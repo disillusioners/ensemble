@@ -320,3 +320,40 @@ No other contradictions found; all other commission mandates (D1–D9, §5.2/§5
 ---
 
 *End of component A plan. Design only — no code, no tests run, no repo writes except this file and its commit.*
+
+---
+
+## 17. Fix-round 2 addenda (2026-11-12, reviewer REJECT → resolution)
+
+These supersede §5.1 (location), §5.6 (cleanup), §5.7 (reader) and add the
+host-global contract. Code + pins: commits `5d9fbf8b2`, `c223791ff`,
+`e51102241`.
+
+1. **B1 — host-global per-uid claims dir.** The install-scoped location made a
+   foreign daemon INVISIBLE across installs (two-process blindness). The claims
+   dir is now `ENSEMBLE_PORT_CLAIMS_DIR` → `$XDG_RUNTIME_DIR/ensemble-port-claims`
+   → `/tmp/ensemble-port-claims-<uid>`, mode 0700. Foreign-ness is still decided
+   on the claim's `install_dir` payload; the location is no longer install-bound.
+   Claims are keyed by a normalized host bucket (wildcard + loopback collapse to
+   `any`) + port. Two-process E2E pin added.
+2. **B3 — no eager release.** §5.6's lifespan release ran while the process was
+   still ALIVE (uvicorn still owned the listener), re-opening the window. The
+   daemon no longer releases; stale claims self-heal via pid+starttime.
+3. **B5 — the refusal marker has a READER in this release.** §5.7's channel B
+   was write-only. `surface_refusal_marker()` now reports a prior boot's record
+   ONCE (loud structured ERROR with holder identity + timestamp; rotation to
+   `.seen-<utc>`), called from the pre-bind gate and the lifespan (so every entry
+   path, including `uvicorn daemon.api:app`, surfaces it). Operator channel:
+   the daemon's journald unit log (`journalctl -u <unit>`) and the unit status
+   (`systemctl status <unit>`); the file log carries the same line.
+4. **N3 — no canonical-LIVE fallback for dev.** `resolve_self_install_dir` no
+   longer falls back to `_canonical_install_root("agents-ensemble")`; a
+   dev/unresolved boot resolves its own source-tree root. This is what accreted
+   claim debris inside the live install. Verified: the two pre-existing files in
+   `/home/nea/agents-ensemble/data/port-claims/` are byte-unchanged and no new
+   files appear (their shas are recorded in the fix-round-2 report).
+5. **N8 — port validation.** `PORT=0` (ephemeral) and out-of-range ports REFUSE
+   the claim loudly (no claim file written); the boot proceeds without ownership
+   enforcement for that port. No `*-0.json` file can be created again.
+6. **Residuals (unchanged, now documented in-code and in the mutation matrix):**
+   same-UID claim deletion; same-install H1.

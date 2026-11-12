@@ -54,6 +54,13 @@ Clean tree => `tests/unit/test_port_ownership.py` +
 `RESTORE_EQUAL` = true for every mutated file (byte-identical pre/post).
 Scratch venue removed; `git worktree list` shows no `/tmp/rogue-mut-r2`.
 
+**P-M12 re-verified at the final tip** (`cf391ccda`) after the api.py comment
+rewording, with a clean-baseline control: clean tree => `-k B3` GREEN (1
+passed); mutant applied => RED (1 failed); restore sha ==
+`27cbeb9ecf63dfa4e91d620919721f3552a0f17516693f90630d82d2802ecc6e`.
+This closes the vacuity risk of the first attempt (whose venue predated the
+comment change).
+
 ## Residuals (carried, not closed)
 
 * **Same-UID claim deletion** — any process as the same uid may unlink or
