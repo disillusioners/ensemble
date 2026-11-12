@@ -187,7 +187,18 @@ WHERE key = 'limits.metrics_listener_port';
 - Read-only; no mutation; no test.
 
 ---
+### 5.6 Rollback-safe adjudication shape (rider (d))
 
+Rider (d) retires the `limits.metrics_listener_port` managed key (registry
+entry removed) and derives the metrics port from the resolved main port + 1,
+with `LIMITS_METRICS_LISTENER_PORT` as the env escape hatch. No schema change
+and no new table; the only DB touch is an optional, idempotent DELETE of an
+orphaned `app_settings` row (dev/fenced DBs only, never live). Adjudication:
+`rollback_safe=true` with `source=explicit (fix-loss-only)` — consistent with
+v0.29.19's `rollback_safe=true source=explicit (fix-loss-only)`. If a schema
+need surfaces, STOP and flag (changes rollback_safe and ceremony scope).
+
+---
 ## 6. DB-Poison Half (commission root; analysis-silent — flag it)
 
 The analysis's Lane 3 strip list covers only the four bind vars. The commission's B root — `data/ensemble.json` DB pin — is analysis-silent. This plan's DB half EXTENDS the (e′) MECHANISM (same seams, same explicit-setter allowlist); it does NOT carry analysis authority. Recorded as a contradiction in §13.
