@@ -2,7 +2,10 @@
 # prompt_assent_phase3_unit_test.sh
 #
 # The prompt-assent Phase-3 lane pack — the acceptance path and the
-# provenance flow (branch feature/prompt-assent, base 0efdf106f).
+# provenance flow (branch feature/assent-designated-channels, base
+# efa8aaae2; the pack originated in the parent prompt-assent lane, whose
+# header said feature/prompt-assent @ 0efdf106f — the lane identity
+# above is the one that now carries and tests it).
 #
 # Wraps the Phase-3 test surface in ONE pytest invocation:
 #

@@ -483,11 +483,6 @@ APPROVE_DESIGNATION_CODES: dict[DesignationResult, str] = {
 }
 
 
-def _approve_designation_codes() -> dict[DesignationResult, str]:
-    """The approve-side mapping table (a named accessor for the pins)."""
-    return APPROVE_DESIGNATION_CODES
-
-
 def assent_channel_not_private_code(
     discord_meta: Any,
     designations: Any = None,
@@ -531,7 +526,10 @@ def assent_channel_not_private_code(
     leg = designation_outcome(designations, discord_meta, user_id)
     if leg is DesignationResult.PASS:
         return None
-    return _approve_designation_codes()[leg]
+    # L8 — an unknown leg fails CLOSED to this side's
+    # not-acceptable-surface code (never a KeyError out of a lookup table
+    # that a future enum member could miss).
+    return APPROVE_DESIGNATION_CODES.get(leg, "token-channel-mismatch")
 
 
 def _assent_confirmation(

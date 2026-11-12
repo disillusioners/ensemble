@@ -93,6 +93,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import uuid
 from dataclasses import dataclass
@@ -103,6 +104,12 @@ from sqlalchemy import func, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
+
+from daemon.repositories.prompt_assent.designation import (
+    ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS,
+    designation_digest,
+    parse_designations,
+)
 
 from .assent_attestation import AssentAttestation
 from .models import (
@@ -1812,7 +1819,7 @@ class PromptVersionRepository:
     @staticmethod
     def _assent_audit_provenance(
         attestation: AssentAttestation,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """The §2.4 relay provenance dict (payload-only; D-9 shape).
 
         Keys exactly as ruled; ``reject_reason`` is added by
@@ -1827,6 +1834,18 @@ class PromptVersionRepository:
         (b) / AC14). A DM decision records NO ``map_digest`` at all: the DM
         path never reads that configuration (``INVARIANT-DM``). This is ONE
         additive JSON key — no schema change, no column, no migration.
+
+        **The decision-time re-read is the RULED semantics, not a stale-
+        read defect.** The digest is minted from the environment AS IT
+        STANDS WHEN THE DECISION IS RECORDED (a decision-time map —
+        reviewer-ruled): the ledger answers "which map was in force when
+        this token was decided", which is exactly the question a replay
+        or an audit asks. It is deliberately NOT the mint-time snapshot —
+        a designation moved between the mint and the decision is a REAL
+        event (A-9/A-10) and the provenance must reflect the map the
+        decision actually faced. This method therefore re-parses the env
+        at provenance time, ONCE, content-free (only the digest is
+        stored — never the map, never a key, never a value).
         """
         ident = attestation.human_identity
         provenance = {
@@ -1861,19 +1880,15 @@ class PromptVersionRepository:
         # the attestation type is deliberately NOT widened (no field may be
         # smuggled in by a caller). An INVALID map contributes NO key —
         # ``_assent_audit_provenance`` never raises and never guesses a
-        # fingerprint for a map that has none.
+        # fingerprint for a map that has none. The imports are hoisted to
+        # module top (L12) — designation.py is dependency-free, so the
+        # boot import order is untouched.
         if ident.is_dm is False:
-            import os as _os
-
-            from daemon.repositories.prompt_assent.designation import (
-                ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS as _ENV_NAME,
-                designation_digest as _designation_digest,
-                parse_designations as _parse_designations,
+            _parsed = parse_designations(
+                os.environ.get(ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS)
             )
-
-            _parsed = _parse_designations(_os.environ.get(_ENV_NAME))
             if _parsed.valid and _parsed.map is not None:
-                provenance["map_digest"] = _designation_digest(_parsed.map)
+                provenance["map_digest"] = designation_digest(_parsed.map)
         return provenance
 
     def approve_assent(

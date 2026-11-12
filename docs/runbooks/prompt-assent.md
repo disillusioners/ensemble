@@ -125,9 +125,19 @@ in the map is refused exactly as before Phase 1.5.
   coerced — an unquoted `1` that silently became `"1"` would hide a
   typo.
 - **Bound**: at most **64** entries.
-- **Duplicate keys are refused.** JSON's normal last-key-wins would
-  silently drop one designation; the parser refuses the whole map
+- **Duplicate keys are refused.** JSON's normal last-key-would-win
+  silently drops one designation; the parser refuses the whole map
   instead.
+
+**For maintainers — the import shape is deliberate.** The four
+Phase-1.5 classification names that live in
+`daemon/repositories/prompt_assent/mint_context.py`
+(`DesignationResult`, `designation_outcome`,
+`is_designated_assent_channel`, `resolve_pinned_approver`) are
+DELIBERATELY submodule-imported: consumers use
+`from daemon.repositories.prompt_assent.mint_context import …`, never a
+package-level re-export. The package `__init__.py` stays frozen (it is
+byte-pinned to the base commit); do not "fix" the longer import paths.
 - **All-or-nothing**: ONE invalid entry invalidates the WHOLE map — the
   designated path then refuses `designation-config-invalid`, and the
   daemon log carries one WARNING per offending entry (naming the KEY
@@ -145,7 +155,7 @@ in the map is refused exactly as before Phase 1.5.
   boot from the launcher's `.env` export. An `.env` edit alone changes
   nothing in the running process — **edit `.env`, then restart the
   daemon**, and confirm the fresh map-parse log line
-  (`designation_map state=… count=… map_digest=…`).
+  (`designation_map state=… count=… map_digest=… errors=…`).
 - **Never commit it**: the map names the Emperor's private rooms and
   their pinned humans — operator-private configuration. It lives in the
   environment's `.env` (mode 600) and NOWHERE else: never in the repo,

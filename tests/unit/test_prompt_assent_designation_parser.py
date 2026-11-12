@@ -34,7 +34,6 @@ from pathlib import Path
 
 import pytest
 
-from daemon.repositories.prompt_assent import mint_context
 from daemon.repositories.prompt_assent.designation import (
     ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS,
     MAP_DIGEST_HEX_LEN,
@@ -668,6 +667,21 @@ class TestTheNoRegressionPin:
         assert live == base, (
             "is_private_assent_channel drifted from base "
             f"{BASE_COMMIT}:\n--- base ---\n{base}\n--- live ---\n{live}"
+        )
+
+    def test_the_package_init_is_byte_identical_to_base(self) -> None:
+        """M2 — the package ``__init__.py`` is FROZEN at the base commit:
+        ANY edit to it executes RED here. The Phase-1.5 names are
+        deliberately submodule-imported (the runbook carries the note),
+        so the file must never grow a re-export either."""
+        base = _git_show("daemon/repositories/prompt_assent/__init__.py")
+        live = (
+            REPO_ROOT / "daemon/repositories/prompt_assent/__init__.py"
+        ).read_text(encoding="utf-8")
+        assert live == base, (
+            "daemon/repositories/prompt_assent/__init__.py drifted from base "
+            f"{BASE_COMMIT} — the package init is byte-pinned (M2); revert "
+            "the edit or move the change to the owning submodule"
         )
 
     def test_the_four_existing_classifier_cells_are_green(self) -> None:

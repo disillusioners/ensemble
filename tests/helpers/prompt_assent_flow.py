@@ -24,11 +24,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
 from tests.helpers.prompt_assent_tool_fixture import (
-    CHANNEL_ID,
-    MESSAGE_ID,
     RELAY_INSTANCE_ID,
-    SOURCE_ID,
-    USER_ID,
     FakeManager,
     FakeMessageRow,
     build_discord_meta,
@@ -177,6 +173,13 @@ async def mint_for(flow: SimpleNamespace, **kwargs: Any) -> str:
     payload: dict[str, Any] = {"action": "mint", "version_id": flow.version_id}
     payload.update(kwargs)
     return await flow.tools["prompt_assent"].ainvoke(payload)
+
+
+def token_of(mint: str) -> str:
+    """The raw token out of a mint response (L16 — ONE shared
+    extraction; both the designated matrix and the census file parse
+    the mint response through this)."""
+    return mint.split("token: ", 1)[1].splitlines()[0]
 
 
 def echo(flow: SimpleNamespace, token: str, **meta_kwargs: Any) -> None:

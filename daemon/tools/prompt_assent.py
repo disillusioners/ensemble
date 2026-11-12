@@ -153,6 +153,7 @@ from ..config import (
     PROMPT_ASSENT_DEFAULT_HOURLY_MISMATCH_BUDGET,
     PromptAssentConfig,
 )
+from ..repositories.prompt_assent import mint_context
 from ..repositories.prompt_assent.designation import (
     ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS,
     DesignationParseResult,
@@ -163,6 +164,29 @@ from ..repositories.prompt_assent.designation import (
 from ..repositories.prompt_assent.mint_context import (
     DesignationResult,
     designation_outcome,
+)
+from ..repositories.prompt_assent.repository import PromptAssentTokenRepository
+from ..repositories.prompt_version.assent_attestation import (
+    AssentAttestation,
+    AssentHumanIdentity,
+    AssentItemBinding,
+)
+from ..repositories.prompt_version.repository import ARTIFACT_CLASS_CORE
+from ..services.prompt_version_diff import canonical_render, render_sha256
+from ..services.prompt_version_service import (
+    AssentRefusalError,
+    assent_approver_mismatch_code,
+    assent_channel_mismatch_code,
+    assent_channel_not_private_code,
+)
+from daemon.tools.upgrade_journal import (
+    classify_user_origin,
+    mint_nonce,
+    nonce_grouped,
+    nonce_in_content,
+    now_iso,
+    parse_iso_utc,
+    user_origin_sources_display,
 )
 from ._tool_registry import register_tool_category
 
@@ -544,6 +568,10 @@ def _resolve_enabled(manager: Any = None) -> bool:
 #: process" and "the digest changed between resolutions" survive across
 #: tool calls. It is NEVER a decision input: every call re-parses, so a
 #: mid-flight environment change is always visible (the A-9 window).
+#: L7 — deliberately SINGLE-THREADED, no lock: the resolver runs on the
+#: event-loop thread only (the gate/branch coroutines never offload it
+#: to a worker thread), so the two-key read-modify-write below has no
+#: concurrent writer by construction.
 _DESIGNATION_LOG_STATE: dict[str, Any] = {"resolved": False, "digest": None}
 
 
@@ -575,7 +603,12 @@ def _resolve_designations() -> DesignationParseResult:
         )
 
     resolved = result.valid and result.map is not None
-    digest = designation_digest(result.map) if resolved and result.map else None
+    # M1 — the EMPTY map is FIRST-CLASS: its digest (the canonical `{}`
+    # fingerprint, 44136fa3…) is recorded like any other effective map.
+    # The old truthiness test collapsed "valid empty" into ``None``,
+    # blunting digest-change detection exactly at the unset→empty
+    # boundary. An INVALID map still carries ``map=None`` ⇒ ``None``.
+    digest = designation_digest(result.map) if result.map is not None else None
     first_resolution = resolved and not _DESIGNATION_LOG_STATE["resolved"]
     digest_changed = bool(
         resolved
@@ -687,12 +720,17 @@ _MINT_DESIGNATION_DETAILS: dict[str, str] = {
 #: The APPROVE-side detail for the two NEW codes (T2.8 / D-8) — the side
 #: ambiguity is resolved by TEXT at zero taxonomy cost (the INFO line already
 #: carries ``action=``). Content-free: no persona, no diff, no channel name.
+#: M3 (leader ruling): the ``extraction-incomplete`` entry deliberately does
+#: NOT claim "the token stays live" — at the 4f site that code is OUTSIDE
+#: ``PHASE1_5_PLACED_CODES``, so ``_record_mismatch`` FIRES and the claim
+#: would be false. The other two entries keep the clause: both codes refuse
+#: BEFORE the recording call, so their claim is TRUE. Same code, same burn,
+#: on the DM-adjacent and designated paths alike — no path asymmetry.
 _APPROVE_DESIGNATION_DETAILS: dict[str, str] = {
     "extraction-incomplete": (
         "the approving turn's designated-channel context carries no usable "
         "human identity (metadata['discord']['user_id'] is absent), so no "
-        "pinned-approver comparison is possible — fail closed (D-5); the "
-        "token stays live and its attempt counter is UNTOUCHED"
+        "pinned-approver comparison is possible — fail closed (D-5)"
     ),
     "approver-not-pinned": (
         "the mint-witnessed human is no longer this room's current pinned "
@@ -762,22 +800,41 @@ def _emit_info_line(
     flag_text = ",".join(
         f"{k}={'1' if v else '0'}" for k, v in sorted((flags or {}).items())
     )
-    line = (
-        "prompt_assent outcome=%s action=%s code=%s agent=%s instance=%s "
-        "count=%d flags=%s"
-    )
-    args: list[Any] = [
-        outcome,
-        action,
-        code or "-",
-        agent_id or "-",
-        (instance_id or "-")[:8],
-        int(count),
-        flag_text or "-",
-    ]
+    # M13 — the format string and the args tuple are PRECONSTRUCTED per
+    # branch instead of assembled incrementally. OUTPUT IS BYTE-IDENTICAL
+    # to the old ``line += " map_digest=%s"`` construction: the
+    # map_digest branch's string is exactly the base string plus
+    # ``" map_digest=%s"``, and the args order is unchanged (the digest
+    # rides LAST, as it always did).
     if map_digest is not None:
-        line += " map_digest=%s"
-        args.append(map_digest)
+        line = (
+            "prompt_assent outcome=%s action=%s code=%s agent=%s instance=%s "
+            "count=%d flags=%s map_digest=%s"
+        )
+        args: tuple[Any, ...] = (
+            outcome,
+            action,
+            code or "-",
+            agent_id or "-",
+            (instance_id or "-")[:8],
+            int(count),
+            flag_text or "-",
+            map_digest,
+        )
+    else:
+        line = (
+            "prompt_assent outcome=%s action=%s code=%s agent=%s instance=%s "
+            "count=%d flags=%s"
+        )
+        args = (
+            outcome,
+            action,
+            code or "-",
+            agent_id or "-",
+            (instance_id or "-")[:8],
+            int(count),
+            flag_text or "-",
+        )
     logger.info(line, *args)
 
 
@@ -854,11 +911,13 @@ class _AssentContext:
         Delegates to P1's fail-closed classifier: an ABSENT or
         UNPARSEABLE ``is_group_dm`` discriminator ⇒ NOT private.
         """
-        from ..repositories.prompt_assent.mint_context import (
-            is_private_assent_channel,
-        )
-
-        return is_private_assent_channel(self.discord_meta)
+        # LATE BINDING, deliberate (M12 kept the import at module top,
+        # but the CALL goes through the module namespace): the P-2b
+        # counter-mutation patches
+        # ``mint_context.is_private_assent_channel`` and needs THIS call
+        # to observe the patch — a from-imported direct reference would
+        # freeze the pre-patch object and silently vacate the mutation.
+        return mint_context.is_private_assent_channel(self.discord_meta)
 
 
 def _discord_meta_of(row: Any) -> dict[str, Any]:
@@ -1019,6 +1078,10 @@ def _classify_window_source(manager: Any, source: Any) -> tuple[bool, str]:
     THE single source of truth for user-origin classification — the
     trust anchor is never forked (S-1 (i)).
     """
+    # KEPT LOCAL, deliberately (M12 exception): the Mutation6 unforked
+    # pin greps THIS exact import line in the tool's source ("the tool
+    # imports the function and never defines its own") — hoisting it to
+    # the module top would redden that pin.
     from daemon.tools.upgrade_journal import classify_user_origin
 
     registry = getattr(manager, "source_registry", None)
@@ -1041,8 +1104,6 @@ async def _run_factor_gates(
 
     ALL failures are ENUMERATED in ONE refusal (no partial proceed).
     """
-    from daemon.tools.upgrade_journal import parse_iso_utc, user_origin_sources_display
-
     outcome = _GateOutcome()
 
     # 3a. the explicit user confirmation (approve/reject only).
@@ -1155,6 +1216,11 @@ async def _run_factor_gates(
 
     # 3g. the token must be echoed verbatim in THAT message's content.
     if action in PROMPT_ASSENT_TOKEN_ACTIONS:
+        # KEPT LOCAL, deliberately (M12 exception): Mutation1 proves its
+        # cell by patching ``upgrade_journal.nonce_in_content`` AT ITS
+        # HOME MODULE — the call must bind LATE, so the import lives in
+        # the call path (a module-top from-import would freeze the
+        # pre-patch object and vacate the counter-mutation).
         from daemon.tools.upgrade_journal import nonce_in_content
 
         echoed = canonical_token_form(token)
@@ -1237,8 +1303,6 @@ def _attestation_refusal(what: str) -> Any:
     exception carrying a taxonomy ``code`` is surfaced verbatim as a
     REFUSED envelope — no state change, no token burn).
     """
-    from ..services.prompt_version_service import AssentRefusalError
-
     return AssentRefusalError(
         "extraction-incomplete",
         f"the daemon-derived attestation assembly is incomplete — {what} "
@@ -1294,13 +1358,6 @@ def _build_attestation(
     own ``__post_init__`` re-validates the composition and the
     completeness of every field.
     """
-    from daemon.tools.upgrade_journal import now_iso
-    from ..repositories.prompt_version.assent_attestation import (
-        AssentAttestation,
-        AssentHumanIdentity,
-        AssentItemBinding,
-    )
-
     if context is None or token_row is None:
         raise _attestation_refusal(
             "the daemon-derived context or the token row is missing"
@@ -1312,8 +1369,6 @@ def _build_attestation(
     # here is fail-closed belt-and-braces.
     row_version_id = getattr(token_row, "version_id", None)
     if row_version_id != version_id:
-        from ..services.prompt_version_service import AssentRefusalError
-
         raise AssentRefusalError(
             "token-item-mismatch",
             f"the token is bound to version_id={row_version_id!r}, not "
@@ -1902,7 +1957,7 @@ async def _mint_branch(
     version_id: str,
     context: _AssentContext,
     force: bool,
-    designations: "_DesignationCache",
+    designations: _DesignationCache,
 ) -> str:
     """The MINT branch — M-4a..M-6.
 
@@ -1947,8 +2002,6 @@ async def _mint_branch(
         return _mint_refusal(
             "item-not-found", f"no prompt version row for version_id={version_id!r}"
         )
-    from ..repositories.prompt_version.repository import ARTIFACT_CLASS_CORE
-
     if getattr(row, "artifact_class", None) != ARTIFACT_CLASS_CORE:
         return _mint_refusal(
             "item-not-assentable",
@@ -1992,7 +2045,12 @@ async def _mint_branch(
     if not context.is_private:
         leg = designations.outcome(context.discord_meta, context.user_id)
         if leg is not DesignationResult.PASS:
-            code = _MINT_DESIGNATION_CODES[leg]
+            # L8 — an unknown leg fails CLOSED to this side's
+            # not-acceptable-surface code (never a KeyError out of a
+            # lookup table that a future enum member could miss).
+            code = _MINT_DESIGNATION_CODES.get(
+                leg, "mint-requires-private-channel"
+            )
             if code in PHASE1_5_PLACED_CODES:
                 # T2.17 (blocker #6): the mint path bypasses
                 # ``_mismatch_aware_refusal`` (the only other site that
@@ -2052,8 +2110,6 @@ async def _mint_branch(
             PROMPT_ASSENT_INTERNAL_ERROR, f"{type(exc).__name__}: {exc}"
         )
 
-    from ..services.prompt_version_diff import canonical_render, render_sha256
-
     render_kwargs = {
         "agent_id": row.agent_id,
         "version_tag": row.version_tag,
@@ -2072,8 +2128,6 @@ async def _mint_branch(
     # re-checked-at-approve BY CONSTRUCTION; it is byte-identical to
     # hashing ``rendered`` directly (pinned by test).
     render_sha = render_sha256(**render_kwargs)
-
-    from daemon.tools.upgrade_journal import mint_nonce, nonce_grouped
 
     raw_token = mint_nonce()
     grouped = nonce_grouped(raw_token)
@@ -2153,7 +2207,7 @@ async def _decide_branch(
     context: _AssentContext,
     window: Optional[dict[str, Any]],
     reject_reason: str,
-    designations: "_DesignationCache",
+    designations: _DesignationCache,
 ) -> str:
     """The APPROVE / REJECT branch — the AR-1 equality legs + the service.
 
@@ -2162,12 +2216,6 @@ async def _decide_branch(
     user match, 4f the private check, 4g the lockout, then the service
     acceptance path (counters / attestation / guarded transition).
     """
-    from ..services.prompt_version_service import (
-        assent_approver_mismatch_code,
-        assent_channel_mismatch_code,
-        assent_channel_not_private_code,
-    )
-
     pv_repo = getattr(manager, "_prompt_version_repo", None)
     token_repo = _token_repo(manager)
     if pv_repo is None or token_repo is None:
@@ -2204,8 +2252,6 @@ async def _decide_branch(
         return _refuse(
             "item-not-found", f"no prompt version row for version_id={version_id!r}"
         )
-    from ..repositories.prompt_version.repository import ARTIFACT_CLASS_CORE
-
     if getattr(row, "artifact_class", None) != ARTIFACT_CLASS_CORE:
         return _refuse(
             "item-not-assentable",
@@ -2489,8 +2535,4 @@ def _token_repo(manager: Any) -> Any:
     engine = getattr(manager, "_engine", None)
     if engine is None:
         return None
-    from ..repositories.prompt_assent.repository import (
-        PromptAssentTokenRepository,
-    )
-
     return PromptAssentTokenRepository(engine)

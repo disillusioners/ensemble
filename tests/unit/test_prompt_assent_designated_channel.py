@@ -79,18 +79,22 @@ from tests.helpers.prompt_assent_flow import (
     decide,
     echo,
     mint_for,
+    token_of as _token_of,
 )
 from tests.helpers.prompt_assent_tool_fixture import (
+    DESIGNATED_APPROVER_ID as APPROVER,
+    DESIGNATED_CHANNEL_ID as CHANNEL,
+    DESIGNATED_GUILD_ID as GUILD_ID,
     USER_ID,
     FakeMessageRow,
     build_discord_meta,
+    build_guild_meta as _guild_meta,
+    info_lines as _info_lines,
 )
 
 #: The lane's ids — digit strings, no leading zeros (the map's id shape,
-#: ``^[1-9][0-9]{0,31}$``).
-GUILD_ID = "777000111"
-CHANNEL = "111122223333444455"
-APPROVER = "112233445566"
+#: ``^[1-9][0-9]{0,31}$``). GUILD_ID / CHANNEL / APPROVER are the SHARED
+#: fixture constants (L17); the rest are this matrix's own.
 OTHER_HUMAN = "999999999"
 THREAD_ID = "222233334444555566"
 SECOND_CHANNEL = "333344445555666677"
@@ -139,22 +143,9 @@ def _clean_budget():
 
 
 # ── shared helpers ────────────────────────────────────────────────────────
-
-
-def _token_of(mint: str) -> str:
-    """The raw token out of a mint response."""
-    return mint.split("token: ", 1)[1].splitlines()[0]
-
-
-def _info_lines(caplog) -> list[str]:
-    """The frozen INFO lines (``outcome=`` lines only — the resolver's
-    ``designation_map state=`` line is a different record)."""
-    return [
-        rec.getMessage()
-        for rec in caplog.records
-        if rec.name == "daemon.tools.prompt_assent"
-        and rec.getMessage().startswith("prompt_assent outcome=")
-    ]
+# ``_token_of`` / ``_info_lines`` / ``_guild_meta`` are the SHARED helpers
+# (L15/L16/M11) imported above — their definitions live in
+# ``tests/helpers/``.
 
 
 def _mint_ok_line(caplog) -> str:
@@ -194,30 +185,6 @@ def _echo_designated_kwargs() -> dict[str, Any]:
         channel_id=CHANNEL,
         channel_type="text",
     )
-
-
-def _guild_meta(
-    user_id: str = APPROVER,
-    channel_id: str = CHANNEL,
-    **overrides: Any,
-) -> dict[str, Any]:
-    """A designated-channel-shaped window row (T3.1): a guild text
-    channel with a nested human — the only shape a designation applies
-    to. ``AssentHumanIdentity`` needs a non-empty ``external_user_id``;
-    the non-DM derivation builds ``channel:<guild>:<channel>:<user>``,
-    so NO mapping-row fake is needed (verified by execution — A-4).
-    ``**overrides`` replaces any default (e.g. ``channel_type="thread"``
-    for the D-9 cells)."""
-    kwargs: dict[str, Any] = dict(
-        is_dm=False,
-        is_group_dm=False,
-        guild_id=GUILD_ID,
-        channel_id=channel_id,
-        channel_type="text",
-        user_id=user_id,
-    )
-    kwargs.update(overrides)
-    return build_discord_meta(**kwargs)
 
 
 def _designated_flow(**flow_kwargs: Any):

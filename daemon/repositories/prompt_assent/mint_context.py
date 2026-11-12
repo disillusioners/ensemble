@@ -121,7 +121,7 @@ class DesignationResult(str, Enum):
 
 
 def designation_outcome(
-    designations: "DesignationParseResult | None",
+    designations: DesignationParseResult | None,
     discord_meta: Mapping[str, Any] | None,
     user_id: Any,
 ) -> DesignationResult:
@@ -176,7 +176,14 @@ def designation_outcome(
         return DesignationResult.ABSENT_DISCRIMINATOR
 
     # 5. the operator's map — passed IN, never read from the environment.
-    if designations is None or not designations.valid or designations.map is None:
+    # L9 — a non-``DesignationParseResult`` argument (a caller bug: a raw
+    # dict, a str) and ``None`` BOTH land here: the typed CONFIG_INVALID
+    # outcome, never an AttributeError out of ``.valid``. The guard sits
+    # at the leg where the map is FIRST touched, so a proven 1:1 DM still
+    # short-circuits at leg 1 without consulting it (INVARIANT-DM).
+    if not isinstance(designations, DesignationParseResult):
+        return DesignationResult.CONFIG_INVALID
+    if not designations.valid or designations.map is None:
         return DesignationResult.CONFIG_INVALID
 
     # 6. exact channel-id match only (D-9 — no thread inheritance).
@@ -197,23 +204,26 @@ def designation_outcome(
 
 
 def resolve_pinned_approver(
-    designations: "DesignationParseResult | None",
+    designations: DesignationParseResult | None,
     discord_meta: Mapping[str, Any] | None,
 ) -> str | None:
     """The approver pinned to this turn's channel, or ``None``.
 
     A convenience accessor for diagnostics/tests only — it does NOT decide
     anything (the decision is :func:`designation_outcome`). ``None`` when the
-    map is unset/invalid or the channel is not designated.
+    map is unset/invalid, the channel is not designated, or the meta is not
+    a Mapping (L3 — the same fail-closed shape as the classifier's guard).
     """
     if designations is None or not designations.valid or designations.map is None:
         return None
-    meta: Mapping[str, Any] = discord_meta if discord_meta else {}
+    if not isinstance(discord_meta, Mapping):
+        return None
+    meta: Mapping[str, Any] = discord_meta
     return designations.map.pinned_approver(meta.get("channel_id"))
 
 
 def is_designated_assent_channel(
-    designations: "DesignationParseResult | None",
+    designations: DesignationParseResult | None,
     discord_meta: Mapping[str, Any] | None,
     user_id: Any,
 ) -> bool:
@@ -229,6 +239,11 @@ def is_designated_assent_channel(
     Callers that need to REFUSE with a code must use the typed outcome (a
     boolean loses which leg failed).
     """
+    if not isinstance(discord_meta, Mapping):
+        # L3 — Mapping-guard parity with the classifier: a non-Mapping meta
+        # is fail-closed ``False``, never an AttributeError (the delegated
+        # :func:`designation_outcome` already guards its own leg).
+        return False
     return (
         designation_outcome(designations, discord_meta, user_id)
         is DesignationResult.PASS

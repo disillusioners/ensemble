@@ -39,8 +39,8 @@ THE PARSE CONTRACT (D-4 — every rule has a reason)
 **All-or-nothing**: one invalid entry ⇒ the WHOLE map is invalid. A partially
 applied map would be a silent *partial authority* state the operator cannot
 reason about ("is channel X enabled or not?"). Every error names the offending
-**key** and the **rule** — never the operator's raw value, never a value at
-all (S-6: the logs and the refusals are content-free).
+**KEY** and the **rule** it broke — the values never appear (S-6: the logs
+and the refusals are content-free).
 
 THE MAP-PARSE LOG LINE (mandatory, content-free)
 ------------------------------------------------
@@ -138,7 +138,12 @@ class DesignationMap:
     unset: bool = False
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "entries", MappingProxyType(dict(self.entries)))
+        # L6: the defensive copy is None-tolerant — a caller that passes
+        # ``entries=None`` explicitly gets the EMPTY map, never a TypeError
+        # out of ``dict(None)``.
+        object.__setattr__(
+            self, "entries", MappingProxyType(dict(self.entries or {}))
+        )
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -174,8 +179,9 @@ class DesignationMap:
 class DesignationParseResult:
     """The typed parse outcome — a valid map OR a typed-invalid carrier.
 
-    ``errors`` names EVERY offending entry (key + rule), never a value; a
-    single error makes the whole result invalid (all-or-nothing).
+    ``errors`` names EVERY offending entry — the KEY + the rule it broke;
+    the values never appear. A single error makes the whole result invalid
+    (all-or-nothing).
     """
 
     valid: bool
@@ -208,7 +214,10 @@ def parse_designations(raw: str | None) -> DesignationParseResult:
     """Parse the operator's raw env value into a typed outcome (D-4).
 
     ``None`` or an empty/whitespace-only string ⇒ a valid UNSET map. ``"{}"``
-    ⇒ a valid EMPTY map. Anything else must be a JSON object whose keys and
+    ⇒ a valid EMPTY map. A NON-STRING ``raw`` (an int, a list — a caller or
+    test bug) is a TYPED-INVALID outcome, never a silent unset (M6: degrading
+    junk to "no map designated" would disguise a broken caller as an
+    operator choice). Anything else must be a JSON object whose keys and
     values match the id shape — otherwise the result is invalid and names
     every offending entry.
 
@@ -220,7 +229,15 @@ def parse_designations(raw: str | None) -> DesignationParseResult:
         return DesignationParseResult(
             valid=True, map=DesignationMap(unset=True), errors=()
         )
-    text = raw.strip() if isinstance(raw, str) else ""
+    if not isinstance(raw, str):
+        # M6 — a non-string payload is a CALLER bug, not an operator
+        # choice: it must surface as a typed invalid, never degrade to
+        # the silent UNSET posture. The type name is content-free (S-6).
+        return _invalid(
+            "<root>: the designation value must be a JSON string payload, "
+            f"not {type(raw).__name__} (rule: format)"
+        )
+    text = raw.strip()
     if not text:
         return DesignationParseResult(
             valid=True, map=DesignationMap(unset=True), errors=()
@@ -228,18 +245,26 @@ def parse_designations(raw: str | None) -> DesignationParseResult:
 
     try:
         decoded = json.loads(text, object_pairs_hook=_pairs_hook)
-    except (ValueError, RecursionError):
-        return _invalid("<root>: malformed JSON (rule: format)")
+    except (ValueError, TypeError, RecursionError) as exc:
+        # M5 — ``TypeError`` joins the refusal family (a bytes payload or
+        # an exotic decoder state must produce the typed outcome, never an
+        # exception at a call site). ``str(exc)`` is content-free for this
+        # decoder family (position/expectation text only — never the raw
+        # operator value), so it rides the invalid outcome's text.
+        return _invalid(f"<root>: malformed JSON (rule: format): {exc}")
 
     if not isinstance(decoded, _Pairs):
         return _invalid("<root>: the designation map must be a JSON object (rule: format)")
 
-    errors: list[str] = []
+    # L1 — the bound short-circuits BEFORE per-entry enumeration: an
+    # oversized map is refused on the bound alone (the entries behind it
+    # are never walked, let alone named).
     if len(decoded) > MAX_DESIGNATIONS:
-        errors.append(
+        return _invalid(
             f"<root>: at most {MAX_DESIGNATIONS} designations (rule: bound)"
         )
 
+    errors: list[str] = []
     entries: dict[str, str] = {}
     seen: set[str] = set()
     for key, value in decoded:

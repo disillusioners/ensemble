@@ -48,6 +48,7 @@ from __future__ import annotations
 import ast
 import json
 from pathlib import Path
+from typing import Any
 
 from daemon.config import PromptAssentConfig
 from daemon.tools._tool_registry import (
@@ -68,6 +69,13 @@ from daemon.tools.prompt_assent import (
     PROMPT_ASSENT_DEFAULT_HOURLY_MISMATCH_BUDGET,
     PROMPT_ASSENT_TOOL_NAME,
     REFUSAL_TAXONOMY,
+)
+from tests.helpers.prompt_assent_flow import token_of
+from tests.helpers.prompt_assent_tool_fixture import (
+    DESIGNATED_APPROVER_ID,
+    DESIGNATED_CHANNEL_ID,
+    build_guild_meta,
+    info_lines,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -441,10 +449,10 @@ class TestThePhase1_5PlacedCodes:
             DesignationResult,
         )
         from daemon.services.prompt_version_service import (
-            _approve_designation_codes,
+            APPROVE_DESIGNATION_CODES,
         )
 
-        table = _approve_designation_codes()
+        table = APPROVE_DESIGNATION_CODES
         assert set(table) == set(DesignationResult) - {DesignationResult.PASS}
         assert table[DesignationResult.APPROVER_NOT_PINNED] == "approver-not-pinned"
         assert "token-approver-mismatch" not in table.values()
@@ -732,30 +740,28 @@ class TestThePhase1_5RuntimeContract:
     properties Phase 2's edits introduce or must not disturb.
     """
 
-    CHANNEL = "111122223333444455"
-    APPROVER = "112233445566"
+    # L17 — the SHARED fixture constants (the same values this class
+    # declared inline before the dedupe).
+    CHANNEL = DESIGNATED_CHANNEL_ID
+    APPROVER = DESIGNATED_APPROVER_ID
 
     @staticmethod
-    def _guild_meta(user_id: str, channel_id: str = "111122223333444455"):
-        from tests.helpers.prompt_assent_tool_fixture import build_discord_meta
-
-        return build_discord_meta(
-            is_dm=False,
-            is_group_dm=False,
-            guild_id="777",
-            channel_id=channel_id,
-            channel_type="text",
-            user_id=user_id,
+    def _guild_meta(
+        user_id: str, channel_id: str = DESIGNATED_CHANNEL_ID
+    ) -> dict[str, Any]:
+        """The census rig's designated-channel meta — the shared builder
+        (M11) with the census's OWN guild id: the ``channel:777:…``
+        identity string is asserted verbatim below, so ``"777"`` stays
+        local and visible."""
+        return build_guild_meta(
+            user_id=user_id, channel_id=channel_id, guild_id="777"
         )
 
     @staticmethod
     def _info_lines(caplog) -> list[str]:
-        return [
-            rec.getMessage()
-            for rec in caplog.records
-            if rec.name == "daemon.tools.prompt_assent"
-            and rec.getMessage().startswith("prompt_assent ")
-        ]
+        """L15 — the shared filter (the census keeps its narrow call
+        shape; the body is the ONE shared helper)."""
+        return info_lines(caplog)
 
     async def test_the_designated_mint_flag_set(self, monkeypatch, caplog) -> None:
         """P2-AC15 — a designated-channel mint emits
@@ -855,7 +861,7 @@ class TestThePhase1_5RuntimeContract:
 
         flow = build_flow(meta=self._guild_meta(self.APPROVER))
         mint = await mint_for(flow)
-        token = mint.split("token: ", 1)[1].splitlines()[0]
+        token = token_of(mint)
         echo(
             flow,
             token,
@@ -878,7 +884,7 @@ class TestThePhase1_5RuntimeContract:
 
         dm_flow = build_flow()
         dm_mint = await mint_for(dm_flow)
-        dm_token = dm_mint.split("token: ", 1)[1].splitlines()[0]
+        dm_token = token_of(dm_mint)
         echo(dm_flow, dm_token)
         assert "prompt_assent approve — OK" in await decide(
             dm_flow, token=dm_token
@@ -910,7 +916,7 @@ class TestThePhase1_5RuntimeContract:
         flow = build_flow()
         mint = await mint_for(flow)
         assert "prompt_assent mint" in mint, mint
-        token = mint.split("token: ", 1)[1].splitlines()[0]
+        token = token_of(mint)
         echo(flow, token)
         assert "prompt_assent approve — OK" in await decide(flow, token=token)
 
@@ -943,7 +949,7 @@ class TestThePhase1_5RuntimeContract:
         # (a) re-designation between mint and approve
         flow = build_flow(meta=self._guild_meta(self.APPROVER))
         mint = await mint_for(flow)
-        token = mint.split("token: ", 1)[1].splitlines()[0]
+        token = token_of(mint)
         live = flow.token_repo.find_live(flow.version_id)
         monkeypatch.setenv(ENV, json.dumps({self.CHANNEL: "555666777888999000"}))
         echo(
@@ -961,7 +967,7 @@ class TestThePhase1_5RuntimeContract:
         monkeypatch.setenv(ENV, json.dumps({self.CHANNEL: self.APPROVER}))
         flow = build_flow(meta=self._guild_meta(self.APPROVER))
         mint = await mint_for(flow)
-        token = mint.split("token: ", 1)[1].splitlines()[0]
+        token = token_of(mint)
         live = flow.token_repo.find_live(flow.version_id)
         monkeypatch.setenv(ENV, "{bad")
         echo(
@@ -995,7 +1001,7 @@ class TestThePhase1_5RuntimeContract:
         monkeypatch.setenv(ENV, json.dumps({self.CHANNEL: self.APPROVER}))
         flow = build_flow(meta=self._guild_meta(self.APPROVER))
         mint = await mint_for(flow)
-        token = mint.split("token: ", 1)[1].splitlines()[0]
+        token = token_of(mint)
         live = flow.token_repo.find_live(flow.version_id)
         monkeypatch.setenv(ENV, "{}")  # the channel is no longer designated
         echo(
