@@ -573,7 +573,8 @@ def _media_preflight(
     compliant header instead of falling through to Starlette.
 
     A part is unsatisfiable when it is ``"-"`` (no positions), a
-    zero/negative suffix (``-0``), a start at or past EOF, or an
+    zero/negative suffix (``-0``), a suffix longer than the file
+    (``-<size+1>`` and beyond), a start at or past EOF, or an
     end before its start. Parsable-but-unsatisfiable is the ONLY
     case answered here: a header with an unparsable part, or a
     non-``bytes`` unit, returns ``None`` so Starlette keeps its
@@ -622,8 +623,13 @@ def _media_preflight(
             if first == "" and last == "":
                 unsatisfiable = True
             elif first == "":
-                # Suffix form ``bytes=-N``: N must be positive.
-                unsatisfiable = int(last) <= 0
+                # Suffix form ``bytes=-N``: N must be positive, and
+                # an over-long suffix (N > size) is unsatisfiable
+                # too — Starlette rewrites it to ``start = size - N``
+                # (negative), so ITS ``0 <= start`` 416 fires first
+                # and omits the RFC-7233 ``bytes `` token. Strict
+                # ``>``: ``bytes=-<size>`` means "the whole file".
+                unsatisfiable = int(last) <= 0 or int(last) > size
             else:
                 start = int(first)
                 unsatisfiable = start >= size or (

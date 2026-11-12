@@ -339,6 +339,48 @@ class TestRangedGet:
         assert resp.headers["content-range"] == f"bytes {size-100}-{size-1}/{size}"
         assert resp.content == data[-100:]
 
+    @pytest.mark.parametrize("delta", [1, 999])
+    def test_suffix_larger_than_file_gets_compliant_416(
+        self, media_root_dir, delta
+    ):
+        """An over-long suffix is unsatisfiable — answer it OURSELVES.
+
+        REGRESSION PIN (residual #2 of the multi-range fix). Starlette's
+        ``_parse_ranges`` rewrites ``bytes=-N`` to ``start = size - N``;
+        for ``N > size`` that start is NEGATIVE, so Starlette's own
+        ``0 <= start`` guard raises ``RangeNotSatisfiable`` and its
+        handler answers ``Content-Range: */<size>`` — WITHOUT the
+        RFC-7233 ``bytes `` token. The pre-flight now treats
+        ``N > size`` as unsatisfiable and emits the compliant header.
+
+        Mutation that flips this RED: revert the suffix predicate in
+        ``_media_preflight`` to ``unsatisfiable = int(last) <= 0`` —
+        both suffixes then fall through to Starlette and the header
+        asserts ``'*/1070' != 'bytes */1070'``.
+        """
+        c, data, size, url = self._ctx(media_root_dir)
+        resp = c.get(url, headers={"Range": f"bytes=-{size + delta}"})
+        assert resp.status_code == 416
+        assert resp.headers["content-range"] == f"bytes */{size}"
+        assert resp.headers["content-length"] == "0"
+
+    def test_suffix_equal_to_size_is_satisfiable(self, media_root_dir):
+        """``bytes=-<size>`` means "the whole file" — 206, NOT 416.
+
+        BOUNDARY GUARD for the over-long-suffix rule above: the
+        predicate must be strict ``>``. A ``>=`` would turn this
+        legitimate whole-file suffix into a 416.
+
+        Mutation that flips this RED: change ``int(last) > size`` to
+        ``int(last) >= size`` in ``_media_preflight`` — the response
+        becomes 416 and the 206/body assertions fail.
+        """
+        c, data, size, url = self._ctx(media_root_dir)
+        resp = c.get(url, headers={"Range": f"bytes=-{size}"})
+        assert resp.status_code == 206
+        assert resp.headers["content-range"] == f"bytes 0-{size-1}/{size}"
+        assert resp.content == data
+
     def test_open_ended(self, media_root_dir):
         c, data, size, url = self._ctx(media_root_dir)
         resp = c.get(url, headers={"Range": f"bytes={size-40}-"})
