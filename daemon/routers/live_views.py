@@ -1491,6 +1491,108 @@ def _is_https_request(request: Request) -> bool:
         return False
 
 
+#: The EXACT loopback host identities EXEMPT from the public-lane
+#: HTTPS requirement (2026-11-12, loopback-https-exempt).
+#:
+#: WHY a code change instead of config: the only HTTPS knob that
+#: exists anywhere is ``auth.allow_insecure_cookie`` (auth-lane
+#: session cookies) and there is NO ``live_views`` host/scheme
+#: toggle (``LiveViewsConfig`` carries enabled / external_base_url /
+#: rate-limit / lockout / TTL / roots only). A global "HTTPS off"
+#: switch would drop enforcement for every non-loopback host, which
+#: over-relaxes; the hazard the gate exists for (a ``Secure`` grant
+#: cookie cannot be stored on a plain-HTTP NON-trustworthy origin)
+#: does not apply to loopback, which every browser treats as a
+#: potentially-trustworthy secure context even over http://.
+#:
+#: Scope discipline: hard-coded, minimal, auditable — NO
+#: ``127.0.0.0/8`` range match, NO config-supplied host list, NO
+#: ``.localhost`` / lookalike suffix matching. ``::ffff:127.0.0.1``
+#: is the IPv4-mapped spelling of 127.0.0.1 (added per the
+#: 2026-11-12 operator directive); everything else fails closed and
+#: keeps the historical HTTPS rejection byte-for-byte.
+#:
+#: NOT a replacement for :func:`_views_exact_loopback_name` — that
+#: predicate is the ORIGIN-TRUST carve (``{localhost, 127.0.0.1,
+#: ::1}`` behind a loopback TCP-peer gate) and is deliberately left
+#: untouched; this set answers a different question ("may a plain
+#: http:// request on this host mint a grant cookie at all?").
+_LOOPBACK_HTTPS_EXEMPT_HOSTS = frozenset(
+    {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "::ffff:127.0.0.1",
+    }
+)
+
+
+def _hostname_from_host_header(host_header: str | None) -> str | None:
+    """Return the HOSTNAME of a ``Host`` header value, or ``None``.
+
+    Port stripping is bracket-aware and colon-aware:
+
+    * ``[::1]:9797`` → ``::1`` (the bracketed IPv6 authority form —
+      the brackets delimit the literal, everything after ``]`` is
+      the port suffix and is dropped);
+    * ``[::1]`` → ``::1``;
+    * ``localhost:9797`` / ``127.0.0.1:9797`` → single colon ⇒ the
+      suffix is a port;
+    * a BARE IPv6 literal (``::1``, ``::ffff:127.0.0.1``) carries
+      colons of its own ⇒ NOT split, returned verbatim.
+
+    The result is lowercased. Empty / bracket-less-malformed input
+    returns ``None`` (fail closed at every caller — an uninterpretable
+    Host never earns the exempt verdict).
+    """
+    value = (host_header or "").strip()
+    if not value:
+        return None
+    if value.startswith("["):
+        end = value.find("]")
+        if end == -1:
+            return None
+        host = value[1:end].strip().lower()
+        return host or None
+    if value.count(":") == 1:
+        value = value.split(":", 1)[0]
+    host = value.strip().lower()
+    return host or None
+
+
+def _is_loopback_https_exempt(request: Request) -> bool:
+    """True iff the inbound ``Host`` header names an EXACT loopback host.
+
+    Reads the request ``Host`` header (the browser's own authority —
+    the same value the browser used to decide whether this origin is
+    a trustworthy secure context, which is what the exemption is
+    modelling), strips the port (bracket-aware for IPv6), lowercases,
+    and compares against :data:`_LOOPBACK_HTTPS_EXEMPT_HOSTS`.
+    """
+    return (
+        _hostname_from_host_header(request.headers.get("host"))
+        in _LOOPBACK_HTTPS_EXEMPT_HOSTS
+    )
+
+
+def _secure_context_satisfied(request: Request) -> bool:
+    """True when the plain-HTTP ``Secure``-cookie hazard does NOT apply.
+
+    The historical requirement is "the request must be HTTPS"
+    (architecture-recommendation.md D6:79). This predicate keeps that
+    requirement for every non-loopback host and adds ONE exemption:
+    an exact loopback ``Host`` over plain HTTP, where browsers treat
+    ``http://localhost`` / ``http://127.0.0.1`` / ``http://[::1]`` as
+    potentially-trustworthy secure contexts and DO store the
+    ``Secure`` grant cookie.
+
+    Everything else — LAN IPs, hostnames, public domains, a
+    forwarded-proto-less proxy hit — returns False and keeps the
+    unchanged HTTPS-rejection page.
+    """
+    return _is_https_request(request) or _is_loopback_https_exempt(request)
+
+
 def _grant_cookie_path(root_name: str, rel_path: str) -> str:
     """Return the EXACT queryless public URL path for cookie ``Path`` scoping.
 
@@ -2472,7 +2574,17 @@ def build_router() -> APIRouter:
         # Detect and render the explicit
         # secure-context message — never a redirect
         # loop.
-        if not _is_https_request(request):
+        #
+        # LOOPBACK EXEMPTION (2026-11-12): an EXACT loopback
+        # ``Host`` (``localhost`` / ``127.0.0.1`` / ``::1`` /
+        # ``::ffff:127.0.0.1``) over plain HTTP is served —
+        # browsers treat those origins as potentially-
+        # trustworthy secure contexts and DO store the
+        # ``Secure`` grant cookie there, so the hazard this
+        # block exists for does not apply. Every NON-loopback
+        # host keeps the historical rejection BYTE-IDENTICAL
+        # (see ``_secure_context_satisfied``).
+        if not _secure_context_satisfied(request):
             return _render_secure_context_page(
                 request, csp_nonce=_public_csp_nonce()
             )
