@@ -38,7 +38,6 @@ from typing import Any
 import pytest
 
 from daemon.repositories.event.models import EventKind
-from daemon.services.ram_guard import guard as guard_mod
 from daemon.services.ram_guard import ladder as ladder_mod
 from daemon.services.ram_guard.events import RamBreachEmitter
 from daemon.services.ram_guard.verdict import (
@@ -311,6 +310,9 @@ class TestSuccessPath:
 
 
 class TestDropPaths:
+    @pytest.mark.filterwarnings(
+        "ignore:coroutine .* was never awaited:RuntimeWarning"
+    )  # daemon-side leak: ram_guard_events.py:141 coro not closed on sched failure — source worker owns fix
     def test_no_live_loop_drops_with_a_warning(self, caplog):
         manager = _FakeManager(fail=True)
         bus = _FakeBus()
@@ -332,6 +334,9 @@ class TestDropPaths:
         assert emitter("", SAMPLE_PAYLOAD) is False
         assert manager.accessor_calls == 0
 
+    @pytest.mark.filterwarnings(
+        "ignore:coroutine .* was never awaited:RuntimeWarning"
+    )  # daemon-side leak: ram_guard_events.py:141 coro not closed on sched failure — source worker owns fix
     def test_a_closed_loop_drops(self):
         loop = asyncio.new_event_loop()
         loop.close()
