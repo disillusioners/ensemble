@@ -1144,8 +1144,26 @@ class TestNoFalseAttribution:
         assert rows[0].peak_rss_kb == 4242
 
     async def test_the_ram_arm_adds_no_child_env_stamp(self, real_guard, monkeypatch):
-        """T2 — the RAM arm writes NO env var into the child."""
+        """T2 — the RAM arm writes NO env var into the child.
+
+        The child env is the SCRUBBED inherit base plus the reaper's own
+        stamp — not the raw ``os.environ``: the rogue-containment
+        spawn-boundary scrub (merged into this path by the
+        latest-absorption merge) removes the bind/DB/attestation family
+        before spawn, so the expected set must be derived from
+        ``scrub_spawn_env(os.environ)``.
+
+        NON-VACUITY (BLOCKER-1, 2026-11-12): the raw-``os.environ`` form
+        of this pin passed vacuously whenever the ambient carried no
+        stripped name and reddened spuriously whenever it carried one
+        (``HOST=0.0.0.0`` / ``ENSEMBLE_UPGRADE_LIVE=1``). The scrubbed-set
+        form discriminates BOTH ways — observed RED in the scratch venue
+        for (a) the reaper stamp removed/skipped (child set loses the
+        expected delta) and (b) a stripped name injected into the child
+        env AFTER the scrub (child set gains an unexpected key).
+        """
         from daemon.services.bash_spawn_reaper import BASH_TRACKING_ENV_VAR
+        from daemon.services.spawn_env_policy import scrub_spawn_env
 
         captured = {}
 
@@ -1159,9 +1177,11 @@ class TestNoFalseAttribution:
         await bash_module.bash.coroutine(command="echo hi", instance_id=INSTANCE)
         env = captured["env"]
         assert isinstance(env, dict)
-        # Exactly the inherited env plus the reaper's OWN stamp — the RAM
-        # arm contributes nothing.
-        assert set(env.keys()) == set(os.environ.keys()) | {BASH_TRACKING_ENV_VAR}
+        # Exactly the SCRUBBED inherited env plus the reaper's OWN stamp —
+        # the RAM arm contributes nothing.
+        assert set(env.keys()) == set(scrub_spawn_env(os.environ)) | {
+            BASH_TRACKING_ENV_VAR
+        }
 
 
 # ── T13 — the exit-kind vocabulary ─────────────────────────────────────────
