@@ -136,8 +136,12 @@ class EnsembleConfig(BaseModel):
 
 
 def assert_db_resolution_sanctioned(data_dir) -> None:
-    """Fail-closed guard: refuse an ambient-POSTGRES-driven first boot
+    """DB-resolution guard: refuse an ambient-POSTGRES-driven first boot
     (tier 2) unless ``ENSEMBLE_DB_AMBIENT_ALLOW=1`` is set.
+
+    Fail-closed on the tier-2 poison case; fail-OPEN on an unexpected
+    exception in the guard itself (so a broken check never blocks boot).
+    Documented exemption: daemon/auth/cli.py:150 (no code change there).
 
     Fires (sys.exit(78) + marker line) iff:
       - (data_dir / "ensemble.json") does NOT exist (tier 2 path), AND
@@ -147,6 +151,15 @@ def assert_db_resolution_sanctioned(data_dir) -> None:
     Tier 1 (json exists) => does not fire. Tier 3/4 (sqlite) => does not
     fire. Marker line names the tier + ambient var NAMES only (never
     values) + the fence var name (F7).
+
+    EXIT-CODE NOTE (iter-1 D4): this function calls sys.exit(78). When
+    invoked from daemon/__main__._boot_db_preflight (BEFORE uvicorn) the
+    process exits 78 (the launcher's refuse track). When invoked from
+    the api.py lifespan (a defense-in-depth backstop, unreachable when
+    the preflight ran) the SystemExit propagates through uvicorn's
+    lifespan handler as exit 3 (crash track). The __main__ preflight is
+    the exit-78 owner on BOTH entry paths (python -m daemon and frozen
+    run_app); the lifespan call is backstop only.
     """
     import sys as _sys
 

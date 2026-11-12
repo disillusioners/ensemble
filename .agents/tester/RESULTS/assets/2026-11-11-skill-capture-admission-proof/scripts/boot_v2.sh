@@ -44,6 +44,9 @@ export POSTGRES_PORT="$PGPORT"
 export POSTGRES_DB=ens_e2e_v02917
 export POSTGRES_USER=pguser
 export POSTGRES_PASSWORD=""
+# rogue-containment DB guard: sanctioned first boot (POSTGRES_* present
+# before ensemble.json is persisted) needs the fence var.
+export ENSEMBLE_DB_AMBIENT_ALLOW=1
 
 export ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0
 export ENSEMBLE_ORPHAN_F1_ENABLED=0

@@ -18,6 +18,13 @@ unset DATABASE_URL PGHOST PGPORT PGUSER PGPASSWORD
 # pin sweep guard explicitly (never env -u on it)
 export ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0
 
+# rogue-containment iter-1 D5: refuse to run without a scratch postgres
+# (silent SQLite fallback is the bug this guard prevents).
+if [ -z "${PG_TEST_HOST:-}" ]; then
+  echo "FATAL: PG_TEST_HOST is required (scratch postgres). Refusing to fall back to SQLite." >&2
+  exit 99
+fi
+
 # --- scratch port (re-roll off 9797/9798/7979/8079) ---
 PORT="${ROGUE_MIRROR_PORT:-18790}"
 export PORT HOST=0.0.0.0
@@ -33,7 +40,7 @@ if [ -n "${PG_TEST_PASSWORD:-}" ]; then export POSTGRES_PASSWORD="$PG_TEST_PASSW
 export POSTGRES_DB="$PG_TEST_DB_NAME"
 
 # --- scratch config (literal port, never ${PORT:-}) ---
-SCRATCH_DIR="${TMPDIR:-/tmp}/rogue-mirror-$"
+SCRATCH_DIR="${TMPDIR:-/tmp}/rogue-mirror-$$"
 mkdir -p "$SCRATCH_DIR/data"
 export ENSEMBLE_DATA_DIR="$SCRATCH_DIR/data"
 export ENSEMBLE_SELF_ENV=sandbox
@@ -41,6 +48,7 @@ export ENSEMBLE_SELF_ENV=sandbox
 # --- run the daemon; capture redacted output ---
 echo "[mirror] PORT=$PORT DATA_DIR=$ENSEMBLE_DATA_DIR HOME=$HOME SWEEP=$ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES"
 echo "[mirror] scratch DB=$POSTGRES_DB (must not be a forbidden name)"
+echo "[mirror] backend=postgres://${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB} (password redacted)"
 case "$POSTGRES_DB" in ensemble_prod|ensemble_dev|ensemble_prod_test) echo "FATAL: forbidden DB name"; exit 99 ;; esac
 
 # Caller supplies the daemon invocation via ROGUE_MIRROR_CMD (default: python -m daemon)
@@ -61,13 +69,16 @@ os.makedirs(os.path.dirname(p),exist_ok=True)
 st=__import__("daemon.services.port_ownership",fromlist=["_read_starttime"])._read_starttime(os.getpid())
 json.dump({"install_dir":"foreign-install-root","pid":os.getpid(),"starttime":st,"port":port,"host":"0.0.0.0","claimed_at":"now"},open(p,"w"))
 PY
+    export ENSEMBLE_DB_AMBIENT_ALLOW=1
     ;;
   db-poison)
     # Ensure no ensemble.json (tier 2) and ambient POSTGRES_* present (already).
     rm -f "$ENSEMBLE_DATA_DIR/ensemble.json"
+    unset ENSEMBLE_DB_AMBIENT_ALLOW
     ;;
   happy)
     rm -f "$ENSEMBLE_DATA_DIR/ensemble.json"
+    export ENSEMBLE_DB_AMBIENT_ALLOW=1
     ;;
 esac
 

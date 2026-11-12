@@ -724,6 +724,10 @@ async def lifespan(app: FastAPI):
         or os.environ.get("DATA_DIR")
         or "./data"
     )
+    # DB-resolution guard (rogue-containment). The __main__ preflight
+    # (before uvicorn) is the exit-78 owner; this lifespan call is a
+    # defense-in-depth backstop whose failure mode is exit 3 (crash
+    # track) and is unreachable when the preflight ran.
     from daemon.ensemble_config import assert_db_resolution_sanctioned
     assert_db_resolution_sanctioned(data_dir)
     ensemble_config = EnsembleConfig.load_or_create(data_dir)

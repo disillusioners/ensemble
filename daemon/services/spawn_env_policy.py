@@ -38,6 +38,13 @@ from __future__ import annotations
 from typing import Mapping
 
 # Single source of truth for the scrub policy (pin target).
+# NOTE (iter-1 minor 9): POSTGRES_URL / DATABASE_URL_POSTGRES / PG* are
+# deliberately NOT in the strip set. The strip set is scoped to the exact
+# names read by ensemble_config.get_postgres_url (POSTGRES_HOST/PORT/DB/
+# USER/PASSWORD). A broader PG*-prefix scrub is a follow-up candidate
+# (would also need the executor seam's PG* allowlist reconciled); the
+# count pin (10 names) reflects the scoped set. See upgrade_journal's
+# EXECUTOR_ENV_PREFIXES = ("PG",) for the promote-leg channel.
 SPAWN_BOUNDARY_STRIP_ENV: frozenset[str] = frozenset({
     # bind family (analysis §5.3)
     "PORT",
