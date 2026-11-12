@@ -2,14 +2,14 @@
 
 The committed evidence artifact ``tests/bind_race_rogue_containment_mutation_matrix.md``
 had once been corrupted by a self-overwriting heredoc: raw model transcript
-markup (``<|start|>`` / ``<|end|>`` / ``<rfl:parameter``) and a duplicated
-heredoc body landed INSIDE a tracked file. This gate makes that class of
-corruption impossible to re-commit silently: no tracked text file may
-contain a transcript control marker.
+control markup and a duplicated heredoc body landed INSIDE a tracked file.
+This gate makes that class of corruption impossible to re-commit silently:
+no tracked text file may contain a transcript control marker.
 
-There is NO allowlist. A genuine fixture needing these literals must
-escape them (``<\\|start\\|>``) so the artifact is never byte-identical to
-harness protocol.
+There is NO allowlist. This test itself builds its marker constants from
+parts (so it carries no literal marker), and a genuine fixture needing the
+literals must escape them (``<\\|start\\|>``) so an artifact is never
+byte-identical to harness protocol.
 """
 
 import subprocess
@@ -17,7 +17,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-MARKERS = ("<|start|>", "<|end|>", "<rfl:parameter")
+_LT = "<"
+MARKERS = (
+    _LT + "|start|>",
+    _LT + "|end|>",
+    _LT + "rfl:parameter",
+)
 
 TEXT_SUFFIXES = {
     ".md", ".py", ".sh", ".yaml", ".yml", ".json", ".txt", ".toml",
