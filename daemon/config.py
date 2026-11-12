@@ -8887,15 +8887,13 @@ def load_config(config_path: str | None = None) -> Config:
     for _k in [k for k, v in list(live_views_config.items()) if v is None]:
         del live_views_config[_k]
     live_views_config["max_media_bytes"] = _lv_resolved_max
-    if "live_views" in processed_config:
-        # Operator can override / disable individual seed roots by
-        # writing a ``live_views.roots:`` block in config.yaml —
-        # pydantic REPLACES the default dict (the seeded
-        # ``designer-artifact`` / ``planning`` / ``tmp-images`` are
-        # the no-operator-config baseline). See
-        # ``_seed_phase1_roots`` for the full operator-override
-        # model.
-        pass
+    # Operator can override / disable individual seed roots by
+    # writing a ``live_views.roots:`` block in config.yaml —
+    # pydantic REPLACES the default dict (the seeded
+    # ``designer-artifact`` / ``planning`` / ``tmp-images`` are
+    # the no-operator-config baseline). See
+    # ``_seed_phase1_roots`` for the full operator-override
+    # model.
     config_dict["live_views"] = live_views_config
     if "memoir" in processed_config:
         # Memoir Store v1 (phase 0, D0.4): the yaml tier for the memoir
