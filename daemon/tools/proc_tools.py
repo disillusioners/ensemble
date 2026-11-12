@@ -1993,6 +1993,27 @@ def create_proc_tools(current_instance_id: str = "") -> list:
             On failure: ``"Error: ..."`` string describing why
             (process cap reached, command not found, etc.).
         """
+        # rogue-containment (iter-1 D2b): apply the SAME pkill overlay
+        # predicate to proc_run's command so a pkill refused in bash
+        # cannot be re-issued via a background process. Fence env is
+        # ambient (proc_run has no env overlay).
+        try:
+            from daemon.tools.bash import _pkill_overlay_violation
+            _proc_pkill_violation = _pkill_overlay_violation(command, None)
+        except Exception:  # noqa: BLE001
+            _proc_pkill_violation = None
+        if _proc_pkill_violation is not None:
+            return (
+                "Error: refused by the rogue-containment pkill overlay guard — "
+                f"command matches live-ensemble pattern {_proc_pkill_violation!r}. "
+                "This guard prevents agent-issued processes from killing live "
+                "ensemble processes/ports/install roots. To run such a command "
+                "inside a fenced (scratch) test mirror, set "
+                "ENSEMBLE_FENCED_TEST_CONTEXT=1 in the daemon environment — "
+                "only inside a fenced mirror. Scratch-sentinel/scratch-named "
+                "targets are allowed without the marker."
+            )
+
         # Defensive: timeout validation (matches ``bash`` semantics
         # of accepting 0 = no-timeout). No explicit upper bound here
         # because the user explicitly asked for a long-running

@@ -839,6 +839,8 @@ async def bash(
     # kill-like commands targeting live ensemble processes/ports/install
     # roots unless a fenced test context marker is present.
     _pkill_violation = _pkill_overlay_violation(command, env)
+    if _pkill_violation is None and input is not None:
+        _pkill_violation = _pkill_overlay_violation(input, env)
     if _pkill_violation is not None:
         return (
             "ERROR: refused by the rogue-containment pkill overlay guard — "
@@ -1289,9 +1291,8 @@ Returns:
 """
 
 
-
 # ---------------------------------------------------------------------------
-# rogue-containment pkill overlay guard (adjudication 1)
+# rogue-containment pkill overlay guard (adjudication 1, iter-1 hardened)
 # ---------------------------------------------------------------------------
 # Pattern gate only — NO PID-identity resolution. Refuses bash commands that
 # look like process/port kills targeting LIVE ensemble processes, ports, or
@@ -1303,28 +1304,62 @@ Returns:
 # Scratch-sentinel / scratch-named targets (no live pattern) pass without
 # the marker.
 #
-# Pattern set (lowercased substring match, only on kill-like commands):
-#   live tokens: "ensemble-prod", "ensemble-daemon", "9797", "9798",
-#                "agents-ensemble"
-#   kill-like tokens: "pkill", "killall", "kill ", "fuser", "xargs kill",
-#                     "systemctl"
+# Word-boundary / anchored design (iter-1 D2c):
+#   - kill-like verbs match as command words only, so "skill " does NOT
+#     trigger (\b boundary prevents the substring match inside "skill").
+#   - port tokens match only as whole words (\b9797\b), so "19797" does
+#     not trigger.
+#   - systemctl: read-only verbs (status/show/is-active/list-units/cat/
+#     is-enabled/is-failed/get-default) are ALLOWED against live units;
+#     mutating verbs (stop/restart/kill/disable/mask/reload/daemon-reload/
+#     enable/start/try-restart/isolate) are gated.
+#
+# Live patterns (iter-1 D2a adds ensemble-main, ensemble-demo):
+#   "ensemble-prod", "ensemble-daemon", "ensemble-main", "ensemble-demo",
+#   "\b9797\b", "\b9798\b", "agents-ensemble"
 
-_PKILL_OVERLAY_LIVE_PATTERNS: tuple[str, ...] = (
+import re as _re
+
+_PKILL_OVERLAY_LIVE_NAME_PATTERNS: tuple[str, ...] = (
     "ensemble-prod",
     "ensemble-daemon",
-    "9797",
-    "9798",
+    "ensemble-main",
+    "ensemble-demo",
     "agents-ensemble",
 )
 
-_PKILL_OVERLAY_KILL_TOKENS: tuple[str, ...] = (
-    "pkill",
-    "killall",
-    "kill ",
-    "fuser",
-    "xargs kill",
-    "systemctl",
-)
+_PKILL_OVERLAY_SYSTEMCTL_MUTATING: frozenset[str] = frozenset({
+    "stop", "restart", "kill", "disable", "mask", "reload",
+    "daemon-reload", "enable", "start", "try-restart", "isolate",
+})
+
+_PKILL_OVERLAY_SYSTEMCTL_READONLY: frozenset[str] = frozenset({
+    "status", "show", "is-active", "list-units", "list-unit-files",
+    "cat", "is-enabled", "is-failed", "get-default", "help",
+})
+
+
+def _pkill_overlay_is_kill_like(cmd_lower: str) -> bool:
+    # kill-like verbs as command words (word-boundary).
+    if _re.search(r"\bpkill\b", cmd_lower):
+        return True
+    if _re.search(r"\bkillall\b", cmd_lower):
+        return True
+    if _re.search(r"\bfuser\b", cmd_lower):
+        return True
+    # "kill" as a command word: preceded by start/whitespace/;&|(` then
+    # optional spaces; not part of another word.
+    if _re.search(r"(^|[\s;&|(`])\s*kill\b", cmd_lower):
+        return True
+    if "xargs kill" in cmd_lower or _re.search(r"\bxargs\s+kill\b", cmd_lower):
+        return True
+    if "systemctl" in cmd_lower:
+        # only mutating verbs are gated; read-only verbs pass
+        for verb in _PKILL_OVERLAY_SYSTEMCTL_MUTATING:
+            if _re.search(r"\b" + _re.escape(verb) + r"\b", cmd_lower):
+                return True
+        return False
+    return False
 
 
 def _pkill_overlay_violation(command, env=None) -> str | None:
@@ -1335,7 +1370,7 @@ def _pkill_overlay_violation(command, env=None) -> str | None:
     else:
         cmd_str = str(command)
     lower = cmd_str.lower()
-    if not any(tok in lower for tok in _PKILL_OVERLAY_KILL_TOKENS):
+    if not _pkill_overlay_is_kill_like(lower):
         return None
     env = env or {}
     fenced = False
@@ -1345,7 +1380,11 @@ def _pkill_overlay_violation(command, env=None) -> str | None:
         fenced = True
     if fenced:
         return None
-    for pat in _PKILL_OVERLAY_LIVE_PATTERNS:
-        if pat in lower:
-            return pat
+    for name in _PKILL_OVERLAY_LIVE_NAME_PATTERNS:
+        if name in lower:
+            return name
+    # port tokens as whole words
+    for port_num, port_pat in (("9797", r"\b9797\b"), ("9798", r"\b9798\b")):
+        if _re.search(port_pat, lower):
+            return port_num
     return None
