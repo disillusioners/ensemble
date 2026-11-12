@@ -49,7 +49,14 @@ from typing import Optional
 # Lazy import to avoid any import-cycle risk with daemon.services.
 try:
     from daemon.services.spawn_env_policy import apply_spawn_boundary as _apply_spawn_boundary
-except Exception:  # pragma: no cover - defensive
+    _SPAWN_BOUNDARY_AVAILABLE = True
+except Exception as _spawn_policy_exc:  # pragma: no cover - defensive
+    # FAIL-POLARITY (leader decision): FAIL-OPEN + LOUD. A broken local
+    # policy module must not brick the service lane, but every affected
+    # spawn logs at ERROR so the missing containment is never silent.
+    _SPAWN_BOUNDARY_AVAILABLE = False
+    _SPAWN_BOUNDARY_IMPORT_ERROR = _spawn_policy_exc
+
     def _apply_spawn_boundary(os_env, overlay=None, deliberate=None):
         return dict(os_env) if os_env else {}
 
@@ -179,6 +186,13 @@ def spawn(
         # contract). ``close_fds=True`` is the standard defense
         # against FD-leak across fork; the child has no inherited
         # sockets / pipes.
+        if not _SPAWN_BOUNDARY_AVAILABLE:  # pragma: no cover - defensive
+            logger.error(
+                "service_spawner: spawn-boundary scrub UNAVAILABLE (%s) — "
+                "child environment is NOT scrubbed for this spawn. "
+                "FAIL-OPEN by policy (availability), loudly logged.",
+                _SPAWN_BOUNDARY_IMPORT_ERROR,
+            )
         proc = subprocess.Popen(
             list(argv),
             stdin=subprocess.DEVNULL,

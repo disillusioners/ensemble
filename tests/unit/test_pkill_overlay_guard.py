@@ -49,10 +49,20 @@ def test_xargs_kill_with_live_token_refused():
     assert _pkill_overlay_violation("echo ensemble-prod | xargs kill") is not None
 
 
-def test_kill_live_pattern_allowed_with_env_overlay_fence():
+def test_env_overlay_fence_is_IGNORED_B6():
+    """fix-round 2 / B6: the agent-settable tool-call env overlay is NOT a
+    fence channel — otherwise the guard is pattern-only, not containment."""
     env = {"ENSEMBLE_FENCED_TEST_CONTEXT": "1"}
-    assert _pkill_overlay_violation("pkill -f ensemble-prod", env=env) is None
-    assert _pkill_overlay_violation("systemctl --user stop ensemble-main.service", env=env) is None
+    assert _pkill_overlay_violation("pkill -f ensemble-prod", env=env) == "ensemble-prod"
+    assert (
+        _pkill_overlay_violation("systemctl --user stop ensemble-main.service", env=env)
+        == "ensemble-main"
+    )
+
+
+def test_env_overlay_fence_without_ambient_still_refused(monkeypatch):
+    monkeypatch.delenv("ENSEMBLE_FENCED_TEST_CONTEXT", raising=False)
+    assert _pkill_overlay_violation("pkill -f 9797", env={"ENSEMBLE_FENCED_TEST_CONTEXT": "1"}) == "9797"
 
 
 def test_kill_live_pattern_allowed_with_ambient_fence(monkeypatch):

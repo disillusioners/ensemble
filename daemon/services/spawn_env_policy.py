@@ -11,12 +11,17 @@ process state. The two seam consumers (``daemon/tools/bash.py`` and
 is intentionally NOT a consumer — its allowlist seam stays untouched
 (load-bearing for promote legs).
 
-Strip set (10 names):
+Strip set (12 exact names + one prefix family, fix-round 2 / N4):
   - bind family (4): PORT, DAEMON_PORT, HOST, LIMITS_METRICS_LISTENER_PORT
-  - DB-poison family (5): POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB,
+  - DB-poison family (7): POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB,
     POSTGRES_USER, POSTGRES_PASSWORD (exact names from
-    ``ensemble_config.get_postgres_url``)
+    ``ensemble_config.get_postgres_url``), DATABASE_URL, ENSEMBLE_CONFIG
   - live-attestation flag (1): ENSEMBLE_UPGRADE_LIVE
+  - ``PG`` PREFIX family (libpq knobs: PGHOST, PGPORT, PGDATABASE,
+    PGUSER, PGPASSWORD, PGPASSFILE, PGSSLMODE, PGSERVICE, ...). The
+    test-fence family ``PG_TEST_*`` is EXEMPT: those values are scratch
+    coordinates the sanctioned test lanes (conventions) require, never a
+    live credential. Ordinary ``POSTGRES_*`` names are matched exactly.
 
 House precedent: ``daemon/services/vscode_server_manager.py`` ``_CODESERVER_STRIP_ENV``
 strips ``PORT`` for exactly this reason ("PORT causes EADDRINUSE").
@@ -38,13 +43,11 @@ from __future__ import annotations
 from typing import Mapping
 
 # Single source of truth for the scrub policy (pin target).
-# NOTE (iter-1 minor 9): POSTGRES_URL / DATABASE_URL_POSTGRES / PG* are
-# deliberately NOT in the strip set. The strip set is scoped to the exact
-# names read by ensemble_config.get_postgres_url (POSTGRES_HOST/PORT/DB/
-# USER/PASSWORD). A broader PG*-prefix scrub is a follow-up candidate
-# (would also need the executor seam's PG* allowlist reconciled); the
-# count pin (10 names) reflects the scoped set. See upgrade_journal's
-# EXECUTOR_ENV_PREFIXES = ("PG",) for the promote-leg channel.
+# NOTE (fix-round 2 / N4): the exact set now ALSO covers DATABASE_URL and
+# ENSEMBLE_CONFIG (a scratch config path re-points port/DB resolution), and
+# a ``PG`` PREFIX family covers libpq knobs. The promote-executor seam
+# (upgrade_journal.executor_env) is deliberately NOT a consumer — promote
+# legs legitimately forward PG*/POSTGRES_DB under explicit control.
 SPAWN_BOUNDARY_STRIP_ENV: frozenset[str] = frozenset({
     # bind family (analysis §5.3)
     "PORT",
@@ -60,16 +63,36 @@ SPAWN_BOUNDARY_STRIP_ENV: frozenset[str] = frozenset({
     "POSTGRES_PASSWORD",
     # live-attestation flag (adjudicated §4.3)
     "ENSEMBLE_UPGRADE_LIVE",
+    # scratch-config + DSN re-point channels (fix-round 2 / N4)
+    "ENSEMBLE_CONFIG",
+    "DATABASE_URL",
 })
 
-# Sanity: the strip set is exactly 10 names (bind 4 + DB 5 + attestation 1).
-assert len(SPAWN_BOUNDARY_STRIP_ENV) == 10, len(SPAWN_BOUNDARY_STRIP_ENV)
+#: Prefix families stripped from the inherit base.
+SPAWN_BOUNDARY_STRIP_PREFIXES: tuple[str, ...] = ("PG",)
+
+#: Prefix exemptions — values that are scratch test coordinates, not
+#: credentials. Keeping these makes sanctioned pytest/PG lanes work through
+#: the scrub without re-opening the live-poison channel.
+SPAWN_BOUNDARY_STRIP_PREFIX_EXEMPTIONS: tuple[str, ...] = ("PG_TEST_",)
+
+# Sanity: the exact set is exactly 12 names (bind 4 + DB 7 + attestation 1).
+assert len(SPAWN_BOUNDARY_STRIP_ENV) == 12, len(SPAWN_BOUNDARY_STRIP_ENV)
+
+
+def is_stripped_name(name: str) -> bool:
+    """True when ``name`` is removed by the spawn-boundary policy."""
+    if name in SPAWN_BOUNDARY_STRIP_ENV:
+        return True
+    if not name.startswith(SPAWN_BOUNDARY_STRIP_PREFIXES):
+        return False
+    return not name.startswith(SPAWN_BOUNDARY_STRIP_PREFIX_EXEMPTIONS)
 
 
 def scrub_spawn_env(base: Mapping[str, str]) -> dict[str, str]:
-    """Return a copy of ``base`` with every name in
-    ``SPAWN_BOUNDARY_STRIP_ENV`` removed. Does NOT mutate the input."""
-    return {k: v for k, v in base.items() if k not in SPAWN_BOUNDARY_STRIP_ENV}
+    """Return a copy of ``base`` with every stripped name removed.
+    Does NOT mutate the input."""
+    return {k: v for k, v in base.items() if not is_stripped_name(k)}
 
 
 def apply_spawn_boundary(

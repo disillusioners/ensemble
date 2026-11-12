@@ -58,7 +58,21 @@ from daemon.services.timestamps import now_utc_iso as _now_utc_iso
 # Spawn-boundary env scrub (rogue-containment component B, (e′)):
 # strip bind/DB/attestation vars from the inherit base before handing
 # env to children. Pure module; no import cycle (daemon.services only).
-from daemon.services.spawn_env_policy import apply_spawn_boundary as _apply_spawn_boundary
+# Spawn-boundary env scrub (rogue-containment component B).
+# FAIL-POLARITY (leader decision, pinned): an import failure here is
+# FAIL-OPEN + LOUD — availability wins (a broken local policy module must
+# not brick the whole bash tool), but every affected spawn logs at ERROR.
+try:
+    from daemon.services.spawn_env_policy import (
+        apply_spawn_boundary as _apply_spawn_boundary,
+    )
+    _SPAWN_BOUNDARY_AVAILABLE = True
+except Exception as _spawn_policy_exc:  # pragma: no cover - defensive
+    _SPAWN_BOUNDARY_AVAILABLE = False
+    _SPAWN_BOUNDARY_IMPORT_ERROR = _spawn_policy_exc
+
+    def _apply_spawn_boundary(os_env, overlay=None, deliberate=None):
+        return dict(os_env) if os_env else {}
 
 if TYPE_CHECKING:
     # Writer-injection seam (lifespan wiring): typed here only — importing
@@ -838,9 +852,25 @@ async def bash(
     # rogue-containment pkill overlay guard (adjudication 1): refuse
     # kill-like commands targeting live ensemble processes/ports/install
     # roots unless a fenced test context marker is present.
-    _pkill_violation = _pkill_overlay_violation(command, env)
+    #
+    # fix-round 2 / B6: the fence is AMBIENT-ONLY. An agent-settable
+    # tool-call env overlay must never carry it (that would make the guard
+    # pattern-only, not containment). An overlay attempt is IGNORED and the
+    # key is stripped from the child environment so it cannot be laundered
+    # into a nested process.
+    spawn_env_overlay = env
+    if isinstance(env, dict) and "ENSEMBLE_FENCED_TEST_CONTEXT" in env:
+        logger.warning(
+            "bash: ENSEMBLE_FENCED_TEST_CONTEXT in the tool-call env overlay "
+            "is IGNORED (the fence is ambient-only, daemon-set) and stripped "
+            "from the child environment."
+        )
+        spawn_env_overlay = {
+            k: v for k, v in env.items() if k != "ENSEMBLE_FENCED_TEST_CONTEXT"
+        }
+    _pkill_violation = _pkill_overlay_violation(command, spawn_env_overlay)
     if _pkill_violation is None and input is not None:
-        _pkill_violation = _pkill_overlay_violation(input, env)
+        _pkill_violation = _pkill_overlay_violation(input, spawn_env_overlay)
     if _pkill_violation is not None:
         return (
             "ERROR: refused by the rogue-containment pkill overlay guard — "
@@ -916,8 +946,15 @@ async def bash(
             # None-inherit path that carried PORT/HOST/POSTGRES_*/... is
             # collapsed. Secret-marker resolution + KMS resolution run
             # AFTER the strip (strip FIRST), then the reaper stamp.
+            if not _SPAWN_BOUNDARY_AVAILABLE:  # pragma: no cover - defensive
+                logger.error(
+                    "bash: spawn-boundary scrub UNAVAILABLE (%s) — child "
+                    "environment is NOT scrubbed for this spawn. FAIL-OPEN "
+                    "by policy (availability), loudly logged.",
+                    _SPAWN_BOUNDARY_IMPORT_ERROR,
+                )
             assembled_env: Dict[str, str] = _apply_spawn_boundary(
-                os.environ, env
+                os.environ, spawn_env_overlay
             )
             assembled_env = _resolve_secret_markers(
                 assembled_env,
@@ -997,7 +1034,7 @@ async def bash(
             # persist. The detail column carries the full command
             # shape + env-overlay keys (no values) for forensics.
             sanitized_command, detail_for_registry = _sanitize_command_for_registry(
-                command, env
+                command, spawn_env_overlay
             )
             try:
                 _pid_registry_register(
@@ -1299,10 +1336,25 @@ Returns:
 # install roots, unless an explicit fenced-test context marker is present.
 #
 # Fence mechanism (documented for the census walk):
-#   - env={"ENSEMBLE_FENCED_TEST_CONTEXT": "1"} passed to the bash tool, OR
-#   - ambient daemon env ENSEMBLE_FENCED_TEST_CONTEXT=1.
+#   - ambient daemon env ENSEMBLE_FENCED_TEST_CONTEXT=1 ONLY.
+#   The tool-call env overlay is NOT a fence channel (fix-round 2 / B6): an
+#   overlay attempt is ignored (and the key is stripped from the child env),
+#   so the guard cannot be self-granted by the agent it constrains.
 # Scratch-sentinel / scratch-named targets (no live pattern) pass without
 # the marker.
+#
+# Residuals / evasion surface (documented for the census walk, N10):
+#   - two-step PID laundering (``lsof -ti:9797`` then ``kill <pid>``): the
+#     gate is pattern-based, not PID-identity based;
+#   - regex variants that do not contain a pattern token verbatim
+#     (``pkill -f 'ensemble.*prod'``);
+#   - substring collisions (``ensemble-maintenance`` does NOT match
+#     ``ensemble-main`` as a whole token in the command string? it does —
+#     conservative over-refusal is accepted);
+#   - ``kill -9 -1`` (signal every process the uid may signal);
+#   - same-uid / same-install limits (see port_ownership residuals).
+# The ownership claim (component A) is the control that does not depend on
+# command text; this overlay is defense-in-depth only.
 #
 # Word-boundary / anchored design (iter-1 D2c):
 #   - kill-like verbs match as command words only, so "skill " does NOT
@@ -1372,12 +1424,13 @@ def _pkill_overlay_violation(command, env=None) -> str | None:
     lower = cmd_str.lower()
     if not _pkill_overlay_is_kill_like(lower):
         return None
-    env = env or {}
-    fenced = False
-    if str(env.get("ENSEMBLE_FENCED_TEST_CONTEXT", "")).strip() == "1":
-        fenced = True
-    if not fenced and os.environ.get("ENSEMBLE_FENCED_TEST_CONTEXT") == "1":
-        fenced = True
+    # fix-round 2 / B6: the fence is read from the DAEMON-SET AMBIENT
+    # environment ONLY. ``env`` (the agent-settable tool-call overlay) is
+    # accepted for call-site compatibility but is DELIBERATELY IGNORED as a
+    # fence source — otherwise any agent could grant itself a fence in the
+    # same call that issues a live-pattern kill.
+    del env
+    fenced = os.environ.get("ENSEMBLE_FENCED_TEST_CONTEXT") == "1"
     if fenced:
         return None
     for name in _PKILL_OVERLAY_LIVE_NAME_PATTERNS:

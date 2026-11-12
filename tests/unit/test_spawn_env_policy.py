@@ -1,28 +1,44 @@
-"""Unit tests for spawn_env_policy (component B, pin positive-count gate).
+"""Unit tests for spawn_env_policy (component B, fix-round 2 / N4).
 
-Mutation-discipline positive shapes: a counter-mutation that removes a strip
-entry (or changes the count) must redden at least one node here.
+Positive-count gate: bind 4 + DB exact 7 + attestation 1 = 12 EXACT names,
+plus the ``PG`` prefix family with the ``PG_TEST_*`` exemption.
 """
-
-import os
 
 from daemon.services.spawn_env_policy import (
     SPAWN_BOUNDARY_STRIP_ENV,
-    scrub_spawn_env,
+    SPAWN_BOUNDARY_STRIP_PREFIXES,
+    SPAWN_BOUNDARY_STRIP_PREFIX_EXEMPTIONS,
     apply_spawn_boundary,
+    is_stripped_name,
+    scrub_spawn_env,
 )
 
 
-def test_strip_env_exact_ten_names():
-    # Positive-count gate: bind 4 + DB 5 + attestation 1.
-    assert len(SPAWN_BOUNDARY_STRIP_ENV) == 10
+def test_strip_env_exact_twelve_names():
+    assert len(SPAWN_BOUNDARY_STRIP_ENV) == 12
     expected = {
         "PORT", "DAEMON_PORT", "HOST", "LIMITS_METRICS_LISTENER_PORT",
         "POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DB",
         "POSTGRES_USER", "POSTGRES_PASSWORD",
         "ENSEMBLE_UPGRADE_LIVE",
+        "ENSEMBLE_CONFIG", "DATABASE_URL",
     }
     assert set(SPAWN_BOUNDARY_STRIP_ENV) == expected
+
+
+def test_pg_prefix_family_stripped():
+    assert SPAWN_BOUNDARY_STRIP_PREFIXES == ("PG",)
+    for name in ("PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD",
+                 "PGPASSFILE", "PGSSLMODE", "PGSERVICE", "PGSERVICEFILE"):
+        assert is_stripped_name(name) is True, name
+        assert name not in scrub_spawn_env({name: "x"})
+
+
+def test_pg_test_exemption_survives():
+    assert SPAWN_BOUNDARY_STRIP_PREFIX_EXEMPTIONS == ("PG_TEST_",)
+    assert is_stripped_name("PG_TEST_HOST") is False
+    out = scrub_spawn_env({"PG_TEST_HOST": "127.0.0.1", "PGHOST": "live"})
+    assert out == {"PG_TEST_HOST": "127.0.0.1"}
 
 
 def test_scrub_removes_all_strip_names():
