@@ -299,7 +299,7 @@ class TestTheFingerprint:
         valid = _valid_map()
         line = describe_parse(valid)
         assert "state=1 entries" in line
-        assert "entries=1" in line
+        assert "count=1" in line
         assert f"map_digest={designation_digest(valid.map)}" in line  # type: ignore[arg-type]
         assert CHANNEL not in line
         assert APPROVER not in line
@@ -312,7 +312,7 @@ class TestTheFingerprint:
 
         unset = describe_parse(parse_designations(None))
         assert "state=unset" in unset
-        assert "entries=0" in unset
+        assert "count=0" in unset
 
         empty = describe_parse(parse_designations("{}"))
         assert "state=empty" in empty

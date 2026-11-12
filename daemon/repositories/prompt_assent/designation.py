@@ -287,7 +287,7 @@ def describe_parse(result: DesignationParseResult) -> str:
     entries = len(result.map) if result.map is not None else 0
     digest = designation_digest(result.map) if result.map is not None else "-"
     return (
-        f"designation_map state={result.state} entries={entries} "
+        f"designation_map state={result.state} count={entries} "
         f"map_digest={digest} errors={len(result.errors)}"
     )
 
