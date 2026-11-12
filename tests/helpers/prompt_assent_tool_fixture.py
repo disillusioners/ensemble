@@ -142,9 +142,20 @@ def build_discord_meta(
     is_group_dm: Any = False,
     guild_id: Optional[str] = None,
     channel_type: str = "dm",
+    parent_channel_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    """The nested ``metadata["discord"]`` dict the adapter builds."""
-    return {
+    """The nested ``metadata["discord"]`` dict the adapter builds.
+
+    Phase-1.5 thread cells (D-9 / M-12 / M-13): a thread carries
+    ``channel_type="thread"``, its OWN ``channel_id`` and the parent's
+    id in ``parent_channel_id`` — the adapter's exact key set
+    (``daemon/sources/adapters/discord/adapter.py:1080-1092``). The two
+    new keys are ADDITIVE-ONLY: they appear in the dict ONLY when the
+    caller passes them, so every pre-existing caller's meta dict is
+    byte-identical to before this parameter existed.
+    """
+    meta: dict[str, Any] = {
         "guild_id": guild_id,
         "channel_id": channel_id,
         "channel_type": channel_type,
@@ -154,6 +165,11 @@ def build_discord_meta(
         "is_dm": is_dm,
         "is_group_dm": is_group_dm,
     }
+    if parent_channel_id is not None:
+        meta["parent_channel_id"] = parent_channel_id
+    if thread_id is not None:
+        meta["thread_id"] = thread_id
+    return meta
 
 
 def build_tools(
