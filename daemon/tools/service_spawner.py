@@ -45,6 +45,14 @@ import sys
 import time
 from typing import Optional
 
+# Spawn-boundary env scrub (rogue-containment component B, (e′)).
+# Lazy import to avoid any import-cycle risk with daemon.services.
+try:
+    from daemon.services.spawn_env_policy import apply_spawn_boundary as _apply_spawn_boundary
+except Exception:  # pragma: no cover - defensive
+    def _apply_spawn_boundary(os_env, overlay=None, deliberate=None):
+        return dict(os_env) if os_env else {}
+
 logger = logging.getLogger(__name__)
 
 
@@ -109,6 +117,7 @@ def spawn(
     argv: list[str],
     log_path: str,
     cwd: Optional[str] = None,
+    extra_env: Optional[dict[str, str]] = None,
 ) -> tuple[int, int]:
     """Spawn a detached service process and return ``(pid, start_time)``.
 
@@ -176,6 +185,7 @@ def spawn(
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             cwd=cwd,
+            env=_apply_spawn_boundary(os.environ, None, extra_env),
             start_new_session=True,
             close_fds=True,
         )

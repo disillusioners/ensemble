@@ -55,6 +55,10 @@ from daemon.services.bash_spawn_reaper import (
     sweep_instance as _bash_reaper_sweep_instance,
 )
 from daemon.services.timestamps import now_utc_iso as _now_utc_iso
+# Spawn-boundary env scrub (rogue-containment component B, (e′)):
+# strip bind/DB/attestation vars from the inherit base before handing
+# env to children. Pure module; no import cycle (daemon.services only).
+from daemon.services.spawn_env_policy import apply_spawn_boundary as _apply_spawn_boundary
 
 if TYPE_CHECKING:
     # Writer-injection seam (lifespan wiring): typed here only — importing
@@ -831,6 +835,22 @@ async def bash(
     # Gating (instance_id present AND master switch ON) is applied at the
     # stamp/write sites; minting itself is inert.
     tracking_id: str | None = uuid4().hex if instance_id is not None else None
+    # rogue-containment pkill overlay guard (adjudication 1): refuse
+    # kill-like commands targeting live ensemble processes/ports/install
+    # roots unless a fenced test context marker is present.
+    _pkill_violation = _pkill_overlay_violation(command, env)
+    if _pkill_violation is not None:
+        return (
+            "ERROR: refused by the rogue-containment pkill overlay guard — "
+            f"command matches live-ensemble pattern {_pkill_violation!r}. "
+            "This guard prevents agent-issued bash from killing live "
+            "ensemble processes/ports/install roots. To run such a command "
+            "inside a fenced (scratch) test mirror, set "
+            "ENSEMBLE_FENCED_TEST_CONTEXT=1 in the tool env "
+            '(env={"ENSEMBLE_FENCED_TEST_CONTEXT": "1"}) or in the daemon '
+            "environment — only inside a fenced mirror. Scratch-sentinel/"
+            "scratch-named targets are allowed without the marker."
+        )
     try:
         # start_new_session=True (Unix) creates a new process group so that
         # backgrounded children (e.g., `nohup ... &`) can be killed together
@@ -888,30 +908,30 @@ async def bash(
             # fails closed ONLY when a marker-shaped value is present
             # (the resolver's lazy service check); marker-free env
             # passes through byte-identical (zero measurable latency).
-            assembled_env: Dict[str, str] | None = None
-            if env:
-                assembled_env = os.environ.copy()
-                # Overlay wins over os.environ (§1a semantics).
-                assembled_env.update(env)
-                assembled_env = _resolve_secret_markers(
-                    assembled_env,
-                    secret_service=_get_process_secret_service(),
-                    actor=instance_id or "<bash>",
-                    surface="bash.env",
-                )
-                assembled_env = _kms_resolve_env(assembled_env)
+            # rogue-containment (e′): ALWAYS materialise the inherit base
+            # through apply_spawn_boundary so the bind/DB/attestation
+            # family is stripped even when no overlay is passed. The
+            # None-inherit path that carried PORT/HOST/POSTGRES_*/... is
+            # collapsed. Secret-marker resolution + KMS resolution run
+            # AFTER the strip (strip FIRST), then the reaper stamp.
+            assembled_env: Dict[str, str] = _apply_spawn_boundary(
+                os.environ, env
+            )
+            assembled_env = _resolve_secret_markers(
+                assembled_env,
+                secret_service=_get_process_secret_service(),
+                actor=instance_id or "<bash>",
+                surface="bash.env",
+            )
+            assembled_env = _kms_resolve_env(assembled_env)
             # bash-tool orphan reaper Phase 1 (task 1.4): env stamp.
             # Gated: instance_id present AND master switch ON (F6 default ON).
-            # When no overlay was passed this materializes the inherit-env
-            # copy — byte-identical semantics plus one var.
             if instance_id is not None and tracking_id is not None:
                 try:
                     _stamp_on = _bash_reaper_switch()
                 except Exception:
                     _stamp_on = True
                 if _stamp_on:
-                    if assembled_env is None:
-                        assembled_env = os.environ.copy()
                     assembled_env[_BASH_TRACKING_ENV_VAR] = tracking_id
             if isinstance(command, list):
                 proc = await asyncio.create_subprocess_exec(
@@ -1267,3 +1287,65 @@ Returns:
     Command output including stdout, stderr, and exit code.
     Output is truncated at 150,000 characters — redirect to file for full results.
 """
+
+
+
+# ---------------------------------------------------------------------------
+# rogue-containment pkill overlay guard (adjudication 1)
+# ---------------------------------------------------------------------------
+# Pattern gate only — NO PID-identity resolution. Refuses bash commands that
+# look like process/port kills targeting LIVE ensemble processes, ports, or
+# install roots, unless an explicit fenced-test context marker is present.
+#
+# Fence mechanism (documented for the census walk):
+#   - env={"ENSEMBLE_FENCED_TEST_CONTEXT": "1"} passed to the bash tool, OR
+#   - ambient daemon env ENSEMBLE_FENCED_TEST_CONTEXT=1.
+# Scratch-sentinel / scratch-named targets (no live pattern) pass without
+# the marker.
+#
+# Pattern set (lowercased substring match, only on kill-like commands):
+#   live tokens: "ensemble-prod", "ensemble-daemon", "9797", "9798",
+#                "agents-ensemble"
+#   kill-like tokens: "pkill", "killall", "kill ", "fuser", "xargs kill",
+#                     "systemctl"
+
+_PKILL_OVERLAY_LIVE_PATTERNS: tuple[str, ...] = (
+    "ensemble-prod",
+    "ensemble-daemon",
+    "9797",
+    "9798",
+    "agents-ensemble",
+)
+
+_PKILL_OVERLAY_KILL_TOKENS: tuple[str, ...] = (
+    "pkill",
+    "killall",
+    "kill ",
+    "fuser",
+    "xargs kill",
+    "systemctl",
+)
+
+
+def _pkill_overlay_violation(command, env=None) -> str | None:
+    """Return the matched live pattern if the command must be refused,
+    else None. Pure function (no I/O) so it is unit-testable."""
+    if isinstance(command, (list, tuple)):
+        cmd_str = " ".join(str(c) for c in command)
+    else:
+        cmd_str = str(command)
+    lower = cmd_str.lower()
+    if not any(tok in lower for tok in _PKILL_OVERLAY_KILL_TOKENS):
+        return None
+    env = env or {}
+    fenced = False
+    if str(env.get("ENSEMBLE_FENCED_TEST_CONTEXT", "")).strip() == "1":
+        fenced = True
+    if not fenced and os.environ.get("ENSEMBLE_FENCED_TEST_CONTEXT") == "1":
+        fenced = True
+    if fenced:
+        return None
+    for pat in _PKILL_OVERLAY_LIVE_PATTERNS:
+        if pat in lower:
+            return pat
+    return None

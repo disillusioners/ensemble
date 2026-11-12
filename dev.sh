@@ -141,6 +141,10 @@ export PERSISTENCE_DB_PATH="$DATA_DIR/instances.db"
 export PORT=8079
 export HOST="${HOST:-0.0.0.0}"
 export LOG_LEVEL="${LOG_LEVEL:-info}"
+# rogue-containment (component B task 6): sanctioned fresh-postgres dev
+# boot may need ambient POSTGRES_* to drive DB resolution on first boot
+# (before ensemble.json is persisted). The fence var attests that.
+export ENSEMBLE_DB_AMBIENT_ALLOW="${ENSEMBLE_DB_AMBIENT_ALLOW:-1}"
 
 echo -e "${GREEN}Starting server with auto-reload...${NC}"
 echo -e "${GREEN}API Documentation: http://localhost:$PORT/docs${NC}"

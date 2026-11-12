@@ -216,6 +216,7 @@ class ServiceToolManager:
         cwd: Optional[str],
         started_by_instance_id: str,
         started_by_agent_id: str,
+        extra_env: Optional[dict[str, str]] = None,
     ) -> dict:
         """Start a detached service. Returns the canonical result dict.
 
@@ -313,7 +314,7 @@ class ServiceToolManager:
         # ── F8: synchronous spawn failure ────────────────────────
         try:
             pid, start_time = await asyncio.to_thread(
-                spawner_spawn, argv, log_path, cwd
+                spawner_spawn, argv, log_path, cwd, extra_env
             )
         except OSError as exc:
             # Child never existed; nothing to kill. Write an EXITED
