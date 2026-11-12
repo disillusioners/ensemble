@@ -45,7 +45,9 @@ non-zero ``still-null`` that only contains deleted-instance rows is
 the expected steady state.
 
 Exit codes: 0 = run completed (dry or apply); 2 = bad arguments /
-DB unreachable; 1 = unexpected internal error.
+DB unreachable; 3 = daemon not activated yet
+(snapshots.agent_space_key missing from the database — activate
+first, then re-run); 1 = unexpected internal error.
 """
 
 from __future__ import annotations
@@ -66,6 +68,7 @@ def _add_repo_root_to_path() -> None:
 
 _add_repo_root_to_path()
 
+from sqlalchemy import inspect  # noqa: E402
 from sqlalchemy.engine import Engine  # noqa: E402
 from sqlmodel import Session, create_engine  # noqa: E402
 
@@ -185,7 +188,11 @@ def main(argv: list[str] | None = None) -> int:
         "--batch",
         type=int,
         default=DEFAULT_BATCH,
-        help=f"Rows per fetch chunk (default {DEFAULT_BATCH}).",
+        help=(
+            "Rows per stamp-commit chunk in --apply mode "
+            f"(default {DEFAULT_BATCH}). Scanning is a single read; "
+            "this does not chunk the fetch."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -196,6 +203,32 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 — operator-facing CLI
         print(f"ERROR: cannot open database {args.db_url!r}: {exc}", file=sys.stderr)
         return 2
+
+    # Pre-flight probe: the backfill writes snapshots.agent_space_key.
+    # On a database the daemon has not activated against yet (no
+    # create_all / no migration applied), the column does not exist
+    # and the pass would die with an opaque "no such column" error
+    # mid-scan. Refuse cleanly instead.
+    try:
+        inspector = inspect(engine)
+        table_names = set(inspector.get_table_names())
+        has_space_column = "snapshots" in table_names and any(
+            col.get("name") == "agent_space_key"
+            for col in inspector.get_columns("snapshots")
+        )
+    except Exception as exc:  # noqa: BLE001 — operator-facing CLI
+        print(f"ERROR: cannot inspect schema of {args.db_url!r}: {exc}", file=sys.stderr)
+        return 2
+    if not has_space_column:
+        print(
+            "ERROR: snapshots.agent_space_key is missing from "
+            f"{args.db_url!r} — activate the daemon first (boot runs "
+            "create_all plus the SQLite migration, or the PG "
+            "_ensure_postgres_columns entries), then re-run this "
+            "backfill.",
+            file=sys.stderr,
+        )
+        return 3
 
     try:
         result = run_backfill(engine, apply=bool(args.apply), batch=args.batch)

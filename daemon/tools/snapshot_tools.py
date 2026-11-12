@@ -948,6 +948,25 @@ async def resolve_spawn_snapshot(
                         or getattr(consumed, "status", None) != "active"
                     ):
                         resolution.cold_reason = "no-hit"
+                    elif (
+                        getattr(consumed, "agent_space_key", None)
+                        != agent_space_key
+                    ):
+                        # vsss belt-and-braces (REVIEW-1 Minor-7): the
+                        # SQL predicate already filtered candidates to
+                        # agent_space_key = :key; re-verify on the
+                        # re-read row so a TOCTOU flip between search
+                        # and get (e.g. a concurrent backfill stamp)
+                        # refuses cold instead of warm-starting
+                        # across spaces.
+                        resolution.cold_reason = "no-hit"
+                        resolution.warnings.append(
+                            f"top match {top.get('snapshot_id')} space "
+                            f"mismatch on re-read (row="
+                            f"{getattr(consumed, 'agent_space_key', None)!r} "
+                            f"!= spawn={agent_space_key!r}) — refused "
+                            f"(fail-closed)"
+                        )
                     elif top.get("freshness") == "expired":
                         resolution.cold_reason = "expired"
                         resolution.warnings.append(
