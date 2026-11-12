@@ -310,9 +310,6 @@ class TestSuccessPath:
 
 
 class TestDropPaths:
-    @pytest.mark.filterwarnings(
-        "ignore:coroutine .* was never awaited:RuntimeWarning"
-    )  # daemon-side leak: ram_guard_events.py:141 coro not closed on sched failure — source worker owns fix
     def test_no_live_loop_drops_with_a_warning(self, caplog):
         manager = _FakeManager(fail=True)
         bus = _FakeBus()
@@ -334,9 +331,6 @@ class TestDropPaths:
         assert emitter("", SAMPLE_PAYLOAD) is False
         assert manager.accessor_calls == 0
 
-    @pytest.mark.filterwarnings(
-        "ignore:coroutine .* was never awaited:RuntimeWarning"
-    )  # daemon-side leak: ram_guard_events.py:141 coro not closed on sched failure — source worker owns fix
     def test_a_closed_loop_drops(self):
         loop = asyncio.new_event_loop()
         loop.close()
@@ -593,3 +587,35 @@ class TestGuardIntegration:
             assert bus.events == []
         finally:
             lt.stop()
+
+
+class TestScheduleFailureClosesCoro:
+    """Micro-fix pin: a scheduling failure (closed loop) closes the
+    coroutine, drops visibly, and emits NO unawaited-coroutine warning."""
+
+    def test_a_closed_loop_schedules_nothing_and_closes_the_coro(self, caplog):
+        import warnings
+
+        loop = asyncio.new_event_loop()
+        loop.close()
+        bus = _FakeBus()
+        emitter = make_ram_breach_emitter(
+            manager=_FakeManager(loop=loop), event_bus=bus
+        )
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            with caplog.at_level(logging.WARNING):
+                assert emitter("i-1", SAMPLE_PAYLOAD) is False
+            import gc
+            gc.collect()
+        assert bus.events == []
+        assert "DROPPED" in caplog.text
+        unawaited = [
+            w for w in captured
+            if issubclass(w.category, RuntimeWarning)
+            and "never awaited" in str(w.message)
+        ]
+        assert unawaited == [], (
+            "the scheduling-failure path must close the coroutine — "
+            "no unawaited-coroutine warning may escape"
+        )

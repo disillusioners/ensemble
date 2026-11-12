@@ -137,6 +137,7 @@ def make_ram_breach_emitter(
                 loop_exc,
             )
             return False
+        coro = None
         try:
             coro = event_bus.create_event(
                 instance_id=instance_id,
@@ -145,6 +146,15 @@ def make_ram_breach_emitter(
             )
             fut = asyncio.run_coroutine_threadsafe(coro, loop)
         except Exception as sched_exc:
+            # The drop is VISIBLE (the guard counts ram_events_dropped
+            # and writes the transition log line) — never silent.  The
+            # coroutine created by create_event must be CLOSED, not left
+            # unawaited (that would leak a frame + a RuntimeWarning).
+            if coro is not None:
+                try:
+                    coro.close()
+                except Exception:  # noqa: BLE001 — never let close raise
+                    pass
             logger.warning(
                 "ram-guard: RAM_LIMIT_EXCEEDED event scheduling FAILED "
                 "— the event was DROPPED (%s: %s)",
