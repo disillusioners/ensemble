@@ -120,3 +120,24 @@ def test_release_claim_pid_gated(tmp_path):
     # correct pid => released
     assert release_claim(claims_dir, "0.0.0.0", 9797, os.getpid()) is True
     assert not (claims_dir / "0.0.0.0-9797.json").exists()
+
+
+def test_claims_dir_override_lands_in_override_dir(tmp_path, monkeypatch):
+    """iter-1 D3: ENSEMBLE_PORT_CLAIMS_DIR redirects claims away from
+    the (possibly live) install root."""
+    import os
+    override = tmp_path / "override-claims"
+    override.mkdir()
+    fake_install = tmp_path / "fake-install-root"
+    fake_install.mkdir()
+    monkeypatch.setenv("ENSEMBLE_PORT_CLAIMS_DIR", str(override))
+    # resolve_self_install_dir may return None or a path; force a non-None
+    # install root via env? Instead, call _claims_dir_for with a fake root.
+    from daemon.services.port_ownership import _claims_dir_for, try_claim
+    cd = _claims_dir_for(fake_install)
+    assert cd == override
+    res = try_claim(cd, "0.0.0.0", 12345, fake_install)
+    assert res.kind == "taken"
+    assert (override / "0.0.0.0-12345.json").is_file()
+    # nothing written under the fake install root
+    assert not (fake_install / "data" / "port-claims").exists()

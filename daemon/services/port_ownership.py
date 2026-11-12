@@ -68,6 +68,12 @@ def resolve_self_install_dir() -> Optional[Path]:
 
 
 def _claims_dir_for(self_install_dir: Optional[Path]) -> Path:
+    # rogue-containment iter-1 D3: ENSEMBLE_PORT_CLAIMS_DIR overrides
+    # the claims directory entirely (used by tests + fenced mirrors so
+    # no boot ever writes the live install's data/port-claims).
+    override = os.environ.get("ENSEMBLE_PORT_CLAIMS_DIR")
+    if override and str(override).strip():
+        return Path(str(override).strip())
     if self_install_dir is not None:
         return Path(self_install_dir) / "data" / "port-claims"
     # Fallback when install root is unresolved (dev/source/pytest):
@@ -81,6 +87,11 @@ def _claims_dir_for(self_install_dir: Optional[Path]) -> Path:
 
 
 def resolve_data_dir() -> Path:
+    # rogue-containment iter-1 D3: honor ENSEMBLE_PORT_CLAIMS_DIR for the
+    # refusal marker too (keeps marker + claims co-located under the override).
+    override = os.environ.get("ENSEMBLE_PORT_CLAIMS_DIR")
+    if override and str(override).strip():
+        return Path(str(override).strip()).parent
     return Path(
         os.environ.get("ENSEMBLE_DATA_DIR")
         or os.environ.get("DATA_DIR")
