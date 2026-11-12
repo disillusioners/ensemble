@@ -5274,6 +5274,16 @@ class LiveViewsConfig(BaseSettings):
             "outstanding grants via the generation bump."
         ),
     )
+    max_media_bytes: int = Field(
+        default=2 * 1024 * 1024 * 1024,
+        ge=1,
+        description=(
+            "Separate size cap for media (video/audio) files served via "
+            "the Range-capable streamed lane. Env: "
+            "ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES. Default 2 GiB. "
+            "Precedence: env > yaml live_views.max_media_bytes > default."
+        ),
+    )
     roots: dict[str, LiveViewsRootConfig] = Field(
         default_factory=_seed_phase1_roots,
         description=(
@@ -7777,6 +7787,7 @@ _SERVICE_TOOL_ENABLED: bool | None = None
 ENSEMBLE_SERVICE_TOOL_ENABLED = "ENSEMBLE_SERVICE_TOOL_ENABLED"
 ENSEMBLE_SERVICE_TOOL_MAX_CONCURRENT = "ENSEMBLE_SERVICE_TOOL_MAX_CONCURRENT"
 ENSEMBLE_SERVICE_TOOL_RECONCILE_INTERVAL = "ENSEMBLE_SERVICE_TOOL_RECONCILE_INTERVAL"
+ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES = "ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES"
 
 
 def _resolve_service_tool_enabled(ens_value: str | None, yaml_value: Any) -> bool:
@@ -7873,6 +7884,66 @@ def _resolve_service_tool_reconcile_interval(ens_value: str | None, yaml_value: 
     return _parse_service_tool_int(
         yaml_value, env_name="services.service_tool_reconcile_interval_seconds"
     )
+
+
+def _resolve_live_views_max_media_bytes(ens_value: str | None, yaml_value: Any) -> int:
+    """Pure resolver for ``ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES``.
+
+    Precedence: env > yaml (``live_views.max_media_bytes``) >
+    default 2 GiB. Empty-string safe; non-int or <=0 raises
+    :class:`ValueError` naming the env. The ``ge=1`` floor is
+    enforced by ``LiveViewsConfig.max_media_bytes`` at model
+    validation (fail-fast at boot).
+    """
+    cleaned = _clean_env_value(ens_value)
+    if cleaned is not None:
+        val = _parse_service_tool_int(cleaned, env_name=ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES)
+        if val <= 0:
+            raise ValueError(
+                f"Invalid {ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES} value "
+                f"{cleaned!r} — expected a positive integer"
+            )
+        return val
+    if yaml_value is None:
+        return 2 * 1024 * 1024 * 1024
+    if isinstance(yaml_value, str):
+        if not yaml_value.strip():
+            return 2 * 1024 * 1024 * 1024
+        val = _parse_service_tool_int(
+            yaml_value, env_name="live_views.max_media_bytes"
+        )
+        if val <= 0:
+            raise ValueError(
+                f"Invalid live_views.max_media_bytes value {yaml_value!r} "
+                f"— expected a positive integer"
+            )
+        return val
+    if isinstance(yaml_value, bool):
+        raise ValueError(
+            f"Invalid live_views.max_media_bytes value {yaml_value!r} "
+            f"— expected an integer"
+        )
+    if isinstance(yaml_value, int):
+        if yaml_value <= 0:
+            raise ValueError(
+                f"Invalid live_views.max_media_bytes value {yaml_value!r} "
+                f"— expected a positive integer"
+            )
+        return yaml_value
+    # float etc
+    try:
+        val = int(yaml_value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"Invalid live_views.max_media_bytes value {yaml_value!r} "
+            f"— expected an integer"
+        ) from None
+    if val <= 0:
+        raise ValueError(
+            f"Invalid live_views.max_media_bytes value {yaml_value!r} "
+            f"— expected a positive integer"
+        )
+    return val
 
 
 def _install_service_tool_enabled(value: bool) -> None:
@@ -8780,6 +8851,42 @@ def load_config(config_path: str | None = None) -> Config:
         config_dict["scheduling"] = processed_config["scheduling"]
     if "mcp_pool" in processed_config:
         config_dict["mcp_pool"] = processed_config["mcp_pool"]
+    # Live-views max_media_bytes resolution (D2): env >
+    # yaml live_views.max_media_bytes > 2 GiB default. Always
+    # inject so the init-kwarg-beats-env inversion cannot occur
+    # (pydantic-settings env source must not win over the
+    # resolved value).
+    _lv_yaml_block = processed_config.get("live_views")
+    _lv_yaml_block = _lv_yaml_block if isinstance(_lv_yaml_block, dict) else {}
+    _lv_yaml_max = _lv_yaml_block.get("max_media_bytes")
+    # strip None keys conceptually: treat None as unset
+    if _lv_yaml_max is None:
+        _lv_yaml_max = None
+    _lv_resolved_max = _resolve_live_views_max_media_bytes(
+        os.environ.get(ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES),
+        _lv_yaml_max,
+    )
+    _cleaned_env = _clean_env_value(
+        os.environ.get(ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES)
+    )
+    if _cleaned_env is not None:
+        _lv_source = "env"
+    elif _lv_yaml_max is not None and not (
+        isinstance(_lv_yaml_max, str) and not _lv_yaml_max.strip()
+    ):
+        _lv_source = "yaml"
+    else:
+        _lv_source = "default"
+    logger.info(
+        "[LiveViews] max_media_bytes=%d (source=%s)",
+        _lv_resolved_max,
+        _lv_source,
+    )
+    live_views_config: dict = dict(_lv_yaml_block)
+    # strip None-valued keys
+    for _k in [k for k, v in list(live_views_config.items()) if v is None]:
+        del live_views_config[_k]
+    live_views_config["max_media_bytes"] = _lv_resolved_max
     if "live_views" in processed_config:
         # Operator can override / disable individual seed roots by
         # writing a ``live_views.roots:`` block in config.yaml —
@@ -8788,7 +8895,8 @@ def load_config(config_path: str | None = None) -> Config:
         # the no-operator-config baseline). See
         # ``_seed_phase1_roots`` for the full operator-override
         # model.
-        config_dict["live_views"] = processed_config["live_views"]
+        pass
+    config_dict["live_views"] = live_views_config
     if "memoir" in processed_config:
         # Memoir Store v1 (phase 0, D0.4): the yaml tier for the memoir
         # kill-switch. The ENV tier wins over this tier — the override is

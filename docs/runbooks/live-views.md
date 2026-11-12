@@ -134,7 +134,7 @@ Likely causes, in order of frequency:
 2. The file's extension is not in the root's `allowed_extensions` (uniform 404 by design — see `daemon/services/live_views.py:603-609`).
 3. The file is a symlink whose target escapes the resolved root (the containment check fires; uniform 404).
 4. The file's path traverses a `..` segment (the shape check fires; uniform 404).
-5. The file is larger than the 32 MiB soft cap (uniform 404; the cap protects against accidentally serving a multi-GB log).
+5. The file is larger than the 32 MiB soft cap (uniform 404; the cap protects against accidentally serving a multi-GB log). Non-media files over the cap now also emit a server-side WARNING log naming root/rel/size/cap. Media (video/audio) files use a separate cap `max_media_bytes` (default 2 GiB) and return 413 (not 404) when exceeded.
 6. The root is `project_scoped` with a non-empty `required_rel_subpath` (M3 subpath gate) and the rel path does not contain the configured sequence as a contiguous subsequence. See §2.6 for the three valid shapes (`[]` = gate skipped, `[""]` = **boot-time ValidationError (M11 loud-fail-at-load)**, populated list = sliding-window segment gate). The `[""]` case is now caught by the M11 validator in `daemon/config.py:_validate_root_shape` at config load — the daemon refuses to start with a single actionable error (`required_rel_subpath contains an empty segment — the sliding-window gate can never match a real path segment, so the root would uniformly 404 every URL`), not a uniform-404 at request time. A misconfig that boots is operationally worse than one that refuses to boot, so M11 surfaces it at load with the field name and the reason. The resolver-level uniform-404 fallback (`daemon/services/live_views.py:452-467`) is now a defense-in-depth layer; the symptom it would produce (a `project_scoped` root with a `required_rel_subpath` returning 404 on EVERY URL, even the canonical example path) is only reachable if a non-M11 path sneaks a broken subpath past the validator. Cure: correct the config (use a populated list like `["design", "mockups"]` for the seeded `designer-artifact` shape) and restart.
 7. The root is `designer-artifact` (REWORK 2026-10-07 M2: project-scoped) and the URL's project shortname is not a registered `Project.shortnames` entry (uniform 404; check the project's shortnames list). Or the rel path is not under `*/design/mockups/*` (M3: the resolver enforces the mockups subtree prefix; uniform 404).
 8. The root is `planning` and the URL's project shortname is not a registered `Project.shortnames` entry (uniform 404; check the project's shortnames list).
@@ -144,6 +144,8 @@ Likely causes, in order of frequency:
 `/views/<root>/<rel>` uses an explicit extension→MIME map (see `daemon/services/live_views.py:97-119`). Anything not in the map returns `application/octet-stream`. The map is **closed** — the daemon never consults the host `mimetypes` registry (`/etc/mime.types`): a packager who maps an agent-authored extension to `text/html` would let the browser execute the result on the daemon origin. The safe default for any extension outside the closed map is `application/octet-stream` (the spec's allowed fallback). If a deployment needs a new MIME for a common artifact, add it to `_EXT_TO_MIME` and file a PR.
 
 The exception is `/views/tmp-images/<id>` — that path uses the sidecar MIME (architect risk #7), not the extension. The blob is extensionless on disk; the sidecar is the only source of truth.
+
+Media extensions (mp4, m4v, webm, mov, ogv, mkv, mp3, m4a, aac, ogg, oga, opus, wav, flac) are served via the Range-capable streamed lane: `Accept-Ranges: bytes`, 206 partial content, streamed in 64 KiB chunks (memory O(64 KiB)/request). Cache policy stays `private, max-age=60` plus FileResponse strong ETag/Last-Modified for revalidation.
 
 ### 3.5 `view_link` returns a path-relative URL when I expected fully-qualified
 
@@ -303,6 +305,7 @@ P2 of `view_link` (architecture-recommendation.md D10):
 | `verify_rate_limit_refill_per_minute` | `ENSEMBLE_LIVE_VIEWS_VERIFY_RATE_LIMIT_REFILL_PER_MINUTE` | `5` | Per-IP token-bucket refill |
 | `passcode_lockout_threshold` | `ENSEMBLE_LIVE_VIEWS_PASSCODE_LOCKOUT_THRESHOLD` | `10` | Consecutive wrong verifies → locked (today's P1 value is hard-coded; this knob wires the env path; P3 may consult) |
 | `passcode_grant_ttl_seconds` | `ENSEMBLE_LIVE_VIEWS_PASSCODE_GRANT_TTL_SECONDS` | `86400` | Grant cookie lifetime (~24h, matches oauth2-proxy's `--cookie-expire=24h` house precedent) |
+| `max_media_bytes` | `ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES` | `2147483648` (2 GiB) | Size cap for media (video/audio) files served via the Range-capable streamed lane; over-cap returns 413. Precedence env > yaml > default. |
 
 ### 9.7 What's NOT in this runbook (out of scope for P2)
 

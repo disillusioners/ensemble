@@ -202,6 +202,22 @@ _EXT_TO_MIME: dict[str, str] = {
     "xml": "application/xml; charset=utf-8",
     "yml": "application/yaml; charset=utf-8",
     "yaml": "application/yaml; charset=utf-8",
+    # Media (live-view multimedia streaming). Closed map — never
+    # sniff, never consult stdlib mimetypes (architect ruling).
+    "mp4": "video/mp4",
+    "m4v": "video/x-m4v",
+    "webm": "video/webm",
+    "mov": "video/quicktime",
+    "ogv": "video/ogg",
+    "mkv": "video/x-matroska",
+    "mp3": "audio/mpeg",
+    "m4a": "audio/mp4",
+    "aac": "audio/aac",
+    "ogg": "audio/ogg",
+    "oga": "audio/ogg",
+    "opus": "audio/opus",
+    "wav": "audio/wav",
+    "flac": "audio/flac",
 }
 
 
@@ -338,6 +354,33 @@ def mime_for_extension(ext: str) -> str:
     if not ext:
         return "application/octet-stream"
     return _EXT_TO_MIME.get(ext, "application/octet-stream")
+
+
+# Media extensions served via the Range-capable, streamed lane (D1).
+# Closed set — must match the media entries added to _EXT_TO_MIME.
+MEDIA_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        "mp4",
+        "m4v",
+        "webm",
+        "mov",
+        "ogv",
+        "mkv",
+        "mp3",
+        "m4a",
+        "aac",
+        "ogg",
+        "oga",
+        "opus",
+        "wav",
+        "flac",
+    }
+)
+
+
+def is_media_extension(ext: str) -> bool:
+    """Return True iff ``ext`` (without leading dot) is a media type."""
+    return (ext or "").lower() in MEDIA_EXTENSIONS
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -830,6 +873,24 @@ class PathNotFoundError(LiveViewsServiceError):
     """The resolved path does not exist on disk."""
 
 
+class ServedFileTooLargeError(LiveViewsServiceError):
+    """A served file exceeds its size cap (media lane).
+
+    Carries ``size_bytes``, ``max_bytes`` and ``rel_path`` so the
+    router can map it to a 413 with a named body. Distinct from
+    ``PathNotFoundError`` (which maps to the uniform 404) so the
+    over-cap case is observable to the client per D2.
+    """
+
+    def __init__(self, *, size_bytes: int, max_bytes: int, rel_path: str) -> None:
+        super().__init__(
+            f"{rel_path}: {size_bytes} bytes exceeds media cap {max_bytes}"
+        )
+        self.size_bytes = size_bytes
+        self.max_bytes = max_bytes
+        self.rel_path = rel_path
+
+
 # ─────────────────────────────────────────────────────────────────
 # Service
 # ─────────────────────────────────────────────────────────────────
@@ -891,6 +952,10 @@ class LiveViewsService:
 
     def enabled(self) -> bool:
         return self._config.enabled
+
+    @property
+    def max_media_bytes(self) -> int:
+        return self._config.max_media_bytes
 
     def root_names(self) -> list[str]:
         """Return the names of every registered root (for diagnostics)."""
@@ -1276,12 +1341,29 @@ class LiveViewsService:
             raise PathNotFoundError(rel_path)
 
         size = candidate.stat().st_size
-        if size > MAX_SERVED_BYTES:
-            # Soft cap — uniform miss, no path-disclosure error
-            # message.
-            raise PathNotFoundError(rel_path)
+        ext = extension_for(rel_path)
+        if is_media_extension(ext):
+            max_media = self._config.max_media_bytes
+            if size > max_media:
+                # Media cap — dedicated 413 (D2), never a 404.
+                raise ServedFileTooLargeError(
+                    size_bytes=size, max_bytes=max_media, rel_path=rel_path
+                )
+        else:
+            if size > MAX_SERVED_BYTES:
+                # Soft cap — uniform miss, no path-disclosure error
+                # message. Server-side warning (D2).
+                logger.warning(
+                    "[LiveViews] non-media file exceeds soft cap: "
+                    "root=%s rel=%s size=%d cap=%d",
+                    root_name,
+                    rel_path,
+                    size,
+                    MAX_SERVED_BYTES,
+                )
+                raise PathNotFoundError(rel_path)
 
-        mime = mime_for_extension(extension_for(rel_path))
+        mime = mime_for_extension(ext)
         return ResolvedTarget(
             on_disk_path=candidate,
             content_type=mime,
