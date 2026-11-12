@@ -2,9 +2,9 @@
 
 Date: 2026-11-12 (UTC)
 Author: plan-creation worker (planner commission, setup+census lane)
-Status: Ready for Review — FOLDED with architecture adjustments (arch commit 17bcbd2d8: R1–R10 + O11/O12 + leader race ruling D16)
+Status: Ready for Review — FOLDED TWICE: architecture adjustments (17bcbd2d8: R1–R10 + O11/O12 + leader ruling D16) + reviewer-council notes (C1 + RW1/RW4/RW5/RW8 + AC26–AC28 + leader rulings D17–D18)
 Worktree: `/home/nea/ensemble-src-wt-project-future` (branch `feature/project-future`, base `ac9849bf7` == origin/latest)
-Companion files: `decisions.md` (D1–D16), `research-tool-lane.md`, `research-data-layer.md`, `research-prompt-docs.md`, `architecture-recommendation.md` (same directory — the research set is the evidence base; this plan cites it, never re-derives; THIS file + decisions.md are the single self-contained source of truth for the developer)
+Companion files: `decisions.md` (D1–D18), `research-tool-lane.md`, `research-data-layer.md`, `research-prompt-docs.md`, `architecture-recommendation.md` (same directory — the research set is the evidence base; this plan cites it, never re-derives; THIS file + decisions.md are the single self-contained source of truth for the developer)
 
 ---
 
@@ -34,7 +34,7 @@ order) item is evicted to make room, and the add response MUST disclose the evic
 - Allow grants: 14 `meta.json` files (category-key style).
 - Prompt/doc discoverability: leader rule.md Decision-Table row; BOTH reviewer workflow.md twins :286; docs/agents.md row.
 - Prompt-artifact baseline re-stamp (181 rows; exactly 3 hashes change).
-- Tests: tool-layer, repo-layer, migration-structure, registration/filter pins (AC1–AC25).
+- Tests: tool-layer, repo-layer, migration-structure, registration/filter pins (AC1–AC28).
 - Proof obligations PO1–PO8 (tester-executable, zero network, zero live DB).
 
 ### Out of Scope (with reasons)
@@ -167,7 +167,7 @@ File: `daemon/migrations/versions/{YYYYMMDD_HHMMSS}_create_project_future.sql` �
 --   registered before create_all at manager boot — mission-records precedent for brand-new
 --   tables, NO ``_ensure_postgres_columns`` mirror); the migration runner is a NO-OP there.
 --   Schema mirrors daemon/repositories/project/models.py ``ProjectFutureEntry``.
---   STRING COLUMNS ARE TEXT IN THIS FILE (memoir doctrine D1.2/AM-6). Scope: the SQLite-side
+--   STRING COLUMNS ARE TEXT IN THIS FILE (memoir doctrine, 20261109_021154_create_memoir_v2_tables.sql:42). Scope: the SQLite-side
 --   .sql — TEXT here, never VARCHAR. On PostgreSQL, create_all emits VARCHAR(300)/(5000)
 --   from the model's max_length=300/5000 (sibling precedent ProjectHistoryEntry.summary/
 --   details, models.py:488-489); that PG-side VARCHAR reality is accepted (equivalent
@@ -197,7 +197,7 @@ DROP INDEX IF EXISTS ix_project_future_project_id;
 DROP TABLE IF EXISTS project_future;
 ```
 
-Notes: model↔DDL lockstep — `ix_project_future_project_id` is SQLAlchemy's default auto-name for the `index=True` FK column; `uq_project_future_project_seq` is the explicit model `Index(..., unique=True)` name (exact 3-site lockstep: model ↔ migration ↔ create_all, memoir :50-58 doctrine). `created_at TIMESTAMP` matches SQLAlchemy `DateTime` mapping from the sibling's datetime idiom (:496). DOWN drops exactly what UP created. Tests build schemas via `create_all`, NOT the runner — the pre-existing fresh-SQLite breaker `20260714_000001` is untouched and irrelevant to this file (A29).
+Notes: model↔DDL lockstep — `ix_project_future_project_id` is SQLAlchemy's default auto-name for the `index=True` FK column; `uq_project_future_project_seq` is the explicit model `Index(..., unique=True)` name (exact 3-site lockstep: model ↔ migration ↔ create_all, memoir :50-58 doctrine). `created_at TIMESTAMP` matches SQLAlchemy `DateTime` mapping from the sibling's datetime idiom (:496). DOWN drops exactly what UP created. Duplicate-prefix scope note: the guard (`DuplicateMigrationVersionError`, runner :420) enumerates on the SQLite RUNNER lane only — PG boots never enumerate the migrations directory — so the guard bites at dev/test boot and in the runner lane, never on the PG boot path (risk row 15). Tests build schemas via `create_all`, NOT the runner — the pre-existing fresh-SQLite breaker `20260714_000001` is untouched and irrelevant to this file (A29).
 
 Acceptance: AC20 migration-structure greps; no other file shares the timestamp prefix.
 
@@ -290,13 +290,25 @@ def add_future_entry(
             )
             session.add(entry)
             session.commit()                           # ONE transaction: deletes + insert land together
-        except IntegrityError:
-            # D16 translate-and-fail-closed: UNIQUE(project_id, seq) lost the race →
-            # WHOLE transaction rolls back (evictions restored, insert rejected — never
-            # partial); typed domain error; NO automatic retry (leader ruling D16,
-            # overriding the architect's optional in-repo retry).
+        except IntegrityError as exc:
+            # D16 + D18 translate-and-fail-closed, NARROWED per D18: inspect the
+            # violation — ONLY the UNIQUE(project_id, seq) race translates.
+            # Matches the named index (PG create_all: "uq_project_future_project_seq")
+            # OR SQLite's column-pair message ("UNIQUE constraint failed:
+            # project_future.project_id, project_future.seq"). WHOLE transaction rolls
+            # back first (evictions restored, insert rejected — never partial); typed
+            # domain error; NO automatic retry (leader ruling D16, overriding the
+            # architect's optional in-repo retry). Any OTHER IntegrityError (different
+            # constraint, NOT NULL, FK) is NOT the race: rollback and RE-RAISE the
+            # original untranslated (A31 precedent, mcp_server/repository.py:146-205).
             session.rollback()
-            raise ConcurrentWishlistUpdate(project_id)
+            is_the_race = (
+                "uq_project_future_project_seq" in str(exc)
+                or ("project_future.project_id" in str(exc) and "project_future.seq" in str(exc))
+            )
+            if is_the_race:
+                raise ConcurrentWishlistUpdate(project_id)
+            raise
         session.refresh(entry)
         payload = entry.to_dict()
         payload["evicted"] = evicted
@@ -349,7 +361,7 @@ def remove_future_entry(
         return removed
 ```
 
-Concurrency note (D16 — supersedes the earlier "caller retries" wording): two concurrent adds can compute the same `seq` → `IntegrityError` at commit → caught, WHOLE transaction rolled back (evictions restored AND insert rejected — never a partial state) → re-raised as `ConcurrentWishlistUpdate` → the TOOL layer returns the stable translated message `{"error": "Concurrent wishlist update for project '<pid>' — please retry"}` (A31 precedent). NO automatic retry anywhere (leader ruling D16, overriding the architect's optional one-bounded-retry); the calling agent may still choose to retry, since the message says so. Same contract for the R1 guard path. Accepted v1 behavior, fail-closed.
+Concurrency note (D16 + D18 — supersedes the earlier "caller retries" wording): two concurrent adds can compute the same `seq` → `IntegrityError` at commit → caught and NARROWED per D18 (ONLY the UNIQUE(project_id, seq) violation translates; any other IntegrityError rolls back and RE-RAISES raw) → on the race, WHOLE transaction rolled back (evictions restored AND insert rejected — never a partial state) → re-raised as `ConcurrentWishlistUpdate` → the TOOL layer returns the stable translated message `{"error": "Concurrent wishlist update for project '<pid>' — please retry"}` (A31 precedent). NO automatic retry anywhere (leader ruling D16, overriding the architect's optional one-bounded-retry); the calling agent may still choose to retry, since the message says so. Same contract for the R1 guard path. Accepted v1 behavior, fail-closed.
 
 Acceptance: AC10–AC19 + AC25. No count-helper method added (inline idiom per A17).
 
@@ -372,7 +384,7 @@ Structure:
 2. `summary = summary.strip()`; empty ⇒ `{"error": "Summary cannot be empty"}` (:144-145).
 3. truncate `summary = summary[:_MAX_SUMMARY_LEN]`; `details = details[:_MAX_DETAILS_LEN] if details else None` (:148-150).
 4. stamp provenance from factory closure: `source_agent=agent_id`, `source_instance_id=current_instance_id` (A29 :192-193 wiring).
-5. `result = store.add_future_entry(project_id, summary, details, agent_id, current_instance_id, max_entries=_MAX_ENTRIES)` (`max_entries` REQUIRED — O11; keyword-only at the repo). Wrap the store call with TWO handlers: `except ConcurrentWishlistUpdate: return {"error": f"Concurrent wishlist update for project '{project_id}' — please retry"}` (D16 typed translation — import the exception from `..repositories.project.repository`, the same direction project_history.py:13 imports from the package; precedent A31) and `except Exception as exc: return {"error": str(exc)}` (generic backstop keeps the errors-always-`{"error": str}` contract). NO automatic retry anywhere (D16).
+5. `result = store.add_future_entry(project_id, summary, details, agent_id, current_instance_id, max_entries=_MAX_ENTRIES)` (`max_entries` REQUIRED — O11; keyword-only at the repo). Wrap the store call with TWO handlers: `except ConcurrentWishlistUpdate: return {"error": f"Concurrent wishlist update for project '{project_id}' — please retry"}` (D16 typed translation — import the exception from `..repositories.project.repository`, the same direction project_history.py:13 imports from the package; precedent A31) and `except Exception as exc: return {"error": str(exc)}` (generic backstop keeps the errors-always-`{"error": str}` contract). The repo NARROWS translation to the unique-race (D18), so the backstop only sees genuinely-unexpected failures — a non-race IntegrityError re-raises raw from the repo and lands here as `{"error": str(exc)}` (accepted; risk row 12 scope). NO automatic retry anywhere (D16).
 6. `return result` — flat entry dict **including `"evicted"`** (verbatim pass-through, like :218).
 
 **`project_future_list`** — args: `project_id: str, limit: int = 20, offset: int = 0`. Project check; `limit = max(1, min(limit, 100))` (:236); `offset = max(0, offset)` (:237); `result = store.list_future_entries(project_id, limit, offset)`; merge `"cap": _MAX_ENTRIES` into the envelope before returning (O12a — self-describing; the tool owns the cap constant, so the merge happens here, not in the repo); return the envelope (:252 pass-through shape + the one extra key).
@@ -388,7 +400,7 @@ Acceptance: AC1–AC9.
 1. **Module + decorator stack** — done by W4 (decorators A4).
 2. **`_full_doc_` per tool** — done by W4 (`_FULL_DOCS` :29-91 idiom; harvested by `scan_tools_for_full_docs`, _tool_registry.py:1115-1129).
 3. **CATEGORY_MODULES entry** — `daemon/tools/_tool_registry.py`, insert `"project_future": "daemon.tools.project_future",` directly below the project_history entry at :1189. Value MUST be a `daemon.tools.*` path (:1207-1211) or the AST scanner never finds the module.
-4. **KNOWN_TOOL_NAMES entries** — add `"project_future_add"`, `"project_future_list"`, `"project_future_remove"` in the frozenset (:1565; project_* names live :1757-1786, project_history at :1772-1775). Alphabetical sort: `project_future_*` sorts BEFORE `project_history_*` (`f` < `h`) — place accordingly, or regenerate the set with the documented command (`uv run python -c "from daemon.tools._tool_registry import discover_source_only_tool_names; print(sorted(discover_source_only_tool_names()))"`, :1550-1553) and paste the sorted output. The drift pin `tests/unit/tools/test_frozen_tool_name_discovery.py::test_known_tool_names_matches_source_exactly_no_drift` (:1559-1560) enforces bidirectional exactness.
+4. **KNOWN_TOOL_NAMES entries** — add `"project_future_add"`, `"project_future_list"`, `"project_future_remove"` in the frozenset (:1565; project_* names live :1757-1786, project_history at :1772-1775). Alphabetical sort: `project_future_*` sorts BEFORE `project_history_*` (`f` < `h`). **PREFER the place-accordingly (minimal-diff) branch**: hand-place the three names in sorted position next to the project_history block — the regen-paste branch RELOCATES the `pok_*` block (sort order moves it) and produces unrelated diff noise. The regen command exists for verification (`uv run python -c "from daemon.tools._tool_registry import discover_source_only_tool_names; print(sorted(discover_source_only_tool_names()))"`, :1550-1553). The drift pin `tests/unit/tools/test_frozen_tool_name_discovery.py::test_known_tool_names_matches_source_exactly_no_drift` (:1559-1560) enforces bidirectional exactness.
 5. **Construct + extend, in the right place** — `daemon/tools/instance.py`: add import `from .project_future import create_project_future_tools` adjacent to :281; insert immediately after the history block (:6655), keeping the same call shape:
 
 ```python
@@ -448,7 +460,7 @@ Acceptance: PO6 (twin sha equality pre/post); PO4 baseline check; grep shows the
 ### W7 — Baseline re-stamp
 
 From the WORKTREE root:
-0. `git status --short` — must show ONLY the three intended prompt edits (`agents/leader/rule.md`, `agents/reviewer/workflow.md`, `agents/reviewer[v2]/workflow.md`) plus the W8 meta.json grant edits. Anything ELSE dirty in the tree changes the baseline's hash count and must be resolved BEFORE regenerating (R9).
+0. `git status --short` — the gate polices the THREE intended prompt edits (`agents/leader/rule.md`, `agents/reviewer/workflow.md`, `agents/reviewer[v2]/workflow.md`); the W8 meta.json grant edits are also EXPECTED here but are not what the gate checks (meta.json is not hashed). Anything ELSE dirty in the tree changes the baseline's hash count and must be resolved BEFORE regenerating (R9).
 1. `python3 scripts/protection/generate_prompt_artifact_baseline.py` (regenerates `agents/.prompt-artifacts.sha256`).
 2. `python3 scripts/protection/generate_prompt_artifact_baseline.py --check --tree .` → exit 0.
 3. Verify: row count STILL 181 / 47 dirs; exactly 3 rows changed hash — `agents/leader/rule.md` (row 119), `agents/reviewer/workflow.md` (row 143), `agents/reviewer[v2]/workflow.md` (row 147). meta.json edits (W8) do NOT touch the baseline (A28).
@@ -477,16 +489,16 @@ Add `"project_future"` to `tools.allow` (array append, category-key style matchi
 | 13 | `agents/architect/meta.json` | non-v2 only |
 | 14 | `agents/devops/meta.json` | non-v2 only |
 
-Justification (D8): all are leader-team dev-spine members (team_members :17) who do the work and generate improvement ideas; the surface is cheap, non-pinned, 32-capped, eviction-disclosed. EXCLUDED in v1: project-manager (verb-style idiom, not dev-team — easy follow-up), and the support roster (giter, explorer, wanderer, kb-writer, doc-writer, maintenancer, designer, gaia, aegis, coder, worker) — widening is a one-file-per-agent follow-up. Boot-time validation of unknown allow entries is warn-only (A13) — that is why AC24 must assert positively.
+Justification (D8): all are leader-team dev-spine members (team_members :17) who do the work and generate improvement ideas; the surface is cheap, non-pinned, 32-capped, eviction-disclosed. EXCLUDED in v1: project-manager (verb-style idiom, not dev-team — easy follow-up), `ari` (user-facing assistant, not a dev-team builder — deliberate exclusion per leader ruling D17), and the support roster (giter, explorer, wanderer, kb-writer, doc-writer, maintenancer, designer, gaia, aegis, coder, worker) — widening is a one-file-per-agent follow-up via follow-up #6 if the user wants. Boot-time validation of unknown allow entries is warn-only (A13) — that is why AC24 must assert positively.
 
-Acceptance: AC24 both-directions filter test; no boot WARNING for `project_future` on granted agents.
+Acceptance: AC24 both-directions filter test covers the grant surface (the boot-time validation is warn-only and not observable under this lane's zero-daemon-contact discipline — no boot-WARNING clause is asserted).
 
 ### W9 — Tests (new files; house idioms per A29)
 
 | File | Idiom | ACs |
 |------|-------|-----|
 | `tests/unit/test_project_future_tools.py` | MagicMock store + side_effect handlers, direct dict asserts, cap constants imported module-level; factory called WITHOUT manager (defaults None) | AC1–AC9 |
-| `tests/test_project_future.py` | tests/ ROOT; `sqlite:///:memory:` + `SQLModel.metadata.create_all` + real `SQLModelProjectRepository`; FK behavioral tests need `PRAGMA foreign_keys=ON` listener (SQLite default is OFF — without it AC16's cascade half silently passes-vacuous) | AC10–AC19, AC25 |
+| `tests/test_project_future.py` | tests/ ROOT; `sqlite:///:memory:` + `SQLModel.metadata.create_all` + real `SQLModelProjectRepository` (AC25/AC26's interleaving tests use their OWN tempfile+two-engine setup per RW8 — not this fixture); FK behavioral tests need `PRAGMA foreign_keys=ON` listener (SQLite default is OFF — without it AC16's cascade half silently passes-vacuous) | AC10–AC19, AC25–AC28 |
 | `tests/unit/test_project_future_migration.py` | read the .sql as text; marker greps (pattern: test_project_metadata_table.py:583-611) | AC20 |
 | `tests/unit/test_project_future_registration.py` | registry imports; `resolve_tool_filter` level asserts | AC21–AC24 |
 
@@ -513,12 +525,15 @@ Acceptance: AC24 both-directions filter test; no boot WARNING for `project_futur
 | AC17 | repo truncate bounds 300/5000 (repository layer duplicates tool layer, A17) |
 | AC18 | drift self-heal: inflate table to 34 rows via direct session inserts → next add evicts 3 → count == 32 |
 | AC19 | `UNIQUE(project_id, seq)` enforced: duplicate-seq insert raises `IntegrityError` |
-| AC20 | migration file matches `^\d{8}_\d{6}_create_project_future\.sql$`; contains `CREATE TABLE IF NOT EXISTS project_future`, `-- UP`, `-- DOWN`, `ON DELETE CASCADE`, `CREATE UNIQUE INDEX IF NOT EXISTS uq_project_future_project_seq`, `CREATE INDEX IF NOT EXISTS ix_project_future_project_id`, `DROP TABLE IF EXISTS project_future`; DOWN drops exactly the two indexes + table; zero `VARCHAR` tokens IN THE `.sql` FILE ONLY (R4 scope — PG's create_all-side `VARCHAR(300)/(5000)` from `max_length` is accepted reality, see W2 comment) |
+| AC20 | migration file matches `^\d{8}_\d{6}_create_project_future\.sql$`; contains `CREATE TABLE IF NOT EXISTS project_future`, `-- UP`, `-- DOWN`, `ON DELETE CASCADE`, `CREATE UNIQUE INDEX IF NOT EXISTS uq_project_future_project_seq`, `CREATE INDEX IF NOT EXISTS ix_project_future_project_id`, `DROP TABLE IF EXISTS project_future`; DOWN drops exactly the two indexes + table; zero `VARCHAR` tokens on NON-COMMENT lines of the .sql — C1: the mandated W2 doctrine comment contains "VARCHAR" 4× and stays VERBATIM, so the naive whole-file negative grep is UNSATISFIABLE; filter comment lines first (`[ln for ln in content.splitlines() if not ln.lstrip().startswith("--")]`, equivalently `grep -v '^[[:space:]]*--' <file>`) and assert `"VARCHAR"` is absent from the filtered text; PG's create_all-side `VARCHAR(300)/(5000)` from `max_length` is accepted reality (R4 scope) |
 | AC21 | `CATEGORY_MODULES["project_future"] == "daemon.tools.project_future"` |
 | AC22 | `KNOWN_TOOL_NAMES ⊇ {project_future_add, project_future_list, project_future_remove}` |
 | AC23 | existing drift pin green: `tests/unit/tools/test_frozen_tool_name_discovery.py` passes unchanged |
 | AC24 | allow-filter resolves: with `allow=["project_future"]` all three tools survive the filter; with the entry absent all three are dropped (both directions — positive assertions, since boot validation is warn-only) |
-| AC25 | **Stale/concurrent victim delete aborts the transaction (R1 guard):** force the interleaving (engine hook or equivalent) that deletes a selected victim from a second session between the add's victim-SELECT and victim-DELETE → the add must (i) raise `ConcurrentWishlistUpdate` after WHOLE-transaction rollback (test catches it / tool lane returns the translated D16 message), (ii) leave the table count ≤ 32 with no phantom row, and (iii) return NO false `evicted` entry. Recipe: seed 32 rows; delete the seq=1 victim from a second session inside the forced window; run the add. A naive "delete-then-add" (commit BEFORE the add starts) must NOT trip the guard — it counts 31 and proceeds cleanly; see PO8 for the full recipe |
+| AC25 | **Stale/concurrent victim delete aborts the transaction (R1 guard):** force the interleaving (engine hook or equivalent) that deletes a selected victim from a second session between the add's victim-SELECT and victim-DELETE → the add must (i) raise `ConcurrentWishlistUpdate` after WHOLE-transaction rollback (test catches it / tool lane returns the translated D16 message), (ii) leave the table count ≤ 32 with no phantom row, and (iii) return NO false `evicted` entry. Recipe (RW8): use a TEMPFILE-backed SQLite DB (`tmp_path` file) with TWO separate engines — an `:memory:` pair is TWO DISJOINT databases and the second-session delete would be invisible; seed 32 rows; the hook deletes the seq=1 victim from the SECOND engine's session inside the forced window; run the add. A naive "delete-then-add" (commit BEFORE the add starts) must NOT trip the guard — it counts 31 and proceeds cleanly; see PO8 for the full recipe |
+| AC26 | **UNIQUE(project_id, seq) violation forced THROUGH `add_future_entry`** (not by direct row insert — closes reviewer Warning 2): seed rows via the repo; force the collision with a hook that INSERTs the colliding seq row from a SECOND engine between the add's `MAX(seq)` read and its INSERT; assert `ConcurrentWishlistUpdate` raised (translated D16 message at the tool lane) + WHOLE-transaction rollback + no partial rows (any eviction the add had staged is rolled back too). Narrowing pin (D18): a NON-unique IntegrityError (e.g. forced NOT NULL on `summary` through the same path) propagates UNtranslated — raw re-raise, no ConcurrentWishlistUpdate |
+| AC27 | **Keyword-only `max_entries` pin (O11):** calling `store.add_future_entry("p", "s", None, "a", "i", 32)` positionally past the `*` marker raises `TypeError`; the keyword call (`max_entries=32`) works |
+| AC28 | **Seq-reuse pin (D2/R6):** seed 5 rows via the repo; `remove_future_entry` the seq=5 row; the next `add_future_entry` returns `seq == 5` again (top slot reused) and `list` still orders it newest-first — monotone among LIVE rows, `id` is the durable identity |
 
 NO network, NO live DB, NO migration-runner execution in tests (create_all fixtures sidestep the 20260714_000001 fresh-SQLite breaker, A29).
 
@@ -531,7 +546,7 @@ NO network, NO live DB, NO migration-runner execution in tests (create_all fixtu
 - **PO5 — drift-pin run**: `tests/unit/tools/test_frozen_tool_name_discovery.py` green.
 - **PO6 — reviewer-twin integrity**: `sha256sum agents/reviewer/workflow.md 'agents/reviewer[v2]/workflow.md'` equal BEFORE and AFTER the edit (quote the bracketed dirname).
 - **PO7 — assembly-visibility probe** (catches the SILENTLY-INVISIBLE class that no test catches, A12/A13): in-process harness mimicking the instance.py order — build the factory tools, extend a plain list at the W5 position, then run `create_help_tool` + `scan_tools_for_full_docs` + `_apply_tool_filter` (allow=["project_future"]) and assert all three names survive into help's tool_index and the filtered list. (Full live-instance smoke is the reviewer lane's own process; this lane makes zero daemon contact.)
-- **PO8 — stale-victim guard, end-to-end via the tool lane (R1/AC25):** seed the table to 32 via `project_future_add`; force the interleaving with a `before_cursor_execute`-style engine hook (or equivalent) that deletes the SELECTED victim (seq=1 row) from a SECOND session exactly between the add's victim-SELECT and victim-DELETE, then run `project_future_add`. Assert: (i) the response is exactly `{"error": "Concurrent wishlist update for project '<pid>' — please retry"}` (D16 translated message, no dialect fragment); (ii) table count ≤ 32 with NO phantom row from the rolled-back add (the externally deleted victim stays gone); (iii) NO `evicted` key naming a row that was never deleted (the false-disclosure path is impossible). Recipe note: the naive "delete-then-add" ordering does NOT reach the guard — the add re-counts to 31 and proceeds cleanly; the hook-forced interleaving is REQUIRED for determinism.
+- **PO8 — stale-victim guard, end-to-end via the tool lane (R1/AC25):** use a TEMPFILE-backed SQLite file DB with TWO separate engines (RW8 — an `:memory:` engine pair is two disjoint databases; the cross-session delete must be visible to the add's connection); seed the table to 32 via `project_future_add`; force the interleaving with a `before_cursor_execute`-style engine hook (or equivalent) that deletes the SELECTED victim (seq=1 row) from the SECOND engine's session exactly between the add's victim-SELECT and victim-DELETE, then run `project_future_add`. Assert: (i) the response is exactly `{"error": "Concurrent wishlist update for project '<pid>' — please retry"}` (D16 translated message, no dialect fragment); (ii) table count ≤ 32 with NO phantom row from the rolled-back add (the externally deleted victim stays gone); (iii) NO `evicted` key naming a row that was never deleted (the false-disclosure path is impossible). Recipe note: the naive "delete-then-add" ordering does NOT reach the guard — the add re-counts to 31 and proceeds cleanly; the hook-forced interleaving is REQUIRED for determinism.
 
 ### W11 — Version-slot note (D15)
 
@@ -578,7 +593,7 @@ add_future_entry(project_id, summary, details, source_agent, source_instance_id,
   9. return to_dict() + {"evicted": evicted}           # disclosure, never silent
 ```
 
-Properties: after any add the table holds ≤32 (R5); drifted tables (count > 32) self-heal (overflow 2+ evicts down, insert lands at exactly 32 — AC18); concurrent-add race is TRANSLATE-AND-FAIL-CLOSED (D16): `IntegrityError` at commit, or the R1 rowcount-guard failure, rolls back the WHOLE transaction (evictions restored, insert rejected — never partial) and surfaces the typed `ConcurrentWishlistUpdate` as the stable message `{"error": "Concurrent wishlist update for project '<pid>' — please retry"}` — NO automatic retry anywhere (leader ruling D16, overriding the architect's optional in-repo retry); the calling agent may still retry, the message says so; eviction order is exactly insertion order (seq ASC survives same-microsecond timestamps, AC12); the R1 rowcount guard makes a false `evicted` disclosure (naming a row never deleted) impossible by construction (AC25/PO8).
+Properties: after any add the table holds ≤32 (R5); drifted tables (count > 32) self-heal (overflow 2+ evicts down, insert lands at exactly 32 — AC18); concurrent-add race is TRANSLATE-AND-FAIL-CLOSED (D16/D18): a UNIQUE(project_id, seq) `IntegrityError` at commit (the ONLY IntegrityError that translates — D18) or the R1 rowcount-guard failure rolls back the WHOLE transaction (evictions restored, insert rejected — never partial) and surfaces the typed `ConcurrentWishlistUpdate` as the stable message `{"error": "Concurrent wishlist update for project '<pid>' — please retry"}` — NO automatic retry anywhere (leader ruling D16, overriding the architect's optional in-repo retry); the calling agent may still retry, the message says so; eviction order is exactly insertion order (seq ASC survives same-microsecond timestamps, AC12); the R1 rowcount guard makes a false `evicted` disclosure (naming a row never deleted) impossible by construction (AC25/PO8).
 
 ---
 
@@ -627,15 +642,15 @@ Errors are ALWAYS a single `{"error": "<string>"}` dict — no codes, no structu
 | 4 | **prompt-twin divergence** — reviewer/workflow.md vs reviewer[v2]/workflow.md must stay byte-identical | Medium | High | Identical edit string specified (W6b); PO6 sha equality asserted BEFORE and AFTER; baseline rows 143/147 both change (W7) |
 | 5 | **migration naming collision** — duplicate `YYYYMMDD_HHMMSS` prefix ⇒ `DuplicateMigrationVersionError` (runner :420) | Low | Medium | Developer stamps real current UTC at file creation; AC20 filename regex; newest existing prefix 20261112_124200 leaves the namespace clear (A22) |
 | 6 | **privilege misclassification** — category accidentally joins PRIVILEGED_TOOL_CATEGORIES (strips empty-allow agents; breaks five-pin exact-set assertions :7646-7653); or grants forgotten (boot only WARNS, A13) | Low | High | Category stays non-privileged — zero edits to the privileged set; grants are explicit W8 file list; AC24 asserts BOTH directions positively |
-| 7 | **FIFO-vs-REFUSE acceptance friction** — deviation from the critical_notes "no silent eviction" house doctrine reads as data loss | Medium | Medium | D7 deviation statement; disclosure mandatory in the add response (id+summary); `_full_doc_` states the contract verbatim; cap exact at every observation point; AC10/AC5 pin the disclosure |
-| 8 | **commit-scope contamination** — committing outside the planning dir, or in canonical /home/nea/ensemble-src (detached HEAD + dirty) | Low | High | All git via `git -C /home/nea/ensemble-src-wt-project-future`; add ONLY the five planning paths; branch + status verified before/after; zero-contact restated (W11) |
+| 7 | **FIFO-vs-REFUSE acceptance friction** — deviation from the critical_notes "no silent eviction" house doctrine reads as data loss | Medium | Medium | D7 deviation statement; disclosure mandatory in the add response (id+summary); `_full_doc_` states the contract verbatim; cap exact at every ADD boundary (drift visible via `total`, self-heals on next add); AC10/AC5 pin the disclosure |
+| 8 | **commit-scope contamination** — committing wrong paths, or in canonical /home/nea/ensemble-src (detached HEAD + dirty) | Low | High | All git via `git -C /home/nea/ensemble-src-wt-project-future`; committable paths are EXACTLY each work item's file list — W1 `daemon/repositories/project/{models.py, __init__.py}` + `daemon/repositories/__init__.py`; W2 `daemon/migrations/versions/<stamp>_create_project_future.sql`; W3 `daemon/repositories/project/repository.py`; W4 `daemon/tools/project_future.py`; W5 `daemon/tools/instance.py` + `daemon/tools/_tool_registry.py`; W6 `agents/leader/rule.md` + both reviewer `workflow.md` twins + `docs/agents.md`; W7 `agents/.prompt-artifacts.sha256`; W8 the 14 `meta.json` files; W9 the four test files (the planning-lane commits themselves touch only `.agents/shared/planning/project-future/`). Canonical checkout untouchable; branch + status verified before/after; zero-contact restated (W11) |
 | 9 | **cascade test vacuousness** — SQLite does NOT enforce FKs by default ⇒ AC16's behavioral half silently passes | Medium | Low | PRAGMA foreign_keys=ON engine listener specified in W9; structural introspection pin kept as the second leg |
 | 10 | **Delete-refactor class** — the cap + no-false-disclosure invariant depends on the victim DELETE raising when rows went missing (ORM `StaleDataError` on the naive loop); rewriting to the `prune_excess` `text("DELETE … WHERE id IN")` style (pending_repository.py:462-470) would silently delete 0 rows and break BOTH the cap and the disclosure contract | Low (post-merge refactor) | **High** (cap violation + false user-law disclosure) | R1 hardening: Core delete + explicit `rowcount != len(victims)` guard raising `ConcurrentWishlistUpdate`; in-code comment naming the failure class; AC25 + PO8 pin the guarded path |
 | 11 | **PG model-side VARCHAR vs the doctrine comment** — `max_length=300/5000` makes create_all emit `VARCHAR(300)/(5000)` on PG; the migration's TEXT applies only to the SQLite runner; a "never VARCHAR on either driver" claim is false | High (certain on PG) | Low (equivalent semantics; length check unreachable via two-layer truncation; sibling precedent models.py:488-489) | R4: W2 comment reworded to scope TEXT-never-VARCHAR to the .sql; AC20's zero-VARCHAR grep scoped explicitly to the .sql file |
-| 12 | **Raw dialect error string surfaced to the agent** — `str(IntegrityError)` embeds constraint/table/pgcode internals | Low | Low (opaque UX, no secrets) | D16 translation: catch `IntegrityError` + the guard exception, rollback, stable message (A31 precedent, mcp_server/repository.py:146-205); the generic `{"error": str(exc)}` backstop remains only for truly unexpected failures |
+| 12 | **Raw dialect error string surfaced to the agent** — `str(IntegrityError)` embeds constraint/table/pgcode internals | Low | Low (opaque UX, no secrets) | D16+D18 translation, NARROWED: ONLY the UNIQUE(project_id, seq) race is translated to the stable message (A31 precedent, mcp_server/repository.py:146-205 — which also re-raises the rest); other IntegrityErrors propagate raw via the generic `{"error": str(exc)}` backstop — accepted, not a secrets risk |
 | 13 | **`created_at` example/response-shape mismatch** — `session.refresh` re-reads the stored value; SQLite and PG (`TIMESTAMP WITHOUT TIME ZONE`) both drop tzinfo, so `isoformat()` has NO `+00:00` | Medium (every add) | Low (no AC pins an offset; FIFO never reads `created_at`) | R8: example fixed to naive UTC; driver tz-drop noted in the Data Model Summary; no offset assertions in tests |
 | 14 | **Empty-allow inheritance** — every empty-allow agent (in practice only `watcher`, A33) silently gains the 3 write tools | High (structural) | Low (32-capped, project-scoped, eviction-disclosed; mirrors the project_history status quo) | Documented in W5 (category stays non-privileged); per-agent `tools.deny` remains available; AC24 pins both directions for granted agents |
-| 15 | **Cross-lane migration-prefix collision** — parallel staged lanes could stamp the same second (newest prefix at planning time: 20261112_124200; v0.29.22's migration inventory UNVERIFIED from this worktree) | Very Low (same-second + guard) | Low (pre-apply fail-loud) | Real-UTC stamp at file creation + a `ls daemon/migrations/versions | grep <prefix>` pre-commit check; the duplicate-prefix guard (runner :395-417/:420) fails before any apply |
+| 15 | **Cross-lane migration-prefix collision** — parallel staged lanes could stamp the same second (newest prefix at planning time: 20261112_124200; v0.29.22's migration inventory UNVERIFIED from this worktree) | Very Low (same-second + guard) | Low (pre-apply fail-loud) | Real-UTC stamp at file creation + a `ls daemon/migrations/versions \| grep <prefix>` pre-commit check; the duplicate-prefix guard (runner :395-417/:420) fails before any apply — note the guard enumerates on the SQLite runner lane only (PG boots never enumerate the directory), so the fence lives in dev/test/CI, not the PG boot path |
 
 ---
 
@@ -657,7 +672,7 @@ See W10 (PO1–PO8). All are tester-executable in-process: no network, no live D
 
 ---
 
-## Research Insights (shaping decisions — see decisions.md for the full D1–D16 rationale)
+## Research Insights (shaping decisions — see decisions.md for the full D1–D18 rationale)
 
 - The construction seam lives in **instance.py:6651-6655**, not `_tool_registry.py` (research CORRECTION, confirmed by spot-check) — the brief's original location was wrong.
 - `created_at` in the sibling is a **datetime**, the ONLY such column in models.py — a fork point this plan resolves deliberately toward the history-sibling idiom (D2/R3).
@@ -670,4 +685,4 @@ See W10 (PO1–PO8). All are tester-executable in-process: no network, no live D
 
 ## Open Questions
 
-None blocking. Plan-writer judgment calls: (a) `source_agent`/`source_instance_id` modeled NOT NULL with `""` default per the D12 DDL, deviating from the sibling's Optional — still standing, reviewer-attention noted; (b) the earlier seq-race try/except judgment call is **SUPERSEDED** by the leader's D16 ruling — the race is now a typed translation (`ConcurrentWishlistUpdate` → stable message, whole-transaction rollback) with NO automatic retry, not a generic except-wrap. Everything else follows the dispatcher's D1–D15 steer plus the fold pass (R1–R10, O11–O12, D16) as written.
+None blocking. Plan-writer judgment calls: (a) `source_agent`/`source_instance_id` modeled NOT NULL with `""` default per the D12 DDL, deviating from the sibling's Optional — still standing, reviewer-attention noted; (b) the earlier seq-race try/except judgment call is **SUPERSEDED** by the leader's D16 ruling — the race is now a typed translation (`ConcurrentWishlistUpdate` → stable message, whole-transaction rollback) with NO automatic retry, not a generic except-wrap. Everything else follows the dispatcher's D1–D15 steer plus the two fold passes (R1–R10 + O11/O12 + D16; then reviewer-council C1 + RW1/RW4/RW5/RW8 + AC26–AC28 + D17/D18) as written.
