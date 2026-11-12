@@ -26,7 +26,7 @@
 **Qualifying sentence (house debt, out of scope — arch §15 B22, verbatim):**
 
 ```
-the SQLite `event.kind` CHECK constraint lists only 8 kinds while `EventKind` has 16 — it is already stale for 8 pre-existing kinds; the production deployment is PostgreSQL (`create_all`; the SQLModel column carries no CHECK — `models.py:74`), so `ram_limit_exceeded` (the 17th member) is unaffected
+the SQLite `event.kind` CHECK constraint lists only 8 kinds while `EventKind` has 16 — it is already stale for 8 pre-existing kinds; the production deployment is PostgreSQL (`create_all`; the SQLModel column carries no CHECK — `models.py:86`), so `ram_limit_exceeded` (the 17th member) is unaffected
 ```
 
 The stale CHECK is **pre-existing house debt and is deliberately not fixed by this feature**. No
