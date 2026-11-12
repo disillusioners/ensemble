@@ -1,7 +1,7 @@
 """``ladder`` — the kill ladder and the pre-kill gate.
 
 Contract: architecture-recommendation.md §4.2 (the ladder contract + the
-16-code vocabulary + the P0–P7 gate + P5a + P8-as-post-kill), §15 B4
+reason vocabulary (15 codes since §18.2) + the P0–P7 gate + P8-as-post-kill), §15 B4
 (the reason/status sets, pinned char-for-character), §15 B16 (the grace
 slice constant), §15 B27 (the refusal classification), phase2-plan.md
 T11 / T12.
@@ -10,9 +10,10 @@ T11 / T12.
 event loop (and from a bare thread in tests).  TERM → slice-probed
 grace → KILL; KILL is always reachable; zombie-aware skip; idempotent.
 
-**The 16 codes (§15 B4, ordered, exact):** the enumeration IS the
-authoritative exact set — 16 codes = 9 kept/renamed + 7 added.  Any
-count other than 16 anywhere in the plan set is a defect.
+**The 15 codes (§15 B4, ordered, exact; §18.2):** the enumeration IS the
+authoritative exact set — 15 codes = 9 kept/renamed + 7 added − 1 retired
+(``refused:ownership-mismatch`` — retired with P6's ADVISORY demotion).
+Any count other than 15 anywhere in the plan set is a defect.
 
 **The gate is P0–P7** — P8 is the POST-KILL probe, not a pre-kill
 predicate.  A kill fires iff ALL of P0–P7 evaluate true; "unevaluable"
@@ -67,7 +68,7 @@ OWNERSHIP_ENV_VAR_BY_LANE = {
     "proc": OWNERSHIP_ENV_VAR_PROC,
 }
 
-# ── The reason set (§15 B4 — ordered, exact, 16 codes) ─────────────────────
+# ── The reason set (§15 B4 — ordered, exact, 15 codes) ─────────────────────
 
 REASON_TERM_ESRCH = "killed:term-esrch"
 REASON_GROUP_DEAD_AFTER_GRACE = "killed:group-dead-after-grace"
@@ -86,7 +87,7 @@ REASON_LEADER_UNREADABLE = "refused:leader-unreadable"
 REASON_OWNERSHIP_MISMATCH = "refused:ownership-mismatch"  # RETIRED (§18.2) — kept for compat only; no longer in REASON_SET
 REASON_GROUP_UNKNOWN = "refused:group-unknown"
 
-#: The authoritative exact set — 16 codes (§15 B4).
+#: The authoritative exact set — 15 codes (§15 B4; §18.2).
 REASON_SET: tuple[str, ...] = (
     REASON_TERM_ESRCH,
     REASON_GROUP_DEAD_AFTER_GRACE,
@@ -117,7 +118,12 @@ STATUS_REFUSED = "refused"
 #: The refusal classification (§15 B27, verbatim):
 #:
 #:     transient (re-arm to WATCHING; re-claimable on a later tick): refused:leader-unreadable, refused:group-unknown
-#:     permanent (terminal REFUSED; released): refused:guard-disabled, refused:not-registered, refused:platform-unsupported, refused:pgid-not-registered, refused:pgid-invalid, refused:pgid-self, refused:daemon-group, refused:pgid-recycled, refused:ownership-mismatch
+#:     permanent (kill-decision terminal; the record stays
+#:     REFUSED-but-watching per ruling A §18.1): refused:guard-disabled,
+#:     refused:not-registered, refused:platform-unsupported,
+#:     refused:pgid-not-registered, refused:pgid-invalid, refused:pgid-self,
+#:     refused:daemon-group, refused:pgid-recycled
+#:     retired (§18.2): refused:ownership-mismatch
 #:
 #: (The two RENAMED/REMOVED members of the iteration-001 vocabulary are
 #: recorded here as ruled: ``refused:platform-win32`` was RENAMED to
@@ -174,7 +180,7 @@ def refusal_bucket(reason: str) -> Optional[str]:
     return REFUSAL_PREDICATE_BUCKET.get(reason)
 
 
-# ── The individual pre-kill predicates (P0–P7 + P5a) ───────────────────────
+# ── The individual pre-kill predicates (P0–P7; P5a RETIRED §18.3) ─────────
 
 
 def check_p0_guard_enabled(
@@ -289,23 +295,21 @@ def read_ownership_stamp(
 
     ``False`` — the ownership stamp VARIABLE is PRESENT but carries a
     DIFFERENT value: a REAL mismatch (the PID was recycled, or a
-    foreign-lane stamp is present).  This is the ONLY case that refuses
-    (``refused:ownership-mismatch`` — deterministic; a retry cannot
-    change it).
+    foreign-lane stamp is present).  Under Ruling B (§18.2) a mismatch
+    NEVER refuses — it counts as UNVERIFIABLE for the aggregation.
 
     ``None``  — the stamp CANNOT BE VERIFIED: the ownership variable is
     ABSENT from the environ, or the environ is unreadable (fail-open,
     with ``ownership_unverified++``).
 
-    Contract (phase2-plan.md T11; test-plan.md S8(h); arch §4.2:226
-    "for ``refused:ownership-mismatch`` the stamp check is
-    DETERMINISTIC — retrying cannot change it"; dispatcher ruling
-    2026-11-11; LEADER RULING 2026-11-11 — lane-aware): P6 has TWO
-    outcomes only — a stamp that EXISTS and DIFFERS ⇒ refuse; a stamp
-    that CANNOT BE VERIFIED (absent or unreadable) ⇒ PROCEED with
-    ``ownership_unverified++``.  ABSENT ≠ MISMATCH.  The variable that
-    is checked is the LANE'S OWN (``env_var``): stamps are set per-lane
-    by the tool at its spawn boundary and inherited down the tree.
+    Contract (LEADER RULING B 2026-11-11, §18.2 — supersedes the
+    pre-ruling refusal semantics): env stamps are ADVISORY.  A stamp
+    that EXISTS and DIFFERS is UNVERIFIABLE (the kill proceeds with
+    ``ownership_unverified++``); a stamp that is ABSENT or unreadable is
+    likewise UNVERIFIABLE.  ABSENT ≠ MISMATCH historically; under Ruling
+    B NEITHER refuses.  The variable that is checked is the LANE'S OWN
+    (``env_var``): stamps are set per-lane by the tool at its spawn
+    boundary and inherited down the tree.
 
     The house idiom (bash_spawn_reaper._verify_member_env_procfs) already
     makes this exact three-way split: exact match ⇒ True, marker present
@@ -368,23 +372,18 @@ def check_p6_ownership(
 ) -> tuple[Optional[str], bool]:
     """P6 — the ownership stamp (LANE-AWARE).
 
-    Returns ``(reason, unverifiable)``.  THREE outcomes (phase2-plan.md
-    T11; test-plan.md S8(h); arch §4.2:226 "for
-    ``refused:ownership-mismatch`` the stamp check is DETERMINISTIC —
-    retrying cannot change it"; dispatcher ruling 2026-11-11; LEADER
-    RULING 2026-11-11 — lane-aware):
+    Returns ``(reason, unverifiable)``.  TWO outcomes under Ruling B
+    (§18.2 — the stamp is ADVISORY; P6 NEVER refuses):
 
-      - the LANE'S OWN stamp present AND matching ⇒ VERIFIED (a positive
-        signal — NOT counted as unverified);
-      - the stamp ABSENT (or the environ unreadable) ⇒ PROCEED with
-        ``unverifiable=True`` (``ownership_unverified++``) — ABSENT ≠
-        MISMATCH;
-      - the OTHER lane's stamp present ⇒ ``refused:ownership-mismatch``
-        (the cross-lane tripwire, checked FIRST — cross-presence does
-        not occur legitimately, so it refuses even when the lane's own
-        stamp would otherwise match); the lane's own stamp present with
-        a DIFFERENT value ⇒ the same refusal (a REAL mismatch — the PID
-        was recycled).
+      - VERIFIED (``unverifiable=False``): ≥1 stamp-bearing member
+        matches AND all stamp-bearing members match (§18.9 two-pass
+        aggregation) — a positive signal, NOT counted as unverified;
+      - otherwise (mismatch, absent, unreadable, or a foreign stamp)
+        ⇒ PROCEED with ``unverifiable=True`` (``ownership_unverified++``).
+
+    The primary identity (captured pgid ∧ leader starttime) is
+    re-verified by P5 BEFORE P6 runs — the gate ordering IS the
+    ruling's "re-verify primary identity" leg.
 
     ``lane=None`` (the legacy default — direct callers without a lane)
     checks the bash lane's variable and runs NO cross-lane tripwire,
@@ -411,20 +410,26 @@ def check_p6_ownership(
     # (foreign stamp present, or the lane's own stamp present with a
     # different value) NEVER permanent-refuses — it re-verifies the primary
     # identity (the captured pgid ∧ the leader's starttime, already
-    # established by P5 + P5a before P6 runs) and, on a hold, PROCEEDS
+    # established by P5 before P6 runs) and, on a hold, PROCEEDS
     # with ownership_unverified++.  The lane-aware structure stays.
     if foreign_vars and _foreign_stamp_present(proc_root, members, foreign_vars):
         return None, True
-    readable = False
+    # §18.9 — TWO-PASS aggregation: VERIFIED requires (a) ≥1 stamp-bearing
+    # member matching AND (b) ALL stamp-bearing members matching.  A single
+    # early return on the first match is the uniformity violation: one
+    # t-1 member + one SOMETHING-ELSE member must NOT read as verified.
+    matched_any = False
+    all_matching = True
     for pid in members:
-        matched = read_ownership_stamp(proc_root, pid, tracking_id, env_var=lane_var)
-        if matched is None:
-            continue
-        readable = True
-        if matched:
-            return None, False
-    if readable:
-        return None, True
+        stamp_state = read_ownership_stamp(proc_root, pid, tracking_id, env_var=lane_var)
+        if stamp_state is None:
+            continue  # absent/unreadable — not a stamp-bearing member
+        if stamp_state:
+            matched_any = True
+        else:
+            all_matching = False
+    if matched_any and all_matching:
+        return None, False
     return None, True
 
 
@@ -436,10 +441,17 @@ def check_p7_group_liveness(scan_complete: bool, member_count: int, unreadable_p
     pids make "empty" unprovable — §18.1).  An unevaluable group ⇒
     ``refused:group-unknown``.
     """
-    if not scan_complete or unreadable_pids:
+    if not scan_complete:
         return REASON_GROUP_UNKNOWN
     if int(member_count) == 0:
+        if unreadable_pids:
+            # C2 + leader ruling (pgid-filtered): emptiness is UNPROVABLE
+            # while any pid is unreadable — the watched group's members
+            # could be hiding behind the unreadable set.
+            return REASON_GROUP_UNKNOWN
         return REASON_GROUP_EMPTY
+    # LIVE group members ⇒ the kill proceeds even with unreadable pids
+    # (hidepid>0 hosts must still kill their own trees).
     return None
 
 
@@ -502,8 +514,8 @@ def ram_kill_ladder(
 ) -> tuple[str, str]:
     """Kill one process group → ``(status, reason)``.
 
-    The pre-kill gate is **P0–P7** (+ P5a); a kill fires iff ALL of them
-    evaluate true.  Then: TERM → slice-probed grace → KILL, and finally
+    The pre-kill gate is **P0–P7** (P5a RETIRED — §18.3); a kill fires
+    iff ALL of them evaluate true.  Then: TERM → slice-probed grace → KILL, and finally
     the **P8 post-kill probe**.
 
     ``lane`` — the SPAWN'S lane (``"bash"`` | ``"proc"``): P6 reads the
@@ -512,7 +524,7 @@ def ram_kill_ladder(
     legacy bash-variable behaviour with no cross-lane tripwire.
 
     ``status`` ∈ ``{killed, already-dead, refused}``; ``reason`` ∈ the
-    16-code set (§15 B4).
+    15-code set (§15 B4; §18.2).
 
     The ladder is **idempotent**: a repeat call on a dead group finds
     ``group_member_count == 0`` at P7 and returns
@@ -543,7 +555,7 @@ def ram_kill_ladder(
     if reason is not None:
         return (STATUS_REFUSED, reason)
 
-    # ── P5 + P5a — the leader identity and the pgid-recycle check ──
+    # ── P5 — the leader identity (the recycle verdict; P5a retired) ──
     # The leader's pid IS the pgid (POSIX: a group leader's pid becomes
     # the group id), so ONE direct stat read serves both predicates.
     leader_stat = read_stat_entry(proc_root, int(pgid))

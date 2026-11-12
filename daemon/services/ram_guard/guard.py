@@ -374,6 +374,10 @@ class RamGuard:
                     return False
                 if record.group_member_count > 0:
                     return False
+                if not getattr(record, "group_scan_complete", True):
+                    # The scan-completeness gate (leader ruling, P1):
+                    # emptiness is unprovable on an incomplete scan.
+                    return False
             self._registry.pop(tracking_id, None)
             record.mark_released()
             self._remember_released(record)
@@ -470,9 +474,20 @@ class RamGuard:
         reading = read_tree_rss(self._proc_root, members)
 
         with self._lock:
+            # Leader ruling — PGID-FILTERED completeness: an unreadable pid
+            # that was an OBSERVED MEMBER of THIS record poisons the
+            # completeness; a never-observed (foreign) unreadable pid is
+            # dropped and NEVER poisons.  On hidepid>0 hosts the watched
+            # group's own completeness is still provable.
+            observed = set(record.members)
+            unreadable_members = tuple(
+                p for p in table.unreadable_pids if p in observed
+            )
             record.members = members
             record.group_member_count = group_count
-            record.group_scan_complete = bool(table.scan_complete) and not bool(table.unreadable_pids)
+            record.group_scan_complete = (
+                bool(table.scan_complete) and not unreadable_members
+            )
             record.members_total = len(members)
             record.members_killable = killable
             record.members_unreachable = len(members) - killable
@@ -768,6 +783,16 @@ class RamGuard:
                 group_empty = False
                 refusal = reason
             record.claim_token = None
+
+        # §4.3.1 item 1 — the terminal verdict is PUBLISHED (state=KILLED)
+        # BETWEEN mark_killed and the release block: the event payload and
+        # the transition log line MUST carry the terminal state, never the
+        # post-release RELEASED.  (The emitter call itself stays OUTSIDE
+        # the lock; the ordering is what carries the guarantee.)
+        if publish:
+            self._emit(record)
+
+        with self._lock:
             if group_empty:
                 # The terminal resolution with an empty group — the
                 # lane releases (B21 trigger (ii)/(iii)).
@@ -776,9 +801,7 @@ class RamGuard:
                     record.mark_released()
                     self._remember_released(record)
 
-        if publish:
-            self._emit(record)
-        elif refusal is not None:
+        if refusal is not None:
             # A REFUSAL emits NO event (arch §17.2 — operational, not
             # forensic) but it DOES carry a transition log line
             # (arch §5 / :779: "counters + the transition log line").
@@ -792,7 +815,7 @@ class RamGuard:
         """The REFUSAL transition log line — CONTENT-FREE (arch §5 / :779).
 
         A refusal emits NO event (§17.2) but it IS logged: the reason
-        code (the 16-code enum) and the counters only — the same
+        code (the 15-code enum, §18.2) and the counters only — the same
         negative-space discipline the envelope and the event payload
         obey (no argv, no env, no stdout/stderr, no secret ids, no
         per-member lists, no host paths, no exception reprs).

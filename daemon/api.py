@@ -2504,63 +2504,7 @@ async def lifespan(app: FastAPI):
     # OFF. Boot failure degrades the subsystem to disabled (the
     # resource-monitor house shape above) without crashing the
     # lifespan.
-    app.state.ram_guard = None
-    if config.ram_guard_derived_switch:
-        try:
-            from daemon.services.ram_guard import RamGuard, set_ram_guard
-            from daemon.services.ram_guard_events import (
-                make_ram_breach_emitter,
-            )
-
-            _ram_guard = RamGuard(
-                enabled=True,
-                ceiling_mib=config.ram_guard.ceiling_mib,
-                poll_interval_ms=config.ram_guard.poll_interval_ms,
-                grace_ms=config.ram_guard.grace_ms,
-                pss_confirm_deadline_ms=config.ram_guard.pss_confirm_deadline_ms,
-                emitter=make_ram_breach_emitter(
-                    manager=manager,
-                    event_bus=getattr(manager, "_event_bus", None),
-                ),
-            )
-            _ram_guard.start()
-            app.state.ram_guard = _ram_guard
-            set_ram_guard(_ram_guard)
-            logger.info(
-                "[RamGuard] started (ceiling=%d bytes source=%s "
-                "poll_ms=%d grace_ms=%d confirm_ms=%d)",
-                _ram_guard.resolved_ceiling_bytes,
-                _ram_guard.ceiling_source,
-                config.ram_guard.poll_interval_ms,
-                config.ram_guard.grace_ms,
-                config.ram_guard.pss_confirm_deadline_ms,
-            )
-        except Exception as ram_guard_boot_exc:
-            try:
-                if _ram_guard is not None:
-                    _ram_guard.stop()
-                    _ram_guard.join(timeout=3.0)
-            except Exception:  # noqa: BLE001 — belt-and-braces; never raise
-                pass
-            app.state.ram_guard = None
-            try:
-                from daemon.services.ram_guard import set_ram_guard
-                set_ram_guard(None)
-            except Exception:  # noqa: BLE001 — degradation must not raise
-                pass
-            logger.error(
-                "[RamGuard] DISABLED — boot failed: %s",
-                ram_guard_boot_exc,
-                exc_info=True,
-            )
-    else:
-        # The ONE INFO line at lifespan start (arch §4.6 item 6) — the
-        # quiet-daemon grep proves the guard is OFF by intent.
-        logger.info(
-            "[RamGuard] OFF — %s=0 (no thread, no registration, "
-            "no measurement)",
-            "ENSEMBLE_RAM_GUARD",
-        )
+    _boot_ram_guard(app, manager, config)
 
     # ── Metrics exposition listener (metrics-collection P0 T1/T2/T11) ────
     # A SEPARATE localhost-bound (127.0.0.1 only) listener on its own
@@ -4534,6 +4478,85 @@ async def lifespan(app: FastAPI):
 
     # Call manager shutdown for graceful shutdown
     await manager.shutdown()
+
+
+
+
+def _boot_ram_guard(app, manager, config):
+    """The RAM-guard composition root — ONE boot-time construction.
+
+    Extracted verbatim from the lifespan (cycle 2, the DRIVEN
+    composition-root pin): ``app.state.ram_guard`` owns BOTH threads
+    (the tick + the execution lane — arch §15 B16); the facade
+    (``set_ram_guard``) flips the tool lanes' no-op registration to
+    live. OFF (``ENSEMBLE_RAM_GUARD`` parsed by ``load_config`` into
+    the DERIVED ``config.ram_guard_derived_switch``) is a COMPLETE
+    no-op (arch §4.6 item 6): no thread, no registration, no
+    measurement, zero DB queries, no /proc reads — and NO guard
+    object is constructed at all, so not even the boot-time ceiling
+    snapshot runs. ``app.state.ram_guard is None`` either way when
+    OFF. Boot failure degrades the subsystem to disabled (the
+    resource-monitor house shape) without crashing the lifespan.
+    """
+    app.state.ram_guard = None
+    if config.ram_guard_derived_switch:
+        _ram_guard = None
+        try:
+            from daemon.services.ram_guard import RamGuard, set_ram_guard
+            from daemon.services.ram_guard_events import (
+                make_ram_breach_emitter,
+            )
+
+            _ram_guard = RamGuard(
+                enabled=True,
+                ceiling_mib=config.ram_guard.ceiling_mib,
+                poll_interval_ms=config.ram_guard.poll_interval_ms,
+                grace_ms=config.ram_guard.grace_ms,
+                pss_confirm_deadline_ms=config.ram_guard.pss_confirm_deadline_ms,
+                emitter=make_ram_breach_emitter(
+                    manager=manager,
+                    event_bus=getattr(manager, "_event_bus", None),
+                ),
+            )
+            _ram_guard.start()
+            app.state.ram_guard = _ram_guard
+            set_ram_guard(_ram_guard)
+            logger.info(
+                "[RamGuard] started (ceiling=%d bytes source=%s "
+                "poll_ms=%d grace_ms=%d confirm_ms=%d)",
+                _ram_guard.resolved_ceiling_bytes,
+                _ram_guard.ceiling_source,
+                config.ram_guard.poll_interval_ms,
+                config.ram_guard.grace_ms,
+                config.ram_guard.pss_confirm_deadline_ms,
+            )
+        except Exception as ram_guard_boot_exc:
+            try:
+                if _ram_guard is not None:
+                    _ram_guard.stop()
+                    _ram_guard.join(timeout=3.0)
+            except Exception:  # noqa: BLE001 — belt-and-braces; never raise
+                pass
+            app.state.ram_guard = None
+            try:
+                from daemon.services.ram_guard import set_ram_guard
+                set_ram_guard(None)
+            except Exception:  # noqa: BLE001 — degradation must not raise
+                pass
+            logger.error(
+                "[RamGuard] DISABLED — boot failed: %s",
+                ram_guard_boot_exc,
+                exc_info=True,
+            )
+    else:
+        # The ONE INFO line at lifespan start (arch §4.6 item 6) — the
+        # quiet-daemon grep proves the guard is OFF by intent.
+        logger.info(
+            "[RamGuard] OFF — %s=0 (no thread, no registration, "
+            "no measurement)",
+            "ENSEMBLE_RAM_GUARD",
+        )
+    return app.state.ram_guard
 
 
 async def _auto_start_vscode_if_preferred(
