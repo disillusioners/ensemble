@@ -35,9 +35,12 @@ from daemon.services.live_views import (
     LiveViewsService,
     PathNotFoundError,
     RootNotFoundError,
+    ServedFileTooLargeError,
     TraversalError,
+    MEDIA_EXTENSIONS,
     _EXT_TO_MIME,
     extension_for,
+    is_media_extension,
     is_well_formed_rel_path,
     is_well_formed_root_name,
     mime_for_extension,
@@ -1074,3 +1077,72 @@ class TestResolveOsErrorToUniform404:
         with pytest.raises(RootNotFoundError) as excinfo:
             svc.resolve_for_instance("fs-root", "ok.txt")
         assert isinstance(excinfo.value.__cause__, OSError)
+
+
+# ===========================================================================
+# Group: Media MIME + media-extension predicates
+# ===========================================================================
+
+
+class TestMediaMime:
+    @pytest.mark.parametrize(
+        "ext,mime",
+        [
+            ("mp4", "video/mp4"),
+            ("m4v", "video/x-m4v"),
+            ("webm", "video/webm"),
+            ("mov", "video/quicktime"),
+            ("ogv", "video/ogg"),
+            ("mkv", "video/x-matroska"),
+            ("mp3", "audio/mpeg"),
+            ("m4a", "audio/mp4"),
+            ("aac", "audio/aac"),
+            ("ogg", "audio/ogg"),
+            ("oga", "audio/ogg"),
+            ("opus", "audio/opus"),
+            ("wav", "audio/wav"),
+            ("flac", "audio/flac"),
+        ],
+    )
+    def test_media_mime(self, ext, mime):
+        assert mime_for_extension(ext) == mime
+
+    @pytest.mark.parametrize(
+        "ext",
+        ["mp4", "m4v", "webm", "mov", "ogv", "mkv", "mp3", "m4a",
+         "aac", "ogg", "oga", "opus", "wav", "flac"],
+    )
+    def test_is_media_true(self, ext):
+        assert is_media_extension(ext) is True
+
+    @pytest.mark.parametrize("ext", ["html", "md", "png", "csv", ""])
+    def test_is_media_false(self, ext):
+        assert is_media_extension(ext) is False
+
+    def test_media_extensions_set_equality(self):
+        media_keys = {k for k, v in _EXT_TO_MIME.items() if v.startswith(("video/", "audio/"))}
+        assert MEDIA_EXTENSIONS == media_keys
+
+    def test_over_cap_media_raises_too_large(self, tmp_path):
+        f = tmp_path / "big.mp4"
+        f.write_bytes(b"x" * 2048)
+        cfg = LiveViewsConfig()
+        cfg.max_media_bytes = 1024
+        cfg.roots["docs"] = LiveViewsRootConfig(type="filesystem", path=str(tmp_path))
+        svc = LiveViewsService(config=cfg)
+        with pytest.raises(ServedFileTooLargeError) as ei:
+            svc.resolve_for_instance("docs", "big.mp4")
+        assert ei.value.size_bytes == 2048
+        assert ei.value.max_bytes == 1024
+
+    def test_over_cap_nonmedia_raises_path_not_found(self, tmp_path):
+        from daemon.services.live_views import MAX_SERVED_BYTES
+
+        f = tmp_path / "big.html"
+        with open(f, "wb") as fh:
+            fh.truncate(MAX_SERVED_BYTES + 1)
+        cfg = LiveViewsConfig()
+        cfg.roots["docs"] = LiveViewsRootConfig(type="filesystem", path=str(tmp_path))
+        svc = LiveViewsService(config=cfg)
+        with pytest.raises(PathNotFoundError):
+            svc.resolve_for_instance("docs", "big.html")

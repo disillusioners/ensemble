@@ -27,7 +27,12 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from daemon.config import LiveViewsConfig, LiveViewsRootConfig
+from daemon.config import (
+    ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES,
+    LiveViewsConfig,
+    LiveViewsRootConfig,
+    _resolve_live_views_max_media_bytes,
+)
 
 
 # ── filesystem / project_scoped path-required gate ────────────────
@@ -252,3 +257,62 @@ class TestLiveViewsConfigSeeds:
         assert seeds["planning"].type == "project_scoped"
         assert seeds["tmp-images"].type == "tmp_images"
         assert seeds["tmp-images"].path is None
+
+
+# ===========================================================================
+# Group: max_media_bytes
+# ===========================================================================
+
+
+class TestMaxMediaBytes:
+    def test_default(self):
+        assert LiveViewsConfig().max_media_bytes == 2 * 1024 * 1024 * 1024
+
+    def test_ge_one_rejects_zero(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            LiveViewsConfig(max_media_bytes=0)
+
+    def test_resolver_env_wins_over_yaml(self, monkeypatch):
+        monkeypatch.setenv(ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES, "2048")
+        assert _resolve_live_views_max_media_bytes("2048", 4096) == 2048
+
+    def test_resolver_yaml_wins_over_default(self):
+        assert _resolve_live_views_max_media_bytes(None, 4096) == 4096
+
+    def test_resolver_both_absent_default(self):
+        assert _resolve_live_views_max_media_bytes(None, None) == 2 * 1024 * 1024 * 1024
+
+    def test_resolver_blank_env_unset(self, monkeypatch):
+        monkeypatch.delenv(ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES, raising=False)
+        assert _resolve_live_views_max_media_bytes("", None) == 2 * 1024 * 1024 * 1024
+        assert _resolve_live_views_max_media_bytes("   ", None) == 2 * 1024 * 1024 * 1024
+
+    def test_resolver_whitespace_yaml_unset(self):
+        assert _resolve_live_views_max_media_bytes(None, "   ") == 2 * 1024 * 1024 * 1024
+
+    def test_resolver_nonint_env_raises_naming_env(self):
+        import pytest as _p
+
+        with _p.raises(ValueError) as ei:
+            _resolve_live_views_max_media_bytes("abc", None)
+        assert ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES in str(ei.value)
+
+    def test_resolver_zero_env_raises(self):
+        import pytest as _p
+
+        with _p.raises(ValueError):
+            _resolve_live_views_max_media_bytes("0", None)
+
+    def test_resolver_negative_env_raises(self):
+        import pytest as _p
+
+        with _p.raises(ValueError):
+            _resolve_live_views_max_media_bytes("-5", None)
+
+    def test_resolver_nonint_yaml_raises(self):
+        import pytest as _p
+
+        with _p.raises(ValueError):
+            _resolve_live_views_max_media_bytes(None, "abc")
