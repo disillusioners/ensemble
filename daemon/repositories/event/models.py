@@ -60,7 +60,7 @@ class EventKind(str, enum.Enum):
     # CHECK constraint lists only 8 kinds while ``EventKind`` has 16 —
     # it is already stale for 8 pre-existing kinds; the production
     # deployment is PostgreSQL (``create_all``; the SQLModel column
-    # carries no CHECK — ``models.py:74``), so ``ram_limit_exceeded``
+    # carries no CHECK — ``models.py:86``), so ``ram_limit_exceeded``
     # (the 17th member) is unaffected. Additive — older readers ignore
     # unknown kinds (the SSE parser surfaces ``kind`` as a string).
     RAM_LIMIT_EXCEEDED = "ram_limit_exceeded"

@@ -253,7 +253,7 @@ RAM_GUARD_WAIT_SLACK_MS = 250
 RAM_GUARD_PSS_CONFIRM_DEADLINE_MS = 250
 RAM_GUARD_GRACE_MS = 250
 RAM_GUARD_PROBE_MS = 10
-#: The bounded wait's deadline floor (arch §15 B20): 1270 ms.
+#: The bounded wait's deadline floor (arch §15 B20, §18.4): 1308 ms.
 RAM_GUARD_WAIT_DEADLINE_MS = (
     _RAM_GUARD_PENDING_MAX
     * (RAM_GUARD_PSS_CONFIRM_DEADLINE_MS + RAM_GUARD_GRACE_MS + RAM_GUARD_PROBE_MS)
@@ -400,7 +400,7 @@ def _ram_wait_deadline_ms(guard) -> int:
 
     Derived from the guard's PUBLIC read-only accessors so a substrate
     rename cannot silently re-derive the deadline.  Mirrors the bash
-    lane's derivation (same pinned arithmetic: 2 x 510 + 250 = 1270).
+    lane's derivation (same pinned arithmetic: 2 x 529 + 250 = 1308).
     """
     grace_ms = RAM_GUARD_GRACE_MS
     confirm_ms = RAM_GUARD_PSS_CONFIRM_DEADLINE_MS

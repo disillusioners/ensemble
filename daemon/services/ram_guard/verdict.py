@@ -222,11 +222,13 @@ class SpawnRecord:
         return True
 
     def mark_refused(self, reason: str, *, permanent: bool) -> bool:
-        """→ REFUSED (permanent, terminal) or → WATCHING (transient re-arm).
+        """→ REFUSED (kill-decision terminal, ruling A) or → WATCHING
+        (transient re-arm with the §18.5 backoff).
 
-        §17.2: the transient refusals (``refused:leader-unreadable``,
+        §17.2/§18.1: the transient refusals (``refused:leader-unreadable``,
         ``refused:group-unknown``) re-arm to WATCHING and are
-        re-claimable on a later tick; the permanent ones terminate.
+        re-claimable after the backoff; the permanent ones terminate the
+        KILL DECISION only — the record stays REFUSED-but-watching.
         """
         # Ruling A (§18.1): a permanent refusal terminates the KILL
         # DECISION only — the record stays REFUSED-but-watching.  OVERCOUNTED

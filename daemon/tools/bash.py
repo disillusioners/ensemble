@@ -889,7 +889,7 @@ def _ram_wait_deadline_ms(guard) -> int:
     """The bounded wait's deadline for the INSTALLED guard.
 
     The derivation (arch §15 B20) is pinned against the documented
-    defaults (1270 ms).  The guard's OWN service-worst-case inputs are
+    defaults (1308 ms).  The guard's OWN service-worst-case inputs are
     read through its PUBLIC read-only accessors (``grace_seconds`` /
     ``pss_confirm_deadline_ms``) — NEVER its private attributes, so a
     substrate rename cannot silently re-derive the deadline.  When a
@@ -958,8 +958,9 @@ def _ram_episode_resolved(record: "_RamSpawnRecord | None") -> bool:
     ``KILLED`` / ``REFUSED`` / ``RELEASED`` are terminal.  An
     ``OVERCOUNTED`` re-arm is resolved too — the re-armed threshold IS
     the episode's recorded outcome and no verdict is published (arch
-    §17.5).  A ``WATCHING`` record that carries a reason is a TRANSIENT
-    refusal that re-armed (arch §17.2 / §15 B27).
+    §17.5).  A ``WATCHING`` record inside its transient-refusal backoff
+    (``transient_backoff > 0``) re-armed from a TRANSIENT refusal
+    (arch §17.2 / §15 B27 / §18.5).
     """
     if record is None:
         return True
@@ -978,7 +979,7 @@ async def _await_ram_verdict(tracking_id: str | None) -> "_RamSpawnRecord | None
 
     arch §4.3.1 item 2 / §15 B20: a 25 ms ASYNC poll (the event loop is
     never blocked), a deadline of ``RAM_GUARD_WAIT_DEADLINE_MS``
-    (1270 ms).  Only an IN-FLIGHT episode is waited on — a record with
+    (1308 ms).  Only an IN-FLIGHT episode is waited on — a record with
     no observed breach costs NOTHING (no deadline burn without an
     outcome).  On expiry the record's ACTUAL state is returned: a
     pending decision is reported as pending, never fabricated.
@@ -1561,7 +1562,7 @@ async def bash(
         # ALREADY have killed the tree (arch §4.3.1).  The verdict
         # RECORD decides which arm runs — the exit code NEVER does
         # (``-9`` is ambiguous by construction, arch §5).  The wait is
-        # bounded (1270 ms) and async (the event loop is never blocked).
+        # bounded (1308 ms) and async (the event loop is never blocked).
         ram_record = await _await_ram_verdict(tracking_id)
         ram_kill = _ram_is_kill(ram_record)
         ram_breach = _ram_breach_observed(ram_record)

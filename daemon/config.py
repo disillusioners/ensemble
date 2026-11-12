@@ -1182,6 +1182,15 @@ class RamGuardConfig(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="RAM_GUARD_")
 
+    @field_validator("ceiling_mib", mode="before")
+    @classmethod
+    def _empty_string_is_unset(cls, v):  # noqa: ANN001
+        # An EMPTY-string env value (``RAM_GUARD_CEILING_MIB=``) is the
+        # UNSET semantics — never a boot abort (live-verified carryover).
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
     ceiling_mib: Optional[int] = Field(
         default=None,
         ge=64,
@@ -1195,6 +1204,18 @@ class RamGuardConfig(BaseSettings):
             "RAM_GUARD_CEILING_MIB."
         ),
     )
+    @field_validator(
+        "poll_interval_ms", "grace_ms", "pss_confirm_deadline_ms", mode="before"
+    )
+    @classmethod
+    def _empty_string_is_the_default(cls, v, info):  # noqa: ANN001
+        # Same empty-string rule: ``RAM_GUARD_GRACE_MS=`` binds the
+        # field's DEFAULT, never a boot abort.
+        if isinstance(v, str) and not v.strip():
+            return {"poll_interval_ms": 200, "grace_ms": 250,
+                    "pss_confirm_deadline_ms": 250}[info.field_name]
+        return v
+
     poll_interval_ms: int = Field(
         default=200,
         ge=50,
