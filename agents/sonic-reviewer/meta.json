@@ -1,0 +1,18 @@
+{
+  "id": "sonic-reviewer",
+  "name": "Sonic Reviewer",
+  "description": "Read-only review leaf — consumes the handoff artifact, verifies the change against its stated intent, returns a one-line verdict block",
+  "icon": "🔍",
+  "color": "accent-rose",
+  "version": "1.0.0",
+  "llm_model": "agentic",
+  "innate_skills": [],
+  "skill_injection": false,
+  "no_force_explore": true,
+  "snapshot_enabled": true,
+  "tools": {
+    "allow": ["bash", "filesystem", "time", "self", "help", "context", "pok", "nest-report"],
+    "deny": ["proc", "instance", "service", "midflight", "shared_meta_kv", "infra", "mcp", "secrets", "edit_file", "write_file"]
+  },
+  "team_members": []
+}

@@ -45,11 +45,11 @@ CATEGORY = "pok"
 #: anchor).
 ANCHOR_CATEGORY = "nest-report"
 
-#: Mechanically re-derived 2026-11-07 (the POK B4 sweep): 45 explicit
-#: grants (every non-empty allow) / 46 meta-bearing agent dirs
-#: (45 at the last nest-report pin + ``canary`` since).
-EXPECTED_EXPLICIT = 45
-EXPECTED_TOTAL_META = 46
+#: Mechanically re-derived 2026-11-12 (the sonic-team lane): 49 explicit
+#: grants (every non-empty allow) / 50 meta-bearing agent dirs
+#: (46 at the 2026-11-07 POK B4 sweep + the 4 ``sonic-*`` agents since).
+EXPECTED_EXPLICIT = 49
+EXPECTED_TOTAL_META = 50
 #: The ONE agent that inherits (empty allow = the default universe
 #: grants every NON-privileged category — an explicit entry would
 #: STRIP every other tool watcher inherits).
