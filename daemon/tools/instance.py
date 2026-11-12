@@ -279,6 +279,7 @@ from .snapshot_tools import (
 from .rag_tools import create_rag_tools
 from .critical_notes import create_critical_notes_tools
 from .project_history import create_project_history_tools
+from .project_future import create_project_future_tools
 from .context_tools import create_context_tools
 from .shared_meta_kv_tools import create_shared_meta_kv_tools
 from .board_tools import create_board_tools
@@ -6653,6 +6654,16 @@ Returns:
         manager=manager,
     )
     tools.extend(history_tools)
+
+    # Project future tools (forward-improvement wishlist, 32-cap FIFO with
+    # disclosed eviction). `manager` is accepted for call-site parity with
+    # the history lane and deliberately unused — wishlist items are not
+    # structural events and never feed the Blueprint pending queue.
+    future_tools = create_project_future_tools(
+        manager.project_store, current_instance_id, agent_id,
+        manager=manager,
+    )
+    tools.extend(future_tools)
     
     # Create job tools if job service is available
     # F2: forward ``version_tag`` as ``agent_tag`` so the agent-facing

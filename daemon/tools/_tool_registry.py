@@ -1187,6 +1187,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # value as ``daemon/tools/<parts[2:]>.py``.
     "pok": "daemon.tools.pok",
     "project_history": "daemon.tools.project_history",
+    "project_future": "daemon.tools.project_future",
     "filesystem": "daemon.tools.filesystem",
     "time": "daemon.tools.time",
     "instance": ["daemon.tools.instance", "daemon.tools.tunables"],
@@ -1766,6 +1767,9 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "project_create",
     "project_delete",
     "project_delete_metadata",
+    "project_future_add",
+    "project_future_list",
+    "project_future_remove",
     "project_get",
     "project_get_by_directory",
     "project_get_by_instance",
