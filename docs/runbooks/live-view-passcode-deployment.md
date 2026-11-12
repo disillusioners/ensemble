@@ -440,6 +440,13 @@ page, no cookie, no redirect loop; edge-emulated (`X-Forwarded-Proto: https`) co
 verify → 303 + `view_grant` cookie → bytes through the gate; direct lane + `/api/*`
 → 302 to `/api/auth/login`. **No daemon defect surfaced; zero daemon code changes in P3.**
 
+**Loopback exemption (behavior update):** the "Secure connection required" outcome
+above is now loopback-scoped. A plain-HTTP public-lane request whose `Host` (after
+port-strip — IPv6 bracket form included — and lowercasing) is exactly `localhost`,
+`127.0.0.1`, `::1`, or `::ffff:127.0.0.1` is **served over plain HTTP**; every
+non-loopback Host still gets the unchanged HTTPS rejection, and the passcode gate is
+unchanged — a valid code is still required on loopback HTTP.
+
 **Host-preservation assertion (local counterpart of §3 step H):** the verify POST is
 exercised with (a) a **vouched same-origin** `Origin` — the inbound `Host` and the
 `Origin` name the same host **and** that host is vouched (an audience entry, a
