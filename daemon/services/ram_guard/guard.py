@@ -338,6 +338,9 @@ class RamGuard:
                     tracking_id,
                     existing.state,
                 )
+            # C1 (cycle 3): seed the ever-member set with the leader's
+            # pid — a member unreadable FROM BIRTH is still watched.
+            record.ever_members = (int(pid),)
             # §18.5: a record registered with start_time_jiffies=None has
             # a structurally unprovable identity ⇒ REFUSED-watching at
             # registration (one count, no claim, no confirm, measure-only).
@@ -474,15 +477,17 @@ class RamGuard:
         reading = read_tree_rss(self._proc_root, members)
 
         with self._lock:
-            # Leader ruling — PGID-FILTERED completeness: an unreadable pid
-            # that was an OBSERVED MEMBER of THIS record poisons the
-            # completeness; a never-observed (foreign) unreadable pid is
-            # dropped and NEVER poisons.  On hidepid>0 hosts the watched
-            # group's own completeness is still provable.
-            observed = set(record.members)
+            # Leader ruling (extended, cycle 3) — ALL consumers read the
+            # record's OWN ever-member set, never a host-global unreadable
+            # list.  C1: the union carries observed-but-unreadable members
+            # FORWARD (the pre-fix shape re-intersected with table.entries
+            # and forgot them on tick 3 — the sweep released a live watch).
+            ever = set(record.ever_members)
+            ever.update(members)
             unreadable_members = tuple(
-                p for p in table.unreadable_pids if p in observed
+                p for p in table.unreadable_pids if p in ever
             )
+            record.ever_members = tuple(sorted(ever))
             record.members = members
             record.group_member_count = group_count
             record.group_scan_complete = (
@@ -494,8 +499,9 @@ class RamGuard:
             record.unreadable_pids = reading.unreadable_pids
             record.gone_pids = reading.gone_pids
             # tree_complete = the P8 verdict on kills; per-tick keep the
-            # honest reading/scan completeness (§18.6 terms).
-            record.tree_complete = bool(reading.complete) and bool(table.scan_complete) and not bool(table.unreadable_pids)
+            # honest reading/scan completeness — WATCHED-GROUP scoped
+            # (never host-global unreadable_pids).
+            record.tree_complete = bool(reading.complete) and bool(table.scan_complete) and not unreadable_members
             record.metric = reading.metric
             record.trigger_metric = reading.metric
             record.record_sample(reading.total_bytes, now)
@@ -533,6 +539,18 @@ class RamGuard:
             if record.ever_claimed:
                 cap = RAM_GUARD_PENDING_MAX - 1
             if len(self._pending) >= cap:
+                # §18.5 (cycle 3): the pending-full blind spot is LOGGED —
+                # content-free (the id + the depth only).  No counter: the
+                # §15 B5 set is frozen exact and a pending-full tick does
+                # not claim (ram_breaches_detected already counted the
+                # detection above).
+                logger.warning(
+                    "ram-guard: pending full — breach not claimed this tick "
+                    "(id=%s depth=%d cap=%d)",
+                    record.tracking_id,
+                    len(self._pending),
+                    cap,
+                )
                 return
 
             record.mark_breached(now)
@@ -549,7 +567,8 @@ class RamGuard:
         A pid joins the record's member set iff (a) it was already an
         observed member of this record, or (b) it is a bounded
         descendant of an already-observed member, or (c) it shares the
-        captured pgid and is not a pgid-leader replacement (P5a).
+        captured pgid and is not a pgid-leader replacement (the recycle
+        verdict is P5's — P5a RETIRED, §18.3).
 
         Without the carry-forward the re-anchor would re-adopt a
         recycled pgid's members.
@@ -752,6 +771,7 @@ class RamGuard:
             platform=self._platform,
             lane=record.lane,
             on_ownership_unverified=lambda: self._bump("ownership_unverified"),
+            watched_pids=record.ever_members,
         )
 
         now = time.time()
@@ -782,17 +802,20 @@ class RamGuard:
                     record.reason = None
                 group_empty = False
                 refusal = reason
-            record.claim_token = None
+            # C2 (cycle 3): the claim token stays HELD across the emit —
+            # a tick+sweep racing the payload build cannot release the
+            # record mid-flight and flip the payload's state to RELEASED.
 
         # §4.3.1 item 1 — the terminal verdict is PUBLISHED (state=KILLED)
         # BETWEEN mark_killed and the release block: the event payload and
         # the transition log line MUST carry the terminal state, never the
         # post-release RELEASED.  (The emitter call itself stays OUTSIDE
-        # the lock; the ordering is what carries the guarantee.)
+        # the lock; the ordering AND the held claim carry the guarantee.)
         if publish:
             self._emit(record)
 
         with self._lock:
+            record.claim_token = None
             if group_empty:
                 # The terminal resolution with an empty group — the
                 # lane releases (B21 trigger (ii)/(iii)).

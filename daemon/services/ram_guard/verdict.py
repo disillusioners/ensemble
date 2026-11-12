@@ -53,7 +53,10 @@ STATE_KILLED = "KILLED"
 STATE_REFUSED = "REFUSED"
 STATE_RELEASED = "RELEASED"
 
-#: The states from which no further transition is allowed.
+#: The states from which no further KILL-DECISION transition is allowed.
+#: Ruling A (§18.1): REFUSED is kill-decision-terminal, NOT
+#: record-terminal — the RECORD's terminal states are KILLED and
+#: RELEASED; a REFUSED record keeps being measured (watching continues).
 TERMINAL_STATES = frozenset({STATE_KILLED, STATE_REFUSED, STATE_RELEASED})
 
 # ── Trigger vocabulary (§4.4 / §15 B3) ──────────────────────────────────────
@@ -161,6 +164,11 @@ class SpawnRecord:
     ever_claimed: bool = False
     #: Backoff ticks remaining after a transient refusal (§18.5).
     transient_backoff: int = 0
+    #: EVERY pid ever observed as a member of THIS record (cycle 3, C1).
+    #: The completeness/ruling consumers read THIS set — never a
+    #: host-global unreadable list.  Seeded with the leader's pid at
+    #: registration (a from-birth-unreadable leader is still watched).
+    ever_members: tuple[int, ...] = ()
     #: The bounded sample series the under-report bound is derived from.
     sample_totals: list[int] = field(default_factory=list)
 

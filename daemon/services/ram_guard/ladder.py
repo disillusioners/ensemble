@@ -137,7 +137,8 @@ TRANSIENT_REFUSALS: tuple[str, ...] = (
     REASON_GROUP_UNKNOWN,
 )
 
-#: PERMANENT — terminal REFUSED; released.
+#: PERMANENT — kill-decision terminal (ruling A §18.1): the
+#: record stays REFUSED-but-watching; NO release.
 PERMANENT_REFUSALS: tuple[str, ...] = (
     REASON_GUARD_DISABLED,
     REASON_NOT_REGISTERED,
@@ -171,7 +172,8 @@ def is_transient_refusal(reason: str) -> bool:
 
 
 def is_permanent_refusal(reason: str) -> bool:
-    """``True`` for the nine permanent refusals (§15 B27)."""
+    """``True`` for the EIGHT permanent refusals (§15 B27; §18.2
+    retired ``refused:ownership-mismatch``)."""
     return reason in PERMANENT_REFUSALS
 
 
@@ -433,21 +435,29 @@ def check_p6_ownership(
     return None, True
 
 
-def check_p7_group_liveness(scan_complete: bool, member_count: int, unreadable_pids=()) -> Optional[str]:
+def check_p7_group_liveness(
+    scan_complete: bool,
+    member_count: int,
+    unreadable_pids=(),
+    watched_pids: tuple[int, ...] = (),
+) -> Optional[str]:
     """P7 — the group is still alive.
 
     ``group_member_count == 0`` ⇒ ``already-dead:group-empty`` (release,
-    no signal) — and ONLY at member count 0 on a COMPLETE scan (unreadable
-    pids make "empty" unprovable — §18.1).  An unevaluable group ⇒
-    ``refused:group-unknown``.
+    no signal) — and ONLY at member count 0 on a COMPLETE scan whose
+    WATCHED-GROUP emptiness is provable.  Leader ruling (extended, cycle
+    3): an unreadable pid makes emptiness unprovable ONLY if it belongs
+    to the watched group (the record's ever-member set) — foreign
+    unreadables NEVER poison (hidepid hosts still reach group-empty).
+    An unevaluable group ⇒ ``refused:group-unknown``.
     """
     if not scan_complete:
         return REASON_GROUP_UNKNOWN
     if int(member_count) == 0:
-        if unreadable_pids:
-            # C2 + leader ruling (pgid-filtered): emptiness is UNPROVABLE
-            # while any pid is unreadable — the watched group's members
-            # could be hiding behind the unreadable set.
+        poison = [p for p in unreadable_pids if not watched_pids or p in watched_pids]
+        if poison:
+            # C2 + leader ruling (watched-scoped): emptiness is UNPROVABLE
+            # while a WATCHED member is unreadable — it could be alive.
             return REASON_GROUP_UNKNOWN
         return REASON_GROUP_EMPTY
     # LIVE group members ⇒ the kill proceeds even with unreadable pids
@@ -484,7 +494,9 @@ def _grace_wait_for_death(pgid: int, grace_seconds: float) -> None:
         time.sleep(min(interval, remaining))
 
 
-def probe_tree_after_kill(proc_root: Path, pgid: int) -> bool:
+def probe_tree_after_kill(
+    proc_root: Path, pgid: int, watched_pids: tuple[int, ...] = ()
+) -> bool:
     """P8 — the POST-KILL verification probe.
 
     ``True`` when the tree's death could be VERIFIED (the scan
@@ -493,7 +505,13 @@ def probe_tree_after_kill(proc_root: Path, pgid: int) -> bool:
     ``killed:tree-incomplete``.
     """
     table = scan_proc(proc_root)
-    if not table.scan_complete or table.unreadable_pids:
+    if not table.scan_complete:
+        return False
+    # Leader ruling (extended, cycle 3): unreadable pids poison the death
+    # verification ONLY if they belong to the WATCHED group (the record's
+    # ever-member set) — never a host-global unreadable list.
+    poison = [p for p in table.unreadable_pids if not watched_pids or p in watched_pids]
+    if poison:
         return False
     return not table.by_pgrp.get(int(pgid), ())
 
@@ -511,12 +529,16 @@ def ram_kill_ladder(
     platform: Optional[str] = None,
     lane: Optional[str] = None,
     on_ownership_unverified: Optional[Callable[[], None]] = None,
+    watched_pids: tuple[int, ...] = (),
 ) -> tuple[str, str]:
     """Kill one process group → ``(status, reason)``.
 
     The pre-kill gate is **P0–P7** (P5a RETIRED — §18.3); a kill fires
     iff ALL of them evaluate true.  Then: TERM → slice-probed grace → KILL, and finally
     the **P8 post-kill probe**.
+
+    ``watched_pids`` — the record's EVER-MEMBER set (cycle 3): P7 and P8
+    judge unreadable pids over THIS set only, never a host-global list.
 
     ``lane`` — the SPAWN'S lane (``"bash"`` | ``"proc"``): P6 reads the
     LANE-APPROPRIATE ownership stamp (leader ruling 2026-11-11).  The
@@ -581,7 +603,9 @@ def ram_kill_ladder(
         on_ownership_unverified()
 
     # ── P7 — the group is still alive ──
-    reason = check_p7_group_liveness(table.scan_complete, len(members), table.unreadable_pids)
+    reason = check_p7_group_liveness(
+        table.scan_complete, len(members), table.unreadable_pids, watched_pids
+    )
     if reason is not None:
         if reason == REASON_GROUP_EMPTY:
             return (STATUS_ALREADY_DEAD, REASON_GROUP_EMPTY)
@@ -609,7 +633,7 @@ def ram_kill_ladder(
     # ── zombie-aware KILL skip ──
     post_grace = scan_proc(proc_root)
     if post_grace.scan_complete and not post_grace.by_pgrp.get(int(pgid), ()):
-        return _finish_kill(STATUS_KILLED, REASON_GROUP_DEAD_AFTER_GRACE, proc_root, pgid)
+        return _finish_kill(STATUS_KILLED, REASON_GROUP_DEAD_AFTER_GRACE, proc_root, pgid, watched_pids)
 
     try:
         os.killpg(int(pgid), signal.SIGKILL)
@@ -617,12 +641,15 @@ def ram_kill_ladder(
         pass  # ESRCH: the group exited during the grace window
     except OSError:
         pass
-    return _finish_kill(STATUS_KILLED, REASON_LADDER, proc_root, pgid)
+    return _finish_kill(STATUS_KILLED, REASON_LADDER, proc_root, pgid, watched_pids)
 
 
-def _finish_kill(status: str, reason: str, proc_root: Path, pgid: int) -> tuple[str, str]:
-    """Apply the P8 post-kill probe to a kill outcome."""
-    if not probe_tree_after_kill(proc_root, pgid):
+def _finish_kill(
+    status: str, reason: str, proc_root: Path, pgid: int,
+    watched_pids: tuple[int, ...] = (),
+) -> tuple[str, str]:
+    """Apply the P8 post-kill probe to a kill outcome (watched-scoped)."""
+    if not probe_tree_after_kill(proc_root, pgid, watched_pids):
         reason = REASON_TREE_INCOMPLETE
     return (status, reason)
 
