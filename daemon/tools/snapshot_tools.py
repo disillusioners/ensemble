@@ -14,7 +14,15 @@ search, plus the warm-start consumption flow that backs the UNIFIED
 REMOVED as a standalone tool. Warm-start consumption now rides
 ``spawn_instance`` (``daemon/tools/instance.py``), gated by the
 TARGET (being-spawned) agent's ``snapshot_enabled: true`` meta.json
-flag. The ~500-line resolution state machine was NOT duplicated —
+flag. **vsss (2026-11-12, version-scoped snapshot spaces):** the
+automatic warm-start search resolves to the TARGET's OWN per-version
+space — keyed by the canonical versioned identity
+(``registry.compose_agent_space_key``, e.g. ``'developer[v2]'``) —
+so ``developer`` and ``developer[v2]`` never consume each other's
+snapshots; version-unattributable (NULL ``agent_space_key``) rows
+match NO version's automatic warm-start (fail-closed), while the
+explicit ``snapshot_id`` path stays version-permissive. The
+resolution state machine was NOT duplicated —
 it lives HERE as module-level helpers with a single source of
 truth, imported by the unified spawn tool:
 
@@ -37,6 +45,9 @@ Category layout — one module, one grant category:
   Consumption is gated per-agent by ``snapshot_enabled`` (registry
   field consulted against the TARGET's resolved meta), not by a
   tool grant — the former ``instance``-category ride-along is gone.
+  vsss: consumption additionally resolves to the TARGET VERSION's
+  own snapshot space (``agent_space_key``) — a gate-on target only
+  ever automatically consumes from its own version's pool.
 
 R15 settings toggle (write side ONLY): ``snapshot_create`` consults
 the async :func:`daemon.services.snapshot_settings_utils.get_snapshot_create_enabled`
@@ -47,7 +58,8 @@ fail-closed default.
 ``snapshot_search`` (read-only) is NEVER gated, and the warm-start
 consumption path inside ``spawn_instance`` is NEVER gated by R15
 either — consumption is gated ONLY by the target agent's
-``snapshot_enabled`` flag.
+``snapshot_enabled`` flag (vsss: and resolved to the target
+version's own snapshot space).
 
 R14 fail-soft contract (preserved under the unified tool):
 consumption NEVER turns a snapshot miss into an error —
@@ -130,6 +142,11 @@ When the gate is on, callers pass `snapshot_id` / `tags` /
 `verify` / `allow_cross_project` to `spawn_instance` and the result
 string carries a `[snapshot] started: warm|cold — …` citation line
 (cold fallback on any miss/expiry/verify-failure — never an error).
+vsss (version-scoped snapshot spaces): the automatic search resolves
+to the TARGET VERSION's own space only (keyed by the registry
+composite identity, e.g. `developer[v2]`); version-unattributable
+rows match no version's automatic warm-start (fail-closed), while an
+explicit `snapshot_id` is still consumed regardless of space.
 `task` + `auto_dispatch` (R18) auto-enqueue the task as the child's
 first turn. Project-less callers (e.g. an instance whose project is
 unknown) always get a cold spawn — the internal search has no
@@ -704,10 +721,13 @@ def create_snapshot_tools(
 # removed tool (explicit-id verify → internal search → staleness →
 # verify=git → R6b stamp → R16 counter), factored into module-level
 # helpers so there is exactly ONE copy of the resolution logic
-# (decision 1 of unify-spawn-tools). Ordering contract (R6b + R18):
-# resolve → manager.spawn_instance → finalize (stamp BEFORE enqueue) →
-# the unified tool's R18 auto-dispatch (which lives in instance.py —
-# it must run even when the snapshot gate is OFF).
+# (decision 1 of unify-spawn-tools). vsss (2026-11-12): the internal
+# search branch resolves to the TARGET VERSION's own snapshot space
+# (``agent_space_key`` — strict, fail-closed without it); the
+# explicit-id branch is version-permissive. Ordering contract (R6b +
+# R18): resolve → manager.spawn_instance → finalize (stamp BEFORE
+# enqueue) → the unified tool's R18 auto-dispatch (which lives in
+# instance.py — it must run even when the snapshot gate is OFF).
 
 
 @dataclass
@@ -738,7 +758,8 @@ class SpawnSnapshotResolution:
 SNAPSHOT_STEERING_IGNORED_LINE = (
     '[snapshot] ignored: snapshot_id/tags steering requires the target '
     'agent to have "snapshot_enabled": true in its meta.json — '
-    "spawned plain cold."
+    "spawned plain cold (the automatic warm-start search resolves to "
+    "each target version's own snapshot space)."
 )
 
 
@@ -751,6 +772,7 @@ async def resolve_spawn_snapshot(
     verify: str,
     allow_cross_project: bool,
     caller_project_id: str | None,
+    agent_space_key: str | None = None,
 ) -> SpawnSnapshotResolution:
     """Resolve the snapshot to warm-start from (``consumed=None`` ⇒ cold).
 
@@ -765,6 +787,19 @@ async def resolve_spawn_snapshot(
     ``staleness.warnings``). D8: ``caller_project_id=None``
     (project-less caller) fails closed on any snapshot that HAS a
     project.
+
+    vsss (version-scoped snapshot spaces): the internal-search branch
+    is version-scoped — it ALWAYS resolves to exactly ONE canonical
+    agent space (``agent_space_key``, composed by the caller from the
+    spawn target's resolved versioned identity via
+    ``registry.compose_agent_space_key``) and the Stage-0 predicate
+    is ``project_id + status='active' + agent_space_key = :key``.
+    NULL (version-unattributable) rows match NO version's automatic
+    warm-start — fail-closed, no fallback tier. A missing/unresolvable
+    key ⇒ ``no-hit`` cold + warning (a seam that cannot resolve the
+    target version never searches). The EXPLICIT ``snapshot_id``
+    branch is version-permissive (project + status verified only —
+    direct addressing, not space resolution) and unchanged.
 
     NEVER raises: an unexpected fault in this phase degrades to a
     ``no-hit`` cold with a warning so the unified spawn still
@@ -863,7 +898,20 @@ async def resolve_spawn_snapshot(
         else:
             # R14 internal search — ACTIVE-only candidates (the search
             # service filters status='active' + project).
-            if search_service is None or repo is None:
+            #
+            # vsss (version-scoped snapshot spaces): the automatic
+            # path resolves to EXACTLY ONE canonical agent space and
+            # fails closed without it — a NULL/unresolvable key never
+            # falls back to an unfiltered search (a legacy row would
+            # then be reachable from every version's warm start).
+            if not agent_space_key:
+                resolution.cold_reason = "no-hit"
+                resolution.warnings.append(
+                    "no agent version space resolved for the spawn "
+                    "target — automatic snapshot matching disabled "
+                    "(fail-closed; explicit snapshot_id still works)"
+                )
+            elif search_service is None or repo is None:
                 resolution.cold_reason = "no-hit"
                 resolution.warnings.append("snapshot services not wired")
             else:
@@ -879,6 +927,7 @@ async def resolve_spawn_snapshot(
                         # FIXME(ledger): tag_mode=any unwired — see follow-up ledger
                         tag_mode="all" if search_tags else "all",
                         limit=1,
+                        agent_space_key=agent_space_key,
                     )
                     results = list(search_result.get("results") or [])
                 except Exception as exc:
@@ -899,6 +948,25 @@ async def resolve_spawn_snapshot(
                         or getattr(consumed, "status", None) != "active"
                     ):
                         resolution.cold_reason = "no-hit"
+                    elif (
+                        getattr(consumed, "agent_space_key", None)
+                        != agent_space_key
+                    ):
+                        # vsss belt-and-braces (REVIEW-1 Minor-7): the
+                        # SQL predicate already filtered candidates to
+                        # agent_space_key = :key; re-verify on the
+                        # re-read row so a TOCTOU flip between search
+                        # and get (e.g. a concurrent backfill stamp)
+                        # refuses cold instead of warm-starting
+                        # across spaces.
+                        resolution.cold_reason = "no-hit"
+                        resolution.warnings.append(
+                            f"top match {top.get('snapshot_id')} space "
+                            f"mismatch on re-read (row="
+                            f"{getattr(consumed, 'agent_space_key', None)!r} "
+                            f"!= spawn={agent_space_key!r}) — refused "
+                            f"(fail-closed)"
+                        )
                     elif top.get("freshness") == "expired":
                         resolution.cold_reason = "expired"
                         resolution.warnings.append(

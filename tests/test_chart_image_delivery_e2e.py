@@ -1477,14 +1477,15 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # to this file still trips the tripwire.
     "daemon/sources/adapters/slack/adapter.py": "476ba0b5a17a297f652125ab9060af125ba3955d4b71e324e3de3bf177e1ef1e",
     "daemon/sources/adapters/telegram.py": "7e08882fc2fcc4291bed994ab992cb5afdc7a232a1444839f42da86fbfae063c",
-    # daemon/constants.py re-pinned 2026-11-07 (wi-b97ec302 tidier pass):
-    # zero-behavior addition of SOURCE_CONFIG_SCAN_MAX_ROWS — names the
-    # boot-scan ceiling the registry page-through already enforced
-    # (page_size * 200 == 100_000; same value, now constant-home).
-    # Prior value 21cd744a2eb80c52ce67e782640a6886415690875997f20cb62763f99cfc3c7e.
-    # Prior re-pin note: wi-b97ec302 sources-pagination fix
-    # (SOURCE_CONFIG_PAGE_SIZE / SOURCE_LIST_HARD_MAX; lane commit 799679a94).
-    "daemon/constants.py": "4453ef30f28b440ae87ba3eab760075ecc1c5958b445946638753ff73ddba5a9",
+    # daemon/constants.py re-pinned 2026-11-12 (vsss — version-scoped
+    # snapshot spaces): zero-behavior comment addition on the
+    # SNAPSHOT_CREATE_METADATA_KEY block — notes that warm-start
+    # consumption additionally resolves to the TARGET VERSION's own
+    # snapshot space (agent_space_key).
+    # Prior value 4453ef30f28b440ae87ba3eab760075ecc1c5958b445946638753ff73ddba5a9.
+    # Prior re-pin note: wi-b97ec302 tidier pass
+    # (SOURCE_CONFIG_SCAN_MAX_ROWS; lane commit 799679a94 lineage).
+    "daemon/constants.py": "5ce5a4198596d53b6ae318ac20f4bcff523d112d5e6fcac3d21e34cf40a132fb",
     # Phase C — 20 agent canonical-home files
     # agents/approver/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
     # C8): the duty section was APPENDED to this file by the phase-5 duty
@@ -1501,23 +1502,25 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # ceremony, so the pinned content-sha256 moved with the real bytes.
     # Prior value ce96896142f568c480a2f92b9b92fa0775be641d877fa386205d8438d55b21b4.
     "agents/architect/rule.md": "ba53247b1e2095ba3776a7d23713c9b796927575647cb15e99842fe54b779a73",
-    # agents/ari/rule.md re-pinned 2026-11-06 (ari-pm-terminology-RESIDUAL):
-    # whole-file genericization — the Default Delegation Targets row and the
-    # four Project-Management Dispatch bullets (Trigger / Topology / Scope
-    # split / Environment discipline) lost their residual product wording and
-    # their backticked implementation verb names.  The section now carries
-    # EXACTLY ONE occurrence: the sanctioned backing note.  Pure wording: no
-    # rule, ordering, or behavioural change.  Brief: ari-pm-terminology-
-    # residual.
-    # Prior value a133f840703f7dabe6d6910e660a6febe1e0a8adb8a83e42b1497d122851a0de.
-    # Prior re-pin note: ari-pm-terminology (PM-tracking section reword).
-    "agents/ari/rule.md": "8063c9ce005d300f34b10fac2b81c3f00ca0756720cb05858dcc3e1a594a2e6d",
+    # agents/ari/rule.md re-pinned 2026-11-12 (vsss — version-scoped
+    # snapshot spaces): the Never-Use-instance-Tools bullet now notes
+    # that each version resolves to its own snapshot space (vsss).
+    # Pure doc alignment with the spawn_instance tool docstring; no
+    # rule or behavioural change.
+    # Prior value 8063c9ce005d300f34b10fac2b81c3f00ca0756720cb05858dcc3e1a594a2e6d.
+    # Prior re-pin note: ari-pm-terminology-RESIDUAL (whole-file
+    # genericization).
+    "agents/ari/rule.md": "fc0a7542157d79d16011a48d7e79d31d33fe1376ca5fc5c694d47e670bcfdf10",
     "agents/coder/soul.md": "6263b648cfee8eeb84bb90361687e45728bc8bdae60702e965a84a23a1b46968",
-    # agents/developer/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
-    # C8): the duty section was APPENDED to this file by the phase-5 duty
-    # ceremony, so the pinned content-sha256 moved with the real bytes.
-    # Prior value 9b06c29c811e3636765f8ee09dd1a2b10901554e542723f3de6b851a85a97249.
-    "agents/developer/rule.md": "d4f8c671e354da079ec16bdaf9d25fd558d7601bb97fcc055d7b8d4bd22cc9ca",
+    # agents/developer/rule.md re-pinned 2026-11-12 (vsss — version-
+    # scoped snapshot spaces): the 10b Spawn-citation contract bullet
+    # now notes that each version resolves to its own snapshot space
+    # (vsss). Pure doc alignment with the spawn_instance tool
+    # docstring; no rule or behavioural change.
+    # Prior value d4f8c671e354da079ec16bdaf9d25fd558d7601bb97fcc055d7b8d4bd22cc9ca.
+    # Prior re-pin note: nest-anomaly-report phase 5 / C8 (duty
+    # section appended).
+    "agents/developer/rule.md": "c615d2a03dcc361f7c97fcf984cfcdde732732e68ec0a05b0f86da59534cd492",
     "agents/developer[v2]/tools_note.md": "62882063ca109e7829c097201e110a0edb872ade000415372ab7ca016bee5748",
     # agents/devops/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
     # C8): the duty section was APPENDED to this file by the phase-5 duty
@@ -1534,11 +1537,15 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # ceremony, so the pinned content-sha256 moved with the real bytes.
     # Prior value 07aaed75b0290d2d857ede82f876b6d55979d2f67ba29b861781531f815b41f2.
     "agents/governor/rule.md": "a991057c811d709ff8be1e70c8b6f93680576387a4bfa1c21c6669bdd537fc22",
-    # agents/leader/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase 5 /
-    # C8): the duty section was APPENDED to this file by the phase-5 duty
-    # ceremony, so the pinned content-sha256 moved with the real bytes.
-    # Prior value f0bda673c7b112ef7a43f17f1166f99fcb11f1562aabf0d7a5c9879e924a231a.
-    "agents/leader/rule.md": "d104cb7fe0be553e2252322de1d5c861f808be503af4f3e428b64055affb2fc7",
+    # agents/leader/rule.md re-pinned 2026-11-12 (vsss — version-scoped
+    # snapshot spaces): the Spawn-citation contract paragraph now notes
+    # that each version resolves to its own snapshot space (vsss).
+    # Pure doc alignment with the spawn_instance tool docstring; no
+    # rule or behavioural change.
+    # Prior value d104cb7fe0be553e2252322de1d5c861f808be503af4f3e428b64055affb2fc7.
+    # Prior re-pin note: nest-anomaly-report phase 5 / C8 (duty
+    # section appended).
+    "agents/leader/rule.md": "6a225b9f0becdb9b135efcc5b5e42661f48676aba1b65189e2314343ce5ea09d",
     # agents/maintenancer/rule.md re-pinned 2026-11-05 (nest-anomaly-report phase
     # 5 / C8): the duty section was APPENDED to this file by the phase-5 duty
     # ceremony, so the pinned content-sha256 moved with the real bytes.

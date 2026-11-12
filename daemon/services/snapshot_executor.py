@@ -157,6 +157,7 @@ def derive_auto_tags(
     git_branch: str | None,
     spawned_from_snapshot_id: str | None,
     runtime_version: str,
+    agent_space_key: str | None = None,
 ) -> list[str]:
     """Derive the R8 auto-tag set (zero prompt cost, computed at capture).
 
@@ -166,12 +167,23 @@ def derive_auto_tags(
     (from the permanent ``parent_id`` chain root), ``branch:`` (iff
     stamped), ``from-snapshot:`` (iff the target carries
     ``spawned_from_snapshot_id`` — R6b read-side), ``runtime:``.
+
+    vsss: ``agent_space_key`` (optional) appends ONE additive
+    version-qualified identity token ``agent-space:{key}`` (e.g.
+    ``agent-space:developer[v2]``) right after the ``role:`` alias —
+    ranking signal for version-scoped discovery. ADDITIVE ONLY: the
+    bare ``agent:{id}`` / ``role:{id}`` tokens are NEVER removed or
+    replaced (compat — existing tag filters keep matching). The token
+    carries the canonical space key (``registry.compose_agent_space_key``),
+    never the meta.json ``version`` field.
     """
     tags = [
         f"project:{project_id}",
         f"agent:{agent_id}",
         f"role:{agent_id}",
     ]
+    if agent_space_key:
+        tags.append(f"agent-space:{agent_space_key}")
     if lineage_root_id:
         tags.append(f"lineage:{lineage_root_id}")
     if git_branch:
@@ -1055,6 +1067,15 @@ class SnapshotService:
         # R8 judgment tags — fail loud BEFORE any write (a malformed
         # tag list never enters the ledger).
         normalized_tags = normalize_judgment_tags(list(judgment_tags))
+        # vsss — canonical versioned space key of the TARGET instance
+        # (agent_id + agent_tag → e.g. 'developer[v2]'). Resolved from
+        # the PERSISTED instances row (agent_id base + directory-suffix
+        # agent_tag — never meta.json 'version'). None = target row
+        # missing/unattributable → the row stamps NULL and matches NO
+        # version's automatic warm-start (fail-closed).
+        target_space_key = self._resolve_target_space_key(
+            target_instance_id
+        )
         auto_tags = derive_auto_tags(
             project_id=project_id,
             agent_id=self._resolve_target_agent_id(target_instance_id) or "unknown",
@@ -1062,6 +1083,7 @@ class SnapshotService:
             git_branch=git_branch,
             spawned_from_snapshot_id=self._resolve_spawned_from(target_instance_id),
             runtime_version=_runtime_version(),
+            agent_space_key=target_space_key,
         )
         domain_tags = auto_tags + normalized_tags
 
@@ -1073,6 +1095,7 @@ class SnapshotService:
             task_summary=task_summary,
             domain_tags=domain_tags,
             status=SNAPSHOT_STATUS_RUNNING,
+            agent_space_key=target_space_key,
             supersedes_snapshot_id=None,  # stamped by R12 at successor mint
             repo_path=repo_path,
             vcs_type=vcs_type,
@@ -1210,6 +1233,32 @@ class SnapshotService:
         repo = getattr(self._manager, "_instance_repository", None)
         row = repo.get(target_instance_id) if repo is not None else None
         return row.agent_id if row else None
+
+    def _resolve_target_space_key(self, target_instance_id: str) -> str | None:
+        """vsss — canonical versioned space key of the TARGET instance.
+
+        Composes from the PERSISTED instance row's identity pair
+        (``instances.agent_id`` base + directory-suffix
+        ``instances.agent_tag``) via
+        :func:`daemon.registry.compose_agent_space_key` — the same
+        derivation the warm-start search and the backfill use. NEVER
+        reads meta.json ``version`` (collides across versioned dirs).
+
+        Returns ``None`` (row stays unattributed → matches NO
+        version's automatic warm-start, fail-closed) when the instance
+        repository is not wired, the target row is gone (deleted
+        instance), or the row carries no usable ``agent_id``.
+        """
+        from ..registry import compose_agent_space_key
+
+        repo = getattr(self._manager, "_instance_repository", None)
+        row = repo.get(target_instance_id) if repo is not None else None
+        if row is None:
+            return None
+        return compose_agent_space_key(
+            getattr(row, "agent_id", None),
+            getattr(row, "agent_tag", None),
+        )
 
     def _resolve_spawned_from(self, target_instance_id: str) -> str | None:
         repo = getattr(self._manager, "_instance_repository", None)

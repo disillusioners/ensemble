@@ -25,9 +25,12 @@ directly; the ``is_snapshot_create_enabled`` sync stub in
 answers the fail-closed default).
 ``snapshot_search`` (read) and the warm-start consumption path inside
 ``spawn_instance`` (consumption) are NEVER R15-gated — they ship
-always-on (consumption is per-agent ``snapshot_enabled`` instead). Toggle OFF = instant cold fallback
+always-on (consumption is per-agent ``snapshot_enabled`` instead).
+Toggle OFF = instant cold fallback
 per R14 (the spawn succeeds but no snapshot is found because none is
-being created).
+being created). vsss (2026-11-12): consumption additionally resolves
+to the TARGET VERSION's own snapshot space (``agent_space_key``) —
+version-unattributable rows match no version's automatic warm-start.
 """
 from __future__ import annotations
 

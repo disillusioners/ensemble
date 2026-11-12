@@ -3096,7 +3096,9 @@ class SpawnInstanceInput(BaseModel):
             "failed verification falls back to a cold spawn with a "
             "warning (never an error). Omit to let the tool search "
             "for the best active match itself (requires task for the "
-            "search query). Only consulted when the TARGET agent has "
+            "search query; the automatic search resolves to the "
+            "TARGET version's own snapshot space — vsss). Only "
+            "consulted when the TARGET agent has "
             '"snapshot_enabled": true in its meta.json — otherwise '
             "ignored with an informational line."
         ),
@@ -3105,8 +3107,9 @@ class SpawnInstanceInput(BaseModel):
     tags: Annotated[list[str], Field(
         description=(
             "Optional R8 `dim:value` tags steering the internal "
-            "snapshot search when snapshot_id is omitted. Only "
-            "consulted when the TARGET agent has "
+            "snapshot search when snapshot_id is omitted (the search "
+            "is scoped to the TARGET version's own snapshot space — "
+            "vsss). Only consulted when the TARGET agent has "
             '"snapshot_enabled": true in its meta.json.'
         ),
     )] = []
@@ -3290,7 +3293,13 @@ def create_instance_tools(
         ``verify``/``allow_cross_project`` to warm-start the child from a
         matching snapshot; any miss / expiry / verify-failure degrades to
         a plain cold spawn and the result carries a ``[snapshot] started:
-        warm|cold — …`` citation line to cite in your report.
+        warm|cold — …`` citation line to cite in your report. vsss
+        (version-scoped snapshot spaces): the automatic search resolves
+        to the TARGET VERSION's OWN space (keyed by the registry
+        composite identity, e.g. ``developer[v2]``) — versions never
+        consume each other's snapshots; version-unattributable rows
+        match no version's automatic warm-start, while an explicit
+        ``snapshot_id`` is still honored across spaces.
 
         Two-outcome precision for the return contract:
 
@@ -3507,10 +3516,20 @@ def create_instance_tools(
             # W2: registry validates the configured tag so a stale
             # default (e.g. ``"v99"`` retagged/renamed) falls back to
             # base instead of hard-failing the spawn.
-            from ..registry import get_registry
+            from ..registry import compose_agent_space_key, get_registry
             registry = get_registry()
             version_tag = await _resolve_default_version_tag(
                 manager._project_repository, agent_id, registry
+            )
+            # vsss (version-scoped snapshot spaces): compose the
+            # canonical space key from the spawn target's RESOLVED
+            # versioned identity — the same tag this spawn will start
+            # the child with — so developer and developer[v2] search
+            # DIFFERENT snapshot spaces. One derivation for all seams
+            # (registry.compose_agent_space_key); never the meta.json
+            # 'version' field.
+            snapshot_space_key = compose_agent_space_key(
+                agent_id, version_tag
             )
 
             # ── unify-spawn-tools (2026-10-05): TARGET-agent snapshot
@@ -3521,7 +3540,10 @@ def create_instance_tools(
             # with) so developer[v2]-style variants gate on THEIR
             # flag. Gate OFF ⇒ NO snapshot work at all: no search, no
             # repo reads, no snapshot output — exactly the
-            # pre-unification plain cold spawn.
+            # pre-unification plain cold spawn. vsss: the internal
+            # search resolves per-version snapshot spaces keyed by
+            # ``snapshot_space_key`` (the same resolved identity);
+            # NULL/unattributed rows never match the automatic path.
             snapshot_gate_on = _target_snapshot_enabled(agent_id, version_tag)
             resolution: SpawnSnapshotResolution | None = None
             steering_note = ""
@@ -3540,6 +3562,7 @@ def create_instance_tools(
                     verify=verify,
                     allow_cross_project=allow_cross_project,
                     caller_project_id=caller_project,
+                    agent_space_key=snapshot_space_key,
                 )
             elif snapshot_id or tags:
                 # Steering params passed to a non-snapshot target —
@@ -7255,7 +7278,9 @@ Returns:
     # a tool since unify-spawn-tools (2026-10-05): spawn_instance
     # above consumes the snapshot_tools helpers directly, gated by the
     # TARGET agent's snapshot_enabled meta flag (spawn_hot_instance
-    # was removed).
+    # was removed). vsss (2026-11-12): the automatic consumption
+    # search resolves to the TARGET VERSION's own snapshot space
+    # (registry composite key over the spawn identity).
     # Both tools fail-soft when the snapshot services are not wired on
     # the manager (test doubles / partial init), so this call is safe
     # everywhere create_instance_tools runs. version_tag is forwarded

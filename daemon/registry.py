@@ -31,6 +31,51 @@ SKIP_DIRS: frozenset[str] = frozenset({
 _TAG_PATTERN = re.compile(r'^([^\[\]]+)\[([A-Za-z0-9_-]+)\]$')
 
 
+def compose_agent_space_key(
+    base_agent_id: str | None,
+    version_tag: str | None,
+) -> str | None:
+    """Canonical snapshot-space key for a versioned agent identity (vsss).
+
+    THE single derivation every ``agent_space_key`` seam uses (capture
+    stamping, warm-start search, backfill). Mirrors the registry's own
+    composite key format exactly (:meth:`AgentRegistry.get_version` /
+    discovery at ``_register_discovered``):
+
+    * tagged definition   → ``f"{base_agent_id}[{version_tag}]"``
+      (e.g. ``'developer[v2]'``);
+    * untagged definition → bare ``base_agent_id`` (e.g.
+      ``'developer'``, ``'tester'``).
+
+    NEVER derived from meta.json ``version`` (both ``developer`` and
+    ``developer[v2]`` carry ``"version": "2.0.0"`` — that field
+    collides across the versioned directories and is a display
+    version, not an identity). Identity comes from the DIRECTORY
+    suffix only (``_parse_agent_dir_name``), as persisted on
+    ``instances.agent_id`` + ``instances.agent_tag``.
+
+    Returns ``None`` when ``base_agent_id`` is missing/blank — the
+    caller stamps no space (row stays NULL ⇒ matches NO version's
+    automatic warm-start: fail-closed, version-unattributable).
+
+    Args:
+        base_agent_id: Base agent identifier (never a composite key).
+        version_tag: Directory-name tag (e.g. ``"v2"``) or ``None``.
+
+    Returns:
+        The canonical space key string, or ``None`` when unresolvable.
+    """
+    if base_agent_id is None:
+        return None
+    base = str(base_agent_id).strip()
+    if not base:
+        return None
+    tag = str(version_tag).strip() if version_tag else ""
+    if tag:
+        return f"{base}[{tag}]"
+    return base
+
+
 def _parse_agent_dir_name(dir_name: str) -> tuple[str, str | None]:
     """Parse a directory name, extracting optional [tag] suffix.
 

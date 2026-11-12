@@ -228,6 +228,64 @@ class SnapshotRepository:
             session.commit()
             return True
 
+    # ── vsss backfill support ─────────────────────────────────────────
+
+    def rows_missing_agent_space(self, limit: int = 0) -> list[Snapshot]:
+        """Rows whose ``agent_space_key`` is still NULL (vsss backfill).
+
+        All statuses — superseded rows are stamped too so the column
+        reaches uniform coverage (the search predicate additionally
+        filters ``status='active'``, so this is hygiene, not reach).
+        Ordered by ``created_at`` for deterministic chunking.
+
+        Args:
+            limit: Max rows returned; ``0`` (default) = unbounded.
+
+        Returns:
+            The unattributed rows (fresh read; re-running after a
+            stamp pass yields only rows the pass could not resolve).
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(Snapshot)  # type: ignore[arg-type]
+                .where(col(Snapshot.agent_space_key).is_(None))
+                .order_by(col(Snapshot.created_at))
+            )
+            if limit and int(limit) > 0:
+                stmt = stmt.limit(int(limit))
+            return list(session.exec(stmt).all())
+
+    def stamp_agent_space_key(self, snapshot_id: str, key: str) -> bool:
+        """Stamp one row's ``agent_space_key`` (vsss backfill).
+
+        CAS-flavored: the write only lands when the row's
+        ``agent_space_key`` is STILL NULL — a concurrent capture or a
+        re-run can never overwrite an already-stamped key (idempotent;
+        re-run = no-op on stamped rows).
+
+        Args:
+            snapshot_id: Row id.
+            key: The canonical space key
+                (``registry.compose_agent_space_key`` output).
+
+        Returns:
+            ``True`` if this call stamped the row; ``False`` when the
+            row is unknown or was already stamped (both are success
+            states for an idempotent backfill re-run).
+        """
+        if not key or not str(key).strip():
+            return False
+        with Session(self.engine) as session:
+            row = session.get(Snapshot, snapshot_id)
+            if row is None:
+                return False
+            if row.agent_space_key is not None:
+                return False
+            row.agent_space_key = str(key).strip()
+            session.add(row)
+            session.commit()
+            return True
+
     def update_capture_result(
         self,
         snapshot_id: str,
@@ -424,6 +482,8 @@ class SnapshotRepository:
         self,
         project_id: str,
         limit: int = 50,
+        *,
+        agent_space_key: str | None = None,
     ) -> list[Snapshot]:
         """Active-status candidates for project-scoped search (PR5).
 
@@ -434,11 +494,21 @@ class SnapshotRepository:
         existing call shape. The 3-line delegation is the only
         behaviour delta from the original implementation; zero
         observable change at any call site.
+
+        Args:
+            project_id: Owning project (D8 — required).
+            limit: Outer SQL cap on candidates.
+            agent_space_key: vsss — when set, restrict candidates to
+                rows stamped with this canonical versioned space key
+                (NULL rows — legacy / unattributed — NEVER match:
+                fail-closed). ``None`` (default) = no space filter
+                (the public ``snapshot_search`` tool path).
         """
         items, _total = self.list_with_filters(
             project_id=project_id,
             statuses=(SNAPSHOT_STATUS_ACTIVE,),
             limit=limit,
+            agent_space_key=agent_space_key,
         )
         return items
 
@@ -452,6 +522,7 @@ class SnapshotRepository:
         created_before: str | None = None,
         tags: Sequence[str] | None = None,
         tag_mode: Literal["all", "any"] = "all",
+        agent_space_key: str | None = None,
         sort: Literal[
             "created_at_desc", "created_at_asc",
             "title_asc", "title_desc",
@@ -476,12 +547,18 @@ class SnapshotRepository:
         ``.limit()``/``.offset()`` — so the tag post-pass can still
         narrow the candidate set.
 
+        ``agent_space_key`` (vsss) is the one exception to the
+        "None means no filter" rule on the MATCH side: when set, rows
+        whose ``agent_space_key`` is NULL never match (exact
+        equality, fail-closed) — only ``None`` disables the space
+        filter entirely (the HTTP list surface).
+
         Pinned pipeline (be-plan §6.2):
 
         1. SQL: SELECT … FROM snapshots WHERE <project_id?> AND
-           <agent_id?> AND <statuses?> AND <created_after?> AND
-           <created_before?> ORDER BY <sort> (no SQL ``.limit()`` /
-           ``.offset()`` — UNPAGINATED).
+           <agent_id?> AND <statuses?> AND <agent_space_key?> AND
+           <created_after?> AND <created_before?> ORDER BY <sort>
+           (no SQL ``.limit()`` / ``.offset()`` — UNPAGINATED).
         2. POST: ``filter_by_tags(candidates, tags, tag_mode)``.
         3. COUNT: ``total = len(filtered)`` — post-filter list length.
         4. SLICE: ``items = filtered[offset : offset + limit]``.
@@ -516,6 +593,16 @@ class SnapshotRepository:
             conditions.append(col(Snapshot.created_by_agent_id) == agent_id)
         if statuses:
             conditions.append(col(Snapshot.status).in_(list(statuses)))
+        if agent_space_key is not None:
+            # vsss — version-scoped snapshot spaces. Exact-match
+            # equality: NULL agent_space_key rows (legacy /
+            # version-unattributed, incl. snapshots of deleted
+            # instances) NEVER match — SQL ``= NULL`` is never true —
+            # so they are invisible to every version's automatic
+            # warm-start path (fail-closed, no fallback tier).
+            conditions.append(
+                col(Snapshot.agent_space_key) == agent_space_key
+            )
         if created_after is not None:
             conditions.append(col(Snapshot.created_at) >= created_after)
         if created_before is not None:
