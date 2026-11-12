@@ -117,3 +117,66 @@ Canonical checkout `/home/nea/ensemble-src` never touched (porcelain sha identic
 | 8 Merged-tree | ✅ CLEAN @ 569eacdbb |
 
 **TESTING GATE: PASS — the lane is clear for its next phase (leader/ceremony owns what follows; scope fence B5 stands).**
+
+---
+
+# DELTA RE-GATE — quality pass @ `40b6c9363`
+
+**Date:** 2026-11-12 (UTC, second wave)
+**Delta under test:** `40b6c93638c0925c168fe9b022906d0ca5b56133` — `refactor(prompt-assent): quality pass` (12 files, +322/−170), on top of evidence commit `92aece24d` on tested `569eacdbb`. Base unchanged: `efa8aaae2`.
+**Workers:** W5-delta-runs `532ac11c` (test-pack-execution) · W6-delta-statics `42156858` (statics + mutation) · W-final-delta.
+
+## VERDICT: **PASS** — every item the quality pass could have moved is re-proven; the single red is the CONFIRMED pre-existing freshness flake (delta-untouched); three doc-level coverage findings + three honest caveats in §Disclosures; nothing blocks the staged release.
+
+### 1. Three touched test files — ✅ PASS (151 = expected)
+parser **60** (was 59; +M2 pin) · designated-channel **38** · census **53** — all green, wall 1.23s/8.72s/4.08s.
+
+### 2. Pack — ✅ PASS at attempt 2 (205/205)
+Attempt 1: `1 failed, 204 passed` — the failure is `TestTheFreshnessBound::test_inside_the_bound_is_fresh` (the KNOWN pre-existing boundary flake). Attempt 2: **`205 passed`, pytest 24.11s, script wall 30s, exit 0**. Ex-flake confirmation: the pack's exact 12-file surface with only that node deselected → **204 passed, 1 deselected, 0 failed** (24.69s/30s). PACKS.md row rewritten at `40b6c9363` with this measurement (supersedes the `11c024685` row; that sha was reflog-only). `PACKS.md.new` (tracked 0-byte stub) **deleted** in this evidence commit.
+
+### 3. M13 INFO-line byte-identity — ✅ EXACT
+Independent old-vs-new reconstruction (`ast` extraction of `_emit_info_line` from `92aece24d` and live `daemon/tools/prompt_assent.py`, each exec'd with a capturing `FakeLogger`): **CASE A** (digest-append, channel mint with `map_digest`) — char-identical; **CASE B** (`flags=-` empty render, DM-ish dict, no flags/digest) — char-identical. Zero differing characters. Scratch deleted. Durable pinned-substring guards also green (parser :302/:309 `map_digest=` / `map_digest=-`; designated-channel :276/:455/:1096/:1130).
+
+### 4. M3/M1 behavior — ✅ PASS
+Digest tests 4/4 green; `PHASE1_5_PLACED_CODES` is exactly `{approver-not-pinned, designation-config-invalid}`; the 4f split shape is unchanged (quote: `if private_code in PHASE1_5_PLACED_CODES: … return _refuse(...)` then `await _record_mismatch(...)` for everything else — A-12 keeps its burn). No-burn/burn pair: **8/8 green** (A-5..A-8 burn, A-9/A-10/A-11 no-burn, A-12 burn). The text-only no-burn clause removal left zero "no burn" string matches in the two source files — property is structural (placed-set membership), as designed. Approve-side extraction-incomplete cell green (refusal only; production 4c/4e return before `_record_mismatch` — unchanged, no burn).
+
+### 5. M2 byte-pin discriminates — ✅ PROVEN
+Control 1 passed → mutant (comment appended to `daemon/repositories/prompt_assent/__init__.py`) → **RED**: `AssertionError: daemon/repositories/prompt_assent/__init__.py drifted from base efa8aaae2 — the package init is byte-pinned (M2)` (byte-diff `+ # byte-pin mutation probe`) → `git checkout --` revert → node green → **full parser 60/60 green**; sha unchanged; tree clean. Pin asserts `live == base` explicitly; base existence implicitly guarded by `_git_show`'s `check=True` (no explicit non-empty assert — caveat, not defect).
+
+### 6. Ambient confirmation — ✅ (mechanism unchanged; run hit the same known flake)
+Pack with `ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS='{"999888777":"112233445566"}'` ambient → `1 failed, 204 passed`: the ONE failure is the same freshness flake; **the body-level unset held for all other 204 nodes**. The pack's delta diff is a 3-line header comment only — the unset mechanism is byte-unchanged — and the prior gate's full ambient proof (R5 green / R6 discriminating RED at `mint_gate.py:102` / R7 control green) stands on the untouched mechanism. Ex-flake 204/204 green run (item 2) supplies the positive half under ambient-identical conditions.
+
+### 7. Guards unchanged — ✅ ALL CONFIRMED
+taxonomy **29** · mismatch **5** · p15-placed **2** · overlap **0** (equality + disjoint pins quoted) · migrations **128**, head `20261110_221500_create_prompt_assent_tokens.sql`, `git diff efa8aaae2..40b6c9363 -- daemon/migrations/` **empty** · single-home literal **exactly 1** (`"ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS"` → `daemon/repositories/prompt_assent/designation.py`, pinned by `TestTheSingleHomePin`) · **0-diff vs `92aece24d`**: `daemon/api.py`, `daemon/__init__.py`, `daemon/sources/adapters/discord/adapter.py`, `daemon/manager.py`, `daemon/config.py` · **8 DM-path pin files 0-diff vs `efa8aaae2`** · pinned `daemon/repositories/prompt_assent/__init__.py` 0-diff vs base.
+
+### 8. Merged tree — ✅ CLEAN at `40b6c9363`
+Tree clean at start and end of every leg and every mutation cycle; sha never moved during the delta wave. Evidence commit lands on top (RESULTS amendment + PACKS.md row + the stub deletion).
+
+## Delta-run findings (coverage, doc-level — none blocking)
+
+1. **No literal pin of the empty-map digest `44136fa355b3`** — the value is correct (`sha256("{}")[:12]`) and the unset/empty equivalence is asserted, but no test pins the literal. Suggested follow-up: assert the literal (M1's claim made mechanically checkable).
+2. **No explicit "channel mint with INVALID map ⇒ no `map_digest` stamped" assertion** — m9/m10/m11 assert the refusal/burn shape only. Suggested follow-up: one assertion on the mint INFO line / audit payload absence.
+3. **No approve-side extraction-incomplete burn-behavior assertion** — the cell asserts the refusal code only; production returns before `_record_mismatch` (no burn) and the test does not pin that. Suggested follow-up: `_assert_no_burn` on that cell.
+
+## Disclosures
+
+1. **Freshness flake CONFIRMED PRE-EXISTING:** delta-untouched proof = `git diff --stat efa8aaae2..40b6c9363 -- tests/unit/test_prompt_assent_freshness.py` **empty** + `git log --oneline efa8aaae2..40b6c9363 -- <same>` **empty** + not in the 12-file delta. 10-run isolation this batch: 10/10 green; prior isolated probe 1P/2F with no code change ⇒ timing-boundary jitter, not a regression. The pack row records attempt 2 of 2; durable fix remains deferred per the parent lane's OD-3.
+2. **M13 probe method caveat:** the byte-identity proof is an extracted-function exec with a stubbed logger (no full in-process mint), plus the durable pinned-substring assertions. Two independent forms agree; residual risk is low.
+3. **M2 base non-empty** is not explicitly asserted (implicit via `_git_show(check=True)`).
+4. **M7 remains SKIPPED per the leader's ruling** — carried as a residual, not a test-gate defect.
+5. `PACKS.md.new` was **tracked** (empty blob since base) — deletion is a tracked-file deletion, performed intentionally in this evidence commit.
+
+## Delta overall status
+
+| Delta item | Verdict |
+|---|---|
+| 1 Touched files 151 | ✅ PASS |
+| 2 Pack 205 (attempt 2) | ✅ PASS (+ pre-existing flake recorded) |
+| 3 M13 byte-identity | ✅ EXACT |
+| 4 M3/M1 behavior + burn pair | ✅ PASS |
+| 5 M2 pin discriminates | ✅ PROVEN |
+| 6 Ambient | ✅ (mechanism unchanged; flake-only red) |
+| 7 Guards | ✅ ALL CONFIRMED |
+| 8 Merged tree | ✅ CLEAN |
+
+**FINAL VERDICT FOR `40b6c9363`: PASS** — the quality pass introduced no behavioral regression; the release may cite this sha. Residuals: the three doc-level coverage follow-ups above, the deferred freshness flake fix, and the leader-ruled M7 skip.
