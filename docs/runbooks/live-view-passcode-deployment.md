@@ -443,9 +443,14 @@ verify → 303 + `view_grant` cookie → bytes through the gate; direct lane + `
 **Loopback exemption (behavior update):** the "Secure connection required" outcome
 above is now loopback-scoped. A plain-HTTP public-lane request whose `Host` (after
 port-strip — IPv6 bracket form included — and lowercasing) is exactly `localhost`,
-`127.0.0.1`, `::1`, or `::ffff:127.0.0.1` is **served over plain HTTP**; every
+`127.0.0.1`, `::1`, or `::ffff:127.0.0.1` is **served over plain HTTP** only when the
+TCP peer is also loopback — the exemption keys on BOTH a loopback `Host` and a loopback
+transport peer, so a remote client spelling `Host: localhost` on a plain-HTTP
+LAN-exposed deployment does NOT match and still receives the HTTPS rejection; every
 non-loopback Host still gets the unchanged HTTPS rejection, and the passcode gate is
-unchanged — a valid code is still required on loopback HTTP.
+unchanged — a valid code is still required on loopback HTTP. Passcode + lockout remain
+the access control; prefer binding to `127.0.0.1` or enabling TLS when exposing the
+daemon on a LAN.
 
 **Host-preservation assertion (local counterpart of §3 step H):** the verify POST is
 exercised with (a) a **vouched same-origin** `Origin` — the inbound `Host` and the
