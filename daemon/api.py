@@ -4480,8 +4480,6 @@ async def lifespan(app: FastAPI):
     await manager.shutdown()
 
 
-
-
 def _boot_ram_guard(app, manager, config):
     """The RAM-guard composition root — ONE boot-time construction.
 
