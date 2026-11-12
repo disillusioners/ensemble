@@ -689,7 +689,7 @@ lane's scope**; see `risks.md` Part 5, NT-5.)
 *"map says no"* and *"map is broken/empty"* — and **D-4 rule 4's promised diagnostic had no
 specified log line at all** (architect §3.6(b)). It is now specified: **T1.3** (Phase 1) emits
 the parse state (**empty / unset / invalid / N entries**) plus a content-free fingerprint, and
-the effective-map line is logged at FIRST successful resolution in a process AND whenever the effective digest changes between resolutions — inside the cached-lazy resolver; no boot hook, no api.py (**D-20**).
+the effective-map line is emitted on every resolution; the `first_resolution=` / `digest_changed=` flags mark the first successful resolution in a process and every digest change — inside the cached-lazy resolver; no boot hook, no api.py (**D-20**).
 
 ---
 
@@ -790,7 +790,7 @@ auth**. The true boundary is two-part: the map leaves **every audited tool surfa
 **and** even a malicious map cannot mint without a genuine-user turn **by the pinned human** in
 the designated channel (`daemon/tools/prompt_assent.py:674-702`).
 
-**Control (a) — the effective-map log line.** logged at FIRST successful resolution in a process AND whenever the effective digest changes between resolutions — inside the cached-lazy resolver; no boot hook, no api.py. The resolver emits **one** line
+**Control (a) — the effective-map log line.** emitted on every resolution; the `first_resolution=` / `digest_changed=` flags mark the first successful resolution in a process and every digest change — inside the cached-lazy resolver; no boot hook, no api.py. The resolver emits **one** line
 naming the map's **entry count** and a **content-free fingerprint** (the first **12** hex of the
 canonical JSON's sha256 — **one length, everywhere**; T2.11's `map_digest=<12 hex>` uses the same) —
 never a value, never a channel id. An unvetted expansion becomes
@@ -806,9 +806,14 @@ ARCHITECT'S §3.5 — it is an owned plan requirement, not a nice-to-have.**
 | **Where it lands (primary)** | the mint's **content-free INFO log line** (`daemon/tools/prompt_assent.py:508-543`) gains a `map_digest=<12 hex>` field — the per-mint provenance entry. **No schema change**: the token table gains **no column** |
 | **Where it lands (secondary)** | the **approve/reject audit payload** (`prompt_audit_events.payload`, JSON — additive, **no migration**) carries `map_digest`, so the **decision's** provenance in the queryable ledger names the map that was in force |
 | **Why NOT the token row** | a `map_digest` column on `prompt_assent_tokens` would need a **129th migration** — which **D-5** and the architect's §9.5 forbid (the migration head stays `20261110_221500`, 128 files). The token row's bytes are unchanged |
-| **The owned tasks** | **Phase 2 — T2.10** (the effective-map log line — control (a), logged at FIRST successful resolution in a process AND whenever the effective digest changes between resolutions — inside the cached-lazy resolver; no boot hook, no api.py); **Phase 2 — T2.11** (the effective map digest in the mint provenance — control (b)); **Phase 2 — T2.12** (the effective map digest in the decision provenance — control (b)) |
-| **The owned ACs** | **Phase 2 — AC15** (control (a): logged at FIRST successful resolution in a process AND whenever the effective digest changes between resolutions — inside the cached-lazy resolver; no boot hook, no api.py — the line carries the entry count + the content-free fingerprint) · **Phase 2 — AC13** (control (b): the mint INFO line carries the digest) · **Phase 2 — AC14** (control (b): the audit payload carries the digest) |
+| **The owned tasks** | **Phase 2 — T2.10** (the effective-map log line — control (a), emitted on every resolution; the `first_resolution=` / `digest_changed=` flags mark the first successful resolution in a process and every digest change — inside the cached-lazy resolver; no boot hook, no api.py); **Phase 2 — T2.11** (the effective map digest in the mint provenance — control (b)); **Phase 2 — T2.12** (the effective map digest in the decision provenance — control (b)) |
+| **The owned ACs** | **Phase 2 — AC15** (control (a): emitted on every resolution; the `first_resolution=` / `digest_changed=` flags mark the first successful resolution in a process and every digest change — inside the cached-lazy resolver; no boot hook, no api.py — the line carries the entry count + the content-free fingerprint) · **Phase 2 — AC13** (control (b): the mint INFO line carries the digest) · **Phase 2 — AC14** (control (b): the audit payload carries the digest) |
 | **The owned tests** | **Phase 3 — T3.9** (the digest is stable for a given map, changes when the map changes, and never contains a channel id, a user id or the raw value) |
+
+**The two digests may legitimately differ** after a mid-flight re-designation (D-6): the mint's
+`map_digest` names the map in force AT THE MINT, the decision's names the map in force AT THE
+DECISION — that divergence is the point, not a provenance break: it is what makes the
+re-designation window observable (the A-9 cell).
 
 **Control (c) — the S-1 residual is rewritten** per the architect's §3.4 (see **D-3** and
 `risks.md` S-1). The runbook **must not** lean on the file-tool deny list
@@ -938,18 +943,20 @@ downstream consumer can accidentally treat it as an identity.
 ### D-20 — **LEADER RULING C** (blocker 3): the effective-map log line moves to **FIRST-RESOLUTION + ON-DIGEST-CHANGE inside the cached-lazy resolver**
 
 **Status:** **`LEADER-RULED`** (leader/dispatcher, 2026-11-11 — the approver iteration-002 blocking issue #3)
-**Decision.** D-15 control (a) moves from "boot-time effective-map line" to **FIRST-RESOLUTION +
-ON-DIGEST-CHANGE logging inside the cached-lazy resolver** in `prompt_assent.py` (a file the lane
-already touches): log the effective map (or its digest) when first successfully resolved in a
-process AND whenever the effective digest changes between resolutions. **NO boot hook**,
-**NO `daemon/api.py` edit**; **PR-1 raise-on-invalid UNTOUCHED** (the log fires only on successful
-resolution; invalid maps keep their typed-invalid refusal path). Re-wrds **AC15** + **T2.10** to
+**Decision.** D-15 control (a) moves from "boot-time effective-map line" to **effective-map
+logging inside the cached-lazy resolver** in `prompt_assent.py` (a file the lane
+already touches): as built, the line is **emitted on every resolution**; the
+`first_resolution=` / `digest_changed=` flags mark the first successful resolution in a
+process and every digest change. **NO boot hook**,
+**NO `daemon/api.py` edit**; **PR-1 raise-on-invalid UNTOUCHED** (invalid maps keep their
+typed-invalid refusal path). Re-words **AC15** + **T2.10** to
 this contract; **D-15's control-(a) row** amended.
 
 **Rationale.** `prompt_assent.py` has **zero** lifespan/startup hooks (the approver verified:
 grep=0), and `daemon/api.py` is fenced out (**O-4**). An import-time side effect would **nullify
-PR-1/AC4** (every test import would parse the map). First-resolution logging fires at the same
-moment the map is actually read — and on-digest-change logging makes a mid-flight map change
+PR-1/AC4** (every test import would parse the map). The line fires at the same
+moment the map is actually read (every resolution, flags marked) — and the `digest_changed=1`
+flag makes a mid-flight map change
 **visible** without a boot hook.
 
 ---

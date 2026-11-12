@@ -174,6 +174,10 @@ rest: the effective-map log line (entry count + a content-free 12-hex
 fingerprint) fires at first resolution and on every digest change, and
 every channel mint's INFO line plus the decision's audit payload carry
 the same `map_digest` — a map change is always visible in provenance.
+The two digests are the same only while the map is stable: after a
+mid-flight re-designation (D-6), the decision's `map_digest` may differ
+from the mint's — and that divergence is the point, not a provenance
+break (it is what makes the A-9 re-designation window observable).
 
 ## The three factors (and what they are NOT)
 

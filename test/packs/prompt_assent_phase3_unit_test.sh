@@ -65,6 +65,14 @@
 #           bash test/packs/prompt_assent_phase3_unit_test.sh
 
 set -euo pipefail
+
+# N2 (2026-11-12 fix round): the per-variable `-u` flags in the
+# invocation note above are ADVISORY (they document the caller's duty);
+# this body-level unset makes the scrub REAL — an ambient operator map
+# cannot leak into the house gate even when the pack is invoked without
+# the `-u` flags (T3.10; the one ambient-flippable pin is the
+# guild-default ids at tests/unit/test_prompt_assent_mint_gate.py:102).
+unset ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 echo "=== Test Pack: prompt_assent_phase3_unit_test ==="

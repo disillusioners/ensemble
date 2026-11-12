@@ -152,6 +152,12 @@ def designation_outcome(
     8. a **user ≠ the pinned approver** ⇒ ``APPROVER_NOT_PINNED``;
     9. otherwise ⇒ :attr:`DesignationResult.PASS`.
     """
+    if not isinstance(discord_meta, Mapping):
+        # A non-Mapping meta (a caller bug — a list, a str, an int) has
+        # no usable discriminator: fail CLOSED to the typed outcome,
+        # never raise AttributeError out of the classifier (the gate
+        # callers must always see a DesignationResult).
+        return DesignationResult.ABSENT_DISCRIMINATOR
     meta: Mapping[str, Any] = discord_meta if discord_meta else {}
     is_dm = meta.get("is_dm")
     is_group_dm = meta.get("is_group_dm")

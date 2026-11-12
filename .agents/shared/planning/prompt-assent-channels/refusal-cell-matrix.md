@@ -218,6 +218,11 @@ The proof is **INVARIANT-DM** plus four legs. (The proofs are numbered **PR-1…
 > `parse_designations`, and the outcome (code, envelope, token row, ledger shape, budget counter,
 > attempt counter) MUST equal the v0.29.18 outcome.
 
+*Scope note (fix round, 2026-11-12): the guarantee covers **behaviour + refusal envelopes +
+ledger** — the code, the token row, the budget/attempt counters — **not the INFO flag set**: the
+DM mint's INFO line now carries `private_equivalent=1`, which is plan-sanctioned by **P2-AC15**
+(a log-only surface outside the ledger the invariant enumerates).*
+
 | # | Proof | Mechanism |
 |---|---|---|
 | **PR-1** | **The runtime resolver-raises pin** (the primary proof) | **Monkeypatch the resolver to RAISE**, then run three calls — a **DM mint**, a **DM approve**, and a **lane-disabled** call — and assert **no raise** and **identical outcomes** to the unpatched run. This is the **non-vacuous** form of the guarantee: a source-shape pin alone is prose-satisfiable (the house's own non-vacuity doctrine, `tests/unit/test_prompt_assent_pins.py:22-26`) |

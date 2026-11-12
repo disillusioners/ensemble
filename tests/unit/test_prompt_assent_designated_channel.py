@@ -11,7 +11,7 @@ CELL CENSUS — where every one of the 32 cells is proved
 | Cell | Named test | Where |
 |------|-----------|-------|
 | M-1  | ``test_a_proven_1to1_dm_mints`` (UNCHANGED pin) | ``test_prompt_assent_mint_gate.py:117`` |
-| M-2  | FAMILY-TESTED — the conjunction of M-1 + A-2 (a 1:1 DM by ANY human mints — the DM path does not bind the approver at mint; the binding is at approve leg 4e). NO separate cell, by the plan's own family-test rule (AC2). | this docstring |
+| M-2  | FAMILY-TESTED — M-1 + A-2 (the conjunction) **+ the named M-2 cell** ``test_m2_a_dm_mint_by_a_distinct_human_records_that_human`` (a DM mint by a NON-default human ⇒ ``mint_user_id`` records THAT human; added in the 2026-11-12 fix round — the plan's family-test rule now names this cell). The DM path does not bind the approver at mint; the binding is at approve leg 4e. | this file + this docstring |
 | M-3  | ``test_a_group_dm_is_refused_with_no_row`` (UNCHANGED pin) | ``test_prompt_assent_mint_gate.py:84`` |
 | M-4  | ``test_an_absent_discriminator_is_refused`` + the group-DM discriminator pins (UNCHANGED) | ``test_prompt_assent_mint_gate.py:92`` + ``test_prompt_assent_group_dm_discriminator.py:150`` |
 | M-5  | ``test_a_guild_channel_is_refused`` (UNCHANGED pin) | ``test_prompt_assent_mint_gate.py:102`` |
@@ -646,6 +646,36 @@ class TestTheAbsentGroupDmKeyCell:
         assert _budget_count() == 0
 
 
+class TestTheM2FamilyCell:
+    """M-2's NAMED family cell (AC2's family-test rule, as amended
+    2026-11-12): "any human mints in a 1:1 DM" was previously covered
+    only by the M-1 + A-2 conjunction — both riding the fixture's
+    DEFAULT human. This cell mints with a DISTINCT ``user_id``, so the
+    daemon-derived ``mint_user_id`` is asserted against a non-default
+    human (K-8: the identity comes from the daemon-owned window row,
+    never from a tool argument)."""
+
+    async def test_m2_a_dm_mint_by_a_distinct_human_records_that_human(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setenv(KILL_SWITCH_ENV, "1")
+        flow = build_flow(
+            meta=build_discord_meta(is_dm=True, user_id=OTHER_HUMAN),
+            designations=None,  # the map scrubbed — the DM path mints anyway
+        )
+        mint = await mint_for(flow)
+        assert "prompt_assent mint" in mint, mint
+        row = flow.token_repo.find_live(flow.version_id)
+        assert row is not None and row.mint_is_dm == 1
+        assert row.mint_user_id == OTHER_HUMAN, (
+            "the mint records the DAEMON-DERIVED human from the window "
+            "row — here the DISTINCT human, not the fixture default"
+        )
+        assert row.mint_user_id != USER_ID, (
+            "the cell exists to prove a NON-default human mints"
+        )
+
+
 # ═════════════════════════════════════════════════════════════════════════
 # The APPROVE cells — §3 of the matrix (the new ones; A-1…A-3 stay in the
 # UNCHANGED pin files, see the census above).
@@ -829,6 +859,19 @@ class TestTheApproveNoBurnCells:
             "the DM decision consumed its token"
         )
         assert flow.repo.get_version(flow.version_id).state == "approved"
+        # T3.3's no-burn legs for A-11 — the `_assert_no_burn` helper
+        # does NOT fit as-is: its revoke leg asserts ``status == "live"``,
+        # but THIS cell's token is CONSUMED BY DESIGN (the DM decision
+        # passes and spends the token). What must hold is "untouched
+        # EXCEPT the spend": the durable mismatch counter never moved and
+        # the K-9 hourly budget never moved.
+        assert row.attempts == 0, (
+            "the DM decision spends the token WITHOUT a mismatch burn"
+        )
+        assert _budget_count() == 0, (
+            "the invalid map at decision time is an operator fault — "
+            "no budget burn (D-17's asymmetry)"
+        )
 
 
 class TestTheWithdrawnDesignation:
@@ -1015,6 +1058,29 @@ class TestTheRuntimeResolverRaisesPin:
             "the resolver's raise fired ON the DM path — the mutation "
             "is demonstrated"
         )
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# The non-Mapping-meta guard (fix round (c), 2026-11-12): a non-Mapping
+# ``discord_meta`` (a caller bug — a list / a str / an int) must fail
+# CLOSED to the typed outcome, never raise AttributeError out of the
+# classifier.
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestTheNonMappingMetaFailClosed:
+    async def test_a_non_mapping_discord_meta_fails_closed(self) -> None:
+        from daemon.repositories.prompt_assent.mint_context import (
+            DesignationResult,
+            designation_outcome,
+        )
+
+        for bad_meta in (["is_dm"], "is_dm=True", 7):
+            outcome = designation_outcome(None, bad_meta, APPROVER)
+            assert outcome is DesignationResult.ABSENT_DISCRIMINATOR, (
+                bad_meta,
+                outcome,
+            )
 
 
 # ═════════════════════════════════════════════════════════════════════════
