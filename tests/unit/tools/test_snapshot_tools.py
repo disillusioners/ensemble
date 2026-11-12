@@ -155,7 +155,14 @@ def _snapshot(
     tags: list[str] | None = None,
     digest: dict[str, Any] | None = None,
     created_by: str = "coder",
+    agent_space_key: str | None = None,
 ) -> Snapshot:
+    # vsss: ``agent_space_key=None`` = legacy/version-unattributable row.
+    # Automatic-path (internal-search) tests MUST pass the spawn target's
+    # space key so the consume-arm re-check (snapshot_tools.py:951-969)
+    # passes and the intended warm/expired branch executes — the belt
+    # fail-closed refusal of NULL-key rows is correct per the ratified
+    # Option-A ruling (pinned in test_snapshot_agent_spaces.py).
     return Snapshot(
         id=snapshot_id,
         project_id=project_id,
@@ -165,6 +172,7 @@ def _snapshot(
         task_summary="did the thing",
         domain_tags=tags or [],
         status=status,
+        agent_space_key=agent_space_key,
         repo_path="/repo",
         vcs_type="git",
         git_sha="abc1234",
@@ -822,7 +830,16 @@ class TestUnifiedSpawnSnapshot:
     def test_expired_top_match_cold(self, engine, caller_rows, monkeypatch):
         m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
         repo: SnapshotRepository = m._snapshot_repo
-        repo.create_with_embeddings(_snapshot(snapshot_id="snap-stale", target="inst-1"))
+        # vsss: row carries the spawn target's space key ("worker") so the
+        # consume-arm re-check passes and the EXPIRED branch fires — the
+        # intended cold reason is expiry, not the belt's fail-closed refusal.
+        repo.create_with_embeddings(
+            _snapshot(
+                snapshot_id="snap-stale",
+                target="inst-1",
+                agent_space_key="worker",
+            )
+        )
         m._snapshot_search_service = FakeSearchService(
             [_candidate("snap-stale", [], freshness="expired", age=40.0)]
         )
@@ -841,7 +858,15 @@ class TestUnifiedSpawnSnapshot:
         top hit warms the spawn (the R14 default path)."""
         m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
         repo: SnapshotRepository = m._snapshot_repo
-        repo.create_with_embeddings(_snapshot(snapshot_id="snap-hit", target="inst-1"))
+        # vsss: in-space row ("worker" == spawn target's key) so the
+        # consume-arm re-check passes and the warm path executes.
+        repo.create_with_embeddings(
+            _snapshot(
+                snapshot_id="snap-hit",
+                target="inst-1",
+                agent_space_key="worker",
+            )
+        )
         m._snapshot_search_service = FakeSearchService(
             [_candidate("snap-hit", [], freshness="fresh", age=1.0)]
         )
@@ -918,7 +943,16 @@ class TestUnifiedSpawnSnapshot:
     def test_stale_warm_carries_drift_note_in_citation(self, engine, caller_rows, monkeypatch):
         m = _unified_spawn_manager(caller_rows, SnapshotRepository(engine))
         repo: SnapshotRepository = m._snapshot_repo
-        repo.create_with_embeddings(_snapshot(snapshot_id="snap-1", target="inst-1"))
+        # vsss: in-space row ("worker" == spawn target's key) so the
+        # consume-arm re-check passes and the stale-warm drift-note
+        # citation path executes.
+        repo.create_with_embeddings(
+            _snapshot(
+                snapshot_id="snap-1",
+                target="inst-1",
+                agent_space_key="worker",
+            )
+        )
         m._snapshot_service.staleness = {
             "snapshot_age_days": 9.0,
             "freshness": "stale",

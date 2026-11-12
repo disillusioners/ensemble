@@ -597,6 +597,48 @@ class TestAutomaticPathFailClosed:
         assert resolution.started == "cold"
         assert resolution.cold_reason == "no-hit"
 
+    def test_legacy_null_key_canned_hit_refused_cold(self, engine: Any):
+        """Legacy NULL-key row surfacing through a predicate-bypassing
+        canned hit is refused COLD by the consume-arm re-check — the
+        belt-side last line of Option A's fail-closed ruling (NULL =
+        version-unattributable, never warms ANY space, not even the
+        bare base id). Distinct from the wrong-space cell above (a
+        NON-NULL foreign key) and from the real-service cell below
+        (the predicate filters the NULL row before the consume arm);
+        this cell pins the TOCTOU/canned-bypass defense for the
+        legacy-row class specifically."""
+        repo = SnapshotRepository(engine)
+        repo.create_with_embeddings(
+            _snapshot_row(snapshot_id="snap-legacy", agent_space_key=None)
+        )
+        search = _RecordingSearchService(
+            [{"snapshot_id": "snap-legacy", "freshness": "fresh"}]
+        )
+        manager = _spawn_manager(repo, search)
+
+        async def _driver():
+            return await resolve_spawn_snapshot(
+                manager,
+                task="upgrade pipeline",
+                snapshot_id=None,
+                tags=[],
+                verify="metadata",
+                allow_cross_project=False,
+                caller_project_id="p1",
+                agent_space_key="developer",
+            )
+
+        resolution = asyncio.run(_driver())
+        assert resolution.started == "cold"
+        assert resolution.cold_reason == "no-hit"
+        assert resolution.consumed is None
+        # The refusal is the belt's explicit space-mismatch warning,
+        # carrying the NULL row key (row=None) — not a silent no-hit.
+        assert any(
+            "space mismatch on re-read" in w and "row=None" in w
+            for w in resolution.warnings
+        ), resolution.warnings
+
     def test_real_service_null_row_never_warms_own_space_search(
         self, engine: Any
     ):
