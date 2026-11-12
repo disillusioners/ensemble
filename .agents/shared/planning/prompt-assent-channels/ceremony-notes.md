@@ -70,6 +70,11 @@ variable.**
 
 ### 1.4 — Preconditions — **all of them, before the probe starts**
 
+- **The lane is in `ARMED-TENTATIVE`** — `ENSEMBLE_PROMPT_ASSENT_ENABLED=1` + restart. **Map
+  state is PER PHASE, with a RESTART between the phases**: Phase A runs with the map UNSET;
+  Phase B with it SET to the SAME channel id leg 4A used. Setting the map means editing `.env`
+  AND restarting (the map is read from the process environment); confirm the map-parse log line
+  (`state=…`) before Phase B.
 - **≥ 2 pending CORE `prompt_versions`**, **Emperor-created** (the artifact write path is
   human-session-only) and a **different subject item per minting leg** (a live token blocks
   re-mint, `daemon/tools/prompt_assent.py:1700-1705`; `force=true` supersedes).
@@ -78,6 +83,11 @@ variable.**
 - **Discord Developer Mode ON** (ids are copy-paste digits).
 - **The relay bot must be present in a NON-designated guild channel at probe time** — leg 4's
   precondition. **Absent ⇒ INCONCLUSIVE, not a pass.**
+- **Every probe channel must PASS the adapter's dispatch gates** — the relay source's
+  `require_mention` (the bot must be mentioned in every probe turn) and
+  `allowed_guild_ids` / `allowed_channels` (`daemon/sources/adapters/discord/adapter.py:163-164`
+  — the key names): a channel that fails those gates never reaches the daemon, so the probe
+  produces **silence** (no refusal, no response), which is **not** a pass.
 - **The second human must be a second ACCOUNT.** A second *device* shares the `user_id` and
   degenerates leg 5 into leg 3. **The Emperor's own alt account is the strongest choice** — it
   proves the pin binds the **account**, not the person.
@@ -97,6 +107,14 @@ multi-occupant discriminator then stays **unit-proven only** — exactly the cla
 | `no-user-origin-turn` / `user-origin-window-stale` | a **window-family** code | the Emperor's turn did not arm the window (or a bystander spoke — see §1.7) |
 | `approver-not-pinned` | the turning human is not the room's **current** pinned approver | check the map's value for **that** channel; check who spoke last (§1.7) |
 
+> **The burn asymmetry on the record (D-17 — KEEP BURN).** A **withdrawn designation** (the
+> operator re-pins or un-pins the channel between the mint and the approval) refuses
+> `token-channel-mismatch` — mismatch-class ⇒ **the token BURNS** (durable counter; five such
+> attempts revoke the live token). The two operator-fault codes do **NOT** burn:
+> `designation-config-invalid` (the map is broken) and `approver-not-pinned` on the
+> re-designation window leave the token live and its counter UNTOUCHED. This is a **user cost**
+> an operator must know before arming.
+
 ### 1.7 — Hygiene, fail-safe, and the NT-5 rule
 
 - **Refusal-only legs first; minting legs last.** One subject item per leg.
@@ -104,6 +122,10 @@ multi-occupant discriminator then stays **unit-proven only** — exactly the cla
   (`daemon/tools/prompt_assent.py:1249`, `:1252-1254`) ⇒ **single-occupant channel for leg 3**.
 - **Consume or TTL-expire** a token before reusing its subject item (60 min).
 - **Never** paste a live token into a second channel.
+- **The mention gate** (`require_mention`, default True): the relay bot must be **mentioned** in
+  every probe turn, AND the channel must pass the adapter's allow-list
+  (`daemon/sources/adapters/discord/adapter.py:163-164`) — a channel that fails either gate
+  produces **silence** (no refusal, no response), which is **not** a pass.
 - **The map-parse log line is MANDATORY probe evidence** — the state (`unset` / `empty` /
   `invalid` / `N entries`) + the content-free fingerprint. It is the **only** discriminator
   between *"map says no"* and *"map is broken/empty"*.
