@@ -208,6 +208,8 @@ def _boot_db_preflight() -> None:
             or os.environ.get("DATA_DIR")
             or "./data"
         )
+        from .ensemble_config import assert_db_resolution_sanctioned
+        assert_db_resolution_sanctioned(data_dir)
         ensemble_config = EnsembleConfig.load_or_create(data_dir)
         if not ensemble_config.is_postgres:
             logger.debug("Boot preflight: SQLite backend — PG check skipped")
@@ -443,6 +445,20 @@ def _serve_with_bind_retry(uvicorn_config, max_wait_s: float | None = None) -> N
     # the docstring). Idempotent — the app's own install at import time
     # replaces this tagged handler pair.
     install_root_logging()
+
+    # rogue-containment (component A): port-ownership gate — refuse on
+    # positive proof of a live foreign owner (exit 78 + marker line).
+    # Runs after install_root_logging() (marker line observable) and
+    # before bind_socket_with_retry. Degrade-never-refuse on write
+    # failure / unknown.
+    try:
+        from .services.port_ownership import run_port_ownership_gate
+
+        run_port_ownership_gate(host, port)
+    except SystemExit:
+        raise
+    except Exception as _po_exc:  # noqa: BLE001
+        logger.warning("port-ownership gate unavailable (%s) — proceeding", _po_exc)
 
     # Bind FIRST, serve second — the socket stays held across the
     # lifespan startup, so there is no window in which the port can be

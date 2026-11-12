@@ -133,3 +133,74 @@ class EnsembleConfig(BaseModel):
     def postgres_env_available(self) -> bool:
         """Check if PostgreSQL ENV vars are available."""
         return bool(os.environ.get("POSTGRES_HOST") and os.environ.get("POSTGRES_DB"))
+
+
+def assert_db_resolution_sanctioned(data_dir) -> None:
+    """DB-resolution guard: refuse an ambient-POSTGRES-driven first boot
+    (tier 2) unless ``ENSEMBLE_DB_AMBIENT_ALLOW=1`` is set.
+
+    Fail-closed on the tier-2 poison case AND on a guard-internal error
+    (fix-round 2 / N5 — leader fail-polarity decision: an unverifiable DB
+    sanction must not proceed; the guard logs a clear reason and exits 78).
+    Documented exemption: daemon/auth/cli.py:150 (no code change there).
+
+    Fires (sys.exit(78) + marker line) iff:
+      - (data_dir / "ensemble.json") does NOT exist (tier 2 path), AND
+      - POSTGRES_HOST and POSTGRES_DB are both set, AND
+      - ENSEMBLE_DB_AMBIENT_ALLOW != "1".
+
+    Tier 1 (json exists) => does not fire. Tier 3/4 (sqlite) => does not
+    fire. Marker line names the tier + ambient var NAMES only (never
+    values) + the fence var name (F7).
+
+    EXIT-CODE NOTE (iter-1 D4): this function calls sys.exit(78). When
+    invoked from daemon/__main__._boot_db_preflight (BEFORE uvicorn) the
+    process exits 78 (the launcher's refuse track). When invoked from
+    the api.py lifespan (a defense-in-depth backstop, unreachable when
+    the preflight ran) the SystemExit propagates through uvicorn's
+    lifespan handler as exit 3 (crash track). The __main__ preflight is
+    the exit-78 owner on BOTH entry paths (python -m daemon and frozen
+    run_app); the lifespan call is backstop only.
+    """
+    import sys as _sys
+
+    try:
+        dd = Path(data_dir)
+        config_path = dd / "ensemble.json"
+        if config_path.exists():
+            return  # tier 1 — sanctioned
+        host_set = bool(os.environ.get("POSTGRES_HOST"))
+        db_set = bool(os.environ.get("POSTGRES_DB"))
+        if not (host_set and db_set):
+            return  # tier 3/4 — sqlite default, safe
+        if os.environ.get("ENSEMBLE_DB_AMBIENT_ALLOW") == "1":
+            return  # sanctioned
+        ambient_names = []
+        for name in ("POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DB",
+                     "POSTGRES_USER", "POSTGRES_PASSWORD"):
+            if os.environ.get(name):
+                ambient_names.append(name)
+        logger.error(
+            "DB RESOLUTION REFUSED (rogue-containment): tier=ambient "
+            "(ensemble.json absent) with ambient POSTGRES_* present "
+            "(%s) and ENSEMBLE_DB_AMBIENT_ALLOW != 1. "
+            "Refusing before any TCP connection. Set "
+            "ENSEMBLE_DB_AMBIENT_ALLOW=1 for a sanctioned first boot "
+            "(the persisted ensemble.json makes later boots tier 1).",
+            ",".join(ambient_names),
+        )
+        _sys.exit(78)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # FAIL-CLOSED (fix-round 2 / N5, leader decision): if the guard
+        # cannot EVALUATE the sanction, the DB resolution is unverified and
+        # must not proceed. Loud, explicit, and exit 78 (the existing
+        # configuration-refusal contract — the launcher does not loop).
+        logger.error(
+            "DB RESOLUTION UNVERIFIABLE (rogue-containment guard error): "
+            "%s: %s — refusing boot (fail-closed; exit 78).",
+            type(exc).__name__,
+            exc,
+        )
+        _sys.exit(78)

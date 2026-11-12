@@ -45,6 +45,21 @@ import sys
 import time
 from typing import Optional
 
+# Spawn-boundary env scrub (rogue-containment component B, (e′)).
+# Lazy import to avoid any import-cycle risk with daemon.services.
+try:
+    from daemon.services.spawn_env_policy import apply_spawn_boundary as _apply_spawn_boundary
+    _SPAWN_BOUNDARY_AVAILABLE = True
+except Exception as _spawn_policy_exc:  # pragma: no cover - defensive
+    # FAIL-POLARITY (leader decision): FAIL-OPEN + LOUD. A broken local
+    # policy module must not brick the service lane, but every affected
+    # spawn logs at ERROR so the missing containment is never silent.
+    _SPAWN_BOUNDARY_AVAILABLE = False
+    _SPAWN_BOUNDARY_IMPORT_ERROR = _spawn_policy_exc
+
+    def _apply_spawn_boundary(os_env, overlay=None, deliberate=None):
+        return dict(os_env) if os_env else {}
+
 logger = logging.getLogger(__name__)
 
 
@@ -109,6 +124,7 @@ def spawn(
     argv: list[str],
     log_path: str,
     cwd: Optional[str] = None,
+    extra_env: Optional[dict[str, str]] = None,
 ) -> tuple[int, int]:
     """Spawn a detached service process and return ``(pid, start_time)``.
 
@@ -170,12 +186,20 @@ def spawn(
         # contract). ``close_fds=True`` is the standard defense
         # against FD-leak across fork; the child has no inherited
         # sockets / pipes.
+        if not _SPAWN_BOUNDARY_AVAILABLE:  # pragma: no cover - defensive
+            logger.error(
+                "service_spawner: spawn-boundary scrub UNAVAILABLE (%s) — "
+                "child environment is NOT scrubbed for this spawn. "
+                "FAIL-OPEN by policy (availability), loudly logged.",
+                _SPAWN_BOUNDARY_IMPORT_ERROR,
+            )
         proc = subprocess.Popen(
             list(argv),
             stdin=subprocess.DEVNULL,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             cwd=cwd,
+            env=_apply_spawn_boundary(os.environ, None, extra_env),
             start_new_session=True,
             close_fds=True,
         )

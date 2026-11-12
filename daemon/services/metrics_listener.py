@@ -67,6 +67,80 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+#: Metrics listener port range (N8 fix-round 2).
+MIN_METRICS_PORT = 1
+MAX_METRICS_PORT = 65535
+
+
+def derive_metrics_port(
+    main_port: int | str | None,
+    env_value: str | None = None,
+) -> int | None:
+    """Derive the metrics listener port (rider (d), fix-round 2 edge policy).
+
+    Precedence: explicit env escape hatch > ``main_port + 1``.
+
+    Returns ``None`` — with a loud ERROR — for an unusable result, and the
+    caller DISABLES the listener (it is non-fatal by design) rather than
+    attempting a privileged/impossible bind:
+
+      * ``PORT=0`` (ephemeral main port): there is no stable derived port;
+      * ``main_port + 1 > 65535`` (the pre-fix ``int(port)+1`` overflow);
+      * an env value that is not an integer or is outside 1..65535.
+
+    This is a CLAMP-BY-DISABLE policy: refuse the derived port loudly, keep
+    boot alive. It never silently binds something unintended.
+    """
+    raw_env = str(env_value).strip() if env_value is not None else ""
+    if raw_env:
+        try:
+            value = int(raw_env)
+        except ValueError:
+            logger.error(
+                "metrics listener: LIMITS_METRICS_LISTENER_PORT=%r is not an "
+                "integer — listener DISABLED for this boot",
+                env_value,
+            )
+            return None
+        if not (MIN_METRICS_PORT <= value <= MAX_METRICS_PORT):
+            logger.error(
+                "metrics listener: LIMITS_METRICS_LISTENER_PORT=%s outside "
+                "%s..%s — listener DISABLED for this boot",
+                value,
+                MIN_METRICS_PORT,
+                MAX_METRICS_PORT,
+            )
+            return None
+        return value
+
+    try:
+        base = int(main_port)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        logger.error(
+            "metrics listener: main port %r is not an integer — listener "
+            "DISABLED for this boot",
+            main_port,
+        )
+        return None
+    if base < 1:
+        logger.error(
+            "metrics listener: main port %s is an ephemeral/invalid bind — no "
+            "stable derived metrics port; listener DISABLED for this boot",
+            base,
+        )
+        return None
+    derived = base + 1
+    if derived > MAX_METRICS_PORT:
+        logger.error(
+            "metrics listener: derived port %s (main %s + 1) exceeds %s — "
+            "listener DISABLED for this boot (N8 overflow policy)",
+            derived,
+            base,
+            MAX_METRICS_PORT,
+        )
+        return None
+    return derived
+
 #: The exposition listener binds the LOOPBACK address ONLY.
 LISTENER_HOST = "127.0.0.1"
 

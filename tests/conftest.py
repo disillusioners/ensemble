@@ -903,3 +903,17 @@ def _fence_install_audit_lane(tmp_path, monkeypatch):
         install_audit, "resolve_install_audit_path", fenced_resolve
     )
     yield
+
+
+# rogue-containment (iter-1 D3): autouse session fence so NO pytest boot
+# can ever write port-ownership claim files under the live install root.
+# The dedicated port_ownership pins pass explicit tmp dirs and are
+# unaffected.
+@pytest.fixture(scope="session", autouse=True)
+def _rogue_containment_port_claims_fence(tmp_path_factory):
+    import os as _os
+
+    claims_dir = tmp_path_factory.mktemp("rogue-port-claims")
+    _os.environ["ENSEMBLE_PORT_CLAIMS_DIR"] = str(claims_dir)
+    yield
+    _os.environ.pop("ENSEMBLE_PORT_CLAIMS_DIR", None)

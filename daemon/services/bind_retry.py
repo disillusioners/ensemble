@@ -79,6 +79,12 @@ What this module does NOT do
 -----------------------------
 * It does not touch the exit-75 / exit-78 preflight verdicts — those
   are decided BEFORE the bind and stay decided before it.
+* Cross-reference (rogue-containment component A): a port-ownership gate
+  (``daemon.services.port_ownership.run_port_ownership_gate``) runs in
+  ``_serve_with_bind_retry`` AFTER ``install_root_logging()`` and BEFORE
+  ``bind_socket_with_retry``. It may ``sys.exit(78)`` on a foreign live
+  owner; otherwise it degrades and falls through to this retry. This
+  module is unchanged by that gate.
 * It does not change the exit code. Exhaustion exits **1** — the same
   code, from the same logical site, that uvicorn's failed-bind path
   used. A NEW exit code would land in the launcher's ``*→crash``

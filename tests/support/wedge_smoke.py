@@ -576,6 +576,9 @@ def scratch_env(*, tmp_path: Path, port: int, pg_env: Iterable[tuple[str, str]])
         "ENSEMBLE_DATA_DIR": str(tmp_path / "data"),
         "DAEMON_PORT": str(port),
         "ENSEMBLE_SELF_ENV": "sandbox",
+        # rogue-containment (component B task 6): sanctioned scratch
+        # postgres boot needs ambient POSTGRES_* to drive DB resolution.
+        "ENSEMBLE_DB_AMBIENT_ALLOW": "1",
     }
     supplied = dict(pg_env)
     env.update(supplied)

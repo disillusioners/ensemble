@@ -88,6 +88,23 @@ from ._tool_registry import register_tool_category
 # Gap-2: service discovery consolidated into the scrub module's
 # public ``get_process_secret_service`` (seam LOGIC stays separate
 # per design §1b — only the discovery is shared).
+# Spawn-boundary env scrub (rogue-containment component B, fix-round 2 / B2).
+# FAIL-POLARITY (leader decision, pinned): a scrub-policy import failure at a
+# spawn site is FAIL-OPEN + LOUD. Availability wins — a broken local module
+# must not brick every background process spawn — but the degradation is
+# logged at ERROR on every spawn so the missing containment is never silent.
+try:
+    from daemon.services.spawn_env_policy import (
+        apply_spawn_boundary as _apply_spawn_boundary,
+    )
+    _SPAWN_BOUNDARY_AVAILABLE = True
+except Exception as _spawn_policy_exc:  # pragma: no cover - defensive
+    _SPAWN_BOUNDARY_AVAILABLE = False
+    _SPAWN_BOUNDARY_IMPORT_ERROR = _spawn_policy_exc
+
+    def _apply_spawn_boundary(os_env, overlay=None, deliberate=None):
+        return dict(os_env) if os_env else {}
+
 from daemon.services.secret_persistence_scrub import (
     get_process_secret_service as _get_process_secret_service,
 )
@@ -907,13 +924,31 @@ def _build_child_env(
             the child env is ``os.environ ⊕ tracking_id``, unchanged
             from P1 behavior.
     """
-    env = os.environ.copy()
+    if not _SPAWN_BOUNDARY_AVAILABLE:  # pragma: no cover - defensive
+        logger.error(
+            "proc_run: spawn-boundary scrub UNAVAILABLE (%s) — child "
+            "environment is NOT scrubbed for this spawn. FAIL-OPEN by "
+            "policy (availability), loudly logged.",
+            _SPAWN_BOUNDARY_IMPORT_ERROR,
+        )
+    # fix-round 2 / B2: proc_run was the incident's delivery vector — it
+    # inherited the daemon's ambient environment verbatim (PORT/HOST/
+    # POSTGRES_*/ENSEMBLE_UPGRADE_LIVE). Route the inherit base through the
+    # SAME policy as the bash seam; the operator overlay is the sanctioned
+    # explicit-setter channel (overlay wins, matching the bash seam).
+    env = _apply_spawn_boundary(os.environ, process_env_overlay)
+    # Re-stamp the tracking id AFTER the strip so the PID-recycling defense
+    # is never swallowed by the policy.
     env[_TRACKING_ENV_VAR] = process_id
-    if process_env_overlay:
-        env.update(process_env_overlay)
     # Leader ruling B: strip FOREIGN ownership stamps POST-overlay so an
     # overlay can never forge the other lane's stamp.  Re-assert the own
     # stamp LAST so the authoritative value wins.
+    # INTEGRATION (latest-absorption merge, 2026-11-12): upstream applied
+    # the overlay via ``env.update(process_env_overlay)`` at this point;
+    # the rogue-containment (e′/B2) shape above applies the overlay
+    # INSIDE ``_apply_spawn_boundary`` (overlay wins — identical
+    # semantics), so the update line is not re-added.  The foreign-stamp
+    # strip is unchanged upstream semantics, still POST-overlay.
     env.pop(_RAM_OWNERSHIP_ENV_VAR, None)
     env[_TRACKING_ENV_VAR] = process_id
     # Design §1b: timing / locus / failure identical to the bash
@@ -2532,6 +2567,38 @@ def create_proc_tools(current_instance_id: str = "") -> list:
             On failure: ``"Error: ..."`` string describing why
             (process cap reached, command not found, etc.).
         """
+        # rogue-containment (iter-1 D2b): apply the SAME pkill overlay
+        # predicate to proc_run's command so a pkill refused in bash
+        # cannot be re-issued via a background process. Fence env is
+        # ambient (proc_run has no env overlay).
+        try:
+            from daemon.tools.bash import _pkill_overlay_violation
+
+            _proc_pkill_violation = _pkill_overlay_violation(command, None)
+        except Exception as _guard_exc:  # noqa: BLE001
+            # N9 (fix-round 2): fail-open + LOUD. The overlay is
+            # defense-in-depth; a broken import must not brick proc_run,
+            # but the missing guard is logged at ERROR on every call.
+            logger.error(
+                "proc_run: pkill overlay guard UNAVAILABLE (%s: %s) — this "
+                "spawn is NOT pattern-checked. FAIL-OPEN by policy "
+                "(availability), loudly logged.",
+                type(_guard_exc).__name__,
+                _guard_exc,
+            )
+            _proc_pkill_violation = None
+        if _proc_pkill_violation is not None:
+            return (
+                "Error: refused by the rogue-containment pkill overlay guard — "
+                f"command matches live-ensemble pattern {_proc_pkill_violation!r}. "
+                "This guard prevents agent-issued processes from killing live "
+                "ensemble processes/ports/install roots. To run such a command "
+                "inside a fenced (scratch) test mirror, set "
+                "ENSEMBLE_FENCED_TEST_CONTEXT=1 in the daemon environment — "
+                "only inside a fenced mirror. Scratch-sentinel/scratch-named "
+                "targets are allowed without the marker."
+            )
+
         # Defensive: timeout validation (matches ``bash`` semantics
         # of accepting 0 = no-timeout). No explicit upper bound here
         # because the user explicitly asked for a long-running

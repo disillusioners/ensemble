@@ -63,6 +63,29 @@ from daemon.services.bash_spawn_reaper import (
 #: the coupling is pinned by a test.
 _RAM_FOREIGN_OWNERSHIP_ENV_VARS: tuple[str, ...] = ("ENSEMBLE_PROC_TRACKING_ID",)
 from daemon.services.timestamps import now_utc_iso as _now_utc_iso
+# Spawn-boundary env scrub (rogue-containment component B, (e′)):
+# strip bind/DB/attestation vars from the inherit base before handing
+# env to children. Pure module; no import cycle (daemon.services only).
+# Spawn-boundary env scrub (rogue-containment component B).
+# FAIL-POLARITY (leader decision, pinned): an import failure here is
+# FAIL-OPEN + LOUD — availability wins (a broken local policy module must
+# not brick the whole bash tool), but every affected spawn logs at ERROR.
+try:
+    from daemon.services.spawn_env_policy import (
+        apply_spawn_boundary as _apply_spawn_boundary,
+    )
+    _SPAWN_BOUNDARY_AVAILABLE = True
+except Exception as _spawn_policy_exc:  # pragma: no cover - defensive
+    _SPAWN_BOUNDARY_AVAILABLE = False
+    _SPAWN_BOUNDARY_IMPORT_ERROR = _spawn_policy_exc
+
+    def _apply_spawn_boundary(os_env, overlay=None, deliberate=None):
+        return dict(os_env) if os_env else {}
+
+# INTEGRATION (latest-absorption merge, 2026-11-12): BOTH import seams
+# coexist — the rogue-containment spawn-boundary scrub above and the
+# ram-auto-termination imports below. Neither side wins; both features
+# are active on this lane.
 # RAM auto-termination (phase3-plan.md) — the bash lane's RAM arm.
 # The import direction is ``tools/* → ram_guard`` ONLY (arch §7's import
 # freeze): the ``ram_guard`` package imports NOTHING from ``daemon/``.
@@ -1276,6 +1299,40 @@ async def bash(
     # Gating (instance_id present AND master switch ON) is applied at the
     # stamp/write sites; minting itself is inert.
     tracking_id: str | None = uuid4().hex if instance_id is not None else None
+    # rogue-containment pkill overlay guard (adjudication 1): refuse
+    # kill-like commands targeting live ensemble processes/ports/install
+    # roots unless a fenced test context marker is present.
+    #
+    # fix-round 2 / B6: the fence is AMBIENT-ONLY. An agent-settable
+    # tool-call env overlay must never carry it (that would make the guard
+    # pattern-only, not containment). An overlay attempt is IGNORED and the
+    # key is stripped from the child environment so it cannot be laundered
+    # into a nested process.
+    spawn_env_overlay = env
+    if isinstance(env, dict) and "ENSEMBLE_FENCED_TEST_CONTEXT" in env:
+        logger.warning(
+            "bash: ENSEMBLE_FENCED_TEST_CONTEXT in the tool-call env overlay "
+            "is IGNORED (the fence is ambient-only, daemon-set) and stripped "
+            "from the child environment."
+        )
+        spawn_env_overlay = {
+            k: v for k, v in env.items() if k != "ENSEMBLE_FENCED_TEST_CONTEXT"
+        }
+    _pkill_violation = _pkill_overlay_violation(command, spawn_env_overlay)
+    if _pkill_violation is None and input is not None:
+        _pkill_violation = _pkill_overlay_violation(input, spawn_env_overlay)
+    if _pkill_violation is not None:
+        return (
+            "ERROR: refused by the rogue-containment pkill overlay guard — "
+            f"command matches live-ensemble pattern {_pkill_violation!r}. "
+            "This guard prevents agent-issued bash from killing live "
+            "ensemble processes/ports/install roots. To run such a command "
+            "inside a fenced (scratch) test mirror, set "
+            "ENSEMBLE_FENCED_TEST_CONTEXT=1 in the tool env "
+            '(env={"ENSEMBLE_FENCED_TEST_CONTEXT": "1"}) or in the daemon '
+            "environment — only inside a fenced mirror. Scratch-sentinel/"
+            "scratch-named targets are allowed without the marker."
+        )
     try:
         # start_new_session=True (Unix) creates a new process group so that
         # backgrounded children (e.g., `nohup ... &`) can be killed together
@@ -1333,45 +1390,52 @@ async def bash(
             # fails closed ONLY when a marker-shaped value is present
             # (the resolver's lazy service check); marker-free env
             # passes through byte-identical (zero measurable latency).
-            assembled_env: Dict[str, str] | None = None
-            if env:
-                assembled_env = os.environ.copy()
-                # Overlay wins over os.environ (§1a semantics).
-                assembled_env.update(env)
-                assembled_env = _resolve_secret_markers(
-                    assembled_env,
-                    secret_service=_get_process_secret_service(),
-                    actor=instance_id or "<bash>",
-                    surface="bash.env",
+            # rogue-containment (e′): ALWAYS materialise the inherit base
+            # through apply_spawn_boundary so the bind/DB/attestation
+            # family is stripped even when no overlay is passed. The
+            # None-inherit path that carried PORT/HOST/POSTGRES_*/... is
+            # collapsed. Secret-marker resolution + KMS resolution run
+            # AFTER the strip (strip FIRST), then the reaper stamp.
+            if not _SPAWN_BOUNDARY_AVAILABLE:  # pragma: no cover - defensive
+                logger.error(
+                    "bash: spawn-boundary scrub UNAVAILABLE (%s) — child "
+                    "environment is NOT scrubbed for this spawn. FAIL-OPEN "
+                    "by policy (availability), loudly logged.",
+                    _SPAWN_BOUNDARY_IMPORT_ERROR,
                 )
-                assembled_env = _kms_resolve_env(assembled_env)
+            assembled_env: Dict[str, str] = _apply_spawn_boundary(
+                os.environ, spawn_env_overlay
+            )
+            assembled_env = _resolve_secret_markers(
+                assembled_env,
+                secret_service=_get_process_secret_service(),
+                actor=instance_id or "<bash>",
+                surface="bash.env",
+            )
+            assembled_env = _kms_resolve_env(assembled_env)
             # bash-tool orphan reaper Phase 1 (task 1.4): env stamp.
             # Gated: instance_id present AND master switch ON (F6 default ON).
-            # When no overlay was passed this materializes the inherit-env
-            # copy — byte-identical semantics plus one var.
             if instance_id is not None and tracking_id is not None:
                 try:
                     _stamp_on = _bash_reaper_switch()
                 except Exception:
                     _stamp_on = True
                 if _stamp_on:
-                    if assembled_env is None:
-                        assembled_env = os.environ.copy()
                     assembled_env[_BASH_TRACKING_ENV_VAR] = tracking_id
             # Leader ruling B: strip FOREIGN ownership stamps POST-overlay so
-            # an env overlay can never forge the other lane's stamp.  Also
-            # materialise the inherit-env copy when an ambient foreign stamp
-            # is present, even when no stamping occurs.
+            # an env overlay can never forge the other lane's stamp.
+            # INTEGRATION (latest-absorption merge, 2026-11-12): upstream
+            # guarded this strip with materialisation branches for a
+            # None-able ``assembled_env``; the rogue-containment (e′)
+            # shape ABOVE always materialises (``_apply_spawn_boundary``
+            # returns a dict unconditionally), so those branches are
+            # dead and dropped here — the STRIP itself is unchanged
+            # upstream semantics, still gated on instance-attributed
+            # spawns and still POST-overlay (the overlay is applied
+            # inside ``_apply_spawn_boundary``).
             if instance_id is not None:
-                if any(
-                    (assembled_env or os.environ).get(v) is not None
-                    for v in _RAM_FOREIGN_OWNERSHIP_ENV_VARS
-                ) or env:
-                    if assembled_env is None:
-                        assembled_env = os.environ.copy()
-                if assembled_env is not None:
-                    for v in _RAM_FOREIGN_OWNERSHIP_ENV_VARS:
-                        assembled_env.pop(v, None)
+                for v in _RAM_FOREIGN_OWNERSHIP_ENV_VARS:
+                    assembled_env.pop(v, None)
             if isinstance(command, list):
                 proc = await asyncio.create_subprocess_exec(
                     *command,
@@ -1448,7 +1512,7 @@ async def bash(
             # persist. The detail column carries the full command
             # shape + env-overlay keys (no values) for forensics.
             sanitized_command, detail_for_registry = _sanitize_command_for_registry(
-                command, env
+                command, spawn_env_overlay
             )
             try:
                 _pid_registry_register(
@@ -1835,3 +1899,118 @@ Returns:
     "observed_peak_bytes": ..., ...}. Parse it as JSON — it is the whole return.
     Output is truncated at 150,000 characters — redirect to file for full results.
 """
+
+
+# ---------------------------------------------------------------------------
+# rogue-containment pkill overlay guard (adjudication 1, iter-1 hardened)
+# ---------------------------------------------------------------------------
+# Pattern gate only — NO PID-identity resolution. Refuses bash commands that
+# look like process/port kills targeting LIVE ensemble processes, ports, or
+# install roots, unless an explicit fenced-test context marker is present.
+#
+# Fence mechanism (documented for the census walk):
+#   - ambient daemon env ENSEMBLE_FENCED_TEST_CONTEXT=1 ONLY.
+#   The tool-call env overlay is NOT a fence channel (fix-round 2 / B6): an
+#   overlay attempt is ignored (and the key is stripped from the child env),
+#   so the guard cannot be self-granted by the agent it constrains.
+# Scratch-sentinel / scratch-named targets (no live pattern) pass without
+# the marker.
+#
+# Residuals / evasion surface (documented for the census walk, N10):
+#   - two-step PID laundering (``lsof -ti:9797`` then ``kill <pid>``): the
+#     gate is pattern-based, not PID-identity based;
+#   - regex variants that do not contain a pattern token verbatim
+#     (``pkill -f 'ensemble.*prod'``);
+#   - substring collisions (``ensemble-maintenance`` does NOT match
+#     ``ensemble-main`` as a whole token in the command string? it does —
+#     conservative over-refusal is accepted);
+#   - ``kill -9 -1`` (signal every process the uid may signal);
+#   - same-uid / same-install limits (see port_ownership residuals).
+# The ownership claim (component A) is the control that does not depend on
+# command text; this overlay is defense-in-depth only.
+#
+# Word-boundary / anchored design (iter-1 D2c):
+#   - kill-like verbs match as command words only, so "skill " does NOT
+#     trigger (\b boundary prevents the substring match inside "skill").
+#   - port tokens match only as whole words (\b9797\b), so "19797" does
+#     not trigger.
+#   - systemctl: read-only verbs (status/show/is-active/list-units/cat/
+#     is-enabled/is-failed/get-default) are ALLOWED against live units;
+#     mutating verbs (stop/restart/kill/disable/mask/reload/daemon-reload/
+#     enable/start/try-restart/isolate) are gated.
+#
+# Live patterns (iter-1 D2a adds ensemble-main, ensemble-demo):
+#   "ensemble-prod", "ensemble-daemon", "ensemble-main", "ensemble-demo",
+#   "\b9797\b", "\b9798\b", "agents-ensemble"
+
+import re as _re
+
+_PKILL_OVERLAY_LIVE_NAME_PATTERNS: tuple[str, ...] = (
+    "ensemble-prod",
+    "ensemble-daemon",
+    "ensemble-main",
+    "ensemble-demo",
+    "agents-ensemble",
+)
+
+_PKILL_OVERLAY_SYSTEMCTL_MUTATING: frozenset[str] = frozenset({
+    "stop", "restart", "kill", "disable", "mask", "reload",
+    "daemon-reload", "enable", "start", "try-restart", "isolate",
+})
+
+_PKILL_OVERLAY_SYSTEMCTL_READONLY: frozenset[str] = frozenset({
+    "status", "show", "is-active", "list-units", "list-unit-files",
+    "cat", "is-enabled", "is-failed", "get-default", "help",
+})
+
+
+def _pkill_overlay_is_kill_like(cmd_lower: str) -> bool:
+    # kill-like verbs as command words (word-boundary).
+    if _re.search(r"\bpkill\b", cmd_lower):
+        return True
+    if _re.search(r"\bkillall\b", cmd_lower):
+        return True
+    if _re.search(r"\bfuser\b", cmd_lower):
+        return True
+    # "kill" as a command word: preceded by start/whitespace/;&|(` then
+    # optional spaces; not part of another word.
+    if _re.search(r"(^|[\s;&|(`])\s*kill\b", cmd_lower):
+        return True
+    if "xargs kill" in cmd_lower or _re.search(r"\bxargs\s+kill\b", cmd_lower):
+        return True
+    if "systemctl" in cmd_lower:
+        # only mutating verbs are gated; read-only verbs pass
+        for verb in _PKILL_OVERLAY_SYSTEMCTL_MUTATING:
+            if _re.search(r"\b" + _re.escape(verb) + r"\b", cmd_lower):
+                return True
+        return False
+    return False
+
+
+def _pkill_overlay_violation(command, env=None) -> str | None:
+    """Return the matched live pattern if the command must be refused,
+    else None. Pure function (no I/O) so it is unit-testable."""
+    if isinstance(command, (list, tuple)):
+        cmd_str = " ".join(str(c) for c in command)
+    else:
+        cmd_str = str(command)
+    lower = cmd_str.lower()
+    if not _pkill_overlay_is_kill_like(lower):
+        return None
+    # fix-round 2 / B6: the fence is read from the DAEMON-SET AMBIENT
+    # environment ONLY. ``env`` (the agent-settable tool-call overlay) is
+    # accepted for call-site compatibility but is DELIBERATELY IGNORED as a
+    # fence source — otherwise any agent could grant itself a fence in the
+    # same call that issues a live-pattern kill.
+    del env
+    fenced = os.environ.get("ENSEMBLE_FENCED_TEST_CONTEXT") == "1"
+    if fenced:
+        return None
+    for name in _PKILL_OVERLAY_LIVE_NAME_PATTERNS:
+        if name in lower:
+            return name
+    # port tokens as whole words
+    for port_num, port_pat in (("9797", r"\b9797\b"), ("9798", r"\b9798\b")):
+        if _re.search(port_pat, lower):
+            return port_num
+    return None
