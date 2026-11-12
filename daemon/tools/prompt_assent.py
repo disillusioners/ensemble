@@ -684,16 +684,6 @@ _MINT_DESIGNATION_DETAILS: dict[str, str] = {
     ),
 }
 
-#: The 4f codes that MUST NOT touch the durable counter or the K-9 budget.
-#: The two Phase-1.5 codes are the ruling's list; ``extraction-incomplete``
-#: joins them because it is NOT a mismatch-class code anywhere else in the
-#: lane (4e refuses the same shape without recording — this keeps that
-#: discipline even on a path 4e already guards, i.e. defence in depth
-#: against a future reordering).
-_APPROVE_NON_BURNING_CODES: frozenset[str] = PHASE1_5_PLACED_CODES | {
-    "extraction-incomplete"
-}
-
 #: The APPROVE-side detail for the two NEW codes (T2.8 / D-8) — the side
 #: ambiguity is resolved by TEXT at zero taxonomy cost (the INFO line already
 #: carries ``action=``). Content-free: no persona, no diff, no channel name.
@@ -2362,17 +2352,23 @@ async def _decide_branch(
             context.discord_meta, designations.get(), context.user_id
         )
     if private_code is not None:
-        if private_code in _APPROVE_NON_BURNING_CODES:
-            return _refuse(
-                private_code,
-                _APPROVE_DESIGNATION_DETAILS[private_code],
-            )
-        await _record_mismatch(token_repo, token_row)
-        return _refuse(
+        # The DETAIL is selected first (truthful text for the leg that
+        # actually failed — a designated surface is not "not a 1:1 DM" when
+        # the human was simply not identified). Detail selection is NOT a
+        # security property; the SPLIT below is.
+        detail = _APPROVE_DESIGNATION_DETAILS.get(
             private_code,
             "the approving turn is not a proven 1:1 DM (is_dm AND NOT "
             "is_group_dm; an absent discriminator is not private)",
         )
+        if private_code in PHASE1_5_PLACED_CODES:
+            # The 4f SPLIT: the two Phase-1.5 codes refuse HERE, before the
+            # durable counter / K-9 budget are touched (A-9, A-10 / AC7).
+            # EVERY other code — mismatch-class or not — records exactly as
+            # it did in v0.29.18 (A-12 keeps its burn).
+            return _refuse(private_code, detail)
+        await _record_mismatch(token_repo, token_row)
+        return _refuse(private_code, detail)
 
     # ── 4g. the per-token lockout ──────────────────────────────────────
     attempts = int(getattr(token_row, "attempts", 0) or 0)

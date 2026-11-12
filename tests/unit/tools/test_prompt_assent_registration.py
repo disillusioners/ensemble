@@ -604,7 +604,7 @@ class TestThePhase1_5CodeShape:
         block_at = seg.find("private_code is not None")
         assert block_at != -1
         block = seg[block_at : block_at + 1400]
-        new_code_gate = block.find("_APPROVE_NON_BURNING_CODES")
+        new_code_gate = block.find("private_code in PHASE1_5_PLACED_CODES")
         record_at = block.find("_record_mismatch(")
         assert new_code_gate != -1, "the new-code gate is missing from 4f"
         assert record_at != -1, "the mismatch branch lost its recording"
