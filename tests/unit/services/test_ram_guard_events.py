@@ -548,9 +548,9 @@ class TestGuardIntegration:
 
     def test_a_refusal_emits_no_event(self, tmp_path, kill_census):
         """§17.2 — refusals emit NO event, with the real emitter wired.
-        The house RECYCLED-PGID shape (P5a): a real refusal with a real
-        claim (the empty-group shape never breaches, so it would prove
-        nothing)."""
+        The house RECYCLED-PGID shape (the recycle verdict is P5's —
+        P5a RETIRED, §18.3): a real refusal with a real claim (the
+        empty-group shape never breaches, so it would prove nothing)."""
         lt = _LoopThread()
         try:
             bus = _FakeBus()
@@ -575,8 +575,9 @@ class TestGuardIntegration:
                 stat_line(recycled) + "\n"
             )
             guard._lane_once()
-            # A permanent refusal terminates + releases (B21 (ii)) — the
-            # reason is the verdict; the state is post-release.
+            # Ruling A (§18.1): a permanent refusal terminates the KILL
+            # DECISION only — the reason is the verdict; the state is
+            # REFUSED-but-watching (no release at refusal time).
             assert record.reason == "refused:pgid-recycled"
             assert record.state in ("REFUSED", "RELEASED")
             counters = guard.counters_snapshot()

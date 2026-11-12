@@ -1197,3 +1197,120 @@ def test_release_gate_incomplete_scan_refuses_the_release(tmp_path):
         "an incomplete-scan record is not releasable without force"
     )
     assert guard.release(TRACKING_ID, force=True) is True
+
+
+# ── Cycle-3 P0 pins — C1 multi-tick forgetting + C2 emit TOCTOU ────────────
+
+
+def test_c1_unreadable_member_stays_blocking_across_ticks(tmp_path):
+    """C1 — the TWO-TICK property: an unreadable OBSERVED member keeps
+    ``group_scan_complete`` FALSE on tick 2 AND on tick 3+ (the
+    ever-members carry-forward).  The pre-fix shape intersected the
+    observed set with ``table.entries``, forgot the member on tick 3,
+    flipped completeness true, and the sweep RELEASED a watch whose
+    member was still live behind the unreadable stat."""
+    root = tmp_path / "proc"
+    build_tree(root, leader=True, members=0, rss_kb=128)
+    guard, _root = make_guard(tmp_path, root=root)
+    record = register(guard)
+    guard._tick_once()  # tick 1 — observes the member
+    assert record.members == (SYNTHETIC_PGID,)
+    stat_path = root / str(SYNTHETIC_PGID) / "stat"
+    stat_path.unlink()
+    stat_path.mkdir()  # hidepid shape: unreadable from tick 2 on
+    for tick in (2, 3, 4):
+        guard._tick_once()
+        guard._liveness_sweep()
+        assert record.group_scan_complete is False, (
+            f"tick {tick}: completeness must stay FALSE while the observed "
+            "member is unreadable"
+        )
+        assert record.state != STATE_RELEASED, (
+            f"tick {tick}: the sweep must NOT release — the member is "
+            "still live behind the unreadable stat"
+        )
+    # The member really was live the whole time: restore readability and
+    # the watch still holds it (the ever-set kept it observed).
+    stat_path.rmdir()
+    stat_path.write_text(
+        stat_line(FakeProc(pid=SYNTHETIC_PGID, pgrp=SYNTHETIC_PGID, ppid=1,
+                           starttime=LEADER_START)) + "\n"
+    )
+    guard._tick_once()
+    assert record.members == (SYNTHETIC_PGID,), (
+        "the carried-forward member re-enters the member set when readable"
+    )
+
+
+def test_c1_unreadable_from_birth_member_blocks_release(tmp_path):
+    """C1 — a group whose ONLY member is unreadable FROM BIRTH (never a
+    readable scan) must never be sweep-released while it stays
+    unreadable: the leader's own pid seeds the ever-member set at
+    registration."""
+    root = tmp_path / "proc"
+    root.mkdir(parents=True, exist_ok=True)
+    blind = root / str(SYNTHETIC_PGID)
+    blind.mkdir()
+    (blind / "stat").mkdir()  # unreadable FROM BIRTH — no readable tick
+    guard, _root = make_guard(tmp_path, root=root)
+    record = register(guard)
+    for tick in (1, 2, 3):
+        guard._tick_once()
+        guard._liveness_sweep()
+        assert record.state != STATE_RELEASED, (
+            f"tick {tick}: a from-birth-unreadable only member must not be "
+            "sweep-released (it may be alive)"
+        )
+        assert record.group_scan_complete is False, f"tick {tick}"
+
+
+def test_c2_the_claim_spans_the_emit(tmp_path, kill_census, monkeypatch):
+    """C2 — the emit TOCTOU: the claim token is STILL HELD when ``_emit``
+    builds the payload, so a tick+sweep racing the emit cannot release
+    the record mid-flight and flip the payload's state to RELEASED."""
+    emitted: list[tuple[str, dict]] = []
+
+    def _emitter(instance_id, payload):  # noqa: ANN001
+        emitted.append((instance_id, dict(payload)))
+        return True
+
+    guard, root = make_guard(tmp_path, emitter=_emitter)
+    record = register(guard)
+    guard._tick_once()
+    assert record.state == STATE_BREACHED
+
+    captured: dict[str, object] = {}
+    real_emit = guard._emit
+
+    def _racing_emit(rec):  # noqa: ANN001
+        # The TOCTOU window, replayed: a tick + a sweep land BETWEEN the
+        # claim-clear site and the payload build.
+        captured["claim_at_emit"] = rec.claim_token
+        guard._tick_once()
+        guard._liveness_sweep()
+        captured["state_at_payload"] = rec.state
+        real_emit(rec)
+
+    monkeypatch.setattr(guard, "_emit", _racing_emit)
+
+    real_killpg = ladder_mod.os.killpg
+
+    def _dying_killpg(pgid, sig):  # noqa: ANN001
+        real_killpg(pgid, sig)
+        if sig == 9:
+            kill_tree(root, [SYNTHETIC_PGID, SYNTHETIC_PGID + 100])
+
+    monkeypatch.setattr(ladder_mod.os, "killpg", _dying_killpg)
+
+    guard._lane_once()
+    assert captured["claim_at_emit"] is not None, (
+        "the claim must STILL be held when _emit runs (cleared only after)"
+    )
+    assert captured["state_at_payload"] == STATE_KILLED, (
+        "a racing sweep must not flip the payload's state to RELEASED"
+    )
+    assert len(emitted) == 1
+    assert emitted[0][1]["state"] == "KILLED"
+    assert record.state == STATE_RELEASED, (
+        "the release still lands — after the emit"
+    )

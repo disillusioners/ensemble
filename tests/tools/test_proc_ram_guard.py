@@ -1398,3 +1398,20 @@ class TestDisclosures:
         assert "ram_breach_observed: true" in lines
         assert any(ln.startswith("ram_observed_peak_bytes: ") for ln in lines)
         assert "ram_killed: true" not in lines
+
+
+class TestBoundedWaitDeadline:
+    """Cure 4 — the proc lane's bounded-wait floor is the §18.4
+    derivation (PROBE_MS declared at 29; the 10 ms estimate withdrawn)."""
+
+    def test_the_proc_deadline_floor_matches_the_declared_probe(self):
+        assert proc_tools_module.RAM_GUARD_PROBE_MS == 29
+        assert proc_tools_module.RAM_GUARD_WAIT_DEADLINE_MS == (
+            2 * (250 + 250 + 29) + 250
+        ) == 1308
+
+    def test_a_bare_guard_falls_back_to_the_1308_floor(self):
+        class _BareGuard:
+            pass
+
+        assert proc_tools_module._ram_wait_deadline_ms(_BareGuard()) == 1308

@@ -263,10 +263,10 @@ labels are the only addition — the sentences are unmodified.
 
 ### Lane addition — **not one of the fifteen** (Phase-3 / leader-routed)
 
-**The deferred kill: a tree can outlive the bash timeout by ≤ ~1.27 s.** In the narrow window
+**The deferred kill: a tree can outlive the bash timeout by ≤ ~1.31 s** (the §18.4-derived 1308 ms wait). In the narrow window
 where the guard holds the episode claim and does **not** kill (a refusal, a transient re-arm, or
 a still-pending record), the bash timeout arm **defers its own signal** until after the bounded
-verdict wait — so the tree can survive up to **≤ ~1.27 s past the bash timeout**. The *wait* is
+verdict wait — so the tree can survive up to **≤ ~1.31 s past the bash timeout**. The *wait* is
 B20-pinned (`wait_deadline_ms = RAM_GUARD_PENDING_MAX × T_service_worst_ms + WAIT_SLACK_MS
 = 2 × 529 + 250 = 1308 ms`, widening with the installed guard's own grace/confirm knobs); the
 *kill latency after that wait is **not** bounded by anything in this design*. Mechanism:
@@ -542,3 +542,21 @@ are unaffected; not that a killed command was "the culprit" (a numeric kill can 
 heavy command — item 5); **not that the guard always finishes before a unit kill** (Appendix B
 quotes the binding prohibition verbatim); not that the derived default is a safe operating point
 on this host.
+
+---
+
+## Appendix E — Deferral register (COMMITTED — cycle 3, 2026-11-12)
+
+Every item deferred in fix cycles 1–3, with its reason. Without this
+register a silent drop and a deliberate deferral look identical — that is
+why it is committed. Each row names the deferring cycle and the reason it
+stayed out. Re-entry requires a new commission; nothing here auto-expires.
+
+| Item | Deferred in | Reason |
+|---|---|---|
+| PSS-confirm early abort (256-member trees: a sequential `smaps_rollup` walk can hold the lane ~23 s before the post-hoc deadline check) | cycle 1 | Requires a deadline parameter threaded through `read_tree_pss` + partial-read semantics; touching the confirm contract mid-cycles was ruled riskier than the bounded exposure (fail-open ⇒ kill still fires; only the lane occupancy is long). |
+| `_lane_failures` as a heartbeat/counter key | cycle 1 | Both the §15 B23 heartbeat set (11 keys) and the §15 B5 counter set (16 keys) are pinned EXACT; adding a key breaks the exact-set pins and the M12 mutation leg. The failure signal currently surfaces via the lane's restart-log only. |
+| `breach_at` staleness on a re-armed episode | cycle 1 | Cosmetic: `breach_at` keeps the FIRST breach time of the episode rather than the re-arm's re-breach. No consumer keys off it for correctness; changing it would touch the verdict-record semantics for no observable gain. |
+| MemTotal 1 kB ⇒ 64 MiB floor instead of the fallback | cycle 1 | The §18.7/§4.7 case "sub-64 MiB effective total ⇒ the floor" is PINNED (test_derived_value_is_floored_at_64_mib); moving the fallback threshold would break that pin and the §18.7 test enumeration. The floor IS the specified behavior for tiny-but-nonzero totals. |
+| No re-kill on a KILLED/tree-incomplete record (v1 scope) | cycle 3 (LEADER RULING) | Episodes are contract-scoped ONE-SHOT: a kill that could not verify death (tree-incomplete) never re-fires in v1. Survivor processes are the reaper/orphan net's domain. The record is still retained and watched; the retention bound is member-count-0 on a COMPLETE scan (real since the cycle-3 ever-members fix), at which point the sweep releases it. |
+| The KILLED-retention bound itself (no time-based max-watch) | cycle 3 (LEADER RULING) | The bound is exactly member-count-0-on-complete-scan. A time-based cap was rejected: the marginal per-tick cost of a dead-but-unverifiable record is one RSS sum, and the shared scan is O(host pids) regardless — the only forever-watched trees are trees with live members, which is what the guard should watch (disclosed per §18.1). |

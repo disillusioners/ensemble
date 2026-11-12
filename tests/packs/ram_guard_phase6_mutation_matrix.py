@@ -7,7 +7,7 @@ must go RED -> restore -> the same pin must go GREEN (file sha verified
 identical to the original).  Nothing here is narrated — the TSV/line per
 leg is the evidence.
 
-It covers the sixteen executable legs whose source mutation is a single
+It covers the executable legs whose source mutation is a single
 exact-string swap; the remaining §4 rows are the SAME shape as an
 executable row (a durability/ordering flip whose pin already exists) and
 are enumerated in ``DEFERRED_ROWS`` so a reader sees the whole table.
@@ -25,6 +25,15 @@ than no pin.
 Env fence: the child pytest runs with ``POSTGRES_*`` scrubbed PER-VARIABLE
 (``env -u POSTGRES_*`` is a silent no-op — see the project critical notes)
 and ``ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0`` pinned explicitly.
+
+House process note (cycle 3): mutation runs never share a worktree with a
+read-only review - fix-pass mutations stay IN-PROCESS with finally-restore.
+
+Structural-impossibility note: the C2 emit-TOCTOU (claim-spans-emit) has no
+single-string source mutation - the reorder is a MULTI-SITE move.  Its
+evidence is carried by the LIVE counter-mutation proof on
+``test_c2_the_claim_spans_the_emit`` (cycle-3 report) instead of an
+executable leg here.
 """
 
 from __future__ import annotations
@@ -195,6 +204,50 @@ LEGS: list[Leg] = [
             "test_the_whole_tree_is_killed_and_the_envelope_is_returned"
         ),
         note="B3 honest-peak: spawn-time floor reported as the peak (real run)",
+    ),
+    Leg(
+        id="M16-emit-after-release",
+        path="daemon/services/ram_guard/guard.py",
+        old="        if publish:\n            self._emit(record)\n\n        with self._lock:\n            record.claim_token = None\n            if group_empty:\n                # The terminal resolution with an empty group — the\n                # lane releases (B21 trigger (ii)/(iii)).\n                if tracking_id in self._registry:\n                    self._registry.pop(tracking_id, None)\n                    record.mark_released()\n                    self._remember_released(record)",
+        new="        with self._lock:\n            record.claim_token = None\n            if group_empty:\n                # The terminal resolution with an empty group — the\n                # lane releases (B21 trigger (ii)/(iii)).\n                if tracking_id in self._registry:\n                    self._registry.pop(tracking_id, None)\n                    record.mark_released()\n                    self._remember_released(record)\n\n        if publish:\n            self._emit(record)",
+        node=(
+            "tests/unit/services/test_ram_guard_guard.py::"
+            "test_the_event_payload_carries_killed_on_a_release_path_kill"
+        ),
+        note="cycle-2 P0-1: the terminal verdict published AFTER the release (payload carries RELEASED)",
+    ),
+    Leg(
+        id="M17-p6-first-match",
+        path="daemon/services/ram_guard/ladder.py",
+        old="    if matched_any and all_matching:\n        return None, False\n    return None, True",
+        new="    return (None, False) if matched_any else (None, True)",
+        node=(
+            "tests/unit/services/test_ram_guard_ladder.py::"
+            "test_p6_uniformity_mixed_stamps_is_not_verified"
+        ),
+        note="cycle-2 P0-2: the first-match uniformity violation restored",
+    ),
+    Leg(
+        id="M18-release-gate-dropped",
+        path="daemon/services/ram_guard/guard.py",
+        old='                if not getattr(record, "group_scan_complete", True):',
+        new='                if False and not getattr(record, "group_scan_complete", True):',
+        node=(
+            "tests/unit/services/test_ram_guard_guard.py::"
+            "test_release_gate_incomplete_scan_refuses_the_release"
+        ),
+        note="cycle-2 P1: the release() scan-completeness gate disabled",
+    ),
+    Leg(
+        id="M19-ever-members-dropped",
+        path="daemon/services/ram_guard/guard.py",
+        old="            ever = set(record.ever_members)\n            ever.update(members)\n            unreadable_members = tuple(\n                p for p in table.unreadable_pids if p in ever\n            )\n            record.ever_members = tuple(sorted(ever))",
+        new="            unreadable_members = tuple(\n                p for p in table.unreadable_pids if p in set(record.members)\n            )",
+        node=(
+            "tests/unit/services/test_ram_guard_guard.py::"
+            "test_c1_unreadable_member_stays_blocking_across_ticks"
+        ),
+        note="cycle-3 C1/leader ruling: the ever-members carry-forward dropped (tick-3 forgetting returns)",
     ),
     Leg(
         id="M13-off-still-registers",

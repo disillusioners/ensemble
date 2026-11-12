@@ -1,5 +1,5 @@
 """Substrate tier — the kill ladder and the pre-kill gate (test-plan §3.1,
-case S8 — ALL of P0–P7 + P5a — plus S16 and S18).
+case S8 — ALL of P0–P7 (P5a RETIRED, §18.3) — plus S16 and S18).
 
 **The fixture split (§15 B12, verbatim):**
 
@@ -318,7 +318,7 @@ def test_p6_ownership_mismatch_proceeds_and_counts(tmp_path, kill_census):
     stamp is ADVISORY — a P6 mismatch NEVER permanent-refuses).
 
     The primary identity (the captured pgid ∧ the leader's starttime)
-    is re-verified by P5 + P5a BEFORE P6 runs — the ladder's gate
+    is re-verified by P5 BEFORE P6 runs — the ladder's gate
     ordering IS the ruling's "re-verify primary identity" leg, so a
     mismatch that reaches P6 arrives with the primary identity already
     holding ⇒ the kill decision PROCEEDS and the unverifiable counter
@@ -910,9 +910,10 @@ def test_p7_live_members_kill_even_with_unreadable_foreign_pids(tmp_path, kill_c
     assert calls, "live group members ⇒ the kill fires despite foreign unreadables"
 
 
-def test_p7_zero_members_with_unreadable_is_group_unknown(tmp_path, kill_fence):
-    """C2 at P7 — member count 0 with unreadable pids ⇒ emptiness is
-    UNPROVABLE ⇒ ``refused:group-unknown`` (never already-dead)."""
+def test_p7_zero_members_with_watched_unreadable_is_group_unknown(tmp_path, kill_fence):
+    """C2 at P7 — RE-AIMED (leader ruling, cycle 3): member count 0 with
+    an unreadable WATCHED member ⇒ emptiness is UNPROVABLE ⇒
+    ``refused:group-unknown`` (never already-dead)."""
     root = write_proc_tree(tmp_path / "proc", [])
     foreign = root / "7777"
     foreign.mkdir()
@@ -920,5 +921,49 @@ def test_p7_zero_members_with_unreadable_is_group_unknown(tmp_path, kill_fence):
     status, reason = ram_kill_ladder(
         SYNTHETIC_PGID, LEADER_START, 0.25, proc_root=root,
         captured_pgid=SYNTHETIC_PGID,
+        watched_pids=(7777,),  # the unreadable pid IS watched
     )
     assert (status, reason) == ("refused", REASON_GROUP_UNKNOWN)
+
+
+def test_p7_zero_members_with_foreign_unreadable_only_is_group_empty(tmp_path, kill_fence):
+    """Leader ruling (cycle 3) — a foreign unreadable pid NEVER poisons:
+    zero members + only-foreign unreadables ⇒ ``already-dead:group-empty``
+    (hidepid hosts still reach the release)."""
+    root = write_proc_tree(tmp_path / "proc", [])
+    foreign = root / "7777"
+    foreign.mkdir()
+    (foreign / "stat").mkdir()
+    status, reason = ram_kill_ladder(
+        SYNTHETIC_PGID, LEADER_START, 0.25, proc_root=root,
+        captured_pgid=SYNTHETIC_PGID,
+        watched_pids=(SYNTHETIC_PGID,),  # 7777 is NOT watched
+    )
+    assert (status, reason) == ("already-dead", REASON_GROUP_EMPTY)
+
+
+def test_p8_foreign_unreadable_does_not_mask_the_verified_death(tmp_path, kill_census):
+    """Leader ruling (cycle 3) at P8 — an unreadable FOREIGN pid must not
+    downgrade a VERIFIED death to ``killed:tree-incomplete``."""
+    root = build_tree(tmp_path / "proc")
+    foreign = root / "7777"
+    foreign.mkdir()
+    (foreign / "stat").mkdir()
+
+    def _killpg(pgid, sig):  # noqa: ANN001
+        calls = None
+        if sig == 9:
+            kill_tree(root, [SYNTHETIC_PGID, SYNTHETIC_PGID + 100])
+
+    calls, _sleeps = kill_census
+    import unittest.mock as mock
+    with mock.patch.object(ladder.os, "killpg", _killpg):
+        status, reason = ram_kill_ladder(
+            SYNTHETIC_PGID, LEADER_START, 0.25, proc_root=root,
+            captured_pgid=SYNTHETIC_PGID,
+            watched_pids=(SYNTHETIC_PGID, SYNTHETIC_PGID + 100),
+        )
+    assert status == "killed"
+    assert reason == REASON_LADDER, (
+        f"a foreign unreadable must not mask the verified death (got {reason})"
+    )
