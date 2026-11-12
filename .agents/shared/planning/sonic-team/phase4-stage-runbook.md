@@ -83,26 +83,32 @@ ls -l frontend/dist/frontend/browser/index.html.build-provenance.json   # sideca
 Run from the **stage worktree** — a clean checkout at the tagged commit (precedent: `/home/nea/ensemble-src-wt-stage-v<ver>` for v0.29.15; the sonic worktree at the tag is acceptable if clean). The staging tree must be at the integration tip (`_verify_tip_identity`, `scripts/upgrade/stage.sh:196-207`) with build provenance matching HEAD.
 
 ```bash
-cd <stage worktree @ $VERSION>
+cd <stage worktree @ $VERSION>        # a NEW clean worktree at $VERSION — see §2.7
 git status --porcelain                       # MUST be empty
-ENSEMBLE_UPGRADE_LIVE=1 VERSION="$VERSION" bash scripts/upgrade/stage.sh live
+ENSEMBLE_UPGRADE_LIVE=1 ENSEMBLE_ROLLBACK_SAFE=1 VERSION="$VERSION" bash scripts/upgrade/stage.sh live
 ```
+
+First run: NO `--skip-build`, NO `--allow-stale-stage` (see flag table).
 
 Flag policy — **required tonight vs premise-inapplicable**:
 
 | Flag / env | Tonight | Why |
 |---|---|---|
 | `VERSION=<derived>` (env-first) | **REQUIRED** | Explicit version; must equal the exact tag at HEAD (`stage.sh:180-191`, exit 78 otherwise) |
-| `ENSEMBLE_UPGRADE_LIVE=1` | **REQUIRED** | `require_live_guard` refuses live without it (`lib.sh`) |
-| `ENSEMBLE_ROLLBACK_SAFE` | **UNSET** | Let it DERIVE (`stage.sh:369-391`): true unless destructive DDL is in the migration set; tonight there is none (§3.3) |
+| `ENSEMBLE_UPGRADE_LIVE=1` | **REQUIRED** | `require_live_guard` refuses live without it (`stage.sh:176` → `lib.sh:1431-1442`, exit 78). **A-STAGE-3:** this arms the target guard ONLY — no promote, no nonce, no `state.json` promote-field writes; the Emperor's no-live-promote boundary is untouched (standard house invocation, v0.29.15 precedent) |
+| `ENSEMBLE_ROLLBACK_SAFE=1` | **REQUIRED — explicit form (SUPERSEDES the earlier "unset/derive" expectation in this row)** | `stage.sh:357-363` runs a FULL-HISTORY, comment-blind `grep -liE 'DROP\s+TABLE\|DROP\s+COLUMN'` over ALL `daemon/migrations/versions/*.sql`; ANY match ⇒ `contains_contract_phase=true` ⇒ the unset path **exits 78** (`:382-388`) — giter's preconditions audit: **106 legacy files match**, so the unset/default path is UNREACHABLE on this tree. Expected log token: `rollback_safe=true source=explicit=true` (`:371` + `:927`). Deliberate leader adjudication per A-STAGE-1 (§4) |
 | `--skip-build` | **Only if** a prebuilt `dist/ensemble-prod` from the SAME commit with a valid provenance sidecar exists; otherwise omit so the stage builds and OWNS provenance (`stage.sh:207-290`) | A dirty/stale binary is refused by the provenance gate |
 | `--allow-stale-stage` | **NOT APPLICABLE — do not use** | It unlocks tip-identity + provenance refusals (`stage.sh:87-95`). If stage refuses, STOP and fix the tree — never override tonight |
 | `ENSEMBLE_BINARY_VERSION` | not needed | defaults to `${VERSION#v}` (`stage.sh:403-404`) |
 | demo guard (`ENSEMBLE_INSTALL_DEMO`) | not needed | target is `live`, not demo |
 
-Stage expectations: exit 0; log line `staged release $VERSION at $REL (rollback_safe=true source=default=true …) — NO flip performed` (`stage.sh:927`; the unset path sets `ROLLBACK_SAFE_SRC="default=true"` at `stage.sh:390` — `grep derived scripts/upgrade/stage.sh` matches NOTHING). The exit-0 chain now includes the FE provenance sidecar check (§2.5 precedes this step, so the chain is reachable). Stage writes `ENSEMBLE_SELF_ENV=live` into `<install>/.env` (idempotent marker update, mode 0600 — expected behavior, not a deviation; `stage.sh:858-905`).
+Stage expectations: exit 0; log line `staged release $VERSION at $REL (rollback_safe=true source=explicit=true … contains_contract_phase=true …) — NO flip performed` (`stage.sh:927`; the explicit path sets `ROLLBACK_SAFE_SRC="explicit=true"` at `stage.sh:371`). **Supersession note (in-row):** the earlier `source=default=true` expectation is SUPERSEDED — it is unreachable on this tree (the unset path exits 78 because legacy migrations trip the full-history DDL grep, `stage.sh:357-363`; giter preconditions audit, 106 files). `contains_contract_phase=true` is EXPECTED here (same legacy-migration cause) and is NOT a stop condition (leader adjudication A-STAGE-2 — see the corrected STOP list in §3.4). The exit-0 chain includes the FE provenance sidecar check (§2.5 precedes this step, so the chain is reachable). Stage writes `ENSEMBLE_SELF_ENV=live` into `<install>/.env` (idempotent marker update, mode 0600 — expected behavior, not a deviation; `stage.sh:858-905`).
 
 **RAM-guard note (#15):** if the host carries the staged v0.29.21 guard, large `uv sync`/pytest trees (and the PyInstaller build) may be tree-killed (`ram_breach_observed` fires even on ordinary commands). The per-step budgets bound exposure; a killed step is re-run from its remainder with identical inputs — never widen a budget silently.
+
+### 2.7 Stage worktree (house continuation rule)
+
+After the merge, the stage runs from a **NEW clean worktree checked out at `$VERSION`** (e.g. `<repo>-wt-stage-<slug>`) — never the sonic commission worktree and never the canonical checkout (the house continuation rule: a worktree is per-task; continuation = a NEW worktree, never a resurrection). The §2.5 FE build and the §2.6 stage invocation both run there; `git status --porcelain` in that worktree must be empty before `stage.sh`.
 
 ## 3. Verification legs (explicit — do NOT rely on stage's non-fatal legs)
 
@@ -140,12 +146,12 @@ git diff --name-only ac9849bf7.."$VERSION" -- daemon/migrations/versions/ | wc -
 # (b) Tag-to-tag delta vs the release currently behind `current` — OBSERVE + DISCLOSE:
 PREV_TAG=<tag currently behind `current`>       # VERIFY-AT-IMPL from `readlink $HOME/agents-ensemble/current` (or the install's state.json)
 git diff --name-only "$PREV_TAG".."$VERSION" -- daemon/migrations/versions/    # expected empty; non-empty ⇒ list and disclose (intermediate already-staged releases, NOT this release)
-grep -o '"rollback_safe": [a-z]*' "$REL/manifest.json"                          # MUST be true (unset/default path — log token `source=default=true`)
+grep -o '"rollback_safe": [a-z]*' "$REL/manifest.json"                          # MUST be true (EXPLICIT path — log token `source=explicit=true`; `contains_contract_phase=true` is EXPECTED per A-STAGE-2, same legacy-migration cause)
 ```
 
 Note on (b): if the live `current` sits several staged releases behind (v0.29.2x chain), the tag-to-tag diff may legitimately include changes from those intermediate releases — that delta is **not** this release's content and must be disclosed as such, never attributed to the sonic branch. The binding "zero migrations" claim for tonight is (a): the sonic branch itself ships no `daemon/` and no migration files.
 
-**rollback_safe rationale (state exactly in the report):** the release is content-only — additive `agents/sonic-*/` directories plus one `agents/ari/rule.md` note; the daemon binary and the schema are unchanged, and the previous release directory ignores new agent directories entirely (they are plain directory-scanned prompt content). Therefore reverting `current` to the previous release restores the prior behavior with zero data or schema implications — trivially safe. If stage logs `contains_contract_phase=true` or `rollback_safe=false`, STOP (something shipped destructive DDL that this plan does not authorize).
+**rollback_safe rationale (state exactly in the report):** the release is content-only — additive `agents/sonic-*/` directories plus one `agents/ari/rule.md` note; the daemon binary and the schema are unchanged, and the previous release directory ignores new agent directories entirely (they are plain directory-scanned prompt content). Therefore reverting `current` to the previous release restores the prior behavior with zero data or schema implications — trivially safe. **STOP triggers (corrected per leader adjudication A-STAGE-2):** STOP ONLY on (i) `rollback_safe ≠ true`; (ii) missing/failed 4-way sha (§3.1–§3.2); (iii) PROMPT-BASELINE mismatch (§3.3); (iv) unexpected NEW migration delta vs `ac9849bf7` (this release's own migration delta = 0, proven by C4/C6). `contains_contract_phase=true` is **EXPECTED** on this tree — the same full-history legacy-migration grep fires (`stage.sh:357-363`) — and is **NOT a stop condition**.
 
 ## 4. STOP LINE — NO PROMOTE
 
@@ -161,6 +167,7 @@ ENSEMBLE_UPGRADE_LIVE=1 VERSION=<derived> bash scripts/upgrade/promote.sh live -
 ```
 
 - Evidence pointers the template must carry: staged release dir path, 4-way sha value, manifest path, prompt-baseline count, dry-run evidence path, pack result, journal file path.
+- **A-STAGE-1 disclosure (mandatory in the morning report):** `ENSEMBLE_ROLLBACK_SAFE=1` is a deliberate leader adjudication, NOT stage.sh's "delta empty" condition: tag-to-tag `v0.29.22..$VERSION` contains exactly ONE migration (`20261112_124200_add_snapshot_agent_space_key.sql` — vsss lane, already in base `ac9849bf7`, NOT sonic content); UP is additive (`ALTER TABLE snapshots ADD COLUMN agent_space_key TEXT`); only DROPs are in the DOWN block; rolling back to the prior release tolerates the extra column → data/schema-safe.
 
 ## 5. Morning handoff — what the report MUST show
 
@@ -171,14 +178,14 @@ ENSEMBLE_UPGRADE_LIVE=1 VERSION=<derived> bash scripts/upgrade/promote.sh live -
 5. **Pack result** — `sonic_agent_defs_unit_test` PASS + the PACKS.md row location + run duration.
 6. **Deviation list** — every item from the three phase files' Deviations sections that materialized, plus anything new, with evidence.
 7. **Open decisions for the Emperor** — (a) promote or not (with the template), (b) patch-vs-minor version choice if it was a judgment call, (c) any VERIFY-AT-IMPL item that landed differently than specified, (d) untested surfaces (snapshot chain — see `phase3-dryrun-spec.md` §8.4).
-8. **Zero-migration statement** + rollback_safe rationale verbatim (§3.4).
+8. **Zero-migration statement** + rollback_safe rationale verbatim (§3.4) **+ the A-STAGE-1 `ENSEMBLE_ROLLBACK_SAFE=1` adjudication disclosure (§4)**.
 
 ## 6. Acceptance criteria
 
 - AC-P4-1: preconditions C1–C7 all verified with recorded command output; any C failure stops before §2.
 - AC-P4-2: merge performed by giter per contract; `latest` contains the branch; feature-branch cleanup executed exactly once.
 - AC-P4-3: version derived from tags (derivation command output recorded); bump touched exactly the 4 (+CHANGELOG if renamed) files; tag is annotated and `git describe --tags --exact-match` == `$VERSION`.
-- AC-P4-4: `stage.sh live` exit 0 with `rollback_safe=true` via the unset/default path — log token `source=default=true` (`stage.sh:390` + `:927`); no `--allow-stale-stage` in argv (grep the recorded command).
+- AC-P4-4: `stage.sh live` exit 0 with `rollback_safe=true source=explicit=true` (`stage.sh:371` + `:927`); `ENSEMBLE_ROLLBACK_SAFE=1` present in the recorded argv (deliberate adjudication, A-STAGE-1); no `--allow-stale-stage` in argv (grep the recorded command). Supersession: the default=true token is unreachable on this tree — full-history DDL grep, 106 legacy matches (`stage.sh:357-363`; see §2.6).
 - AC-P4-5: §3.1–§3.4 all PASS with literal output; 4-way sha identical; baseline count == 197; this-release delta (`ac9849bf7..$VERSION` over `daemon/` + `scripts/` + migrations) == 0; any tag-to-tag migrations delta disclosed.
 - AC-P4-6: **no promote executed** — evidence: `readlink $HOME/agents-ensemble/current` unchanged from pre-stage; no promote.sh invocation in the shell history/transcript.
 - AC-P4-7: morning-handoff §5 items all present.

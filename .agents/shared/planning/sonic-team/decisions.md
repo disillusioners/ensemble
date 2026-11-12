@@ -138,4 +138,13 @@ Cross-reference ONLY — the single source of detail is `plan-overview.md` §7: 
 - **(b) Pack does not assert six load-bearing prompt properties** (`test/packs/sonic_agent_defs_checks.py:630-642`) — regression-detection gap; properties correct today; add assertions in v1.1.
 - **(c) Duty tripwire desensitized by the 4 permanent canary reds** (`tests/unit/test_anomaly_report_duty_prompts.py:343-481`) — re-arm in a follow-up (fix canary or scope the walk) in v1.1.
 
+### Stage-truth adjudications (leader, 2026-11-12 late — giter preconditions audit)
+
+*Evidence basis: giter's read-only preconditions audit; phase4 carries the operational edits — mechanics not restated beyond one line each.*
+
+- **A-STAGE-1 — explicit `ENSEMBLE_ROLLBACK_SAFE=1` ACCEPTED:** the unset/derive path is unattainable on this tree (stage.sh:357-363 full-history comment-blind DDL grep; 106 legacy migration files match → contains_contract_phase=true → exit 78). Content-only release; tag-to-tag `v0.29.22..$VERSION` contains EXACTLY ONE migration — `20261112_124200_add_snapshot_agent_space_key.sql` (vsss lane, already in base ac9849bf7, NOT sonic content); UP additive (ALTER TABLE snapshots ADD COLUMN agent_space_key TEXT); only DROPs in the DOWN block; prior-release rollback tolerates the extra column → data/schema-safe. Emperor-ceremony disclosure: this is NOT stage.sh's "delta empty" condition — the =1 is a deliberate adjudication.
+- **A-STAGE-2 — `contains_contract_phase=true` EXPECTED, not a STOP:** same legacy-migration cause; Phase-4 §3.4 STOP triggers corrected to: rollback_safe≠true · missing/failed 4-way sha · PROMPT-BASELINE mismatch · unexpected NEW migration delta vs ac9849bf7 (this release's own delta = 0, proven).
+- **A-STAGE-3 — `ENSEMBLE_UPGRADE_LIVE=1` required and standard:** target guard only (stage.sh:176 → lib.sh:1431-1442, exit 78 otherwise; v0.29.15 precedent); arms the target guard ONLY — NO promote, NO nonce, NO state.json promote-field writes; the Emperor's no-live-promote boundary is untouched.
+- **Supersession — iteration-001 token fix (`source=default=true`) SUPERSEDED:** unreachable on this tree; the expected token is now `rollback_safe=true source=explicit=true` (stage.sh:371/:927); phase4 §2.6/AC-P4-4/§3.4 carry the corrected expectation.
+
 — end of decisions.md —
