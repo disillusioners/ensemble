@@ -4032,8 +4032,9 @@ async def lifespan(app: FastAPI):
     # point re-opens the exact window the claim exists to close — a
     # concurrent boot would see "no owner" and take the port. Stale claims
     # self-heal on the next boot via pid + starttime liveness; a claim owned
-    # by a live process is never taken over. `release_claim` remains
-    # available for tests/manual operator cleanup only.
+    # by a live process is never taken over. The pid-gated release helper in
+    # daemon/services/port_ownership.py remains available for tests/manual
+    # operator cleanup only.
 
     # Shutdown sequence
     # Stop RetryScheduler first
