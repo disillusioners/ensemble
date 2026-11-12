@@ -908,16 +908,14 @@ def _build_child_env(
             from P1 behavior.
     """
     env = os.environ.copy()
-    # Strip the RAM ladder's ownership stamp: a proc child is not
-    # stamped by the lane that owns that variable, and an inherited
-    # ambient value would read as a REAL "exists and differs" mismatch
-    # in the ladder's P6 — refusing this lane's kill forever.  ABSENT
-    # is UNVERIFIABLE, which is the correct reading for this lane
-    # (see ``_RAM_OWNERSHIP_ENV_VAR``).
-    env.pop(_RAM_OWNERSHIP_ENV_VAR, None)
     env[_TRACKING_ENV_VAR] = process_id
     if process_env_overlay:
         env.update(process_env_overlay)
+    # Leader ruling B: strip FOREIGN ownership stamps POST-overlay so an
+    # overlay can never forge the other lane's stamp.  Re-assert the own
+    # stamp LAST so the authoritative value wins.
+    env.pop(_RAM_OWNERSHIP_ENV_VAR, None)
+    env[_TRACKING_ENV_VAR] = process_id
     # Design §1b: timing / locus / failure identical to the bash
     # seam (§1a) — resolution runs on the ASSEMBLED dict at spawn
     # time, surface "bash.env" family. Marker-free env is a no-op

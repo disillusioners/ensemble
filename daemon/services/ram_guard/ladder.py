@@ -83,7 +83,7 @@ REASON_PGID_SELF = "refused:pgid-self"
 REASON_DAEMON_GROUP = "refused:daemon-group"
 REASON_PGID_RECYCLED = "refused:pgid-recycled"
 REASON_LEADER_UNREADABLE = "refused:leader-unreadable"
-REASON_OWNERSHIP_MISMATCH = "refused:ownership-mismatch"
+REASON_OWNERSHIP_MISMATCH = "refused:ownership-mismatch"  # RETIRED (§18.2) — kept for compat only; no longer in REASON_SET
 REASON_GROUP_UNKNOWN = "refused:group-unknown"
 
 #: The authoritative exact set — 16 codes (§15 B4).
@@ -102,7 +102,6 @@ REASON_SET: tuple[str, ...] = (
     REASON_DAEMON_GROUP,
     REASON_PGID_RECYCLED,
     REASON_LEADER_UNREADABLE,
-    REASON_OWNERSHIP_MISMATCH,
     REASON_GROUP_UNKNOWN,
 )
 
@@ -142,7 +141,6 @@ PERMANENT_REFUSALS: tuple[str, ...] = (
     REASON_PGID_SELF,
     REASON_DAEMON_GROUP,
     REASON_PGID_RECYCLED,
-    REASON_OWNERSHIP_MISMATCH,
 )
 
 #: Which pre-kill predicate each refusal belongs to — the counter
@@ -157,7 +155,6 @@ REFUSAL_PREDICATE_BUCKET: dict[str, str] = {
     REASON_PGID_SELF: "p4",
     REASON_PGID_RECYCLED: "p5",
     REASON_LEADER_UNREADABLE: "p5",
-    REASON_OWNERSHIP_MISMATCH: "p6",
     REASON_GROUP_UNKNOWN: "p7",
 }
 
@@ -274,26 +271,6 @@ def check_p5_leader_identity(stat, leader_start_time: Optional[int]) -> Optional
         return None  # a zombie leader is dead (awaiting reap)
     if leader_start_time is None:
         return REASON_LEADER_UNREADABLE  # nothing to compare against
-    if stat.start_time_jiffies != leader_start_time:
-        return REASON_PGID_RECYCLED
-    return None
-
-
-def check_p5a_pgid_recycled(stat, leader_start_time: Optional[int]) -> Optional[str]:
-    """P5a — the pgid-recycle check the re-anchor requires.
-
-    ``pgid recycled ⇔ a live process with pid == captured_pgid has a
-    starttime ≠ captured leader_start_time``.  Fail-closed on an
-    unreadable leader.
-    """
-    if stat.unreadable:
-        return REASON_LEADER_UNREADABLE
-    if stat.absent:
-        return None  # no live process holds the pid ⇒ not recycled
-    if (stat.state or "").startswith("Z"):
-        return None
-    if leader_start_time is None:
-        return REASON_LEADER_UNREADABLE
     if stat.start_time_jiffies != leader_start_time:
         return REASON_PGID_RECYCLED
     return None
@@ -430,8 +407,14 @@ def check_p6_ownership(
         if lane is not None
         else ()
     )
+    # LEADER RULING B (2026-11-11): env stamps are ADVISORY.  A mismatch
+    # (foreign stamp present, or the lane's own stamp present with a
+    # different value) NEVER permanent-refuses — it re-verifies the primary
+    # identity (the captured pgid ∧ the leader's starttime, already
+    # established by P5 + P5a before P6 runs) and, on a hold, PROCEEDS
+    # with ownership_unverified++.  The lane-aware structure stays.
     if foreign_vars and _foreign_stamp_present(proc_root, members, foreign_vars):
-        return REASON_OWNERSHIP_MISMATCH, False
+        return None, True
     readable = False
     for pid in members:
         matched = read_ownership_stamp(proc_root, pid, tracking_id, env_var=lane_var)
@@ -441,19 +424,19 @@ def check_p6_ownership(
         if matched:
             return None, False
     if readable:
-        return REASON_OWNERSHIP_MISMATCH, False
+        return None, True
     return None, True
 
 
-def check_p7_group_liveness(scan_complete: bool, member_count: int) -> Optional[str]:
+def check_p7_group_liveness(scan_complete: bool, member_count: int, unreadable_pids=()) -> Optional[str]:
     """P7 — the group is still alive.
 
     ``group_member_count == 0`` ⇒ ``already-dead:group-empty`` (release,
-    no signal) — and ONLY at member count 0 (it is NOT produced merely
-    because the leader is gone).  An unevaluable group ⇒
+    no signal) — and ONLY at member count 0 on a COMPLETE scan (unreadable
+    pids make "empty" unprovable — §18.1).  An unevaluable group ⇒
     ``refused:group-unknown``.
     """
-    if not scan_complete:
+    if not scan_complete or unreadable_pids:
         return REASON_GROUP_UNKNOWN
     if int(member_count) == 0:
         return REASON_GROUP_EMPTY
@@ -498,7 +481,7 @@ def probe_tree_after_kill(proc_root: Path, pgid: int) -> bool:
     ``killed:tree-incomplete``.
     """
     table = scan_proc(proc_root)
-    if not table.scan_complete:
+    if not table.scan_complete or table.unreadable_pids:
         return False
     return not table.by_pgrp.get(int(pgid), ())
 
@@ -567,9 +550,8 @@ def ram_kill_ladder(
     reason = check_p5_leader_identity(leader_stat, leader_start_time)
     if reason is not None:
         return (STATUS_REFUSED, reason)
-    reason = check_p5a_pgid_recycled(leader_stat, leader_start_time)
-    if reason is not None:
-        return (STATUS_REFUSED, reason)
+    # P5a RETIRED (§18.3): probe-proven byte-identical to P5; the
+    # recycle outcome is produced by check_p5_leader_identity above.
 
     # ── ONE scan serves P6 (the ownership stamp) and P7 (the liveness) ──
     table = scan_proc(proc_root)
@@ -587,7 +569,7 @@ def ram_kill_ladder(
         on_ownership_unverified()
 
     # ── P7 — the group is still alive ──
-    reason = check_p7_group_liveness(table.scan_complete, len(members))
+    reason = check_p7_group_liveness(table.scan_complete, len(members), table.unreadable_pids)
     if reason is not None:
         if reason == REASON_GROUP_EMPTY:
             return (STATUS_ALREADY_DEAD, REASON_GROUP_EMPTY)
@@ -652,7 +634,6 @@ __all__ = [
     "check_p3_daemon_group",
     "check_p4_self",
     "check_p5_leader_identity",
-    "check_p5a_pgid_recycled",
     "check_p6_ownership",
     "check_p7_group_liveness",
     "is_permanent_refusal",

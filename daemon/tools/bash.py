@@ -55,6 +55,13 @@ from daemon.services.bash_spawn_reaper import (
     kill_switch_from_env as _bash_reaper_switch,
     sweep_instance as _bash_reaper_sweep_instance,
 )
+
+#: FOREIGN ownership stamps (leader ruling B, 2026-11-11): the bash lane
+#: strips these from the assembled env AFTER the overlay is applied, so an
+#: LLM-supplied ``env`` overlay can never forge the OTHER lane's stamp.
+#: Duplicated literal (the import freeze forbids ``bash → proc_tools``);
+#: the coupling is pinned by a test.
+_RAM_FOREIGN_OWNERSHIP_ENV_VARS: tuple[str, ...] = ("ENSEMBLE_PROC_TRACKING_ID",)
 from daemon.services.timestamps import now_utc_iso as _now_utc_iso
 # RAM auto-termination (phase3-plan.md) — the bash lane's RAM arm.
 # The import direction is ``tools/* → ram_guard`` ONLY (arch §7's import
@@ -816,11 +823,15 @@ RAM_GUARD_WAIT_SLACK_MS = 250
 #: :func:`_ram_wait_deadline_ms`).
 RAM_GUARD_PSS_CONFIRM_DEADLINE_MS = 250
 RAM_GUARD_GRACE_MS = 250
-RAM_GUARD_PROBE_MS = 10
+RAM_GUARD_PROBE_MS = 29
 
-#: The bounded wait's deadline (arch §15 B20, verbatim):
-#: ``wait_deadline_ms = RAM_GUARD_PENDING_MAX × T_service_worst_ms + WAIT_SLACK_MS``
-#: ``= 2 × 510 + 250 = 1270``.
+#: The bounded wait's deadline (arch §15 B20, re-derived at the
+#: code-council pass — §18.4, PROBE_MS DECLARED at the council-measured
+#: 29 ms; the 10 ms figure was an estimate):
+#: ``T_service_worst_ms = PSS_CONFIRM_DEADLINE_MS + GRACE_MS + PROBE_MS
+#:                       = 250 + 250 + 29 = 529``
+#: ``wait_deadline_ms = 2 × T_service_worst_ms + WAIT_SLACK_MS
+#:                   = 2 × 529 + 250 = 1308``.
 RAM_GUARD_WAIT_DEADLINE_MS = (
     _RAM_GUARD_PENDING_MAX
     * (
@@ -957,7 +968,7 @@ def _ram_episode_resolved(record: "_RamSpawnRecord | None") -> bool:
         return True
     if state == _RAM_STATE_OVERCOUNTED:
         return True
-    if state == _RAM_STATE_WATCHING and record.reason:
+    if state == _RAM_STATE_WATCHING and getattr(record, "transient_backoff", 0) > 0:
         return True
     return False
 
@@ -1346,6 +1357,20 @@ async def bash(
                     if assembled_env is None:
                         assembled_env = os.environ.copy()
                     assembled_env[_BASH_TRACKING_ENV_VAR] = tracking_id
+            # Leader ruling B: strip FOREIGN ownership stamps POST-overlay so
+            # an env overlay can never forge the other lane's stamp.  Also
+            # materialise the inherit-env copy when an ambient foreign stamp
+            # is present, even when no stamping occurs.
+            if instance_id is not None:
+                if any(
+                    (assembled_env or os.environ).get(v) is not None
+                    for v in _RAM_FOREIGN_OWNERSHIP_ENV_VARS
+                ) or env:
+                    if assembled_env is None:
+                        assembled_env = os.environ.copy()
+                if assembled_env is not None:
+                    for v in _RAM_FOREIGN_OWNERSHIP_ENV_VARS:
+                        assembled_env.pop(v, None)
             if isinstance(command, list):
                 proc = await asyncio.create_subprocess_exec(
                     *command,
