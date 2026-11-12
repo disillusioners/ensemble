@@ -1,198 +1,141 @@
-# bind_race port-ownership mutation matrix
+# bind_race rogue-containment mutation matrix (component B, fix-round 2)
 
-Mutation-proven pin suite for `daemon/services/port_ownership.py` and
-`tests/unit/test_port_ownership_pins.py` (component A, rogue-containment).
+Mutation-proven pin suite for the **spawn-boundary scrub**, **proc_run seam**,
+**pkill-overlay fence**, **DB-resolution guard**, **metrics-port derive** and
+**transcript-marker gate**. Regenerated 2026-11-12 during fix-round 2 after the
+original artifact was corrupted by a self-overwriting heredoc (B4); it now
+contains ONLY this body — the port-ownership matrix lives in
+`tests/bind_race_port_ownership_mutation_matrix.md`.
 
-Venue discipline (mutation-02 POK): every mutant runs in a scratch
-worktree at the branch tip with its own venv; never on the canonical
-checkout. Restore via `git restore <file>` and verify sha256 PRE==POST.
+**Venue (mutation-02 POK):** scratch worktree `/tmp/rogue-mut-r2`
+(`git worktree add --detach ... e5110224 1`), `PYTHONPATH=<venue>` with
+`daemon.__file__` verified inside the venue, per-variable env scrub (never
+`env -u POSTGRES_*`), `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0`,
+`ENSEMBLE_PORT_CLAIMS_DIR` under /tmp, all runs bounded (`--timeout=90`).
+Restore via `git checkout -- .`; sha256 PRE == POST verified for every
+mutated file. Scratch tree removed after the run.
 
-```
-git worktree add --detach /tmp/rogue-mut <branch-tip-sha>
-cd /tmp/rogue-mut && /home/nea/ensemble-src/.venv/bin/python -m pip install -e . 2>/dev/null
-# prove import isolation:
-/home/nea/ensemble-src/.venv/bin/python -c "import daemon; print(daemon.__file__)"
-# baseline GREEN:
-/home/nea/ensemble-src/.venv/bin/python -m pytest tests/unit/test_port_ownership_pins.py -q
-# apply mutant (edit named file/line), re-run, expect listed REDs, then:
-git restore daemon/services/port_ownership.py
-sha256sum daemon/services/port_ownership.py   # == recorded digest
-```
-
-Pre-mutation sha256 (recorded at tip 715f4eedc, verified unchanged at tip 50d97c5ab):
+## Pre-mutation digests (venue tip e5110224 1)
 
 ```
-942e62bdecdb8629444497a9568a1167c33532acce93c70c0b0e76c27a6e65d8  daemon/services/port_ownership.py
+617dae9867f2dcb53f3d5ff4342b70f09f60bb45f27ea95bac8c387aaa4b6f2a  daemon/services/port_ownership.py
+1158010107f9e1a610488378a0c62218335c390983bbd6a2ce7c857b6b558a67  daemon/services/spawn_env_policy.py
+b3d31acd83738f816ac3f3ab68a3c57b24801e89a1b51e9befb31fae44cae532  daemon/tools/service_spawner.py
+27cbeb9ecf63dfa4e91d620919721f3552a0f17516693f90630d82d2802ecc6e  daemon/api.py
+6673c46b535e091476ad94f44ecbcff3e10365d7f503dc623def489b9375c224  daemon/ensemble_config.py
+a49c7abcaf560a2da1e2d7a2e0b75c9889561709e09480579b76581cdcb41edd  daemon/tools/bash.py
+b7fd92cc58e12b318499c2d27badf9632422adecb80e5e792973a73a1ca15769  daemon/tools/proc_tools.py
+036fa3f2ede7f6454c9fc13b06678a7ba88f2f8cc3b82c0162221f56b51fbe40  daemon/services/metrics_listener.py
 ```
 
-## Mutants
+## Mutants (observed reds — 2026-11-12 execution)
 
-must-RED lists below are the **observed** red sets from the 2026-11-12 execution
-(rulings 1/2/6): accept the natural blast radius, list all observed reds, with
-a one-line causal note wherever a previously-listed node was dropped or an
-unexpected node appeared. No code was restructured to serve a mutant.
-
-| Mutant | File | Edit (surviving behaviour removed) | Must RED (observed) |
+| Mutant | File | Edit (surviving behaviour removed) | Observed RED |
 |---|---|---|---|
-| M1 | daemon/services/port_ownership.py | In `is_live_foreign`, replace the foreign-ness gate result with `False` (treat foreign install_dir as non-foreign) — removes the foreign-ness gate | `test_E_ii_refuse_foreign_live`, `test_E_iii_M4_plant_foreign_refuses`. Causal note: `test_E_ii_M1_same_install_takes` stays green BY DESIGN — the planted claim is same-install, which the `==` early-return already classifies non-foreign, so removing the final gate never touches it. |
-| M2 | daemon/services/port_ownership.py | In `pid_alive_with_starttime`, remove the starttime mismatch check (mismatched starttime still returns True) | `test_E_ii_M2_dead_pid_stale_takes`. Causal note: `test_E_ii_refuse_foreign_live` stays green BY DESIGN — its planted pid is live with a matching starttime, so the starttime check is not on its path. |
-| M3 | daemon/services/port_ownership.py | Remove the `is_live_foreign` foreign-ness check in `try_claim` (always take) | `test_E_ii_refuse_foreign_live`, `test_E_iii_M4_plant_foreign_refuses` |
-| M4 | daemon/services/port_ownership.py | In `try_claim`, invert the foreign-ness verdict (`is_live_foreign` → `not is_live_foreign`) on the EXISTING-claim path | `test_E_ii_refuse_foreign_live`, `test_E_ii_M1_same_install_takes`, `test_E_ii_M2_dead_pid_stale_takes`, `test_E_iii_M4_plant_foreign_refuses`, `test_promote_shape_same_install_non_refuse`. True effect: inverts the verdict on the existing-claim path only. The absent-claim path (`test_E_iii_happy_take_claim`) sits outside the `existing is not None` guard and is unreachable by this mutation family; it is covered by its clean-green result plus harness leg (b). |
-| M5 | daemon/services/port_ownership.py | In `try_claim`, make `claims_dir.mkdir` failure raise instead of degrade | `test_E_iii_M5_degrade_claims_dir_create_fails` (raises OSError) |
-| M6 | daemon/services/port_ownership.py | In `is_live_foreign`, treat same-install as foreign (`==` → `!=`) | `test_E_ii_refuse_foreign_live`, `test_E_ii_M1_same_install_takes`, `test_E_ii_M3_remove_foreign_check_would_refuse_same_install`, `test_E_iii_M4_plant_foreign_refuses`, `test_promote_shape_same_install_non_refuse`, `test_promote_shape_M6_foreignness_flip_would_refuse`. Causal note: the flip changes foreign-ness for both same- and different-install claims, so the blast radius spans the whole suite. |
+| B-M1 | spawn_env_policy.py | remove `"PORT"` from the exact strip set | collection error (module-level count assert 11 != 12) — loud, unmissable |
+| B-M2 | spawn_env_policy.py | `if overlay: out.update(overlay)` → `if False:` | `test_apply_boundary_strips_inherit_and_overlay_wins`, `test_scrub_strips_poisoned_ambient_with_overlay_wins` |
+| B-M3 | service_spawner.py | drop `env=_apply_spawn_boundary(...)` from `Popen` | `test_scrub_service_spawner_env_kwarg` |
+| B-M4a | metrics_listener.py | remove the `derived > MAX_METRICS_PORT` guard (N8 overflow) | `test_derive_overflow_at_65535_disables_loudly` |
+| B-M4b | api.py | revert to `getattr(config.limits, "metrics_listener_port", int(port)+1)` | `test_api_source_uses_the_single_derive_helper` |
+| B-M5 | ensemble_config.py | remove the fence-var early return | `test_guard_fence_var_allows`, `test_predicate_strings_present` |
+| B-M6 | bash.py | `_pkill_overlay_violation` → always `None` | 15 reds across both overlay files (name/unit/path/port/list/systemctl/substitution/xargs + the B6 pins) |
+| B-M7 | spawn_env_policy.py | count assert 12 → 11 | collection error |
+| **B-M8** | proc_tools.py | `_build_child_env` → `env = os.environ.copy()` (the B2 regression) | `test_proc_run_build_child_env_is_scrubbed`, `test_proc_run_real_spawn_channel` |
+| **B-M9** | bash.py | restore overlay-as-fence (`del env` removed, overlay OR'd in) | `test_env_overlay_fence_is_IGNORED_B6`, `test_env_overlay_fence_without_ambient_still_refused`, `test_overlay_fence_does_not_allow_live_pattern_B6` |
+| **B-M10** | bash.py | keep the fence key in the child overlay (`spawn_env_overlay = env`) | `test_bash_overlay_fence_key_is_stripped_from_child` |
+| **B-M11** | spawn_env_policy.py | strip prefix `("PG",)` → `("ZZ",)` | 8 reds (3 bash real-spawn channels, 2 proc_run, service_spawner, `test_pg_prefix_family_stripped`, `test_pg_test_exemption_survives`) |
+| **B-M12** | spawn_env_policy.py | remove the `PG_TEST_` exemption | 7 reds (both real-spawn families + `test_pg_test_exemption_survives`) |
+| **B-M13** | (planted) | inject `<\|end\|>` into a tracked text artifact | `test_no_transcript_markers_in_tracked_text_files` (B4 gate) |
+| **B-M14** | ensemble_config.py | N5 fail-closed `_sys.exit(78)` → `pass` | `test_guard_internal_error_fails_CLOSED_exit_78`, `test_guard_does_not_call_create_engine`, `test_guard_fires_on_ambient_poison`, `test_main_boot_preflight_call_site_exits_78_before_load` |
+
+Causal notes:
+* B-M1/B-M7 trip the module-level count assert → collection-level detection
+  (kept deliberately: the loudest possible signal).
+* B-M4b reddens the source pin only; B-M4a covers the behavioural edge.
+* B-M6's 15-red blast radius is expected: one pure function backs every
+  overlay assertion in both files.
+* B-M8 is the reviewer's exact regression shape (reverting the proc_run
+  scrub) — it now reddens two pins, including a REAL spawned-child env probe.
 
 ## Non-vacuity control
 
-Clean tree (no mutant) => all pins GREEN. Each mutant reddens only its listed
-node(s) plus the causal blast radius above; any unlisted RED was investigated
-before sign-off. Baseline run on the scratch venue: 10 passed
-(`tests/unit/test_port_ownership_pins.py`).
+Clean tree => `tests/unit/test_spawn_boundary_scrub.py`
+`tests/unit/test_spawn_env_policy.py` `tests/unit/test_pkill_overlay_guard.py`
+`tests/unit/test_pkill_overlay_pins.py` `tests/unit/test_db_resolution_guard.py`
+`tests/unit/test_metrics_port_derive.py` `tests/unit/test_transcript_marker_gate.py`
+all GREEN at the venue tip (160 + 19 + 1 passed across the fix-round-2 focused
+runs).
 
 ## Restore verification
 
-`git restore daemon/services/port_ownership.py` then `sha256sum` must equal the
-recorded digest. Any mismatch => re-clone the scratch venue. Verified for all six
-mutants (PRE == POST == 942e62bdecdb8629444497a9568a1167c33532acce93c70c0b0e76c27a6e65d8).
+`RESTORE_EQUAL` = true for every mutated file (all 9 digests byte-identical to
+the pre-mutation values above). No scratch tree left behind
+(`git worktree list` shows no `/tmp/rogue-mut-r2`).
 
-## Execution record (2026-11-12, tip 50d97c5ab)
+## House-gate evidence — CANONICAL claim set (N6)
 
-**Venue + import isolation:** `git worktree add --detach /tmp/rogue-mut-po 50d97c5ab`;
-`PYTHONPATH=/tmp/rogue-mut-po` forced the worktree ahead of the canonical
-editable `.pth` (verified: `daemon.__file__` = `/tmp/rogue-mut-po/daemon/__init__.py`,
-`tests.__file__` = `/tmp/rogue-mut-po/tests/__init__.py`). Per-variable env scrub
-(no `env -u POSTGRES_*` glob). All runs bounded. Non-vacuity control green
-(10/10). Scratch tree removed (`git worktree remove --force /tmp/rogue-mut-po`;
-`git worktree list` shows no `/tmp/rogue-mut-*`).
+### (a) Full-pack PRE baseline — **NON-COMPARABLE** (different test universe)
 
-**Per-mutant table (edit applied / observed reds / verdict / sha equality):**
+Artifact: `/tmp/rogue-containment-baseline-clean.log`
+sha256 `b57680585aab7fea56e8216d48f5e7997f29f47610a1fc015d2cfc40eb4c605c`
+Summary line: `541 failed, 25265 passed, 113 skipped, 5 xfailed, 2234 warnings, 125 errors in 857.98s`
+(exit 3). The post-side full-pack artifact
+`/tmp/rogue-post-run2.log` (sha256 `d0125e518de483fc31f23e37c5fb30c1277014b6af49e4565f0b2b5cfc030e50`)
+reports `380 failed, 5358 passed, 134 skipped, 1220 deselected, 121 errors`.
+**The universes differ** (25k vs 5.9k executed; deselection counts 2234 vs
+1220), so a 541→380 delta is **NOT** a "regressions fixed" claim. Labeled
+NON-COMPARABLE and not used for adjudication.
 
-| Mutant | Edit applied | Observed reds | Verdict | POST sha == PRE |
-|---|---|---|---|---|
-| M1 | final `return True`→`return False` | `test_E_ii_refuse_foreign_live`, `test_E_iii_M4_plant_foreign_refuses` | MATCH + UNDER-RED (`test_E_ii_M1`) + OVER-RED (`test_E_iii_M4`) | ✓ |
-| M2 | remove starttime mismatch check | `test_E_ii_M2_dead_pid_stale_takes` | MATCH + UNDER-RED (`test_E_ii_refuse_foreign_live`) | ✓ |
-| M3 | `is_live_foreign(...)`→`if False:` | `test_E_ii_refuse_foreign_live`, `test_E_iii_M4_plant_foreign_refuses` | MATCH (both) | ✓ |
-| M4 | `is_live_foreign(...)`→`not is_live_foreign(...)` | 5 reds (see table above) | UNDER-RED (named node green) + 5 OVER-RED | ✓ |
-| M5 | mkdir failure → `raise` | `test_E_iii_M5_degrade_claims_dir_create_fails` (OSError) | MATCH | ✓ |
-| M6 | same-install `==`→`!=` | 6 reds (see table above) | MATCH (2) + 4 OVER-RED | ✓ |
+### (b) SAME-INVOCATION cohort — the only comparable claim
 
-**Classification:** 2/6 clean MATCH (M3, M5); 4/6 match-with-relisted-blast. Zero
-undetected mutants (every mutant reddened at least its core assertion). Zero
-truly-vacuous pins — every UNDER-RED was causal over-specification of the
-must-RED list, not a green-on-mutant core assertion. Docs not committed (STOP
-rule) pending this re-authoring.<|end|><|start|><|start|>assistant to=bash<|channel|>analysis <|constrain|>xml<|message|><rfl:parameter name="command">
-cat > /home/nea/ensemble-src-wt-rogue-containment/tests/bind_race_rogue_containment_mutation_matrix.md <<'EOF'
-# bind_race rogue-containment mutation matrix
+Both artifacts come from the identical command
+(`pytest -q -n 8 --dist=loadfile ... tests/unit/services tests/unit/tools tests/unit/test_*.py`,
+per-variable env scrub, `ENSEMBLE_SELF_ENV=dev`, claims dir under /tmp):
 
-Mutation-proven pin suite for the spawn-boundary scrub, rider (d) metrics
-derive, DB-resolution guard, and pkill overlay guard (component B +
-component A overlay).
-
-Venue discipline (mutation-02 POK): scratch worktree at branch tip, own
-venv; restore via `git restore <file>`; verify sha256 PRE==POST. Never
-touch the canonical checkout.
-
-## Mutants
-
-must-RED lists below are the **observed** red sets from the 2026-11-12 execution
-(rulings 1/4/5/6): accept the natural blast radius, list all observed reds,
-with a one-line causal note wherever a previously-listed node was dropped or
-an unexpected node appeared.
-
-| Mutant | File | Edit | Must RED (observed) |
+| side | tree | result line | failed-id artifact |
 |---|---|---|---|
-| B-M1 | daemon/services/spawn_env_policy.py | Remove "PORT" from SPAWN_BOUNDARY_STRIP_ENV | Collection error: module-level `assert len(SPAWN_BOUNDARY_STRIP_ENV) == 10` fails (9) → both files fail to collect. Causal note: removing any strip entry trips the module-level count assert; collection-level detection is a loud, unmissable mutant signal (ruling 3 — kept as-is). The three named nodes (`test_strip_env_exact_ten_names`, `test_scrub_strips_poisoned_ambient_with_overlay_wins`, `test_counter_mutation_would_redden`) are all affected via collection. Interplay with B-M7 noted. |
-| B-M2 | daemon/services/spawn_env_policy.py | Remove overlay-merge block in `apply_spawn_boundary` (`if overlay: out.update(overlay)`) | `test_apply_boundary_strips_inherit_and_overlay_wins` (env_policy), `test_scrub_strips_poisoned_ambient_with_overlay_wins` (scrub). Causal note: `test_scrub_service_spawner_env_kwarg` stays green BY DESIGN — it exercises the deliberate=extra_env channel, not overlay. |
-| B-M3 | daemon/tools/service_spawner.py | Remove `env=_apply_spawn_boundary(...)` kwarg from Popen (revert to inherit) | `test_scrub_service_spawner_env_kwarg` |
-| B-M4 | daemon/api.py | Revert metrics derive to `getattr(config.limits, "metrics_listener_port", 9798)` | `test_api_source_uses_derive_not_managed_default`, `test_api_source_honors_env_escape`. Causal note: `test_derive_scratch_main_plus_one` is deliberately unaffected — it is a local mirror function that never reads api.py (ruling 4). |
-| B-M5 | daemon/ensemble_config.py | (primary) Remove fence-var check (`ENSEMBLE_DB_AMBIENT_ALLOW == "1"` early return) | `test_guard_fence_var_allows`. Causal note: `test_guard_fires_on_ambient_poison` stays green — the ambient-poison case still fires regardless of the fence-var check. Alt (ambient-predicate removal): observed red = `test_guard_does_not_fire_sqlite_default` (the always-fire detector); both must-RED nodes stayed green. Fence-var removal is the cleaner mutation (ruling 5). |
-| B-M6 | daemon/tools/bash.py | Remove live-pattern check from `_pkill_overlay_violation` (always None) | `test_name_family_refused_unfenced`, `test_unit_ref_family_refused_unfenced`, `test_install_root_path_family_refused_unfenced`, `test_port_family_refused_unfenced`, `test_list_form`. Causal note: all five use live patterns, so removing the check makes them all return None. |
-| B-M7 | daemon/services/spawn_env_policy.py | Change count assertion target 10 -> 9 (count gate bypass) | Collection error: module-level `assert len(SPAWN_BOUNDARY_STRIP_ENV) == 9` fails (10 != 9) → both files fail to collect. Causal note: collection-level detection; interplay with B-M1 honestly noted (ruling 3 — kept as-is). |
+| PRE | `d5da2c766` | `301 failed, 20839 passed, 78 skipped, 1 xfailed, 771 warnings, 37 errors in 912.18s` | `/tmp/rogue-pre-failed.txt` sha256 `083605df89b25ea5760639e81bbbdafb716138c98342a70ca8e5f1b430887caa` |
+| POST | `1a691248e` | `300 failed, 20899 passed, 78 skipped, 1 xfailed, 753 warnings, 37 errors in 930.58s` | `/tmp/rogue-post-failed.txt` sha256 `f781fdf23683261a50ff428a4bfab1b3b5172b9cf93a8b96f05a31116e045f66` |
 
-## Non-vacuity control
+Log artifacts: PRE `/tmp/rogue-pre.log` sha256
+`a08827ad1c3ff473d8510524d2e45f91cdc8c8463218e3d45d03f03ffcf7a627`; POST
+`/tmp/rogue-post.log` sha256
+`1b90458a273459a93cde2e7ae0b4f2e80cb435e3fab24f939af0a00fa6c35a3b`.
 
-Clean tree => all pins GREEN. Counter-mutations redden only their listed
-nodes (plus the causal blast radius above); unlisted REDs are investigated.
-Baseline run on the scratch venue: 11 passed
-(`tests/unit/test_spawn_env_policy.py` + `tests/unit/test_spawn_boundary_scrub.py`).
+Set diff (sorted unique failed ids): **9 net-new** (POST-only), **10 resolved**
+(PRE-only, reverse-flakes).
 
-## Restore verification
-
-`git restore <file>` then `sha256sum` must equal the recorded digest for
-each mutated file. Recorded digests at tip 715f4eedc (verified unchanged at
-tip 50d97c5ab):
+Net-new (all in ONE file, all pass in isolation at the POST tip — 20/20 in
+`tests/unit/tools/test_prompt_reload_tool.py` on re-run):
 
 ```
-65cd0ea7edc4fe9a718ca98ac24458e812af2af8b8883a488fbed2d4844ec094  daemon/services/spawn_env_policy.py
-103a422bb460ca25e0b6ea8cd99b3c6fb295d66c1c8b68e481e653636f97a981  daemon/tools/service_spawner.py
-d3579eb9bade9177eda79c7ad97d9b32aa2e2e55a9d8b202e7c6617eccbeee39  daemon/api.py
-3d4e5cef8c42745621c4e4d53d0d14a165abb681b5cc1bf633a553b4badbebd6  daemon/ensemble_config.py
-e3c2afc41b9554b08e55bccf7bf532875b7b418e5069d040591fef7d9acf3dc0  daemon/tools/bash.py
+tests/unit/tools/test_prompt_reload_tool.py::TestInfoLine::test_fingerprint_changed_true_on_db_change
+tests/unit/tools/test_prompt_reload_tool.py::TestInfoLine::test_info_line_on_success
+tests/unit/tools/test_prompt_reload_tool.py::TestMarkerContract::test_marker_on_forced_reload
+tests/unit/tools/test_prompt_reload_tool.py::TestMarkerContract::test_marker_on_no_change
+tests/unit/tools/test_prompt_reload_tool.py::TestMarkerContract::test_marker_on_reloaded
+tests/unit/tools/test_prompt_reload_tool.py::TestMarkerContract::test_marker_on_reloaded_db
+tests/unit/tools/test_prompt_reload_tool.py::TestMarkerContract::test_marker_on_unproven
+tests/unit/tools/test_prompt_reload_tool.py::TestMarkerContract::test_marker_token_equals_structured_outcome_everywhere
+tests/unit/tools/test_prompt_reload_tool.py::TestMarkerContract::test_zero_marker_on_refusals_and_failed
 ```
 
-## Execution record (2026-11-12, tip 50d97c5ab)
+Resolved (reverse-flakes, not lane-adjacent): 4 × `test_filesystem_walk_guardrails`
+/ `test_filesystem_workdir`, `test_loop_repairer::test_repair_summary_failure_returns_original_messages`,
+2 × `test_paused_auto_resume_fallback`, `test_scheduler_deferred_mechanism_probe`,
+`test_symptom_repair_engine`.
 
-**Venue + import isolation:** three scratch worktrees
-(`/tmp/rogue-mut-spawn`, `/tmp/rogue-mut-svc`, `/tmp/rogue-mut-api`,
-`/tmp/rogue-mut-db`, `/tmp/rogue-mut-bash`) created via
-`git worktree add --detach ... 50d97c5ab`. `PYTHONPATH=/tmp/rogue-mut-<x>`
-forced the worktree ahead of the canonical editable `.pth` (verified:
-`daemon.__file__` under `/tmp/rogue-mut-<x>`). Per-variable env scrub
-(no `env -u POSTGRES_*` glob). All runs bounded. Non-vacuity controls green
-(11/4/7/6/9). All scratch trees removed (`git worktree list` shows no
-`/tmp/rogue-mut-*`).
+**Adjudication:** ZERO lane-adjacent net-new ids. The 9 net-new are a
+`--dist=loadfile` ordering/load artifact in one pre-existing file (green when
+run in isolation, green in the focused fix-round-2 runs). Error counts are
+identical (37 / 37).
 
-**Per-mutant table (edit applied / observed reds / verdict / sha equality):**
+### (c) Superseded figures
 
-| Mutant | Edit applied | Observed reds | Verdict | POST sha == PRE |
-|---|---|---|---|---|
-| B-M1 | remove "PORT" from strip set | collection error (both files) | collection-level (broader than listed) | ✓ |
-| B-M2 | remove overlay-merge block | `test_apply_boundary_strips_inherit_and_overlay_wins` (env_policy), `test_scrub_strips_poisoned_ambient_with_overlay_wins` (scrub) | MATCH + OVER-RED + UNDER-RED (`test_scrub_service_spawner_env_kwarg`) | ✓ |
-| B-M3 | remove `env=` kwarg from Popen | `test_scrub_service_spawner_env_kwarg` | MATCH | ✓ |
-| B-M4 | revert derive to `getattr(...)` | `test_api_source_uses_derive_not_managed_default`, `test_api_source_honors_env_escape` | UNDER-RED (named node green) — source pins red | ✓ |
-| B-M5 (primary) | remove fence-var check | `test_guard_fence_var_allows` | MATCH + UNDER-RED (`test_guard_fires_on_ambient_poison`) | ✓ |
-| B-M5 (alt) | remove ambient predicate | `test_guard_does_not_fire_sqlite_default` | OVER-RED + UNDER-RED (both must-RED green) | ✓ |
-| B-M6 | remove live-pattern for-loop | 5 reds (see table above) | MATCH (2) + 3 OVER-RED | ✓ |
-| B-M7 | count assert 10→9 | collection error (both files) | collection-level | ✓ |
-
-**Classification:** 3/8 clean MATCH (B-M3, B-M5 primary fence node, plus B-M4's two source pins are the real pins). Zero undetected mutants. Zero truly-vacuous pins — every UNDER-RED was causal over-specification of the must-RED list. Docs not committed (STOP rule) pending this re-authoring.
-
-## House-gate evidence (2026-11-12)
-
-**Task B — net-new-red adjudication.** Pre FAILED: 561 (verified byte-identical to
-`grep "^FAILED "` over `/tmp/rogue-lf-run.log`). Post FAILED: 380
-(`/tmp/rogue-post-run2.log`). Set diff (`comm`): 243 net-new (post not in pre),
-424 resolved (pre not in post). Grouping of the 243 net-new:
-integration 177, root 17, services 15, manager 9, performance 8, job_queue 6,
-api 4, message_queue_redesign 2, migration 2, static 2, property 1. ZERO
-lane-adjacent ids (itemized grep over every lane-touched module and test cohort
-returned 0). Collection-error counts measure different things pre vs post:
-pre log has 0 `ERROR tests/...` collection-error lines (its 125 "errors" are
-execution-time E markers), post has 121. **Comparability statement (verbatim):**
-the pre run executed ~706 tests (561 failed + 20 passed + 125 errors) with 2210
-deselected; the post run executed ~5993 (380 failed + 5358 passed + 134 skipped +
-121 errors) with 1220 deselected. Test universes differ (new pin suites added).
-Therefore the pass/fail-count improvement (561→380 failed) is NOT a defensible
-"regressions fixed" claim — the sets are not comparable. What IS defensible:
-(1) zero lane-adjacent ids among the 243 net-new (verified by itemization); and
-(2) the lane's own pins are green and mutant-proven. The 243 are predominantly
-integration tests failing with 302 auth redirects / fixture errors —
-environmental, not lane-caused. Verdict: "zero lane-caused net-new reds" confirmed.
-
-**Task C — harness legs.** Leg (a) foreign-claim refuse: SKIP. Two honest reasons:
-(1) source-tree `resolve_self_install_dir()` returned `/home/nea/agents-ensemble` in
-this environment (not None as the task premise stated); (2) the harness's
-refuse-foreign plant uses a dead pid (planter process exits) →
-`pid_alive_with_starttime` False → stale → take (no refusal). Arranging a live
-foreign owner requires a staged/frozen second daemon; routed to staged
-verification. Unit pins cover the logic. Leg (b) happy boot take-claim: PASS —
-source-tree daemon booted ("Application startup complete", "Uvicorn running on
-0.0.0.0:18792"), readyz HTTP 401 (auth-gated; endpoint exists), no
-"PORT OWNERSHIP REFUSED" marker, graceful shutdown complete. (Nuance: readyz
-returns 401 because auth is enabled; the endpoint exists and the daemon is
-healthy — the harness's 8s default was too short, so the run was repeated
-manually with a 22s wait.) Leg (c) ambient-DB-poison refusal: PASS — daemon
-exited 78; log "DB RESOLUTION REFUSED ... Refusing before any TCP connection.";
-pg_stat_activity count = 1 (the verification query's own session); daemon made
-zero connections.
-EOF
-echo "written"
+Earlier revisions of this artifact cited `pre 561 / post 380 / 243 net-new`.
+Those came from a mixed-universe run whose pre-side artifact
+(`/tmp/rogue-lf-run.log`) no longer exists, and the reviewer's walk showed the
+two sides did not execute the same test set. **They are withdrawn.** The only
+canonical claim set is (a) as NON-COMPARABLE + (b) as the comparable cohort
+above. No `243` / `380` / `561` figure is used for adjudication anywhere in
+this lane.

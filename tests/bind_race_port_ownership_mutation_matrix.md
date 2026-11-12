@@ -1,81 +1,65 @@
-# bind_race port-ownership mutation matrix
+# bind_race port-ownership mutation matrix (component A, fix-round 2)
 
-Mutation-proven pin suite for `daemon/services/port_ownership.py` and
-`tests/unit/test_port_ownership_pins.py` (component A, rogue-containment).
+Mutation-proven pin suite for `daemon/services/port_ownership.py`, its gate
+wiring, and `tests/unit/test_port_ownership.py` /
+`tests/unit/test_port_ownership_pins.py`.
 
-Venue discipline (mutation-02 POK): every mutant runs in a scratch
-worktree at the branch tip with its own venv; never on the canonical
-checkout. Restore via `git restore <file>` and verify sha256 PRE==POST.
+**Venue (mutation-02 POK):** scratch worktree `/tmp/rogue-mut-r2` at tip
+`e5110224 1`, `PYTHONPATH=<venue>` (verified `daemon.__file__` inside the
+venue), per-variable env scrub, claims dir under /tmp, all runs bounded
+(`--timeout=90`), restore via `git checkout -- .` with sha256 PRE == POST.
 
-```
-git worktree add --detach /tmp/rogue-mut <branch-tip-sha>
-cd /tmp/rogue-mut && /home/nea/ensemble-src/.venv/bin/python -m pip install -e . 2>/dev/null
-# prove import isolation:
-/home/nea/ensemble-src/.venv/bin/python -c "import daemon; print(daemon.__file__)"
-# baseline GREEN:
-/home/nea/ensemble-src/.venv/bin/python -m pytest tests/unit/test_port_ownership_pins.py -q
-# apply mutant (edit named file/line), re-run, expect listed REDs, then:
-git restore daemon/services/port_ownership.py
-sha256sum daemon/services/port_ownership.py   # == recorded digest
-```
-
-Pre-mutation sha256 (recorded at tip 715f4eedc, verified unchanged at tip 50d97c5ab):
+## Pre-mutation digest
 
 ```
-942e62bdecdb8629444497a9568a1167c33532acce93c70c0b0e76c27a6e65d8  daemon/services/port_ownership.py
+617dae9867f2dcb53f3d5ff4342b70f09f60bb45f27ea95bac8c387aaa4b6f2a  daemon/services/port_ownership.py
+9c381fec62b673441c34802573f4c3e048c23e891dba2a3ce5a1b120acb140e3  daemon/__main__.py
+27cbeb9ecf63dfa4e91d620919721f3552a0f17516693f90630d82d2802ecc6e  daemon/api.py
 ```
 
-## Mutants
+## Mutants (observed reds — 2026-11-12 execution)
 
-must-RED lists below are the **observed** red sets from the 2026-11-12 execution
-(rulings 1/2/6): accept the natural blast radius, list all observed reds, with
-a one-line causal note wherever a previously-listed node was dropped or an
-unexpected node appeared. No code was restructured to serve a mutant.
+| Mutant | Edit (surviving behaviour removed) | Observed RED |
+|---|---|---|
+| P-M1 | `is_live_foreign` final `return True` → `False` (drop the foreign gate) | 6: `test_E_ii_refuse_foreign_live`, `test_E_iii_M4_plant_foreign_refuses`, `test_try_claim_refuse_foreign`, `test_gate_refuses_live_foreign_claim_and_writes_marker`, `test_B1_two_process_...`, `test_is_live_foreign_foreign_live` |
+| P-M2 | remove the starttime mismatch check | 2: `test_E_ii_M2_dead_pid_stale_takes`, `test_pid_alive_with_starttime_wrong_starttime` |
+| P-M3 | `if is_live_foreign(...)` → `if False and ...` | 5 (refusal family + the two-process pin) |
+| P-M4 | invert the verdict (`not is_live_foreign`) | 9 (both installation classes) |
+| P-M5 | claims-dir create failure → `raise OSError` | 1: `test_E_iii_M5_degrade_claims_dir_create_fails` |
+| P-M6 | same-install `==` → `!=` | 12 (whole foreign-ness blast radius) |
+| **P-M7** | `_claims_dir_for` → install-scoped (`<install>/data/port-claims`) — **the B1 regression** | 7 incl. `test_B1_two_process_foreign_claim_is_visible_and_refused`, `test_claims_dir_is_host_global_not_install_scoped`, `test_N3_gate_never_writes_under_the_install_root` |
+| **P-M8** | `validate_claim_port` → always `None` (N8 disabled) | 3: `test_gate_port_zero_refuses_claim_loudly`, `test_try_claim_port_zero_writes_nothing`, `test_validate_claim_port_edges` |
+| **P-M9** | `surface_refusal_marker` → immediate `False` (B5 reader disabled) | 3: `test_gate_surfaces_prior_refusal_once`, `test_surface_refusal_marker_reports_once_and_rotates`, `test_surface_refusal_marker_unparseable_is_loud` |
+| **P-M10** | delete the `run_port_ownership_gate(host, port)` call in `__main__` (B7(ii) wiring) | 1: `test_gate_refusal_never_enters_bind_retry` |
+| **P-M11** | restore the canonical-LIVE fallback in `resolve_self_install_dir` (the N3 defect) | 1: `test_N3_self_install_dir_never_falls_back_to_live_root` |
+| **P-M12** | re-introduce an aliased `release_claim` call into the api lifespan (B3) | 1: `test_B3_daemon_never_releases_claim_eagerly` |
+| **P-M13** | `_normalize_claim_host` → raw host (keying) | 8 (wildcard/loopback collision + claim readback family) |
 
-| Mutant | File | Edit (surviving behaviour removed) | Must RED (observed) |
-|---|---|---|---|
-| M1 | daemon/services/port_ownership.py | In `is_live_foreign`, replace the foreign-ness gate result with `False` (treat foreign install_dir as non-foreign) — removes the foreign-ness gate | `test_E_ii_refuse_foreign_live`, `test_E_iii_M4_plant_foreign_refuses`. Causal note: `test_E_ii_M1_same_install_takes` stays green BY DESIGN — the planted claim is same-install, which the `==` early-return already classifies non-foreign, so removing the final gate never touches it. |
-| M2 | daemon/services/port_ownership.py | In `pid_alive_with_starttime`, remove the starttime mismatch check (mismatched starttime still returns True) | `test_E_ii_M2_dead_pid_stale_takes`. Causal note: `test_E_ii_refuse_foreign_live` stays green BY DESIGN — its planted pid is live with a matching starttime, so the starttime check is not on its path. |
-| M3 | daemon/services/port_ownership.py | Remove the `is_live_foreign` foreign-ness check in `try_claim` (always take) | `test_E_ii_refuse_foreign_live`, `test_E_iii_M4_plant_foreign_refuses` |
-| M4 | daemon/services/port_ownership.py | In `try_claim`, invert the foreign-ness verdict (`is_live_foreign` → `not is_live_foreign`) on the EXISTING-claim path | `test_E_ii_refuse_foreign_live`, `test_E_ii_M1_same_install_takes`, `test_E_ii_M2_dead_pid_stale_takes`, `test_E_iii_M4_plant_foreign_refuses`, `test_promote_shape_same_install_non_refuse`. True effect: inverts the verdict on the existing-claim path only. The absent-claim path (`test_E_iii_happy_take_claim`) sits outside the `existing is not None` guard and is unreachable by this mutation family; it is covered by its clean-green result plus harness leg (b). |
-| M5 | daemon/services/port_ownership.py | In `try_claim`, make `claims_dir.mkdir` failure raise instead of degrade | `test_E_iii_M5_degrade_claims_dir_create_fails` (raises OSError) |
-| M6 | daemon/services/port_ownership.py | In `is_live_foreign`, treat same-install as foreign (`==` → `!=`) | `test_E_ii_refuse_foreign_live`, `test_E_ii_M1_same_install_takes`, `test_E_ii_M3_remove_foreign_check_would_refuse_same_install`, `test_E_iii_M4_plant_foreign_refuses`, `test_promote_shape_same_install_non_refuse`, `test_promote_shape_M6_foreignness_flip_would_refuse`. Causal note: the flip changes foreign-ness for both same- and different-install claims, so the blast radius spans the whole suite. |
+Causal notes:
+* P-M7 is the reviewer's exact blindness shape; the pin that catches it is the
+  TWO-PROCESS end-to-end test resolving via `XDG_RUNTIME_DIR` (NOT the
+  `ENSEMBLE_PORT_CLAIMS_DIR` override), so install-scoping is causal.
+* P-M10 covers "the gate exists but nothing calls it" (the reviewer's second
+  mutation gap); P-M11/P-M12 cover the N3/B3 regressions.
+* P-M1/P-M3/P-M6 red sets are the accepted natural blast radius of the shared
+  foreign-ness predicate.
 
 ## Non-vacuity control
 
-Clean tree (no mutant) => all pins GREEN. Each mutant reddens only its listed
-node(s) plus the causal blast radius above; any unlisted RED was investigated
-before sign-off. Baseline run on the scratch venue: 10 passed
-(`tests/unit/test_port_ownership_pins.py`).
+Clean tree => `tests/unit/test_port_ownership.py` +
+`tests/unit/test_port_ownership_pins.py` GREEN (44 passed at the venue tip).
 
 ## Restore verification
 
-`git restore daemon/services/port_ownership.py` then `sha256sum` must equal the
-recorded digest. Any mismatch => re-clone the scratch venue. Verified for all six
-mutants (PRE == POST == 942e62bdecdb8629444497a9568a1167c33532acce93c70c0b0e76c27a6e65d8).
+`RESTORE_EQUAL` = true for every mutated file (byte-identical pre/post).
+Scratch venue removed; `git worktree list` shows no `/tmp/rogue-mut-r2`.
 
-## Execution record (2026-11-12, tip 50d97c5ab)
+## Residuals (carried, not closed)
 
-**Venue + import isolation:** `git worktree add --detach /tmp/rogue-mut-po 50d97c5ab`;
-`PYTHONPATH=/tmp/rogue-mut-po` forced the worktree ahead of the canonical
-editable `.pth` (verified: `daemon.__file__` = `/tmp/rogue-mut-po/daemon/__init__.py`,
-`tests.__file__` = `/tmp/rogue-mut-po/tests/__init__.py`). Per-variable env scrub
-(no `env -u POSTGRES_*` glob). All runs bounded. Non-vacuity control green
-(10/10). Scratch tree removed (`git worktree remove --force /tmp/rogue-mut-po`;
-`git worktree list` shows no `/tmp/rogue-mut-*`).
-
-**Per-mutant table (edit applied / observed reds / verdict / sha equality):**
-
-| Mutant | Edit applied | Observed reds | Verdict | POST sha == PRE |
-|---|---|---|---|---|
-| M1 | final `return True`→`return False` | `test_E_ii_refuse_foreign_live`, `test_E_iii_M4_plant_foreign_refuses` | MATCH + UNDER-RED (`test_E_ii_M1`) + OVER-RED (`test_E_iii_M4`) | ✓ |
-| M2 | remove starttime mismatch check | `test_E_ii_M2_dead_pid_stale_takes` | MATCH + UNDER-RED (`test_E_ii_refuse_foreign_live`) | ✓ |
-| M3 | `is_live_foreign(...)`→`if False:` | `test_E_ii_refuse_foreign_live`, `test_E_iii_M4_plant_foreign_refuses` | MATCH (both) | ✓ |
-| M4 | `is_live_foreign(...)`→`not is_live_foreign(...)` | 5 reds (see table above) | UNDER-RED (named node green) + 5 OVER-RED | ✓ |
-| M5 | mkdir failure → `raise` | `test_E_iii_M5_degrade_claims_dir_create_fails` (OSError) | MATCH | ✓ |
-| M6 | same-install `==`→`!=` | 6 reds (see table above) | MATCH (2) + 4 OVER-RED | ✓ |
-
-**Classification:** 2/6 clean MATCH (M3, M5); 4/6 match-with-relisted-blast. Zero
-undetected mutants (every mutant reddened at least its core assertion). Zero
-truly-vacuous pins — every UNDER-RED was causal over-specification of the
-must-RED list, not a green-on-mutant core assertion.
+* **Same-UID claim deletion** — any process as the same uid may unlink or
+  overwrite a claim file. The boundary is the uid.
+* **Same-install H1** — a rogue executing the same install's binary resolves
+  the same `install_dir` and is non-foreign by design (D2).
+* **PORT=0** — the gate refuses to claim (loud ERROR) and boot proceeds
+  without ownership enforcement (N8 policy); `*-0.json` files can no longer
+  be created.
