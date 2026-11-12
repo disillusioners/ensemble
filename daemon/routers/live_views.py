@@ -617,11 +617,16 @@ def _media_preflight(
     A part is skipped exactly as Starlette skips it when it is empty or
     a bare ``"-"`` (no positions). A part is UNSATISFIABLE when it is a
     zero/negative suffix (``-0``), a suffix longer than the file
-    (``-<size+1>`` and beyond), or a start at or past EOF. ONLY
-    provably-unsatisfiable shapes are answered here: a reversed bound
-    (``5-3``, Starlette's ``MalformedRangeHeader`` 400), an unparsable
-    part, or a non-``bytes`` unit returns ``None`` so Starlette keeps
-    its 400 / ignore-part behaviour unchanged.
+    (``-<size+1>`` and beyond), or a start at or past EOF. Past-EOF is
+    classified BEFORE reversed bounds: ``5000-3`` is both, and
+    past-EOF is the stronger, provable classification (Starlette's own
+    ``0 <= start < size`` guard runs before its ``start > end`` guard,
+    so it also answers 416 — just without the ``bytes `` token).
+    ONLY provably-unsatisfiable shapes are answered here: a reversed
+    bound WITHIN range (``1023-3``, Starlette's
+    ``MalformedRangeHeader`` 400), an unparsable part, or a
+    non-``bytes`` unit returns ``None`` so Starlette keeps its
+    400 / ignore-part behaviour unchanged.
     """
     try:
         fd = os.open(
@@ -676,14 +681,20 @@ def _media_preflight(
                 # ``>``: ``bytes=-<size>`` means "the whole file".
                 if int(last) <= 0 or int(last) > size:
                     return _unsatisfiable_416(size)
-            elif last != "" and int(last) < int(first):
-                # Reversed bounds are ``MalformedRangeHeader`` in
-                # Starlette — its 400, not our 416. We only answer
-                # PROVABLY UNsatisfiable shapes.
-                return None
             elif int(first) >= size:
                 # Start at or past EOF — provably unsatisfiable.
+                # Classified BEFORE reversed bounds: a pair like
+                # ``5000-3`` is BOTH reversed (``3 < 5000``) AND a
+                # start past EOF, and past-EOF is the stronger,
+                # provable classification (Starlette agrees on the
+                # status — its own ``0 <= start < size`` guard runs
+                # before its ``start > end`` guard — it just omits
+                # the RFC-7233 ``bytes `` token).
                 return _unsatisfiable_416(size)
+            elif last != "" and int(last) < int(first):
+                # Reversed WITHIN range — ``MalformedRangeHeader`` in
+                # Starlette, its 400, not our 416.
+                return None
         return None
     finally:
         try:

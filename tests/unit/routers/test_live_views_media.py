@@ -502,6 +502,56 @@ class TestRangedGet:
         assert resp.status_code == 400
         assert "content-range" not in resp.headers
 
+    def test_reversed_past_eof_gets_compliant_416(self, media_root_dir):
+        """Reversed AND past-EOF → OUR compliant 416, not Starlette's.
+
+        ``bytes=5000-3`` / ``bytes=1024-3`` are BOTH reversed (``3 <
+        start``) AND start-past-EOF. Past-EOF is the stronger, provable
+        classification and must be checked FIRST: when the reversed
+        branch won, we deferred, Starlette answered 416 with the
+        token-less ``Content-Range: */<size>`` — the exact RFC-7233
+        §4.4 violation this line of fixes exists to eliminate.
+
+        Starlette's own guard order agrees on the STATUS (its
+        ``0 <= start < size`` check runs before its ``start > end``
+        check), it just omits the ``bytes `` token.
+
+        Mutation that flips this RED: move the
+        ``elif last != "" and int(last) < int(first)`` branch back
+        ABOVE the ``elif int(first) >= size`` branch — both shapes
+        fall through to Starlette and the header becomes ``'*/1070'``.
+        """
+        c, data, size, url = self._ctx(media_root_dir)
+        # The dispatcher's repro literals (``bytes=5000-3`` /
+        # ``bytes=1024-3``) were measured on a 1024-byte file; this
+        # fixture's clip.mp4 is 1070 bytes, so the SAME two shapes are
+        # expressed size-relative: "far past EOF" and "exactly at EOF",
+        # both of which are also reversed (end ``3`` < start).
+        for header in (f"bytes={size + 1000}-3", f"bytes={size}-3"):
+            resp = c.get(url, headers={"Range": header})
+            assert resp.status_code == 416, header
+            assert resp.headers["content-range"] == f"bytes */{size}", header
+            assert resp.headers["content-length"] == "0", header
+
+    def test_reversed_within_range_still_defers_to_400(self, media_root_dir):
+        """BOUNDARY: reversed INSIDE range must stay Starlette's 400.
+
+        ``bytes=1023-3`` has a start BELOW EOF, so it is only reversed
+        — ``MalformedRangeHeader`` → 400. This is the pin that proves
+        the past-EOF-before-reversed reorder did not over-reach: if the
+        ``last < first`` defer is dropped (or the past-EOF branch
+        widened to ``>` / ``!=``), this becomes a 416.
+
+        Mutation that flips this RED (verified): widen the past-EOF
+        branch to swallow reversed pairs, i.e.
+        ``elif int(first) >= size or (last != "" and int(last) < int(first)):``
+        — ``bytes=1023-3`` then becomes a 416.
+        """
+        c, data, size, url = self._ctx(media_root_dir)
+        resp = c.get(url, headers={"Range": f"bytes={size - 1}-3"})
+        assert resp.status_code == 400
+        assert "content-range" not in resp.headers
+
     def test_multi_range_two(self, media_root_dir):
         c, data, size, url = self._ctx(media_root_dir)
         resp = c.get(url, headers={"Range": "bytes=0-1,4-5"})
