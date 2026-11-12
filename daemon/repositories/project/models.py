@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import CheckConstraint, Column, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import CheckConstraint, Column, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlmodel import SQLModel, Field
 from pydantic import BaseModel, field_validator
 
@@ -507,4 +507,37 @@ class ProjectHistoryEntry(SQLModel, table=True):
             "source_instance_id": self.source_instance_id,
             "entry_metadata": self.entry_metadata,
             "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class ProjectFutureEntry(SQLModel, table=True):
+    """SQLModel ProjectFutureEntry table - per-project forward-improvement wishlist (32-cap FIFO)."""
+    __tablename__ = "project_future"
+
+    __table_args__ = (
+        Index("uq_project_future_project_seq", "project_id", "seq", unique=True),
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str = Field(
+        sa_column=Column(String, ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False, index=True)
+    )
+    summary: str = Field(max_length=300)
+    details: str | None = Field(default=None, max_length=5000)
+    source_agent: str = Field(default="")          # NOT NULL in DDL — "" when unknown (D2)
+    source_instance_id: str = Field(default="")    # NOT NULL in DDL — "" when unknown (D2)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))  # history-sibling idiom :496
+    seq: int = Field(nullable=False)               # app-assigned monotonic per project (D2/D3)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "id": self.id,
+            "project_id": self.project_id,
+            "summary": self.summary,
+            "details": self.details,
+            "source_agent": self.source_agent,
+            "source_instance_id": self.source_instance_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,  # mirror :509
+            "seq": self.seq,
         }
