@@ -1561,16 +1561,27 @@ def _hostname_from_host_header(host_header: str | None) -> str | None:
 
 
 def _is_loopback_https_exempt(request: Request) -> bool:
-    """True iff the inbound ``Host`` header names an EXACT loopback host.
+    """True iff the inbound ``Host`` header names an EXACT loopback host
+    AND the TCP peer is loopback.
 
     Reads the request ``Host`` header (the browser's own authority —
     the same value the browser used to decide whether this origin is
     a trustworthy secure context, which is what the exemption is
     modelling), strips the port (bracket-aware for IPv6), lowercases,
-    and compares against :data:`_LOOPBACK_HTTPS_EXEMPT_HOSTS`.
+    and compares against :data:`_LOOPBACK_HTTPS_EXEMPT_HOSTS`. The
+    Host match is conjoined with a TCP-peer loopback check so a
+    remote client merely spelling ``Host: localhost`` cannot claim the
+    exemption (peer source: ``request.scope.get("client")``; fail
+    closed on missing/unparseable peer info).
     """
+    from daemon.auth.cookie import peer_is_loopback
+
+    peer_loopback = peer_is_loopback(
+        (getattr(request, "scope", None) or {}).get("client")
+    )
     return (
-        _hostname_from_host_header(request.headers.get("host"))
+        peer_loopback
+        and _hostname_from_host_header(request.headers.get("host"))
         in _LOOPBACK_HTTPS_EXEMPT_HOSTS
     )
 
@@ -2606,15 +2617,14 @@ def build_router() -> APIRouter:
                 ),
             },
         )
-        # Belt-and-suspenders: the cookie WAS set with
-        # ``Secure`` (see ``_build_grant_cookie_value``)
-        # so a plain-HTTP request never reaches the
-        # success branch — the explicit
-        # secure-context page above is the only
-        # plain-HTTP outcome. If a test ever injects
-        # a non-secure request through the success
-        # path, the ``Secure`` flag still denies the
-        # cookie storage on the browser.
+        # The grant cookie keeps the ``Secure`` flag (see
+        # ``_build_grant_cookie_value``), so a non-loopback
+        # plain-HTTP request never reaches this success branch
+        # — the explicit secure-context page above is its only
+        # outcome. Loopback plain-HTTP requests ARE served
+        # here (the loopback HTTPS exemption), and the
+        # ``Secure`` flag is still honored by browsers on
+        # those potentially-trustworthy origins.
         return response
 
     async def _public_post(

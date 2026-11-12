@@ -202,7 +202,7 @@ def client(
     app.state.verify_rate_limiter = VerifyRateLimiter(
         capacity=50, refill_per_minute=50
     )
-    return TestClient(app)
+    return TestClient(app, client=("127.0.0.1", 50000))
 
 
 def _mint(store: _Store, cipher: ViewPasscodeCipher) -> str:
@@ -266,12 +266,14 @@ class TestExemptVerdict:
     """``_is_loopback_https_exempt`` reads the request Host header."""
 
     @staticmethod
-    def _req(headers: dict) -> "object":
+    def _req(headers: dict, client=("127.0.0.1", 50000)) -> "object":
         from types import SimpleNamespace
 
+        scope = {"client": client} if client is not None else {}
         return SimpleNamespace(
             headers={k.lower(): v for k, v in headers.items()},
             url=SimpleNamespace(scheme="http"),
+            scope=scope,
         )
 
     @pytest.mark.parametrize(
@@ -283,6 +285,10 @@ class TestExemptVerdict:
             "[::1]:9797",
             "::1",
             "::ffff:127.0.0.1",
+            # S2 bracket-tail leniency pins (current parser behavior):
+            "[localhost]",
+            "[::1]junk",
+            "[::1]:",
         ],
     )
     def test_loopback_hosts_are_exempt_over_plain_http(self, host: str):
@@ -305,6 +311,16 @@ class TestExemptVerdict:
             "127.0.0.2:9797",
             "0.0.0.0:9797",
             "testserver",
+            # S3/S4 fail-closed pins:
+            "u@localhost",
+            "http://localhost:9797",
+            "0177.0.0.1",
+            "0x7f.0.0.1",
+            "2130706433",
+            "::ffff:7f00:1",
+            "localhost\x00",
+            "localhost%00",
+            "localhost%2e",
         ],
     )
     def test_non_loopback_hosts_are_not_exempt(self, host: str):
@@ -319,6 +335,60 @@ class TestExemptVerdict:
              "X-Forwarded-Proto": "https"}
         )
         assert _secure_context_satisfied(request) is True
+
+
+# ──────────────────────────────────────────────────────────────────
+# Peer-gate (S1): exemption requires a loopback TCP peer too
+# ──────────────────────────────────────────────────────────────────
+
+
+class TestPeerGateConjunction:
+    """S1 — Host match alone no longer earns the exemption."""
+
+    def test_loopback_host_loopback_peer_exempt(self):
+        request = TestExemptVerdict._req(
+            {"Host": "localhost:9797"}, client=("127.0.0.1", 50000)
+        )
+        assert _is_loopback_https_exempt(request) is True
+        assert _secure_context_satisfied(request) is True
+
+    def test_loopback_host_non_loopback_peer_rejected(self):
+        request = TestExemptVerdict._req(
+            {"Host": "localhost:9797"}, client=("192.168.1.10", 50000)
+        )
+        assert _is_loopback_https_exempt(request) is False
+        assert _secure_context_satisfied(request) is False
+
+    def test_loopback_host_missing_client_scope_fail_closed(self):
+        request = TestExemptVerdict._req(
+            {"Host": "localhost:9797"}, client=None
+        )
+        assert _is_loopback_https_exempt(request) is False
+        assert _secure_context_satisfied(request) is False
+
+    def test_ipv6_mapped_peer_is_loopback(self):
+        request = TestExemptVerdict._req(
+            {"Host": "127.0.0.1:9797"}, client=("::ffff:127.0.0.1", 50000)
+        )
+        assert _is_loopback_https_exempt(request) is True
+
+    def test_xfp_http_loopback_peer_exempt(self):
+        """XFP: http + loopback Host + loopback peer → exempt."""
+        request = TestExemptVerdict._req(
+            {"Host": "localhost:9797", "X-Forwarded-Proto": "http"},
+            client=("127.0.0.1", 50000),
+        )
+        assert _is_loopback_https_exempt(request) is True
+        assert _secure_context_satisfied(request) is True
+
+    def test_xfp_http_non_loopback_rejected(self):
+        """XFP: http + non-loopback Host → rejected."""
+        request = TestExemptVerdict._req(
+            {"Host": "192.168.1.10:9797", "X-Forwarded-Proto": "http"},
+            client=("192.168.1.10", 50000),
+        )
+        assert _is_loopback_https_exempt(request) is False
+        assert _secure_context_satisfied(request) is False
 
 
 # ──────────────────────────────────────────────────────────────────
