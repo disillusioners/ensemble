@@ -545,7 +545,7 @@ on this host.
 
 ---
 
-## Appendix E — Deferral register (COMMITTED — cycle 3, 2026-11-12)
+## Appendix I — Deferral Register
 
 Every item deferred in fix cycles 1–3, with its reason. Without this
 register a silent drop and a deliberate deferral look identical — that is
@@ -560,3 +560,4 @@ stayed out. Re-entry requires a new commission; nothing here auto-expires.
 | MemTotal 1 kB ⇒ 64 MiB floor instead of the fallback | cycle 1 | The §18.7/§4.7 case "sub-64 MiB effective total ⇒ the floor" is PINNED (test_derived_value_is_floored_at_64_mib); moving the fallback threshold would break that pin and the §18.7 test enumeration. The floor IS the specified behavior for tiny-but-nonzero totals. |
 | No re-kill on a KILLED/tree-incomplete record (v1 scope) | cycle 3 (LEADER RULING) | Episodes are contract-scoped ONE-SHOT: a kill that could not verify death (tree-incomplete) never re-fires in v1. Survivor processes are the reaper/orphan net's domain. The record is still retained and watched; the retention bound is member-count-0 on a COMPLETE scan (real since the cycle-3 ever-members fix), at which point the sweep releases it. |
 | The KILLED-retention bound itself (no time-based max-watch) | cycle 3 (LEADER RULING) | The bound is exactly member-count-0-on-complete-scan. A time-based cap was rejected: the marginal per-tick cost of a dead-but-unverifiable record is one RSS sum, and the shared scan is O(host pids) regardless — the only forever-watched trees are trees with live members, which is what the guard should watch (disclosed per §18.1). |
+| Pending-full blind spot (content-free WARN, no counter) | cycle 3 (code 6dc38a1b3) | The pending slot is full this tick and the breach is not claimed; handled as a content-free `logger.warning` naming only the tracking id + depth + cap (no argv, no env values, no counter bump) so the §15 B5 counter set (16 keys, frozen exact) stays untouched. Code-side pending-full log landed in 6dc38a1b3; this register row is the runbook mirror. |
