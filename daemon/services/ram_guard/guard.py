@@ -53,6 +53,7 @@ from .errors import build_ram_event_payload
 from .events import RamBreachEmitter
 from .ladder import (
     REASON_TREE_INCOMPLETE,
+    REASON_LEADER_UNREADABLE,
     is_permanent_refusal,
     refusal_bucket,
     ram_kill_ladder,
@@ -69,6 +70,7 @@ from .tree_reader import (
 )
 from .verdict import (
     STATE_OVERCOUNTED,
+    STATE_REFUSED,
     STATE_RELEASED,
     STATE_WATCHING,
     TRIGGER_PSS_CONFIRM_UNAVAILABLE,
@@ -95,6 +97,10 @@ RAM_GUARD_PENDING_MAX = 2
 #: is ~5 s.
 RAM_GUARD_SWEEP_EVERY_TICKS = 25
 
+#: Bounded backoff for transient refusals (§18.5) — runtime transients
+#: re-arm after this many ticks.
+RAM_GUARD_TRANSIENT_BACKOFF_TICKS = 5
+
 #: How many released verdicts stay readable (``read_verdict`` after the
 #: release).  Bounded — the registry itself must not retain them (the
 #: guard's registry has no entry for a released pid).
@@ -110,7 +116,6 @@ COUNTER_KEYS: tuple[str, ...] = (
     "ram_kill_refusals_p3",
     "ram_kill_refusals_p4",
     "ram_kill_refusals_p5",
-    "ram_kill_refusals_p6",
     "ram_kill_refusals_p7",
     "ram_overcounted",
     "ram_rearms",
@@ -327,17 +332,19 @@ class RamGuard:
         with self._lock:
             existing = self._registry.get(tracking_id)
             if existing is not None and existing.state != STATE_RELEASED:
-                # D-5 — a collision must not be SILENT: the overwrite
-                # loses the earlier watch with no diagnostic.  Content-free
-                # (the id + the outcome only — never argv, never an env
-                # value), and semantics-preserving for non-colliding keys
-                # (B5's counter set is frozen; no counter is bumped).
                 logger.warning(
                     "ram-guard register: tracking id already live — "
                     "overwriting the earlier watch (id=%s, prior_state=%s)",
                     tracking_id,
                     existing.state,
                 )
+            # §18.5: a record registered with start_time_jiffies=None has
+            # a structurally unprovable identity ⇒ REFUSED-watching at
+            # registration (one count, no claim, no confirm, measure-only).
+            if start_time_jiffies is None:
+                record.state = STATE_REFUSED
+                record.reason = REASON_LEADER_UNREADABLE
+                self._counters.bump("ram_kill_refusals_p5")
             self._registry[tracking_id] = record
         return record
 
@@ -392,7 +399,13 @@ class RamGuard:
             target=self._lane_loop, name="ram-guard-lane", daemon=True
         )
         self._tick_thread.start()
-        self._lane_thread.start()
+        try:
+            self._lane_thread.start()
+        except Exception:
+            self._stop.set()
+            if self._tick_thread is not None and self._tick_thread.is_alive():
+                self._tick_thread.join(timeout=3.0)
+            raise
 
     def stop(self) -> None:
         """Signal the stop flag on both threads (the join is the caller's)."""
@@ -431,7 +444,6 @@ class RamGuard:
         now = time.time()
         with self._lock:
             self._ticks += 1
-            self._last_tick_at = now
             records = list(self._registry.values())
         # The scan is OUTSIDE the lock — it is the expensive part.
         table = scan_proc(self._proc_root)
@@ -439,6 +451,10 @@ class RamGuard:
             self._sample_record(record, table, now)
         if self._sweep_every_ticks > 0 and self._ticks % self._sweep_every_ticks == 0:
             self._liveness_sweep()
+        # Heartbeat truthfulness (C6): stamp last_tick_at ONLY after a
+        # completed scan (a failed tick leaves it stale).
+        with self._lock:
+            self._last_tick_at = now
 
     def _sample_record(self, record: SpawnRecord, table, now: float) -> None:
         """Sample one record — the RSS trigger, the peak, the counters."""
@@ -456,25 +472,34 @@ class RamGuard:
         with self._lock:
             record.members = members
             record.group_member_count = group_count
+            record.group_scan_complete = bool(table.scan_complete) and not bool(table.unreadable_pids)
             record.members_total = len(members)
             record.members_killable = killable
             record.members_unreachable = len(members) - killable
             record.unreadable_pids = reading.unreadable_pids
             record.gone_pids = reading.gone_pids
-            record.tree_complete = bool(reading.complete)
+            # tree_complete = the P8 verdict on kills; per-tick keep the
+            # honest reading/scan completeness (§18.6 terms).
+            record.tree_complete = bool(reading.complete) and bool(table.scan_complete) and not bool(table.unreadable_pids)
             record.metric = reading.metric
             record.trigger_metric = reading.metric
             record.record_sample(reading.total_bytes, now)
+
+            # REFUSED-but-watching (Ruling A): RSS-only, no PSS, no
+            # ladder, no pending slot — cheap by construction.
+            if record.state == STATE_REFUSED:
+                return
+
+            # Transient backoff (§18.5): a re-armed record waits.
+            if record.state == STATE_WATCHING and record.transient_backoff > 0:
+                record.transient_backoff -= 1
+                return
 
             threshold = record.effective_threshold_bytes
             if not breaches(reading.total_bytes, threshold):
                 return
 
-            self._counters.bump("ram_breaches_detected")
-
             if record.state == STATE_OVERCOUNTED:
-                # The growth governor gates the re-armed confirm (a
-                # confirm does NOT run on every tick).
                 if not confirm_due(
                     reading.total_bytes,
                     record.rearm_threshold_bytes,
@@ -484,14 +509,21 @@ class RamGuard:
             elif record.state != STATE_WATCHING:
                 return
 
-            if len(self._pending) >= RAM_GUARD_PENDING_MAX:
-                # The newest breach is NOT claimed and is re-offered next
-                # tick — no confirm is ever skipped.
+            self._counters.bump("ram_breaches_detected")
+
+            # Pending slot reservation (§18.5): a previously-claimed
+            # record holds at most PENDING_MAX-1 slots, reserving one for
+            # a never-claimed record.
+            cap = RAM_GUARD_PENDING_MAX
+            if record.ever_claimed:
+                cap = RAM_GUARD_PENDING_MAX - 1
+            if len(self._pending) >= cap:
                 return
 
             record.mark_breached(now)
             self._next_claim_token += 1
             record.claim_token = self._next_claim_token
+            record.ever_claimed = True
             self._pending.append((record.tracking_id, record.claim_token))
 
     def _resolve_members(
@@ -577,7 +609,7 @@ class RamGuard:
                 if record.samples <= 0:
                     # Never sampled yet — the sweep does not judge it.
                     continue
-                if record.group_member_count > 0:
+                if record.group_member_count > 0 or not getattr(record, "group_scan_complete", True):
                     continue
                 self._registry.pop(tracking_id, None)
                 record.mark_released()
@@ -613,6 +645,15 @@ class RamGuard:
             tracking_id, token = self._pending.pop(0)
         try:
             self._service_claim(tracking_id, token)
+        except Exception:
+            with self._lock:
+                record = self._registry.get(tracking_id)
+                if record is not None and record.claim_token == token:
+                    record.claim_token = None
+                    self._next_claim_token += 1
+                    record.claim_token = self._next_claim_token
+                    self._pending.append((tracking_id, record.claim_token))
+            raise
         finally:
             with self._lock:
                 self._last_lane_progress_at = time.time()
@@ -721,7 +762,10 @@ class RamGuard:
                     self._counters.bump(f"ram_kill_refusals_{bucket}")
                 permanent = is_permanent_refusal(reason)
                 record.mark_refused(reason, permanent=permanent)
-                group_empty = permanent
+                if not permanent:
+                    record.transient_backoff = RAM_GUARD_TRANSIENT_BACKOFF_TICKS
+                    record.reason = None
+                group_empty = False
                 refusal = reason
             record.claim_token = None
             if group_empty:
@@ -763,7 +807,6 @@ class RamGuard:
             "ram_kill_refusals_p3": self._counters.ram_kill_refusals_p3,
             "ram_kill_refusals_p4": self._counters.ram_kill_refusals_p4,
             "ram_kill_refusals_p5": self._counters.ram_kill_refusals_p5,
-            "ram_kill_refusals_p6": self._counters.ram_kill_refusals_p6,
             "ram_kill_refusals_p7": self._counters.ram_kill_refusals_p7,
             "ram_kills": self._counters.ram_kills,
         }

@@ -52,9 +52,10 @@ RAM_GUARD_DETECTION_FALLBACK_BYTES = 3221225472  # 3072 MiB
 
 #: The ceiling sources (§15 B23: ``ceiling_source ∈ {meminfo, cgroup,
 #: fallback-fixed}``).
-CEILING_SOURCE_MEMINFO = "meminfo"
-CEILING_SOURCE_CGROUP = "cgroup"
-CEILING_SOURCE_FALLBACK_FIXED = "fallback-fixed"
+CEILING_SOURCE_MEMINFO = "derived-meminfo"
+CEILING_SOURCE_CGROUP = "derived-cgroup"
+CEILING_SOURCE_FALLBACK_FIXED = "fallback"
+CEILING_SOURCE_EXPLICIT = "explicit"
 
 #: Bytes per MiB.
 MIB = 1024 * 1024
@@ -140,7 +141,7 @@ def _read_cgroup_limit_file(path: Path) -> Optional[int]:
         value = int(raw)
     except (ValueError, TypeError):
         return None
-    if value <= 0 or value >= _CGROUP_V1_UNLIMITED_FLOOR:
+    if value < 0 or value >= _CGROUP_V1_UNLIMITED_FLOOR:
         return None  # v1 "unlimited" sentinel
     return value
 
@@ -217,6 +218,9 @@ def resolve_ceiling_bytes(
     the DETECTED host context (the effective total's source); the
     resolved VALUE is the explicit ceiling either way.
     """
+    if ceiling_mib is not None:
+        # Explicit path: never detects, never warns, never falls back.
+        return ceiling_mib * MIB, CEILING_SOURCE_EXPLICIT
     try:
         effective, source = detect_effective_total_bytes(proc_root, cgroup_root)
     except Exception as exc:  # NEVER raises — a failed detector must not
@@ -228,16 +232,13 @@ def resolve_ceiling_bytes(
             exc,
             RAM_GUARD_DETECTION_FALLBACK_BYTES,
         )
-        if ceiling_mib is not None:
-            return ceiling_mib * MIB, CEILING_SOURCE_FALLBACK_FIXED
         return RAM_GUARD_DETECTION_FALLBACK_BYTES, CEILING_SOURCE_FALLBACK_FIXED
-    if ceiling_mib is not None:
-        return ceiling_mib * MIB, source
     return derive_ceiling_bytes(effective), source
 
 
 __all__ = [
     "CEILING_SOURCE_CGROUP",
+    "CEILING_SOURCE_EXPLICIT",
     "CEILING_SOURCE_FALLBACK_FIXED",
     "CEILING_SOURCE_MEMINFO",
     "MIB",

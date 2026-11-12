@@ -120,6 +120,10 @@ class ProcTable:
     by_pgrp: dict[int, tuple[int, ...]]
     children: dict[int, tuple[int, ...]]
     scan_complete: bool
+    #: Pids whose stat could not be read (hidepid / exec-race / EACCES).
+    #: Non-empty ⇒ the scan is NOT provably complete even when
+    #: ``scan_complete`` is True — member emptiness is unprovable.
+    unreadable_pids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -236,10 +240,10 @@ def read_stat_entry(proc_root: Path, pid: int) -> StatRead:
     """
     path = Path(proc_root) / str(pid) / "stat"
     try:
-        line = path.read_text()
+        line = path.read_text(errors="replace")
     except FileNotFoundError:
         return StatRead(pid=pid, status="absent")
-    except OSError:
+    except (OSError, ValueError):
         return StatRead(pid=pid, status="unreadable")
     parsed = parse_stat_line(line)
     if parsed is None:
@@ -295,19 +299,23 @@ def scan_proc(proc_root: Path = PROC_ROOT) -> ProcTable:
         # only thing that clears ``scan_complete`` (a single unreadable
         # pid is NOT an enumeration failure — it is simply absent).
         names = sorted(os.listdir(root))
-    except OSError:
+    except (OSError, ValueError):
         # ENUMERATION FAILURE — the sample is dropped downstream, never
         # a kill on no-evidence (test-plan S6 / N3).
         return ProcTable(entries={}, by_pgrp={}, children={}, scan_complete=False)
 
     by_pgrp: dict[int, list[int]] = {}
     children: dict[int, list[int]] = {}
+    unreadable_pids: list[int] = []
     for name in names:
         if not name.isdigit():
             continue
         pid = int(name)
         stat = read_stat_entry(root, pid)
-        if not stat.ok:
+        if stat.unreadable:
+            unreadable_pids.append(pid)
+            continue
+        if stat.absent:
             continue
         state = stat.state or ""
         ppid = stat.ppid if stat.ppid is not None else -1
@@ -325,6 +333,7 @@ def scan_proc(proc_root: Path = PROC_ROOT) -> ProcTable:
         by_pgrp={pgid: tuple(pids) for pgid, pids in by_pgrp.items()},
         children={ppid: tuple(pids) for ppid, pids in children.items()},
         scan_complete=True,
+        unreadable_pids=tuple(unreadable_pids),
     )
 
 
@@ -496,10 +505,10 @@ def _read_status_rss_bytes(proc_root: Path, pid: int) -> tuple[int, str]:
     """
     path = proc_root / str(pid) / "status"
     try:
-        text = path.read_text()
+        text = path.read_text(errors="replace")
     except FileNotFoundError:
         raise
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise _Unreadable(str(exc)) from exc
     for line in text.splitlines():
         if line.startswith("VmRSS:"):
@@ -515,10 +524,10 @@ def _read_smaps_rollup_pss_bytes(proc_root: Path, pid: int) -> tuple[int, str]:
     """One member's ``smaps_rollup`` ``Pss:`` → bytes."""
     path = proc_root / str(pid) / "smaps_rollup"
     try:
-        text = path.read_text()
+        text = path.read_text(errors="replace")
     except FileNotFoundError:
         raise
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise _Unreadable(str(exc)) from exc
     for line in text.splitlines():
         if line.startswith("Pss:"):

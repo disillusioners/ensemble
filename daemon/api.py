@@ -2536,6 +2536,12 @@ async def lifespan(app: FastAPI):
                 config.ram_guard.pss_confirm_deadline_ms,
             )
         except Exception as ram_guard_boot_exc:
+            try:
+                if _ram_guard is not None:
+                    _ram_guard.stop()
+                    _ram_guard.join(timeout=3.0)
+            except Exception:  # noqa: BLE001 — belt-and-braces; never raise
+                pass
             app.state.ram_guard = None
             try:
                 from daemon.services.ram_guard import set_ram_guard

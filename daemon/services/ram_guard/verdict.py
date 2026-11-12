@@ -152,8 +152,15 @@ class SpawnRecord:
     #: The live member count of the CAPTURED GROUP — 0 means the watch
     #: is over (``group_member_count == 0``, §15 B6).
     group_member_count: int = 0
+    #: Scan completeness of the LAST sample (False when unreadable pids
+    #: were present) — gates the release on incomplete scans.
+    group_scan_complete: bool = True
     #: The EPISODE-scoped claim token (§17.6) — ``None`` when unclaimed.
     claim_token: Optional[int] = None
+    #: Whether this record has EVER been claimed (§18.5 slot reservation).
+    ever_claimed: bool = False
+    #: Backoff ticks remaining after a transient refusal (§18.5).
+    transient_backoff: int = 0
     #: The bounded sample series the under-report bound is derived from.
     sample_totals: list[int] = field(default_factory=list)
 
@@ -221,7 +228,10 @@ class SpawnRecord:
         ``refused:group-unknown``) re-arm to WATCHING and are
         re-claimable on a later tick; the permanent ones terminate.
         """
-        if self.state != STATE_BREACHED:
+        # Ruling A (§18.1): a permanent refusal terminates the KILL
+        # DECISION only — the record stays REFUSED-but-watching.  OVERCOUNTED
+        # is an accepted predecessor (a re-armed tree can later refuse).
+        if self.state not in (STATE_BREACHED, STATE_OVERCOUNTED):
             return False
         self.reason = reason
         if permanent:
