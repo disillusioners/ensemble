@@ -42,7 +42,6 @@ import argparse
 import hashlib
 import os
 import subprocess
-import sys
 from dataclasses import dataclass
 
 WT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

@@ -21,9 +21,7 @@ per-variable, the ``ENSEMBLE_AUTH_*`` family scrubbed all-or-none, and a
 
 from __future__ import annotations
 
-import os
 import sys
-import time
 from pathlib import Path
 
 import pytest

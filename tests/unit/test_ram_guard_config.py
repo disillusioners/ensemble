@@ -34,7 +34,6 @@ guard's boot-time job, not config's).
 
 from __future__ import annotations
 
-import inspect
 import re
 from pathlib import Path
 

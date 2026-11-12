@@ -36,8 +36,6 @@ from daemon.routers.resources import (
 from daemon.services.ram_guard.events import RamBreachEmitter  # noqa: F401  (pin importability)
 from daemon.services.ram_guard.guard import COUNTER_KEYS, HEARTBEAT_KEYS
 from daemon.services.ram_guard.verdict import STATE_BREACHED, STATE_KILLED
-from daemon.services.ram_guard_events import make_ram_breach_emitter
-from tests.unit.services.ram_guard_fixtures import FakeProc, stat_line
 from tests.unit.services.test_ram_guard_guard import (
     LEADER_START,
     SYNTHETIC_PGID,
