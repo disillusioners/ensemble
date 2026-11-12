@@ -1,5 +1,5 @@
 -- Migration: add the vsss agent-space column + search index to snapshots
---           (version-scoped snapshot spaces — REVIEW-1 MAJOR-1 fix)
+--           (version-scoped snapshot spaces)
 -- Created: 2026-11-12
 -- Lane: version-scoped snapshot spaces (vsss) on
 --       feature/version-scoped-snapshot-spaces (core landed at

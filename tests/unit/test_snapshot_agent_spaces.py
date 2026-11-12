@@ -552,9 +552,10 @@ class TestAutomaticPathFailClosed:
         ), resolution.warnings
 
     def test_wrong_space_search_receives_caller_space_key(self, engine: Any):
-        """Threading proof: a v2 caller's automatic search carries the
-        COMPOSITE key to the search seam (the predicate rejection of a
-        foreign-space row is pinned at the repo layer in
+        """Threading + cold-outcome proof: a v2 caller's automatic search
+        carries the COMPOSITE key to the search seam, and the canned
+        wrong-space hit resolves cold no-hit (the predicate rejection of
+        a foreign-space row is pinned at the repo layer in
         TestPredicateIsolation; the canned fake here bypasses the
         predicate deliberately)."""
         repo = SnapshotRepository(engine)
@@ -589,8 +590,12 @@ class TestAutomaticPathFailClosed:
         # agrees the row belongs to another space. The canned fake
         # bypasses the predicate, so assert the SEARCH received the
         # caller's space key (threading proof) — predicate rejection
-        # is pinned at the repo layer.
+        # is pinned at the repo layer. The outcome assertions below pin
+        # the refused hit: cold, reason no-hit (a swallowed re-check
+        # exception must not surface as anything but cold no-hit).
         assert search.calls[0]["agent_space_key"] == "developer[v2]"
+        assert resolution.started == "cold"
+        assert resolution.cold_reason == "no-hit"
 
     def test_real_service_null_row_never_warms_own_space_search(
         self, engine: Any
