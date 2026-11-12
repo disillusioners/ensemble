@@ -1,0 +1,7 @@
+agent_id: video-editor
+skills:
+  - name: video-exact-edit
+    version: "1.0.0"
+    auto_load: true
+    category: editing
+    description: "The no-re-capture edit path: all-intra stream-copy trims, overlay swaps, camera crops, action-log appends, compose ladder"

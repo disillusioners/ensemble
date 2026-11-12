@@ -1,0 +1,12 @@
+agent_id: video-producer
+skills:
+  - name: video-planning
+    version: "1.0.0"
+    auto_load: true
+    category: planning
+    description: "Template-driven shot-plan authoring, delta intake, plan-diff review (data only)"
+  - name: video-project-ops
+    version: "1.0.0"
+    auto_load: false
+    category: workflow
+    description: "Openable-project lifecycle, lane registry, action-log governance, veto flow, delivery shape"

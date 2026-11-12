@@ -45,11 +45,12 @@ CATEGORY = "pok"
 #: anchor).
 ANCHOR_CATEGORY = "nest-report"
 
-#: Mechanically re-derived 2026-11-07 (the POK B4 sweep): 45 explicit
-#: grants (every non-empty allow) / 46 meta-bearing agent dirs
-#: (45 at the last nest-report pin + ``canary`` since).
-EXPECTED_EXPLICIT = 45
-EXPECTED_TOTAL_META = 46
+#: Mechanically re-derived 2026-11-11 (video-team scaffold adds FOUR agents —
+#: video-producer / video-capturer / video-editor / video-verifier, each with a
+#: non-empty allow granted mechanically by the SAME insert-before rule):
+#: 49 explicit grants / 50 meta-bearing agent dirs.
+EXPECTED_EXPLICIT = 49
+EXPECTED_TOTAL_META = 50
 #: The ONE agent that inherits (empty allow = the default universe
 #: grants every NON-privileged category — an explicit entry would
 #: STRIP every other tool watcher inherits).

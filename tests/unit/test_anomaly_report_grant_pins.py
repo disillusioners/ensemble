@@ -60,8 +60,11 @@ CATEGORY = "nest-report"
 #: arrived after the last sweep WITHOUT the retroactive grant — it
 #: counts toward the meta denominator but stays a documented
 #: nest-report exception (its POK grant is the append-end exception).
-EXPECTED_EXPLICIT = 44
-EXPECTED_TOTAL_META = 46
+#: 44 explicit / 48 after the video-team scaffold (2026-11-11) added FOUR agents
+#: (video-producer / video-capturer / video-editor / video-verifier), each granted
+#: by the SAME append-last rule; 50 total meta-bearing dirs.
+EXPECTED_EXPLICIT = 48
+EXPECTED_TOTAL_META = 50
 #: The ONE agent that inherits instead of carrying an explicit entry.
 INHERITANCE_EXCEPTIONS: frozenset[str] = frozenset({"watcher"})
 #: Agents whose NON-EMPTY allow predates their sweep class and

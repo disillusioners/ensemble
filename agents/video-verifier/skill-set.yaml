@@ -1,0 +1,7 @@
+agent_id: video-verifier
+skills:
+  - name: video-gates
+    version: "1.0.0"
+    auto_load: true
+    category: verification
+    description: "Preflights + both gate sets, contact-sheet reading protocol, golden regression runs, verdict shape"

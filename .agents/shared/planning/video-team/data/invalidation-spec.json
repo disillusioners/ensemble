@@ -1,0 +1,22 @@
+{
+  "$comment": "Per-shot sha invalidation spec (architecture.md section 9). Change one beat, re-capture one beat. The ledger file is build/captures/invalidation.json inside the project tree; written by video-capturer at capture time (MEASURED tier). Preflight P2 refuses any assembly whose referenced beat ledger is stale.",
+  "beat_valid_formula": "beat_valid(beat) := beat_sha(beat) == ledger.beat_sha AND fixture_sha == ledger.fixture_sha AND fe_build_sha == ledger.fe_build_sha AND harness_sha == ledger.harness_sha AND lab_stack_sha == ledger.lab_stack_sha",
+  "beat_sha_rule": "sha256 over the canonical serialization of the beat's subtree of the shot plan's beats[] array: sorted keys, 2-space indent, no timestamps, no generated ids, UTF-8",
+  "required_inputs": [
+    {"name": "beat_sha", "source": "canonical serialization of the beat's subtree in the shot plan (beats[] array)"},
+    {"name": "fixture_sha", "source": "sha256 of the fixture payload(s) the beat's state.requires bind"},
+    {"name": "fe_build_sha", "source": "the frontend build the capture ran against"},
+    {"name": "harness_sha", "source": "capture harness version (tools/capture.mjs + lab-lib)"},
+    {"name": "lab_stack_sha", "source": "lab stack version (proxies, auth stub, seeded state)"}
+  ],
+  "invalidation_matrix": [
+    {"change": "one beat's actions/blocks in the plan", "recaptures": "that beat only", "spares": "all other beats"},
+    {"change": "caption or lower-third text (overlay track)", "recaptures": "nothing — re-render the asset, then compose", "spares": "footage"},
+    {"change": "camera window on one beat", "recaptures": "nothing — recompute crops + one compose encode", "spares": "footage"},
+    {"change": "fixture payload (mock body)", "recaptures": "beats binding that fixture (state.requires refs)", "spares": "others"},
+    {"change": "frontend build (user changed the product)", "recaptures": "beats on affected routes (conservative default: all beats whose route or asserts touch a changed route; capturer publishes the diff-report)", "spares": "untouched routes; G-PLAN re-judges asserts"},
+    {"change": "capture harness version", "recaptures": "ALL beats (harness_sha mismatch); 3-launch re-run if film profile", "spares": "nothing"},
+    {"change": "lab stack version", "recaptures": "ALL beats (lab_stack_sha mismatch)", "spares": "nothing"}
+  ],
+  "refusal_rule": "an editor handed a beat whose ledger is stale refuses in seconds (P2); the lead decides whether to re-capture or re-plan"
+}

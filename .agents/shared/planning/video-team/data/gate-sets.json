@@ -1,0 +1,107 @@
+{
+  "$comment": "The two gate sets (architecture.md sections 5.2 and 6). Each gate earned its keep in v1-v5; the table in architecture.md section 0.2 is the traceability record. Gates are scripts with exit codes, never vibes.",
+  "gate_sets": {
+    "fast-demo-gates": {
+      "preflights": [
+        "P1",
+        "P2",
+        "P3",
+        "P4",
+        "P5",
+        "P6",
+        "P7",
+        "P8"
+      ],
+      "gates": [
+        "G-PLAN",
+        "G-BLANK",
+        "G-FASTSTART",
+        "G-SPEC",
+        "G-EYES"
+      ],
+      "g_geo_tolerance_px": null,
+      "g_pointer_tolerance_px": null
+    },
+    "film-goldens-gates": {
+      "preflights": [
+        "P1",
+        "P2",
+        "P3",
+        "P4",
+        "P5",
+        "P6",
+        "P7",
+        "P8"
+      ],
+      "gates": [
+        "G-PLAN",
+        "G-BLANK",
+        "G-FASTSTART",
+        "G-SPEC",
+        "G-EYES",
+        "G-GEO",
+        "G-POINTER",
+        "G-DETERM",
+        "G-3LAUNCH",
+        "G-GOLDEN"
+      ],
+      "g_geo_tolerance_px": 2,
+      "g_pointer_tolerance_px": 0.005
+    }
+  },
+  "gates": {
+    "G-PLAN": {
+      "proves": "plan == performed",
+      "mechanism": "performed-timeline (from capture meta) diffed against the authored plan's actions; any drift fails",
+      "v1_origin": "the plan==performed catch"
+    },
+    "G-BLANK": {
+      "proves": "no dead frames ship",
+      "mechanism": "full-resolution luma-uniformity scan per clip",
+      "v1_origin": "blank-frame scan (camera clamp)"
+    },
+    "G-FASTSTART": {
+      "proves": "container is streamable",
+      "mechanism": "moov precedes mdat (atom walk or ffprobe trace)"
+    },
+    "G-SPEC": {
+      "proves": "codec/pixfmt/fps/duration conform",
+      "mechanism": "ffprobe: h264 / yuv420p / 1920x1080 / fps / duration within 1 frame of plan",
+      "container": "silent AAC track explicit when audio deltas land; true -an until then"
+    },
+    "G-EYES": {
+      "proves": "a pair of agent eyes has SEEN the video",
+      "mechanism": "verifier builds contact sheet + keyframe stills and READS them (image category); verdict text names what it saw",
+      "v1_origin": "the vision-channel requirement (no shipped video without eyes)"
+    },
+    "G-GEO": {
+      "proves": "overlays and camera land where the plan says",
+      "mechanism": "per-frame logged bboxes vs plan positions",
+      "tolerance": "<= 2 px (film profile only)",
+      "v1_origin": "geometry measurement"
+    },
+    "G-POINTER": {
+      "proves": "the teaching pointer tracks REAL input, including inside zoom windows",
+      "mechanism": "pointer overlay coords vs harness per-frame input-coordinate log",
+      "tolerance": "<= 0.005 px (film profile; v2 measured max deviation 0.0044 px)",
+      "v1_origin": "pointer fidelity in zoom windows"
+    },
+    "G-DETERM": {
+      "proves": "the render is the artifact",
+      "mechanism": "per-frame SHA-256 of every frame across two independent renders; NOT OpenFilm look's 12-frame sample",
+      "v1_origin": "CSS-alpha nondeterminism + full-frame proof discipline"
+    },
+    "G-3LAUNCH": {
+      "proves": "capture is stable against warm-stack lies, font loads, ambient state",
+      "mechanism": "three independent capture launches of the same plan produce identical frame sequences",
+      "profile": "film only",
+      "v1_origin": "3-launch re-capture"
+    },
+    "G-GOLDEN": {
+      "proves": "no silent quality slide between iterations",
+      "mechanism": "re-render vs committed golden per-beat clips at frame-hash level (goldens/<beat-id>/ inside the project tree); drift is a loud regression",
+      "profile": "film only",
+      "storage": "OQ3 default: goldens in video-lab, sha256 manifests committed in-repo"
+    }
+  }
+}

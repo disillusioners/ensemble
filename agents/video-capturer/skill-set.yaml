@@ -1,0 +1,12 @@
+agent_id: video-capturer
+skills:
+  - name: video-capture-harness
+    version: "1.0.0"
+    auto_load: true
+    category: capture
+    description: "Deterministic per-frame capture, per-frame input-coordinate logs, parallel shots, ledger writes, 3-launch protocol"
+  - name: video-lab-ops
+    version: "1.0.0"
+    auto_load: false
+    category: ops
+    description: "Standing lab stack control, fixture tenants, warm caches, backend gotchas, invalidation re-derivation"
