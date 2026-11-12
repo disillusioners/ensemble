@@ -129,4 +129,13 @@ Cross-reference ONLY — the single source of detail is `plan-overview.md` §7: 
 - **Disclosure — standing-pack coverage asymmetry:** subsumed by R16 (base-red duty pack).
 - **Disclosure — advisory #2 frozen-string hardening:** A10/A11 full-line diff checks deferred to implementation; tonight's content review covers.
 
+### Reviewer advisory fast-follow (v1.1 hardening candidates — NOT v1 blockers)
+
+*Context: plan approved iteration 003; code review passed 0 MUST-FIX. Entries below are ledger records only — (a)(b)(c) are v1.1 hardening candidates, explicitly NOT v1 blockers.*
+
+- **A22 amendment FORMALIZED** (closes code-review (a)'s governance note): phase1 §7/:447 now reads "exactly 5 pre-existing reds at base, NONE sonic/ari" (+ appendix row reconciled) — evidence basis: pristine-restore + 0-line-diff base-attribution (developer[v2]/workflow ×2 bare-md tokens; charter rule/workflow odd-fence; charter skills-template bare-md); phase2 carries a cross-ref note (review-verified, not pack-run).
+- **(a) Pack docs claim a nonexistent "inner 240s guard"** (`test/packs/sonic_agent_defs_unit_test.sh:7-9,:19-27`; `.agents/tester/PACKS.md:4864-4870`) — wording fix or add the cap in v1.1.
+- **(b) Pack does not assert six load-bearing prompt properties** (`test/packs/sonic_agent_defs_checks.py:630-642`) — regression-detection gap; properties correct today; add assertions in v1.1.
+- **(c) Duty tripwire desensitized by the 4 permanent canary reds** (`tests/unit/test_anomaly_report_duty_prompts.py:343-481`) — re-arm in a follow-up (fix canary or scope the walk) in v1.1.
+
 — end of decisions.md —

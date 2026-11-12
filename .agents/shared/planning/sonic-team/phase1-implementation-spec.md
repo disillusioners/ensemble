@@ -383,7 +383,7 @@ The Ari edit is **mechanical** (proceed) iff ALL hold:
 - (a) the inserted text is the §5.2 block verbatim, at the §5.1 anchor;
 - (b) the only pinned-surface changes are: the seal row for `agents/ari/rule.md` (1 row) + the `ari/rule.md` baseline hash row (1 row);
 - (c) `grep -c 'plane' (case-insensitive)` on the edited rule.md == 1;
-- (d) the four green packs in §7 A21–A22 stay green.
+- (d) the four packs in §7 A21 stay green and A22 shows exactly its 5 base-attributed reds (no NEW reds vs base — the amended criterion at :447).
 
 If ANY fails (e.g., a test pins additional `ari/rule.md` content and would need a semantic edit), the ceremony is **NOT mechanical** → **fallback: DROP the Ari note to a fast-follow** (record the deviation in the morning report; Phase 1 ships the 4 agents only). This is a recorded-deviation path, not a silent skip.
 
@@ -444,7 +444,7 @@ Run from the worktree root. `jq` or `python3 -c` is acceptable; `grep -F` is exa
 | **A20a** | Duty block last, byte-identical ×4 | python3: for each sonic `rule.md`, `text.endswith(DUTY_BLOCK)` with `DUTY_BLOCK` copied from `tests/unit/test_anomaly_report_duty_prompts.py:63-71` | 4/4 |
 | **A20b** | Exactly 4 versioned artifacts per sonic dir | `ls agents/sonic-*/{soul,rule,workflow,tools_note}.md \| wc -l` == 16; no `memory.md|growth.md|skills-template|skill-set.yaml` under `agents/sonic-*` | 16 and 0 |
 | **A21** | Existing green packs stay green | `pytest tests/unit/test_pok_grant_pins.py tests/unit/test_anomaly_report_grant_pins.py tests/unit/test_report_integrity_prompts.py tests/unit/test_ari_pm_terminology_pins.py tests/unit/tools/test_mission_watch_prompts.py -q` | 0 failed |
-| **A22** | Prompt-section integrity | `pytest tests/unit/tools/test_prompt_section_reference_integrity.py -q` | 0 failed |
+| **A22** | Prompt-section integrity | `pytest tests/unit/tools/test_prompt_section_reference_integrity.py -q` | **exactly 5 pre-existing reds at base, NONE sonic/ari** (developer[v2]/workflow.md ×2 bare-md tokens; charter/rule.md + charter/workflow.md odd-fence; charter skills-template bare-md) — base-attribution proven by pristine-restore + 0-line-diff (code-review.md (a)); FAIL only on NEW reds vs base |
 | **A23** | Duty pack registered | `EXPECTED_TOTAL == 50`, `EXPECTED_WALK == 48`, `BASELINE_EXPECTED_ENTRIES == 197`; remaining red = the FOUR canary-rooted node ids (`test_every_duty_file_carries_the_byte_identical_block`, `test_the_duty_block_is_the_last_top_level_section`, `test_no_duty_file_carries_a_forbidden_token_inside_its_duty_block`, `test_each_duty_file_keeps_its_cardinal_count`) — one root cause, base-attributed | 4 red, all canary |
 | **A24** | Grant packs registered | pok: `EXPECTED_TOTAL_META == 50`, `EXPECTED_EXPLICIT == 49`; anomaly grant: `EXPECTED_TOTAL_META == 50`, `EXPECTED_EXPLICIT == 48` | python3 asserts |
 | **A25** | Aegis baseline arithmetic | `EXPECTED_BASELINE_ROWS == 197` and its two tests pass | exit 0 |
@@ -550,6 +550,6 @@ Two root causes: **4 canary-rooted nodes** (`canary/rule.md` lacks the duty bloc
 | `tests/test_chart_image_delivery_e2e.py` (GREEN) | 35-row seal map, 0-stale | re-pin ari/rule.md only |
 | `tests/unit/test_ari_pm_terminology_pins.py` (GREEN) | `plane` counts 1/0/0 + backing note | note adds no `plane` |
 | `tests/unit/tools/test_mission_watch_prompts.py` (GREEN) | mission-vocabulary needles in ari prompts | additive note leaves them intact |
-| `tests/unit/tools/test_prompt_section_reference_integrity.py` (GREEN) | no bare `agents/` cross-refs / glue | author prompts cleanly |
+| `tests/unit/tools/test_prompt_section_reference_integrity.py` (RED-at-base ×5 — base-attributed, none sonic/ari; sonic-authored prompts clean) | no bare `agents/` cross-refs / glue | author prompts cleanly |
 
 Base-state evidence: `pytest` over the 5 grant/terminology/report-integrity packs = **115 passed, 24 skipped**; duty pack = **7 failed, 12 passed** (pre-existing).
