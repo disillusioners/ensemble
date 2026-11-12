@@ -3096,7 +3096,9 @@ class SpawnInstanceInput(BaseModel):
             "failed verification falls back to a cold spawn with a "
             "warning (never an error). Omit to let the tool search "
             "for the best active match itself (requires task for the "
-            "search query). Only consulted when the TARGET agent has "
+            "search query; the automatic search resolves to the "
+            "TARGET version's own snapshot space — vsss). Only "
+            "consulted when the TARGET agent has "
             '"snapshot_enabled": true in its meta.json — otherwise '
             "ignored with an informational line."
         ),
@@ -3105,8 +3107,9 @@ class SpawnInstanceInput(BaseModel):
     tags: Annotated[list[str], Field(
         description=(
             "Optional R8 `dim:value` tags steering the internal "
-            "snapshot search when snapshot_id is omitted. Only "
-            "consulted when the TARGET agent has "
+            "snapshot search when snapshot_id is omitted (the search "
+            "is scoped to the TARGET version's own snapshot space — "
+            "vsss). Only consulted when the TARGET agent has "
             '"snapshot_enabled": true in its meta.json.'
         ),
     )] = []
@@ -3290,7 +3293,13 @@ def create_instance_tools(
         ``verify``/``allow_cross_project`` to warm-start the child from a
         matching snapshot; any miss / expiry / verify-failure degrades to
         a plain cold spawn and the result carries a ``[snapshot] started:
-        warm|cold — …`` citation line to cite in your report.
+        warm|cold — …`` citation line to cite in your report. vsss
+        (version-scoped snapshot spaces): the automatic search resolves
+        to the TARGET VERSION's OWN space (keyed by the registry
+        composite identity, e.g. ``developer[v2]``) — versions never
+        consume each other's snapshots; version-unattributable rows
+        match no version's automatic warm-start, while an explicit
+        ``snapshot_id`` is still honored across spaces.
 
         Two-outcome precision for the return contract:
 
@@ -7269,7 +7278,9 @@ Returns:
     # a tool since unify-spawn-tools (2026-10-05): spawn_instance
     # above consumes the snapshot_tools helpers directly, gated by the
     # TARGET agent's snapshot_enabled meta flag (spawn_hot_instance
-    # was removed).
+    # was removed). vsss (2026-11-12): the automatic consumption
+    # search resolves to the TARGET VERSION's own snapshot space
+    # (registry composite key over the spawn identity).
     # Both tools fail-soft when the snapshot services are not wired on
     # the manager (test doubles / partial init), so this call is safe
     # everywhere create_instance_tools runs. version_tag is forwarded

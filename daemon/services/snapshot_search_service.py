@@ -34,6 +34,17 @@ Pipeline constraints (design §3.4 — PR5 binding contract):
 * **Project-scoped** (D8 — PERMANENT). ``project_id`` is required.
 * **Active-only candidates** — ``status='active'``; superseded
   rows never surface.
+* **Space contract (vsss, 2026-11-12)** — the AUTOMATIC warm-start
+  path (``resolve_spawn_snapshot`` internal branch) always passes
+  ``agent_space_key`` and Stage 0 restricts candidates to
+  ``project_id + status='active' + agent_space_key = :key``; each
+  agent version therefore resolves to its OWN snapshot space and
+  NULL (version-unattributable) rows match NO version's automatic
+  warm-start — fail-closed, no fallback tier. The PUBLIC
+  ``snapshot_search`` tool omits the key and keeps the unfiltered
+  project+status shape (observability across spaces); the explicit
+  ``snapshot_id`` consume path is version-permissive (direct
+  addressing, not space resolution).
 * **Tag filter (R8)** via
   :meth:`daemon.repositories.snapshot.repository.SnapshotRepository.filter_by_tags`
   (``tag_mode: all|any``, default ``all``).

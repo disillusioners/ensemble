@@ -14,7 +14,15 @@ search, plus the warm-start consumption flow that backs the UNIFIED
 REMOVED as a standalone tool. Warm-start consumption now rides
 ``spawn_instance`` (``daemon/tools/instance.py``), gated by the
 TARGET (being-spawned) agent's ``snapshot_enabled: true`` meta.json
-flag. The ~500-line resolution state machine was NOT duplicated —
+flag. **vsss (2026-11-12, version-scoped snapshot spaces):** the
+automatic warm-start search resolves to the TARGET's OWN per-version
+space — keyed by the canonical versioned identity
+(``registry.compose_agent_space_key``, e.g. ``'developer[v2]'``) —
+so ``developer`` and ``developer[v2]`` never consume each other's
+snapshots; version-unattributable (NULL ``agent_space_key``) rows
+match NO version's automatic warm-start (fail-closed), while the
+explicit ``snapshot_id`` path stays version-permissive. The
+resolution state machine was NOT duplicated —
 it lives HERE as module-level helpers with a single source of
 truth, imported by the unified spawn tool:
 
@@ -37,6 +45,9 @@ Category layout — one module, one grant category:
   Consumption is gated per-agent by ``snapshot_enabled`` (registry
   field consulted against the TARGET's resolved meta), not by a
   tool grant — the former ``instance``-category ride-along is gone.
+  vsss: consumption additionally resolves to the TARGET VERSION's
+  own snapshot space (``agent_space_key``) — a gate-on target only
+  ever automatically consumes from its own version's pool.
 
 R15 settings toggle (write side ONLY): ``snapshot_create`` consults
 the async :func:`daemon.services.snapshot_settings_utils.get_snapshot_create_enabled`
@@ -47,7 +58,8 @@ fail-closed default.
 ``snapshot_search`` (read-only) is NEVER gated, and the warm-start
 consumption path inside ``spawn_instance`` is NEVER gated by R15
 either — consumption is gated ONLY by the target agent's
-``snapshot_enabled`` flag.
+``snapshot_enabled`` flag (vsss: and resolved to the target
+version's own snapshot space).
 
 R14 fail-soft contract (preserved under the unified tool):
 consumption NEVER turns a snapshot miss into an error —
@@ -130,6 +142,11 @@ When the gate is on, callers pass `snapshot_id` / `tags` /
 `verify` / `allow_cross_project` to `spawn_instance` and the result
 string carries a `[snapshot] started: warm|cold — …` citation line
 (cold fallback on any miss/expiry/verify-failure — never an error).
+vsss (version-scoped snapshot spaces): the automatic search resolves
+to the TARGET VERSION's own space only (keyed by the registry
+composite identity, e.g. `developer[v2]`); version-unattributable
+rows match no version's automatic warm-start (fail-closed), while an
+explicit `snapshot_id` is still consumed regardless of space.
 `task` + `auto_dispatch` (R18) auto-enqueue the task as the child's
 first turn. Project-less callers (e.g. an instance whose project is
 unknown) always get a cold spawn — the internal search has no
@@ -704,10 +721,13 @@ def create_snapshot_tools(
 # removed tool (explicit-id verify → internal search → staleness →
 # verify=git → R6b stamp → R16 counter), factored into module-level
 # helpers so there is exactly ONE copy of the resolution logic
-# (decision 1 of unify-spawn-tools). Ordering contract (R6b + R18):
-# resolve → manager.spawn_instance → finalize (stamp BEFORE enqueue) →
-# the unified tool's R18 auto-dispatch (which lives in instance.py —
-# it must run even when the snapshot gate is OFF).
+# (decision 1 of unify-spawn-tools). vsss (2026-11-12): the internal
+# search branch resolves to the TARGET VERSION's own snapshot space
+# (``agent_space_key`` — strict, fail-closed without it); the
+# explicit-id branch is version-permissive. Ordering contract (R6b +
+# R18): resolve → manager.spawn_instance → finalize (stamp BEFORE
+# enqueue) → the unified tool's R18 auto-dispatch (which lives in
+# instance.py — it must run even when the snapshot gate is OFF).
 
 
 @dataclass
@@ -738,7 +758,8 @@ class SpawnSnapshotResolution:
 SNAPSHOT_STEERING_IGNORED_LINE = (
     '[snapshot] ignored: snapshot_id/tags steering requires the target '
     'agent to have "snapshot_enabled": true in its meta.json — '
-    "spawned plain cold."
+    "spawned plain cold (the automatic warm-start search resolves to "
+    "each target version's own snapshot space)."
 )
 
 

@@ -665,7 +665,10 @@ EDITOR_OPTIONS = ["builtin", "vscode"]         # valid editor values
 # (fail-closed opt-in rollout). The toggle gates ONLY ``snapshot_create``;
 # ``snapshot_search`` (read) and the warm-start consumption path inside
 # ``spawn_instance`` (consumption; per-agent ``snapshot_enabled`` gate)
-# are always-on w.r.t. R15 (rider (i) isolation).
+# are always-on w.r.t. R15 (rider (i) isolation). vsss (2026-11-12):
+# consumption additionally resolves to the TARGET VERSION's own snapshot
+# space (``snapshots.agent_space_key`` — registry composite identity);
+# NULL rows match no version's automatic warm-start (fail-closed).
 SNAPSHOT_CREATE_METADATA_KEY = "snapshot_create_enabled"
 # Tracked string values stored in the metadata record. Anything not in this
 # set is treated as OFF (defense-in-depth — corrupt or legacy values fail
