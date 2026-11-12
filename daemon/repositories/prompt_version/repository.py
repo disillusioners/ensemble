@@ -93,6 +93,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import uuid
 from dataclasses import dataclass
@@ -103,6 +104,12 @@ from sqlalchemy import func, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
+
+from daemon.repositories.prompt_assent.designation import (
+    ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS,
+    designation_digest,
+    parse_designations,
+)
 
 from .assent_attestation import AssentAttestation
 from .models import (
@@ -1812,15 +1819,36 @@ class PromptVersionRepository:
     @staticmethod
     def _assent_audit_provenance(
         attestation: AssentAttestation,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """The §2.4 relay provenance dict (payload-only; D-9 shape).
 
         Keys exactly as ruled; ``reject_reason`` is added by
         ``reject_assent`` (top-level, ≤500 chars). The raw token appears
         NOWHERE — ``token_fingerprint`` is ``sha256(token)[:12]``.
+
+        **Phase 1.5 — one ADDITIVE key (prompt-assent-channels F-15).** A
+        decision taken in a DESIGNATED CHANNEL also records
+        ``map_digest`` — the 12-hex content-free fingerprint of the
+        operator's designation map AS IN FORCE AT DECISION TIME — so the
+        queryable ledger names the map behind the decision (D-15 control
+        (b) / AC14). A DM decision records NO ``map_digest`` at all: the DM
+        path never reads that configuration (``INVARIANT-DM``). This is ONE
+        additive JSON key — no schema change, no column, no migration.
+
+        **The decision-time re-read is the RULED semantics, not a stale-
+        read defect.** The digest is minted from the environment AS IT
+        STANDS WHEN THE DECISION IS RECORDED (a decision-time map —
+        reviewer-ruled): the ledger answers "which map was in force when
+        this token was decided", which is exactly the question a replay
+        or an audit asks. It is deliberately NOT the mint-time snapshot —
+        a designation moved between the mint and the decision is a REAL
+        event (A-9/A-10) and the provenance must reflect the map the
+        decision actually faced. This method therefore re-parses the env
+        at provenance time, ONCE, content-free (only the digest is
+        stored — never the map, never a key, never a value).
         """
         ident = attestation.human_identity
-        return {
+        provenance = {
             "approval_path": "chat-assent",
             "relay_agent": attestation.relay_agent,
             "relay_instance_id": attestation.relay_instance_id,
@@ -1839,6 +1867,29 @@ class PromptVersionRepository:
             "token_fingerprint": attestation.token_fingerprint,
             "render_sha256": attestation.render_sha256,
         }
+        # F-15 (ADDITIVE-ONLY — ONE JSON key): a decision taken from a
+        # GUILD context names the designation map in force at decision
+        # time. ``ident.is_dm is False`` is the channel shape by
+        # construction (the mint gate admits only a proven 1:1 DM or a
+        # designated channel), and a DM decision adds NOTHING
+        # (INVARIANT-DM: the DM path never reads this configuration).
+        #
+        # The read is a DIRECT environment read through P1's ONE constant
+        # (no second literal — the single-home pin covers the name) because
+        # the payload is assembled here, downstream of the attestation, and
+        # the attestation type is deliberately NOT widened (no field may be
+        # smuggled in by a caller). An INVALID map contributes NO key —
+        # ``_assent_audit_provenance`` never raises and never guesses a
+        # fingerprint for a map that has none. The imports are hoisted to
+        # module top (L12) — designation.py is dependency-free, so the
+        # boot import order is untouched.
+        if ident.is_dm is False:
+            _parsed = parse_designations(
+                os.environ.get(ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS)
+            )
+            if _parsed.valid and _parsed.map is not None:
+                provenance["map_digest"] = designation_digest(_parsed.map)
+        return provenance
 
     def approve_assent(
         self,

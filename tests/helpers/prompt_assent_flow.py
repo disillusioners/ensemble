@@ -24,11 +24,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
 from tests.helpers.prompt_assent_tool_fixture import (
-    CHANNEL_ID,
-    MESSAGE_ID,
     RELAY_INSTANCE_ID,
-    SOURCE_ID,
-    USER_ID,
     FakeManager,
     FakeMessageRow,
     build_discord_meta,
@@ -39,6 +35,48 @@ from tests.helpers.prompt_assent_tool_fixture import (
 PENDING_CONTENT = "do not run destructive commands without a human yes\n"
 ITEM_AGENT = "ari"
 ITEM_ARTIFACT = "rule"
+
+#: The sentinel default of ``build_flow(designations=…)``: "leave the
+#: designation environment EXACTLY as the caller arranged it".
+#: ⚠ DEVIATION NOTE (T3.1, flagged in the lane report): the plan's literal
+#: "default = scrubbed" on THIS rig would redden Phase 2's un-editable
+#: census file (``tests/unit/tools/test_prompt_assent_registration.py``),
+#: whose cells ``monkeypatch.setenv(ENV, …)`` BEFORE calling ``build_flow``
+#: and rely on the map surviving into the tool call. The sentinel keeps
+#: every existing caller byte-green; the "default rig is scrubbed"
+#: guarantee for the PHASE-3 cells is delivered by the phase-3 file's own
+#: autouse fixture (``_hermetic_designation_map`` — scrubs the variable
+#: before every cell), so no phase-3 cell can inherit an ambient operator
+#: map (AC1). ``designations=None`` remains an EXPLICIT scrub.
+AMBIENT = object()
+
+
+def _apply_designations(designations: Any) -> None:
+    """The hermetic map control (T3.1 / D-3.2): set-or-scrub, never inherit.
+
+    * a ``dict``  → ``os.environ[ENV] = json.dumps(designations)`` — the
+      EXACT canonical JSON string of that dict;
+    * a ``str``   → set to that EXACT raw string (the invalid-map cells);
+    * ``None``    → SCRUB the variable (per-variable pop — the house
+      ``env -u`` lesson: no globs);
+    * ``AMBIENT`` (the default) → touch nothing (see the sentinel note).
+    """
+    import json
+    import os
+
+    from daemon.repositories.prompt_assent.designation import (
+        ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS as _ENV,
+    )
+
+    if designations is AMBIENT:
+        return
+    if designations is None:
+        os.environ.pop(_ENV, None)
+        return
+    if isinstance(designations, str):
+        os.environ[_ENV] = designations
+        return
+    os.environ[_ENV] = json.dumps(designations)
 
 
 def make_flow_engine() -> Any:
@@ -67,8 +105,17 @@ def build_flow(
     meta: dict[str, Any] | None = None,
     echo_content: str = "mint it",
     with_service: bool = True,
+    designations: Any = AMBIENT,
 ) -> SimpleNamespace:
-    """The wired flow rig — manager + tools + repos + a pending item."""
+    """The wired flow rig — manager + tools + repos + a pending item.
+
+    ``designations`` is the hermetic map control (T3.1): a ``dict`` sets
+    ``ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS`` to its exact canonical
+    JSON, a ``str`` sets the EXACT raw value (invalid-map cells),
+    ``None`` SCRUBS it; the ``AMBIENT`` default touches nothing (the
+    phase-3 file's autouse fixture is what makes ITS default scrubbed —
+    see the sentinel note above).
+    """
     from daemon.repositories.prompt_version.repository import (
         PromptVersionRepository,
         actor_from_instance,
@@ -77,6 +124,8 @@ def build_flow(
         PromptAssentTokenRepository,
     )
     from daemon.services.prompt_version_service import PromptVersionService
+
+    _apply_designations(designations)
 
     engine = engine if engine is not None else make_flow_engine()
     repo = PromptVersionRepository(engine)
@@ -114,11 +163,23 @@ def build_flow(
     )
 
 
-async def mint_for(flow: SimpleNamespace) -> str:
-    """Mint for the rig's item; return the mint response."""
-    return await flow.tools["prompt_assent"].ainvoke(
-        {"action": "mint", "version_id": flow.version_id}
-    )
+async def mint_for(flow: SimpleNamespace, **kwargs: Any) -> str:
+    """Mint for the rig's item; return the mint response.
+
+    ``**kwargs`` ride the tool payload verbatim (e.g. ``force=True``
+    re-mints past a live token — superseding it); existing callers pass
+    no kwargs and behave exactly as before.
+    """
+    payload: dict[str, Any] = {"action": "mint", "version_id": flow.version_id}
+    payload.update(kwargs)
+    return await flow.tools["prompt_assent"].ainvoke(payload)
+
+
+def token_of(mint: str) -> str:
+    """The raw token out of a mint response (L16 — ONE shared
+    extraction; both the designated matrix and the census file parse
+    the mint response through this)."""
+    return mint.split("token: ", 1)[1].splitlines()[0]
 
 
 def echo(flow: SimpleNamespace, token: str, **meta_kwargs: Any) -> None:

@@ -2,7 +2,10 @@
 # prompt_assent_phase3_unit_test.sh
 #
 # The prompt-assent Phase-3 lane pack — the acceptance path and the
-# provenance flow (branch feature/prompt-assent, base 0efdf106f).
+# provenance flow (branch feature/assent-designated-channels, base
+# efa8aaae2; the pack originated in the parent prompt-assent lane, whose
+# header said feature/prompt-assent @ 0efdf106f — the lane identity
+# above is the one that now carries and tests it).
 #
 # Wraps the Phase-3 test surface in ONE pytest invocation:
 #
@@ -29,6 +32,14 @@
 #   * tests/unit/test_prompt_assent_counter_mutations.py — the SIX
 #     named counter-mutations + the K-7 column-source pin, each
 #     demonstrated to REDDEN its cell;
+#   * tests/unit/test_prompt_assent_designated_channel.py — the
+#     Phase-1.5 designated-channel cell matrix (20 mint + 12 approve
+#     cells; the runtime resolver-raises pin; the map-unset
+#     equivalence; the digest provenance; the P-2b/P-2c/P-3/P-7/P-8
+#     counter-mutations) — Phase 1.5, T3.10;
+#   * tests/unit/test_prompt_assent_designation_parser.py — the
+#     Phase-1 designation-map parser + typed outcome + the arena pins
+#     (P-1, P-6) — Phase 1.5, T3.10;
 #   * tests/unit/test_prompt_assent_fe_unchanged.py — the FE proof
 #     (routes / service / repo methods byte-identical to base;
 #     F4 + the bearer clamp intact);
@@ -48,12 +59,23 @@
 #   * Single-process collection (no -n auto).
 #   * Env hygiene (H-7): the env scrub is PER-VARIABLE (a bare
 #     `env -u POSTGRES_*` is a silent NO-OP) — set the scrub env when
-#     invoking this pack:
+#     invoking this pack; the designation map var is scrubbed too, so
+#     an ambient operator map cannot leak into the house gate (T3.10):
 #       env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD \
 #           -u POSTGRES_HOST -u POSTGRES_PORT -u DATABASE_URL \
-#           -u ENSEMBLE_SELF_ENV bash test/packs/prompt_assent_phase3_unit_test.sh
+#           -u ENSEMBLE_SELF_ENV \
+#           -u ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS \
+#           bash test/packs/prompt_assent_phase3_unit_test.sh
 
 set -euo pipefail
+
+# N2 (2026-11-12 fix round): the per-variable `-u` flags in the
+# invocation note above are ADVISORY (they document the caller's duty);
+# this body-level unset makes the scrub REAL — an ambient operator map
+# cannot leak into the house gate even when the pack is invoked without
+# the `-u` flags (T3.10; the one ambient-flippable pin is the
+# guild-default ids at tests/unit/test_prompt_assent_mint_gate.py:102).
+unset ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 echo "=== Test Pack: prompt_assent_phase3_unit_test ==="
@@ -70,6 +92,8 @@ timeout 300s .venv/bin/pytest \
   tests/unit/test_prompt_assent_render_mutation.py \
   tests/unit/test_prompt_assent_counter_transaction.py \
   tests/unit/test_prompt_assent_counter_mutations.py \
+  tests/unit/test_prompt_assent_designated_channel.py \
+  tests/unit/test_prompt_assent_designation_parser.py \
   tests/unit/test_prompt_assent_fe_unchanged.py \
   tests/integration/test_prompt_assent_flow.py \
   --override-ini="addopts=" --tb=short -q -p no:timeout 2>&1 || EXIT_CODE=$?
