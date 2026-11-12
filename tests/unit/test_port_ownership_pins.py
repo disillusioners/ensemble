@@ -300,9 +300,10 @@ def test_B1_two_process_foreign_claim_is_visible_and_refused(tmp_path, monkeypat
 
 def test_B3_daemon_never_releases_claim_eagerly():
     src = (REPO_ROOT / "daemon" / "api.py").read_text(encoding="utf-8")
-    assert "release_claim(" not in src, (
-        "api.py must not release the claim — releasing during lifespan "
-        "shutdown runs while the process still owns the listener (B3)"
+    assert "release_claim" not in src, (
+        "api.py must not reference the claim-release helper — releasing "
+        "during lifespan shutdown runs while the process still owns the "
+        "listener (B3)"
     )
 
 
