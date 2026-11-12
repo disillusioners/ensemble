@@ -1,51 +1,64 @@
-"""Unit tests for rider (d) derived metrics port (component B, pin (ii))."""
+"""Unit tests for rider (d): derived metrics port (component B, pin (ii)).
 
-import os
-import re
+Fix-round 2 / N8: the derive moved into ``daemon/services/metrics_listener.py``
+(single source of truth) and gained an explicit edge policy:
+``main+1 > 65535``, ``main_port < 1`` and invalid env values are
+CLAMP-BY-DISABLE (None + loud ERROR) — never a silent bad bind.
+"""
+
 from pathlib import Path
 
+from daemon.services.metrics_listener import derive_metrics_port
 
-def _derive_metrics_port(main_port, env_value=None):
-    # Mirror of daemon/api.py derive (must stay in sync).
-    if env_value is not None and str(env_value).strip() != "":
-        return int(str(env_value).strip())
-    return int(main_port) + 1
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_derive_scratch_main_plus_one():
-    assert _derive_metrics_port(8099) == 8100
+    assert derive_metrics_port(8099) == 8100
 
 
 def test_derive_live_main_unchanged():
-    assert _derive_metrics_port(9797) == 9798
+    assert derive_metrics_port(9797) == 9798
 
 
 def test_derive_env_escape_hatch():
-    assert _derive_metrics_port(8099, env_value="19999") == 19999
+    assert derive_metrics_port(8099, env_value="19999") == 19999
 
 
 def test_derive_env_empty_falls_back():
-    assert _derive_metrics_port(8099, env_value="") == 8100
-    assert _derive_metrics_port(8099, env_value="   ") == 8100
+    assert derive_metrics_port(8099, env_value="") == 8100
+    assert derive_metrics_port(8099, env_value="   ") == 8100
 
 
-def test_api_source_uses_derive_not_managed_default():
-    src = Path("daemon/api.py").read_text(encoding="utf-8")
-    # The derive expression must be present.
-    assert 'int(config.daemon.port) + 1' in src or 'int(config.daemon.port)+1' in src.replace(" ", "")
-    # The old managed-default fallback must NOT be the operative expression.
-    assert "getattr(config.limits" not in src or "metrics_listener_port" not in src.split("getattr(config.limits")[1][:80] if "getattr(config.limits" in src else True
+def test_derive_env_invalid_disables(caplog):
+    with caplog.at_level("ERROR", logger="daemon.services.metrics_listener"):
+        assert derive_metrics_port(8099, env_value="not-a-port") is None
+        assert derive_metrics_port(8099, env_value="70000") is None
+    assert "DISABLED" in caplog.text
 
 
-def test_api_source_honors_env_escape():
-    src = Path("daemon/api.py").read_text(encoding="utf-8")
+def test_derive_overflow_at_65535_disables_loudly(caplog):
+    """N8: the pre-fix ``int(port)+1`` overflow."""
+    with caplog.at_level("ERROR", logger="daemon.services.metrics_listener"):
+        assert derive_metrics_port(65535) is None
+    assert "exceeds 65535" in caplog.text
+
+
+def test_derive_ephemeral_main_port_disables(caplog):
+    with caplog.at_level("ERROR", logger="daemon.services.metrics_listener"):
+        assert derive_metrics_port(0) is None
+    assert "ephemeral" in caplog.text
+
+
+def test_api_source_uses_the_single_derive_helper():
+    src = (REPO_ROOT / "daemon" / "api.py").read_text(encoding="utf-8")
+    assert "derive_metrics_port(" in src
     assert 'os.environ.get("LIMITS_METRICS_LISTENER_PORT")' in src
+    # The retired managed-key fallback must not be the operative expression.
+    assert "getattr(config.limits, \"metrics_listener_port\"" not in src
+    assert "getattr(config.limits, 'metrics_listener_port'" not in src
 
 
 def test_managed_key_retired_in_settings_service():
-    # The registry entry for limits.metrics_listener_port should be removed
-    # (or at least not a managed key). Check source for the key string.
-    src = Path("daemon/services/settings_service.py").read_text(encoding="utf-8")
-    # We don't hard-fail if still present (retirement is a task), but pin
-    # that the derive path does not consult the DB-managed value.
-    assert "metrics_listener_port" not in src or True
+    src = (REPO_ROOT / "daemon" / "services" / "settings_service.py").read_text(encoding="utf-8")
+    assert '"limits.metrics_listener_port": ManagedKeySpec' not in src

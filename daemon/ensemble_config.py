@@ -139,8 +139,9 @@ def assert_db_resolution_sanctioned(data_dir) -> None:
     """DB-resolution guard: refuse an ambient-POSTGRES-driven first boot
     (tier 2) unless ``ENSEMBLE_DB_AMBIENT_ALLOW=1`` is set.
 
-    Fail-closed on the tier-2 poison case; fail-OPEN on an unexpected
-    exception in the guard itself (so a broken check never blocks boot).
+    Fail-closed on the tier-2 poison case AND on a guard-internal error
+    (fix-round 2 / N5 — leader fail-polarity decision: an unverifiable DB
+    sanction must not proceed; the guard logs a clear reason and exits 78).
     Documented exemption: daemon/auth/cli.py:150 (no code change there).
 
     Fires (sys.exit(78) + marker line) iff:
@@ -191,5 +192,15 @@ def assert_db_resolution_sanctioned(data_dir) -> None:
         _sys.exit(78)
     except SystemExit:
         raise
-    except Exception as exc:  # noqa: BLE001 — fail-closed on guard errors
-        logger.warning("assert_db_resolution_sanctioned unexpected error: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        # FAIL-CLOSED (fix-round 2 / N5, leader decision): if the guard
+        # cannot EVALUATE the sanction, the DB resolution is unverified and
+        # must not proceed. Loud, explicit, and exit 78 (the existing
+        # configuration-refusal contract — the launcher does not loop).
+        logger.error(
+            "DB RESOLUTION UNVERIFIABLE (rogue-containment guard error): "
+            "%s: %s — refusing boot (fail-closed; exit 78).",
+            type(exc).__name__,
+            exc,
+        )
+        _sys.exit(78)

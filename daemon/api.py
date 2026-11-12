@@ -724,10 +724,31 @@ async def lifespan(app: FastAPI):
         or os.environ.get("DATA_DIR")
         or "./data"
     )
+    # rogue-containment (fix-round 2 / B5): surface a port-ownership
+    # refusal record left by a PRIOR boot ONCE. This is the reader half of
+    # the durable refusal marker: a refusing boot exits 78 and cannot
+    # report past the exit, so the next boot reports it here. Placed in the
+    # lifespan (not only in the pre-bind gate) so EVERY entry path —
+    # including `uvicorn daemon.api:app` — surfaces the record. The gate
+    # also calls this first; rotation makes the report exactly-once.
+    try:
+        from daemon.services.port_ownership import surface_refusal_marker
+
+        surface_refusal_marker()
+    except Exception as _refusal_marker_exc:  # noqa: BLE001 — boot must proceed
+        daemon_logger.warning(
+            "port-ownership: refusal-marker surface skipped (%s)",
+            _refusal_marker_exc,
+        )
+
     # DB-resolution guard (rogue-containment). The __main__ preflight
-    # (before uvicorn) is the exit-78 owner; this lifespan call is a
-    # defense-in-depth backstop whose failure mode is exit 3 (crash
-    # track) and is unreachable when the preflight ran.
+    # (before uvicorn) is the exit-78 owner on BOTH entry paths; this
+    # lifespan call is a defense-in-depth backstop. Pinned behaviour
+    # (fix-round 2 / N5): raising SystemExit(78) here propagates through
+    # uvicorn's LifespanOn as a STARTUP FAILURE — `server.started` stays
+    # False and `_serve_with_bind_retry`'s tail exits 3 (crash track),
+    # which is the supervisor's retry signal. It is unreachable when the
+    # preflight already ran (the preflight owns exit 78 there).
     from daemon.ensemble_config import assert_db_resolution_sanctioned
     assert_db_resolution_sanctioned(data_dir)
     ensemble_config = EnsembleConfig.load_or_create(data_dir)
@@ -2697,18 +2718,24 @@ async def lifespan(app: FastAPI):
         # is on — the state must never be mysterious.
         metrics_gate.log_deferral_once()
 
-        _metrics_port_env = os.environ.get("LIMITS_METRICS_LISTENER_PORT")
-        if _metrics_port_env is not None and str(_metrics_port_env).strip() != "":
-            _metrics_port = int(str(_metrics_port_env).strip())
-        else:
-            _metrics_port = int(config.daemon.port) + 1
-        _metrics_listener = MetricsListener(
-            port=_metrics_port,
+        from daemon.services.metrics_listener import derive_metrics_port
+
+        _metrics_port = derive_metrics_port(
+            config.daemon.port,
+            os.environ.get("LIMITS_METRICS_LISTENER_PORT"),
         )
-        if _metrics_listener.start():
-            app.state.metrics_listener = _metrics_listener
-        else:
+        if _metrics_port is None:
+            # Edge policy (N8): clamp-by-disable — the listener is
+            # non-fatal by design; derive_metrics_port already logged loudly.
             app.state.metrics_listener = None
+        else:
+            _metrics_listener = MetricsListener(
+                port=_metrics_port,
+            )
+            if _metrics_listener.start():
+                app.state.metrics_listener = _metrics_listener
+            else:
+                app.state.metrics_listener = None
     except Exception as metrics_listener_boot_exc:
         app.state.metrics_listener = None
         logger.error(
@@ -3998,25 +4025,15 @@ async def lifespan(app: FastAPI):
     async with session_mgr.run():
         yield
     
-    # rogue-containment: best-effort release of the port-ownership claim
-    # (pid-gated — never deletes a successor's claim).
-    try:
-        from daemon.services.port_ownership import (
-            release_claim,
-            resolve_self_install_dir,
-            _claims_dir_for,
-        )
-        import os as _os
-        _self_install = resolve_self_install_dir()
-        _claims_dir = _claims_dir_for(_self_install)
-        release_claim(
-            _claims_dir,
-            getattr(config, "daemon", None).host if getattr(config, "daemon", None) else "0.0.0.0",
-            int(getattr(getattr(config, "daemon", None), "port", 0) or 0),
-            _os.getpid(),
-        )
-    except Exception:  # noqa: BLE001 — best-effort
-        pass
+    # rogue-containment (fix-round 2 / B3): the claim is deliberately NOT
+    # released here. Lifespan shutdown runs while this process is still
+    # ALIVE (uvicorn owns the listener until its own teardown; the shutdown
+    # sequence below still drains services), so dropping the claim at this
+    # point re-opens the exact window the claim exists to close — a
+    # concurrent boot would see "no owner" and take the port. Stale claims
+    # self-heal on the next boot via pid + starttime liveness; a claim owned
+    # by a live process is never taken over. `release_claim` remains
+    # available for tests/manual operator cleanup only.
 
     # Shutdown sequence
     # Stop RetryScheduler first
