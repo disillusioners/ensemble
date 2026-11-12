@@ -20,6 +20,7 @@ from daemon.services.ram_guard.ceiling import (
     RAM_GUARD_DETECTION_FALLBACK_BYTES,
     derive_ceiling_bytes,
     detect_effective_total_bytes,
+    read_cgroup_limit_bytes,
     resolve_ceiling_bytes,
 )
 from tests.unit.services.ram_guard_fixtures import write_proc_tree
@@ -224,3 +225,24 @@ def test_detection_failure_never_raises(tmp_path):
         CEILING_SOURCE_FALLBACK_FIXED,
         CEILING_SOURCE_EXPLICIT,
     }
+
+
+def test_cgroup_memory_max_zero_is_a_real_limit_not_unlimited(tmp_path):
+    """Cycle-2 pin — ``memory.max = 0`` is a REAL limit (0 bytes), never
+    the cgroup-v2 unlimited sentinel (only the literal ``max`` is).  The
+    effective total floors to 0 ⇒ the derived ceiling floors to 64 MiB
+    with the ``derived-cgroup`` provenance."""
+    proc_root, cgroup_root = build_host(
+        tmp_path,
+        mem_total_mib=11953,
+        cgroup_path="/system.slice/ensemble-main.service",
+        cgroup_max="0",
+    )
+    limit = read_cgroup_limit_bytes(proc_root, cgroup_root)
+    assert limit == 0, "0 is a real limit — never parsed as unlimited"
+    effective, source = detect_effective_total_bytes(proc_root, cgroup_root)
+    assert effective == 0
+    assert source == CEILING_SOURCE_CGROUP
+    resolved, ceiling_source = resolve_ceiling_bytes(proc_root, cgroup_root)
+    assert resolved == RAM_GUARD_DERIVED_CEILING_FLOOR_BYTES == 64 * MIB
+    assert ceiling_source == CEILING_SOURCE_CGROUP

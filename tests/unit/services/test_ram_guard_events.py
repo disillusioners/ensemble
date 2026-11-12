@@ -422,6 +422,64 @@ class TestLifespanWiring:
         rg = api_source.index("[RamGuard] started")
         assert rg > rm
 
+    # ── The DRIVEN composition-root legs (cycle 2 — NO source-grep) ──
+
+    def _boot_config(self, *, on: bool):
+        from types import SimpleNamespace
+        from daemon.config import RamGuardConfig
+
+        return SimpleNamespace(
+            ram_guard_derived_switch=on,
+            ram_guard=RamGuardConfig(ceiling_mib=3072),
+        )
+
+    def test_driven_the_off_boot_starts_nothing_and_resets_the_state(self):
+        """DRIVEN (no source-grep): the OFF composition root RESETS
+        ``app.state.ram_guard`` to None and starts NO thread."""
+        from types import SimpleNamespace
+
+        from fastapi import FastAPI
+
+        from daemon.api import _boot_ram_guard
+        from daemon.services.ram_guard import set_ram_guard
+
+        app = FastAPI()
+        app.state.ram_guard = "sentinel-from-a-previous-life"
+        before = {t.name for t in threading.enumerate() if t.name.startswith("ram-guard")}
+        try:
+            guard = _boot_ram_guard(app, manager=SimpleNamespace(), config=self._boot_config(on=False))
+            assert guard is None
+            assert app.state.ram_guard is None
+            after = {t.name for t in threading.enumerate() if t.name.startswith("ram-guard")}
+            assert after == before, "the OFF boot must start zero guard threads"
+        finally:
+            set_ram_guard(None)
+
+    def test_driven_the_on_boot_starts_both_threads_and_wires_the_facade(self):
+        """DRIVEN (no source-grep): the ON composition root constructs the
+        guard, starts BOTH threads, wires the app state AND the facade."""
+        from types import SimpleNamespace
+
+        from fastapi import FastAPI
+
+        from daemon.api import _boot_ram_guard
+        from daemon.services.ram_guard import get_ram_guard, set_ram_guard
+
+        app = FastAPI()
+        try:
+            guard = _boot_ram_guard(app, manager=SimpleNamespace(), config=self._boot_config(on=True))
+            assert guard is not None
+            assert app.state.ram_guard is guard
+            assert get_ram_guard() is guard, "the facade is wired at the composition root"
+            health = guard.health()
+            assert health["thread_alive"] is True, "the tick thread EXISTS"
+            assert health["lane_alive"] is True, "the lane thread EXISTS"
+        finally:
+            if app.state.ram_guard is not None:
+                app.state.ram_guard.stop()
+                app.state.ram_guard.join(timeout=3.0)
+            set_ram_guard(None)
+
 
 # ── The integration legs (guard hook ⇄ this emitter) ───────────────────────
 

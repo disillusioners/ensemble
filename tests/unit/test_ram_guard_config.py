@@ -200,6 +200,37 @@ class TestKnobBounds:
 # ── C4 — the yaml trap ──────────────────────────────────────────────────────
 
 
+class TestEmptyStringEnvIsUnset:
+    """An EMPTY-string env value (``RAM_GUARD_CEILING_MIB=`` in a shell,
+    a docker-compose hole, a systemd EnvironmentFile line with no value)
+    is the UNSET semantics — never a boot abort (live-verified carryover:
+    the pre-validator ValidationError aborted the daemon on ``""``)."""
+
+    @pytest.mark.parametrize(
+        ("env_name", "field", "expected"),
+        [
+            ("RAM_GUARD_CEILING_MIB", "ceiling_mib", None),
+            ("RAM_GUARD_POLL_INTERVAL_MS", "poll_interval_ms", 200),
+            ("RAM_GUARD_GRACE_MS", "grace_ms", 250),
+            ("RAM_GUARD_PSS_CONFIRM_DEADLINE_MS", "pss_confirm_deadline_ms", 250),
+        ],
+    )
+    def test_an_empty_string_env_is_the_unset_semantics_for_all_four_knobs(
+        self, monkeypatch, env_name, field, expected
+    ):
+        monkeypatch.setenv(env_name, "")
+        config = RamGuardConfig()
+        assert getattr(config, field) == expected
+
+    def test_a_whitespace_string_env_is_also_unset(self, monkeypatch):
+        monkeypatch.setenv("RAM_GUARD_CEILING_MIB", "   ")
+        assert RamGuardConfig().ceiling_mib is None
+
+    def test_a_real_value_still_binds(self, monkeypatch):
+        monkeypatch.setenv("RAM_GUARD_CEILING_MIB", "3072")
+        assert RamGuardConfig().ceiling_mib == 3072
+
+
 class TestYamlTrap:
     def test_a_yaml_literal_is_ignored_and_the_env_tier_wins(
         self, tmp_path, monkeypatch

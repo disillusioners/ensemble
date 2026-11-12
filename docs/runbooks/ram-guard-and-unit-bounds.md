@@ -268,7 +268,7 @@ where the guard holds the episode claim and does **not** kill (a refusal, a tran
 a still-pending record), the bash timeout arm **defers its own signal** until after the bounded
 verdict wait — so the tree can survive up to **≤ ~1.27 s past the bash timeout**. The *wait* is
 B20-pinned (`wait_deadline_ms = RAM_GUARD_PENDING_MAX × T_service_worst_ms + WAIT_SLACK_MS
-= 2 × 510 + 250 = 1270 ms`, widening with the installed guard's own grace/confirm knobs); the
+= 2 × 529 + 250 = 1308 ms`, widening with the installed guard's own grace/confirm knobs); the
 *kill latency after that wait is **not** bounded by anything in this design*. Mechanism:
 `daemon/tools/bash.py` — `timeout_kill_deferred` is set when `_ram_claim_held(record)`, and the
 deferred `_kill_process` runs only after `await _await_ram_verdict(...)` returns (never at all

@@ -111,7 +111,14 @@ LEGS: list[Leg] = [
         node="tests/unit/services/test_ram_guard_phase6.py::test_a_raising_tick_climbs_missed_samples",
         note="a raising tick does not count a miss",
     ),
-    # M7 RETIRED (2026-11-12, §18.3): P5a retired — vacuous pin.
+    Leg(
+        id="M7-unreadable-as-absent",
+        path="daemon/services/ram_guard/ladder.py",
+        old="    if stat.unreadable:\n        return REASON_LEADER_UNREADABLE",
+        new="    if stat.unreadable:\n        return None",
+        node="tests/unit/services/test_ram_guard_ladder.py::test_p5_leader_unreadable_refused",
+        note="unreadable leader treated as absent (S8f) — P5 site only (P5a retired 2026-11-12 §18.3; the string now occurs exactly once)",
+    ),
     Leg(
         id="M8-dead-guard-healthy",
         path="daemon/services/ram_guard/guard.py",
@@ -131,8 +138,8 @@ LEGS: list[Leg] = [
     Leg(
         id="M10-hide-lane-progress",
         path="daemon/services/ram_guard/guard.py",
-        old="            self._service_claim(tracking_id, token)\n        finally:\n            with self._lock:\n                self._last_lane_progress_at = time.time()",
-        new="            self._service_claim(tracking_id, token)\n        finally:\n            with self._lock:\n                pass",
+        old="        finally:\n            with self._lock:\n                self._last_lane_progress_at = time.time()",
+        new="        finally:\n            with self._lock:\n                pass",
         node="tests/unit/services/test_ram_guard_guard.py::test_the_lane_heartbeat_is_the_wedge_signal",
         note="lane progress heartbeat frozen (O11/T11b)",
     ),
@@ -213,7 +220,8 @@ DEFERRED_ROWS: list[tuple[str, str]] = [
     ("Return the spawn-time floor as the peak", "B3 honest-peak (test_bash_ram_guard.py::TestEnvelope)"),
     ("Close the durable row on a RAM kill", "B7 (test_bash_ram_guard.py::TestDurableRowStaysOpen)"),
     ("Make the leaderless case drop the watch", "B13 / S8(f) (test_bash_ram_guard.py::TestRealBallooningTree::test_the_leaderless_tree_is_still_watched_and_killed)"),
-    ("Remove the P5a pgid-recycle check", "S8(g) (test_ram_guard_ladder.py::test_p5a_pgid_recycled_refused)"),
+    # ("Remove the P5a pgid-recycle check") — RETIRED with P5a (2026-11-12, §18.3):
+    # the predicate and its pin no longer exist; the recycle outcome is P5's.
     ("Add a 4th proc task", "P5 (test_proc_ram_guard.py::test_the_lane_creates_no_fourth_task)"),
     ("Fire the event per tick", "O1 (test_ram_guard_events.py::test_o1_a_live_loop_emits_exactly_one_event)"),
     ("Leak the registry entry", "B6/P6 (test_bash_ram_guard.py::TestReleaseOrder + test_proc_ram_guard.py::TestReleasePaths)"),

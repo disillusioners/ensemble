@@ -30,6 +30,7 @@ from daemon.services.ram_guard.verdict import (
     STATE_KILLED,
     STATE_OVERCOUNTED,
     STATE_REFUSED,
+    STATE_RELEASED,
     STATE_WATCHING,
 )
 from tests.unit.services.ram_guard_fixtures import (
@@ -388,6 +389,50 @@ def test_the_lane_kills_and_emits_exactly_once(tmp_path, kill_census):
     assert counters["ram_kills"] == 1
     assert counters["ram_events_emitted"] == 1
     assert counters["ram_events_dropped"] == 0
+
+
+def test_the_event_payload_carries_killed_on_a_release_path_kill(
+    tmp_path, kill_census, monkeypatch
+):
+    """§4.3.1 item 1 — the terminal verdict is PUBLISHED (``state=KILLED``)
+    BEFORE the release block.  On an ORDINARY (release-path) kill the
+    event payload MUST carry ``state="KILLED"``, never ``"RELEASED"``.
+
+    The drive: the tree DIES at the KILL ⇒ the P8 probe verifies death ⇒
+    ``group_empty=True`` ⇒ the release block runs.  A pin on a
+    tree-incomplete kill does NOT discriminate this ordering (no release
+    happens there) — this leg is the release-path shape.
+    """
+    emitted: list[tuple[str, dict]] = []
+
+    def _emitter(instance_id, payload):  # noqa: ANN001
+        emitted.append((instance_id, dict(payload)))
+        return True
+
+    guard, root = make_guard(tmp_path, emitter=_emitter)
+    record = register(guard)
+    guard._tick_once()
+    assert record.state == STATE_BREACHED
+
+    real_killpg = ladder_mod.os.killpg
+
+    def _dying_killpg(pgid, sig):  # noqa: ANN001
+        real_killpg(pgid, sig)  # the census double still records
+        if sig == 9:
+            kill_tree(root, [SYNTHETIC_PGID, SYNTHETIC_PGID + 100])
+
+    monkeypatch.setattr(ladder_mod.os, "killpg", _dying_killpg)
+
+    guard._lane_once()
+    # The leg MUST be the release-path shape: the record was released.
+    assert record.state == STATE_RELEASED, (
+        "the leg must drive the RELEASE-PATH shape (P8 verified ⇒ release)"
+    )
+    assert len(emitted) == 1, "exactly one event on the release-path kill"
+    assert emitted[0][1]["state"] == "KILLED", (
+        "the event payload must carry the terminal verdict (KILLED), "
+        "not the post-release state (RELEASED)"
+    )
 
 
 def test_a_raising_emitter_is_counted_as_dropped_and_never_raises(tmp_path, kill_census):
@@ -886,3 +931,269 @@ def test_non_colliding_register_stays_silent(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="daemon.services.ram_guard.guard"):
         assert register(guard) is not None
     assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+# ── Cycle-2 pin cluster — the fixes that landed WITHOUT discriminating pins ─
+
+
+def test_b29_jiffies_none_is_refused_watching_at_registration(tmp_path):
+    """B29/§18.5 — a record registered with ``start_time_jiffies=None``
+    has a STRUCTURALLY UNPROVABLE identity ⇒ REFUSED-watching AT
+    registration: one p5 count, no claim, no confirm, measure-only.
+    The deterministic-spin shape can never enter the pending set."""
+    guard, root = make_guard(tmp_path)
+    record = register(guard, start_time_jiffies=None)
+    assert record.state == STATE_REFUSED
+    assert record.reason == "refused:leader-unreadable"
+    assert record.claim_token is None
+    assert guard.counters_snapshot()["ram_kill_refusals_p5"] == 1
+    assert guard._pending == []
+    # Measure-only: a tick still samples it (the watch continues) but
+    # never claims.
+    guard._tick_once()
+    assert record.samples >= 1
+    assert record.claim_token is None
+    assert guard._pending == []
+
+
+def test_b29_transient_backoff_gates_the_reclaim(tmp_path):
+    """B29/§18.5 — a transiently refused episode re-arms with a BOUNDED
+    backoff: the record is NOT re-claimed for 5 ticks, then re-arms."""
+    guard, root = make_guard(tmp_path)
+    record = register(guard)
+    # Drive the transient refusal: the leader becomes UNREADABLE.
+    (root / str(SYNTHETIC_PGID) / "stat").unlink()
+    (root / str(SYNTHETIC_PGID) / "stat").mkdir()
+    guard._tick_once()
+    guard._lane_once()
+    assert record.state == STATE_WATCHING, "leader-unreadable is a TRANSIENT refusal"
+    assert record.transient_backoff == 5
+    assert guard._pending == []
+    # Restore the leader; the backoff still gates the re-claim.
+    (root / str(SYNTHETIC_PGID) / "stat").rmdir()
+    (root / str(SYNTHETIC_PGID) / "stat").write_text(
+        stat_line(FakeProc(pid=SYNTHETIC_PGID, pgrp=SYNTHETIC_PGID, ppid=1,
+                           starttime=LEADER_START)) + "\n"
+    )
+    for tick in range(5):
+        guard._tick_once()
+        assert guard._pending == [], f"tick {tick}: backoff must gate the re-claim"
+        assert record.transient_backoff == 5 - (tick + 1)
+    # The 6th tick re-arms (the breach is re-claimed).
+    guard._tick_once()
+    assert guard._pending != [], "after the backoff the breach re-arms"
+    assert record.claim_token is not None
+
+
+def test_b29_reserved_slot_ever_claimed_blocked_rookie_admitted(tmp_path):
+    """B29/§18.5 — the pending set RESERVES one slot for never-claimed
+    records: a previously-claimed veteran holds at most PENDING_MAX-1
+    slots.  The drive: a holder claim occupies one slot while the ROOKIE
+    (never claimed) is admitted at depth 1; then the re-armed VETERAN
+    (ever_claimed) is BLOCKED at the same depth."""
+    # The veteran and the holder are FAIR trees (PSS under the ceiling)
+    # so their claims resolve to OVERCOUNTED — alive, ever_claimed.
+    # The tree is built BEFORE the guard (no default-tree residue).
+    root = tmp_path / "proc"
+    build_tree(root, leader=True, members=0, pss_kb=500)  # fair: PSS < ceiling
+    holder_pid = SYNTHETIC_PGID + 800
+    write_proc_tree(root, [
+        FakeProc(pid=holder_pid, pgrp=holder_pid, ppid=1,
+                 starttime=LEADER_START + 800, rss_kb=1024, pss_kb=500),
+    ])
+    guard, _root = make_guard(tmp_path, root=root)
+    veteran = register(guard, tracking_id="veteran", pid=SYNTHETIC_PGID,
+                       pgid=SYNTHETIC_PGID)
+    holder = register(guard, tracking_id="holder", pid=holder_pid,
+                      pgid=holder_pid, start_time_jiffies=LEADER_START + 800)
+
+    guard._tick_once()
+    assert len(guard._pending) == 2, "both fair trees breached and claimed"
+    assert veteran.ever_claimed and holder.ever_claimed
+    # ONE lane pass: the FRONT claim (the veteran) resolves to
+    # OVERCOUNTED (alive); the holder stays queued.
+    guard._lane_once()
+    assert veteran.state == STATE_OVERCOUNTED
+    assert len(guard._pending) == 1, "the holder is still queued"
+
+    # The ROOKIE (never claimed) is admitted at pending depth 1 — the
+    # reserved slot gives it room.
+    rookie_pid = SYNTHETIC_PGID + 900
+    rookie = register(guard, tracking_id="rookie", pid=rookie_pid,
+                      pgid=rookie_pid, start_time_jiffies=LEADER_START + 900)
+    write_proc_tree(root, [
+        FakeProc(pid=rookie_pid, pgrp=rookie_pid, ppid=1,
+                 starttime=LEADER_START + 900),
+    ])
+    guard._tick_once()
+    assert rookie.claim_token is not None, (
+        "a never-claimed record is admitted at depth PENDING_MAX-1"
+    )
+    assert len(guard._pending) == RAM_GUARD_PENDING_MAX
+
+    # The holder's claim is serviced into OVERCOUNTED (alive).
+    guard._lane_once()
+    assert holder.state == STATE_OVERCOUNTED
+    assert len(guard._pending) == 1
+
+    # The veteran RE-BREACHES past the growth governor (its tree grows
+    # by ≥128 MiB over the last confirm) ⇒ it offers again — and is
+    # BLOCKED: an ever-claimed record may not take the reserved slot.
+    (root / str(SYNTHETIC_PGID) / "status").write_text(
+        "Name:\tveteran\nState:\tS\nVmRSS:\t140000 kB\nVmHWM:\t140000 kB\n"
+    )
+    guard._tick_once()
+    assert veteran.claim_token is None, (
+        "an ever-claimed veteran must NOT take the reserved slot at "
+        f"pending depth {len(guard._pending)} (>= PENDING_MAX-1)"
+    )
+    assert len(guard._pending) == 1
+
+
+def test_c3_lane_exception_releases_and_re_offers(tmp_path, monkeypatch):
+    """C3 — an exception inside ``_service_claim`` releases the claim and
+    RE-OFFERS the record with a fresh token: no permanent strand, the
+    kill re-arms."""
+    guard, root = make_guard(tmp_path)
+    record = register(guard)
+    guard._tick_once()
+    original_token = record.claim_token
+    assert original_token is not None
+    assert len(guard._pending) == 1
+
+    def _boom(tracking_id, token):
+        raise RuntimeError("lane boom")
+
+    monkeypatch.setattr(guard, "_service_claim", _boom)
+    with pytest.raises(RuntimeError):
+        guard._lane_once()
+    # The claim was RELEASED and RE-OFFERED with a FRESH token.
+    assert record.claim_token is not None
+    assert record.claim_token != original_token
+    assert guard._pending == [(TRACKING_ID, record.claim_token)]
+    # The kill re-arms: with the exception removed, the lane completes it.
+    monkeypatch.setattr(guard, "_service_claim",
+                        RamGuard._service_claim.__get__(guard))
+    guard._lane_once()
+    assert record.reason is not None and record.reason.startswith("killed:"), (
+        "the re-offered claim completed the KILL (no permanent strand)"
+    )
+    assert record.state in (STATE_KILLED, STATE_RELEASED)
+
+
+def test_c2_hidepid_unreadable_member_blocks_the_sweep_release(tmp_path):
+    """C2 — an UNREADABLE OBSERVED MEMBER makes emptiness unprovable:
+    the liveness sweep must NOT release the record (the safe direction).
+    A no-breach tree so the SWEEP (never a pending claim) governs."""
+    root = tmp_path / "proc"
+    build_tree(root, leader=True, members=0, rss_kb=128)
+    guard, _root = make_guard(tmp_path, root=root)
+    record = register(guard)
+    guard._tick_once()  # observes the member
+    assert record.members == (SYNTHETIC_PGID,)
+    assert record.claim_token is None
+    # hidepid shape: the member's stat becomes unreadable (a directory).
+    stat_path = root / str(SYNTHETIC_PGID) / "stat"
+    stat_path.unlink()
+    stat_path.mkdir()
+    guard._tick_once()
+    guard._liveness_sweep()
+    assert record.state != STATE_RELEASED, (
+        "an unreadable observed member ⇒ emptiness unprovable ⇒ NO release"
+    )
+    assert guard.read_verdict(TRACKING_ID) is record, (
+        "the record stays LIVE in the registry (watch continues)"
+    )
+
+
+def test_hidepid_foreign_unreadable_pids_never_poison_completeness(tmp_path):
+    """Leader ruling — scan-completeness is PGID-FILTERED: unreadable
+    FOREIGN pids from the whole-host scan are dropped and NEVER poison
+    the watched group's completeness.  On hidepid>0 hosts the guard
+    still releases its own empty trees."""
+    # A no-breach tree (rss under the ceiling) so the SWEEP governs the
+    # release — never a pending claim.
+    root = tmp_path / "proc"
+    build_tree(root, leader=True, members=0, rss_kb=128)
+    guard, _root = make_guard(tmp_path, root=root)
+    record = register(guard)
+    guard._tick_once()
+    assert record.claim_token is None, "the leg must be claim-free"
+    # The watched group empties; a FOREIGN pid (never observed as a member)
+    # goes unreadable.
+    kill_tree(root, [SYNTHETIC_PGID])
+    foreign = root / "7777"
+    foreign.mkdir()
+    (foreign / "stat").mkdir()  # unreadable FOREIGN pid
+    guard._tick_once()
+    guard._liveness_sweep()
+    assert record.state == STATE_RELEASED, (
+        "a foreign unreadable pid must not block the release of an empty watch"
+    )
+
+
+def test_unicode_blackout_raw_bytes_never_kill_the_scan(tmp_path):
+    """C5 — a raw-byte (non-UTF-8) ``/proc/<pid>/stat`` must degrade to a
+    per-pid UNREADABLE, never raise out of ``scan_proc`` (the pre-fix
+    UnicodeDecodeError blacked out the WHOLE tick's samples)."""
+    guard, root = make_guard(tmp_path)
+    record = register(guard)
+    bad = root / "6666"
+    bad.mkdir()
+    (bad / "stat").write_bytes(b"\xff\xfe\x00\x01garbage")
+    guard._tick_once()
+    assert record.samples >= 1, (
+        "the tick must SURVIVE a raw-byte stat (the sample is not dropped)"
+    )
+    from daemon.services.ram_guard.tree_reader import scan_proc
+    table = scan_proc(root)
+    assert 6666 in table.unreadable_pids
+
+
+def test_start_rollback_lane_start_failure_tears_down_and_reraises(
+    tmp_path, monkeypatch
+):
+    """C8 — a lane-thread start failure rolls the start back: ``_stop``
+    set, the tick thread joined, the exception RE-RAISED (no half-started
+    guard)."""
+    guard, _root = make_guard(tmp_path)
+    real_thread = guard_mod.threading.Thread
+    calls = {"n": 0}
+
+    class _BoomOnSecond(real_thread):
+        def start(self):  # noqa: D102
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("lane start boom")
+            return super().start()
+
+    monkeypatch.setattr(guard_mod.threading, "Thread", _BoomOnSecond)
+    with pytest.raises(RuntimeError, match="lane start boom"):
+        guard.start()
+    assert guard._stop.is_set(), "the stop flag must be set on rollback"
+    assert guard._tick_thread is not None
+    assert not guard._tick_thread.is_alive(), "the tick thread must be joined"
+
+
+def test_release_gate_incomplete_scan_refuses_the_release(tmp_path):
+    """P1 + leader ruling — ``release()`` gains the scan-completeness
+    gate: a record whose LAST sample ran on an incomplete scan (an
+    unreadable OBSERVED member) is not releasable without ``force``,
+    even at member count 0 (emptiness unprovable)."""
+    root = tmp_path / "proc"
+    build_tree(root, leader=True, members=0, rss_kb=128)  # no breach, one member
+    guard, _root = make_guard(tmp_path, root=root)
+    record = register(guard)
+    guard._tick_once()  # observes the member
+    assert record.members == (SYNTHETIC_PGID,)
+    assert record.claim_token is None
+    stat_path = root / str(SYNTHETIC_PGID) / "stat"
+    stat_path.unlink()
+    stat_path.mkdir()  # the OBSERVED member goes unreadable
+    guard._tick_once()
+    assert record.group_scan_complete is False
+    assert record.group_member_count == 0
+    assert guard.release(TRACKING_ID) is False, (
+        "an incomplete-scan record is not releasable without force"
+    )
+    assert guard.release(TRACKING_ID, force=True) is True

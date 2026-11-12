@@ -491,6 +491,50 @@ def test_p6_lane_bash_foreign_proc_stamp_proceeds_and_counts(tmp_path, kill_cens
     assert calls
 
 
+def test_p6_uniformity_mixed_stamps_is_not_verified(tmp_path, kill_census):
+    """§18.9 — P6 is a TWO-PASS aggregation: VERIFIED requires ≥1 match
+    AND **all stamp-bearing members matching**.  One t-1 member + one
+    SOMETHING-ELSE member ⇒ NOT verified (the kill proceeds under Ruling
+    B, but ``ownership_unverified++`` — the first-match shortcut is the
+    uniformity violation the council flagged)."""
+    root = write_proc_tree(
+        tmp_path / "proc",
+        [
+            FakeProc(
+                pid=SYNTHETIC_PGID,
+                pgrp=SYNTHETIC_PGID,
+                ppid=1,
+                starttime=LEADER_START,
+                environ=b"ENSEMBLE_BASH_TRACKING_ID=t-1\x00",
+            ),
+            FakeProc(
+                pid=SYNTHETIC_PGID + 100,
+                pgrp=SYNTHETIC_PGID,
+                ppid=SYNTHETIC_PGID,
+                starttime=LEADER_START + 5,
+                environ=b"ENSEMBLE_BASH_TRACKING_ID=SOMETHING-ELSE\x00",
+            ),
+        ],
+    )
+    calls, _sleeps = kill_census
+    unverified: list[int] = []
+    status, reason = ram_kill_ladder(
+        SYNTHETIC_PGID,
+        LEADER_START,
+        0.25,
+        proc_root=root,
+        captured_pgid=SYNTHETIC_PGID,
+        tracking_id="t-1",
+        on_ownership_unverified=lambda: unverified.append(1),
+    )
+    assert status == "killed", (status, reason)
+    assert unverified == [1], (
+        "a mixed-stamp member set is NOT verified — the first-match "
+        "shortcut must not mask the SOMETHING-ELSE member"
+    )
+    assert calls
+
+
 def test_p6_lane_proc_own_stamp_matching_verifies(tmp_path, kill_census):
     root = build_tree(
         tmp_path / "proc",
@@ -797,3 +841,84 @@ def test_s16_ladder_runs_from_a_bare_thread(tmp_path, kill_census):
     thread.join(timeout=10)
     assert not thread.is_alive()
     assert result and result[0][0] == "killed"
+
+
+# ── Cycle-2 pins — the gate order and the P7 scoping ───────────────────────
+
+
+def test_gate_order_recycled_pgid_wins_over_foreign_stamp(tmp_path, kill_fence):
+    """The GATE-ORDER pin: P5 (the primary identity) runs BEFORE P6 — a
+    recycled pgid carrying a FOREIGN stamp refuses ``pgid-recycled`` (the
+    primary identity's verdict), never anything else.  The order hole
+    (a stamp check masking the identity verdict) must not reopen."""
+    root = write_proc_tree(
+        tmp_path / "proc",
+        [
+            FakeProc(
+                pid=SYNTHETIC_PGID,
+                pgrp=SYNTHETIC_PGID,
+                ppid=1,
+                starttime=LEADER_START + 999,  # RECYCLED
+                environ=b"ENSEMBLE_PROC_TRACKING_ID=t-1\x00",  # foreign stamp
+            ),
+        ],
+    )
+    unverified: list[int] = []
+    status, reason = ram_kill_ladder(
+        SYNTHETIC_PGID,
+        LEADER_START,
+        0.25,
+        proc_root=root,
+        captured_pgid=SYNTHETIC_PGID,
+        tracking_id="t-1",
+        lane="bash",
+        on_ownership_unverified=lambda: unverified.append(1),
+    )
+    assert (status, reason) == ("refused", REASON_PGID_RECYCLED), (
+        "the primary identity gate (P5) outranks the advisory stamp check"
+    )
+    assert unverified == [], (
+        "P5's refusal SHORT-CIRCUITS before P6: the advisory check never "
+        "runs on a primary-identity refusal (the order hole would bump it)"
+    )
+
+
+def test_p7_live_members_kill_even_with_unreadable_foreign_pids(tmp_path, kill_census):
+    """Leader ruling — P7 is pgid-filtered: unreadable pids only make
+    EMPTINESS unprovable.  With LIVE group members the kill proceeds
+    even when foreign pids are unreadable (hidepid hosts must still
+    kill their own trees)."""
+    root = write_proc_tree(
+        tmp_path / "proc",
+        [
+            FakeProc(pid=SYNTHETIC_PGID, pgrp=SYNTHETIC_PGID, ppid=1,
+                     starttime=LEADER_START),
+            FakeProc(pid=SYNTHETIC_PGID + 100, pgrp=SYNTHETIC_PGID,
+                     ppid=SYNTHETIC_PGID, starttime=LEADER_START + 5),
+        ],
+    )
+    # A foreign unreadable pid.
+    foreign = root / "7777"
+    foreign.mkdir()
+    (foreign / "stat").mkdir()
+    calls, _sleeps = kill_census
+    status, reason = ram_kill_ladder(
+        SYNTHETIC_PGID, LEADER_START, 0.25, proc_root=root,
+        captured_pgid=SYNTHETIC_PGID,
+    )
+    assert status == "killed", (status, reason)
+    assert calls, "live group members ⇒ the kill fires despite foreign unreadables"
+
+
+def test_p7_zero_members_with_unreadable_is_group_unknown(tmp_path, kill_fence):
+    """C2 at P7 — member count 0 with unreadable pids ⇒ emptiness is
+    UNPROVABLE ⇒ ``refused:group-unknown`` (never already-dead)."""
+    root = write_proc_tree(tmp_path / "proc", [])
+    foreign = root / "7777"
+    foreign.mkdir()
+    (foreign / "stat").mkdir()
+    status, reason = ram_kill_ladder(
+        SYNTHETIC_PGID, LEADER_START, 0.25, proc_root=root,
+        captured_pgid=SYNTHETIC_PGID,
+    )
+    assert (status, reason) == ("refused", REASON_GROUP_UNKNOWN)

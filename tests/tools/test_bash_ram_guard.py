@@ -1410,23 +1410,104 @@ class TestOwnershipStampForgery:
     async def test_a_hostile_foreign_stamp_does_not_disarm_the_kill(
         self, real_guard, tmp_path
     ):
-        _require_headroom(PLANNED_BYTES * 4)
-        script = _balloon_script(tmp_path)
-        pidfile = tmp_path / "pids.txt"
-        out = await bash_module.bash.coroutine(
-            command=[
-                "python3",
-                str(script),
-                str(CHILD_BYTES),
-                str(CHILD_COUNT),
-                str(pidfile),
-            ],
-            instance_id=INSTANCE,
-            env={"ENSEMBLE_PROC_TRACKING_ID": "forged"},
+        try:
+            _require_headroom(PLANNED_BYTES * 4)
+            script = _balloon_script(tmp_path)
+            pidfile = tmp_path / "pids.txt"
+            out = await bash_module.bash.coroutine(
+                command=[
+                    "python3",
+                    str(script),
+                    str(CHILD_BYTES),
+                    str(CHILD_COUNT),
+                    str(pidfile),
+                ],
+                instance_id=INSTANCE,
+                env={"ENSEMBLE_PROC_TRACKING_ID": "forged"},
+            )
+            payload = json.loads(out)
+            assert payload["code"] == "ram_limit_exceeded"
+            assert payload["reason"].startswith("killed:")
+        finally:
+            for _pid in _read_pids(tmp_path / "pids.txt"):
+                try:
+                    import os as _os, signal as _signal
+                    _os.kill(_pid, _signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+
+class TestStagedGrowerStrictUnderReport:
+    """B3/C9 strictness — a STAGED grower (chunks + sleeps) spans ≥2 poll
+    intervals ⇒ the under-report bound is STRICTLY positive, the peak
+    reaches the planned magnitude, and the watch provably sampled ≥2."""
+
+    @pytest.mark.timeout(90)
+    async def test_the_under_report_bound_is_strictly_positive_on_a_staged_grower(
+        self, real_guard, tmp_path
+    ):
+        staged_mib = 75          # == the ceiling: the kill lands AT completion
+        chunk_mib = 15           # 5 stages ⇒ the ramp spans ~750 ms
+        pause_s = 0.15
+        planned_bytes = staged_mib * 1024 * 1024
+        _require_headroom(planned_bytes * 4)
+        script = tmp_path / "staged.py"
+        script.write_text(
+            "import os, sys, time\n"
+            "size = int(sys.argv[1]); chunk = int(sys.argv[2])\n"
+            "pause = float(sys.argv[3]); pidfile = sys.argv[4]\n"
+            "pid = os.fork()\n"
+            "if pid == 0:\n"
+            "    fd = os.open(pidfile, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)\n"
+            "    os.write(fd, (str(os.getpid()) + '\\n').encode()); os.close(fd)\n"
+            "    bufs = []\n"
+            "    for _ in range(0, size, chunk):\n"
+            "        b = bytearray(chunk)\n"
+            "        for off in range(0, chunk, 4096):\n"
+            "            b[off] = 1\n"
+            "        bufs.append(b)\n"
+            "        time.sleep(pause)\n"
+            "    time.sleep(30)\n"
+            "    os._exit(0)\n"
+            "time.sleep(30)\n",
+            encoding="utf-8",
         )
-        payload = json.loads(out)
-        assert payload["code"] == "ram_limit_exceeded"
-        assert payload["reason"].startswith("killed:")
+        pidfile = tmp_path / "pids.txt"
+        try:
+            out = await bash_module.bash.coroutine(
+                command=[
+                    "python3", str(script),
+                    str(planned_bytes), str(chunk_mib * 1024 * 1024),
+                    str(pause_s), str(pidfile),
+                ],
+                instance_id=INSTANCE,
+            )
+            payload = json.loads(out)
+            assert payload["code"] == "ram_limit_exceeded"
+            assert payload["reason"].startswith("killed:")
+            # The peak-pin gates on SAMPLES ≥ 2 — staging guarantees it.
+            watched = (
+                list(real_guard._released.values())
+                + list(real_guard._registry.values())
+            )
+            max_samples = max((r.samples for r in watched), default=0)
+            assert max_samples >= 2, (
+                f"the staged grower must span ≥2 polls (got samples={max_samples})"
+            )
+            # The peak reaches the planned magnitude (the inclusive
+            # predicate fires AT completion).
+            assert payload["observed_peak_bytes"] >= int(0.9 * planned_bytes)
+            # STRICTLY positive — the ramp guarantees a positive delta.
+            assert payload["under_report_bound_bytes"] > 0, (
+                f"≥2 samples across a staged ramp ⇒ bound must be > 0 "
+                f"(samples={max_samples}, bound={payload['under_report_bound_bytes']})"
+            )
+        finally:
+            for _pid in _read_pids(pidfile):
+                try:
+                    import os as _os, signal as _signal
+                    _os.kill(_pid, _signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
 
 
 class TestSwitchOffWouldBreach:
@@ -1708,8 +1789,10 @@ class TestRealBallooningTree:
             # planned magnitude (a spawn-time floor would be far below).
             assert payload["observed_peak_bytes"] >= int(0.9 * PLANNED_BYTES)
             # The under-report bound is the substrate's own MAX POSITIVE
-            # sample-to-sample delta — strictly positive on a real growing
-            # tree (the bash lane only publishes it).
+            # sample-to-sample delta.  THIS balloon allocates faster than
+            # one poll, so the bound may be legitimately 0 — the STRICT
+            # pin lives on the staged grower (see
+            # test_the_under_report_bound_is_strictly_positive_on_a_staged_grower).
             assert isinstance(payload["under_report_bound_bytes"], int)
             assert payload["under_report_bound_bytes"] >= 0
             # The envelope carries BOTH the configured ceiling and the
