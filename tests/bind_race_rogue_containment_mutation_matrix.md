@@ -24,7 +24,7 @@ b3d31acd83738f816ac3f3ab68a3c57b24801e89a1b51e9befb31fae44cae532  daemon/tools/s
 27cbeb9ecf63dfa4e91d620919721f3552a0f17516693f90630d82d2802ecc6e  daemon/api.py
 6673c46b535e091476ad94f44ecbcff3e10365d7f503dc623def489b9375c224  daemon/ensemble_config.py
 a49c7abcaf560a2da1e2d7a2e0b75c9889561709e09480579b76581cdcb41edd  daemon/tools/bash.py
-b7fd92cc58e12b318499c2d27badf9632422adecb80e5e792973a73a1ca15769  daemon/tools/proc_tools.py
+2be680f42a130d9029c5021e9244bcb39eeff5059af6cb7732250ec80fc69544  daemon/tools/proc_tools.py
 036fa3f2ede7f6454c9fc13b06678a7ba88f2f8cc3b82c0162221f56b51fbe40  daemon/services/metrics_listener.py
 ```
 
@@ -56,6 +56,12 @@ Causal notes:
   overlay assertion in both files.
 * B-M8 is the reviewer's exact regression shape (reverting the proc_run
   scrub) — it now reddens two pins, including a REAL spawned-child env probe.
+
+**N9 (post-matrix):** the proc_run overlay-guard import fallback was made
+loud (ERROR on every affected call) and pinned by
+`test_proc_run_guard_import_failure_is_loud_fail_open`; the proc_tools digest
+above is the final-tip value (the N9 edit landed after the mutant run and does
+not touch any mutated seam).
 
 ## Non-vacuity control
 
