@@ -313,9 +313,14 @@ class ServiceToolManager:
 
         # ── F8: synchronous spawn failure ────────────────────────
         try:
-            pid, start_time = await asyncio.to_thread(
-                spawner_spawn, argv, log_path, cwd, extra_env
-            )
+            if extra_env is None:
+                pid, start_time = await asyncio.to_thread(
+                    spawner_spawn, argv, log_path, cwd
+                )
+            else:
+                pid, start_time = await asyncio.to_thread(
+                    spawner_spawn, argv, log_path, cwd, extra_env
+                )
         except OSError as exc:
             # Child never existed; nothing to kill. Write an EXITED
             # row immediately so the slot is released and

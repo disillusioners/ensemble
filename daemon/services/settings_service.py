@@ -85,7 +85,7 @@ knobs (``limits.metrics_enabled`` / ``limits.metrics_listener_port`` /
 v1.4 (2026-11-09, decision-module P1) adds the THREE decision switches
 (``decision_global_enabled`` / ``decision_seam_snapshot_l3_selection_enabled``
 / ``decision_seam_snapshot_l3_selection_stage``) — the registry now
-carries NINETEEN entries. ``len(MANAGED_KEYS)`` is
+carries EIGHTEEN entries (rogue-containment rider (d) retired limits.metrics_listener_port). ``len(MANAGED_KEYS)`` is
 the authoritative census; this prose is history, not truth.
 """
 
@@ -217,7 +217,7 @@ class ManagedKeySpec:
 #: ``limits.manager_pool_size`` (devops incident fix item #7), the
 #: SEVEN metrics-collection knobs (metrics-collection P0, 2026-10-29)
 #: and the THREE decision-module switches (decision-module P1,
-#: 2026-11-09) — the registry now carries NINETEEN entries. Adding keys
+#: 2026-11-09) — the registry now carries EIGHTEEN entries (rogue-containment rider (d) retired limits.metrics_listener_port). Adding keys
 #: later is a registry entry + nothing else (the ladder, CRUD, API and
 #: FE render generically off the registry); ``len(MANAGED_KEYS)`` is
 #: the authoritative census.

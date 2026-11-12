@@ -1,4 +1,6 @@
-"""P0 T5 — the SEVEN metrics managed keys (plan §5 / catalog §0.8).
+"""P0 T5 — the SIX metrics managed keys (plan §5 / catalog §0.8).
+
+rogue-containment rider (d) retired limits.metrics_listener_port (derived now).
 
 The registry is the ONE truth and it must mirror the backing pydantic
 Field EXACTLY: the default, the bounds and the value type. The bounds
@@ -8,7 +10,6 @@ validation truth — Ruling 1).
 The restart column is the plan §5 table verbatim:
 
 * ``limits.metrics_enabled`` — no restart (per-request);
-* ``limits.metrics_listener_port`` — restart;
 * ``limits.metrics_scrape_interval_hint_s`` — no restart (advisory);
 * ``limits.metrics_census_interval_s`` — restart;
 * ``limits.metrics_sampler_interval_s`` — restart;
@@ -29,7 +30,6 @@ from daemon.services.settings_service import (
 
 METRICS_KEYS = (
     "limits.metrics_enabled",
-    "limits.metrics_listener_port",
     "limits.metrics_scrape_interval_hint_s",
     "limits.metrics_census_interval_s",
     "limits.metrics_sampler_interval_s",
@@ -40,13 +40,17 @@ METRICS_KEYS = (
 #: The plan §5 restart column.
 RESTART_COLUMN = {
     "limits.metrics_enabled": False,
-    "limits.metrics_listener_port": True,
     "limits.metrics_scrape_interval_hint_s": False,
     "limits.metrics_census_interval_s": True,
     "limits.metrics_sampler_interval_s": True,
     "limits.metrics_textfile_dir": True,
     "limits.metrics_cardinality_cap": False,
 }
+
+
+def test_the_retired_listener_port_key_is_absent():
+    """rogue-containment rider (d) retired limits.metrics_listener_port."""
+    assert "limits.metrics_listener_port" not in MANAGED_KEYS
 
 
 @pytest.mark.parametrize("key", METRICS_KEYS)
@@ -110,8 +114,6 @@ def test_the_env_var_mirrors_the_limits_env_prefix():
 @pytest.mark.parametrize(
     "key,value",
     [
-        ("limits.metrics_listener_port", 1023),
-        ("limits.metrics_listener_port", 65536),
         ("limits.metrics_scrape_interval_hint_s", 4),
         ("limits.metrics_scrape_interval_hint_s", 301),
         ("limits.metrics_census_interval_s", 14),
@@ -135,9 +137,6 @@ def test_out_of_bounds_values_are_rejected_at_write_time(key, value):
     [
         ("limits.metrics_enabled", True),
         ("limits.metrics_enabled", False),
-        ("limits.metrics_listener_port", 1024),
-        ("limits.metrics_listener_port", 65535),
-        ("limits.metrics_listener_port", 9798),
         ("limits.metrics_scrape_interval_hint_s", 5),
         ("limits.metrics_scrape_interval_hint_s", 300),
         ("limits.metrics_census_interval_s", 15),
