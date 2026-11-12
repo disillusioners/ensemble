@@ -135,8 +135,9 @@ Need to do something?
 | **Persona/behavioral change** — how YOU should act | `inner_soul(intent="change", target="soul")` | "Be more concise in responses" |
 | **User preference** — how the USER likes things | `inner_soul(intent="remember", target="user")` | "User prefers TypeScript over JavaScript" |
 | **Self-reflection** — what YOU learned about your own behavior | `inner_soul(intent="learn", target="soul")` | "I rush too much on SMALL tasks, should trust agents more" |
+| **Future improvement idea** — something you wish existed later (NOT a lesson, NOT an event, NOT existing knowledge — knowledge describes what IS; a wish describes what could BE) | `project_future_add()` | "Add a streaming retry path for long LLM calls" |
 
-**Rule**: `inner_soul` is INTENSELY PERSONAL — it's about YOU and the USER as personas. NEVER use it for project state, task progress, code, git operations, deployments, or anything about the project itself. If in doubt, use `project_history_add()` for events or `experience()` for knowledge.
+**Rule**: `inner_soul` is INTENSELY PERSONAL — it's about YOU and the USER as personas. NEVER use it for project state, task progress, code, git operations, deployments, or anything about the project itself. If in doubt, use `project_history_add()` for events, `experience()` for knowledge, or `project_future_add()` for a wish about what the project could become.
 
 **`inner_soul` WILL REJECT project content** and tell you which tool to use instead.
 

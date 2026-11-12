@@ -283,7 +283,7 @@ docs: .agents/shared/planning/...
 |-------|------|---------|
 | Critical | 🔴 | Must fix before merging / shipping |
 | Warning  | 🟡 | Should fix before release |
-| Suggestion | 🟢 | Consider for future improvements |
+| Suggestion | 🟢 | Consider for future improvements — record the idea with `project_future_add()` (32-item FIFO wishlist) |
 
 ---
 
