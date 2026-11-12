@@ -359,6 +359,61 @@ class TestRangedGet:
         assert resp.status_code == 416
         assert resp.headers["content-range"] == f"bytes */{size}"
 
+    @pytest.mark.parametrize(
+        "range_value", ["bytes=9999-,9998-", "bytes=0-99,99999-"]
+    )
+    def test_multi_range_unsatisfiable_content_range_token(
+        self, media_root_dir, range_value
+    ):
+        """RFC 7233 §4.4: the 416 MUST carry ``bytes */<size>``.
+
+        REGRESSION PIN for the multi-range hole. The router's
+        pre-emption used to match only a SINGLE ``^bytes=(\\d*)-(\\d*)$``
+        form; a comma list missed the regex, fell through to
+        ``FileResponse``, and Starlette's ``RangeNotSatisfiable``
+        handler answered ``Content-Range: */<size>`` — WITHOUT the
+        ``bytes `` token. The pre-flight now walks every part of the
+        list.
+
+        Mutation that flips this RED: restore the single-range-only
+        match (``re.match(r"^bytes=(\\d*)-(\\d*)$", value)``) in
+        ``_media_preflight`` — both ranges then fall through to
+        Starlette and the header asserts ``'*/1070' != 'bytes */1070'``.
+        """
+        c, data, size, url = self._ctx(media_root_dir)
+        resp = c.get(url, headers={"Range": range_value})
+        assert resp.status_code == 416
+        assert resp.headers["content-range"] == f"bytes */{size}"
+        assert resp.headers["content-length"] == "0"
+
+    def test_multi_range_partially_malformed_defers_to_starlette(
+        self, media_root_dir
+    ):
+        """An unparsable part is NOT ours to judge — defer to Starlette.
+
+        ``garbage`` is not a byte-range part, so ``_media_preflight``
+        returns ``None`` (it only answers PARSABLE-but-unsatisfiable
+        ranges) and Starlette's ``_parse_ranges`` drops the offending
+        part, leaving the single valid ``0-99`` → 206.
+
+        (Named ``..._defers_to_400`` in the original brief, which
+        expected a 400; Starlette 0.52.1 IGNORES unparsable parts
+        rather than rejecting the header, so the truthful name is
+        kept here. A header whose UNIT is wrong — ``items=0-5`` — is
+        the shape that yields Starlette's 400, pinned by
+        ``test_malformed_units``.)
+
+        Mutation that flips this RED: make the helper treat a
+        non-matching part as unsatisfiable (``return`` the 416
+        instead of ``None`` at the ``match is None`` branch) — the
+        response becomes 416 and this assertion fails.
+        """
+        c, data, size, url = self._ctx(media_root_dir)
+        resp = c.get(url, headers={"Range": "bytes=0-99,garbage"})
+        assert resp.status_code == 206
+        assert resp.headers["content-range"] == f"bytes 0-99/{size}"
+        assert resp.content == data[0:100]
+
     def test_multi_range_two(self, media_root_dir):
         c, data, size, url = self._ctx(media_root_dir)
         resp = c.get(url, headers={"Range": "bytes=0-1,4-5"})

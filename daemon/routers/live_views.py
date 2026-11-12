@@ -113,6 +113,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -528,6 +529,117 @@ def _fd_read(path: "os.PathLike[str] | str", max_bytes: int) -> bytes | None:
             return b"".join(chunks)
         except OSError:
             return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+# One ``Range`` part, byte-unit form: ``<start>-<end>``, ``<start>-``,
+# ``-<suffix>``. Anything else is NOT ours to interpret — the media
+# pre-flight defers to Starlette (which answers 400 or ignores the
+# part), so the router never guesses a range it cannot represent.
+_RANGE_PART_PATTERN = re.compile(r"^(\d*)-(\d*)$")
+
+
+def _media_preflight(
+    request: Request,
+    resolved: "ResolvedTarget",
+    max_bytes: int,
+) -> Response | None:
+    """Pre-flight the media lane: TOCTOU open, size cap, 416.
+
+    Runs BEFORE any byte is emitted and BEFORE ``FileResponse`` gets
+    the request. Returns a ``Response`` when the request must be
+    answered here (uniform 404, 413 over-cap, 416 unsatisfiable
+    range); returns ``None`` when the caller should stream the file
+    via ``FileResponse`` (which owns the 200 / 206 / 400 shapes).
+
+    TOCTOU (REWORK 2026-10-07, M4): the file is opened with
+    ``O_NOFOLLOW`` — a final-component symlink swap fails at OPEN
+    time (``ELOOP``) — and ``fstat`` after the open reports the
+    CURRENT size, which is the size both the cap check and the
+    ``Content-Range`` are computed from. The fd is closed on every
+    path.
+
+    416 semantics (RFC 7233 §4.4): an unsatisfiable range MUST be
+    answered with ``Content-Range: bytes */<complete-length>`` — note
+    the ``bytes `` token. Starlette's own ``RangeNotSatisfiable``
+    handler emits ``Content-Range: */<size>``, which OMITS that
+    token; that is why this pre-emption exists at all. It covers
+    comma-separated MULTI-range requests as well as single-range
+    ones, so an unsatisfiable part anywhere in the list gets the
+    compliant header instead of falling through to Starlette.
+
+    A part is unsatisfiable when it is ``"-"`` (no positions), a
+    zero/negative suffix (``-0``), a start at or past EOF, or an
+    end before its start. Parsable-but-unsatisfiable is the ONLY
+    case answered here: a header with an unparsable part, or a
+    non-``bytes`` unit, returns ``None`` so Starlette keeps its
+    400 / ignore-part behaviour unchanged.
+    """
+    try:
+        fd = os.open(
+            os.fspath(resolved.on_disk_path),
+            os.O_RDONLY | os.O_NOFOLLOW,
+        )
+    except OSError:
+        return _uniform_404(request)
+    try:
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return _uniform_404(request)
+        size = st.st_size
+        if size > max_bytes:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": "file too large",
+                    "reason": "exceeds media serve cap",
+                    "size_bytes": size,
+                    "max_bytes": max_bytes,
+                },
+                headers=_HARDENING_HEADERS,
+            )
+        rng = request.headers.get("range")
+        if rng is None:
+            return None
+        value = rng.strip()
+        if value[:6].lower() != "bytes=":
+            # Non-bytes unit / no ``=`` — Starlette's 400 path.
+            return None
+        for part in value[6:].split(","):
+            part = part.strip()
+            if not part:
+                continue
+            match = _RANGE_PART_PATTERN.match(part)
+            if match is None:
+                # Not a byte-range part we can interpret — defer.
+                return None
+            first, last = match.group(1), match.group(2)
+            if first == "" and last == "":
+                unsatisfiable = True
+            elif first == "":
+                # Suffix form ``bytes=-N``: N must be positive.
+                unsatisfiable = int(last) <= 0
+            else:
+                start = int(first)
+                unsatisfiable = start >= size or (
+                    last != "" and int(last) < start
+                )
+            if unsatisfiable:
+                return Response(
+                    status_code=416,
+                    headers={
+                        **_HARDENING_HEADERS,
+                        "Content-Range": f"bytes */{size}",
+                        "Content-Length": "0",
+                    },
+                    media_type="text/plain; charset=utf-8",
+                )
+        return None
     finally:
         try:
             os.close(fd)
@@ -1794,83 +1906,19 @@ def _serve_resolved_target(
     )
 
     # Media lane (D3): Range-capable, streamed via FileResponse
-    # (64 KiB chunks). Pre-flight fd open + fstat enforces the
-    # cap and refuses symlink swaps before any byte is emitted.
+    # (64 KiB chunks). ``_media_preflight`` owns the fd open +
+    # fstat cap check + the RFC-7233 416 pre-emption; a ``None``
+    # result means "stream it" (Starlette owns 200 / 206 / 400).
     if is_media_extension(_ext_for(rel_path)):
         service = _resolve_service(request)
-        max_bytes = service.max_media_bytes if service is not None else 2 * 1024 * 1024 * 1024
-        try:
-            fd = os.open(os.fspath(resolved.on_disk_path), os.O_RDONLY | os.O_NOFOLLOW)
-        except OSError:
-            return _uniform_404(request)
-        try:
-            try:
-                st = os.fstat(fd)
-            except OSError:
-                return _uniform_404(request)
-            if st.st_size > max_bytes:
-                return JSONResponse(
-                    status_code=413,
-                    content={
-                        "error": "file too large",
-                        "reason": "exceeds media serve cap",
-                        "size_bytes": st.st_size,
-                        "max_bytes": max_bytes,
-                    },
-                    headers=_HARDENING_HEADERS,
-                )
-            # Unsatisfiable-range pre-emption: emit standards-
-            # compliant "bytes */size" (Starlette emits "*/size").
-            # Only the common unsatisfiable single-range forms are
-            # pre-empted here; other ranges fall through to
-            # FileResponse.
-            import re as _re
-            rng = request.headers.get("range")
-            if rng:
-                m = _re.match(r"^bytes=(\d*)-(\d*)$", rng.strip())
-                if m:
-                    a, b = m.group(1), m.group(2)
-                    size = st.st_size
-                    unsat = False
-                    if a == "" and b == "":
-                        unsat = True
-                    elif a == "":
-                        # suffix bytes=-N
-                        try:
-                            n = int(b)
-                        except ValueError:
-                            n = 0
-                        if n <= 0:
-                            unsat = True
-                    else:
-                        try:
-                            start = int(a)
-                        except ValueError:
-                            start = size
-                        if start >= size:
-                            unsat = True
-                        if b != "":
-                            try:
-                                end = int(b)
-                            except ValueError:
-                                end = start
-                            if end < start:
-                                unsat = True
-                    if unsat:
-                        return Response(
-                            status_code=416,
-                            headers={
-                                **_HARDENING_HEADERS,
-                                "Content-Range": f"bytes */{size}",
-                                "Content-Length": "0",
-                            },
-                            media_type="text/plain; charset=utf-8",
-                        )
-        finally:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+        max_bytes = (
+            service.max_media_bytes
+            if service is not None
+            else 2 * 1024 * 1024 * 1024
+        )
+        resp = _media_preflight(request, resolved, max_bytes)
+        if resp is not None:
+            return resp
 
         from starlette.responses import FileResponse
 
@@ -3259,74 +3307,18 @@ def build_router() -> APIRouter:
 
         if is_media_extension(_ext_for2(rel_path)):
             # Media lane (D3): Range-capable via FileResponse.
+            # ``_media_preflight`` owns the fd open + fstat cap
+            # check + the RFC-7233 416 pre-emption (the SAME
+            # helper the public lane uses — no second copy).
             service = _resolve_service(request)
-            max_bytes = service.max_media_bytes if service is not None else 2 * 1024 * 1024 * 1024
-            try:
-                fd = os.open(os.fspath(resolved.on_disk_path), os.O_RDONLY | os.O_NOFOLLOW)
-            except OSError:
-                return _uniform_404(request)
-            try:
-                try:
-                    st = os.fstat(fd)
-                except OSError:
-                    return _uniform_404(request)
-                if st.st_size > max_bytes:
-                    return JSONResponse(
-                        status_code=413,
-                        content={
-                            "error": "file too large",
-                            "reason": "exceeds media serve cap",
-                            "size_bytes": st.st_size,
-                            "max_bytes": max_bytes,
-                        },
-                        headers=_HARDENING_HEADERS,
-                    )
-                import re as _re2
-                rng = request.headers.get("range")
-                if rng:
-                    m = _re2.match(r"^bytes=(\d*)-(\d*)$", rng.strip())
-                    if m:
-                        a, b = m.group(1), m.group(2)
-                        size = st.st_size
-                        unsat = False
-                        if a == "" and b == "":
-                            unsat = True
-                        elif a == "":
-                            try:
-                                n = int(b)
-                            except ValueError:
-                                n = 0
-                            if n <= 0:
-                                unsat = True
-                        else:
-                            try:
-                                start = int(a)
-                            except ValueError:
-                                start = size
-                            if start >= size:
-                                unsat = True
-                            if b != "":
-                                try:
-                                    end = int(b)
-                                except ValueError:
-                                    end = start
-                                if end < start:
-                                    unsat = True
-                        if unsat:
-                            return Response(
-                                status_code=416,
-                                headers={
-                                    **_HARDENING_HEADERS,
-                                    "Content-Range": f"bytes */{size}",
-                                    "Content-Length": "0",
-                                },
-                                media_type="text/plain; charset=utf-8",
-                            )
-            finally:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
+            max_bytes = (
+                service.max_media_bytes
+                if service is not None
+                else 2 * 1024 * 1024 * 1024
+            )
+            resp = _media_preflight(request, resolved, max_bytes)
+            if resp is not None:
+                return resp
             from starlette.responses import FileResponse
 
             return FileResponse(
