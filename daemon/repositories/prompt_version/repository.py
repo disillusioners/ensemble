@@ -1818,9 +1818,18 @@ class PromptVersionRepository:
         Keys exactly as ruled; ``reject_reason`` is added by
         ``reject_assent`` (top-level, ≤500 chars). The raw token appears
         NOWHERE — ``token_fingerprint`` is ``sha256(token)[:12]``.
+
+        **Phase 1.5 — one ADDITIVE key (prompt-assent-channels F-15).** A
+        decision taken in a DESIGNATED CHANNEL also records
+        ``map_digest`` — the 12-hex content-free fingerprint of the
+        operator's designation map AS IN FORCE AT DECISION TIME — so the
+        queryable ledger names the map behind the decision (D-15 control
+        (b) / AC14). A DM decision records NO ``map_digest`` at all: the DM
+        path never reads that configuration (``INVARIANT-DM``). This is ONE
+        additive JSON key — no schema change, no column, no migration.
         """
         ident = attestation.human_identity
-        return {
+        provenance = {
             "approval_path": "chat-assent",
             "relay_agent": attestation.relay_agent,
             "relay_instance_id": attestation.relay_instance_id,
@@ -1839,6 +1848,33 @@ class PromptVersionRepository:
             "token_fingerprint": attestation.token_fingerprint,
             "render_sha256": attestation.render_sha256,
         }
+        # F-15 (ADDITIVE-ONLY — ONE JSON key): a decision taken from a
+        # GUILD context names the designation map in force at decision
+        # time. ``ident.is_dm is False`` is the channel shape by
+        # construction (the mint gate admits only a proven 1:1 DM or a
+        # designated channel), and a DM decision adds NOTHING
+        # (INVARIANT-DM: the DM path never reads this configuration).
+        #
+        # The read is a DIRECT environment read through P1's ONE constant
+        # (no second literal — the single-home pin covers the name) because
+        # the payload is assembled here, downstream of the attestation, and
+        # the attestation type is deliberately NOT widened (no field may be
+        # smuggled in by a caller). An INVALID map contributes NO key —
+        # ``_assent_audit_provenance`` never raises and never guesses a
+        # fingerprint for a map that has none.
+        if ident.is_dm is False:
+            import os as _os
+
+            from daemon.repositories.prompt_assent.designation import (
+                ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS as _ENV_NAME,
+                designation_digest as _designation_digest,
+                parse_designations as _parse_designations,
+            )
+
+            _parsed = _parse_designations(_os.environ.get(_ENV_NAME))
+            if _parsed.valid and _parsed.map is not None:
+                provenance["map_digest"] = _designation_digest(_parsed.map)
+        return provenance
 
     def approve_assent(
         self,

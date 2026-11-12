@@ -100,6 +100,32 @@ ENV-ONLY (the ``nest_report`` precedent — no yaml block, no
 ``load_config`` pass-through, so a yaml tier could never shadow the
 env knob).
 
+PHASE 1.5 — DESIGNATED CHANNELS (pinned-approver model)
+------------------------------------------------------
+The lane's privacy leg grows ONE surface: a proven 1:1 DM **or** a
+designated Discord channel (operator-pinned to exactly one human). The
+rule and its ordering live in ONE place —
+``daemon.repositories.prompt_assent.mint_context.designation_outcome`` —
+and BOTH gates call it (the mint gate inside its ``not private`` arm,
+the approve-side service predicate inside its own):
+
+    PASS | NOT_DESIGNATED | GROUP_DM_SHAPE | APPROVER_NOT_PINNED |
+    ABSENT_DISCRIMINATOR | ABSENT_IDENTITY | CONFIG_INVALID      (D-18)
+
+Those are SIDE-NEUTRAL leg identities, never refusal codes: each gate maps
+them through its own pinned table (``_MINT_DESIGNATION_CODES`` here; the
+approve-side table beside the service predicate). The burning
+``token-approver-mismatch`` keeps ONLY its existing 4e different-human
+role — it is never the mapping of ``APPROVER_NOT_PINNED``.
+
+THE MAP IS READ LAZILY, ONCE PER CALL. ``_DesignationCache`` wraps the
+call-time resolver (:func:`_resolve_designations` — a DIRECT
+``os.environ`` read, never a pydantic dotenv source, so the map stays
+restart-bound) and parses on the FIRST non-DM use. A DM turn therefore
+never reads the environment variable, never parses the map and never
+touches the resolver — that is ``INVARIANT-DM``, the structural proof that
+the DM path is unchanged.
+
 House rules honored: tools NEVER raise — every failure is a typed
 envelope string (REFUSED for the taxonomy codes, FAILED for the internal
 error); the ONE frozen INFO line fires on EVERY terminal path with
@@ -126,6 +152,17 @@ from ..config import (
     PROMPT_ASSENT_DEFAULT_ENABLED,
     PROMPT_ASSENT_DEFAULT_HOURLY_MISMATCH_BUDGET,
     PromptAssentConfig,
+)
+from ..repositories.prompt_assent.designation import (
+    ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS,
+    DesignationParseResult,
+    designation_digest,
+    describe_parse,
+    parse_designations,
+)
+from ..repositories.prompt_assent.mint_context import (
+    DesignationResult,
+    designation_outcome,
 )
 from ._tool_registry import register_tool_category
 
@@ -220,6 +257,9 @@ REFUSAL_TAXONOMY: frozenset[str] = frozenset({
     "self-approval-attempt",
     "extraction-incomplete",
     "audit-unavailable",
+    # ── Phase 1.5 (designated channels) — +2 codes, D-8 / D-13 ────────
+    "approver-not-pinned",
+    "designation-config-invalid",
 })
 
 #: The EIGHT codes THIS PHASE PLACES (the amendment's list). Every one
@@ -233,6 +273,14 @@ PHASE2_PLACED_CODES: frozenset[str] = frozenset({
     "extraction-incomplete",
     "token-approver-mismatch",
     "mismatch-budget-exceeded",
+})
+
+#: The TWO codes THIS PHASE (Phase 1.5 — designated channels) PLACES.
+#: The parent's :data:`PHASE2_PLACED_CODES` keeps its own eight and its own
+#: meaning; this is a SEPARATE set so the parent's pin never has to move.
+PHASE1_5_PLACED_CODES: frozenset[str] = frozenset({
+    "approver-not-pinned",
+    "designation-config-invalid",
 })
 
 #: The MISMATCH-class codes — the ones that consume the K-9 hourly
@@ -478,6 +526,199 @@ def _resolve_enabled(manager: Any = None) -> bool:
     return bool(_resolve_knobs(manager).enabled)
 
 
+# ── The designation-map resolver (Phase 1.5 — cached-lazy, D-20) ─────────
+#
+# THE MAP IS READ AT CALL TIME, DIRECTLY FROM ``os.environ`` — never through
+# a pydantic-settings dotenv source. ``PromptAssentConfig`` is instantiated
+# per call, so a dotenv-backed field would HOT-RELOAD the map without a
+# restart and silently break the restart-bound story (D-3 / D-2.1). The
+# direct read is therefore a pin, not an accident.
+#
+# The parse is LAZY: nothing in this module resolves the map at import time
+# and the DM path never reaches this function at all (INVARIANT-DM). A
+# first-resolution log fires the moment the map is actually read — no boot
+# hook, no ``daemon/api.py`` edit (D-20).
+
+#: The process-lifetime LOGGING memo — the last EFFECTIVE map digest this
+#: process logged. Module-level so "first successful resolution in a
+#: process" and "the digest changed between resolutions" survive across
+#: tool calls. It is NEVER a decision input: every call re-parses, so a
+#: mid-flight environment change is always visible (the A-9 window).
+_DESIGNATION_LOG_STATE: dict[str, Any] = {"resolved": False, "digest": None}
+
+
+def _reset_designation_log_state() -> None:
+    """Clear the resolver's logging memo (tests / operator diagnosis only)."""
+    _DESIGNATION_LOG_STATE["resolved"] = False
+    _DESIGNATION_LOG_STATE["digest"] = None
+
+
+def _resolve_designations() -> DesignationParseResult:
+    """Resolve the operator's designation map from the environment.
+
+    Returns the typed parse outcome (:func:`parse_designations`), logs the
+    mandatory content-free map-parse line, one WARNING per offending entry
+    (BY KEY — never by value), and marks the effective-map line on the
+    FIRST successful resolution in this process and on every DIGEST CHANGE
+    thereafter (D-20). An invalid map is a typed outcome here, never an
+    exception (PR-1: the DM path is untouched because it never gets here).
+    """
+    raw = os.environ.get(ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS)
+    result = parse_designations(raw)
+
+    for error in result.errors:
+        logger.warning(
+            "prompt_assent: designation map entry refused — %s "
+            "(the whole map is invalid; the designated-channel path is "
+            "unavailable)",
+            error,
+        )
+
+    resolved = result.valid and result.map is not None
+    digest = designation_digest(result.map) if resolved and result.map else None
+    first_resolution = resolved and not _DESIGNATION_LOG_STATE["resolved"]
+    digest_changed = bool(
+        resolved
+        and _DESIGNATION_LOG_STATE["resolved"]
+        and digest != _DESIGNATION_LOG_STATE["digest"]
+    )
+    if resolved:
+        _DESIGNATION_LOG_STATE["resolved"] = True
+        _DESIGNATION_LOG_STATE["digest"] = digest
+
+    logger.info(
+        "prompt_assent %s first_resolution=%s digest_changed=%s",
+        describe_parse(result),
+        "1" if first_resolution else "0",
+        "1" if digest_changed else "0",
+    )
+    return result
+
+
+class _DesignationCache:
+    """The PER-CALL memo of the designation map (D-2.1 / D-2.2).
+
+    Constructed ONCE per tool call beside the knob resolver. The FIRST
+    non-DM use resolves and parses; every later use in the SAME call
+    returns the memoised result, so the mint gate and the approve leg can
+    never disagree within one call. A FRESH call re-resolves — which is
+    exactly what makes a mid-flight re-designation observable (A-9).
+
+    The DM path never calls :meth:`get`; that is the structural half of
+    ``INVARIANT-DM`` (the runtime half is the resolver-raises pin).
+    """
+
+    __slots__ = ("_result",)
+
+    def __init__(self) -> None:
+        self._result: Optional[DesignationParseResult] = None
+
+    def get(self) -> DesignationParseResult:
+        """The parsed map — resolved on first use, memoised thereafter."""
+        if self._result is None:
+            self._result = _resolve_designations()
+        return self._result
+
+    @property
+    def digest(self) -> Optional[str]:
+        """The 12-hex map fingerprint, or ``None`` when the map is invalid.
+
+        Reading this RESOLVES the map — callers must therefore be on the
+        non-DM path (the DM branch never asks for a digest: a DM mint emits
+        NO ``map_digest`` at all — AC13).
+        """
+        result = self.get()
+        if not result.valid or result.map is None:
+            return None
+        return designation_digest(result.map)
+
+    def outcome(self, discord_meta: Any, user_id: Any) -> DesignationResult:
+        """Classify a NON-DM turn (P1's ONE ordering owner)."""
+        return designation_outcome(self.get(), discord_meta, user_id)
+
+
+#: The MINT-side leg mapping (D-18) — every neutral leg maps to EXACTLY one
+#: code. ``PASS`` is deliberately absent: it is not a refusal.
+_MINT_DESIGNATION_CODES: dict[DesignationResult, str] = {
+    DesignationResult.NOT_DESIGNATED: "mint-requires-private-channel",
+    DesignationResult.GROUP_DM_SHAPE: "mint-requires-private-channel",
+    DesignationResult.ABSENT_DISCRIMINATOR: "mint-requires-private-channel",
+    DesignationResult.APPROVER_NOT_PINNED: "approver-not-pinned",
+    DesignationResult.ABSENT_IDENTITY: "extraction-incomplete",
+    DesignationResult.CONFIG_INVALID: "designation-config-invalid",
+}
+
+#: The EXISTING mint refusal detail — BYTE-IDENTICAL to v0.29.18 (architect
+#: §2.4 / D-2.3 / T2.8). The designated-channel wording lives on the two NEW
+#: codes' messages ONLY, so the DM cells' envelopes stay byte-identical.
+_MINT_NOT_PRIVATE_DETAIL = (
+    "the mint context is not a proven 1:1 DM (is_dm AND NOT "
+    "is_group_dm; an absent discriminator is not private) — the "
+    "mint is refused and NO token row is written"
+)
+
+#: The MINT-side detail for the codes the DESIGNATED branch can produce.
+#: The two NEW codes are mandated by T2.8; ``extraction-incomplete`` is an
+#: EXISTING code whose bare detail ("not a proven 1:1 DM") would be a lie on
+#: the designated leg (the surface was fine — the human was not identified),
+#: so it gets its own truthful, content-free text HERE. The pre-existing
+#: ``mint-requires-private-channel`` string is NOT in this map — it stays
+#: byte-identical (architect §2.4 / D-2.3).
+_MINT_DESIGNATION_DETAILS: dict[str, str] = {
+    "extraction-incomplete": (
+        "the daemon-derived mint context is incomplete — the designated "
+        "channel's turn carries no usable human identity "
+        "(metadata['discord']['user_id'] is absent), so no pinned-approver "
+        "comparison is possible (fail-closed, D-5); NO token row is written"
+    ),
+    "approver-not-pinned": (
+        "this human is not the pinned approver of this room — the channel is "
+        "designated, but the designated human is someone else; NO token row "
+        "is written"
+    ),
+    "designation-config-invalid": (
+        "the operator's designated-channel map is malformed or carries an "
+        "invalid entry — the designated-channel path is unavailable (the "
+        "offending keys are named in the daemon log; NO channel, user or raw "
+        "value is ever logged) and NO token row is written"
+    ),
+}
+
+#: The 4f codes that MUST NOT touch the durable counter or the K-9 budget.
+#: The two Phase-1.5 codes are the ruling's list; ``extraction-incomplete``
+#: joins them because it is NOT a mismatch-class code anywhere else in the
+#: lane (4e refuses the same shape without recording — this keeps that
+#: discipline even on a path 4e already guards, i.e. defence in depth
+#: against a future reordering).
+_APPROVE_NON_BURNING_CODES: frozenset[str] = PHASE1_5_PLACED_CODES | {
+    "extraction-incomplete"
+}
+
+#: The APPROVE-side detail for the two NEW codes (T2.8 / D-8) — the side
+#: ambiguity is resolved by TEXT at zero taxonomy cost (the INFO line already
+#: carries ``action=``). Content-free: no persona, no diff, no channel name.
+_APPROVE_DESIGNATION_DETAILS: dict[str, str] = {
+    "extraction-incomplete": (
+        "the approving turn's designated-channel context carries no usable "
+        "human identity (metadata['discord']['user_id'] is absent), so no "
+        "pinned-approver comparison is possible — fail closed (D-5); the "
+        "token stays live and its attempt counter is UNTOUCHED"
+    ),
+    "approver-not-pinned": (
+        "the mint-witnessed human is no longer this room's current pinned "
+        "approver — the designation moved between the mint and this decision "
+        "(fail-closed: re-mint in a fresh user turn by the current pinned "
+        "approver); the token stays live and its attempt counter is UNTOUCHED"
+    ),
+    "designation-config-invalid": (
+        "the operator's designated-channel map is malformed or carries an "
+        "invalid entry at decision time — the designated-channel path is "
+        "unavailable, so this approval cannot be verified; the token stays "
+        "live and its attempt counter is UNTOUCHED"
+    ),
+}
+
+
 # ── Envelopes (notify_user.py:314-321 shape) ─────────────────────────────
 
 
@@ -514,19 +755,28 @@ def _emit_info_line(
     agent_id: str = "",
     count: int = 0,
     flags: Optional[dict[str, Any]] = None,
+    map_digest: Optional[str] = None,
 ) -> None:
     """The ONE frozen INFO line — counts and flags ONLY.
 
     Content-free by construction (the "logs content-free v1" doctrine):
     never persona, never diff content, never the raw or grouped token.
     Fired on EVERY terminal path (success and refusal alike).
+
+    ``map_digest`` is a DEDICATED field, NOT a flag: it BYPASSES the flags
+    renderer entirely (the ``'1'/'0'`` boolean coercion below would render a
+    hex string as ``0`` — architect blocker #4). It is emitted ONLY by a
+    designated-CHANNEL mint; a DM mint passes ``None`` and the field is
+    absent from the line (AC13 / INVARIANT-DM).
     """
     flag_text = ",".join(
         f"{k}={'1' if v else '0'}" for k, v in sorted((flags or {}).items())
     )
-    logger.info(
+    line = (
         "prompt_assent outcome=%s action=%s code=%s agent=%s instance=%s "
-        "count=%d flags=%s",
+        "count=%d flags=%s"
+    )
+    args: list[Any] = [
         outcome,
         action,
         code or "-",
@@ -534,7 +784,11 @@ def _emit_info_line(
         (instance_id or "-")[:8],
         int(count),
         flag_text or "-",
-    )
+    ]
+    if map_digest is not None:
+        line += " map_digest=%s"
+        args.append(map_digest)
+    logger.info(line, *args)
 
 
 # ── Token helpers ─────────────────────────────────────────────────────────
@@ -587,7 +841,6 @@ class _AssentContext:
         "source_id",
         "channel_id",
         "is_dm",
-        "is_group_dm",
         "user_id",
         "user_name",
         "external_user_id",
@@ -645,8 +898,19 @@ def _derive_external_user_id(
     2. the instance's SOURCE MAPPING row (the authoritative
        ``(source_id, external_user_id) → instance`` binding);
     3. the Discord 1:1-DM canonical form ``dm:<user_id>`` — reachable
-       ONLY when the row proves a DM, which is the only shape the
-       private check admits.
+       ONLY when the row proves a DM (byte-behaviour unchanged);
+    4. the Discord GUILD-CHANNEL canonical form
+       ``channel:<guild_id>:<channel_id>:<user_id>`` — the Phase-1.5
+       designated-channel shape (D-19).
+
+    **The guild form is AUDIT-ONLY.** It is a composite that the adapter's
+    ``_parse_external_user_id`` is NEVER applied to (there is no in-tree
+    consumer, and the pin in the Phase-2 census asserts that): the
+    OPERATIONAL identity of a designated-channel mint stays ``mint_user_id``
+    (the daemon-side snowflake equality the approve legs 4d/4e use). The
+    composite exists so the ledger can say *where* the mint happened without
+    collapsing the human into an ambiguous channel key (which is what the
+    adapter's lossy ``{guild}:{channel}`` mapping grammar would do).
     """
     explicit = discord_meta.get("external_user_id")
     if isinstance(explicit, str) and explicit.strip():
@@ -668,6 +932,17 @@ def _derive_external_user_id(
             return external.strip()
     if is_dm is True and user_id:
         return f"dm:{user_id}"
+    # ── the non-DM branch (D-19, AUDIT-ONLY) ───────────────────────────
+    # ``is_dm is False`` proves a GUILD shape; the composite needs the guild
+    # and the channel plus the human. An ABSENT nested user id yields NO
+    # derivation (the accept path's ``extraction-incomplete`` is the
+    # truthful code — M-19), never a partial composite.
+    if is_dm is False and user_id:
+        guild_id = discord_meta.get("guild_id")
+        channel_id = discord_meta.get("channel_id")
+        if isinstance(guild_id, str) and guild_id.strip():
+            if isinstance(channel_id, str) and channel_id.strip():
+                return f"channel:{guild_id.strip()}:{channel_id.strip()}:{user_id}"
     return None
 
 
@@ -686,7 +961,6 @@ def _derive_context(manager: Any, row: Any, window: dict[str, Any]) -> _AssentCo
         source_id=str(source_id),
         channel_id=discord_meta.get("channel_id"),
         is_dm=is_dm,
-        is_group_dm=discord_meta.get("is_group_dm"),
         user_id=user_id,
         user_name=discord_meta.get("user_name"),
         external_user_id=_derive_external_user_id(
@@ -1553,6 +1827,10 @@ async def _dispatch(
         )
 
     # ── 4. the action branch ───────────────────────────────────────────
+    # The designation map is resolved LAZILY, ONCE PER CALL (D-2.1/D-2.2):
+    # the cache is constructed here but nothing is read until a branch
+    # actually asks for it — and a DM context never asks (INVARIANT-DM).
+    designations = _DesignationCache()
     if action == "mint":
         return await _mint_branch(
             manager,
@@ -1561,6 +1839,7 @@ async def _dispatch(
             version_id=version_id,
             context=gate.context,
             force=force,
+            designations=designations,
         )
     return await _decide_branch(
         manager,
@@ -1572,6 +1851,7 @@ async def _dispatch(
         context=gate.context,
         window=gate.window,
         reject_reason=reject_reason,
+        designations=designations,
     )
 
 
@@ -1632,6 +1912,7 @@ async def _mint_branch(
     version_id: str,
     context: _AssentContext,
     force: bool,
+    designations: "_DesignationCache",
 ) -> str:
     """The MINT branch — M-4a..M-6.
 
@@ -1705,15 +1986,48 @@ async def _mint_branch(
             "re-mint must be explicitly forced (and re-shows the diff)",
         )
 
-    # ── M-4c. the PRIVATE check on the WINDOW-derived context ─────────
-    if context is None or not context.is_private:
+    # ── M-4c. the PRIVATE (or DESIGNATED) check on the WINDOW context ──
+    # The DM short-circuit stays FIRST and it never touches the resolver:
+    # a proven 1:1 DM mints without reading the designation map at all
+    # (INVARIANT-DM). Every other shape goes through P1's ONE
+    # classification owner and is mapped through the mint-side table.
+    designated = False
+    mint_digest: Optional[str] = None
+    if context is None:
         return _mint_refusal(
             "mint-requires-private-channel",
-            "the mint context is not a proven 1:1 DM (is_dm AND NOT "
-            "is_group_dm; an absent discriminator is not private) — the "
-            "mint is refused and NO token row is written",
+            _MINT_NOT_PRIVATE_DETAIL,
             flags={"private": False},
         )
+    if not context.is_private:
+        leg = designations.outcome(context.discord_meta, context.user_id)
+        if leg is not DesignationResult.PASS:
+            code = _MINT_DESIGNATION_CODES[leg]
+            if code in PHASE1_5_PLACED_CODES:
+                # T2.17 (blocker #6): the mint path bypasses
+                # ``_mismatch_aware_refusal`` (the only other site that
+                # sets this flag), so the NEW codes' envelopes state
+                # ``mismatch=0`` directly — the probe's pass criterion is
+                # then producible without routing through
+                # ``_record_mismatch``.
+                return _mint_refusal(
+                    code,
+                    _MINT_DESIGNATION_DETAILS[code],
+                    flags={"private": False, "mismatch": False},
+                )
+            # Every PRE-EXISTING code keeps its EXACT v0.29.18 envelope
+            # (byte-identical detail text and byte-identical flags dict) —
+            # except ``extraction-incomplete``, which gets the designated-
+            # branch text above (the same CODE, a truthful detail for a
+            # different leg; the DM path never reaches this arm).
+            return _mint_refusal(
+                code,
+                _MINT_DESIGNATION_DETAILS.get(code, _MINT_NOT_PRIVATE_DETAIL),
+                flags={"private": False},
+            )
+        # A designated channel, turned by its pinned approver.
+        designated = True
+        mint_digest = designations.digest
 
     # ── the nested-identity extraction (D-5) — fail closed ────────────
     # The mint context must carry the channel AND the human: a token
@@ -1816,10 +2130,18 @@ async def _mint_branch(
         agent_id=caller_agent_id,
         count=1,
         flags={
-            "private": True,
+            # P2-AC15: a DESIGNATED-channel mint is NOT a private DM — it is
+            # private-EQUIVALENT (the operator's designation + the pinned
+            # human). A DM mint is both. The flag set is documented, never
+            # silently wrong.
+            "private": not designated,
+            "private_equivalent": True,
             "forced": bool(force),
             "superseded": prior_live is not None,
         },
+        # AC13 / D-15(b): a CHANNEL mint records the map digest; a DM mint
+        # passes None (it never read the map — INVARIANT-DM).
+        map_digest=mint_digest,
     )
     return _render_mint_response(
         row=row,
@@ -1841,6 +2163,7 @@ async def _decide_branch(
     context: _AssentContext,
     window: Optional[dict[str, Any]],
     reject_reason: str,
+    designations: "_DesignationCache",
 ) -> str:
     """The APPROVE / REJECT branch — the AR-1 equality legs + the service.
 
@@ -2015,9 +2338,35 @@ async def _decide_branch(
             "— both sides are daemon-derived, neither is tool-supplied",
         )
 
-    # ── 4f. the private check on the APPROVING context (the predicate) ─
-    private_code = assent_channel_not_private_code(context.discord_meta)
+    # ── 4f. the private (or DESIGNATED) check on the APPROVING context ─
+    # THE DM SHORT-CIRCUIT IS PRESERVED: a proven 1:1 DM approves without
+    # the designation map ever being resolved (INVARIANT-DM / PR-1). Only a
+    # non-DM context reaches the resolver, and only a non-DM context can be
+    # designation-eligible.
+    #
+    # THE 4f SPLIT (T2.5 / refusal-cell-matrix §1.3 — BLOCKING). This site
+    # used to call ``_record_mismatch`` UNCONDITIONALLY, before the code's
+    # class was examined — so five Phase-1.5 refusals would have REVOKED the
+    # Emperor's live token (threshold 5) and burned the K-9 budget. Now:
+    #   * the two NEW codes (operator fault / re-designation) refuse BEFORE
+    #     the recording call — no counter motion, no revoke, no budget burn
+    #     (A-9, A-10 / AC7);
+    #   * every pre-existing 4f code keeps ``_record_mismatch`` EXACTLY as
+    #     before — including A-12 (a withdrawn designation maps to
+    #     ``token-channel-mismatch``, a user-side mismatch, and BURNS);
+    #   * the three genuine mismatch sites (4c-item / 4d / 4e) are untouched.
+    if context.is_private:
+        private_code = None
+    else:
+        private_code = assent_channel_not_private_code(
+            context.discord_meta, designations.get(), context.user_id
+        )
     if private_code is not None:
+        if private_code in _APPROVE_NON_BURNING_CODES:
+            return _refuse(
+                private_code,
+                _APPROVE_DESIGNATION_DETAILS[private_code],
+            )
         await _record_mismatch(token_repo, token_row)
         return _refuse(
             private_code,

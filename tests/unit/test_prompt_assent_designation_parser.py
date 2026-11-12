@@ -344,25 +344,30 @@ class TestTheDesignationOutcomeOrdering:
     def test_the_leg_set_is_exactly_seven(self) -> None:
         """D-18 — seven side-neutral variants, no more, no fewer."""
         assert {leg.value for leg in DesignationResult} == {
-            "pass",
-            "not-designated",
-            "group-dm-shape",
-            "approver-not-pinned",
-            "absent-discriminator",
-            "absent-identity",
-            "config-invalid",
+            "leg:pass",
+            "leg:not-designated",
+            "leg:group-dm-shape",
+            "leg:approver-not-pinned",
+            "leg:absent-discriminator",
+            "leg:absent-identity",
+            "leg:config-invalid",
         }
         assert len(DesignationResult) == 7
 
-    def test_no_variant_carries_a_side_specific_code(self) -> None:
-        """D-18 — the function NEVER returns a refusal code."""
+    def test_no_variant_is_usable_as_a_refusal_code(self) -> None:
+        """D-18 — a variant is never a refusal code, not even by STRING
+        equality (``approver-not-pinned`` is a real code on both sides)."""
+        from daemon.tools.prompt_assent import (
+            MISMATCH_CODES,
+            PHASE1_5_PLACED_CODES,
+            REFUSAL_TAXONOMY,
+        )
+
         for leg in DesignationResult:
-            assert "-" in leg.value or leg is DesignationResult.PASS
-            assert leg.value not in {
-                "mint-requires-private-channel",
-                "token-channel-mismatch",
-                "token-approver-mismatch",
-            }
+            assert leg.value.startswith("leg:"), leg
+            assert leg.value not in REFUSAL_TAXONOMY, leg
+            assert leg.value not in MISMATCH_CODES, leg
+            assert leg.value not in PHASE1_5_PLACED_CODES, leg
 
     def test_a_proven_1to1_dm_passes_without_the_map(self) -> None:
         """Leg 1 — and it passes even with an INVALID map (blast radius)."""
@@ -558,24 +563,45 @@ class TestTheSingleHomePin:
         """P-1 / AC6 — ONE literal (the declaration site). Every other
         module imports the constant."""
         literal = f'"{ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS}"'
-        hits: list[str] = []
+        hits: list[tuple[str, int]] = []
         for path in _daemon_python_files():
-            text = path.read_text(encoding="utf-8", errors="ignore")
-            if literal in text:
-                hits.append(str(path.relative_to(REPO_ROOT)))
-        assert hits == ["daemon/repositories/prompt_assent/designation.py"], (
-            f"the env-name literal must live exactly once in daemon/; "
-            f"found in: {hits}"
+            count = path.read_text(
+                encoding="utf-8", errors="ignore"
+            ).count(literal)
+            if count:
+                hits.append((str(path.relative_to(REPO_ROOT)), count))
+        assert hits == [
+            ("daemon/repositories/prompt_assent/designation.py", 1)
+        ], (
+            "the env-name literal must appear EXACTLY ONCE in daemon/ "
+            f"(the single declaration — not in ``__all__``, not in a "
+            f"second module); found: {hits}"
         )
 
-    def test_the_declaration_site_is_the_parser_module(self) -> None:
-        declaration = [
-            p for p in _daemon_python_files()
-            if ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS in p.read_text(
-                encoding="utf-8", errors="ignore"
-            )
-        ]
-        assert [p.name for p in declaration] == ["designation.py"]
+    def test_only_the_known_modules_reference_the_constant(self) -> None:
+        """The NAME may travel by import (Phase 2 wires three modules) — but
+        the module SET is fixed, so a new consumer must consciously join it.
+
+        Consumers: the declaration site (``designation.py``), the mint/approve
+        gate + its resolver (``daemon/tools/prompt_assent.py``, T2.1) and the
+        decision-provenance assembly (``daemon/repositories/prompt_version/
+        repository.py``, F-15). The LITERAL is still exactly one (the pin
+        above).
+        """
+        expected = {
+            "daemon/repositories/prompt_assent/designation.py",
+            "daemon/tools/prompt_assent.py",
+            "daemon/repositories/prompt_version/repository.py",
+        }
+        referrers = {
+            str(p.relative_to(REPO_ROOT))
+            for p in _daemon_python_files()
+            if ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS
+            in p.read_text(encoding="utf-8", errors="ignore")
+        }
+        assert referrers == expected, (
+            f"unexpected constant consumers: {sorted(referrers ^ expected)}"
+        )
 
     def test_the_parser_module_owns_no_environment_read(self) -> None:
         """D-3 / phase1-plan §5 — the parser takes the raw string; it never
@@ -666,14 +692,16 @@ class TestThePhaseFence:
     the wiring, so the fence can never silently rot.
     """
 
-    #: How many PRODUCTION files (excluding the owner module, whose import
-    #: is the definition site) may reference the new symbols.
-    #: **P1 = 0** (the phase is inert);
-    #: **P2 = 2** — the mint gate in ``daemon/tools/prompt_assent.py`` and the
-    #: approve predicate in ``daemon/services/prompt_version_service.py``.
-    #: Phase 2 bumps this constant in the SAME commit as the wiring, so the
-    #: fence can never silently rot.
-    EXPECTED_CALL_SITE_FILES = 0
+    #: The PRODUCTION files (excluding the owner module) that reference the
+    #: new symbols. **P1 shipped 0** (the phase was inert); **P2 wires
+    #: exactly TWO** — the mint gate + resolver in
+    #: ``daemon/tools/prompt_assent.py`` and the approve predicate in
+    #: ``daemon/services/prompt_version_service.py``. Phase 2 bumped this
+    #: constant in the SAME commit as the wiring, so the fence cannot rot.
+    EXPECTED_CALL_SITE_FILES = {
+        "daemon/tools/prompt_assent.py",
+        "daemon/services/prompt_version_service.py",
+    }
 
     def test_no_production_call_site_reaches_the_new_symbols(self) -> None:
         symbols = ("designation_outcome", "is_designated_assent_channel")
@@ -688,9 +716,8 @@ class TestThePhaseFence:
                 continue
             if any(symbol in text for symbol in symbols):
                 callers.add(rel)
-        assert len(callers) == self.EXPECTED_CALL_SITE_FILES, (
-            f"unexpected call sites in {sorted(callers)} — Phase 1 must be "
-            "INERT until Phase 2 wires the gates"
+        assert callers == self.EXPECTED_CALL_SITE_FILES, (
+            f"unexpected call sites: {sorted(callers ^ self.EXPECTED_CALL_SITE_FILES)}"
         )
 
     def test_the_designation_module_is_not_reexported(self) -> None:

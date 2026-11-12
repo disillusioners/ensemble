@@ -292,8 +292,13 @@ def describe_parse(result: DesignationParseResult) -> str:
     )
 
 
+#: NOTE — the env-name constant is deliberately NOT re-exported here:
+#: ``__all__`` would need the literal a SECOND time in this module, and the
+#: single-home pin (P-1) counts occurrences, not just files. Consumers
+#: import the name explicitly (``from ...designation import
+#: ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS``), which ``__all__`` does not
+#: govern.
 __all__ = [
-    "ENSEMBLE_PROMPT_ASSENT_DESIGNATED_CHANNELS",
     "MAP_DIGEST_HEX_LEN",
     "MAX_DESIGNATIONS",
     "DesignationMap",

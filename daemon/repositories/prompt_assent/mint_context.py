@@ -86,7 +86,9 @@ def is_private_assent_channel(discord_meta: Mapping[str, Any] | None) -> bool:
 #
 # The function NEVER reads ``os.environ``: the caller (the tool's cached-lazy
 # resolver) parses the env value once per call and passes the TYPED result in
-# (B2(c) — the repository layer owns no environment read and no I/O).
+# (B2(c)). Neither this module nor ``designation.py`` owns an environment
+# read or any I/O — the decision function is a pure function of
+# (map, metadata, user id).
 #
 # The result is SIDE-NEUTRAL (D-18): these are neutral LEG identities, not
 # refusal codes. Each gate maps the leg to its own side's code via a pinned
@@ -102,16 +104,20 @@ class DesignationResult(str, Enum):
     """The typed neutral outcome of :func:`designation_outcome` (D-18).
 
     Every variant except :attr:`PASS` is a NEUTRAL leg identity; the gates
-    translate it into their side's code.
+    translate it into their side's code. The values are prefixed ``leg:`` on
+    purpose: a variant must NEVER be usable as, or compare equal to, a
+    refusal code — ``approver-not-pinned`` is a real code on BOTH sides, and
+    an unprefixed enum value would silently be ``in MISMATCH_CODES``-style
+    membership tests away from a wrong decision.
     """
 
-    PASS = "pass"
-    NOT_DESIGNATED = "not-designated"
-    GROUP_DM_SHAPE = "group-dm-shape"
-    APPROVER_NOT_PINNED = "approver-not-pinned"
-    ABSENT_DISCRIMINATOR = "absent-discriminator"
-    ABSENT_IDENTITY = "absent-identity"
-    CONFIG_INVALID = "config-invalid"
+    PASS = "leg:pass"
+    NOT_DESIGNATED = "leg:not-designated"
+    GROUP_DM_SHAPE = "leg:group-dm-shape"
+    APPROVER_NOT_PINNED = "leg:approver-not-pinned"
+    ABSENT_DISCRIMINATOR = "leg:absent-discriminator"
+    ABSENT_IDENTITY = "leg:absent-identity"
+    CONFIG_INVALID = "leg:config-invalid"
 
 
 def designation_outcome(
