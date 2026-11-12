@@ -99,9 +99,88 @@
     },
     "G-GOLDEN": {
       "proves": "no silent quality slide between iterations",
-      "mechanism": "re-render vs committed golden per-beat clips at frame-hash level (goldens/<beat-id>/ inside the project tree); drift is a loud regression",
+      "mechanism": "three-tier dispatch per beat's `comparison` field (TIER E exact masked-region per-frame hash, zero tolerance; TIER P perceptual SSIM/pHash-dHash on representative frames with per-beat thresholds; TIER R lightweight representative key-frame references)",
       "profile": "film only",
-      "storage": "OQ3 default: goldens in video-lab, sha256 manifests committed in-repo"
+      "storage": "OQ3 approved (Option A): lab binaries + in-repo manifests (goldens/<beat-id>/)",
+      "tiers": {
+        "exact": {
+          "mode": "masked-region-per-frame-hash",
+          "tolerance": 0
+        },
+        "perceptual": {
+          "defaults": {
+            "ssim_min": 0.97,
+            "dhash_hamming_max": 6
+          },
+          "configurable": "per-beat at mint (lands in golden provenance)",
+          "calibration": {
+            "method": "mean_minus_k_sigma",
+            "k": 3,
+            "min_samples": 5,
+            "uncalibrated_fallback": {
+              "ssim_min": 0.995,
+              "dhash_hamming_max": 2
+            },
+            "provenance_fields": [
+              "calibration_sample_ids",
+              "calibration_stats",
+              "derived_thresholds"
+            ],
+            "sigma_zero_policy": "sigma == 0 => record sigma_zero:true and treat as exact-match at that metric",
+            "sample_set_approver": "sample set approval rides reason_class 'calibration_update' (approved_by in {user, leader})",
+            "re_derivation_on_remint": "thresholds re-derived on every re-mint; never carried over silently",
+            "seed_floor_clamp": "derived thresholds may only be STRICTER than lane seeds (ssim_min >= 0.97, dhash_hamming_max <= 6); loosening requires an approval-worthy calibration_update event",
+            "single_comparison_per_render": true
+          }
+        },
+        "representative": {
+          "defaults": {
+            "mode": "adaptive",
+            "boundary_detector": {
+              "metric": "ssim_drop",
+              "threshold": null,
+              "_note": "seed/starting value only; derived from the approved sample set's SSIM-drop/frame-diff distribution at mint (calibration supersedes)"
+            },
+            "action_windows": {
+              "source": "capture_action_log",
+              "types": [
+                "pointer travel",
+                "press",
+                "drag",
+                "drop",
+                "popup open",
+                "row edits"
+              ],
+              "pad_frames": 3
+            },
+            "baseline_interval_frames": 30,
+            "reduced_long_edge_px": 480,
+            "include_first_last": true
+          }
+        },
+        "semantic": {
+          "evidence_only": true,
+          "per_keyframe_verdict": true,
+          "on_miss": "surface_loudly",
+          "checklist_source": "shot-plan per-beat",
+          "max_keyframes_per_beat": 3,
+          "pre_estimate_before_vision_calls": true,
+          "exceedance_policy": "FAIL unless explicit recorded waiver (approval record with reason)"
+        }
+      },
+      "tier_dispatch": "per-beat comparison field",
+      "overhead": {
+        "budget_pct": 15,
+        "metrics": [
+          "tier_e_hashing_wall_ms",
+          "tier_p_metric_ms",
+          "tier_r_sampling_ms",
+          "tier_s_vision_call_ms",
+          "total_verification_ms"
+        ],
+        "vs": "beat_render_wall_ms",
+        "on_exceedance": "report_plainly_with_dominant_cost_named"
+      }
     }
   }
 }

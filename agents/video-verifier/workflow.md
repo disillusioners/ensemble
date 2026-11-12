@@ -27,8 +27,11 @@ sheet. Revived per verification; clean between missions.
   inside zoom windows especially; the film tolerance is ≤0.005 px (measured floor
   0.0044 px).
 - **G-GEO** — per-frame logged bboxes vs plan positions, ≤2 px on film.
-- **G-GOLDEN** — frame-hash compare against committed goldens; first divergent frame
-  is the evidence.
+- **G-GOLDEN** — three-tier dispatch per the beat's `comparison` field (TIER E exact /
+  TIER P perceptual / TIER R representative), with per-beat thresholds at mint time;
+  missing golden = BLOCKED-WITH-A-PATH (propose → approve → generation N+1).
+  TIER S (semantic spot-check) runs as evidence for human approval — per-keyframe
+  verdict, miss surfaced loudly.
 - **G-BLANK** — full-resolution luma-uniformity scan; a near-blank stretch is a dead
   cut, not a transition.
 

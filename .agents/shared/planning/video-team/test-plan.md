@@ -81,7 +81,7 @@ fixture → exit 1 within the cap), **shape** (the command contract `--help` mus
 | P5 | Fixture-only tenants | v5 capture meta: base URL `http://127.0.0.1:8987/...`, tenant markers uid 9001 / tenant 1706 → exit 0 | (a) base URL rewritten to a non-localhost host (e.g. `http://10.0.0.1:8987`) → `P5 FAIL non-localhost base URL`, exit 0 <1 s, BEFORE any request is made; (b) markers rewritten to uid 9002 → `P5 FAIL non-fixture tenant uid 9002` | `preflight.mjs p5 --capture-meta <meta.json>` |
 | P6 | Localhost-only DB | Lab stack env: DB host localhost, DB `ydlab_layout` → exit 0 | DB host env pointing at any non-localhost (e.g. `ydlab@db.internal`) → `P6 FAIL db host not localhost`, exit 0 <1 s, before any connection attempt | `preflight.mjs p6 --env <lab env file>` |
 | P7 | Blank/luma scan (sampled) | v5 frame set (no uniform-luma stretch; the camera-clamp catch is what it hunts) → exit 0 | A synthetic 2 s uniform-gray stretch spliced into a copied frame dir → `P7 FAIL near-blank stretch frames 240-300 (luma σ<1)`, exit 0 ≤10 s. (Full-resolution scan is G-BLANK's job; P7 is the cheap sampled pre-assembly tripwire.) | `preflight.mjs p7 --frames <dir> [--sample-step N]` |
-| P8 | Deliverable size | A real sub-32 MiB cut (e.g. `prod-v5/out/tabs-feature-16x9-v5-trim12.mp4`, 2,161,800 B) or a synthetic 31 MiB sparse file → `P8 PASS size=2111132 B < cap=33554432 B`, exit 0 | A synthetic deliverable AT or OVER the cap (32 MiB + 1 byte) → `P8 FAIL size=33554433 B >= cap=33554432 B (MAX_SERVED_BYTES — over-cap serves a uniform silent 404 at live_views.py:1279-1283)`, exit 1 <1 s. Cost cap ≤ 1 s (stat-only, no decode) | `preflight.mjs p8 --deliverable <mp4> [--cap-bytes 33554432]` |
+| P8 | Deliverable size | A real sub-32 MiB cut (e.g. `prod-v5/out/tabs-feature-16x9-v5-trim12.mp4`, 2,161,800 B) or a synthetic 31 MiB sparse file → `P8 PASS size=2161800 B < cap=33554432 B`, exit 0 | A synthetic deliverable AT or OVER the cap (32 MiB + 1 byte) → `P8 FAIL size=33554433 B >= cap=33554432 B (MAX_SERVED_BYTES — over-cap serves a uniform silent 404 at live_views.py:1279-1283)`, exit 1 <1 s. Cost cap ≤ 1 s (stat-only, no decode) | `preflight.mjs p8 --deliverable <mp4> [--cap-bytes 33554432]` |
 
 **Fixture discipline for negatives:** every negative fixture is a COPY or SYNTHETIC —
 no lab artifact is mutated. The two retained historical artifacts usable as negatives
@@ -165,7 +165,7 @@ G-GOLDEN; G-DETERM is the canonical name — no space, no "M" suffix).
 | G-POINTER (film) | pointer overlay coords vs harness per-frame input log, ≤ 0.005 px, zoom windows included | `prod-v2` → PASS **by calibration**: measured max deviation 0.0044 px < 0.005 (HANDOFF §5) — the tolerance is set just above the worst real measurement, which is exactly what the dry-run must confirm. Negative: a synthetic 0.01 px offset → FAIL | pointer fidelity in zoom windows |
 | G-DETERM (film) | per-frame SHA-256 across TWO independent renders — never the engine's 12-frame `look` sample (HANDOFF §4) | the v5 launch pair (capture vs capture-recap) at frame level → PASS 2010/2010 (historical). Negative: the **range-render replay** below → FAIL | CSS-alpha nondeterminism + full-frame proof discipline |
 | G-3LAUNCH (film) | three independent launches agree hash-for-hash | `prod-v5/capture` + `capture-recap` + `capture-recap2` → PASS (historical: all three byte-identical, `all_pairs_pass`) | 3-launch re-capture catch |
-| G-GOLDEN (film) | re-render vs committed golden at frame-hash level; drift = loud regression; goldens live at `goldens/<beat-id>/` inside the project tree | first film iteration = **MINT, not compare** (no goldens exist yet — §3); from the second render on: PASS expected; negative: a golden compared against a wrong-`fe_build_sha` render → FAIL with first divergent frame named | no-silent-quality-slide requirement |
+| G-GOLDEN (film) | tier-aware golden regression (ONE gate id; fast = goldens OFF; film = hybrid E+P+R dispatch) — E: masked-region per-frame hash (zero tolerance); P: SSIM/dhash vs per-beat stored thresholds; R: scene-boundary + endpoint coverage; **S: per-keyframe written verdict (evidence for human approval, not auto pass/fail)** | first film iteration = **MINT, not compare** (no goldens exist yet — §3); at mint the beat's `comparison` + `comparison_thresholds` are captured into provenance (incl. adaptive sampling config: action windows from the action log, SSIM-drop boundary detector, 30-frame baseline interval); from the second render on: PASS expected per tier (E loud regression / P measured score vs threshold + first flagged frame / R coverage gap / S verdict recorded); negative: a golden compared against a wrong-`fe_build_sha` render → FAIL with the tier-appropriate evidence; adaptive-sampling assertion pointer → §3.9 | no-silent-quality-slide requirement |
 
 ### 2.3 Replay cases — the gates must re-catch their historical catches
 
@@ -184,7 +184,9 @@ G-GOLDEN; G-DETERM is the canonical name — no space, no "M" suffix).
 G-PLAN + G-BLANK + G-FASTSTART + G-SPEC + G-EYES all green → a fast-demo lane can treat
 v5 as the known-good base (A §12 step 7). Under `film+goldens`: additionally G-GEO,
 G-POINTER, G-DETERM, G-3LAUNCH green; G-GOLDEN is a first-mint (no golden exists yet) —
-regression semantics begin at the second render of the same beat (§3).
+at mint the beat's `comparison` + `comparison_thresholds` (incl. adaptive sampling
+config and Tier S checklist) are captured into provenance; regression semantics
+(E/P/R tier-aware + Tier S verdict) begin at the second render of the same beat (§3).
 
 ### 2.4 Read-only artifact probes (the dry-run's cheapest tier — runnable any morning)
 
@@ -212,17 +214,21 @@ sample of the same evidence.
 
 ## 3. Golden-File Regression Procedure (film profile only)
 
-Requirement 6 (A §0.1): determinism CI with committed goldens. Shape per A §6.3 and
-`gate-sets.json` G-GOLDEN; storage per **OQ3 — DEFAULT TAGGED PENDING-MORNING-APPROVAL:
-goldens live in `video-lab`, only sha256 manifests are committed in-repo.**
+Requirement 6 (A §0.1, §6.3): determinism CI with committed goldens. Shape per
+`gate-sets.json` G-GOLDEN (tier-aware, one gate id); storage per **OQ3 — RESOLVED BY
+USER RULING (2026-11-12): Option A** (lab binaries + in-repo sha256 manifests).
+The winning model is the **three-tier hybrid (E + P + R)**; per-frame-SHA-everywhere
+was rejected.
 
 ### 3.1 What a golden is
 
 ```
-goldens/<beat-id>/           # inside the project tree (A §8.1); OQ3 default: binaries live lab-side, manifests in-repo
-├── clip.mp4                 # the golden per-beat clip (all-intra, per A §7.1)
+goldens/<beat-id>/           # inside the project tree (A §8.1); Option A (approved):
+├── clip.mp4                 #   binaries live in video-lab, manifests in-repo
 ├── manifest.sha256          # per-frame sha256 list, frame-count-prefixed
-└── provenance.json          # engine versions, fixture sha, fe_build_sha, harness_sha, lab_stack_sha
+└── provenance.json          # engine versions, fixture sha, fe_build_sha, harness_sha,
+                             #   lab_stack_sha, AND the per-beat comparison config
+                             #   (comparison + comparison_thresholds — see §3.3)
 ```
 
 In-repo mirror (subject repo project tree, A §8.1 layout `goldens/<beat-id>/`): the
@@ -232,72 +238,373 @@ copy is the comparison target. The path shape is `goldens/<beat-id>/` everywhere
 inside the `<project-id>` tree (A §6.3/§8.1, `gate-sets.json` G-GOLDEN), never a
 `<project>` directory layer.
 
-`manifest.sha256` format (frame-count-prefixed, one hash per frame, stable order):
+### 3.2 The three tiers (E / P / R)
 
-```
-frames 1650
-b3f1c2…64hex  frame-000001.png
-7a9e04…64hex  frame-000002.png
-…
-```
+| Tier | What it compares | Default thresholds | Where configured |
+|---|---|---|---|
+| **E — exact** | masked-region per-frame hashes over deterministic regions (text / indicator pills / overlay chrome / controlled UI); whole-frame when the beat is fully deterministic | **zero tolerance** — byte-exact frame hash | per-beat `comparison` + `comparison_thresholds` in the shot plan; stored in golden provenance at mint |
+| **P — perceptual** | generated/AI footage + legitimate render variance | **film defaults: `ssim_min = 0.97`, `dhash_hamming_max = 6` at 64-bit** (per-beat configurable) | per-beat `comparison_thresholds` in the shot plan; stored in golden provenance at mint |
+| **R — representative** | scene boundaries + each beat's first/last frame + action-window frames (pointer travel / press / drag / drop / popup open / row edits) + uniform baseline between them, long edge ≤ 480 p | **adaptive** (default — dense around scene boundaries via SSIM-drop/frame-diff + forced sample points at action windows + uniform baseline interval between); modes: `scene` | `every_n` | `adaptive` | per-beat `comparison_thresholds.representative` in the shot plan; stored in golden provenance at mint |
 
-The diff operation is a line-wise compare of the hash column: first mismatching line
-number = the first divergent frame (exactly the evidence G-GOLDEN reports).
+**P-metric semantics: AND by default.** When both `ssim_min` AND `dhash_hamming_max`
+are configured for a beat, BOTH must pass (SSIM mean ≥ ssim_min AND dHash Hamming ≤
+dhash_hamming_max); passing one does not excuse the other.
 
-### 3.2 Minting (first green cut per beat, film profile)
+**Lane defaults:** `fast-demo` = goldens OFF (unchanged); `film+goldens` = **hybrid
+(E + P + R)** — G-GOLDEN is ONE gate id, membership unchanged (fast 5 / film 10);
+it becomes tier-aware internally, dispatching each beat to the tier its `comparison`
+field declares.
+
+**Tier S (semantic) is the EVIDENCE LAYER, not a comparison threshold.** It rides
+alongside the hybrid E+P+R model: per-keyframe written verdicts (must_include /
+must_exclude) recorded in the verify report as evidence for human approval. It does
+NOT add a fourth comparison threshold and does NOT auto-pass/fail; a miss is surfaced
+loudly. See §3.10.
+
+### 3.3 Per-beat threshold-at-mint rule (REQUIRED fields)
+
+Every beat carries, at mint time, the exact shot-plan fields (stored in golden
+provenance — never inferred at compare time; the MINT-CAPTURE set is frozen in full
+per invalidation-spec.json's MINT-CAPTURE guard):
+
+- `comparison`: `exact` | `perceptual` | `representative` | `hybrid`
+- `comparison_thresholds`: `{"ssim_min", "dhash_hamming_max", "representative": {"mode": "adaptive" | "scene" | "every_n", "n", "boundary_detector": {"metric": "ssim_drop" | "frame_diff", "threshold"}, "action_windows": {"source": "capture_action_log", "types": [...], "pad_frames": 3}, "baseline_interval_frames": 30}}`
+- `masks[]`: `{mask_id, sha256, regions, beat_id}` — versioned mask artifacts
+- `mask_area_budget_pct`: default 30 (masked-out area ≤ this % of frame area)
+- `critical_regions`: the declared critical regions the exact tier MUST cover
+
+A threshold change or a re-mint is **APPROVAL-WORTHY** — recorded in provenance
+(reason + approver), never silent. No per-run threshold tuning: the thresholds live
+in the shot plan and are frozen into the golden at mint.
+
+**`boundary_detector.threshold` derivation:** starts from the seed/`null` (contract
+default), is DERIVED at calibration alongside the perceptual thresholds (the detector
+threshold that separates scene boundaries in the approved sample set), and is frozen
+into the golden at mint like every other threshold; changes after mint are
+APPROVAL-WORTHY like any other threshold delta.
+
+**Single comparison per render:** exactly ONE `comparison` value governs a beat's
+golden comparison per render. `hybrid` means E + P + R are all compared under that one
+value, with S as the evidence layer alongside — it never means "two comparison values
+race". Per-beat opt-out of Tier S on the film lane is APPROVAL-WORTHY (the film-lane
+default is Tier S ON).
+
+### 3.4 Minting (first green cut per beat, film profile)
 
 1. The beat's render passes the full film gate set (§2.2) including G-3LAUNCH.
-2. The verifier hashes every frame of the winning render (`finalize-determinism.mjs`
-   lineage — per-frame SHA-256) and writes `manifest.sha256`.
+2. The verifier reads the beat's `comparison` + `comparison_thresholds` from the shot
+   plan and hashes the winning render per the declared tier (E: masked-region per-frame
+   hashes; P: representative-frame SSIM/dhash; R: scene-boundary + endpoint frames).
 3. The verifier copies the clip + manifest + provenance to the golden dir (lab) and the
    manifest + provenance to the in-repo mirror; commits the mirror.
-4. The mint is RECORDED in the verify report: `golden: minted (generation 1)`.
+4. The mint is RECORDED in the verify report: `golden: minted (generation 1)` with the
+   per-beat comparison config captured in provenance.
 
 A golden is never minted from a render that skipped a gate; minting is the verifier's
 act (B: `agents/video-verifier/skills-template/video-gates.md`), never the editor's.
 
-### 3.3 Comparison semantics
+### 3.5 Comparison semantics (tier-specific)
 
-| Profile | Goldens | Comparison |
+| Tier | Comparison | Mismatch evidence |
 |---|---|---|
-| `fast-demo` | OFF (`lane-profiles.json` `goldens: false`) | none — single render, cheap gates only; determinism CI would be the wrong cost for minutes-turnaround iterations |
-| `film+goldens` | ON | **frame-hash level** (per-frame SHA-256 list diff) — container bytes need NOT match (re-encode noise tolerated); every frame must hash identically. This is deliberately stricter than perceptual: A §6.3 rules any drift a loud regression, "not a silent quality slide" |
+| E (exact) | **loud regression** — masked-region per-frame hash diff | names the **first divergent masked-region frame**; whole-frame hash when the beat is fully deterministic |
+| P (perceptual) | measured SSIM/dhash score vs the stored threshold | reports the measured score vs threshold **+ the first flagged representative frame** |
+| R (representative) | coverage — scene boundaries + endpoints present | reports the **coverage gap** (missing scene/endpoint frames), NOT a pixel verdict |
 
-No perceptual (PSNR/SSIM) tolerance exists anywhere in this design — the artifact is the
-frame sequence (A §3.2 E3 uses the same semantics for the HyperFrames evaluation).
+**E-tier mismatch** is a loud regression: the verify report FAILS G-GOLDEN and the lane
+STOPS at the cap-and-flag boundary (A §6.4). Never averaged, never fuzzed, never
+"retry until green" (B verifier Cardinal: retry-until-green is falsification).
 
-### 3.4 What a mismatch MEANS
+**P-tier mismatch** names the measured SSIM/dhash score against the stored threshold and
+the first flagged representative frame — the threshold is the per-beat minted value,
+not a per-run override.
 
-- A **loud regression**: the verify report FAILS G-GOLDEN, names the **first divergent
-  frame index**, and the lane STOPS at the cap-and-flag boundary (A §6.4). Never averaged,
-  never fuzzed, never "retry until green" (B verifier Cardinal: retry-until-green is
-  falsification).
-- Who may loosen or retire a gate/golden: **only the user or leader** (A §6.4; B producer
-  Cardinal #6). The team's remedies are DISCLOSED PROPOSALS — e.g. "the golden predates
-  the approved plan delta; re-mint generation 2" — never silent actions.
+**R-tier mismatch** is a coverage gap: missing scene-boundary or endpoint frames, not a
+pixel verdict — it says "the representative set is incomplete", never "the pixels differ".
+
+### 3.6 What a mismatch MEANS
+
+- Who may loosen, tighten, or retire a threshold/golden: **only the user or leader**
+  (A §6.4; B producer Cardinal #6). The team's remedies are DISCLOSED PROPOSALS —
+  e.g. "the golden predates the approved plan delta; re-mint generation 2" — never
+  silent actions.
+- **Threshold change or re-mint is APPROVAL-WORTHY** — recorded in provenance (reason
+  + approver), never silent.
+- **Missing golden = BLOCKED-WITH-A-PATH**: the verifier proposes a re-mint with a reason
+  class from the full 5-value enum `{lab_binary_lost, approved_plan_delta, threshold_change, calibration_update, mask_change}` → human approves
+  → generation N+1 is recorded with the approval reference. The cut is blocked until then;
+  it does not silently pass.
 - Diagnostic order on mismatch: (1) read `provenance.json` of both sides — engine
   version drift? (the Chrome 157 lesson, P3) (2) `fe_build_sha` / `fixture_sha` drift?
   (invalidation territory, A §9 — then this is a RE-CAPTURE case, not a regression)
   (3) genuinely same-input different-frames → nondeterminism → G-DETERM investigation.
 
-### 3.5 Golden lifecycle
+### 3.7 Golden lifecycle
 
 | Event | Golden action |
 |---|---|
-| First film-profile green cut of a beat | mint generation 1 (§3.2) |
+| First film-profile green cut of a beat | mint generation 1 (§3.4) with the per-beat comparison config captured in provenance |
 | User-approved plan delta changing that beat's pixels | mint generation N+1 after its own full-gate pass; generation N retained (lab-side) and the supersede recorded in provenance |
 | `harness_sha` or `lab_stack_sha` bump | ALL goldens re-minted after a fresh G-3LAUNCH green (invalidation-spec: harness/stack changes invalidate everything) |
 | `fe_build_sha` change on untouched routes | NO re-mint — the golden's provenance records the build it pins; beats whose route changed are re-captured first (A §9), re-gated, then re-minted if pixels changed |
-| Golden binary lost from the lab | detectable: in-repo manifest exists, lab copy absent → G-GOLDEN fails the cut as **provenance incomplete** (B verifier: "goldens missing on a film cut → fail the cut"), NOT as a regression |
+| Threshold change (approval-worthy) | re-mint generation N+1 with the new `comparison_thresholds`, approval reference recorded in provenance |
+| Golden binary lost from the lab | BLOCKED-WITH-A-PATH: verifier proposes re-mint with reason class `lab_binary_lost` → human approves → generation N+1 (OQ3 resolved — no silent pass) |
+| Mask change (approval-worthy) | re-mint / re-validate the affected beat(s) with reason class `mask_change`; provenance records the new `{mask_id, sha256, regions, beat_id}` and the approval reference |
+| Calibration update (approval-worthy) | threshold re-derivation from a NEW approved sample set (≥5 renders); provenance records sample ids / distribution stats / derived thresholds; loosening beyond the seed floor requires this class explicitly |
 
-### 3.6 CI shape (post-activation)
+---
 
-Re-render each golden beat on demand (film profile missions) → frame-hash diff vs
-manifest → verdict line per beat. There is no hosted CI runner in this design; "CI" is
+### 3.8 CI shape (post-activation)
+
+Re-render each golden beat on demand (film profile missions) → tier-aware diff vs
+manifest → verdict line per beat (E: frame-hash diff; P: score vs threshold + first
+flagged frame; R: coverage check). There is no hosted CI runner in this design; "CI" is
 the verifier's standing procedure on the armed lab — the in-repo manifests make the
-evidence REVIEWABLE (and portable) without committing binaries. If a future remote CI
-must run away from this machine, that re-opens OQ3's trade — noted in §5's decision
-block.
+evidence REVIEWABLE (and portable) without committing binaries. Option A (lab binaries +
+in-repo manifests) is **APPROVED BY USER RULING (2026-11-12)**; the thresholds are
+per-beat-at-mint and frozen into provenance, so a remote CI can re-run the same
+comparison against the same manifest.
+
+### 3.9 Adaptive sampling (Tier R) — demonstration
+
+**Assertion (SET-CONTAINMENT + COVERAGE-GAP):** for a fixture beat, the sample set S
+must satisfy (a) every action-window frame ± `pad_frames` (3) from the capture
+harness record (`action_windows.source` = `capture_action_log` — the RENAMED field;
+the capture record is `video-lab/prod-v5/capture/inputs.json`: 16 sections with ids
+like `p1-open`/`p1-focus`/`p1-approach`/`p1-press`, frames[] carrying per-frame
+`pointer` state, events[] carrying `{seq, frame, type, x, y}` (316 events in the
+v5 record, verified by `python3 -c "import json;print(len(json.load(open('.../inputs.json'))['events']))"`); `action_type_map` maps event type → section id so windows are mechanically derivable — this map is DECLARED BY CONTRACT (it must be emitted by the capturer at activation; it is NOT yet present in the v5 record, `grep -rn action_type_map` over the lab = 0 hits)
+(types: pointer travel / press / drag / drop / popup open / row edits) is in S, and
+(b) boundary-adjacent frames from the SSIM-drop/frame-diff detector are in S, with
+uniform baseline coverage between them (`baseline_interval_frames` = 30, default). The
+coverage gap between any two consecutive samples ≤ `baseline_interval_frames`.
+
+**Expected output shape (per-beat sampling manifest):**
+
+```
+{
+  "beat_id": "popup-session",
+  "required_points": [12, 45, 46, 47, 48, 49, 50, 51, 52, 180, 181, 182, 210, 211, 212],
+  "sampled":      [0, 12, 30, 45, 46, 47, 48, 49, 50, 51, 52, 60, 90, 120, 150, 180, 181, 182, 210, 211, 212],
+  "gaps":         [12, 18, 15, 1, 1, 1, 1, 1, 1, 1, 8, 30, 30, 30, 30, 1, 1, 28, 1, 1],
+  "max_gap": 30,
+  "verdict": "PASS"   // max_gap <= baseline_interval_frames (30) AND all required_points ⊆ sampled
+}
+```
+
+FAIL shape: `"verdict": "FAIL", "missing_required": [47], "max_gap": 45 (> 30)`.
+
+The contract's `representative.mode` is `adaptive` by default (every_n/scene are
+fallback modes). A uniform every-N default is a bug — sweep any surviving uniform-every-N
+or global-threshold language before shipping.
+
+**NAME-COLLISION TRAP (disambiguation):** `action-log.schema.json` in this scaffold is
+the EDITOR governance log (action kinds trim / text-swap / zoom-crop / …) — it is NOT
+the capture harness input record. The capture-side sampling source is the harness
+record (`capture_action_log`, `video-lab/prod-v5/capture/inputs.json`); the editor's
+append-only log is a different artifact consumed by different gates. The former field
+name `action_log` collided with the editor log — the rename to `capture_action_log`
+is the fix.
+
+### 3.10 Tier S per-keyframe verdict (evidence, not a threshold)
+
+Tier S (semantic) is the **evidence layer**, not a comparison threshold — it rides
+alongside hybrid E+P+R. Per-keyframe written verdict (must_include / must_exclude)
+recorded in the verify report as evidence for human approval. `evidence_only: true` in
+the contract (gate-sets.json G-GOLDEN tiers.semantic): on-miss = SURFACED LOUDLY,
+never buried; per_keyframe_verdict = true; checklist_source = shot-plan per-beat.
+
+**Worked verdict table (illustrative plan-data against a real v5 fixture frame — the
+caption-side G10 case, HANDOFF §9: the G10 gate labelled the caption `right` while the
+pixels said `LEFT`; the caption's panel at x 650..856, teal accent at x 668..671, the
+button's box at x 889.6..1030.4, 33.6 px clear on the left):**
+
+| Keyframe | must_include | must_exclude | Verdict | Written note |
+|---|---|---|---|---|
+| result-landed frame (instant-summary panel) | subject tab, expected popup rows, colour swatch | hidden tab | **PASS** | "subject tab visible; popup rows match plan; swatch present; no hidden tab" |
+| popup-open frame | UI Options button, centred tab group | (none) | **MISS** | "UI Options button present but caption labelled `right` while the button sits at x 889.6..1030.4 (33.6 px clear on the left of the centred group) — surfacing for human review" |
+
+The MISS row is the surfacing shape: a written verdict naming what was seen, not a
+boolean. Tier S output is EVIDENCE FOR HUMAN APPROVAL — never auto pass/fail.
+
+**Delivery obligation:** every Tier S miss must be ACKNOWLEDGED (accept / re-capture /
+re-scope) before the cut may be delivered — a miss blocks delivery until acknowledged,
+never buried.
+
+**Keyframe bound: ≤ 3 keyframes per beat** for Tier S vision calls. The bound keeps
+the vision-call fan-out bounded and load-bearing (see §3.13's bounded/unbounded
+arithmetic).
+
+### 3.11 Calibration from approved samples
+
+**Procedure:** collect ≥5 approved renders → per-beat per-metric distribution →
+threshold = mean − 3σ → record `calibration_sample_ids` / `calibration_stats` /
+`derived_thresholds` in provenance. With fewer than 5 samples: **fail-closed defaults**
+apply — `ssim_min = 0.995`, `dhash_hamming_max = 2` — which are STRICTER than the
+lane defaults (0.97 / 6), never looser. Threshold change or re-mint is
+APPROVAL-WORTHY (reason + approver recorded).
+
+**Worked example (ONE real beat — procedure, not measurement):** v5 full cut
+(`prod-v5/out/tabs-feature-16x9-v5.mp4`, 2,468,574 B, 2010 frames, 67.0 s) is the
+golden-mint candidate. We cannot run ffmpeg/SSIM tonight, so the procedure is recorded
+here; the numbers land at activation step 10 (film/goldens verification):
+
+```
+# inputs (MEASURED from disk tonight):
+#   capture launches: 3 (capture/, capture-recap/, capture-recap2/) — all 2010/2010 byte-identical (HANDOFF §9)
+#   frames per launch: 2010 (ls | wc -l, read-only)
+# command shape (activation day, against the v5 known-good cut):
+  python3 calibrate.py --beat <beat-id> --renders capture/ capture-recap/ capture-recap2/ \
+    --metric ssim --metric dhash_hamming --representative-frames scene_boundaries+endpoints \
+    --k 3 --min-samples 5
+```
+
+**Row (a) — n=3 (BELOW the 5-sample minimum): fail-closed.** The sample stats may be
+recorded for traceability, but `derived_thresholds` is NULL and the UNCALIBRATED
+FALLBACK (0.995 / 2) GOVERNS — the looser lane seeds (0.97 / 6) are NEVER displayed
+as governing:
+
+```json
+{
+  "calibration_sample_ids": ["capture", "capture-recap", "capture-recap2"],
+  "calibration_stats": {"ssim": {"mean": 0.982, "sigma": 0.004, "n": 3}, "dhash_hamming": {"mean": 1.2, "sigma": 0.8, "n": 3}},
+  "derived_thresholds": null,
+  "governing": "uncalibrated_fallback",
+  "active_thresholds": {"ssim_min": 0.995, "dhash_hamming_max": 2}
+}
+```
+
+**Row (b) — n≥5 (derived, seed-floor CLAMP applied).** Worked arithmetic with sample
+stats where mean−3σ lands at-or-stricter than the seeds after integer flooring:
+
+```json
+{
+  "calibration_sample_ids": ["r1", "r2", "r3", "r4", "r5"],
+  "calibration_stats": {"ssim": {"mean": 0.981, "sigma": 0.002, "n": 5}, "dhash_hamming": {"mean": 2.0, "sigma": 0.5, "n": 5}},
+  "derived_thresholds": {"ssim_min": 0.975, "dhash_hamming_max": 2},
+  "governing": "derived",
+  "active_thresholds": {"ssim_min": 0.975, "dhash_hamming_max": 2}
+}
+```
+
+Arithmetic: ssim derived = 0.981 − 3×0.002 = 0.975 (≥ 0.97 seed floor — clamp passes);
+dhash derived = 2.0 − 3×0.5 = 0.5 → integer flooring to 1 (≤ 6 seed floor — clamp
+passes, and 1 is STRICTER than the seed 6, which is allowed). A derived value that
+would be LOOSER than the seed floor (ssim < 0.97 or dhash > 6) is rejected by the
+`seed_floor_clamp` (gate-sets.json G-GOLDEN tiers.perceptual.calibration); loosening
+beyond the seeds requires an approval-worthy `calibration_update` event.
+
+**σ=0 case:** if a metric's sample distribution has σ = 0 (zero-variance sample set),
+record `"sigma_zero": true` and treat that metric as EXACT-MATCH at its mean (any
+deviation from the observed mean is a regression) — per the contract's
+`sigma_zero_policy`. LABEL: PROCEDURE-NOT-MEASUREMENT — the formula, clamp, and output
+shapes are specified; the numbers are illustrative until activation step 10 runs.
+
+### 3.12 Mask validation — four negative cases
+
+Masks are versioned artifacts: provenance records `{mask_id, sha256, regions, beat_id}`.
+Mask change is APPROVAL-WORTHY with reason class `mask_change`. Three mandatory checks
+(invalidation-spec.json guards): (a) every declared critical region inside the
+exact-compare area — exclusion = FAIL; (b) masked-out area ≤ `mask_area_budget_pct`
+(default 30) — exceedance = FAIL; (c) mask change APPROVAL-WORTHY.
+
+**Negative case 1 — over-broad mask (area budget breach):** a mask blanketing
+1280×720 px of a 1920×1080 frame. Masked-out AREA = 1280 × 720 = 921,600 px²; frame
+AREA = 1920 × 1080 = 2,073,600 px²; ratio = 921,600 ÷ 2,073,600 = 0.4444 = **44.4%**
+> 30% budget → **validation FAIL**, measured percentage vs budget reported. (Trap
+noted: 66.7% is the per-DIMENSION ratio — 1280/1920 × 720/1080 each = 0.667 — the
+AREA ratio compounds: 0.667 × 0.667 = 0.444. Only the area figure is compared to the
+budget.) The abuse path (mask away the hard parts) is closed by the budget.
+
+**Negative case 2 — mask excluding a declared critical region:** a mask that covers the
+overlay chrome area but excludes the subject tab's bounding box (a declared critical
+region from the beat's plan geometry). Subset assertion FAILS: masks must be a SUBSET
+of declared non-critical regions; excluding a critical region means the exact tier
+cannot verify it. Concrete geometry (v1-v5 fixture frame, 1920×1080): subject tab
+bbox [x: 889.6, y: 0, w: 140.8, h: 48] (the UI Options button region from HANDOFF §3
+WARNING); mask region [x: 0, y: 0, w: 1920, h: 1080] claims to mask it but the critical
+region is inside → subset assertion FAIL.
+
+**Negative case 3 — 100% bare mask (schema-bound rejection):** a mask covering the
+ENTIRE frame (masked-out area = 100%) is rejected at VALIDATION time by the schema
+itself: `mask_area_budget_pct` carries `maximum: 30` in shot-plan.schema.json, so a
+beat declaring a bare-frame mask fails the schema bound before any runtime budget
+check runs (state both layers: schema bound `maximum: 30`, then the runtime budget
+check — the schema rejects earlier and harder).
+
+**Negative case 4 — EMPTY `critical_regions` + a 29.9% mask:** a beat with an empty
+`critical_regions` array and a mask covering 29.9% of the frame passes the area check
+numerically, but MUST FAIL: exact/hybrid beats require a NON-EMPTY `critical_regions`
+array — with no declared critical regions the subset assertion is vacuously true
+(masks are trivially a subset of nothing), which is precisely the mask-away-the-hard-
+parts abuse the budget exists to prevent. Empty critical regions on an exact/hybrid
+beat = validation FAIL.
+
+**Approval-identity rule (worked FAIL row):** every approval-worthy event records
+`approved_by` ∈ {user, leader} AND an `approval_ref` that resolves to a real artifact
+(e.g. `.agents/approver/<slug>-tracking.md` iteration). A threshold delta between
+golden generations WITHOUT a matching approval record = FAIL:
+
+| generation | reason_class | approved_by | approval_ref | Verdict |
+|---|---|---|---|---|
+| N | threshold_change | (empty) | (empty) | **FAIL** — approval identity missing; the delta is unrecorded and the cut is blocked |
+| N+1 | threshold_change | user | .agents/approver/threshold-change-tracking.md#iter-2 | PASS — approval recorded and resolvable |
+
+### 3.13 Overhead measurement
+
+Per-beat per-tier instrumented fields (gate-sets.json G-GOLDEN overhead): `tier_e_hashing_wall_ms`,
+`tier_p_metric_ms`, `tier_r_sampling_ms`, `tier_s_vision_call_ms`, `total_verification_ms`
+vs `beat_render_wall_ms`. Budget ≤ 15%; exceedance reported plainly with the DOMINANT
+COST named.
+
+**Pre-estimate BEFORE vision calls:** the per-beat verification cost is estimated from
+the sampling manifest BEFORE any Tier S vision call is spent; if the estimate breaches
+the budget, the vision calls are NOT made — the beat is flagged instead (spend-then-
+discover is the failure mode this step exists to prevent).
+
+**Exceedance = FAIL unless a recorded waiver.** An over-budget beat FAILS the overhead
+check unless a waiver is recorded with the approval identity (approved_by ∈ {user,
+leader}); a silent pass-through is forbidden.
+
+**Fan-out is BOUNDED, not per-sample.** Adaptive sampling yields ~21 samples/beat
+(~70 across v5's 2010 frames — HANDOFF §3 + the sampling-manifest shape in §3.9); a
+per-SAMPLE vision-call policy would spend ~21 calls/beat ≈ 31,500 ms/beat — roughly
+7× the bounded worst case, and up to ~10-15× on longer beats where the 30-frame
+baseline yields more sample points. The ≤3-keyframes/beat bound (§3.10) is therefore
+visibly load-bearing: the table's Tier S column prices ONE call/beat (1,500 ms — the
+typical case); the bounded worst case is 3 calls = 4,500 ms/beat; the unbounded
+per-sample case is the breach the bound exists to prevent.
+
+**Cost table over the ACTUAL v1-v5 fixture inventory (file sizes MEASURED tonight via
+stat; frame counts from HANDOFF §3; durations from HANDOFF §3; per-tier ms ESTIMATED
+at a stated throughput assumption, labeled honestly):**
+
+| Fixture | Size (B, MEASURED) | Frames (HANDOFF §3) | Duration (s) | Beats | Tier E est. (ms) | Tier R est. (ms) | Tier P est. (ms) | Tier S est. (ms) | Total est. (ms) | Budget 15% of render (ms) | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| prod (v1) | 3,075,656 | 1341 f | 44.7 | 9 (HANDOFF §3) | 40 | 20 | 900 | 13,500 | 14,460 | 6705 | **EXCEEDS (est.)** — dominant cost: Tier S ≈ 93% of total (13,500/14,460) |
+| prod-v2 (v2) | 3,942,562 | 2490 f | 83.0 | 1 (one-shot, HANDOFF §3) | 75 | 37 | 100 | 1500 | 1712 | 12,450 | PASS (est.) |
+| prod-v3 (v3) | 2,367,558 | 2010 f | 67.0 | 1 (one-shot, HANDOFF §3) | 60 | 30 | 100 | 1500 | 1690 | 10,050 | PASS (est.) |
+| prod-v5 (v5 full) | 2,468,574 | 2010 f | 67.0 | 1 (one-shot, HANDOFF §3) | 60 | 30 | 100 | 1500 | 1690 | 10,050 | PASS (est.) |
+| prod-v5-trim12 | 2,161,800 | 1650 f | 55.0 | 1 (one-shot trim, HANDOFF §3) | 50 | 25 | 100 | 1500 | 1675 | 8250 | PASS (est.) |
+
+Estimate basis (every cell follows from it): Tier E ≈ 30 ms per 1000 frames
+(masked-region hashing — E = frames ÷ 1000 × 30); Tier R ≈ 15 ms per 1000 frames
+(scene sampling — R = frames ÷ 1000 × 15); Tier P ≈ 100 ms per beat (SSIM/dhash on
+representative frames — P = beats × 100); Tier S ≈ 1500 ms per beat (vision call,
+dominant cost when present — S = beats × 1500). Beat counts: v1 = 9 (HANDOFF §3,
+"9 beats"); v2/v3/v5/trim12 = 1 each (HANDOFF §3 documents v2/v3 as "one-shot"; v5
+full and trim12 are a single continuous stream-copy pair — per-fixture assumption
+"1 beat" labeled here explicitly). Budget column = 15% × duration in ms. Worked
+cells (v1): E = 1341/1000 × 30 = 40.2 → 40; R = 1341/1000 × 15 = 20.1 → 20;
+P = 9 × 100 = 900; S = 9 × 1500 = 13,500; total = 14,460. **MEASURED numbers land
+at activation step 10's film/goldens verification against the v5 known-good cut** —
+every per-tier ms above is ESTIMATED at the stated throughput; only file sizes are
+MEASURED (stat, read-only, tonight). Do not present estimates as measurements. The v1 row
+deliberately demonstrates the exceedance-reporting shape: reported plainly, dominant
+cost named (Tier S); the disclosed remedy class is Tier-S sampling reduction via the
+per-beat `semantic_checklist` config (approval-worthy, never silent). MEASURED
+numbers land at activation step 10 and re-judge this row. All other rows PASS (est.)
+as computed.
 
 ---
 
@@ -320,7 +627,7 @@ daemon changes (A §4.2), so its verification is fully static:
 | Contact sheet inlined | grep `data:image/png;base64` → ≥ 1 hit | present |
 | Zero external URLs | `grep -oE 'https?://[^"'"'"' >)]+' preview.html` → empty | empty (the app's Bootstrap CDN lives in the PRODUCT, not the page — HANDOFF §5) |
 | No remote scripts | `grep -c '<script'` → 0 | 0 |
-| Single self-contained file | one `.html`, few MB (mp4 + sheet inflate it ~4-6 MB) | e.g. v1 = 4,362,785 B, v2 = 5,853,096 B |
+| Single self-contained file | one `.html`, few MB (mp4 + sheet inflate it ~4-6 MB) | e.g. v1 = 4,362,785 B, v2 = 5,850,996 B |
 
 **TONIGHT (pre-run evidence, §6c): both retained lab previews pass all five checks.**
 The shape the team must reproduce is proven by the v1-v5 artifacts themselves.
@@ -374,9 +681,10 @@ the first eyed cut.
 
 ## 5. Morning-Review Checklist for the User
 
-Everything below is checkbox-shaped for direct use. Read order, decisions, spot-checks,
-approval gate, and what approval triggers. Time budget ≈ 30-45 min (A is 761 lines; the
-rest is spot-checks).
+Everything below is checkbox-shaped for direct use. Read order, **7 decision blocks**
+(OQ1, OQ2, OQ4, OQ-B1, OQ-B2, OQ-B3, OQ-B4 — OQ3 resolved by user ruling
+2026-11-12), spot-checks, approval gate, and what approval triggers. Time budget
+≈ 30-45 min (A is 900 lines; the rest is spot-checks).
 
 ### 5.1 Read
 
@@ -398,18 +706,13 @@ rest is spot-checks).
       **Deny branch (OQ1 = deny):** strip `view-views` from producer+editor metas (no
       privileged grant), skip step 2b entirely, delivery degrades to artifact paths instead
       of preview URLs — the team can still produce and gate, but cannot mint preview URLs.
-- [ ] **OQ2 — subject-project registration (verification-class per the fix-round
-      direction — A §14 OQ2 remains a verify-at-step-1 recommendation, not a
-      reclassified verification-class item; not a blocking decision item; record the
-      result, do not block activation on it).** Is the subject repo (e.g.
-      `/Users/nguyenminhkha/All/Code/Yedda/frontend-engine`) registered as an ensemble
-      PROJECT in this install? **VERIFY at activation step 1** (project list via API/DB
-      read; register if absent — operator action, not code). Without it, the `planning`
-      root has no shortname to resolve and Channel B has no workdir.
-- [ ] **OQ3 — golden storage.** Film goldens in the lab with sha256 manifests committed
-      in-repo (A §6.3, §3 above)? **Recommend: LAB + SHA-MANIFESTS IN-REPO** — determinism
-      evidence without binary repo bloat (~2-8 MB/beat-clip/generation). Re-open only if a
-      remote CI must run away from this machine.
+- [ ] **OQ2 — subject-project registration (verification-class per A §14 —
+      RECLASSIFIED iteration 2, NOT user-decision-class; kept listed for traceability,
+      no approval gate; do not block activation on it).** Verify/register the subject
+      repo (e.g. `/Users/nguyenminhkha/All/Code/Yedda/frontend-engine`) as an ensemble
+      project — step 1 of §12 carries the default: verify via API/DB read, register if
+      absent (operator action, not code). Without it, the `planning` root has no
+      shortname to resolve and Channel B has no workdir.
 - [ ] **OQ4 — direct-MP4 daemon deltas (V1-V5, A §4.3).** Land now, or preview-page-only v1?
       **Recommend: PREVIEW-PAGE-ONLY FOR v1, DEFER V1-V5** — zero daemon change; you can
       watch tonight-shaped output (§4.1 evidence); land V1-V5 before any sharing beyond
@@ -456,15 +759,16 @@ rest is spot-checks).
 ```bash
 cd /Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble-wt-video-team-scaffold
 git status --short
-# expect: ` M .gitignore` + 3 ` M` pin files + `?? .agents/shared/planning/video-team/`
-#         (the directory entry — test-plan.md does NOT appear as its own porcelain line
-#         because the directory is already untracked) + `?? agents/video-{capturer,editor,
-#         producer,verifier}/` — nothing else. Snapshot-pin pack: STOPPED per OQ-B4 (A §14) —
-#         the pin is NOT extended; the four video metas keep snapshot_enabled: true; the red
-#         at test_snapshot_tools.py:1835 is pre-existing-debt, not scaffold-caused. No fifth
-#         modified file is expected; if one appears, re-check before assuming it is the pin.
+# expected SHAPE (re-derive with git status — the tree is concurrent; do not trust a
+# memorized list): the scaffold set (sanctioned deltas + the video trees) plus any
+# concurrent dev-1/approver edits; what matters is that the SANCTIONED files are the
+# only scaffold-side modifications and the two approver artifacts are not yours.
+# Snapshot-pin pack: STOPPED per OQ-B4 (A §14) — the pin is NOT extended; the four
+# video metas keep snapshot_enabled: true; the red at test_snapshot_tools.py:1835 is
+# pre-existing-debt, not scaffold-caused.
 git diff --stat
-# expect: exactly 4 files, +39/−23 lines (3 pin files + .gitignore, §6c)
+# expected SHAPE: the sanctioned delta files (3 pin packs + .gitignore) dominate;
+# count and ±lines drift as dev-1 lands — re-derive, don't trust a number.
 git check-ignore -v .agents/shared/planning/video-team/data/gate-sets.json
 # expect: NO OUTPUT, exit 1 — the 7 contracts are NOT ignored (the one negation works;
 #         check-ignore exit 1 = not-ignored, so `echo $?` right after must print 1)
@@ -489,6 +793,16 @@ for a in ("video-producer","video-capturer","video-editor","video-verifier","wor
 PY
 grep -c '^```' agents/video-producer/skills-template/video-project-ops.md
 # expect: an EVEN number (fence parity — the odd-fence guard's shape)
+
+# --- CONTRACT ASSERTIONS (demonstrate before activation — tonight-runnable, daemon-free) ---
+python3 -c "import json;d=json.load(open('.agents/shared/planning/video-team/data/gate-sets.json'));print(d['gates']['G-GOLDEN']['tiers']['perceptual']['calibration']['uncalibrated_fallback'])"
+# expect: {'ssim_min': 0.995, 'dhash_hamming_max': 2}
+python3 -c 'import json;d=json.load(open(".agents/shared/planning/video-team/data/shot-plan.schema.json"));print(d["$defs"]["beat"]["properties"]["comparison_thresholds"]["properties"]["representative"]["properties"]["mode"]["enum"])'
+# expect: ['scene', 'every_n', 'adaptive'] — enum CONTAINS 'adaptive'
+python3 -c 'import json;d=json.load(open(".agents/shared/planning/video-team/data/shot-plan.schema.json"));print(d["$defs"]["beat"]["properties"]["mask_area_budget_pct"]["maximum"])'
+# expect: 30 (schema-bound mask rejection)
+python3 -c "import json;d=json.load(open('.agents/shared/planning/video-team/data/lane-profiles.json'));print('_note' in d['profiles']['film+goldens']['comparison_thresholds_default'])"
+# expect: True — the film lane carries the calibration-seed note (PROPOSED INITIAL VALUES / calibration seeds, superseded by derived thresholds at mint; uncalibrated fallback 0.995/2)
 ```
 
 ### 5.4 Approve the activation plan
@@ -672,7 +986,7 @@ tests/unit/test_video_verifier_agent.py   — ABSENT (  "  )
 ```
 prod/preview.html      (4,362,785 B): 1× data:video/mp4;base64, 1× data:image/png;base64,
                        0 external http(s) refs, 0 <script> tags
-prod-v2/preview.html   (5,853,096 B): same shape — all five §4.1 checks pass
+prod-v2/preview.html   (5,850,996 B): same shape — all five §4.1 checks pass
 ```
 
 ### 6e. Tonight's exact commands (reproducibility record)
@@ -748,7 +1062,10 @@ patterns over the 22 in-scope B files.
 | V1-V5 deltas + P8 deliverable-size assertion (32 MiB, MAX_SERVED_BYTES — derived threshold, not a hand number) vs 32 MiB serve cap | A §4.3 V4 row (~:332) + `data/preflights.json` (P8) + A §5.1 P8 row (~:360, advisory) + A §12 step 7 (~:664-666, advisory) |
 | Eyes protocol (contact sheet + named verdicts) | B `agents/video-verifier/skills-template/video-gates.md`; B verifier `rule.md` Cardinal #1 |
 | Duty-block byte-identity + pin bumps | tonight's §6c (sha16 `5e376731cf9d977f` × 5 files) |
-| OQ1-OQ4, OQ-B1, OQ-B2, OQ-B3, OQ-B4 | A §14 + addendum (corrected 2026-11-11, now 767 lines); §5.2 above |
+| Three-tier golden model (E/P/R) + per-beat comparison config at mint + adaptive sampling + mask validation + overhead budget | user ruling 2026-11-12 (amendment 2); §3.9-§3.13; A §6.3 |
+
+| OQ1, OQ2, OQ4, OQ-B1, OQ-B2, OQ-B3, OQ-B4 (OQ3 resolved by user ruling 2026-11-12) | A §14 + addendum (now 900 lines); §5.2 above |
+| Three-tier golden model (E exact / P perceptual / R representative) + per-beat comparison config at mint + Option A storage (lab binaries + in-repo manifests) | user ruling 2026-11-12; §3, §2.2 G-GOLDEN row, A §6.3 |
 | Snapshot pin STOPPED (OQ-B4) — test_snapshot_tools.py:1835 RED at base, pre-existing-debt, pin NOT extended, snapshot_enabled stays true ×4 | A §14 OQ-B4 |
 | HyperFrames license/cost/capture facts (only E3 semantics referenced here) | A §3.2 — BRIEF-SOURCED/UNVERIFIED: E1 hard-requires reading the upstream license/fee schedule before any film-lane commitment; nothing in C leans on them unverified |
 | Sanctioned deltas (.gitignore negation + 3 pin packs + pok/nest-report grants) | A §13; tonight's §6c `git diff` |

@@ -25,6 +25,9 @@ re-states them.
 ## Failure modes I expect
 
 - Gate harness fault (exit 2+) → report as harness fault, never as a product verdict.
-- Goldens missing on a film cut → fail the cut (provenance incomplete); the golden
-  storage decision rides OQ3 (default: goldens in the lab, sha manifests in-repo).
+- Goldens missing on a film cut → BLOCKED-WITH-A-PATH: propose a re-mint with a
+  reason class, the human approves, re-mint records generation N+1 + approval ref.
+  OQ3 RESOLVED by user ruling (Option A: lab binaries + in-repo manifests).
+- Tier S semantic spot-check: representative frames via image-reader/explain_image
+  against the per-beat semantic_checklist; evidence for human approval, miss surfaced loudly.
 - Contact sheet unreadable/missing → fail the mission; eyes are not optional.

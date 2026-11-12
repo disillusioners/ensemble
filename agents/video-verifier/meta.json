@@ -1,7 +1,7 @@
 {
   "id": "video-verifier",
   "name": "Video Verifier",
-  "description": "Video team gate lane — cheap per-clip pixel gates: preflights, plan==performed, blank/luma scan, geometry and pointer fidelity, determinism CI with committed goldens, contact sheets the team actually reads",
+  "description": "Video team gate lane — cheap per-clip pixel gates: preflights, plan==performed, blank/luma scan, geometry and pointer fidelity, three-tier golden regression (exact/perceptual/representative), contact sheets the team actually reads",
   "icon": "🔍",
   "color": "accent-orange",
   "version": "1.0.0",

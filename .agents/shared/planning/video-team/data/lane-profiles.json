@@ -8,7 +8,8 @@
       "goldens": false,
       "determinism_ci": false,
       "compose": "stream-copy-first",
-      "iteration_cap_per_beat": 3
+      "iteration_cap_per_beat": 3,
+      "comparison_default": "none"
     },
     "film+goldens": {
       "description": "Strict. Customer-facing cuts. Everything in fast-demo plus determinism CI, goldens, 3-launch re-capture, film tolerances.",
@@ -18,7 +19,36 @@
       "determinism_ci": true,
       "three_launch_recapture": true,
       "compose": "stream-copy-first",
-      "iteration_cap_per_beat": 2
+      "iteration_cap_per_beat": 2,
+      "golden_tier_model": "hybrid",
+      "comparison_default": "hybrid",
+      "comparison_thresholds_default": {
+        "ssim_min": 0.97,
+        "dhash_hamming_max": 6,
+        "representative": {
+          "mode": "adaptive",
+          "boundary_detector": {
+            "metric": "ssim_drop",
+            "threshold": null
+          },
+          "action_windows": {
+            "source": "capture_action_log",
+            "types": [
+              "pointer travel",
+              "press",
+              "drag",
+              "drop",
+              "popup open",
+              "row edits"
+            ],
+            "pad_frames": 3
+          },
+          "baseline_interval_frames": 30,
+          "include_first_last": true,
+          "reduced_long_edge_px": 480
+        },
+        "_note": "PROPOSED INITIAL VALUES / calibration seeds \u2014 superseded by derived thresholds at mint (calibration: mean - k*sigma, k=3, min 5 samples). Uncalibrated fallback (fail-closed) = ssim_min 0.995 / dhash_hamming_max 2."
+      }
     }
   }
 }

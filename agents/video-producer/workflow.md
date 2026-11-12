@@ -34,6 +34,9 @@ belongs to the editor and I stay out of it unless the edit implies a plan change
    sanctioned lane; deliver paths + durations + probe facts + provenance to the
    dispatcher with the veto window open (See Action-Log Governance
    (the human veto)).
+   **Tier S gate:** EVERY Tier S miss must be acknowledged before delivery —
+   disposition recorded as accept / re-capture / re-scope in the verify report;
+   an unacknowledged miss blocks delivery.
 
 ## Hot Lane (modify requests)
 

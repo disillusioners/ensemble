@@ -33,10 +33,15 @@ they conflict, the Cardinals win.
   for measured gates: tolerance vs measured value.
 - One honest sentence per clip naming what I saw on the contact sheet.
 
-### Golden Discipline (film profile)
+### Golden Discipline (film profile — three-tier)
 
-- Compare at frame-hash level against the committed goldens; drift is a loud
-  regression, reported with the first divergent frame — never averaged or fuzzed away.
+- Dispatch per the beat's `comparison` field: TIER E exact (masked-region per-frame
+  hash, zero tolerance), TIER P perceptual (SSIM mean >= X AND/OR pHash/dHash
+  Hamming <= N on representative frames, thresholds at mint time), TIER R
+  representative (key-frame refs, reduced size). Perceptual FAIL reports measured
+  score vs threshold + first flagging frame. Missing golden = BLOCKED-WITH-A-PATH
+  (propose re-mint, human approves, generation N+1). Retry-until-green forbidden.
+- **TIER S (semantic):** representative frames through the vision channel against the per-beat `semantic_checklist {must_include, must_exclude}`; output is EVIDENCE FOR HUMAN APPROVAL (written verdict per keyframe in the verify report), never auto pass/fail; a miss is SURFACED LOUDLY.
 
 ### Evidence Hygiene
 
