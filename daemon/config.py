@@ -5167,6 +5167,15 @@ def _seed_phase1_roots() -> dict[str, "LiveViewsRootConfig"]:
     }
 
 
+#: Default media-serve cap (2 GiB) for the Range-capable live-view media
+#: lane. SINGLE source of truth: the ``LiveViewsConfig.max_media_bytes``
+#: Field default, both resolver fallbacks, and the router's no-service
+#: fallback all read this constant. Defined BEFORE ``LiveViewsConfig``
+#: (the Field default is evaluated at class-creation time on import, so
+#: a later definition would raise NameError).
+DEFAULT_LIVE_VIEWS_MAX_MEDIA_BYTES: int = 2 * 1024 * 1024 * 1024
+
+
 class LiveViewsConfig(BaseSettings):
     """Configuration for the live-view subsystem (Phase 1).
 
@@ -5275,7 +5284,7 @@ class LiveViewsConfig(BaseSettings):
         ),
     )
     max_media_bytes: int = Field(
-        default=2 * 1024 * 1024 * 1024,
+        default=DEFAULT_LIVE_VIEWS_MAX_MEDIA_BYTES,
         ge=1,
         description=(
             "Separate size cap for media (video/audio) files served via "
@@ -7890,10 +7899,16 @@ def _resolve_live_views_max_media_bytes(ens_value: str | None, yaml_value: Any) 
     """Pure resolver for ``ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES``.
 
     Precedence: env > yaml (``live_views.max_media_bytes``) >
-    default 2 GiB. Empty-string safe; non-int or <=0 raises
-    :class:`ValueError` naming the env. The ``ge=1`` floor is
-    enforced by ``LiveViewsConfig.max_media_bytes`` at model
-    validation (fail-fast at boot).
+    :data:`DEFAULT_LIVE_VIEWS_MAX_MEDIA_BYTES` (2 GiB). Empty-string
+    safe; non-int or <=0 raises :class:`ValueError` naming the env.
+    The ``ge=1`` floor is enforced by
+    ``LiveViewsConfig.max_media_bytes`` at model validation
+    (fail-fast at boot).
+
+    Every non-``int`` yaml value raises — including floats
+    (``4096.9`` / ``4096.0``), ``bool`` and containers. There is no
+    ``int()`` coercion: silently truncating a float would ship a cap
+    the operator never wrote.
     """
     cleaned = _clean_env_value(ens_value)
     if cleaned is not None:
@@ -7905,10 +7920,10 @@ def _resolve_live_views_max_media_bytes(ens_value: str | None, yaml_value: Any) 
             )
         return val
     if yaml_value is None:
-        return 2 * 1024 * 1024 * 1024
+        return DEFAULT_LIVE_VIEWS_MAX_MEDIA_BYTES
     if isinstance(yaml_value, str):
         if not yaml_value.strip():
-            return 2 * 1024 * 1024 * 1024
+            return DEFAULT_LIVE_VIEWS_MAX_MEDIA_BYTES
         val = _parse_service_tool_int(
             yaml_value, env_name="live_views.max_media_bytes"
         )
@@ -7930,20 +7945,13 @@ def _resolve_live_views_max_media_bytes(ens_value: str | None, yaml_value: Any) 
                 f"— expected a positive integer"
             )
         return yaml_value
-    # float etc
-    try:
-        val = int(yaml_value)
-    except (TypeError, ValueError):
-        raise ValueError(
-            f"Invalid live_views.max_media_bytes value {yaml_value!r} "
-            f"— expected an integer"
-        ) from None
-    if val <= 0:
-        raise ValueError(
-            f"Invalid live_views.max_media_bytes value {yaml_value!r} "
-            f"— expected a positive integer"
-        )
-    return val
+    # Anything else (float, list, dict, …) is a CONFIG ERROR — the
+    # boot must fail loudly. ``int(4096.9)`` silently truncating to
+    # 4096 would ship a cap the operator never wrote.
+    raise ValueError(
+        f"Invalid live_views.max_media_bytes value {yaml_value!r} "
+        f"— expected an integer"
+    )
 
 
 def _install_service_tool_enabled(value: bool) -> None:
@@ -8859,9 +8867,6 @@ def load_config(config_path: str | None = None) -> Config:
     _lv_yaml_block = processed_config.get("live_views")
     _lv_yaml_block = _lv_yaml_block if isinstance(_lv_yaml_block, dict) else {}
     _lv_yaml_max = _lv_yaml_block.get("max_media_bytes")
-    # strip None keys conceptually: treat None as unset
-    if _lv_yaml_max is None:
-        _lv_yaml_max = None
     _lv_resolved_max = _resolve_live_views_max_media_bytes(
         os.environ.get(ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES),
         _lv_yaml_max,

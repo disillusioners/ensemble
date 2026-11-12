@@ -279,6 +279,8 @@ class TestFullFileGet:
         assert resp.headers["content-length"] == str(len(data))
         assert resp.headers.get("accept-ranges") == "bytes"
         assert "content-range" not in resp.headers
+        # F6: nosniff on the 200 media response (MIME-sniff XSS guard).
+        assert resp.headers["x-content-type-options"] == "nosniff"
         assert resp.content == data
 
     def test_webm_full(self, media_root_dir):
@@ -319,6 +321,9 @@ class TestRangedGet:
         assert resp.status_code == 206
         assert resp.headers["content-range"] == f"bytes 0-99/{size}"
         assert resp.headers["content-length"] == "100"
+        # F6: nosniff rides the 206 partial path too (FileResponse
+        # inherits the caller's _HARDENING_HEADERS dict).
+        assert resp.headers["x-content-type-options"] == "nosniff"
         assert resp.content == data[0:100]
 
     def test_mid_chunk(self, media_root_dir):
@@ -456,6 +461,47 @@ class TestRangedGet:
         assert resp.headers["content-range"] == f"bytes 0-99/{size}"
         assert resp.content == data[0:100]
 
+    def test_dash_part_is_ignored_not_416(self, media_root_dir):
+        """A bare ``-`` part is IGNORED (Starlette skip list), not 416.
+
+        Starlette's ``_parse_ranges`` skips ``not part or part == "-"``,
+        so ``bytes=0-99,-`` and ``bytes=-,0-99`` BOTH serve the single
+        valid ``0-99`` range as 206. The pre-flight must mirror that
+        skip list — its old ``first == "" and last == ""`` branch
+        treated the bare ``-`` as unsatisfiable and answered 416,
+        contradicting Starlette and the helper's own
+        defer-what-we-cannot-classify contract.
+
+        Mutation that flips this RED: re-add the
+        ``first == "" and last == "" → _unsatisfiable_416(size)``
+        branch (i.e. drop the ``part == "-"`` skip) — both shapes
+        become 416.
+        """
+        c, data, size, url = self._ctx(media_root_dir)
+        for header in ("bytes=0-99,-", "bytes=-,0-99"):
+            resp = c.get(url, headers={"Range": header})
+            assert resp.status_code == 206, header
+            assert resp.headers["content-range"] == f"bytes 0-99/{size}", header
+            assert resp.content == data[0:100], header
+
+    def test_reversed_bounds_defers_to_400(self, media_root_dir):
+        """Reversed bounds inside a list are Starlette's 400, not our 416.
+
+        ``bytes=0-99,5-3`` — the second part is reversed, which
+        Starlette's ``_parse_range_header`` classifies as
+        ``MalformedRangeHeader`` → 400 for the whole request. The
+        pre-flight only answers provably-UNSATISFIABLE shapes.
+
+        Mutation that flips this RED: restore the
+        ``elif last != "" and int(last) < int(first): return
+        _unsatisfiable_416(size)`` branch — the response becomes 416
+        with a ``Content-Range`` header.
+        """
+        c, data, size, url = self._ctx(media_root_dir)
+        resp = c.get(url, headers={"Range": "bytes=0-99,5-3"})
+        assert resp.status_code == 400
+        assert "content-range" not in resp.headers
+
     def test_multi_range_two(self, media_root_dir):
         c, data, size, url = self._ctx(media_root_dir)
         resp = c.get(url, headers={"Range": "bytes=0-1,4-5"})
@@ -470,10 +516,28 @@ class TestRangedGet:
         assert "multipart/byteranges" in resp.headers["content-range"]
 
     def test_malformed_reverse(self, media_root_dir):
+        """Reversed bounds are Starlette's 400 — NOT our 416.
+
+        ``bytes=5-3`` parses as ``start=5, end=4``; Starlette's
+        ``_parse_range_header`` raises ``MalformedRangeHeader`` for
+        ``start > end`` and answers 400. The media pre-flight only
+        answers PROVABLY UNsatisfiable shapes (suffix <= 0 or longer
+        than the file, start at/past EOF), so it defers here.
+
+        Behaviour change (review fix round, F1): this pin previously
+        asserted 416 + ``bytes */{size}`` — the pre-flight's old
+        ``last < first → unsatisfiable`` branch contradicted both
+        Starlette and our own defer-what-we-cannot-classify contract.
+        It emitted no ``Content-Range`` at all (a plaintext 400).
+
+        Mutation that flips this RED: re-add
+        ``elif last != "" and int(last) < int(first): return
+        _unsatisfiable_416(size)`` in ``_media_preflight``.
+        """
         c, data, size, url = self._ctx(media_root_dir)
         resp = c.get(url, headers={"Range": "bytes=5-3"})
-        assert resp.status_code == 416
-        assert resp.headers["content-range"] == f"bytes */{size}"
+        assert resp.status_code == 400
+        assert "content-range" not in resp.headers
 
     def test_malformed_garbage(self, media_root_dir):
         c, data, size, url = self._ctx(media_root_dir)
@@ -526,6 +590,76 @@ class TestHeadMedia:
         assert resp.headers["content-length"] == str(len(data))
         assert resp.headers.get("accept-ranges") == "bytes"
         assert resp.content == b""
+
+    def test_public_head_media_csp_matches_public_get(
+        self, tmp_path, pub_cipher, pub_store, pub_passcode_service
+    ):
+        """All FOUR paths on the ``reports`` root carry the same CSP.
+
+        ``reports`` is the only root the raw-lane sandbox CSP applies
+        to (``_raw_lane_csp_headers``), so a mismatch is observable:
+        the public HEAD media branch used to build its header dict
+        from ``_HARDENING_HEADERS`` alone and OMITTED the CSP, while
+        public GET / direct GET / direct HEAD all included it —
+        ``HEAD /views/public/reports/x.mp4`` answered
+        ``Content-Security-Policy: None``.
+
+        Mutation that flips this RED: drop
+        ``**_raw_lane_csp_headers(root_name)`` from ``_public_head``'s
+        granted-media branch — the public-HEAD value becomes ``None``.
+        """
+        media_dir = tmp_path / "reports-root"
+        media_dir.mkdir()
+        (media_dir / "clip.mp4").write_bytes(b"\x00" * 64)
+
+        rel = "clip.mp4"
+        pub_store.upsert(
+            "reports", rel, wrapped_passcode=pub_cipher.wrap(b"secret"), generation=1
+        )
+        cfg = LiveViewsConfig()
+        cfg.roots["reports"] = LiveViewsRootConfig(
+            type="filesystem",
+            path=str(media_dir),
+            allowed_extensions=["mp4"],
+        )
+        service = LiveViewsService(config=cfg)
+        app = FastAPI()
+        app.include_router(build_router())
+        app.state.live_views_service = service
+        app.state.view_passcode_service = pub_passcode_service
+        app.state.view_passcode_cipher = pub_cipher
+        app.state.view_passcode_grant_ttl_seconds = 86400
+        from daemon.services.view_passcode_service import VerifyRateLimiter
+
+        app.state.verify_rate_limiter = VerifyRateLimiter(
+            capacity=50, refill_per_minute=50
+        )
+        c = TestClient(app)
+        token = issue_grant_cookie(
+            cipher=pub_cipher,
+            root_name="reports",
+            rel_path=rel,
+            generation=1,
+            ttl_seconds=86400,
+        )
+        c.cookies.set(GRANT_COOKIE_NAME, token.decode("ascii"))
+
+        expected = "sandbox allow-scripts"
+        public_get = c.get(f"/views/public/reports/{rel}")
+        public_head = c.head(f"/views/public/reports/{rel}")
+        direct_get = c.get(f"/views/reports/{rel}")
+        direct_head = c.head(f"/views/reports/{rel}")
+
+        for label, resp in (
+            ("public GET", public_get),
+            ("public HEAD", public_head),
+            ("direct GET", direct_get),
+            ("direct HEAD", direct_head),
+        ):
+            assert resp.status_code == 200, label
+            assert (
+                resp.headers.get("content-security-policy") == expected
+            ), f"{label}: {resp.headers.get('content-security-policy')!r}"
 
 
 # ===========================================================================

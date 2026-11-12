@@ -99,6 +99,23 @@ intervening growth). The same shape is used in
 ``daemon/routers/tmp_images.py`` for the sidecar-MIME
 substrate.
 
+TOCTOU RESIDUAL — media lane (ACCEPTED 2026-11-12, reviewer
+APPROVE, documented not fixed): (a) the media pre-flight's
+``O_NOFOLLOW`` fd is CLOSED before ``FileResponse`` re-stats and
+re-opens the file BY PATH — without ``O_NOFOLLOW`` — so a
+reopen window exists; the pre-flight's guarantees are the cap +
+the 416 decision, not the streamed bytes' identity. (b) It is
+NOT remotely exploitable in this threat model: reaching it
+needs local write access inside a sub-millisecond window between
+our ``close()`` and Starlette's ``stat()``/``open()``, and
+intermediate-directory swaps are a pre-existing class shared
+with every path-based reader on the daemon. (c) The principled
+close is an fd-pinned ``FileResponse`` subclass (hand it the
+already-open fd + ``stat_result`` so no path reopen happens) —
+filed as its own follow-up, deliberately NOT done here. (d) The
+NON-media lane is structurally immune: ``_fd_read`` reads from
+ONE pinned ``O_NOFOLLOW`` fd end-to-end.
+
 Size rationale (~2914 lines, refreshed 2026-11-08): this router is
 the sole HTTP surface of the live-views subsystem; route-registration
 order is load-bearing (mounted directly on ``app`` before the SPA
@@ -119,6 +136,8 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
+
+from daemon.config import DEFAULT_LIVE_VIEWS_MAX_MEDIA_BYTES
 
 if TYPE_CHECKING:
     from daemon.auth.context import AuthContext
@@ -493,8 +512,12 @@ def _fd_read(path: "os.PathLike[str] | str", max_bytes: int) -> bytes | None:
         size = st.st_size
         if size > max_bytes:
             logger.warning(
+                # BASENAME only — the surrounding docstring forbids
+                # path-disclosure log lines; the service-layer
+                # WARNING at ``_resolve_under_root`` already carries
+                # root/rel/size/cap for correlation.
                 "[LiveViews] read-time over-cap: path=%s size=%d cap=%d",
-                path,
+                os.path.basename(os.fspath(path)),
                 size,
                 max_bytes,
             )
@@ -543,6 +566,25 @@ def _fd_read(path: "os.PathLike[str] | str", max_bytes: int) -> bytes | None:
 _RANGE_PART_PATTERN = re.compile(r"^(\d*)-(\d*)$")
 
 
+def _unsatisfiable_416(size: int) -> Response:
+    """The RFC-7233 §4.4 unsatisfiable-range response.
+
+    Note the ``bytes `` token in ``Content-Range``: Starlette's own
+    ``RangeNotSatisfiable`` handler emits ``Content-Range: */<size>``
+    (token omitted), which is why the media lane pre-empts the shapes
+    it can prove unsatisfiable and answers them here instead.
+    """
+    return Response(
+        status_code=416,
+        headers={
+            **_HARDENING_HEADERS,
+            "Content-Range": f"bytes */{size}",
+            "Content-Length": "0",
+        },
+        media_type="text/plain; charset=utf-8",
+    )
+
+
 def _media_preflight(
     request: Request,
     resolved: "ResolvedTarget",
@@ -572,13 +614,14 @@ def _media_preflight(
     ones, so an unsatisfiable part anywhere in the list gets the
     compliant header instead of falling through to Starlette.
 
-    A part is unsatisfiable when it is ``"-"`` (no positions), a
+    A part is skipped exactly as Starlette skips it when it is empty or
+    a bare ``"-"`` (no positions). A part is UNSATISFIABLE when it is a
     zero/negative suffix (``-0``), a suffix longer than the file
-    (``-<size+1>`` and beyond), a start at or past EOF, or an
-    end before its start. Parsable-but-unsatisfiable is the ONLY
-    case answered here: a header with an unparsable part, or a
-    non-``bytes`` unit, returns ``None`` so Starlette keeps its
-    400 / ignore-part behaviour unchanged.
+    (``-<size+1>`` and beyond), or a start at or past EOF. ONLY
+    provably-unsatisfiable shapes are answered here: a reversed bound
+    (``5-3``, Starlette's ``MalformedRangeHeader`` 400), an unparsable
+    part, or a non-``bytes`` unit returns ``None`` so Starlette keeps
+    its 400 / ignore-part behaviour unchanged.
     """
     try:
         fd = os.open(
@@ -613,38 +656,34 @@ def _media_preflight(
             return None
         for part in value[6:].split(","):
             part = part.strip()
-            if not part:
+            if not part or part == "-":
+                # Mirror Starlette's ``_parse_ranges`` skip list: an
+                # empty part and a bare ``-`` are IGNORED, not
+                # unsatisfiable. 416ing them would answer a request
+                # Starlette serves (``bytes=0-99,-`` → 206).
                 continue
             match = _RANGE_PART_PATTERN.match(part)
             if match is None:
                 # Not a byte-range part we can interpret — defer.
                 return None
             first, last = match.group(1), match.group(2)
-            if first == "" and last == "":
-                unsatisfiable = True
-            elif first == "":
+            if first == "":
                 # Suffix form ``bytes=-N``: N must be positive, and
                 # an over-long suffix (N > size) is unsatisfiable
                 # too — Starlette rewrites it to ``start = size - N``
                 # (negative), so ITS ``0 <= start`` 416 fires first
                 # and omits the RFC-7233 ``bytes `` token. Strict
                 # ``>``: ``bytes=-<size>`` means "the whole file".
-                unsatisfiable = int(last) <= 0 or int(last) > size
-            else:
-                start = int(first)
-                unsatisfiable = start >= size or (
-                    last != "" and int(last) < start
-                )
-            if unsatisfiable:
-                return Response(
-                    status_code=416,
-                    headers={
-                        **_HARDENING_HEADERS,
-                        "Content-Range": f"bytes */{size}",
-                        "Content-Length": "0",
-                    },
-                    media_type="text/plain; charset=utf-8",
-                )
+                if int(last) <= 0 or int(last) > size:
+                    return _unsatisfiable_416(size)
+            elif last != "" and int(last) < int(first):
+                # Reversed bounds are ``MalformedRangeHeader`` in
+                # Starlette — its 400, not our 416. We only answer
+                # PROVABLY UNsatisfiable shapes.
+                return None
+            elif int(first) >= size:
+                # Start at or past EOF — provably unsatisfiable.
+                return _unsatisfiable_416(size)
         return None
     finally:
         try:
@@ -1920,7 +1959,7 @@ def _serve_resolved_target(
         max_bytes = (
             service.max_media_bytes
             if service is not None
-            else 2 * 1024 * 1024 * 1024
+            else DEFAULT_LIVE_VIEWS_MAX_MEDIA_BYTES
         )
         resp = _media_preflight(request, resolved, max_bytes)
         if resp is not None:
@@ -2570,6 +2609,7 @@ def build_router() -> APIRouter:
                 status_code=200,
                 headers={
                     **_HARDENING_HEADERS,
+                    **_raw_lane_csp_headers(root_name),
                     "Content-Type": resolved.content_type,
                     "Content-Length": str(resolved.size_bytes),
                     "Accept-Ranges": "bytes",
@@ -3320,7 +3360,7 @@ def build_router() -> APIRouter:
             max_bytes = (
                 service.max_media_bytes
                 if service is not None
-                else 2 * 1024 * 1024 * 1024
+                else DEFAULT_LIVE_VIEWS_MAX_MEDIA_BYTES
             )
             resp = _media_preflight(request, resolved, max_bytes)
             if resp is not None:
