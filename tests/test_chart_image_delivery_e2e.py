@@ -1502,15 +1502,8 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # ceremony, so the pinned content-sha256 moved with the real bytes.
     # Prior value ce96896142f568c480a2f92b9b92fa0775be641d877fa386205d8438d55b21b4.
     "agents/architect/rule.md": "ba53247b1e2095ba3776a7d23713c9b796927575647cb15e99842fe54b779a73",
-    # agents/ari/rule.md re-pinned 2026-11-12 (vsss — version-scoped
-    # snapshot spaces): the Never-Use-instance-Tools bullet now notes
-    # that each version resolves to its own snapshot space (vsss).
-    # Pure doc alignment with the spawn_instance tool docstring; no
-    # rule or behavioural change.
-    # Prior value 8063c9ce005d300f34b10fac2b81c3f00ca0756720cb05858dcc3e1a594a2e6d.
-    # Prior re-pin note: ari-pm-terminology-RESIDUAL (whole-file
-    # genericization).
-    "agents/ari/rule.md": "fc0a7542157d79d16011a48d7e79d31d33fe1376ca5fc5c694d47e670bcfdf10",
+    # agents/ari/rule.md re-pinned 2026-11-12 (ENSEMBLE-31 sonic team v1): opt-in Sonic Lane triage note inserted into the task-triage section; ain't a behaviour change. Prior value fc0a7542157d79d16011a48d7e79d31d33fe1376ca5fc5c694d47e670bcfdf10. Prior re-pin note: vsss — version-scoped snapshot spaces doc alignment.
+    "agents/ari/rule.md": "8d6ca1642a3426927d58a2a419327b0bf494af5a78e236cead1f9206700515f9",
     "agents/coder/soul.md": "6263b648cfee8eeb84bb90361687e45728bc8bdae60702e965a84a23a1b46968",
     # agents/developer/rule.md re-pinned 2026-11-12 (vsss — version-
     # scoped snapshot spaces): the 10b Spawn-citation contract bullet

@@ -1,0 +1,17 @@
+{
+  "id": "sonic-tester",
+  "name": "Sonic Tester",
+  "description": "Scoped test leaf — consumes the handoff artifact, runs blast-radius-scoped packs, returns a one-line verdict and (when load-bearing) a RESULTS file",
+  "icon": "🧪",
+  "color": "accent-green",
+  "version": "1.0.0",
+  "llm_model": "agentic",
+  "innate_skills": [],
+  "skill_injection": false,
+  "snapshot_enabled": true,
+  "tools": {
+    "allow": ["bash", "proc", "filesystem", "time", "self", "help", "context", "pok", "nest-report"],
+    "deny": ["instance", "service", "midflight", "shared_meta_kv", "infra", "mcp", "secrets"]
+  },
+  "team_members": []
+}

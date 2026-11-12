@@ -89,8 +89,8 @@ HOME_ORDER: tuple[str, ...] = ("rule.md", "workflow.md", "soul.md")
 #: 41 = 39 walk + 2 specials to 45 = 43 walk + 2 specials.  The pins
 #: RED without this — the count pin IS the "a new agent must carry the
 #: duty" tripwire (mutation leg M-P5-4).
-EXPECTED_TOTAL = 45
-EXPECTED_WALK = 43
+EXPECTED_TOTAL = 50
+EXPECTED_WALK = 48
 EXPECTED_SPECIALS = 2
 
 #: The underscore specials — the two dirs the id-collapsed walk skips.
@@ -197,7 +197,7 @@ SEAL_UNTOUCHED_BASE_VALUES: dict[str, str] = {
 #: aegis-lane agents' artifacts (+16 versioned files).  The COUNT is
 #: pinned so a NEW versioned artifact cannot appear silently.
 BASELINE_FILE = AGENTS_DIR / ".prompt-artifacts.sha256"
-BASELINE_EXPECTED_ENTRIES = 177
+BASELINE_EXPECTED_ENTRIES = 197
 
 
 # ---------------------------------------------------------------------------
