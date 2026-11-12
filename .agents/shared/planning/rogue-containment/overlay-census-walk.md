@@ -1,9 +1,22 @@
 # Overlay (pkill) guard — 16-lane sanctioned-lane census walk
 
-Rogue-containment component A/B. For each sanctioned lane, inspected
-actual kill/pkill/killall/fuser/systemctl usage at tip 715f4eedc and
-recorded PASS / FENCE / BLOCKED. Pattern set is FIXED (5 live + 6
-kill-like tokens); do NOT widen or narrow to make the walk pass.
+Rogue-containment component A/B (iter-1 hardened pattern set). For each
+sanctioned lane, re-inspected actual kill/pkill/killall/fuser/systemctl
+usage at tip 715f4eedc+ against the NEW pattern set and recorded
+PASS / FENCE / BLOCKED. Pattern set is FIXED; do NOT widen or narrow to
+make the walk pass.
+
+NEW pattern set (iter-1 D2a/D2c):
+  live name tokens: ensemble-prod, ensemble-daemon, ensemble-main,
+                    ensemble-demo, agents-ensemble
+  port tokens (word-boundary): \b9797\b, \b9798\b
+  kill-like verbs: pkill, killall, fuser, kill (command word only),
+                   xargs kill, systemctl (mutating verbs only)
+  systemctl mutating (gated): stop restart kill disable mask reload
+    daemon-reload enable start try-restart isolate
+  systemctl read-only (allowed): status show is-active list-units
+    list-unit-files cat is-enabled is-failed get-default help
+  false-positive guards: "skill " (no trigger), "19797" (no trigger)
 
 | # | Lane | Verdict | Notes |
 |---|------|---------|-------|
@@ -24,4 +37,4 @@ kill-like tokens); do NOT widen or narrow to make the walk pass.
 | 15 | Frozen entry points (run_app, run_tests_scrubbed) | PASS | no kill cmd |
 | 16 | Interpreter-certification fences | PASS | per-var scrub |
 
-Result: 15 PASS, 1 FENCE (boot_v2.sh — fence available via env overlay/ambient; not BLOCKED). No BLOCKED lanes. Fallback contract not triggered; no pin-i drop required.
+Result (re-walked against iter-1 pattern set): 15 PASS, 1 FENCE (boot_v2.sh — fence available via env overlay/ambient; not BLOCKED; boot_v2.sh now also exports ENSEMBLE_DB_AMBIENT_ALLOW=1 for its sanctioned postgres boot). No BLOCKED lanes. Fallback contract not triggered; no pin-i drop required. All kill-like commands in the lane scripts target scratch PIDs/ports (18088, \$DPID, \$CHILD_PID) — none match a live pattern.
