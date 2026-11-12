@@ -52,6 +52,18 @@ class EventKind(str, enum.Enum):
     MIDFLIGHT_REPORT = "midflight_report"
     STUCK_AWAITING_ANSWER = "stuck_awaiting_answer"
     CHILD_QUESTION_STILL_PENDING = "child_question_still_pending"
+    # RAM auto-termination (feature/ram-auto-termination Phase 5): the
+    # durable breach event, fired ONCE at the WATCHING→KILLED transition
+    # by the bus-backed emitter (daemon/services/ram_guard_events.py).
+    # The value equals the envelope's ``code`` (arch §17.1). Arch §15
+    # B22 (the ONLY surviving pin variant): the SQLite ``event.kind``
+    # CHECK constraint lists only 8 kinds while ``EventKind`` has 16 —
+    # it is already stale for 8 pre-existing kinds; the production
+    # deployment is PostgreSQL (``create_all``; the SQLModel column
+    # carries no CHECK — ``models.py:86``), so ``ram_limit_exceeded``
+    # (the 17th member) is unaffected. Additive — older readers ignore
+    # unknown kinds (the SSE parser surfaces ``kind`` as a string).
+    RAM_LIMIT_EXCEEDED = "ram_limit_exceeded"
 
 
 class Event(SQLModel, table=True):

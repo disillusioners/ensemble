@@ -168,6 +168,14 @@ from typing import Any, Callable, Optional, Union
 # part of this facade's contract surface (the routers / callers that
 # hold only the service can catch them without a second import path).
 # noqa: F401 — intentional re-export.
+from daemon.repositories.prompt_assent.designation import (
+    DesignationMap,
+    DesignationParseResult,
+)
+from daemon.repositories.prompt_assent.mint_context import (
+    DesignationResult,
+    designation_outcome,
+)
 from daemon.repositories.prompt_version.repository import (  # noqa: F401
     VersionNotDeletableError,
     VersionNotEditableError,
@@ -457,23 +465,71 @@ def assent_approver_mismatch_code(
     return None
 
 
-def assent_channel_not_private_code(discord_meta: Any) -> Optional[str]:
-    """AR-1 leg 2 / K-3 (task 3.4) — the approving context must be private.
+#: The APPROVE-side leg mapping (D-18 / AC18) — every neutral leg of
+#: :class:`~daemon.repositories.prompt_assent.mint_context.DesignationResult`
+#: maps to EXACTLY one approve-side code. ``PASS`` is deliberately absent:
+#: it is not a refusal. The two Phase-1.5 codes are here and NOT in the
+#: tool's ``MISMATCH_CODES`` — a re-designation or an operator config fault
+#: must never burn the Emperor's token (the 4f split, refusal-cell-matrix
+#: §1.3). ``token-approver-mismatch`` is NOT in this table: it keeps only its
+#: existing 4e different-human role.
+APPROVE_DESIGNATION_CODES: dict[DesignationResult, str] = {
+    DesignationResult.NOT_DESIGNATED: "token-channel-mismatch",
+    DesignationResult.GROUP_DM_SHAPE: "token-channel-mismatch",
+    DesignationResult.ABSENT_DISCRIMINATOR: "token-channel-mismatch",
+    DesignationResult.APPROVER_NOT_PINNED: "approver-not-pinned",
+    DesignationResult.ABSENT_IDENTITY: "extraction-incomplete",
+    DesignationResult.CONFIG_INVALID: "designation-config-invalid",
+}
 
-    Delegates to the ONE fail-closed classifier
-    (:func:`daemon.repositories.prompt_assent.mint_context.is_private_assent_channel`
-    — P1 task 1.12; an ABSENT or UNPARSEABLE ``is_group_dm``
-    discriminator is NOT private). Returns
-    ``token-channel-mismatch`` when the approving context is not a
-    proven 1:1 DM, ``None`` when it is.
+
+def assent_channel_not_private_code(
+    discord_meta: Any,
+    designations: Any = None,
+    user_id: Any = None,
+) -> Optional[str]:
+    """AR-1 leg 2 / K-3 (task 3.4) — the approving context must be
+    private, or private-EQUIVALENT (Phase 1.5).
+
+    Delegates to the ONE classification owner
+    (:func:`daemon.repositories.prompt_assent.mint_context.designation_outcome`
+    — the whole leg ordering, D-6 / architect §4.4) and maps the returned
+    SIDE-NEUTRAL leg through :data:`APPROVE_DESIGNATION_CODES`.
+
+    ``designations`` is the PARSED map (a
+    :class:`~daemon.repositories.prompt_assent.designation.DesignationParseResult`)
+    and ``user_id`` the approving human's daemon-derived id (the caller
+    takes it from ``context.user_id`` — the single identity parse site —
+    NEVER from a second read of ``discord_meta["user_id"]``). This function
+    never reads the environment and never parses the map: resolution belongs
+    to the caller (the tool's cached-lazy resolver).
+
+    ``None`` means the approving context is acceptable. Otherwise the
+    returned code is this side's refusal (``token-channel-mismatch`` for
+    the three undesignated shapes, ``extraction-incomplete`` for an absent
+    identity, and the two Phase-1.5 codes ``approver-not-pinned`` /
+    ``designation-config-invalid``).
+
+    **Backwards-compatible default.** ``designations=None`` means *"the
+    caller supplied no map"*, which is EXACTLY the v0.29.18 posture (no
+    designated channels): a proven 1:1 DM passes on the DM short-circuit
+    and any other shape classifies ``token-channel-mismatch``. A caller
+    that supplies a map gets the mapped verdict — including the two
+    Phase-1.5 codes. An explicitly INVALID map is NOT the same thing as
+    "none supplied": it classifies ``designation-config-invalid``.
     """
-    from daemon.repositories.prompt_assent.mint_context import (
-        is_private_assent_channel,
-    )
-
-    if not is_private_assent_channel(discord_meta):
-        return "token-channel-mismatch"
-    return None
+    if designations is None:
+        # The documented "no map supplied" posture — the DM-only lane.
+        designations = DesignationParseResult(
+            valid=True, map=DesignationMap(unset=True), errors=()
+        )
+    leg = designation_outcome(designations, discord_meta, user_id)
+    if leg is DesignationResult.PASS:
+        return None
+    # L8 — an unknown leg fails CLOSED to this side's
+    # not-acceptable-surface code (never a KeyError out of a lookup table
+    # that a future enum member could miss).
+    return APPROVE_DESIGNATION_CODES.get(leg, "token-channel-mismatch")
 
 
 def _assent_confirmation(
@@ -1604,6 +1660,7 @@ __all__ = [
     "assent_channel_mismatch_code",
     "assent_approver_mismatch_code",
     "assent_channel_not_private_code",
+    "APPROVE_DESIGNATION_CODES",
 ]
 
 

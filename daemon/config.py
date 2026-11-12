@@ -11,7 +11,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Annotated, Any, Callable, Dict, Literal, NamedTuple
+from typing import Annotated, Any, Callable, Dict, Literal, NamedTuple, Optional
 from urllib.parse import urlparse
 
 import yaml
@@ -1119,6 +1119,154 @@ class ResourceMonitorConfig(BaseSettings):
             "Cold-start guard: the pass stays QUIET for a series "
             "until its baseline carries ≥ this many points (default "
             "12 = 1 h of 5-min buckets). Quiet, not an error."
+        ),
+    )
+
+
+# ── RamGuardConfig ─────────────────────────────────────────────────────────
+# RAM auto-termination Phase 5 (arch §4.6 / §15 B8) — the guard knob
+# section. Peer of ``ResourceMonitorConfig`` (the house shape at
+# config.py:920+). EXACTLY FOUR INT-ONLY knobs; every other tunable of
+# the guard (the depth/node caps, the §4.1a re-arm pair
+# ``RAM_GUARD_REARM_MAX_EXTRA_BYTES`` / ``RAM_GUARD_REARM_MIN_GROWTH_BYTES``,
+# ``RAM_GUARD_PENDING_MAX``, ``RAM_GUARD_GRACE_POLL_SLICE_SECONDS``,
+# ``WAIT_SLACK_MS``, §4.7's detector constants) is a MODULE CONSTANT,
+# not a knob (asserted by tests/unit/test_ram_guard_config.py).
+#
+# YAML block (config.yaml ``ram_guard:``) MUST stay COMMENT-ONLY: a
+# yaml literal would silently beat the env tier (pydantic init-kwargs
+# outrank env — the ResourceMonitorConfig trap; here the trap is
+# structural — load_config has NO ``ram_guard`` pass-through at all, so
+# a yaml literal is ignored and the RAM_GUARD_* env tier is always the
+# live one — and the comment-only rule keeps the yaml self-documenting).
+#
+# The master kill-switch ``ENSEMBLE_RAM_GUARD`` is deliberately NOT a
+# pydantic bool: a pydantic bool would raise on ``""`` and abort boot,
+# violating the reaper's "explicit anything else ⇒ ON" semantics. It is
+# resolved by :func:`ram_guard_switch_from_env` (a pure function, the
+# exact reaper semantics) and carried on the root ``Config`` as the
+# DERIVED field ``ram_guard_derived_switch`` so the lifespan reads it
+# without re-parsing the env.
+ENSEMBLE_RAM_GUARD = "ENSEMBLE_RAM_GUARD"
+
+#: The OFF values (case-insensitive after ``strip().lower()``) —
+#: arch §15 B8, verbatim.
+_RAM_GUARD_SWITCH_OFF_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def ram_guard_switch_from_env(environ: "Dict[str, str] | None" = None) -> bool:
+    """Resolve the ``ENSEMBLE_RAM_GUARD`` master switch (pure function).
+
+    The exact reaper semantics (``bash_spawn_reaper.kill_switch_from_env``
+    with the default ON; arch §15 B2/B8):
+
+    * **absent** ⇒ ON (the default-ON guard);
+    * **empty/whitespace** ⇒ ON (the operator exported the var but left
+      it empty — explicit anything else ⇒ ON);
+    * ``0`` / ``false`` / ``no`` / ``off`` (case-insensitive) ⇒ **OFF**;
+    * explicit anything else ⇒ ON.
+
+    OFF ⇒ a complete no-op guard (``app.state.ram_guard is None``, no
+    thread, no registration, no measurement, zero DB queries, no /proc
+    reads — arch §4.6 item 6). ``environ`` is injectable so tests never
+    touch the live process env.
+    """
+    env = os.environ if environ is None else environ
+    val = env.get(ENSEMBLE_RAM_GUARD)
+    if val is None:
+        return True  # absent ⇒ ON
+    raw = val.strip().lower()
+    if not raw:
+        return True  # empty/whitespace ⇒ ON
+    return raw not in _RAM_GUARD_SWITCH_OFF_VALUES
+
+
+class RamGuardConfig(BaseSettings):
+    """RAM auto-termination guard configuration (arch §4.6 / §15 B8).
+
+    Exactly four INT-only knobs (the B8 field set, verbatim bounds;
+    units are INT-only — a human-string size like ``"8G"`` is NOT
+    accepted, the house rule):
+
+    * ``ceiling_mib``              — the per-command absolute ceiling in
+      MiB. ``None`` (UNSET) ⇒ the DYNAMIC 70 % default (USER RULING #2,
+      §4.7: ``max(64 MiB, 0.7 × effective_total_bytes)``, resolved once
+      at guard start, no upper clamp). An EXPLICIT value is validated
+      ``[64, 65536]`` — the clamp applies to EXPLICIT values ONLY; an
+      out-of-range explicit value ⇒ ``ValidationError`` out of
+      ``load_config`` ⇒ **BOOT ABORTS** (never clamped), unless the
+      master switch is OFF, which beats validation (§15 B26).
+    * ``poll_interval_ms``         — the tick cadence (default 200).
+    * ``grace_ms``                 — the TERM→KILL grace (default 250).
+    * ``pss_confirm_deadline_ms``  — the one-shot PSS confirm deadline
+      (default 250).
+
+    Env: ``RAM_GUARD_*``. Restart-required for any flip. OFF (the
+    master switch) bypasses BOTH validation and the settings sources
+    (``model_construct`` in ``load_config``).
+    """
+
+    model_config = SettingsConfigDict(env_prefix="RAM_GUARD_")
+
+    @field_validator("ceiling_mib", mode="before")
+    @classmethod
+    def _empty_string_is_unset(cls, v):  # noqa: ANN001
+        # An EMPTY-string env value (``RAM_GUARD_CEILING_MIB=``) is the
+        # UNSET semantics — never a boot abort (live-verified carryover).
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    ceiling_mib: Optional[int] = Field(
+        default=None,
+        ge=64,
+        le=65536,
+        description=(
+            "Absolute per-command RAM ceiling in MiB. UNSET (None) ⇒ "
+            "the DYNAMIC 70 % default derived at guard start (§4.7; "
+            "floored at 64 MiB, never upper-clamped). An explicit value "
+            "is validated [64, 65536] and an out-of-range one ABORTS "
+            "boot while the guard is ON (never clamped). Env "
+            "RAM_GUARD_CEILING_MIB."
+        ),
+    )
+    @field_validator(
+        "poll_interval_ms", "grace_ms", "pss_confirm_deadline_ms", mode="before"
+    )
+    @classmethod
+    def _empty_string_is_the_default(cls, v, info):  # noqa: ANN001
+        # Same empty-string rule: ``RAM_GUARD_GRACE_MS=`` binds the
+        # field's DEFAULT, never a boot abort.
+        if isinstance(v, str) and not v.strip():
+            return {"poll_interval_ms": 200, "grace_ms": 250,
+                    "pss_confirm_deadline_ms": 250}[info.field_name]
+        return v
+
+    poll_interval_ms: int = Field(
+        default=200,
+        ge=50,
+        le=2000,
+        description=(
+            "Tick cadence in milliseconds. Env RAM_GUARD_POLL_INTERVAL_MS."
+        ),
+    )
+    grace_ms: int = Field(
+        default=250,
+        ge=0,
+        le=2000,
+        description=(
+            "TERM→KILL grace in milliseconds (floor 0 argued in DQ4). "
+            "Env RAM_GUARD_GRACE_MS."
+        ),
+    )
+    pss_confirm_deadline_ms: int = Field(
+        default=250,
+        ge=50,
+        le=2000,
+        description=(
+            "One-shot PSS confirm deadline in milliseconds; a confirm "
+            "that overruns it is FAIL-OPEN ⇒ kill. Env "
+            "RAM_GUARD_PSS_CONFIRM_DEADLINE_MS."
         ),
     )
 
@@ -6915,6 +7063,18 @@ class Config(BaseSettings):
     resource_monitor: ResourceMonitorConfig = Field(
         default_factory=ResourceMonitorConfig
     )
+    # RAM auto-termination Phase 5 — the guard knob section (arch §15
+    # B8, verbatim root field). Peer of `resource_monitor:`; the yaml
+    # block stays COMMENT-ONLY (no load_config pass-through either), so
+    # `default_factory` IS the env tier (RAM_GUARD_*) and no literal
+    # can shadow it. NOT `| None`: OFF is a VALUE, not an absence.
+    ram_guard: RamGuardConfig = Field(default_factory=RamGuardConfig)
+    # The master kill-switch ENSEMBLE_RAM_GUARD is NOT a pydantic bool —
+    # it is a DERIVED value (reaper semantics, resolved by
+    # ram_guard_switch_from_env in load_config and passed as an init
+    # kwarg, so the lifespan reads it without re-parsing the env).
+    # Default True = the absent-default (the switch defaults ON).
+    ram_guard_derived_switch: bool = True
     persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     queue: QueueConfig = Field(default_factory=QueueConfig)
@@ -8903,6 +9063,29 @@ def load_config(config_path: str | None = None) -> Config:
             config_dict["decision"] = clean_dec
         else:
             config_dict["decision"] = dec_raw
+
+    # ── RAM auto-termination Phase 5 — the OFF short-circuit (§15 B26) ──
+    # The master switch is parsed FIRST (before any knob validation):
+    # when OFF, ``RamGuardConfig.model_construct`` bypasses BOTH
+    # validation and the settings sources, and pydantic v2 does not
+    # re-validate an exact-class instance passed into a field — so NO
+    # ge/le check runs while OFF (env OR yaml): ``ENSEMBLE_RAM_GUARD=0``
+    # + an out-of-range ceiling BOOTS FINE with the guard inert. When
+    # ON, no ``ram_guard`` key is injected ⇒ the root field's
+    # ``default_factory`` runs the normal construction (env tier +
+    # validation ⇒ BOOT ABORTS on out-of-range). ``default_factory``
+    # IS the env tier; there is deliberately NO ``ram_guard`` yaml
+    # pass-through (config.yaml's block is comment-only), so a yaml
+    # literal can never shadow the env tier either way.
+    _ram_guard_switch = ram_guard_switch_from_env()
+    if not _ram_guard_switch:
+        config_dict["ram_guard"] = RamGuardConfig.model_construct(
+            ceiling_mib=None,
+            poll_interval_ms=200,
+            grace_ms=250,
+            pss_confirm_deadline_ms=250,
+        )
+    config_dict["ram_guard_derived_switch"] = _ram_guard_switch
 
     # Create and validate config
     config = Config(**config_dict)

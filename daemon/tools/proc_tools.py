@@ -38,6 +38,27 @@ Tools are gated through the standard ``tools.allow`` / ``tools.deny``
 meta.json filter via the ``proc`` category key registered by
 ``register_tool_category``. Wire-up (adding ``proc`` to
 ``CATEGORY_MODULES`` and ``create_instance_tools``) is a separate task.
+
+RAM auto-termination (arch §4.3, §8 item 3) — the proc lane's RAM
+arm.  Two disclosures ride this docstring.
+
+**§3.5 item 13 (the reaping posture):** The guard kills a GROUP. The
+daemon reaps only its DIRECT child (the pre-existing await proc.wait()).
+Grandchildren are re-parented to init/PID 1, which reaps them; a
+transient Z member of a grandchild is init's business, not the guard's.
+The guard never forks and never races the direct-child reap. No
+subreaper is introduced.
+
+**§3.5 item 12 (the QUERY-ONLY verdict):** ``proc_run`` returns a
+process handle before any breach can exist, so the typed
+``ram_limit_exceeded`` envelope is delivered by the BASH lane's return
+string only. In the proc lane the verdict is surfaced by
+``proc_status`` as a ``ram_breach:`` line plus a flat
+``ram_killed: true`` (added as lines, never replacing the block).
+the verdict is QUERY-ONLY — an agent that never calls proc_status
+after a proc run will not see the RAM verdict in the proc_run result;
+it must poll proc_status, the same obligation it already has for
+timed_out and user_stopped.
 """
 
 from __future__ import annotations
@@ -89,6 +110,37 @@ from daemon.services.secret_persistence_scrub import (
 )
 from daemon.services.secret_resolver import (
     resolve_secret_markers as _resolve_secret_markers,
+)
+
+# RAM auto-termination (arch §4.3, §8 item 3) — the proc lane is a
+# query-only consumer of the Phase 2 guard: it REGISTERS the spawn
+# (no durable row — DQ5), maps the verdict to ``info.status`` /
+# ``info.ram_killed``, and RELEASES on exit.  It never delivers a
+# signal (T6); the guard thread kills the group via ram_kill_ladder.
+# Import direction: tools/* -> ram_guard (allowed); ram_guard imports
+# nothing from daemon/ (import freeze).
+from daemon.services.ram_guard import (
+    get_ram_guard as _get_ram_guard,
+    read_verdict as _read_ram_verdict,
+    register as _ram_register,
+    release as _ram_guard_release,
+)
+from daemon.services.ram_guard.errors import (
+    format_ram_proc_lines as _format_ram_proc_lines,
+)
+from daemon.services.ram_guard.guard import (
+    RAM_GUARD_PENDING_MAX as _RAM_GUARD_PENDING_MAX,
+)
+from daemon.services.ram_guard.ladder import (
+    OWNERSHIP_ENV_VAR as _RAM_LADDER_OWNERSHIP_ENV_VAR,
+)
+from daemon.services.ram_guard.tree_reader import PROC_ROOT as _PROC_ROOT
+from daemon.services.ram_guard.tree_reader import read_start_time as _read_start_time
+from daemon.services.ram_guard.verdict import (
+    LANE_PROC as _LANE_PROC,
+    STATE_OVERCOUNTED as _STATE_OVERCOUNTED,
+    STATE_WATCHING as _STATE_WATCHING,
+    TERMINAL_STATES as _TERMINAL_STATES,
 )
 
 logger = logging.getLogger(__name__)
@@ -147,10 +199,318 @@ _PROCESS_ID_HEX_LEN: int = 4  # token_hex(4) yields 8 hex chars
 #: The value is the same as the ``process_id`` (e.g. ``proc-a3b2c1d4``).
 _TRACKING_ENV_VAR: str = "ENSEMBLE_PROC_TRACKING_ID"
 
+#: The RAM ladder's OWNERSHIP-STAMP variable (arch §4.2 P6) — imported
+#: from the SUBSTRATE (the import direction ``tools/* → ram_guard`` is
+#: the allowed one; the lanes never import each other).
+#:
+#: The ladder's P6 check reads THIS variable to decide whether the pid
+#: it is about to signal is still the one it started.  A PROC child is
+#: NOT stamped by that lane — the proc lane stamps its own
+#: ``_TRACKING_ENV_VAR``.  An INHERITED ambient value (the daemon's own
+#: environment carries one) would read as "the stamp EXISTS and
+#: DIFFERS" — a REAL mismatch by the P6 contract — and would refuse
+#: the proc lane's kill permanently (a deterministic refusal: retrying
+#: cannot change it).
+#:
+#: Stripping it makes the proc child's ownership stamp ABSENT, which
+#: the P6 contract classifies as UNVERIFIABLE (PROCEED +
+#: ``ownership_unverified++``) — the proc lane has no ownership gate of
+#: its own (arch §1.1 P4) and the bash lane's stamp has no authority
+#: over a proc child.
+_RAM_OWNERSHIP_ENV_VAR: str = _RAM_LADDER_OWNERSHIP_ENV_VAR
+
 
 # ---------------------------------------------------------------------------
-# ProcessInfo + BackgroundProcessManager
+# RAM auto-termination — the proc lane (arch §4.3, §8 item 3)
 # ---------------------------------------------------------------------------
+# The proc lane is a QUERY-ONLY consumer of the Phase 2 guard: it
+# REGISTERS the spawn (no durable row — DQ5), maps the verdict to
+# ``info.status`` / ``info.ram_killed``, and RELEASES on exit.  It never
+# delivers a signal (T6); the guard thread kills the group via
+# ram_kill_ladder.  The RAM watchdog is NOT a fourth task (leader ruling
+# Q1): the guard's TWO threads own measure/breach/kill/verdict.
+#
+# The kill-switch parse mirrors the bash lane's semantics (arch §15 B8)
+# but is independent of the bash lane (no shared wiring code — Phase 4
+# Coupling).  The env var name and OFF-value set are pinned to the same
+# contract; the proc test pack asserts parity with the bash lane's parse.
+RAM_GUARD_ENV_SWITCH = "ENSEMBLE_RAM_GUARD"          # == bash.py's RAM_GUARD_ENV_SWITCH
+RAM_GUARD_SWITCH_OFF_VALUES = frozenset({"0", "false", "no", "off"})
+
+# ── §3.5 honesty minimum — VERBATIM pins (D-6) ─────────────────────────────
+# The two disclosure sentences the lane's documentation must carry,
+# pinned as constants (phase4-plan.md T7/T12 — the arch's §3.5 items 12
+# and 13, markdown emphasis and backticks normalized away).  The
+# docstrings below carry them word-for-word; the test pack asserts the
+# normalized-whitespace equality so neither docstring can drift from the
+# contract text.  The RUNBOOK carry is Phase 7's.
+
+#: §3.5 item 13 — the reaping posture (verbatim).
+RAM_ITEM13_SENTENCE: str = (
+    "The guard kills a GROUP. The daemon reaps only its DIRECT child "
+    "(the pre-existing await proc.wait()). Grandchildren are re-parented "
+    "to init/PID 1, which reaps them; a transient Z member of a "
+    "grandchild is init's business, not the guard's. The guard never "
+    "forks and never races the direct-child reap."
+)
+
+#: §3.5 item 12 — the proc lane's QUERY-ONLY verdict (verbatim).
+RAM_ITEM12_SENTENCE: str = (
+    "the verdict is QUERY-ONLY — an agent that never calls proc_status "
+    "after a proc run will not see the RAM verdict in the proc_run "
+    "result; it must poll proc_status, the same obligation it already "
+    "has for timed_out and user_stopped"
+)
+
+#: The bounded wait's poll interval (arch §4.3.1 item 2) — 25 ms.
+RAM_GUARD_WAIT_POLL_SECONDS = 0.025
+#: The wait's slack (arch §15 B20) — 250 ms.
+RAM_GUARD_WAIT_SLACK_MS = 250
+#: The service-worst-case components (arch §15 B20) — mirror bash's.
+RAM_GUARD_PSS_CONFIRM_DEADLINE_MS = 250
+RAM_GUARD_GRACE_MS = 250
+RAM_GUARD_PROBE_MS = 29  # §18.4 — council-measured; 10 was the estimate
+#: The bounded wait's deadline floor (arch §15 B20, §18.4): 1308 ms.
+RAM_GUARD_WAIT_DEADLINE_MS = (
+    _RAM_GUARD_PENDING_MAX
+    * (RAM_GUARD_PSS_CONFIRM_DEADLINE_MS + RAM_GUARD_GRACE_MS + RAM_GUARD_PROBE_MS)
+    + RAM_GUARD_WAIT_SLACK_MS
+)
+
+
+def _ram_guard_switch(environ=None) -> bool:
+    """Resolve the master switch — default ON, explicit OFF values off.
+
+    Mirrors ``bashSpawnReaper.kill_switch_from_env`` and the bash lane's
+    ``_ram_guard_switch`` (arch §15 B8, verbatim): absent/empty ⇒ ON;
+    ``0/false/no/off`` (case-insensitive) ⇒ OFF; anything else ⇒ ON.
+    """
+    env = os.environ if environ is None else environ
+    val = env.get(RAM_GUARD_ENV_SWITCH)
+    if val is None:
+        return True
+    raw = val.strip().lower()
+    if not raw:
+        return True
+    return raw not in RAM_GUARD_SWITCH_OFF_VALUES
+
+
+def _ram_guard_active() -> bool:
+    """Is the RAM arm live? (the switch ON AND a guard installed)."""
+    if not _ram_guard_switch():
+        return False
+    return _get_ram_guard() is not None
+
+
+def _ram_register_spawn(
+    *,
+    tracking_id: str | None,
+    instance_id: str | None,
+    pid: int,
+    pgid: int,
+    start_time_jiffies: int | None,
+    ceiling_bytes: int | None,
+) -> "Optional[SpawnRecord]":
+    """S1 — register the spawn with the RAM guard (fail-open).
+
+    The ALREADY-CAPTURED ``pgid`` is used — NEVER a second
+    ``os.getpgid`` (the TOCTOU the capture block already respects).  The
+    ceiling is the guard's RESOLVED ceiling unless an INTERNAL override
+    is passed (the per-call test seam — the LLM-facing schema has NO
+    ceiling parameter).
+    """
+    if not _ram_guard_active():
+        return None
+    if not tracking_id or not instance_id:
+        return None
+    try:
+        return _ram_register(
+            tracking_id=tracking_id,
+            instance_id=instance_id,
+            lane=_LANE_PROC,
+            pid=pid,
+            pgid=pgid,
+            start_time_jiffies=start_time_jiffies,
+            ceiling_bytes=ceiling_bytes,
+        )
+    except Exception as exc:
+        logger.warning(
+            "proc: ram-guard registration failed (fail-open): %s: %s",
+            type(exc).__name__, exc,
+        )
+        return None
+
+
+def _ram_is_kill(record) -> bool:
+    """Did the GUARD kill the tree?  The verdict record is the only
+    discriminator (arch §5 — the exit code is ambiguous by construction:
+    ``-9`` is either cause).  Mirrors the bash lane's ``_ram_is_kill``."""
+    if record is None:
+        return False
+    reason = getattr(record, "reason", None)
+    return bool(reason and str(reason).startswith("killed:"))
+
+
+def _ram_is_refusal(record) -> bool:
+    """Did the episode resolve as a REFUSAL?  (arch §15 B25/B27)"""
+    if record is None:
+        return False
+    reason = getattr(record, "reason", None)
+    return bool(reason and str(reason).startswith("refused:"))
+
+
+def _ram_episode_resolved(record) -> bool:
+    if record is None:
+        return True
+    state = getattr(record, "state", None)
+    if state in _TERMINAL_STATES:
+        return True
+    if state == _STATE_OVERCOUNTED:
+        return True
+    if state == _STATE_WATCHING and getattr(record, "reason", None):
+        return True
+    return False
+
+
+def _ram_claim_held(record) -> bool:
+    """Does the guard hold the episode's claim token right now?"""
+    return bool(record is not None and getattr(record, "claim_token", None) is not None)
+
+
+async def _await_ram_verdict(tracking_id: str | None):
+    """Read the guard's verdict, waiting BOUNDED for a terminal state.
+
+    Mirrors the bash lane's ``_await_ram_verdict`` (arch §4.3.1 item 2 /
+    §15 B20).  Only an IN-FLIGHT episode is waited on — a record with no
+    observed breach costs NOTHING (no deadline burn without an outcome).
+    On expiry the record's ACTUAL state is returned: a pending decision
+    is reported as pending, never fabricated.
+    """
+    if not tracking_id:
+        return None
+    guard = _get_ram_guard()
+    if guard is None:
+        return None
+    record = _read_ram_verdict(tracking_id)
+    if record is None:
+        return None
+    if not getattr(record, "breach_at", None):
+        return record
+    if _ram_episode_resolved(record):
+        return record
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + (_ram_wait_deadline_ms(guard) / 1000.0)
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return record
+        await asyncio.sleep(min(RAM_GUARD_WAIT_POLL_SECONDS, remaining))
+        record = _read_ram_verdict(tracking_id)
+        if record is None:
+            return None
+        if _ram_episode_resolved(record):
+            return record
+
+
+def _ram_wait_deadline_ms(guard) -> int:
+    """The bounded wait's deadline for the INSTALLED guard (arch §15 B20).
+
+    Derived from the guard's PUBLIC read-only accessors so a substrate
+    rename cannot silently re-derive the deadline.  Mirrors the bash
+    lane's derivation (same pinned arithmetic: 2 x 529 + 250 = 1308).
+    """
+    grace_ms = RAM_GUARD_GRACE_MS
+    confirm_ms = RAM_GUARD_PSS_CONFIRM_DEADLINE_MS
+    raw_grace = getattr(guard, "grace_seconds", None)
+    if isinstance(raw_grace, (int, float)):
+        grace_ms = int(round(float(raw_grace) * 1000))
+    raw_confirm = getattr(guard, "pss_confirm_deadline_ms", None)
+    if isinstance(raw_confirm, (int, float)):
+        confirm_ms = int(raw_confirm)
+    adaptive = (
+        _RAM_GUARD_PENDING_MAX
+        * (confirm_ms + grace_ms + RAM_GUARD_PROBE_MS)
+        + RAM_GUARD_WAIT_SLACK_MS
+    )
+    return max(RAM_GUARD_WAIT_DEADLINE_MS, adaptive)
+
+
+def _ram_lane_release(tracking_id: str | None) -> bool:
+    """The lane's (conditional) release — CONDITIONAL on the watch.
+
+    Mirrors the bash lane's ``_ram_lane_release`` (arch §15 B21): a lane
+    exit is a NOTIFICATION, not the end of the watch.  A record that was
+    NEVER sampled is left alone (its group membership is UNKNOWN, and
+    releasing it could drop a live watch — the ``cmd &`` shape).  The
+    guard's own release API refuses a CLAIMED record (deferred to the
+    lane) and a record whose WATCH IS STILL LIVE.  Idempotent.
+    """
+    if not tracking_id:
+        return False
+    try:
+        record = _read_ram_verdict(tracking_id)
+        if (
+            record is not None
+            and not record.is_terminal
+            and getattr(record, "samples", 0) <= 0
+        ):
+            return False
+        return _ram_guard_release(tracking_id)
+    except Exception as exc:
+        logger.warning(
+            "proc: ram-guard release failed (best-effort): %s: %s",
+            type(exc).__name__, exc,
+        )
+        return False
+
+
+def _reconcile_late_ram_verdict(info: "ProcessInfo") -> None:
+    """D-2 — fold a POST-RETURN verdict into the rendered status.
+
+    The drain is the single writer that finalizes ``info.status``, and it
+    runs when the DIRECT child exits — in the leaderless shape (the shell
+    exits 0 while a grandchild balloons) the guard's kill lands LATER.
+    Without this reconciliation a ``proc_status`` block could render
+    ``status: exited`` directly above ``ram_killed: true`` —
+    self-contradicting.
+
+    The status query (and ``proc_list``) are the LATE ADOPTERS: they
+    re-run the T5 status ladder with the live verdict folded in.
+    Idempotent and direction-safe — a guard kill only ever upgrades
+    ``exited`` → ``killed``, never the reverse — and it never touches a
+    record whose kill the drain already accounted for.
+    """
+    if info.ram_killed or not getattr(info, "ram_tracking_id", ""):
+        return
+    record = _read_ram_verdict(info.ram_tracking_id)
+    if not _ram_is_kill(record):
+        return
+    info.ram_killed = True
+    # Re-run the SAME ladder the drain uses (T5): a guard kill makes
+    # ``status`` ``"killed"`` — the RAM-ness rides ``ram_killed``.
+    info.status = "killed"
+
+
+def _ram_proc_surface_lines(record, *, timed_out: bool = False) -> list[str]:
+    """The proc lane's additive surface lines for ``proc_status``.
+
+    ONE producer, TWO surfaces (arch §8.1): the bash lane returns the
+    envelope; the proc lane renders these lines from the SAME payload
+    (``errors.build_ram_envelope_payload``).  This helper is a thin
+    delegation — the SURFACE ITSELF is produced by
+    ``errors.format_ram_proc_lines`` so the two lanes can never drift.
+
+    The proc lane has no typed error surface (``proc_run`` returns
+    before any breach can exist — arch §4.3, §3.5 item 12).
+
+    ``timed_out`` feeds the envelope's ``coincident_timeout`` flag, whose
+    semantics are ``bool(timed_out)`` (dispatcher ruling 2026-11-11):
+    the coincidence is reported when the timeout arm ALSO fired, not
+    when the guard "wins".
+    """
+    if record is None:
+        return []
+    return list(_format_ram_proc_lines(record, timed_out=bool(timed_out)))
 
 
 @dataclass
@@ -224,6 +584,18 @@ class ProcessInfo:
     # instances constructed without it (e.g. in tests) skip the
     # ownership verification by design (fail-open).
     tracking_id: str = ""
+    # RAM auto-termination (phase 4): ProcessInfo gains ``ram_killed``
+    # (S10) plus the captured pgid/start_time (T9) and the guard's
+    # registry key for this spawn.  The key IS the ``process_id`` — the
+    # SAME value the lane stamps under its own ownership variable — so
+    # the lane-aware P6 verifies the stamp (the positive signal).  The
+    # bash lane keeps its uuid-per-spawn key; the proc id space is the
+    # lane's own (8 hex chars), whose collision blast radius is
+    # disclosed in the phase-4 report.
+    ram_killed: bool = False
+    ram_tracking_id: str = ""
+    ram_pgid: int = 0
+    ram_start_time_jiffies: Optional[int] = None
     # C1 fix: tracks whether the spill file's last byte is ``\n``.
     # Used by ``_get_recent_lines`` to detect the split-line at the
     # memory/file boundary and stitch the partial line correctly.
@@ -568,6 +940,17 @@ def _build_child_env(
     # Re-stamp the tracking id AFTER the strip so the PID-recycling defense
     # is never swallowed by the policy.
     env[_TRACKING_ENV_VAR] = process_id
+    # Leader ruling B: strip FOREIGN ownership stamps POST-overlay so an
+    # overlay can never forge the other lane's stamp.  Re-assert the own
+    # stamp LAST so the authoritative value wins.
+    # INTEGRATION (latest-absorption merge, 2026-11-12): upstream applied
+    # the overlay via ``env.update(process_env_overlay)`` at this point;
+    # the rogue-containment (e′/B2) shape above applies the overlay
+    # INSIDE ``_apply_spawn_boundary`` (overlay wins — identical
+    # semantics), so the update line is not re-added.  The foreign-stamp
+    # strip is unchanged upstream semantics, still POST-overlay.
+    env.pop(_RAM_OWNERSHIP_ENV_VAR, None)
+    env[_TRACKING_ENV_VAR] = process_id
     # Design §1b: timing / locus / failure identical to the bash
     # seam (§1a) — resolution runs on the ASSEMBLED dict at spawn
     # time, surface "bash.env" family. Marker-free env is a no-op
@@ -881,13 +1264,28 @@ class BackgroundProcessManager:
         # concurrent natural-exit + cleanup).
         await self._close_file_handle(info)
 
-        # ``timed_out`` and ``user_stopped`` are both authoritative —
-        # they represent an intentional kill from the runtime
-        # (timeout task or explicit ``proc_stop``) and beat any signal
-        # translation below. Without this guard, the drain task could
-        # race with ``stop_process`` and overwrite a ``"killed"``
-        # verdict with ``"exited"``.
-        if info.timed_out:
+        # T5 — consult the verdict BEFORE finalizing info.status.  The
+        # RAM verdict is the only signal that says WHO killed the tree:
+        # the guard's kill and a user/timeout stop are otherwise
+        # indistinguishable (``-9`` is either cause).  The ordering
+        # (verdict consulted before ``info.status`` is finalized) is
+        # observable, not assumed — the bounded wait only burns when a
+        # breach was observed, so a normal exit costs nothing.
+        ram_record = await _await_ram_verdict(info.ram_tracking_id)
+        info.ram_killed = bool(
+            ram_record is not None
+            and getattr(ram_record, "reason", None)
+            and str(ram_record.reason).startswith("killed:")
+        )
+
+        # ``ram_killed`` joins ``timed_out``/``user_stopped`` as the
+        # third authoritative input — the existing ladder is preserved
+        # and the RAM verdict is consulted FIRST (because it is the only
+        # signal that says who killed the tree).  ``status`` stays
+        # ``"killed"``; the RAM-ness is carried by ``ram_killed``.
+        if info.ram_killed:
+            info.status = "killed"
+        elif info.timed_out:
             info.status = "killed"
         elif info.user_stopped:
             info.status = "killed"
@@ -902,6 +1300,18 @@ class BackgroundProcessManager:
             # an explicit non-zero exit often just means the process
             # did its job and reported a failure (e.g. a test runner).
             info.status = "exited"
+
+        # T8 — release the registration on exit (conditional, idempotent:
+        # a claimed record is deferred to the lane, a live watch is never
+        # ended by a lane exit, and a never-sampled record is left alone).
+        if info.ram_tracking_id:
+            try:
+                _ram_lane_release(info.ram_tracking_id)
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.warning(
+                    "proc: ram-guard release (exit) failed: %s: %s",
+                    type(exc).__name__, exc,
+                )
 
     async def _timeout_killer(self, info: ProcessInfo, seconds: float) -> None:
         """Sleep ``seconds``, then kill ``info.proc`` if still running.
@@ -940,42 +1350,85 @@ class BackgroundProcessManager:
         if proc.returncode is not None:
             return  # already exited naturally
 
+        # RAM auto-termination — claim-token deferral (arch §17.5):
+        # the episode-scoped claim token's first claimant owns the
+        # verdict; the loser SKIPS its signal so the timeout arm and the
+        # guard's ladder never BOTH signal.  The guard's claim is read
+        # WITHOUT waiting.  (Only when the RAM guard is live; otherwise
+        # the proc timeout arm owns the kill as before.)
+        timeout_kill_deferred = False
+        try:
+            if _ram_guard_active() and info.ram_tracking_id:
+                rec = _read_ram_verdict(info.ram_tracking_id)
+                if _ram_claim_held(rec):
+                    timeout_kill_deferred = True
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "proc: ram-guard claim check failed (fail-open): %s: %s",
+                type(exc).__name__, exc,
+            )
+
         # Mark the process as timeout-killed BEFORE the kill attempt
-        # so ``_drain_exit_code`` (line ~808) reports ``"killed"`` rather
-        # than ``"exited"`` when the timeout fires. We roll this back
+        # so ``_drain_exit_code`` reports ``"killed"`` rather than
+        # ``"exited"`` when the timeout fires. We roll this back
         # if the helper aborts due to PID recycle (below) — otherwise
         # a recycled PID would be reported as "killed" even though no
         # signal was delivered, the same bug class we fixed in
         # ``stop_process`` via the ``pid_recycled`` guard.
         info.timed_out = True
         try:
-            # Route through the centralized helper — it runs Layers
-            # 1+2+3 internally and returns the disposition. Layer 3
-            # is NOT invoked directly here to avoid the duplicate-call
-            # bug we fixed: a direct ``_verify_pid_ownership`` would
-            # race the helper's internal check and double-log on
-            # recycle. Letting the helper own Layer 3 keeps the
-            # kill-path logic in one place.
-            sig_result = self._attempt_kill_signal(
-                info,
-                signal.SIGKILL,
-                sys.platform != "win32",
-                "SIGKILL (timeout)",
-            )
-            if sig_result == "aborted_recycled":
-                # Layer 3 aborted — PID may have been recycled.
-                # Roll back ``timed_out`` so ``_drain_exit_code``
-                # doesn't promote ``status="killed"`` for a process
-                # that is still alive under a recycled PID. Mirrors
-                # the ``pid_recycled`` guard in :func:`stop_process`.
-                info.timed_out = False
-                logger.warning(
-                    "timeout-kill: PID ownership check failed for %s "
-                    "(PID %d); ABORTING timeout-kill — PID may have "
-                    "been recycled.",
-                    info.process_id,
-                    proc.pid,
+            if not timeout_kill_deferred:
+                # Route through the centralized helper — it runs Layers
+                # 1+2+3 internally and returns the disposition. Layer 3
+                # is NOT invoked directly here to avoid the duplicate-call
+                # bug we fixed: a direct ``_verify_pid_ownership`` would
+                # race the helper's internal check and double-log on
+                # recycle. Letting the helper own Layer 3 keeps the
+                # kill-path logic in one place.
+                sig_result = self._attempt_kill_signal(
+                    info,
+                    signal.SIGKILL,
+                    sys.platform != "win32",
+                    "SIGKILL (timeout)",
                 )
+                if sig_result == "aborted_recycled":
+                    # Layer 3 aborted — PID may have been recycled.
+                    # Roll back ``timed_out`` so ``_drain_exit_code``
+                    # doesn't promote ``status="killed"`` for a process
+                    # that is still alive under a recycled PID. Mirrors
+                    # the ``pid_recycled`` guard in :func:`stop_process`.
+                    info.timed_out = False
+                    logger.warning(
+                        "timeout-kill: PID ownership check failed for %s "
+                        "(PID %d); ABORTING timeout-kill — PID may have "
+                        "been recycled.",
+                        info.process_id,
+                        proc.pid,
+                    )
+            else:
+                # Deferred: the guard owns the kill. Wait bounded for
+                # its verdict (arch §4.3.1 item 2). If the guard
+                # REFUSED (never signalled) the timeout arm's own kill
+                # contract still stands — retry.
+                ram_record = await _await_ram_verdict(info.ram_tracking_id)
+                ram_kill = _ram_is_kill(ram_record)
+                if not ram_kill:
+                    info.timed_out = True
+                    sig_result = self._attempt_kill_signal(
+                        info,
+                        signal.SIGKILL,
+                        sys.platform != "win32",
+                        "SIGKILL (timeout)",
+                    )
+                    if sig_result == "aborted_recycled":
+                        info.timed_out = False
+                        logger.warning(
+                            "timeout-kill: PID ownership check failed for "
+                            "%s (PID %d); ABORTING timeout-kill — PID may "
+                            "have been recycled.",
+                            info.process_id,
+                            proc.pid,
+                        )
         except ProcessLookupError:
             # Process already reaped between our check and kill —
             # benign race. ``timed_out`` stays True so ``_drain_exit_code``
@@ -1122,6 +1575,8 @@ class BackgroundProcessManager:
         command: Union[str, List[str]],
         workdir: Optional[str],
         timeout_seconds: int = 0,
+        *,
+        ram_ceiling_bytes: Optional[int] = None,
     ) -> tuple[Optional[str], Optional[str]]:
         """Spawn a background subprocess.
 
@@ -1137,6 +1592,10 @@ class BackgroundProcessManager:
             timeout_seconds: ``0`` = no auto-kill. Otherwise schedule
                 a background task that SIGKILLs the process after
                 ``timeout_seconds`` seconds.
+            ram_ceiling_bytes: INTERNAL/TEST seam (the LLM-facing
+                ``proc_run`` schema gains NO ceiling parameter).  The
+                per-spawn ceiling override; ``None`` uses the guard's
+                resolved ceiling (the configured / dynamic default).
 
         Returns:
             ``(process_id, error_str)`` tuple. On success
@@ -1254,6 +1713,48 @@ class BackgroundProcessManager:
 
         info.proc = proc
 
+        # T9 — capture the pgid + start_time AT SPAWN (a field capture,
+        # not a task, not a new asyncio task).  The proc lane uses
+        # ``start_new_session=True`` so PGID == PID; we still capture via
+        # ``os.getpgid`` once (with a fallback) and never re-derive it
+        # in the RAM path (the ladder receives the captured value).
+        pgid = proc.pid
+        if sys.platform != "win32":
+            try:
+                pgid = os.getpgid(proc.pid)
+            except (ProcessLookupError, OSError):
+                pgid = proc.pid
+        start_time_jiffies = _read_start_time(_PROC_ROOT, proc.pid)
+        info.ram_pgid = pgid
+        info.ram_start_time_jiffies = start_time_jiffies
+
+        # T3/T4 — register with the guard thread (NO new task, NO
+        # polling loop, NO signal delivery — the guard's two threads
+        # own measure/breach/kill/verdict).  Fail-open: a registration
+        # failure must NOT break proc_run (mirrors the bash lane's
+        # ``_ram_register_spawn``).  The kill-switch OFF ⇒ no
+        # registration (T2).
+        #
+        # The tracking id IS the process_id — the SAME value the lane
+        # already stamped under the lane's own ownership variable
+        # (``_TRACKING_ENV_VAR``) at spawn.  That equality is the
+        # lane-aware P6's POSITIVE signal (leader ruling 2026-11-11):
+        # the guard's ladder reads the lane's own stamp and finds it
+        # present AND matching ⇒ ownership VERIFIED (never counted as
+        # unverified).  The bash lane does the same with its own id.
+        info.ram_tracking_id = ""
+        if _ram_guard_active():
+            record = _ram_register_spawn(
+                tracking_id=process_id,
+                instance_id=instance_id,
+                pid=proc.pid,
+                pgid=pgid,
+                start_time_jiffies=start_time_jiffies,
+                ceiling_bytes=ram_ceiling_bytes,
+            )
+            if record is not None:
+                info.ram_tracking_id = process_id
+
         # Start the output-capture and exit-watcher tasks. Both run
         # for the lifetime of the process. We hold references so we
         # can cancel them on cleanup.
@@ -1331,6 +1832,16 @@ class BackgroundProcessManager:
                 ):
                     if task is not None and not task.done():
                         task.cancel()
+                # T8 — release the orphan's registration (best-effort,
+                # conditional, idempotent — never ends a live watch).
+                if info.ram_tracking_id:
+                    try:
+                        _ram_lane_release(info.ram_tracking_id)
+                    except Exception as exc:  # pragma: no cover
+                        logger.warning(
+                            "proc: ram-guard release (orphan) failed: "
+                            "%s: %s", type(exc).__name__, exc
+                        )
                 return None, (
                     f"Error: process {process_id} was cleaned up "
                     f"during start"
@@ -1548,6 +2059,11 @@ class BackgroundProcessManager:
                 f"{instance_id}. Use proc_list() to see active ids."
             )
 
+        # D-2 — a verdict that lands AFTER the drain (the leaderless
+        # shape) is folded in here, so the rendered block can never show
+        # ``status: exited`` above ``ram_killed: true``.
+        _reconcile_late_ram_verdict(info)
+
         parts: list[str] = [
             f"process_id: {info.process_id}",
             f"status: {info.status}",
@@ -1564,6 +2080,11 @@ class BackgroundProcessManager:
             parts.append(f"exit_code: {info.exit_code}")
         if info.timed_out:
             parts.append("timed_out: true")
+        # T10 — surface user_stopped (arch §8 item 3).  A process that
+        # was not user-stopped does NOT show the line (additive — the
+        # proc_status block stays byte-identical for a non-RAM process).
+        if getattr(info, "user_stopped", False):
+            parts.append("user_stopped: true")
         if info.last_error:
             parts.append(f"last_error: {info.last_error}")
         # Buffer info lets the agent know whether to expect a spill
@@ -1578,6 +2099,14 @@ class BackgroundProcessManager:
                 parts.append(f"spill_file: {info.file_path} ({size} bytes)")
             except OSError:
                 parts.append(f"spill_file: {info.file_path} (unreadable)")
+
+        # T7 — the proc lane's RAM surface (query-only): additive lines,
+        # never replacing the block.  Byte-identical to today for a
+        # non-RAM process.  The verdict rides proc_status (the agent polls
+        # it); the §3.5 item-12 sentence is carried in the docstring.
+        ram_record = _read_ram_verdict(info.ram_tracking_id) if getattr(info, "ram_tracking_id", "") else None
+        ram_lines = _ram_proc_surface_lines(ram_record, timed_out=getattr(info, "timed_out", False))
+        parts.extend(ram_lines)
 
         return "\n".join(parts)
 
@@ -1602,6 +2131,10 @@ class BackgroundProcessManager:
         # Stable order so repeated ``proc_list`` calls diff cleanly.
         for pid in sorted(bucket.keys()):
             info = bucket[pid]
+            # D-2 — the same late-verdict reconciliation as ``get_status``:
+            # ``proc_list`` renders ``info.status`` too, so the table must
+            # not contradict the ``proc_status`` block.
+            _reconcile_late_ram_verdict(info)
             cmd_repr = self._command_repr(info.command)
             elapsed = datetime.now(timezone.utc) - info.started_at
             secs = int(elapsed.total_seconds())
@@ -1694,6 +2227,18 @@ class BackgroundProcessManager:
                     os.unlink(info.file_path)
                 except OSError:
                     pass
+
+            # T8 — release the guard registration on the cleanup path
+            # (conditional, idempotent: a live watch / a claimed record
+            # is never ended by a lane exit — the guard owns it).
+            if getattr(info, "ram_tracking_id", ""):
+                try:
+                    _ram_lane_release(info.ram_tracking_id)
+                except Exception as exc:  # pragma: no cover — defensive
+                    logger.warning(
+                        "proc: ram-guard release (cleanup) failed: %s: %s",
+                        type(exc).__name__, exc,
+                    )
 
     async def cleanup_all(self) -> int:
         """Kill ALL background processes across ALL instances.
@@ -2234,6 +2779,18 @@ Returns:
     ``status: exited`` → exited cleanly (exit_code); ``status:
     killed`` → killed by SIGTERM/SIGKILL or user-requested stop;
     ``status: error`` → spawn / wait failed.
+
+    RAM auto-termination (arch §4.3, §8 item 3; §3.5 item 12): the
+    proc lane's RAM verdict is QUERY-ONLY — ``proc_run`` returns a
+    process handle before any breach can exist, so the typed
+    ``ram_limit_exceeded`` envelope is delivered by the BASH lane's
+    return string only. In the proc lane the verdict is surfaced by
+    ``proc_status`` as a ``ram_breach:`` line plus a flat
+    ``ram_killed: true`` (added as lines, never replacing the block).
+    the verdict is QUERY-ONLY — an agent that never calls proc_status
+    after a proc run will not see the RAM verdict in the proc_run
+    result; it must poll proc_status, the same obligation it already
+    has for timed_out and user_stopped.
 """
 
     # -----------------------------------------------------------------

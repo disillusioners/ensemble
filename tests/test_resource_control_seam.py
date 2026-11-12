@@ -842,6 +842,13 @@ _FENCE_ALLOWED_IDENTIFIERS = {
     "cg_nr_throttled",
     "throttled_usec",
     "nr_throttled",
+    # RAM auto-termination (phase3-plan.md T13): the ``ram_killed``
+    # exit-kind VOCABULARY — the name the pid_registry records when the
+    # RAM guard's kill ladder terminated the tree.  It is a NAMED
+    # CONSTANT in a vocabulary enum (``mark_exit`` raises on an unknown
+    # kind), NOT enforcement code: nothing in the resource_monitor
+    # package signals, throttles or enforces anything because of it.
+    "EXIT_KIND_RAM_KILLED",
 }
 _FENCE_ALLOWED_STRINGS = {
     # T4 ``op`` vocabulary advertised as available:false by
@@ -859,6 +866,14 @@ _FENCE_ALLOWED_STRINGS = {
     "nr_throttled",
     "cg_throttled_usec",
     "cg_nr_throttled",
+    # RAM auto-termination (phase3-plan.md T13): the ``ram_killed``
+    # exit-kind VALUE — the recorded OUTCOME vocabulary of the pid
+    # registry.  It RECORDS a kill the RAM guard's ladder performed;
+    # the registry itself never signals, throttles or enforces.
+    "ram_killed",
+    # …and the constant's own NAME, as it rides in the module's
+    # ``__all__`` (a re-export list — no behaviour, no enforcement).
+    "EXIT_KIND_RAM_KILLED",
 }
 _FENCE_ALLOWED_STRING_PHRASES = (
     # House kill-switch vocabulary (facade boot log + P3/P4 prose).

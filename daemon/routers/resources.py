@@ -47,6 +47,20 @@ P6 appends the OBSERVE-ONLY control seam:
   this docstring deliberately does not name the dormant columns —
   the dormancy audit allows only the model definition to).
 
+The RAM auto-termination Phase 5 appends the guard-health read surface:
+
+* ``GET /api/resources/ram-guard`` — the SINGLE eleven-field heartbeat
+  pin (arch §15 B23, ordered: ``enabled, thread_alive, last_tick_at,
+  missed_samples, ticks, registry_depth, lane_alive, lane_pending,
+  last_lane_progress_at, resolved_ceiling_bytes, ceiling_source`` —
+  ``ceiling_source ∈ {meminfo, cgroup, fallback-fixed}``) plus the B5
+  counter set (17 keys, ordered). ADDITIVE and independent: it is
+  NEVER referenced by ``/livez`` or ``/readyz`` (an observability
+  death must not gate traffic) and ``/control-capabilities`` stays
+  byte-identical (fence-pinned). Absent guard (OFF / pre-init) degrades
+  to the EMPTY SHAPE — ``enabled:false`` + zeros/nulls — never 503
+  (D11).
+
 The router is the single mount for the whole family.
 
 **DI pattern.** The router depends-injects the manager via
@@ -94,6 +108,7 @@ from daemon.services.resource_monitor.sampler import (
     DEGRADED_SENTINEL_INTERVAL_S,
 )
 from daemon.services import resource_traceback
+from daemon.services.ram_guard.guard import COUNTER_KEYS, HEARTBEAT_KEYS
 from daemon.services.timestamps import to_utc_iso
 
 logger = logging.getLogger(__name__)
@@ -1403,3 +1418,59 @@ async def post_profile(request: Request, body: ProfileRequestBody) -> dict:
         "capability": _profile_capability_probe(),
         "profile_seam_invocations": count,
     }
+
+
+# ── RAM auto-termination P5 — the guard-health read surface ────────────────
+#
+# GET /api/resources/ram-guard (arch §15 B23 + B5; phase5-plan T12).
+# The payload is the SINGLE eleven-field heartbeat pin plus the B5
+# counter set — EXACTLY the ordered shapes the substrate pins
+# (``daemon/services/ram_guard/guard.py`` ``HEARTBEAT_KEYS`` /
+# ``COUNTER_KEYS``); the endpoint projects them verbatim and adds
+# nothing. It is NOT in /livez or /readyz (an observability death must
+# not gate traffic) and /control-capabilities stays byte-identical
+# (fence-pinned by tests/test_resource_control_seam.py, unmodified).
+
+def _empty_ram_guard_shape() -> dict:
+    """The degrade-never-503 empty shape (D11) — OFF / pre-init guard.
+
+    Every heartbeat field is present (``enabled:false`` + zeros/nulls)
+    and every B5 counter is present at 0, so a poller can branch on
+    presence without ``undefined`` guards (the ``_empty_live_shape``
+    house shape).
+    """
+    heartbeat: dict[str, Any] = {
+        "enabled": False,
+        "thread_alive": False,
+        "last_tick_at": None,
+        "missed_samples": 0,
+        "ticks": 0,
+        "registry_depth": 0,
+        "lane_alive": False,
+        "lane_pending": 0,
+        "last_lane_progress_at": None,
+        "resolved_ceiling_bytes": None,
+        "ceiling_source": None,
+    }
+    assert tuple(heartbeat.keys()) == HEARTBEAT_KEYS, "heartbeat drifted"
+    counters: dict[str, int] = {key: 0 for key in COUNTER_KEYS}
+    return {**heartbeat, **counters}
+
+
+@router.get("/ram-guard")
+async def get_ram_guard_status(request: Request) -> dict:
+    """The RAM guard's health heartbeat + counters (§15 B23 + B5).
+
+    Passthrough of the substrate's ordered surfaces — ``health()`` (the
+    eleven-field pin) then ``counters_snapshot()`` (the B5 set). Absent
+    guard (OFF / pre-init / degraded boot) ⇒ the EMPTY SHAPE, never 503
+    (D11).
+    """
+    guard = getattr(request.app.state, "ram_guard", None)
+    if guard is None:
+        return _empty_ram_guard_shape()
+    heartbeat = guard.health()
+    counters = guard.counters_snapshot()
+    assert tuple(heartbeat.keys()) == HEARTBEAT_KEYS, "heartbeat drifted"
+    assert tuple(counters.keys()) == COUNTER_KEYS, "counter set drifted"
+    return {**heartbeat, **counters}

@@ -27,6 +27,14 @@ CHANNEL_ID = "999888777"
 #: The human's platform user id.
 USER_ID = "112233445566"
 
+#: The designated-channel fixture ids (L17 — ONE home): the lane's
+#: shared digit-string shapes, consumed by the designated-channel
+#: matrix AND the census runtime contract. Same values the two test
+#: files declared inline before the dedupe.
+DESIGNATED_GUILD_ID = "777000111"
+DESIGNATED_CHANNEL_ID = "111122223333444455"
+DESIGNATED_APPROVER_ID = "112233445566"
+
 
 class FakeMessageRow:
     """A message-queue row — the window's trigger evidence."""
@@ -142,9 +150,20 @@ def build_discord_meta(
     is_group_dm: Any = False,
     guild_id: Optional[str] = None,
     channel_type: str = "dm",
+    parent_channel_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    """The nested ``metadata["discord"]`` dict the adapter builds."""
-    return {
+    """The nested ``metadata["discord"]`` dict the adapter builds.
+
+    Phase-1.5 thread cells (D-9 / M-12 / M-13): a thread carries
+    ``channel_type="thread"``, its OWN ``channel_id`` and the parent's
+    id in ``parent_channel_id`` — the adapter's exact key set
+    (``daemon/sources/adapters/discord/adapter.py:1080-1092``). The two
+    new keys are ADDITIVE-ONLY: they appear in the dict ONLY when the
+    caller passes them, so every pre-existing caller's meta dict is
+    byte-identical to before this parameter existed.
+    """
+    meta: dict[str, Any] = {
         "guild_id": guild_id,
         "channel_id": channel_id,
         "channel_type": channel_type,
@@ -154,6 +173,57 @@ def build_discord_meta(
         "is_dm": is_dm,
         "is_group_dm": is_group_dm,
     }
+    if parent_channel_id is not None:
+        meta["parent_channel_id"] = parent_channel_id
+    if thread_id is not None:
+        meta["thread_id"] = thread_id
+    return meta
+
+
+def build_guild_meta(
+    *,
+    user_id: str = DESIGNATED_APPROVER_ID,
+    channel_id: str = DESIGNATED_CHANNEL_ID,
+    guild_id: str = DESIGNATED_GUILD_ID,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """A designated-channel-shaped window row (T3.1): a guild text
+    channel with a nested human — the only shape a designation applies
+    to. ``AssentHumanIdentity`` needs a non-empty ``external_user_id``;
+    the non-DM derivation builds ``channel:<guild>:<channel>:<user>``,
+    so NO mapping-row fake is needed (verified by execution — A-4).
+    ``**overrides`` replaces any default (e.g. ``channel_type="thread"``
+    for the D-9 cells).
+
+    M11 — ONE shared builder: both the designated-channel matrix and
+    the census runtime contract call this. A caller needing a different
+    guild passes ``guild_id=`` explicitly (the census pins the literal
+    ``channel:777:…`` identity string, so it keeps ``"777"`` local).
+    """
+    kwargs: dict[str, Any] = dict(
+        is_dm=False,
+        is_group_dm=False,
+        guild_id=guild_id,
+        channel_id=channel_id,
+        channel_type="text",
+        user_id=user_id,
+    )
+    kwargs.update(overrides)
+    return build_discord_meta(**kwargs)
+
+
+def info_lines(caplog) -> list[str]:
+    """The tool's INFO lines from a caplog capture (L15 — ONE shared
+    filter): every ``prompt_assent …`` record on the tool's logger. The
+    resolver's ``designation_map`` line matches too; the outcome-line
+    consumers downstream disambiguate on ``action=``/``outcome=``, and
+    the warning records (``prompt_assent: …``) never match the prefix."""
+    return [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.name == "daemon.tools.prompt_assent"
+        and rec.getMessage().startswith("prompt_assent ")
+    ]
 
 
 def build_tools(
