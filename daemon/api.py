@@ -3987,6 +3987,26 @@ async def lifespan(app: FastAPI):
     async with session_mgr.run():
         yield
     
+    # rogue-containment: best-effort release of the port-ownership claim
+    # (pid-gated — never deletes a successor's claim).
+    try:
+        from daemon.services.port_ownership import (
+            release_claim,
+            resolve_self_install_dir,
+            _claims_dir_for,
+        )
+        import os as _os
+        _self_install = resolve_self_install_dir()
+        _claims_dir = _claims_dir_for(_self_install)
+        release_claim(
+            _claims_dir,
+            getattr(config, "daemon", None).host if getattr(config, "daemon", None) else "0.0.0.0",
+            int(getattr(getattr(config, "daemon", None), "port", 0) or 0),
+            _os.getpid(),
+        )
+    except Exception:  # noqa: BLE001 — best-effort
+        pass
+
     # Shutdown sequence
     # Stop RetryScheduler first
     if retry_scheduler is not None:
