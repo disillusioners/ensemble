@@ -1822,17 +1822,29 @@ class TestRegistrationChain:
             assert "snapshot_search" in allow, agent
 
     def test_gate_flag_enabled_on_targets(self):
-        """unify-spawn-tools decision 10: tester + developer[v2] carry
-        ``"snapshot_enabled": true``; no other agent meta.json does."""
+        """vsss + unify-spawn-tools decision 10: the snapshot-enabled
+        targets are tester + developer (base) + developer[v2] —
+        enumerated per-DIRECTORY and identified by each directory's
+        VERSIONED SPACE KEY (``registry.compose_agent_space_key`` over
+        the parsed dir name: ``developer[v2]`` → ``'developer[v2]'``,
+        NOT the bare meta ``id`` — both developer metas say
+        ``id: 'developer'`` / ``version: 2.0.0``, which collide).
+        No other agent meta.json carries the flag."""
         import json
+
+        from daemon.registry import _parse_agent_dir_name
 
         agents_dir = TOOLS_DIR.parents[1] / "agents"
         enabled = []
         for meta_path in sorted(agents_dir.glob("*/meta.json")):
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             if meta.get("snapshot_enabled") is True:
-                enabled.append(meta.get("id") or meta_path.parent.name)
-        assert sorted(enabled) == ["developer", "tester"], (
+                # vsss: per-dir identity — the versioned space key
+                # derived from the DIRECTORY name suffix, never the
+                # (colliding) meta id/version fields.
+                base, tag = _parse_agent_dir_name(meta_path.parent.name)
+                enabled.append(f"{base}[{tag}]" if tag else base)
+        assert sorted(enabled) == ["developer", "developer[v2]", "tester"], (
             f"snapshot_enabled targets drifted: {enabled}"
         )
         # The versioned developer[v2] directory is the ONLY developer

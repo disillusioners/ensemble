@@ -299,6 +299,7 @@ class SnapshotSearchService:
         *,
         llm_client: Any | None = None,
         llm_model: str | None = None,
+        agent_space_key: str | None = None,
     ) -> dict[str, Any]:
         """Run the full three-stage snapshot search pipeline.
 
@@ -315,6 +316,14 @@ class SnapshotSearchService:
                 and the service builds a client from
                 ``self._llm_config``).
             llm_model: Optional model override (test seam).
+            agent_space_key: vsss — canonical versioned space key
+                for the automatic warm-start path ONLY (threaded
+                from ``resolve_spawn_snapshot``). When set, Stage 0
+                restricts candidates to
+                ``project_id + status='active' + agent_space_key =
+                :key`` — NULL (version-unattributable) rows never
+                match. ``None`` (default) = the public
+                ``snapshot_search`` shape (no space filter).
 
         Returns:
             Dict with keys:
@@ -330,11 +339,25 @@ class SnapshotSearchService:
         """
         try:
             # ── Stage 0: candidate filter (project + status='active') ─
-            candidates = await asyncio.to_thread(
-                self._repo.list_active_by_project,
-                project_id,
-                _SQL_ACTIVE_FETCH_CAP,  # outer SQL cap; the LLM cap is the tighter bound
-            )
+            # vsss: the space-keyed call passes agent_space_key as a
+            # KEYWORD so legacy duck-typed fakes that predate the
+            # column keep the two-positional-arg shape on the
+            # unfiltered path; a stale fake hit WITH a key raises
+            # TypeError inside the service's fail-soft envelope →
+            # zero candidates (fail-closed, never a warm start).
+            if agent_space_key:
+                candidates = await asyncio.to_thread(
+                    self._repo.list_active_by_project,
+                    project_id,
+                    _SQL_ACTIVE_FETCH_CAP,  # outer SQL cap; the LLM cap is the tighter bound
+                    agent_space_key=agent_space_key,
+                )
+            else:
+                candidates = await asyncio.to_thread(
+                    self._repo.list_active_by_project,
+                    project_id,
+                    _SQL_ACTIVE_FETCH_CAP,  # outer SQL cap; the LLM cap is the tighter bound
+                )
             if not candidates:
                 return {"results": [], "error": None}
 

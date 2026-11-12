@@ -3507,10 +3507,20 @@ def create_instance_tools(
             # W2: registry validates the configured tag so a stale
             # default (e.g. ``"v99"`` retagged/renamed) falls back to
             # base instead of hard-failing the spawn.
-            from ..registry import get_registry
+            from ..registry import compose_agent_space_key, get_registry
             registry = get_registry()
             version_tag = await _resolve_default_version_tag(
                 manager._project_repository, agent_id, registry
+            )
+            # vsss (version-scoped snapshot spaces): compose the
+            # canonical space key from the spawn target's RESOLVED
+            # versioned identity — the same tag this spawn will start
+            # the child with — so developer and developer[v2] search
+            # DIFFERENT snapshot spaces. One derivation for all seams
+            # (registry.compose_agent_space_key); never the meta.json
+            # 'version' field.
+            snapshot_space_key = compose_agent_space_key(
+                agent_id, version_tag
             )
 
             # ── unify-spawn-tools (2026-10-05): TARGET-agent snapshot
@@ -3521,7 +3531,10 @@ def create_instance_tools(
             # with) so developer[v2]-style variants gate on THEIR
             # flag. Gate OFF ⇒ NO snapshot work at all: no search, no
             # repo reads, no snapshot output — exactly the
-            # pre-unification plain cold spawn.
+            # pre-unification plain cold spawn. vsss: the internal
+            # search resolves per-version snapshot spaces keyed by
+            # ``snapshot_space_key`` (the same resolved identity);
+            # NULL/unattributed rows never match the automatic path.
             snapshot_gate_on = _target_snapshot_enabled(agent_id, version_tag)
             resolution: SpawnSnapshotResolution | None = None
             steering_note = ""
@@ -3540,6 +3553,7 @@ def create_instance_tools(
                     verify=verify,
                     allow_cross_project=allow_cross_project,
                     caller_project_id=caller_project,
+                    agent_space_key=snapshot_space_key,
                 )
             elif snapshot_id or tags:
                 # Steering params passed to a non-snapshot target —

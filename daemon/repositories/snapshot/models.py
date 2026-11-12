@@ -141,6 +141,25 @@ class Snapshot(SQLModel, table=True):
             USING GIN (domain_tags jsonb_path_ops);`` or equivalent).
         status: Lifecycle state — see module docstring. Searchable
             states are ``active`` / ``superseded`` ONLY.
+        agent_space_key: Canonical versioned agent identity of the
+            TARGET instance at capture time (vsss,
+            ``registry.compose_agent_space_key`` — e.g.
+            ``'developer'`` / ``'developer[v2]'`` / ``'tester'``).
+            Partitions the automatic warm-start search into
+            per-version spaces: the spawn-time internal search
+            filters ``agent_space_key = :key`` so ``developer`` and
+            ``developer[v2]`` never warm-start from each other's
+            snapshots. ``NULL`` = version-unattributable (legacy
+            rows, or snapshots of deleted instances) — matches NO
+            version's automatic warm-start (fail-closed, no
+            fallback tier). The explicit ``snapshot_id`` path is
+            version-permissive and still reaches NULL rows.
+            The public ``snapshot_search`` tool does NOT filter by
+            this column (project+status+tags only — observability
+            across spaces).
+            Legacy rows are stamped by
+            ``scripts/backfill_snapshot_agent_space.py`` (only when
+            the target instance row still exists).
         supersedes_snapshot_id: R12 soft self-ref — set when this row
             is the successor minted by create-mints-successor.
             Cross-root supersession is permitted (no same-root
@@ -166,6 +185,17 @@ class Snapshot(SQLModel, table=True):
         # Candidate-filter index for the project+status search path
         # (PR5: every search is project-scoped + status='active').
         Index("ix_snapshots_project_status", "project_id", "status"),
+        # vsss — candidate-filter index for the automatic warm-start
+        # path's Stage-0 predicate (project_id, status='active',
+        # agent_space_key). Superset of the two-column index above;
+        # both kept: the HTTP list surface filters without a space
+        # key and stays served by the narrower index.
+        Index(
+            "ix_snapshots_project_status_space",
+            "project_id",
+            "status",
+            "agent_space_key",
+        ),
         # Supersession-chain walks + per-target lookups (R9 verdict:
         # "previous snapshot of this target exists").
         Index("ix_snapshots_target_instance", "target_instance_id"),
@@ -200,6 +230,17 @@ class Snapshot(SQLModel, table=True):
         sa_column=Column(
             String, nullable=False, default=SNAPSHOT_STATUS_ACTIVE
         ),
+    )
+    # vsss — version-scoped snapshot space (see class docstring).
+    # TEXT NULL: NULL = version-unattributable (legacy rows /
+    # deleted-instance captures) and NEVER matches the automatic
+    # warm-start path (fail-closed). SQLite gets this column from
+    # create_all; existing PostgreSQL databases get it via
+    # EnsembleManager._ensure_postgres_columns (ALTER TABLE snapshots
+    # ADD COLUMN IF NOT EXISTS agent_space_key TEXT) + the
+    # ix_snapshots_project_status_space index.
+    agent_space_key: str | None = Field(
+        default=None, sa_column=Column(Text, nullable=True, default=None)
     )
     # SOFT self-reference — NO FK (R12 cross-root supersession permitted).
     supersedes_snapshot_id: str | None = Field(
@@ -239,6 +280,7 @@ class Snapshot(SQLModel, table=True):
             "task_summary": self.task_summary,
             "domain_tags": list(self.domain_tags) if self.domain_tags else [],
             "status": self.status,
+            "agent_space_key": self.agent_space_key,
             "supersedes_snapshot_id": self.supersedes_snapshot_id,
             "repo_path": self.repo_path,
             "vcs_type": self.vcs_type,

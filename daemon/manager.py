@@ -8630,6 +8630,24 @@ class InstanceManager:
           'agent' satisfies the CHECK, so the backfill of every
           Phase-1 row is byte-preserving (proven on a throwaway
           SQLite before landing).
+        - snapshots.agent_space_key + ix_snapshots_project_status_space
+          (vsss — version-scoped snapshot spaces, 2026-11-12): the
+          canonical versioned agent identity of the capture TARGET
+          (``registry.compose_agent_space_key`` over
+          ``instances.agent_id`` + ``instances.agent_tag`` — e.g.
+          ``'developer[v2]'``). The automatic warm-start search
+          filters ``project_id + status='active' + agent_space_key``
+          so each version resolves to its OWN snapshot space; NULL
+          rows (pre-column legacy rows, deleted-instance captures)
+          match NO version's automatic warm-start (fail-closed).
+          Fresh PG databases get column + index from create_all via
+          the Snapshot model; existing PG databases get the
+          idempotent ALTER + CREATE INDEX below. Backfill of NULL
+          rows whose target instance still exists:
+          ``scripts/backfill_snapshot_agent_space.py`` (idempotent,
+          re-runnable post-activation — the live daemon mints NULL
+          rows only for unresolvable targets after restart, never
+          for healthy ones).
 
         When a new column needs this treatment: add the IF NOT EXISTS
         ALTER + (optional) CREATE INDEX here. Do NOT add raw
@@ -8669,6 +8687,37 @@ class InstanceManager:
             "ALTER TABLE instance_ui_prefs ADD COLUMN IF NOT EXISTS icon_tag VARCHAR",
             # instances.agent_tag: agent version tag for directory-suffix versioning
             "ALTER TABLE instances ADD COLUMN IF NOT EXISTS agent_tag VARCHAR",
+            # snapshots.agent_space_key (vsss — version-scoped snapshot
+            # spaces, 2026-11-12): canonical versioned agent identity
+            # of the capture TARGET (registry composite key, e.g.
+            # 'developer[v2]'). Partitions the automatic warm-start
+            # search into per-version spaces; NULL (legacy rows /
+            # deleted-instance captures) matches NO version's
+            # automatic warm-start (fail-closed). Fresh databases get
+            # the column + index from SQLModel.metadata.create_all()
+            # via the Snapshot SQLModel declaration at
+            # daemon/repositories/snapshot/models.py; existing
+            # databases need the ADD COLUMN here. ADD COLUMN IF NOT
+            # EXISTS is INVALID SQLite syntax — this method is gated
+            # by ``is_postgres`` at the call site, so SQLite never
+            # reaches this list (its DDL is landed by ``create_all``).
+            # Backfill for pre-existing rows:
+            # scripts/backfill_snapshot_agent_space.py (idempotent;
+            # only rows whose target instance still exists are
+            # stamped — deleted-instance rows stay NULL forever).
+            (
+                "ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS "
+                "agent_space_key TEXT"
+            ),
+            # vsss — Stage-0 predicate index for the automatic
+            # warm-start path (project_id, status='active',
+            # agent_space_key). Fresh PG databases also get this from
+            # create_all (declared in __table_args__); existing
+            # databases need the CREATE INDEX here.
+            (
+                "CREATE INDEX IF NOT EXISTS ix_snapshots_project_status_space "
+                "ON snapshots (project_id, status, agent_space_key)"
+            ),
             # message_queue.image_refs (Phase 2 / clipboard-image-chat,
             # council NEEDS-FIXES, 2026-09-19): DEDICATED JSONB column
             # for clipboard ``/api/tmp_images/<32hex>`` refs. Distinct

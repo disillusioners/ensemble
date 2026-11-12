@@ -751,6 +751,7 @@ async def resolve_spawn_snapshot(
     verify: str,
     allow_cross_project: bool,
     caller_project_id: str | None,
+    agent_space_key: str | None = None,
 ) -> SpawnSnapshotResolution:
     """Resolve the snapshot to warm-start from (``consumed=None`` ⇒ cold).
 
@@ -765,6 +766,19 @@ async def resolve_spawn_snapshot(
     ``staleness.warnings``). D8: ``caller_project_id=None``
     (project-less caller) fails closed on any snapshot that HAS a
     project.
+
+    vsss (version-scoped snapshot spaces): the internal-search branch
+    is version-scoped — it ALWAYS resolves to exactly ONE canonical
+    agent space (``agent_space_key``, composed by the caller from the
+    spawn target's resolved versioned identity via
+    ``registry.compose_agent_space_key``) and the Stage-0 predicate
+    is ``project_id + status='active' + agent_space_key = :key``.
+    NULL (version-unattributable) rows match NO version's automatic
+    warm-start — fail-closed, no fallback tier. A missing/unresolvable
+    key ⇒ ``no-hit`` cold + warning (a seam that cannot resolve the
+    target version never searches). The EXPLICIT ``snapshot_id``
+    branch is version-permissive (project + status verified only —
+    direct addressing, not space resolution) and unchanged.
 
     NEVER raises: an unexpected fault in this phase degrades to a
     ``no-hit`` cold with a warning so the unified spawn still
@@ -863,7 +877,20 @@ async def resolve_spawn_snapshot(
         else:
             # R14 internal search — ACTIVE-only candidates (the search
             # service filters status='active' + project).
-            if search_service is None or repo is None:
+            #
+            # vsss (version-scoped snapshot spaces): the automatic
+            # path resolves to EXACTLY ONE canonical agent space and
+            # fails closed without it — a NULL/unresolvable key never
+            # falls back to an unfiltered search (a legacy row would
+            # then be reachable from every version's warm start).
+            if not agent_space_key:
+                resolution.cold_reason = "no-hit"
+                resolution.warnings.append(
+                    "no agent version space resolved for the spawn "
+                    "target — automatic snapshot matching disabled "
+                    "(fail-closed; explicit snapshot_id still works)"
+                )
+            elif search_service is None or repo is None:
                 resolution.cold_reason = "no-hit"
                 resolution.warnings.append("snapshot services not wired")
             else:
@@ -879,6 +906,7 @@ async def resolve_spawn_snapshot(
                         # FIXME(ledger): tag_mode=any unwired — see follow-up ledger
                         tag_mode="all" if search_tags else "all",
                         limit=1,
+                        agent_space_key=agent_space_key,
                     )
                     results = list(search_result.get("results") or [])
                 except Exception as exc:
