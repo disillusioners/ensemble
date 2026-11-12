@@ -174,12 +174,13 @@ def workdir(tmp_path: pathlib.Path) -> pathlib.Path:
     return root
 
 
-@pytest.fixture
-def client(
+def _make_client(
     workdir: pathlib.Path,
     passcode_service: ViewPasscodeService,
     cipher: ViewPasscodeCipher,
+    peer: tuple[str, int],
 ) -> TestClient:
+    """Fresh app + router; ``peer`` becomes the ASGI ``scope["client"]``."""
     cfg = LiveViewsConfig()
     cfg.roots["planning"] = LiveViewsRootConfig(
         type="project_scoped",
@@ -202,7 +203,30 @@ def client(
     app.state.verify_rate_limiter = VerifyRateLimiter(
         capacity=50, refill_per_minute=50
     )
-    return TestClient(app, client=("127.0.0.1", 50000))
+    return TestClient(app, client=peer)
+
+
+@pytest.fixture
+def client(
+    workdir: pathlib.Path,
+    passcode_service: ViewPasscodeService,
+    cipher: ViewPasscodeCipher,
+) -> TestClient:
+    return _make_client(
+        workdir, passcode_service, cipher, ("127.0.0.1", 50000)
+    )
+
+
+@pytest.fixture
+def nonloopback_client(
+    workdir: pathlib.Path,
+    passcode_service: ViewPasscodeService,
+    cipher: ViewPasscodeCipher,
+) -> TestClient:
+    """Same router, NON-loopback transport peer (``192.168.1.10``)."""
+    return _make_client(
+        workdir, passcode_service, cipher, ("192.168.1.10", 50000)
+    )
 
 
 def _mint(store: _Store, cipher: ViewPasscodeCipher) -> str:
@@ -321,6 +345,11 @@ class TestExemptVerdict:
             "localhost\x00",
             "localhost%00",
             "localhost%2e",
+            # C2 trailing-dot pins: a fully-qualified trailing dot is a
+            # DIFFERENT host from the exact literal — never normalized
+            # away (a ``rstrip(".")`` mutation would exempt these).
+            "localhost.",
+            "localhost.:9797",
         ],
     )
     def test_non_loopback_hosts_are_not_exempt(self, host: str):
@@ -389,6 +418,38 @@ class TestPeerGateConjunction:
         )
         assert _is_loopback_https_exempt(request) is False
         assert _secure_context_satisfied(request) is False
+
+
+class TestPeerProvenance:
+    """The peer SOURCE is ``request.scope["client"]`` — never a header.
+
+    ``X-Forwarded-For`` is client-supplied and forgeable. A mutation
+    that derives the peer from that header (instead of the transport
+    peer) would grant the exemption to any remote caller who spells
+    both ``Host: localhost`` and ``X-Forwarded-For: 127.0.0.1``.
+    """
+
+    def test_route_level_non_loopback_peer_with_spoofed_xff_rejected(
+        self,
+        nonloopback_client: TestClient,
+        store: _Store,
+        cipher: ViewPasscodeCipher,
+    ):
+        """Real TestClient: peer 192.168.1.10 + Host: localhost + XFF spoof."""
+        plaintext = _mint(store, cipher)
+        resp = nonloopback_client.post(
+            _VIEW_URL,
+            data={"code": plaintext},
+            headers={
+                "Host": "localhost",
+                "X-Forwarded-For": "127.0.0.1",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 200
+        assert "Secure connection required" in resp.text
+        assert "set-cookie" not in resp.headers
+        assert plaintext not in resp.text
 
 
 # ──────────────────────────────────────────────────────────────────

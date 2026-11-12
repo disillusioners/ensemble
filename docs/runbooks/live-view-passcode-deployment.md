@@ -452,6 +452,20 @@ unchanged — a valid code is still required on loopback HTTP. Passcode + lockou
 the access control; prefer binding to `127.0.0.1` or enabling TLS when exposing the
 daemon on a LAN.
 
+**XFF-trust qualification (same-host reverse proxy):** the "does NOT match remotely"
+statement above is unconditional only for a DIRECT connection, and is FALSE under a
+same-host reverse proxy — uvicorn defaults to `proxy_headers=True` with
+`forwarded_allow_ips` resolving to `127.0.0.1`, so for a request arriving from the
+loopback proxy the daemon rewrites the peer it exposes to the application
+(`scope["client"]`) from the request's `X-Forwarded-For`, making the forwarded client
+peer — not the proxy socket — what the exemption gate sees, and the exemption therefore
+follows the proxy's `X-Forwarded-For` handling. Such a proxy MUST **APPEND** to (never
+pass through verbatim) any client-supplied `X-Forwarded-For`: a pass-through proxy lets a
+remote caller present `X-Forwarded-For: 127.0.0.1` and claim the exemption, whereas an
+appending proxy contributes the real client address as the rightmost (most recently
+appended) untrusted hop — the one the daemon selects — so the request is rejected as
+expected.
+
 **Host-preservation assertion (local counterpart of §3 step H):** the verify POST is
 exercised with (a) a **vouched same-origin** `Origin` — the inbound `Host` and the
 `Origin` name the same host **and** that host is vouched (an audience entry, a

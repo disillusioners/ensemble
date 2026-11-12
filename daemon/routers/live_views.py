@@ -1592,10 +1592,14 @@ def _secure_context_satisfied(request: Request) -> bool:
     The historical requirement is "the request must be HTTPS"
     (architecture-recommendation.md D6:79). This predicate keeps that
     requirement for every non-loopback host and adds ONE exemption:
-    an exact loopback ``Host`` over plain HTTP, where browsers treat
-    ``http://localhost`` / ``http://127.0.0.1`` / ``http://[::1]`` as
-    potentially-trustworthy secure contexts and DO store the
-    ``Secure`` grant cookie.
+    an exact loopback ``Host`` over plain HTTP **AND** a loopback TCP
+    peer (``request.scope["client"]``) — fail-closed when the client
+    info is missing or unparseable. Browsers treat ``http://localhost``
+    / ``http://127.0.0.1`` / ``http://[::1]`` as potentially-
+    trustworthy secure contexts and DO store the ``Secure`` grant
+    cookie, but the ``Host`` spelling alone is client-controlled and
+    forgeable, so the peer conjunct is what confines the exemption to
+    genuinely local traffic.
 
     Everything else — LAN IPs, hostnames, public domains, a
     forwarded-proto-less proxy hit — returns False and keeps the
@@ -2588,13 +2592,17 @@ def build_router() -> APIRouter:
         #
         # LOOPBACK EXEMPTION (2026-11-12): an EXACT loopback
         # ``Host`` (``localhost`` / ``127.0.0.1`` / ``::1`` /
-        # ``::ffff:127.0.0.1``) over plain HTTP is served —
-        # browsers treat those origins as potentially-
-        # trustworthy secure contexts and DO store the
-        # ``Secure`` grant cookie there, so the hazard this
-        # block exists for does not apply. Every NON-loopback
-        # host keeps the historical rejection BYTE-IDENTICAL
-        # (see ``_secure_context_satisfied``).
+        # ``::ffff:127.0.0.1``) over plain HTTP is served,
+        # but ONLY when the TCP peer (``request.scope["client"]``,
+        # see ``_is_loopback_https_exempt``) is loopback too —
+        # fail-closed when peer info is missing. Browsers treat
+        # those origins as potentially-trustworthy secure
+        # contexts and DO store the ``Secure`` grant cookie
+        # there, so the hazard this block exists for does not
+        # apply. Every NON-loopback host — and any non-loopback
+        # peer spelling a loopback ``Host`` — keeps the
+        # historical rejection BYTE-IDENTICAL (see
+        # ``_secure_context_satisfied``).
         if not _secure_context_satisfied(request):
             return _render_secure_context_page(
                 request, csp_nonce=_public_csp_nonce()
