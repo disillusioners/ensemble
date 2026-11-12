@@ -244,3 +244,23 @@ def test_proc_run_real_spawn_channel(monkeypatch, tmp_path):
     # NOTE: an AMBIENT fence marker is inherited by children BY DESIGN (a
     # fenced mirror keeps its descendants fenced). Only the tool-call
     # OVERLAY channel is stripped (pinned in the bash test above).
+
+
+def test_proc_run_guard_import_failure_is_loud_fail_open(monkeypatch, caplog):
+    """N9: the overlay-guard import fallback must log at ERROR (fail-open)."""
+    import sys
+
+    from daemon.tools.proc_tools import create_proc_tools
+
+    # NOTE: ``daemon.tools.bash`` is the decorated TOOL on the package; the
+    # MODULE lives in sys.modules and is what ``from ... import`` resolves.
+    bash_mod = sys.modules["daemon.tools.bash"]
+    monkeypatch.delattr(bash_mod, "_pkill_overlay_violation", raising=False)
+    tools = create_proc_tools("test-loud-fallback")
+    proc_run = next(t for t in tools if getattr(t, "name", "") == "proc_run")
+
+    with caplog.at_level("ERROR", logger="daemon.tools.proc_tools"):
+        # timeout=-1 returns before any spawn, AFTER the guard block.
+        out = asyncio.run(proc_run.ainvoke({"command": "echo hi", "timeout": -1}))
+    assert "Error: timeout" in str(out)
+    assert "overlay guard UNAVAILABLE" in caplog.text

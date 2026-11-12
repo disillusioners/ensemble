@@ -2028,8 +2028,19 @@ def create_proc_tools(current_instance_id: str = "") -> list:
         # ambient (proc_run has no env overlay).
         try:
             from daemon.tools.bash import _pkill_overlay_violation
+
             _proc_pkill_violation = _pkill_overlay_violation(command, None)
-        except Exception:  # noqa: BLE001
+        except Exception as _guard_exc:  # noqa: BLE001
+            # N9 (fix-round 2): fail-open + LOUD. The overlay is
+            # defense-in-depth; a broken import must not brick proc_run,
+            # but the missing guard is logged at ERROR on every call.
+            logger.error(
+                "proc_run: pkill overlay guard UNAVAILABLE (%s: %s) — this "
+                "spawn is NOT pattern-checked. FAIL-OPEN by policy "
+                "(availability), loudly logged.",
+                type(_guard_exc).__name__,
+                _guard_exc,
+            )
             _proc_pkill_violation = None
         if _proc_pkill_violation is not None:
             return (
