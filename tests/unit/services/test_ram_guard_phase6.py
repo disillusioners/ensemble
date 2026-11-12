@@ -161,21 +161,20 @@ def test_t11b_a_wedged_tick_freezes_last_tick_at_and_does_not_count_a_miss(
         release.wait(5.0)  # never returns while wedged
         return {"x": 1}
 
-    # The tick's scan wedges — but ``_last_tick_at`` is set BEFORE the
-    # scan, so it freezes at the wedge moment.
+    # C6: ``_last_tick_at`` is stamped only AFTER a completed scan, so
+    # let one tick complete first to establish a frozen baseline.
+    guard._tick_once()
+    assert guard.health()["last_tick_at"] is not None
+    frozen = guard.health()["last_tick_at"]
+
+    # Then the scan wedges — the heartbeat freezes at the prior value.
     monkeypatch.setattr(guard_mod, "scan_proc", _wedge)
     thread = threading.Thread(target=guard._tick_loop, daemon=True)
     guard._tick_thread = thread  # the health surface reads this object
     thread.start()
     try:
-        # Give the body time to enter the wedge.
-        deadline = time.monotonic() + 2.0
-        while guard.health()["last_tick_at"] is None and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert guard.health()["last_tick_at"] is not None
-        frozen = guard.health()["last_tick_at"]
         missed_before = guard.health()["missed_samples"]
-        time.sleep(0.15)  # several poll intervals
+        time.sleep(0.15)  # several poll intervals while wedged
         snap = guard.health()
         # The heartbeat is FROZEN — the only wedge signal.
         assert snap["last_tick_at"] == frozen
@@ -527,9 +526,11 @@ def test_t23_the_predicate_test_names_follow_the_b12_shape():
     text = (
         Path(__file__).resolve().parent / "test_ram_guard_ladder.py"
     ).read_text(encoding="utf-8")
-    names = re.findall(r"^def (test_p\d+_[a-z0-9_]+)\(", text, flags=re.MULTILINE)
-    assert names, "no predicate tests found"
-    for name in names:
+    all_names = re.findall(r"^def (test_\w+)\(", text, flags=re.MULTILINE)
+    assert all_names, "no tests found"
+    predicate_names = [n for n in all_names if re.match(r"test_p\d_", n)]
+    assert predicate_names, "no predicate tests found"
+    for name in predicate_names:
         assert re.fullmatch(r"test_p\d+_[a-z0-9_]+", name), name
 
 
@@ -571,7 +572,7 @@ def test_t23_no_ladder_leg_runs_under_the_signal_fence():
             # A ladder leg that asserts only refusal / already-dead outcomes.
             refusal_legs.append(node.name)
             assert uses_fence, f"{node.name}: a refusal leg must be kill_fence-backed"
-            assert not uses_census or True  # a refusal leg may also census (tolerated)
+            # A refusal leg may also census (tolerated) — no assertion.
     # The enumeration is non-vacuous: BOTH classes exist and were classified.
     assert len(killing_legs) >= 8, killing_legs
     assert len(refusal_legs) >= 8, refusal_legs

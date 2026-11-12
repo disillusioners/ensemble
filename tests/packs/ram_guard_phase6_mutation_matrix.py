@@ -111,15 +111,7 @@ LEGS: list[Leg] = [
         node="tests/unit/services/test_ram_guard_phase6.py::test_a_raising_tick_climbs_missed_samples",
         note="a raising tick does not count a miss",
     ),
-    Leg(
-        id="M7-unreadable-as-absent",
-        path="daemon/services/ram_guard/ladder.py",
-        old="    if stat.unreadable:\n        return REASON_LEADER_UNREADABLE",
-        new="    if stat.unreadable:\n        return None",
-        node="tests/unit/services/test_ram_guard_ladder.py::test_p5_leader_unreadable_refused",
-        note="unreadable leader treated as absent (S8f) — BOTH P5 and P5a sites",
-        all_sites=True,
-    ),
+    # M7 RETIRED (2026-11-12, §18.3): P5a retired — vacuous pin.
     Leg(
         id="M8-dead-guard-healthy",
         path="daemon/services/ram_guard/guard.py",
@@ -187,6 +179,17 @@ LEGS: list[Leg] = [
         ),
     ),
     Leg(
+        id="M15-return-spawn-floor-as-peak",
+        path="daemon/tools/bash.py",
+        old="            await _ram_release_sequence(\n                tracking_id=tracking_id,\n                instance_id=instance_id,\n                pid=proc.pid,\n                start_time_jiffies=bash_start_time_jiffies,\n                exit_code=proc.returncode,\n                peak_bytes=int(ram_record.observed_peak_bytes),\n            )",
+        new="            await _ram_release_sequence(\n                tracking_id=tracking_id,\n                instance_id=instance_id,\n                pid=proc.pid,\n                start_time_jiffies=bash_start_time_jiffies,\n                exit_code=proc.returncode,\n                peak_bytes=int(bash_peak_rss_kb_at_spawn or 0) * 1024,\n            )",
+        node=(
+            "tests/tools/test_bash_ram_guard.py::TestRealBallooningTree::"
+            "test_the_whole_tree_is_killed_and_the_envelope_is_returned"
+        ),
+        note="B3 honest-peak: spawn-time floor reported as the peak (real run)",
+    ),
+    Leg(
         id="M13-off-still-registers",
         path="daemon/tools/bash.py",
         old="""def _ram_guard_active() -> bool:
@@ -231,7 +234,8 @@ def _sha(path: str) -> str:
 
 
 def _run(nodes: str) -> int:
-    env = {k: v for k, v in os.environ.items() if k not in SCRUB}
+    env = {k: v for k, v in os.environ.items()
+           if k not in SCRUB and not k.startswith("ENSEMBLE_AUTH_")}
     env["ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES"] = "0"
     proc = subprocess.run(
         [PY, "-m", "pytest", nodes, "-q", "-p", "no:randomly", "--timeout=120"],
@@ -240,6 +244,8 @@ def _run(nodes: str) -> int:
         capture_output=True,
         text=True,
     )
+    # Discriminate FAILED (rc=1) from COLLECTION/ERROR (rc=2+): a leg that
+    # "reds" via an error is not a real RED.
     return proc.returncode
 
 
@@ -278,10 +284,12 @@ def run_leg(leg: Leg) -> tuple[str, bool]:
         current = open(target, encoding="utf-8").read()
         if current != original:
             open(target, "w", encoding="utf-8").write(original)
-    if red_rc != 0 and green_rc == 0:
+    if red_rc == 1 and green_rc == 0:
         return "DISCRIMINATING", True
     if red_rc == 0:
         return "NON-DISCRIMINATING (GREEN with the defect)", False
+    if red_rc != 1:
+        return f"NON-DISCRIMINATING (ERROR with the defect: rc={red_rc})", False
     return f"NON-DISCRIMINATING (RED after restore: rc={green_rc})", False
 
 

@@ -296,36 +296,39 @@ def test_p5_leader_unreadable_refused(tmp_path, kill_fence):
     assert (status, reason) == ("refused", REASON_LEADER_UNREADABLE)
 
 
-# ── P5a — the pgid-recycle check ───────────────────────────────────────────
-
-
-def test_p5a_pgid_recycled_refused(tmp_path, kill_fence):
-    """P5a — a live process holding the captured pgid with a DIFFERENT
-    starttime ⇒ ``refused:pgid-recycled`` (fail-closed)."""
-    root = build_tree(tmp_path / "proc", starttime=LEADER_START + 99)
-    status, reason = ram_kill_ladder(
-        SYNTHETIC_PGID, LEADER_START, 0.25, proc_root=root, captured_pgid=SYNTHETIC_PGID
-    )
-    assert (status, reason) == ("refused", REASON_PGID_RECYCLED)
-
-
-def test_p5a_absent_leader_is_not_recycled():
-    """P5a — no live process holds the pid ⇒ NOT recycled."""
-    stat = ladder.read_stat_entry.__wrapped__ if hasattr(ladder.read_stat_entry, "__wrapped__") else None
-    from daemon.services.ram_guard.tree_reader import StatRead
-
-    absent = StatRead(pid=1, status="absent")
-    assert ladder.check_p5a_pgid_recycled(absent, LEADER_START) is None
+# ── P5a — RETIRED (2026-11-12, §18.3) ─────────────────────────────────────
+# P5a's truth table is byte-identical to P5 across a 288-case exhaustive
+# probe (0 divergence); its pin was vacuous.  P5's leader-identity gate
+# already covers the pgid-recycle-on-re-anchor hazard because captured pgid
+# == the captured leader's pid (start_new_session ⇒ PGID == PID, test-pinned)
+# and the re-anchored identity check reads the same /proc/<captured_pgid>
+# slot P5 reads.  `refused:pgid-recycled` REMAINS, produced by P5
+# (test_p5_leader_alive_mismatched_starttime_refused still pins it).  The
+# S8(g)/phase2-T11 pins retire with this predicate; do not re-add a
+# duplicate — a distinct predicate that provably diverges from P5 does not
+# exist on this invariant.
 
 
 # ── P6 — the ownership stamp ───────────────────────────────────────────────
 
 
-def test_p6_ownership_mismatch_refused(tmp_path, kill_fence):
-    """P6 — a readable stamp that does NOT match ⇒ ``refused:ownership-mismatch``."""
+def test_p6_ownership_mismatch_proceeds_and_counts(tmp_path, kill_census):
+    """P6 — a readable stamp that does NOT match ⇒ PROCEED +
+    ``ownership_unverified++`` (LEADER RULING B, 2026-11-11: the env
+    stamp is ADVISORY — a P6 mismatch NEVER permanent-refuses).
+
+    The primary identity (the captured pgid ∧ the leader's starttime)
+    is re-verified by P5 + P5a BEFORE P6 runs — the ladder's gate
+    ordering IS the ruling's "re-verify primary identity" leg, so a
+    mismatch that reaches P6 arrives with the primary identity already
+    holding ⇒ the kill decision PROCEEDS and the unverifiable counter
+    climbs.
+    """
     root = build_tree(
         tmp_path / "proc", environ=b"OTHER=1\x00ENSEMBLE_BASH_TRACKING_ID=other-id\x00"
     )
+    calls, _sleeps = kill_census
+    unverified: list[int] = []
     status, reason = ram_kill_ladder(
         SYNTHETIC_PGID,
         LEADER_START,
@@ -333,8 +336,11 @@ def test_p6_ownership_mismatch_refused(tmp_path, kill_fence):
         proc_root=root,
         captured_pgid=SYNTHETIC_PGID,
         tracking_id="t-1",
+        on_ownership_unverified=lambda: unverified.append(1),
     )
-    assert (status, reason) == ("refused", REASON_OWNERSHIP_MISMATCH)
+    assert status == "killed", (status, reason)
+    assert unverified == [1], "a mismatch is UNVERIFIABLE under Ruling B — counted"
+    assert calls
 
 
 def test_p6_ownership_unreadable_proceeds_and_counts(tmp_path, kill_census):
@@ -461,12 +467,15 @@ def test_p6_lane_bash_stamp_absent_proceeds_and_counts(tmp_path, kill_census):
     assert calls
 
 
-def test_p6_lane_bash_foreign_proc_stamp_refuses(tmp_path, kill_fence):
-    """The CROSS-LANE tripwire, bash side: a proc stamp on a bash spawn."""
+def test_p6_lane_bash_foreign_proc_stamp_proceeds_and_counts(tmp_path, kill_census):
+    """Ruling B: a foreign (proc) stamp on a bash spawn is ADVISORY —
+    the kill still fires and the unverifiable counter climbs."""
     root = build_tree(
         tmp_path / "proc",
         environ=b"ENSEMBLE_PROC_TRACKING_ID=t-1\x00",
     )
+    calls, _sleeps = kill_census
+    unverified: list[int] = []
     status, reason = ram_kill_ladder(
         SYNTHETIC_PGID,
         LEADER_START,
@@ -475,8 +484,11 @@ def test_p6_lane_bash_foreign_proc_stamp_refuses(tmp_path, kill_fence):
         captured_pgid=SYNTHETIC_PGID,
         tracking_id="t-1",
         lane="bash",
+        on_ownership_unverified=lambda: unverified.append(1),
     )
-    assert (status, reason) == ("refused", REASON_OWNERSHIP_MISMATCH)
+    assert status == "killed", (status, reason)
+    assert unverified == [1]
+    assert calls
 
 
 def test_p6_lane_proc_own_stamp_matching_verifies(tmp_path, kill_census):
@@ -521,12 +533,15 @@ def test_p6_lane_proc_stamp_absent_proceeds_and_counts(tmp_path, kill_census):
     assert calls
 
 
-def test_p6_lane_proc_own_stamp_mismatch_refuses(tmp_path, kill_fence):
-    """The proc lane's own stamp present with a DIFFERENT value ⇒ refuse."""
+def test_p6_lane_proc_own_stamp_mismatch_proceeds_and_counts(tmp_path, kill_census):
+    """Ruling B: a mismatched proc stamp is ADVISORY — the kill still
+    fires and the unverifiable counter climbs."""
     root = build_tree(
         tmp_path / "proc",
         environ=b"ENSEMBLE_PROC_TRACKING_ID=other-id\x00",
     )
+    calls, _sleeps = kill_census
+    unverified: list[int] = []
     status, reason = ram_kill_ladder(
         SYNTHETIC_PGID,
         LEADER_START,
@@ -535,16 +550,22 @@ def test_p6_lane_proc_own_stamp_mismatch_refuses(tmp_path, kill_fence):
         captured_pgid=SYNTHETIC_PGID,
         tracking_id="t-1",
         lane="proc",
+        on_ownership_unverified=lambda: unverified.append(1),
     )
-    assert (status, reason) == ("refused", REASON_OWNERSHIP_MISMATCH)
+    assert status == "killed", (status, reason)
+    assert unverified == [1]
+    assert calls
 
 
-def test_p6_lane_proc_foreign_bash_stamp_refuses(tmp_path, kill_fence):
-    """The CROSS-LANE tripwire, proc side: a bash stamp on a proc spawn."""
+def test_p6_lane_proc_foreign_bash_stamp_proceeds_and_counts(tmp_path, kill_census):
+    """Ruling B: a foreign (bash) stamp on a proc spawn is ADVISORY —
+    the kill still fires and the unverifiable counter climbs."""
     root = build_tree(
         tmp_path / "proc",
         environ=b"ENSEMBLE_BASH_TRACKING_ID=t-1\x00",
     )
+    calls, _sleeps = kill_census
+    unverified: list[int] = []
     status, reason = ram_kill_ladder(
         SYNTHETIC_PGID,
         LEADER_START,
@@ -553,15 +574,16 @@ def test_p6_lane_proc_foreign_bash_stamp_refuses(tmp_path, kill_fence):
         captured_pgid=SYNTHETIC_PGID,
         tracking_id="t-1",
         lane="proc",
+        on_ownership_unverified=lambda: unverified.append(1),
     )
-    assert (status, reason) == ("refused", REASON_OWNERSHIP_MISMATCH)
+    assert status == "killed", (status, reason)
+    assert unverified == [1]
+    assert calls
 
 
-def test_p6_lane_foreign_stamp_outranks_own_match(tmp_path, kill_fence):
-    """Precedence: the foreign stamp REFUSES even when the lane's own
-    stamp is present and matching (cross-presence does not occur
-    legitimately — defense-in-depth for a process-killing subsystem).
-    """
+def test_p6_lane_foreign_stamp_proceeds_and_counts(tmp_path, kill_census):
+    """Ruling B: even cross-presence is ADVISORY — the kill still fires
+    and the unverifiable counter climbs (the stamp never disarms)."""
     root = build_tree(
         tmp_path / "proc",
         environ=(
@@ -569,6 +591,8 @@ def test_p6_lane_foreign_stamp_outranks_own_match(tmp_path, kill_fence):
             b"ENSEMBLE_BASH_TRACKING_ID=t-1\x00"
         ),
     )
+    calls, _sleeps = kill_census
+    unverified: list[int] = []
     status, reason = ram_kill_ladder(
         SYNTHETIC_PGID,
         LEADER_START,
@@ -577,8 +601,11 @@ def test_p6_lane_foreign_stamp_outranks_own_match(tmp_path, kill_fence):
         captured_pgid=SYNTHETIC_PGID,
         tracking_id="t-1",
         lane="proc",
+        on_ownership_unverified=lambda: unverified.append(1),
     )
-    assert (status, reason) == ("refused", REASON_OWNERSHIP_MISMATCH)
+    assert status == "killed", (status, reason)
+    assert unverified == [1]
+    assert calls
 
 
 # ── P7 — the group is still alive ──────────────────────────────────────────
@@ -682,7 +709,7 @@ def test_p8_group_dead_after_grace_skips_the_kill(tmp_path, kill_census, monkeyp
 
 
 def test_s18_reason_set_is_the_exact_ordered_set():
-    """§15 B4 — the reason set is EXACTLY these 16 codes, in this order."""
+    """§15 B4 — the reason set is EXACTLY these 15 codes, in this order."""
     assert REASON_SET == (
         "killed:term-esrch",
         "killed:group-dead-after-grace",
@@ -698,11 +725,10 @@ def test_s18_reason_set_is_the_exact_ordered_set():
         "refused:daemon-group",
         "refused:pgid-recycled",
         "refused:leader-unreadable",
-        "refused:ownership-mismatch",
         "refused:group-unknown",
     )
-    assert len(REASON_SET) == 16
-    assert len(set(REASON_SET)) == 16
+    assert len(REASON_SET) == 15
+    assert len(set(REASON_SET)) == 15
 
 
 def test_s18_status_set_is_the_exact_ordered_set():
@@ -743,12 +769,11 @@ def test_s18_refusal_classification_is_the_pinned_split():
         "refused:pgid-self",
         "refused:daemon-group",
         "refused:pgid-recycled",
-        "refused:ownership-mismatch",
     )
-    assert len(ladder.TRANSIENT_REFUSALS) + len(ladder.PERMANENT_REFUSALS) == 11
+    assert len(ladder.TRANSIENT_REFUSALS) + len(ladder.PERMANENT_REFUSALS) == 10
     # Every refusal has a counter bucket, and there is NO p8.
     for reason in ladder.TRANSIENT_REFUSALS + ladder.PERMANENT_REFUSALS:
-        assert ladder.refusal_bucket(reason) in {"p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7"}
+        assert ladder.refusal_bucket(reason) in {"p0", "p1", "p2", "p3", "p4", "p5", "p7"}
     assert "p8" not in ladder.REFUSAL_PREDICATE_BUCKET.values()
 
 

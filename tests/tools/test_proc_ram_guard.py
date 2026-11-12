@@ -1275,6 +1275,40 @@ class TestOwnershipStampIsolation:
 # ── T7 — the three mandatory disclosures + the pinned lines ────────────────
 
 
+class TestForeignStampSmuggling:
+    """Leader ruling B: an env overlay cannot forge the OTHER lane's stamp."""
+
+    def test_the_overlay_cannot_smuggle_a_foreign_stamp(self, monkeypatch):
+        from daemon.services.ram_guard.ladder import OWNERSHIP_ENV_VAR
+        from daemon.tools import proc_tools as pt
+
+        monkeypatch.setenv(OWNERSHIP_ENV_VAR, "a-foreign-ambient-id")
+        env = pt._build_child_env(
+            "proc-abc12345",
+            process_env_overlay={OWNERSHIP_ENV_VAR: "forged-via-overlay"},
+        )
+        # The foreign stamp is stripped POST-overlay.
+        assert OWNERSHIP_ENV_VAR not in env, (
+            "overlay-smuggled foreign stamp survived the post-overlay strip"
+        )
+        # The own stamp is present and authoritative.
+        assert env[pt._TRACKING_ENV_VAR] == "proc-abc12345"
+
+    def test_the_overlay_cannot_clobber_the_own_stamp(self, monkeypatch):
+        from daemon.services.ram_guard.ladder import OWNERSHIP_ENV_VAR
+        from daemon.tools import proc_tools as pt
+
+        env = pt._build_child_env(
+            "proc-abc12345",
+            process_env_overlay={pt._TRACKING_ENV_VAR: "forged-via-overlay"},
+        )
+        assert env[pt._TRACKING_ENV_VAR] == "proc-abc12345", (
+            "the own stamp must be re-asserted last so the overlay cannot "
+            "clobber it (a REAL mismatch would follow)"
+        )
+        assert OWNERSHIP_ENV_VAR not in env
+
+
 class TestDisclosures:
     def test_the_item13_statement_is_verbatim_in_the_lane_docstring(self):
         """T12/D-6 — the §3.5 item-13 statement is VERBATIM in the lane's

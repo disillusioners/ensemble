@@ -333,17 +333,17 @@ an out-of-range `RAM_GUARD_CEILING_MIB` (env **or** yaml) **does not abort the b
 later with that bad value still aborts at *that* boot — a misconfigured guard cannot be silently
 enabled.
 
-### C.3 Counters — the exact ordered set, 17 keys, **no `p8`**
+### C.3 Counters — the exact ordered set, 16 keys, **no `p6`, no `p8`**
 
 ```
-ram_kills, ram_breaches_detected, ram_kill_refusals_p0, ram_kill_refusals_p1, ram_kill_refusals_p2, ram_kill_refusals_p3, ram_kill_refusals_p4, ram_kill_refusals_p5, ram_kill_refusals_p6, ram_kill_refusals_p7, ram_overcounted, ram_rearms, ram_confirm_failures, ram_events_emitted, ram_events_dropped, ownership_unverified, tree_incomplete
+ram_kills, ram_breaches_detected, ram_kill_refusals_p0, ram_kill_refusals_p1, ram_kill_refusals_p2, ram_kill_refusals_p3, ram_kill_refusals_p4, ram_kill_refusals_p5, ram_kill_refusals_p7, ram_overcounted, ram_rearms, ram_confirm_failures, ram_events_emitted, ram_events_dropped, ownership_unverified, tree_incomplete
 ```
 
 There is **no `ram_kill_refusals_p8`**: the refusal ladder is `p0…p7`, and the pre-kill
 predicates map onto the buckets as `p0` = not-registered / guard-disabled / platform-unsupported ·
 `p1` = pgid-not-registered · `p2` = pgid-invalid · `p3` = daemon-group · `p4` = pgid-self ·
-`p5` = pgid-recycled / leader-unreadable · `p6` = ownership-mismatch · `p7` = group-unknown.
-Eleven of the 16 reason codes are `refused:` (nine permanent → terminal `REFUSED`; two —
+`p5` = pgid-recycled / leader-unreadable · `p7` = group-unknown. (no `p6`: P6 is ADVISORY — §18.2.)
+Ten of the 15 reason codes are `refused:` (eight permanent → terminal `REFUSED`; two —
 `leader-unreadable`, `group-unknown` — transient → re-arm to `WATCHING`). The P8 probe is
 **post-kill**, not a refusal, which is why no `p8` bucket exists. Semantics in one line each:
 `ram_kills` trees killed · `ram_breaches_detected` trigger fires · `ram_kill_refusals_pN`
@@ -363,7 +363,7 @@ B23) followed by the 17 counters above:
 enabled, thread_alive, last_tick_at, missed_samples, ticks, registry_depth, lane_alive, lane_pending, last_lane_progress_at, resolved_ceiling_bytes, ceiling_source
 ```
 
-`ceiling_source ∈ {meminfo, cgroup, fallback-fixed}`. Frozen `last_tick_at` /
+`ceiling_source ∈ {derived-meminfo, derived-cgroup, fallback, explicit}` (§18.6). Frozen `last_tick_at` /
 `last_lane_progress_at` is the wedged-lane signal (item 9). Degraded states (OFF, pre-init, boot
 failure) return the **EMPTY SHAPE** — `enabled:false` + zeros/nulls, every counter 0 — **never
 503**. **Not in `/livez` or `/readyz`** (an observability death must never gate traffic), and
@@ -398,7 +398,7 @@ failure) return the **EMPTY SHAPE** — `enabled:false` + zeros/nulls, every cou
   Qualifying sentence (arch `§15` B22, verbatim):
 
 ```
-the SQLite `event.kind` CHECK constraint lists only 8 kinds while `EventKind` has 16 — it is already stale for 8 pre-existing kinds; the production deployment is PostgreSQL (`create_all`; the SQLModel column carries no CHECK — `models.py:74`), so `ram_limit_exceeded` (the 17th member) is unaffected
+the SQLite `event.kind` CHECK constraint lists only 8 kinds while `EventKind` has 16 — it is already stale for 8 pre-existing kinds; the production deployment is PostgreSQL (`create_all`; the SQLModel column carries no CHECK — `models.py:86`), so `ram_limit_exceeded` (the 17th member) is unaffected
 ```
 
 That SQLite-side staleness is **pre-existing house debt, deliberately not fixed here**. On a

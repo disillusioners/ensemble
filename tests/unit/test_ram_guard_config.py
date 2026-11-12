@@ -354,7 +354,7 @@ class TestCeilingOverrideSeam:
         guard = RamGuard(
             proc_root=tmp_path / "proc",
             cgroup_root=tmp_path / "cgroup",
-            resolved_ceiling=(resolved, "meminfo"),
+            resolved_ceiling=(resolved, "derived-meminfo"),
         )
         record_default = guard.register(
             tracking_id="t-default",

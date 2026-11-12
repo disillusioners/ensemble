@@ -12,6 +12,7 @@ import pytest
 
 from daemon.services.ram_guard.ceiling import (
     CEILING_SOURCE_CGROUP,
+    CEILING_SOURCE_EXPLICIT,
     CEILING_SOURCE_FALLBACK_FIXED,
     CEILING_SOURCE_MEMINFO,
     MIB,
@@ -155,20 +156,16 @@ def test_explicit_ceiling_overrides_the_derived_value(tmp_path):
     assert resolved == 3072 * MIB
 
 
-def test_the_explicit_ceiling_path_reports_a_source_in_the_closed_set(tmp_path):
-    """§15 B23 — ``ceiling_source`` is ALWAYS one of the three values.
+def test_the_explicit_ceiling_path_reports_explicit(tmp_path):
+    """§18.6 — ``ceiling_source`` is ``explicit`` on the explicit path.
 
-    The explicit path (an explicit ``ceiling_mib``) overrides the
-    derived VALUE but the source still reports the detected host
-    context — the pinned set has no ``explicit`` member, and it is not
-    widened (the reviewer's O2 disposition: the closed-set labelling
-    stands as documented).
+    One-branch capture at the resolution site: an explicit ``ceiling_mib``
+    never runs detection, never warns, never falls back.
     """
     proc_root, cgroup_root = build_host(tmp_path, mem_total_mib=11953)
-    closed = {CEILING_SOURCE_MEMINFO, CEILING_SOURCE_CGROUP, CEILING_SOURCE_FALLBACK_FIXED}
     resolved, source = resolve_ceiling_bytes(proc_root, cgroup_root, ceiling_mib=3072)
     assert resolved == 3072 * MIB
-    assert source in closed
+    assert source == CEILING_SOURCE_EXPLICIT
 
 
 def test_detection_failure_yields_the_fixed_fallback_and_one_warn(tmp_path, caplog):
@@ -225,4 +222,5 @@ def test_detection_failure_never_raises(tmp_path):
         CEILING_SOURCE_MEMINFO,
         CEILING_SOURCE_CGROUP,
         CEILING_SOURCE_FALLBACK_FIXED,
+        CEILING_SOURCE_EXPLICIT,
     }

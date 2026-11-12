@@ -136,7 +136,7 @@ class TestEndpointShape:
         assert list(body.keys()) == list(HEARTBEAT_KEYS) + list(COUNTER_KEYS)
         assert body == {**guard.health(), **guard.counters_snapshot()}
         assert body["enabled"] is True
-        assert body["ceiling_source"] == "meminfo"  # the injected resolved pair
+        assert body["ceiling_source"] == "derived-meminfo"  # the injected resolved pair
         assert body["resolved_ceiling_bytes"] == 3072 * 1024 * 1024
 
     def test_the_b23_eleven_fields_are_the_pin_verbatim(self):
@@ -164,7 +164,6 @@ class TestEndpointShape:
             "ram_kill_refusals_p3",
             "ram_kill_refusals_p4",
             "ram_kill_refusals_p5",
-            "ram_kill_refusals_p6",
             "ram_kill_refusals_p7",
             "ram_overcounted",
             "ram_rearms",

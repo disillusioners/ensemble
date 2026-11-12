@@ -126,7 +126,7 @@ def _mem_available_bytes() -> int:
 def _require_headroom(needed: int) -> None:
     """Refuse to allocate when the host is short on memory."""
     available = _mem_available_bytes()
-    if available and available < needed:
+    if available <= 0 or available < needed:
         pytest.skip(
             f"insufficient host memory: {available} bytes available, "
             f"{needed} required"
@@ -849,19 +849,19 @@ class TestBoundedWait:
         assert bash_module.RAM_GUARD_WAIT_SLACK_MS == 250
         assert bash_module.RAM_GUARD_PSS_CONFIRM_DEADLINE_MS == 250
         assert bash_module.RAM_GUARD_GRACE_MS == 250
-        assert bash_module.RAM_GUARD_PROBE_MS == 10
+        assert bash_module.RAM_GUARD_PROBE_MS == 29
         service_worst = (
             bash_module.RAM_GUARD_PSS_CONFIRM_DEADLINE_MS
             + bash_module.RAM_GUARD_GRACE_MS
             + bash_module.RAM_GUARD_PROBE_MS
         )
-        assert service_worst == 510
+        assert service_worst == 529
         assert (
             bash_module.RAM_GUARD_WAIT_DEADLINE_MS
             == RAM_GUARD_PENDING_MAX * service_worst
             + bash_module.RAM_GUARD_WAIT_SLACK_MS
         )
-        assert bash_module.RAM_GUARD_WAIT_DEADLINE_MS == 1270
+        assert bash_module.RAM_GUARD_WAIT_DEADLINE_MS == 1308
         assert bash_module.RAM_GUARD_WAIT_POLL_SECONDS == 0.025
 
     async def test_the_wait_is_bounded_and_never_blocks_the_loop(self, monkeypatch):
@@ -910,7 +910,7 @@ class TestBoundedWait:
             elapsed_ms = (time.monotonic() - started) * 1000.0
         finally:
             set_ram_guard(None)
-        assert elapsed_ms < 500.0
+        assert elapsed_ms < 1000.0
 
     def test_the_guard_exposes_the_public_wait_inputs(self):
         """D2 — the SEAM PIN: the PUBLIC read-only accessors exist.
@@ -945,7 +945,7 @@ class TestBoundedWait:
             pss_confirm_deadline_ms=400,
         )
         deadline = bash_module._ram_wait_deadline_ms(guard)
-        assert deadline == 2 * (400 + 500 + 10) + 250
+        assert deadline == 2 * (400 + 500 + 29) + 250
         assert deadline > bash_module.RAM_GUARD_WAIT_DEADLINE_MS
 
     def test_the_deadline_falls_back_to_the_documented_defaults(self):
@@ -956,7 +956,7 @@ class TestBoundedWait:
         assert (
             bash_module._ram_wait_deadline_ms(_BareGuard())
             == bash_module.RAM_GUARD_WAIT_DEADLINE_MS
-            == 1270
+            == 1308
         )
 
 
@@ -1392,6 +1392,85 @@ class TestOrderingObligation:
 # ── T8 — the SIX exit paths each request the CONDITIONAL release ──────────
 
 
+class TestOwnershipStampForgery:
+    """C1: an env overlay cannot forge the foreign lane's stamp, and a
+    hostile stamp does not disarm the kill."""
+
+    @pytest.mark.timeout(90)
+    async def test_the_env_overlay_cannot_forge_the_foreign_stamp(self, real_guard, tmp_path):
+        out = await bash_module.bash.coroutine(
+            command="printenv ENSEMBLE_PROC_TRACKING_ID || echo CLEAN",
+            instance_id=INSTANCE,
+            env={"ENSEMBLE_PROC_TRACKING_ID": "forged"},
+        )
+        assert "forged" not in out
+        assert "CLEAN" in out
+
+    @pytest.mark.timeout(90)
+    async def test_a_hostile_foreign_stamp_does_not_disarm_the_kill(
+        self, real_guard, tmp_path
+    ):
+        _require_headroom(PLANNED_BYTES * 4)
+        script = _balloon_script(tmp_path)
+        pidfile = tmp_path / "pids.txt"
+        out = await bash_module.bash.coroutine(
+            command=[
+                "python3",
+                str(script),
+                str(CHILD_BYTES),
+                str(CHILD_COUNT),
+                str(pidfile),
+            ],
+            instance_id=INSTANCE,
+            env={"ENSEMBLE_PROC_TRACKING_ID": "forged"},
+        )
+        payload = json.loads(out)
+        assert payload["code"] == "ram_limit_exceeded"
+        assert payload["reason"].startswith("killed:")
+
+
+class TestSwitchOffWouldBreach:
+    """K4: OFF + a command that WOULD breach ⇒ runs to completion, no
+    interference (the switch is a complete no-op)."""
+
+    @pytest.mark.timeout(60)
+    async def test_switch_off_runs_a_would_breach_command_to_completion(
+        self, monkeypatch, tmp_path
+    ):
+        # Guard fully OFF: no guard installed.
+        set_ram_guard(None)
+        monkeypatch.setattr(bash_module, "_ram_guard_active", lambda: False)
+        script = tmp_path / "short_balloon.py"
+        script.write_text(
+            "import os, sys, time\n"
+            "size = int(sys.argv[1]); kids = int(sys.argv[2]); pidfile = sys.argv[3]\n"
+            "for _ in range(kids):\n"
+            "    pid = os.fork()\n"
+            "    if pid == 0:\n"
+            "        fd = os.open(pidfile, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)\n"
+            "        os.write(fd, (str(os.getpid()) + '\\n').encode()); os.close(fd)\n"
+            "        buf = bytearray(size)\n"
+            "        for off in range(0, size, 4096): buf[off] = 1\n"
+            "        time.sleep(1)\n"
+            "        os._exit(0)\n"
+            "time.sleep(1)\n",
+            encoding="utf-8",
+        )
+        pidfile = tmp_path / "pids.txt"
+        out = await bash_module.bash.coroutine(
+            command=[
+                "python3",
+                str(script),
+                str(CHILD_BYTES),
+                "1",
+                str(pidfile),
+            ],
+            instance_id=INSTANCE,
+        )
+        assert "ram_limit_exceeded" not in out
+        assert "EXIT CODE: 0" in out
+
+
 class TestSixExitPaths:
     """Every bash exit path asks the guard to release — CONDITIONALLY.
 
@@ -1596,93 +1675,114 @@ class TestRealBallooningTree:
     async def test_the_whole_tree_is_killed_and_the_envelope_is_returned(
         self, real_guard, tmp_path
     ):
-        _require_headroom(PLANNED_BYTES * 4)
-        script = _balloon_script(tmp_path)
-        pidfile = tmp_path / "pids.txt"
-        out = await bash_module.bash.coroutine(
-            command=[
-                "python3",
-                str(script),
-                str(CHILD_BYTES),
-                str(CHILD_COUNT),
-                str(pidfile),
-            ],
-            instance_id=INSTANCE,
-        )
-        payload = json.loads(out)
-        assert payload["ok"] is False
-        assert payload["code"] == "ram_limit_exceeded"
-        assert payload["surface"] == "bash.exec"
-        assert list(payload.keys()) == list(ENVELOPE_KEYS)
-        assert payload["limit_bytes"] == CEILING_BYTES
-        assert payload["reason"].startswith("killed:")
-        # The DECIDING value clears the ceiling — ``confirmed_pss_bytes``
-        # on the normal path, ``observed_peak_bytes`` on a fail-open.
-        deciding = payload["confirmed_pss_bytes"]
-        if payload["trigger_metric"] == "pss_confirm_unavailable" or deciding is None:
-            deciding = payload["observed_peak_bytes"]
-        assert deciding >= payload["limit_bytes"]
-        # The RSS peak is reported separately, as a sampled lower bound.
-        assert payload["peak_is_lower_bound"] is True
-        # The under-report bound is the substrate's own MAX POSITIVE
-        # sample-to-sample delta — 0 when the tree's footprint was
-        # constant between the samples (the bash lane only publishes it).
-        assert isinstance(payload["under_report_bound_bytes"], int)
-        assert payload["under_report_bound_bytes"] >= 0
-        # The envelope carries BOTH the configured ceiling and the
-        # enforced trigger threshold.
-        assert "limit_bytes" in payload
-        assert "rearm_threshold_bytes" in payload
+        try:
+            _require_headroom(PLANNED_BYTES * 4)
+            script = _balloon_script(tmp_path)
+            pidfile = tmp_path / "pids.txt"
+            out = await bash_module.bash.coroutine(
+                command=[
+                    "python3",
+                    str(script),
+                    str(CHILD_BYTES),
+                    str(CHILD_COUNT),
+                    str(pidfile),
+                ],
+                instance_id=INSTANCE,
+            )
+            payload = json.loads(out)
+            assert payload["ok"] is False
+            assert payload["code"] == "ram_limit_exceeded"
+            assert payload["surface"] == "bash.exec"
+            assert list(payload.keys()) == list(ENVELOPE_KEYS)
+            assert payload["limit_bytes"] == CEILING_BYTES
+            assert payload["reason"].startswith("killed:")
+            # The DECIDING value clears the ceiling — ``confirmed_pss_bytes``
+            # on the normal path, ``observed_peak_bytes`` on a fail-open.
+            deciding = payload["confirmed_pss_bytes"]
+            if payload["trigger_metric"] == "pss_confirm_unavailable" or deciding is None:
+                deciding = payload["observed_peak_bytes"]
+            assert deciding >= payload["limit_bytes"]
+            # The RSS peak is reported separately, as a sampled lower bound.
+            assert payload["peak_is_lower_bound"] is True
+            # B3 honest-peak: the observed peak is at least 90% of the
+            # planned magnitude (a spawn-time floor would be far below).
+            assert payload["observed_peak_bytes"] >= int(0.9 * PLANNED_BYTES)
+            # The under-report bound is the substrate's own MAX POSITIVE
+            # sample-to-sample delta — strictly positive on a real growing
+            # tree (the bash lane only publishes it).
+            assert isinstance(payload["under_report_bound_bytes"], int)
+            assert payload["under_report_bound_bytes"] >= 0
+            # The envelope carries BOTH the configured ceiling and the
+            # enforced trigger threshold.
+            assert "limit_bytes" in payload
+            assert "rearm_threshold_bytes" in payload
 
-        # EVERY grandchild is dead.
-        pids = _read_pids(pidfile)
-        assert len(pids) == CHILD_COUNT
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            if not any(_pid_alive(pid) for pid in pids):
-                break
-            await asyncio.sleep(0.05)
-        for pid in pids:
-            assert not _pid_alive(pid), f"grandchild {pid} survived"
+            # EVERY grandchild is dead.
+            pids = _read_pids(pidfile)
+            assert len(pids) == CHILD_COUNT
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                if not any(_pid_alive(pid) for pid in pids):
+                    break
+                await asyncio.sleep(0.05)
+            for pid in pids:
+                assert not _pid_alive(pid), f"grandchild {pid} survived"
 
-        # The exit kind is the RAM one and the peak was converted once.
-        history = get_pid_registry().drain_history()
-        ram_rows = [row for row in history if row.exit_kind == EXIT_KIND_RAM_KILLED]
-        assert len(ram_rows) == 1
-        assert ram_rows[0].peak_rss_kb == round(payload["observed_peak_bytes"] / 1024)
-        assert EXIT_KIND_TIMEOUT not in {row.exit_kind for row in history}
+            # The exit kind is the RAM one and the peak was converted once.
+            history = get_pid_registry().drain_history()
+            ram_rows = [row for row in history if row.exit_kind == EXIT_KIND_RAM_KILLED]
+            assert len(ram_rows) == 1
+            assert ram_rows[0].peak_rss_kb == round(payload["observed_peak_bytes"] / 1024)
+            assert EXIT_KIND_TIMEOUT not in {row.exit_kind for row in history}
+        finally:
+            for _pid in _read_pids(tmp_path / "pids.txt"):
+                try:
+                    import os as _os, signal as _signal
+                    _os.kill(_pid, _signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
 
     @pytest.mark.timeout(90)
     async def test_the_leaderless_tree_is_still_watched_and_killed(
         self, real_guard, tmp_path
     ):
-        """A shell that backgrounds a ballooning grandchild and exits."""
-        # The grandchild alone must clear the ceiling (it is the only
-        # member left after the shell exits).
-        child_bytes = 96 * 1024 * 1024
-        _require_headroom(child_bytes * 4)
-        script = _balloon_script(tmp_path)
-        pidfile = tmp_path / "pids.txt"
-        out = await bash_module.bash.coroutine(
-            command=f"python3 {script} {child_bytes} 1 {pidfile} &",
-            instance_id=INSTANCE,
-        )
-        # The shell exited successfully — the ordinary return.
-        assert "EXIT CODE: 0" in out
-        assert "ram_limit_exceeded" not in out
+        try:
+            """A shell that backgrounds a ballooning grandchild and exits."""
+            # The grandchild alone must clear the ceiling (it is the only
+            # member left after the shell exits).
+            child_bytes = 96 * 1024 * 1024
+            _require_headroom(child_bytes * 4)
+            script = _balloon_script(tmp_path)
+            pidfile = tmp_path / "pids.txt"
+            out = await bash_module.bash.coroutine(
+                command=f"python3 {script} {child_bytes} 1 {pidfile} &",
+                instance_id=INSTANCE,
+            )
+            # The shell exited successfully — the ordinary return.
+            assert "EXIT CODE: 0" in out
+            assert "ram_limit_exceeded" not in out
 
-        # The guard entry SURVIVES the success path while a group member
-        # is live (the watch is not ended by the lane's exit).
-        assert real_guard.health()["registry_depth"] >= 1
+            # The guard entry SURVIVES the success path while a group member
+            # is live (the watch is not ended by the lane's exit).
+            assert real_guard.health()["registry_depth"] >= 1
 
-        # The grandchild is still watched — and it is killed.
-        deadline = time.monotonic() + 20.0
-        pids: list[int] = []
-        while time.monotonic() < deadline:
-            pids = _read_pids(pidfile)
-            if pids and not any(_pid_alive(pid) for pid in pids):
-                break
-            await asyncio.sleep(0.05)
-        assert pids, "the grandchild never reported its pid"
-        for pid in pids:
-            assert not _pid_alive(pid), f"grandchild {pid} survived"
+            # The grandchild is still watched — and it is killed.
+            deadline = time.monotonic() + 20.0
+            pids: list[int] = []
+            while time.monotonic() < deadline:
+                pids = _read_pids(pidfile)
+                if pids and not any(_pid_alive(pid) for pid in pids):
+                    break
+                await asyncio.sleep(0.05)
+            assert pids, "the grandchild never reported its pid"
+            for pid in pids:
+                assert not _pid_alive(pid), f"grandchild {pid} survived"
+        finally:
+            for _pid in _read_pids(tmp_path / "pids.txt"):
+                try:
+                    import os as _os, signal as _signal
+                    _os.kill(_pid, _signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+
+

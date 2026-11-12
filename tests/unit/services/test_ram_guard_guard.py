@@ -102,7 +102,7 @@ def make_guard(tmp_path, root=None, **kwargs):
     options = dict(
         proc_root=root,
         cgroup_root=tmp_path / "cgroup",
-        resolved_ceiling=(3072 * MIB, "meminfo"),
+        resolved_ceiling=(3072 * MIB, "derived-meminfo"),
         poll_interval_ms=200,
         grace_ms=250,
         pss_confirm_deadline_ms=250,
@@ -173,7 +173,6 @@ def test_counter_set_is_the_exact_ordered_set():
         "ram_kill_refusals_p3",
         "ram_kill_refusals_p4",
         "ram_kill_refusals_p5",
-        "ram_kill_refusals_p6",
         "ram_kill_refusals_p7",
         "ram_overcounted",
         "ram_rearms",
@@ -210,7 +209,7 @@ def test_health_payload_carries_the_eleven_fields(tmp_path):
     health = guard.health()
     assert tuple(health.keys()) == HEARTBEAT_KEYS
     assert health["resolved_ceiling_bytes"] == 3072 * MIB
-    assert health["ceiling_source"] == "meminfo"
+    assert health["ceiling_source"] == "derived-meminfo"
 
 
 # ── The tick path (S6 / N3 / S17) ──────────────────────────────────────────
@@ -682,7 +681,6 @@ def test_a_refusal_emits_no_event(tmp_path, kill_census, caplog):
         "ram_kill_refusals_p3",
         "ram_kill_refusals_p4",
         "ram_kill_refusals_p5",
-        "ram_kill_refusals_p6",
         "ram_kill_refusals_p7",
         "ram_kills",
     }
@@ -823,9 +821,9 @@ def test_a_recycled_pgid_is_not_readopted(tmp_path, kill_census):
     assert counters["ram_kills"] == 0
     assert counters["ram_kill_refusals_p5"] == 1
     assert record.reason == "refused:pgid-recycled"
-    # The permanent refusal reaches the terminal REFUSED state and is
-    # then released — the reason sink keeps the distinction (§17.1).
-    assert record.state == "RELEASED"
+    # Ruling A (§18.1): a permanent refusal terminates the KILL DECISION
+    # only — the record stays REFUSED-but-watching.
+    assert record.state == "REFUSED"
 
 
 # ── The registration contract (§16.3) ──────────────────────────────────────
