@@ -42,7 +42,7 @@ This is the **only** control robust to a lane that sets `PORT` explicitly, and t
 | D5 | **Placement inside `_serve_with_bind_retry`, after `install_root_logging()` and before `bind_socket_with_retry`** — so the marker line lands in journald + file log, the gate runs on both entry paths (frozen + `python -m daemon`), and it stays outside any `run_preflight` block | §5.1 placement contract; `__main__.py:445` (install_root_logging) / `:472-473` (bind); auth preflight `:514-520` is the template | placing in `main()` before `_serve_with_bind_retry` (logging not yet installed → marker invisible) |
 | D6 | **Foreign-ness rule: a holder is foreign ONLY when both its `install_dir` and the self `install_dir` are resolved non-`None` AND they differ.** Otherwise (either side unresolved, e.g. dev/source/pytest/transient) ⇒ non-foreign ⇒ take claim | trip-risk rows 3/4; `upgrade_tools._resolve_install_dir` returns `None` for dev/unresolved | treating `None` as foreign (would refuse dev/pytest/transient boots) |
 | D7 | **Claim file is filesystem JSON under the resolved install root's data dir**, NOT a SQLModel table — zero migration, zero rollback_safe impact | analysis §6 "binary swap only"; migration-expectation mandate | a DB-backed claim (would need a migration + change rollback_safe adjudication) |
-| D8 | **Operator alert (mandatory companion): recommended default = logging marker line (always) + durable refusal-marker file under the data dir.** Leader confirms final channel (analysis §9.4) | §5.2 "MANDATORY COMPANION"; launcher refuse branch has no `_notify_once` (`launcher.sh:3814-3816` vs `:3821`/`:3848-3851`) | logging-only (silent-down risk); critical-notes direct write (not wired at boot); Discord webhook (new dependency) |
+| D8 | **Operator alert (mandatory companion): recommended default = logging marker line (always) + durable refusal-marker file under the data dir.** Leader confirms final channel (analysis §9.4) | §5.2 "MANDATORY COMPANION"; launcher refuse branch has no `_notify_once` (`launcher.sh:3847-3849` vs `:3853-3855`/`:3881-3883`) | logging-only (silent-down risk); critical-notes direct write (not wired at boot); Discord webhook (new dependency) |
 | D9 | **Claim-file cleanup on graceful shutdown is best-effort** (remove the claim file); on crash the claim goes stale and the next boot reclaims via liveness (`pid` dead or starttime mismatch) | stale-claim self-healing; pid-recycle defence via field-22 starttime | mandatory cleanup (impossible on SIGKILL) |
 
 ## 5. Claim-File Design
@@ -110,7 +110,7 @@ If the claim write fails (permission denied, disk full, read-only FS, etc.):
 
 ### 5.7 Operator alert (mandatory companion — D8)
 
-The launcher's refuse branch has **no** `_notify_once` (`launcher.sh:3814-3816` logs then `exit 78`, vs. tempfail `:3821` and burst-abort `:3848-3851` which do call `_notify_once`). So a 78 is a **silent-down** unless the daemon adds its own alert. Daemon-side channels available at the refusal moment (pre-lifespan, after `load_config()` + DB preflight, before bind):
+The launcher's refuse branch has **no** `_notify_once` (`launcher.sh:3847-3849` logs then `exit 78`, vs. tempfail `:3853-3855` and burst-abort `:3881-3883` which do call `_notify_once`). So a 78 is a **silent-down** unless the daemon adds its own alert. Daemon-side channels available at the refusal moment (pre-lifespan, after `load_config()` + DB preflight, before bind):
 
 | Channel | Available at refusal moment? | Pros | Cons |
 |---|---|---|---|
@@ -168,8 +168,8 @@ This satisfies:
 
 ### 6.2 Exit-code contract
 
-- Reuse **78** (analysis §5.5). `classify_exit` (`launcher.sh:3587-3595`): `78 → refuse → launcher exits 78, does NOT restart` (`launcher.sh:3814-3816`). `RestartPreventExitStatus=78` (`scripts/systemd/ensemble-daemon.service:110`) keeps systemd from restarting. `SuccessExitStatus=143` (`:111`) is unaffected.
-- **75 is wrong** — budget-exempt (`launcher.sh:3821` `_notify_once "tempfail-75"`), producing an unbounded slow retry loop (same class, less visible).
+- Reuse **78** (analysis §5.5). `classify_exit` (`launcher.sh:3587-3595`): `78 → refuse → launcher exits 78, does NOT restart` (`launcher.sh:3847-3849`). `RestartPreventExitStatus=78` (`scripts/systemd/ensemble-daemon.service:110`) keeps systemd from restarting. `SuccessExitStatus=143` (`:111`) is unaffected.
+- **75 is wrong** — budget-exempt (`launcher.sh:3853-3855` `_notify_once "tempfail-75"`), producing an unbounded slow retry loop (same class, less visible).
 - **A new code is wrong now** — lands in `*→crash`, loops unless `launcher.sh` learns it (sha-pinned, ceremony-critical) AND the unit lists it. Never piecemeal; a dedicated code (~73/79) is a long-term option only as a paired launcher+unit lane (deferred).
 - Residual: a port-squat 78 during a promote window reads as a "clean pre-mutation exit-78" — mitigated by the marker line plus the 30 s retry covering normal promote hand-over (§7 row 1).
 
