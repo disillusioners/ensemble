@@ -252,7 +252,7 @@ RAM_GUARD_WAIT_SLACK_MS = 250
 #: The service-worst-case components (arch §15 B20) — mirror bash's.
 RAM_GUARD_PSS_CONFIRM_DEADLINE_MS = 250
 RAM_GUARD_GRACE_MS = 250
-RAM_GUARD_PROBE_MS = 10
+RAM_GUARD_PROBE_MS = 29  # §18.4 — council-measured; 10 was the estimate
 #: The bounded wait's deadline floor (arch §15 B20, §18.4): 1308 ms.
 RAM_GUARD_WAIT_DEADLINE_MS = (
     _RAM_GUARD_PENDING_MAX
