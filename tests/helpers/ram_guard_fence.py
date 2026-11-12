@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 #: The boot-sweep kill-switch, pinned ``0`` (never ``env -u``).
 BOOT_SWEEP_VAR = "ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES"
@@ -51,7 +52,7 @@ def _auth_vars() -> tuple[str, ...]:
     return tuple(name for name in os.environ if name.startswith(AUTH_PREFIX))
 
 
-def apply_fence(monkeypatch, tmp_path: Path) -> tuple[Path, tuple[str, ...]]:
+def apply_fence(monkeypatch: Any, tmp_path: Path) -> tuple[Path, tuple[str, ...]]:
     """Apply the fence; return ``(fake_home, scrubbed_auth_names)``.
 
     The caller MUST pass the returned pair to
