@@ -1,7 +1,7 @@
 # Ceremony Notes — prompt-assent Phase 1.5 (designated channels) — PLANNING-SIDE
 
 **Prepared by:** the plan lane (this file is **F-13**, written by **Phase 4**) · **Date:**
-2026-11-11 (UTC) · **Status:** **PLANNING-SIDE NOTES — not yet a staged release.**
+2026-11-11 (UTC) · **Status:** **PLANNING-SIDE NOTES — v0.29.20 IS STAGED (measured 2026-11-12) — NOT promoted, NOT armed.** See §0 (staging receipts).
 
 > **⚠ OWNERSHIP (architect §8.6 / §11 row 10).** This file is **this lane's** artefact: it is the
 > **planning-side** record of what the v0.29.20 ceremony notes must say. The **release-dir**
@@ -23,6 +23,21 @@
 | Supersedes | the parent's DM-only K-3 probe wording — from the new side |
 | Governing decisions | [`decisions.md`](decisions.md) **D-10** (the version), **D-11** (the probe), **D-14** (the delivery posture), **D-15** (the controls) |
 | Governing artefact | [`architecture-recommendation.md`](architecture-recommendation.md) §8 (the probe shape), §9 (the staging) — **wins over every file of this set** |
+
+---
+
+## 0. Staging receipts — measured 2026-11-12 (v0.29.20)
+
+- bump commit **`fcea5f153e92e55bc0db6989929ff66b38b6a8c4`** (`chore(release): bump version to 0.29.20`)
+- annotation tag **`v0.29.20`** = `5bb2642fde6f4ca894c920d9a79c7abefaca6393` → `fcea5f153`
+- **4-WAY SHA `4bfe2a83b446ac4614383f9526a2a8abb296eb247b4c5cf247ba4b59c06342af`** (release-dir == manifest == sidecar == dist)
+- `staged_at` **2026-11-12T05:38:52Z**
+- `rollback_safe=true`, `source=explicit`
+- `known_schema_gen` **20261110_221500**
+- releases count **7**
+- **current UNMOVED `v0.29.15`**
+- taxonomy **29** / prompt-assent **ari-EXACTLY PASS**
+- disclosure: **two idempotent stage runs** occurred (a wrapper `rc-2` caused the re-run); the payload was **byte-identical except `staged_at`**, and the eviction set was **unchanged**.
 
 ---
 
@@ -180,7 +195,7 @@ That is why §1.7's hygiene rules bind.
 | Field | Value |
 |---|---|
 | `staged_version` | **`v0.29.20`** |
-| slot verification | `git ls-remote --tags origin 'v0.29.20*'` → empty; `git tag --list v0.29.20` → empty; the remote max is **v0.29.19** (tag `649a509b1` → `1132fa4cb`, the concurrent lane); **v0.29.20 free local+origin** — **re-verified TWICE: at the start of the day and immediately before `git tag -a`** (three lanes are converging on adjacent slots) |
+| slot verification | `git ls-remote --tags origin 'v0.29.20*'` → empty; `git tag --list v0.29.20` → empty; the remote max is **v0.29.19** (tag `649a509b1` → `1132fa4cb`, the concurrent lane — tag exists but was never promoted; live current is v0.29.15); **v0.29.20 free local+origin** — **re-verified TWICE: at the start of the day and immediately before `git tag -a`** (three lanes are converging on adjacent slots) |
 | **trap 1** | **`ENSEMBLE_ROLLBACK_SAFE=1` MUST be in the argv.** `scripts/upgrade/stage.sh:328-352` greps the **whole** migration history for `DROP TABLE\|DROP COLUMN` — it **matches** ⇒ the unset branch **exits 78**. Record `rollback_safe=true, source=explicit` |
 | **trap 2** | `scripts/bump_version.py` commits with the subject **`! New version X`** (`scripts/bump_version.py:150`) — use it as a **FILE EDITOR** and commit **`chore(release): bump version to 0.29.20`** (exactly as v0.29.18's bump did (`d317043aa` — its subject named 0.29.18; ours names 0.29.20)) |
 | tag discipline | annotated tag at exact HEAD; **push by name, never `--tags`**; on a slot collision **re-bump to the next free patch slot and record it — never re-cut an existing tag**; **a remote tag is never deleted** |
@@ -200,7 +215,7 @@ That is why §1.7's hygiene rules bind.
   (`scripts/upgrade/lib.sh:6857-6917`, `RETENTION_KEEP=3` at `:375`) is called **only** from
   `promote.sh:771` and `:927` — **`stage.sh` never evicts** (verified: `grep -c retention_evict
   scripts/upgrade/stage.sh` = 0).
-- **Retention TRUTH:** Staging v0.29.20 takes the host to **7 release dirs**; `retention_evict` (`lib.sh`, RETENTION_KEEP=3) evicts the oldest non-pinned dirs until **3 TOTAL remain** — the **FIRST v0.29.20 promote evicts v0.29.7, v0.29.13, v0.29.17 and v0.29.18** (4 dirs): **the DM-only fallback is NOT protected on this host**. Primary stated mitigation = the **re-stage-from-`df4a92732` recovery procedure**: (1) the `v0.29.18` tag + its 4-way sha `aa78f632c4…` survive in git history; (2) `git checkout df4a92732` in a clean worktree (the tag's commit — never re-cut the tag); (3) rebuild `dist/ensemble-prod`; (4) re-run `scripts/upgrade/stage.sh` with `VERSION=v0.29.18` + `ENSEMBLE_ROLLBACK_SAFE=1` (the exact-match gate is satisfied by the existing tag); (5) verify the 4-way sha reproduces. One build+stage cycle restores the fallback.
+- **Retention (MEASURED 2026-11-12):** Staging v0.29.20 takes the host to **7 release dirs**; `retention_evict` (`lib.sh`, RETENTION_KEEP=3) evicts the oldest non-pinned dirs until **3 TOTAL remain** — the **FIRST v0.29.20 promote evicts v0.29.7 / v0.29.13 / v0.29.17 / v0.29.18** (4 dirs, MEASURED not predicted): **survivors: v0.29.15 / v0.29.19 / v0.29.20**; **v0.29.18 (the DM-only fallback) is UNPROTECTED**. Primary stated mitigation = the **re-stage-from-`df4a92732` recovery procedure**: recovery = **tag `v0.29.18^{}` = `df4a92732`** + **one build+stage cycle** — (1) the `v0.29.18` tag + its 4-way sha `aa78f632c4…` survive in git history; (2) `git checkout df4a92732` in a clean worktree (the tag's commit — never re-cut the tag); (3) rebuild `dist/ensemble-prod`; (4) re-run `scripts/upgrade/stage.sh` with `VERSION=v0.29.18` + `ENSEMBLE_ROLLBACK_SAFE=1` (the exact-match gate is satisfied by the existing tag); (5) verify the 4-way sha reproduces. One build+stage cycle restores the fallback.
 - **Operator rule:** *no other promote until the designated-channel decision is made.*
 - **Recoverability:** *"if evicted, re-stage from `df4a92732` — the tags survive, the option is
   recoverable at one build+stage cycle."*
@@ -218,8 +233,14 @@ must **point at the repo paths**:
 
 Two refusal codes + one new module + new tests move **none** of the ceremony-asserted ordinals:
 migration head `20261110_221500` / **128 files** ✓ · prompt baseline **181** ✓ (the lane touches no
-`agents/` file) · scripts floor/rev `2147c0298` ✓ · privileged category / tool vocabulary / artifact
+`agents/` file) · scripts floor/rev `087f782afbf1957dd0bf6acea5198314093d2a89` ✓ (moved at re-pin commit `fe362aedd`) · privileged category / tool vocabulary / artifact
 counts ✓. **The refusal-taxonomy count 27 → 29 is a test-pinned count, not a ceremony ordinal.**
+
+### 3.5 — PRE-STEP BEFORE ANY ARMED UPGRADE: the scripts-pin provenance
+
+- A **v0.29.20 daemon's arm-time provenance REFUSES** against the **current** scripts-pin: the pin's **stamp is `2147c0298`** and its **HEAD `84df6b55c` does not contain the floor `087f782afbf1957dd0bf6acea5198314093d2a89`**.
+- A **SHELL-DRIVEN ceremony from the pinned tree is FINE** — the pin carries **all four `promote.sh` stanzas**, and the pin's `integrity_verify v0.29.20` returns **PASS**.
+- **Consequence (state it plainly):** after **v0.29.20 goes live, sync the scripts-pin to a floor descendant BEFORE relying on the tool-lane arm path.**
 
 ---
 
