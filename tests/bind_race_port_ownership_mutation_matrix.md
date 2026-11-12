@@ -17,6 +17,37 @@ venue), per-variable env scrub, claims dir under /tmp, all runs bounded
 27cbeb9ecf63dfa4e91d620919721f3552a0f17516693f90630d82d2802ecc6e  daemon/api.py
 ```
 
+## Digest refresh — latest-absorption merge (tip `becc9884c`, 2026-11-12)
+
+`origin/latest 6b644f770` (79 commits: prompt-assent P1.5,
+ram-auto-termination, live-views loopback) was merged into the lane.
+Digests re-recorded at the new tip; **1 of 3 MOVED** (`api.py` — the
+ram-auto-termination lifespan wiring; `port_ownership.py` / `__main__.py`
+are ours-only files the merge did not touch).
+
+| file | old (`25d6c56d7`) | new (`becc9884c`) | moved |
+|---|---|---|---|
+| daemon/services/port_ownership.py | `617dae98…b6f2a` | `617dae98…b6f2a` | no |
+| daemon/__main__.py | `9c381fec…140e3` | `9c381fec…140e3` | no |
+| daemon/api.py | `27cbeb9e…2ecc6e` | `e93ee522…77a4c` | **YES** |
+
+Re-run at the merged tip (venue `/tmp/rg3-mut`, detached @ `becc9884c`,
+`PYTHONPATH=<venue>` with `daemon.__file__` verified inside the venue,
+per-variable env scrub, claims dir under /tmp, `--timeout=90`,
+command-level `timeout 240`, restore via `git checkout --`,
+PRE==POST bundle sha every leg — all TRUE; clean control: the same
+7-file pin set, **96 passed**; venue porcelain empty at close; venue
+removed):
+
+| Leg | File mutated | Observed RED | Restore |
+|---|---|---|---|
+| P-M7 | port_ownership.py | **7** — the claimed 3 (`test_B1_two_process_foreign_claim_is_visible_and_refused`, `test_claims_dir_is_host_global_not_install_scoped`, `test_N3_gate_never_writes_under_the_install_root`) + 4 accepted blast-radius | TRUE |
+| P-M9 | port_ownership.py | **exactly the 3 claimed** | TRUE |
+| P-M10 | __main__.py | **exactly the 1 claimed** (`test_gate_refusal_never_enters_bind_retry`) | TRUE |
+| P-M12 | api.py | **exactly the 1 claimed** (`test_B3_daemon_never_releases_claim_eagerly`; the mutant anchor — the lifespan `yield` block — survived the merge intact) | TRUE |
+
+Zero vacuous pins at the merged tip.
+
 ## Mutants (observed reds — 2026-11-12 execution)
 
 | Mutant | Edit (surviving behaviour removed) | Observed RED |

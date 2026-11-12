@@ -28,6 +28,42 @@ a49c7abcaf560a2da1e2d7a2e0b75c9889561709e09480579b76581cdcb41edd  daemon/tools/b
 036fa3f2ede7f6454c9fc13b06678a7ba88f2f8cc3b82c0162221f56b51fbe40  daemon/services/metrics_listener.py
 ```
 
+## Digest refresh — latest-absorption merge (tip `becc9884c`, 2026-11-12)
+
+`origin/latest 6b644f770` (79 commits) merged into the lane. Digests
+re-recorded at the new tip; **3 of 8 MOVED** — `api.py` (ram-guard
+lifespan wiring), `bash.py` + `proc_tools.py` (RAM arm added upstream AND
+the merge integration seams). The other five are ours-only files the
+merge did not touch.
+
+| file | old (`25d6c56d7`) | new (`becc9884c`) | moved |
+|---|---|---|---|
+| daemon/services/port_ownership.py | `617dae98…b6f2a` | `617dae98…b6f2a` | no |
+| daemon/services/spawn_env_policy.py | `11580101…58a67` | `11580101…58a67` | no |
+| daemon/tools/service_spawner.py | `b3d31acd…cae532` | `b3d31acd…cae532` | no |
+| daemon/api.py | `27cbeb9e…2ecc6e` | `e93ee522…77a4c` | **YES** |
+| daemon/ensemble_config.py | `6673c46b…5c224` | `6673c46b…5c224` | no |
+| daemon/tools/bash.py | `a49c7abc…b41edd` | `4b1f45d8…8e9a76` | **YES** |
+| daemon/tools/proc_tools.py | `2be680f4…fc69544` | `aa206ae5…148d98b` | **YES** |
+| daemon/services/metrics_listener.py | `036fa3f2…51fbe40` | `036fa3f2…51fbe40` | no |
+
+Re-run at the merged tip (venue `/tmp/rg3-mut`, detached @ `becc9884c`,
+`PYTHONPATH=<venue>` verified, per-variable scrub, claims dir under /tmp,
+`--timeout=90`, `timeout 240`, restore via `git checkout --`,
+PRE==POST bundle sha every leg — all TRUE; clean control 96 passed on the
+7-file pin set; venue porcelain empty at close; venue removed):
+
+| Leg | File mutated | Observed RED | Restore |
+|---|---|---|---|
+| B-M8 | proc_tools.py | **exactly the 2 claimed** (`test_proc_run_build_child_env_is_scrubbed`, `test_proc_run_real_spawn_channel`) | TRUE |
+| B-M9 | bash.py | **exactly the 3 claimed** B6 pins | TRUE |
+| B-M13 | (planted `docs/runbooks/upgrade-drills.md`) | **exactly the 1 claimed** (`test_no_transcript_markers_in_tracked_text_files`) | TRUE |
+| B-M14 | ensemble_config.py | **exactly the 4 claimed** | TRUE |
+
+Zero vacuous pins at the merged tip. The B-M8/B-M9 mutant anchors
+survived the merge verbatim (the scrub call and the ambient-only fence
+block were not rewritten by the resolution).
+
 ## Mutants (observed reds — 2026-11-12 execution)
 
 | Mutant | File | Edit (surviving behaviour removed) | Observed RED |
