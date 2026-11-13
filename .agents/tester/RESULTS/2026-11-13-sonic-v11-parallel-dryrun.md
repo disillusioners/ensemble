@@ -131,3 +131,79 @@ Both failures carry a hard-proven **ENVIRONMENT-ONLY** attribution (knowledge la
 `D0-preflight.txt` · `D3-isolation.txt` · `D3-bootsweep-grep.txt` · `D3-bootscan.txt` · `D3-agentlist.txt` · `D3-sonic-developer.json` · `supplementary-agent-defs-checks.txt` · `D4-dispatch.txt` (+raw create/send bodies) · `D4-status-timeline.txt` · `D4-final-roster.txt` · `D4-git-peek.txt` · `D4-peek-*.json` · `messages-<6 lanes>.json` · `V9-14-timings-<lane>.txt` · `V5-V11-git.txt` · `V6-postrun-isolation.txt` · `V-matrix-facts.txt` · `canary-reattr.txt` · `MF2-scrub.txt` · `HANDOFF.md.txt` (preserved deliverable, 83 lines) · `D8-final-git-graph.txt` · `D8-teardown.txt`.
 
 **Scratch work-item seed commit:** `51e5abc8a` · **Feature tip:** `06e255b6a` (range `51e5abc8a..06e255b6a`).
+
+---
+
+# 11. RE-RUN — leader-authorized environment-corrected run (2026-11-13, ~10:03–10:16Z)
+
+**Authorization (leader, 2026-11-13):** exactly ONE corrected re-run (option (a)) — the knowledge lane IS the feature; an env-blocked V9/V13 proves nothing about the shipped shape. Same scenario, FRESH fenced boot (fresh throwaway DB, new recorded PIDs, runbook ports). If any REAL behavioral failure appears → STOP and report; there is no third run.
+
+**MF-1 amendment (committed BEFORE the re-run):** `d6fff7f1b` — `docs(sonic): MF-1 addendum — forward knowledge-lane env (LIGHTRAG_*, RAG_IS_REQUIRED=1) for dry-run re-run`. Planning docs confirmed NOT baseline-tracked (prompt baseline covers `agents/**` only; no baseline churn). Forwarded names: `LIGHTRAG_HOST`, `LIGHTRAG_API_KEY`, `RAG_IS_REQUIRED=1` (forced, fail-closed), values read READ-ONLY from the live install `.env`, by-name via the 0600 scratch env file, never echoed.
+
+## 11.0 Leader fence ruling (recorded verbatim for audit)
+
+> "ZERO live contact" = no contact with the live DAEMON, live DB, live install state (no restarts, no current flip, no live-instance messaging). The shared RAG knowledge service is house-shared infra — dev agents read and write it daily; pointing the dry-run at it is the same posture. Specifically:
+> - explore() READ against the shared RAG: fine (read-only, cheap 'quick' lane).
+> - experience() WRITE: exactly one, and its learning text MUST carry a unique scenario marker prefix — `SONIC-DRYRUN-V11-20261113-<uuid8> — ` — so the synthetic entry is identifiable. Capture the leader's experience() CALL (that is the V13 evidence), then TEARDOWN PROMPTLY to minimize the async kb-writer window. Before teardown, check whether the kb-writer insert actually completed (dry-run queues/logs) and disclose the exact resulting artifact in RESULTS (entry text incl. marker, or "no insert completed — async job not run"). Both outcomes are acceptable; silent ambiguity is not.
+
+Marker used this run: **`SONIC-DRYRUN-V11-20261113-a7c41e9b`**.
+
+## 11.1 Re-run V0–V14 matrix
+
+| # | Verdict | Evidence |
+|---|---|---|
+| V0 | **PASS** | Lane probe: 7/7 names count==1 (`OPENAI_*`×4 + `LIGHTRAG_HOST` + `LIGHTRAG_API_KEY` + `RAG_IS_REQUIRED=1`); `RAGConfig.is_configured=True`; RAG `/health` 200 — recorded pre-dispatch |
+| V1 | **PASS** | D0–D9 complete; scenario terminal 10:15:38Z; teardown residue-free |
+| V2 | **PASS** | `HANDOFF.md` at scratch work-item root, **7/7 frozen headers in exact order** (byte-exact grep); authored by the developer via single bash heredoc; preserved to `HANDOFF.md.txt` (67 lines) before teardown |
+| V3 | **PASS** | Reviewer `9d003ffd`: `read_file(HANDOFF.md)` + bash `git log --oneline --graph --merges 78f42b040..HEAD` + bash `git diff 78f42b040..b7aa34cc8` (merged diff) → **REVIEW: PASS** |
+| V4 | **PASS** | Tester `d44cfb92`: `python3 -m pytest sonic_dryrun/ -q` → **"3 passed in 0.18s"** on the merged tree (per-module: mathx 2 passed, strix 1 passed) → **TEST: PASS** |
+| V5 | **PASS** | 2 module commits (`82d374efa` mathx, `c7469ea8c` strix) + 2 genuine two-parent `--no-ff` merges (`427070d84` slot 1, `b7aa34cc8` slot 2). Module branches existed during the run and were deleted post-merge by the developer per FROZEN pin 9 — merge-parent topology is the evidence |
+| V6 | **PASS** | Post-run `dryrun-verify.py`: **RESULT: ALL PASS** (scratch 2750809 owns 8797/8798 only; live 2579736; demo 3547188) |
+| V7 | **PASS** | FD-ISOLATION clean; boot sweep zero SIGTERM/SIGKILL ("0 interrupted run(s)") |
+| V8 | **PASS** | SIGTERM exact PID → exit 4s; ports free; DB count 0; claim removed; scratch worktree+branch removed (`dryrun/*` empty); porcelain empty; live+demo alive |
+| V9 | **PASS** (disclosure) | Developer `206d08ed`: `explore` count = **1** @ **10:05:16.668676Z**, BEFORE first coder spawn **10:11:04.534038Z**; `experience` = **0**; spawn_instance targets = `sonic-dryrun-moda`/`sonic-dryrun-modb` only — **zero kb-writer targets**. DISCLOSURE: the explore call hit its 300s cap and returned no knowledge (anomaly `04408b5e`); the mandatory read HAPPENED as a call, ordering predicate satisfied |
+| V10 | **PASS** | coderA window [10:11:05.922507Z, 10:11:33.586690Z]; coderB [10:11:07.269979Z, 10:11:28.492640Z] ⇒ **OVERLAP (~21.2s shared)** |
+| **V12** | **FAIL** | coderA `b7eb5210`: explore=0, file-census (read_file 4 + glob_files 2) = **6** ⇒ PASS. **coderB `60ce161d`: explore=0, file-census = 0 ⇒ FAIL** — it used bash `cat` ×6 + `edit_file` ×2 instead of the filesystem read tools. F15 class (clarification violation), **agent-behavioral, not environmental** |
+| V13 | **PASS** | Leader `c299f5d1`: `experience` count = **1** @ **10:15:22.860171Z** — AFTER tester completion 10:14:12.323512Z and reviewer completion 10:15:10.969437Z; marker **`SONIC-DRYRUN-V11-20261113-a7c41e9b` present verbatim** in the experience call text |
+| V14 | **PASS** | Reviewer: explore=0, experience=0. Tester: explore=0, experience=0 |
+
+**Re-run verdict: V0–V14 = 14 PASS / 1 FAIL (V12 — coderB file-exploration census 0).** Per the leader's ruling, a REAL behavioral failure ⇒ **no third run**. Phase 4 remains blocked pending adjudication of V12 (coder tool-choice: bash-`cat` exploration vs the mandated filesystem read tools).
+
+## 11.2 Transcript extracts (timestamps)
+
+- **V9 (developer):** `explore` call @ **2026-11-13T10:05:16.668676Z** (plan-open; explorer child `66c739cf` spawned 10:05:19.265Z; explore timed out at its 300s cap → anomaly `04408b5e`; no retry, no experience, no kb-writer spawn). First coder spawn @ **10:11:04.534038Z** ⇒ ordering satisfied.
+- **V13 (leader):** `experience` call @ **2026-11-13T10:15:22.860171Z**, text carries the marker verbatim; verdicts: tester `TEST: PASS` @ 10:14:12Z, reviewer `REVIEW: PASS` @ 10:15:11Z; leader `SONIC-VERDICT: PASS` @ 10:15:38Z.
+- **V10:** coderA [10:11:05.922507Z → 10:11:33.586690Z] vs coderB [10:11:07.269979Z → 10:11:28.492640Z] — overlapping ~21.2s.
+- **V12 (coderB):** explore=0; read_file/grep_files/glob_files/list_directory all 0; bash `cat` ×6 + `edit_file` ×2.
+
+## 11.3 kb-writer insert disclosure (both outcomes acceptable; silence is not)
+
+**NO INSERT COMPLETED — the async kb-writer job RAN but ended FAILED.** Instance `ff63ab4e-aaa7-490d-9732-e9c119c333bd` (spawned 10:15:51, after the experience call), terminal_status=error, work_id `6adce09e`, "PP1 zero-watcher terminal fire: no watchers found, terminal report NOT delivered"; its transcript shows 0 tool calls / 0 assistant messages; no `track_id` in the daemon log. **The leader's `experience()` call (marker-bearing) is the primary V13 artifact.** Evidence: `R2-kbwriter-disclosure.txt`, `messages-ff63ab4e.json`.
+
+## 11.4 5-agent boot-scan (restated on the fresh boot)
+
+All five registered (`GET /api/agents`): sonic-leader, sonic-developer, sonic-coder, sonic-reviewer, sonic-tester. `sonic-developer` record captured to `R2-sonic-developer.json` (lane `agentic`; allow instance/knowledge/bash/proc/filesystem/todo/shared_meta_kv/time/self/help/context/pok/nest-report; deny edit_file/write_file; team_members [sonic-coder]).
+
+## 11.5 Fence receipts (re-run)
+
+- Scratch PID **2750809** (claim `any-8797.json`, install_dir `…/ensemble-src-wt-sonic-v11`); boot via `fenced-launch.py` only; `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` pinned; `PORT=8797 HOST=127.0.0.1`; `ENSEMBLE_SELF_ENV=dev`; `ENSEMBLE_DB_AMBIENT_ALLOW=1` (fresh data dir ⇒ first boot); scratch tree `/tmp/ensemble-sonic-dryrun-r2` (077; dirs 700).
+- Readiness ~20s; `dryrun-verify.py` ALL PASS pre- and post-run.
+- Neighbors alive/untouched: live 2579736 (9797/9798), demo 3547188 (7979).
+- DB `ensemble_sonic_dryrun` created → dropped (count 0). Claim removed. Scratch worktree `…-wt-sonic-dryrun` + branch `dryrun/sonic-parallel-e2e-20261113-r2` removed (HANDOFF preserved first); `dryrun/*` empty; commission porcelain empty.
+- **Shared-RAG contact per the leader ruling:** explore READ (explorer `66c739cf`) + one marked experience WRITE attempt (kb-writer job FAILED — no insert landed). No live daemon/DB/install-state contact.
+
+## 11.6 MF-2 scrub (re-run bundle)
+
+PASS — `sk-proj-` 0 hits · `sk-ant-` 0 hits · OPENAI key prefix `e33c34f5af4278a0` 0 hits · LIGHTRAG key prefix `fa90ac639cef24dc` 0 hits · no `LIGHTRAG_API_KEY=` value lines. Evidence: `R2-MF2-scrub.txt`.
+
+## 11.7 Anomalies & deviations (re-run)
+
+- `04408b5e` — developer plan-open `explore()` exceeded its 300s cap (explorer lane latency); call made, no knowledge returned; no retry (correct).
+- `ec177b18` — **process anomaly:** the R3 evidence worker's first report was a verbatim echo of the developer transcript (rejected as interim; corrective follow-up recovered the true receipts; no evidence loss). Filed by the test leader.
+- House-convention scope ambiguity: slot docstrings only on the two commissioned modules (`__init__.py` + test modules carry none) — flagged by the developer as an owner decision, not silently satisfied.
+- `HANDOFF.md` left untracked at the work-item root by design (developer's deliverable, not committed).
+- Module branches deleted post-merge by the developer (FROZEN pin 9) — V5 evidence is merge-parent topology.
+
+## 11.8 Re-run evidence inventory (`/tmp/ensemble-sonic-dryrun-r2/evidence/`, 0600)
+
+`R2-preflight.txt` · `R2-probes.txt` · `R2-bootscan.txt` · `R2-sonic-developer.json` · `R2-dispatch.txt` · `R2-status-timeline.txt` · `R2-final-roster.json` · `messages-<7 instances>.json` (incl. explorer + kb-writer) · `V9-14-timings-<lane>.txt` ×7 · `R2-V-matrix.txt` · `R2-V2-V11-git.txt` · `R2-V6-postrun-isolation.txt` · `R2-kbwriter-disclosure.txt` · `R2-MF2-scrub.txt` · `HANDOFF.md.txt` (67 lines) · `R2-final-git-graph.txt` · `R2-teardown.txt`.
