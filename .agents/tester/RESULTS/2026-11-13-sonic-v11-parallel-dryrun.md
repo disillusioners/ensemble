@@ -286,3 +286,17 @@ Root cause: the best-effort journal append failed during staging (`reason=non-ti
 - S1's remote-tag absence cannot be proven without contacting the remote (explicitly forbidden); local evidence only (no remote-tag refs, tag local).
 - No remediation performed (per instruction): the missing journal entry was NOT re-created, the tag was NOT touched, nothing was pushed.
 - Evidence: `/tmp/stageverify-v0301/VA-artifacts.txt` + `VB-live-journal.txt` (0600).
+
+## 12.1 S6 CLOSE-OUT — remediation independently confirmed (2026-11-13)
+
+**S6 CLOSED-BY-REMEDIATION.** The repo-committed manual audit record **`de9ad4c3a`** (`docs(sonic): S6 remediation — manual freshness-override audit record`; exactly **1 file**, +8/−0, `.agents/shared/planning/sonic-team/V1-1-AMENDMENT.md`; worktree clean) was independently verified truthful + verbatim:
+
+- **Verbatim quote fidelity (PASS):** both authoritative log lines are present in the committed record and are **byte-identical when unwrapped** to `/tmp/stage_v0301.txt` (markdown list wrapping only — full shas, no abbreviations):
+  - `upgrade-stage[live]: WARN: FRESHNESS OVERRIDE: tip-identity mismatch (HEAD=00b0af633a075a93afb153b2d6bbd44ed18f78ed tip=ee2b46d3b01e1d956aac7ad1c5dca5ad9f209ff8) — proceeding (operator accepted; journaled)`
+  - `upgrade-stage[live]: WARN: freshness-override journal append FAILED (best-effort) — override is taken but the audit trail is incomplete; reason=non-tip-tree`
+- **Record content 6/6:** full HEAD sha `00b0af633a075a93afb153b2d6bbd44ed18f78ed` (×3) · full tip sha `ee2b46d3b01e1d956aac7ad1c5dca5ad9f209ff8` · reason class `non-tip-tree` (×2) · leader adjudication dated 2026-11-13 · S1–S5 evidence pointer · system-defect note ("stage.sh freshness-override journal append fails for non-tip trees…").
+- **Disclosure (non-blocking):** the remediation record describes the journal-append defect but does **not** cite anomaly id `1afd2e48` (it cites `04408b5e`, a different performance-watch item). The defect is tracked as anomaly **`1afd2e48`** per the leader's close-out ruling and is recorded here; the record may be amended later if the id is meant to live inside it.
+- **Tag unmoved (PASS):** `git rev-parse v0.30.1` = `0a4c8b6f63a35efb9b7207d56ae1c25a8aded131` (annotated); `v0.30.1^{commit}` = `00b0af633a075a93afb153b2d6bbd44ed18f78ed`. No fetch performed.
+- **Baseline untouched (PASS):** the commit touches no baseline/prompt-artifact file; baseline re-check rc 0 — **"PROMPT-BASELINE: OK — 201 versioned artifact(s) match"**. (Run from the stage worktree's script with `--tree $REL` — the release dir carries no `scripts/protection/` tree; outcome identical to the stage log's 201 claim.)
+
+**FINAL STAGE VERIFICATION: S1–S6 PASS · artifacts `82c60f4fba39cd4a52d5bbc72981014dbadb68a555d23fc9842aa50889c012b0` · verdict: STAGE VERIFIED.**
