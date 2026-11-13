@@ -198,10 +198,12 @@ SEAL_UNTOUCHED_BASE_VALUES: dict[str, str] = {
 #:
 #: 161 entries at the ceremony; 177 after the MERGE-FIRST step
 #: (origin/latest 97b76e20e — the v0.28.12 aegis release) added the four
-#: aegis-lane agents' artifacts (+16 versioned files).  The COUNT is
-#: pinned so a NEW versioned artifact cannot appear silently.
+#: aegis-lane agents' artifacts (+16 versioned files).  197 after the
+#: sonic-team lane (2026-11-12, +16 sonic artifacts).  201 after the
+#: COMBINED v1.1+v1.2 rework (2026-11-13, +4 sonic-developer artifacts).
+#: The COUNT is pinned so a NEW versioned artifact cannot appear silently.
 BASELINE_FILE = AGENTS_DIR / ".prompt-artifacts.sha256"
-BASELINE_EXPECTED_ENTRIES = 197
+BASELINE_EXPECTED_ENTRIES = 201
 
 
 # ---------------------------------------------------------------------------
