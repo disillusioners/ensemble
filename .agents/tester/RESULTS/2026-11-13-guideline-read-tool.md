@@ -83,3 +83,84 @@ marked the rest NOT-RUN explicitly — no implied greens).
 ## Scope discipline
 
 Fix-round commit touches ONLY: the 5 stale-pin sites (3 test files), the registration suite (R2 guard + R3 retarget), the 4 doctrine-line homes (R1), the regenerated manifest (R1), and this record (W1/W2). No code changes in `daemon/` or `scripts/`; no DB/migrations; no env knobs; no POK entries; no critical notes; `docs/guidelines/` untouched; no new test logic beyond the two scoped in-suite amendments (R2 banned-list extension, R3 retarget — both inside existing tests).
+
+
+---
+
+# INDEPENDENT GATE — tester-lane evidence (2026-11-13, appended; do not merge with developer-lane sections above)
+
+> **Executor:** tester (commissioned independent gate executor — sonic agents not spawnable from this lane; gate set unchanged).
+> **Tree:** worktree `/home/nea/ensemble-src-wt-guideline-read-tool`, branch `feature/guideline-read-tool` @ `a9ff512d590c02fa4e640a25763c6ae2a24801db`, base `5316e0cd3` (origin/latest). Developer-lane evidence above was NOT trusted; every leg below was re-driven at HEAD by 12 dispatched workers (IDs per section). Wave-start 23:26Z; all runs in the fenced dev env (POSTGRES_DB=ensemble_dev verified, worktree `.venv`, uv cpython-3.14).
+> **Verdict headline: gates B, C, D, E + all supporting re-runs PASS; gate A PARTIAL — 3/4 commissioned counter-mutations PROVEN, M2 (extend-site removal) NOT-PROVEN (leg-e pin defect, escalated); NET-NEW REDS: 0; two 🟠 findings for the leader (§F1, §F2).**
+
+## Gate verdict table
+
+| Gate | Verdict | Numbers | Worker |
+|---|---|---|---|
+| A — registration pins, base run | **PASS** | 39 passed / 0 failed, rc 0, ~8s; HEAD clean start→end | c622e1b7 |
+| A — counter-mutations (4 minimum) | **3/4 PROVEN, M2 NOT-PROVEN → gate A PARTIAL** | table below | 6c833af8 |
+| B — allow-list tree proofs | **PASS** | 6/6 items; census exactly 4/53 agents | d692b768 |
+| C — read/refusal behavior | **PASS** (1 finding §F2) | 10/10 harness checks; 5/5 sha256 round-trips | 7d07a26b |
+| D — payload pack | **PASS** | 49 passed / 0 failed, rc 0, 137s; hermeticity double-verified | 837fb01b |
+| D — independent recompute + manifest + census | **PASS** | two-method recompute match `a1293776…435`; per-file digests identical; 5/5 files exact | af9c70d5 |
+| D6 — guard-removal counter-mutation | **PROVEN** | mutated 48P/1F (D6 leg: expected 78, got 1); revert sha256-identical | 31d94723 |
+| E — doctrine + baseline | **PASS** | 8/8 line-anchored hits; negative census 45 files clean; 201/201 both checks | 38454e56 |
+| S1 — test_pok_grant_pins.py | **PASS** | 10 passed (0.62s) | 4a3f337b |
+| S2 — test_metrics_vocabulary_amendment.py | **PASS** | 11 passed (0.86s) | 0c8cc5bb |
+| S3 — test_metrics_family_adjudication.py | **expected shape** | 28 passed + 1 failed — the failure IS the declared known pre-existing census red; offender count 64 confirmed | 3501c551 |
+| Journal suite (`bash tests/test_release_journal.sh`) | **NOT-RUN (honest)** | monolithic 24m26s shell suite — exceeds the 5-min pack hard cap; no config-shrink possible; splitting = out-of-scope test-architecture surgery for an independent gate. Dev-lane 363/16 above remains UNVERIFIED by this lane. NOTE: lane footprint shows `tests/test_release_journal.sh` as Modified by the lane — flagged. | — |
+
+## Gate A counter-mutation proof (commissioned minimum; one at a time, byte-identical revert each, pre/post sha256 + empty git-diff proven, post-revert control 39P rc 0)
+
+| # | Mutation (file) | Result | Failing ids → matrix leg |
+|---|---|---|---|
+| M1 | category-constant removal — `"guidelines"` from `PRIVILEGED_TOOL_CATEGORIES` (`_tool_registry.py`, was :876) | **RED, PROVEN** — 3F/36P | `test_the_category_is_privileged`, `test_the_set_is_exactly_the_twenty_two_entries`, `test_the_set_has_twenty_two_members` → leg f (exact 3) |
+| M2 | extend-site removal — comment `tools.extend(create_guidelines_tools_if_available(...))` (`instance.py`, was :7173-7177) | **GREEN — NOT-PROVEN** (39P rc 0) | none — see §F1 |
+| M3 | allow-grant removal — `"guidelines"` token from sonic-leader `tools.allow` (deny untouched) | **RED, PROVEN** — 2F/37P | `test_every_granted_agent_carries_the_exact_key` → leg g; `test_b5_midflight_did_not_confer_the_grant` (same-allow-array positive claim, expected collateral) |
+| M4 | warm-list removal — loader unit (`loader.py` import :558 + construction :608 + tuple entry :637) | **RED, PROVEN** — 1F/38P | `test_the_loader_warm_list_entry_exists` → leg j (exact 1) |
+
+### F1 (🟠 escalated, gate-A leg): leg-e pin is def-anchored — blind to its declared counter-mutation
+
+The mutation verifiably landed (call site commented) yet the pack stayed 39/39 green. Root cause, statically proven from the test source: `test_the_extend_precedes_the_filter_and_the_doc_scan` anchors `source.index("create_guidelines_tools_if_available(")` whose FIRST occurrence is the module-level **def** at `instance.py:2965`, not the extend call — the def precedes help/scan/filter unconditionally, so the ordering assertion cannot fail on call-site removal; `test_step4_construction_extends_present_in_source` greps (import :295, bare name via the def, `"tools.extend("` ~60× elsewhere) are all still satisfied. **The matrix's leg-e counter-mutation ("move/remove the extend") can never redden the pin as written.** Edits that WOULD bite (worker-verified against the assertions): removing the import at :295, or relocating the def below the help/scan/filter sites. Recommended re-anchor: index on the extend-call shape (`tools.extend(\n        create_guidelines_tools_if_available(`). Context that raises severity: adjudication sanity (i) calls the extend-order pins "the only guard" against silently-invisible decorator-only registration — a guard that cannot fire on its declared mutation is a real pin defect (POK `mutation-01` class). **Open question for the leader:** is the `instance.py` extend call load-bearing for tool attachment (→ pin re-anchor + consider a behavioral construction pin — coverage hole), or is the registry/warm-list path the sole real attach (→ pin re-anchor is still warranted; matrix wording amendment)? No fix applied — gate mandate.
+
+## Gate B evidence (tree-only, no suite)
+
+- **B1**: sonic-leader allow carries `"guidelines"` (appended last, line 15); **deny byte-identical to base** (`["edit_file","write_file","image_save"]`, whole-file diff shows allow-line as the only change). ari/leader/devops also carry it.
+- **Census**: JSON-aware sweep of all 53 `agents/*/meta.json` → `guidelines` in allow EXACTLY {ari, devops, leader, sonic-leader}; 49 others no.
+- **B2/B3**: sonic-coder/-developer/-reviewer/-tester absent (grep 0 occurrences each); spot-set giter, wanderer, maintenancer, explorer, architect, coder absent.
+- **B5**: sonic-leader allow holds `midflight` AND `guidelines` as separate tokens; `PRIVILEGED_TOOL_CATEGORIES` = exactly 22 members (members-only extraction; comment-polluted raw grep overcounts 25), no `midflight`; midflight holders {aegis, coder, designer, devops, leader, sonic-leader, tester} — guidelines only on the granted quartet members. Grant = allow token, never midflight.
+- **B4**: both tool bodies open with the frozenset gate (`guidelines.py` list :356-358, read :405-407; refusals pre-`try`; constant :117-119 == the required quartet); all fs access post-gate (factory-time path *construction* in `_resolve_guidelines_dir` disclosed — not per-call IO).
+
+## Gate C evidence (independent harness, /tmp scratch, dual-layer timeout)
+
+C1 5 entries (3 canonical slug==stem/status `draft` cut at U+00B7/non-empty purpose + README/TEMPLATE auxiliary) validated against a raw-file oracle; C2 canonical field shapes verified; C3 six malformed fixtures (incl. `|`-in-status preserved whole, never a separator) — never raised, fallbacks applied, no invented fields; C4 absent dir → identical typed refusal `reason=guidelines-payload-unavailable` from BOTH tools, never an empty list; C5 byte-verbatim 5/5 (sha256: README `18751c6ade7e…`, TEMPLATE `310cf321ceb4…`, passcode `81cc72458aef…`, memoir `bdae2ad5845e…`, notify `64d72b14bff2…` — matching Gate D's manifest digests); C6 unknown slug → refusal naming all 5 valid slugs; C7 AST census: 0 mutation calls, 0 risky imports, exactly 2 `@tool` defs, read-only surface.
+
+### F2 (🟠 non-blocking, for the leader): matrix-C4 "empty base_dir" is cwd-dependent
+
+`base_dir=""` is treated as a real injection → resolves `Path(".")`. Clean cwd → correct typed refusal; **repo-root cwd → lists 12 repo-root `*.md` files as auxiliary entries** instead of refusing. Commission's gate wording ("absent-dir → refusal, never empty list") is MET; the matrix's stricter "empty base_dir" wording is violated under repo-cwd conditions. No production exposure (runtime passes `None`; `base_dir` is a test/ops param; auth gate still first). Suggested cure if adjudicated: treat falsy `base_dir` like missing. The 39-leg suite pin does not cover this cell. No fix applied — gate mandate.
+
+## Gate D evidence
+
+- Base pack 49/49 rc 0 (137s); transcript `/tmp/guidelines_payload_pack_out_3516661`; hermetic (FAKE_HOME/mktemp only; no live-path contact pre- or post-run).
+- Independent recompute of `guidelines_tree_sha256` by transcription AND by executing the real `lib.sh` `_tree_hash` read-only: both `a1293776dbcd75e0e68a076f56816d53c849d3c3dec2c270029ced83c18da435`; the pack's own D2 leg independently recomputes over the STAGED copy and asserts equality (`test :285-313`). Per-file manifest digests (two-space, tree-relative) identical line-for-line to independent `sha256sum` of all 5 files.
+- D5 corruption-refusal and D6 precondition-78 legs cited from source (stage.sh :811-813 / :330-333); **D6 counter-mutation executed**: guard removed → exactly one leg red (`D6: missing docs/guidelines refused (exit 78)` expected 78 / actual 1; 48P/1F vs baseline 49/0) → revert sha256-identical (`cfb462c5…bb53`), diff empty. D5 was exercised inside the 49-leg base run (pack leg) per its poller design.
+
+## Gate E evidence
+
+- 8/8 doctrine-line hits, each exactly once, standalone full-line (`grep -nxF`): ari :993/:994, leader :130/:131, devops :452/:453, sonic-leader :36/:37; `## Guidelines` section in all 4. Negative census: zero occurrences in the other sonic agents' tools_note and across all 45 `agents/*/tools_note.md` outside the quartet.
+- Tool help: both lines byte-verbatim in module docstring (:8/:9), CATEGORY_DOC (:97/:98 — L1 bare standalone), `_build_full_doc` (:470-473, AST-rendered string contains both sentences 1×/1×). Record correction: dev-lane §T4 transposed the latter two surface labels; substance unaffected.
+- Baseline: `wc -l` 201; `sha256sum --check` 201/201 OK; generator `--check` `PROMPT-BASELINE: OK — 201 versioned artifact(s) match`, rc 0.
+
+## Red-set accounting + quarantine
+
+- **Net-new reds: 0.** The only failing test across all executed packs is S3's `TestNoProducerInstrumentation::test_the_daemon_diff_is_confined_to_the_allowed_files` — identity-matched to the commission-declared known pre-existing broad-diff census red (offender count 64). Provenance (worker f058d097, committed-object reads): the failing test + helper existed at base (def @501) and are **byte-untouched** by the lane; the lane's only edits to that file are the mandated census-row recording of its own new `daemon/tools/guidelines.py` into `PRE_EXISTING_DAEMON_OFFENDERS` and the unrelated `TestTheBudget` VOCABULARY_VERSION pin 9→10; hunk ranges disjoint from the failing test. All other packs 100% green.
+- **Quarantine:** 0 rows in `.agents/tester/QUARANTINE.md` for `family_adjudication`, `test_guidelines_registration`, `test_guidelines_payload` (worktree file sha-identical to HEAD; absent from lane footprint).
+- **Lane footprint** (57 rows, 18A/39M) reviewed: scoped to the lane's declared surfaces (tool module, registry/loader/instance seams, stage.sh, 4-agent grants + tools_note, manifest, planning/approver/tester records, pin amendments). `tests/test_release_journal.sh` M noted → journal NOT-RUN disclosure above.
+
+## Cross-worker contamination audit (three independent observations reconciled)
+
+W-C and W-E each observed a transient ` M scripts/upgrade/stage.sh` (guard deleted) at 23:34:02Z, reverted by 23:37:07Z — attributed to W-D3's authorized D6 mutation window (its own report confirms the same edit + byte-identical revert + clean end state). Timeline consistent across all three observers; no gate result contaminated (disjoint surfaces; W-E re-verified baseline 201/201 after the window closed).
+
+## Overall verdict
+
+**PASS on gates B, C, D, E and all supporting re-runs; gate A PARTIAL (base 39/39 green; counter-mutations 3/4 — M2 extend-site NOT-PROVEN, §F1 escalated); net-new reds 0; quarantine 0; two 🟠 findings (§F1 pin re-anchor + attach-path question, §F2 empty-base_dir semantics) routed to the leader for adjudication before landing.** No product code, test code, or docs were modified by the gate (all mutations reverted byte-identical; only this RESULTS section is added).
