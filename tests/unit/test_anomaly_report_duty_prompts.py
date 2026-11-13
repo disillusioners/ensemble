@@ -3,22 +3,22 @@
 The nest-anomaly-report lane (2026-11-05, board ``wi-2d691ed2``) opens
 ONE write surface in a NON-privileged category: ``report_anomaly``.  An
 agent can only use a tool it knows about — so phase 5 gives EVERY agent
-(41 of them) the canonical duty line in ITS OWN canonical-home artifact,
+(50 of them) the canonical duty line in ITS OWN canonical-home artifact,
 and the duty text is BYTE-IDENTICAL everywhere.
 
 This pack pins the ceremony (phase5-plan "The Two New Pins" / AC-5.1 ..
 AC-5.6):
 
-(a) **the decomposition** — ``45 = 43 walk + 2 underscore specials``
+(a) **the decomposition** — ``50 = 48 walk + 2 underscore specials``
     (41 = 39 + 2 before the MERGE-FIRST step added the four aegis-lane
     agents; the count pin is the "a new agent must carry the duty"
     tripwire).  The
     walk enumerates DIRS (never collapsed ids): the report-integrity
-    precedent's id-collapsed walk reaches only 34 of the 41 (it skips
+    precedent's id-collapsed walk reaches only 34 of the 50 (it skips
     every underscore dir and resolves a ``[v2]`` pair to ONE operative
     dir), which would leave the 5 ``[v2]`` base counterparts + the 2
     underscore specials unpinned — a LEGALIZED silent loss.
-(b) **byte-identity** — every one of the 41 files ends with the SAME
+(b) **byte-identity** — every one of the 50 files ends with the SAME
     block (one template constant; never a per-agent hand-write).
 (c) **placement** — the block is the LAST top-level section of its file.
 (d) **the 5 v2 mirror pairs** — ``rule.md`` stays byte-identical between
@@ -56,7 +56,7 @@ AGENTS_DIR = REPO_ROOT / "agents"
 
 # ---------------------------------------------------------------------------
 # THE duty block — ONE template constant (AC-5.5).  Byte-identical in all
-# 41 files; the completeness pin below is the mechanical proof that no
+# 50 files; the completeness pin below is the mechanical proof that no
 # hand-edit crept in (a variant that differs by one character fails it).
 # ---------------------------------------------------------------------------
 
@@ -79,22 +79,31 @@ DUTY_BLOCK_SHA256 = hashlib.sha256(DUTY_BLOCK.encode("utf-8")).hexdigest()
 HOME_ORDER: tuple[str, ...] = ("rule.md", "workflow.md", "soul.md")
 
 #: The pinned decomposition (AC-5.5 / the plan's "41 = 39 walk + 2",
-#: EXTENDED to the merged population).
+#: EXTENDED to the merged population, then to the video-team scaffold).
 #:
 #: The MERGE-FIRST step (origin/latest 97b76e20e — the v0.28.12 aegis
 #: release) added FOUR agents to the nest (``aegis`` / ``cracker`` /
 #: ``hacker`` / ``sweeper``), each with its own ``rule.md`` canonical
 #: home.  The ceremony was extended to them mechanically (the SAME
-#: template constant, the SAME append), so the decomposition moves from
+#: template constant, the SAME append), so the decomposition moved from
 #: 41 = 39 walk + 2 specials to 45 = 43 walk + 2 specials.  The pins
 #: RED without this — the count pin IS the "a new agent must carry the
 #: duty" tripwire (mutation leg M-P5-4).
-#: The sonic-team lane added FOUR more (2026-11-12: 48 = 46 walk + 2) and
-#: the COMBINED v1.1+v1.2 rework added the fifth, ``sonic-developer``
-#: (2026-11-13: 51 = 49 walk + 2 — every sonic agent carries the duty
-#: block as the LAST section of its rule.md).
-EXPECTED_TOTAL = 51
-EXPECTED_WALK = 49
+#: The sonic-team lane added FOUR more (2026-11-12) and the COMBINED
+#: v1.1+v1.2 rework added the fifth, ``sonic-developer`` (2026-11-13) —
+#: every sonic agent carries the duty block as the LAST section of its
+#: rule.md (latest pinned 51 = 49 walk + 2).
+#: The video-team scaffold (2026-11-11) added FOUR more (video-producer /
+#: video-capturer / video-editor / video-verifier), each carrying the
+#: byte-identical duty block appended to its ``rule.md``; its fix-round-1
+#: recount found the pre-sonic walk pin stale by one.
+#: KNOWN PRE-EXISTING RED at base: ``agents/canary/rule.md`` carries NO
+#: duty block (byte-identity test REDs; canary is an existing agent —
+#: outside the scaffold's write scope; remediation is activation-day).
+#: MERGE 2026-11-13 (video-team -> latest): 49 walk (latest) + 4 video
+#: = 53 walk + 2 specials = 55 total.
+EXPECTED_TOTAL = 55
+EXPECTED_WALK = 53
 EXPECTED_SPECIALS = 2
 
 #: The underscore specials — the two dirs the id-collapsed walk skips.
@@ -201,9 +210,12 @@ SEAL_UNTOUCHED_BASE_VALUES: dict[str, str] = {
 #: aegis-lane agents' artifacts (+16 versioned files).  197 after the
 #: sonic-team lane (2026-11-12, +16 sonic artifacts).  201 after the
 #: COMBINED v1.1+v1.2 rework (2026-11-13, +4 sonic-developer artifacts).
-#: The COUNT is pinned so a NEW versioned artifact cannot appear silently.
+#: MERGE 2026-11-13 (video-team -> latest): +16 video-team artifacts
+#: = 217, recounted from the merged manifest.
+#: The COUNT is pinned so a NEW versioned artifact cannot appear
+#: silently.  PIN = GENERATOR OUTPUT COUNT.
 BASELINE_FILE = AGENTS_DIR / ".prompt-artifacts.sha256"
-BASELINE_EXPECTED_ENTRIES = 201
+BASELINE_EXPECTED_ENTRIES = 217
 
 
 # ---------------------------------------------------------------------------
@@ -300,12 +312,13 @@ def _sha256(path: Path) -> str:
 
 
 class TestTheDutyWalkDecomposition:
-    """``45 = 43 walk + 2 underscore specials`` — the pinned count.
+    """``50 = 48 walk + 2 underscore specials`` — the pinned count.
 
     The count is pinned so a NEWLY added agent dir cannot silently change
     the total: a new agent MUST carry the duty (M-P5-4) and MUST be
     registered here.  (41 = 39 + 2 at the ceremony; 45 = 43 + 2 after the
-    MERGE-FIRST step brought in the four aegis-lane agents.)
+    MERGE-FIRST step brought in the four aegis-lane agents; 50 = 48 + 2 after
+    the video-team scaffold brought in four more.)
     """
 
     def test_the_total_is_41(self) -> None:
@@ -376,9 +389,9 @@ class TestTheDutyBlockIsByteIdenticalEverywhere:
         assert DUTY_BLOCK_SHA256 == (
             "da18f1f9cf2ccda2c443e0edb5c76c13ec00c3368f8e284a65b61ae0091663e9"
         ), (
-            "the duty template constant changed — the 41 shipped blocks are "
+            "the duty template constant changed — the 50 shipped blocks are "
             "byte-identical to the PREVIOUS constant; a change here must be "
-            "a deliberate re-append of all 41 files"
+            "a deliberate re-append of all 50 files"
         )
 
 

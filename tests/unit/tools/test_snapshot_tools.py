@@ -1856,14 +1856,34 @@ class TestRegistrationChain:
             assert "snapshot_search" in allow, agent
 
     def test_gate_flag_enabled_on_targets(self):
-        """vsss + unify-spawn-tools decision 10: the snapshot-enabled
-        targets are tester + developer (base) + developer[v2] —
+        """vsss + unify-spawn-tools decision 10, reconciled with the
+        video-team activation (2026-11-12): snapshot-enabled targets are
         enumerated per-DIRECTORY and identified by each directory's
         VERSIONED SPACE KEY (``registry.compose_agent_space_key`` over
         the parsed dir name: ``developer[v2]`` → ``'developer[v2]'``,
         NOT the bare meta ``id`` — both developer metas say
         ``id: 'developer'`` / ``version: 2.0.0``, which collide).
-        No other agent meta.json carries the flag."""
+
+        TWO more facts this pin records exactly:
+
+        1. SANCTIONED DELTAS: the four video-team agents carry
+           ``"snapshot_enabled": true`` (video-team activation, user GO
+           2026-11-12 — warm-start lanes; no directory tag, so they
+           enumerate as plain names), and the sonic lane set the flag
+           on ``sonic-reviewer`` + ``sonic-tester`` — a LATENT
+           PRE-EXISTING RED at latest 5136af20b (the sonic lane's pin
+           update was missed; surfaced by the video-merge resolution
+           run 2026-11-13 and pinned to reality here, not papered
+           over).
+        2. PRE-EXISTING QUIRK (recorded, NOT papered over): BOTH
+           ``agents/developer/meta.json`` AND
+           ``agents/developer[v2]/meta.json`` carry the flag under the
+           shared agent_id ``developer`` — under the OLD id-based
+           enumeration the base list was ``['developer', 'developer',
+           'tester']``; the versioned-space-key enumeration above is
+           precisely what makes the two directories distinct. The
+           duplicate-id debt is owned outside these lanes; this pin
+           pins reality until that debt is ruled on."""
         import json
 
         from daemon.registry import _parse_agent_dir_name
@@ -1875,10 +1895,22 @@ class TestRegistrationChain:
             if meta.get("snapshot_enabled") is True:
                 # vsss: per-dir identity — the versioned space key
                 # derived from the DIRECTORY name suffix, never the
-                # (colliding) meta id/version fields.
+                # (colliding) meta id/version fields.  MERGE 2026-11-13:
+                # the four video-team dirs carry no [vN] tag, so they
+                # enumerate as plain names and join the expected list.
                 base, tag = _parse_agent_dir_name(meta_path.parent.name)
                 enabled.append(f"{base}[{tag}]" if tag else base)
-        assert sorted(enabled) == ["developer", "developer[v2]", "tester"], (
+        assert sorted(enabled) == [
+            "developer",
+            "developer[v2]",
+            "sonic-reviewer",
+            "sonic-tester",
+            "tester",
+            "video-capturer",
+            "video-editor",
+            "video-producer",
+            "video-verifier",
+        ], (
             f"snapshot_enabled targets drifted: {enabled}"
         )
         # The versioned developer[v2] directory is the ONLY developer

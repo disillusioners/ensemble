@@ -61,14 +61,19 @@ CATEGORY = "nest-report"
 #: counts toward the meta denominator but stays a documented
 #: nest-report exception (its POK grant is the append-end exception).
 #: 48 / 50 after the sonic-team lane (2026-11-12): the FOUR ``sonic-*``
-#: agents each carry the grant explicitly (44 explicit + 4; ``canary``
-#: and ``watcher`` remain the two non-carriers).
+#: agents each carry the grant explicitly (``canary`` and ``watcher``
+#: remain the two non-carriers).
 #: 49 / 51 after the COMBINED v1.1+v1.2 rework (2026-11-13): the fifth
 #: sonic agent ``sonic-developer`` carries the grant explicitly
 #: (``nest-report`` LAST, ``pok`` immediately before — grant-pin
 #: convention preserved).
-EXPECTED_EXPLICIT = 49
-EXPECTED_TOTAL_META = 51
+#: MERGE 2026-11-13 (video-team -> latest): the video-team scaffold
+#: (2026-11-11) added FOUR agents (video-producer / video-capturer /
+#: video-editor / video-verifier), each granted by the SAME append-last
+#: rule → 53 explicit / 55 total meta-bearing dirs (non-carriers still
+#: exactly ``canary`` + ``watcher``).
+EXPECTED_EXPLICIT = 53
+EXPECTED_TOTAL_META = 55
 #: The ONE agent that inherits instead of carrying an explicit entry.
 INHERITANCE_EXCEPTIONS: frozenset[str] = frozenset({"watcher"})
 #: Agents whose NON-EMPTY allow predates their sweep class and

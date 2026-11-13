@@ -5312,6 +5312,21 @@ def _seed_phase1_roots() -> dict[str, "LiveViewsRootConfig"]:
                 "MIME from sidecar, not extension."
             ),
         ),
+        "video-artifact": LiveViewsRootConfig(
+            type="project_scoped",
+            path=".agents/shared/planning",
+            required_rel_subpath=["video"],
+            allowed_extensions=["html", "png", "md", "mp4"],
+            description=(
+                "Video-team deliverables under "
+                "<project_workdir>/.agents/shared/planning/video/<project-id>/. "
+                "Project-scoped via shortname (URL shape /views/video-artifact/"
+                "<project_shortname>/video/<project-id>/...); the structural 'video' "
+                "subtree gate restricts exposure to the video subtree only. Seeded by "
+                "activation step 2a (architecture.md V3); mp4 inline playback rides the "
+                "media-streaming lane (fb39b4df1)."
+            ),
+        ),
     }
 
 

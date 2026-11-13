@@ -1,0 +1,186 @@
+{
+  "$comment": "The two gate sets (architecture.md sections 5.2 and 6). Each gate earned its keep in v1-v5; the table in architecture.md section 0.2 is the traceability record. Gates are scripts with exit codes, never vibes.",
+  "gate_sets": {
+    "fast-demo-gates": {
+      "preflights": [
+        "P1",
+        "P2",
+        "P3",
+        "P4",
+        "P5",
+        "P6",
+        "P7",
+        "P8"
+      ],
+      "gates": [
+        "G-PLAN",
+        "G-BLANK",
+        "G-FASTSTART",
+        "G-SPEC",
+        "G-EYES"
+      ],
+      "g_geo_tolerance_px": null,
+      "g_pointer_tolerance_px": null
+    },
+    "film-goldens-gates": {
+      "preflights": [
+        "P1",
+        "P2",
+        "P3",
+        "P4",
+        "P5",
+        "P6",
+        "P7",
+        "P8"
+      ],
+      "gates": [
+        "G-PLAN",
+        "G-BLANK",
+        "G-FASTSTART",
+        "G-SPEC",
+        "G-EYES",
+        "G-GEO",
+        "G-POINTER",
+        "G-DETERM",
+        "G-3LAUNCH",
+        "G-GOLDEN"
+      ],
+      "g_geo_tolerance_px": 2,
+      "g_pointer_tolerance_px": 0.005
+    }
+  },
+  "gates": {
+    "G-PLAN": {
+      "proves": "plan == performed",
+      "mechanism": "performed-timeline (from capture meta) diffed against the authored plan's actions; any drift fails",
+      "v1_origin": "the plan==performed catch"
+    },
+    "G-BLANK": {
+      "proves": "no dead frames ship",
+      "mechanism": "full-resolution luma-uniformity scan per clip",
+      "v1_origin": "blank-frame scan (camera clamp)"
+    },
+    "G-FASTSTART": {
+      "proves": "container is streamable",
+      "mechanism": "moov precedes mdat (atom walk or ffprobe trace)"
+    },
+    "G-SPEC": {
+      "proves": "codec/pixfmt/fps/duration conform",
+      "mechanism": "ffprobe: h264 / yuv420p / 1920x1080 / fps / duration within 1 frame of plan",
+      "container": "silent AAC track explicit when audio deltas land; true -an until then"
+    },
+    "G-EYES": {
+      "proves": "a pair of agent eyes has SEEN the video",
+      "mechanism": "verifier builds contact sheet + keyframe stills and READS them (image category); verdict text names what it saw",
+      "v1_origin": "the vision-channel requirement (no shipped video without eyes)"
+    },
+    "G-GEO": {
+      "proves": "overlays and camera land where the plan says",
+      "mechanism": "per-frame logged bboxes vs plan positions",
+      "tolerance": "<= 2 px (film profile only)",
+      "v1_origin": "geometry measurement"
+    },
+    "G-POINTER": {
+      "proves": "the teaching pointer tracks REAL input, including inside zoom windows",
+      "mechanism": "pointer overlay coords vs harness per-frame input-coordinate log",
+      "tolerance": "<= 0.005 px (film profile; v2 measured max deviation 0.0044 px)",
+      "v1_origin": "pointer fidelity in zoom windows"
+    },
+    "G-DETERM": {
+      "proves": "the render is the artifact",
+      "mechanism": "per-frame SHA-256 of every frame across two independent renders; NOT OpenFilm look's 12-frame sample",
+      "v1_origin": "CSS-alpha nondeterminism + full-frame proof discipline"
+    },
+    "G-3LAUNCH": {
+      "proves": "capture is stable against warm-stack lies, font loads, ambient state",
+      "mechanism": "three independent capture launches of the same plan produce identical frame sequences",
+      "profile": "film only",
+      "v1_origin": "3-launch re-capture"
+    },
+    "G-GOLDEN": {
+      "proves": "no silent quality slide between iterations",
+      "mechanism": "three-tier dispatch per beat's `comparison` field (TIER E exact masked-region per-frame hash, zero tolerance; TIER P perceptual SSIM/pHash-dHash on representative frames with per-beat thresholds; TIER R lightweight representative key-frame references)",
+      "profile": "film only",
+      "storage": "OQ3 approved (Option A): lab binaries + in-repo manifests (goldens/<beat-id>/)",
+      "tiers": {
+        "exact": {
+          "mode": "masked-region-per-frame-hash",
+          "tolerance": 0
+        },
+        "perceptual": {
+          "defaults": {
+            "ssim_min": 0.97,
+            "dhash_hamming_max": 6
+          },
+          "configurable": "per-beat at mint (lands in golden provenance)",
+          "calibration": {
+            "method": "mean_minus_k_sigma",
+            "k": 3,
+            "min_samples": 5,
+            "uncalibrated_fallback": {
+              "ssim_min": 0.995,
+              "dhash_hamming_max": 2
+            },
+            "provenance_fields": [
+              "calibration_sample_ids",
+              "calibration_stats",
+              "derived_thresholds"
+            ],
+            "sigma_zero_policy": "sigma == 0 => record sigma_zero:true and treat as exact-match at that metric",
+            "sample_set_approver": "sample set approval rides reason_class 'calibration_update' (approved_by in {user, leader})",
+            "re_derivation_on_remint": "thresholds re-derived on every re-mint; never carried over silently",
+            "seed_floor_clamp": "derived thresholds may only be STRICTER than lane seeds (ssim_min >= 0.97, dhash_hamming_max <= 6); loosening requires an approval-worthy calibration_update event",
+            "single_comparison_per_render": true
+          }
+        },
+        "representative": {
+          "defaults": {
+            "mode": "adaptive",
+            "boundary_detector": {
+              "metric": "ssim_drop",
+              "threshold": null,
+              "_note": "seed/starting value only; derived from the approved sample set's SSIM-drop/frame-diff distribution at mint (calibration supersedes)"
+            },
+            "action_windows": {
+              "source": "capture_action_log",
+              "types": [
+                "pointer travel",
+                "press",
+                "drag",
+                "drop",
+                "popup open",
+                "row edits"
+              ],
+              "pad_frames": 3
+            },
+            "baseline_interval_frames": 30,
+            "reduced_long_edge_px": 480,
+            "include_first_last": true
+          }
+        },
+        "semantic": {
+          "evidence_only": true,
+          "per_keyframe_verdict": true,
+          "on_miss": "surface_loudly",
+          "checklist_source": "shot-plan per-beat",
+          "max_keyframes_per_beat": 3,
+          "pre_estimate_before_vision_calls": true,
+          "exceedance_policy": "FAIL unless explicit recorded waiver (approval record with reason)"
+        }
+      },
+      "tier_dispatch": "per-beat comparison field",
+      "overhead": {
+        "budget_pct": 15,
+        "metrics": [
+          "tier_e_hashing_wall_ms",
+          "tier_p_metric_ms",
+          "tier_r_sampling_ms",
+          "tier_s_vision_call_ms",
+          "total_verification_ms"
+        ],
+        "vs": "beat_render_wall_ms",
+        "on_exceedance": "report_plainly_with_dominant_cost_named"
+      }
+    }
+  }
+}

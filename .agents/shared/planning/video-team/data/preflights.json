@@ -1,0 +1,63 @@
+{
+  "$comment": "Machine-checked preflight definitions (architecture.md section 5.1). Run by video-capturer and video-editor locally; no LLM judgment. Each fails in seconds with a stable exit code and a one-line reason. Contract lives here and in the scripts' --help output (tools carry their own contracts); dispatch prompts carry only the mission delta.",
+  "preflights": [
+    {
+      "id": "P1",
+      "check": "duration cap",
+      "fails_when": "ffprobe duration exceeds the lane profile cap (90 s hard cap; locked 1:30 decision)",
+      "tool": "ffprobe",
+      "max_seconds": 1,
+      "exit_zero_on": "duration <= cap"
+    },
+    {
+      "id": "P2",
+      "check": "clip pinning",
+      "fails_when": "any assemble/trim input sha256 differs from its MEASURED manifest entry, or any referenced beat clip is missing",
+      "mechanism": "compare inputs_sha against build/captures/invalidation.json ledger + measured manifests",
+      "max_seconds": 1
+    },
+    {
+      "id": "P3",
+      "check": "engines named",
+      "fails_when": "provenance.json lacks openfilm version, Chrome/engine version, or ffmpeg version",
+      "v1_origin": "engine drifted to Chrome 157 mid-run in v2",
+      "max_seconds": 1
+    },
+    {
+      "id": "P4",
+      "check": "viewport floor",
+      "fails_when": "any capture viewport width < 1024 (locked: no mobile framing; deliverable 1920x1080 only)",
+      "max_seconds": 1
+    },
+    {
+      "id": "P5",
+      "check": "fixture-only tenants",
+      "fails_when": "capture base URL not in the localhost allowlist (127.0.0.1/localhost) or tenant markers differ from fixture uid 9001 / tenant 1706",
+      "max_seconds": 1
+    },
+    {
+      "id": "P6",
+      "check": "localhost-only DB",
+      "fails_when": "lab stack DB host is not localhost (ydlab_layout)",
+      "max_seconds": 1
+    },
+    {
+      "id": "P7",
+      "check": "blank/luma frame scan",
+      "fails_when": "near-blank (uniform-luma) stretches detected in the capture",
+      "mechanism": "sampled pre-assembly (camera clamp detector); full-resolution scan is gate G-BLANK in the verify lane",
+      "v1_origin": "blank-frame scan",
+      "max_seconds": 10
+    },
+    {
+      "id": "P8",
+      "check": "deliverable size cap",
+      "fails_when": "deliverable bytes >= the serve cap (MAX_SERVED_BYTES, 32 MiB \u2014 daemon/services/live_views.py:174); an over-cap file does not error loudly \u2014 it returns a uniform silent 404 (PathNotFoundError at daemon/services/live_views.py:1279-1283), so the preflight fails in seconds rather than letting the deliverable vanish at serve time",
+      "rationale": "threshold DERIVED FROM the 32 MiB serve cap (no invented margin); the serve cap is the real guard, P8 only makes its failure loud and early \u2014 document this derivation in the record and in A section 5.1's P8 row",
+      "mechanism": "stat the deliverable; compare against MAX_SERVED_BYTES (32 MiB)",
+      "max_seconds": 1,
+      "exit_zero_on": "size_bytes < 32 MiB"
+    }
+  ],
+  "exit_code_semantics": "0 = pass; 1 = named check failed (reason printed on one line); 2+ = harness fault (never interpreted as a product verdict)"
+}

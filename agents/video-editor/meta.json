@@ -1,0 +1,16 @@
+{
+  "id": "video-editor",
+  "name": "Video Editor",
+  "description": "Video team hot lane — trims, text swaps, zoom/crop changes in seconds with NO re-capture; all-intra intermediates + ffmpeg stream copy; every edit an undoable action in the log with a human veto window",
+  "icon": "✂️",
+  "color": "accent-cyan",
+  "version": "1.0.0",
+  "innate_skills": ["dynamic-skill", "todo"],
+  "skill_injection": false,
+  "snapshot_enabled": true,
+  "no_force_explore": true,
+  "tools": {
+    "allow": ["bash", "proc", "filesystem", "context", "shared_meta_kv", "todo", "time", "help", "midflight", "image", "view-views", "pok", "nest-report"]
+  },
+  "team_members": []
+}

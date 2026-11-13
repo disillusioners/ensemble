@@ -51,8 +51,13 @@ ANCHOR_CATEGORY = "nest-report"
 #: Re-derived 2026-11-13 (COMBINED v1.1+v1.2 rework): 50 / 51 — the
 #: fifth sonic agent ``sonic-developer`` carries ``pok`` immediately
 #: before ``nest-report`` (the insert-before discipline preserved).
-EXPECTED_EXPLICIT = 50
-EXPECTED_TOTAL_META = 51
+#: MERGE 2026-11-13 (video-team -> latest): the video-team scaffold
+#: (2026-11-11) adds FOUR agents (video-producer / video-capturer /
+#: video-editor / video-verifier), each with a non-empty allow granted
+#: mechanically by the SAME insert-before rule → 54 explicit grants /
+#: 55 meta-bearing agent dirs.
+EXPECTED_EXPLICIT = 54
+EXPECTED_TOTAL_META = 55
 #: The ONE agent that inherits (empty allow = the default universe
 #: grants every NON-privileged category — an explicit entry would
 #: STRIP every other tool watcher inherits).

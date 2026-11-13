@@ -459,8 +459,10 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # is a public-by-obscurity URL minter (no FS / DB side effects
     # at the tool surface), but the user's first-release
     # visibility decision (Discord, 2026-10-07) is RESTRICTED:
-    # only the three commissioned users (ari, leader, designer)
-    # opt in via ``tools.allow: ["view-views"]``. The empty-allow
+    # only the commissioned users (ari, leader, designer, and
+    # video-producer + video-editor added 2026-11-12 by the
+    # video-team activation step 2b — user GO = GRANT) opt in
+    # via ``tools.allow: ["view-views"]``. The empty-allow
     # inherit universe must NOT auto-grant it; making the
     # category privileged makes that structural instead of
     # conventional. The designer-side schema entry in

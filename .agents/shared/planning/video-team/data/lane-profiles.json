@@ -1,0 +1,54 @@
+{
+  "$comment": "Lane profiles (architecture.md section 6). Two profiles, two gate sets; profile selects the gate set id. Cap-and-flag iteration policy: a lane auto-iterates up to iteration_cap gate-fail-fix cycles per beat, then STOPS and flags the user with failure evidence and disclosed remedies (remedies are proposals; only the user or leader loosens a gate).",
+  "profiles": {
+    "fast-demo": {
+      "description": "Default. Cheap gates, minutes turnaround, for guidance/demo cuts the user iterates on fast.",
+      "cap_s": 90,
+      "gate_set": "fast-demo-gates",
+      "goldens": false,
+      "determinism_ci": false,
+      "compose": "stream-copy-first",
+      "iteration_cap_per_beat": 3,
+      "comparison_default": "none"
+    },
+    "film+goldens": {
+      "description": "Strict. Customer-facing cuts. Everything in fast-demo plus determinism CI, goldens, 3-launch re-capture, film tolerances.",
+      "cap_s": 90,
+      "gate_set": "film-goldens-gates",
+      "goldens": true,
+      "determinism_ci": true,
+      "three_launch_recapture": true,
+      "compose": "stream-copy-first",
+      "iteration_cap_per_beat": 2,
+      "golden_tier_model": "hybrid",
+      "comparison_default": "hybrid",
+      "comparison_thresholds_default": {
+        "ssim_min": 0.97,
+        "dhash_hamming_max": 6,
+        "representative": {
+          "mode": "adaptive",
+          "boundary_detector": {
+            "metric": "ssim_drop",
+            "threshold": null
+          },
+          "action_windows": {
+            "source": "capture_action_log",
+            "types": [
+              "pointer travel",
+              "press",
+              "drag",
+              "drop",
+              "popup open",
+              "row edits"
+            ],
+            "pad_frames": 3
+          },
+          "baseline_interval_frames": 30,
+          "include_first_last": true,
+          "reduced_long_edge_px": 480
+        },
+        "_note": "PROPOSED INITIAL VALUES / calibration seeds \u2014 superseded by derived thresholds at mint (calibration: mean - k*sigma, k=3, min 5 samples). Uncalibrated fallback (fail-closed) = ssim_min 0.995 / dhash_hamming_max 2."
+      }
+    }
+  }
+}
