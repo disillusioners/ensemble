@@ -74,7 +74,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 SONIC_AGENTS = ("sonic-leader", "sonic-coder", "sonic-reviewer", "sonic-tester")
 
-# ---- FROZEN [sonic-tools-v1] (phase1 §3.5) ----
+# ---- FROZEN [sonic-tools-v1] (phase1 §3.5 + v1.1 amendment 2026-11-13,
+# Emperor ruling: bounded knowledge granted to coder + leader — coder
+# explore-at-start, leader explore-on-decomposition + write-once-at-end;
+# reviewer + tester UNCHANGED, still zero knowledge) ----
 FROZEN_TEAMS = {
     "sonic-leader": ["sonic-coder", "sonic-reviewer", "sonic-tester", "giter"],
     "sonic-coder": [],
@@ -85,12 +88,13 @@ FROZEN_TEAMS = {
 FROZEN_TOOLS = {
     "sonic-leader": {
         "allow": ["instance", "bash", "filesystem", "time", "self", "help",
-                  "context", "shared_meta_kv", "midflight", "pok", "nest-report"],
+                  "context", "shared_meta_kv", "midflight", "knowledge", "pok",
+                  "nest-report"],
         "deny": ["edit_file", "write_file"],
     },
     "sonic-coder": {
         "allow": ["bash", "proc", "filesystem", "time", "self", "help",
-                  "context", "shared_meta_kv", "pok", "nest-report"],
+                  "context", "shared_meta_kv", "knowledge", "pok", "nest-report"],
         "deny": [],
     },
     "sonic-reviewer": {
@@ -108,12 +112,16 @@ FROZEN_TOOLS = {
 }
 # ---- END FROZEN [sonic-tools-v1] ----
 
-# Effective spawn sets (phase1 §3.5): leader = exactly the 4 (ZERO implicit
-# members — no allowed category maps to a TOOL_REQUIRED_AGENTS row), the
-# other three = empty.
+# Effective spawn sets (phase1 §3.5 + v1.1 amendment): leader = its 4 team
+# members PLUS the two knowledge-lane support agents (TOOL_REQUIRED_AGENTS
+# maps "knowledge" -> ["explorer", "kb-writer"]; granting the category to the
+# leader for explore-on-decomposition + write-once-at-end makes them implicit
+# members — intended, not drift); coder = the same two implicit members
+# (explore-at-start); the other two = empty.
 EXPECTED_EFFECTIVE = {
-    "sonic-leader": {"sonic-coder", "sonic-reviewer", "sonic-tester", "giter"},
-    "sonic-coder": set(),
+    "sonic-leader": {"sonic-coder", "sonic-reviewer", "sonic-tester", "giter",
+                     "explorer", "kb-writer"},
+    "sonic-coder": {"explorer", "kb-writer"},
     "sonic-reviewer": set(),
     "sonic-tester": set(),
 }
@@ -629,7 +637,7 @@ def a11_ari_note(fx: Fixture) -> None:
 ASSERTIONS = (
     ("A1", a1_meta_parse, "meta.json parse + id==dirname x4"),
     ("A2", a2_team_members, "team_members exact sets"),
-    ("A3", a3_allow_deny, "frozen allow/deny arrays + effective spawn sets"),
+    ("A3", a3_allow_deny, "frozen allow/deny arrays (v1.1: coder+leader carry knowledge; reviewer/tester do not) + effective spawn sets"),
     ("A4", a4_llm_model, "llm_model pin map (coder/tester=coding, leader/reviewer=agentic) + both in default set"),
     ("A5", a5_recursion, "multiplier 7 coder-only"),
     ("A6", a6_handoff_schema, "handoff 7 headers + HANDOFF_PATH three-way"),
@@ -787,9 +795,22 @@ def _mutation_legs():
         _mutate_meta(fixture, "sonic-coder",
                      lambda m: m.__setitem__("team_members", ["worker"]))
 
-    def a3_leader_add_knowledge(fixture):
+    def a3_leader_drop_knowledge(fixture):
         _mutate_meta(fixture, "sonic-leader",
+                     lambda m: m["tools"]["allow"].remove("knowledge"))
+
+    def a3_coder_drop_knowledge(fixture):
+        _mutate_meta(fixture, "sonic-coder",
+                     lambda m: m["tools"]["allow"].remove("knowledge"))
+
+    def a3_reviewer_add_knowledge(fixture):
+        _mutate_meta(fixture, "sonic-reviewer",
                      lambda m: m["tools"]["allow"].append("knowledge"))
+
+    def a3_effective_drop_required_row(fixture):
+        # v1.1 positive shape: the effective-spawn-set pin depends on the
+        # TOOL_REQUIRED_AGENTS row — removing the mapping must RED.
+        fixture.tool_required_agents.pop("knowledge")
 
     def a3_reviewer_drop_bash(fixture):
         _mutate_meta(fixture, "sonic-reviewer",
@@ -871,7 +892,10 @@ def _mutation_legs():
         ("A1-trailing-comma", a1_trailing_comma),
         ("A2-leader-add-planner", a2_leader_add_planner),
         ("A2-coder-add-worker", a2_coder_add_worker),
-        ("A3-leader-add-knowledge", a3_leader_add_knowledge),
+        ("A3-leader-drop-knowledge", a3_leader_drop_knowledge),
+        ("A3-coder-drop-knowledge", a3_coder_drop_knowledge),
+        ("A3-reviewer-add-knowledge", a3_reviewer_add_knowledge),
+        ("A3-effective-drop-required-row", a3_effective_drop_required_row),
         ("A3-reviewer-drop-bash", a3_reviewer_drop_bash),
         ("A3-reviewer-deny-drop-editfile", a3_reviewer_deny_drop_editfile),
         ("A4-coder-model-agentic", a4_coder_model_agentic),
