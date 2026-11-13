@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.3] — 2026-11-13
+
+### Added — media streaming for live-views + the video team, on top of the v0.30.2 sonic roster (`feature/liveviews-media-streaming`, `feature/video-team-scaffold`)
+
+- **Multimedia streaming in the live-views surface** (`daemon/routers/live_views.py`, `daemon/services/live_views.py`): MP4/WebM/MOV serving over HTTP with RFC-7233 `Range` semantics — multi-range preflight, suffix-range and start-past-EOF classified to 416 per the spec's ordering, a separate 2 GiB media cap (`ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES`, env > yaml > default), public-HEAD CSP + `nosniff` pins, basename-only over-cap logging, and a 928-line dedicated media test pack. Tester verdict MERGE-READY 217/217 green.
+- **The video team — four agents, definition + activation** (`agents/video-{producer,capturer,editor,verifier}` + `.agents/shared/planning/video-team/`): user-ratified three-tier E/P/R golden model with the Tier S evidence layer, adaptive sampling, mean-3σ calibration (k=3, min 5, fail-closed 0.995/2), mask versioning (≤30 % hard cap), approval identity (`user|leader`), overhead budget ≤15 %; seven `data/*.json` contracts; census pin packs; the `video-artifact` live-views root seed; commissioned tool set; leader wiring (`team_members` = 21). Definition files load at boot — dispatch requires the morning activation go.
+- **Guidelines system, initial set** (`docs/guidelines/`): README + template + memoir-reflection / live-views-passcode / notify-user-bounds guidelines.
+- **Merge-time census reconciliation** (video merge `821b1342d`): the 5 conflicted pin packs re-derived from the merged tree (manifest 217 rows; duty walk 53/55; anomaly grants 53/55; POK grants 54/55; snapshot targets 9) — resolution verified 673/673 on the merged tree, and a latent pre-existing RED at latest (sonic `snapshot_enabled` never pinned) surfaced and pinned to reality, not papered over.
+
 ## [0.30.2] — 2026-11-13
 
 ### Changed — sonic-team roster & support-parity amendment (Emperor ruling 2026-11-13; `feature/sonic-team-v0302`, base `c1d81593e`; content-only, zero migrations)
