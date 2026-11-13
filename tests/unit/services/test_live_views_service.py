@@ -33,6 +33,7 @@ import pytest
 from daemon.config import LiveViewsConfig, LiveViewsRootConfig
 from daemon.services.live_views import (
     LiveViewsService,
+    MAX_SERVED_BYTES,
     PathNotFoundError,
     RootNotFoundError,
     ServedFileTooLargeError,
@@ -1136,8 +1137,6 @@ class TestMediaMime:
         assert ei.value.max_bytes == 1024
 
     def test_over_cap_nonmedia_raises_path_not_found(self, tmp_path):
-        from daemon.services.live_views import MAX_SERVED_BYTES
-
         f = tmp_path / "big.html"
         with open(f, "wb") as fh:
             fh.truncate(MAX_SERVED_BYTES + 1)

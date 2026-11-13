@@ -17,18 +17,20 @@ Pins the production behaviour shipped in commit c6a9a80fb:
 
 Mirrors the fixtures in ``test_live_views_markdown.py`` and
 ``test_live_views_public_lane.py``.
+
+Size rationale: one module by design — public-lane byte-identity
+pins sit beside the direct-lane fixtures they mirror.
 """
 
 from __future__ import annotations
 
+import hmac
 import os
 import pathlib
-import re
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from starlette.responses import Response
 
 from daemon.config import LiveViewsConfig, LiveViewsRootConfig
 from daemon.routers.live_views import build_router
@@ -43,6 +45,7 @@ from daemon.services.view_passcode_service import (
     GRANT_COOKIE_NAME,
     ViewPasscodeCipher,
     ViewPasscodeService,
+    VerifyRateLimiter,
     generate_passcode,
     issue_grant_cookie,
 )
@@ -81,7 +84,9 @@ def _service_with_media_allowed(
     )
 
 
-def _client_with_workdir(workdir: pathlib.Path, *, max_media_bytes=None) -> TestClient:
+def _client_with_workdir(
+    workdir: pathlib.Path, *, max_media_bytes: int | None = None
+) -> TestClient:
     service = _service_with_media_allowed(workdir, max_media_bytes=max_media_bytes)
     app = FastAPI()
     app.include_router(build_router())
@@ -175,8 +180,6 @@ class _InMemoryStorePort:
         return self._store.get_row(root_name, rel_path)
 
     def mint(self, root_name, rel_path):
-        from daemon.services.view_passcode_service import generate_passcode
-
         plaintext = generate_passcode()
         wrapped = self._cipher.wrap(plaintext.encode("ascii"))
         row = self._store.upsert(
@@ -192,8 +195,6 @@ class _InMemoryStorePort:
             stored = self._cipher.unwrap(row.wrapped_passcode)
         except Exception:
             return False, row
-        import hmac
-
         if hmac.compare_digest(stored, candidate.encode("ascii")):
             return True, row
         return False, row
@@ -237,7 +238,11 @@ def pub_passcode_service(pub_cipher, pub_store) -> ViewPasscodeService:
 
 
 @pytest.fixture
-def pub_client(media_root_dir, pub_cipher, pub_passcode_service) -> TestClient:
+def pub_client(
+    media_root_dir: pathlib.Path,
+    pub_cipher: ViewPasscodeCipher,
+    pub_passcode_service: ViewPasscodeService,
+) -> TestClient:
     cfg = LiveViewsConfig()
     workdir = media_root_dir
     cfg.roots["planning"] = LiveViewsRootConfig(
@@ -258,8 +263,6 @@ def pub_client(media_root_dir, pub_cipher, pub_passcode_service) -> TestClient:
     app.state.view_passcode_service = pub_passcode_service
     app.state.view_passcode_cipher = pub_cipher
     app.state.view_passcode_grant_ttl_seconds = 86400
-    from daemon.services.view_passcode_service import VerifyRateLimiter
-
     app.state.verify_rate_limiter = VerifyRateLimiter(capacity=50, refill_per_minute=50)
     return TestClient(app)
 
@@ -308,7 +311,7 @@ class TestFullFileGet:
 
 
 class TestRangedGet:
-    def _ctx(self, media_root_dir):
+    def _ctx(self, media_root_dir: pathlib.Path) -> tuple[TestClient, bytes, int, str]:
         c = _client_with_workdir(media_root_dir)
         data = (media_root_dir / ".agents/shared/planning/feat/design/mockups/clip.mp4").read_bytes()
         size = len(data)
@@ -679,8 +682,6 @@ class TestHeadMedia:
         app.state.view_passcode_service = pub_passcode_service
         app.state.view_passcode_cipher = pub_cipher
         app.state.view_passcode_grant_ttl_seconds = 86400
-        from daemon.services.view_passcode_service import VerifyRateLimiter
-
         app.state.verify_rate_limiter = VerifyRateLimiter(
             capacity=50, refill_per_minute=50
         )
@@ -724,7 +725,7 @@ class TestOverMediaCap:
         mockup.mkdir(parents=True)
         (mockup / "big.mp4").write_bytes(b"x" * 2048)
         c = _client_with_workdir(workdir, max_media_bytes=1024)
-        resp = c.get(_url_for_workdir(workdir, "big.mp4"))
+        resp = c.get(_url("big.mp4"))
         assert resp.status_code == 413
         assert resp.json() == {
             "error": "file too large",
@@ -734,10 +735,6 @@ class TestOverMediaCap:
         }
 
 
-def _url_for_workdir(workdir, name):
-    return f"/views/designer-artifact/ens/feat/design/mockups/{name}"
-
-
 # ===========================================================================
 # Group 6 — Non-media over 32 MiB
 # ===========================================================================
@@ -745,8 +742,6 @@ def _url_for_workdir(workdir, name):
 
 class TestNonMediaOverCap:
     def test_404_uniform(self, media_root_dir):
-        from daemon.services.live_views import MAX_SERVED_BYTES
-
         mockup = media_root_dir / ".agents" / "shared" / "planning" / "feat" / "design" / "mockups"
         big = mockup / "big.html"
         with open(big, "wb") as f:

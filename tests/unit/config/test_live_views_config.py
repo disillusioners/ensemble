@@ -289,8 +289,6 @@ class TestMaxMediaBytes:
         )
 
     def test_ge_one_rejects_zero(self):
-        from pydantic import ValidationError
-
         with pytest.raises(ValidationError):
             LiveViewsConfig(max_media_bytes=0)
 
@@ -313,28 +311,20 @@ class TestMaxMediaBytes:
         assert _resolve_live_views_max_media_bytes(None, "   ") == 2 * 1024 * 1024 * 1024
 
     def test_resolver_nonint_env_raises_naming_env(self):
-        import pytest as _p
-
-        with _p.raises(ValueError) as ei:
+        with pytest.raises(ValueError) as ei:
             _resolve_live_views_max_media_bytes("abc", None)
         assert ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES in str(ei.value)
 
     def test_resolver_zero_env_raises(self):
-        import pytest as _p
-
-        with _p.raises(ValueError):
+        with pytest.raises(ValueError):
             _resolve_live_views_max_media_bytes("0", None)
 
     def test_resolver_negative_env_raises(self):
-        import pytest as _p
-
-        with _p.raises(ValueError):
+        with pytest.raises(ValueError):
             _resolve_live_views_max_media_bytes("-5", None)
 
     def test_resolver_nonint_yaml_raises(self):
-        import pytest as _p
-
-        with _p.raises(ValueError):
+        with pytest.raises(ValueError):
             _resolve_live_views_max_media_bytes(None, "abc")
 
     def test_resolver_float_yaml_raises_not_truncated(self):
@@ -347,9 +337,7 @@ class TestMaxMediaBytes:
         Mutation that flips this RED: restore the ``int(yaml_value)``
         coercion tail — 4096.9 resolves to 4096 instead of raising.
         """
-        import pytest as _p
-
-        with _p.raises(ValueError) as ei:
+        with pytest.raises(ValueError) as ei:
             _resolve_live_views_max_media_bytes(None, 4096.9)
         assert "live_views.max_media_bytes" in str(ei.value)
 
@@ -361,23 +349,17 @@ class TestMaxMediaBytes:
         operator's contract, and a float in a byte-count field is a
         typo the boot should refuse.
         """
-        import pytest as _p
-
-        with _p.raises(ValueError):
+        with pytest.raises(ValueError):
             _resolve_live_views_max_media_bytes(None, 4096.0)
 
     def test_resolver_bool_yaml_raises(self):
         """``True`` is an ``int`` subclass in Python — must still raise."""
-        import pytest as _p
-
-        with _p.raises(ValueError):
+        with pytest.raises(ValueError):
             _resolve_live_views_max_media_bytes(None, True)
 
     def test_resolver_list_and_dict_yaml_raise(self):
         """Container shapes fail loud too (no ``TypeError`` leak)."""
-        import pytest as _p
-
-        with _p.raises(ValueError):
+        with pytest.raises(ValueError):
             _resolve_live_views_max_media_bytes(None, [4096])
-        with _p.raises(ValueError):
+        with pytest.raises(ValueError):
             _resolve_live_views_max_media_bytes(None, {"v": 4096})
