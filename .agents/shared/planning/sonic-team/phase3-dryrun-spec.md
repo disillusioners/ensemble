@@ -88,6 +88,9 @@ Polling discipline: drive waits with `proc_logs`/short polls — **never a singl
 | V6 | **Zero live contact** — `dryrun-verify.py` RESULT: ALL PASS, incl. live pid owns live API+metrics ports (pid unchanged from D0) and demo pid owns 7979; no write under the live install dir in the window (guard-safe checks only — no literal live tokens in commands, §2.1 note) | helper output + claim-file inspection |
 | V7 | **FD isolation + no boot-sweep kills** — scratch pid appears 0× on live API/metrics/demo ports; no sweep-kill lines in `/tmp/ensemble-sonic-dryrun/logs/boot.log`; live/demo processes continuously alive | helper output (`FD-ISOLATION` line) + log grep |
 | V8 | Teardown residue-free — scratch ports free, DB count 0, claim file removed, scratch worktree/branch removed; only the evidence bundle remains | procedure §6 outputs |
+| V9 | **(v1.1) sonic-coder explore-at-start PRESENT** — the coder instance's transcript shows an `explore` tool call within its FIRST working turn; exactly ONE such call in the whole turn (the bound), and the message timestamp of the call is recorded as evidence | transcript fetch (§9) — `tool_calls[].name == "explore"` count == 1 in the coder instance |
+| V10 | **(v1.1) sonic-leader write-once-at-end** — the leader instance's transcript shows AT MOST ONE `experience` call, positioned at commission completion (after the giter commit dispatch resolves); the scenario is DESIGNED so a learning OCCURS (see §9), making exactly-one the expected shape — zero is valid ONLY when nothing was learned (record which branch fired) | transcript fetch (§9) — `tool_calls[].name == "experience"` count ≤ 1 + call timestamp |
+| V11 | **(v1.1) reviewer/tester knowledge-FORBIDDEN** — zero `explore` and zero `experience` calls in BOTH verification lanes' transcripts | transcript fetch (§9) — counts == 0 for both instances |
 
 ## 6. Failure taxonomy, evidence, timebox
 
@@ -129,3 +132,34 @@ Record for EVERY failure: step id, timestamp, exact command, full error text, re
 7. **giter's approval gates add hops** (`findings-B-infra.md` §6 caveat); the D4 task message carries pre-approval (commit-only, named worktree, no merge). If giter still stops for approval, that is F9-class evidence, not a reason to bypass giter (`decisions.md` D17).
 8. **MF-1/MF-2 folded via a clearly-marked AMENDMENT block appended to `dryrun-boot-procedure.md`** (devops's validated steps unchanged, per the batch-2 policy): the four `OPENAI_*` forwarded by name, the 0600 scratch-env-file mechanism, the **D3.5 lane probe**, and pins (i)–(m). This protects the single-run budget: a credential/environment fault is F1 pre-flight and can never consume the one permitted pipeline run. The original `env -i` block (`:150-168`) forwards only POSTGRES_*/PORT/HOME and `daemon/config.py` reads `OPENAI_*` from process env with no `load_dotenv` in the boot path — the procedure's boot-path-only validation (`:5-6`) proves nothing about the LLM lane; the amendment is load-bearing, not cosmetic.
 9. **Execution notes (#14/#15):** quiesce the giter-owned commission worktree during D2 (boot + `uv venv` happen there; the venv is gitignored — confirm Phase-4 C5 cleanliness after); if the host carries the staged v0.29.21 RAM guard, large `uv sync`/pytest trees may be tree-killed (`ram_breach_observed` fires even on ordinary commands) — re-run the killed step's remainder with identical inputs; never widen a budget silently.
+
+## 9. AMENDMENT 2026-11-13 — v1.1 knowledge-lane presence assertions (V9–V11)
+
+**Supersedes the v1 absence assertions.** The v1 spec asserted knowledge ABSENCE (zero `experience()` calls, zero kb-writer spawns) — that predicate is gone: the v1.1 amendment (Emperor ruling 2026-11-13; `decisions.md` knowledge-grant amendment; `V1-1-AMENDMENT.md`) grants bounded knowledge to sonic-coder (explore-at-start) and sonic-leader (explore-on-decomposition + write-once-at-end). The dry-run re-proof judges PRESENCE/SHAPE, not absence.
+
+**V9 — coder explore-at-start (presence).** The sonic-coder instance's transcript MUST show an `explore` tool call within its FIRST working turn — before the first file edit. Exactly ONE `explore` in the turn (the prompt bound); more than one is a FAIL (research-loop violation). Reviewer/tester transcripts MUST show zero knowledge calls (V11).
+
+**V10 — leader write-once-at-end (shape).** AT MOST ONE `experience` call, made at commission completion (after the giter commit dispatch resolves — never mid-run). The scenario MUST be designed so a learning OCCURS: e.g. the D4 dispatch context carries a non-obvious gotcha the leader could not have derived from the code (a fake constraint worth remembering), so exactly-one is the EXPECTED shape. Zero `experience` calls is a valid outcome ONLY when the leader's final report records that nothing non-obvious was learned — the report and the transcript must agree (a silent zero is a FAIL).
+
+**Timing attribution (required in the evidence bundle).** The Sunday sonic review judges explore-via-RAG cleanly from instance messages: record for each asserted call the message `created_at` timestamp — (a) the coder's `explore` call timestamp AND the coder turn's start timestamp (proves at-start ordering), (b) the leader's `experience` call timestamp AND the commit-dispatch resolution timestamp (proves at-end ordering). A verdict without timestamps is incomplete evidence, not a PASS.
+
+**Literal transcript-fetch command (pin).** The messages API is `GET /api/instances/{id}/messages`; tool calls appear on `assistant`-role messages under the FLAT key `tool_calls`, each entry carrying `name` (`daemon/utils.py serialize_message`: `message_id, role, content, thinking, tool_calls, images, created_at`):
+
+```sh
+# scratch daemon on $PORT (8797); $INSTANCE_ID = the lane instance id
+curl -s "http://127.0.0.1:${PORT}/api/instances/${INSTANCE_ID}/messages" > /tmp/ensemble-sonic-dryrun/evidence/messages-${INSTANCE_ID}.json
+
+# count a tool by name across the transcript (flat tool_calls[].name):
+.venv/bin/python -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
+print(sum(1 for m in ms for c in (m.get("tool_calls") or []) if c.get("name")==sys.argv[2]))' \
+  /tmp/ensemble-sonic-dryrun/evidence/messages-${INSTANCE_ID}.json explore   # expect 1 for sonic-coder, 0 for reviewer/tester
+
+# timing attribution (per-call created_at):
+.venv/bin/python -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
+print([ (c.get("name"), m.get("created_at")) for m in ms for c in (m.get("tool_calls") or []) if c.get("name") in ("explore","experience") ])' \
+  /tmp/ensemble-sonic-dryrun/evidence/messages-${INSTANCE_ID}.json
+```
+
+Guard-safety: the fetch targets the SCRATCH daemon port only; no literal live-port tokens in command text (§2.1 note).
+
+**kb-writer lane cost (facts, for judging the lane CHEAP):** `explore()` runs the explorer agent (its own `llm_model: "quick"`); `experience()` is a zero-LLM caller turn plus an async kb-writer spawn (also `quick`). One edge recorded in `V1-1-AMENDMENT.md`: explorer's legacy `caller_model_overrides {"coder": null}` matches only the literal caller agent_id `coder` — sonic-coder NEVER matches it (its id is `sonic-coder`), so no override path is exercised by the sonic lane.

@@ -379,3 +379,43 @@ tr '\0' '\n' < "/proc/$SCRATCH_PID/environ" | grep -c '^OPENAI_API_KEY='
 
 - **(i) `ENSEMBLE_DB_AMBIENT_ALLOW=1`** — the sanctioned first-boot flag from §5 is REQUIRED until `data/ensemble.json` exists (not a guard bypass).
 - **(m) Credential forwarding** as above: the four `OPENAI_*` NAMES only; values via the 0600 scratch env file; never argv/echo/`set -x`.
+
+## AMENDMENT 2026-11-13 (sonic v1.1) — transcript fetch + knowledge-lane evidence
+
+> **Appended by the v1.1 amendment lane. The validated boot/teardown steps ABOVE are unchanged** — this block is additive. It exists because the v1.1 dry-run re-proof (phase3-dryrun-spec.md §9, V9–V11) judges knowledge-lane PRESENCE from instance transcripts, and the fetch command must be pinned literally so every lane collects identical evidence.
+
+### Transcript fetch (the literal command)
+
+The messages API is `GET /api/instances/{id}/messages` (read-only; scratch daemon port `$PORT`, never a live port). Each serialized message carries `message_id, role, content, thinking, tool_calls, images, created_at`; tool calls ride on `assistant`-role messages under the FLAT key `tool_calls`, each entry with a `name` field.
+
+```sh
+# one fetch per lane instance (coder / leader / reviewer / tester)
+curl -s "http://127.0.0.1:${PORT}/api/instances/${INSTANCE_ID}/messages" \
+  > /tmp/ensemble-sonic-dryrun/evidence/messages-${INSTANCE_ID}.json
+```
+
+### Presence + timing checks (V9–V11 evidence)
+
+```sh
+# tool-by-name count (flat tool_calls[].name):
+#   sonic-coder   -> explore   == 1   (first working turn, before first edit)
+#   sonic-leader  -> experience <= 1  (at commission completion)
+#   reviewer/tester -> explore == 0 AND experience == 0
+.venv/bin/python -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
+print(sum(1 for m in ms for c in (m.get("tool_calls") or []) if c.get("name")==sys.argv[2]))' \
+  evidence/messages-${INSTANCE_ID}.json <tool-name>
+
+# timing attribution — (name, created_at) pairs for the knowledge calls:
+.venv/bin/python -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
+print([(c.get("name"), m.get("created_at")) for m in ms \
+for c in (m.get("tool_calls") or []) if c.get("name") in ("explore","experience")])' \
+  evidence/messages-${INSTANCE_ID}.json
+```
+
+Record the timestamps in the evidence bundle: coder `explore` at-start ordering (vs the coder turn start) and leader `experience` at-end ordering (vs the commit-dispatch resolution) — the Sunday sonic review judges explore-via-RAG from these transcripts alone.
+
+### Cost facts (judge the lane CHEAP)
+
+- `explore()` = explorer agent on its own `llm_model: "quick"` — one bounded agent turn.
+- `experience()` = zero-LLM caller turn + async kb-writer spawn (also `quick`).
+- Edge: explorer's legacy `caller_model_overrides {"coder": null}` matches ONLY the literal caller agent_id `coder`; sonic-coder's id is `sonic-coder` and NEVER matches — no override path is exercised by the sonic lane. Details: `V1-1-AMENDMENT.md`.
