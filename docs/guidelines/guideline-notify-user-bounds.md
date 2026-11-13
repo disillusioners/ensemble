@@ -38,7 +38,7 @@ No schema coupling beyond the additive `notify_audit` table. `ENSEMBLE_NOTIFY_US
 
 ## 8. First real use
 
-The self-alarm voice: scheduled fires and wake turns needing the user. The v0.27.8 staged verification (S1 8/8, S2 boot 7/7, S3 8/8, S4 rollback posture; PASS-WITH-NOTES) is the recorded gate; a first-production exercise record — UNVERIFIED in the sources consulted.
+The self-alarm voice: scheduled fires and wake turns needing the user. The v0.27.8 staged verification (UNVERIFIED: S1 8/8, S2 boot 7/7, S3 8/8, S4 rollback posture; PASS-WITH-NOTES — no in-tree tester-RESULTS or planning record carries these scores; decisions.md holds only a forward-looking re-derive note) is the recorded gate; a first-production exercise record — UNVERIFIED in the sources consulted.
 
 ## 9. Status
 

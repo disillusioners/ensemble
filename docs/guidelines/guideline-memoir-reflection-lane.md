@@ -21,7 +21,7 @@ All v2 knob sections are **ENV-ONLY** — no `config.yaml` block, no `load_confi
 - **The trigger is DERIVED per tick**, never a rolling counter (restart-durable, self-clearing; a counter would double-count on re-score and die on restart).
 - The nightly pass runs inside quiet hours `02:00 ≤ now < 04:00 UTC`, oldest-unreflected-first, capped at 30 episodes, walking the pre-cutover backlog without the 2-day window restriction (C2/V2-27).
 - **A misspelled v1 knob NAME is indistinguishable from unset ⇒ the surface is ON** — the only signal is the once-per-boot WARNING (accepted residual D0.8; mitigation is loudness, not prevention).
-- "**19**" at v0.29.0 was the REFUSAL-CODE count only — never a category or tool count.
+- "**19**" at v0.29.0 was BOTH the refusal-code count AND the privileged-category count (memoir = entry **#19** of 19 in `PRIVILEGED_TOOL_CATEGORIES`) — only the tool-vocabulary count (**6**) is excluded.
 
 ## 5. Verification & probe
 

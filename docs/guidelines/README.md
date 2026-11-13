@@ -144,7 +144,7 @@ Rules of the lifecycle:
   note or is deleted in the same lane that removes the feature — never
   left canonical.
 
-## 5. The seed set (the seed set)
+## 5. The seed set
 
 | File | Feature | Ships as |
 |---|---|---|
