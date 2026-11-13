@@ -1105,6 +1105,12 @@ def _mutation_legs():
         _mutate_meta(fixture, "sonic-reviewer",
                      lambda m: m["tools"]["deny"].remove("image_save"))
 
+    def a3_tester_add_image(fixture):
+        # GUARD leg (v0.30.2 R18): sonic-tester is UNTOUCHED by the image
+        # support-parity grant — adding "image" to its allow must RED.
+        _mutate_meta(fixture, "sonic-tester",
+                     lambda m: m["tools"]["allow"].append("image"))
+
     def a3_effective_drop_image_row(fixture):
         # Positive shape: the image-reader effective-set pin depends on the
         # TOOL_REQUIRED_AGENTS["image"] row — removing the mapping must RED.
@@ -1267,6 +1273,7 @@ def _mutation_legs():
         ("A3-developer-deny-drop-image_save", a3_developer_deny_drop_image_save),
         ("A3-coder-deny-drop-image_save", a3_coder_deny_drop_image_save),
         ("A3-reviewer-deny-drop-image_save", a3_reviewer_deny_drop_image_save),
+        ("A3-tester-add-image", a3_tester_add_image),
         ("A3-effective-drop-image-row", a3_effective_drop_image_row),
         ("A3-leader-add-design", a3_leader_add_design),
         ("A4-developer-model-coding", a4_developer_model_coding),
@@ -1320,6 +1327,8 @@ def run_self_test() -> bool:
             baseline=dict(good.baseline),
             seal=dict(good.seal),
             agents_changed=list(good.agents_changed),
+            tool_required_agents=dict(good.tool_required_agents),
+            allowed_models_default=list(good.allowed_models_default),
         )
         mutator(fixture)
         target = leg_id.split("-", 1)[0]
