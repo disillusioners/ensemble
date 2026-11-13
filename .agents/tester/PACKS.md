@@ -4862,6 +4862,12 @@ Registered by the tester during mission vsss-20261112 verification. The new pack
 | `snapshot_tools_registration_chain_unit_test` (**re-pinned** 2026-11-12, same file) | `cd <wt> && PYTHONDONTWRITEBYTECODE=1 TZ=UTC timeout 300 scripts/run_tests_scrubbed.sh tests/unit/tools/test_snapshot_tools.py -q --tb=short -p no:cacheprovider` (pin node: `::TestRegistrationChain::test_gate_flag_enabled_on_targets`) | registration-chain pin — per-DIRECTORY versioned keys `['developer','developer[v2]','tester']` from `registry._parse_agent_dir_name`, never the colliding `meta.json` `id`/`version` fields | 2026-11-12 | see RESULTS/2026-11-12-version-scoped-snapshot-spaces-verification.md |
 <!-- vsss-20261112-pack-registration-end -->
 
+## Sonic Team v0.30.2 stage-verification re-run: `sonic_agent_defs_unit_test` + self-test (2026-11-13; stage-verification lane; NEWEST-FIRST — supersedes nothing, same pack, v0.30.2 tag content)
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `sonic_agent_defs_unit_test` (re-run @ tag v0.30.2, 5-agent tree) | static: `PYTHONDONTWRITEBYTECODE=1 timeout 300 python3 test/packs/sonic_agent_defs_checks.py --static` · self-test: `… --self-test` · wrapper (static+real through production auth gate): `cd $WT && timeout 300 bash test/packs/sonic_agent_defs_unit_test.sh` (self-cap 240 s; per-variable `POSTGRES_*` — never the glob form; NON-SOURCING .env extraction: the branch worktree `.env` line 9 is a bare password value — do NOT source it, see POK `env-nonsource-wt-sonic-v0302`) | 5 sonic agent defs incl. v0.30.2 delta grants (image trio allow + `image_save` deny on leader/developer/coder/reviewer; leader spawn set + giter + devops; developer spawn + giter; tester unchanged) — A1–A14, 55 counter-mutation legs (54 + `A3-tester-add-image`) | 2026-11-13 | ✅ PASS — static 14/14; self-test 55/55 RED / 0 vacuous / fixture 14/14; real-resolver A2-real + A3-real green; pytest 23 passed; inner 12 s. Run at HEAD `c50a7631a` under test-leader adjudication (docs-only path proof vs tag commit `afc172de77de…`). Evidence: RESULTS/2026-11-13-v0302-stage-verification.md |
+
 ## Sonic Team v1 — pack registration: `sonic_agent_defs_unit_test` (ENSEMBLE-31; 2026-11-12; worktree `/home/nea/ensemble-src-wt-sonic-v1`, branch `feature/sonic-team-v1`, pre-commit)
 
 | Pack | Invocation | Scope | Last run | Status |
