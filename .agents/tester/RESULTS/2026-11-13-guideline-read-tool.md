@@ -3,10 +3,12 @@
 > **STATUS: DEVELOPER-LANE EVIDENCE — NOT the independent tester gate.** Every run below was
 > executed by the developer lane itself (worktree `/home/nea/ensemble-src-wt-guideline-read-tool`,
 > branch `feature/guideline-read-tool`, venv `.venv` uv/CPython) as its final functional sweep
-> (phase4-plan T5). The independent tester owns further gates (red-set accounting, counter-mutation
+> (phase4-plan T5), then CORRECTED by the 2026-11-13 fix round (below) after an independent
+> code-review REJECT identified stale vocabulary/census pins + record-honesty defects.
+> The independent tester owns further gates (red-set accounting, counter-mutation
 > re-drive, base-vs-head diffing) and may supersede or annotate these numbers. No mutation legs were
 > re-driven here (the counter-mutations live in the phase-1/2 pin file and the phase-3 payload
-> suite's own negative legs, which DID run green below).
+> suite's own negative legs).
 
 ## Lane commits
 
@@ -15,25 +17,52 @@
 | `681de8081` | Phases 1+2 — category #22 (`guidelines`) tools + registration + 4-agent grants + 21→22 pin census |
 | `ccb7962d5` | Phase 3 — stage payload seam (flat `guidelines/` + `guidelines_tree_sha256` + `guidelines_manifest` + stage-local re-hash leg) + stage-smoke |
 | phase-4 commit | Doctrine homes (4/4 `tools_note.md` `## Guidelines` sections) + prompt-artifact sha re-stamp (exactly 4 manifest rows) + approver/tester/ceremony records |
+| fix-round commit | Stale-pin clear (pok-grant `9→10`/`63→64`/ari-tail, metrics-vocab `9→10` + rename, family-adjudication `9→10`) + standalone doctrine lines (R1, manifest re-stamp: the same 4 rows) + c7 guard hardening (R2) + b5 retarget (R3) + THIS record honesty pass (W1/W2) |
 
-## Per-suite results (honest, phase4-plan T5 + test-matrix §E)
+## Fix-round per-suite results (2026-11-13 — REAL numbers from THIS round)
 
 | Suite / check | Command | Result |
 |---|---|---|
-| Registration pins + allow gates + parser + verbatim (matrix A–C, E4 tool-side) | `.venv/bin/pytest tests/unit/tools/test_guidelines_registration.py -q` | **39 passed** in 1.94s |
-| Stage-smoke legs (matrix D1–D7: flat payload, tree sha, per-file manifest, re-hash green + negative, precondition 78, fixture discipline) | `bash tests/test_guidelines_payload.sh` | **rc 0 — 49 passed, 0 failed** |
-| SEALED_SHA_BASELINES tripwire (the binding 0-stale gate) | `.venv/bin/pytest "tests/test_chart_image_delivery_e2e.py::TestPhaseDDoesNotModifySealedArtifacts" -q` | **1 passed** in 0.82s |
-| Prompt-artifact baseline mechanics (drift core + generator CLI + sha256sum -c compat) | `.venv/bin/pytest tests/test_prompt_artifact_baseline.py -q` | **19 passed** in 2.43s |
-| Committed-baseline verification (regen must be the only delta) | `python3 scripts/protection/generate_prompt_artifact_baseline.py --check --tree <wt>` | **OK — 201 versioned artifacts match** |
-| Registered pack (thin wrapper, both lanes) | `bash test/packs/guidelines_read_tool_unit_test.sh` | **RESULT: PASS** (leg 1: 39 passed; leg 2: 49 passed, 0 failed) |
+| POK grant-completeness pins (incl. `VOCABULARY_VERSION == 10`, artifact count 64, ari tail …prompt-assent, guidelines) | `.venv/bin/pytest tests/unit/test_pok_grant_pins.py -q` | **10 passed** (0.37s) |
+| Vocabulary-amendment pack (incl. renamed `test_the_version_is_ten`, `== 10`) | `.venv/bin/pytest tests/unit/metrics/test_metrics_vocabulary_amendment.py -q` | **11 passed** (0.93s) |
+| Metrics family-adjudication (incl. the `== 10` re-point) | `.venv/bin/pytest tests/unit/metrics/test_metrics_family_adjudication.py -q` | **28 passed, 1 failed** (1.39s) — the 1 failure is `TestNoProducerInstrumentation::test_the_daemon_diff_is_confined_to_the_allowed_files`, a PRE-EXISTING broad-diff census red (fails identically with the fix-round edits stashed; 197 daemon paths changed since that lane's frozen `LANE_BASE 644c2bfaa`, 65 unrecorded — other lanes' committed work, NOT this defect; the lane's own 2 daemon files ARE recorded). NOT fixed here — different defect class, out of the fix-round scope. |
+| Registration pins + allow gates + parser + verbatim (matrix A–C, E4 tool-side; incl. hardened c7 guard + retargeted b5) | `.venv/bin/pytest tests/unit/tools/test_guidelines_registration.py -q` | **39 passed** (2.03s) |
+| SEALED_SHA_BASELINES tripwire (the binding 0-stale gate) | `.venv/bin/pytest "tests/test_chart_image_delivery_e2e.py::TestPhaseDDoesNotModifySealedArtifacts" -q` | **1 passed** (re-run after the R1 manifest re-stamp — still green) |
+| Prompt-artifact baseline mechanics (drift core + generator CLI + sha256sum -c compat) | `.venv/bin/pytest tests/test_prompt_artifact_baseline.py -q` | **19 passed** (re-run after the re-stamp — still green) |
+| Committed-baseline verification (regen must be the only delta) | `python3 scripts/protection/generate_prompt_artifact_baseline.py --check --tree <wt>` | **OK — 201 versioned artifacts match** (re-run after the re-stamp) |
+| Release-journal shell suite (P2.1) | `bash tests/test_release_journal.sh` (timeout 1750s, stdin redirected) | **rc 1 — 363 passed, 16 failed, 24m26s** — full log archived at `/tmp/guideline-read-tool-journal-20261113T2229Z.log` (158 lines; W2 disposition below) |
+| Stage-smoke legs (matrix D1–D7) `bash tests/test_guidelines_payload.sh` | — | **NOT-RUN (not re-run in the fix round)** — the fix round touches no payload-seam surface (`git diff`: only `tests/`, `agents/*.md`, the manifest, this record; `daemon/` + `scripts/` untouched). Last known: lane-era row below (rc 0 — 49 passed, 0 failed). |
+| Registered pack wrapper `bash test/packs/guidelines_read_tool_unit_test.sh` | — | **NOT-RUN as a wrapper (not re-run in the fix round)** — leg 1's suite (registration) WAS re-run green (39 passed, above); leg 2's suite (payload) NOT-RUN per the row above. |
 
-Failures: none. Waivers: none required.
+Failures in THIS round: exactly 1 — the pre-existing family-adjudication broad-diff census red (distinguished above; not this lane's defect, pre-dates the fix round, survives a stash of all fix-round edits).
 
-## T1/T2 verification (phase-4 duties)
+## W2 — release-journal disposition (honest)
+
+- **The run:** completed IN BUDGET this time (24m26s elapsed; the lane-era re-run had timed out at ~590s inside the stale-txn section). The previously-timed-out `== adopt_stale_txn decision table ==` section PASSED in full this run (0 failures inside it). Log: `/tmp/guideline-read-tool-journal-20261113T2229Z.log`.
+- **The numbers:** 363 passed / 16 failed (rc 1). The "363/16" shape the lane claimed is CONFIRMED as the suite's own outcome at this tree.
+- **Baseline-identity:** PARTIALLY re-proven — NOT a byte-identical match against a stored 16-name artifact (no such stored artifact exists; the lane-era claim's provenance was an unarchived run). What IS proven: (a) the 3 ledger-math reds — `cap boundary: count=3 in-window reads 3`, `count=2 in-window reads 2`, `count_rollback after stale window resets then counts → 1` — are name-identical members of BOTH prior recorded baselines (`2026-09-30 supervision-war-r3` 14-name family; `2026-10-24 unit-secret-exposure` 5-name byte-identical list); (b) the other 13 — `12c sweep halt event cites quarantine (M4)` (the M4 red, section-renumbered from the 09-30 baseline's `8k`), `12g` LAUNCHD F1, and the 10 `12h-A/B/C/D/E` MUTATION-mode legs — are the suite's OWN in-code annotated deferred fence (`== adopt-unit MUTATION-mode lock/marker integration (NAMED FENCE) ==`; "Tracked under the deferred fence; do not mark PASS") — by-design unpinned without fake-systemd scaffolding, untouched by this lane's surface. Net: no failure in the 16 names touches this lane's surface; a stricter byte-identical re-proof is NOT claimed.
+
+## Lane-era per-suite results (2026-11-13, pre-fix-round — superseded where the fix round re-ran)
+
+| Suite / check | Command | Result |
+|---|---|---|
+| Registration pins + allow gates + parser + verbatim (matrix A–C, E4 tool-side) | `.venv/bin/pytest tests/unit/tools/test_guidelines_registration.py -q` | 39 passed in 1.94s |
+| Stage-smoke legs (matrix D1–D7: flat payload, tree sha, per-file manifest, re-hash green + negative, precondition 78, fixture discipline) | `bash tests/test_guidelines_payload.sh` | rc 0 — 49 passed, 0 failed |
+| SEALED_SHA_BASELINES tripwire (the binding 0-stale gate) | `.venv/bin/pytest "tests/test_chart_image_delivery_e2e.py::TestPhaseDDoesNotModifySealedArtifacts" -q` | 1 passed in 0.82s |
+| Prompt-artifact baseline mechanics (drift core + generator CLI + sha256sum -c compat) | `.venv/bin/pytest tests/test_prompt_artifact_baseline.py -q` | 19 passed in 2.43s |
+| Committed-baseline verification (regen must be the only delta) | `python3 scripts/protection/generate_prompt_artifact_baseline.py --check --tree <wt>` | OK — 201 versioned artifacts match |
+| Registered pack (thin wrapper, both lanes) | `bash test/packs/guidelines_read_tool_unit_test.sh` | RESULT: PASS (leg 1: 39 passed; leg 2: 49 passed, 0 failed) |
+
+Lane-era note: no consolidated whole-suite number is claimed by this record (the earlier lane-era
+draft's per-suite rows are the only numbers; the fix round re-derived the suites it touched and
+marked the rest NOT-RUN explicitly — no implied greens).
+
+## T1/T2 verification (phase-4 duties; fix-round R1 amendments noted)
 
 - **T1 doctrine homes:** 4/4 granted agents' `tools_note.md` carry an `## Guidelines` section (ari, leader, devops, sonic-leader; appended at file end, `---`-separated, notify-user precedent `agents/ari/tools_note.md:820` shape). Both doctrine lines present BYTE-VERBATIM on single physical lines in each file: `Every feature shipping dormant / config-armed / ceremony-gated / with silently-biting rules OWES a guideline (see docs/guidelines/TEMPLATE.md).` and `Fixed files are the authority; this tool only reads them.` (each greps exactly once per file). NO other prompt artifact touched (git status: only the 4 tools_note files + the manifest). No section for sonic-coder/-developer/-reviewer/-tester (they cannot see the category).
-- **T2 re-stamp:** manifest regenerated SAME-COMMIT via `scripts/protection/generate_prompt_artifact_baseline.py`; pre/post diff = EXACTLY the 4 expected rows (`agents/ari/tools_note.md`, `agents/devops/tools_note.md`, `agents/leader/tools_note.md`, `agents/sonic-leader/tools_note.md`) — zero unrelated drift (the STOP condition did not fire).
-- **T2 tripwire verdict (VERIFIED, not assumed):** `SEALED_SHA_BASELINES` (`tests/test_chart_image_delivery_e2e.py:1425`, 28 rows) contains NONE of the 4 touched files — its only `tools_note` rows are `agents/developer[v2]/tools_note.md` and `agents/planner[v2]/tools_note.md`, both untouched. **Zero rows re-pinned; the test file is NOT edited this commit.** Consistent with the notify-user precedent (tools_note files are manifest-tracked, not sealed-tracked, except those two v2 rows).
+  - **R1 amendment (fix round):** the framing prefixes (`The standing obligation:` / `And the contract: ` — in devops split across a line break) were REMOVED so each doctrine line is a STANDALONE line-anchored grep (verified `^...$` = exactly 1 per file, per line, all 4 agents).
+- **T2 re-stamp:** manifest regenerated SAME-COMMIT via `scripts/protection/generate_prompt_artifact_baseline.py`; pre/post diff = EXACTLY the 4 expected rows (`agents/ari/tools_note.md`, `agents/devops/tools_note.md`, `agents/leader/tools_note.md`, `agents/sonic-leader/tools_note.md`) — zero unrelated drift (the STOP condition did not fire). **Re-done in the fix round (R1) with the same result: exactly the same 4 rows changed (sha-only delta), 201 artifacts, `--check` OK.**
+- **T2 tripwire verdict (VERIFIED, not assumed):** `SEALED_SHA_BASELINES` (`tests/test_chart_image_delivery_e2e.py:1425`, 28 rows) contains NONE of the 4 touched files — its only `tools_note` rows are `agents/developer[v2]/tools_note.md` and `agents/planner[v2]/tools_note.md`, both untouched. **Zero rows re-pinned; the test file is NOT edited this commit.** Consistent with the notify-user precedent (tools_note files are manifest-tracked, not sealed-tracked, except those two v2 rows). **Re-verified after the R1 re-stamp: same verdict.**
 
 ## Census/ceremony sweep (T4 — VERIFY-only; single-ownership invariant honored)
 
@@ -53,4 +82,4 @@ Failures: none. Waivers: none required.
 
 ## Scope discipline
 
-No code changes in `daemon/` or `scripts/` this commit; no DB/migrations; no env knobs; no POK entries; no critical notes; `docs/guidelines/` untouched; no new test logic (the pack is a thin wrapper).
+Fix-round commit touches ONLY: the 5 stale-pin sites (3 test files), the registration suite (R2 guard + R3 retarget), the 4 doctrine-line homes (R1), the regenerated manifest (R1), and this record (W1/W2). No code changes in `daemon/` or `scripts/`; no DB/migrations; no env knobs; no POK entries; no critical notes; `docs/guidelines/` untouched; no new test logic beyond the two scoped in-suite amendments (R2 banned-list extension, R3 retarget — both inside existing tests).

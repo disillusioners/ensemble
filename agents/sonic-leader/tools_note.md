@@ -32,6 +32,6 @@ One row per held category, with the operational boundary and the avoid-case. My 
 guideline corpus that shipped with the RUNNING release (staged from
 `docs/guidelines/` into `releases/<v>/guidelines/`) — READ-only, like
 everything else in my surface. Consult them before citing doctrine from
-memory. The standing obligation:
+memory.
 Every feature shipping dormant / config-armed / ceremony-gated / with silently-biting rules OWES a guideline (see docs/guidelines/TEMPLATE.md).
-And the contract: Fixed files are the authority; this tool only reads them.
+Fixed files are the authority; this tool only reads them.

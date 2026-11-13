@@ -451,8 +451,6 @@ class TestBehaviorLegs:
         from daemon.tools.guidelines import GUIDELINES_TOOLS
 
         assert "midflight" not in PRIVILEGED_TOOL_CATEGORIES
-        assert "guidelines_list" not in PRIVILEGED_TOOL_CATEGORIES
-        assert "guideline_read" not in PRIVILEGED_TOOL_CATEGORIES
         source = (REPO_ROOT / "daemon" / "tools" / "midflight_report.py").read_text(
             encoding="utf-8"
         )
@@ -468,7 +466,17 @@ class TestBehaviorLegs:
             )
         )
         allow = (meta.get("tools") or {}).get("allow") or []
+        # R3 retarget (2026-11-13 fix round): the REAL bite — the allow
+        # array carries the CATEGORY KEY, never the literal tool names
+        # (a literal tool-name entry would bypass the category gate; the
+        # body gate is the second layer, not the first). The old
+        # `"guidelines_list" not in PRIVILEGED_TOOL_CATEGORIES` pair was
+        # trivially true (that set holds category keys, not tool names).
         assert "midflight" in allow and "guidelines" in allow
+        assert "guidelines_list" not in allow and "guideline_read" not in allow, (
+            f"sonic-leader allow must carry the category key only — literal "
+            f"tool names bypass the category gate: {allow}"
+        )
 
 
 # ── C. the parser + tools legs (fail-soft contract) ─────────────────────
@@ -654,6 +662,13 @@ class TestParserFailSoft:
             ".rmdir(",
             ".mkdir(",
             "open(",
+            # R2 hardening (2026-11-13 fix round): the module is clean —
+            # ban the process/shell and temp-write escape hatches too,
+            # so a future "indirect" write path cannot sneak in.
+            "shutil",
+            "subprocess",
+            "tempfile",
+            "os.remove",
         ):
             assert banned not in source, (
                 f"guidelines.py must not carry {banned!r} — read-only surface"

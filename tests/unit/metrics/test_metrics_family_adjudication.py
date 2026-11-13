@@ -830,7 +830,12 @@ class TestTheBudget:
         # prompt-assent 2026-11-10 (Phase 2): the sanctioned 8 -> 9 bump
         # (the ``prompt-assent`` PRIVILEGED category, #21, joined the
         # tool-category label set — the SAME axis, a fifth time).
-        assert cm.VOCABULARY_VERSION == 9
+        # guidelines 2026-11-13 (guideline-read-tool lane): the
+        # sanctioned 9 -> 10 bump (the ``guidelines`` PRIVILEGED READ
+        # category, #22 — the first privileged grant to a sonic agent,
+        # sonic-leader — joined the tool-category label set; the SAME
+        # axis, a sixth time).
+        assert cm.VOCABULARY_VERSION == 10
 
     def test_each_family_stays_inside_its_declared_band(self) -> None:
         specs = registry.registered_families()

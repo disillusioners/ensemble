@@ -126,6 +126,6 @@ On failure the tool returns a short `Error: ...` string; I relay it as-is and ne
 `guidelines_list` / `guideline_read` give me a read-only window onto the
 guideline corpus that shipped with the RUNNING release (staged from
 `docs/guidelines/` into `releases/<v>/guidelines/`) — consult them
-before inventing doctrine from memory. The standing obligation:
+before inventing doctrine from memory.
 Every feature shipping dormant / config-armed / ceremony-gated / with silently-biting rules OWES a guideline (see docs/guidelines/TEMPLATE.md).
-And the contract: Fixed files are the authority; this tool only reads them.
+Fixed files are the authority; this tool only reads them.
