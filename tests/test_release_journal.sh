@@ -76,6 +76,7 @@ mkdir -p "$FAKE_REPO/scripts/upgrade" "$FAKE_REPO/agents/leader" \
          "$FAKE_REPO/frontend/dist/frontend/browser" \
          "$FAKE_REPO/plugins/opendesign" \
          "$FAKE_REPO/daemon/plugin_subsystem" \
+         "$FAKE_REPO/docs/guidelines" \
          "$FAKE_HOME/agents-ensemble"
 
 # Stub plugins/ payload — f7db75ed4 added stage.sh's
@@ -153,6 +154,15 @@ printf 'stub-agent-definition\n' > "$FAKE_REPO/agents/leader/soul.md"
 printf 'port: ${PORT:-8088}\n' > "$FAKE_REPO/config.yaml"
 printf 'stub-index\n' > "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
 printf 'stub-app\n' > "$FAKE_REPO/frontend/dist/frontend/browser/main.js"
+# docs/guidelines/ stub payload — the guideline library is a REQUIRED
+# payload source (stage.sh docs/guidelines precondition guard, same
+# exit-78 family as the plugins/ guard whose fixture omission stranded
+# 86 assertions — see the plugins stub comment above). Content is
+# stub-grade: the seam copies verbatim and no consumer here parses it.
+for _g in README.md TEMPLATE.md guideline-live-views-passcode.md \
+          guideline-memoir-reflection-lane.md guideline-notify-user-bounds.md; do
+    printf 'stub-guideline: %s\n' "$_g" > "$FAKE_REPO/docs/guidelines/$_g"
+done
 printf 'CREATE TABLE x (id int);\n' > "$FAKE_REPO/daemon/migrations/versions/20260101_000001_init.sql"
 # Mirror the REAL repo's ignore shape (root .gitignore `dist/`; frontend/
 # has its own .gitignore with /dist): the FE provenance sidecar written by
@@ -781,8 +791,9 @@ MANIFEST="$SBX/releases/$SBX_V1/manifest.json"
 [ -f "$MANIFEST" ] && _pass || _fail "manifest exists"
 for f in binary_version known_schema_gen contains_contract_phase rollback_safe \
          launcher_sha256 binary_sha256 config_sha256 agents_tree_sha256 \
-         frontend_tree_sha256 agents_manifest frontend_manifest \
-         scripts_tree_sha256 scripts_manifest pipeline_scripts_rev; do
+         frontend_tree_sha256 guidelines_tree_sha256 agents_manifest \
+         frontend_manifest guidelines_manifest scripts_tree_sha256 \
+         scripts_manifest pipeline_scripts_rev; do
     grep -q "\"$f\"" "$MANIFEST" 2>/dev/null && _pass || _fail "manifest has $f"
 done
 # D3: the staged PAYLOAD must carry the executor script family at the
@@ -2280,7 +2291,7 @@ FAKE_REPO_DROP="$FIXTURE/fake-repo-drop"
 rm -rf "$FAKE_REPO_DROP"
 for d in scripts/upgrade agents/leader frontend/dist/frontend/browser \
          daemon/migrations/versions plugins/opendesign \
-         daemon/plugin_subsystem; do
+         daemon/plugin_subsystem docs/guidelines; do
     mkdir -p "$FAKE_REPO_DROP/$d"
 done
 cp "$FAKE_REPO/scripts/upgrade/"*.sh "$FAKE_REPO_DROP/scripts/upgrade/"
@@ -2301,6 +2312,10 @@ printf 'plugin:\n  name: opendesign\nschema_version: 1.0.3\n' \
     > "$FAKE_REPO_DROP/plugins/opendesign/MANIFEST.yaml"
 cp "$FAKE_REPO/daemon/plugin_subsystem/promote_staleness.py" \
    "$FAKE_REPO_DROP/daemon/plugin_subsystem/promote_staleness.py"
+# docs/guidelines/ stub rides the DROP fixture too — DROP_STAGE runs the
+# real stage.sh, whose docs/guidelines precondition guard would otherwise
+# refuse every 9x rollback_safe-rider stage with exit 78.
+cp -R "$FAKE_REPO/docs/guidelines" "$FAKE_REPO_DROP/docs/guidelines"
 git -C "$FAKE_REPO_DROP" init -q
 git -C "$FAKE_REPO_DROP" add -A 2>/dev/null
 git -C "$FAKE_REPO_DROP" -c user.email=t@t -c user.name=t commit -qm fixture

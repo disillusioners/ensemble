@@ -319,6 +319,18 @@ if [ ! -d "$REPO_ROOT/plugins" ]; then
     _warn "missing payload source: $REPO_ROOT/plugins (plugin subsystem tree required for native lane — refusing to stage a release that would ship with an empty plugin registry; the v0.18.0 regression was caused by this exact omission)"
     exit 78
 fi
+# docs/guidelines/ tree (the agent guideline library) is a REQUIRED payload
+# source. The runtime guideline reader resolves <exe-dir>/guidelines — the
+# FLAT tree shipped at the release root — so a release whose docs/guidelines/
+# cannot ship boots with zero guideline files and the guideline surface
+# refuses wholesale at runtime. REFUSE to stage a release without the
+# docs/guidelines/ source — same exit-78 family as the plugins/ guard above
+# (the same regression class as v0.18.0: a payload source whose absence
+# would otherwise stage a silently-empty tree).
+if [ ! -d "$REPO_ROOT/docs/guidelines" ]; then
+    _warn "missing payload source: $REPO_ROOT/docs/guidelines (guideline library required — refusing to stage a release that would ship with an empty guideline surface; the guideline reader resolves <exe-dir>/guidelines at runtime)"
+    exit 78
+fi
 if [ ! -d "$REPO_ROOT/frontend/dist/frontend/browser" ]; then
     # FE absent → the operator must build it (unchanged from the pre-guard
     # behavior). The FE provenance sidecar is written by the FE build
@@ -448,6 +460,17 @@ cp -R "$REPO_ROOT/frontend/dist/frontend/browser" "$STAGE_TMP/frontend/dist/fron
 # tree matches what was on disk at stage time. Mirrors the
 # agents/ + frontend/ copy pattern above.
 cp -R "$REPO_ROOT/plugins" "$STAGE_TMP/plugins" || { rm -rf "$STAGE_TMP"; exit 1; }
+# docs/guidelines/ tree — the agent guideline library. Carried verbatim as
+# the FLAT guidelines/ tree at the release root (NOT docs/guidelines/):
+# the runtime guideline reader resolves <exe-dir>/guidelines, so the
+# payload layout mirrors how plugins/ rides at the root. The aggregate
+# lands in the manifest as `guidelines_tree_sha256` and the per-file map
+# as `guidelines_manifest`, with a stage-local re-hash leg below —
+# lib.sh's integrity_verify loop does NOT cover this tree (same open
+# escalation as plugins/; see that leg's comment). Mirrors the plugins/
+# verbatim copy pattern above. .md-only content is safe under the
+# _no_env_in_release whole-tree walk (no build artifacts in the tree).
+cp -R "$REPO_ROOT/docs/guidelines" "$STAGE_TMP/guidelines" || { rm -rf "$STAGE_TMP"; exit 1; }
 # G3 (review round 2): EXCLUDE the FE provenance sidecar from the release
 # payload (it is web-servable: the front-end container serves every file
 # under browser/). The sidecar is BUILD-TIME state, not a runtime
@@ -520,6 +543,13 @@ PLUGINS_TREE="$(_tree_hash_of_lines "$PLUGINS_LINES")"
 # so it does not need the unbounded-walk budget of the plugins tree.
 SCRIPTS_LINES="$(executor_family_manifest_lines "$STAGE_TMP/scripts")" || { rm -rf "$STAGE_TMP"; exit 1; }
 SCRIPTS_TREE="$(executor_family_tree_hash "$SCRIPTS_LINES")"
+# guidelines/ tree — same one-walk-feeds-both shape as the other trees
+# (the walk feeds BOTH the aggregate hash and the per-file map below).
+# The tree is small and fixed-shape (a handful of .md files), so the
+# plugins-tree unbounded-walk budget concern does not apply — same
+# rationale as the executor family note above.
+GUIDELINES_LINES="$(_stage_tree_walk guidelines "$STAGE_TMP/guidelines")" || { rm -rf "$STAGE_TMP"; exit 1; }
+GUIDELINES_TREE="$(_tree_hash_of_lines "$GUIDELINES_LINES")"
 
 # ── per-file maps (linear streaming — 2026-10-07 O(n²) fix) ─────────────────
 # The previous construct appended each entry to a growing bash string
@@ -585,6 +615,21 @@ $PLUGINS_LINES
 EOF
 plugins_map="$(_stage_join_map "$_plugins_frag")" || { rm -rf "$STAGE_TMP"; exit 1; }
 rm -f "$_plugins_frag"
+# guidelines/ per-file map — same shape as the agents/frontend/plugins
+# blocks above (flat {path:sha256,…}); the keys are TREE-relative
+# ("README.md", "TEMPLATE.md", …), so the map composes with lib.sh's
+# _manifest_map_lines verifier exactly like the other trees.
+_guidelines_frag="$STAGE_TMP/.map_frag.guidelines"
+: > "$_guidelines_frag"
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    sha="${line%%  *}"; rel="${line#*  }"
+    printf '"%s":"%s"\n' "$(_json_escape "$rel")" "$sha" >> "$_guidelines_frag"
+done <<EOF
+$GUIDELINES_LINES
+EOF
+guidelines_map="$(_stage_join_map "$_guidelines_frag")" || { rm -rf "$STAGE_TMP"; exit 1; }
+rm -f "$_guidelines_frag"
 # scripts/ per-file map — the shipped executor family, same shape as the
 # agents/frontend/plugins blocks above (flat {path:sha256,…}; the keys are
 # TREE-relative, i.e. "upgrade/promote.sh" + "stop-ensemble.sh", so the
@@ -715,9 +760,11 @@ cat > "$STAGE_TMP/manifest.json" <<EOF
   "frontend_tree_sha256": "$FRONTEND_TREE",
   "plugins_tree_sha256": "$PLUGINS_TREE",
   "scripts_tree_sha256": "$SCRIPTS_TREE",
+  "guidelines_tree_sha256": "$GUIDELINES_TREE",
   "agents_manifest": {$agents_map},
   "frontend_manifest": {$frontend_map},
   "plugins_manifest": {$plugins_map},
+  "guidelines_manifest": {$guidelines_map},
   "scripts_manifest": {$scripts_map}
 }
 EOF
@@ -732,7 +779,7 @@ if ! integrity_verify ".staging.$VERSION.$$"; then
     exit 1
 fi
 # Local fail-closed re-hash for the plugins/ tree. lib.sh's
-# integrity_verify loops `for tree in agents frontend` (lib.sh:2424)
+# integrity_verify loops `for tree in agents frontend` (lib.sh:4102)
 # and does NOT yet know about the plugins/ tree — extending it
 # touches lib.sh which is fenced behind a concurrent dev1 commit.
 # The structural fix in lib.sh is an escalation item; the local
@@ -748,6 +795,21 @@ got_plugins_lines="$(_tree_manifest "$STAGE_TMP/plugins" "")"
 got_plugins_tree="$(_tree_hash_of_lines "$got_plugins_lines")"
 if [ "$got_plugins_tree" != "$PLUGINS_TREE" ]; then
     _warn "post-stage plugins/ tree hash MISMATCH (want ${PLUGINS_TREE:0:12}… got ${got_plugins_tree:0:12}…) — refusing to swap in a payload whose plugins/ tree cannot be re-hashed to the manifest stamp (likely a copy glitch; the integrity check is local because lib.sh's integrity_verify doesn't yet cover plugins/ — that extension is an open escalation item)"
+    rm -rf "$STAGE_TMP"
+    exit 1
+fi
+
+# Local fail-closed re-hash for the guidelines/ tree — same shape as the
+# plugins/ leg above (the aggregate is the tree's identity; a mismatch
+# means the copy glitched — rsync truncation, ENOSPC mid-write — and must
+# abort BEFORE the rename-aside swap). lib.sh's integrity_verify loop
+# covers agents+frontend only, so WITHOUT this leg a guidelines/ copy
+# glitch would ship silently — the manifest stamp would name a tree
+# nobody verifies.
+got_guidelines_lines="$(_tree_manifest "$STAGE_TMP/guidelines" "")"
+got_guidelines_tree="$(_tree_hash_of_lines "$got_guidelines_lines")"
+if [ "$got_guidelines_tree" != "$GUIDELINES_TREE" ]; then
+    _warn "post-stage guidelines/ tree hash MISMATCH (want ${GUIDELINES_TREE:0:12}… got ${got_guidelines_tree:0:12}…) — refusing to swap in a payload whose guidelines/ tree cannot be re-hashed to the manifest stamp (likely a copy glitch; the integrity check is local because lib.sh's integrity_verify doesn't cover guidelines/ — the same open escalation item as plugins/)"
     rm -rf "$STAGE_TMP"
     exit 1
 fi
