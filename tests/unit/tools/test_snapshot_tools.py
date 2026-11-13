@@ -1822,8 +1822,22 @@ class TestRegistrationChain:
             assert "snapshot_search" in allow, agent
 
     def test_gate_flag_enabled_on_targets(self):
-        """unify-spawn-tools decision 10: tester + developer[v2] carry
-        ``"snapshot_enabled": true``; no other agent meta.json does."""
+        """snapshot_enabled targets — reconciled 2026-11-12 (activation).
+
+        TWO facts this pin now records exactly:
+
+        1. SANCTIONED DELTA: the four video-team agents carry
+           ``"snapshot_enabled": true`` (video-team activation, user GO
+           2026-11-12 — warm-start lanes).
+        2. PRE-EXISTING QUIRK (recorded, NOT papered over): BOTH
+           ``agents/developer/meta.json`` AND ``agents/developer[v2]/meta.json``
+           carry the flag with the shared agent_id ``developer`` — the old
+           expectation ``["developer", "tester"]`` and this docstring's old
+           "no other agent meta.json does" claim were FALSE at base (the
+           base-equivalent list excluding video-* is
+           ``['developer', 'developer', 'tester']``). The duplicate is
+           pre-existing debt owned outside this scaffold; this pin pins
+           reality until that debt is ruled on."""
         import json
 
         agents_dir = TOOLS_DIR.parents[1] / "agents"
@@ -1832,7 +1846,15 @@ class TestRegistrationChain:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             if meta.get("snapshot_enabled") is True:
                 enabled.append(meta.get("id") or meta_path.parent.name)
-        assert sorted(enabled) == ["developer", "tester"], (
+        assert sorted(enabled) == [
+            "developer",
+            "developer",
+            "tester",
+            "video-capturer",
+            "video-editor",
+            "video-producer",
+            "video-verifier",
+        ], (
             f"snapshot_enabled targets drifted: {enabled}"
         )
         # The versioned developer[v2] directory is the ONLY developer

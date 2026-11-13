@@ -243,18 +243,20 @@ class TestVisibilityMatrix:
     """REWORK 2026-10-07 (M1, user refinement #1):
     ``view-views`` is in ``PRIVILEGED_TOOL_CATEGORIES`` so
     the empty-allow inherit universe must NOT auto-grant
-    ``view_link``. The three commissioned users (ari, leader,
-    designer) opt in via ``tools.allow: ["view-views"]`` in
-    their meta.json.
+    ``view_link``. The five commissioned users (ari, leader,
+    designer, video-producer, video-editor) opt in via
+    ``tools.allow: ["view-views"]`` in their meta.json
+    (video-producer + video-editor added by the video-team
+    activation step 2b, 2026-11-12 — user GO = GRANT).
 
     This test pins the FULL matrix:
 
     * empty-allow agent → ``view_link`` is NOT in the
       resolved tools (R-SR16 default-deny on a privileged
       category);
-    * ari / leader / designer → ``view_link`` IS in the
-      resolved tools (their meta.json carries the explicit
-      ``view-views`` opt-in);
+    * ari / leader / designer / video-producer / video-editor
+      → ``view_link`` IS in the resolved tools (their
+      meta.json carries the explicit ``view-views`` opt-in);
     * non-commissioned agents (worker, jober, watcher) →
       ``view_link`` is NOT in the resolved tools (no
       explicit allow entry; the privileged strip
@@ -328,6 +330,26 @@ class TestVisibilityMatrix:
         assert "view_link" in by_name, (
             "designer must still resolve view_link "
             "(schema-visibility entry from Phase 1)"
+        )
+
+    def test_video_producer_resolves_view_link(self, tools_by_agent):
+        # video-producer is a commissioned user (video-team
+        # activation step 2b, 2026-11-12 — user GO = GRANT;
+        # preview-page delivery lane).
+        by_name = tools_by_agent("video-producer")
+        assert "view_link" in by_name, (
+            "video-producer must resolve view_link via the "
+            "tools.allow: [view-views] opt-in"
+        )
+
+    def test_video_editor_resolves_view_link(self, tools_by_agent):
+        # video-editor is a commissioned user (video-team
+        # activation step 2b, 2026-11-12 — user GO = GRANT;
+        # hot-lane preview delivery).
+        by_name = tools_by_agent("video-editor")
+        assert "view_link" in by_name, (
+            "video-editor must resolve view_link via the "
+            "tools.allow: [view-views] opt-in"
         )
 
     @pytest.mark.parametrize("agent_id", ["worker", "jober", "watcher"])

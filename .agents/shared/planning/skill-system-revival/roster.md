@@ -177,6 +177,10 @@ absent) · `capture-enabled` · `injection-enabled` · `source`.
 | `tester` | agent | yes | false | false | false | origin/latest census |
 | `tidier` | agent | yes | true | true | true | origin/latest census |
 | `tidier[v2]` | agent | yes | true | true | true | origin/latest census |
+| `video-capturer` | agent | yes | false | false | false | video-team activation 2026-11-12 (skill_injection: false — declares, not live) |
+| `video-editor` | agent | yes | false | false | false | video-team activation 2026-11-12 (skill_injection: false — declares, not live) |
+| `video-producer` | agent | yes | false | false | false | video-team activation 2026-11-12 (skill_injection: false — declares, not live) |
+| `video-verifier` | agent | yes | false | false | false | video-team activation 2026-11-12 (skill_injection: false — declares, not live) |
 | `wanderer` | agent | yes | false | false | false | origin/latest census |
 | `watcher` | agent | yes | false | false | false | origin/latest census |
 | `worker` | agent | yes | true | true | true | origin/latest census |

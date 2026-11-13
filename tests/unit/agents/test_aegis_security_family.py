@@ -2612,7 +2612,7 @@ class TestAegisDoctrinePins:
 # (canary-injection-defense P4: 177 base + canary's 4 prompt files)
 # ---------------------------------------------------------------------------
 
-EXPECTED_BASELINE_ROWS = 181
+EXPECTED_BASELINE_ROWS = 197
 
 
 class TestBaselineArithmetic:
@@ -2626,7 +2626,8 @@ class TestBaselineArithmetic:
         lines = [ln for ln in BASELINE_PATH.read_text(encoding="utf-8").splitlines() if ln.strip()]
         assert len(lines) == EXPECTED_BASELINE_ROWS, (
             f"baseline rows = {len(lines)}, expected {EXPECTED_BASELINE_ROWS} "
-            f"(177 base + canary's 4 prompt files — a fifth prompt file or a "
+            f"(197 = 181 base + canary's 4 + the video team's 16 — a fifth "
+            f"prompt file or a "
             f"missing one moves this number)"
         )
 
