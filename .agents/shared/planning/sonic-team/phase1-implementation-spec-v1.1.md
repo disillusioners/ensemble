@@ -255,7 +255,9 @@ dependency order.
    `send_message`s the owning sonic-coder with the conflict evidence (paths, both
    sides); the coder resolves IN ITS OWN module branch (new commit) and reports; the
    developer retries the merge. The developer NEVER hand-resolves source conflicts
-   (it authors no source).
+   (it authors no source). Disjoint file sets mean a conflict is itself evidence of
+   TWO owners: bounce to BOTH owning coders with the conflict evidence, or
+   re-partition the overlapping files and re-brief.
 6. **Failure:** if a coder turn dies mid-module, its worktree stays isolated — the
    developer merges the surviving modules, records the failed module in HANDOFF-v2
    `## What is UNTESTED` / `## Known risks`, and reports the gap up. No re-dispatch
@@ -282,6 +284,12 @@ They do NOT consume per-module reports (those are the developer's aggregation in
   merged diff; run blast-radius-scoped packs on the MERGED tree (scoped-test doctrine
   unchanged, timeout-wrapped, QUARANTINE-aware). Verdict `TEST: PASS` / `TEST: FAIL`;
   RESULTS file only when load-bearing (path convention unchanged).
+- **Write-surface residuals, BOTH disclosed:** the reviewer's residual is its bash
+  (read-only by prompt; write tools mechanically denied). The tester's counterpart is
+  broader and bounded ONLY by prompt: it holds filesystem write (the RESULTS file and
+  `/tmp`) AND a git-capable bash. Its git surface is read-only inspection plus the
+  RESULTS write its rules bound — no merge, no push, no tag, no `git stash`, and no
+  commits outside its role (the sonic-coders own module-branch commits).
 
 ---
 

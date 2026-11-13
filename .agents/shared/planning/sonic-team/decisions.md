@@ -95,6 +95,7 @@ Cross-reference ONLY — the single source of detail is `plan-overview.md` §7: 
 - **Pack-id alias rule (§3b-a):** the canonical script/row id is `sonic_agent_defs_unit_test` (house `<scope>_unit_test` convention; PACKS.md row id); `sonic_agent_defs` is a plan alias only. Any restatement naming a file or registry row uses the script id — grep THIS line as the single authority.
 - **Seal-pin location + current value (§3b-b):** Ari rule.md seal pin lives at `tests/test_chart_image_delivery_e2e.py:1425` in `SEALED_SHA_BASELINES`; CURRENT value `fc0a7542…` (prior `8063c9ce…`); the terminology test's exactly-1-'Plane' condition is unchanged. Phase 1 re-pins from the current value only.
 - **Baseline numbers:** pre-regen baseline = 181 rows (verified); post-regen expectation = 197 rows (16 new artifacts: 4 agents × 4 artifacts) + 8 pre-existing drift repairs (DEV-1).
+- **Combined-rework register append (2026-11-13):** the combined v1.1+v1.2 lane adds TWO canonical docs to this register — `phase1-implementation-spec-v1.1.md` (the combined frozen strings; supersedes `phase1-implementation-spec.md`, which is retained as audit trail) and `V1-1-AMENDMENT.md` (stage ceremony recipe, PLAN ONLY) — and the baseline expectation is now **201 rows** post-regen (181 steady + 20 sonic rows = 5 agents × 4 artifacts per R12 lockstep), superseding the 197 figure above.
 
 ## 6. Gate ledger & council adjudications
 

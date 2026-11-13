@@ -70,10 +70,10 @@ Transcript evidence contract (applies to V9–V14): fetch `GET /api/instances/{i
 | V6 | **Zero live contact** — `dryrun-verify.py` RESULT: ALL PASS (unchanged) | helper output |
 | V7 | **FD isolation + no boot-sweep kills** (unchanged) | helper `FD-ISOLATION` + log grep |
 | V8 | Teardown residue-free incl. BOTH module worktrees/branches | procedure §6 outputs |
-| V9 | **sonic-developer: exactly ONE RAG `explore` in its FIRST working turn** — count == 1 in the whole turn, timestamped BEFORE its first coder dispatch; more than one is a FAIL (D-G violation); zero is a FAIL (the mandatory read never happened) | transcript count + `created_at` ordering vs first dispatch |
+| V9 | **sonic-developer: exactly ONE RAG `explore` in its FIRST working turn AND a silent knowledge-write lane** — explore count == 1 in the whole turn, timestamped BEFORE its first coder dispatch; AND in the SAME transcript `experience` count == 0 AND zero kb-writer `spawn_instance` entries. More than one explore is a FAIL (D-G violation); zero is a FAIL (the mandatory read never happened); any `experience()` call or kb-writer spawn is a FAIL (never-experience violation — the developer is mechanically able to do both via the knowledge lane, so a runtime violation MUST red here, not false-PASS) | transcript counts (`explore`/`experience`/`spawn_instance`) + `created_at` ordering vs first dispatch |
 | V10 | **≥2 sonic-coders RUNNING CONCURRENTLY** — the two coder instances' turn windows (first→last message `created_at`) TEMPORALLY OVERLAP; a strictly sequential coder pair is a FAIL (the parallel dispatch did not happen) | interval overlap from the two transcripts' created_at min/max |
 | V11 | **Integration merge on the feature branch** — the developer's transcript shows `merge --no-ff` merges it ran (bash tool calls) and the HANDOFF authoring; conflict-free here, but the merge ORDER must match the briefs' slots | transcript + `git log --merges` |
-| V12 | **Coder transcripts: ZERO RAG explore calls AND ≥1 file-exploration calls — BOTH required per coder.** `explore` count == 0 AND (`read_file` + `grep_files` + `glob_files` + `list_directory` + read-only bash) count ≥ 1, for EACH coder instance. One-sided evidence (zero RAG but also zero file reads, or file reads with an explore) is a FAIL — this is the Emperor clarification's two-sided shape | transcript counts per coder |
+| V12 | **Coder transcripts: ZERO RAG explore calls AND ≥1 file-exploration calls — BOTH required per coder.** `explore` count == 0 AND (`read_file` + `grep_files` + `glob_files` + `list_directory`) count ≥ 1, for EACH coder instance — `bash` is EXCLUDED from the census (tautological: coders must bash to commit). One-sided evidence (zero RAG but also zero file reads, or file reads with an explore) is a FAIL — this is the Emperor clarification's two-sided shape | transcript counts per coder |
 | V13 | **Leader: exactly-one `experience()` at commission completion** — count == 1, timestamped AFTER the verification verdicts resolve; the scenario is DESIGNED so a learning OCCURS (D4's fake convention), making exactly-one the expected shape — **a silent zero is a FAIL** (the designed-learning scenario removes the v1.1 zero-branch) | transcript count + `created_at` ordering vs verdict timestamps |
 | V14 | **Reviewer/tester ZERO knowledge calls** — `explore` == 0 AND `experience` == 0 in BOTH verification lanes | transcript counts == 0 |
 
@@ -82,7 +82,7 @@ Transcript evidence contract (applies to V9–V14): fetch `GET /api/instances/{i
 | ID | Failure | Class | Action |
 |---|---|---|---|
 | F12 | Leader routed FAST on a two-module commission (D-E gate violation) | routing | Fail; record the intake text |
-| F13 | Developer explore count ≠ 1 (0 or ≥2) or not at plan-open | D-G violation | Fail; transcript evidence |
+| F13 | Developer explore count ≠ 1 (0 or ≥2), not at plan-open, OR its transcript shows an `experience()` call / a kb-writer `spawn_instance` entry (never-experience violation) | D-G violation | Fail; transcript evidence |
 | F14 | Coders ran strictly sequentially (no temporal overlap) | parallel dispatch violation | Fail; interval evidence |
 | F15 | Any coder transcript shows a RAG `explore` call OR zero file-exploration calls | clarification violation | Fail; transcript evidence |
 | F16 | Leader `experience` count ≠ 1, or the call precedes the verdicts | write-once violation | Fail (designed-learning scenario ⇒ zero is a FAIL, not a valid branch) |
@@ -105,23 +105,23 @@ Transcript evidence contract (applies to V9–V14): fetch `GET /api/instances/{i
 curl -s "http://127.0.0.1:${PORT}/api/instances/${INSTANCE_ID}/messages" > /tmp/ensemble-sonic-dryrun/evidence/messages-${INSTANCE_ID}.json
 
 # count a tool by name across a transcript (flat tool_calls[].name):
-.venv/bin/python -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
+python3 -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
 print(sum(1 for m in ms for c in (m.get("tool_calls") or []) if c.get("name")==sys.argv[2]))' \
-  /tmp/ensemble-sonic-dryrun/evidence/messages-${INSTANCE_ID}.json explore   # expect: developer 1; coders 0; reviewer/tester 0
+  /tmp/ensemble-sonic-dryrun/evidence/messages-${INSTANCE_ID}.json explore   # expect: developer 1, AND its experience count == 0 AND its kb-writer spawn_instance entries == 0 (V9/F13); coders 0; reviewer/tester 0
 
 # file-exploration census for a coder (V12 second shape — must be >= 1):
-.venv/bin/python -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
+python3 -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
 names={c.get("name") for m in ms for c in (m.get("tool_calls") or [])}; \
-print(sum(n in ("read_file","grep_files","glob_files","list_directory","bash") for n in names))' \
+print(sum(n in ("read_file","grep_files","glob_files","list_directory") for n in names))' \
   /tmp/ensemble-sonic-dryrun/evidence/messages-${INSTANCE_ID}.json
 
 # timing attribution (per-call created_at — REQUIRED in the evidence bundle):
-.venv/bin/python -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
+python3 -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
 print([(c.get("name"), m.get("created_at")) for m in ms for c in (m.get("tool_calls") or []) if c.get("name") in ("explore","experience","send_message","spawn_instance")])' \
   /tmp/ensemble-sonic-dryrun/evidence/messages-${INSTANCE_ID}.json
 
 # temporal overlap of the two coder turns (V10):
-.venv/bin/python -c 'import json,sys;
+python3 -c 'import json,sys;
 a=json.load(open(sys.argv[1])); b=json.load(open(sys.argv[2]));
 wa=(min(m["created_at"] for m in a), max(m["created_at"] for m in a));
 wb=(min(m["created_at"] for m in b), max(m["created_at"] for m in b));
