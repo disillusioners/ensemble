@@ -116,12 +116,13 @@ filed as its own follow-up, deliberately NOT done here. (d) The
 NON-media lane is structurally immune: ``_fd_read`` reads from
 ONE pinned ``O_NOFOLLOW`` fd end-to-end.
 
-Size rationale (~2914 lines, refreshed 2026-11-08): this router is
+Size rationale (~3434 lines, refreshed 2026-11-13): this router is
 the sole HTTP surface of the live-views subsystem; route-registration
 order is load-bearing (mounted directly on ``app`` before the SPA
 catch-all); gate, pages, and origin logic live beside the route family
-to keep the security boundary cohesive. The file sits in the 1000–3000
-band (the band obligation applies) and any future extraction would
+to keep the security boundary cohesive. The file has crossed into the
+>3000 band (refactor-flag band — the one-module justification above
+is the standing rationale) and any future extraction would
 preserve the unified registration order.
 """
 
@@ -489,8 +490,9 @@ def _fd_read(path: "os.PathLike[str] | str", max_bytes: int) -> bytes | None:
 
     Returns ``None`` on any open / fstat / over-cap / read
     error. The router collapses ``None`` to the uniform
-    404 — never a stack trace, never a path-disclosure
-    log line at WARNING. The same shape is used in
+    404 — never a stack trace, never a FULL-path log line
+    at WARNING (the over-cap WARNING below intentionally
+    logs the basename only). The same shape is used in
     ``daemon/routers/tmp_images.py`` for the sidecar-MIME
     substrate.
     """
@@ -511,11 +513,11 @@ def _fd_read(path: "os.PathLike[str] | str", max_bytes: int) -> bytes | None:
             return None
         size = st.st_size
         if size > max_bytes:
+            # BASENAME only — the surrounding docstring forbids
+            # path-disclosure log lines; the service-layer
+            # WARNING at ``_resolve_under_root`` already carries
+            # root/rel/size/cap for correlation.
             logger.warning(
-                # BASENAME only — the surrounding docstring forbids
-                # path-disclosure log lines; the service-layer
-                # WARNING at ``_resolve_under_root`` already carries
-                # root/rel/size/cap for correlation.
                 "[LiveViews] read-time over-cap: path=%s size=%d cap=%d",
                 os.path.basename(os.fspath(path)),
                 size,
@@ -564,6 +566,12 @@ def _fd_read(path: "os.PathLike[str] | str", max_bytes: int) -> bytes | None:
 # pre-flight defers to Starlette (which answers 400 or ignores the
 # part), so the router never guesses a range it cannot represent.
 _RANGE_PART_PATTERN = re.compile(r"^(\d*)-(\d*)$")
+
+
+#: ``Range`` unit prefix (RFC 7233 §2). Only ``bytes`` is
+#: interpreted; the slice lengths in the pre-flight derive from
+#: this constant.
+_RANGE_UNIT_PREFIX = "bytes="
 
 
 def _unsatisfiable_416(size: int) -> Response:
@@ -656,10 +664,10 @@ def _media_preflight(
         if rng is None:
             return None
         value = rng.strip()
-        if value[:6].lower() != "bytes=":
+        if value[:len(_RANGE_UNIT_PREFIX)].lower() != _RANGE_UNIT_PREFIX:
             # Non-bytes unit / no ``=`` — Starlette's 400 path.
             return None
-        for part in value[6:].split(","):
+        for part in value[len(_RANGE_UNIT_PREFIX):].split(","):
             part = part.strip()
             if not part or part == "-":
                 # Mirror Starlette's ``_parse_ranges`` skip list: an
@@ -2613,9 +2621,9 @@ def build_router() -> APIRouter:
                 },
             )
         # Granted media: real size + Accept-Ranges (D3).
-        from daemon.services.live_views import is_media_extension, extension_for as _ext_for4
+        from daemon.services.live_views import is_media_extension, extension_for as _ext_for
 
-        if is_media_extension(_ext_for4(rel_path)):
+        if is_media_extension(_ext_for(rel_path)):
             return Response(
                 status_code=200,
                 headers={
@@ -3267,9 +3275,9 @@ def build_router() -> APIRouter:
                         "Content-Length": "0",
                     },
                 )
-        from daemon.services.live_views import is_media_extension, extension_for as _ext_for3
+        from daemon.services.live_views import is_media_extension, extension_for as _ext_for
 
-        if is_media_extension(_ext_for3(rel_path)):
+        if is_media_extension(_ext_for(rel_path)):
             return Response(
                 status_code=200,
                 headers={
@@ -3358,11 +3366,11 @@ def build_router() -> APIRouter:
             MAX_SERVED_BYTES,
             is_markdown_content_type,
             is_media_extension,
-            extension_for as _ext_for2,
+            extension_for as _ext_for,
             new_csp_nonce,
         )
 
-        if is_media_extension(_ext_for2(rel_path)):
+        if is_media_extension(_ext_for(rel_path)):
             # Media lane (D3): Range-capable via FileResponse.
             # ``_media_preflight`` owns the fd open + fstat cap
             # check + the RFC-7233 416 pre-emption (the SAME

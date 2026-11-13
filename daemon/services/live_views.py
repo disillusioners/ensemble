@@ -70,9 +70,10 @@ Three seed roots ship by default (config-driven; operator-editable):
   ``TmpImageStore`` substrate. MIME comes from the sidecar
   record, NOT the extension (architect risk #7 ruling).
 
-MODULE-BAND RATIONALE + SECTION MAP (2026-10-10, mirrors the
-``daemon/api.py`` M10 note): this file lives in the ~1300-line
-band by design and is organized as five top-to-bottom sections:
+MODULE-BAND RATIONALE + SECTION MAP (authored 2026-10-10,
+refreshed 2026-11-13; mirrors the ``daemon/api.py`` M10 note):
+this file lives in the ~2400-line band (1000–3000) by design and
+is organized as five top-to-bottom sections:
 
 1. **Validation helpers** — root-name / rel-path syntactic
    validation, the extension→MIME map, and the shared

@@ -8889,7 +8889,7 @@ def load_config(config_path: str | None = None) -> Config:
     )
     live_views_config: dict = dict(_lv_yaml_block)
     # strip None-valued keys
-    for _k in [k for k, v in list(live_views_config.items()) if v is None]:
+    for _k in [k for k, v in live_views_config.items() if v is None]:
         del live_views_config[_k]
     live_views_config["max_media_bytes"] = _lv_resolved_max
     # Operator can override / disable individual seed roots by
