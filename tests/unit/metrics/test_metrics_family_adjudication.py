@@ -263,6 +263,10 @@ PRE_EXISTING_DAEMON_OFFENDERS = frozenset(
         "daemon/services/view_passcode_pages.py",
         "daemon/sources/registry.py",
         "daemon/tools/_tool_registry.py",
+        # guideline-read-tool lane (2026-11-13): the lane's NEW file —
+        # the guidelines privileged-read tool module — recorded per the
+        # rule above (THE RECORD IS MAINTAINED BY THE CHANGING LANE).
+        "daemon/tools/guidelines.py",
         "daemon/tools/inner_soul.py",
         "daemon/tools/instance.py",
         "daemon/tools/job_queue.py",

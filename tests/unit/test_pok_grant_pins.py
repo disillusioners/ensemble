@@ -171,10 +171,10 @@ class TestThePokGrantOrdering:
 
 
 class TestTheVocabularyArtifactPair:
-    def test_vocabulary_version_is_nine(self) -> None:
+    def test_vocabulary_version_is_ten(self) -> None:
         assert VOCABULARY_VERSION == 10
 
-    def test_artifact_carries_63_categories_with_pok(self) -> None:
+    def test_artifact_carries_64_categories_with_pok(self) -> None:
         artifact_path = (
             REPO_ROOT / ".agents" / "shared" / "metrics" / "tool-categories.json"
         )

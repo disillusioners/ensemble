@@ -445,11 +445,10 @@ class TestBehaviorLegs:
         """B5 — the negative-claim guard: sonic-leader holds
         ``midflight`` (NON-privileged, the cross-team QA channel) and
         that fact must NOT have conferred ``guidelines``. The midflight
-        category is not a privileged member, its tool is disjoint from
-        GUIDELINES_TOOLS, and the guidelines grant exists ONLY via the
-        explicit allow entry (pinned by the census above)."""
-        from daemon.tools.guidelines import GUIDELINES_TOOLS
-
+        category is not a privileged member, its tool name is disjoint
+        from GUIDELINES_TOOLS (pinned verbatim by the tool-set pin
+        above), and the guidelines grant exists ONLY via the explicit
+        allow entry (pinned by the census above)."""
         assert "midflight" not in PRIVILEGED_TOOL_CATEGORIES
         source = (REPO_ROOT / "daemon" / "tools" / "midflight_report.py").read_text(
             encoding="utf-8"
@@ -457,7 +456,6 @@ class TestBehaviorLegs:
         assert "guidelines_list" not in source and "guideline_read" not in source, (
             "the midflight module must not carry guidelines tools"
         )
-        assert not ({"midflight_report"} & set(GUIDELINES_TOOLS))
         # The sonic-leader allow entry for midflight exists INDEPENDENTLY
         # of the guidelines entry (the explicit grant is the only path).
         meta = json.loads(
