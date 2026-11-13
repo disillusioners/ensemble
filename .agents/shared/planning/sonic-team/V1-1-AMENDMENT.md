@@ -110,3 +110,20 @@
   - `upgrade-stage[live]: WARN: freshness-override journal append FAILED (best-effort) — override is taken but the audit trail is incomplete; reason=non-tip-tree`
 - **Adjudication**: leader accepted the override 2026-11-13 (this lane). Rationale: artifact integrity is independently proven — stage verification S1–S5 (4-way sha `82c60f4f…`, sidecar git_head == tag commit, git_dirty=false, baseline 201, content invariants, live untouched); the tag pins the exact content; finalize merges the tag commit into latest, matching house precedent (v0.30.0: latest = tag commit + 1 verification record).
 - **System defect noted**: stage.sh freshness-override journal append fails for non-tip trees (audit trail incomplete) — anomaly filed by the leader.
+
+## Ceremony record — v0.30.2
+
+- **Version:** v0.30.2 (patch bump from v0.30.1; branch `feature/sonic-team-v0302`, base `c1d81593e`). Pre-stage fold-in of the review warnings (APPROVED, 0 critical): W1 leg-fixture isolation (`dataclasses.replace` now copies `tool_required_agents` + `allowed_models_default` — kills the leg-25 proof contamination), W2 `A3-tester-add-image` guard leg (sonic-tester-untouched pinned), W3 CHANGELOG baseline reword. Post-fold self-test: **55 legs, ALL RED, 0 VACUOUS**; static A1–A14 green. Commits `1fe263aaf` (W1+W2, `test(sonic):`) + `afc172de7` (W3, `docs(changelog):`).
+- **Tag:** annotated `v0.30.2` at `afc172de77deaea9ca383071bf4edfc9f77881e5` (`git describe --tags --exact-match` = v0.30.2); tag object sha `01c7a4fc65ecb3f8fae5ce99c8a719374aecbf73`; message "ENSEMBLE-31 sonic team v0.30.2 — roster & support-parity amendment (content-only)". **PUSHED** (`git push origin v0.30.2` → accepted). v0.30.0/v0.30.1 tags NOT touched. Merge-to-latest NOT performed (post-stage disposition = the leader's sweep).
+- **Stage command (verbatim, attempt 2):** `ENSEMBLE_UPGRADE_LIVE=1 ENSEMBLE_ROLLBACK_SAFE=1 VERSION=v0.30.2 bash scripts/upgrade/stage.sh live --allow-stale-stage` (run from `/home/nea/ensemble-src-wt-stage-v0302`; full stdout+stderr captured at `/tmp/stage_v0302.txt`). Attempt 1 WITHOUT the override exit-78'd on the deterministic freshness guard — `WARN: FRESHNESS OVERRIDE: tip-identity mismatch (HEAD=afc172de77de… tip=c1d81593e5b6…) — proceeding (operator accepted; journaled)` + `WARN: freshness-override journal append FAILED (best-effort) … reason=non-tip-tree` — the SAME class as v0.30.1 (tag ahead of unpushed `origin/latest`; the standing defect: best-effort journal append fails on non-tip trees).
+- **Tag object sha:** `01c7a4fc65ecb3f8fae5ce99c8a719374aecbf73`
+- **Tag commit sha:** `afc172de77deaea9ca383071bf4edfc9f77881e5`
+- **4-way binary sha:** `ca1a9cfee7de7c1570a2c364ab65bc5ded875ed1a74d8afb039cf2c0f13d2edd` (release binary == stage-wt `dist/ensemble-prod` == `manifest.json` binary_sha256 == sidecar `ensemble-prod.build-provenance.json` artifact_sha256)
+- **Sidecar:** git_head == tag commit `afc172de77de…`, git_dirty=false
+- **Release dir:** `/home/nea/agents-ensemble/releases/v0.30.2`
+- **Baseline count:** 201 (PROMPT-BASELINE OK rc=0 in the release tree; `--check --tree .` rc=0 pre-stage)
+- **Migration delta:** tag-to-base `c1d81593e..v0.30.2`: `daemon/` shows ONLY `daemon/__init__.py` (version string `0.30.1` → `0.30.2` — version-only, NOT a migration); `daemon/migrations/versions/` delta = 0; `scripts/` delta = 0
+- **rollback_safe:** true (source=explicit=true); **contains_contract_phase:** true (EXPECTED — legacy-migration grep, not a stop); known_schema_gen `20261112_124200_add_snapshot_agent_space_key.sql`
+- **Staged at:** 2026-11-13T13:24:39Z (manifest `staged_at`)
+- **Fence proofs:** `readlink $HOME/agents-ensemble/current` = `releases/v0.30.0` BEFORE and AFTER the stage — UNCHANGED; NO `promote.sh` invocation; NO daemon restart; `releases/state.json` last modified 12:50Z (predates the stage) — promote fields untouched; v0.30.0/v0.30.1 release dirs untouched. The `ENSEMBLE_SELF_ENV=live` marker staged into the install `.env` is the sanctioned stage act.
+- **Promote:** NOT performed (Emperor-owned). Stage worktree `/home/nea/ensemble-src-wt-stage-v0302` kept.

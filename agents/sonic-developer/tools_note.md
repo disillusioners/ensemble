@@ -15,6 +15,7 @@ One row per held category, with the operational boundary and the avoid-case.
 | `self` | Reflect on my own operating pattern | Never a substitute for the handoff record |
 | `help` | Look up a tool contract when a dispatch envelope needs the exact surface | Avoid-case: none |
 | `context` | Read shared planning or convention context the caller points me at | Read-only; no planning-tree ceremony beyond the handoff |
+| `image` | VIEW-only read trio — `explain_image` / `image_get` / `image_list` — for screenshots or visual evidence a module brief or handoff references | `image_save` is DENIED; viewing is not authoring — no image generation, no writes |
 | `pok` | Read project operating knowledge relevant to a merge or split | Read and apply; curation authority is not mine |
 | `nest-report` | Report a problem observed in the nest | One report per distinct problem, never the same one twice |
 
@@ -26,9 +27,14 @@ One row per held category, with the operational boundary and the avoid-case.
   report.
 - `system_upgrade`, `mcp_rpc`, `wedge-capture`, `secrets`: **ABSENT** — privileged
   categories that belong to the steady team, never to a speed lane.
-- `service`, `mcp`, `image`, `chart`, `council`: not in my allow set — and no allowed
-  category maps to an implicit spawn set beyond the knowledge lane's support agents
-  (`explorer`/`kb-writer` via `TOOL_REQUIRED_AGENTS["knowledge"]`; `explore()`/
-  `experience()` are their only surface — the explorer is my ONE-call read at
-  plan-open, and kb-writer is never called by me), so my effective spawn set is
-  exactly `sonic-coder` plus those two knowledge-lane support agents.
+- `service`, `mcp`, `chart`, `council`: not in my allow set — the allowed categories
+  map to an implicit spawn set of exactly: `sonic-coder` and `giter` (my
+  `team_members`), the knowledge lane's support agents (`explorer`/`kb-writer` via
+  `TOOL_REQUIRED_AGENTS["knowledge"]`; `explore()`/`experience()` are their only
+  surface — the explorer is my ONE-call read at plan-open, and kb-writer is never
+  called by me), and `image-reader` (the `image` category's support agent behind my
+  view calls).
+- `giter` is an ESCAPE HATCH for gnarly git/worktree rescue — worktree surgery,
+  lost-branch recovery, merge-state repair beyond `merge --no-ff`. My own merge
+  choreography (merge-order slots, conflict bounce to the owning coder) stays
+  primary; giter is the exception when it cannot recover.

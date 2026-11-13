@@ -11,6 +11,9 @@
   HANDOFF-v2 authorship belongs to sonic-developer.
 - `shared_meta_kv` — optional: refresh your module worktree's `wt.claim.*` census row
   at phase boundaries. Keep rows compact.
+- `image` — VIEW-only read trio: `explain_image` / `image_get` / `image_list`, for
+  screenshots or visual evidence a module brief references. `image_save` is denied —
+  you produce no images; viewing is not authoring.
 - NO `knowledge` — you make NO RAG/knowledge call: no `explore()`, no `experience()`.
   Source exploration with your file tools is expected and unbounded within your module
   scope; the developer's plan carries the stored experience.

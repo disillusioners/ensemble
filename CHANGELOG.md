@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.2] — 2026-11-13
+
+### Changed — sonic-team roster & support-parity amendment (Emperor ruling 2026-11-13; `feature/sonic-team-v0302`, base `c1d81593e`; content-only, zero migrations)
+
+- **Roster — giter returns as escape hatch (R16/R20).** `sonic-leader` `team_members` gains `giter` and `devops`; `sonic-developer` gains `giter` (Emperor: *"gitter shouldn't removed, they know about workflow, worktree"* — the developer already owns the house worktree/merge machinery per `[sonic-merge-strategy-v1]`). The internal commit choreography is UNCHANGED (sonic-coder commits its module branch, sonic-developer merges `--no-ff` in dependency order); giter is dispatched only for gnarly git/worktree rescue, devops is "rarely invoked by design — the infra/deploy escape hatch"; release-lane git stays outside the sonic loop.
+- **Image support-parity (R18).** The read trio `{explain_image, image_get, image_list}` granted to sonic-leader / sonic-developer / sonic-coder / sonic-reviewer via `allow "image"` + `deny "image_save"` (the established critic pattern); `image-reader` joins each grantee's effective spawn set (category implication, pinned in the pack's EXPECTED_EFFECTIVE). `compare_images`/`design` NOT granted (design-category holders remain designer + critic only); `generate_image`/`image_save` omitted — read/view only. sonic-coder gains its first `deny` key. sonic-tester UNTOUCHED.
+- **Omissions recorded (R19).** `generate_chart`/`charter`, `generate_image`, `image_save`, `sketcher`/`critic`, `wanderer` omitted; sonic-coder's other steady-coder gaps (snapshot/instance/service/midflight) not directed by the ruling — no change.
+- **Pins in lockstep.** `test/packs/sonic_agent_defs_checks.py` FROZEN_TEAMS/FROZEN_TOOLS/EXPECTED_EFFECTIVE updated for the four touched agents; 13 new counter-mutation legs (54 total, ALL RED — incl. the leader-add-design guard that REDs if the design category ever reaches a sonic agent); real-resolver negatives updated (giter now team-legal for leader + developer). Prompt baseline regenerated: 201-row baseline set unchanged — 6 sonic artifact shas re-hashed. Agent meta versions bumped (leader 1.1.1, developer 1.0.1, coder 1.1.1, reviewer 1.1.1).
+- **Zero schema delta; no Ari edits** — seal + terminology pins untouched; sibling duty/grant/pok/aegis pin counts unchanged (51/49, 49/51, 50/51, 201).
+
 ## [0.29.21] — 2026-11-12
 
 ### Added — RAM-based auto-termination for agent-spawned shell processes (`feature/ram-auto-termination`; plan `.agents/shared/planning/ram-auto-termination/`; runbook `docs/runbooks/ram-guard-and-unit-bounds.md`)

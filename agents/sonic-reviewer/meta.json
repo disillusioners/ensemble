@@ -4,15 +4,15 @@
   "description": "Read-only integration reviewer — consumes the developer's HANDOFF-v2 and the FULL MERGED DIFF (base..merged), verifies the integrated change against its stated intent, returns a one-line verdict block",
   "icon": "🔍",
   "color": "accent-rose",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "llm_model": "agentic",
   "innate_skills": [],
   "skill_injection": false,
   "no_force_explore": true,
   "snapshot_enabled": true,
   "tools": {
-    "allow": ["bash", "filesystem", "time", "self", "help", "context", "pok", "nest-report"],
-    "deny": ["proc", "instance", "service", "midflight", "shared_meta_kv", "infra", "mcp", "secrets", "edit_file", "write_file"]
+    "allow": ["bash", "filesystem", "time", "self", "help", "context", "image", "pok", "nest-report"],
+    "deny": ["proc", "instance", "service", "midflight", "shared_meta_kv", "infra", "mcp", "secrets", "edit_file", "write_file", "image_save"]
   },
   "team_members": []
 }

@@ -15,6 +15,13 @@ executor (source exploration expected, RAG excluded, commits its module
 branch, returns a compact module report); ``sonic-reviewer`` and
 ``sonic-tester`` operate at INTEGRATION level (HANDOFF-v2 + base..merged).
 
+v0.30.2 amendment (Emperor ruling 2026-11-13, decisions.md R16-R19):
+giter re-added to sonic-leader + added to sonic-developer (escape hatch),
+devops on the leader, and the image read-trio granted to leader/developer/
+coder/reviewer via allow "image" + deny "image_save" (critic pattern) —
+image-reader joins each grantee's effective spawn set; sonic-tester
+UNCHANGED. Legs marked v0.30.2 in the self-test matrix pin every new grant.
+
 Three layers:
 
   --static      stdlib-only contract checks A1-A14 against the real tree.
@@ -91,11 +98,18 @@ SONIC_AGENTS = (
 # 2026-11-13: knowledge granted to sonic-developer + sonic-leader ONLY;
 # coder/reviewer/tester ZERO-KNOWLEDGE — the coder grant is REVERSED; coder
 # keeps SOURCE exploration with file tools, excluded ONLY from the RAG call)
+# ---- v0.30.2 roster & support-parity amendment (Emperor ruling 2026-11-13,
+# decisions.md R16-R19): giter re-added to sonic-leader AND added to
+# sonic-developer (escape hatch — workflow/worktree expertise); devops on the
+# leader (rarely invoked by design — infra/deploy escape hatch); the image
+# read-trio {explain_image, image_get, image_list} granted to leader/
+# developer/coder/reviewer via allow "image" + deny "image_save" (critic
+# pattern); sonic-tester UNCHANGED.
 # ----
 FROZEN_TEAMS = {
     "sonic-leader": ["sonic-developer", "sonic-coder", "sonic-reviewer",
-                     "sonic-tester"],
-    "sonic-developer": ["sonic-coder"],
+                     "sonic-tester", "giter", "devops"],
+    "sonic-developer": ["sonic-coder", "giter"],
     "sonic-coder": [],
     "sonic-reviewer": [],
     "sonic-tester": [],
@@ -104,26 +118,27 @@ FROZEN_TEAMS = {
 FROZEN_TOOLS = {
     "sonic-leader": {
         "allow": ["instance", "bash", "filesystem", "time", "self", "help",
-                  "context", "shared_meta_kv", "midflight", "knowledge", "pok",
-                  "nest-report"],
-        "deny": ["edit_file", "write_file"],
+                  "context", "shared_meta_kv", "midflight", "knowledge", "image",
+                  "pok", "nest-report"],
+        "deny": ["edit_file", "write_file", "image_save"],
     },
     "sonic-developer": {
         "allow": ["instance", "knowledge", "bash", "proc", "filesystem", "todo",
-                  "shared_meta_kv", "time", "self", "help", "context", "pok",
-                  "nest-report"],
-        "deny": ["edit_file", "write_file"],
+                  "shared_meta_kv", "time", "self", "help", "context", "image",
+                  "pok", "nest-report"],
+        "deny": ["edit_file", "write_file", "image_save"],
     },
     "sonic-coder": {
         "allow": ["bash", "proc", "filesystem", "time", "self", "help",
-                  "context", "shared_meta_kv", "pok", "nest-report"],
-        "deny": [],
+                  "context", "shared_meta_kv", "image", "pok", "nest-report"],
+        "deny": ["image_save"],
     },
     "sonic-reviewer": {
         "allow": ["bash", "filesystem", "time", "self", "help", "context",
-                  "pok", "nest-report"],
+                  "image", "pok", "nest-report"],
         "deny": ["proc", "instance", "service", "midflight", "shared_meta_kv",
-                 "infra", "mcp", "secrets", "edit_file", "write_file"],
+                 "infra", "mcp", "secrets", "edit_file", "write_file",
+                 "image_save"],
     },
     "sonic-tester": {
         "allow": ["bash", "proc", "filesystem", "time", "self", "help",
@@ -134,18 +149,21 @@ FROZEN_TOOLS = {
 }
 # ---- END FROZEN [sonic-tools-v2] ----
 
-# Effective spawn sets (combined spec §9): leader = its 4 sonic team members
-# PLUS the two knowledge-lane support agents (TOOL_REQUIRED_AGENTS maps
-# "knowledge" -> ["explorer", "kb-writer"]); developer = sonic-coder PLUS the
-# same two implicit members (its ONE explore at plan-open); coder/reviewer/
-# tester = EMPTY (no team, no knowledge-implied members — the v1.1 coder
-# grant is reversed).
+# Effective spawn sets (combined spec §9 + v0.30.2 amendment): leader = its six
+# team members (4 sonic + giter + devops) PLUS the two knowledge-lane support
+# agents (TOOL_REQUIRED_AGENTS maps "knowledge" -> ["explorer", "kb-writer"])
+# PLUS image-reader (TOOL_REQUIRED_AGENTS maps "image" -> ["image-reader"]);
+# developer = sonic-coder + giter PLUS the same three implicit members; coder/
+# reviewer = image-reader ONLY (the image category's implicit member); tester =
+# EMPTY (unchanged — no image grant, no team, no knowledge-implied members).
 EXPECTED_EFFECTIVE = {
     "sonic-leader": {"sonic-developer", "sonic-coder", "sonic-reviewer",
-                     "sonic-tester", "explorer", "kb-writer"},
-    "sonic-developer": {"sonic-coder", "explorer", "kb-writer"},
-    "sonic-coder": set(),
-    "sonic-reviewer": set(),
+                     "sonic-tester", "giter", "devops", "explorer", "kb-writer",
+                     "image-reader"},
+    "sonic-developer": {"sonic-coder", "giter", "explorer", "kb-writer",
+                        "image-reader"},
+    "sonic-coder": {"image-reader"},
+    "sonic-reviewer": {"image-reader"},
     "sonic-tester": set(),
 }
 
@@ -782,8 +800,8 @@ def a14_leader_fast_path(fx: Fixture) -> None:
 
 ASSERTIONS = (
     ("A1", a1_meta_parse, "meta.json parse + id==dirname x5"),
-    ("A2", a2_team_members, "team_members exact sets (D-H: leader=4 sonic, developer=[coder])"),
-    ("A3", a3_allow_deny, "frozen allow/deny arrays (v1.2: knowledge on developer+leader ONLY; coder zero-knowledge) + effective spawn sets"),
+    ("A2", a2_team_members, "team_members exact sets (R16: leader=4 sonic + giter + devops; developer=[coder, giter])"),
+    ("A3", a3_allow_deny, "frozen allow/deny arrays (v0.30.2: image read-trio on leader/developer/coder/reviewer, image_save denied; knowledge on developer+leader ONLY) + effective spawn sets (giter/devops/image-reader members)"),
     ("A4", a4_llm_model, "llm_model pin map (developer/leader/reviewer=agentic, coder/tester=coding) + both in default set"),
     ("A5", a5_recursion, "multiplier 7 coder-only"),
     ("A6", a6_integration_surfaces, "HANDOFF-v2 headers in developer workflow + HANDOFF_PATH three-way + coder module-report template"),
@@ -849,7 +867,7 @@ def _good_workflow(role: str, with_blast: bool, with_handoff: bool,
 def build_good_fixture() -> Fixture:
     metas = {
         "sonic-leader": {
-            "id": "sonic-leader", "name": "Sonic Leader", "version": "1.1.0",
+            "id": "sonic-leader", "name": "Sonic Leader", "version": "1.1.1",
             "llm_model": "agentic", "innate_skills": ["todo"],
             "skill_injection": False, "default_queue": "system_parallel_queue",
             "tools": {"allow": list(FROZEN_TOOLS["sonic-leader"]["allow"]),
@@ -857,7 +875,7 @@ def build_good_fixture() -> Fixture:
             "team_members": list(FROZEN_TEAMS["sonic-leader"]),
         },
         "sonic-developer": {
-            "id": "sonic-developer", "name": "Sonic Developer", "version": "1.0.0",
+            "id": "sonic-developer", "name": "Sonic Developer", "version": "1.0.1",
             "llm_model": "agentic", "innate_skills": ["todo"],
             "skill_injection": False, "default_queue": "system_parallel_queue",
             "tools": {"allow": list(FROZEN_TOOLS["sonic-developer"]["allow"]),
@@ -865,14 +883,15 @@ def build_good_fixture() -> Fixture:
             "team_members": list(FROZEN_TEAMS["sonic-developer"]),
         },
         "sonic-coder": {
-            "id": "sonic-coder", "name": "Sonic Coder", "version": "1.1.0",
+            "id": "sonic-coder", "name": "Sonic Coder", "version": "1.1.1",
             "llm_model": "coding", "innate_skills": ["todo"],
             "skill_injection": False, "recursion_limit_multiplier": 7,
-            "tools": {"allow": list(FROZEN_TOOLS["sonic-coder"]["allow"])},
+            "tools": {"allow": list(FROZEN_TOOLS["sonic-coder"]["allow"]),
+                      "deny": list(FROZEN_TOOLS["sonic-coder"]["deny"])},
             "team_members": [],
         },
         "sonic-reviewer": {
-            "id": "sonic-reviewer", "name": "Sonic Reviewer", "version": "1.1.0",
+            "id": "sonic-reviewer", "name": "Sonic Reviewer", "version": "1.1.1",
             "llm_model": "agentic", "innate_skills": [], "skill_injection": False,
             "tools": {"allow": list(FROZEN_TOOLS["sonic-reviewer"]["allow"]),
                       "deny": list(FROZEN_TOOLS["sonic-reviewer"]["deny"])},
@@ -1040,6 +1059,70 @@ def _mutation_legs():
         _mutate_meta(fixture, "sonic-reviewer",
                      lambda m: m["tools"]["deny"].remove("edit_file"))
 
+    # ---- v0.30.2 roster & support-parity legs (decisions.md R16-R19) ----
+
+    def a3_leader_drop_giter(fixture):
+        _mutate_meta(fixture, "sonic-leader",
+                     lambda m: m["team_members"].remove("giter"))
+
+    def a3_leader_drop_devops(fixture):
+        _mutate_meta(fixture, "sonic-leader",
+                     lambda m: m["team_members"].remove("devops"))
+
+    def a3_developer_drop_giter(fixture):
+        _mutate_meta(fixture, "sonic-developer",
+                     lambda m: m["team_members"].remove("giter"))
+
+    def a3_leader_drop_image(fixture):
+        _mutate_meta(fixture, "sonic-leader",
+                     lambda m: m["tools"]["allow"].remove("image"))
+
+    def a3_developer_drop_image(fixture):
+        _mutate_meta(fixture, "sonic-developer",
+                     lambda m: m["tools"]["allow"].remove("image"))
+
+    def a3_coder_drop_image(fixture):
+        _mutate_meta(fixture, "sonic-coder",
+                     lambda m: m["tools"]["allow"].remove("image"))
+
+    def a3_reviewer_drop_image(fixture):
+        _mutate_meta(fixture, "sonic-reviewer",
+                     lambda m: m["tools"]["allow"].remove("image"))
+
+    def a3_leader_deny_drop_image_save(fixture):
+        _mutate_meta(fixture, "sonic-leader",
+                     lambda m: m["tools"]["deny"].remove("image_save"))
+
+    def a3_developer_deny_drop_image_save(fixture):
+        _mutate_meta(fixture, "sonic-developer",
+                     lambda m: m["tools"]["deny"].remove("image_save"))
+
+    def a3_coder_deny_drop_image_save(fixture):
+        _mutate_meta(fixture, "sonic-coder",
+                     lambda m: m["tools"]["deny"].remove("image_save"))
+
+    def a3_reviewer_deny_drop_image_save(fixture):
+        _mutate_meta(fixture, "sonic-reviewer",
+                     lambda m: m["tools"]["deny"].remove("image_save"))
+
+    def a3_tester_add_image(fixture):
+        # GUARD leg (v0.30.2 R18): sonic-tester is UNTOUCHED by the image
+        # support-parity grant — adding "image" to its allow must RED.
+        _mutate_meta(fixture, "sonic-tester",
+                     lambda m: m["tools"]["allow"].append("image"))
+
+    def a3_effective_drop_image_row(fixture):
+        # Positive shape: the image-reader effective-set pin depends on the
+        # TOOL_REQUIRED_AGENTS["image"] row — removing the mapping must RED.
+        fixture.tool_required_agents.pop("image")
+
+    def a3_leader_add_design(fixture):
+        # GUARD leg (R18): compare_images lives ONLY behind the "design"
+        # category (image-comparator) — granting design to the leader would
+        # silently add it to the sonic spawn set. Must RED.
+        _mutate_meta(fixture, "sonic-leader",
+                     lambda m: m["tools"]["allow"].append("design"))
+
     def a4_developer_model_coding(fixture):
         _mutate_meta(fixture, "sonic-developer",
                      lambda m: m.__setitem__("llm_model", "coding"))
@@ -1179,6 +1262,20 @@ def _mutation_legs():
         ("A3-effective-drop-required-row", a3_effective_drop_required_row),
         ("A3-reviewer-drop-bash", a3_reviewer_drop_bash),
         ("A3-reviewer-deny-drop-editfile", a3_reviewer_deny_drop_editfile),
+        ("A3-leader-drop-giter", a3_leader_drop_giter),
+        ("A3-leader-drop-devops", a3_leader_drop_devops),
+        ("A3-developer-drop-giter", a3_developer_drop_giter),
+        ("A3-leader-drop-image", a3_leader_drop_image),
+        ("A3-developer-drop-image", a3_developer_drop_image),
+        ("A3-coder-drop-image", a3_coder_drop_image),
+        ("A3-reviewer-drop-image", a3_reviewer_drop_image),
+        ("A3-leader-deny-drop-image_save", a3_leader_deny_drop_image_save),
+        ("A3-developer-deny-drop-image_save", a3_developer_deny_drop_image_save),
+        ("A3-coder-deny-drop-image_save", a3_coder_deny_drop_image_save),
+        ("A3-reviewer-deny-drop-image_save", a3_reviewer_deny_drop_image_save),
+        ("A3-tester-add-image", a3_tester_add_image),
+        ("A3-effective-drop-image-row", a3_effective_drop_image_row),
+        ("A3-leader-add-design", a3_leader_add_design),
         ("A4-developer-model-coding", a4_developer_model_coding),
         ("A4-coder-model-agentic", a4_coder_model_agentic),
         ("A4-reviewer-model-coding", a4_reviewer_model_coding),
@@ -1230,6 +1327,8 @@ def run_self_test() -> bool:
             baseline=dict(good.baseline),
             seal=dict(good.seal),
             agents_changed=list(good.agents_changed),
+            tool_required_agents=dict(good.tool_required_agents),
+            allowed_models_default=list(good.allowed_models_default),
         )
         mutator(fixture)
         target = leg_id.split("-", 1)[0]
@@ -1272,7 +1371,8 @@ def run_real() -> bool:
     ok = True
     registry = get_registry()
     # A2-real: all five discovered as AgentMetadata; leader spawns exactly its
-    # 4 sonic members; developer spawns exactly sonic-coder.
+    # six team members (4 sonic + giter + devops); developer spawns exactly
+    # sonic-coder + giter (FROZEN_TEAMS drives the positive checks).
     for agent in SONIC_AGENTS:
         meta = registry.get_resolved(agent)
         if meta is None:
@@ -1299,10 +1399,12 @@ def run_real() -> bool:
             ok = False
     if ok:
         print("PASS A2-real (discovery + leader spawns its 4 + developer spawns coder + coder deny-by-default)")
-    # A3-real: high-risk negatives through the REAL gate.  sonic-leader must
-    # NOT spawn giter (R10: giter removed from the sonic team).
+    # A3-real: high-risk negatives through the REAL gate.  giter is now a
+    # sonic-leader + sonic-developer TEAM member (v0.30.2 R16/R20 — escape
+    # hatch), so it moved OUT of the negatives (A2-real already proves the
+    # positive path via FROZEN_TEAMS); the other steady-team ids stay denied.
     negatives = {
-        "sonic-leader": ["leader", "developer", "planner", "worker", "giter"],
+        "sonic-leader": ["leader", "developer", "planner", "worker"],
         "sonic-developer": ["worker", "sonic-reviewer", "sonic-leader"],
         "sonic-coder": ["worker"],
         "sonic-reviewer": ["worker", "sonic-coder"],
