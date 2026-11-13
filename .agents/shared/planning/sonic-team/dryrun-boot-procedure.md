@@ -419,3 +419,42 @@ Record the timestamps in the evidence bundle: coder `explore` at-start ordering 
 - `explore()` = explorer agent on its own `llm_model: "quick"` — one bounded agent turn.
 - `experience()` = zero-LLM caller turn + async kb-writer spawn (also `quick`).
 - Edge: explorer's legacy `caller_model_overrides {"coder": null}` matches ONLY the literal caller agent_id `coder`; sonic-coder's id is `sonic-coder` and NEVER matches — no override path is exercised by the sonic lane. Details: `V1-1-AMENDMENT.md`.
+
+## AMENDMENT 2026-11-13 (COMBINED v1.1+v1.2) — parallel-run topology + re-proof evidence
+
+**Supersedes the v1.1 amendment's V9–V11 one-liners below** (they describe the 4-agent v1.1 shape: coder explore-at-start + leader commit-dispatch). The boot/teardown recipe above (§1–§6, P1–P11, `fenced-launch.py` MANDATORY) is UNCHANGED — this amendment only adds the parallel work-item topology and the new evidence one-liners. Authoritative V-criteria: `phase3-dryrun-spec.md` (rewritten 2026-11-13, V0–V14).
+
+### Parallel topology deltas
+
+- **Seed:** TWO disjoint module bugs in one scratch work item (`sonic_dryrun/mathx.py` + `sonic_dryrun/strix.py`, each with its test) — the parallel design's precondition.
+- **Dispatch:** `sonic-leader` receives the two-module commission; expect the STANDARD path (sonic-developer layer), NOT the fast path (F12 if fast).
+- **Module worktrees:** the DEVELOPER creates per-module worktrees (`<repo>-wt-sonic-dryrun-mod{a,b}` siblings, cut from the scratch branch by explicit base sha) per FROZEN `[sonic-merge-strategy-v1]`; coders work one-per-worktree; teardown removes BOTH module worktrees/branches in addition to the scratch work-item worktree/branch.
+- **Integration:** developer merges module branches onto the scratch branch with `merge --no-ff` in brief order, then authors HANDOFF-v2 at the scratch work-item root.
+- **Designed learning (V13):** the D4 dispatch context carries a non-obvious fake convention (module docstrings must name their merge-order slot) so the leader's completion-time `experience()` is the EXPECTED shape — a silent zero is a FAIL under this scenario.
+
+### Evidence one-liners (V9–V14, combined shape)
+
+```sh
+# sonic-developer -> explore == 1, timestamped BEFORE its first coder dispatch (V9)
+# sonic-coder(s)  -> explore == 0  AND  file-exploration census >= 1  (V12 — BOTH shapes)
+# sonic-reviewer / sonic-tester -> explore == 0 AND experience == 0 (V14)
+# sonic-leader    -> experience == 1, timestamped AFTER the verdicts (V13)
+# coder pair turn windows (min/max created_at) must TEMPORALLY OVERLAP (V10)
+.venv/bin/python -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
+print(sum(1 for m in ms for c in (m.get("tool_calls") or []) if c.get("name")==sys.argv[2]))' \
+  evidence/messages-${INSTANCE_ID}.json explore
+
+.venv/bin/python -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
+names={c.get("name") for m in ms for c in (m.get("tool_calls") or [])}; \
+print(sum(n in ("read_file","grep_files","glob_files","list_directory","bash") for n in names))' \
+  evidence/messages-${CODER_ID}.json
+
+.venv/bin/python -c 'import json,sys;
+a=json.load(open(sys.argv[1])); b=json.load(open(sys.argv[2]));
+wa=(min(m["created_at"] for m in a), max(m["created_at"] for m in a));
+wb=(min(m["created_at"] for m in b), max(m["created_at"] for m in b));
+print("OVERLAP" if wa[0] <= wb[1] and wb[0] <= wa[1] else "SEQUENTIAL", wa, wb)' \
+  evidence/messages-${CODER_A}.json evidence/messages-${CODER_B}.json
+```
+
+All evidence via `GET /api/instances/{id}/messages` (flat `tool_calls[].name`) with per-message `created_at` timing attribution — a verdict without timestamps is incomplete evidence, not a PASS. Full command set: `phase3-dryrun-spec.md` §8.
