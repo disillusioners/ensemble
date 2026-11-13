@@ -358,6 +358,16 @@ OPENAI_MODEL="$OPENAI_MODEL" OPENAI_BASE_URL_BACKUP="$OPENAI_BASE_URL_BACKUP" \
 
 **C1-safety:** contact with the shared LLM proxy (provider lane) is **NOT** live daemon/DB/install contact — the proxy call is C1-safe.
 
+### MF-1 addendum (2026-11-13, sonic v1.1 dry-run re-run) — knowledge-lane env
+
+The knowledge lane (`explore`/`experience`) is gated by `is_rag_enabled()` (`daemon/tools/instance.py:~7149`) ← `RAGConfig.from_env().is_configured` ← `bool(LIGHTRAG_HOST)`. A boot that forwards only the four `OPENAI_*` names silently unregisters `explore`/`experience` for every agent — the 2026-11-13 first dry-run failed V9/V13 with an ENVIRONMENT-ONLY attribution for exactly this reason (RESULTS 2026-11-13-sonic-v11-parallel-dryrun.md §6). Forward these THREE additional names:
+
+- `LIGHTRAG_HOST`
+- `LIGHTRAG_API_KEY`
+- `RAG_IS_REQUIRED=1`  (forced, fail-closed: a loud boot failure beats a silent lane absence)
+
+Values are read READ-ONLY from the live install's `.env` (or the live daemon's `/proc/<pid>/environ`) and passed BY NAME via the 0600 scratch env file — never argv literals, never echoed, never `set -x`. `umask 077`; MF-2 (j)(k)(l) apply unchanged. **Fence ruling (leader, 2026-11-13):** the shared RAG knowledge service is house-shared infra — `explore()` READ and exactly-one marked `experience()` WRITE are within "zero live contact" (no live daemon / live DB / live install-state contact: no restarts, no current flip, no live-instance messaging).
+
 ### D3.5 — pre-flight lane probe (MUST pass before the first agent dispatch)
 
 ```sh
