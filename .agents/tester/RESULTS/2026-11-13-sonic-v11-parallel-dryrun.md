@@ -231,3 +231,58 @@ PASS — `sk-proj-` 0 hits · `sk-ant-` 0 hits · OPENAI key prefix `e33c34f5af4
 **Updated V-leg matrix under the refined census: V0–V14 = 15 PASS / 0 FAIL.**
 
 **Residual (spec text):** the criterion wording in `phase3-dryrun-spec.md` V12/F15 is being amended by the developer lane (commit pending/imminent). This re-adjudication cites that amendment; the tester does NOT edit the graded criterion. **No third run was performed** — the re-adjudication is evidence-preserving (identical transcripts; refined mapping only).
+
+---
+
+# 12. STAGE VERIFICATION — v0.30.1 (artifact-only; 2026-11-13)
+
+**Scope:** independent artifact verification of the staged v0.30.1 release BEFORE any push (a pushed tag can never be re-cut — last gate). ARTIFACT-ONLY: no boots, reads-only, umask 077, scratch `/tmp/stageverify-v0301/`. Every value recomputed by the tester lane; the developer's report was not trusted. Remediation: none (per instruction). STOP-ON-FAIL per leg, other legs continued.
+
+**VERDICT: NEEDS-REVISION** — S1–S5 PASS (artifacts are internally consistent and the live install is untouched); **S6 FAIL** (the `--allow-stale-stage` override's audit-trail journal entry does not exist — the append failed best-effort). The artifact content itself is sound; the audit-trail gap is the sole blocking finding.
+
+| Leg | Verdict | Evidence |
+|---|---|---|
+| S1 4-way SHA + provenance + tag | **PASS** | All four identical: `82c60f4fba39cd4a52d5bbc72981014dbadb68a555d23fc9842aa50889c012b0` (REL binary · STAGEWT dist binary · manifest `binary_sha256` · provenance `artifact_sha256`) — matches the claim. Provenance `git_head` `00b0af633a075a93afb153b2d6bbd44ed18f78ed` == `git rev-parse v0.30.1^{commit}`; `git_dirty=false`. Tag object `0a4c8b6f63a35efb9b7207d56ae1c25a8aded131` (annotated; `cat-file -t` = tag); HEAD detached at `00b0af633…`. **Local-only:** loose ref `.git/refs/tags/v0.30.1` → `0a4c8b6f…`, no packed-refs entry, no remote tag refs; a definitive remote check would require contacting the remote (forbidden) — local evidence only |
+| S2 baseline | **PASS** | `generate_prompt_artifact_baseline.py --check --tree $REL` → rc 0, **"PROMPT-BASELINE: OK — 201 versioned artifact(s) match"**; 4 sonic-developer rows present in `.prompt-artifacts.sha256` (rule.md, soul.md, tools_note.md, workflow.md) |
+| S3 artifact content | **PASS** | All FIVE sonic agent dirs present. sonic-developer rule/soul/tools_note/workflow **4/4 byte-identical** to `git show v0.30.1:agents/sonic-developer/<file>`. Invariants: sonic-coder `knowledge` ∉ `tools.allow` (False); sonic-developer + sonic-leader `knowledge` ∈ `tools.allow` (True); sonic-developer `deny` = [`edit_file`, `write_file`]; all 5 `rule.md` carry `## Reporting Anomalies` (1 each). Model lanes: leader/developer/reviewer = `agentic`; coder/tester = `coding`. team_members: leader→[developer,coder,reviewer,tester], developer→[coder], others→[] |
+| S4 manifest/migration | **PASS** | manifest `version` 0.30.1 / `binary_version` 0.30.1 / `rollback_safe` True. `git diff --name-only ee2b46d3b..v0.30.1 -- daemon/ scripts/` = **exactly `daemon/__init__.py`**; `daemon/migrations/` diff **EMPTY** (zero migration files). Full change set: 41 files |
+| S5 live untouched | **PASS** | `releases/state.json` sha256 `adbf8fad998f9d1de2af790d2197efa9e91f78336a4586fd4c1bf7abb3625d68` (prefix `adbf8fad…` matches claim); `current` → `releases/v0.30.0` (NOT v0.30.1); live PID **2579736** etime **05:38:31** (continuous uptime, no restart); demo PID 3547188; release dirs v0.29.22 / v0.29.23 / v0.30.0 / v0.30.1; state.json current=v0.30.0, previous=v0.29.22, in_flight=null. No signals sent |
+| **S6 stale-stage journal** | **FAIL** | No `stage_freshness_override` entry exists in `releases/state.json` (0 matches); no journal/upgrade table in the DB; filesystem search found none. The stage run log `/tmp/stage_v0301.txt` proves the override was taken AND the append failed — see verbatim quotes below. Audit trail incomplete; the stage log is the only surviving record |
+
+**S4 verbatim hunks:**
+```
+diff --git a/daemon/__init__.py b/daemon/__init__.py
+index 203c3d874..ba71dbdc8 100644
+--- a/daemon/__init__.py
++++ b/daemon/__init__.py
+@@ -1,6 +1,6 @@
+ """Persistent Multi-Session Agent Daemon"""
+ 
+-__version__ = "0.30.0"
++__version__ = "0.30.1"
+```
+```
+diff --git a/pyproject.toml b/pyproject.toml
+index a19efb957..f02585d07 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,6 +1,6 @@
+ [project]
+ name = "ensemble"
+-version = "0.30.0"
++version = "0.30.1"
+```
+(pyproject.toml is outside the `daemon/ scripts/` scope; version-string-only, single line.)
+
+**S6 verbatim stage-log quotes (`/tmp/stage_v0301.txt`):**
+```
+WARN: FRESHNESS OVERRIDE: tip-identity mismatch (HEAD=00b0af633a075a93afb153b2d6bbd44ed18f78ed tip=ee2b46d3b01e1d956aac7ad1c5dca5ad9f209ff8) — proceeding (operator accepted; journaled)
+WARN: freshness-override journal append FAILED (best-effort) — override is taken but the audit trail is incomplete; reason=non-tip-tree
+```
+Root cause: the best-effort journal append failed during staging (`reason=non-tip-tree`); the staging-tree HEAD `00b0af633` (version-bump commit) is not the integration tip `ee2b46d3b` — that mismatch is what triggered the override, and the journal write path refused/failed on it.
+
+**Notes / deviations:**
+- VA's first phrasing "pyproject.toml same" was corrected on follow-up: pyproject.toml **was** changed, version-string-only (`0.30.0`→`0.30.1`) — outside the S4 daemon/scripts scope, so S4's expectation is unaffected.
+- S1's remote-tag absence cannot be proven without contacting the remote (explicitly forbidden); local evidence only (no remote-tag refs, tag local).
+- No remediation performed (per instruction): the missing journal entry was NOT re-created, the tag was NOT touched, nothing was pushed.
+- Evidence: `/tmp/stageverify-v0301/VA-artifacts.txt` + `VB-live-journal.txt` (0600).
