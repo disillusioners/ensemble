@@ -5,7 +5,7 @@
   "icon": "⚙️",
   "color": "accent-blue",
   "version": "1.0.0",
-  "llm_model": "agentic",
+  "llm_model": "coding",
   "innate_skills": ["todo"],
   "skill_injection": false,
   "no_force_explore": true,

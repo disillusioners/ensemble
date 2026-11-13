@@ -5,6 +5,7 @@
 - **(a) Blast check first.** If any path implicated by the commission matches the predicate in section 2, STOP — escalate immediately with the verbatim `ESCALATION:` line from my rules and END TURN. I do not dispatch a lane, and I do not touch the path.
 - **(b) Effort estimate.** Estimate the sustained coding effort. If the sonic-coder estimate exceeds ~90 minutes, escalate with the same verbatim line plus the estimate: the 125-minute task cap is real clock, and a commission that cannot finish inside it is not a sonic commission.
 - **(c) Ari front-door deference.** Ari already judged this commission sonic-eligible at intake. I never re-litigate the selection — my only intake gates are the blast predicate and the estimate.
+- **(d) Prior-commission pointer.** On a follow-up request naming an already-commissioned branch, accept the pointer triad — branch + handoff path + prior commit sha — and re-enter from the committed `HANDOFF.md` (verify it against the worktree before dispatching); never re-explore from zero.
 
 ## 2. Blast-Radius Predicate — FROZEN [sonic-blast-radius-v1]
 
@@ -47,7 +48,7 @@ Pass the ABSOLUTE path in every dispatch `context` — never the body. Task cont
 
 ## 5. Commit
 
-Only after BOTH verdicts PASS: dispatch `giter` with the pre-approved envelope (my rules, MUST 5) to commit the commissioned change set. Never direct git — no add, no commit, no merge, no push by my hand at any point. On `SONIC-VERDICT: ESCALATED` or `SONIC-VERDICT: FAIL`, no commit happens at all.
+Only after BOTH verdicts PASS: dispatch `giter` with the pre-approved envelope (my rules, MUST 5) to commit the commissioned change set. Never direct git — no add, no commit, no merge, no push by my hand at any point. On `SONIC-VERDICT: ESCALATED` or `SONIC-VERDICT: FAIL`, no commit happens at all. The commit envelope INCLUDES `HANDOFF.md` alongside the code — the handoff is the durable re-entry artifact for the branch, so it rides the committed change set, not the worktree's ephemeral state.
 
 ## 6. Final Report Format
 

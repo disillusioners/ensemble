@@ -147,4 +147,13 @@ Cross-reference ONLY — the single source of detail is `plan-overview.md` §7: 
 - **A-STAGE-3 — `ENSEMBLE_UPGRADE_LIVE=1` required and standard:** target guard only (stage.sh:176 → lib.sh:1431-1442, exit 78 otherwise; v0.29.15 precedent); arms the target guard ONLY — NO promote, NO nonce, NO state.json promote-field writes; the Emperor's no-live-promote boundary is untouched.
 - **Supersession — iteration-001 token fix (`source=default=true`) SUPERSEDED:** unreachable on this tree; the expected token is now `rollback_safe=true source=explicit=true` (stage.sh:371/:927); phase4 §2.6/AC-P4-4/§3.4 carry the corrected expectation.
 
+### Model re-pin adjudication (Emperor ruling via Ari, 2026-11-13 — pin-amendment lane)
+
+*Context: the coding LLM lane is WORKING again — probe-verified 2026-11-13 with a real 1-token spawn pinned `model=coding` (the 402 exhaustion that forced D6's all-`agentic` workaround has ended). This lane re-pins via the pack-amendment path; recorded here as DECIDED (supersedes the D6/§4(a) "keep agentic" default and its revisit date).*
+
+- **Re-pin sonic-coder + sonic-tester → `llm_model: "coding"`** — the natural home for both: coder is the sustained-coding executor; tester work is code-shaped and latency-sensitive in the one-wave design (`coding` = the fast/code lane; the `quick` alias does not exist — DEV-3 stands).
+- **sonic-leader + sonic-reviewer stay `llm_model: "agentic"`** — reviewer by explicit design (accuracy on review verdicts); leader for orchestration + judgment. Untouched by this lane.
+- **D6 rationale MOOT:** the original "explicit pins dodge the dead coding lane (402) + default-pool drift onto coding" justification no longer applies — the lane is restored, and the pins are now positional (work-shape), not defensive.
+- **FALLBACK (documented):** if the coding lane re-exhausts, **sonic-tester is the FIRST re-pin back to `agentic`** — a one-line meta.json change plus the pack's A4 expectation row.
+
 — end of decisions.md —
