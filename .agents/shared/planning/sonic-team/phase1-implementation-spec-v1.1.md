@@ -224,7 +224,7 @@ Each section is present even when empty (write `none`).
 
 ---
 
-## 5. PARALLEL MERGE STRATEGY (D-MERGE — the central design problem)
+## 5. PARALLEL MERGE STRATEGY [sonic-merge-strategy-v1] (D-MERGE — the central design problem)
 
 **Problem:** N sonic-coders on ONE repo in ONE commission → conflicting working trees,
 interleaved commits, unattributable breakage.
@@ -308,7 +308,7 @@ anything larger goes through sonic-developer.
 
 ---
 
-## 8. MODULE BRIEF (D-F — developer → coder, frozen labeled fields)
+## 8. MODULE BRIEF [sonic-module-brief-v2] (D-F — developer → coder, frozen labeled fields)
 
 ```text
 SONIC-MODULE-BRIEF — <module-slug>
@@ -344,6 +344,8 @@ cannot query the knowledge base — §1.3).
     sentences: rule.md / workflow.md / tools_note.md).
   - **A13** sonic-coder artifacts assert source-exploration-expected + RAG-excluded
     (both §3.3 shapes in rule.md AND workflow.md; tools_note no-knowledge marker).
+  - **A14** sonic-leader artifacts pin the FROZEN fast-path gate line (combined spec
+    §7/D-E shape) in BOTH rule.md AND workflow.md.
 - Mutation matrix: every new pin carries a counter-mutation leg that REDS it
   (`mutation-01-guards-need-counter-mutation`); the v1.1 legs that assert the coder
   HAS knowledge are replaced (coder-add-knowledge is now the counter-mutation).

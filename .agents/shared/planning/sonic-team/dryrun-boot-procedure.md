@@ -382,7 +382,9 @@ tr '\0' '\n' < "/proc/$SCRATCH_PID/environ" | grep -c '^OPENAI_API_KEY='
 
 ## AMENDMENT 2026-11-13 (sonic v1.1) — transcript fetch + knowledge-lane evidence
 
-> **Appended by the v1.1 amendment lane. The validated boot/teardown steps ABOVE are unchanged** — this block is additive. It exists because the v1.1 dry-run re-proof (phase3-dryrun-spec.md §9, V9–V11) judges knowledge-lane PRESENCE from instance transcripts, and the fetch command must be pinned literally so every lane collects identical evidence.
+<!-- SUPERSEDED v1.1 predicates — HISTORICAL amendment log ONLY; no executor may apply the presence one-liners in this section. The authoritative acceptance criteria are V0–V14 in phase3-dryrun-spec.md §5; in particular the sonic-coder "explore == 1 (first working turn)" predicate below was REVERSED by the COMBINED v1.1+v1.2 amendment further below (V12: coder explore == 0 AND file-exploration census >= 1). -->
+
+> **Appended by the v1.1 amendment lane. The validated boot/teardown steps ABOVE are unchanged** — this block is additive. It exists because the v1.1 dry-run re-proof (phase3-dryrun-spec.md §5, V0–V14) judges knowledge-lane PRESENCE from instance transcripts, and the fetch command must be pinned literally so every lane collects identical evidence.
 
 ### Transcript fetch (the literal command)
 
@@ -422,7 +424,7 @@ Record the timestamps in the evidence bundle: coder `explore` at-start ordering 
 
 ## AMENDMENT 2026-11-13 (COMBINED v1.1+v1.2) — parallel-run topology + re-proof evidence
 
-**Supersedes the v1.1 amendment's V9–V11 one-liners below** (they describe the 4-agent v1.1 shape: coder explore-at-start + leader commit-dispatch). The boot/teardown recipe above (§1–§6, P1–P11, `fenced-launch.py` MANDATORY) is UNCHANGED — this amendment only adds the parallel work-item topology and the new evidence one-liners. Authoritative V-criteria: `phase3-dryrun-spec.md` (rewritten 2026-11-13, V0–V14).
+**Supersedes the v1.1 amendment's V9–V11 one-liners above** (they describe the 4-agent v1.1 shape: coder explore-at-start + leader commit-dispatch). The boot/teardown recipe above (§1–§6, P1–P11, `fenced-launch.py` MANDATORY) is UNCHANGED — this amendment only adds the parallel work-item topology and the new evidence one-liners. Authoritative V-criteria: `phase3-dryrun-spec.md` (rewritten 2026-11-13, V0–V14).
 
 ### Parallel topology deltas
 
