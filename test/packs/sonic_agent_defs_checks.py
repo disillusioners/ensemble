@@ -4,7 +4,7 @@
 Companion checker for pack ``sonic_agent_defs_unit_test`` (see the .sh
 sibling for the invocation contract).  Implements the phase-2 spec
 (``phase2-test-pack-spec.md``) assertions A1-A11 PLUS the combined-rework
-pins A12-A13, each derived from the FROZEN blocks of the combined spec
+pins A12-A14, each derived from the FROZEN blocks of the combined spec
 (``phase1-implementation-spec-v1.1.md``) — the combined spec wins on any
 mismatch (spec §7-4 VERIFY-AT-IMPL doctrine).
 
@@ -17,7 +17,7 @@ branch, returns a compact module report); ``sonic-reviewer`` and
 
 Three layers:
 
-  --static      stdlib-only contract checks A1-A13 against the real tree.
+  --static      stdlib-only contract checks A1-A14 against the real tree.
                 NO daemon import (mirrors the
                 ``scripts/protection/generate_prompt_artifact_baseline.py``
                 doctrine: a bare host python3 must not drag the langchain
@@ -481,7 +481,7 @@ def extract_seal_dict(path: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# The assertion functions A1-A13.  Each raises CheckFailure on drift and
+# The assertion functions A1-A14.  Each raises CheckFailure on drift and
 # returns normally on pass.  Pure functions of the Fixture.
 # ---------------------------------------------------------------------------
 
