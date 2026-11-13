@@ -184,6 +184,18 @@ SONIC_BASELINE_PATHS = tuple(
     for artifact in SONIC_ARTIFACTS
 )  # 16 rows
 
+# ---- FROZEN [sonic-llm-pins-v2] (phase1 §3.5 + 2026-11-13 Emperor amendment:
+# coding lane restored; coder+tester re-pinned to "coding", leader+reviewer
+# stay "agentic") ----
+EXPECTED_LLM_MODEL = {
+    "sonic-leader": "agentic",
+    "sonic-coder": "coding",
+    "sonic-reviewer": "agentic",
+    "sonic-tester": "coding",
+}
+EXPECTED_MODELS_IN_DEFAULT_SET = ("agentic", "coding")
+# ---- END FROZEN [sonic-llm-pins-v2] ----
+
 # Config single source (AST-extracted, never imported in the static layer).
 ALLOWED_MODELS_CONST = "_ALLOWED_MODELS_DEFAULT"  # daemon/config.py:7311
 CONFIG_FILE = "daemon/config.py"
@@ -444,16 +456,19 @@ def a3_allow_deny(fx: Fixture) -> None:
 
 
 def a4_llm_model(fx: Fixture) -> None:
-    """A4: llm_model == "agentic" x4; agentic in the in-tree default set."""
+    """A4: per-agent llm_model pin map (coder/tester="coding",
+    leader/reviewer="agentic"); BOTH pin values in the in-tree default set."""
     for agent in SONIC_AGENTS:
         meta = json.loads(fx.metas[agent])
         model = meta.get("llm_model")
-        if model != "agentic":
-            raise CheckFailure("A4", f"{agent}.llm_model={model}")
-    if "agentic" not in fx.allowed_models_default:
-        raise CheckFailure(
-            "A4", f"agentic missing from in-tree {ALLOWED_MODELS_CONST} "
-            f"={fx.allowed_models_default}")
+        expected = EXPECTED_LLM_MODEL[agent]
+        if model != expected:
+            raise CheckFailure("A4", f"{agent}.llm_model={model} expected={expected}")
+    for model in EXPECTED_MODELS_IN_DEFAULT_SET:
+        if model not in fx.allowed_models_default:
+            raise CheckFailure(
+                "A4", f"{model} missing from in-tree {ALLOWED_MODELS_CONST} "
+                f"={fx.allowed_models_default}")
 
 
 def a5_recursion(fx: Fixture) -> None:
@@ -615,7 +630,7 @@ ASSERTIONS = (
     ("A1", a1_meta_parse, "meta.json parse + id==dirname x4"),
     ("A2", a2_team_members, "team_members exact sets"),
     ("A3", a3_allow_deny, "frozen allow/deny arrays + effective spawn sets"),
-    ("A4", a4_llm_model, "llm_model=agentic x4 + in-tree default set"),
+    ("A4", a4_llm_model, "llm_model pin map (coder/tester=coding, leader/reviewer=agentic) + both in default set"),
     ("A5", a5_recursion, "multiplier 7 coder-only"),
     ("A6", a6_handoff_schema, "handoff 7 headers + HANDOFF_PATH three-way"),
     ("A7", a7_blast_globs, "14 blast globs both files zero-diff"),
@@ -672,7 +687,7 @@ def build_good_fixture() -> Fixture:
         },
         "sonic-coder": {
             "id": "sonic-coder", "name": "Sonic Coder", "version": "1.0.0",
-            "llm_model": "agentic", "innate_skills": ["todo"],
+            "llm_model": "coding", "innate_skills": ["todo"],
             "skill_injection": False, "recursion_limit_multiplier": 7,
             "tools": {"allow": list(FROZEN_TOOLS["sonic-coder"]["allow"])},
             "team_members": [],
@@ -686,7 +701,7 @@ def build_good_fixture() -> Fixture:
         },
         "sonic-tester": {
             "id": "sonic-tester", "name": "Sonic Tester", "version": "1.0.0",
-            "llm_model": "agentic", "innate_skills": [], "skill_injection": False,
+            "llm_model": "coding", "innate_skills": [], "skill_injection": False,
             "tools": {"allow": list(FROZEN_TOOLS["sonic-tester"]["allow"]),
                       "deny": list(FROZEN_TOOLS["sonic-tester"]["deny"])},
             "team_members": [],
@@ -784,6 +799,10 @@ def _mutation_legs():
         _mutate_meta(fixture, "sonic-reviewer",
                      lambda m: m["tools"]["deny"].remove("edit_file"))
 
+    def a4_coder_model_agentic(fixture):
+        _mutate_meta(fixture, "sonic-coder",
+                     lambda m: m.__setitem__("llm_model", "agentic"))
+
     def a4_reviewer_model_coding(fixture):
         _mutate_meta(fixture, "sonic-reviewer",
                      lambda m: m.__setitem__("llm_model", "coding"))
@@ -855,6 +874,7 @@ def _mutation_legs():
         ("A3-leader-add-knowledge", a3_leader_add_knowledge),
         ("A3-reviewer-drop-bash", a3_reviewer_drop_bash),
         ("A3-reviewer-deny-drop-editfile", a3_reviewer_deny_drop_editfile),
+        ("A4-coder-model-agentic", a4_coder_model_agentic),
         ("A4-reviewer-model-coding", a4_reviewer_model_coding),
         ("A5-coder-drop-multiplier", a5_coder_drop_multiplier),
         ("A5-reviewer-add-multiplier", a5_reviewer_add_multiplier),

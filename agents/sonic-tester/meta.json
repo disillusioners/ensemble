@@ -5,7 +5,7 @@
   "icon": "🧪",
   "color": "accent-green",
   "version": "1.0.0",
-  "llm_model": "agentic",
+  "llm_model": "coding",
   "innate_skills": [],
   "skill_injection": false,
   "snapshot_enabled": true,

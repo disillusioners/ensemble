@@ -27,7 +27,9 @@ HANDOFF_PATH = HANDOFF.md   # worktree-root-relative; the ABSOLUTE path is passe
 ## Blast-radius self-assessment vs predicate
 ```
 
-   Exit when all 7 headers exist in the file at the worktree root.
+   Exit when all 7 headers exist in the file at the worktree root. This artifact is durable
+   re-entry state: it rides the commit — the leader's giter commit envelope INCLUDES
+   `HANDOFF.md` in the committed change set (commits belong to the git lane, never you).
 5. **Report.** First line is exactly one of `SONIC-VERDICT: PASS`, `SONIC-VERDICT: FAIL`,
    or `SONIC-VERDICT: ESCALATED`; then at most 40 lines: what changed, self-test evidence,
    honest UNTESTED/risks. Exit by ending the turn.
