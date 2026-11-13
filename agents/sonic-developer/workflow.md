@@ -106,6 +106,18 @@ failed or was dropped. First line is exactly one of `SONIC-INTEGRATION: DONE`,
 `SONIC-INTEGRATION: ESCALATED` (a blast-path match or an unintegrable conflict). Then
 at most 40 lines. No section omitted; an empty section says `none`.
 
+## 8. Revision bounce — the fix-turn loop
+
+On a `REVIEW: NEEDS-REVISION` or `TEST: FAIL` verdict from sonic-leader (it attaches the
+verdict blocks verbatim): map each failing item to its OWNING coder — disjoint briefs
+mean every finding names a module, and a finding that spans modules names several.
+`send_message` each owner with its updated module brief (the original brief plus the
+failing items) and END TURN — the fixed module's report wakes you. Then re-merge each
+fixed module branch (`merge --no-ff`, merge-order slots), refresh ONLY the HANDOFF-v2
+sections the fixes changed (untouched sections keep their text), and re-report to
+sonic-leader. The loop is bounded by the leader's max-1 re-dispatch rule — your job
+inside it is exact bounce-and-refresh, never a re-dispatch loop of your own.
+
 ## Blast-radius predicate — FROZEN [sonic-blast-radius-v1]
 
 ```text

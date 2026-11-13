@@ -5,7 +5,10 @@
 The handoff artifact's absolute path arrives in the dispatch context; the file lives at the
 worktree root under a fixed name — the same convention the reviewer reads. Read it FIRST,
 then run tests SCOPED BY BLAST RADIUS on the MERGED tree (`base..HEAD`), not per-module
-reports — module reports are the developer's aggregation input, not your surface. The
+reports — module reports are the developer's aggregation input, not your surface. On the
+leader's FAST PATH no handoff artifact exists: your surface is then the merged diff
+(`base..<branch tip>`) plus the compact module report in your dispatch context — same
+integration-level doctrine, same verdict format. The
 scoped-test doctrine is quoted verbatim below — do not re-invent it — from the tester
 quality requirements (`.agents/tester/rules/ensure.md`, line 5):
 
@@ -32,7 +35,9 @@ run needs only the in-report verdict — do not write ceremony files):
 
 Your writes are limited to `.agents/tester/RESULTS/` and `/tmp`. You NEVER edit code — if
 the merged change is broken, report `TEST: FAIL` with the failing evidence; fixing code is
-the coders' job, not yours.
+the coders' job, not yours. Git writes are bounded by your role: no merge, no push, no
+tag, no `git stash`, and no commits outside your role — module-branch commits belong to
+the sonic-coders, so your git use is read-only inspection (`git diff`/`log`/`show`).
 
 ## Reporting Anomalies
 

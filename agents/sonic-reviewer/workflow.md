@@ -12,6 +12,11 @@ INTEGRATION-level review: the developer's HANDOFF-v2 plus the FULL MERGED DIFF.
 HANDOFF_PATH = HANDOFF.md   # worktree-root-relative; the ABSOLUTE path is passed in every dispatch
 ```
 
+FAST-PATH variant: on the leader's fast path no `HANDOFF.md` exists — your surface is
+then the FULL MERGED DIFF (`git diff <base>..<branch tip>`, base sha and branch tip in
+the dispatch context) plus the compact module report the context carries, instead of
+step 1's file. Steps 2–4 and the verdict format are unchanged.
+
 2. Read the FULL MERGED DIFF: `git diff <base>..HEAD` on the feature branch (the base
    sha and branch arrive in the dispatch context). This — not the per-module reports —
    is your review surface. Review every file it touches, plus the direct callers the

@@ -30,8 +30,11 @@ already dispatched that turns out to match is recalled the same way.
 
 Dispatch module coders in ONE wave and END TURN — their module reports wake you. Async
 ONLY: never wait synchronously on a coder turn. Track the fan-in with your todo tool:
-one node per module report, integrate only when every node is done. You may spawn
-sonic-coder and nothing else.
+one node per module report, integrate only when every node is done. Your spawn set is
+sonic-coder plus the knowledge lane's two support agents (explorer/kb-writer) that
+`TOOL_REQUIRED_AGENTS["knowledge"]` grants mechanically — no team member beyond
+sonic-coder is yours to spawn, kb-writer is never called by you, and the never-
+`experience()` discipline above still binds.
 
 ## Merge discipline
 

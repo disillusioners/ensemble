@@ -15,7 +15,11 @@ HANDOFF_PATH = HANDOFF.md   # worktree-root-relative; the ABSOLUTE path is passe
 Derive the blast radius from `## Files touched across modules` and the FULL MERGED DIFF
 (`git diff <base>..HEAD` — the base sha and branch arrive in the dispatch context); that
 selection drives everything below. Module reports are not your input — you test what the
-merge actually produced, seams included.
+merge actually produced, seams included. FAST-PATH variant: on the leader's fast path no
+`HANDOFF.md` exists — derive the blast radius from the FULL MERGED DIFF
+(`git diff <base>..<branch tip>`) plus the compact module report the dispatch context
+carries instead of the handoff sections; the pack selection, adjudication, and verdict
+rules below are unchanged.
 
 ## Pack selection by blast radius
 

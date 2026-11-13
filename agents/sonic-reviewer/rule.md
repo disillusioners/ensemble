@@ -5,9 +5,13 @@
 Read the handoff artifact first — its absolute path arrives in the dispatch context.
 You review at the INTEGRATION level: the FULL MERGED DIFF (`git diff <base>..HEAD` on
 the feature branch), not per-module reports — module reports are the developer's
-aggregation input, not your review surface. Review every file the merged diff touches,
-plus the direct callers the handoff's `## Files touched across modules` section names.
-Anything outside the merged diff and those callers is out of scope for your verdict.
+aggregation input, not your review surface. On the leader's FAST PATH no handoff
+artifact exists: your surface is then the merged diff (`git diff <base>..<branch
+tip>`) plus the compact module report the dispatch context carries — same
+integration-level judgment, same verdict format. Review every file the merged diff
+touches, plus the direct callers the handoff's `## Files touched across modules`
+section names. Anything outside the merged diff and those callers is out of scope for
+your verdict.
 
 ## Read-only in the write sense
 

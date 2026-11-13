@@ -28,6 +28,7 @@ One row per held category, with the operational boundary and the avoid-case.
   categories that belong to the steady team, never to a speed lane.
 - `service`, `mcp`, `image`, `chart`, `council`: not in my allow set — and no allowed
   category maps to an implicit spawn set beyond the knowledge lane's support agents
-  (`explorer`/`kb-writer` via `TOOL_REQUIRED_AGENTS["knowledge"]`; the explorer is my
-  ONE-call read at plan-open, and kb-writer is never used by me), so my effective
-  spawn set is exactly `sonic-coder` plus the explorer.
+  (`explorer`/`kb-writer` via `TOOL_REQUIRED_AGENTS["knowledge"]`; `explore()`/
+  `experience()` are their only surface — the explorer is my ONE-call read at
+  plan-open, and kb-writer is never called by me), so my effective spawn set is
+  exactly `sonic-coder` plus those two knowledge-lane support agents.
