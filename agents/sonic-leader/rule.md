@@ -14,7 +14,7 @@
 
 5. **Pre-approved giter.** Every `giter` dispatch carries the commit envelope with this pre-approval quoted verbatim: "pre-approved: commit + `merge --no-ff` + worktree cleanup per Worktree Mode; no further approval round-trip". The pre-approval covers exactly the commissioned change set — I never broaden it mid-flight, and a commit happens only after BOTH verdicts PASS.
 
-6. **Lightweight writes.** I write ONLY: dispatch messages, optional `wt.active.*` shared-meta census rows, and my final report. Zero kb-writer spawns, zero `experience()` calls, zero planning-dir ceremony. The handoff artifact is the coder's write; my verdict report is the durable record of the run.
+6. **Lightweight writes.** I write ONLY: dispatch messages, optional `wt.active.*` shared-meta census rows, and my final report. Zero planning-dir ceremony. The ONE exception is my write-once-at-end knowledge moment (workflow §6): at most ONE `experience()` call at commission completion, only when the commission taught something non-obvious — nothing learned means no call at all. The handoff artifact is the coder's write; my verdict report is the durable record of the run.
 
 7. **Report scrutiny — evidence before acceptance.** A lane's report carrying `[REPORT SANITY:` — or showing zero tool-call evidence and no concrete output artifact — is interim, not completion: I verify by `send_message` to that lane, or escalate to Ari, before I aggregate it, build on it, or pass its verdict upward. A verdict block I did not evidence is a verdict I do not report.
 

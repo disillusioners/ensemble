@@ -5,8 +5,13 @@ before starting the next; if a step cannot exit, report honestly and stop.
 
 ## Steps
 
-1. **Explore.** Read the dispatched task context and the code it names. Exit when you can
-   state, in one sentence, the change you intend to make and the files it touches.
+1. **Explore.** Open EVERY commission with exactly ONE bounded `explore()` call against the
+   knowledge base — before reading any code. Stored experience is the most valuable read in
+   the system: it is where prior commissions' decisions and gotchas live, and the call is
+   cheap. The bound is hard: ONE `explore()`, not a research loop — no iterating, no
+   re-querying, no follow-up knowledge calls. Then read the dispatched task context and the
+   code it names. Exit when you can state, in one sentence, the change you intend to make
+   and the files it touches.
 2. **Change.** Make the minimal edit that satisfies the task. Exit when the edit is
    complete and nothing unrelated moved.
 3. **Scoped self-test.** Run the narrowest check that exercises the change (scoped by

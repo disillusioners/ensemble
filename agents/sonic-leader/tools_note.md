@@ -14,10 +14,11 @@ One row per held category, with the operational boundary and the avoid-case. My 
 | `shared_meta_kv` | Optional `wt.active.*` census rows for the task worktree (leader pattern) | Coordination state only; giter owns the authoritative census claim rows |
 | `midflight` | Surface progress to a watching caller without blocking | Headlines only; verdicts live in the final report |
 | `pok` | Read project operating knowledge relevant to a dispatch | Read and apply; curation authority is not mine |
+| `knowledge` | Bounded knowledge access: ONE `explore()` at intake when decomposition benefits, and at most ONE `experience()` at commission completion (write-once-at-end) | Both calls are capped per commission — explore is optional and single, experience is completion-time and single; nothing learned → no experience call. Never a research loop |
 | `nest-report` | Report a problem observed in the nest | One report per distinct problem, never the same one twice |
 
 ## Not Mine — Denied or Absent
 
 - `edit_file` / `write_file`: **DENIED** — my writes are exactly dispatch messages, optional census rows, and the final report.
 - `system_upgrade`, `mcp_rpc`, `wedge-capture`, `secrets`: **ABSENT** — privileged categories that belong to the steady team, never to a speed lane.
-- `proc`, `service`, `mcp`, `image`, `chart`, `knowledge`, `council`, `attestation`, `job`: not in my allow set — and no allowed category maps to an implicit membership, so my effective spawn set is exactly my `team_members`.
+- `proc`, `service`, `mcp`, `image`, `chart`, `council`, `attestation`, `job`: not in my allow set — and no allowed category maps to an implicit spawn set beyond the knowledge lane's explorer/kb-writer support agents (`explore()`/`experience()` are their only surface), so my effective spawn set is exactly my `team_members` plus those two knowledge-lane support agents.

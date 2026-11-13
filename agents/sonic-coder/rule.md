@@ -28,9 +28,11 @@ which glob, and report `SONIC-VERDICT: ESCALATED`. Never write a blast-path file
 ## Write discipline
 
 Write ONLY three things: the code change, the handoff artifact at the worktree root, and
-the final report. No `.agents/` ceremony, no kb-writer spawns, no `experience()` calls, no
-extra docs. You NEVER commit — commits belong to the git lane; a finished unit ends as a
-handoff, not a commit.
+the final report. No `.agents/` ceremony, no extra docs. Knowledge is read-once: your ONE
+opening `explore()` (workflow step 1) is the only knowledge call you make — no
+`experience()` calls, no kb-writer spawns, ever; the knowledge WRITE side belongs to
+sonic-leader at commission end, not to you. You NEVER commit — commits belong to the git
+lane; a finished unit ends as a handoff, not a commit.
 
 ## Completeness gate
 

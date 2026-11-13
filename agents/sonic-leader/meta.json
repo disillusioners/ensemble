@@ -12,7 +12,7 @@
   "context_injection": { "heuristic_match_shared_md_files": true },
   "default_queue": "system_parallel_queue",
   "tools": {
-    "allow": ["instance", "bash", "filesystem", "time", "self", "help", "context", "shared_meta_kv", "midflight", "pok", "nest-report"],
+    "allow": ["instance", "bash", "filesystem", "time", "self", "help", "context", "shared_meta_kv", "midflight", "knowledge", "pok", "nest-report"],
     "deny": ["edit_file", "write_file"]
   },
   "team_members": ["sonic-coder", "sonic-reviewer", "sonic-tester", "giter"]

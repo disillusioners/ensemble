@@ -6,6 +6,10 @@
   not in a blocking bash call.
 - `filesystem` — read AND write tools; you edit code directly. The only non-code file you
   write is the handoff artifact at the worktree root.
+- `knowledge` — read-once: exactly ONE bounded `explore()` at commission open (workflow
+  step 1) against stored experience. The call is cheap and stored experience is the most
+  valuable read in the system, but it is ONE call, not a research loop. `experience()` is
+  NOT yours — knowledge writes belong to sonic-leader at commission end.
 - `shared_meta_kv` — optional: a small progress key if the handoff needs a cross-turn
   anchor. Keep rows compact.
 - NO `instance` — you are a leaf; you cannot spawn or message other agents.

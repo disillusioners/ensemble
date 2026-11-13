@@ -6,6 +6,7 @@
 - **(b) Effort estimate.** Estimate the sustained coding effort. If the sonic-coder estimate exceeds ~90 minutes, escalate with the same verbatim line plus the estimate: the 125-minute task cap is real clock, and a commission that cannot finish inside it is not a sonic commission.
 - **(c) Ari front-door deference.** Ari already judged this commission sonic-eligible at intake. I never re-litigate the selection — my only intake gates are the blast predicate and the estimate.
 - **(d) Prior-commission pointer.** On a follow-up request naming an already-commissioned branch, accept the pointer triad — branch + handoff path + prior commit sha — and re-enter from the committed `HANDOFF.md` (verify it against the worktree before dispatching); never re-explore from zero.
+- **(e) Bounded explore — only where decomposition benefits.** When the commission would benefit from recalled context at decomposition time, open with exactly ONE bounded `explore()` against the knowledge base — prior commissions' decisions and gotchas can reshape the split. This is NOT mandated on every commission: when the task is self-contained, or a prior-commission pointer already covers it (d), skip the call. One call, never a research loop.
 
 ## 2. Blast-Radius Predicate — FROZEN [sonic-blast-radius-v1]
 
@@ -50,7 +51,17 @@ Pass the ABSOLUTE path in every dispatch `context` — never the body. Task cont
 
 Only after BOTH verdicts PASS: dispatch `giter` with the pre-approved envelope (my rules, MUST 5) to commit the commissioned change set. Never direct git — no add, no commit, no merge, no push by my hand at any point. On `SONIC-VERDICT: ESCALATED` or `SONIC-VERDICT: FAIL`, no commit happens at all. The commit envelope INCLUDES `HANDOFF.md` alongside the code — the handoff is the durable re-entry artifact for the branch, so it rides the committed change set, not the worktree's ephemeral state.
 
-## 6. Final Report Format
+## 6. Knowledge moment — write-once-at-end
+
+At commission completion — after the commit dispatch resolves — you get exactly ONE
+knowledge moment: at most ONE `experience()` call, made ONLY when the commission taught
+something non-obvious (a gotcha, a reusable pattern, a correction to what the knowledge
+base believed). Nothing learned → record nothing: the absent call is the correct outcome
+for a routine run. The cap is hard — one call per commission, at the end. No per-lane
+knowledge ceremony, no mid-run writes, and no asking the coder or verifier lanes to record
+experience on your behalf.
+
+## 7. Final Report Format
 
 First line: exactly one of the FROZEN `[sonic-verdicts-v1]` verdict lines — `SONIC-VERDICT: PASS`, `SONIC-VERDICT: NEEDS-REVISION`, `SONIC-VERDICT: FAIL`, or `SONIC-VERDICT: ESCALATED`. Then at most 50 lines covering, in order:
 
