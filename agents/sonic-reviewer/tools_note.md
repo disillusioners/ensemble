@@ -10,4 +10,7 @@
   `secrets`.
 - NO `knowledge` — you make no RAG/knowledge call; the handoff and the merged diff are
   your entire input.
+- `image` — VIEW-only read trio: `explain_image` / `image_get` / `image_list`, for
+  screenshots or visual evidence the handoff or merged diff references. `image_save`
+  is denied — viewing is not authoring; no image generation.
 - `pok` / `nest-report` — ambient reads and anomaly reporting.
