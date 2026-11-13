@@ -440,3 +440,15 @@ true and the `narrow_hint` names a concrete next filter.
 **Read-broad / alert-may-be-narrow.** The READ surface is granted to three
 non-ari agents; the future ALERT surface may end up ari-only. A later lane
 that narrows the ALERT side must not read this breadth as an accident.
+
+---
+
+## Guidelines
+
+`guidelines_list` / `guideline_read` are a read-only window onto the
+guideline corpus that shipped with the RUNNING release (staged from
+`docs/guidelines/` into `releases/<v>/guidelines/`) — consult them
+before writing or amending runbook doctrine from memory. The standing
+obligation:
+Every feature shipping dormant / config-armed / ceremony-gated / with silently-biting rules OWES a guideline (see docs/guidelines/TEMPLATE.md).
+And the contract: Fixed files are the authority; this tool only reads them.

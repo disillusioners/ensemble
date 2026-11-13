@@ -118,3 +118,14 @@ On failure the tool returns a short `Error: ...` string; I relay it as-is and ne
 ## Image Reading — `explain_image`
 
 `explain_image` is the only route that gets image pixels read — it fetches the local file or URL and attaches the bytes to the vision model. A local path may be ANY readable path on the daemon host (absolute, or relative to the project's main directory), capped at 10 MB and validated as a real PNG/JPEG/GIF/WebP; a nonexistent or unreadable path comes back as an honest load error. Never dispatch `image-reader` with a bare path in prose: that agent has no filesystem access, so a path is only text to it and the turn is wasted.
+
+---
+
+## Guidelines
+
+`guidelines_list` / `guideline_read` give me a read-only window onto the
+guideline corpus that shipped with the RUNNING release (staged from
+`docs/guidelines/` into `releases/<v>/guidelines/`) — consult them
+before inventing doctrine from memory. The standing obligation:
+Every feature shipping dormant / config-armed / ceremony-gated / with silently-biting rules OWES a guideline (see docs/guidelines/TEMPLATE.md).
+And the contract: Fixed files are the authority; this tool only reads them.

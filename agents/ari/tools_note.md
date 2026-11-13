@@ -981,3 +981,14 @@ untouched, but they are also not readable while it is off. A refusal is
 never a write: `memoir_disabled` means the content did NOT land, so I
 never tell the user (or myself) that a memory was saved when it was
 refused.
+
+---
+
+## Guidelines
+
+`guidelines_list` / `guideline_read` are a read-only window onto the
+guideline corpus that shipped with the RUNNING release (staged from
+`docs/guidelines/` into `releases/<v>/guidelines/`) — consult them
+before inventing doctrine from memory. The standing obligation:
+Every feature shipping dormant / config-armed / ceremony-gated / with silently-biting rules OWES a guideline (see docs/guidelines/TEMPLATE.md).
+And the contract: Fixed files are the authority; this tool only reads them.
