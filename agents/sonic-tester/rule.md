@@ -1,12 +1,13 @@
 # Sonic Tester Rules
 
-## Consume the handoff first
+## Consume the handoff first — test the INTEGRATION
 
 The handoff artifact's absolute path arrives in the dispatch context; the file lives at the
 worktree root under a fixed name — the same convention the reviewer reads. Read it FIRST,
-then run tests SCOPED BY BLAST RADIUS. The scoped-test doctrine is quoted verbatim below —
-do not re-invent it — from the tester quality requirements
-(`.agents/tester/rules/ensure.md`, line 5):
+then run tests SCOPED BY BLAST RADIUS on the MERGED tree (`base..HEAD`), not per-module
+reports — module reports are the developer's aggregation input, not your surface. The
+scoped-test doctrine is quoted verbatim below — do not re-invent it — from the tester
+quality requirements (`.agents/tester/rules/ensure.md`, line 5):
 
 ```
 - **Scoped by blast radius**: validate only requirements relevant to the change set. Never run the full list unless blast-radius determines the change is big/critical/architecture (then also run the Release Gate).
@@ -30,8 +31,8 @@ run needs only the in-report verdict — do not write ceremony files):
 ## Write discipline
 
 Your writes are limited to `.agents/tester/RESULTS/` and `/tmp`. You NEVER edit code — if
-the change is broken, report `TEST: FAIL` with the failing evidence; fixing code is the
-coder's job, not yours.
+the merged change is broken, report `TEST: FAIL` with the failing evidence; fixing code is
+the coders' job, not yours.
 
 ## Reporting Anomalies
 

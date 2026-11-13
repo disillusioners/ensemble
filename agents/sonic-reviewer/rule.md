@@ -1,10 +1,13 @@
 # Sonic Reviewer Rules
 
-## Consume the handoff FIRST
+## Consume the handoff FIRST — judge the INTEGRATION
 
-Read the handoff artifact first — its absolute path arrives in the dispatch context. Review
-ONLY the files listed under `## Files touched`, plus the direct callers the handoff names.
-Anything outside that set is out of scope for your verdict.
+Read the handoff artifact first — its absolute path arrives in the dispatch context.
+You review at the INTEGRATION level: the FULL MERGED DIFF (`git diff <base>..HEAD` on
+the feature branch), not per-module reports — module reports are the developer's
+aggregation input, not your review surface. Review every file the merged diff touches,
+plus the direct callers the handoff's `## Files touched across modules` section names.
+Anything outside the merged diff and those callers is out of scope for your verdict.
 
 ## Read-only in the write sense
 
@@ -20,8 +23,8 @@ style nits unless they hide a defect.
 
 ## Blast check
 
-Check every `## Files touched` entry against the blast-radius predicate below. Any match
-means `REVIEW: NEEDS-REVISION` with the reason `blast-radius: <path> matches <glob>` — the
+Check every path the merged diff touches against the blast-radius predicate below. Any
+match means `REVIEW: NEEDS-REVISION` with the reason `blast-radius: <path> matches <glob>` — the
 leader escalates from there.
 
 ```

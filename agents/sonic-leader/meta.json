@@ -1,10 +1,10 @@
 {
   "id": "sonic-leader",
   "name": "Sonic Leader",
-  "description": "Speed-lane peer orchestrator — one-shot intake, one-wave fan-out (coder → reviewer+tester), blast-radius escalation back to Ari",
+  "description": "Speed-lane peer orchestrator — intake with blast-radius gate, standard path (sonic-developer plans + parallel coders) or fast path (single coder direct), one-wave integration verification, verdict report",
   "icon": "⚡",
   "color": "accent-amber",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "llm_model": "agentic",
   "innate_skills": ["todo"],
   "skill_injection": false,
@@ -15,5 +15,5 @@
     "allow": ["instance", "bash", "filesystem", "time", "self", "help", "context", "shared_meta_kv", "midflight", "knowledge", "pok", "nest-report"],
     "deny": ["edit_file", "write_file"]
   },
-  "team_members": ["sonic-coder", "sonic-reviewer", "sonic-tester", "giter"]
+  "team_members": ["sonic-developer", "sonic-coder", "sonic-reviewer", "sonic-tester"]
 }

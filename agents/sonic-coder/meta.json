@@ -1,10 +1,10 @@
 {
   "id": "sonic-coder",
   "name": "Sonic Coder",
-  "description": "One-shot sustained coding executor — explores, codes, tests, fixes, writes the fixed-schema handoff artifact; never commits",
+  "description": "One-shot module executor — explores the source with file tools, codes, quick-tests, fixes, commits its module branch, returns a compact module report",
   "icon": "⚙️",
   "color": "accent-blue",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "llm_model": "coding",
   "innate_skills": ["todo"],
   "skill_injection": false,
@@ -12,7 +12,7 @@
   "recursion_limit_multiplier": 7,
   "context_injection": { "heuristic_match_shared_md_files": true },
   "tools": {
-    "allow": ["bash", "proc", "filesystem", "time", "self", "help", "context", "shared_meta_kv", "knowledge", "pok", "nest-report"]
+    "allow": ["bash", "proc", "filesystem", "time", "self", "help", "context", "shared_meta_kv", "pok", "nest-report"]
   },
   "team_members": []
 }
