@@ -44,7 +44,7 @@ The registration is a **THREE-STEP SEAM** (decorator + registry entries + constr
   - never raises — catch-all returns a typed failure envelope (`:527-536`);
   - returns `[notify_user]`.
 - **The ordered impl** `_notify_user_impl(...)` (`:686+`): **auth-first** — the `agent_id != NOTIFY_AUTHORIZED_AGENT` gate is `:702-707` (pre-audit; a non-ari caller leaves no ledger noise), kill-switch second (`:715-732`), then pure argument gates, then any DB/ledger touch. (The exemplar's own adjacent comment calls the knob "the outermost gate" — the CODE order is the authority; memoir's AM-16 ruling: auth-first, always.)
-- The `*_if_available` wrapper used by instance.py is defined alongside (the instance.py import is `from .notify_user import create_notify_user_tools`; the call site uses `create_notify_user_tools_if_available(...)`).
+- The `*_if_available` wrapper used by instance.py is defined IN instance.py itself, NOT alongside the factory (CORRECTED 2026-11-13 — the wrappers block spans `instance.py:2684-2964`, the notify wrapper at `:2897`; `notify_user.py` defines no wrapper): the instance.py import is `from .notify_user import create_notify_user_tools`; the call site uses `create_notify_user_tools_if_available(...)`.
 
 ### A(iii) `daemon/tools/instance.py` — the wiring (2 edit sites in one file)
 
@@ -64,7 +64,7 @@ The registration is a **THREE-STEP SEAM** (decorator + registry entries + constr
 The fail-closed privileged enforcement is the pair:
 - **layer 1+2 (visibility/authority):** privileged default-deny strip (A(iii)) + per-agent `tools.allow` entry; and
 - **layer 3 (in-body runtime gate):** the factory-captured `agent_id` constant checked FIRST in every tool body.
-For a MULTI-agent allow-list, the exact template is `metrics_read.py`: `METRICS_AUTHORIZED_AGENTS: frozenset[str] = frozenset({"maintenancer", "devops", "wanderer"})` (`daemon/tools/metrics_read.py:207-209`) with the comment "The privileged category gates VISIBILITY; this set gates AUTHORITY. Both are required" (`:204-206`). For `guidelines`: `GUIDELINES_AUTHORIZED_AGENTS = frozenset({"ari", "leader", "devops", "sonic-leader"})`, checked before anything else (unknown-agent / not-authorized typed tokens first — the metrics ladder `:222-227`).
+For a MULTI-agent allow-list, the exact template is `metrics_read.py`: `METRICS_AUTHORIZED_AGENTS: frozenset[str] = frozenset({"maintenancer", "devops", "wanderer"})` (`daemon/tools/metrics_read.py:207-209`) with the comment "The privileged category gates VISIBILITY; this set gates AUTHORITY. Both are required" (`:204-206`). For `guidelines`: `GUIDELINES_AUTHORIZED_AGENTS = frozenset({"ari", "leader", "devops", "sonic-leader"})`, checked before anything else (unknown-agent / not-authorized typed tokens first — the metrics ladder `metrics_read.py:1404-1417`).
 
 ### A(v) `daemon/loader.py` — the cold-boot warm-list (a REQUIRED touch point, easily missed)
 
@@ -74,7 +74,7 @@ For a MULTI-agent allow-list, the exact template is `metrics_read.py`: `METRICS_
 
 ## B. THE PIN CENSUS — every site that pins the notify-user / privileged-set registration
 
-**Derive-by-grep is binding**; the census below is verified at this base SHA and is the files-to-touch inventory for a `guidelines` category (privileged set 21 → 22).
+**Derive-by-grep is binding**; the census below is verified at this base SHA and is the files-to-touch inventory for a `guidelines` category (privileged set 21 → 22). Counts corrected 2026-11-13 (B5/B10 off-by-ones); the enumerated numbers remain a STARTING POINT — DERIVE-BY-GREP at implementation time is the BINDING rule (decisions.md D14; the registry's own three greps at `_tool_registry.py:441-443` are the authority).
 
 ### B1. Registry prose census (canonical)
 - `daemon/tools/_tool_registry.py:375-445` — SAME-PR RULE prose: names SIXTEEN pin files + mutation-pack string; must be re-derived and updated in the SAME commit (its last derivation is dated 2026-11-11 prompt-assent Phase-4 at `:430-433`).
@@ -102,7 +102,7 @@ Per-category pin packs observed (legs a–j: AST discovery, decorator order, CAT
 - `tests/integration/test_maintenancer_spawn_resolves_tools.py:412` (comment `:474-479` carries the notify-user entry)
 - `tests/integration/test_service_tool_flag_off_byte_identical.py:842` (comment `:911-916`; ALSO its docstring census at `:819` — "The exact-set pin lives at ELEVEN sites..." — a stale-prose correction site, same-commit duty)
 
-### B5. Count pins — `len(PRIVILEGED_TOOL_CATEGORIES) == 21` (11 sites / 10 files)
+### B5. Count pins — `len(PRIVILEGED_TOOL_CATEGORIES) == 21` (12 sites / 11 files — CORRECTED 2026-11-13, was off by one)
 `test_anomaly_report_tool_registration.py:383` · `test_board_registration.py:235` · `test_instance_ops_registration.py:222` · `test_memoir_registration.py:149` · `test_metrics_read_registration.py:235` · `test_notify_user_registration.py:196` · `test_self_alarm_registration.py:231` · `test_wedge_capture_registration.py:193` · `tests/unit/tools/test_nest_report_read_registration.py:175` · `tests/unit/tools/test_prompt_assent_registration.py:218` AND `:260` · `tests/unit/tools/test_prompt_reload_pins.py:71`. (Bump to 22 in the SAME commit. `test_memoir_registration.py:377-422` additionally self-pins the count-pin population — a derivation-shape pin that greps the OTHER files; adding a new pin file updates that derivation.)
 
 ### B6. Derived-set pins (no literal edit, but re-run green only after the count bump)
@@ -124,7 +124,7 @@ Per-category pin packs observed (legs a–j: AST discovery, decorator order, CAT
 - Each of the four agents' `tools_note.md` gains a section (see D) + `agents/.prompt-artifacts.sha256` manifest regeneration + `SEALED_SHA_BASELINES` re-pin in the SAME commit (notify-user precedent: `.agents/shared/planning/ari-notify-user/decisions.md:143`).
 
 ### B10. Census data file
-- `.agents/shared/metrics/tool-categories.json:38` — the sorted frozen-vocabulary category census (57 categories at last capture); add `"guidelines"` in sorted position. (Consumed by the central-metrics exposition lanes; see `.agents/shared/planning/central-metrics-v1/evidence/*exposition*.txt` shapes.)
+- `.agents/shared/metrics/tool-categories.json:38` — the sorted frozen-vocabulary category census (63 categories at last capture — CORRECTED 2026-11-13, was off by one); add `"guidelines"` in sorted position. (Consumed by the central-metrics exposition lanes; see `.agents/shared/planning/central-metrics-v1/evidence/*exposition*.txt` shapes.)
 
 ---
 
@@ -176,7 +176,7 @@ There are TWO houses, both required by the notify-user precedent:
 5. `agents/ari/meta.json` (append END), 6. `agents/leader/meta.json`, 7. `agents/devops/meta.json`, 8. `agents/sonic-leader/meta.json`; 9. four `agents/<a>/tools_note.md` `## Guidelines` sections; 10. `agents/.prompt-artifacts.sha256` + SEALED_SHA_BASELINES re-pin.
 
 **Tests/pins (SAME commit):**
-11. NEW `tests/unit/tools/test_guidelines_registration.py`; 12-17. the 6 EXPECTED_PRIVILEGED_SET definitions; 18-25. the 11 count pins / 10 files; 26-30. the 5 inline frozenset pins; 31. `test_board_registration.py:310` ari array literal; 32. `test_anomaly_report_grant_pins.py:99/:317`; 33. `test_aegis_security_family.py:171` (verify pin shape); 34. `test_service_tool_flag_off_byte_identical.py:819` stale docstring census correction; 35. mutation-pack target in `test/packs/metrics_read_mutation_matrix_test.py`.
+11. NEW `tests/unit/tools/test_guidelines_registration.py`; 12-17. the 6 EXPECTED_PRIVILEGED_SET definitions; 18-25. the 12 count pins / 11 files (matches B5 as corrected); 26-30. the 5 inline frozenset pins; 31. `test_board_registration.py:310` ari array literal; 32. `test_anomaly_report_grant_pins.py:99/:317`; 33. `test_aegis_security_family.py:171` (verify pin shape); 34. `test_service_tool_flag_off_byte_identical.py:819` stale docstring census correction; 35. mutation-pack target in `test/packs/metrics_read_mutation_matrix_test.py`.
 
 **Census/docs:**
 36. `.agents/shared/metrics/tool-categories.json`; 37. planning dir `.agents/shared/planning/guideline-read-tool/*` (committed in-branch); 38. tester RESULTS + PACKS registration; 39. registry SAME-PR derivation date line (same file as #2).

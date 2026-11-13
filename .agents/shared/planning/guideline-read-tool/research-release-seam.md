@@ -48,7 +48,7 @@ Assembly happens into a temp dir then swap-in (`STAGE_TMP="$INSTALL_DIR/releases
    - Copy: after :450 (plugins copy), before :484 (`executor_family_install`): `cp -R "$REPO_ROOT/docs/guidelines" "$STAGE_TMP/guidelines"` — mirrors the plugins/verbatim copy; comment should cite the plugins precedent (:443-449).
    - Note: `_no_env_in_release` (:493) walks the whole staged tree — .md-only content is safe. No FE-sidecar-style strip needed (docs/guidelines has no build artifacts today).
 
-2. **(ii) 7th top-level tree sha**
+2. **(ii) guidelines tree sha (alongside agents/frontend/plugins/scripts)**
    - Walk+aggregate: after :521-522 — `GUIDELINES_LINES="$(_stage_tree_walk guidelines "$STAGE_TMP/guidelines")"` + `GUIDELINES_TREE="$(_tree_hash_of_lines "$GUIDELINES_LINES")"` (the small-tree budget note at :519-520 applies: guidelines is small/fixed-shape, no unbounded-walk concern).
    - Manifest key: in the heredoc after :717 — `"guidelines_tree_sha256": "$GUIDELINES_TREE",`.
    - **Post-stage re-hash leg REQUIRED** (mirror plugins :747-753): `integrity_verify` does NOT cover plugins/scripts/guidelines — without a local leg a copy glitch ships silently. Alternatively extend lib.sh's loop (see B).
@@ -80,7 +80,7 @@ Assembly happens into a temp dir then swap-in (`STAGE_TMP="$INSTALL_DIR/releases
 | `lib.sh` retention/eviction identity (:2839-2853; stage.sh:616-624 comment) | `staged_at` epoch only | IGNORED |
 | `scripts/upgrade/promote.sh` | `manifest_field "$VERSION" binary_version` (:496-498, missing → refuse — field still present); T5 gate `PREV_SAFE="$(manifest_field "$PREV" rollback_safe)"` (:890-931) | **UNAFFECTED** — no top-level sha enumeration anywhere |
 | `scripts/upgrade/rollback.sh` (:174-177) | `rollback_safe` | UNAFFECTED |
-| `scripts/upgrade/status.sh` | **zero** `manifest` references (grep-verified) | UNAFFECTED |
+| `scripts/upgrade/status.sh` | `rollback_safe` (:88), `manifest_path` + `binary_version` (:123-124) — all key-addressed (CORRECTION 2026-11-13: the earlier "zero manifest references" claim was FALSE) | UNAFFECTED |
 | `scripts/upgrade/ledger_check.py`, `journal_read.py`, `journal_splice.py` | **zero** manifest/tree-sha references (grep-verified) | UNAFFECTED |
 | `daemon/tools/upgrade_tools.py` `_scan_releases` (:798-836) | loads whole manifest JSON into a dict; renders IDENTITY fields only (:818-836; :2276-2294 "manifest schema — showing manifest identity fields per release") | **TOLERATED** — `.get()` style, extra keys ride silently in the dict |
 | `upgrade_tools.py` version gate (:2200-2208) | `manifest.get("binary_version")` | TOLERATED |
@@ -88,7 +88,7 @@ Assembly happens into a temp dir then swap-in (`STAGE_TMP="$INSTALL_DIR/releases
 | `upgrade_tools.py` drop-release arm (:3415-3471) | `rollback_safe` / `binary_version` / `known_schema_gen` via `.get` | TOLERATED |
 | `daemon/services/release_manifest.py` (NEW reader, exists at this base) | reads ONLY `agents_manifest` (:53, :113-126); "Missing TOP-LEVEL keys other than `agents_manifest` are TOLERATED (the demo v0.16.3 manifest predates `plugins_manifest`)" (:22-23); `verify_paths` (:164+) is per-requested-path | **TOLERATED** — new keys invisible to it |
 | `daemon/services/prompt_refresh.py` (:745-780) | uses `load_release_manifest`/`verify_paths` only | TOLERATED |
-| Tests | grep `binary_sha256\|agents_tree_sha256\|launcher_sha256` over tests/ → ONE tangential hit (tests/test_bind_retry.py:149); **no test pins the manifest key SET** | No strict-schema rejection anywhere |
+| Tests | CORRECTED 2026-11-13 (earlier "ONE tangential hit / no test pins the key SET" was FALSE): presence-pin loop `tests/test_release_journal.sh:782-787` (14 keys, presence-only, additive-safe) + hits at `tests/packs/preflight_watchdog_test.sh:141-145`, `tests/test_stage_plugins_tree.sh:247-269`/`:357`, `tests/test_executor_family_payload.sh:318`; `tests/test_bind_retry.py:149` tangential | No exact-set rejection anywhere |
 
 **Files that MUST change: none (consumer side).** Optional learn-the-field changes: lib.sh `integrity_verify` loop :4102 (+ the field-group doc comment lib.sh:3052-3059, documentation-only) OR the stage-local re-hash leg.
 
@@ -116,7 +116,7 @@ else:
 ```
 Sites: `daemon/loader.py:446-448` (`_base_dir`; agents payload), `daemon/manager.py:4815-4820` (`agents_base` → registry), `daemon/registry.py:1581-1583`, `daemon/graph.py:11045-11047` (`_WATCHER_AGENTS_BASE`), `daemon/api.py:169-171` (`BASE_DIR`), `daemon/routers/agents.py:20-22` (`BASE_DIR`, three parents up), `daemon/tools/agent_mother.py:141-143`. In frozen mode `sys.executable` = the real binary path `…/releases/<v>/ensemble-prod`, so `base/agents` resolves the staged payload. Frozen topology facts: install dir = `binary.parent.parent.parent`, release root = `binary.parent` (`upgrade_tools.py:453-458` `_auto_derive_env` comment).
 
-**The most robust runtime anchor** — derive the release root from the loader's own resolved dir: `daemon/services/prompt_refresh.py:660` takes `resolved_dir = Path(agent_meta.path)` from the registry, then `:745`: `release_root = resolved_dir.parent.parent`, and reads `<release_root>/manifest.json` via `load_release_manifest` (:747). This is anchored to the tree the daemon ACTUALLY reads, immune to CWD and to bundle-vs-binary confusion. A guidelines reader should either (a) reuse the `sys.frozen → Path(sys.executable).parent` fork (matches the agents/ tree the loader serves) or (b) ride the registry-resolved agents root (`registry._agents_dir.parent` / `resolved_dir.parent.parent`).
+**The most robust runtime anchor** — derive the release root from the loader's own resolved dir: `daemon/services/prompt_refresh.py:660` takes `resolved_dir = Path(agent_meta.path)` from the registry, then `:745`: `release_root = resolved_dir.parent.parent`, and reads the manifest via `load_release_manifest(release_root)` (:747) — the function takes the RELEASE ROOT and joins `manifest.json` internally (`release_manifest.py:96` def, join at `:104`), it does NOT take a manifest path. This is anchored to the tree the daemon ACTUALLY reads, immune to CWD and to bundle-vs-binary confusion. A guidelines reader should either (a) reuse the `sys.frozen → Path(sys.executable).parent` fork (matches the agents/ tree the loader serves) or (b) ride the registry-resolved agents root (`registry._agents_dir.parent` / `resolved_dir.parent.parent`).
 
 ### C.3 Dev-checkout sibling behavior
 
@@ -145,7 +145,7 @@ Pattern summary: explicit `release_root`/base argument > monkeypatch of the reso
 
 **Stage-time gates (stage.sh):**
 1. Floor SET+VALIDATE (:627-651): reads the constant from the built tree's `upgrade_tools.py` (:644-645); `_pipeline_scripts_floor_verdict` (lib.sh:746-775) requires it to be a commit sha AND **an ancestor of the built tree** (`git -C $REPO_ROOT merge-base --is-ancestor <floor> HEAD`, refusal text lib.sh:773) — i.e. the floor must name a commit the release itself contains. Comparison is against the BUILT TREE's HEAD — **origin/latest ancestry is not directly checked; containment in the built tree is** (the built tree is the tagged feature-merged tip, so containment implies latest-ancestry in practice).
-2. Stamp SET+VALIDATE W-2 (:653-672): `PIPELINE_SCRIPTS_REV` must be 40-hex, resolve in the tree, and EQUAL the floor (D6-8; lib.sh:707-738).
+2. Stamp SET+VALIDATE W-2 (:653-672): `PIPELINE_SCRIPTS_REV` must be 40-hex, resolve in the tree, and EQUAL the floor (D6-8; `_pipeline_scripts_stamp_verdict` = lib.sh:727-742 — the earlier :707-738 span was the doc-comment-inclusive range, off-target).
 3. Stamp COVERAGE (:674-699): `executor_family_verify_stamp_coverage` (executor_family.sh:48-50) lists family paths **that do not EXIST** at the stamped commit — existence-only, not content-equality. Remedy text :695: "re-pin PIPELINE_SCRIPTS_REV (scripts/upgrade/lib.sh) AND PIPELINE_SCRIPTS_FLOOR_COMMIT (daemon/tools/upgrade_tools.py) to a merge commit that contains the WHOLE shipped family".
 
 **Arm-time guard (daemon):** `scripts_dir_provenance_verdict` (`upgrade_tools.py:4210-4390`): git dir → stamp must parse from `<dir>/lib.sh`, floor compared by **ancestry against the pinned scripts dir's HEAD** (:4352-4354 `merge-base --is-ancestor floor HEAD`); `anc_rc==1` → refuse `stale-scripts` (:4360-4367); unset floor → refuse `floor-unset` (:4343-4351); escape `ENSEMBLE_ALLOW_STALE_SCRIPTS=1` warn-only (:4259-4266); non-git pinned dir warn-only (:4377-4390).

@@ -210,7 +210,9 @@ have NO entry — a guidelines entry would be inert-to-wrong. D3 stands.
   `scripts_tree_sha256` already present (`stage.sh:717`), `guidelines_tree_sha256` is the **5th tree sha
   and 8th sha256-suffixed key**. Fix at: plan-overview.md:18, success criterion 7, release-recipe.md step 6,
   phase3-plan.md T5. Reword to "a guidelines tree sha alongside agents/frontend/plugins/scripts" (safest —
-  no ordinal to go stale).
+  no ordinal to go stale). Fold-in whole-package grep found FOUR more occurrences beyond the
+  four listed above — all fixed: plan-overview.md:103 (binding invariant 3), phase3-plan.md:5
+  (objective), research-release-seam.md §A.3-2 heading, test-matrix.md:47 (row D2 — reviewer O2's site).
 - **C2 — consumer-table row status.sh.** "zero manifest refs (grep-verified)" is FALSE: status.sh reads
   `rollback_safe` (`:88`) and `manifest_path` + `binary_version` (`:123-124`), all key-addressed. Verdict
   (tolerated) unchanged; fix the row (phase3-plan §Consumers; research §B).
@@ -225,11 +227,17 @@ have NO entry — a guidelines entry would be inert-to-wrong. D3 stands.
 - **C5 — release-recipe step 2 (disclosure duty).** Note the bump commit's sanctioned file set: 4 version
   files + CHANGELOG + the 2 floor-constant files (sanctioned by `stage.sh:633-641` cadence; disclose at ceremony).
 - **C6 — anchor fixes in plan prose.** metrics gate ladder = `metrics_read.py:1404-1417` (not `:222-227`,
-  which is the token-constants region; tokens at `:224-226`); `*_if_available` wrappers live in
-  `daemon/tools/instance.py:2684-2964` (notify at `:2897`), not module-adjacent; prompt-assent extend block
-  = `instance.py:7105-7110` (not `:7102-7107`); `load_release_manifest(release_root)` takes the ROOT and
-  joins `manifest.json` internally (`release_manifest.py:96/:103` — research §C.2's `:747` phrasing
-  implied a path argument); `_pipeline_scripts_stamp_verdict` = `lib.sh:727-742`.
+  which is the token-constants region; tokens at `:224-227`); the stale `:222-227` carrier sites to fix
+  alongside: phase1-plan.md T2 acceptance text, test-matrix.md row A(i), AND research-registration-pattern.md
+  §A(iv) (third carrier, found in the fold-in grep sweep); `*_if_available` wrappers live in
+  `daemon/tools/instance.py:2684-2964` (first def :2684, notify at `:2897`, last def :2964 — all verified),
+  not module-adjacent; prompt-assent extend block = `instance.py:7102-7106` — VERIFIED by grep in the
+  fold-in pass (the `tools.extend(` call spans 7102-7106; THIS document's earlier `:7105-7110` and the
+  plan's `:7102-7107` were both off — 7107 is a blank line, 7105-7110 runs into the mission-tools comment);
+  `load_release_manifest(release_root)` takes the ROOT and joins `manifest.json` internally
+  (`release_manifest.py:96` def, join at `:104` — research §C.2's `:747` phrasing implied a path argument);
+  `_pipeline_scripts_stamp_verdict` = `lib.sh:727-742` (verified; the plan's `:707-738` was the
+  doc-comment-inclusive span).
 
 ## Optional, non-binding (🟢 — take or route, never block on these)
 
