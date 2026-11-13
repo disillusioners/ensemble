@@ -105,6 +105,10 @@ SONIC_AGENTS = (
 # read-trio {explain_image, image_get, image_list} granted to leader/
 # developer/coder/reviewer via allow "image" + deny "image_save" (critic
 # pattern); sonic-tester UNCHANGED.
+# ---- guideline-read-tool amendment (2026-11-13): "guidelines" (privileged
+# category #22 — the READ-ONLY shipped-guideline window) tail-appended to
+# sonic-leader's allow ONLY; sonic-developer/coder/reviewer/tester UNCHANGED.
+# The FIRST privileged grant to a sonic agent (ruling 2026-11-13).
 # ----
 FROZEN_TEAMS = {
     "sonic-leader": ["sonic-developer", "sonic-coder", "sonic-reviewer",
@@ -119,7 +123,7 @@ FROZEN_TOOLS = {
     "sonic-leader": {
         "allow": ["instance", "bash", "filesystem", "time", "self", "help",
                   "context", "shared_meta_kv", "midflight", "knowledge", "image",
-                  "pok", "nest-report"],
+                  "pok", "nest-report", "guidelines"],
         "deny": ["edit_file", "write_file", "image_save"],
     },
     "sonic-developer": {
@@ -712,12 +716,25 @@ def a8_ari_pins(fx: Fixture, run_generator_check: bool = False) -> None:
 
 def a9_steady_team(fx: Fixture) -> None:
     """A9: changed agents/ set (committed UNION worktree) = sonic-* +
-    baseline + exactly ari/rule.md; positive shape: sonic dirs present."""
+    baseline + exactly ari/rule.md; positive shape: sonic dirs present.
+
+    guideline-read-tool amendment (2026-11-13): the ``guidelines``
+    privileged grant (entry #22 — the FIRST privileged grant to a sonic
+    agent, sonic-leader) touched FOUR allow arrays; sonic-leader's
+    meta.json is admitted by the sonic-* prefix above, so the non-sonic
+    residual admits exactly the OTHER THREE grants beside ari/rule.md.
+    """
+    guideline_read_tool_grants = [
+        "agents/ari/meta.json",
+        "agents/leader/meta.json",
+        "agents/devops/meta.json",
+    ]
     residual = [p for p in fx.agents_changed
                 if not p.startswith("agents/sonic-")
                 and p != BASELINE_FILE]
-    if residual != [ARI_RULE]:
-        extra = [p for p in residual if p != ARI_RULE]
+    if sorted(residual) != sorted([ARI_RULE] + guideline_read_tool_grants):
+        extra = [p for p in residual
+                 if p != ARI_RULE and p not in guideline_read_tool_grants]
         raise CheckFailure("A9", f"unexpected agents/ edit: {extra or residual}")
     if ARI_RULE not in fx.agents_changed:
         raise CheckFailure("A9", f"expected {ARI_RULE} in the changed set (positive shape)")

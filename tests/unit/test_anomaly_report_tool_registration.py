@@ -380,7 +380,7 @@ class TestTheNonPrivilegedCategory:
         later added the READ-ONLY ``nest-report-read`` (entry #18) —
         the count moved 17 → 18 with ALL its pin sites in that phase's
         commit."""
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 21
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 22
         assert "nest-report" not in PRIVILEGED_TOOL_CATEGORIES
         assert "nest-report-read" in PRIVILEGED_TOOL_CATEGORIES
 

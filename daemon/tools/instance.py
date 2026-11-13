@@ -292,6 +292,7 @@ from .notify_user import create_notify_user_tools
 from .metrics_read import create_metrics_read_tools
 from .prompt_reload import create_prompt_reload_tools
 from .prompt_assent import create_prompt_assent_tools
+from .guidelines import create_guidelines_tools
 from .nest_report import create_nest_report_tools
 from .nest_report_read import create_nest_report_read_tools
 from .memoir import create_memoir_tools
@@ -2954,6 +2955,44 @@ def create_prompt_assent_tools_if_available(manager, current_instance_id: str, a
     entry + construction).
     """
     return create_prompt_assent_tools(
+        manager,
+        current_instance_id=current_instance_id,
+        agent_id=agent_id,
+        agent_tag=agent_tag,
+    )
+
+
+def create_guidelines_tools_if_available(manager, current_instance_id: str, agent_id: str, agent_tag: str | None = None) -> list:
+    """Create the read-only guidelines tools for one instance/agent.
+
+    guideline-read-tool lane (2026-11-13) — the tools read the
+    release payload directory resolved at CALL time (frozen fork:
+    ``<exe-dir>/guidelines`` = ``releases/<v>/guidelines/``; dev: the
+    repo ``docs/guidelines``). The factory itself ALWAYS constructs
+    (the tools refuse cleanly with the typed
+    ``guidelines-payload-unavailable`` envelope when the payload is
+    absent) — there is no service-presence wiring check here, unlike
+    the sibling ``*_if_available`` factories; a release predating the
+    guidelines payload boots and registers cleanly (adjudication
+    Q1(d)).
+
+    Per-agent visibility is scoped afterwards by ``_apply_tool_filter``
+    via the ``guidelines`` PRIVILEGED category (entry #22) — granted
+    via the explicit ``tools.allow: ["guidelines"]`` entries in
+    agents/ari + agents/leader + agents/devops + agents/sonic-leader
+    meta.json and NOWHERE else (the FIRST privileged grant to a sonic
+    agent: sonic-leader, ruling 2026-11-13). The privileged category
+    is NOT sufficient on its own — a literal tool name in an allow
+    list bypasses the category gate — so every tool body ALSO carries
+    its own ``GUIDELINES_AUTHORIZED_AGENTS`` gate. Both gates are
+    required.
+
+    Decorator-only registration is SILENTLY INVISIBLE — the extend of
+    this factory's return list inside ``create_instance_tools`` is the
+    third step of the three-step registration seam (decorator + registry
+    entry + construction).
+    """
+    return create_guidelines_tools(
         manager,
         current_instance_id=current_instance_id,
         agent_id=agent_id,
@@ -7101,6 +7140,38 @@ Returns:
     # SWITCH-STATE-INDEPENDENT.
     tools.extend(
         create_prompt_assent_tools_if_available(
+            manager, current_instance_id, agent_id, agent_tag=version_tag
+        )
+    )
+
+    # ── Guidelines tools (guideline-read-tool lane, 2026-11-13) ────────
+    # Same critical list-append pattern as board_tool_list /
+    # self_alarm_tool_list / the prompt-assent extend above:
+    # decorator-only registration is SILENTLY INVISIBLE — this extend is
+    # the third step of the three-step registration seam (decorator +
+    # registry entries + construction).
+    #
+    # PLACEMENT: this extend MUST precede ``create_help_tool`` (which
+    # snapshots the tool list into its index), ``scan_tools_for_full_docs``
+    # and ``_apply_tool_filter`` (which applies the per-agent allow list
+    # and the privileged-category default-deny strip). A later extend is
+    # either invisible to the help tool or BYPASSES the privileged strip.
+    #
+    # The category is PRIVILEGED (entry #22): the shipped guideline
+    # corpus is the doctrine layer for dormant / config-armed /
+    # ceremony-gated / silently-biting features — the empty-allow
+    # inherit universe must never auto-grant it. The audience is spelled
+    # by the ``tools.allow: ["guidelines"]`` entries (ari + leader +
+    # devops + sonic-leader ONLY — the FIRST privileged grant to a
+    # sonic agent, ruling 2026-11-13) AND the tool bodies' SECOND,
+    # independent GUIDELINES_AUTHORIZED_AGENTS gate — a LITERAL tool
+    # name in an allow list bypasses the category gate, so the category
+    # alone cannot spell the audience. The tools are READ-ONLY over THE
+    # RELEASE PAYLOAD (no write path, no cache, no DB) and the factory
+    # ALWAYS constructs — a release predating the payload registers
+    # cleanly and refuses with the typed payload envelope at call time.
+    tools.extend(
+        create_guidelines_tools_if_available(
             manager, current_instance_id, agent_id, agent_tag=version_tag
         )
     )

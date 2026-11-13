@@ -816,11 +816,11 @@ def test_privileged_category_set_is_pinned() -> None:
     override 2026-09-16 (D4 reversed; see decisions.md §D4
     override note).
 
-    The exact-set pin lives at ELEVEN sites (6 ``EXPECTED_PRIVILEGED_SET``
-    constants + 5 inline ``frozenset`` literals — 11 comparison sites +
-    7 count pins + 1 mutation-pack string pair in total, re-grepped with
-    BOTH greps 2026-11-05; plus the 1 VERIFY-ONLY ari trailing-entry
-    pin):
+    The exact-set pin lives at TWELVE sites (7 ``EXPECTED_PRIVILEGED_SET``
+    constants + 5 inline ``frozenset`` literals — 12 comparison sites +
+    13 count pins + 2 mutation-pack string pairs in total, re-grepped
+    with BOTH greps 2026-11-13 by the guideline-read-tool lane; plus
+    the 1 VERIFY-ONLY ari trailing-entry pin):
     ``tests/unit/tools/test_upgrade_registration.py``,
     ``tests/unit/tools/test_attestation_registration.py``,
     ``tests/integration/test_maintenancer_spawn_resolves_tools.py``,
@@ -830,11 +830,18 @@ def test_privileged_category_set_is_pinned() -> None:
     ``tests/unit/test_self_alarm_registration.py``,
     ``tests/unit/test_instance_ops_registration.py``,
     ``tests/unit/test_wedge_capture_registration.py``,
-    ``tests/unit/test_notify_user_registration.py`` and
-    ``tests/unit/test_metrics_read_registration.py``
+    ``tests/unit/test_notify_user_registration.py``,
+    ``tests/unit/test_metrics_read_registration.py``,
+    ``tests/unit/tools/test_nest_report_read_registration.py``,
+    ``tests/unit/test_memoir_registration.py``,
+    ``tests/unit/tools/test_prompt_reload_pins.py``,
+    ``tests/unit/tools/test_prompt_assent_registration.py``,
+    ``tests/unit/test_anomaly_report_tool_registration.py`` and
+    ``tests/unit/tools/test_guidelines_registration.py``
     (the SAME-PR RULE per D18 / A14; the census was re-derived by grep
-    at the memoir ceremony, 2026-11-05 — the previous "TEN sites … 15
-    EDIT sites" claim omitted three files and undercounted the pins).
+    at the 2026-11-13 guidelines ceremony — the previous "ELEVEN sites
+    … 7 count pins" claim dated 2026-11-05 omitted the five files that
+    landed after it and undercounted the pins).
     This integration-layer sanity pin duplicates the set check to ensure
     the OFF flag test runs in a category universe where the trio is the
     canonical set.
@@ -938,12 +945,19 @@ def test_privileged_category_set_is_pinned() -> None:
     # prompt-assent (2026-11-10, prompt-assent lane): privileged entry #21
     # (ari-exactly; see daemon/tools/_tool_registry.py).
     "prompt-assent",
+    # guidelines (2026-11-13, guideline-read-tool lane): the READ-ONLY
+    # window onto the shipped guideline corpus — privileged entry #22;
+    # the FIRST privileged grant to a sonic agent (sonic-leader,
+    # ruling 2026-11-13); see daemon/tools/_tool_registry.py.
+    "guidelines",
 }
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "
         f"trio + W4 ens-env + REWORK view-views + "
         f"agent-secrets-P1 'secrets' + settings-worker-slots-P2 "
         f"'settings' + ari-tools-P1 'board' + ari-tools-P2 'self-alarm' + "
-        f"ari-tools-P3 'view-write' + ari-tools-P3 'board-link'; "
+        f"ari-tools-P3 'view-write' + ari-tools-P3 'board-link' + "
+        f"the later privileged lanes through entry #21 prompt-assent "
+        f"and entry #22 guidelines (2026-11-13); "
         f"got {PRIVILEGED_TOOL_CATEGORIES}"
     )
