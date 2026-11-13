@@ -102,3 +102,11 @@
 - **rollback_safe:** true (source=explicit)
 - **Staged at:** 2026-11-13T11:12:11Z; known_schema_gen `20261112_124200_add_snapshot_agent_space_key.sql`; contains_contract_phase true
 - **Promote:** NOT performed (Emperor-owned). Stage worktree `/home/nea/ensemble-src-wt-stage-v0301` kept.
+
+### FRESHNESS OVERRIDE — TAKEN (manual audit record; system journal append FAILED)
+
+- **Facts**: stage-tree HEAD `00b0af633` (v0.30.1 bump commit); integration-tip ref origin/latest `ee2b46d3b` (LOCAL, unpushed BY DESIGN — the commission's no-push fence makes the guard premise HEAD==tip unsatisfiable in an unpushed feature release lane); refusal class `non-tip-tree`; surviving system evidence `/tmp/stage_v0301.txt`. Verbatim log lines (from `/tmp/stage_v0301.txt`):
+  - `upgrade-stage[live]: WARN: FRESHNESS OVERRIDE: tip-identity mismatch (HEAD=00b0af633a075a93afb153b2d6bbd44ed18f78ed tip=ee2b46d3b01e1d956aac7ad1c5dca5ad9f209ff8) — proceeding (operator accepted; journaled)`
+  - `upgrade-stage[live]: WARN: freshness-override journal append FAILED (best-effort) — override is taken but the audit trail is incomplete; reason=non-tip-tree`
+- **Adjudication**: leader accepted the override 2026-11-13 (this lane). Rationale: artifact integrity is independently proven — stage verification S1–S5 (4-way sha `82c60f4f…`, sidecar git_head == tag commit, git_dirty=false, baseline 201, content invariants, live untouched); the tag pins the exact content; finalize merges the tag commit into latest, matching house precedent (v0.30.0: latest = tag commit + 1 verification record).
+- **System defect noted**: stage.sh freshness-override journal append fails for non-tip trees (audit trail incomplete) — anomaly filed by the leader.
