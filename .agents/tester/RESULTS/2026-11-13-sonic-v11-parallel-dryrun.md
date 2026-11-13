@@ -207,3 +207,27 @@ PASS — `sk-proj-` 0 hits · `sk-ant-` 0 hits · OPENAI key prefix `e33c34f5af4
 ## 11.8 Re-run evidence inventory (`/tmp/ensemble-sonic-dryrun-r2/evidence/`, 0600)
 
 `R2-preflight.txt` · `R2-probes.txt` · `R2-bootscan.txt` · `R2-sonic-developer.json` · `R2-dispatch.txt` · `R2-status-timeline.txt` · `R2-final-roster.json` · `messages-<7 instances>.json` (incl. explorer + kb-writer) · `V9-14-timings-<lane>.txt` ×7 · `R2-V-matrix.txt` · `R2-V2-V11-git.txt` · `R2-V6-postrun-isolation.txt` · `R2-kbwriter-disclosure.txt` · `R2-MF2-scrub.txt` · `HANDOFF.md.txt` (67 lines) · `R2-final-git-graph.txt` · `R2-teardown.txt`.
+
+## 11.9 V12 re-adjudication — refined census (leader ruling, 2026-11-13)
+
+**Ruling (leader):** criterion refinement — NOT a third run, NOT a coder prompt amendment. The Emperor's requirement is that the coder explores the SOURCE ("sonic coder still has explore but read file/src"); the TOOL is not specified. coderB's bash `cat` IS source exploration. The original bash-exclusion was a false-tightening: bash was dropped as *ambiguous* evidence ("coders must bash to commit"), which does not exclude bash READ commands as exploration evidence.
+
+**Refined V12/F15 census (authoritative for this re-adjudication):**
+1. Admissible file-exploration evidence = ANY file-read call: filesystem `read_file`/`grep_files`/`glob_files`/`list_directory` **OR** bash-based reads (`cat`, `head`, `tail`, `sed -n`, `grep`, `rg`, `awk`, `nl`). Count each occurrence; V12 passes at census ≥ 1.
+2. **ABSOLUTE and unchanged:** RAG `explore` tool calls == 0 per coder (the two-sided pin's exclusion side is what the Emperor mandated).
+3. NON-evidence: bash commit/merge/write commands (`git commit`, `git merge`, `git add`), `edit_file`, `write_file` — never counted as exploration.
+
+**Re-adjudication on the EXISTING run-2 transcripts (no new boot; evidence-preserving — same transcripts, refined mapping only):**
+
+| Coder | Tool-reads | Bash-reads | Refined census | RAG `explore` | Verdict |
+|---|---|---|---|---|---|
+| coderA `b7eb5210` (moda/mathx) | 6 (`read_file`×4 + `glob_files`×2) | 0 | **6** | 0 | **PASS** |
+| coderB `60ce161d` (modb/strix) | 0 | **5** (`cat`×4: strix.py, test_strix.py, mathx.py, strix.py; `tail`×1 in a pytest pipe) | **5** | 0 | **PASS** |
+
+- **NO-NEITHER check:** explicitly CONFIRMED — no coder has tool-reads==0 AND bash-reads==0 (coderA has 6 tool-reads; coderB has 5 bash-reads).
+- **Count-delta disclosure:** the earlier informal peek reported coderB "bash cat ×6"; the verified per-occurrence recompute is **5** (cat×4 + tail×1). Verdict unaffected (≥1). The recompute artifact (`R2-V12-refined-census.txt`, 0600) lists every counted command snippet.
+- **Lane sanity (same refined rules):** developer `explore`=1 · reviewer `explore`=0 · tester `explore`=0 — unchanged.
+
+**Updated V-leg matrix under the refined census: V0–V14 = 15 PASS / 0 FAIL.**
+
+**Residual (spec text):** the criterion wording in `phase3-dryrun-spec.md` V12/F15 is being amended by the developer lane (commit pending/imminent). This re-adjudication cites that amendment; the tester does NOT edit the graded criterion. **No third run was performed** — the re-adjudication is evidence-preserving (identical transcripts; refined mapping only).
