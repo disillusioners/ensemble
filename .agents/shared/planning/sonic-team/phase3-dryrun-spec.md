@@ -1,131 +1,135 @@
-# Phase 3 — Dry-run E2E: Bounded Spec (S10)
+# Phase 3 — Dry-run E2E: PARALLEL architecture re-proof (COMBINED v1.1+v1.2)
 
-**Plan set:** ENSEMBLE-31 "sonic team v1" · **Phase:** 3 of 4 (0 Preflight & input gate, 1 Content build, 2 Verification, 3 Dry-run E2E, 4 Staging/promote-ready/NO promote)
-**Owner:** W3 · **Status:** SPEC — the dry-run is executed ONCE, by an implementer, never by this plan lane
-**Branch:** `feature/sonic-team-v1` @ base `ac9849bf7` (= origin/latest at plan time)
-**Inputs:** `findings-B-infra.md` §2 (recursion caps; 125-min task cap `daemon/config.py:2096`), §4 (worker pool = 5, handoff latency p50/p90, avoid `invoke_agent_and_wait`), §6 (giter Worktree Mode, `agents/giter/workflow.md:78-103`) · `findings-C-risk.md` §4 (bash 1800 s cap; `bash_spawn_registry` is NOT a duration source) · **`dryrun-boot-procedure.md` (PRESENT — VERIFIED 2026-11-12, triple-exercised; plus the batch-2 AMENDMENT)** + helpers `fenced-launch.py`, `dryrun-verify.py` · **`plan-review.md`** (council APPROVE-WITH-NOTES; batch-2 MF-1/MF-2 folded here)
-**[Leg A] runtime numbers (verbatim):** median feature commission 8–41 h wall; dispatch p50 **775 s** / p90 **4,258 s**; 125-min task cap; bash 1800 s cap fired ~79×/window, >10 min = 0.106% of 75k runs; coding-lane 402 ACTIVE until 2026-11-17T11:43Z (agentic/vision CLEAN); 6× recursion-limit-300 terminal events.
+**Plan set:** ENSEMBLE-31 "sonic team" · **Phase:** 3 of 4 (0 Preflight, 1 Content build, 2 Verification, 3 Dry-run E2E, 4 Staging/promote-ready/NO promote)
+**Status:** SPEC — REWRITTEN 2026-11-13 for the COMBINED v1.1+v1.2 architecture (Emperor ruling: one release, one ceremony). This file SUPERSEDES the v1.1-only presence-assertion version of the V-criteria (V9–V11) — the superseded text lives in this branch's git history; the safety pins (§3) and the procedure audit (§2) carry over UNCHANGED.
+**Branch:** `feature/sonic-team-v1-1` (combined rework lane)
+**What is being proven:** the FIVE-agent parallel architecture end-to-end on a scratch, FENCED daemon booted from this worktree with the REAL agent definitions: `sonic-leader` intake + route → `sonic-developer` (ONE explore → module split → PARALLEL sonic-coders → dependency-order merge → HANDOFF-v2) → `sonic-reviewer` + `sonic-tester` at INTEGRATION level → `sonic-leader` verdict + write-once-at-end knowledge moment.
+**Inputs:** `dryrun-boot-procedure.md` (VERIFIED; + its AMENDMENT blocks) + helpers `fenced-launch.py`, `dryrun-verify.py` · `phase1-implementation-spec-v1.1.md` (the combined frozen strings) · the v1.1 §3 safety pins (unchanged, §3 here).
 
 ## 1. Purpose, scope, gate semantics
 
-Prove the sonic loop end-to-end on a **scratch, fenced** daemon booted from this worktree with the REAL agent definitions: `sonic-leader` intake → `sonic-coder` one-shot coding turn → `HANDOFF.md` (7 frozen fields) → `sonic-reviewer` verdict → `sonic-tester` scoped run → `giter` commit on a scratch branch.
+- **PASS ⇒** Phase 4 (staging per the V1-1-AMENDMENT ceremony recipe — PLAN ONLY) MAY proceed. **FAIL ⇒** nothing is staged; write an honest failure report with the evidence bundle.
+- **Exactly ONE run.** No retry loops. (A single pre-flight retry is allowed only for an evidenced environment/config defect that prevented the daemon from ever becoming healthy — F1 class — never for an agent-behaviour failure.)
+- **Zero live contact** is a hard invariant: the live daemon, the demo daemon, the live DB, and the live install dirs are untouched — asserted pre/post (§3 pins + `dryrun-verify.py`). Pids are point-in-time: re-read them immediately before the run.
+- Out of scope: snapshot warm-start chain, performance/cost measurement (kb-writer CHEAP verdict is report-only — `V1-1-AMENDMENT.md`).
 
-- **PASS ⇒** Phase 4 (staging) MAY proceed. **FAIL ⇒** nothing is staged; write an honest failure report with the evidence bundle (§6).
-- **Exactly ONE run.** No retry loops. (A single pre-flight retry is allowed only for an evidenced environment/config defect that prevented the daemon from ever becoming healthy — §6 F1 — never for an agent-behaviour failure.)
-- **Zero live contact** is a hard invariant: the live daemon (`:9797` + metrics `:9798`, live pid observed **2147839** at procedure-write time), the demo daemon (`:7979`, pid **3547188**), the live DB, and `/home/nea/agents-ensemble` are untouched — asserted pre/post (§5). Pids are point-in-time: **re-read them immediately before the run** (they are inputs to `dryrun-verify.py`), never trust these literals.
+## 2. Procedure source — audited, unchanged requirements
 
-Out of scope: snapshot warm-start chain (R15 toggle default OFF; v1 uses the handoff file — `decisions.md` D2; not exercised — §8.4), performance/cost measurement (no token telemetry daemon-side — `findings-C-risk.md` §5a).
+**`dryrun-boot-procedure.md` remains the AUTHORITATIVE boot/teardown recipe**; the implementer re-audits the P1–P11 checklist before running anything; any violation ⇒ report the gap, do not improvise. The P1–P11 properties (env fence, scratch ports 8797/8798, `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` explicit, health probes, supervision+logging, teardown, HOME fence, no live contact, exactness, **FD fence via `fenced-launch.py` — MANDATORY for any boot**, LLM credential forwarding per the batch-2 amendment) all still apply verbatim. The parallel run ADDS work-item topology (§4 D1') but does NOT change any boot property.
 
-## 2. Procedure source — PRESENT and audited
+**Bash-overlay guard (binding):** the agent bash tool fail-closes any command whose TEXT contains live tokens; all liveness/isolation checks use unfiltered `ss -ltnp`, PID-based checks, and `dryrun-verify.py`. Never put a literal live port token in a command and never work around the refusal.
 
-**`.agents/shared/planning/sonic-team/dryrun-boot-procedure.md` — STATUS AT PLAN TIME (final): PRESENT, marked VERIFIED 2026-11-12, exercised end-to-end three times** (DB create → boot → `dryrun-verify.py` → SIGTERM → DROP). (At first draft of this file it was absent/pending devops; it landed during plan writing — recorded in §8.1.) The implementer consumes it as the AUTHORITATIVE boot/teardown recipe and re-audits the P1–P10 checklist before running anything; any violation ⇒ report the gap, do not improvise.
+## 3. SAFETY PINS — VERBATIM, non-negotiable (carried over unchanged)
 
-### 2.1 Minimum required properties — audit result against the delivered procedure
-
-| # | Property | Required | Delivered procedure | Audit |
-|---|---|---|---|---|
-| P1 | Explicit env fence | `ENSEMBLE_SELF_ENV=dev`; full `POSTGRES_*` set; `POSTGRES_DB != ensemble_prod`; fenced `.env` before any daemon run | sources the worktree `.env` (`set -a; . ./.env`) then passes an explicit `env -i` block incl. `ENSEMBLE_SELF_ENV=dev` and every `POSTGRES_*`; DB = `ensemble_sonic_dryrun` | **PASS** |
-| P2 | Scratch ports only | free scratch port(s), verified; none of 9797/9798/7979/8079 | **8797/8798** (metrics = API+1 at this base, `daemon/services/metrics_listener.py`), free-check + fallbacks 8897/8898, 8997/8998; `PORT` set explicitly — **`DAEMON_PORT` is INERT** (config.yaml `port: ${PORT:-8088}`) | **PASS** |
-| P3 | Boot-sweep pin | `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` explicit | in the `env -i` block | **PASS** |
-| P4 | Health probes | `/livez` 200 + `/readyz` 200 within deadline | 2 s poll loop; observed ready **≈17 s warm / ≈23 s cold** | **PASS** |
-| P5 | Supervision + logging | background start, known log path, graceful stop | `proc_run` preferred (portable `setsid nohup` fallback); logs `/tmp/ensemble-sonic-dryrun/logs/boot.log` | **PASS** |
-| P6 | Teardown | stop → DB drop → dirs/claims cleanup, every exit path | SIGTERM by exact pid, port-freed check, `DROP DATABASE ensemble_sonic_dryrun`, claim-file removal | **PASS** |
-| P7 | HOME fence | no HOME-derived live install paths | `HOME=/tmp/ensemble-sonic-dryrun/home` (mode 700); all writes under `/tmp` via `ENSEMBLE_DATA_DIR`/`DAEMON_LOG_DIR` | **PASS** |
-| P8 | No live contact | no `:9797` request, no live DSN, no live-install writes | stated + verified (§5/§8 of the procedure) | **PASS** |
-| P9 | Exactness | copy-paste commands | every block is copy-paste executable | **PASS** |
-| **P10** | **FD fence (load-bearing, non-obvious)** | the launcher must close inherited fds — agent shells are children of the LIVE daemon and inherit its non-CLOEXEC listening socket (fd=6 = 9797) | **`fenced-launch.py`** (`os.closerange(3,4096)` then `execv`) is MANDATORY; direct `python -m daemon` was PROVEN to hold the live 9797 listener fd (wi-2454ede3 port-capture class); post-fence scratch pid appears 0× on 9797/9798/7979 | **PASS** |
-| **P11** | **LLM credential forwarding (MF-1)** | the four `OPENAI_*` names (`OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL_BACKUP`) forwarded into the `env -i` block **by name** — values from a 0600 scratch env file sourced from the invoking shell (never argv/echo/`set -x`); **D3.5 lane probe PASSES before D4** | **AMENDMENT (batch 2)** appended to `dryrun-boot-procedure.md`: OPENAI_* forwarding + scratch-env mechanism + D3.5 + pins (j)(k)(l). The original §4 block forwards only POSTGRES_*/PORT/HOME and `daemon/config.py` reads `OPENAI_*` from process env (no `load_dotenv` in the boot path) — the boot-path-only validation (`:5-6`) proves nothing about the lane | **PASS via amendment** |
-
-**Conclusion: the procedure satisfies P1–P10.** Two of its own pins are extra (not in my original checklist) and are now binding here: the FD fence (P10) and the **bash-overlay guard** — the agent bash tool fail-closes any command whose TEXT contains live tokens (`ensemble-prod`, `9797`, …), so all liveness/isolation checks must use unfiltered `ss -ltnp`, PID-based checks, and `dryrun-verify.py` (which reads `ss` inside Python). **Never** put a literal live port token in a command and never "work around" the refusal by targeting live processes.
-
-## 3. SAFETY PINS — VERBATIM, non-negotiable
-
-1. **`ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` pinned EXPLICITLY** in the daemon's environment. A daemon-child shell inherits the ambient guard; with the var absent the boot sweep can SIGTERM/SIGKILL live processes (2026-10-31: a staged smoke killed the LIVE launcher + ensemble-prod pair). **NEVER `env -u ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES`** — the `-u` form strips the ambient `=0` guard and re-arms the sweep. Pin `=0`; never unset.
-2. **Launch ONLY through `fenced-launch.py`.** Agent bash/`proc_run` shells are children of the live daemon and inherit its non-CLOEXEC listener fd (fd=6 = 9797); a direct launch holds the live listener without binding it. `env -i` does NOT close inherited fds — only the launcher's `closerange(3,4096)` does.
-3. **NEVER `env -u POSTGRES_*`** — bash does not glob env names; the glob form is a silent NO-OP and an ambient `POSTGRES_DB=ensemble_prod` stays visible. Scrub per variable, or (as the procedure does) `env -i` + explicit `POSTGRES_*` assignment.
-4. **Test/dry-run scripts must NEVER resolve live-shaped HOME-derived install paths.** Fake HOME (`/tmp/ensemble-sonic-dryrun/home`) + escape guard; the 2026-10-12 incidents deleted a live install twice via an unfenced live-shape fixture.
+1. **`ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` pinned EXPLICITLY** in the daemon's environment. NEVER `env -u ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES` — the `-u` form strips the ambient `=0` guard and re-arms the sweep. Pin `=0`; never unset.
+2. **Launch ONLY through `fenced-launch.py`.** Agent bash/`proc_run` shells are children of the live daemon and inherit its non-CLOEXEC listener fd; `env -i` does NOT close inherited fds — only the launcher's `closerange(3,4096)` does. Any boot without the launcher is F3 (CRITICAL).
+3. **NEVER `env -u POSTGRES_*`** — bash does not glob env names; the glob form is a silent NO-OP. Scrub per variable, or `env -i` + explicit `POSTGRES_*` assignment.
+4. **Test/dry-run scripts must NEVER resolve live-shaped HOME-derived install paths.** Fake HOME + escape guard.
 5. **Scratch ports only** — 8797/8798 (fallbacks 8897/8898, 8997/8998); free-check before boot; never 9797/9798/7979/8079.
-6. **Zero live contact** — live daemon, live DB, live install dirs untouched; asserted pre/post via `dryrun-verify.py` + claim files (§5).
-7. **Kill only by exact PID.** Broad `pkill` is BANNED (wi-2454ede3); the authoritative scratch pid is the `pid` in the port-claims file (`/tmp/ensemble-port-claims-1000/*.json`, `install_dir` = this worktree).
-8. **Bash-overlay guard compliance** (§2.1 note): guard-safe checks only; literal live tokens in command text are refused and must not be circumvented.
-9. **giter's Worktree Mode contract** applies to every commit step: worktree per committing task, fenced `.env` before any daemon run, quiescence before any merge, merge IS the commit point (`agents/giter/workflow.md:78-103`). No merge tonight.
-10. **(i) `ENSEMBLE_DB_AMBIENT_ALLOW=1`** — REQUIRED on the first boot (no `data/ensemble.json` yet with `POSTGRES_HOST`+`POSTGRES_DB` present → the DB-resolution guard exits 78 without it). It is the *documented sanctioned* first-boot flag (`dryrun-boot-procedure.md:56-60`), not a guard bypass; no longer needed once `ensemble.json` exists (tier 1). Restated here so AC-P3-3 asserts it from the spec, not only from the procedure (review advisory #7).
-11. **(j) `umask 077` at harness start** — applies to ALL of `/tmp/ensemble-sonic-dryrun/**` (data/home/logs/evidence); this SUPERSEDES the lone `chmod 700 home` as the first rule (keep the chmod, umask-first). Re-assert `chmod 600` on every file written into the scratch tree.
-12. **(k) env capture is permitted ONLY as a redacted block** — `name + sha256-prefix` per variable; NEVER raw values in logs/evidence; no `env`/`printenv` dumps; no `set -x` around credential handling.
-13. **(l) scrub before ANY artifact leaves the scratch dir** — grep the evidence bundle for the key's sha256-prefix and the `sk-(proj|ant)-` needle; scrub or exclude hits; record the scrub result in the report. (F7 / wi-2454ede3 rule: the F7 finding was a live key sitting in 4 world-readable scratch files for ~25 min.)
-14. **(m) LLM credential forwarding (MF-1)** — the four `OPENAI_*` NAMES only; values are sourced at harness start from the INVOKING shell into a scratch env file (mode 0600, inside the umask-077 scratch dir), then `set -a; . <scratch-env>; set +a` before the `env -i` exec. **Never** `env VAR=value` argv, never echoed, never `set -x`. **C1-safety line:** contact with the shared LLM proxy (provider lane) is NOT live daemon/DB/install contact — the proxy call is C1-safe.
+6. **Zero live contact** — live daemon, live DB, live install dirs untouched; asserted pre/post via `dryrun-verify.py` + claim files.
+7. **Kill only by exact PID.** Broad `pkill` is BANNED; the authoritative scratch pid is the `pid` in the port-claims file.
+8. **Bash-overlay guard compliance** — guard-safe checks only.
+9. **Worktree discipline for the work item:** module worktrees are `<repo>-wt-<slug>` siblings created by the developer per FROZEN `[sonic-merge-strategy-v1]`; pathspec-limited commits; `merge --no-ff`; NO `git stash`; teardown removes every module worktree/branch it created.
+10. **`ENSEMBLE_DB_AMBIENT_ALLOW=1`** — REQUIRED on the first boot (documented sanctioned first-boot flag).
+11. **`umask 077` at harness start** — applies to ALL scratch files; re-assert `chmod 600` on credentials-adjacent artifacts.
+12. **Env capture is permitted ONLY as a redacted block** (`name + sha256-prefix`); no raw dumps, no `set -x` around credentials.
+13. **Scrub before ANY artifact leaves the scratch dir** — grep the evidence bundle for the key's sha256-prefix and the `sk-(proj|ant)-` needle; record the scrub result.
+14. **LLM credential forwarding (MF-1)** — the four `OPENAI_*` NAMES only, via the 0600 scratch env file; never argv/echo/`set -x`. Provider-proxy contact is C1-safe (not live contact).
+15. **RAM-guard note:** if the host carries the staged RAM guard, large `uv sync`/pytest trees may be tree-killed; re-run only the killed step's remainder with identical inputs; never widen a budget silently.
 
-## 4. Run outline (ordered)
+## 4. Run outline (ordered — PARALLEL shape)
 
 | Step | Action |
 |---|---|
-| D0 | **Pre-flight + harness fence:** `umask 077`; create `/tmp/ensemble-sonic-dryrun/{data,home,logs,evidence}`; build the scratch LLM env file `/tmp/ensemble-sonic-dryrun/scratch-llm.env` (mode 0600) from the INVOKING shell's four `OPENAI_*` vars — values never echoed / never argv / never `set -x` (pin m); re-read live/demo pids (claims files / `ss -ltnp`), re-scan scratch ports free, record the commission-worktree state (`git status --porcelain` — must stay clean; it is the staging source later) and **quiesce it for D2** (#14: no concurrent agent/commit work in that worktree while the daemon boots and `uv venv` runs there; the venv is gitignored, confirm Phase-4 C5 cleanliness after) |
-| D1 | **Scratch worktree + seed (giter lane):** create `/home/nea/ensemble-src-wt-sonic-dryrun` on scratch branch `dryrun/sonic-team-e2e-<YYYYMMDD>` from the `feature/sonic-team-v1` tip; commit the tiny feature seed: `sonic_dryrun/__init__.py` (empty), `sonic_dryrun/tiny_feature.py` = `def add(a, b): """Return the sum of two integers.""" return a - b  # SEEDED BUG`, `sonic_dryrun/test_tiny_feature.py` = `from sonic_dryrun.tiny_feature import add` / `def test_add(): assert add(2, 3) == 5`. Verify: `uv run python -m pytest sonic_dryrun/test_tiny_feature.py -q` ⇒ **1 failed** (the work item). (Lazy-venv rule: `uv sync` inside the scratch worktree when a test must run there — never reuse another checkout's `.venv`, which pins its own tree.) |
-| D2 | **Boot per `dryrun-boot-procedure.md` §1–§4 + its AMENDMENT (batch 2)** from the commission worktree (`/home/nea/ensemble-src-wt-sonic-v1`, the validated path): lazy venv (`uv venv --python 3.14 .venv && uv sync --frozen --no-dev`), throwaway DB `ensemble_sonic_dryrun` (owner `ensemble_dev_app`), boot via `proc_run` + `fenced-launch.py` with the procedure's exact `env -i` block **plus the four `OPENAI_*` forwarded by name** (values loaded from the 0600 scratch env file — pin m), scratch dirs `/tmp/ensemble-sonic-dryrun/{data,home,logs}`. |
-| D3 | **Health probe + isolation:** `/livez` 200 + `/readyz` 200 (≈17–23 s); then `.venv/bin/python .agents/shared/planning/sonic-team/dryrun-verify.py --scratch-port 8797 --live-pid <live> --demo-pid <demo>` ⇒ `RESULT: ALL PASS` (FD-isolation, port ownership, live/demo alive). |
-| D3.5 | **LANE PROBE (MF-1) — MUST pass before D4:** non-echoing presence check on the scratch pid environ — `tr '\0' '\n' < "/proc/$SCRATCH_PID/environ" \| grep -c '^OPENAI_API_KEY='` ⇒ `1` (prints a COUNT only; alternative: one trivial provider round-trip against `OPENAI_BASE_URL`). A green `/readyz` proves nothing about the LLM lane. Failure is **F1 environment/pre-flight** and does NOT consume the single permitted run. |
-| D4 | **Dispatch `sonic-leader` on the scratch daemon** (operator API / job lane; exact payload VERIFY-AT-IMPL from the procedure's daemon surface) with: *fix `sonic_dryrun/tiny_feature.py` in worktree `/home/nea/ensemble-src-wt-sonic-dryrun` so `sonic_dryrun/test_tiny_feature.py` passes; one-shot; produce the frozen 7-field HANDOFF; blast radius = `sonic_dryrun/**` only; pre-approval: giter commit-only in that worktree, no merge, no branch ops*. Intake records the coder-estimate (≤ ~90 min per S7). |
-| D5 | `sonic-coder` one-shot turn (real definition, `recursion_limit_multiplier:7`) — edits `tiny_feature.py`, writes `HANDOFF.md` at the frozen path with all 7 fields. |
-| D6 | `sonic-reviewer` verdict on handoff + diff — PASS required. |
-| D7 | `sonic-tester` SCOPED run — only `sonic_dryrun/test_tiny_feature.py` (`ensure.md` scoped-test doctrine) ⇒ `1 passed`. |
-| D8 | `giter` commit on the scratch branch (commit-only, worktree supplied, no merge) ⇒ `git log --oneline -1` + `git show --stat` (touches `sonic_dryrun/tiny_feature.py` + the handoff artifact). |
-| D9 | **Teardown per procedure §6:** SIGTERM exact scratch pid → ports freed → `DROP DATABASE ensemble_sonic_dryrun` → remove claim file → remove scratch worktree/branch (giter lane) → capture the evidence bundle (`/tmp/ensemble-sonic-dryrun/logs/*`, verify output, verdicts, `git show`). |
+| D0 | **Pre-flight + harness fence** (unchanged): `umask 077`; scratch dirs; 0600 scratch LLM env file; re-read live/demo pids; re-scan scratch ports; record the commission-worktree `git status --porcelain` (must stay clean) and quiesce it for D2 |
+| D1 | **Scratch work item + seed (giter lane):** create the scratch work-item worktree `/home/nea/ensemble-src-wt-sonic-dryrun` on scratch branch `dryrun/sonic-parallel-e2e-<YYYYMMDD>` from this branch's tip. Seed a TWO-module feature with DISJOINT files (the parallel design's precondition): `sonic_dryrun/__init__.py` (empty) · `sonic_dryrun/mathx.py` = `def add(a, b): """Return the sum of two integers.""" return a - b  # SEEDED BUG` + `sonic_dryrun/test_mathx.py` · `sonic_dryrun/strix.py` = `def slurp(s): """Upper-case a string.""" return s.lower()  # SEEDED BUG` + `sonic_dryrun/test_strix.py`. Verify: `pytest sonic_dryrun/ -q` ⇒ **2 failed** (the work items) |
+| D2 | **Boot per the procedure + amendments** from the commission worktree — `fenced-launch.py` MANDATORY, `env -i` block + four `OPENAI_*` by name, scratch dirs, throwaway DB `ensemble_sonic_dryrun` |
+| D3 | **Health probe + isolation:** `/livez` + `/readyz`; `dryrun-verify.py --scratch-port 8797 --live-pid <live> --demo-pid <demo>` ⇒ `RESULT: ALL PASS` |
+| D3.5 | **LANE PROBE (MF-1) — MUST pass before D4:** OPENAI_API_KEY presence count == 1 (non-echoing) or one trivial provider round-trip |
+| D4 | **Dispatch `sonic-leader` on the scratch daemon** with: *fix both seeded bugs in work item `/home/nea/ensemble-src-wt-sonic-dryrun` so `pytest sonic_dryrun/` passes; expect the STANDARD path (two disjoint modules ⇒ parallel coders); the developer creates per-module worktrees as `<repo>-wt-sonic-dryrun-mod{a,b}` siblings cut from the scratch branch, merges in dependency order with `merge --no-ff`, authors HANDOFF-v2 at the scratch work-item root; feature integration happens ON the scratch branch; blast radius = `sonic_dryrun/**` only.* **DESIGNED LEARNING (V13 precondition):** the dispatch context carries a non-obvious fake convention the lanes cannot derive from the code — e.g. "house convention: every `sonic_dryrun` module docstring must name its merge-order slot" — so the leader has a genuine, non-obvious correction to record at completion |
+| D5 | `sonic-developer` turn: exactly ONE `explore()` at plan-open → module split (2 briefs) → PARALLEL coder dispatch → merges → HANDOFF-v2 → `SONIC-INTEGRATION: DONE` report |
+| D6 | ≥2 `sonic-coder` turns (module A, module B) — one-shot per module: source exploration → change → quick-test → commit on the module branch → compact module report |
+| D7 | `sonic-reviewer` + `sonic-tester` INTEGRATION verdicts on HANDOFF-v2 + `base..merged` (ONE wave) — both PASS required |
+| D8 | **Teardown per procedure §6 + parallel additions:** SIGTERM exact scratch pid → ports freed → `DROP DATABASE` → remove claim file → remove BOTH module worktrees/branches AND the scratch work-item worktree/branch (giter lane) → capture the evidence bundle |
+| D9 | **Evidence bundle:** transcripts for ALL FIVE lanes + `created_at` timings + HANDOFF-v2 + verdicts + `git log --oneline` of the scratch branch (module commits + merge commits) |
 
-Polling discipline: drive waits with `proc_logs`/short polls — **never a single blocking `bash` call approaching 1800 s** (tool cap, `findings-C-risk.md` §4a; `[Leg A]` shows real 1800 s timeouts). Never derive durations from `bash_spawn_registry.reaped_at` (99.98% GC-reaped — `findings-C-risk.md` §4b); use log timestamps. **RAM-guard note (#15):** if the host carries the staged v0.29.21 guard, large `uv sync`/pytest process trees may be tree-killed (`ram_breach_observed` fires even on ordinary commands); the step timeboxes partially bound exposure — re-run only the killed step's remainder with identical inputs, never widen a budget silently.
+Polling discipline: `proc_logs`/short polls, never a blocking call approaching 1800 s. Timebox: hard wall 210 min for D0–D9 (the parallel architecture adds one integration hop vs the v1 outline's 180; per-step budgets otherwise unchanged: D5 ≤ 30, D6 ≤ 60 outer bound, D7 ≤ 20, D8 ≤ 15, D9 ≤ 10).
 
-**Worktree split (decision, see §8.3):** the daemon boots from the COMMISSION worktree (the only path the procedure validated, with its fenced `.env` + `.venv`); the WORK ITEM lives in the scratch worktree so the commission worktree stays clean for Phase 4 (C5). If the agent tool layer cannot operate on the scratch worktree path (recorded check at D4), FAIL as **F11** — never dirty the commission worktree to recover.
+## 5. Pass criteria (mechanical — V0–V14, superseding V0–V11)
 
-## 5. Pass criteria (mechanical)
+Transcript evidence contract (applies to V9–V14): fetch `GET /api/instances/{id}/messages` for each lane instance; tool calls appear on `assistant`-role messages under the FLAT key `tool_calls`, each entry carrying `name`, and every message carries `created_at`. **A verdict without per-message `created_at` timing attribution is incomplete evidence, not a PASS.**
 
 | # | Criterion | Check |
 |---|---|---|
-| V0 | **Lane probe PASS (D3.5, MF-1)** | scratch pid environ carries `OPENAI_API_KEY=` (count == 1, non-echoing) OR one trivial provider round-trip succeeded; recorded BEFORE D4 |
+| V0 | **Lane probe PASS (D3.5)** — unchanged | recorded BEFORE D4 |
 | V1 | All steps D0–D9 complete | step log with timestamps |
-| V2 | Handoff present with all 7 frozen field names — exact Title-Case headers, `grep -Fq` per header (review #8): `## Files touched`, `## What changed`, `## What is UNTESTED`, `## Known risks`, `## How to verify`, `## Bash-raises used`, `## Blast-radius self-assessment vs predicate` | grep each exact header in the artifact |
-| V3 | Reviewer verdict = PASS | verdict text in the evidence bundle |
-| V4 | Tester = PASS (1 passed, 0 failed) | pytest output captured |
-| V5 | Scratch commit exists on the scratch branch | `git log --oneline` + `git branch --contains <sha>` |
-| V6 | **Zero live contact** — `dryrun-verify.py` RESULT: ALL PASS, incl. live pid owns live API+metrics ports (pid unchanged from D0) and demo pid owns 7979; no write under the live install dir in the window (guard-safe checks only — no literal live tokens in commands, §2.1 note) | helper output + claim-file inspection |
-| V7 | **FD isolation + no boot-sweep kills** — scratch pid appears 0× on live API/metrics/demo ports; no sweep-kill lines in `/tmp/ensemble-sonic-dryrun/logs/boot.log`; live/demo processes continuously alive | helper output (`FD-ISOLATION` line) + log grep |
-| V8 | Teardown residue-free — scratch ports free, DB count 0, claim file removed, scratch worktree/branch removed; only the evidence bundle remains | procedure §6 outputs |
+| V2 | **HANDOFF-v2 present** at the scratch work-item root with all 7 frozen headers — `## Files touched across modules`, `## What changed`, `## What is UNTESTED`, `## Known risks`, `## How to verify`, `## Bash-raises used`, `## Blast-radius self-assessment vs predicate` (exact Title-Case, `grep -Fq` per header) | grep each header |
+| V3 | Reviewer verdict = PASS **at integration level** — its transcript shows it consumed the HANDOFF path AND ran `git diff <base>..HEAD` (the merged diff), not per-module reports | verdict text + transcript evidence |
+| V4 | Tester = PASS (2 passed, 0 failed) **on the merged tree** | pytest output captured |
+| V5 | **Feature branch carries the integration:** ≥2 module commits + ≥1 `merge --no-ff` merge commit on the scratch branch; module branches exist per module | `git log --oneline --graph` + `git branch` |
+| V6 | **Zero live contact** — `dryrun-verify.py` RESULT: ALL PASS (unchanged) | helper output |
+| V7 | **FD isolation + no boot-sweep kills** (unchanged) | helper `FD-ISOLATION` + log grep |
+| V8 | Teardown residue-free incl. BOTH module worktrees/branches | procedure §6 outputs |
+| V9 | **sonic-developer: exactly ONE RAG `explore` in its FIRST working turn AND a silent knowledge-write lane** — explore count == 1 in the whole turn, timestamped BEFORE its first coder dispatch; AND in the SAME transcript `experience` count == 0 AND zero kb-writer `spawn_instance` entries. More than one explore is a FAIL (D-G violation); zero is a FAIL (the mandatory read never happened); any `experience()` call or kb-writer spawn is a FAIL (never-experience violation — the developer is mechanically able to do both via the knowledge lane, so a runtime violation MUST red here, not false-PASS) | transcript counts (`explore`/`experience`/`spawn_instance`) + `created_at` ordering vs first dispatch |
+| V10 | **≥2 sonic-coders RUNNING CONCURRENTLY** — the two coder instances' turn windows (first→last message `created_at`) TEMPORALLY OVERLAP; a strictly sequential coder pair is a FAIL (the parallel dispatch did not happen) | interval overlap from the two transcripts' created_at min/max |
+| V11 | **Integration merge on the feature branch** — the developer's transcript shows `merge --no-ff` merges it ran (bash tool calls) and the HANDOFF authoring; conflict-free here, but the merge ORDER must match the briefs' slots | transcript + `git log --merges` |
+| V12 | **Coder transcripts: ZERO RAG explore calls AND ≥1 file-exploration calls — BOTH required per coder.** RAG `explore` count == 0 per coder (ABSOLUTE and unchanged — the Emperor's mandated exclusion side) AND the file-exploration census ≥ 1 per coder, where admissible evidence = ANY file-read call: filesystem `read_file`/`grep_files`/`glob_files`/`list_directory` OR bash-based reads (`cat`, `head`, `tail`, `sed -n`, `grep`, `rg`, `awk`, `nl`) — count each occurrence. NON-evidence (never counted): bash commit/merge/write commands (`git commit`/`git merge`/`git add`), `edit_file`, `write_file`. One-sided evidence (RAG-zero but census 0, or census ≥ 1 with an `explore`) is a FAIL — the Emperor clarification's two-sided shape. Provenance: leader ruling (tester re-adjudication of V12 under the refined census, 2026-11-13) + RESULTS §11.9 (re-adjudication commit `16100e872`; coderB evidence = 5 bash reads: cat×4 + tail×1) | transcript counts per coder |
+| V13 | **Leader: exactly-one `experience()` at commission completion** — count == 1, timestamped AFTER the verification verdicts resolve; the scenario is DESIGNED so a learning OCCURS (D4's fake convention), making exactly-one the expected shape — **a silent zero is a FAIL** (the designed-learning scenario removes the v1.1 zero-branch) | transcript count + `created_at` ordering vs verdict timestamps |
+| V14 | **Reviewer/tester ZERO knowledge calls** — `explore` == 0 AND `experience` == 0 in BOTH verification lanes | transcript counts == 0 |
 
-## 6. Failure taxonomy, evidence, timebox
-
-Record for EVERY failure: step id, timestamp, exact command, full error text, relevant log slice, and the pre/post live-liveness snapshot (helper output).
+## 6. Failure taxonomy (additions to the v1 taxonomy F1–F11 — all v1 classes stand)
 
 | ID | Failure | Class | Action |
 |---|---|---|---|
-| F1 | Daemon never healthy (no `/livez` 200 within ~80 s) **OR the D3.5 lane probe fails** | environment/config | Diagnose from `boot.log` (procedure §7 playbook: exit 78 port-claim / exit 78 DB-resolution / exit 75 PG) and the lane check (missing `OPENAI_*`). ONE pre-flight retry permitted if evidenced; no agent ran ⇒ the run has not started, and a missing key can never burn the single permitted run as an F5 |
-| F2 | **Boot sweep fired / a live process died** | **CRITICAL** | Abort immediately; containment report; no re-run without an operator decision |
-| F3 | **Any live contact detected / FD inheritance observed** | **CRITICAL** | Abort; containment report |
-| F4 | Leader intake misroutes / rejects the task | agent behaviour | Fail; record intake text |
-| F5 | Coder turn terminal (recursion limit, 125-min task cap, loop-breaker exhaustion) | agent behaviour | Fail; record which ceiling fired (`findings-B-infra.md` §2b/§2c) |
-| F6 | Handoff missing/incomplete (any of 7 fields) | contract | Fail; attach artifact |
-| F7 | Reviewer REJECT | quality | Fail; attach verdict |
-| F8 | Tester FAIL | quality | Fail; attach pytest output |
-| F9 | No commit created | process | Fail; attach giter report |
-| F10 | Teardown residue (listener/DB/claim/worktree remain) | hygiene | Fail; record residue |
-| F11 | Agent tool layer cannot operate on the scratch worktree path | tooling scope | Fail; report the limitation (never dirty the commission worktree) |
-
-**Timebox (bounded):** hard wall **180 min** for D0–D9: D0 ≤ 10 · D1 ≤ 15 · D2–D3 ≤ 20 · D3.5 ≤ 2 · D4 ≤ 15 · D5 ≤ 60 (outer bound = the 125-min task cap; coder-estimate rule ≤ ~90 min) · D6 ≤ 20 · D7 ≤ 15 · D8 ≤ 15 · D9 ≤ 10. (D5's "≤ 60" is the DRY-RUN's own coder-step budget — deliberately tighter because the tiny feature is minutes-scale; the ≤ ~90-min intake ceiling is the COMMISSION-SIZE rule (S7/`decisions.md` D7). Both stand; no contradiction.) Basis: `[Leg A]` p50 775 s/hop × ~6 hops ≈ 78 min; p90 4,258 s/hop exceeds any budget ⇒ hard wall 180 min, exceeding it is a recorded failure (do not extend). Worker pool = 5 daemon-wide (`daemon/constants.py:91`) ⇒ leader fans out in ONE wave and ENDs TURN (`findings-B-infra.md` §4); `invoke_agent_and_wait` is forbidden (300 s default, terminates the child).
+| F12 | Leader routed FAST on a two-module commission (D-E gate violation) | routing | Fail; record the intake text |
+| F13 | Developer explore count ≠ 1 (0 or ≥2), not at plan-open, OR its transcript shows an `experience()` call / a kb-writer `spawn_instance` entry (never-experience violation) | D-G violation | Fail; transcript evidence |
+| F14 | Coders ran strictly sequentially (no temporal overlap) | parallel dispatch violation | Fail; interval evidence |
+| F15 | Any coder transcript shows a RAG `explore` call OR zero file-exploration calls (under the refined census: filesystem reads OR bash reads `cat`/`head`/`tail`/`sed -n`/`grep`/`rg`/`awk`/`nl`; bash commit/merge/write commands, `edit_file`, `write_file` never count) | clarification violation | Fail; transcript evidence |
+| F16 | Leader `experience` count ≠ 1, or the call precedes the verdicts | write-once violation | Fail (designed-learning scenario ⇒ zero is a FAIL, not a valid branch) |
+| F17 | Reviewer/tester transcript shows any knowledge call | zero-knowledge violation | Fail |
+| F18 | HANDOFF-v2 authored by anyone but the developer, or the coder wrote a handoff file | authorship violation | Fail |
 
 ## 7. Acceptance criteria (phase-level)
 
-- AC-P3-0: **MF-1/MF-2 harness fence** — pins (i)–(m) present in the executed harness: `ENSEMBLE_DB_AMBIENT_ALLOW=1` (i); `umask 077` + 0600 scratch env file (j); no raw env dump — redacted `name+sha256-prefix` only if env evidence exists (k); evidence-bundle scrub recorded (l); the four `OPENAI_*` forwarded by name via the scratch env file with **no value in argv/echo/`set -x`** (m); and **D3.5 recorded PASS before D4** (V0).
-- AC-P3-1: `dryrun-boot-procedure.md` present and re-audited P1–P11 (checklist filled, each PASS — P11 via the AMENDMENT batch 2) before D0; else BLOCKED (no run).
-- AC-P3-2: V0–V8 all PASS; evidence bundle saved under `.agents/shared/planning/sonic-team/evidence/` (or `/tmp` with an index file) and its path recorded in the morning report.
-- AC-P3-3: safety pins §3 present in the executed commands (grep the evidence bundle for `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0`, `ENSEMBLE_DB_AMBIENT_ALLOW=1`, `fenced-launch.py`, `dryrun-verify.py`, `umask 077`; assert NO `env -u POSTGRES_*` glob, NO broad `pkill`, NO raw `env`/`printenv` dump, and NO raw `OPENAI_*` value in any artifact).
-- AC-P3-4: exactly one run recorded (no retry beyond the F1 carve-out); the commission worktree `git status --porcelain` is empty before and after.
-- AC-P3-5: PASS ⇒ Phase 4 unblocked with the evidence path recorded; FAIL/BLOCKED ⇒ Phase 4 not started, honest report.
+- AC-P3-0: harness fence pins (§3, items 1–15) present in the executed harness; D3.5 recorded PASS before D4 (V0).
+- AC-P3-1: `dryrun-boot-procedure.md` re-audited P1–P11 before D0; else BLOCKED.
+- AC-P3-2: **V0–V14 all PASS**; evidence bundle saved with per-call `created_at` attribution; path recorded in the report.
+- AC-P3-3: safety pins present in the executed commands (grep the evidence bundle); no `env -u POSTGRES_*` glob; no broad `pkill`; no raw env dumps; no raw `OPENAI_*` values.
+- AC-P3-4: exactly one run recorded; the commission worktree `git status --porcelain` empty before and after.
+- AC-P3-5: PASS ⇒ Phase 4 unblocked (ceremony recipe stays PLAN ONLY in `V1-1-AMENDMENT.md`); FAIL ⇒ nothing staged, honest report.
 
-## 8. Deviations & evidence conflicts
+## 8. Transcript-fetch pin (literal commands)
 
-1. **Procedure status changed during plan writing: ABSENT → PRESENT + VERIFIED.** It landed at 19:58Z (devops) and is marked triple-exercised; `decisions.md` DEV-5 says "PENDING INPUT from devops; Phase 3 hard-blocked" — that ledger row is now STALE. This spec's §2 audit supersedes it; the morning report must note the status change (the decision itself, D10, is unchanged: consume the procedure, hard-block without it).
-2. **`DAEMON_PORT` is INERT at this base** — the listen port resolves from bare `PORT` (config.yaml `port: ${PORT:-8088}`; YAML→init kwargs beat `DAEMON_*` env). The giter `.env` template writes `DAEMON_PORT=8079` (valid for `dev.sh`); the dry-run procedure correctly sets `PORT=8797` in the `env -i` block. Do not "fix" the `.env` template — set `PORT` at boot.
-3. **Boot tree vs work-item tree are deliberately split.** The delivered procedure boots from the COMMISSION worktree (its validated `.env`, `.venv`, and claim identity `install_dir=…-wt-sonic-v1`). The work item lives in a separate scratch worktree so the commission worktree stays clean for Phase 4 (C5) and the scratch branch never touches the feature branch. F11 covers the case where agent file tools cannot reach the scratch worktree.
-4. **`fenced-launch.py` is load-bearing and its absence is not survivable.** A direct launch was PROVEN to inherit the live 9797 listener fd (`env -i` does not close fds). Any boot without the launcher is F3 (CRITICAL), never a warning.
-5. **Live/demo pids are point-in-time** (2147839 / 3547188 at procedure-write time). Re-read them at D0; never let a hardcoded pid turn a liveness check into a false PASS.
-6. **Snapshot warm-start is NOT exercised.** The neutralized-snapshot handoff is the v2 upgrade path (`decisions.md` D2; R15 toggle default OFF; explicit-`snapshot_id` relay mandatory). v1 proves the HANDOFF-artifact path instead — record the snapshot chain as an UNTESTED surface in the morning report; do not claim it works.
-7. **giter's approval gates add hops** (`findings-B-infra.md` §6 caveat); the D4 task message carries pre-approval (commit-only, named worktree, no merge). If giter still stops for approval, that is F9-class evidence, not a reason to bypass giter (`decisions.md` D17).
-8. **MF-1/MF-2 folded via a clearly-marked AMENDMENT block appended to `dryrun-boot-procedure.md`** (devops's validated steps unchanged, per the batch-2 policy): the four `OPENAI_*` forwarded by name, the 0600 scratch-env-file mechanism, the **D3.5 lane probe**, and pins (i)–(m). This protects the single-run budget: a credential/environment fault is F1 pre-flight and can never consume the one permitted pipeline run. The original `env -i` block (`:150-168`) forwards only POSTGRES_*/PORT/HOME and `daemon/config.py` reads `OPENAI_*` from process env with no `load_dotenv` in the boot path — the procedure's boot-path-only validation (`:5-6`) proves nothing about the LLM lane; the amendment is load-bearing, not cosmetic.
-9. **Execution notes (#14/#15):** quiesce the giter-owned commission worktree during D2 (boot + `uv venv` happen there; the venv is gitignored — confirm Phase-4 C5 cleanliness after); if the host carries the staged v0.29.21 RAM guard, large `uv sync`/pytest trees may be tree-killed (`ram_breach_observed` fires even on ordinary commands) — re-run the killed step's remainder with identical inputs; never widen a budget silently.
+```sh
+# scratch daemon on $PORT (8797); $INSTANCE_ID = the lane instance id
+curl -s "http://127.0.0.1:${PORT}/api/instances/${INSTANCE_ID}/messages" > /tmp/ensemble-sonic-dryrun/evidence/messages-${INSTANCE_ID}.json
+
+# count a tool by name across a transcript (flat tool_calls[].name):
+python3 -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
+print(sum(1 for m in ms for c in (m.get("tool_calls") or []) if c.get("name")==sys.argv[2]))' \
+  /tmp/ensemble-sonic-dryrun/evidence/messages-${INSTANCE_ID}.json explore   # expect: developer 1, AND its experience count == 0 AND its kb-writer spawn_instance entries == 0 (V9/F13); coders 0; reviewer/tester 0
+
+# file-exploration census for a coder (V12 second shape — refined census; must be >= 1):
+python3 -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
+names={c.get("name") for m in ms for c in (m.get("tool_calls") or [])}; \
+print(sum(n in ("read_file","grep_files","glob_files","list_directory") for n in names))' \
+  /tmp/ensemble-sonic-dryrun/evidence/messages-${INSTANCE_ID}.json
+
+# timing attribution (per-call created_at — REQUIRED in the evidence bundle):
+python3 -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
+print([(c.get("name"), m.get("created_at")) for m in ms for c in (m.get("tool_calls") or []) if c.get("name") in ("explore","experience","send_message","spawn_instance")])' \
+  /tmp/ensemble-sonic-dryrun/evidence/messages-${INSTANCE_ID}.json
+
+# temporal overlap of the two coder turns (V10):
+python3 -c 'import json,sys;
+a=json.load(open(sys.argv[1])); b=json.load(open(sys.argv[2]));
+wa=(min(m["created_at"] for m in a), max(m["created_at"] for m in a));
+wb=(min(m["created_at"] for m in b), max(m["created_at"] for m in b));
+print("OVERLAP" if wa[0] <= wb[1] and wb[0] <= wa[1] else "SEQUENTIAL", wa, wb)' \
+  /tmp/ensemble-sonic-dryrun/evidence/messages-${CODER_A}.json \
+  /tmp/ensemble-sonic-dryrun/evidence/messages-${CODER_B}.json
+```
+
+Guard-safety: the fetch targets the SCRATCH daemon port only; no literal live-port tokens in command text (§2 note).
+
+**kb-writer lane cost (facts):** `explore()` runs the explorer agent (`llm_model: "quick"`); `experience()` is a zero-LLM caller turn plus an async kb-writer spawn (also `quick`). Edge: explorer's legacy `caller_model_overrides {"coder": null}` matches ONLY the literal caller agent_id `coder` — sonic-developer/sonic-coder never match it; no override path is exercised by the sonic lane. Verdict CHEAP — report-only, `V1-1-AMENDMENT.md`.

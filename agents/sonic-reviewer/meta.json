@@ -1,10 +1,10 @@
 {
   "id": "sonic-reviewer",
   "name": "Sonic Reviewer",
-  "description": "Read-only review leaf — consumes the handoff artifact, verifies the change against its stated intent, returns a one-line verdict block",
+  "description": "Read-only integration reviewer — consumes the developer's HANDOFF-v2 and the FULL MERGED DIFF (base..merged), verifies the integrated change against its stated intent, returns a one-line verdict block",
   "icon": "🔍",
   "color": "accent-rose",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "llm_model": "agentic",
   "innate_skills": [],
   "skill_injection": false,

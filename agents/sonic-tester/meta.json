@@ -1,10 +1,10 @@
 {
   "id": "sonic-tester",
   "name": "Sonic Tester",
-  "description": "Scoped test leaf — consumes the handoff artifact, runs blast-radius-scoped packs, returns a one-line verdict and (when load-bearing) a RESULTS file",
+  "description": "Integration test leaf — consumes the developer's HANDOFF-v2 and the merged tree, runs blast-radius-scoped packs on the merged diff, returns a one-line verdict and (when load-bearing) a RESULTS file",
   "icon": "🧪",
   "color": "accent-green",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "llm_model": "coding",
   "innate_skills": [],
   "skill_injection": false,

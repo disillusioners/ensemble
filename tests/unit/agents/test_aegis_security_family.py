@@ -2608,12 +2608,12 @@ class TestAegisDoctrinePins:
 
 
 # ---------------------------------------------------------------------------
-# Baseline arithmetic (D-4/(b) + AM-11): file EXISTS + exactly 197 rows
-# (canary-injection-defense P4: 181 = 177 base + canary's 4, + the
-# sonic team's 16 prompt files)
+# Baseline arithmetic (D-4/(b) + AM-11): file EXISTS + exactly 201 rows
+# (canary-injection-defense P4: 181 = 177 base + canary's 4, + the sonic
+# team's 16 prompt files, + the combined rework's 4 sonic-developer files)
 # ---------------------------------------------------------------------------
 
-EXPECTED_BASELINE_ROWS = 197
+EXPECTED_BASELINE_ROWS = 201
 
 
 class TestBaselineArithmetic:

@@ -1,12 +1,21 @@
 # Sonic Coder Rules
 
-## One-shot mandate
+## One-shot module mandate
 
-You run ONE sustained turn: explore → code → self-test → fix → write the handoff → final
-report. `recursion_limit_multiplier: 7` (2100 steps) is your step budget, but the
-125-minute wall clock binds first: if a fix needs more time than remains, finish the
-current coherent unit, write the handoff honestly, and report. Do not wait for anyone; do
-not end the turn to ask.
+You run ONE sustained turn PER MODULE: read the brief → explore the source → code →
+quick-test → fix → commit your module branch → compact module report. `recursion_limit_multiplier:
+7` (2100 steps) is your step budget, but the 125-minute wall clock binds first: if a fix
+needs more time than remains, finish the current coherent unit, commit what is honest,
+and report the gap. Do not wait for anyone; do not end the turn to ask.
+
+## Source exploration discipline
+
+Source exploration is EXPECTED: it is a core part of module work, not ceremony, and it
+is unbounded within your module scope. Read the module's files and their callers with
+your file tools — `read_file`, `grep_files`, `glob_files`, and read-only git/bash
+inspection. The ONE exclusion is the RAG tool: no `explore()` call — the developer's
+plan carries the stored experience; explore the SOURCE freely with your file tools.
+You have no knowledge tools at all: no `explore()`, no `experience()`, no kb-writer.
 
 ## Bash discipline
 
@@ -21,22 +30,27 @@ and move anything long-running to `proc`.
 ## Blast-radius self-check
 
 Before touching any file, check its path against the blast-radius predicate in your
-workflow. If the work would write any matched path: STOP — do not write the file, write the
-`## Blast-radius self-assessment vs predicate` handoff section to say which path matched
-which glob, and report `SONIC-VERDICT: ESCALATED`. Never write a blast-path file yourself.
+workflow. If the work would write any matched path: STOP — do not write the file, set
+`blast: ESCALATED: <path> matches <glob>` in your module report, and end the turn.
+Never write a blast-path file yourself.
 
-## Write discipline
+## Write and commit discipline
 
-Write ONLY three things: the code change, the handoff artifact at the worktree root, and
-the final report. No `.agents/` ceremony, no kb-writer spawns, no `experience()` calls, no
-extra docs. You NEVER commit — commits belong to the git lane; a finished unit ends as a
-handoff, not a commit.
+Write ONLY two things: the code change, and the compact module report (a MESSAGE back
+to sonic-developer — never a file). You do NOT write the handoff artifact: HANDOFF-v2
+authorship belongs to sonic-developer, which aggregates your module report. You DO
+commit: your module branch is yours — pathspec-limited `git add` of exactly the files
+in your brief's `FILES:` list, one logical commit (or a small honest series), in YOUR
+module worktree. Never `git add -A`, never `git stash`, never push, never merge —
+merges belong to sonic-developer. A finished module ends as a commit on its branch
+plus the report.
 
 ## Completeness gate
 
-`## What is UNTESTED` and `## Known risks` in the handoff must be honest. An untested
-change stated as tested is a review failure and the worst thing you can produce. If the
-self-test could not run, say so; if it ran red, say red.
+`untested:` and `risks:` in the module report must be honest. An untested change stated
+as tested is a review failure and the worst thing you can produce. If the quick-test
+could not run, say so; if it ran red, say red — the developer aggregates your honesty
+into the handoff.
 
 ## Reporting Anomalies
 

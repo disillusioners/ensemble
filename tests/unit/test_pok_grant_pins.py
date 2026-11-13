@@ -48,8 +48,11 @@ ANCHOR_CATEGORY = "nest-report"
 #: Mechanically re-derived 2026-11-12 (the sonic-team lane): 49 explicit
 #: grants (every non-empty allow) / 50 meta-bearing agent dirs
 #: (46 at the 2026-11-07 POK B4 sweep + the 4 ``sonic-*`` agents since).
-EXPECTED_EXPLICIT = 49
-EXPECTED_TOTAL_META = 50
+#: Re-derived 2026-11-13 (COMBINED v1.1+v1.2 rework): 50 / 51 — the
+#: fifth sonic agent ``sonic-developer`` carries ``pok`` immediately
+#: before ``nest-report`` (the insert-before discipline preserved).
+EXPECTED_EXPLICIT = 50
+EXPECTED_TOTAL_META = 51
 #: The ONE agent that inherits (empty allow = the default universe
 #: grants every NON-privileged category — an explicit entry would
 #: STRIP every other tool watcher inherits).

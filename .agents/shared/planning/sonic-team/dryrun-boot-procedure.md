@@ -358,6 +358,16 @@ OPENAI_MODEL="$OPENAI_MODEL" OPENAI_BASE_URL_BACKUP="$OPENAI_BASE_URL_BACKUP" \
 
 **C1-safety:** contact with the shared LLM proxy (provider lane) is **NOT** live daemon/DB/install contact — the proxy call is C1-safe.
 
+### MF-1 addendum (2026-11-13, sonic v1.1 dry-run re-run) — knowledge-lane env
+
+The knowledge lane (`explore`/`experience`) is gated by `is_rag_enabled()` (`daemon/tools/instance.py:~7149`) ← `RAGConfig.from_env().is_configured` ← `bool(LIGHTRAG_HOST)`. A boot that forwards only the four `OPENAI_*` names silently unregisters `explore`/`experience` for every agent — the 2026-11-13 first dry-run failed V9/V13 with an ENVIRONMENT-ONLY attribution for exactly this reason (RESULTS 2026-11-13-sonic-v11-parallel-dryrun.md §6). Forward these THREE additional names:
+
+- `LIGHTRAG_HOST`
+- `LIGHTRAG_API_KEY`
+- `RAG_IS_REQUIRED=1`  (forced, fail-closed: a loud boot failure beats a silent lane absence)
+
+Values are read READ-ONLY from the live install's `.env` (or the live daemon's `/proc/<pid>/environ`) and passed BY NAME via the 0600 scratch env file — never argv literals, never echoed, never `set -x`. `umask 077`; MF-2 (j)(k)(l) apply unchanged. **Fence ruling (leader, 2026-11-13):** the shared RAG knowledge service is house-shared infra — `explore()` READ and exactly-one marked `experience()` WRITE are within "zero live contact" (no live daemon / live DB / live install-state contact: no restarts, no current flip, no live-instance messaging).
+
 ### D3.5 — pre-flight lane probe (MUST pass before the first agent dispatch)
 
 ```sh
@@ -379,3 +389,84 @@ tr '\0' '\n' < "/proc/$SCRATCH_PID/environ" | grep -c '^OPENAI_API_KEY='
 
 - **(i) `ENSEMBLE_DB_AMBIENT_ALLOW=1`** — the sanctioned first-boot flag from §5 is REQUIRED until `data/ensemble.json` exists (not a guard bypass).
 - **(m) Credential forwarding** as above: the four `OPENAI_*` NAMES only; values via the 0600 scratch env file; never argv/echo/`set -x`.
+
+## AMENDMENT 2026-11-13 (sonic v1.1) — transcript fetch + knowledge-lane evidence
+
+<!-- SUPERSEDED v1.1 predicates — HISTORICAL amendment log ONLY; no executor may apply the presence one-liners in this section. The authoritative acceptance criteria are V0–V14 in phase3-dryrun-spec.md §5; in particular the sonic-coder "explore == 1 (first working turn)" predicate below was REVERSED by the COMBINED v1.1+v1.2 amendment further below (V12: coder explore == 0 AND file-exploration census >= 1). -->
+
+> **Appended by the v1.1 amendment lane. The validated boot/teardown steps ABOVE are unchanged** — this block is additive. It exists because the v1.1 dry-run re-proof (phase3-dryrun-spec.md §5, V0–V14) judges knowledge-lane PRESENCE from instance transcripts, and the fetch command must be pinned literally so every lane collects identical evidence.
+
+### Transcript fetch (the literal command)
+
+The messages API is `GET /api/instances/{id}/messages` (read-only; scratch daemon port `$PORT`, never a live port). Each serialized message carries `message_id, role, content, thinking, tool_calls, images, created_at`; tool calls ride on `assistant`-role messages under the FLAT key `tool_calls`, each entry with a `name` field.
+
+```sh
+# one fetch per lane instance (coder / leader / reviewer / tester)
+curl -s "http://127.0.0.1:${PORT}/api/instances/${INSTANCE_ID}/messages" \
+  > /tmp/ensemble-sonic-dryrun/evidence/messages-${INSTANCE_ID}.json
+```
+
+### Presence + timing checks (V9–V11 evidence)
+
+```sh
+# tool-by-name count (flat tool_calls[].name):
+#   sonic-coder   -> explore   == 1   (first working turn, before first edit)
+#   sonic-leader  -> experience <= 1  (at commission completion)
+#   reviewer/tester -> explore == 0 AND experience == 0
+.venv/bin/python -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
+print(sum(1 for m in ms for c in (m.get("tool_calls") or []) if c.get("name")==sys.argv[2]))' \
+  evidence/messages-${INSTANCE_ID}.json <tool-name>
+
+# timing attribution — (name, created_at) pairs for the knowledge calls:
+.venv/bin/python -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
+print([(c.get("name"), m.get("created_at")) for m in ms \
+for c in (m.get("tool_calls") or []) if c.get("name") in ("explore","experience")])' \
+  evidence/messages-${INSTANCE_ID}.json
+```
+
+Record the timestamps in the evidence bundle: coder `explore` at-start ordering (vs the coder turn start) and leader `experience` at-end ordering (vs the commit-dispatch resolution) — the Sunday sonic review judges explore-via-RAG from these transcripts alone.
+
+### Cost facts (judge the lane CHEAP)
+
+- `explore()` = explorer agent on its own `llm_model: "quick"` — one bounded agent turn.
+- `experience()` = zero-LLM caller turn + async kb-writer spawn (also `quick`).
+- Edge: explorer's legacy `caller_model_overrides {"coder": null}` matches ONLY the literal caller agent_id `coder`; sonic-coder's id is `sonic-coder` and NEVER matches — no override path is exercised by the sonic lane. Details: `V1-1-AMENDMENT.md`.
+
+## AMENDMENT 2026-11-13 (COMBINED v1.1+v1.2) — parallel-run topology + re-proof evidence
+
+**Supersedes the v1.1 amendment's V9–V11 one-liners above** (they describe the 4-agent v1.1 shape: coder explore-at-start + leader commit-dispatch). The boot/teardown recipe above (§1–§6, P1–P11, `fenced-launch.py` MANDATORY) is UNCHANGED — this amendment only adds the parallel work-item topology and the new evidence one-liners. Authoritative V-criteria: `phase3-dryrun-spec.md` (rewritten 2026-11-13, V0–V14).
+
+### Parallel topology deltas
+
+- **Seed:** TWO disjoint module bugs in one scratch work item (`sonic_dryrun/mathx.py` + `sonic_dryrun/strix.py`, each with its test) — the parallel design's precondition.
+- **Dispatch:** `sonic-leader` receives the two-module commission; expect the STANDARD path (sonic-developer layer), NOT the fast path (F12 if fast).
+- **Module worktrees:** the DEVELOPER creates per-module worktrees (`<repo>-wt-sonic-dryrun-mod{a,b}` siblings, cut from the scratch branch by explicit base sha) per FROZEN `[sonic-merge-strategy-v1]`; coders work one-per-worktree; teardown removes BOTH module worktrees/branches in addition to the scratch work-item worktree/branch.
+- **Integration:** developer merges module branches onto the scratch branch with `merge --no-ff` in brief order, then authors HANDOFF-v2 at the scratch work-item root.
+- **Designed learning (V13):** the D4 dispatch context carries a non-obvious fake convention (module docstrings must name their merge-order slot) so the leader's completion-time `experience()` is the EXPECTED shape — a silent zero is a FAIL under this scenario.
+
+### Evidence one-liners (V9–V14, combined shape)
+
+```sh
+# sonic-developer -> explore == 1, timestamped BEFORE its first coder dispatch (V9)
+# sonic-coder(s)  -> explore == 0  AND  file-exploration census >= 1  (V12 — BOTH shapes)
+# sonic-reviewer / sonic-tester -> explore == 0 AND experience == 0 (V14)
+# sonic-leader    -> experience == 1, timestamped AFTER the verdicts (V13)
+# coder pair turn windows (min/max created_at) must TEMPORALLY OVERLAP (V10)
+.venv/bin/python -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
+print(sum(1 for m in ms for c in (m.get("tool_calls") or []) if c.get("name")==sys.argv[2]))' \
+  evidence/messages-${INSTANCE_ID}.json explore
+
+.venv/bin/python -c 'import json,sys; ms=json.load(open(sys.argv[1])); \
+names={c.get("name") for m in ms for c in (m.get("tool_calls") or [])}; \
+print(sum(n in ("read_file","grep_files","glob_files","list_directory","bash") for n in names))' \
+  evidence/messages-${CODER_ID}.json
+
+.venv/bin/python -c 'import json,sys;
+a=json.load(open(sys.argv[1])); b=json.load(open(sys.argv[2]));
+wa=(min(m["created_at"] for m in a), max(m["created_at"] for m in a));
+wb=(min(m["created_at"] for m in b), max(m["created_at"] for m in b));
+print("OVERLAP" if wa[0] <= wb[1] and wb[0] <= wa[1] else "SEQUENTIAL", wa, wb)' \
+  evidence/messages-${CODER_A}.json evidence/messages-${CODER_B}.json
+```
+
+All evidence via `GET /api/instances/{id}/messages` (flat `tool_calls[].name`) with per-message `created_at` timing attribution — a verdict without timestamps is incomplete evidence, not a PASS. Full command set: `phase3-dryrun-spec.md` §8.

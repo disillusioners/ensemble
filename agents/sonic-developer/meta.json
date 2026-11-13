@@ -1,0 +1,19 @@
+{
+  "id": "sonic-developer",
+  "name": "Sonic Developer",
+  "description": "Sonic planning/integration layer — ONE bounded explore at plan-open, splits the commission into module briefs, dispatches parallel sonic-coders, merges their branches in dependency order, authors HANDOFF-v2",
+  "icon": "🧭",
+  "color": "accent-violet",
+  "version": "1.0.0",
+  "llm_model": "agentic",
+  "innate_skills": ["todo"],
+  "skill_injection": false,
+  "no_force_explore": true,
+  "context_injection": { "heuristic_match_shared_md_files": true },
+  "default_queue": "system_parallel_queue",
+  "tools": {
+    "allow": ["instance", "knowledge", "bash", "proc", "filesystem", "todo", "shared_meta_kv", "time", "self", "help", "context", "pok", "nest-report"],
+    "deny": ["edit_file", "write_file"]
+  },
+  "team_members": ["sonic-coder"]
+}

@@ -89,8 +89,12 @@ HOME_ORDER: tuple[str, ...] = ("rule.md", "workflow.md", "soul.md")
 #: 41 = 39 walk + 2 specials to 45 = 43 walk + 2 specials.  The pins
 #: RED without this — the count pin IS the "a new agent must carry the
 #: duty" tripwire (mutation leg M-P5-4).
-EXPECTED_TOTAL = 50
-EXPECTED_WALK = 48
+#: The sonic-team lane added FOUR more (2026-11-12: 48 = 46 walk + 2) and
+#: the COMBINED v1.1+v1.2 rework added the fifth, ``sonic-developer``
+#: (2026-11-13: 51 = 49 walk + 2 — every sonic agent carries the duty
+#: block as the LAST section of its rule.md).
+EXPECTED_TOTAL = 51
+EXPECTED_WALK = 49
 EXPECTED_SPECIALS = 2
 
 #: The underscore specials — the two dirs the id-collapsed walk skips.
@@ -194,10 +198,12 @@ SEAL_UNTOUCHED_BASE_VALUES: dict[str, str] = {
 #:
 #: 161 entries at the ceremony; 177 after the MERGE-FIRST step
 #: (origin/latest 97b76e20e — the v0.28.12 aegis release) added the four
-#: aegis-lane agents' artifacts (+16 versioned files).  The COUNT is
-#: pinned so a NEW versioned artifact cannot appear silently.
+#: aegis-lane agents' artifacts (+16 versioned files).  197 after the
+#: sonic-team lane (2026-11-12, +16 sonic artifacts).  201 after the
+#: COMBINED v1.1+v1.2 rework (2026-11-13, +4 sonic-developer artifacts).
+#: The COUNT is pinned so a NEW versioned artifact cannot appear silently.
 BASELINE_FILE = AGENTS_DIR / ".prompt-artifacts.sha256"
-BASELINE_EXPECTED_ENTRIES = 197
+BASELINE_EXPECTED_ENTRIES = 201
 
 
 # ---------------------------------------------------------------------------
