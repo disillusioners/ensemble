@@ -400,3 +400,41 @@ fix (5e22bc61e); anomaly duty blocks on all FIVE sonic agents (`nest-report` in 
 tools.allow, LAST; `pok` immediately before); blast predicate 14 globs byte-identical;
 `HANDOFF_PATH` literal; escalation line; Ari note + seal pins; kb-writer cheap-lane
 verdict (report-only — shared `kb-writer` untouched).
+
+---
+
+## Amendment — v0.30.2 roster & support-parity (2026-11-13)
+
+**Status:** POINTER-STYLE SUPERSESSION NOTES ONLY — this section amends the combined
+spec above without rewriting it (history stands). Authoritative decision rows:
+`decisions.md` §"v0.30.2 roster & support-parity amendment" (R16–R20). Lane:
+`feature/sonic-team-v0302`, base `c1d81593e`, Emperor ruling 2026-11-13.
+
+What changed vs the body of this spec (the body's wording stands as the v0.30.1 record):
+
+- **§1.2 Team membership (superseded in part by R16/R20):** `sonic-leader`
+  `team_members = ["sonic-developer", "sonic-coder", "sonic-reviewer", "sonic-tester",
+  "giter", "devops"]`; `sonic-developer` `team_members = ["sonic-coder", "giter"]`.
+  Giter's removal (D-H) is PARTIALLY superseded — giter returns as ESCAPE HATCH
+  (workflow/worktree expertise); the internal commit choreography (§5 D-MERGE) and the
+  release-lane-git-outside-the-loop rule stand unchanged. Devops on the leader is
+  "rarely invoked by design — infra/deploy escape hatch" (R17).
+- **§2.1 + §9 tools (superseded in part by R18):** `image` added to the allow list of
+  sonic-leader / sonic-developer / sonic-coder / sonic-reviewer (inserted immediately
+  before `pok` — grant-order invariant preserved), with `image_save` appended to each
+  deny list; sonic-coder gains its first `deny` key `["image_save"]`. Effective result
+  = the read trio `{explain_image, image_get, image_list}` (critic pattern);
+  `image-reader` joins each grantee's effective spawn set via
+  `TOOL_REQUIRED_AGENTS["image"]` — pinned in EXPECTED_EFFECTIVE, not hidden.
+  `compare_images`/`design`, `generate_image`, `generate_chart`/`charter`,
+  `sketcher`/`critic`, `wanderer`: OMITTED (R19 — includes sonic-coder's other
+  steady-coder gaps: snapshot/instance/service/midflight, not directed → no change).
+- **§9 pack pins (lockstep):** FROZEN_TOOLS + EXPECTED_EFFECTIVE updated for the four
+  touched agents (sonic-tester unchanged); counter-mutation legs added for EVERY new
+  grant (giter/devops spawn-set membership, image allow per agent, image_save deny per
+  agent, image-reader effective-set membership, leader-add-design guard).
+- **Baseline:** regenerated at 201 rows UNCHANGED (no new `.md` files; shas move for
+  the touched sonic artifacts). Duty/grant/pok/aegis sibling pin counts unchanged
+  (51/49, 49/51, 50/51, 201) — no new agents.
+- **Version:** content-only delta stage v0.30.2; zero migrations; no Ari edits (seal +
+  terminology pins untouched); sonic-tester untouched.
