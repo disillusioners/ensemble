@@ -88,3 +88,17 @@
 **Honest finding (i) — PERFORMANCE WATCH:** the developer's plan-open `explore()` (instance `66c739cf`) exceeded its 300s cap and returned no knowledge — anomaly `04408b5e`. The call WAS made at plan-open (ordering predicate satisfied, V9 PASS) and the developer proceeded correctly without it (no retry, no experience, no kb-writer spawn). Recorded as a PERFORMANCE WATCH item: the call is cheap-tier (`llm_model: "quick"`) but wall-clock heavy on a 2-module plan; the developer's correct no-retry handling kept it non-fatal. No prompt or code change implied by this record.
 
 **Honest finding (ii) — kb-writer terminal failure, no synthetic pollution:** the async kb-writer job ran and FAILED — instance `ff63ab4e-aaa7-490d-9732-e9c119c333bd` (spawned 10:15:51Z, terminal_status=error, work_id `6adce09e`, "PP1 zero-watcher terminal fire: no watchers found, terminal report NOT delivered"); its transcript shows 0 tool calls / 0 assistant messages; no `track_id` in the daemon log. NO RAG insert landed. The marker-bearing `experience()` call (marker `SONIC-DRYRUN-V11-20261113-a7c41e9b`, leader instance `c299f5d1`, @ 10:15:22.860171Z) stands as the V13 artifact; no synthetic knowledge pollution occurred. Both outcomes were pre-declared acceptable; silence was not — hence this disclosure.
+
+## Ceremony record — v0.30.1
+
+- **Version:** v0.30.1 (patch bump from v0.30.0; commit `00b0af633a075a93afb153b2d6bbd44ed18f78ed`)
+- **Stage command (verbatim):** `ENSEMBLE_UPGRADE_LIVE=1 ENSEMBLE_ROLLBACK_SAFE=1 VERSION=v0.30.1 bash scripts/upgrade/stage.sh live --allow-stale-stage` (run from `/home/nea/ensemble-src-wt-stage-v0301`; `--allow-stale-stage` added because the freshness guard refused the non-tip tree — feature branch is ahead of `origin/latest`; documented override, journaled on the install dir)
+- **Tag object sha:** `0a4c8b6f63a35efb9b7207d56ae1c25a8aded131`
+- **Tag commit sha:** `00b0af633a075a93afb153b2d6bbd44ed18f78ed`
+- **4-way binary sha:** `82c60f4fba39cd4a52d5bbc72981014dbadb68a555d23fc9842aa50889c012b0` (release binary == stage-wt dist binary == manifest binary_sha256 == sidecar artifact_sha256)
+- **Release dir:** `/home/nea/agents-ensemble/releases/v0.30.1`
+- **Baseline count:** 201 (PROMPT-BASELINE OK, rc 0)
+- **Migration delta:** `daemon/__init__.py` only (version string `0.30.0` → `0.30.1`); version-only, NOT a migration; `scripts/` untouched
+- **rollback_safe:** true (source=explicit)
+- **Staged at:** 2026-11-13T11:12:11Z; known_schema_gen `20261112_124200_add_snapshot_agent_space_key.sql`; contains_contract_phase true
+- **Promote:** NOT performed (Emperor-owned). Stage worktree `/home/nea/ensemble-src-wt-stage-v0301` kept.
