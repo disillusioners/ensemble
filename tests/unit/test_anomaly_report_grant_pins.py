@@ -63,8 +63,12 @@ CATEGORY = "nest-report"
 #: 48 / 50 after the sonic-team lane (2026-11-12): the FOUR ``sonic-*``
 #: agents each carry the grant explicitly (44 explicit + 4; ``canary``
 #: and ``watcher`` remain the two non-carriers).
-EXPECTED_EXPLICIT = 48
-EXPECTED_TOTAL_META = 50
+#: 49 / 51 after the COMBINED v1.1+v1.2 rework (2026-11-13): the fifth
+#: sonic agent ``sonic-developer`` carries the grant explicitly
+#: (``nest-report`` LAST, ``pok`` immediately before — grant-pin
+#: convention preserved).
+EXPECTED_EXPLICIT = 49
+EXPECTED_TOTAL_META = 51
 #: The ONE agent that inherits instead of carrying an explicit entry.
 INHERITANCE_EXCEPTIONS: frozenset[str] = frozenset({"watcher"})
 #: Agents whose NON-EMPTY allow predates their sweep class and
