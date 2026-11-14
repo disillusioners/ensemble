@@ -1,3 +1,4 @@
+# ENSEMBLE-32: platform-fixture rationale — see docs/runbooks/ram-guard-and-unit-bounds.md "Test-platform census"
 """Phase 6 — the interaction packs (T17b three-kill-path; T20 stalled confirm).
 
 Both are DETERMINISTIC — the kill signals are recorded by the house

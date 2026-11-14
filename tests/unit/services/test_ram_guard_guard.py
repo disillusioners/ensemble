@@ -1,3 +1,4 @@
+# ENSEMBLE-32: platform-fixture rationale — see docs/runbooks/ram-guard-and-unit-bounds.md "Test-platform census"
 """Substrate tier — the guard: the two threads, the registry, the
 pending set, the liveness sweep and the event HOOK
 (test-plan §3.1 case S6, §3.7 N3, §3.8 O10/O11/O12/O14).

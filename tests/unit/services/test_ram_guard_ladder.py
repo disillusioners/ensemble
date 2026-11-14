@@ -1,3 +1,4 @@
+# ENSEMBLE-32: platform-fixture rationale — see docs/runbooks/ram-guard-and-unit-bounds.md "Test-platform census"
 """Substrate tier — the kill ladder and the pre-kill gate (test-plan §3.1,
 case S8 — ALL of P0–P7 (P5a RETIRED, §18.3) — plus S16 and S18).
 

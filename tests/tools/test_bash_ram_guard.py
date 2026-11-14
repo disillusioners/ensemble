@@ -1982,3 +1982,20 @@ class TestEnsemble32ReadProcClassify:
         status, val = bash_module._read_proc_start_time(123)
         assert status == 'unsupported'
         assert val is None
+
+class TestEnsemble32BashAbsentSpawn:
+    async def test_bash_absent_leader_no_registration_no_footer(self, fake_guard, monkeypatch):
+        import importlib
+        bash_module = importlib.import_module('daemon.tools.bash')
+        # make fake guard honor absent status (real guard does)
+        orig_register = fake_guard.register
+        def _reg(**kwargs):
+            if kwargs.get('start_time_status') == 'absent':
+                return None
+            return orig_register(**kwargs)
+        fake_guard.register = _reg
+        monkeypatch.setattr(bash_module, '_read_proc_start_time', lambda pid: ('absent', None))
+        out = await bash_module.bash.coroutine(command='echo hi', instance_id='i-bash-absent')
+        assert fake_guard.registered == []
+        assert 'ram_kill_refused:' not in out
+        assert 'ram_breach_observed:' not in out

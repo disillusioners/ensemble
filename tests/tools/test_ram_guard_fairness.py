@@ -1,3 +1,4 @@
+# ENSEMBLE-32: platform-fixture rationale — see docs/runbooks/ram-guard-and-unit-bounds.md "Test-platform census"
 """The FORK-TREE FAIRNESS pack (phase6 T16 / test-plan U4).
 
 **The single most important fairness proof in the suite.**  A real

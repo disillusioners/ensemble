@@ -1,3 +1,4 @@
+# ENSEMBLE-32: platform-fixture rationale — see docs/runbooks/ram-guard-and-unit-bounds.md "Test-platform census"
 """Phase 6 — the guard-level additions (bounded, deterministic, NO subprocesses).
 
 This pack owns the Phase-6-only assertions that were NOT part of the

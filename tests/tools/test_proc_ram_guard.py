@@ -240,6 +240,12 @@ def _mem_available_bytes() -> int:
     return 0
 
 
+def _mem_skip_reason() -> str:
+    if not Path("/proc/meminfo").exists():
+        return "no /proc/meminfo (non-Linux host)"
+    return "insufficient memory"
+
+
 def _norm_ws(text: str) -> str:
     """Normalized-whitespace equality (D-6) — the pin comparator for the
     verbatim §3.5 sentences (markdown emphasis/backticks are already
@@ -474,7 +480,7 @@ class TestBallooningTree:
     @pytest.mark.timeout(90)
     async def test_ballooning_tree_via_proc_run_is_killed(self, proc_tools, real_guard):
         if _mem_available_bytes() < PLANNED_BYTES + 256 * 1024 * 1024:
-            pytest.skip("insufficient memory")
+            pytest.skip(_mem_skip_reason())
         # The guard is installed AND started by the ``real_guard``
         # fixture — its two threads own the measurement, the breach
         # decision, the kill and the verdict (leader ruling Q1).
@@ -563,7 +569,7 @@ class TestLeaderlessTree:
     @pytest.mark.timeout(90)
     async def test_leaderless_tree_shape(self, proc_tools, real_guard):
         if _mem_available_bytes() < PLANNED_BYTES + 256 * 1024 * 1024:
-            pytest.skip("insufficient memory")
+            pytest.skip(_mem_skip_reason())
         # The guard is installed AND started by the ``real_guard``
         # fixture (its two threads own the measurement + the kill).
         tools, _ = proc_tools
@@ -884,7 +890,7 @@ class TestLaneShape:
         through the DQ4 ladder.
         """
         if _mem_available_bytes() < PLANNED_BYTES + 256 * 1024 * 1024:
-            pytest.skip("insufficient memory")
+            pytest.skip(_mem_skip_reason())
         from daemon.tools.proc_tools import BackgroundProcessManager
 
         calls: list[str] = []
@@ -1437,3 +1443,27 @@ class TestEnsemble32ProcAbsentSeam:
         )
         assert rec is None
         assert g.counters_snapshot()['ram_kill_refusals_p5'] == 0
+        assert g.counters_snapshot()['ram_kill_refusals_p0'] == 0
+        assert g.read_verdict('p' * 32) is None
+
+class TestEnsemble32ProcClassifyParity:
+    def test_proc_status_derivation_matches_canonical(self, monkeypatch):
+        import importlib
+        import daemon.services.ram_guard.tree_reader as tr
+        from daemon.services.ram_guard.tree_reader import classify_proc_stat_error
+        # absent
+        monkeypatch.setattr(tr, 'read_stat_entry', lambda root, pid: tr.StatRead(pid=pid, status='absent'))
+        st = tr.read_stat_entry(None, 1)
+        derived = 'ok' if st.ok else ('absent' if st.absent else 'unreadable')
+        assert derived == classify_proc_stat_error(FileNotFoundError('x'))
+        # unreadable
+        monkeypatch.setattr(tr, 'read_stat_entry', lambda root, pid: tr.StatRead(pid=pid, status='unreadable'))
+        st2 = tr.read_stat_entry(None, 1)
+        derived2 = 'ok' if st2.ok else ('absent' if st2.absent else 'unreadable')
+        assert derived2 == classify_proc_stat_error(PermissionError('x'))
+        # ok
+        monkeypatch.setattr(tr, 'read_stat_entry', lambda root, pid: tr.StatRead(pid=pid, status='ok', start_time_jiffies=42))
+        st3 = tr.read_stat_entry(None, 1)
+        derived3 = 'ok' if st3.ok else ('absent' if st3.absent else 'unreadable')
+        assert derived3 == 'ok'
+        assert st3.start_time_jiffies == 42

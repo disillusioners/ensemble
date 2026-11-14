@@ -293,17 +293,19 @@ def test_envelope_reports_the_resolved_ceiling_as_limit_bytes():
 def test_default_ram_breach_observed_false():
     import inspect
     from daemon.services.ram_guard.errors import build_ram_envelope_payload, format_ram_envelope
-    assert build_ram_envelope_payload.__wrapped__ if hasattr(build_ram_envelope_payload,'__wrapped__') else True
     assert inspect.signature(build_ram_envelope_payload).parameters['ram_breach_observed'].default is False
     assert inspect.signature(format_ram_envelope).parameters['ram_breach_observed'].default is False
 
 def test_killed_envelope_carries_ram_breach_observed_true():
     """Kill path (bash.py:1685/:1792, errors.py:221) passes True explicitly."""
     rec = make_record()
-    # caller passes True as the kill path does
+    # caller passes True as the kill path does (bash.py:1685/:1792,
+    # errors.py:221). Each assertion proves only what its line states:
+    #   - with ram_breach_observed=True the payload carries True;
+    #   - with no caller arg the default (False) is used.
+    # The proc surface is pinned separately in
+    # test_ram_guard_breachless_refusal.py and test_proc_ram_guard.py.
     payload = build_ram_envelope_payload(rec, ram_breach_observed=True)
     assert payload["ram_breach_observed"] is True
-    # proc surface for the same record still reports the breach
-    # default-constructed payload (no caller) is False (safe-by-construction)
     default_payload = build_ram_envelope_payload(rec)
     assert default_payload["ram_breach_observed"] is False
