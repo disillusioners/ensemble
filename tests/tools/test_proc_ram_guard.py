@@ -1446,6 +1446,8 @@ class TestEnsemble32ProcAbsentSeam:
         assert g.counters_snapshot()['ram_kill_refusals_p0'] == 0
         assert g.read_verdict('p' * 32) is None
 
+import re as _re
+
 class TestEnsemble32ProcClassifyParity:
     async def test_proc_absent_drives_lane_no_registration(self, proc_tools, monkeypatch):
         tools, iid = proc_tools
@@ -1460,9 +1462,12 @@ class TestEnsemble32ProcClassifyParity:
             res = await tools["proc_run"].ainvoke({"command": "echo hi"})
         finally:
             set_ram_guard(None)
+        assert guard.health()["registry_depth"] == 0
         assert guard.counters_snapshot()["ram_kill_refusals_p5"] == 0
         assert guard.counters_snapshot()["ram_kill_refusals_p0"] == 0
-        assert guard.read_verdict(iid) is None
+        m = _re.search(r"(proc-[0-9a-f]+)", res)
+        if m:
+            assert guard.read_verdict(m.group(1)) is None
 
     async def test_proc_unreadable_drives_lane_refusal(self, proc_tools, monkeypatch):
         tools, iid = proc_tools
@@ -1477,8 +1482,13 @@ class TestEnsemble32ProcClassifyParity:
             res = await tools["proc_run"].ainvoke({"command": "echo hi"})
         finally:
             set_ram_guard(None)
-        # a refused record should have bumped p5
+        assert guard.health()["registry_depth"] == 1
         assert guard.counters_snapshot()["ram_kill_refusals_p5"] == 1
+        m = _re.search(r"(proc-[0-9a-f]+)", res)
+        if m:
+            rec = guard.read_verdict(m.group(1))
+            assert rec is not None
+            assert rec.reason == "refused:leader-unreadable"
 
     async def test_proc_ok_drives_lane_registration(self, proc_tools, monkeypatch):
         tools, iid = proc_tools
@@ -1493,9 +1503,14 @@ class TestEnsemble32ProcClassifyParity:
             res = await tools["proc_run"].ainvoke({"command": "echo hi"})
         finally:
             set_ram_guard(None)
-        # registered: at least one registration recorded via real guard? guard has no .registered; check counters not refused
+        assert guard.health()["registry_depth"] == 1
         assert guard.counters_snapshot()["ram_kill_refusals_p5"] == 0
         assert guard.counters_snapshot()["ram_kill_refusals_p0"] == 0
+        m = _re.search(r"(proc-[0-9a-f]+)", res)
+        if m:
+            rec = guard.read_verdict(m.group(1))
+            assert rec is not None
+            assert rec.start_time_jiffies == 42
 
     async def test_proc_unsupported_platform(self, proc_tools, monkeypatch):
         tools, iid = proc_tools
@@ -1509,4 +1524,6 @@ class TestEnsemble32ProcClassifyParity:
             res = await tools["proc_run"].ainvoke({"command": "echo hi"})
         finally:
             set_ram_guard(None)
-        assert guard.counters_snapshot()["ram_kill_refusals_p0"] >= 0
+        assert guard.counters_snapshot()["ram_kill_refusals_p0"] == 1
+        assert guard.counters_snapshot()["ram_kill_refusals_p5"] == 0
+        assert guard.health()["registry_depth"] == 1
