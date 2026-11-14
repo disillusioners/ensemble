@@ -391,6 +391,53 @@ serial runs (no concurrent mutation driver on the tree).
 - Venue removed after the run; this lane's own scratch evidence removed
   alongside it.
 
+## R7 sweep — recorded addendum (2026-11-14, FIX-1 lane)
+
+The reviewer's delta verdict flagged that the R7 /tmp tidy — the
+scratch-evidence removal noted at the close of the spawn-safe re-proof above —
+left NO recorded artifact and was therefore unverifiable-by-construction. This
+addendum records it.
+
+Removed path prefixes (10), with per-path notes; measured sizes where the
+FIX-1 lane measured them, otherwise marked unmeasured at removal:
+
+| Removed path | Note | Size at removal |
+| --- | --- | --- |
+| `/tmp/rc-p2-happy-manual-336990/` | happy-manual mirror | **44.8 MB** |
+| `/tmp/rc-p2-evidence/` | 44 AH-M* evidence logs | **92 KB** |
+| `/tmp/rc-p2-fr-334021/` | fix-round scratch dir | unmeasured at removal |
+| `/tmp/rc-p2-fr-334285/` | fix-round scratch dir | unmeasured at removal |
+| `/tmp/rc-p2-fr-runner.sh` | fix-round runner script | unmeasured at removal |
+| `/tmp/rc-p2-happy-manual.sh` | happy-manual driver script | unmeasured at removal |
+| `/tmp/rc-p2-mut/` | mutation-run scratch dir | unmeasured at removal |
+| `/tmp/rc-p2-pg-initdb.log` | PG initdb log (attempt 1) | unmeasured at removal |
+| `/tmp/rc-p2-pg-initdb2.log` | PG initdb log (attempt 2) | unmeasured at removal |
+| `/tmp/rc-p2-u-append.md` | lane append note | unmeasured at removal |
+
+Sizes were measured at removal ONLY for the happy-manual mirror (44.8 MB) and
+the AH-M evidence logs (92 KB); the remaining 8 paths were removed unmeasured —
+recorded as such, no precise total is invented. Reclaimed floor:
+**≥44.9 MB**.
+
+`any-18097.json` staleness-proof TRIPLE, recorded at removal (sha256
+`aa761070…` noted at removal):
+
+1. **No socket of ANY state on port 18097** in `/proc/net/tcp` and
+   `/proc/net/tcp6` at removal time.
+2. **File mtime `2026-11-14T07:01:07Z`** predates this lane's opening
+   `2026-11-14T18:16Z` — the stale claim file predates the lane that swept it.
+3. **The claimed pid's starttime ~16h stale** at removal — no live process
+   could still match the recorded identity pair.
+
+Live-claims spared: `any-9797.json` and ALL claim files for ports
+9797 / 9798 / 7979 were left untouched. Post-sweep `/tmp` carries ZERO
+`rc-p2-*` paths.
+
+**Provenance:** facts recorded verbatim from the FIX-1 lane's execution report
+(sweep executed during the `634b54cda..1bbd5b71e` commit window); the listed
+paths no longer exist by construction — the recorded triple + sha256 prefix
+are the evidence, and re-measurement is impossible by design.
+
 ## Row verdict roll (S6)
 
 13/13 rows RED under their named counter-mutants (BF-M1..M9, HY-M1..M4) ·
