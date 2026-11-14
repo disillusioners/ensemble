@@ -1462,7 +1462,7 @@ class TestEnsemble32ProcClassifyParity:
             set_ram_guard(None)
         assert guard.counters_snapshot()["ram_kill_refusals_p5"] == 0
         assert guard.counters_snapshot()["ram_kill_refusals_p0"] == 0
-        assert guard.read_verdict(iid) is None or True
+        assert guard.read_verdict(iid) is None
 
     async def test_proc_unreadable_drives_lane_refusal(self, proc_tools, monkeypatch):
         tools, iid = proc_tools
