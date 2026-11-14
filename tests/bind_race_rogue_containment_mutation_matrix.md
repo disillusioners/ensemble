@@ -339,6 +339,58 @@ invoke real tool coroutines — recorder active on every pin) and
 held as a family tripwire). Both carry the autouse `_spawn_seam_recorder`
 fixture; the full family runs 29/29 green under it.
 
+### Spawn-safe HY-M2 re-proof (structural — recorder active; 2026-11-14)
+
+First re-proof under the spawn-seam contract above: the SAME incident scenario
+that produced the live SIGTERM, replayed with the seam in the pin files.
+Venue: `git worktree add --detach /tmp/rc-p2-hym2-reproof 634b54cda` (the
+commit that lands the recorders — KILL-PROOF BY CONSTRUCTION: the seam is in
+the venue's pin files), `uv sync --frozen`, `daemon.__file__` verified inside
+the venue, per-variable PG scrubs + `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0`
++ `ENSEMBLE_PORT_CLAIMS_DIR` under /tmp, `--timeout=120` inside `timeout 300`,
+serial runs (no concurrent mutation driver on the tree).
+
+- PRE digest: `dc57fdf28c6f543efefc65246937433b13c91ca790568a35d454714b5a8c815f  daemon/tools/proc_tools.py`.
+- Mutant (identical to the HY-M2 row above): the function-local bash import +
+  delegated call in `create_proc_tools` replaced with a local no-op
+  (`_proc_pkill_violation = None`).
+- **Observed RED — exactly the HY-M2 row's 2 failing nodes, 27 passed:**
+  - `test_proc_lane_delegates_to_bash_predicate_HY2` — structural face:
+    `assert 'from daemon.tools.bash import _pkill_overlay_violation' in src`
+    (import gone from the factory source).
+  - `test_proc_refusal_text_stays_ambient_only_HY4` — refusal absent ⇒
+    assertion fails: the tool's success text named `proc-<id>, pid=2000001` —
+    the RECORDER STUB's pid, not a real process. Its command is redacted here
+    as `pkill -f <live-name>` (paste-safe).
+  - `ERROR at teardown of test_proc_refusal_text_stays_ambient_only_HY4`:
+    `STRUCTURAL SPAWN GUARD tripped … recorder captured 1 spawn attempt(s) …
+    [{'argv': ['pkill -f <live-name>'], 'cwd': None}]. NOTHING was executed`
+    — the zero-exec proof rides the red itself.
+- **Zero real spawns.** The incident's failure mode (a real pkill matching the
+  live daemon's name pattern reaching the kernel) is structurally unreachable:
+  the argv never left the pytest process except as a recorded dict.
+- Restore: `git restore daemon/tools/proc_tools.py`; sha256 POST == PRE
+  (`dc57fdf2…c815f` byte-identical); tracked porcelain empty.
+- Green re-run after restore: **29 passed**.
+- **Belt-and-braces live-trio listener identity** (pid + starttime + cmdline
+  sha256-prefix; comm/cmdline literals withheld paste-safe; snapshots via the
+  `/proc/net/tcp{,6}` → socket-inode → `/proc/<pid>/fd` walk):
+  - port 7979: PRE pid 304612 / starttime 59048199 / hash `b9444c3587b8` —
+    POST **identical**.
+  - port 9798: PRE pid 305455 / starttime 59055349 / hash `b94b053d4e8b` —
+    POST **identical**.
+  - port 9797: PRE pid 371165 / starttime 59588242 → POST pid 372293 /
+    starttime 59597565 — **CHURNED, attributed NOT-this-lane**: (i) the
+    recorder proves the mutant leg spawned nothing; (ii) the pin family
+    contains no server/bind code; (iii) the churn continued while this venue
+    sat idle (successive pids 372708, 373364, 373561 recorded minutes AFTER
+    this lane's last pytest run ended); (iv) an active claim file for 9797
+    (claimed 2026-11-14T21:57:24Z by the live daemon's own pid+starttime —
+    its metrics-port derive lane) predates the runs. The pair the original
+    incident harmed (7979 + 9798) is identity-identical across the whole lane.
+- Venue removed after the run; this lane's own scratch evidence removed
+  alongside it.
+
 ## Row verdict roll (S6)
 
 13/13 rows RED under their named counter-mutants (BF-M1..M9, HY-M1..M4) ·
