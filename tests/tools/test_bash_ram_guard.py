@@ -1302,7 +1302,7 @@ class TestNegativePaths:
         assert "done" in out
         # The refusal surface — the reason is reported, not swallowed.
         assert "ram_kill_refused: refused:platform-unsupported" in out
-        assert "ram_breach_observed: true" in out
+        assert "ram_breach_observed: true" not in out
         assert "ram_limit_exceeded" not in out
 
     async def test_an_unreadable_proc_root_produces_no_false_breach(
@@ -1889,3 +1889,49 @@ class TestRealBallooningTree:
                     pass
 
 
+import pytest
+
+@pytest.fixture(autouse=True)
+def _ensemble32_linux_platform(monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")
+
+
+# ── ENSEMBLE-32 breach-less refusal surface ──────────────────────────────
+class TestEnsemble32Breachless:
+    async def test_platform_refusal_emits_no_breach_observed(self, monkeypatch, tmp_path):
+        from daemon.services.ram_guard.guard import RamGuard
+        from daemon.services.ram_guard import set_ram_guard, get_ram_guard
+
+        guard = RamGuard(
+            enabled=True,
+            resolved_ceiling=(1024 * 1024, "test"),
+            platform="win32",
+        )
+        set_ram_guard(guard)
+        guard.start()
+        try:
+            import importlib
+            bash_module = importlib.import_module("daemon.tools.bash")
+            out = await bash_module.bash.coroutine(
+                command="echo hi", instance_id="i-ens32"
+            )
+        finally:
+            guard.stop()
+            guard.join(3.0)
+            set_ram_guard(None)
+        assert "ram_kill_refused: refused:platform-unsupported" in out
+        assert "ram_breach_observed" not in out
+
+
+class TestEnsemble32RegistrationSeam:
+    async def test_darwin_no_guard_no_footer(self, monkeypatch, tmp_path):
+        import importlib
+        bash_module = importlib.import_module("daemon.tools.bash")
+        from daemon.services.ram_guard import set_ram_guard
+        monkeypatch.setattr("sys.platform", "darwin")
+        set_ram_guard(None)
+        out = await bash_module.bash.coroutine(
+            command="echo hi", instance_id="i-ens32-seam"
+        )
+        assert "ram_kill_refused:" not in out
+        assert "ram_breach_observed:" not in out

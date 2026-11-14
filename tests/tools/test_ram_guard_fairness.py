@@ -240,3 +240,10 @@ class TestHarnessBounds:
         monkeypatch.setattr(harness, "mem_available_bytes", lambda: 0)
         with pytest.raises(HostMemoryShortage):
             require_allocation_fits(_spec())
+
+
+import pytest
+
+@pytest.fixture(autouse=True)
+def _ensemble32_linux_platform(monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")

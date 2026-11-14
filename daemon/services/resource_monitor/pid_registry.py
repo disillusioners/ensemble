@@ -152,7 +152,7 @@ class PidRegistryEntry:
     """
 
     pid: int
-    start_time: int  # kernel jiffies (Linux) or epoch seconds (macOS)
+    start_time: Optional[int]  # kernel jiffies (Linux) or epoch seconds (macOS); None = structurally unverified
     kind: str
     spawned_at: str  # naive-UTC ISO "YYYY-MM-DD HH:MM:SS" (D9)
     pgid: Optional[int] = None
@@ -290,7 +290,7 @@ class PidRegistry:
         self,
         *,
         pid: int,
-        start_time: int,
+        start_time: Optional[int],
         kind: str,
         instance_id: Optional[str] = None,
         agent_id: Optional[str] = None,
@@ -342,7 +342,7 @@ class PidRegistry:
         with self._lock:
             existing = self._live.get(pid)
             if existing is not None:
-                if existing.start_time == start_time:
+                if start_time is not None and existing.start_time == start_time:
                     # Idempotent re-register (e.g. chart tool retries
                     # the same charter invocation). Keep the original
                     # ``spawned_at``; the caller has not changed.
@@ -380,7 +380,8 @@ class PidRegistry:
         self,
         *,
         pid: int,
-        start_time: int,
+        start_time: Optional[int],
+        pgid: Optional[int] = None,
         exit_code: Optional[int] = None,
         exit_kind: str = EXIT_KIND_UNKNOWN,
         peak_rss_kb: Optional[int] = None,
@@ -419,7 +420,15 @@ class PidRegistry:
             )
         with self._lock:
             entry = self._live.get(pid)
-            if entry is None or entry.start_time != start_time:
+            if entry is None:
+                return None
+            # Identity verification — never a pid-only match.
+            verified = False
+            if start_time is not None and entry.start_time is not None and entry.start_time == start_time:
+                verified = True
+            elif pgid is not None and entry.pgid is not None and entry.pgid == pgid and (start_time is None or entry.start_time is None):
+                verified = True
+            if not verified:
                 return None
             entry.exited_at = _now_naive_utc_iso()
             entry.exit_code = exit_code

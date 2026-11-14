@@ -274,3 +274,10 @@ class TestFourSurfaceNegativeSpace:
             assert not isinstance(value, (dict, list, tuple)), (
                 f"nested structure in the event payload: {key}"
             )
+
+
+import pytest
+
+@pytest.fixture(autouse=True)
+def _ensemble32_linux_platform(monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")

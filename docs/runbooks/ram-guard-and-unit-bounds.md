@@ -327,6 +327,23 @@ one INFO line at lifespan start — grep it as proof of intent:
 
 The bash and proc lanes then behave byte-identically to pre-feature output.
 
+### C.2b Supported platforms — Linux only
+
+The RAM guard is **Linux-only**. On any non-Linux platform (`sys.platform` not starting with
+`linux`) the guard is completely inert: `_boot_ram_guard` does **not** construct a `RamGuard`,
+sets `app.state.ram_guard = None`, calls `set_ram_guard(None)`, and emits exactly one boot
+INFO line:
+
+```
+[RamGuard] OFF — platform <sys.platform> unsupported
+```
+
+There is no guard thread, no registration, no `/proc` reads, and no footer on bash/proc output —
+bash behaves exactly as it did pre-v0.29.21 (unguarded). The belt-and-braces `RamGuard.register`
+refuses registration with `refused:platform-unsupported` if a guard is ever constructed manually
+on a non-Linux host, but that path is not reachable through the normal boot flow, so
+`refused:platform-unsupported` does **not** appear in production output on a Linux daemon.
+
 **OFF beats validation (B26).** `load_config` parses the bare switch **first**; while OFF it
 passes a `model_construct`-ed config that bypasses both validation and the settings sources, so
 an out-of-range `RAM_GUARD_CEILING_MIB` (env **or** yaml) **does not abort the boot**. Enabling
@@ -340,7 +357,9 @@ ram_kills, ram_breaches_detected, ram_kill_refusals_p0, ram_kill_refusals_p1, ra
 ```
 
 There is **no `ram_kill_refusals_p8`**: the refusal ladder is `p0…p7`, and the pre-kill
-predicates map onto the buckets as `p0` = not-registered / guard-disabled / platform-unsupported ·
+predicates map onto the buckets as `p0` = not-registered / guard-disabled (platform-unsupported is
+listed here for completeness but is not reachable in production: on non-Linux the guard is never
+constructed, so no registration — and no `refused:platform-unsupported` — ever occurs) ·
 `p1` = pgid-not-registered · `p2` = pgid-invalid · `p3` = daemon-group · `p4` = pgid-self ·
 `p5` = pgid-recycled / leader-unreadable · `p7` = group-unknown. (no `p6`: P6 is ADVISORY — §18.2.)
 Ten of the 15 reason codes are `refused:` (eight permanent → terminal `REFUSED`; two —

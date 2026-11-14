@@ -1314,3 +1314,10 @@ def test_c2_the_claim_spans_the_emit(tmp_path, kill_census, monkeypatch):
     assert record.state == STATE_RELEASED, (
         "the release still lands — after the emit"
     )
+
+
+import pytest
+
+@pytest.fixture(autouse=True)
+def _ensemble32_linux_platform(monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")

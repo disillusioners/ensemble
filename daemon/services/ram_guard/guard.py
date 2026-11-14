@@ -54,9 +54,11 @@ from .events import RamBreachEmitter
 from .ladder import (
     REASON_TREE_INCOMPLETE,
     REASON_LEADER_UNREADABLE,
+    REASON_PLATFORM_UNSUPPORTED,
     is_permanent_refusal,
     refusal_bucket,
     ram_kill_ladder,
+    platform_supported,
 )
 from .tree_reader import (
     PROC_ROOT,
@@ -318,6 +320,27 @@ class RamGuard:
             return None
         if not instance_id:
             return None
+        # Belt-and-braces: non-Linux platform ⇒ refuse registration with
+        # the platform-unsupported reason (P0 is the reason authority).
+        if not platform_supported(self._platform):
+            record = SpawnRecord(
+                tracking_id=tracking_id,
+                instance_id=instance_id,
+                lane=lane,
+                pid=int(pid),
+                pgid=int(pgid),
+                start_time_jiffies=start_time_jiffies,
+                ceiling_bytes=int(ceiling_bytes if ceiling_bytes is not None else self._resolved_ceiling_bytes),
+                poll_interval_ms=int(poll_interval_ms if poll_interval_ms is not None else self._poll_interval_ms),
+                grace_ms=int(grace_ms if grace_ms is not None else int(self._grace_seconds * 1000)),
+            )
+            with self._lock:
+                record.state = STATE_REFUSED
+                record.reason = REASON_PLATFORM_UNSUPPORTED
+                record.ever_members = (int(pid),)
+                self._registry[tracking_id] = record
+                self._counters.bump("ram_kill_refusals_" + refusal_bucket(REASON_PLATFORM_UNSUPPORTED))
+            return record
         record = SpawnRecord(
             tracking_id=tracking_id,
             instance_id=instance_id,
@@ -347,7 +370,7 @@ class RamGuard:
             if start_time_jiffies is None:
                 record.state = STATE_REFUSED
                 record.reason = REASON_LEADER_UNREADABLE
-                self._counters.bump("ram_kill_refusals_p5")
+                self._counters.bump("ram_kill_refusals_" + refusal_bucket(REASON_LEADER_UNREADABLE))
             self._registry[tracking_id] = record
         return record
 
@@ -454,8 +477,16 @@ class RamGuard:
             records = list(self._registry.values())
         # The scan is OUTSIDE the lock — it is the expensive part.
         table = scan_proc(self._proc_root)
-        for record in records:
-            self._sample_record(record, table, now)
+        if not table.scan_complete:
+            # Skip-fast: enumeration failed — increment enumeration_failures
+            # for every record under a SINGLE lock instead of per-record.
+            with self._lock:
+                for record in records:
+                    record.enumeration_failures += 1
+            # Still run liveness sweep + heartbeat stamping below.
+        else:
+            for record in records:
+                self._sample_record(record, table, now)
         if self._sweep_every_ticks > 0 and self._ticks % self._sweep_every_ticks == 0:
             self._liveness_sweep()
         # Heartbeat truthfulness (C6): stamp last_tick_at ONLY after a

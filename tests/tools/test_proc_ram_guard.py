@@ -1415,3 +1415,10 @@ class TestBoundedWaitDeadline:
             pass
 
         assert proc_tools_module._ram_wait_deadline_ms(_BareGuard()) == 1308
+
+
+import pytest
+
+@pytest.fixture(autouse=True)
+def _ensemble32_linux_platform(monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")

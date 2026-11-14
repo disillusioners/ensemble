@@ -320,10 +320,10 @@ def format_ram_proc_lines(record, *, timed_out: bool = False) -> list[str]:
     reason = getattr(record, "reason", None)
     reason_str = reason if isinstance(reason, str) else ""
     if reason_str.startswith("refused:"):
-        return [
-            PROC_REFUSAL_LINE.format(reason=reason_str),
-            PROC_BREACH_OBSERVED_LINE,
-        ]
+        lines = [PROC_REFUSAL_LINE.format(reason=reason_str)]
+        if breach_observed(record):
+            lines.append(PROC_BREACH_OBSERVED_LINE)
+        return lines
     state = getattr(record, "state", None)
     if state == STATE_KILLED or reason_str.startswith("killed:"):
         payload = build_ram_envelope_payload(
@@ -349,6 +349,19 @@ def format_ram_proc_lines(record, *, timed_out: bool = False) -> list[str]:
     return []
 
 
+
+def breach_observed(record) -> bool:
+    """Canonical predicate: was a breach actually OBSERVED?
+
+    ``True`` iff ``record`` is not None and ``record.breach_at`` is not
+    None.  Shared by the bash lane (``_ram_additive_surface``) and the
+    proc lane (``format_ram_proc_lines``) so the two surfaces can never
+    drift on the breach-observed question.
+    """
+    return bool(record is not None and getattr(record, "breach_at", None) is not None)
+
+
+
 __all__ = [
     "DEFAULT_SURFACE",
     "ENVELOPE_KEYS",
@@ -357,6 +370,7 @@ __all__ = [
     "MESSAGE_TEMPLATE",
     "RAM_LIMIT_EXCEEDED_CODE",
     "SURFACE_BY_LANE",
+    "breach_observed",
     "build_message",
     "build_ram_envelope_payload",
     "build_ram_event_payload",

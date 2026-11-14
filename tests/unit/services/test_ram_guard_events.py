@@ -619,3 +619,10 @@ class TestScheduleFailureClosesCoro:
             "the scheduling-failure path must close the coroutine — "
             "no unawaited-coroutine warning may escape"
         )
+
+
+import pytest
+
+@pytest.fixture(autouse=True)
+def _ensemble32_linux_platform(monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")

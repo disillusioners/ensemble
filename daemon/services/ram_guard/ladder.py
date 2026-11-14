@@ -185,6 +185,17 @@ def refusal_bucket(reason: str) -> Optional[str]:
 # ── The individual pre-kill predicates (P0–P7; P5a RETIRED §18.3) ─────────
 
 
+def platform_supported(platform: Optional[str] = None) -> bool:
+    """The P0 platform predicate — the SINGLE source of truth.
+
+    ``True`` iff ``platform`` (default ``sys.platform``) starts with
+    ``"linux"``.  Used by BOTH ``check_p0_guard_enabled`` and
+    ``RamGuard.register`` so the two can never drift.
+    """
+    plat = sys.platform if platform is None else platform
+    return bool(plat) and str(plat).startswith("linux")
+
+
 def check_p0_guard_enabled(
     *,
     guard_enabled: bool,
@@ -199,8 +210,7 @@ def check_p0_guard_enabled(
         return REASON_GUARD_DISABLED
     if not registered:
         return REASON_NOT_REGISTERED
-    plat = sys.platform if platform is None else platform
-    if not plat.startswith("linux"):
+    if not platform_supported(platform):
         return REASON_PLATFORM_UNSUPPORTED
     return None
 

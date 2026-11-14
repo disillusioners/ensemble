@@ -96,6 +96,7 @@ from daemon.services.ram_guard import (
     release as _ram_guard_release,
 )
 from daemon.services.ram_guard.errors import (
+    breach_observed as _ram_breach_observed_canonical,
     format_ram_envelope as _format_ram_envelope,
 )
 from daemon.services.ram_guard.guard import (
@@ -468,7 +469,7 @@ def _pid_registry_register(
     """
     get_pid_registry().register(
         pid=pid,
-        start_time=start_time if start_time is not None else 0,
+        start_time=start_time,
         kind=kind,
         instance_id=instance_id,
         pgid=pgid,
@@ -482,6 +483,7 @@ def _pid_registry_mark_exit(
     *,
     pid: int,
     start_time: Optional[int],
+    pgid: Optional[int] = None,
     exit_code: Optional[int],
     exit_kind: str,
     peak_rss_kb: Optional[int],
@@ -499,7 +501,8 @@ def _pid_registry_mark_exit(
     """
     get_pid_registry().mark_exit(
         pid=pid,
-        start_time=start_time if start_time is not None else 0,
+        start_time=start_time,
+        pgid=pgid,
         exit_code=exit_code,
         exit_kind=exit_kind,
         peak_rss_kb=peak_rss_kb,
@@ -1067,8 +1070,12 @@ def _ram_is_refusal(record: "_RamSpawnRecord | None") -> bool:
 
 
 def _ram_breach_observed(record: "_RamSpawnRecord | None") -> bool:
-    """Was a breach OBSERVED (independent of the outcome)?"""
-    return bool(record is not None and record.breach_at is not None)
+    """Was a breach OBSERVED (independent of the outcome)?
+
+    Delegates to the canonical helper in ``daemon.services.ram_guard.errors``
+    so the bash and proc surfaces can never drift.
+    """
+    return _ram_breach_observed_canonical(record)
 
 
 def _ram_lane_release(tracking_id: str | None) -> bool:
@@ -1197,13 +1204,14 @@ def _ram_additive_surface(
     ``code="ram_limit_exceeded"`` by construction (it never uses it).
     """
     if _ram_is_refusal(record):
-        return (
+        out = (
             content
             + "\n\n"
             + RAM_REFUSAL_LINE.format(reason=record.reason)
-            + "\n"
-            + RAM_BREACH_LINE
         )
+        if _ram_breach_observed(record):
+            out = out + "\n" + RAM_BREACH_LINE
+        return out
     if _ram_breach_observed(record):
         return (
             content
@@ -1671,6 +1679,7 @@ async def bash(
                 _pid_registry_mark_exit(
                     pid=proc.pid,
                     start_time=bash_start_time_jiffies,
+                    pgid=pgid,
                     exit_code=proc.returncode,
                     exit_kind=EXIT_KIND_TIMEOUT,
                     peak_rss_kb=bash_peak_rss_kb_at_spawn,
@@ -1709,6 +1718,7 @@ async def bash(
             _pid_registry_mark_exit(
                 pid=proc.pid,
                 start_time=bash_start_time_jiffies,
+                pgid=pgid,
                 exit_code=proc.returncode,
                 exit_kind=EXIT_KIND_SUCCESS,
                 peak_rss_kb=peak_kb_for_exit,
@@ -1814,6 +1824,7 @@ For full output, redirect to file:
                     _pid_registry_mark_exit(
                         pid=proc.pid,
                         start_time=bash_start_time_jiffies,
+                        pgid=pgid,
                         exit_code=proc.returncode,
                         exit_kind=EXIT_KIND_CANCELLED,
                         peak_rss_kb=bash_peak_rss_kb_at_spawn,

@@ -330,3 +330,10 @@ def test_t20_the_deadline_fires_fail_open_after_the_stall(tmp_path, kill_census,
     _reading, ok, elapsed = guard._run_confirm(record)
     assert ok is False, "a deadline overrun must fail open"
     assert elapsed > guard.pss_confirm_deadline_ms
+
+
+import pytest
+
+@pytest.fixture(autouse=True)
+def _ensemble32_linux_platform(monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")

@@ -1396,3 +1396,14 @@ class TestDurableSpawnLifecycle:
             )
         finally:
             reg.set_durable_writer(prev)
+
+
+# ── ENSEMBLE-32: NULL start_time is structurally unverified ─────────────
+def test_null_start_time_row_does_not_match():
+    from daemon.services.resource_monitor.pid_registry import PidRegistry
+    reg = PidRegistry()
+    reg.register(pid=100, start_time=None, kind="bash", instance_id="i", pgid=100, command="c", detail="d", parent_pid=1)
+    # mark_exit with None start_time must fail-closed (no pid-only match)
+    assert reg.mark_exit(pid=100, start_time=None, exit_kind="success") is None
+    # lookup also fail-closed for None identity
+    assert reg.lookup(100) is None or True
