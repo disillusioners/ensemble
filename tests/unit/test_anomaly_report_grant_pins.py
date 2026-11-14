@@ -114,6 +114,8 @@ ALLOW_ARRAY_CONSTANTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "prompt-reload",
             "prompt-assent",
             "guidelines",
+            "instance_read",
+            "instance_ops",
         ),
     ),
     (
@@ -344,7 +346,7 @@ class TestTheRepinnedAllowArrayConstants:
         assert (
             '"ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", '
             '"wedge-capture", "notify-user", "pok", "nest-report", '
-            '"memoir", "prompt-reload", "prompt-assent", "guidelines"],'
+            '"memoir", "prompt-reload", "prompt-assent", "guidelines", "instance_read", "instance_ops"],'
             in source
         ), (
             "the ari trailing set must carry pok inserted BEFORE "

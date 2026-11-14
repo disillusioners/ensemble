@@ -15,16 +15,20 @@ Mirrors ``tests/unit/test_anomaly_report_grant_pins.py`` for the
     mid-array with the memoir/prompt-reload tail intact;
 (c) **once-per-agent** — the grant appears exactly once;
 (d) **the vocab/artifact pair** — ``VOCABULARY_VERSION == 10`` and
-    the committed artifact carries 64 categories with ``pok``
+    the committed artifact carries 65 categories with ``pok``
     (F-1 pair — the constant and the artifact move in the SAME
-    change; the 9 → 10 bump is the guidelines lane's).
+    change; the 9 → 10 bump is the guidelines lane's; the
+    64 → 65 bump is the 2026-11-14 F-1 completion — the
+    project_future category landed at v0.30.7 without regenerating
+    the artifact, and the pre-existing pair defect was completed
+    in v0.30.8).
 
 Mutation legs (the pack's own mutation-verification duty):
 
 * **M-POK-1** — remove ``"pok"`` from one meta.json → the walk REDs.
 * **M-POK-2** — move the entry off its nest-report-adjacent slot →
   the ordering pin REDs.
-* **M-POK-3** — revert the artifact count to 61 → the artifact pin
+* **M-POK-3** — revert the artifact count to 64 → the artifact pin
   REDs.
 """
 
@@ -169,9 +173,9 @@ class TestThePokGrantOrdering:
         assert ANCHOR_CATEGORY in allow
         assert allow.index(CATEGORY) == allow.index(ANCHOR_CATEGORY) - 1
         tail = allow[allow.index(CATEGORY) + 2 :]
-        assert tail == ["memoir", "prompt-reload", "prompt-assent", "guidelines"], (
-            f"ari's memoir/prompt-reload/prompt-assent/guidelines tail must "
-            f"survive the insert UNREORDERED — tail is {tail}"
+        assert tail == ["memoir", "prompt-reload", "prompt-assent", "guidelines", "instance_read", "instance_ops"], (
+            f"ari's memoir/prompt-reload/prompt-assent/guidelines/instance_read/"
+            f"instance_ops tail must survive the insert UNREORDERED — tail is {tail}"
         )
 
 
@@ -179,15 +183,17 @@ class TestTheVocabularyArtifactPair:
     def test_vocabulary_version_is_ten(self) -> None:
         assert VOCABULARY_VERSION == 10
 
-    def test_artifact_carries_64_categories_with_pok(self) -> None:
+    def test_artifact_carries_65_categories_with_pok(self) -> None:
         artifact_path = (
             REPO_ROOT / ".agents" / "shared" / "metrics" / "tool-categories.json"
         )
         data = json.loads(artifact_path.read_text(encoding="utf-8"))
-        assert data["count"] == 64, (
-            f"artifact count is {data['count']} — the guidelines bump is "
-            "63 → 64 (F-1: regenerate via "
-            "ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT, never hand-edit)"
+        assert data["count"] == 65, (
+            f"artifact count is {data['count']} — the project_future "
+            "category landed at v0.30.7 without regenerating the artifact "
+            "— the pre-existing pair defect is completed in v0.30.8: "
+            "64 → 65, F-1: regenerate via "
+            "ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT, never hand-edit"
         )
         assert data["vocabulary_version"] == VOCABULARY_VERSION
         assert CATEGORY in data["categories"]

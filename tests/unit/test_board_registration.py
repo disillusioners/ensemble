@@ -312,7 +312,11 @@ class TestAllowLists:
             # (2026-11-13) appended "guidelines". The pin's INTENT is
             # unchanged: only the categories appended AFTER the board
             # may follow it.
-            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture", "notify-user", "pok", "nest-report", "memoir", "prompt-reload", "prompt-assent", "guidelines"],
+            # (2026-11-14 ari nest-ops fleet grant) appended "instance_read",
+            # "instance_ops" after "guidelines". The pin's INTENT is
+            # unchanged: only the categories appended AFTER the board
+            # may follow it.
+            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture", "notify-user", "pok", "nest-report", "memoir", "prompt-reload", "prompt-assent", "guidelines", "instance_read", "instance_ops"],
         }
         for agent_id in BOARD_ALLOW_AGENTS:
             allow = self._allow(agent_id)
