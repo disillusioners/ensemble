@@ -142,3 +142,10 @@ def test_register_platform_unavailable_never_leader_unreadable():
     assert rec is not None
     assert rec.reason == "refused:platform-unsupported"
     assert rec.reason != "refused:leader-unreadable"
+
+def test_classify_proc_stat_error_process_lookup_is_absent():
+    from daemon.services.ram_guard.tree_reader import classify_proc_stat_error
+    assert classify_proc_stat_error(ProcessLookupError('gone')) == 'absent'
+    assert classify_proc_stat_error(FileNotFoundError('gone')) == 'absent'
+    assert classify_proc_stat_error(PermissionError('denied')) == 'unreadable'
+    assert classify_proc_stat_error(OSError('other')) == 'unreadable'

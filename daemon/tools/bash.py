@@ -99,6 +99,9 @@ from daemon.services.ram_guard.errors import (
     breach_observed as _ram_breach_observed_canonical,
     format_ram_envelope as _format_ram_envelope,
 )
+from daemon.services.ram_guard.tree_reader import (
+    classify_proc_stat_error as _classify_proc_stat_error,
+)
 from daemon.services.ram_guard.guard import (
     RAM_GUARD_PENDING_MAX as _RAM_GUARD_PENDING_MAX,
 )
@@ -418,13 +421,12 @@ def _read_proc_start_time(pid: int) -> tuple[str, Optional[int]]:
     try:
         with open(f"/proc/{pid}/stat", "r") as h:
             line = h.readline()
-    except (FileNotFoundError, ProcessLookupError):
-        return ("absent", None)
-    except (PermissionError, OSError):
-        return ("unreadable", None)
+    except (OSError, ValueError) as exc:
+        return (_classify_proc_stat_error(exc), None)
     # ``(comm)`` may contain spaces/parens — split on the LAST ``)``.
     last_paren = line.rfind(")")
     if last_paren == -1:
+        # unparseable line ⇒ unreadable (fail-closed)
         return ("unreadable", None)
     _, _, tail = line.rpartition(")")
     parts = tail.strip().split()
@@ -1502,9 +1504,11 @@ async def bash(
             # Eagerly read /proc/<pid>/stat field 22 for the
             # PID-recycle defense (M3: capture NOW, never re-derive
             # after exit). Best-effort: the proc may exit between
-            # spawn and this read on a near-zero-lifetime child;
-            # we register start_time=0 in that edge case and the
-            # registry lookup falls through to the pgid fallback.
+            # spawn and this read on a near-zero-lifetime child, in
+            # which case status is "absent": the RAM guard registers
+            # NO watch, and the pid_registry row carries start_time
+            # NULL (identity unverified; lookup falls through to the
+            # pgid fallback).
             bash_start_time_status, bash_start_time_jiffies = _read_proc_start_time(proc.pid)
             bash_peak_rss_kb_at_spawn = _read_proc_vm_hwm_kb(proc.pid)
             # ── RAM auto-termination — S1: register the spawn ──

@@ -1958,6 +1958,19 @@ class TestEnsemble32ReadProcClassify:
         assert val2 is None
         assert status != status2
 
+    @pytest.mark.parametrize('exc_cls', [FileNotFoundError, ProcessLookupError, PermissionError, OSError])
+    def test_bash_status_matches_canonical_classifier(self, monkeypatch, exc_cls):
+        import importlib
+        from daemon.services.ram_guard.tree_reader import classify_proc_stat_error
+        bash_module = importlib.import_module('daemon.tools.bash')
+        monkeypatch.setattr('sys.platform', 'linux')
+        def raiser(*a, **k):
+            raise exc_cls('boom')
+        monkeypatch.setattr('builtins.open', raiser)
+        status, val = bash_module._read_proc_start_time(123)
+        assert status == classify_proc_stat_error(exc_cls('boom'))
+        assert val is None
+
     def test_unsupported_on_darwin(self, monkeypatch):
         import importlib
         bash_module = importlib.import_module('daemon.tools.bash')
