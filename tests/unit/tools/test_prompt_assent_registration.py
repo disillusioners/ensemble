@@ -228,12 +228,17 @@ class TestTheAriOnlyCensus:
         # guidelines (2026-11-13, guideline-read-tool lane) appended AFTER
         # prompt-assent — prompt-assent is now second-to-last; the
         # relative tail discipline is unchanged.
-        assert allow[-2] == CATEGORY, (
+        # ari nest-ops fleet grant (2026-11-14) appended
+        # "instance_read", "instance_ops" AFTER guidelines — prompt-assent
+        # is now fourth-to-last; the relative discipline is unchanged.
+        assert allow[-4] == CATEGORY, (
             "the prompt-assent entry must sit IMMEDIATELY BEFORE the "
             "guidelines entry in ari's allow array (the trailing-entry "
             "discipline — a later lane may append after it)"
         )
-        assert allow[-1] == "guidelines"
+        assert allow[-3] == "guidelines"
+        assert allow[-2] == "instance_read"
+        assert allow[-1] == "instance_ops"
 
     def test_no_other_agent_carries_the_category(self) -> None:
         offenders: list[str] = []

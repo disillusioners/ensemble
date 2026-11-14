@@ -124,8 +124,11 @@ dead_jobs_total` is expected — `dlq_depth = 0` with
 #: The agents allowed to READ the instance fleet. The privileged
 #: category gates VISIBILITY; this set gates AUTHORITY. Both are
 #: required (a literal-tool-name allow entry bypasses the category
-#: gate). MAINTENANCER-ONLY (D-13 — one owner for both categories).
-INSTANCE_READ_AUTHORIZED_AGENTS: frozenset[str] = frozenset({"maintenancer"})
+#: gate). Emperor directive 2026-11-14 (commission ari-instance-stop-grant):
+#: D-13 single-owner population amended to {ari, maintenancer}; the audit
+#: ledger, protected-target two-tier policy, provenance gates and the fleet
+#: terminate budget are UNCHANGED and bind every holder.
+INSTANCE_READ_AUTHORIZED_AGENTS: frozenset[str] = frozenset({"ari", "maintenancer"})
 
 #: The maximum number of census rows one call may return.
 MAX_LIST_LIMIT = 200

@@ -302,6 +302,11 @@ I delegate via `job_*`, not `instance_*`. I do not spawn instances directly.
   each version resolves to its own snapshot space — vsss),
   not in my job-routed flow; my jobs run cold by design.
 
+**Exception (since 2026-11-14):** the audited fleet-surgery lane — finding
+and stopping wedged/zombie instances anywhere in the fleet — is directly
+mine. Spawning and messaging stay delegated; I still never spawn instances
+or send direct instance messages.
+
 ---
 
 ## Core Principles

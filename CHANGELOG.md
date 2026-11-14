@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.8] — 2026-11-14
+
+### Added — Ari nest-ops fleet grant: instance_read + instance_ops (`feature/ari-instance-stop-grant`, Emperor directive 2026-11-14; zero migrations)
+
+- **Tools.** Categories `instance_read` (5 fleet reads) + `instance_ops` (6 audited acts incl. `instance_terminate`) granted to `ari` WHOLE-CATEGORY (read+act pair; per-tool allow stays rejected per D-13); holder population now {`ari`, `maintenancer`}.
+- **Gates.** The layer-3 authorized-agent frozensets in `daemon/tools/instance_{read,ops}.py` widened {maintenancer} → {`ari`, `maintenancer`} (D-13 single-owner amended by Emperor clarification 2026-11-14); audit ledger, protected-target two-tier policy, provenance gates, shared terminate budget (3 acts/24h) UNCHANGED and bind every holder; privileged category set stays 22 — no new category, tool or migration.
+- **Pins.** Re-pointed same-PR: board_registration `ari` trailing tail, anomaly grant-pin constants + source literal, memoir tail faces, instance_ops registration allow-lists + behaviour positive leg.
+- **Docs.** `ari` tools_note fleet-surfaces section + rule.md fleet-surgery exception; prompt-artifact baseline re-stamped (217 rows unchanged); `agents/ari/rule.md` seal row re-pinned.
+- **Artifact.** `tool-categories.json` UNCHANGED (registry-only, no per-agent data; grant adds no category — generator byte-identity proven at integration).
+- **Stage.** Staged-not-promoted; the Emperor's 3-factor nonce ceremony owns the flip; grant takes effect only at promote.
+- **Disclosures.** Pre-existing on `latest`, NOT introduced by this lane: (1) tool-category artifact drift — the committed artifact carried a stale `doc_maintenance` entry and lacked `project_future` vs the tool registry — REGENERATED in this release with the house generator (never hand-edited; count 64→64; VOCABULARY_VERSION stays 10); (2) three pre-existing reds in `tests/unit/test_anomaly_report_grant_pins.py` (`test_the_grant_is_the_last_element`, `test_the_three_phase_3_touched_agents_carry_both_entries`, `test_the_seal_map_is_zero_stale` — the last from a stale `agents/leader/rule.md` seal row left by the prior lane) — reproduced red at base, untouched here, routed for the leader's sweep.
+
 ## [0.30.7] — 2026-11-14
 
 ### Added — Project Future: dev-team forward-improvement list tool (`feature/project-future`, base `ac9849bf7`, merged at `7a92e5828`; +1 migration)

@@ -946,6 +946,13 @@ class TestReadTools:
         out = await by_name(tools, "instance_list").ainvoke({})
         assert "not permitted" in out
 
+    async def test_authorized_ari_gets_payload(self, fleet):
+        import daemon.tools.instance_read as ir
+
+        tools = ir.create_instance_read_tools(fleet, agent_id="ari")
+        out = await by_name(tools, "instance_list").ainvoke({})
+        assert "not permitted" not in out
+
 
 # ── Review fixes (2026-10-21): H1 / M2 / M5 / M8 pins ─────────────────────
 

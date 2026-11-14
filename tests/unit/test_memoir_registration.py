@@ -333,13 +333,17 @@ class TestTheAriOnlyAllowList:
         allow = meta.get("tools", {}).get("allow", []) or []
         assert CATEGORY in allow
         # guidelines (2026-11-13, guideline-read-tool lane) appended AFTER
-        # prompt-assent — the relative tail discipline is unchanged.
-        assert allow[-2] == "prompt-assent", (
+        # prompt-assent — the relative tail discipline is unchanged; the
+        # 2026-11-14 ari nest-ops fleet grant then appended
+        # "instance_read", "instance_ops" after "guidelines".
+        assert allow[-4] == "prompt-assent", (
             "the prompt-assent entry must sit IMMEDIATELY BEFORE the "
             "guidelines entry in ari's allow array (the trailing-entry "
             "discipline)"
         )
-        assert allow[-1] == "guidelines"
+        assert allow[-3] == "guidelines"
+        assert allow[-2] == "instance_read"
+        assert allow[-1] == "instance_ops"
 
     def test_no_other_agent_carries_the_category(self) -> None:
         offenders: list[str] = []
@@ -365,10 +369,11 @@ class TestTheAriOnlyAllowList:
         source = (REPO_ROOT / "tests/unit/test_board_registration.py").read_text(
             encoding="utf-8"
         )
-        assert '"prompt-reload", "prompt-assent", "guidelines"]' in source, (
+        assert '"prompt-reload", "prompt-assent", "guidelines", "instance_read", "instance_ops"]' in source, (
             "the board trailing pin must end with prompt-assent + "
-            "guidelines (the guideline-read-tool lane, 2026-11-13, "
-            "appended after prompt-assent)"
+            "guidelines + instance_read + instance_ops (the ari "
+            "nest-ops fleet grant, 2026-11-14, appended after "
+            "guidelines)"
         )
         # "pok" re-point 2026-11-08 (POK B4 sweep 16b4e70b2): the board
         # pin's ari literal gained "pok" between "notify-user" and

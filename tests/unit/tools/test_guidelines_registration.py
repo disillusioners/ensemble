@@ -312,11 +312,15 @@ class TestTheFourAgentAllowList:
 
     def test_ari_carries_it_as_the_literal_last_element(self) -> None:
         """ari is the ONLY order-pinned allow array — guidelines must
-        be the literal LAST element (the trailing-append discipline)."""
+        sit immediately before the instance_read/instance_ops pair
+        (the 2026-11-13 grant made it the literal LAST element; the
+        ari nest-ops fleet grant 2026-11-14 appended after it — the
+        same trailing-append evolution prompt-reload/prompt-assent
+        underwent)."""
         allow = self._allow("ari")
-        assert allow[-1] == CATEGORY, (
-            f"ari: guidelines must be the LAST allow element, got tail "
-            f"{allow[-3:]}"
+        assert allow[-3] == CATEGORY, (
+            f"ari: guidelines must sit immediately before the "
+            f"instance_read/instance_ops pair, got tail {allow[-3:]}"
         )
 
     def test_sonic_leader_deny_array_is_untouched(self) -> None:

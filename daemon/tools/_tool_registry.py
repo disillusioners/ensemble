@@ -646,7 +646,8 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # (all-thread stack dumps, per-thread CPU maps, process RSS and the
     # DB-side executing turns), and the empty-allow inherit universe must
     # never auto-grant it. The allow-list is ari + leader + maintenancer
-    # — a DIFFERENT population from ``instance_read`` (maintenancer-only),
+    # — a DIFFERENT population from ``instance_read`` (maintenancer + ari
+    # since 2026-11-14),
     # so a separate category keeps the privilege boundary auditable.
     # Defence in depth: a LITERAL TOOL NAME in an allow list bypasses the
     # category gate, so the tool bodies ALSO carry an ``agent_id in
@@ -655,8 +656,8 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # The manual capture trigger is deliberately NOT an agent tool — it
     # stays on the admin API / CLI, so an agent cannot fill the disk.
     "wedge-capture",
-    # nest-ops (2026-10-21, D-13): TWO single-owner categories for the
-    # maintenancer — ``instance_read`` (#13: the four fleet reads) and
+    # nest-ops (2026-10-21, D-13): TWO two-holder categories —
+    # ``instance_read`` (#13: the four fleet reads) and
     # ``instance_ops`` (#14: the six audited acts). Why BOTH are
     # privileged, and why the split is structural rather than prose:
     #   * the ACT surface is DESTRUCTIVE (terminate takes a whole
@@ -670,7 +671,12 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     #   * two categories keep read and act structurally separable: a
     #     future read-only grant to another agent is a one-line allow
     #     change on a category that structurally CANNOT carry acts.
-    # Both name the SAME single owner (maintenancer). Per-tool allow
+    # Both name the SAME two holders (ari, maintenancer) — amended
+    # 2026-11-14 (Emperor directive 2026-11-14 (commission
+    # ari-instance-stop-grant): D-13 single-owner population amended to
+    # {ari, maintenancer}; the audit ledger, protected-target two-tier
+    # policy, provenance gates and the fleet terminate budget are
+    # UNCHANGED and bind every holder). Per-tool allow
     # is REJECTED (D-13): a literal tool name in an allow list bypasses
     # the category gate outright. SAME-PR pin updates at the EIGHT
     # files listed in the SAME-PR RULE comment above are mandatory
