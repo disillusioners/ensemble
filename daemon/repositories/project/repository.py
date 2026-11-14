@@ -69,6 +69,24 @@ class ConcurrentWishlistUpdate(Exception):
     """
 
 
+def _is_seq_unique_race(exc) -> bool:
+    """D18 narrowing predicate: True iff ``exc`` is the UNIQUE(project_id, seq) race.
+
+    Matches the named index (PG create_all: "uq_project_future_project_seq") OR
+    SQLite's column-pair message ("UNIQUE constraint failed: project_future.project_id,
+    project_future.seq"). Any OTHER IntegrityError (different constraint, NOT NULL, FK)
+    is NOT the race and must be re-raised untranslated (A31 precedent,
+    mcp_server/repository.py:146-205).
+
+    Accepts either an exception or a raw message string for testability.
+    """
+    text = exc if isinstance(exc, str) else str(exc)
+    return (
+        "uq_project_future_project_seq" in text
+        or ("project_future.project_id" in text and "project_future.seq" in text)
+    )
+
+
 class SQLModelProjectRepository:
     """SQLModel-based Project repository with bulk operations for tags/shortnames."""
     
@@ -1539,6 +1557,11 @@ class SQLModelProjectRepository:
                     # (evicted naming a row that was never deleted). Core delete + explicit
                     # rowcount check makes that path impossible by construction and directly
                     # testable (AC25 / PO8). Do NOT refactor this guard away.
+                    # Session-context-manager guarantee for this path: `with Session(self.engine)`
+                    # closes the session on exit (commit or exception), and the explicit
+                    # session.rollback() in the guard/except branches runs before any raise, so no
+                    # partial state escapes this method — the transaction is either fully committed
+                    # or fully rolled back.
                     victim_ids = [v.id for v in victims]
                     result = session.execute(
                         sql_delete(ProjectFutureEntry).where(ProjectFutureEntry.id.in_(victim_ids))
@@ -1568,11 +1591,7 @@ class SQLModelProjectRepository:
                 # constraint, NOT NULL, FK) is NOT the race: rollback and RE-RAISE the
                 # original untranslated (A31 precedent, mcp_server/repository.py:146-205).
                 session.rollback()
-                is_the_race = (
-                    "uq_project_future_project_seq" in str(exc)
-                    or ("project_future.project_id" in str(exc) and "project_future.seq" in str(exc))
-                )
-                if is_the_race:
+                if _is_seq_unique_race(exc):
                     raise ConcurrentWishlistUpdate(project_id)
                 raise
             session.refresh(entry)
