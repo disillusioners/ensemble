@@ -1984,18 +1984,18 @@ class TestEnsemble32ReadProcClassify:
         assert val is None
 
 class TestEnsemble32BashAbsentSpawn:
-    async def test_bash_absent_leader_no_registration_no_footer(self, fake_guard, monkeypatch):
+    async def test_bash_absent_leader_no_registration_no_footer(self, monkeypatch):
         import importlib
         bash_module = importlib.import_module('daemon.tools.bash')
-        # make fake guard honor absent status (real guard does)
-        orig_register = fake_guard.register
-        def _reg(**kwargs):
-            if kwargs.get('start_time_status') == 'absent':
-                return None
-            return orig_register(**kwargs)
-        fake_guard.register = _reg
+        from daemon.services.ram_guard import set_ram_guard, get_ram_guard
+        from daemon.services.ram_guard.guard import RamGuard
+        guard = RamGuard(enabled=True, resolved_ceiling=(1024*1024, 'test'), platform='linux')
+        set_ram_guard(guard)
         monkeypatch.setattr(bash_module, '_read_proc_start_time', lambda pid: ('absent', None))
-        out = await bash_module.bash.coroutine(command='echo hi', instance_id='i-bash-absent')
-        assert fake_guard.registered == []
+        try:
+            out = await bash_module.bash.coroutine(command='echo hi', instance_id='i-bash-absent')
+        finally:
+            set_ram_guard(None)
+        assert guard.counters_snapshot()['ram_kill_refusals_p5'] == 0
         assert 'ram_kill_refused:' not in out
         assert 'ram_breach_observed:' not in out

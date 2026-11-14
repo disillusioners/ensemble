@@ -94,7 +94,6 @@ def test_register_refuses_on_darwin_platform():
 
 
 def test_register_registers_on_linux_platform():
-    import tempfile
     g = RamGuard(
         enabled=True,
         resolved_ceiling=(1024 * 1024, "test"),

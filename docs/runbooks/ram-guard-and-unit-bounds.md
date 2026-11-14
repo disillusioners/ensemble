@@ -586,20 +586,16 @@ stayed out. Re-entry requires a new commission; nothing here auto-expires.
 **Tick-level skip-fast (ENSEMBLE-32 item 5):** when scan_proc reports scan_complete=False, _tick_once bumps enumeration_failures for every record under a single lock (peak preserved, no breach evaluated, no per-record lock churn).
 
 **Ops note (ENSEMBLE-32):** ram_kill_refusals_p5 will drop for short-lived children post-fix (intended) — dashboards keyed on it see a step.
-
 ## Test-platform census (ENSEMBLE-32)
 
-Retained by design: the following 7 files carry a whole-module autouse
- re-scope. Kernel-dependent legs are skipif-gated
-with honest markers; the fixture exists to exercise the platform-gate
-predicate on a darwin host.
+Evidence command: grep -nE "/proc|read_stat_entry|read_start_time|os.getpgid|meminfo" <file>
 
-| File | Why the fixture exists | Kernel-dependent legs | Gating |
+| File | Kernel-dependent legs | Gating | Why autouse retained |
 |---|---|---|---|
-| test_ram_guard_fairness.py | platform-gate predicate | yes (/proc) | skipif |
-| tests/unit/routers/test_resources_ram_guard.py | platform-gate predicate | yes (/proc) | skipif |
-| test_ram_guard_events.py | platform-gate predicate | yes (/proc) | skipif |
-| test_ram_guard_guard.py | platform-gate predicate | yes (/proc) | skipif |
-| test_ram_guard_interactions.py | platform-gate predicate | yes (/proc) | skipif |
-| test_ram_guard_ladder.py | platform-gate predicate | yes (/proc) | skipif |
-| test_ram_guard_phase6.py | platform-gate predicate | yes (/proc) | skipif |
+| test_ram_guard_fairness.py | yes (/proc/meminfo unreadable) | skipif | exercises platform-gate predicate |
+| tests/unit/routers/test_resources_ram_guard.py | none (fake procfs trees) | none needed | platform-gate predicate; tmp_path fakes |
+| test_ram_guard_events.py | none (fake procfs) | none needed | platform-gate predicate; tmp_path fakes |
+| test_ram_guard_guard.py | one (/proc/<pid>/stat raw bytes) | skipif where needed | platform-gate predicate |
+| test_ram_guard_interactions.py | none (fake procfs) | none needed | platform-gate predicate |
+| test_ram_guard_ladder.py | none (synthetic proc root) | none needed | platform-gate predicate |
+| test_ram_guard_phase6.py | none (fake procfs) | none needed | platform-gate predicate |

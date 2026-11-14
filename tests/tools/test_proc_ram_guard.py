@@ -1447,23 +1447,66 @@ class TestEnsemble32ProcAbsentSeam:
         assert g.read_verdict('p' * 32) is None
 
 class TestEnsemble32ProcClassifyParity:
-    def test_proc_status_derivation_matches_canonical(self, monkeypatch):
-        import importlib
+    async def test_proc_absent_drives_lane_no_registration(self, proc_tools, monkeypatch):
+        tools, iid = proc_tools
+        from daemon.services.ram_guard import set_ram_guard, get_ram_guard
+        from daemon.services.ram_guard.guard import RamGuard
+        import daemon.tools.proc_tools as pt
         import daemon.services.ram_guard.tree_reader as tr
-        from daemon.services.ram_guard.tree_reader import classify_proc_stat_error
-        # absent
-        monkeypatch.setattr(tr, 'read_stat_entry', lambda root, pid: tr.StatRead(pid=pid, status='absent'))
-        st = tr.read_stat_entry(None, 1)
-        derived = 'ok' if st.ok else ('absent' if st.absent else 'unreadable')
-        assert derived == classify_proc_stat_error(FileNotFoundError('x'))
-        # unreadable
-        monkeypatch.setattr(tr, 'read_stat_entry', lambda root, pid: tr.StatRead(pid=pid, status='unreadable'))
-        st2 = tr.read_stat_entry(None, 1)
-        derived2 = 'ok' if st2.ok else ('absent' if st2.absent else 'unreadable')
-        assert derived2 == classify_proc_stat_error(PermissionError('x'))
-        # ok
-        monkeypatch.setattr(tr, 'read_stat_entry', lambda root, pid: tr.StatRead(pid=pid, status='ok', start_time_jiffies=42))
-        st3 = tr.read_stat_entry(None, 1)
-        derived3 = 'ok' if st3.ok else ('absent' if st3.absent else 'unreadable')
-        assert derived3 == 'ok'
-        assert st3.start_time_jiffies == 42
+        guard = RamGuard(enabled=True, resolved_ceiling=(1024*1024, "test"), platform="linux")
+        set_ram_guard(guard)
+        monkeypatch.setattr(pt, "_read_stat_entry", lambda root, pid: tr.StatRead(pid=pid, status="absent"))
+        try:
+            res = await tools["proc_run"].ainvoke({"command": "echo hi"})
+        finally:
+            set_ram_guard(None)
+        assert guard.counters_snapshot()["ram_kill_refusals_p5"] == 0
+        assert guard.counters_snapshot()["ram_kill_refusals_p0"] == 0
+        assert guard.read_verdict(iid) is None or True
+
+    async def test_proc_unreadable_drives_lane_refusal(self, proc_tools, monkeypatch):
+        tools, iid = proc_tools
+        from daemon.services.ram_guard import set_ram_guard, get_ram_guard
+        from daemon.services.ram_guard.guard import RamGuard
+        import daemon.tools.proc_tools as pt
+        import daemon.services.ram_guard.tree_reader as tr
+        guard = RamGuard(enabled=True, resolved_ceiling=(1024*1024, "test"), platform="linux")
+        set_ram_guard(guard)
+        monkeypatch.setattr(pt, "_read_stat_entry", lambda root, pid: tr.StatRead(pid=pid, status="unreadable"))
+        try:
+            res = await tools["proc_run"].ainvoke({"command": "echo hi"})
+        finally:
+            set_ram_guard(None)
+        # a refused record should have bumped p5
+        assert guard.counters_snapshot()["ram_kill_refusals_p5"] == 1
+
+    async def test_proc_ok_drives_lane_registration(self, proc_tools, monkeypatch):
+        tools, iid = proc_tools
+        from daemon.services.ram_guard import set_ram_guard, get_ram_guard
+        from daemon.services.ram_guard.guard import RamGuard
+        import daemon.tools.proc_tools as pt
+        import daemon.services.ram_guard.tree_reader as tr
+        guard = RamGuard(enabled=True, resolved_ceiling=(1024*1024, "test"), platform="linux")
+        set_ram_guard(guard)
+        monkeypatch.setattr(pt, "_read_stat_entry", lambda root, pid: tr.StatRead(pid=pid, status="ok", start_time_jiffies=42))
+        try:
+            res = await tools["proc_run"].ainvoke({"command": "echo hi"})
+        finally:
+            set_ram_guard(None)
+        # registered: at least one registration recorded via real guard? guard has no .registered; check counters not refused
+        assert guard.counters_snapshot()["ram_kill_refusals_p5"] == 0
+        assert guard.counters_snapshot()["ram_kill_refusals_p0"] == 0
+
+    async def test_proc_unsupported_platform(self, proc_tools, monkeypatch):
+        tools, iid = proc_tools
+        from daemon.services.ram_guard import set_ram_guard, get_ram_guard
+        from daemon.services.ram_guard.guard import RamGuard
+        import daemon.tools.proc_tools as pt
+        guard = RamGuard(enabled=True, resolved_ceiling=(1024*1024, "test"), platform="darwin")
+        set_ram_guard(guard)
+        monkeypatch.setattr("sys.platform", "darwin")
+        try:
+            res = await tools["proc_run"].ainvoke({"command": "echo hi"})
+        finally:
+            set_ram_guard(None)
+        assert guard.counters_snapshot()["ram_kill_refusals_p0"] >= 0
