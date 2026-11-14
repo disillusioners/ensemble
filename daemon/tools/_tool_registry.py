@@ -91,8 +91,9 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # explicit ``tools.allow: ["self-alarm"]`` entry (ari only) is the
     # only access path.
     "self_alarm",
-    # nest-ops (2026-10-21) — the instance fleet surfaces for the
-    # maintenancer. Four read tools (instance_list / instance_get /
+    # nest-ops (2026-10-21) — the instance fleet surfaces for the two
+    # holders {ari, maintenancer} (D-13 amended 2026-11-14). Four read
+    # tools (instance_list / instance_get /
     # instance_health / fleet_capacity_summary, created by the
     # create_instance_read_tools() factory in
     # daemon/tools/instance_read.py) and six act tools
@@ -1270,7 +1271,8 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # PRIVILEGED_TOOL_CATEGORIES): the board is global and shared, so
     # the empty-allow inherit universe must NOT auto-grant it. Placed
     # near "job" — the board is work-adjacent (it links job ids).
-    # nest-ops (2026-10-21): the two maintenancer fleet categories. The
+    # nest-ops (2026-10-21): the two {ari, maintenancer} fleet
+    # categories (D-13 amended 2026-11-14). The
     # values MUST be ``daemon.tools.*`` paths — the AST scanner resolves
     # a CATEGORY_MODULES value as ``daemon/tools/<parts[2:]>.py``, so a
     # ``daemon.services.*`` value is NEVER discovered and the
@@ -1662,8 +1664,12 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     # factories. Factory-built (not import-time registered), so they
     # belong in DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. BOTH
     # categories are PRIVILEGED (#13 / #14) — opt-in only, never
-    # default-granted; the maintenancer-only runtime gate lives in the
-    # tool bodies.
+    # default-granted; the runtime gate in the tool bodies authorizes
+    # {ari, maintenancer} per the Emperor directive 2026-11-14
+    # (commission ari-instance-stop-grant) — D-13 single-owner
+    # population amended; the audit ledger, protected-target two-tier
+    # policy, provenance gates and the fleet terminate budget are
+    # UNCHANGED and bind every holder.
     "instance_list",
     "instance_get",
     "instance_health",
