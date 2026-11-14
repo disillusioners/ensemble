@@ -41,7 +41,8 @@
       "mcp_rpc",
       "wedge-capture",
       "pok",
-      "nest-report"
+      "nest-report",
+      "guidelines"
     ]
   },
   "team_members": [

@@ -218,7 +218,8 @@ class TestStaticRegistrationChecklist:
         D18/A14).
         """
         assert SECRETS_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
-        # The full set is exactly twenty-one entries — the
+        # The full set is exactly twenty-two entries (entry #22 =
+        # guidelines joined 2026-11-13, guideline-read-tool lane) — the
         # same-PR pin (the SEVEN-file rule; the fifth
         # exact-set pin was added by the iteration-002
         # council B2 correction, the sixth + seventh by
@@ -314,6 +315,11 @@ class TestStaticRegistrationChecklist:
     # prompt-assent (2026-11-10, prompt-assent lane): privileged entry #21
     # (ari-exactly; see daemon/tools/_tool_registry.py).
     "prompt-assent",
+    # guidelines (2026-11-13, guideline-read-tool lane): the READ-ONLY
+    # window onto the shipped guideline corpus — privileged entry #22;
+    # the FIRST privileged grant to a sonic agent (sonic-leader,
+    # ruling 2026-11-13); see daemon/tools/_tool_registry.py.
+    "guidelines",
 })
 
 

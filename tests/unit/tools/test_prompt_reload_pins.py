@@ -67,12 +67,12 @@ class TestTheCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_has_twenty_one_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 21
+    def test_the_set_has_twenty_two_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 22
 
-    def test_the_derived_set_is_exactly_the_twenty_one_entries(self) -> None:
+    def test_the_derived_set_is_exactly_the_twenty_two_entries(self) -> None:
         derived = _registry_literal_members()
-        assert len(derived) == 21, sorted(derived)
+        assert len(derived) == 22, sorted(derived)
         assert CATEGORY in derived
         assert PRIVILEGED_TOOL_CATEGORIES == derived
 
@@ -92,8 +92,12 @@ class TestTheCategory:
         # prompt-assent (2026-11-10) appended after prompt-reload —
         # prompt-reload is now second-to-last (the tail discipline is
         # a RELATIVE one: a later lane may append after it).
-        assert entries[-2] == CATEGORY, entries[-4:]
-        assert entries[-1] == "prompt-assent", entries[-4:]
+        # guidelines (2026-11-13) appended after prompt-assent —
+        # prompt-reload is now third-to-last; the relative discipline
+        # is unchanged.
+        assert entries[-3] == CATEGORY, entries[-4:]
+        assert entries[-2] == "prompt-assent", entries[-4:]
+        assert entries[-1] == "guidelines", entries[-4:]
 
     def test_the_category_module_resolves_to_a_daemon_tools_path(self) -> None:
         value = CATEGORY_MODULES.get(CATEGORY)
@@ -191,13 +195,17 @@ class TestTheAriOnlyAllowList:
         # length grew 36 -> 37.
         # prompt-assent (2026-11-10) appended AFTER it — prompt-reload is
         # now second-to-last; the array length grew 37 -> 38.
-        assert allow[-2] == CATEGORY, (
+        # guidelines (2026-11-13, guideline-read-tool lane) appended AFTER
+        # prompt-assent — prompt-reload is now third-to-last; the array
+        # length grew 38 -> 39.
+        assert allow[-3] == CATEGORY, (
             "the prompt-reload entry must sit IMMEDIATELY BEFORE the "
             "prompt-assent entry in ari's allow array (the trailing-entry "
             "discipline — a later lane may append after it)"
         )
-        assert allow[-1] == "prompt-assent"
-        assert len(allow) == 38
+        assert allow[-2] == "prompt-assent"
+        assert allow[-1] == "guidelines"
+        assert len(allow) == 39
 
     def test_no_other_agent_carries_the_category(self) -> None:
         offenders: list[str] = []

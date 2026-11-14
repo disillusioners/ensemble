@@ -408,7 +408,10 @@ class TestPrivilegedCategoryRegistryShape:
         # category addition EXCEPT 7 = secrets: that registration
         # (152a9c93b) carried no pin update, and the pins were
         # closed in the immediately-following same-PR commit
-        # 72fbd6126 ("update SAME-PR triple-pin tests").
+        # 72fbd6126 ("update SAME-PR triple-pin tests"). The chain
+        # continued to #21 = prompt-assent (2026-11-10) and #22 =
+        # guidelines (2026-11-13, guideline-read-tool lane — the
+        # FIRST privileged grant to a sonic agent, sonic-leader).
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
@@ -501,6 +504,11 @@ class TestPrivilegedCategoryRegistryShape:
     # prompt-assent (2026-11-10, prompt-assent lane): privileged entry #21
     # (ari-exactly; see daemon/tools/_tool_registry.py).
     "prompt-assent",
+    # guidelines (2026-11-13, guideline-read-tool lane): the READ-ONLY
+    # window onto the shipped guideline corpus — privileged entry #22;
+    # the FIRST privileged grant to a sonic agent (sonic-leader,
+    # ruling 2026-11-13); see daemon/tools/_tool_registry.py.
+    "guidelines",
 })
 
     def test_ens_db_registered_in_category_modules(self) -> None:

@@ -1,3 +1,13 @@
+<!-- guideline-read-tool-20261113-begin -->
+## GUIDELINE-READ-TOOL registration (2026-11-13; lane `feature/guideline-read-tool` @ phases 1–3 landed `681de8081` + `ccb7962d5`; registered by phase 4 as a THIN WRAPPER — zero test logic in the pack; owner: coder guideline-read-tool)
+
+> **DEVELOPER-LANE registration** (the independent tester gate owns further verification). The pack runs the two suites this lane shipped: the registration/pin file (matrix A–C: registration pins, allow gates incl. sonic-leader GRANTED / sonic-coder-developer-reviewer-tester DENIED / unlisted DENIED, parser fail-soft, verbatim round-trip, typed refusals, write-path absence, tool-side doctrine VERBATIM) and the phase-3 hermetic payload seam (matrix D1–D7: flat `guidelines/` payload, `guidelines_tree_sha256` + per-file `guidelines_manifest`, stage-local re-hash green + corrupt-post-compute negative, missing-source-dir 78, mktemp fixture discipline). Lane runs @ phase 4: registration **39 passed** (1.94s); payload **rc 0, 49 passed / 0 failed**; wrapper end-to-end **RESULT: PASS**. Full evidence: `RESULTS/2026-11-13-guideline-read-tool.md` (developer-lane evidence, pending the independent tester gate).
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `guidelines_read_tool_unit_test` (NEW 2026-11-13) | `cd $WT && timeout 600 bash test/packs/guidelines_read_tool_unit_test.sh` (thin wrapper; leg 1 self-capped 180s pytest, leg 2 self-capped 480s hermetic bash; stdin redirected per leg; no PG, no live install paths) | `tests/unit/tools/test_guidelines_registration.py` (39 nodes) + `tests/test_guidelines_payload.sh` (49 legs). Assertions are OWNED by those suites; the pack adds only invocation + per-leg timeout + aggregate RESULT | 2026-11-13 | ✅ PASS (39 + 49; wall ~15s total) — lane commits `681de8081`/`ccb7962d5` + phase-4 commit |
+<!-- guideline-read-tool-20261113-end -->
+
 <!-- skill-revival-phase1-tester-gate-20261110-begin -->
 ## SKILL-SYSTEM-REVIVAL Phase 1 — TESTER FUNCTIONAL GATE @ pin `74914c435` (2026-11-10; verdict **PASS-WITH-NOTES**; full evidence: `RESULTS/2026-11-10-skill-revival-phase1-tester-gate.md`)
 

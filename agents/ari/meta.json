@@ -45,7 +45,8 @@
       "pok", "nest-report",
       "memoir",
       "prompt-reload",
-      "prompt-assent"
+      "prompt-assent",
+      "guidelines"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
   },

@@ -215,7 +215,7 @@ class TestStaticRegistration:
         """Step 4 — the category is PRIVILEGED (entry #21): the
         empty-allow inherit universe must NEVER auto-grant the lane."""
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 21
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 22
 
 
 class TestTheAriOnlyCensus:
@@ -225,10 +225,15 @@ class TestTheAriOnlyCensus:
         )
         allow = meta.get("tools", {}).get("allow", []) or []
         assert CATEGORY in allow
-        assert allow[-1] == CATEGORY, (
-            "the prompt-assent entry (2026-11-10) must be the LAST entry of "
-            "ari's allow array (the trailing-entry discipline)"
+        # guidelines (2026-11-13, guideline-read-tool lane) appended AFTER
+        # prompt-assent — prompt-assent is now second-to-last; the
+        # relative tail discipline is unchanged.
+        assert allow[-2] == CATEGORY, (
+            "the prompt-assent entry must sit IMMEDIATELY BEFORE the "
+            "guidelines entry in ari's allow array (the trailing-entry "
+            "discipline — a later lane may append after it)"
         )
+        assert allow[-1] == "guidelines"
 
     def test_no_other_agent_carries_the_category(self) -> None:
         offenders: list[str] = []
@@ -257,7 +262,7 @@ class TestTheAriExactlyPin:
 
     def test_the_privileged_category_still_holds_the_lane(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 21
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 22
 
     def test_ari_is_the_only_allow_holder(self) -> None:
         holders: list[str] = []

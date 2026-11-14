@@ -269,7 +269,14 @@ def _cardinality_cap() -> int:
 #: mechanically at this tree (checkpoint_metrics = 8, artifact = 62/8
 #: before this lane). The F7 checkpoint ``op`` enum is UNCHANGED by this
 #: bump (its own vocabulary still reads ``{aget, other}``).
-VOCABULARY_VERSION: int = 9
+#: **10** (guideline-read-tool, 2026-11-13) — the tool-category
+#: vocabulary gained the ``guidelines`` PRIVILEGED category (entry #22,
+#: the FIRST privileged grant to a sonic agent), so the frozen artifact
+#: label set grew 63 → 64 and the vocabulary version bumps with the
+#: regeneration (F-1 trap class: the artifact and this constant move in
+#: the SAME change). The F7 checkpoint ``op`` enum is UNCHANGED by this
+#: bump (its own vocabulary still reads ``{aget, other}``).
+VOCABULARY_VERSION: int = 10
 
 
 # ─── Registration-time family metadata (AM-3) ───────────────────────────────

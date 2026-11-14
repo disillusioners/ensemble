@@ -88,6 +88,12 @@ NEST_REPORT_LATE_ARRIVALS: frozenset[str] = frozenset({"canary"})
 #: after ``nest-report``; the POK sweep inserts BEFORE ``nest-report``
 #: (mid-array), preserving that tail.
 GRANT_NOT_LAST_EXCEPTIONS: frozenset[str] = frozenset({"ari"})
+#: Categories that may legitimately FOLLOW ``nest-report`` in a non-ari
+#: allow array (documented later-lane grants). The guideline-read-tool
+#: lane (2026-11-13) appended ``guidelines`` (privileged entry #22, the
+#: FIRST privileged grant to a sonic agent) to leader / devops /
+#: sonic-leader, whose allow arrays end ``..., "pok", "nest-report"``.
+GRANT_POST_TAIL: frozenset[str] = frozenset({"guidelines"})
 
 #: The re-pinned allow-array constants — the file, the constant name and
 #: the value the constant MUST carry after the grant.
@@ -106,6 +112,8 @@ ALLOW_ARRAY_CONSTANTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "nest-report",
             "memoir",
             "prompt-reload",
+            "prompt-assent",
+            "guidelines",
         ),
     ),
     (
@@ -218,8 +226,15 @@ class TestTheGrantCompletenessWalk:
 
     def test_the_grant_is_the_last_element(self) -> None:
         """The trailing-order discipline — the grant is APPENDED, never
-        reordered into the middle (ari-class tails exempt: memoir +
-        prompt-reload legitimately follow ``nest-report`` there)."""
+        reordered into the middle. Only DOCUMENTED later-lane categories
+        may follow ``nest-report`` in a non-ari allow array: ari's tail
+        is the class exemption (memoir + prompt-reload + prompt-assent,
+        pinned by the board/memoir order pins), and the
+        guideline-read-tool lane (2026-11-13) appended ``guidelines``
+        AFTER ``nest-report`` in leader / devops / sonic-leader (the
+        FIRST privileged grant to a sonic agent) — so the trailing
+        entries are checked against GRANT_POST_TAIL instead of
+        requiring the grant to be literally last."""
         offenders = []
         for agent_dir in _agent_dirs():
             allow = _allow(agent_dir)
@@ -227,11 +242,13 @@ class TestTheGrantCompletenessWalk:
                 continue
             if agent_dir.name in GRANT_NOT_LAST_EXCEPTIONS:
                 continue
-            if allow[-1] != CATEGORY:
-                offenders.append((agent_dir.name, allow[-1]))
+            tail = allow[allow.index(CATEGORY) + 1 :]
+            if any(entry not in GRANT_POST_TAIL for entry in tail):
+                offenders.append((agent_dir.name, tail))
         assert not offenders, (
-            "the grant must be the LAST element of tools.allow (the ari "
-            f"trailing-entry precedent) — offenders: {offenders}"
+            "only documented later-lane categories may follow the grant "
+            f"in tools.allow (the ari trailing-entry precedent) — "
+            f"offenders: {offenders}"
         )
 
     def test_the_grant_appears_exactly_once_per_agent(self) -> None:
@@ -272,13 +289,17 @@ class TestTheGrantCompletenessWalk:
 
     def test_the_three_phase_3_touched_agents_carry_both_entries(self) -> None:
         """Phase 3 appended ``nest-report-read`` to these three; phase 5
-        appends ``nest-report`` AFTER it (the two-phase edit order)."""
+        appends ``nest-report`` AFTER it (the two-phase edit order).
+        Only DOCUMENTED later-lane categories may follow ``nest-report``
+        (GRANT_POST_TAIL — the guideline-read-tool lane appended
+        ``guidelines`` to devops, 2026-11-13)."""
         for name in ("maintenancer", "devops", "wanderer"):
             allow = _allow(AGENTS_DIR / name)
             assert "nest-report-read" in allow, name
-            assert allow[-1] == CATEGORY, (
-                f"{name}: the phase-5 grant must come AFTER phase 3's "
-                f"'nest-report-read' — the array is {allow}"
+            tail = allow[allow.index(CATEGORY) + 1 :]
+            assert all(entry in GRANT_POST_TAIL for entry in tail), (
+                f"{name}: only documented later-lane categories may follow "
+                f"the grant — tail is {tail}"
             )
             assert allow.index("nest-report-read") < allow.index(CATEGORY), name
 
@@ -313,18 +334,22 @@ class TestTheRepinnedAllowArrayConstants:
         appended) → 9 (memoir + prompt-reload joined, 2026-11-06) →
         10 (``pok`` inserted BEFORE ``nest-report`` — the sweep's
         insert-before rule, the memoir/prompt-reload tail preserved)
-        → 11 (prompt-assent appended at the END, 2026-11-10)."""
+        → 11 (prompt-assent appended at the END, 2026-11-10)
+        → 12 (guidelines appended at the END, 2026-11-13 — the
+        guideline-read-tool lane; the FIRST privileged grant to a sonic
+        agent, sonic-leader)."""
         source = (REPO_ROOT / "tests/unit/test_board_registration.py").read_text(
             encoding="utf-8"
         )
         assert (
             '"ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", '
             '"wedge-capture", "notify-user", "pok", "nest-report", '
-            '"memoir", "prompt-reload", "prompt-assent"],' in source
+            '"memoir", "prompt-reload", "prompt-assent", "guidelines"],'
+            in source
         ), (
             "the ari trailing set must carry pok inserted BEFORE "
-            "nest-report with the memoir/prompt-reload/prompt-assent tail "
-            "intact (the 11-entry re-derived value)"
+            "nest-report with the memoir/prompt-reload/prompt-assent/"
+            "guidelines tail intact (the 12-entry re-derived value)"
         )
 
     def test_the_gaia_constant_is_exactly_the_seven(self) -> None:

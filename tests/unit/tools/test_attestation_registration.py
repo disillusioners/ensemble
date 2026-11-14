@@ -287,6 +287,11 @@ class TestStaticRegistrationChecklist:
     # prompt-assent (2026-11-10, prompt-assent lane): privileged entry #21
     # (ari-exactly; see daemon/tools/_tool_registry.py).
     "prompt-assent",
+    # guidelines (2026-11-13, guideline-read-tool lane): the READ-ONLY
+    # window onto the shipped guideline corpus — privileged entry #22;
+    # the FIRST privileged grant to a sonic agent (sonic-leader,
+    # ruling 2026-11-13); see daemon/tools/_tool_registry.py.
+    "guidelines",
 })
 
 

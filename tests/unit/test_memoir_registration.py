@@ -78,6 +78,7 @@ COUNT_PIN_FILES: tuple[str, ...] = (
     "tests/unit/test_notify_user_registration.py",
     "tests/unit/test_metrics_read_registration.py",
     "tests/unit/test_instance_ops_registration.py",
+    "tests/unit/tools/test_guidelines_registration.py",
 )
 EXPECTED_SET_FILES: tuple[str, ...] = (
     "tests/unit/test_board_registration.py",
@@ -86,6 +87,7 @@ EXPECTED_SET_FILES: tuple[str, ...] = (
     "tests/unit/test_notify_user_registration.py",
     "tests/unit/test_metrics_read_registration.py",
     "tests/unit/test_instance_ops_registration.py",
+    "tests/unit/tools/test_guidelines_registration.py",
 )
 EXACT_SET_FILES: tuple[str, ...] = (
     "tests/integration/test_service_tool_flag_off_byte_identical.py",
@@ -144,15 +146,15 @@ class TestTheCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_has_twenty_one_members(self) -> None:
-        # prompt-assent (2026-11-10) entered as #21 after prompt-reload.
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 21
+    def test_the_set_has_twenty_two_members(self) -> None:
+        # guidelines (2026-11-13) entered as #22 after prompt-assent.
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 22
 
-    def test_the_derived_set_is_exactly_the_twenty_one_entries(self) -> None:
+    def test_the_derived_set_is_exactly_the_twenty_two_entries(self) -> None:
         """The expected set is DERIVED (the registry's own literal), never
         hardcoded from a prose census."""
         derived = _registry_literal_members()
-        assert len(derived) == 21, sorted(derived)
+        assert len(derived) == 22, sorted(derived)
         assert CATEGORY in derived
         assert PRIVILEGED_TOOL_CATEGORIES == derived
 
@@ -175,9 +177,13 @@ class TestTheCategory:
             for line in literal.splitlines()
             if line.strip().startswith('"')
         ]
-        assert entries[-3] == CATEGORY, entries[-4:]
-        assert entries[-2] == "prompt-reload", entries[-4:]
-        assert entries[-1] == "prompt-assent", entries[-4:]
+        # guidelines (2026-11-13) appended after prompt-assent —
+        # memoir is now fourth-to-last; the relative discipline is
+        # unchanged.
+        assert entries[-4] == CATEGORY, entries[-4:]
+        assert entries[-3] == "prompt-reload", entries[-4:]
+        assert entries[-2] == "prompt-assent", entries[-4:]
+        assert entries[-1] == "guidelines", entries[-4:]
 
     def test_the_category_module_resolves_to_a_daemon_tools_path(self) -> None:
         assert CATEGORY_MODULES.get(CATEGORY) == MODULE
@@ -326,10 +332,14 @@ class TestTheAriOnlyAllowList:
         )
         allow = meta.get("tools", {}).get("allow", []) or []
         assert CATEGORY in allow
-        assert allow[-1] == "prompt-assent", (
-            "the prompt-assent entry (2026-11-10) must be the LAST entry "
-            "of ari's allow array (the trailing-entry discipline)"
+        # guidelines (2026-11-13, guideline-read-tool lane) appended AFTER
+        # prompt-assent — the relative tail discipline is unchanged.
+        assert allow[-2] == "prompt-assent", (
+            "the prompt-assent entry must sit IMMEDIATELY BEFORE the "
+            "guidelines entry in ari's allow array (the trailing-entry "
+            "discipline)"
         )
+        assert allow[-1] == "guidelines"
 
     def test_no_other_agent_carries_the_category(self) -> None:
         offenders: list[str] = []
@@ -355,10 +365,10 @@ class TestTheAriOnlyAllowList:
         source = (REPO_ROOT / "tests/unit/test_board_registration.py").read_text(
             encoding="utf-8"
         )
-        assert '"memoir", "prompt-reload", "prompt-assent"]' in source, (
-            "the board trailing pin must end with prompt-reload + "
-            "prompt-assent (the prompt-assent lane, 2026-11-10, appended "
-            "after prompt-reload)"
+        assert '"prompt-reload", "prompt-assent", "guidelines"]' in source, (
+            "the board trailing pin must end with prompt-assent + "
+            "guidelines (the guideline-read-tool lane, 2026-11-13, "
+            "appended after prompt-assent)"
         )
         # "pok" re-point 2026-11-08 (POK B4 sweep 16b4e70b2): the board
         # pin's ari literal gained "pok" between "notify-user" and
@@ -371,13 +381,17 @@ class TestTheCeremonySelfVerification:
     exact-set literal agrees with the registry's own, and the standing
     mutation instrument is lockstepped."""
 
-    def test_every_count_pin_says_twenty_one(self) -> None:
+    def test_every_count_pin_says_twenty_two(self) -> None:
         for rel in COUNT_PIN_FILES:
             source = (REPO_ROOT / rel).read_text(encoding="utf-8")
-            assert "assert len(PRIVILEGED_TOOL_CATEGORIES) == 21" in source, rel
+            assert "assert len(PRIVILEGED_TOOL_CATEGORIES) == 22" in source, rel
             assert "assert len(PRIVILEGED_TOOL_CATEGORIES) == 20" not in source, (
                 f"{rel}: a stale 20-flavored count pin survived the "
                 f"prompt-assent ceremony"
+            )
+            assert "assert len(PRIVILEGED_TOOL_CATEGORIES) == 21" not in source, (
+                f"{rel}: a stale 21-flavored count pin survived the "
+                f"guidelines ceremony"
             )
 
     def test_every_expected_set_definition_agrees_with_the_registry(self) -> None:
@@ -422,6 +436,10 @@ class TestTheCeremonySelfVerification:
         assert '"assert len(PRIVILEGED_TOOL_CATEGORIES) == 17"' not in source, (
             "a stale hardcoded 17-flavored literal survived the merge"
         )
+        assert '"assert len(PRIVILEGED_TOOL_CATEGORIES) == 21"' not in source, (
+            "a stale hardcoded 21-flavored literal survived the "
+            "guidelines ceremony"
+        )
 
     def test_the_registry_prose_census_is_corrected(self) -> None:
         source = (REPO_ROOT / "daemon" / "tools" / "_tool_registry.py").read_text(
@@ -433,4 +451,7 @@ class TestTheCeremonySelfVerification:
         # the dated merge derivation note (the census itself is re-derived
         # at every ceremony and is never a frozen literal).
         assert "DERIVE THE PIN SET BY GREPPING THE TREE" in source
-        assert "2026-11-06 memoir-merge derivation" in source
+        # The derivation note is re-dated at every lane ceremony; the
+        # current stamp is the 2026-11-13 guidelines Phase-1/2
+        # derivation.
+        assert "2026-11-13 guidelines Phase-1/2 derivation" in source
