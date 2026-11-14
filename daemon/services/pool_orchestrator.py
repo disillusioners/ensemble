@@ -798,7 +798,7 @@ class PoolOrchestrator:
 
     # ── notify_all ────────────────────────────────────────────────
 
-    def notify_all(self) -> None:
+    def notify_all(self) -> int:
         """Fan-out wake pulse to every live worker pool.
 
         Chat-source-worker-lane, D5 — replaces the
@@ -820,13 +820,20 @@ class PoolOrchestrator:
         :meth:`shutdown` clears the list (and the slots) so
         post-teardown notifies are a no-op rather than reaching a
         stopped pool.
+
+        Returns:
+            Count of pools successfully pulsed (a pool whose
+            ``notify_work()`` raised is logged with a WARNING and
+            does NOT count as pulsed; fan-out continues).
         """
         # Snapshot iterate — cross-thread clear/extend during shutdown can race live iteration; list(...) preserves the no-rebind alias discipline.
+        pulsed = 0
         for pool in list(self._pools):
             if pool is None:
                 continue
             try:
                 pool.notify_work()
+                pulsed += 1
             except Exception as notify_err:
                 # Transient pool-side blip — log + skip. The
                 # wake-site None-guard mandate also covers the
@@ -840,6 +847,7 @@ class PoolOrchestrator:
                     f"_notify_all_pools: pool.notify_work() "
                     f"raised {notify_err!r} — continuing fan-out"
                 )
+        return pulsed
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -922,14 +930,15 @@ def safe_notify_all_pools(
        claim cycles.
 
     4. **Async-aware return.** The helper returns whatever the
-       wake call returned — ``None`` for production sync
-       ``WorkerPool.notify_work()``, or the coroutine for test
-       fixtures that attach ``AsyncMock`` to ``notify_work``.
-       Async callers (the watchdog's wedge-pass,
-       ``long_tool_nudge``'s async sites) check the return value
-       via ``inspect.iscoroutine`` and ``await`` it as needed.
-       Sync callers can ignore the return value (the production
-       shape is ``None``).
+       wake call returned — ``True`` for production sync
+       ``WorkerPool.notify_work()`` (which now returns ``True``),
+       an int for ``PoolOrchestrator.notify_all()`` (count of
+       pools pulsed), or the coroutine for test fixtures that
+       attach ``AsyncMock`` to ``notify_work``. Async callers
+       (the watchdog's wedge-pass, ``long_tool_nudge``'s async
+       sites) check the return value via ``inspect.iscoroutine``
+       and ``await`` it as needed. Sync callers can ignore the
+       return value (the production shape is truthy).
 
     Args:
         manager: The owning ``InstanceManager`` (or Mock). May be
@@ -953,13 +962,14 @@ def safe_notify_all_pools(
             without dispatching.
 
     Returns:
-        The result of the dispatched wake call (typically
-        ``None`` for sync production ``notify_work()``, or a
-        coroutine for ``AsyncMock`` test fixtures). ``None`` if
-        no pool was reachable. Per-pool errors are swallowed
-        (logged, not propagated) — the helper returns the
-        partial result (``None`` on error, since the exception
-        interrupts the wake call's normal completion).
+        The result of the dispatched wake call (``True`` for sync
+        production ``notify_work()``, an int for
+        ``PoolOrchestrator.notify_all()``, or a coroutine for
+        ``AsyncMock`` test fixtures). ``None`` if no pool was
+        reachable. Per-pool errors are swallowed (logged, not
+        propagated) — the helper returns the partial result
+        (``None`` on error, since the exception interrupts the
+        wake call's normal completion).
     """
     manager_dict = getattr(manager, "__dict__", {}) or {}
     notify_pools = manager_dict.get("_notify_all_pools")

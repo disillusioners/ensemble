@@ -1906,7 +1906,7 @@ class TaskRepository:
             return list(db_session.exec(stmt))
 
     def list_pending_tasks_older_than(
-        self, age_seconds: int, exclude_task_types: list[str] | None = None
+        self, age_seconds: int, exclude_task_types: list[str] | None = None, *, limit: int | None = None
     ) -> list[Task]:
         """Return PENDING ``task`` rows whose ``created_at`` is older than
         ``age_seconds`` ago AND whose ``last_heartbeat_at`` IS NULL.
@@ -1934,6 +1934,11 @@ class TaskRepository:
                 considered drift-eligible.
             exclude_task_types: Task types to exclude from the drift
                 scan (default: the wedge-guard heartbeat type only).
+            limit: Optional keyword-only cap on the number of rows
+                returned (oldest-first). ``None`` (default) returns
+                the full set — preserves the reconciler's need for
+                the complete candidate set. Used by the eligible-
+                PENDING sweep to bound its scan to claim capacity.
 
         Returns:
             List of PENDING ``Task`` rows older than ``age_seconds``
@@ -1957,6 +1962,8 @@ class TaskRepository:
                     col(Task.task_type).notin_(exclude_task_types)
                 )
             stmt = stmt.order_by(col(Task.created_at).asc())
+            if limit is not None:
+                stmt = stmt.limit(limit)
             return list(db_session.exec(stmt))
 
     def list_live_process_report_carriers_for_instance(
