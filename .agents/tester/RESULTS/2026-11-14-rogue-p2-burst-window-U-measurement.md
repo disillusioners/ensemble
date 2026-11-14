@@ -87,3 +87,43 @@ Launchd-host residual (GAP-1, `docs/deployment.md:327,348`) sits outside `Restar
 
 - Measurement script (not committed, `/tmp` scratch): `/tmp/rogue-u-measure-e2d.sh` — fence block copied from the fixed harness `boot_rogue_mirror.sh` @ `9b59bafcd`; the harness's pkill-overlay guard (A1 hygiene, HY pins) correctly flagged the script's `TERM`-of-holder + live-token co-occurrence on first write; restructured so the script carries scratch-named targets only and live-port probes run as separate read-only `ss` calls outside it. `ENSEMBLE_FENCED_TEST_CONTEXT=1` was NOT needed for the final script (scratch-clean by the guard's own standard).
 - The `bind_retry.py` ceiling note's frozen-path estimate (B ≈ 18.3 s ⇒ U ≈ 48.3 s) remains the worst-case coupling anchor; this worktree-venv measurement (B ≈ 4.5 s ⇒ U ≈ 34.5 s) is a LOWER bound shape on a faster interpreter path — both sit under 58 s; the C3 closure arithmetic is unaffected either way.
+
+---
+
+# APPENDED (post-A2 verify lane): Fast-Refuse-ON Single Cycle — DIRECT U EVIDENCE
+
+- **Date:** 2026-11-14 (UTC), cycle at 22:31:30Z–22:31:35Z
+- **Tip:** A2 landed `cc154c308` (worktree `feature/rogue-port-containment` tip `67aec7232` ⊇ A2; direct `<worktree>/.venv/bin/python -m daemon`, CWD=worktree, NEVER launcher.sh). Provenance asserted pre-run: `daemon.__file__ = /home/nea/ensemble-src-wt-rogue-contain/daemon/__init__.py`.
+- **Shape:** the (D) fence exactly — umask 077; FAKE_HOME escape-guarded; per-variable PG scrub (`env -u` per-variable wrap on the child, never the glob idiom); fence `.env` sourced (values never printed) then `POSTGRES_DB=ensemble_dev_scratch` override (the (D) shape; forbidden-name guard both before and after the override); `ENSEMBLE_DB_AMBIENT_ALLOW=1` (the attempt-1 lesson — present from the start this time); `ENSEMBLE_SELF_ENV=sandbox`; fresh `ENSEMBLE_DATA_DIR`; per-run EMPTY `ENSEMBLE_PORT_CLAIMS_DIR` tmp dir (asserted empty at cycle start, mode 700); `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` pinned EXPLICITLY; scratch port **18791** (free-verified pre-run; the live trio never touched).
+- **Holder:** live python socket squatter on the scratch port, `cwd = /tmp/rc-p2-fr-<run>/holder-install-dir` (scratch FOREIGN install; `launcher.sh` attribution marker present) — claim-less (claims dir EMPTY). cwd verified via `/proc/<pid>/cwd` + TCP-connect LISTEN assertion before the cycle. **Unlike the pre-A2 leg, this cycle EXPECTS exit 78** (the A2 holder gate refuses on positive proof of a live foreign holder) — the assert is the marker SUBSTRING, never bare 78.
+
+## Cycle result — PASS (Lane-1 constraint survived the A2 gate)
+
+| Metric | Value |
+|---|---|
+| **U (wall-clock child start → exit)** | **5111 ms = 5.111 s ≪ 58 s** |
+| Exit code | **78** (expected — holder refusal) |
+| Marker line | `PORT OWNERSHIP REFUSED (socket-holder): port=18791 host=0.0.0.0 holder_pid=334297 holder_exe=…python3.14 holder_cwd=/tmp/rc-p2-fr-334285/holder-install-dir holder_install=/tmp/rc-p2-fr-334285/holder-install-dir self_install=/home/nea/ensemble-src-wt-rogue-contain claims_dir=…` — **pid/exe/cwd tokens ALL present** |
+| Durable refusal record | `port-ownership-refusal.json` in the cycle claims dir: `exit_code=78, family=port-ownership, source=socket-holder, evidence=positive-install-mismatch, holder pid=334297 (ppid=334285), holder install=<scratch foreign dir>, self_install_dir=<worktree>` |
+| Ladder entered | NO — no "Bind retry" lines in the log (refusal fired pre-bind, exactly the 6a shape); U − boot-to-prebind B ≈ 5.1 s − ~4.5 s ⇒ gate cost ≈ 0.6 s (incl. the 0.25 s two-sample re-walk delay) |
+| run.log sha256 | `40cc44f9135235be2917d9d5e9837062ea038ae0cc777bf6a92ed0d340025a24` |
+| Secret scan | clean (`sk-(proj|ant)-`, `POSTGRES_PASSWORD=` — zero hits) |
+| Teardown | TERM-only to the holder PID the script owned; "HOLDER-TEARDOWN: exited on TERM"; scratch port 18791 released post-run |
+
+## (D) closure-condition status (per §9-1 CLOSED-BY-A2 CONDITIONAL)
+
+| Condition | Status | Evidence |
+|---|---|---|
+| **C1** — A2 merged | **TRUE** | A2 landed as `cc154c308` (this cycle ran the A2 gate — the refusal IS the new code path firing) |
+| **C2** — live unit RestartPreventExitStatus=78 | lives in **S9b operator leg** (NOT this lane) — unchanged, still pending the root-side read-only command | per plan §5.8/T3 |
+| **C3** — measured median U ≤ 58 s | **TRUE** | pre-A2 median 34.472 s (N=6, above) **+ this direct post-A2 refused-boot U = 5.111 s ≪ 58 s** (the fast-refuse-ON single-cycle evidence §S9 names) |
+
+Verdict (telemetry-only — arms nothing): trigger **dormant**; C1+C3 hold on this lane's evidence, C2 rides S9b. NO launcher.sh edits (either way, per the binding rule).
+
+## Live-untouched invariants (asserted pre AND post the cycle)
+
+- Port probes: pre-run and post-run **identical** — the live trio (`0.0.0.0:9797`, `127.0.0.1:9798`, `127.0.0.1:7979`) unchanged (read-only `ss`, run OUTSIDE the cycle script).
+- Scratch port 18791: released post-run; no stray holder/daemon processes remain (`ps` verified).
+- Zero live mutation: the cycle wrote only inside its own `/tmp/rc-p2-fr-<run>/` tree (data dir, claims dir); DB contact = the preflight reachability check against the shared scratch DB (`ensemble_dev_scratch` @ 127.0.0.1:5432) — the daemon died pre-lifespan (pre-bind refusal ⇒ no evolution step ran); no claim writes outside the cycle claims dir; no pkill; no launcher/unit/`.env` edits.
+
+Runner script (not committed, /tmp scratch): `/tmp/rc-p2-fr-runner.sh` — fence block copied from the (D) shape; carries scratch-named targets only (no live tokens; the only TERM is the script-owned holder PID).
