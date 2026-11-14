@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Sonic Team (ENSEMBLE-31, COMBINED v1.1+v1.2) — agent-definition contract checker.
+"""Sonic Team (ENSEMBLE-31) — agent-definition contract checker.
 
 Companion checker for pack ``sonic_agent_defs_unit_test`` (see the .sh
 sibling for the invocation contract).  Implements the phase-2 spec
-(``phase2-test-pack-spec.md``) assertions A1-A11 PLUS the combined-rework
-pins A12-A14, each derived from the FROZEN blocks of the combined spec
-(``phase1-implementation-spec-v1.1.md``) — the combined spec wins on any
-mismatch (spec §7-4 VERIFY-AT-IMPL doctrine).
+(``phase2-test-pack-spec.md``) assertions PLUS the sonic-routing
+amendment pins (Emperor ruling 2026-11-14, decisions.md "Sonic routing
+amendment") — each derived from the frozen blocks of the combined spec
+(``phase1-implementation-spec-v1.1.md``, amend block 2026-11-14) — the
+spec wins on any mismatch (spec §7-4 VERIFY-AT-IMPL doctrine).
 
 Combined shape (Emperor ruling 2026-11-13: v1.2 merged into v1.1): FIVE
 sonic agents — the new ``sonic-developer`` layer plans/splits/dispatches/
@@ -18,28 +19,42 @@ branch, returns a compact module report); ``sonic-reviewer`` and
 v0.30.2 amendment (Emperor ruling 2026-11-13, decisions.md R16-R19):
 giter re-added to sonic-leader + added to sonic-developer (escape hatch),
 devops on the leader, and the image read-trio granted to leader/developer/
-coder/reviewer via allow "image" + deny "image_save" (critic pattern) —
-image-reader joins each grantee's effective spawn set; sonic-tester
-UNCHANGED. Legs marked v0.30.2 in the self-test matrix pin every new grant.
+coder/reviewer via allow "image" + deny "image_save" (critic pattern).
+
+v0.30.5 sonic-routing amendment (Emperor ruling 2026-11-14, four rulings):
+  A — the FROZEN blast-radius predicate (the frozen 14-glob block) is REMOVED; routing
+      is by COMPLEXITY, not paths.  The developer assesses complexity after
+      explore+plan and PAUSES on high/extremely-high with a handover
+      suggestion to the leader; the leader adjudicates ACCEPT (HANDOVER
+      REPORT to Ari) or REJECT (narrower split).
+  B — cross-team interop: HANDOFF-v2 moves into
+      ``.agents/shared/planning/sonic-team/<task>/``; the tester registers
+      packs in ``.agents/tester/PACKS.md`` (one line, tagged sonic); the
+      leader/developer prompts read the shared planning dir + PACKS; the
+      POK ``DEFAULT_AUDIENCE_SETS`` code gains sonic-leader/developer.
+  C — the handover is a RECOMMENDATION: user/Ari/leader overrides resolve
+      it; nothing may silently downgrade the recorded verdict.
+  D — "steady team" vocabulary becomes "expert team".
+The former A7 (blast globs) and A10 (blast escalation line) legs are gone;
+their replacements pin the complexity-handover protocol + interop.
 
 Three layers:
 
-  --static      stdlib-only contract checks A1-A14 against the real tree.
+  --static      stdlib-only contract checks against the real tree.
                 NO daemon import (mirrors the
                 ``scripts/protection/generate_prompt_artifact_baseline.py``
                 doctrine: a bare host python3 must not drag the langchain
-                stack).  Daemon CONSTANTS that the assertions need
-                (``TOOL_REQUIRED_AGENTS``, ``_ALLOWED_MODELS_DEFAULT``) are
-                AST-extracted from source, never imported.
+                stack).  Daemon CONSTANTS the assertions need
+                (``TOOL_REQUIRED_AGENTS``, ``_ALLOWED_MODELS_DEFAULT``,
+                ``DEFAULT_AUDIENCE_SETS``) are AST-extracted from source,
+                never imported.
 
   --self-test   the mutation matrix: every assertion is (a) proven GREEN on
                 a good in-memory fixture and (b) proven RED on that fixture
-                with ONE planted counter-mutation (spec §3 counter-mutation
-                column; POK ``mutation-01-guards-need-counter-mutation``).
-                A leg that stays green under its own counter-mutation is a
-                FAIL of the self-test, never a skip.  NO repo bytes are
-                touched (in-memory fixtures only — precedent: the header of
-                ``tests/unit/test_ari_pm_terminology_pins.py``).
+                with ONE planted counter-mutation (POK
+                ``mutation-01-guards-need-counter-mutation``).  A leg that
+                stays green under its own counter-mutation is a FAIL of the
+                self-test, never a skip.  NO repo bytes are touched.
 
   --real        the REAL resolver layer: ``get_registry()`` +
                 ``_check_team_membership`` (imports daemon — run under
@@ -49,22 +64,17 @@ Three layers:
                 resolver leg is the aegis blind-spot class.
 
 Frozen strings are restated from phase1-implementation-spec-v1.1.md §3/§4
-and must stay character-for-character identical (POK
+and the amend block, and must stay character-for-character identical (POK
 ``plan-body-ledger-agreement``).
 
 Implementation notes (disclosed):
-- A11/A12/A13 anchor matching whitespace-normalizes both haystack and
-  needle before containment: the landed prompts wrap sentences across
-  markdown line breaks, so raw substring matching would false-RED on
-  verbatim-spec text.  Normalized matching is insensitive to re-wraps.
-- A10 matches by containment (grep -F semantics): the landed escalation
-  line sits inside Markdown backticks.
-- A9 (steady team untouched) judges the UNION of the committed delta
-  (``git diff --name-only <v1-base>..HEAD -- agents/``) and the
-  working-tree status (``git status --porcelain -- agents/``): pre-commit
-  lanes carry their delta in the working tree; post-merge lanes carry it
-  in commits.  The pack stays valid in both states by construction
-  (ancestry drift pin, not a branch-name pin).
+- Containment assertions whitespace-normalize both haystack and needle
+  before matching: the landed prompts wrap sentences across markdown line
+  breaks, so raw substring matching would false-RED on verbatim text.
+- A9 (steady-team fence) judges the UNION of the committed delta
+  (``git diff --name-only 3f45cd6dd..HEAD -- agents/``) and the working-tree
+  status (``git status --porcelain -- agents/``); its fence base is the
+  v0.30.4 release commit (this lane's base).
 """
 
 from __future__ import annotations
@@ -82,8 +92,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 # ---------------------------------------------------------------------------
-# FROZEN constants — single source: phase1-implementation-spec-v1.1.md §1-§4.
-# The combined spec wins on any mismatch (phase2 spec §7-4 VERIFY-AT-IMPL).
+# FROZEN constants — single source: phase1-implementation-spec-v1.1.md §1-§4
+# (+ the 2026-11-14 amend block).  The combined spec wins on any mismatch.
 # ---------------------------------------------------------------------------
 
 SONIC_AGENTS = (
@@ -102,13 +112,11 @@ SONIC_AGENTS = (
 # decisions.md R16-R19): giter re-added to sonic-leader AND added to
 # sonic-developer (escape hatch — workflow/worktree expertise); devops on the
 # leader (rarely invoked by design — infra/deploy escape hatch); the image
-# read-trio {explain_image, image_get, image_list} granted to leader/
-# developer/coder/reviewer via allow "image" + deny "image_save" (critic
-# pattern); sonic-tester UNCHANGED.
+# read-trio granted to leader/developer/coder/reviewer via allow "image" +
+# deny "image_save" (critic pattern); sonic-tester UNCHANGED.
 # ---- guideline-read-tool amendment (2026-11-13): "guidelines" (privileged
 # category #22 — the READ-ONLY shipped-guideline window) tail-appended to
 # sonic-leader's allow ONLY; sonic-developer/coder/reviewer/tester UNCHANGED.
-# The FIRST privileged grant to a sonic agent (ruling 2026-11-13).
 # ----
 FROZEN_TEAMS = {
     "sonic-leader": ["sonic-developer", "sonic-coder", "sonic-reviewer",
@@ -158,8 +166,7 @@ FROZEN_TOOLS = {
 # agents (TOOL_REQUIRED_AGENTS maps "knowledge" -> ["explorer", "kb-writer"])
 # PLUS image-reader (TOOL_REQUIRED_AGENTS maps "image" -> ["image-reader"]);
 # developer = sonic-coder + giter PLUS the same three implicit members; coder/
-# reviewer = image-reader ONLY (the image category's implicit member); tester =
-# EMPTY (unchanged — no image grant, no team, no knowledge-implied members).
+# reviewer = image-reader ONLY; tester = EMPTY.
 EXPECTED_EFFECTIVE = {
     "sonic-leader": {"sonic-developer", "sonic-coder", "sonic-reviewer",
                      "sonic-tester", "giter", "devops", "explorer", "kb-writer",
@@ -171,35 +178,10 @@ EXPECTED_EFFECTIVE = {
     "sonic-tester": set(),
 }
 
-# ---- FROZEN [sonic-blast-radius-v1] (combined spec §3.5) — 14 globs, exact
-# order; the block lives in THREE workflow files (leader, coder, developer)
-# and must be byte-identical across all three ----
-FROZEN_GLOBS = [
-    "daemon/graph.py",
-    "daemon/manager.py",
-    "daemon/config.py",
-    "daemon/api.py",
-    "daemon/services/**",
-    "daemon/repositories/**",
-    "daemon/tools/**",
-    "daemon/migrations/versions/**",
-    "daemon/sources/**",
-    "daemon/mcp/**",
-    "daemon/routers/**",
-    "scripts/**",
-    "agents/**/*.md",
-    "agents/.prompt-artifacts.sha256",
-]
-BLAST_MARKER_OPEN = "# ---- FROZEN [sonic-blast-radius-v1] ----"
-BLAST_MARKER_CLOSE = "# ---- END FROZEN [sonic-blast-radius-v1] ----"
-BLAST_WORKFLOW_FILES = (
-    "agents/sonic-leader/workflow.md",
-    "agents/sonic-developer/workflow.md",
-    "agents/sonic-coder/workflow.md",
-)
-
-# ---- FROZEN [sonic-handoff-v2] (combined spec §4.1) — Title-Case
-# authoritative; authorship = sonic-developer (integration-level author) ----
+# ---- FROZEN [sonic-handoff-v2] (combined spec §4.1; section 7 renamed per
+# Ruling A: the blast predicate is gone, the handoff carries a complexity
+# self-assessment instead).  Authorship = sonic-developer.  v0.30.5 Ruling B:
+# the artifact lives in the shared planning dir. ----
 HANDOFF_HEADERS = [
     "## Files touched across modules",
     "## What changed",
@@ -207,9 +189,12 @@ HANDOFF_HEADERS = [
     "## Known risks",
     "## How to verify",
     "## Bash-raises used",
-    "## Blast-radius self-assessment vs predicate",
+    "## Complexity self-assessment",
 ]
-HANDOFF_PATH_PREFIX = "HANDOFF_PATH = HANDOFF.md"
+HANDOFF_PATH_PREFIX = (
+    "HANDOFF_PATH = .agents/shared/planning/sonic-team/<task>/HANDOFF.md"
+)
+PLANNING_HANDOFF_DIR_TOKEN = ".agents/shared/planning/sonic-team/<task>/HANDOFF.md"
 HANDOFF_FILES = (
     "agents/sonic-developer/workflow.md",
     "agents/sonic-reviewer/workflow.md",
@@ -217,7 +202,9 @@ HANDOFF_FILES = (
 )
 
 # ---- FROZEN [sonic-module-report-v2] (combined spec §3.4) — the coder's
-# compact module report shape (a MESSAGE, never a file) ----
+# compact module report shape (a MESSAGE, never a file).  v0.30.5: the former
+# ``blast:`` field is replaced by ``complexity:`` (the predicate is gone; a
+# module that turns out heavier than briefed flags its own band). ----
 MODULE_REPORT_PREFIX = "MODULE-REPORT: <module-slug>"
 MODULE_REPORT_KEYS = (
     "branch: <branch-name> @ <tip-sha>",
@@ -227,7 +214,7 @@ MODULE_REPORT_KEYS = (
     "untested:",
     "risks:",
     "raises:",
-    "blast:",
+    "complexity:",
 )
 
 # ---- FROZEN [sonic-coder-discipline-v2] (combined spec §3.3) — the two
@@ -265,6 +252,10 @@ DEV_TOOLSNOTE_NEVER_EXPERIENCE = (
 DEV_RULE = "agents/sonic-developer/rule.md"
 DEV_WORKFLOW = "agents/sonic-developer/workflow.md"
 DEV_TOOLS_NOTE = "agents/sonic-developer/tools_note.md"
+LEADER_RULE = "agents/sonic-leader/rule.md"
+LEADER_WORKFLOW = "agents/sonic-leader/workflow.md"
+TESTER_RULE = "agents/sonic-tester/rule.md"
+TESTER_WORKFLOW = "agents/sonic-tester/workflow.md"
 
 # ---- FROZEN [sonic-fast-path-v1] (combined spec §7 / D-E) — the gate line
 # pinned in the leader's rule.md AND workflow.md ----
@@ -273,19 +264,56 @@ FAST_PATH_GATE_LINE = (
     "cross-module risk — anything larger goes through sonic-developer."
 )
 
-# ---- FROZEN [sonic-escalation-v1] (phase1 §4.0) ----
-ESCALATION_LINE = (
-    "ESCALATION: <path> matches <glob> — returning commission to Ari "
-    "(steady-team routing)."
+# ---- Ruling A: the complexity-handover protocol (deterministic shape) ----
+COMPLEXITY_BANDS = "low | medium | high | extremely-high"
+DEV_PAUSE_SENTENCE = (
+    "HIGH / EXTREMELY-HIGH → PAUSE the pipeline: do NOT dispatch any coder"
 )
+DEV_HANDOVER_LINE = (
+    "handover suggestion: <complexity> because <reasons from the plan>"
+)
+DEV_ORDER_SENTENCE = "explore → plan → complexity verdict → THEN dispatch"
+LEADER_ACCEPT_SENTENCE = (
+    "ACCEPT → I end the commission as a HANDOVER REPORT to Ari"
+)
+LEADER_REJECT_SENTENCE = "REJECT → I continue"
+HANDOVER_REPORT_FIELDS = (
+    "HANDOVER-REPORT:",
+    "complexity:",
+    "reasons:",
+    "leader-assessment:",
+    "work-state:",
+    "override:",
+    "recommendation: reroute to the expert team",
+)
+# ---- Ruling C: override paths + no-silent-downgrade ----
+OVERRIDE_TOKENS = ("USER OVERRIDE", "ARI OVERRIDE", "LEADER OVERRIDE")
+NO_DOWNGRADE_SENTENCE = "NOTHING MAY SILENTLY DOWNGRADE THE RECORDED VERDICT"
+HANDOVER_VERDICT_TOKEN = "handover-verdict:"
+# ---- Ruling D: terminology ----
+EXPERT_TEAM_TOKEN = "expert team"
 
-# Ari note (phase1 §5.1/§5.2).
+# ---- Ruling B: interop contract ----
+PACKS_REGISTRY = ".agents/tester/PACKS.md"
+PACKS_GATE_TOKEN = "gate-verifiable = registered"
+PACKS_PACK_ID = "sonic_agent_defs_unit_test"
+PLANNING_DIR_READ_TOKEN = ".agents/shared/planning/"
+
+# ---- Ruling B.4: POK audience defaults (CODE, AST-extracted) ----
+POK_INJECTION_FILE = "daemon/services/pok_injection.py"
+POK_AUDIENCE_CONST = "DEFAULT_AUDIENCE_SETS"
+EXPECTED_POK_AUDIENCE = {
+    "operation": {"ari", "leader", "devops", "sonic-leader", "sonic-developer"},
+    "implementation": {"leader", "developer", "sonic-developer"},
+}
+
+# Ari note (Ruling A/D rework of the sonic triage section).
 ARI_RULE = "agents/ari/rule.md"
-ARI_HEADING = "### Sonic Lane (Opt-In)"
+ARI_HEADING = "### Sonic Team (Default) — Expert Team for Genuinely Heavy Work"
 ARI_ANCHORS = [
-    "Delegation defaults stay with the steady team (`leader`).",
-    "opt-in by POSITIVE selection only",
-    "escalates the commission back to me with its reason",
+    "Routing is by COMPLEXITY, not paths",
+    "roughly 80–90% of tasks",
+    "never silently downgrade a recorded complexity verdict",
 ]
 _BACKING_NOTE_TOKEN = "backed by Plane"
 
@@ -293,7 +321,10 @@ _BACKING_NOTE_TOKEN = "backed by Plane"
 BASELINE_FILE = "agents/.prompt-artifacts.sha256"
 SEAL_FILE = "tests/test_chart_image_delivery_e2e.py"
 SEAL_DICT_NAME = "SEALED_SHA_BASELINES"
-EXPECTED_BASELINE_ROWS = 201  # 197 at the v1.1 tip + 4 sonic-developer artifacts
+# Regenerated at v0.30.5 (was 201 at the v0.30.2 tag; agent dirs added across
+# v0.30.3/v0.30.4 grew the tree to 217).  Row COUNT is fixed by the tree, not
+# by this lane (no artifact files added/removed); edit only after a regen.
+EXPECTED_BASELINE_ROWS = 217
 EXPECTED_SEAL_ROWS = 35
 SONIC_ARTIFACTS = ("soul.md", "rule.md", "workflow.md", "tools_note.md")
 SONIC_BASELINE_PATHS = tuple(
@@ -314,6 +345,9 @@ EXPECTED_LLM_MODEL = {
 }
 EXPECTED_MODELS_IN_DEFAULT_SET = ("agentic", "coding")
 # ---- END FROZEN [sonic-llm-pins-v3] ----
+
+# This lane's base — the A9 steady-team fence is judged relative to it.
+AGENTS_FENCE_BASE = "3f45cd6dd"
 
 # Config single source (AST-extracted, never imported in the static layer).
 ALLOWED_MODELS_CONST = "_ALLOWED_MODELS_DEFAULT"  # daemon/config.py
@@ -351,6 +385,10 @@ def _norm(text: str) -> str:
     return " ".join(text.split())
 
 
+def _contains(haystack: str, needle: str) -> bool:
+    return _norm(needle) in _norm(haystack)
+
+
 def _count_token(text: str, token: str) -> int:
     return len(re.findall(re.escape(token), text, flags=re.IGNORECASE))
 
@@ -377,6 +415,44 @@ def _extract_const_from_source(path: Path, const_name: str):
     )
 
 
+def _eval_audience_node(node) -> set:
+    """Evaluate a set-ish AST node: ``{...}`` / ``set([...])`` / ``frozenset({...})``."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+            and node.func.id in ("set", "frozenset", "list", "tuple"):
+        return set(_eval_audience_node(node.args[0]))
+    if isinstance(node, (ast.Set, ast.List, ast.Tuple)):
+        return {ast.literal_eval(elt) for elt in node.elts}
+    raise CheckFailure(
+        "A23",
+        f"unsupported DEFAULT_AUDIENCE_SETS value node: {type(node).__name__}",
+    )
+
+
+def extract_pok_audience(root: Path = ROOT) -> dict:
+    """AST-extract ``DEFAULT_AUDIENCE_SETS`` (dict[str, frozenset]) from source."""
+    path = root / POK_INJECTION_FILE
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        target_node = None
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == POK_AUDIENCE_CONST for t in node.targets
+        ):
+            target_node = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) \
+                and node.target.id == POK_AUDIENCE_CONST and node.value is not None:
+            target_node = node.value
+        if target_node is not None:
+            if not isinstance(target_node, ast.Dict):
+                raise CheckFailure("A23", f"{POK_AUDIENCE_CONST} is not a dict literal")
+            out = {}
+            for k, v in zip(target_node.keys, target_node.values):
+                out[ast.literal_eval(k)] = _eval_audience_node(v)
+            return out
+    raise CheckFailure(
+        "static", f"const {POK_AUDIENCE_CONST!r} not found in {path}"
+    )
+
+
 def extract_tool_required_agents(root: Path = ROOT) -> dict:
     value = _extract_const_from_source(root / AUTH_FILE, TOOL_REQUIRED_CONST)
     if not isinstance(value, dict):
@@ -396,13 +472,14 @@ def extract_allowed_models_default(root: Path = ROOT) -> list:
 
 @dataclasses.dataclass
 class Fixture:
-    metas: dict  # agent -> RAW meta.json text (a1 parses; mutation legs can corrupt)
+    metas: dict  # agent -> RAW meta.json text
     texts: dict  # relpath -> file text
     baseline: dict  # baseline path -> sha row
     seal: dict  # SEALED_SHA_BASELINES rows
     agents_changed: list  # A9 input: committed-delta UNION working-tree paths
     tool_required_agents: dict
     allowed_models_default: list
+    pok_audience: dict
 
     def bytes(self, relpath: str) -> bytes:
         return self.texts[relpath].encode("utf-8")
@@ -415,7 +492,7 @@ def _git_changed_agents(root: Path) -> list:
     """A9 input: committed delta UNION working-tree status, under agents/."""
     changed: set = set()
     committed = subprocess.run(
-        ["git", "diff", "--name-only", "ac9849bf7..HEAD", "--", "agents/"],
+        ["git", "diff", "--name-only", f"{AGENTS_FENCE_BASE}..HEAD", "--", "agents/"],
         capture_output=True, text=True, cwd=str(root), check=False,
     )
     if committed.returncode != 0:
@@ -445,16 +522,19 @@ def build_real_fixture(root: Path = ROOT) -> Fixture:
     for agent in SONIC_AGENTS:
         metas[agent] = (root / "agents" / agent / "meta.json").read_text(encoding="utf-8")
     needed = [
-        "agents/sonic-leader/workflow.md",
-        "agents/sonic-leader/rule.md",
-        "agents/sonic-developer/workflow.md",
-        "agents/sonic-developer/rule.md",
-        "agents/sonic-developer/tools_note.md",
+        LEADER_WORKFLOW,
+        LEADER_RULE,
+        DEV_WORKFLOW,
+        DEV_RULE,
+        DEV_TOOLS_NOTE,
         "agents/sonic-coder/workflow.md",
         "agents/sonic-coder/rule.md",
         "agents/sonic-coder/tools_note.md",
         "agents/sonic-reviewer/workflow.md",
-        "agents/sonic-tester/workflow.md",
+        "agents/sonic-reviewer/rule.md",
+        TESTER_WORKFLOW,
+        TESTER_RULE,
+        PACKS_REGISTRY,
         ARI_RULE,
         "agents/ari/workflow.md",
         "agents/ari/soul.md",
@@ -475,6 +555,7 @@ def build_real_fixture(root: Path = ROOT) -> Fixture:
         agents_changed=_git_changed_agents(root),
         tool_required_agents=extract_tool_required_agents(root),
         allowed_models_default=extract_allowed_models_default(root),
+        pok_audience=extract_pok_audience(root),
     )
 
 
@@ -503,8 +584,7 @@ def extract_seal_dict(path: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# The assertion functions A1-A14.  Each raises CheckFailure on drift and
-# returns normally on pass.  Pure functions of the Fixture.
+# The assertion functions.  Each raises CheckFailure on drift.
 # ---------------------------------------------------------------------------
 
 def a1_meta_parse(fx: Fixture) -> None:
@@ -560,8 +640,7 @@ def _effective_spawn_set(fx: Fixture, agent: str) -> set:
 
 
 def a3_allow_deny(fx: Fixture) -> None:
-    """A3: frozen allow/deny arrays verbatim + effective spawn sets
-    (v1.2: knowledge on developer+leader ONLY; coder WITHOUT knowledge)."""
+    """A3: frozen allow/deny arrays verbatim + effective spawn sets."""
     for agent in SONIC_AGENTS:
         allow, deny = _tools(fx, agent)
         if allow != FROZEN_TOOLS[agent]["allow"]:
@@ -581,8 +660,7 @@ def a3_allow_deny(fx: Fixture) -> None:
 
 
 def a4_llm_model(fx: Fixture) -> None:
-    """A4: per-agent llm_model pin map (developer/leader/reviewer="agentic",
-    coder/tester="coding"); BOTH pin values in the in-tree default set."""
+    """A4: per-agent llm_model pin map; BOTH pin values in the in-tree set."""
     for agent in SONIC_AGENTS:
         meta = json.loads(fx.metas[agent])
         model = meta.get("llm_model")
@@ -611,10 +689,9 @@ def a5_recursion(fx: Fixture) -> None:
 
 
 def a6_integration_surfaces(fx: Fixture) -> None:
-    """A6: HANDOFF-v2's 7 headers in the DEVELOPER workflow (authorship moved
-    up) + HANDOFF_PATH three-way (developer/reviewer/tester) + the FROZEN
-    [sonic-module-report-v2] template in the coder workflow (the coder's
-    contract replacement — it writes NO handoff)."""
+    """A6: HANDOFF-v2's 7 headers in the DEVELOPER workflow + HANDOFF_PATH
+    three-way (developer/reviewer/tester, now the shared-planning-dir literal)
+    + the FROZEN [sonic-module-report-v2] template in the coder workflow."""
     dev = fx.texts[DEV_WORKFLOW]
     for header in HANDOFF_HEADERS:
         if header not in dev:
@@ -639,41 +716,9 @@ def a6_integration_surfaces(fx: Fixture) -> None:
             raise CheckFailure("A6", f"coder workflow missing module-report key {key!r}")
 
 
-def _extract_blast_block(text: str, rel: str) -> list:
-    try:
-        _, after_open = text.split(BLAST_MARKER_OPEN, 1)
-        block, _rest = after_open.split(BLAST_MARKER_CLOSE, 1)
-    except ValueError:
-        raise CheckFailure("A7", f"blast block drift: {rel} (markers missing)") from None
-    return [ln for ln in block.splitlines() if ln.strip()]
-
-
-def a7_blast_globs(fx: Fixture) -> None:
-    """A7: ALL 14 globs, exact order, byte-identical across the THREE
-    workflows that carry the block (leader, developer, coder)."""
-    blocks = {}
-    for rel in BLAST_WORKFLOW_FILES:
-        blocks[rel] = _extract_blast_block(fx.texts[rel], rel)
-        block = blocks[rel]
-        if len(block) != len(FROZEN_GLOBS) or block != FROZEN_GLOBS:
-            first_diff = ""
-            for i, (want, got) in enumerate(zip(FROZEN_GLOBS, block)):
-                if want != got:
-                    first_diff = f"{want} vs {got}"
-                    break
-            else:
-                first_diff = f"length {len(block)} vs {len(FROZEN_GLOBS)}"
-            raise CheckFailure(
-                "A7", f"blast block drift: {rel} ({len(block)}/{len(FROZEN_GLOBS)}, "
-                f"first diff {first_diff})")
-    first = blocks[BLAST_WORKFLOW_FILES[0]]
-    if any(blocks[rel] != first for rel in BLAST_WORKFLOW_FILES[1:]):
-        raise CheckFailure("A7", "blast block drift: the three workflow copies differ")
-
-
 def a8_ari_pins(fx: Fixture, run_generator_check: bool = False) -> None:
     """A8: Ari rule.md exactly-1-Plane + backing note; seal consistency;
-    baseline 20 sonic rows + total 201 (+ generator --check in real mode)."""
+    baseline 20 sonic rows + total EXPECTED_BASELINE_ROWS (+ generator --check)."""
     rule = fx.texts[ARI_RULE]
     plane_count = _count_token(rule, "plane")
     if plane_count != 1:
@@ -692,7 +737,7 @@ def a8_ari_pins(fx: Fixture, run_generator_check: bool = False) -> None:
         raise CheckFailure("A8", f"seal map missing row for {ARI_RULE}")
     if want != actual:
         raise CheckFailure("A8", f"seal stale for {ARI_RULE}: pinned {want} != actual {actual}")
-    # (c) baseline: 20 sonic rows with LIVE values + total 201.
+    # (c) baseline: 20 sonic rows with LIVE values + total EXPECTED_BASELINE_ROWS.
     for rel in SONIC_BASELINE_PATHS:
         row = fx.baseline.get(rel)
         if row is None:
@@ -715,37 +760,36 @@ def a8_ari_pins(fx: Fixture, run_generator_check: bool = False) -> None:
 
 
 def a9_steady_team(fx: Fixture) -> None:
-    """A9: changed agents/ set (committed UNION worktree) = sonic-* +
-    baseline + exactly ari/rule.md; positive shape: sonic dirs present.
+    """A9: changed agents/ set (committed UNION worktree) = sonic-* + baseline
+    + exactly ari/rule.md; positive shape: sonic dirs present.
 
-    guideline-read-tool amendment (2026-11-13): the ``guidelines``
-    privileged grant (entry #22 — the FIRST privileged grant to a sonic
-    agent, sonic-leader) touched FOUR allow arrays; sonic-leader's
-    meta.json is admitted by the sonic-* prefix above, so the non-sonic
-    residual admits exactly the OTHER THREE grants beside ari/rule.md.
+    v0.30.5: the fence base is this lane's base commit (3f45cd6dd), so the
+    only non-sonic, non-baseline agent change this lane may make is the Ari
+    note.  The expert-team agent dirs stay UNTOUCHED (the dispatcher fence).
     """
-    guideline_read_tool_grants = [
-        "agents/ari/meta.json",
-        "agents/leader/meta.json",
-        "agents/devops/meta.json",
-    ]
     residual = [p for p in fx.agents_changed
                 if not p.startswith("agents/sonic-")
                 and p != BASELINE_FILE]
-    if sorted(residual) != sorted([ARI_RULE] + guideline_read_tool_grants):
-        extra = [p for p in residual
-                 if p != ARI_RULE and p not in guideline_read_tool_grants]
-        raise CheckFailure("A9", f"unexpected agents/ edit: {extra or residual}")
+    if sorted(residual) != [ARI_RULE]:
+        raise CheckFailure("A9", f"unexpected agents/ edit: {residual or '(none)'}")
     if ARI_RULE not in fx.agents_changed:
         raise CheckFailure("A9", f"expected {ARI_RULE} in the changed set (positive shape)")
     if not any(p.startswith("agents/sonic-") for p in fx.agents_changed):
         raise CheckFailure("A9", "sonic dirs absent from the changed set (positive shape)")
 
 
-def a10_escalation(fx: Fixture) -> None:
-    """A10: the complete frozen escalation sentence in leader rule.md."""
-    if ESCALATION_LINE not in fx.texts["agents/sonic-leader/rule.md"]:
-        raise CheckFailure("A10", "escalation line drift")
+def a10_dev_pause_handover(fx: Fixture) -> None:
+    """A10 (Ruling A-i/ii): the developer pauses on high/extremely-high — the
+    PAUSE sentence and the handover-suggestion line live in BOTH rule.md AND
+    workflow.md (positive shape, normalized containment)."""
+    for rel in (DEV_RULE, DEV_WORKFLOW):
+        text = fx.texts[rel]
+        if not _contains(text, DEV_PAUSE_SENTENCE):
+            raise CheckFailure("A10", f"developer pause sentence missing in {rel}")
+        if not _contains(text, DEV_HANDOVER_LINE):
+            raise CheckFailure("A10", f"developer handover-suggestion line missing in {rel}")
+        if not _contains(text, COMPLEXITY_BANDS):
+            raise CheckFailure("A10", f"developer complexity bands missing in {rel}")
 
 
 def a11_ari_note(fx: Fixture) -> None:
@@ -765,9 +809,8 @@ def a11_ari_note(fx: Fixture) -> None:
             break
         region_lines.append(ln)
     region = "\n".join(region_lines)
-    region_norm = _norm(region)
     for anchor in ARI_ANCHORS:
-        if _norm(anchor) not in region_norm:
+        if not _contains(region, anchor):
             raise CheckFailure("A11", f"Ari note heading/anchor missing: {anchor!r}")
     if _count_token(region, "plane"):
         raise CheckFailure("A11", "plane in Ari note")
@@ -777,28 +820,26 @@ def a11_ari_note(fx: Fixture) -> None:
 
 def a12_developer_never_experience(fx: Fixture) -> None:
     """A12 (combined spec §2.3/D-G): the sonic-developer's THREE artifacts
-    each carry the pinned never-experience/explore-bound boundary sentence
-    (positive shape, normalized containment)."""
+    each carry the pinned never-experience/explore-bound boundary sentence."""
     checks = (
         (DEV_RULE, DEV_RULE_NEVER_EXPERIENCE),
         (DEV_WORKFLOW, DEV_WORKFLOW_EXPLORE_BOUND),
         (DEV_TOOLS_NOTE, DEV_TOOLSNOTE_NEVER_EXPERIENCE),
     )
     for rel, needle in checks:
-        if _norm(needle) not in _norm(fx.texts[rel]):
+        if not _contains(fx.texts[rel], needle):
             raise CheckFailure("A12", f"developer never-experience boundary drift in {rel}")
 
 
 def a13_coder_discipline(fx: Fixture) -> None:
     """A13 (combined spec §3.3): the coder artifacts assert BOTH discipline
     shapes — source-exploration-expected AND RAG-excluded — in rule.md AND
-    workflow.md (normalized), plus the tools_note no-knowledge marker with
-    NO held-knowledge row (the v1.1 grant is reversed)."""
+    workflow.md, plus the tools_note no-knowledge marker."""
     for rel in CODER_DISCIPLINE_FILES:
-        text = _norm(fx.texts[rel])
-        if _norm(CODER_SOURCE_EXPLORE_SENTENCE) not in text:
+        text = fx.texts[rel]
+        if not _contains(text, CODER_SOURCE_EXPLORE_SENTENCE):
             raise CheckFailure("A13", f"coder source-exploration shape missing in {rel}")
-        if _norm(CODER_RAG_EXCLUSION_SENTENCE) not in text:
+        if not _contains(text, CODER_RAG_EXCLUSION_SENTENCE):
             raise CheckFailure("A13", f"coder RAG-exclusion shape missing in {rel}")
     note = fx.texts[CODER_TOOLS_NOTE]
     if CODER_NO_KNOWLEDGE_MARKER not in note:
@@ -810,26 +851,140 @@ def a13_coder_discipline(fx: Fixture) -> None:
 def a14_leader_fast_path(fx: Fixture) -> None:
     """A14 (combined spec §7/D-E): the FROZEN fast-path gate line in the
     leader's rule.md AND workflow.md."""
-    for rel in ("agents/sonic-leader/rule.md", "agents/sonic-leader/workflow.md"):
+    for rel in (LEADER_RULE, LEADER_WORKFLOW):
         if FAST_PATH_GATE_LINE not in fx.texts[rel]:
             raise CheckFailure("A14", f"fast-path gate line drift in {rel}")
 
 
+def a15_handover_shape(fx: Fixture) -> None:
+    """A15 (Ruling A-ii): the HANDOVER-REPORT shape — first line + six fields —
+    present in the leader's workflow (the shape block lives there; the rule
+    names the HANDOVER REPORT it produces)."""
+    workflow = fx.texts[LEADER_WORKFLOW]
+    if not _contains(workflow, "HANDOVER-REPORT:"):
+        raise CheckFailure("A15", "HANDOVER-REPORT shape missing in workflow")
+    for field in HANDOVER_REPORT_FIELDS:
+        if not _contains(workflow, field):
+            raise CheckFailure("A15", f"handover-report field missing in workflow: {field!r}")
+
+
+def a16_leader_adjudication(fx: Fixture) -> None:
+    """A16 (Ruling A-iii): ACCEPT ends as a HANDOVER REPORT to Ari; REJECT
+    continues — both pinned in the leader's rule.md AND workflow.md."""
+    for rel in (LEADER_RULE, LEADER_WORKFLOW):
+        text = fx.texts[rel]
+        if not _contains(text, LEADER_ACCEPT_SENTENCE):
+            raise CheckFailure("A16", f"leader ACCEPT adjudication missing in {rel}")
+        if not _contains(text, LEADER_REJECT_SENTENCE):
+            raise CheckFailure("A16", f"leader REJECT adjudication missing in {rel}")
+
+
+def a17_dev_ordering(fx: Fixture) -> None:
+    """A17 (Ruling A-iv): the developer's ORDERING — explore → plan →
+    complexity verdict → THEN dispatch — pinned in the rule AND workflow."""
+    for rel in (DEV_RULE, DEV_WORKFLOW):
+        if not _contains(fx.texts[rel], DEV_ORDER_SENTENCE):
+            raise CheckFailure("A17", f"developer verdict-ordering sentence missing in {rel}")
+
+
+def a18_overrides(fx: Fixture) -> None:
+    """A18 (Ruling C-a/b/c): the three override paths present in the leader's
+    rule (the binding record) — USER / ARI / LEADER OVERRIDE."""
+    rule = fx.texts[LEADER_RULE]
+    for token in OVERRIDE_TOKENS:
+        if token not in rule:
+            raise CheckFailure("A18", f"override path missing in leader rule: {token!r}")
+    # The override must be a RECOMMENDATION, not a hard stop, and the original
+    # verdict must stay visible — the leader rule carries that binding sentence.
+    if not _contains(rule, "RECOMMENDATION"):
+        raise CheckFailure("A18", "leader rule does not state the handover is a RECOMMENDATION")
+
+
+def a19_no_silent_downgrade(fx: Fixture) -> None:
+    """A19 (Ruling C-vi): nothing silently downgrades the recorded verdict —
+    the binding sentence + the handover-verdict attribution token."""
+    if not _contains(fx.texts[LEADER_RULE], NO_DOWNGRADE_SENTENCE):
+        raise CheckFailure("A19", "leader rule missing the no-silent-downgrade sentence")
+    if not _contains(fx.texts[LEADER_WORKFLOW], NO_DOWNGRADE_SENTENCE):
+        raise CheckFailure("A19", "leader workflow missing the no-silent-downgrade sentence")
+    if HANDOVER_VERDICT_TOKEN not in fx.texts[LEADER_WORKFLOW]:
+        raise CheckFailure("A19", "leader workflow missing the handover-verdict attribution token")
+
+
+def a20_interop_handoff_path(fx: Fixture) -> None:
+    """A20 (Ruling B.1/B.5): HANDOFF-v2 lives in the shared planning dir — the
+    literal in all three consuming workflows + the developer's authorship path."""
+    for rel in HANDOFF_FILES:
+        if not _contains(fx.texts[rel], PLANNING_HANDOFF_DIR_TOKEN):
+            raise CheckFailure("A20", f"HANDOFF planning-dir token missing in {rel}")
+    if PLANNING_HANDOFF_DIR_TOKEN not in fx.texts[DEV_WORKFLOW]:
+        raise CheckFailure("A20", "developer workflow missing the shared-planning-dir handoff path")
+
+
+def a21_packs_registration(fx: Fixture) -> None:
+    """A21 (Ruling B.2/B.5): the sonic pack is registered in the shared PACKS
+    registry (one line), and the tester prompt carries the registration
+    contract (standard test tree + one-line PACKS entry)."""
+    if PACKS_PACK_ID not in fx.texts[PACKS_REGISTRY]:
+        raise CheckFailure("A21", f"pack {PACKS_PACK_ID} not registered in {PACKS_REGISTRY}")
+    tester = fx.texts[TESTER_RULE] + "\n" + fx.texts[TESTER_WORKFLOW]
+    if PACKS_REGISTRY not in tester:
+        raise CheckFailure("A21", "tester prompt does not reference the PACKS registry")
+    if not _contains(tester, PACKS_GATE_TOKEN):
+        raise CheckFailure("A21", "tester prompt missing the gate-verifiable = registered token")
+    if not _contains(tester, "standard test tree"):
+        raise CheckFailure("A21", "tester prompt missing the standard-test-tree write instruction")
+
+
+def a22_prompt_protocol_lines(fx: Fixture) -> None:
+    """A22 (Ruling B.3/B.5): both-team prompt protocol — the developer reads
+    the shared planning dir regardless of authoring team, and leader/developer/
+    tester each point at the shared PACKS registry."""
+    if PLANNING_DIR_READ_TOKEN not in fx.texts[DEV_RULE]:
+        raise CheckFailure("A22", "developer rule missing the shared-planning-dir read line")
+    for rel in (LEADER_RULE, DEV_RULE, TESTER_RULE):
+        if PACKS_REGISTRY not in fx.texts[rel]:
+            raise CheckFailure("A22", f"{rel} missing the shared PACKS-registry line")
+
+
+def a23_pok_audience(fx: Fixture) -> None:
+    """A23 (Ruling B.4/B.5): the CODE defaults put sonic-leader/developer in
+    `operation` and sonic-developer in `implementation` (release content)."""
+    actual = {k: set(v) for k, v in fx.pok_audience.items()}
+    expected = {k: set(v) for k, v in EXPECTED_POK_AUDIENCE.items()}
+    for audience, members in expected.items():
+        got = actual.get(audience)
+        if got is None:
+            raise CheckFailure("A23", f"DEFAULT_AUDIENCE_SETS missing audience {audience!r}")
+        if got != members:
+            raise CheckFailure(
+                "A23", f"DEFAULT_AUDIENCE_SETS[{audience!r}] actual={sorted(got)} "
+                f"expected={sorted(members)}")
+
+
 ASSERTIONS = (
     ("A1", a1_meta_parse, "meta.json parse + id==dirname x5"),
-    ("A2", a2_team_members, "team_members exact sets (R16: leader=4 sonic + giter + devops; developer=[coder, giter])"),
-    ("A3", a3_allow_deny, "frozen allow/deny arrays (v0.30.2: image read-trio on leader/developer/coder/reviewer, image_save denied; knowledge on developer+leader ONLY) + effective spawn sets (giter/devops/image-reader members)"),
-    ("A4", a4_llm_model, "llm_model pin map (developer/leader/reviewer=agentic, coder/tester=coding) + both in default set"),
+    ("A2", a2_team_members, "team_members exact sets (leader=4 sonic + giter + devops; developer=[coder, giter])"),
+    ("A3", a3_allow_deny, "frozen allow/deny arrays + effective spawn sets"),
+    ("A4", a4_llm_model, "llm_model pin map + both in default set"),
     ("A5", a5_recursion, "multiplier 7 coder-only"),
-    ("A6", a6_integration_surfaces, "HANDOFF-v2 headers in developer workflow + HANDOFF_PATH three-way + coder module-report template"),
-    ("A7", a7_blast_globs, "14 blast globs zero-diff across leader/developer/coder workflows"),
-    ("A8", a8_ari_pins, "Ari plane==1 + seal + baseline 201/20"),
-    ("A9", a9_steady_team, "steady team untouched (union predicate)"),
-    ("A10", a10_escalation, "escalation full frozen line"),
-    ("A11", a11_ari_note, "Ari note heading + anchors + region hygiene"),
+    ("A6", a6_integration_surfaces, "HANDOFF-v2 headers in developer workflow + shared-planning HANDOFF_PATH three-way + coder module-report template"),
+    ("A8", a8_ari_pins, "Ari plane==1 + seal + baseline 217/20"),
+    ("A9", a9_steady_team, "steady/expert-team fence (union predicate vs 3f45cd6dd)"),
+    ("A10", a10_dev_pause_handover, "developer pause on high/extremely-high + handover-suggestion line"),
+    ("A11", a11_ari_note, "Ari sonic-team note heading + anchors + region hygiene"),
     ("A12", a12_developer_never_experience, "developer never-experience boundary pinned in 3 artifacts"),
     ("A13", a13_coder_discipline, "coder source-exploration + RAG-exclusion shapes + tools_note no-knowledge marker"),
     ("A14", a14_leader_fast_path, "leader fast-path gate line in rule.md + workflow.md"),
+    ("A15", a15_handover_shape, "HANDOVER-REPORT first line + six fields"),
+    ("A16", a16_leader_adjudication, "leader ACCEPT (handover report) / REJECT (continue) adjudication"),
+    ("A17", a17_dev_ordering, "developer explore→plan→verdict→dispatch ordering"),
+    ("A18", a18_overrides, "override paths USER/ARI/LEADER + recommendation-not-hard-stop"),
+    ("A19", a19_no_silent_downgrade, "no-silent-downgrade sentence + handover-verdict attribution"),
+    ("A20", a20_interop_handoff_path, "HANDOFF-v2 shared-planning-dir path (3 consumers + developer)"),
+    ("A21", a21_packs_registration, "PACKS one-line registration + tester registration contract"),
+    ("A22", a22_prompt_protocol_lines, "developer planning-dir read + leader/developer/tester PACKS lines"),
+    ("A23", a23_pok_audience, "POK DEFAULT_AUDIENCE_SETS includes sonic-leader/developer"),
 )
 
 
@@ -848,13 +1003,12 @@ def _good_rule(agent: str) -> str:
     )
 
 
-def _good_workflow(role: str, with_blast: bool, with_handoff: bool,
-                   with_module_report: bool = False) -> str:
+def _good_workflow(role: str, with_handoff: bool, with_module_report: bool = False) -> str:
     parts = [f"# {role} workflow\n\n", "## 1. Intake\n\nRead the commission.\n\n"]
     if with_handoff:
         parts.append(
             "## Handoff\n\n"
-            "HANDOFF_PATH = HANDOFF.md   # worktree-root-relative; the ABSOLUTE path is passed in every dispatch\n\n"
+            f"{HANDOFF_PATH_PREFIX}   # repo-root-relative; the ABSOLUTE path is passed in every dispatch\n\n"
         )
         for header in HANDOFF_HEADERS:
             parts.append(f"{header}\n\nnone\n\n")
@@ -869,16 +1023,79 @@ def _good_workflow(role: str, with_blast: bool, with_handoff: bool,
             "untested: <list, or none>\n"
             "risks: <list, or none>\n"
             "raises: <bash-raises, or none>\n"
-            "blast: <no predicate match | ESCALATED>\n\n"
-        )
-    if with_blast:
-        parts.append(
-            "## Blast-Radius Predicate\n\n"
-            f"{BLAST_MARKER_OPEN}\n"
-            + "\n".join(FROZEN_GLOBS)
-            + f"\n{BLAST_MARKER_CLOSE}\n\n"
+            "complexity: <low | medium | high | extremely-high>\n\n"
         )
     return "".join(parts)
+
+
+def _good_leader_rule() -> str:
+    return (
+        "# sonic-leader rules\n\n"
+        f"`handover suggestion: <complexity> because <reasons>`\n\n"
+        f"1. {LEADER_ACCEPT_SENTENCE} (developer's reasoning + my assessment + work state). "
+        f"{LEADER_REJECT_SENTENCE} with a narrower split and recorded reasoning.\n\n"
+        "2. Overrides: (a) USER OVERRIDE — proceed, original verdict visible; "
+        "(b) ARI OVERRIDE — Ari proceeds over my recommendation; "
+        "(c) LEADER OVERRIDE — my reject-and-continue stands. The handover is a "
+        f"RECOMMENDATION, never a hard stop. {NO_DOWNGRADE_SENTENCE}: an override only "
+        "fills `override:`.\n\n"
+        f"{FAST_PATH_GATE_LINE}\n\n"
+        f"{PACKS_REGISTRY} is the shared pack registry — gate-verifiable = registered.\n\n"
+    )
+
+
+def _good_leader_workflow() -> str:
+    return (
+        "# sonic-leader workflow\n\n"
+        f"{FAST_PATH_GATE_LINE}\n\n"
+        "## Complexity handover\n\n"
+        f"{LEADER_ACCEPT_SENTENCE}; {LEADER_REJECT_SENTENCE}.\n\n"
+        "HANDOVER-REPORT: <task-slug>\n"
+        "complexity: <high | extremely-high>   # original verdict, never softened\n"
+        "reasons: <developer reasons>\n"
+        "leader-assessment: <mine>\n"
+        "work-state: <branch/worktree/sha>\n"
+        "override: <none | user:... | ari:...>\n"
+        "recommendation: reroute to the expert team\n\n"
+        f"{NO_DOWNGRADE_SENTENCE}. A proceed-under-override report carries "
+        "`handover-verdict: <original complexity> — overridden by <user|ari>`.\n\n"
+        f"{PACKS_REGISTRY} is the shared pack registry — gate-verifiable = registered.\n\n"
+        + _good_workflow("sonic-leader", with_handoff=False)
+    )
+
+
+def _good_dev_rule() -> str:
+    return (
+        "# Sonic Developer Rules\n\n"
+        f"{DEV_RULE_NEVER_EXPERIENCE}\n\n"
+        "## Complexity assessment\n\n"
+        f"Assess {COMPLEXITY_BANDS}. {DEV_PAUSE_SENTENCE}, do NOT do half-work. "
+        f"Report: {DEV_HANDOVER_LINE}. {DEV_ORDER_SENTENCE}.\n\n"
+        "## Shared surfaces\n\n"
+        f"Read relevant {PLANNING_DIR_READ_TOKEN} entries regardless of authoring team. "
+        f"{PACKS_REGISTRY} is the shared pack registry — gate-verifiable = registered.\n\n"
+    )
+
+
+def _good_dev_workflow() -> str:
+    return (
+        "# Sonic Developer Workflow\n\n"
+        f"{DEV_WORKFLOW_EXPLORE_BOUND}\n\n"
+        "## Complexity verdict\n\n"
+        f"Assess {COMPLEXITY_BANDS}. {DEV_PAUSE_SENTENCE} and report "
+        f"{DEV_HANDOVER_LINE}. {DEV_ORDER_SENTENCE}.\n\n"
+        f"Handoff lives at {PLANNING_HANDOFF_DIR_TOKEN}.\n\n"
+        + _good_workflow("sonic-developer", with_handoff=True)
+    )
+
+
+def _good_tester_rule() -> str:
+    return (
+        "# Sonic Tester Rules\n\n"
+        "## Standard test tree + ONE line\n\n"
+        "Write packs into the standard test tree and register each with one line in "
+        f"{PACKS_REGISTRY} (tagged sonic) — {PACKS_GATE_TOKEN}.\n\n"
+    )
 
 
 def build_good_fixture() -> Fixture:
@@ -923,28 +1140,11 @@ def build_good_fixture() -> Fixture:
         },
     }
     texts = {
-        "agents/sonic-leader/workflow.md": (
-            "# sonic-leader workflow\n\n"
-            f"{FAST_PATH_GATE_LINE}\n\n"
-            + _good_workflow("sonic-leader", with_blast=True, with_handoff=False)
-        ),
-        "agents/sonic-leader/rule.md": (
-            "# sonic-leader rules\n\n"
-            f"`{ESCALATION_LINE}`\n\n"
-            f"{FAST_PATH_GATE_LINE}\n\n"
-            + _good_rule("sonic-leader")
-        ),
-        "agents/sonic-developer/workflow.md": (
-            "# Sonic Developer Workflow\n\n"
-            f"{DEV_WORKFLOW_EXPLORE_BOUND}\n\n"
-            + _good_workflow("sonic-developer", with_blast=True, with_handoff=True)
-        ),
-        "agents/sonic-developer/rule.md": (
-            "# sonic-developer rules\n\n"
-            f"{DEV_RULE_NEVER_EXPERIENCE}\n\n"
-            + _good_rule("sonic-developer")
-        ),
-        "agents/sonic-developer/tools_note.md": (
+        LEADER_WORKFLOW: _good_leader_workflow(),
+        LEADER_RULE: _good_leader_rule(),
+        DEV_WORKFLOW: _good_dev_workflow(),
+        DEV_RULE: _good_dev_rule(),
+        DEV_TOOLS_NOTE: (
             "# Sonic Developer Tools\n\n"
             f"- `knowledge` — ONE explore at plan-open. {DEV_TOOLSNOTE_NEVER_EXPERIENCE}.\n"
         ),
@@ -952,7 +1152,7 @@ def build_good_fixture() -> Fixture:
             "# Sonic Coder Workflow\n\n"
             f"{CODER_SOURCE_EXPLORE_SENTENCE}\n\n"
             f"{CODER_RAG_EXCLUSION_SENTENCE}\n\n"
-            + _good_workflow("sonic-coder", with_blast=True, with_handoff=False, with_module_report=True)
+            + _good_workflow("sonic-coder", with_handoff=False, with_module_report=True)
         ),
         "agents/sonic-coder/rule.md": (
             "# Sonic Coder Rules\n\n"
@@ -964,18 +1164,26 @@ def build_good_fixture() -> Fixture:
             "# Sonic Coder Tools\n\n"
             f"- {CODER_NO_KNOWLEDGE_MARKER} — you make NO RAG/knowledge call.\n"
         ),
-        "agents/sonic-reviewer/workflow.md": _good_workflow("sonic-reviewer", with_blast=False, with_handoff=True),
-        "agents/sonic-tester/workflow.md": _good_workflow("sonic-tester", with_blast=False, with_handoff=True),
+        "agents/sonic-reviewer/workflow.md": _good_workflow(
+            "sonic-reviewer", with_handoff=True),
+        TESTER_WORKFLOW: (
+            _good_workflow("sonic-tester", with_handoff=True)
+            + f"\nWrite packs into the standard test tree; register in {PACKS_REGISTRY} — "
+            f"{PACKS_GATE_TOKEN}.\n"
+        ),
+        TESTER_RULE: _good_tester_rule(),
+        PACKS_REGISTRY: (
+            "# PACKS registry (fixture)\n\n"
+            f"| `{PACKS_PACK_ID}` | wrapper | sonic team defs | 2026-11-14 | PASS |\n"
+        ),
         ARI_RULE: (
             "### CRITICAL: TASK TRIAGE\n\n"
             "- \"Help me set up project X\" — could be quick or huge; **ask** if unclear\n\n"
             f"{ARI_HEADING}\n\n"
-            "Delegation defaults stay with the steady team (`leader`). The sonic lane\n"
-            "(`sonic-leader`) is opt-in by POSITIVE selection only — dispatch to it when\n"
-            "the user asks for it by name, or for small-to-medium, low-coupling work where\n"
-            "speed is the point. Everything else defaults to `leader`. If the work turns\n"
-            "out to sit on load-bearing paths, sonic-leader escalates the commission back\n"
-            "to me with its reason, and I re-route it to `leader`.\n\n"
+            "Routing is by COMPLEXITY, not paths. Most project work defaults to the\n"
+            "sonic team — roughly 80–90% of tasks. The expert team takes genuinely\n"
+            "heavy, high-complexity work. A sonic handover re-routes to the expert\n"
+            "team; I never silently downgrade a recorded complexity verdict.\n\n"
             "---\n\n"
             "### Always Watch Jobs You Create\n\n"
             "Note: the PM interface is currently backed by Plane — an implementation\n"
@@ -992,9 +1200,9 @@ def build_good_fixture() -> Fixture:
         agents_changed=[ARI_RULE, BASELINE_FILE] + list(SONIC_BASELINE_PATHS),
         tool_required_agents=dict(_TOOL_REQUIRED_AGENTS_FROZEN),
         allowed_models_default=["agentic", "coding", "coding2", "vision", "img-gen", "decision"],
+        pok_audience={k: set(v) for k, v in EXPECTED_POK_AUDIENCE.items()},
     )
-    # Fill the remaining sonic artifact texts (baseline hashing needs all 20);
-    # workflow.md texts set above are kept.
+    # Fill the remaining sonic artifact texts (baseline hashing needs all 20).
     for rel in SONIC_BASELINE_PATHS:
         if rel not in fixture.texts:
             fixture.texts[rel] = f"# {rel} (fixture)\n\nfixture body.\n"
@@ -1003,7 +1211,7 @@ def build_good_fixture() -> Fixture:
     for i in range(EXPECTED_SEAL_ROWS - 1):
         seal[f"agents/filler-{i}/rule.md"] = f"{i:064x}"
     fixture.seal = seal
-    # Baseline: exactly 201 rows, sonic rows matching fixture bytes.
+    # Baseline: exactly EXPECTED_BASELINE_ROWS rows, sonic rows matching bytes.
     for rel in SONIC_BASELINE_PATHS:
         fixture.baseline[rel] = fixture.sha(rel)
     fixture.baseline[ARI_RULE] = fixture.sha(ARI_RULE)
@@ -1046,8 +1254,6 @@ def _mutation_legs():
                      lambda m: m["tools"]["allow"].remove("knowledge"))
 
     def a3_coder_add_knowledge(fixture):
-        # v1.2 counter-mutation: the coder grant is REVERSED — re-adding
-        # knowledge to the coder's allow must RED.
         _mutate_meta(fixture, "sonic-coder",
                      lambda m: m["tools"]["allow"].insert(-2, "knowledge"))
 
@@ -1064,8 +1270,6 @@ def _mutation_legs():
                      lambda m: m["tools"]["allow"].append("knowledge"))
 
     def a3_effective_drop_required_row(fixture):
-        # Positive shape: the effective-spawn-set pin depends on the
-        # TOOL_REQUIRED_AGENTS row — removing the mapping must RED.
         fixture.tool_required_agents.pop("knowledge")
 
     def a3_reviewer_drop_bash(fixture):
@@ -1075,8 +1279,6 @@ def _mutation_legs():
     def a3_reviewer_deny_drop_editfile(fixture):
         _mutate_meta(fixture, "sonic-reviewer",
                      lambda m: m["tools"]["deny"].remove("edit_file"))
-
-    # ---- v0.30.2 roster & support-parity legs (decisions.md R16-R19) ----
 
     def a3_leader_drop_giter(fixture):
         _mutate_meta(fixture, "sonic-leader",
@@ -1123,20 +1325,13 @@ def _mutation_legs():
                      lambda m: m["tools"]["deny"].remove("image_save"))
 
     def a3_tester_add_image(fixture):
-        # GUARD leg (v0.30.2 R18): sonic-tester is UNTOUCHED by the image
-        # support-parity grant — adding "image" to its allow must RED.
         _mutate_meta(fixture, "sonic-tester",
                      lambda m: m["tools"]["allow"].append("image"))
 
     def a3_effective_drop_image_row(fixture):
-        # Positive shape: the image-reader effective-set pin depends on the
-        # TOOL_REQUIRED_AGENTS["image"] row — removing the mapping must RED.
         fixture.tool_required_agents.pop("image")
 
     def a3_leader_add_design(fixture):
-        # GUARD leg (R18): compare_images lives ONLY behind the "design"
-        # category (image-comparator) — granting design to the leader would
-        # silently add it to the sonic spawn set. Must RED.
         _mutate_meta(fixture, "sonic-leader",
                      lambda m: m["tools"]["allow"].append("design"))
 
@@ -1169,28 +1364,13 @@ def _mutation_legs():
             "## What is UNTESTED\n\nnone\n\n", "", 1)
 
     def a6_tester_handoff_literal(fixture):
-        fixture.texts["agents/sonic-tester/workflow.md"] = fixture.texts[
-            "agents/sonic-tester/workflow.md"].replace(
-            "HANDOFF_PATH = HANDOFF.md", "HANDOFF_PATH = handoff.md", 1)
+        fixture.texts[TESTER_WORKFLOW] = fixture.texts[TESTER_WORKFLOW].replace(
+            HANDOFF_PATH_PREFIX, "HANDOFF_PATH = handoff.md", 1)
 
     def a6_coder_module_report_drop(fixture):
         fixture.texts["agents/sonic-coder/workflow.md"] = fixture.texts[
             "agents/sonic-coder/workflow.md"].replace(
             "MODULE-REPORT: <module-slug>\n", "", 1)
-
-    def a7_glob_delete(fixture):
-        fixture.texts["agents/sonic-coder/workflow.md"] = fixture.texts[
-            "agents/sonic-coder/workflow.md"].replace("daemon/routers/**\n", "", 1)
-
-    def a7_developer_glob_delete(fixture):
-        fixture.texts[DEV_WORKFLOW] = fixture.texts[DEV_WORKFLOW].replace(
-            "daemon/routers/**\n", "", 1)
-
-    def a7_glob_reorder(fixture):
-        text = fixture.texts["agents/sonic-leader/workflow.md"]
-        text = text.replace("daemon/api.py\ndaemon/services/**",
-                            "daemon/services/**\ndaemon/api.py", 1)
-        fixture.texts["agents/sonic-leader/workflow.md"] = text
 
     def a8_ari_plane_append(fixture):
         fixture.texts[ARI_RULE] += "\n<!-- Plane -->\n"
@@ -1204,20 +1384,22 @@ def _mutation_legs():
     def a9_extra_steady_path(fixture):
         fixture.agents_changed = fixture.agents_changed + ["agents/leader/rule.md"]
 
-    def a10_escalation_corrupt(fixture):
-        fixture.texts["agents/sonic-leader/rule.md"] = fixture.texts[
-            "agents/sonic-leader/rule.md"].replace(
-            "returning commission to Ari (steady-team routing).",
-            "returning commission to the agent.", 1)
+    def a10_pause_corrupt(fixture):
+        fixture.texts[DEV_RULE] = fixture.texts[DEV_RULE].replace(
+            DEV_PAUSE_SENTENCE, "assess the complexity but proceed regardless", 1)
+
+    def a10_handover_line_corrupt(fixture):
+        fixture.texts[DEV_WORKFLOW] = fixture.texts[DEV_WORKFLOW].replace(
+            DEV_HANDOVER_LINE, "report the complexity", 1)
 
     def a11_heading_rename(fixture):
         fixture.texts[ARI_RULE] = fixture.texts[ARI_RULE].replace(
-            ARI_HEADING, "### Sonic Lane (opt-in)", 1)
+            ARI_HEADING, "### Sonic Lane (Opt-In)", 1)
 
     def a11_anchor_drop(fixture):
         fixture.texts[ARI_RULE] = fixture.texts[ARI_RULE].replace(
-            "escalates the commission back\n"
-            "to me with its reason,", "escalates it back,", 1)
+            "never silently downgrade a recorded complexity verdict",
+            "never overrule", 1)
 
     def a11_note_plane_inject(fixture):
         fixture.texts[ARI_RULE] = fixture.texts[ARI_RULE].replace(
@@ -1260,10 +1442,44 @@ def _mutation_legs():
             "- `knowledge` — read-once: exactly ONE bounded explore() at open.\n")
 
     def a14_leader_gate_corrupt(fixture):
-        fixture.texts["agents/sonic-leader/workflow.md"] = fixture.texts[
-            "agents/sonic-leader/workflow.md"].replace(
+        fixture.texts[LEADER_WORKFLOW] = fixture.texts[LEADER_WORKFLOW].replace(
             FAST_PATH_GATE_LINE,
             "FAST-PATH GATE: small work may skip the developer layer.", 1)
+
+    def a15_field_drop(fixture):
+        fixture.texts[LEADER_WORKFLOW] = fixture.texts[LEADER_WORKFLOW].replace(
+            "leader-assessment: <mine>\n", "", 1)
+
+    def a16_accept_corrupt(fixture):
+        fixture.texts[LEADER_RULE] = fixture.texts[LEADER_RULE].replace(
+            LEADER_ACCEPT_SENTENCE, "ACCEPT → I quietly absorb the work", 1)
+
+    def a17_ordering_corrupt(fixture):
+        fixture.texts[DEV_RULE] = fixture.texts[DEV_RULE].replace(
+            DEV_ORDER_SENTENCE, "dispatch first, then think about complexity", 1)
+
+    def a18_override_corrupt(fixture):
+        fixture.texts[LEADER_RULE] = fixture.texts[LEADER_RULE].replace(
+            "USER OVERRIDE", "soft hint", 1)
+
+    def a19_downgrade_corrupt(fixture):
+        fixture.texts[LEADER_WORKFLOW] = fixture.texts[LEADER_WORKFLOW].replace(
+            NO_DOWNGRADE_SENTENCE, "an override may quietly lower the verdict", 1)
+
+    def a20_handoff_path_corrupt(fixture):
+        fixture.texts[DEV_WORKFLOW] = fixture.texts[DEV_WORKFLOW].replace(
+            PLANNING_HANDOFF_DIR_TOKEN, "HANDOFF.md")
+
+    def a21_packs_row_drop(fixture):
+        fixture.texts[PACKS_REGISTRY] = fixture.texts[PACKS_REGISTRY].replace(
+            PACKS_PACK_ID, "some_other_pack", 1)
+
+    def a22_protocol_line_drop(fixture):
+        fixture.texts[LEADER_RULE] = fixture.texts[LEADER_RULE].replace(
+            PACKS_REGISTRY, "a pack list", 1)
+
+    def a23_audience_drop(fixture):
+        fixture.pok_audience["operation"].discard("sonic-developer")
 
     return [
         ("A1-drop-id", a1_drop_id),
@@ -1302,14 +1518,12 @@ def _mutation_legs():
         ("A6-developer-drop-header", a6_developer_drop_header),
         ("A6-tester-handoff-literal", a6_tester_handoff_literal),
         ("A6-coder-module-report-drop", a6_coder_module_report_drop),
-        ("A7-glob-delete", a7_glob_delete),
-        ("A7-developer-glob-delete", a7_developer_glob_delete),
-        ("A7-glob-reorder", a7_glob_reorder),
         ("A8-ari-plane-append", a8_ari_plane_append),
         ("A8-seal-revert", a8_seal_revert),
         ("A8-baseline-delete-row", a8_baseline_delete_row),
         ("A9-extra-steady-path", a9_extra_steady_path),
-        ("A10-escalation-corrupt", a10_escalation_corrupt),
+        ("A10-pause-corrupt", a10_pause_corrupt),
+        ("A10-handover-line-corrupt", a10_handover_line_corrupt),
         ("A11-heading-rename", a11_heading_rename),
         ("A11-anchor-drop", a11_anchor_drop),
         ("A11-note-plane-inject", a11_note_plane_inject),
@@ -1321,6 +1535,15 @@ def _mutation_legs():
         ("A13-toolsnote-drop-marker", a13_toolsnote_drop_marker),
         ("A13-toolsnote-add-knowledge-row", a13_toolsnote_add_knowledge_row),
         ("A14-leader-gate-corrupt", a14_leader_gate_corrupt),
+        ("A15-field-drop", a15_field_drop),
+        ("A16-accept-corrupt", a16_accept_corrupt),
+        ("A17-ordering-corrupt", a17_ordering_corrupt),
+        ("A18-override-corrupt", a18_override_corrupt),
+        ("A19-downgrade-corrupt", a19_downgrade_corrupt),
+        ("A20-handoff-path-corrupt", a20_handoff_path_corrupt),
+        ("A21-packs-row-drop", a21_packs_row_drop),
+        ("A22-protocol-line-drop", a22_protocol_line_drop),
+        ("A23-audience-drop", a23_audience_drop),
     ]
 
 
@@ -1346,6 +1569,7 @@ def run_self_test() -> bool:
             agents_changed=list(good.agents_changed),
             tool_required_agents=dict(good.tool_required_agents),
             allowed_models_default=list(good.allowed_models_default),
+            pok_audience={k: set(v) for k, v in good.pok_audience.items()},
         )
         mutator(fixture)
         target = leg_id.split("-", 1)[0]
@@ -1387,9 +1611,6 @@ def run_real() -> bool:
         return False
     ok = True
     registry = get_registry()
-    # A2-real: all five discovered as AgentMetadata; leader spawns exactly its
-    # six team members (4 sonic + giter + devops); developer spawns exactly
-    # sonic-coder + giter (FROZEN_TEAMS drives the positive checks).
     for agent in SONIC_AGENTS:
         meta = registry.get_resolved(agent)
         if meta is None:
@@ -1416,10 +1637,6 @@ def run_real() -> bool:
             ok = False
     if ok:
         print("PASS A2-real (discovery + leader spawns its 4 + developer spawns coder + coder deny-by-default)")
-    # A3-real: high-risk negatives through the REAL gate.  giter is now a
-    # sonic-leader + sonic-developer TEAM member (v0.30.2 R16/R20 — escape
-    # hatch), so it moved OUT of the negatives (A2-real already proves the
-    # positive path via FROZEN_TEAMS); the other steady-team ids stay denied.
     negatives = {
         "sonic-leader": ["leader", "developer", "planner", "worker"],
         "sonic-developer": ["worker", "sonic-reviewer", "sonic-leader"],
@@ -1444,7 +1661,7 @@ def run_real() -> bool:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--static", action="store_true",
-                        help="stdlib-only contract checks A1-A14 against the tree")
+                        help="stdlib-only contract checks against the tree")
     parser.add_argument("--self-test", action="store_true",
                         help="in-memory counter-mutation matrix")
     parser.add_argument("--real", action="store_true",

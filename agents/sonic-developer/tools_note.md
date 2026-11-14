@@ -26,7 +26,7 @@ One row per held category, with the operational boundary and the avoid-case.
 - `midflight`: not in my allow set — progress rides the module reports and my final
   report.
 - `system_upgrade`, `mcp_rpc`, `wedge-capture`, `secrets`: **ABSENT** — privileged
-  categories that belong to the steady team, never to a speed lane.
+  categories that belong to the expert team, never to a speed lane.
 - `service`, `mcp`, `chart`, `council`: not in my allow set — the allowed categories
   map to an implicit spawn set of exactly: `sonic-coder` and `giter` (my
   `team_members`), the knowledge lane's support agents (`explorer`/`kb-writer` via

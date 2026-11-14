@@ -12,10 +12,10 @@ Pipeline (order is load-bearing):
 1. **AUDIENCE FILTER FIRST** (ER-1.2): visible set = ACTIVE rows
    whose effective audience includes the viewer's factory-captured
    ``agent_id``. Defaults (design-time constants in code, plan §8):
-   operation → {ari, leader, devops}; implementation →
-   {leader, developer}; both → every agent on the project. A
-   curator-set ``audience_agents`` REPLACES the default set when
-   present.
+   operation → {ari, leader, devops, sonic-leader, sonic-developer};
+   implementation → {leader, developer, sonic-developer}; both → every
+   agent on the project. A curator-set ``audience_agents`` REPLACES the
+   default set when present.
 2. **Exclusions within the visible set** (F3 extended): disputed
    rows are excluded-for-view (suppress injection, stay readable);
    an audience-INVISIBLE member is an excluded row FOR THAT VIEW.
@@ -140,10 +140,14 @@ POK_FAMILY_RE = re.compile(POK_FAMILY_SLUG_PATTERN)
 
 #: Default audiences for ACTIVE injection (§4.5.1 — design-time
 #: constants in code; ER-1 ruling: leader INCLUDED in operation —
-#: it runs the ops lanes).
+#: it runs the ops lanes). v0.30.5 sonic-routing amendment (Emperor
+#: ruling 2026-11-14): the sonic team is the DEFAULT project-work lane,
+#: so sonic-leader + sonic-developer join `operation` and sonic-developer
+#: joins `implementation` — ops + implementation knowledge reaches the
+#: speed lane too.
 DEFAULT_AUDIENCE_SETS: dict[str, frozenset[str]] = {
-    "operation": frozenset({"ari", "leader", "devops"}),
-    "implementation": frozenset({"leader", "developer"}),
+    "operation": frozenset({"ari", "leader", "devops", "sonic-leader", "sonic-developer"}),
+    "implementation": frozenset({"leader", "developer", "sonic-developer"}),
     # "both" is universal — modeled as None (no set membership test).
 }
 

@@ -25,30 +25,13 @@ The report opens with exactly `REVIEW: PASS` or `REVIEW: NEEDS-REVISION`, then a
 lines of findings. Each finding names the `path`, what is wrong, and what would fix it. No
 style nits unless they hide a defect.
 
-## Blast check
+## Complexity & scope check
 
-Check every path the merged diff touches against the blast-radius predicate below. Any
-match means `REVIEW: NEEDS-REVISION` with the reason `blast-radius: <path> matches <glob>` — the
-leader escalates from there.
-
-```
-# ---- FROZEN [sonic-blast-radius-v1] ----
-daemon/graph.py
-daemon/manager.py
-daemon/config.py
-daemon/api.py
-daemon/services/**
-daemon/repositories/**
-daemon/tools/**
-daemon/migrations/versions/**
-daemon/sources/**
-daemon/mcp/**
-daemon/routers/**
-scripts/**
-agents/**/*.md
-agents/.prompt-artifacts.sha256
-# ---- END FROZEN [sonic-blast-radius-v1] ----
-```
+Routing is by complexity, not paths — there is no path list to refuse. Check the merged
+change against the handoff's `## Complexity self-assessment`: if the integrated change is
+materially heavier or riskier than the recorded verdict, or a claim under `## How to
+verify` cannot be reproduced from the merged code, that is `REVIEW: NEEDS-REVISION`. You
+never silently accept a softened complexity claim — the recorded verdict must stay honest.
 
 ## Reporting Anomalies
 

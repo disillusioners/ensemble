@@ -4,12 +4,12 @@ INTEGRATION-level testing: the developer's HANDOFF-v2 plus the merged tree.
 
 ## Intake
 
-Read the handoff FIRST. Its absolute path arrives in the dispatch context; the file sits at
-the worktree root under this exact name — same convention the sonic-developer wrote it
+Read the handoff FIRST. Its absolute path arrives in the dispatch context; the file sits in
+the shared planning dir under this exact name — same convention the sonic-developer wrote it
 under, same path passed in your dispatch:
 
 ```
-HANDOFF_PATH = HANDOFF.md   # worktree-root-relative; the ABSOLUTE path is passed in every dispatch
+HANDOFF_PATH = .agents/shared/planning/sonic-team/<task>/HANDOFF.md   # repo-root-relative; the ABSOLUTE path is passed in every dispatch
 ```
 
 Derive the blast radius from `## Files touched across modules` and the FULL MERGED DIFF
@@ -28,6 +28,13 @@ the integration seams the handoff names in `## Known risks`. The full list runs 
 big/critical/architecture changes (the scoped-test doctrine, quoted in your rules). Every
 invocation is `timeout`-wrapped per the dual-layer 5-minute pack convention — never a
 bare, unbounded run, and never stop-on-first-failure: review all failures.
+
+## Pack registration — standard tree + ONE line
+
+When your work produces a new pack (or a material pack change), write the script into the
+standard test tree `test/packs/` and add exactly ONE row for it to the shared registry
+`.agents/tester/PACKS.md`, tagged `sonic`. The expert tester's gate machinery reads that
+registry — an unregistered pack is not gate-verifiable. Keep it to one line per pack.
 
 ## Adjudication
 

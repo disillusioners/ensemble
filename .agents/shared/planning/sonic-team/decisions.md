@@ -202,4 +202,63 @@ Cross-reference ONLY — the single source of detail is `plan-overview.md` §7: 
 | R19 | **Omissions (leader's stated reasons):** `generate_chart`/`charter` OMITTED (charts are not a sonic coding-team surface); `generate_image` OMITTED (no generation — read/view parity only); `image_save` OMITTED (the sonic agents author code and reports, never image files); `sketcher`/`critic` OMITTED (design-lane specialists, outside the coding team); `wanderer` OMITTED (sonic spec grants no research spawn rights beyond knowledge's implicit explorer/kb-writer). PLUS: sonic-coder's other steady-coder gaps — `snapshot_create`/`snapshot_search`, `instance`, `service`, `midflight` — are NOT directed by this ruling → NO change | Emperor ruling 2026-11-13 + leader adjudication |
 | R20 | **R10 PARTIAL supersession:** giter RETURNS to the sonic team as ESCAPE HATCH (leader + developer); R10's core discipline stands UNCHANGED — the internal commit choreography is the default (coder commits its module branch pathspec-limited; developer merges `--no-ff` in dependency order), the leader verifies tips/merged diff READ-ONLY, and release-lane git (merge-to-latest, staging, cleanup) stays OUTSIDE the sonic loop with the steady git lanes. The v1.1 "giter noted as OUTSIDE the sonic loop" leader wording is corrected in prompts (tools_note/rule/workflow) | Emperor ruling 2026-11-13; supersedes R10's giter-removal consequence ONLY |
 
+## Sonic routing amendment (Emperor ruling, 2026-11-14 — four rulings, one release)
+
+*Context: the Emperor ruled on 2026-11-14 that the frozen blast-radius gate be replaced by a complexity-driven handover protocol, that sonic artifacts interoperate through the existing cross-agent surfaces, that the handover is a recommendation resolvable by three override paths, and that doctrine uses "expert team" for the deep lane. This section is the DECIDED record; numbering continues from R20. It **SUPERSEDES D3** (the blast-radius gate) and its superset/exclusion adjudications in §3b (i and h); the historical rows above stand as the audit trail (recorded, not deleted). Operative frozen strings for the new protocol live in `phase1-implementation-spec-v1.1.md` (amend block dated 2026-11-14) and the landed agent prompts; the registered pack `sonic_agent_defs_checks.py` pins them.*
+
+**Glossary (Ruling D, one line):** **Sonic team** (speed lane: sonic-leader/developer/coder/reviewer/tester) and **Expert team** (deep lane: leader/developer/reviewer/tester). Agent IDs are unchanged.
+
+### Ruling A — routing philosophy (VERBATIM)
+
+> The frozen blast-radius predicate is REMOVED. 80-90% of tasks can be done via the sonic team; only 10-20% should route to the steady leader team **[= the expert team, per Ruling D]**. Routing is based on COMPLEXITY, not paths — a user wanting a quick change in api.py is still well-suited to sonic even though it touches core. Instead of a static gate: sonic-developer explores + plans, then ASSESSES COMPLEXITY — if high or extremely high, it pauses the pipeline and reports a handover suggestion up the chain (developer -> sonic-leader -> Ari). Like a real team: a senior dev who finds the task too hard asks the leader to hand it off to the expert team.
+
+*Rendering note: the quoted text is the Emperor's spoken ruling, verbatim ("steady leader team" included); the bracketed phrase maps it to "expert team" per Ruling D, and ALL doctrine this lane authors uses "expert team". The frozen `[sonic-blast-radius-v1]` predicate — its 14 globs, the three workflow blocks, the coder `blast:` module-report field, the reviewer blast check, the leader escalation line, and every pin/counter-mutation leg — is REMOVED (see "Blast-radius removal" below).*
+
+- **R-A1 — complexity bands:** the developer assesses `low | medium | high | extremely-high` after explore + plan.
+- **R-A2 — pause on high/extremely-high:** HIGH or EXTREMELY-HIGH → the pipeline PAUSES: no coder dispatch, no half-work; the developer reports `handover suggestion: <complexity> because <reasons from the plan>` to sonic-leader and ENDS TURN.
+- **R-A3 — proceed on low/medium:** low/medium proceeds as today; a quick core-file change is legitimate sonic work.
+- **R-A4 — ordering:** explore → plan → complexity verdict → THEN dispatch. The verdict precedes any coder dispatch (pinned).
+- **Blast-radius removal (acceptance):** the string `sonic-blast-radius` and its 14 frozen globs are ZERO in all live enforcement — the five sonic agent prompt trees + `test/packs/sonic_agent_defs_checks.py`. Historical records (`MORNING-REPORT.md`, `plan-review.md`, `phase1-implementation-spec.md`, and the D3 row above) keep the name as history; this file's and the spec's OPERATIVE text reflect removal. The `## Blast-radius self-assessment vs predicate` handoff section is redefined as `## Complexity self-assessment` (carries the developer's complexity verdict + any override) — a Ruling-A-driven adaptation of the fixed seven-section schema, disclosed here.
+
+### Ruling B — cross-team artifact interoperability (ride existing surfaces; NO new index file)
+
+- **R-B1 — HANDOFF-v2 path moves into the shared planning dir:** the developer authors `HANDOFF.md` at `<task-worktree>/.agents/shared/planning/sonic-team/<task>/HANDOFF.md` — the canonical cross-agent planning dir the expert team already reads by convention — and commits it to the feature branch (pathspec-limited). The fixed seven-section schema is unchanged except section 7 renamed per R-A (above). All path references (developer/reviewer/tester workflows, the leader's dispatch context) updated to `HANDOFF_PATH = .agents/shared/planning/sonic-team/<task>/HANDOFF.md` (repo-root-relative; the ABSOLUTE path is passed in every dispatch).
+- **R-B2 — PACKS registration:** sonic-tester writes pack scripts into the standard test tree (`test/packs/`) AND registers each pack with a ONE-LINE entry in `.agents/tester/PACKS.md` (tagged sonic) — the expert tester's gate machinery then sees them ("gate-verifiable = registered"). One line per pack. The worktree `PACKS.md` is release content; cross-checked against the canonical checkout before treating grep-empty as unregistered.
+- **R-B3 — prompt protocol lines (both teams honor; no-file part):** (a) the developer's plan phase reads relevant `.agents/shared/planning/` entries regardless of authoring team; (b) sonic-leader / sonic-developer / sonic-tester prompts each carry ONE line pointing at `.agents/tester/PACKS.md` as the shared pack registry. Expert-team agent files are FENCED (untouched) — the expert team already reads both surfaces by existing convention, so no reciprocal line is needed.
+- **R-B4 — POK audience fix (CODE, included in this release):** `DEFAULT_AUDIENCE_SETS` lives in CODE (`daemon/services/pok_injection.py`), not curator/DB state. This release adds `sonic-leader` + `sonic-developer` to `operation` and `sonic-developer` to `implementation`. No DB write; the rebuilt binary carries the change. (Had it been runtime curator state, a post-promote `pok_curate --audience` pass would have been documented instead — it is not.)
+- **R-B5 — pins:** HANDOFF path shape (developer/reviewer/tester three-way + the planning-dir literal); PACKS one-line registration (row present + the tester prompt carries the instruction); the three prompt protocol lines.
+
+### Ruling C — override paths (binding)
+
+The handover suggestion is a RECOMMENDATION, never a hard stop. The pause → handover-suggestion flow fires FIRST (the developer raises it honestly); an override then resolves it one way or the other. NOTHING MAY SILENTLY DOWNGRADE THE RECORDED VERDICT.
+
+- **C-a USER OVERRIDE:** a user / Ari-relayed directive ("use sonic team anyway") makes sonic PROCEED regardless of the complexity verdict; the override is recorded in the handover/commission report with the ORIGINAL VERDICT KEPT VISIBLE.
+- **C-b ARI OVERRIDE:** Ari may dispatch/proceed with sonic when doubting a complexity verdict or when the user explicitly requested sonic — Ari's front-door judgment sits above the recommendation.
+- **C-c LEADER OVERRIDE:** sonic-leader's existing reject-and-continue adjudication stands (narrower module split, more decomposition) with recorded reasoning.
+
+### Ruling D — terminology
+
+"steady team" / "leader team" → "expert team" in ALL doctrine this lane touches (ari/rule.md, sonic agent prompts, decisions, spec, the handover report shape "reroute to the expert team"). Agent IDs unchanged. Glossary one-liner above.
+
+### Handover protocol as agreed
+
+- **Developer (`sonic-developer`):** after explore + plan, assess complexity `low | medium | high | extremely-high`; HIGH/EXTREMELY-HIGH → PAUSE (no coder dispatch, no half-work), report `handover suggestion: <complexity> because <reasons from the plan>` to sonic-leader, END TURN; low/medium → proceed. Ordering: explore → plan → verdict → dispatch.
+- **Leader (`sonic-leader`):** on a `handover suggestion:`, ADJUDICATE — ACCEPT → end the commission as a HANDOVER REPORT to Ari (developer's reasoning + leader's own assessment + work state so the expert team takes over warm); REJECT → continue (narrower split) with recorded reasoning. Overrides C-a/b/c apply.
+- **Handover seam:** the commission's result message (Ari watches the mission) — the leader's final report with first line `SONIC-VERDICT: ESCALATED` + the HANDOVER-REPORT block in the body. No new machinery; rationale: Ari already watches the mission and parses the leader's first line, so the existing verdict + result channel carries the handover.
+- **HANDOVER-REPORT shape (pinned):**
+  ```text
+  HANDOVER-REPORT: <task-slug>
+  complexity: <high | extremely-high>        # the developer's ORIGINAL verdict — never softened
+  reasons: <the developer's reasons from the plan>
+  leader-assessment: <the leader's own assessment>
+  work-state: <branch / worktree / sha + what is committed, so the expert team resumes warm>
+  override: <none | user:<verbatim> | ari:<verbatim>>   # attribution; ORIGINAL VERDICT KEPT VISIBLE
+  recommendation: reroute to the expert team
+  ```
+- **No-silent-downgrade:** an override NEVER rewrites `complexity:` — it only fills `override:` and flips `recommendation:`; a proceed-under-override final report additionally carries `handover-verdict: <original complexity> — overridden by <user|ari>` so the original verdict stays visible. A HANDOVER-REPORT missing `complexity:` or `override:` is malformed and rejected upward.
+
+### Steady-team lesson supersession
+
+The lesson "daemon work never gets routed to sonic" (recorded 2026-11-14) is **SUPERSEDED by Ruling A**. It was NOT found in any repo file (`.agents/**/LESSONS/` or elsewhere) in this worktree's committed content — presumed a POK / critical-note entry, which this lane does NOT write (the dispatcher owns POK writes). Recommended disposition: mark it superseded by Ruling A (`--disputed` or a curated supersede) and re-word any surviving critical note to "complexity, not paths; default sonic team; expert team for genuinely heavy work".
+
 — end of decisions.md —

@@ -2,13 +2,13 @@
 
 ## Consume the handoff first — test the INTEGRATION
 
-The handoff artifact's absolute path arrives in the dispatch context; the file lives at the
-worktree root under a fixed name — the same convention the reviewer reads. Read it FIRST,
-then run tests SCOPED BY BLAST RADIUS on the MERGED tree (`base..HEAD`), not per-module
-reports — module reports are the developer's aggregation input, not your surface. On the
-leader's FAST PATH no handoff artifact exists: your surface is then the merged diff
-(`base..<branch tip>`) plus the compact module report in your dispatch context — same
-integration-level doctrine, same verdict format. The
+The handoff artifact's absolute path arrives in the dispatch context; the file lives in the
+shared planning dir (`.agents/shared/planning/sonic-team/<task>/HANDOFF.md`) — the same
+convention the reviewer reads. Read it FIRST, then run tests SCOPED BY BLAST RADIUS on the
+MERGED tree (`base..HEAD`), not per-module reports — module reports are the developer's
+aggregation input, not your surface. On the leader's FAST PATH no handoff artifact exists:
+your surface is then the merged diff (`base..<branch tip>`) plus the compact module report
+in your dispatch context — same integration-level doctrine, same verdict format. The
 scoped-test doctrine is quoted verbatim below — do not re-invent it — from the tester
 quality requirements (`.agents/tester/rules/ensure.md`, line 5):
 
@@ -22,6 +22,14 @@ First line is exactly `TEST: PASS` or `TEST: FAIL`. Then: the packs run, per-pac
 counts, and the failing node ids for any red. A green claim without pack evidence is not a
 verdict.
 
+## Standard test tree + ONE-LINE PACKS registration
+
+You write pack scripts into the standard test tree (`test/packs/`) — the same tree the
+expert tester's gate machinery reads — AND register each pack with ONE line in the shared
+pack registry `.agents/tester/PACKS.md`, tagged `sonic`. That one line is what makes a pack
+gate-verifiable: "gate-verifiable = registered." Nothing heavier than one row per pack — no
+separate index, no per-pack ledger.
+
 ## RESULTS file only when load-bearing
 
 A gate-relevant, evidence-bearing run writes a RESULTS file at this path (a routine green
@@ -33,11 +41,17 @@ run needs only the in-report verdict — do not write ceremony files):
 
 ## Write discipline
 
-Your writes are limited to `.agents/tester/RESULTS/` and `/tmp`. You NEVER edit code — if
+Your writes are limited to `test/packs/` (pack scripts), the ONE-line rows in
+`.agents/tester/PACKS.md`, `.agents/tester/RESULTS/`, and `/tmp`. You NEVER edit code — if
 the merged change is broken, report `TEST: FAIL` with the failing evidence; fixing code is
 the coders' job, not yours. Git writes are bounded by your role: no merge, no push, no
 tag, no `git stash`, and no commits outside your role — module-branch commits belong to
 the sonic-coders, so your git use is read-only inspection (`git diff`/`log`/`show`).
+
+## Shared pack registry
+
+`.agents/tester/PACKS.md` is the shared pack registry BOTH teams honor — the expert tester's
+gate machinery sees every registered sonic pack; "gate-verifiable = registered."
 
 ## Reporting Anomalies
 

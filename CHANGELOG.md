@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.6] — 2026-11-14
+
+### Changed — sonic routing amendment: routing by COMPLEXITY, cross-team interop, overrides, expert-team terminology (Emperor's four rulings 2026-11-14; `feature/sonic-routing-v0305`, base `3f45cd6dd`; zero migrations)
+
+- **Ruling A — routing by COMPLEXITY, not paths.** The frozen `[sonic-blast-radius-v1]` 14-glob predicate is REMOVED from all sonic prompts and the pack. The sonic-developer assesses `low|medium|high|extremely-high` after explore+plan; HIGH/EXTREMELY-HIGH → PAUSE (no coder dispatch) + `handover suggestion: <complexity> because <reasons from the plan>` to the leader; low/medium → proceed. A quick change in a core file is legitimate sonic work. Ordering: explore → plan → verdict → dispatch.
+- **Ruling A — leader adjudication.** On a handover suggestion the leader ACCEPTs (ends the commission as a HANDOVER-REPORT to Ari — developer reasoning + leader assessment + work state, first line `SONIC-VERDICT: ESCALATED`) or REJECTs (narrower split, recorded reasoning). Handover seam = the commission result message; no new machinery.
+- **Ruling C — overrides (binding).** The handover is a RECOMMENDATION: USER / ARI / LEADER overrides resolve it; NOTHING silently downgrades the recorded verdict — the report carries `complexity:` (original) + `override:` attribution, and a proceed-under-override adds `handover-verdict: <original> — overridden by <user|ari>`.
+- **Ruling B — interop (ride existing surfaces).** HANDOFF-v2 now lands in `.agents/shared/planning/sonic-team/<task>/HANDOFF.md` (the cross-agent planning dir the expert team reads); its section 7 becomes `## Complexity self-assessment`. The sonic-tester writes packs into the standard test tree and registers each with ONE line in `.agents/tester/PACKS.md` (tagged sonic). Leader/developer/tester prompts read the shared planning dir + the PACKS registry; expert-team agent files untouched (fenced). POK `DEFAULT_AUDIENCE_SETS` (code, `daemon/services/pok_injection.py`) gains `sonic-leader`+`sonic-developer` on `operation` and `sonic-developer` on `implementation`.
+- **Ruling D — terminology.** "steady team"/"leader team" → "expert team" in the sonic prompts, `ari/rule.md`, and the handover report shape. Agent IDs unchanged.
+- **ari/rule.md triage.** The sonic team is now the DEFAULT team for most project work (~80–90%, including quick core-file changes); the expert team (`leader`) is reserved for genuinely heavy/high-complexity work (~10–20%) and takes sonic handovers warm; Ari's front-door override keeps the original verdict visible. Exactly ONE "Plane" preserved. Seal re-pinned; prompt baseline regenerated (217 rows).
+- **Pins (lockstep).** `test/packs/sonic_agent_defs_checks.py` reworked: old A7 (blast globs) and A10 (blast escalation) REMOVED; new legs pin the developer pause/handover, the HANDOVER-REPORT shape, leader ACCEPT/REJECT, the explore→plan→verdict→dispatch ordering, the three override paths, no-silent-downgrade, the interop HANDOFF path, PACKS registration, the prompt protocol lines, and the POK audience — 22 assertions, 62 counter-mutation legs (ALL RED, 0 vacuous).
+- **Behavioral proof.** A real-model prompt probe of the landed prompts (C1-safe proxy): (a) normal → PROCEED, (b) high → HANDOVER, (c) leader → ESCALATED HANDOVER-REPORT, (d) user-override → proceed with the original `extremely-high` verdict kept visible. ZERO live contact.
+- **Fence.** Expert-team agent dirs (`agents/{leader,developer,reviewer,tester}`) untouched; zero migrations.
 ## [0.30.5] — 2026-11-14
 
 ### Fixed — ENSEMBLE-32: ram-guard platform gate + refusal/breach decoupling (`feature/ensemble-32-ram-guard-platform-gate`, base `3f45cd6dd`; zero migrations)

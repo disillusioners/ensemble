@@ -5,11 +5,11 @@ INTEGRATION-level review: the developer's HANDOFF-v2 plus the FULL MERGED DIFF.
 ## Read order
 
 1. Read the handoff artifact FIRST. Its absolute path arrives in the dispatch context;
-   the file sits at the worktree root under this exact name — same convention the
+   the file sits in the shared planning dir under this exact name — same convention the
    sonic-developer wrote it under, same path passed in your dispatch:
 
 ```
-HANDOFF_PATH = HANDOFF.md   # worktree-root-relative; the ABSOLUTE path is passed in every dispatch
+HANDOFF_PATH = .agents/shared/planning/sonic-team/<task>/HANDOFF.md   # repo-root-relative; the ABSOLUTE path is passed in every dispatch
 ```
 
 FAST-PATH variant: on the leader's fast path no `HANDOFF.md` exists — your surface is
@@ -25,9 +25,10 @@ step 1's file. Steps 2–4 and the verdict format are unchanged.
    — the claim must be reproducible from the code, not merely plausible. Integration
    seams get extra scrutiny: the handoff's `## What is UNTESTED` and `## Known risks`
    must account for what the merge itself could have broken.
-4. Run the blast check (your rules carry the predicate): any path the merged diff
-   touches matching a blast-radius glob means `REVIEW: NEEDS-REVISION` with the reason
-   `blast-radius: <path> matches <glob>`.
+4. Run the complexity & scope check (your rules): if the integrated change is materially
+   heavier or riskier than the handoff's `## Complexity self-assessment`, or a `## How to
+   verify` claim is not reproducible from the merged code, that is `REVIEW:
+   NEEDS-REVISION`. You never silently accept a softened complexity claim.
 
 ## Verdict format
 

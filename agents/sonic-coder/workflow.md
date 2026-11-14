@@ -18,7 +18,7 @@ authorship belongs to sonic-developer; you return the compact module report.
 2. **Change.** Make the minimal edit that satisfies the brief, inside the brief's
    `FILES:` list only. Exit when the edit is complete and nothing unrelated moved.
 3. **Scoped quick-test.** Run the narrowest check that exercises the change (scoped by
-   blast radius — the tester owns full execution, you own the narrow self-check).
+   the change set — the tester owns full execution, you own the narrow self-check).
    Exit when the relevant checks pass, or when a failure is understood and recorded
    honestly.
 4. **Fix loop.** Fix what the quick-test exposed, within your step and wall-clock
@@ -40,36 +40,20 @@ self-test: <what ran → pass/fail, honest>
 untested: <list, or none>
 risks: <list, or none>
 raises: <bash-raises consumed, or none>
-blast: <no predicate match | ESCALATED: <path> matches <glob>>
+complexity: <low | medium | high | extremely-high — flag if the module is harder than briefed>
 ```
 
    Exit by ending the turn. The developer aggregates this report into HANDOFF-v2;
    reviewer and tester read the handoff and the merged diff, not your report.
 
-## Blast-radius self-check (before you edit)
+## Complexity flag (during the work)
 
-If the work would touch any path matched by the predicate below, STOP: do not write
-the file, set `blast: ESCALATED: <path> matches <glob>` in your module report, and end
-the turn.
-
-```
-# ---- FROZEN [sonic-blast-radius-v1] ----
-daemon/graph.py
-daemon/manager.py
-daemon/config.py
-daemon/api.py
-daemon/services/**
-daemon/repositories/**
-daemon/tools/**
-daemon/migrations/versions/**
-daemon/sources/**
-daemon/mcp/**
-daemon/routers/**
-scripts/**
-agents/**/*.md
-agents/.prompt-artifacts.sha256
-# ---- END FROZEN [sonic-blast-radius-v1] ----
-```
+The developer assessed the commission's complexity BEFORE you were dispatched; you are
+working a low/medium module. If, inside the module, the work turns out materially harder
+than the brief implied, do NOT grind past your budget: finish the current coherent unit,
+commit what is honest, set `complexity: high` (or `extremely-high`) in your module report,
+and report the gap — the developer decides whether to raise a handover up the chain. You
+never soften a complexity concern to keep the pipeline moving.
 
 ## Bash discipline
 

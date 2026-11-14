@@ -15,6 +15,35 @@ inspection) as a CORE, EXPECTED part of module work; the ONLY exclusion is the R
 
 ---
 
+## AMENDMENT 2026-11-14 — sonic routing (Emperor's four rulings; v0.30.5)
+
+*This block SUPERSEDES the blast-radius predicate content below (former §3.5 and the
+`blast:` module-report field in §3.4, the `## Complexity self-assessment`
+handoff section in §4.1, and phase2's A7/A10 blast legs). Operative text below is LEFT AS
+HISTORY except where a struck-through/renamed note is inserted; the LANDED prompts +
+`test/packs/sonic_agent_defs_checks.py` are the operative authority (decisions.md "Sonic
+routing amendment").*
+
+- **Ruling A — routing by COMPLEXITY, not paths.** The frozen predicate `[sonic-blast-radius-v1]`
+  is REMOVED. The developer assesses `low | medium | high | extremely-high` after explore+plan;
+  HIGH/EXTREMELY-HIGH → PAUSE (no coder dispatch) + `handover suggestion: <complexity> because
+  <reasons from the plan>` to the leader; low/medium → proceed. Ordering: explore → plan →
+  verdict → dispatch.
+- **Ruling B — interop.** HANDOFF-v2 lives in `.agents/shared/planning/sonic-team/<task>/HANDOFF.md`;
+  the tester registers packs with ONE line in `.agents/tester/PACKS.md` (tagged sonic); leader/
+  developer/tester prompts read the shared planning dir + PACKS; POK `DEFAULT_AUDIENCE_SETS`
+  (code) gains sonic-leader/developer.
+- **Ruling C — overrides.** The handover is a RECOMMENDATION: user/ari/leader overrides resolve
+  it; nothing silently downgrades the recorded verdict (`override:` attribution + original verdict).
+- **Ruling D — terminology.** "steady team" → "expert team".
+- **Pack delta:** old **A7** (blast globs) and **A10** (blast escalation line) are REMOVED; A10
+  now pins the developer pause/handover; new A15–A23 pin the handover shape, leader adjudication,
+  ordering, overrides, no-silent-downgrade, interop path, PACKS registration, protocol lines, POK
+  audience. `## Complexity self-assessment` replaces the handoff's section 7; the module report's
+  `blast:` field becomes `complexity:`.
+
+---
+
 ## 1. Combined architecture — 5-agent inventory
 
 | Agent | Layer | llm_model | Role (one line) |
@@ -167,18 +196,18 @@ self-test: <what ran → pass/fail, honest>
 untested: <list, or none>
 risks: <list, or none>
 raises: <bash-raises consumed, or none>
-blast: <no predicate match | ESCALATED: <path> matches <glob>>
+complexity: <low | medium | high | extremely-high — flag if the module is harder than briefed>
 ```
 
 The developer aggregates module reports into HANDOFF-v2 sections; reviewer/tester do
 NOT consume module reports (§6).
 
-### 3.5 Blast-radius predicate — retained, unchanged
+### 3.5 ~~Blast-radius predicate~~ — REMOVED (Ruling A, 2026-11-14)
 
-The FROZEN `[sonic-blast-radius-v1]` 14-glob block stays byte-identical and now lives
-in THREE workflow files: `sonic-leader`, `sonic-coder`, AND `sonic-developer` (the
-developer escalates blast-path work back to the leader at plan time — it can also
-refuse a module brief that would touch a blast path).
+The FROZEN `[sonic-blast-radius-v1]` 14-glob block is REMOVED from all sonic prompts and
+the pack; routing is by COMPLEXITY, not paths. See the AMENDMENT 2026-11-14 block above.
+The developer's complexity verdict + pause/handover protocol (landed workflow §2.5)
+replaces it; a quick change in a core file is legitimate sonic work.
 
 ---
 
@@ -199,7 +228,7 @@ CONSUMERS:   sonic-reviewer + sonic-tester at INTEGRATION level (base..merged)
 ## Known risks
 ## How to verify
 ## Bash-raises used
-## Blast-radius self-assessment vs predicate
+## Complexity self-assessment
 ```
 
 Section semantics for an INTEGRATION-level author (redefined from v1's coder author):
@@ -217,8 +246,9 @@ Section semantics for an INTEGRATION-level author (redefined from v1's coder aut
 6. `## Bash-raises used` — the developer's OWN bash-raises consumed by the merge
    machinery (long merges, big syncs), in the FROZEN `[sonic-bash-rule-v1]` shape:
    `bash rule: default <=600 s per command; a longer command requires an explicit raise from sonic-leader; hard max 1800 s (the tool-layer cap).`
-7. `## Blast-radius self-assessment vs predicate` — the integration-level assessment:
-   whether ANY merged path matches FROZEN `[sonic-blast-radius-v1]`, and which glob.
+7. `## Complexity self-assessment` — the commission's complexity verdict
+   (`low | medium | high | extremely-high`) and, if a raised handover was overridden to
+   proceed, the original verdict + the override attribution — never a softened verdict.
 
 Each section is present even when empty (write `none`).
 
