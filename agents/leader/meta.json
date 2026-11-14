@@ -29,6 +29,7 @@
       "mcp",
       "critical_notes",
       "project_history",
+      "project_future",
       "shared_meta_kv",
       "question",
       "midflight",

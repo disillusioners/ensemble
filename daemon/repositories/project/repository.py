@@ -1,4 +1,11 @@
-"""SQLModel-based Project Repository implementation."""
+"""SQLModel-based Project Repository implementation.
+
+Module size: ~2623 lines — inside the 1000-3000 band, at its upper edge. The
+size reflects deliberate co-location of project-scoped concerns (projects/
+tags/shortnames CRUD, project history, critical notes + embeddings, project
+metadata, and the project-future wishlist) rather than accidental growth.
+A per-concern split remains a ticketed follow-up; NOT done in this pass.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +28,7 @@ from .models import (
     ProjectStatus,
     ProjectType,
     ProjectHistoryEntry,
+    ProjectFutureEntry,
     CriticalNoteModel,
     CriticalNoteEmbeddingModel,
     ProjectMetadataRecord,
@@ -50,6 +58,39 @@ def _is_postgres(session: Session) -> bool:
     return (
         session.bind is not None
         and session.bind.dialect.name == "postgresql"
+    )
+
+
+class ConcurrentWishlistUpdate(Exception):
+    """A concurrent/stale write made the FIFO prune or seq assign unsafe.
+
+    Raised ONLY after the whole add transaction has been rolled back — never a partial
+    state. The tool layer translates it to the stable message "Concurrent wishlist update
+    for project '<pid>' — please retry" (D16; precedent
+    daemon/repositories/mcp_server/repository.py:146-205). NO automatic retry is performed
+    anywhere (leader ruling D16) — the CALLING agent may retry, since the message says so.
+
+    Methods raising it live on :class:`SQLModelProjectRepository`
+    (``add_future_entry`` — the R1 rowcount guard and the narrowed
+    ``IntegrityError`` translation per D18).
+    """
+
+
+def _is_seq_unique_race(exc: BaseException | str) -> bool:
+    """D18 narrowing predicate: True iff ``exc`` is the UNIQUE(project_id, seq) race.
+
+    Matches the named index (PG create_all: "uq_project_future_project_seq") OR
+    SQLite's column-pair message ("UNIQUE constraint failed: project_future.project_id,
+    project_future.seq"). Any OTHER IntegrityError (different constraint, NOT NULL, FK)
+    is NOT the race and must be re-raised untranslated (A31 precedent,
+    mcp_server/repository.py:146-205).
+
+    Accepts either an exception or a raw message string for testability.
+    """
+    msg = exc if isinstance(exc, str) else str(exc)
+    return (
+        "uq_project_future_project_seq" in msg
+        or ("project_future.project_id" in msg and "project_future.seq" in msg)
     )
 
 
@@ -1467,6 +1508,170 @@ class SQLModelProjectRepository:
             )
             entries = list(session.exec(stmt))
             return [e.to_dict() for e in entries]
+
+    # --------------------------------------------------------
+    # PROJECT FUTURE (forward-improvement wishlist, 32-cap FIFO)
+    # --------------------------------------------------------
+
+    def add_future_entry(
+        self,
+        project_id: str,
+        summary: str,
+        details: str | None = None,
+        source_agent: str = "",
+        source_instance_id: str = "",
+        *,
+        max_entries: int,   # REQUIRED keyword-only (O11) — no default, so the repo cap cannot drift from the tool's _MAX_ENTRIES
+    ) -> dict:
+        """Add a wishlist item, FIFO-pruning the OLDEST rows over the cap IN THE SAME TRANSACTION.
+
+        Returns the new entry's to_dict() flat dict plus ``"evicted"``: a list of
+        {id, summary, seq, created_at} for every row removed to make room (empty when not full).
+        Eviction is disclosed, never silent. AFTER ANY ADD the table holds <= max_entries rows
+        (R5 scoping — reads are uncapped BY DESIGN and ``total`` exposes drift; a drifted
+        table self-heals on the next add). Raises ConcurrentWishlistUpdate — after rolling
+        back the WHOLE transaction — when a concurrent/stale write makes the prune or seq
+        assign unsafe. NO automatic retry (D16).
+        """
+        summary = summary[:300]                      # house double-layer truncation (A17, add_history_entry truncation idiom)
+        details = details[:5000] if details else None
+        with Session(self.engine) as session:
+            try:
+                # B2 / D19: per-project writer serialization — lock the ALWAYS-PRESENT
+                # projects row as the FIRST statement, BEFORE the count. PG: a real row
+                # lock serializing ALL writers for that project — the whole
+                # count→evict→MAX→INSERT sequence becomes atomic per project. SQLite:
+                # ``with_for_update`` is a no-op AND SQLite already serializes writers at
+                # the DB level, so semantics are correct on BOTH backends. The architect's
+                # earlier FOR UPDATE objection ("locks nothing on an empty project")
+                # applied to locking FUTURE-table rows — locking the projects row
+                # sidesteps it (the row always exists for a live project).
+                # session.get returns None for an absent project (no lock acquired);
+                # callers pre-verify project existence at the tool layer.
+                session.get(Project, project_id, with_for_update=True)
+                count_stmt = select(func.count()).select_from(
+                    select(ProjectFutureEntry).where(ProjectFutureEntry.project_id == project_id).subquery()
+                )                                    # inline count idiom (A17, add_history_entry count idiom)
+                existing = session.exec(count_stmt).one()
+                overflow = max(0, existing - max_entries + 1)      # make room for the incoming row
+                evicted: list[dict] = []
+                if overflow > 0:
+                    victims = list(session.exec(
+                        select(ProjectFutureEntry)
+                        .where(ProjectFutureEntry.project_id == project_id)
+                        .order_by(ProjectFutureEntry.seq.asc())    # insertion order — same-timestamp-safe (D2)
+                        .limit(overflow)
+                    ))
+                    evicted = [
+                        {"id": v.id, "summary": v.summary, "seq": v.seq,
+                         "created_at": v.created_at.isoformat() if v.created_at else None}
+                        for v in victims
+                    ]
+                    # R1 GUARD. Failure class: a concurrent/stale writer already removed a
+                    # selected victim, so this DELETE matches fewer rows than selected. The
+                    # naive per-victim session.delete() loop only survived on flush-time
+                    # StaleDataError; a "simplification" to prune_excess's raw
+                    # text("DELETE … WHERE id IN") idiom (pending_repository.py:462-470)
+                    # would delete 0 rows SILENTLY — cap breach + FALSE user-law disclosure
+                    # (evicted naming a row that was never deleted). Core delete + explicit
+                    # rowcount check makes that path impossible by construction and directly
+                    # testable (AC25 / PO8). Do NOT refactor this guard away.
+                    # Session-context-manager guarantee for this path: `with Session(self.engine)`
+                    # closes the session on exit (commit or exception), and the explicit
+                    # session.rollback() in the guard/except branches runs before any raise, so no
+                    # partial state escapes this method — the transaction is either fully committed
+                    # or fully rolled back.
+                    victim_ids = [v.id for v in victims]
+                    result = session.execute(
+                        sql_delete(ProjectFutureEntry).where(ProjectFutureEntry.id.in_(victim_ids))
+                    )
+                    # sqlite3/psycopg report real DELETE rowcounts; a falsy/unknown rowcount is deliberately treated as a lost race (fail-closed).
+                    if (result.rowcount or 0) != len(victim_ids):
+                        session.rollback()
+                        raise ConcurrentWishlistUpdate(project_id)
+                max_seq = session.exec(
+                    select(func.max(ProjectFutureEntry.seq)).where(ProjectFutureEntry.project_id == project_id)
+                ).one()
+                entry = ProjectFutureEntry(
+                    project_id=project_id, summary=summary, details=details,
+                    source_agent=source_agent, source_instance_id=source_instance_id,
+                    seq=(max_seq or 0) + 1,            # monotone among LIVE rows; removing the newest row may reuse its seq (R6/D2)
+                )
+                session.add(entry)
+                session.flush()                        # assign the PK before payload capture (B1)
+                # B1: capture the response payload BEFORE commit — a concurrent remove in
+                # the commit→refresh gap used to raise ObjectDeletedError (not
+                # IntegrityError → generic backstop → ORM-internals error to the agent)
+                # even though the add had COMMITTED. Payload is captured pre-commit and
+                # the post-commit refresh is gone: the caller gets the success payload
+                # regardless of what happens to the row after the commit lands.
+                payload = entry.to_dict()
+                payload["evicted"] = evicted
+                session.commit()                       # ONE transaction: deletes + insert land together
+            except IntegrityError as exc:
+                # D16 + D18 translate-and-fail-closed, NARROWED per D18: inspect the
+                # violation — ONLY the UNIQUE(project_id, seq) race translates.
+                # Matches the named index (PG create_all: "uq_project_future_project_seq")
+                # OR SQLite's column-pair message ("UNIQUE constraint failed:
+                # project_future.project_id, project_future.seq"). WHOLE transaction rolls
+                # back first (evictions restored, insert rejected — never partial); typed
+                # domain error; NO automatic retry (leader ruling D16, overriding the
+                # architect's optional in-repo retry). Any OTHER IntegrityError (different
+                # constraint, NOT NULL, FK) is NOT the race: rollback and RE-RAISE the
+                # original untranslated (A31 precedent, mcp_server/repository.py:146-205).
+                session.rollback()
+                if _is_seq_unique_race(exc):
+                    raise ConcurrentWishlistUpdate(project_id) from exc
+                raise
+            return payload
+
+    def list_future_entries(
+        self,
+        project_id: str,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict:
+        """List wishlist items NEWEST-FIRST (seq DESC, created_at DESC tiebreak). {entries,total,limit,offset}."""
+        with Session(self.engine) as session:
+            stmt = select(ProjectFutureEntry).where(ProjectFutureEntry.project_id == project_id)
+            count_stmt = select(func.count()).select_from(stmt.subquery())   # A17, add_history_entry count idiom
+            total = session.exec(count_stmt).one()
+            stmt = (
+                stmt.order_by(ProjectFutureEntry.seq.desc(), ProjectFutureEntry.created_at.desc())
+                .offset(offset)
+                .limit(limit)
+            )
+            entries = list(session.exec(stmt))
+            return {"entries": [e.to_dict() for e in entries], "total": total, "limit": limit, "offset": offset}
+
+    def remove_future_entry(
+        self,
+        entry_id: str,
+        project_id: str | None = None,
+    ) -> dict | None:
+        """Remove a wishlist entry (mirrors delete_history_entry, project-scoped).
+
+        Returns the REMOVED entry's dict (id, summary, seq, created_at, project_id, …) so the
+        caller can identify what was retired; None when absent or project-mismatch.
+        Deliberately NO agent-ownership requirement — any granted agent may retire an
+        obsolete idea (D11).
+        """
+        with Session(self.engine) as session:
+            # B2 / D19: same per-project writer lock as add_future_entry (uniformity —
+            # closes the remove-vs-add window cheaply). Skipped when project_id is None
+            # (the caller didn't scope it; the entry's own project is discovered post-get
+            # and the add-side lock already bounds that residual window).
+            if project_id is not None:
+                session.get(Project, project_id, with_for_update=True)
+            entry = session.get(ProjectFutureEntry, entry_id)
+            if entry is None:
+                return None
+            if project_id is not None and entry.project_id != project_id:
+                return None                                  # A17, delete_history_entry scoping preserved
+            removed = entry.to_dict()
+            session.delete(entry)
+            session.commit()
+            return removed
 
     # --------------------------------------------------------
     # CRITICAL NOTES

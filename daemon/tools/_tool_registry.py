@@ -3,6 +3,9 @@
 This module provides a registry for tool documentation that allows
 tools to have short docstrings (for LLM context efficiency) while
 still providing detailed documentation via the tool_help() function.
+Kept as ONE module deliberately: the registry is the single source of
+truth (full docs + metadata + dynamic names + category map + known-names
+validation), so a split would fragment that authority.
 """
 
 from importlib import import_module
@@ -1243,6 +1246,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # value as ``daemon/tools/<parts[2:]>.py``.
     "pok": "daemon.tools.pok",
     "project_history": "daemon.tools.project_history",
+    "project_future": "daemon.tools.project_future",
     "filesystem": "daemon.tools.filesystem",
     "time": "daemon.tools.time",
     "instance": ["daemon.tools.instance", "daemon.tools.tunables"],
@@ -1839,6 +1843,9 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "project_create",
     "project_delete",
     "project_delete_metadata",
+    "project_future_add",
+    "project_future_list",
+    "project_future_remove",
     "project_get",
     "project_get_by_directory",
     "project_get_by_instance",

@@ -1,7 +1,7 @@
 """Project repository module."""
 
 from .repository import SQLModelProjectRepository
-from .models import Project, ProjectTagLink, ProjectShortnameLink, ProjectStatus, ProjectType, ProjectHistoryEntry, HistoryEntryType
+from .models import Project, ProjectTagLink, ProjectShortnameLink, ProjectStatus, ProjectType, ProjectHistoryEntry, ProjectFutureEntry, HistoryEntryType
 
 __all__ = [
     "SQLModelProjectRepository",
@@ -11,5 +11,6 @@ __all__ = [
     "ProjectStatus",
     "ProjectType",
     "ProjectHistoryEntry",
+    "ProjectFutureEntry",
     "HistoryEntryType",
 ]
