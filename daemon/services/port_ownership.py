@@ -32,6 +32,13 @@ Residuals (documented, NOT closed here):
   * SAME-INSTALL rogue (H1) — a rogue process executing from the SAME
     install directory resolves the same ``install_dir`` and is therefore
     non-foreign by design (D2). The claim protects across installs.
+  * SAME-INSTALL INVOCATION-SHAPE (A2 §7 row 18) — DECLARED behavior
+    change (A2 §5.3 sharpening 2), not a silent one: with a claim v2
+    present, a launcher-session claim (``bash dev.sh`` parent) followed
+    by a DIRECT ``python -m daemon`` boot on the SAME port + tree now
+    REFUSES (claim-lineage mismatch, exit 78 + attribution) where it
+    previously took over — the direct boot is not the launcher session
+    that owns the claim (ratified-intended H1 semantics; pinned AH-10).
   * PORT=0 — an ephemeral-port bind has no stable claim key; the gate
     REFUSES to claim (loud ERROR) rather than writing a meaningless
     ``*-0.json`` file (fix-round 2 / N8).
@@ -871,7 +878,9 @@ def run_port_ownership_gate(host: str, port: int) -> None:
             except Exception:  # noqa: BLE001
                 confirmed = False
         if confirmed:
-            h = positive_foreign[0]
+            # h is the holder that PASSED confirm_holder (the loop breaks on
+            # the first confirmation) — attribute the refusal to IT, never
+            # to positive_foreign[0] (which may be an unconfirmed sample).
             holder_install = h.install_dir
             logger.warning(
                 "PORT OWNERSHIP REFUSED (socket-holder): port=%s host=%s "
