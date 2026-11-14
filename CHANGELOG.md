@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.5] — 2026-11-14
+
+### Fixed — ENSEMBLE-32: ram-guard platform gate + refusal/breach decoupling (`feature/ensemble-32-ram-guard-platform-gate`, base `3f45cd6dd`; zero migrations)
+
+- **Platform gate (boot + registration)**: ram-guard arms only on platforms it can police (Linux). Non-Linux hosts (macOS/darwin) no longer fabricate `ram_breach_observed` / `ram_kill_refused` footers — the class behind every darwin turn carrying a false breach banner.
+- **Refusal/breach decoupling (both surfaces)**: "kill refused" is no longer conflated with "breach observed" on the footer and the log/event surfaces — a breachless refusal reads as a refusal.
+- **Proc-lane identity wiring**: process identity is threaded through the proc lane (`daemon/services/resource_monitor/pid_registry.py`), so counters attribute to the right lane instead of an identity-less bucket.
+- **/proc-absent label unification**: one consistent label when `/proc` is unavailable; no identity-less breach claims.
+- **NULL identity sentinel**: missing identity is an explicit sentinel, not a breach signal (`daemon/services/ram_guard/errors.py`).
+- **Counter bucketing (p0/p5)**: per-lane buckets replace the conflation across `daemon/api.py`, `daemon/tools/bash.py`, `daemon/tools/proc_tools.py`.
+- **Tests**: registration-seam darwin pack (`tests/unit/services/test_ram_guard_platform_gate.py`), proc parity, breachless refusal, honest skipif markers instead of silent green — 13 test files alongside `tests/test_resource_pid_registry.py` hardening.
+- **Runbook**: platform census added to `docs/runbooks/ram-guard-and-unit-bounds.md`.
+- Gates: reviewer APPROVE (423P/0F/12S, zero product findings); tester SHIP ×2 (A/B: branch fixed ~66 base reds, zero green→red). Floor constants unchanged (`68c6ee055` both) — ENSEMBLE-32 touches zero ceremony-relevant `scripts/upgrade/` semantics (D6-8 cadence: semantics-triggered).
+
 ## [0.30.4] — 2026-11-14
 
 ### Added — the guidelines read-tool: a read-only `guidelines` category over the homed guideline system (`feature/guideline-read-tool`, base `5316e0cd3`; zero migrations)

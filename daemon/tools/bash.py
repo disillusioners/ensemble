@@ -96,7 +96,11 @@ from daemon.services.ram_guard import (
     release as _ram_guard_release,
 )
 from daemon.services.ram_guard.errors import (
+    breach_observed as _ram_breach_observed_canonical,
     format_ram_envelope as _format_ram_envelope,
+)
+from daemon.services.ram_guard.tree_reader import (
+    classify_proc_stat_error as _classify_proc_stat_error,
 )
 from daemon.services.ram_guard.guard import (
     RAM_GUARD_PENDING_MAX as _RAM_GUARD_PENDING_MAX,
@@ -390,36 +394,47 @@ def _sanitize_command_for_registry(
     )
 
 
-def _read_proc_start_time(pid: int) -> Optional[int]:
-    """Read ``/proc/<pid>/stat`` field 22 (starttime jiffies) on Linux.
+def _read_proc_start_time(pid: int) -> tuple[str, Optional[int]]:
+    """Classify + read ``/proc/<pid>/stat`` field 22 (starttime jiffies).
 
-    Best-effort. Returns ``None`` on any failure — the registry
-    accepts a None start_time (registration succeeds; the
-    PID-recycle check at lookup time simply cannot verify a None
-    value and falls through to the pgid fallback).
+    Returns ``(status, value)`` where ``status`` is one of:
+      - ``"ok"``                  — field 22 parsed successfully
+      - ``"absent"``              — the process is gone (ENOENT /
+                                   ProcessLookupError) — sourced from
+                                   the SAME classifier family as
+                                   ``tree_reader.classify_proc_stat_error``
+      - ``"unreadable"``          — any other read/parse error
+                                   (fail-closed identity)
+      - ``"unsupported"``         — non-Linux platform (no /proc)
 
-    Non-Linux platforms always return ``None`` (the registry is
-    process-lifetime and platform-agnostic — the per-row
-    start_time column is simply NULL on macOS/Windows).
+    The classification is consumed by ``RamGuard.register`` via the
+    ``start_time_status`` keyword so an absent leader is NEVER
+    labelled ``refused:leader-unreadable``.  A ``None`` value no
+    longer implies "registration succeeds" — registration refuses
+    on ``unreadable`` (fail-closed) and skips on ``absent``.
+
+    Non-Linux platforms return ``("unsupported", None)``.
     """
-    if sys.platform == "win32":
-        return None
+    import sys as _sys
+    if not _sys.platform.startswith("linux"):
+        return ("unsupported", None)
     try:
         with open(f"/proc/{pid}/stat", "r") as h:
             line = h.readline()
-    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
-        return None
+    except (OSError, ValueError) as exc:
+        return (_classify_proc_stat_error(exc), None)
     # ``(comm)`` may contain spaces/parens — split on the LAST ``)``.
     last_paren = line.rfind(")")
     if last_paren == -1:
-        return None
+        # unparseable line ⇒ unreadable (fail-closed)
+        return ("unreadable", None)
     _, _, tail = line.rpartition(")")
     parts = tail.strip().split()
     # field 22 = parts[19] (offset accounts for the stripped ``(comm)``)
     try:
-        return int(parts[19])
+        return ("ok", int(parts[19]))
     except (ValueError, IndexError):
-        return None
+        return ("unreadable", None)
 
 
 def _read_proc_vm_hwm_kb(pid: int) -> Optional[int]:
@@ -431,7 +446,7 @@ def _read_proc_vm_hwm_kb(pid: int) -> Optional[int]:
     NOT re-validate; a None peak just means we raced and missed
     the reap window.
     """
-    if sys.platform == "win32":
+    if not sys.platform.startswith("linux"):
         return None
     try:
         with open(f"/proc/{pid}/status", "r") as h:
@@ -468,7 +483,7 @@ def _pid_registry_register(
     """
     get_pid_registry().register(
         pid=pid,
-        start_time=start_time if start_time is not None else 0,
+        start_time=start_time,
         kind=kind,
         instance_id=instance_id,
         pgid=pgid,
@@ -482,6 +497,7 @@ def _pid_registry_mark_exit(
     *,
     pid: int,
     start_time: Optional[int],
+    pgid: Optional[int] = None,
     exit_code: Optional[int],
     exit_kind: str,
     peak_rss_kb: Optional[int],
@@ -499,7 +515,8 @@ def _pid_registry_mark_exit(
     """
     get_pid_registry().mark_exit(
         pid=pid,
-        start_time=start_time if start_time is not None else 0,
+        start_time=start_time,
+        pgid=pgid,
         exit_code=exit_code,
         exit_kind=exit_kind,
         peak_rss_kb=peak_rss_kb,
@@ -942,6 +959,7 @@ def _ram_register_spawn(
     pid: int,
     pgid: int,
     start_time_jiffies: int | None,
+    start_time_status: str | None = None,
     ceiling_bytes: int | None,
 ) -> "_RamSpawnRecord | None":
     """S1 — register the spawn with the RAM guard.
@@ -964,6 +982,7 @@ def _ram_register_spawn(
             pid=pid,
             pgid=pgid,
             start_time_jiffies=start_time_jiffies,
+            start_time_status=start_time_status,
             ceiling_bytes=ceiling_bytes,
         )
     except Exception as exc:
@@ -1067,8 +1086,12 @@ def _ram_is_refusal(record: "_RamSpawnRecord | None") -> bool:
 
 
 def _ram_breach_observed(record: "_RamSpawnRecord | None") -> bool:
-    """Was a breach OBSERVED (independent of the outcome)?"""
-    return bool(record is not None and record.breach_at is not None)
+    """Was a breach OBSERVED (independent of the outcome)?
+
+    Delegates to the canonical helper in ``daemon.services.ram_guard.errors``
+    so the bash and proc surfaces can never drift.
+    """
+    return _ram_breach_observed_canonical(record)
 
 
 def _ram_lane_release(tracking_id: str | None) -> bool:
@@ -1189,21 +1212,23 @@ def _ram_additive_surface(
 ) -> str:
     """The additive RAM surfaces (arch §15 B25, verbatim).
 
-    A refusal ⇒ ``ram_kill_refused: <reason>`` + ``ram_breach_observed:
-    true``; an observed breach whose episode did not kill (the
+    A refusal ⇒ ``ram_kill_refused: <reason>`` (plus
+    ``ram_breach_observed: true`` only when a breach was observed);
+    an observed breach whose episode did not kill (the
     wait-expiry / over-count surface) ⇒ ``ram_breach_observed: true`` +
     the observed peak.  The lines are ADDITIVE — the command's output
     is never swallowed — and the surface is distinct from
     ``code="ram_limit_exceeded"`` by construction (it never uses it).
     """
     if _ram_is_refusal(record):
-        return (
+        out = (
             content
             + "\n\n"
             + RAM_REFUSAL_LINE.format(reason=record.reason)
-            + "\n"
-            + RAM_BREACH_LINE
         )
+        if _ram_breach_observed(record):
+            out = out + "\n" + RAM_BREACH_LINE
+        return out
     if _ram_breach_observed(record):
         return (
             content
@@ -1480,10 +1505,12 @@ async def bash(
             # Eagerly read /proc/<pid>/stat field 22 for the
             # PID-recycle defense (M3: capture NOW, never re-derive
             # after exit). Best-effort: the proc may exit between
-            # spawn and this read on a near-zero-lifetime child;
-            # we register start_time=0 in that edge case and the
-            # registry lookup falls through to the pgid fallback.
-            bash_start_time_jiffies = _read_proc_start_time(proc.pid)
+            # spawn and this read on a near-zero-lifetime child, in
+            # which case status is "absent": the RAM guard registers
+            # NO watch, and the pid_registry row carries start_time
+            # NULL (identity unverified; lookup falls through to the
+            # pgid fallback).
+            bash_start_time_status, bash_start_time_jiffies = _read_proc_start_time(proc.pid)
             bash_peak_rss_kb_at_spawn = _read_proc_vm_hwm_kb(proc.pid)
             # ── RAM auto-termination — S1: register the spawn ──
             # The ALREADY-CAPTURED pgid (never a second ``os.getpgid``
@@ -1497,6 +1524,7 @@ async def bash(
                 pid=proc.pid,
                 pgid=pgid,
                 start_time_jiffies=bash_start_time_jiffies,
+                start_time_status=bash_start_time_status,
                 ceiling_bytes=ram_ceiling_bytes,
             )
             await get_bash_process_registry().register(instance_id, proc.pid, pgid)
@@ -1671,6 +1699,7 @@ async def bash(
                 _pid_registry_mark_exit(
                     pid=proc.pid,
                     start_time=bash_start_time_jiffies,
+                    pgid=pgid,
                     exit_code=proc.returncode,
                     exit_kind=EXIT_KIND_TIMEOUT,
                     peak_rss_kb=bash_peak_rss_kb_at_spawn,
@@ -1709,6 +1738,7 @@ async def bash(
             _pid_registry_mark_exit(
                 pid=proc.pid,
                 start_time=bash_start_time_jiffies,
+                pgid=pgid,
                 exit_code=proc.returncode,
                 exit_kind=EXIT_KIND_SUCCESS,
                 peak_rss_kb=peak_kb_for_exit,
@@ -1814,6 +1844,7 @@ For full output, redirect to file:
                     _pid_registry_mark_exit(
                         pid=proc.pid,
                         start_time=bash_start_time_jiffies,
+                        pgid=pgid,
                         exit_code=proc.returncode,
                         exit_kind=EXIT_KIND_CANCELLED,
                         peak_rss_kb=bash_peak_rss_kb_at_spawn,

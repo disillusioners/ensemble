@@ -230,6 +230,24 @@ def parse_stat_line(line: str) -> Optional[tuple[str, int, int, Optional[int], O
     return state, ppid, pgrp, starttime, rss_pages
 
 
+def classify_proc_stat_error(exc: BaseException) -> str:
+    """Classify a ``/proc/<pid>/stat`` read error into ONE label.
+
+    ``FileNotFoundError`` and ``ProcessLookupError`` (siblings under
+    ``OSError`` — ``issubclass(ProcessLookupError, FileNotFoundError)``
+    is False) both mean "the process is gone" ⇒ ``"absent"``.  Any
+    other read/parse error ⇒ ``"unreadable"`` (fail-closed — identity
+    unverifiable).
+
+    Single source of truth shared by ``read_stat_entry`` and the bash
+    lane so the two can never disagree on the absent-vs-unreadable
+    split (ENSEMBLE-32 item 4b).
+    """
+    if isinstance(exc, (FileNotFoundError, ProcessLookupError)):
+        return "absent"
+    return "unreadable"
+
+
 def read_stat_entry(proc_root: Path, pid: int) -> StatRead:
     """Read ONE ``/proc/<pid>/stat`` — the ABSENT/UNREADABLE split.
 
@@ -241,10 +259,8 @@ def read_stat_entry(proc_root: Path, pid: int) -> StatRead:
     path = Path(proc_root) / str(pid) / "stat"
     try:
         line = path.read_text(errors="replace")
-    except FileNotFoundError:
-        return StatRead(pid=pid, status="absent")
-    except (OSError, ValueError):
-        return StatRead(pid=pid, status="unreadable")
+    except (OSError, ValueError) as exc:
+        return StatRead(pid=pid, status=classify_proc_stat_error(exc))
     parsed = parse_stat_line(line)
     if parsed is None:
         return StatRead(pid=pid, status="unreadable")

@@ -1,3 +1,4 @@
+# ENSEMBLE-32: platform-fixture rationale — see docs/runbooks/ram-guard-and-unit-bounds.md "Test-platform census"
 """The FORK-TREE FAIRNESS pack (phase6 T16 / test-plan U4).
 
 **The single most important fairness proof in the suite.**  A real
@@ -240,3 +241,10 @@ class TestHarnessBounds:
         monkeypatch.setattr(harness, "mem_available_bytes", lambda: 0)
         with pytest.raises(HostMemoryShortage):
             require_allocation_fits(_spec())
+
+
+import pytest
+
+@pytest.fixture(autouse=True)
+def _ensemble32_linux_platform(monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")

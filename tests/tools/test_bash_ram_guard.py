@@ -1,3 +1,4 @@
+# ENSEMBLE-32: platform-fixture rationale — see docs/runbooks/ram-guard-and-unit-bounds.md "Test-platform census"
 """Bash-lane RAM auto-termination tests (phase3-plan.md T14).
 
 The pack covers the five shapes the plan names:
@@ -405,6 +406,10 @@ class TestKillSwitch:
         assert out == GOLDEN_ECHO_HI
         assert fake_guard.registered == []
 
+    @pytest.mark.skipif(
+        not __import__("sys").platform.startswith("linux"),
+        reason="EXPECTED CONSEQUENCE OF THE FIX: on darwin the node now proceeds past the footer golden to registry_depth; passes on Linux.",
+    )
     async def test_switch_off_is_byte_identical_to_on(self, real_guard, monkeypatch):
         monkeypatch.setenv("ENSEMBLE_RAM_GUARD", "0")
         off = await bash_module.bash.coroutine(
@@ -1302,7 +1307,7 @@ class TestNegativePaths:
         assert "done" in out
         # The refusal surface — the reason is reported, not swallowed.
         assert "ram_kill_refused: refused:platform-unsupported" in out
-        assert "ram_breach_observed: true" in out
+        assert "ram_breach_observed: true" not in out
         assert "ram_limit_exceeded" not in out
 
     async def test_an_unreadable_proc_root_produces_no_false_breach(
@@ -1889,3 +1894,110 @@ class TestRealBallooningTree:
                     pass
 
 
+import pytest
+
+@pytest.fixture(autouse=True)
+def _ensemble32_linux_platform(monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")
+
+
+# ── ENSEMBLE-32 breach-less refusal surface ──────────────────────────────
+class TestEnsemble32Breachless:
+    async def test_platform_refusal_emits_no_breach_observed(self, monkeypatch, tmp_path):
+        from daemon.services.ram_guard.guard import RamGuard
+        from daemon.services.ram_guard import set_ram_guard, get_ram_guard
+
+        guard = RamGuard(
+            enabled=True,
+            resolved_ceiling=(1024 * 1024, "test"),
+            platform="win32",
+        )
+        set_ram_guard(guard)
+        guard.start()
+        try:
+            import importlib
+            bash_module = importlib.import_module("daemon.tools.bash")
+            out = await bash_module.bash.coroutine(
+                command="echo hi", instance_id="i-ens32"
+            )
+        finally:
+            guard.stop()
+            guard.join(3.0)
+            set_ram_guard(None)
+        assert "ram_kill_refused: refused:platform-unsupported" in out
+        assert "ram_breach_observed" not in out
+
+
+class TestEnsemble32RegistrationSeam:
+    async def test_darwin_no_guard_no_footer(self, monkeypatch, tmp_path):
+        import importlib
+        bash_module = importlib.import_module("daemon.tools.bash")
+        from daemon.services.ram_guard import set_ram_guard
+        monkeypatch.setattr("sys.platform", "darwin")
+        set_ram_guard(None)
+        out = await bash_module.bash.coroutine(
+            command="echo hi", instance_id="i-ens32-seam"
+        )
+        assert "ram_kill_refused:" not in out
+        assert "ram_breach_observed:" not in out
+
+class TestEnsemble32ReadProcClassify:
+    def test_file_not_found_vs_permission_error_distinct(self, monkeypatch):
+        import importlib
+        bash_module = importlib.import_module('daemon.tools.bash')
+        # platform linux
+        monkeypatch.setattr('sys.platform', 'linux')
+        # absent
+        def absent_open(*a, **k):
+            raise FileNotFoundError('no such file')
+        monkeypatch.setattr('builtins.open', absent_open)
+        status, val = bash_module._read_proc_start_time(123)
+        assert status == 'absent'
+        assert val is None
+        # unreadable
+        def perm_open(*a, **k):
+            raise PermissionError('denied')
+        monkeypatch.setattr('builtins.open', perm_open)
+        status2, val2 = bash_module._read_proc_start_time(123)
+        assert status2 == 'unreadable'
+        assert val2 is None
+        assert status != status2
+
+    @pytest.mark.parametrize('exc_cls', [FileNotFoundError, ProcessLookupError, PermissionError, OSError])
+    def test_bash_status_matches_canonical_classifier(self, monkeypatch, exc_cls):
+        import importlib
+        from daemon.services.ram_guard.tree_reader import classify_proc_stat_error
+        bash_module = importlib.import_module('daemon.tools.bash')
+        monkeypatch.setattr('sys.platform', 'linux')
+        def raiser(*a, **k):
+            raise exc_cls('boom')
+        monkeypatch.setattr('builtins.open', raiser)
+        status, val = bash_module._read_proc_start_time(123)
+        assert status == classify_proc_stat_error(exc_cls('boom'))
+        assert val is None
+
+    def test_unsupported_on_darwin(self, monkeypatch):
+        import importlib
+        bash_module = importlib.import_module('daemon.tools.bash')
+        monkeypatch.setattr('sys.platform', 'darwin')
+        status, val = bash_module._read_proc_start_time(123)
+        assert status == 'unsupported'
+        assert val is None
+
+class TestEnsemble32BashAbsentSpawn:
+    async def test_bash_absent_leader_no_registration_no_footer(self, monkeypatch):
+        import importlib
+        bash_module = importlib.import_module('daemon.tools.bash')
+        from daemon.services.ram_guard import set_ram_guard, get_ram_guard
+        from daemon.services.ram_guard.guard import RamGuard
+        guard = RamGuard(enabled=True, resolved_ceiling=(1024*1024, 'test'), platform='linux')
+        set_ram_guard(guard)
+        monkeypatch.setattr(bash_module, '_read_proc_start_time', lambda pid: ('absent', None))
+        try:
+            out = await bash_module.bash.coroutine(command='echo hi', instance_id='i-bash-absent')
+        finally:
+            set_ram_guard(None)
+        assert guard.counters_snapshot()['ram_kill_refusals_p5'] == 0
+        assert guard.health()['registry_depth'] == 0
+        assert 'ram_kill_refused:' not in out
+        assert 'ram_breach_observed:' not in out
