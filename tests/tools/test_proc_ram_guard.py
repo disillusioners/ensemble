@@ -1466,8 +1466,8 @@ class TestEnsemble32ProcClassifyParity:
         assert guard.counters_snapshot()["ram_kill_refusals_p5"] == 0
         assert guard.counters_snapshot()["ram_kill_refusals_p0"] == 0
         m = _re.search(r"(proc-[0-9a-f]+)", res)
-        if m:
-            assert guard.read_verdict(m.group(1)) is None
+        assert m, f"proc tracking id not found in proc_run result: {res!r}"
+        assert guard.read_verdict(m.group(1)) is None
 
     async def test_proc_unreadable_drives_lane_refusal(self, proc_tools, monkeypatch):
         tools, iid = proc_tools
@@ -1485,10 +1485,10 @@ class TestEnsemble32ProcClassifyParity:
         assert guard.health()["registry_depth"] == 1
         assert guard.counters_snapshot()["ram_kill_refusals_p5"] == 1
         m = _re.search(r"(proc-[0-9a-f]+)", res)
-        if m:
-            rec = guard.read_verdict(m.group(1))
-            assert rec is not None
-            assert rec.reason == "refused:leader-unreadable"
+        assert m, f"proc tracking id not found in proc_run result: {res!r}"
+        rec = guard.read_verdict(m.group(1))
+        assert rec is not None
+        assert rec.reason == "refused:leader-unreadable"
 
     async def test_proc_ok_drives_lane_registration(self, proc_tools, monkeypatch):
         tools, iid = proc_tools
@@ -1507,10 +1507,10 @@ class TestEnsemble32ProcClassifyParity:
         assert guard.counters_snapshot()["ram_kill_refusals_p5"] == 0
         assert guard.counters_snapshot()["ram_kill_refusals_p0"] == 0
         m = _re.search(r"(proc-[0-9a-f]+)", res)
-        if m:
-            rec = guard.read_verdict(m.group(1))
-            assert rec is not None
-            assert rec.start_time_jiffies == 42
+        assert m, f"proc tracking id not found in proc_run result: {res!r}"
+        rec = guard.read_verdict(m.group(1))
+        assert rec is not None
+        assert rec.start_time_jiffies == 42
 
     async def test_proc_unsupported_platform(self, proc_tools, monkeypatch):
         tools, iid = proc_tools
