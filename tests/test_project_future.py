@@ -10,13 +10,14 @@ cascade assertion vacuous).
 """
 
 import pytest
-from sqlalchemy import event, inspect
+from datetime import datetime, timedelta
+from sqlalchemy import event, func
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from daemon.repositories import SQLModelProjectRepository as ProjectStore
 from daemon.repositories.project.models import Project, ProjectFutureEntry
-from daemon.repositories.project.repository import ConcurrentWishlistUpdate
+from daemon.repositories.project.repository import ConcurrentWishlistUpdate, _is_seq_unique_race
 
 
 @pytest.fixture
@@ -55,6 +56,7 @@ def fill_direct(session, project_id, count, same_ts=None, seq_start=1):
             row.created_at = same_ts
         rows.append(row)
         session.add(row)
+    session.flush()
     session.commit()
     return rows
 
@@ -534,8 +536,91 @@ class TestUniqueRaceThroughAdd:
             eng.dispose()
 
 
-# --- imports kept at the bottom on purpose: the fixtures above read naturally
-# top-down; sqlalchemy funcs + datetime helpers are shared across classes.
-from datetime import datetime, timedelta  # noqa: E402
-from sqlalchemy import func  # noqa: E402
-from sqlmodel import select  # noqa: E402
+
+# ============================================================================
+# W-2 — _is_seq_unique_race predicate (parametrized, PG + SQLite + FK)
+# ============================================================================
+
+
+class TestIsSeqUniqueRace:
+    @pytest.mark.parametrize(
+        "msg,expected",
+        [
+            ("(psycopg2.errors.UniqueViolation) duplicate key value violates unique constraint \"uq_project_future_project_seq\"", True),
+            ("UNIQUE constraint failed: project_future.project_id, project_future.seq", True),
+            ("FOREIGN KEY constraint failed", False),
+        ],
+    )
+    def test_predicate(self, msg, expected):
+        from daemon.repositories.project.repository import _is_seq_unique_race
+
+        exc = Exception(msg)
+        assert _is_seq_unique_race(exc) is expected
+        # string form also works
+        assert _is_seq_unique_race(msg) is expected
+
+
+# ============================================================================
+# W-3 — behavioral max_entries=2
+# ============================================================================
+
+
+class TestMaxEntriesBehavioral:
+    def test_three_adds_with_cap_two_evicts_one(self, store, project):
+        pid = project.project_id
+        r1 = store.add_future_entry(pid, "a", max_entries=2)
+        r2 = store.add_future_entry(pid, "b", max_entries=2)
+        r3 = store.add_future_entry(pid, "c", max_entries=2)
+        assert len(r3["evicted"]) == 1
+        assert r3["evicted"][0]["summary"] == "a"
+        assert store.list_future_entries(pid, limit=100)["total"] == 2
+
+
+# ============================================================================
+# W-4 — eviction-disclosure fidelity (300-char summary, byte-equal)
+# ============================================================================
+
+
+class TestEvictionDisclosureFidelity:
+    def test_evicted_summary_byte_equal_300_chars(self, store, project):
+        pid = project.project_id
+        long_summary = "x" * 300
+        store.add_future_entry(pid, long_summary, max_entries=1)
+        r = store.add_future_entry(pid, "new", max_entries=1)
+        assert len(r["evicted"]) == 1
+        assert r["evicted"][0]["summary"] == long_summary
+        assert len(r["evicted"][0]["summary"]) == 300
+
+
+# ============================================================================
+# W-1 — composition: full table, commit-time unique race restores victims
+# ============================================================================
+
+
+class TestCompositionCommitRace:
+    def test_forced_commit_race_restores_all_victims(self, two_engine_env):
+        from sqlalchemy.exc import IntegrityError
+        from sqlalchemy import event
+
+        e1, e2, store = two_engine_env
+        proj = store.create(name="Race")
+        pid = proj.project_id
+        added = seed_via_repo(store, pid, 32)
+        original_ids = {a["id"] for a in added}
+
+        def raise_on_commit(conn):
+            raise IntegrityError(
+                "stmt", {}, Exception("UNIQUE constraint failed: uq_project_future_project_seq")
+            )
+
+        event.listen(e1, "commit", raise_on_commit)
+        try:
+            with pytest.raises(ConcurrentWishlistUpdate):
+                store.add_future_entry(pid, "racer", max_entries=32)
+        finally:
+            event.remove(e1, "commit", raise_on_commit)
+
+        entries = store.list_future_entries(pid, limit=100)["entries"]
+        assert len(entries) == 32
+        assert {e["id"] for e in entries} == original_ids
+        assert sum(1 for e in entries if e["summary"] == "racer") == 0

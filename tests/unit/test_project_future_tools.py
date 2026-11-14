@@ -267,6 +267,15 @@ class TestList:
         result = tools[1].invoke({"project_id": "test-project-id"})
         assert result["cap"] == _MAX_ENTRIES == 32
 
+    def test_list_cap_reads_patched_module_attribute(self, tools, store, monkeypatch):
+        """S1: cap reads the (possibly patched) module attribute — no literal drift."""
+        import daemon.tools.project_future as mod
+
+        sentinel = 9999
+        monkeypatch.setattr(mod, "_MAX_ENTRIES", sentinel)
+        result = tools[1].invoke({"project_id": "test-project-id"})
+        assert result["cap"] is sentinel
+
     def test_list_unknown_project(self, tools, store):
         """AC4 (list leg)."""
         store.get.return_value = None
