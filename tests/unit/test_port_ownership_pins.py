@@ -373,27 +373,65 @@ def test_AH1_foreign_holder_without_claim_refuses(tmp_path, monkeypatch, caplog)
 
 
 def test_AH4_stale_claim_plus_foreign_holder_refuses(tmp_path, monkeypatch):
-    """AH-4 / mutant AH-M4: claim ABSENT or stale + holder positive-foreign
-    => refuses via HOLDER evidence alone."""
+    """AH-4 / mutants AH-M4 + AH-M4b (re-aimed F-1): stale claim + a LIVE
+    positive-foreign holder => 78 whose record carries HOLDER-evidence
+    attribution (source startswith "socket-holder"), never the bare claim
+    path. Liveness is REAL /proc (no global monkeypatch): the holder is a
+    real live pid (this process, real starttime) while the planted claim
+    stays stale (dead starttime) — so under AH-M4 (refusal gated on
+    claim-absence) or AH-M4b (holder path deleted) the stale claim alone
+    takes over with NO 78 and this pin reddens."""
     claims_dir = tmp_path / "claims"
     claims_dir.mkdir()
-    # stale claim (dead starttime)
+    # stale claim (wrong starttime => stale under the REAL check)
     _plant_claim(claims_dir, 18812, "foreign-install-root",
                  starttime=(_self_st() or 0) + 9999)
     monkeypatch.setenv("ENSEMBLE_PORT_CLAIMS_DIR", str(claims_dir))
     monkeypatch.setattr(po, "resolve_self_install_dir", lambda: tmp_path / "self-install")
     import daemon.services.port_holder as ph
 
-    holder = _mk_holder(install=str(tmp_path / "foreign-install"))
+    holder = _mk_holder(pid=os.getpid(), starttime=po._read_starttime(os.getpid()),
+                        install=str(tmp_path / "foreign-install"))
     monkeypatch.setattr(ph, "find_listener_holders", lambda proc_root, port, exclude_pid=None: [holder])
     monkeypatch.setattr(ph, "confirm_holder", lambda h, proc_root="/proc", port=0, delay=0: True)
     monkeypatch.setattr(ph, "attribute_install_dir", lambda h, proc_root="/proc": tmp_path / "foreign-install")
-    holder.install_dir = str(tmp_path / "foreign-install")
-    monkeypatch.setattr(po, "pid_alive_with_starttime", lambda pid, st: True)
 
     with pytest.raises(SystemExit) as exc:
         po.run_port_ownership_gate("127.0.0.1", 18812)
     assert exc.value.code == 78
+    marker = json.loads((claims_dir / "port-ownership-refusal.json").read_text())
+    # F-1 discriminator: the refusal must be holder-attributed ("socket-holder"
+    # or "socket-holder+claim"), never the bare claim path ("claim").
+    assert marker["source"].startswith("socket-holder")
+    assert marker["holder"]["pid"] == os.getpid()
+
+
+def test_AH8_gate_stale_holder_degrades_with_warning(tmp_path, monkeypatch, caplog):
+    """AH-8 / mutant AH-M8 (re-aimed F-2): a foreign holder whose starttime
+    mismatches (recycled-pid shape, REAL /proc liveness — no monkeypatch)
+    DEGRADES at the gate: no refusal, boot proceeds to claim, and the
+    stale-degrade WARNING fires. AH-M8 (stale branch silenced:
+    `if not live:` -> `if False and not live:`) must redden this pin — the
+    warning line never appears."""
+    claims_dir = tmp_path / "claims"
+    claims_dir.mkdir()
+    self_install = tmp_path / "self-install"
+    self_install.mkdir()
+    monkeypatch.setenv("ENSEMBLE_PORT_CLAIMS_DIR", str(claims_dir))
+    monkeypatch.setattr(po, "resolve_self_install_dir", lambda: self_install)
+    import daemon.services.port_holder as ph
+
+    # this process IS live, but starttime=7 cannot match the real one =>
+    # deterministically stale under the real pid_alive_with_starttime check
+    holder = _mk_holder(pid=os.getpid(), starttime=7,
+                        install=str(tmp_path / "foreign-install"))
+    monkeypatch.setattr(ph, "find_listener_holders", lambda proc_root, port, exclude_pid=None: [holder])
+    monkeypatch.setattr(ph, "attribute_install_dir", lambda h, proc_root="/proc": tmp_path / "foreign-install")
+
+    with caplog.at_level("WARNING", logger="daemon.services.port_ownership"):
+        po.run_port_ownership_gate("127.0.0.1", 18821)  # must NOT raise
+    assert "starttime mismatch (stale)" in caplog.text
+    assert (claims_dir / "any-18821.json").is_file()
 
 
 def test_AH5_same_install_holder_non_refuse(tmp_path, monkeypatch):

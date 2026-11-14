@@ -203,6 +203,51 @@ def test_AH14_liveness_only_sample2_would_false_confirm(monkeypatch):
     assert ph_mod.confirm_holder(holder, "/proc", 18800, delay=0) is False
 
 
+def test_AH8b_confirm_rejects_recycled_pid_same_inode(monkeypatch):
+    """AH-8b / mutant AH-M8b (re-aimed F-2): a sample-2 holder with the SAME
+    (pid, inode) but a DIFFERENT starttime (recycled pid) must NOT confirm —
+    the fresh-match requires starttime equality. Real live pid + real
+    /proc liveness (no monkeypatch on pid_alive_with_starttime), so AH-M8b
+    (starttime dropped from the match) WOULD confirm and reddens this pin."""
+    import daemon.services.port_holder as ph_mod
+    import daemon.services.port_ownership as po_mod
+
+    pid = os.getpid()
+    real_st = po_mod._read_starttime(pid)
+    assert real_st is not None
+    holder1 = ph.HolderRef(pid=pid, starttime=real_st, exe="/f", cwd="/f",
+                           install_dir="/foreign", inode="777")
+    holder2 = ph.HolderRef(pid=pid, starttime=real_st - 1, exe="/f", cwd="/f",
+                           install_dir="/foreign", inode="777")
+    monkeypatch.setattr(ph_mod, "find_listener_holders",
+                        lambda proc_root, port, exclude_pid=None: [holder2])
+    import time as _t
+    monkeypatch.setattr(_t, "sleep", lambda s: None)
+    assert ph_mod.confirm_holder(holder1, "/proc", 18800, delay=0) is False
+
+
+def test_AH15_liveness_only_live_pid_would_confirm(monkeypatch):
+    """AH-M15 (re-aimed F-3): with a REAL LIVE pid (real /proc liveness), a
+    sample-2 implemented liveness-only (no re-walk) WOULD confirm a holder
+    whose socket closed; the shipped full-rewalk must NOT. This fixture is
+    the discriminator the fake-dead-pid AH-14 fixture could not provide
+    (the tail liveness check shielded every liveness-only mutant there)."""
+    import daemon.services.port_holder as ph_mod
+    import daemon.services.port_ownership as po_mod
+
+    pid = os.getpid()
+    real_st = po_mod._read_starttime(pid)
+    holder = ph.HolderRef(pid=pid, starttime=real_st, exe="/f", cwd="/f",
+                          install_dir="/foreign", inode="888")
+    # confirm_holder's internal find IS the sample-2 re-walk: the socket has
+    # closed, so the fresh walk finds NOTHING — but the pid is still alive.
+    monkeypatch.setattr(ph_mod, "find_listener_holders",
+                        lambda proc_root, port, exclude_pid=None: [])
+    import time as _t
+    monkeypatch.setattr(_t, "sleep", lambda s: None)
+    assert ph_mod.confirm_holder(holder, "/proc", 18800, delay=0) is False
+
+
 # ---------------------------------------------------------------------------
 # AH-15: lineage-tuple normalization stability
 # ---------------------------------------------------------------------------
