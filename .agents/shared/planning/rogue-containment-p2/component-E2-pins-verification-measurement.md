@@ -90,6 +90,10 @@ Harness read in full: `.agents/shared/planning/rogue-containment/harness/boot_ro
 - **(b) `foreign-holder`** — plant a scratch python socket-holder (binds the leg's scratch port, cwd = a scratch install dir) → boot → expected exit 78 + holder marker line asserting pid/exe/cwd tokens present; teardown TERMs the holder (verify it exits; never SIGKILL). Lane-ordering: this leg lands WITH the A2 holder code — before that, the leg is not registered (the harness leg-selector refuses unknown legs loudly rather than silently skipping).
 - **(c) `same-install-handover`** — holder whose cwd == the daemon-under-test's own resolved install dir → boot → expected NON-refuse: readyz 200, exit 0 on TERM, no refusal marker; claim taken/overwritten. Preserve pin for the promote shape.
 
+**T9 harness-contract notes (gap-close 2026-11-14, per A2 §7 H row):** leg (b) above already satisfies the H row (scratch holder, scratch-install cwd ⇒ foreign ⇒ 78 + holder marker). Leg (c) ADDITIONALLY requires the leg setup to spawn holder + daemon-under-test from the SAME parent cmdline (both children of the harness script/pytest runner) so the ratified claim-lineage layer reads match ⇒ non-refuse (AH-5); a different-parent same-install holder must instead plant a v2 claim with a MATCHING recorded lineage (A2 LDP-1 assumption / open-question E2-coordination). The same contract is carried at plan-overview.md:87 and decisions.md:101 — this line localizes it for the harness implementer.
+
+**C1 claims-dir fix LANDED:** commit `9b59bafcd` ("E2 step-0 blocking harness fix — plant mirror claims at the resolved gate path + per-leg expected-exit/marker verdicts") closes the BLOCKING PRECONDITION above — step-0 is CLOSED; the refuse-foreign leg's green is now evidence.
+
 **Live-untouched invariant (every leg, asserted by the harness before AND after):** ports 9797/9798/7979 unbound-or-unchanged (port probes); DB name never `ensemble_prod`/`ensemble_dev`/`ensemble_prod_test` (existing `:52` guard retained); `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` pinned explicitly (never `env -u` on it); umask 077; SIGTERM-only teardown; captures redacted (name + sha256 prefix only, F7).
 
 ---
