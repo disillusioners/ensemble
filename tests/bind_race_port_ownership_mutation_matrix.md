@@ -205,3 +205,31 @@ evidence above is the authoritative set. AH-M6's first attempt also produced
 a syntactically-invalid move (inserted inside the bind `try:` body) — caught
 via `ast.parse` and re-executed with a corrected anchor; the recorded AH-M6
 evidence is from the valid second execution.
+
+## F-1/F-2/F-3 RE-AIM + re-proof (rogue-containment-p2, delta)
+
+Pin re-aims landed at **`e67ca5010`** (2 files, +89/−6: AH-4 rewritten, three
+pins added); clean control at the re-aim tip: **42 passed** (was 39). Re-proof
+venue: scratch worktree `/tmp/rc-p2-va2-reproof` DETACHED @ `e67ca5010`,
+`uv sync --frozen`, `daemon.__file__` verified inside the venue, per-variable
+PG scrub, `timeout 300` + `--timeout=120`, restore `git checkout --` with
+sha256 PRE==POST every row, green re-run after every restore. Source digests
+identical to the cc154c308 execution (`port_holder.py 390cc9d9…`,
+`port_ownership.py c651276e…`).
+
+| Row | Re-aimed pin (guard now tight) | Mutant re-run | Pins REDDENED | Restore | Green-after |
+|---|---|---|---|---|---|
+| F-1 | `test_AH4_stale_claim_plus_foreign_holder_refuses` REWRITTEN — REAL /proc liveness (holder = this live pid + real starttime; NO global `pid_alive` monkeypatch), planted claim stays stale ⇒ asserts `marker["source"].startswith("socket-holder")` + `holder.pid == os.getpid()` | AH-M4 (refusal gated on claim-absence) | the re-aimed AH-4 (was GREEN pre-re-aim) | TRUE | 42 passed |
+| F-1 | (same pin) | AH-M4b (holder path deleted) | AH-1 **+ the re-aimed AH-4** (was AH-4-green pre-re-aim — the original finding) | TRUE | 42 passed |
+| F-2 | `test_AH8_gate_stale_holder_degrades_with_warning` NEW — foreign holder, real-liveness-stale (this pid + starttime 7), asserts NO raise AND `"starttime mismatch (stale)"` WARNING AND claim-file present | AH-M8 (gate stale branch silenced) | the new AH-8 gate pin — red mode: the WARNING line absent (mutant logs "vanished between samples" instead) | TRUE | 42 passed |
+| F-2 | `test_AH8b_confirm_rejects_recycled_pid_same_inode` NEW — sample-2 holder same (pid, inode), starttime −1 (recycled), REAL live pid ⇒ asserts confirm is False | AH-M8b (starttime dropped from the confirm match) | the new AH-8b pin | TRUE | 42 passed |
+| F-3 | `test_AH15_liveness_only_live_pid_would_confirm` NEW — REAL live pid, socket closed in sample 2 (empty re-walk) ⇒ asserts confirm is False; the discriminator the fake-dead-pid fixture could not provide | AH-M15 (sample-2 liveness-only: `match = holder` pre-set) | the new AH-15 pin **+ the AH-8b pin** (accepted overlap: `match = holder` bypasses the match loop entirely, subsuming the starttime-equality the AH-8b pin guards) | TRUE | 42 passed |
+
+**Findings F-1, F-2, F-3: RESOLVED** — all three counter-mutants now redden
+their named pins (mutation-01 discipline satisfied at tip `e67ca5010`).
+
+Accepted blast-radius notes (re-aimed corpus): AH-M1 (attribution stub) and
+AH-M2 (source field dropped) now ALSO redden the re-aimed AH-4 pin (both
+suppress the holder-attributed 78) — same one-behavior mutants, larger red
+sets, no new executions run for them here (their original cc154c308
+executions stand; the re-aimed corpus tightens every holder-path guard).

@@ -15,6 +15,8 @@ every row, green re-run after every restore.
 
 ## Findings (failed to redden — for the leader/architect)
 
+> **STATUS UPDATE (same lane, follow-up): ALL THREE RESOLVED** — pins re-aimed and re-proven at commit `e67ca5010` (AH-4 rewritten + three new pins; clean control 42 passed; all three counter-mutants now RED with byte-exact restores). Re-proof table: `tests/bind_race_port_ownership_mutation_matrix.md` §"F-1/F-2/F-3 RE-AIM + re-proof". The table below is the original finding record.
+
 | # | Row | Root cause | Re-aim |
 |---|-----|-----------|--------|
 | F-1 | AH-M4 (+AH-M4b proof leg) | AH-4's global `pid_alive_with_starttime=True` monkeypatch makes the planted foreign CLAIM refuse via the claim path — verdict over-determined; holder path deleted ⇒ AH-4 still passes | assert `marker["source"]=="socket-holder"` or drop the global liveness monkeypatch |
@@ -87,6 +89,7 @@ Three harness legs + disposable PG cluster (user-space `initdb -A trust -U nea`
 
 ## Artifacts
 
-- Full mutation table: `tests/bind_race_port_ownership_mutation_matrix.md` (this commit)
-- U-measurement append: `.agents/tester/RESULTS/2026-11-14-rogue-p2-burst-window-U-measurement.md` (this commit)
-- Commit: test(rogue-containment-p2): AH/LH mutation matrix + post-A2 fast-refuse U cycle (sha recorded in the lane report)
+- Full mutation table: `tests/bind_race_port_ownership_mutation_matrix.md` (commit `0e9152869` + re-aim delta at the pins commit `e67ca5010`/artifact commit)
+- U-measurement append: `.agents/tester/RESULTS/2026-11-14-rogue-p2-burst-window-U-measurement.md` (commit `0e9152869`)
+- Pins re-aim commit: `e67ca5010` — test(rogue-containment-p2): re-aim AH-4/AH-8/AH-15 pins (F-1/F-2/F-3)
+- Commit: `0e9152869` — test(rogue-containment-p2): AH/LH mutation matrix at cc154c308 (13 RED, 3 findings) + post-A2 fast-refuse U cycle (5.1s) + harness leg evidence
