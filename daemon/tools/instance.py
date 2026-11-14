@@ -6827,8 +6827,13 @@ Returns:
     #     telemetry; the empty-allow inherit universe must never
     #     auto-grant it.
     #   * ``instance_ops``  — the six audited acts (terminate, reclaim,
-    #     nudge, mark, answer, dismiss). Destructive; single-owner
-    #     (maintenancer) with a kill switch on the act side only.
+    #     nudge, mark, answer, dismiss). Destructive; holders {ari,
+    #     maintenancer} per the Emperor directive 2026-11-14
+    #     (commission ari-instance-stop-grant) — D-13 single-owner
+    #     population amended; the audit ledger, protected-target
+    #     two-tier policy, provenance gates and the fleet terminate
+    #     budget are UNCHANGED and bind every holder — with a kill
+    #     switch on the act side only.
     # The tool bodies carry a SECOND, independent agent_id gate (the
     # shared helpers in their modules) — a LITERAL tool name in an allow
     # list bypasses the category gate, so the category alone cannot
