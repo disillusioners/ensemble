@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.4] — 2026-11-14
+
+### Added — the guidelines read-tool: a read-only `guidelines` category over the homed guideline system (`feature/guideline-read-tool`, base `5316e0cd3`; zero migrations)
+
+- **Read-only tool category #22** (`daemon/tools/guidelines.py` + `daemon/tools/_tool_registry.py`): `guidelines_list` and `guidelines_read` expose the canonical `docs/guidelines/` set at runtime — status/audience metadata on list, path-confined reads under `docs/guidelines/` only; no write surface anywhere in the category. Factory-built tools carried in `DYNAMIC_TOOL_NAMES`/`KNOWN_TOOL_NAMES` (MT-G01).
+- **Four-agent grant**: `ari`, `devops`, `leader`, `sonic-leader` gain `allow "guidelines"` — the readers who must consult a guideline before acting on a dormant / config-armed / ceremony-gated feature. Full 21→22 category census pins (exact-set AND count) with the new category as a mutation target; 43 registration tests (`tests/unit/tools/test_guidelines_registration.py`).
+- **Staged payload** (`scripts/upgrade/stage.sh` + `tests/test_guidelines_payload.sh`): the 5-file `docs/guidelines/` tree stages as a flat top-level `guidelines/` payload carrying `guidelines_tree_sha256` (lib.sh ordering) + a per-file `guidelines_manifest` in `manifest.json`, plus a stage-local re-hash leg — manifest presence set goes 14 → 16 keys.
+- **Stale-pin clears on the merged vocabulary surface** (`tests/unit/test_pok_grant_pins.py`, `tests/unit/metrics/test_metrics_vocabulary_amendment.py`, `tests/unit/test_anomaly_report_grant_pins.py`): pok-grant `9→10` / `63→64` and ari-tail pins re-derived, metrics-vocab `9→10` + rename. The known pre-existing family-adjudication broad-diff census red (stale `LANE_BASE=644c2bfaa`, owner metrics-family lane, red-by-construction since v0.28.12) remains documented and NOT fixed here.
+- **Gates A–E PASS** (leader verdict 2026-11-14): counter-mutations 4/4, net-new reds 0; tester evidence `.agents/tester/RESULTS/2026-11-13-guideline-read-tool.md`; plan + research `.agents/shared/planning/guideline-read-tool/`.
+
 ## [0.30.3] — 2026-11-13
 
 ### Added — media streaming for live-views + the video team, on top of the v0.30.2 sonic roster (`feature/liveviews-media-streaming`, `feature/video-team-scaffold`)
