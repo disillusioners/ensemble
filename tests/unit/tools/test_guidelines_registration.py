@@ -15,10 +15,13 @@ construction) is proven END-TO-END here, in the notify-user shape:
   never discovered and the drift pin fails at boot);
 * (d) ``DYNAMIC_TOOL_NAMES`` + ``KNOWN_TOOL_NAMES`` carry both names
   (factory-built, not import-time registered);
-* (e) the ``create_instance_tools`` extend is greppable in source AND
-  precedes ``create_help_tool`` / ``scan_tools_for_full_docs`` /
-  ``_apply_tool_filter`` (decorator-only registration is SILENTLY
-  INVISIBLE — a late extend bypasses the privileged strip);
+* (e) the ``create_instance_tools`` extend is greppable in source AT
+  THE CALL SITE (``tools.extend(create_guidelines_tools_if_available(
+  ...)`` — a def-anchored grep stays green when the call is removed,
+  the gate's M2 hole) AND the call precedes ``create_help_tool`` /
+  ``scan_tools_for_full_docs`` / ``_apply_tool_filter`` (decorator-only
+  registration is SILENTLY INVISIBLE — a late extend bypasses the
+  privileged strip);
 * (f) the category is PRIVILEGED entry #22 — membership + EXACT set +
   count 22;
 * (g) the FOUR-AGENT allow census: ``"guidelines"`` appears in
@@ -32,7 +35,11 @@ construction) is proven END-TO-END here, in the notify-user shape:
   and a refused caller must never touch the filesystem);
 * (j) the doctrine renders: CATEGORY_DOC + ``_full_doc_`` carry BOTH
   fixed doctrine lines VERBATIM, and the loader warm-list entry exists
-  so cold-boot docs render the category (W1-FIX-NOW class).
+  so cold-boot docs render the category (W1-FIX-NOW class);
+* (k) the per-agent construction seam (gate F1, behavioral bite):
+  constructing the surface through the REAL ``create_instance_tools``
+  flow yields BOTH tools for a GRANTED agent (leader / sonic-leader)
+  and NEITHER for an UNLISTED agent (sonic-coder / giter).
 
 Plus the B-matrix legs assigned to phases 1+2 (B4 auth-first typed
 refusal BEFORE any file IO; B5 the ``midflight`` negative-claim guard)
@@ -48,6 +55,7 @@ import ast
 import json
 import re
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -123,6 +131,33 @@ def _instance_source() -> str:
     return (REPO_ROOT / "daemon" / "tools" / "instance.py").read_text(
         encoding="utf-8"
     )
+
+
+#: The ACTUAL construction CALL shape inside ``create_instance_tools`` —
+#: ``tools.extend(create_guidelines_tools_if_available(...))``. A bare
+#: ``source.index("create_guidelines_tools_if_available(")`` hits the
+#: factory DEF first (instance.py:2965), so REMOVING the extend CALL
+#: keeps a def-anchored pin green — the silent-failure mode the
+#: independent gate's M2 hole proved. Anchoring on the call shape is
+#: the cure (gate F1, 2026-11-13).
+_EXTEND_CALL_RE = re.compile(
+    r"tools\.extend\(\s*create_guidelines_tools_if_available\("
+)
+
+
+def _extend_call_index(source: str) -> int:
+    """Offset of the ACTUAL ``tools.extend(
+    create_guidelines_tools_if_available(...))`` CALL inside
+    ``create_instance_tools`` — never the factory def. Exactly-one
+    match enforced: zero = the extend call was removed (the pin goes
+    RED), more than one = the seam drifted."""
+    matches = list(_EXTEND_CALL_RE.finditer(source))
+    assert len(matches) == 1, (
+        "expected EXACTLY ONE tools.extend(create_guidelines_tools_"
+        f"if_available( call shape in daemon/tools/instance.py, found "
+        f"{len(matches)} — the construction extend is missing or drifted"
+    )
+    return matches[0].start()
 
 
 def _tools(agent_id: str = "ari", base_dir: Path | None = None) -> dict[str, object]:
@@ -210,20 +245,25 @@ class TestStaticRegistration:
 
     def test_step4_construction_extends_present_in_source(self) -> None:
         """Step 4 — the CRITICAL list-append is greppable in
-        ``daemon/tools/instance.py``. Decorator-only registration is
-        SILENTLY INVISIBLE."""
+        ``daemon/tools/instance.py`` AT THE CALL SITE (the
+        ``tools.extend(create_guidelines_tools_if_available(...))``
+        shape inside ``create_instance_tools`` — NOT the factory def,
+        which stays greppable when the extend call is removed).
+        Decorator-only registration is SILENTLY INVISIBLE."""
         source = _instance_source()
         assert "from .guidelines import create_guidelines_tools" in source
-        assert "create_guidelines_tools_if_available(" in source
-        assert "tools.extend(" in source
+        _extend_call_index(source)  # exactly-one call shape, or RED
 
     def test_the_extend_precedes_the_filter_and_the_doc_scan(self) -> None:
-        """The extend MUST precede ``create_help_tool`` /
+        """The extend CALL MUST precede ``create_help_tool`` /
         ``scan_tools_for_full_docs`` / ``_apply_tool_filter`` — a later
         extend either bypasses the privileged strip or is invisible to
-        the help tool."""
+        the help tool. Anchored on the CALL SITE (the notify leg-e
+        index-comparison style, hardened to the extend-call shape: a
+        def-anchored index stays green when the call is removed — the
+        gate's M2 hole)."""
         source = _instance_source()
-        extend_idx = source.index("create_guidelines_tools_if_available(")
+        extend_idx = _extend_call_index(source)
         help_idx = source.index("create_help_tool(tools")
         scan_idx = source.index("scan_tools_for_full_docs(tools)")
         filter_idx = source.index("_apply_tool_filter(tools, agent_id")
@@ -698,3 +738,65 @@ async def test_every_granted_agent_can_list_and_read(agent_id: str) -> None:
     assert raw == (REPO_DOCS_GUIDELINES / "guideline-notify-user-bounds.md").read_text(
         encoding="utf-8"
     )
+
+
+# ── F. the per-agent construction seam (gate F1, behavioral bite) ────────
+
+
+def _build_instance_tools_for(
+    agent_id: str, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, object]:
+    """The HOUSE per-agent construction seam (board registration shape,
+    ``tests/unit/test_board_registration.py::_build_instance_tools``):
+    the REAL ``create_instance_tools()`` over a MagicMock manager with
+    the REAL agent registry installed — the full factory flow,
+    INCLUDING the guidelines extend and the ``_apply_tool_filter``
+    scope-down. No synthetic seam is invented here."""
+    import daemon.registry as dr
+    from daemon.registry import AgentRegistry
+    from daemon.tools.instance import create_instance_tools
+
+    registry = AgentRegistry(REPO_ROOT / "agents")
+    registry.discover()
+    monkeypatch.setattr(dr, "_registry", registry)
+
+    manager = MagicMock(name="InstanceManager")
+    manager.config.daemon.port = 0
+    manager.config.llm.allowed_models = []
+    # Tolerate a None-stub SecretService (the factory dereferences it
+    # at call time only).
+    manager._secret_service = None
+    manager._instance_repository = None
+    tools = create_instance_tools(manager, f"inst-{agent_id}", agent_id)
+    return {getattr(t, "name", "?"): t for t in tools}
+
+
+class TestPerAgentConstruction:
+    """Gate F1 behavioral bite — construction through the REAL
+    ``create_instance_tools()`` flow: a GRANTED agent's surface carries
+    BOTH guidelines tools after the privileged-category filter, an
+    UNLISTED agent's carries NEITHER. Source greps cannot substitute —
+    this is the property the extend + privileged-strip seam exists to
+    deliver."""
+
+    @pytest.mark.parametrize("agent_id", ["leader", "sonic-leader"])
+    def test_granted_agent_surface_carries_both_tools(
+        self, monkeypatch: pytest.MonkeyPatch, agent_id: str
+    ) -> None:
+        by_name = _build_instance_tools_for(agent_id, monkeypatch)
+        missing = TOOL_NAMES - set(by_name)
+        assert missing == set(), (
+            f"granted agent {agent_id!r} must construct BOTH guidelines "
+            f"tools through create_instance_tools, missing: {sorted(missing)}"
+        )
+
+    @pytest.mark.parametrize("agent_id", ["sonic-coder", "giter"])
+    def test_unlisted_agent_surface_carries_neither_tool(
+        self, monkeypatch: pytest.MonkeyPatch, agent_id: str
+    ) -> None:
+        by_name = _build_instance_tools_for(agent_id, monkeypatch)
+        leaked = TOOL_NAMES & set(by_name)
+        assert leaked == set(), (
+            f"unlisted agent {agent_id!r} must construct NEITHER guidelines "
+            f"tool (privileged default-deny), leaked: {sorted(leaked)}"
+        )

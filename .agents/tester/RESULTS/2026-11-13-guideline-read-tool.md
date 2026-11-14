@@ -139,6 +139,8 @@ C1 5 entries (3 canonical slug==stem/status `draft` cut at U+00B7/non-empty purp
 
 `base_dir=""` is treated as a real injection → resolves `Path(".")`. Clean cwd → correct typed refusal; **repo-root cwd → lists 12 repo-root `*.md` files as auxiliary entries** instead of refusing. Commission's gate wording ("absent-dir → refusal, never empty list") is MET; the matrix's stricter "empty base_dir" wording is violated under repo-cwd conditions. No production exposure (runtime passes `None`; `base_dir` is a test/ops param; auth gate still first). Suggested cure if adjudicated: treat falsy `base_dir` like missing. The 39-leg suite pin does not cover this cell. No fix applied — gate mandate.
 
+> **DISPOSITION (independent-gate fix round, 2026-11-13): ACCEPTED as-is** — empty-string `base_dir` resolving to `Path(".")` and listing cwd stands unmodified; rationale: `base_dir` is a test-injection seam only (the runtime always passes `None`), zero production exposure.
+
 ## Gate D evidence
 
 - Base pack 49/49 rc 0 (137s); transcript `/tmp/guidelines_payload_pack_out_3516661`; hermetic (FAKE_HOME/mktemp only; no live-path contact pre- or post-run).
