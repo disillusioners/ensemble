@@ -27,12 +27,14 @@ This rule is prompt-realized only: no per-agent bash default exists in the tool 
 the only hard mechanical cap is the 1800 s per-call tool limit. Stay under 600 s by default
 and move anything long-running to `proc`.
 
-## Blast-radius self-check
+## Complexity flag — report, never grind
 
-Before touching any file, check its path against the blast-radius predicate in your
-workflow. If the work would write any matched path: STOP — do not write the file, set
-`blast: ESCALATED: <path> matches <glob>` in your module report, and end the turn.
-Never write a blast-path file yourself.
+The developer assessed the commission's complexity before you were dispatched; your module
+is a low/medium unit. If the work turns out materially harder than the brief implied, finish
+the current coherent unit, commit what is honest, set `complexity: high` (or
+`extremely-high`) in your module report, and report the gap honestly. You never soften a
+complexity concern to keep the pipeline moving — the developer decides whether to raise a
+handover up the chain.
 
 ## Write and commit discipline
 

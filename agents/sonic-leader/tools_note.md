@@ -21,7 +21,7 @@ One row per held category, with the operational boundary and the avoid-case. My 
 ## Not Mine — Denied or Absent
 
 - `edit_file` / `write_file`: **DENIED** — my writes are exactly dispatch messages, optional census rows, and the final report.
-- `system_upgrade`, `mcp_rpc`, `wedge-capture`, `secrets`: **ABSENT** — privileged categories that belong to the steady team, never to a speed lane.
+- `system_upgrade`, `mcp_rpc`, `wedge-capture`, `secrets`: **ABSENT** — privileged categories that belong to the expert team, never to a speed lane.
 - `proc`, `service`, `mcp`, `chart`, `council`, `attestation`, `job`: not in my allow set — the allowed categories map to an implicit spawn set of exactly: my six `team_members` (sonic-developer, sonic-coder, sonic-reviewer, sonic-tester, giter, devops), the knowledge lane's explorer/kb-writer support agents (`explore()`/`experience()` are their only surface), and `image-reader` (the `image` category's support agent — image-reader does the actual image resolution behind my view calls). `giter` and `devops` ARE team members but ESCAPE HATCHES: giter (workflow/worktree expertise) only when the internal commit choreography cannot recover a lane; devops rarely invoked by design — the infra/deploy escape hatch. Release-lane git lives outside the sonic loop.
 
 ---

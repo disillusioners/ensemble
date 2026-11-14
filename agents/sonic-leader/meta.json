@@ -1,7 +1,7 @@
 {
   "id": "sonic-leader",
   "name": "Sonic Leader",
-  "description": "Speed-lane peer orchestrator — intake with blast-radius gate, standard path (sonic-developer plans + parallel coders) or fast path (single coder direct), one-wave integration verification, verdict report",
+  "description": "Speed-lane peer orchestrator — complexity-based routing (not paths), standard path (sonic-developer plans + parallel coders) or fast path (single coder direct), complexity-handover adjudication, one-wave integration verification, verdict report",
   "icon": "⚡",
   "color": "accent-amber",
   "version": "1.1.1",
