@@ -19,6 +19,28 @@
 
 set -euo pipefail
 
+# 0. ENSEMBLE_SELF_ENV entry gate (house-safety blind spot, 2026-10-21
+#    + 2026-11-11 gap). Daemon child shells on this host inherit an ambient
+#    ENSEMBLE_SELF_ENV=live value; letting it reach a test invocation makes
+#    downstream session fences (e.g. tests/test_prompt_cache_invalidation.py)
+#    abort mid-run via pytest.exit, while the summary still prints and looks
+#    complete (~30% of collected tests never run). Fail CLOSED here — refuse,
+#    never silently scrub — so the condition surfaces before any pytest child
+#    is spawned and before any unset family runs. The sanctioned explicit
+#    prefix is ENSEMBLE_SELF_ENV=dev; unset / dev / demo / sandbox pass
+#    through unchanged. Anything else (live / prod / garbage / wrong case)
+#    is refused with exit 78 (EX_CONFIG), mirroring the leak-gate convention
+#    at the bottom of this script.
+case "${ENSEMBLE_SELF_ENV:-}" in
+    ""|dev|demo|sandbox)
+        ;;
+    *)
+    echo "ENV-SCRUB FAILURE: ambient ENSEMBLE_SELF_ENV='${ENSEMBLE_SELF_ENV}'" >&2
+    echo "unset ENSEMBLE_SELF_ENV or run with ENSEMBLE_SELF_ENV=dev" >&2
+    exit 78  # EX_CONFIG — mirrors lib.sh exit-78 convention
+    ;;
+esac
+
 # 1. Scrub every variant the project warns about, plus the bare libpq
 #    connection variables. Unset is a no-op when the var is absent, so
 #    this is safe to run unconditionally.
