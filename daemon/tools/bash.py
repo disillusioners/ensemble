@@ -391,36 +391,48 @@ def _sanitize_command_for_registry(
     )
 
 
-def _read_proc_start_time(pid: int) -> Optional[int]:
-    """Read ``/proc/<pid>/stat`` field 22 (starttime jiffies) on Linux.
+def _read_proc_start_time(pid: int) -> tuple[str, Optional[int]]:
+    """Classify + read ``/proc/<pid>/stat`` field 22 (starttime jiffies).
 
-    Best-effort. Returns ``None`` on any failure — the registry
-    accepts a None start_time (registration succeeds; the
-    PID-recycle check at lookup time simply cannot verify a None
-    value and falls through to the pgid fallback).
+    Returns ``(status, value)`` where ``status`` is one of:
+      - ``"ok"``                  — field 22 parsed successfully
+      - ``"absent"``              — the process is gone (ENOENT /
+                                   ProcessLookupError) — sourced from
+                                   the SAME classifier family as
+                                   ``tree_reader.classify_proc_stat_error``
+      - ``"unreadable"``          — any other read/parse error
+                                   (fail-closed identity)
+      - ``"unsupported"``         — non-Linux platform (no /proc)
 
-    Non-Linux platforms always return ``None`` (the registry is
-    process-lifetime and platform-agnostic — the per-row
-    start_time column is simply NULL on macOS/Windows).
+    The classification is consumed by ``RamGuard.register`` via the
+    ``start_time_status`` keyword so an absent leader is NEVER
+    labelled ``refused:leader-unreadable``.  A ``None`` value no
+    longer implies "registration succeeds" — registration refuses
+    on ``unreadable`` (fail-closed) and skips on ``absent``.
+
+    Non-Linux platforms return ``("unsupported", None)``.
     """
-    if sys.platform == "win32":
-        return None
+    import sys as _sys
+    if not _sys.platform.startswith("linux"):
+        return ("unsupported", None)
     try:
         with open(f"/proc/{pid}/stat", "r") as h:
             line = h.readline()
-    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
-        return None
+    except (FileNotFoundError, ProcessLookupError):
+        return ("absent", None)
+    except (PermissionError, OSError):
+        return ("unreadable", None)
     # ``(comm)`` may contain spaces/parens — split on the LAST ``)``.
     last_paren = line.rfind(")")
     if last_paren == -1:
-        return None
+        return ("unreadable", None)
     _, _, tail = line.rpartition(")")
     parts = tail.strip().split()
     # field 22 = parts[19] (offset accounts for the stripped ``(comm)``)
     try:
-        return int(parts[19])
+        return ("ok", int(parts[19]))
     except (ValueError, IndexError):
-        return None
+        return ("unreadable", None)
 
 
 def _read_proc_vm_hwm_kb(pid: int) -> Optional[int]:
@@ -945,6 +957,7 @@ def _ram_register_spawn(
     pid: int,
     pgid: int,
     start_time_jiffies: int | None,
+    start_time_status: str | None = None,
     ceiling_bytes: int | None,
 ) -> "_RamSpawnRecord | None":
     """S1 — register the spawn with the RAM guard.
@@ -967,6 +980,7 @@ def _ram_register_spawn(
             pid=pid,
             pgid=pgid,
             start_time_jiffies=start_time_jiffies,
+            start_time_status=start_time_status,
             ceiling_bytes=ceiling_bytes,
         )
     except Exception as exc:
@@ -1491,7 +1505,7 @@ async def bash(
             # spawn and this read on a near-zero-lifetime child;
             # we register start_time=0 in that edge case and the
             # registry lookup falls through to the pgid fallback.
-            bash_start_time_jiffies = _read_proc_start_time(proc.pid)
+            bash_start_time_status, bash_start_time_jiffies = _read_proc_start_time(proc.pid)
             bash_peak_rss_kb_at_spawn = _read_proc_vm_hwm_kb(proc.pid)
             # ── RAM auto-termination — S1: register the spawn ──
             # The ALREADY-CAPTURED pgid (never a second ``os.getpgid``
@@ -1505,6 +1519,7 @@ async def bash(
                 pid=proc.pid,
                 pgid=pgid,
                 start_time_jiffies=bash_start_time_jiffies,
+                start_time_status=bash_start_time_status,
                 ceiling_bytes=ram_ceiling_bytes,
             )
             await get_bash_process_registry().register(instance_id, proc.pid, pgid)

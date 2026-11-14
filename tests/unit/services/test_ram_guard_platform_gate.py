@@ -112,3 +112,33 @@ def test_register_registers_on_linux_platform():
     )
     assert rec is not None
     assert not (rec.state == STATE_REFUSED and rec.reason == "refused:platform-unsupported")
+def test_register_absent_does_not_emit_leader_unreadable():
+    g = RamGuard(enabled=True, resolved_ceiling=(1024 * 1024, "test"), platform="linux")
+    rec = g.register(
+        tracking_id="a" * 32, instance_id="i-1", lane="bash", pid=1234, pgid=1234,
+        start_time_jiffies=None, start_time_status="absent",
+    )
+    assert rec is None
+    assert g.counters_snapshot()["ram_kill_refusals_p5"] == 0
+
+
+def test_register_unreadable_still_leader_unreadable():
+    g = RamGuard(enabled=True, resolved_ceiling=(1024 * 1024, "test"), platform="linux")
+    rec = g.register(
+        tracking_id="b" * 32, instance_id="i-1", lane="bash", pid=1234, pgid=1234,
+        start_time_jiffies=None, start_time_status="unreadable",
+    )
+    assert rec is not None
+    assert rec.reason == "refused:leader-unreadable"
+    assert g.counters_snapshot()["ram_kill_refusals_p5"] == 1
+
+
+def test_register_platform_unavailable_never_leader_unreadable():
+    g = RamGuard(enabled=True, resolved_ceiling=(1024 * 1024, "test"), platform="darwin")
+    rec = g.register(
+        tracking_id="c" * 32, instance_id="i-1", lane="bash", pid=1234, pgid=1234,
+        start_time_jiffies=999, start_time_status="unsupported",
+    )
+    assert rec is not None
+    assert rec.reason == "refused:platform-unsupported"
+    assert rec.reason != "refused:leader-unreadable"

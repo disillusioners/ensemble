@@ -304,6 +304,7 @@ class RamGuard:
         pid: int,
         pgid: int,
         start_time_jiffies: Optional[int],
+        start_time_status: Optional[str] = None,
         ceiling_bytes: Optional[int] = None,
         poll_interval_ms: Optional[int] = None,
         grace_ms: Optional[int] = None,
@@ -341,6 +342,16 @@ class RamGuard:
                 self._registry[tracking_id] = record
                 self._counters.bump("ram_kill_refusals_" + refusal_bucket(REASON_PLATFORM_UNSUPPORTED))
             return record
+        # Resolve the identity classification (backward-compat: infer
+        # from start_time_jiffies when the lane did not pass one).
+        if start_time_status is None:
+            start_time_status = "ok" if start_time_jiffies is not None else "unreadable"
+        # Absent leader (process already gone): do NOT register a
+        # refused/unreadable record — no watch, no counter, no refusal.
+        # (absent-specific handling; avoids the leader-unreadable label.)
+        if start_time_status == "absent":
+            return None
+        # Platform-unavailable is handled by the gate above.
         record = SpawnRecord(
             tracking_id=tracking_id,
             instance_id=instance_id,
@@ -364,10 +375,11 @@ class RamGuard:
             # C1 (cycle 3): seed the ever-member set with the leader's
             # pid — a member unreadable FROM BIRTH is still watched.
             record.ever_members = (int(pid),)
-            # §18.5: a record registered with start_time_jiffies=None has
+            # §18.5: a record registered with an unreadable identity has
             # a structurally unprovable identity ⇒ REFUSED-watching at
             # registration (one count, no claim, no confirm, measure-only).
-            if start_time_jiffies is None:
+            # Absent leaders were already filtered above (no registration).
+            if start_time_status == "unreadable" or start_time_jiffies is None:
                 record.state = STATE_REFUSED
                 record.reason = REASON_LEADER_UNREADABLE
                 self._counters.bump("ram_kill_refusals_" + refusal_bucket(REASON_LEADER_UNREADABLE))

@@ -1935,3 +1935,33 @@ class TestEnsemble32RegistrationSeam:
         )
         assert "ram_kill_refused:" not in out
         assert "ram_breach_observed:" not in out
+
+class TestEnsemble32ReadProcClassify:
+    def test_file_not_found_vs_permission_error_distinct(self, monkeypatch):
+        import importlib
+        bash_module = importlib.import_module('daemon.tools.bash')
+        # platform linux
+        monkeypatch.setattr('sys.platform', 'linux')
+        # absent
+        def absent_open(*a, **k):
+            raise FileNotFoundError('no such file')
+        monkeypatch.setattr('builtins.open', absent_open)
+        status, val = bash_module._read_proc_start_time(123)
+        assert status == 'absent'
+        assert val is None
+        # unreadable
+        def perm_open(*a, **k):
+            raise PermissionError('denied')
+        monkeypatch.setattr('builtins.open', perm_open)
+        status2, val2 = bash_module._read_proc_start_time(123)
+        assert status2 == 'unreadable'
+        assert val2 is None
+        assert status != status2
+
+    def test_unsupported_on_darwin(self, monkeypatch):
+        import importlib
+        bash_module = importlib.import_module('daemon.tools.bash')
+        monkeypatch.setattr('sys.platform', 'darwin')
+        status, val = bash_module._read_proc_start_time(123)
+        assert status == 'unsupported'
+        assert val is None
