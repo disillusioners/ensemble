@@ -1,5 +1,5 @@
 -- Migration: create_project_future
--- Created: 20261112_175916
+-- Created: 2026-11-12
 -- Author: feature/project-future implementation lane
 -- Description: ProjectFutureEntry — per-project forward-improvement wishlist (MAX 32, FIFO eviction).
 --   On PostgreSQL the table is created by ``SQLModel.metadata.create_all()`` (the model is

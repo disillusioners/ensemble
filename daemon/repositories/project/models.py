@@ -515,6 +515,7 @@ class ProjectFutureEntry(SQLModel, table=True):
     __tablename__ = "project_future"
 
     __table_args__ = (
+        # Named unique INDEX (not UniqueConstraint): keeps model/migration/create_all three-site lockstep byte-consistent + gives the D18 race predicate its name match.
         Index("uq_project_future_project_seq", "project_id", "seq", unique=True),
     )
 

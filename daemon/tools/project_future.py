@@ -19,7 +19,10 @@ from ._tool_registry import register_tool_category
 logger = logging.getLogger(__name__)
 
 CATEGORY_NAME = "project_future"
-CATEGORY_DOC = """Manage project future entries — forward-looking improvement ideas and wishlist items for a project. Use this for "we should add/try/improve X later" suggestions; use project_history for what HAS happened and critical notes for lessons and traps. Each project keeps at most 32 items; when full, the OLDEST idea is evicted automatically and the add response names what was removed."""
+CATEGORY_DOC = """Manage project future entries — forward-looking improvement ideas and wishlist items for \
+a project. Use this for "we should add/try/improve X later" suggestions; use project_history for \
+what HAS happened and critical notes for lessons and traps. Each project keeps at most 32 items; \
+when full, the OLDEST idea is evicted automatically and the add response names what was removed."""
 
 _MAX_ENTRIES = 32
 _MAX_SUMMARY_LEN = 300
@@ -152,8 +155,13 @@ def create_project_future_tools(
                 max_entries=_MAX_ENTRIES,
             )
         except ConcurrentWishlistUpdate:
+            logger.info(
+                "project_future_add concurrent wishlist update for project %s (retryable)",
+                project_id,
+            )
             return {"error": f"Concurrent wishlist update for project '{project_id}' — please retry"}
         except Exception as exc:
+            logger.warning("project_future_add failed for project %s: %s", project_id, exc)
             return {"error": str(exc)}
 
         # Step 6: flat entry dict including "evicted" (verbatim pass-through)

@@ -107,9 +107,9 @@ from .report_injection.repository import ReportInjectionRepository
 from .mission_record.models import MissionCommission, MissionRecord
 
 # Project-future wishlist table (forward-improvement lane, 32-cap FIFO).
-# Imported here so
-# SQLModel.metadata.create_all() registers project_future. Brand-new table — no
-# _ensure_postgres_columns entry is needed. SQLite-side canonical DDL ships in the migration runner.
+# Imported here so ``SQLModel.metadata.create_all()`` registers the
+# ``project_future`` table. Brand-new table — no ``_ensure_postgres_columns``
+# entry is needed. SQLite-side canonical DDL ships in the migration runner.
 from .project.models import ProjectFutureEntry  # noqa: F401  # register before create_all
 
 # Instance UI preferences (pin + color tag).

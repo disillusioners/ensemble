@@ -1,4 +1,11 @@
-"""SQLModel-based Project Repository implementation."""
+"""SQLModel-based Project Repository implementation.
+
+Module size: ~2623 lines — inside the 1000-3000 band, at its upper edge. The
+size reflects deliberate co-location of project-scoped concerns (projects/
+tags/shortnames CRUD, project history, critical notes + embeddings, project
+metadata, and the project-future wishlist) rather than accidental growth.
+A per-concern split remains a ticketed follow-up; NOT done in this pass.
+"""
 
 from __future__ import annotations
 
@@ -69,7 +76,7 @@ class ConcurrentWishlistUpdate(Exception):
     """
 
 
-def _is_seq_unique_race(exc) -> bool:
+def _is_seq_unique_race(exc: BaseException | str) -> bool:
     """D18 narrowing predicate: True iff ``exc`` is the UNIQUE(project_id, seq) race.
 
     Matches the named index (PG create_all: "uq_project_future_project_seq") OR
@@ -80,10 +87,10 @@ def _is_seq_unique_race(exc) -> bool:
 
     Accepts either an exception or a raw message string for testability.
     """
-    text = exc if isinstance(exc, str) else str(exc)
+    msg = exc if isinstance(exc, str) else str(exc)
     return (
-        "uq_project_future_project_seq" in text
-        or ("project_future.project_id" in text and "project_future.seq" in text)
+        "uq_project_future_project_seq" in msg
+        or ("project_future.project_id" in msg and "project_future.seq" in msg)
     )
 
 
@@ -1526,13 +1533,13 @@ class SQLModelProjectRepository:
         back the WHOLE transaction — when a concurrent/stale write makes the prune or seq
         assign unsafe. NO automatic retry (D16).
         """
-        summary = summary[:300]                      # house double-layer truncation (A17 :1309-1310)
+        summary = summary[:300]                      # house double-layer truncation (A17, add_history_entry truncation idiom)
         details = details[:5000] if details else None
         with Session(self.engine) as session:
             try:
                 count_stmt = select(func.count()).select_from(
                     select(ProjectFutureEntry).where(ProjectFutureEntry.project_id == project_id).subquery()
-                )                                    # inline count idiom (A17 :1388)
+                )                                    # inline count idiom (A17, add_history_entry count idiom)
                 existing = session.exec(count_stmt).one()
                 overflow = max(0, existing - max_entries + 1)      # make room for the incoming row
                 evicted: list[dict] = []
@@ -1566,6 +1573,7 @@ class SQLModelProjectRepository:
                     result = session.execute(
                         sql_delete(ProjectFutureEntry).where(ProjectFutureEntry.id.in_(victim_ids))
                     )
+                    # sqlite3/psycopg report real DELETE rowcounts; a falsy/unknown rowcount is deliberately treated as a lost race (fail-closed).
                     if (result.rowcount or 0) != len(victim_ids):
                         session.rollback()
                         raise ConcurrentWishlistUpdate(project_id)
@@ -1592,7 +1600,7 @@ class SQLModelProjectRepository:
                 # original untranslated (A31 precedent, mcp_server/repository.py:146-205).
                 session.rollback()
                 if _is_seq_unique_race(exc):
-                    raise ConcurrentWishlistUpdate(project_id)
+                    raise ConcurrentWishlistUpdate(project_id) from exc
                 raise
             session.refresh(entry)
             payload = entry.to_dict()
@@ -1608,7 +1616,7 @@ class SQLModelProjectRepository:
         """List wishlist items NEWEST-FIRST (seq DESC, created_at DESC tiebreak). {entries,total,limit,offset}."""
         with Session(self.engine) as session:
             stmt = select(ProjectFutureEntry).where(ProjectFutureEntry.project_id == project_id)
-            count_stmt = select(func.count()).select_from(stmt.subquery())   # A17 :1388
+            count_stmt = select(func.count()).select_from(stmt.subquery())   # A17, add_history_entry count idiom
             total = session.exec(count_stmt).one()
             stmt = (
                 stmt.order_by(ProjectFutureEntry.seq.desc(), ProjectFutureEntry.created_at.desc())
@@ -1623,7 +1631,7 @@ class SQLModelProjectRepository:
         entry_id: str,
         project_id: str | None = None,
     ) -> dict | None:
-        """Remove a wishlist entry (mirrors delete_history_entry :1340, project-scoped).
+        """Remove a wishlist entry (mirrors delete_history_entry, project-scoped).
 
         Returns the REMOVED entry's dict (id, summary, seq, created_at, project_id, …) so the
         caller can identify what was retired; None when absent or project-mismatch.
@@ -1635,7 +1643,7 @@ class SQLModelProjectRepository:
             if entry is None:
                 return None
             if project_id is not None and entry.project_id != project_id:
-                return None                                  # A17 :1355 scoping preserved
+                return None                                  # A17, delete_history_entry scoping preserved
             removed = entry.to_dict()
             session.delete(entry)
             session.commit()

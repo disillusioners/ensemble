@@ -3,6 +3,9 @@
 This module provides a registry for tool documentation that allows
 tools to have short docstrings (for LLM context efficiency) while
 still providing detailed documentation via the tool_help() function.
+Kept as ONE module deliberately: the registry is the single source of
+truth (full docs + metadata + dynamic names + category map + known-names
+validation), so a split would fragment that authority.
 """
 
 from importlib import import_module
