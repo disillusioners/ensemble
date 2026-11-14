@@ -4623,6 +4623,20 @@ def _boot_ram_guard(app, manager, config):
     """
     app.state.ram_guard = None
     if config.ram_guard_derived_switch:
+        import sys as _sys
+        from daemon.services.ram_guard.ladder import platform_supported
+        if not platform_supported(_sys.platform):
+            # Non-Linux: the guard is inert (no thread, no registration,
+            # no measurement). Mirror the OFF line style.
+            logger.info(
+                "[RamGuard] OFF — platform %s unsupported", _sys.platform
+            )
+            try:
+                from daemon.services.ram_guard import set_ram_guard
+                set_ram_guard(None)
+            except Exception:  # noqa: BLE001 — degradation must not raise
+                pass
+            return app.state.ram_guard
         _ram_guard = None
         try:
             from daemon.services.ram_guard import RamGuard, set_ram_guard

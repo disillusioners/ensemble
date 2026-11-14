@@ -1,3 +1,4 @@
+# ENSEMBLE-32: platform-fixture rationale — see docs/runbooks/ram-guard-and-unit-bounds.md "Test-platform census"
 """Proc-lane RAM auto-termination tests (phase4-plan.md T11).
 
 The pack covers the five shapes the plan names:
@@ -240,6 +241,12 @@ def _mem_available_bytes() -> int:
     return 0
 
 
+def _mem_skip_reason() -> str:
+    if not Path("/proc/meminfo").exists():
+        return "no /proc/meminfo (non-Linux host)"
+    return "insufficient memory"
+
+
 def _norm_ws(text: str) -> str:
     """Normalized-whitespace equality (D-6) — the pin comparator for the
     verbatim §3.5 sentences (markdown emphasis/backticks are already
@@ -474,7 +481,7 @@ class TestBallooningTree:
     @pytest.mark.timeout(90)
     async def test_ballooning_tree_via_proc_run_is_killed(self, proc_tools, real_guard):
         if _mem_available_bytes() < PLANNED_BYTES + 256 * 1024 * 1024:
-            pytest.skip("insufficient memory")
+            pytest.skip(_mem_skip_reason())
         # The guard is installed AND started by the ``real_guard``
         # fixture — its two threads own the measurement, the breach
         # decision, the kill and the verdict (leader ruling Q1).
@@ -563,7 +570,7 @@ class TestLeaderlessTree:
     @pytest.mark.timeout(90)
     async def test_leaderless_tree_shape(self, proc_tools, real_guard):
         if _mem_available_bytes() < PLANNED_BYTES + 256 * 1024 * 1024:
-            pytest.skip("insufficient memory")
+            pytest.skip(_mem_skip_reason())
         # The guard is installed AND started by the ``real_guard``
         # fixture (its two threads own the measurement + the kill).
         tools, _ = proc_tools
@@ -803,6 +810,10 @@ class TestKillSwitch:
 
 
 class TestLaneShape:
+    @pytest.mark.skipif(
+        not __import__("sys").platform.startswith("linux"),
+        reason="genuinely pre-existing at base: proc lane start_time_jiffies is None on darwin.",
+    )
     @pytest.mark.asyncio
     async def test_the_guard_registry_holds_the_entry(
         self, unique_instance_id, recording_guard
@@ -880,7 +891,7 @@ class TestLaneShape:
         through the DQ4 ladder.
         """
         if _mem_available_bytes() < PLANNED_BYTES + 256 * 1024 * 1024:
-            pytest.skip("insufficient memory")
+            pytest.skip(_mem_skip_reason())
         from daemon.tools.proc_tools import BackgroundProcessManager
 
         calls: list[str] = []
@@ -1415,3 +1426,105 @@ class TestBoundedWaitDeadline:
             pass
 
         assert proc_tools_module._ram_wait_deadline_ms(_BareGuard()) == 1308
+
+
+import pytest
+
+@pytest.fixture(autouse=True)
+def _ensemble32_linux_platform(monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")
+
+class TestEnsemble32ProcAbsentSeam:
+    def test_proc_absent_no_registration(self):
+        from daemon.services.ram_guard.guard import RamGuard
+        g = RamGuard(enabled=True, resolved_ceiling=(1024*1024, 'test'), platform='linux')
+        rec = g.register(
+            tracking_id='p' * 32, instance_id='i-1', lane='proc', pid=5678, pgid=5678,
+            start_time_jiffies=None, start_time_status='absent',
+        )
+        assert rec is None
+        assert g.counters_snapshot()['ram_kill_refusals_p5'] == 0
+        assert g.counters_snapshot()['ram_kill_refusals_p0'] == 0
+        assert g.read_verdict('p' * 32) is None
+
+import re as _re
+
+class TestEnsemble32ProcClassifyParity:
+    async def test_proc_absent_drives_lane_no_registration(self, proc_tools, monkeypatch):
+        tools, iid = proc_tools
+        from daemon.services.ram_guard import set_ram_guard, get_ram_guard
+        from daemon.services.ram_guard.guard import RamGuard
+        import daemon.tools.proc_tools as pt
+        import daemon.services.ram_guard.tree_reader as tr
+        guard = RamGuard(enabled=True, resolved_ceiling=(1024*1024, "test"), platform="linux")
+        set_ram_guard(guard)
+        monkeypatch.setattr(pt, "_read_stat_entry", lambda root, pid: tr.StatRead(pid=pid, status="absent"))
+        try:
+            res = await tools["proc_run"].ainvoke({"command": "echo hi"})
+        finally:
+            set_ram_guard(None)
+        assert guard.health()["registry_depth"] == 0
+        assert guard.counters_snapshot()["ram_kill_refusals_p5"] == 0
+        assert guard.counters_snapshot()["ram_kill_refusals_p0"] == 0
+        m = _re.search(r"(proc-[0-9a-f]+)", res)
+        assert m, f"proc tracking id not found in proc_run result: {res!r}"
+        assert guard.read_verdict(m.group(1)) is None
+
+    async def test_proc_unreadable_drives_lane_refusal(self, proc_tools, monkeypatch):
+        tools, iid = proc_tools
+        from daemon.services.ram_guard import set_ram_guard, get_ram_guard
+        from daemon.services.ram_guard.guard import RamGuard
+        import daemon.tools.proc_tools as pt
+        import daemon.services.ram_guard.tree_reader as tr
+        guard = RamGuard(enabled=True, resolved_ceiling=(1024*1024, "test"), platform="linux")
+        set_ram_guard(guard)
+        monkeypatch.setattr(pt, "_read_stat_entry", lambda root, pid: tr.StatRead(pid=pid, status="unreadable"))
+        try:
+            res = await tools["proc_run"].ainvoke({"command": "echo hi"})
+        finally:
+            set_ram_guard(None)
+        assert guard.health()["registry_depth"] == 1
+        assert guard.counters_snapshot()["ram_kill_refusals_p5"] == 1
+        m = _re.search(r"(proc-[0-9a-f]+)", res)
+        assert m, f"proc tracking id not found in proc_run result: {res!r}"
+        rec = guard.read_verdict(m.group(1))
+        assert rec is not None
+        assert rec.reason == "refused:leader-unreadable"
+
+    async def test_proc_ok_drives_lane_registration(self, proc_tools, monkeypatch):
+        tools, iid = proc_tools
+        from daemon.services.ram_guard import set_ram_guard, get_ram_guard
+        from daemon.services.ram_guard.guard import RamGuard
+        import daemon.tools.proc_tools as pt
+        import daemon.services.ram_guard.tree_reader as tr
+        guard = RamGuard(enabled=True, resolved_ceiling=(1024*1024, "test"), platform="linux")
+        set_ram_guard(guard)
+        monkeypatch.setattr(pt, "_read_stat_entry", lambda root, pid: tr.StatRead(pid=pid, status="ok", start_time_jiffies=42))
+        try:
+            res = await tools["proc_run"].ainvoke({"command": "echo hi"})
+        finally:
+            set_ram_guard(None)
+        assert guard.health()["registry_depth"] == 1
+        assert guard.counters_snapshot()["ram_kill_refusals_p5"] == 0
+        assert guard.counters_snapshot()["ram_kill_refusals_p0"] == 0
+        m = _re.search(r"(proc-[0-9a-f]+)", res)
+        assert m, f"proc tracking id not found in proc_run result: {res!r}"
+        rec = guard.read_verdict(m.group(1))
+        assert rec is not None
+        assert rec.start_time_jiffies == 42
+
+    async def test_proc_unsupported_platform(self, proc_tools, monkeypatch):
+        tools, iid = proc_tools
+        from daemon.services.ram_guard import set_ram_guard, get_ram_guard
+        from daemon.services.ram_guard.guard import RamGuard
+        import daemon.tools.proc_tools as pt
+        guard = RamGuard(enabled=True, resolved_ceiling=(1024*1024, "test"), platform="darwin")
+        set_ram_guard(guard)
+        monkeypatch.setattr("sys.platform", "darwin")
+        try:
+            res = await tools["proc_run"].ainvoke({"command": "echo hi"})
+        finally:
+            set_ram_guard(None)
+        assert guard.counters_snapshot()["ram_kill_refusals_p0"] == 1
+        assert guard.counters_snapshot()["ram_kill_refusals_p5"] == 0
+        assert guard.health()["registry_depth"] == 1

@@ -1396,3 +1396,26 @@ class TestDurableSpawnLifecycle:
             )
         finally:
             reg.set_durable_writer(prev)
+
+
+# ── ENSEMBLE-32: NULL start_time is structurally unverified ─────────────
+def test_null_start_time_row_does_not_match():
+    from daemon.services.resource_monitor.pid_registry import PidRegistry
+    reg = PidRegistry()
+    reg.register(pid=100, start_time=None, kind="bash", instance_id="i", pgid=100, command="c", detail="d", parent_pid=1)
+    # mark_exit with None start_time must fail-closed (no pid-only match)
+    assert reg.mark_exit(pid=100, start_time=None, exit_kind="success") is None
+    # lookup also fail-closed for None identity
+    assert reg.lookup(100) is None
+
+def test_pid_registry_recycle_none_identity_logs_warning(caplog):
+    import logging
+    from daemon.services.resource_monitor.pid_registry import PidRegistry
+    reg = PidRegistry()
+    reg.register(pid=100, start_time=None, kind='bash', instance_id='i', pgid=100, command='c', detail='d', parent_pid=1)
+    with caplog.at_level(logging.WARNING):
+        reg.register(pid=100, start_time=5, kind='bash', instance_id='i', pgid=100, command='c', detail='d', parent_pid=1)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any('recycled' in m for m in msgs), msgs
+    # no logging error
+    assert not any('Logging error' in m or 'TypeError' in m for m in msgs)

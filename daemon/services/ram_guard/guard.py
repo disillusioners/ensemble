@@ -54,9 +54,11 @@ from .events import RamBreachEmitter
 from .ladder import (
     REASON_TREE_INCOMPLETE,
     REASON_LEADER_UNREADABLE,
+    REASON_PLATFORM_UNSUPPORTED,
     is_permanent_refusal,
     refusal_bucket,
     ram_kill_ladder,
+    platform_supported,
 )
 from .tree_reader import (
     PROC_ROOT,
@@ -302,6 +304,7 @@ class RamGuard:
         pid: int,
         pgid: int,
         start_time_jiffies: Optional[int],
+        start_time_status: Optional[str] = None,
         ceiling_bytes: Optional[int] = None,
         poll_interval_ms: Optional[int] = None,
         grace_ms: Optional[int] = None,
@@ -316,8 +319,41 @@ class RamGuard:
         """
         if not self._enabled:
             return None
+        if not tracking_id:
+            return None
         if not instance_id:
             return None
+        # Belt-and-braces: non-Linux platform ⇒ refuse registration with
+        # the platform-unsupported reason (P0 is the reason authority).
+        if not platform_supported(self._platform):
+            record = SpawnRecord(
+                tracking_id=tracking_id,
+                instance_id=instance_id,
+                lane=lane,
+                pid=int(pid),
+                pgid=int(pgid),
+                start_time_jiffies=start_time_jiffies,
+                ceiling_bytes=int(ceiling_bytes if ceiling_bytes is not None else self._resolved_ceiling_bytes),
+                poll_interval_ms=int(poll_interval_ms if poll_interval_ms is not None else self._poll_interval_ms),
+                grace_ms=int(grace_ms if grace_ms is not None else int(self._grace_seconds * 1000)),
+            )
+            with self._lock:
+                record.state = STATE_REFUSED
+                record.reason = REASON_PLATFORM_UNSUPPORTED
+                record.ever_members = (int(pid),)
+                self._registry[tracking_id] = record
+                self._counters.bump("ram_kill_refusals_" + refusal_bucket(REASON_PLATFORM_UNSUPPORTED))
+            return record
+        # Resolve the identity classification (backward-compat: infer
+        # from start_time_jiffies when the lane did not pass one).
+        if start_time_status is None:
+            start_time_status = "ok" if start_time_jiffies is not None else "unreadable"
+        # Absent leader (process already gone): do NOT register a
+        # refused/unreadable record — no watch, no counter, no refusal.
+        # (absent-specific handling; avoids the leader-unreadable label.)
+        if start_time_status == "absent":
+            return None
+        # Platform-unavailable is handled by the gate above.
         record = SpawnRecord(
             tracking_id=tracking_id,
             instance_id=instance_id,
@@ -341,13 +377,14 @@ class RamGuard:
             # C1 (cycle 3): seed the ever-member set with the leader's
             # pid — a member unreadable FROM BIRTH is still watched.
             record.ever_members = (int(pid),)
-            # §18.5: a record registered with start_time_jiffies=None has
+            # §18.5: a record registered with an unreadable identity has
             # a structurally unprovable identity ⇒ REFUSED-watching at
             # registration (one count, no claim, no confirm, measure-only).
-            if start_time_jiffies is None:
+            # Absent leaders were already filtered above (no registration).
+            if start_time_status == "unreadable" or start_time_jiffies is None:
                 record.state = STATE_REFUSED
                 record.reason = REASON_LEADER_UNREADABLE
-                self._counters.bump("ram_kill_refusals_p5")
+                self._counters.bump("ram_kill_refusals_" + refusal_bucket(REASON_LEADER_UNREADABLE))
             self._registry[tracking_id] = record
         return record
 
@@ -454,8 +491,16 @@ class RamGuard:
             records = list(self._registry.values())
         # The scan is OUTSIDE the lock — it is the expensive part.
         table = scan_proc(self._proc_root)
-        for record in records:
-            self._sample_record(record, table, now)
+        if not table.scan_complete:
+            # Skip-fast: enumeration failed — increment enumeration_failures
+            # for every record under a SINGLE lock instead of per-record.
+            with self._lock:
+                for record in records:
+                    record.enumeration_failures += 1
+            # Still run liveness sweep + heartbeat stamping below.
+        else:
+            for record in records:
+                self._sample_record(record, table, now)
         if self._sweep_every_ticks > 0 and self._ticks % self._sweep_every_ticks == 0:
             self._liveness_sweep()
         # Heartbeat truthfulness (C6): stamp last_tick_at ONLY after a

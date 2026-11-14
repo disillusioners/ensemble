@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.30.5] — 2026-11-14
+## [0.30.6] — 2026-11-14
 
 ### Changed — sonic routing amendment: routing by COMPLEXITY, cross-team interop, overrides, expert-team terminology (Emperor's four rulings 2026-11-14; `feature/sonic-routing-v0305`, base `3f45cd6dd`; zero migrations)
 
@@ -20,6 +20,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Pins (lockstep).** `test/packs/sonic_agent_defs_checks.py` reworked: old A7 (blast globs) and A10 (blast escalation) REMOVED; new legs pin the developer pause/handover, the HANDOVER-REPORT shape, leader ACCEPT/REJECT, the explore→plan→verdict→dispatch ordering, the three override paths, no-silent-downgrade, the interop HANDOFF path, PACKS registration, the prompt protocol lines, and the POK audience — 22 assertions, 62 counter-mutation legs (ALL RED, 0 vacuous).
 - **Behavioral proof.** A real-model prompt probe of the landed prompts (C1-safe proxy): (a) normal → PROCEED, (b) high → HANDOVER, (c) leader → ESCALATED HANDOVER-REPORT, (d) user-override → proceed with the original `extremely-high` verdict kept visible. ZERO live contact.
 - **Fence.** Expert-team agent dirs (`agents/{leader,developer,reviewer,tester}`) untouched; zero migrations.
+## [0.30.5] — 2026-11-14
+
+### Fixed — ENSEMBLE-32: ram-guard platform gate + refusal/breach decoupling (`feature/ensemble-32-ram-guard-platform-gate`, base `3f45cd6dd`; zero migrations)
+
+- **Platform gate (boot + registration)**: ram-guard arms only on platforms it can police (Linux). Non-Linux hosts (macOS/darwin) no longer fabricate `ram_breach_observed` / `ram_kill_refused` footers — the class behind every darwin turn carrying a false breach banner.
+- **Refusal/breach decoupling (both surfaces)**: "kill refused" is no longer conflated with "breach observed" on the footer and the log/event surfaces — a breachless refusal reads as a refusal.
+- **Proc-lane identity wiring**: process identity is threaded through the proc lane (`daemon/services/resource_monitor/pid_registry.py`), so counters attribute to the right lane instead of an identity-less bucket.
+- **/proc-absent label unification**: one consistent label when `/proc` is unavailable; no identity-less breach claims.
+- **NULL identity sentinel**: missing identity is an explicit sentinel, not a breach signal (`daemon/services/ram_guard/errors.py`).
+- **Counter bucketing (p0/p5)**: per-lane buckets replace the conflation across `daemon/api.py`, `daemon/tools/bash.py`, `daemon/tools/proc_tools.py`.
+- **Tests**: registration-seam darwin pack (`tests/unit/services/test_ram_guard_platform_gate.py`), proc parity, breachless refusal, honest skipif markers instead of silent green — 13 test files alongside `tests/test_resource_pid_registry.py` hardening.
+- **Runbook**: platform census added to `docs/runbooks/ram-guard-and-unit-bounds.md`.
+- Gates: reviewer APPROVE (423P/0F/12S, zero product findings); tester SHIP ×2 (A/B: branch fixed ~66 base reds, zero green→red). Floor constants unchanged (`68c6ee055` both) — ENSEMBLE-32 touches zero ceremony-relevant `scripts/upgrade/` semantics (D6-8 cadence: semantics-triggered).
 
 ## [0.30.4] — 2026-11-14
 

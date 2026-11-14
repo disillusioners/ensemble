@@ -1,3 +1,4 @@
+# ENSEMBLE-32: platform-fixture rationale — see docs/runbooks/ram-guard-and-unit-bounds.md "Test-platform census"
 """``GET /api/resources/ram-guard`` — the Phase-5 read surface pack.
 
 Covers phase5-plan.md T12 / T13 / T14 / T15 and test-plan.md §3.8
@@ -274,3 +275,10 @@ class TestFourSurfaceNegativeSpace:
             assert not isinstance(value, (dict, list, tuple)), (
                 f"nested structure in the event payload: {key}"
             )
+
+
+import pytest
+
+@pytest.fixture(autouse=True)
+def _ensemble32_linux_platform(monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")

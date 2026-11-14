@@ -327,6 +327,23 @@ one INFO line at lifespan start — grep it as proof of intent:
 
 The bash and proc lanes then behave byte-identically to pre-feature output.
 
+### C.2b Supported platforms — Linux only
+
+The RAM guard is **Linux-only**. On any non-Linux platform (`sys.platform` not starting with
+`linux`) the guard is completely inert: `_boot_ram_guard` does **not** construct a `RamGuard`,
+sets `app.state.ram_guard = None`, calls `set_ram_guard(None)`, and emits exactly one boot
+INFO line:
+
+```
+[RamGuard] OFF — platform <sys.platform> unsupported
+```
+
+There is no guard thread, no registration, no `/proc` reads, and no footer on bash/proc output —
+bash behaves exactly as it did pre-v0.29.21 (unguarded). The belt-and-braces `RamGuard.register`
+refuses registration with `refused:platform-unsupported` if a guard is ever constructed manually
+on a non-Linux host, but that path is not reachable through the normal boot flow, so
+`refused:platform-unsupported` does **not** appear in production output on a Linux daemon.
+
 **OFF beats validation (B26).** `load_config` parses the bare switch **first**; while OFF it
 passes a `model_construct`-ed config that bypasses both validation and the settings sources, so
 an out-of-range `RAM_GUARD_CEILING_MIB` (env **or** yaml) **does not abort the boot**. Enabling
@@ -340,7 +357,9 @@ ram_kills, ram_breaches_detected, ram_kill_refusals_p0, ram_kill_refusals_p1, ra
 ```
 
 There is **no `ram_kill_refusals_p8`**: the refusal ladder is `p0…p7`, and the pre-kill
-predicates map onto the buckets as `p0` = not-registered / guard-disabled / platform-unsupported ·
+predicates map onto the buckets as `p0` = not-registered / guard-disabled (platform-unsupported is
+listed here for completeness but is not reachable in production: on non-Linux the guard is never
+constructed, so no registration — and no `refused:platform-unsupported` — ever occurs) ·
 `p1` = pgid-not-registered · `p2` = pgid-invalid · `p3` = daemon-group · `p4` = pgid-self ·
 `p5` = pgid-recycled / leader-unreadable · `p7` = group-unknown. (no `p6`: P6 is ADVISORY — §18.2.)
 Ten of the 15 reason codes are `refused:` (eight permanent → terminal `REFUSED`; two —
@@ -561,3 +580,33 @@ stayed out. Re-entry requires a new commission; nothing here auto-expires.
 | No re-kill on a KILLED/tree-incomplete record (v1 scope) | cycle 3 (LEADER RULING) | Episodes are contract-scoped ONE-SHOT: a kill that could not verify death (tree-incomplete) never re-fires in v1. Survivor processes are the reaper/orphan net's domain. The record is still retained and watched; the retention bound is member-count-0 on a COMPLETE scan (real since the cycle-3 ever-members fix), at which point the sweep releases it. |
 | The KILLED-retention bound itself (no time-based max-watch) | cycle 3 (LEADER RULING) | The bound is exactly member-count-0-on-complete-scan. A time-based cap was rejected: the marginal per-tick cost of a dead-but-unverifiable record is one RSS sum, and the shared scan is O(host pids) regardless — the only forever-watched trees are trees with live members, which is what the guard should watch (disclosed per §18.1). |
 | Pending-full blind spot (content-free WARN, no counter) | cycle 3 (code 6dc38a1b3) | The pending slot is full this tick and the breach is not claimed; handled as a content-free `logger.warning` naming only the tracking id + depth + cap (no argv, no env values, no counter bump) so the §15 B5 counter set (16 keys, frozen exact) stays untouched. Code-side pending-full log landed in 6dc38a1b3; this register row is the runbook mirror. |
+
+**Identity classification at spawn (ENSEMBLE-32):** absent leader is never registered (no watch, no counter, no refusal). absent covers both FileNotFoundError and ProcessLookupError (the process is gone). unreadable -> refused:leader-unreadable (p5, fail-closed). platform-unavailable -> refused:platform-unsupported (p0). The kill ladder keeps its own P5 split (absent -> proceed, unreadable -> refuse); both lanes share tree_reader.classify_proc_stat_error, so absent and unreadable can no longer disagree.
+
+**Tick-level skip-fast (ENSEMBLE-32 item 5):** when scan_proc reports scan_complete=False, _tick_once bumps enumeration_failures for every record under a single lock (peak preserved, no breach evaluated, no per-record lock churn).
+
+**Ops note (ENSEMBLE-32):** ram_kill_refusals_p5 will drop for short-lived children post-fix (intended) — dashboards keyed on it see a step.
+## Test-platform census (ENSEMBLE-32)
+
+Reconciliation command:
+for f in $(grep -rl 'autouse=True' tests/ --include=*.py | sort); do
+  grep -q 'setattr("sys.platform"' "$f" && echo "$f"
+done
+→ 9 files.
+
+Retained by design: the following NINE files carry a whole-module autouse
+sys.platform = "linux" re-scope. Kernel-dependent legs are skipif-gated
+with honest markers; the fixture exists to exercise the platform-gate
+predicate on a darwin host.
+
+| File | Kernel-dependent legs | Gating | Why autouse retained |
+|---|---|---|---|
+| tests/tools/test_bash_ram_guard.py | yes (/proc/<pid>/stat, /proc/meminfo) | skipif on TestKillSwitch::test_switch_off_is_byte_identical_to_on + inline memory skips | exercises platform-gate predicate |
+| tests/tools/test_proc_ram_guard.py | yes (/proc/meminfo; real /proc in non-mocked cases) | skipif on TestLaneShape::test_the_guard_registry_holds_the_entry + inline memory skips | exercises platform-gate predicate |
+| tests/tools/test_ram_guard_fairness.py | yes (/proc/meminfo unreadable) | skipif | exercises platform-gate predicate |
+| tests/unit/routers/test_resources_ram_guard.py | none (fake procfs trees) | none needed | platform-gate predicate; tmp_path fakes |
+| tests/unit/services/test_ram_guard_events.py | none (fake procfs) | none needed | platform-gate predicate; tmp_path fakes |
+| tests/unit/services/test_ram_guard_guard.py | one (/proc/<pid>/stat raw bytes) | skipif where needed | platform-gate predicate |
+| tests/unit/services/test_ram_guard_interactions.py | none (fake procfs) | none needed | platform-gate predicate |
+| tests/unit/services/test_ram_guard_ladder.py | none (synthetic proc root) | none needed | platform-gate predicate |
+| tests/unit/services/test_ram_guard_phase6.py | none (fake procfs) | none needed | platform-gate predicate |

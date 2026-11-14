@@ -1,3 +1,4 @@
+# ENSEMBLE-32: platform-fixture rationale — see docs/runbooks/ram-guard-and-unit-bounds.md "Test-platform census"
 """Substrate tier — the kill ladder and the pre-kill gate (test-plan §3.1,
 case S8 — ALL of P0–P7 (P5a RETIRED, §18.3) — plus S16 and S18).
 
@@ -967,3 +968,10 @@ def test_p8_foreign_unreadable_does_not_mask_the_verified_death(tmp_path, kill_c
     assert reason == REASON_LADDER, (
         f"a foreign unreadable must not mask the verified death (got {reason})"
     )
+
+
+import pytest
+
+@pytest.fixture(autouse=True)
+def _ensemble32_linux_platform(monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")

@@ -1,3 +1,4 @@
+# ENSEMBLE-32: platform-fixture rationale — see docs/runbooks/ram-guard-and-unit-bounds.md "Test-platform census"
 """Phase 6 — the guard-level additions (bounded, deterministic, NO subprocesses).
 
 This pack owns the Phase-6-only assertions that were NOT part of the
@@ -716,3 +717,10 @@ def test_d8_the_bash_lane_carries_the_ram_observed_peak_bytes_line_name():
 def test_the_counter_and_heartbeat_key_sets_are_stable():
     assert "ram_kill_refusals_p8" not in COUNTER_KEYS
     assert len(HEARTBEAT_KEYS) == 11
+
+
+import pytest
+
+@pytest.fixture(autouse=True)
+def _ensemble32_linux_platform(monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")
