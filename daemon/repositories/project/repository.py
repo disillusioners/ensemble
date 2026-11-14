@@ -1537,6 +1537,18 @@ class SQLModelProjectRepository:
         details = details[:5000] if details else None
         with Session(self.engine) as session:
             try:
+                # B2 / D19: per-project writer serialization — lock the ALWAYS-PRESENT
+                # projects row as the FIRST statement, BEFORE the count. PG: a real row
+                # lock serializing ALL writers for that project — the whole
+                # count→evict→MAX→INSERT sequence becomes atomic per project. SQLite:
+                # ``with_for_update`` is a no-op AND SQLite already serializes writers at
+                # the DB level, so semantics are correct on BOTH backends. The architect's
+                # earlier FOR UPDATE objection ("locks nothing on an empty project")
+                # applied to locking FUTURE-table rows — locking the projects row
+                # sidesteps it (the row always exists for a live project).
+                # session.get returns None for an absent project (no lock acquired);
+                # callers pre-verify project existence at the tool layer.
+                session.get(Project, project_id, with_for_update=True)
                 count_stmt = select(func.count()).select_from(
                     select(ProjectFutureEntry).where(ProjectFutureEntry.project_id == project_id).subquery()
                 )                                    # inline count idiom (A17, add_history_entry count idiom)
@@ -1586,6 +1598,15 @@ class SQLModelProjectRepository:
                     seq=(max_seq or 0) + 1,            # monotone among LIVE rows; removing the newest row may reuse its seq (R6/D2)
                 )
                 session.add(entry)
+                session.flush()                        # assign the PK before payload capture (B1)
+                # B1: capture the response payload BEFORE commit — a concurrent remove in
+                # the commit→refresh gap used to raise ObjectDeletedError (not
+                # IntegrityError → generic backstop → ORM-internals error to the agent)
+                # even though the add had COMMITTED. Payload is captured pre-commit and
+                # the post-commit refresh is gone: the caller gets the success payload
+                # regardless of what happens to the row after the commit lands.
+                payload = entry.to_dict()
+                payload["evicted"] = evicted
                 session.commit()                       # ONE transaction: deletes + insert land together
             except IntegrityError as exc:
                 # D16 + D18 translate-and-fail-closed, NARROWED per D18: inspect the
@@ -1602,9 +1623,6 @@ class SQLModelProjectRepository:
                 if _is_seq_unique_race(exc):
                     raise ConcurrentWishlistUpdate(project_id) from exc
                 raise
-            session.refresh(entry)
-            payload = entry.to_dict()
-            payload["evicted"] = evicted
             return payload
 
     def list_future_entries(
@@ -1639,6 +1657,12 @@ class SQLModelProjectRepository:
         obsolete idea (D11).
         """
         with Session(self.engine) as session:
+            # B2 / D19: same per-project writer lock as add_future_entry (uniformity —
+            # closes the remove-vs-add window cheaply). Skipped when project_id is None
+            # (the caller didn't scope it; the entry's own project is discovered post-get
+            # and the add-side lock already bounds that residual window).
+            if project_id is not None:
+                session.get(Project, project_id, with_for_update=True)
             entry = session.get(ProjectFutureEntry, entry_id)
             if entry is None:
                 return None
