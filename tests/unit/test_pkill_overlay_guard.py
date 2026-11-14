@@ -1,8 +1,67 @@
 """Unit tests for the rogue-containment pkill overlay guard (pure function)."""
 
+import asyncio
 import os
 
+import pytest
+
 from daemon.tools.bash import _pkill_overlay_violation
+
+
+# ---------------------------------------------------------------------------
+# STRUCTURAL spawn-seam neuter — record-instead-of-spawn (HY-M2 incident fix)
+# ---------------------------------------------------------------------------
+# This file pins the guard's PURE predicate (no tool coroutine is invoked
+# here today — every pin calls ``_pkill_overlay_violation`` directly, which
+# cannot spawn). The autouse recorder below is defense-in-depth for the
+# FAMILY: if a future pin in THIS file ever invokes the real bash/proc tool
+# coroutine with a command, its spawn seam is already neutered — under any
+# mutant, including refusal-gate-bypassing ones. Mirrors the fixture in
+# test_pkill_overlay_pins.py (module-local copies; tests/conftest.py is
+# deliberately NOT touched). NOTHING is ever executed.
+
+
+class _RecordedSpawnStub:
+    """Inert stand-in for ``asyncio.subprocess.Process`` — never a process."""
+
+    def __init__(self, seq: int) -> None:
+        self.pid = 2_000_000 + seq
+        self.returncode = 0
+        self.stdout = None
+        self.stderr = None
+
+    async def wait(self) -> int:
+        return self.returncode
+
+
+@pytest.fixture(autouse=True)
+def _spawn_seam_recorder(monkeypatch):
+    """Record-instead-of-spawn tripwire for every pin in this file."""
+    spawns: list = []
+    seq = 0
+
+    async def _record_exec(*args, **kwargs):
+        nonlocal seq
+        seq += 1
+        spawns.append({"argv": list(args), "cwd": kwargs.get("cwd")})
+        return _RecordedSpawnStub(seq)
+
+    async def _record_shell(command, *args, **kwargs):
+        nonlocal seq
+        seq += 1
+        spawns.append({"argv": [command], "cwd": kwargs.get("cwd")})
+        return _RecordedSpawnStub(seq)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _record_exec, raising=True)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", _record_shell, raising=True)
+    yield
+    assert not spawns, (
+        "STRUCTURAL SPAWN GUARD tripped (test_pkill_overlay_guard): the recorder "
+        f"captured {len(spawns)} spawn attempt(s): {spawns!r}. NOTHING was "
+        "executed — the recorder returned an inert stub — so this run is "
+        "harmless; but a spawn from this pure-predicate file means a pin "
+        "started invoking a real tool coroutine and its guard is bypassed."
+    )
 
 
 def test_non_kill_command_passes():

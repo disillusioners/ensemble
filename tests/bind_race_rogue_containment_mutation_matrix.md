@@ -303,6 +303,42 @@ predicate-neutering proc mutant converts the "inert" text pins into real-spawn
 hazards. Text-only mutants (HY-M3/HY-M4) keep the refusal firing and are safe,
 as observed.
 
+### Spawn-seam contract (normative — STRUCTURAL, not prose; added 2026-11-14)
+
+ANY counter-mutant that can bypass a refusal gate on a spawn-capable tool (bash
+tool, proc tool, or any future tool whose refusal precedes a process spawn)
+MUST be executed under a **spawn-seam recorder (record-instead-of-spawn)**: the
+tool's process-spawn surface (`asyncio.create_subprocess_exec` /
+`asyncio.create_subprocess_shell` — resolved as module attributes of `asyncio`
+at call time by `daemon/tools/bash.py` and `daemon/tools/proc_tools.py`) is
+replaced per-pin by an **autouse fixture living INSIDE the pin file** that
+captures argv and returns an inert stub (never execs, never forks, never
+signals). Prose caution alone ("the refusal returns BEFORE any spawn") is
+NON-COMPLIANT — that sentence is the exact assumption the incident falsified.
+
+Contract rules:
+
+1. **Seam in the pin file, not the harness.** The recorder is a module-local
+   autouse fixture in each pin file (never `tests/conftest.py`), so every venue
+   that checks out the pins carries the seam — kill-proof by construction, not
+   by run-time discipline.
+2. **Live shapes stay live.** The seam neuters the SPAWN, never the GUARD: pin
+   command patterns must remain live-shaped (they still trip the refusal under
+   green code) and must still REDDEN under bypassing mutants.
+3. **Zero-exec proof rides the red.** The recorder's per-pin teardown FAILS any
+   pin that recorded a spawn attempt, naming the recorded argv — a bypassing
+   mutant yields a RED pin whose failure output is itself the evidence that
+   nothing was executed.
+4. **Row validity.** A refusal-gate counter-mutant row is valid only when its
+   red evidence shows BOTH the refusal-text/assertion failure AND the recorder
+   proving zero executed processes.
+
+Current compliance: `tests/unit/test_pkill_overlay_pins.py` (HY-2/HY-3/HY-4
+invoke real tool coroutines — recorder active on every pin) and
+`tests/unit/test_pkill_overlay_guard.py` (pure-predicate pins today; recorder
+held as a family tripwire). Both carry the autouse `_spawn_seam_recorder`
+fixture; the full family runs 29/29 green under it.
+
 ## Row verdict roll (S6)
 
 13/13 rows RED under their named counter-mutants (BF-M1..M9, HY-M1..M4) ·

@@ -1,10 +1,91 @@
 """Mutation-proven overlay pins (component A/B census): every pattern family."""
 
+import asyncio
 import importlib
 import inspect
 
+import pytest
+
 from daemon.tools.bash import _pkill_overlay_violation
 from daemon.tools.proc_tools import create_proc_tools
+
+
+# ---------------------------------------------------------------------------
+# STRUCTURAL spawn-seam neuter — record-instead-of-spawn (HY-M2 incident fix)
+# ---------------------------------------------------------------------------
+# Incident 64c82ac6: under the HY-M2 counter-mutant (proc delegation severed)
+# the HY-4 pin's ``proc_run(command="pkill -f <live-name>")`` passed the
+# refusal gate and spawned a REAL pkill that SIGTERM'd the live daemon. The
+# pins' inertness rested on "refusal returns BEFORE spawn" — an assumption,
+# not a structure. This fixture makes the hazard impossible BY CONSTRUCTION:
+# the process-spawn seam both tools use (``asyncio.create_subprocess_exec`` /
+# ``asyncio.create_subprocess_shell`` — resolved as module attributes of
+# ``asyncio`` at call time by daemon/tools/bash.py and daemon/tools/
+# proc_tools.py) is replaced with a RECORDER. Live-shaped command patterns
+# stay live-shaped (they still trip the guard under green code) but any
+# spawn the guard fails to refuse — under ANY mutant, including
+# refusal-gate-bypassing ones — is captured and returned as an inert stub.
+# NOTHING is ever executed.
+
+
+class _RecordedSpawnStub:
+    """Inert stand-in for ``asyncio.subprocess.Process`` — never a process.
+
+    Surface shaped to the tools' post-spawn reads: ``pid`` (outside the
+    live pid space, so ``os.getpgid`` raises ProcessLookupError → the
+    tools' caught fallback and ``/proc/<pid>`` reads report absent →
+    the tools' fail-open paths), ``returncode``, ``stdout``/``stderr``
+    (``None`` — the proc lane's capture task exits early; the bash lane
+    redirects to files), and an async ``wait()``.
+    """
+
+    def __init__(self, seq: int) -> None:
+        self.pid = 2_000_000 + seq
+        self.returncode = 0
+        self.stdout = None
+        self.stderr = None
+
+    async def wait(self) -> int:
+        return self.returncode
+
+
+@pytest.fixture(autouse=True)
+def _spawn_seam_recorder(monkeypatch):
+    """Record-instead-of-spawn for EVERY pin in this file (per-pin seam).
+
+    A recorded spawn is a STRUCTURAL GUARD EVENT: it can only happen when
+    a refusal gate failed to fire. The recorder returns an inert stub (no
+    exec, no fork, no signal), and the per-pin teardown below fails the
+    pin with the recorded argv — so a bypassing mutant turns into a RED
+    pin with a zero-exec proof, instead of a live kill.
+    """
+    spawns: list = []
+    seq = 0
+
+    async def _record_exec(*args, **kwargs):
+        nonlocal seq
+        seq += 1
+        # argv + cwd ONLY — never the assembled child env (ambient
+        # environment must not leak into failure output).
+        spawns.append({"argv": list(args), "cwd": kwargs.get("cwd")})
+        return _RecordedSpawnStub(seq)
+
+    async def _record_shell(command, *args, **kwargs):
+        nonlocal seq
+        seq += 1
+        spawns.append({"argv": [command], "cwd": kwargs.get("cwd")})
+        return _RecordedSpawnStub(seq)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _record_exec, raising=True)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", _record_shell, raising=True)
+    yield
+    assert not spawns, (
+        "STRUCTURAL SPAWN GUARD tripped (test_pkill_overlay_pins): the recorder "
+        f"captured {len(spawns)} spawn attempt(s) that the refusal gate failed "
+        f"to stop: {spawns!r}. NOTHING was executed — the recorder returned an "
+        "inert stub — so this run is harmless; but the guard under test is "
+        "bypassed and this pin family must REDDEN under such a mutant."
+    )
 
 
 def test_name_family_refused_unfenced():
