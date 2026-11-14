@@ -293,7 +293,7 @@ Non-vacuity controls: clean-tree green legs accompany every family (E2 S6 owns t
 
 ## 10. Migration Expectation
 
-**ZERO migrations.** Code-only: one new module, additive JSON fields on a filesystem claim file (no SQLModel table), additive marker-payload fields, one tuple entry + one string edit in bash.py, one watchdog watch leg. No `*.sql` in `daemon/migrations/versions/` (119 files, zero exceptions — repo rule). No `rollback_safe` adjudication change (additive logic ⇒ expected `rollback_safe=true source=explicit (fix-loss-only)`). **If any design step turns out to need a DB table: STOP and flag to the leader** (changes rollback_safe + ceremony scope).
+**ZERO migrations.** Code-only: one new module, additive JSON fields on a filesystem claim file (no SQLModel table), additive marker-payload fields, one tuple entry + one string edit in bash.py, one watchdog watch leg. No `*.sql` in `daemon/migrations/versions/` (one file per migration, zero exceptions — repo rule). No `rollback_safe` adjudication change (additive logic ⇒ expected `rollback_safe=true source=explicit (fix-loss-only)`). **If any design step turns out to need a DB table: STOP and flag to the leader** (changes rollback_safe + ceremony scope).
 
 ## 11. Risks
 

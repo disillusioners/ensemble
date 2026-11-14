@@ -114,7 +114,7 @@ Addendum `architecture-addendum.md` @ `ad814dae4` (enriches this corpus; bind-ra
 - 🔴 3 D-2 knob interface → recorded as no-knob — APPLIED (A2, E2).
 - 🔴 4 D-3 lineage fragility → script-name-arg fix + §7 row + stability control — APPLIED (A2 §5.3/§7).
 - 🟡 5 stale component-B anchors (`:502-515/:532-556/:513/:558-559`; §4.7 `:617-619`) — APPLIED (B2 §3/§4.7).
-- 🟡 6 second DSN site `factory.py:364-369` cited (+ drift cross-ref) — APPLIED (B2).
+- 🟡 6 second DSN site `factory.py:364-369` cited (+ drift cross-ref) — APPLIED (B2); cite re-verified 2026-11-14 — the env-wins line now sits at `factory.py:360` in `create_postgres_engine` (`:316`).
 - 🟡 7 P4b real-live-shape pin cell — APPLIED (B2; cross-ref in E2).
 - 🟡 8 `daemon/api.py` into plan-overview Phase-1 file column — APPLIED (plan-overview).
 - 🟡 9 C1 claims-dir harness fix → PRECONDITION (existing refuse-foreign leg silently green; re-based onto the shipped claims path) — APPLIED (E2, blocking).
@@ -126,7 +126,7 @@ Addendum `architecture-addendum.md` @ `ad814dae4` (enriches this corpus; bind-ra
 - 🟢 15 `migration_worker.py:487-489` out-of-hook residual declared in the guard docstring — RECORDED (B2).
 - 🟢 16 unit-template sha pin missing → follow-up lane recommended, leader's call whether to queue — RECORDED (§5).
 
-**Unchanged rulings (honored):** CHANGELOG consolidated catch-up under **v0.30.10 ONLY**, NO heading backfill ([0.29.22]/[0.29.23]/[0.30.0]/[0.30.1] stay absent, referenced by tag); no remediation; no promote; live untouched; code-only release.
+**Unchanged rulings (honored; version anchor updated per the finalize rulings):** CHANGELOG consolidated catch-up under **v0.30.12 ONLY** — NOT v0.30.10 (phantom .10 = a bump commit inside sweep ancestry, zero tags/artifacts; v0.30.11 = the absorbed sibling) — shaped as `[0.30.12]` carrying THREE attributed subsections ((i) this lane's new work; (ii) containment catch-up v0.29.19–v0.30.9 shipped-silent; (iii) 'absorbed from sibling staged v0.30.11' five sweep items), with the CHANGELOG forestry itself owned by the finalize lane (giter), not this implementation lane. NO heading backfill ([0.29.22]/[0.29.23]/[0.30.0]/[0.30.1] stay absent, referenced by tag); no remediation; no promote; live untouched; code-only release.
 
 ## 10. Rejected shapes (house memory, do not re-open without new evidence)
 
