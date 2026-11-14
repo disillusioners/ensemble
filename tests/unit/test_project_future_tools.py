@@ -323,3 +323,31 @@ class TestRemove:
             {"project_id": "nope", "entry_id": "future-1"}
         )
         assert result == {"error": "Project 'nope' not found"}
+
+
+# =============================================================================
+# W6d — per-tool _FULL_DOCS contract components
+# =============================================================================
+
+
+class TestFullDocContract:
+    @pytest.mark.parametrize("tool_name", [
+        "project_future_add",
+        "project_future_list",
+        "project_future_remove",
+    ])
+    def test_full_doc_carries_contract_components(self, tools, tool_name):
+        """W6d: EVERY tool's _full_doc_ states the contract — cap token, an
+        eviction token, and a purpose phrase. A future edit that drops one names
+        the offending tool."""
+        tool = next(t for t in tools if t.name == tool_name)
+        doc = tool._full_doc_
+        assert "32" in doc, f"{tool_name}: missing cap token '32'"
+        assert ("evict" in doc.lower()) or ("fifo" in doc.lower()), (
+            f"{tool_name}: missing eviction token ('evict'/'FIFO')"
+        )
+        assert (
+            ("critical notes" in doc.lower())
+            or ("wishlist" in doc.lower())
+            or ("future-improvement" in doc.lower())
+        ), f"{tool_name}: missing purpose phrase ('critical notes'/'wishlist'/'future-improvement')"
