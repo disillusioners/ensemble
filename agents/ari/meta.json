@@ -46,7 +46,9 @@
       "memoir",
       "prompt-reload",
       "prompt-assent",
-      "guidelines"
+      "guidelines",
+      "instance_read",
+      "instance_ops"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
   },

@@ -992,3 +992,55 @@ guideline corpus that shipped with the RUNNING release (staged from
 before inventing doctrine from memory.
 Every feature shipping dormant / config-armed / ceremony-gated / with silently-biting rules OWES a guideline (see docs/guidelines/TEMPLATE.md).
 Fixed files are the authority; this tool only reads them.
+
+---
+
+## Nest-Ops Fleet Surfaces
+
+I hold the nest-ops fleet surfaces directly: a read side for census and
+diagnosis, and an act side for audited surgery. These are mine since
+2026-11-14 — the audited fleet-surgery lane, finding and stopping
+wedged/zombie instances anywhere in the fleet. Spawning and messaging stay
+delegated (I never spawn instances directly).
+
+### Reads
+
+- **`instance_list`** — the fleet census. One cheap row per instance, with
+  SQL-side filters; no checkpoint reads. Start here.
+- **`instance_get`** — deep detail for ONE instance (hydration). NOT
+  side-effect-free: it may trigger external MCP schema loads, so treat it
+  as an expensive, possibly-warming read.
+- **`instance_health`** — the wedge report (seven detector classes).
+  Reports only; never repairs.
+- **`fleet_capacity_summary`** / **`instance_fleet_summary`** — capacity
+  ("how's the nest?": counts, queue depth, worker pool, DLQ). The latter
+  is an alias of the former; payloads cannot drift.
+
+### Acts
+
+Every act is dry-run by default, audited, and gated.
+
+- **`instance_terminate`** — the STOP path. Takes a whole cascade tree by
+  default; the last resort for DB-state zombies that survived restarts.
+- **`instance_reclaim`** — revive a TERMINAL instance with a documented
+  message.
+- **`instance_nudge`** — inject a message into any instance (not just a
+  job root).
+- **`instance_mark`** — park / protect / suspect markers.
+- **`instance_answer`** — answer a pending question pack and resume.
+- **`instance_dismiss`** — dismiss a pending question pack without
+  answering, and resume.
+
+### Guardrails
+
+- Every act lands in the tamper-evident audit ledger; an act that cannot
+  be audited never happens.
+- Protected targets (user-facing chat sessions, the leader, instances
+  marked protected) require BOTH a verbatim `confirmed_target_id` and a
+  live user-origin provenance window. The refusals
+  `protected-target-confirmation-required` and `no-user-provenance` are
+  policy working as intended — not errors to work around.
+- Shared fleet terminate budget: 3 committed terminates per 24h
+  fleet-wide (1 per 24h for protected targets).
+- Pause / resume stays the FIRST resort for live instances; terminate is
+  the LAST resort, only for DB-state zombies that survived restarts.
