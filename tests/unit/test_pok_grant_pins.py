@@ -169,9 +169,9 @@ class TestThePokGrantOrdering:
         assert ANCHOR_CATEGORY in allow
         assert allow.index(CATEGORY) == allow.index(ANCHOR_CATEGORY) - 1
         tail = allow[allow.index(CATEGORY) + 2 :]
-        assert tail == ["memoir", "prompt-reload", "prompt-assent", "guidelines"], (
-            f"ari's memoir/prompt-reload/prompt-assent/guidelines tail must "
-            f"survive the insert UNREORDERED — tail is {tail}"
+        assert tail == ["memoir", "prompt-reload", "prompt-assent", "guidelines", "instance_read", "instance_ops"], (
+            f"ari's memoir/prompt-reload/prompt-assent/guidelines/instance_read/"
+            f"instance_ops tail must survive the insert UNREORDERED — tail is {tail}"
         )
 
 

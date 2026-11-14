@@ -198,14 +198,19 @@ class TestTheAriOnlyAllowList:
         # guidelines (2026-11-13, guideline-read-tool lane) appended AFTER
         # prompt-assent — prompt-reload is now third-to-last; the array
         # length grew 38 -> 39.
-        assert allow[-3] == CATEGORY, (
+        # ari nest-ops fleet grant (2026-11-14) appended
+        # "instance_read", "instance_ops" AFTER guidelines — prompt-reload
+        # is now fifth-to-last; the array length grew 39 -> 41.
+        assert allow[-5] == CATEGORY, (
             "the prompt-reload entry must sit IMMEDIATELY BEFORE the "
             "prompt-assent entry in ari's allow array (the trailing-entry "
             "discipline — a later lane may append after it)"
         )
-        assert allow[-2] == "prompt-assent"
-        assert allow[-1] == "guidelines"
-        assert len(allow) == 39
+        assert allow[-4] == "prompt-assent"
+        assert allow[-3] == "guidelines"
+        assert allow[-2] == "instance_read"
+        assert allow[-1] == "instance_ops"
+        assert len(allow) == 41
 
     def test_no_other_agent_carries_the_category(self) -> None:
         offenders: list[str] = []
