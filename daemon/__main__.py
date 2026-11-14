@@ -208,12 +208,23 @@ def _boot_db_preflight() -> None:
             or os.environ.get("DATA_DIR")
             or "./data"
         )
-        from .ensemble_config import assert_db_resolution_sanctioned
+        from .ensemble_config import (
+            assert_db_resolution_sanctioned,
+            assert_prod_dsn_sanctioned,
+        )
         assert_db_resolution_sanctioned(data_dir)
         ensemble_config = EnsembleConfig.load_or_create(data_dir)
         if not ensemble_config.is_postgres:
             logger.debug("Boot preflight: SQLite backend — PG check skipped")
             return
+
+        # rogue-containment p2 (component B2): the tier-1 prod-DSN fence.
+        # The ambient tier-2 guard above short-circuits on json-present;
+        # this post-load gate refuses a boot whose RESOLVED DSN (env-wins)
+        # targets ensemble_prod unless identity is live — BEFORE the
+        # connectivity probe constructs any engine (pre-TCP; this
+        # preflight is the exit-78 owner on both entry paths).
+        assert_prod_dsn_sanctioned(ensemble_config)
 
         from .constants import BOOT_DB_TIMEOUT_S
         from sqlalchemy import create_engine, text

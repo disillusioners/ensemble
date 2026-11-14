@@ -749,9 +749,18 @@ async def lifespan(app: FastAPI):
     # False and `_serve_with_bind_retry`'s tail exits 3 (crash track),
     # which is the supervisor's retry signal. It is unreachable when the
     # preflight already ran (the preflight owns exit 78 there).
-    from daemon.ensemble_config import assert_db_resolution_sanctioned
+    from daemon.ensemble_config import (
+        assert_db_resolution_sanctioned,
+        assert_prod_dsn_sanctioned,
+    )
     assert_db_resolution_sanctioned(data_dir)
     ensemble_config = EnsembleConfig.load_or_create(data_dir)
+    # rogue-containment p2 (component B2): tier-1 prod-DSN fence as a
+    # defense-in-depth backstop — unreachable when the preflight already
+    # ran (the preflight owns exit 78 there). Same exit-3 mapping as the
+    # tier-2 guard above: SystemExit(78) propagates through uvicorn's
+    # LifespanOn as a STARTUP FAILURE (crash track).
+    assert_prod_dsn_sanctioned(ensemble_config)
     app.state.ensemble_config = ensemble_config
     # Stash the data_dir so routers (e.g. database switch) can persist
     # ensemble.json updates to the same location the lifespan loaded it

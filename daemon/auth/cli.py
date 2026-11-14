@@ -81,6 +81,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m daemon.auth.cli",
         description="OAuth2 bearer-token mint/revoke CLI (oauth2-auth P4).",
+        epilog=(
+            "DB-resolution fence (rogue-containment p2): token ops resolve "
+            "the daemon's own ensemble.json chain and are REFUSED (exit 78) "
+            "when the resolved DSN targets ensemble_prod without live boot "
+            "identity. Operator escape hatch on the live install: set "
+            "ENSEMBLE_SELF_ENV=live."
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -130,6 +137,14 @@ def resolve_engine(config: Any = None):
     ``create_postgres_engine`` when postgres, else SQLite over
     ``config.persistence.db_path``. Callers may inject an engine
     directly (tests / DI) — production resolves this chain.
+
+    rogue-containment p2 (component B2 §4.7): the DB-resolution fence
+    applies on this path too — the tier-2 ambient guard runs BEFORE
+    ``load_or_create`` (a refusal persists no ensemble.json) and the
+    prod-DSN gate runs after load, before any engine. Live identity
+    proceeds; dev/demo/sandbox refuse with exit 78; unresolved identity
+    degrades loudly. Operator escape hatch on the live install:
+    ``ENSEMBLE_SELF_ENV=live``.
     """
     from sqlalchemy.engine import Engine
 
@@ -140,15 +155,31 @@ def resolve_engine(config: Any = None):
 
         config = load_config()
 
-    from daemon.ensemble_config import EnsembleConfig
+    from daemon.ensemble_config import (
+        EnsembleConfig,
+        assert_db_resolution_sanctioned,
+        assert_prod_dsn_sanctioned,
+    )
 
     data_dir = Path(
         os.environ.get("ENSEMBLE_DATA_DIR")
         or os.environ.get("DATA_DIR")
         or "./data"
     )
+    # rogue-containment p2 (component B2 §4.7): the guard-free exemption
+    # here is CLOSED — it was an active poisoner (load_or_create
+    # AUTO-PERSISTS ensemble.json, so an ambient-prod CLI invocation from
+    # a foreign cwd both touched prod AND wrote the tier-1 sanction
+    # artifact). Order: the tier-2 ambient guard runs BEFORE
+    # load_or_create (a refused CLI persists NO artifact); the prod-DSN
+    # gate runs after load, BEFORE any engine — the same carve-out as the
+    # boot path (live proceeds; dev/demo/sandbox refuse 78; unresolved
+    # degrades loudly). Operator escape hatch on the live install: stage
+    # ENSEMBLE_SELF_ENV=live (the explicit marker wins).
+    assert_db_resolution_sanctioned(data_dir)
     ensemble_config = EnsembleConfig.load_or_create(data_dir)
     if ensemble_config.is_postgres:
+        assert_prod_dsn_sanctioned(ensemble_config)
         from daemon.repositories.factory import create_postgres_engine
 
         return create_postgres_engine(ensemble_config)
