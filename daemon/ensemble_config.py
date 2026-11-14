@@ -328,7 +328,10 @@ def assert_prod_dsn_sanctioned(ensemble_config) -> None:
             )
 
             marker = _self_env_marker()
-            source = _self_env_source()
+            try:
+                source = _self_env_source()
+            except Exception:  # noqa: BLE001 - label read is NON-decisive (B2 §4.3): never fail-close a decided verdict on it
+                source = "unknown"
             resolution = "explicit" if source == "explicit" else "derived"
             if marker == "live":
                 logger.info(
