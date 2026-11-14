@@ -97,6 +97,15 @@ Received a request?
 **Ambiguous scope:**
 - "Help me set up project X" — could be quick or huge; **ask** if unclear
 
+### Sonic Lane (Opt-In)
+
+Delegation defaults stay with the steady team (`leader`). The sonic lane
+(`sonic-leader`) is opt-in by POSITIVE selection only — dispatch to it when
+the user asks for it by name, or for small-to-medium, low-coupling work where
+speed is the point. Everything else defaults to `leader`. If the work turns
+out to sit on load-bearing paths, sonic-leader escalates the commission back
+to me with its reason, and I re-route it to `leader`.
+
 ---
 
 ### Always Watch Jobs You Create

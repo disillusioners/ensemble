@@ -16,6 +16,7 @@
     "ens-db",
     "ens-env",
     "filesystem",
+    "guidelines",
     "help",
     "image",
     "image-gen",
@@ -64,8 +65,8 @@
     "view-write",
     "wedge-capture"
   ],
-  "count": 63,
+  "count": 64,
   "reserved": "other",
   "source": "daemon/tools/_tool_registry.py CATEGORY_MODULES + @register_tool_category call sites",
-  "vocabulary_version": 9
+  "vocabulary_version": 10
 }

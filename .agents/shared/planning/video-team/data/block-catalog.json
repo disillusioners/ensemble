@@ -1,0 +1,54 @@
+{
+  "$comment": "Block catalog v1 — EDITABLE SOURCE (architecture.md section 10). A block = id + layer + params schema + render contract + geometry source + gates. Adding a block = a new catalog entry + its renderer + its gates; never an engine fork. video-producer may PROPOSE a new block by editing this catalog; the proposal lands as a plan delta the user approves.",
+  "catalog_version": 1,
+  "blocks": [
+    {
+      "id": "marching-ants-indicator",
+      "layer": "overlay",
+      "description": "Animated dashes + terse label over elements that WILL change (the approved v1-v3 design language: 'Sort X before Y', 'Change X color', 'Hide Z').",
+      "geometry_source": "per-frame logged bboxes from capture meta",
+      "render_contract": "browser-rendered transparent asset track keyed to frame ranges; never ffmpeg drawtext (this host's ffmpeg has no drawtext/subtitles/ass)",
+      "gates": ["G-GEO"],
+      "params_schema": {
+        "type": "object",
+        "required": ["label"],
+        "properties": {
+          "label": {"type": "string", "maxLength": 60},
+          "target_selector": {"type": "string"},
+          "dash_period_frames": {"type": "integer", "minimum": 2, "default": 8}
+        }
+      }
+    },
+    {
+      "id": "teaching-pointer",
+      "layer": "capture-time",
+      "description": "Visible pointer + click ripples + touch indicators driven by the harness's REAL per-frame input coordinates (v2 measured max deviation 0.0044 px). A decorative overlay teaches nothing — this block is a capture property, not a post overlay.",
+      "geometry_source": "harness per-frame input-coordinate log",
+      "render_contract": "harness-rendered during capture; recorded to per-frame coord logs so G-POINTER audits fidelity including inside zoom windows",
+      "gates": ["G-POINTER"],
+      "params_schema": {
+        "type": "object",
+        "properties": {
+          "ripple_frames": {"type": "integer", "minimum": 2, "default": 6},
+          "touch_indicators": {"type": "boolean", "default": true}
+        }
+      }
+    },
+    {
+      "id": "instant-summary-panel",
+      "layer": "overlay",
+      "description": "Appears the INSTANT the result does — no dead seconds (the v2-to-v3 fix; dead air cost v2 ~10-15 s).",
+      "geometry_source": "measured result-landed frame index (from the beat's assert actions)",
+      "render_contract": "browser-rendered overlay keyed to the measured frame index",
+      "gates": ["G-PLAN"],
+      "params_schema": {
+        "type": "object",
+        "required": ["content"],
+        "properties": {
+          "content": {"type": "string", "maxLength": 300},
+          "trigger": {"const": "result-landed-frame"}
+        }
+      }
+    }
+  ]
+}

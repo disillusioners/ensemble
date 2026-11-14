@@ -99,12 +99,30 @@ intervening growth). The same shape is used in
 ``daemon/routers/tmp_images.py`` for the sidecar-MIME
 substrate.
 
-Size rationale (~2914 lines, refreshed 2026-11-08): this router is
+TOCTOU RESIDUAL — media lane (ACCEPTED 2026-11-12, reviewer
+APPROVE, documented not fixed): (a) the media pre-flight's
+``O_NOFOLLOW`` fd is CLOSED before ``FileResponse`` re-stats and
+re-opens the file BY PATH — without ``O_NOFOLLOW`` — so a
+reopen window exists; the pre-flight's guarantees are the cap +
+the 416 decision, not the streamed bytes' identity. (b) It is
+NOT remotely exploitable in this threat model: reaching it
+needs local write access inside a sub-millisecond window between
+our ``close()`` and Starlette's ``stat()``/``open()``, and
+intermediate-directory swaps are a pre-existing class shared
+with every path-based reader on the daemon. (c) The principled
+close is an fd-pinned ``FileResponse`` subclass (hand it the
+already-open fd + ``stat_result`` so no path reopen happens) —
+filed as its own follow-up, deliberately NOT done here. (d) The
+NON-media lane is structurally immune: ``_fd_read`` reads from
+ONE pinned ``O_NOFOLLOW`` fd end-to-end.
+
+Size rationale (~3434 lines, refreshed 2026-11-13): this router is
 the sole HTTP surface of the live-views subsystem; route-registration
 order is load-bearing (mounted directly on ``app`` before the SPA
 catch-all); gate, pages, and origin logic live beside the route family
-to keep the security boundary cohesive. The file sits in the 1000–3000
-band (the band obligation applies) and any future extraction would
+to keep the security boundary cohesive. The file has crossed into the
+>3000 band (refactor-flag band — the one-module justification above
+is the standing rationale) and any future extraction would
 preserve the unified registration order.
 """
 
@@ -113,11 +131,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
+
+from daemon.config import DEFAULT_LIVE_VIEWS_MAX_MEDIA_BYTES
 
 if TYPE_CHECKING:
     from daemon.auth.context import AuthContext
@@ -469,8 +490,9 @@ def _fd_read(path: "os.PathLike[str] | str", max_bytes: int) -> bytes | None:
 
     Returns ``None`` on any open / fstat / over-cap / read
     error. The router collapses ``None`` to the uniform
-    404 — never a stack trace, never a path-disclosure
-    log line at WARNING. The same shape is used in
+    404 — never a stack trace, never a FULL-path log line
+    at WARNING (the over-cap WARNING below intentionally
+    logs the basename only). The same shape is used in
     ``daemon/routers/tmp_images.py`` for the sidecar-MIME
     substrate.
     """
@@ -491,6 +513,16 @@ def _fd_read(path: "os.PathLike[str] | str", max_bytes: int) -> bytes | None:
             return None
         size = st.st_size
         if size > max_bytes:
+            # BASENAME only — the surrounding docstring forbids
+            # path-disclosure log lines; the service-layer
+            # WARNING at ``_resolve_under_root`` already carries
+            # root/rel/size/cap for correlation.
+            logger.warning(
+                "[LiveViews] read-time over-cap: path=%s size=%d cap=%d",
+                os.path.basename(os.fspath(path)),
+                size,
+                max_bytes,
+            )
             return None
         # Read in a loop until we have ``size`` bytes or hit
         # EOF (``b""``). Single-shot ``os.read(fd, size)`` is
@@ -522,6 +554,156 @@ def _fd_read(path: "os.PathLike[str] | str", max_bytes: int) -> bytes | None:
             return b"".join(chunks)
         except OSError:
             return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+# One ``Range`` part, byte-unit form: ``<start>-<end>``, ``<start>-``,
+# ``-<suffix>``. Anything else is NOT ours to interpret — the media
+# pre-flight defers to Starlette (which answers 400 or ignores the
+# part), so the router never guesses a range it cannot represent.
+_RANGE_PART_PATTERN = re.compile(r"^(\d*)-(\d*)$")
+
+
+#: ``Range`` unit prefix (RFC 7233 §2). Only ``bytes`` is
+#: interpreted; the slice lengths in the pre-flight derive from
+#: this constant.
+_RANGE_UNIT_PREFIX = "bytes="
+
+
+def _unsatisfiable_416(size: int) -> Response:
+    """The RFC-7233 §4.4 unsatisfiable-range response.
+
+    Note the ``bytes `` token in ``Content-Range``: Starlette's own
+    ``RangeNotSatisfiable`` handler emits ``Content-Range: */<size>``
+    (token omitted), which is why the media lane pre-empts the shapes
+    it can prove unsatisfiable and answers them here instead.
+    """
+    return Response(
+        status_code=416,
+        headers={
+            **_HARDENING_HEADERS,
+            "Content-Range": f"bytes */{size}",
+            "Content-Length": "0",
+        },
+        media_type="text/plain; charset=utf-8",
+    )
+
+
+def _media_preflight(
+    request: Request,
+    resolved: "ResolvedTarget",
+    max_bytes: int,
+) -> Response | None:
+    """Pre-flight the media lane: TOCTOU open, size cap, 416.
+
+    Runs BEFORE any byte is emitted and BEFORE ``FileResponse`` gets
+    the request. Returns a ``Response`` when the request must be
+    answered here (uniform 404, 413 over-cap, 416 unsatisfiable
+    range); returns ``None`` when the caller should stream the file
+    via ``FileResponse`` (which owns the 200 / 206 / 400 shapes).
+
+    TOCTOU (REWORK 2026-10-07, M4): the file is opened with
+    ``O_NOFOLLOW`` — a final-component symlink swap fails at OPEN
+    time (``ELOOP``) — and ``fstat`` after the open reports the
+    CURRENT size, which is the size both the cap check and the
+    ``Content-Range`` are computed from. The fd is closed on every
+    path.
+
+    416 semantics (RFC 7233 §4.4): an unsatisfiable range MUST be
+    answered with ``Content-Range: bytes */<complete-length>`` — note
+    the ``bytes `` token. Starlette's own ``RangeNotSatisfiable``
+    handler emits ``Content-Range: */<size>``, which OMITS that
+    token; that is why this pre-emption exists at all. It covers
+    comma-separated MULTI-range requests as well as single-range
+    ones, so an unsatisfiable part anywhere in the list gets the
+    compliant header instead of falling through to Starlette.
+
+    A part is skipped exactly as Starlette skips it when it is empty or
+    a bare ``"-"`` (no positions). A part is UNSATISFIABLE when it is a
+    zero/negative suffix (``-0``), a suffix longer than the file
+    (``-<size+1>`` and beyond), or a start at or past EOF. Past-EOF is
+    classified BEFORE reversed bounds: ``5000-3`` is both, and
+    past-EOF is the stronger, provable classification (Starlette's own
+    ``0 <= start < size`` guard runs before its ``start > end`` guard,
+    so it also answers 416 — just without the ``bytes `` token).
+    ONLY provably-unsatisfiable shapes are answered here: a reversed
+    bound WITHIN range (``1023-3``, Starlette's
+    ``MalformedRangeHeader`` 400), an unparsable part, or a
+    non-``bytes`` unit returns ``None`` so Starlette keeps its
+    400 / ignore-part behaviour unchanged.
+    """
+    try:
+        fd = os.open(
+            os.fspath(resolved.on_disk_path),
+            os.O_RDONLY | os.O_NOFOLLOW,
+        )
+    except OSError:
+        return _uniform_404(request)
+    try:
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return _uniform_404(request)
+        size = st.st_size
+        if size > max_bytes:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": "file too large",
+                    "reason": "exceeds media serve cap",
+                    "size_bytes": size,
+                    "max_bytes": max_bytes,
+                },
+                headers=_HARDENING_HEADERS,
+            )
+        rng = request.headers.get("range")
+        if rng is None:
+            return None
+        value = rng.strip()
+        if value[:len(_RANGE_UNIT_PREFIX)].lower() != _RANGE_UNIT_PREFIX:
+            # Non-bytes unit / no ``=`` — Starlette's 400 path.
+            return None
+        for part in value[len(_RANGE_UNIT_PREFIX):].split(","):
+            part = part.strip()
+            if not part or part == "-":
+                # Mirror Starlette's ``_parse_ranges`` skip list: an
+                # empty part and a bare ``-`` are IGNORED, not
+                # unsatisfiable. 416ing them would answer a request
+                # Starlette serves (``bytes=0-99,-`` → 206).
+                continue
+            match = _RANGE_PART_PATTERN.match(part)
+            if match is None:
+                # Not a byte-range part we can interpret — defer.
+                return None
+            first, last = match.group(1), match.group(2)
+            if first == "":
+                # Suffix form ``bytes=-N``: N must be positive, and
+                # an over-long suffix (N > size) is unsatisfiable
+                # too — Starlette rewrites it to ``start = size - N``
+                # (negative), so ITS ``0 <= start`` 416 fires first
+                # and omits the RFC-7233 ``bytes `` token. Strict
+                # ``>``: ``bytes=-<size>`` means "the whole file".
+                if int(last) <= 0 or int(last) > size:
+                    return _unsatisfiable_416(size)
+            elif int(first) >= size:
+                # Start at or past EOF — provably unsatisfiable.
+                # Classified BEFORE reversed bounds: a pair like
+                # ``5000-3`` is BOTH reversed (``3 < 5000``) AND a
+                # start past EOF, and past-EOF is the stronger,
+                # provable classification (Starlette agrees on the
+                # status — its own ``0 <= start < size`` guard runs
+                # before its ``start > end`` guard — it just omits
+                # the RFC-7233 ``bytes `` token).
+                return _unsatisfiable_416(size)
+            elif last != "" and int(last) < int(first):
+                # Reversed WITHIN range — ``MalformedRangeHeader`` in
+                # Starlette, its 400, not our 416.
+                return None
+        return None
     finally:
         try:
             os.close(fd)
@@ -1898,6 +2080,38 @@ def _serve_resolved_target(
             rel_path, nonce=new_csp_nonce(), public=public
         )
 
+    from daemon.services.live_views import (
+        MAX_SERVED_BYTES,
+        is_media_extension,
+        extension_for as _ext_for,
+    )
+
+    # Media lane (D3): Range-capable, streamed via FileResponse
+    # (64 KiB chunks). ``_media_preflight`` owns the fd open +
+    # fstat cap check + the RFC-7233 416 pre-emption; a ``None``
+    # result means "stream it" (Starlette owns 200 / 206 / 400).
+    if is_media_extension(_ext_for(rel_path)):
+        service = _resolve_service(request)
+        max_bytes = (
+            service.max_media_bytes
+            if service is not None
+            else DEFAULT_LIVE_VIEWS_MAX_MEDIA_BYTES
+        )
+        resp = _media_preflight(request, resolved, max_bytes)
+        if resp is not None:
+            return resp
+
+        from starlette.responses import FileResponse
+
+        return FileResponse(
+            path=resolved.on_disk_path,
+            media_type=resolved.content_type,
+            headers={
+                **_HARDENING_HEADERS,
+                **_raw_lane_csp_headers(root_name),
+            },
+        )
+
     # Filesystem / project_scoped: serve the bytes via the
     # same fd-read pipeline as the direct lane (TOCTOU
     # containment — see module docstring).
@@ -2161,7 +2375,10 @@ def build_router() -> APIRouter:
         # 404s ``root_name == "public"`` even if a future drift
         # let one slip past the registry validator. Reserved-
         # name guard mirroring :func:`_public_resolve`.
-        from daemon.services.live_views import is_reserved_root_name
+        from daemon.services.live_views import (
+            ServedFileTooLargeError,
+            is_reserved_root_name,
+        )
 
         if is_reserved_root_name(root_name):
             return _uniform_404(request)
@@ -2186,6 +2403,17 @@ def build_router() -> APIRouter:
             )
         except (RootNotFoundError, TraversalError, PathNotFoundError):
             return _uniform_404(request)
+        except ServedFileTooLargeError as exc:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error": "file too large",
+                    "reason": "exceeds media serve cap",
+                    "size_bytes": exc.size_bytes,
+                    "max_bytes": exc.max_bytes,
+                },
+                headers=_HARDENING_HEADERS,
+            )
         return resolved
 
     # ─────────────────────────────────────────────────────────
@@ -2303,6 +2531,7 @@ def build_router() -> APIRouter:
         from daemon.services.live_views import (
             PathNotFoundError,
             RootNotFoundError,
+            ServedFileTooLargeError,
             TraversalError,
             is_reserved_root_name,
             is_well_formed_rel_path,
@@ -2366,6 +2595,17 @@ def build_router() -> APIRouter:
                             rel_path,
                             calling_instance_id=None,
                         )
+                    except ServedFileTooLargeError as exc:
+                        return JSONResponse(
+                            status_code=413,
+                            content={
+                                "error": "file too large",
+                                "reason": "exceeds media serve cap",
+                                "size_bytes": exc.size_bytes,
+                                "max_bytes": exc.max_bytes,
+                            },
+                            headers=_HARDENING_HEADERS,
+                        )
                     except (
                         RootNotFoundError,
                         TraversalError,
@@ -2398,6 +2638,17 @@ def build_router() -> APIRouter:
                     root_name,
                     rel_path,
                     calling_instance_id=None,
+                )
+            except ServedFileTooLargeError as exc:
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        "error": "file too large",
+                        "reason": "exceeds media serve cap",
+                        "size_bytes": exc.size_bytes,
+                        "max_bytes": exc.max_bytes,
+                    },
+                    headers=_HARDENING_HEADERS,
                 )
             except (
                 RootNotFoundError,
@@ -2474,10 +2725,33 @@ def build_router() -> APIRouter:
         )
         if isinstance(resolved, Response):
             return resolved
-        # No valid grant → interstitial; HEAD returns the
-        # headers-only shape with ``Content-Length: 0`` (the
-        # body is computed on GET; the HEAD contract is the
-        # reachable-or-not signal, not the body).
+        if resolved is None:
+            # No valid grant → interstitial; HEAD returns the
+            # headers-only shape with ``Content-Length: 0`` (the
+            # body is computed on GET; the HEAD contract is the
+            # reachable-or-not signal, not the body).
+            return Response(
+                status_code=200,
+                headers={
+                    **_HARDENING_HEADERS,
+                    "Content-Length": "0",
+                },
+            )
+        # Granted media: real size + Accept-Ranges (D3).
+        from daemon.services.live_views import is_media_extension, extension_for as _ext_for
+
+        if is_media_extension(_ext_for(rel_path)):
+            return Response(
+                status_code=200,
+                headers={
+                    **_HARDENING_HEADERS,
+                    **_raw_lane_csp_headers(root_name),
+                    "Content-Type": resolved.content_type,
+                    "Content-Length": str(resolved.size_bytes),
+                    "Accept-Ranges": "bytes",
+                },
+            )
+        # Granted non-media: keep historical CL 0.
         return Response(
             status_code=200,
             headers={
@@ -3131,6 +3405,20 @@ def build_router() -> APIRouter:
                         "Content-Length": "0",
                     },
                 )
+        from daemon.services.live_views import is_media_extension, extension_for as _ext_for
+
+        if is_media_extension(_ext_for(rel_path)):
+            return Response(
+                status_code=200,
+                headers={
+                    **_HARDENING_HEADERS,
+                    **_raw_lane_csp_headers(root_name),
+                    "Content-Type": resolved.content_type,
+                    "Content-Length": str(resolved.size_bytes),
+                    "Accept-Ranges": "bytes",
+                },
+            )
+
         return Response(
             status_code=200,
             headers={
@@ -3207,8 +3495,35 @@ def build_router() -> APIRouter:
         from daemon.services.live_views import (
             MAX_SERVED_BYTES,
             is_markdown_content_type,
+            is_media_extension,
+            extension_for as _ext_for,
             new_csp_nonce,
         )
+
+        if is_media_extension(_ext_for(rel_path)):
+            # Media lane (D3): Range-capable via FileResponse.
+            # ``_media_preflight`` owns the fd open + fstat cap
+            # check + the RFC-7233 416 pre-emption (the SAME
+            # helper the public lane uses — no second copy).
+            service = _resolve_service(request)
+            max_bytes = (
+                service.max_media_bytes
+                if service is not None
+                else DEFAULT_LIVE_VIEWS_MAX_MEDIA_BYTES
+            )
+            resp = _media_preflight(request, resolved, max_bytes)
+            if resp is not None:
+                return resp
+            from starlette.responses import FileResponse
+
+            return FileResponse(
+                path=resolved.on_disk_path,
+                media_type=resolved.content_type,
+                headers={
+                    **_HARDENING_HEADERS,
+                    **_raw_lane_csp_headers(root_name),
+                },
+            )
 
         file_bytes = _fd_read(resolved.on_disk_path, MAX_SERVED_BYTES)
         if file_bytes is None:

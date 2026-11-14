@@ -63,8 +63,8 @@ Design notes that matter to every leg:
   (T38 — the committed scanner over the ruled three-CWD set), and the
   tidier rec-2 pins ``TestErrorFenceHashCoversFullPayload`` (A1) and
   ``TestErrorFenceChannelUniformity`` (A2).
-* **The baseline leg asserts file-exists + exactly-181 rows** (AM-11: 177
-  base + canary's 4 prompt files): the generator's ``--check`` exits 0 both
+* **The baseline leg asserts file-exists + exactly-197 rows** (AM-11: 177
+  base + canary's 4 + the sonic team's 16 prompt files): the generator's ``--check`` exits 0 both
   when clean AND when the file is absent, so ``rc=0`` alone proves nothing.
 """
 
@@ -2608,11 +2608,16 @@ class TestAegisDoctrinePins:
 
 
 # ---------------------------------------------------------------------------
-# Baseline arithmetic (D-4/(b) + AM-11): file EXISTS + exactly 181 rows
-# (canary-injection-defense P4: 177 base + canary's 4 prompt files)
+# Baseline arithmetic (D-4/(b) + AM-11): file EXISTS + exactly 217 rows
+# (canary-injection-defense P4: 181 = 177 base + canary's 4, + the sonic
+# team's 16 prompt files, + the combined rework's 4 sonic-developer files,
+# + the video-team activation's 16 files — merge 2026-11-13, recounted
+# from the merged manifest)
 # ---------------------------------------------------------------------------
 
-EXPECTED_BASELINE_ROWS = 181
+#: MERGE 2026-11-13 (video-team -> latest): 201 (latest) + 16 video-team
+#: artifacts = 217.
+EXPECTED_BASELINE_ROWS = 217
 
 
 class TestBaselineArithmetic:
@@ -2626,7 +2631,8 @@ class TestBaselineArithmetic:
         lines = [ln for ln in BASELINE_PATH.read_text(encoding="utf-8").splitlines() if ln.strip()]
         assert len(lines) == EXPECTED_BASELINE_ROWS, (
             f"baseline rows = {len(lines)}, expected {EXPECTED_BASELINE_ROWS} "
-            f"(177 base + canary's 4 prompt files — a fifth prompt file or a "
+            f"(197 = 181 base + canary's 4 + the video team's 16 — a fifth "
+            f"prompt file or a "
             f"missing one moves this number)"
         )
 

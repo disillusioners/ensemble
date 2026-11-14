@@ -1,0 +1,17 @@
+{
+  "id": "sonic-tester",
+  "name": "Sonic Tester",
+  "description": "Integration test leaf — consumes the developer's HANDOFF-v2 and the merged tree, runs blast-radius-scoped packs on the merged diff, returns a one-line verdict and (when load-bearing) a RESULTS file",
+  "icon": "🧪",
+  "color": "accent-green",
+  "version": "1.1.0",
+  "llm_model": "coding",
+  "innate_skills": [],
+  "skill_injection": false,
+  "snapshot_enabled": true,
+  "tools": {
+    "allow": ["bash", "proc", "filesystem", "time", "self", "help", "context", "pok", "nest-report"],
+    "deny": ["instance", "service", "midflight", "shared_meta_kv", "infra", "mcp", "secrets"]
+  },
+  "team_members": []
+}

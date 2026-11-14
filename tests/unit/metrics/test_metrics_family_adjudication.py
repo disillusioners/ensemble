@@ -263,6 +263,10 @@ PRE_EXISTING_DAEMON_OFFENDERS = frozenset(
         "daemon/services/view_passcode_pages.py",
         "daemon/sources/registry.py",
         "daemon/tools/_tool_registry.py",
+        # guideline-read-tool lane (2026-11-13): the lane's NEW file —
+        # the guidelines privileged-read tool module — recorded per the
+        # rule above (THE RECORD IS MAINTAINED BY THE CHANGING LANE).
+        "daemon/tools/guidelines.py",
         "daemon/tools/inner_soul.py",
         "daemon/tools/instance.py",
         "daemon/tools/job_queue.py",
@@ -830,7 +834,12 @@ class TestTheBudget:
         # prompt-assent 2026-11-10 (Phase 2): the sanctioned 8 -> 9 bump
         # (the ``prompt-assent`` PRIVILEGED category, #21, joined the
         # tool-category label set — the SAME axis, a fifth time).
-        assert cm.VOCABULARY_VERSION == 9
+        # guidelines 2026-11-13 (guideline-read-tool lane): the
+        # sanctioned 9 -> 10 bump (the ``guidelines`` PRIVILEGED READ
+        # category, #22 — the first privileged grant to a sonic agent,
+        # sonic-leader — joined the tool-category label set; the SAME
+        # axis, a sixth time).
+        assert cm.VOCABULARY_VERSION == 10
 
     def test_each_family_stays_inside_its_declared_band(self) -> None:
         specs = registry.registered_families()

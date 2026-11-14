@@ -11,7 +11,8 @@ Covers the five coverage cells of mission vsss-20261112:
   ``agents/*/`` maps each snapshot-enabled directory to its versioned
   space key; repeated scans yield the identical sorted set and the
   pinned set matches the ratified targets
-  ``['developer', 'developer[v2]', 'tester']``.
+  ``['developer', 'developer[v2]', 'sonic-reviewer', 'sonic-tester',
+  'tester']``.
 * **(c) Predicate isolation** — a real
   :class:`~daemon.repositories.snapshot.repository.SnapshotRepository`
   over in-memory SQLite: an A-space row is invisible to a B-space
@@ -206,12 +207,15 @@ class TestEnumerationStability:
         assert first == second
 
     def test_pinned_expected_set(self):
-        """Ratified targets: developer (base) + developer[v2] + tester —
-        per-directory identity; the pre-vsss pin collapsed the two
-        developer directories into one colliding 'developer' entry."""
+        """Ratified targets: developer (base) + developer[v2] + sonic-reviewer
+        + sonic-tester + tester — per-directory identity; the pre-vsss pin
+        collapsed the two developer directories into one colliding
+        'developer' entry."""
         assert sorted(_scan_snapshot_enabled_space_keys()) == [
             "developer",
             "developer[v2]",
+            "sonic-reviewer",
+            "sonic-tester",
             "tester",
         ]
 

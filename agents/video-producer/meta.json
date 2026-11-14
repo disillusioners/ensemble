@@ -1,0 +1,19 @@
+{
+  "id": "video-producer",
+  "name": "Video Producer",
+  "description": "Video team lane lead — turns requirements into schema'd shot plans from templates, asks the user only for deltas, orchestrates the capture/edit/verify lanes, and owns the openable-project lifecycle with the human veto action log",
+  "icon": "🎬",
+  "color": "accent-amber",
+  "version": "1.0.0",
+  "innate_skills": ["dynamic-skill", "todo"],
+  "skill_injection": false,
+  "snapshot_enabled": true,
+  "no_force_explore": true,
+  "context_injection": {
+    "heuristic_match_shared_md_files": true
+  },
+  "tools": {
+    "allow": ["instance", "subtree_messages", "subtree_status", "question", "filesystem", "context", "shared_meta_kv", "todo", "time", "help", "midflight", "image", "knowledge", "view-views", "pok", "nest-report"]
+  },
+  "team_members": ["video-capturer", "video-editor", "video-verifier"]
+}

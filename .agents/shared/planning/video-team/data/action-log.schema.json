@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agents-ensemble.local/planning/video-team/action-log.schema.json",
+  "title": "Video Team Action Log Entry",
+  "description": "One append-only record per editor mutation (architecture.md section 8.2; the OpenReel-pattern steal). File shape: edit/action-log.jsonl = one JSON object per line, each matching this schema. Reverting action N = re-derive the prior segment set via stream copy from inputs_sha; history is never rewritten.",
+  "type": "object",
+  "required": ["seq", "ts", "actor", "kind", "params", "inputs_sha", "outputs_sha", "reversible", "veto"],
+  "additionalProperties": false,
+  "properties": {
+    "seq": {"type": "integer", "minimum": 1, "description": "Monotonic per project; the log is append-only."},
+    "ts": {"type": "string", "format": "date-time", "description": "ISO-8601 UTC; operational stamp, never part of any sha."},
+    "actor": {"type": "string", "description": "Agent id or 'user'."},
+    "kind": {
+      "enum": ["trim", "text-swap", "zoom-crop", "overlay-swap", "re-capture", "block-param"],
+      "description": "Extensible only via block-catalog.json entries (a new kind must ship with its renderer + gates)."
+    },
+    "params": {"type": "object"},
+    "inputs_sha": {
+      "type": "array",
+      "items": {"type": "object", "required": ["path", "sha256"], "additionalProperties": false, "properties": {"path": {"type": "string"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}},
+      "minItems": 1,
+      "description": "Pinned input set; clip-pinning preflight P2 refuses a stale reference in seconds."
+    },
+    "outputs_sha": {
+      "type": "array",
+      "items": {"type": "object", "required": ["path", "sha256"], "additionalProperties": false, "properties": {"path": {"type": "string"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}}
+    },
+    "reversible": {"type": "boolean", "description": "True when the prior state is reconstructible from pinned inputs via stream copy (architecture.md section 7)."},
+    "veto": {"enum": ["pending", "accepted", "vetoed"], "description": "Human veto state. Fast-lane edits land with veto pending (deliver fast, disclose fully). A vetoed action stays in the log marked vetoed."}
+  }
+}

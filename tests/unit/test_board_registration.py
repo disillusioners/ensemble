@@ -122,6 +122,10 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     # prompt-assent (2026-11-10, prompt-assent lane): privileged entry #21
     # (ari-exactly; see daemon/tools/_tool_registry.py).
     "prompt-assent",
+    # guidelines (2026-11-13, guideline-read-tool lane): privileged entry
+    # #22 — the FIRST privileged grant to a sonic agent (sonic-leader;
+    # ruling 2026-11-13; see daemon/tools/_tool_registry.py).
+    "guidelines",
 })
 
 #: The ONLY agent allowed to hold the board category.
@@ -232,7 +236,7 @@ class TestPrivilegedCategory:
         "ninth entry" is a property of the SET SIZE at the time of the
         phase-1 commit and of the registry's literal order afterwards;
         the comment block in the registry records the ordinal."""
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 21
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 22
         source = (
             REPO_ROOT / "daemon" / "tools" / "_tool_registry.py"
         ).read_text(encoding="utf-8")
@@ -304,10 +308,11 @@ class TestAllowLists:
             # (2026-11-05) appended "nest-report"; memoir-store-v1
             # (2026-11-06) appended "memoir"; prompt-reload
             # (2026-11-06) appended "prompt-reload"; prompt-assent
-            # (2026-11-10) appended "prompt-assent". The pin's INTENT is
+            # (2026-11-10) appended "prompt-assent"; guideline-read-tool
+            # (2026-11-13) appended "guidelines". The pin's INTENT is
             # unchanged: only the categories appended AFTER the board
             # may follow it.
-            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture", "notify-user", "pok", "nest-report", "memoir", "prompt-reload", "prompt-assent"],
+            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture", "notify-user", "pok", "nest-report", "memoir", "prompt-reload", "prompt-assent", "guidelines"],
         }
         for agent_id in BOARD_ALLOW_AGENTS:
             allow = self._allow(agent_id)

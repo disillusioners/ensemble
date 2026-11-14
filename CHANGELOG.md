@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.4] — 2026-11-14
+
+### Added — the guidelines read-tool: a read-only `guidelines` category over the homed guideline system (`feature/guideline-read-tool`, base `5316e0cd3`; zero migrations)
+
+- **Read-only tool category #22** (`daemon/tools/guidelines.py` + `daemon/tools/_tool_registry.py`): `guidelines_list` and `guidelines_read` expose the canonical `docs/guidelines/` set at runtime — status/audience metadata on list, path-confined reads under `docs/guidelines/` only; no write surface anywhere in the category. Factory-built tools carried in `DYNAMIC_TOOL_NAMES`/`KNOWN_TOOL_NAMES` (MT-G01).
+- **Four-agent grant**: `ari`, `devops`, `leader`, `sonic-leader` gain `allow "guidelines"` — the readers who must consult a guideline before acting on a dormant / config-armed / ceremony-gated feature. Full 21→22 category census pins (exact-set AND count) with the new category as a mutation target; 43 registration tests (`tests/unit/tools/test_guidelines_registration.py`).
+- **Staged payload** (`scripts/upgrade/stage.sh` + `tests/test_guidelines_payload.sh`): the 5-file `docs/guidelines/` tree stages as a flat top-level `guidelines/` payload carrying `guidelines_tree_sha256` (lib.sh ordering) + a per-file `guidelines_manifest` in `manifest.json`, plus a stage-local re-hash leg — manifest presence set goes 14 → 16 keys.
+- **Stale-pin clears on the merged vocabulary surface** (`tests/unit/test_pok_grant_pins.py`, `tests/unit/metrics/test_metrics_vocabulary_amendment.py`, `tests/unit/test_anomaly_report_grant_pins.py`): pok-grant `9→10` / `63→64` and ari-tail pins re-derived, metrics-vocab `9→10` + rename. The known pre-existing family-adjudication broad-diff census red (stale `LANE_BASE=644c2bfaa`, owner metrics-family lane, red-by-construction since v0.28.12) remains documented and NOT fixed here.
+- **Gates A–E PASS** (leader verdict 2026-11-14): counter-mutations 4/4, net-new reds 0; tester evidence `.agents/tester/RESULTS/2026-11-13-guideline-read-tool.md`; plan + research `.agents/shared/planning/guideline-read-tool/`.
+
+## [0.30.3] — 2026-11-13
+
+### Added — media streaming for live-views + the video team, on top of the v0.30.2 sonic roster (`feature/liveviews-media-streaming`, `feature/video-team-scaffold`)
+
+- **Multimedia streaming in the live-views surface** (`daemon/routers/live_views.py`, `daemon/services/live_views.py`): MP4/WebM/MOV serving over HTTP with RFC-7233 `Range` semantics — multi-range preflight, suffix-range and start-past-EOF classified to 416 per the spec's ordering, a separate 2 GiB media cap (`ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES`, env > yaml > default), public-HEAD CSP + `nosniff` pins, basename-only over-cap logging, and a 928-line dedicated media test pack. Tester verdict MERGE-READY 217/217 green.
+- **The video team — four agents, definition + activation** (`agents/video-{producer,capturer,editor,verifier}` + `.agents/shared/planning/video-team/`): user-ratified three-tier E/P/R golden model with the Tier S evidence layer, adaptive sampling, mean-3σ calibration (k=3, min 5, fail-closed 0.995/2), mask versioning (≤30 % hard cap), approval identity (`user|leader`), overhead budget ≤15 %; seven `data/*.json` contracts; census pin packs; the `video-artifact` live-views root seed; commissioned tool set; leader wiring (`team_members` = 21). Definition files load at boot — dispatch requires the morning activation go.
+- **Guidelines system, initial set** (`docs/guidelines/`): README + template + memoir-reflection / live-views-passcode / notify-user-bounds guidelines.
+- **Merge-time census reconciliation** (video merge `821b1342d`): the 5 conflicted pin packs re-derived from the merged tree (manifest 217 rows; duty walk 53/55; anomaly grants 53/55; POK grants 54/55; snapshot targets 9) — resolution verified 673/673 on the merged tree, and a latent pre-existing RED at latest (sonic `snapshot_enabled` never pinned) surfaced and pinned to reality, not papered over.
+
+## [0.30.2] — 2026-11-13
+
+### Changed — sonic-team roster & support-parity amendment (Emperor ruling 2026-11-13; `feature/sonic-team-v0302`, base `c1d81593e`; content-only, zero migrations)
+
+- **Roster — giter returns as escape hatch (R16/R20).** `sonic-leader` `team_members` gains `giter` and `devops`; `sonic-developer` gains `giter` (Emperor: *"gitter shouldn't removed, they know about workflow, worktree"* — the developer already owns the house worktree/merge machinery per `[sonic-merge-strategy-v1]`). The internal commit choreography is UNCHANGED (sonic-coder commits its module branch, sonic-developer merges `--no-ff` in dependency order); giter is dispatched only for gnarly git/worktree rescue, devops is "rarely invoked by design — the infra/deploy escape hatch"; release-lane git stays outside the sonic loop.
+- **Image support-parity (R18).** The read trio `{explain_image, image_get, image_list}` granted to sonic-leader / sonic-developer / sonic-coder / sonic-reviewer via `allow "image"` + `deny "image_save"` (the established critic pattern); `image-reader` joins each grantee's effective spawn set (category implication, pinned in the pack's EXPECTED_EFFECTIVE). `compare_images`/`design` NOT granted (design-category holders remain designer + critic only); `generate_image`/`image_save` omitted — read/view only. sonic-coder gains its first `deny` key. sonic-tester UNTOUCHED.
+- **Omissions recorded (R19).** `generate_chart`/`charter`, `generate_image`, `image_save`, `sketcher`/`critic`, `wanderer` omitted; sonic-coder's other steady-coder gaps (snapshot/instance/service/midflight) not directed by the ruling — no change.
+- **Pins in lockstep.** `test/packs/sonic_agent_defs_checks.py` FROZEN_TEAMS/FROZEN_TOOLS/EXPECTED_EFFECTIVE updated for the four touched agents; 13 new counter-mutation legs (54 total, ALL RED — incl. the leader-add-design guard that REDs if the design category ever reaches a sonic agent); real-resolver negatives updated (giter now team-legal for leader + developer). Prompt baseline regenerated: 201-row baseline set unchanged — 6 sonic artifact shas re-hashed. Agent meta versions bumped (leader 1.1.1, developer 1.0.1, coder 1.1.1, reviewer 1.1.1).
+- **Zero schema delta; no Ari edits** — seal + terminology pins untouched; sibling duty/grant/pok/aegis pin counts unchanged (51/49, 49/51, 50/51, 201).
+
 ## [0.29.21] — 2026-11-12
 
 ### Added — RAM-based auto-termination for agent-spawned shell processes (`feature/ram-auto-termination`; plan `.agents/shared/planning/ram-auto-termination/`; runbook `docs/runbooks/ram-guard-and-unit-bounds.md`)

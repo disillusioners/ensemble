@@ -14,10 +14,10 @@ Mirrors ``tests/unit/test_anomaly_report_grant_pins.py`` for the
     nest-report) carries it APPENDED AT END; ``ari`` carries it
     mid-array with the memoir/prompt-reload tail intact;
 (c) **once-per-agent** — the grant appears exactly once;
-(d) **the vocab/artifact pair** — ``VOCABULARY_VERSION == 9`` and
-    the committed artifact carries 63 categories with ``pok``
+(d) **the vocab/artifact pair** — ``VOCABULARY_VERSION == 10`` and
+    the committed artifact carries 64 categories with ``pok``
     (F-1 pair — the constant and the artifact move in the SAME
-    change; the 8 → 9 bump is the prompt-assent lane's).
+    change; the 9 → 10 bump is the guidelines lane's).
 
 Mutation legs (the pack's own mutation-verification duty):
 
@@ -45,11 +45,19 @@ CATEGORY = "pok"
 #: anchor).
 ANCHOR_CATEGORY = "nest-report"
 
-#: Mechanically re-derived 2026-11-07 (the POK B4 sweep): 45 explicit
-#: grants (every non-empty allow) / 46 meta-bearing agent dirs
-#: (45 at the last nest-report pin + ``canary`` since).
-EXPECTED_EXPLICIT = 45
-EXPECTED_TOTAL_META = 46
+#: Mechanically re-derived 2026-11-12 (the sonic-team lane): 49 explicit
+#: grants (every non-empty allow) / 50 meta-bearing agent dirs
+#: (46 at the 2026-11-07 POK B4 sweep + the 4 ``sonic-*`` agents since).
+#: Re-derived 2026-11-13 (COMBINED v1.1+v1.2 rework): 50 / 51 — the
+#: fifth sonic agent ``sonic-developer`` carries ``pok`` immediately
+#: before ``nest-report`` (the insert-before discipline preserved).
+#: MERGE 2026-11-13 (video-team -> latest): the video-team scaffold
+#: (2026-11-11) adds FOUR agents (video-producer / video-capturer /
+#: video-editor / video-verifier), each with a non-empty allow granted
+#: mechanically by the SAME insert-before rule → 54 explicit grants /
+#: 55 meta-bearing agent dirs.
+EXPECTED_EXPLICIT = 54
+EXPECTED_TOTAL_META = 55
 #: The ONE agent that inherits (empty allow = the default universe
 #: grants every NON-privileged category — an explicit entry would
 #: STRIP every other tool watcher inherits).
@@ -161,24 +169,24 @@ class TestThePokGrantOrdering:
         assert ANCHOR_CATEGORY in allow
         assert allow.index(CATEGORY) == allow.index(ANCHOR_CATEGORY) - 1
         tail = allow[allow.index(CATEGORY) + 2 :]
-        assert tail == ["memoir", "prompt-reload", "prompt-assent"], (
-            f"ari's memoir/prompt-reload/prompt-assent tail must survive "
-            f"the insert UNREORDERED — tail is {tail}"
+        assert tail == ["memoir", "prompt-reload", "prompt-assent", "guidelines"], (
+            f"ari's memoir/prompt-reload/prompt-assent/guidelines tail must "
+            f"survive the insert UNREORDERED — tail is {tail}"
         )
 
 
 class TestTheVocabularyArtifactPair:
-    def test_vocabulary_version_is_nine(self) -> None:
-        assert VOCABULARY_VERSION == 9
+    def test_vocabulary_version_is_ten(self) -> None:
+        assert VOCABULARY_VERSION == 10
 
-    def test_artifact_carries_63_categories_with_pok(self) -> None:
+    def test_artifact_carries_64_categories_with_pok(self) -> None:
         artifact_path = (
             REPO_ROOT / ".agents" / "shared" / "metrics" / "tool-categories.json"
         )
         data = json.loads(artifact_path.read_text(encoding="utf-8"))
-        assert data["count"] == 63, (
-            f"artifact count is {data['count']} — the prompt-assent bump is "
-            "62 → 63 (F-1: regenerate via "
+        assert data["count"] == 64, (
+            f"artifact count is {data['count']} — the guidelines bump is "
+            "63 → 64 (F-1: regenerate via "
             "ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT, never hand-edit)"
         )
         assert data["vocabulary_version"] == VOCABULARY_VERSION

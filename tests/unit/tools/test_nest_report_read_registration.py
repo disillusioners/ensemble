@@ -171,8 +171,8 @@ class TestPrivilegedCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_has_twenty_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 21
+    def test_the_set_has_twenty_two_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 22
 
     def test_the_category_follows_metrics_read(self) -> None:
         """The category was appended AFTER ``metrics-read`` (entry #17).
@@ -274,11 +274,21 @@ class TestTheGrants:
         # now [..., "nest-report-read", "pok", "nest-report"] for the
         # three phase-3 holders. The intent (mis-ordered arrays caught
         # mechanically) is unchanged.
+        # guidelines (2026-11-13, guideline-read-tool lane) tail-appended
+        # to DEVOPS ONLY (privileged entry #22) — devops's tail grew by
+        # one documented later-lane entry; maintenancer/wanderer are
+        # unchanged.
         for agent in ("maintenancer", "devops", "wanderer"):
             allow = _agent_meta(agent)["tools"]["allow"]
-            assert allow[-3] == CATEGORY, (agent, allow[-3:])
-            assert allow[-2] == "pok", (agent, allow[-3:])
-            assert allow[-1] == "nest-report", (agent, allow[-3:])
+            expected_tail = (
+                [CATEGORY, "pok", "nest-report", "guidelines"]
+                if agent == "devops"
+                else [CATEGORY, "pok", "nest-report"]
+            )
+            assert allow[-len(expected_tail):] == expected_tail, (
+                agent,
+                allow[-len(expected_tail):],
+            )
 
 
 class TestColdBootWiring:

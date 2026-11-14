@@ -26,6 +26,10 @@ htmlcov/
 
 # Data directory
 data/
+# Sanctioned exception (leader-authorized 2026-11-11): the video-team
+# contracts of record live under the planning dir; the generic data/
+# rule above must not swallow them.
+!.agents/shared/planning/video-team/data/
 # Disposable-PG e2e cluster (Maintenance Console) — leaked dir is
 # cleaned by `frontend/scripts/boot-e2e-maintenance-daemon.sh stop`
 # (cleanup() now wired into TERM/INT trap AND action_stop). Stays

@@ -1,0 +1,516 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agents-ensemble.local/planning/video-team/shot-plan.schema.json",
+  "title": "Video Team Shot Plan",
+  "description": "Schema'd shot plan (architecture.md section 5.3 / section 9). Authored by video-producer; reviewed as a DATA DIFF (one turn). beat_sha = sha256 over the canonical serialization (sorted keys, 2-space indent, no timestamps) of the beat's subtree of beats[].",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project_id",
+    "profile",
+    "video",
+    "beats"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "project_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "maxLength": 48
+    },
+    "profile": {
+      "enum": [
+        "fast-demo",
+        "film+goldens"
+      ]
+    },
+    "video": {
+      "type": "object",
+      "required": [
+        "title",
+        "fps",
+        "cap_s",
+        "aspects",
+        "silent"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "fps": {
+          "enum": [
+            24,
+            30,
+            60
+          ]
+        },
+        "cap_s": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 90,
+          "description": "Hard duration cap in seconds; locked 1:30 maximum (preflight P1 reads this per lane profile)."
+        },
+        "aspects": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [
+              "16x9"
+            ]
+          },
+          "description": "v1 deliverable is 1920x1080 16:9 only; locked no-mobile-framing decision."
+        },
+        "silent": {
+          "const": true,
+          "description": "Locked SILENT decision; never voiceover."
+        }
+      }
+    },
+    "beats": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/beat"
+      }
+    }
+  },
+  "$defs": {
+    "beat": {
+      "type": "object",
+      "required": [
+        "id",
+        "surface",
+        "route",
+        "state",
+        "actions",
+        "duration_frames",
+        "comparison",
+        "comparison_thresholds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "maxLength": 48
+        },
+        "surface": {
+          "enum": [
+            "sider",
+            "bottom-bar",
+            "modal",
+            "popup",
+            "dashboard"
+          ]
+        },
+        "route": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "type": "object",
+          "required": [
+            "requires",
+            "asserts"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "requires": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "asserts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The beat's intent; G-PLAN re-judges these after any product change."
+            }
+          }
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "type",
+              "at_frame"
+            ],
+            "additionalProperties": true,
+            "properties": {
+              "type": {
+                "enum": [
+                  "navigate",
+                  "click",
+                  "hover",
+                  "drag",
+                  "type",
+                  "key",
+                  "wait_for",
+                  "wait_frames",
+                  "assert",
+                  "set_fixture"
+                ]
+              },
+              "at_frame": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Absolute virtual-clock frame; compiler rejects overlapping or unsorted at_frame within a beat."
+              }
+            }
+          }
+        },
+        "blocks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "block_id"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "block_id": {
+                "enum": [
+                  "marching-ants-indicator",
+                  "teaching-pointer",
+                  "instant-summary-panel"
+                ]
+              },
+              "params": {
+                "type": "object",
+                "description": "Block params per block-catalog.json; catalog is editable source."
+              }
+            }
+          }
+        },
+        "duration_frames": {
+          "type": "integer",
+          "minimum": 12,
+          "maximum": 5400,
+          "description": "max = cap_s (90) x max_fps (60) = 5400, coherent with lane-profiles.json cap_s=90; the prior 1800 ceiling was incoherent for 90 s cuts at 30/60 fps"
+        },
+        "comparison": {
+          "enum": [
+            "none",
+            "exact",
+            "perceptual",
+            "representative",
+            "hybrid"
+          ],
+          "description": "Comparison tier for this beat's golden (TIER E/P/R). Required at mint time; lane defaults propose values. exact = deterministic regions (text, pills, overlay chrome, controlled UI) \u2014 masked-region per-frame hash, zero tolerance. perceptual = generated/AI footage + legitimate render variance \u2014 SSIM mean >= ssim_min AND/OR pHash/dHash Hamming <= dhash_hamming_max on representative frames. representative = lightweight key-frame references (adaptive sampling by default — dense around scene boundaries + forced action-window points + uniform baseline; `scene` and `every_n` are legacy explicit choices) where full-video comparison is overkill. hybrid = E + P + R with S as evidence layer."
+        },
+        "comparison_thresholds": {
+          "type": "object",
+          "description": "Required at mint time (lands in golden provenance). Configurable per beat \u2014 never global magic numbers; thresholds must never be tuned per-run to make a specific cut pass.",
+          "properties": {
+            "ssim_min": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "Perceptual SSIM mean floor (film default 0.97). null when not applicable."
+            },
+            "dhash_hamming_max": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "description": "Perceptual dHash Hamming ceiling on 64-bit (film default 6). null when not applicable."
+            },
+            "representative": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "scene",
+                    "every_n",
+                    "adaptive"
+                  ]
+                },
+                "n": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "description": "every_n step; null when mode=scene"
+                },
+                "boundary_detector": {
+                  "type": "object",
+                  "description": "Adaptive sampling: dense around scene boundaries (frame-diff / SSIM-drop detection).",
+                  "properties": {
+                    "metric": {
+                      "enum": [
+                        "ssim_drop",
+                        "frame_diff"
+                      ]
+                    },
+                    "threshold": {
+                      "type": "number",
+                      "description": "Derived from the approved sample set's SSIM-drop / frame-diff distribution (seed value is a starting value only; calibration supersedes)."
+                    }
+                  }
+                },
+                "action_windows": {
+                  "type": "object",
+                  "description": "Adaptive sampling: forced sample points at action windows from the capture harness action log.",
+                  "properties": {
+                    "source": {
+                      "const": "capture_action_log"
+                    },
+                    "types": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "e.g. pointer travel, press, drag, drop, popup open, row edits"
+                    },
+                    "pad_frames": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "action_type_map": {
+                      "type": "object",
+                      "description": "M3: type -> section-id/action-type map so action windows are mechanically derivable from the capture harness record (video-lab/prod-v5/capture/inputs.json sections[] + events[]). Disambiguates the editor governance log (action-log.schema.json) from the capture harness record.",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "baseline_interval_frames": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Adaptive sampling: uniform baseline interval between dense regions."
+                },
+                "include_first_last": {
+                  "type": "boolean",
+                  "default": true
+                }
+              }
+            }
+          }
+        },
+        "camera": {
+          "type": "array",
+          "description": "Zoom/crop windows over full-frame footage; camera moves are re-encodes, never re-captures.",
+          "items": {
+            "type": "object",
+            "required": [
+              "from_frame",
+              "to_frame",
+              "box"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "from_frame": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "to_frame": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "box": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                },
+                "minItems": 4,
+                "maxItems": 4,
+                "description": "[x, y, w, h] in 1920x1080 frame coordinates."
+              }
+            }
+          }
+        },
+        "overlays": {
+          "type": "array",
+          "description": "Lower-thirds/captions keyed to frame ranges; browser-rendered assets, never ffmpeg drawtext.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "from_frame",
+              "to_frame",
+              "text"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "from_frame": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "to_frame": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "text": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "sub": {
+                "type": "string",
+                "maxLength": 200
+              }
+            }
+          }
+        },
+        "aspects": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "viewport",
+              "dpr"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "const": "16x9"
+              },
+              "viewport": {
+                "type": "object",
+                "required": [
+                  "w",
+                  "h"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "w": {
+                    "type": "integer",
+                    "minimum": 1024,
+                    "description": "Preflight P4: no viewport below 1024 (locked decision)."
+                  },
+                  "h": {
+                    "type": "integer",
+                    "minimum": 600
+                  }
+                }
+              },
+              "dpr": {
+                "enum": [
+                  1,
+                  2
+                ]
+              },
+              "action_overrides": {
+                "type": "array",
+                "description": "Sparse; index into actions[].",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "action_index"
+                  ],
+                  "additionalProperties": true,
+                  "properties": {
+                    "action_index": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "semantic_checklist": {
+          "type": "object",
+          "description": "TIER S (semantic spot-check): perceptual != semantic (SSIM/pHash do NOT understand content; a critical subject/object change can score well). Tier S output is EVIDENCE FOR HUMAN APPROVAL \u2014 a written verdict PER KEYFRAME recorded in the verify report \u2014 NOT an auto pass/fail threshold; but a miss must be SURFACED LOUDLY, never buried.",
+          "properties": {
+            "must_include": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "must_exclude": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": []
+        },
+        "critical_regions": {
+          "type": "array",
+          "description": "TIER E exact-compare areas derived from the action log + a declared list (text/overlay/action areas). Every declared critical region MUST be INSIDE the exact-compare area \u2014 an exclusion is a FAIL (closes the mask-away-the-hard-parts abuse path).",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mask_area_budget_pct": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "maximum": 30,
+          "description": "Masked-out area <= this % of frame area per beat. Exceeding = validation FAIL. Default 30. PINNED VALUE (dev-2 codes against it)."
+        },
+        "masks": {
+          "type": "array",
+          "description": "Versioned mask artifacts. Provenance records {mask_id, sha256, regions, beat_id}. A mask change is APPROVAL-WORTHY (reason_class 'mask_change') with reason + approver recorded.",
+          "items": {
+            "type": "object",
+            "required": [
+              "mask_id",
+              "sha256"
+            ],
+            "properties": {
+              "mask_id": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "regions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "beat_id": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "comparison": {
+                "enum": [
+                  "exact",
+                  "hybrid"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "critical_regions"
+            ],
+            "properties": {
+              "critical_regions": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

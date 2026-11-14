@@ -93,13 +93,13 @@ def test_census_counts_are_the_published_ones(manifest):
     """The Phase-1 known state (the plan's recomputed roster)."""
     rows = list(manifest.values())
     declaring = [r for r in rows if r.declares]
-    assert len(rows) == 46, "the census population is `agents/*/meta.json`"
-    assert len(declaring) == 25
+    assert len(rows) == 50, "the census population is `agents/*/meta.json`"
+    assert len(declaring) == 29
     assert sum(1 for r in declaring if r.live) == 15
-    assert sum(1 for r in declaring if not r.live) == 10
+    assert sum(1 for r in declaring if not r.live) == 14
     assert sum(1 for r in rows if not r.declares) == 21
-    # 31 of the 46 census entries cannot capture.
-    assert sum(1 for r in rows if not r.live) == 31
+    # 35 of the 50 census entries cannot capture.
+    assert sum(1 for r in rows if not r.live) == 35
 
 
 def test_the_registry_population_is_one_smaller(manifest):
@@ -107,8 +107,8 @@ def test_the_registry_population_is_one_smaller(manifest):
     scaffolding = [a for a, r in manifest.items() if r.registry == "scaffolding"]
     assert scaffolding == ["_baby_template"]
     registered = [a for a, r in manifest.items() if r.registry == "agent"]
-    assert len(registered) == 45
-    assert sum(1 for a in registered if not manifest[a].live) == 30
+    assert len(registered) == 49
+    assert sum(1 for a in registered if not manifest[a].live) == 34
 
 
 def test_the_declaring_roster_is_the_published_one(manifest):
@@ -140,6 +140,10 @@ def test_the_declaring_roster_is_the_published_one(manifest):
         "devops",
         "project-manager",
         "tester",
+        "video-capturer",
+        "video-editor",
+        "video-producer",
+        "video-verifier",
         "wanderer",
         "watcher",
     ]

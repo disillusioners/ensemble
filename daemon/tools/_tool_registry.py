@@ -331,6 +331,18 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # opt-in only, never default-granted; the ari-only runtime gate
     # lives in the tool body (factory-captured agent_id).
     "prompt_assent",
+    # guidelines (2026-11-13, guideline-read-tool lane): the READ-ONLY
+    # window onto the shipped guideline corpus. Created by the
+    # create_guidelines_tools() factory (daemon/tools/guidelines.py).
+    # Factory-built (not import-time registered), so both names belong
+    # in DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. The category is
+    # PRIVILEGED (entry #22) — opt-in only, never default-granted; the
+    # GUIDELINES_AUTHORIZED_AGENTS runtime gate lives in the tool
+    # bodies (factory-captured agent_id; audience EXACTLY ari + leader
+    # + devops + sonic-leader — the first privileged grant to a sonic
+    # agent, ruling 2026-11-13).
+    "guidelines_list",
+    "guideline_read",
 })
 
 
@@ -376,13 +388,14 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # every pin site — five inline ``frozenset({...})`` literals + the
 # ``EXPECTED_PRIVILEGED_SET`` definitions — plus a
 # ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion at EACH
-# phase-local pin — plus ONE mutation-pack find/replace STRING pair
-# (``test/packs/metrics_read_mutation_matrix_test.py`` MT-01 — derived
-# from the live constant at pack-import time so a count bump cannot
-# stale it).  The site/file census is re-derived BY GREP at every
-# lane ceremony (the three greps at the end of this block) — the
-# numbers below are the 2026-11-06 memoir-merge derivation, never a
-# frozen literal to copy forward.
+# phase-local pin — plus the mutation-pack find/replace STRING pairs
+# (``test/packs/metrics_read_mutation_matrix_test.py`` MT-01 and the
+# guidelines MT-G01 — both derived from the live constant at
+# pack-import time so a count bump cannot stale them).  The site/file
+# census is re-derived BY GREP at every lane ceremony (the three greps
+# at the end of this block) — the numbers below are the 2026-11-13
+# guidelines Phase-1/2 derivation, never a frozen literal to copy
+# forward.
 # Adding or
 # removing a category REQUIRES updating ALL of them in the same commit:
 # ``tests/unit/tools/test_upgrade_registration.py``,
@@ -420,16 +433,23 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # real defect) and
 # ``tests/unit/tools/test_prompt_assent_registration.py`` (the
 # prompt-assent pin — added 2026-11-10; exact-set AND count; appended
-# to this prose by the same lane's Phase 4 — the census it DERIVES is
-# SIXTEEN pin files).  That is SIXTEEN pin files, PLUS the ONE
-# mutation-pack find/replace STRING pair
+# to this prose by the same lane's Phase 4) and
+# ``tests/unit/tools/test_guidelines_registration.py`` (the
+# guidelines pin — added 2026-11-13; exact-set AND count; appended to
+# this prose by the guideline-read-tool lane).  That is SEVENTEEN pin
+# files, PLUS the mutation-pack find/replace STRING pairs
 # (``test/packs/metrics_read_mutation_matrix_test.py`` MT-01 — derived
 # from the live constant at pack-import time so a count bump cannot
-# stale it; the pack also needs the new category as a MUTATION TARGET
-# — a category with no mutation target is not covered by the matrix).
+# stale it — and the guideline-read-tool lane's MT-G01, the same
+# derived shape aimed at the guidelines pin file; the pack also needs
+# every new category as a MUTATION TARGET — a category with no
+# mutation target is not covered by the matrix).  The exact-set pin
+# surface is now TWELVE comparison sites (SEVEN
+# ``EXPECTED_PRIVILEGED_SET`` definitions + FIVE inline ``frozenset``
+# literals) and the count-pin surface is THIRTEEN assertion sites.
 # The site/file census is re-derived BY GREP at every lane ceremony
 # (the three greps at the end of this block) — the numbers below are
-# the 2026-11-11 prompt-assent Phase-4 derivation, never a frozen
+# the 2026-11-13 guidelines Phase-1/2 derivation, never a frozen
 # literal to copy forward.
 # SEPARATELY, ONE
 # allow-array TRAILING-ENTRY pin (the ari ``tools.allow``
@@ -459,8 +479,10 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # is a public-by-obscurity URL minter (no FS / DB side effects
     # at the tool surface), but the user's first-release
     # visibility decision (Discord, 2026-10-07) is RESTRICTED:
-    # only the three commissioned users (ari, leader, designer)
-    # opt in via ``tools.allow: ["view-views"]``. The empty-allow
+    # only the commissioned users (ari, leader, designer, and
+    # video-producer + video-editor added 2026-11-12 by the
+    # video-team activation step 2b — user GO = GRANT) opt in
+    # via ``tools.allow: ["view-views"]``. The empty-allow
     # inherit universe must NOT auto-grant it; making the
     # category privileged makes that structural instead of
     # conventional. The designer-side schema entry in
@@ -820,6 +842,40 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # count assertion sites (re-derive the census BY GREP at the
     # ceremony — see the SAME-PR RULE block above) are mandatory.
     "prompt-assent",
+    # guidelines (2026-11-13, guideline-read-tool lane): the READ-ONLY
+    # window onto the shipped guideline corpus — ``guidelines_list`` +
+    # ``guideline_read``, created by the create_guidelines_tools()
+    # factory (daemon/tools/guidelines.py). PRIVILEGED entry #22 of
+    # PRIVILEGED_TOOL_CATEGORIES (21 -> 22 after the prompt-assent
+    # entry): the corpus is the doctrine layer for dormant /
+    # config-armed / ceremony-gated / silently-biting features, so the
+    # empty-allow inherit universe must NOT auto-grant it. Explicit
+    # ``tools.allow: ["guidelines"]`` on EXACTLY ari + leader + devops
+    # + sonic-leader is the only access path, and every tool body ALSO
+    # carries its own ``GUIDELINES_AUTHORIZED_AGENTS`` gate (the
+    # metrics-read two-layer shape) — a LITERAL tool name in an allow
+    # list bypasses the category gate outright.
+    #
+    # SONIC-FIRST CEREMONY NOTE (ruling 2026-11-13): this is the FIRST
+    # privileged-category grant to a sonic agent (sonic-leader; grant
+    # authority: sonic roster v0.30.2 amendment, merge 82e2bd849) —
+    # supported by census: no other sonic-* allow array carries any
+    # privileged member, and sonic-leader's ``midflight`` is
+    # NON-privileged (it does not confer this grant).
+    #
+    # The surface is structurally READ-ONLY: the tools read THE RELEASE
+    # PAYLOAD only (frozen: ``<exe-dir>/guidelines``; dev: repo
+    # ``docs/guidelines``) and cannot serve any guideline newer than
+    # the running release — INTENDED. No write path, no cache, no
+    # database; the payload is the natural off-switch (adjudication
+    # Q4: NO kill-switch, NO env knob).
+    #
+    # SAME-PR pin updates at every file carrying the privileged-set /
+    # count assertion sites (re-derive the census BY GREP at the
+    # ceremony — see the SAME-PR RULE block above) are mandatory (this
+    # entry ships in the SAME commit as those bumps — the set must
+    # never be red between two commits).
+    "guidelines",
 })
 
 
@@ -1381,6 +1437,23 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # name is snake_case (``prompt_assent``) — the house pattern
     # (``prompt-reload`` → ``prompt_reload``).
     "prompt-assent": "daemon.tools.prompt_assent",
+    # guidelines (2026-11-13, guideline-read-tool lane): the READ-ONLY
+    # window onto the shipped guideline corpus
+    # (``guidelines_list`` / ``guideline_read``). PRIVILEGED category
+    # (entry #22 of PRIVILEGED_TOOL_CATEGORIES): the corpus is the
+    # doctrine layer for dormant / config-armed / ceremony-gated /
+    # silently-biting features, so the empty-allow inherit universe
+    # must never auto-grant it.
+    #
+    # The value MUST be a ``daemon.tools.*`` path — the AST scanner
+    # resolves the value as ``daemon/tools/<parts[2:]>.py``; a
+    # ``daemon.services.*`` value is NEVER discovered and the
+    # exact-equality drift pin fails at boot. The category key is
+    # EXACTLY ``guidelines`` (D2) while the tool names are snake_case
+    # (``guidelines_list`` / ``guideline_read``) — the house pattern
+    # (``self-alarm`` → ``self_alarm``, ``wedge-capture`` →
+    # ``wedge_capture_*``).
+    "guidelines": "daemon.tools.guidelines",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
     # writers; census stays at 23.
@@ -1953,6 +2026,10 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     # Factory-built (prompt-assent lane, 2026-11-10) — see
     # DYNAMIC_TOOL_NAMES for the registration note.
     "prompt_assent",
+    # Factory-built (guideline-read-tool lane, 2026-11-13) — see
+    # DYNAMIC_TOOL_NAMES for the registration note.
+    "guidelines_list",
+    "guideline_read",
 })
 
 

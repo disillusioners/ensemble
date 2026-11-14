@@ -27,7 +27,13 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from daemon.config import LiveViewsConfig, LiveViewsRootConfig
+from daemon.config import (
+    DEFAULT_LIVE_VIEWS_MAX_MEDIA_BYTES,
+    ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES,
+    LiveViewsConfig,
+    LiveViewsRootConfig,
+    _resolve_live_views_max_media_bytes,
+)
 
 
 # ── filesystem / project_scoped path-required gate ────────────────
@@ -252,3 +258,108 @@ class TestLiveViewsConfigSeeds:
         assert seeds["planning"].type == "project_scoped"
         assert seeds["tmp-images"].type == "tmp_images"
         assert seeds["tmp-images"].path is None
+
+
+# ===========================================================================
+# Group: max_media_bytes
+# ===========================================================================
+
+
+class TestMaxMediaBytes:
+    def test_default(self):
+        assert LiveViewsConfig().max_media_bytes == 2 * 1024 * 1024 * 1024
+
+    def test_default_literal_is_the_shared_constant(self):
+        """Single source of truth: Field default + resolver agree.
+
+        ``DEFAULT_LIVE_VIEWS_MAX_MEDIA_BYTES`` (:5176) backs the
+        ``max_media_bytes`` Field default, both resolver fallbacks and
+        the router's no-service fallback. Before the dedupe the literal
+        ``2 * 1024 * 1024 * 1024`` appeared five times; a change to one
+        copy silently disagreed with the others.
+
+        Mutation that flips this RED: change any one copy back to a
+        different literal (e.g. resolver default → 1 GiB).
+        """
+        assert DEFAULT_LIVE_VIEWS_MAX_MEDIA_BYTES == 2 * 1024 * 1024 * 1024
+        assert LiveViewsConfig().max_media_bytes == DEFAULT_LIVE_VIEWS_MAX_MEDIA_BYTES
+        assert (
+            _resolve_live_views_max_media_bytes(None, None)
+            == DEFAULT_LIVE_VIEWS_MAX_MEDIA_BYTES
+        )
+
+    def test_ge_one_rejects_zero(self):
+        with pytest.raises(ValidationError):
+            LiveViewsConfig(max_media_bytes=0)
+
+    def test_resolver_env_wins_over_yaml(self, monkeypatch):
+        monkeypatch.setenv(ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES, "2048")
+        assert _resolve_live_views_max_media_bytes("2048", 4096) == 2048
+
+    def test_resolver_yaml_wins_over_default(self):
+        assert _resolve_live_views_max_media_bytes(None, 4096) == 4096
+
+    def test_resolver_both_absent_default(self):
+        assert _resolve_live_views_max_media_bytes(None, None) == 2 * 1024 * 1024 * 1024
+
+    def test_resolver_blank_env_unset(self, monkeypatch):
+        monkeypatch.delenv(ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES, raising=False)
+        assert _resolve_live_views_max_media_bytes("", None) == 2 * 1024 * 1024 * 1024
+        assert _resolve_live_views_max_media_bytes("   ", None) == 2 * 1024 * 1024 * 1024
+
+    def test_resolver_whitespace_yaml_unset(self):
+        assert _resolve_live_views_max_media_bytes(None, "   ") == 2 * 1024 * 1024 * 1024
+
+    def test_resolver_nonint_env_raises_naming_env(self):
+        with pytest.raises(ValueError) as ei:
+            _resolve_live_views_max_media_bytes("abc", None)
+        assert ENSEMBLE_LIVE_VIEWS_MAX_MEDIA_BYTES in str(ei.value)
+
+    def test_resolver_zero_env_raises(self):
+        with pytest.raises(ValueError):
+            _resolve_live_views_max_media_bytes("0", None)
+
+    def test_resolver_negative_env_raises(self):
+        with pytest.raises(ValueError):
+            _resolve_live_views_max_media_bytes("-5", None)
+
+    def test_resolver_nonint_yaml_raises(self):
+        with pytest.raises(ValueError):
+            _resolve_live_views_max_media_bytes(None, "abc")
+
+    def test_resolver_float_yaml_raises_not_truncated(self):
+        """A yaml float is a CONFIG ERROR — never silently truncated.
+
+        ``int(4096.9)`` would have shipped 4096 (a cap the operator
+        never wrote). The resolver now raises the same boot-failing
+        ``ValueError`` for every non-int yaml value.
+
+        Mutation that flips this RED: restore the ``int(yaml_value)``
+        coercion tail — 4096.9 resolves to 4096 instead of raising.
+        """
+        with pytest.raises(ValueError) as ei:
+            _resolve_live_views_max_media_bytes(None, 4096.9)
+        assert "live_views.max_media_bytes" in str(ei.value)
+
+    def test_resolver_float_whole_number_yaml_raises(self):
+        """``4096.0`` is a float, not an int — still a config error.
+
+        Guards against a "truncation is harmless when lossless" patch
+        (``if float(v).is_integer(): return int(v)``): the type is the
+        operator's contract, and a float in a byte-count field is a
+        typo the boot should refuse.
+        """
+        with pytest.raises(ValueError):
+            _resolve_live_views_max_media_bytes(None, 4096.0)
+
+    def test_resolver_bool_yaml_raises(self):
+        """``True`` is an ``int`` subclass in Python — must still raise."""
+        with pytest.raises(ValueError):
+            _resolve_live_views_max_media_bytes(None, True)
+
+    def test_resolver_list_and_dict_yaml_raise(self):
+        """Container shapes fail loud too (no ``TypeError`` leak)."""
+        with pytest.raises(ValueError):
+            _resolve_live_views_max_media_bytes(None, [4096])
+        with pytest.raises(ValueError):
+            _resolve_live_views_max_media_bytes(None, {"v": 4096})

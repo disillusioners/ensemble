@@ -1,0 +1,136 @@
+{
+  "$comment": "Per-shot sha invalidation spec (architecture.md section 9). Change one beat, re-capture one beat. The ledger file is build/captures/invalidation.json inside the project tree; written by video-capturer at capture time (MEASURED tier). Preflight P2 refuses any assembly whose referenced beat ledger is stale.",
+  "beat_valid_formula": "beat_valid(beat) := beat_sha(beat) == ledger.beat_sha AND fixture_sha == ledger.fixture_sha AND fe_build_sha == ledger.fe_build_sha AND harness_sha == ledger.harness_sha AND lab_stack_sha == ledger.lab_stack_sha",
+  "beat_sha_rule": "sha256 over the canonical serialization of the beat's subtree of the shot plan's beats[] array: sorted keys, 2-space indent, no timestamps, no generated ids, UTF-8",
+  "required_inputs": [
+    {
+      "name": "beat_sha",
+      "source": "canonical serialization of the beat's subtree in the shot plan (beats[] array)"
+    },
+    {
+      "name": "fixture_sha",
+      "source": "sha256 of the fixture payload(s) the beat's state.requires bind"
+    },
+    {
+      "name": "fe_build_sha",
+      "source": "the frontend build the capture ran against"
+    },
+    {
+      "name": "harness_sha",
+      "source": "capture harness version (tools/capture.mjs + lab-lib)"
+    },
+    {
+      "name": "lab_stack_sha",
+      "source": "lab stack version (proxies, auth stub, seeded state)"
+    }
+  ],
+  "invalidation_matrix": [
+    {
+      "change": "one beat's actions/blocks in the plan",
+      "recaptures": "that beat only",
+      "spares": "all other beats"
+    },
+    {
+      "change": "caption or lower-third text (overlay track)",
+      "recaptures": "nothing \u2014 re-render the asset, then compose",
+      "spares": "footage"
+    },
+    {
+      "change": "camera window on one beat",
+      "recaptures": "nothing \u2014 recompute crops + one compose encode",
+      "spares": "footage"
+    },
+    {
+      "change": "fixture payload (mock body)",
+      "recaptures": "beats binding that fixture (state.requires refs)",
+      "spares": "others"
+    },
+    {
+      "change": "frontend build (user changed the product)",
+      "recaptures": "beats on affected routes (conservative default: all beats whose route or asserts touch a changed route; capturer publishes the diff-report)",
+      "spares": "untouched routes; G-PLAN re-judges asserts"
+    },
+    {
+      "change": "capture harness version",
+      "recaptures": "ALL beats (harness_sha mismatch); 3-launch re-run if film profile",
+      "spares": "nothing"
+    },
+    {
+      "change": "lab stack version",
+      "recaptures": "ALL beats (lab_stack_sha mismatch)",
+      "spares": "nothing"
+    }
+  ],
+  "refusal_rule": "an editor handed a beat whose ledger is stale refuses in seconds (P2); the lead decides whether to re-capture or re-plan",
+  "approval_record": {
+    "description": "Recorded for any threshold change or golden re-mint (approval-worthy events). Thresholds must never be tuned per-run to make a specific cut pass.",
+    "fields": {
+      "generation": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Golden generation number; re-mint records N+1."
+      },
+      "reason_class": {
+        "enum": [
+          "lab_binary_lost",
+          "approved_plan_delta",
+          "threshold_change",
+          "calibration_update",
+          "mask_change"
+        ]
+      },
+      "reason": {
+        "type": "string",
+        "minLength": 1
+      },
+      "approved_by": {
+        "enum": [
+          "user",
+          "leader"
+        ],
+        "description": "Actor ENUM \u2014 free-form strings are rejected; an agent cannot self-approve."
+      },
+      "approval_ref": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Non-empty AND resolvable to a real artifact: must point at an existing approval record (e.g. .agents/approver/<slug>-tracking.md iteration NNN) whose sha256 is recorded in provenance. Unresolvable ref = FAIL."
+      },
+      "at": {
+        "type": "string",
+        "format": "date-time"
+      }
+    },
+    "required": [
+      "generation",
+      "reason_class",
+      "reason",
+      "approved_by",
+      "approval_ref",
+      "at"
+    ],
+    "guards": [
+      "a threshold change OR a golden re-mint is APPROVAL-WORTHY \u2014 recorded in provenance with reason + approver, never silent",
+      "a perceptual FAIL reports MEASURED score vs threshold + the first representative frame that flagged (never bare boolean)",
+      "missing golden = BLOCKED-WITH-A-PATH: verifier PROPOSES re-mint with reason class, human APPROVES, re-mint records generation N+1 + approval reference \u2014 actionable, never permanently blocked",
+      "retry-until-green FORBIDDEN (falsification)",
+      "thresholds must never be tuned per-run to make a specific cut pass",
+      "TIER R adaptive sampling: dense around scene boundaries (frame-diff/SSIM-drop) + forced sample points at action windows (pointer travel/press/drag/drop/popup open/row edits) + uniform baseline between them",
+      "TIER S semantic spot-check: perceptual != semantic (SSIM/pHash do not understand content); representative frames through the vision channel against per-beat must_include/must_exclude checklist; output is EVIDENCE FOR HUMAN APPROVAL (written verdict per keyframe in the verify report), NOT auto pass/fail; but a miss must be SURFACED LOUDLY, never buried",
+      "MASK VALIDATION (exact tier, all three mandatory): (a) every declared critical region inside the exact-compare area \u2014 exclusion = FAIL; (b) masked-out area <= mask_area_budget_pct (default 30) \u2014 exceedance = FAIL; (c) mask change is APPROVAL-WORTHY (reason_class mask_change) with reason + approver recorded \u2014 closes the mask-away-the-hard-parts abuse path",
+      "OVERHEAD MEASUREMENT: per-beat, per-tier wall times (Tier E hashing, Tier P metric, Tier R sampling, Tier S vision-call, total verification) recorded in the verify report vs the beat's render wall time; budget <= 15% of render time; on exceedance report plainly + name the dominant cost",
+      "APPROVAL IDENTITY: approved_by is an ENUM {user, leader}; free-form strings (e.g. 'video-verifier') are rejected. approval_ref must be non-empty and resolvable to a real artifact (resolution rule above).",
+      "DELTA-WITHOUT-RECORD = FAIL: any threshold delta between generations MUST carry a matching approval record; a generation whose thresholds changed with no approval record is a FAIL, not a warning.",
+      "MINT-CAPTURE: mask fields (masks[], mask_area_budget_pct, critical_regions, comparison, comparison_thresholds) MUST be frozen in golden provenance at mint time \u2014 the mint currently freezes only comparison + thresholds; extend it (C-side mirrors this).",
+      "ACTION-LOG SOURCE (M3): the capture harness record is video-lab/prod-v5/capture/inputs.json (sections[] with id + label + startFrame/endFrame; events[] with frame + type). action_windows.source renamed 'capture_action_log' (was 'action_log', which collided with the editor governance log action-log.schema.json). action_type_map (type -> section-id/action-type) makes windows mechanically derivable."
+    ],
+    "provenance_fields": [
+      "calibration_sample_ids",
+      "calibration_stats",
+      "derived_thresholds",
+      "mask_id",
+      "mask_sha256",
+      "mask_regions",
+      "mask_beat_id"
+    ]
+  }
+}

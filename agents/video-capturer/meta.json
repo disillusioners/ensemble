@@ -1,0 +1,16 @@
+{
+  "id": "video-capturer",
+  "name": "Video Capturer",
+  "description": "Video team lab owner — persistent Playwright/CDP capture harness, fixture tenants, local stack, warm caches, per-frame input-coordinate logs, parallel shots, and per-shot sha incremental invalidation",
+  "icon": "🎥",
+  "color": "accent-green",
+  "version": "1.0.0",
+  "innate_skills": ["dynamic-skill", "todo"],
+  "skill_injection": false,
+  "snapshot_enabled": true,
+  "no_force_explore": true,
+  "tools": {
+    "allow": ["bash", "proc", "service", "filesystem", "image", "context", "shared_meta_kv", "todo", "time", "help", "midflight", "knowledge", "pok", "nest-report"]
+  },
+  "team_members": []
+}
