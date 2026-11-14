@@ -135,7 +135,6 @@ from daemon.services.ram_guard.ladder import (
     OWNERSHIP_ENV_VAR as _RAM_LADDER_OWNERSHIP_ENV_VAR,
 )
 from daemon.services.ram_guard.tree_reader import PROC_ROOT as _PROC_ROOT
-from daemon.services.ram_guard.tree_reader import read_start_time as _read_start_time
 from daemon.services.ram_guard.tree_reader import read_stat_entry as _read_stat_entry
 from daemon.services.ram_guard.verdict import (
     LANE_PROC as _LANE_PROC,
