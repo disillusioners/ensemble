@@ -11099,7 +11099,7 @@ class InstanceManager:
         self._orchestrator.setup(num_workers=num_workers)
 
 
-    def _notify_all_pools(self) -> None:
+    def _notify_all_pools(self) -> int:
         """Forward to :meth:`PoolOrchestrator.notify_all` (thin delegating wrapper).
 
         Chat-source-worker-lane, D5 fan-out seam — the helper
@@ -11124,8 +11124,12 @@ class InstanceManager:
         callers SHOULD prefer ``PoolOrchestrator.safe_notify_all_pools(
         manager, site_label=...)`` over the bare method call (the
         helper carries the Mock-compat probe + legacy fallback).
+
+        Returns:
+            Count of pools successfully pulsed (forwarded from
+            :meth:`PoolOrchestrator.notify_all`).
         """
-        self._orchestrator.notify_all()
+        return self._orchestrator.notify_all()
 
 
     def shutdown_worker_pool(self) -> None:

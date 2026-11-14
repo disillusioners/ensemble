@@ -51,6 +51,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from daemon.constants import CHAT_WORKER_POOL_SIZE, WORKER_POOL_SIZE
 from .pool_orchestrator import safe_notify_all_pools
 from . import promote_txn_hold
 
@@ -228,9 +229,22 @@ class EligiblePendingSweepService:
         eligible_count = 0
         notified = 0
         try:
+            # Claim capacity of one wake pulse = default pool sizes
+            # (daemon/constants.py WORKER_POOL_SIZE=5 +
+            # CHAT_WORKER_POOL_SIZE=2 — the pools one pulse wakes).
+            # A 2x multiple gives headroom for rows removed by the
+            # is_deferred and W-D post-filters; the sweep is a
+            # backstop healer, the unbounded reconciler remains the
+            # correctness path. Caveat: is_deferred/W-D post-filters
+            # may shrink a bounded sample; the unbounded reconciler
+            # (job_recovery_service.py) still holds the full set.
+            _SWEEP_PENDING_LIMIT = 2 * (
+                WORKER_POOL_SIZE + CHAT_WORKER_POOL_SIZE
+            )
             tasks = await asyncio.to_thread(
                 self._task_repository.list_pending_tasks_older_than,
                 self._min_pending_age_seconds,
+                limit=_SWEEP_PENDING_LIMIT,
             )
             # Filter to ``is_deferred=False`` rows. The
             # ``list_pending_tasks_older_than`` helper does not
@@ -282,11 +296,10 @@ class EligiblePendingSweepService:
             # reconciler (terminal) or naturally surfaces via the
             # claim path (resumed).
             if eligible and self._instance_repository is not None:
-                blocked_instance_ids = (
+                blocked_instance_ids = await asyncio.to_thread(
                     self._instance_repository
-                    .list_paused_or_terminal_instance_ids(
-                        list({t.instance_id for t in eligible})
-                    )
+                    .list_paused_or_terminal_instance_ids,
+                    list({t.instance_id for t in eligible}),
                 )
                 if blocked_instance_ids:
                     eligible = [
@@ -317,14 +330,17 @@ class EligiblePendingSweepService:
             # manager), so we pass ``fallback_pool=self._worker_pool``
             # to preserve the pre-Phase-2 reach.
             #
-            # The helper returns the wake call's value: ``None`` for
-            # production sync ``WorkerPool.notify_work()``, a coroutine
-            # for ``AsyncMock`` fixtures, or a ``MagicMock`` value for
-            # legacy ``MagicMock`` fixtures. ``result is not None``
-            # mirrors the original ``if notified:`` semantics (a wake
-            # was dispatched iff the helper entered a dispatch branch
-            # — production returns None when no pool was reachable,
-            # MagicMock returns a truthy MagicMock when one was).
+            # The helper returns the wake call's value: ``True`` for
+            # production sync ``WorkerPool.notify_work()`` (which now
+            # returns ``True``), an int for
+            # ``PoolOrchestrator.notify_all()`` (count of pools
+            # pulsed), a coroutine for ``AsyncMock`` fixtures, or a
+            # ``MagicMock`` value for legacy ``MagicMock`` fixtures.
+            # ``bool(result)`` mirrors the original ``if notified:``
+            # semantics (a wake was dispatched iff the helper entered
+            # a dispatch branch — production returns a truthy value
+            # when a pool was reachable, ``None`` when no pool was
+            # reachable).
             if eligible_count > 0:
                 # ── A3 SEAM 3 (soak-gate-mcp-warmup) ─────────────────
                 # A promote transaction is live ⇒ SKIP the wake (a
@@ -357,22 +373,31 @@ class EligiblePendingSweepService:
                     site_label="EligiblePendingSweep",
                     fallback_pool=self._worker_pool,
                 )
-                notified = notify_result is not None
+                notified = bool(notify_result)
                 if notified:
                     self._notified_total += 1
                 else:
-                    # No pool wired AND no manager helper — DEBUG log
-                    # so the operator sees the eligible rows. The A1
-                    # carve-out + A2 autopromote are the primary
-                    # fixes; the sweep is the secondary backstop.
-                    logger.debug(
-                        f"EligiblePendingSweepService: {eligible_count} "
-                        f"eligible PENDING row(s) found on tick "
-                        f"{self._ticks_total}, but worker_pool is not "
-                        f"wired (legacy test fixture / pre-wiring "
-                        f"lifespan) — relying on the A1/A2 primary "
-                        f"fixes to surface them"
-                    )
+                    if notify_result is None:
+                        # No wake path reachable (no manager helper
+                        # and no fallback pool). REAL cause: no wake
+                        # path reachable — legacy test fixture /
+                        # pre-wiring lifespan.
+                        logger.debug(
+                            f"EligiblePendingSweepService: {eligible_count} "
+                            f"eligible PENDING row(s) found on tick "
+                            f"{self._ticks_total}, but worker_pool is not "
+                            f"wired (legacy test fixture / pre-wiring "
+                            f"lifespan) — relying on the A1/A2 primary "
+                            f"fixes to surface them"
+                        )
+                    else:
+                        # Wake path reached but 0 pools pulsed (all
+                        # pools raised — see WARNING lines above).
+                        logger.debug(
+                            "EligiblePendingSweepService: wake path "
+                            "reached, 0 pools pulsed (see WARNING "
+                            "lines above)"
+                        )
         except Exception as tick_err:
             self._errors_total += 1
             logger.error(
