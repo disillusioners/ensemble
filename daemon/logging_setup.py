@@ -67,6 +67,15 @@ def _level_from_env(var: str, default: int) -> int:
 _CONSOLE_LEVEL = _level_from_env("ENSEMBLE_LOG_CONSOLE_LEVEL", logging.INFO)
 _FILE_LEVEL = _level_from_env("ENSEMBLE_LOG_FILE_LEVEL", logging.DEBUG)
 
+# Third-party noise pin (log-noise-hygiene, item (e)): the openai SDK's
+# `_base_client` logger emits DEBUG "Request options" carrying FULL prompt
+# JSON (~150K chars/turn) under the default DEBUG file level. Pin the
+# `openai` logger (which covers `openai._base_client`) to INFO by default
+# via an env-overridable knob, preserving opt-in DEBUG for observability.
+# Sanctioned attribution lines live on the `daemon.graph` DEBUG logger
+# (`[LLM][<iid-8hex>]`) and are untouched.
+_OPENAI_LEVEL = _level_from_env("ENSEMBLE_LOG_OPENAI_LEVEL", logging.INFO)
+
 # Resolve log directory from env directly (no DaemonConfig import — avoids
 # circular import, no dead config field).
 _LOG_DIR = os.environ.get("DAEMON_LOG_DIR", "./data/logs")
@@ -190,6 +199,11 @@ def install_root_logging() -> None:
     uvicorn_access = logging.getLogger("uvicorn.access")
     uvicorn_access.setLevel(logging.WARNING)
 
+    # Pin the openai SDK logger (covers openai._base_client) so its DEBUG
+    # "Request options" payload dumps do not flood ensemble.log. Opt-in via
+    # ENSEMBLE_LOG_OPENAI_LEVEL=DEBUG. Re-applied on every install (idempotent).
+    openai_logger = logging.getLogger("openai")
+    openai_logger.setLevel(_OPENAI_LEVEL)
 
 __all__ = [
     "daemon_logger",
