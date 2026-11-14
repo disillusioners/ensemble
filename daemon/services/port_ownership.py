@@ -80,6 +80,10 @@ class PortClaim:
     claimed_at: str
     version: Optional[str] = None
     uid: Optional[int] = None
+    # A2 lineage (claim v2, additive — backward compat: old readers ignore)
+    ppid: Optional[int] = None
+    ppid_cmdline_sha: Optional[str] = None
+    ppid_cmdline_head: Optional[str] = None
 
 
 @dataclass
@@ -309,6 +313,114 @@ def pid_alive_with_starttime(pid: int, starttime: Optional[int]) -> bool:
         return False
     return True
 
+# ---------------------------------------------------------------------------
+# Lineage (H1 close — claim v2)
+# ---------------------------------------------------------------------------
+
+
+def _read_ppid(pid: int) -> Optional[int]:
+    try:
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as f:
+            data = f.read()
+    except (OSError, IOError, ValueError):
+        return None
+    idx = data.rfind(")")
+    if idx < 0:
+        return None
+    fields = data[idx + 1 :].split()
+    if len(fields) < 2:
+        return None
+    try:
+        return int(fields[1])
+    except (ValueError, IndexError):
+        return None
+
+
+def read_parent_cmdline(pid: Optional[int]) -> Optional[list]:
+    """Return argv list from /proc/<pid>/cmdline, or None if unreadable."""
+    if pid is None:
+        return None
+    try:
+        raw = open(f"/proc/{pid}/cmdline", "rb").read()
+    except (OSError, IOError):
+        return None
+    if not raw:
+        return None
+    text = raw.decode("utf-8", "replace")
+    parts = [p for p in text.split("\x00")]
+    if parts and parts[-1] == "":
+        parts = parts[:-1]
+    if not parts:
+        return None
+    return parts
+
+
+def normalize_lineage_token(argv: Optional[list]) -> Optional[str]:
+    """Normalize the lineage token per D-A2-5 (script-name argument).
+
+    Returns the FIRST non-flag argument after the interpreter, path-stripped
+    to its basename — EXCEPT when the preceding flag is a ``-c``-family flag,
+    in which case the payload is returned verbatim (the ``-c`` payload head).
+    Never ``argv[-1]``.
+    """
+    if not argv or len(argv) < 2:
+        return None
+    is_c = False
+    for tok in argv[1:]:
+        if tok.startswith("-"):
+            low = tok.lstrip("-").lower()
+            if "c" in low:
+                is_c = True
+            continue
+        if is_c:
+            return tok
+        try:
+            from pathlib import Path as _P
+
+            return _P(tok).name
+        except Exception:  # pragma: no cover - defensive
+            return tok
+    return None
+
+
+def lineage_token_hash(argv: Optional[list]) -> Optional[str]:
+    import hashlib
+
+    tok = normalize_lineage_token(argv)
+    if tok is None:
+        return None
+    return hashlib.sha256(tok.encode("utf-8")).hexdigest()
+
+
+def _lineage_foreign(claim: Any, self_install_dir: Optional[Path]) -> bool:
+    """Same-install zone only: claim v2 lineage mismatch ⇒ foreign."""
+    if claim is None:
+        return False
+    claim_install = getattr(claim, "install_dir", None)
+    if claim_install is None or self_install_dir is None:
+        return False
+    if str(claim_install) != str(self_install_dir):
+        return False
+    # stale (dead pid) ⇒ take-over before lineage is consulted
+    try:
+        from daemon.services.port_ownership import pid_alive_with_starttime
+    except Exception:  # pragma: no cover - defensive
+        pid_alive_with_starttime = None
+    if pid_alive_with_starttime is not None:
+        if not pid_alive_with_starttime(getattr(claim, "pid", 0), getattr(claim, "starttime", None)):
+            return False
+    recorded_sha = getattr(claim, "ppid_cmdline_sha", None)
+    if not recorded_sha:
+        return False  # old-format claim ⇒ non-foreign
+    self_ppid = _read_ppid(os.getpid())
+    self_argv = read_parent_cmdline(self_ppid)
+    if self_argv is None:
+        return False  # self-parent unreadable ⇒ non-foreign
+    self_sha = lineage_token_hash(self_argv)
+    if self_sha is None:
+        return False
+    return recorded_sha != self_sha
+
 
 # ---------------------------------------------------------------------------
 # Claim file IO
@@ -338,6 +450,9 @@ def read_claim(path: Path) -> Optional[PortClaim]:
             claimed_at=str(data.get("claimed_at", "")),
             version=data.get("version"),
             uid=data.get("uid"),
+            ppid=data.get("ppid"),
+            ppid_cmdline_sha=data.get("ppid_cmdline_sha"),
+            ppid_cmdline_head=data.get("ppid_cmdline_head"),
         )
     except (KeyError, ValueError, TypeError):
         return None
@@ -386,6 +501,13 @@ def try_claim(
 
     self_install_str = _str_or_none(self_install_dir)
     starttime = _read_starttime(os.getpid())
+    _ppid = _read_ppid(os.getpid())
+    _ppid_argv = read_parent_cmdline(_ppid)
+    _ppid_sha = lineage_token_hash(_ppid_argv)
+    _ppid_head = None
+    if _ppid_argv is not None:
+        _h = " ".join(_ppid_argv)
+        _ppid_head = _h[:120] if len(_h) > 120 else _h
     claim_to_write = PortClaim(
         install_dir=self_install_str,
         pid=os.getpid(),
@@ -395,6 +517,9 @@ def try_claim(
         claimed_at=_now_iso(),
         version=version if version is not None else _version(),
         uid=os.getuid(),
+        ppid=_ppid,
+        ppid_cmdline_sha=_ppid_sha,
+        ppid_cmdline_head=_ppid_head,
     )
 
     for attempt in range(retries + 1):
@@ -402,7 +527,11 @@ def try_claim(
         if existing is not None:
             if is_live_foreign(existing, self_install_dir):
                 return ClaimResult(kind="refused", claim=existing, holder_pid=existing.pid, reason="foreign live owner")
-            # stale or same-install: take over
+            # A2 lineage (same-install zone): recorded lineage mismatch => refuse
+            # BEFORE the unlink (closes the unlink+rewrite side-defect).
+            if _lineage_foreign(existing, self_install_dir):
+                return ClaimResult(kind="refused", claim=existing, holder_pid=existing.pid, reason="claim-lineage mismatch")
+            # stale or same-install (lineage match / old-format): take over
             try:
                 path.unlink(missing_ok=True)
             except OSError as e:
@@ -504,12 +633,16 @@ def surface_refusal_marker(claims_dir: Optional[Path] = None) -> bool:
         holder = data.get("holder") if isinstance(data.get("holder"), dict) else {}
         logger.error(
             "PORT-OWNERSHIP REFUSAL FROM A PRIOR BOOT: refused_at=%s "
-            "port=%s host=%s exit_code=%s holder_pid=%s holder_exe=%s "
-            "holder_cwd=%s holder_install=%s self_install=%s marker=%s",
+            "port=%s host=%s exit_code=%s family=%s source=%s evidence=%s "
+            "holder_pid=%s holder_exe=%s holder_cwd=%s holder_install=%s "
+            "self_install=%s marker=%s",
             data.get("refused_at"),
             data.get("port"),
             data.get("host"),
             data.get("exit_code"),
+            data.get("family"),
+            data.get("source"),
+            data.get("evidence"),
             holder.get("pid"),
             holder.get("exe"),
             holder.get("cwd"),
@@ -533,7 +666,17 @@ def surface_refusal_marker(claims_dir: Optional[Path] = None) -> bool:
 
 
 def write_refusal_marker(
-    data_dir: Path, holder: Any, self_install_dir: Optional[Path], port: int, host: str
+    data_dir: Path,
+    holder: Any,
+    self_install_dir: Optional[Path],
+    port: Any,
+    host: str,
+    *,
+    family: str = "port-ownership",
+    source: str = "claim",
+    evidence: Optional[str] = None,
+    holder_ppid: Optional[int] = None,
+    holder_ppid_cmdline_head: Optional[str] = None,
 ) -> bool:
     path = Path(data_dir) / REFUSAL_MARKER_FILENAME
     holder_pid = None
@@ -541,21 +684,52 @@ def write_refusal_marker(
     if isinstance(holder, PortClaim):
         holder_pid = holder.pid
         holder_install = holder.install_dir
+        if holder_ppid is None:
+            holder_ppid = getattr(holder, "ppid", None)
+        if holder_ppid_cmdline_head is None:
+            holder_ppid_cmdline_head = getattr(holder, "ppid_cmdline_head", None)
     elif isinstance(holder, dict):
         holder_pid = holder.get("pid")
         holder_install = holder.get("install_dir")
+        if holder_ppid is None:
+            holder_ppid = holder.get("ppid")
+        if holder_ppid_cmdline_head is None:
+            holder_ppid_cmdline_head = holder.get("ppid_cmdline_head")
     else:
         holder_pid = getattr(holder, "pid", None)
         holder_install = getattr(holder, "install_dir", None)
+        if holder_ppid is None:
+            holder_ppid = getattr(holder, "ppid", None)
+        if holder_ppid_cmdline_head is None:
+            holder_ppid_cmdline_head = getattr(holder, "ppid_cmdline_head", None)
+    if holder_ppid is None and holder_pid is not None:
+        try:
+            holder_ppid = _read_ppid(holder_pid)
+        except Exception:  # pragma: no cover - defensive
+            holder_ppid = None
+        if holder_ppid_cmdline_head is None and holder_ppid is not None:
+            try:
+                argv = read_parent_cmdline(holder_ppid)
+                if argv is not None:
+                    holder_ppid_cmdline_head = " ".join(argv)
+                    if len(holder_ppid_cmdline_head) > 120:
+                        holder_ppid_cmdline_head = holder_ppid_cmdline_head[:120]
+            except Exception:  # pragma: no cover - defensive
+                holder_ppid_cmdline_head = None
     payload = {
         "refused_at": _now_iso(),
         "port": port,
         "host": host,
+        "family": family,
+        "source": source,
+        "evidence": evidence,
         "holder": {
             "pid": holder_pid,
             "exe": _read_proc_exe(holder_pid) if holder_pid is not None else "<unknown>",
             "cwd": _read_proc_cwd(holder_pid) if holder_pid is not None else "<unknown>",
             "install_dir": holder_install,
+            "ppid": holder_ppid,
+            "ppid_cmdline_head": holder_ppid_cmdline_head,
         },
         "self_install_dir": _str_or_none(self_install_dir),
         "exit_code": 78,
@@ -587,15 +761,20 @@ def clear_refusal_marker(data_dir: Path) -> bool:
 def run_port_ownership_gate(host: str, port: int) -> None:
     """Run the gate.
 
-    Order (fix-round 2):
+    Order (fix-round 2 + A2):
       1. surface any refusal marker left by a PRIOR boot (B5),
       2. validate the port — PORT=0 / out-of-range REFUSES THE CLAIM
          loudly and the boot proceeds with no ownership enforcement (N8),
-      3. claim; on positive proof of a live FOREIGN owner: marker line +
+         (discovery never runs on an unclaimable port),
+      3. NEW (A2): socket-holder discovery — positive-foreign holder
+         (both install dirs resolved + different + liveness confirmed)
+         => two-sample confirm => refuse 78 + holder marker (pre-bind),
+         regardless of claim presence.
+      4. claim; on positive proof of a live FOREIGN owner: marker line +
          durable refusal record + ``sys.exit(78)``. This exit happens
          BEFORE ``bind_socket_with_retry`` — the refusal never enters the
          retry loop (D4, pinned).
-      4. degrade/unknown => loud warning, proceed without enforcement.
+      5. degrade/unknown => loud warning, proceed without enforcement.
     """
     self_install_dir = resolve_self_install_dir()
     # The claims dir is host-global; the install identity is passed for
@@ -614,12 +793,131 @@ def run_port_ownership_gate(host: str, port: int) -> None:
         )
         return
 
+    # --- A2 socket-holder discovery (positive-proof-only) ---
+    try:
+        from daemon.services import port_holder as ph
+
+        holders = ph.find_listener_holders("/proc", port)
+    except Exception as exc:  # noqa: BLE001 - degrade, never refuse
+        logger.warning("port-holder discovery unavailable (%s) — proceeding", exc)
+        holders = []
+
+    # Existing claim (read-only) for claim-and-socket agreement detection.
+    existing_claim = None
+    try:
+        existing_claim = read_claim(_claim_path(claims_dir, host, port))
+    except Exception:  # noqa: BLE001 - defensive
+        existing_claim = None
+
+    positive_foreign = []
+    for h in holders:
+        try:
+            h_install = ph.attribute_install_dir(h, "/proc")
+        except Exception:  # noqa: BLE001
+            h_install = None
+        if h.install_dir is None and h_install is not None:
+            h.install_dir = str(h_install)
+        holder_install = h.install_dir
+        # liveness
+        try:
+            from daemon.services.port_ownership import pid_alive_with_starttime as _pa
+            live = _pa(h.pid, h.starttime)
+        except Exception:  # noqa: BLE001
+            live = False
+        if holder_install is None or self_install_dir is None:
+            # unattributable / unresolved => non-foreign; loud warning
+            logger.warning(
+                "port-holder: pid=%s exe=%s cwd=%s install=<unattributable> "
+                "(non-foreign, degrade) — not refusing",
+                h.pid,
+                h.exe,
+                h.cwd,
+            )
+            continue
+        if str(holder_install) == str(self_install_dir):
+            # same-install: fall through (lineage only applies to claims)
+            logger.warning(
+                "port-holder: same-install holder pid=%s (non-foreign) — "
+                "proceeding; claim path handles lineage",
+                h.pid,
+            )
+            continue
+        if not live:
+            # recycled / dead => degrade
+            logger.warning(
+                "port-holder: holder pid=%s starttime mismatch (stale) — "
+                "degrade, not refusing",
+                h.pid,
+            )
+            continue
+        positive_foreign.append(h)
+
+    if positive_foreign:
+        # claim-and-socket agreement: a claim exists whose pid is the holder
+        agreeing = False
+        if existing_claim is not None:
+            for h in positive_foreign:
+                if existing_claim.pid == h.pid:
+                    agreeing = True
+                    break
+        source = "socket-holder+claim" if agreeing else "socket-holder"
+        # two-sample confirm (full re-walk) before refusing
+        confirmed = False
+        for h in positive_foreign:
+            try:
+                if ph.confirm_holder(h, "/proc", port):
+                    confirmed = True
+                    break
+            except Exception:  # noqa: BLE001
+                confirmed = False
+        if confirmed:
+            h = positive_foreign[0]
+            holder_install = h.install_dir
+            logger.warning(
+                "PORT OWNERSHIP REFUSED (socket-holder): port=%s host=%s "
+                "holder_pid=%s holder_exe=%s holder_cwd=%s holder_install=%s "
+                "self_install=%s claims_dir=%s",
+                port,
+                host,
+                h.pid,
+                h.exe,
+                h.cwd,
+                holder_install,
+                self_install_dir,
+                claims_dir,
+            )
+            write_refusal_marker(
+                claims_dir,
+                h,
+                self_install_dir,
+                port,
+                host,
+                family="port-ownership",
+                source=source,
+                evidence="positive-install-mismatch",
+                holder_ppid=getattr(h, "ppid", None),
+                holder_ppid_cmdline_head=getattr(h, "ppid_cmdline_head", None),
+            )
+            sys.exit(78)
+        else:
+            logger.warning(
+                "port-holder: positive-foreign holder vanished between samples "
+                "(no proof) — proceeding to bind",
+            )
+
     result = try_claim(claims_dir, host, port, self_install_dir)
     if result.kind == "refused":
         holder = result.claim
         holder_pid = result.holder_pid
         if holder is not None:
             holder_pid = holder.pid
+        # determine source: claim-lineage vs claim
+        if result.reason == "claim-lineage mismatch":
+            src = "claim-lineage"
+            ev = "lineage-mismatch"
+        else:
+            src = "claim"
+            ev = "positive-install-mismatch"
         logger.warning(
             "PORT OWNERSHIP REFUSED: port=%s host=%s holder_pid=%s "
             "holder_exe=%s holder_cwd=%s holder_install=%s self_install=%s "
@@ -633,7 +931,18 @@ def run_port_ownership_gate(host: str, port: int) -> None:
             self_install_dir,
             claims_dir,
         )
-        write_refusal_marker(claims_dir, holder, self_install_dir, port, host)
+        write_refusal_marker(
+            claims_dir,
+            holder,
+            self_install_dir,
+            port,
+            host,
+            family="port-ownership",
+            source=src,
+            evidence=ev,
+            holder_ppid=getattr(holder, "ppid", None) if holder is not None else None,
+            holder_ppid_cmdline_head=getattr(holder, "ppid_cmdline_head", None) if holder is not None else None,
+        )
         sys.exit(78)
     if result.kind in ("degraded", "unknown", "invalid"):
         logger.warning(
