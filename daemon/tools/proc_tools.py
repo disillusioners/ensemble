@@ -135,7 +135,7 @@ from daemon.services.ram_guard.ladder import (
     OWNERSHIP_ENV_VAR as _RAM_LADDER_OWNERSHIP_ENV_VAR,
 )
 from daemon.services.ram_guard.tree_reader import PROC_ROOT as _PROC_ROOT
-from daemon.services.ram_guard.tree_reader import read_start_time as _read_start_time
+from daemon.services.ram_guard.tree_reader import read_stat_entry as _read_stat_entry
 from daemon.services.ram_guard.verdict import (
     LANE_PROC as _LANE_PROC,
     STATE_OVERCOUNTED as _STATE_OVERCOUNTED,
@@ -309,6 +309,7 @@ def _ram_register_spawn(
     pid: int,
     pgid: int,
     start_time_jiffies: int | None,
+    start_time_status: str | None = None,
     ceiling_bytes: int | None,
 ) -> "Optional[SpawnRecord]":
     """S1 — register the spawn with the RAM guard (fail-open).
@@ -331,6 +332,7 @@ def _ram_register_spawn(
             pid=pid,
             pgid=pgid,
             start_time_jiffies=start_time_jiffies,
+            start_time_status=start_time_status,
             ceiling_bytes=ceiling_bytes,
         )
     except Exception as exc:
@@ -1724,7 +1726,14 @@ class BackgroundProcessManager:
                 pgid = os.getpgid(proc.pid)
             except (ProcessLookupError, OSError):
                 pgid = proc.pid
-        start_time_jiffies = _read_start_time(_PROC_ROOT, proc.pid)
+        import sys as _sys
+        if not _sys.platform.startswith("linux"):
+            start_time_status = "unsupported"
+            start_time_jiffies = None
+        else:
+            _stat = _read_stat_entry(_PROC_ROOT, proc.pid)
+            start_time_status = "ok" if _stat.ok else ("absent" if _stat.absent else "unreadable")
+            start_time_jiffies = _stat.start_time_jiffies
         info.ram_pgid = pgid
         info.ram_start_time_jiffies = start_time_jiffies
 
@@ -1750,6 +1759,7 @@ class BackgroundProcessManager:
                 pid=proc.pid,
                 pgid=pgid,
                 start_time_jiffies=start_time_jiffies,
+                start_time_status=start_time_status,
                 ceiling_bytes=ram_ceiling_bytes,
             )
             if record is not None:

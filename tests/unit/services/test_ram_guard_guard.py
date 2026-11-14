@@ -1,3 +1,4 @@
+# ENSEMBLE-32: platform-fixture rationale — see docs/runbooks/ram-guard-and-unit-bounds.md "Test-platform census"
 """Substrate tier — the guard: the two threads, the registry, the
 pending set, the liveness sweep and the event HOOK
 (test-plan §3.1 case S6, §3.7 N3, §3.8 O10/O11/O12/O14).
@@ -1314,3 +1315,10 @@ def test_c2_the_claim_spans_the_emit(tmp_path, kill_census, monkeypatch):
     assert record.state == STATE_RELEASED, (
         "the release still lands — after the emit"
     )
+
+
+import pytest
+
+@pytest.fixture(autouse=True)
+def _ensemble32_linux_platform(monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")

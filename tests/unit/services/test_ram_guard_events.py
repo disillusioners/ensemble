@@ -1,3 +1,4 @@
+# ENSEMBLE-32: platform-fixture rationale — see docs/runbooks/ram-guard-and-unit-bounds.md "Test-platform census"
 """The RAM-guard EVENT EMITTER pack (Phase 5) — the bridge contract.
 
 Covers phase5-plan.md T7 and test-plan.md §3.7 N9 / §3.8 O1 against
@@ -619,3 +620,10 @@ class TestScheduleFailureClosesCoro:
             "the scheduling-failure path must close the coroutine — "
             "no unawaited-coroutine warning may escape"
         )
+
+
+import pytest
+
+@pytest.fixture(autouse=True)
+def _ensemble32_linux_platform(monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")
