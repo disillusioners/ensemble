@@ -601,8 +601,8 @@ predicate on a darwin host.
 
 | File | Kernel-dependent legs | Gating | Why autouse retained |
 |---|---|---|---|
-| tests/tools/test_bash_ram_guard.py | yes (/proc/<pid>/stat, /proc/meminfo) | skipif at :408 + inline memory skips | exercises platform-gate predicate |
-| tests/tools/test_proc_ram_guard.py | yes (/proc/meminfo; real /proc in non-mocked cases) | skipif at :806 + inline memory skips | exercises platform-gate predicate |
+| tests/tools/test_bash_ram_guard.py | yes (/proc/<pid>/stat, /proc/meminfo) | skipif on TestKillSwitch::test_switch_off_is_byte_identical_to_on + inline memory skips | exercises platform-gate predicate |
+| tests/tools/test_proc_ram_guard.py | yes (/proc/meminfo; real /proc in non-mocked cases) | skipif on TestLaneShape::test_the_guard_registry_holds_the_entry + inline memory skips | exercises platform-gate predicate |
 | tests/tools/test_ram_guard_fairness.py | yes (/proc/meminfo unreadable) | skipif | exercises platform-gate predicate |
 | tests/unit/routers/test_resources_ram_guard.py | none (fake procfs trees) | none needed | platform-gate predicate; tmp_path fakes |
 | tests/unit/services/test_ram_guard_events.py | none (fake procfs) | none needed | platform-gate predicate; tmp_path fakes |
