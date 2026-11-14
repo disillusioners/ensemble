@@ -446,7 +446,7 @@ def _read_proc_vm_hwm_kb(pid: int) -> Optional[int]:
     NOT re-validate; a None peak just means we raced and missed
     the reap window.
     """
-    if sys.platform == "win32":
+    if not sys.platform.startswith("linux"):
         return None
     try:
         with open(f"/proc/{pid}/status", "r") as h:
@@ -1212,8 +1212,9 @@ def _ram_additive_surface(
 ) -> str:
     """The additive RAM surfaces (arch §15 B25, verbatim).
 
-    A refusal ⇒ ``ram_kill_refused: <reason>`` + ``ram_breach_observed:
-    true``; an observed breach whose episode did not kill (the
+    A refusal ⇒ ``ram_kill_refused: <reason>`` (plus
+    ``ram_breach_observed: true`` only when a breach was observed);
+    an observed breach whose episode did not kill (the
     wait-expiry / over-count surface) ⇒ ``ram_breach_observed: true`` +
     the observed peak.  The lines are ADDITIVE — the command's output
     is never swallowed — and the surface is distinct from

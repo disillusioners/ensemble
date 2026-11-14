@@ -357,8 +357,8 @@ class PidRegistry:
                 self._enqueue_history_locked(existing)
                 del self._live[pid]
                 logger.warning(
-                    "pid_registry: pid=%d recycled (old start_time=%d, "
-                    "new start_time=%d) — force-exited old entry",
+                    "pid_registry: pid=%d recycled (old start_time=%s, "
+                    "new start_time=%s) — force-exited old entry",
                     pid, existing.start_time, start_time,
                 )
             entry = PidRegistryEntry(

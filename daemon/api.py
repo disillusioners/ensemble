@@ -4624,7 +4624,8 @@ def _boot_ram_guard(app, manager, config):
     app.state.ram_guard = None
     if config.ram_guard_derived_switch:
         import sys as _sys
-        if not _sys.platform.startswith("linux"):
+        from daemon.services.ram_guard.ladder import platform_supported
+        if not platform_supported(_sys.platform):
             # Non-Linux: the guard is inert (no thread, no registration,
             # no measurement). Mirror the OFF line style.
             logger.info(

@@ -74,8 +74,6 @@ def test_boot_registers_on_linux(_linux):
 
 def test_register_refuses_on_darwin_platform():
     """Belt-and-braces: a guard constructed on darwin refuses registration."""
-    import tempfile, os
-    root = None
     g = RamGuard(
         enabled=True,
         resolved_ceiling=(1024 * 1024, "test"),
@@ -142,6 +140,8 @@ def test_register_platform_unavailable_never_leader_unreadable():
     assert rec is not None
     assert rec.reason == "refused:platform-unsupported"
     assert rec.reason != "refused:leader-unreadable"
+    assert g.counters_snapshot()["ram_kill_refusals_p0"] == 1
+    assert g.counters_snapshot()["ram_kill_refusals_p5"] == 0
 
 def test_classify_proc_stat_error_process_lookup_is_absent():
     from daemon.services.ram_guard.tree_reader import classify_proc_stat_error
@@ -149,3 +149,8 @@ def test_classify_proc_stat_error_process_lookup_is_absent():
     assert classify_proc_stat_error(FileNotFoundError('gone')) == 'absent'
     assert classify_proc_stat_error(PermissionError('denied')) == 'unreadable'
     assert classify_proc_stat_error(OSError('other')) == 'unreadable'
+
+def test_register_empty_tracking_id_returns_none():
+    g = RamGuard(enabled=True, resolved_ceiling=(1024*1024, 'test'), platform='linux')
+    rec = g.register(tracking_id='', instance_id='i-1', lane='bash', pid=1, pgid=1, start_time_jiffies=1)
+    assert rec is None

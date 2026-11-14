@@ -141,7 +141,7 @@ def build_ram_envelope_payload(
     *,
     code: str = RAM_LIMIT_EXCEEDED_CODE,
     surface: Optional[str] = None,
-    ram_breach_observed: bool = True,
+    ram_breach_observed: bool = False,
     coincident_timeout: bool = False,
     timeout_seconds: Optional[float] = None,
     message: Optional[str] = None,
@@ -187,7 +187,7 @@ def format_ram_envelope(
     *,
     code: str = RAM_LIMIT_EXCEEDED_CODE,
     surface: Optional[str] = None,
-    ram_breach_observed: bool = True,
+    ram_breach_observed: bool = False,
     coincident_timeout: bool = False,
     timeout_seconds: Optional[float] = None,
     message: Optional[str] = None,
@@ -218,7 +218,7 @@ def build_ram_event_payload(record: SpawnRecord) -> dict[str, Any]:
     on the list is NEVER copied — the bus persists ``data`` unsanitized,
     so the allow-list MUST be enforced here, at the producer.
     """
-    payload = build_ram_envelope_payload(record)
+    payload = build_ram_envelope_payload(record, ram_breach_observed=True)
     payload["trigger"] = record.trigger
     payload["state"] = record.state
     payload["tracking_id"] = record.tracking_id
@@ -300,8 +300,9 @@ def format_ram_proc_lines(record, *, timed_out: bool = False) -> list[str]:
 
     States (checked in this order):
       - ``reason`` starts with ``refused:`` ⇒ the B25 refusal surface
-        (``ram_kill_refused: <reason>`` + ``ram_breach_observed: true``)
-        — a refusal is NEVER swallowed.
+        (``ram_kill_refused: <reason>``; ``ram_breach_observed: true`` is
+        appended ONLY when a breach was actually observed) — a refusal
+        is NEVER swallowed.
       - terminal ``KILLED`` (or a ``killed:`` reason) ⇒ a ``ram_breach:``
         line (projected from the SAME payload as the bash envelope) +
         the flat ``ram_killed: true``.

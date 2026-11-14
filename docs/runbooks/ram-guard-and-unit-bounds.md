@@ -582,3 +582,7 @@ stayed out. Re-entry requires a new commission; nothing here auto-expires.
 | Pending-full blind spot (content-free WARN, no counter) | cycle 3 (code 6dc38a1b3) | The pending slot is full this tick and the breach is not claimed; handled as a content-free `logger.warning` naming only the tracking id + depth + cap (no argv, no env values, no counter bump) so the §15 B5 counter set (16 keys, frozen exact) stays untouched. Code-side pending-full log landed in 6dc38a1b3; this register row is the runbook mirror. |
 
 **Identity classification at spawn (ENSEMBLE-32):** absent leader is never registered (no watch, no counter, no refusal). absent covers both FileNotFoundError and ProcessLookupError (the process is gone). unreadable -> refused:leader-unreadable (p5, fail-closed). platform-unavailable -> refused:platform-unsupported (p0). The kill ladder keeps its own P5 split (absent -> proceed, unreadable -> refuse); both lanes share tree_reader.classify_proc_stat_error, so absent and unreadable can no longer disagree.
+
+**Tick-level skip-fast (ENSEMBLE-32 item 5):** when scan_proc reports scan_complete=False, _tick_once bumps enumeration_failures for every record under a single lock (peak preserved, no breach evaluated, no per-record lock churn).
+
+**Ops note (ENSEMBLE-32):** ram_kill_refusals_p5 will drop for short-lived children post-fix (intended) — dashboards keyed on it see a step.

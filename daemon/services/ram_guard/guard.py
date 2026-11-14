@@ -319,6 +319,8 @@ class RamGuard:
         """
         if not self._enabled:
             return None
+        if not tracking_id:
+            return None
         if not instance_id:
             return None
         # Belt-and-braces: non-Linux platform ⇒ refuse registration with

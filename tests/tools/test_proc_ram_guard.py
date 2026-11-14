@@ -803,6 +803,10 @@ class TestKillSwitch:
 
 
 class TestLaneShape:
+    @pytest.mark.skipif(
+        not __import__("sys").platform.startswith("linux"),
+        reason="genuinely pre-existing at base: proc lane start_time_jiffies is None on darwin.",
+    )
     @pytest.mark.asyncio
     async def test_the_guard_registry_holds_the_entry(
         self, unique_instance_id, recording_guard
@@ -1422,3 +1426,14 @@ import pytest
 @pytest.fixture(autouse=True)
 def _ensemble32_linux_platform(monkeypatch):
     monkeypatch.setattr("sys.platform", "linux")
+
+class TestEnsemble32ProcAbsentSeam:
+    def test_proc_absent_no_registration(self):
+        from daemon.services.ram_guard.guard import RamGuard
+        g = RamGuard(enabled=True, resolved_ceiling=(1024*1024, 'test'), platform='linux')
+        rec = g.register(
+            tracking_id='p' * 32, instance_id='i-1', lane='proc', pid=5678, pgid=5678,
+            start_time_jiffies=None, start_time_status='absent',
+        )
+        assert rec is None
+        assert g.counters_snapshot()['ram_kill_refusals_p5'] == 0

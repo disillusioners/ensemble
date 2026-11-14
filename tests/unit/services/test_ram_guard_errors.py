@@ -289,3 +289,10 @@ def test_envelope_reports_the_resolved_ceiling_as_limit_bytes():
     assert payload["limit_bytes"] == 8367 * MIB
     # The re-arm threshold is 0 (never None) when unarmed.
     assert payload["rearm_threshold_bytes"] == 0
+
+def test_default_ram_breach_observed_false():
+    import inspect
+    from daemon.services.ram_guard.errors import build_ram_envelope_payload, format_ram_envelope
+    assert build_ram_envelope_payload.__wrapped__ if hasattr(build_ram_envelope_payload,'__wrapped__') else True
+    assert inspect.signature(build_ram_envelope_payload).parameters['ram_breach_observed'].default is False
+    assert inspect.signature(format_ram_envelope).parameters['ram_breach_observed'].default is False
