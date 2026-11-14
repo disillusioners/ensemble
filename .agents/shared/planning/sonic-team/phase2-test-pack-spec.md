@@ -6,6 +6,17 @@
 **Inputs:** `findings-C-risk.md` §2b (pack corpus/registry), §2c (pins/QUARANTINE), §2d (ceremony gates) · `findings-B-infra.md` §1 (registry/discovery), §2b (recursion), §5 (llm lanes)
 **Cross-refs (restate by reference, never re-invent):** `phase1-implementation-spec.md` owns the frozen contracts — 7 handoff field names, `HANDOFF.md` path convention, blast-radius glob list, the Ari note text, meta.json values (`llm_model:"agentic"` ×4; `recursion_limit_multiplier:7` on sonic-coder only; sonic-leader `team_members {sonic-coder, sonic-reviewer, sonic-tester, giter}`).
 
+## AMENDMENT 2026-11-14 — sonic routing (v0.30.5; supersedes A7/A10/A11 + the registry row)
+
+The blast-radius predicate is REMOVED (Ruling A, Emperor 2026-11-14). This phase-2 spec is
+the v1 HISTORICAL record; the OPERATIVE pack is `test/packs/sonic_agent_defs_checks.py`.
+Superseded legs: **A7** (blast globs) and **A10** (blast escalation line) are REMOVED — A10
+now pins the developer pause/handover; **A11** anchors moved to the "Sonic Team (Default)"
+note. New legs A15–A23 pin the complexity-handover protocol + interop (HANDOFF shared-planning
+path, PACKS one-line registration, prompt protocol lines, POK audience). The frozen strings
+are owned by `phase1-implementation-spec-v1.1.md`'s 2026-11-14 amend block + the landed
+prompts. Registered row re-stated in `.agents/tester/PACKS.md` (v0.30.5).
+
 ## 1. Purpose and gate semantics
 
 One gate-able pack covering the four new agent definitions + the one steady-team edit (Ari's `rule.md`). **Aegis lesson (binding):** a pinned condition that lives in NO registered pack cannot be verified by any gate — the pin is invisible (POK `packconv-03`: a script with no registry row never enters the pack runner; the runner IS the tester's procedure, `findings-C-risk.md` §2b). This pack is therefore *registered* (§4) and self-contained: it runs from any clean checkout of the branch (and from `latest` post-merge) with `bash test/packs/sonic_agent_defs_unit_test.sh`.
