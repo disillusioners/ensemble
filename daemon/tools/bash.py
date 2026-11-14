@@ -1353,9 +1353,8 @@ async def bash(
             "This guard prevents agent-issued bash from killing live "
             "ensemble processes/ports/install roots. To run such a command "
             "inside a fenced (scratch) test mirror, set "
-            "ENSEMBLE_FENCED_TEST_CONTEXT=1 in the tool env "
-            '(env={"ENSEMBLE_FENCED_TEST_CONTEXT": "1"}) or in the daemon '
-            "environment — only inside a fenced mirror. Scratch-sentinel/"
+            "ENSEMBLE_FENCED_TEST_CONTEXT=1 in the daemon environment — "
+            "only inside a fenced mirror. Scratch-sentinel/"
             "scratch-named targets are allowed without the marker."
         )
     try:
@@ -2040,8 +2039,12 @@ def _pkill_overlay_violation(command, env=None) -> str | None:
     for name in _PKILL_OVERLAY_LIVE_NAME_PATTERNS:
         if name in lower:
             return name
-    # port tokens as whole words
-    for port_num, port_pat in (("9797", r"\b9797\b"), ("9798", r"\b9798\b")):
+    # port tokens as whole words (A1 hygiene: demo port 7979 joins)
+    for port_num, port_pat in (
+        ("9797", r"\b9797\b"),
+        ("9798", r"\b9798\b"),
+        ("7979", r"\b7979\b"),
+    ):
         if _re.search(port_pat, lower):
             return port_num
     return None

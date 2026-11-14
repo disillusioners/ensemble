@@ -78,3 +78,39 @@ def test_input_channel_refused():
     # The bash tool applies the same predicate to `input=`; verify the
     # pure function refuses a kill+live-token stdin payload.
     assert _pkill_overlay_violation("pkill -f ensemble-prod") == "ensemble-prod"
+
+
+# ---------------------------------------------------------------------------
+# HY-1 (A1 hygiene): demo port 7979 joined the live port tokens
+# ---------------------------------------------------------------------------
+
+
+def test_7979_token_refused_unfenced_HY1():
+    r"""HY-1: the 7979 token is a live pattern. Counter-mutant HY-M1 —
+    removing the ("7979", r"\b7979\b") tuple entry reddens this (the
+    predicate returns None where "7979" is required)."""
+    assert _pkill_overlay_violation("fuser -k 7979/tcp") == "7979"
+    assert _pkill_overlay_violation("pkill -f 7979") == "7979"
+
+
+def test_7979_whole_word_negative_passes_HY1():
+    r"""HY-1: port tokens match as WHOLE WORDS only. The matrix negative
+    (19799) passes trivially; 17979 CONTAINS "7979" mid-word, so this pin
+    reddens under the counter-mutation that strips the \b boundaries
+    (naive substring match) — removal of the tuple (HY-M1) is separately
+    reddened by test_7979_token_refused_unfenced_HY1."""
+    assert _pkill_overlay_violation("kill -0 19799") is None
+    assert _pkill_overlay_violation("kill -0 17979") is None
+
+
+def test_7979_allowed_with_ambient_fence_HY1(monkeypatch):
+    """HY-1: the daemon-set ambient fence still exempts a 7979 kill, and
+    the agent-settable overlay does NOT (B6 semantics carry to the new
+    token). Counter-mutant HY-M1 (tuple removal) reddens the paired
+    refusal leg; an overlay-as-fence regression reddens the first assert
+    here (asserted with the ambient var absent so ambient cannot win)."""
+    monkeypatch.delenv("ENSEMBLE_FENCED_TEST_CONTEXT", raising=False)
+    env = {"ENSEMBLE_FENCED_TEST_CONTEXT": "1"}
+    assert _pkill_overlay_violation("fuser -k 7979/tcp", env=env) == "7979"
+    monkeypatch.setenv("ENSEMBLE_FENCED_TEST_CONTEXT", "1")
+    assert _pkill_overlay_violation("fuser -k 7979/tcp") is None
