@@ -616,3 +616,115 @@ class TestCompositionCommitRace:
         assert len(entries) == 32
         assert {e["id"] for e in entries} == original_ids
         assert sum(1 for e in entries if e["summary"] == "racer") == 0
+
+
+# ============================================================================
+# B2 — per-project writer serialization (D19)
+# ============================================================================
+
+
+class TestWriterSerializationLock:
+    def test_lock_carries_for_update_on_pg_not_on_sqlite(self, store, project):
+        """B2 dialect-compile proof: the projects-row lock carries FOR UPDATE under
+        the PG dialect and is a no-op under the SQLite dialect."""
+        from sqlalchemy.dialects import postgresql, sqlite
+
+        pid = project.project_id
+        clause_elements = []
+
+        def _rec(conn, clause_element, multiparams, params, execution_options):
+            clause_elements.append(clause_element)
+
+        event.listen(store.engine, "before_execute", _rec)
+        try:
+            from sqlmodel import Session
+
+            with Session(store.engine) as s:
+                s.get(Project, pid, with_for_update=True)
+        finally:
+            event.remove(store.engine, "before_execute", _rec)
+
+        assert len(clause_elements) == 1
+        lock_clause = clause_elements[0]
+        pg_sql = str(lock_clause.compile(dialect=postgresql.dialect()))
+        sl_sql = str(lock_clause.compile(dialect=sqlite.dialect()))
+        assert "FOR UPDATE" in pg_sql
+        assert "FOR UPDATE" not in sl_sql
+
+    def test_add_emits_projects_row_lock_as_first_statement(self, store, project):
+        """B2 behavioral: add_future_entry's first emitted statement is the projects
+        SELECT — i.e. the with_for_update lock precedes the count."""
+        pid = project.project_id
+        captured = []
+
+        def _rec(conn, cursor, statement, parameters, context, executemany):
+            captured.append(statement)
+
+        event.listen(store.engine, "before_cursor_execute", _rec)
+        try:
+            store.add_future_entry(pid, "lock-order-add", max_entries=32)
+        finally:
+            event.remove(store.engine, "before_cursor_execute", _rec)
+
+        assert captured, "no statements captured"
+        first = captured[0].lower()
+        assert first.startswith("select")
+        assert "projects" in first
+
+    def test_remove_emits_projects_row_lock_as_first_statement(self, store, project):
+        """B2 behavioral: remove_future_entry with a scoped project_id emits the
+        projects-row lock as its first statement (uniformity with add)."""
+        pid = project.project_id
+        added = store.add_future_entry(pid, "to-remove", max_entries=32)
+        captured = []
+
+        def _rec(conn, cursor, statement, parameters, context, executemany):
+            captured.append(statement)
+
+        event.listen(store.engine, "before_cursor_execute", _rec)
+        try:
+            store.remove_future_entry(added["id"], project_id=pid)
+        finally:
+            event.remove(store.engine, "before_cursor_execute", _rec)
+
+        assert captured, "no statements captured"
+        first = captured[0].lower()
+        assert first.startswith("select")
+        assert "projects" in first
+
+
+# ============================================================================
+# B1 — payload captured pre-commit, no post-commit refresh
+# ============================================================================
+
+
+class TestPayloadCapturedPreCommit:
+    def test_add_returns_success_payload_without_post_commit_refresh(self, store, project):
+        """B1: the add's success payload is captured before commit and no
+        post-commit refresh is performed, so a concurrent remove in the
+        commit→refresh gap can no longer surface an ObjectDeletedError."""
+        from unittest.mock import patch as mock_patch
+        from sqlalchemy.orm import Session as SASession
+
+        pid = project.project_id
+        with mock_patch.object(
+            SASession, "refresh", side_effect=AssertionError("post-commit refresh called")
+        ):
+            result = store.add_future_entry(pid, "b1-payload", max_entries=32)
+
+        assert result["summary"] == "b1-payload"
+        assert result["evicted"] == []
+        assert result["id"] is not None  # PK assigned via flush before capture
+        # the row really landed
+        assert store.list_future_entries(pid, limit=100)["total"] == 1
+
+    def test_payload_survives_subsequent_row_removal(self, store, project):
+        """B1 companion: the caller already holds the success payload even if the
+        row is removed immediately after the add returns."""
+        pid = project.project_id
+        result = store.add_future_entry(pid, "b1-survives", max_entries=32)
+        captured = dict(result)
+        store.remove_future_entry(result["id"], project_id=pid)
+        assert captured["summary"] == "b1-survives"
+        assert captured["id"] == result["id"]
+        assert captured["evicted"] == []
