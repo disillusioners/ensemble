@@ -28,8 +28,8 @@ AC-10a, AC-10b):
   (``ok``/``pclass`` ∈ {direct, inherited}/``depth``/``detail``) and
   the gate's refusal-token mapping are pinned so NEITHER lane can
   silently change semantics;
-* allow-lists: the maintenancer holds BOTH categories; ari, leader and
-  every other agent hold NEITHER (D-1/D-2/D-13).
+* allow-lists: ari and the maintenancer hold BOTH categories; the leader
+  and every other agent hold NEITHER (D-1/D-2/D-13, amended 2026-11-14).
 
 SIZE: ≈535 lines — registration + wiring + vocabulary + the DF-4
 gate-predicate source pins; split the source-pin classes out when a
@@ -105,7 +105,7 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     # entries are the only access path, and every tool body ALSO
     # carries its own agent_id gate.
     "wedge-capture",
-    # nest-ops (2026-10-21): the two maintenancer fleet categories
+    # nest-ops (2026-10-21): the two {ari, maintenancer} fleet categories
     # (read #13 / act #14) — opt-in-only, never default-granted.
     "instance_read",
     "instance_ops",
@@ -227,10 +227,11 @@ class TestPrivilegedCategory:
 
 
 class TestAllowLists:
-    """The two categories are MAINTENANCER-ONLY (D-1 / D-2 / D-13).
+    """The two categories are held by {ari, maintenancer} (D-1 / D-2 /
+    D-13, amended 2026-11-14 (Emperor directive 2026-11-14)).
 
-    Ari does NOT hold them; the leader does NOT hold them; no other
-    agent's allow list gains either.
+    The leader does NOT hold them; no other agent's allow list gains
+    either.
     """
 
     def _allow(self, agent_dir: str) -> list:
@@ -246,10 +247,10 @@ class TestAllowLists:
         assert READ_CATEGORY in allow
         assert ACT_CATEGORY in allow
 
-    def test_ari_does_not_hold_either(self) -> None:
+    def test_ari_holds_both(self) -> None:
         allow = self._allow("ari")
-        assert READ_CATEGORY not in allow
-        assert ACT_CATEGORY not in allow
+        assert READ_CATEGORY in allow
+        assert ACT_CATEGORY in allow
 
     def test_leader_does_not_hold_either(self) -> None:
         allow = self._allow("leader")
@@ -264,7 +265,7 @@ class TestAllowLists:
             allow = meta.get("tools", {}).get("allow", [])
             if READ_CATEGORY in allow or ACT_CATEGORY in allow:
                 holders.append(meta_path.parent.name)
-        assert holders == ["maintenancer"], (
+        assert holders == ["ari", "maintenancer"], (
             f"unexpected holders of the nest-ops categories: {holders}"
         )
 

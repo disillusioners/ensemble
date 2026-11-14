@@ -42,6 +42,7 @@
     "pok",
     "proc",
     "project",
+    "project_future",
     "project_history",
     "prompt-assent",
     "prompt-reload",
@@ -65,7 +66,7 @@
     "view-write",
     "wedge-capture"
   ],
-  "count": 64,
+  "count": 65,
   "reserved": "other",
   "source": "daemon/tools/_tool_registry.py CATEGORY_MODULES + @register_tool_category call sites",
   "vocabulary_version": 10
