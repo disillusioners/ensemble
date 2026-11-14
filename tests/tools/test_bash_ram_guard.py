@@ -1,3 +1,4 @@
+# ENSEMBLE-32: platform-fixture rationale — see docs/runbooks/ram-guard-and-unit-bounds.md "Test-platform census"
 """Bash-lane RAM auto-termination tests (phase3-plan.md T14).
 
 The pack covers the five shapes the plan names:
@@ -1997,5 +1998,6 @@ class TestEnsemble32BashAbsentSpawn:
         finally:
             set_ram_guard(None)
         assert guard.counters_snapshot()['ram_kill_refusals_p5'] == 0
+        assert guard.health()['registry_depth'] == 0
         assert 'ram_kill_refused:' not in out
         assert 'ram_breach_observed:' not in out

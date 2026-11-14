@@ -1,3 +1,4 @@
+# ENSEMBLE-32: platform-fixture rationale — see docs/runbooks/ram-guard-and-unit-bounds.md "Test-platform census"
 """Proc-lane RAM auto-termination tests (phase4-plan.md T11).
 
 The pack covers the five shapes the plan names:

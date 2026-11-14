@@ -588,14 +588,25 @@ stayed out. Re-entry requires a new commission; nothing here auto-expires.
 **Ops note (ENSEMBLE-32):** ram_kill_refusals_p5 will drop for short-lived children post-fix (intended) — dashboards keyed on it see a step.
 ## Test-platform census (ENSEMBLE-32)
 
-Evidence command: grep -nE "/proc|read_stat_entry|read_start_time|os.getpgid|meminfo" <file>
+Reconciliation command:
+for f in $(grep -rl 'autouse=True' tests/ --include=*.py | sort); do
+  grep -q 'setattr("sys.platform"' "$f" && echo "$f"
+done
+→ 9 files.
+
+Retained by design: the following NINE files carry a whole-module autouse
+sys.platform = "linux" re-scope. Kernel-dependent legs are skipif-gated
+with honest markers; the fixture exists to exercise the platform-gate
+predicate on a darwin host.
 
 | File | Kernel-dependent legs | Gating | Why autouse retained |
 |---|---|---|---|
-| test_ram_guard_fairness.py | yes (/proc/meminfo unreadable) | skipif | exercises platform-gate predicate |
+| tests/tools/test_bash_ram_guard.py | yes (/proc/<pid>/stat, /proc/meminfo) | skipif at :408 + inline memory skips | exercises platform-gate predicate |
+| tests/tools/test_proc_ram_guard.py | yes (/proc/meminfo; real /proc in non-mocked cases) | skipif at :806 + inline memory skips | exercises platform-gate predicate |
+| tests/tools/test_ram_guard_fairness.py | yes (/proc/meminfo unreadable) | skipif | exercises platform-gate predicate |
 | tests/unit/routers/test_resources_ram_guard.py | none (fake procfs trees) | none needed | platform-gate predicate; tmp_path fakes |
-| test_ram_guard_events.py | none (fake procfs) | none needed | platform-gate predicate; tmp_path fakes |
-| test_ram_guard_guard.py | one (/proc/<pid>/stat raw bytes) | skipif where needed | platform-gate predicate |
-| test_ram_guard_interactions.py | none (fake procfs) | none needed | platform-gate predicate |
-| test_ram_guard_ladder.py | none (synthetic proc root) | none needed | platform-gate predicate |
-| test_ram_guard_phase6.py | none (fake procfs) | none needed | platform-gate predicate |
+| tests/unit/services/test_ram_guard_events.py | none (fake procfs) | none needed | platform-gate predicate; tmp_path fakes |
+| tests/unit/services/test_ram_guard_guard.py | one (/proc/<pid>/stat raw bytes) | skipif where needed | platform-gate predicate |
+| tests/unit/services/test_ram_guard_interactions.py | none (fake procfs) | none needed | platform-gate predicate |
+| tests/unit/services/test_ram_guard_ladder.py | none (synthetic proc root) | none needed | platform-gate predicate |
+| tests/unit/services/test_ram_guard_phase6.py | none (fake procfs) | none needed | platform-gate predicate |
