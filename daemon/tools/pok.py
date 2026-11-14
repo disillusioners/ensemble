@@ -215,8 +215,9 @@ def create_pok_tools(
           escaping. Newlines, leading '#', '[SYSTEM CONTEXT:' and
           triple-backticks are REFUSED at write (the content fence).
         - ``audience`` (stated at capture, default 'operation'):
-          operation → {ari, leader, devops}; implementation →
-          {leader, developer}; both → every agent on the project.
+          operation → {ari, leader, devops, sonic-leader,
+          sonic-developer}; implementation → {leader, developer,
+          sonic-developer}; both → every agent on the project.
           Curator-narrow override is pok_curate's ``audience_agents``.
         - ``source_tier`` (default 'agent'): omit for agent-captured
           facts. ``'curated'`` marks a dev-curated immutable
