@@ -31,7 +31,7 @@
 #   EXECUTABLE file (PR1's arm gate: os.access(X_OK)).
 #
 # NO PLIST EVER (property, not accident): the family list below is an
-# EXPLICIT enumeration — ensemble-prod.plist / ensemble-watchdog-watcher.plist
+# EXPLICIT enumeration — com.ensemble.prod.plist / com.ensemble.watchdog.plist
 # are OPERATOR-side (make plist-install stages them into <install>/data/),
 # never part of a release payload. A *.plist in a payload would put a
 # launchd job definition into a web-servable/release artifact tree; the

@@ -214,8 +214,8 @@ PORT=9797
 ```bash
 make plist-install    INSTALL_DIR="$INSTALL_DIR"
 make watchdog-install INSTALL_DIR="$INSTALL_DIR"
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ensemble-prod.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ensemble-watchdog-watcher.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ensemble.prod.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ensemble.watchdog.plist
 curl -s http://127.0.0.1:9797/livez
 ```
 

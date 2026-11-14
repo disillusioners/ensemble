@@ -366,6 +366,17 @@ LOCK_HEARTBEAT_S=30           # live owner rewrites heartbeat this often
 LOCK_STALE_S=300              # heartbeat older than this = stale-breakable
 LOCK_WAIT_S_DEFAULT=15        # bounded wait for a busy lock, never forever
 
+# Fix #6 (2026-11-14 incident §5.5): every stale-break LEAVES its sibling
+# behind by protocol (mv to rollback.lock.d.stale.<pid>, never rmdir —
+# racy) and nothing ever removed them — `.stale.1099` / `.stale.92146`
+# accumulated on the live install. Age-bounded prune knob: a sibling
+# older than this is reaped at acquire time. 7d conservative default (a
+# promote/rollback runtime is bounded far below it, so nothing reaped can
+# belong to a live pipeline); env-overridable for tests/rescue. Garbage
+# values fall back to the default via _numeric_knob (a garbage bound that
+# read as 0 would reap FRESH siblings — the inverse failure).
+ROLLBACK_LOCK_STALE_PRUNE_S="$(_numeric_knob ROLLBACK_LOCK_STALE_PRUNE_S "${ROLLBACK_LOCK_STALE_PRUNE_S:-}" 604800)"
+
 # HEARTBEAT_STALE_S mirrors LOCK_STALE_S; the two are refreshed
 # together at every lock_heartbeat call site but kept as separate
 # constants so the lock vs journal paths age independently.
@@ -2510,6 +2521,67 @@ journal_cooldown_active() {
 #     flavor at the caller), NOT a crash
 lock_dir_path() { printf '%s/releases/rollback.lock.d' "$INSTALL_DIR"; }
 
+# _lock_mtime_epoch <path> — file mtime as epoch seconds, platform-branched
+# (the house date-idiom branch: BSD stat -f %m vs GNU stat -c %Y). Empty on
+# ANY failure/unknown platform — the caller treats that as NEVER PRUNE
+# (fail-closed conservative: an unmeasurable age is not proof of age).
+_lock_mtime_epoch() {
+    case "$(uname -s)" in
+        Darwin|*BSD*) stat -f %m "$1" 2>/dev/null || true ;;
+        Linux|GNU*)   stat -c %Y "$1" 2>/dev/null || true ;;
+        *) : ;;
+    esac
+}
+
+# _lock_prune_stale_siblings — Fix #6 (2026-11-14 incident §5.5):
+# age-bounded prune of rollback.lock.d.stale.<pid> siblings. Called from
+# lock_acquire AFTER the acquire succeeded — the pruner is the pipeline
+# owner, serialized against concurrent acquirers (a loser would be
+# pipeline-busy, never mid-prune). Rules:
+#   - ONLY siblings matching rollback.lock.d.stale.<digits> (the protocol's
+#     own mv target; suffix = the breaker's pid). Any other name is left
+#     untouched — an unknown shape may be operator evidence.
+#   - reap only when mtime age > ROLLBACK_LOCK_STALE_PRUNE_S (7d default):
+#     at/under the bound SURVIVES (a freshly-broken sibling is crash-
+#     forensics the operator may still want; it also cannot be confused
+#     with a live pipeline — nothing reaped is young enough to be one).
+#   - unparseable/missing mtime ⇒ never prune (fail-closed conservative).
+#   - the LIVE lock (rollback.lock.d, no suffix) is structurally out of
+#     reach: the glob requires the .stale.<digits> suffix.
+#   - every reap is logged twice: a _log line + a journal history row
+#     (legal here — the pipeline lock is held by a LIVE owner, which is
+#     exactly the history-append authority). Best-effort end to end: a
+#     prune failure logs a warning and never fails the acquisition it
+#     piggybacks on.
+_lock_prune_stale_siblings() {
+    local releases_dir lock pruning mtime age reaped=0
+    lock="$(lock_dir_path)"
+    releases_dir="$(dirname "$lock")"
+    [ -d "$releases_dir" ] || return 0
+    for pruning in "$releases_dir"/"${lock##*/}".stale.*; do
+        [ -e "$pruning" ] || continue   # unexpanded glob (bash 3.2: no nullglob)
+        case "${pruning##*/}" in
+            rollback.lock.d.stale.[0-9]*) ;;
+            *) continue ;;
+        esac
+        mtime="$(_lock_mtime_epoch "$pruning")"
+        case "$mtime" in ''|*[!0-9]*) continue ;; esac
+        age=$(( $(_now_epoch) - mtime ))
+        [ "$age" -gt "$ROLLBACK_LOCK_STALE_PRUNE_S" ] || continue
+        if rm -rf "$pruning" 2>/dev/null; then
+            reaped=$((reaped + 1))
+            _log "pipeline lock: reaped stale-broken sibling ${pruning##*/} (age ${age}s > bound ${ROLLBACK_LOCK_STALE_PRUNE_S}s) — fix #6, incident 2026-11-14 §5.5"
+            journal_history_append lock-stale-prune \
+                "reaped ${pruning##*/} age=${age}s bound=${ROLLBACK_LOCK_STALE_PRUNE_S}s" \
+                >/dev/null 2>&1 || true
+        else
+            _warn "pipeline lock: FAILED to reap stale-broken sibling ${pruning##*/} (age ${age}s) — leaving it (never block the acquisition on housekeeping)"
+        fi
+    done
+    [ "$reaped" -eq 0 ] || _log "pipeline lock: stale-sibling prune complete (${reaped} reaped)"
+    return 0
+}
+
 lock_run_id=""
 
 # _pid_alive <pid> — kill -0 liveness with EPERM=ALIVE semantics
@@ -2563,6 +2635,10 @@ lock_acquire() {
                     "reclaimed owner pid=${_broke_owner:-?} run_id=${_broke_run:-?} heartbeat_age=${_broke_age:-?}s reason=${_broke_reason} reclaiming_run_id=${lock_run_id}" \
                     >/dev/null 2>&1 || true
             fi
+            # Fix #6 (incident 2026-11-14 §5.5): housekeeping rides the
+            # acquire — we hold the lock, so the prune is serialized
+            # against concurrent pipelines. Best-effort, never blocks.
+            _lock_prune_stale_siblings
             return 0
         fi
         # exists — stale? Break only when the heartbeat is > LOCK_STALE_S AND
@@ -5355,14 +5431,53 @@ _supervision_launchd_bootstrap() {
     return 1
 }
 
-# _supervision_launchd_plist_path — the VERBATIM `path =` plist path from a
-# job's `launchctl print` dump (label ≠ filename). Empty when unresolvable.
+# _supervision_launchd_plist_path — resolve the launchd job's plist path.
+# THREE rungs (2026-11-14 hand-back halt, PC-1 — incident
+# docs/incidents/2026-11-14-macos-launchd-handback-halt.md): the promote
+# stop phase BOOTOUTS the job BEFORE the hand-back (lib.sh
+# stop_via_stop_script → _supervision_stop_launchd), so at hand-back time
+# `launchctl print` answers "Could not find service" exactly when the
+# resolver is needed most — the v0.30.5/v0.30.9 halts. Resolution:
+#   1. LIVE probe — `launchctl print` `path =` (FIRST, backward compat:
+#      call sites that run pre-stop, e.g. the disarm warning, still get
+#      the launchd-attested verbatim path).
+#   2. PRE-STOP STASH — SUPERVISION_LAUNCHD_PLIST_PATH, captured by
+#      supervision_classify while the job was still registered (belt).
+#   3. DETERMINISTIC FALLBACK — "$HOME/Library/LaunchAgents/<label>.plist"
+#      (braces): VALID under the ratified filename==label convention
+#      (incident §7b — the repo plists are label-verbatim since the
+#      2026-11-15 rename, so the host file is derivable). The old "never
+#      label-derive" rule guarded a filename≠label install that the
+#      repo's own tooling can no longer produce; every candidate is still
+#      verified with -f, so a stale/mis-named file resolves to NOTHING
+#      (fail-closed), never to a wrong path.
+# Empty output + rc 1 ⇒ unresolvable ⇒ the caller halts fail-safe
+# (Amendment #1 — never a nohup fallback on Darwin).
 _supervision_launchd_plist_path() {
-    local label="${1:-}" dump
+    local label="${1:-}" dump p
     [ -n "$label" ] || return 1
-    command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1 || return 1
-    dump="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" print "$(_supervision_launchd_domain)/${label}" 2>/dev/null)" || return 1
-    printf '%s\n' "$dump" | sed -n 's/^[[:space:]]*path = //p' | head -1
+    # Rung 1 — live probe (the job may still be registered).
+    if command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1; then
+        dump="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" print "$(_supervision_launchd_domain)/${label}" 2>/dev/null)" || dump=""
+        p="$(printf '%s\n' "$dump" | sed -n 's/^[[:space:]]*path = //p' | head -1)"
+        if [ -n "$p" ] && [ -f "$p" ]; then
+            printf '%s\n' "$p"
+            return 0
+        fi
+    fi
+    # Rung 2 — the pre-stop stash (survives the bootout).
+    p="${SUPERVISION_LAUNCHD_PLIST_PATH:-}"
+    if [ -n "$p" ] && [ -f "$p" ]; then
+        printf '%s\n' "$p"
+        return 0
+    fi
+    # Rung 3 — label-verbatim fallback (ratified convention).
+    p="$HOME/Library/LaunchAgents/${label}.plist"
+    if [ -f "$p" ]; then
+        printf '%s\n' "$p"
+        return 0
+    fi
+    return 1
 }
 
 # _handback_serving_probe — the hand-back's SERVING conjunct
@@ -5814,9 +5929,18 @@ restart_via_launcher() {
     if [ "${SUPERVISION_STATE:-}" = "LAUNCHD_MANAGED" ] && [ -n "${SUPERVISION_UNIT:-}" ] \
        && _supervision_host_allows_launchd; then
         local lplist lrc lattempt=1
+        # PC-1 (2026-11-14 hand-back halt): the resolver is THREE-runged —
+        # live `launchctl print` (rarely alive here: the stop bootouted the
+        # job) → the pre-stop classify stash → the label-verbatim
+        # ~/Library/LaunchAgents/<label>.plist fallback (ratified
+        # filename==label convention, incident §7b). The old
+        # "never label-derive" refusal was the halt: filename ≠ label was
+        # the incident's root cause, and the rename retired that install
+        # shape; every candidate is still -f-verified, so unresolvable
+        # remains unresolvable (fail-closed, no fabricated path).
         lplist="$(_supervision_launchd_plist_path "$SUPERVISION_UNIT")"
         if [ -z "$lplist" ]; then
-            _warn "launchd hand-back: cannot resolve the VERBATIM plist path for job '$SUPERVISION_UNIT' (label ≠ filename) — failing (never label-derive); caller halts fail-safe"
+            _warn "launchd hand-back: cannot resolve the plist path for job '$SUPERVISION_UNIT' — live probe, pre-stop stash, and the label-verbatim ~/Library/LaunchAgents/<label>.plist fallback ALL unresolvable (incident 2026-11-14 §7b: filename must equal the job label) — failing; caller halts fail-safe"
             return 1
         fi
         lrc=1
@@ -6335,6 +6459,10 @@ supervision_classify() {
     SUPERVISION_UNIT=""
     SUPERVISION_EXPLICIT_UNIT=0
     SUPERVISION_REFUSE_REASON=""
+    # PC-1 stash reset (2026-11-14 hand-back halt): a re-classify must not
+    # inherit a previous classification's plist path — the job may have
+    # been re-registered from a different file between the two runs.
+    SUPERVISION_LAUNCHD_PLIST_PATH=""
     local raw low leaf pid inv heal_unit heal_on
     heal_on=0
     raw="${ENSEMBLE_SUPERVISION:-}"
@@ -6439,6 +6567,13 @@ supervision_classify() {
                 fi
                 if _supervision_launchd_detect; then
                     SUPERVISION_STATE="LAUNCHD_MANAGED"
+                    # PC-1 stash (belt): capture the plist path NOW, while
+                    # the job is still registered and `launchctl print`
+                    # answers — the stop phase bootouts the job before the
+                    # hand-back, killing the live probe exactly when the
+                    # hand-back needs it (2026-11-14 halt, incident §3.2).
+                    SUPERVISION_LAUNCHD_PLIST_PATH="$(_supervision_launchd_plist_path "$SUPERVISION_UNIT" 2>/dev/null)" \
+                        || SUPERVISION_LAUNCHD_PLIST_PATH=""
                     printf 'ENSEMBLE_SUPERVISION_RESULT=%s:%s\n' "$SUPERVISION_STATE" "$SUPERVISION_UNIT"
                     return 0
                 fi
@@ -6479,6 +6614,10 @@ supervision_classify() {
         SUPERVISION_STATE="LAUNCHD_MANAGED"
         if command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1 && _supervision_launchd_detect; then
             SUPERVISION_STATE="LAUNCHD_MANAGED"
+            # PC-1 stash (belt) — same rationale as the explicit-launchd arm:
+            # capture while registered; the hand-back consumes it post-bootout.
+            SUPERVISION_LAUNCHD_PLIST_PATH="$(_supervision_launchd_plist_path "$SUPERVISION_UNIT" 2>/dev/null)" \
+                || SUPERVISION_LAUNCHD_PLIST_PATH=""
             printf 'ENSEMBLE_SUPERVISION_RESULT=%s:%s\n' "$SUPERVISION_STATE" "$SUPERVISION_UNIT"
             return 0
         fi

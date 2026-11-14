@@ -356,7 +356,7 @@ install: install-dir-guard pyinstaller
 	cp $(ENV_PROD_FILE) "$(INSTALL_DIR)/.env"
 	
 	# Stage the launchd plist with the real install path substituted
-	# (template lives in scripts/ensemble-prod.plist with placeholders).
+	# (template lives in scripts/com.ensemble.prod.plist with placeholders).
 	# Literal substitution (review m8): the old `sed 's|…|$(INSTALL_DIR)|g'`
 	# — and equally an `awk -v rep=…` + gsub form — deliberately NOT used —
 	# reinterprets `&` (expands to the matched placeholder) and `\` in
@@ -368,15 +368,15 @@ install: install-dir-guard pyinstaller
 	cp $(CURDIR)/launcher.sh "$(INSTALL_DIR)/launcher.sh"
 	chmod +x "$(INSTALL_DIR)/launcher.sh"
 	mkdir -p "$(INSTALL_DIR)/data"
-	INSTALL_DIR='$(INSTALL_DIR)' awk 'BEGIN { rep = ENVIRON["INSTALL_DIR"]; p = "INSTALL_DIR_PLACEHOLDER"; lp = length(p) } { while ((i = index($$0, p)) > 0) $$0 = substr($$0, 1, i - 1) rep substr($$0, i + lp); print }' scripts/ensemble-prod.plist \
-		> "$(INSTALL_DIR)/data/ensemble-prod.plist"
+	INSTALL_DIR='$(INSTALL_DIR)' awk 'BEGIN { rep = ENVIRON["INSTALL_DIR"]; p = "INSTALL_DIR_PLACEHOLDER"; lp = length(p) } { while ((i = index($$0, p)) > 0) $$0 = substr($$0, 1, i - 1) rep substr($$0, i + lp); print }' scripts/com.ensemble.prod.plist \
+		> "$(INSTALL_DIR)/data/com.ensemble.prod.plist"
 	# Watchdog-watcher (m3): stage the script + its launchd-agent plist
 	# (same literal-substitution awk as above — no sed `&` hazards).
 	mkdir -p "$(INSTALL_DIR)/scripts"
 	cp $(CURDIR)/scripts/watchdog-watcher.sh "$(INSTALL_DIR)/scripts/watchdog-watcher.sh"
 	chmod +x "$(INSTALL_DIR)/scripts/watchdog-watcher.sh"
-	INSTALL_DIR='$(INSTALL_DIR)' awk 'BEGIN { rep = ENVIRON["INSTALL_DIR"]; p = "INSTALL_DIR_PLACEHOLDER"; lp = length(p) } { while ((i = index($$0, p)) > 0) $$0 = substr($$0, 1, i - 1) rep substr($$0, i + lp); print }' scripts/ensemble-watchdog-watcher.plist \
-		> "$(INSTALL_DIR)/data/ensemble-watchdog-watcher.plist"
+	INSTALL_DIR='$(INSTALL_DIR)' awk 'BEGIN { rep = ENVIRON["INSTALL_DIR"]; p = "INSTALL_DIR_PLACEHOLDER"; lp = length(p) } { while ((i = index($$0, p)) > 0) $$0 = substr($$0, 1, i - 1) rep substr($$0, i + lp); print }' scripts/com.ensemble.watchdog.plist \
+		> "$(INSTALL_DIR)/data/com.ensemble.watchdog.plist"
 	# D3: ship the EXECUTOR SCRIPT FAMILY into the install dir at the
 	# canonical payload-relative paths (scripts/upgrade/* +
 	# scripts/stop-ensemble.sh + scripts/install-dir-guard.sh). Until this,
@@ -420,21 +420,21 @@ install: install-dir-guard pyinstaller
 	@echo "  - frontend/dist/"
 	@echo "  - data/"
 
-# Copy the staged plist (INSTALL_DIR/data/ensemble-prod.plist, path already
+# Copy the staged plist (INSTALL_DIR/data/com.ensemble.prod.plist, path already
 # sed'd by `make install`) into ~/Library/LaunchAgents and print the
 # bootstrap hint. Convenience only — the operator runs launchctl by hand.
 plist-install:
 	@bash $(GUARD_SCRIPT) --target plist-install --require-live
-	@if [ ! -f "$(INSTALL_DIR)/data/ensemble-prod.plist" ]; then \
-		echo "$(RED)Error: $(INSTALL_DIR)/data/ensemble-prod.plist not found — run 'make install' first.$(NC)"; \
+	@if [ ! -f "$(INSTALL_DIR)/data/com.ensemble.prod.plist" ]; then \
+		echo "$(RED)Error: $(INSTALL_DIR)/data/com.ensemble.prod.plist not found — run 'make install' first.$(NC)"; \
 		exit 1; \
 	fi
 	mkdir -p "$(HOME)/Library/LaunchAgents"
-	cp "$(INSTALL_DIR)/data/ensemble-prod.plist" "$(HOME)/Library/LaunchAgents/ensemble-prod.plist"
-	@echo "$(GREEN)Plist installed: $(HOME)/Library/LaunchAgents/ensemble-prod.plist$(NC)"
+	cp "$(INSTALL_DIR)/data/com.ensemble.prod.plist" "$(HOME)/Library/LaunchAgents/com.ensemble.prod.plist"
+	@echo "$(GREEN)Plist installed: $(HOME)/Library/LaunchAgents/com.ensemble.prod.plist$(NC)"
 	@echo ""
 	@echo "To load it (macOS launchd):"
-	@echo "  launchctl bootstrap gui/$$(id -u) $(HOME)/Library/LaunchAgents/ensemble-prod.plist"
+	@echo "  launchctl bootstrap gui/$$(id -u) $(HOME)/Library/LaunchAgents/com.ensemble.prod.plist"
 	@echo ""
 	@echo "To unload:"
 	@echo "  launchctl bootout gui/$$(id -u)/com.ensemble.prod"
@@ -447,23 +447,29 @@ plist-install:
 # daemon has been absent >600s. Observation only — never restarts.
 # Demo-env variant: hand-duplicate the plist with Label
 # com.ensemble.watchdog.demo + the demo INSTALL_DIR (see the template's
-# DEMO USAGE note) — same convention as ensemble-prod.plist.
+# DEMO USAGE note) — same convention as com.ensemble.prod.plist. The file
+# NAME must be label-verbatim: com.ensemble.watchdog.demo.plist. The
+# 2026-11-14 hand-back halt (docs/incidents/2026-11-14-macos-launchd-
+# handback-halt.md §7b) ratified plist filename == job label as a pipeline
+# invariant — the hand-back resolver's deterministic fallback derives the
+# path from the label, so a mis-named plist (e.g. the legacy host file
+# ensemble-demo.plist, label com.ensemble.demo) breaks resolution.
 watchdog-install:
 	@bash $(GUARD_SCRIPT) --target watchdog-install --require-live
-	@if [ ! -f "$(INSTALL_DIR)/data/ensemble-watchdog-watcher.plist" ]; then \
+	@if [ ! -f "$(INSTALL_DIR)/data/com.ensemble.watchdog.plist" ]; then \
 		if [ -f "$(INSTALL_DIR)/scripts/watchdog-watcher.sh" ]; then \
-			INSTALL_DIR='$(INSTALL_DIR)' awk 'BEGIN { rep = ENVIRON["INSTALL_DIR"]; p = "INSTALL_DIR_PLACEHOLDER"; lp = length(p) } { while ((i = index($$0, p)) > 0) $$0 = substr($$0, 1, i - 1) rep substr($$0, i + lp); print }' $(CURDIR)/scripts/ensemble-watchdog-watcher.plist > "$(INSTALL_DIR)/data/ensemble-watchdog-watcher.plist"; \
+			INSTALL_DIR='$(INSTALL_DIR)' awk 'BEGIN { rep = ENVIRON["INSTALL_DIR"]; p = "INSTALL_DIR_PLACEHOLDER"; lp = length(p) } { while ((i = index($$0, p)) > 0) $$0 = substr($$0, 1, i - 1) rep substr($$0, i + lp); print }' $(CURDIR)/scripts/com.ensemble.watchdog.plist > "$(INSTALL_DIR)/data/com.ensemble.watchdog.plist"; \
 		else \
 			echo "$(RED)Error: $(INSTALL_DIR)/scripts/watchdog-watcher.sh not found — run 'make install' first.$(NC)"; \
 			exit 1; \
 		fi; \
 	fi
 	mkdir -p "$(HOME)/Library/LaunchAgents"
-	cp "$(INSTALL_DIR)/data/ensemble-watchdog-watcher.plist" "$(HOME)/Library/LaunchAgents/ensemble-watchdog-watcher.plist"
-	@echo "$(GREEN)Watchdog-watcher agent installed: $(HOME)/Library/LaunchAgents/ensemble-watchdog-watcher.plist$(NC)"
+	cp "$(INSTALL_DIR)/data/com.ensemble.watchdog.plist" "$(HOME)/Library/LaunchAgents/com.ensemble.watchdog.plist"
+	@echo "$(GREEN)Watchdog-watcher agent installed: $(HOME)/Library/LaunchAgents/com.ensemble.watchdog.plist$(NC)"
 	@echo ""
 	@echo "To load it (macOS launchd):"
-	@echo "  launchctl bootstrap gui/$$(id -u) $(HOME)/Library/LaunchAgents/ensemble-watchdog-watcher.plist"
+	@echo "  launchctl bootstrap gui/$$(id -u) $(HOME)/Library/LaunchAgents/com.ensemble.watchdog.plist"
 	@echo ""
 	@echo "To unload:"
 	@echo "  launchctl bootout gui/$$(id -u)/com.ensemble.watchdog"

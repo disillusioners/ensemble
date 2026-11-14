@@ -1410,6 +1410,169 @@ else
 fi
 
 # ===========================================================================
+section "L — PC-1 launchd hand-back plist resolution (2026-11-14 halt)"
+# THE halt (docs/incidents/2026-11-14-macos-launchd-handback-halt.md):
+# the stop phase bootouts the job BEFORE the hand-back → `launchctl print`
+# answers "Could not find service" → the old single-rung resolver returned
+# empty → WARN → halt-for-human with the daemon down (v0.30.5 @ 11:54,
+# v0.30.9 recurrence). The fix is THREE-runged: live `launchctl print`
+# (FIRST — backward compat) → the pre-stop classify stash
+# (SUPERVISION_LAUNCHD_PLIST_PATH) → the label-verbatim
+# ~/Library/LaunchAgents/<label>.plist fallback (incident §7b ratified
+# filename == job label). Every leg drives the REAL lib.sh code through a
+# hermetic launchctl stub on PATH (the LAUNCHCTL_BIN seam is
+# PATH-resolved by design — the same seam test_release_journal.sh uses);
+# Darwin is simulated with the uname stub (the C10 pattern) and HOME is a
+# fixture dir so the fallback rung is hermetic (never the operator's real
+# ~/Library/LaunchAgents). The stub's print path (registered.plist) is
+# deliberately DIFFERENT from the fallback file so each leg's resolved
+# path ATTRIBUTES ITS RUNG.
+L_FIX="$(mktemp -d -t suphb-launchd.XXXXXX)"
+# The C-section's rvl_rc lives inside the systemd fence (skipped on this
+# Darwin host) — the L legs define their own rc extractor.
+l_rvl_rc() { printf '%s' "$1" | grep -o 'rvl-rc=[0-9]*' | head -1; }
+L_LABEL="com.ensemble.hb.fixture"
+L_INSTALL="$L_FIX/install"
+L_REGISTERED_PLIST="$L_FIX/registered.plist"          # rung 1 (live print)
+mkdir -p "$L_INSTALL" "$L_FIX/home/Library/LaunchAgents"
+printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>Label</key><string>%s</string></dict></plist>\n' "$L_LABEL" > "$L_REGISTERED_PLIST"
+printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>Label</key><string>%s</string></dict></plist>\n' "$L_LABEL" > "$L_FIX/home/Library/LaunchAgents/${L_LABEL}.plist"
+cat > "$L_FIX/launchctl" <<STUB
+#!/bin/bash
+set -u
+STATE="${L_FIX}/launchd-registered"
+LOG="${L_FIX}/launchctl.calls"
+LABEL="${L_LABEL}"
+PLIST="${L_REGISTERED_PLIST}"
+cmd="\${1:-}"
+[ \$# -gt 0 ] && shift
+echo "launchctl \$cmd \$*" >> "\$LOG"
+case "\$cmd" in
+    list)
+        [ -f "\$STATE" ] && printf '%s\t%s\t%s\n' "4321" "0" "\$LABEL"
+        exit 0 ;;
+    print)
+        target="\${1:-}"
+        if [ -f "\$STATE" ]; then
+            printf 'program = /bin/bash\n'
+            printf 'program arguments = {\n    /bin/bash\n    %s/launcher.sh\n}\n' "${L_INSTALL}"
+            printf 'path = %s\n' "\$PLIST"
+            printf 'pid = 4321\n'
+            exit 0
+        fi
+        echo "Could not find service \"\${target}\" in GUI domain for uid \$(id -u)" >&2
+        exit 113 ;;
+    bootout)
+        rm -f "\$STATE"
+        exit 0 ;;
+    bootstrap)
+        exit "\${LAUNCHD_BOOTSTRAP_RC:-0}" ;;
+    *) exit 0 ;;
+esac
+STUB
+chmod +x "$L_FIX/launchctl"
+cat > "$L_FIX/uname" <<STUB
+#!/bin/bash
+case "\${1:-}" in
+    -s) echo "Darwin" ;;
+    *) "$(command -v uname)" "\$@" ;;
+esac
+STUB
+chmod +x "$L_FIX/uname"
+
+# L1 rung 1 — registered job: the live `launchctl print` `path =` answer.
+touch "$L_FIX/launchd-registered"
+L1_OUT="$(PATH="$L_FIX:$PATH" HOME="$L_FIX/home" bash -c '
+    export INSTALL_DIR="'"$L_INSTALL"'"
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    P="$(_supervision_launchd_plist_path "'"$L_LABEL"'")"
+    printf "%s rc=%s\n" "$P" "$?"
+' 2>&1)"
+assert_contains "L1 rung 1 (registered): resolves the launchd-attested path" "$L_REGISTERED_PLIST" "$L1_OUT"
+assert_contains "L1 rung 1: rc 0" "rc=0" "$L1_OUT"
+
+# L2 THE PC-1 NODE — classify (registered: stash captured) → bootout (the
+# M1 barrier; the stub flips to "Could not find service") → hand-back
+# resolves via the STASH → bootstrap issued → rc 0. This is the incident
+# sequence end-to-end, and the stash wiring proof.
+rm -f "$L_FIX/launchctl.calls"
+L2_OUT="$(PATH="$L_FIX:$PATH" HOME="$L_FIX/home" bash -c '
+    export INSTALL_DIR="'"$L_INSTALL"'"
+    unset ENSEMBLE_SUPERVISION 2>/dev/null || true
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    touch "'"$L_FIX"'/launchd-registered"
+    SUPERVISION_LAUNCHD_PLIST_PATH=""
+    supervision_classify || true
+    echo "classify-state=$SUPERVISION_STATE unit=$SUPERVISION_UNIT stash=$SUPERVISION_LAUNCHD_PLIST_PATH"
+    _supervision_launchd_bootout "$SUPERVISION_UNIT" >/dev/null 2>&1   # the stop barrier — job now GONE
+    SUPERVISION_STATE=LAUNCHD_MANAGED                                   # consume the PRE-STOP classification
+    SUPERVISION_PRESTOP_MAINPID=4321
+    restart_via_launcher
+    echo "rvl-rc=$?"
+' 2>&1)"
+assert_contains "L2 classify (registered): LAUNCHD_MANAGED + label resolved" "classify-state=LAUNCHD_MANAGED unit=$L_LABEL" "$L2_OUT"
+assert_contains "L2 PC-1 stash: captured at classify while the job was registered" "stash=$L_REGISTERED_PLIST" "$L2_OUT"
+assert_eq "L2 PC-1 hand-back post-bootout: rc 0 (the halt is dead)" "rvl-rc=0" "$(l_rvl_rc "$L2_OUT")"
+assert_contains "L2 hand-back announces the launchd bootstrap" "hand-back: launchd — bootstrapped job" "$L2_OUT"
+assert_contains "L2 bootstrap was issued with the STASHED path (rung 2, not fallback)" "bootstrap gui/$(id -u) $L_REGISTERED_PLIST" "$(cat "$L_FIX/launchctl.calls" 2>/dev/null)"
+assert_not_contains "L2 no halt warn on the stash path" "ALL unresolvable" "$L2_OUT"
+assert_not_contains "L2 Amendment #1: never a nohup fallback" "launcher started (nohup)" "$L2_OUT"
+
+# L3 rung 3 — NO stash (belt absent), print failing, but the host file
+# exists under the RATIFIED label-verbatim name → the fallback resolves.
+rm -f "$L_FIX/launchctl.calls" "$L_FIX/launchd-registered"
+L3_OUT="$(PATH="$L_FIX:$PATH" HOME="$L_FIX/home" bash -c '
+    export INSTALL_DIR="'"$L_INSTALL"'"
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    SUPERVISION_STATE=LAUNCHD_MANAGED; SUPERVISION_MODE=launchd
+    SUPERVISION_UNIT="'"$L_LABEL"'"; SUPERVISION_PRESTOP_MAINPID=4321
+    SUPERVISION_LAUNCHD_PLIST_PATH=""
+    restart_via_launcher
+    echo "rvl-rc=$?"
+' 2>&1)"
+assert_eq "L3 fallback rung (no stash, print dead): rc 0" "rvl-rc=0" "$(l_rvl_rc "$L3_OUT")"
+assert_contains "L3 bootstrap issued with the LABEL-VERBATIM fallback path (rung 3)" "bootstrap gui/$(id -u) $L_FIX/home/Library/LaunchAgents/$L_LABEL.plist" "$(cat "$L_FIX/launchctl.calls" 2>/dev/null)"
+
+# L4 fail-closed — print dead, no stash, NO host file: empty resolution →
+# rc 1 + the updated WARN + NO bootstrap issued (Amendment #1 intact).
+rm -f "$L_FIX/launchctl.calls"
+mv "$L_FIX/home/Library/LaunchAgents/${L_LABEL}.plist" "$L_FIX/home/Library/LaunchAgents/${L_LABEL}.plist.hidden"
+L4_OUT="$(PATH="$L_FIX:$PATH" HOME="$L_FIX/home" bash -c '
+    export INSTALL_DIR="'"$L_INSTALL"'"
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    SUPERVISION_STATE=LAUNCHD_MANAGED; SUPERVISION_MODE=launchd
+    SUPERVISION_UNIT="'"$L_LABEL"'"; SUPERVISION_PRESTOP_MAINPID=4321
+    SUPERVISION_LAUNCHD_PLIST_PATH=""
+    restart_via_launcher
+    echo "rvl-rc=$?"
+' 2>&1)"
+assert_eq "L4 all rungs unresolvable: rc 1 (halt fail-safe, no fabricated path)" "rvl-rc=1" "$(l_rvl_rc "$L4_OUT")"
+assert_contains "L4 the WARN names the three rungs" "live probe, pre-stop stash, and the label-verbatim" "$L4_OUT"
+assert_contains "L4 the WARN cites the ratified convention (incident §7b)" "filename must equal the job label" "$L4_OUT"
+case "$(cat "$L_FIX/launchctl.calls" 2>/dev/null)" in
+    *" bootstrap "*) _fail "L4 NO bootstrap on an unresolvable path (fail-closed)" "no bootstrap" "$(cat "$L_FIX/launchctl.calls")" ;;
+    *) _pass "L4 NO bootstrap on an unresolvable path (fail-closed)" ;;
+esac
+assert_not_contains "L4 Amendment #1: never a nohup fallback" "launcher started (nohup)" "$L4_OUT"
+mv "$L_FIX/home/Library/LaunchAgents/${L_LABEL}.plist.hidden" "$L_FIX/home/Library/LaunchAgents/${L_LABEL}.plist"
+
+# L5 stale-stash hygiene — a re-classify must not inherit the previous
+# stash when the job can no longer be verified (the reset at classify top).
+L5_OUT="$(PATH="$L_FIX:$PATH" HOME="$L_FIX/home" bash -c '
+    export INSTALL_DIR="'"$L_INSTALL"'"
+    unset ENSEMBLE_SUPERVISION 2>/dev/null || true
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    SUPERVISION_LAUNCHD_PLIST_PATH="/stale/from/previous/run.plist"
+    rm -f "'"$L_FIX"'/launchd-registered"
+    supervision_classify >/dev/null 2>&1
+    echo "stash-after-refused-classify=$SUPERVISION_LAUNCHD_PLIST_PATH"
+' 2>&1)"
+assert_contains "L5 re-classify resets the stash (no stale inheritance)" "stash-after-refused-classify=" "$L5_OUT"
+assert_not_contains "L5 stale path is GONE after a refused classify" "/stale/from/previous/run.plist" "$L5_OUT"
+
+rm -rf "$L_FIX"
+
+# ===========================================================================
 section "summary"
 printf 'PASS=%s FAIL=%s SKIP=%s\n' "$PASS" "$FAIL" "$SKIP"
 if [ "$SKIP" -gt 0 ]; then

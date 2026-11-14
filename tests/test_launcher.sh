@@ -1605,7 +1605,7 @@ else
         "probe=${probe_line:-absent} synth=${synthexport_line:-absent}"
 fi
 # h2 — NO baked version literals anywhere (launcher + prod plist).
-for pinfile in "$LAUNCHER" "$REPO_ROOT/scripts/ensemble-prod.plist"; do
+for pinfile in "$LAUNCHER" "$REPO_ROOT/scripts/com.ensemble.prod.plist"; do
     if grep -Eq '/versions/node/v[0-9]+\.' "$pinfile"; then
         _fail "13.h no baked nvm version literal ($(basename "$pinfile"))" "absent" \
             "$(grep -E '/versions/node/v[0-9]+\.' "$pinfile" | head -2)"
@@ -2037,8 +2037,8 @@ assert_eq "14.l single functional classic-path default in launcher.sh" "1" \
 
 # ─── 15. Plist template + Makefile staging (design §iv Layer 1) ────────────
 section "plist template + Makefile staging (§iv Layer 1)"
-PROD_PLIST="$REPO_ROOT/scripts/ensemble-prod.plist"
-WATCH_PLIST="$REPO_ROOT/scripts/ensemble-watchdog-watcher.plist"
+PROD_PLIST="$REPO_ROOT/scripts/com.ensemble.prod.plist"
+WATCH_PLIST="$REPO_ROOT/scripts/com.ensemble.watchdog.plist"
 PLIST_PATH_VALUE="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # 15.a the stable-anchor PATH, byte-exact per design §iv Layer 1.
@@ -2174,7 +2174,7 @@ _staging_ok() {
     local mk="$1" plist="$2" prog out
     prog="$(_makefile_awk_program "$mk")" || return 1
     [ -n "$prog" ] || return 1
-    out="$LP_TEST_DIR/stage-drift/data/ensemble-prod.plist"
+    out="$LP_TEST_DIR/stage-drift/data/com.ensemble.prod.plist"
     mkdir -p "$LP_TEST_DIR/stage-drift/data" || return 1
     INSTALL_DIR="$LP_TEST_DIR/stage-drift" awk "$prog" "$plist" > "$out" 2>/dev/null || return 1
     grep -qF "<string>$PLIST_PATH_VALUE</string>" "$out" || return 1

@@ -94,6 +94,18 @@ SWEEP_LOCK_WAIT_S=0            # the launcher NEVER delays boot on a busy
                               # pipeline lock — if another action holds it
                               # with a fresh heartbeat, the sweep defers to
                               # the next start (availability-first).
+ROLLBACK_LOCK_STALE_PRUNE_S="${ROLLBACK_LOCK_STALE_PRUNE_S:-604800}"
+case "$ROLLBACK_LOCK_STALE_PRUNE_S" in
+    *[!0-9]*|'') ROLLBACK_LOCK_STALE_PRUNE_S=604800 ;;  # garbage env → default (never 0-reap fresh siblings)
+esac
+                              # fix #6 (2026-11-14 incident §5.5): stale-
+                              # broken siblings (rollback.lock.d.stale.<pid>)
+                              # older than this are reaped at acquire time.
+                              # 7d default, env-overridable; mirrors the
+                              # lib.sh/upgrade_journal.py twins. Garbage
+                              # env values fall back to the default (a
+                              # garbage bound reading as 0 would reap
+                              # FRESH siblings — the inverse failure).
 HEARTBEAT_STALE_S=300          # mirror of lib.sh HEARTBEAT_STALE_S (lib.sh
                               # constant block) — journal in_flight.last_
                               # heartbeat older than this is stale. Used by
@@ -294,7 +306,7 @@ _env_strip_value() {
 # Two complementary layers, both required (architecture-recommendation.md §iv;
 # rehearsal-a A/B proof: minimal launchd PATH ⇒ context7 stdio MCP
 # FileNotFoundError, healthy:False; anchored PATH ⇒ healthy:True):
-#   Layer 1 (macOS supervisor-env): scripts/ensemble-prod.plist carries a
+#   Layer 1 (macOS supervisor-env): scripts/com.ensemble.prod.plist carries a
 #           STABLE-ANCHOR EnvironmentVariables.PATH (no user dirs, no nvm
 #           version dirs — version dirs rot when nvm updates).
 #   Layer 2 (THIS block, cross-platform shared launcher): probe the
@@ -1946,7 +1958,7 @@ _js_serving_probe() {
     deadline=$(( $(_now) + budget ))
     # F11 (code-council doubt register #2) — THE FD-OPEN AND THE WHOLE
     # PROBE RUN IN A SUBSHELL. Under bash 3.2 with `execfail` ON (macOS /
-    # launchd is a supported substrate — scripts/ensemble-prod.plist,
+    # launchd is a supported substrate — scripts/com.ensemble.prod.plist,
     # Makefile:293) a failing `exec 3<>` CAN KILL THE SHELL: the failure
     # would be LOUD at exactly the "port down" moment the ladder exists
     # for. Isolated in a subshell the `exec` failure kills only the
@@ -2219,6 +2231,54 @@ _js_pid_alive_bounded() {
     esac
 }
 
+# _js_lock_prune_stale_siblings <install_dir> — fix #6 (2026-11-14
+# incident §5.5): age-bounded prune of rollback.lock.d.stale.<pid>
+# siblings, called from _js_lock_acquire AFTER the acquire (the sweep
+# holds the lock — serialized against concurrent pipelines). MIRRORS the
+# lib.sh _lock_prune_stale_siblings twin (the launcher is the BOOT path
+# and stays self-contained — never sources lib.sh — so the rules are
+# duplicated deliberately):
+#   - ONLY rollback.lock.d.stale.<digits> siblings (the protocol's own mv
+#     target); any other shape is left untouched (operator evidence).
+#   - reap only when mtime age > ROLLBACK_LOCK_STALE_PRUNE_S (7d default):
+#     at/under the bound SURVIVES; unparseable mtime ⇒ never prune.
+#   - logging via the launcher's own _log (no journal append — the boot
+#     sweep's lock-prune is a log-surface event; lib.sh's lock-lane twin
+#     carries the journal row).
+#   - best-effort: a failure never fails the boot sweep.
+_js_lock_mtime_epoch() {
+    case "$(uname -s)" in
+        Darwin|*BSD*) stat -f %m "$1" 2>/dev/null || true ;;
+        Linux|GNU*)   stat -c %Y "$1" 2>/dev/null || true ;;
+        *) : ;;
+    esac
+}
+
+_js_lock_prune_stale_siblings() {
+    local install_dir="$1" releases_dir lock pruning mtime age reaped=0
+    lock="$(_js_lock_dir "$install_dir")"
+    releases_dir="$(dirname "$lock")"
+    [ -d "$releases_dir" ] || return 0
+    for pruning in "$releases_dir"/"${lock##*/}".stale.*; do
+        [ -e "$pruning" ] || continue   # unexpanded glob (no nullglob)
+        case "${pruning##*/}" in
+            rollback.lock.d.stale.[0-9]*) ;;
+            *) continue ;;
+        esac
+        mtime="$(_js_lock_mtime_epoch "$pruning")"
+        case "$mtime" in ''|*[!0-9]*) continue ;; esac
+        age=$(( $(_now) - mtime ))
+        [ "$age" -gt "$ROLLBACK_LOCK_STALE_PRUNE_S" ] || continue
+        if rm -rf "$pruning" 2>/dev/null; then
+            reaped=$((reaped + 1))
+            _log "journal sweep: reaped stale-broken pipeline-lock sibling ${pruning##*/} (age ${age}s > bound ${ROLLBACK_LOCK_STALE_PRUNE_S}s) — fix #6, incident 2026-11-14 §5.5"
+        else
+            _log "journal sweep: FAILED to reap stale-broken sibling ${pruning##*/} (age ${age}s) — leaving it"
+        fi
+    done
+    return 0
+}
+
 # _js_lock_acquire <install_dir> [wait_s] — 0 acquired, 1 busy.
 _js_lock_acquire() {
     local install_dir="$1" wait_s="${2:-$SWEEP_LOCK_WAIT_S}"
@@ -2234,6 +2294,10 @@ _js_lock_acquire() {
             # status.sh shows an empty run (review m1).
             printf '%s\n' "run-$(date +%Y%m%d-%H%M%S)-$$" > "$lock/run_id" 2>/dev/null
             printf '%s\n' "$(_now)" > "$lock/heartbeat" 2>/dev/null
+            # fix #6 (incident 2026-11-14 §5.5): housekeeping rides the
+            # acquire — we hold the lock, so the prune is serialized
+            # against concurrent pipelines. Best-effort, never blocks boot.
+            _js_lock_prune_stale_siblings "$install_dir"
             return 0
         fi
         # exists — stale? Break only when the heartbeat is > SWEEP_LOCK_STALE_S

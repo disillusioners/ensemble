@@ -41,7 +41,7 @@
 #                                        trees)
 #
 # NO PLIST EVER (property, not accident): the launchd plists
-# (scripts/ensemble-prod.plist, scripts/ensemble-watchdog-watcher.plist) are
+# (scripts/com.ensemble.prod.plist, scripts/com.ensemble.watchdog.plist) are
 # OPERATOR-side (make plist-install stages them into <install>/data/) and are
 # NOT part of any release payload. The family list is an explicit
 # enumeration, so a plist cannot ride along; the layout pin test

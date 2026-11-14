@@ -830,7 +830,7 @@ done
 
 # ── --require-live mode (opt-in; additive) ──────────────────────────────────
 # The plist-install / watchdog-install targets write HOST launchd state
-# ($HOME/Library/LaunchAgents/ensemble-prod.plist) REGARDLESS of INSTALL_DIR
+# ($HOME/Library/LaunchAgents/com.ensemble.prod.plist) REGARDLESS of INSTALL_DIR
 # — a sandbox or demo INSTALL_DIR would silently overwrite the running prod
 # unit with one pointing at that tree. The flag adds ONE extra rule for
 # those targets: the requested dir must classify as LIVE (and a live dir
@@ -843,7 +843,7 @@ if [ "$REQUIRE_LIVE" = "1" ] && [ "$CLASS" != "live" ]; then
     cat >&2 <<EOF
 make ${TARGET:-<unknown>}: REFUSING — INSTALL_DIR does not resolve to a LIVE install dir ($DIR_CANON).
   This target writes the HOST launchd unit
-  ($HOME/Library/LaunchAgents/ensemble-prod.plist) — the prod unit must point
+  ($HOME/Library/LaunchAgents/com.ensemble.prod.plist) — the prod unit must point
   at the live install, never at a sandbox or demo tree (a sandbox INSTALL_DIR
   would silently overwrite the running prod unit).
   To install the prod launchd unit:

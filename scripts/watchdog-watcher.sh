@@ -3,7 +3,7 @@
 # watchdog-watcher.sh — who watches the watchdog? (Auto-Restart Phase 1, m3)
 # ============================================================================
 # A LOW-FREQUENCY launchd AGENT (StartInterval=300, see
-# scripts/ensemble-watchdog-watcher.plist) that observes the daemon's
+# scripts/com.ensemble.watchdog.plist) that observes the daemon's
 # /livez endpoint and NOTIFIES when the daemon has been absent for more
 # than 10 minutes. This covers supervisor *misconfiguration* — the one
 # failure launchd itself cannot report (plan §6 row "Watchdog dies":

@@ -534,6 +534,100 @@ class TestLockProtocol:
         assert not lock_dir(install).exists()
 
 
+# ── fix #6 (2026-11-14 incident §5.5): stale-sibling reap at acquire ─────────
+
+
+class TestStaleSiblingPrune:
+    """The age-bounded prune of rollback.lock.d.stale.<pid> siblings riding
+    lock_acquire (the Python twin of lib.sh _lock_prune_stale_siblings and
+    the launcher's _js_lock_prune_stale_siblings). Boundary contract:
+    at/under the bound SURVIVES, strictly over is reaped."""
+
+    @staticmethod
+    def _sibling(install: Path, name: str, mtime_epoch: int) -> Path:
+        p = install / "releases" / name
+        p.touch()
+        os.utime(p, (mtime_epoch, mtime_epoch))
+        return p
+
+    def test_over_bound_sibling_reaped_at_acquire(
+        self, install: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.INFO, logger="daemon.tools.upgrade_journal")
+        now = int(time.time())
+        self._sibling(install, "rollback.lock.d.stale.7001", now - (uj.ROLLBACK_LOCK_STALE_PRUNE_S_DEFAULT + 300))
+        acquired, _ = lock_acquire(install, "r-1")
+        assert acquired
+        assert not (install / "releases" / "rollback.lock.d.stale.7001").exists(), (
+            "over-bound sibling must be reaped at acquire (fix #6)"
+        )
+        assert any(
+            "reaped stale-broken pipeline-lock sibling" in r.message and "7001" in r.message
+            for r in caplog.records
+        ), "the reap must be logged (what was reaped + age + bound)"
+
+    def test_under_bound_and_fresh_siblings_survive(self, install: Path) -> None:
+        now = int(time.time())
+        self._sibling(install, "rollback.lock.d.stale.7002", now - (uj.ROLLBACK_LOCK_STALE_PRUNE_S_DEFAULT - 300))
+        self._sibling(install, "rollback.lock.d.stale.7003", now - 60)
+        acquired, _ = lock_acquire(install, "r-1")
+        assert acquired
+        assert (install / "releases" / "rollback.lock.d.stale.7002").exists(), (
+            "at/under the bound SURVIVES (boundary contract)"
+        )
+        assert (install / "releases" / "rollback.lock.d.stale.7003").exists(), (
+            "a freshly-broken sibling is crash-forensics — never reaped"
+        )
+
+    def test_non_pid_sibling_names_never_touched(self, install: Path) -> None:
+        now = int(time.time())
+        ancient = now - (uj.ROLLBACK_LOCK_STALE_PRUNE_S_DEFAULT + 300)
+        self._sibling(install, "rollback.lock.d.stale.notapid", ancient)
+        self._sibling(install, "rollback.lock.d.stale", ancient)
+        acquired, _ = lock_acquire(install, "r-1")
+        assert acquired
+        assert (install / "releases" / "rollback.lock.d.stale.notapid").exists(), (
+            "an unknown sibling shape may be operator evidence — NEVER touched"
+        )
+        assert (install / "releases" / "rollback.lock.d.stale").exists()
+
+    def test_env_knob_override(self, install: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        now = int(time.time())
+        self._sibling(install, "rollback.lock.d.stale.8001", now - 200)   # age 200 > bound 100
+        self._sibling(install, "rollback.lock.d.stale.8002", now - 50)    # age 50 < bound 100
+        monkeypatch.setenv("ROLLBACK_LOCK_STALE_PRUNE_S", "100")
+        acquired, _ = lock_acquire(install, "r-1")
+        assert acquired
+        assert not (install / "releases" / "rollback.lock.d.stale.8001").exists()
+        assert (install / "releases" / "rollback.lock.d.stale.8002").exists()
+
+    def test_garbage_env_knob_falls_back_to_default(
+        self, install: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A garbage bound reading as 0 would reap FRESH siblings — the
+        # inverse failure. The under-default sibling below distinguishes:
+        # default bound applied → survives; garbage-as-0 → would be reaped.
+        now = int(time.time())
+        self._sibling(install, "rollback.lock.d.stale.9001", now - (uj.ROLLBACK_LOCK_STALE_PRUNE_S_DEFAULT - 300))
+        monkeypatch.setenv("ROLLBACK_LOCK_STALE_PRUNE_S", "garbage")
+        acquired, _ = lock_acquire(install, "r-1")
+        assert acquired
+        assert (install / "releases" / "rollback.lock.d.stale.9001").exists(), (
+            "garbage env must fall back to the documented default bound"
+        )
+
+    def test_prune_helper_returns_count_and_never_raises(
+        self, install: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        now = int(time.time())
+        self._sibling(install, "rollback.lock.d.stale.7001", now - (uj.ROLLBACK_LOCK_STALE_PRUNE_S_DEFAULT + 300))
+        self._sibling(install, "rollback.lock.d.stale.7003", now - 60)
+        monkeypatch.setenv("ROLLBACK_LOCK_STALE_PRUNE_S", str(uj.ROLLBACK_LOCK_STALE_PRUNE_S_DEFAULT))
+        assert uj._prune_stale_lock_siblings(install) == 1
+        # No releases dir at all → a clean 0, never a raise.
+        assert uj._prune_stale_lock_siblings(install.parent / "nonexistent") == 0
+
+
 # ── PendingOp persistence ────────────────────────────────────────────────────
 
 

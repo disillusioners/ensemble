@@ -406,8 +406,8 @@ make install INSTALL_DIR="$HOME/agents-ensemble"
 ```bash
 export INSTALL_DIR="$HOME/agents-ensemble" ENSEMBLE_INSTALL_LIVE=1
 make install          INSTALL_DIR="$INSTALL_DIR"   # → .env.prod staged to .env, launcher, plists
-make plist-install    INSTALL_DIR="$INSTALL_DIR"   # → ~/Library/LaunchAgents/ensemble-prod.plist
-make watchdog-install INSTALL_DIR="$INSTALL_DIR"   # → ~/Library/LaunchAgents/ensemble-watchdog-watcher.plist
+make plist-install    INSTALL_DIR="$INSTALL_DIR"   # → ~/Library/LaunchAgents/com.ensemble.prod.plist
+make watchdog-install INSTALL_DIR="$INSTALL_DIR"   # → ~/Library/LaunchAgents/com.ensemble.watchdog.plist
 ```
 
 Never `sudo` the two plist targets. A target path **outside** the live set needs no confirm var at all: `make install INSTALL_DIR="$HOME/agents-ensemble-fresh"`.

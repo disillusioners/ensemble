@@ -29,7 +29,7 @@
 | Disk | **≥5 GB free** (the install tree is ≈122 MB; the frontend + PyInstaller build dominates) |
 | Credentials | an OpenAI-compatible API key |
 
-**Drill first (one line):** to rehearse before live, run the identical sequence with `INSTALL_DIR="$HOME/agents-ensemble-demo"`, `PORT=7979`, DB `ensemble_demo`, and the demo plist label `com.ensemble.demo` — the guard then asks for `ENSEMBLE_INSTALL_DEMO=1` instead.
+**Drill first (one line):** to rehearse before live, run the identical sequence with `INSTALL_DIR="$HOME/agents-ensemble-demo"`, `PORT=7979`, DB `ensemble_demo`, and the demo plist label `com.ensemble.demo` — the guard then asks for `ENSEMBLE_INSTALL_DEMO=1` instead. Label-verbatim naming applies to every env: the demo job's plist FILE must be `~/Library/LaunchAgents/com.ensemble.demo.plist` (filename == job label is the hand-back pipeline invariant — incident §7b). A host still carrying the legacy mis-named `ensemble-demo.plist` must have it OPERATOR-renamed (bootout → `mv` → re-bootstrap from the new name); this repo never touches the host file itself.
 
 ### 1 · Clone the repo and ASSERT the branch
 
@@ -81,11 +81,11 @@ A bare `make install` refuses: the **guard script exits 78**; make surfaces it a
 ### 3 · Stage the launchd jobs and start them (SAME `INSTALL_DIR` — the plist embeds it)
 
 ```bash
-make plist-install    INSTALL_DIR="$INSTALL_DIR"   # → ~/Library/LaunchAgents/ensemble-prod.plist
-make watchdog-install INSTALL_DIR="$INSTALL_DIR"   # → ~/Library/LaunchAgents/ensemble-watchdog-watcher.plist
+make plist-install    INSTALL_DIR="$INSTALL_DIR"   # → ~/Library/LaunchAgents/com.ensemble.prod.plist
+make watchdog-install INSTALL_DIR="$INSTALL_DIR"   # → ~/Library/LaunchAgents/com.ensemble.watchdog.plist
 
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ensemble-prod.plist            # RunAtLoad → starts now
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ensemble-watchdog-watcher.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ensemble.prod.plist            # RunAtLoad → starts now
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ensemble.watchdog.plist
 ```
 
 Never stage plists for a different tree than the one you installed. **Never `sudo` the two plist targets.** Re-running either **overwrites the plist with no `.bak`** — snapshot it first if you need the old one.
@@ -369,7 +369,7 @@ flowchart TD
 
     Goal -->|"Deliberate stop"| Bootout["launchctl bootout gui/$(id -u)/com.ensemble.prod — the ONLY correct stop. Job stays down (proven: no restart at t+28s, ThrottleInterval 10). Graceful drain budget ≈70s (CHILD_STOP_WAIT_S)."]
     Goal -->|"Restart"| Kickstart["launchctl kickstart -k gui/$(id -u)/com.ensemble.prod"]
-    Goal -->|"Start again after bootout"| Bootstrap["launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ensemble-prod.plist"]
+    Goal -->|"Start again after bootout"| Bootstrap["launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ensemble.prod.plist"]
 
     Goal -.->|"bare SIGTERM / kill to launcher"| WrongPath["NEVER bare SIGTERM / kill to the launcher"]
     WrongPath --> Restart143["launcher exits 143 (graceful) → nonzero ⇒ KeepAlive {SuccessfulExit=false, Crashed=true} RE-ENGAGES → daemon restarts after ~10s — you did not stop it (GAP-2, live-proven in rehearsal-a)"]
@@ -417,7 +417,7 @@ Why the layer is **required** — same-box A/B proof on the demo install `[RA §
 
 Mechanism: `context7` spawns `npx` (daemon/mcp/builtin_servers/context7.py:56), which resolves at `~/.nvm/versions/node/v22.21.1/bin/npx` — a directory that exists only in a full user PATH `[RA §5]`. Rehearsal-b then proved the **preservation** side: the installed PATH value stayed byte-identical (shasum) across the anchored relocation sed AND the round-trip, and context7 booted healthy at the drill path `[RB]`. Rehearsal-d made this the **third independent confirmation** and added the sharpest form of the fact: with **no** PATH block, context7 fails **silently** — `healthy: False`, `primed 0/2` — while `/livez` and `/readyz` stay GREEN; MCP degradation has NO health signal `[RD]`.
 
-**Template drift — RESOLVED by leg-2:** the repo template `scripts/ensemble-prod.plist` used to **omit `EnvironmentVariables` entirely** (citing ADR-014) while the installed prod plist carried a PATH block — a next install from the bare template was born-broken for stdio MCP `[RA §2 divergence, §9 S4]`. The template ships the static anchor string above **with v0.29.10** — it is **not** in v0.29.9 — so until that release lands a fresh install's plist may lack the block: §0 states the degraded expectation (context7 `healthy: False`, `primed 0/2`, endpoints green) and §6.7.2 the remedy.
+**Template drift — RESOLVED by leg-2:** the repo template `scripts/com.ensemble.prod.plist` used to **omit `EnvironmentVariables` entirely** (citing ADR-014) while the installed prod plist carried a PATH block — a next install from the bare template was born-broken for stdio MCP `[RA §2 divergence, §9 S4]`. The template ships the static anchor string above **with v0.29.10** — it is **not** in v0.29.9 — so until that release lands a fresh install's plist may lack the block: §0 states the degraded expectation (context7 `healthy: False`, `primed 0/2`, endpoints green) and §6.7.2 the remedy.
 
 **Layer 2 — the launcher `_path_*` family (cross-platform shared surface; VM no-op).** Runs after `load_env_file`, before binary resolve `[ARCH §iv]`, as implemented:
 
@@ -514,8 +514,8 @@ The guard (`scripts/install-dir-guard.sh` + Makefile wiring) makes every mutatin
 # live install path → INSTALL_DIR + confirm var, both explicit:
 export INSTALL_DIR="$HOME/agents-ensemble" ENSEMBLE_INSTALL_LIVE=1
 make install INSTALL_DIR="$INSTALL_DIR"                 # stages .env.prod → .env, launcher, plists
-make plist-install    INSTALL_DIR="$INSTALL_DIR"        # → ~/Library/LaunchAgents/ensemble-prod.plist
-make watchdog-install INSTALL_DIR="$INSTALL_DIR"        # → ~/Library/LaunchAgents/ensemble-watchdog-watcher.plist
+make plist-install    INSTALL_DIR="$INSTALL_DIR"        # → ~/Library/LaunchAgents/com.ensemble.prod.plist
+make watchdog-install INSTALL_DIR="$INSTALL_DIR"        # → ~/Library/LaunchAgents/com.ensemble.watchdog.plist
 
 # a path OUTSIDE the live set needs no confirm var at all:
 make install INSTALL_DIR="$HOME/agents-ensemble-fresh"
@@ -622,16 +622,16 @@ launchctl print gui/$(id -u)/com.ensemble.prod | head -20     # is the job loade
 curl -fsS http://127.0.0.1:9797/livez                          # what version is actually serving?
 # if the flipped current looks broken → roll back to previous via promote/rollback,
 #   or start the LKG manually:
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ensemble-prod.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ensemble.prod.plist
 ```
 
-**plist `ExitTimeOut` — raise it to N ≥ 90 (operator, NOT shipped in this PR).** The template carries NO `ExitTimeOut` key today, so launchd's ~20 s default (and the live 5 s job value) TRUNCATES a healthy graceful drain. The launcher's stop budget is `CHILD_STOP_WAIT_S=70` (daemon graceful default 60 s + 10 s margin); set `ExitTimeOut` to **N ≥ 90** so launchd's SIGKILL backstop always sits OUTSIDE the launcher's own drain wait. Edit `scripts/ensemble-prod.plist` (add `<key>ExitTimeOut</key><integer>90</integer>`), re-stage the substituted plist into `$(INSTALL_DIR)/data/ensemble-prod.plist` (the install-time substitution — **never `make install` on a live dir**), then `make plist-install`, then reload (bootout + bootstrap).
+**plist `ExitTimeOut` — raise it to N ≥ 90 (operator, NOT shipped in this PR).** The template carries NO `ExitTimeOut` key today, so launchd's ~20 s default (and the live 5 s job value) TRUNCATES a healthy graceful drain. The launcher's stop budget is `CHILD_STOP_WAIT_S=70` (daemon graceful default 60 s + 10 s margin); set `ExitTimeOut` to **N ≥ 90** so launchd's SIGKILL backstop always sits OUTSIDE the launcher's own drain wait. Edit `scripts/com.ensemble.prod.plist` (add `<key>ExitTimeOut</key><integer>90</integer>`), re-stage the substituted plist into `$(INSTALL_DIR)/data/com.ensemble.prod.plist` (the install-time substitution — **never `make install` on a live dir**), then `make plist-install`, then reload (bootout + bootstrap).
 
-**`make plist-install` overwrites with NO `.bak` — snapshot first.** It rewrites `~/Library/LaunchAgents/ensemble-prod.plist` in place. If you have hand-edited that plist (PATH, ExitTimeOut), copy it first:
+**`make plist-install` overwrites with NO `.bak` — snapshot first.** It rewrites `~/Library/LaunchAgents/com.ensemble.prod.plist` in place. If you have hand-edited that plist (PATH, ExitTimeOut), copy it first:
 
 ```bash
-cp ~/Library/LaunchAgents/ensemble-prod.plist \
-   ~/Library/LaunchAgents/ensemble-prod.plist.bak-$(date -u +%Y%m%d-%H%M%S)
+cp ~/Library/LaunchAgents/com.ensemble.prod.plist \
+   ~/Library/LaunchAgents/com.ensemble.prod.plist.bak-$(date -u +%Y%m%d-%H%M%S)
 make plist-install INSTALL_DIR="$INSTALL_DIR"
 ```
 
@@ -645,8 +645,8 @@ The **depth** behind §0's compressed handover — for the case where the daemon
 lsof -nP -iTCP:9797 -sTCP:LISTEN          # who holds the port
 pgrep -fl '\./launcher\.sh'              # the manual launcher (ignore postgres autovacuum hits)
 launchctl list | grep -i ensemble         # expect only Apple's com.apple.ensemble — a NAME COLLISION, not ours
-plutil -lint ~/Library/LaunchAgents/ensemble-prod.plist \
-            ~/Library/LaunchAgents/ensemble-watchdog-watcher.plist
+plutil -lint ~/Library/LaunchAgents/com.ensemble.prod.plist \
+            ~/Library/LaunchAgents/com.ensemble.watchdog.plist
 curl -s http://127.0.0.1:9797/livez; echo
 curl -s http://127.0.0.1:9797/readyz; echo
 ```
@@ -656,14 +656,14 @@ Gate: `/livez` must return `{"status":"alive",…}` and `/readyz` must return re
 **6.7.2 Stage the plists + the PATH block.** Prefer the guard-era staging path, which writes the plists with the real install path already substituted:
 
 ```bash
-make plist-install    INSTALL_DIR="$INSTALL_DIR"    # → ~/Library/LaunchAgents/ensemble-prod.plist
-make watchdog-install INSTALL_DIR="$INSTALL_DIR"    # → ~/Library/LaunchAgents/ensemble-watchdog-watcher.plist
+make plist-install    INSTALL_DIR="$INSTALL_DIR"    # → ~/Library/LaunchAgents/com.ensemble.prod.plist
+make watchdog-install INSTALL_DIR="$INSTALL_DIR"    # → ~/Library/LaunchAgents/com.ensemble.watchdog.plist
 ```
 
 If you are hand-copying instead, the plist **must** carry `EnvironmentVariables.PATH` — launchd hands a job only `/usr/bin:/bin:/usr/sbin:/sbin`, and the MCP stdio servers spawn `npx` (§5). The repo template ships the static anchor string (`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`) **with v0.29.10**; nvm stays dynamic via the launcher's synthesis layer. ⚠️ **An install made from the v0.29.9 tag has NO PATH block** (leg-2 is not in that release) — that is exactly the case this step exists for. Verify the key is really there — a missing key is an *unreadable key*, not a stale path (§7 2.6):
 
 ```bash
-plutil -extract EnvironmentVariables.PATH raw -o - -- ~/Library/LaunchAgents/ensemble-prod.plist
+plutil -extract EnvironmentVariables.PATH raw -o - -- ~/Library/LaunchAgents/com.ensemble.prod.plist
 ```
 
 **6.7.3 The one restart — from OUTSIDE the daemon.** `launchctl bootout` SIGTERMs the daemon, and any shell/agent session running INSIDE it dies with it (exit −9). Run these from a terminal outside the daemon, or use the detached python3 helper in §7 Phase 3.
@@ -672,12 +672,14 @@ plutil -extract EnvironmentVariables.PATH raw -o - -- ~/Library/LaunchAgents/ens
 pgrep -fl '\./launcher\.sh'        # confirm the PID first
 kill -TERM <launcher-pid>          # Ctrl-C in the launcher's own terminal is cleaner
 while lsof -nP -iTCP:9797 -sTCP:LISTEN >/dev/null 2>&1; do sleep 1; done   # wait for release
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ensemble-prod.plist   # RunAtLoad → starts now
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ensemble.prod.plist   # RunAtLoad → starts now
 ```
 
 **6.7.4 Verify.** `launchctl print gui/$(id -u)/com.ensemble.prod | head -20` (the printed pid is the **launcher's** — the daemon listener is its grandchild) · `curl -fsS http://127.0.0.1:9797/livez` · `curl -fsS http://127.0.0.1:9797/readyz` · `ps -o pid,ppid,command -p "$(lsof -t -iTCP:9797 -sTCP:LISTEN)"` (the listener's ppid = the **launcher's** pid, and the launcher's ppid = 1 — never your shell) · `tail -30 "$INSTALL_DIR/data/launcher.err.log"` (daemon output is on **stderr** — `launcher.log` can be 0 bytes) · MCP evidence: `grep -E 'Context7|MCP warm-up pool' "$INSTALL_DIR/data/launcher.err.log" | tail -5`.
 
-**6.7.5 The observer.** `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ensemble-watchdog-watcher.plist` — probes `/livez` every 300 s and notifies via Notification Center if the daemon has been absent >600 s. It **never restarts anything**.
+**6.7.5 The observer.** `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ensemble.watchdog.plist` — probes `/livez` every 300 s and notifies via Notification Center if the daemon has been absent >600 s. It **never restarts anything**.
+
+> **FYI (known macOS behavior, incident §5.6):** every promote's stop→hand-back cycle bootouts and re-bootstraps the LaunchAgent, which re-registers it and can trigger the macOS **Background Items** permission notification. Expect one prompt per promote until the pipeline's registration settles — it is cosmetic, not a failure signal.
 
 **6.7.6 Rollback (back to a manual launcher).**
 
@@ -706,7 +708,7 @@ The gated checklist below is carried from the corrected `[G5]` (**120 L** — re
 Rehearse the ENTIRE move sequence against a throwaway clone — zero contact with live or demo trees:
 
 - [ ] R1. `cp -a ~/agents-ensemble-demo /tmp/ensemble-stage1-rehearsal` (allowed write surface: /tmp).
-- [ ] R2. Edit the clone's staged plist (`/tmp/ensemble-stage1-rehearsal/data/ensemble-prod.plist`) with the SAME anchored sed as Phase 2, retarget: install path → `/tmp/ensemble-stage1-rehearsal`, label → `com.ensemble.rehearsal.prod` (MUST NOT collide with real labels), port → a rehearsal port (e.g. 8199) via the clone's `.env`.
+- [ ] R2. Edit the clone's staged plist (`/tmp/ensemble-stage1-rehearsal/data/com.ensemble.prod.plist`) with the SAME anchored sed as Phase 2, retarget: install path → `/tmp/ensemble-stage1-rehearsal`, label → `com.ensemble.rehearsal.prod` (MUST NOT collide with real labels), port → a rehearsal port (e.g. 8199) via the clone's `.env`.
 - [ ] R3. From the OPERATOR Terminal: `launchctl bootstrap gui/$(id -u)` the rehearsal plist; verify state=running + `/livez` on the rehearsal port (era caveat: release ID via `readlink current` + binary sha256 — see 4.2; the binary's self-reported version is NOT a release discriminator `[RC-F2]`).
 - [ ] R4. Run the FULL Phase 2–4 sequence against the rehearsal clone (rename to `/tmp/ensemble-stage1-rehearsal-moved` — mv onto a NONEXISTENT target, per corrected 2.1/2.2 — in-place plist sed with the literal-prefix anchor, `plutil -lint` + the 2.6 path assert, a PlistBuddy **human** before/after diff (never a programmatic compare — see 2.6), bootout → bootstrap, verification battery, then the rollback sequence). Every guard below must fire or the rehearsal FAILS.
 - [ ] R5. Bootout the rehearsal job; `rm -rf /tmp/ensemble-stage1-rehearsal*` (named, /tmp-scoped — legitimate); confirm zero residue: `launchctl print gui/$(id -u)/com.ensemble.rehearsal.prod` → "No such process".
@@ -720,9 +722,9 @@ Rehearse the ENTIRE move sequence against a throwaway clone — zero contact wit
 - [ ] 1.1 Live daemon healthy: record `launchctl print gui/$(id -u)/com.ensemble.prod | grep -E 'state|pid'` (expect state=running + pid) and `curl -s http://127.0.0.1:9797/livez`.
 - [ ] 1.2 Layout census (expected): flat tree — `launcher.sh` + `ensemble-prod` at root; **NO** `.launcher-state`, NO `.sweep-defer-*`, NO `releases/` (journal dormant). If ANY of these now exist → STOP: re-verify state-file path-neutrality before proceeding.
 - [ ] 1.3 **Same-volume check (hard refuse if unequal):** `stat -f %d ~/agents-ensemble` vs `stat -f %d /opt`. Unequal ⇒ `mv` silently degrades to copy+delete (hours, inconsistent) — DO NOT PROCEED.
-- [ ] 1.4 Plist inventory: `ls -l ~/Library/LaunchAgents/ | grep ensemble` — expect `ensemble-prod.plist`, `ensemble-watchdog-watcher.plist`, `ensemble-demo.plist`. **Only the FIRST TWO are ever edited.** 🔴 Substring hazard (host-verified; rehearsal-b exercised the inverted direction and held): `/Users/nguyenminhkha/agents-ensemble` is a PREFIX of `/Users/nguyenminhkha/agents-ensemble-demo` — a glob `sed` over `*.plist` would corrupt the demo plist into `/opt/ensemble-demo`. Never glob. Never touch `ensemble-demo.plist`.
+- [ ] 1.4 Plist inventory: `ls -l ~/Library/LaunchAgents/ | grep ensemble` — expect `com.ensemble.prod.plist`, `com.ensemble.watchdog.plist`, `com.ensemble.demo.plist` (label-verbatim: filename == job label, the hand-back pipeline invariant — incident §7b). A legacy `ensemble-demo.plist` on the host VIOLATES the invariant and must be OPERATOR-renamed (bootout → `mv` → re-bootstrap); document-only here — never touch the host file from tooling. **Only the FIRST TWO are ever edited.** 🔴 Substring hazard (host-verified; rehearsal-b exercised the inverted direction and held): `/Users/nguyenminhkha/agents-ensemble` is a PREFIX of `/Users/nguyenminhkha/agents-ensemble-demo` — a glob `sed` over `*.plist` would corrupt the demo plist into `/opt/ensemble-demo`. Never glob. Never touch the demo plist.
 - [ ] 1.5 Pre-edit assertion on both edit-target plists: `grep -c 'agents-ensemble-demo' <file>` → **0** (proves the anchored sed cannot hit a demo path inside them).
-- [ ] 1.6 Byte-state baselines: `cp -p` each target plist to `<name>.bak-stage1` AND `shasum -a 256` both; same for the staged copies inside the tree (`data/ensemble-prod.plist`, `data/ensemble-watchdog-watcher.plist` — they carry the substituted OLD install path from Makefile:345/:352 and must be updated too). Also baseline the supervisor PATH value: `plutil -extract EnvironmentVariables.PATH raw -o - -- ~/Library/LaunchAgents/ensemble-prod.plist | shasum -a 256` (verified on macOS 14.4.1: returns the BARE value). **The watchdog plist has NO `EnvironmentVariables` key** — that keypath errors there ("No value at that key path") and that is EXPECTED for that file, not a failure.
+- [ ] 1.6 Byte-state baselines: `cp -p` each target plist to `<name>.bak-stage1` AND `shasum -a 256` both; same for the staged copies inside the tree (`data/com.ensemble.prod.plist`, `data/com.ensemble.watchdog.plist` — they carry the substituted OLD install path from Makefile:345/:352 and must be updated too). Also baseline the supervisor PATH value: `plutil -extract EnvironmentVariables.PATH raw -o - -- ~/Library/LaunchAgents/com.ensemble.prod.plist | shasum -a 256` (verified on macOS 14.4.1: returns the BARE value). **The watchdog plist has NO `EnvironmentVariables` key** — that keypath errors there ("No value at that key path") and that is EXPECTED for that file, not a failure.
 - [ ] 1.7 `.env` census recorded: `.env` contains ZERO path-valued keys — nothing to edit inside `.env`. Re-verify with `grep -n 'agents-ensemble' /opt/ensemble/.env` AFTER the move (expect 0).
 - [ ] 1.8 Read-only reference census (report-only, no action): `grep -rl 'agents-ensemble' ~/Library/LaunchAgents/ ~/.zshrc ~/.zprofile 2>/dev/null` — record anything found for the operator's own awareness.
 - [ ] 1.9 (Optional, recommended — rehearsal-b F2 method) Pre-move tree manifest: relpath+sha256 of every file + `du -sk` (~seconds for ~227 MB) — gives 2.3 a hard lossless guarantee instead of `ls` spot-checks.
@@ -735,14 +737,14 @@ Rehearse the ENTIRE move sequence against a throwaway clone — zero contact wit
 - [ ] 2.3 Verify: `ls /opt/ensemble/launcher.sh /opt/ensemble/ensemble-prod` exist as DIRECT children (NOT under `/opt/ensemble/agents-ensemble/` — the nesting signature of the 2.1 trap); `ls ~/agents-ensemble` → No such file or directory. If 1.9's manifest was taken: re-run and diff → identical count + total sha (rehearsal-b's marker-A==marker-B proof shape).
 - [ ] 2.4 **In-place plist edits — the PATH-PRESERVATION TRAP.** The installed plists' `EnvironmentVariables.PATH` contains `/Users/nguyenminhkha/.nvm/versions/node/v22.21.1/bin` which MUST survive verbatim (it is REQUIRED for MCP spawning — rehearsal-a A/B proof; the value contains no `agents-ensemble` substring, host-verified, so the anchored sed cannot touch it — **preservation rehearsal-proven: the PATH value stayed byte-identical (shasum) across the anchored sed AND the round-trip, and context7 booted healthy at the drill path `[RB]`**). Edit ONLY the two named files, with the literal-prefix anchor and BSD sed's empty-suffix in-place form:
   ```bash
-  for f in ~/Library/LaunchAgents/ensemble-prod.plist ~/Library/LaunchAgents/ensemble-watchdog-watcher.plist; do
+  for f in ~/Library/LaunchAgents/com.ensemble.prod.plist ~/Library/LaunchAgents/com.ensemble.watchdog.plist; do
     sed -i '' 's|/Users/nguyenminhkha/agents-ensemble|/opt/ensemble|g' "$f"
   done
   ```
   Anchors rewritten (verify each before/after — `/usr/libexec/PlistBuddy -c 'Print :<key>'` is fine for a HUMAN diff; its array dump carries `Array { … }` structure noise, so NEVER compare it programmatically — use `plutil -extract … raw`, see 2.6):
-  - `ensemble-prod.plist`: `ProgramArguments[1]`, `WorkingDirectory`, `StandardOutPath`, `StandardErrorPath`
-  - `ensemble-watchdog-watcher.plist`: `ProgramArguments[1]` (script path — resolves via the tree) and `ProgramArguments[2]` (the explicit INSTALL_DIR arg), `StandardOutPath`, `StandardErrorPath`
-- [ ] 2.5 **Staged copies inside the moved tree** — same anchored sed on `/opt/ensemble/data/ensemble-prod.plist` and `/opt/ensemble/data/ensemble-watchdog-watcher.plist` (they are the `make plist-install` source of truth).
+  - `com.ensemble.prod.plist`: `ProgramArguments[1]`, `WorkingDirectory`, `StandardOutPath`, `StandardErrorPath`
+  - `com.ensemble.watchdog.plist`: `ProgramArguments[1]` (script path — resolves via the tree) and `ProgramArguments[2]` (the explicit INSTALL_DIR arg), `StandardOutPath`, `StandardErrorPath`
+- [ ] 2.5 **Staged copies inside the moved tree** — same anchored sed on `/opt/ensemble/data/com.ensemble.prod.plist` and `/opt/ensemble/data/com.ensemble.watchdog.plist` (they are the `make plist-install` source of truth).
 - [ ] 2.6 **Lint + path assert on BOTH installed plists — THREE DISTINCT VERDICTS, never a false "stale path".** Tool choice: **`plutil -extract <keypath> raw -o - -- <plist>`** — verified on macOS 14.4.1 to return the BARE path/value (no quotes, no structure) for `ProgramArguments.1`, `ProgramArguments.2`, `WorkingDirectory`, `EnvironmentVariables.PATH`; it exits non-zero with a distinct message for an absent key/index ("No value at that key path or invalid key path") and for a malformed file ("Property List error"). A bare `PlistBuddy -c 'Print :ProgramArguments:1'` compare is NOT used: `Print` of an array emits `Array { … }` structure noise, an absent key yields an empty/error capture, and a missing binary yields "command not found" — all three collapse into a FALSE "stale path" verdict on a healthy plist.
   - **TOOL MISSING** (abort, exit 78): `/usr/libexec/PlistBuddy` (ABSOLUTE path — a bare `PlistBuddy` can resolve to a shell stub) and `plutil` must be present BEFORE any verdict.
   - **UNREADABLE KEY / MALFORMED PLIST** (exit 1): the key or index is absent, or the file is not a plist. Distinct from stale — never "fix" a healthy plist on this verdict.
@@ -764,10 +766,10 @@ Rehearse the ENTIRE move sequence against a throwaway clone — zero contact wit
     esac
   }
   EXPECT_ROOT=/opt/ensemble     # POST-move root (RB.4 runs the same block with the PRE-move root)
-  assert_under prod ~/Library/LaunchAgents/ensemble-prod.plist             ProgramArguments.1  # <root>/launcher.sh
-  assert_under prod ~/Library/LaunchAgents/ensemble-prod.plist             WorkingDirectory   # <root>
-  assert_under wd   ~/Library/LaunchAgents/ensemble-watchdog-watcher.plist ProgramArguments.1  # <root>/scripts/watchdog-watcher.sh
-  assert_under wd   ~/Library/LaunchAgents/ensemble-watchdog-watcher.plist ProgramArguments.2  # <root> (INSTALL_DIR arg)
+  assert_under prod ~/Library/LaunchAgents/com.ensemble.prod.plist             ProgramArguments.1  # <root>/launcher.sh
+  assert_under prod ~/Library/LaunchAgents/com.ensemble.prod.plist             WorkingDirectory   # <root>
+  assert_under wd   ~/Library/LaunchAgents/com.ensemble.watchdog.plist ProgramArguments.1  # <root>/scripts/watchdog-watcher.sh
+  assert_under wd   ~/Library/LaunchAgents/com.ensemble.watchdog.plist ProgramArguments.2  # <root> (INSTALL_DIR arg)
   echo "PATH ASSERTS OK (expected root: $EXPECT_ROOT)"
   ```
   → must print `PATH ASSERTS OK` and ZERO stale/unreadable lines. Per-file key shapes (verified on the installed plists): the prod plist has ProgramArguments[0]=`/bin/bash`, [1]=launcher.sh and a `WorkingDirectory`; the watchdog plist has [0]=`/bin/bash`, [1]=watchdog-watcher.sh, [2]=INSTALL_DIR and **NO** `WorkingDirectory` and **NO** `EnvironmentVariables` — do NOT assert those keys there (an absent key is "unreadable", not stale). `plutil -lint` (exit 0) is RETAINED as a necessary-but-BLIND pre-check (it cannot see a stale path — rehearsal-b F3) · `grep -c 'agents-ensemble'` on each plist → **0** · `EnvironmentVariables.PATH` (prod plist only) → shasum UNCHANGED vs the 1.6 baseline (nvm path intact).
@@ -778,15 +780,15 @@ Rehearse the ENTIRE move sequence against a throwaway clone — zero contact wit
 
 - [ ] 3.1 `launchctl bootout gui/$(id -u)/com.ensemble.watchdog` then `launchctl bootout gui/$(id -u)/com.ensemble.prod`
   - GAP-2 fact (live-proven `[RA]`, re-observed ×4 in rehearsals b/c with TERM→exit 143 in 1–2 s): bootout KEEPS the job down (no restart at t+28 s with ThrottleInterval 10); the launcher exits 143 on graceful stop. A bare SIGTERM would re-engage KeepAlive 10 s later — that is why stop = bootout ONLY.
-- [ ] 3.2 `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ensemble-prod.plist` then the watchdog plist.
+- [ ] 3.2 `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ensemble.prod.plist` then the watchdog plist.
 
 > **Doc note — the bootout-from-outside-the-daemon warning `[HANDOFF §6.3]`, corrected per design:** `launchctl bootout` SIGTERMs the daemon — and any shell, agent turn or tool session running INSIDE that daemon dies with it (exit code −9; proven twice). Either run Phase 3 from a terminal OUTSIDE the daemon, or run the bootstrap **detached** so it survives the stop. Note: stock macOS **ships no `setsid(1)`** `[ARCH §iii.6]` — the interim handoff's literal `( setsid bash -c '…' & )` one-liner presumes a brew-installed `setsid` and fails on a stock host. The portable detached form is a python3 double-fork with `os.setsid()`:
 > ```bash
 > ( /usr/bin/python3 -c "import os,sys; os.fork() or (os.setsid(), os.fork() or os.execvp(sys.argv[1], sys.argv[1:]))" \
->     bash -c 'launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ensemble-prod.plist' >/tmp/relaunch.log 2>&1 & )
+>     bash -c 'launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ensemble.prod.plist' >/tmp/relaunch.log 2>&1 & )
 > ```
 > If you already ran a bootout without a surviving bootstrap, the daemon is DOWN — bring it back with:
-> `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ensemble-prod.plist`
+> `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ensemble.prod.plist`
 
 ### Phase 4 — Verification battery (era caveats apply `[RA][RC]`)
 
@@ -950,7 +952,7 @@ All drills on demo (:7979) or throwaway paths; operator executes; agents prepare
 - [ ] C4. STATE_FILE wiring: append `ENSEMBLE_LAUNCHER_STATE_FILE=/opt/ensemble/data/.launcher-state` to `.env` (sudo — `.env` is root-owned now); restart via bootout/bootstrap (operator Terminal) → verify state+defer appear under `data/`; watchdog reads them; upgrade-tools UI shows launcher state.
 - [ ] C5. `ensemble-privrun` installed to `/usr/local/bin` (root:wheel 755) — **INERT** (no sudoers change). Drill refusal paths (D2 shape) on live-adjacent allowlist entries.
 - [ ] C6. Backstop timers: install both LaunchDaemon plists + twin scripts (root:root); `launchctl bootstrap system/` + `kickstart`; verify first snapshot lands, treecheck healthy-quiet.
-- [ ] C7. Plist convergence: replace installed `~/Library/LaunchAgents/ensemble-prod.plist` with the template-staged copy (static-anchor PATH — removes the rot-prone nvm version dir from supervisor env; the launcher synthesis block is now the guaranteed layer, plist PATH is the belt); `plutil -lint` **+ the G5-2.6 path assert run VERBATIM with `EXPECT_ROOT=/opt/ensemble`** — i.e. the three-verdict block (TOOL MISSING / UNREADABLE KEY / STALE PATH) using **`plutil -extract <keypath> raw -o - -- <plist>`** (verified on macOS 14.4.1: returns the BARE value; non-zero exit + distinct message for an absent key/index or a malformed file). **Never** a bare `PlistBuddy -c 'Print :ProgramArguments:1'` compare — `Print` of an array emits `Array { … }` structure noise, an absent key yields an empty/error capture, and a missing binary yields "command not found"; all three collapse into a FALSE "stale path" verdict on a healthy plist. `/usr/libexec/PlistBuddy -c 'Print'` remains fine for a HUMAN before/after diff (absolute path). Then bootout/bootstrap both jobs.
+- [ ] C7. Plist convergence: replace installed `~/Library/LaunchAgents/com.ensemble.prod.plist` with the template-staged copy (static-anchor PATH — removes the rot-prone nvm version dir from supervisor env; the launcher synthesis block is now the guaranteed layer, plist PATH is the belt); `plutil -lint` **+ the G5-2.6 path assert run VERBATIM with `EXPECT_ROOT=/opt/ensemble`** — i.e. the three-verdict block (TOOL MISSING / UNREADABLE KEY / STALE PATH) using **`plutil -extract <keypath> raw -o - -- <plist>`** (verified on macOS 14.4.1: returns the BARE value; non-zero exit + distinct message for an absent key/index or a malformed file). **Never** a bare `PlistBuddy -c 'Print :ProgramArguments:1'` compare — `Print` of an array emits `Array { … }` structure noise, an absent key yields an empty/error capture, and a missing binary yields "command not found"; all three collapse into a FALSE "stale path" verdict on a healthy plist. `/usr/libexec/PlistBuddy -c 'Print'` remains fine for a HUMAN before/after diff (absolute path). Then bootout/bootstrap both jobs.
 - [ ] C8. (If adopted) O1 root-owned plist copy + R1 health timer; kickstart + verify D6 behavior.
 - [ ] C9. Verification battery (Stage-1 Phase-4 shape, plus): writable-set writes succeed from a lane (e.g. tmp_images upload); read-only write attempt fails EACCES; snapshot timer fired ≥1; treecheck quiet; watchdog relays a test alert; `/livez` `/readyz` green — `/readyz` components are `database`, `queue_freshness`, `services`, `checkpoint_saver`, and **MCP is advisory under `detail.mcp` and NEVER gates status ⇒ `/readyz` is NOT MCP proof** — MCP health (context7/webfetch/plane) is evidenced from `data/launcher.err.log`; any release flip verified via `readlink current` + binary sha256.
 - [ ] C10. Operator decision recorded on **arming promote** (the only remaining root touchpoint): stay inert (deploys = releases/+promote without root) or arm the sudo window.
@@ -978,7 +980,7 @@ Process-kill by same-uid lanes (KeepAlive restores ≤10 s — flap, VM parity);
 | Boot / start | automatic — launchd starts it at login/boot (`RunAtLoad`) |
 | Restart | `launchctl kickstart -k gui/$(id -u)/com.ensemble.prod` |
 | Stop (intentional) | `launchctl bootout gui/$(id -u)/com.ensemble.prod` — ⚠️ GAP-2: **bootout ONLY, never a bare SIGTERM** (§4); kills in-daemon agent sessions — check §2 first |
-| Start again after stop | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ensemble-prod.plist` |
+| Start again after stop | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ensemble.prod.plist` |
 | Check status | `launchctl print gui/$(id -u)/com.ensemble.prod` |
 | Logs | `data/launcher.log` (supervisor stdout) · `data/launcher.err.log` (daemon stderr — **the daemon log surface under launchd** `[RA §9 S3]`) · `data/logs/ensemble.log` (daemon file log) |
 | Watchdog status | `launchctl print gui/$(id -u)/com.ensemble.watchdog` · `tail -20 data/watchdog.log` |
@@ -1037,7 +1039,7 @@ Folded from `[HANDOFF §8]` with the rehearsal additions. Mac rows assume launch
 What is **true now** on the Mac, verified at commission time:
 
 - **launchd cutover: DONE.** `com.ensemble.prod` runs under launchd (pid 51569 observed stable across the rehearsal window, `[RA §1 R7, §7 PR1]`), with `com.ensemble.watchdog` loaded alongside. `/readyz` all-green after the PATH fix. **MCP is advisory and never gates `/readyz`** (components: `database`, `queue_freshness`, `services`, `checkpoint_saver`; MCP is reported under `detail.mcp`) — its evidence is the daemon stderr surface, `data/launcher.err.log`.
-- **The PATH fix is live in the installed plist** — the installed `ensemble-prod.plist` carries `EnvironmentVariables.PATH` (1541 B file), which is what makes context7 healthy. The repo **template** fix ships with v0.29.10 (below) — the born-broken drift closes with that release.
+- **The PATH fix is live in the installed plist** — the installed `com.ensemble.prod.plist` carries `EnvironmentVariables.PATH` (1541 B file), which is what makes context7 healthy. The repo **template** fix ships with v0.29.10 (below) — the born-broken drift closes with that release.
 - **Live install is FLAT** — no `releases/`, no `state.json` journal, deliberately, until the Stage-2 release lands (v0.29.10 — §8). `system_upgrade`/`upgrade_status` therefore do not work on this box — expected.
 - **Demo:** label `com.ensemble.demo` **booted out** (its original unloaded state), `:7979` free, `ensemble-demo.plist` (1680 B, lint OK) **kept on disk** for the next rehearsals `[RA §8]`.
 - **Install guard: MERGED.** Guard commit `c46f1523c` (3 files, path-limited) + merge `--no-ff` `424494082` onto `c113531f2`; `origin/latest` + feature branch pushed 0/0. **Zero live change** — merge-safety pre-verified GREEN (zero CI anywhere; a repo merge ≠ a live change). The worktree caveat stands (§6.5): worktrees branched before the merge still carry the old Makefile.
