@@ -9,8 +9,8 @@ second-session delete/insert would be invisible. FK behavioral tests need the
 cascade assertion vacuous).
 """
 
-import pytest
 from datetime import datetime, timedelta
+import pytest
 from sqlalchemy import event, func
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -284,8 +284,6 @@ class TestFkCascade:
                 session.delete(row)
                 session.commit()
             with Session(eng) as session:
-                from sqlmodel import select
-
                 remaining = list(
                     session.exec(
                         select(ProjectFutureEntry).where(
@@ -414,7 +412,7 @@ class TestStaleVictimGuard:
     def _seed_32(self, store, project):
         return seed_via_repo(store, project.project_id, 32)
 
-    def test_naive_delete_then_add_does_not_trip_guard(self, two_engine_env, tmp_path):
+    def test_naive_delete_then_add_does_not_trip_guard(self, two_engine_env):
         """AC25 negative leg: a committed delete BEFORE the add counts 31 → clean."""
         e1, e2, store = two_engine_env
         proj = store.create(name="Guard")
@@ -536,7 +534,6 @@ class TestUniqueRaceThroughAdd:
             eng.dispose()
 
 
-
 # ============================================================================
 # W-2 — _is_seq_unique_race predicate (parametrized, PG + SQLite + FK)
 # ============================================================================
@@ -552,8 +549,6 @@ class TestIsSeqUniqueRace:
         ],
     )
     def test_predicate(self, msg, expected):
-        from daemon.repositories.project.repository import _is_seq_unique_race
-
         exc = Exception(msg)
         assert _is_seq_unique_race(exc) is expected
         # string form also works
@@ -599,9 +594,6 @@ class TestEvictionDisclosureFidelity:
 
 class TestCompositionCommitRace:
     def test_forced_commit_race_restores_all_victims(self, two_engine_env):
-        from sqlalchemy.exc import IntegrityError
-        from sqlalchemy import event
-
         e1, e2, store = two_engine_env
         proj = store.create(name="Race")
         pid = proj.project_id

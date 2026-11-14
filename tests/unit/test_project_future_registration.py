@@ -11,6 +11,8 @@ not observable under this lane's zero-daemon-contact discipline.
 from daemon.tools._tool_registry import (
     CATEGORY_MODULES,
     KNOWN_TOOL_NAMES,
+    PRIVILEGED_TOOL_CATEGORIES,
+    list_tools_by_category,
     scan_tools_for_full_docs,
 )
 from daemon.tools.instance import resolve_tool_filter
@@ -40,8 +42,8 @@ def _scanned_future_tools() -> list:
 def test_category_modules_entry():
     """AC21: CATEGORY_MODULES['project_future'] == 'daemon.tools.project_future'.
 
-    The value MUST be a daemon.tools.* path (:1207-1211) or the AST scanner
-    never finds the module.
+    The value MUST be a daemon.tools.* path (the daemon.tools.* path rule in
+    the CATEGORY_MODULES preamble) or the AST scanner never finds the module.
     """
     assert CATEGORY_MODULES["project_future"] == "daemon.tools.project_future"
 
@@ -64,8 +66,6 @@ def test_known_tool_names_sorted_position():
 def test_category_not_privileged():
     """W5 do-not-copy decision: project_future stays NON-privileged — empty-allow
     agents inherit it exactly as they inherit project_history today (A15)."""
-    from daemon.tools._tool_registry import PRIVILEGED_TOOL_CATEGORIES
-
     assert "project_future" not in PRIVILEGED_TOOL_CATEGORIES
 
 
@@ -99,8 +99,6 @@ def test_allow_filter_deny_wins():
 def test_tool_name_in_tool_categories_map():
     """list_tools_by_category exposes project_future owning exactly the 3 verbs."""
     _scanned_future_tools()
-    from daemon.tools._tool_registry import list_tools_by_category
-
     cats = dict(list_tools_by_category())
     assert "project_future" in cats
     assert set(cats["project_future"]) == set(FUTURE_TOOLS)

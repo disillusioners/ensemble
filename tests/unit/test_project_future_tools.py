@@ -4,8 +4,8 @@ Tests tool logic (validation, truncation, error handling, cap merge) with a
 mocked store — the house idiom of test_project_history_tools.py.
 """
 
-import pytest
 from unittest.mock import MagicMock
+import pytest
 
 from daemon.tools.project_future import (
     create_project_future_tools,
@@ -20,7 +20,7 @@ from daemon.tools.project_future import (
 # =============================================================================
 
 
-def make_mock_store(initial_entries: list = None):
+def make_mock_store(initial_entries: list | None = None):
     """Create an isolated mock store for the wishlist lane.
 
     Returns a MagicMock store whose ``get`` returns a truthy project and
