@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.7] — 2026-11-14
+
+### Added — Project Future: dev-team forward-improvement list tool (`feature/project-future`, base `ac9849bf7`, merged at `7a92e5828`; +1 migration)
+
+- **Tools.** `project_future_add` / `project_future_list` / `project_future_remove` — a per-project forward-improvement wishlist with a 32-item cap and DISCLOSED FIFO eviction (D16 translation at the tool envelope, D18 cap contract). Writes are serialized by a per-project writer lock (D19, READ-COMMITTED reasoning; proven statically, see disclosures) and guarded by `ConcurrentWishlistUpdate` (R1) at the repository seam; the payload is captured pre-commit (B1).
+- **Registration.** Category `project_future` added to `CATEGORY_MODULES` and its three names to `KNOWN_TOOL_NAMES` (**261** total, +3). The category is **NOT privileged** (privileged set stays **22**), and it is granted to the **14 dev-spine agents** only — the four `sonic-*` agents are deliberately excluded in v1.
+- **Schema.** `daemon/migrations/versions/20261112_175916_create_project_future.sql` — additive table only, **130 migrations** total; no duplicate date prefix.
+- **Docs routing.** Leader decision-table row (Recording Decision Table), reviewer Suggestion tier in BOTH twins (`reviewer` and `reviewer[v2]`), and `docs/agents.md`; prompt-artifact baseline re-stamped to its **217-row** denominator with **0 drift**.
+- **Cumulative release.** This tag carries everything already on `latest` (ENSEMBLE-32 ram-guard platform gate at 0.30.5; Sonic routing + expert-team terminology at 0.30.6) plus the tester's two re-gate evidence documents.
+- **Disclosures.** D19 writer lock proven STATICALLY (dialect compile + emission order + READ-COMMITTED reasoning), never executed on a PG cluster; lock pin is inspection-proven, not session-identity-pinned (next-touch hardening); remove-side `project_id is None` residual bounded by the add-side lock; new-entry `created_at` is now tz-aware (`+00:00`) vs the old DB-roundtrip naive form; 26 pre-existing `test_project_history_api.py` reds under ambient `ENSEMBLE_AUTH_ENABLED` (identical at base, green under scrub); two RAM-guard anomaly reports classified as ENSEMBLE-32-class noise (fixed by the 0.30.5 platform gate).
+
 ## [0.30.6] — 2026-11-14
 
 ### Changed — sonic routing amendment: routing by COMPLEXITY, cross-team interop, overrides, expert-team terminology (Emperor's four rulings 2026-11-14; `feature/sonic-routing-v0305`, base `3f45cd6dd`; zero migrations)
