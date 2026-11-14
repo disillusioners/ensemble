@@ -407,3 +407,20 @@ None blocking. One item for the leader's judgment: **Adjustment 2b's retry** —
 recommendation is translate-and-fail-closed; a single in-repo retry is offered if the
 leader prefers the capture lane to be frictionless. Either is correct; the translation
 is the part that matters.
+
+
+---
+
+## Correction note (D19 — supersedes the rejection of FOR UPDATE above)
+
+The "no serialization" conclusion in §2's concurrency table rejected `SELECT … FOR UPDATE`
+on project rows on two premises: (a) "`FOR UPDATE` + aggregate is invalid" and (b) "locks
+nothing on an empty project". Both rested on the false same-seq premise — they apply to
+locking FUTURE-table rows (which can be empty). Locking the ALWAYS-PRESENT projects row
+instead sidesteps both objections (the row always exists for a live project) and is now
+ADOPTED per D19: `session.get(Project, project_id, with_for_update=True)` is the first
+statement of both `add_future_entry` and `remove_future_entry`. On PG it serializes all
+writers for that project (count→evict→MAX→INSERT becomes atomic per project); on SQLite
+`with_for_update` is a no-op and SQLite already serializes writers at the DB level, so
+semantics hold on both backends with one uniform shape. This closes the stale-COUNT
+overshoot (cap+N−1 for N racing adds) that D16/R5 assumed away. See decisions.md D19.

@@ -363,6 +363,8 @@ def remove_future_entry(
 
 Concurrency note (D16 + D18 — supersedes the earlier "caller retries" wording): two concurrent adds can compute the same `seq` → `IntegrityError` at commit → caught and NARROWED per D18 (ONLY the UNIQUE(project_id, seq) violation translates; any other IntegrityError rolls back and RE-RAISES raw) → on the race, WHOLE transaction rolled back (evictions restored AND insert rejected — never a partial state) → re-raised as `ConcurrentWishlistUpdate` → the TOOL layer returns the stable translated message `{"error": "Concurrent wishlist update for project '<pid>' — please retry"}` (A31 precedent). NO automatic retry anywhere (leader ruling D16, overriding the architect's optional one-bounded-retry); the calling agent may still choose to retry, since the message says so. Same contract for the R1 guard path. Accepted v1 behavior, fail-closed.
 
+Correction pointer (D19): writer serialization was ADDED — `add_future_entry` and `remove_future_entry` now take a per-project projects-row `FOR UPDATE` lock as their first statement (D19), closing the stale-COUNT overshoot that D16/R5 assumed away (cap+N−1 for N racing adds). D16's UNCONDITIONAL claim and R5's "after any add ≤32" now hold on BOTH backends. See decisions.md D19.
+
 Acceptance: AC10–AC19 + AC25. No count-helper method added (inline idiom per A17).
 
 ### W4 — Tool module `daemon/tools/project_future.py` (NEW)

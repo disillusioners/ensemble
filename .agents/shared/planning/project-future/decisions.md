@@ -156,3 +156,16 @@ All anchors verified 2026-11-12 in worktree `/home/nea/ensemble-src-wt-project-f
 **Rationale:** a broad catch-and-translate would mislabel unrelated constraint failures as "concurrent wishlist update — please retry", sending the caller into a retry loop that can never succeed (a NOT NULL violation is not contention). Narrowing keeps D16's honest-signal principle: the stable retry message is emitted only when retrying can actually help. D16 and D18 read as ONE contract: **D16 = what happens on a lost race** (translate + whole-transaction rollback + no automatic retry); **D18 = which IntegrityError violations count as the race** (the UNIQUE(project_id, seq) violation only).
 
 **Evidence:** leader ruling (reviewer-council fold pass); A31 precedent; plan.md W3 handler spec (constraint-inspection block), W4 step 5 (tool-side two-handler note), risk row 12, FIFO properties, AC26 (race-through-add pin + non-race re-raise pin).
+
+
+## D19 — Writer serialization per project: the projects-row FOR UPDATE as the first statement (leader ruling, B2)
+
+**Decision:** `add_future_entry` and `remove_future_entry` both acquire a per-project write lock as the FIRST statement in their transaction, BEFORE any count/MAX read: `session.get(Project, project_id, with_for_update=True)` — a lock on the ALWAYS-PRESENT projects row (not the future-table rows). On PG this is a real row lock serializing ALL writers for that project — the whole count→evict→MAX→INSERT sequence becomes atomic per project. On SQLite `with_for_update` is a no-op AND SQLite already serializes writers at the DB level, so semantics are correct on BOTH backends with one uniform shape.
+
+**WHICH interleaving it closes:** the stale-COUNT overshoot — under PG READ COMMITTED, two adds at 31 rows: T2's COUNT=31 → no eviction (guarded DELETE skipped) → T1 commits seq 32 → T2's MAX=32 → assigns 33 → no UNIQUE conflict → 33 rows (cap+N−1 for N racing adds). That violated D16's UNCONDITIONAL cap claim and R5's "after any add ≤32". With the projects-row lock, T2 blocks on the lock until T1 commits, then re-reads COUNT=32 → evicts → cap holds.
+
+**Residual for this class:** none — the lock closes the count/evict/MAX/INSERT sequence per project; the R1 rowcount guard (AC25) and D18 narrowing remain as the second and third layers.
+
+**session.get None note:** for an absent project the get returns None and no lock is acquired; callers pre-verify project existence at the tool layer (the add tool returns "Project not found" before reaching the repo).
+
+**Evidence:** leader ruling (reviewer second-seat B2); arch's earlier FOR UPDATE rejection ("locks nothing on an empty project") applied to locking FUTURE-table rows — the projects row always exists for a live project, sidestepping that objection; dialect-compile proof (PG: FOR UPDATE present; SQLite: absent) + first-statement behavioral pins in tests/test_project_future.py (TestWriterSerializationLock).
