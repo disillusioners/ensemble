@@ -189,9 +189,40 @@ esac
 
 # Run with timeout; capture exit code
 set +e
+
+# --- Fix 2 (residue incident 2026-11-14): eval + "&" can interpose a wrapper
+# shell between the harness and the daemon, so TERM on $DPID may kill only the
+# WRAPPER and ORPHAN the real daemon (observed: daemon survived holding the
+# scratch port, LISTEN fd inherited by its MCP children). Resolve the actual
+# daemon pid (the DPID descendant whose cmdline runs `-m daemon`) and aim
+# every TERM at THAT pid. Never SIGKILL — TERM only.
+daemon_descendant_pid() {
+  local parent="$1" p c
+  for p in $(pgrep -P "$parent" 2>/dev/null); do
+    if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- '-m daemon'; then
+      echo "$p"; return 0
+    fi
+    for c in $(pgrep -P "$p" 2>/dev/null); do
+      if tr '\0' ' ' < "/proc/$c/cmdline" 2>/dev/null | grep -q -- '-m daemon'; then
+        echo "$c"; return 0
+      fi
+    done
+  done
+  echo "$parent"   # eval exec'd directly: DPID IS the daemon
+}
+
+# --- Fix 3 (TERM disposition): the daemon's SIGTERM disposition on this host
+# is exit 143 AFTER a graceful shutdown — the unit template codifies this as a
+# SUCCESS disposition: SuccessExitStatus=143 (scripts/systemd/ensemble-daemon.service:111,
+# comment :48 "SIGTERM-forwarded graceful stop"). The old "exit 0" expectation
+# was aspirational; the happy leg accepts {0,143} and, for 143, REQUIRES the
+# graceful-shutdown log line ("Graceful shutdown complete") as the
+# with-graceful-log half of the contract.
+
 eval "$ROGUE_MIRROR_CMD" > "$SCRATCH_DIR/run.log" 2>&1 &
 DPID=$!
 READYZ=""
+LIVEZ=""
 if [ "$EXPECT_RC" -ne 0 ]; then
   # Refusal legs: the daemon self-exits 78 at the gate (pre-bind, early
   # in boot). Wait for that exit (bounded ~45s) instead of a fixed sleep
@@ -202,26 +233,54 @@ if [ "$EXPECT_RC" -ne 0 ]; then
     if ! kill -0 "$DPID" 2>/dev/null; then ALIVE=0; break; fi
     sleep 0.5
   done
+  DAEMON_PID="$(daemon_descendant_pid "$DPID")"
   if [ "$ALIVE" -eq 1 ]; then
-    echo "[mirror] refusal leg: daemon STILL ALIVE after ~45s (gate never fired) -- TERMing"
-    kill -TERM "$DPID" 2>/dev/null
+    echo "[mirror] refusal leg: daemon STILL ALIVE after ~45s (gate never fired) -- TERMing real pid $DAEMON_PID"
+    kill -TERM "$DAEMON_PID" 2>/dev/null
   fi
   wait "$DPID" 2>/dev/null
   RC=$?
+  # Fix 2 orphan check: the REAL daemon must be gone after the wait/TERM.
+  for _ in $(seq 1 20); do
+    if ! kill -0 "$DAEMON_PID" 2>/dev/null; then DAEMON_GONE=1; break; fi
+    sleep 0.5
+  done
+  if [ "${DAEMON_GONE:-0}" -ne 1 ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
+    echo "[mirror] ORPHAN WARNING: daemon pid $DAEMON_PID still alive after TERM (leg will fail)"
+    FAIL_ORPHAN="daemon_pid=$DAEMON_PID alive_after_TERM"
+  fi
 else
   # wait for boot. Budget 25s: the fixed 8s false-redded the happy leg on
   # a slow scratch-PG boot (2026-11-14 smoke — TERM mid-startup => 143,
   # readyz never reached). The bounded readyz POLL itself is a LATER
   # lane (gap 5) — this is only a budget bump, not the poll.
   sleep 25
-  # probe readyz
-  READYZ="$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/api/health/readyz" 2>/dev/null)"
+  # Fix 1: probe the SHIPPED public health routes — root-level /readyz
+  # (daemon/api.py) and /livez, both in the auth middleware's public path
+  # set (daemon/middleware/auth.py:87). The old /api/health/readyz path is
+  # NOT a public route: 401 no_credentials behind the auth middleware
+  # (first DB-wall-clearing happy run, 2026-11-14).
+  READYZ="$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/readyz" 2>/dev/null)"
   CURL_RC=$?
   if [ "$CURL_RC" -ne 0 ]; then READYZ="no-readyz"; fi
-  # teardown: SIGTERM only
-  kill -TERM "$DPID" 2>/dev/null
+  LIVEZ="$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/livez" 2>/dev/null)"
+  # teardown: SIGTERM only — at the REAL daemon pid (Fix 2), never the
+  # possible eval wrapper and never SIGKILL.
+  DAEMON_PID="$(daemon_descendant_pid "$DPID")"
+  echo "[mirror] TERM target (real daemon pid): $DAEMON_PID"
+  kill -TERM "$DAEMON_PID" 2>/dev/null
   wait "$DPID" 2>/dev/null
   RC=$?
+  # Fix 2 orphan check: the REAL daemon must be gone after the TERM.
+  DAEMON_GONE=0
+  for _ in $(seq 1 20); do
+    if ! kill -0 "$DAEMON_PID" 2>/dev/null; then DAEMON_GONE=1; break; fi
+    sleep 0.5
+  done
+  if [ "$DAEMON_GONE" -ne 1 ]; then
+    echo "[mirror] ORPHAN WARNING: daemon pid $DAEMON_PID still alive after TERM (leg will fail)"
+    FAIL_ORPHAN="daemon_pid=$DAEMON_PID alive_after_TERM"
+  fi
 fi
 # teardown: SIGTERM only — the scratch holder is ours too, never SIGKILL
 if [ -n "$ROGUE_HOLDER_PID" ]; then
@@ -230,6 +289,10 @@ if [ -n "$ROGUE_HOLDER_PID" ]; then
 fi
 echo "[mirror] exit_code=$RC"
 if [ -n "$READYZ" ]; then echo "[mirror] readyz=$READYZ"; fi
+if [ -n "$LIVEZ" ]; then echo "[mirror] livez=$LIVEZ"; fi
+if [ "$LEG" = "happy" ]; then
+  echo "[mirror] graceful_log_lines=$(grep -c 'Graceful shutdown complete' "$SCRATCH_DIR/run.log") (TERM disposition contract: SuccessExitStatus=143 — scripts/systemd/ensemble-daemon.service:111)"
+fi
 echo "[mirror] --- tail of run.log ---"
 tail -30 "$SCRATCH_DIR/run.log"
 # redacted capture: sha256 of log only
@@ -237,8 +300,23 @@ echo "[mirror] log_sha256=$(sha256sum "$SCRATCH_DIR/run.log" | awk '{print $1}')
 
 # --- leg verdict (BLOCKING: any mismatch => exit 1 naming the leg) ---
 FAIL=""
-if [ "$RC" -ne "$EXPECT_RC" ]; then
-  FAIL="exit_code=$RC expected=$EXPECT_RC"
+if [ -n "${FAIL_ORPHAN:-}" ]; then
+  FAIL="$FAIL orphan:$FAIL_ORPHAN"
+fi
+if [ "$LEG" = "happy" ]; then
+  # Fix 3: {0,143} accepted (SuccessExitStatus=143 precedent —
+  # scripts/systemd/ensemble-daemon.service:111); 143 MUST carry the
+  # graceful-shutdown log line.
+  if [ "$RC" -ne 0 ] && [ "$RC" -ne 143 ]; then
+    FAIL="exit_code=$RC expected={0,143}"
+  fi
+  if [ "$RC" -eq 143 ] && ! grep -q "Graceful shutdown complete" "$SCRATCH_DIR/run.log"; then
+    FAIL="$FAIL rc143_without_graceful_shutdown_log"
+  fi
+else
+  if [ "$RC" -ne "$EXPECT_RC" ]; then
+    FAIL="exit_code=$RC expected=$EXPECT_RC"
+  fi
 fi
 if [ -n "$EXPECT_MARKER" ]; then
   if ! grep -q "$EXPECT_MARKER" "$SCRATCH_DIR/run.log"; then
@@ -250,6 +328,9 @@ if [ -n "$EXPECT_MARKER" ]; then
 else
   if [ "$READYZ" != "200" ]; then
     FAIL="$FAIL happy_leg_readyz=$READYZ expected=200"
+  fi
+  if [ "$LIVEZ" != "200" ]; then
+    FAIL="$FAIL happy_leg_livez=$LIVEZ expected=200"
   fi
   if grep -qE "PORT OWNERSHIP REFUSED|DB RESOLUTION REFUSED" "$SCRATCH_DIR/run.log"; then
     FAIL="$FAIL happy_leg_saw_refusal_marker"

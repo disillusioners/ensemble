@@ -93,3 +93,25 @@ Three harness legs + disposable PG cluster (user-space `initdb -A trust -U nea`
 - U-measurement append: `.agents/tester/RESULTS/2026-11-14-rogue-p2-burst-window-U-measurement.md` (commit `0e9152869`)
 - Pins re-aim commit: `e67ca5010` — test(rogue-containment-p2): re-aim AH-4/AH-8/AH-15 pins (F-1/F-2/F-3)
 - Commit: `0e9152869` — test(rogue-containment-p2): AH/LH mutation matrix at cc154c308 (13 RED, 3 findings) + post-A2 fast-refuse U cycle (5.1s) + harness leg evidence
+
+## Leg-3 addendum (follow-up): happy leg FIXED + GREEN on the fixed harness
+
+Harness fixes landed (this commit's harness file):
+1. **Probe path** — probes the shipped public routes root-level `/readyz` + `/livez` (`daemon/api.py`, public per `daemon/middleware/auth.py:87`); the stale `/api/health/readyz` probe (401 behind auth) removed.
+2. **Real-pid TERM** — `daemon_descendant_pid()` resolves the DPID descendant running `-m daemon`; every TERM aims at THAT pid, with a post-TERM orphan check that fails the leg if the daemon survives. Root cause of the 2026-11-14 residue incident (orphaned daemon 335807 holding 18790) was the `eval`+`&` wrapper shell eating the TERM.
+3. **TERM disposition** — happy leg accepts **{0,143}**; 143 requires the `Graceful shutdown complete` log line. Precedent cited in-harness: `SuccessExitStatus=143` (`scripts/systemd/ensemble-daemon.service:111`, comment :48 "SIGTERM-forwarded graceful stop") — the old exit-0 expectation was aspirational.
+
+**Re-run verdict (disposable-cluster shape — fresh `initdb -A trust -U nea` cluster @ 55433, scratch DB `rc_p2_happy_scratch2`, superuser verified):**
+
+```
+[mirror] TERM target (real daemon pid): 347218
+[mirror] exit_code=143
+[mirror] readyz=200
+[mirror] livez=200
+[mirror] graceful_log_lines=1 (TERM disposition contract: SuccessExitStatus=143 — scripts/systemd/ensemble-daemon.service:111)
+[mirror] LEG PASS: happy (exit_code=143 readyz=200)
+```
+
+**Observed disposition: 143** (2/2 consecutive PASS runs; `wait` on the eval wrapper forwards the daemon's graceful-TERM exit). Log sha256 (2nd run): `a47165b1782cd1067be5d113d3e3b49891fa857da852f644c2ce784ed5c13476`.
+
+Teardown confirmation: `pg_ctl stop -m fast` + cluster dir removed; scratch port 18790 released with NO orphan (the Fix-2 orphan check verified the real daemon pid exited); no daemon/MCP strays; live trio identical pre/post; secret scans clean; zero live mutation.
