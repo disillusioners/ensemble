@@ -69,7 +69,17 @@ Example:
 
     "project_future_list": """List the future-improvement wishlist for a project.
 
-Returns entries NEWEST-FIRST (seq descending — the most recent idea first).
+FUTURE IMPROVEMENT IDEAS GO HERE -- not critical notes (lessons/traps, capped at
+200, REFUSES when full) and not project history (what already happened). Use
+this to review what the dev team wants to try or build next.
+
+THE CAP IS EXACTLY 32 ITEMS PER PROJECT. When the wishlist is full, the OLDEST
+idea (lowest seq) is evicted AUTOMATICALLY on the next add, and that add
+response carries an ``"evicted"`` list naming each removed item -- eviction is
+DISCLOSED, never silent (FIFO rotation; this list is the read side of that
+contract).
+
+Returns entries NEWEST-FIRST (seq descending -- the most recent idea first).
 Reads are uncapped by design: if ``total`` ever exceeds 32, the table has
 drifted (direct DB writes) and self-heals on the next add.
 
@@ -80,17 +90,21 @@ Args:
 
 Returns:
     Dict with entries list, total count, limit, offset, and ``cap`` (always
-    32 — the per-project cap).""",
+    32 -- the per-project cap).""",
 
     "project_future_remove": """Remove (retire) a future-improvement idea by ID.
 
-Retiring an obsolete idea is a NORMAL operation — no ownership requirement;
-any granted agent may remove a wish that has been fulfilled or abandoned
-(an idea's author and its retiree are usually different agents). Removing
-the newest row frees its seq: the next add reuses it, so identify entries
-by ``id``, never by ``seq``.
+Retiring an obsolete idea is a NORMAL operation -- normal maintenance of the
+wishlist -- no ownership requirement; any granted agent may remove a wish that
+has been fulfilled or abandoned (an idea's author and its retiree are usually
+different agents).
 
-Wishlist items do NOT feed the Blueprint pending queue — they are ideas,
+THE CAP IS EXACTLY 32 ITEMS PER PROJECT, and REMOVAL does NOT evict or shift
+anything: it only retires the named entry and frees its seq. Removing the
+newest row lets the next add reuse its seq, so identify entries by ``id``,
+never by ``seq``.
+
+Wishlist items do NOT feed the Blueprint pending queue -- they are ideas,
 not structural project events.
 
 Args:
