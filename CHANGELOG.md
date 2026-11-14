@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.9] — 2026-11-14
+
+### Changed — supersede re-stage: release-record corrections (no behavior change; zero tool-code drift)
+
+- **Record fixes.** The v0.30.8 CHANGELOG artifact/disclosure corrections above (regenerated 64→65; `doc_maintenance` retained, not stale).
+- **Comment citations.** Two comment-only D-13-amendment citations added at `daemon/tools/_tool_registry.py:1665` and `daemon/tools/instance.py:6830` (holders now {`ari`, `maintenancer`}; safety machinery unchanged).
+- **Supersede/disposal.** v0.30.8 was staged-not-promoted and is SUPERSEDED by v0.30.9: its staged release dir is disposed (sidecars preserved out-of-tree), its LOCAL tag is disposed, its REMOTE tag remains as audit trail; this tag is the stage vehicle.
+- **Standing matrix.** Behavior verified clean by reviewer+tester at the 0.30.8 tree; net-new deterministic reds 0; pre-existing reds disclosed (anomaly ×3 + `test_nest_report_read_registration.py:284` devops-tail) — leader sweep, untouched.
+
 ## [0.30.8] — 2026-11-14
 
 ### Added — Ari nest-ops fleet grant: instance_read + instance_ops (`feature/ari-instance-stop-grant`, Emperor directive 2026-11-14; zero migrations)
@@ -15,9 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Gates.** The layer-3 authorized-agent frozensets in `daemon/tools/instance_{read,ops}.py` widened {maintenancer} → {`ari`, `maintenancer`} (D-13 single-owner amended by Emperor clarification 2026-11-14); audit ledger, protected-target two-tier policy, provenance gates, shared terminate budget (3 acts/24h) UNCHANGED and bind every holder; privileged category set stays 22 — no new category, tool or migration.
 - **Pins.** Re-pointed same-PR: board_registration `ari` trailing tail, anomaly grant-pin constants + source literal, memoir tail faces, instance_ops registration allow-lists + behaviour positive leg.
 - **Docs.** `ari` tools_note fleet-surfaces section + rule.md fleet-surgery exception; prompt-artifact baseline re-stamped (217 rows unchanged); `agents/ari/rule.md` seal row re-pinned.
-- **Artifact.** `tool-categories.json` UNCHANGED (registry-only, no per-agent data; grant adds no category — generator byte-identity proven at integration).
+- **Artifact.** `tool-categories.json` REGENERATED with the house generator (never hand-edited; generator byte-identity proven): `project_future` added, count 64→65; the GRANT itself adds no category or per-agent data — the file delta is the pre-existing F-1 pair completion, not the grant.
 - **Stage.** Staged-not-promoted; the Emperor's 3-factor nonce ceremony owns the flip; grant takes effect only at promote.
-- **Disclosures.** Pre-existing on `latest`, NOT introduced by this lane: (1) tool-category artifact drift — the committed artifact carried a stale `doc_maintenance` entry and lacked `project_future` vs the tool registry — REGENERATED in this release with the house generator (never hand-edited; count 64→64; VOCABULARY_VERSION stays 10); (2) three pre-existing reds in `tests/unit/test_anomaly_report_grant_pins.py` (`test_the_grant_is_the_last_element`, `test_the_three_phase_3_touched_agents_carry_both_entries`, `test_the_seal_map_is_zero_stale` — the last from a stale `agents/leader/rule.md` seal row left by the prior lane) — reproduced red at base, untouched here, routed for the leader's sweep.
+- **Disclosures.** Pre-existing on `latest`, NOT introduced by this lane: (1) tool-category artifact drift — the committed artifact lacked `project_future` vs the tool registry; `doc_maintenance` is genuinely registered (`daemon/tools/comment_edit.py:536`, `daemon/tools/doc_commit.py:88`, `daemon/tools/doc_write.py:267`) and was RETAINED by the regeneration — REGENERATED in this release with the house generator (never hand-edited; count 64→65; VOCABULARY_VERSION stays 10); (2) three pre-existing reds in `tests/unit/test_anomaly_report_grant_pins.py` (`test_the_grant_is_the_last_element`, `test_the_three_phase_3_touched_agents_carry_both_entries`, `test_the_seal_map_is_zero_stale` — the last from a stale `agents/leader/rule.md` seal row left by the prior lane) — reproduced red at base, untouched here, routed for the leader's sweep.
 
 ## [0.30.7] — 2026-11-14
 
