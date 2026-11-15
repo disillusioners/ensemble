@@ -5729,10 +5729,10 @@ status=InstanceStatus.IDLE.value,
             except IntegrityError as exc:
                 if room_join is not None:
                     from daemon.repositories.room.repository import (
-                        RoomRepository,
+                        raise_typed_member_integrity,
                     )
 
-                    RoomRepository._raise_typed_integrity(
+                    raise_typed_member_integrity(
                         exc, room_join.room_id, room_join.base_name
                     )
                 raise

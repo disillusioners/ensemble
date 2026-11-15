@@ -54,7 +54,7 @@ from daemon.repositories.room import (
     validate_room_join,
 )
 from daemon.repositories.room.models import ChatRoom, ChatRoomMember
-from daemon.repositories.room.repository import _member_payload
+from daemon.repositories.room.repository import member_payload
 from tests.helpers.room_harness import (
     count_rows,
     join_member,

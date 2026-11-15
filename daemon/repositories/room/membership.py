@@ -297,9 +297,9 @@ def validate_room_join(
                 f"(ROOM_MAX_ACTIVE_ROOMS_PER_TREE="
                 f"{ROOM_MAX_ACTIVE_ROOMS_PER_TREE})"
             )
-        from daemon.repositories.room.repository import _room_payload
+        from daemon.repositories.room.repository import room_payload
 
-        return _room_payload(room)
+        return room_payload(room)
 
 
 # ── In-transaction member-row construction (the registry mechanics) ───────
@@ -428,7 +428,7 @@ def leave_room(
     from daemon.repositories.room.repository import (
         MemberNotFoundError,
         RoomNotFoundError,
-        _member_payload,
+        member_payload,
     )
 
     now = datetime.now(timezone.utc)
@@ -449,7 +449,7 @@ def leave_room(
                 f"room={room_id}: the OWNER row cannot leave (retired "
                 f"only with the room, D2)"
             )
-        payload = _member_payload(member)
+        payload = member_payload(member)
         already_left = member.state == RoomMemberState.LEFT.value
         if not already_left:
             member.state = RoomMemberState.LEFT.value

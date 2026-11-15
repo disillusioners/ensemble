@@ -172,6 +172,39 @@ class RoomSeqConflictError(RoomError):
     is the DB-level backstop, never expected, always surfaced."""
 
 
+def raise_typed_member_integrity(
+    exc: IntegrityError, room_id: str, member_name: str
+) -> None:
+    """Classify a membership-write IntegrityError → typed failure.
+
+    Module-level (public) so cross-module callers — the lifecycle's
+    spawn commit — classify without reaching into the repository
+    class. The staticmethod ``RoomRepository._raise_typed_integrity``
+    remains as a thin delegating wrapper over this function.
+    """
+    # Constraint FINGERPRINTS ONLY: the named UNIQUE constraint
+    # (PG / name-reporting drivers) or the other driver's
+    # dotted-pair column message. A bare ``member_name`` substring
+    # over-matches — a composite-PK duplicate or any other
+    # violation must fall through to the base RoomError, never the
+    # name-collision type.
+    msg = str(exc).lower()
+    if (
+        "uq_chatroom_members_room_member_name" in msg
+        or (
+            "chatroom_members.room_id, chatroom_members.member_name"
+            in msg
+        )
+    ):
+        raise MemberNameCollisionError(
+            f"member_name={member_name!r} already registered in "
+            f"room={room_id} (UNIQUE(room_id, member_name) backstop)"
+        ) from exc
+    raise RoomError(
+        f"room write integrity failure for room={room_id}: {exc}"
+    ) from exc
+
+
 # ── The single-statement seq-assigning append (module-level, built ONCE) ──
 #
 # ``INSERT ... SELECT COALESCE(MAX(seq), 0) + 1 ...`` so no read-max
@@ -215,7 +248,7 @@ _APPEND_MESSAGE_STMT = sql_text(
 # ── Detached payload shapes ────────────────────────────────────────────────
 
 
-def _room_payload(room: ChatRoom) -> dict[str, Any]:
+def room_payload(room: ChatRoom) -> dict[str, Any]:
     return {
         "room_id": room.room_id,
         "name": room.name,
@@ -230,7 +263,7 @@ def _room_payload(room: ChatRoom) -> dict[str, Any]:
     }
 
 
-def _member_payload(member: ChatRoomMember) -> dict[str, Any]:
+def member_payload(member: ChatRoomMember) -> dict[str, Any]:
     return {
         "room_id": member.room_id,
         "instance_id": member.instance_id,
@@ -331,8 +364,8 @@ class RoomRepository:
         # ``commit()`` the ORM instances expire and reading them
         # detached would raise DetachedInstanceError (the board
         # service's expunge discipline, adapted to snapshot form).
-        room_payload = _room_payload(room)
-        member_payload = _member_payload(owner_row)
+        room_snap = room_payload(room)
+        member_snap = member_payload(owner_row)
         try:
             with Session(self._engine) as session:
                 session.add(room)
@@ -341,35 +374,18 @@ class RoomRepository:
         except IntegrityError as exc:
             self._raise_typed_integrity(exc, rid, owner_member_name)
         return {
-            "room": room_payload,
-            "owner_member": member_payload,
+            "room": room_snap,
+            "owner_member": member_snap,
         }
 
     @staticmethod
     def _raise_typed_integrity(
         exc: IntegrityError, room_id: str, member_name: str
     ) -> None:
-        # Constraint FINGERPRINTS ONLY: the named UNIQUE constraint
-        # (PG / name-reporting drivers) or the other driver's
-        # dotted-pair column message. A bare ``member_name`` substring
-        # over-matches — a composite-PK duplicate or any other
-        # violation must fall through to the base RoomError, never the
-        # name-collision type.
-        msg = str(exc).lower()
-        if (
-            "uq_chatroom_members_room_member_name" in msg
-            or (
-                "chatroom_members.room_id, chatroom_members.member_name"
-                in msg
-            )
-        ):
-            raise MemberNameCollisionError(
-                f"member_name={member_name!r} already registered in "
-                f"room={room_id} (UNIQUE(room_id, member_name) backstop)"
-            ) from exc
-        raise RoomError(
-            f"room write integrity failure for room={room_id}: {exc}"
-        ) from exc
+        # Thin delegating wrapper over the module-level
+        # ``raise_typed_member_integrity`` (kept: tests/other callers
+        # reference the class attribute).
+        raise_typed_member_integrity(exc, room_id, member_name)
 
     @staticmethod
     def _raise_typed_append_integrity(
@@ -399,14 +415,14 @@ class RoomRepository:
         """Room payload or None — existence WITHOUT any ACL predicate."""
         with Session(self._engine) as session:
             room = session.get(ChatRoom, room_id)
-            return _room_payload(room) if room is not None else None
+            return room_payload(room) if room is not None else None
 
     def get_member(
         self, room_id: str, instance_id: str
     ) -> dict[str, Any] | None:
         with Session(self._engine) as session:
             row = session.get(ChatRoomMember, (room_id, instance_id))
-            return _member_payload(row) if row is not None else None
+            return member_payload(row) if row is not None else None
 
     def list_members(
         self,
@@ -425,7 +441,7 @@ class RoomRepository:
         stmt = stmt.order_by(ChatRoomMember.joined_at)
         with Session(self._engine) as session:
             return [
-                _member_payload(m) for m in session.exec(stmt).all()
+                member_payload(m) for m in session.exec(stmt).all()
             ]
 
     # ── the fail-closed read predicate (d) ─────────────────────────────
@@ -477,10 +493,10 @@ class RoomRepository:
                 )
             member = session.get(ChatRoomMember, (room_id, caller_instance_id))
             if member is not None and member.state == RoomMemberState.ACTIVE.value:
-                return _room_payload(room)
+                return room_payload(room)
             chain = self._owner_ancestry_chain(session, room)
             if caller_instance_id in chain:
-                return _room_payload(room)
+                return room_payload(room)
             raise RoomNotFoundError(
                 f"room={room_id} not found for caller={caller_instance_id} "
                 f"(fail-closed: not an active member and not in the "
@@ -541,7 +557,7 @@ class RoomRepository:
                     role=role,
                     agent_id=agent_id,
                 )
-                payload = _member_payload(row)
+                payload = member_payload(row)
                 session.commit()
         except IntegrityError as exc:
             self._raise_typed_integrity(exc, room_id, base_name)
