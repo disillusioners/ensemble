@@ -510,6 +510,110 @@ assert_contains "PASS-direction gate detail: version identity ok" "version=ident
 # serving launcher cleanup (it self-exits after 4 requests; belt):
 [ -f "$INSTALL/launcher.pid" ] && kill "$(cat "$INSTALL/launcher.pid")" 2>/dev/null || true
 
+section "4d. MAJOR #1/#2 (review round 2) — hand-back failure capture END-TO-END"
+# The PRODUCTION failure path, scripted end-to-end: restart.sh's hand-back
+# arm (restart_via_launcher) consumes the resolver via `$()` — a VARIABLE
+# stash dies in that subshell (MAJOR #1). This leg drives the REAL
+# restart.sh through a launchd hand-back FAILURE (stub launchctl: print
+# fails "Could not find service"; HOME has no label-verbatim plist; no
+# pre-stop stash) and asserts the STUBBED LAUNCHCTL STDERR TEXT lands in
+# the JOURNAL HALT DETAIL via the out-of-band channel — the exact gap the
+# v0.30.5/v0.30.9 halts died of ("hand-back error: none captured").
+# Darwin-fenced: the launchd arm requires _supervision_host_allows_launchd;
+# non-Darwin hosts take the unit/script arm and cannot produce this shape.
+HB_STUB="$(mktemp -d /tmp/ens-hb-stub.XXXXXX)"
+# NOTE: HOME is NOT redirected for this leg — restart.sh resolves the live
+# install dir off HOME (a swapped HOME re-derived INSTALL_DIR and refused
+# "no resolvable PORT"). The resolver's label-verbatim rung-3 fails
+# naturally under the sim HOME (no LaunchAgents plist there); the stub's
+# printed path (its OWN plist fixture) is removed by the bootout, killing
+# rungs 1+2 together.
+# STATEFUL launchctl emulator (the v0.30.5 incident shape, scripted):
+# the job IS registered pre-stop (print answers the fixture launcher dump —
+# this is what lets the supervision PREFLIGHT pass hermetically, so the leg
+# reaches the hand-back); `bootout` de-registers AND removes the plist —
+# after the stop phase every resolver rung fails (live print → "Could not
+# find service"; the stashed path points at the REMOVED file) — the
+# hand-back resolver fails exactly as it did on 2026-11-14, and the
+# diagnosis must reach the halt detail out-of-band.
+HB_STATE="$HB_STUB/registered"
+HB_PLIST="$HB_STUB/com.ensemble.sim-hb.plist"
+printf '<?xml version="1.0"?><plist><dict/></plist>\n' > "$HB_PLIST"
+printf 'registered\n' > "$HB_STATE"
+cat > "$HB_STUB/launchctl" <<HBSTUB
+#!/bin/bash
+HB_STATE="$HB_STATE"
+HB_PLIST="$HB_PLIST"
+HB_INSTALL="$INSTALL"
+HB_LABEL="com.ensemble.sim-hb"
+cmd="\${1:-}"
+case "\$cmd" in
+    list)
+        [ -f "\$HB_STATE" ] && printf '%s\t-\t%s\n' "0" "\$HB_LABEL"
+        exit 0 ;;
+    print)
+        if [ -f "\$HB_STATE" ]; then
+            printf 'program = /bin/bash\n'
+            printf 'program arguments = {\n    /bin/bash\n    %s/launcher.sh\n}\n' "\$HB_INSTALL"
+            printf 'path = %s\n' "\$HB_PLIST"
+            printf 'pid = 4294967295\n'
+            exit 0
+        fi
+        echo "Could not find service \"gui/501/\$HB_LABEL\" in GUI domain for uid 501" >&2
+        exit 113 ;;
+    bootout)
+        rm -f "\$HB_STATE" "\$HB_PLIST"
+        exit 0 ;;
+    bootstrap)
+        echo "5454: Bootstrap failed: 57: Operation not permitted" >&2
+        exit 5 ;;
+    *) exit 0 ;;
+esac
+HBSTUB
+chmod +x "$HB_STUB/launchctl"
+if [ "$(uname -s)" = "Darwin" ]; then
+    # fresh journal + a THIRD arm (4c's op is closed); re-own the lock to
+    # this shell (the arm's owner pid is long dead — the splice fence
+    # refuses dead-owner writes).
+    INSTALL_DIR="$INSTALL" HOME="$FAKE_HOME" "$PY" - <<'RESETPY2'
+import os
+from pathlib import Path
+import daemon.tools.upgrade_journal as uj
+inst = Path(os.environ["INSTALL_DIR"])
+uj.journal_write(inst, dict(uj.JOURNAL_EMPTY))
+uj.ensure_extensions(inst)
+RESETPY2
+    ARM3_OUT="$(run_py)" || { printf '%s\n' "$ARM3_OUT"; _fail "hand-back leg arm"; }
+    RUN_ID3="$(printf '%s\n' "$ARM3_OUT" | tail -n 1 | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["run_id"])' 2>/dev/null || true)"
+    [ -n "$RUN_ID3" ] && _pass "hand-back leg arm run_id: $RUN_ID3" || _fail "hand-back leg run_id"
+    if [ -d "$INSTALL/releases/rollback.lock.d" ]; then printf '%s\n' "$$" > "$INSTALL/releases/rollback.lock.d/owner"; fi
+    RC3=0
+    ENSEMBLE_RESTART_LIVE=1 INSTALL_DIR="$INSTALL" PORT="$SIM_PORT" \
+    LIVEZ_BUDGET_S=5 READYZ_BUDGET_S=5 HOME="$FAKE_HOME" \
+    SUPERVISION_STATE=LAUNCHD_MANAGED SUPERVISION_MODE=launchd \
+    SUPERVISION_UNIT=com.ensemble.sim-hb SUPERVISION_LAUNCHD_PLIST_PATH="" \
+    LAUNCHCTL_BIN=launchctl PATH="$HB_STUB:$PATH" \
+        bash "$INSTALL/scripts/upgrade/restart.sh" live --run-id "$RUN_ID3" --grace-s 1 \
+        > "$INSTALL/restart-run3.log" 2>&1 || RC3=$?
+    LOG3="$(cat "$INSTALL/restart-run3.log" 2>/dev/null)"
+    J3="$(cat "$INSTALL/releases/state.json" 2>/dev/null || echo '{}')"
+    [ "$RC3" = "1" ] && _pass "hand-back failure halts restart.sh (rc 1, txn left open)" \
+                     || _fail "hand-back failure rc=$RC3 (want 1)"
+    assert_contains "hand-back WARN surfaces the capture (captured: field)" "captured: plist resolution failed" "$LOG3"
+    assert_contains "hand-back WARN carries the STUBBED launchctl stderr text" "Could not find service" "$LOG3"
+    assert_contains "JOURNAL HALT DETAIL carries the stub stderr (end-to-end, out-of-band)" "hand-back error: plist resolution failed" "$J3"
+    assert_contains "JOURNAL HALT DETAIL carries the stubbed stderr text" "Could not find service" "$J3"
+    # the MAJOR-#1 degradation ("hand-back error: none captured") must be GONE:
+    case "$J3" in
+        *"none captured"*) _fail "halt detail says none captured — the subshell loss is BACK" ;;
+        *) _pass "halt detail says none captured — ABSENT (MAJOR #1 fixed end-to-end)" ;;
+    esac
+    rm -rf "$HB_STUB"
+else
+    _pass "4d skipped: launchd arm is Darwin-only (host=$(uname -s))"
+    rm -rf "$HB_STUB"
+fi
+
 section "5. wake + audit settle shape"
 assert_contains "pending wake armed for the run" '"kind":"restart"' "$J"
 

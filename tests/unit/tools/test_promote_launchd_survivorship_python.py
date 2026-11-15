@@ -348,8 +348,23 @@ def main() -> None:  # noqa: C901 — a linear pin script, mirrors the shell pac
     check("6f: _supervision_stop_launchd escalation filters self/group (Fix #5)",
           'for pid in $(_pipeline_self_excluded "$(_supervision_owned_pids '
           '2>/dev/null)")' in lib_src)
-    check("6g: stop-ensemble.sh _stop_pids applies the self-exclusion guard",
-          "_stop_self_excluded_in_tree" in stop_src and "$SELF_PID" in stop_src)
+    # 6g REWRITTEN (MAJOR #3, review round 2): the OLD pin required the
+    # _stop_self_excluded_in_tree ancestor walk — the walk that excluded
+    # the DAEMON TARGET itself when the sweep ran in-tree (reproduced
+    # live; the daemon was classified, filtered, and "is stopped" was
+    # declared while it lived). The shipped shape is executor-identity
+    # ONLY ($$/$PPID via SELF_PID/PPID) + the never-exclude-the-TARGET
+    # guard + the all-filtered loud refusal — the walk must be GONE.
+    check("6g: stop-ensemble.sh _stop_pids is executor-identity-only (the daemon-dropping ancestor walk is GONE)",
+          "_stop_self_excluded_in_tree() {" not in stop_src
+          and "$SELF_PID" in stop_src
+          and "never-exclude guard" in stop_src
+          and "REFUSAL: every stop candidate was filtered" in stop_src)
+    check("6g-2: ALL THREE _stop_pids call sites honor the all-filtered rc (MAJOR #3)",
+          "if ! _stop_pids $owned_launchers" in stop_src
+          and "if ! _stop_pids $STRAGGLERS" in stop_src
+          and "_stop_pids $pids" in stop_src and "exit 1" in stop_src
+          and "STOP_SWEEP_REFUSED" in stop_src)
     check("6h: the ancestor walk is depth-bounded",
           re.search(r"depth.*-lt \d+", lib_src) is not None)
 

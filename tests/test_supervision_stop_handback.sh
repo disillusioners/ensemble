@@ -2069,29 +2069,57 @@ assert_contains "N1 hand-back halts fail-safe on the bootstrap failure" "rvl-rc=
 assert_contains "N1 the stub launchctl stderr is CAPTURED" "Bootstrap failed: 57: Operation not permitted" "$N1_OUT"
 assert_contains "N1 the WARN surfaces the capture" "captured: launchctl bootstrap" "$N1_OUT"
 
-# N2 — the resolver-failure capture: with the host plist hidden and NO
-# stash, the resolver fails and its `launchctl print` stderr ("Could not
-# find service") lands in HANDBACK_LAST_ERROR (the v0.30.5 halt's missing
-# diagnosis).
+# N2 — MAJOR #1/#2 (review round 2): the resolver is consumed via `$()` at
+# the PRODUCTION hand-back site (restart_via_launcher — lib.sh restart_via_
+# launcher's launchd arm), and a VARIABLE stash dies inside that command
+# substitution: the pre-review N2 invoked the resolver PLAINLY, so the
+# 93P/0F green was invocation-shape vacuous for this seam (the plain call
+# let the variable survive; production loses it). Rewritten against the
+# production shape: restart_via_launcher itself, all three resolver rungs
+# failing (stub `launchctl print` → "Could not find service"; host plist
+# hidden; no pre-stop stash). Asserts (a) the fail-safe halt (rc 1) AND
+# (b) the stub stderr TEXT propagating to the halt-destined WARN through
+# the OUT-OF-BAND channel ($$-keyed HANDBACK_ERROR_FILE — subshell-proof;
+# _handback_last_error_text is the reader).
 mv "$N_FIX/home/Library/LaunchAgents/${N_LABEL}.plist" "$N_FIX/home/Library/LaunchAgents/${N_LABEL}.plist.hidden"
 N2_OUT="$(PATH="$N_FIX:$PATH" HOME="$N_FIX/home" INSTALL_DIR="$N_INSTALL" bash -c '
     . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
-    _supervision_launchd_plist_path "'"$N_LABEL"'"
-    echo "resolve-rc=$?"
-    echo "HBE=[${HANDBACK_LAST_ERROR:-<empty>}]"
+    SUPERVISION_STATE=LAUNCHD_MANAGED; SUPERVISION_MODE=launchd
+    SUPERVISION_UNIT="'"$N_LABEL"'"; SUPERVISION_PRESTOP_MAINPID=4321
+    SUPERVISION_LAUNCHD_PLIST_PATH=""
+    restart_via_launcher
+    echo "rvl-rc=$?"
 ' 2>&1)"
-assert_contains "N2 resolver fails closed (no fabricated path)" "resolve-rc=1" "$N2_OUT"
-assert_contains "N2 the print stderr is captured (was destroyed pre-Fix4)" "Could not find service" "$N2_OUT"
+assert_contains "N2 hand-back fails fail-safe via the PRODUCTION \$() consumption site" "rvl-rc=1" "$N2_OUT"
+assert_contains "N2 the halt WARN carries the stub stderr (out-of-band, subshell-proof)" "Could not find service" "$N2_OUT"
+assert_contains "N2 the capture rides the WARN captured: field" "captured: plist resolution failed" "$N2_OUT"
 mv "$N_FIX/home/Library/LaunchAgents/${N_LABEL}.plist.hidden" "$N_FIX/home/Library/LaunchAgents/${N_LABEL}.plist"
+# N2b — success hygiene: now that the resolver SUCCEEDS again (plist
+# restored), the out-of-band channel must be CLEAR — N2's failure seeded
+# it, and a successful resolution must clear it (a stale failure diagnosis
+# must never ride a later halt in the same run).
+N2B_OUT="$(PATH="$N_FIX:$PATH" HOME="$N_FIX/home" INSTALL_DIR="$N_INSTALL" bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    SUPERVISION_LAUNCHD_PLIST_PATH=""
+    _p="$(_supervision_launchd_plist_path "'"$N_LABEL"'")"
+    echo "resolved=[${_p:+yes}]"
+    echo "ACCESSOR=[$(_handback_last_error_text)]"
+' 2>&1)"
+assert_contains "N2b the resolver resolves the restored plist" "resolved=[yes]" "$N2B_OUT"
+assert_contains "N2b the out-of-band channel is CLEAR after a successful resolution" "ACCESSOR=[]" "$N2B_OUT"
 
 # N3 — the three halt templates append the capture to the journal halt
 # detail (promote/restart/rollback; the LIVE halt leg through restart.sh
 # is the restart-sim pack's §N leg — this pins the template wiring).
 for N_SCRIPT in promote.sh restart.sh rollback.sh; do
-    if grep -q 'hand-back error: ${HANDBACK_LAST_ERROR:-none captured}' "$UPGRADE_DIR/$N_SCRIPT"; then
-        _pass "N3 $N_SCRIPT halt template carries HANDBACK_LAST_ERROR"
+    # MAJOR #1 (review round 2): the templates read through the
+    # _handback_last_error_text ACCESSOR (HB_ERR) — the bare
+    # ${HANDBACK_LAST_ERROR:-…} read was the subshell-loss bug shape.
+    if grep -q 'hand-back error: ${HB_ERR:-none captured}' "$UPGRADE_DIR/$N_SCRIPT" \
+       && grep -q 'HB_ERR="$(_handback_last_error_text)"' "$UPGRADE_DIR/$N_SCRIPT"; then
+        _pass "N3 $N_SCRIPT halt template reads the accessor (HB_ERR — subshell-proof)"
     else
-        _fail "N3 $N_SCRIPT halt template carries HANDBACK_LAST_ERROR" "hand-back error: \${HANDBACK_LAST_ERROR:-none captured}" "absent"
+        _fail "N3 $N_SCRIPT halt template reads the accessor (HB_ERR — subshell-proof)" "hand-back error: \${HB_ERR:-none captured} + the accessor read" "absent"
     fi
 done
 

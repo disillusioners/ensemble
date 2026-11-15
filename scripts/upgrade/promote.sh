@@ -676,10 +676,13 @@ lock_heartbeat
 if ! restart_via_launcher; then
     _warn "unit hand-back FAILED — halting promote (txn left open for sweep recovery; NO nohup fallback, never a false success)"
     # Fix #4 (ENSEMBLE-32 repair lane; incident §5.2): the halt detail
-    # carries the CAPTURED hand-back error (HANDBACK_LAST_ERROR — the
-    # launchctl bootstrap/resolver diagnosis the v0.30.5 halt never
-    # recorded; today's failure was unreproducible from the artifacts).
-    journal_history_append halt "promote aborted post-flip: unit hand-back failed for $VERSION — halt-for-human, txn left open for sweep recovery (declared=${SUPERVISION_MODE:-?} verified=${SUPERVISION_STATE:-?} unit=${SUPERVISION_UNIT:-?}; no nohup fallback — Amendment #1; hand-back error: ${HANDBACK_LAST_ERROR:-none captured})" \
+    # carries the CAPTURED hand-back error — read through
+    # _handback_last_error_text (MAJOR #1, review round 2: the resolver
+    # branch's diagnosis lives in the $$-keyed HANDBACK_ERROR_FILE because
+    # the resolver runs inside the caller's $() — a bare variable read
+    # degraded to "none captured" on the exact incident path).
+    HB_ERR="$(_handback_last_error_text)"
+    journal_history_append halt "promote aborted post-flip: unit hand-back failed for $VERSION — halt-for-human, txn left open for sweep recovery (declared=${SUPERVISION_MODE:-?} verified=${SUPERVISION_STATE:-?} unit=${SUPERVISION_UNIT:-?}; no nohup fallback — Amendment #1; hand-back error: ${HB_ERR:-none captured})" \
                               || true   # history is advisory; the open txn IS the B4 contract
     exit 1
 fi

@@ -572,45 +572,62 @@ _report_port() {
 # executor's self-detach (lib.sh _executor_detach_self) — the pinned-mirror
 # discipline: stop-ensemble.sh is a leaf (sourcing lib.sh would run its stop
 # machinery), so the exclusion shape is mirrored here rather than shared.
-# _stop_self_excluded_in_tree: 0 IFF this sweep sits in an install's lineage.
-_stop_self_excluded_in_tree() {
-    [ -n "${INSTALL_DIR:-}" ] || return 1
-    local esc phys pid args comm cwd depth=0
-    esc="$(printf '%s' "$INSTALL_DIR" | sed -e 's/[.[\*^$()+?{|]/\\&/g')"
-    phys="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd || printf '%s' "$INSTALL_DIR")"
-    pid="$PPID"
-    while [ -n "$pid" ] && [ "$pid" != "0" ] && [ "$pid" != "1" ] && [ "$depth" -lt 16 ]; do
-        args="$(ps -o args= -p "$pid" 2>/dev/null)"
-        comm="$(ps -o comm= -p "$pid" 2>/dev/null)"
-        case "$args" in
-            *"$INSTALL_DIR/launcher.sh"*|*"$INSTALL_DIR/ensemble-prod"*|*"$phys/launcher.sh"*|*"$phys/ensemble-prod"*) return 0 ;;
-        esac
-        case "$comm $args" in
-            *ensemble-prod*|*launcher.sh*)
-                cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
-                if [ "$cwd" = "$INSTALL_DIR" ] || [ "$cwd" = "$phys" ]; then return 0; fi
-                ;;
-        esac
-        pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
-        depth=$((depth + 1))
-    done
-    return 1
-}
-
+# _stop_pids — MAJOR #3 (review round 2, ENSEMBLE-32): EXECUTOR-IDENTITY-ONLY
+# self-exclusion, daemon-never-excluded. The previous shape excluded $$,
+# $PPID AND — in-tree — $PPID's PARENT (via the removed
+# _stop_self_excluded_in_tree ancestor walk). When the sweep runs IN-TREE
+# the daemon itself is the executor's ancestor, so the walk excluded the
+# TARGET: the daemon was classified, handed to this function, filtered out,
+# nothing signalled — and the caller declared the install stopped while the
+# daemon lived (reproduced live with DRY_RUN=1: sweep as the daemon's
+# grandchild, "self-exclusion: pid <daemon> is this sweep or its promote
+# executor", "done — ... is stopped", daemon alive). The 16d TERM-pin
+# regression (a blanket own-pgid filter dropped the daemon the same way)
+# is the same class: any group- or ancestor-based identity provably matches
+# the target in-tree. Shipped shape:
+#   1. identity candidates: $$ and $PPID ONLY (this sweep + the immediate
+#      executor shell — invocation artifacts, never the daemon by intent);
+#   2. HARD GUARD (never-exclude-the-daemon): a pid that is a TARGET of
+#      this sweep ($@) is NEVER excludable — the daemon must die even when
+#      it is literally $PPID (a daemon-spawned sweep);
+#   3. NO ancestor walk, NO own-pgid filter (see above — both provably
+#      match the target in-tree); the ownership scan is the only
+#      candidate source.
+# ALL-FILTERED REFUSAL: numeric candidates existed but every one was
+# filtered => return 1 — the CALLERS honor this rc and refuse loudly
+# instead of declaring a false "stopped".
 _stop_pids() {
-    # $@ = pids — filtered through the self-exclusion guard FIRST (see the
-    # Fix #5 block above): $$, $PPID and — only in-tree — $PPID's parent.
-    local filtered="" _fpid _excluded
-    _excluded="$$ $PPID"
-    if _stop_self_excluded_in_tree; then
-        _excluded="$_excluded $(ps -o ppid= -p "$PPID" 2>/dev/null | tr -d '[:space:]')"
+    local filtered="" _fpid _c _excl_id _is_target _numeric=0
+    for _fpid in "$@"; do
+        case "$_fpid" in ''|*[!0-9]*) continue ;; esac
+        _numeric=$((_numeric + 1))
+    done
+    if [ "$_numeric" -eq 0 ]; then
+        return 0   # nothing numeric was ever handed in: peaceful no-op
     fi
+    local _excluded="$$ $PPID"
+    local _excluded_new=""
+    for _excl_id in $_excluded; do
+        _is_target=0
+        for _c in "$@"; do
+            case "$_c" in ''|*[!0-9]*) continue ;; esac
+            [ "$_c" = "$_excl_id" ] || continue
+            _is_target=1
+            break
+        done
+        if [ "$_is_target" = "1" ]; then
+            _log "never-exclude guard: pid $_excl_id is BOTH executor-identity and a TARGET of this sweep — the target wins (it will be signalled; MAJOR #3)"
+        else
+            _excluded_new="$_excluded_new $_excl_id"
+        fi
+    done
+    _excluded="$_excluded_new"
     for _fpid in "$@"; do
         case "$_fpid" in
             ''|*[!0-9]*) continue ;;
         esac
         case " $_excluded " in *" $_fpid "*)
-            _log "self-exclusion: pid $_fpid is this sweep or its promote executor — never a signal target (Fix #5, incident 2026-11-14 §7)"
+            _log "self-exclusion: pid $_fpid is this sweep process or its immediate executor shell — never a signal target (MAJOR #3: executor identity only; the daemon target is NEVER excludable)"
             continue ;;
         esac
         filtered="$filtered $_fpid"
@@ -618,7 +635,8 @@ _stop_pids() {
     # shellcheck disable=SC2086  # intentional word-split of the filtered list
     set -- $filtered
     if [ "$#" -eq 0 ]; then
-        return 0
+        _log "REFUSAL: every stop candidate was filtered as executor-identity and NONE remain — the stop is NOT confirmed (MAJOR #3: all-filtered is a loud failure, never a silent success)"
+        return 1
     fi
     if [ "$DRY_RUN" = "1" ]; then
         local p
@@ -674,8 +692,12 @@ if [ "${STOP_BY_PORT:-0}" = "1" ] && [ -n "$REPORT_PORT" ]; then
     echo "stop-ensemble: ⚠️  listeners on dev+prod coexistence hosts. You opted in." >&2
     pids="$(lsof -ti:"$REPORT_PORT" 2>/dev/null)"
     if [ -n "$pids" ]; then
-        _stop_pids $pids
-        _log "port-based stop done (opt-in)"
+        if _stop_pids $pids; then
+            _log "port-based stop done (opt-in)"
+        else
+            _log "port-based stop REFUSED: every pid on :$REPORT_PORT filtered as executor-identity — stop NOT confirmed (MAJOR #3)"
+            exit 1
+        fi
     else
         _log "nothing on port $REPORT_PORT"
     fi
@@ -814,7 +836,14 @@ for pid in $raw; do
     case " $seen " in *" $pid "*) continue ;; esac
     seen="$seen $pid"
     [ "$pid" = "$SELF_PID" ] && continue
-    [ "$pid" = "$PPID" ] && continue
+    # MAJOR #3 (review round 2): the OLD blanket `$PPID` skip dropped the
+    # DAEMON itself whenever the sweep was spawned BY the daemon (in-tree
+    # executor) — the daemon was never classified, "no processes owned"
+    # was declared, exit 0: the false-success family again. Classification
+    # decides ownership, not ancestry: PPID is classified like any other
+    # candidate (a plain executor shell classifies out; the daemon-as-PPID
+    # is owned and must die). The executor-identity exclusion that remains
+    # lives in _stop_pids with the never-exclude-the-TARGET guard.
     kind="$(_classify "$pid")" || continue
     case "$kind" in
         launcher-path|cwd-launcher) owned_launchers="$owned_launchers $pid" ;;
@@ -840,9 +869,13 @@ fi
 # to the straggler pass below, which runs only for what is STILL alive
 # after the launcher(s) finished (launcher died without reaping, or plain
 # no-launcher installs where owned_rest IS the daemon set).
+STOP_SWEEP_REFUSED=0
 if [ -n "$(printf '%s' "$owned_launchers" | tr -d ' ')" ]; then
     _log "launcher-owned stop: TERMinG launcher(s) ONLY (single TERM, forwarded to daemon):$owned_launchers"
-    _stop_pids $owned_launchers
+    if ! _stop_pids $owned_launchers; then
+        STOP_SWEEP_REFUSED=1
+        _log "launcher stop sweep REFUSED (all candidates executor-identity-filtered) — the launcher was NOT signalled (MAJOR #3)"
+    fi
 fi
 
 # Straggler / no-launcher pass — direct daemon TERM. Descendants of a
@@ -908,9 +941,18 @@ if [ -n "$(printf '%s' "$owned_rest" | tr -d ' ')" ]; then
     done
     if [ -n "$(printf '%s' "$STRAGGLERS" | tr -d ' ')" ]; then
         _log "stopping owned daemon process(es) directly (no live launcher):$STRAGGLERS"
-        _stop_pids $STRAGGLERS
+        if ! _stop_pids $STRAGGLERS; then
+            STOP_SWEEP_REFUSED=1
+            _log "daemon stop sweep REFUSED (all candidates executor-identity-filtered) — the daemon was NOT signalled (MAJOR #3)"
+        fi
     fi
 fi
 
+# MAJOR #3: an all-filtered sweep is a LOUD failure — the script must never
+# exit 0 having signalled nothing while candidates existed.
+if [ "${STOP_SWEEP_REFUSED:-0}" = "1" ]; then
+    _log "done-REFUSED: $INSTALL_DIR stop DID NOT complete (every candidate was filtered as executor-identity) — exit 1; resolve the invocation shape (run the sweep OUT of the daemon's tree — the detached-executor lanes) and re-run"
+    exit 1
+fi
 _log "done — $INSTALL_DIR is stopped"
 exit 0

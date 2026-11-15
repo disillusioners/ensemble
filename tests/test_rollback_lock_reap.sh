@@ -31,6 +31,7 @@ set -u
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIBSH="$REPO_ROOT/scripts/upgrade/lib.sh"
 LAUNCHER="$REPO_ROOT/launcher.sh"
+PY="$(command -v python3)"
 BOUND="${ROLLBACK_LOCK_STALE_PRUNE_S:-604800}"   # the documented default
 
 PASS=0
@@ -87,6 +88,11 @@ set_mtime() {
 #   fresh  : age 60          → MUST survive (R2 fresh-forensics shape)
 #   odd    : rollback.lock.d.stale.notapid, ancient → MUST survive (R3)
 #   nosuf  : rollback.lock.d.stale, ancient → MUST survive (R3)
+#   junk   : rollback.lock.d.stale.7004junk, ancient → MUST survive (R3,
+#            MINOR ④ twins-drift pin: digit-FIRST + trailing junk — the
+#            pre-fix shell matcher [0-9]* PRUNED it while the python twin
+#            (fullmatch \d+) SURVIVED it; all three now require
+#            digits-to-EOL)
 make_fixture() {
     local root
     root="$(mktemp -d -t reap-XXXXXX)"
@@ -95,6 +101,7 @@ make_fixture() {
     : > "$root/releases/rollback.lock.d.stale.7002";   set_mtime "$(( NOW - BOUND + 300 ))" "$root/releases/rollback.lock.d.stale.7002"
     : > "$root/releases/rollback.lock.d.stale.7003";   set_mtime "$(( NOW - 60 ))"          "$root/releases/rollback.lock.d.stale.7003"
     : > "$root/releases/rollback.lock.d.stale.notapid"; set_mtime "$(( NOW - BOUND - 300 ))" "$root/releases/rollback.lock.d.stale.notapid"
+    : > "$root/releases/rollback.lock.d.stale.7004junk"; set_mtime "$(( NOW - BOUND - 300 ))" "$root/releases/rollback.lock.d.stale.7004junk"
     : > "$root/releases/rollback.lock.d.stale";         set_mtime "$(( NOW - BOUND - 300 ))" "$root/releases/rollback.lock.d.stale"
     printf '%s' "$root"
 }
@@ -118,6 +125,7 @@ assert_contains "A R1 reap log cites the incident" "incident 2026-11-14" "$A_OUT
 [ -f "$A_FIX/releases/rollback.lock.d.stale.7002" ] && _pass "A R2 under-bound sibling survives" || _fail "A R2 under-bound sibling survives" "present" "reaped"
 [ -f "$A_FIX/releases/rollback.lock.d.stale.7003" ] && _pass "A R2 fresh sibling survives (forensics window)" || _fail "A R2 fresh sibling survives (forensics window)" "present" "reaped"
 [ -f "$A_FIX/releases/rollback.lock.d.stale.notapid" ] && _pass "A R3 non-pid sibling name NEVER touched" || _fail "A R3 non-pid sibling name NEVER touched" "present" "reaped"
+[ -f "$A_FIX/releases/rollback.lock.d.stale.7004junk" ] && _pass "A R3 digit-first junk sibling survives (MINOR ④ twins-drift pin)" || _fail "A R3 digit-first junk sibling survives (MINOR ④ twins-drift pin)" "present" "reaped"
 [ -f "$A_FIX/releases/rollback.lock.d.stale" ] && _pass "A R3 suffix-less sibling NEVER touched" || _fail "A R3 suffix-less sibling NEVER touched" "present" "reaped"
 [ -d "$A_FIX/releases/rollback.lock.d" ] && _pass "A R4 the LIVE lock is untouched (we hold it)" || _fail "A R4 the LIVE lock is untouched (we hold it)" "present" "gone"
 # protocol triple intact after the prune rode the acquire
@@ -162,6 +170,7 @@ assert_contains "C R1 reap is logged via the launcher _log surface" "reaped stal
 [ -f "$C_FIX/releases/rollback.lock.d.stale.7002" ] && _pass "C R2 under-bound sibling survives" || _fail "C R2 under-bound sibling survives" "present" "reaped"
 [ -f "$C_FIX/releases/rollback.lock.d.stale.7003" ] && _pass "C R2 fresh sibling survives" || _fail "C R2 fresh sibling survives" "present" "reaped"
 [ -f "$C_FIX/releases/rollback.lock.d.stale.notapid" ] && _pass "C R3 non-pid sibling name NEVER touched" || _fail "C R3 non-pid sibling name NEVER touched" "present" "reaped"
+[ -f "$C_FIX/releases/rollback.lock.d.stale.7004junk" ] && _pass "C R3 digit-first junk sibling survives (MINOR ④ twins-drift pin)" || _fail "C R3 digit-first junk sibling survives (MINOR ④ twins-drift pin)" "present" "reaped"
 [ -f "$C_FIX/releases/rollback.lock.d.stale" ] && _pass "C R3 suffix-less sibling NEVER touched" || _fail "C R3 suffix-less sibling NEVER touched" "present" "reaped"
 [ -d "$C_FIX/releases/rollback.lock.d" ] && _pass "C R4 the LIVE lock is untouched (we hold it)" || _fail "C R4 the LIVE lock is untouched (we hold it)" "present" "gone"
 rm -rf "$C_FIX"
@@ -179,6 +188,49 @@ assert_contains "D launcher knob falls back to the default on garbage env" "knob
 assert_contains "D acquire succeeds" "acquire-rc=0" "$D_OUT"
 [ -f "$D_FIX/releases/rollback.lock.d.stale.7002" ] && _pass "D garbage knob → default bound (under-default sibling survives)" || _fail "D garbage knob → default bound (under-default sibling survives)" "present" "reaped"
 rm -rf "$D_FIX"
+
+# ── E. python twin (daemon/tools/upgrade_journal.py) — the cross-language
+# mirror pin (MINOR ④): the SAME fixture through
+# upgrade_journal._prune_stale_lock_siblings; every survival/reap verdict
+# must agree with the shell twins cell-for-cell (the drift this pack
+# exists to catch was exactly a shell-vs-python matcher divergence).
+section "E — python twin: _prune_stale_lock_siblings (the cross-language mirror)"
+E_FIX="$(make_fixture)"
+E_OUT="$(REPO_ROOT="$REPO_ROOT" INSTALL_DIR="$E_FIX" "$PY" - <<'EPY'
+import os
+from pathlib import Path
+import importlib.machinery, importlib.util, types, sys
+
+REPO = Path(os.environ["REPO_ROOT"])
+m = types.ModuleType("daemon"); m.__path__ = ["daemon"]
+c = types.ModuleType("daemon.constants"); c.is_reserved_source = lambda x: False
+sys.modules["daemon"] = m; sys.modules["daemon.constants"] = c
+loader = importlib.machinery.SourceFileLoader(
+    "uj_reap", str(REPO / "daemon" / "tools" / "upgrade_journal.py"))
+spec = importlib.util.spec_from_loader("uj_reap", loader)
+uj = importlib.util.module_from_spec(spec); sys.modules["uj_reap"] = uj
+loader.exec_module(uj)
+
+inst = Path(os.environ["INSTALL_DIR"])
+reaped = uj._prune_stale_lock_siblings(inst)
+rel = inst / "releases"
+def exists(name):
+    return "present" if (rel / name).exists() else "REAPED"
+print(f"reaped-count={reaped}")
+for name in ("rollback.lock.d.stale.7001", "rollback.lock.d.stale.7002",
+             "rollback.lock.d.stale.7003", "rollback.lock.d.stale.notapid",
+             "rollback.lock.d.stale", "rollback.lock.d.stale.7004junk"):
+    print(f"{name}={exists(name)}")
+EPY
+)"
+assert_contains "E python twin reaped exactly the over-bound sibling (count=1)" "reaped-count=1" "$E_OUT"
+assert_contains "E R1 over-bound sibling REAPED" "rollback.lock.d.stale.7001=REAPED" "$E_OUT"
+assert_contains "E R2 under-bound sibling survives" "rollback.lock.d.stale.7002=present" "$E_OUT"
+assert_contains "E R2 fresh sibling survives" "rollback.lock.d.stale.7003=present" "$E_OUT"
+assert_contains "E R3 non-pid sibling survives" "rollback.lock.d.stale.notapid=present" "$E_OUT"
+assert_contains "E R3 suffix-less sibling survives" "rollback.lock.d.stale=present" "$E_OUT"
+assert_contains "E R3 digit-first junk sibling survives (the MINOR ④ drift cell)" "rollback.lock.d.stale.7004junk=present" "$E_OUT"
+rm -rf "$E_FIX"
 
 # ── summary ────────────────────────────────────────────────────────────────
 section "summary"

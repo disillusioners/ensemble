@@ -249,8 +249,12 @@ lock_heartbeat
 if ! restart_via_launcher; then
     _warn "unit hand-back FAILED — halting rollback (txn left open for sweep recovery; NO nohup fallback, never a false success)"
     # Fix #4 (ENSEMBLE-32 repair lane; incident §5.2): the halt detail
-    # carries the CAPTURED hand-back error (HANDBACK_LAST_ERROR).
-    journal_history_append halt "manual rollback to $TO_VERSION: unit hand-back failed — halt-for-human, txn left open for sweep recovery (no nohup fallback — Amendment #1; hand-back error: ${HANDBACK_LAST_ERROR:-none captured})" \
+    # carries the CAPTURED hand-back error — read through
+    # _handback_last_error_text (MAJOR #1: resolver-branch diagnosis is
+    # out-of-band in HANDBACK_ERROR_FILE; the bare variable read degraded
+    # to "none captured" because the resolver runs inside $()).
+    HB_ERR="$(_handback_last_error_text)"
+    journal_history_append halt "manual rollback to $TO_VERSION: unit hand-back failed — halt-for-human, txn left open for sweep recovery (no nohup fallback — Amendment #1; hand-back error: ${HB_ERR:-none captured})" \
                               || true   # history is advisory; the open txn IS the B4 contract
     exit 1
 fi

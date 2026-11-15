@@ -2564,6 +2564,24 @@ _lock_prune_stale_siblings() {
             rollback.lock.d.stale.[0-9]*) ;;
             *) continue ;;
         esac
+        # MINOR ④ (review round 2, twins-mirror): the python twin
+        # (upgrade_journal._prune_stale_lock_siblings) fullmatches
+        # rollback.lock.d.stale.<DIGITS-to-EOL> — the bare glob case above
+        # admitted digit-first + trailing junk (stale.7004junk would be
+        # reaped here but SURVIVES there). Enforce the same exact shape:
+        # everything after the LAST ".stale." must be ALL digits.
+        case "${pruning##*/}" in
+            *.stale.*) ;;
+            *) continue ;;
+        esac
+        # strip the NAME, then the ".stale." prefix — the name's suffix is
+        # preceded by "d." (rollback.lock.d.stale.X), never by a slash, so
+        # a path-form ##*/.stale. strip would match nothing.
+        _prune_suffix="${pruning##*/}"
+        _prune_suffix="${_prune_suffix##*.stale.}"
+        case "$_prune_suffix" in
+            ''|*[!0-9]*) continue ;;
+        esac
         mtime="$(_lock_mtime_epoch "$pruning")"
         case "$mtime" in ''|*[!0-9]*) continue ;; esac
         age=$(( $(_now_epoch) - mtime ))
@@ -5421,7 +5439,46 @@ _supervision_launchd_bootout() {
 # anywhere, so the failure was unreproducible from the artifacts. The
 # WARN lines at the hand-back call site and the three halt templates
 # (promote/restart/rollback) surface it. Success clears the stash.
+#
+# MAJOR #1 (review round 2, ENSEMBLE-32): a VARIABLE stash dies in the
+# subshell whenever the writer runs inside `$()` — and the RESOLVER
+# (_supervision_launchd_plist_path) is consumed via `$()` at the
+# hand-back site (restart_via_launcher). On the exact incident path
+# (resolver fails → halt) the halt detail degraded to "hand-back error:
+# none captured" — the capture purpose UNMET for that branch. Out-of-band
+# channel: both stash sites ALSO write the diagnosis to
+# HANDBACK_ERROR_FILE (a $$-keyed temp file — filesystem, subshell-proof);
+# the halt readers go through _handback_last_error_text, which prefers
+# the in-scope variable (bootstrap branch — plain call, variable
+# survives) and falls back to the file (resolver branch). Every FAILURE
+# rewrites both; every SUCCESS/benign arm clears both, so a stale seed
+# (e.g. a pre-stop resolver failure at the SUPERVISION_LAUNCHD_PLIST_PATH
+# stash sites) can never surface instead of the diagnosis for the actual
+# hand-back failure.
 HANDBACK_LAST_ERROR=""
+HANDBACK_ERROR_FILE="${TMPDIR:-/tmp}/ensemble-hbk-err.$$"
+_handback_err_file_write() {
+    # $1 = diagnosis text; best-effort — a tmp failure must never break
+    # the failure path itself.
+    printf '%s' "$1" > "${HANDBACK_ERROR_FILE:-/tmp/ensemble-hbk-err.$$}" 2>/dev/null || true
+}
+_handback_err_file_clear() {
+    rm -f "${HANDBACK_ERROR_FILE:-/tmp/ensemble-hbk-err.$$}" 2>/dev/null || true
+}
+# _handback_last_error_text — THE reader for every consumer (WARN lines +
+# halt templates). Variable first (survives plain calls), file second
+# (survives $() subshells). Empty output = nothing captured.
+_handback_last_error_text() {
+    if [ -n "${HANDBACK_LAST_ERROR:-}" ]; then
+        printf '%s' "$HANDBACK_LAST_ERROR"
+        return 0
+    fi
+    local _f="${HANDBACK_ERROR_FILE:-/tmp/ensemble-hbk-err.$$}"
+    if [ -s "$_f" ]; then
+        printf '%s' "$(head -c 400 "$_f" 2>/dev/null | tr '\n' ';' | tr -s ' ')"
+    fi
+    return 0
+}
 _supervision_launchd_bootstrap() {
     local plist="${1:-}" domain
     [ -n "$plist" ] || return 1
@@ -5433,11 +5490,15 @@ _supervision_launchd_bootstrap() {
     rc=$?
     if [ "$rc" -eq 0 ]; then
         HANDBACK_LAST_ERROR=""
+        _handback_err_file_clear
         return 0
     fi
     # Fix #4: stash the launchctl diagnosis (one line, bounded — journal
-    # detail is a single-line quoted string).
+    # detail is a single-line quoted string). MAJOR #1: also out-of-band
+    # (file) — this function is called as a STATEMENT so the variable
+    # survives, but the file keeps ONE channel semantics for the readers.
     HANDBACK_LAST_ERROR="$(printf 'launchctl bootstrap %s %s failed (rc=%s): %s' "$domain" "$plist" "$rc" "$(printf '%s' "$out" | tr '\n' ';' | tr -s ' ' | cut -c1-400)")"
+    _handback_err_file_write "$HANDBACK_LAST_ERROR"
     case "$out" in
         *"already bootstrapped"*|*"already loaded"*|*"Input/output error"*)
             # "already loaded" is NOT success on its own — return a distinct
@@ -5449,6 +5510,7 @@ _supervision_launchd_bootstrap() {
             # top clears it; this arm is success-shaped too, modulo the
             # caller's mandatory revalidation).
             HANDBACK_LAST_ERROR=""
+            _handback_err_file_clear
             return 2 ;;
     esac
     [ "$rc" -eq 124 ] && return 1
@@ -5493,6 +5555,7 @@ _supervision_launchd_plist_path() {
         p="$(printf '%s\n' "$dump" | sed -n 's/^[[:space:]]*path = //p' | head -1)"
         if [ -n "$p" ] && [ -f "$p" ]; then
             rm -f "$errtmp" 2>/dev/null
+            _handback_err_file_clear
             printf '%s\n' "$p"
             return 0
         fi
@@ -5501,6 +5564,7 @@ _supervision_launchd_plist_path() {
     p="${SUPERVISION_LAUNCHD_PLIST_PATH:-}"
     if [ -n "$p" ] && [ -f "$p" ]; then
         rm -f "$errtmp" 2>/dev/null
+        _handback_err_file_clear
         printf '%s\n' "$p"
         return 0
     fi
@@ -5508,11 +5572,19 @@ _supervision_launchd_plist_path() {
     p="$HOME/Library/LaunchAgents/${label}.plist"
     if [ -f "$p" ]; then
         rm -f "$errtmp" 2>/dev/null
+        _handback_err_file_clear
         printf '%s\n' "$p"
         return 0
     fi
     # All rungs unresolvable — stash the live probe's stderr (Fix #4).
+    # MAJOR #1 (review round 2): the VARIABLE stash dies in the caller's
+    # `$()` consumption subshell (restart_via_launcher) — this function is
+    # THE resolver on the incident path, so the diagnosis goes OUT-OF-BAND
+    # to HANDBACK_ERROR_FILE (subshell-proof); the halt readers use
+    # _handback_last_error_text. The variable write stays for plain-call
+    # consumers (and is harmless in the subshell).
     HANDBACK_LAST_ERROR="$(printf "plist resolution failed for job '%s' (launchctl print: %s)" "$label" "$(printf '%s' "$(cat "$errtmp" 2>/dev/null)" | tr '\n' ';' | tr -s ' ' | cut -c1-400)")"
+    _handback_err_file_write "$HANDBACK_LAST_ERROR"
     rm -f "$errtmp" 2>/dev/null
     return 1
 }
@@ -5783,58 +5855,48 @@ PLEOF
     return 124
 }
 
-# _pipeline_self_excluded <pid…> — DEFENSE-IN-DEPTH SELF-EXCLUSION for the
+# _pipeline_self_excluded <pid> — DEFENSE-IN-DEPTH SELF-EXCLUSION for the
 # kill sweeps (Fix #5, ENSEMBLE-32 Family-3; incident 2026-11-14 §7 defect
-# #7): print the pid list MINUS the sweep's own identity and — ONLY when the
-# sweep is actually running inside an install's launcher/daemon lineage —
-# the promote executor (the sweep's parent) and that executor's parent (the
-# agent bash tool that owns the executor). The exclusion is BY EXACT PID
-# IDENTITY, never by process group or by ancestry propagation: a pgid filter
-# would also drop the daemon itself (it shares the launchd job's group) and
-# an ancestry filter would drop every ancestor including the daemon — both
-# would make the sweep find NOTHING and break the stop (observed: the 16d
-# TERM pin). A detached executor lives in a different tree BY CONSTRUCTION
-# and is not an ancestor of the sweep at all, so it needs no exclusion here.
-# Prints the surviving pids, one per line, ascending, deduped.
+# #7). MAJOR #3 (review round 2): the previous shape ALSO excluded PPID's
+# PARENT when the sweep ran in-tree (_pipeline_self_excluded_in_tree
+# ancestor walk) — and the walk ANCHORS on the daemon, so in-tree it
+# excluded the TARGET itself: the daemon was classified, filtered out of
+# the kill sweep, and the stop false-succeeded while the daemon lived (the
+# exact class reproduced live in scripts/stop-ensemble.sh _stop_pids; the
+# 16d TERM-pin regression is the same family — a blanket own-pgid
+# filter drops the daemon because the in-tree sweep shares the launchd
+# job group). SHIPPED SHAPE (mirrors _stop_pids):
+#   1. executor identity ONLY: _PIPELINE_SELF_PID/$PPID (seam-injectable
+#      for tests);
+#   2. HARD GUARD (never-exclude-the-TARGET): a pid that is a sweep
+#      CANDIDATE is never excludable — the daemon dies even when it is
+#      literally $PPID (a daemon-spawned sweep).
+# A detached executor lives in a different tree BY CONSTRUCTION and is not
+# an ancestor of the sweep at all, so it needs no exclusion here. Prints
+# the surviving pids, one per line, ascending, deduped.
 _PIPELINE_SELF_PID="${_PIPELINE_SELF_PID:-$$}"
 _PIPELINE_SELF_PPID="${_PIPELINE_SELF_PPID:-$PPID}"
-_pipeline_self_excluded_in_tree() {
-    [ -n "${INSTALL_DIR:-}" ] || return 1
-    local esc esc_phys phys pid args comm cwd depth=0
-    esc="$(_supervision_ere_escape "$INSTALL_DIR")"
-    phys="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd || printf '%s' "$INSTALL_DIR")"
-    esc_phys="$(_supervision_ere_escape "$phys")"
-    pid="$(_executor_detach_ps_field "$$" ppid)"
-    while [ -n "$pid" ] && [ "$pid" != "0" ] && [ "$pid" != "1" ] && [ "$depth" -lt 16 ]; do
-        args="$(_executor_detach_ps_field "$pid" args)"
-        comm="$(_executor_detach_ps_field "$pid" comm)"
-        if printf '%s' "$args" 2>/dev/null | grep -Eq \
-            "(${esc}|${esc_phys})/(current/)?ensemble-prod( |$)|${esc}/launcher\.sh( |$)"; then
-            return 0
-        fi
-        case "$comm $args" in
-            *ensemble-prod*|*launcher.sh*)
-                cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
-                if [ "$cwd" = "$INSTALL_DIR" ] || [ "$cwd" = "$phys" ]; then
-                    return 0
-                fi
-                ;;
-        esac
-        pid="$(_executor_detach_ps_field "$pid" ppid)"
-        depth=$((depth + 1))
-    done
-    return 1
-}
 _pipeline_self_excluded() {
-    local my_pid my_ppid pid my_excluded
+    local my_pid my_ppid pid my_excluded _c _is_target
     my_pid="$_PIPELINE_SELF_PID"
     my_ppid="$_PIPELINE_SELF_PPID"
     my_excluded="$my_pid $my_ppid"
-    if _pipeline_self_excluded_in_tree; then
-        my_excluded="$my_excluded $(ps -o ppid= -p "$my_ppid" 2>/dev/null | tr -d '[:space:]')"
-    fi
+    local my_excluded_new=""
+    for _c in $my_excluded; do
+        _is_target=0
+        for pid in $(printf '%s\n' "$@" | grep -E '^[0-9]+$' | sort -n | awk '!seen[$0]++'); do
+            [ "$pid" = "$_c" ] || continue
+            _is_target=1
+            break
+        done
+        if [ "$_is_target" = "1" ]; then
+            : "never-exclude-the-target: $_c is a sweep candidate — the target wins (MAJOR #3)"
+        else
+            my_excluded_new="$my_excluded_new $_c"
+        fi
+    done
     for pid in $(printf '%s\n' "$@" | grep -E '^[0-9]+$' | sort -n | awk '!seen[$0]++'); do
-        case " $my_excluded " in *" $pid "*) continue ;; esac
+        case " $my_excluded_new " in *" $pid "*) continue ;; esac
         printf '%s\n' "$pid"
     done
 }
@@ -6307,7 +6369,8 @@ restart_via_launcher() {
         # remains unresolvable (fail-closed, no fabricated path).
         lplist="$(_supervision_launchd_plist_path "$SUPERVISION_UNIT")"
         if [ -z "$lplist" ]; then
-            _warn "launchd hand-back: cannot resolve the plist path for job '$SUPERVISION_UNIT' — live probe, pre-stop stash, and the label-verbatim ~/Library/LaunchAgents/<label>.plist fallback ALL unresolvable (incident 2026-11-14 §7b: filename must equal the job label) — failing; caller halts fail-safe${HANDBACK_LAST_ERROR:+; captured: $HANDBACK_LAST_ERROR}"
+            _hb_err="$(_handback_last_error_text)"   # MAJOR #1: subshell-proof reader (resolver wrote the file from inside $())
+            _warn "launchd hand-back: cannot resolve the plist path for job '$SUPERVISION_UNIT' — live probe, pre-stop stash, and the label-verbatim ~/Library/LaunchAgents/<label>.plist fallback ALL unresolvable (incident 2026-11-14 §7b: filename must equal the job label) — failing; caller halts fail-safe${_hb_err:+; captured: $_hb_err}"
             return 1
         fi
         lrc=1
@@ -6317,14 +6380,17 @@ restart_via_launcher() {
             # rc 0 = started; rc 2 = already loaded (benign ONLY because the
             # forward path booted out first — the caller's gate revalidates).
             if [ "$lrc" -eq 0 ] || [ "$lrc" -eq 2 ]; then break; fi
-            _warn "launchd hand-back: bootstrap attempt $lattempt FAILED (rc=$lrc) for '$SUPERVISION_UNIT' — retrying${HANDBACK_LAST_ERROR:+; captured: $HANDBACK_LAST_ERROR}"
+            _hb_err="$(_handback_last_error_text)"
+            _warn "launchd hand-back: bootstrap attempt $lattempt FAILED (rc=$lrc) for '$SUPERVISION_UNIT' — retrying${_hb_err:+; captured: $_hb_err}"
             sleep $(( lattempt * 2 ))
             lattempt=$(( lattempt + 1 ))
         done
         if [ "$lrc" -ne 0 ] && [ "$lrc" -ne 2 ]; then
-            _warn "launchd hand-back: bootstrap EXHAUSTED after retries (last rc=$lrc) — failing (never a nohup fallback on Darwin); caller halts fail-safe${HANDBACK_LAST_ERROR:+; captured: $HANDBACK_LAST_ERROR}"
+            _hb_err="$(_handback_last_error_text)"
+            _warn "launchd hand-back: bootstrap EXHAUSTED after retries (last rc=$lrc) — failing (never a nohup fallback on Darwin); caller halts fail-safe${_hb_err:+; captured: $_hb_err}"
             return 1
         fi
+        HANDBACK_LAST_ERROR=""; _handback_err_file_clear   # MAJOR #1 hygiene: success clears both channels
         _log "hand-back: launchd — bootstrapped job '$SUPERVISION_UNIT' from $lplist (RunAtLoad starts the daemon exactly once; no nohup, no promote-started launcher)"
         return 0
     fi

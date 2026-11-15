@@ -2265,6 +2265,24 @@ _js_lock_prune_stale_siblings() {
             rollback.lock.d.stale.[0-9]*) ;;
             *) continue ;;
         esac
+        # MINOR ④ (review round 2, twins-mirror): the python twin
+        # (upgrade_journal._prune_stale_lock_siblings) fullmatches
+        # rollback.lock.d.stale.<DIGITS-to-EOL> — the bare glob case above
+        # admitted digit-first + trailing junk (stale.7004junk would be
+        # reaped here but SURVIVES there). Enforce the same exact shape:
+        # everything after the LAST ".stale." must be ALL digits.
+        case "${pruning##*/}" in
+            *.stale.*) ;;
+            *) continue ;;
+        esac
+        # strip the NAME, then the ".stale." prefix — the name's suffix is
+        # preceded by "d." (rollback.lock.d.stale.X), never by a slash, so
+        # a path-form ##*/.stale. strip would match nothing.
+        _prune_suffix="${pruning##*/}"
+        _prune_suffix="${_prune_suffix##*.stale.}"
+        case "$_prune_suffix" in
+            ''|*[!0-9]*) continue ;;
+        esac
         mtime="$(_js_lock_mtime_epoch "$pruning")"
         case "$mtime" in ''|*[!0-9]*) continue ;; esac
         age=$(( $(_now) - mtime ))
