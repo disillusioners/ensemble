@@ -479,6 +479,45 @@ assert_contains "C2: detached rc 7 propagates" "rc=7" "$out"
 out="$(run_detached_with_payload 78)"
 assert_contains "C3: detached rc 78 propagates" "rc=78" "$out"
 
+# ============================================================================
+# section J — D-5 wrapper argv shape (cycle-3 E2E, one round): the caller
+# passes script-as-$1 plus its own argv (promote.sh:182:
+#   _executor_detach_self "$SCRIPT_DIR/promote.sh" "$@"), and the wrapper
+# consumed $1 into script= but its quoting loop re-included $1 from "$@"
+# (no shift) -> the detached child ran `promote.sh promote.sh <args>` ->
+# `unknown flag` rc 78 in ~2s (cycle-3: the whole detach chain worked
+# end-to-end, then the wrapper duplicated the script). The payload below
+# records ITS OWN argv; the legs assert the detached child received the
+# script ONCE and the args VERBATIM (order preserved).
+section "J - D-5 wrapper argv shape: script consumed ONCE, args verbatim"
+D5PAY="$FIXTURE/d5-argv-payload.sh"
+cat > "$D5PAY" <<'D5PAYEOF'
+#!/bin/bash
+printf 'payload-argc=%s\n' "$#" >> "${DETACH_EVIDENCE:?}"
+printf 'payload-argv=%s\n' "$*" >> "${DETACH_EVIDENCE:?}"
+exit 0
+D5PAYEOF
+chmod +x "$D5PAY"
+D5_OUT="$(src_lib "
+ps() { case \"$*\" in *ppid=*) echo 0 ;; *) return 1 ;; esac; }
+: > "$FIXTURE/d5-evidence"   # fresh evidence file per run (no stale argv lines)
+export DETACH_EVIDENCE="$FIXTURE/d5-evidence"
+export PROMOTE_DETACH_WAIT_S=\"60\" PROMOTE_DETACH_POLL_S=\"1\"
+_executor_detach_self '$FIXTURE/d5-argv-payload.sh' demo --run-id r-d5 >/dev/null 2>&1
+echo rc=\$?
+" 2>/dev/null)"
+assert_contains "J1: the detach ran (rc 0 propagates)" "rc=0" "$D5_OUT"
+D5_EVID="$(cat "$FIXTURE/d5-evidence" 2>/dev/null)"
+assert_contains "J2: argv = the args VERBATIM (script consumed ONCE, not duplicated)" \
+    "payload-argv=demo --run-id r-d5" "$D5_EVID"
+assert_contains "J3: argc = 3 (script-as-\$1 consumed; demo --run-id r-d5 forwarded verbatim)" \
+    "payload-argc=3" "$D5_EVID"
+case "$D5_EVID" in
+    *"$FIXTURE/d5-argv-payload.sh"*) _fail "J4: the script path leaked into the detached argv (D-5 shift missing)" ;;
+    *) _pass ;;
+esac
+rm -f "$FIXTURE/d5-argv-payload.sh"
+
 section "D — cleanup on success AND failure (footgun legs)"
 # D1: after a successful detach the scratch plist is GONE and bootout fired.
 assert_contains "D1: bootout recorded after the success-path detach" \

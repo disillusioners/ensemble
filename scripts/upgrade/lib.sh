@@ -5832,6 +5832,15 @@ _executor_detach_cleanup() {
 # (the incident's own shape).
 _executor_detach_self() {
     local script="${1:-}"
+    # D-5 (E2E round 3, cycle-3 🔴): $1 IS the promote script — consumed
+    # here. WITHOUT this shift the argv-quoting loop below re-includes the
+    # script path in esc_args and the detached child runs
+    # `promote.sh promote.sh <args>` → promote.sh refuses `unknown flag`
+    # rc 78 in ~2s (cycle-3 E2E: the detach machinery worked end-to-end,
+    # then the wrapper duplicated the script). Every other positional
+    # ($2… — the caller's own argv, promote.sh:182) forwards verbatim;
+    # there is no other preamble positional consumption in this function.
+    [ "$#" -gt 0 ] && shift
     [ -n "$script" ] && [ -f "$script" ] || {
         _DETACH_LAST_ERROR="executor-detach: promote script not found: ${script:-<empty>}"
         return 1

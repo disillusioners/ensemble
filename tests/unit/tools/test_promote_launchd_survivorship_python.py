@@ -241,6 +241,29 @@ def main() -> None:  # noqa: C901 — a linear pin script, mirrors the shell pac
         check("2a: ENSEMBLE_LAUNCHER_STATE_FILE NEVER reaches the detached env",
               "ENSEMBLE_LAUNCHER_STATE_FILE" not in env_txt)
 
+        # ── 2b-d5. wrapper argv shape (D-5, cycle-3 E2E): the caller passes
+        # script-as-$1 + its own argv (promote.sh:182) — the detached child
+        # must receive the script ONCE and the args VERBATIM. The pre-fix
+        # wrapper re-included $1 in its quoting loop (no shift) → the child
+        # ran `probe.sh probe.sh demo --version v9-py` → unknown-flag 78.
+        # The payload dumps argc+argv; the pins assert both.
+        (tmp / "argv-probe.sh").write_text(
+            '#!/bin/bash\nprintf "argc=%s argv=[%s]\\n" "$#" "$*" > "%s"\n'
+            % ("$#", "$*", tmp / "d5-argv.txt")
+        )
+        out = bash_env_snippet(
+            tmp, env,
+            'ps() { case "$*" in *ppid=*) echo 0 ;; *) return 1 ;; esac; }\n'
+            f"_executor_detach_self '{tmp}/argv-probe.sh' demo --version v9-py >/dev/null 2>&1\n"
+            "echo done\n",
+        )
+        argv_txt = (tmp / "d5-argv.txt").read_text(errors="replace").strip()
+        check("2b-d5: the detached child received the args VERBATIM (script ONCE)",
+              argv_txt == "argc=3 argv=[demo --version v9-py]", argv_txt or "<empty>")
+        check("2b-d5: the script path NEVER leaked into the child argv",
+              "argv-probe" not in argv_txt and "demo demo" not in argv_txt,
+              argv_txt or "<empty>")
+
         # ── 3. exit-code propagation (payload exit 7 asserted above) ────────
         # ── 4. bootstrap failure ⇒ fail-closed + diagnosis recorded ────────
         (tmp / "lctl-ctrl").write_text("mode=fail\n")
