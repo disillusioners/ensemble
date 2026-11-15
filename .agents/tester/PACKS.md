@@ -1,3 +1,18 @@
+<!-- rogue-p2-full-gate-20261115-begin -->
+## ROGUE-CONTAINMENT-P2 FULL TESTER GATE (2026-11-15; verdict **ALL 8 GATES PASS**; full evidence: `RESULTS/2026-11-15-rogue-p2-full-gate.md` + /tmp rescue packs — UNCOMMITTED-landing disposition: branch finalize-frozen mid-gate; ready-to-apply commands live inside each pack)
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `rogue_p2_mutation_bfhy` (ad-hoc) | matrix `tests/bind_race_rogue_containment_mutation_matrix.md` driver; per-leg `timeout 120` + `--timeout=90`; scratch venue + spawn-seam recorder | BF-M1..M9 + HY-M1..M4 | 2026-11-15 | ✅ PASS 13/13 RED, 13/13 sha restores, control 73P, 27/27 spawn-seam clean |
+| `rogue_p2_mutation_ahlh` (ad-hoc) | matrix `tests/bind_race_port_ownership_mutation_matrix.md` driver; same discipline | AH-M* + LH-* (22 legs + 2 riders) | 2026-11-15 | ✅ PASS 22/22 RED, 22/22 restores, controls 42P, 0 spawn-seam hits |
+| `rogue_p2_pin_families_unit_test` (ad-hoc) | `env <10-var scrub> timeout 120 .venv/bin/pytest <family files> -q --tb=short -p no:randomly` ×3 legs | BF 44 + AH 68 + HY 29 | 2026-11-15 | ✅ PASS 141/141 |
+| `rogue_p2_metrics_neighbors_unit_test` (ad-hoc) | same shape ×3 legs | 8 untouched metrics files 190P + bind_retry family 92P + test_main_entry 29P | 2026-11-15 | ✅ PASS 311 nodes |
+| `rogue_p2_regression_scoped_test` (ad-hoc) | explicit files/node-id shards, null-delimited xargs, `timeout 300` per shard; base venue bf4bfde6e | 10 lane test files, 213 nodes + 4 NEW ×3 stability | 2026-11-15 | ✅ PASS — net-new failing list vs base EMPTY |
+| `rogue_p2_mirror_legs` (harness) | `boot_rogue_mirror.sh` (FIXED: OWNED_RM_DIRS) legs refuse-foreign/db-poison/happy/tier1-name-refusal/foreign-holder/same-install-handover; disposable PG 127.0.0.1:15432 | 6 legs ×2 runs | 2026-11-15 | ✅ PASS 12/12 |
+| `rogue_p2_boot_e2e` (harness) | fd-closerange(3,4096)+execv wrapper, `ROGUE_FD_VERIFY=1`; disposable PG 127.0.0.1:15433; ports 18800-18806 | 3 shapes + ss -ltnp fd-verify | 2026-11-15 | ✅ PASS 3/3 + fd-verify PASS |
+
+> Incident `b740d48c` (harness `rm -rf "$HOLD_DIR"` deleted the worktree mid-gate) is FIXED in the rescue-pack harness (OWNED_RM_DIRS allowlist; buggy variant extinct fleet-wide). One unbounded hazard remains OUTSIDE this lane's tree: `tests/test_stop_ownership.sh:78` env-injectable `${CLEANUP_DIRS:-}` — routed to leader (main checkout, write-forbidden here).
+<!-- rogue-p2-full-gate-20261115-end -->
 <!-- guideline-read-tool-20261113-begin -->
 ## GUIDELINE-READ-TOOL registration (2026-11-13; lane `feature/guideline-read-tool` @ phases 1–3 landed `681de8081` + `ccb7962d5`; registered by phase 4 as a THIN WRAPPER — zero test logic in the pack; owner: coder guideline-read-tool)
 
