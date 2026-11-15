@@ -703,6 +703,47 @@ class TestP11BootNoBehaviorChange:
     MEMOIR_LANE_SANCTIONED_PATH = "daemon/manager.py"
     MEMOIR_LANE_MARKER = "memoir"
 
+    # The GROUP-CHAT (P1 substrate) lane's sanctioned changes to
+    # daemon/manager.py. Mirrors the DECISION-lane precedent (commit
+    # c81dd0dea, "scoped source-gc sanction") and the memoir-lane block
+    # above, which sanctioned that same path under their own markers.
+    # The guard is about the SOURCE-GC lane's own diff: manager.py is
+    # not frozen forever, it is frozen against the SOURCE-GC lane. The
+    # sanction is SCOPED — every hunk of the manager.py drift in the
+    # span must carry a sanctioned-lane marker, so any OTHER manager.py
+    # drift (a source-gc change, an unrelated lane's edit) still REDs.
+    #
+    # Group-chat commits touching daemon/manager.py over this span
+    # (30e7cf69c..HEAD, the P1 range):
+    #   9985557b3 feat(room): group-chat P1 substrate — 3-table store,
+    #                               repository, per-room lock, boot regen
+    #
+    # Marker choice: the literal "group chat" (space form) is carried by
+    # EVERY manager.py hunk in the span (measured: hunk 1 = 15 added
+    # lines — the registration comment "Agent group chat Phase 2 / P1";
+    # hunk 2 = 30 added lines — the boot-pass banner "Agent group chat
+    # P1"), so it is PER-HUNK-COMPLETE. Markers are LEXICAL, not
+    # semantic: hunk 1 incidentally mentions "memoir" twice (precedent
+    # prose), hunk 2 carries NO memoir at all — so the memoir pin's pass
+    # on this tip must come from the cross-lane carve-out below (the
+    # memoir lane's own hunks are absent from this range), NEVER from a
+    # courtesy "memoir" mention added to appease it. No marker token was
+    # added to manager.py for this sanction: both hunks already carried
+    # "group chat" verbatim in their added lines.
+    GROUP_CHAT_LANE_SANCTIONED_PATH = "daemon/manager.py"
+    GROUP_CHAT_LANE_MARKER = "group chat"
+
+    # Cross-lane carve-out: a hunk claimed by ANY sanctioned lane is
+    # sanctioned drift, so co-spanning sanctioned lanes do not
+    # cross-red each other (the memoir pin would otherwise RED on the
+    # group-chat hunks, which carry no "memoir"). Every manager.py lane
+    # pin below treats a hunk carrying NONE of these markers as an
+    # offender — an UNSANCTIONED hunk (the source-gc lane included)
+    # still REDs every pin. Counter-mutation proof of non-vacuity:
+    # stripping "group chat" from a P1 hunk leaves it markerless and
+    # REDs all three manager.py pins (decision, memoir, group-chat).
+    SANCTIONED_LANE_MARKERS = ("decision", "memoir", "group chat")
+
     # The EXACT added lines of the leader-sanctioned None guard (content
     # pin, indentation preserved; diff '+' prefixes stripped). The file
     # pin requires these contiguous; the history pin requires this list
@@ -730,6 +771,51 @@ class TestP11BootNoBehaviorChange:
             ["git", *args], capture_output=True, text=True, check=False
         ).stdout
 
+    def _manager_hunks_missing_sanctioned_marker(self, span):
+        """Hunks of the daemon/manager.py drift in ``span`` that carry
+        NO sanctioned-lane marker. ``SANCTIONED_LANE_MARKERS`` is the
+        single source (the cross-lane carve-out lives there — never
+        here). This is the SHARED body of the three lane pins below:
+        the diff, the hunk parse and the marker check are identical
+        across them (all three lane path constants alias the same
+        file — daemon/manager.py); only each pin's docstring narrates
+        its own lane's claim. A span with no manager.py diff is
+        vacuously clean ([]). A degenerate diff (content lines but no
+        hunk headers) yields a pseudo-hunk so the caller's ``== []``
+        assert still fails — the old explicit "no content lines"
+        assert, preserved.
+        """
+        diff = self._git(
+            "diff", "--unified=0", span, "--", self.DECISION_LANE_SANCTIONED_PATH
+        )
+        if not diff.strip():
+            return []  # nothing sanctioned in this span — vacuously clean
+        hunks: list[list[str]] = []
+        current: list[str] = []
+        for line in diff.splitlines():
+            if line.startswith("@@"):
+                if current:
+                    hunks.append(current)
+                current = []
+                continue
+            if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
+                current.append(line)
+        if current:
+            hunks.append(current)
+        if not hunks:
+            return [[
+                "<degenerate: manager.py diff had content lines but no "
+                "hunk headers>"
+            ]]
+        return [
+            hunk for hunk in hunks
+            if not any(
+                marker in line.lower()
+                for line in hunk
+                for marker in self.SANCTIONED_LANE_MARKERS
+            )
+        ]
+
     def test_sanctioned_guard_present_in_file(self):
         # File-state pin: the sanctioned hunk must be present, contiguous,
         # and exact. Removing/altering a line REDs. This survives a future
@@ -754,12 +840,13 @@ class TestP11BootNoBehaviorChange:
         assert merge, "no first-parent merge found"
         span = f"{merge}..HEAD"
         # daemon/manager.py is excluded from the blanket no-drift check
-        # (the DECISION and MEMOIR lanes legitimately changed it); their
-        # drift is checked by the scoped lane sanctions below.
+        # (the DECISION, MEMOIR and GROUP-CHAT lanes legitimately changed
+        # it); their drift is checked by the scoped lane sanctions below.
         others = [p for p in self.NOT_TOUCHED_PATHS
                   if p not in (self.SANCTIONED_PATH,
                                self.DECISION_LANE_SANCTIONED_PATH,
-                               self.MEMOIR_LANE_SANCTIONED_PATH)]
+                               self.MEMOIR_LANE_SANCTIONED_PATH,
+                               self.GROUP_CHAT_LANE_SANCTIONED_PATH)]
         out_others = self._git("diff", "--stat", span, "--", *others)
         assert out_others.strip() == "", (
             f"unexpected post-merge drift in NOT-TOUCHED paths:\n{out_others}"
@@ -793,43 +880,18 @@ class TestP11BootNoBehaviorChange:
         must carry a decision-lane marker. A manager.py change from ANY
         other lane (the source-gc lane included) lands in a hunk with no
         decision marker and REDS here — the guard's intent (the source-gc
-        lane must not drift manager.py) is preserved; only the decision
-        lane's own wiring is sanctioned.
+        lane must not drift manager.py) is preserved; only sanctioned
+        lanes' own wiring is allowed. Cross-lane carve-out: a hunk
+        claimed by another sanctioned lane's marker
+        (SANCTIONED_LANE_MARKERS) is sanctioned drift and is not an
+        offender, so co-spanning sanctioned lanes do not cross-red.
         """
         merge = self._git(
             "rev-list", "--first-parent", "--merges", "-1", "HEAD"
         ).strip()
         assert merge, "no first-parent merge found"
         span = f"{merge}..HEAD"
-        diff = self._git(
-            "diff", "--unified=0", span, "--", self.DECISION_LANE_SANCTIONED_PATH
-        )
-        if not diff.strip():
-            return  # nothing sanctioned in this span — vacuously clean
-        hunks: list[list[str]] = []
-        current: list[str] = []
-        for line in diff.splitlines():
-            if line.startswith("@@"):
-                if current:
-                    hunks.append(current)
-                current = []
-                continue
-            if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
-                current.append(line)
-        if current:
-            hunks.append(current)
-        assert hunks, "the manager.py diff has no content lines"
-        offenders = [
-            hunk for hunk in hunks
-            if not any(
-                self.DECISION_LANE_MARKER in line.lower() for line in hunk
-            )
-        ]
-        assert offenders == [], (
-            "daemon/manager.py drifted OUTSIDE the decision lane in the "
-            f"post-merge span — every hunk must carry a decision marker.\n"
-            f"offending hunks={offenders!r}"
-        )
+        assert self._manager_hunks_missing_sanctioned_marker(span) == []
 
     def test_the_memoir_lane_manager_drift_is_confined_to_sanctioned_lane_hunks(self):
         """The SANCTIONED memoir-lane manager.py drift.
@@ -838,41 +900,43 @@ class TestP11BootNoBehaviorChange:
         must carry a memoir-lane marker. A manager.py change from ANY
         other lane (the source-gc lane included) lands in a hunk with no
         memoir marker and REDs here — the guard's intent (the source-gc
-        lane must not drift manager.py) is preserved; only the memoir
-        lane's own wiring is sanctioned. Mirrors the decision-lane
-        precedent (c81dd0dea).
+        lane must not drift manager.py) is preserved; only sanctioned
+        lanes' own wiring is allowed. Mirrors the decision-lane
+        precedent (c81dd0dea). Cross-lane carve-out: a hunk claimed by
+        another sanctioned lane's marker (SANCTIONED_LANE_MARKERS) is
+        sanctioned drift and is not an offender — the GROUP-CHAT hunks
+        carry no "memoir" (hunk 2 has zero occurrences), so without the
+        carve-out this pin would cross-red on them; it must NEVER be
+        satisfied by a courtesy memoir mention instead.
         """
         merge = self._git(
             "rev-list", "--first-parent", "--merges", "-1", "HEAD"
         ).strip()
         assert merge, "no first-parent merge found"
         span = f"{merge}..HEAD"
-        diff = self._git(
-            "diff", "--unified=0", span, "--", self.MEMOIR_LANE_SANCTIONED_PATH
-        )
-        if not diff.strip():
-            return  # nothing sanctioned in this span — vacuously clean
-        hunks: list[list[str]] = []
-        current: list[str] = []
-        for line in diff.splitlines():
-            if line.startswith("@@"):
-                if current:
-                    hunks.append(current)
-                current = []
-                continue
-            if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
-                current.append(line)
-        if current:
-            hunks.append(current)
-        assert hunks, "the manager.py diff has no content lines"
-        offenders = [
-            hunk for hunk in hunks
-            if not any(
-                self.MEMOIR_LANE_MARKER in line.lower() for line in hunk
-            )
-        ]
-        assert offenders == [], (
-            "daemon/manager.py drifted OUTSIDE the memoir lane in the "
-            f"post-merge span — every hunk must carry a memoir marker.\n"
-            f"offending hunks={offenders!r}"
-        )
+        assert self._manager_hunks_missing_sanctioned_marker(span) == []
+
+    def test_the_group_chat_lane_manager_drift_is_confined_to_sanctioned_lane_hunks(
+        self,
+    ):
+        """The SANCTIONED group-chat (P1 substrate) lane manager.py drift.
+
+        Every hunk of the daemon/manager.py drift in the post-merge span
+        must carry a sanctioned-lane marker, and this pin documents the
+        GROUP-CHAT lane's own claim: both P1 hunks (manager.py model
+        registration + room boot regeneration pass) carry the literal
+        "group chat" verbatim in their added lines — measured PER-HUNK-
+        COMPLETE (hunk 1 = 15 added lines, hunk 2 = 30; the marker
+        occurs exactly once per hunk). A manager.py change from ANY
+        other lane (the source-gc lane included) lands in a hunk with
+        no sanctioned marker and REDs here — the guard's intent (the
+        source-gc lane must not drift manager.py) is preserved; only
+        sanctioned lanes' own wiring is allowed. Mirrors the memoir-lane
+        block and the decision-lane precedent (c81dd0dea).
+        """
+        merge = self._git(
+            "rev-list", "--first-parent", "--merges", "-1", "HEAD"
+        ).strip()
+        assert merge, "no first-parent merge found"
+        span = f"{merge}..HEAD"
+        assert self._manager_hunks_missing_sanctioned_marker(span) == []

@@ -2,6 +2,8 @@
 
 **Doc-set Rev 6** (single alignment stamp; 2026-11-15 final fix pass). **Status:** Phase-1 endpoint deliverable · **Date:** 2026-11-15.
 **Provenance:** distilled from architecture-recommendation.md (🏛️ council 2/2 unanimous + 4 dimension analyses, all anchor-verified at tip `bf4bfde6e`).
+> ✅ **RATIFIED 2026-11-15 — ALL 7 ITEMS AS RECOMMENDED** (Emperor, via KV key `gc_phase2_go`). Two binding refinements (R1: untagged-but-ADDRESSED-to-TERMINAL member → NUDGE THE PARENT; R2: archived rooms PURGED FROM THE DATABASE — literal DB cleanup) + the P6 UI direction (chatroom icon → big modal on the instances surface) are recorded as settled design in decisions.md D-S10..D-S13 and architecture-recommendation.md Rev 7 (§4.4 / §2 / §13.1). The 7 items below are the UNALTERED decision record.
+
 **Reading guide:** 7 items, ordered by decision-impact. Each is a genuine choice with real trade-offs; everything else is settled within the rulings or is an implementation detail. Recommendations are ours to ratify or flip — the design bends at any of these without re-opening the substrate. Three adaptation disclosures follow the items (not decision items).
 
 ---

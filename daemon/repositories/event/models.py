@@ -64,6 +64,26 @@ class EventKind(str, enum.Enum):
     # (the 17th member) is unaffected. Additive — older readers ignore
     # unknown kinds (the SSE parser surfaces ``kind`` as a string).
     RAM_LIMIT_EXCEEDED = "ram_limit_exceeded"
+    # Agent group chat (Phase 2 / P1, 2026-11-15): the content-free
+    # ``room_*`` audit family. The REGISTRY lands in P1 (before any
+    # P2/P3 emission); P1 itself emits ONLY ``room_purged`` (inside the
+    # purge transaction — ids + counts only, no message content).
+    # Every member is content-free by contract: the ``data`` payload
+    # carries ids/counts/outcomes, never message text. Additive —
+    # older readers ignore unknown kinds (the SSE parser surfaces
+    # ``kind`` as a string, not a typed enum).
+    ROOM_POST = "room_post"
+    ROOM_JOIN = "room_join"
+    ROOM_LEAVE = "room_leave"
+    # Tag-delivery audit (P3): the outcome rides ``data`` —
+    # injected | enqueued | parked_paused | deferred_cursor | proposal.
+    ROOM_TAG_DELIVERY = "room_tag_delivery"
+    # Ruling-A proposal/decision audit rows (P3).
+    ROOM_PROPOSAL = "room_proposal"
+    ROOM_DECISION = "room_decision"
+    # R2 purge trace — the ONLY surviving record of a purged room
+    # (ids + counts only; emitted in the purge transaction, P1).
+    ROOM_PURGED = "room_purged"
 
 
 class Event(SQLModel, table=True):
