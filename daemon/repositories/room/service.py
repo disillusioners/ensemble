@@ -42,6 +42,7 @@ from typing import Any
 
 from sqlalchemy.engine import Engine
 
+from daemon.repositories.room.membership import ROLE_CHILD
 from daemon.repositories.room.models import RoomMessageKind
 from daemon.repositories.room.repository import (
     MemberNameCollisionError,
@@ -208,7 +209,7 @@ class RoomChatService:
         room_id: str,
         instance_id: str,
         base_name: str,
-        role: str = "child",
+        role: str = ROLE_CHILD,
         agent_id: str | None = None,
     ) -> dict[str, Any]:
         """Member-add under the per-room lock (off-loop).

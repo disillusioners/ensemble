@@ -86,6 +86,17 @@ __all__ = [
 ]
 
 
+# ── Naming-cascade vocabulary (the pinned string values) ──────────────────
+# The tier labels ride the RoomJoinSpec → spawn result line (no silent
+# naming); their VALUES are pinned by tests (byte-identical) — the
+# constants only name them. ROLE_CHILD is the default membership role
+# (RoomMemberRole.CHILD's value, named for the spawn-tool call sites).
+TIER_PARENT_PROVIDED = "parent_provided"
+TIER_QUICK_MODEL = "quick_model"
+TIER_AGENT_FALLBACK = "agent_fallback"
+ROLE_CHILD = RoomMemberRole.CHILD.value
+
+
 @dataclass(frozen=True)
 class RoomJoinSpec:
     """Spawn-path room-join contract (tool → lifecycle).
@@ -103,9 +114,9 @@ class RoomJoinSpec:
 
     room_id: str
     base_name: str
-    role: str = "child"
+    role: str = ROLE_CHILD
     agent_id: str | None = None
-    tier: str = "parent_provided"
+    tier: str = TIER_PARENT_PROVIDED
 
 # Architecture §9 caps — typed fail-closed at join admission.
 ROOM_MAX_MEMBERS = 16

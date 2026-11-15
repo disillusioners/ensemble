@@ -60,7 +60,13 @@ from daemon.config import _SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT
 # ``daemon.repositories.instance.repository``); the reverse direction
 # does not exist, so there is no circular-import risk.
 from daemon.repositories.instance import CHAT_SOURCE_TYPES
-from daemon.repositories.room.membership import RoomJoinError
+from daemon.repositories.room.membership import (
+    ROLE_CHILD,
+    TIER_AGENT_FALLBACK,
+    TIER_PARENT_PROVIDED,
+    TIER_QUICK_MODEL,
+    RoomJoinError,
+)
 from daemon.repositories.room.repository import MemberNameCollisionError
 from daemon.services.mission_record_service import (
     mint_commission_fail_open,
@@ -3093,7 +3099,7 @@ async def _prepare_room_join(
     return RoomJoinSpec(
         room_id=join_room,
         base_name=base_name,
-        role="child",
+        role=ROLE_CHILD,
         agent_id=agent_id,
         tier=tier,
     )
@@ -3177,9 +3183,9 @@ def _room_join_result_line(spec, final_member_name: str | None) -> str:
     if final_member_name and final_member_name != spec.base_name:
         suffix_note = " (tier 4 suffix)"
     tier_label = {
-        "parent_provided": "tier 1 parent-provided",
-        "quick_model": "tier 2 quick-model",
-        "agent_fallback": "tier 3 agent-fallback",
+        TIER_PARENT_PROVIDED: "tier 1 parent-provided",
+        TIER_QUICK_MODEL: "tier 2 quick-model",
+        TIER_AGENT_FALLBACK: "tier 3 agent-fallback",
     }.get(spec.tier, spec.tier)
     return (
         f"room join: room={spec.room_id} "

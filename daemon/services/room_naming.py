@@ -47,7 +47,12 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from ..graph import ThinkingChatOpenAI, clean_llm_config
-from ..repositories.room.membership import sanitize_member_name
+from ..repositories.room.membership import (
+    TIER_AGENT_FALLBACK,
+    TIER_PARENT_PROVIDED,
+    TIER_QUICK_MODEL,
+    sanitize_member_name,
+)
 from ..utils import parse_think_tags
 from .llm_failover import wrap_langchain_failover
 
@@ -224,7 +229,7 @@ class RoomNamingService:
         """
         tier1 = sanitize_member_name(provided)
         if tier1:
-            return tier1, "parent_provided"
+            return tier1, TIER_PARENT_PROVIDED
         tier2 = await self.generate_member_name(
             agent_id=agent_id, instance_name=instance_name
         )
@@ -235,5 +240,5 @@ class RoomNamingService:
         # normalized or fall through to tier 3.
         tier2 = sanitize_member_name(tier2)
         if tier2:
-            return tier2, "quick_model"
-        return self.fallback_member_name(agent_id), "agent_fallback"
+            return tier2, TIER_QUICK_MODEL
+        return self.fallback_member_name(agent_id), TIER_AGENT_FALLBACK
