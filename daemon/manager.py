@@ -4826,7 +4826,7 @@ class InstanceManager:
             logger.debug(
                 "room boot regen counts: %s", room_regen_counts
             )
-        except Exception as room_regen_err:
+        except Exception as room_regen_err:  # noqa: BLE001 — best-effort boot pass; a failure must not abort boot
             logger.warning(
                 "room boot regen pass failed (non-fatal, best-effort): "
                 "%r",

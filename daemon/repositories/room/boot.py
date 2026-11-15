@@ -20,15 +20,16 @@ pass neither reads nor writes ``message_queue`` / ``task`` (the
 F-1 pin test proves the wipe cannot reach room rows).
 
 Best-effort by contract: :func:`run_room_boot_regen` returns a counts
-dict and NEVER raises into the boot path — the caller (manager boot
-hook) still wraps it in try/except per the house boot-pass shape
-(maintenance_boot_sweep precedent).
+dict; the caller (manager boot hook) wraps failures in try/except per
+the house boot-pass shape (maintenance_boot_sweep precedent).
 """
 
 from __future__ import annotations
 
 import logging
 from typing import Any
+
+from sqlalchemy.engine import Engine
 
 from daemon.repositories.room.repository import RoomRepository
 
@@ -37,7 +38,7 @@ __all__ = ["run_room_boot_regen"]
 logger = logging.getLogger(__name__)
 
 
-def run_room_boot_regen(engine: Any) -> dict[str, Any]:
+def run_room_boot_regen(engine: Engine) -> dict[str, Any]:
     """Re-derive the TAGGED undelivered set; log ONE line; return counts.
 
     Sync function — the manager boot hook calls it via

@@ -31,6 +31,9 @@ import logging
 from collections import OrderedDict
 from typing import Any
 
+from sqlalchemy.engine import Engine
+
+from daemon.repositories.room.models import RoomMessageKind
 from daemon.repositories.room.repository import (
     MemberNameCollisionError,
     MemberNotFoundError,
@@ -64,7 +67,7 @@ logger = logging.getLogger(__name__)
 class RoomChatService:
     """Async facade: LRU per-room locks + ``asyncio.to_thread`` wrapping."""
 
-    def __init__(self, engine: Any) -> None:
+    def __init__(self, engine: Engine) -> None:
         self._repo = RoomRepository(engine)
         # Port of sources/dispatcher.py:451-452 — bounded LRU lock
         # registry + the double-check guard.
@@ -94,23 +97,58 @@ class RoomChatService:
 
     # ── room birth ─────────────────────────────────────────────────────
 
-    async def create_room(self, **kwargs: Any) -> dict[str, Any]:
+    async def create_room(
+        self,
+        *,
+        name: str,
+        tree_root_id: str,
+        owner_instance_id: str,
+        owner_member_name: str = "owner",
+        owner_agent_id: str | None = None,
+        room_id: str | None = None,
+    ) -> dict[str, Any]:
         """Room + owner seed in one transaction (off-loop)."""
-        return await asyncio.to_thread(self._repo.create_room, **kwargs)
+        return await asyncio.to_thread(
+            self._repo.create_room,
+            name=name,
+            tree_root_id=tree_root_id,
+            owner_instance_id=owner_instance_id,
+            owner_member_name=owner_member_name,
+            owner_agent_id=owner_agent_id,
+            room_id=room_id,
+        )
 
     # ── append — the ONLY path that takes the per-room lock ────────────
 
-    async def append_message(self, **kwargs: Any) -> dict[str, Any]:
+    async def append_message(
+        self,
+        *,
+        room_id: str,
+        author_instance_id: str,
+        author_name: str,
+        text_body: str,
+        tagged_members: list[str] | None = None,
+        addressed_members: list[str] | None = None,
+        kind: str = RoomMessageKind.MESSAGE.value,
+    ) -> dict[str, Any]:
         """Append under the per-room lock (off-loop).
 
         Lock scope: the ENTIRE append (room-state gate + seq INSERT +
         counters bump). The lock serializes writers within the daemon;
         ``UNIQUE(room_id, seq)`` backstops anything else.
         """
-        room_id = kwargs["room_id"]
         lock = await self._get_room_lock(room_id)
         async with lock:
-            return await asyncio.to_thread(self._repo.append_message, **kwargs)
+            return await asyncio.to_thread(
+                self._repo.append_message,
+                room_id=room_id,
+                author_instance_id=author_instance_id,
+                author_name=author_name,
+                text_body=text_body,
+                tagged_members=tagged_members,
+                addressed_members=addressed_members,
+                kind=kind,
+            )
 
     # ── cursors ────────────────────────────────────────────────────────
 

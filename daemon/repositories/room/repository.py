@@ -54,9 +54,10 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import bindparam, text as sql_text
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -81,7 +82,6 @@ __all__ = [
     "MemberNameCollisionError",
     "RoomSeqConflictError",
     "RoomRepository",
-    "_ANCESTRY_WALK_DEPTH",
 ]
 
 logger = logging.getLogger(__name__)
@@ -140,6 +140,46 @@ class RoomSeqConflictError(RoomError):
     is the DB-level backstop, never expected, always surfaced."""
 
 
+# ── The single-statement seq-assigning append (module-level, built ONCE) ──
+#
+# ``INSERT ... SELECT COALESCE(MAX(seq), 0) + 1 ...`` so no read-max
+# race exists inside the statement; ``UNIQUE(room_id, seq)`` is the
+# DB-level backstop. RETURNING is supported by PG and by SQLite
+# ≥ 3.35 — the house runner already gates on sqlite>=3.35. The JSON
+# params carry the PYTHON LIST bound via the house dialect-aware
+# JSONBType — a raw json.dumps string binds as VARCHAR and PG refuses
+# it (JSONB ≠ varchar); SQLite's JSON branch serializes the same
+# list. (Driver fork caught by the PG proof run.) Per-call state
+# travels only in the params dict at ``session.execute``.
+_APPEND_MESSAGE_STMT = sql_text(
+    "INSERT INTO room_messages ("
+    "  room_id, seq, author_instance_id, author_name,"
+    "  text, tagged_members, addressed_members, kind,"
+    "  created_at"
+    ") SELECT "
+    "  :room_id,"
+    "  COALESCE(MAX(seq), 0) + 1,"
+    "  :author_instance_id,"
+    "  :author_name,"
+    "  :text_body,"
+    "  :tagged_members,"
+    "  :addressed_members,"
+    "  :kind,"
+    "  :created_at"
+    " FROM room_messages WHERE room_messages.room_id = :room_id"
+    " RETURNING id, seq"
+).bindparams(
+    bindparam("room_id"),
+    bindparam("author_instance_id"),
+    bindparam("author_name"),
+    bindparam("text_body"),
+    bindparam("tagged_members", type_=JSONBType),
+    bindparam("addressed_members", type_=JSONBType),
+    bindparam("kind"),
+    bindparam("created_at"),
+)
+
+
 # ── Detached payload shapes ────────────────────────────────────────────────
 
 
@@ -190,7 +230,7 @@ def _message_payload(message: RoomMessage) -> dict[str, Any]:
 class RoomRepository:
     """Sync CRUD + the room transactions over the caller's engine."""
 
-    def __init__(self, engine: Any) -> None:
+    def __init__(self, engine: Engine) -> None:
         self._engine = engine
 
     # ── room birth (a: chatrooms row + OWNER membership row, one tx) ──
@@ -413,42 +453,10 @@ class RoomRepository:
                         f"room={room_id} is closed — posts are refused "
                         f"(capability row: closed = read-only)"
                     )
-                # Single-statement seq assignment + insert (RETURNING
-                # is supported by PG and by SQLite ≥ 3.35 — the house
-                # runner already gates on sqlite>=3.35). The JSON
-                # params carry the PYTHON LIST bound via the house
-                # dialect-aware JSONBType — a raw json.dumps string
-                # binds as VARCHAR and PG refuses it (JSONB ≠
-                # varchar); SQLite's JSON branch serializes the same
-                # list. (Driver fork caught by the PG proof run.)
-                stmt = sql_text(
-                    "INSERT INTO room_messages ("
-                    "  room_id, seq, author_instance_id, author_name,"
-                    "  text, tagged_members, addressed_members, kind,"
-                    "  created_at"
-                    ") SELECT "
-                    "  :room_id,"
-                    "  COALESCE(MAX(seq), 0) + 1,"
-                    "  :author_instance_id,"
-                    "  :author_name,"
-                    "  :text_body,"
-                    "  :tagged_members,"
-                    "  :addressed_members,"
-                    "  :kind,"
-                    "  :created_at"
-                    " FROM room_messages WHERE room_messages.room_id = :room_id"
-                    " RETURNING id, seq"
-                ).bindparams(
-                    bindparam("room_id"),
-                    bindparam("author_instance_id"),
-                    bindparam("author_name"),
-                    bindparam("text_body"),
-                    bindparam("tagged_members", type_=JSONBType),
-                    bindparam("addressed_members", type_=JSONBType),
-                    bindparam("kind"),
-                    bindparam("created_at"),
-                )
-                result = session.execute(stmt, {
+                # The typed binds live on the module-level statement —
+                # the JSONBType'd list params are the load-bearing part
+                # (PG JSONB ≠ varchar; see _APPEND_MESSAGE_STMT).
+                result = session.execute(_APPEND_MESSAGE_STMT, {
                     "room_id": room_id,
                     "author_instance_id": author_instance_id,
                     "author_name": author_name,
@@ -464,14 +472,7 @@ class RoomRepository:
                         f"UNIQUE(room_id, seq) backstop fired"
                     )
                 new_id, new_seq = int(result[0]), int(result[1])
-                # Same-transaction counters bump (no drift by construction).
-                session.execute(
-                    sql_text(
-                        "UPDATE chatrooms SET message_count = message_count + 1,"
-                        " last_post_at = :now, updated_at = :now"
-                        " WHERE room_id = :room_id"
-                    ).bindparams(now=now, room_id=room_id)
-                )
+                self._bump_room_counters(session, room_id, now)
                 session.commit()
         except IntegrityError as exc:
             raise RoomSeqConflictError(
@@ -489,6 +490,19 @@ class RoomRepository:
             "kind": kind,
             "created_at": now,
         }
+
+    @staticmethod
+    def _bump_room_counters(session: Session, room_id: str, now: str) -> None:
+        """Same-transaction denormalized counters bump (no drift by
+        construction) — the append's ``chatrooms`` UPDATE, extracted
+        so the append body reads as gate → INSERT → bump → commit."""
+        session.execute(
+            sql_text(
+                "UPDATE chatrooms SET message_count = message_count + 1,"
+                " last_post_at = :now, updated_at = :now"
+                " WHERE room_id = :room_id"
+            ).bindparams(now=now, room_id=room_id)
+        )
 
     def list_messages(
         self,
@@ -561,7 +575,11 @@ class RoomRepository:
         )
 
     def _advance_cursor(
-        self, room_id: str, instance_id: str, column: str, seq: int
+        self,
+        room_id: str,
+        instance_id: str,
+        column: Literal["last_read_seq", "last_delivered_seq"],
+        seq: int,
     ) -> bool:
         if column not in ("last_read_seq", "last_delivered_seq"):
             raise ValueError(f"unknown cursor column: {column}")
