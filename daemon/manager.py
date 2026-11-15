@@ -1032,6 +1032,21 @@ class InstanceManager:
             ProjectOperatingKnowledge,
             ProjectOperatingKnowledgeEmbedding,
         )
+        # Agent group chat Phase 2 / P1 (Emperor-ratified design,
+        # 2026-11-15): register the 3 room substrate tables BEFORE
+        # create_all so the PG boot path lands them on existing PG
+        # databases (SQLModel.metadata.create_all is the PG
+        # source-of-truth per the app_settings / resource_monitor /
+        # board / bash_spawn / PSL / memoir / POK precedent).
+        # Brand-new tables ⇒ NO ``_ensure_postgres_columns`` mirror;
+        # SQLite path is the ONE multi-table .sql file
+        # (20261115_080000_create_chatroom_tables.sql — the ratified
+        # single-file-3-tables precedent: board / memoir-v2).
+        from .repositories.room.models import (  # noqa: F401  # group-chat P1: register before create_all
+            ChatRoom,
+            ChatRoomMember,
+            RoomMessage,
+        )
 
         SQLModel.metadata.create_all(self._engine)
 
@@ -4788,6 +4803,36 @@ class InstanceManager:
             )
 
             await run_boot_sweep_with_retry(self._maintenance_runs_repo)
+
+        # ── Agent group chat P1 — room boot regeneration pass ──────────
+        # PURE re-derivation (the pinned pair, architecture §10 / D4):
+        # re-derives TAGGED undelivered rows for members INCLUDING THE
+        # OWNER across rooms in active|closed (predicate seq >
+        # max(last_read_seq, last_delivered_seq)) and does NOT route,
+        # wake, or revive anything — lane assignment is P3; proposals
+        # and addressed notices stay durable pending rows under the
+        # one-hop rule. Outside the F-1 blast radius by construction
+        # (the doomed predicate spans message_queue × task only; this
+        # pass reads/writes ONLY the room tables — the F-1 pin test
+        # proves the wipe cannot reach room rows). Best-effort: a
+        # failure logs WARNING and boot proceeds (the house boot-pass
+        # shape); runs OFF the loop via to_thread.
+        try:
+            from daemon.repositories.room.boot import run_room_boot_regen
+
+            room_regen_counts = await asyncio.to_thread(
+                run_room_boot_regen, self._engine
+            )
+            logger.debug(
+                "room boot regen counts: %s", room_regen_counts
+            )
+        except Exception as room_regen_err:
+            logger.warning(
+                "room boot regen pass failed (non-fatal, best-effort): "
+                "%r",
+                room_regen_err,
+                exc_info=True,
+            )
 
         await self._maintenance_service.start()
 
