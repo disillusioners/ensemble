@@ -174,6 +174,28 @@ class RoomSeqConflictError(RoomError):
     is the DB-level backstop, never expected, always surfaced."""
 
 
+def is_room_member_integrity(exc: BaseException) -> bool:
+    """Non-raising fingerprint probe — True iff the IntegrityError is
+    the room member-name ``UNIQUE(room_id, member_name)`` fire (the
+    ONLY room-table write the spawn commit makes).
+
+    The lifecycle's spawn-commit re-typing GATES on this: a matching
+    error re-types to :class:`MemberNameCollisionError`; every other
+    IntegrityError (instances-PK, hierarchy, anything non-room)
+    propagates UN-RE-TYPED. The fingerprints are the SAME strings the
+    raising classifier below matches — one source, extracted here so
+    the gate can probe without raising.
+    """
+    msg = str(exc).lower()
+    return (
+        "uq_chatroom_members_room_member_name" in msg
+        or (
+            "chatroom_members.room_id, chatroom_members.member_name"
+            in msg
+        )
+    )
+
+
 def raise_typed_member_integrity(
     exc: IntegrityError, room_id: str, member_name: str
 ) -> None:
@@ -184,20 +206,13 @@ def raise_typed_member_integrity(
     class. The staticmethod ``RoomRepository._raise_typed_integrity``
     remains as a thin delegating wrapper over this function.
     """
-    # Constraint FINGERPRINTS ONLY: the named UNIQUE constraint
-    # (PG / name-reporting drivers) or the other driver's
-    # dotted-pair column message. A bare ``member_name`` substring
-    # over-matches — a composite-PK duplicate or any other
-    # violation must fall through to the base RoomError, never the
-    # name-collision type.
-    msg = str(exc).lower()
-    if (
-        "uq_chatroom_members_room_member_name" in msg
-        or (
-            "chatroom_members.room_id, chatroom_members.member_name"
-            in msg
-        )
-    ):
+    # Constraint FINGERPRINTS ONLY (the shared probe above is the
+    # single source): the named UNIQUE constraint (PG / name-reporting
+    # drivers) or the other driver's dotted-pair column message. A
+    # bare ``member_name`` substring over-matches — a composite-PK
+    # duplicate or any other violation must fall through to the base
+    # RoomError, never the name-collision type.
+    if is_room_member_integrity(exc):
         raise MemberNameCollisionError(
             f"member_name={member_name!r} already registered in "
             f"room={room_id} (UNIQUE(room_id, member_name) backstop)"

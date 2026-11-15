@@ -5725,7 +5725,19 @@ status=InstanceStatus.IDLE.value,
             try:
                 session.commit()
             except IntegrityError as exc:
-                if room_join is not None:
+                # FINGERPRINT-GATED re-typing (P1 R1 discipline): ONLY
+                # a room-write-shaped integrity failure — the
+                # member-name UNIQUE fire, the sole room-table write
+                # this commit makes — re-types to the room error
+                # family. Every other IntegrityError (instances PK,
+                # hierarchy, anything non-room) propagates UN-RE-TYPED
+                # so a non-room DB fault can never masquerade as a
+                # room-join refusal.
+                from daemon.repositories.room.repository import (
+                    is_room_member_integrity,
+                )
+
+                if room_join is not None and is_room_member_integrity(exc):
                     from daemon.repositories.room.repository import (
                         raise_typed_member_integrity,
                     )
