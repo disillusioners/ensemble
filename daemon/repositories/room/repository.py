@@ -549,6 +549,11 @@ class RoomRepository:
         State-aware per the capability row: ``active`` and ``closed``
         both read; purged/absent resolves typed not-found.
         """
+        # Entry bounds guard (house precedent: shared_meta_kv P0-1) —
+        # reject before ANY DB work; the service pass-through is
+        # covered by the same guard.
+        if limit <= 0:
+            raise ValueError(f"limit must be positive: {limit}")
         self._require_room_access(room_id, caller_instance_id)
         stmt = (
             select(RoomMessage)

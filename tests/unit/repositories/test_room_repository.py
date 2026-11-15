@@ -531,6 +531,15 @@ def test_read_matrix_roster_query(repo, room_id, tree):
     assert roles == {"owner", "child"}
 
 
+def test_list_messages_rejects_non_positive_limit(repo, room_id, tree):
+    """R3 entry bounds pin (house precedent: shared_meta_kv P0-1): a
+    non-positive limit is refused with ValueError BEFORE any DB work
+    (bounds, not access — an authorized caller is the subject here)."""
+    for bad in (0, -1, -200):
+        with pytest.raises(ValueError, match="limit"):
+            repo.list_messages(room_id, caller_instance_id=tree["owner"], limit=bad)
+
+
 # ---------------------------------------------------------------------------
 # closed rooms — capability row (read-only)
 # ---------------------------------------------------------------------------
