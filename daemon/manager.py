@@ -16848,6 +16848,11 @@ class InstanceManager:
             # reserved for restart-orphaned rows). Runs BEFORE the DB
             # pools go away so the terminal write lands on a live pool.
             ("shutdown_maintenance_api_service", self._shutdown_maintenance_api_service()),
+            # agent group chat P3 — clear the per-room lock registry on
+            # stop (symmetry with get_room_lock's LRU maintenance).
+            # Hygiene only: locks are loop-local RAM, correctness lives
+            # in the DB backstops; a restart re-derives on demand.
+            ("clear_room_lock_registry", self._clear_room_lock_registry()),
             # Drain the D3 snapshot capture + R10 embedding
             # fire-and-forget tasks BEFORE the DB pools go away —
             # an in-flight terminal write must land on a live pool.
@@ -16876,6 +16881,27 @@ class InstanceManager:
     async def _cancel_all_active_requests(self) -> None:
         """Cancel all active requests in the registry with SHUTDOWN reason."""
         return await self._cancellation_service._cancel_all_active_requests()
+
+    async def _clear_room_lock_registry(self) -> None:
+        """agent group chat P3 shutdown step: drop every per-room
+        chat lock (registry-clear-on-stop symmetry, P3 carry-over).
+        Best-effort like every shutdown step — a missing service
+        (early-boot failure) is a no-op."""
+        service = getattr(self, "_room_chat_service", None)
+        if service is None:
+            return
+        try:
+            dropped = await service.clear_lock_registry()
+            if dropped:
+                logger.info(
+                    "shutdown: cleared %d per-room chat lock(s)", dropped
+                )
+        except Exception as e:  # noqa: BLE001 — best-effort shutdown step
+            logger.error(
+                "Error during shutdown step 'clear_room_lock_registry': %s",
+                e,
+                exc_info=True,
+            )
 
     async def _drain_snapshot_capture_tasks(self) -> None:
         """Drain the D3 snapshot capture/embedding lane during shutdown.

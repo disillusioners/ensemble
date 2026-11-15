@@ -341,6 +341,23 @@ class RoomChatService:
     ) -> None:
         await asyncio.to_thread(self._repo.emit_room_event, instance_id, kind, data)
 
+    # ── stop symmetry (P3 carry-over) ──────────────────────────────────
+
+    async def clear_lock_registry(self) -> int:
+        """Drop every per-room lock (manager.shutdown step).
+
+        Symmetry with ``get_room_lock``'s registry maintenance: the
+        registry is loop-local RAM (locks are never persisted), so the
+        clear is HYGIENE, not correctness — a restart re-derives locks
+        on demand and the ``UNIQUE(room_id, member_name)`` /
+        ``UNIQUE(room_id, seq)`` DB backstops own correctness. Returns
+        the number of locks dropped (for the shutdown log line).
+        """
+        async with self._locks_guard:
+            dropped = len(self._room_locks)
+            self._room_locks.clear()
+            return dropped
+
     # ── boot regeneration snapshot (pure derivation) ───────────────────
 
     async def derive_undelivered_tagged(self) -> list[dict[str, Any]]:

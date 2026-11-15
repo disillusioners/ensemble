@@ -169,9 +169,20 @@ class MemberNameCollisionError(RoomError, RoomJoinError):
 
 
 class RoomSeqConflictError(RoomError):
-    """``UNIQUE(room_id, seq)`` refused the append. The per-room lock
-    makes this unreachable within one daemon (RK-13 single-writer); it
-    is the DB-level backstop, never expected, always surfaced."""
+    """``UNIQUE(room_id, seq)`` refused the append.
+
+    Reachability (RK-13 amended — the old "never expected" claim was
+    an over-claim): WITHIN one daemon the per-room lock makes the
+    append single-writer, but the lock REGISTRY is an LRU capped at
+    ``MAX_ROOM_LOCKS`` — at >1000 cycling rooms the eviction can drop
+    a lock that is CURRENTLY HELD, letting a second writer enter the
+    same room concurrently. The consequence is bounded and benign per
+    the accepted RK-13 posture (architecture §1.4: the lock is a
+    THROUGHPUT layer; correctness lives in the DB backstop): exactly
+    one winner, the loser surfaces THIS typed error, and the next
+    append self-heals to ``MAX(committed seq) + 1`` (no duplicate, no
+    gap, no skip). Always surfaced, never swallowed.
+    """
 
 
 def is_room_member_integrity(exc: BaseException) -> bool:
@@ -219,6 +230,42 @@ def raise_typed_member_integrity(
         ) from exc
     raise RoomError(
         f"room write integrity failure for room={room_id}: {exc}"
+    ) from exc
+
+
+def is_purge_fk_integrity(exc: BaseException) -> bool:
+    """FK-shape probe for the purge path — True iff the IntegrityError
+    message matches the FK-violation fingerprint of EITHER driver:
+    PG/psycopg3 reports the named-constraint form
+    (``violates foreign key constraint``), SQLite the terse
+    ``foreign key constraint failed`` (case folded here). One probe,
+    both shapes — the purge must classify identically under either
+    driver (P3 carry-over: purge FK-fingerprint classification).
+    """
+    msg = str(exc).lower()
+    return "foreign key" in msg
+
+
+def raise_typed_purge_integrity(exc: IntegrityError, room_id: str) -> None:
+    """Purge-path classification (P3 carry-over: purge FK-fingerprint
+    classification).
+
+    The purge is child-first so an integrity failure here is abnormal;
+    it surfaces typed as the base :class:`RoomError` either way (NO
+    new exception class = no new call-site surface), but an FK-shaped
+    failure gets its OWN label in the message — ``purge FK integrity
+    failure`` — so a future referencing-table FK (a child table added
+    without the child-first ordering) is distinguishable in logs from
+    any other integrity shape. Deliberately uniform-raise: the
+    fingerprint SHAPES the message, it does not change the type.
+    """
+    if is_purge_fk_integrity(exc):
+        raise RoomError(
+            f"purge FK integrity failure for room={room_id} "
+            f"(child-first violated? a referencing table exists?): {exc}"
+        ) from exc
+    raise RoomError(
+        f"purge integrity failure for room={room_id}: {exc}"
     ) from exc
 
 
@@ -887,12 +934,7 @@ class RoomRepository:
                 )
                 session.commit()
         except IntegrityError as exc:
-            # Uniform typed wrap (create/append precedent): the purge
-            # is child-first so an integrity failure here is abnormal —
-            # surface it typed, never raw.
-            raise RoomError(
-                f"purge integrity failure for room={room_id}: {exc}"
-            ) from exc
+            raise_typed_purge_integrity(exc, room_id)
         logger.info(
             "room purge complete: room=%s reason=%s messages=%d members=%d",
             room_id,
@@ -1050,6 +1092,20 @@ class RoomRepository:
                     try:
                         tagged = json.loads(raw or "[]")
                     except (TypeError, ValueError):
+                        # Corrupt JSON in a delivery-critical column is
+                        # a data-integrity signal, NOT expected noise:
+                        # the only writer (append_message) always binds
+                        # valid JSON via JSONBType, so corruption means
+                        # external mutation. WARN with the row identity
+                        # so it neither raises nor silently vanishes
+                        # (A-P3-9); the row is still excluded from the
+                        # pending set — it cannot be tagged-delivered.
+                        logger.warning(
+                            "derive_undelivered_tagged: corrupt "
+                            "tagged_members JSON for room=%s message_id=%s "
+                            "seq=%s — row excluded from the pending set",
+                            row.room_id, row.message_id, row.seq,
+                        )
                         tagged = []
                 else:
                     tagged = []
