@@ -1,0 +1,14 @@
+# Fenced scratch config for boot_rogue_mirror.sh — rogue-containment-p2 gap-fix #4
+# (component-E2 § FENCED MIRROR EXTENSION gap 4 / §7.6 rider).
+#
+# The HARNESS GENERATES a copy of this file into the per-run scratch dir with the
+# leg's ACTUAL port substituted over the literal below. The generated copy is
+# exported as ENSEMBLE_CONFIG for every leg. NEVER point ENSEMBLE_CONFIG at a
+# repo-root config copy: the shipped repo config.yaml substitutes the ambient
+# PORT into its port line (config.yaml:113, the ambient-PORT substitution
+# idiom), so a repo-root copy is NOT a real fence. This template stays OUT of
+# the dev lanes entirely — the repo-root config.yaml is NOT touched (its
+# ambient-PORT substitution is load-bearing for dev.sh).
+daemon:
+  host: 0.0.0.0
+  port: 18790
