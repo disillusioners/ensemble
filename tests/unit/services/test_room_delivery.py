@@ -791,6 +791,72 @@ def test_addressed_alive_not_running_is_digest_only_no_wake(stack):
     assert manager.set_injection.call_count == 0, "alive addressee: no injection"
 
 
+def test_boot_two_hop_race_never_routes_parent(stack):
+    """C2 residual / A-P3-24 — the TWO-HOP race: the member reads ALIVE
+    at boot_deliver's lane read AND at _tagged_lane's re-read, then
+    flips TERMINAL before _lane_b_enqueue's fresh re-read (hooked on the
+    CAS: alive at descent, terminal at the fresh read). At boot the
+    fresh-terminal branch must stay MINT-ONLY: proposal minted, ZERO
+    parent routing, member never revived.
+
+    Trap avoidance (the C2 one-hop pin's lesson): the PARENT is seeded
+    routable-looking (running in the DB + live-graph mock) and the flip
+    touches ONLY the member — under the targeted mutation the reddening
+    assertion is the real _route_proposal_to_parent call firing
+    set_injection on the untouched running parent, not a parent-status
+    side-effect. Mutation-grade: reddens when the fresh-terminal
+    at_boot guard is removed (see the remediation report's red/green)."""
+    engine, repo, svc, room_id, caller = stack
+    with Session(engine) as s:
+        inst = s.get(Instance, "child-1")
+        inst.status = "idle"  # alive at BOTH pre-descent reads
+        owner = s.get(Instance, caller)
+        owner.status = "running"  # routable-looking parent, never mutated
+        s.commit()
+    post = asyncio.run(svc.append_message(
+        room_id=room_id, author_instance_id=caller, author_name="lead",
+        text_body="two-hop ping", tagged_members=["worker"], addressed_members=[],
+    ))
+    asyncio.run(svc.advance_delivered_cursor(room_id, caller, post["seq"]))
+    # The flip rides the CAS: by the time _lane_b_enqueue's fresh
+    # re-read runs, the member is terminal (CAS misses — terminal is
+    # outside the allowed set).
+    real_cas = svc.cas_instance_status_to_running
+
+    async def flipping_cas(iid, allowed):
+        if iid == "child-1":
+            with Session(engine) as s:
+                inst = s.get(Instance, iid)
+                inst.status = "completed"
+                s.commit()
+        return await real_cas(iid, allowed)
+
+    svc.cas_instance_status_to_running = flipping_cas  # type: ignore[method-assign]
+    manager = _make_manager(engine, svc, live_graph=True, inject_ok=True)
+    delivery = RoomDeliveryService(manager, svc)
+
+    async def run():
+        try:
+            return await delivery.boot_deliver(engine)
+        finally:
+            svc.cas_instance_status_to_running = real_cas  # type: ignore[method-assign]
+
+    counts = asyncio.run(run())
+    proposals = _proposal_rows(engine, room_id)
+    assert len(proposals) == 1, f"exactly one proposal, got {len(proposals)}"
+    assert counts["delivered"] == 1, "boot counting classifies proposal as delivered"
+    assert _member_row(engine, room_id).last_delivered_seq == post["seq"], "Y14 advance"
+    assert manager.set_injection.call_count == 0, (
+        "two-hop window: NEVER parent-inject at boot"
+    )
+    assert manager.enqueue_message.await_count == 0, (
+        "two-hop window: NEVER parent-enqueue at boot"
+    )
+    with Session(engine) as s:
+        assert s.get(Instance, "child-1").status == "completed", "member not revived"
+        assert s.get(Instance, caller).status == "running", "parent untouched"
+
+
 # ---------------------------------------------------------------------------
 # P3 carry-over — registry-clear-on-stop symmetry
 # ---------------------------------------------------------------------------

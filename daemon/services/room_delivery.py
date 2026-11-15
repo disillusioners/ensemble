@@ -269,7 +269,11 @@ class RoomDeliveryService:
         # Running → (a) injection, with DEFECT-A guard.
         if status == "running":
             if not self._manager.has_live_graph_task(member_iid):
-                # DEFECT-A downgrade → lane (b) shape.
+                # DEFECT-A downgrade → lane (b) shape. at_boot threads
+                # through (A-P3-24): for a running-graphless member the
+                # CAS-miss is UNCONDITIONAL (running ∉ allowed set), so
+                # the fresh-terminal re-read transit is guaranteed —
+                # boot must stay mint-only two hops deep too.
                 return await self._lane_b_enqueue(
                     room_id=room_id,
                     post=post,
@@ -277,6 +281,7 @@ class RoomDeliveryService:
                     seq=seq,
                     member_iid=member_iid,
                     graphless=True,
+                    at_boot=at_boot,
                 )
             # Race retry: 1 bounded retry.
             for attempt in range(2):
@@ -316,6 +321,7 @@ class RoomDeliveryService:
                 seq=seq,
                 member_iid=member_iid,
                 graphless=False,
+                at_boot=at_boot,
             )
 
         # Fallback (shouldn't happen — total map covers all 10).
@@ -330,6 +336,7 @@ class RoomDeliveryService:
         seq: int,
         member_iid: str,
         graphless: bool,
+        at_boot: bool = False,
     ) -> str:
         member_name = member["member_name"]
         # Rowcount-0 fallback: re-read fresh status; take the total map's
@@ -356,6 +363,13 @@ class RoomDeliveryService:
                 if not admitted:
                     return "deferred_cursor"
                 await self._room.advance_delivered_cursor(room_id, member_iid, seq)
+                if at_boot:
+                    # A-P3-24 (two-hop closure): the CAS-miss → fresh
+                    # re-read transit survives one hop deeper than the
+                    # _tagged_lane terminal branch — pair #2's absolute
+                    # wording holds HERE too: mint-only at boot, NO
+                    # parent routing.
+                    return "proposal"
                 await self._route_proposal_to_parent(
                     room_id=room_id,
                     post=post,
