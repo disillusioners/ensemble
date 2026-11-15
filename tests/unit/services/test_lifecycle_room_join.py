@@ -235,3 +235,63 @@ class TestLifecycleRoomJoin:
         # The holder is intact.
         holder = repo.get_member(room_id, "taken-2")
         assert holder is not None and holder["member_name"] == "scout"
+
+    def test_non_room_integrity_propagates_untyped(
+        self, engine, room_id
+    ):
+        """FINGERPRINT-GATE coverage: a NON-room IntegrityError at the
+        spawn commit (instances-PK duplicate here) propagates UN-
+        RE-TYPED even with room_join set — it must NEVER surface as a
+        room-join refusal (MemberNameCollisionError / RoomJoinError /
+        RoomError)."""
+        from sqlalchemy.exc import IntegrityError
+
+        from daemon.repositories.room.repository import RoomJoinError
+
+        # Pre-insert the instance row (no membership) so the spawn's
+        # instances INSERT violates the PK at commit — a non-room
+        # integrity failure, while room_join is set.
+        dup_id = "99999999-9999-9999-9999-999999999999"
+        with Session(engine) as s:
+            s.add(
+                Instance(
+                    instance_id=dup_id,
+                    agent_id="capture",
+                    agent_dir="/agents/capture",
+                    parent_id=CALLER,
+                    status="idle",
+                )
+            )
+            s.commit()
+
+        lifecycle = InstanceLifecycleService.__new__(InstanceLifecycleService)
+        spec = RoomJoinSpec(
+            room_id=room_id,
+            base_name="fresh-name",
+            role="child",
+            agent_id="capture",
+            tier="parent_provided",
+        )
+        with pytest.raises(IntegrityError) as exc_info:
+            lifecycle._spawn_instance_db_sync(
+                engine,
+                WritePauseGuard(),
+                instance_id=dup_id,
+                resolved_agent_id="capture",
+                resolved_agent_dir="/agents/capture",
+                version_tag=None,
+                agent_name="capture",
+                parent_id=CALLER,
+                project_id=None,
+                instance_metadata={},
+                room_join=spec,
+            )
+        # NOT re-typed: the propagated type is the RAW IntegrityError.
+        assert not isinstance(exc_info.value, RoomJoinError)
+        from daemon.repositories.room.repository import (
+            RoomError as _RoomError,
+        )
+
+        assert not isinstance(exc_info.value, _RoomError)
+        # And the room was never touched (rollback).
+        assert count_rows(engine, ChatRoomMember, instance_id=dup_id) == 0

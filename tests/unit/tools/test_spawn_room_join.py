@@ -590,6 +590,56 @@ class TestJoinRefusals:
 # ---------------------------------------------------------------------------
 
 
+class TestBlankJoinRoomRefusal:
+    """Item-3 pin: an EMPTY/blank join_room is a MALFORMED join
+    request — typed fail-closed refusal naming the problem, never a
+    silent spawn-without-join (the truthy `if join_room:` conflated
+    None and "")."""
+
+    def _assert_blank_refused(self, engine, manager, result, value):
+        assert result.startswith(
+            "ERROR: spawn refused — room join rejected"
+        ), result
+        assert "malformed join_room" in result
+        assert repr(value) in result
+        assert manager.spawn_instance.called is False
+        with Session(engine) as s:
+            from sqlalchemy import text
+
+            rows = s.exec(
+                text("SELECT COUNT(*) FROM instances")
+            ).scalar()
+            assert int(rows) == 0  # NO instance row written
+
+    def test_empty_string_join_room_refused(self, engine, room_stack):
+        _, svc, _ = room_stack
+        calls: list[dict] = []
+        manager = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
+        result = _run_spawn_tool(
+            manager, agent_id="capture", join_room=""
+        )
+        self._assert_blank_refused(engine, manager, result, "")
+
+    def test_whitespace_join_room_refused(self, engine, room_stack):
+        _, svc, _ = room_stack
+        calls: list[dict] = []
+        manager = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
+        result = _run_spawn_tool(
+            manager, agent_id="capture", join_room="   "
+        )
+        self._assert_blank_refused(engine, manager, result, "   ")
+
+    def test_none_join_room_still_inert(self, engine, room_stack):
+        """The gate must NOT fire for the LEGACY None path — no
+        join_room means no room intent, byte-shape unchanged."""
+        _, svc, _ = room_stack
+        calls: list[dict] = []
+        manager = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
+        result = _run_spawn_tool(manager, agent_id="capture")
+        assert "room join:" not in result
+        assert manager.spawn_instance.called is True
+
+
 class TestLegacyPath:
     def test_no_join_room_no_room_line_no_kwarg(self, engine, room_stack):
         _, svc, _ = room_stack

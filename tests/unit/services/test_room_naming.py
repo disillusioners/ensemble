@@ -234,6 +234,60 @@ class TestTier2Success:
 # ── the failure TRIPLE — error / timeout / unavailable ─────────────────────
 
 
+class TestTier2ConstructorFailure:
+    """Item-1 pin: the model CONSTRUCTION sits inside the guarded
+    block — a constructor / failover-setup failure is a tier-2
+    failure and degrades to the deterministic tier-3 fallback, never
+    an exception to the caller (D-S3: ANY tier-2 failure ⇒ tier 3)."""
+
+    @pytest.mark.asyncio
+    async def test_constructor_raise_returns_none_instant(self):
+        mgr = _manager()
+
+        class _ExplodingLLM:
+            def __init__(self, **kwargs):
+                raise RuntimeError("constructor exploded")
+
+        cap = _Capture(invoke_result=_content("never-reached"))
+        svc = RoomNamingService(mgr)
+        with patch(
+            "daemon.services.room_naming.ThinkingChatOpenAI",
+            _ExplodingLLM,
+        ), patch(
+            "daemon.services.room_naming.wrap_langchain_failover",
+            cap.fake_failover,
+        ):
+            started = time.monotonic()
+            out = await svc.generate_member_name(agent_id="capture")
+            elapsed = time.monotonic() - started
+        assert out is None
+        assert cap.invoke_calls == 0  # invoke never reached
+        assert elapsed < 1.0  # instant — never blocks spawn
+
+    @pytest.mark.asyncio
+    async def test_constructor_raise_cascade_lands_tier3(self):
+        mgr = _manager()
+
+        class _ExplodingLLM:
+            def __init__(self, **kwargs):
+                raise RuntimeError("constructor exploded")
+
+        cap = _Capture(invoke_result=_content("never-reached"))
+        svc = RoomNamingService(mgr)
+        with patch(
+            "daemon.services.room_naming.ThinkingChatOpenAI",
+            _ExplodingLLM,
+        ), patch(
+            "daemon.services.room_naming.wrap_langchain_failover",
+            cap.fake_failover,
+        ):
+            name, tier = await svc.resolve_base_name(
+                provided=None, agent_id="capture"
+            )
+        assert name == "capture"
+        assert tier == "agent_fallback"
+
+
 class TestTier2FailureTriple:
     @pytest.mark.asyncio
     async def test_failure_exception_returns_none_instant(self):
