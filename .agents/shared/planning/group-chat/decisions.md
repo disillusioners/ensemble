@@ -243,3 +243,107 @@ re-route / boot), and the UNIQUE index is the DB-level belt. Both
 layers are needed: the Python check avoids a wasted append + the
 unique-index violation on re-derivation, and the index covers races
 the Python check cannot see.
+
+**A-P3-9 · Corrupt tagged_members JSON warns with the row identity
+(O-6, P3 carry-over lane).** The carried anchor for O-6
+("repository.py:729-740, logger.debug") was STALE: the corrupt-JSON
+branch actually lives in `RoomRepository.derive_undelivered_tagged`
+and, as shipped by the core lane, logged NOTHING — the corrupt row was
+swallowed into `tagged = []` in total silence. Resolved: the branch now
+emits a `logger.warning` carrying room_id + message_id + seq, and the
+row stays excluded from the pending set (a corrupt payload cannot be
+tag-delivered). Rationale for warning over debug: the only writer
+(`append_message`) always binds valid JSON through JSONBType, so a
+corrupt payload implies EXTERNAL mutation of a delivery-critical
+column — a data-integrity signal, not expected noise; and
+`derive_undelivered_tagged` runs at boot + delivery routing, not a hot
+path. "Neither raises nor silently vanishes" is pinned by
+`test_corrupt_tagged_json_warns_and_excludes_row`.
+
+**A-P3-10 · The live PG integrity fingerprint is the NAMED-CONSTRAINT
+form (D1c, verified empirically).** On this deployment's PG (psycopg3,
+fenced `ensemble_dev`, private-schema probe, 2026-11-15), a real
+UNIQUE violation reports `duplicate key value violates unique
+constraint "uq_chatroom_members_room_member_name"` — the named form;
+the dotted-pair message (`chatroom_members.room_id,
+chatroom_members.member_name`) is the SQLITE form and never fires on
+PG. The classifiers accept EITHER shape (fingerprint-or), so both
+drivers classify identically; the execution pin
+(`test_room_migration_runner_execution.py::
+TestConstraintFingerprintDriverDependence`) pins BOTH branches — the
+SQLite form empirically off the executed schema, the PG form via the
+documented psycopg3 message — and the composite-PK negative leg
+(never mistyped as a name collision). The lockstep on constraint NAMES
+is deliberately NOT pinned (SQLite auto-names inline UNIQUEs); the
+driver-honest invariant is (column-set → unique) pairs.
+
+**A-P3-11 · `after_seq` is EXCLUSIVE at the boundary — implemented
+contract confirmed consistent with every doc claim (O-2).**
+`list_messages` returns rows with `seq > after_seq` (strict), ordered
+by seq ASC, truncated to `limit` — i.e. the FIRST `limit` rows above
+the cursor (the pull-model digest window). The boundary row AT
+`after_seq` is excluded; consecutive cursor walks cover the log
+exactly once (no dup, no loss). The re-derivation predicate
+(`seq > max(last_read_seq, last_delivered_seq)`), the unread COUNT
+(`seq > last_read_seq`), and the room_read tool prose all use the same
+strict form — no divergence existed to resolve. Pinned by the four
+window tests (seed N=7 > limit=3: window, boundary exclusion,
+pagination walk, beyond-max empty) in
+`test_room_repository.py`.
+
+**A-P3-12 · The L6 skip (P1) is recorded here — the in-repo referent
+is unrecoverable (D2).** The P1 review record (KV-only,
+`gc_p1_review_followups`) directed: "Record the L6 skip (dual-defaults
+target + rationale) in-repo." Recovery attempt: NO L6-numbered item
+exists anywhere in-repo — not in the group-chat planning docs, not in
+the tests (the only in-repo L-number is the L8 read-surface symmetry
+pin), not in git history of the group-chat lanes, not in the tester
+gate record. The full L6 text therefore lived only in the review
+channel, which has TTL'd. THIS ENTRY is the in-repo record the item
+asked for: the skip STANDS (nothing was implemented for L6 in P1, and
+P3 does not implement it either), the label "dual-defaults target" is
+preserved verbatim for future identification, and if the referent
+resurfaces (e.g. a model-field dual-default like `model_quick`'s
+Field-default + validator-fallback pair — the closest in-repo concept)
+it should be re-filed as a fresh A-P3-n rather than silently folded
+here. Flagged to the reviewer for confirmation at the gate.
+
+**A-P3-13 · `room_join` emission on admission is SAME-TRANSACTION and
+the room read happens BEFORE the first pending add (A-P2-11 closed).**
+`join_room_in_session` now adds ONE content-free `room_join` Event row
+(ids + final per-room name; the room OWNER's event stream — the exact
+`room_leave` shape) in the caller's transaction, so a rolled-back
+admission (UNIQUE name-collision fire) leaves NO phantom event. One
+mechanics note worth keeping: the owner stream is read via
+`session.get(ChatRoom, room_id)` BEFORE the membership row is added —
+a query AFTER the first `add` would trigger SQLAlchemy's
+query-invoked autoflush and move the collision's failure point from
+the CALLER's commit (where the typed backstop classifies it — the
+spawn sim and the standalone path both rely on that ordering) into
+the helper. Pinned by the emission/phantom/parity trio in
+`test_room_membership.py::TestRoomJoinEventEmission`; the pre-existing
+spawn/lifecycle/naming pins stayed green unchanged.
+
+**A-P3-14 · Purge-path FK integrity classification is message-shaped,
+uniform-typed (item 10, conditional — cheap, taken).** The purge's
+IntegrityError wrap now distinguishes FK-shaped failures (PG named
+prose "violates foreign key constraint" / SQLite terse "FOREIGN KEY
+constraint failed" — one probe, both drivers) from every other
+integrity shape, labelling the former `purge FK integrity failure`
+(child-first violated? a referencing table exists?). The TYPE stays
+the base `RoomError` either way — no new exception class, no new
+call-site surface, no migration. The classifier is module-level
+(`is_purge_fk_integrity` / `raise_typed_purge_integrity`) and pinned
+by `TestPurgeFingerprintClassification` (both FK shapes labelled,
+UNIQUE shape keeps the generic label, healthy purge path untouched).
+
+**A-P3-15 · The per-room lock registry clears on stop — hygiene, not
+correctness (item 9).** `RoomChatService.clear_lock_registry()` drops
+every loop-local lock behind the registry guard (returns the count)
+and `manager.shutdown` runs it as a best-effort step
+(`clear_room_lock_registry`) before the DB pools go away. Locks are
+never persisted and correctness lives in the DB backstops
+(RK-13 posture), so the clear is symmetry/hygiene with
+`get_room_lock`'s LRU maintenance — a restart re-derives locks on
+demand. The manager hunks carry the lane marker per the house
+drift-pin discipline; `TestP11BootNoBehaviorChange` stays green.
