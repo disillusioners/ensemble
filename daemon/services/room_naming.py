@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from ..graph import ThinkingChatOpenAI, clean_llm_config
 from ..repositories.room.membership import (
@@ -70,6 +70,11 @@ __all__ = [
 # instant-to-3.0s and never blocks the spawn itself.
 ROOM_NAME_MODEL_TIMEOUT_S = 3.0
 
+# Tier-3 terminal base: when even a NON-EMPTY agent id sanitizes to
+# nothing (e.g. all-symbols), the guaranteed-kebab ``member`` stands —
+# the cascade never returns an empty base name.
+_TERMINAL_MEMBER_BASE = "member"
+
 _default_logger = logging.getLogger(__name__)
 
 _NAMING_SYSTEM_PROMPT = (
@@ -92,7 +97,7 @@ class RoomNamingService:
     def __init__(
         self,
         manager: "InstanceManager",
-        logger: Any = None,
+        logger: logging.Logger | None = None,
     ):
         self._manager = manager
         self._logger = logger if logger is not None else _default_logger
@@ -122,8 +127,12 @@ class RoomNamingService:
         """Tier 2 — one bounded quick-model call → sanitized name.
 
         Returns the sanitized candidate, or ``None`` on ANY failure
-        (timeout / exception / empty / think-only output). NEVER
-        raises; NEVER retries (the ruling: no retry-loop).
+        INSIDE the model lane (timeout / exception / empty /
+        think-only output). NEVER retries (the ruling: no
+        retry-loop). Config-construction errors — the LLM client /
+        failover-wrapper setup, which sits OUTSIDE the guarded invoke
+        below — PROPAGATE to the caller (only the invoke itself and
+        its wait are guarded).
         """
         model = self._model_for_naming()
         if not model:
@@ -206,11 +215,13 @@ class RoomNamingService:
         """Tier 3 — deterministic instant base: the agent id.
 
         Sanitized through the same ladder (an agent id like
-        ``ui_worker`` becomes ``ui-worker``). The tier-4 registry
-        appends ``-N`` on collision. Predictable: the same agent id
-        always yields the same base.
+        ``ui_worker`` becomes ``ui-worker``). A fully unusable agent
+        id falls to the guaranteed-kebab ``member`` base
+        (``_TERMINAL_MEMBER_BASE``). The tier-4 registry appends
+        ``-N`` on collision. Predictable: the same agent id always
+        yields the same base.
         """
-        return sanitize_member_name(agent_id) or "member"
+        return sanitize_member_name(agent_id) or _TERMINAL_MEMBER_BASE
 
     async def resolve_member_name(
         self,
