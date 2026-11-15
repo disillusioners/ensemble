@@ -33,11 +33,10 @@ PER-ROOM LOCK CONCURRENCY (RK-12):
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Iterator
 
 import pytest
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
 from sqlmodel import Session, SQLModel, select
@@ -55,6 +54,7 @@ from daemon.repositories.message_queue.repository import (
     SQLModelMessageQueueRepository,
 )
 from daemon.repositories.room.boot import run_room_boot_regen
+from daemon.repositories.room.models import ChatRoom, ChatRoomMember, RoomMessage
 from daemon.repositories.room.repository import RoomRepository
 from daemon.repositories.room.service import MAX_ROOM_LOCKS, RoomChatService
 
@@ -129,17 +129,6 @@ def _seed_room_with_content(repo: RoomRepository, tree_root: str, owner: str) ->
     return rid
 
 
-def _room_snapshot(eng: Engine) -> dict:
-    from daemon.repositories.room.models import ChatRoom, ChatRoomMember, RoomMessage
-
-    with Session(eng) as s:
-        return {
-            "rooms": [r.room_id for r in s.exec(select(ChatRoom)).all()],
-            "members": [m.instance_id for m in s.exec(select(ChatRoomMember)).all()],
-            "messages": [m.seq for m in s.exec(select(RoomMessage)).all()],
-        }
-
-
 # ---------------------------------------------------------------------------
 # F-1 blast-radius pin
 # ---------------------------------------------------------------------------
@@ -149,8 +138,6 @@ def test_f1_wipe_cannot_reach_room_rows(engine, tmp_path):
     """THE F-1 PIN: the real wipe deletes the doomed queue rows and
     leaves EVERY room row untouched (architecture §10 'By
     construction' — different table/PK space)."""
-    from daemon.repositories.room.models import ChatRoom, ChatRoomMember, RoomMessage
-
     repo = RoomRepository(engine)
 
     _seed_instance(engine, "owner-1", None)
@@ -200,8 +187,6 @@ def test_room_tables_have_no_taskless_ready_shape(engine):
     """A FORBIDDEN-SHAPE pin: no room table carries the columns the F-1
     doomed predicate keys on (status='ready' taskless rows) — room
     persistence is structurally outside the queue lifecycle."""
-    from daemon.repositories.room.models import ChatRoom, ChatRoomMember, RoomMessage
-
     for model in (ChatRoom, ChatRoomMember, RoomMessage):
         columns = {c.name for c in model.__table__.columns}
         assert "status" not in columns, (
@@ -226,8 +211,6 @@ def test_boot_regen_does_not_route_wake_or_revive(engine):
     rid = _seed_room_with_content(repo, "owner-1", "owner-1")
 
     # give child-1 a membership row so the derivation has 2 participants
-    from daemon.repositories.room.models import ChatRoomMember
-
     with Session(engine) as s:
         s.add(
             ChatRoomMember(
@@ -267,16 +250,14 @@ def test_boot_regen_does_not_route_wake_or_revive(engine):
 def test_boot_regen_sees_closed_rooms_not_purged(engine):
     """Pinned pair #1, state dimension: active + closed covered; purged
     rooms (no rows) structurally absent."""
-    from sqlalchemy.exc import IntegrityError  # noqa: F401
-
+    # IntegrityError classification is pinned in test_room_repository.py
+    # (name-collision fingerprints + FK-vs-seq); this file never needs it.
     repo = RoomRepository(engine)
     _seed_instance(engine, "owner-1", None)
 
     rid_active = _seed_room_with_content(repo, "owner-1", "owner-1")
     rid_closed = _seed_room_with_content(repo, "owner-1", "owner-1")
     with Session(engine) as s:
-        from daemon.repositories.room.models import ChatRoom
-
         row = s.get(ChatRoom, rid_closed)
         row.state = "closed"
         row.closed_at = "2026-11-15T09:00:00+00:00"
@@ -309,8 +290,6 @@ def test_concurrent_appends_are_unique_and_gap_free(engine):
     """Two writers × N appends each through the service — seqs are
     exactly 1..2N with no duplicates (per-room lock + single-statement
     INSERT + UNIQUE backstop)."""
-    from daemon.repositories.room.models import RoomMessage
-
     repo = RoomRepository(engine)
     service = RoomChatService(engine)
     _seed_instance(engine, "owner-1", None)

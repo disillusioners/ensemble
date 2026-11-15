@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
 from typing import Iterator
 
 import pytest
@@ -410,7 +409,8 @@ def test_room_seq_conflict_error_in_vocabulary():
 def test_cursor_advance_monotonic(repo, room_id, tree):
     assert repo.advance_read_cursor(room_id, tree["owner"], 3) is True
     assert repo.advance_read_cursor(room_id, tree["owner"], 3) is False
-    assert repo.advance_read_cursor(room_id, tree["owner"], 1) is False  # never decreases
+    # never decreases
+    assert repo.advance_read_cursor(room_id, tree["owner"], 1) is False
     member = repo.get_member(room_id, tree["owner"])
     assert member["last_read_seq"] == 3
 
@@ -524,6 +524,32 @@ def test_list_messages_rejects_non_positive_limit(repo, room_id, tree):
     for bad in (0, -1, -200):
         with pytest.raises(ValueError, match="limit"):
             repo.list_messages(room_id, caller_instance_id=tree["owner"], limit=bad)
+
+
+def test_read_matrix_not_found_classes_hold_on_every_read_surface(
+    repo, room_id, tree
+):
+    """L8 symmetry pin: the fail-closed predicate is SHARED by all
+    three read surfaces — a non-member, a purged room and an absent
+    room resolve typed not-found on list_messages AND list_members
+    AND unread_count (not just the message log)."""
+    surfaces = (repo.list_messages, repo.list_members, repo.unread_count)
+
+    # non-member (room still alive here — the class must hold on its own)
+    for surf in surfaces:
+        with pytest.raises(RoomNotFoundError):
+            surf(room_id, caller_instance_id=tree["outsider"])
+
+    # purged (R2: purged = nonexistent)
+    repo.purge_room(room_id, reason="symmetry")
+    for surf in surfaces:
+        with pytest.raises(RoomNotFoundError):
+            surf(room_id, caller_instance_id=tree["owner"])
+
+    # absent
+    for surf in surfaces:
+        with pytest.raises(RoomNotFoundError):
+            surf("no-such-room", caller_instance_id=tree["owner"])
 
 
 # ---------------------------------------------------------------------------

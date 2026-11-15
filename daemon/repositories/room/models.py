@@ -69,6 +69,7 @@ from sqlalchemy import (
 from sqlmodel import Field, SQLModel
 
 from daemon.repositories.infra.types import JSONBType
+from daemon.repositories.instance.models import InstanceStatus
 
 __all__ = [
     "RoomState",
@@ -161,14 +162,16 @@ TERMINAL_INSTANCE_STATUSES_FOR_ROOMS: frozenset[str] = frozenset({
     "failed",
 })
 
-NON_TERMINAL_INSTANCE_STATUSES_FOR_ROOMS: frozenset[str] = frozenset({
-    "idle",
-    "running",
-    "waiting",
-    "paused",
-    "queued",
-    "waiting_children",
-})
+# Derived STRUCTURALLY from the enum: non-terminal ≡ enum − terminal,
+# so the partition (disjoint union == all members) holds by
+# construction; the totality pin's exact-content assertions keep their
+# teeth on the TERMINAL classification (hand-written) and the derived
+# result.
+NON_TERMINAL_INSTANCE_STATUSES_FOR_ROOMS: frozenset[str] = frozenset(
+    s.value
+    for s in InstanceStatus
+    if s.value not in TERMINAL_INSTANCE_STATUSES_FOR_ROOMS
+)
 
 # Room states whose rows are read/targetable. Purged rooms are NOT in
 # any set — they have no rows at all.
@@ -264,8 +267,9 @@ class ChatRoomMember(SQLModel, table=True):
     Every participant has a row — INCLUDING the owner (seeded at room
     create in the same transaction as the room row, D2). The composite
     PK ``(room_id, instance_id)`` makes duplicate membership
-    structurally impossible; the ``UNIQUE(room_id, member_name)`` backstop makes duplicate per-room names structurally impossible (the
-    tier-4 naming-registry backstop — colliders get suffixed at
+    structurally impossible; the ``UNIQUE(room_id, member_name)``
+    backstop makes duplicate per-room names structurally impossible
+    (the tier-4 naming-registry backstop — colliders get suffixed at
     registration, P2).
     """
 
@@ -421,7 +425,7 @@ class RoomMessage(SQLModel, table=True):
         sa_column=Column("text", Text, nullable=False),
         description="Post body. Never edited, never deleted (until purge).",
     )
-    tagged_members: list | None = Field(
+    tagged_members: list[str] | None = Field(
         default=None,
         sa_column=Column(
             "tagged_members", JSONBType, nullable=True, default=list
@@ -432,7 +436,7 @@ class RoomMessage(SQLModel, table=True):
             "= untagged."
         ),
     )
-    addressed_members: list | None = Field(
+    addressed_members: list[str] | None = Field(
         default=None,
         sa_column=Column(
             "addressed_members", JSONBType, nullable=True, default=list

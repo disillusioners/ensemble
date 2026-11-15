@@ -136,13 +136,15 @@ CREATE TABLE IF NOT EXISTS room_messages (
 
 -- DOWN
 --
--- The child tables are dropped BEFORE the parent so the rollback path
+-- The indexes drop BEFORE the tables (a table drop would take its
+-- indexes with it, turning the DROP INDEX lines into silent no-ops);
+-- then the child tables drop BEFORE the parent so the rollback path
 -- is order-safe with the NO ACTION foreign keys in place.
 
-DROP TABLE IF EXISTS room_messages;
-DROP TABLE IF EXISTS chatroom_members;
 DROP INDEX IF EXISTS idx_chatroom_members_instance_id;
 DROP INDEX IF EXISTS idx_chatrooms_state_last_post_at;
 DROP INDEX IF EXISTS idx_chatrooms_state_closed_at;
 DROP INDEX IF EXISTS idx_chatrooms_tree_root_id;
+DROP TABLE IF EXISTS room_messages;
+DROP TABLE IF EXISTS chatroom_members;
 DROP TABLE IF EXISTS chatrooms;
