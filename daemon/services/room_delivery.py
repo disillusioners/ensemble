@@ -207,6 +207,7 @@ class RoomDeliveryService:
         sender_instance_id: str,
         sender_member_name: str,
         room: dict[str, Any],
+        at_boot: bool = False,
     ) -> str:
         member_iid = member["instance_id"]
         member_name = member["member_name"]
@@ -221,7 +222,7 @@ class RoomDeliveryService:
 
         # Terminal → (c) parent proposal (Ruling A).
         if status in TERMINAL_INSTANCE_STATUSES_FOR_ROOMS:
-            await self._mint_proposal(
+            admitted = await self._mint_proposal(
                 room_id=room_id,
                 post=post,
                 member=member,
@@ -229,8 +230,17 @@ class RoomDeliveryService:
                 sender_instance_id=sender_instance_id,
                 sender_member_name=sender_member_name,
             )
+            if not admitted:
+                # F1/A-P3-22: no durable proposal row exists — advancing
+                # the cursor would PERMANENTLY hide the undelivered
+                # notification from re-derivation. Leave durable.
+                return "deferred_cursor"
             # Y14: terminal member's delivered cursor advances at admission.
             await self._room.advance_delivered_cursor(room_id, member_iid, seq)
+            if at_boot:
+                # Pinned pair #2 (absolute wording, A-P3-21): proposals
+                # are NEVER parent-routed at boot — mint-only, durable.
+                return "proposal"
             # Route the proposal to the parent per the parent-target matrix.
             await self._route_proposal_to_parent(
                 room_id=room_id,
@@ -333,8 +343,9 @@ class RoomDeliveryService:
                 return "deferred_cursor"
             if fresh in TERMINAL_INSTANCE_STATUSES_FOR_ROOMS:
                 # Re-route as terminal (proposal) — but only if we haven't
-                # already. Guard: mint proposal + parent route.
-                await self._mint_proposal(
+                # already. Guard: mint proposal + parent route, BOTH gated
+                # on admission (F1/A-P3-22).
+                admitted = await self._mint_proposal(
                     room_id=room_id,
                     post=post,
                     member=member,
@@ -342,6 +353,8 @@ class RoomDeliveryService:
                     sender_instance_id=post["author_instance_id"],
                     sender_member_name=post["author_name"],
                 )
+                if not admitted:
+                    return "deferred_cursor"
                 await self._room.advance_delivered_cursor(room_id, member_iid, seq)
                 await self._route_proposal_to_parent(
                     room_id=room_id,
@@ -484,7 +497,7 @@ class RoomDeliveryService:
 
         # terminal → (c′) parent notice.
         if status in TERMINAL_INSTANCE_STATUSES_FOR_ROOMS:
-            await self._mint_proposal(
+            admitted = await self._mint_proposal(
                 room_id=room_id,
                 post=post,
                 member=member,
@@ -492,6 +505,9 @@ class RoomDeliveryService:
                 sender_instance_id=sender_instance_id,
                 sender_member_name=sender_member_name,
             )
+            if not admitted:
+                # F1/A-P3-22: no durable proposal row — leave durable.
+                return "deferred_cursor"
             await self._room.advance_delivered_cursor(room_id, member_iid, seq)
             parent_iid = room["owner_instance_id"]
             # parent-target matrix for the notice delivery.
@@ -568,15 +584,29 @@ class RoomDeliveryService:
         trigger: str,
         sender_instance_id: str,
         sender_member_name: str,
-    ) -> None:
+    ) -> bool:
+        """ADMISSION RESULT (F1, A-P3-22): True iff a durable
+        task_proposal row EXISTS after this call — (a) minted here,
+        (b) dedup-present (the row was already there — that IS
+        admission; treating it as failure would re-deliver proposals
+        forever), or (c) concurrent-winner (the UNIQUE
+        (source_message_id, trigger, member) backstop raced us; the
+        winner's row is verified before admitting). Only a
+        NO-durable-row outcome returns False: the caller MUST gate the
+        delivered-cursor advance (and parent routing) on admission —
+        advancing the cursor on a mint failure would PERMANENTLY hide
+        the undelivered notification from re-derivation."""
         post_id = int(post["id"])
         member_name = member["member_name"]
-        # Dedup: if a proposal row already exists, skip.
-        try:
-            # Check existing proposals with same (source_message_id, trigger, member).
-            msgs = await self._room.read_messages(
-                room_id, caller_instance_id=sender_instance_id, after_seq=0, limit=10000
-            )
+
+        async def _durable_row_exists() -> bool:
+            try:
+                msgs = await self._room.read_messages(
+                    room_id, caller_instance_id=sender_instance_id,
+                    after_seq=0, limit=10000,
+                )
+            except Exception:  # noqa: BLE001 — probe failure ≠ proof of absence
+                return False
             for m in msgs:
                 if (
                     m.get("kind") == "task_proposal"
@@ -584,9 +614,12 @@ class RoomDeliveryService:
                     and m.get("trigger") == trigger
                     and m.get("member") == member_name
                 ):
-                    return  # already minted
-        except Exception:  # noqa: BLE001
-            pass
+                    return True
+            return False
+
+        # (b) Dedup-present: the row already exists — that IS admission.
+        if await _durable_row_exists():
+            return True
         text_body = (
             f"[ROOM NOTICE — addressed to a completed member] room={room_id} · "
             f"{sender_member_name}'s post is addressed to {member_name} "
@@ -609,8 +642,12 @@ class RoomDeliveryService:
                 addressed_members=[],
             )
         except Exception as exc:  # noqa: BLE001
+            # (c) Concurrent-winner: the dedup backstop (or any other
+            # integrity shape) fired — verify before admitting.
+            if await _durable_row_exists():
+                return True
             self._logger.warning("proposal mint failed: %r", exc)
-            return
+            return False
         await self._room.emit_room_event(
             sender_instance_id,
             "room_proposal",
@@ -622,6 +659,7 @@ class RoomDeliveryService:
                 "outcome": "minted",
             },
         )
+        return True
 
     async def _route_proposal_to_parent(
         self,
@@ -753,13 +791,15 @@ class RoomDeliveryService:
                 # We invoke the tagged lane for the member; if it mints a
                 # proposal, that's allowed (tagged terminal → proposal is
                 # the lane-(c) outcome, and the proposal row is durable).
-                # But pinned pair #2 says proposals are NOT routed at boot
-                # — the lane-(c) parent routing is skipped at boot.
-                # So we call a boot-safe variant: tagged terminal → mint
-                # proposal (durable) but NO parent routing.
+                # Pinned pair #2 (absolute wording, A-P3-21): proposals
+                # are NEVER parent-routed at boot — enforced by the
+                # at_boot flag (mint-only terminal branch), which also
+                # covers the ms-scale nick where the member flips
+                # terminal between the status read above and the lane's
+                # own re-read.
                 status = await self._room.get_instance_status(row["instance_id"])
                 if status in TERMINAL_INSTANCE_STATUSES_FOR_ROOMS:
-                    await self._mint_proposal(
+                    admitted = await self._mint_proposal(
                         room_id=row["room_id"],
                         post=post,
                         member=member,
@@ -767,12 +807,21 @@ class RoomDeliveryService:
                         sender_instance_id=post["author_instance_id"],
                         sender_member_name=post["author_name"],
                     )
+                    if not admitted:
+                        # F1/A-P3-22: no durable proposal row — the cursor
+                        # advance would permanently hide the notification.
+                        deferred += 1
+                        continue
                     await self._room.advance_delivered_cursor(
                         row["room_id"], row["instance_id"], int(row["seq"])
                     )
                     delivered += 1
                     continue
                 # Otherwise, route normally (injection/enqueue/park).
+                # at_boot=True (A-P3-21): a member flipping terminal
+                # between the status read above and the lane's re-read
+                # must still take the mint-only boot branch — NEVER the
+                # parent-routing branch (pinned pair #2, absolute).
                 outcome = await self._tagged_lane(
                     room_id=row["room_id"],
                     post=post,
@@ -780,6 +829,7 @@ class RoomDeliveryService:
                     sender_instance_id=post["author_instance_id"],
                     sender_member_name=post["author_name"],
                     room=room,
+                    at_boot=True,
                 )
                 # Outcome-faithful counting: delivered = the cursor
                 # advanced this pass (injected / enqueued / proposal);

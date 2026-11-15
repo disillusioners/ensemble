@@ -573,6 +573,225 @@ def test_boot_deliver_counts_reflect_outcomes(stack):
 
 
 # ---------------------------------------------------------------------------
+# P3 remediation iteration-2 pins — F1 mint-admission gating (A-P3-22),
+# C1 boot pair-#2 dedicated pin, C2 boot terminal race (A-P3-21), F3
+# alive-addressee no-wake. F1 + C2 pins are mutation-grade (evidence in
+# the remediation report); C1/F3 pin EXISTING guarantees that lacked a
+# dedicated pin (pair #2 and §4.4's promised pin #2 respectively).
+# ---------------------------------------------------------------------------
+
+
+def _raise_append(svc):
+    """Swap svc.append_message for a raiser; returns the real method for
+    restoration. Used to inject a proposal-mint failure deterministically."""
+    real_append = svc.append_message
+
+    async def boom(**kw):
+        raise RuntimeError("mint boom")
+
+    svc.append_message = boom  # type: ignore[method-assign]
+    return real_append
+
+
+def _proposal_rows(engine, room_id):
+    with Session(engine) as s:
+        return s.exec(__import__("sqlmodel").select(RoomMessage).where(
+            RoomMessage.room_id == room_id, RoomMessage.kind == "task_proposal")).all()
+
+
+def test_mint_failure_route_time_defers_and_keeps_cursor(stack):
+    """F1 / A-P3-22 (lane (c), route-time): when the proposal mint fails,
+    the terminal lane must return deferred_cursor, leave the delivered
+    cursor UNTOUCHED, and NOT parent-route — the advanced cursor would
+    permanently hide the undelivered notification. Mutation-grade:
+    reddens against the pre-fix 939cf171a shape (swallowed mint +
+    unconditional advance → 'proposal')."""
+    engine, repo, svc, room_id, caller = stack
+    with Session(engine) as s:
+        inst = s.get(Instance, "child-1")
+        inst.status = "completed"
+        owner = s.get(Instance, caller)
+        owner.status = "running"  # routing (if it ran) would inject — detectable
+        s.commit()
+    post = asyncio.run(svc.append_message(
+        room_id=room_id, author_instance_id=caller, author_name="lead",
+        text_body="hello", tagged_members=["worker"], addressed_members=[],
+    ))
+    real_append = _raise_append(svc)
+    manager = _make_manager(engine, svc, live_graph=True, inject_ok=True)
+    delivery = RoomDeliveryService(manager, svc)
+
+    async def run():
+        try:
+            return await delivery.route_post(
+                room_id=room_id, post=post,
+                sender_instance_id=caller, sender_member_name="lead",
+            )
+        finally:
+            svc.append_message = real_append  # type: ignore[method-assign]
+
+    res = asyncio.run(run())
+    outcomes = [o["outcome"] for o in res["tag_outcomes"]]
+    assert outcomes == ["deferred_cursor"], f"expected deferred_cursor, got {outcomes}"
+    assert _proposal_rows(engine, room_id) == [], "no proposal row may exist"
+    assert _member_row(engine, room_id).last_delivered_seq == 0, (
+        "mint failure must NOT advance the delivered cursor"
+    )
+    assert manager.set_injection.call_count == 0, "parent routing must be gated"
+    assert manager.enqueue_message.await_count == 0
+
+
+def test_mint_failure_boot_time_defers_and_keeps_cursor(stack):
+    """F1 / A-P3-22 (lane (c′)/boot-time): a mint failure at boot counts
+    deferred, leaves the cursor untouched, and mints no row — the row
+    re-derives (and retries) on the next boot. Mutation-grade: reddens
+    against the pre-fix 939cf171a shape (delivered += 1 + cursor advance
+    on a swallowed mint)."""
+    engine, repo, svc, room_id, caller = stack
+    with Session(engine) as s:
+        inst = s.get(Instance, "child-1")
+        inst.status = "completed"
+        s.commit()
+    post = asyncio.run(svc.append_message(
+        room_id=room_id, author_instance_id=caller, author_name="lead",
+        text_body="boot ping", tagged_members=["worker"], addressed_members=[],
+    ))
+    asyncio.run(svc.advance_delivered_cursor(room_id, caller, post["seq"]))
+    real_append = _raise_append(svc)
+    manager = _make_manager(engine, svc, live_graph=True, inject_ok=True)
+    delivery = RoomDeliveryService(manager, svc)
+
+    async def run():
+        try:
+            return await delivery.boot_deliver(engine)
+        finally:
+            svc.append_message = real_append  # type: ignore[method-assign]
+
+    counts = asyncio.run(run())
+    assert counts["delivered"] == 0, "failed mint is not delivered"
+    assert counts["deferred"] == 1, "failed mint counts deferred (retry next boot)"
+    assert _proposal_rows(engine, room_id) == [], "no proposal row may exist"
+    assert _member_row(engine, room_id).last_delivered_seq == 0, (
+        "mint failure must NOT advance the delivered cursor"
+    )
+
+
+def test_boot_terminal_mints_exactly_once_and_never_routes_parent(stack):
+    """C1 — the pinned pair #2 DEDICATED pin: terminal member + tagged
+    row at boot → EXACTLY ONE task_proposal row minted, Y14 cursor
+    advance, ZERO parent set_injection/enqueue_message calls, parent
+    status unchanged."""
+    engine, repo, svc, room_id, caller = stack
+    with Session(engine) as s:
+        inst = s.get(Instance, "child-1")
+        inst.status = "completed"
+        owner = s.get(Instance, caller)
+        owner.status = "running"  # if routing happened, injection would fire
+        s.commit()
+    post = asyncio.run(svc.append_message(
+        room_id=room_id, author_instance_id=caller, author_name="lead",
+        text_body="boot ping", tagged_members=["worker"], addressed_members=[],
+    ))
+    asyncio.run(svc.advance_delivered_cursor(room_id, caller, post["seq"]))
+    manager = _make_manager(engine, svc, live_graph=True, inject_ok=True)
+    delivery = RoomDeliveryService(manager, svc)
+
+    counts = asyncio.run(delivery.boot_deliver(engine))
+    proposals = _proposal_rows(engine, room_id)
+    assert len(proposals) == 1, f"exactly one proposal, got {len(proposals)}"
+    assert counts["delivered"] == 1, "terminal mint advances the cursor (Y14)"
+    assert _member_row(engine, room_id).last_delivered_seq == post["seq"]
+    assert manager.set_injection.call_count == 0, "never parent-inject at boot"
+    assert manager.enqueue_message.await_count == 0, "never parent-enqueue at boot"
+    with Session(engine) as s:
+        assert s.get(Instance, caller).status == "running", "parent untouched"
+
+
+def test_boot_terminal_race_never_routes_parent(stack):
+    """C2 / A-P3-21: a member flipping terminal between boot_deliver's
+    status read and _tagged_lane's re-read takes the MINT-ONLY boot
+    branch (at_boot=True) — the parent-routing branch never fires at
+    boot, restoring pair #2's absolute wording. Mutation-grade: reddens
+    when the at_boot guard is removed (parent gets injected/enqueued)."""
+    engine, repo, svc, room_id, caller = stack
+    with Session(engine) as s:
+        owner = s.get(Instance, caller)
+        owner.status = "running"  # routing (if it ran) would inject — detectable
+        s.commit()
+    post = asyncio.run(svc.append_message(
+        room_id=room_id, author_instance_id=caller, author_name="lead",
+        text_body="race ping", tagged_members=["worker"], addressed_members=[],
+    ))
+    asyncio.run(svc.advance_delivered_cursor(room_id, caller, post["seq"]))
+    # Deterministic race: the FIRST status read (boot_deliver's lane
+    # assignment) sees the member alive; the member flips terminal before
+    # _tagged_lane's re-read.
+    real_status = svc.get_instance_status
+    flipped = False
+
+    async def racing_status(iid):
+        nonlocal flipped
+        if iid == "child-1":
+            if not flipped:
+                flipped = True
+                return "idle"  # boot_deliver's lane-assignment read sees alive
+            with Session(engine) as s:
+                inst = s.get(Instance, iid)
+                inst.status = "completed"
+                s.commit()
+        return await real_status(iid)  # every other read (parent!) passes through
+
+    svc.get_instance_status = racing_status  # type: ignore[method-assign]
+    manager = _make_manager(engine, svc, live_graph=True, inject_ok=True)
+    delivery = RoomDeliveryService(manager, svc)
+
+    async def run():
+        try:
+            return await delivery.boot_deliver(engine)
+        finally:
+            svc.get_instance_status = real_status  # type: ignore[method-assign]
+
+    counts = asyncio.run(run())
+    assert counts["delivered"] == 1, "terminal mint at boot advances the cursor"
+    assert len(_proposal_rows(engine, room_id)) == 1, "exactly one proposal"
+    assert manager.set_injection.call_count == 0, (
+        "pair #2 absolute: the race path must NEVER parent-inject at boot"
+    )
+    assert manager.enqueue_message.await_count == 0, (
+        "pair #2 absolute: the race path must NEVER parent-enqueue at boot"
+    )
+
+
+def test_addressed_alive_not_running_is_digest_only_no_wake(stack):
+    """F3 — §4.4's doc-promised pin #2: an addressed-to ALIVE-NOT-RUNNING
+    addressee gets digest-only with NO wake — no MessageQueue write, no
+    injection call (addressing alone never interrupts)."""
+    engine, repo, svc, room_id, caller = stack
+    with Session(engine) as s:
+        inst = s.get(Instance, "child-1")
+        inst.status = "idle"  # alive, not running
+        s.commit()
+    manager = _make_manager(engine, svc, live_graph=True, inject_ok=True)
+    delivery = RoomDeliveryService(manager, svc)
+
+    async def run():
+        post = await svc.append_message(
+            room_id=room_id, author_instance_id=caller, author_name="lead",
+            text_body="fyi", tagged_members=[], addressed_members=["worker"],
+        )
+        return await delivery.route_post(
+            room_id=room_id, post=post,
+            sender_instance_id=caller, sender_member_name="lead",
+        )
+
+    res = asyncio.run(run())
+    addr_outcomes = [o["outcome"] for o in res["addressed_outcomes"]]
+    assert addr_outcomes == ["digest_only"]
+    assert manager.enqueue_message.await_count == 0, "alive addressee: no wake"
+    assert manager.set_injection.call_count == 0, "alive addressee: no injection"
+
+
+# ---------------------------------------------------------------------------
 # P3 carry-over — registry-clear-on-stop symmetry
 # ---------------------------------------------------------------------------
 
