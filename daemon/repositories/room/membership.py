@@ -175,7 +175,15 @@ class RoomJoinRoomCapError(RoomJoinError):
 
 class RoomLeaveOwnerError(Exception):
     """Leave refused for the OWNER row — the owner membership is
-    retired only WITH the room (D2; the purge is the only remover)."""
+    retired only WITH the room (D2; the purge is the only remover).
+
+    Deliberately OUTSIDE the :class:`RoomError` family (base
+    ``Exception``): this module cannot import the repository's error
+    vocabulary — repository.py imports THIS module (the one-direction
+    constraint that keeps the room package cycle-free). P5 catchers
+    must catch this type EXPLICITLY; no room-error base will carry
+    it.
+    """
 
 
 # ── Name normalization + the tier-4 suffix registry (pure) ────────────────
