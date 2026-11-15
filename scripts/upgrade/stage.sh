@@ -523,6 +523,35 @@ executor_family_install "$REPO_ROOT" "$STAGE_TMP" || {
     rm -rf "$STAGE_TMP"
     exit 1
 }
+
+# D-2 (ENSEMBLE-32 repair lane, E2E round 1): mint the config-compat
+# CONTRACT into the staged daemon slice — the TARGET tree's real config
+# model key-shape as JSON, consumed by the payload's
+# config_compat_check.py at promote ENTRY (validating the install's
+# config.yaml against the target BEFORE any stop/flip — the demo
+# rollback crash-looped on a refreshed config with a deterministic
+# pydantic extra_forbidden AFTER the flip). BEST-EFFORT at stage: a
+# host without an importable pydantic/pydantic_settings mints nothing
+# and this stage WARNS — the promote gate then REFUSES fail-closed on
+# the absent contract (never warns-and-passes; D-2 mandate).
+_stage_cc_py=""
+if [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+    _stage_cc_py="$REPO_ROOT/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    _stage_cc_py="python3"
+fi
+if [ -z "$_stage_cc_py" ]; then
+    _warn "config-compat contract NOT minted: no python interpreter found — the promote gate will REFUSE this payload at entry (fail-closed; D-2)"
+else
+    if "$_stage_cc_py" "$STAGE_TMP/daemon/plugin_subsystem/config_compat_contract.py" \
+        --repo-root "$REPO_ROOT" \
+        > "$STAGE_TMP/daemon/plugin_subsystem/config_compat_contract.json" 2> "$STAGE_TMP/.ens-cc-err.$$"; then
+        _log "config-compat contract minted into the payload ($(wc -c < "$STAGE_TMP/daemon/plugin_subsystem/config_compat_contract.json") bytes) — promote entry will validate the install config against THIS release's model"
+    else
+        _warn "config-compat contract NOT minted (emit failed: $(head -c 200 "$STAGE_TMP/.ens-cc-err.$$" 2>/dev/null)) — the promote gate will REFUSE this payload at entry (fail-closed; D-2)"
+    fi
+    rm -f "$STAGE_TMP/.ens-cc-err.$$"
+fi
 lock_heartbeat   # payload copies done; checksum walks start (long phase)
 
 # ADR-014/m6 invariant — NO .env of any kind inside a release dir (catches a

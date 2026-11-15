@@ -303,6 +303,23 @@ the staged release payload is the **complete, self-contained invoke path**:
 `stage.sh`, point `current` at the staged release, and promote from inside
 it. No pinned checkout is required for the normal ceremony.
 
+**DEMO/CONFIG CURRENCY (D-2, E2E round 1 — 2026-11-15):** `config.yaml` does
+NOT travel with releases (only `launcher.sh` swaps per-release) — the demo
+env's `config.yaml` must be **current-schema** before promoting new-era code
+onto it. The v0.10.8 rollback binary rejected the refreshed v0.30-era config
+with a deterministic pydantic `extra_forbidden` and crash-looped (E2E
+evidence, 2026-11-15 08:02–08:05Z). Guarded now: promote's ENTRY carries a
+**config-compat check** (`lib.sh _config_compat_check` — slice modules
+`daemon/plugin_subsystem/config_compat_{check,contract}.py`) that validates
+the install config's key shape against the TARGET release's model contract
+BEFORE any stop/flip, refusing (exit 78, `config-incompatible` / remedy:
+"migrate config or pin a compatible release") and failing CLOSED when the
+contract cannot be evaluated. `stage.sh` mints the contract into the payload
+from the target tree; legacy payloads without one are refused at promote
+entry (re-stage). DEFERRED (incident §9.4(e)): per-release config transport
+(config traveling in the payload like launcher.sh) — the structural fix,
+NOT built by this lane.
+
 ### 10.2 The recovery / escape hatch — `ENSEMBLE_UPGRADE_SCRIPTS_DIR` pinned worktree
 
 The pinned-worktree pattern (`ensemble-src-wt-scripts-pin`, must contain

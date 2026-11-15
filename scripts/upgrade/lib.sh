@@ -3662,6 +3662,122 @@ _freshness_refuse() {
     _refuse "$token" "$@"
 }
 
+# ═══════════════ Config-compat promote entry check (D-2) ═══════════════
+#
+# _config_compat_check — E2E round 1 🟠 (demo promote 2026-11-15): the
+# install's config.yaml does NOT travel with releases (only launcher.sh
+# swaps per-release), so a promote whose TARGET release cannot parse the
+# install config crash-loops the new daemon with a deterministic pydantic
+# error AFTER the flip — the demo auto-rollback then landed on an
+# unbootable previous release and halted for 5+ hours of human time. This
+# entry check validates the install config's KEY SHAPE against the TARGET
+# release's config model contract BEFORE any stop/flip; incompatibility is
+# an exit-class refusal (the 78 freshness-refusal family) with a named
+# remedy. FAIL-CLOSED by mandate: if the check CANNOT run (checker or
+# contract absent, interpreter without PyYAML, config unparseable), it
+# REFUSES — it never warns-and-passes.
+#
+# Contract resolution (dual-mode):
+#   TREE CONTEXT — promote running from a checkout/worktree: the target
+#   model is importable at <tree>/daemon/config.py, so the contract is
+#   minted FRESH via the payload's own minter
+#   (config_compat_contract.py --repo-root <tree>) into a tmp file; a
+#   mint failure falls through to the staged-contract rung (and finally
+#   to the refusal).
+#   PAYLOAD CONTEXT — release-staged promote: the contract travels WITH
+#   the release (stage.sh mints it into the daemon slice from the target
+#   tree at stage time). Legacy payloads staged before this lane carry no
+#   contract ⇒ REFUSE with the re-stage remedy.
+# The checker + minter are slice members (executor_family_paths — staged
+# with every payload; commit-in the tree for the tree context).
+#
+# Interpreter ladder (same conventions as the staleness predicate's
+# PyYAML requirement): CONFIG_COMPAT_PYTHON wins; else the build venv
+# (the only interpreter guaranteed to carry pydantic for the tree-context
+# mint); else python3.
+_config_compat_check() {
+    local version="${1:-?}" checker contract py cfg_out rc
+    # SCOPE (D-2): the gate guards REAL installs (demo/live) — the sandbox
+    # lane is the free exercise lane (require_live_guard precedent), and
+    # sandbox fixtures cannot mint a contract (no target model in a
+    # fixture tree). A sandbox promote SKIPS the check loudly.
+    if [ "${UP_TARGET:-}" = "sandbox" ]; then
+        _log "config-compat: sandbox target — entry check skipped (D-2 scope: the gate guards demo/live installs)"
+        return 0
+    fi
+    checker="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../../daemon/plugin_subsystem/config_compat_check.py"
+    [ -f "$checker" ] || checker="${REPO_ROOT:-}/daemon/plugin_subsystem/config_compat_check.py"
+    if [ ! -f "$checker" ]; then
+        _freshness_refuse config-compat-unrunnable \
+            "config-compat checker module not found (looked next to lib.sh and at ${REPO_ROOT:-?}/daemon/plugin_subsystem/config_compat_check.py). " \
+            "The gate refuses FAIL-CLOSED when it cannot evaluate (D-2). " \
+            "Remedy: run promote from the repo checkout (scripts/upgrade/promote.sh) or re-stage with a stage.sh that mints the config-compat contract."
+    fi
+    if [ -n "${CONFIG_COMPAT_PYTHON:-}" ]; then
+        py="$CONFIG_COMPAT_PYTHON"
+    elif [ -x "${REPO_ROOT:-}/.venv/bin/python" ]; then
+        py="${REPO_ROOT}/.venv/bin/python"
+    elif command -v python3 >/dev/null 2>&1; then
+        py="python3"
+    else
+        _freshness_refuse config-compat-unrunnable \
+            "config-compat check cannot run: no python interpreter found (CONFIG_COMPAT_PYTHON unset, no .venv/bin/python, no python3). " \
+            "The gate refuses FAIL-CLOSED when it cannot evaluate (D-2)."
+    fi
+    contract=""
+    local tree_root
+    tree_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)"
+    if [ -f "$tree_root/daemon/config.py" ] && [ -f "$checker" ] && [ -f "$tree_root/daemon/plugin_subsystem/config_compat_contract.py" ]; then
+        # TREE CONTEXT: mint fresh from the target model (always current).
+        cfg_out="$(mktemp -t cc.XXXXXX 2>/dev/null || printf '/tmp/cc.%s.json' "$$")"
+        if "$py" "$tree_root/daemon/plugin_subsystem/config_compat_contract.py" \
+            --repo-root "$tree_root" > "$cfg_out" 2>/dev/null && [ -s "$cfg_out" ]; then
+            contract="$cfg_out"
+        else
+            rm -f "$cfg_out" 2>/dev/null
+            _warn "config-compat: fresh contract mint FAILED in tree context — falling through to the staged contract rung"
+        fi
+    fi
+    if [ -z "$contract" ]; then
+        contract="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../../daemon/plugin_subsystem/config_compat_contract.json"
+        [ -f "$contract" ] || contract="${REPO_ROOT:-}/daemon/plugin_subsystem/config_compat_contract.json"
+        if [ ! -f "$contract" ]; then
+            _freshness_refuse config-compat-unrunnable \
+                "config-compat contract not found (looked next to lib.sh and at ${REPO_ROOT:-?}/daemon/plugin_subsystem/config_compat_contract.json). " \
+                "The TARGET release's config key-shape is unknown — the gate refuses FAIL-CLOSED (D-2; a release whose model rejects the install config crash-loops AFTER the flip). " \
+                "Remedy: re-stage the release with a contract-minting stage.sh (the contract is minted from the target tree at stage time), or pin a compatible release."
+        fi
+    fi
+    if [ ! -f "${INSTALL_DIR:-}/config.yaml" ]; then
+        _freshness_refuse config-compat-unrunnable \
+            "install config.yaml not found at ${INSTALL_DIR:-?}/config.yaml — the daemon refuses to boot without it, so the flip would crash-loop. " \
+            "Remedy: restore config.yaml (stage/config backups) before promoting."
+    fi
+    local out
+    out="$("$py" "$checker" "$contract" "${INSTALL_DIR}/config.yaml" 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        _log "config-compat: $(printf '%s' "$out" | tail -n 1)"
+        return 0
+    fi
+    local code detail
+    code="$(printf '%s\n' "$out" | sed -n 's/.*code=\([a-z0-9-]*\).*/\1/p' | head -n 1)"
+    detail="$(printf '%s\n' "$out" | sed -n 's/.*detail=//p' | head -n 1)"
+    case "$code" in
+        config-incompatible)
+            _freshness_refuse config-incompatible \
+                "config.yaml incompatible with $VERSION — migrate config or pin a compatible release. " \
+                "Refused at ENTRY (before stop/flip; D-2): $detail"
+            ;;
+        *)
+            _freshness_refuse config-compat-unrunnable \
+                "config-compat check could not evaluate (rc=$rc): $(printf '%s\n' "$out" | head -n 4 | tr '\n' ' ') " \
+                "The gate refuses FAIL-CLOSED when it cannot evaluate (D-2)."
+            ;;
+    esac
+    return 0  # _freshness_refuse exits; never reached
+}
+
 # ═══════════════ Plugin-staleness promote predicate (slice ⑥) ═══════════════
 #
 # promote_plugin_staleness_check — REC §1.2 component 13
@@ -6792,11 +6908,77 @@ _supervision_owned_pids() {
 # ESTABLISHED client connection (uptime monitor, browser, kubectl
 # sidecar) — reading those as "holders" would refuse every green gate
 # on a monitored host. Only the LISTENER is the serving process.
-# Prints pids (one per line). Return: 0 = pids printed; 1 = census
-# ran clean and found NO listener (the port is unbound); 2 =
-# unprobeable (lsof absent, or lsof itself errored — a tool failure
-# is never evidence of a foreign holder; the caller decides its
-# degraded posture per the no-missing-tool-fault house rule).
+# _flip_verify_port_attribution <post_pid> — D-1 (E2E round 1 🔴, demo
+# promote 2026-11-15): the flip-verify's SERVING attribution with a
+# BOUNDED LISTEN-GRACE. The defect shape: the launchd verify broke its
+# wait-loop on the FIRST owned-pid appearance, then a SINGLE unbuffered
+# _supervision_port_holders census issued a crash-shape verdict if
+# nothing listened yet — the boot-to-listen span of a migration-heavy
+# cold boot (~15-20s on the demo install) exceeded the census instant,
+# so a HEALTHY boot was killed mid-flight and the auto-rollback landed
+# on an unbootable previous release. The attribution requirement is
+# RIGHT; the TIMING was the defect. Shaped fix:
+#   - bounded listen-grace: poll the census (FLIP_VERIFY_LISTEN_POLL_S,
+#     default 2s — the _probe family cadence) up to
+#     FLIP_VERIFY_LISTEN_GRACE_S (default = LIVEZ_BUDGET_S — the SAME
+#     operator-tuned "how long a healthy boot may take" budget the
+#     later /livez gate uses; a distinct name so it can be shortened
+#     independently, same env-overridable-seconds knob conventions);
+#   - grace applies ONLY to the waiting-for-an-owned-holder condition.
+#     A FOREIGN holder fails IMMEDIATELY at the census that sees it (no
+#     grace for wrong-process), and budget exhaustion without a listener
+#     still issues the crash-shape verdict (leg (b) preserved);
+#   - census-tool failure (rc 2) breaks the poll immediately into the
+#     degraded pid-provenance arm — a broken lsof will not heal by
+#     polling, and a missing tool is never refusal evidence.
+# Sets _FLIP_VERIFY_REASON (global) and returns 0 = attributed serving
+# (proceed to the version gate); 1 = refusal (caller sets gate_fail_reason
+# from _FLIP_VERIFY_REASON); 2 = degraded-skip (census unprobeable —
+# pid provenance only, NOT a pass evidence; the caller logs the skip).
+# STATEMENT FORM: call directly, never in $( ) (it sleeps).
+FLIP_VERIFY_LISTEN_GRACE_S="${FLIP_VERIFY_LISTEN_GRACE_S:-${LIVEZ_BUDGET_S:-180}}"
+FLIP_VERIFY_LISTEN_POLL_S="${FLIP_VERIFY_LISTEN_POLL_S:-2}"
+_flip_verify_port_attribution() {
+    local post_pid="${1:-}" deadline holders hrc owned owned_spaced h foreign
+    deadline=$(( $(_now_epoch) + FLIP_VERIFY_LISTEN_GRACE_S ))
+    holders="" ; hrc="" ; foreign=""
+    while :; do
+        holders="$(_supervision_port_holders)"
+        hrc=$?
+        if [ "$hrc" -eq 2 ]; then
+            return 2   # census unprobeable — degraded arm, no polling can heal it
+        fi
+        if [ -n "$holders" ]; then
+            owned="$(_supervision_owned_pids 2>/dev/null)"
+            # the owned set is NEWLINE-joined — normalize for token matching
+            # (the F1 council fix, mirrored from promote.sh's flip-verify).
+            owned_spaced="$(printf '%s' "$owned" | tr '\n' ' ')"
+            for h in $holders; do
+                [ -n "$h" ] || continue
+                case " $owned_spaced " in
+                    *" $h "*) ;;
+                    *) foreign="$foreign $h" ;;
+                esac
+            done
+            break   # DECIDE NOW: all-owned → success; any foreign → immediate
+                    # refusal — the grace covers only "no listener YET", never
+                    # a wrong-process holder
+        fi
+        [ "$(_now_epoch)" -lt "$deadline" ] || break
+        sleep "$FLIP_VERIFY_LISTEN_POLL_S"
+    done
+    if [ -z "$holders" ]; then
+        _FLIP_VERIFY_REASON="launchd verify: owned pid $post_pid exists but NOTHING listened on :${PORT} within the ${FLIP_VERIFY_LISTEN_GRACE_S}s listen-grace — the flip produced a process, not a serving daemon (crash-loop shape; D-1 bounded grace exhausted)"
+        return 1
+    fi
+    if [ -n "$foreign" ]; then
+        _FLIP_VERIFY_REASON="launchd verify: port :${PORT} holder(s):$foreign NOT in the owned-pid set (owned:$owned_spaced) — the flip is served by a foreign process"
+        return 1
+    fi
+    _FLIP_VERIFY_REASON=""
+    return 0
+}
+
 _supervision_port_holders() {
     [ -n "${PORT:-}" ] || return 2
     command -v lsof >/dev/null 2>&1 || return 2

@@ -234,6 +234,19 @@ authoritative per-family gate list; this section is the cross-family ledger.
   sweep service passes its own install dir into the Python detect path (no
   os.environ dependence), so plist-lineage daemons no longer structurally lack
   `INSTALL_DIR` — closes the `LAUNCHD_NOT_VERIFIED` false-positive class.
+- **E2E round-1 defects (D-1/D-2, demo promote 2026-11-15)** — this commit.
+  D-1: flip-verify boot-grace — the Fix #2-ii census false-fired on a
+  healthy migration-heavy boot (~15-20s boot-to-listen) and auto-rolled
+  back mid-boot; the census moved into `lib.sh
+  _flip_verify_port_attribution` with a bounded listen-grace poll
+  (`FLIP_VERIFY_LISTEN_GRACE_S`, default = `LIVEZ_BUDGET_S`; foreign
+  holders still fail immediately — no grace for wrong-process). D-2:
+  config-compat ENTRY check (before stop/flip) — slice modules
+  `daemon/plugin_subsystem/config_compat_{check,contract}.py`, stage-time
+  contract mint, exit-78 refusals `config-incompatible` (remedy: "migrate
+  config or pin a compatible release") and `config-compat-unrunnable`
+  (fail-closed); demo runbook §10.1 carries the config-currency note; the
+  per-release config transport structural fix is DEFERRED (§9.4(e)).
 
 - **Fix #3 + Fix #5 + §10 runbook policy** —
   `6b2f2c1911e06195998c2a54d8b1de88924abd19` (`fix(upgrade)`). Fix #3:
@@ -316,6 +329,19 @@ run DEFERRED → tester.
 (d) Minor council notes carried: daemon-slice stamp-gate dedicated negative
 leg (optional hardening), python-twin 6g pin precision, dual-SIGKILL
 spent-plist residual (accepted, documented in §7b).
+(e) **Per-release config transport** (E2E round 1, D-2 deferred future item):
+`config.yaml` does not travel with releases (only `launcher.sh` swaps
+per-release), so rollback targets can become unbootable across a
+config-format boundary (the 2026-11-15 demo promote halted on exactly this:
+v0.10.8 binary vs refreshed v0.30-era config, pydantic `extra_forbidden`,
+re-gate exhausted 180s). This lane shipped the MINIMAL fail-closed guard
+(promote ENTRY config-compat check + stage-time contract mint — runbook
+§10.1); the STRUCTURAL fix — config traveling in the payload per-release —
+is deferred to a future lane. Also recorded (R-1, verification-only): a job
+run BY the demo daemon calling `system_upgrade(user_confirmed=true,
+dry_run=false)` spawns the promote executor via manager.py's sole spawn seam
+(descends from the demo daemon's tree ⇒ §7 self-detach fires E2E); no
+ADR-017/live-rung constraint blocks the daemon lane on a DEMO install.
 
 ### 9.5 Open items carried (not closed by this lane)
 

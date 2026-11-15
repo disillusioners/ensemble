@@ -481,6 +481,14 @@ supervision_preflight
 lock_heartbeat
 _log_phase_marker "entry-check"
 _run_bounded_step plugin-staleness promote_plugin_staleness_check || exit 78
+
+# 1d-quater. Config-compat ENTRY check (D-2, E2E round 1): the TARGET
+# release must accept the install's config.yaml key-shape BEFORE any
+# stop/flip — the demo rollback crash-looped on a refreshed config
+# (pydantic extra_forbidden) AFTER the flip and halted-for-human. Same
+# bounded-step wrapper + exit-78 refusal family as the staleness check;
+# FAIL-CLOSED when unrunnable (D-2 mandate).
+_run_bounded_step config-compat _config_compat_check "$VERSION" || exit 78
 _enforce_deadline "$preflight_deadline" preflight "budget=PREFLIGHT_PHASE_BUDGET_S value=${PREFLIGHT_PHASE_BUDGET_S}"
 
 # 1e. integrity (D-FA4.4): CURRENT (drift detection) + TARGET + manifest
@@ -738,38 +746,25 @@ if [ "${SUPERVISION_STATE:-}" = "LAUNCHD_MANAGED" ]; then
     # process, not on a respawn). Fail-closed: any miss routes to 8b
     # (auto-rollback) via gate_fail_reason, never warn-and-pass.
     else
-        _fv_holders="$(_supervision_port_holders)"
-        _fv_hrc=$?
-        _fv_owned="$(_supervision_owned_pids 2>/dev/null)"
-        if [ "$_fv_hrc" -eq 1 ] || [ -z "$_fv_holders" ]; then
-            gate_fail_reason="launchd verify: owned pid $_post_pid exists but NOTHING listens on :${PORT} — the flip produced a process, not a serving daemon (crash-loop shape)"
+        # D-1 (E2E round 1 🔴; demo promote 2026-11-15): the census moved
+        # into _flip_verify_port_attribution (lib.sh) — BOUNDED
+        # LISTEN-GRACE polling instead of the single unbuffered census
+        # that false-fired on a healthy migration-heavy boot (~15-20s
+        # boot-to-listen) and killed the daemon mid-flight. Grace covers
+        # ONLY the no-listener-yet condition: a foreign holder fails
+        # IMMEDIATELY, budget exhaustion still issues the crash-shape
+        # verdict, and a census-tool failure takes the degraded
+        # pid-provenance arm (rc 2 — no grace can heal a broken lsof).
+        _flip_verify_port_attribution "$_post_pid"
+        _fv_rc=$?   # captured AT the call — `if !` would erase the rc distinctions
+        if [ "$_fv_rc" -eq 1 ]; then
+            gate_fail_reason="$_FLIP_VERIFY_REASON"
             _warn "$gate_fail_reason"
-        elif [ "$_fv_hrc" -eq 2 ]; then
-            # lsof absent/errored — the census cannot run; the launchd
-            # verify keeps its pid-based verdict (loud, once) rather than
-            # refusing on a missing tool (attribution helper precedent).
+        elif [ "$_fv_rc" -eq 2 ]; then
             _warn "launchd verify: port-holder census unavailable (no lsof / lsof errored) — serving attribution SKIPPED for the flip-verify (pid provenance only; NOT a pass evidence)"
             _log "launchd verify: provenance OK (owned pid $_post_pid${SUPERVISION_PRESTOP_MAINPID:+, pre-stop was $SUPERVISION_PRESTOP_MAINPID}) — proceeding to version gate"
         else
-            _fv_foreign=""
-            # F1 (ENSEMBLE-32 repair lane council): $_fv_owned is
-            # NEWLINE-joined (_supervision_owned_pids emits one printf per
-            # pid) while this case matches SPACE-delimited tokens — the
-            # supervised production shape (launcher + daemon, >=2 pids)
-            # false-refused the flip-verify. Normalize once, then match.
-            _fv_owned_spaced="$(printf '%s' "$_fv_owned" | tr '\n' ' ')"
-            for _fv_h in $_fv_holders; do
-                case " $_fv_owned_spaced " in
-                    *" $_fv_h "*) ;;
-                    *) _fv_foreign="$_fv_foreign $_fv_h" ;;
-                esac
-            done
-            if [ -n "$_fv_foreign" ]; then
-                gate_fail_reason="launchd verify: port :${PORT} holder(s):$_fv_foreign NOT in the owned-pid set (owned:$_fv_owned_spaced) — the flip is served by a foreign process"
-                _warn "$gate_fail_reason"
-            else
-                _log "launchd verify: provenance OK (owned pid $_post_pid${SUPERVISION_PRESTOP_MAINPID:+, pre-stop was $SUPERVISION_PRESTOP_MAINPID}; port ${PORT} holder(s):$_fv_holders owned) — proceeding to version gate"
-            fi
+            _log "launchd verify: provenance OK (owned pid $_post_pid${SUPERVISION_PRESTOP_MAINPID:+, pre-stop was $SUPERVISION_PRESTOP_MAINPID}; port ${PORT} holder(s) owned) — proceeding to version gate"
         fi
     fi
 fi

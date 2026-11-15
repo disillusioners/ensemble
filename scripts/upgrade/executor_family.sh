@@ -92,6 +92,8 @@ scripts/upgrade/status.sh
 scripts/stop-ensemble.sh
 scripts/install-dir-guard.sh
 daemon/plugin_subsystem/promote_staleness.py
+daemon/plugin_subsystem/config_compat_check.py
+daemon/plugin_subsystem/config_compat_contract.py
 EOF
 }
 

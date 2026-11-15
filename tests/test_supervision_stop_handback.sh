@@ -2130,11 +2130,15 @@ done
 # Grep-pins from the definition sites (N3 pattern): driving a REAL promote
 # to the flip-verify needs a launchd-classified sandbox; the refusal arms
 # themselves are one straight-line block each.
-if grep -q 'NOTHING listens on :${PORT}' "$UPGRADE_DIR/promote.sh" \
-   && grep -q 'NOT in the owned-pid set' "$UPGRADE_DIR/promote.sh"; then
-    _pass "N4 promote flip-verify requires the port-holder census (owned-pid set)"
+# D-1 (E2E round 1): the census moved into lib.sh _flip_verify_port_
+# attribution (bounded listen-grace) — the needles follow the verdict
+# messages to their new home; promote.sh must still CONSUME the function.
+if grep -q 'NOTHING listened on :${PORT} within' "$UPGRADE_DIR/lib.sh" \
+   && grep -q 'NOT in the owned-pid set' "$UPGRADE_DIR/lib.sh" \
+   && grep -q '_flip_verify_port_attribution "$_post_pid"' "$UPGRADE_DIR/promote.sh"; then
+    _pass "N4 promote flip-verify requires the port-holder census (owned-pid set; D-1 grace function)"
 else
-    _fail "N4 promote flip-verify requires the port-holder census (owned-pid set)" "census needles" "absent"
+    _fail "N4 promote flip-verify requires the port-holder census (owned-pid set; D-1 grace function)" "census needles" "absent"
 fi
 if grep -q 'STATUS_ATTR_MISMATCH' "$UPGRADE_DIR/status.sh" \
    && grep -q 'attribution MISMATCH is a verify failure' "$UPGRADE_DIR/status.sh"; then
@@ -2171,6 +2175,18 @@ assert_contains "N5 the hard-fail stash carries the launchctl stderr" "$N5B_ERR"
 rm -rf "$N_FIX"
 
 # ===========================================================================
+# N6 — D-1 (E2E round 1): the FLIP-VERIFY census lives in the lib.sh grace
+# function and promote.sh consumes it — structural pins (the live drive of
+# the function is the handback pack's G-D1 section; the harness here owns
+# the restart_via_launcher seam, so this is the wiring pin).
+if grep -q '_flip_verify_port_attribution "$_post_pid"' "$UPGRADE_DIR/promote.sh" \
+   && grep -q 'FLIP_VERIFY_LISTEN_GRACE_S=' "$UPGRADE_DIR/lib.sh" \
+   && grep -q '_flip_verify_port_attribution()' "$UPGRADE_DIR/lib.sh"; then
+    _pass "N6 promote flip-verify consumes the lib.sh listen-grace function (D-1)"
+else
+    _fail "N6 promote flip-verify consumes the lib.sh listen-grace function (D-1)" "grace wiring" "absent"
+fi
+
 section "summary"
 printf 'PASS=%s FAIL=%s SKIP=%s\n' "$PASS" "$FAIL" "$SKIP"
 if [ "$SKIP" -gt 0 ]; then
