@@ -23,8 +23,8 @@ Lane map (total over the 10-member ``InstanceStatus`` enum):
 
 Addressing (§4.4) is ORTHOGONAL and non-escalating: tagged members get
 the lanes above; addressed-to (not also tagged) members get the
-addressed predicate (terminal → parent notice; running → no action;
-alive → digest no-wake; paused → no action; left → skip+warning).
+addressed predicate (terminal → parent notice; running/alive/paused →
+digest_only (no delivery action); left → skip+warning).
 
 This module is the service the P5 room tools will call; it is also the
 boot-delivery entry point.
@@ -34,17 +34,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from sqlalchemy.engine import Engine
+
+from daemon.repositories.event.models import EventKind
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.room.models import (
     NON_TERMINAL_INSTANCE_STATUSES_FOR_ROOMS,
     TERMINAL_INSTANCE_STATUSES_FOR_ROOMS,
     RoomMessageKind,
 )
+from daemon.repositories.room.repository import RoomRepository
 from daemon.repositories.room.service import RoomChatService
 
+if TYPE_CHECKING:
+    from ..manager import InstanceManager
+
 logger = logging.getLogger(__name__)
+
+__all__ = ["LANE_B_CAS_ALLOWED", "RoomDeliveryService"]
 
 # The derived CAS set for lane (b): non-terminal − {running, paused}.
 # Derived STRUCTURALLY from the enum (never from ALIVE_INSTANCE_STATUSES,
@@ -54,6 +63,21 @@ LANE_B_CAS_ALLOWED: frozenset[str] = NON_TERMINAL_INSTANCE_STATUSES_FOR_ROOMS - 
     "running",
     "paused",
 }
+
+# Dedup probe cap: rows beyond the cap fall through to the
+# UNIQUE(source_message_id, trigger, member) backstop — the probe is
+# an optimization, not the guarantee.
+_DEDUP_PROBE_LIMIT = 10000
+# Bounded race-retry attempts for the mid-turn injection window.
+_INJECTION_MAX_ATTEMPTS = 2
+# Parent notice cap differs from the member excerpt cap by policy.
+_PARENT_NOTICE_MAX_CHARS = 400
+# Member excerpt cap (proposal text bodies + notice excerpts).
+_EXCERPT_MAX_CHARS = 120
+# Trigger values feed the dedup UNIQUE(source_message_id, trigger,
+# member) key — never free-text.
+_TRIGGER_TAG_TERMINAL = "tag_terminal"
+_TRIGGER_ADDRESSED_TERMINAL = "addressed_terminal"
 
 
 def _is_uuid_like(name: str) -> bool:
@@ -65,7 +89,12 @@ def _is_uuid_like(name: str) -> bool:
 class RoomDeliveryService:
     """The P3 delivery router."""
 
-    def __init__(self, manager: Any, room_service: RoomChatService, logger=None) -> None:
+    def __init__(
+        self,
+        manager: "InstanceManager",
+        room_service: RoomChatService,
+        logger: logging.Logger | None = None,
+    ) -> None:
         self._manager = manager
         self._room = room_service
         self._logger = logger or logging.getLogger(__name__)
@@ -177,18 +206,19 @@ class RoomDeliveryService:
         # Emit content-free audit for tag-delivery outcomes.
         for o in tag_outcomes:
             try:
-                await self._room.emit_room_event(
+                await self._emit_delivery_event(
                     o["instance_id"],
-                    "room_tag_delivery",
-                    {
-                        "room_id": room_id,
-                        "seq": post["seq"],
-                        "member_name": o["member_name"],
-                        "outcome": o["outcome"],
-                    },
+                    room_id,
+                    post["seq"],
+                    o["member_name"],
+                    o["outcome"],
                 )
             except Exception as exc:  # noqa: BLE001 — audit must never break delivery
-                self._logger.warning("room_tag_delivery emit failed: %r", exc)
+                self._logger.warning(
+                    "room_tag_delivery emit failed (room=%s seq=%s member=%s "
+                    "outcome=%s): %r",
+                    room_id, post["seq"], o["member_name"], o["outcome"], exc,
+                )
 
         return {
             "tag_outcomes": tag_outcomes,
@@ -212,12 +242,15 @@ class RoomDeliveryService:
         member_iid = member["instance_id"]
         member_name = member["member_name"]
         seq = int(post["seq"])
-        post_id = post["id"]
 
         # Read fresh status (lane assignment FIRST).
         status = await self._room.get_instance_status(member_iid)
         if status is None:
             # Instance row gone — leave durable (deferred_cursor).
+            self._logger.debug(
+                "instance row gone mid-route (room=%s seq=%s member=%s)",
+                room_id, seq, member_iid,
+            )
             return "deferred_cursor"
 
         # Terminal → (c) parent proposal (Ruling A).
@@ -226,7 +259,7 @@ class RoomDeliveryService:
                 room_id=room_id,
                 post=post,
                 member=member,
-                trigger="tag_terminal",
+                trigger=_TRIGGER_TAG_TERMINAL,
                 sender_instance_id=sender_instance_id,
                 sender_member_name=sender_member_name,
             )
@@ -254,15 +287,8 @@ class RoomDeliveryService:
 
         # Paused → (d) park + audit.
         if status == "paused":
-            await self._room.emit_room_event(
-                member_iid,
-                "room_tag_delivery",
-                {
-                    "room_id": room_id,
-                    "seq": seq,
-                    "member_name": member_name,
-                    "outcome": "parked_paused",
-                },
+            await self._emit_delivery_event(
+                member_iid, room_id, seq, member_name, "parked_paused"
             )
             return "parked_paused"
 
@@ -283,8 +309,8 @@ class RoomDeliveryService:
                     graphless=True,
                     at_boot=at_boot,
                 )
-            # Race retry: 1 bounded retry.
-            for attempt in range(2):
+            # Race retry: bounded retry.
+            for attempt in range(_INJECTION_MAX_ATTEMPTS):
                 try:
                     notif = self._notification_text(room_id, sender_member_name, seq)
                     source = (
@@ -295,20 +321,17 @@ class RoomDeliveryService:
                     await self._room.advance_delivered_cursor(room_id, member_iid, seq)
                     return "injected"
                 except Exception as exc:  # noqa: BLE001
-                    self._logger.warning("injection attempt %d failed: %r", attempt, exc)
+                    self._logger.warning(
+                        "injection attempt %d failed (room=%s seq=%s member=%s): %r",
+                        attempt, room_id, seq, member_iid, exc,
+                    )
                     if attempt == 0:
+                        # yield-only; no backoff by design (race window is in-process)
                         await asyncio.sleep(0)
                         continue
             # Race exhausted → deferred_cursor.
-            await self._room.emit_room_event(
-                member_iid,
-                "room_tag_delivery",
-                {
-                    "room_id": room_id,
-                    "seq": seq,
-                    "member_name": member_name,
-                    "outcome": "deferred_cursor",
-                },
+            await self._emit_delivery_event(
+                member_iid, room_id, seq, member_name, "deferred_cursor"
             )
             return "deferred_cursor"
 
@@ -347,6 +370,10 @@ class RoomDeliveryService:
         if rowcount == 0:
             fresh = await self._room.get_instance_status(member_iid)
             if fresh is None:
+                self._logger.debug(
+                    "instance row gone mid-route (room=%s seq=%s member=%s)",
+                    room_id, seq, member_iid,
+                )
                 return "deferred_cursor"
             if fresh in TERMINAL_INSTANCE_STATUSES_FOR_ROOMS:
                 # Re-route as terminal (proposal) — but only if we haven't
@@ -356,7 +383,7 @@ class RoomDeliveryService:
                     room_id=room_id,
                     post=post,
                     member=member,
-                    trigger="tag_terminal",
+                    trigger=_TRIGGER_TAG_TERMINAL,
                     sender_instance_id=post["author_instance_id"],
                     sender_member_name=post["author_name"],
                 )
@@ -380,10 +407,8 @@ class RoomDeliveryService:
                 )
                 return "proposal"
             if fresh == "paused":
-                await self._room.emit_room_event(
-                    member_iid, "room_tag_delivery",
-                    {"room_id": room_id, "seq": seq, "member_name": member_name,
-                     "outcome": "parked_paused"},
+                await self._emit_delivery_event(
+                    member_iid, room_id, seq, member_name, "parked_paused"
                 )
                 return "parked_paused"
             if fresh == "running":
@@ -425,25 +450,26 @@ class RoomDeliveryService:
                         )
                 # Delivery not completed → deferred_cursor with the cursor
                 # UNTOUCHED, so boot re-derivation retries the row.
-                await self._room.emit_room_event(
-                    member_iid, "room_tag_delivery",
-                    {"room_id": room_id, "seq": seq, "member_name": member_name,
-                     "outcome": "deferred_cursor"},
+                await self._emit_delivery_event(
+                    member_iid, room_id, seq, member_name, "deferred_cursor"
                 )
                 return "deferred_cursor"
             # Unknown/other → deferred.
-            await self._room.emit_room_event(
-                member_iid, "room_tag_delivery",
-                {"room_id": room_id, "seq": seq, "member_name": member_name,
-                 "outcome": "deferred_cursor"},
+            await self._emit_delivery_event(
+                member_iid, room_id, seq, member_name, "deferred_cursor"
             )
             return "deferred_cursor"
 
-        # CAS succeeded → member is now running. Busy-guard (copied shape).
+        # CAS succeeded → member is now running. Busy-guard: mirrors the
+        # enqueue path's get_queue_stats pending/processing probe.
         try:
             stats = await self._manager.get_queue_stats(member_iid)
             busy = bool(stats.get("pending_count", 0) > 0 or stats.get("processing_count", 0) > 0)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug(
+                "queue stats probe failed (room=%s seq=%s member=%s): %r",
+                room_id, seq, member_iid, exc,
+            )
             busy = False
         if busy:
             # Busy fallback: inject if eligible, else deferred.
@@ -458,12 +484,13 @@ class RoomDeliveryService:
                     self._manager.set_injection(member_iid, notif, source=source)
                     await self._room.advance_delivered_cursor(room_id, member_iid, seq)
                     return "injected"
-                except Exception:  # noqa: BLE001
-                    pass
-            await self._room.emit_room_event(
-                member_iid, "room_tag_delivery",
-                {"room_id": room_id, "seq": seq, "member_name": member_name,
-                 "outcome": "deferred_cursor"},
+                except Exception as exc:  # noqa: BLE001
+                    self._logger.warning(
+                        "busy-fallback injection failed for %s (room=%s seq=%s): %r",
+                        member_iid, room_id, seq, exc,
+                    )
+            await self._emit_delivery_event(
+                member_iid, room_id, seq, member_name, "deferred_cursor"
             )
             return "deferred_cursor"
 
@@ -477,10 +504,8 @@ class RoomDeliveryService:
             )
         except Exception as exc:  # noqa: BLE001
             self._logger.warning("enqueue failed for %s: %r", member_iid, exc)
-            await self._room.emit_room_event(
-                member_iid, "room_tag_delivery",
-                {"room_id": room_id, "seq": seq, "member_name": member_name,
-                 "outcome": "deferred_cursor"},
+            await self._emit_delivery_event(
+                member_iid, room_id, seq, member_name, "deferred_cursor"
             )
             return "deferred_cursor"
 
@@ -503,10 +528,13 @@ class RoomDeliveryService:
         member_iid = member["instance_id"]
         member_name = member["member_name"]
         seq = int(post["seq"])
-        post_id = post["id"]
 
         status = await self._room.get_instance_status(member_iid)
         if status is None:
+            self._logger.debug(
+                "instance row gone mid-route (room=%s seq=%s member=%s)",
+                room_id, seq, member_iid,
+            )
             return "digest_only"
 
         # terminal → (c′) parent notice.
@@ -515,7 +543,7 @@ class RoomDeliveryService:
                 room_id=room_id,
                 post=post,
                 member=member,
-                trigger="addressed_terminal",
+                trigger=_TRIGGER_ADDRESSED_TERMINAL,
                 sender_instance_id=sender_instance_id,
                 sender_member_name=sender_member_name,
             )
@@ -533,41 +561,44 @@ class RoomDeliveryService:
                 member_iid=member_iid,
                 prior_status=status,
                 seq=seq,
-                excerpt=(post.get("text") or "")[:120],
+                excerpt=(post.get("text") or "")[:_EXCERPT_MAX_CHARS],
             )
             if parent_status == "running" and self._manager.has_live_graph_task(parent_iid):
                 self._manager.set_injection(
-                    parent_iid, notice_text[:400],
+                    parent_iid, notice_text[:_PARENT_NOTICE_MAX_CHARS],
                     source=f"room:{room_id}:{sender_member_name}:{seq}:author={sender_instance_id}",
                 )
                 await self._room.emit_room_event(
-                    parent_iid, "room_tag_delivery",
+                    parent_iid, EventKind.ROOM_TAG_DELIVERY.value,
                     {"room_id": room_id, "seq": seq, "member_name": member_name,
                      "outcome": "proposal"},
                 )
-            elif parent_status == "running" or parent_status in (
-                "idle", "queued", "waiting", "waiting_children"
-            ):
+            # LANE_B_CAS_ALLOWED (non-terminal − {running, paused}) matches
+            # this lane-(b) tuple today.
+            elif parent_status == "running" or parent_status in LANE_B_CAS_ALLOWED:
                 # DEFECT-A downgrade: a graphless-running parent (running,
                 # no live graph task) takes the lane-(b) shape — enqueue —
                 # instead of silently leaving the notice durable-pending.
                 try:
                     await self._manager.enqueue_message(
-                        parent_iid, notice_text[:400],
+                        parent_iid, notice_text[:_PARENT_NOTICE_MAX_CHARS],
                         source=f"internal_agent:{sender_instance_id}",
                         metadata={"room_id": room_id, "seq": seq, "kind": "task_proposal"},
                     )
                 except Exception as exc:  # noqa: BLE001
-                    self._logger.warning("parent enqueue failed: %r", exc)
+                    self._logger.warning(
+                        "parent enqueue failed (parent=%s room=%s seq=%s): %r",
+                        parent_iid, room_id, seq, exc,
+                    )
             elif parent_status == "paused":
                 await self._room.emit_room_event(
-                    parent_iid, "room_tag_delivery",
+                    parent_iid, EventKind.ROOM_TAG_DELIVERY.value,
                     {"room_id": room_id, "seq": seq, "member_name": member_name,
                      "outcome": "parked_paused"},
                 )
             # parent terminal → one-hop durable pending (no routing).
             await self._room.emit_room_event(
-                parent_iid, "room_proposal",
+                parent_iid, EventKind.ROOM_PROPOSAL.value,
                 {"room_id": room_id, "seq": seq, "member_name": member_name,
                  "trigger": "addressed_terminal", "outcome": "pending"},
             )
@@ -577,8 +608,9 @@ class RoomDeliveryService:
         if status == "running":
             return "digest_only"
 
-        # alive-not-running → digest, no wake.
-        if status in ("idle", "queued", "waiting", "waiting_children"):
+        # alive-not-running → digest, no wake. LANE_B_CAS_ALLOWED
+        # (non-terminal − {running, paused}) matches this tuple today.
+        if status in LANE_B_CAS_ALLOWED:
             return "digest_only"
 
         # paused → digest at resume, no lane action.
@@ -617,9 +649,13 @@ class RoomDeliveryService:
             try:
                 msgs = await self._room.read_messages(
                     room_id, caller_instance_id=sender_instance_id,
-                    after_seq=0, limit=10000,
+                    after_seq=0, limit=_DEDUP_PROBE_LIMIT,
                 )
-            except Exception:  # noqa: BLE001 — probe failure ≠ proof of absence
+            except Exception as exc:  # noqa: BLE001 — probe failure ≠ proof of absence
+                self._logger.debug(
+                    "dedup probe failed (room=%s post=%s trigger=%s member=%s): %r",
+                    room_id, post_id, trigger, member_name, exc,
+                )
                 return False
             for m in msgs:
                 if (
@@ -638,7 +674,7 @@ class RoomDeliveryService:
             f"[ROOM NOTICE — addressed to a completed member] room={room_id} · "
             f"{sender_member_name}'s post is addressed to {member_name} "
             f"({member['instance_id']}, prior_status=terminal) · "
-            f"excerpt: \"{(post.get('text') or '')[:120]}\" (seq {post['seq']})\n"
+            f"excerpt: \"{(post.get('text') or '')[:_EXCERPT_MAX_CHARS]}\" (seq {post['seq']})\n"
             f"options: revive {member_name} | reroute | answer in-room · "
             f"full context: room_read(room={room_id}, after_seq={post['seq']})"
         )
@@ -660,11 +696,14 @@ class RoomDeliveryService:
             # integrity shape) fired — verify before admitting.
             if await _durable_row_exists():
                 return True
-            self._logger.warning("proposal mint failed: %r", exc)
+            self._logger.warning(
+                "proposal mint failed (room=%s seq=%s member=%s trigger=%s): %r",
+                room_id, post["seq"], member_name, trigger, exc,
+            )
             return False
         await self._room.emit_room_event(
             sender_instance_id,
-            "room_proposal",
+            EventKind.ROOM_PROPOSAL.value,
             {
                 "room_id": room_id,
                 "seq": post["seq"],
@@ -689,6 +728,13 @@ class RoomDeliveryService:
         One-hop rule: a terminal parent leaves the proposal durable pending
         (no recursion, no revive)."""
         parent_status = await self._room.get_instance_status(parent_iid)
+        if parent_status is None:
+            # Deliberate debug (zero control-flow): a gone parent row falls
+            # through the matrix below as the one-hop pending posture.
+            self._logger.debug(
+                "instance row gone mid-route (room=%s seq=%s parent=%s)",
+                room_id, post["seq"], parent_iid,
+            )
         seq = int(post["seq"])
         member_name = member["member_name"]
         member_iid = member["instance_id"]
@@ -700,28 +746,34 @@ class RoomDeliveryService:
         if parent_status == "running" and self._manager.has_live_graph_task(parent_iid):
             try:
                 self._manager.set_injection(
-                    parent_iid, notice_text[:400],
+                    parent_iid, notice_text[:_PARENT_NOTICE_MAX_CHARS],
                     source=f"room:{room_id}:{sender_member_name}:{seq}:author={post['author_instance_id']}",
                 )
             except Exception as exc:  # noqa: BLE001
-                self._logger.warning("parent injection failed: %r", exc)
-        elif parent_status == "running" or parent_status in (
-            "idle", "queued", "waiting", "waiting_children"
-        ):
+                self._logger.warning(
+                    "parent injection failed (parent=%s room=%s seq=%s): %r",
+                    parent_iid, room_id, seq, exc,
+                )
+        # LANE_B_CAS_ALLOWED (non-terminal − {running, paused}) matches
+        # this lane-(b) tuple today.
+        elif parent_status == "running" or parent_status in LANE_B_CAS_ALLOWED:
             # DEFECT-A downgrade: a graphless-running parent (running, no
             # live graph task) takes the lane-(b) shape — enqueue —
             # instead of silently leaving the proposal durable-pending.
             try:
                 await self._manager.enqueue_message(
-                    parent_iid, notice_text[:400],
+                    parent_iid, notice_text[:_PARENT_NOTICE_MAX_CHARS],
                     source=f"internal_agent:{post['author_instance_id']}",
                     metadata={"room_id": room_id, "seq": seq, "kind": "task_proposal"},
                 )
             except Exception as exc:  # noqa: BLE001
-                self._logger.warning("parent enqueue failed: %r", exc)
+                self._logger.warning(
+                    "parent enqueue failed (parent=%s room=%s seq=%s): %r",
+                    parent_iid, room_id, seq, exc,
+                )
         elif parent_status == "paused":
             await self._room.emit_room_event(
-                parent_iid, "room_tag_delivery",
+                parent_iid, EventKind.ROOM_TAG_DELIVERY.value,
                 {"room_id": room_id, "seq": seq, "member_name": member_name,
                  "outcome": "parked_paused"},
             )
@@ -730,6 +782,27 @@ class RoomDeliveryService:
         # surfaced when the parent next runs through a legitimate lane.
 
     # ── helpers ───────────────────────────────────────────────────────────
+
+    async def _emit_delivery_event(
+        self,
+        instance_id: str,
+        room_id: str,
+        seq: int,
+        member_name: str,
+        outcome: str,
+    ) -> None:
+        """Emit ONE content-free ``room_tag_delivery`` audit row (the
+        shared 4-field payload: room_id / seq / member_name / outcome)."""
+        await self._room.emit_room_event(
+            instance_id,
+            EventKind.ROOM_TAG_DELIVERY.value,
+            {
+                "room_id": room_id,
+                "seq": seq,
+                "member_name": member_name,
+                "outcome": outcome,
+            },
+        )
 
     def _notification_text(self, room_id: str, sender_name: str, seq: int) -> str:
         text = f"Room {room_id} · new tagged message from {sender_name} (seq {seq})"
@@ -759,15 +832,13 @@ class RoomDeliveryService:
 
     # ── boot delivery ─────────────────────────────────────────────────────
 
-    async def boot_deliver(self, engine) -> dict[str, Any]:
+    async def boot_deliver(self, engine: Engine) -> dict[str, Any]:
         """Boot-time delivery: re-derive tagged undelivered rows and route
         per the lane map. Proposals/notices stay durable pending (no
         routing) per pinned pair #2.
 
         Returns a counts dict (mirrors run_room_boot_regen).
         """
-        from daemon.repositories.room.repository import RoomRepository
-
         repo = RoomRepository(engine)
         pending = await asyncio.to_thread(repo.derive_undelivered_tagged)
         rooms = sorted({row["room_id"] for row in pending})
@@ -792,6 +863,7 @@ class RoomDeliveryService:
                         post = m
                         break
                 if post is None:
+                    # Defensive: the window must contain exactly the pending seq.
                     continue
                 # Only route if tagged (derive_undelivered_tagged already
                 # filtered tagged non-empty).
@@ -817,7 +889,7 @@ class RoomDeliveryService:
                         room_id=row["room_id"],
                         post=post,
                         member=member,
-                        trigger="tag_terminal",
+                        trigger=_TRIGGER_TAG_TERMINAL,
                         sender_instance_id=post["author_instance_id"],
                         sender_member_name=post["author_name"],
                     )
@@ -854,7 +926,10 @@ class RoomDeliveryService:
                 else:
                     delivered += 1
             except Exception as exc:  # noqa: BLE001
-                self._logger.warning("boot deliver row failed: %r", exc)
+                self._logger.warning(
+                    "boot deliver row failed (room=%s seq=%s member=%s): %r",
+                    row["room_id"], row["seq"], row["instance_id"], exc,
+                )
         counts = {
             "pending_rows": len(pending),
             "rooms_with_pending": len(rooms),

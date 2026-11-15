@@ -49,6 +49,7 @@ somehow over its budget). Resolution recorded in
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -64,6 +65,8 @@ from daemon.repositories.room.models import (
     RoomMemberState,
     RoomState,
 )
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "ROOM_MAX_MEMBERS",
@@ -373,6 +376,11 @@ def join_room_in_session(
     from daemon.repositories.event.models import Event, EventKind
 
     owner_stream = room.owner_instance_id if room is not None else instance_id
+    if room is None:
+        logger.warning(
+            "room_join: room row missing for room=%s — event parked on joiner stream",
+            room_id,
+        )
     session.add(
         Event(
             instance_id=owner_stream,

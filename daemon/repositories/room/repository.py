@@ -36,6 +36,12 @@ What lives here (mechanics only, no policy):
   INCLUDING THE OWNER, across rooms in ``active | closed`` (purged
   rooms have no rows). PURE re-derivation — it routes, wakes, and
   revives NOTHING (the pinned pair, architecture §10).
+* ``cas_instance_status_to_running`` — the P3 lane-(b) CAS over the
+  ``instances`` table (NOT a room table): atomically flips status to
+  ``running`` iff it is in the caller-derived allowed set, returning
+  the affected rowcount.
+* ``emit_room_event`` — the content-free ``room_*`` EventKind
+  emission surface (ids/counts/outcomes only, never message text).
 
 Policy (caps, admission, tag/address resolution, lane routing, nudges)
 lives in the later phases (P2–P5); this file deliberately has none.
@@ -964,7 +970,10 @@ class RoomRepository:
     ) -> int:
         """Atomically flip ``instances.status`` to ``running`` iff it is
         currently in ``allowed`` (the derived CAS set). Returns the
-        affected row count (0 or 1). The caller derives ``allowed`` from
+        affected row count (0 or 1) — the int rowcount is deliberate
+        (vs the cursor methods' bool-on-miss convention) so the caller
+        distinguishes miss from flip without a re-read. The caller
+        derives ``allowed`` from
         the 10-state enum (non-terminal minus {running, paused}) — this
         method never interprets the set.
 
