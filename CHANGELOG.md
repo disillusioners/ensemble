@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.13] — 2026-11-15
+
 
 ### Fixed — ENSEMBLE-32 repair lane (macOS launchd hand-back halt)
 
