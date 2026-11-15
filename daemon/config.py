@@ -188,10 +188,11 @@ class LLMConfig(BaseSettings):
     # never blocks spawn (tier-3 deterministic fallback) — see
     # ``daemon/services/room_naming.py``.
     model_quick: str | None = Field(
-        default=None,
+        default="quick",
         description=(
             "Model for quick inline generation lanes (group-chat member-name "
-            "generation, D-S3 tier 2; falls back to model). Purpose-bound: "
+            "generation, D-S3 tier 2; defaults to the 'quick' alias; "
+            "falls back to model if cleared). Purpose-bound: "
             "never consulted against allowed_models. Override via "
             "OPENAI_MODEL_QUICK."
         ),
@@ -511,7 +512,8 @@ class LLMConfig(BaseSettings):
             "(spawn model= override, weighted llm_models pool filter, "
             "spawn_councilor validation, session-restore re-validation); "
             "purpose-bound models (model_title, model_keywords when set to "
-            "a fixed value, model_vision, compaction, skill_evolution) are "
+            "a fixed value, model_quick, model_vision, compaction, "
+            "skill_evolution) are "
             "unaffected. Resolved from OPENAI_SELECTABLE_MODELS with "
             "OPENAI_ALLOWED_MODELS as a legacy alias (warn-once when the "
             "legacy name is the effective source). Default: ``(\"agentic\", "
@@ -571,11 +573,14 @@ class LLMConfig(BaseSettings):
 
     @model_validator(mode="after")
     def set_title_model_fallback(self) -> "LLMConfig":
-        """Ensure model_title and model_keywords fall back to model if not set or empty."""
+        """Ensure model_title, model_keywords and model_quick fall
+        back to model if not set or empty."""
         if not self.model_title:  # Handles None and empty string
             self.model_title = self.model
         if not self.model_keywords:  # Handles None and empty string
             self.model_keywords = self.model
+        if not self.model_quick:  # Handles None and empty string
+            self.model_quick = self.model
         return self
 
 
