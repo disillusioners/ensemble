@@ -3,7 +3,7 @@
 **Doc-set Rev 6** (single alignment stamp; 2026-11-15 final fix pass: D1–D5 + iteration-003 notes).
 
 Provenance: Emperor directive via Ari (Discord 2026-11-15); rulings settled 2026-11-15 (two naming-cascade additions arrived mid-design, same date); evidence = three investigation reports at repo tip bf4bfde6e, consolidated in substrate-map.md (§A–§J).
-**Rev history:** F-A (verbatim ruling re-paste from the KV source of record) · F-B (wrapper anchors re-verified) · F-C (architect risk → RK-13) · iteration-001 (END-chain order B1, GC accepted-loss B2, carrier precision N3, post-graph cite N10) · iteration-002 (closed-state capability row B1', join-admission predicate B2', post-graph chain correction B3', constants-derived CAS B4') · **iteration-003 final fix (Rev 6): D1 — lane map TOTAL over the 10-state enum (`waiting` assigned); D2 — owner membership row seeded at room_create; D3 — one-hop proposal rule for terminal parents; D4 — pinned boot pair; D5 — two-conjunct restore rule.**
+**Rev history:** F-A (verbatim ruling re-paste from the KV source of record) · F-B (wrapper anchors re-verified) · F-C (architect risk → RK-13) · iteration-001 (END-chain order B1, GC accepted-loss B2, carrier precision N3, post-graph cite N10) · iteration-002 (closed-state capability row B1', join-admission predicate B2', post-graph chain correction B3', constants-derived CAS B4') · **iteration-003 final fix (Rev 6): D1 — lane map TOTAL over the 10-state enum (`waiting` assigned); D2 — owner membership row seeded at room_create; D3 — one-hop proposal rule for terminal parents; D4 — pinned boot pair; D5 — two-conjunct restore rule.** **Phase-2 amendment (Doc-set Rev 7, 2026-11-15):** D-S10..D-S13 — Emperor ratification + refinements R1 (addressing→parent-nudge), R2 (purge-from-DB), R3 (P6 UI direction).
 
 Legend: **SETTLED** = binding (Emperor rulings verbatim-faithful). **OPEN** = framed by the planner, owned by the ARCHITECT — **all six RESOLVED**; pointers per entry; ratification item numbers refer to emperor-open-questions.md.
 
@@ -101,10 +101,31 @@ Off-loop async I/O (exemplars instance_messaging.py:1179-1184); explicit boot st
 ### D-O6 · Todo-nudge composition — RESOLVED
 **RESOLVED → architecture §4.3** — carrier = every-update reminder slot (todo_manager.py:403-461; `_compute_reminder` :1198-1276), filtered by the manager-level shared latch + watermark (never done-only); todo store untouched; durable state = P1 cursors. **No ratification item** (mechanism settled by D-S1).
 
+
+---
+
+## SETTLED — Phase-2 ratification + refinements (2026-11-15; KV keys `gc_phase2_go` / `gc_ui_refinement_p6`)
+
+### D-S10 · RATIFICATION — all 7 items as recommended
+**Ruling (verbatim — KV `gc_phase2_go`):** "RATIFIED 2026-11-15: ALL 7 decision items AS RECOMMENDED. … PHASE 2 GO: implement per phased plan P1 substrate/persistence+boot → P2 membership/spawn/naming → P3 delivery → P4 nudges ∥ P5 tool+guidelines → P6 UI/audit+GC; full house gates per phase; prompt-artifact discipline; staged release lane when ready; live promote ceremony = Emperor's. Report at phase boundaries; escalate only on genuine blockers/design-changing decisions."
+**Effect:** emperor-open-questions.md items #1–#7 are RATIFIED (the decision record there is unaltered; a banner records this); the Phase-1 recommendations are binding for Phase-2 implementation per the phased plan.
+
+### D-S11 · REFINEMENT 1 — addressing extends Ruling A (item #2)
+**Ruling (verbatim — KV `gc_phase2_go` excerpt):** "REFINEMENT 1 (item #2): untagged→idle-but-LIVE member = digest/nudge, NO wake (as recommended); untagged-but-ADDRESSED-to-TERMINAL member → NUDGE THE PARENT (parent decides revive/reroute/answer; extends Ruling A; exact mechanics of how an untagged-but-addressed post identifies its target = to be designed + pinned)."
+**Pinned mechanics (architecture §4.4 — the designed+pinning the ruling required):** `addressed_to: list[str]` — a STRUCTURED `room_post` parameter (NO in-body parsing; bare per-room names, NO `@` sigil — the sigil is the tag/interrupt signal; its absence signals routing-only); resolution = the @tag machinery reused as a NON-escalating routing field (exact case-sensitive per-room match; UUID fallback iff roster-active-resolvable; unresolvable/non-member/LEFT/cross-room → post succeeds, routing skips, warning stamped). Routing predicate: **terminal addressee → parent notice** (a `kind:"task_proposal"` row, `trigger="addressed_terminal"`, unique `(source_message_id, trigger, member)`; content-light: sender + addressee + ≤120-char excerpt + options revive/reroute/answer); **running → digest at next boundary (PINNED: addressing alone NEVER injects — only tags inject)**; **alive-not-running → digest, NO wake**; **paused → digest at resume**; parent lane per the parent-target matrix ((a)/(b)/park/**one-hop**); **the MEMBER is never auto-revived**. Co-presence: tags and `addressed_to` may co-exist (overlap → tag dominates). 8 pin tests at P3 (architecture §4.4).
+
+### D-S12 · REFINEMENT 2 — GC = purge from the DB (item #4)
+**Ruling (verbatim — KV `gc_phase2_go` excerpt):** "REFINEMENT 2 (item #4): 'cleanup from db' — archived rooms PURGED FROM THE DATABASE (archive = actual deletion; accepted loss = literal DB cleanup, not a hidden flag)."
+**Pinned posture (architecture §2.1/§2.2):** purge = ONE transaction per room: insert the content-free `room_purged` event (ids + counts only) → DELETE `room_messages` → DELETE `chatroom_members` → DELETE `chatrooms` (atomic commit/rollback). **NO archive tables (dropped from the design — RK-11 win); NO tombstone** — purged rooms are NONEXISTENT to every predicate (read/ACL/boot/digest resolve typed not-found; no tombstone dependency). Capability-row third column = `purged` — "none — accepted loss = LITERAL DB CLEANUP". Triggers unchanged: P-close (closed ≥14d) and P-idle (silent ≥72h + zero non-terminal among members ∪ owner ∪ owner-ancestry).
+
+### D-S13 · REFINEMENT 3 — P6 UI direction (KV `gc_ui_refinement_p6`)
+**Ruling (verbatim):** "BINDING 2026-11-15 (P6 UI/audit scope): CHATROOM ICON next to the WATCHOVER button on the frontend instances surface. Click → BIG POPUP (large modal, NOT a cramped tooltip) showing (a) chatrooms created by that instance('s tree) and (b) messages in each room — pick instance → see its rooms → read any room's conversation. This is the PRIMARY human observability surface for group chat (complements the SSE live view), on demand from the instance row the user already looks at. Rides the SAME room-read API as the agents' read tool (members ∪ owner-ancestry predicate, fail-closed) with the FE's own auth posture. Fold into P6 UI/audit design + FE conventions (Angular / metrics-tab patterns)."
+**Pinned (architecture §13.1):** chatroom icon adjacent to WATCHOVER on the instances surface; click → LARGE modal; instance → rooms → conversation; SAME room-read API (predicate parity: members ∪ owner-ancestry, fail-closed) under the FE auth posture; Angular/metrics-tab conventions as P6 design inputs; P6 exit criterion recorded (icon+modal wired with predicate parity; SSE parity; purged rooms render not-found).
+
 ---
 
 ## Counts
-SETTLED: 9. OPEN at framing time: 6 — **ALL RESOLVED**; live state = awaiting Emperor ratification (items 1–7). Architect-input details inside settled rulings: D-S3 suffix mechanics (resolved; owner name included); D-S1 durable-fallback ownership (resolved; D2 closes the owner gap).
+SETTLED: 13 (9 Phase-1 rulings/frame + D-S10..D-S13 Phase-2 ratification & refinements). OPEN at framing time: 6 — **ALL RESOLVED**; live state = **RATIFIED 2026-11-15 — all 7 as recommended (D-S10) + refinements R1–R3 (D-S11..D-S13); Phase-2 implementation in flight**. Architect-input details inside settled rulings: D-S3 suffix mechanics (resolved; owner name included); D-S1 durable-fallback ownership (resolved; D2 closes the owner gap).
 
 ---
 

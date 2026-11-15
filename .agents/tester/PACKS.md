@@ -1,3 +1,16 @@
+<!-- group-chat-p1-tester-gate-20261115-begin -->
+## GROUP-CHAT P1 — INDEPENDENT TESTER GATE (2026-11-15; verdict **PASS-WITH-NOTES**; full evidence: `RESULTS/2026-11-15-group-chat-p1-tester-gate.md` + `/tmp/gc_p1_tier2_gate_866678/`; UNCOMMITTED-landing disposition — HEAD stays `cc44d8416`, commit is the merge lane's call)
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `gc_p1_regression_tier2` (ad-hoc) | Tier-2 dual-side, re-scoped to unit floor: xdist mass shards (t=1750) + serial repositories leg (t=300) + out-of-floor shard-0 dual; LLM-fence verbatim; digests via `sweep_digest_verdict.sh` | tests/unit 26,183n dual-side + 338n serial + 3,187n; D1 60n; evidence pack `/tmp/gc_p1_tier2_gate_866678/` | 2026-11-15 | ✅ PASS — NET-NEW EMPTY post-adjudication (12 head-only ids = load-order flakes 3×3 both legs; 1 junit artifact); ≈106 min vs 90 advisory, disclosed; 1,686 non-floor nodes unexecuted (re-scope cost) |
+| `gc_p1_behavior_matrix` (ad-hoc) | /tmp scripts, worktree venv, `ensemble_dev_scratch` PG (prod-guard asserted), `timeout 300` per run | 6 scenarios / 57 checks: create same-tx, append monotonic+isolation, cursor max-predicate, fail-closed read matrix (owner-ANCESTRY ALLOW), purge 5-key content-free single event, boot-regen purity (0 message_queue writes) | 2026-11-15 | ✅ PASS 57/57 |
+| `gc_p1_migration_proof` (ad-hoc) | fresh tmp SQLite via `MigrationRunner.run_pending_migrations` (worktree venv); `20260714_000001` sanctioned tmp-ledger pre-mark | 20261115_080000 UP: 70 migrations incl. target; 3/3 tables + 4/4 indexes match inventory; idempotent re-run no-op | 2026-11-15 | ✅ PASS (file SQLite-only by design; PG fresh-DB skipped — role lacks CREATEDB) |
+| `gc_p1_edge_matrix` (ad-hoc) | /tmp scripts, two-session race construction, `ensemble_dev_scratch` PG | 14 checks: limit guard 0/-1/-200 → ValueError pre-DB-work; collision fingerprint (not substring); two-writer race → ONE winner + typed `RoomSeqConflictError` + MAX+1 self-heal | 2026-11-15 | ✅ 13/14 PASS + 1 design-scope finding (no member-add callable in P1 — P2 scope) |
+| `gc_p1_ensure_core` (ad-hoc) | registered `concurrency_atomic_unit_test` pack under per-var-scrubbed dev fence (pre-flight FENCE OK printed) + 2 static checks | 5F/94P/74S — all 5 = QUARANTINE row 152 node-for-node, 0 non-quarantined; dev.sh:159 flag present; 9/9 await call-sites | 2026-11-15 | ✅ PASS (R1 quarantine-adjudicated, R2/R3 clean) |
+
+> Follow-ups for the lane/ledger owners: F1 P2 owns member-add/naming (`MemberNameCollisionError` public-surface gap) · F2 P3 O-1 pin should anchor `apply_migration` (no `_executable_sql` exists) + driver-dependent fingerprint parity · F5 228 unledgered base-reds at `/tmp/gc_p1_tier2_gate_866678/base_red_final.txt`. Anomalies `44920f6e` (fence-family×xdist worker death) and `89bf5f37` (pytest-9 zero-FAILED-lines) filed by the regression worker.
+<!-- group-chat-p1-tester-gate-20261115-end -->
 <!-- rogue-p2-full-gate-20261115-begin -->
 ## ROGUE-CONTAINMENT-P2 FULL TESTER GATE (2026-11-15; verdict **ALL 8 GATES PASS**; full evidence: `RESULTS/2026-11-15-rogue-p2-full-gate.md` + /tmp rescue packs — UNCOMMITTED-landing disposition: branch finalize-frozen mid-gate; ready-to-apply commands live inside each pack)
 
