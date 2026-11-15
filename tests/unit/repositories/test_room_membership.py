@@ -41,6 +41,7 @@ from daemon.repositories.event.models import Event, EventKind
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.room import (
     MemberNameCollisionError,
+    MemberNotFoundError,
     RoomJoinCrossTreeError,
     RoomJoinError,
     RoomJoinMemberCapError,
@@ -552,7 +553,7 @@ class TestLeave:
         with pytest.raises(RoomNotFoundError):
             repo.leave_room(room_id=str(uuid.uuid4()),
                             instance_id=tree["child1"])
-        with pytest.raises(Exception):
+        with pytest.raises(MemberNotFoundError):
             repo.leave_room(room_id=room_id, instance_id="never-joined")
 
     def test_left_member_fails_active_membership(

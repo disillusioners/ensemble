@@ -166,6 +166,7 @@ class TestTier2Success:
         ):
             out = await svc.generate_member_name(agent_id="capture")
         assert out == "scout"  # quick-model NOT in allowed_models — used anyway
+        assert cap.raw_llm_config["model"] == "quick-model"  # decisive: the quick lane was actually used
 
     @pytest.mark.asyncio
     async def test_think_block_stripped_and_list_content(self):

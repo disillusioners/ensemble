@@ -324,6 +324,51 @@ class TestJoinHappyPath:
             == "sampler-pro"
         )
 
+    async def test_tier2_naming_wait_runs_outside_room_lock(
+        self, engine, room_stack
+    ):
+        """Behavioral pin: the tier-2 quick-model wait (the ONE
+        sanctioned spawn-blocking naming wait) happens BEFORE the
+        per-room lock is taken — a slow model must NOT serialize
+        unrelated same-room membership writes. Proved: while
+        generate_member_name is in-flight, the room's lock is NOT
+        held (not even acquired) by this spawn."""
+        repo, svc, room_id = room_stack
+        # Materialize the lock up-front so the assertion is concrete
+        # (get_room_lock creates it lazily on first call).
+        lock = await svc.get_room_lock(room_id)
+        assert not lock.locked()
+
+        calls: list[dict] = []
+        manager = _build_manager(engine, svc, _spawn_sim(engine, calls))
+
+        async def naming_side_effect(*, agent_id, instance_name):
+            # While naming is in-flight, this spawn must NOT hold the
+            # room lock (tier-2 wait runs outside the lock).
+            assert not lock.locked(), (
+                "tier-2 naming wait ran INSIDE the room lock — "
+                "would serialize same-room writes on a slow model"
+            )
+            await asyncio.sleep(0.05)  # simulate the model latency
+            return "sampler"
+
+        manager._room_naming_service.generate_member_name = (
+            AsyncMock(side_effect=naming_side_effect)
+        )
+
+        tool, reg = _build_tool_and_registry(manager)
+        with patch(
+            "daemon.tools.instance._check_team_membership",
+            return_value=None,
+        ):
+            with patch(
+                "daemon.registry.get_registry", return_value=reg
+            ):
+                result = await tool.coroutine(
+                    agent_id="capture", join_room=room_id
+                )
+        assert "member_name='sampler'" in result
+
     def test_tier3_agent_fallback_in_result_and_instant(
         self, engine, room_stack
     ):
