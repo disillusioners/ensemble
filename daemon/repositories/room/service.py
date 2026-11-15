@@ -162,6 +162,9 @@ class RoomChatService:
         tagged_members: list[str] | None = None,
         addressed_members: list[str] | None = None,
         kind: str = RoomMessageKind.MESSAGE.value,
+        source_message_id: int | None = None,
+        trigger: str | None = None,
+        member: str | None = None,
     ) -> dict[str, Any]:
         """Append under the per-room lock (off-loop).
 
@@ -180,6 +183,9 @@ class RoomChatService:
                 tagged_members=tagged_members,
                 addressed_members=addressed_members,
                 kind=kind,
+                source_message_id=source_message_id,
+                trigger=trigger,
+                member=member,
             )
 
     # ── membership (P2) ────────────────────────────────────────────────
@@ -318,6 +324,22 @@ class RoomChatService:
         return await asyncio.to_thread(
             self._repo.purge_room, room_id, reason=reason
         )
+
+    # ── P3 delivery helpers (off-loop wrappers) ─────────────────────
+    async def cas_instance_status_to_running(
+        self, instance_id: str, allowed: frozenset[str]
+    ) -> int:
+        return await asyncio.to_thread(
+            self._repo.cas_instance_status_to_running, instance_id, allowed
+        )
+
+    async def get_instance_status(self, instance_id: str) -> str | None:
+        return await asyncio.to_thread(self._repo.get_instance_status, instance_id)
+
+    async def emit_room_event(
+        self, instance_id: str, kind: str, data: dict[str, Any]
+    ) -> None:
+        await asyncio.to_thread(self._repo.emit_room_event, instance_id, kind, data)
 
     # ── boot regeneration snapshot (pure derivation) ───────────────────
 

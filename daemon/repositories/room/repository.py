@@ -237,6 +237,7 @@ _APPEND_MESSAGE_STMT = sql_text(
     "INSERT INTO room_messages ("
     "  room_id, seq, author_instance_id, author_name,"
     "  text, tagged_members, addressed_members, kind,"
+    "  source_message_id, trigger, member,"
     "  created_at"
     ") SELECT "
     "  :room_id,"
@@ -247,6 +248,9 @@ _APPEND_MESSAGE_STMT = sql_text(
     "  :tagged_members,"
     "  :addressed_members,"
     "  :kind,"
+    "  :source_message_id,"
+    "  :trigger,"
+    "  :member,"
     "  :created_at"
     " FROM room_messages WHERE room_messages.room_id = :room_id"
     " RETURNING id, seq"
@@ -258,6 +262,9 @@ _APPEND_MESSAGE_STMT = sql_text(
     bindparam("tagged_members", type_=JSONBType),
     bindparam("addressed_members", type_=JSONBType),
     bindparam("kind"),
+    bindparam("source_message_id"),
+    bindparam("trigger"),
+    bindparam("member"),
     bindparam("created_at"),
 )
 
@@ -305,6 +312,9 @@ def _message_payload(message: RoomMessage) -> dict[str, Any]:
         "tagged_members": list(message.tagged_members or []),
         "addressed_members": list(message.addressed_members or []),
         "kind": message.kind,
+        "source_message_id": message.source_message_id,
+        "trigger": message.trigger,
+        "member": message.member,
         "created_at": message.created_at,
     }
 
@@ -621,6 +631,9 @@ class RoomRepository:
         tagged_members: list[str] | None = None,
         addressed_members: list[str] | None = None,
         kind: str = RoomMessageKind.MESSAGE.value,
+        source_message_id: int | None = None,
+        trigger: str | None = None,
+        member: str | None = None,
     ) -> dict[str, Any]:
         """Append one message — per-room monotonic seq, single statement.
 
@@ -662,6 +675,9 @@ class RoomRepository:
                     "tagged_members": list(tagged_members or []),
                     "addressed_members": list(addressed_members or []),
                     "kind": kind,
+                    "source_message_id": source_message_id,
+                    "trigger": trigger,
+                    "member": member,
                     "created_at": now,
                 }).first()
                 if result is None:
@@ -684,6 +700,9 @@ class RoomRepository:
             "tagged_members": list(tagged_members or []),
             "addressed_members": list(addressed_members or []),
             "kind": kind,
+            "source_message_id": source_message_id,
+            "trigger": trigger,
+            "member": member,
             "created_at": now,
         }
 
@@ -888,6 +907,77 @@ class RoomRepository:
             "reason": reason,
             "purged_at": now,
         }
+
+    # ── P3 delivery helpers (instances-table CAS + content-free event) ──
+    #
+    # These two methods are the P3 lane-(b) CAS and the content-free
+    # room_* EventKind emission surface. They touch the ``instances``
+    # / ``event`` tables (NOT the room tables) but are policy-free
+    # mechanics owned by this repository so that ALL DB I/O stays
+    # engine-passed, sync, and off-loop-wrapped by the service layer.
+    # They are used ONLY by ``daemon/services/room_delivery.py``.
+
+    def cas_instance_status_to_running(
+        self, instance_id: str, allowed: frozenset[str]
+    ) -> int:
+        """Atomically flip ``instances.status`` to ``running`` iff it is
+        currently in ``allowed`` (the derived CAS set). Returns the
+        affected row count (0 or 1). The caller derives ``allowed`` from
+        the 10-state enum (non-terminal minus {running, paused}) — this
+        method never interprets the set.
+
+        Used by lane (b) to defeat the enqueue's terminal auto-revival:
+        by the time ``manager.enqueue_message`` runs, the instance is
+        already ``running``, so its internal revive predicate never
+        fires for a room-routed member.
+        """
+        if not allowed:
+            return 0
+        placeholders = ", ".join(f":s{i}" for i in range(len(allowed)))
+        stmt = sql_text(
+            f"UPDATE instances SET status = 'running' "
+            f"WHERE instance_id = :iid AND status IN ({placeholders})"
+        )
+        params: dict[str, Any] = {"iid": instance_id}
+        for i, v in enumerate(sorted(allowed)):
+            params[f"s{i}"] = v
+        with Session(self._engine) as session:
+            result = session.execute(stmt.bindparams(**params))
+            session.commit()
+            return int(result.rowcount or 0)
+
+    def get_instance_status(self, instance_id: str) -> str | None:
+        """Read the current status of an instance (sync, engine-passed).
+
+        Used by the delivery router for lane assignment + the rowcount-0
+        fallback re-read. Returns None when the row is gone.
+        """
+        with Session(self._engine) as session:
+            row = session.get(Instance, instance_id)
+            return row.status if row is not None else None
+
+    def emit_room_event(
+        self, instance_id: str, kind: str, data: dict[str, Any]
+    ) -> None:
+        """Insert ONE content-free ``room_*`` EventKind row.
+
+        Content-free contract: ``data`` carries ids/counts/outcomes only,
+        never message text. ``instance_id`` is the stream the trace
+        rides (the member for tag-delivery, the parent for proposals).
+        """
+        from daemon.repositories.event.models import Event, EventKind
+
+        now = datetime.now(timezone.utc)
+        with Session(self._engine) as session:
+            session.add(
+                Event(
+                    instance_id=instance_id,
+                    kind=kind,
+                    data=__import__("json").dumps(data),
+                    created_at=now,
+                )
+            )
+            session.commit()
 
     # ── boot regeneration snapshot (P1 — the pinned pair, §10) ─────────
 

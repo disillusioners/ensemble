@@ -171,3 +171,75 @@ Recorded 2026-11-15 by the P2 implementation lane (branch `feature/group-chat-p2
 **A-P2-10 · OPT-2 — cap-conjuncts-outside-lock residual (accepted, bounded).** A-P2-5 scopes the per-room lock to the registry's read→insert only. The admission validation (`_validate_room_join`, including the `ROOM_MAX_MEMBERS` and `ROOM_MAX_ACTIVE_ROOMS_PER_TREE` counts) runs BEFORE the lock is acquired, so two spawns admitted at the boundary (e.g. both validated at 15 active) can both insert → a bounded overshoot of ≤ the number of spawns racing the last slot. The `UNIQUE(room_id, member_name)` backstop does NOT catch this (names differ). Accepted because: (a) spawn-into-a-room is parent-driven and effectively sequential in practice; (b) the caps are cost-discipline bounds, not correctness invariants; (c) moving the admission reads inside the lock would hold the lock across DB reads for every spawn and was not warranted. Bound: overshoot ≤ concurrent racers at the boundary (in practice ≤ a handful; never unbounded). P3 inherits this posture unchanged — do not re-litigate; if a later phase needs a hard cap, move `validate_room_join` under `get_room_lock` (a one-block change) rather than adding a new mechanism.
 
 **A-P2-11 · OPT-5 — `room_join` event asymmetry (join defers to P3; leave emits today).** `leave_room` emits a content-free `room_leave` EventKind row TODAY (ids + per-room name, owner's event stream). The spawn join path does NOT emit a `room_join` event at P2 — it emits only the spawn-scoped INFO log line ("spawn room join: room=… instance=… member_name=…") and persists the membership row + JSONB keys. The content-free `room_join` EventKind (registered in P1) is reserved for P3's delivery lanes, which own the event-emission surface alongside tag/address routing. P3: emit `room_join` on admission (content-free, same shape as `room_leave`) — no new kind needed. Do not re-litigate the split; the asymmetry is intentional and recorded.
+
+---
+
+## P3 implementation ambiguity resolutions (appendix A-P3)
+
+Recorded 2026-11-15 by the P3 CORE implementation lane (branch
+`feature/group-chat-p3`, base 09a683ddc) — the ambiguity resolutions
+made while implementing the P3 delivery machinery, persisted in-repo
+per the P1/P2 lesson (O-4) so they survive KV/context TTL.
+
+**A-P3-1 · Injection source composite.** The commission requires BOTH
+author provenance (`internal_agent:<author>`) and the room context
+shape (`room:{room_id}:{sender_name}:{seq}`) on the injection source.
+To avoid the dispatch-chain machinery mis-parsing the composite as an
+instance id, the source is `room:{room_id}:{sender_name}:{seq}:author={author_instance_id}`
+— the room shape stays the prefix (first four segments) and the author
+identity rides the final `author=` segment. The drain site stamps the
+string verbatim onto `HumanMessage.additional_kwargs["source"]`; no
+downstream parser depends on the `internal_agent:` prefix for room
+notifications, so no dispatch-chain side effect is introduced.
+
+**A-P3-2 · Proposal row authorship.** A minted `task_proposal` row
+carries `author_instance_id`/`author_name` of the SENDER of the
+triggering post (the sibling whose @tag/addressing caused it), not the
+room machinery or the parent. Speaker attribution rides the sender;
+the proposal text itself names room + sender + member + options.
+
+**A-P3-3 · `member` in the dedup uniqueness.** The `(source_message_id,
+trigger, member)` uniqueness uses the per-room member NAME (not the
+instance id). Names are per-room unique and never recycled (LEFT rows
+keep their names — A-P2-2), so they are a stable dedup key; instance
+ids would also work but the notice shape + roster resolution key on
+names, so names are the consistent choice.
+
+**A-P3-4 · Lane-(b) CAS lives in the room repository.** The
+instances-table status CAS (`UPDATE instances SET status='running'
+WHERE instance_id=? AND status IN (...)`) is exposed as
+`RoomRepository.cas_instance_status_to_running` even though it touches
+the instances table, because it is a policy-free mechanic (the caller
+derives the allowed set from the enum) and all DB I/O must stay
+engine-passed/sync/off-loop-wrapped. It is the only cross-table method
+in the room repository and is documented as such.
+
+**A-P3-5 · Boot delivery is a separate pass.** `run_room_boot_regen`
+stays a pure derivation (its P1 test stays green); boot delivery per
+the lane map runs as a separate best-effort pass
+(`RoomDeliveryService.boot_deliver`) immediately after, re-using the
+same `derive_undelivered_tagged` predicate. Pinned pair #2 is honored:
+tagged terminal rows mint a durable proposal (Y14 cursor advance) but
+NO parent routing occurs at boot. Non-terminal tagged rows route per
+the lane map (injection/enqueue/park).
+
+**A-P3-6 · `addressed_to` resolution reuses the active roster.** A LEFT
+member or a cross-room name resolves to `None` (warning + skip, post
+still succeeds) because `list_members(active_only=True)` is the
+resolution base — this matches the capability row (LEFT = inactive
+for routing) and the cross-room fail-closed rule without a separate
+code path.
+
+**A-P3-7 · Audit emission is best-effort.** Every `room_*` EventKind
+emission on the delivery paths is wrapped so a failure logs a WARNING
+and never breaks delivery. The content-free contract (ids/counts/
+outcomes only, never message text) is enforced by construction in the
+emitted payloads.
+
+**A-P3-8 · Proposal dedup is checked in Python + the DB backstop.** The
+router checks for an existing proposal row with the same
+`(source_message_id, trigger, member)` before minting (idempotent
+re-route / boot), and the UNIQUE index is the DB-level belt. Both
+layers are needed: the Python check avoids a wasted append + the
+unique-index violation on re-derivation, and the index covers races
+the Python check cannot see.

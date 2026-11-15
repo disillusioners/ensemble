@@ -378,6 +378,18 @@ class RoomMessage(SQLModel, table=True):
             "seq",
             name="uq_room_messages_room_seq",
         ),
+        # P3 proposal-dedup backstop (R1/Ruling A): at most one
+        # task_proposal row per (source_message_id, trigger, member).
+        # NULLs are treated as distinct on both drivers, so ordinary
+        # message rows (all three NULL) never collide. The index is
+        # re-created on existing databases via _ensure_postgres_columns
+        # (PG) / the P3 migration (SQLite).
+        UniqueConstraint(
+            "source_message_id",
+            "trigger",
+            "member",
+            name="uq_room_messages_proposal_dedup",
+        ),
     )
 
     id: int | None = Field(
@@ -451,6 +463,37 @@ class RoomMessage(SQLModel, table=True):
         default=RoomMessageKind.MESSAGE.value,
         sa_column=Column("kind", Text, nullable=False),
         description="message | system | task_proposal | task_decision.",
+    )
+    # P3 proposal-dedup columns (R1 / Ruling A). All nullable: only
+    # task_proposal rows carry them (ordinary posts + decisions leave
+    # them NULL). ``source_message_id`` is the id of the triggering
+    # room post; ``trigger`` ∈ {tag_terminal, addressed_terminal};
+    # ``member`` is the (per-room unique) member name the proposal is
+    # about. The UNIQUE(source_message_id, trigger, member) backstop
+    # (above) makes the dedup mechanical.
+    source_message_id: int | None = Field(
+        default=None,
+        sa_column=Column("source_message_id", BigInteger, nullable=True),
+        description=(
+            "P3: id of the triggering room post for a task_proposal row "
+            "(NULL for ordinary posts / decisions)."
+        ),
+    )
+    trigger: str | None = Field(
+        default=None,
+        sa_column=Column("trigger", Text, nullable=True),
+        description=(
+            "P3: tag_terminal | addressed_terminal for a task_proposal "
+            "row (NULL otherwise)."
+        ),
+    )
+    member: str | None = Field(
+        default=None,
+        sa_column=Column("member", Text, nullable=True),
+        description=(
+            "P3: the member name a task_proposal row is about (NULL "
+            "otherwise)."
+        ),
     )
     created_at: str = Field(
         sa_column=Column("created_at", Text, nullable=False),
