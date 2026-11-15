@@ -123,6 +123,38 @@ def _join_member(
         s.commit()
 
 
+def _append(
+    repo: RoomRepository,
+    room_id: str,
+    tree: dict[str, str],
+    text_body: str,
+    *,
+    author: str = "child1",
+    tagged: list[str] | None = None,
+    addressed: list[str] | None = None,
+) -> dict:
+    """One-line append through the repo — the matrix's default author
+    is child-1. ``author`` selects the (instance, name) pair:
+    ``child1`` → (child-1, worker-a), ``owner`` → (parent-1, lead),
+    ``lead2`` → (parent-1, lead2 — the second-room owner name),
+    ``x`` → (x, x)."""
+    authors = {
+        "child1": (tree["child1"], "worker-a"),
+        "owner": (tree["owner"], "lead"),
+        "lead2": (tree["owner"], "lead2"),
+        "x": ("x", "x"),
+    }
+    instance_id, author_name = authors[author]
+    return repo.append_message(
+        room_id=room_id,
+        author_instance_id=instance_id,
+        author_name=author_name,
+        text_body=text_body,
+        tagged_members=tagged,
+        addressed_members=addressed,
+    )
+
+
 @pytest.fixture
 def tree(engine: Engine) -> dict[str, str]:
     """grand-1 (root) → parent-1 (room owner) → {child-1, child-2}."""
@@ -308,9 +340,11 @@ def test_append_integrity_fk_violation_is_not_seq_conflict(repo):
 def test_member_name_unique_backstop_at_db_level(engine, repo, tree, room_id):
     """A second member row with the SAME per-room name is structurally
     impossible (the tier-4 registry backstop)."""
-    with pytest.raises(Exception) as excinfo:
+    # child-1 already owns "worker-a" (the room_id fixture) — THIS join
+    # collides on UNIQUE(room_id, member_name). One call per scenario:
+    # the old second statement inside the raises block was unreachable.
+    with pytest.raises(IntegrityError) as excinfo:
         _join_member(engine, room_id, tree["child2"], "worker-a")
-        _join_member(engine, room_id, tree["child2"] + "-x", "worker-a")
     assert "unique" in str(excinfo.value).lower()
 
 
@@ -320,52 +354,28 @@ def test_member_name_unique_backstop_at_db_level(engine, repo, tree, room_id):
 
 
 def test_seq_monotonic_gap_free(repo, room_id, tree):
-    seqs = [
-        repo.append_message(
-            room_id=room_id,
-            author_instance_id=tree["child1"],
-            author_name="worker-a",
-            text_body=f"m{i}",
-        )["seq"]
-        for i in range(5)
-    ]
+    seqs = [_append(repo, room_id, tree, f"m{i}")["seq"] for i in range(5)]
     assert seqs == [1, 2, 3, 4, 5]
 
 
 def test_append_bumps_room_counters(repo, room_id, tree):
-    repo.append_message(
-        room_id=room_id,
-        author_instance_id=tree["child1"],
-        author_name="worker-a",
-        text_body="hello",
-        tagged_members=["lead"],
-    )
+    _append(repo, room_id, tree, "hello", tagged=["lead"])
     room = repo.get_room(room_id)
     assert room["message_count"] == 1
     assert room["last_post_at"] is not None
 
 
-def test_append_to_absent_room_typed_not_found(repo):
+def test_append_to_absent_room_typed_not_found(repo, tree):
     with pytest.raises(RoomNotFoundError):
-        repo.append_message(
-            room_id="no-such-room",
-            author_instance_id="x",
-            author_name="x",
-            text_body="t",
-        )
+        _append(repo, "no-such-room", tree, "t", author="x")
 
 
 def test_unique_room_seq_backstop_at_db_level(engine, repo, room_id, tree):
     """The DB-level constraint exists and refuses a duplicated
     (room_id, seq) pair — the backstop behind the per-room lock."""
-    seq = repo.append_message(
-        room_id=room_id,
-        author_instance_id=tree["child1"],
-        author_name="worker-a",
-        text_body="first",
-    )["seq"]
+    seq = _append(repo, room_id, tree, "first")["seq"]
     assert seq == 1
-    with pytest.raises(Exception) as excinfo, Session(engine) as session:
+    with pytest.raises(IntegrityError) as excinfo, Session(engine) as session:
         session.execute(
             text(
                 "INSERT INTO room_messages (room_id, seq,"
@@ -381,18 +391,9 @@ def test_unique_room_seq_backstop_at_db_level(engine, repo, room_id, tree):
                 c="2026-11-15T08:00:00+00:00",
             )
         )
-        session.commit()
     assert "unique" in str(excinfo.value).lower()
     # and the seq machinery self-heals: next append continues 2, 3.
-    assert (
-        repo.append_message(
-            room_id=room_id,
-            author_instance_id=tree["child1"],
-            author_name="worker-a",
-            text_body="second",
-        )["seq"]
-        == 2
-    )
+    assert _append(repo, room_id, tree, "second")["seq"] == 2
 
 
 def test_room_seq_conflict_error_in_vocabulary():
@@ -434,22 +435,12 @@ def test_read_matrix_active_member(repo, room_id, tree):
 
 
 def test_read_matrix_owner_member(repo, room_id, tree):
-    repo.append_message(
-        room_id=room_id,
-        author_instance_id=tree["owner"],
-        author_name="lead",
-        text_body="hi",
-    )
+    _append(repo, room_id, tree, "hi", author="owner")
     assert len(repo.list_messages(room_id, caller_instance_id=tree["owner"])) == 1
 
 
 def test_read_matrix_owner_ancestry(repo, room_id, tree):
-    repo.append_message(
-        room_id=room_id,
-        author_instance_id=tree["child1"],
-        author_name="worker-a",
-        text_body="from child",
-    )
+    _append(repo, room_id, tree, "from child")
     # grand-1 is two hops above the owner — pure ancestry, NO member row.
     assert repo.get_member(room_id, tree["root"]) is None
     msgs = repo.list_messages(room_id, caller_instance_id=tree["root"])
@@ -486,12 +477,7 @@ def test_read_matrix_left_ancestor_member_reads_via_ancestry(
     ``test_read_matrix_left_member_is_not_found`` (referenced, not
     duplicated).
     """
-    repo.append_message(
-        room_id=room_id,
-        author_instance_id=tree["child1"],
-        author_name="worker-a",
-        text_body="ancestor still reads",
-    )
+    _append(repo, room_id, tree, "ancestor still reads")
     _join_member(repo._engine, room_id, tree["root"], "grand-watcher")
     with Session(repo._engine) as s:
         row = s.get(ChatRoomMember, (room_id, tree["root"]))
@@ -557,22 +543,11 @@ def _close_room(repo: RoomRepository, room_id: str) -> None:
 def test_closed_room_refuses_posts(repo, room_id, tree):
     _close_room(repo, room_id)
     with pytest.raises(RoomClosedError):
-        repo.append_message(
-            room_id=room_id,
-            author_instance_id=tree["child1"],
-            author_name="worker-a",
-            text_body="late",
-        )
+        _append(repo, room_id, tree, "late")
 
 
 def test_closed_room_still_reads(repo, room_id, tree):
-    repo.append_message(
-        room_id=room_id,
-        author_instance_id=tree["child1"],
-        author_name="worker-a",
-        text_body="before close",
-        tagged_members=["lead"],
-    )
+    _append(repo, room_id, tree, "before close", tagged=["lead"])
     _close_room(repo, room_id)
     assert len(repo.list_messages(room_id, caller_instance_id=tree["owner"])) == 1
     assert repo.unread_count(room_id, caller_instance_id=tree["owner"]) == 1
@@ -586,25 +561,10 @@ def test_closed_room_still_reads(repo, room_id, tree):
 def test_rederivation_predicate_and_owner_inclusion(repo, room_id, tree):
     """seq > max(last_read, last_delivered); TAGGED rows only; the
     OWNER participates (D2)."""
-    s1 = repo.append_message(
-        room_id=room_id,
-        author_instance_id=tree["child1"],
-        author_name="worker-a",
-        text_body="tagged for all",
-        tagged_members=["lead"],
-    )["seq"]
-    repo.append_message(
-        room_id=room_id,
-        author_instance_id=tree["child1"],
-        author_name="worker-a",
-        text_body="untagged",
-    )
-    s3 = repo.append_message(
-        room_id=room_id,
-        author_instance_id=tree["child1"],
-        author_name="worker-a",
-        text_body="tagged for worker",
-        tagged_members=["worker-a"],
+    s1 = _append(repo, room_id, tree, "tagged for all", tagged=["lead"])["seq"]
+    _append(repo, room_id, tree, "untagged")
+    s3 = _append(
+        repo, room_id, tree, "tagged for worker", tagged=["worker-a"]
     )["seq"]
 
     # Owner read up to s1 → the substrate candidate set is
@@ -626,13 +586,7 @@ def test_rederivation_predicate_and_owner_inclusion(repo, room_id, tree):
 
 
 def test_rederivation_delivered_cursor_gates(repo, room_id, tree):
-    s1 = repo.append_message(
-        room_id=room_id,
-        author_instance_id=tree["child1"],
-        author_name="worker-a",
-        text_body="tagged",
-        tagged_members=["lead"],
-    )["seq"]
+    s1 = _append(repo, room_id, tree, "tagged", tagged=["lead"])["seq"]
     assert repo.derive_undelivered_tagged()  # pending above 0/0
     repo.advance_delivered_cursor(room_id, tree["owner"], s1)
     owner_rows = [
@@ -650,21 +604,11 @@ def test_rederivation_covers_closed_not_purged(repo, room_id, tree, engine):
         owner_instance_id=tree["owner"],
         owner_member_name="lead2",
     )["room"]["room_id"]
-    repo.append_message(
-        room_id=rid2,
-        author_instance_id=tree["owner"],
-        author_name="lead2",
-        text_body="tagged in closed",
-        tagged_members=["lead2"],
+    _append(
+        repo, rid2, tree, "tagged in closed", author="lead2", tagged=["lead2"]
     )
     _close_room(repo, rid2)
-    repo.append_message(
-        room_id=room_id,
-        author_instance_id=tree["child1"],
-        author_name="worker-a",
-        text_body="tagged in active",
-        tagged_members=["worker-a"],
-    )
+    _append(repo, room_id, tree, "tagged in active", tagged=["worker-a"])
 
     pending_rooms = {p["room_id"] for p in repo.derive_undelivered_tagged()}
     assert room_id in pending_rooms  # active
@@ -676,13 +620,7 @@ def test_rederivation_covers_closed_not_purged(repo, room_id, tree, engine):
 
 
 def test_rederivation_skips_left_members(repo, room_id, tree):
-    repo.append_message(
-        room_id=room_id,
-        author_instance_id=tree["child1"],
-        author_name="worker-a",
-        text_body="tagged",
-        tagged_members=["worker-a"],
-    )
+    _append(repo, room_id, tree, "tagged", tagged=["worker-a"])
     with Session(repo._engine) as s:
         row = s.get(ChatRoomMember, (room_id, tree["child1"]))
         row.state = "left"
@@ -707,18 +645,8 @@ def test_purge_transactional_completeness(repo, engine, room_id, tree):
         owner_member_name="lead2",
     )["room"]["room_id"]
     for _ in range(3):
-        repo.append_message(
-            room_id=room_id,
-            author_instance_id=tree["child1"],
-            author_name="worker-a",
-            text_body="doomed content xyzzy",
-        )
-    repo.append_message(
-        room_id=other,
-        author_instance_id=tree["owner"],
-        author_name="lead2",
-        text_body="survivor",
-    )
+        _append(repo, room_id, tree, "doomed content xyzzy")
+    _append(repo, other, tree, "survivor", author="lead2")
 
     counts = repo.purge_room(room_id, reason="p_close_test")
     assert counts["messages_purged"] == 3
@@ -748,13 +676,7 @@ def test_purge_transactional_completeness(repo, engine, room_id, tree):
 
 
 def test_purge_emits_exactly_one_content_free_event(repo, engine, room_id, tree):
-    repo.append_message(
-        room_id=room_id,
-        author_instance_id=tree["child1"],
-        author_name="worker-a",
-        text_body="SECRET-CONTENT-MARKER",
-        tagged_members=["lead"],
-    )
+    _append(repo, room_id, tree, "SECRET-CONTENT-MARKER", tagged=["lead"])
     repo.purge_room(room_id, reason="p_idle_test")
 
     with Session(engine) as s:
@@ -802,12 +724,7 @@ def test_purge_is_idempotent_via_typed_not_found(repo, room_id):
 
 def test_unread_count_follows_read_cursor(repo, room_id, tree):
     for i in range(3):
-        repo.append_message(
-            room_id=room_id,
-            author_instance_id=tree["child1"],
-            author_name="worker-a",
-            text_body=f"m{i}",
-        )
+        _append(repo, room_id, tree, f"m{i}")
     assert repo.unread_count(room_id, caller_instance_id=tree["owner"]) == 3
     repo.advance_read_cursor(room_id, tree["owner"], 2)
     assert repo.unread_count(room_id, caller_instance_id=tree["owner"]) == 1
@@ -816,12 +733,7 @@ def test_unread_count_follows_read_cursor(repo, room_id, tree):
 
 
 def test_unread_count_closed_room_still_computes(repo, room_id, tree):
-    repo.append_message(
-        room_id=room_id,
-        author_instance_id=tree["child1"],
-        author_name="worker-a",
-        text_body="m",
-    )
+    _append(repo, room_id, tree, "m")
     _close_room(repo, room_id)
     assert repo.unread_count(room_id, caller_instance_id=tree["owner"]) == 1
 
@@ -836,15 +748,10 @@ def test_unread_count_fails_closed_for_non_member(repo, room_id):
 # ---------------------------------------------------------------------------
 
 
-def test_p1_emits_only_room_purged_kind(repo, engine, room_id):
+def test_p1_emits_only_room_purged_kind(repo, engine, room_id, tree):
     """The full P1 surface runs; the ONLY room_* event kind written is
     room_purged (registry-before-emission — the rest are P3+)."""
-    repo.append_message(
-        room_id=room_id,
-        author_instance_id="x",
-        author_name="x",
-        text_body="t",
-    )
+    _append(repo, room_id, tree, "t", author="x")
     repo.advance_read_cursor(room_id, "x", 1)
     repo.derive_undelivered_tagged()
     with pytest.raises(RoomNotFoundError):

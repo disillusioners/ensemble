@@ -771,6 +771,51 @@ class TestP11BootNoBehaviorChange:
             ["git", *args], capture_output=True, text=True, check=False
         ).stdout
 
+    def _manager_hunks_missing_sanctioned_marker(self, span):
+        """Hunks of the daemon/manager.py drift in ``span`` that carry
+        NO sanctioned-lane marker. ``SANCTIONED_LANE_MARKERS`` is the
+        single source (the cross-lane carve-out lives there — never
+        here). This is the SHARED body of the three lane pins below:
+        the diff, the hunk parse and the marker check are identical
+        across them (all three lane path constants alias the same
+        file — daemon/manager.py); only each pin's docstring narrates
+        its own lane's claim. A span with no manager.py diff is
+        vacuously clean ([]). A degenerate diff (content lines but no
+        hunk headers) yields a pseudo-hunk so the caller's ``== []``
+        assert still fails — the old explicit "no content lines"
+        assert, preserved.
+        """
+        diff = self._git(
+            "diff", "--unified=0", span, "--", self.DECISION_LANE_SANCTIONED_PATH
+        )
+        if not diff.strip():
+            return []  # nothing sanctioned in this span — vacuously clean
+        hunks: list[list[str]] = []
+        current: list[str] = []
+        for line in diff.splitlines():
+            if line.startswith("@@"):
+                if current:
+                    hunks.append(current)
+                current = []
+                continue
+            if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
+                current.append(line)
+        if current:
+            hunks.append(current)
+        if not hunks:
+            return [[
+                "<degenerate: manager.py diff had content lines but no "
+                "hunk headers>"
+            ]]
+        return [
+            hunk for hunk in hunks
+            if not any(
+                marker in line.lower()
+                for line in hunk
+                for marker in self.SANCTIONED_LANE_MARKERS
+            )
+        ]
+
     def test_sanctioned_guard_present_in_file(self):
         # File-state pin: the sanctioned hunk must be present, contiguous,
         # and exact. Removing/altering a line REDs. This survives a future
@@ -846,38 +891,7 @@ class TestP11BootNoBehaviorChange:
         ).strip()
         assert merge, "no first-parent merge found"
         span = f"{merge}..HEAD"
-        diff = self._git(
-            "diff", "--unified=0", span, "--", self.DECISION_LANE_SANCTIONED_PATH
-        )
-        if not diff.strip():
-            return  # nothing sanctioned in this span — vacuously clean
-        hunks: list[list[str]] = []
-        current: list[str] = []
-        for line in diff.splitlines():
-            if line.startswith("@@"):
-                if current:
-                    hunks.append(current)
-                current = []
-                continue
-            if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
-                current.append(line)
-        if current:
-            hunks.append(current)
-        assert hunks, "the manager.py diff has no content lines"
-        offenders = [
-            hunk for hunk in hunks
-            if not any(
-                marker in line.lower()
-                for line in hunk
-                for marker in self.SANCTIONED_LANE_MARKERS
-            )
-        ]
-        assert offenders == [], (
-            "daemon/manager.py drifted OUTSIDE every sanctioned lane in "
-            f"the post-merge span — every hunk must carry a sanctioned "
-            f"lane marker {self.SANCTIONED_LANE_MARKERS}.\n"
-            f"offending hunks={offenders!r}"
-        )
+        assert self._manager_hunks_missing_sanctioned_marker(span) == []
 
     def test_the_memoir_lane_manager_drift_is_confined_to_sanctioned_lane_hunks(self):
         """The SANCTIONED memoir-lane manager.py drift.
@@ -900,39 +914,11 @@ class TestP11BootNoBehaviorChange:
         ).strip()
         assert merge, "no first-parent merge found"
         span = f"{merge}..HEAD"
-        diff = self._git(
-            "diff", "--unified=0", span, "--", self.MEMOIR_LANE_SANCTIONED_PATH
-        )
-        if not diff.strip():
-            return  # nothing sanctioned in this span — vacuously clean
-        hunks: list[list[str]] = []
-        current: list[str] = []
-        for line in diff.splitlines():
-            if line.startswith("@@"):
-                if current:
-                    hunks.append(current)
-                current = []
-                continue
-            if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
-                current.append(line)
-        if current:
-            hunks.append(current)
-        assert hunks, "the manager.py diff has no content lines"
-        offenders = [
-            hunk for hunk in hunks
-            if not any(
-                marker in line.lower()
-                for line in hunk
-                for marker in self.SANCTIONED_LANE_MARKERS
-            )
-        ]
-        assert offenders == [], (
-            "daemon/manager.py drifted OUTSIDE every sanctioned lane in "
-            f"the post-merge span — every hunk must carry a sanctioned "
-            f"lane marker {self.SANCTIONED_LANE_MARKERS}.\n"
-            f"offending hunks={offenders!r}"
-        )
-    def test_the_group_chat_lane_manager_drift_is_confined_to_sanctioned_lane_hunks(self):
+        assert self._manager_hunks_missing_sanctioned_marker(span) == []
+
+    def test_the_group_chat_lane_manager_drift_is_confined_to_sanctioned_lane_hunks(
+        self,
+    ):
         """The SANCTIONED group-chat (P1 substrate) lane manager.py drift.
 
         Every hunk of the daemon/manager.py drift in the post-merge span
@@ -953,36 +939,4 @@ class TestP11BootNoBehaviorChange:
         ).strip()
         assert merge, "no first-parent merge found"
         span = f"{merge}..HEAD"
-        diff = self._git(
-            "diff", "--unified=0", span, "--",
-            self.GROUP_CHAT_LANE_SANCTIONED_PATH
-        )
-        if not diff.strip():
-            return  # nothing sanctioned in this span — vacuously clean
-        hunks: list[list[str]] = []
-        current: list[str] = []
-        for line in diff.splitlines():
-            if line.startswith("@@"):
-                if current:
-                    hunks.append(current)
-                current = []
-                continue
-            if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
-                current.append(line)
-        if current:
-            hunks.append(current)
-        assert hunks, "the manager.py diff has no content lines"
-        offenders = [
-            hunk for hunk in hunks
-            if not any(
-                marker in line.lower()
-                for line in hunk
-                for marker in self.SANCTIONED_LANE_MARKERS
-            )
-        ]
-        assert offenders == [], (
-            "daemon/manager.py drifted OUTSIDE every sanctioned lane in "
-            f"the post-merge span — every hunk must carry a sanctioned "
-            f"lane marker {self.SANCTIONED_LANE_MARKERS}.\n"
-            f"offending hunks={offenders!r}"
-        )
+        assert self._manager_hunks_missing_sanctioned_marker(span) == []
