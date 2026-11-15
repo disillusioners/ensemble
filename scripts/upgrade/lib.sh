@@ -3677,17 +3677,26 @@ _freshness_refuse() {
 # contract absent, interpreter without PyYAML, config unparseable), it
 # REFUSES — it never warns-and-passes.
 #
-# Contract resolution (dual-mode):
-#   TREE CONTEXT — promote running from a checkout/worktree: the target
-#   model is importable at <tree>/daemon/config.py, so the contract is
-#   minted FRESH via the payload's own minter
-#   (config_compat_contract.py --repo-root <tree>) into a tmp file; a
-#   mint failure falls through to the staged-contract rung (and finally
-#   to the refusal).
-#   PAYLOAD CONTEXT — release-staged promote: the contract travels WITH
-#   the release (stage.sh mints it into the daemon slice from the target
-#   tree at stage time). Legacy payloads staged before this lane carry no
-#   contract ⇒ REFUSE with the re-stage remedy.
+# Contract resolution (explicit order — D-6, E2E round 4 / cycle-4 🔴
+# anomaly 7ce14c96: the §7 self-detached promote runs from the INSTALL dir,
+# where the pre-D-6 legs could not resolve — no daemon/config.py in the
+# install layout, no contract next to lib.sh, REPO_ROOT by-design absent
+# (the refusal rendered the unset fallback literally: "?/daemon/...") while
+# the 12,873-B contract sat at releases/<ver>/daemon/plugin_subsystem/):
+#   1. TARGET-PAYLOAD — $INSTALL_DIR/releases/$VERSION/daemon/plugin_subsystem/
+#      config_compat_contract.json. FIRST-AUTHORITATIVE when promoting a
+#      staged version: stage.sh minted it (stage.sh:546) from exactly the
+#      tree that boots after the flip — the release content, not the
+#      current tree state, is the oracle.
+#   2. TREE CONTEXT — promote running from a checkout/worktree: the target
+#      model is importable at <tree>/daemon/config.py, so the contract is
+#      minted FRESH via the payload's own minter
+#      (config_compat_contract.py --repo-root <tree>) into a tmp file; a
+#      mint failure falls through to the staged-contract rungs (and finally
+#      to the refusal). Skipped when leg 1 already resolved.
+#   3./4. PAYLOAD CONTEXT legacy rungs — next to lib.sh, then $REPO_ROOT.
+#      Legacy payloads staged before this lane carry no contract ⇒ REFUSE
+#      with the re-stage remedy.
 # The checker + minter are slice members (executor_family_paths — staged
 # with every payload; commit-in the tree for the tree context).
 #
@@ -3725,9 +3734,18 @@ _config_compat_check() {
             "The gate refuses FAIL-CLOSED when it cannot evaluate (D-2)."
     fi
     contract=""
+    # D-6 leg 1 — TARGET-PAYLOAD (FIRST-AUTHORITATIVE, see the block comment
+    # above). Checked before every other rung: when promoting a staged
+    # version the payload contract IS the target release's key-shape
+    # contract; the detached executor's only resolvable leg.
+    local payload_contract
+    payload_contract="${INSTALL_DIR:-}/releases/${version}/daemon/plugin_subsystem/config_compat_contract.json"
+    if [ -f "$payload_contract" ]; then
+        contract="$payload_contract"
+    fi
     local tree_root
     tree_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)"
-    if [ -f "$tree_root/daemon/config.py" ] && [ -f "$checker" ] && [ -f "$tree_root/daemon/plugin_subsystem/config_compat_contract.py" ]; then
+    if [ -z "$contract" ] && [ -f "$tree_root/daemon/config.py" ] && [ -f "$checker" ] && [ -f "$tree_root/daemon/plugin_subsystem/config_compat_contract.py" ]; then
         # TREE CONTEXT: mint fresh from the target model (always current).
         cfg_out="$(mktemp -t cc.XXXXXX 2>/dev/null || printf '/tmp/cc.%s.json' "$$")"
         if "$py" "$tree_root/daemon/plugin_subsystem/config_compat_contract.py" \
@@ -5890,6 +5908,28 @@ _executor_detach_self() {
         esc_args="$esc_args '$(printf "%s" "$arg_q" | sed -e "s/'/'\\\\''/g")'"
     done
     launchctl_abs="$(command -v "$LAUNCHCTL_BIN" 2>/dev/null || printf 'launchctl')"
+    # D-6 (E2E round 4, cycle-4 🔴 anomaly 7ce14c96): thread REPO_ROOT into
+    # the plist EnvironmentVariables EXPLICITLY. HOOK POINT: the plist
+    # template below (this is the detach machinery's own template — no
+    # daemon-side allowlist is widened). Convention: allowlist-of-one,
+    # per the EXECUTOR_ENV_ALLOWLIST discipline (upgrade_journal.py:3034) —
+    # a NAMED key threaded deliberately, never a blanket env copy; the
+    # envfile snapshot (declare -px) already carries EXPORTED vars, but it
+    # misses a set-but-NON-exported REPO_ROOT (an operator shell that
+    # assigned it plainly), which is exactly the checkout-leg resolution
+    # the config-compat gate reads (lib.sh _config_compat_check leg 4).
+    # Set-but-empty stays ABSENT (no empty-string env entries — launchd
+    # would hand the child a literal empty REPO_ROOT and the gate's
+    # "-f" probe would still miss, but the refusal detail would render
+    # a confusing empty path instead of "?").
+    local detach_repo_root_xml=""
+    if [ -n "${REPO_ROOT:-}" ]; then
+        detach_repo_root_xml="    <key>EnvironmentVariables</key>
+    <dict>
+        <key>REPO_ROOT</key><string>$(_executor_detach_xml_escape "$REPO_ROOT")</string>
+    </dict>
+"
+    fi
     cat > "$wrapper" <<WEOF
 #!/bin/bash
 # Executor self-detach wrapper (ENSEMBLE-32 Fix #5) — generated by lib.sh
@@ -5926,7 +5966,7 @@ WEOF
     <key>ExitTimeOut</key><integer>30</integer>
     <key>StandardOutPath</key><string>$(_executor_detach_xml_escape "$logfile")</string>
     <key>StandardErrorPath</key><string>$(_executor_detach_xml_escape "$logfile")</string>
-</dict>
+${detach_repo_root_xml}</dict>
 </plist>
 PLEOF
 

@@ -518,6 +518,57 @@ case "$D5_EVID" in
 esac
 rm -f "$FIXTURE/d5-argv-payload.sh"
 
+# ════════════════════════════════════════════════════════════════════════════
+# K — D-6 (E2E round 4, cycle-4 🔴): REPO_ROOT threaded into the detached
+# job's plist EnvironmentVariables (allowlist-of-one). Driven legs: run the
+# REAL detach with a bootstrap-refusing launchctl stub (mode=fail) and a
+# no-op cleanup override so the GENERATED PLIST survives for byte
+# inspection. SET ⇒ the plist carries EnvironmentVariables/REPO_ROOT;
+# UNSET ⇒ the plist carries NO EnvironmentVariables key at all.
+section "K - D-6 plist EnvironmentVariables threading"
+K_OUT_SET="$(src_lib "
+ps() { case \"\$*\" in *ppid=*) echo 0 ;; *) return 1 ;; esac; }
+printf 'mode=fail\n' > \"\$LCTL_CTRL\"
+export PROMOTE_DETACH_WAIT_S=\"60\" PROMOTE_DETACH_POLL_S=\"1\"
+export REPO_ROOT='/tmp/some-checkout'
+_executor_detach_cleanup() { :; }   # keep the generated plist for inspection
+_executor_detach_self '$FIXTURE/pl.sh' demo --version v9-fixture >/dev/null 2>&1
+echo detach-rc=\$?
+echo \"plist=\$(ls -t \"\${TMPDIR:-/tmp}\"/ens-promote-detach.*/com.ensemble.promote-*.plist 2>/dev/null | head -n 1)\"
+" 2>/dev/null)"
+K_PLIST="$(printf '%s\n' "$K_OUT_SET" | sed -n 's/^plist=//p' | head -n 1)"
+assert_contains "K1: the detach machinery ran to the refusal (fixture sound)" "detach-rc=1" "$K_OUT_SET"
+[ -n "$K_PLIST" ] && [ -f "$K_PLIST" ] && _pass || _fail "K1b: no plist survived for inspection (cleanup override ineffective)"
+if [ -n "$K_PLIST" ] && [ -f "$K_PLIST" ]; then
+    K_BODY="$(cat "$K_PLIST")"
+    case "$K_BODY" in
+        *"<key>EnvironmentVariables</key>"*"<key>REPO_ROOT</key><string>/tmp/some-checkout</string>"*) _pass ;;
+        *) _fail "K2: plist missing EnvironmentVariables/REPO_ROOT (D-6 threading absent)" ;;
+    esac
+fi
+rm -f "$K_PLIST"
+K_OUT_UNSET="$(src_lib "
+ps() { case \"\$*\" in *ppid=*) echo 0 ;; *) return 1 ;; esac; }
+printf 'mode=fail\n' > \"\$LCTL_CTRL\"
+export PROMOTE_DETACH_WAIT_S=\"60\" PROMOTE_DETACH_POLL_S=\"1\"
+unset REPO_ROOT
+_executor_detach_cleanup() { :; }
+_executor_detach_self '$FIXTURE/pl.sh' demo --version v9-fixture >/dev/null 2>&1
+echo detach-rc=\$?
+echo \"plist=\$(ls -t \"\${TMPDIR:-/tmp}\"/ens-promote-detach.*/com.ensemble.promote-*.plist 2>/dev/null | head -n 1)\"
+" 2>/dev/null)"
+K_PLIST2="$(printf '%s\n' "$K_OUT_UNSET" | sed -n 's/^plist=//p' | head -n 1)"
+assert_contains "K3: the unset-arm detach ran to the refusal" "detach-rc=1" "$K_OUT_UNSET"
+if [ -n "$K_PLIST2" ] && [ -f "$K_PLIST2" ]; then
+    case "$(cat "$K_PLIST2")" in
+        *"<key>EnvironmentVariables</key>"*) _fail "K4: plist carries EnvironmentVariables with REPO_ROOT unset (must stay ABSENT)" ;;
+        *) _pass ;;
+    esac
+else
+    _fail "K4: no plist survived for the unset-arm inspection"
+fi
+rm -f "$K_PLIST2" $(find "$FIXTURE" "$INST" -name 'com.ensemble.promote-*.plist' 2>/dev/null)
+
 section "D — cleanup on success AND failure (footgun legs)"
 # D1: after a successful detach the scratch plist is GONE and bootout fired.
 assert_contains "D1: bootout recorded after the success-path detach" \

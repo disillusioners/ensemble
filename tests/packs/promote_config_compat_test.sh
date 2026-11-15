@@ -235,6 +235,50 @@ FAM_OUT="$(bash -c '. "'"$REPO_ROOT"'/scripts/upgrade/executor_family.sh"; execu
 assert_contains "C9 config_compat_check.py is a family member" "daemon/plugin_subsystem/config_compat_check.py" "$FAM_OUT"
 assert_contains "C9 config_compat_contract.py is a family member" "daemon/plugin_subsystem/config_compat_contract.py" "$FAM_OUT"
 
+echo "== C10 — D-6 (E2E round 4, cycle-4 🔴): DETACHED-ENV shape, contract ONLY at the TARGET-PAYLOAD leg =="
+# The R4 refusal shape, hermetic: the §7 self-detached executor runs from
+# the INSTALL dir with a scrubbed env (REPO_ROOT unset — the refusal
+# rendered "?/daemon/plugin_subsystem/..."). The stage-minted contract
+# exists ONLY at $INSTALL_DIR/releases/$VERSION/daemon/plugin_subsystem/.
+# Every pre-D-6 leg must be dead here:
+#   - tree-mint: no daemon/config.py at the payload root (install layout);
+#   - next-to-lib.sh: daemon/plugin_subsystem/ carries ONLY the checker .py;
+#   - REPO_ROOT: explicitly unset in the probe env.
+# → ONLY the new TARGET-PAYLOAD leg can resolve → compat ok, rc 0.
+C10_FIX="$FIX/payload-detached-contract"
+make_payload "$C10_FIX" 0 1          # with_checker=1, with_contract=0 — kills next-to-lib.sh
+mkdir -p "$C10_FIX/releases/vD6/daemon/plugin_subsystem"
+cp "$CONTRACT" "$C10_FIX/releases/vD6/daemon/plugin_subsystem/config_compat_contract.json"
+# the install config must be ACCEPTED by the real tree contract (same
+# lesson as C1: the real model rejects a bare `port` key) — use the REAL
+# shipped config for a genuine compat-ok proof.
+cp "$REPO_ROOT/config.yaml" "$C10_FIX/config.yaml" 2>/dev/null || \
+    { echo "FATAL: repo config.yaml missing" >&2; exit 2; }
+cat > "$C10_FIX/promote_entry_probe.sh" <<PROBE
+#!/bin/bash
+set -u
+unset REPO_ROOT          # the detached env: by-design scrubbed (R4 refusal shape)
+export UP_TARGET=demo
+. "$C10_FIX/scripts/upgrade/lib.sh"
+_config_compat_check "\${1:-vD6}"
+echo "post-refuse-reached rc=\$?"
+PROBE
+chmod +x "$C10_FIX/promote_entry_probe.sh"
+C10_OUT="$(INSTALL_DIR="$C10_FIX" VERSION="vD6" bash "$C10_FIX/promote_entry_probe.sh" 2>&1)"
+C10_RC=$?
+assert_rc "C10 payload-only contract in a detached-style env resolves: rc 0" "0" "$C10_RC"
+assert_contains "C10 the gate accepts the install config against the PAYLOAD contract" "CONFIG-COMPAT=ok" "$C10_OUT"
+
+echo "== C10b — same fixture minus the payload contract → STILL refuses 78 (fail-closed unchanged) =="
+# The D-6 leg ADDS a resolution rung; it must not weaken any degraded
+# condition: with even the payload leg dead, the gate refuses exactly as
+# before (checker present here, so the refusal is the contract-missing arm).
+rm -f "$C10_FIX/releases/vD6/daemon/plugin_subsystem/config_compat_contract.json"
+C10B_OUT="$(INSTALL_DIR="$C10_FIX" VERSION="vD6" bash "$C10_FIX/promote_entry_probe.sh" 2>&1)"
+C10B_RC=$?
+assert_rc "C10b payload leg dead: the gate refuses 78" "78" "$C10B_RC"
+assert_contains "C10b the refusal names config-compat-unrunnable" "config-compat-unrunnable" "$C10B_OUT"
+
 # ── summary ────────────────────────────────────────────────────────────────
 echo
 echo "========================================"
