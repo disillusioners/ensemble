@@ -69,7 +69,6 @@ from ..repositories.message_queue.models import MessageQueue, MessageStatus, Mes
 from ..repositories.task.models import SuspensionReason, Task, TaskStatus
 from ..repositories.room import membership as room_membership
 from ..repositories.room.membership import RoomJoinSpec
-from ..repositories.room.models import ChatRoomMember
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .pool_orchestrator import safe_notify_all_pools
@@ -5661,19 +5660,18 @@ class InstanceLifecycleService:
             # is held by the tool across the whole spawn call; the
             # UNIQUE(room_id, member_name) backstop catches anything
             # the lock cannot see (MemberNameCollisionError).
-            member_row: ChatRoomMember | None = None
+            join_room_id = room_join.room_id if room_join is not None else None
             member_final_name: str | None = None
             if room_join is not None:
-                effective_metadata["join_room"] = room_join.room_id
-                member_row = room_membership.join_room_in_session(
+                effective_metadata["join_room"] = join_room_id
+                member_final_name = room_membership.join_room_in_session(
                     session,
                     room_id=room_join.room_id,
                     instance_id=instance_id,
                     base_name=room_join.base_name,
                     role=room_join.role,
                     agent_id=room_join.agent_id or resolved_agent_id,
-                )
-                member_final_name = member_row.member_name
+                ).member_name
                 # The instance KNOWS ITS OWN NAME (Ruling B): the
                 # final per-room name rides the JSONB alongside the
                 # room id (additive keys — zero migration).
@@ -5745,7 +5743,7 @@ status=InstanceStatus.IDLE.value,
                 project_id=project_id,
                 created_at=new_instance.created_at,
                 inherited_source=bool(inherited_source),
-                room_id=room_join.room_id if room_join is not None else None,
+                room_id=join_room_id,
                 member_name=member_final_name,
             )
 
