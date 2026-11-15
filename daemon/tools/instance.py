@@ -3109,7 +3109,7 @@ async def _prepare_room_join(
     )
 
 
-def _format_room_join_refusal(exc) -> str:
+def _format_room_join_refusal(exc: Exception) -> str:
     """Map each typed join refusal to its DISTINCT agent-readable text.
 
     All subclass texts are distinct (the P2 exit criterion's
@@ -3147,7 +3147,7 @@ def _format_room_join_refusal(exc) -> str:
     return f"{head}: {exc}"
 
 
-def _format_member_name_collision_failure(exc) -> str:
+def _format_member_name_collision_failure(exc: Exception) -> str:
     """The commit-time backstop text — DISTINCT by construction.
 
     ``MemberNameCollisionError`` rides the room-join handler (dual
