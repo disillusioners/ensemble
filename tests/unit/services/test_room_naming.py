@@ -329,7 +329,7 @@ class TestCascade:
                 "tier 1 must not call the model lane"
             )
         ):
-            name, tier = await svc.resolve_member_name(
+            name, tier = await svc.resolve_base_name(
                 provided="Lead Capture", agent_id="capture"
             )
         assert name == "lead-capture"
@@ -341,7 +341,7 @@ class TestCascade:
         with patch.object(
             svc, "generate_member_name", return_value="sampler"
         ):
-            name, tier = await svc.resolve_member_name(
+            name, tier = await svc.resolve_base_name(
                 provided=None, agent_id="capture"
             )
         assert name == "sampler"
@@ -365,7 +365,7 @@ class TestCascade:
             cap.fake_wait_for,
         ):
             started = time.monotonic()
-            name, tier = await svc.resolve_member_name(
+            name, tier = await svc.resolve_base_name(
                 provided=None, agent_id="ui_capture"
             )
             elapsed = time.monotonic() - started
@@ -379,7 +379,7 @@ class TestCascade:
         failure → the cascade continues to tier 2 (never invents)."""
         svc = RoomNamingService(_manager())
         with patch.object(svc, "generate_member_name", return_value=None):
-            name, tier = await svc.resolve_member_name(
+            name, tier = await svc.resolve_base_name(
                 provided="!!!", agent_id="capture"
             )
         assert name == "capture"

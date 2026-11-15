@@ -223,7 +223,7 @@ class RoomNamingService:
         """
         return sanitize_member_name(agent_id) or _TERMINAL_MEMBER_BASE
 
-    async def resolve_member_name(
+    async def resolve_base_name(
         self,
         *,
         provided: str | None,

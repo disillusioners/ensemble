@@ -3095,7 +3095,7 @@ async def _prepare_room_join(
     await room_service.validate_room_join(
         room_id=join_room, joiner_tree_root=tree_root
     )
-    base_name, tier = await manager._room_naming_service.resolve_member_name(
+    base_name, tier = await manager._room_naming_service.resolve_base_name(
         provided=member_name,
         agent_id=agent_id,
         instance_name=instance_name,
