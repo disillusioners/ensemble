@@ -70,6 +70,10 @@ __all__ = [
 # instant-to-3.0s and never blocks the spawn itself.
 ROOM_NAME_MODEL_TIMEOUT_S = 3.0
 
+# Tier-2 focused-output temperature — the model_title lane precedent
+# (0.3: lower temperature for a short, deterministic purpose name).
+_NAMING_TEMPERATURE = 0.3
+
 # Tier-3 terminal base: when even a NON-EMPTY agent id sanitizes to
 # nothing (e.g. all-symbols), the guaranteed-kebab ``member`` stands —
 # the cascade never returns an empty base name.
@@ -127,38 +131,17 @@ class RoomNamingService:
         """Tier 2 — one bounded quick-model call → sanitized name.
 
         Returns the sanitized candidate, or ``None`` on ANY failure
-        INSIDE the model lane (timeout / exception / empty /
-        think-only output). NEVER retries (the ruling: no
-        retry-loop). Config-construction errors — the LLM client /
-        failover-wrapper setup, which sits OUTSIDE the guarded invoke
-        below — PROPAGATE to the caller (only the invoke itself and
-        its wait are guarded).
+        INSIDE the model lane (constructor / failover-wrapper setup /
+        timeout / exception / empty / think-only output). NEVER
+        retries (the ruling: no retry-loop) — D-S3 tier 3 exists so
+        ANY tier-2 failure (error/timeout/unavailable, INCLUDING
+        construction) degrades to the deterministic agent-id fallback,
+        never an exception to the caller.
         """
         model = self._model_for_naming()
         if not model:
             # Unavailable by configuration — instant tier-3 fallback.
             return None
-        llm_config = {
-            "base_url": self._config.llm.base_url,
-            "base_url_backup": self._config.llm.base_url_backup,
-            "api_key": self._config.llm.api_key,
-            "model": model,
-            "temperature": 0.3,
-            "default_headers": {
-                "x-proxy-app": "ensemble",
-                "x-proxy-interleaved-thinking": "True",
-                **(
-                    {"X-LLMProxy-Buffer-Response": "true"}
-                    if getattr(self._config.llm, "buffer_response_header", False)
-                    else {}
-                ),
-            },
-        }
-        # F1: clean at constructor only — the facade needs the RAW
-        # dict (base_url_backup failover). TitleGenerationService
-        # precedent.
-        llm = ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))
-        llm_wrapper = wrap_langchain_failover(llm, llm_config)
         from langchain_core.messages import HumanMessage, SystemMessage
 
         prompt = _NAMING_PROMPT_TEMPLATE.format(
@@ -166,6 +149,29 @@ class RoomNamingService:
             instance_name=instance_name or "(none)",
         )
         try:
+            llm_config = {
+                "base_url": self._config.llm.base_url,
+                "base_url_backup": self._config.llm.base_url_backup,
+                "api_key": self._config.llm.api_key,
+                "model": model,
+                "temperature": _NAMING_TEMPERATURE,
+                "default_headers": {
+                    "x-proxy-app": "ensemble",
+                    "x-proxy-interleaved-thinking": "True",
+                    **(
+                        {"X-LLMProxy-Buffer-Response": "true"}
+                        if getattr(self._config.llm, "buffer_response_header", False)
+                        else {}
+                    ),
+                },
+            }
+            # F1: clean at constructor only — the facade needs the RAW
+            # dict (base_url_backup failover). TitleGenerationService
+            # precedent. INSIDE the guarded block: a constructor /
+            # failover-setup failure is a tier-2 failure — it must
+            # degrade to tier 3, never escape the cascade.
+            llm = ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))
+            llm_wrapper = wrap_langchain_failover(llm, llm_config)
             # Belt-and-braces: the 3.0s wait_for cancels the inner
             # task on timeout (tier-2's bound); the facade's
             # wall-clock cap is the primary line of defense (see the
