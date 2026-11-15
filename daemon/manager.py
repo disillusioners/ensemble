@@ -151,6 +151,8 @@ from .services.child_reports import ChildReportsService
 from .services.error_reporting import ErrorReportingService
 from .services.cancellation import CancellationService
 from .services.title_generation import TitleGenerationService
+# Agent group chat P2: room chat service (per-room locks + admission)
+# and the member naming service (D-S3 cascade tiers 2-3).
 from .services.room_naming import RoomNamingService
 from .repositories.room.service import RoomChatService
 from .services.event_publisher import EventPublisherService
@@ -11225,7 +11227,7 @@ class InstanceManager:
         model: str | None = None,
         version_tag: str | None = None,
         source_type: str | None = None,
-        room_join: "RoomJoinSpec | None" = None,
+        room_join: "RoomJoinSpec | None" = None,  # agent group chat P2 join-at-spawn (D-S3)
     ) -> tuple[str, str | None]:
         """Create a new agent instance.
 
@@ -11285,7 +11287,7 @@ class InstanceManager:
             model=model,
             version_tag=version_tag,
             source_type=source_type,
-            room_join=room_join,
+            room_join=room_join,  # agent group chat P2 pass-through (D-S3)
         )
 
     async def ensure_mcp_preloaded(
