@@ -471,3 +471,75 @@ failing-id set certifies the baseline where counts alone did not).
 
 No product-code or test-code changes in this family; only this doc,
 `CHANGELOG.md`, and `docs/runbooks/promote-handback-serving-green-closer.md`.
+
+### 9.6 Live self-promote — final proof (2026-11-15)
+
+**Result: GREEN — the incident family is fully closed on darwin, pending only
+the Linux `handback_verify_budget` legs.**
+
+- Commissioned as v0.30.10; substituted v0.30.13 (tags v0.30.11/v0.30.12
+  already existed from parallel lanes; bump_version.py takes bump-types only;
+  semver monotonicity). Tag v0.30.13 → commit `83a237bc5`, parent `969f4eaf6`
+  (the repair-lane merge). Pushed atomically to origin (latest + tag).
+- **Stage:** exit 0 after the script's own frontend remedy (fresh-worktree
+  npm ci + `_build_frontend.sh`); exit-78 completeness gate exercised live
+  for the first time — plugin_subsystem staleness predicate PASS,
+  config_compat_contract.json minted (12,873 B). Migration delta NON-EMPTY
+  (1 file: `20261115_080000_create_chatroom_tables.sql` vs live gen
+  `20261112_175916`) → `ENSEMBLE_ROLLBACK_SAFE=0` per ADR-035 =0 arm
+  (`.agents/shared/planning/self-restart-upgrade-phase2/decisions.md:215`);
+  manifest `rollback_safe=false` `source=explicit=false`. DISCLOSED:
+  auto-rollback lane halts-for-human on this release.
+- **Promote:** designed path from
+  `releases/v0.30.13/scripts/upgrade/promote.sh`, `ENSEMBLE_UPGRADE_LIVE=1` +
+  `--f2-verified-closed` (operator go verbatim: "yes, promote if you're
+  ready"; F2 assertion stands from the user's VM run). First live exercise
+  of fix #3 (release-staged executor completeness — the v0.29.16 rc=127
+  stop-script class is closed) and fix #5 (darwin executor self-detach):
+  executor shell inside the daemon tree detected ancestry, spawned
+  label-verbatim transient one-shot LaunchAgent
+  `com.ensemble.promote-v0-30-13-1794762996`, detached (executor wrapper
+  SIGKILLed at the daemon stop — by design), survived its own stop phase,
+  done.rc=0, cleaned (0 promote plists in `~/Library/LaunchAgents` —
+  RunAtLoad footgun clear).
+- **Verdict (W-1 discipline: journal + state.json only, TWO independent
+  seats — devops executor + maintenancer verdict seat; result_summary never
+  used):** 6-event run window 17:16:37Z promote-start → 17:19:26Z commit;
+  state.json `current=v0.30.13` `previous=v0.30.9` `in_flight=null`;
+  supervision_boot LAUNCHD_MANAGED · com.ensemble.prod · conforming (direct
+  contrast to 11-14 18:04:08Z halt — the halt family is live-proven closed);
+  `/livez` version=0.30.13; `/readyz` ready; launchd ownership chain
+  launchd(1)→36849 bash→37009→37043 ensemble-prod = the :9797 listener;
+  label == plist filename verbatim; HANDBACK_LAST_ERROR: no ensemble-hbk-err
+  file for this run's pids (success path); zero rollbacks (rollbacks_24h
+  0/3), no halt, no new .stale locks; soak 67s supervision_boot→commit.
+- **Self-hosting proof:** the new daemon's promote_txn_hold parked the
+  executor's own mid-txn turn (instance `a1a6faf6`, work `21ff26ec`) at
+  00:18:17 local and released it through boot_continue 6s after commit.
+- **W-1 follow-up status:** the discipline was enforced end-to-end this
+  ceremony and proven sufficient — the verdict was read from the UPGRADE
+  JOURNAL + `releases/state.json` at a second, independent seat
+  (maintenancer) and the devops executor's claims were independently
+  confirmed against the journal before records; "verdict seat ≠ executor
+  seat" held live. That supersedes the procedural posture only — §9.4's
+  follow-up ledger was minted "none closed by this lane" and stays honest:
+  item (i) (`result_summary` written before `executor_exit`; no delivery
+  channel back to the instance — an agent can report "done" while the
+  promote refused) remains an OPEN product gap, as does the adjacent
+  executor_exit-echo item (v) (`upgrade.log` append-mode tail pollution,
+  anomaly 4f95c9d8). New residual noted by the verdict seat: the journal
+  does not echo the promote argv / `executor_exit` for the run (live arming
+  is only implied by env=live resolution) — that argv/exit echo is the
+  natural closure shape for (i)/(v), and this ceremony is live evidence the
+  two-seat journal discipline compensates meanwhile.
+- **Residuals (non-blocking):** restarts ledger surface empty for this run
+  (attribution confirmed via journal supervision_boot instead — POK
+  promote-attribution-journal-not-ledger); opendesign plugin pin
+  'open-design-v0.24.1' 52d stale, journaled-and-proceeded per ratified
+  2026-10-07 default — pin refresh advised (future lane); ~70 pre-existing
+  ensemble-hbk-err test-fixture files in TMPDIR (sweeper candidate); stage
+  anomaly 1882aaac (`lib.sh:3234` temp-file race, non-fatal); ceremony
+  anomaly 36295a34 (maintenancer seat lacks shell — executor/adjudicator
+  seat split adopted for upgrade ceremonies).
+- **Plane:** still blocked — this document plus the mission report serve as
+  the board record.
