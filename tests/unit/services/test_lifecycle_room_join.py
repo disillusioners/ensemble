@@ -26,10 +26,8 @@ from typing import Iterator
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
-from sqlalchemy.pool import NullPool
-from sqlmodel import Session, SQLModel
+from sqlmodel import Session
 
 import daemon.repositories.event.models  # noqa: F401 — register event
 import daemon.repositories.instance.models  # noqa: F401 — register instances
@@ -40,25 +38,16 @@ from daemon.repositories.room.membership import RoomJoinSpec
 from daemon.repositories.room.models import ChatRoomMember
 from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.write_pause_guard import WritePauseGuard
+from tests.helpers.room_harness import (
+    count_rows,
+    make_room,
+    make_room_engine,
+)
 
 
 @pytest.fixture
 def engine(tmp_path) -> Iterator[Engine]:
-    eng = create_engine(
-        f"sqlite:///{tmp_path}/lifecycle_room_join.db",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-
-    @event.listens_for(eng, "connect")
-    def _enable_pragmas(dbapi_conn, _connection_record) -> None:
-        cursor = dbapi_conn.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=10000")
-        cursor.close()
-
-    SQLModel.metadata.create_all(eng)
+    eng = make_room_engine(tmp_path, "lifecycle_room_join.db")
     yield eng
     eng.dispose()
 
@@ -70,34 +59,7 @@ TREE_ROOT = "22222222-2222-2222-2222-222222222222"
 @pytest.fixture
 def room_id(engine: Engine) -> str:
     repo = RoomRepository(engine)
-    return repo.create_room(
-        name="alpha",
-        tree_root_id=TREE_ROOT,
-        owner_instance_id=CALLER,
-        owner_member_name="owner",
-    )["room"]["room_id"]
-
-
-def _count_instances(engine: Engine, iid: str) -> int:
-    with Session(engine) as s:
-        return len(
-            s.exec(
-                __import__("sqlmodel").select(Instance).where(
-                    Instance.instance_id == iid
-                )
-            ).all()
-        )
-
-
-def _count_members(engine: Engine, iid: str) -> int:
-    with Session(engine) as s:
-        return len(
-            s.exec(
-                __import__("sqlmodel").select(ChatRoomMember).where(
-                    ChatRoomMember.instance_id == iid
-                )
-            ).all()
-        )
+    return make_room(repo, tree_root=TREE_ROOT, owner=CALLER)
 
 
 class TestLifecycleRoomJoin:
@@ -261,8 +223,8 @@ class TestLifecycleRoomJoin:
                 )
 
         # Whole-spawn rollback: no instance row, no membership row.
-        assert _count_instances(engine, instance_id) == 0
-        assert _count_members(engine, instance_id) == 0
+        assert count_rows(engine, Instance, instance_id=instance_id) == 0
+        assert count_rows(engine, ChatRoomMember, instance_id=instance_id) == 0
         # Pre-existing rows untouched (the holder survives).
         after_instance_count = _scalar("SELECT COUNT(*) FROM instances")
         after_member_count = _scalar(

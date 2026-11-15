@@ -30,15 +30,12 @@ import uuid
 from typing import Iterator
 
 import pytest
-from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.pool import NullPool
-from sqlmodel import Session, SQLModel, select
+from sqlmodel import Session, select
 
 import daemon.repositories.event.models  # noqa: F401 — register event
 import daemon.repositories.instance.models  # noqa: F401 — register instances
 from daemon.repositories.event.models import Event, EventKind
-from daemon.repositories.instance.models import Instance
 from daemon.repositories.room import (
     MemberNameCollisionError,
     MemberNotFoundError,
@@ -58,6 +55,13 @@ from daemon.repositories.room import (
 )
 from daemon.repositories.room.models import ChatRoom, ChatRoomMember
 from daemon.repositories.room.repository import _member_payload
+from tests.helpers.room_harness import (
+    count_rows,
+    join_member,
+    make_room,
+    make_room_engine,
+    seed_instance,
+)
 
 # ---------------------------------------------------------------------------
 # F9-parity harness (P1 precedent)
@@ -66,21 +70,7 @@ from daemon.repositories.room.repository import _member_payload
 
 @pytest.fixture
 def engine(tmp_path) -> Iterator[Engine]:
-    eng = create_engine(
-        f"sqlite:///{tmp_path}/room_membership_matrix.db",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-
-    @event.listens_for(eng, "connect")
-    def _enable_pragmas(dbapi_conn, _connection_record) -> None:
-        cursor = dbapi_conn.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=10000")
-        cursor.close()
-
-    SQLModel.metadata.create_all(eng)
+    eng = make_room_engine(tmp_path, "room_membership_matrix.db")
     yield eng
     eng.dispose()
 
@@ -90,63 +80,14 @@ def repo(engine: Engine) -> RoomRepository:
     return RoomRepository(engine)
 
 
-def _seed_instance(
-    eng: Engine, instance_id: str, parent_id: str | None = None
-) -> None:
-    with Session(eng) as s:
-        s.add(
-            Instance(
-                instance_id=instance_id,
-                agent_id="ari",
-                agent_dir="/agents/ari",
-                parent_id=parent_id,
-                status="idle",
-            )
-        )
-        s.commit()
-
-
-def _join_member(
-    eng: Engine, room_id: str, instance_id: str, member_name: str
-) -> None:
-    """Direct membership-row insert (bypasses the registry — seeding)."""
-    with Session(eng) as s:
-        s.add(
-            ChatRoomMember(
-                room_id=room_id,
-                instance_id=instance_id,
-                member_name=member_name,
-                agent_id="ari",
-                role="child",
-                joined_at="2026-11-15T08:00:00+00:00",
-                last_read_seq=0,
-                last_delivered_seq=0,
-                state="active",
-            )
-        )
-        s.commit()
-
-
-def _count_members(eng: Engine, room_id: str, state: str) -> int:
-    with Session(eng) as s:
-        return len(
-            s.exec(
-                select(ChatRoomMember).where(
-                    ChatRoomMember.room_id == room_id,
-                    ChatRoomMember.state == state,
-                )
-            ).all()
-        )
-
-
 @pytest.fixture
 def tree(engine: Engine) -> dict[str, str]:
     """grand-1 (root) → parent-1 (room owner) → {child-1, child-2}."""
-    _seed_instance(engine, "grand-1", None)
-    _seed_instance(engine, "parent-1", "grand-1")
-    _seed_instance(engine, "child-1", "parent-1")
-    _seed_instance(engine, "child-2", "parent-1")
-    _seed_instance(engine, "other-root", None)
+    seed_instance(engine, "grand-1", None)
+    seed_instance(engine, "parent-1", "grand-1")
+    seed_instance(engine, "child-1", "parent-1")
+    seed_instance(engine, "child-2", "parent-1")
+    seed_instance(engine, "other-root", None)
     return {
         "root": "grand-1",
         "owner": "parent-1",
@@ -158,15 +99,15 @@ def tree(engine: Engine) -> dict[str, str]:
 
 @pytest.fixture
 def room_id(repo: RoomRepository, tree: dict[str, str]) -> str:
-    rid = repo.create_room(
-        name="alpha",
-        tree_root_id=tree["root"],
-        owner_instance_id=tree["owner"],
+    rid = make_room(
+        repo,
+        tree_root=tree["root"],
+        owner=tree["owner"],
         owner_member_name="lead",
-    )["room"]["room_id"]
+    )
     # child-1 rides the roster (the P1 fixture shape): member rows
     # carry role/name/state for the roster + restore legs.
-    _join_member(repo._engine, rid, tree["child1"], "worker-a")
+    join_member(repo._engine, rid, tree["child1"], "worker-a")
     return rid
 
 
@@ -269,8 +210,8 @@ class TestValidateRoomJoin:
         # Member cap: fill to 16 ACTIVE rows (owner + 15 children).
         for i in range(15):
             member_id = f"fill-{i}"
-            _seed_instance(engine, member_id, tree["owner"])
-            _join_member(engine, room_id, member_id, f"worker-{i}")
+            seed_instance(engine, member_id, tree["owner"])
+            join_member(engine, room_id, member_id, f"worker-{i}")
         with pytest.raises(RoomJoinMemberCapError):
             validate_room_join(engine, room_id=room_id,
                                joiner_tree_root=tree["root"])
@@ -306,26 +247,26 @@ class TestValidateRoomJoin:
         # 2 active at fixture (owner + child-1). Fill to 15.
         for i in range(13):
             member_id = f"fill-{i}"
-            _seed_instance(engine, member_id, tree["owner"])
-            _join_member(engine, room_id, member_id, f"worker-{i}")
+            seed_instance(engine, member_id, tree["owner"])
+            join_member(engine, room_id, member_id, f"worker-{i}")
         # Add 5 LEFT rows on top — they must NOT tighten the cap.
         for i in range(5):
             left_id = f"gone-{i}"
-            _seed_instance(engine, left_id, tree["owner"])
-            _join_member(engine, room_id, left_id, f"gone-{i}")
+            seed_instance(engine, left_id, tree["owner"])
+            join_member(engine, room_id, left_id, f"gone-{i}")
             repo.leave_room(room_id=room_id, instance_id=left_id)
-        assert _count_members(engine, room_id, "active") == 15
-        assert _count_members(engine, room_id, "left") == 5
+        assert count_rows(engine, ChatRoomMember, room_id=room_id, state="active") == 15
+        assert count_rows(engine, ChatRoomMember, room_id=room_id, state="left") == 5
         # The 16th ACTIVE slot is open despite the 5 LEFT rows.
         joiner = "fit-16"
-        _seed_instance(engine, joiner, tree["owner"])
+        seed_instance(engine, joiner, tree["owner"])
         validate_room_join(engine, room_id=room_id,
                            joiner_tree_root=tree["root"])
-        _join_member(engine, room_id, joiner, "worker-16")
-        assert _count_members(engine, room_id, "active") == 16
+        join_member(engine, room_id, joiner, "worker-16")
+        assert count_rows(engine, ChatRoomMember, room_id=room_id, state="active") == 16
         # At cap now — the next ACTIVE join refuses.
         joiner17 = "over-17"
-        _seed_instance(engine, joiner17, tree["owner"])
+        seed_instance(engine, joiner17, tree["owner"])
         with pytest.raises(RoomJoinMemberCapError):
             validate_room_join(engine, room_id=room_id,
                                joiner_tree_root=tree["root"])
@@ -339,18 +280,18 @@ class TestValidateRoomJoin:
         # 2 active at fixture (owner + child-1). Fill to 15.
         for i in range(13):
             member_id = f"fill-{i}"
-            _seed_instance(engine, member_id, tree["owner"])
-            _join_member(engine, room_id, member_id, f"worker-{i}")
-        assert _count_members(engine, room_id, "active") == 15
+            seed_instance(engine, member_id, tree["owner"])
+            join_member(engine, room_id, member_id, f"worker-{i}")
+        assert count_rows(engine, ChatRoomMember, room_id=room_id, state="active") == 15
         # 16th fits; 17th refuses.
         joiner = "fit-16"
-        _seed_instance(engine, joiner, tree["owner"])
+        seed_instance(engine, joiner, tree["owner"])
         validate_room_join(engine, room_id=room_id,
                            joiner_tree_root=tree["root"])
-        _join_member(engine, room_id, joiner, "worker-16")
-        assert _count_members(engine, room_id, "active") == 16
+        join_member(engine, room_id, joiner, "worker-16")
+        assert count_rows(engine, ChatRoomMember, room_id=room_id, state="active") == 16
         joiner17 = "over-17"
-        _seed_instance(engine, joiner17, tree["owner"])
+        seed_instance(engine, joiner17, tree["owner"])
         with pytest.raises(RoomJoinMemberCapError):
             validate_room_join(engine, room_id=room_id,
                                joiner_tree_root=tree["root"])
@@ -427,7 +368,7 @@ class TestSuffixRegistry:
         """Duplicates are FIRST-CLASS: two joins with the same base
         name land as bare + '-1'."""
         for member_id in ("dup-a", "dup-b"):
-            _seed_instance(engine, member_id, tree["owner"])
+            seed_instance(engine, member_id, tree["owner"])
         first = repo.join_room(
             room_id=room_id, instance_id="dup-a", base_name="capture"
         )
@@ -440,8 +381,8 @@ class TestSuffixRegistry:
     def test_left_row_name_stays_taken(self, engine, repo, tree, room_id):
         """The UNIQUE backstop spans LEFT rows: a left member's name
         is NOT recycled — the next same-base join suffixes past it."""
-        _seed_instance(engine, "leaver", tree["owner"])
-        _seed_instance(engine, "late-arrival", tree["owner"])
+        seed_instance(engine, "leaver", tree["owner"])
+        seed_instance(engine, "late-arrival", tree["owner"])
         repo.join_room(room_id=room_id, instance_id="leaver",
                        base_name="scout")
         repo.leave_room(room_id=room_id, instance_id="leaver")
@@ -457,11 +398,11 @@ class TestSuffixRegistry:
         for a composite-PK duplicate)."""
         from sqlalchemy.exc import IntegrityError as sa_IntegrityError
 
-        _seed_instance(engine, "c-1", tree["owner"])
-        _seed_instance(engine, "c-2", tree["owner"])
+        seed_instance(engine, "c-1", tree["owner"])
+        seed_instance(engine, "c-2", tree["owner"])
         repo.join_room(room_id=room_id, instance_id="c-1", base_name="head")
         with pytest.raises(sa_IntegrityError) as exc_info:
-            _join_member(engine, room_id, "c-2", "head")
+            join_member(engine, room_id, "c-2", "head")
         # The classifier over the REAL driver message → typed surface.
         with pytest.raises(MemberNameCollisionError):
             repo._raise_typed_integrity(exc_info.value, room_id, "head")
@@ -477,11 +418,11 @@ class TestSuffixRegistry:
 
         from daemon.repositories.room.repository import RoomError
 
-        _seed_instance(engine, "pk-dup", tree["owner"])
+        seed_instance(engine, "pk-dup", tree["owner"])
         repo.join_room(room_id=room_id, instance_id="pk-dup",
                        base_name="first-name")
         with pytest.raises(sa_IntegrityError) as exc_info:
-            _join_member(engine, room_id, "pk-dup", "second-name")
+            join_member(engine, room_id, "pk-dup", "second-name")
         with pytest.raises(RoomError) as typed:
             repo._raise_typed_integrity(exc_info.value, room_id, "second-name")
         assert not isinstance(typed.value, MemberNameCollisionError)
@@ -494,7 +435,7 @@ class TestSuffixRegistry:
         smallest-free suffixes in join-completion order)."""
         n = 6
         for i in range(n):
-            _seed_instance(engine, f"racer-{i}", tree["owner"])
+            seed_instance(engine, f"racer-{i}", tree["owner"])
 
         async def join_one(i: int) -> str:
             out = await svc.join_room(
@@ -517,7 +458,7 @@ class TestSuffixRegistry:
         collision (fingerprint-only discipline)."""
         from daemon.repositories.room.repository import RoomError as _RoomError
 
-        _seed_instance(engine, "double", tree["owner"])
+        seed_instance(engine, "double", tree["owner"])
         await svc.join_room(room_id=room_id, instance_id="double",
                             base_name="twin")
         with pytest.raises(_RoomError) as typed:
@@ -533,12 +474,12 @@ class TestSuffixRegistry:
 
 class TestLeave:
     def test_member_leave_sets_left(self, engine, repo, tree, room_id):
-        _seed_instance(engine, "leaver-1", tree["owner"])
+        seed_instance(engine, "leaver-1", tree["owner"])
         repo.join_room(room_id=room_id, instance_id="leaver-1",
                        base_name="deployer")
         out = repo.leave_room(room_id=room_id, instance_id="leaver-1")
         assert out["state"] == "left"
-        assert _count_members(engine, room_id, "left") == 1
+        assert count_rows(engine, ChatRoomMember, room_id=room_id, state="left") == 1
         # The row survives (roster history) — never deleted.
         member = repo.get_member(room_id, "leaver-1")
         assert member is not None
@@ -561,7 +502,7 @@ class TestLeave:
     ):
         """A LEFT row fails every active-membership predicate: not
         listed active-only, not a valid read cursor holder."""
-        _seed_instance(engine, "quiet-1", tree["owner"])
+        seed_instance(engine, "quiet-1", tree["owner"])
         repo.join_room(room_id=room_id, instance_id="quiet-1",
                        base_name="sleeper")
         repo.leave_room(room_id=room_id, instance_id="quiet-1")
@@ -577,7 +518,7 @@ class TestLeave:
     def test_leave_emits_content_free_room_leave_event(
         self, engine, repo, tree, room_id
     ):
-        _seed_instance(engine, "leaver-2", tree["owner"])
+        seed_instance(engine, "leaver-2", tree["owner"])
         repo.join_room(room_id=room_id, instance_id="leaver-2",
                        base_name="mailer")
         repo.leave_room(room_id=room_id, instance_id="leaver-2")
@@ -605,9 +546,9 @@ class TestLeave:
             owner_instance_id=tree["owner"],
             owner_member_name="lead2",
         )["room"]["room_id"]
-        _seed_instance(engine, "xroom-1", tree["owner"])
+        seed_instance(engine, "xroom-1", tree["owner"])
         repo.join_room(room_id=other, instance_id="xroom-1", base_name="pilot")
-        _seed_instance(engine, "xroom-2", tree["owner"])
+        seed_instance(engine, "xroom-2", tree["owner"])
         mine = repo.join_room(room_id=room_id, instance_id="xroom-2",
                               base_name="pilot")
         assert mine["member_name"] == "pilot"  # bare — different room
@@ -705,7 +646,7 @@ class TestRoster:
         assert by_id[tree["child1"]]["member_name"] == "worker-a"
 
     def test_join_room_payload_shape(self, engine, repo, tree, room_id):
-        _seed_instance(engine, "shape-1", tree["owner"])
+        seed_instance(engine, "shape-1", tree["owner"])
         out = repo.join_room(room_id=room_id, instance_id="shape-1",
                              base_name="scout")
         assert set(out) == {

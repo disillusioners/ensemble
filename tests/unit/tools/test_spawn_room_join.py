@@ -38,10 +38,9 @@ from typing import Iterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
-from sqlalchemy.pool import NullPool
-from sqlmodel import Session, SQLModel
+from sqlmodel import Session
 
 import daemon.repositories.event.models  # noqa: F401 — register event
 import daemon.repositories.instance.models  # noqa: F401 — register instances
@@ -49,6 +48,11 @@ from daemon.repositories.instance.models import Instance
 from daemon.repositories.room import RoomChatService, RoomRepository
 from daemon.repositories.room import membership as room_membership
 from daemon.services.room_naming import RoomNamingService
+from tests.helpers.room_harness import (
+    _make_spawn_sim,
+    make_room,
+    make_room_engine,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -58,21 +62,7 @@ from daemon.services.room_naming import RoomNamingService
 
 @pytest.fixture
 def engine(tmp_path) -> Iterator[Engine]:
-    eng = create_engine(
-        f"sqlite:///{tmp_path}/spawn_room_join.db",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-
-    @event.listens_for(eng, "connect")
-    def _enable_pragmas(dbapi_conn, _connection_record) -> None:
-        cursor = dbapi_conn.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=10000")
-        cursor.close()
-
-    SQLModel.metadata.create_all(eng)
+    eng = make_room_engine(tmp_path, "spawn_room_join.db")
     yield eng
     eng.dispose()
 
@@ -86,103 +76,8 @@ FOREIGN_ROOT = "33333333-3333-3333-3333-333333333333"
 def room_stack(engine: Engine) -> tuple[RoomRepository, RoomChatService, str]:
     repo = RoomRepository(engine)
     svc = RoomChatService(engine)
-    room_id = repo.create_room(
-        name="alpha",
-        tree_root_id=TREE_ROOT,
-        owner_instance_id=CALLER,
-        owner_member_name="owner",
-    )["room"]["room_id"]
+    room_id = make_room(repo, tree_root=TREE_ROOT, owner=CALLER)
     return repo, svc, room_id
-
-
-def _spawn_sim(engine: Engine, calls: list[dict]):
-    """Stub ``manager.spawn_instance`` that replicates the lifecycle's
-    ONE-transaction join: membership row (suffix registry inside the
-    tx) + Instance row with the JSONB join keys, committed together.
-    Returns the instance id (the tool reads back the member row)."""
-
-    def _sim(**kwargs) -> tuple[str, None]:
-        calls.append(kwargs)
-        iid = kwargs["instance_id"]
-        spec = kwargs.get("room_join")
-        if spec is not None:
-            with Session(engine) as s:
-                row = room_membership.join_room_in_session(
-                    s,
-                    room_id=spec.room_id,
-                    instance_id=iid,
-                    base_name=spec.base_name,
-                    role=spec.role,
-                    agent_id=spec.agent_id,
-                )
-                final_name = row.member_name
-                s.add(
-                    Instance(
-                        instance_id=iid,
-                        agent_id=kwargs.get("agent_id") or "capture",
-                        agent_dir="/agents/capture",
-                        parent_id=kwargs.get("parent_id"),
-                        status="idle",
-                        instance_metadata={
-                            "join_room": spec.room_id,
-                            "member_name": final_name,
-                        },
-                    )
-                )
-                s.commit()
-        return iid, None
-
-    return _sim
-
-
-def _spawn_sim_commit_backstop(engine: Engine, calls: list[dict]):
-    """Stub replicating the lifecycle's step-4 commit path INCLUDING
-    the integrity classifier (instance_lifecycle: ``session.commit()``
-    wrapped in ``except IntegrityError → _raise_typed_integrity``), so
-    a UNIQUE(room_id, member_name) fire at commit surfaces exactly as
-    it does in production — typed ``MemberNameCollisionError`` raised
-    OUT of ``manager.spawn_instance``."""
-
-    def _sim(**kwargs) -> tuple[str, None]:
-        from sqlalchemy.exc import IntegrityError
-
-        from daemon.repositories.room.repository import RoomRepository
-
-        calls.append(kwargs)
-        iid = kwargs["instance_id"]
-        spec = kwargs.get("room_join")
-        assert spec is not None
-        with Session(engine) as s:
-            row = room_membership.join_room_in_session(
-                s,
-                room_id=spec.room_id,
-                instance_id=iid,
-                base_name=spec.base_name,
-                role=spec.role,
-                agent_id=spec.agent_id,
-            )
-            s.add(
-                Instance(
-                    instance_id=iid,
-                    agent_id=kwargs.get("agent_id") or "capture",
-                    agent_dir="/agents/capture",
-                    parent_id=kwargs.get("parent_id"),
-                    status="idle",
-                    instance_metadata={
-                        "join_room": spec.room_id,
-                        "member_name": row.member_name,
-                    },
-                )
-            )
-            try:
-                s.commit()
-            except IntegrityError as exc:
-                RoomRepository._raise_typed_integrity(
-                    exc, spec.room_id, spec.base_name
-                )
-        return iid, None
-
-    return _sim
 
 
 def _build_manager(
@@ -290,7 +185,7 @@ class TestJoinHappyPath:
     ):
         repo, svc, room_id = room_stack
         calls: list[dict] = []
-        manager = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        manager = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         result = _run_spawn_tool(
             manager, agent_id="capture", join_room=room_id, member_name="Scout Lead"
         )
@@ -309,7 +204,7 @@ class TestJoinHappyPath:
     def test_tier2_quick_model_name_in_result(self, engine, room_stack):
         repo, svc, room_id = room_stack
         calls: list[dict] = []
-        manager = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        manager = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         manager._room_naming_service.generate_member_name = AsyncMock(
             return_value="Sampler Pro"
         )
@@ -340,7 +235,7 @@ class TestJoinHappyPath:
         assert not lock.locked()
 
         calls: list[dict] = []
-        manager = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        manager = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
 
         async def naming_side_effect(*, agent_id, instance_name):
             # While naming is in-flight, this spawn must NOT hold the
@@ -374,7 +269,7 @@ class TestJoinHappyPath:
     ):
         repo, svc, room_id = room_stack
         calls: list[dict] = []
-        manager = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        manager = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         manager._room_naming_service.generate_member_name = AsyncMock(
             return_value=None
         )
@@ -409,7 +304,7 @@ class TestJoinHappyPath:
             room_id=room_id, instance_id="taken-1", base_name="scout"
         )
         calls: list[dict] = []
-        manager = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        manager = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         result = _run_spawn_tool(
             manager, agent_id="capture", join_room=room_id, member_name="scout"
         )
@@ -438,13 +333,13 @@ class TestJoinHappyPath:
         repo, svc, room_id = room_stack
         calls: list[dict] = []
 
-        m1 = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        m1 = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         m1._room_naming_service.generate_member_name = AsyncMock(
             return_value=None
         )
         tool1, reg1 = _build_tool_and_registry(m1)
 
-        m2 = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        m2 = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         m2._room_naming_service.generate_member_name = AsyncMock(
             return_value=None
         )
@@ -508,7 +403,7 @@ class TestJoinRefusals:
     def test_unknown_room_refusal(self, engine, room_stack):
         _, svc, _ = room_stack
         calls: list[dict] = []
-        manager = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        manager = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         result = _run_spawn_tool(
             manager, agent_id="capture", join_room=str(uuid.uuid4())
         )
@@ -524,7 +419,7 @@ class TestJoinRefusals:
             s.add(room)
             s.commit()
         calls: list[dict] = []
-        manager = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        manager = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         result = _run_spawn_tool(
             manager, agent_id="capture", join_room=room_id
         )
@@ -534,7 +429,7 @@ class TestJoinRefusals:
         _, svc, room_id = room_stack
         calls: list[dict] = []
         manager = _build_manager(
-            engine, svc, _spawn_sim(engine, calls), tree_root=FOREIGN_ROOT
+            engine, svc, _make_spawn_sim(engine, calls), tree_root=FOREIGN_ROOT
         )
         result = _run_spawn_tool(
             manager, agent_id="capture", join_room=room_id
@@ -547,7 +442,7 @@ class TestJoinRefusals:
         _, svc, room_id = room_stack
         calls: list[dict] = []
         manager = _build_manager(
-            engine, svc, _spawn_sim(engine, calls), tree_root=None
+            engine, svc, _make_spawn_sim(engine, calls), tree_root=None
         )
         result = _run_spawn_tool(
             manager, agent_id="capture", join_room=room_id
@@ -581,7 +476,7 @@ class TestJoinRefusals:
                 )
                 s.commit()
         calls: list[dict] = []
-        manager = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        manager = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         result = _run_spawn_tool(
             manager, agent_id="capture", join_room=room_id
         )
@@ -598,7 +493,7 @@ class TestJoinRefusals:
                 owner_member_name=f"owner-{i}",
             )
         calls: list[dict] = []
-        manager = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        manager = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         result = _run_spawn_tool(
             manager, agent_id="capture", join_room=room_id
         )
@@ -611,7 +506,7 @@ class TestJoinRefusals:
         texts: list[str] = []
 
         calls: list[dict] = []
-        m = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        m = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         texts.append(_run_spawn_tool(
             m, agent_id="capture", join_room=str(uuid.uuid4())
         ))
@@ -623,7 +518,7 @@ class TestJoinRefusals:
             room.state = "closed"
             s.add(room)
             s.commit()
-        m = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        m = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         texts.append(_run_spawn_tool(
             m, agent_id="capture", join_room=room_id
         ))
@@ -636,7 +531,7 @@ class TestJoinRefusals:
             s.commit()
 
         m = _build_manager(
-            engine, svc, _spawn_sim(engine, calls), tree_root=FOREIGN_ROOT
+            engine, svc, _make_spawn_sim(engine, calls), tree_root=FOREIGN_ROOT
         )
         texts.append(_run_spawn_tool(
             m, agent_id="capture", join_room=room_id
@@ -666,7 +561,7 @@ class TestJoinRefusals:
                     )
                 )
                 s.commit()
-        m = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        m = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         texts.append(_run_spawn_tool(
             m, agent_id="capture", join_room=room_id
         ))
@@ -681,7 +576,7 @@ class TestJoinRefusals:
                 owner_instance_id=CALLER,
                 owner_member_name=f"owner-{i}",
             )
-        m = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        m = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         texts.append(_run_spawn_tool(
             m, agent_id="capture", join_room=room_id
         ))
@@ -699,7 +594,7 @@ class TestLegacyPath:
     def test_no_join_room_no_room_line_no_kwarg(self, engine, room_stack):
         _, svc, _ = room_stack
         calls: list[dict] = []
-        manager = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        manager = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         result = _run_spawn_tool(manager, agent_id="capture")
         assert "room join:" not in result
         assert manager.spawn_instance.called is True
@@ -711,7 +606,7 @@ class TestLegacyPath:
         is ignored (no refusal, no room line, no room_join kwarg)."""
         _, svc, _ = room_stack
         calls: list[dict] = []
-        manager = _build_manager(engine, svc, _spawn_sim(engine, calls))
+        manager = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         result = _run_spawn_tool(
             manager, agent_id="capture", member_name="lone-name"
         )
@@ -776,7 +671,7 @@ class TestCommitTimeNameCollision:
         )
         calls: list[dict] = []
         manager = _build_manager(
-            engine, svc, _spawn_sim_commit_backstop(engine, calls)
+            engine, svc, _make_spawn_sim(engine, calls, commit_backstop=True)
         )
         result = _run_spawn_tool(
             manager, agent_id="capture", join_room=room_id,
@@ -850,7 +745,7 @@ class TestCommitTimeNameCollision:
         )
         calls: list[dict] = []
         manager = _build_manager(
-            engine, svc, _spawn_sim_commit_backstop(engine, calls)
+            engine, svc, _make_spawn_sim(engine, calls, commit_backstop=True)
         )
         result = _run_spawn_tool(
             manager, agent_id="capture", join_room=room_id,
