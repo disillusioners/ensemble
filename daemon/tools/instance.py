@@ -3844,6 +3844,16 @@ def create_instance_tools(
             # UNIQUE(room_id, member_name) backstop remains the DB
             # belt. The legacy (no join_room) path is byte-identical.
             room_join_spec = None
+            if join_room is not None and not join_room.strip():
+                # Malformed join request: an EMPTY/blank join_room is
+                # NOT a silent spawn-without-join (the truthy check
+                # conflated None and "") — typed fail-closed refusal
+                # naming the problem (D-S3 fail-closed posture).
+                raise RoomJoinError(
+                    "malformed join_room: empty or blank value "
+                    f"({join_room!r}) — pass a chatroom UUID or omit "
+                    "the parameter entirely"
+                )
             if join_room:
                 room_join_spec = await _prepare_room_join(
                     manager,
