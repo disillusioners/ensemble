@@ -1573,6 +1573,576 @@ assert_not_contains "L5 stale path is GONE after a refused classify" "/stale/fro
 rm -rf "$L_FIX"
 
 # ===========================================================================
+section "M — Fix #2 serving-process attribution (2026-11-14 §3.1/§5.1)"
+# THE v0.30.3 commit defect: gate+soak validated /livez answers from a
+# NOHUP daemon while the launchd-adopted tree crash-looped on EADDRINUSE
+# for 9h — and the ensemble-vm shape (:9797 held by kubectl port-forward +
+# uptime monitor + code-server child while the daemon serves :9798). Every
+# gate now refuses unless the PORT-HOLDER is this install's supervised
+# daemon: layer 1 = holder ∈ _supervision_owned_pids; layer 2 = holder ∈
+# the resolved supervisor's lineage (launchd job pid / systemd MainPID +
+# cgroup). All legs drive the REAL lib.sh gates through a hermetic PATH
+# stub set (lsof/curl/launchctl/uname) + a function-stubbed owned-pid set
+# (the pack's fixture daemon IS the owned daemon by construction — pid
+# discovery itself is pinned elsewhere).
+M_FIX="$(mktemp -d -t suphb-attr.XXXXXX)"
+M_INSTALL="$M_FIX/install"
+mkdir -p "$M_INSTALL"
+cat > "$M_FIX/lsof" <<STUB
+#!/bin/bash
+case "\${1:-}" in
+    -ti:*) printf '%s\n' \${ATTR_LSOF_PIDS:-} ;;
+    *) exit 1 ;;
+esac
+STUB
+cat > "$M_FIX/curl" <<STUB
+#!/bin/bash
+# hermetic curl emulating the lib.sh probe shapes: -o <file> (body target),
+# -w <fmt> (%{http_code} → stdout), plain fetch → body on stdout.
+__out=""; __fmt=""; __url=""
+while [ \$# -gt 0 ]; do
+    case "\$1" in
+        -o) __out="\$2"; shift 2 ;;
+        -w) __fmt="\$2"; shift 2 ;;
+        -sS|-s|-S|--silent|--show-error) shift ;;
+        --max-time) shift 2 ;;
+        *) __url="\$__url \$1"; shift ;;
+    esac
+done
+case "\$__url" in
+    *"/livez"*)
+        __code=200
+        __body='{"status":"ok","version":"'"\${ATTR_VERSION:-vTEST}"'"}'
+        ;;
+    *"/readyz"*)
+        __code=200
+        __body='{"status":"ok","detail":{"inflight_turns":0}}'
+        ;;
+    *) exit 7 ;;
+esac
+if [ -n "\$__out" ] && [ "\$__out" != "/dev/null" ]; then
+    printf '%s' "\$__body" > "\$__out"
+fi
+case "\$__fmt" in
+    *http_code*) printf '%s' "\$__code" ;;
+    *) [ -n "\$__out" ] || printf '%s' "\$__body" ;;
+esac
+exit 0
+STUB
+cat > "$M_FIX/launchctl" <<STUB
+#!/bin/bash
+case "\${1:-}" in
+    print) printf 'pid = %s\n' "\${ATTR_JOB_PID-4321}"; exit 0 ;;
+    *) exit 0 ;;
+esac
+STUB
+cat > "$M_FIX/uname" <<STUB
+#!/bin/bash
+case "\${1:-}" in
+    -s) echo "Darwin" ;;
+    *) "$(command -v uname)" "\$@" ;;
+esac
+STUB
+chmod +x "$M_FIX"/lsof "$M_FIX"/curl "$M_FIX"/launchctl "$M_FIX"/uname
+
+m_attr() {  # m_attr "VAR=value"... — export the legs' knobs, probe once
+    local kv
+    for kv in "$@"; do export "$kv"; done
+    PATH="$M_FIX:$PATH" INSTALL_DIR="$M_INSTALL" PORT=18777 \
+    LIVEZ_BUDGET_S=2 READYZ_BUDGET_S=2 bash -c '
+        . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+        _supervision_owned_pids() { printf "%s\n" ${ATTR_OWNED_PIDS-424242}; }
+        _gate_serving_attribution "M"
+        echo "attr-rc=$?"
+        echo "attr-detail=$GATE_ATTRIBUTION_DETAIL"
+    ' 2>&1
+    local rc=$?   # the child's rc is not needed here; output carries it
+    true
+}
+
+# M1 — foreign holder (owned set says 424242, the port is held by 999999):
+# the gate REFUSES and the detail names the holder + the owned set.
+M1_OUT="$(m_attr "ATTR_LSOF_PIDS=999999")"
+assert_contains "M1 foreign holder: attribution refuses" "attr-rc=1" "$M1_OUT"
+assert_contains "M1 detail names the foreign holder" "999999 NOT in the supervision-owned pid set" "$M1_OUT"
+
+# M2 — owned holder (holder == the owned pid): attribution PASSES.
+M2_OUT="$(m_attr "ATTR_LSOF_PIDS=424242")"
+assert_contains "M2 owned holder: attribution passes" "attr-rc=0" "$M2_OUT"
+
+# M3 — EMPTY owned set against a live holder: same mismatch (owned:<none>).
+M3_OUT="$(m_attr "ATTR_LSOF_PIDS=999999" "ATTR_OWNED_PIDS=")"
+assert_contains "M3 empty owned set + live holder: refuses" "attr-rc=1" "$M3_OUT"
+assert_contains "M3 detail carries owned:<none>" "owned:<none>" "$M3_OUT"
+
+# M4 — green answer with NO listener behind it: unattributable → refuse.
+M4_OUT="$(m_attr "ATTR_LSOF_PIDS=")"
+assert_contains "M4 green answer + no listener: refuses" "attr-rc=1" "$M4_OUT"
+assert_contains "M4 detail says unattributable" "finds NO listener" "$M4_OUT"
+
+# M5 — launchd lineage, member holder: pass (layer 2 engages only under the
+# resolved launchd classification — CONSUMED, never re-derived).
+M5_OUT="$(m_attr "ATTR_LSOF_PIDS=4321" "ATTR_OWNED_PIDS=4321" "SUPERVISION_MODE=launchd" "SUPERVISION_UNIT=com.ensemble.prod")"
+assert_contains "M5 launchd holder in lineage: passes" "attr-rc=0" "$M5_OUT"
+
+# M6 — launchd lineage, holder owned-shaped but OUTSIDE the job lineage:
+# the v0.30.3 nohup-serves-while-launchd-crash-loops shape → REFUSE.
+M6_OUT="$(m_attr "ATTR_LSOF_PIDS=9999" "ATTR_OWNED_PIDS=9999" "SUPERVISION_MODE=launchd" "SUPERVISION_UNIT=com.ensemble.prod")"
+assert_contains "M6 holder outside launchd lineage: refuses" "attr-rc=1" "$M6_OUT"
+assert_contains "M6 detail names the second supervisor" "OUTSIDE launchd job 'com.ensemble.prod' lineage" "$M6_OUT"
+
+# M7 — launchd job registered but PIDLESS (crash-looping) while the port is
+# served by an owned-shaped pid: the v0.30.3 dual-supervisor shape → REFUSE.
+M7_OUT="$(m_attr "ATTR_LSOF_PIDS=424242" "ATTR_JOB_PID=4294967295" "SUPERVISION_MODE=launchd" "SUPERVISION_UNIT=com.ensemble.prod")"
+assert_contains "M7 pidless launchd job + served port: refuses" "attr-rc=1" "$M7_OUT"
+assert_contains "M7 detail names the crash-loop shape" "NO live pid while" "$M7_OUT"
+
+# M8 — script mode (no supervisor resolved): layer 2 absent, layer 1 governs.
+M8_OUT="$(m_attr "ATTR_LSOF_PIDS=424242" "SUPERVISION_MODE=script")"
+assert_contains "M8 script mode: ownership layer alone governs (pass)" "attr-rc=0" "$M8_OUT"
+
+# M9 — GATE WIRING: gate_livez and gate_version REFUSE when the answer is
+# unattributable (empty census) or FOREIGN — the conjunct rides INSIDE the
+# gates, so every caller (promote/rollback/restart/status re-gates)
+# inherits it without a per-site edit.
+M9_OUT="$(PATH="$M_FIX:$PATH" INSTALL_DIR="$M_INSTALL" PORT=18777 LIVEZ_BUDGET_S=2 bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    _supervision_owned_pids() { printf "%s\n" 424242; }
+    gate_livez >/dev/null 2>&1
+    echo "livez-rc=$?"
+    gate_version "vTEST" >/dev/null 2>&1
+    echo "version-rc=$?"
+' 2>&1)"
+# the lsof stub reports NO pids here (ATTR_LSOF_PIDS unset → empty) → the
+# no-listener refusal fires for BOTH gates.
+assert_contains "M9 gate_livez refuses the unattributable answer" "livez-rc=1" "$M9_OUT"
+assert_contains "M9 gate_version refuses the unattributable answer" "version-rc=1" "$M9_OUT"
+M9B_OUT="$(PATH="$M_FIX:$PATH" INSTALL_DIR="$M_INSTALL" PORT=18777 LIVEZ_BUDGET_S=2 ATTR_LSOF_PIDS="999999" bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    _supervision_owned_pids() { printf "%s\n" 424242; }
+    gate_livez >/dev/null 2>&1
+    echo "livez-rc=$?"
+    gate_version "vTEST" >/dev/null 2>&1
+    echo "version-rc=$?"
+' 2>&1)"
+assert_contains "M9b gate_livez refuses the FOREIGN holder" "livez-rc=1" "$M9B_OUT"
+assert_contains "M9b gate_version refuses the FOREIGN holder" "version-rc=1" "$M9B_OUT"
+
+# M10 — the WIRING inverse: with an OWNED holder both gates go green.
+M10_OUT="$(PATH="$M_FIX:$PATH" INSTALL_DIR="$M_INSTALL" PORT=18777 LIVEZ_BUDGET_S=2 ATTR_LSOF_PIDS="424242" bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    _supervision_owned_pids() { printf "%s\n" 424242; }
+    gate_livez >/dev/null 2>&1
+    echo "livez-rc=$?"
+    gate_version "vTEST" >/dev/null 2>&1
+    echo "version-rc=$?"
+' 2>&1)"
+assert_contains "M10 owned holder: gate_livez greens" "livez-rc=0" "$M10_OUT"
+assert_contains "M10 owned holder: gate_version greens" "version-rc=0" "$M10_OUT"
+
+# M11 — unprobeable (a PATH whose stub dir has curl but NO lsof): the gate
+# PASSES with the ONE-TIME loud skip warn (no-missing-tool-fault
+# precedent; never silent, never spammy across the probe loops).
+M11_DIR="$M_FIX/nolsof"
+mkdir -p "$M11_DIR"
+cp "$M_FIX/curl" "$M11_DIR/curl"
+M11_OUT="$(PATH="$M11_DIR:/bin" INSTALL_DIR="$M_INSTALL" PORT=18777 LIVEZ_BUDGET_S=2 bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    command -v lsof >/dev/null 2>&1 && { echo "fence-broken: lsof reachable"; exit 0; }
+    _supervision_owned_pids() { printf "%s\n" 424242; }
+    gate_livez >/dev/null 2>&1
+    echo "livez-rc=$?"
+' 2>&1)"
+assert_not_contains "M11 fence: the stub PATH truly lacks lsof" "fence-broken" "$M11_OUT"
+assert_contains "M11 no lsof: gate skips attribution (rc 0, degraded-loud)" "livez-rc=0" "$M11_OUT"
+M11B_OUT="$(PATH="$M11_DIR:/bin" INSTALL_DIR="$M_INSTALL" PORT=18777 LIVEZ_BUDGET_S=2 READYZ_BUDGET_S=2 bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    _supervision_owned_pids() { printf "%s\n" 424242; }
+    gate_livez >/dev/null || true   # stderr STAYS visible: the skip warn lives there
+    gate_readyz >/dev/null || true
+    echo done
+' 2>&1)"
+M11B_COUNT="$(printf '%s' "$M11B_OUT" | grep -c ']: skipped')"
+assert_eq "M11b exactly ONE skip warn across two gates (one-time)" "1" "$M11B_COUNT"
+
+# M12 — dualfight launchd arm: holder OUTSIDE the job lineage → halt 78
+# (the arm that was MISSING on Darwin — the old guard returned 0 there).
+# exit 78 kills the child before any echo; the rc comes from the child.
+M12_OUT="$(PATH="$M_FIX:$PATH" INSTALL_DIR="$M_INSTALL" PORT=18777 ATTR_LSOF_PIDS="9999" bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    _supervision_owned_pids() { printf "%s\n" 9999; }
+    SUPERVISION_MODE=launchd SUPERVISION_UNIT=com.ensemble.prod
+    supervision_dualfight_check
+' 2>&1)"
+M12_RC=$?
+assert_eq "M12 dualfight launchd arm faults on a foreign holder (exit 78)" "78" "$M12_RC"
+assert_contains "M12 the halt names the launchd lineage fault" "OUTSIDE launchd job com.ensemble.prod lineage" "$M12_OUT"
+
+# M13 — dualfight launchd arm, holder IN the job lineage: green rc 0.
+M13_OUT="$(PATH="$M_FIX:$PATH" INSTALL_DIR="$M_INSTALL" PORT=18777 ATTR_LSOF_PIDS="4321" bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    _supervision_owned_pids() { printf "%s\n" 4321; }
+    SUPERVISION_MODE=launchd SUPERVISION_UNIT=com.ensemble.prod
+    supervision_dualfight_check
+    echo "df-rc=$?"
+' 2>&1)"
+assert_contains "M13 dualfight launchd arm passes an in-lineage holder" "df-rc=0" "$M13_OUT"
+
+# M14 — non-launchd shapes unchanged: script mode still returns 0 (the
+# systemd path's own Linux fencing is untouched by the launchd arm).
+M14_OUT="$(PATH="$M_FIX:$PATH" INSTALL_DIR="$M_INSTALL" PORT=18777 bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    SUPERVISION_MODE=script
+    supervision_dualfight_check
+    echo "df-rc=$?"
+' 2>&1)"
+assert_contains "M14 script mode still returns 0 (no launchd/systemd fight)" "df-rc=0" "$M14_OUT"
+
+# M15 — gate_readyz: the third touched gate refuses a FOREIGN holder too
+# (the brief's "every touched gate refuses" — livez/version pinned in M9).
+M15_OUT="$(PATH="$M_FIX:$PATH" INSTALL_DIR="$M_INSTALL" PORT=18777 READYZ_BUDGET_S=2 ATTR_LSOF_PIDS="999999" bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    _supervision_owned_pids() { printf "%s\n" 424242; }
+    gate_readyz >/dev/null 2>&1
+    echo "readyz-rc=$?"
+' 2>&1)"
+assert_contains "M15 gate_readyz refuses the FOREIGN holder" "readyz-rc=1" "$M15_OUT"
+
+# M16 — _handback_serving_probe: the hand-back verify rides the SAME
+# conjunct (Fix #2 site per the incident §3.1 — the commit validated the
+# wrong daemon's answers). Foreign holder → probe-level fail-fast (rc 1,
+# the probe's own vocabulary); owned holder → green (no expected-version
+# knob in this leg ⇒ the version conjunct is skipped by design).
+M16_OUT="$(PATH="$M_FIX:$PATH" INSTALL_DIR="$M_INSTALL" PORT=18777 ATTR_LSOF_PIDS="999999" bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    _supervision_owned_pids() { printf "%s\n" 424242; }
+    _handback_serving_probe
+    echo "hsp-rc=$?"
+' 2>&1)"
+assert_contains "M16 hand-back probe refuses the FOREIGN holder (fail-fast)" "hsp-rc=1" "$M16_OUT"
+assert_contains "M16 the refusal names the attribution conjunct" "serving-process attribution REFUSED" "$M16_OUT"
+M16B_OUT="$(PATH="$M_FIX:$PATH" INSTALL_DIR="$M_INSTALL" PORT=18777 ATTR_LSOF_PIDS="424242" bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    _supervision_owned_pids() { printf "%s\n" 424242; }
+    _handback_serving_probe
+    echo "hsp-rc=$?"
+' 2>&1)"
+assert_contains "M16b hand-back probe greens the OWNED holder" "hsp-rc=0" "$M16B_OUT"
+
+# M17 — gate_soak inherits the conjunct through its per-tick gate_version
+# (the soak loop probes livez/readyz directly but versions THROUGH the
+# gate): a foreign holder fails the soak on the FIRST green tick — no
+# wall-clock is wasted validating the wrong daemon (the v0.30.3 9h shape).
+# The adaptive knobs are shrunk to their floor so the leg runs in ~2-4s.
+M17_OUT="$(PATH="$M_FIX:$PATH" INSTALL_DIR="$M_INSTALL" PORT=18777 ATTR_LSOF_PIDS="999999" \
+    ADAPTIVE_SOAK_FLOOR_S=1 ADAPTIVE_SOAK_CAP_S=2 ADAPTIVE_SOAK_CONSECUTIVE=1 ADAPTIVE_SOAK_CADENCE_S=1 \
+    bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    _supervision_owned_pids() { printf "%s\n" 424242; }
+    gate_soak 2 "vTEST"
+    echo "soak-rc=$?"
+' 2>&1)"
+assert_contains "M17 gate_soak refuses via the per-tick version conjunct (foreign holder)" "soak-rc=1" "$M17_OUT"
+assert_contains "M17 the soak failure carries the attribution detail" "attribution [version verify]: REFUSED" "$M17_OUT"
+M17B_OUT="$(PATH="$M_FIX:$PATH" INSTALL_DIR="$M_INSTALL" PORT=18777 ATTR_LSOF_PIDS="424242" \
+    ADAPTIVE_SOAK_FLOOR_S=1 ADAPTIVE_SOAK_CAP_S=2 ADAPTIVE_SOAK_CONSECUTIVE=1 ADAPTIVE_SOAK_CADENCE_S=1 \
+    bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    _supervision_owned_pids() { printf "%s\n" 424242; }
+    gate_soak 2 "vTEST"
+    echo "soak-rc=$?"
+' 2>&1)"
+assert_contains "M17b gate_soak greens the OWNED holder (early-exit floor)" "soak-rc=0" "$M17B_OUT"
+
+# M18 — MULTI-PID OWNED SET, both directions (F1 council fix pin). The
+# supervised production shape has >=2 owned pids (the launcher run_loop
+# holds the daemon as a live child; the launchd job argv anchors the
+# launcher) and _supervision_owned_pids emits them NEWLINE-joined. The
+# pre-fix membership check matched SPACE-delimited tokens against that
+# raw newline list and false-refused exactly this shape (holder = the
+# daemon pid, owned = launcher NL daemon => REFUSED) — reproduced on real
+# lib.sh before the fix, hidden until now because every seam armed a
+# SINGLE-pid set (a seam blind-spot). The seam here prints TWO pids
+# newline-joined — the real emission shape.
+# M18a positive: holder = the daemon pid (222), owned = {launcher 111,
+# daemon 222} => attribution PASSES.
+M18_OUT="$(m_attr "ATTR_LSOF_PIDS=222" "ATTR_OWNED_PIDS=111 222")"
+assert_contains "M18a two-pid owned set: the daemon-pid holder PASSES" "attr-rc=0" "$M18_OUT"
+# M18b negative: holder = foreign 333 against the same two-pid set => REFUSES.
+M18B_OUT="$(m_attr "ATTR_LSOF_PIDS=333" "ATTR_OWNED_PIDS=111 222")"
+assert_contains "M18b two-pid owned set: a foreign holder still REFUSES" "attr-rc=1" "$M18B_OUT"
+assert_contains "M18b the refusal names 333 and carries both owned pids" "333 NOT in the supervision-owned pid set" "$M18B_OUT"
+assert_contains "M18b the detail's owned list is SPACE-flattened (journal single-line)" "owned:111 222" "$M18B_OUT"
+
+# M19 — status.sh --verify, DRIVEN (F2 council): the verify-hardening arm
+# needs a driven leg like every other gate class (the N4b pin is grep-only).
+# The fixture stages a REAL status.sh + lib.sh copy with the owned-pid seam
+# appended to the STAGED copy (the soak-pack fixture convention — the seam
+# must survive status.sh's own `. lib.sh` re-source), a hand-built VALID
+# release (manifest sha256s + tree hashes computed by the REAL lib.sh
+# helpers) so the ONLY rc-flipping mechanism between the two legs is the
+# attribution arm — the positive control proves the refusal leg's rc=1 came
+# from the attribution arm, not from an integrity failure (non-vacuity).
+S_FIX="$(mktemp -d -t suphb-status.XXXXXX)"
+S_INSTALL="$S_FIX/inst"
+S_STAGE="$S_FIX/scripts-upgrade"
+mkdir -p "$S_INSTALL/releases/vT/agents/leader" "$S_INSTALL/releases/vT/frontend/dist" "$S_STAGE"
+cp "$UPGRADE_DIR/status.sh" "$S_STAGE/status.sh"
+cp "$UPGRADE_DIR/lib.sh" "$S_STAGE/lib.sh"
+chmod +x "$S_STAGE/status.sh" "$S_STAGE/lib.sh"
+cat >> "$S_STAGE/lib.sh" <<'SSEAM'
+
+# [pack fixture seam — ENSEMBLE-32 Family-2 status legs] fixture-is-daemon.
+_supervision_owned_pids() { printf "%s\n" ${ATTR_OWNED_PIDS:-424242}; }
+SSEAM
+printf '#!/bin/bash\nexit 0\n' > "$S_INSTALL/releases/vT/ensemble-prod"
+printf '# stub launcher (fixture)\n' > "$S_INSTALL/releases/vT/launcher.sh"
+printf 'port: 1\n' > "$S_INSTALL/releases/vT/config.yaml"
+printf 'stub-agent\n' > "$S_INSTALL/releases/vT/agents/leader/soul.md"
+printf 'stub-fe\n' > "$S_INSTALL/releases/vT/frontend/dist/index.html"
+chmod +x "$S_INSTALL/releases/vT/ensemble-prod" "$S_INSTALL/releases/vT/launcher.sh"
+S_RAW="$(INSTALL_DIR="$S_INSTALL" bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    # 7 plain lines: 5 hashes + the 2 raw tree walks (sha  relpath). ALL
+    # manifest assembly happens OUTSIDE the nested bash -c (python3 below) —
+    # the multi-line printf quote-state inside a nested bash -c body was the
+    # source of an unparseable-quoting defect in this block first draft.
+    # printf format is DOUBLE-quoted (the pack nested-body idiom): an
+    # unquoted \n loses its backslash in the assembled body.
+    printf "%s\n" \
+        "$(_sha256 "$INSTALL_DIR/releases/vT/ensemble-prod")" \
+        "$(_sha256 "$INSTALL_DIR/releases/vT/launcher.sh")" \
+        "$(_sha256 "$INSTALL_DIR/releases/vT/config.yaml")" \
+        "$(_tree_hash_of_lines "$(_tree_manifest "$INSTALL_DIR/releases/vT/agents" "")")" \
+        "$(_tree_hash_of_lines "$(_tree_manifest "$INSTALL_DIR/releases/vT/frontend" "")")" \
+        "$(_tree_manifest "$INSTALL_DIR/releases/vT/agents" "")" \
+        "$(_tree_manifest "$INSTALL_DIR/releases/vT/frontend" "")"
+')"
+# Assemble in stage.sh's EXACT line shape (per-tree maps inline-compacted on
+# their own line — _manifest_map_lines parses line-scoped; the per-file maps
+# are REQUIRED, else integrity pinpoints every file "on disk, not in
+# manifest").
+S_MANIFEST="$(printf '%s' "$S_RAW" | python3 -c '
+import json, sys
+lines = sys.stdin.read().splitlines()
+bin_sha, lau_sha, cfg_sha, ag_tree, fe_tree, ag_walk, fe_walk = lines[:7]
+
+def m(walk):
+    items = [l.split(None, 1) for l in walk.splitlines() if l.strip()]
+    return json.dumps({p: s for s, p in items}, separators=(",", ": "))
+
+out = "{"
+out += "\n  \"version\": \"vT\","
+out += "\n  \"binary_version\": \"vT\","
+out += "\n  \"binary_sha256\": \"%s\"," % bin_sha
+out += "\n  \"launcher_sha256\": \"%s\"," % lau_sha
+out += "\n  \"config_sha256\": \"%s\"," % cfg_sha
+out += "\n  \"agents_tree_sha256\": \"%s\"," % ag_tree
+out += "\n  \"frontend_tree_sha256\": \"%s\"," % fe_tree
+out += "\n  \"agents_manifest\": %s," % m(ag_walk)
+out += "\n  \"frontend_manifest\": %s" % m(fe_walk)
+out += "\n}"
+print(out)
+')"
+printf '%s' "$S_MANIFEST" > "$S_INSTALL/releases/vT/manifest.json"
+ln -s releases/vT "$S_INSTALL/current"
+# the SAME hermetic curl stub shape as the M harness (body + http_code).
+# Quoted heredoc: NO backslash escapes — the body lands verbatim and the
+# ATTR_* expansions happen at stub RUNTIME.
+cat > "$S_FIX/curl" <<'SSTUB'
+#!/bin/bash
+__out=""; __fmt=""; __url=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) __out="$2"; shift 2 ;;
+        -w) __fmt="$2"; shift 2 ;;
+        -sS|-s|-S|--silent|--show-error) shift ;;
+        --max-time) shift 2 ;;
+        *) __url="$__url $1"; shift ;;
+    esac
+done
+case "$__url" in
+    *"/livez"*)
+        __code=200
+        __body='{"status":"ok","version":"'"${ATTR_VERSION:-vT}"'"}'
+        ;;
+    *"/readyz"*)
+        __code=200
+        __body='{"status":"ok","detail":{"inflight_turns":0}}'
+        ;;
+    *) exit 7 ;;
+esac
+if [ -n "$__out" ] && [ "$__out" != "/dev/null" ]; then
+    printf '%s' "$__body" > "$__out"
+fi
+case "$__fmt" in
+    *http_code*) printf '%s' "$__code" ;;
+    *) [ -n "$__out" ] || printf '%s' "$__body" ;;
+esac
+exit 0
+SSTUB
+chmod +x "$S_FIX/curl"
+# the lsof stub (ATTR-driven holder census) — WITHOUT it both legs refuse via
+# "no listener behind a green answer", which would make M19a green for the
+# WRONG mechanism (the foreign-pid refusal never engaging = mechanism-vacuity).
+cat > "$S_FIX/lsof" <<'SLSTUB'
+#!/bin/bash
+case "${1:-}" in
+    -ti:*) printf '%s\n' ${ATTR_LSOF_PIDS:-} ;;
+    *) exit 1 ;;
+esac
+SLSTUB
+chmod +x "$S_FIX/lsof"
+s_status() {  # s_status <ATTR_LSOF_PIDS> — drive the STAGED status.sh --verify
+    PATH="$S_FIX:$PATH" INSTALL_DIR="$S_INSTALL" PORT=18778 ATTR_LSOF_PIDS="$1" \
+    bash -c '
+        . "'"$S_STAGE"'/status.sh" sandbox --verify
+    ' 2>&1
+}
+# M19a negative: the answerer (999999) is NOT the owned daemon (424242) —
+# the mismatch must HARDEN into a verify failure (rc 1) and name itself.
+M19A_OUT="$(s_status 999999)"; M19A_RC=$?
+assert_eq "M19a status --verify REFUSES a foreign answerer (rc 1)" "1" "$M19A_RC"
+assert_contains "M19a the verify failure NAMES the attribution arm" "attribution MISMATCH is a verify failure" "$M19A_OUT"
+assert_contains "M19a the plain-mode warning fired too (wrong-process alert)" "serving-process attribution MISMATCH" "$M19A_OUT"
+# M19b positive control: the SAME valid release with an OWNED answerer —
+# verify PASSes (rc 0), proving M19a's rc=1 was the attribution arm alone.
+M19B_OUT="$(s_status 424242)"; M19B_RC=$?
+assert_eq "M19b status --verify PASSes the owned answerer (rc 0)" "0" "$M19B_RC"
+assert_contains "M19b integrity held (the release is valid)" "integrity OK" "$M19B_OUT"
+assert_contains "M19b no mismatch warn on the owned leg" "PASS" "$M19B_OUT"
+
+rm -rf "$S_FIX"
+
+rm -rf "$M_FIX"
+
+# ===========================================================================
+section "N — Fix #4 hand-back error capture (2026-11-14 §3.2/§5.2)"
+# The v0.30.5/v0.30.9 halts recorded NO launchctl error anywhere: the
+# bootstrap output was discarded, the WARNs printed rc only, and the
+# resolver print stderr was destroyed. Now: _supervision_launchd_bootstrap
+# stashes its captured output into HANDBACK_LAST_ERROR, the resolver
+# stashes its print stderr, the WARN lines surface it, and the three halt
+# templates (promote/restart/rollback) append it to the journal halt
+# detail. The stub launchctl's bootstrap stderr text is the assertion
+# needle — the halt journal must be able to carry exactly this.
+N_FIX="$(mktemp -d -t suphb-hbe.XXXXXX)"
+N_INSTALL="$N_FIX/install"
+N_LABEL="com.ensemble.hbe.fixture"
+mkdir -p "$N_INSTALL" "$N_FIX/home/Library/LaunchAgents"
+printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>Label</key><string>%s</string></dict></plist>\n' "$N_LABEL" > "$N_FIX/home/Library/LaunchAgents/${N_LABEL}.plist"
+cat > "$N_FIX/launchctl" <<STUB
+#!/bin/bash
+set -u
+STATE="${N_FIX}/launchd-registered"
+LOG="${N_FIX}/launchctl.calls"
+LABEL="${N_LABEL}"
+cmd="\${1:-}"
+[ \$# -gt 0 ] && shift
+echo "launchctl \$cmd \$*" >> "\$LOG"
+case "\$cmd" in
+    list) exit 0 ;;
+    print) echo "Could not find service \"gui/501/\${1:-}\" in GUI domain for uid \$(id -u)" >&2; exit 113 ;;
+    bootout) rm -f "\$STATE"; exit 0 ;;
+    bootstrap)
+        if [ "\${N_BOOTSTRAP_RC:-0}" = "0" ]; then exit 0; fi
+        printf '%s\n' "\${N_BOOTSTRAP_ERR:-5454: Bootstrap failed: 57: Operation not permitted}" >&2
+        exit "\${N_BOOTSTRAP_RC:-5}" ;;
+    *) exit 0 ;;
+esac
+STUB
+chmod +x "$N_FIX/launchctl"
+
+# N1 — the bootstrap failure is CAPTURED: restart_via_launcher halts (rc 1,
+# Amendment #1) and HANDBACK_LAST_ERROR carries the stub's launchctl stderr;
+# the WARN lines surface it ("captured:").
+N1_OUT="$(PATH="$N_FIX:$PATH" HOME="$N_FIX/home" INSTALL_DIR="$N_INSTALL" N_BOOTSTRAP_RC=5 bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    SUPERVISION_STATE=LAUNCHD_MANAGED; SUPERVISION_MODE=launchd
+    SUPERVISION_UNIT="'"$N_LABEL"'"; SUPERVISION_PRESTOP_MAINPID=4321
+    SUPERVISION_LAUNCHD_PLIST_PATH=""
+    restart_via_launcher
+    echo "rvl-rc=$?"
+    echo "HBE=[${HANDBACK_LAST_ERROR:-<empty>}]"
+' 2>&1)"
+assert_contains "N1 hand-back halts fail-safe on the bootstrap failure" "rvl-rc=1" "$N1_OUT"
+assert_contains "N1 the stub launchctl stderr is CAPTURED" "Bootstrap failed: 57: Operation not permitted" "$N1_OUT"
+assert_contains "N1 the WARN surfaces the capture" "captured: launchctl bootstrap" "$N1_OUT"
+
+# N2 — the resolver-failure capture: with the host plist hidden and NO
+# stash, the resolver fails and its `launchctl print` stderr ("Could not
+# find service") lands in HANDBACK_LAST_ERROR (the v0.30.5 halt's missing
+# diagnosis).
+mv "$N_FIX/home/Library/LaunchAgents/${N_LABEL}.plist" "$N_FIX/home/Library/LaunchAgents/${N_LABEL}.plist.hidden"
+N2_OUT="$(PATH="$N_FIX:$PATH" HOME="$N_FIX/home" INSTALL_DIR="$N_INSTALL" bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    _supervision_launchd_plist_path "'"$N_LABEL"'"
+    echo "resolve-rc=$?"
+    echo "HBE=[${HANDBACK_LAST_ERROR:-<empty>}]"
+' 2>&1)"
+assert_contains "N2 resolver fails closed (no fabricated path)" "resolve-rc=1" "$N2_OUT"
+assert_contains "N2 the print stderr is captured (was destroyed pre-Fix4)" "Could not find service" "$N2_OUT"
+mv "$N_FIX/home/Library/LaunchAgents/${N_LABEL}.plist.hidden" "$N_FIX/home/Library/LaunchAgents/${N_LABEL}.plist"
+
+# N3 — the three halt templates append the capture to the journal halt
+# detail (promote/restart/rollback; the LIVE halt leg through restart.sh
+# is the restart-sim pack's §N leg — this pins the template wiring).
+for N_SCRIPT in promote.sh restart.sh rollback.sh; do
+    if grep -q 'hand-back error: ${HANDBACK_LAST_ERROR:-none captured}' "$UPGRADE_DIR/$N_SCRIPT"; then
+        _pass "N3 $N_SCRIPT halt template carries HANDBACK_LAST_ERROR"
+    else
+        _fail "N3 $N_SCRIPT halt template carries HANDBACK_LAST_ERROR" "hand-back error: \${HANDBACK_LAST_ERROR:-none captured}" "absent"
+    fi
+done
+
+# N4 — Fix #2-ii structural pins: the promote FLIP-VERIFY must require the
+# port-holder census (a crash-looping launcher — a NEW owned pid with
+# NOTHING serving — must NOT satisfy it; incident §3.1) and the status
+# --verify must harden an attribution mismatch into a verify failure.
+# Grep-pins from the definition sites (N3 pattern): driving a REAL promote
+# to the flip-verify needs a launchd-classified sandbox; the refusal arms
+# themselves are one straight-line block each.
+if grep -q 'NOTHING listens on :${PORT}' "$UPGRADE_DIR/promote.sh" \
+   && grep -q 'NOT in the owned-pid set' "$UPGRADE_DIR/promote.sh"; then
+    _pass "N4 promote flip-verify requires the port-holder census (owned-pid set)"
+else
+    _fail "N4 promote flip-verify requires the port-holder census (owned-pid set)" "census needles" "absent"
+fi
+if grep -q 'STATUS_ATTR_MISMATCH' "$UPGRADE_DIR/status.sh" \
+   && grep -q 'attribution MISMATCH is a verify failure' "$UPGRADE_DIR/status.sh"; then
+    _pass "N4b status --verify hardens an attribution mismatch into a failure"
+else
+    _fail "N4b status --verify hardens an attribution mismatch into a failure" "mismatch needles" "absent"
+fi
+
+# N5 — F3 council fix: the BENIGN bootstrap arm ("already bootstrapped"/rc 2
+# after the caller's retry) must CLEAR HANDBACK_LAST_ERROR, mirroring the
+# success arm. Stale-capture shape: attempt 1 fails hard (stash set with the
+# stub's stderr), attempt 2 comes back benign — a later warn in the same run
+# must not surface attempt 1's diagnosis as if it described the benign arm.
+N5B_ERR="5454: Bootstrap failed: 57: Operation not permitted"
+N5_OUT="$(PATH="$N_FIX:$PATH" HOME="$N_FIX/home" INSTALL_DIR="$N_INSTALL" \
+    N_BOOTSTRAP_RC=2 N_BOOTSTRAP_ERR="already bootstrapped" bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    HANDBACK_LAST_ERROR="stale capture from a previous failed attempt"
+    _supervision_launchd_bootstrap "'"$N_FIX/home/Library/LaunchAgents/$N_LABEL.plist"'"
+    echo "benign-rc=$?"
+    echo "HBE-after-benign=[${HANDBACK_LAST_ERROR:-<empty>}]"
+    # the hard-fail arm STILL stashes (the clear must not neuter Fix #4):
+    export N_BOOTSTRAP_RC=5
+    export N_BOOTSTRAP_ERR="'"$N5B_ERR"'"
+    _supervision_launchd_bootstrap "'"$N_FIX/home/Library/LaunchAgents/$N_LABEL.plist"'"
+    echo "hard-rc=$?"
+    echo "HBE-after-hard=[${HANDBACK_LAST_ERROR:-<empty>}]"
+' 2>&1)"
+assert_contains "N5 the benign arm returns rc 2 (caller revalidates)" "benign-rc=2" "$N5_OUT"
+assert_contains "N5 the benign arm CLEARED the stale capture (F3)" "HBE-after-benign=[<empty>]" "$N5_OUT"
+assert_contains "N5 the hard-fail arm still captures (Fix #4 intact)" "HBE-after-hard=[launchctl bootstrap" "$N5_OUT"
+assert_contains "N5 the hard-fail stash carries the launchctl stderr" "$N5B_ERR" "$N5_OUT"
+
+rm -rf "$N_FIX"
+
+# ===========================================================================
 section "summary"
 printf 'PASS=%s FAIL=%s SKIP=%s\n' "$PASS" "$FAIL" "$SKIP"
 if [ "$SKIP" -gt 0 ]; then

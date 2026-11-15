@@ -248,7 +248,9 @@ lock_heartbeat
 # surfaces here for the B4 leave-txn-open policy.
 if ! restart_via_launcher; then
     _warn "unit hand-back FAILED — halting rollback (txn left open for sweep recovery; NO nohup fallback, never a false success)"
-    journal_history_append halt "manual rollback to $TO_VERSION: unit hand-back failed — halt-for-human, txn left open for sweep recovery (no nohup fallback — Amendment #1)" \
+    # Fix #4 (ENSEMBLE-32 repair lane; incident §5.2): the halt detail
+    # carries the CAPTURED hand-back error (HANDBACK_LAST_ERROR).
+    journal_history_append halt "manual rollback to $TO_VERSION: unit hand-back failed — halt-for-human, txn left open for sweep recovery (no nohup fallback — Amendment #1; hand-back error: ${HANDBACK_LAST_ERROR:-none captured})" \
                               || true   # history is advisory; the open txn IS the B4 contract
     exit 1
 fi

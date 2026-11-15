@@ -638,7 +638,11 @@ lock_heartbeat
 # previous; the halt event alerts the human).
 if ! restart_via_launcher; then
     _warn "unit hand-back FAILED — halting promote (txn left open for sweep recovery; NO nohup fallback, never a false success)"
-    journal_history_append halt "promote aborted post-flip: unit hand-back failed for $VERSION — halt-for-human, txn left open for sweep recovery (declared=${SUPERVISION_MODE:-?} verified=${SUPERVISION_STATE:-?} unit=${SUPERVISION_UNIT:-?}; no nohup fallback — Amendment #1)" \
+    # Fix #4 (ENSEMBLE-32 repair lane; incident §5.2): the halt detail
+    # carries the CAPTURED hand-back error (HANDBACK_LAST_ERROR — the
+    # launchctl bootstrap/resolver diagnosis the v0.30.5 halt never
+    # recorded; today's failure was unreproducible from the artifacts).
+    journal_history_append halt "promote aborted post-flip: unit hand-back failed for $VERSION — halt-for-human, txn left open for sweep recovery (declared=${SUPERVISION_MODE:-?} verified=${SUPERVISION_STATE:-?} unit=${SUPERVISION_UNIT:-?}; no nohup fallback — Amendment #1; hand-back error: ${HANDBACK_LAST_ERROR:-none captured})" \
                               || true   # history is advisory; the open txn IS the B4 contract
     exit 1
 fi
@@ -679,8 +683,49 @@ if [ "${SUPERVISION_STATE:-}" = "LAUNCHD_MANAGED" ]; then
     elif [ -n "${SUPERVISION_PRESTOP_MAINPID:-}" ] && [ "$_post_pid" = "$SUPERVISION_PRESTOP_MAINPID" ]; then
         gate_fail_reason="launchd verify: post-bootstrap pid $_post_pid EQUALS the pre-stop pid ${SUPERVISION_PRESTOP_MAINPID} — the supervisor did not start a NEW daemon"
         _warn "$gate_fail_reason"
+    # Fix #2-ii (ENSEMBLE-32 repair lane; incident 2026-11-14 §3.1): an
+    # owned pid that is NEW is still not proof of SERVICE — a
+    # crash-looping launcher satisfies "any new pid ≠ prestop mainpid"
+    # while NOTHING serves the port. The flip-verify therefore requires
+    # the port-holder census: at least one LISTEN holder on $PORT, and
+    # every holder inside the owned-pid set (the serving pid must be
+    # THIS install's process — the flip is verified on the SERVING
+    # process, not on a respawn). Fail-closed: any miss routes to 8b
+    # (auto-rollback) via gate_fail_reason, never warn-and-pass.
     else
-        _log "launchd verify: provenance OK (owned pid $_post_pid${SUPERVISION_PRESTOP_MAINPID:+, pre-stop was $SUPERVISION_PRESTOP_MAINPID}) — proceeding to version gate"
+        _fv_holders="$(_supervision_port_holders)"
+        _fv_hrc=$?
+        _fv_owned="$(_supervision_owned_pids 2>/dev/null)"
+        if [ "$_fv_hrc" -eq 1 ] || [ -z "$_fv_holders" ]; then
+            gate_fail_reason="launchd verify: owned pid $_post_pid exists but NOTHING listens on :${PORT} — the flip produced a process, not a serving daemon (crash-loop shape)"
+            _warn "$gate_fail_reason"
+        elif [ "$_fv_hrc" -eq 2 ]; then
+            # lsof absent/errored — the census cannot run; the launchd
+            # verify keeps its pid-based verdict (loud, once) rather than
+            # refusing on a missing tool (attribution helper precedent).
+            _warn "launchd verify: port-holder census unavailable (no lsof / lsof errored) — serving attribution SKIPPED for the flip-verify (pid provenance only; NOT a pass evidence)"
+            _log "launchd verify: provenance OK (owned pid $_post_pid${SUPERVISION_PRESTOP_MAINPID:+, pre-stop was $SUPERVISION_PRESTOP_MAINPID}) — proceeding to version gate"
+        else
+            _fv_foreign=""
+            # F1 (ENSEMBLE-32 repair lane council): $_fv_owned is
+            # NEWLINE-joined (_supervision_owned_pids emits one printf per
+            # pid) while this case matches SPACE-delimited tokens — the
+            # supervised production shape (launcher + daemon, >=2 pids)
+            # false-refused the flip-verify. Normalize once, then match.
+            _fv_owned_spaced="$(printf '%s' "$_fv_owned" | tr '\n' ' ')"
+            for _fv_h in $_fv_holders; do
+                case " $_fv_owned_spaced " in
+                    *" $_fv_h "*) ;;
+                    *) _fv_foreign="$_fv_foreign $_fv_h" ;;
+                esac
+            done
+            if [ -n "$_fv_foreign" ]; then
+                gate_fail_reason="launchd verify: port :${PORT} holder(s):$_fv_foreign NOT in the owned-pid set (owned:$_fv_owned_spaced) — the flip is served by a foreign process"
+                _warn "$gate_fail_reason"
+            else
+                _log "launchd verify: provenance OK (owned pid $_post_pid${SUPERVISION_PRESTOP_MAINPID:+, pre-stop was $SUPERVISION_PRESTOP_MAINPID}; port ${PORT} holder(s):$_fv_holders owned) — proceeding to version gate"
+            fi
+        fi
     fi
 fi
 

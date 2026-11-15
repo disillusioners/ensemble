@@ -116,7 +116,18 @@ fi
 cur_name=""
 [ -L "$INSTALL_DIR/current" ] && cur_name="$(readlink "$INSTALL_DIR/current")" && cur_name="${cur_name##*/}"
 LIVEZ="$(_probe_once "/livez" "$PORT")"
+# Fix #2 (ENSEMBLE-32 repair lane; incident 2026-11-14 §5.1): the smoke's
+# answer is only meaningful if the port-holder is THIS install's daemon
+# (ensemble-vm: :9797 held by kubectl port-forward + monitor + code-server
+# child while the daemon serves :9798). Plain mode: loud WARN (status is a
+# read-only diagnostic). --verify mode: the mismatch HARDENS into a
+# failure below (same posture as the version-smoke mismatch).
+STATUS_ATTR_MISMATCH=""
 if [ -n "$LIVEZ" ]; then
+    if ! _gate_serving_attribution "status smoke"; then
+        STATUS_ATTR_MISMATCH="${GATE_ATTRIBUTION_DETAIL:-unattributed answerer on :$PORT}"
+        _warn "status: serving-process attribution MISMATCH — $STATUS_ATTR_MISMATCH (the answer below may be from the WRONG process)"
+    fi
     running_ver="$(_json_field "$LIVEZ" version)"
     [ -n "$running_ver" ] || running_ver="(no version field)"
     _log "daemon :$PORT /livez version=$running_ver"
@@ -153,6 +164,13 @@ if [ "$VERIFY" = "1" ]; then
             _warn "verify: version smoke MISMATCH is a verify failure (running=$running_ver manifest=$want_ver)"
             rc=1
         fi
+    fi
+    # Fix #2: an attribution mismatch hardens into a verify failure too —
+    # "the supervised daemon answers" is part of integrity, not cosmetics
+    # (the v0.30.3 commit validated the WRONG daemon's answers).
+    if [ -n "$LIVEZ" ] && [ -n "$STATUS_ATTR_MISMATCH" ]; then
+        _warn "verify: serving-process attribution MISMATCH is a verify failure ($STATUS_ATTR_MISMATCH)"
+        rc=1
     fi
     if [ "${VERIFY_RC_NOTE:-0}" = "1" ]; then rc=1; fi
     if [ "$rc" = "0" ]; then

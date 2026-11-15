@@ -3980,6 +3980,21 @@ main() {
         _log "FATAL: could not resolve INSTALL_DIR"
         exit 78
     fi
+    # PC-2 (ENSEMBLE-32 repair lane; incident
+    # docs/incidents/2026-11-14-macos-launchd-handback-halt.md defect #4):
+    # EXPORT the resolved install dir. The plist EnvironmentVariables
+    # carries PATH only (plist-lineage daemons), so without this export the
+    # daemon's os.environ LACKS INSTALL_DIR and the supervision twin's
+    # launchd probe degrades to LAUNCHD_NOT_VERIFIED instantly
+    # (upgrade_journal.py _supervision_launchd_detect returns NOT_VERIFIED
+    # on an empty install dir) — the supervision_boot advisory fired
+    # LAUNCHD_NOT_VERIFIED on genuinely supervised boots. Executor-lineage
+    # daemons were unaffected (manager mints INSTALL_DIR into the executor
+    # env); the launcher is the plist lineage's env source, so the export
+    # propagates to the daemon child. The Python sweep service passes its
+    # own resolved install dir as a belt-and-braces second arm
+    # (upgrade_journal_sweep._emit_supervision_boot_advisory).
+    export INSTALL_DIR
 
     if ! cd "$INSTALL_DIR" 2>/dev/null; then
         _log "FATAL: cannot cd to INSTALL_DIR: $INSTALL_DIR"

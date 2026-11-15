@@ -238,6 +238,13 @@ soak_pack_start_fake_daemon() {
     for i in $(seq 1 50); do
         sleep 0.2
         if [ -f "$ready" ]; then
+            # ENSEMBLE-32 Family-2 fixture seam: record the fake daemon's
+            # pid so the staged lib.sh's owned-pid fixture (see
+            # soak_pack_build_promote_fixture) can attribute it — the
+            # child promote's Fix #2 conjunct reads $INSTALL_DIR/.pack-owned-pid.
+            if [ -n "$install_dir" ] && [ -d "$install_dir" ]; then
+                printf '%s\n' "$SOAK_FAKE_PID" > "$install_dir/.pack-owned-pid" 2>/dev/null || true
+            fi
             return 0
         fi
         if ! kill -0 "$SOAK_FAKE_PID" 2>/dev/null; then
@@ -329,15 +336,52 @@ if __name__ == "__main__":
 PYEOF
     chmod +x "$SOAK_FAKE_REPO/daemon/plugin_subsystem/promote_staleness.py"
 
-    # The REAL upgrade scripts (the subject of the packs).
-    cp "$SOAK_PACK_REPO_ROOT/scripts/upgrade/lib.sh"           "$SOAK_FAKE_REPO/scripts/upgrade/lib.sh"
-    cp "$SOAK_PACK_REPO_ROOT/scripts/upgrade/journal_splice.py" "$SOAK_FAKE_REPO/scripts/upgrade/journal_splice.py"
-    cp "$SOAK_PACK_REPO_ROOT/scripts/upgrade/stage.sh"          "$SOAK_FAKE_REPO/scripts/upgrade/stage.sh"
-    cp "$SOAK_PACK_REPO_ROOT/scripts/upgrade/promote.sh"        "$SOAK_FAKE_REPO/scripts/upgrade/promote.sh"
-    cp "$SOAK_PACK_REPO_ROOT/scripts/upgrade/rollback.sh"       "$SOAK_FAKE_REPO/scripts/upgrade/rollback.sh"
-    cp "$SOAK_PACK_REPO_ROOT/scripts/upgrade/status.sh"         "$SOAK_FAKE_REPO/scripts/upgrade/status.sh"
-    cp "$SOAK_PACK_REPO_ROOT/scripts/stop-ensemble.sh"          "$SOAK_FAKE_REPO/scripts/stop-ensemble.sh"
-    chmod +x "$SOAK_FAKE_REPO/scripts/upgrade/"*.sh "$SOAK_FAKE_REPO/scripts/stop-ensemble.sh"
+    # The REAL upgrade scripts (the subject of the packs) — seeded from the
+    # EXECUTOR FAMILY's authoritative list (executor_family_paths), never a
+    # hand-transcribed copy: a family member added on latest must reach the
+    # fixture automatically or stage.sh's fail-closed family staging (the
+    # v0.29.16 halt class) refuses the route the packs drive.
+    . "$SOAK_PACK_REPO_ROOT/scripts/upgrade/executor_family.sh"
+    mkdir -p "$SOAK_FAKE_REPO/scripts/upgrade"
+    while IFS= read -r _family_path; do
+        [ -n "$_family_path" ] || continue
+        _fsrc="$SOAK_PACK_REPO_ROOT/$_family_path"
+        [ -f "$_fsrc" ] || { echo "FAIL: fixture family source missing: $_fsrc" >&2; return 1; }
+        _fdst="$SOAK_FAKE_REPO/$_family_path"
+        mkdir -p "$(dirname "$_fdst")"
+        cp "$_fsrc" "$_fdst"
+    done < <(executor_family_paths)
+    chmod +x "$SOAK_FAKE_REPO/scripts/upgrade/"*.sh "$SOAK_FAKE_REPO/scripts/stop-ensemble.sh" \
+        "$SOAK_FAKE_REPO/scripts/install-dir-guard.sh"
+    # The guideline library is a REQUIRED stage payload on latest (stage.sh
+    # refuses a guidelines-less release — the guideline reader resolves
+    # <exe-dir>/guidelines). (Fixture gap was BASE-attributed: the guards
+    # landed on latest after this helper last shipped a seed.)
+    mkdir -p "$SOAK_FAKE_REPO/docs/guidelines"
+    printf 'stub-guideline\n' > "$SOAK_FAKE_REPO/docs/guidelines/README.md"
+
+    # ── [pack fixture seam — ENSEMBLE-32 Family-2, Fix #2] ────────────
+    # The staged lib.sh copy gets the attribution fixture: the sandbox's
+    # fake daemon (tests/helpers/soak_gate_fake_daemon.py) is NOT
+    # ensemble-shaped, so _supervision_owned_pids cannot see it and the
+    # Fix #2 attribution conjunct would refuse every green gate in the
+    # child promote (the child cannot be function-stubbed). The staged
+    # copy arms the owned set to the fixture's recorded pid
+    # ($INSTALL_DIR/.pack-owned-pid, written by soak_pack_start_fake_daemon
+    # when --install-dir is passed): the fixture IS this install's daemon
+    # by construction. The REPO lib.sh is untouched — production keeps the
+    # real pid discovery (negative-side pins: supervision pack §M).
+    cat >> "$SOAK_FAKE_REPO/scripts/upgrade/lib.sh" <<'FIXTURE_SEAM'
+
+# ── [pack fixture seam — ENSEMBLE-32 Family-2 attribution] ──────────
+_supervision_owned_pids() {
+    local pf="${INSTALL_DIR:-}/.pack-owned-pid"
+    if [ -f "$pf" ]; then
+        cat "$pf" 2>/dev/null
+    fi
+    return 0
+}
+FIXTURE_SEAM
 
     # The stub payload tree + launcher.
     printf '#!/bin/bash\n# stub launcher (fixture)\n' > "$SOAK_FAKE_REPO/launcher.sh"
@@ -353,6 +397,26 @@ PYEOF
     git -C "$SOAK_FAKE_REPO" init -q
     git -C "$SOAK_FAKE_REPO" add -A 2>/dev/null
     git -C "$SOAK_FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm fixture >/dev/null 2>&1
+    # The PIPELINE_SCRIPTS_FLOOR_COMMIT stub (T6.15/AC15): stage.sh refuses
+    # a release whose daemon constant is unset or names a non-ancestor. The
+    # fixture pins the floor to the FIRST fixture commit — a real ancestor
+    # of the tagged HEAD (a second commit carries the constant; amending
+    # would rewrite the floor sha out of the tree).
+    _fixture_base="$(git -C "$SOAK_FAKE_REPO" rev-parse HEAD)"
+    mkdir -p "$SOAK_FAKE_REPO/daemon/tools"
+    printf '# fixture stub (soak-gate packs)\nPIPELINE_SCRIPTS_FLOOR_COMMIT = "%s"\n' \
+        "$_fixture_base" > "$SOAK_FAKE_REPO/daemon/tools/upgrade_tools.py"
+    # The lib.sh stamp (W-2, the SAME "commit this release contains" rule):
+    # the copied lib.sh carries the REAL repo's rev stamp which cannot
+    # resolve inside the fixture tree — rewrite it to the fixture's own
+    # floor commit (the fixture is its own mini-repo; the packs exercise
+    # the gates, not the real lineage). Portable in-place edit (BSD -i ''
+    # vs GNU -i): .bak + rm.
+    sed -i.bak "s/^PIPELINE_SCRIPTS_REV=.*/PIPELINE_SCRIPTS_REV=$_fixture_base/" \
+        "$SOAK_FAKE_REPO/scripts/upgrade/lib.sh"
+    rm -f "$SOAK_FAKE_REPO/scripts/upgrade/lib.sh.bak"
+    git -C "$SOAK_FAKE_REPO" add -A 2>/dev/null
+    git -C "$SOAK_FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm "floor stub" >/dev/null 2>&1
     git -C "$SOAK_FAKE_REPO" tag "$SOAK_SBX_V1"
     SOAK_SBX_PORT="$(soak_pack_free_port)" || return 1
 }

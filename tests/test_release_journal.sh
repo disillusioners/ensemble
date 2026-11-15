@@ -463,6 +463,19 @@ case "$cmd" in
                 printf 'program = /bin/bash\n'
                 printf 'program arguments = {\n    /bin/bash\n    %s/launcher.sh\n}\n' "$real"
                 printf 'path = %s\n' "$PLIST"
+                # ENSEMBLE-32 Family-2 (Fix #2): a REAL `launchctl print` for
+                # a RUNNING job carries `pid = <n>` — the supervision
+                # attribution arm reads it (the job's live pid) and the
+                # dual-fight launchd check faults on a registered-but-pidless
+                # job while the port is held. The emulator models the job's
+                # live process as the $PORT listener (the same pid its `list`
+                # arm reports in column 1), so print mirrors that: emit the
+                # pid line ONLY when a listener exists (a stopped job has no
+                # pid line on real launchctl either).
+                if [ -n "${PORT:-}" ]; then
+                    rj_pid="$(lsof -ti:"$PORT" 2>/dev/null | head -1)"
+                    [ -n "$rj_pid" ] && printf 'pid = %s\n' "$rj_pid"
+                fi
                 exit 0
                 ;;
             *)
@@ -1120,12 +1133,21 @@ http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
 PYEOF
 SRV_PID=$!
 sleep 1
-if ( export INSTALL_DIR="$SBX"; export PORT=$SRV_PORT; . "$FAKE_REPO/scripts/upgrade/lib.sh"; gate_version "9.9.9-stub" ) > /dev/null 2>&1; then
+# ENSEMBLE-32 Family-2 (Fix #2) attribution seam: gate_version requires the
+# port-holder to be in the OWNED pid set, and this stub python server is not
+# ensemble-shaped (real pid discovery cannot see it). Arm the owned set to
+# the stub's ACTUAL listener pid (lsof, the same census the conjunct uses) —
+# the stub IS this install's daemon by construction, so the leg keeps its
+# ORIGINAL mechanism (version-only discrimination: green on match, red on
+# mismatch — never an attribution red masquerading as a version red).
+# Negative-side attribution pins: tests/test_supervision_stop_handback.sh §M.
+RJ_OWNED_SEAM='_supervision_owned_pids() { lsof -ti:"$PORT" -sTCP:LISTEN 2>/dev/null; }'
+if ( export INSTALL_DIR="$SBX"; export PORT=$SRV_PORT; . "$FAKE_REPO/scripts/upgrade/lib.sh"; eval "$RJ_OWNED_SEAM"; gate_version "9.9.9-stub" ) > /dev/null 2>&1; then
     _pass
 else
     _fail "gate_version accepts matching version"
 fi
-if ( export INSTALL_DIR="$SBX"; export PORT=$SRV_PORT; . "$FAKE_REPO/scripts/upgrade/lib.sh"; gate_version "0.0.1-wrong" ) > /dev/null 2>&1; then
+if ( export INSTALL_DIR="$SBX"; export PORT=$SRV_PORT; . "$FAKE_REPO/scripts/upgrade/lib.sh"; eval "$RJ_OWNED_SEAM"; gate_version "0.0.1-wrong" ) > /dev/null 2>&1; then
     _fail "gate_version REFUSES mismatching version"
 else
     _pass

@@ -227,6 +227,18 @@ _setup_subtest() {
     _BOOT_GRACE_CONSEC_GREEN=0
     # shellcheck source=scripts/upgrade/lib.sh
     . "$UPGRADE_DIR/lib.sh"
+    # ENSEMBLE-32 Family-2 (Fix #2) attribution seam: gate_livez/readyz/
+    # version now require the port-holder to be in the OWNED pid set. This
+    # pack's fixture stub daemons are plain python http.servers — never
+    # ensemble-shaped, so real pid discovery cannot see them. The pack arms
+    # the owned set to the fixture's ACTUAL listener pid on the LIVE $PORT
+    # (lsof, the same census the conjunct uses): the fixture IS the owned
+    # daemon by construction. Negative-side attribution pins live in
+    # tests/test_supervision_stop_handback.sh §M (that pack owns the
+    # foreign-holder refusals).
+    _supervision_owned_pids() {
+        lsof -ti:"${PORT:-}" -sTCP:LISTEN 2>/dev/null
+    }
 }
 
 # ============================================================================

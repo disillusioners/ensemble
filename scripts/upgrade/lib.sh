@@ -5408,6 +5408,15 @@ _supervision_launchd_bootout() {
 # bootstrap == start. Bounded. "Already loaded" is benign ONLY after a
 # revalidation by the caller; here a nonzero rc is returned for the caller to
 # handle (no promote-started launcher ever on the supervised path).
+#
+# Fix #4 (ENSEMBLE-32 repair lane; incident 2026-11-14 §3.2/§5.2): on a
+# hard failure the captured launchctl output is STASHED into the global
+# HANDBACK_LAST_ERROR (flattened to one line, bounded) instead of being
+# discarded — the v0.30.5/v0.30.9 halts recorded NO launchctl error
+# anywhere, so the failure was unreproducible from the artifacts. The
+# WARN lines at the hand-back call site and the three halt templates
+# (promote/restart/rollback) surface it. Success clears the stash.
+HANDBACK_LAST_ERROR=""
 _supervision_launchd_bootstrap() {
     local plist="${1:-}" domain
     [ -n "$plist" ] || return 1
@@ -5418,13 +5427,23 @@ _supervision_launchd_bootstrap() {
     out="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" bootstrap "$domain" "$plist" 2>&1)"
     rc=$?
     if [ "$rc" -eq 0 ]; then
+        HANDBACK_LAST_ERROR=""
         return 0
     fi
+    # Fix #4: stash the launchctl diagnosis (one line, bounded — journal
+    # detail is a single-line quoted string).
+    HANDBACK_LAST_ERROR="$(printf 'launchctl bootstrap %s %s failed (rc=%s): %s' "$domain" "$plist" "$rc" "$(printf '%s' "$out" | tr '\n' ';' | tr -s ' ' | cut -c1-400)")"
     case "$out" in
         *"already bootstrapped"*|*"already loaded"*|*"Input/output error"*)
             # "already loaded" is NOT success on its own — return a distinct
             # code (2) so the caller revalidates the LIVE job rather than
-            # trusting a no-op rc.
+            # trusting a no-op rc. BENIGN arm: clear the stash (F3 council
+            # fix) — this is attempt N of the caller's retry loop, and a
+            # diagnosis captured by an EARLIER failed attempt must not ride
+            # a later halt detail in the same run (the success arm at the
+            # top clears it; this arm is success-shaped too, modulo the
+            # caller's mandatory revalidation).
+            HANDBACK_LAST_ERROR=""
             return 2 ;;
     esac
     [ "$rc" -eq 124 ] && return 1
@@ -5453,14 +5472,22 @@ _supervision_launchd_bootstrap() {
 #      (fail-closed), never to a wrong path.
 # Empty output + rc 1 ⇒ unresolvable ⇒ the caller halts fail-safe
 # (Amendment #1 — never a nohup fallback on Darwin).
+#
+# Fix #4 (ENSEMBLE-32 repair lane; incident §5.2): the live probe's
+# stderr is CAPTURED, not discarded — on total resolution failure it is
+# stashed into HANDBACK_LAST_ERROR so the halt journal carries WHY the
+# resolver could not see the job (the v0.30.5 halt's "Could not find
+# service" was never recorded).
 _supervision_launchd_plist_path() {
-    local label="${1:-}" dump p
+    local label="${1:-}" dump p errtmp
     [ -n "$label" ] || return 1
     # Rung 1 — live probe (the job may still be registered).
+    errtmp="$(mktemp -t hbk.XXXXXX 2>/dev/null || printf '/tmp/hbk.%s.err' "$$")"
     if command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1; then
-        dump="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" print "$(_supervision_launchd_domain)/${label}" 2>/dev/null)" || dump=""
+        dump="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" print "$(_supervision_launchd_domain)/${label}" 2>"$errtmp")" || dump=""
         p="$(printf '%s\n' "$dump" | sed -n 's/^[[:space:]]*path = //p' | head -1)"
         if [ -n "$p" ] && [ -f "$p" ]; then
+            rm -f "$errtmp" 2>/dev/null
             printf '%s\n' "$p"
             return 0
         fi
@@ -5468,15 +5495,20 @@ _supervision_launchd_plist_path() {
     # Rung 2 — the pre-stop stash (survives the bootout).
     p="${SUPERVISION_LAUNCHD_PLIST_PATH:-}"
     if [ -n "$p" ] && [ -f "$p" ]; then
+        rm -f "$errtmp" 2>/dev/null
         printf '%s\n' "$p"
         return 0
     fi
     # Rung 3 — label-verbatim fallback (ratified convention).
     p="$HOME/Library/LaunchAgents/${label}.plist"
     if [ -f "$p" ]; then
+        rm -f "$errtmp" 2>/dev/null
         printf '%s\n' "$p"
         return 0
     fi
+    # All rungs unresolvable — stash the live probe's stderr (Fix #4).
+    HANDBACK_LAST_ERROR="$(printf "plist resolution failed for job '%s' (launchctl print: %s)" "$label" "$(printf '%s' "$(cat "$errtmp" 2>/dev/null)" | tr '\n' ';' | tr -s ' ' | cut -c1-400)")"
+    rm -f "$errtmp" 2>/dev/null
     return 1
 }
 
@@ -5510,6 +5542,14 @@ _handback_serving_probe() {
     case "$hspc_rc" in
         0)
             # green-class (green or busy-amnesty) — the body is in _PROBE_BODY
+            # Fix #2: the green answer must come from the ATTRIBUTED daemon.
+            # A mismatch is probe-level FAIL-FAST (the probe's own vocabulary:
+            # no amount of polling fixes a foreign answerer — the incident's
+            # nohup-serves-while-launchd-crash-loops shape).
+            if ! _gate_serving_attribution "hand-back verify"; then
+                _warn "hand-back verify: serving-process attribution REFUSED${GATE_ATTRIBUTION_DETAIL:+ — $GATE_ATTRIBUTION_DETAIL} (probe-level fail-fast, Fix #2); NOT success"
+                return 1
+            fi
             if [ -n "${PROMOTE_EXPECTED_VERSION:-}" ]; then
                 running="$(_json_field "${_PROBE_BODY:-}" version 2>/dev/null)" || running=""
                 if [ -z "$running" ]; then
@@ -5940,7 +5980,7 @@ restart_via_launcher() {
         # remains unresolvable (fail-closed, no fabricated path).
         lplist="$(_supervision_launchd_plist_path "$SUPERVISION_UNIT")"
         if [ -z "$lplist" ]; then
-            _warn "launchd hand-back: cannot resolve the plist path for job '$SUPERVISION_UNIT' — live probe, pre-stop stash, and the label-verbatim ~/Library/LaunchAgents/<label>.plist fallback ALL unresolvable (incident 2026-11-14 §7b: filename must equal the job label) — failing; caller halts fail-safe"
+            _warn "launchd hand-back: cannot resolve the plist path for job '$SUPERVISION_UNIT' — live probe, pre-stop stash, and the label-verbatim ~/Library/LaunchAgents/<label>.plist fallback ALL unresolvable (incident 2026-11-14 §7b: filename must equal the job label) — failing; caller halts fail-safe${HANDBACK_LAST_ERROR:+; captured: $HANDBACK_LAST_ERROR}"
             return 1
         fi
         lrc=1
@@ -5950,12 +5990,12 @@ restart_via_launcher() {
             # rc 0 = started; rc 2 = already loaded (benign ONLY because the
             # forward path booted out first — the caller's gate revalidates).
             if [ "$lrc" -eq 0 ] || [ "$lrc" -eq 2 ]; then break; fi
-            _warn "launchd hand-back: bootstrap attempt $lattempt FAILED (rc=$lrc) for '$SUPERVISION_UNIT' — retrying"
+            _warn "launchd hand-back: bootstrap attempt $lattempt FAILED (rc=$lrc) for '$SUPERVISION_UNIT' — retrying${HANDBACK_LAST_ERROR:+; captured: $HANDBACK_LAST_ERROR}"
             sleep $(( lattempt * 2 ))
             lattempt=$(( lattempt + 1 ))
         done
         if [ "$lrc" -ne 0 ] && [ "$lrc" -ne 2 ]; then
-            _warn "launchd hand-back: bootstrap EXHAUSTED after retries (last rc=$lrc) — failing (never a nohup fallback on Darwin); caller halts fail-safe"
+            _warn "launchd hand-back: bootstrap EXHAUSTED after retries (last rc=$lrc) — failing (never a nohup fallback on Darwin); caller halts fail-safe${HANDBACK_LAST_ERROR:+; captured: $HANDBACK_LAST_ERROR}"
             return 1
         fi
         _log "hand-back: launchd — bootstrapped job '$SUPERVISION_UNIT' from $lplist (RunAtLoad starts the daemon exactly once; no nohup, no promote-started launcher)"
@@ -6349,6 +6389,89 @@ _supervision_owned_pids() {
             fi
             printf '%s\n' "$pid"
         done
+}
+
+# _supervision_port_holders — the LISTENING pids on $PORT (Fix #2,
+# ENSEMBLE-32 repair lane; incident
+# docs/incidents/2026-11-14-macos-launchd-handback-halt.md §5.1). The
+# census is -sTCP:LISTEN-scoped DELIBERATELY: bare `lsof -ti:$PORT`
+# (the stop path's fast condition) also lists every pid holding an
+# ESTABLISHED client connection (uptime monitor, browser, kubectl
+# sidecar) — reading those as "holders" would refuse every green gate
+# on a monitored host. Only the LISTENER is the serving process.
+# Prints pids (one per line). Return: 0 = pids printed; 1 = census
+# ran clean and found NO listener (the port is unbound); 2 =
+# unprobeable (lsof absent, or lsof itself errored — a tool failure
+# is never evidence of a foreign holder; the caller decides its
+# degraded posture per the no-missing-tool-fault house rule).
+_supervision_port_holders() {
+    [ -n "${PORT:-}" ] || return 2
+    command -v lsof >/dev/null 2>&1 || return 2
+    local errtmp out rc
+    errtmp="$(mktemp -t attr.XXXXXX 2>/dev/null || printf '/tmp/attr.%s.err' "$$")"
+    out="$(lsof -ti:"$PORT" -sTCP:LISTEN 2>"$errtmp")"
+    rc=$?
+    if [ "$rc" -ne 0 ] && [ -s "$errtmp" ]; then
+        rm -f "$errtmp" 2>/dev/null
+        return 2   # lsof errored (bad flag / permissions) — not evidence
+    fi
+    rm -f "$errtmp" 2>/dev/null
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    return 1
+}
+
+# _supervision_launchd_job_pid <label> — the launchd job's CURRENT pid
+# (Fix #2 launchd lineage anchor; the `pid = ` line of the job dump —
+# the same parse family as the plist `path = ` resolver above). Bounded
+# (LAUNCHD_PROBE_BUDGET_S). Prints the pid; returns nonzero when the
+# job is not registered. Prints NOTHING for a registered-but-pidless
+# job (crash-looping: launchctl answers `pid = 4294967295` (-1
+# sentinel) or omits the line) — rc 0, empty output: the CALLER
+# distinguishes "probe tool failed" (skip, no evidence) from "the job
+# has NO live process while the port serves someone" (the v0.30.3
+# dual-supervisor shape — refuse).
+_supervision_launchd_job_pid() {
+    local label="${1:-}" dump rc
+    [ -n "$label" ] || return 1
+    command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1 || return 2
+    dump="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" print "$(_supervision_launchd_domain)/${label}" 2>/dev/null)"
+    rc=$?
+    [ "$rc" -eq 0 ] || return 2
+    printf '%s\n' "$dump" | sed -n 's/^[[:space:]]*pid = //p' | head -1 \
+        | while IFS= read -r p; do
+            case "$p" in
+                ''|0|4294967295) ;;   # no live process behind the job
+                *[!0-9]*) ;;
+                *) printf '%s\n' "$p" ;;
+            esac
+        done
+    return 0
+}
+
+# _supervision_pid_in_launchd_lineage <pid> <root> — is <pid> the root
+# itself or a bounded ppid-descendant of it? launchd's job pid is the
+# LAUNCHER; the daemon is its foreground child, so one or two hops
+# always suffice (depth 12 is paranoia against exotic trees). PPID
+# walking is safe here BY SHAPE: the launcher does not double-fork the
+# daemon (KeepAlive supervises the tree), which is exactly why the
+# Linux cgroup containment is used for systemd instead — see the
+# supervision_dualfight_check header.
+_supervision_pid_in_launchd_lineage() {
+    local cur="${1:-}" root="${2:-}" depth=0
+    [ -n "$cur" ] && [ -n "$root" ] || return 1
+    while [ -n "$cur" ] && [ "$depth" -lt 12 ]; do
+        [ "$cur" = "$root" ] && return 0
+        cur="$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d '[:space:]')"
+        case "$cur" in
+            ''|0|1) return 1 ;;
+            *[!0-9]*) return 1 ;;
+        esac
+        depth=$(( depth + 1 ))
+    done
+    return 1
 }
 
 # _supervision_pid_cgroup_leaf <pid> — basename of the pid's cgroup LEAF,
@@ -6886,7 +7009,13 @@ supervision_map_outcome() {
 # prefix with $cg (e.g. a transient scope nested under the unit's
 # slice) may over-include. Deliberately conservative — diagnostic-
 # only — the FAULT arm only fires when reality disagrees.
-# Linux+systemd only; every other shape returns 0 (zero behavior change).
+# Linux+systemd Check A/B unchanged; Fix #2-i (ENSEMBLE-32 repair
+# lane, incident 2026-11-14 §3.1) adds the MISSING LAUNCHD ARM for
+# Darwin launchd-declared hosts (SUPERVISION_MODE=launchd): Check B
+# grammar on the launchd pid lineage (_df_launchd_check_b) — the old
+# guard returned 0 immediately on Darwin, so a launchd host ran NO
+# dual-fight detection at all (the gap the v0.30.3 dual-supervisor
+# commit lived through). Other shapes still return 0.
 # _df_systemctl <outfile> <args...> — a BOUNDED supervision systemctl probe
 # (T2.7/phase-2 D2). The dual-fight check's four `systemctl is-active` /
 # `systemctl show` calls were the last unbounded probes on the preflight
@@ -6946,7 +7075,63 @@ _df_systemctl() {
     return "$__rc"
 }
 
+# _df_launchd_check_b — the launchd Check B (Fix #2-i): every LISTEN
+# holder of $PORT must sit in the launchd job's pid lineage. Mirrors the
+# systemd Check B verdict shape (fault → halt journal event → exit 78)
+# with the launchd lineage anchor (_supervision_launchd_job_pid +
+# _supervision_pid_in_launchd_lineage). Degraded arms follow the house
+# no-missing-tool-fault rule: PORT unset / lsof absent → skip (a
+# report-only port lookup cannot fault on a missing tool — systemd Check
+# B precedent); job pid unresolvable via a TOOL failure → skip (a wedged
+# launchctl is not evidence); a registered job with NO live pid while
+# the port IS held → FAULT (the v0.30.3 dual-supervisor shape — the job
+# is armed but its tree is crash-looping while something else serves).
+# STATEMENT-FORM CONTRACT (unchanged): call directly, never in $( ).
+_df_launchd_check_b() {
+    local unit="${SUPERVISION_UNIT:-}" hpid lpid fault="" holders
+    holders="$(_supervision_port_holders)" || return 0   # rc1 no-listener / rc2 unprobeable — nothing to fight over
+    lpid="$(_supervision_launchd_job_pid "$unit")"
+    case "$?" in
+        2) return 0 ;;   # launchctl tool/budget failure — never evidence
+    esac
+    if [ -z "$lpid" ]; then
+        # Registered job, no live pid, port held → two masters (or a
+        # serving orphan). Fault, not skip.
+        fault="launchd-job-pidless-while-port-held"
+        journal_history_append halt "supervision DUAL_FIGHT ($fault): launchd job $unit is registered with NO live pid while port ${PORT:-?} is held by:${holders} — refusing PRE-TXN (two masters must never meet a flip; halt-for-human, resolve the supervision split before any pipeline mutation)" >/dev/null 2>&1 \
+            || _warn "DUAL_FIGHT halt journal append FAILED (best-effort) — proceeding to exit 78"
+        exit 78
+    fi
+    for hpid in $holders; do
+        [ -n "$hpid" ] || continue
+        if ! _supervision_pid_in_launchd_lineage "$hpid" "$lpid"; then
+            _warn "supervision DUAL_FIGHT: port $PORT holder $hpid is OUTSIDE launchd job $unit lineage (job pid $lpid) — two masters"
+            fault="port-holder-outside-launchd-lineage"
+            break
+        fi
+    done
+    if [ -n "$fault" ]; then
+        journal_history_append halt "supervision DUAL_FIGHT ($fault): launchd job $unit is armed while the port-holder sits OUTSIDE its pid lineage — refusing PRE-TXN (two masters must never meet a flip; halt-for-human, resolve the supervision split before any pipeline mutation)" >/dev/null 2>&1 \
+            || _warn "DUAL_FIGHT halt journal append FAILED (best-effort) — proceeding to exit 78"
+        exit 78
+    fi
+    return 0
+}
+
 supervision_dualfight_check() {
+    # ── Fix #2-i (ENSEMBLE-32 repair lane; incident 2026-11-14 §3.1) ──
+    # LAUNCHD ARM (was the gap: the Linux guard below returned 0
+    # immediately on Darwin, so a launchd-declared host ran NO
+    # dual-fight detection at all). Check B grammar on the launchd
+    # lineage: the port-holder must be the launchd job's process —
+    # a holder outside the job's pid lineage while the job is
+    # armed = two masters meeting a flip (the v0.30.3 shape: a nohup
+    # daemon serving while the launchd-adopted tree crash-looped).
+    if [ "${SUPERVISION_MODE:-}" = "launchd" ] \
+       && [ -n "${SUPERVISION_UNIT:-}" ] && _supervision_host_allows_launchd; then
+        _df_launchd_check_b
+        return $?
+    fi
     [ "${SUPERVISION_MODE:-}" = "unit" ] || return 0
     [ -n "${SUPERVISION_UNIT:-}" ] || return 0
     [ "$(uname -s)" = "Linux" ] || return 0
@@ -7134,12 +7319,204 @@ journal_mark_supervision() {
     journal_update "in_flight" "$new_inf"
 }
 
+# _gate_serving_attribution <what> — the Fix #2 ATTRIBUTION CONJUNCT
+# (ENSEMBLE-32 repair lane Family 2; incident
+# docs/incidents/2026-11-14-macos-launchd-handback-halt.md §3.1/§5.1).
+# Rides AFTER a green curl in every gate (gate_livez / gate_readyz /
+# gate_version — gate_soak inherits it through its per-tick
+# gate_version) and in _handback_serving_probe: the gate answer is
+# only trusted when the process HOLDING the port is THIS install's
+# supervised daemon. Live fact driving this: on ensemble-vm the daemon
+# listens 127.0.0.1:9798 while :9797 is held by `kubectl port-forward`
+# + an uptime monitor + a code-server child — a port-answer check
+# validated the WRONG process (the v0.30.3 promote "committed" on
+# /livez answers from a nohup daemon while the launchd-adopted tree
+# crash-looped on EADDRINUSE for 9h).
+#
+# TWO layers, both fail-closed:
+#   1. OWNERSHIP — every LISTEN holder of $PORT must be a member of
+#      the supervision-owned pid set (_supervision_owned_pids — the
+#      INSTALL_DIR-anchored shape ladder). Catches foreign holders
+#      (kubectl/monitor/code-server). An EMPTY owned set against a
+#      live holder is the same mismatch (nothing anchored is serving).
+#   2. SUPERVISOR LINEAGE — when the pre-stop classification resolved
+#      a supervisor (SUPERVISION_MODE=launchd on Darwin, =unit on
+#      Linux), every holder must sit in THAT supervisor's lineage
+#      (launchd job pid / systemd MainPID ∧ unit cgroup containment —
+#      the dualfight Check B grammar). Catches the v0.30.3 shape:
+#      the nohup daemon IS owned-shaped (same install) but is NOT the
+#      launchd job's process. Script/nohup mode has no supervisor to
+#      attribute to — the ownership layer alone governs there.
+#
+# Refusal vs degraded (no silent fallbacks):
+#   * holder present ∧ not owned / outside lineage / no listener
+#     behind a green answer  → REFUSE: rc 1 + loud _warn naming the
+#     pids (the caller turns the gate red — never warn-and-pass).
+#   * unprobeable (PORT unset, lsof absent, or lsof itself errored;
+#     supervisor probe TOOL failure — never evidence) → rc 0 with a
+#     ONE-TIME loud warn naming the skipped layer (dualfight/
+#     _supervision_unit_serving no-missing-tool-fault precedent).
+#
+# Sets GATE_ATTRIBUTION_DETAIL ("<reason>" on refusal, "" on pass) so
+# callers that thread a failure reason (promote 8b, restart GATE_FAIL,
+# rollback REGATE_FAIL, status verify) can carry WHY. Called as a
+# statement; reads PORT/INSTALL_DIR/SUPERVISION_* globals.
+GATE_ATTRIBUTION_DETAIL=""
+_GATE_ATTR_WARNED=""
+# _gate_attr_unprobeable <what> <why> — the ONE-TIME loud degraded note
+# (never silent, never spammy — the budgeted probe loops would repeat it
+# every iteration). NOT a pass evidence: it marks the layer as skipped.
+_gate_attr_unprobeable() {
+    [ -n "$_GATE_ATTR_WARNED" ] && return 0
+    _GATE_ATTR_WARNED=1
+    _warn "attribution [$1]: skipped (${2}) — the serving-process conjunct cannot be evaluated on this host/shape (Fix #2; gates do NOT refuse on a missing probe tool, but this is NOT a pass evidence)"
+}
+_gate_serving_attribution() {
+    local what="${1:-gate}" holders h owned nonmatch="" lpid lrc hrc
+    GATE_ATTRIBUTION_DETAIL=""
+    holders="$(_supervision_port_holders)"
+    hrc=$?
+    case "$hrc" in
+        2) GATE_ATTRIBUTION_DETAIL=""; _gate_attr_unprobeable "$what" "no lsof / PORT unset / lsof errored"; return 0 ;;
+    esac
+    if [ -z "$holders" ]; then
+        # curl JUST answered green on :$PORT — a green answer with no
+        # listener is an unattributable answer (the answerer vanished
+        # mid-probe, or the census cannot see it). Fail-closed: the
+        # incident class is exactly "trusting an unattributable answer".
+        GATE_ATTRIBUTION_DETAIL="port :${PORT} answered green but lsof finds NO listener — the answer is unattributable"
+        _warn "attribution [$what]: REFUSED — $GATE_ATTRIBUTION_DETAIL (incident 2026-11-14 §3.1: the gate must verify WHO answers)"
+        return 1
+    fi
+    # ── Layer 1: ownership ────────────────────────────────────────────
+    owned="$(_supervision_owned_pids 2>/dev/null)"
+    # _supervision_owned_pids emits a NEWLINE-joined list (one printf per
+    # pid); the membership case below matches SPACE-delimited tokens, so
+    # normalize ONCE before the loop. F1 (ENSEMBLE-32 repair lane council):
+    # on every supervised install the owned set has >=2 pids (the launcher
+    # run_loop holds the daemon as a live child, launcher.sh:3838; the
+    # launchd job argv anchors the launcher) — matching raw newlines
+    # false-refused exactly that shape (holder=daemon pid, owned=<launcher
+    # NL daemon> => REFUSED), the F1 empiric reproduced before this fix.
+    owned_spaced="$(printf '%s' "$owned" | tr '\n' ' ')"
+    for h in $holders; do
+        [ -n "$h" ] || continue
+        case " $owned_spaced " in
+            *" $h "*) ;;
+            *) nonmatch="$nonmatch $h" ;;
+        esac
+    done
+    if [ -n "$nonmatch" ]; then
+        # owned_spaced (NOT $owned) in the detail: GATE_ATTRIBUTION_DETAIL is
+        # threaded into promote's gate_fail_reason and from there into the
+        # journal event detail — a single-line quoted string by contract (the
+        # same reason the bootstrap stash flattens newlines to ';').
+        GATE_ATTRIBUTION_DETAIL="port-holder(s):${nonmatch} NOT in the supervision-owned pid set (owned:${owned_spaced:-<none>}) — the :${PORT} answerer is not this install's daemon"
+        _warn "attribution [$what]: REFUSED —$GATE_ATTRIBUTION_DETAIL (ensemble-vm §5.1: :9797 held by kubectl/monitor while the daemon serves :9798)"
+        return 1
+    fi
+    # ── Layer 2: supervisor lineage (consume the PRE-STOP classify) ──
+    case "${SUPERVISION_MODE:-}" in
+        launchd)
+            if [ -n "${SUPERVISION_UNIT:-}" ] && _supervision_host_allows_launchd; then
+                lpid="$(_supervision_launchd_job_pid "$SUPERVISION_UNIT")"
+                lrc=$?
+                case "$lrc" in
+                    2)
+                        GATE_ATTRIBUTION_DETAIL=""
+                        _gate_attr_unprobeable "$what" "launchctl probe failed (tool/budget) — launchd lineage unverifiable"
+                        return 0
+                        ;;
+                    *)
+                        if [ -z "$lpid" ]; then
+                            # The job is registered (print answered) but has NO
+                            # live process while the port serves someone — the
+                            # v0.30.3 dual-supervisor shape (launchd tree
+                            # crash-looping, a nohup daemon serving). Refuse.
+                            GATE_ATTRIBUTION_DETAIL="launchd job '$SUPERVISION_UNIT' has NO live pid while :${PORT} is served by:${holders} — the answerer is not the supervised daemon"
+                            _warn "attribution [$what]: REFUSED — $GATE_ATTRIBUTION_DETAIL (incident 2026-11-14 §3.1)"
+                            return 1
+                        fi
+                        for h in $holders; do
+                            if ! _supervision_pid_in_launchd_lineage "$h" "$lpid"; then
+                                GATE_ATTRIBUTION_DETAIL="port-holder $h is OUTSIDE launchd job '$SUPERVISION_UNIT' lineage (job pid $lpid) — a second supervisor is serving"
+                                _warn "attribution [$what]: REFUSED — $GATE_ATTRIBUTION_DETAIL"
+                                return 1
+                            fi
+                        done
+                        ;;
+                esac
+            fi
+            ;;
+        unit)
+            if [ -n "${SUPERVISION_UNIT:-}" ]; then
+                # $holders is newline-joined — pass UNQUOTED so the unit arm
+                # word-splits per holder (F1 council fix: a quoted pass made a
+                # multi-holder host probe /proc/"p1 NL p2"/cgroup and
+                # false-refuse with garbled detail).
+                _gate_attr_unit_lineage "$what" $holders || return 1
+            fi
+            ;;
+    esac
+    return 0
+}
+
+# _gate_attr_unit_lineage <what> <holders...> — the systemd lineage arm
+# (MainPID ∧ unit-cgroup containment — the supervision_dualfight_check
+# Check B grammar, mirrored): holders must BE the unit's MainPID or sit
+# inside the unit's ControlGroup. Tool failure (bounded probe rc 124 /
+# systemctl absent) = unverifiable → loud skip, never evidence; an
+# ANSWERED-but-uncontainable holder is a mismatch → refuse.
+_gate_attr_unit_lineage() {
+    local what="$1"; shift
+    local h main_pid cg pcg rc_main
+    _gate_attr_unit_lineage_out="$(mktemp -t attr.XXXXXX 2>/dev/null || printf '/tmp/attr.%s.out' "$$")"
+    _run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" show "$SUPERVISION_UNIT" -p MainPID --value > "$_gate_attr_unit_lineage_out" 2>/dev/null
+    rc_main=$?
+    main_pid="$(cat "$_gate_attr_unit_lineage_out" 2>/dev/null)"
+    if [ "$rc_main" -ne 0 ] || [ -z "$main_pid" ] || [ "$main_pid" = "0" ]; then
+        rm -f "$_gate_attr_unit_lineage_out" 2>/dev/null
+        _gate_attr_unprobeable "$what" "systemd MainPID unresolvable for '$SUPERVISION_UNIT' (tool/budget/unit state)"
+        return 0
+    fi
+    _run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" show "$SUPERVISION_UNIT" -p ControlGroup --value > "$_gate_attr_unit_lineage_out" 2>/dev/null
+    cg="$(cat "$_gate_attr_unit_lineage_out" 2>/dev/null)"
+    rm -f "$_gate_attr_unit_lineage_out" 2>/dev/null
+    if [ -z "$cg" ] || [ "$cg" = "/" ]; then
+        _gate_attr_unprobeable "$what" "unit '$SUPERVISION_UNIT' ControlGroup unobservable — containment unverifiable"
+        return 0
+    fi
+    for h in "$@"; do
+        [ -n "$h" ] || continue
+        [ "$h" = "$main_pid" ] && continue
+        pcg=""
+        if [ -r "/proc/$h/cgroup" ]; then
+            pcg="$(tail -n 1 "/proc/$h/cgroup" 2>/dev/null)"
+            pcg="${pcg##*:}"
+        fi
+        case "$pcg" in
+            *"$cg"*) ;;
+            *)
+                GATE_ATTRIBUTION_DETAIL="port-holder $h is OUTSIDE unit '$SUPERVISION_UNIT' lineage (MainPID=$main_pid cgroup='${pcg:-<unreadable>}') — a second supervisor is serving"
+                _warn "attribution [$what]: REFUSED — $GATE_ATTRIBUTION_DETAIL"
+                return 1
+                ;;
+        esac
+    done
+    return 0
+}
+
 # gate_livez / gate_readyz — budgeted probes (D2). Print body; nonzero on fail.
-gate_livez()  { _probe "/livez"  "$LIVEZ_BUDGET_S"  "$PORT"; }
-gate_readyz() { _probe "/readyz" "$READYZ_BUDGET_S" "$PORT"; }
+# Fix #2: a green answer is only trusted when the attribution conjunct
+# holds (the SUPERVISED daemon answers — see _gate_serving_attribution).
+gate_livez()  { _probe "/livez"  "$LIVEZ_BUDGET_S"  "$PORT" && _gate_serving_attribution "/livez"; }
+gate_readyz() { _probe "/readyz" "$READYZ_BUDGET_S" "$PORT" && _gate_serving_attribution "/readyz"; }
 
 # gate_version <expected> — one-shot /livez version check (D2/ADR-027: the
 # RUNNING daemon must self-report the manifest's binary_version).
+# Fix #2: version identity is only trusted from the ATTRIBUTED daemon —
+# the conjunct rides the green answer (gate_soak's per-tick version
+# check inherits the attribution from this site).
 gate_version() {
     local expected="$1" body running
     body="$(_probe_once "/livez" "$PORT")"
@@ -7149,6 +7526,7 @@ gate_version() {
         _warn "version verify MISMATCH: running=$running expected=$expected (manifest binary_version)"
         return 1
     fi
+    _gate_serving_attribution "version verify" || return 1
     _log "version verify OK: $running"
     return 0
 }

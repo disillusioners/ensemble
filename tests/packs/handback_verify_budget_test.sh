@@ -134,6 +134,16 @@ make_lsof_stub() {
     mkdir -p "$dir"
     cat > "$dir/lsof" <<STUB
 #!/bin/bash
+# ENSEMBLE-32 Family-2 (Fix #2) stub shape: rc 0 models a BOUND port, and a
+# real lsof answers a bound port by PRINTING the listener pid. The
+# serving-process attribution conjunct (_supervision_port_holders →
+# _gate_serving_attribution) reads an rc-0-EMPTY answer as "no listener"
+# and refuses the green probe (fail-closed, incident 2026-11-14 §3.1), so
+# the stub must carry the pid — 424242, the same fixture pid the owned-set
+# seam in run_hb arms (the fixture IS the owned daemon by construction;
+# the negative-side attribution pins live in
+# tests/test_supervision_stop_handback.sh §M).
+if [ "$rc" = "0" ]; then printf '%s\n' 424242; fi
 exit $rc
 STUB
     chmod +x "$dir/lsof"
@@ -253,6 +263,13 @@ run_hb() {
         export LIVEZ_BUDGET_S=2
         unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
         . "'"$libsh"'" >/dev/null 2>&1
+        # ENSEMBLE-32 Family-2 (Fix #2) owned-set seam: the lsof stub reports
+        # the fixture pid 424242 (see make_lsof_stub) and the attribution
+        # conjunct requires that holder to be in the OWNED pid set. This pack
+        # pins hand-back BUDGET semantics, not pid discovery — the fixture is
+        # the owned daemon by construction (negative-side pins:
+        # tests/test_supervision_stop_handback.sh §M).
+        _supervision_owned_pids() { printf "%s\n" 424242; }
         '"$setup"'
         restart_via_launcher
         echo "rvl-rc=$?"

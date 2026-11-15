@@ -180,9 +180,18 @@ def main() -> None:
         # Should be SIGTERM / 15.
         assert sig_name == "SIGTERM", sig_name
         assert sig_num == 15, sig_num
-        # exit_code from waitstatus_to_exitcode should be 128+15=143.
+        # exit_code from waitstatus_to_exitcode: python's contract returns
+        # the NEGATED signal number (-15) for a signal death — 143 is the
+        # SHELL convention ($? = 128+15) and is NEVER produced by this API.
+        # The old `== 143` assertion was wrong at the API-semantics level and
+        # made the leg flaky host-side: it passed only where the sandbox
+        # quirk skipped the WIFSIGNALED branch entirely, and exploded with
+        # "AssertionError: -15" on any host that actually delivers SIGTERM
+        # (ENSEMBLE-32 Family-2 A/B found it red-at-HEAD / green-at-base with
+        # a byte-identical file — the definition of a latent test bug, not a
+        # product regression).
         exit_code2 = os.waitstatus_to_exitcode(status2)
-        assert exit_code2 == 143, exit_code2
+        assert exit_code2 == -15, exit_code2
         print(f"PASS: 4b SIGTERM → signal_name={sig_name} signal_num={sig_num} exit_code={exit_code2}")
     else:
         # Some platforms / sandbox configs intercept SIGTERM before delivery

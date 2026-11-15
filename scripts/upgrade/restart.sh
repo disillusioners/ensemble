@@ -249,7 +249,9 @@ lock_heartbeat
 # Amendment #1): halt + leave the txn open for boot-sweep convergence,
 # mirroring the stop-failure arm above (never a false success).
 if ! restart_via_launcher; then
-    journal_history_append halt "restart run_id=$RUN_ID: unit hand-back FAILED — daemon down; txn left open for boot-sweep convergence (no nohup fallback — Amendment #1)"
+    # Fix #4 (ENSEMBLE-32 repair lane; incident §5.2): the halt detail
+    # carries the CAPTURED hand-back error (HANDBACK_LAST_ERROR).
+    journal_history_append halt "restart run_id=$RUN_ID: unit hand-back FAILED — daemon down; txn left open for boot-sweep convergence (no nohup fallback — Amendment #1; hand-back error: ${HANDBACK_LAST_ERROR:-none captured})"
     _warn "unit hand-back FAILED — txn left open (boot sweep owns convergence)"
     exit 1
 fi
