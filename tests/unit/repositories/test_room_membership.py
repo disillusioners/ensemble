@@ -26,6 +26,7 @@ Coverage (commission P2 scope items 2-4 + plan-overview §6 P2 row):
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from typing import Iterator
 
@@ -527,13 +528,10 @@ class TestLeave:
                 select(Event).where(Event.kind == EventKind.ROOM_LEAVE.value)
             ).all()
             assert len(rows) == 1
-            import json as _json
-
-            data = _json.loads(rows[0].data)
+            data = json.loads(rows[0].data)
             assert data["room_id"] == room_id
             assert data["instance_id"] == "leaver-2"
             assert data["member_name"] == "mailer"
-
 
     def test_join_emits_room_join_context_via_registry_names(
         self, engine, repo, tree, room_id
@@ -577,9 +575,7 @@ class TestRoomJoinEventEmission:
                 select(Event).where(Event.kind == EventKind.ROOM_JOIN.value)
             ).all()
             assert len(rows) == 1
-            import json as _json
-
-            data = _json.loads(rows[0].data)
+            data = json.loads(rows[0].data)
             assert data["room_id"] == room_id
             assert data["instance_id"] == "joiner-1"
             assert data["member_name"] == "tracker"

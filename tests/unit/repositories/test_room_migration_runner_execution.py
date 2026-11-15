@@ -40,7 +40,6 @@ Covers, on the EXECUTED schema:
 from __future__ import annotations
 
 import shutil
-from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, event, text
@@ -265,20 +264,8 @@ class TestExecutedSchemaShape:
         """The NO ACTION refusal is REAL, not textual: deleting the
         parent room with children present is refused by the database
         (PRAGMA foreign_keys=ON); child-first deletion succeeds."""
-        with executed_engine.connect() as conn:
-            conn.execute(text(
-                "INSERT INTO chatrooms (room_id, name, tree_root_id, "
-                "owner_instance_id, state, message_count, created_at, "
-                "updated_at) VALUES ('r1', 'alpha', 'root-1', 'own-1', "
-                "'active', 0, 't0', 't0')"
-            ))
-            conn.execute(text(
-                "INSERT INTO chatroom_members (room_id, instance_id, "
-                "member_name, role, joined_at, last_read_seq, "
-                "last_delivered_seq, state) VALUES ('r1', 'c1', 'w', "
-                "'child', 't0', 0, 0, 'active')"
-            ))
-            conn.commit()
+        _insert_room(executed_engine, "r1")
+        _insert_member(executed_engine, "r1", "c1", "w")
 
         # Parent-first delete is REFUSED (the NO ACTION FK).
         with pytest.raises(IntegrityError):
@@ -373,28 +360,21 @@ class TestExecutedSchemaShape:
             {"chatrooms", "chatroom_members", "room_messages"} & set(remaining)
         )
 
-    def test_proposal_dedup_unique_executes(self, engine):
+    def test_proposal_dedup_unique_executes(self, executed_engine):
         """The P3 proposal-dedup migration, executed: one proposal row
         per (source_message_id, trigger, member); ordinary all-NULL
         rows never collide (NULLs distinct on SQLite)."""
-        apply_migration_file(engine, CHATROOM_MIGRATION_FILENAME)
-        apply_migration_file(engine, PROPOSAL_DEDUP_MIGRATION_FILENAME)
+        _insert_room(executed_engine, "r1")
 
-        with engine.connect() as conn:
+        with executed_engine.connect() as conn:
             # The dedup index exists with the pinned columns.
-            messages = sqlite_indexes(engine, "room_messages")
+            messages = sqlite_indexes(executed_engine, "room_messages")
             dedup = [
                 v for v in messages.values()
                 if v["columns"] == ["source_message_id", "trigger", "member"]
             ]
             assert dedup and dedup[0]["unique"], messages
 
-            conn.execute(text(
-                "INSERT INTO chatrooms (room_id, name, tree_root_id, "
-                "owner_instance_id, state, message_count, created_at, "
-                "updated_at) VALUES ('r1', 'alpha', 'root-1', 'own-1', "
-                "'active', 0, 't0', 't0')"
-            ))
             base = (
                 "INSERT INTO room_messages (room_id, seq, "
                 "author_instance_id, author_name, text, tagged_members, "

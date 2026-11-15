@@ -50,7 +50,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
@@ -65,6 +64,7 @@ from daemon.repositories.room.models import (  # noqa: F401 — register room
 )
 from tests.helpers.migration_execution import (
     CHATROOM_MIGRATION_FILENAME,
+    PROPOSAL_DEDUP_MIGRATION_FILENAME,
     apply_migration_file,
     sqlite_columns,
     sqlite_foreign_keys,
@@ -93,10 +93,6 @@ def _executed_engine(tmp_path) -> Engine:
         cursor.close()
 
     apply_migration_file(eng, CHATROOM_MIGRATION_FILENAME)
-    from tests.helpers.migration_execution import (
-        PROPOSAL_DEDUP_MIGRATION_FILENAME,
-    )
-
     apply_migration_file(eng, PROPOSAL_DEDUP_MIGRATION_FILENAME)
     return eng
 

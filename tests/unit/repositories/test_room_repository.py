@@ -19,11 +19,20 @@ Coverage (commission P1 item 6):
     content-free ``room_purged`` event, typed not-found after);
   * the boot-regen pinned pair (members incl. OWNER; active+closed;
     purged structurally excluded).
+
+P3 carry-overs covered here:
+  * O-2 window/boundary pins (``list_messages`` after_seq/limit —
+    seeded N > limit, window contents, boundary exclusion);
+  * the literal cross-room deny + the tree-scoped-ancestor ALLOW;
+  * the purge FK-fingerprint classification (retry-noise guard);
+  * the corrupt-JSON WARNING pins (O-6 — row excluded, warning
+    carries the room identity).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from typing import Iterator
 
@@ -968,10 +977,6 @@ def test_corrupt_tagged_json_warns_and_excludes_row(
     derive_undelivered_tagged neither raise nor SILENTLY vanish the
     row: the corrupt row is excluded from the pending set AND a
     WARNING carrying the room identity is emitted (A-P3-9)."""
-    import logging
-
-    from sqlalchemy import text
-
     _append(repo, room_id, tree, "tagged post", tagged=["worker-a"])
     with engine.connect() as conn:
         conn.execute(

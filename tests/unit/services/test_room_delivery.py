@@ -2,8 +2,13 @@
 
 Real file-backed SQLite (F9-parity harness), real RoomChatService +
 RoomDeliveryService wired over a MagicMock manager whose lifecycle
-seams (get_instance_info/get_queue_stats/set_injection/enqueue_message/
+seams (get_queue_stats/set_injection/enqueue_message/
 has_live_graph_task) are controlled per test.
+
+Coverage map: tagged lane-map outcomes (injected / enqueued /
+parked_paused / proposal / deferred_cursor) × addressing outcomes
+(tag_dominates / parent_notice / digest_only / deferred_cursor) × boot
+pins (mint-only at boot, counts dict, cursor untouched on mint fail).
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ from typing import Iterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import sqlmodel
 from sqlalchemy.engine import Engine
 from sqlmodel import Session
 
@@ -21,8 +27,8 @@ import daemon.repositories.instance.models  # noqa: F401
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.room import RoomChatService, RoomRepository
 from daemon.repositories.room.models import RoomMessage
-from daemon.services.room_delivery import RoomDeliveryService, LANE_B_CAS_ALLOWED
-from tests.helpers.room_harness import make_room, make_room_engine
+from daemon.services.room_delivery import RoomDeliveryService
+from tests.helpers.room_harness import join_member, make_room, make_room_engine
 
 
 def _seed_instance(eng: Engine, iid: str, parent: str | None = None, status: str = "idle") -> None:
@@ -48,29 +54,14 @@ def stack(engine):
     room_id = make_room(repo, tree_root=caller, owner=caller, owner_member_name="lead")
     # add a child member
     _seed_instance(engine, "child-1", caller, "idle")
-    with Session(engine) as s:
-        from daemon.repositories.room.models import ChatRoomMember
-        s.add(ChatRoomMember(room_id=room_id, instance_id="child-1", member_name="worker",
-                             agent_id="ari", role="child",
-                             joined_at="2026-11-15T08:00:00+00:00",
-                             last_read_seq=0, last_delivered_seq=0, state="active"))
-        s.commit()
+    join_member(engine, room_id, "child-1", "worker")
     return engine, repo, svc, room_id, caller
 
 
-def _make_manager(engine, svc, *, statuses=None, queue_stats=None,
+def _make_manager(engine, svc, *, queue_stats=None,
                   live_graph=True, inject_ok=True, enqueue_ok=True):
-    statuses = statuses or {}
     queue_stats = queue_stats or {}
     manager = MagicMock()
-    manager._engine = engine
-    manager._room_chat_service = svc
-
-    def get_status(iid):
-        return statuses.get(iid, "idle")
-    manager.get_instance_info = MagicMock(side_effect=lambda iid: {"status": get_status(iid)})
-    # room delivery uses room service, not manager, for status reads; but
-    # manager.has_live_graph_task is used.
     manager.has_live_graph_task = MagicMock(return_value=live_graph)
 
     async def fake_enqueue(iid, msg, **kw):
@@ -95,7 +86,9 @@ def test_lane_map_totality_pin():
     )
     from daemon.repositories.instance.models import InstanceStatus
     enum_values = {s.value for s in InstanceStatus}
-    assert TERMINAL_INSTANCE_STATUSES_FOR_ROOMS | NON_TERMINAL_INSTANCE_STATUSES_FOR_ROOMS == enum_values
+    assert TERMINAL_INSTANCE_STATUSES_FOR_ROOMS | NON_TERMINAL_INSTANCE_STATUSES_FOR_ROOMS == (
+        enum_values
+    )
     assert TERMINAL_INSTANCE_STATUSES_FOR_ROOMS.isdisjoint(NON_TERMINAL_INSTANCE_STATUSES_FOR_ROOMS)
 
 
@@ -107,10 +100,8 @@ def test_addressed_to_terminal_does_not_revive_member(stack):
         inst.status = "completed"
         s.commit()
 
-    manager = _make_manager(engine, svc, statuses={"child-1": "completed", caller: "running"},
-                            live_graph=True)
+    manager = _make_manager(engine, svc, live_graph=True)
     delivery = RoomDeliveryService(manager, svc)
-    manager._room_delivery_service = delivery
 
     # post a tagged message from owner to worker
     async def run():
@@ -134,8 +125,7 @@ def test_addressed_to_terminal_does_not_revive_member(stack):
 
 def test_addressed_to_running_no_injection(stack):
     engine, repo, svc, room_id, caller = stack
-    manager = _make_manager(engine, svc, statuses={"child-1": "running", caller: "running"},
-                            live_graph=True)
+    manager = _make_manager(engine, svc, live_graph=True)
     delivery = RoomDeliveryService(manager, svc)
     async def run():
         post = await svc.append_message(
@@ -161,8 +151,7 @@ def test_co_presence_tag_dominates(stack):
         inst = s.get(Instance, "child-1")
         inst.status = "completed"
         s.commit()
-    manager = _make_manager(engine, svc, statuses={"child-1": "completed", caller: "running"},
-                            live_graph=True)
+    manager = _make_manager(engine, svc, live_graph=True)
     delivery = RoomDeliveryService(manager, svc)
     async def run():
         post = await svc.append_message(
@@ -181,8 +170,7 @@ def test_co_presence_tag_dominates(stack):
 def test_cross_room_addressed_fails_closed(stack):
     engine, repo, svc, room_id, caller = stack
     # a name not in this room's roster
-    manager = _make_manager(engine, svc, statuses={"child-1": "running", caller: "running"},
-                            live_graph=True)
+    manager = _make_manager(engine, svc, live_graph=True)
     delivery = RoomDeliveryService(manager, svc)
     async def run():
         post = await svc.append_message(
@@ -210,8 +198,7 @@ def test_unresolvable_left_post_succeeds(stack):
         return post
     post = asyncio.run(run())
     # post succeeded; routing should warn (worker now LEFT → not in active roster)
-    manager = _make_manager(engine, svc, statuses={"child-1": "completed", caller: "running"},
-                            live_graph=True)
+    manager = _make_manager(engine, svc, live_graph=True)
     delivery = RoomDeliveryService(manager, svc)
     async def run2():
         return await delivery.route_post(
@@ -228,8 +215,7 @@ def test_dedup_no_duplicate_proposal(stack):
         inst = s.get(Instance, "child-1")
         inst.status = "completed"
         s.commit()
-    manager = _make_manager(engine, svc, statuses={"child-1": "completed", caller: "running"},
-                            live_graph=True)
+    manager = _make_manager(engine, svc, live_graph=True)
     delivery = RoomDeliveryService(manager, svc)
     async def run():
         post = await svc.append_message(
@@ -244,9 +230,7 @@ def test_dedup_no_duplicate_proposal(stack):
         return r1, r2, post
     r1, r2, post = asyncio.run(run())
     # count proposal rows
-    with Session(engine) as s:
-        proposals = s.exec(__import__("sqlmodel").select(RoomMessage).where(
-            RoomMessage.room_id == room_id, RoomMessage.kind == "task_proposal")).all()
+    proposals = _proposal_rows(engine, room_id)
     assert len(proposals) == 1, f"expected 1 proposal, got {len(proposals)}"
 
 
@@ -259,8 +243,7 @@ def test_parent_terminal_one_hop_no_recursion(stack):
         owner = s.get(Instance, caller)
         owner.status = "completed"
         s.commit()
-    manager = _make_manager(engine, svc, statuses={"child-1": "completed", caller: "completed"},
-                            live_graph=True)
+    manager = _make_manager(engine, svc, live_graph=True)
     delivery = RoomDeliveryService(manager, svc)
     async def run():
         post = await svc.append_message(
@@ -275,7 +258,9 @@ def test_parent_terminal_one_hop_no_recursion(stack):
         owner = s.get(Instance, caller)
         assert owner.status == "completed", "parent must not be auto-revived (one-hop)"
     # no enqueue to parent (would revive) — set_injection not called for parent
-    parent_injects = [c for c in manager.set_injection.call_args_list if c.args and c.args[0] == caller]
+    parent_injects = [
+        c for c in manager.set_injection.call_args_list if c.args and c.args[0] == caller
+    ]
     # parent injection may happen only if running; here parent terminal → no injection
     assert parent_injects == []
 
@@ -286,8 +271,7 @@ def test_lane_map_branch_for_paused_member(stack):
         inst = s.get(Instance, "child-1")
         inst.status = "paused"
         s.commit()
-    manager = _make_manager(engine, svc, statuses={"child-1": "paused", caller: "running"},
-                            live_graph=True)
+    manager = _make_manager(engine, svc, live_graph=True)
     delivery = RoomDeliveryService(manager, svc)
     async def run():
         post = await svc.append_message(
@@ -307,8 +291,7 @@ def test_addressed_terminal_parent_notice_shape(stack):
         inst = s.get(Instance, "child-1")
         inst.status = "completed"
         s.commit()
-    manager = _make_manager(engine, svc, statuses={"child-1": "completed", caller: "running"},
-                            live_graph=True)
+    manager = _make_manager(engine, svc, live_graph=True)
     delivery = RoomDeliveryService(manager, svc)
     async def run():
         post = await svc.append_message(
@@ -321,9 +304,7 @@ def test_addressed_terminal_parent_notice_shape(stack):
     addr_outcomes = [o["outcome"] for o in res["addressed_outcomes"]]
     assert "parent_notice" in addr_outcomes
     # a proposal row minted with trigger addressed_terminal
-    with Session(engine) as s:
-        proposals = s.exec(__import__("sqlmodel").select(RoomMessage).where(
-            RoomMessage.room_id == room_id, RoomMessage.kind == "task_proposal")).all()
+    proposals = _proposal_rows(engine, room_id)
     assert any(p.trigger == "addressed_terminal" for p in proposals)
 
 
@@ -595,7 +576,7 @@ def _raise_append(svc):
 
 def _proposal_rows(engine, room_id):
     with Session(engine) as s:
-        return s.exec(__import__("sqlmodel").select(RoomMessage).where(
+        return s.exec(sqlmodel.select(RoomMessage).where(
             RoomMessage.room_id == room_id, RoomMessage.kind == "task_proposal")).all()
 
 

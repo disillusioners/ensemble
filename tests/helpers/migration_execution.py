@@ -52,7 +52,7 @@ def parse_migration(filename: str) -> MigrationFile:
 
 
 def apply_migration_file(engine: Engine, filename: str) -> MigrationRunner:
-    """Apply ONE real migration file through ``MigrationRunner.
+    """Apply ONE real migration file through ``MigrationRunner``.
 
     The runner creates the ``schema_migrations`` ledger on first use;
     the migration's UP SQL is executed for real (statement splitter,
