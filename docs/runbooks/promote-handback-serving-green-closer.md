@@ -263,3 +263,85 @@ absent-ceiling (≥3 qualifying AMBIGUOUS observations ∧ owner-dead ∧
 `intent_flip` ∧ never-green-observed). The commission's literal *"NEVER
 rollback"* wording is **not** the ratified rule — the bounded ceiling is a
 leader-ratified bounded ceiling, and this runbook and the register agree.
+---
+
+## 10. Invoke-path policy — release-staged PRIMARY, pinned-worktree RECOVERY (ENSEMBLE-32 Family-3)
+
+This section is the close of the invoke-path story §9 began with the
+scripts pin (§9.2). It states the operator-facing hierarchy of how the
+promote executor is invoked, post-Family-3.
+
+### 10.1 The primary path — release-staged scripts (complete, fail-closed)
+
+As of Family-3 (commit `fix(upgrade): ENSEMBLE-32 repair lane — payload
+plugin-staleness slice, darwin executor self-detach, pinned-scripts policy`),
+the staged release payload is the **complete, self-contained invoke path**:
+
+* The payload carries the **whole executor family** — `scripts/upgrade/*`
+  (promote.sh, lib.sh, stage.sh, restart.sh, rollback.sh, adopt-unit.sh,
+  ledger_check.py, journal_read.py, journal_splice.py, _build_frontend.sh,
+  executor_family.sh, status.sh, journal_splice.py) + `scripts/stop-ensemble.sh`
+  + `scripts/install-dir-guard.sh` + the **plugin-staleness predicate slice**
+  (`daemon/plugin_subsystem/promote_staleness.py`).
+* The plugin-staleness gate (`lib.sh promote_plugin_staleness_check`) resolves
+  the predicate module as `<lib.sh-dir>/../../daemon/plugin_subsystem/
+  promote_staleness.py` — i.e. two levels up from `scripts/upgrade` — which
+  is the payload's own top-level `daemon/` slice. A release-staged promote
+  therefore runs its **own** staleness gate from its own payload, with no
+  dependency on a repo checkout.
+* `stage.sh` runs a **fail-closed staging assertion** before signing the
+  manifest: it resolves the staged module, resolves an interpreter with
+  PyYAML, and EXECUTES the staged module against a scratch plugin dir,
+  expecting a fresh verdict. A payload whose promote would fail its own
+  staleness predicate (module absent, module broken, no PyYAML host) is
+  **refused at stage time (exit 78)** — never a warning. This closes the
+  defect-3 class that killed the v0.30.5 and v0.30.9 release-staged promotes
+  at 11:53:15 and 00:49:01 (incident `docs/incidents/
+  2026-11-14-macos-launchd-handback-halt.md` §3.3 + §7).
+
+**Rule:** a release-staged promote is the **default**. Operators stage with
+`stage.sh`, point `current` at the staged release, and promote from inside
+it. No pinned checkout is required for the normal ceremony.
+
+### 10.2 The recovery / escape hatch — `ENSEMBLE_UPGRADE_SCRIPTS_DIR` pinned worktree
+
+The pinned-worktree pattern (`ensemble-src-wt-scripts-pin`, must contain
+`PIPELINE_SCRIPTS_FLOOR_COMMIT`, `upgrade_tools.py` `_resolve_scripts_dir`
+~:2029–2061, runbook §9.2) remains the **documented recovery/escape hatch**,
+not the default. It is used when:
+
+* the release-staged scripts are damaged or absent (a partial/old install
+  predating the D3 packaging lane);
+* a sandbox drill needs a specific scripts commit ahead of the staged one;
+* the operator is explicitly pinning a scripts tree for a one-off repair
+  (the `ENSEMBLE_UPGRADE_SCRIPTS_DIR` knob in `_resolve_scripts_dir`).
+
+When the pin is used, its HEAD **must contain `PIPELINE_SCRIPTS_FLOOR_COMMIT`**
+(the daemon-side arm-time floor, `upgrade_tools.py` `PIPELINE_SCRIPTS_FLOOR_COMMIT`
+= `68c6ee0558a93a7d519862f2cdca4b0c8c1e320c` at the time of writing). An
+explicit pin that predates the floor is refused **pre-nonce** by the
+arm-time provenance guard (phase-6 Check 4) — the guard is working, not a
+regression. The two channels travel together (§9.1): stamp
+(`scripts/upgrade/lib.sh` `PIPELINE_SCRIPTS_REV`) == floor
+(`daemon/tools/upgrade_tools.py` `PIPELINE_SCRIPTS_FLOOR_COMMIT`).
+
+### 10.3 Why the hierarchy matters (the regression this closes)
+
+Before Family-3 the *only* working invoke path was the pinned worktree: the
+release-staged scripts lacked the plugin-staleness predicate module and refused
+FAIL-CLOSED at the gate (incident §3.3, 11:53:15; §7, 00:49:01). Operators
+were forced to bypass the release-staged scripts and run from a dev worktree
+— which is exactly the "executor scripts must ship with the deployment"
+(Nov-11 lesson) promise being untrue. Family-3 makes the release-staged
+payload complete AND fail-closes at stage time when it is not, so a
+release-staged promote can never reach its own gate without the slice.
+
+### 10.4 Darwin caveat — the executor detaches, the daemon does not
+
+Amendment #1 (no nohup fallback for the DAEMON) is unchanged. On darwin, a
+promote invoked from inside the daemon's process tree (the agent-bash lane)
+self-detaches via a transient one-shot LaunchAgent (`lib.sh
+_executor_detach_self`, `promote.sh` detach block) so the executor survives
+the launchd bootout of the daemon job. The daemon itself stays launchd-
+supervised. See the incident's §7b (the proven pattern) and
+`docs/incidents/2026-09-28-promote-cgroup-teardown.md` (the VM mirror).

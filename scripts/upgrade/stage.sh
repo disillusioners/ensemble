@@ -33,6 +33,20 @@
 #                                        (rc=127, no stop script) was
 #                                        possible only because NO packaging
 #                                        lane shipped these trees.]
+#   releases/<ver>/daemon/plugin_subsystem/
+#                                       [Fix #3, ENSEMBLE-32 — the
+#                                        plugin-staleness predicate SLICE
+#                                        (promote_staleness.py), so the
+#                                        promote-time gate's
+#                                        <lib.sh-dir>/../../daemon/…
+#                                        resolution holds INSIDE a
+#                                        release-staged payload too; the
+#                                        v0.30.5/v0.30.9 release-staged
+#                                        promotes refused FAIL-CLOSED
+#                                        without it (incident §3.3/§7
+#                                        defect #3). Stage REFUSES (exit 78)
+#                                        when the staged predicate fails
+#                                        its entry check.]
 #   releases/<ver>/manifest.json        (ADR-004 M5 fields + D-FA4.4 checksums
 #                                        + scripts_tree_sha256 /
 #                                        scripts_manifest — the shipped
@@ -543,6 +557,31 @@ PLUGINS_TREE="$(_tree_hash_of_lines "$PLUGINS_LINES")"
 # so it does not need the unbounded-walk budget of the plugins tree.
 SCRIPTS_LINES="$(executor_family_manifest_lines "$STAGE_TMP/scripts")" || { rm -rf "$STAGE_TMP"; exit 1; }
 SCRIPTS_TREE="$(executor_family_tree_hash "$SCRIPTS_LINES")"
+# Fix #3 (ENSEMBLE-32): the family's daemon/ SLICE gets the same integrity
+# contract as the scripts/ tree. The slice members live OUTSIDE scripts/ (the
+# whole-tree walker above cannot see them), so the explicit per-path walker
+# drives them: the payload's plugin-staleness predicate module
+# (daemon/plugin_subsystem/promote_staleness.py) is what makes a
+# RELEASE-STAGED promote able to run its own staleness gate (incident
+# 2026-11-14 §3.3/§7 defect #3 — the v0.30.5/v0.30.9 release-staged promotes
+# refused FAIL-CLOSED without it). The slice is small and fixed-size (a
+# filtered projection of the canonical family list), so the unbounded-walk
+# budget concern does not apply — same rationale as the executor family note
+# above. rc discipline: manifest_lines_for fails CLOSED per path; its rc is
+# checked per iteration (a pipeline would swallow the subshell exit — the
+# silent-short-slice class).
+_daemon_slice_frag="$STAGE_TMP/.map_frag.daemon_slice"
+: > "$_daemon_slice_frag"
+while IFS= read -r _slice_rel; do
+    [ -n "$_slice_rel" ] || continue
+    if ! executor_family_manifest_lines_for "$STAGE_TMP" "$_slice_rel" >> "$_daemon_slice_frag"; then
+        rm -rf "$STAGE_TMP"
+        exit 1
+    fi
+done < <(executor_family_daemon_slice_paths)
+DAEMON_SLICE_LINES="$(sort -k2 "$_daemon_slice_frag")"
+rm -f "$_daemon_slice_frag"
+DAEMON_SLICE_TREE="$(executor_family_tree_hash "$DAEMON_SLICE_LINES")"
 # guidelines/ tree — same one-walk-feeds-both shape as the other trees
 # (the walk feeds BOTH the aggregate hash and the per-file map below).
 # The tree is small and fixed-shape (a handful of .md files), so the
@@ -646,6 +685,22 @@ $SCRIPTS_LINES
 EOF
 scripts_map="$(_stage_join_map "$_scripts_frag")" || { rm -rf "$STAGE_TMP"; exit 1; }
 rm -f "$_scripts_frag"
+# daemon/ slice per-file map — same shape as the other trees (flat
+# {path:sha256,…}), but the keys are PAYLOAD-relative
+# ("daemon/plugin_subsystem/promote_staleness.py") because the slice is
+# addressed from the payload root, not from a tree subdir. Same linear
+# streaming construct as the blocks above.
+_daemon_slice_map_frag="$STAGE_TMP/.map_frag.daemon_slice_map"
+: > "$_daemon_slice_map_frag"
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    sha="${line%%  *}"; rel="${line#*  }"
+    printf '"%s":"%s"\n' "$(_json_escape "$rel")" "$sha" >> "$_daemon_slice_map_frag"
+done <<EOF
+$DAEMON_SLICE_LINES
+EOF
+daemon_slice_map="$(_stage_join_map "$_daemon_slice_map_frag")" || { rm -rf "$STAGE_TMP"; exit 1; }
+rm -f "$_daemon_slice_map_frag"
 
 # staged_at: REFRESHED on every stage (M6, commission v0.16.6 component 2).
 # Pre-rider behavior preserved the original timestamp across idempotent
@@ -761,11 +816,13 @@ cat > "$STAGE_TMP/manifest.json" <<EOF
   "plugins_tree_sha256": "$PLUGINS_TREE",
   "scripts_tree_sha256": "$SCRIPTS_TREE",
   "guidelines_tree_sha256": "$GUIDELINES_TREE",
+  "daemon_slice_tree_sha256": "$DAEMON_SLICE_TREE",
   "agents_manifest": {$agents_map},
   "frontend_manifest": {$frontend_map},
   "plugins_manifest": {$plugins_map},
   "guidelines_manifest": {$guidelines_map},
-  "scripts_manifest": {$scripts_map}
+  "scripts_manifest": {$scripts_map},
+  "daemon_slice_manifest": {$daemon_slice_map}
 }
 EOF
 
@@ -827,6 +884,44 @@ if [ "$got_scripts_tree" != "$SCRIPTS_TREE" ]; then
     rm -rf "$STAGE_TMP"
     exit 1
 fi
+
+# Fix #3 (ENSEMBLE-32): local fail-closed re-hash for the daemon/ slice —
+# the same shape as the plugins/guidelines/scripts legs (the aggregate is
+# the tree's identity; a mismatch means the copy glitched and must abort
+# BEFORE the rename-aside swap). lib.sh's integrity_verify loop covers
+# agents+frontend only, so without this leg a slice copy glitch would ship
+# silently — the manifest stamp would name a tree nobody verifies (the same
+# open-escalation-item rationale as the plugins/ leg above).
+got_daemon_slice_lines="$(executor_family_daemon_slice_paths | while IFS= read -r _slice_rel; do
+    [ -n "$_slice_rel" ] || continue
+    executor_family_manifest_lines_for "$STAGE_TMP" "$_slice_rel" || exit 1
+done | sort -k2)"
+got_daemon_slice_tree="$(executor_family_tree_hash "$got_daemon_slice_lines")"
+if [ "$got_daemon_slice_tree" != "$DAEMON_SLICE_TREE" ]; then
+    _warn "post-stage daemon-slice tree hash MISMATCH (want ${DAEMON_SLICE_TREE:0:12}… got ${got_daemon_slice_tree:0:12}…) — refusing to swap in a payload whose plugin-staleness slice cannot be re-hashed to the manifest stamp (likely a copy glitch)"
+    diff <(printf '%s\n' "$DAEMON_SLICE_LINES") <(printf '%s\n' "$got_daemon_slice_lines") 2>/dev/null | head -20 >&2
+    rm -rf "$STAGE_TMP"
+    exit 1
+fi
+
+# ── Fix #3 (ENSEMBLE-32): the FAIL-CLOSED STAGING ASSERTION ─────────────────
+# Before signing the manifest, prove the staged payload's OWN promote could
+# run its plugin-staleness predicate: resolve the module at the exact
+# payload-relative path the promote-time gate walks, resolve an interpreter
+# with PyYAML (the gate's ladder), and EXECUTE the staged module against a
+# scratch plugin dir expecting a fresh verdict. Any failure refuses the
+# stage (exit 78) — NEVER a warning: the v0.30.5/v0.30.9 release-staged
+# promotes both halted at the gate (incident 2026-11-14 §3.3 + §7
+# 00:49:01 recurrence, defect #3) because the payload lacked the slice, and
+# a warn-only check here would let the next incomplete payload through.
+lock_heartbeat   # the entry check forks the predicate interpreter (long step)
+if ! _staleness_entry_pass="$(executor_family_staleness_entry_check "$STAGE_TMP")"; then
+    _warn "REFUSING TO STAGE: ${_staleness_entry_pass}"
+    _warn "  a payload whose promote would fail its own plugin-staleness predicate must never ship (fail-closed staging assertion; incident docs/incidents/2026-11-14-macos-launchd-handback-halt.md §3.3/§7 defect #3)"
+    rm -rf "$STAGE_TMP"
+    exit 78
+fi
+_log "staging assertion: ${_staleness_entry_pass}"
 
 # swap in — RENAME-ASIDE, not rm-then-mv (Batch C, council 🟢 suggestion
 # taken): the old `rm -rf "$REL"; mv …` left a window with NEITHER the old

@@ -317,6 +317,13 @@ PYEOF
     cp "$UPGRADE_DIR/promote.sh" "$repo/scripts/upgrade/promote.sh"
     cp "$REPO_ROOT/scripts/stop-ensemble.sh" "$repo/scripts/stop-ensemble.sh"
     chmod +x "$repo/scripts/upgrade/"*.sh
+    # seed the family from the ONE authoritative definition (F2 seam)
+    . "$UPGRADE_DIR/executor_family.sh"
+    while IFS= read -r _family_path; do
+        [ -n "$_family_path" ] || continue
+        mkdir -p "$repo/$(dirname "$_family_path")"
+        cp "$REPO_ROOT/$_family_path" "$repo/$_family_path"
+    done < <(executor_family_paths)
     cp "$REPO_ROOT/launcher.sh" "$repo/launcher.sh"
     chmod +x "$repo/launcher.sh"
     printf 'stub-agent-definition\n' > "$repo/agents/leader/soul.md"

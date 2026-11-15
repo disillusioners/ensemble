@@ -88,13 +88,15 @@ mkdir -p "$FAKE_REPO/scripts/upgrade" "$FAKE_REPO/agents/leader" \
 # is what refuses. Nothing of it is ever contacted.
 printf 'PORT=4999\n' > "$FAKE_HOME/agents-ensemble/.env"
 
-cp "$UPGRADE_DIR/lib.sh"        "$FAKE_REPO/scripts/upgrade/lib.sh"
-cp "$UPGRADE_DIR/stage.sh"      "$FAKE_REPO/scripts/upgrade/stage.sh"
-cp "$UPGRADE_DIR/promote.sh"    "$FAKE_REPO/scripts/upgrade/promote.sh"
-cp "$UPGRADE_DIR/rollback.sh"   "$FAKE_REPO/scripts/upgrade/rollback.sh"
-cp "$UPGRADE_DIR/status.sh"     "$FAKE_REPO/scripts/upgrade/status.sh"
-cp "$REPO_ROOT/scripts/stop-ensemble.sh" "$FAKE_REPO/scripts/stop-ensemble.sh"
-chmod +x "$FAKE_REPO/scripts/upgrade/"*.sh
+# seed the family from the ONE authoritative definition (F2 seam)
+. "$UPGRADE_DIR/executor_family.sh"
+while IFS= read -r _family_path; do
+    [ -n "$_family_path" ] || continue
+    mkdir -p "$FAKE_REPO/$(dirname "$_family_path")"
+    cp "$REPO_ROOT/$_family_path" "$FAKE_REPO/$_family_path"
+done < <(executor_family_paths)
+chmod +x "$FAKE_REPO/scripts/upgrade/"*.sh "$FAKE_REPO/scripts/stop-ensemble.sh" \
+    "$FAKE_REPO/scripts/install-dir-guard.sh" 2>/dev/null
 
 # Stub payloads — never actually run, just staged.
 printf '#!/bin/bash\n# stub launcher (unit fixture)\n' > "$FAKE_REPO/launcher.sh"

@@ -558,8 +558,68 @@ _report_port() {
 }
 
 # ── Bounded stop: TERM, wait, KILL ──────────────────────────────────────────
+# Fix #5 (ENSEMBLE-32 Family-3; incident docs/incidents/
+# 2026-11-14-macos-launchd-handback-halt.md §7 defect #7): SELF-EXCLUSION is
+# applied INSIDE _stop_pids so EVERY call site (port-kill opt-in, the
+# launcher pass, the straggler pass) is covered uniformly. The exclusion is
+# BY EXACT PID IDENTITY — $$ (this sweep), $PPID (the promote executor when
+# promote drives the stop), and — ONLY when this sweep is actually running
+# inside an install's launcher/daemon lineage — that executor's parent (the
+# agent bash tool that owns the executor). A pgid/ancestry filter would also
+# drop the daemon itself (it shares the launchd job's group / is an
+# ancestor) and make the sweep find NOTHING (observed: the 16d TERM pin) — so
+# it is deliberately NOT used. Defense-in-depth alongside the promote
+# executor's self-detach (lib.sh _executor_detach_self) — the pinned-mirror
+# discipline: stop-ensemble.sh is a leaf (sourcing lib.sh would run its stop
+# machinery), so the exclusion shape is mirrored here rather than shared.
+# _stop_self_excluded_in_tree: 0 IFF this sweep sits in an install's lineage.
+_stop_self_excluded_in_tree() {
+    [ -n "${INSTALL_DIR:-}" ] || return 1
+    local esc phys pid args comm cwd depth=0
+    esc="$(printf '%s' "$INSTALL_DIR" | sed -e 's/[.[\*^$()+?{|]/\\&/g')"
+    phys="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd || printf '%s' "$INSTALL_DIR")"
+    pid="$PPID"
+    while [ -n "$pid" ] && [ "$pid" != "0" ] && [ "$pid" != "1" ] && [ "$depth" -lt 16 ]; do
+        args="$(ps -o args= -p "$pid" 2>/dev/null)"
+        comm="$(ps -o comm= -p "$pid" 2>/dev/null)"
+        case "$args" in
+            *"$INSTALL_DIR/launcher.sh"*|*"$INSTALL_DIR/ensemble-prod"*|*"$phys/launcher.sh"*|*"$phys/ensemble-prod"*) return 0 ;;
+        esac
+        case "$comm $args" in
+            *ensemble-prod*|*launcher.sh*)
+                cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+                if [ "$cwd" = "$INSTALL_DIR" ] || [ "$cwd" = "$phys" ]; then return 0; fi
+                ;;
+        esac
+        pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+        depth=$((depth + 1))
+    done
+    return 1
+}
+
 _stop_pids() {
-    # $@ = pids
+    # $@ = pids — filtered through the self-exclusion guard FIRST (see the
+    # Fix #5 block above): $$, $PPID and — only in-tree — $PPID's parent.
+    local filtered="" _fpid _excluded
+    _excluded="$$ $PPID"
+    if _stop_self_excluded_in_tree; then
+        _excluded="$_excluded $(ps -o ppid= -p "$PPID" 2>/dev/null | tr -d '[:space:]')"
+    fi
+    for _fpid in "$@"; do
+        case "$_fpid" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        case " $_excluded " in *" $_fpid "*)
+            _log "self-exclusion: pid $_fpid is this sweep or its promote executor — never a signal target (Fix #5, incident 2026-11-14 §7)"
+            continue ;;
+        esac
+        filtered="$filtered $_fpid"
+    done
+    # shellcheck disable=SC2086  # intentional word-split of the filtered list
+    set -- $filtered
+    if [ "$#" -eq 0 ]; then
+        return 0
+    fi
     if [ "$DRY_RUN" = "1" ]; then
         local p
         for p in "$@"; do

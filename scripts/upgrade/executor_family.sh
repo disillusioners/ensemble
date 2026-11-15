@@ -25,10 +25,24 @@
 #   <root>/scripts/upgrade/<family>   the executor scripts themselves
 #   <root>/scripts/stop-ensemble.sh   the promote stop step's SIBLING
 #   <root>/scripts/install-dir-guard.sh  the install-dir guard
+#   <root>/daemon/plugin_subsystem/promote_staleness.py  the plugin-staleness
+#       predicate module (D3 payload-completeness slice — ENSEMBLE-32 Fix #3)
 #   where <root> is the staged release dir (releases/<ver>/) for the payload
 #   and the install dir for a flat install. The sibling relation is what
 #   matters: <scripts_dir>/../stop-ensemble.sh must resolve to a PRESENT and
-#   EXECUTABLE file (PR1's arm gate: os.access(X_OK)).
+#   EXECUTABLE file (PR1's arm gate: os.access(X_OK)). The staleness module
+#   is resolved by lib.sh's plugin-staleness gate as
+#   <lib.sh-dir>/../../daemon/plugin_subsystem/promote_staleness.py — i.e.
+#   TWO levels up from scripts/upgrade — so the payload must carry the
+#   daemon/plugin_subsystem/ slice at the payload top level or a
+#   release-staged promote refuses FAIL-CLOSED (plugin-staleness-unreadable:
+#   incident docs/incidents/2026-11-14-macos-launchd-handback-halt.md §3.3 +
+#   §7 00:49:01 recurrence, defect #3). The module is the MINIMAL slice by
+#   construction: it imports ONLY stdlib + PyYAML — NO daemon imports — and
+#   is invoked as a direct script (`"$py" "$pred" "$pdir"`), so no
+#   daemon/__init__.py or plugin_subsystem/__init__.py travels with it
+#   (daemon/__init__.py pulls daemon.util.* — staging it would be the
+#   daemon grab-bag this slice exists to avoid).
 #
 # NO PLIST EVER (property, not accident): the family list below is an
 # EXPLICIT enumeration — com.ensemble.prod.plist / com.ensemble.watchdog.plist
@@ -77,7 +91,18 @@ scripts/upgrade/stage.sh
 scripts/upgrade/status.sh
 scripts/stop-ensemble.sh
 scripts/install-dir-guard.sh
+daemon/plugin_subsystem/promote_staleness.py
 EOF
+}
+
+# executor_family_daemon_slice_paths — the family members OUTSIDE scripts/
+# (currently exactly the plugin-staleness predicate slice, ENSEMBLE-32
+# Fix #3). Derived by filtering executor_family_paths so the canonical
+# list stays the ONE definition of what ships; the scripts/ tree coverage
+# (executor_family_manifest_lines over <payload>/scripts) plus this
+# subset together cover the whole family.
+executor_family_daemon_slice_paths() {
+    executor_family_paths | grep -v '^scripts/'
 }
 
 # The paths whose EXEC BIT is load-bearing (PR1's arm gate tests
@@ -170,6 +195,111 @@ executor_family_tree_hash() {
     printf '%s\n' "${1:-}" | shasum -a 256 | awk '{print $1}'
 }
 
+# executor_family_manifest_lines_for <root> <relpath>…
+#   "sha256  relpath" lines for EXACTLY the named paths under <root>
+#   (payload-relative), sorted by relpath — the same line shape + sort
+#   discipline as executor_family_manifest_lines, but driven by an explicit
+#   path list instead of a whole-tree walk. Used for the daemon/ slice,
+#   whose members live OUTSIDE the scripts/ tree the whole-tree walker
+#   covers. Fail-closed: a missing path aborts with the path named (a
+#   silently short slice would re-open the defect-3 class this slice
+#   closes — incident 2026-11-14 §3.3/§7).
+executor_family_manifest_lines_for() {
+    local root="${1:-}" rel sha
+    [ -n "$root" ] || { printf 'executor_family_manifest_lines_for: usage: <root> <relpath>…\n' >&2; return 2; }
+    [ -d "$root" ] || { printf 'executor_family_manifest_lines_for: %s is not a directory\n' "$root" >&2; return 1; }
+    shift
+    for rel in "$@"; do
+        [ -n "$rel" ] || continue
+        if [ ! -f "$root/$rel" ]; then
+            printf 'executor_family_manifest_lines_for: MISSING %s (the slice list is authoritative — a missing member is a packaging defect, never a silent skip)\n' "$root/$rel" >&2
+            return 1
+        fi
+        sha="$(shasum -a 256 "$root/$rel" 2>/dev/null | awk '{print $1}')"
+        [ -n "$sha" ] || { printf 'executor_family_manifest_lines_for: cannot hash %s\n' "$root/$rel" >&2; return 1; }
+        printf '%s  %s\n' "$sha" "$rel"
+    done | sort -k2
+}
+
+# executor_family_staleness_entry_check <payload_root>
+#   THE FAIL-CLOSED STAGING ASSERTION (ENSEMBLE-32 Fix #3, incident
+#   docs/incidents/2026-11-14-macos-launchd-handback-halt.md §3.3 + §7
+#   00:49:01 recurrence): a release payload whose promote would fail its
+#   OWN plugin-staleness predicate must never be staged. The promote-time
+#   gate (lib.sh promote_plugin_staleness_check) resolves the predicate
+#   module as <lib.sh-dir>/../../daemon/plugin_subsystem/promote_staleness.py
+#   and refuses FAIL-CLOSED (plugin-staleness-unreadable, exit 78) when the
+#   module is absent — the v0.30.5 AND v0.30.9 release-staged promotes both
+#   died exactly there, because the 14-file payload carried no daemon/
+#   slice. stage.sh calls this BEFORE signing the manifest and refuses
+#   (exit 78 class) on ANY failure — never a warning.
+#
+#   Three rungs, all fail-closed:
+#     (1) RESOLUTION — the module exists at the exact payload-relative path
+#         the promote-time resolution walks (<payload>/scripts/upgrade/
+#         lib.sh must be present too: it is the anchor the two-levels-up
+#         walk starts from).
+#     (2) EVALUABILITY — an interpreter with PyYAML resolves (the same
+#         ladder the promote-time gate runs: PLUGIN_STALENESS_PYTHON →
+#         python3 → python). A payload that cannot be evaluated at stage
+#         time would refuse its own gate at promote time — refuse here
+#         with the PLUGIN_STALENESS_PYTHON remedy, never warn.
+#     (3) EXECUTION — the staged module actually RUNS and answers fresh
+#         (exit 0) on an empty plugin dir. This proves interpreter +
+#         PyYAML + module integrity end-to-end inside the STAGED tree
+#         (a corrupted/truncated module fails here, not at the promote).
+#
+#   Prints a one-line PASS summary on success; on failure prints the
+#   refusal text (single line, greppable token plugin-staleness-payload)
+#   and returns nonzero.
+executor_family_staleness_entry_check() {
+    local root="${1:-}" mod py cand scratch out rc
+    [ -n "$root" ] || { printf 'plugin-staleness-payload: usage: entry-check <payload_root>\n' >&2; return 2; }
+    # Rung 1 — resolution (the exact two-levels-up shape, anchored).
+    if [ ! -f "$root/scripts/upgrade/lib.sh" ]; then
+        printf 'plugin-staleness-payload: staged tree has no scripts/upgrade/lib.sh — the promote-time resolution anchor is absent; refusing'
+        return 1
+    fi
+    mod="$root/daemon/plugin_subsystem/promote_staleness.py"
+    if [ ! -f "$mod" ]; then
+        printf 'plugin-staleness-payload: staged payload carries NO plugin-staleness predicate module at daemon/plugin_subsystem/promote_staleness.py — a release-staged promote would refuse FAIL-CLOSED (plugin-staleness-unreadable) exactly as the v0.30.5/v0.30.9 release-staged promotes did (incident 2026-11-14 §3.3/§7 defect #3); refusing'
+        return 1
+    fi
+    # Rung 2 — evaluability (mirror lib.sh's interpreter ladder).
+    py=""
+    if [ -n "${PLUGIN_STALENESS_PYTHON:-}" ] && [ -x "${PLUGIN_STALENESS_PYTHON}" ]; then
+        py="$PLUGIN_STALENESS_PYTHON"
+    fi
+    if [ -z "$py" ]; then
+        for cand in "$(command -v python3 2>/dev/null || true)" \
+                    "$(command -v python 2>/dev/null || true)"; do
+            if [ -n "$cand" ] && [ -x "$cand" ] && "$cand" -c "import yaml" >/dev/null 2>&1; then
+                py="$cand"
+                break
+            fi
+        done
+    fi
+    if [ -z "$py" ]; then
+        printf 'plugin-staleness-payload: no interpreter with PyYAML available to prove the staged predicate runs (tried PLUGIN_STALENESS_PYTHON, python3, python) — the promote-time gate would refuse FAIL-CLOSED on the same condition; set PLUGIN_STALENESS_PYTHON=<interpreter with PyYAML> on the staging host or install PyYAML; refusing'
+        return 1
+    fi
+    # Rung 3 — execution inside the staged tree.
+    scratch="$(mktemp -d "${TMPDIR:-/tmp}/exec-family-stale.XXXXXX")" || {
+        printf 'plugin-staleness-payload: cannot create the entry-check scratch dir; refusing'
+        return 1
+    }
+    out="$("$py" "$mod" "$scratch" 2>&1)"
+    rc=$?
+    rm -rf "$scratch" 2>/dev/null
+    if [ "$rc" -ne 0 ]; then
+        printf 'plugin-staleness-payload: the STAGED predicate module failed its entry check (rc=%s): %s — a payload whose own predicate cannot run refuses at promote; refusing' "$rc" "$(printf '%s' "$out" | tr '\n' ';' | tr -s ' ' | cut -c1-300)"
+        return 1
+    fi
+    printf 'staleness predicate entry-check PASS (module=%s interpreter=%s verdict=%s)' \
+        "${mod#"$root"/}" "$py" "$(printf '%s' "$out" | tail -n 1)"
+    return 0
+}
+
 # executor_family_verify_stamp_coverage <git_root> <stamp>
 #   Print the family paths that do NOT exist at commit <stamp> in
 #   <git_root>. Empty output = the stamp COVERS the whole shipped set.
@@ -213,6 +343,10 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
             ;;
         --stamp-coverage)
             executor_family_verify_stamp_coverage "${1:-}" "${2:-}"
+            exit $?
+            ;;
+        --staleness-entry-check)
+            executor_family_staleness_entry_check "${1:-}"
             exit $?
             ;;
         *)

@@ -150,6 +150,43 @@ if [ -z "$VERSION" ]; then
     exit 78
 fi
 
+# ═══════════════ Executor SELF-DETACH (Fix #5, ENSEMBLE-32 Family-3) ══════
+# Incident docs/incidents/2026-11-14-macos-launchd-handback-halt.md §7
+# (defect #7): a promote driven from INSIDE the daemon's process tree (the
+# agent-bash lane: daemon → bash tool → agent shell → this script) is
+# SIGKILLed by its own stop phase — the launchd bootout of the daemon job
+# (and the pid sweeps' escalation) tear down the whole job's tree INCLUDING
+# the executor, which died mid-stop BEFORE the flip (v0.30.9, 00:50:53).
+# On darwin, when this shell sits in the install's launcher/daemon lineage
+# AND is not already the detached child, re-exec the ENTIRE promote inside
+# a transient ONE-SHOT LaunchAgent (lib.sh _executor_detach_self:
+# label-verbatim plist, RunAtLoad, log file, bounded wait, MANDATORY
+# bootout + plist removal on every path — the RunAtLoad-at-login footgun,
+# §7b) and propagate the detached exit code. Refuse-with-recipe alone is
+# NOT acceptable for this path: the E2E demo promote is invoked from an
+# agent bash INSIDE the daemon tree and MUST complete — the recipe hint
+# below is printed IN ADDITION, never instead.
+#
+# AMENDMENT #1 UNTOUCHED: the no-nohup-fallback rule governs the DAEMON (the
+# serving process must stay launchd-supervised). ONLY the executor detaches,
+# via launchd itself — the darwin mirror of the VM's systemd-run scope
+# guarantee (docs/incidents/2026-09-28-promote-cgroup-teardown.md).
+# Placement: BEFORE any lock/txn/signal-trap mutation (the detached child
+# re-runs the whole preflight itself; a lock held here would deadlock it),
+# after the VERSION input check (the child needs a valid VERSION).
+if [ "$(uname -s)" = "Darwin" ] \
+   && [ "${ENSEMBLE_PROMOTE_SELF_DETACHED:-0}" != "1" ] \
+   && _executor_detach_in_tree; then
+    _log "executor self-detach: this shell sits INSIDE the daemon tree — re-execing the promote in a transient one-shot LaunchAgent (incident 2026-11-14 §7 defect #7; pattern proven §7b)"
+    _exec_detach_rc=0
+    _executor_detach_self "$SCRIPT_DIR/promote.sh" "$@" || _exec_detach_rc=$?
+    if [ "$_exec_detach_rc" -ne 0 ]; then
+        _warn "executor self-detach did not complete cleanly (rc=$_exec_detach_rc${_DETACH_LAST_ERROR:+ — ${_DETACH_LAST_ERROR}})"
+        _warn "  recipe (in addition to the attempted detach, never instead): run the promote from a shell OUTSIDE the daemon tree (an operator terminal or a supervisor-owned lane) — launchctl bootstrap gui/\$(id -u) <label-verbatim-plist> with RunAtLoad, then ALWAYS bootout + rm the plist after the run"
+    fi
+    exit "$_exec_detach_rc"
+fi
+
 # D1 (reviewer ruling, P2.3 final batch): the direct exit-78s above and the
 # SOAK_S case below are INPUT-VALIDATION refusals — journal-less BY DESIGN
 # (nothing has been locked, opened, or mutated yet; the reviewed carve-out

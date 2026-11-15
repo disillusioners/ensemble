@@ -480,6 +480,72 @@ fresh_journal="$(cat "$FRESH_DEFAULT_INSTALL/releases/state.json" 2>/dev/null ||
 assert_not_contains "fresh default does NOT journal observed" "plugin_staleness_observed" "$fresh_journal"
 assert_not_contains "fresh default does NOT journal override" "plugin_staleness_override" "$fresh_journal"
 
+section "(6b) RELEASE-STAGED resolution — the payload-relative module path (Fix #3, ENSEMBLE-32)"
+# The defect-3 shape (incident 2026-11-14 §3.3 + §7 00:49:01): a promote run
+# from RELEASE-STAGED scripts resolves the predicate module as
+# <lib.sh-dir>/../../daemon/plugin_subsystem/promote_staleness.py — two
+# levels up from scripts/upgrade, INSIDE the release payload. The payload
+# must carry the daemon/ slice or the gate refuses FAIL-CLOSED. These legs
+# pin BOTH arms with REPO_ROOT dead (no repo checkout to lean on) and no
+# venv candidate (PLUGIN_STALENESS_PYTHON pinned):
+#   (6b-positive) staged layout WITH the slice → the gate RUNS (fresh).
+#   (6b-negative) staged layout WITHOUT the slice → plugin-staleness-unreadable, exit 78.
+STAGED_ROOT="$FIXTURE/staged-payload"
+mkdir -p "$STAGED_ROOT/scripts/upgrade" "$STAGED_ROOT/daemon/plugin_subsystem"
+cp "$UPGRADE_DIR/lib.sh" "$STAGED_ROOT/scripts/upgrade/lib.sh"
+cp "$REPO_ROOT/daemon/plugin_subsystem/promote_staleness.py" \
+   "$STAGED_ROOT/daemon/plugin_subsystem/promote_staleness.py"
+STAGED_INSTALL="$FIXTURE/install-staged"
+mkdir -p "$STAGED_INSTALL"
+out="$(
+    { export PLUGIN_STALENESS_PLUGINS_ROOT="$FRESH_REPO/plugins"
+    export PLUGIN_STALENESS_PYTHON="$PRED_PY"
+    export PROMOTE_STALENESS_OVERRIDE="0"
+    export PROMOTE_STRICT_STALENESS="0"
+    export REPO_ROOT="/nonexistent-staged-leg"
+    export INSTALL_DIR="$STAGED_INSTALL"
+    SCRIPT_DIR="$STAGED_ROOT/scripts/upgrade"
+    # shellcheck disable=SC1090
+    . "$SCRIPT_DIR/lib.sh"
+    promote_plugin_staleness_check
+    } 2>&1
+)"
+rc=$?
+assert_eq "staged-layout resolution rc (module INSIDE the payload)" "0" "$rc"
+assert_contains "staged-layout resolution runs the real predicate" \
+    "PLUGIN-STALENESS=fresh" "$out"
+
+STAGED_NOSLICE="$FIXTURE/staged-payload-noslice"
+mkdir -p "$STAGED_NOSLICE/scripts/upgrade"
+cp "$UPGRADE_DIR/lib.sh" "$STAGED_NOSLICE/scripts/upgrade/lib.sh"
+NOSLICE_INSTALL="$FIXTURE/install-staged-noslice"
+mkdir -p "$NOSLICE_INSTALL"
+cat > "$FIXTURE/staged-noslice-runner.sh" <<RUNNER2
+#!/bin/bash
+set +e
+export PLUGIN_STALENESS_PLUGINS_ROOT="$FRESH_REPO/plugins"
+export PLUGIN_STALENESS_PYTHON="$PRED_PY"
+export PROMOTE_STALENESS_OVERRIDE="0"
+export PROMOTE_STRICT_STALENESS="0"
+export REPO_ROOT="/nonexistent-staged-noslice-leg"
+export INSTALL_DIR="$NOSLICE_INSTALL"
+export SCRIPT_DIR="$STAGED_NOSLICE/scripts/upgrade"
+# shellcheck disable=SC1090
+. "\$SCRIPT_DIR/lib.sh"
+promote_plugin_staleness_check
+RUNNER2
+chmod +x "$FIXTURE/staged-noslice-runner.sh"
+set +e
+bash "$FIXTURE/staged-noslice-runner.sh" >/tmp/staged-noslice.out 2>&1
+noslice_rc=$?
+set -u
+noslice_out="$(cat /tmp/staged-noslice.out 2>/dev/null || true)"
+assert_eq "staged layout WITHOUT the slice refuses 78 (defect #3 fail-closed arm)" "78" "$noslice_rc"
+assert_contains "the missing-slice refusal names the unreadable token" \
+    "plugin-staleness-unreadable" "$noslice_out"
+assert_contains "the missing-slice refusal names the predicate module path" \
+    "promote_staleness.py" "$noslice_out"
+
 # ─── (7) End-to-end through the REAL promote.sh ──────────────────────────────
 
 section "(7a) promote.sh e2e stale default — plugin gate PROCEEDS + journals observed"

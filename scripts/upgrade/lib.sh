@@ -2673,7 +2673,7 @@ lock_acquire() {
             age=$(( $(_now_epoch) - hb ))
             if [ "$age" -gt "$LOCK_STALE_S" ]; then
                 local owner_live=0
-                if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$' \
+                if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$'\
                    && _pid_alive "$owner_pid"; then
                     owner_live=1
                 fi
@@ -2694,7 +2694,7 @@ lock_acquire() {
         fi
         # owner process dead? (crash left a fresh-heartbeat dir) — break too
         # (_pid_alive: EPERM = alive under another user — never break)
-        if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$' \
+        if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$'\
            && ! _pid_alive "$owner_pid"; then
             _log "pipeline lock owner pid $owner_pid is dead — breaking lock"
             if mv "$lock" "${lock}.stale.$$" 2>/dev/null; then
@@ -4979,8 +4979,13 @@ _supervision_stop_launchd() {
     done
     # Still alive after the drain budget ⇒ the daemon ignored TERM. Escalate
     # with SIGKILL ONLY (never a second TERM — the checkpoint-void regression).
-    for pid in $(_supervision_owned_pids 2>/dev/null); do
-        _log "launchd stop: pid $pid still alive after ${LAUNCHD_DRAIN_BUDGET_S}s drain — SIGKILL escalation (no second TERM)"
+    # Fix #5 (ENSEMBLE-32): the candidate list runs through the SELF-EXCLUSION
+    # filter first — $$ (this shell), $PPID (the promote executor) and every
+    # own-process-group pid are NEVER SIGKILL targets (incident 2026-11-14
+    # §7 defect #7: the stop escalation must not sweep the executor running
+    # the very stop). Defense-in-depth alongside the executor self-detach.
+    for pid in $(_pipeline_self_excluded "$(_supervision_owned_pids 2>/dev/null)"); do
+        _log "launchd stop: pid $pid still alive after ${LAUNCHD_DRAIN_BUDGET_S}s drain — SIGKILL escalation (no second TERM; own-group/self pids excluded)"
         journal_history_append stop_forced_kill \
             "launchd stop: pid=$pid survived bootout + ${LAUNCHD_DRAIN_BUDGET_S}s drain — SIGKILL escalated (no second TERM; graceful checkpoint write VOIDED)" \
             >/dev/null 2>&1 || true
@@ -5510,6 +5515,328 @@ _supervision_launchd_plist_path() {
     HANDBACK_LAST_ERROR="$(printf "plist resolution failed for job '%s' (launchctl print: %s)" "$label" "$(printf '%s' "$(cat "$errtmp" 2>/dev/null)" | tr '\n' ';' | tr -s ' ' | cut -c1-400)")"
     rm -f "$errtmp" 2>/dev/null
     return 1
+}
+
+# ═══════════════ Executor SELF-DETACH (Fix #5, ENSEMBLE-32 Family-3) ═══════
+# A promote executor that runs INSIDE the daemon's process tree (the
+# agent-bash lane: daemon → bash tool → agent shell → promote.sh) dies with
+# its own stop sweep: the launchd bootout of com.ensemble.prod (or the pid
+# sweep's escalation) tears down the WHOLE launchd job tree INCLUDING the
+# executor — incident docs/incidents/2026-11-14-macos-launchd-handback-halt.md
+# §7 (00:50:53, the v0.30.9 promote killed mid-stop BEFORE the flip, defect
+# #7). The §7b proven pattern, productized: on darwin, an in-tree executor
+# re-execs ITSELF inside a transient ONE-SHOT LaunchAgent (label-verbatim
+# plist, RunAtLoad, bootout + plist-removal MANDATORY on every path — the
+# RunAtLoad-at-login footgun) and propagates the detached exit code. This is
+# the darwin mirror of the VM's systemd-run scope guarantee
+# (docs/incidents/2026-09-28-promote-cgroup-teardown.md — setsid escapes a
+# process GROUP, never a systemd cgroup / a launchd job; only a
+# supervisor-owned unit does).
+#
+# AMENDMENT #1 UNTOUCHED: the no-nohup-fallback rule governs the DAEMON (the
+# SERVING process must stay launchd-supervised — 2026-11-11 incident). ONLY
+# the EXECUTOR detaches, and it detaches via launchd itself (a supervised,
+# bounded, one-shot job with a log file — never a nohup'd orphan).
+#
+# Test seams (SYSTEMCTL_BIN / LAUNCHCTL_BIN house discipline):
+#   - LAUNCHCTL_BIN drives every launchctl call (PATH-injected stub works).
+#   - `ps` is PATH-resolved for the ppid/args/comm probes (a PATH-injected
+#     stub drives scripted ancestry chains in tests).
+#   - PROMOTE_DETACH_WAIT_S / PROMOTE_DETACH_POLL_S bound the wait.
+
+# The marker env var: set (exported) in the DETACHED child's environment so
+# the re-executed promote skips the detach block (recursion guard).
+ENSEMBLE_PROMOTE_DETACH_MARKER="${ENSEMBLE_PROMOTE_DETACH_MARKER:-ENSEMBLE_PROMOTE_SELF_DETACHED}"
+PROMOTE_DETACH_WAIT_S="${PROMOTE_DETACH_WAIT_S:-1800}"
+PROMOTE_DETACH_POLL_S="${PROMOTE_DETACH_POLL_S:-2}"
+
+# _detach_last_error — Fix #4 discipline (incident §5.2): a detach failure
+# must be RECORDED, not swallowed — the v0.30.5/v0.30.9 halts were
+# unreproducible because launchctl output was discarded.
+_DETACH_LAST_ERROR=""
+
+# _executor_detach_ps_field <pid> <field> — one ps probe (ppid|args|comm).
+# PATH-resolved `ps` so tests script ancestry chains; empty output on any
+# probe failure (a dead pid mid-walk just terminates the chain).
+_executor_detach_ps_field() {
+    ps -o "$2=" -p "$1" 2>/dev/null | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+# _executor_detach_in_tree — 0 IFF this shell sits inside the install's
+# launcher/daemon lineage. Walks the ppid chain from $$ (bounded depth 16 —
+# paranoia against exotic trees, same bound family as
+# _supervision_pid_in_launchd_lineage), and counts as IN-TREE when an
+# ancestor either (a) carries THIS install's launcher/daemon shapes in its
+# argv (tier-1a anchored-path shapes MIRRORED from _supervision_owned_pids
+# — the pinned mirror discipline: stop-ensemble.sh stays a leaf, lib.sh owns
+# the lib-side shapes), or (b) is ensemble-SHAPED (comm/args say
+# launcher.sh/ensemble-prod) AND its cwd IS this install (the tier-1b
+# conjunct). The cwd conjunct is LOAD-BEARING, not decoration: a sandbox or
+# fixture promote runs inside the REAL daemon's tree of a DIFFERENT install
+# — an unanchored "ancestor named ensemble-prod" would misclassify every
+# such run as in-tree and bootstrap a REAL LaunchAgent for a fixture
+# promote (observed in the staleness pack's e2e legs, 2026-11-15).
+# Requires INSTALL_DIR (resolve_env must have run). Never throws.
+_executor_detach_in_tree() {
+    [ -n "${INSTALL_DIR:-}" ] || return 1
+    local esc esc_phys phys pid args comm cwd depth=0
+    esc="$(_supervision_ere_escape "$INSTALL_DIR")"
+    phys="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd || printf '%s' "$INSTALL_DIR")"
+    esc_phys="$(_supervision_ere_escape "$phys")"
+    pid="$(_executor_detach_ps_field "$$" ppid)"
+    while [ -n "$pid" ] && [ "$pid" != "0" ] && [ "$pid" != "1" ] && [ "$depth" -lt 16 ]; do
+        args="$(_executor_detach_ps_field "$pid" args)"
+        comm="$(_executor_detach_ps_field "$pid" comm)"
+        if printf '%s' "$args" 2>/dev/null | grep -Eq \
+            "(${esc}|${esc_phys})/(current/)?ensemble-prod( |$)|${esc}/launcher\.sh( |$)"; then
+            return 0
+        fi
+        case "$comm $args" in
+            *ensemble-prod*|*launcher.sh*)
+                cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+                if [ "$cwd" = "$INSTALL_DIR" ] || [ "$cwd" = "$phys" ]; then
+                    return 0
+                fi
+                ;;
+        esac
+        pid="$(_executor_detach_ps_field "$pid" ppid)"
+        depth=$((depth + 1))
+    done
+    return 1
+}
+
+# _executor_detach_xml_escape <string> — minimal plist XML text escaping.
+_executor_detach_xml_escape() {
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+# _executor_detach_cleanup <domain> <label> <plist> <tmpdir> — the MANDATORY
+# bootout + scratch removal (the RunAtLoad-at-login footgun: a spent one-shot
+# left registered would RE-FIRE the promote at the next login — incident
+# §7b, the operator had to hand-remove the spent com.ensemble.promote-v03009).
+# Idempotent by construction (benign "not found" bootout class, rm -f); the
+# DETACHED LOG FILE is deliberately kept (forensics — incident §7b's log was
+# the only artifact carrying the hand-back error).
+_executor_detach_cleanup() {
+    local domain="${1:-}" label="${2:-}" plist="${3:-}" tmpdir="${4:-}"
+    if [ -n "$label" ]; then
+        _supervision_launchd_bootout "$label" >/dev/null 2>&1 || true
+    fi
+    [ -n "$plist" ] && rm -f "$plist" 2>/dev/null
+    [ -n "$tmpdir" ] && [ -d "$tmpdir" ] && rm -rf "$tmpdir" 2>/dev/null
+    return 0
+}
+
+# _executor_detach_self <promote-script> <argv…> — re-exec the ENTIRE promote
+# inside a transient one-shot LaunchAgent, wait for completion, and print
+# NOTHING on stdout except the final rc via the function's return code.
+# Contract:
+#   - bootstrap failure ⇒ belt-cleanup + rc 1 with _DETACH_LAST_ERROR set
+#     (the caller refuses fail-closed — an in-tree executor that cannot
+#     detach would die with its own stop sweep, the exact defect #7 shape).
+#   - wait budget exhausted (PROMOTE_DETACH_WAIT_S) without a done-file ⇒
+#     cleanup + rc 124 (the house bounded-wait convention).
+#   - job vanished without writing the done-file (spawn failure class) ⇒
+#     cleanup + rc 1, _DETACH_LAST_ERROR set.
+#   - otherwise rc = the detached promote's exit code (from the done-file).
+# The DETACHED CHILD self-cleans too (done-file first, then bootout + rm) —
+# so cleanup happens even if THIS in-tree waiter is SIGKILLed mid-wait
+# (the incident's own shape).
+_executor_detach_self() {
+    local script="${1:-}"
+    [ -n "$script" ] && [ -f "$script" ] || {
+        _DETACH_LAST_ERROR="executor-detach: promote script not found: ${script:-<empty>}"
+        return 1
+    }
+    [ -n "${INSTALL_DIR:-}" ] || {
+        _DETACH_LAST_ERROR="executor-detach: INSTALL_DIR unresolved (resolve_env must run first)"
+        return 1
+    }
+    command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1 || {
+        _DETACH_LAST_ERROR="executor-detach: no launchctl on PATH (LAUNCHCTL_BIN=${LAUNCHCTL_BIN}) — cannot detach; the caller refuses (an in-tree executor without detachment dies with its own stop sweep)"
+        return 1
+    }
+    local uid domain label runid tmpdir envfile wrapper plist logfile donefile
+    uid="$(id -u)"
+    domain="gui/${uid}"
+    runid="promote-$(printf '%s' "${VERSION:-run}" | tr -c 'A-Za-z0-9' '-' | sed -e 's/-\{1,\}/-/g' -e 's/^-*//' -e 's/-*$//')-$(_now_epoch)"
+    label="com.ensemble.${runid}"
+    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/ens-promote-detach.XXXXXX")" || {
+        _DETACH_LAST_ERROR="executor-detach: cannot create the detach scratch dir"
+        return 1
+    }
+    envfile="${tmpdir}/env.sh"
+    wrapper="${tmpdir}/wrapper.sh"
+    plist="${tmpdir}/${label}.plist"
+    donefile="${tmpdir}/done.rc"
+    logfile="${INSTALL_DIR}/data/${runid}.detach.log"
+    mkdir -p "$(dirname "$logfile")" 2>/dev/null || true
+
+    # Env snapshot for the detached child: EVERYTHING exported here, minus
+    # the one poison key (ENSEMBLE_LAUNCHER_STATE_FILE must NEVER propagate —
+    # the env-parity rule), plus the marker that stops the child from
+    # re-detaching. Plain (non-exported) shell variables are NOT carried —
+    # the child re-derives them exactly like a fresh invocation would.
+    {
+        declare -px | grep -v "^declare -x ENSEMBLE_LAUNCHER_STATE_FILE=" || true
+        printf 'export %s=1\n' "$ENSEMBLE_PROMOTE_DETACH_MARKER"
+    } > "$envfile" 2>/dev/null
+
+    # Wrapper: env → promote → rc → done-file → SELF-CLEAN (bootout BEFORE
+    # rm; done-file BEFORE bootout so the waiter reads the rc even if the
+    # bootout kills this wrapper mid-clean). Forensics log kept. Script and
+    # argv are single-quote-escaped into the wrapper body.
+    local esc_args arg_q launchctl_abs script_q
+    script_q="'$(printf '%s' "$script" | sed -e "s/'/'\\\\''/g")'"
+    esc_args=""
+    for arg_q in "$@"; do
+        esc_args="$esc_args '$(printf "%s" "$arg_q" | sed -e "s/'/'\\\\''/g")'"
+    done
+    launchctl_abs="$(command -v "$LAUNCHCTL_BIN" 2>/dev/null || printf 'launchctl')"
+    cat > "$wrapper" <<WEOF
+#!/bin/bash
+# Executor self-detach wrapper (ENSEMBLE-32 Fix #5) — generated by lib.sh
+# _executor_detach_self; run inside the transient one-shot LaunchAgent
+# ${label}. Cleanup below is MANDATORY (RunAtLoad-at-login footgun,
+# incident 2026-11-14 §7b).
+. '${envfile}'
+bash ${script_q}${esc_args}
+rc=\$?
+printf '%s\n' "\$rc" > '${donefile}'
+'${launchctl_abs}' bootout '${domain}/${label}' >/dev/null 2>&1 || true
+rm -f '${plist}' '${wrapper}' '${envfile}' >/dev/null 2>&1 || true
+exit "\$rc"
+WEOF
+    chmod +x "$wrapper"
+
+    # Plist: label-verbatim FILENAME == LABEL (Family-1 ratified invariant,
+    # incident §7b root cause). RunAtLoad one-shot, KeepAlive false,
+    # ExitTimeOut bounded. NO plist ever lands in ~/Library/LaunchAgents —
+    # this one lives in the private scratch dir and is bootstrapped by path.
+    cat > "$plist" <<PLEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>$(_executor_detach_xml_escape "$label")</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>$(_executor_detach_xml_escape "$wrapper")</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><false/>
+    <key>ExitTimeOut</key><integer>30</integer>
+    <key>StandardOutPath</key><string>$(_executor_detach_xml_escape "$logfile")</string>
+    <key>StandardErrorPath</key><string>$(_executor_detach_xml_escape "$logfile")</string>
+</dict>
+</plist>
+PLEOF
+
+    # Belt cleanup trap for THIS shell: whatever happens to the wait
+    # (timeout, TERM/INT, exit), bootout + scratch removal run here too.
+    # Idempotent with the wrapper's own self-clean. The trap fires at the
+    # caller's exit (the promote.sh detach block exits right after us).
+    trap "_executor_detach_cleanup '${domain}' '${label}' '${plist}' '${tmpdir}' >/dev/null 2>&1 || true" EXIT
+
+    _log "executor self-detach: bootstrapping one-shot LaunchAgent ${label} (plist=${plist}, log=${logfile})"
+    local out rc
+    out="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" bootstrap "$domain" "$plist" 2>&1)"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        _DETACH_LAST_ERROR="$(printf 'launchctl bootstrap %s %s failed (rc=%s): %s' "$domain" "$plist" "$rc" "$(printf '%s' "$out" | tr '\n' ';' | tr -s ' ' | cut -c1-400)")"
+        _warn "executor self-detach FAILED: ${_DETACH_LAST_ERROR}"
+        _executor_detach_cleanup "$domain" "$label" "$plist" "$tmpdir"
+        return 1
+    fi
+
+    # Bounded wait on the done-file. Fast-fail: the job VANISHED from the
+    # domain without writing the done-file (spawn failure class — e.g. the
+    # wrapper died before exec; launchctl print answers empty).
+    local deadline waited job_dump
+    deadline=$(( $(_now_epoch) + PROMOTE_DETACH_WAIT_S ))
+    waited=0
+    while [ "$(_now_epoch)" -lt "$deadline" ]; do
+        if [ -f "$donefile" ]; then
+            rc="$(cat "$donefile" 2>/dev/null)"
+            case "$rc" in
+                ''|*[!0-9]*) _DETACH_LAST_ERROR="executor-detach: done-file unreadable/garbage (${donefile})"; _warn "executor self-detach: ${_DETACH_LAST_ERROR}"; _executor_detach_cleanup "$domain" "$label" "$plist" "$tmpdir"; return 1 ;;
+            esac
+            _log "executor self-detach: detached promote completed rc=${rc} after ${waited}s (log=${logfile})"
+            return "$rc"
+        fi
+        sleep "$PROMOTE_DETACH_POLL_S"
+        waited=$((waited + PROMOTE_DETACH_POLL_S))
+        if [ "$waited" -ge 10 ]; then
+            job_dump="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" print "${domain}/${label}" 2>/dev/null)"
+            if [ -z "$job_dump" ] && [ ! -f "$donefile" ]; then
+                _DETACH_LAST_ERROR="executor-detach: LaunchAgent ${label} vanished from ${domain} without writing the done-file (spawn failure class; log=${logfile})"
+                _warn "executor self-detach: ${_DETACH_LAST_ERROR}"
+                _executor_detach_cleanup "$domain" "$label" "$plist" "$tmpdir"
+                return 1
+            fi
+        fi
+    done
+    _DETACH_LAST_ERROR="$(printf 'executor-detach: the detached promote did not complete within PROMOTE_DETACH_WAIT_S=%ss (label=%s, log=%s)' "$PROMOTE_DETACH_WAIT_S" "$label" "$logfile")"
+    _warn "executor self-detach WAIT BUDGET EXHAUSTED: ${_DETACH_LAST_ERROR}"
+    _executor_detach_cleanup "$domain" "$label" "$plist" "$tmpdir"
+    return 124
+}
+
+# _pipeline_self_excluded <pid…> — DEFENSE-IN-DEPTH SELF-EXCLUSION for the
+# kill sweeps (Fix #5, ENSEMBLE-32 Family-3; incident 2026-11-14 §7 defect
+# #7): print the pid list MINUS the sweep's own identity and — ONLY when the
+# sweep is actually running inside an install's launcher/daemon lineage —
+# the promote executor (the sweep's parent) and that executor's parent (the
+# agent bash tool that owns the executor). The exclusion is BY EXACT PID
+# IDENTITY, never by process group or by ancestry propagation: a pgid filter
+# would also drop the daemon itself (it shares the launchd job's group) and
+# an ancestry filter would drop every ancestor including the daemon — both
+# would make the sweep find NOTHING and break the stop (observed: the 16d
+# TERM pin). A detached executor lives in a different tree BY CONSTRUCTION
+# and is not an ancestor of the sweep at all, so it needs no exclusion here.
+# Prints the surviving pids, one per line, ascending, deduped.
+_PIPELINE_SELF_PID="${_PIPELINE_SELF_PID:-$$}"
+_PIPELINE_SELF_PPID="${_PIPELINE_SELF_PPID:-$PPID}"
+_pipeline_self_excluded_in_tree() {
+    [ -n "${INSTALL_DIR:-}" ] || return 1
+    local esc esc_phys phys pid args comm cwd depth=0
+    esc="$(_supervision_ere_escape "$INSTALL_DIR")"
+    phys="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd || printf '%s' "$INSTALL_DIR")"
+    esc_phys="$(_supervision_ere_escape "$phys")"
+    pid="$(_executor_detach_ps_field "$$" ppid)"
+    while [ -n "$pid" ] && [ "$pid" != "0" ] && [ "$pid" != "1" ] && [ "$depth" -lt 16 ]; do
+        args="$(_executor_detach_ps_field "$pid" args)"
+        comm="$(_executor_detach_ps_field "$pid" comm)"
+        if printf '%s' "$args" 2>/dev/null | grep -Eq \
+            "(${esc}|${esc_phys})/(current/)?ensemble-prod( |$)|${esc}/launcher\.sh( |$)"; then
+            return 0
+        fi
+        case "$comm $args" in
+            *ensemble-prod*|*launcher.sh*)
+                cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+                if [ "$cwd" = "$INSTALL_DIR" ] || [ "$cwd" = "$phys" ]; then
+                    return 0
+                fi
+                ;;
+        esac
+        pid="$(_executor_detach_ps_field "$pid" ppid)"
+        depth=$((depth + 1))
+    done
+    return 1
+}
+_pipeline_self_excluded() {
+    local my_pid my_ppid pid my_excluded
+    my_pid="$_PIPELINE_SELF_PID"
+    my_ppid="$_PIPELINE_SELF_PPID"
+    my_excluded="$my_pid $my_ppid"
+    if _pipeline_self_excluded_in_tree; then
+        my_excluded="$my_excluded $(ps -o ppid= -p "$my_ppid" 2>/dev/null | tr -d '[:space:]')"
+    fi
+    for pid in $(printf '%s\n' "$@" | grep -E '^[0-9]+$' | sort -n | awk '!seen[$0]++'); do
+        case " $my_excluded " in *" $pid "*) continue ;; esac
+        printf '%s\n' "$pid"
+    done
 }
 
 # _handback_serving_probe — the hand-back's SERVING conjunct
