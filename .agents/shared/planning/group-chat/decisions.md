@@ -105,3 +105,16 @@ Off-loop async I/O (exemplars instance_messaging.py:1179-1184); explicit boot st
 
 ## Counts
 SETTLED: 9. OPEN at framing time: 6 — **ALL RESOLVED**; live state = awaiting Emperor ratification (items 1–7). Architect-input details inside settled rulings: D-S3 suffix mechanics (resolved; owner name included); D-S1 durable-fallback ownership (resolved; D2 closes the owner gap).
+
+---
+
+## P1 implementation ambiguity resolutions
+
+Recorded 2026-11-15 by the P1 implementation lane (branch `feature/group-chat-p1`, tip 97293fb6a) — the six ambiguity resolutions made while implementing the P1 substrate, persisted in-repo per O-4 so they survive KV/context TTL. Load-bearing tokens kept verbatim.
+
+1. **`derive_undelivered_tagged` = over-inclusion on purpose.** Returns per-(member, tagged-row) candidates WITHOUT @name-target resolution — targeting/lane assignment is P3's; over-inclusion is the fail-safe direction. Documented on the method.
+2. **`role=parent` lives in the enum, not the P1 writes.** Carried in the `RoomMemberRole` enum per §1.3's closed set `owner|parent|child`; P1 writes `owner` only (the P2 join surface writes the rest) — the enum exists so P2 needs NO migration.
+3. **`message_count` is the one denormalized counter.** Bumped inside the append transaction (no drift, proven under concurrency); member-count left to on-read COUNT.
+4. **Purge event `instance_id` = room owner.** The trace rides the owner's event stream (room rows vanish); payload trimmed to the literal ids+counts pin `{room_id, owner_instance_id, tree_root_id, messages_purged, members_purged}` in 97293fb6a.
+5. **Owner-ancestry read scope is INDEPENDENT of membership state.** A member who LEFT but sits in the owner's ANCESTRY chain (chain walks UP via `instances.parent_id`) still reads via the chain; pinned by `test_read_matrix_left_ancestor_member_reads_via_ancestry`; scope vs roster are different predicates.
+6. **PG behavior proof ran against the worktree-fenced `ensemble_dev`.** (`ensemble_dev_scratch` denies instances INSERT to the dev role) with per-variable `POSTGRES_*` scrub + full teardown + verified zero leftovers; it caught two PG-only defects (JSONB bind via `JSONBType`; native-list JSONB read branch) fixed in-code.
