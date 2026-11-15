@@ -280,7 +280,7 @@ class RoomDeliveryService:
                 post=post,
                 member=member,
                 parent_iid=room["owner_instance_id"],
-                trigger="tag_terminal",
+                trigger=_TRIGGER_TAG_TERMINAL,
                 sender_member_name=sender_member_name,
             )
             return "proposal"
@@ -402,7 +402,7 @@ class RoomDeliveryService:
                     post=post,
                     member=member,
                     parent_iid=(await self._room.get_room(room_id))["owner_instance_id"],
-                    trigger="tag_terminal",
+                    trigger=_TRIGGER_TAG_TERMINAL,
                     sender_member_name=post["author_name"],
                 )
                 return "proposal"
