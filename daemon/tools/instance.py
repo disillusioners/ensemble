@@ -65,7 +65,13 @@ from daemon.repositories.room.membership import (
     TIER_AGENT_FALLBACK,
     TIER_PARENT_PROVIDED,
     TIER_QUICK_MODEL,
+    RoomJoinCrossTreeError,
     RoomJoinError,
+    RoomJoinMemberCapError,
+    RoomJoinRoomCapError,
+    RoomJoinRoomStateError,
+    RoomJoinSpec,
+    RoomJoinUnknownRoomError,
 )
 from daemon.repositories.room.repository import MemberNameCollisionError
 from daemon.services.mission_record_service import (
@@ -3057,7 +3063,7 @@ async def _prepare_room_join(
     member_name: str | None,
     instance_name: str | None,
     agent_id: str,
-) -> "RoomJoinSpec":
+) -> RoomJoinSpec:
     """Validate admission + run the naming cascade → :class:`RoomJoinSpec`.
 
     Ordering (fail-closed BEFORE any row exists):
@@ -3082,8 +3088,6 @@ async def _prepare_room_join(
     around the spawn call itself) so a slow model cannot serialize
     unrelated same-room membership writes.
     """
-    from ..repositories.room.membership import RoomJoinSpec
-
     room_service = manager._room_chat_service
     tree_root = await asyncio.to_thread(
         manager._instance_repository.get_tree_root_id, current_instance_id
@@ -3111,14 +3115,6 @@ def _format_room_join_refusal(exc) -> str:
     All subclass texts are distinct (the P2 exit criterion's
     typed-error matrix) and carry the remediation hint.
     """
-    from ..repositories.room.membership import (
-        RoomJoinCrossTreeError,
-        RoomJoinMemberCapError,
-        RoomJoinRoomCapError,
-        RoomJoinRoomStateError,
-        RoomJoinUnknownRoomError,
-    )
-
     head = "ERROR: spawn refused — room join rejected"
     if isinstance(exc, RoomJoinUnknownRoomError):
         return (
