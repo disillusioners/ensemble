@@ -127,9 +127,6 @@ class RoomChatService:
             self._room_locks[room_id] = lock
             return lock
 
-    # Back-compat private alias (P1 internal callers).
-    _get_room_lock = get_room_lock
-
     # ── room birth ─────────────────────────────────────────────────────
 
     async def create_room(
@@ -172,7 +169,7 @@ class RoomChatService:
         counters bump). The lock serializes writers within the daemon;
         ``UNIQUE(room_id, seq)`` backstops anything else.
         """
-        lock = await self._get_room_lock(room_id)
+        lock = await self.get_room_lock(room_id)
         async with lock:
             return await asyncio.to_thread(
                 self._repo.append_message,
