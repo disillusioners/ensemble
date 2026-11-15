@@ -307,14 +307,48 @@ class RoomRepository:
     def _raise_typed_integrity(
         exc: IntegrityError, room_id: str, member_name: str
     ) -> None:
+        # Constraint FINGERPRINTS ONLY: the named UNIQUE constraint
+        # (PG / name-reporting drivers) or the other driver's
+        # dotted-pair column message. A bare ``member_name`` substring
+        # over-matches — a composite-PK duplicate or any other
+        # violation must fall through to the base RoomError, never the
+        # name-collision type.
         msg = str(exc).lower()
-        if "member_name" in msg or "uq_chatroom_members_room_member_name" in msg:
+        if (
+            "uq_chatroom_members_room_member_name" in msg
+            or (
+                "chatroom_members.room_id, chatroom_members.member_name"
+                in msg
+            )
+        ):
             raise MemberNameCollisionError(
                 f"member_name={member_name!r} already registered in "
                 f"room={room_id} (UNIQUE(room_id, member_name) backstop)"
             ) from exc
         raise RoomError(
             f"room write integrity failure for room={room_id}: {exc}"
+        ) from exc
+
+    @staticmethod
+    def _raise_typed_append_integrity(
+        exc: IntegrityError, room_id: str
+    ) -> None:
+        """Append-path classification — the same fingerprints-only
+        discipline as :meth:`_raise_typed_integrity`: ONLY the
+        ``UNIQUE(room_id, seq)`` fingerprints (named constraint /
+        dotted-pair columns) map to :class:`RoomSeqConflictError`; an
+        FK violation or any other integrity failure falls back to the
+        base :class:`RoomError` — never mis-typed as a seq conflict."""
+        msg = str(exc).lower()
+        if (
+            "uq_room_messages_room_seq" in msg
+            or "room_messages.room_id, room_messages.seq" in msg
+        ):
+            raise RoomSeqConflictError(
+                f"append for room={room_id} hit UNIQUE(room_id, seq): {exc}"
+            ) from exc
+        raise RoomError(
+            f"append integrity failure for room={room_id}: {exc}"
         ) from exc
 
     # ── reads (room / member lookups) ──────────────────────────────────
@@ -475,9 +509,7 @@ class RoomRepository:
                 self._bump_room_counters(session, room_id, now)
                 session.commit()
         except IntegrityError as exc:
-            raise RoomSeqConflictError(
-                f"append for room={room_id} hit UNIQUE(room_id, seq): {exc}"
-            ) from exc
+            self._raise_typed_append_integrity(exc, room_id)
         return {
             "id": new_id,
             "room_id": room_id,
@@ -611,60 +643,68 @@ class RoomRepository:
         resolves typed :class:`RoomNotFoundError`.
         """
         now = _utc_now_iso()
-        with Session(self._engine) as session:
-            room = session.get(ChatRoom, room_id)
-            if room is None:
-                raise RoomNotFoundError(
-                    f"room={room_id} not found (absent or already purged)"
+        try:
+            with Session(self._engine) as session:
+                room = session.get(ChatRoom, room_id)
+                if room is None:
+                    raise RoomNotFoundError(
+                        f"room={room_id} not found (absent or already purged)"
+                    )
+                message_count = int(
+                    session.execute(
+                        sql_text(
+                            "SELECT COUNT(*) FROM room_messages WHERE room_id = :r"
+                        ).bindparams(r=room_id)
+                    ).scalar()
                 )
-            message_count = int(
+                member_count = int(
+                    session.execute(
+                        sql_text(
+                            "SELECT COUNT(*) FROM chatroom_members WHERE room_id = :r"
+                        ).bindparams(r=room_id)
+                    ).scalar()
+                )
+                # (2) the ONLY trace — content-free, ids + counts only.
+                session.add(
+                    Event(
+                        instance_id=room.owner_instance_id,
+                        kind=EventKind.ROOM_PURGED.value,
+                        data=json.dumps(
+                            {
+                                "room_id": room_id,
+                                "owner_instance_id": room.owner_instance_id,
+                                "tree_root_id": room.tree_root_id,
+                                "messages_purged": message_count,
+                                "members_purged": member_count,
+                            }
+                        ),
+                        created_at=datetime.now(timezone.utc),
+                    )
+                )
+                # (3) child-first — the NO ACTION FKs demand it.
                 session.execute(
                     sql_text(
-                        "SELECT COUNT(*) FROM room_messages WHERE room_id = :r"
+                        "DELETE FROM room_messages WHERE room_id = :r"
                     ).bindparams(r=room_id)
-                ).scalar()
-            )
-            member_count = int(
+                )
                 session.execute(
                     sql_text(
-                        "SELECT COUNT(*) FROM chatroom_members WHERE room_id = :r"
+                        "DELETE FROM chatroom_members WHERE room_id = :r"
                     ).bindparams(r=room_id)
-                ).scalar()
-            )
-            # (2) the ONLY trace — content-free, ids + counts only.
-            session.add(
-                Event(
-                    instance_id=room.owner_instance_id,
-                    kind=EventKind.ROOM_PURGED.value,
-                    data=json.dumps(
-                        {
-                            "room_id": room_id,
-                            "owner_instance_id": room.owner_instance_id,
-                            "tree_root_id": room.tree_root_id,
-                            "messages_purged": message_count,
-                            "members_purged": member_count,
-                        }
-                    ),
-                    created_at=datetime.now(timezone.utc),
                 )
-            )
-            # (3) child-first — the NO ACTION FKs demand it.
-            session.execute(
-                sql_text("DELETE FROM room_messages WHERE room_id = :r").bindparams(
-                    r=room_id
+                session.execute(
+                    sql_text(
+                        "DELETE FROM chatrooms WHERE room_id = :r"
+                    ).bindparams(r=room_id)
                 )
-            )
-            session.execute(
-                sql_text(
-                    "DELETE FROM chatroom_members WHERE room_id = :r"
-                ).bindparams(r=room_id)
-            )
-            session.execute(
-                sql_text("DELETE FROM chatrooms WHERE room_id = :r").bindparams(
-                    r=room_id
-                )
-            )
-            session.commit()
+                session.commit()
+        except IntegrityError as exc:
+            # Uniform typed wrap (create/append precedent): the purge
+            # is child-first so an integrity failure here is abnormal —
+            # surface it typed, never raw.
+            raise RoomError(
+                f"purge integrity failure for room={room_id}: {exc}"
+            ) from exc
         logger.info(
             "room purge complete: room=%s reason=%s messages=%d members=%d",
             room_id,

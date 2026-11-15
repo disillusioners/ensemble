@@ -31,6 +31,7 @@ from typing import Iterator
 import pytest
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import NullPool
 from sqlmodel import Session, SQLModel, select
 
@@ -203,9 +204,8 @@ def test_member_name_collision_typed_mapping(repo):
     """The ``UNIQUE(room_id, member_name)`` mapping recognizes BOTH
     driver message shapes (SQLite constraint-columns form + PG
     constraint-name form) — P2's suffix registry depends on the typed
-    refusal."""
-    from sqlalchemy.exc import IntegrityError
-
+    refusal. R1: fingerprints ONLY — a composite-PK duplicate (either
+    driver shape) must NOT map to the name-collision type."""
     sqlite_shaped = IntegrityError(
         "stmt", {},
         Exception(
@@ -230,6 +230,79 @@ def test_member_name_collision_typed_mapping(repo):
     with pytest.raises(RoomError) as excinfo:
         repo._raise_typed_integrity(unrelated, "room-1", "lead")
     assert not isinstance(excinfo.value, MemberNameCollisionError)
+
+    # R1 PK-dup legs — a duplicate composite-PK membership insert (the
+    # (room_id, instance_id) PK, NOT the name backstop) falls back to
+    # the base RoomError on BOTH driver shapes.
+    pk_dup_sqlite = IntegrityError(
+        "stmt", {},
+        Exception(
+            "UNIQUE constraint failed: chatroom_members.room_id, "
+            "chatroom_members.instance_id"
+        ),
+    )
+    with pytest.raises(RoomError) as excinfo:
+        repo._raise_typed_integrity(pk_dup_sqlite, "room-1", "lead")
+    assert not isinstance(excinfo.value, MemberNameCollisionError)
+
+    pk_dup_pg = IntegrityError(
+        "stmt", {},
+        Exception(
+            'duplicate key value violates unique constraint '
+            '"chatroom_members_pkey"'
+        ),
+    )
+    with pytest.raises(RoomError) as excinfo:
+        repo._raise_typed_integrity(pk_dup_pg, "room-1", "lead")
+    assert not isinstance(excinfo.value, MemberNameCollisionError)
+
+
+def test_append_integrity_fk_violation_is_not_seq_conflict(repo):
+    """R2 classification pin: ONLY the ``UNIQUE(room_id, seq)``
+    fingerprints (named constraint / dotted-pair columns) map to
+    :class:`RoomSeqConflictError`. An FK violation — either driver
+    shape — must NOT surface as a seq conflict; it falls back to the
+    base :class:`RoomError` with the ``from exc`` chain kept."""
+    # FK shapes — SQLite bare message + PG named-FK message.
+    fk_sqlite = IntegrityError(
+        "stmt", {}, Exception("FOREIGN KEY constraint failed")
+    )
+    with pytest.raises(RoomError) as excinfo:
+        repo._raise_typed_append_integrity(fk_sqlite, "room-1")
+    assert not isinstance(excinfo.value, RoomSeqConflictError)
+    assert excinfo.value.__cause__ is fk_sqlite  # `from exc` chaining kept
+
+    fk_pg = IntegrityError(
+        "stmt", {},
+        Exception(
+            'insert or update on table "room_messages" violates '
+            'foreign key constraint "room_messages_room_id_fkey"'
+        ),
+    )
+    with pytest.raises(RoomError) as excinfo:
+        repo._raise_typed_append_integrity(fk_pg, "room-1")
+    assert not isinstance(excinfo.value, RoomSeqConflictError)
+
+    # The seq-conflict shapes still map typed (non-vacuous control).
+    seq_sqlite = IntegrityError(
+        "stmt", {},
+        Exception(
+            "UNIQUE constraint failed: room_messages.room_id, "
+            "room_messages.seq"
+        ),
+    )
+    with pytest.raises(RoomSeqConflictError):
+        repo._raise_typed_append_integrity(seq_sqlite, "room-1")
+
+    seq_pg = IntegrityError(
+        "stmt", {},
+        Exception(
+            'duplicate key value violates unique constraint '
+            '"uq_room_messages_room_seq"'
+        ),
+    )
+    with pytest.raises(RoomSeqConflictError):
+        repo._raise_typed_append_integrity(seq_pg, "room-1")
 
 
 def test_member_name_unique_backstop_at_db_level(engine, repo, tree, room_id):
