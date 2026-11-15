@@ -154,7 +154,7 @@ from .services.title_generation import TitleGenerationService
 # agent group chat P2: room chat service (per-room locks + admission)
 # and the member naming service (D-S3 cascade tiers 2-3).
 from .services.room_naming import RoomNamingService
-from .services.room_delivery import RoomDeliveryService  # group chat P3 delivery router
+from .services.room_delivery import RoomDeliveryService  # agent group chat P3 — delivery router
 from .repositories.room.service import RoomChatService
 from .services.event_publisher import EventPublisherService
 from .services.skill_embedding_service import SkillEmbeddingService
@@ -2395,7 +2395,7 @@ class InstanceManager:
             manager=self,
             logger=logger,
         )
-        # group chat P3 — delivery router (lane map + addressing +
+        # agent group chat P3 — delivery router (lane map + addressing +
         # Ruling-A proposals). Depends on the room chat service + the
         # manager facade.
         self._room_delivery_service = RoomDeliveryService(
@@ -4864,7 +4864,7 @@ class InstanceManager:
                 exc_info=True,
             )
 
-        # ── Agent group chat P3 — room boot delivery pass ──────────
+        # ── agent group chat P3 — room boot delivery pass ──────────
         # Re-uses the P1 re-derivation predicate (seq >
         # max(last_read_seq, last_delivered_seq)) and routes tagged
         # undelivered rows per the total 10-state lane map. Proposals
@@ -8842,7 +8842,7 @@ class InstanceManager:
                 "ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS "
                 "instance_metadata JSONB"
             ),
-            # Agent group chat P3 (2026-11-15): room_messages proposal-dedup
+            # agent group chat P3 (2026-11-15): room_messages proposal-dedup
             # columns + unique index (source_message_id / trigger / member).
             # Fresh PG databases get them from SQLModel.metadata.create_all()
             # via the RoomMessage SQLModel declaration; existing databases
