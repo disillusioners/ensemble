@@ -5,11 +5,7 @@ lineage-tuple normalization. Counter-mutants named per the house rule
 (mutation-01-guards-need-counter-mutation).
 """
 import hashlib
-import json
 import os
-import sys
-import textwrap
-from pathlib import Path
 
 import pytest
 
@@ -50,7 +46,7 @@ def _make_proc_tree(tmp_path, tcp_text, tcp6_text=None, holders=None, include_ne
                 (pd / "cwd").symlink_to(cwd)
             except FileExistsError:
                 pass
-        # cmdline for ppid (best-effort; not used by holder walk itself)
+        # no cmdline fixture — the holder walk itself never reads one
     return proc
 
 
@@ -165,8 +161,6 @@ def test_AH8_recycled_pid_degrade(tmp_path, monkeypatch):
 def test_AH14_holder_vanishes_between_samples_no_refusal(monkeypatch):
     """AH-14 / mutants AH-M14 + AH-M15: sample2 must FULL re-walk;
     a pid alive whose socket closed must NOT confirm."""
-    import daemon.services.port_holder as ph_mod
-
     holder = ph.HolderRef(pid=4242, starttime=123, exe="/f", cwd="/f",
                           install_dir="/foreign", inode="999")
     calls = {"n": 0}
@@ -177,11 +171,10 @@ def test_AH14_holder_vanishes_between_samples_no_refusal(monkeypatch):
             return [holder]
         return []  # vanished
 
-    monkeypatch.setattr(ph_mod, "find_listener_holders", fake_find)
-    monkeypatch.setattr(ph_mod, "time", ph_mod.time)
+    monkeypatch.setattr(ph, "find_listener_holders", fake_find)
     import time as _t
     monkeypatch.setattr(_t, "sleep", lambda s: None)
-    assert ph_mod.confirm_holder(holder, "/proc", 18800, delay=0) is False
+    assert ph.confirm_holder(holder, "/proc", 18800, delay=0) is False
 
 
 def test_AH14_liveness_only_sample2_would_false_confirm(monkeypatch):
@@ -191,16 +184,14 @@ def test_AH14_liveness_only_sample2_would_false_confirm(monkeypatch):
     # Documented counter-mutant; the real confirm_holder requires the inode
     # to still be present in a fresh LISTEN row, so this asserts the
     # positive shape is full-rewalk.
-    import daemon.services.port_holder as ph_mod
-
     holder = ph.HolderRef(pid=4242, starttime=123, exe="/f", cwd="/f",
                           install_dir="/foreign", inode="999")
     # sample2 returns holder with same pid/starttime but we mark inode gone
     # by returning empty -> must not confirm
-    monkeypatch.setattr(ph_mod, "find_listener_holders", lambda pr, port, exclude_pid=None: [])
+    monkeypatch.setattr(ph, "find_listener_holders", lambda pr, port, exclude_pid=None: [])
     import time as _t
     monkeypatch.setattr(_t, "sleep", lambda s: None)
-    assert ph_mod.confirm_holder(holder, "/proc", 18800, delay=0) is False
+    assert ph.confirm_holder(holder, "/proc", 18800, delay=0) is False
 
 
 def test_AH8b_confirm_rejects_recycled_pid_same_inode(monkeypatch):
@@ -209,21 +200,18 @@ def test_AH8b_confirm_rejects_recycled_pid_same_inode(monkeypatch):
     the fresh-match requires starttime equality. Real live pid + real
     /proc liveness (no monkeypatch on pid_alive_with_starttime), so AH-M8b
     (starttime dropped from the match) WOULD confirm and reddens this pin."""
-    import daemon.services.port_holder as ph_mod
-    import daemon.services.port_ownership as po_mod
-
     pid = os.getpid()
-    real_st = po_mod._read_starttime(pid)
+    real_st = po._read_starttime(pid)
     assert real_st is not None
     holder1 = ph.HolderRef(pid=pid, starttime=real_st, exe="/f", cwd="/f",
                            install_dir="/foreign", inode="777")
     holder2 = ph.HolderRef(pid=pid, starttime=real_st - 1, exe="/f", cwd="/f",
                            install_dir="/foreign", inode="777")
-    monkeypatch.setattr(ph_mod, "find_listener_holders",
+    monkeypatch.setattr(ph, "find_listener_holders",
                         lambda proc_root, port, exclude_pid=None: [holder2])
     import time as _t
     monkeypatch.setattr(_t, "sleep", lambda s: None)
-    assert ph_mod.confirm_holder(holder1, "/proc", 18800, delay=0) is False
+    assert ph.confirm_holder(holder1, "/proc", 18800, delay=0) is False
 
 
 def test_AH15_liveness_only_live_pid_would_confirm(monkeypatch):
@@ -232,20 +220,17 @@ def test_AH15_liveness_only_live_pid_would_confirm(monkeypatch):
     whose socket closed; the shipped full-rewalk must NOT. This fixture is
     the discriminator the fake-dead-pid AH-14 fixture could not provide
     (the tail liveness check shielded every liveness-only mutant there)."""
-    import daemon.services.port_holder as ph_mod
-    import daemon.services.port_ownership as po_mod
-
     pid = os.getpid()
-    real_st = po_mod._read_starttime(pid)
+    real_st = po._read_starttime(pid)
     holder = ph.HolderRef(pid=pid, starttime=real_st, exe="/f", cwd="/f",
                           install_dir="/foreign", inode="888")
     # confirm_holder's internal find IS the sample-2 re-walk: the socket has
     # closed, so the fresh walk finds NOTHING — but the pid is still alive.
-    monkeypatch.setattr(ph_mod, "find_listener_holders",
+    monkeypatch.setattr(ph, "find_listener_holders",
                         lambda proc_root, port, exclude_pid=None: [])
     import time as _t
     monkeypatch.setattr(_t, "sleep", lambda s: None)
-    assert ph_mod.confirm_holder(holder, "/proc", 18800, delay=0) is False
+    assert ph.confirm_holder(holder, "/proc", 18800, delay=0) is False
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +258,6 @@ def test_AH15_normalize_script_name_arg():
     # python -m daemon -> daemon (first non-flag after interpreter)
     assert normalize_lineage_token(["python", "-m", "daemon"]) == "daemon"
     # mutant "hash full argv" would differ for --foo variant
-    import hashlib
     full = hashlib.sha256(" ".join(["bash", "launcher.sh", "--foo"]).encode()).hexdigest()
     assert full != h1
 

@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from daemon.services import port_holder as ph
 from daemon.services import port_ownership as po
 from daemon.services.port_ownership import (
     PortClaim,
@@ -45,6 +46,25 @@ def _plant_claim(claims_dir: Path, port: int, install_dir, pid=None, starttime=N
         "port": port,
         "host": host,
         "claimed_at": "now",
+    }))
+    return path
+
+
+def _plant_claim_v2(claims_dir: Path, port: int, install_dir, *, sha, ppid, head="x",
+                    pid=None, starttime=None, host="0.0.0.0"):
+    """Plant a v2 claim (full lineage trio: ppid / ppid_cmdline_sha / head)."""
+    claims_dir.mkdir(parents=True, exist_ok=True)
+    path = po._claim_path(claims_dir, host, port)
+    path.write_text(json.dumps({
+        "install_dir": install_dir,
+        "pid": os.getpid() if pid is None else pid,
+        "starttime": _self_st() if starttime is None else starttime,
+        "port": port,
+        "host": host,
+        "claimed_at": "now",
+        "ppid": ppid,
+        "ppid_cmdline_sha": sha,
+        "ppid_cmdline_head": head,
     }))
     return path
 
@@ -340,8 +360,6 @@ def test_N3_gate_never_writes_under_the_install_root(tmp_path, monkeypatch):
 
 
 def _mk_holder(pid=4242, starttime=123, install="/foreign-install", self_install=None):
-    import daemon.services.port_holder as ph
-
     h = ph.HolderRef(pid=pid, starttime=starttime, exe=f"{install}/bin",
                      cwd=install, install_dir=install, inode="999")
     return h
@@ -353,8 +371,6 @@ def test_AH1_foreign_holder_without_claim_refuses(tmp_path, monkeypatch, caplog)
     claims_dir.mkdir()
     monkeypatch.setenv("ENSEMBLE_PORT_CLAIMS_DIR", str(claims_dir))
     monkeypatch.setattr(po, "resolve_self_install_dir", lambda: tmp_path / "self-install")
-    import daemon.services.port_holder as ph
-
     holder = _mk_holder(install=str(tmp_path / "foreign-install"))
     monkeypatch.setattr(ph, "find_listener_holders", lambda proc_root, port, exclude_pid=None: [holder])
     monkeypatch.setattr(ph, "confirm_holder", lambda h, proc_root="/proc", port=0, delay=0: True)
@@ -388,8 +404,6 @@ def test_AH4_stale_claim_plus_foreign_holder_refuses(tmp_path, monkeypatch):
                  starttime=(_self_st() or 0) + 9999)
     monkeypatch.setenv("ENSEMBLE_PORT_CLAIMS_DIR", str(claims_dir))
     monkeypatch.setattr(po, "resolve_self_install_dir", lambda: tmp_path / "self-install")
-    import daemon.services.port_holder as ph
-
     holder = _mk_holder(pid=os.getpid(), starttime=po._read_starttime(os.getpid()),
                         install=str(tmp_path / "foreign-install"))
     monkeypatch.setattr(ph, "find_listener_holders", lambda proc_root, port, exclude_pid=None: [holder])
@@ -419,8 +433,6 @@ def test_AH8_gate_stale_holder_degrades_with_warning(tmp_path, monkeypatch, capl
     self_install.mkdir()
     monkeypatch.setenv("ENSEMBLE_PORT_CLAIMS_DIR", str(claims_dir))
     monkeypatch.setattr(po, "resolve_self_install_dir", lambda: self_install)
-    import daemon.services.port_holder as ph
-
     # this process IS live, but starttime=7 cannot match the real one =>
     # deterministically stale under the real pid_alive_with_starttime check
     holder = _mk_holder(pid=os.getpid(), starttime=7,
@@ -442,8 +454,6 @@ def test_AH5_same_install_holder_non_refuse(tmp_path, monkeypatch):
     self_install.mkdir()
     monkeypatch.setenv("ENSEMBLE_PORT_CLAIMS_DIR", str(claims_dir))
     monkeypatch.setattr(po, "resolve_self_install_dir", lambda: self_install)
-    import daemon.services.port_holder as ph
-
     holder = _mk_holder(install=str(self_install))
     holder.install_dir = str(self_install)
     monkeypatch.setattr(ph, "find_listener_holders", lambda proc_root, port, exclude_pid=None: [holder])
@@ -464,8 +474,6 @@ def test_AH3_degrade_tables_absent_no_refusal(tmp_path, monkeypatch):
     self_install.mkdir()
     monkeypatch.setenv("ENSEMBLE_PORT_CLAIMS_DIR", str(claims_dir))
     monkeypatch.setattr(po, "resolve_self_install_dir", lambda: self_install)
-    import daemon.services.port_holder as ph
-
     monkeypatch.setattr(ph, "find_listener_holders", lambda proc_root, port, exclude_pid=None: [])
 
     po.run_port_ownership_gate("127.0.0.1", 18814)
@@ -480,8 +488,6 @@ def test_AH14_holder_vanishes_no_refusal(tmp_path, monkeypatch):
     self_install.mkdir()
     monkeypatch.setenv("ENSEMBLE_PORT_CLAIMS_DIR", str(claims_dir))
     monkeypatch.setattr(po, "resolve_self_install_dir", lambda: self_install)
-    import daemon.services.port_holder as ph
-
     holder = _mk_holder(install=str(tmp_path / "foreign-install"))
     holder.install_dir = str(tmp_path / "foreign-install")
     calls = {"n": 0}
@@ -511,20 +517,7 @@ def test_AH9_lineage_matching_non_refuse(tmp_path, monkeypatch):
     argv = po.read_parent_cmdline(ppid)
     sha = po.lineage_token_hash(argv)
     # plant a v2 claim with matching lineage
-    import json as _j
-    path = po._claim_path(claims_dir, "0.0.0.0", 18816)
-    claims_dir.mkdir(exist_ok=True)
-    path.write_text(_j.dumps({
-        "install_dir": str(self_install),
-        "pid": os.getpid(),
-        "starttime": po._read_starttime(os.getpid()),
-        "port": 18816,
-        "host": "0.0.0.0",
-        "claimed_at": "now",
-        "ppid": ppid,
-        "ppid_cmdline_sha": sha,
-        "ppid_cmdline_head": "x",
-    }))
+    _plant_claim_v2(claims_dir, 18816, str(self_install), sha=sha, ppid=ppid)
     # monkeypatch _read_ppid/read_parent_cmdline to keep self lineage stable
     monkeypatch.setattr(po, "_read_ppid", lambda pid: ppid)
     monkeypatch.setattr(po, "read_parent_cmdline", lambda pid: argv)
@@ -542,20 +535,7 @@ def test_AH10_lineage_mismatch_refuses(tmp_path, monkeypatch):
     monkeypatch.setattr(po, "resolve_self_install_dir", lambda: self_install)
     ppid = po._read_ppid(os.getpid())
     argv = po.read_parent_cmdline(ppid)
-    path = po._claim_path(claims_dir, "0.0.0.0", 18817)
-    claims_dir.mkdir(exist_ok=True)
-    import json as _j
-    path.write_text(_j.dumps({
-        "install_dir": str(self_install),
-        "pid": os.getpid(),
-        "starttime": po._read_starttime(os.getpid()),
-        "port": 18817,
-        "host": "0.0.0.0",
-        "claimed_at": "now",
-        "ppid": ppid,
-        "ppid_cmdline_sha": "0" * 64,  # mismatched
-        "ppid_cmdline_head": "x",
-    }))
+    _plant_claim_v2(claims_dir, 18817, str(self_install), sha="0" * 64, ppid=ppid)  # mismatched
     monkeypatch.setattr(po, "_read_ppid", lambda pid: ppid)
     monkeypatch.setattr(po, "read_parent_cmdline", lambda pid: argv)
 
@@ -590,20 +570,7 @@ def test_AH12_self_parent_unreadable_non_refuse(tmp_path, monkeypatch):
     monkeypatch.setenv("ENSEMBLE_PORT_CLAIMS_DIR", str(claims_dir))
     monkeypatch.setattr(po, "resolve_self_install_dir", lambda: self_install)
     ppid = po._read_ppid(os.getpid())
-    path = po._claim_path(claims_dir, "0.0.0.0", 18819)
-    claims_dir.mkdir(exist_ok=True)
-    import json as _j
-    path.write_text(_j.dumps({
-        "install_dir": str(self_install),
-        "pid": os.getpid(),
-        "starttime": po._read_starttime(os.getpid()),
-        "port": 18819,
-        "host": "0.0.0.0",
-        "claimed_at": "now",
-        "ppid": ppid,
-        "ppid_cmdline_sha": "0" * 64,
-        "ppid_cmdline_head": "x",
-    }))
+    _plant_claim_v2(claims_dir, 18819, str(self_install), sha="0" * 64, ppid=ppid)
     # make self-parent unreadable
     monkeypatch.setattr(po, "read_parent_cmdline", lambda pid: None)
     monkeypatch.setattr(po, "_read_ppid", lambda pid: None)
@@ -633,13 +600,13 @@ def test_LH2_surface_carries_family_source(tmp_path, monkeypatch, caplog):
     assert list(claims_dir.glob("port-ownership-refusal.json.seen-*"))
 
 
-def test_LH1_write_refusal_family_record_best_effort(tmp_path, monkeypatch, caplog):
+def test_LH1_write_refusal_family_record_best_effort(monkeypatch, caplog):
     """LH-1 / mutant LH-M1: best-effort write never raises; unresolvable
     data dir => log-only."""
     import daemon.__main__ as dm
     # force write_refusal_marker to raise
     monkeypatch.setattr(po, "write_refusal_marker", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
-    monkeypatch.setattr(po, "resolve_claims_dir", lambda: tmp_path if False else __import__("pathlib").Path("/tmp"))
+    monkeypatch.setattr(po, "resolve_claims_dir", lambda: Path("/tmp"))
     # should not raise
     dm._write_refusal_family_record(family="auth-config", source="auth-config-preflight", detail="x")
 
@@ -647,7 +614,6 @@ def test_LH1_write_refusal_family_record_best_effort(tmp_path, monkeypatch, capl
 def test_LH3_watchdog_refusal_marker_latch(tmp_path):
     """LH-3 / mutant LH-M3: watchdog watch-set includes the family marker path;
     latch fires once per occurrence. Mirrors tests/test_watchdog_watcher.sh shape."""
-    import subprocess
     inst = tmp_path / "inst"
     (inst / "data").mkdir(parents=True)
     # claims dir under tmp (host-global per-uid override)
