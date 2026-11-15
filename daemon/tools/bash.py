@@ -1,10 +1,17 @@
 """Bash execution tool for running shell commands."""
 
+# Module-band rationale: one module by design (~2050 lines) — the bash tool
+# coroutine (execution, streaming, timeout), the env fencing / secret-scrub
+# resolver, the pkill-overlay live-pattern predicate, and its static pattern
+# tables form one cohesive safety envelope; splitting them would scatter a
+# single gate across files.
+
 import asyncio
 import json
 import logging
 import os
 import re
+import re as _re
 import signal
 import sys
 import tempfile
@@ -1353,9 +1360,8 @@ async def bash(
             "This guard prevents agent-issued bash from killing live "
             "ensemble processes/ports/install roots. To run such a command "
             "inside a fenced (scratch) test mirror, set "
-            "ENSEMBLE_FENCED_TEST_CONTEXT=1 in the tool env "
-            '(env={"ENSEMBLE_FENCED_TEST_CONTEXT": "1"}) or in the daemon '
-            "environment — only inside a fenced mirror. Scratch-sentinel/"
+            "ENSEMBLE_FENCED_TEST_CONTEXT=1 in the daemon environment — "
+            "only inside a fenced mirror. Scratch-sentinel/"
             "scratch-named targets are allowed without the marker."
         )
     try:
@@ -1970,11 +1976,10 @@ Returns:
 #     mutating verbs (stop/restart/kill/disable/mask/reload/daemon-reload/
 #     enable/start/try-restart/isolate) are gated.
 #
-# Live patterns (iter-1 D2a adds ensemble-main, ensemble-demo):
+# Live patterns (iter-1 D2a adds ensemble-main, ensemble-demo; A1 adds
+# "\b7979\b"):
 #   "ensemble-prod", "ensemble-daemon", "ensemble-main", "ensemble-demo",
-#   "\b9797\b", "\b9798\b", "agents-ensemble"
-
-import re as _re
+#   "\b9797\b", "\b9798\b", "\b7979\b", "agents-ensemble"
 
 _PKILL_OVERLAY_LIVE_NAME_PATTERNS: tuple[str, ...] = (
     "ensemble-prod",
@@ -2040,8 +2045,12 @@ def _pkill_overlay_violation(command, env=None) -> str | None:
     for name in _PKILL_OVERLAY_LIVE_NAME_PATTERNS:
         if name in lower:
             return name
-    # port tokens as whole words
-    for port_num, port_pat in (("9797", r"\b9797\b"), ("9798", r"\b9798\b")):
+    # port tokens as whole words (A1 hygiene: demo port 7979 joins)
+    for port_num, port_pat in (
+        ("9797", r"\b9797\b"),
+        ("9798", r"\b9798\b"),
+        ("7979", r"\b7979\b"),
+    ):
         if _re.search(port_pat, lower):
             return port_num
     return None

@@ -1394,13 +1394,20 @@ class WorkerPool:
         # Tests can wait on this to synchronize with workers entering wait state
         self._wait_for_work_called = threading.Event()
     
-    def notify_work(self) -> None:
-        """Signal that new work is available. Safe to call from any thread."""
+    def notify_work(self) -> bool:
+        """Signal that new work is available. Safe to call from any thread.
+
+        Returns:
+            ``True`` — a pulse was delivered (condition notified and
+            ``notifications_sent`` incremented). Always ``True`` on
+            success; the method does not fail silently.
+        """
         with self._condition:
             self._notification_count += 1
             self._condition.notify()
         with self._stats_lock:
             self._stats["notifications_sent"] += 1
+        return True
 
     def incr_stat(self, key: str, delta: int = 1) -> None:
         """Atomically increment a counter in ``_stats``.

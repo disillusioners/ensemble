@@ -1,3 +1,8 @@
+"""Daemon entrypoint (``python -m daemon``).
+
+Runs the boot preflight port-ownership gate (claim + socket-holder refusal
+family, exit 78) and the wrapper regions that assemble and launch the
+daemon application."""
 import logging
 import os
 import sys
@@ -172,6 +177,41 @@ def _pg_sqlstate(exc: BaseException) -> "str | None":
     return None
 
 
+def _write_refusal_family_record(*, family: str, source: str, detail: str = "") -> None:
+    """Best-effort durable refusal-family record (A2 §5.8).
+
+    Writes the shared refusal record (claims-dir co-location — ONE namespace,
+    ONE reader path) so the whole exit-78 refusal family surfaces exactly
+    once on the next boot. NEVER raises and NEVER changes the exit path: a
+    write failure degrades to log-only (the WARNING/ERROR lines already carry
+    the identity).
+    """
+    try:
+        from .services.port_ownership import (
+            resolve_claims_dir,
+            write_refusal_marker,
+        )
+
+        claims_dir = resolve_claims_dir()
+        write_refusal_marker(
+            claims_dir,
+            holder=None,
+            self_install_dir=None,
+            port=None,
+            host="",
+            family=family,
+            source=source,
+            evidence=(detail[:200] if detail else None),
+        )
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - best-effort, never block the exit
+        try:
+            logger.warning("refusal family record not written (%s/%s): %s", family, source, exc)
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+
 def _boot_db_preflight() -> None:
     """Boot preflight: PostgreSQL reachability check (Phase 1, ADR-011).
 
@@ -208,12 +248,31 @@ def _boot_db_preflight() -> None:
             or os.environ.get("DATA_DIR")
             or "./data"
         )
-        from .ensemble_config import assert_db_resolution_sanctioned
+        from .ensemble_config import (
+            assert_db_resolution_sanctioned,
+            assert_prod_dsn_sanctioned,
+        )
         assert_db_resolution_sanctioned(data_dir)
         ensemble_config = EnsembleConfig.load_or_create(data_dir)
         if not ensemble_config.is_postgres:
             logger.debug("Boot preflight: SQLite backend — PG check skipped")
             return
+
+        # rogue-containment p2 (component B2): the tier-1 prod-DSN fence.
+        # The ambient tier-2 guard above short-circuits on json-present;
+        # this post-load gate refuses a boot whose RESOLVED DSN (env-wins)
+        # targets ensemble_prod unless identity is live — BEFORE the
+        # connectivity probe constructs any engine (pre-TCP; this
+        # preflight is the exit-78 owner on both entry paths).
+        try:
+            assert_prod_dsn_sanctioned(ensemble_config)
+        except SystemExit as _exc:
+            if getattr(_exc, "code", None) == 78:
+                _write_refusal_family_record(
+                    family="prod-dsn", source="prod-dsn-preflight",
+                    detail="resolved DSN targets ensemble_prod",
+                )
+            raise
 
         from .constants import BOOT_DB_TIMEOUT_S
         from sqlalchemy import create_engine, text
@@ -269,6 +328,10 @@ def _boot_db_preflight() -> None:
                     "retrying cannot fix credentials",
                     sqlstate,
                     exc,
+                )
+                _write_refusal_family_record(
+                    family="db-auth", source="db-auth-preflight",
+                    detail=f"sqlstate={sqlstate}",
                 )
                 sys.exit(_EXIT_BOOT_DB_AUTH_REFUSED)
             logger.error(
@@ -339,6 +402,10 @@ def _boot_auth_config_preflight() -> None:
         "  → exiting %d (EX_CONFIG); launcher must NOT retry — "
         "restarting cannot fix a config refusal",
         _EXIT_BOOT_AUTH_CONFIG_REFUSED,
+    )
+    _write_refusal_family_record(
+        family="auth-config", source="auth-config-preflight",
+        detail="; ".join(refusals),
     )
     sys.exit(_EXIT_BOOT_AUTH_CONFIG_REFUSED)
 
@@ -487,6 +554,40 @@ def _serve_with_bind_retry(uvicorn_config, max_wait_s: float | None = None) -> N
     # retry); stated here because it is a real change, not a parity.
     try:
         sock = bind_socket_with_retry(host, port, max_wait_s=max_wait_s)
+    except SystemExit as _bind_exit:
+        # Exhaustion path (placement-b, D-A2-6): ATTRIBUTION-ONLY. The
+        # bind proved live contention at this instant; run the holder
+        # discovery once, log the attribution, re-raise UNCHANGED (exit
+        # stays BIND_FAILURE_EXIT_CODE=1 — never refuse here).
+        try:
+            from .services import port_holder as _ph
+
+            _holders = _ph.find_listener_holders("/proc", port)
+            if _holders:
+                _h = _holders[0]
+                logger.error(
+                    "BIND EXHAUSTED (attribution): port=%s host=%s "
+                    "holder_pid=%s holder_exe=%s holder_cwd=%s "
+                    "holder_install=%s (bind proved contention; exit %s)",
+                    port,
+                    host,
+                    _h.pid,
+                    _h.exe,
+                    _h.cwd,
+                    _h.install_dir,
+                    getattr(_bind_exit, "code", 1),
+                )
+            else:
+                logger.error(
+                    "BIND EXHAUSTED (attribution): port=%s host=%s — no "
+                    "holder discovered (degrade); exit %s",
+                    port,
+                    host,
+                    getattr(_bind_exit, "code", 1),
+                )
+        except Exception as _exc:  # noqa: BLE001 - best-effort
+            logger.warning("bind-exhaustion attribution unavailable: %s", _exc)
+        raise
     except KeyboardInterrupt:
         logger.info(
             "Boot interrupted during the listener bind wait — exiting as a "

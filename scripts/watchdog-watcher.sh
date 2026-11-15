@@ -37,7 +37,7 @@
 # attaches HERE — same site, replace the notify body only.
 #
 # P2.3 B4 / T8b (ADR-025(b)) — daemon-independent alert sources: besides
-# /livez, the watcher file-watches two daemon-DOWN channels, readable
+# /livez, the watcher file-watches THREE daemon-DOWN channels, readable
 # without the daemon process:
 #   (a) the launcher's state file — the burst-abort marker (last_exit=1 +
 #       crash_count > BUDGET_MAX_CRASHES, launcher.sh budget_tick/
@@ -46,10 +46,16 @@
 #       parse → classic $INSTALL_DIR/.launcher-state, design §v);
 #   (b) INSTALL_DIR/releases/state.json — journal halt (halt_for_human)
 #       and sweep_rollback history events (the same terminal classes the
-#       in-daemon SSE emits; plain sweep-clears stay quiet, R3.4).
+#       in-daemon SSE emits; plain sweep-clears stay quiet, R3.4);
+#   (d) the refusal-family marker file (port-ownership-refusal.json) —
+#       co-located with the claims dir (ENSEMBLE_PORT_CLAIMS_DIR >
+#       $XDG_RUNTIME_DIR/ensemble-port-claims > /tmp/ensemble-port-claims-<uid>);
+#       one notify per refusal occurrence (latched by refused_at). Written
+#       by EVERY exit-78 refusal site (port-ownership claim/holder/lineage,
+#       prod-DSN, auth-config, DB-auth) — best-effort, claims-dir namespace.
 # All file reads are BEST-EFFORT: absent/invalid files are skipped
 # silently — the watcher must survive partially-deployed envs where
-# releases/ or .launcher-state do not exist yet (P2.1 pre-T4 installs).
+# releases/ or .launcher-state or the claims dir do not exist yet.
 # Watch-set paths derive from the SAME INSTALL_DIR/env as Phase 1 — no
 # new defaults, no port literals; a LIVE watcher install stays USER-GATED
 # (promotion ladder U6: duplicate the plist per env only on explicit
@@ -316,6 +322,23 @@ _resolve_launcher_state_file() {
 }
 LAUNCHER_STATE_FILE="$(_resolve_launcher_state_file)"
 
+# ── Refusal-family marker resolution (A2 §5.8) ─────────────────────────────
+# Mirrors daemon/services/port_ownership.py resolve_claims_dir():
+#   ENSEMBLE_PORT_CLAIMS_DIR > $XDG_RUNTIME_DIR/ensemble-port-claims >
+#   /tmp/ensemble-port-claims-<uid>. The marker file is co-located there.
+_resolve_refusal_marker_file() {
+    local d=""
+    if [ -n "${ENSEMBLE_PORT_CLAIMS_DIR:-}" ]; then
+        d="$ENSEMBLE_PORT_CLAIMS_DIR"
+    elif [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+        d="$XDG_RUNTIME_DIR/ensemble-port-claims"
+    else
+        d="/tmp/ensemble-port-claims-$(id -u)"
+    fi
+    printf '%s' "$d/port-ownership-refusal.json"
+}
+REFUSAL_MARKER_FILE="$(_resolve_refusal_marker_file)"
+
 # ── State I/O ───────────────────────────────────────────────────────────────
 read_state() {
     FIRST_MISS_AT=0
@@ -401,6 +424,7 @@ read_alert_state() {
     ABORT_SEEN=0
     JOURNAL_SEEN=0
     FLIPPED_ORPHAN_SEEN=0
+    REFUSAL_SEEN=""
     [ -f "$ALERT_STATE_FILE" ] || return 0
     local line
     while IFS= read -r line || [ -n "$line" ]; do
@@ -408,6 +432,7 @@ read_alert_state() {
             abort_seen=*)   [[ "${line#abort_seen=}" =~ ^[0-9]+$ ]] && ABORT_SEEN="${line#abort_seen=}" ;;
             journal_seen=*) [[ "${line#journal_seen=}" =~ ^[0-9]+$ ]] && JOURNAL_SEEN="${line#journal_seen=}" ;;
             flipped_orphan_seen=*) [[ "${line#flipped_orphan_seen=}" =~ ^[0-9]+$ ]] && FLIPPED_ORPHAN_SEEN="${line#flipped_orphan_seen=}" ;;
+            refusal_seen=*) REFUSAL_SEEN="${line#refusal_seen=}" ;;
         esac
     done < "$ALERT_STATE_FILE"
     return 0
@@ -416,7 +441,7 @@ read_alert_state() {
 write_alert_state() {
     [ -n "$ALERT_STATE_FILE" ] || return 0
     local tmp="${ALERT_STATE_FILE}.tmp.$$"
-    printf 'abort_seen=%s\njournal_seen=%s\nflipped_orphan_seen=%s\n' "$ABORT_SEEN" "$JOURNAL_SEEN" "$FLIPPED_ORPHAN_SEEN" \
+    printf 'abort_seen=%s\njournal_seen=%s\nflipped_orphan_seen=%s\nrefusal_seen=%s\n' "$ABORT_SEEN" "$JOURNAL_SEEN" "$FLIPPED_ORPHAN_SEEN" "$REFUSAL_SEEN" \
         > "$tmp" 2>/dev/null \
         && mv -f "$tmp" "$ALERT_STATE_FILE" 2>/dev/null \
         || { _log "WARN: could not persist watchdog alert state to $ALERT_STATE_FILE"; rm -f "$tmp" 2>/dev/null; }
@@ -573,6 +598,30 @@ check_flipped_orphan() {
     return 0
 }
 
+# (d) refusal-family marker: one notify per refusal occurrence, latched by
+# refused_at. The marker is written by every exit-78 refusal site (port-
+# ownership claim/holder/lineage, prod-DSN, auth-config, DB-auth) and
+# rotated (.seen-*) by the next boot's surface_refusal_marker — so an
+# absent file re-arms silently.
+check_refusal_marker() {
+    local f="$REFUSAL_MARKER_FILE" refused_at
+    if [ ! -f "$f" ]; then
+        if [ -n "${REFUSAL_SEEN:-}" ]; then
+            REFUSAL_SEEN=""
+            write_alert_state
+        fi
+        return 0
+    fi
+    refused_at="$(grep -oE '"refused_at": *"[^"]*"' "$f" 2>/dev/null | head -1 | sed 's/.*: *"//; s/"$//')"
+    [ -n "$refused_at" ] || refused_at="$(head -c 64 "$f" 2>/dev/null)"
+    if [ "$refused_at" != "${REFUSAL_SEEN:-}" ]; then
+        REFUSAL_SEEN="$refused_at"
+        write_alert_state
+        _notify "Ensemble daemon refused its port (exit 78) — staying down"             "a prior boot refused the port; record at $f (refused_at=${refused_at:-unknown})"             "refusal-marker"
+    fi
+    return 0
+}
+
 # ── Main ────────────────────────────────────────────────────────────────────
 read_state
 read_alert_state
@@ -583,6 +632,7 @@ read_alert_state
 check_burst_abort
 check_journal_events
 check_flipped_orphan
+check_refusal_marker
 if probe_livez; then
     if [ "$FIRST_MISS_AT" -gt 0 ]; then
         _log "RECOVERED: /livez answering again on :$PORT (was absent since epoch $FIRST_MISS_AT)"

@@ -181,3 +181,268 @@ two sides did not execute the same test set. **They are withdrawn.** The only
 canonical claim set is (a) as NON-COMPARABLE + (b) as the comparable cohort
 above. No `243` / `380` / `561` figure is used for adjudication anywhere in
 this lane.
+
+---
+
+# BF + HY mutation matrices — rogue-containment-p2 (S6 execution, component E2)
+
+Executed 2026-11-14 at **pin sha `26acaf702`** (the B2 landing commit; the venue was
+detached at this FIXED sha so the concurrent A2 coder's later commits on the shared
+branch are invisible to the run). Executor: developer-verify lane (BF+HY families;
+AH rows live in `tests/bind_race_port_ownership_mutation_matrix.md` per the E2
+§"Mutation-matrix artifacts" routing — § SEQUENCING step 3's "both files" is
+satisfied by the AH executor on that second file).
+
+## Venue
+
+- `git worktree add --detach /tmp/rc-p2-vb2-k7f3 26acaf702`; `uv sync --frozen`.
+- Module identity proven before ANY run:
+  `<venue>/.venv/bin/python -c "import daemon, tests; print(daemon.__file__)"`
+  ⇒ `/tmp/rc-p2-vb2-k7f3/daemon/__init__.py` (inside the venue).
+- Per-row run command: `env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD
+  -u POSTGRES_HOST -u POSTGRES_PORT -u ENSEMBLE_AUTH_ALLOWED_ORIGINS
+  -u ENSEMBLE_AUTH_CLIENT_ID -u ENSEMBLE_AUTH_CLIENT_SECRET
+  -u ENSEMBLE_AUTH_DISCOVERY_URL -u ENSEMBLE_AUTH_ENABLED
+  -u ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE -u ENSEMBLE_AUTH_ISSUER
+  ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 timeout 300 .venv/bin/python -m pytest
+  <explicit test files> -q --timeout=120 --tb=short` (per-variable scrubs — NEVER
+  `env -u POSTGRES_*`; the ENSEMBLE_AUTH_* scrubs fence the known ambient-issuer
+  environmental red, pre-existing, not a matrix row). No whole-tree pytest runs;
+  no live DBs; no real binds; the demo-port token and both live-port tokens never
+  bound.
+- Restore per row: `git -C <venue> restore <file>`; sha256 PRE == POST verified
+  against the venue census below for EVERY mutated file.
+
+## Pre-mutation digests (venue tip 26acaf702)
+
+```
+9c0bc42054398b8a653d30a51531c30be2e22c680d129886c28a3a4defcf9042  daemon/ensemble_config.py
+a81c3c8a4fa07fc5454ff028e7c0ff81db7f1fa89a1045f8b5cf893a3a3cfd57  daemon/tools/bash.py
+dc57fdf28c6f543efefc65246937433b13c91ca790568a35d454714b5a8c815f  daemon/tools/proc_tools.py
+28919557fa6376ffe05644576279b0e4efd272ede2c0bb790be304b5d4191490  daemon/repositories/factory.py
+bbf2170d1be61ce32a27cfc8a74f7fbbcd5bc8c9f51f2b850398360e62ba7361  daemon/auth/cli.py
+```
+
+## Clean-tree control (non-vacuity)
+
+All four pin files, unmutated, at `26acaf702`:
+**73 passed** (`tests/unit/test_prod_dsn_fence.py` 26 + `test_db_resolution_guard.py` 18
++ `test_pkill_overlay_guard.py` 16 + `test_pkill_overlay_pins.py` 13).
+Re-confirmed green after EVERY row's restore and once more at venue close
+(73 passed, tracked porcelain empty, all five digests == census).
+
+## Family BF — tier-1 prod-DSN fence (pin files: test_prod_dsn_fence.py + test_db_resolution_guard.py, 44 nodes)
+
+Row runs execute BOTH files so control pins are exposed to the mutant too.
+
+| Row | Mutant applied (one behavior neutered) | File | Observed RED (failing node ids) | Red evidence (assertion substring) | Restore | Green after |
+|---|---|---|---|---|---|---|
+| **BF-M1** | tier-1 prod-name branch DELETED: `if resolved_postgres_db_name(ensemble_config) == "ensemble_prod":` → `if False:` | ensemble_config.py | **14**: `test_p1_tier1_prod_name_refused_for_non_live_identities[sandbox|dev|demo]`, `test_p3_env_wins_prod_override_refused`, `test_p4_sanctioned_live_identity_proceeds_with_info[explicit-explicit|auto-derived]`, `test_p4b_real_live_shape_env_wins_sanctioned`, `test_p5_unresolved_identity_degrades_loudly_and_proceeds`, `test_p6_identity_resolver_raise_fails_closed_exit_78`, `test_p7_ambient_allow_does_not_exempt_prod_name`, `test_tier1_flip_side_by_side`, `test_boot_preflight_refuses_prod_dsn_pre_tcp`, `test_cli_resolve_engine_refuses_and_writes_no_artifact`, `test_prod_dsn_predicate_strings_present` | 8× `Failed: DID NOT RAISE <class 'SystemExit'>`; 3× `assert 'DB RESOLUTION SANCTIONED (rogue-containment)' in ''`; 1× `assert 'resolved_postgres_db_name(ensemble_config) == "ensemble_prod"' in ...` (strings pin — the predicate literal left the source); 1× `RuntimeError: engine must not be constructed on refuse path` (P10 preflight sentinel) | TRUE | 44 passed |
+| **BF-M2** | live carve-out REMOVED: `if marker == "live":` → `if False:` (live falls through to the None-degrade path) | ensemble_config.py | **3**: `test_p4_sanctioned_live_identity_proceeds_with_info[explicit-explicit]`, `[auto-derived]`, `test_p4b_real_live_shape_env_wins_sanctioned` | `assert 'DB RESOLUTION SANCTIONED (rogue-containment)' in 'WARNING ... DB RESOLUTION DEGRADED (rogue-containment) ... proceeding WITHOUT positive live proof ...'` | TRUE | 44 passed |
+| **BF-M3** | env-wins DELETED in `resolved_postgres_db_name`: `return os.environ.get("POSTGRES_DB", config.postgres.db).strip().lower()` → `return config.postgres.db.strip().lower()` | ensemble_config.py | **4**: `test_p3_env_wins_prod_override_refused`, `test_p4b_real_live_shape_env_wins_sanctioned`, `test_p7_ambient_allow_does_not_exempt_prod_name`, `test_env_wins_positive_control_scratch_name` | 3× `AssertionError: assert 'ensemble' == 'ensemble_prod'` (predicate now reads the FILE tier); + P7's resolved-name leg | TRUE | 44 passed |
+| **BF-M4** | ALLOW short-circuits the prod check: `if os.environ.get("ENSEMBLE_DB_AMBIENT_ALLOW") == "1": return` inserted at the top of the prod-DSN gate | ensemble_config.py | **2**: `test_p7_ambient_allow_does_not_exempt_prod_name`, `test_prod_dsn_predicate_strings_present` | `Failed: DID NOT RAISE <class 'SystemExit'>` (ALLOW=1 bypassed the fence) + the strings pin's forbidden-read-shape assert (`assert 'os.environ.get("ENSEMBLE_DB_AMBIENT_ALLOW"' not in guard_src` → present) | TRUE | 44 passed |
+| **BF-M5** | CLI exemption RESTORED: `assert_prod_dsn_sanctioned(ensemble_config)` deleted from `resolve_engine` | auth/cli.py | **2**: `test_cli_resolve_engine_call_site_ordering`, `test_cli_resolve_engine_refuses_and_writes_no_artifact` | `ValueError: substring not found` (structural ordering) + `RuntimeError: engine must not be constructed on refuse path` (behavioral — the CLI proceeded to engine construction on a prod-name json) | TRUE | 44 passed |
+| **BF-M6** | fail-OPEN exception handler: the prod-dsn guard's `except Exception: ... _sys.exit(78)` → `return` | ensemble_config.py | **1**: `test_p6_identity_resolver_raise_fails_closed_exit_78` | `Failed: DID NOT RAISE <class 'SystemExit'>` (resolver raise proceeded silently) | TRUE | 44 passed |
+| **BF-M7** | factory env-wins line REWRITTEN: `db = os.environ.get("POSTGRES_DB", pg.db)` → `db = pg.db` (the both-sites pin's NAMED counter-mutant, component-B §110 site) | repositories/factory.py | **1**: `test_prod_dsn_predicate_strings_present` | `assert 'db = os.environ.get("POSTGRES_DB", pg.db)' in inspect.getsource(create_postgres_engine)` → literal gone | TRUE | 44 passed |
+| **BF-M8** | old unconditional tier-1⇒sanctioned short-circuit REINTRODUCED: `return` immediately after the `is_postgres` early-return (guard fully dead for postgres shapes) | ensemble_config.py | **13**: P1[sandbox|dev|demo], P3, P4×2, P4b, P5, P6, P7, `test_tier1_flip_side_by_side`, `test_cli_resolve_engine_refuses_and_writes_no_artifact`, `test_boot_preflight_refuses_prod_dsn_pre_tcp` | 8× `DID NOT RAISE SystemExit`; 3× SANCTIONED-line missing; 1× engine-sentinel RuntimeError. (The strings pin stays green — the predicate literal remains in source.) BF-1 reddens as required (P1×3 + tier1_flip) | TRUE | 44 passed |
+| **BF-M9** | live carve-out DROPPED (two-site): `if marker == "live":` → `if marker == "live" and False:` AND `if marker in ("dev", "demo", "sandbox"):` → `if marker in ("dev", "demo", "sandbox", "live"):` | ensemble_config.py | **3**: `test_p4_sanctioned_live_identity_proceeds_with_info[explicit-explicit]`, `[auto-derived]`, `test_p4b_real_live_shape_env_wins_sanctioned` | 3× `SystemExit: 78` — the BF-2 catastrophe (a false live refusal downs live and every promote leg) | TRUE | 44 passed |
+
+**BF-M9 first-cut mutant was a NO-OP (recorded honestly):** adding `"live"` to the
+refuse tuple ALONE is unreachable-dead — the `if marker == "live"` sanction branch
+returns before the tuple check is ever reached, so the tuple-only mutant ran GREEN
+(44 passed under mutation). The corrected two-site mutant (carve-out recognition
+neutered + live in the refuse tuple) is the faithful "drop the carve-out ⇒ live
+shape refuses" shape and reddens exactly the 3 live-shape pins. No pin change
+needed; the lesson is for mutant AUTHORS, not the pins.
+
+**BF-7 strings-pin nuance (recorded honestly):** under BF-M3 the strings pin did
+NOT redden although the env-wins literal left the helper's CODE —
+`inspect.getsource` includes the helper DOCSTRING, which quotes the literal, so the
+substring assert is prose-satisfiable for that particular mutant. The pin DOES
+redden under its named counter-mutants (BF-M7 code-site drift, BF-M4 forbidden
+read-shape). Same weakness class as POK `mutation-01` (raw-text pins are
+prose-satisfiable); noted as residual, not a matrix failure.
+
+**Pre-proof count deltas (independent re-derivation, per commission):** B2's
+pre-proof claimed BF-M1 = 4 red (P1×3 + BF-8) and BF-M2 = 3 red (P4×2 + P4b).
+This run confirms BF-M2 = 3 exactly; BF-M1's faithful branch-deletion reddens 14
+(every pin that requires the fence to FIRE or SPEAK on a tier-1 shape — P3, P4×2,
+P4b, P5, P6, P7, P10-preflight, the CLI behavioral leg and the strings pin are
+all legitimate collateral of branch deletion, not false reds). A1's pre-proof
+(HY-M1 = 5, HY-M3 = 1) is confirmed exactly.
+
+## Family HY — A1 hygiene, pkill overlay (pin files: test_pkill_overlay_guard.py + test_pkill_overlay_pins.py, 29 nodes)
+
+Row runs execute BOTH files.
+
+| Row | Mutant applied (one behavior neutered) | File | Observed RED (failing node ids) | Red evidence (assertion substring) | Restore | Green after |
+|---|---|---|---|---|---|---|
+| **HY-M1** | demo-port tuple entry REMOVED from the bash port-token loop (`("7979", r"\b7979\b")` deleted) | tools/bash.py | **5**: `test_7979_token_refused_unfenced_HY1`, `test_7979_allowed_with_ambient_fence_HY1`, `test_port_family_refused_unfenced`, `test_overlay_fence_does_not_allow_live_pattern_B6`, `test_list_form` | 5× `AssertionError: assert None == '7979'` (predicate returns None where "7979" required) | TRUE | 29 passed |
+| **HY-M2** | delegation SEVERED: the function-local bash import + delegated call in `create_proc_tools` replaced with a local no-op (`_proc_pkill_violation = None`) | tools/proc_tools.py | **2**: `test_proc_lane_delegates_to_bash_predicate_HY2` (both faces), `test_proc_refusal_text_stays_ambient_only_HY4` (collateral — see INCIDENT below) | structural: `assert 'from daemon.tools.bash import _pkill_overlay_violation' in src` → import gone; behavioral: refusal text was `"Started process: proc-<id> ..."` instead of the refusal (stubbed shared function never consulted) | TRUE | 29 passed |
+| **HY-M3** | dead env-overlay advertisement RESTORED in the bash refusal string (`in the daemon environment` → `in the tool env (env={"ENSEMBLE_FENCED_TEST_CONTEXT": "1"})`) | tools/bash.py | **1**: `test_bash_refusal_text_names_ambient_channel_only_HY3` | forbidden-phrase assert: `'env={"ENSEMBLE_FENCED_TEST_CONTEXT": "1"}' is contained here: tool env (env={...})` | TRUE | 29 passed |
+| **HY-M4** | overlay remedy ADDED to the proc refusal text (same advertisement) | tools/proc_tools.py | **1**: `test_proc_refusal_text_stays_ambient_only_HY4` | forbidden-phrase assert fired (identical shape to HY-M3) | TRUE | 29 passed |
+
+### ⚠️ INCIDENT (disclosed, contained, auto-recovered) — HY-M2 red leg spawned a REAL process
+
+The HY-2/HY-4 pins invoke the REAL tool coroutines; their docstrings assert
+inertness ("the refusal returns BEFORE any spawn"). Under the HY-M2 mutant the
+refusal does NOT fire, so the HY-4 pin's `proc_run(command="pkill -f <live-name>")`
+executed a REAL pkill against the LIVE-DAEMON NAME PATTERN (timeout: none) as an
+orphaned child of the pytest process. The live daemon's process cmdline carries
+that name, so the stray pkill SIGTERM'd the LIVE daemon mid-run; systemd
+auto-restarted it (livez green immediately after: `{"status":"alive"}`, fresh
+uptime, self-reported v0.30.9), and the executor's in-flight shell died with the
+daemon's process tree (that run's restore leg was interrupted; completed
+immediately after, restore verified TRUE). No other infrastructure was harmed;
+both ensemble listeners were present and serving after the restart. Exact-name
+values of the live daemon are deliberately not spelled in this artifact — the
+agent-side overlay fence treats them as live patterns, and this document should
+stay paste-safe. **Lesson for future HY-M2 runs:** stub or cap the spawn path
+(e.g. run HY-M2 against a proc_tools factory whose Popen is monkeypatched) — a
+predicate-neutering proc mutant converts the "inert" text pins into real-spawn
+hazards. Text-only mutants (HY-M3/HY-M4) keep the refusal firing and are safe,
+as observed.
+
+### Spawn-seam contract (normative — STRUCTURAL, not prose; added 2026-11-14)
+
+ANY counter-mutant that can bypass a refusal gate on a spawn-capable tool (bash
+tool, proc tool, or any future tool whose refusal precedes a process spawn)
+MUST be executed under a **spawn-seam recorder (record-instead-of-spawn)**: the
+tool's process-spawn surface (`asyncio.create_subprocess_exec` /
+`asyncio.create_subprocess_shell` — resolved as module attributes of `asyncio`
+at call time by `daemon/tools/bash.py` and `daemon/tools/proc_tools.py`) is
+replaced per-pin by an **autouse fixture living INSIDE the pin file** that
+captures argv and returns an inert stub (never execs, never forks, never
+signals). Prose caution alone ("the refusal returns BEFORE any spawn") is
+NON-COMPLIANT — that sentence is the exact assumption the incident falsified.
+
+Contract rules:
+
+1. **Seam in the pin file, not the harness.** The recorder is a module-local
+   autouse fixture in each pin file (never `tests/conftest.py`), so every venue
+   that checks out the pins carries the seam — kill-proof by construction, not
+   by run-time discipline.
+2. **Live shapes stay live.** The seam neuters the SPAWN, never the GUARD: pin
+   command patterns must remain live-shaped (they still trip the refusal under
+   green code) and must still REDDEN under bypassing mutants.
+3. **Zero-exec proof rides the red.** The recorder's per-pin teardown FAILS any
+   pin that recorded a spawn attempt, naming the recorded argv — a bypassing
+   mutant yields a RED pin whose failure output is itself the evidence that
+   nothing was executed.
+4. **Row validity.** A refusal-gate counter-mutant row is valid only when its
+   red evidence shows BOTH the refusal-text/assertion failure AND the recorder
+   proving zero executed processes.
+
+Current compliance: `tests/unit/test_pkill_overlay_pins.py` (HY-2/HY-3/HY-4
+invoke real tool coroutines — recorder active on every pin) and
+`tests/unit/test_pkill_overlay_guard.py` (pure-predicate pins today; recorder
+held as a family tripwire). Both carry the autouse `_spawn_seam_recorder`
+fixture; the full family runs 29/29 green under it.
+
+### Spawn-safe HY-M2 re-proof (structural — recorder active; 2026-11-14)
+
+First re-proof under the spawn-seam contract above: the SAME incident scenario
+that produced the live SIGTERM, replayed with the seam in the pin files.
+Venue: `git worktree add --detach /tmp/rc-p2-hym2-reproof 634b54cda` (the
+commit that lands the recorders — KILL-PROOF BY CONSTRUCTION: the seam is in
+the venue's pin files), `uv sync --frozen`, `daemon.__file__` verified inside
+the venue, per-variable PG scrubs + `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0`
++ `ENSEMBLE_PORT_CLAIMS_DIR` under /tmp, `--timeout=120` inside `timeout 300`,
+serial runs (no concurrent mutation driver on the tree).
+
+- PRE digest: `dc57fdf28c6f543efefc65246937433b13c91ca790568a35d454714b5a8c815f  daemon/tools/proc_tools.py`.
+- Mutant (identical to the HY-M2 row above): the function-local bash import +
+  delegated call in `create_proc_tools` replaced with a local no-op
+  (`_proc_pkill_violation = None`).
+- **Observed RED — exactly the HY-M2 row's 2 failing nodes, 27 passed:**
+  - `test_proc_lane_delegates_to_bash_predicate_HY2` — structural face:
+    `assert 'from daemon.tools.bash import _pkill_overlay_violation' in src`
+    (import gone from the factory source).
+  - `test_proc_refusal_text_stays_ambient_only_HY4` — refusal absent ⇒
+    assertion fails: the tool's success text named `proc-<id>, pid=2000001` —
+    the RECORDER STUB's pid, not a real process. Its command is redacted here
+    as `pkill -f <live-name>` (paste-safe).
+  - `ERROR at teardown of test_proc_refusal_text_stays_ambient_only_HY4`:
+    `STRUCTURAL SPAWN GUARD tripped … recorder captured 1 spawn attempt(s) …
+    [{'argv': ['pkill -f <live-name>'], 'cwd': None}]. NOTHING was executed`
+    — the zero-exec proof rides the red itself.
+- **Zero real spawns.** The incident's failure mode (a real pkill matching the
+  live daemon's name pattern reaching the kernel) is structurally unreachable:
+  the argv never left the pytest process except as a recorded dict.
+- Restore: `git restore daemon/tools/proc_tools.py`; sha256 POST == PRE
+  (`dc57fdf2…c815f` byte-identical); tracked porcelain empty.
+- Green re-run after restore: **29 passed**.
+- **Belt-and-braces live-trio listener identity** (pid + starttime + cmdline
+  sha256-prefix; comm/cmdline literals withheld paste-safe; snapshots via the
+  `/proc/net/tcp{,6}` → socket-inode → `/proc/<pid>/fd` walk):
+  - port 7979: PRE pid 304612 / starttime 59048199 / hash `b9444c3587b8` —
+    POST **identical**.
+  - port 9798: PRE pid 305455 / starttime 59055349 / hash `b94b053d4e8b` —
+    POST **identical**.
+  - port 9797: PRE pid 371165 / starttime 59588242 → POST pid 372293 /
+    starttime 59597565 — **CHURNED, attributed NOT-this-lane**: (i) the
+    recorder proves the mutant leg spawned nothing; (ii) the pin family
+    contains no server/bind code; (iii) the churn continued while this venue
+    sat idle (successive pids 372708, 373364, 373561 recorded minutes AFTER
+    this lane's last pytest run ended); (iv) an active claim file for 9797
+    (claimed 2026-11-14T21:57:24Z by the live daemon's own pid+starttime —
+    its metrics-port derive lane) predates the runs. The pair the original
+    incident harmed (7979 + 9798) is identity-identical across the whole lane.
+- Venue removed after the run; this lane's own scratch evidence removed
+  alongside it.
+
+## R7 sweep — recorded addendum (2026-11-14, FIX-1 lane)
+
+The reviewer's delta verdict flagged that the R7 /tmp tidy — the
+scratch-evidence removal noted at the close of the spawn-safe re-proof above —
+left NO recorded artifact and was therefore unverifiable-by-construction. This
+addendum records it.
+
+Removed path prefixes (10), with per-path notes; measured sizes where the
+FIX-1 lane measured them, otherwise marked unmeasured at removal:
+
+| Removed path | Note | Size at removal |
+| --- | --- | --- |
+| `/tmp/rc-p2-happy-manual-336990/` | happy-manual mirror | **44.8 MB** |
+| `/tmp/rc-p2-evidence/` | 44 AH-M* evidence logs | **92 KB** |
+| `/tmp/rc-p2-fr-334021/` | fix-round scratch dir | unmeasured at removal |
+| `/tmp/rc-p2-fr-334285/` | fix-round scratch dir | unmeasured at removal |
+| `/tmp/rc-p2-fr-runner.sh` | fix-round runner script | unmeasured at removal |
+| `/tmp/rc-p2-happy-manual.sh` | happy-manual driver script | unmeasured at removal |
+| `/tmp/rc-p2-mut/` | mutation-run scratch dir | unmeasured at removal |
+| `/tmp/rc-p2-pg-initdb.log` | PG initdb log (attempt 1) | unmeasured at removal |
+| `/tmp/rc-p2-pg-initdb2.log` | PG initdb log (attempt 2) | unmeasured at removal |
+| `/tmp/rc-p2-u-append.md` | lane append note | unmeasured at removal |
+
+Sizes were measured at removal ONLY for the happy-manual mirror (44.8 MB) and
+the AH-M evidence logs (92 KB); the remaining 8 paths were removed unmeasured —
+recorded as such, no precise total is invented. Reclaimed floor:
+**≥44.9 MB**.
+
+`any-18097.json` staleness-proof TRIPLE, recorded at removal (sha256
+`aa761070…` noted at removal):
+
+1. **No socket of ANY state on port 18097** in `/proc/net/tcp` and
+   `/proc/net/tcp6` at removal time.
+2. **File mtime `2026-11-14T07:01:07Z`** predates this lane's opening
+   `2026-11-14T18:16Z` — the stale claim file predates the lane that swept it.
+3. **The claimed pid's starttime ~16h stale** at removal — no live process
+   could still match the recorded identity pair.
+
+Live-claims spared: `any-9797.json` and ALL claim files for ports
+9797 / 9798 / 7979 were left untouched. Post-sweep `/tmp` carries ZERO
+`rc-p2-*` paths.
+
+**Provenance:** facts recorded verbatim from the FIX-1 lane's execution report
+(sweep executed during the `634b54cda..1bbd5b71e` commit window); the listed
+paths no longer exist by construction — the recorded triple + sha256 prefix
+are the evidence, and re-measurement is impossible by design.
+
+## Row verdict roll (S6)
+
+13/13 rows RED under their named counter-mutants (BF-M1..M9, HY-M1..M4) ·
+13/13 restores sha256-verified PRE == POST (all five mutated files byte-identical
+to the venue census at close) · clean-tree control 73 passed unmutated ·
+venue removed after the run. **Zero rows failed to redden.** (The BF-M9 no-op
+first-cut was a mutant-construction error, corrected and re-run — both attempts
+are recorded above.)

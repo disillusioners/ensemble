@@ -16,6 +16,10 @@ THE SHAPE (plan §3 / §4 P0 T1, catalog §0.7, arch §1 Option A)
 * **bind failure ⇒ disabled + logged, boot CONTINUES** (the
   resource-monitor boot degradation block in the lifespan — the
   ``except Exception as resource_monitor_boot_exc`` pattern);
+* the rogue-port ownership gate (rogue-containment-p2 A2) is
+  **MAIN-PORT-ONLY** — it never applies to this listener: metrics
+  9798 is loopback-only, bind-failure ⇒ disabled + boot continues
+  (above); correctly ungated, NO discovery rider;
 * teardown: stop event → ``shutdown()`` → **detached** join → close
   (the resource-monitor stop block in the lifespan — the house
   detached-join precedent, never a blocking join on the event loop

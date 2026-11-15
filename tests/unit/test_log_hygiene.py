@@ -212,6 +212,7 @@ class TestLLMHeartbeat:
 _LOG_ENV_VARS = (
     "LOG_LEVEL", "LOG_LEVEL_DAEMON",
     "ENSEMBLE_LOG_CONSOLE_LEVEL", "ENSEMBLE_LOG_FILE_LEVEL", "DAEMON_LOG_DIR",
+    "ENSEMBLE_LOG_OPENAI_LEVEL",
 )
 
 
@@ -231,6 +232,7 @@ class _FreshInstall:
             logging.getLogger().name: logging.getLogger().level,
             "daemon": logging.getLogger("daemon").level,
             "uvicorn.access": logging.getLogger("uvicorn.access").level,
+            "openai": logging.getLogger("openai").level,
         }
         self._known: list[logging.Handler] = []
         self.module = None
@@ -393,6 +395,40 @@ class TestDualLevelHandlers:
         logging.getLogger("daemon.idem-proof").info("idempotency-payload-1")
         text = (tmp_path / "ensemble.log").read_text()
         assert text.count("idempotency-payload-1") == 1
+
+
+class TestOpenaiLoggerPin:
+    """Item (e) log-quiet: pin the ``openai`` logger (covering
+    ``openai._base_client``) to INFO by default via an env-overridable knob,
+    without touching the daemon logger hierarchy or the root gate."""
+
+    def test_default_pin_is_info(self, fresh_logging):
+        """P1: with the knob unset, install_root_logging() pins the openai
+        logger (and thus openai._base_client) to INFO."""
+        fresh_logging.install()
+        assert logging.getLogger("openai").getEffectiveLevel() == logging.INFO
+        assert logging.getLogger("openai._base_client").getEffectiveLevel() == logging.INFO
+
+    def test_env_override_debug(self, fresh_logging):
+        """P2: ENSEMBLE_LOG_OPENAI_LEVEL=DEBUG re-opens the openai logger to
+        DEBUG (opt-in observability)."""
+        fresh_logging.install(ENSEMBLE_LOG_OPENAI_LEVEL="DEBUG")
+        assert logging.getLogger("openai").getEffectiveLevel() == logging.DEBUG
+        assert logging.getLogger("openai._base_client").getEffectiveLevel() == logging.DEBUG
+
+    def test_daemon_logger_unaffected(self, fresh_logging):
+        """P3: the daemon logger's effective level is UNCHANGED by the pin
+        (still the DEBUG band under the default env)."""
+        fresh_logging.install()
+        assert logging.getLogger("daemon").getEffectiveLevel() == logging.DEBUG
+
+    def test_pin_survives_reinstall(self, fresh_logging):
+        """Idempotent re-install (M1): the pin is re-applied on a second
+        install_root_logging() call."""
+        fresh_logging.install()
+        assert logging.getLogger("openai").getEffectiveLevel() == logging.INFO
+        fresh_logging.module.install_root_logging()
+        assert logging.getLogger("openai").getEffectiveLevel() == logging.INFO
 
 
 # ─────────────────────────────────────────────────────────────────────────────

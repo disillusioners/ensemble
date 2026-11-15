@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.12] — 2026-11-15
+
+### Added — rogue-process containment p2 (this lane; zero migrations)
+
+- **B2 tier-1 prod-DSN fence.** Prod-NAME predicate on the RESOLVED DSN in boot preflight, firing in BOTH the tier-1 (ensemble.json) and tier-2 (env-driven) branches: non-live boots whose resolved DSN targets `ensemble_prod` refuse with exit 78 + `tier=resolved-dsn-targets-prod` marker, PRE-TCP (no packet can reach prod), degrade-on-None (guard-internal error fails closed), sanctioned live/promote carve-out preserved. Closes the copied-ensemble.json residual and the env-wins override hole (`get_postgres_url`).
+- **A2 socket-holder identity.** Claim-lineage H1 close (same-cmdline holders non-foreign), fast-refuse path (~18.6 s legacy shape collapsed to fast-refuse on conflict), holder refusal attributes the CONFIRMED holder (post-conflict attribution, row-18 lineage residual declared).
+- **A1 hygiene.** The 7979 demo-port token joins the overlay port tokens (proc lane sees bash tokens through the delegation); bash refusal text made ambient-only.
+- **Harness.** Fixed fenced mirror (`OWNED_RM_DIRS` claims-dir fix — the refuse-foreign leg's green is evidence again) + `scratch-config.yaml` literal-port template (repo-root `config.yaml` untouched; ambient PORT cannot leak through interpolation).
+- **Pins.** 141 pins + 35-mutant matrices across BF/AH/HY families with sha256-verified restores; normative spawn-seam contract (HY structural recorders, zero spawns under delegation-severed mutants).
+
+### Changed — containment catch-up v0.29.19–v0.30.9 (shipped-silent until now; see tags v0.29.19…v0.30.9)
+
+- **Recorded for the ledger** (each shipped in the noted range without a changelog entry): claim-before-bind gate; pkill overlay guard; spawn-boundary seam scrub; ambient-DB resolution guard. No behavior change in v0.30.12 — this section lists them so the promote-notes describe everything in the lineage.
+
+### Added — absorbed from sibling staged v0.30.11 (sweep-truth-gate-hygiene, tag v0.30.11 @ 29f368431)
+
+- Truthful sweep telemetry: `notify_work()` returns `bool` and the sweep records `dispatched=True/False` with cause.
+- W-D liveness filter moved off-loop via `to_thread` (no event-loop stall).
+- Bounded PENDING scan (capacity-derived bound 14).
+- `scripts/run_tests_scrubbed.sh` fails closed: exit 78 on ambient `ENSEMBLE_SELF_ENV`.
+- openai logger INFO default (knob `ENSEMBLE_LOG_OPENAI_LEVEL`).
+
+
 ## [0.30.9] — 2026-11-14
 
 ### Changed — supersede re-stage: release-record corrections (no behavior change; zero tool-code drift)
