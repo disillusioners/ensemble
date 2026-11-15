@@ -242,6 +242,12 @@ if TYPE_CHECKING:
     # runtime import would be a needless module-load cycle for a type
     # annotation, and the mount itself is set by the lifespan.
     from .services.metrics_query.protocol import MetricsQueryProvider
+    # agent group chat P2: the room-join spec riding
+    # ``spawn_instance`` — TYPE_CHECKING-only so the quoted
+    # ``"RoomJoinSpec | None"`` parameter annotation resolves for
+    # type checkers; the annotation string is never evaluated at
+    # runtime.
+    from .repositories.room.membership import RoomJoinSpec
 
 
 
