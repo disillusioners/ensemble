@@ -64,7 +64,6 @@ from sqlmodel import Session, select
 from daemon.repositories.event.models import Event, EventKind
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.room import membership as _membership
-from daemon.repositories.room.membership import RoomJoinError  # noqa: E402 — dual-family collision (see MemberNameCollisionError)
 from daemon.repositories.room.models import (
     ChatRoom,
     ChatRoomMember,
@@ -94,7 +93,10 @@ __all__ = [
 ]
 
 # Re-exported join/leave vocabulary (membership module owns the
-# definitions; the repository is the callers' one-stop import).
+# definitions; the repository is the callers' one-stop import). This
+# binding MUST precede the MemberNameCollisionError class body below —
+# the dual-family collision (RoomError + RoomJoinError) consumes the
+# name at class-creation time.
 RoomJoinError = _membership.RoomJoinError
 RoomJoinUnknownRoomError = _membership.RoomJoinUnknownRoomError
 RoomJoinRoomStateError = _membership.RoomJoinRoomStateError
