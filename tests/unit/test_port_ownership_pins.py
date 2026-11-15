@@ -9,6 +9,7 @@ Fix-round 2 additions:
   * N3 — dev boots never resolve (or write) the canonical LIVE root.
 """
 
+import hashlib
 import json
 import os
 import subprocess
@@ -505,17 +506,27 @@ def test_AH14_holder_vanishes_no_refusal(tmp_path, monkeypatch):
 
 
 def test_AH9_lineage_matching_non_refuse(tmp_path, monkeypatch):
-    """AH-9 / mutant AH-M9: claim v2 with matching lineage hash => non-foreign (taken)."""
+    """AH-9 / mutant AH-M9: claim v2 with matching lineage hash => non-foreign (taken).
+
+    The lineage tuple is a FIXED synthetic (never the ambient parent's argv):
+    the planted sha is derived deterministically from the same tuple the
+    monkeypatched self-parent returns, and cross-checked against the literal
+    sha256 of the normalized script-name token — so the pin (a) cannot
+    silently degrade to the old-format path (recorded sha None) on hosts
+    where /proc/<ppid>/cmdline is unreadable (hidepid, kernel-thread parent,
+    sandboxed CI), and (b) reddens under a normalizer bypass (AH-M16) instead
+    of planting and reading the same broken hash."""
     claims_dir = tmp_path / "claims"
     claims_dir.mkdir()
     self_install = tmp_path / "self-install"
     self_install.mkdir()
     monkeypatch.setenv("ENSEMBLE_PORT_CLAIMS_DIR", str(claims_dir))
     monkeypatch.setattr(po, "resolve_self_install_dir", lambda: self_install)
-    # compute self lineage hash
-    ppid = po._read_ppid(os.getpid())
-    argv = po.read_parent_cmdline(ppid)
+    # fixed synthetic lineage tuple — deterministic on every host, no /proc reads
+    ppid = 4321
+    argv = ["bash", "/opt/ensemble/bin/launcher.sh", "--flag"]
     sha = po.lineage_token_hash(argv)
+    assert sha == hashlib.sha256(b"launcher.sh").hexdigest()
     # plant a v2 claim with matching lineage
     _plant_claim_v2(claims_dir, 18816, str(self_install), sha=sha, ppid=ppid)
     # monkeypatch _read_ppid/read_parent_cmdline to keep self lineage stable
@@ -533,8 +544,11 @@ def test_AH10_lineage_mismatch_refuses(tmp_path, monkeypatch):
     self_install.mkdir()
     monkeypatch.setenv("ENSEMBLE_PORT_CLAIMS_DIR", str(claims_dir))
     monkeypatch.setattr(po, "resolve_self_install_dir", lambda: self_install)
-    ppid = po._read_ppid(os.getpid())
-    argv = po.read_parent_cmdline(ppid)
+    # fixed synthetic lineage tuple (deterministic; capturing the AMBIENT
+    # parent argv here would be None on hardened hosts and the pin would
+    # degrade to non-foreign instead of refusing 78)
+    ppid = 4321
+    argv = ["bash", "/opt/ensemble/bin/launcher.sh", "--flag"]
     _plant_claim_v2(claims_dir, 18817, str(self_install), sha="0" * 64, ppid=ppid)  # mismatched
     monkeypatch.setattr(po, "_read_ppid", lambda pid: ppid)
     monkeypatch.setattr(po, "read_parent_cmdline", lambda pid: argv)

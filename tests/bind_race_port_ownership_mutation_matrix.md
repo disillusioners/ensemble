@@ -233,3 +233,58 @@ AH-M2 (source field dropped) now ALSO redden the re-aimed AH-4 pin (both
 suppress the holder-attributed 78) — same one-behavior mutants, larger red
 sets, no new executions run for them here (their original cc154c308
 executions stand; the re-aimed corpus tightens every holder-path guard).
+
+## Gate-8 pin-robustness re-aims (AH-8 family vacuity + AH-9 ambient sha; 2026-11-15)
+
+Tester gate-8 assessment (tidier-routed) found two pin-robustness defects in
+this corpus at tip `ccb35112b`; empirically probed in a scratch venue
+(`/tmp/rc-p2-ah89-venue`, byte-exact `git archive HEAD`, worktree `.venv`,
+per-variable PG scrub, 42-passed pristine control). Fixed on-branch:
+
+* **AH-8 module pin absence-shaped (the F-2 module-side leftover).**
+  `test_AH8_recycled_pid_degrade` ended in `assert isinstance(res, list)` —
+  green under a liveness-filtering-walk mutant (holder dropped ⇒ `res == []`
+  and the pin stayed green). Re-aimed at the POSITIVE shape: the walk is
+  liveness-blind and must REPORT the recycled holder with its recycled
+  starttime (the stale/degrade decision is the gate seam, pinned at
+  `test_AH8_gate_stale_holder_degrades_with_warning`). Now RED under that
+  mutant (AH-13 pins redden alongside — accepted blast radius).
+* **AH-M15 control pin shielded.** `test_AH14_liveness_only_sample2_would_false_confirm`
+  used fake-dead pid 4242, so the tail real-`/proc` liveness check returned
+  False for BOTH the mutant (`match = holder`) and the shipped full re-walk ⇒
+  GREEN under its own named counter-mutant (vacuous). Re-aimed: REAL live pid
+  (`os.getpid()`), sample-2 holder with the same (pid, starttime) but a NEW
+  inode (socket re-created) — liveness-only WOULD confirm, the full re-walk
+  must not. Now RED under AH-M15 (joins AH-8b + AH15-liveness-only).
+  `test_AH14_holder_vanishes_between_samples_no_refusal` docstring corrected
+  (AH-M14 only — it was always AH-M15-shielded by design; body unchanged,
+  still reddens under AH-M14).
+* **AH-9 planted sha ambient-derived.** `test_AH9_lineage_matching_non_refuse`
+  planted `lineage_token_hash(read_parent_cmdline(_read_ppid(getpid())))`:
+  on hosts with an unreadable/empty parent cmdline (hidepid, kernel-thread
+  parent, sandboxed CI) the hash is None ⇒ claim JSON `ppid_cmdline_sha:
+  null` ⇒ `_lineage_foreign` takes the OLD-FORMAT path (`if not
+  recorded_sha`) ⇒ pin green via the wrong code path; and the pin was
+  self-referential (plant + read through the same hash fn) ⇒ GREEN under
+  AH-M16. `test_AH10_lineage_mismatch_refuses` shared the ambient capture and
+  BREAKS on such hosts (self_argv None ⇒ unreadable-parent degrade ⇒ no 78).
+  Re-aimed: FIXED synthetic tuple (`["bash", "/opt/ensemble/bin/launcher.sh",
+  "--flag"]`, ppid 4321) in both pins; the planted sha is cross-checked
+  against `sha256("launcher.sh")`, breaking the self-reference ⇒
+  `test_AH9_lineage_matching_non_refuse` now RED under AH-M16 as well.
+  Env-perturbed legs green (swapped HOME/XDG_RUNTIME_DIR, `python -m pytest`
+  and `bash -c` parent shapes, hostile env).
+
+Clean control at the fix tip: both pin files GREEN — 42 passed (same count
+as the pre-fix baseline; no pin added or removed, two re-aimed + two
+docstrings + one `import hashlib`).
+
+**Gate-1 handoff (spawn-seam recorder contract):** NOT implicated — every
+counter-mutant executed here (AH-M15 `match = holder`, AH-M16 hash-full-argv,
+liveness-filtering walk) touches no spawn-capable tool surface (pure /proc
+readers + a pure hash fn), consistent with this matrix's spawn-safety audit.
+Gate-1's re-run must know: the AH-M14-row-cited
+`test_AH14_liveness_only_sample2_would_false_confirm` and the F-2/F-3-noted
+module pin are now the RE-AIMED shapes above, and AH-M16 additionally reddens
+`test_AH9_lineage_matching_non_refuse` (new coverage beyond the recorded
+AH-M16 row).

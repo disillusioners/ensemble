@@ -133,8 +133,15 @@ def test_AH3_fd_eaccess_degrade(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_AH8_recycled_pid_degrade(tmp_path, monkeypatch):
-    """AH-8 / mutant AH-M8: holder starttime mismatch => not reported."""
+def test_AH8_recycled_pid_degrade(tmp_path):
+    """AH-8 module half (module-side F-2 re-aim, POSITIVE shape): the walk is
+    LIVENESS-BLIND — a pid whose stat starttime was recycled (stat now reads
+    9999) IS still reported, with the recycled starttime, so the
+    stale/degrade decision belongs to the GATE (gate seam pinned in
+    test_port_ownership_pins.py::test_AH8_gate_stale_holder_degrades_with_warning).
+    A liveness-filtering walk — or any drop of this holder — reddens this
+    pin; the old `isinstance(res, list)` terminal assert stayed green under
+    exactly that mutant (absence-shaped, prose-satisfiable)."""
     proc = _make_proc_tree(
         tmp_path,
         tcp_text="  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
@@ -144,13 +151,9 @@ def test_AH8_recycled_pid_degrade(tmp_path, monkeypatch):
     # tamper starttime in stat to simulate recycle
     stat = (proc / "3003" / "stat").read_text()
     (proc / "3003" / "stat").write_text(stat.replace(" 50", " 9999", 1))
-    # find_listener_holders reads starttime 9999 now, but holder's recorded? walk reports 9999.
-    # Simulate recycle by monkeypatching pid_alive_with_starttime to return False
-    monkeypatch.setattr(po, "pid_alive_with_starttime", lambda pid, st: False)
     res = ph.find_listener_holders(str(proc), 9999)
-    # holder still discovered (walk doesn't check liveness) but gate filters;
-    # module-level: holder present in list
-    assert isinstance(res, list)
+    assert [h.pid for h in res] == [3003]
+    assert res[0].starttime == 9999
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +162,11 @@ def test_AH8_recycled_pid_degrade(tmp_path, monkeypatch):
 
 
 def test_AH14_holder_vanishes_between_samples_no_refusal(monkeypatch):
-    """AH-14 / mutants AH-M14 + AH-M15: sample2 must FULL re-walk;
-    a pid alive whose socket closed must NOT confirm."""
+    """AH-14 / mutant AH-M14: sample1 present, sample2 empty re-walk
+    (holder vanished) => confirm False. (AH-M15 discrimination is carried by
+    test_AH14_liveness_only_sample2_would_false_confirm and
+    test_AH15_liveness_only_live_pid_would_confirm — this fixture's fake-dead
+    pid is shielded by the tail liveness check under AH-M15 by design.)"""
     holder = ph.HolderRef(pid=4242, starttime=123, exe="/f", cwd="/f",
                           install_dir="/foreign", inode="999")
     calls = {"n": 0}
@@ -178,20 +184,26 @@ def test_AH14_holder_vanishes_between_samples_no_refusal(monkeypatch):
 
 
 def test_AH14_liveness_only_sample2_would_false_confirm(monkeypatch):
-    """AH-M15 control: sample2 implemented as liveness-only (no re-walk)
-    would confirm a pid alive whose socket closed — must be RED under
-    the real (full-rewalk) implementation."""
-    # Documented counter-mutant; the real confirm_holder requires the inode
-    # to still be present in a fresh LISTEN row, so this asserts the
-    # positive shape is full-rewalk.
-    holder = ph.HolderRef(pid=4242, starttime=123, exe="/f", cwd="/f",
-                          install_dir="/foreign", inode="999")
-    # sample2 returns holder with same pid/starttime but we mark inode gone
-    # by returning empty -> must not confirm
-    monkeypatch.setattr(ph, "find_listener_holders", lambda pr, port, exclude_pid=None: [])
+    """AH-M15 control (re-aimed: the original fake-dead-pid 4242 fixture was
+    shielded by confirm_holder's tail real-/proc liveness check and stayed
+    GREEN under its own counter-mutant AH-M15 — vacuous). With a REAL LIVE
+    pid whose socket was re-created with a NEW inode, a sample-2 implemented
+    liveness-only (`match = holder` — trusts sample 1, skips socket
+    re-verification) WOULD confirm; the shipped full re-walk requires the
+    SAME inode in a fresh LISTEN row and must NOT confirm."""
+    pid = os.getpid()
+    real_st = po._read_starttime(pid)
+    assert real_st is not None
+    holder1 = ph.HolderRef(pid=pid, starttime=real_st, exe="/f", cwd="/f",
+                           install_dir="/foreign", inode="777")
+    # sample-2 re-walk: same live (pid, starttime), socket RE-CREATED -> new inode
+    holder2 = ph.HolderRef(pid=pid, starttime=real_st, exe="/f", cwd="/f",
+                           install_dir="/foreign", inode="888")
+    monkeypatch.setattr(ph, "find_listener_holders",
+                        lambda proc_root, port, exclude_pid=None: [holder2])
     import time as _t
     monkeypatch.setattr(_t, "sleep", lambda s: None)
-    assert ph.confirm_holder(holder, "/proc", 18800, delay=0) is False
+    assert ph.confirm_holder(holder1, "/proc", 18800, delay=0) is False
 
 
 def test_AH8b_confirm_rejects_recycled_pid_same_inode(monkeypatch):
