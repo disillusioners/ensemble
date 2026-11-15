@@ -3853,30 +3853,27 @@ def create_instance_tools(
                     instance_name=instance_name,
                     agent_id=agent_id,
                 )
+            spawn_kwargs = dict(
+                agent_id=agent_id,
+                instance_id=child_uuid,
+                parent_id=current_instance_id,
+                project_id=project_id,
+                instance_name=instance_name,
+                model=effective_model,
+                version_tag=version_tag,
+            )
             if room_join_spec is not None:
                 room_lock = await manager._room_chat_service.get_room_lock(
                     room_join_spec.room_id
                 )
                 async with room_lock:
                     new_instance_id, validated_model_override = manager.spawn_instance(
-                        agent_id=agent_id,
-                        instance_id=child_uuid,
-                        parent_id=current_instance_id,
-                        project_id=project_id,
-                        instance_name=instance_name,
-                        model=effective_model,
-                        version_tag=version_tag,
+                        **spawn_kwargs,
                         room_join=room_join_spec,
                     )
             else:
                 new_instance_id, validated_model_override = manager.spawn_instance(
-                    agent_id=agent_id,
-                    instance_id=child_uuid,
-                    parent_id=current_instance_id,
-                    project_id=project_id,
-                    instance_name=instance_name,
-                    model=effective_model,
-                    version_tag=version_tag,
+                    **spawn_kwargs
                 )
             room_join_line = ""
             if room_join_spec is not None:
