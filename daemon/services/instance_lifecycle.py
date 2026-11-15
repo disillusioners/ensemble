@@ -52,6 +52,7 @@ from zoneinfo import ZoneInfo
 
 from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy import Integer, bindparam, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
 from ..cancellation import CancellationReason
@@ -69,7 +70,6 @@ from ..repositories.task.models import SuspensionReason, Task, TaskStatus
 from ..repositories.room import membership as room_membership
 from ..repositories.room.membership import RoomJoinSpec
 from ..repositories.room.models import ChatRoomMember
-from sqlalchemy.exc import IntegrityError
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .pool_orchestrator import safe_notify_all_pools
