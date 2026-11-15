@@ -61,6 +61,7 @@ from daemon.config import _SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT
 # does not exist, so there is no circular-import risk.
 from daemon.repositories.instance import CHAT_SOURCE_TYPES
 from daemon.repositories.room.membership import RoomJoinError
+from daemon.repositories.room.repository import MemberNameCollisionError
 from daemon.services.mission_record_service import (
     mint_commission_fail_open,
     resolve_or_mint_fail_open,
@@ -3144,6 +3145,27 @@ def _format_room_join_refusal(exc) -> str:
     return f"{head}: {exc}"
 
 
+def _format_member_name_collision_failure(exc) -> str:
+    """The commit-time backstop text — DISTINCT by construction.
+
+    ``MemberNameCollisionError`` rides the room-join handler (dual
+    family: ``RoomError`` + ``RoomJoinError``) but is NOT an admission
+    refusal: the 5-conjunct predicate PASSED and the collision fired
+    mid-transaction at commit. The text therefore carries its own
+    head — never the ``room join rejected`` admission head, never the
+    generic ``Failed to spawn instance`` wrapper — and the exception
+    message itself names the colliding member_name and the room.
+    """
+    return (
+        "ERROR: spawn failed — room member name already taken "
+        f"({exc}). HINT: the per-room name registry raced a "
+        f"concurrent same-room spawn (the commit-time "
+        f"UNIQUE(room_id, member_name) backstop caught it); retry the "
+        f"spawn with a different member_name — tier-4 suffixing "
+        f"normally prevents this."
+    )
+
+
 def _room_join_result_line(spec, final_member_name: str | None) -> str:
     """The spawn-result room line — the final name at EVERY tier.
 
@@ -4001,11 +4023,21 @@ def create_instance_tools(
             return "\n".join(
                 line for line in segments if line
             )
+        except MemberNameCollisionError as e:
+            # The commit-time UNIQUE(room_id, member_name) backstop
+            # fired MID-TRANSACTION (admission already passed): the
+            # failed commit rolls the WHOLE spawn back — instance row
+            # and hierarchy row included, the one-tx contract — so no
+            # partial spawn survives and a retry is clean. Matched
+            # BEFORE RoomJoinError: the collision is dual-family and
+            # must surface THIS text, not an admission-refusal one.
+            return _format_member_name_collision_failure(e)
         except RoomJoinError as e:
             # P2 room join — every failed admission conjunct surfaces
             # as its OWN distinct refusal text (typed-error matrix).
-            # No instance row was written (validation precedes the
-            # spawn; the in-tx backstop rolls the whole spawn back).
+            # Admission validation precedes the spawn transaction, so
+            # NOTHING was written here — there is nothing to roll
+            # back. (The commit-time backstop is the branch above.)
             return _format_room_join_refusal(e)
         except ValueError as e:
             # Return text guidance instead of raising - agent can self-correct

@@ -64,6 +64,7 @@ from sqlmodel import Session, select
 from daemon.repositories.event.models import Event, EventKind
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.room import membership as _membership
+from daemon.repositories.room.membership import RoomJoinError  # noqa: E402 — dual-family collision (see MemberNameCollisionError)
 from daemon.repositories.room.models import (
     ChatRoom,
     ChatRoomMember,
@@ -146,10 +147,23 @@ class MemberNotFoundError(RoomError):
     """No membership row for (room_id, instance_id)."""
 
 
-class MemberNameCollisionError(RoomError):
+class MemberNameCollisionError(RoomError, RoomJoinError):
     """``UNIQUE(room_id, member_name)`` refused the insert — the
     per-room naming-registry backstop (P2 owns the suffix registry;
-    P1 only surfaces the typed refusal)."""
+    P1 only surfaces the typed refusal).
+
+    DUAL FAMILY, deliberate: it stays a :class:`RoomError` (this
+    module's typed repository vocabulary) AND becomes a
+    :class:`~daemon.repositories.room.membership.RoomJoinError`
+    because it is semantically a JOIN failure — the spawn aborted
+    because the room could not admit the member under its name. That
+    routes it into the spawn tool's room-join handler, which matches
+    it BEFORE the 5 admission-refusal texts and surfaces the DISTINCT
+    commit-time message (catch-site audit 2026-11-15: the only
+    ``except RoomJoinError`` site is the spawn tool; nothing catches
+    ``RoomError``/``MemberNameCollisionError`` directly, so the only
+    behavioral delta is the intended one).
+    """
 
 
 class RoomSeqConflictError(RoomError):

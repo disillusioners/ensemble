@@ -124,7 +124,14 @@ class RoomJoinError(Exception):
 
     The spawn tool maps each subclass to its OWN agent-readable
     refusal text (all distinct); catching this base catches the whole
-    admission family without touching the other typed room errors.
+    admission family. The commit-time naming backstop
+    (:class:`~daemon.repositories.room.repository.MemberNameCollisionError`)
+    is ALSO a member of this family (dual inheritance, deliberate):
+    it is semantically a join failure, so the spawn tool's room-join
+    handler catches it too — its DISTINCT commit-time text is matched
+    BEFORE the admission-refusal mapping. The remaining typed room
+    errors (:class:`~daemon.repositories.room.repository.RoomError`
+    members below the collision) are untouched by this base.
     """
 
 

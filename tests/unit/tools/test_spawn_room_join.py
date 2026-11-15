@@ -19,6 +19,11 @@ Coverage (commission P2 scope items 1-3 + 6):
   (1 parent-provided / 2 quick-model / 3 agent-fallback / 4 suffix);
 * the typed refusal matrix via the TOOL (5 distinct conjunct texts,
   NO instance row written, spawn never invoked);
+* the commit-time UNIQUE(room_id, member_name) backstop
+  (``MemberNameCollisionError``, dual-family RoomError+RoomJoinError)
+  surfaces via the TOOL as the DISTINCT collision text — never the
+  generic spawn-failure wrapper, never an admission-refusal text —
+  with the whole spawn rolled back (no instance row);
 * naming FAILURE never blocks spawn (instant tier-3 fallback);
 * the legacy path (no join_room) is byte-shape unchanged (no room
   line, no room_join kwarg).
@@ -125,6 +130,56 @@ def _spawn_sim(engine: Engine, calls: list[dict]):
                     )
                 )
                 s.commit()
+        return iid, None
+
+    return _sim
+
+
+def _spawn_sim_commit_backstop(engine: Engine, calls: list[dict]):
+    """Stub replicating the lifecycle's step-4 commit path INCLUDING
+    the integrity classifier (instance_lifecycle: ``session.commit()``
+    wrapped in ``except IntegrityError → _raise_typed_integrity``), so
+    a UNIQUE(room_id, member_name) fire at commit surfaces exactly as
+    it does in production — typed ``MemberNameCollisionError`` raised
+    OUT of ``manager.spawn_instance``."""
+
+    def _sim(**kwargs) -> tuple[str, None]:
+        from sqlalchemy.exc import IntegrityError
+
+        from daemon.repositories.room.repository import RoomRepository
+
+        calls.append(kwargs)
+        iid = kwargs["instance_id"]
+        spec = kwargs.get("room_join")
+        assert spec is not None
+        with Session(engine) as s:
+            row = room_membership.join_room_in_session(
+                s,
+                room_id=spec.room_id,
+                instance_id=iid,
+                base_name=spec.base_name,
+                role=spec.role,
+                agent_id=spec.agent_id,
+            )
+            s.add(
+                Instance(
+                    instance_id=iid,
+                    agent_id=kwargs.get("agent_id") or "capture",
+                    agent_dir="/agents/capture",
+                    parent_id=kwargs.get("parent_id"),
+                    status="idle",
+                    instance_metadata={
+                        "join_room": spec.room_id,
+                        "member_name": row.member_name,
+                    },
+                )
+            )
+            try:
+                s.commit()
+            except IntegrityError as exc:
+                RoomRepository._raise_typed_integrity(
+                    exc, spec.room_id, spec.base_name
+                )
         return iid, None
 
     return _sim
@@ -618,3 +673,160 @@ class TestLegacyPath:
         assert "room join:" not in result
         assert manager.spawn_instance.called is True
         assert "room_join" not in manager.spawn_instance.call_args.kwargs
+
+
+# ---------------------------------------------------------------------------
+# (e) commit-time name collision — the typed backstop text
+# ---------------------------------------------------------------------------
+
+
+class TestCommitTimeNameCollision:
+    """The UNIQUE(room_id, member_name) commit-time backstop.
+
+    The tier-4 registry runs inside the tx, but a name that looks free
+    at registry-read time can be TAKEN at insert time (the lock cannot
+    see an out-of-band writer) — the DB backstop fires, the failed
+    commit rolls the whole spawn back, and ``MemberNameCollisionError``
+    (dual-family: RoomError + RoomJoinError) surfaces through the tool
+    as the DISTINCT collision text.
+    """
+
+    def _seed_taken_name(self, engine: Engine, room_id: str) -> None:
+        """Background row: 'solo' is already registered (prior
+        member). Direct insert — deliberate: the collision source is
+        out-of-band state the suffix registry cannot see."""
+        with Session(engine) as s:
+            s.add(
+                room_membership.join_room_in_session(
+                    s,
+                    room_id=room_id,
+                    instance_id="prior-member",
+                    base_name="solo",
+                )
+            )
+            s.commit()
+
+    def test_typed_collision_text_distinct_at_tool(
+        self, engine, room_stack, monkeypatch
+    ):
+        from daemon.repositories.room import (
+            MemberNameCollisionError,
+            RoomError,
+        )
+        from daemon.repositories.room.membership import RoomJoinError
+
+        # Dual-family contract (the option-a design decision): the
+        # collision stays a RoomError AND rides the room-join family
+        # so the spawn tool's room-join handler catches it.
+        assert issubclass(MemberNameCollisionError, RoomError)
+        assert issubclass(MemberNameCollisionError, RoomJoinError)
+
+        _, svc, room_id = room_stack
+        self._seed_taken_name(engine, room_id)
+        # Simulate the lock-invisible race: the registry read saw
+        # 'solo' as free, so resolve returns the base UNCHANGED and
+        # the INSERT collides with the seeded row at commit.
+        monkeypatch.setattr(
+            room_membership, "resolve_member_name", lambda taken, base: base
+        )
+        calls: list[dict] = []
+        manager = _build_manager(
+            engine, svc, _spawn_sim_commit_backstop(engine, calls)
+        )
+        result = _run_spawn_tool(
+            manager, agent_id="capture", join_room=room_id,
+            member_name="solo",
+        )
+
+        # TYPED: the distinct collision head, naming room + colliding
+        # name (the classifier message carries member_name='solo' and
+        # room=<room_id>).
+        assert result.startswith(
+            "ERROR: spawn failed — room member name already taken"
+        ), result
+        assert room_id in result
+        assert "member_name='solo'" in result
+        # NOT the generic spawn-failure wrapper.
+        assert not result.startswith("ERROR: Failed to spawn instance")
+        # NOT one of the 5 admission-refusal texts.
+        assert "spawn refused — room join rejected" not in result
+        assert "unknown room" not in result
+        assert "member cap" not in result
+        assert "room budget" not in result
+
+        # One-tx contract: the failed commit rolled the WHOLE spawn
+        # back — no instance row, and 'solo' stays registered exactly
+        # once (owned by the prior member).
+        assert manager.spawn_instance.called is True
+        with Session(engine) as s:
+            instances = s.exec(
+                text("SELECT COUNT(*) FROM instances WHERE agent_id = 'capture'")
+            ).scalar()
+            assert int(instances) == 0
+            solos = s.exec(
+                text(
+                    "SELECT COUNT(*) FROM chatroom_members "
+                    "WHERE member_name = 'solo'"
+                )
+            ).scalar()
+            assert int(solos) == 1
+            prior = s.exec(
+                text(
+                    "SELECT instance_id FROM chatroom_members "
+                    "WHERE member_name = 'solo'"
+                )
+            ).scalar()
+            assert prior == "prior-member"
+
+    def test_collision_text_differs_from_every_admission_refusal(
+        self, engine, room_stack, monkeypatch
+    ):
+        """Distinguishability, mechanically: the tool-level collision
+        text equals the dedicated formatter's output and differs from
+        EVERY admission-refusal text (each real refusal type driven
+        through the shared formatter)."""
+        from daemon.repositories import room as room_pkg
+        from daemon.repositories.room.membership import (
+            RoomJoinCrossTreeError,
+            RoomJoinMemberCapError,
+            RoomJoinRoomCapError,
+            RoomJoinRoomStateError,
+            RoomJoinUnknownRoomError,
+        )
+        from daemon.tools.instance import (
+            _format_member_name_collision_failure,
+            _format_room_join_refusal,
+        )
+
+        _, svc, room_id = room_stack
+        self._seed_taken_name(engine, room_id)
+        monkeypatch.setattr(
+            room_membership, "resolve_member_name", lambda taken, base: base
+        )
+        calls: list[dict] = []
+        manager = _build_manager(
+            engine, svc, _spawn_sim_commit_backstop(engine, calls)
+        )
+        result = _run_spawn_tool(
+            manager, agent_id="capture", join_room=room_id,
+            member_name="solo",
+        )
+        typed = room_pkg.MemberNameCollisionError(
+            f"member_name='solo' already registered in room={room_id} "
+            f"(UNIQUE(room_id, member_name) backstop)"
+        )
+        collision_text = _format_member_name_collision_failure(typed)
+        # The tool returned EXACTLY the dedicated collision text.
+        assert result == collision_text
+        # …and it differs from every admission-refusal text.
+        refusals = [
+            _format_room_join_refusal(RoomJoinUnknownRoomError("probe")),
+            _format_room_join_refusal(RoomJoinRoomStateError("probe")),
+            _format_room_join_refusal(RoomJoinCrossTreeError("probe")),
+            _format_room_join_refusal(RoomJoinMemberCapError("probe")),
+            _format_room_join_refusal(RoomJoinRoomCapError("probe")),
+        ]
+        assert len(set(refusals)) == 5
+        for refusal in refusals:
+            assert refusal != collision_text
+        assert collision_text not in " ".join(refusals)
