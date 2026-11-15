@@ -151,7 +151,7 @@ from .services.child_reports import ChildReportsService
 from .services.error_reporting import ErrorReportingService
 from .services.cancellation import CancellationService
 from .services.title_generation import TitleGenerationService
-# Agent group chat P2: room chat service (per-room locks + admission)
+# agent group chat P2: room chat service (per-room locks + admission)
 # and the member naming service (D-S3 cascade tiers 2-3).
 from .services.room_naming import RoomNamingService
 from .repositories.room.service import RoomChatService
@@ -2378,7 +2378,7 @@ class InstanceManager:
             logger=logger,  # Pass manager's logger so tests can mock it
         )
 
-        # Agent group chat P2 — room chat service (per-room lock
+        # agent group chat P2 — room chat service (per-room lock
         # registry + off-loop facade over the room repository) and the
         # member naming service (D-S3 cascade tiers 2-3). Both depend
         # only on the engine/config via the manager; the spawn tool
