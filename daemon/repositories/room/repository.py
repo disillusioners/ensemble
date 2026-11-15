@@ -63,6 +63,7 @@ from sqlmodel import Session, select
 
 from daemon.repositories.event.models import Event, EventKind
 from daemon.repositories.instance.models import Instance
+from daemon.repositories.room import membership as _membership
 from daemon.repositories.room.models import (
     ChatRoom,
     ChatRoomMember,
@@ -81,8 +82,25 @@ __all__ = [
     "MemberNotFoundError",
     "MemberNameCollisionError",
     "RoomSeqConflictError",
+    "RoomJoinError",
+    "RoomJoinUnknownRoomError",
+    "RoomJoinRoomStateError",
+    "RoomJoinCrossTreeError",
+    "RoomJoinMemberCapError",
+    "RoomJoinRoomCapError",
+    "RoomLeaveOwnerError",
     "RoomRepository",
 ]
+
+# Re-exported join/leave vocabulary (membership module owns the
+# definitions; the repository is the callers' one-stop import).
+RoomJoinError = _membership.RoomJoinError
+RoomJoinUnknownRoomError = _membership.RoomJoinUnknownRoomError
+RoomJoinRoomStateError = _membership.RoomJoinRoomStateError
+RoomJoinCrossTreeError = _membership.RoomJoinCrossTreeError
+RoomJoinMemberCapError = _membership.RoomJoinMemberCapError
+RoomJoinRoomCapError = _membership.RoomJoinRoomCapError
+RoomLeaveOwnerError = _membership.RoomLeaveOwnerError
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +279,16 @@ class RoomRepository:
         """
         rid = room_id or _new_room_id()
         now = _utc_now_iso()
+        # D2 / naming-cascade tier 4: the owner's member_name goes
+        # through the SAME per-room registry as every other member
+        # (P2's resolve_member_name). A fresh room has zero registered
+        # names, so the caller-provided name survives bare — the
+        # registry call is the shared-mechanic pin, not a behavior
+        # change (it becomes load-bearing if room-create is ever
+        # re-entered for an existing room_id).
+        owner_member_name = _membership.resolve_member_name(
+            set(), owner_member_name
+        )
         room = ChatRoom(
             room_id=rid,
             name=name,
@@ -444,6 +472,95 @@ class RoomRepository:
                 f"(fail-closed: not an active member and not in the "
                 f"owner-ancestry chain)"
             )
+
+    # ── membership (P2): admission, join, leave, restore ────────────────
+
+    def validate_room_join(
+        self, *, room_id: str, joiner_tree_root: str | None
+    ) -> dict[str, Any]:
+        """THE pinned spawn-time admission predicate (P2).
+
+        Thin delegation to
+        :func:`daemon.repositories.room.membership.validate_room_join`
+        — 5 conjuncts, one distinct typed :class:`RoomJoinError`
+        subclass per failure, room payload on success. Sync; async
+        callers go through the service's ``asyncio.to_thread`` wrap.
+        """
+        return _membership.validate_room_join(
+            self._engine, room_id=room_id, joiner_tree_root=joiner_tree_root
+        )
+
+    def join_room(
+        self,
+        *,
+        room_id: str,
+        instance_id: str,
+        base_name: str,
+        role: str = RoomMemberRole.CHILD.value,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """The member-add public surface (tester F1 gap, closed).
+
+        ONE transaction: read the room's registered names (ALL rows —
+        LEFT included), run the tier-4 suffix registry
+        (:func:`membership.resolve_member_name` — bare for the first
+        bearer, smallest-free ``-N`` for colliders), INSERT the
+        membership row. Caller MUST hold the per-room lock (the
+        service's ``join_room`` takes it); ``UNIQUE(room_id,
+        member_name)`` is the DB backstop — its fire surfaces as
+        :class:`MemberNameCollisionError` via the same
+        fingerprint-only classifier as the create path.
+
+        NOTE: the SPAWN path does NOT use this method — it calls
+        :func:`membership.join_room_in_session` inside
+        ``_spawn_instance_db_sync``'s transaction so the membership
+        row and the instance JSONB keys commit atomically. This
+        method is the standalone surface (tests, future late-join).
+        """
+        try:
+            with Session(self._engine) as session:
+                row = _membership.join_room_in_session(
+                    session,
+                    room_id=room_id,
+                    instance_id=instance_id,
+                    base_name=base_name,
+                    role=role,
+                    agent_id=agent_id,
+                )
+                payload = _member_payload(row)
+                session.commit()
+        except IntegrityError as exc:
+            self._raise_typed_integrity(exc, room_id, base_name)
+        return payload
+
+    def leave_room(self, *, room_id: str, instance_id: str) -> dict[str, Any]:
+        """Membership ``state → left`` (owner exempt — D2).
+
+        The row is NEVER deleted (roster history + cursor substrate);
+        its NAME stays registered (the UNIQUE backstop spans LEFT
+        rows); LEFT rows are FREE vs ``ROOM_MAX_MEMBERS``. Emits ONE
+        content-free ``room_leave`` audit event. Raises
+        :class:`RoomNotFoundError` / :class:`MemberNotFoundError` /
+        :class:`RoomLeaveOwnerError`.
+        """
+        return _membership.leave_room(
+            self, room_id=room_id, instance_id=instance_id
+        )
+
+    def restore_eligibility(
+        self, *, room_id: str, instance_id: str
+    ) -> dict[str, Any]:
+        """The D5 two-conjunct restore rule as a predicate payload.
+
+        Eligible iff ``room.state ∈ {active, closed}`` AND
+        ``member.state = active``; a LEFT member's restore grants
+        nothing (the pin); purged/absent room → ``room_not_found``.
+        The TOOL-grant side of restore is P5 — this predicate is the
+        P2 substrate it will consult.
+        """
+        return _membership.restore_eligibility(
+            self._engine, room_id=room_id, instance_id=instance_id
+        )
 
     # ── message append (b) ─────────────────────────────────────────────
 
