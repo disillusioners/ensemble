@@ -6,6 +6,15 @@ the SQLite-side canonical DDL + the permanent record (create_all
 handles the brand-new tables on PG via the manager's pre-create_all
 registration).
 
+O-5 RE-BASING (group-chat P3 carry-over): the pins that verified
+EXECUTION-CHECKABLE facts (columns, FK shape, DOWN order, index
+lockstep) no longer string-match the .sql text — they apply_migration
+the real file through the REAL runner (via
+``tests.helpers.migration_execution``) and assert on the LIVE schema.
+The runner-mechanics pins (F1 pre-mark, pending list, ledger rows,
+driver fingerprints) live in
+``test_room_migration_runner_execution.py``.
+
 Pins (design of record: architecture-recommendation.md §1.3 + the
 ratified item #1 — ONE multi-table .sql, 3 CREATE TABLE; D2 owner
 seed; the shared non-terminal/terminal status sets with the
@@ -15,14 +24,13 @@ seed; the shared non-terminal/terminal status sets with the
     directory — a duplicate prefix raises
     ``DuplicateMigrationVersionError`` at boot);
   * 3 CREATE TABLE IF NOT EXISTS statements (chatrooms /
-    chatroom_members / room_messages), ``-- UP`` / ``-- DOWN``,
-    DOWN drops exactly what UP created, child-first;
-  * 3-site index lockstep (model ``__table_args__`` ↔ migration
-    ``CREATE INDEX`` ↔ this pin);
-  * UNIQUE backstops present: (room_id, member_name) and
-    (room_id, seq);
-  * NO ACTION FK shape (REFERENCES chatrooms(room_id) with NO
-    ``ON DELETE`` clause — the BoardNote shape);
+    chatroom_members / room_messages), ``-- UP`` / ``-- DOWN``;
+  * EXECUTED: pinned columns per table, NO ACTION FK shape (and its
+    real enforcement), DOWN drops exactly what UP created (child-first,
+    proven by the rollback succeeding under FK pragma), index lockstep
+    model ↔ executed schema;
+  * UNIQUE backstops named in the MODELS (uq_chatroom_members_room_member_name
+    / uq_room_messages_room_seq);
   * models registered with ``SQLModel.metadata`` (the PG
     create_all source of truth);
   * the lifecycle columns exist AT BIRTH (state / closed_at /
@@ -42,7 +50,55 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import NullPool
+from sqlmodel import SQLModel
+
+import daemon.repositories.event.models  # noqa: F401 — register event
+import daemon.repositories.instance.models  # noqa: F401 — register instances
+from daemon.repositories.room.models import (  # noqa: F401 — register room
+    ChatRoom,
+    ChatRoomMember,
+    RoomMessage,
+)
+from tests.helpers.migration_execution import (
+    CHATROOM_MIGRATION_FILENAME,
+    apply_migration_file,
+    sqlite_columns,
+    sqlite_foreign_keys,
+    sqlite_indexes,
+    table_exists,
+)
+
 MIGRATIONS_DIR = Path("daemon/migrations/versions")
+
+
+def _executed_engine(tmp_path) -> Engine:
+    """Fresh file-backed SQLite whose schema is built ONLY by the
+    executed migrations (BOTH room .sql files — the full set boot
+    applies; FK pragma ON) — the O-5 re-basing substrate. Callers own
+    disposal."""
+    eng = create_engine(
+        f"sqlite:///{tmp_path}/room_migration_rebased.db",
+        connect_args={"check_same_thread": False},
+        poolclass=NullPool,
+    )
+
+    @event.listens_for(eng, "connect")
+    def _enable_pragmas(dbapi_conn, _connection_record) -> None:
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    apply_migration_file(eng, CHATROOM_MIGRATION_FILENAME)
+    from tests.helpers.migration_execution import (
+        PROPOSAL_DEDUP_MIGRATION_FILENAME,
+    )
+
+    apply_migration_file(eng, PROPOSAL_DEDUP_MIGRATION_FILENAME)
+    return eng
 
 
 def _find_migration() -> Path:
@@ -105,121 +161,154 @@ def test_migration_has_up_and_down_markers():
     assert "-- DOWN" in content
 
 
-def test_migration_tables_carry_the_pinned_columns():
-    content = _find_migration().read_text()
-
-    def _table_ddl(table: str) -> str:
-        m = re.search(
-            rf"CREATE TABLE IF NOT EXISTS {table} \((.*?)\n\);",
-            content,
-            re.DOTALL,
-        )
-        assert m, f"table {table} not found"
-        return m.group(1)
-
-    rooms = _table_ddl("chatrooms")
-    for col in (
-        "room_id TEXT NOT NULL PRIMARY KEY",
-        "name TEXT NOT NULL",
-        "tree_root_id TEXT NOT NULL",
-        "owner_instance_id TEXT NOT NULL",
-        "state TEXT NOT NULL DEFAULT 'active'",
-        "closed_at TEXT",
-        "last_post_at TEXT",
-        "message_count BIGINT NOT NULL DEFAULT 0",
-        "created_at TEXT NOT NULL",
-        "updated_at TEXT NOT NULL",
-    ):
-        assert col in rooms, f"chatrooms missing {col!r}"
-
-    members = _table_ddl("chatroom_members")
-    for col in (
-        "room_id TEXT NOT NULL REFERENCES chatrooms(room_id)",
-        "instance_id TEXT NOT NULL",
-        "member_name TEXT NOT NULL",
-        "agent_id TEXT",
-        "role TEXT NOT NULL",
-        "joined_at TEXT NOT NULL",
-        "last_read_seq BIGINT NOT NULL DEFAULT 0",
-        "last_delivered_seq BIGINT NOT NULL DEFAULT 0",
-        "state TEXT NOT NULL DEFAULT 'active'",
-        "PRIMARY KEY (room_id, instance_id)",
-        "UNIQUE (room_id, member_name)",
-    ):
-        assert col in members, f"chatroom_members missing {col!r}"
-
-    messages = _table_ddl("room_messages")
-    for col in (
-        "room_id TEXT NOT NULL REFERENCES chatrooms(room_id)",
-        "seq BIGINT NOT NULL",
-        "author_instance_id TEXT NOT NULL",
-        "author_name TEXT NOT NULL",
-        "text TEXT NOT NULL",
-        "tagged_members JSON",
-        "addressed_members JSON",
-        "kind TEXT NOT NULL DEFAULT 'message'",
-        "created_at TEXT NOT NULL",
-        "UNIQUE (room_id, seq)",
-    ):
-        assert col in messages, f"room_messages missing {col!r}"
+def test_migration_tables_carry_the_pinned_columns(tmp_path):
+    """O-5 re-based (was raw-DDL regex): the EXECUTED schema carries the
+    pinned columns per table, with the lifecycle semantics verified on
+    the live columns (NOT NULL / defaults), not on DDL prose."""
+    eng = _executed_engine(tmp_path)
+    try:
+        expected = {
+            "chatrooms": [
+                "room_id", "name", "tree_root_id", "owner_instance_id",
+                "state", "closed_at", "last_post_at", "message_count",
+                "created_at", "updated_at",
+            ],
+            "chatroom_members": [
+                "room_id", "instance_id", "member_name", "agent_id",
+                "role", "joined_at", "last_read_seq", "last_delivered_seq",
+                "state",
+            ],
+            "room_messages": [
+                "id", "room_id", "seq", "author_instance_id",
+                "author_name", "text", "tagged_members",
+                "addressed_members", "kind", "created_at",
+                # P3 proposal-dedup columns (migration 20261115_120000).
+                "source_message_id", "trigger", "member",
+            ],
+        }
+        for table, cols in expected.items():
+            info = sqlite_columns(eng, table)
+            assert [c["name"] for c in info] == cols, (table, info)
+        # Lifecycle semantics, live: room state defaults to 'active'
+        # and is NOT NULL; the cursors + message_count default 0.
+        rooms = {c["name"]: c for c in sqlite_columns(eng, "chatrooms")}
+        assert rooms["state"]["notnull"] == 1
+        assert rooms["state"]["dflt_value"] == "'active'"
+        assert rooms["message_count"]["dflt_value"] == "0"
+        members = {c["name"]: c for c in sqlite_columns(eng, "chatroom_members")}
+        assert members["last_read_seq"]["dflt_value"] == "0"
+        assert members["last_delivered_seq"]["dflt_value"] == "0"
+        assert members["state"]["dflt_value"] == "'active'"
+    finally:
+        eng.dispose()
 
 
-def _executable_sql(content: str) -> str:
-    """Strip full-line ``--`` comments — the runner does the same
-    before the statement split; pins must judge the EXECUTABLE text,
-    never comment prose."""
-    return "\n".join(
-        line for line in content.splitlines() if not line.lstrip().startswith("--")
+def test_migration_fk_is_no_action_shape(tmp_path):
+    """O-5 re-based (was raw-text absence-of-clause): the EXECUTED FK
+    metadata shows both child tables referencing chatrooms(room_id)
+    with on_delete == NO ACTION (the BoardNote shape: purge deletes
+    children FIRST; a stray parent delete is refused)."""
+    eng = _executed_engine(tmp_path)
+    try:
+        for table in ("chatroom_members", "room_messages"):
+            fks = sqlite_foreign_keys(eng, table)
+            room_fks = [f for f in fks if f["table"] == "chatrooms"]
+            assert room_fks, (table, fks)
+            assert any(f["from"] == "room_id" for f in room_fks)
+            for f in room_fks:
+                assert (f["on_delete"] or "NO ACTION") == "NO ACTION", (
+                    table, f
+                )
+    finally:
+        eng.dispose()
+
+
+def test_migration_down_drops_exactly_what_up_created(tmp_path):
+    """O-5 re-based (was UP/DOWN regex pairing): rollback_migration
+    EXECUTES the DOWN — with children seeded and the FK pragma ON, the
+    rollback succeeds (proving the child-first order: a parent-first
+    drop would be FK-refused) and drops exactly the three tables +
+    their indexes, leaving schema_migrations alive."""
+    eng = _executed_engine(tmp_path)
+    try:
+        from sqlalchemy import text
+
+        with eng.connect() as conn:
+            conn.execute(text(
+                "INSERT INTO chatrooms (room_id, name, tree_root_id, "
+                "owner_instance_id, state, message_count, created_at, "
+                "updated_at) VALUES ('r1', 'a', 'root', 'own', 'active', "
+                "0, 't0', 't0')"
+            ))
+            conn.execute(text(
+                "INSERT INTO chatroom_members (room_id, instance_id, "
+                "member_name, role, joined_at, last_read_seq, "
+                "last_delivered_seq, state) VALUES ('r1', 'c1', 'w', "
+                "'child', 't0', 0, 0, 'active')"
+            ))
+            conn.execute(text(
+                "INSERT INTO room_messages (room_id, seq, "
+                "author_instance_id, author_name, text, tagged_members, "
+                "addressed_members, kind, created_at) VALUES "
+                "('r1', 1, 'c1', 'w', 'body', '[]', '[]', 'message', 't0')"
+            ))
+            conn.commit()
+
+        from daemon.migrations.runner import MigrationRunner
+        from tests.helpers.migration_execution import MIGRATIONS_DIR
+
+        runner = MigrationRunner(eng, migrations_dir=MIGRATIONS_DIR)
+        runner.rollback_migration("20261115_080000")
+        for table in ("chatrooms", "chatroom_members", "room_messages"):
+            assert not table_exists(eng, table), table
+        with eng.connect() as conn:
+            remaining = set(
+                conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='table'")
+                ).scalars()
+            )
+        assert "schema_migrations" in remaining
+    finally:
+        eng.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 3-site index lockstep: model __table_args__ ↔ EXECUTED schema ↔ this pin
+# ---------------------------------------------------------------------------
+
+
+def test_index_lockstep_models_vs_migration(tmp_path):
+    """O-5 re-based (was model-attr ↔ CREATE INDEX regex): the executed
+    migration schema and the model-created schema carry the SAME index
+    column-sets (+ uniqueness) per table. Constraint NAMES differ by
+    origin (models declare named UniqueConstraints; the migration's
+    inline UNIQUEs are SQLite-auto-named), so the lockstep compares
+    (column-set → unique) pairs — the driver-honest invariant."""
+    model_engine = create_engine(
+        f"sqlite:///{tmp_path}/model_schema.db",
+        connect_args={"check_same_thread": False},
+        poolclass=NullPool,
     )
-
-
-def test_migration_fk_is_no_action_shape():
-    """NO ACTION = REFERENCES with NO ``ON DELETE`` clause (BoardNote
-    shape: purge deletes children FIRST; a stray parent delete is
-    refused)."""
-    content = _executable_sql(_find_migration().read_text())
-    assert content.count("REFERENCES chatrooms(room_id)") == 2
-    assert "ON DELETE" not in content
-
-
-def test_migration_down_drops_exactly_what_up_created():
-    content = _find_migration().read_text()
-    down = _executable_sql(content.split("-- DOWN", 1)[1])
-    up = _executable_sql(content.split("-- DOWN", 1)[0])
-
-    up_indexes = set(re.findall(r"CREATE INDEX IF NOT EXISTS (\w+)", up))
-    down_indexes = set(re.findall(r"DROP INDEX IF EXISTS (\w+)", down))
-    assert up_indexes == down_indexes, (up_indexes, down_indexes)
-
-    up_tables = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", up))
-    down_tables = re.findall(r"DROP TABLE IF EXISTS (\w+)", down)
-    assert down_tables == [
-        "room_messages",
-        "chatroom_members",
-        "chatrooms",
-    ], down_tables  # child-first order
-    assert set(down_tables) == up_tables
-
-
-# ---------------------------------------------------------------------------
-# 3-site index lockstep: model __table_args__ ↔ migration ↔ this pin
-# ---------------------------------------------------------------------------
-
-
-def test_index_lockstep_models_vs_migration():
-    from daemon.repositories.room.models import ChatRoom, ChatRoomMember
-
-    model_indexes = set()
-    for model in (ChatRoom, ChatRoomMember):
-        for arg in model.__table_args__:
-            name = getattr(arg, "name", None)
-            if isinstance(name, str) and name.startswith("idx_"):
-                model_indexes.add(name)
-
-    content = _find_migration().read_text()
-    sql_indexes = set(re.findall(r"CREATE INDEX IF NOT EXISTS (\w+)", content))
-
-    assert model_indexes == sql_indexes, (model_indexes, sql_indexes)
+    eng = _executed_engine(tmp_path)
+    try:
+        SQLModel.metadata.create_all(model_engine)
+        for table in ("chatrooms", "chatroom_members", "room_messages"):
+            model_sets = {
+                frozenset(idx["columns"]): idx["unique"]
+                for idx in sqlite_indexes(model_engine, table).values()
+            }
+            executed_sets = {
+                frozenset(idx["columns"]): idx["unique"]
+                for idx in sqlite_indexes(eng, table).values()
+            }
+            assert model_sets == executed_sets, (
+                table,
+                sorted(map(sorted, model_sets)),
+                sorted(map(sorted, executed_sets)),
+            )
+    finally:
+        model_engine.dispose()
+        eng.dispose()
 
 
 def test_unique_constraints_pinned_in_models():

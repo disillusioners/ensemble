@@ -325,3 +325,27 @@ def test_addressed_terminal_parent_notice_shape(stack):
         proposals = s.exec(__import__("sqlmodel").select(RoomMessage).where(
             RoomMessage.room_id == room_id, RoomMessage.kind == "task_proposal")).all()
     assert any(p.trigger == "addressed_terminal" for p in proposals)
+
+
+# ---------------------------------------------------------------------------
+# P3 carry-over — registry-clear-on-stop symmetry
+# ---------------------------------------------------------------------------
+
+
+class TestRoomLockRegistryClear:
+    async def test_clear_lock_registry_drops_all_locks(self, engine):
+        """The shutdown step's mechanic: clear_lock_registry drops
+        every per-room lock and returns the count; a subsequent
+        get_room_lock mints a FRESH lock (identity differs)."""
+        svc = RoomChatService(engine)
+        l1 = await svc.get_room_lock("room-a")
+        l2 = await svc.get_room_lock("room-b")
+        dropped = await svc.clear_lock_registry()
+        assert dropped == 2
+        # The registry is empty: a fresh get mints a NEW lock.
+        l3 = await svc.get_room_lock("room-a")
+        assert l3 is not l1
+
+    async def test_clear_on_empty_registry_is_zero(self, engine):
+        svc = RoomChatService(engine)
+        assert await svc.clear_lock_registry() == 0
