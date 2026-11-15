@@ -3,9 +3,12 @@
 This module contains the app factory, lifespan management, middleware,
 and global error handlers. All API endpoints are in daemon/routers/.
 
-M10 — module-band rationale (2026-09-13, refreshed 2026-10-10):
-this file lives in the ~3000-3500-line band by design (currently
-~3290 lines). It carries (a) the FastAPI app
+M10 — module-band rationale (2026-09-13, refreshed 2026-10-10,
+re-refreshed 2026-11-14): this file has GROWN well past the documented
+~3000-3500-line band (currently ~6550 lines) — the band no longer
+holds, and the split is routed to a dedicated commission (the options
+sketched at the end of this docstring remain the plan). It carries
+(a) the FastAPI app
 factory ``create_app`` (the lifespan wiring + middleware
 registration lives here), (b) the ``lifespan`` async-context
 manager that boots the per-instance watchdog, the long-tool-call-

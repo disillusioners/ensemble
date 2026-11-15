@@ -224,12 +224,12 @@ def resolved_postgres_db_name(config) -> str:
     the prod-DSN fence sees the SAME name the connection will use: an
     ambient ``POSTGRES_DB`` override of a tier-1 file boot is INSIDE the
     predicate's view (component B2 §4.2/§4.5, the env-wins poison
-    closure). The identical expression also lives in
-    ``daemon/repositories/factory.create_postgres_engine`` (its env-wins
-    line), so ONE resolved-NAME helper covers both DSN construction
-    sites; the rendered URL is NEVER parsed (passwords containing
-    ``?``/``@`` break URL parsing — the documented reason the factory
-    uses ``URL.create``).
+    closure). The factory keeps its own inline env-wins line in
+    ``daemon/repositories/factory.create_postgres_engine`` — this
+    resolved-NAME helper MIRRORS that expression (it does not serve
+    both DSN construction sites); the rendered URL is NEVER parsed
+    (passwords containing ``?``/``@`` break URL parsing — the
+    documented reason the factory uses ``URL.create``).
 
     Normalization follows the house idiom (``_auto_derive_env``'s
     ``db_hint``): ``.strip().lower()`` before comparison — the predicate
@@ -331,8 +331,8 @@ def assert_prod_dsn_sanctioned(ensemble_config) -> None:
             try:
                 source = _self_env_source()
             except Exception:  # noqa: BLE001 - label read is NON-decisive (B2 §4.3): never fail-close a decided verdict on it
-                source = "unknown"
-            resolution = "explicit" if source == "explicit" else "derived"
+                source = None
+            resolution = "explicit" if source == "explicit" else ("unknown" if source is None else "derived")
             if marker == "live":
                 logger.info(
                     "DB RESOLUTION SANCTIONED (rogue-containment): resolved "

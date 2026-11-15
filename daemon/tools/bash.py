@@ -1,10 +1,17 @@
 """Bash execution tool for running shell commands."""
 
+# Module-band rationale: one module by design (~2050 lines) — the bash tool
+# coroutine (execution, streaming, timeout), the env fencing / secret-scrub
+# resolver, the pkill-overlay live-pattern predicate, and its static pattern
+# tables form one cohesive safety envelope; splitting them would scatter a
+# single gate across files.
+
 import asyncio
 import json
 import logging
 import os
 import re
+import re as _re
 import signal
 import sys
 import tempfile
@@ -1969,11 +1976,10 @@ Returns:
 #     mutating verbs (stop/restart/kill/disable/mask/reload/daemon-reload/
 #     enable/start/try-restart/isolate) are gated.
 #
-# Live patterns (iter-1 D2a adds ensemble-main, ensemble-demo):
+# Live patterns (iter-1 D2a adds ensemble-main, ensemble-demo; A1 adds
+# "\b7979\b"):
 #   "ensemble-prod", "ensemble-daemon", "ensemble-main", "ensemble-demo",
-#   "\b9797\b", "\b9798\b", "agents-ensemble"
-
-import re as _re
+#   "\b9797\b", "\b9798\b", "\b7979\b", "agents-ensemble"
 
 _PKILL_OVERLAY_LIVE_NAME_PATTERNS: tuple[str, ...] = (
     "ensemble-prod",

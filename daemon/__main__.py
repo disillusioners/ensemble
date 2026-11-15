@@ -1,3 +1,8 @@
+"""Daemon entrypoint (``python -m daemon``).
+
+Runs the boot preflight port-ownership gate (claim + socket-holder refusal
+family, exit 78) and the wrapper regions that assemble and launch the
+daemon application."""
 import logging
 import os
 import sys
@@ -190,10 +195,10 @@ def _write_refusal_family_record(*, family: str, source: str, detail: str = "") 
         claims_dir = resolve_claims_dir()
         write_refusal_marker(
             claims_dir,
-            None,
-            None,
-            None,
-            "",
+            holder=None,
+            self_install_dir=None,
+            port=None,
+            host="",
             family=family,
             source=source,
             evidence=(detail[:200] if detail else None),

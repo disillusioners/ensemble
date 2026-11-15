@@ -2,8 +2,9 @@
 
 Pure ``/proc`` inspection: discovers which process ACTUALLY holds a LISTEN
 socket on a given port, attributes its install directory, and confirms the
-finding across two FULL re-walks. No ``ss``/``lsof``/``psutil`` — the only
-variant that is tmp-procfs-injectable for tests and frozen-binary-safe.
+finding across two full walks (discovery + one re-walk). No ``ss``/``lsof``/
+``psutil`` — the only variant that is tmp-procfs-injectable for tests and
+frozen-binary-safe.
 
 Degrade-never-refuse on every unverifiable step (D-A2-3): missing /
 unparseable tables, permission-denied exe/cwd/fd dirs, recycled pids,
@@ -17,7 +18,13 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+from daemon.services.port_ownership import (
+    _cmdline_head,
+    _read_ppid_in,
+    _read_starttime_in,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +38,13 @@ _TCP_LISTEN_STATE = "0A"
 
 @dataclass
 class HolderRef:
+    """A discovered LISTEN-socket holder.
+
+    ``install_dir=None`` ⇒ unattributable ⇒ non-foreign by design;
+    ``ppid_cmdline_head`` is the first 120 chars of the parent's argv
+    (None when the parent cmdline is unreadable).
+    """
+
     pid: int
     starttime: Optional[int] = None
     exe: str = "<unreadable>"
@@ -42,39 +56,13 @@ class HolderRef:
 
 
 def _read_starttime(pid: int, proc_root: str) -> Optional[int]:
-    try:
-        with open(os.path.join(proc_root, str(pid), "stat"), "r", encoding="utf-8") as f:
-            data = f.read()
-    except (OSError, IOError, ValueError):
-        return None
-    idx = data.rfind(")")
-    if idx < 0:
-        return None
-    fields = data[idx + 1 :].split()
-    if len(fields) < 20:
-        return None
-    try:
-        return int(fields[19])
-    except (ValueError, IndexError):
-        return None
+    """Delegate to the shared parser (single stat-split implementation)."""
+    return _read_starttime_in(proc_root, pid)
 
 
 def _read_ppid(pid: int, proc_root: str) -> Optional[int]:
-    try:
-        with open(os.path.join(proc_root, str(pid), "stat"), "r", encoding="utf-8") as f:
-            data = f.read()
-    except (OSError, IOError, ValueError):
-        return None
-    idx = data.rfind(")")
-    if idx < 0:
-        return None
-    fields = data[idx + 1 :].split()
-    if len(fields) < 2:
-        return None
-    try:
-        return int(fields[1])
-    except (ValueError, IndexError):
-        return None
+    """Delegate to the shared parser (single stat-split implementation)."""
+    return _read_ppid_in(proc_root, pid)
 
 
 def _read_exe(pid: int, proc_root: str) -> str:
@@ -92,24 +80,8 @@ def _read_cwd(pid: int, proc_root: str) -> str:
 
 
 def _read_cmdline_head(pid: Optional[int], proc_root: str) -> Optional[str]:
-    if pid is None:
-        return None
-    try:
-        raw = open(os.path.join(proc_root, str(pid), "cmdline"), "rb").read()
-    except (OSError, IOError):
-        return None
-    if not raw:
-        return None
-    text = raw.decode("utf-8", "replace")
-    parts = [p for p in text.split("\x00")]
-    if parts and parts[-1] == "":
-        parts = parts[:-1]
-    if not parts:
-        return None
-    head = " ".join(parts)
-    if len(head) > 120:
-        head = head[:120]
-    return head
+    """Delegate to the shared parser (single cmdline-head implementation)."""
+    return _cmdline_head(proc_root, pid)
 
 
 def _read_fd_links(pid: int, proc_root: str) -> List[str]:
@@ -129,9 +101,9 @@ def _read_fd_links(pid: int, proc_root: str) -> List[str]:
     return out
 
 
-def _parse_tcp_table(text: str) -> List[tuple]:
+def _parse_tcp_table(text: str) -> List[Tuple[int, str, str]]:
     """Parse a /proc/net/tcp{,6} table into (port_int, state, inode) rows."""
-    rows: List[tuple] = []
+    rows: List[Tuple[int, str, str]] = []
     for line in (text or "").splitlines():
         line = line.strip()
         if not line:
@@ -155,7 +127,7 @@ def _parse_tcp_table(text: str) -> List[tuple]:
     return rows
 
 
-def _read_table(proc_root: str, filename: str) -> Optional[List[tuple]]:
+def _read_table(proc_root: str, filename: str) -> Optional[List[Tuple[int, str, str]]]:
     """Return parsed rows, or None when the table is absent/unparseable."""
     path = os.path.join(proc_root, "net", filename)
     try:
@@ -169,7 +141,7 @@ def _read_table(proc_root: str, filename: str) -> Optional[List[tuple]]:
         return None
 
 
-def find_listener_holders(proc_root: str = "/proc", port: int = 0, exclude_pid: Optional[int] = None) -> List[HolderRef]:
+def find_listener_holders(proc_root: str | Path = "/proc", port: int = 0, exclude_pid: Optional[int] = None) -> List[HolderRef]:
     """Discover processes holding a LISTEN socket on ``port``.
 
     Reads BOTH /proc/net/tcp and /proc/net/tcp6 (dual-stack / v4-mapped
@@ -183,7 +155,7 @@ def find_listener_holders(proc_root: str = "/proc", port: int = 0, exclude_pid: 
     except (TypeError, ValueError):
         return []
 
-    listener_inodes: set = set()
+    listener_inodes: Set[str] = set()
     any_table = False
     for fname in ("tcp", "tcp6"):
         rows = _read_table(proc_root, fname)
@@ -215,8 +187,8 @@ def find_listener_holders(proc_root: str = "/proc", port: int = 0, exclude_pid: 
         logger.warning("port-holder: cannot list %s — degrade", proc_root)
         return []
 
-    holders: dict = {}
-    matched_inodes: set = set()
+    holders: Dict[int, HolderRef] = {}
+    matched_inodes: Set[str] = set()
 
     for pid in pids:
         if pid == exclude_pid:
