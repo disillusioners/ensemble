@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — ENSEMBLE-32 repair lane (macOS launchd hand-back halt)
+
+- **Fix #1 + PC-1 + Fix #6 + §5.6 FYI** (`c28b64ec3`): launchd plists renamed to label-verbatim names (`scripts/com.ensemble.prod.plist`, `scripts/com.ensemble.watchdog.plist`); PC-1 three-rung hand-back plist-path resolver (live `launchctl print` → classify-time stash → deterministic `~/Library/LaunchAgents/<label>.plist` fallback, each rung `-f`-verified, fail-closed) — the halt killer, because the stop phase bootouts the job *before* hand-back; Fix #6 age-bounded reap of `rollback.lock.d.stale.*` siblings at all three `lock_acquire` sites (shell/Python twins mirrored); Background Items FYI line.
+- **Fix #2 + Fix #4 + PC-2** (`b7c9403a1`): serving-process attribution conjuncts on every promote/restart/rollback/status gate and the hand-back probe (port-holder pid ∈ supervision-owned pid set — launchd lineage on darwin, systemd MainPID on linux; fail-closed); launchd arm added to `supervision_dualfight_check` Check B; owned-pid membership required in promote flip-verify; council-caught CRITICAL membership normalization (newline-joined owned list vs space-delimited match) pinned both directions (M18); `HANDBACK_LAST_ERROR` capture into the three halt templates + benign-arm clear; PC-2 `INSTALL_DIR` export + sweep passes `self._install_dir` into `supervision_detect` — closes the `LAUNCHD_NOT_VERIFIED` false-positive for plist-lineage daemons.
+- **Fix #3 + Fix #5 + §10 runbook policy** (`6b2f2c191`): `daemon/plugin_subsystem/promote_staleness.py` slice staged at payload top-level + manifest/hash/stamp-gate coverage + fail-closed staging assertion (exit 78); darwin executor self-detach via transient one-shot LaunchAgent `com.ensemble.promote-<runid>` with mandatory bootout+rm on success and failure and exit-code propagation; identity-only kill-sweep self-exclusion (`$$`, `$PPID`, in-tree `$PPID`'s parent — a pgid filter would drop the daemon, same launchd job group); runbook §10 invoke-path policy (release-staged PRIMARY, pinned worktree = recovery/escape hatch).
+
+Lane invariants: (i) filename == label for LaunchAgents (label-verbatim plist names; demo rename of legacy `ensemble-demo.plist` is operator work, documented not performed); (ii) darwin executor self-detach (promote must never run inside the daemon process tree; stop sweeps keep identity-only self-exclusion).
+
+Gates: reviewer council SHIP ×3 (F1 7/7, F2 9/9 post-fix, F3 11/11); tester regression DEFERRED → tester.
+
+Disclosures: (i) PC-1/PC-2 premise corrections honored (resolver print is dead post-bootout; `INSTALL_DIR` absent for plist-lineage daemons); (ii) identity-only self-exclusion deviation from the brief's pgid request (reason: pgid == daemon job group); (iii) pre-existing red baselines listed (see incident §9).
+
 ## [0.30.9] — 2026-11-14
 
 ### Changed — supersede re-stage: release-record corrections (no behavior change; zero tool-code drift)

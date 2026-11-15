@@ -280,7 +280,7 @@ the staged release payload is the **complete, self-contained invoke path**:
 * The payload carries the **whole executor family** — `scripts/upgrade/*`
   (promote.sh, lib.sh, stage.sh, restart.sh, rollback.sh, adopt-unit.sh,
   ledger_check.py, journal_read.py, journal_splice.py, _build_frontend.sh,
-  executor_family.sh, status.sh, journal_splice.py) + `scripts/stop-ensemble.sh`
+  executor_family.sh, status.sh) + `scripts/stop-ensemble.sh`
   + `scripts/install-dir-guard.sh` + the **plugin-staleness predicate slice**
   (`daemon/plugin_subsystem/promote_staleness.py`).
 * The plugin-staleness gate (`lib.sh promote_plugin_staleness_check`) resolves
