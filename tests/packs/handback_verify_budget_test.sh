@@ -111,6 +111,7 @@ gd_run() {  # gd_run <GRACE_S> <POLL_S> — drive the REAL grace function
     PATH="$GD_FIX:$PATH" INSTALL_DIR="$GD_FIX" PORT="$GD_PORT" \
     FLIP_VERIFY_LISTEN_GRACE_S="$1" FLIP_VERIFY_LISTEN_POLL_S="$2" \
     GD_HOLDERS="${GD_HOLDERS:-}" GD_NEVER="${GD_NEVER:-0}" \
+    GD_DELAY_CALLS="${GD_DELAY_CALLS:-}" \
     bash -c '
         . "'"$GD_LIBSH"'" >/dev/null 2>&1
         _supervision_owned_pids() { printf "%s\n" 424242; }
@@ -125,11 +126,15 @@ gd_run() {  # gd_run <GRACE_S> <POLL_S> — drive the REAL grace function
 # impossible (calls 1-3 are silent by the counter), so rc=0 PROVES the
 # function polled past the silent window and accepted the late holder.
 GD_DELAY_CALLS=3 GD_HOLDERS="424242" GD_NEVER=0
+printf '0\n' > "$GD_FIX/calls"   # counter reset: the file persists across legs — each leg asserts ITS OWN call count
 GD1A_OUT="$(gd_run 30 1)"
-printf 'CALLS=[%s] DELAY=[%s] HOLDERS=[%s] NEVER=[%s] STUBHEAD=[%s]\n' "$(cat "$GD_FIX/calls" 2>/dev/null)" "${GD_DELAY_CALLS:-UNSET}" "${GD_HOLDERS:-UNSET}" "${GD_NEVER:-UNSET}" "$(head -c 120 "$GD_FIX/lsof" 2>/dev/null | tr '\n' ' ')" >&2
-PATH="$GD_FIX:$PATH" command -v lsof >&2 || echo "command -v lsof: NOT FOUND in child-context PATH" >&2
 gd_contains "GD1a delayed owned bind: attribution PASSES after grace" "fv-rc=0" "$GD1A_OUT"
 gd_contains "GD1a success reason is empty" "reason=[]" "$GD1A_OUT"
+# counter-token pin (review round 4, #1): the stub MUST have been polled
+# past the silent window — calls >= DELAY_CALLS + 1 proves the grace
+# WAITED (a vacuous stub that answers the holder on call 1 would show 1).
+GD1A_CALLS="$(cat "$GD_FIX/calls" 2>/dev/null || echo 0)"
+if [ "$GD1A_CALLS" -ge 4 ] 2>/dev/null; then gd_pass; else gd_fail "GD1a the stub was polled only $GD1A_CALLS time(s) — the grace did not wait for the delayed bind (counter-token pin)"; fi
 # GD1b — budget exhaustion with NO listener: crash-shape verdict PRESERVED
 # (a 3s budget honored: elapsed >= 3s, rc 1, the reason names the grace).
 GD_NEVER=1 GD_DELAY_CALLS=""
@@ -143,9 +148,16 @@ gd_contains "GD1b the reason keeps the crash-loop shape" "crash-loop shape" "$GD
 # GD1c — FOREIGN holder: IMMEDIATE refusal (no grace for wrong-process):
 # a 60s grace must NOT be waited; the verdict is foreign, not crash-shape.
 GD_NEVER=0 GD_DELAY_CALLS="" GD_HOLDERS="999999"
+printf '0\n' > "$GD_FIX/calls"   # counter reset (cumulative file — see GD1a)
 GD1C_OUT="$(gd_run 60 1)"
 gd_contains "GD1c foreign holder: refuses (rc 1)" "fv-rc=1" "$GD1C_OUT"
 gd_contains "GD1c the verdict is FOREIGN, not crash-shape" "foreign process" "$GD1C_OUT"
+# counter-token pin (review round 4, #3): EXACTLY one census call — the
+# holder was consumed and refused on the FIRST census, with zero grace
+# polling for a wrong-process holder (the previously comment-only
+# zero-grace-for-foreign property, now pinned).
+GD1C_CALLS="$(cat "$GD_FIX/calls" 2>/dev/null || echo 0)"
+if [ "$GD1C_CALLS" = "1" ]; then gd_pass; else gd_fail "GD1c the stub was polled $GD1C_CALLS time(s) for a FOREIGN holder — grace must NOT apply to wrong-process (counter-token pin)"; fi
 # no-grace proof, clock-free: the GRACE knob is set to 60s on this leg —
 # a crash-shape verdict (the wrong reason) would mean the function WAITED
 # for the budget; the foreign verdict + rc 1 on the FIRST census proves

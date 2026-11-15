@@ -6936,8 +6936,14 @@ _supervision_owned_pids() {
 # from _FLIP_VERIFY_REASON); 2 = degraded-skip (census unprobeable —
 # pid provenance only, NOT a pass evidence; the caller logs the skip).
 # STATEMENT FORM: call directly, never in $( ) (it sleeps).
-FLIP_VERIFY_LISTEN_GRACE_S="${FLIP_VERIFY_LISTEN_GRACE_S:-${LIVEZ_BUDGET_S:-180}}"
-FLIP_VERIFY_LISTEN_POLL_S="${FLIP_VERIFY_LISTEN_POLL_S:-2}"
+# Both knobs route through _numeric_knob (A5 house rule): unset -> the
+# documented default (the grace inherits the already-routed LIVEZ_BUDGET_S,
+# the operator's tuned boot-patience budget), garbage/float -> a LOUD stderr
+# note + the default -- garbage can NEVER kill the promote shell mid-flip-
+# verify NOR silently zero the grace (a zero grace would restore the D-1
+# crash-shape instant verdict the knob exists to prevent).
+FLIP_VERIFY_LISTEN_GRACE_S="$(_numeric_knob FLIP_VERIFY_LISTEN_GRACE_S "${FLIP_VERIFY_LISTEN_GRACE_S:-}" "${LIVEZ_BUDGET_S:-180}")"
+FLIP_VERIFY_LISTEN_POLL_S="$(_numeric_knob FLIP_VERIFY_LISTEN_POLL_S "${FLIP_VERIFY_LISTEN_POLL_S:-}" 2)"
 _flip_verify_port_attribution() {
     local post_pid="${1:-}" deadline holders hrc owned owned_spaced h foreign
     deadline=$(( $(_now_epoch) + FLIP_VERIFY_LISTEN_GRACE_S ))
