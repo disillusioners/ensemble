@@ -167,10 +167,18 @@ pipeline's hand-back refuses to resolve the plist and halts fail-safe after ever
 (1-of-3 observations, ambiguous-absent) → **`serving_green_commit` at 18:14:11Z**: journal
 `current: v0.30.9`, `previous: v0.30.5`, `in_flight: false`. FE 200, ready.
 
-**Verification pending:** the next self-promote should now complete its hand-back cleanly.
+~~**Verification pending:** the next self-promote should now complete its hand-back cleanly.
 If it halts again with the same warning, the hand-back may resolve the plist from a different
 directory (e.g. the install's `data/` staged copy — which is still named `ensemble-prod.plist`;
-the staged names would need the same rename at source).
+the staged names would need the same rename at source).~~
+→ **RESOLVED 2026-11-15 (repair lane, E2E round 2):** a real promote completed entry → stop →
+flip → **launchd hand-back → serving-green → COMMIT** with **zero halt rows** (RC=0, 105s wall;
+demo on v0.30.10; attribution launchd == port-holder == /livez live). The mis-named-plist
+hypothesis above was confirmed as the root cause (§7b) and fixed at source (`c28b64ec3`:
+label-verbatim plists + PC-1 three-rung resolver). Evidence:
+`.agents/tester/RESULTS/2026-11-15-ensemble-32-repair-lane-demo-promote.md` (round 2,
+B5.1–5.5 ALL PASS) + the wave block in `.agents/tester/PACKS.md` (`ens32-repair-lane-wave-20261115`).
+Full closure: §9.5.
 
 ## 8. Artifacts
 
@@ -342,8 +350,48 @@ run BY the demo daemon calling `system_upgrade(user_confirmed=true,
 dry_run=false)` spawns the promote executor via manager.py's sole spawn seam
 (descends from the demo daemon's tree ⇒ §7 self-detach fires E2E); no
 ADR-017/live-rung constraint blocks the daemon lane on a DEMO install.
+(f) **D-6 config-compat contract resolution in the §7-detached env — CLOSED**
+(`4ee4c44a1`). The checker resolves the contract from the TARGET-PAYLOAD leg
+first (`$INSTALL_DIR/releases/$VERSION/daemon/plugin_subsystem/
+config_compat_contract.json` — stage.sh minted it from exactly the tree that
+boots after the flip), and `REPO_ROOT` threads through the detach wrapper's
+plist `EnvironmentVariables` (allowlist-of-one per `EXECUTOR_ENV_ALLOWLIST`;
+set-but-non-exported and set-but-empty both stay absent). Pack-proven:
+config_compat 31P/0F (C10/C10b reproduce the round-4 refusal hermetically),
+survivorship 53P/0F (K1–K4 drive the plist threading both directions), python
+twin 30P/0F; mutation kills both directions (payload leg removed → C10 fails
+with the literal-`?` refusal reproduced; threading removed → K2 fails; both
+restored sha-exact). The STRUCTURAL per-release config transport (config.yaml
+itself traveling) STAYS deferred at (e).
 
-### 9.5 Open items carried (not closed by this lane)
+Follow-up ledger (carried after the wave; one line each, none closed by this
+lane):
+
+(i) **W-1 agent false-green observability** — `result_summary` is written
+before `executor_exit`; nothing delivers the executor result back to the
+instance, so an agent can report "done" while the promote refused.
+(ii) rollback / 8b auto-rollback legs carry NO config-compat check
+(reviewer #5).
+(iii) checkout-mint precedence (reviewer #4) — the payload leg is now
+first-authoritative and the checkout tree-mint leg is skipped when it
+resolves; any precedence re-debate (fresh-mint vs staged-contract oracle)
+must re-cut the C10/K packs.
+(iv) `dict[str, Model]` unwrap false-refusal on user-keyed config sections —
+fail-closed, but a live-config audit before the user-gated self-promote is
+recommended.
+(v) `upgrade.log` tail pollution (append-mode executor_exit detail; anomaly
+4f95c9d8).
+(vi) `PREFLIGHT_REAL_SOAK_S` documented-but-unrouted knob (docs/code drift;
+the soak leg still runs the literal 300s).
+(vii) bash-3.2 probe platform debt (darwin serving-green probe blindness;
+standing debt).
+(viii) matcher-drift minor (#3) plus the remainder of the 🟢 minor batch
+(pre-recipe detach-dir shells in `$TMPDIR`, OS rotation; items (v)/(vii)
+carry the other two 🟢 entries).
+
+### 9.5 Closure — E2E verification wave + records (2026-11-15)
+
+Incident items closed by the lane:
 
 - §5.1 serving-process attribution — closed by Fix #2.
 - §5.2 hand-back error recording — closed by Fix #4.
@@ -353,6 +401,73 @@ ADR-017/live-rung constraint blocks the daemon lane on a DEMO install.
 - §5.6 Background Items FYI — documented (§5.6 above).
 - §7 pre-flip executor self-kill — closed by Fix #5.
 - §7b label≠filename halt — closed by Fix #1 + PC-1.
+
+**Cycles 1–4 (the honest arc).** Four E2E demo-promote cycles; each peeled
+one pinned defect layer, every refusal was FAIL-CLOSED (rc 78 / auto-rollback),
+never a silent pass. The demo was contained by the halt machinery at every
+failure and healthy on v0.30.10 from cycle 2 onward; prod was untouched
+across the entire wave (pids/labels/ports proven identical in every phase of
+every cycle).
+
+- **Cycle 1 (R1 @ `a7e727c11`)** — the promote ran to the flip, then halted
+  fail-closed (auto-rollback, rc 78): D-1 (flip-verify had no boot grace — a
+  healthy ~15–20s migration-heavy boot was killed mid-boot) + D-2 (the
+  rollback target was unbootable — `config.yaml` does not travel with
+  releases). The halt machinery itself worked as designed: quarantine +
+  cooldown + halt rows preserved; clean wave-end recovery.
+- **Cycle 2 (R2 @ `1aa0065eb`)** — the repaired pipeline went **E2E GREEN**
+  on the release-staged fallback lane: RC=0, 105s wall, zero halt rows,
+  launchd hand-back, attribution live, serving-green. D-1 grace + D-2 entry
+  check verified live (`CONFIG-COMPAT=ok`).
+- **Cycle 3 (R3 @ `f8dc874f7`)** — the designed path engaged end-to-end for
+  the first time (§7 detector fired; transient LaunchAgent bootstrapped
+  label-verbatim and cleaned up; D-4 resolved live via the honest
+  `ENSEMBLE_ROLLBACK_SAFE=1` attestation) and peeled D-5 (the detach wrapper
+  duplicated the script path — refused rc 78 in ~2s, pre-stop).
+- **Cycle 4 (R4 @ `9d92b9f65`)** — D-5 verified **in vivo** (both detached
+  PPID chains captured; journal argv shows the script consumed exactly once)
+  and peeled D-6 (the config-compat gate could not resolve the contract from
+  the detached env — refused rc 78 pre-stop-window, demo unharmed on
+  v0.30.10). Fixed post-cycle by `4ee4c44a1`; no cycle 5 per commission.
+
+**D-1..D-6 outcome map** (carrying commit + pack evidence):
+
+| Defect | Outcome | Commit | Pack evidence |
+|---|---|---|---|
+| D-1 flip-verify boot grace | FIXED | `802eac803`, refined `1aa0065eb` | G-D1 8→10P/0F (vacuity round killed mutants M1/M3); E2E-present R2 |
+| D-2 config-not-traveling | GUARDED (entry check); per-release transport deferred (§9.4(e)) | `802eac803` | config_compat 27P/0F at birth (31P/0F after D-6); `CONFIG-COMPAT=ok` live R2 |
+| D-3 stamp-coverage re-pin | LANDED | `f8dc874f7` | stage gates green live (floor/stamp/coverage all @ `1aa0065eb`) |
+| D-4 tool rollback_safe drift | RESOLVED LIVE (no tool change) | — | pre-arm passed R3 (schema_gen-identical, migrations-diff-empty basis) |
+| D-5 detach wrapper argv shift | FIXED + IN-VIVO-PROVEN (cycle 4) | `9d92b9f65` | survivorship 48P/0F + twin 30P/0F (J1–J4 + 2b-d5 kill the no-shift mutant); R4 both chains script-once |
+| D-6 detached-env contract resolution | FIXED | `4ee4c44a1` | config_compat 31P/0F (C10/C10b), survivorship 53P/0F (K1–K4), twin 30P/0F, handback 97P/0F/4S; mutation kills both directions |
+
+**Cumulative B5 table** — by pointer, not duplicated: the tester's
+`.agents/tester/RESULTS/2026-11-15-ensemble-32-repair-lane-demo-promote.md`
+(all four rounds + cumulative table in one doc) and the registered wave block
+in `.agents/tester/PACKS.md` (`ens32-repair-lane-wave-20261115`).
+
+**R2 is the incident's demanded proof, plainly:** an E2E promote completed
+GREEN — RC=0, 105s wall (entry → stop → flip → launchd hand-back → soak
+5-greens → COMMITTED), zero halt rows, launchd hand-back verified,
+serving-process attribution live, serving-green. The hand-back halt family is
+closed for the pipeline.
+
+**Designed-path status.** §7's mechanics are FULLY proven in vivo (detector →
+label-verbatim LaunchAgent → detach → correct argv → cleanup → PPID chains
+A + B, cycle 4). The FULL ride — surviving the stop-window through
+serving-green ON the designed path — is pending; its first live exercise is
+the user-gated self-promote.
+
+**Chain (11 commits; base `bf4bfde6e`):**
+`c28b64ec3 → b7c9403a1 → 6b2f2c191 → 645b114cd → 3935a3368 → a7e727c11 →
+802eac803 → 1aa0065eb → f8dc874f7 → 9d92b9f65 → 4ee4c44a1` (head at this
+records commit).
+
+**release_journal baseline certification.** The failing-id set is
+digest-certified `d487651287770376448ec770bfaba67599b82dbee107e9c42afbcc2ca8f3e67e`
+= 4F {8c×3, 12c}, A/B-proven pre-existing at base, with the 16d TERM pin
+green (R2 enumeration 378P/4F/1S, zero out-of-family reds — the normalized
+failing-id set certifies the baseline where counts alone did not).
 
 No product-code or test-code changes in this family; only this doc,
 `CHANGELOG.md`, and `docs/runbooks/promote-handback-serving-green-closer.md`.
