@@ -1015,7 +1015,7 @@ class RoomRepository:
                 Event(
                     instance_id=instance_id,
                     kind=kind,
-                    data=__import__("json").dumps(data),
+                    data=json.dumps(data),
                     created_at=now,
                 )
             )

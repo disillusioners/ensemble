@@ -328,6 +328,251 @@ def test_addressed_terminal_parent_notice_shape(stack):
 
 
 # ---------------------------------------------------------------------------
+# P3 remediation pins — CAS-miss / fresh==running branch (A-P3-17), the
+# graphless-running parent downgrade (A-P3-19), boot counts (A-P3-20).
+# Mutation-grade: reverting room_delivery.py to the pre-fix 3b092ea85
+# shape reddens every test in this section (each asserts behavior the
+# pre-fix code did not perform — see the remediation report).
+# ---------------------------------------------------------------------------
+
+
+def _race_flip_to_running(engine, svc):
+    """Wrap svc.cas_instance_status_to_running so a concurrent actor's
+    running-flip lands between the lane read and the CAS — the exact
+    TOCTOU that makes the CAS miss (rowcount 0) with a fresh running
+    status. Deterministic race simulation; restores the real method."""
+    real_cas = svc.cas_instance_status_to_running
+
+    async def racing_cas(iid, allowed):
+        with Session(engine) as s:
+            inst = s.get(Instance, iid)
+            inst.status = "running"
+            s.commit()
+        return await real_cas(iid, allowed)
+
+    svc.cas_instance_status_to_running = racing_cas  # type: ignore[method-assign]
+    return real_cas
+
+
+def _member_row(engine, room_id):
+    from daemon.repositories.room.models import ChatRoomMember
+    with Session(engine) as s:
+        return s.get(ChatRoomMember, (room_id, "child-1"))
+
+
+def test_cas_miss_running_injects_and_advances_cursor(stack):
+    """Finding 1 / A-P3-17: a tagged lane-B row whose CAS misses against
+    a concurrent running flip must take lane (a) — INJECT (with the
+    A-P3-1 composite source stamp) and advance the cursor. Pre-fix shape
+    advanced the cursor and returned "enqueued" without delivering."""
+    engine, repo, svc, room_id, caller = stack
+    real_cas = _race_flip_to_running(engine, svc)
+    manager = _make_manager(engine, svc, live_graph=True, inject_ok=True)
+    delivery = RoomDeliveryService(manager, svc)
+
+    async def run():
+        try:
+            post = await svc.append_message(
+                room_id=room_id, author_instance_id=caller, author_name="lead",
+                text_body="ping", tagged_members=["worker"], addressed_members=[],
+            )
+            return post, await delivery.route_post(
+                room_id=room_id, post=post,
+                sender_instance_id=caller, sender_member_name="lead",
+            )
+        finally:
+            svc.cas_instance_status_to_running = real_cas  # type: ignore[method-assign]
+
+    post, res = asyncio.run(run())
+    outcomes = [o["outcome"] for o in res["tag_outcomes"]]
+    assert outcomes == ["injected"], f"expected injected, got {outcomes}"
+    # the injection carried the A-P3-1 composite source stamp
+    inj = [c for c in manager.set_injection.call_args_list
+           if c.args and c.args[0] == "child-1"]
+    assert len(inj) == 1, "lane (a) injection must fire exactly once"
+    expected_source = f"room:{room_id}:lead:{post['seq']}:author={caller}"
+    assert inj[0].kwargs.get("source") == expected_source
+    # cursor advanced on successful delivery
+    assert _member_row(engine, room_id).last_delivered_seq == post["seq"]
+
+
+def test_cas_miss_running_inject_failure_leaves_cursor_untouched(stack):
+    """Finding 1 / A-P3-17: when the post-CAS-miss injection cannot be
+    completed, the outcome is deferred_cursor and the delivered cursor
+    is NOT advanced — boot re-derivation must still see (and retry) the
+    row. Pre-fix shape returned "enqueued" with the cursor advanced."""
+    engine, repo, svc, room_id, caller = stack
+    real_cas = _race_flip_to_running(engine, svc)
+    manager = _make_manager(engine, svc, live_graph=True, inject_ok=False)
+    delivery = RoomDeliveryService(manager, svc)
+
+    async def run():
+        try:
+            post = await svc.append_message(
+                room_id=room_id, author_instance_id=caller, author_name="lead",
+                text_body="ping", tagged_members=["worker"], addressed_members=[],
+            )
+            return post, await delivery.route_post(
+                room_id=room_id, post=post,
+                sender_instance_id=caller, sender_member_name="lead",
+            )
+        finally:
+            svc.cas_instance_status_to_running = real_cas  # type: ignore[method-assign]
+
+    post, res = asyncio.run(run())
+    outcomes = [o["outcome"] for o in res["tag_outcomes"]]
+    assert outcomes == ["deferred_cursor"], f"expected deferred_cursor, got {outcomes}"
+    assert manager.enqueue_message.await_count == 0, "no enqueue on the inject lane"
+    assert _member_row(engine, room_id).last_delivered_seq == 0, (
+        "failed delivery must NOT advance the delivered cursor"
+    )
+
+
+def test_cas_miss_running_graphless_downgrades_to_enqueue(stack):
+    """Finding 1 / A-P3-17: the DEFECT-A downgrade — fresh running with
+    NO live graph task cannot see an injection, so the branch enqueues
+    (lane (b) shape) and advances the cursor. Pre-fix shape neither
+    injected nor enqueued (silent drop)."""
+    engine, repo, svc, room_id, caller = stack
+    real_cas = _race_flip_to_running(engine, svc)
+    manager = _make_manager(engine, svc, live_graph=False, inject_ok=True)
+    delivery = RoomDeliveryService(manager, svc)
+
+    async def run():
+        try:
+            post = await svc.append_message(
+                room_id=room_id, author_instance_id=caller, author_name="lead",
+                text_body="ping", tagged_members=["worker"], addressed_members=[],
+            )
+            return post, await delivery.route_post(
+                room_id=room_id, post=post,
+                sender_instance_id=caller, sender_member_name="lead",
+            )
+        finally:
+            svc.cas_instance_status_to_running = real_cas  # type: ignore[method-assign]
+
+    post, res = asyncio.run(run())
+    outcomes = [o["outcome"] for o in res["tag_outcomes"]]
+    assert outcomes == ["enqueued"], f"expected enqueued (downgrade), got {outcomes}"
+    assert manager.set_injection.call_count == 0, "graphless running cannot inject"
+    assert manager.enqueue_message.await_count == 1
+    enqueue_args = manager.enqueue_message.await_args
+    assert enqueue_args.args[0] == "child-1"
+    assert enqueue_args.kwargs.get("metadata") == {
+        "room_id": room_id, "seq": post["seq"],
+    }
+    assert _member_row(engine, room_id).last_delivered_seq == post["seq"]
+
+
+def test_tagged_terminal_graphless_running_parent_gets_enqueue(stack):
+    """Finding 4 / A-P3-19: a graphless-running PARENT (running, no live
+    graph task) receives the terminal-tag proposal notice via the
+    DEFECT-A downgrade to enqueue instead of silently durable-pending."""
+    engine, repo, svc, room_id, caller = stack
+    with Session(engine) as s:
+        inst = s.get(Instance, "child-1")
+        inst.status = "completed"
+        owner = s.get(Instance, caller)
+        owner.status = "running"  # graphless-running parent, not idle
+        s.commit()
+    manager = _make_manager(engine, svc, live_graph=False, inject_ok=True)
+    delivery = RoomDeliveryService(manager, svc)
+
+    async def run():
+        post = await svc.append_message(
+            room_id=room_id, author_instance_id=caller, author_name="lead",
+            text_body="status?", tagged_members=["worker"], addressed_members=[],
+        )
+        return await delivery.route_post(
+            room_id=room_id, post=post,
+            sender_instance_id=caller, sender_member_name="lead",
+        )
+
+    res = asyncio.run(run())
+    outcomes = [o["outcome"] for o in res["tag_outcomes"]]
+    assert "proposal" in outcomes
+    # parent is running ∧ graphless → the proposal notice is ENQUEUED
+    parent_enqueues = [c for c in manager.enqueue_message.await_args_list
+                       if c.args and c.args[0] == caller]
+    assert len(parent_enqueues) == 1, (
+        "graphless-running parent must get the lane-(b) enqueue downgrade"
+    )
+    assert parent_enqueues[0].kwargs.get("metadata", {}).get("kind") == "task_proposal"
+    assert manager.set_injection.call_count == 0
+
+
+def test_addressed_terminal_graphless_running_parent_gets_enqueue(stack):
+    """Finding 4 / A-P3-19: same downgrade for the ADDRESSED lane's
+    parent-target matrix — graphless-running parent enqueued, not
+    silently durable-pending."""
+    engine, repo, svc, room_id, caller = stack
+    with Session(engine) as s:
+        inst = s.get(Instance, "child-1")
+        inst.status = "completed"
+        owner = s.get(Instance, caller)
+        owner.status = "running"  # graphless-running parent, not idle
+        s.commit()
+    manager = _make_manager(engine, svc, live_graph=False, inject_ok=True)
+    delivery = RoomDeliveryService(manager, svc)
+
+    async def run():
+        post = await svc.append_message(
+            room_id=room_id, author_instance_id=caller, author_name="lead",
+            text_body="please revive", tagged_members=[], addressed_members=["worker"],
+        )
+        return await delivery.route_post(
+            room_id=room_id, post=post,
+            sender_instance_id=caller, sender_member_name="lead",
+        )
+
+    res = asyncio.run(run())
+    addr_outcomes = [o["outcome"] for o in res["addressed_outcomes"]]
+    assert "parent_notice" in addr_outcomes
+    parent_enqueues = [c for c in manager.enqueue_message.await_args_list
+                       if c.args and c.args[0] == caller]
+    assert len(parent_enqueues) == 1, (
+        "graphless-running parent must get the lane-(b) enqueue downgrade"
+    )
+    assert parent_enqueues[0].kwargs.get("metadata", {}).get("kind") == "task_proposal"
+
+
+def test_boot_deliver_counts_reflect_outcomes(stack):
+    """Finding 5 / A-P3-20: boot_deliver counts outcomes, not attempts —
+    a parked_paused row counts deferred (cursor untouched), the same row
+    delivers on a later boot once the member is routable."""
+    engine, repo, svc, room_id, caller = stack
+    with Session(engine) as s:
+        inst = s.get(Instance, "child-1")
+        inst.status = "paused"
+        s.commit()
+    manager = _make_manager(engine, svc, live_graph=True, inject_ok=True)
+    delivery = RoomDeliveryService(manager, svc)
+
+    # seed the tagged row (unrouted — the boot pass is the router);
+    # advance the OWNER's delivered cursor so the pinned pair #1's
+    # owner-row over-inclusion doesn't ride along — this pin isolates
+    # the parked MEMBER row.
+    post = asyncio.run(svc.append_message(
+        room_id=room_id, author_instance_id=caller, author_name="lead",
+        text_body="boot ping", tagged_members=["worker"], addressed_members=[],
+    ))
+    asyncio.run(svc.advance_delivered_cursor(room_id, caller, post["seq"]))
+
+    counts1 = asyncio.run(delivery.boot_deliver(engine))
+    assert counts1["delivered"] == 0, "parked row is not delivered"
+    assert counts1["deferred"] == 1, "parked row counts deferred"
+
+    # member becomes routable → the SAME row delivers on the next boot
+    with Session(engine) as s:
+        inst = s.get(Instance, "child-1")
+        inst.status = "idle"
+        s.commit()
+    counts2 = asyncio.run(delivery.boot_deliver(engine))
+    assert counts2["delivered"] == 1
+    assert counts2["deferred"] == 0
+
+
+# ---------------------------------------------------------------------------
 # P3 carry-over — registry-clear-on-stop symmetry
 # ---------------------------------------------------------------------------
 

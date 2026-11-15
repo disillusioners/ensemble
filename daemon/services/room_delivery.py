@@ -360,10 +360,50 @@ class RoomDeliveryService:
                 )
                 return "parked_paused"
             if fresh == "running":
-                # Already running (race) — treat as lane (a) without
-                # re-injecting; mark delivered.
-                await self._room.advance_delivered_cursor(room_id, member_iid, seq)
-                return "enqueued"
+                # CAS missed on a concurrent running flip — the lane map
+                # still assigns running → (a). Attempt delivery NOW. The
+                # pre-fix shape advanced the cursor and returned
+                # "enqueued" without injecting or enqueueing: a silent
+                # drop of a tagged notification that also defeated boot
+                # re-derivation (the pre-advanced cursor hid the row).
+                if self._manager.has_live_graph_task(member_iid):
+                    notif = self._notification_text(room_id, post["author_name"], seq)
+                    source = (
+                        f"room:{room_id}:{post['author_name']}:{seq}:"
+                        f"author={post['author_instance_id']}"
+                    )
+                    try:
+                        self._manager.set_injection(member_iid, notif, source=source)
+                        await self._room.advance_delivered_cursor(room_id, member_iid, seq)
+                        return "injected"
+                    except Exception as exc:  # noqa: BLE001
+                        self._logger.warning(
+                            "post-CAS-miss injection failed for %s: %r", member_iid, exc
+                        )
+                else:
+                    # DEFECT-A downgrade → lane (b) shape: running with
+                    # no live graph task never sees a mid-turn injection.
+                    try:
+                        await self._manager.enqueue_message(
+                            member_iid,
+                            self._notification_text(room_id, post["author_name"], seq),
+                            source=f"internal_agent:{post['author_instance_id']}",
+                            metadata={"room_id": room_id, "seq": seq},
+                        )
+                        await self._room.advance_delivered_cursor(room_id, member_iid, seq)
+                        return "enqueued"
+                    except Exception as exc:  # noqa: BLE001
+                        self._logger.warning(
+                            "post-CAS-miss enqueue failed for %s: %r", member_iid, exc
+                        )
+                # Delivery not completed → deferred_cursor with the cursor
+                # UNTOUCHED, so boot re-derivation retries the row.
+                await self._room.emit_room_event(
+                    member_iid, "room_tag_delivery",
+                    {"room_id": room_id, "seq": seq, "member_name": member_name,
+                     "outcome": "deferred_cursor"},
+                )
+                return "deferred_cursor"
             # Unknown/other → deferred.
             await self._room.emit_room_event(
                 member_iid, "room_tag_delivery",
@@ -475,7 +515,12 @@ class RoomDeliveryService:
                     {"room_id": room_id, "seq": seq, "member_name": member_name,
                      "outcome": "proposal"},
                 )
-            elif parent_status in ("idle", "queued", "waiting", "waiting_children"):
+            elif parent_status == "running" or parent_status in (
+                "idle", "queued", "waiting", "waiting_children"
+            ):
+                # DEFECT-A downgrade: a graphless-running parent (running,
+                # no live graph task) takes the lane-(b) shape — enqueue —
+                # instead of silently leaving the notice durable-pending.
                 try:
                     await self._manager.enqueue_message(
                         parent_iid, notice_text[:400],
@@ -608,7 +653,12 @@ class RoomDeliveryService:
                 )
             except Exception as exc:  # noqa: BLE001
                 self._logger.warning("parent injection failed: %r", exc)
-        elif parent_status in ("idle", "queued", "waiting", "waiting_children"):
+        elif parent_status == "running" or parent_status in (
+            "idle", "queued", "waiting", "waiting_children"
+        ):
+            # DEFECT-A downgrade: a graphless-running parent (running, no
+            # live graph task) takes the lane-(b) shape — enqueue —
+            # instead of silently leaving the proposal durable-pending.
             try:
                 await self._manager.enqueue_message(
                     parent_iid, notice_text[:400],
@@ -674,6 +724,7 @@ class RoomDeliveryService:
         # We need the post payload; reconstruct a minimal post dict from
         # the room log.
         delivered = 0
+        deferred = 0
         for row in pending:
             try:
                 # Fetch the message row to get full post payload.
@@ -722,7 +773,7 @@ class RoomDeliveryService:
                     delivered += 1
                     continue
                 # Otherwise, route normally (injection/enqueue/park).
-                await self._tagged_lane(
+                outcome = await self._tagged_lane(
                     room_id=row["room_id"],
                     post=post,
                     member=member,
@@ -730,7 +781,14 @@ class RoomDeliveryService:
                     sender_member_name=post["author_name"],
                     room=room,
                 )
-                delivered += 1
+                # Outcome-faithful counting: delivered = the cursor
+                # advanced this pass (injected / enqueued / proposal);
+                # deferred = the row stays above the cursor and will be
+                # re-derived next boot (deferred_cursor / parked_paused).
+                if outcome in ("deferred_cursor", "parked_paused"):
+                    deferred += 1
+                else:
+                    delivered += 1
             except Exception as exc:  # noqa: BLE001
                 self._logger.warning("boot deliver row failed: %r", exc)
         counts = {
@@ -738,9 +796,11 @@ class RoomDeliveryService:
             "rooms_with_pending": len(rooms),
             "members_with_pending": len(members),
             "delivered": delivered,
+            "deferred": deferred,
         }
         self._logger.info(
-            "room boot delivery: pending_tagged=%d delivered=%d rooms=%d members=%d",
-            counts["pending_rows"], delivered, len(rooms), len(members),
+            "room boot delivery: pending_tagged=%d delivered=%d deferred=%d "
+            "rooms=%d members=%d",
+            counts["pending_rows"], delivered, deferred, len(rooms), len(members),
         )
         return counts
