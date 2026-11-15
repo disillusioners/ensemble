@@ -92,7 +92,7 @@ LOG_TAG="${LOG_TAG:-upgrade}"
 # per release that touches ceremony-relevant scripts/upgrade semantics —
 # the SAME cadence as the daemon's PIPELINE_SCRIPTS_FLOOR_COMMIT; the two
 # travel together, T6.15/AC15).
-PIPELINE_SCRIPTS_REV=68c6ee0558a93a7d519862f2cdca4b0c8c1e320c
+PIPELINE_SCRIPTS_REV=1aa0065eb818ff00cb32730fab54d7f2060c42d8
 
 # ── _numeric_knob <NAME> <raw-value> <default> — A5 (code council, 2026-10-30)
 # The budget knobs below are consumed in ARITHMETIC (`$(( now + BUDGET ))`)
