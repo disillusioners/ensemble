@@ -150,6 +150,43 @@ if [ -z "$VERSION" ]; then
     exit 78
 fi
 
+# ═══════════════ Executor SELF-DETACH (Fix #5, ENSEMBLE-32 Family-3) ══════
+# Incident docs/incidents/2026-11-14-macos-launchd-handback-halt.md §7
+# (defect #7): a promote driven from INSIDE the daemon's process tree (the
+# agent-bash lane: daemon → bash tool → agent shell → this script) is
+# SIGKILLed by its own stop phase — the launchd bootout of the daemon job
+# (and the pid sweeps' escalation) tear down the whole job's tree INCLUDING
+# the executor, which died mid-stop BEFORE the flip (v0.30.9, 00:50:53).
+# On darwin, when this shell sits in the install's launcher/daemon lineage
+# AND is not already the detached child, re-exec the ENTIRE promote inside
+# a transient ONE-SHOT LaunchAgent (lib.sh _executor_detach_self:
+# label-verbatim plist, RunAtLoad, log file, bounded wait, MANDATORY
+# bootout + plist removal on every path — the RunAtLoad-at-login footgun,
+# §7b) and propagate the detached exit code. Refuse-with-recipe alone is
+# NOT acceptable for this path: the E2E demo promote is invoked from an
+# agent bash INSIDE the daemon tree and MUST complete — the recipe hint
+# below is printed IN ADDITION, never instead.
+#
+# AMENDMENT #1 UNTOUCHED: the no-nohup-fallback rule governs the DAEMON (the
+# serving process must stay launchd-supervised). ONLY the executor detaches,
+# via launchd itself — the darwin mirror of the VM's systemd-run scope
+# guarantee (docs/incidents/2026-09-28-promote-cgroup-teardown.md).
+# Placement: BEFORE any lock/txn/signal-trap mutation (the detached child
+# re-runs the whole preflight itself; a lock held here would deadlock it),
+# after the VERSION input check (the child needs a valid VERSION).
+if [ "$(uname -s)" = "Darwin" ] \
+   && [ "${ENSEMBLE_PROMOTE_SELF_DETACHED:-0}" != "1" ] \
+   && _executor_detach_in_tree; then
+    _log "executor self-detach: this shell sits INSIDE the daemon tree — re-execing the promote in a transient one-shot LaunchAgent (incident 2026-11-14 §7 defect #7; pattern proven §7b)"
+    _exec_detach_rc=0
+    _executor_detach_self "$SCRIPT_DIR/promote.sh" "$@" || _exec_detach_rc=$?
+    if [ "$_exec_detach_rc" -ne 0 ]; then
+        _warn "executor self-detach did not complete cleanly (rc=$_exec_detach_rc${_DETACH_LAST_ERROR:+ — ${_DETACH_LAST_ERROR}})"
+        _warn "  recipe (in addition to the attempted detach, never instead): run the promote from a shell OUTSIDE the daemon tree (an operator terminal or a supervisor-owned lane) — launchctl bootstrap gui/\$(id -u) <label-verbatim-plist> with RunAtLoad, then ALWAYS bootout + rm the plist after the run"
+    fi
+    exit "$_exec_detach_rc"
+fi
+
 # D1 (reviewer ruling, P2.3 final batch): the direct exit-78s above and the
 # SOAK_S case below are INPUT-VALIDATION refusals — journal-less BY DESIGN
 # (nothing has been locked, opened, or mutated yet; the reviewed carve-out
@@ -444,6 +481,14 @@ supervision_preflight
 lock_heartbeat
 _log_phase_marker "entry-check"
 _run_bounded_step plugin-staleness promote_plugin_staleness_check || exit 78
+
+# 1d-quater. Config-compat ENTRY check (D-2, E2E round 1): the TARGET
+# release must accept the install's config.yaml key-shape BEFORE any
+# stop/flip — the demo rollback crash-looped on a refreshed config
+# (pydantic extra_forbidden) AFTER the flip and halted-for-human. Same
+# bounded-step wrapper + exit-78 refusal family as the staleness check;
+# FAIL-CLOSED when unrunnable (D-2 mandate).
+_run_bounded_step config-compat _config_compat_check "$VERSION" || exit 78
 _enforce_deadline "$preflight_deadline" preflight "budget=PREFLIGHT_PHASE_BUDGET_S value=${PREFLIGHT_PHASE_BUDGET_S}"
 
 # 1e. integrity (D-FA4.4): CURRENT (drift detection) + TARGET + manifest
@@ -638,7 +683,19 @@ lock_heartbeat
 # previous; the halt event alerts the human).
 if ! restart_via_launcher; then
     _warn "unit hand-back FAILED — halting promote (txn left open for sweep recovery; NO nohup fallback, never a false success)"
-    journal_history_append halt "promote aborted post-flip: unit hand-back failed for $VERSION — halt-for-human, txn left open for sweep recovery (declared=${SUPERVISION_MODE:-?} verified=${SUPERVISION_STATE:-?} unit=${SUPERVISION_UNIT:-?}; no nohup fallback — Amendment #1)" \
+    # Fix #4 (ENSEMBLE-32 repair lane; incident §5.2): the halt detail
+    # carries the CAPTURED hand-back error — read through
+    # _handback_last_error_text (MAJOR #1, review round 2: the resolver
+    # branch's diagnosis lives in the $$-keyed HANDBACK_ERROR_FILE because
+    # the resolver runs inside the caller's $() — a bare variable read
+    # degraded to "none captured" on the exact incident path).
+    HB_ERR="$(_handback_last_error_text)"
+    # Warning #1 (review round 3): consume-then-clear — the diagnosis is
+    # now in HB_ERR; the $$-keyed side channel must not outlive this
+    # halt (rm-after-read, never a cross-pid delete; the name embeds
+    # this process id by construction).
+    rm -f "${HANDBACK_ERROR_FILE:-}" 2>/dev/null || true
+    journal_history_append halt "promote aborted post-flip: unit hand-back failed for $VERSION — halt-for-human, txn left open for sweep recovery (declared=${SUPERVISION_MODE:-?} verified=${SUPERVISION_STATE:-?} unit=${SUPERVISION_UNIT:-?}; no nohup fallback — Amendment #1; hand-back error: ${HB_ERR:-none captured})" \
                               || true   # history is advisory; the open txn IS the B4 contract
     exit 1
 fi
@@ -679,8 +736,36 @@ if [ "${SUPERVISION_STATE:-}" = "LAUNCHD_MANAGED" ]; then
     elif [ -n "${SUPERVISION_PRESTOP_MAINPID:-}" ] && [ "$_post_pid" = "$SUPERVISION_PRESTOP_MAINPID" ]; then
         gate_fail_reason="launchd verify: post-bootstrap pid $_post_pid EQUALS the pre-stop pid ${SUPERVISION_PRESTOP_MAINPID} — the supervisor did not start a NEW daemon"
         _warn "$gate_fail_reason"
+    # Fix #2-ii (ENSEMBLE-32 repair lane; incident 2026-11-14 §3.1): an
+    # owned pid that is NEW is still not proof of SERVICE — a
+    # crash-looping launcher satisfies "any new pid ≠ prestop mainpid"
+    # while NOTHING serves the port. The flip-verify therefore requires
+    # the port-holder census: at least one LISTEN holder on $PORT, and
+    # every holder inside the owned-pid set (the serving pid must be
+    # THIS install's process — the flip is verified on the SERVING
+    # process, not on a respawn). Fail-closed: any miss routes to 8b
+    # (auto-rollback) via gate_fail_reason, never warn-and-pass.
     else
-        _log "launchd verify: provenance OK (owned pid $_post_pid${SUPERVISION_PRESTOP_MAINPID:+, pre-stop was $SUPERVISION_PRESTOP_MAINPID}) — proceeding to version gate"
+        # D-1 (E2E round 1 🔴; demo promote 2026-11-15): the census moved
+        # into _flip_verify_port_attribution (lib.sh) — BOUNDED
+        # LISTEN-GRACE polling instead of the single unbuffered census
+        # that false-fired on a healthy migration-heavy boot (~15-20s
+        # boot-to-listen) and killed the daemon mid-flight. Grace covers
+        # ONLY the no-listener-yet condition: a foreign holder fails
+        # IMMEDIATELY, budget exhaustion still issues the crash-shape
+        # verdict, and a census-tool failure takes the degraded
+        # pid-provenance arm (rc 2 — no grace can heal a broken lsof).
+        _flip_verify_port_attribution "$_post_pid"
+        _fv_rc=$?   # captured AT the call — `if !` would erase the rc distinctions
+        if [ "$_fv_rc" -eq 1 ]; then
+            gate_fail_reason="$_FLIP_VERIFY_REASON"
+            _warn "$gate_fail_reason"
+        elif [ "$_fv_rc" -eq 2 ]; then
+            _warn "launchd verify: port-holder census unavailable (no lsof / lsof errored) — serving attribution SKIPPED for the flip-verify (pid provenance only; NOT a pass evidence)"
+            _log "launchd verify: provenance OK (owned pid $_post_pid${SUPERVISION_PRESTOP_MAINPID:+, pre-stop was $SUPERVISION_PRESTOP_MAINPID}) — proceeding to version gate"
+        else
+            _log "launchd verify: provenance OK (owned pid $_post_pid${SUPERVISION_PRESTOP_MAINPID:+, pre-stop was $SUPERVISION_PRESTOP_MAINPID}; port ${PORT} holder(s) owned) — proceeding to version gate"
+        fi
     fi
 fi
 

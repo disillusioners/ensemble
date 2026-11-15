@@ -69,6 +69,18 @@ export ENSEMBLE_UPGRADE_SCRIPTS_DIR="$REPO_ROOT/scripts/upgrade"
 . "$REPO_ROOT/scripts/upgrade/lib.sh" || {
     echo "FAIL: cannot source lib.sh"; echo "RESULT: FAIL"; exit 1;
 }
+# ENSEMBLE-32 Family-2 (Fix #2) attribution seam: the pack's fake daemon
+# (soak_gate_fake_daemon.py) is not ensemble-shaped, so the real pid
+# discovery cannot see it and the attribution conjunct inside gate_version
+# would refuse every green tick. Arm the owned set to the fixture's ACTUAL
+# listener pid on the live $PORT (lsof, the same census the conjunct uses)
+# — the fixture IS this install's daemon by construction. The negative
+# side (foreign-holder refusals) is pinned in
+# tests/test_supervision_stop_handback.sh §M.
+_supervision_owned_pids() {
+    lsof -ti:"${PORT:-}" -sTCP:LISTEN 2>/dev/null
+    return 0
+}
 
 LOG_TAG="soak-fail-fast-integration-pack"
 UP_TARGET="pack"

@@ -412,11 +412,26 @@ class UpgradeJournalSweepService:
         line, not a warning. Uses the python twin's compute-once memo
         (``uj.supervision_detect``) — no disk writes in the detector
         itself; this hook is the journal side of the contract.
+
+        PC-2 (ENSEMBLE-32 repair lane; incident
+        docs/incidents/2026-11-14-macos-launchd-handback-halt.md
+        defect #4): the twin's launchd probe reads the install dir from
+        ``env["INSTALL_DIR"]``. A plist-lineage daemon's os.environ
+        historically LACKED INSTALL_DIR (the plist carries PATH only),
+        so the probe degraded to LAUNCHD_NOT_VERIFIED instantly. This
+        service KNOWS its install dir (``self._install_dir``) — pass it
+        explicitly so the classification never depends on os.environ
+        (the launcher-side ``export INSTALL_DIR`` is the structural
+        fix; this is the belt-and-braces arm). The first call seeds the
+        module memo, so every later ``supervision_detect()`` consumer
+        inherits the corrected classification.
         """
         if self._install_dir is None:
             return
         try:
-            det = uj.supervision_detect()
+            env = dict(os.environ)
+            env["INSTALL_DIR"] = str(self._install_dir)
+            det = uj.supervision_detect(env)
             # A1 (2026-09-29): NAME the declared×verified outcome — the
             # mapping twin supervision_outcome on the same module
             # (resolved-mode equivalence: det.mode is the declaration

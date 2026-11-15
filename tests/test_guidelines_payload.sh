@@ -156,12 +156,15 @@ cp "$REPO_ROOT/scripts/stop-ensemble.sh" "$FAKE_REPO/scripts/stop-ensemble.sh"
 # The whole executor family — stage.sh SOURCES executor_family.sh and
 # COPIES the family into the payload; without it stage.sh dies at the
 # source line and measures nothing (journal-suite fixture rationale).
-for _fam in _build_frontend.sh adopt-unit.sh executor_family.sh journal_read.py \
-            journal_splice.py ledger_check.py lib.sh promote.sh restart.sh \
-            rollback.sh stage.sh status.sh; do
-    cp "$UPGRADE_DIR/$_fam" "$FAKE_REPO/scripts/upgrade/$_fam"
-done
-cp "$REPO_ROOT/scripts/install-dir-guard.sh" "$FAKE_REPO/scripts/install-dir-guard.sh"
+# seed the family from the ONE authoritative definition (F2 seam discipline)
+. "$UPGRADE_DIR/executor_family.sh"
+while IFS= read -r _family_path; do
+    [ -n "$_family_path" ] || continue
+    mkdir -p "$FAKE_REPO/$(dirname "$_family_path")"
+    cp "$REPO_ROOT/$_family_path" "$FAKE_REPO/$_family_path"
+done < <(executor_family_paths)
+chmod +x "$FAKE_REPO/scripts/upgrade/"*.sh "$FAKE_REPO/scripts/stop-ensemble.sh" \
+    "$FAKE_REPO/scripts/install-dir-guard.sh" 2>/dev/null
 chmod +x "$FAKE_REPO/scripts/upgrade/"*.sh
 
 # Stub payloads — the other staged trees.

@@ -92,7 +92,7 @@ LOG_TAG="${LOG_TAG:-upgrade}"
 # per release that touches ceremony-relevant scripts/upgrade semantics —
 # the SAME cadence as the daemon's PIPELINE_SCRIPTS_FLOOR_COMMIT; the two
 # travel together, T6.15/AC15).
-PIPELINE_SCRIPTS_REV=68c6ee0558a93a7d519862f2cdca4b0c8c1e320c
+PIPELINE_SCRIPTS_REV=1aa0065eb818ff00cb32730fab54d7f2060c42d8
 
 # ── _numeric_knob <NAME> <raw-value> <default> — A5 (code council, 2026-10-30)
 # The budget knobs below are consumed in ARITHMETIC (`$(( now + BUDGET ))`)
@@ -365,6 +365,17 @@ SWEEP_STALE_S=600             # journal in_flight older than this = orphaned
 LOCK_HEARTBEAT_S=30           # live owner rewrites heartbeat this often
 LOCK_STALE_S=300              # heartbeat older than this = stale-breakable
 LOCK_WAIT_S_DEFAULT=15        # bounded wait for a busy lock, never forever
+
+# Fix #6 (2026-11-14 incident §5.5): every stale-break LEAVES its sibling
+# behind by protocol (mv to rollback.lock.d.stale.<pid>, never rmdir —
+# racy) and nothing ever removed them — `.stale.1099` / `.stale.92146`
+# accumulated on the live install. Age-bounded prune knob: a sibling
+# older than this is reaped at acquire time. 7d conservative default (a
+# promote/rollback runtime is bounded far below it, so nothing reaped can
+# belong to a live pipeline); env-overridable for tests/rescue. Garbage
+# values fall back to the default via _numeric_knob (a garbage bound that
+# read as 0 would reap FRESH siblings — the inverse failure).
+ROLLBACK_LOCK_STALE_PRUNE_S="$(_numeric_knob ROLLBACK_LOCK_STALE_PRUNE_S "${ROLLBACK_LOCK_STALE_PRUNE_S:-}" 604800)"
 
 # HEARTBEAT_STALE_S mirrors LOCK_STALE_S; the two are refreshed
 # together at every lock_heartbeat call site but kept as separate
@@ -2510,6 +2521,85 @@ journal_cooldown_active() {
 #     flavor at the caller), NOT a crash
 lock_dir_path() { printf '%s/releases/rollback.lock.d' "$INSTALL_DIR"; }
 
+# _lock_mtime_epoch <path> — file mtime as epoch seconds, platform-branched
+# (the house date-idiom branch: BSD stat -f %m vs GNU stat -c %Y). Empty on
+# ANY failure/unknown platform — the caller treats that as NEVER PRUNE
+# (fail-closed conservative: an unmeasurable age is not proof of age).
+_lock_mtime_epoch() {
+    case "$(uname -s)" in
+        Darwin|*BSD*) stat -f %m "$1" 2>/dev/null || true ;;
+        Linux|GNU*)   stat -c %Y "$1" 2>/dev/null || true ;;
+        *) : ;;
+    esac
+}
+
+# _lock_prune_stale_siblings — Fix #6 (2026-11-14 incident §5.5):
+# age-bounded prune of rollback.lock.d.stale.<pid> siblings. Called from
+# lock_acquire AFTER the acquire succeeded — the pruner is the pipeline
+# owner, serialized against concurrent acquirers (a loser would be
+# pipeline-busy, never mid-prune). Rules:
+#   - ONLY siblings matching rollback.lock.d.stale.<digits> (the protocol's
+#     own mv target; suffix = the breaker's pid). Any other name is left
+#     untouched — an unknown shape may be operator evidence.
+#   - reap only when mtime age > ROLLBACK_LOCK_STALE_PRUNE_S (7d default):
+#     at/under the bound SURVIVES (a freshly-broken sibling is crash-
+#     forensics the operator may still want; it also cannot be confused
+#     with a live pipeline — nothing reaped is young enough to be one).
+#   - unparseable/missing mtime ⇒ never prune (fail-closed conservative).
+#   - the LIVE lock (rollback.lock.d, no suffix) is structurally out of
+#     reach: the glob requires the .stale.<digits> suffix.
+#   - every reap is logged twice: a _log line + a journal history row
+#     (legal here — the pipeline lock is held by a LIVE owner, which is
+#     exactly the history-append authority). Best-effort end to end: a
+#     prune failure logs a warning and never fails the acquisition it
+#     piggybacks on.
+_lock_prune_stale_siblings() {
+    local releases_dir lock pruning mtime age reaped=0
+    lock="$(lock_dir_path)"
+    releases_dir="$(dirname "$lock")"
+    [ -d "$releases_dir" ] || return 0
+    for pruning in "$releases_dir"/"${lock##*/}".stale.*; do
+        [ -e "$pruning" ] || continue   # unexpanded glob (bash 3.2: no nullglob)
+        case "${pruning##*/}" in
+            rollback.lock.d.stale.[0-9]*) ;;
+            *) continue ;;
+        esac
+        # MINOR ④ (review round 2, twins-mirror): the python twin
+        # (upgrade_journal._prune_stale_lock_siblings) fullmatches
+        # rollback.lock.d.stale.<DIGITS-to-EOL> — the bare glob case above
+        # admitted digit-first + trailing junk (stale.7004junk would be
+        # reaped here but SURVIVES there). Enforce the same exact shape:
+        # everything after the LAST ".stale." must be ALL digits.
+        case "${pruning##*/}" in
+            *.stale.*) ;;
+            *) continue ;;
+        esac
+        # strip the NAME, then the ".stale." prefix — the name's suffix is
+        # preceded by "d." (rollback.lock.d.stale.X), never by a slash, so
+        # a path-form ##*/.stale. strip would match nothing.
+        _prune_suffix="${pruning##*/}"
+        _prune_suffix="${_prune_suffix##*.stale.}"
+        case "$_prune_suffix" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        mtime="$(_lock_mtime_epoch "$pruning")"
+        case "$mtime" in ''|*[!0-9]*) continue ;; esac
+        age=$(( $(_now_epoch) - mtime ))
+        [ "$age" -gt "$ROLLBACK_LOCK_STALE_PRUNE_S" ] || continue
+        if rm -rf "$pruning" 2>/dev/null; then
+            reaped=$((reaped + 1))
+            _log "pipeline lock: reaped stale-broken sibling ${pruning##*/} (age ${age}s > bound ${ROLLBACK_LOCK_STALE_PRUNE_S}s) — fix #6, incident 2026-11-14 §5.5"
+            journal_history_append lock-stale-prune \
+                "reaped ${pruning##*/} age=${age}s bound=${ROLLBACK_LOCK_STALE_PRUNE_S}s" \
+                >/dev/null 2>&1 || true
+        else
+            _warn "pipeline lock: FAILED to reap stale-broken sibling ${pruning##*/} (age ${age}s) — leaving it (never block the acquisition on housekeeping)"
+        fi
+    done
+    [ "$reaped" -eq 0 ] || _log "pipeline lock: stale-sibling prune complete (${reaped} reaped)"
+    return 0
+}
+
 lock_run_id=""
 
 # _pid_alive <pid> — kill -0 liveness with EPERM=ALIVE semantics
@@ -2563,6 +2653,10 @@ lock_acquire() {
                     "reclaimed owner pid=${_broke_owner:-?} run_id=${_broke_run:-?} heartbeat_age=${_broke_age:-?}s reason=${_broke_reason} reclaiming_run_id=${lock_run_id}" \
                     >/dev/null 2>&1 || true
             fi
+            # Fix #6 (incident 2026-11-14 §5.5): housekeeping rides the
+            # acquire — we hold the lock, so the prune is serialized
+            # against concurrent pipelines. Best-effort, never blocks.
+            _lock_prune_stale_siblings
             return 0
         fi
         # exists — stale? Break only when the heartbeat is > LOCK_STALE_S AND
@@ -2597,7 +2691,7 @@ lock_acquire() {
             age=$(( $(_now_epoch) - hb ))
             if [ "$age" -gt "$LOCK_STALE_S" ]; then
                 local owner_live=0
-                if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$' \
+                if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$'\
                    && _pid_alive "$owner_pid"; then
                     owner_live=1
                 fi
@@ -2618,7 +2712,7 @@ lock_acquire() {
         fi
         # owner process dead? (crash left a fresh-heartbeat dir) — break too
         # (_pid_alive: EPERM = alive under another user — never break)
-        if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$' \
+        if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$'\
            && ! _pid_alive "$owner_pid"; then
             _log "pipeline lock owner pid $owner_pid is dead — breaking lock"
             if mv "$lock" "${lock}.stale.$$" 2>/dev/null; then
@@ -3566,6 +3660,140 @@ _freshness_refuse() {
         journal_init >/dev/null 2>&1 || true
     fi
     _refuse "$token" "$@"
+}
+
+# ═══════════════ Config-compat promote entry check (D-2) ═══════════════
+#
+# _config_compat_check — E2E round 1 🟠 (demo promote 2026-11-15): the
+# install's config.yaml does NOT travel with releases (only launcher.sh
+# swaps per-release), so a promote whose TARGET release cannot parse the
+# install config crash-loops the new daemon with a deterministic pydantic
+# error AFTER the flip — the demo auto-rollback then landed on an
+# unbootable previous release and halted for 5+ hours of human time. This
+# entry check validates the install config's KEY SHAPE against the TARGET
+# release's config model contract BEFORE any stop/flip; incompatibility is
+# an exit-class refusal (the 78 freshness-refusal family) with a named
+# remedy. FAIL-CLOSED by mandate: if the check CANNOT run (checker or
+# contract absent, interpreter without PyYAML, config unparseable), it
+# REFUSES — it never warns-and-passes.
+#
+# Contract resolution (explicit order — D-6, E2E round 4 / cycle-4 🔴
+# anomaly 7ce14c96: the §7 self-detached promote runs from the INSTALL dir,
+# where the pre-D-6 legs could not resolve — no daemon/config.py in the
+# install layout, no contract next to lib.sh, REPO_ROOT by-design absent
+# (the refusal rendered the unset fallback literally: "?/daemon/...") while
+# the 12,873-B contract sat at releases/<ver>/daemon/plugin_subsystem/):
+#   1. TARGET-PAYLOAD — $INSTALL_DIR/releases/$VERSION/daemon/plugin_subsystem/
+#      config_compat_contract.json. FIRST-AUTHORITATIVE when promoting a
+#      staged version: stage.sh minted it (stage.sh:546) from exactly the
+#      tree that boots after the flip — the release content, not the
+#      current tree state, is the oracle.
+#   2. TREE CONTEXT — promote running from a checkout/worktree: the target
+#      model is importable at <tree>/daemon/config.py, so the contract is
+#      minted FRESH via the payload's own minter
+#      (config_compat_contract.py --repo-root <tree>) into a tmp file; a
+#      mint failure falls through to the staged-contract rungs (and finally
+#      to the refusal). Skipped when leg 1 already resolved.
+#   3./4. PAYLOAD CONTEXT legacy rungs — next to lib.sh, then $REPO_ROOT.
+#      Legacy payloads staged before this lane carry no contract ⇒ REFUSE
+#      with the re-stage remedy.
+# The checker + minter are slice members (executor_family_paths — staged
+# with every payload; commit-in the tree for the tree context).
+#
+# Interpreter ladder (same conventions as the staleness predicate's
+# PyYAML requirement): CONFIG_COMPAT_PYTHON wins; else the build venv
+# (the only interpreter guaranteed to carry pydantic for the tree-context
+# mint); else python3.
+_config_compat_check() {
+    local version="${1:-?}" checker contract py cfg_out rc
+    # SCOPE (D-2): the gate guards REAL installs (demo/live) — the sandbox
+    # lane is the free exercise lane (require_live_guard precedent), and
+    # sandbox fixtures cannot mint a contract (no target model in a
+    # fixture tree). A sandbox promote SKIPS the check loudly.
+    if [ "${UP_TARGET:-}" = "sandbox" ]; then
+        _log "config-compat: sandbox target — entry check skipped (D-2 scope: the gate guards demo/live installs)"
+        return 0
+    fi
+    checker="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../../daemon/plugin_subsystem/config_compat_check.py"
+    [ -f "$checker" ] || checker="${REPO_ROOT:-}/daemon/plugin_subsystem/config_compat_check.py"
+    if [ ! -f "$checker" ]; then
+        _freshness_refuse config-compat-unrunnable \
+            "config-compat checker module not found (looked next to lib.sh and at ${REPO_ROOT:-?}/daemon/plugin_subsystem/config_compat_check.py). " \
+            "The gate refuses FAIL-CLOSED when it cannot evaluate (D-2). " \
+            "Remedy: run promote from the repo checkout (scripts/upgrade/promote.sh) or re-stage with a stage.sh that mints the config-compat contract."
+    fi
+    if [ -n "${CONFIG_COMPAT_PYTHON:-}" ]; then
+        py="$CONFIG_COMPAT_PYTHON"
+    elif [ -x "${REPO_ROOT:-}/.venv/bin/python" ]; then
+        py="${REPO_ROOT}/.venv/bin/python"
+    elif command -v python3 >/dev/null 2>&1; then
+        py="python3"
+    else
+        _freshness_refuse config-compat-unrunnable \
+            "config-compat check cannot run: no python interpreter found (CONFIG_COMPAT_PYTHON unset, no .venv/bin/python, no python3). " \
+            "The gate refuses FAIL-CLOSED when it cannot evaluate (D-2)."
+    fi
+    contract=""
+    # D-6 leg 1 — TARGET-PAYLOAD (FIRST-AUTHORITATIVE, see the block comment
+    # above). Checked before every other rung: when promoting a staged
+    # version the payload contract IS the target release's key-shape
+    # contract; the detached executor's only resolvable leg.
+    local payload_contract
+    payload_contract="${INSTALL_DIR:-}/releases/${version}/daemon/plugin_subsystem/config_compat_contract.json"
+    if [ -f "$payload_contract" ]; then
+        contract="$payload_contract"
+    fi
+    local tree_root
+    tree_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)"
+    if [ -z "$contract" ] && [ -f "$tree_root/daemon/config.py" ] && [ -f "$checker" ] && [ -f "$tree_root/daemon/plugin_subsystem/config_compat_contract.py" ]; then
+        # TREE CONTEXT: mint fresh from the target model (always current).
+        cfg_out="$(mktemp -t cc.XXXXXX 2>/dev/null || printf '/tmp/cc.%s.json' "$$")"
+        if "$py" "$tree_root/daemon/plugin_subsystem/config_compat_contract.py" \
+            --repo-root "$tree_root" > "$cfg_out" 2>/dev/null && [ -s "$cfg_out" ]; then
+            contract="$cfg_out"
+        else
+            rm -f "$cfg_out" 2>/dev/null
+            _warn "config-compat: fresh contract mint FAILED in tree context — falling through to the staged contract rung"
+        fi
+    fi
+    if [ -z "$contract" ]; then
+        contract="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../../daemon/plugin_subsystem/config_compat_contract.json"
+        [ -f "$contract" ] || contract="${REPO_ROOT:-}/daemon/plugin_subsystem/config_compat_contract.json"
+        if [ ! -f "$contract" ]; then
+            _freshness_refuse config-compat-unrunnable \
+                "config-compat contract not found (looked next to lib.sh and at ${REPO_ROOT:-?}/daemon/plugin_subsystem/config_compat_contract.json). " \
+                "The TARGET release's config key-shape is unknown — the gate refuses FAIL-CLOSED (D-2; a release whose model rejects the install config crash-loops AFTER the flip). " \
+                "Remedy: re-stage the release with a contract-minting stage.sh (the contract is minted from the target tree at stage time), or pin a compatible release."
+        fi
+    fi
+    if [ ! -f "${INSTALL_DIR:-}/config.yaml" ]; then
+        _freshness_refuse config-compat-unrunnable \
+            "install config.yaml not found at ${INSTALL_DIR:-?}/config.yaml — the daemon refuses to boot without it, so the flip would crash-loop. " \
+            "Remedy: restore config.yaml (stage/config backups) before promoting."
+    fi
+    local out
+    out="$("$py" "$checker" "$contract" "${INSTALL_DIR}/config.yaml" 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        _log "config-compat: $(printf '%s' "$out" | tail -n 1)"
+        return 0
+    fi
+    local code detail
+    code="$(printf '%s\n' "$out" | sed -n 's/.*code=\([a-z0-9-]*\).*/\1/p' | head -n 1)"
+    detail="$(printf '%s\n' "$out" | sed -n 's/.*detail=//p' | head -n 1)"
+    case "$code" in
+        config-incompatible)
+            _freshness_refuse config-incompatible \
+                "config.yaml incompatible with $VERSION — migrate config or pin a compatible release. " \
+                "Refused at ENTRY (before stop/flip; D-2): $detail"
+            ;;
+        *)
+            _freshness_refuse config-compat-unrunnable \
+                "config-compat check could not evaluate (rc=$rc): $(printf '%s\n' "$out" | head -n 4 | tr '\n' ' ') " \
+                "The gate refuses FAIL-CLOSED when it cannot evaluate (D-2)."
+            ;;
+    esac
+    return 0  # _freshness_refuse exits; never reached
 }
 
 # ═══════════════ Plugin-staleness promote predicate (slice ⑥) ═══════════════
@@ -4903,8 +5131,13 @@ _supervision_stop_launchd() {
     done
     # Still alive after the drain budget ⇒ the daemon ignored TERM. Escalate
     # with SIGKILL ONLY (never a second TERM — the checkpoint-void regression).
-    for pid in $(_supervision_owned_pids 2>/dev/null); do
-        _log "launchd stop: pid $pid still alive after ${LAUNCHD_DRAIN_BUDGET_S}s drain — SIGKILL escalation (no second TERM)"
+    # Fix #5 (ENSEMBLE-32): the candidate list runs through the SELF-EXCLUSION
+    # filter first — $$ (this shell), $PPID (the promote executor) and every
+    # own-process-group pid are NEVER SIGKILL targets (incident 2026-11-14
+    # §7 defect #7: the stop escalation must not sweep the executor running
+    # the very stop). Defense-in-depth alongside the executor self-detach.
+    for pid in $(_pipeline_self_excluded "$(_supervision_owned_pids 2>/dev/null)"); do
+        _log "launchd stop: pid $pid still alive after ${LAUNCHD_DRAIN_BUDGET_S}s drain — SIGKILL escalation (no second TERM; own-group/self pids excluded)"
         journal_history_append stop_forced_kill \
             "launchd stop: pid=$pid survived bootout + ${LAUNCHD_DRAIN_BUDGET_S}s drain — SIGKILL escalated (no second TERM; graceful checkpoint write VOIDED)" \
             >/dev/null 2>&1 || true
@@ -5332,6 +5565,54 @@ _supervision_launchd_bootout() {
 # bootstrap == start. Bounded. "Already loaded" is benign ONLY after a
 # revalidation by the caller; here a nonzero rc is returned for the caller to
 # handle (no promote-started launcher ever on the supervised path).
+#
+# Fix #4 (ENSEMBLE-32 repair lane; incident 2026-11-14 §3.2/§5.2): on a
+# hard failure the captured launchctl output is STASHED into the global
+# HANDBACK_LAST_ERROR (flattened to one line, bounded) instead of being
+# discarded — the v0.30.5/v0.30.9 halts recorded NO launchctl error
+# anywhere, so the failure was unreproducible from the artifacts. The
+# WARN lines at the hand-back call site and the three halt templates
+# (promote/restart/rollback) surface it. Success clears the stash.
+#
+# MAJOR #1 (review round 2, ENSEMBLE-32): a VARIABLE stash dies in the
+# subshell whenever the writer runs inside `$()` — and the RESOLVER
+# (_supervision_launchd_plist_path) is consumed via `$()` at the
+# hand-back site (restart_via_launcher). On the exact incident path
+# (resolver fails → halt) the halt detail degraded to "hand-back error:
+# none captured" — the capture purpose UNMET for that branch. Out-of-band
+# channel: both stash sites ALSO write the diagnosis to
+# HANDBACK_ERROR_FILE (a $$-keyed temp file — filesystem, subshell-proof);
+# the halt readers go through _handback_last_error_text, which prefers
+# the in-scope variable (bootstrap branch — plain call, variable
+# survives) and falls back to the file (resolver branch). Every FAILURE
+# rewrites both; every SUCCESS/benign arm clears both, so a stale seed
+# (e.g. a pre-stop resolver failure at the SUPERVISION_LAUNCHD_PLIST_PATH
+# stash sites) can never surface instead of the diagnosis for the actual
+# hand-back failure.
+HANDBACK_LAST_ERROR=""
+HANDBACK_ERROR_FILE="${TMPDIR:-/tmp}/ensemble-hbk-err.$$"
+_handback_err_file_write() {
+    # $1 = diagnosis text; best-effort — a tmp failure must never break
+    # the failure path itself.
+    printf '%s' "$1" > "${HANDBACK_ERROR_FILE:-/tmp/ensemble-hbk-err.$$}" 2>/dev/null || true
+}
+_handback_err_file_clear() {
+    rm -f "${HANDBACK_ERROR_FILE:-/tmp/ensemble-hbk-err.$$}" 2>/dev/null || true
+}
+# _handback_last_error_text — THE reader for every consumer (WARN lines +
+# halt templates). Variable first (survives plain calls), file second
+# (survives $() subshells). Empty output = nothing captured.
+_handback_last_error_text() {
+    if [ -n "${HANDBACK_LAST_ERROR:-}" ]; then
+        printf '%s' "$HANDBACK_LAST_ERROR"
+        return 0
+    fi
+    local _f="${HANDBACK_ERROR_FILE:-/tmp/ensemble-hbk-err.$$}"
+    if [ -s "$_f" ]; then
+        printf '%s' "$(head -c 400 "$_f" 2>/dev/null | tr '\n' ';' | tr -s ' ')"
+    fi
+    return 0
+}
 _supervision_launchd_bootstrap() {
     local plist="${1:-}" domain
     [ -n "$plist" ] || return 1
@@ -5342,27 +5623,447 @@ _supervision_launchd_bootstrap() {
     out="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" bootstrap "$domain" "$plist" 2>&1)"
     rc=$?
     if [ "$rc" -eq 0 ]; then
+        HANDBACK_LAST_ERROR=""
+        _handback_err_file_clear
         return 0
     fi
+    # Fix #4: stash the launchctl diagnosis (one line, bounded — journal
+    # detail is a single-line quoted string). MAJOR #1: also out-of-band
+    # (file) — this function is called as a STATEMENT so the variable
+    # survives, but the file keeps ONE channel semantics for the readers.
+    HANDBACK_LAST_ERROR="$(printf 'launchctl bootstrap %s %s failed (rc=%s): %s' "$domain" "$plist" "$rc" "$(printf '%s' "$out" | tr '\n' ';' | tr -s ' ' | cut -c1-400)")"
+    _handback_err_file_write "$HANDBACK_LAST_ERROR"
     case "$out" in
         *"already bootstrapped"*|*"already loaded"*|*"Input/output error"*)
             # "already loaded" is NOT success on its own — return a distinct
             # code (2) so the caller revalidates the LIVE job rather than
-            # trusting a no-op rc.
+            # trusting a no-op rc. BENIGN arm: clear the stash (F3 council
+            # fix) — this is attempt N of the caller's retry loop, and a
+            # diagnosis captured by an EARLIER failed attempt must not ride
+            # a later halt detail in the same run (the success arm at the
+            # top clears it; this arm is success-shaped too, modulo the
+            # caller's mandatory revalidation).
+            HANDBACK_LAST_ERROR=""
+            _handback_err_file_clear
             return 2 ;;
     esac
     [ "$rc" -eq 124 ] && return 1
     return 1
 }
 
-# _supervision_launchd_plist_path — the VERBATIM `path =` plist path from a
-# job's `launchctl print` dump (label ≠ filename). Empty when unresolvable.
+# _supervision_launchd_plist_path — resolve the launchd job's plist path.
+# THREE rungs (2026-11-14 hand-back halt, PC-1 — incident
+# docs/incidents/2026-11-14-macos-launchd-handback-halt.md): the promote
+# stop phase BOOTOUTS the job BEFORE the hand-back (lib.sh
+# stop_via_stop_script → _supervision_stop_launchd), so at hand-back time
+# `launchctl print` answers "Could not find service" exactly when the
+# resolver is needed most — the v0.30.5/v0.30.9 halts. Resolution:
+#   1. LIVE probe — `launchctl print` `path =` (FIRST, backward compat:
+#      call sites that run pre-stop, e.g. the disarm warning, still get
+#      the launchd-attested verbatim path).
+#   2. PRE-STOP STASH — SUPERVISION_LAUNCHD_PLIST_PATH, captured by
+#      supervision_classify while the job was still registered (belt).
+#   3. DETERMINISTIC FALLBACK — "$HOME/Library/LaunchAgents/<label>.plist"
+#      (braces): VALID under the ratified filename==label convention
+#      (incident §7b — the repo plists are label-verbatim since the
+#      2026-11-15 rename, so the host file is derivable). The old "never
+#      label-derive" rule guarded a filename≠label install that the
+#      repo's own tooling can no longer produce; every candidate is still
+#      verified with -f, so a stale/mis-named file resolves to NOTHING
+#      (fail-closed), never to a wrong path.
+# Empty output + rc 1 ⇒ unresolvable ⇒ the caller halts fail-safe
+# (Amendment #1 — never a nohup fallback on Darwin).
+#
+# Fix #4 (ENSEMBLE-32 repair lane; incident §5.2): the live probe's
+# stderr is CAPTURED, not discarded — on total resolution failure it is
+# stashed into HANDBACK_LAST_ERROR so the halt journal carries WHY the
+# resolver could not see the job (the v0.30.5 halt's "Could not find
+# service" was never recorded).
 _supervision_launchd_plist_path() {
-    local label="${1:-}" dump
+    local label="${1:-}" dump p errtmp
     [ -n "$label" ] || return 1
-    command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1 || return 1
-    dump="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" print "$(_supervision_launchd_domain)/${label}" 2>/dev/null)" || return 1
-    printf '%s\n' "$dump" | sed -n 's/^[[:space:]]*path = //p' | head -1
+    # Rung 1 — live probe (the job may still be registered).
+    errtmp="$(mktemp -t hbk.XXXXXX 2>/dev/null || printf '/tmp/hbk.%s.err' "$$")"
+    if command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1; then
+        dump="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" print "$(_supervision_launchd_domain)/${label}" 2>"$errtmp")" || dump=""
+        p="$(printf '%s\n' "$dump" | sed -n 's/^[[:space:]]*path = //p' | head -1)"
+        if [ -n "$p" ] && [ -f "$p" ]; then
+            rm -f "$errtmp" 2>/dev/null
+            _handback_err_file_clear
+            printf '%s\n' "$p"
+            return 0
+        fi
+    fi
+    # Rung 2 — the pre-stop stash (survives the bootout).
+    p="${SUPERVISION_LAUNCHD_PLIST_PATH:-}"
+    if [ -n "$p" ] && [ -f "$p" ]; then
+        rm -f "$errtmp" 2>/dev/null
+        _handback_err_file_clear
+        printf '%s\n' "$p"
+        return 0
+    fi
+    # Rung 3 — label-verbatim fallback (ratified convention).
+    p="$HOME/Library/LaunchAgents/${label}.plist"
+    if [ -f "$p" ]; then
+        rm -f "$errtmp" 2>/dev/null
+        _handback_err_file_clear
+        printf '%s\n' "$p"
+        return 0
+    fi
+    # All rungs unresolvable — stash the live probe's stderr (Fix #4).
+    # MAJOR #1 (review round 2): the VARIABLE stash dies in the caller's
+    # `$()` consumption subshell (restart_via_launcher) — this function is
+    # THE resolver on the incident path, so the diagnosis goes OUT-OF-BAND
+    # to HANDBACK_ERROR_FILE (subshell-proof); the halt readers use
+    # _handback_last_error_text. The variable write stays for plain-call
+    # consumers (and is harmless in the subshell).
+    HANDBACK_LAST_ERROR="$(printf "plist resolution failed for job '%s' (launchctl print: %s)" "$label" "$(printf '%s' "$(cat "$errtmp" 2>/dev/null)" | tr '\n' ';' | tr -s ' ' | cut -c1-400)")"
+    _handback_err_file_write "$HANDBACK_LAST_ERROR"
+    rm -f "$errtmp" 2>/dev/null
+    return 1
+}
+
+# ═══════════════ Executor SELF-DETACH (Fix #5, ENSEMBLE-32 Family-3) ═══════
+# A promote executor that runs INSIDE the daemon's process tree (the
+# agent-bash lane: daemon → bash tool → agent shell → promote.sh) dies with
+# its own stop sweep: the launchd bootout of com.ensemble.prod (or the pid
+# sweep's escalation) tears down the WHOLE launchd job tree INCLUDING the
+# executor — incident docs/incidents/2026-11-14-macos-launchd-handback-halt.md
+# §7 (00:50:53, the v0.30.9 promote killed mid-stop BEFORE the flip, defect
+# #7). The §7b proven pattern, productized: on darwin, an in-tree executor
+# re-execs ITSELF inside a transient ONE-SHOT LaunchAgent (label-verbatim
+# plist, RunAtLoad, bootout + plist-removal MANDATORY on every path — the
+# RunAtLoad-at-login footgun) and propagates the detached exit code. This is
+# the darwin mirror of the VM's systemd-run scope guarantee
+# (docs/incidents/2026-09-28-promote-cgroup-teardown.md — setsid escapes a
+# process GROUP, never a systemd cgroup / a launchd job; only a
+# supervisor-owned unit does).
+#
+# AMENDMENT #1 UNTOUCHED: the no-nohup-fallback rule governs the DAEMON (the
+# SERVING process must stay launchd-supervised — 2026-11-11 incident). ONLY
+# the EXECUTOR detaches, and it detaches via launchd itself (a supervised,
+# bounded, one-shot job with a log file — never a nohup'd orphan).
+#
+# Test seams (SYSTEMCTL_BIN / LAUNCHCTL_BIN house discipline):
+#   - LAUNCHCTL_BIN drives every launchctl call (PATH-injected stub works).
+#   - `ps` is PATH-resolved for the ppid/args/comm probes (a PATH-injected
+#     stub drives scripted ancestry chains in tests).
+#   - PROMOTE_DETACH_WAIT_S / PROMOTE_DETACH_POLL_S bound the wait.
+
+# The marker env var: set (exported) in the DETACHED child's environment so
+# the re-executed promote skips the detach block (recursion guard).
+ENSEMBLE_PROMOTE_DETACH_MARKER="${ENSEMBLE_PROMOTE_DETACH_MARKER:-ENSEMBLE_PROMOTE_SELF_DETACHED}"
+PROMOTE_DETACH_WAIT_S="${PROMOTE_DETACH_WAIT_S:-1800}"
+PROMOTE_DETACH_POLL_S="${PROMOTE_DETACH_POLL_S:-2}"
+
+# _detach_last_error — Fix #4 discipline (incident §5.2): a detach failure
+# must be RECORDED, not swallowed — the v0.30.5/v0.30.9 halts were
+# unreproducible because launchctl output was discarded.
+_DETACH_LAST_ERROR=""
+
+# _executor_detach_ps_field <pid> <field> — one ps probe (ppid|args|comm).
+# PATH-resolved `ps` so tests script ancestry chains; empty output on any
+# probe failure (a dead pid mid-walk just terminates the chain).
+_executor_detach_ps_field() {
+    ps -o "$2=" -p "$1" 2>/dev/null | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+# _executor_detach_in_tree — 0 IFF this shell sits inside the install's
+# launcher/daemon lineage. Walks the ppid chain from $$ (bounded depth 16 —
+# paranoia against exotic trees, same bound family as
+# _supervision_pid_in_launchd_lineage), and counts as IN-TREE when an
+# ancestor either (a) carries THIS install's launcher/daemon shapes in its
+# argv (tier-1a anchored-path shapes MIRRORED from _supervision_owned_pids
+# — the pinned mirror discipline: stop-ensemble.sh stays a leaf, lib.sh owns
+# the lib-side shapes), or (b) is ensemble-SHAPED (comm/args say
+# launcher.sh/ensemble-prod) AND its cwd IS this install (the tier-1b
+# conjunct). The cwd conjunct is LOAD-BEARING, not decoration: a sandbox or
+# fixture promote runs inside the REAL daemon's tree of a DIFFERENT install
+# — an unanchored "ancestor named ensemble-prod" would misclassify every
+# such run as in-tree and bootstrap a REAL LaunchAgent for a fixture
+# promote (observed in the staleness pack's e2e legs, 2026-11-15).
+# Requires INSTALL_DIR (resolve_env must have run). Never throws.
+_executor_detach_in_tree() {
+    [ -n "${INSTALL_DIR:-}" ] || return 1
+    local esc esc_phys phys pid args comm cwd depth=0
+    esc="$(_supervision_ere_escape "$INSTALL_DIR")"
+    phys="$(cd -P "$INSTALL_DIR" 2>/dev/null && pwd || printf '%s' "$INSTALL_DIR")"
+    esc_phys="$(_supervision_ere_escape "$phys")"
+    pid="$(_executor_detach_ps_field "$$" ppid)"
+    while [ -n "$pid" ] && [ "$pid" != "0" ] && [ "$pid" != "1" ] && [ "$depth" -lt 16 ]; do
+        args="$(_executor_detach_ps_field "$pid" args)"
+        comm="$(_executor_detach_ps_field "$pid" comm)"
+        if printf '%s' "$args" 2>/dev/null | grep -Eq \
+            "(${esc}|${esc_phys})/(current/)?ensemble-prod( |$)|${esc}/launcher\.sh( |$)"; then
+            return 0
+        fi
+        case "$comm $args" in
+            *ensemble-prod*|*launcher.sh*)
+                cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+                if [ "$cwd" = "$INSTALL_DIR" ] || [ "$cwd" = "$phys" ]; then
+                    return 0
+                fi
+                ;;
+        esac
+        pid="$(_executor_detach_ps_field "$pid" ppid)"
+        depth=$((depth + 1))
+    done
+    return 1
+}
+
+# _executor_detach_xml_escape <string> — minimal plist XML text escaping.
+_executor_detach_xml_escape() {
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+# _executor_detach_cleanup <domain> <label> <plist> <tmpdir> — the MANDATORY
+# bootout + scratch removal (the RunAtLoad-at-login footgun: a spent one-shot
+# left registered would RE-FIRE the promote at the next login — incident
+# §7b, the operator had to hand-remove the spent com.ensemble.promote-v03009).
+# Idempotent by construction (benign "not found" bootout class, rm -f); the
+# DETACHED LOG FILE is deliberately kept (forensics — incident §7b's log was
+# the only artifact carrying the hand-back error).
+_executor_detach_cleanup() {
+    local domain="${1:-}" label="${2:-}" plist="${3:-}" tmpdir="${4:-}"
+    if [ -n "$label" ]; then
+        _supervision_launchd_bootout "$label" >/dev/null 2>&1 || true
+    fi
+    [ -n "$plist" ] && rm -f "$plist" 2>/dev/null
+    [ -n "$tmpdir" ] && [ -d "$tmpdir" ] && rm -rf "$tmpdir" 2>/dev/null
+    return 0
+}
+
+# _executor_detach_self <promote-script> <argv…> — re-exec the ENTIRE promote
+# inside a transient one-shot LaunchAgent, wait for completion, and print
+# NOTHING on stdout except the final rc via the function's return code.
+# Contract:
+#   - bootstrap failure ⇒ belt-cleanup + rc 1 with _DETACH_LAST_ERROR set
+#     (the caller refuses fail-closed — an in-tree executor that cannot
+#     detach would die with its own stop sweep, the exact defect #7 shape).
+#   - wait budget exhausted (PROMOTE_DETACH_WAIT_S) without a done-file ⇒
+#     cleanup + rc 124 (the house bounded-wait convention).
+#   - job vanished without writing the done-file (spawn failure class) ⇒
+#     cleanup + rc 1, _DETACH_LAST_ERROR set.
+#   - otherwise rc = the detached promote's exit code (from the done-file).
+# The DETACHED CHILD self-cleans too (done-file first, then bootout + rm) —
+# so cleanup happens even if THIS in-tree waiter is SIGKILLed mid-wait
+# (the incident's own shape).
+_executor_detach_self() {
+    local script="${1:-}"
+    # D-5 (E2E round 3, cycle-3 🔴): $1 IS the promote script — consumed
+    # here. WITHOUT this shift the argv-quoting loop below re-includes the
+    # script path in esc_args and the detached child runs
+    # `promote.sh promote.sh <args>` → promote.sh refuses `unknown flag`
+    # rc 78 in ~2s (cycle-3 E2E: the detach machinery worked end-to-end,
+    # then the wrapper duplicated the script). Every other positional
+    # ($2… — the caller's own argv, promote.sh:182) forwards verbatim;
+    # there is no other preamble positional consumption in this function.
+    [ "$#" -gt 0 ] && shift
+    [ -n "$script" ] && [ -f "$script" ] || {
+        _DETACH_LAST_ERROR="executor-detach: promote script not found: ${script:-<empty>}"
+        return 1
+    }
+    [ -n "${INSTALL_DIR:-}" ] || {
+        _DETACH_LAST_ERROR="executor-detach: INSTALL_DIR unresolved (resolve_env must run first)"
+        return 1
+    }
+    command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1 || {
+        _DETACH_LAST_ERROR="executor-detach: no launchctl on PATH (LAUNCHCTL_BIN=${LAUNCHCTL_BIN}) — cannot detach; the caller refuses (an in-tree executor without detachment dies with its own stop sweep)"
+        return 1
+    }
+    local uid domain label runid tmpdir envfile wrapper plist logfile donefile
+    uid="$(id -u)"
+    domain="gui/${uid}"
+    runid="promote-$(printf '%s' "${VERSION:-run}" | tr -c 'A-Za-z0-9' '-' | sed -e 's/-\{1,\}/-/g' -e 's/^-*//' -e 's/-*$//')-$(_now_epoch)"
+    label="com.ensemble.${runid}"
+    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/ens-promote-detach.XXXXXX")" || {
+        _DETACH_LAST_ERROR="executor-detach: cannot create the detach scratch dir"
+        return 1
+    }
+    envfile="${tmpdir}/env.sh"
+    wrapper="${tmpdir}/wrapper.sh"
+    plist="${tmpdir}/${label}.plist"
+    donefile="${tmpdir}/done.rc"
+    logfile="${INSTALL_DIR}/data/${runid}.detach.log"
+    mkdir -p "$(dirname "$logfile")" 2>/dev/null || true
+
+    # Env snapshot for the detached child: EVERYTHING exported here, minus
+    # the one poison key (ENSEMBLE_LAUNCHER_STATE_FILE must NEVER propagate —
+    # the env-parity rule), plus the marker that stops the child from
+    # re-detaching. Plain (non-exported) shell variables are NOT carried —
+    # the child re-derives them exactly like a fresh invocation would.
+    {
+        declare -px | grep -v "^declare -x ENSEMBLE_LAUNCHER_STATE_FILE=" || true
+        printf 'export %s=1\n' "$ENSEMBLE_PROMOTE_DETACH_MARKER"
+    } > "$envfile" 2>/dev/null
+
+    # Wrapper: env → promote → rc → done-file → SELF-CLEAN (bootout BEFORE
+    # rm; done-file BEFORE bootout so the waiter reads the rc even if the
+    # bootout kills this wrapper mid-clean). Forensics log kept. Script and
+    # argv are single-quote-escaped into the wrapper body.
+    local esc_args arg_q launchctl_abs script_q
+    script_q="'$(printf '%s' "$script" | sed -e "s/'/'\\\\''/g")'"
+    esc_args=""
+    for arg_q in "$@"; do
+        esc_args="$esc_args '$(printf "%s" "$arg_q" | sed -e "s/'/'\\\\''/g")'"
+    done
+    launchctl_abs="$(command -v "$LAUNCHCTL_BIN" 2>/dev/null || printf 'launchctl')"
+    # D-6 (E2E round 4, cycle-4 🔴 anomaly 7ce14c96): thread REPO_ROOT into
+    # the plist EnvironmentVariables EXPLICITLY. HOOK POINT: the plist
+    # template below (this is the detach machinery's own template — no
+    # daemon-side allowlist is widened). Convention: allowlist-of-one,
+    # per the EXECUTOR_ENV_ALLOWLIST discipline (upgrade_journal.py:3034) —
+    # a NAMED key threaded deliberately, never a blanket env copy; the
+    # envfile snapshot (declare -px) already carries EXPORTED vars, but it
+    # misses a set-but-NON-exported REPO_ROOT (an operator shell that
+    # assigned it plainly), which is exactly the checkout-leg resolution
+    # the config-compat gate reads (lib.sh _config_compat_check leg 4).
+    # Set-but-empty stays ABSENT (no empty-string env entries — launchd
+    # would hand the child a literal empty REPO_ROOT and the gate's
+    # "-f" probe would still miss, but the refusal detail would render
+    # a confusing empty path instead of "?").
+    local detach_repo_root_xml=""
+    if [ -n "${REPO_ROOT:-}" ]; then
+        detach_repo_root_xml="    <key>EnvironmentVariables</key>
+    <dict>
+        <key>REPO_ROOT</key><string>$(_executor_detach_xml_escape "$REPO_ROOT")</string>
+    </dict>
+"
+    fi
+    cat > "$wrapper" <<WEOF
+#!/bin/bash
+# Executor self-detach wrapper (ENSEMBLE-32 Fix #5) — generated by lib.sh
+# _executor_detach_self; run inside the transient one-shot LaunchAgent
+# ${label}. Cleanup below is MANDATORY (RunAtLoad-at-login footgun,
+# incident 2026-11-14 §7b).
+. '${envfile}'
+bash ${script_q}${esc_args}
+rc=\$?
+printf '%s\n' "\$rc" > '${donefile}'
+'${launchctl_abs}' bootout '${domain}/${label}' >/dev/null 2>&1 || true
+rm -f '${plist}' '${wrapper}' '${envfile}' >/dev/null 2>&1 || true
+exit "\$rc"
+WEOF
+    chmod +x "$wrapper"
+
+    # Plist: label-verbatim FILENAME == LABEL (Family-1 ratified invariant,
+    # incident §7b root cause). RunAtLoad one-shot, KeepAlive false,
+    # ExitTimeOut bounded. NO plist ever lands in ~/Library/LaunchAgents —
+    # this one lives in the private scratch dir and is bootstrapped by path.
+    cat > "$plist" <<PLEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>$(_executor_detach_xml_escape "$label")</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>$(_executor_detach_xml_escape "$wrapper")</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><false/>
+    <key>ExitTimeOut</key><integer>30</integer>
+    <key>StandardOutPath</key><string>$(_executor_detach_xml_escape "$logfile")</string>
+    <key>StandardErrorPath</key><string>$(_executor_detach_xml_escape "$logfile")</string>
+${detach_repo_root_xml}</dict>
+</plist>
+PLEOF
+
+    # Belt cleanup trap for THIS shell: whatever happens to the wait
+    # (timeout, TERM/INT, exit), bootout + scratch removal run here too.
+    # Idempotent with the wrapper's own self-clean. The trap fires at the
+    # caller's exit (the promote.sh detach block exits right after us).
+    trap "_executor_detach_cleanup '${domain}' '${label}' '${plist}' '${tmpdir}' >/dev/null 2>&1 || true" EXIT
+
+    _log "executor self-detach: bootstrapping one-shot LaunchAgent ${label} (plist=${plist}, log=${logfile})"
+    local out rc
+    out="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" bootstrap "$domain" "$plist" 2>&1)"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        _DETACH_LAST_ERROR="$(printf 'launchctl bootstrap %s %s failed (rc=%s): %s' "$domain" "$plist" "$rc" "$(printf '%s' "$out" | tr '\n' ';' | tr -s ' ' | cut -c1-400)")"
+        _warn "executor self-detach FAILED: ${_DETACH_LAST_ERROR}"
+        _executor_detach_cleanup "$domain" "$label" "$plist" "$tmpdir"
+        return 1
+    fi
+
+    # Bounded wait on the done-file. Fast-fail: the job VANISHED from the
+    # domain without writing the done-file (spawn failure class — e.g. the
+    # wrapper died before exec; launchctl print answers empty).
+    local deadline waited job_dump
+    deadline=$(( $(_now_epoch) + PROMOTE_DETACH_WAIT_S ))
+    waited=0
+    while [ "$(_now_epoch)" -lt "$deadline" ]; do
+        if [ -f "$donefile" ]; then
+            rc="$(cat "$donefile" 2>/dev/null)"
+            case "$rc" in
+                ''|*[!0-9]*) _DETACH_LAST_ERROR="executor-detach: done-file unreadable/garbage (${donefile})"; _warn "executor self-detach: ${_DETACH_LAST_ERROR}"; _executor_detach_cleanup "$domain" "$label" "$plist" "$tmpdir"; return 1 ;;
+            esac
+            _log "executor self-detach: detached promote completed rc=${rc} after ${waited}s (log=${logfile})"
+            return "$rc"
+        fi
+        sleep "$PROMOTE_DETACH_POLL_S"
+        waited=$((waited + PROMOTE_DETACH_POLL_S))
+        if [ "$waited" -ge 10 ]; then
+            job_dump="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" print "${domain}/${label}" 2>/dev/null)"
+            if [ -z "$job_dump" ] && [ ! -f "$donefile" ]; then
+                _DETACH_LAST_ERROR="executor-detach: LaunchAgent ${label} vanished from ${domain} without writing the done-file (spawn failure class; log=${logfile})"
+                _warn "executor self-detach: ${_DETACH_LAST_ERROR}"
+                _executor_detach_cleanup "$domain" "$label" "$plist" "$tmpdir"
+                return 1
+            fi
+        fi
+    done
+    _DETACH_LAST_ERROR="$(printf 'executor-detach: the detached promote did not complete within PROMOTE_DETACH_WAIT_S=%ss (label=%s, log=%s)' "$PROMOTE_DETACH_WAIT_S" "$label" "$logfile")"
+    _warn "executor self-detach WAIT BUDGET EXHAUSTED: ${_DETACH_LAST_ERROR}"
+    _executor_detach_cleanup "$domain" "$label" "$plist" "$tmpdir"
+    return 124
+}
+
+# _pipeline_self_excluded <pid> — DEFENSE-IN-DEPTH SELF-EXCLUSION for the
+# kill sweeps (Fix #5, ENSEMBLE-32 Family-3; incident 2026-11-14 §7 defect
+# #7). MAJOR #3 (review round 2): the previous shape ALSO excluded PPID's
+# PARENT when the sweep ran in-tree (_pipeline_self_excluded_in_tree
+# ancestor walk) — and the walk ANCHORS on the daemon, so in-tree it
+# excluded the TARGET itself: the daemon was classified, filtered out of
+# the kill sweep, and the stop false-succeeded while the daemon lived (the
+# exact class reproduced live in scripts/stop-ensemble.sh _stop_pids; the
+# 16d TERM-pin regression is the same family — a blanket own-pgid
+# filter drops the daemon because the in-tree sweep shares the launchd
+# job group). SHIPPED SHAPE (mirrors _stop_pids):
+#   1. executor identity ONLY: _PIPELINE_SELF_PID/$PPID (seam-injectable
+#      for tests);
+#   2. HARD GUARD (never-exclude-the-TARGET): a pid that is a sweep
+#      CANDIDATE is never excludable — the daemon dies even when it is
+#      literally $PPID (a daemon-spawned sweep).
+# A detached executor lives in a different tree BY CONSTRUCTION and is not
+# an ancestor of the sweep at all, so it needs no exclusion here. Prints
+# the surviving pids, one per line, ascending, deduped.
+_PIPELINE_SELF_PID="${_PIPELINE_SELF_PID:-$$}"
+_PIPELINE_SELF_PPID="${_PIPELINE_SELF_PPID:-$PPID}"
+_pipeline_self_excluded() {
+    local my_pid my_ppid pid my_excluded _c _is_target
+    my_pid="$_PIPELINE_SELF_PID"
+    my_ppid="$_PIPELINE_SELF_PPID"
+    my_excluded="$my_pid $my_ppid"
+    local my_excluded_new=""
+    for _c in $my_excluded; do
+        _is_target=0
+        for pid in $(printf '%s\n' "$@" | grep -E '^[0-9]+$' | sort -n | awk '!seen[$0]++'); do
+            [ "$pid" = "$_c" ] || continue
+            _is_target=1
+            break
+        done
+        if [ "$_is_target" = "1" ]; then
+            : "never-exclude-the-target: $_c is a sweep candidate — the target wins (MAJOR #3)"
+        else
+            my_excluded_new="$my_excluded_new $_c"
+        fi
+    done
+    for pid in $(printf '%s\n' "$@" | grep -E '^[0-9]+$' | sort -n | awk '!seen[$0]++'); do
+        case " $my_excluded_new " in *" $pid "*) continue ;; esac
+        printf '%s\n' "$pid"
+    done
 }
 
 # _handback_serving_probe — the hand-back's SERVING conjunct
@@ -5395,6 +6096,14 @@ _handback_serving_probe() {
     case "$hspc_rc" in
         0)
             # green-class (green or busy-amnesty) — the body is in _PROBE_BODY
+            # Fix #2: the green answer must come from the ATTRIBUTED daemon.
+            # A mismatch is probe-level FAIL-FAST (the probe's own vocabulary:
+            # no amount of polling fixes a foreign answerer — the incident's
+            # nohup-serves-while-launchd-crash-loops shape).
+            if ! _gate_serving_attribution "hand-back verify"; then
+                _warn "hand-back verify: serving-process attribution REFUSED${GATE_ATTRIBUTION_DETAIL:+ — $GATE_ATTRIBUTION_DETAIL} (probe-level fail-fast, Fix #2); NOT success"
+                return 1
+            fi
             if [ -n "${PROMOTE_EXPECTED_VERSION:-}" ]; then
                 running="$(_json_field "${_PROBE_BODY:-}" version 2>/dev/null)" || running=""
                 if [ -z "$running" ]; then
@@ -5814,9 +6523,19 @@ restart_via_launcher() {
     if [ "${SUPERVISION_STATE:-}" = "LAUNCHD_MANAGED" ] && [ -n "${SUPERVISION_UNIT:-}" ] \
        && _supervision_host_allows_launchd; then
         local lplist lrc lattempt=1
+        # PC-1 (2026-11-14 hand-back halt): the resolver is THREE-runged —
+        # live `launchctl print` (rarely alive here: the stop bootouted the
+        # job) → the pre-stop classify stash → the label-verbatim
+        # ~/Library/LaunchAgents/<label>.plist fallback (ratified
+        # filename==label convention, incident §7b). The old
+        # "never label-derive" refusal was the halt: filename ≠ label was
+        # the incident's root cause, and the rename retired that install
+        # shape; every candidate is still -f-verified, so unresolvable
+        # remains unresolvable (fail-closed, no fabricated path).
         lplist="$(_supervision_launchd_plist_path "$SUPERVISION_UNIT")"
         if [ -z "$lplist" ]; then
-            _warn "launchd hand-back: cannot resolve the VERBATIM plist path for job '$SUPERVISION_UNIT' (label ≠ filename) — failing (never label-derive); caller halts fail-safe"
+            _hb_err="$(_handback_last_error_text)"   # MAJOR #1: subshell-proof reader (resolver wrote the file from inside $())
+            _warn "launchd hand-back: cannot resolve the plist path for job '$SUPERVISION_UNIT' — live probe, pre-stop stash, and the label-verbatim ~/Library/LaunchAgents/<label>.plist fallback ALL unresolvable (incident 2026-11-14 §7b: filename must equal the job label) — failing; caller halts fail-safe${_hb_err:+; captured: $_hb_err}"
             return 1
         fi
         lrc=1
@@ -5826,14 +6545,17 @@ restart_via_launcher() {
             # rc 0 = started; rc 2 = already loaded (benign ONLY because the
             # forward path booted out first — the caller's gate revalidates).
             if [ "$lrc" -eq 0 ] || [ "$lrc" -eq 2 ]; then break; fi
-            _warn "launchd hand-back: bootstrap attempt $lattempt FAILED (rc=$lrc) for '$SUPERVISION_UNIT' — retrying"
+            _hb_err="$(_handback_last_error_text)"
+            _warn "launchd hand-back: bootstrap attempt $lattempt FAILED (rc=$lrc) for '$SUPERVISION_UNIT' — retrying${_hb_err:+; captured: $_hb_err}"
             sleep $(( lattempt * 2 ))
             lattempt=$(( lattempt + 1 ))
         done
         if [ "$lrc" -ne 0 ] && [ "$lrc" -ne 2 ]; then
-            _warn "launchd hand-back: bootstrap EXHAUSTED after retries (last rc=$lrc) — failing (never a nohup fallback on Darwin); caller halts fail-safe"
+            _hb_err="$(_handback_last_error_text)"
+            _warn "launchd hand-back: bootstrap EXHAUSTED after retries (last rc=$lrc) — failing (never a nohup fallback on Darwin); caller halts fail-safe${_hb_err:+; captured: $_hb_err}"
             return 1
         fi
+        HANDBACK_LAST_ERROR=""; _handback_err_file_clear   # MAJOR #1 hygiene: success clears both channels
         _log "hand-back: launchd — bootstrapped job '$SUPERVISION_UNIT' from $lplist (RunAtLoad starts the daemon exactly once; no nohup, no promote-started launcher)"
         return 0
     fi
@@ -6227,6 +6949,161 @@ _supervision_owned_pids() {
         done
 }
 
+# _supervision_port_holders — the LISTENING pids on $PORT (Fix #2,
+# ENSEMBLE-32 repair lane; incident
+# docs/incidents/2026-11-14-macos-launchd-handback-halt.md §5.1). The
+# census is -sTCP:LISTEN-scoped DELIBERATELY: bare `lsof -ti:$PORT`
+# (the stop path's fast condition) also lists every pid holding an
+# ESTABLISHED client connection (uptime monitor, browser, kubectl
+# sidecar) — reading those as "holders" would refuse every green gate
+# on a monitored host. Only the LISTENER is the serving process.
+# _flip_verify_port_attribution <post_pid> — D-1 (E2E round 1 🔴, demo
+# promote 2026-11-15): the flip-verify's SERVING attribution with a
+# BOUNDED LISTEN-GRACE. The defect shape: the launchd verify broke its
+# wait-loop on the FIRST owned-pid appearance, then a SINGLE unbuffered
+# _supervision_port_holders census issued a crash-shape verdict if
+# nothing listened yet — the boot-to-listen span of a migration-heavy
+# cold boot (~15-20s on the demo install) exceeded the census instant,
+# so a HEALTHY boot was killed mid-flight and the auto-rollback landed
+# on an unbootable previous release. The attribution requirement is
+# RIGHT; the TIMING was the defect. Shaped fix:
+#   - bounded listen-grace: poll the census (FLIP_VERIFY_LISTEN_POLL_S,
+#     default 2s — the _probe family cadence) up to
+#     FLIP_VERIFY_LISTEN_GRACE_S (default = LIVEZ_BUDGET_S — the SAME
+#     operator-tuned "how long a healthy boot may take" budget the
+#     later /livez gate uses; a distinct name so it can be shortened
+#     independently, same env-overridable-seconds knob conventions);
+#   - grace applies ONLY to the waiting-for-an-owned-holder condition.
+#     A FOREIGN holder fails IMMEDIATELY at the census that sees it (no
+#     grace for wrong-process), and budget exhaustion without a listener
+#     still issues the crash-shape verdict (leg (b) preserved);
+#   - census-tool failure (rc 2) breaks the poll immediately into the
+#     degraded pid-provenance arm — a broken lsof will not heal by
+#     polling, and a missing tool is never refusal evidence.
+# Sets _FLIP_VERIFY_REASON (global) and returns 0 = attributed serving
+# (proceed to the version gate); 1 = refusal (caller sets gate_fail_reason
+# from _FLIP_VERIFY_REASON); 2 = degraded-skip (census unprobeable —
+# pid provenance only, NOT a pass evidence; the caller logs the skip).
+# STATEMENT FORM: call directly, never in $( ) (it sleeps).
+# Both knobs route through _numeric_knob (A5 house rule): unset -> the
+# documented default (the grace inherits the already-routed LIVEZ_BUDGET_S,
+# the operator's tuned boot-patience budget), garbage/float -> a LOUD stderr
+# note + the default -- garbage can NEVER kill the promote shell mid-flip-
+# verify NOR silently zero the grace (a zero grace would restore the D-1
+# crash-shape instant verdict the knob exists to prevent).
+FLIP_VERIFY_LISTEN_GRACE_S="$(_numeric_knob FLIP_VERIFY_LISTEN_GRACE_S "${FLIP_VERIFY_LISTEN_GRACE_S:-}" "${LIVEZ_BUDGET_S:-180}")"
+FLIP_VERIFY_LISTEN_POLL_S="$(_numeric_knob FLIP_VERIFY_LISTEN_POLL_S "${FLIP_VERIFY_LISTEN_POLL_S:-}" 2)"
+_flip_verify_port_attribution() {
+    local post_pid="${1:-}" deadline holders hrc owned owned_spaced h foreign
+    deadline=$(( $(_now_epoch) + FLIP_VERIFY_LISTEN_GRACE_S ))
+    holders="" ; hrc="" ; foreign=""
+    while :; do
+        holders="$(_supervision_port_holders)"
+        hrc=$?
+        if [ "$hrc" -eq 2 ]; then
+            return 2   # census unprobeable — degraded arm, no polling can heal it
+        fi
+        if [ -n "$holders" ]; then
+            owned="$(_supervision_owned_pids 2>/dev/null)"
+            # the owned set is NEWLINE-joined — normalize for token matching
+            # (the F1 council fix, mirrored from promote.sh's flip-verify).
+            owned_spaced="$(printf '%s' "$owned" | tr '\n' ' ')"
+            for h in $holders; do
+                [ -n "$h" ] || continue
+                case " $owned_spaced " in
+                    *" $h "*) ;;
+                    *) foreign="$foreign $h" ;;
+                esac
+            done
+            break   # DECIDE NOW: all-owned → success; any foreign → immediate
+                    # refusal — the grace covers only "no listener YET", never
+                    # a wrong-process holder
+        fi
+        [ "$(_now_epoch)" -lt "$deadline" ] || break
+        sleep "$FLIP_VERIFY_LISTEN_POLL_S"
+    done
+    if [ -z "$holders" ]; then
+        _FLIP_VERIFY_REASON="launchd verify: owned pid $post_pid exists but NOTHING listened on :${PORT} within the ${FLIP_VERIFY_LISTEN_GRACE_S}s listen-grace — the flip produced a process, not a serving daemon (crash-loop shape; D-1 bounded grace exhausted)"
+        return 1
+    fi
+    if [ -n "$foreign" ]; then
+        _FLIP_VERIFY_REASON="launchd verify: port :${PORT} holder(s):$foreign NOT in the owned-pid set (owned:$owned_spaced) — the flip is served by a foreign process"
+        return 1
+    fi
+    _FLIP_VERIFY_REASON=""
+    return 0
+}
+
+_supervision_port_holders() {
+    [ -n "${PORT:-}" ] || return 2
+    command -v lsof >/dev/null 2>&1 || return 2
+    local errtmp out rc
+    errtmp="$(mktemp -t attr.XXXXXX 2>/dev/null || printf '/tmp/attr.%s.err' "$$")"
+    out="$(lsof -ti:"$PORT" -sTCP:LISTEN 2>"$errtmp")"
+    rc=$?
+    if [ "$rc" -ne 0 ] && [ -s "$errtmp" ]; then
+        rm -f "$errtmp" 2>/dev/null
+        return 2   # lsof errored (bad flag / permissions) — not evidence
+    fi
+    rm -f "$errtmp" 2>/dev/null
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    return 1
+}
+
+# _supervision_launchd_job_pid <label> — the launchd job's CURRENT pid
+# (Fix #2 launchd lineage anchor; the `pid = ` line of the job dump —
+# the same parse family as the plist `path = ` resolver above). Bounded
+# (LAUNCHD_PROBE_BUDGET_S). Prints the pid; returns nonzero when the
+# job is not registered. Prints NOTHING for a registered-but-pidless
+# job (crash-looping: launchctl answers `pid = 4294967295` (-1
+# sentinel) or omits the line) — rc 0, empty output: the CALLER
+# distinguishes "probe tool failed" (skip, no evidence) from "the job
+# has NO live process while the port serves someone" (the v0.30.3
+# dual-supervisor shape — refuse).
+_supervision_launchd_job_pid() {
+    local label="${1:-}" dump rc
+    [ -n "$label" ] || return 1
+    command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1 || return 2
+    dump="$(_run_bounded "$LAUNCHD_PROBE_BUDGET_S" -- "$LAUNCHCTL_BIN" print "$(_supervision_launchd_domain)/${label}" 2>/dev/null)"
+    rc=$?
+    [ "$rc" -eq 0 ] || return 2
+    printf '%s\n' "$dump" | sed -n 's/^[[:space:]]*pid = //p' | head -1 \
+        | while IFS= read -r p; do
+            case "$p" in
+                ''|0|4294967295) ;;   # no live process behind the job
+                *[!0-9]*) ;;
+                *) printf '%s\n' "$p" ;;
+            esac
+        done
+    return 0
+}
+
+# _supervision_pid_in_launchd_lineage <pid> <root> — is <pid> the root
+# itself or a bounded ppid-descendant of it? launchd's job pid is the
+# LAUNCHER; the daemon is its foreground child, so one or two hops
+# always suffice (depth 12 is paranoia against exotic trees). PPID
+# walking is safe here BY SHAPE: the launcher does not double-fork the
+# daemon (KeepAlive supervises the tree), which is exactly why the
+# Linux cgroup containment is used for systemd instead — see the
+# supervision_dualfight_check header.
+_supervision_pid_in_launchd_lineage() {
+    local cur="${1:-}" root="${2:-}" depth=0
+    [ -n "$cur" ] && [ -n "$root" ] || return 1
+    while [ -n "$cur" ] && [ "$depth" -lt 12 ]; do
+        [ "$cur" = "$root" ] && return 0
+        cur="$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d '[:space:]')"
+        case "$cur" in
+            ''|0|1) return 1 ;;
+            *[!0-9]*) return 1 ;;
+        esac
+        depth=$(( depth + 1 ))
+    done
+    return 1
+}
+
 # _supervision_pid_cgroup_leaf <pid> — basename of the pid's cgroup LEAF,
 # or nothing. TWINS-PINNED parse (~6 lines, duplicated in the python twin
 # _supervision_read_cgroup_leaf — cross-language seam; see the section
@@ -6335,6 +7212,10 @@ supervision_classify() {
     SUPERVISION_UNIT=""
     SUPERVISION_EXPLICIT_UNIT=0
     SUPERVISION_REFUSE_REASON=""
+    # PC-1 stash reset (2026-11-14 hand-back halt): a re-classify must not
+    # inherit a previous classification's plist path — the job may have
+    # been re-registered from a different file between the two runs.
+    SUPERVISION_LAUNCHD_PLIST_PATH=""
     local raw low leaf pid inv heal_unit heal_on
     heal_on=0
     raw="${ENSEMBLE_SUPERVISION:-}"
@@ -6439,6 +7320,13 @@ supervision_classify() {
                 fi
                 if _supervision_launchd_detect; then
                     SUPERVISION_STATE="LAUNCHD_MANAGED"
+                    # PC-1 stash (belt): capture the plist path NOW, while
+                    # the job is still registered and `launchctl print`
+                    # answers — the stop phase bootouts the job before the
+                    # hand-back, killing the live probe exactly when the
+                    # hand-back needs it (2026-11-14 halt, incident §3.2).
+                    SUPERVISION_LAUNCHD_PLIST_PATH="$(_supervision_launchd_plist_path "$SUPERVISION_UNIT" 2>/dev/null)" \
+                        || SUPERVISION_LAUNCHD_PLIST_PATH=""
                     printf 'ENSEMBLE_SUPERVISION_RESULT=%s:%s\n' "$SUPERVISION_STATE" "$SUPERVISION_UNIT"
                     return 0
                 fi
@@ -6479,6 +7367,10 @@ supervision_classify() {
         SUPERVISION_STATE="LAUNCHD_MANAGED"
         if command -v "$LAUNCHCTL_BIN" >/dev/null 2>&1 && _supervision_launchd_detect; then
             SUPERVISION_STATE="LAUNCHD_MANAGED"
+            # PC-1 stash (belt) — same rationale as the explicit-launchd arm:
+            # capture while registered; the hand-back consumes it post-bootout.
+            SUPERVISION_LAUNCHD_PLIST_PATH="$(_supervision_launchd_plist_path "$SUPERVISION_UNIT" 2>/dev/null)" \
+                || SUPERVISION_LAUNCHD_PLIST_PATH=""
             printf 'ENSEMBLE_SUPERVISION_RESULT=%s:%s\n' "$SUPERVISION_STATE" "$SUPERVISION_UNIT"
             return 0
         fi
@@ -6747,7 +7639,13 @@ supervision_map_outcome() {
 # prefix with $cg (e.g. a transient scope nested under the unit's
 # slice) may over-include. Deliberately conservative — diagnostic-
 # only — the FAULT arm only fires when reality disagrees.
-# Linux+systemd only; every other shape returns 0 (zero behavior change).
+# Linux+systemd Check A/B unchanged; Fix #2-i (ENSEMBLE-32 repair
+# lane, incident 2026-11-14 §3.1) adds the MISSING LAUNCHD ARM for
+# Darwin launchd-declared hosts (SUPERVISION_MODE=launchd): Check B
+# grammar on the launchd pid lineage (_df_launchd_check_b) — the old
+# guard returned 0 immediately on Darwin, so a launchd host ran NO
+# dual-fight detection at all (the gap the v0.30.3 dual-supervisor
+# commit lived through). Other shapes still return 0.
 # _df_systemctl <outfile> <args...> — a BOUNDED supervision systemctl probe
 # (T2.7/phase-2 D2). The dual-fight check's four `systemctl is-active` /
 # `systemctl show` calls were the last unbounded probes on the preflight
@@ -6807,7 +7705,63 @@ _df_systemctl() {
     return "$__rc"
 }
 
+# _df_launchd_check_b — the launchd Check B (Fix #2-i): every LISTEN
+# holder of $PORT must sit in the launchd job's pid lineage. Mirrors the
+# systemd Check B verdict shape (fault → halt journal event → exit 78)
+# with the launchd lineage anchor (_supervision_launchd_job_pid +
+# _supervision_pid_in_launchd_lineage). Degraded arms follow the house
+# no-missing-tool-fault rule: PORT unset / lsof absent → skip (a
+# report-only port lookup cannot fault on a missing tool — systemd Check
+# B precedent); job pid unresolvable via a TOOL failure → skip (a wedged
+# launchctl is not evidence); a registered job with NO live pid while
+# the port IS held → FAULT (the v0.30.3 dual-supervisor shape — the job
+# is armed but its tree is crash-looping while something else serves).
+# STATEMENT-FORM CONTRACT (unchanged): call directly, never in $( ).
+_df_launchd_check_b() {
+    local unit="${SUPERVISION_UNIT:-}" hpid lpid fault="" holders
+    holders="$(_supervision_port_holders)" || return 0   # rc1 no-listener / rc2 unprobeable — nothing to fight over
+    lpid="$(_supervision_launchd_job_pid "$unit")"
+    case "$?" in
+        2) return 0 ;;   # launchctl tool/budget failure — never evidence
+    esac
+    if [ -z "$lpid" ]; then
+        # Registered job, no live pid, port held → two masters (or a
+        # serving orphan). Fault, not skip.
+        fault="launchd-job-pidless-while-port-held"
+        journal_history_append halt "supervision DUAL_FIGHT ($fault): launchd job $unit is registered with NO live pid while port ${PORT:-?} is held by:${holders} — refusing PRE-TXN (two masters must never meet a flip; halt-for-human, resolve the supervision split before any pipeline mutation)" >/dev/null 2>&1 \
+            || _warn "DUAL_FIGHT halt journal append FAILED (best-effort) — proceeding to exit 78"
+        exit 78
+    fi
+    for hpid in $holders; do
+        [ -n "$hpid" ] || continue
+        if ! _supervision_pid_in_launchd_lineage "$hpid" "$lpid"; then
+            _warn "supervision DUAL_FIGHT: port $PORT holder $hpid is OUTSIDE launchd job $unit lineage (job pid $lpid) — two masters"
+            fault="port-holder-outside-launchd-lineage"
+            break
+        fi
+    done
+    if [ -n "$fault" ]; then
+        journal_history_append halt "supervision DUAL_FIGHT ($fault): launchd job $unit is armed while the port-holder sits OUTSIDE its pid lineage — refusing PRE-TXN (two masters must never meet a flip; halt-for-human, resolve the supervision split before any pipeline mutation)" >/dev/null 2>&1 \
+            || _warn "DUAL_FIGHT halt journal append FAILED (best-effort) — proceeding to exit 78"
+        exit 78
+    fi
+    return 0
+}
+
 supervision_dualfight_check() {
+    # ── Fix #2-i (ENSEMBLE-32 repair lane; incident 2026-11-14 §3.1) ──
+    # LAUNCHD ARM (was the gap: the Linux guard below returned 0
+    # immediately on Darwin, so a launchd-declared host ran NO
+    # dual-fight detection at all). Check B grammar on the launchd
+    # lineage: the port-holder must be the launchd job's process —
+    # a holder outside the job's pid lineage while the job is
+    # armed = two masters meeting a flip (the v0.30.3 shape: a nohup
+    # daemon serving while the launchd-adopted tree crash-looped).
+    if [ "${SUPERVISION_MODE:-}" = "launchd" ] \
+       && [ -n "${SUPERVISION_UNIT:-}" ] && _supervision_host_allows_launchd; then
+        _df_launchd_check_b
+        return $?
+    fi
     [ "${SUPERVISION_MODE:-}" = "unit" ] || return 0
     [ -n "${SUPERVISION_UNIT:-}" ] || return 0
     [ "$(uname -s)" = "Linux" ] || return 0
@@ -6995,12 +7949,204 @@ journal_mark_supervision() {
     journal_update "in_flight" "$new_inf"
 }
 
+# _gate_serving_attribution <what> — the Fix #2 ATTRIBUTION CONJUNCT
+# (ENSEMBLE-32 repair lane Family 2; incident
+# docs/incidents/2026-11-14-macos-launchd-handback-halt.md §3.1/§5.1).
+# Rides AFTER a green curl in every gate (gate_livez / gate_readyz /
+# gate_version — gate_soak inherits it through its per-tick
+# gate_version) and in _handback_serving_probe: the gate answer is
+# only trusted when the process HOLDING the port is THIS install's
+# supervised daemon. Live fact driving this: on ensemble-vm the daemon
+# listens 127.0.0.1:9798 while :9797 is held by `kubectl port-forward`
+# + an uptime monitor + a code-server child — a port-answer check
+# validated the WRONG process (the v0.30.3 promote "committed" on
+# /livez answers from a nohup daemon while the launchd-adopted tree
+# crash-looped on EADDRINUSE for 9h).
+#
+# TWO layers, both fail-closed:
+#   1. OWNERSHIP — every LISTEN holder of $PORT must be a member of
+#      the supervision-owned pid set (_supervision_owned_pids — the
+#      INSTALL_DIR-anchored shape ladder). Catches foreign holders
+#      (kubectl/monitor/code-server). An EMPTY owned set against a
+#      live holder is the same mismatch (nothing anchored is serving).
+#   2. SUPERVISOR LINEAGE — when the pre-stop classification resolved
+#      a supervisor (SUPERVISION_MODE=launchd on Darwin, =unit on
+#      Linux), every holder must sit in THAT supervisor's lineage
+#      (launchd job pid / systemd MainPID ∧ unit cgroup containment —
+#      the dualfight Check B grammar). Catches the v0.30.3 shape:
+#      the nohup daemon IS owned-shaped (same install) but is NOT the
+#      launchd job's process. Script/nohup mode has no supervisor to
+#      attribute to — the ownership layer alone governs there.
+#
+# Refusal vs degraded (no silent fallbacks):
+#   * holder present ∧ not owned / outside lineage / no listener
+#     behind a green answer  → REFUSE: rc 1 + loud _warn naming the
+#     pids (the caller turns the gate red — never warn-and-pass).
+#   * unprobeable (PORT unset, lsof absent, or lsof itself errored;
+#     supervisor probe TOOL failure — never evidence) → rc 0 with a
+#     ONE-TIME loud warn naming the skipped layer (dualfight/
+#     _supervision_unit_serving no-missing-tool-fault precedent).
+#
+# Sets GATE_ATTRIBUTION_DETAIL ("<reason>" on refusal, "" on pass) so
+# callers that thread a failure reason (promote 8b, restart GATE_FAIL,
+# rollback REGATE_FAIL, status verify) can carry WHY. Called as a
+# statement; reads PORT/INSTALL_DIR/SUPERVISION_* globals.
+GATE_ATTRIBUTION_DETAIL=""
+_GATE_ATTR_WARNED=""
+# _gate_attr_unprobeable <what> <why> — the ONE-TIME loud degraded note
+# (never silent, never spammy — the budgeted probe loops would repeat it
+# every iteration). NOT a pass evidence: it marks the layer as skipped.
+_gate_attr_unprobeable() {
+    [ -n "$_GATE_ATTR_WARNED" ] && return 0
+    _GATE_ATTR_WARNED=1
+    _warn "attribution [$1]: skipped (${2}) — the serving-process conjunct cannot be evaluated on this host/shape (Fix #2; gates do NOT refuse on a missing probe tool, but this is NOT a pass evidence)"
+}
+_gate_serving_attribution() {
+    local what="${1:-gate}" holders h owned nonmatch="" lpid lrc hrc
+    GATE_ATTRIBUTION_DETAIL=""
+    holders="$(_supervision_port_holders)"
+    hrc=$?
+    case "$hrc" in
+        2) GATE_ATTRIBUTION_DETAIL=""; _gate_attr_unprobeable "$what" "no lsof / PORT unset / lsof errored"; return 0 ;;
+    esac
+    if [ -z "$holders" ]; then
+        # curl JUST answered green on :$PORT — a green answer with no
+        # listener is an unattributable answer (the answerer vanished
+        # mid-probe, or the census cannot see it). Fail-closed: the
+        # incident class is exactly "trusting an unattributable answer".
+        GATE_ATTRIBUTION_DETAIL="port :${PORT} answered green but lsof finds NO listener — the answer is unattributable"
+        _warn "attribution [$what]: REFUSED — $GATE_ATTRIBUTION_DETAIL (incident 2026-11-14 §3.1: the gate must verify WHO answers)"
+        return 1
+    fi
+    # ── Layer 1: ownership ────────────────────────────────────────────
+    owned="$(_supervision_owned_pids 2>/dev/null)"
+    # _supervision_owned_pids emits a NEWLINE-joined list (one printf per
+    # pid); the membership case below matches SPACE-delimited tokens, so
+    # normalize ONCE before the loop. F1 (ENSEMBLE-32 repair lane council):
+    # on every supervised install the owned set has >=2 pids (the launcher
+    # run_loop holds the daemon as a live child, launcher.sh:3838; the
+    # launchd job argv anchors the launcher) — matching raw newlines
+    # false-refused exactly that shape (holder=daemon pid, owned=<launcher
+    # NL daemon> => REFUSED), the F1 empiric reproduced before this fix.
+    owned_spaced="$(printf '%s' "$owned" | tr '\n' ' ')"
+    for h in $holders; do
+        [ -n "$h" ] || continue
+        case " $owned_spaced " in
+            *" $h "*) ;;
+            *) nonmatch="$nonmatch $h" ;;
+        esac
+    done
+    if [ -n "$nonmatch" ]; then
+        # owned_spaced (NOT $owned) in the detail: GATE_ATTRIBUTION_DETAIL is
+        # threaded into promote's gate_fail_reason and from there into the
+        # journal event detail — a single-line quoted string by contract (the
+        # same reason the bootstrap stash flattens newlines to ';').
+        GATE_ATTRIBUTION_DETAIL="port-holder(s):${nonmatch} NOT in the supervision-owned pid set (owned:${owned_spaced:-<none>}) — the :${PORT} answerer is not this install's daemon"
+        _warn "attribution [$what]: REFUSED —$GATE_ATTRIBUTION_DETAIL (ensemble-vm §5.1: :9797 held by kubectl/monitor while the daemon serves :9798)"
+        return 1
+    fi
+    # ── Layer 2: supervisor lineage (consume the PRE-STOP classify) ──
+    case "${SUPERVISION_MODE:-}" in
+        launchd)
+            if [ -n "${SUPERVISION_UNIT:-}" ] && _supervision_host_allows_launchd; then
+                lpid="$(_supervision_launchd_job_pid "$SUPERVISION_UNIT")"
+                lrc=$?
+                case "$lrc" in
+                    2)
+                        GATE_ATTRIBUTION_DETAIL=""
+                        _gate_attr_unprobeable "$what" "launchctl probe failed (tool/budget) — launchd lineage unverifiable"
+                        return 0
+                        ;;
+                    *)
+                        if [ -z "$lpid" ]; then
+                            # The job is registered (print answered) but has NO
+                            # live process while the port serves someone — the
+                            # v0.30.3 dual-supervisor shape (launchd tree
+                            # crash-looping, a nohup daemon serving). Refuse.
+                            GATE_ATTRIBUTION_DETAIL="launchd job '$SUPERVISION_UNIT' has NO live pid while :${PORT} is served by:${holders} — the answerer is not the supervised daemon"
+                            _warn "attribution [$what]: REFUSED — $GATE_ATTRIBUTION_DETAIL (incident 2026-11-14 §3.1)"
+                            return 1
+                        fi
+                        for h in $holders; do
+                            if ! _supervision_pid_in_launchd_lineage "$h" "$lpid"; then
+                                GATE_ATTRIBUTION_DETAIL="port-holder $h is OUTSIDE launchd job '$SUPERVISION_UNIT' lineage (job pid $lpid) — a second supervisor is serving"
+                                _warn "attribution [$what]: REFUSED — $GATE_ATTRIBUTION_DETAIL"
+                                return 1
+                            fi
+                        done
+                        ;;
+                esac
+            fi
+            ;;
+        unit)
+            if [ -n "${SUPERVISION_UNIT:-}" ]; then
+                # $holders is newline-joined — pass UNQUOTED so the unit arm
+                # word-splits per holder (F1 council fix: a quoted pass made a
+                # multi-holder host probe /proc/"p1 NL p2"/cgroup and
+                # false-refuse with garbled detail).
+                _gate_attr_unit_lineage "$what" $holders || return 1
+            fi
+            ;;
+    esac
+    return 0
+}
+
+# _gate_attr_unit_lineage <what> <holders...> — the systemd lineage arm
+# (MainPID ∧ unit-cgroup containment — the supervision_dualfight_check
+# Check B grammar, mirrored): holders must BE the unit's MainPID or sit
+# inside the unit's ControlGroup. Tool failure (bounded probe rc 124 /
+# systemctl absent) = unverifiable → loud skip, never evidence; an
+# ANSWERED-but-uncontainable holder is a mismatch → refuse.
+_gate_attr_unit_lineage() {
+    local what="$1"; shift
+    local h main_pid cg pcg rc_main
+    _gate_attr_unit_lineage_out="$(mktemp -t attr.XXXXXX 2>/dev/null || printf '/tmp/attr.%s.out' "$$")"
+    _run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" show "$SUPERVISION_UNIT" -p MainPID --value > "$_gate_attr_unit_lineage_out" 2>/dev/null
+    rc_main=$?
+    main_pid="$(cat "$_gate_attr_unit_lineage_out" 2>/dev/null)"
+    if [ "$rc_main" -ne 0 ] || [ -z "$main_pid" ] || [ "$main_pid" = "0" ]; then
+        rm -f "$_gate_attr_unit_lineage_out" 2>/dev/null
+        _gate_attr_unprobeable "$what" "systemd MainPID unresolvable for '$SUPERVISION_UNIT' (tool/budget/unit state)"
+        return 0
+    fi
+    _run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" show "$SUPERVISION_UNIT" -p ControlGroup --value > "$_gate_attr_unit_lineage_out" 2>/dev/null
+    cg="$(cat "$_gate_attr_unit_lineage_out" 2>/dev/null)"
+    rm -f "$_gate_attr_unit_lineage_out" 2>/dev/null
+    if [ -z "$cg" ] || [ "$cg" = "/" ]; then
+        _gate_attr_unprobeable "$what" "unit '$SUPERVISION_UNIT' ControlGroup unobservable — containment unverifiable"
+        return 0
+    fi
+    for h in "$@"; do
+        [ -n "$h" ] || continue
+        [ "$h" = "$main_pid" ] && continue
+        pcg=""
+        if [ -r "/proc/$h/cgroup" ]; then
+            pcg="$(tail -n 1 "/proc/$h/cgroup" 2>/dev/null)"
+            pcg="${pcg##*:}"
+        fi
+        case "$pcg" in
+            *"$cg"*) ;;
+            *)
+                GATE_ATTRIBUTION_DETAIL="port-holder $h is OUTSIDE unit '$SUPERVISION_UNIT' lineage (MainPID=$main_pid cgroup='${pcg:-<unreadable>}') — a second supervisor is serving"
+                _warn "attribution [$what]: REFUSED — $GATE_ATTRIBUTION_DETAIL"
+                return 1
+                ;;
+        esac
+    done
+    return 0
+}
+
 # gate_livez / gate_readyz — budgeted probes (D2). Print body; nonzero on fail.
-gate_livez()  { _probe "/livez"  "$LIVEZ_BUDGET_S"  "$PORT"; }
-gate_readyz() { _probe "/readyz" "$READYZ_BUDGET_S" "$PORT"; }
+# Fix #2: a green answer is only trusted when the attribution conjunct
+# holds (the SUPERVISED daemon answers — see _gate_serving_attribution).
+gate_livez()  { _probe "/livez"  "$LIVEZ_BUDGET_S"  "$PORT" && _gate_serving_attribution "/livez"; }
+gate_readyz() { _probe "/readyz" "$READYZ_BUDGET_S" "$PORT" && _gate_serving_attribution "/readyz"; }
 
 # gate_version <expected> — one-shot /livez version check (D2/ADR-027: the
 # RUNNING daemon must self-report the manifest's binary_version).
+# Fix #2: version identity is only trusted from the ATTRIBUTED daemon —
+# the conjunct rides the green answer (gate_soak's per-tick version
+# check inherits the attribution from this site).
 gate_version() {
     local expected="$1" body running
     body="$(_probe_once "/livez" "$PORT")"
@@ -7010,6 +8156,7 @@ gate_version() {
         _warn "version verify MISMATCH: running=$running expected=$expected (manifest binary_version)"
         return 1
     fi
+    _gate_serving_attribution "version verify" || return 1
     _log "version verify OK: $running"
     return 0
 }

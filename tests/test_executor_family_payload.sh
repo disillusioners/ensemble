@@ -124,6 +124,20 @@ do
     fi
 done
 
+# Fix #3 (ENSEMBLE-32): the plugin-staleness predicate slice IS a family
+# member — a family list without it stages payloads whose promote refuses
+# FAIL-CLOSED at the staleness gate (incident 2026-11-14 §3.3/§7 defect #3).
+if printf '%s\n' "$FAMILY_PATHS" | grep -qx 'daemon/plugin_subsystem/promote_staleness.py'; then _pass; else
+    _fail "family list carries the plugin-staleness slice" "listed" "absent"
+fi
+
+# the slice projection (daemon_slice_paths) is exactly the non-scripts/ set
+DAEMON_SLICE_PATHS="$(executor_family_daemon_slice_paths)"
+assert_contains "slice projection carries the staleness module" \
+    "daemon/plugin_subsystem/promote_staleness.py" "$DAEMON_SLICE_PATHS"
+_unlisted_scripts="$(printf '%s\n' "$DAEMON_SLICE_PATHS" | grep -c '^scripts/' || true)"
+assert_eq "slice projection carries NO scripts/ member" "0" "$_unlisted_scripts"
+
 # NO PLIST in the family (property, not accident — the plists are operator-side)
 if printf '%s\n' "$FAMILY_PATHS" | grep -q '\.plist$'; then
     _fail "family list carries NO *.plist" "no plist" "plist listed"
@@ -188,6 +202,35 @@ PAYLOAD_STAMP="$(sed -n 's/^PIPELINE_SCRIPTS_REV="\{0,1\}\([0-9A-Za-z._/-]*\)"\{
 assert_eq "payload lib.sh carries the repo's PIPELINE_SCRIPTS_REV" "$REPO_STAMP" "$PAYLOAD_STAMP"
 assert_eq "the stamp is a 40-hex commit sha (the daemon parses it as one)" "40" "${#REPO_STAMP}"
 
+# 2f. Fix #3 (ENSEMBLE-32): the payload carries the plugin-staleness slice
+#     at the EXACT payload-relative path the promote-time gate resolves
+#     (<lib.sh-dir>/../../daemon/plugin_subsystem/promote_staleness.py) —
+#     a release-staged promote runs the predicate from THIS file (incident
+#     §3.3/§7 defect #3: the v0.30.5/v0.30.9 release-staged promotes
+#     refused FAIL-CLOSED without it).
+[ -f "$PAYLOAD/daemon/plugin_subsystem/promote_staleness.py" ] && _pass \
+    || _fail "payload: daemon/plugin_subsystem/promote_staleness.py present (the staleness slice)"
+STALENESS_ENTRY="$(executor_family_staleness_entry_check "$PAYLOAD" 2>&1)" \
+    && _pass || _fail "staleness entry check PASSES on the fixture payload" "rc 0" "$STALENESS_ENTRY"
+# negative leg: a BROKEN module must fail the entry check (fail-closed)
+mkdir -p "$FIXTURE/broken-payload/daemon/plugin_subsystem" \
+         "$FIXTURE/broken-payload/scripts/upgrade"
+cp "$REPO_ROOT/scripts/upgrade/lib.sh" "$FIXTURE/broken-payload/scripts/upgrade/lib.sh"
+printf 'def broken(:\n    syntax error\n' > "$FIXTURE/broken-payload/daemon/plugin_subsystem/promote_staleness.py"
+BROKEN_ENTRY="$(executor_family_staleness_entry_check "$FIXTURE/broken-payload" 2>&1)" \
+    && _fail "staleness entry check REFUSES a broken module" "nonzero rc" "rc 0: $BROKEN_ENTRY" \
+    || _pass
+assert_contains "the broken-module refusal names the fail-closed token" \
+    "plugin-staleness-payload" "$BROKEN_ENTRY"
+# negative leg: a payload MISSING the module must fail with the defect-3 text
+mkdir -p "$FIXTURE/noslice-payload/scripts/upgrade"
+cp "$REPO_ROOT/scripts/upgrade/lib.sh" "$FIXTURE/noslice-payload/scripts/upgrade/lib.sh"
+NOSLICE_ENTRY="$(executor_family_staleness_entry_check "$FIXTURE/noslice-payload" 2>&1)" \
+    && _fail "staleness entry check REFUSES a payload without the slice" "nonzero rc" "rc 0" \
+    || _pass
+assert_contains "the missing-slice refusal names the incident defect" \
+    "defect #3" "$NOSLICE_ENTRY"
+
 # ─── 3. manifest / sha coverage over the SHIPPED set ───────────────────────
 section "manifest coverage over the shipped set"
 LINES="$(executor_family_manifest_lines "$PAYLOAD/scripts")"
@@ -230,6 +273,28 @@ if [ "$(executor_family_tree_hash "$mine")" != "$(_tree_hash_of_lines "$theirs")
 echo "COMPAT"
 ' 2>/dev/null)"
 assert_eq "byte-compatible with lib.sh _tree_manifest/_tree_hash_of_lines" "COMPAT" "$_COMPAT"
+
+# 3e. Fix #3 (ENSEMBLE-32): the daemon/ slice's per-path walker covers the
+#     slice with the same line shape + aggregate algorithm — the slice
+#     manifest must be verifiable exactly like the scripts tree manifest.
+SLICE_PATHS="$(executor_family_daemon_slice_paths)"
+SLICE_LINES="$(executor_family_manifest_lines_for "$PAYLOAD" $SLICE_PATHS)"
+SLICE_HASH="$(executor_family_tree_hash "$SLICE_LINES")"
+assert_eq "the slice tree aggregate is a 64-hex sha256" "64" "${#SLICE_HASH}"
+_bad_slice=""
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    sha="${line%%  *}"; rel="${line#*  }"
+    actual="$(shasum -a 256 "$PAYLOAD/$rel" 2>/dev/null | awk '{print $1}')"
+    [ "$sha" = "$actual" ] || _bad_slice="$_bad_slice $rel"
+done <<EOF
+$SLICE_LINES
+EOF
+assert_eq "every slice sha256 matches the staged bytes" "" "$_bad_slice"
+SLICE_MISSING="$(printf '%s\n' "$SLICE_PATHS" | while IFS= read -r p; do
+    [ -f "$PAYLOAD/$p" ] || echo "$p"
+done)"
+assert_eq "the slice walker fails-closed iff a slice member is missing" "" "$SLICE_MISSING"
 
 # ─── 4. the stamp-coverage gate (truthfulness over the shipped set) ─────────
 # The gate is exercised against a SYNTHETIC git repo (never the live tree):
@@ -319,6 +384,15 @@ assert_contains "stage.sh records the scripts tree aggregate" '"scripts_tree_sha
 assert_contains "stage.sh records the scripts per-file map" '"scripts_manifest"' "$STAGE_SRC"
 assert_contains "stage.sh records the shipped stamp" '"pipeline_scripts_rev"' "$STAGE_SRC"
 assert_contains "stage.sh gates on the stamp covering the shipped set" "executor_family_verify_stamp_coverage" "$STAGE_SRC"
+# Fix #3 (ENSEMBLE-32): the fail-closed staging assertion must be wired
+assert_contains "stage.sh runs the staleness entry check BEFORE signing the manifest" \
+    'executor_family_staleness_entry_check "$STAGE_TMP"' "$STAGE_SRC"
+assert_contains "stage.sh REFUSES (exit 78) when the entry check fails" \
+    "exit 78" "$STAGE_SRC"
+assert_contains "stage.sh records the daemon-slice tree aggregate" '"daemon_slice_tree_sha256"' "$STAGE_SRC"
+assert_contains "stage.sh records the daemon-slice per-file map" '"daemon_slice_manifest"' "$STAGE_SRC"
+assert_contains "stage.sh re-hashes the daemon slice post-stage" \
+    'post-stage daemon-slice tree hash MISMATCH' "$STAGE_SRC"
 
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n========================================\n'

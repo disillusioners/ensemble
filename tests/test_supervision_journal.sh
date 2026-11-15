@@ -280,6 +280,15 @@ _stamp_provenance_for_repo() {
 # stage both releases + seed current=VA (first-promote-equivalent)
 cp "$UPGRADE_DIR/stage.sh" "$FAKE_REPO/scripts/upgrade/stage.sh"
 chmod +x "$FAKE_REPO/scripts/upgrade/stage.sh"
+# seed the family from the ONE authoritative definition (F2 seam)
+. "$UPGRADE_DIR/executor_family.sh"
+while IFS= read -r _family_path; do
+    [ -n "$_family_path" ] || continue
+    mkdir -p "$FAKE_REPO/$(dirname "$_family_path")"
+    cp "$REPO_ROOT/$_family_path" "$FAKE_REPO/$_family_path"
+done < <(executor_family_paths)
+chmod +x "$FAKE_REPO/scripts/upgrade/"*.sh "$FAKE_REPO/scripts/stop-ensemble.sh" \
+    "$FAKE_REPO/scripts/install-dir-guard.sh" 2>/dev/null
 mkdir -p "$SBX"
 run_stage "$VA" "$BIN_A" > "$PROBE/stage-a.log" 2>&1 || {
     echo "FATAL: stage VA failed:"; tail -5 "$PROBE/stage-a.log"

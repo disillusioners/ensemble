@@ -321,6 +321,47 @@ def main() -> None:
     expect("_emit_supervision_boot_advisory" not in run_seg,
            "9f the PERIODIC tick (_run loop) never emits the advisory (no periodic sweep)")
 
+    # 9g (PC-2, ENSEMBLE-32 Family 2; incident 2026-11-14 §5.4 defect #4):
+    # the sweep injects its OWN install dir into the detect env. A
+    # plist-lineage daemon's os.environ historically LACKED INSTALL_DIR (the
+    # plist EnvironmentVariables carries PATH only), so the launchd probe
+    # degraded to LAUNCHD_NOT_VERIFIED on a genuinely supervised boot. The
+    # classification must never depend on os.environ: the service passes
+    # env={"INSTALL_DIR": str(self._install_dir)} (the launcher-side
+    # `export INSTALL_DIR` is the structural fix; this is the second arm —
+    # see launcher.sh main() and upgrade_journal_sweep._emit_supervision_
+    # boot_advisory). The hook is the memo-SEEDING call (the only in-daemon
+    # consumer), so the injected env governs every later consumer too.
+    with tempfile.TemporaryDirectory(prefix="sup-py-pc2.") as td3:
+        inst3 = Path(td3)
+        (inst3 / "releases").mkdir()
+        (inst3 / "releases" / "state.json").write_text(json.dumps({
+            "current": "v1", "previous": None, "in_flight": None,
+            "rollback_window_count": {"24h": 0, "window_start": None},
+            "cooldown_until": None, "quarantined": [], "history": [],
+        }))
+        captured: dict = {}
+
+        def capture_det(env: dict[str, str] | None = None) -> object:
+            captured["env"] = env
+            return uj.SupervisionDetection("SCRIPT")
+
+        uj._supervision_detect_fn = capture_det
+        uj._supervision_reset_memo()
+        try:
+            sweep.UpgradeJournalSweepService(inst3)._emit_supervision_boot_advisory()
+        finally:
+            uj._supervision_detect_fn = uj._supervision_detect_real
+            uj._supervision_reset_memo()
+        env_used = captured.get("env")
+        expect(
+            isinstance(env_used, dict)
+            and env_used is not os.environ
+            and env_used.get("INSTALL_DIR") == str(inst3),
+            "9g the sweep injects INSTALL_DIR=<self._install_dir> into the "
+            "detect env (PC-2: the classification never depends on os.environ)",
+        )
+
     print(f"\n=== ALL PYTHON SUPERVISION PINS PASSED ({PASSED}) ===")
 
 

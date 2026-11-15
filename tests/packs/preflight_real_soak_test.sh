@@ -88,6 +88,16 @@ LOG_TAG=pf-soak
 INSTALL_DIR="$SOAK_INSTALL"; export INSTALL_DIR
 UP_TARGET=sandbox
 PORT="$SOAK_PORT"; export PORT
+# ENSEMBLE-32 Family-2 (Fix #2) attribution seam: the pack's responder is
+# not ensemble-shaped, so the real pid discovery cannot see it and the
+# conjunct inside gate_version would refuse every green tick. Arm the
+# owned set to the responder's ACTUAL listener pid (lsof, the same census
+# the conjunct uses) — the fixture IS this install's daemon by
+# construction (negative-side pins: supervision pack §M).
+_supervision_owned_pids() {
+    lsof -ti:"${PORT:-}" -sTCP:LISTEN 2>/dev/null
+    return 0
+}
 # The budgets the watchdog would use if it were (wrongly) armed here:
 PREFLIGHT_STEP_BUDGET_S=120
 PREFLIGHT_PHASE_BUDGET_S=300

@@ -141,6 +141,13 @@ logger = logging.getLogger(__name__)
 ROLLBACK_CAP_24H = 3            # lib.sh ROLLBACK_CAP_24H
 LOCK_HEARTBEAT_REFRESH_S = 30   # lib.sh LOCK_HEARTBEAT_S
 LOCK_STALE_S = 300              # lib.sh LOCK_STALE_S
+# Fix #6 (2026-11-14 incident §5.5): stale-broken lock siblings
+# (rollback.lock.d.stale.<pid>) older than this are reaped at acquire
+# time. 7d conservative default, env-overridable; mirrors the lib.sh
+# launcher twins (ROLLBACK_LOCK_STALE_PRUNE_S). Garbage env values fall
+# back to the default via _env_int (a garbage bound reading as 0 would
+# reap FRESH siblings — the inverse failure).
+ROLLBACK_LOCK_STALE_PRUNE_S_DEFAULT = 7 * 24 * 60 * 60
 NONCE_TTL_S = 60 * 60           # §4.3 nonce TTL (60min; widened from 15min per user decision 2026-09-30, ADR-036)
 PENDING_OP_EXPIRE_RESTART_S = 30 * 60    # D-FA1.1 restart +30min
 PENDING_OP_EXPIRE_PROMOTE_S = 10 * 60    # D-FA1.1 promote +10min outer window
@@ -1319,6 +1326,79 @@ def _lock_read_file(lock: Path, name: str) -> str:
         return ""
 
 
+# ── Fix #6 (2026-11-14 incident §5.5): stale-sibling reap ──────────────────
+# Every stale-break LEAVES its sibling behind by protocol (mv to
+# rollback.lock.d.stale.<pid>, never rmdir — racy) and nothing removed
+# them; `.stale.1099` / `.stale.92146` accumulated on the live install.
+# The prune rides lock_acquire (all three twins: lib.sh, launcher.sh
+# boot sweep, this module) — the pruner holds the lock, so reaps are
+# serialized against concurrent pipelines.
+
+
+def _rollback_lock_stale_prune_s() -> int:
+    """The age bound for stale-sibling reaping (env-overridable)."""
+    return _env_int("ROLLBACK_LOCK_STALE_PRUNE_S", ROLLBACK_LOCK_STALE_PRUNE_S_DEFAULT)
+
+
+def _prune_stale_lock_siblings(install_dir: Path) -> int:
+    """Age-bounded prune of ``rollback.lock.d.stale.<pid>`` siblings.
+
+    Mirrors the lib.sh ``_lock_prune_stale_siblings`` twin. Rules:
+
+    * ONLY siblings matching ``rollback.lock.d.stale.<digits>`` (the
+      protocol's own mv target; suffix = the breaker's pid). Any other
+      shape is left untouched — an unknown name may be operator evidence.
+    * Reap only when mtime age is STRICTLY greater than
+      ``ROLLBACK_LOCK_STALE_PRUNE_S`` (7d default): at/under the bound
+      SURVIVES (a freshly-broken sibling is crash-forensics the operator
+      may still want).
+    * The LIVE lock is structurally out of reach: the suffix is required.
+    * Best-effort: each failure logs a warning and never raises — a prune
+      failure must never fail the acquisition it piggybacks on.
+
+    Returns the number of siblings reaped (logged per reap).
+    """
+    releases_dir = lock_dir(install_dir).parent
+    if not releases_dir.is_dir():
+        return 0
+    bound_s = _rollback_lock_stale_prune_s()
+    now_epoch = int(time.time())
+    reaped = 0
+    for sibling in sorted(releases_dir.glob("rollback.lock.d.stale.*")):
+        if not re.fullmatch(r"rollback\.lock\.d\.stale\.\d+", sibling.name):
+            continue
+        try:
+            mtime = int(sibling.stat().st_mtime)
+        except OSError:
+            continue  # unmeasurable age ⇒ never prune (fail-closed)
+        age = now_epoch - mtime
+        if age <= bound_s:
+            continue
+        try:
+            if sibling.is_dir() and not sibling.is_symlink():
+                shutil.rmtree(sibling)
+            else:
+                # Protocol siblings are always dirs (mkdir-acquire + mv), but
+                # a stray FILE in the sibling shape is still ancient garbage
+                # in the same namespace — reap it too (rm -rf semantics, the
+                # shell twins' behavior) instead of leaving it forever.
+                sibling.unlink()
+        except OSError as exc:
+            logger.warning(
+                "upgrade_journal: FAILED to reap stale-broken pipeline-lock "
+                "sibling %s (age %ss) — leaving it (%s)",
+                sibling.name, age, exc,
+            )
+            continue
+        reaped += 1
+        logger.info(
+            "upgrade_journal: reaped stale-broken pipeline-lock sibling %s "
+            "(age %ss > bound %ss) — fix #6, incident 2026-11-14 §5.5",
+            sibling.name, age, bound_s,
+        )
+    return reaped
+
+
 def lock_acquire(
     install_dir: Path,
     run_id: str,
@@ -1350,6 +1430,16 @@ def lock_acquire(
             (lock / "owner").write_text(f"{owner_pid}\n", encoding="utf-8")
             (lock / "run_id").write_text(f"{run_id}\n", encoding="utf-8")
             (lock / "heartbeat").write_text(f"{int(time.time())}\n", encoding="utf-8")
+            # Fix #6 (incident 2026-11-14 §5.5): housekeeping rides the
+            # acquire — we hold the lock, so the prune is serialized
+            # against concurrent pipelines. Best-effort, never raises.
+            try:
+                _prune_stale_lock_siblings(install_dir)
+            except Exception:  # noqa: BLE001 — housekeeping must never block the acquire
+                logger.debug(
+                    "upgrade_journal: stale-sibling prune errored (non-fatal)",
+                    exc_info=True,
+                )
             return True, None
 
         hb = _lock_read_file(lock, "heartbeat")

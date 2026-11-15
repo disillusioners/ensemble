@@ -55,6 +55,35 @@
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UPGRADE_DIR="$REPO_ROOT/scripts/upgrade"
 
+# ── fixture seeding helper (the soak_gate_pack_common seam pattern) ──────────
+# The fixture repo must carry the WHOLE executor family — stage.sh SOURCES
+# scripts/upgrade/executor_family.sh and executor_family_install copies every
+# family member FAIL-CLOSED (a missing member aborts staging — the
+# v0.29.16 halt class). Hand-transcribed file lists drift the moment the
+# family grows (the daemon/ plugin-staleness slice, ENSEMBLE-32 Fix #3, was
+# added on latest and stranded 17 assertions here) — so the fixture seeds
+# from executor_family_paths, the ONE authoritative definition, exactly the
+# way tests/helpers/soak_gate_pack_common.sh does it.
+_seed_executor_family() {
+    . "$UPGRADE_DIR/executor_family.sh"
+    while IFS= read -r _family_path; do
+        [ -n "$_family_path" ] || continue
+        _fsrc="$REPO_ROOT/$_family_path"
+        [ -f "$_fsrc" ] || { echo "FAIL: fixture family source missing: $_fsrc" >&2; return 1; }
+        _fdst="$FAKE_REPO/$_family_path"
+        mkdir -p "$(dirname "$_fdst")"
+        cp "$_fsrc" "$_fdst"
+    done < <(executor_family_paths)
+    chmod +x "$FAKE_REPO/scripts/upgrade/"*.sh "$FAKE_REPO/scripts/stop-ensemble.sh" \
+        "$FAKE_REPO/scripts/install-dir-guard.sh" 2>/dev/null
+    # The guideline library is a REQUIRED stage payload on latest (stage.sh
+    # refuses a guidelines-less release — the guideline reader resolves
+    # <exe-dir>/guidelines). Same stub seed the soak fixture uses.
+    mkdir -p "$FAKE_REPO/docs/guidelines"
+    printf 'stub-guideline\n' > "$FAKE_REPO/docs/guidelines/README.md"
+    return 0
+}
+
 PASS=0
 FAIL=0
 FAILED_TESTS=""
@@ -108,13 +137,7 @@ mkdir -p "$FAKE_REPO/scripts/upgrade" "$FAKE_REPO/agents/leader" \
 # it is ever contacted.
 printf 'PORT=4999\n' > "$FAKE_HOME/agents-ensemble/.env"
 
-cp "$UPGRADE_DIR/lib.sh"        "$FAKE_REPO/scripts/upgrade/lib.sh"
-cp "$UPGRADE_DIR/stage.sh"      "$FAKE_REPO/scripts/upgrade/stage.sh"
-cp "$UPGRADE_DIR/promote.sh"    "$FAKE_REPO/scripts/upgrade/promote.sh"
-cp "$UPGRADE_DIR/rollback.sh"   "$FAKE_REPO/scripts/upgrade/rollback.sh"
-cp "$UPGRADE_DIR/status.sh"     "$FAKE_REPO/scripts/upgrade/status.sh"
-cp "$REPO_ROOT/scripts/stop-ensemble.sh" "$FAKE_REPO/scripts/stop-ensemble.sh"
-chmod +x "$FAKE_REPO/scripts/upgrade/"*.sh
+_seed_executor_family
 
 # Stub payloads — agents + frontend (the other staged trees).
 printf '#!/bin/bash\n# stub launcher (unit fixture)\n' > "$FAKE_REPO/launcher.sh"
@@ -159,13 +182,7 @@ _reset_fixture_repo() {
              "$FAKE_REPO/daemon/migrations/versions" \
              "$FAKE_REPO/frontend/dist/frontend/browser" \
              "$FAKE_REPO/plugins/opendesign" "$FAKE_REPO/plugins/aux_plugin"
-    cp "$UPGRADE_DIR/lib.sh"        "$FAKE_REPO/scripts/upgrade/lib.sh"
-    cp "$UPGRADE_DIR/stage.sh"      "$FAKE_REPO/scripts/upgrade/stage.sh"
-    cp "$UPGRADE_DIR/promote.sh"    "$FAKE_REPO/scripts/upgrade/promote.sh"
-    cp "$UPGRADE_DIR/rollback.sh"   "$FAKE_REPO/scripts/upgrade/rollback.sh"
-    cp "$UPGRADE_DIR/status.sh"     "$FAKE_REPO/scripts/upgrade/status.sh"
-    cp "$REPO_ROOT/scripts/stop-ensemble.sh" "$FAKE_REPO/scripts/stop-ensemble.sh"
-    chmod +x "$FAKE_REPO/scripts/upgrade/"*.sh
+    _seed_executor_family
     printf '#!/bin/bash\n# stub launcher (unit fixture)\n' > "$FAKE_REPO/launcher.sh"
     printf 'stub-agent-definition\n' > "$FAKE_REPO/agents/leader/soul.md"
     printf 'port: ${PORT:-8088}\n' > "$FAKE_REPO/config.yaml"
@@ -185,10 +202,34 @@ _reset_fixture_repo() {
     git -C "$FAKE_REPO" add -A 2>/dev/null
     git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -q -m fixture
     SBX_V1="v1.0.0-plugins"
-    git -C "$FAKE_REPO" tag "$SBX_V1"
+    _pin_provenance_and_tag "$SBX_V1"
     if [ "$mode" = "with-latest" ]; then
         git -C "$FAKE_REPO" branch latest
     fi
+}
+
+# Helper: _pin_provenance_and_tag <tag> — pin the fixture's provenance
+# constants to the fixture's OWN HEAD, then tag it. The W-2 release gate
+# requires PIPELINE_SCRIPTS_REV to be a 40-hex commit this tree CONTAINS
+# and to equal PIPELINE_SCRIPTS_FLOOR_COMMIT (D6-8), and — since D3 — to
+# COVER the whole shipped family. The fixture repo is SYNTHETIC (the real
+# stamp commit is not in its object store), so both constants are pinned to
+# the fixture's first commit — the same shape the real release bump
+# produces (the release_journal + guidelines fixtures pin the same way).
+_pin_provenance_and_tag() {
+    local tag="$1" _stamp
+    _stamp="$(git -C "$FAKE_REPO" rev-parse HEAD)"
+    sed -i.bak "s/^PIPELINE_SCRIPTS_REV=.*/PIPELINE_SCRIPTS_REV=$_stamp/" \
+        "$FAKE_REPO/scripts/upgrade/lib.sh"
+    rm -f "$FAKE_REPO/scripts/upgrade/lib.sh.bak"
+    mkdir -p "$FAKE_REPO/daemon/tools"
+    cat > "$FAKE_REPO/daemon/tools/upgrade_tools.py" <<EOFUP
+# fixture stub — only the D3 release-time floor constant is read by stage.sh
+PIPELINE_SCRIPTS_FLOOR_COMMIT = "$_stamp"
+EOFUP
+    git -C "$FAKE_REPO" add -A 2>/dev/null
+    git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -q -m "pin fixture stamp/floor"
+    git -C "$FAKE_REPO" tag -f "$tag" >/dev/null 2>&1
 }
 
 # Helper: _stamp_fresh — re-stamp the stub binary's provenance to match
@@ -285,6 +326,53 @@ else _fail "(i) plugins_manifest per-file map matches the staged tree" \
     "$(printf '%s' "$map_lines" | head -3)..."
 fi
 
+# ─── 2bis. Fix #3 (ENSEMBLE-32): the daemon/ plugin-staleness SLICE ─────────
+# The staged payload must carry daemon/plugin_subsystem/promote_staleness.py
+# (the promote-time staleness gate resolves
+# <scripts/upgrade>/../../daemon/... INSIDE the release) and the manifest
+# must put the slice under the same integrity contract
+# (daemon_slice_tree_sha256 + daemon_slice_manifest).
+section "(i-bis) staged payload carries the plugin-staleness slice + manifest contract"
+[ -f "$SBX/releases/$SBX_V1/daemon/plugin_subsystem/promote_staleness.py" ] && _pass \
+    || _fail "(i-bis) staged release carries daemon/plugin_subsystem/promote_staleness.py"
+assert_contains "(i-bis) manifest declares daemon_slice_tree_sha256" \
+    "daemon_slice_tree_sha256" "$manifest"
+assert_contains "(i-bis) manifest declares daemon_slice_manifest" \
+    "daemon_slice_manifest" "$manifest"
+# the slice map covers the slice file with the right sha
+slice_map_sha="$(python3 -c '
+import json, sys
+m = json.load(open(sys.argv[1]))
+print(m.get("daemon_slice_manifest", {}).get("daemon/plugin_subsystem/promote_staleness.py", "MISSING"))
+' "$SBX/releases/$SBX_V1/manifest.json" 2>/dev/null)"
+slice_disk_sha="$(shasum -a 256 "$SBX/releases/$SBX_V1/daemon/plugin_subsystem/promote_staleness.py" 2>/dev/null | awk '{print $1}')"
+assert_eq "(i-bis) daemon_slice_manifest sha matches the staged slice bytes" \
+    "$slice_disk_sha" "$slice_map_sha"
+
+# ─── 2ter. Fix #3: the FAIL-CLOSED staging assertion ────────────────────────
+# A fixture whose staged predicate module is BROKEN (syntax error) must be
+# REFUSED by stage.sh (exit 78) — a payload whose own staleness predicate
+# cannot run would refuse FAIL-CLOSED at promote (the v0.30.5/v0.30.9
+# release-staged halt shape, incident §3.3/§7 defect #3). Never a warning.
+section "(i-ter) broken staleness module → stage refuses exit 78"
+_reset_fixture_repo
+printf 'def broken(:\n    syntax error\n' > \
+    "$FAKE_REPO/daemon/plugin_subsystem/promote_staleness.py"
+git -C "$FAKE_REPO" add -A 2>/dev/null
+git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -q -m "broken-slice" 2>/dev/null
+_pin_provenance_and_tag "$SBX_V1"
+BROKEN_SBX="$FIXTURE/broken-slice-sbx"
+mkdir -p "$BROKEN_SBX"
+_stamp_fresh
+out="$(HOME="$FAKE_HOME" TARGET=sandbox INSTALL_DIR="$BROKEN_SBX" PORT="$SBX_PORT" \
+    VERSION="$SBX_V1" bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox \
+    --skip-build "$FIXTURE/stub-prod" 2>&1)"; rc=$?
+assert_eq "(i-ter) stage with a BROKEN staleness module → exit 78" "78" "$rc"
+assert_contains "(i-ter) the refusal names the fail-closed assertion" \
+    "plugin-staleness-payload" "$out"
+[ ! -d "$BROKEN_SBX/releases/$SBX_V1" ] && _pass \
+    || _fail "(i-ter) no release dir created on the entry-check refusal"
+
 # ─── 3. (ii) missing plugins/ source → exit 78 ────────────────────────────
 section "(ii) missing plugins/ source → exit 78"
 # Remove the plugins/ dir AFTER the commit so the working tree differs
@@ -297,13 +385,7 @@ rm -rf "$FAKE_REPO"
 mkdir -p "$FAKE_REPO/scripts/upgrade" "$FAKE_REPO/agents/leader" \
          "$FAKE_REPO/daemon/migrations/versions" \
          "$FAKE_REPO/frontend/dist/frontend/browser"   # NOTE: NO plugins/
-cp "$UPGRADE_DIR/lib.sh"        "$FAKE_REPO/scripts/upgrade/lib.sh"
-cp "$UPGRADE_DIR/stage.sh"      "$FAKE_REPO/scripts/upgrade/stage.sh"
-cp "$UPGRADE_DIR/promote.sh"    "$FAKE_REPO/scripts/upgrade/promote.sh"
-cp "$UPGRADE_DIR/rollback.sh"   "$FAKE_REPO/scripts/upgrade/rollback.sh"
-cp "$UPGRADE_DIR/status.sh"     "$FAKE_REPO/scripts/upgrade/status.sh"
-cp "$REPO_ROOT/scripts/stop-ensemble.sh" "$FAKE_REPO/scripts/stop-ensemble.sh"
-chmod +x "$FAKE_REPO/scripts/upgrade/"*.sh
+_seed_executor_family
 printf '#!/bin/bash\n# stub launcher (unit fixture)\n' > "$FAKE_REPO/launcher.sh"
 printf 'stub-agent-definition\n' > "$FAKE_REPO/agents/leader/soul.md"
 printf 'port: ${PORT:-8088}\n' > "$FAKE_REPO/config.yaml"
@@ -398,13 +480,7 @@ rm -rf "$FAKE_REPO"
 mkdir -p "$FAKE_REPO/scripts/upgrade" "$FAKE_REPO/agents/leader" \
          "$FAKE_REPO/daemon/migrations/versions" \
          "$FAKE_REPO/frontend/dist/frontend/browser"   # NOTE: NO plugins/
-cp "$UPGRADE_DIR/lib.sh"        "$FAKE_REPO/scripts/upgrade/lib.sh"
-cp "$UPGRADE_DIR/stage.sh"      "$FAKE_REPO/scripts/upgrade/stage.sh"
-cp "$UPGRADE_DIR/promote.sh"    "$FAKE_REPO/scripts/upgrade/promote.sh"
-cp "$UPGRADE_DIR/rollback.sh"   "$FAKE_REPO/scripts/upgrade/rollback.sh"
-cp "$UPGRADE_DIR/status.sh"     "$FAKE_REPO/scripts/upgrade/status.sh"
-cp "$REPO_ROOT/scripts/stop-ensemble.sh" "$FAKE_REPO/scripts/stop-ensemble.sh"
-chmod +x "$FAKE_REPO/scripts/upgrade/"*.sh
+_seed_executor_family
 printf '#!/bin/bash\n# stub launcher (unit fixture)\n' > "$FAKE_REPO/launcher.sh"
 printf 'stub-agent-definition\n' > "$FAKE_REPO/agents/leader/soul.md"
 printf 'port: ${PORT:-8088}\n' > "$FAKE_REPO/config.yaml"

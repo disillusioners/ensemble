@@ -400,6 +400,28 @@ fi
 rm -rf "$WORK"
 
 # ===========================================================================
+# section D — PC-2 (ENSEMBLE-32 Family 2; incident 2026-11-14 §5.4 #4):
+# INSTALL_DIR must reach BOTH supervision twins WITHOUT os.environ. The
+# plist-lineage daemon's env carries PATH only, so the launcher EXPORTS the
+# resolved dir (the launcher is that lineage's env source) and the sweep
+# service passes its own install dir into the python detect path. The
+# python arm's FUNCTIONAL pin is 9g in tests/unit/tools/test_supervision_
+# python.py (drives the real injection); these are the shell-side
+# constant-pins from the definition sites (a launcher-launch harness would
+# drag the whole launcher suite here for a bash-inheritance fact).
+LAUNCHER_SRC="$(cat "$REPO_ROOT/launcher.sh")"
+assert_eq "D1 launcher.sh EXPORTS the resolved INSTALL_DIR (PC-2 shell twin)" \
+          "found" \
+          "$(printf '%s' "$LAUNCHER_SRC" | grep -Eq '^[[:space:]]*export INSTALL_DIR[[:space:]]*$' && printf found || printf missing)"
+SWEEP_SRC="$(cat "$REPO_ROOT/daemon/services/upgrade_journal_sweep.py")"
+assert_eq "D2 the sweep injects INSTALL_DIR into the detect env (PC-2 python twin)" \
+          "found" \
+          "$(printf '%s' "$SWEEP_SRC" | grep -qF 'env["INSTALL_DIR"] = str(self._install_dir)' && printf found || printf missing)"
+assert_eq "D2b the detect call consumes the injected env (memo-seeding call)" \
+          "found" \
+          "$(printf '%s' "$SWEEP_SRC" | grep -qF 'uj.supervision_detect(env)' && printf found || printf missing)"
+
+# ===========================================================================
 section "summary"
 printf 'PASS=%s FAIL=%s\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then

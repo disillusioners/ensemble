@@ -386,6 +386,163 @@ _expect_resolved "$TMP_E/j4.txt" 601 "P4(j4): explicit WAIT_S=601 (above cap) mu
 
 rm -rf "$TMP_D" "$TMP_E" 2>/dev/null
 
+# ─── 8. MAJOR #3 (review round 2) — daemon-never-excluded stop sweep ───────
+# The in-tree ancestor walk + the blanket $PPID collection skip DROPPED THE
+# DAEMON when the sweep ran inside its tree: classified → filtered →
+# nothing signalled → "is stopped" exit 0 while the daemon lived
+# (reproduced live before the fix: sweep as the daemon's grandchild,
+# "self-exclusion: pid <daemon> …", DRY_RUN would-signal count 0). Shipped
+# shape: executor-identity-only exclusion ($$/$PPID) hard-guarded by the
+# never-exclude-the-TARGET rule — a sweep candidate is signalled even when
+# it is literally $PPID or $PPID's parent. The release_journal 16d TERM pin
+# (sweep runs in the launchd job's group in-tree) is the standing regression
+# guard for the group-based variant of this class.
+TMP_C="$(mktemp -d /tmp/ae-ownertest-C.XXXXXX)"
+CLEANUP_DIRS="$CLEANUP_DIRS $TMP_C"
+export STOP_SCRIPT   # the fake-daemon heredocs are quoted — the daemon resolves the sweep path from the ENV
+D2_PID="" ; D3_PID=""
+m3_cleanup() {
+    [ -n "$D2_PID" ] && kill -9 "$D2_PID" 2>/dev/null
+    [ -n "$D3_PID" ] && kill -9 "$D3_PID" 2>/dev/null
+    # the KILL -9 bypasses the daemon's TERM-forward trap: reap the orphaned
+    # listener children by port so the scratch mirrors never leak.
+    local _lp
+    for _lp in 19131 19132; do
+        local _pids
+        _pids="$(lsof -ti:"$_lp" 2>/dev/null)"
+        [ -n "$_pids" ] && kill -9 $_pids 2>/dev/null
+    done
+    return 0
+}
+# m3_wait_port_free <port> — an earlier leg's leaked listener (KILL -9
+# bypasses the forward trap; the reaper races the bind) must not fail the
+# next leg's startup: kill any holder, then wait until truly free.
+m3_wait_port_free() {
+    local _p="$1" _lp i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        _lp="$(lsof -ti:"$_p" 2>/dev/null)"
+        [ -n "$_lp" ] && kill -9 $_lp 2>/dev/null
+        lsof -ti:"$_p" >/dev/null 2>&1 || return 0
+        sleep 0.5
+    done
+    return 0
+}
+cat > "$TMP_C/ensemble-prod" <<'EOF'
+#!/bin/bash
+CHILD=""
+trap '[ -n "$CHILD" ] && kill "$CHILD" 2>/dev/null; exit 0' TERM INT
+python3 -m http.server "$LISTEN_PORT" --bind 127.0.0.1 >/dev/null 2>&1 &
+CHILD=$!
+# S1 shape: spawn the SWEEP from a grandchild shell (sweep.PPID.parent = US)
+if [ "$SPAWN_SWEEP" = "1" ]; then
+    bash -c "DRY_RUN=1 WAIT_S=3 bash '$STOP_SCRIPT' '$(pwd)' > '$(pwd)/s1.log' 2>&1" &
+fi
+wait "$CHILD"
+EOF
+chmod +x "$TMP_C/ensemble-prod"
+
+echo "== S1: sweep runs as the daemon's GRANDCHILD — the daemon must still be signalled =="
+m3_wait_port_free 19131
+( cd "$TMP_C" && LISTEN_PORT=19131 SPAWN_SWEEP=1 exec ./ensemble-prod ) >/dev/null 2>&1 &
+D2_PID=$!
+sleep 1.5
+alive "$D2_PID" || { echo "S1 fake daemon died immediately" >&2; exit 2; }
+for _ in 1 2 3 4 5 6 7 8; do
+    grep -q "would signal $D2_PID" "$TMP_C/s1.log" 2>/dev/null && break
+    sleep 0.5
+done
+if grep -q "would signal $D2_PID" "$TMP_C/s1.log" 2>/dev/null; then
+    _pass
+else
+    _fail "S1: the daemon (grandparent of the sweep, pid $D2_PID) was NOT selected — the ancestor exclusion dropped the TARGET again"
+fi
+# NOTE: the never-exclude GUARD line cannot fire in the S1 shape — the
+# sweep's executor identity ($$/$PPID = the sweep + the child shell) is NOT
+# a candidate there, so there is nothing to guard. The guard's live shape
+# (identity == target) is exercised by S2 (sweep's PPID IS the daemon) and
+# asserted on S2's log.
+grep -q "is stopped" "$TMP_C/s1.log" 2>/dev/null && _pass || _fail "S1: DRY_RUN plan did not complete"
+kill -9 "$D2_PID" 2>/dev/null; wait "$D2_PID" 2>/dev/null; D2_PID=""
+
+echo "== S2: sweep spawned DIRECTLY by the daemon (PPID = daemon) — the daemon must die for real =="
+cat > "$TMP_C/ensemble-prod" <<'EOF'
+#!/bin/bash
+CHILD=""
+trap '[ -n "$CHILD" ] && kill "$CHILD" 2>/dev/null; exit 0' TERM INT
+python3 -m http.server "$LISTEN_PORT" --bind 127.0.0.1 >/dev/null 2>&1 &
+CHILD=$!
+# S2 shape: the sweep IS this daemon's direct child (PPID = the daemon).
+# The rc is written by the ORPHANED sweep (the daemon gets TERMed by the
+# sweep and exits via its trap — it cannot write its own stop's rc).
+if [ "$SPAWN_SWEEP" = "1" ]; then
+    bash -c 'WAIT_S=6 bash "$0" "$1" > "$2" 2>&1; echo "sweep-rc=$?" > "$3"' \
+        "$STOP_SCRIPT" "$(pwd)" "$(pwd)/s2.log" "$(pwd)/s2.rc" &
+fi
+wait "$CHILD"
+EOF
+chmod +x "$TMP_C/ensemble-prod"
+m3_wait_port_free 19132
+( cd "$TMP_C" && LISTEN_PORT=19132 SPAWN_SWEEP=1 exec ./ensemble-prod ) >/dev/null 2>&1 &
+D3_PID=$!
+# NOTE: no startup-liveness gate here — unlike S1 (DRY_RUN), the S2 sweep
+# is REAL and TERMs the daemon within seconds; a dead daemon at +1.5s IS
+# the leg's success shape. Completion is judged by the sweep's rc marker.
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -f "$TMP_C/s2.rc" ] && break
+    sleep 0.5
+done
+S2_RC="$(cat "$TMP_C/s2.rc" 2>/dev/null | tr -dc '0-9')"
+[ "$S2_RC" = "0" ] && _pass || _fail "S2: the daemon-spawned sweep exited '$S2_RC' (want 0 — the daemon WAS a target and must be stopped)"
+grep -q "SIGTERM $D3_PID" "$TMP_C/s2.log" 2>/dev/null && _pass || _fail "S2: the daemon (pid $D3_PID) was not TERMed by the sweep"
+
+# S2b — the never-exclude GUARD's exact live shape: the sweep spawned as
+# the daemon's DIRECT child (PPID = the daemon = a sweep candidate) under
+# DRY_RUN — the guard must fire ("identity == target ⇒ the target wins")
+# and the plan must include the daemon pid. The daemon SURVIVES (DRY_RUN).
+cat > "$TMP_C/ensemble-prod" <<'EOF'
+#!/bin/bash
+CHILD=""
+trap '[ -n "$CHILD" ] && kill "$CHILD" 2>/dev/null; exit 0' TERM INT
+python3 -m http.server "$LISTEN_PORT" --bind 127.0.0.1 >/dev/null 2>&1 &
+CHILD=$!
+# S2b shape: DIRECT child (no wrapper) — sweep.PPID = this daemon
+if [ "$SPAWN_SWEEP" = "1" ]; then
+    DRY_RUN=1 WAIT_S=3 bash "$STOP_SCRIPT" "$(pwd)" > "$(pwd)/s2b.log" 2>&1 &
+fi
+wait "$CHILD"
+EOF
+chmod +x "$TMP_C/ensemble-prod"
+m3_wait_port_free 19132
+( cd "$TMP_C" && LISTEN_PORT=19132 SPAWN_SWEEP=1 exec ./ensemble-prod ) >/dev/null 2>&1 &
+D3B_PID=$!
+sleep 1.5
+alive "$D3B_PID" || { echo "S2b fake daemon died immediately (DRY_RUN must not signal)" >&2; exit 2; }
+for _ in 1 2 3 4 5 6 7 8; do
+    grep -q "would signal $D3B_PID" "$TMP_C/s2b.log" 2>/dev/null && break
+    sleep 0.5
+done
+grep -q "never-exclude guard" "$TMP_C/s2b.log" 2>/dev/null \
+    && _pass \
+    || _fail "S2b: the never-exclude-the-TARGET guard did not fire for the daemon-as-PPID candidate"
+grep -q "would signal $D3B_PID" "$TMP_C/s2b.log" 2>/dev/null \
+    && _pass \
+    || _fail "S2b: the daemon (sweep's PPID, pid $D3B_PID) was not in the stop plan"
+alive "$D3B_PID" && _pass || _fail "S2b: the daemon died under DRY_RUN (something signalled for real)"
+kill -9 "$D3B_PID" 2>/dev/null; wait "$D3B_PID" 2>/dev/null; D3B_PID=""
+m3_cleanup
+S2_DEAD=0
+for _ in 1 2 3 4 5; do
+    alive "$D3_PID" || { S2_DEAD=1; break; }
+    sleep 0.5
+done
+if [ "$S2_DEAD" = "1" ]; then
+    _pass
+else
+    _fail "S2: the daemon (sweep's PPID, pid $D3_PID) SURVIVED its own stop sweep — the daemon-drop is back"
+fi
+kill -9 "$D3_PID" 2>/dev/null; wait "$D3_PID" 2>/dev/null; D3_PID=""
+m3_cleanup
+
 # ─── summary ────────────────────────────────────────────────────────────────
 echo
 echo "========================================"

@@ -2,13 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   ============================================================================
-  ensemble-watchdog-watcher.plist — launchd AGENT (not daemon) for the
+  com.ensemble.watchdog.plist — launchd AGENT (not daemon) for the
   watchdog-watcher (Auto-Restart Phase 1, plan §4.6 m3 / §6 row
   "Watchdog (supervisor) dies").
 
   This is a REPO TEMPLATE, not an installed file. It contains literal
   INSTALL_DIR_PLACEHOLDER tokens (same convention as
-  scripts/ensemble-prod.plist). `make watchdog-install` stages it with
+  scripts/com.ensemble.prod.plist). `make watchdog-install` stages it with
   the real path substituted and copies it to ~/Library/LaunchAgents —
   the printed launchctl bootstrap command activates it.
 
@@ -20,7 +20,7 @@
   construction (launchd runs it regardless of the daemon job's state).
 
   Division of labor:
-    launchd job (ensemble-prod.plist) — supervises the launcher/daemon.
+    launchd job (com.ensemble.prod.plist) — supervises the launcher/daemon.
     THIS agent — every 300s, probes ONLY /livez (never /readyz —
     readiness never triggers action, ADR-003) and notifies via macOS
     Notification Center when the daemon has been absent >600s. It
@@ -34,7 +34,12 @@
 
   DEMO USAGE (3-env topology): duplicate with Label
   com.ensemble.watchdog.demo and the demo INSTALL_DIR — the port comes
-  from each install's staged .env (nothing to edit here; ADR-014).
+  from each install's staged .env (nothing to edit here; ADR-014). The
+  plist FILE name must be label-verbatim
+  (com.ensemble.watchdog.demo.plist — filename == job label is a
+  pipeline invariant since the 2026-11-14 hand-back halt, §7b of
+  docs/incidents/2026-11-14-macos-launchd-handback-halt.md; the
+  hand-back resolver derives the fallback path from the label).
 
   INSTALL_DIR is REQUIRED and passed EXPLICITLY in ProgramArguments —
   watchdog-watcher.sh is explicit-only (no default anywhere, promotion

@@ -2,13 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   ============================================================================
-  ensemble-prod.plist — launchd supervisor for the Ensemble daemon
+  com.ensemble.prod.plist — launchd supervisor for the Ensemble daemon
   (Auto-Restart Phase 1, ADR-001/002/008/010/014)
   ============================================================================
   This is a REPO TEMPLATE, not an installed file. It contains literal
   INSTALL_DIR_PLACEHOLDER tokens because the plist cannot know the install
   directory at repo time. `make install` stages it with the real path
-  sed'd in (INSTALL_DIR/data/ensemble-prod.plist). `make plist-install`
+  sed'd in (INSTALL_DIR/data/com.ensemble.prod.plist). `make plist-install`
   copies the staged plist to ~/Library/LaunchAgents and prints the
   launchctl bootstrap command.
 
@@ -21,6 +21,15 @@
                        the port source)
     INSTALL_DIR        ~/agents-ensemble-demo   (the placeholder you
                        substitute; logs land in its data/launcher.log)
+  LABEL-VERBATIM FILENAME (pipeline invariant, 2026-11-14 hand-back halt
+  §7b — docs/incidents/2026-11-14-macos-launchd-handback-halt.md): the
+  plist FILE name must equal the job label. The demo job above installs
+  as ~/Library/LaunchAgents/com.ensemble.demo.plist — NOT the legacy
+  ensemble-demo.plist name. If the host still carries the mis-named
+  legacy file, it must be OPERATOR-renamed (launchctl bootout the old
+  job, mv the file, re-bootstrap from the new name); a filename ≠ label
+  plist breaks the promote hand-back's plist resolution and halts
+  fail-safe after every flip.
   Phase 1 ships this ONE template — `make install`'s sed-in path stays
   LIVE-ONLY for now; when demo moves under launchd, duplicate this file
   with the three edits above (a make plist-demo generator is trivial but

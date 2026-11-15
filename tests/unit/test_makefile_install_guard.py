@@ -1824,7 +1824,7 @@ class TestHostLaunchdInstallRequiresLive:
         )
         assert not self._launch_agents(fake_home).exists()
         assert not (
-            self._launch_agents(fake_home) / "ensemble-prod.plist"
+            self._launch_agents(fake_home) / "com.ensemble.prod.plist"
         ).exists()
 
     def test_watchdog_install_refuses_sandbox_and_writes_no_launchd_unit(
@@ -1844,7 +1844,7 @@ class TestHostLaunchdInstallRequiresLive:
         )
         assert not self._launch_agents(fake_home).exists()
         assert not (
-            self._launch_agents(fake_home) / "ensemble-watchdog-watcher.plist"
+            self._launch_agents(fake_home) / "com.ensemble.watchdog.plist"
         ).exists()
 
     def test_demo_dir_is_not_opened_by_the_demo_confirm(self, fake_home):
@@ -1914,14 +1914,14 @@ class TestHostLaunchdInstallRequiresLive:
         the FAKE home's LaunchAgents (tmp — never the real host)."""
         live = make_live_shaped(fake_home)
         (live / "data").mkdir()
-        (live / "data" / "ensemble-prod.plist").write_text("<plist/>\n")
+        (live / "data" / "com.ensemble.prod.plist").write_text("<plist/>\n")
         r = run_make(
             ["plist-install", f"INSTALL_DIR={live}"],
             fake_home,
             extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
         )
         assert r.returncode == 0, r.stderr
-        installed = self._launch_agents(fake_home) / "ensemble-prod.plist"
+        installed = self._launch_agents(fake_home) / "com.ensemble.prod.plist"
         assert installed.exists()
         assert installed.read_text() == "<plist/>\n"
 
@@ -1929,14 +1929,14 @@ class TestHostLaunchdInstallRequiresLive:
         """SUCCESS arm for the watchdog agent (fake home only)."""
         live = make_live_shaped(fake_home)
         (live / "data").mkdir()
-        (live / "data" / "ensemble-watchdog-watcher.plist").write_text("<plist/>\n")
+        (live / "data" / "com.ensemble.watchdog.plist").write_text("<plist/>\n")
         r = run_make(
             ["watchdog-install", f"INSTALL_DIR={live}"],
             fake_home,
             extra_env={"ENSEMBLE_INSTALL_LIVE": "1"},
         )
         assert r.returncode == 0, r.stderr
-        installed = self._launch_agents(fake_home) / "ensemble-watchdog-watcher.plist"
+        installed = self._launch_agents(fake_home) / "com.ensemble.watchdog.plist"
         assert installed.exists()
         assert installed.read_text() == "<plist/>\n"
 
