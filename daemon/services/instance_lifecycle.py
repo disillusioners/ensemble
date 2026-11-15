@@ -52,6 +52,7 @@ from zoneinfo import ZoneInfo
 
 from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy import Integer, bindparam, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
 from ..cancellation import CancellationReason
@@ -66,6 +67,8 @@ from ..repositories.instance.models import Instance, InstanceHierarchy, Instance
 from ..repositories.job_queue.models import AdmissionState
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
 from ..repositories.task.models import SuspensionReason, Task, TaskStatus
+from ..repositories.room import membership as room_membership
+from ..repositories.room.membership import RoomJoinSpec
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .pool_orchestrator import safe_notify_all_pools
@@ -790,6 +793,12 @@ class _SpawnResult(NamedTuple):
     ``created_at`` is captured from the row before commit so the async
     caller can include it in the ``stream_instance_created`` SSE event
     (the instance is detached after the session closes).
+
+    P2 room-join additions: ``room_id`` / ``member_name`` carry the
+    committed membership outcome (``member_name`` is the FINAL
+    tier-4-suffixed per-room name resolved inside the transaction) so
+    the spawn tool can surface the final name without a second
+    round-trip; both are ``None`` on the legacy path.
     """
 
     created: bool
@@ -798,6 +807,8 @@ class _SpawnResult(NamedTuple):
     project_id: str | None
     created_at: str | None
     inherited_source: bool  # True if we set ``original_source`` from parent
+    room_id: str | None = None
+    member_name: str | None = None
 
 
 class _CascadeUpdateResult(NamedTuple):
@@ -1810,6 +1821,7 @@ class InstanceLifecycleService:
         model: str | None = None,
         version_tag: str | None = None,
         source_type: str | None = None,
+        room_join: RoomJoinSpec | None = None,
     ) -> tuple[str, str | None]:
         """Create a new agent instance.
 
@@ -1843,6 +1855,19 @@ class InstanceLifecycleService:
                 so :func:`append_platform_context` can inject platform-specific
                 formatting rules into the system prompt. Silently skipped for
                 unknown source_types and child instances.
+            room_join: Optional P2 room-join spec (agent group chat D-S3).
+                When present, the ``chatroom_members`` row is inserted
+                INSIDE ``_spawn_instance_db_sync``'s ``WriteGuardSession``
+                transaction — the membership row + the instance's
+                ``join_room``/``member_name`` JSONB metadata keys commit in
+                ONE transaction (the P2 exit criterion). The FINAL
+                (tier-4-suffixed) name is resolved inside that same
+                transaction via the per-room suffix registry and flows back
+                on ``_SpawnResult.member_name``. Admission MUST already be
+                validated by the caller (``RoomChatService.validate_room_join``)
+                and the per-room lock MUST be held across this call — this
+                layer performs no admission of its own (fail at the tool
+                layer, before any row exists).
 
         Returns:
             A ``(instance_id, validated_model_override)`` tuple where
@@ -2457,7 +2482,22 @@ class InstanceLifecycleService:
             parent_id=parent_id,
             project_id=project_id,
             instance_metadata=instance_metadata,
+            room_join=room_join,
         )
+
+        if room_join is not None and spawn_result.member_name:
+            # P2 join observability — ONE content-free line; the
+            # room_join event itself is emitted by the room layer's
+            # own lanes (P3 delivery), the spawn line is spawn-scoped.
+            logger.info(
+                "spawn room join: room=%s instance=%s member_name=%s "
+                "role=%s tier=%s",
+                spawn_result.room_id,
+                instance_id,
+                spawn_result.member_name,
+                room_join.role,
+                room_join.tier,
+            )
 
         if spawn_result.inherited_source:
             logger.info(
@@ -5553,6 +5593,7 @@ class InstanceLifecycleService:
         parent_id: str | None,
         project_id: str | None,
         instance_metadata: dict[str, Any],
+        room_join: RoomJoinSpec | None = None,
     ) -> _SpawnResult:
         """Sync DB half of ``spawn_instance`` (M8 fix).
 
@@ -5611,6 +5652,31 @@ class InstanceLifecycleService:
             if inherited_source and "original_source" not in effective_metadata:
                 effective_metadata["original_source"] = inherited_source
 
+            # ── P2 room join (agent group chat, D-S3) ── the suffix
+            # registry runs INSIDE this transaction so the FINAL
+            # per-room name lands in BOTH the membership row and the
+            # instance JSONB from one commit ("membership row + JSONB
+            # in one tx" — the P2 exit criterion). The per-room lock
+            # is held by the tool across the whole spawn call; the
+            # UNIQUE(room_id, member_name) backstop catches anything
+            # the lock cannot see (MemberNameCollisionError).
+            join_room_id = room_join.room_id if room_join is not None else None
+            member_final_name: str | None = None
+            if room_join is not None:
+                effective_metadata["join_room"] = join_room_id
+                member_final_name = room_membership.join_room_in_session(
+                    session,
+                    room_id=room_join.room_id,
+                    instance_id=instance_id,
+                    base_name=room_join.base_name,
+                    role=room_join.role,
+                    agent_id=room_join.agent_id or resolved_agent_id,
+                ).member_name
+                # The instance KNOWS ITS OWN NAME (Ruling B): the
+                # final per-room name rides the JSONB alongside the
+                # room id (additive keys — zero migration).
+                effective_metadata["member_name"] = member_final_name
+
             # Step 2: INSERT INTO instances. Use the ORM ``add`` so the
             # SQLModel ``version_id_col`` machinery auto-emits the
             # initial version=1 — matches the pre-fix behavior.
@@ -5648,7 +5714,38 @@ status=InstanceStatus.IDLE.value,
             # patch a single key atomically post-insert, use the
             # existing ``set_metadata`` repository method which has its
             # own dialect-aware UPDATE.
-            session.commit()
+            #
+            # P2 room-join integrity: a UNIQUE(room_id, member_name)
+            # fire here rolls back the WHOLE spawn (instance row
+            # included — the one-tx contract) and surfaces typed as
+            # MemberNameCollisionError. Unreachable under the held
+            # room lock (RK-13 single-daemon); the DB backstop for
+            # anything else. The instance hierarchy row is part of the
+            # same rollback — no partial spawn survives.
+            try:
+                session.commit()
+            except IntegrityError as exc:
+                # FINGERPRINT-GATED re-typing (P1 R1 discipline): ONLY
+                # a room-write-shaped integrity failure — the
+                # member-name UNIQUE fire, the sole room-table write
+                # this commit makes — re-types to the room error
+                # family. Every other IntegrityError (instances PK,
+                # hierarchy, anything non-room) propagates UN-RE-TYPED
+                # so a non-room DB fault can never masquerade as a
+                # room-join refusal.
+                from daemon.repositories.room.repository import (
+                    is_room_member_integrity,
+                )
+
+                if room_join is not None and is_room_member_integrity(exc):
+                    from daemon.repositories.room.repository import (
+                        raise_typed_member_integrity,
+                    )
+
+                    raise_typed_member_integrity(
+                        exc, room_join.room_id, room_join.base_name
+                    )
+                raise
             session.refresh(new_instance)
 
             return _SpawnResult(
@@ -5658,6 +5755,8 @@ status=InstanceStatus.IDLE.value,
                 project_id=project_id,
                 created_at=new_instance.created_at,
                 inherited_source=bool(inherited_source),
+                room_id=join_room_id,
+                member_name=member_final_name,
             )
 
     def _pause_cascade_db_sync(

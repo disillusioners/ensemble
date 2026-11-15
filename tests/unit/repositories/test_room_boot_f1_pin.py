@@ -339,17 +339,17 @@ def test_lru_lock_registry_evicts_and_refreshes():
 
     async def run() -> None:
         for i in range(MAX_ROOM_LOCKS):
-            await service._get_room_lock(f"room-{i}")
+            await service.get_room_lock(f"room-{i}")
         assert len(service._room_locks) == MAX_ROOM_LOCKS
         assert "room-0" in service._room_locks  # oldest present pre-eviction
 
         # Touch room-0 → moves to end (most recently used).
-        await service._get_room_lock("room-0")
+        await service.get_room_lock("room-0")
         ids = list(service._room_locks)
         assert ids[-1] == "room-0"
 
         # One more → evicts room-1 (the NEW oldest), keeps room-0.
-        await service._get_room_lock("room-new")
+        await service.get_room_lock("room-new")
         assert len(service._room_locks) == MAX_ROOM_LOCKS
         assert "room-0" in service._room_locks
         assert "room-1" not in service._room_locks

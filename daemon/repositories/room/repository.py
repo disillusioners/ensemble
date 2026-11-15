@@ -63,6 +63,7 @@ from sqlmodel import Session, select
 
 from daemon.repositories.event.models import Event, EventKind
 from daemon.repositories.instance.models import Instance
+from daemon.repositories.room import membership as _membership
 from daemon.repositories.room.models import (
     ChatRoom,
     ChatRoomMember,
@@ -81,8 +82,28 @@ __all__ = [
     "MemberNotFoundError",
     "MemberNameCollisionError",
     "RoomSeqConflictError",
+    "RoomJoinError",
+    "RoomJoinUnknownRoomError",
+    "RoomJoinRoomStateError",
+    "RoomJoinCrossTreeError",
+    "RoomJoinMemberCapError",
+    "RoomJoinRoomCapError",
+    "RoomLeaveOwnerError",
     "RoomRepository",
 ]
+
+# Re-exported join/leave vocabulary (membership module owns the
+# definitions; the repository is the callers' one-stop import). This
+# binding MUST precede the MemberNameCollisionError class body below —
+# the dual-family collision (RoomError + RoomJoinError) consumes the
+# name at class-creation time.
+RoomJoinError = _membership.RoomJoinError
+RoomJoinUnknownRoomError = _membership.RoomJoinUnknownRoomError
+RoomJoinRoomStateError = _membership.RoomJoinRoomStateError
+RoomJoinCrossTreeError = _membership.RoomJoinCrossTreeError
+RoomJoinMemberCapError = _membership.RoomJoinMemberCapError
+RoomJoinRoomCapError = _membership.RoomJoinRoomCapError
+RoomLeaveOwnerError = _membership.RoomLeaveOwnerError
 
 logger = logging.getLogger(__name__)
 
@@ -128,16 +149,77 @@ class MemberNotFoundError(RoomError):
     """No membership row for (room_id, instance_id)."""
 
 
-class MemberNameCollisionError(RoomError):
+class MemberNameCollisionError(RoomError, RoomJoinError):
     """``UNIQUE(room_id, member_name)`` refused the insert — the
     per-room naming-registry backstop (P2 owns the suffix registry;
-    P1 only surfaces the typed refusal)."""
+    P1 only surfaces the typed refusal).
+
+    DUAL FAMILY, deliberate: it stays a :class:`RoomError` (this
+    module's typed repository vocabulary) AND becomes a
+    :class:`~daemon.repositories.room.membership.RoomJoinError`
+    because it is semantically a JOIN failure — the spawn aborted
+    because the room could not admit the member under its name. That
+    routes it into the spawn tool's room-join handler, which matches
+    it BEFORE the 5 admission-refusal texts and surfaces the DISTINCT
+    commit-time message (catch-site audit 2026-11-15: the only
+    ``except RoomJoinError`` site is the spawn tool; nothing catches
+    ``RoomError``/``MemberNameCollisionError`` directly, so the only
+    behavioral delta is the intended one).
+    """
 
 
 class RoomSeqConflictError(RoomError):
     """``UNIQUE(room_id, seq)`` refused the append. The per-room lock
     makes this unreachable within one daemon (RK-13 single-writer); it
     is the DB-level backstop, never expected, always surfaced."""
+
+
+def is_room_member_integrity(exc: BaseException) -> bool:
+    """Non-raising fingerprint probe — True iff the IntegrityError is
+    the room member-name ``UNIQUE(room_id, member_name)`` fire (the
+    ONLY room-table write the spawn commit makes).
+
+    The lifecycle's spawn-commit re-typing GATES on this: a matching
+    error re-types to :class:`MemberNameCollisionError`; every other
+    IntegrityError (instances-PK, hierarchy, anything non-room)
+    propagates UN-RE-TYPED. The fingerprints are the SAME strings the
+    raising classifier below matches — one source, extracted here so
+    the gate can probe without raising.
+    """
+    msg = str(exc).lower()
+    return (
+        "uq_chatroom_members_room_member_name" in msg
+        or (
+            "chatroom_members.room_id, chatroom_members.member_name"
+            in msg
+        )
+    )
+
+
+def raise_typed_member_integrity(
+    exc: IntegrityError, room_id: str, member_name: str
+) -> None:
+    """Classify a membership-write IntegrityError → typed failure.
+
+    Module-level (public) so cross-module callers — the lifecycle's
+    spawn commit — classify without reaching into the repository
+    class. The staticmethod ``RoomRepository._raise_typed_integrity``
+    remains as a thin delegating wrapper over this function.
+    """
+    # Constraint FINGERPRINTS ONLY (the shared probe above is the
+    # single source): the named UNIQUE constraint (PG / name-reporting
+    # drivers) or the other driver's dotted-pair column message. A
+    # bare ``member_name`` substring over-matches — a composite-PK
+    # duplicate or any other violation must fall through to the base
+    # RoomError, never the name-collision type.
+    if is_room_member_integrity(exc):
+        raise MemberNameCollisionError(
+            f"member_name={member_name!r} already registered in "
+            f"room={room_id} (UNIQUE(room_id, member_name) backstop)"
+        ) from exc
+    raise RoomError(
+        f"room write integrity failure for room={room_id}: {exc}"
+    ) from exc
 
 
 # ── The single-statement seq-assigning append (module-level, built ONCE) ──
@@ -183,7 +265,7 @@ _APPEND_MESSAGE_STMT = sql_text(
 # ── Detached payload shapes ────────────────────────────────────────────────
 
 
-def _room_payload(room: ChatRoom) -> dict[str, Any]:
+def room_payload(room: ChatRoom) -> dict[str, Any]:
     return {
         "room_id": room.room_id,
         "name": room.name,
@@ -198,7 +280,7 @@ def _room_payload(room: ChatRoom) -> dict[str, Any]:
     }
 
 
-def _member_payload(member: ChatRoomMember) -> dict[str, Any]:
+def member_payload(member: ChatRoomMember) -> dict[str, Any]:
     return {
         "room_id": member.room_id,
         "instance_id": member.instance_id,
@@ -261,6 +343,16 @@ class RoomRepository:
         """
         rid = room_id or _new_room_id()
         now = _utc_now_iso()
+        # D2 / naming-cascade tier 4: the owner's member_name goes
+        # through the SAME per-room registry as every other member
+        # (P2's resolve_member_name). A fresh room has zero registered
+        # names, so the caller-provided name survives bare — the
+        # registry call is the shared-mechanic pin, not a behavior
+        # change (it becomes load-bearing if room-create is ever
+        # re-entered for an existing room_id).
+        owner_member_name = _membership.resolve_member_name(
+            set(), owner_member_name
+        )
         room = ChatRoom(
             room_id=rid,
             name=name,
@@ -289,8 +381,8 @@ class RoomRepository:
         # ``commit()`` the ORM instances expire and reading them
         # detached would raise DetachedInstanceError (the board
         # service's expunge discipline, adapted to snapshot form).
-        room_payload = _room_payload(room)
-        member_payload = _member_payload(owner_row)
+        room_snap = room_payload(room)
+        member_snap = member_payload(owner_row)
         try:
             with Session(self._engine) as session:
                 session.add(room)
@@ -299,35 +391,18 @@ class RoomRepository:
         except IntegrityError as exc:
             self._raise_typed_integrity(exc, rid, owner_member_name)
         return {
-            "room": room_payload,
-            "owner_member": member_payload,
+            "room": room_snap,
+            "owner_member": member_snap,
         }
 
     @staticmethod
     def _raise_typed_integrity(
         exc: IntegrityError, room_id: str, member_name: str
     ) -> None:
-        # Constraint FINGERPRINTS ONLY: the named UNIQUE constraint
-        # (PG / name-reporting drivers) or the other driver's
-        # dotted-pair column message. A bare ``member_name`` substring
-        # over-matches — a composite-PK duplicate or any other
-        # violation must fall through to the base RoomError, never the
-        # name-collision type.
-        msg = str(exc).lower()
-        if (
-            "uq_chatroom_members_room_member_name" in msg
-            or (
-                "chatroom_members.room_id, chatroom_members.member_name"
-                in msg
-            )
-        ):
-            raise MemberNameCollisionError(
-                f"member_name={member_name!r} already registered in "
-                f"room={room_id} (UNIQUE(room_id, member_name) backstop)"
-            ) from exc
-        raise RoomError(
-            f"room write integrity failure for room={room_id}: {exc}"
-        ) from exc
+        # Thin delegating wrapper over the module-level
+        # ``raise_typed_member_integrity`` (kept: tests/other callers
+        # reference the class attribute).
+        raise_typed_member_integrity(exc, room_id, member_name)
 
     @staticmethod
     def _raise_typed_append_integrity(
@@ -357,14 +432,14 @@ class RoomRepository:
         """Room payload or None — existence WITHOUT any ACL predicate."""
         with Session(self._engine) as session:
             room = session.get(ChatRoom, room_id)
-            return _room_payload(room) if room is not None else None
+            return room_payload(room) if room is not None else None
 
     def get_member(
         self, room_id: str, instance_id: str
     ) -> dict[str, Any] | None:
         with Session(self._engine) as session:
             row = session.get(ChatRoomMember, (room_id, instance_id))
-            return _member_payload(row) if row is not None else None
+            return member_payload(row) if row is not None else None
 
     def list_members(
         self,
@@ -383,7 +458,7 @@ class RoomRepository:
         stmt = stmt.order_by(ChatRoomMember.joined_at)
         with Session(self._engine) as session:
             return [
-                _member_payload(m) for m in session.exec(stmt).all()
+                member_payload(m) for m in session.exec(stmt).all()
             ]
 
     # ── the fail-closed read predicate (d) ─────────────────────────────
@@ -435,15 +510,104 @@ class RoomRepository:
                 )
             member = session.get(ChatRoomMember, (room_id, caller_instance_id))
             if member is not None and member.state == RoomMemberState.ACTIVE.value:
-                return _room_payload(room)
+                return room_payload(room)
             chain = self._owner_ancestry_chain(session, room)
             if caller_instance_id in chain:
-                return _room_payload(room)
+                return room_payload(room)
             raise RoomNotFoundError(
                 f"room={room_id} not found for caller={caller_instance_id} "
                 f"(fail-closed: not an active member and not in the "
                 f"owner-ancestry chain)"
             )
+
+    # ── membership (P2): admission, join, leave, restore ────────────────
+
+    def validate_room_join(
+        self, *, room_id: str, joiner_tree_root: str | None
+    ) -> dict[str, Any]:
+        """THE pinned spawn-time admission predicate (P2).
+
+        Thin delegation to
+        :func:`daemon.repositories.room.membership.validate_room_join`
+        — 5 conjuncts, one distinct typed :class:`RoomJoinError`
+        subclass per failure, room payload on success. Sync; async
+        callers go through the service's ``asyncio.to_thread`` wrap.
+        """
+        return _membership.validate_room_join(
+            self._engine, room_id=room_id, joiner_tree_root=joiner_tree_root
+        )
+
+    def join_room(
+        self,
+        *,
+        room_id: str,
+        instance_id: str,
+        base_name: str,
+        role: str = RoomMemberRole.CHILD.value,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """The member-add public surface (tester F1 gap, closed).
+
+        ONE transaction: read the room's registered names (ALL rows —
+        LEFT included), run the tier-4 suffix registry
+        (:func:`membership.resolve_member_name` — bare for the first
+        bearer, smallest-free ``-N`` for colliders), INSERT the
+        membership row. Caller MUST hold the per-room lock (the
+        service's ``join_room`` takes it); ``UNIQUE(room_id,
+        member_name)`` is the DB backstop — its fire surfaces as
+        :class:`MemberNameCollisionError` via the same
+        fingerprint-only classifier as the create path.
+
+        NOTE: the SPAWN path does NOT use this method — it calls
+        :func:`membership.join_room_in_session` inside
+        ``_spawn_instance_db_sync``'s transaction so the membership
+        row and the instance JSONB keys commit atomically. This
+        method is the standalone surface (tests, future late-join).
+        """
+        try:
+            with Session(self._engine) as session:
+                row = _membership.join_room_in_session(
+                    session,
+                    room_id=room_id,
+                    instance_id=instance_id,
+                    base_name=base_name,
+                    role=role,
+                    agent_id=agent_id,
+                )
+                payload = member_payload(row)
+                session.commit()
+        except IntegrityError as exc:
+            self._raise_typed_integrity(exc, room_id, base_name)
+        return payload
+
+    def leave_room(self, *, room_id: str, instance_id: str) -> dict[str, Any]:
+        """Membership ``state → left`` (owner exempt — D2).
+
+        The row is NEVER deleted (roster history + cursor substrate);
+        its NAME stays registered (the UNIQUE backstop spans LEFT
+        rows); LEFT rows are FREE vs ``ROOM_MAX_MEMBERS``. Emits ONE
+        content-free ``room_leave`` audit event. Raises
+        :class:`RoomNotFoundError` / :class:`MemberNotFoundError` /
+        :class:`RoomLeaveOwnerError`.
+        """
+        return _membership.leave_room(
+            self, room_id=room_id, instance_id=instance_id
+        )
+
+    def restore_eligibility(
+        self, *, room_id: str, instance_id: str
+    ) -> dict[str, Any]:
+        """The D5 two-conjunct restore rule as a predicate payload.
+
+        Eligible iff ``room.state ∈ {active, closed}`` AND
+        ``member.state = active``; a LEFT member's restore grants
+        nothing (the pin); purged/absent room → ``room_not_found``.
+        The TOOL-grant side of restore is P5 — this predicate is the
+        P2 substrate it will consult.
+        """
+        return _membership.restore_eligibility(
+            self._engine, room_id=room_id, instance_id=instance_id
+        )
 
     # ── message append (b) ─────────────────────────────────────────────
 

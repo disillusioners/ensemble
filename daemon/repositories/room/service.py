@@ -19,9 +19,18 @@ Two jobs, both P1:
    single-daemon assumption; the UNIQUE constraint is the DB-level
    belt for anything the lock cannot see).
 
-P1 surface only: room birth, append, cursor advance, fail-closed
-reads, roster, purge, boot-regen derivation. Join / naming / tag
-resolution / routing / nudges are P2–P5 and are deliberately absent.
+P1 surface: room birth, append, cursor advance, fail-closed
+reads, roster, purge, boot-regen derivation.
+
+P2 surface (membership/spawn/naming): ``validate_room_join`` (the
+pinned 5-conjunct spawn-time admission), ``join_room`` (the member-add
+surface under the per-room lock — suffix registry), ``leave_room``
+(owner exempt), ``restore_eligibility`` (the D5 two-conjunct rule),
+and the public ``get_room_lock`` (the spawn tool holds it across the
+spawn call so the tier-4 suffix registry's read→insert — inside the
+spawn transaction — cannot interleave with a concurrent same-room
+join). Tag resolution / routing / nudges are P3–P5 and are
+deliberately absent.
 """
 
 from __future__ import annotations
@@ -33,12 +42,20 @@ from typing import Any
 
 from sqlalchemy.engine import Engine
 
+from daemon.repositories.room.membership import ROLE_CHILD
 from daemon.repositories.room.models import RoomMessageKind
 from daemon.repositories.room.repository import (
     MemberNameCollisionError,
     MemberNotFoundError,
     RoomClosedError,
     RoomError,
+    RoomJoinError,
+    RoomJoinCrossTreeError,
+    RoomJoinMemberCapError,
+    RoomJoinRoomCapError,
+    RoomJoinRoomStateError,
+    RoomJoinUnknownRoomError,
+    RoomLeaveOwnerError,
     RoomNotFoundError,
     RoomRepository,
     RoomSeqConflictError,
@@ -55,6 +72,14 @@ __all__ = [
     "MemberNotFoundError",
     "MemberNameCollisionError",
     "RoomSeqConflictError",
+    # P2 join/leave vocabulary
+    "RoomJoinError",
+    "RoomJoinUnknownRoomError",
+    "RoomJoinRoomStateError",
+    "RoomJoinCrossTreeError",
+    "RoomJoinMemberCapError",
+    "RoomJoinRoomCapError",
+    "RoomLeaveOwnerError",
 ]
 
 # Architecture §1.3: MAX_ROOM_LOCKS=1000 (the dispatcher's
@@ -74,11 +99,18 @@ class RoomChatService:
         self._room_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._locks_guard = asyncio.Lock()
 
-    async def _get_room_lock(self, room_id: str) -> asyncio.Lock:
+    async def get_room_lock(self, room_id: str) -> asyncio.Lock:
         """Get or create the per-room write lock (dispatcher :810-838 port).
 
         Double-check locking under the guard; LRU move-to-end on hit;
         oldest-eviction at capacity so the registry cannot leak.
+
+        Public since P2: the spawn tool holds this lock ACROSS the
+        spawn call when joining a room, so the tier-4 suffix
+        registry's read→insert (inside ``_spawn_instance_db_sync``'s
+        transaction) cannot interleave with a concurrent same-room
+        join. The ``UNIQUE(room_id, member_name)`` backstop remains
+        the DB-level belt for anything the lock cannot see.
         """
         async with self._locks_guard:
             if room_id in self._room_locks:
@@ -137,7 +169,7 @@ class RoomChatService:
         counters bump). The lock serializes writers within the daemon;
         ``UNIQUE(room_id, seq)`` backstops anything else.
         """
-        lock = await self._get_room_lock(room_id)
+        lock = await self.get_room_lock(room_id)
         async with lock:
             return await asyncio.to_thread(
                 self._repo.append_message,
@@ -149,6 +181,73 @@ class RoomChatService:
                 addressed_members=addressed_members,
                 kind=kind,
             )
+
+    # ── membership (P2) ────────────────────────────────────────────────
+
+    async def validate_room_join(
+        self, *, room_id: str, joiner_tree_root: str | None
+    ) -> dict[str, Any]:
+        """Spawn-time admission predicate (off-loop).
+
+        5 conjuncts, one distinct typed :class:`RoomJoinError`
+        subclass per failure; the room payload on success. The spawn
+        tool calls this BEFORE any instance row is written, so a
+        refusal leaves no partial state.
+        """
+        return await asyncio.to_thread(
+            self._repo.validate_room_join,
+            room_id=room_id,
+            joiner_tree_root=joiner_tree_root,
+        )
+
+    async def join_room(
+        self,
+        *,
+        room_id: str,
+        instance_id: str,
+        base_name: str,
+        role: str = ROLE_CHILD,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Member-add under the per-room lock (off-loop).
+
+        The lock spans the suffix-registry read → INSERT so
+        concurrent same-name joins serialize (one bare bearer +
+        suffixed colliders); ``UNIQUE(room_id, member_name)`` is the
+        DB backstop. NOTE: the SPAWN path inserts inside the instance
+        transaction instead — the tool holds THIS lock across the
+        spawn call to get the same ordering.
+        """
+        lock = await self.get_room_lock(room_id)
+        async with lock:
+            return await asyncio.to_thread(
+                self._repo.join_room,
+                room_id=room_id,
+                instance_id=instance_id,
+                base_name=base_name,
+                role=role,
+                agent_id=agent_id,
+            )
+
+    async def leave_room(
+        self, *, room_id: str, instance_id: str
+    ) -> dict[str, Any]:
+        """Membership ``state → left`` (owner exempt; off-loop)."""
+        return await asyncio.to_thread(
+            self._repo.leave_room,
+            room_id=room_id,
+            instance_id=instance_id,
+        )
+
+    async def restore_eligibility(
+        self, *, room_id: str, instance_id: str
+    ) -> dict[str, Any]:
+        """D5 two-conjunct restore predicate (off-loop)."""
+        return await asyncio.to_thread(
+            self._repo.restore_eligibility,
+            room_id=room_id,
+            instance_id=instance_id,
+        )
 
     # ── cursors ────────────────────────────────────────────────────────
 

@@ -60,6 +60,20 @@ from daemon.config import _SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT
 # ``daemon.repositories.instance.repository``); the reverse direction
 # does not exist, so there is no circular-import risk.
 from daemon.repositories.instance import CHAT_SOURCE_TYPES
+from daemon.repositories.room.membership import (
+    ROLE_CHILD,
+    TIER_AGENT_FALLBACK,
+    TIER_PARENT_PROVIDED,
+    TIER_QUICK_MODEL,
+    RoomJoinCrossTreeError,
+    RoomJoinError,
+    RoomJoinMemberCapError,
+    RoomJoinRoomCapError,
+    RoomJoinRoomStateError,
+    RoomJoinSpec,
+    RoomJoinUnknownRoomError,
+)
+from daemon.repositories.room.repository import MemberNameCollisionError
 from daemon.services.mission_record_service import (
     mint_commission_fail_open,
     resolve_or_mint_fail_open,
@@ -3039,6 +3053,143 @@ def create_mcp_rpc_tools_if_available(manager, current_instance_id: str, agent_i
     )
 
 
+# ── P2 room join (agent group chat, D-S3) — tool-layer helpers ────────────
+
+
+async def _prepare_room_join(
+    manager,
+    current_instance_id: str,
+    join_room: str,
+    member_name: str | None,
+    instance_name: str | None,
+    agent_id: str,
+) -> RoomJoinSpec:
+    """Validate admission + run the naming cascade → :class:`RoomJoinSpec`.
+
+    Ordering (fail-closed BEFORE any row exists):
+
+    1. Resolve the joiner's tree root. The CHILD being spawned does
+       not exist yet — its tree root is by definition the spawning
+       caller's root (child.parent_id = caller), so the caller's
+       ``get_tree_root_id`` IS the child's future tree root. A None
+       root (caller row unresolvable) fails CLOSED at the cross-tree
+       conjunct.
+    2. ``_validate_room_join`` — the pinned 5-conjunct predicate; one
+       distinct typed :class:`RoomJoinError` subclass per failure;
+       nothing has been written on a refusal.
+    3. Naming cascade tiers 1-3 (D-S3): parent-provided (sanitized) →
+       quick-model inline (bounded 3.0s — the ONE sanctioned
+       spawn-blocking naming wait) → agent-id fallback (instant).
+       Failures NEVER block the spawn. Tier 4 (collision suffix)
+       happens at registration inside the spawn transaction, under
+       the room lock.
+
+    The tier-2 wait runs OFF the room lock (lock is taken afterwards,
+    around the spawn call itself) so a slow model cannot serialize
+    unrelated same-room membership writes.
+    """
+    room_service = manager._room_chat_service
+    tree_root = await asyncio.to_thread(
+        manager._instance_repository.get_tree_root_id, current_instance_id
+    )
+    await room_service.validate_room_join(
+        room_id=join_room, joiner_tree_root=tree_root
+    )
+    base_name, tier = await manager._room_naming_service.resolve_base_name(
+        provided=member_name,
+        agent_id=agent_id,
+        instance_name=instance_name,
+    )
+    return RoomJoinSpec(
+        room_id=join_room,
+        base_name=base_name,
+        role=ROLE_CHILD,
+        agent_id=agent_id,
+        tier=tier,
+    )
+
+
+def _format_room_join_refusal(exc: Exception) -> str:
+    """Map each typed join refusal to its DISTINCT agent-readable text.
+
+    All subclass texts are distinct (the P2 exit criterion's
+    typed-error matrix) and carry the remediation hint.
+    """
+    head = "ERROR: spawn refused — room join rejected"
+    if isinstance(exc, RoomJoinUnknownRoomError):
+        return (
+            f"{head}: unknown room (absent or purged). {exc} "
+            f"HINT: check the room_id you were given; purged rooms do "
+            f"not exist anymore (R2)."
+        )
+    if isinstance(exc, RoomJoinRoomStateError):
+        return (
+            f"{head}: room is not active. {exc} HINT: closed rooms "
+            f"admit no new members."
+        )
+    if isinstance(exc, RoomJoinCrossTreeError):
+        return (
+            f"{head}: cross-tree join. {exc} HINT: rooms are scoped "
+            f"to their creating instance's tree — spawn from a parent "
+            f"in the same tree, or create a room in yours (room_create, "
+            f"P5)."
+        )
+    if isinstance(exc, RoomJoinMemberCapError):
+        return (
+            f"{head}: member cap. {exc} HINT: reuse existing members "
+            f"via send_message instead of spawning new ones."
+        )
+    if isinstance(exc, RoomJoinRoomCapError):
+        return (
+            f"{head}: tree room budget exhausted. {exc} HINT: close or "
+            f"let idle rooms GC (purge) before opening new ones."
+        )
+    return f"{head}: {exc}"
+
+
+def _format_member_name_collision_failure(exc: Exception) -> str:
+    """The commit-time backstop text — DISTINCT by construction.
+
+    ``MemberNameCollisionError`` rides the room-join handler (dual
+    family: ``RoomError`` + ``RoomJoinError``) but is NOT an admission
+    refusal: the 5-conjunct predicate PASSED and the collision fired
+    mid-transaction at commit. The text therefore carries its own
+    head — never the ``room join rejected`` admission head, never the
+    generic ``Failed to spawn instance`` wrapper — and the exception
+    message itself names the colliding member_name and the room.
+    """
+    return (
+        "ERROR: spawn failed — room member name already taken "
+        f"({exc}). HINT: the per-room name registry raced a "
+        f"concurrent same-room spawn (the commit-time "
+        f"UNIQUE(room_id, member_name) backstop caught it); retry the "
+        f"spawn with a different member_name — tier-4 suffixing "
+        f"normally prevents this."
+    )
+
+
+def _room_join_result_line(spec, final_member_name: str | None) -> str:
+    """The spawn-result room line — the final name at EVERY tier.
+
+    The ruling: the final name is RETURNED IN THE SPAWN TOOLCALL
+    RESULT — no silent naming, ever. Tier-4 suffixing is visible when
+    the final name differs from the cascade base.
+    """
+    suffix_note = ""
+    if final_member_name and final_member_name != spec.base_name:
+        suffix_note = " (tier 4 suffix)"
+    tier_label = {
+        TIER_PARENT_PROVIDED: "tier 1 parent-provided",
+        TIER_QUICK_MODEL: "tier 2 quick-model",
+        TIER_AGENT_FALLBACK: "tier 3 agent-fallback",
+    }.get(spec.tier, spec.tier)
+    return (
+        f"room join: room={spec.room_id} "
+        f"member_name='{final_member_name or spec.base_name}' "
+        f"(naming: {tier_label}{suffix_note})"
+    )
+
+
 class SpawnInstanceInput(BaseModel):
     """Input model for spawn_instance tool."""
 
@@ -3123,6 +3274,46 @@ class SpawnInstanceInput(BaseModel):
             "behavior."
         ),
     )] = True
+
+    # ── P2 room join (agent group chat, D-S3 naming cascade) ──
+    # join_room + member_name are snapshot-INDEPENDENT spawn-behavior
+    # params: when join_room is set, the child is ADMITTED into the
+    # room at spawn (typed fail-closed on every failed conjunct) and
+    # the membership row + instance JSONB commit in ONE transaction.
+    # The per-room purpose name follows the FULL NAMING CASCADE:
+    # member_name (tier 1, parent-provided — preferred/expected) →
+    # quick-model inline generation (tier 2, bounded 3.0s) →
+    # agent-name fallback (tier 3, instant) → per-room numeric suffix
+    # on collision (tier 4, under the room lock). The FINAL name is
+    # ALWAYS returned in the toolcall result (no silent naming).
+    join_room: Annotated[str | None, Field(
+        default=None,
+        description=(
+            "Optional chatroom UUID to join at spawn (agent group "
+            "chat). Admission is validated BEFORE any instance row is "
+            "written — room must exist, be active, share the spawn "
+            "tree root, and be under ROOM_MAX_MEMBERS (16 active; "
+            "owner counts, LEFT rows free) with the tree under its "
+            "active-room budget — every failure is a distinct typed "
+            "refusal. The membership row + instance join metadata "
+            "commit in ONE transaction; the child's final per-room "
+            "name is returned in this tool's result."
+        ),
+    )] = None
+
+    member_name: Annotated[str | None, Field(
+        default=None,
+        description=(
+            "Optional parent-provided purpose name for the child in "
+            "the joined room (naming-cascade tier 1 — the preferred "
+            "form). Kebab-case normalized (e.g. 'capture', "
+            "'log-analyzer'). Omitted → inline quick-model generation "
+            "(tier 2, bounded 3s) → agent-name fallback (tier 3). An "
+            "in-room collision is resolved by a per-room numeric "
+            "suffix under the room lock (tier 4). The FINAL name is "
+            "always returned in the spawn result — never silent."
+        ),
+    )] = None
 
     # ── Snapshot warm-start steering (unify-spawn-tools 2026-10-05).
     # Only consulted when the TARGET agent's resolved meta has
@@ -3317,7 +3508,7 @@ def create_instance_tools(
 
     @register_tool_category("instance")
     @tool(args_schema=SpawnInstanceInput)
-    async def spawn_instance(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'developer', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection. Pass None or 'null' if no project context is needed.")] = None, instance_name: Annotated[str | None, Field(default=None, description="Optional short name for the instance (e.g., 'create-feature-a', 'fix-bug-b').")] = None, model: Annotated[str | None, Field(default=None, description="Optional LLM model override for this instance (highest priority — overrides meta.json and env). If provided but not in config.llm.allowed_models, silently falls back to default.")] = None, model_tier: Annotated[Literal["high"] | None, Field(default=None, description="Opt-in: spawn child with high-intelligence model (see SpawnInstanceInput.model_tier for full semantics). When set, raises ValueError if the resolved model is not in allowed_models. Use ONLY when you specifically want the configured high-tier model.")] = None, task: Annotated[str | None, Field(default=None, description="Self-contained task to auto-dispatch as the child's first turn (R18). With auto_dispatch=True (default) no follow-up send_message is needed. Omit for the legacy two-step ritual.")] = None, auto_dispatch: Annotated[bool, Field(default=True, description="Auto-enqueue task as the child's first turn (R18). Only meaningful when task is non-empty; task absent = legacy two-step behavior.")] = True, snapshot_id: Annotated[str | None, Field(default=None, description="Explicit snapshot to warm-start from; omit to search. Verify-fail falls back to cold + warning. Only consulted when the TARGET agent has snapshot_enabled: true.")] = None, tags: Annotated[list[str], Field(description="Optional R8 tags steering the internal snapshot search when snapshot_id is omitted. Only consulted when the TARGET agent has snapshot_enabled: true.")] = [], verify: Annotated[Literal["metadata", "git"], Field(default="metadata", description="Snapshot staleness depth: 'metadata' (default) or 'git' repo-divergence anchor.")] = "metadata", allow_cross_project: Annotated[bool, Field(default=False, description="D8 handoff: explicit cross-project snapshot consume override. False (default) = mismatch is a verify-fail cold fallback.")] = False) -> str:
+    async def spawn_instance(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'developer', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection. Pass None or 'null' if no project context is needed.")] = None, instance_name: Annotated[str | None, Field(default=None, description="Optional short name for the instance (e.g., 'create-feature-a', 'fix-bug-b').")] = None, model: Annotated[str | None, Field(default=None, description="Optional LLM model override for this instance (highest priority — overrides meta.json and env). If provided but not in config.llm.allowed_models, silently falls back to default.")] = None, model_tier: Annotated[Literal["high"] | None, Field(default=None, description="Opt-in: spawn child with high-intelligence model (see SpawnInstanceInput.model_tier for full semantics). When set, raises ValueError if the resolved model is not in allowed_models. Use ONLY when you specifically want the configured high-tier model.")] = None, task: Annotated[str | None, Field(default=None, description="Self-contained task to auto-dispatch as the child's first turn (R18). With auto_dispatch=True (default) no follow-up send_message is needed. Omit for the legacy two-step ritual.")] = None, auto_dispatch: Annotated[bool, Field(default=True, description="Auto-enqueue task as the child's first turn (R18). Only meaningful when task is non-empty; task absent = legacy two-step behavior.")] = True, join_room: Annotated[str | None, Field(default=None, description="Optional chatroom UUID to join at spawn (agent group chat). Admission validated BEFORE any row is written; membership + instance join metadata commit in ONE transaction; the final per-room name is returned in the result.")] = None, member_name: Annotated[str | None, Field(default=None, description="Optional parent-provided purpose name in the joined room (naming-cascade tier 1, preferred). Omitted → quick-model generation (tier 2, bounded 3s) → agent-name fallback (tier 3); in-room collisions get a numeric suffix (tier 4). Final name always returned.")] = None, snapshot_id: Annotated[str | None, Field(default=None, description="Explicit snapshot to warm-start from; omit to search. Verify-fail falls back to cold + warning. Only consulted when the TARGET agent has snapshot_enabled: true.")] = None, tags: Annotated[list[str], Field(description="Optional R8 tags steering the internal snapshot search when snapshot_id is omitted. Only consulted when the TARGET agent has snapshot_enabled: true.")] = [], verify: Annotated[Literal["metadata", "git"], Field(default="metadata", description="Snapshot staleness depth: 'metadata' (default) or 'git' repo-divergence anchor.")] = "metadata", allow_cross_project: Annotated[bool, Field(default=False, description="D8 handoff: explicit cross-project snapshot consume override. False (default) = mismatch is a verify-fail cold fallback.")] = False) -> str:
         """Spawn a new agent instance and return its instance_id.
 
         IMPORTANT: After spawning, you MUST use send_message(instance_id, message)
@@ -3400,6 +3591,22 @@ def create_instance_tools(
             auto_dispatch: Auto-dispatch the task as the child's first turn
                 (R18). Default True. Only meaningful when task is non-empty;
                 task absent ⇒ exactly the legacy two-step behavior.
+            join_room: Optional chatroom UUID to join at spawn (agent group
+                chat, P2). Admission is validated BEFORE any instance row is
+                written — room exists ∧ state=active ∧ same tree root ∧
+                active members < 16 (owner counts, LEFT rows free) ∧ tree
+                under its active-room budget — every failed conjunct is a
+                distinct typed refusal (ERROR string, no instance created).
+                On success the membership row + the instance's join metadata
+                commit in ONE transaction.
+            member_name: Optional parent-provided purpose name for the child
+                in the joined room (naming-cascade tier 1 — the preferred
+                form; Ruling B: naming is MANDATORY when using chatrooms).
+                Omitted → tier 2 inline quick-model generation (bounded
+                3.0s) → tier 3 agent-name fallback (instant); in-room name
+                collisions resolve to a per-room numeric suffix under the
+                room lock (tier 4). The FINAL name is ALWAYS returned in
+                the spawn result — no silent naming.
             snapshot_id: Optional explicit snapshot to warm-start from (only
                 when the TARGET agent has ``"snapshot_enabled": true``).
                 Verified (exists, project match, status active, staleness);
@@ -3628,7 +3835,35 @@ def create_instance_tools(
                 agent_id=agent_id,
                 version_tag=version_tag,
             )
-            new_instance_id, validated_model_override = manager.spawn_instance(
+            # ── P2 room join (agent group chat, D-S3) ── admission +
+            # naming cascade BEFORE the spawn (fail-closed: a refusal
+            # leaves NO instance row). The room lock is taken AROUND
+            # the sync spawn call so the tier-4 suffix registry's
+            # read→insert (inside the spawn transaction) cannot
+            # interleave with a concurrent same-room join; the
+            # UNIQUE(room_id, member_name) backstop remains the DB
+            # belt. The legacy (no join_room) path is byte-identical.
+            room_join_spec = None
+            if join_room is not None and not join_room.strip():
+                # Malformed join request: an EMPTY/blank join_room is
+                # NOT a silent spawn-without-join (the truthy check
+                # conflated None and "") — typed fail-closed refusal
+                # naming the problem (D-S3 fail-closed posture).
+                raise RoomJoinError(
+                    "malformed join_room: empty or blank value "
+                    f"({join_room!r}) — pass a chatroom UUID or omit "
+                    "the parameter entirely"
+                )
+            if join_room:
+                room_join_spec = await _prepare_room_join(
+                    manager,
+                    current_instance_id=current_instance_id,
+                    join_room=join_room,
+                    member_name=member_name,
+                    instance_name=instance_name,
+                    agent_id=agent_id,
+                )
+            spawn_kwargs = dict(
                 agent_id=agent_id,
                 instance_id=child_uuid,
                 parent_id=current_instance_id,
@@ -3637,6 +3872,31 @@ def create_instance_tools(
                 model=effective_model,
                 version_tag=version_tag,
             )
+            if room_join_spec is not None:
+                room_lock = await manager._room_chat_service.get_room_lock(
+                    room_join_spec.room_id
+                )
+                async with room_lock:
+                    new_instance_id, validated_model_override = manager.spawn_instance(
+                        **spawn_kwargs,
+                        room_join=room_join_spec,
+                    )
+            else:
+                new_instance_id, validated_model_override = manager.spawn_instance(
+                    **spawn_kwargs
+                )
+            room_join_line = ""
+            if room_join_spec is not None:
+                # Read back the committed membership row for the FINAL
+                # (tier-4-suffixed) name — the one-tx contract means it
+                # is already durable when the spawn call returns.
+                member_row = await manager._room_chat_service.get_member(
+                    room_join_spec.room_id, new_instance_id
+                )
+                room_join_line = _room_join_result_line(
+                    room_join_spec,
+                    member_row.get("member_name") if member_row else None,
+                )
             # Surface a silent-fallback notice (Fix 2 / security review):
             # if the caller supplied a model that's not in
             # ``config.llm.allowed_models``, the spawn service silently
@@ -3765,10 +4025,29 @@ def create_instance_tools(
                 # bracketed as a single line, no leading ``\n``) or
                 # ``steering_note`` (already a single line).
                 snapshot_line or None,
+                # P2 room join — the FINAL per-room name at EVERY
+                # naming tier (the ruling: no silent naming).
+                room_join_line or None,
             )
             return "\n".join(
                 line for line in segments if line
             )
+        except MemberNameCollisionError as e:
+            # The commit-time UNIQUE(room_id, member_name) backstop
+            # fired MID-TRANSACTION (admission already passed): the
+            # failed commit rolls the WHOLE spawn back — instance row
+            # and hierarchy row included, the one-tx contract — so no
+            # partial spawn survives and a retry is clean. Matched
+            # BEFORE RoomJoinError: the collision is dual-family and
+            # must surface THIS text, not an admission-refusal one.
+            return _format_member_name_collision_failure(e)
+        except RoomJoinError as e:
+            # P2 room join — every failed admission conjunct surfaces
+            # as its OWN distinct refusal text (typed-error matrix).
+            # Admission validation precedes the spawn transaction, so
+            # NOTHING was written here — there is nothing to roll
+            # back. (The commit-time backstop is the branch above.)
+            return _format_room_join_refusal(e)
         except ValueError as e:
             # Return text guidance instead of raising - agent can self-correct
             error_msg = str(e)

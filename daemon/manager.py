@@ -151,6 +151,10 @@ from .services.child_reports import ChildReportsService
 from .services.error_reporting import ErrorReportingService
 from .services.cancellation import CancellationService
 from .services.title_generation import TitleGenerationService
+# agent group chat P2: room chat service (per-room locks + admission)
+# and the member naming service (D-S3 cascade tiers 2-3).
+from .services.room_naming import RoomNamingService
+from .repositories.room.service import RoomChatService
 from .services.event_publisher import EventPublisherService
 from .services.skill_embedding_service import SkillEmbeddingService
 from .services.skill_store_service import SkillStoreService
@@ -238,6 +242,12 @@ if TYPE_CHECKING:
     # runtime import would be a needless module-load cycle for a type
     # annotation, and the mount itself is set by the lifespan.
     from .services.metrics_query.protocol import MetricsQueryProvider
+    # agent group chat P2: the room-join spec riding
+    # ``spawn_instance`` — TYPE_CHECKING-only so the quoted
+    # ``"RoomJoinSpec | None"`` parameter annotation resolves for
+    # type checkers; the annotation string is never evaluated at
+    # runtime.
+    from .repositories.room.membership import RoomJoinSpec
 
 
 
@@ -2372,6 +2382,17 @@ class InstanceManager:
         self._title_gen_service = TitleGenerationService(
             manager=self,
             logger=logger,  # Pass manager's logger so tests can mock it
+        )
+
+        # agent group chat P2 — room chat service (per-room lock
+        # registry + off-loop facade over the room repository) and the
+        # member naming service (D-S3 cascade tiers 2-3). Both depend
+        # only on the engine/config via the manager; the spawn tool
+        # and (P5) the room tools consume them.
+        self._room_chat_service = RoomChatService(self._engine)
+        self._room_naming_service = RoomNamingService(
+            manager=self,
+            logger=logger,
         )
 
         # Child reports service (depends on config, checkpointer, instance_repository via manager)
@@ -11212,6 +11233,7 @@ class InstanceManager:
         model: str | None = None,
         version_tag: str | None = None,
         source_type: str | None = None,
+        room_join: "RoomJoinSpec | None" = None,  # agent group chat P2 join-at-spawn (D-S3)
     ) -> tuple[str, str | None]:
         """Create a new agent instance.
 
@@ -11237,6 +11259,16 @@ class InstanceManager:
                 ``instance_metadata`` so the platform-context system-prompt
                 appender can inject formatting rules into root instances.
                 No-op for child instances (parent_id set).
+            room_join: Optional P2 room-join spec (agent group chat D-S3):
+                the resolved room_id + tier-cascade BASE member name + role.
+                When present, the lifecycle inserts the ``chatroom_members``
+                row INSIDE the spawn's ``WriteGuardSession`` transaction
+                (membership row + ``instance_metadata["join_room"]``/
+                ``["member_name"]`` JSONB keys — ONE commit) and stamps the
+                FINAL (tier-4-suffixed) name into the metadata. Admission
+                MUST have been validated by the caller
+                (:meth:`RoomChatService.validate_room_join`) BEFORE this
+                call — the spawn path refuses nothing here.
 
         Returns:
             A ``(instance_id, validated_model_override)`` tuple. ``validated_model_override``
@@ -11261,6 +11293,7 @@ class InstanceManager:
             model=model,
             version_tag=version_tag,
             source_type=source_type,
+            room_join=room_join,  # agent group chat P2 pass-through (D-S3)
         )
 
     async def ensure_mcp_preloaded(

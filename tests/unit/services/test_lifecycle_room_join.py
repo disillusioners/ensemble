@@ -1,0 +1,297 @@
+"""Lifecycle-level coverage of the REAL room-join seam (P2 OPT-1).
+
+Every tool-level test in ``test_spawn_room_join.py`` drives a replica of
+the lifecycle's DB half (the sim). This file exercises the ACTUAL
+``InstanceLifecycleService._spawn_instance_db_sync`` path on real
+file-backed SQLite — the seam where the latent ImportError lived
+(``_raise_typed_integrity`` resolved through ``RoomRepository``) and
+where the one-tx contract (membership row + instance JSONB keys,
+commit/rollback together) either holds or doesn't.
+
+Coverage:
+* happy path — membership row + BOTH JSONB keys (``join_room``,
+  ``member_name``) committed WITH the instance row, and
+  ``_SpawnResult`` carries them back;
+* tier-4 suffix on the real seam — the FINAL suffixed name lands in
+  BOTH the member row and the instance JSONB (no silent rename);
+* forced collision — ``MemberNameCollisionError`` (dual-family) raised
+  from the REAL commit, with ZERO orphan instance/membership rows
+  (whole-spawn rollback proven on the real seam, not a replica).
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import Iterator
+from unittest.mock import patch
+
+import pytest
+from sqlalchemy.engine import Engine
+from sqlmodel import Session
+
+import daemon.repositories.event.models  # noqa: F401 — register event
+import daemon.repositories.instance.models  # noqa: F401 — register instances
+from daemon.repositories.instance.models import Instance
+from daemon.repositories.room import RoomRepository
+from daemon.repositories.room import membership as room_membership
+from daemon.repositories.room.membership import RoomJoinSpec
+from daemon.repositories.room.models import ChatRoomMember
+from daemon.services.instance_lifecycle import InstanceLifecycleService
+from daemon.write_pause_guard import WritePauseGuard
+from tests.helpers.room_harness import (
+    count_rows,
+    make_room,
+    make_room_engine,
+)
+
+
+@pytest.fixture
+def engine(tmp_path) -> Iterator[Engine]:
+    eng = make_room_engine(tmp_path, "lifecycle_room_join.db")
+    yield eng
+    eng.dispose()
+
+
+CALLER = "11111111-1111-1111-1111-111111111111"
+TREE_ROOT = "22222222-2222-2222-2222-222222222222"
+
+
+@pytest.fixture
+def room_id(engine: Engine) -> str:
+    repo = RoomRepository(engine)
+    return make_room(repo, tree_root=TREE_ROOT, owner=CALLER)
+
+
+class TestLifecycleRoomJoin:
+    def test_happy_path_commits_member_row_and_both_jsonb_keys(
+        self, engine, room_id
+    ):
+        """The REAL seam: membership row + instance JSONB (join_room +
+        member_name) commit together, and _SpawnResult carries them
+        back (no replica)."""
+        lifecycle = InstanceLifecycleService.__new__(InstanceLifecycleService)
+        instance_id = str(uuid.uuid4())
+        spec = RoomJoinSpec(
+            room_id=room_id,
+            base_name="scout",
+            role="child",
+            agent_id="capture",
+            tier="parent_provided",
+        )
+        result = lifecycle._spawn_instance_db_sync(
+            engine,
+            WritePauseGuard(),
+            instance_id=instance_id,
+            resolved_agent_id="capture",
+            resolved_agent_dir="/agents/capture",
+            version_tag=None,
+            agent_name="capture",
+            parent_id=CALLER,
+            project_id=None,
+            instance_metadata={},
+            room_join=spec,
+        )
+        assert result.room_id == room_id
+        assert result.member_name == "scout"
+
+        with Session(engine) as s:
+            inst = s.get(Instance, instance_id)
+            assert inst is not None
+            assert inst.instance_metadata == {
+                "join_room": room_id,
+                "member_name": "scout",
+            }
+            member = s.get(ChatRoomMember, (room_id, instance_id))
+            assert member is not None
+            assert member.member_name == "scout"
+            assert member.role == "child"
+            assert member.state == "active"
+
+    def test_tier4_suffix_lands_in_both_member_row_and_jsonb(
+        self, engine, room_id
+    ):
+        """A colliding base name: the tier-4 registry produces
+        'scout-1' and that FINAL name lands in BOTH the membership
+        row and the instance JSONB (no silent rename on the real
+        seam)."""
+        # Pre-register 'scout' under a DIFFERENT instance.
+        with Session(engine) as s:
+            s.add(
+                Instance(
+                    instance_id="taken-1",
+                    agent_id="capture",
+                    agent_dir="/agents/capture",
+                    parent_id=CALLER,
+                    status="idle",
+                )
+            )
+            s.commit()
+        repo = RoomRepository(engine)
+        repo.join_room(room_id=room_id, instance_id="taken-1", base_name="scout")
+
+        lifecycle = InstanceLifecycleService.__new__(InstanceLifecycleService)
+        instance_id = str(uuid.uuid4())
+        spec = RoomJoinSpec(
+            room_id=room_id,
+            base_name="scout",
+            role="child",
+            agent_id="capture",
+            tier="parent_provided",
+        )
+        result = lifecycle._spawn_instance_db_sync(
+            engine,
+            WritePauseGuard(),
+            instance_id=instance_id,
+            resolved_agent_id="capture",
+            resolved_agent_dir="/agents/capture",
+            version_tag=None,
+            agent_name="capture",
+            parent_id=CALLER,
+            project_id=None,
+            instance_metadata={},
+            room_join=spec,
+        )
+        assert result.member_name == "scout-1"
+        with Session(engine) as s:
+            inst = s.get(Instance, instance_id)
+            assert inst.instance_metadata["member_name"] == "scout-1"
+            member = s.get(ChatRoomMember, (room_id, instance_id))
+            assert member is not None
+            assert member.member_name == "scout-1"
+
+    def test_forced_collision_raises_typed_and_rolls_back_whole_spawn(
+        self, engine, room_id
+    ):
+        """Forced UNIQUE(room_id, member_name) fire on the REAL commit:
+        MemberNameCollisionError (dual-family) raised; ZERO orphan
+        instance/membership rows — the whole spawn rolls back."""
+        from daemon.repositories.room.repository import MemberNameCollisionError
+
+        # Pre-register 'scout' under a DIFFERENT instance.
+        with Session(engine) as s:
+            s.add(
+                Instance(
+                    instance_id="taken-2",
+                    agent_id="capture",
+                    agent_dir="/agents/capture",
+                    parent_id=CALLER,
+                    status="idle",
+                )
+            )
+            s.commit()
+        repo = RoomRepository(engine)
+        repo.join_room(room_id=room_id, instance_id="taken-2", base_name="scout")
+
+        from sqlalchemy import text as _text
+
+        def _scalar(stmt, **kw):
+            with engine.connect() as conn:
+                return conn.execute(_text(stmt).bindparams(**kw)).scalar()
+
+        before_instance_count = _scalar("SELECT COUNT(*) FROM instances")
+        before_member_count = _scalar(
+            "SELECT COUNT(*) FROM chatroom_members WHERE room_id = :r", r=room_id
+        )
+
+        # Force the registry to claim 'scout' (already taken) so the
+        # INSERT violates UNIQUE — simulating a racer past the lock.
+        instance_id = str(uuid.uuid4())
+        spec = RoomJoinSpec(
+            room_id=room_id,
+            base_name="scout",
+            role="child",
+            agent_id="capture",
+            tier="parent_provided",
+        )
+        lifecycle = InstanceLifecycleService.__new__(InstanceLifecycleService)
+        with patch.object(
+            room_membership, "resolve_member_name", lambda taken, base: base
+        ):
+            with pytest.raises(MemberNameCollisionError):
+                lifecycle._spawn_instance_db_sync(
+                    engine,
+                    WritePauseGuard(),
+                    instance_id=instance_id,
+                    resolved_agent_id="capture",
+                    resolved_agent_dir="/agents/capture",
+                    version_tag=None,
+                    agent_name="capture",
+                    parent_id=CALLER,
+                    project_id=None,
+                    instance_metadata={},
+                    room_join=spec,
+                )
+
+        # Whole-spawn rollback: no instance row, no membership row.
+        assert count_rows(engine, Instance, instance_id=instance_id) == 0
+        assert count_rows(engine, ChatRoomMember, instance_id=instance_id) == 0
+        # Pre-existing rows untouched (the holder survives).
+        after_instance_count = _scalar("SELECT COUNT(*) FROM instances")
+        after_member_count = _scalar(
+            "SELECT COUNT(*) FROM chatroom_members WHERE room_id = :r", r=room_id
+        )
+        assert after_instance_count == before_instance_count
+        assert after_member_count == before_member_count
+        # The holder is intact.
+        holder = repo.get_member(room_id, "taken-2")
+        assert holder is not None and holder["member_name"] == "scout"
+
+    def test_non_room_integrity_propagates_untyped(
+        self, engine, room_id
+    ):
+        """FINGERPRINT-GATE coverage: a NON-room IntegrityError at the
+        spawn commit (instances-PK duplicate here) propagates UN-
+        RE-TYPED even with room_join set — it must NEVER surface as a
+        room-join refusal (MemberNameCollisionError / RoomJoinError /
+        RoomError)."""
+        from sqlalchemy.exc import IntegrityError
+
+        from daemon.repositories.room.repository import RoomJoinError
+
+        # Pre-insert the instance row (no membership) so the spawn's
+        # instances INSERT violates the PK at commit — a non-room
+        # integrity failure, while room_join is set.
+        dup_id = "99999999-9999-9999-9999-999999999999"
+        with Session(engine) as s:
+            s.add(
+                Instance(
+                    instance_id=dup_id,
+                    agent_id="capture",
+                    agent_dir="/agents/capture",
+                    parent_id=CALLER,
+                    status="idle",
+                )
+            )
+            s.commit()
+
+        lifecycle = InstanceLifecycleService.__new__(InstanceLifecycleService)
+        spec = RoomJoinSpec(
+            room_id=room_id,
+            base_name="fresh-name",
+            role="child",
+            agent_id="capture",
+            tier="parent_provided",
+        )
+        with pytest.raises(IntegrityError) as exc_info:
+            lifecycle._spawn_instance_db_sync(
+                engine,
+                WritePauseGuard(),
+                instance_id=dup_id,
+                resolved_agent_id="capture",
+                resolved_agent_dir="/agents/capture",
+                version_tag=None,
+                agent_name="capture",
+                parent_id=CALLER,
+                project_id=None,
+                instance_metadata={},
+                room_join=spec,
+            )
+        # NOT re-typed: the propagated type is the RAW IntegrityError.
+        assert not isinstance(exc_info.value, RoomJoinError)
+        from daemon.repositories.room.repository import (
+            RoomError as _RoomError,
+        )
+
+        assert not isinstance(exc_info.value, _RoomError)
+        # And the room was never touched (rollback).
+        assert count_rows(engine, ChatRoomMember, instance_id=dup_id) == 0
