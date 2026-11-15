@@ -621,13 +621,10 @@ class RoomRepository:
                     data=json.dumps(
                         {
                             "room_id": room_id,
-                            "room_name": room.name,
                             "owner_instance_id": room.owner_instance_id,
                             "tree_root_id": room.tree_root_id,
-                            "room_state_at_purge": room.state,
                             "messages_purged": message_count,
                             "members_purged": member_count,
-                            "reason": reason,
                         }
                     ),
                     created_at=datetime.now(timezone.utc),

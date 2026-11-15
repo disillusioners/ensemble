@@ -397,6 +397,41 @@ def test_read_matrix_left_member_is_not_found(repo, room_id, tree):
         repo.list_members(room_id, caller_instance_id=tree["child1"])
 
 
+def test_read_matrix_left_ancestor_member_reads_via_ancestry(
+    repo, room_id, tree
+):
+    """PIN (read-predicate docstring, repository.py ~:350-353): the
+    owner-ancestry read scope is INDEPENDENT of membership state — a
+    member who LEFT the room but sits in the OWNER'S ANCESTRY CHAIN
+    still reads via the chain (the chain is scope, membership is
+    roster; a typed not-found here would be WRONG).
+
+    B is the owner's ANCESTOR (grand-1, one hop above owner parent-1):
+    the chain walk goes UP via ``instances.parent_id``, so a left
+    DESCENDANT of the owner is NOT covered — the contrasting case
+    (left NON-ancestor member ⇒ typed not-found) is already pinned by
+    ``test_read_matrix_left_member_is_not_found`` (referenced, not
+    duplicated).
+    """
+    repo.append_message(
+        room_id=room_id,
+        author_instance_id=tree["child1"],
+        author_name="worker-a",
+        text_body="ancestor still reads",
+    )
+    _join_member(repo._engine, room_id, tree["root"], "grand-watcher")
+    with Session(repo._engine) as s:
+        row = s.get(ChatRoomMember, (room_id, tree["root"]))
+        row.state = "left"
+        s.add(row)
+        s.commit()
+    # the LEFT row kills the member lane (get_member is a raw row read)
+    assert repo.get_member(room_id, tree["root"])["state"] == "left"
+    # ...but the ancestry chain still admits the read.
+    msgs = repo.list_messages(room_id, caller_instance_id=tree["root"])
+    assert len(msgs) == 1
+
+
 def test_read_matrix_non_member_is_not_found(repo, room_id, tree):
     for caller in (tree["outsider"], tree["child2"], "ghost-id"):
         with pytest.raises(RoomNotFoundError):
@@ -648,11 +683,21 @@ def test_purge_emits_exactly_one_content_free_event(repo, engine, room_id, tree)
     ev = events[0]
     assert ev.instance_id == tree["owner"]  # rides the owner's stream
     data = json.loads(ev.data or "{}")
-    # ids + counts ONLY — no message content may survive the purge.
+    # ids + counts ONLY — EXACT key-set equality (§2.1/§2.2 pin): no
+    # room_name / room_state_at_purge / reason may ride the event, and
+    # no message content may survive the purge.
+    assert set(data.keys()) == {
+        "room_id",
+        "owner_instance_id",
+        "tree_root_id",
+        "messages_purged",
+        "members_purged",
+    }
     assert data["room_id"] == room_id
+    assert data["owner_instance_id"] == tree["owner"]
+    assert data["tree_root_id"] == tree["root"]
     assert data["messages_purged"] == 1
     assert data["members_purged"] == 2
-    assert data["reason"] == "p_idle_test"
     assert "SECRET-CONTENT-MARKER" not in (ev.data or "")
     assert "SECRET-CONTENT-MARKER" not in str(data)
 

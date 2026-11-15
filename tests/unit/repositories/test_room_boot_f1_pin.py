@@ -204,7 +204,7 @@ def test_room_tables_have_no_taskless_ready_shape(engine):
 
     for model in (ChatRoom, ChatRoomMember, RoomMessage):
         columns = {c.name for c in model.__table__.columns}
-        assert "status" not in columns or model is ChatRoom, (
+        assert "status" not in columns, (
             f"{model.__tablename__}: room rows are not queue rows — the "
             f"F-1 doomed predicate cannot select them"
         )
