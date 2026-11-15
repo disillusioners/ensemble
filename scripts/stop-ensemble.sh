@@ -562,16 +562,20 @@ _report_port() {
 # 2026-11-14-macos-launchd-handback-halt.md §7 defect #7): SELF-EXCLUSION is
 # applied INSIDE _stop_pids so EVERY call site (port-kill opt-in, the
 # launcher pass, the straggler pass) is covered uniformly. The exclusion is
-# BY EXACT PID IDENTITY — $$ (this sweep), $PPID (the promote executor when
-# promote drives the stop), and — ONLY when this sweep is actually running
-# inside an install's launcher/daemon lineage — that executor's parent (the
-# agent bash tool that owns the executor). A pgid/ancestry filter would also
-# drop the daemon itself (it shares the launchd job's group / is an
-# ancestor) and make the sweep find NOTHING (observed: the 16d TERM pin) — so
-# it is deliberately NOT used. Defense-in-depth alongside the promote
-# executor's self-detach (lib.sh _executor_detach_self) — the pinned-mirror
-# discipline: stop-ensemble.sh is a leaf (sourcing lib.sh would run its stop
-# machinery), so the exclusion shape is mirrored here rather than shared.
+# BY EXACT PID IDENTITY — $$ (this sweep) and $PPID (the immediate executor
+# shell) ONLY. The never-exclude-the-TARGET hard guard makes a false
+# "stopped" declaration IMPOSSIBLE (a sweep candidate is signalled even when
+# it is literally $PPID), so the all-filtered refusal branch inside
+# _stop_pids is STRUCTURALLY UNREACHABLE with this shape — it is kept as
+# defense-in-depth for any future filter that could empty the candidate set.
+# A pgid/ancestry filter (and the removed in-tree ancestor walk) would drop
+# the daemon itself (it shares the launchd job's group / is an ancestor) and
+# make the sweep signal NOTHING while claiming success (observed live, the
+# 16d TERM pin class) — deliberately NOT used. Defense-in-depth alongside
+# the promote executor's self-detach (lib.sh _executor_detach_self) — the
+# pinned-mirror discipline: stop-ensemble.sh is a leaf (sourcing lib.sh
+# would run its stop machinery), so the exclusion shape is mirrored here
+# rather than shared.
 # _stop_pids — MAJOR #3 (review round 2, ENSEMBLE-32): EXECUTOR-IDENTITY-ONLY
 # self-exclusion, daemon-never-excluded. The previous shape excluded $$,
 # $PPID AND — in-tree — $PPID's PARENT (via the removed
@@ -594,8 +598,12 @@ _report_port() {
 #      match the target in-tree); the ownership scan is the only
 #      candidate source.
 # ALL-FILTERED REFUSAL: numeric candidates existed but every one was
-# filtered => return 1 — the CALLERS honor this rc and refuse loudly
-# instead of declaring a false "stopped".
+# filtered => return 1 — the CALLERS honor this rc and refuse loudly.
+# TRUTHFULNESS (review round 3): with the never-exclude-the-TARGET guard
+# above, a sweep candidate can NEVER match the exclusion set, so this
+# branch is STRUCTURALLY UNREACHABLE dead code as shipped — kept as
+# defense-in-depth for any future filter change that could empty the set
+# (the callers' rc-honoring makes the failure loud if it ever fires).
 _stop_pids() {
     local filtered="" _fpid _c _excl_id _is_target _numeric=0
     for _fpid in "$@"; do

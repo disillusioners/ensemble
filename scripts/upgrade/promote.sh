@@ -682,6 +682,11 @@ if ! restart_via_launcher; then
     # the resolver runs inside the caller's $() — a bare variable read
     # degraded to "none captured" on the exact incident path).
     HB_ERR="$(_handback_last_error_text)"
+    # Warning #1 (review round 3): consume-then-clear — the diagnosis is
+    # now in HB_ERR; the $$-keyed side channel must not outlive this
+    # halt (rm-after-read, never a cross-pid delete; the name embeds
+    # this process id by construction).
+    rm -f "${HANDBACK_ERROR_FILE:-}" 2>/dev/null || true
     journal_history_append halt "promote aborted post-flip: unit hand-back failed for $VERSION — halt-for-human, txn left open for sweep recovery (declared=${SUPERVISION_MODE:-?} verified=${SUPERVISION_STATE:-?} unit=${SUPERVISION_UNIT:-?}; no nohup fallback — Amendment #1; hand-back error: ${HB_ERR:-none captured})" \
                               || true   # history is advisory; the open txn IS the B4 contract
     exit 1

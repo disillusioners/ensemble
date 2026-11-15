@@ -354,19 +354,42 @@ def main() -> None:  # noqa: C901 — a linear pin script, mirrors the shell pac
     # live; the daemon was classified, filtered, and "is stopped" was
     # declared while it lived). The shipped shape is executor-identity
     # ONLY ($$/$PPID via SELF_PID/PPID) + the never-exclude-the-TARGET
-    # guard + the all-filtered loud refusal — the walk must be GONE.
+    # guard — the walk must be GONE. ②b (review round 3): the all-filtered
+    # refusal is STRUCTURALLY UNREACHABLE under the guard (a sweep
+    # candidate can never match the exclusion set) — its presence is
+    # pinned as DEFENSE-IN-DEPTH dead code, never as a reachable path.
     check("6g: stop-ensemble.sh _stop_pids is executor-identity-only (the daemon-dropping ancestor walk is GONE)",
           "_stop_self_excluded_in_tree() {" not in stop_src
           and "$SELF_PID" in stop_src
-          and "never-exclude guard" in stop_src
-          and "REFUSAL: every stop candidate was filtered" in stop_src)
-    check("6g-2: ALL THREE _stop_pids call sites honor the all-filtered rc (MAJOR #3)",
-          "if ! _stop_pids $owned_launchers" in stop_src
+          and "never-exclude guard" in stop_src)
+    check("6g-2: the all-filtered refusal is kept as DEFENSE-IN-DEPTH dead code (structurally unreachable under the guard) and all three call sites honor its rc",
+          "STRUCTURALLY UNREACHABLE dead code" in stop_src
+          and "REFUSAL: every stop candidate was filtered" in stop_src
+          and "if ! _stop_pids $owned_launchers" in stop_src
           and "if ! _stop_pids $STRAGGLERS" in stop_src
           and "_stop_pids $pids" in stop_src and "exit 1" in stop_src
           and "STOP_SWEEP_REFUSED" in stop_src)
-    check("6h: the ancestor walk is depth-bounded",
-          re.search(r"depth.*-lt \d+", lib_src) is not None)
+    # ②c (review round 3): the SAME daemon-drop class existed in lib.sh's
+    # _pipeline_self_excluded (its in-tree walk anchored ON the daemon —
+    # PPID's parent IS the daemon in-tree). Negative pin: the walk's
+    # DEFINITION must never re-appear in lib.sh (the historical comment
+    # mention is allowed; the definition-site pattern is what is checked).
+    check("6g-3: lib.sh _pipeline_self_excluded carries no ancestor-walk definition (the daemon-dropping _pipeline_self_excluded_in_tree is GONE; defense-in-depth guard only)",
+          "_pipeline_self_excluded_in_tree() {" not in lib_src
+          and "never-exclude-the-target" in lib_src
+          and "_PIPELINE_SELF_PID" in lib_src)
+    # ②d (review round 3): refocused — the old pin matched ANY
+    # "depth … -lt <n>" in lib.sh, which after the stop-sweep walk was
+    # removed silently re-latched onto an unrelated walk. The walk that is
+    # SUPPOSED to exist is the detach DETECTION walk
+    # (_executor_detach_in_tree — it never excludes a stop target); pin
+    # ITS depth bound specifically.
+    _edt = lib_src.index("_executor_detach_in_tree() {")
+    _edt_body = lib_src[_edt:lib_src.index("\n}\n", _edt)]
+    check("6h: the detach-detection walk (_executor_detach_in_tree — the walk that is SUPPOSED to exist) is depth-bounded",
+          "depth=0" in _edt_body
+          and re.search(r"depth.*-lt \d+", _edt_body) is not None
+          and "depth=$((depth + 1))" in _edt_body)
 
     print(f"\nPASS: {PASS}  FAIL: {FAIL}")
     if FAIL:
