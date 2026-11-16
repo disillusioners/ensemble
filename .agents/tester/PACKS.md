@@ -1,3 +1,11 @@
+<!-- group-chat-p4-coder-registration-20261116-begin -->
+## GROUP-CHAT P4 — NUDGE-HOOKS LANE REGISTRATION (2026-11-16; lane `feature/group-chat-p4` @ `bd4451fce` + fix cycle; base `adbc7bf21`; registered by the P4 coder lane for the reviewer/tester gates)
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `gc_p4_nudge_pins` | `.venv/bin/python -m pytest tests/unit/services/test_room_nudge.py -q --timeout=300` | the P4 lane suite: (a)/(a2) arms, latch+watermark+turn-spend loop-guard, strong form (tag named + single-member lane-(a) re-attempt + per-turn caps + spent-latch resurface), non-member inertness, C4 closed-room exclusion, C1 clear-contract pins, router/wrapper/wiring-order pins, backstop-drop signature pin | 2026-11-16 @ fix-cycle tip | ✅ 27/27 — M5/M6/M7/M8 mutations each redden their targeted pins (byte-exact restores sha-verified) |
+| `gc_p4_executed_composition` | `.venv/bin/python -m pytest "tests/unit/services/test_room_nudge.py::TestExecutedGraphComposition" -q --timeout=300` | the review-mandated EXECUTED-graph pins: (1) fire→continuation→pass→END terminates (C1 anti-loop), (2) disabled seam + mid-flight injection drains BEFORE the nudge (C3), (3) enabled seam language_check NOT bypassed with coordinator armed (C2), (4) closed room terminates in one pass (C4), (5) the real INJECTION_CONTINUATION_MAX interaction (drain→nudge→pass = 3 passes, 1 nudge) | 2026-11-16 @ fix-cycle tip | ✅ 5/5 — real compiled graphs via `real_graph_module` + recording ScriptedChatModel; caught the config-drop drain-killer during the fix (A-P4-9) |
+<!-- group-chat-p4-coder-registration-20261116-end -->
 <!-- group-chat-p3-regate-20261116-begin -->
 ## GROUP-CHAT P3 — F-1 RE-GATE (2026-11-16 @ HEAD `f4fe2df16` = fix `ebcd6a115` + A-P3-25/26 docs; verdict **FIXED — the P3 gate flips to overall PASS**; full evidence: RESULTS §8 + `/tmp/gc_p3_gate/regate{,_packs}/`)
 
