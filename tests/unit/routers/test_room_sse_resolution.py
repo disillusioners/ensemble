@@ -10,20 +10,25 @@ WHAT IS PINNED
 
 * the INSTANCE branch is unchanged — a live instance id resolves to
   itself and the ``room_id`` is empty;
-* the ROOM branch — a room id resolves to the room's OWNER instance
-  (the owner is inside the owner-ancestry chain, and the room's
-  content-free event rows ride their instance's stream);
+* the ROOM branch — a room id resolves to its OWNER instance for
+  LIVENESS validation (the owner is inside the owner-ancestry chain),
+  and since F-3 (A-P6-26) the CONNECTION is a ROOM-SCOPED CONTENT-FREE
+  channel: it receives ONLY the ``room_*`` audit-class lifecycle
+  events — NEVER the owner's content-bearing stream;
 * the resolution is OBSERVABLE on the stream — the ``connected`` event
-  carries the resolved instance, the room id and the branch that fired;
+  carries the resolved instance, the room id, the branch that fired
+  and (room branch, additive) the ``channel`` discriminator;
 * FAIL-CLOSED — an id that is neither a live instance nor an existing
   room answers the typed 404; a PURGED room has no rows ⇒ it is
   NONEXISTENT (R2) ⇒ 404; a room whose owner instance is gone ⇒ 404;
 * OBSERVABILITY-ONLY — the pre-branch resolves a STREAM TARGET and
   nothing else: it never routes, wakes, revives or delivers;
-* the hub's ALIAS registration — the room-resolved connection receives
-  the events streamed under EITHER key (the room id OR the owner
-  instance), and the removal is SYMMETRIC (no alias bucket outlives
-  its connection).
+* the hub's ALIAS registration — the GENERIC alias mechanism (an event
+  streamed under EITHER registered key reaches the queue, and the
+  removal is SYMMETRIC) is pinned as hub infrastructure. Since F-3 the
+  SSE ROUTE no longer uses it for room subscriptions (the dual-key
+  ride-along leaked the owner's content to outsiders — removed per
+  A-P6-26); the router registers room subscriptions as ROOM CHANNELS.
 """
 
 from __future__ import annotations
@@ -88,11 +93,22 @@ class _Manager:
 
 
 def _request(manager: _Manager, hub: LiveEventHub) -> Any:
-    """A minimal Request-shaped object (the route reads app.state)."""
+    """A minimal Request-shaped object (the route reads app.state).
+
+    The F-3 pins hold the stream OPEN across broadcasts, so the stub
+    also carries the loop's ``is_disconnected`` probe (always False —
+    the drain window bounds the pull instead).
+    """
     app = SimpleNamespace(
         state=SimpleNamespace(manager=manager, live_hub=hub)
     )
-    return SimpleNamespace(app=app)
+    request = SimpleNamespace(app=app)
+
+    async def _is_disconnected() -> bool:
+        return False
+
+    request.is_disconnected = _is_disconnected
+    return request
 
 
 async def _first_event(
@@ -255,13 +271,23 @@ class TestTheConnectedEventCarriesTheResolution:
             "instance_id": OWNER,
             "room_id": room_id,
             "resolved_from": "room",
+            "channel": "room",
         }, payload
 
 
-# ── the hub's alias registration (the room-as-instance-id reuse) ────────
+# ── the hub's alias registration (generic hub infrastructure) ────────────
 
 
 class TestTheHubAliasRegistration:
+    """The GENERIC alias mechanics — an event streamed under either
+    registered key reaches the queue, and removal is symmetric.
+
+    Since F-3 (A-P6-26) the SSE ROUTE does not use this for room
+    subscriptions anymore (the ride-along leaked the owner's content);
+    the mechanism stays as hub infrastructure and this class pins its
+    generic contract.
+    """
+
     async def test_a_room_resolved_connection_receives_both_keys(self):
         """The reuse: an event streamed under EITHER key reaches it."""
         hub = LiveEventHub()
@@ -296,3 +322,199 @@ class TestTheHubAliasRegistration:
         assert await hub.get_connection_count("inst-1") == 1
         await hub.remove_connection("inst-1", queue)
         assert await hub.get_connection_count("inst-1") == 0
+
+
+# ── F-3: the room-scoped CONTENT-FREE channel (A-P6-26) ──────────────────
+
+
+_CONTENT_KEYS = frozenset(
+    {
+        "message",
+        "messages",
+        "content",
+        "text",
+        "text_body",
+        "body",
+        "tool_output",
+        "pack",
+        "checkpoint",
+        "html",
+    }
+)
+
+
+async def _drain(iterator, *, window: float = 1.0) -> list[dict]:
+    """Pull every SSE event available within a short drain window."""
+    events: list[dict] = []
+    while True:
+        try:
+            events.append(
+                await asyncio.wait_for(iterator.__anext__(), timeout=window)
+            )
+        except asyncio.TimeoutError:
+            return events
+
+
+class TestTheRoomScopedContentFreeChannel:
+    """F-3 (leader adjudication, option b): a room-resolved events
+    subscription is a ROOM-SCOPED CONTENT-FREE channel.
+
+    Pin 1 — an outsider who names a room id receives ZERO
+    content-bearing events (the pre-F-3 dual-key alias delivered the
+    owner's checkpoints / tool results / messages / question packs /
+    context usage to anyone who could name a room id); the channel
+    carries ONLY content-free ``room_*`` audit-class lifecycle shapes.
+
+    Pin 2 — the OWNER's own instance stream is UNCHANGED: a direct
+    instance-id subscription still receives the same content-bearing
+    events, and its ``connected`` ack keeps the historical shape.
+    """
+
+    async def test_an_outsider_room_stream_carries_zero_content_bearing_events(
+        self, engine, svc
+    ) -> None:
+        seed_instance(engine, OWNER)
+        manager = _Manager(svc)
+        manager._known.add(OWNER)
+        room_id = make_room(
+            svc._repo,
+            tree_root=OWNER,
+            owner=OWNER,
+            name="outsider watch",
+            owner_member_name="producer",
+        )
+        hub = LiveEventHub()
+        response = await stream_events(room_id, _request(manager, hub))
+        iterator = response.body_iterator
+        try:
+            connected = await iterator.__anext__()
+            assert connected["event"] == "connected"
+
+            # Advance the generator PAST its registration point: the
+            # consumer loop must be live before the broadcasts fire
+            # (a suspended-at-yield generator has not registered yet).
+            drain_task = asyncio.create_task(_drain(iterator))
+            await asyncio.sleep(0.05)
+
+            # The owner's content-bearing streams — broadcast WHILE the
+            # room subscription is live. The pre-F-3 alias registration
+            # delivered every one of these to the room subscriber.
+            await hub.stream_checkpoint(
+                OWNER,
+                messages=[{"role": "user", "content": "secret-plan"}],
+                checkpoint_id="cp-1",
+            )
+            await hub.stream_tool_result(
+                OWNER,
+                tool_call_id="tc-1",
+                content="secret-output",
+                message_id="m-1",
+            )
+            await hub.stream_message(
+                OWNER, {"message_id": "m-2", "content": "secret-msg"}
+            )
+            await hub.stream_question_pack(
+                OWNER, {"question": "secret?", "status": "pending"}
+            )
+            await hub.stream_context_usage(OWNER, 1234, 100000, "test-model")
+
+            # The content-free room lifecycle event DOES arrive, and a
+            # content-bearing payload is REFUSED by the hub's guard.
+            assert (
+                await hub.broadcast_room_event(
+                    room_id,
+                    {
+                        "event_type": "room_created",
+                        "room_id": room_id,
+                        "data": {
+                            "room_id": room_id,
+                            "tree_root_id": OWNER,
+                            "owner_instance_id": OWNER,
+                        },
+                    },
+                )
+                is True
+            )
+            assert (
+                await hub.broadcast_room_event(
+                    room_id,
+                    {
+                        "event_type": "room_message",
+                        "room_id": room_id,
+                        "content": "attempted content smuggle",
+                    },
+                )
+                is False
+            )
+
+            events = await asyncio.wait_for(drain_task, timeout=10.0)
+            assert len(events) == 1, [e["event"] for e in events]
+            room_event = events[0]
+            # ONLY the room_* audit-class shape flowed.
+            assert room_event["event"].startswith("room_"), room_event["event"]
+            body = json.loads(room_event["data"])
+            assert body["event_type"] == "room_created"
+            assert body["room_id"] == room_id
+            # Content-free: no content-bearing key anywhere in the payload.
+            assert not (_CONTENT_KEYS & set(body)), sorted(body)
+            assert not (_CONTENT_KEYS & set(body.get("data") or {})), sorted(
+                body.get("data") or {}
+            )
+        finally:
+            await iterator.aclose()
+        # The room channel registration is gone after the disconnect.
+        assert await hub.get_room_channel_count(room_id) == 0
+        assert await hub.get_connection_count(OWNER) == 0
+
+    async def test_the_owner_instance_stream_is_unchanged(
+        self, engine, svc
+    ) -> None:
+        seed_instance(engine, OWNER)
+        manager = _Manager(svc)
+        manager._known.add(OWNER)
+        hub = LiveEventHub()
+        response = await stream_events(OWNER, _request(manager, hub))
+        iterator = response.body_iterator
+        try:
+            connected = await iterator.__anext__()
+            payload = json.loads(connected["data"])
+            # The connected ack keeps the HISTORICAL shape — no channel
+            # discriminator on the instance branch.
+            assert payload == {
+                "instance_id": OWNER,
+                "room_id": "",
+                "resolved_from": "instance",
+            }, payload
+
+            # Advance the generator PAST its registration point (a
+            # suspended-at-yield generator has not registered yet).
+            drain_task = asyncio.create_task(_drain(iterator))
+            await asyncio.sleep(0.05)
+
+            # The same content-bearing events still flow to the owner's
+            # direct instance subscription.
+            await hub.stream_checkpoint(
+                OWNER,
+                messages=[{"role": "user", "content": "secret-plan"}],
+                checkpoint_id="cp-1",
+            )
+            await hub.stream_tool_result(
+                OWNER,
+                tool_call_id="tc-1",
+                content="secret-output",
+                message_id="m-1",
+            )
+            await hub.stream_message(
+                OWNER, {"message_id": "m-2", "content": "secret-msg"}
+            )
+            await hub.stream_context_usage(OWNER, 1234, 100000, "test-model")
+
+            events = await asyncio.wait_for(drain_task, timeout=10.0)
+            event_names = [e["event"] for e in events]
+            assert "checkpoint" in event_names, event_names
+            assert "tool_result" in event_names, event_names
+            assert "message" in event_names, event_names
+            assert "context_usage" in event_names, event_names
+        finally:
+            await iterator.aclose()
+        assert await hub.get_connection_count(OWNER) == 0

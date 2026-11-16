@@ -2397,6 +2397,13 @@ class InstanceManager:
         # only on the engine/config via the manager; the spawn tool
         # and (P5) the room tools consume them.
         self._room_chat_service = RoomChatService(self._engine)
+        # F-3 (A-P6-26): fan the room lifecycle transitions to the SSE
+        # ROOM-SCOPED channels — content-free ``room_*`` audit-class
+        # events only (ids/counts/outcomes; the hub's fail-closed guard
+        # drops anything content-bearing).
+        self._room_chat_service.set_lifecycle_notifier(
+            self._broadcast_room_lifecycle
+        )
         self._room_naming_service = RoomNamingService(
             manager=self,
             logger=logger,
@@ -16972,6 +16979,30 @@ class InstanceManager:
                 e,
                 exc_info=True,
             )
+
+    async def _broadcast_room_lifecycle(
+        self, *, room_id: str, kind: str, data: dict
+    ) -> None:
+        """F-3 (A-P6-26): fan a room lifecycle transition to the SSE
+        room-scoped channels.
+
+        The content-free contract is enforced DOWNSTREAM at
+        ``LiveEventHub.broadcast_room_event`` (fail-closed guard: only
+        ``room_``-prefixed event types, no content-bearing keys) — this
+        wrapper only shapes the event and never raises (the room chat
+        service already wraps the notifier call best-effort).
+        """
+        hub = getattr(self, "_live_hub", None)
+        if hub is None:
+            return
+        await hub.broadcast_room_event(
+            room_id,
+            {
+                "event_type": kind,
+                "room_id": room_id,
+                "data": data,
+            },
+        )
 
     async def _drain_snapshot_capture_tasks(self) -> None:
         """Drain the D3 snapshot capture/embedding lane during shutdown.

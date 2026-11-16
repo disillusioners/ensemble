@@ -98,6 +98,46 @@ class RoomChatService:
         # registry + the double-check guard.
         self._room_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._locks_guard = asyncio.Lock()
+        # F-3 lifecycle notifier (A-P6-26): an OPTIONAL async callable
+        # ``(room_id=..., kind=..., data=...)`` the MANAGER wires to the
+        # SSE room channel (``live_hub.broadcast_room_event``) at boot.
+        # Every lifecycle transition fires it BEST-EFFORT after the
+        # durable commit — a notifier failure never fails the mutation.
+        # Payloads are CONTENT-FREE (ids / counts / outcomes; no message
+        # text, no names).
+        self._lifecycle_notifier = None
+
+    def set_lifecycle_notifier(self, notifier) -> None:
+        """Wire the lifecycle notifier (manager → SSE room channels).
+
+        Args:
+            notifier: An async callable accepting ``room_id``, ``kind``
+                and ``data`` keyword arguments; ``None`` unsets.
+        """
+        self._lifecycle_notifier = notifier
+
+    async def _notify_lifecycle(
+        self, room_id: str, kind: str, data: dict[str, Any]
+    ) -> None:
+        """Fire the lifecycle notifier BEST-EFFORT (never raises).
+
+        Args:
+            room_id: The room the transition completed on.
+            kind: The ``room_*`` audit-class event kind.
+            data: The CONTENT-FREE payload (ids / counts / outcomes).
+        """
+        notifier = self._lifecycle_notifier
+        if notifier is None:
+            return
+        try:
+            await notifier(room_id=room_id, kind=kind, data=data)
+        except Exception as e:  # noqa: BLE001 — observability must not break mutation
+            logger.debug(
+                "room lifecycle notifier failed (room=%s kind=%s): %r",
+                room_id,
+                kind,
+                e,
+            )
 
     async def get_room_lock(self, room_id: str) -> asyncio.Lock:
         """Get or create the per-room write lock (dispatcher :810-838 port).
@@ -140,7 +180,7 @@ class RoomChatService:
         room_id: str | None = None,
     ) -> dict[str, Any]:
         """Room + owner seed in one transaction (off-loop)."""
-        return await asyncio.to_thread(
+        room = await asyncio.to_thread(
             self._repo.create_room,
             name=name,
             tree_root_id=tree_root_id,
@@ -149,6 +189,18 @@ class RoomChatService:
             owner_agent_id=owner_agent_id,
             room_id=room_id,
         )
+        # F-3 lifecycle broadcast — content-free (ids only; the room
+        # NAME is deliberately NOT carried onto the SSE channel).
+        await self._notify_lifecycle(
+            room_id=str(room.get("room_id") or ""),
+            kind="room_created",
+            data={
+                "room_id": str(room.get("room_id") or ""),
+                "tree_root_id": str(room.get("tree_root_id") or ""),
+                "owner_instance_id": str(room.get("owner_instance_id") or ""),
+            },
+        )
+        return room
 
     # ── append — the ONLY path that takes the per-room lock ────────────
 
@@ -232,7 +284,7 @@ class RoomChatService:
         """
         lock = await self.get_room_lock(room_id)
         async with lock:
-            return await asyncio.to_thread(
+            member = await asyncio.to_thread(
                 self._repo.join_room,
                 room_id=room_id,
                 instance_id=instance_id,
@@ -240,16 +292,38 @@ class RoomChatService:
                 role=role,
                 agent_id=agent_id,
             )
+        # F-3 lifecycle broadcast — content-free (ids + role; the final
+        # member NAME is deliberately NOT carried onto the SSE channel).
+        # NOTE (disclosed gap, A-P6-26): the SPAWN-path join inserts the
+        # membership row INSIDE the spawn transaction and does NOT ride
+        # this method — its join event does not broadcast yet.
+        await self._notify_lifecycle(
+            room_id=room_id,
+            kind="room_joined",
+            data={
+                "room_id": room_id,
+                "instance_id": instance_id,
+                "role": role,
+            },
+        )
+        return member
 
     async def leave_room(
         self, *, room_id: str, instance_id: str
     ) -> dict[str, Any]:
         """Membership ``state → left`` (owner exempt; off-loop)."""
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             self._repo.leave_room,
             room_id=room_id,
             instance_id=instance_id,
         )
+        # F-3 lifecycle broadcast — content-free (ids only).
+        await self._notify_lifecycle(
+            room_id=room_id,
+            kind="room_left",
+            data={"room_id": room_id, "instance_id": instance_id},
+        )
+        return result
 
     async def restore_eligibility(
         self, *, room_id: str, instance_id: str
@@ -380,9 +454,16 @@ class RoomChatService:
     # ── purge ──────────────────────────────────────────────────────────
 
     async def purge_room(self, room_id: str, *, reason: str) -> dict[str, Any]:
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             self._repo.purge_room, room_id, reason=reason
         )
+        # F-3 lifecycle broadcast — content-free (id + outcome reason).
+        await self._notify_lifecycle(
+            room_id=room_id,
+            kind="room_purged",
+            data={"room_id": room_id, "reason": reason},
+        )
+        return result
 
     # ── P3 delivery helpers (off-loop wrappers) ─────────────────────
     async def cas_instance_status_to_running(

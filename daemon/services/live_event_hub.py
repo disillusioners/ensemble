@@ -38,8 +38,23 @@ class LiveEventHub:
         # registered under a second stream key (the ROOM id a client
         # connected with) is tracked here so the removal is SYMMETRIC
         # (the alias bucket must not outlive its connection).
+        # NOTE (F-3, A-P6-26): the SSE route NO LONGER registers
+        # room-resolved connections here — the alias mechanism stays as
+        # generic infrastructure, but a room subscription is now a
+        # ROOM-CHANNEL registration (see ``_room_channels``), never an
+        # instance-key alias. The dual-key ride-along is dead on the
+        # router path.
         self._queue_keys: dict[asyncio.Queue, set[str]] = {}
-        
+
+        # The ROOM-CHANNEL registry (F-3, A-P6-26): room-scoped SSE
+        # subscriptions. DELIBERATELY SEPARATE from ``_connections``:
+        # a queue registered here can ONLY receive events broadcast
+        # through :meth:`broadcast_room_event` (content-free room_*
+        # audit-class lifecycle shapes) — it NEVER receives the
+        # instance-keyed content streams (checkpoints, tool results,
+        # messages, question packs, context usage).
+        self._room_channels: dict[str, set[asyncio.Queue]] = {}
+
         # Lock for thread-safe connection management
         self._lock = asyncio.Lock()
     
@@ -127,6 +142,129 @@ class LiveEventHub:
         """
         async with self._lock:
             return len(self._connections.get(instance_id, set()))
+
+    # -------------------------------------------------------------------------
+    # Room Channels (F-3, A-P6-26) — content-free room-scoped SSE
+    # -------------------------------------------------------------------------
+
+    async def add_room_channel(
+        self, room_id: str, queue: asyncio.Queue
+    ) -> None:
+        """Register an SSE connection as a ROOM-SCOPED channel.
+
+        A room-resolved events subscription (F-3) registers HERE —
+        NEVER under the owner's instance key and never as an instance
+        alias. The queue can only ever receive what
+        :meth:`broadcast_room_event` fans out: content-free ``room_*``
+        audit-class lifecycle events.
+
+        Args:
+            room_id: The room the subscription is scoped to.
+            queue: The connection's asyncio.Queue for receiving events.
+        """
+        async with self._lock:
+            bucket = self._room_channels.setdefault(room_id, set())
+            bucket.add(queue)
+            logger.debug(
+                f"Room channel added for {room_id}, total: {len(bucket)}"
+            )
+
+    async def remove_room_channel(
+        self, room_id: str, queue: asyncio.Queue
+    ) -> None:
+        """Unregister a room-scoped SSE connection (symmetric).
+
+        Args:
+            room_id: The room the subscription was scoped to.
+            queue: The connection's queue to remove.
+        """
+        async with self._lock:
+            bucket = self._room_channels.get(room_id)
+            if bucket is None:
+                return
+            bucket.discard(queue)
+            if not bucket:
+                del self._room_channels[room_id]
+            logger.debug(f"Room channel removed for {room_id}")
+
+    async def get_room_channel_count(self, room_id: str) -> int:
+        """Number of active room-scoped SSE subscriptions for a room."""
+        async with self._lock:
+            return len(self._room_channels.get(room_id, set()))
+
+    #: Keys that mark an event payload as CONTENT-BEARING. A room
+    #: channel carries ids/counts/outcomes ONLY — any event whose
+    #: top-level dict or ``data`` dict carries one of these keys is
+    #: REFUSED (fail-closed: dropped, never delivered).
+    _ROOM_CHANNEL_CONTENT_KEYS: frozenset[str] = frozenset(
+        {
+            "message",
+            "messages",
+            "content",
+            "text",
+            "text_body",
+            "body",
+            "tool_output",
+            "pack",
+            "checkpoint",
+            "html",
+        }
+    )
+
+    async def broadcast_room_event(
+        self, room_id: str, event: dict[str, Any]
+    ) -> bool:
+        """Broadcast a CONTENT-FREE room lifecycle event to a room channel.
+
+        FAIL-CLOSED content-free guard: the event's ``event_type`` MUST
+        be ``room_``-prefixed (the audit-class lifecycle shapes), and
+        neither the top-level dict nor its ``data`` dict may carry any
+        content-bearing key (:data:`_ROOM_CHANNEL_CONTENT_KEYS` —
+        message bodies, checkpoints, tool results, question packs).
+        A non-conforming event is logged at WARNING and DROPPED —
+        never delivered, never raised.
+
+        Args:
+            room_id: The room to fan the event out to.
+            event: The event dict (``event_type`` + ``room_id`` +
+                content-free ``data``).
+
+        Returns:
+            True when the event was delivered to at least one room
+            channel; False when it was dropped (guard refusal or no
+            subscribers).
+        """
+        event_type = str(event.get("event_type") or "")
+        if not event_type.startswith("room_"):
+            logger.warning(
+                "broadcast_room_event refused a non-room_ event_type "
+                f"{event_type!r} for room {room_id} — dropped"
+            )
+            return False
+        offending = self._ROOM_CHANNEL_CONTENT_KEYS.intersection(event)
+        data = event.get("data")
+        if isinstance(data, dict):
+            offending |= self._ROOM_CHANNEL_CONTENT_KEYS.intersection(data)
+        if offending:
+            logger.warning(
+                "broadcast_room_event refused a content-bearing payload "
+                f"(keys {sorted(offending)}) for room {room_id} — dropped"
+            )
+            return False
+
+        async with self._lock:
+            connections = list(self._room_channels.get(room_id, set()))
+            delivered = 0
+            dead_queues = []
+            for queue in connections:
+                try:
+                    queue.put_nowait(event)
+                    delivered += 1
+                except (asyncio.QueueFull, asyncio.QueueShutDown):
+                    dead_queues.append(queue)
+            for q in dead_queues:
+                self._room_channels.get(room_id, set()).discard(q)
+        return delivered > 0
     
     # -------------------------------------------------------------------------
     # Event Streaming
