@@ -32,7 +32,7 @@ from sqlmodel import Session, select
 
 import daemon.repositories.event.models  # noqa: F401
 import daemon.repositories.instance.models  # noqa: F401
-from daemon.repositories.room.models import RoomMessage
+from daemon.repositories.room.models import ChatRoom, RoomMessage
 from daemon.repositories.room.service import RoomChatService
 from daemon.services.room_delivery import RoomDeliveryService
 from daemon.services.room_post_cap import ROOM_POSTS_PER_TURN, RoomPostTurnCap
@@ -112,6 +112,23 @@ def _row_count(engine: Engine, room_id: str) -> int:
         )
 
 
+def _set_room_state(engine: Engine, room_id: str, state: str) -> None:
+    """Force the capability-row state (the close/reopen lever)."""
+    with Session(engine) as s:
+        room = s.get(ChatRoom, room_id)
+        assert room is not None
+        room.state = state
+        s.commit()
+
+
+def _spent(manager) -> int:
+    """The §9 counter for the posting instance (the turn's spent slots)."""
+    entry = manager._room_post_turn_counter.get("owner-1")
+    if entry is None:
+        return 0
+    return int(entry.get("count") or 0)
+
+
 def test_four_posts_land_and_the_fifth_is_refused(stack):
     engine, svc, room_id, owner = stack
     manager = _manager(engine, svc)
@@ -155,6 +172,70 @@ def test_the_budget_resets_across_a_turn_boundary(stack):
     raw = _post(tools, room_id, "next turn")
     assert raw.startswith("{"), raw
     assert json.loads(raw)["seq"] == ROOM_POSTS_PER_TURN + 1
+
+
+def test_a_failed_append_does_not_consume_the_budget(stack):
+    """M2 pin (A-P6-25): a post whose append FAILS (the room-closed
+    capability row) does NOT spend the budget — the next post keeps
+    its full allowance."""
+    engine, svc, room_id, owner = stack
+    manager = _manager(engine, svc)
+    tools = _tools(manager, owner)
+
+    # One post lands (one slot spent).
+    assert _post(tools, room_id, "lands").startswith("{")
+    assert _spent(manager) == 1
+
+    # The append FAILS: the room is closed after the check passed.
+    _set_room_state(engine, room_id, "closed")
+    raw = _post(tools, room_id, "refused by the capability row")
+    assert raw.startswith("Error:") and "reason=room-closed" in raw, raw
+    # The invariant: the failed append left the budget untouched.
+    assert _spent(manager) == 1
+
+    # The room reopens — the remaining allowance is FULL: three more
+    # posts land (the total four), the next is the typed cap refusal.
+    _set_room_state(engine, room_id, "active")
+    for index in range(2, ROOM_POSTS_PER_TURN + 1):
+        raw = _post(tools, room_id, f"lands {index}")
+        assert raw.startswith("{"), raw
+    assert _spent(manager) == ROOM_POSTS_PER_TURN
+    raw = _post(tools, room_id, "one too many")
+    assert raw.startswith("Error:") and "reason=post-cap" in raw, raw
+
+
+def test_a_faulting_append_does_not_consume_the_budget(
+    stack, monkeypatch
+):
+    """M2 pin (A-P6-25): a post whose append raises an UNEXPECTED
+    fault (the catch-all) does NOT spend the budget either — the
+    full allowance survives the fault."""
+    engine, svc, room_id, owner = stack
+    manager = _manager(engine, svc)
+    tools = _tools(manager, owner)
+
+    assert _post(tools, room_id, "lands").startswith("{")
+    assert _spent(manager) == 1
+
+    # The append FAULTS once (an infra fault, not a typed refusal).
+    real_append = svc.append_message
+
+    async def _boom(**kwargs):
+        raise RuntimeError("append boom")
+
+    monkeypatch.setattr(svc, "append_message", _boom)
+    raw = _post(tools, room_id, "faults")
+    assert raw.startswith("Error:") and "reason=internal-error" in raw, raw
+    assert _spent(manager) == 1
+
+    # The fault clears: the FULL remaining allowance is intact.
+    monkeypatch.setattr(svc, "append_message", real_append)
+    for index in range(2, ROOM_POSTS_PER_TURN + 1):
+        raw = _post(tools, room_id, f"lands {index}")
+        assert raw.startswith("{"), raw
+    assert _spent(manager) == ROOM_POSTS_PER_TURN
+    raw = _post(tools, room_id, "one too many")
+    assert raw.startswith("Error:") and "reason=post-cap" in raw, raw
 
 
 def test_a_manager_without_a_cap_has_no_budget(stack):

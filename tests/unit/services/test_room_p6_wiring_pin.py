@@ -158,14 +158,35 @@ def _call_line(function: ast.AsyncFunctionDef, attribute: str) -> int:
     raise AssertionError(f"no .{attribute}(...) call inside {function.name}")
 
 
+def _name_call_line(function: ast.AsyncFunctionDef, name: str) -> int:
+    """The line of the FIRST ``<name>(...)`` call (a bare name, not a
+    method attribute)."""
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == name:
+            return node.lineno
+    raise AssertionError(f"no {name}(...) call inside {function.name}")
+
+
 def test_the_cap_chokepoint_sits_before_the_append():
     """The append is the COMMIT POINT of the room log — the budget
-    check must precede it (the refusal must never leave a row)."""
+    check must precede it (the refusal must never leave a row), and —
+    the M2 consume-on-success adjudication (A-P6-25) — the CHARGE must
+    FOLLOW it: the slot is spent only after the append lands, so a
+    failed append never consumes the budget."""
     tree = ast.parse(TOOLS_ROOM.read_text(encoding="utf-8"))
     function = _room_post_function(tree)
-    check_line = _call_line(function, "check")
+    check_line = _name_call_line(function, "_room_post_budget_check")
     append_line = _call_line(function, "append_message")
+    charge_line = _name_call_line(function, "_room_post_budget_charge")
     assert check_line < append_line, (
         f"the cap check (line {check_line}) must precede the append "
         f"(line {append_line}) in room_post"
+    )
+    assert append_line < charge_line, (
+        f"the budget charge (line {charge_line}) must follow the append "
+        f"(line {append_line}) in room_post — the slot is spent only "
+        f"after the append lands (A-P6-25, M2)"
     )
