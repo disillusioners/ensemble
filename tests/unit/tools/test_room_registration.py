@@ -443,11 +443,28 @@ class TestTheMutationTarget:
     def test_the_count_pin_lives_in_this_file(self) -> None:
         """The mutation matrix aims at the count pin of the NEW
         category's pin file ("a category with no mutation target is
-        not covered by the matrix")."""
+        not covered by the matrix").
+
+        The expected literal is BUILT from the LIVE count — it is NOT
+        spelled out verbatim. Spelling it out would put the count
+        literal into this file TWICE, and the matrix's find-string must
+        be UNIQUE in its target file: the harness SKIPs a non-unique
+        find-string and counts the skip as a leg FAILURE. That is
+        exactly what happened — the room leg (MT-R01) was INERT (it
+        skipped, and the skip was the one failing leg of the matrix
+        run) while this meta-pin spelled the literal out a second time.
+        """
         source = (REPO_ROOT / "tests" / "unit" / "tools" / "test_room_registration.py").read_text(
             encoding="utf-8"
         )
-        assert "assert len(PRIVILEGED_TOOL_CATEGORIES) == 23" in source
+        expected = (
+            f"assert len(PRIVILEGED_TOOL_CATEGORIES) == "
+            f"{len(PRIVILEGED_TOOL_CATEGORIES)}"
+        )
+        assert expected in source
+        # The uniqueness precondition the matrix enforces — pinned here
+        # so the room leg can never go inert again unnoticed.
+        assert source.count(expected) == 1, source.count(expected)
 
     def test_the_mutation_matrix_carries_the_room_leg(self) -> None:
         source = (REPO_ROOT / "test" / "packs" / "metrics_read_mutation_matrix_test.py").read_text(
