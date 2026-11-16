@@ -65,13 +65,19 @@ from daemon.migrations.runner import MigrationRunner
 from tests.fakes.f1_premark_helper import F1_VERSION, premark_f1
 from tests.helpers.migration_execution import (
     CHATROOM_MIGRATION_FILENAME,
+    MIGRATION_ENGINE_BUSY_TIMEOUT_MS,
+    MIGRATION_ENGINE_FOREIGN_KEYS,
     MIGRATIONS_DIR,
     PROPOSAL_DEDUP_MIGRATION_FILENAME,
+    RESOLUTION_WARNINGS_MIGRATION_FILENAME,
+    SQLITE_DEFAULT_BUSY_TIMEOUT_MS,
     apply_migration_file,
+    make_migration_engine,
     parse_migration,
     sqlite_columns,
     sqlite_foreign_keys,
     sqlite_indexes,
+    sqlite_pragma,
     table_exists,
 )
 
@@ -93,6 +99,8 @@ PINNED_COLUMNS: dict[str, list[str]] = {
         "created_at",
         # The P3 proposal-dedup columns (migration 20261115_120000).
         "source_message_id", "trigger", "member",
+        # The P5 resolution-warnings column (migration 20261116_083000).
+        "resolution_warnings",
     ],
 }
 
@@ -126,22 +134,59 @@ MODEL_UNIQUE_COLUMN_SETS: dict[str, set[frozenset[str]]] = {
 @pytest.fixture
 def engine(tmp_path) -> Engine:
     """Fresh file-backed SQLite with the FK pragma ON — NO create_all:
-    everything these tests see is what the RUNNER's execution built."""
-    eng = create_engine(
-        f"sqlite:///{tmp_path}/room_migration_execution.db",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
+    everything these tests see is what the RUNNER's execution built.
 
-    @event.listens_for(eng, "connect")
-    def _enable_pragmas(dbapi_conn, _connection_record) -> None:
-        cursor = dbapi_conn.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA busy_timeout=10000")
-        cursor.close()
-
+    M-ro4: the builder moved to
+    ``tests/helpers/migration_execution.py::make_migration_engine``
+    (ONE builder for both migration-test modules). The PRAGMA
+    equivalence proof below pins that the consolidated engine's PRAGMA
+    state is EXACTLY the state this module's original per-file engine
+    had.
+    """
+    eng = make_migration_engine(tmp_path, "room_migration_execution.db")
     yield eng
     eng.dispose()
+
+
+class TestThePragmaEquivalenceProof:
+    """M-ro4 — the PRAGMA equivalence proof, FIRST.
+
+    The consolidation moved ONE builder into the shared helper; the
+    two per-file engines it replaces had DIFFERENT PRAGMA shapes (the
+    runner-execution engine set ``busy_timeout=10000``; the
+    models-and-migration engine set the FK pragma ONLY). The proof
+    pins that the consolidated builder reproduces BOTH shapes exactly
+    — so the consolidation is a pure de-duplication, never a behavior
+    change.
+    """
+
+    def test_the_consolidated_engine_pragmas_match_the_per_file_engines(
+        self, tmp_path, engine
+    ):
+        """The runner-execution module's ORIGINAL shape: FK ON +
+        a 10 s busy timeout."""
+        assert sqlite_pragma(engine, "foreign_keys") == (
+            MIGRATION_ENGINE_FOREIGN_KEYS
+        )
+        assert sqlite_pragma(engine, "busy_timeout") == (
+            MIGRATION_ENGINE_BUSY_TIMEOUT_MS
+        )
+
+    def test_the_fk_only_shape_is_reproducible(self, tmp_path):
+        """The models-and-migration module's ORIGINAL shape: the FK
+        pragma ONLY (SQLite's own default busy timeout)."""
+        eng = make_migration_engine(
+            tmp_path, "room_migration_fk_only.db", busy_timeout_ms=None
+        )
+        try:
+            assert sqlite_pragma(eng, "foreign_keys") == (
+                MIGRATION_ENGINE_FOREIGN_KEYS
+            )
+            assert sqlite_pragma(eng, "busy_timeout") == (
+                SQLITE_DEFAULT_BUSY_TIMEOUT_MS
+            )
+        finally:
+            eng.dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -157,13 +202,14 @@ class TestRunnerExecutesRoomMigrations:
         ``run_pending_migrations`` executes the two room migrations
         end-to-end (real statement splitter, real ledger rows) and
         NEVER touches F1."""
-        # tmp versions dir with exactly F1 + the two room migrations.
+        # tmp versions dir with exactly F1 + the THREE room migrations.
         versions = tmp_path / "versions"
         versions.mkdir()
         for name in (
             "20260714_000001_widen_job_queue_type_constraint.sql",
             CHATROOM_MIGRATION_FILENAME,
             PROPOSAL_DEDUP_MIGRATION_FILENAME,
+            RESOLUTION_WARNINGS_MIGRATION_FILENAME,
         ):
             shutil.copy(MIGRATIONS_DIR / name, versions / name)
 
@@ -178,12 +224,14 @@ class TestRunnerExecutesRoomMigrations:
         assert F1_VERSION not in pending_versions, (
             "the pre-marked F1 breaker must not be pending"
         )
-        assert pending_versions == ["20261115_080000", "20261115_120000"], (
-            pending_versions
-        )
+        assert pending_versions == [
+            "20261115_080000", "20261115_120000", "20261116_083000"
+        ], pending_versions
 
         applied = runner.run_pending_migrations()
-        assert applied == ["20261115_080000", "20261115_120000"], applied
+        assert applied == [
+            "20261115_080000", "20261115_120000", "20261116_083000"
+        ], applied
 
         # Ledger rows exist for the two room migrations (and F1 keeps
         # its pre-mark row).
@@ -196,11 +244,13 @@ class TestRunnerExecutesRoomMigrations:
             ).all()
         by_version = {r[0]: r[1] for r in rows}
         assert set(by_version) == {
-            F1_VERSION, "20261115_080000", "20261115_120000"
+            F1_VERSION, "20261115_080000", "20261115_120000",
+            "20261116_083000",
         }, by_version
         assert by_version[F1_VERSION] is not None, "F1 keeps its skip_reason"
         assert by_version["20261115_080000"] is None
         assert by_version["20261115_120000"] is None
+        assert by_version["20261116_083000"] is None
 
         # The execution built the real schema — all three tables exist
         # with the pinned columns.
@@ -236,6 +286,7 @@ def executed_engine(engine) -> Engine:
     execution produced."""
     apply_migration_file(engine, CHATROOM_MIGRATION_FILENAME)
     apply_migration_file(engine, PROPOSAL_DEDUP_MIGRATION_FILENAME)
+    apply_migration_file(engine, RESOLUTION_WARNINGS_MIGRATION_FILENAME)
     return engine
 
 
@@ -359,6 +410,23 @@ class TestExecutedSchemaShape:
         assert not (
             {"chatrooms", "chatroom_members", "room_messages"} & set(remaining)
         )
+
+    def test_the_p5_resolution_warnings_column_executes(self, executed_engine):
+        """The P5 (A-P3-16) migration, executed: the durable
+        resolution-warnings column lands on the live schema and its
+        DOWN drops exactly that column."""
+        columns = [c["name"] for c in sqlite_columns(executed_engine, "room_messages")]
+        assert "resolution_warnings" in columns, columns
+
+        runner = MigrationRunner(
+            executed_engine, migrations_dir=MIGRATIONS_DIR
+        )
+        runner.rollback_migration("20261116_083000")
+        after = [c["name"] for c in sqlite_columns(executed_engine, "room_messages")]
+        assert "resolution_warnings" not in after, after
+        # The rollback touched NOTHING else — the proposal-dedup
+        # columns (the previous migration) survive.
+        assert "source_message_id" in after, after
 
     def test_proposal_dedup_unique_executes(self, executed_engine):
         """The P3 proposal-dedup migration, executed: one proposal row

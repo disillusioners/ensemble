@@ -66,6 +66,7 @@ from tests.helpers.migration_execution import (
     CHATROOM_MIGRATION_FILENAME,
     PROPOSAL_DEDUP_MIGRATION_FILENAME,
     apply_migration_file,
+    make_migration_engine,
     sqlite_columns,
     sqlite_foreign_keys,
     sqlite_indexes,
@@ -79,19 +80,16 @@ def _executed_engine(tmp_path) -> Engine:
     """Fresh file-backed SQLite whose schema is built ONLY by the
     executed migrations (BOTH room .sql files — the full set boot
     applies; FK pragma ON) — the O-5 re-basing substrate. Callers own
-    disposal."""
-    eng = create_engine(
-        f"sqlite:///{tmp_path}/room_migration_rebased.db",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
+    disposal.
+
+    M-ro4: the engine builder moved to the shared helper
+    (``make_migration_engine``); the PRAGMA shape is UNCHANGED (the
+    FK pragma only — SQLite's own default busy timeout), and the
+    equivalence proof lives in the runner-execution module.
+    """
+    eng = make_migration_engine(
+        tmp_path, "room_migration_rebased.db", busy_timeout_ms=None
     )
-
-    @event.listens_for(eng, "connect")
-    def _enable_pragmas(dbapi_conn, _connection_record) -> None:
-        cursor = dbapi_conn.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
     apply_migration_file(eng, CHATROOM_MIGRATION_FILENAME)
     apply_migration_file(eng, PROPOSAL_DEDUP_MIGRATION_FILENAME)
     return eng

@@ -291,6 +291,7 @@ _APPEND_MESSAGE_STMT = sql_text(
     "  room_id, seq, author_instance_id, author_name,"
     "  text, tagged_members, addressed_members, kind,"
     "  source_message_id, trigger, member,"
+    "  resolution_warnings,"
     "  created_at"
     ") SELECT "
     "  :room_id,"
@@ -304,6 +305,7 @@ _APPEND_MESSAGE_STMT = sql_text(
     "  :source_message_id,"
     "  :trigger,"
     "  :member,"
+    "  :resolution_warnings,"
     "  :created_at"
     " FROM room_messages WHERE room_messages.room_id = :room_id"
     " RETURNING id, seq"
@@ -318,6 +320,7 @@ _APPEND_MESSAGE_STMT = sql_text(
     bindparam("source_message_id"),
     bindparam("trigger"),
     bindparam("member"),
+    bindparam("resolution_warnings", type_=JSONBType),
     bindparam("created_at"),
 )
 
@@ -368,6 +371,7 @@ def _message_payload(message: RoomMessage) -> dict[str, Any]:
         "source_message_id": message.source_message_id,
         "trigger": message.trigger,
         "member": message.member,
+        "resolution_warnings": list(message.resolution_warnings or []),
         "created_at": message.created_at,
     }
 
@@ -518,6 +522,35 @@ class RoomRepository:
         )
         if active_only:
             stmt = stmt.where(ChatRoomMember.state == RoomMemberState.ACTIVE.value)
+        stmt = stmt.order_by(ChatRoomMember.joined_at)
+        with Session(self._engine) as session:
+            return [
+                member_payload(m) for m in session.exec(stmt).all()
+            ]
+
+    def list_member_rooms(
+        self, instance_id: str, *, active_only: bool = True
+    ) -> list[dict[str, Any]]:
+        """Every room this instance has a membership row in (P5).
+
+        The INVERSE of :meth:`list_members` — the digest builder needs
+        "which rooms am I in?" (the instance's own rooms), while the
+        roster read needs "who is in this room?". The lookup is by the
+        ``idx_chatroom_members_instance_id`` index.
+
+        NOT behind the read predicate: the subject of the query IS the
+        caller (their own membership rows), so there is nothing to
+        authorize — the row set is the caller's own. The returned rows
+        carry the membership state so the caller can filter LEFT rows
+        (``active_only=False`` returns them).
+        """
+        stmt = select(ChatRoomMember).where(
+            ChatRoomMember.instance_id == instance_id
+        )
+        if active_only:
+            stmt = stmt.where(
+                ChatRoomMember.state == RoomMemberState.ACTIVE.value
+            )
         stmt = stmt.order_by(ChatRoomMember.joined_at)
         with Session(self._engine) as session:
             return [
@@ -687,6 +720,7 @@ class RoomRepository:
         source_message_id: int | None = None,
         trigger: str | None = None,
         member: str | None = None,
+        resolution_warnings: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Append one message — per-room monotonic seq, single statement.
 
@@ -703,6 +737,13 @@ class RoomRepository:
         :class:`RoomNotFoundError`. The append ALSO bumps the room's
         denormalized ``message_count`` + ``last_post_at`` in the same
         transaction.
+
+        ``resolution_warnings`` (P5 / A-P3-16) is the DURABLE
+        addressing-resolution warning set — written AT APPEND time
+        because the log is append-only (no UPDATE path exists for a
+        ``room_messages`` row). The caller resolves the targets BEFORE
+        the append (the append is the commit point) and hands the
+        per-name reasons over here.
         """
         now = _utc_now_iso()
         try:
@@ -731,6 +772,7 @@ class RoomRepository:
                     "source_message_id": source_message_id,
                     "trigger": trigger,
                     "member": member,
+                    "resolution_warnings": list(resolution_warnings or []),
                     "created_at": now,
                 }).first()
                 if result is None:
@@ -756,6 +798,7 @@ class RoomRepository:
             "source_message_id": source_message_id,
             "trigger": trigger,
             "member": member,
+            "resolution_warnings": list(resolution_warnings or []),
             "created_at": now,
         }
 

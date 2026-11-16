@@ -165,12 +165,17 @@ class RoomChatService:
         source_message_id: int | None = None,
         trigger: str | None = None,
         member: str | None = None,
+        resolution_warnings: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Append under the per-room lock (off-loop).
 
         Lock scope: the ENTIRE append (room-state gate + seq INSERT +
         counters bump). The lock serializes writers within the daemon;
         ``UNIQUE(room_id, seq)`` backstops anything else.
+
+        ``resolution_warnings`` (P5 / A-P3-16) rides the SAME insert —
+        the log is append-only, so the durable warning set is written
+        at append time (the commit point).
         """
         lock = await self.get_room_lock(room_id)
         async with lock:
@@ -186,6 +191,7 @@ class RoomChatService:
                 source_message_id=source_message_id,
                 trigger=trigger,
                 member=member,
+                resolution_warnings=resolution_warnings,
             )
 
     # ── membership (P2) ────────────────────────────────────────────────
@@ -291,6 +297,19 @@ class RoomChatService:
             room_id,
             caller_instance_id=caller_instance_id,
             active_only=active_only,
+        )
+
+    async def list_member_rooms(
+        self, instance_id: str, *, active_only: bool = True
+    ) -> list[dict[str, Any]]:
+        """Every room this instance holds a membership row in (P5).
+
+        The digest builder's "which rooms am I in?" lookup — the
+        INVERSE of the roster read. The subject of the query is the
+        caller themself, so no read predicate applies.
+        """
+        return await asyncio.to_thread(
+            self._repo.list_member_rooms, instance_id, active_only=active_only
         )
 
     async def read_messages(
