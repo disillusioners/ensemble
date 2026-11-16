@@ -766,6 +766,58 @@ class TestP11BootNoBehaviorChange:
     FRONTEND_UI_LANE_SANCTIONED_PATH = "frontend/"
     FRONTEND_UI_LANE_MARKERS = ("room", "chat")
 
+    # F-1 — the FE-UI sanction is PATH-BOUND, not marker-bound. The
+    # marker vocabulary ("room" / "chat") is GENERIC: a foreign
+    # frontend/ hunk worded with it passes a marker-only rule (the
+    # review's probe proved exactly that). The sanctioned set is
+    # therefore the EXACT path list below, and it is the SINGLE SOURCE
+    # OF TRUTH for BOTH the span pin and the F-2 tree-level compensator:
+    # a frontend/ path OUTSIDE this list is an offender REGARDLESS of
+    # its wording (no generic wording buys a foreign path a pass), and a
+    # hunk INSIDE a listed path must ADDITIONALLY carry a marker.
+    # Extending the sanctioned surface is a DELIBERATE, committed act
+    # (add the path here in the same change that touches it).
+    FRONTEND_UI_LANE_SANCTIONED_FILES = (
+        "frontend/src/app/app.component.spec.ts",
+        "frontend/src/app/components/room-dialog/room-dialog.component.html",
+        "frontend/src/app/components/room-dialog/room-dialog.component.scss",
+        "frontend/src/app/components/room-dialog/room-dialog.component.spec.ts",
+        "frontend/src/app/components/room-dialog/room-dialog.component.ts",
+        "frontend/src/app/models/index.ts",
+        "frontend/src/app/models/room.model.ts",
+        "frontend/src/app/pages/chat/chat.component.spec.ts",
+        "frontend/src/app/pages/chat/chat.component.ts",
+        "frontend/src/app/pages/chat/chat.html",
+        "frontend/src/app/pages/chat/chat.scss",
+        "frontend/src/app/services/room.service.spec.ts",
+        "frontend/src/app/services/room.service.ts",
+        "frontend/src/styles.scss",
+    )
+
+    # F-2 — the FIXED committed-tree reference for the compensator: the
+    # P4||P5 wave merge (858a85e31) — the tree the P6 FE-UI lane's
+    # sanctioned surface was committed AGAINST. It is deliberately NOT
+    # merge-relative: a merge-relative reference empties when the merge
+    # absorbs the sanctioned drift (the hole the compensator closes),
+    # while a fixed base NEVER empties — the comparison judges the
+    # current committed tree on every run, before and after the merge.
+    FRONTEND_UI_LANE_SANCTIONED_BASE = "858a85e31489c7db9e9275955e63c021cfc5a2c4"
+
+    # The EXACT marker CONSTANT lines the FE-UI lane committed — the
+    # file-state "constants' presence" anchors, in the same posture as
+    # the leader-sanctioned None-guard's SANCTIONED_HUNK_LINES (the
+    # precedent's file-state compensator). These two lines are the
+    # sanctioned drift's own wording: their absence REDs the
+    # compensator even when the merge-relative span is empty.
+    FRONTEND_UI_LANE_MARKER_CONSTANTS = {
+        "frontend/src/app/app.component.spec.ts": (
+            "// FE-UI lane marker (group-chat P6 room modal lane): A-P6-23."
+        ),
+        "frontend/src/app/pages/chat/chat.component.spec.ts": (
+            "// FE-UI lane marker (group-chat P6 room modal suite): A-P6-23."
+        ),
+    }
+
     # Cross-lane carve-out: a hunk claimed by ANY sanctioned lane is
     # sanctioned drift, so co-spanning sanctioned lanes do not
     # cross-red each other (the memoir pin would otherwise RED on the
@@ -849,59 +901,74 @@ class TestP11BootNoBehaviorChange:
             )
         ]
 
-    def _frontend_ui_hunks_missing_sanctioned_marker(self, span):
-        """Hunks of the frontend/ drift in ``span`` that carry NO
-        sanctioned FE-UI marker. Mirrors the manager.py lane checker
-        above for the FE lane's own path and marker vocabulary: the
-        diff, the hunk parse and the marker check are identical — only
-        the path (``frontend/``) and the marker set
-        (``FRONTEND_UI_LANE_MARKERS``) differ. One ADDITION the
-        single-file manager.py checker never needed: the parse FLUSHES
-        on ``diff --git`` boundaries, because the frontend/ diff spans
-        14 files — without the flush, a file's trailing hunk would
-        merge into the next file's first hunk and a markerless trailing
-        hunk could piggyback on the next file's marker. A span with no
-        frontend/ diff is vacuously clean ([]). A degenerate diff
+    def _frontend_ui_offending_hunks(self, diff_text):
+        """Offending frontend/ hunks in ``diff_text`` — the SHARED body
+        of the FE-UI pins (the span pin below and the F-2 tree-level
+        compensator). The diff, the hunk parse and the marker check are
+        identical for both callers; only the DIFF REFERENCE differs (the
+        merge-relative span vs the fixed committed base).
+
+        A hunk is an OFFENDER when EITHER
+          (a) its PATH is not in FRONTEND_UI_LANE_SANCTIONED_FILES — the
+              sanction is PATH-BOUND (F-1): a foreign frontend/ file is
+              an offender REGARDLESS of its wording, so the generic
+              "room"/"chat" markers cannot buy a foreign path a pass;
+              or
+          (b) it carries NO marker from FRONTEND_UI_LANE_MARKERS — the
+              lexical rule, now scoped to the allowlisted paths.
+
+        The parse flushes on ``diff --git`` boundaries (the frontend/
+        diff spans many files) and on ``@@`` headers, so every hunk is
+        attributed to its OWN file and a markerless trailing hunk cannot
+        piggyback on the next file's first hunk. An EMPTY diff is
+        vacuously clean ([]) — the merge-relative span empties when the
+        merge absorbs the sanctioned drift, and that pin must stay
+        quiet (the compensator carries the teeth). A degenerate diff
         (content lines but no hunk headers) yields a pseudo-hunk so the
         caller's ``== []`` assert still fails — the manager.py
         checker's degenerate assert, preserved.
         """
-        diff = self._git(
-            "diff", "--unified=0", span, "--",
-            self.FRONTEND_UI_LANE_SANCTIONED_PATH,
-        )
-        if not diff.strip():
-            return []  # nothing sanctioned in this span — vacuously clean
-        hunks: list[list[str]] = []
+        if not diff_text.strip():
+            return []  # nothing to judge — vacuously clean
+        hunks: list[tuple[str, list[str]]] = []
         current: list[str] = []
-        for line in diff.splitlines():
+        current_path = ""
+        for line in diff_text.splitlines():
             if line.startswith("diff --git"):
                 if current:
-                    hunks.append(current)
+                    hunks.append((current_path, current))
                     current = []
+                current_path = line.split(" b/")[-1].strip()
                 continue
             if line.startswith("@@"):
                 if current:
-                    hunks.append(current)
-                current = []
+                    hunks.append((current_path, current))
+                    current = []
                 continue
             if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
                 current.append(line)
         if current:
-            hunks.append(current)
+            hunks.append((current_path, current))
         if not hunks:
             return [[
                 "<degenerate: frontend/ diff had content lines but no "
                 "hunk headers>"
             ]]
-        return [
-            hunk for hunk in hunks
+        offenders = []
+        for path, hunk in hunks:
+            if path not in self.FRONTEND_UI_LANE_SANCTIONED_FILES:
+                # (a) path-bound: a foreign frontend/ path is an
+                # offender whatever its wording says.
+                offenders.append((path, hunk))
+                continue
             if not any(
                 marker in line.lower()
                 for line in hunk
                 for marker in self.FRONTEND_UI_LANE_MARKERS
-            )
-        ]
+            ):
+                # (b) markerless inside an allowlisted path.
+                offenders.append((path, hunk))
+        return offenders
 
     def test_sanctioned_guard_present_in_file(self):
         # File-state pin: the sanctioned hunk must be present, contiguous,
@@ -1037,20 +1104,95 @@ class TestP11BootNoBehaviorChange:
         """The SANCTIONED group-chat (P6 FE-UI) lane frontend/ drift.
 
         Every hunk of the frontend/ drift in the post-merge span must
-        carry a sanctioned FE-UI marker ("room" or "chat" — measured
+        be SANCTIONED: its path must be in the F-1 path allowlist
+        (FRONTEND_UI_LANE_SANCTIONED_FILES — a foreign frontend/ path
+        is an offender REGARDLESS of its wording) AND it must carry a
+        sanctioned FE-UI marker ("room" or "chat" — measured
         PER-HUNK-COMPLETE across the 14 commissioned files, 17 hunks;
         the parse flushes on file boundaries so a markerless trailing
         hunk cannot piggyback on the next file's first hunk). A
         frontend/ change from ANY other lane (the source-gc lane
-        included) lands in a hunk with no sanctioned marker and REDs
-        here — the guard's intent (the source-gc lane must not drift
-        frontend/) is preserved; only the P6-commissioned FE surface is
-        allowed. Mirrors the manager.py lane pins (decision / memoir /
+        included) lands in an offending hunk and REDs here — the
+        guard's intent (the source-gc lane must not drift frontend/) is
+        preserved; only the P6-commissioned FE surface is allowed.
+        Mirrors the manager.py lane pins (decision / memoir /
         group-chat).
+
+        SCOPE LIMIT (the F-2 compensator's reason to exist): this is a
+        HISTORY pin — its span is merge-relative, so on the MERGED
+        branch the span empties (the merge absorbs the sanctioned
+        drift) and this pin stops judging. The tree-level compensator
+        (test_the_frontend_ui_lane_drift_is_confined_to_the_allowlist_at_the_tree_level)
+        carries the guard across the merge.
         """
         merge = self._git(
             "rev-list", "--first-parent", "--merges", "-1", "HEAD"
         ).strip()
         assert merge, "no first-parent merge found"
         span = f"{merge}..HEAD"
-        assert self._frontend_ui_hunks_missing_sanctioned_marker(span) == []
+        diff = self._git(
+            "diff", "--unified=0", span, "--",
+            self.FRONTEND_UI_LANE_SANCTIONED_PATH,
+        )
+        assert self._frontend_ui_offending_hunks(diff) == []
+
+    def test_the_frontend_ui_sanctioned_files_carry_their_marker_constants(self):
+        """F-2 (file-state compensator) — the FE-UI sanction's CONSTANTS
+        are PRESENT in the current tree, so the guard PERSISTS after the
+        merge-relative span empties.
+
+        The span pin above is a HISTORY pin: on the merged branch its
+        span (first-parent-merge..HEAD) is EMPTY — the merge absorbs the
+        sanctioned drift — and it stops judging anything. This pin is
+        the COMPENSATOR: it reads the CURRENT tree, never a span, so it
+        keeps its teeth across the merge. Per allowlisted path (F-1's
+        path allowlist — the single source of truth for the sanctioned
+        set) it asserts: the file EXISTS, it carries a marker from
+        FRONTEND_UI_LANE_MARKERS, and its sanctioned marker CONSTANT is
+        present VERBATIM — the exact-line posture the leader-sanctioned
+        None-guard uses for daemon/routers/sources.py (the precedent's
+        file-state compensator), applied to the FE-UI lane.
+        """
+        for path in self.FRONTEND_UI_LANE_SANCTIONED_FILES:
+            assert os.path.exists(path), (
+                f"the sanctioned FE-UI file is missing from the tree: {path}"
+            )
+            text = open(path).read().lower()
+            assert any(
+                marker in text for marker in self.FRONTEND_UI_LANE_MARKERS
+            ), f"the sanctioned FE-UI file carries no FE-UI marker: {path}"
+        for path, constant in self.FRONTEND_UI_LANE_MARKER_CONSTANTS.items():
+            assert constant in open(path).read(), (
+                f"the FE-UI marker constant is missing from {path}: "
+                f"{constant!r}"
+            )
+
+    def test_the_frontend_ui_lane_drift_is_confined_to_the_allowlist_at_the_tree_level(
+        self,
+    ):
+        """F-2 (tree-level compensator) — the FE-UI sanction's ALLOWLIST
+        is enforced against the COMMITTED TREE, so the guard PERSISTS
+        after the merge-relative span empties.
+
+        The span pin judges the merge-relative span; on the merged
+        branch that span is EMPTY (the merge absorbs the sanctioned
+        drift) and the pin stops judging — the hole this compensator
+        closes. Here the reference is a FIXED committed base (the P4||P5
+        wave merge, 858a85e31 — the tree the P6 FE-UI lane's surface was
+        committed AGAINST), so the comparison NEVER empties: the current
+        committed tree's frontend/ drift is judged against the sanctioned
+        set on every run, before and after the merge.
+
+        The rule is F-1's PATH ALLOWLIST: a frontend/ path OUTSIDE
+        FRONTEND_UI_LANE_SANCTIONED_FILES is an offender REGARDLESS of
+        its wording (the generic "room"/"chat" markers cannot buy a
+        foreign file a pass — the review's probe), and a hunk inside an
+        allowlisted path must ADDITIONALLY carry a marker.
+        """
+        diff = self._git(
+            "diff", "--unified=0",
+            f"{self.FRONTEND_UI_LANE_SANCTIONED_BASE}..HEAD",
+            "--",
+            self.FRONTEND_UI_LANE_SANCTIONED_PATH,
+        )
+        assert self._frontend_ui_offending_hunks(diff) == []
