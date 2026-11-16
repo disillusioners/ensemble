@@ -157,10 +157,21 @@ def test_the_guidelines_text_is_a_static_constant_not_an_agents_prompt(stack):
     # The constant lives in the builder module — NOT in any agents/*.md
     # file (the prompt-artifact baseline / seal must not move for this
     # feature — RK-8).
+    #
+    # RE-AIMED (P6 H2, 2026-11-16): the builder module MOVED to
+    # ``daemon/services/joined_room_context.py`` (the H2 extraction).
+    # The pin now reads the NEW home — and it ALSO asserts the
+    # historical import surface still resolves the constant (the move is
+    # a MOVE, not a fork), so a future refactor cannot silently fork
+    # the guidelines text into a second implementation.
     module_source = (
-        REPO_ROOT / "daemon" / "services" / "context_messages.py"
+        REPO_ROOT / "daemon" / "services" / "joined_room_context.py"
     ).read_text(encoding="utf-8")
     assert "ROOM_GUIDELINES_TEXT" in module_source
+    # The re-export from the historical home still resolves.
+    from daemon.services.context_messages import ROOM_GUIDELINES_TEXT as _re
+
+    assert _re is ROOM_GUIDELINES_TEXT
     for md in sorted((REPO_ROOT / "agents").glob("*/**/*.md")):
         text = md.read_text(encoding="utf-8")
         assert "How this team works: report MILESTONES" not in text, (
