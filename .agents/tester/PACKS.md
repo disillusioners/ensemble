@@ -1,3 +1,37 @@
+<!-- group-chat-p4-reverify-20261116-begin -->
+## GROUP-CHAT P4 — SCOPED RE-VERIFY @ `66e59faa1` (2026-11-16; fixes `c249d7fce`/`16f31452d` + pin/doc commits; verdict **AXIS CLOSED**; evidence: `RESULTS/2026-11-16-group-chat-p4-tester-gate.md` §11 + `/tmp/gc_p4_gate/reverify_*`)
+
+| Check | Result |
+|---|---|
+| F2 CLE re-pin | ✅ CORRECT at tip — re-derived via the file's own `ast.If` recipe: 9910/10072 == asserted == claimed; whole file 12/12; counter-mutation discriminates (only 9910/10072 green) |
+| F1 carrier (5 paths) | ✅ CLOSED — all 5 reminder-returning tool paths carry the nudge; base-tree byte-identity 88/86/98/79/63 B; no injection lane; latch 1/turn; payload contract preserved |
+| F3 arity binding (D1) | ✅ CLOSED by construction — name frozenset deleted (`graph.py:7802-7812`), positional-arity binding (`:8020-8025`), 4/4 probe legs + real-graph E2E; loud warn `:5041-5053` exercised; M9 verified on isolated copy (exactly 3/6 redden) |
+| `test_room_nudge.py` | ✅ 40/40 (+12: 6 F1 + 6 F3 pins; 28/28 prior survive) |
+| `TestP11BootNoBehaviorChange` | ✅ 6/6 (per-node counter-mutation teeth, incl. the P4-lane manager-drift node) |
+| `test_language_check.py` STANDALONE | ✅ 124/124 |
+| lineno/SHA completeness sweep | ✅ NO other stale pins on lane files (43 files, 1566P/8F; 4 reds all attributed — quarantine or red-at-base) |
+<!-- group-chat-p4-reverify-20261116-end -->
+<!-- group-chat-p4-tester-gate-20261116-begin -->
+## GROUP-CHAT P4 — INDEPENDENT TESTER GATE (2026-11-16 @ HEAD `522c6a9ba` = tidier tip; base `adbc7bf21`; verdict **PASS-WITH-NOTES** — behavior/product clean; the regression axis carries 2 net-new TEST-SIDE stale CLE line pins ⇒ the 2-constant re-pin is the must-fix before merge; full evidence: `RESULTS/2026-11-16-group-chat-p4-tester-gate.md` + `/tmp/gc_p4_gate/`)
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `gc_p4_tier2_regression_base` (ad-hoc) | 2 manifest shards (508/544 files) `-n 8 --junitxml` + serial repositories + serial shared-scratch + fence-family unset-`POSTGRES_DB`, one canonical runner, `timeout 1750`/shard; `git archive adbc7bf21` extraction + worktree venv (`daemon.__file__` asserted inside) | tests/unit 26,662 executed (223F/37E); BARE-ID digest sha `c2f751c6…` | 2026-11-16 | ✅ DONE — closure exact (+3 named helper ids), 27.1 min |
+| `gc_p4_tier2_regression_head` (ad-hoc) | identical shape in-worktree | tests/unit 26,690 executed (209F/21E); digest sha `35dbb34f…` | 2026-11-16 | ✅ DONE — closure exact (same +3), 28.4 min |
+| `gc_p4_digest_equality` (ad-hoc) | BARE-ID comm + 3× serial isolated ladders on all 18 head_only ids (both legs) + quarantine reconcile | common 212 / base_only 48 / head_only 18 → **NET-NEW = 2**: 15 sweep artifacts + 1 known quarantine (nest-report stale pin) + 2 lane-caused TEST-SIDE stale CLE line pins (`_CLE_GUARD_LINE` 9574→9872, `_CLE_REPLACEMENT_LINE` 9736→10034; pinned code byte-identical; precedent `5995366bb`/`4e0981b57`) | 2026-11-16 | ⚠️ NET-NEW 2 — must-fix re-pin before merge |
+| `gc_p4_behavior_service` (ad-hoc) | 8 probes (P1–P8), real file-backed SQLite + real services, dual-layer timeout | 164 checks: carrier byte-identity (9 todo paths × 3 unwired variants), carrier-not-an-injection (7 spy methods zero), filter, shared latch+watermark, C4 asymmetry, release-after-read, restart duplicate, P8 deferred-not-lost | 2026-11-16 | ✅ 8/8 PASS |
+| `gc_p4_behavior_graph` (ad-hoc) | 8 probes (G1–G8), real compiled graphs; reviewer limit-30 re-run + gate-constructed limit-14 | termination, busy-room bound, config-threading guard load-bearing, a2 hold/release, strong form, restart duplicate | 2026-11-16 | ✅ 8/8 PASS |
+| `gc_p4_language_standalone` (ad-hoc) | `timeout 300 .venv/bin/python -m pytest tests/test_language_check.py -q --timeout=300` STANDALONE | order-scoped POK rule honored | 2026-11-16 | ✅ 124/124 |
+| `gc_p4_ensure_core` (ad-hoc) | registered concurrency pack (per-variable scrub, dev-pinned) + static checks | ensure.md Core R1–R7 | 2026-11-16 | ✅ 7/7 PASS (notices N1–N4) |
+<!-- group-chat-p4-tester-gate-20261116-end -->
+<!-- group-chat-p4-coder-registration-20261116-begin -->
+## GROUP-CHAT P4 — NUDGE-HOOKS LANE REGISTRATION (2026-11-16; lane `feature/group-chat-p4` @ `bd4451fce` + fix cycle; base `adbc7bf21`; registered by the P4 coder lane for the reviewer/tester gates)
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `gc_p4_nudge_pins` | `.venv/bin/python -m pytest tests/unit/services/test_room_nudge.py -q --timeout=300` | the P4 lane suite: (a)/(a2) arms, latch+watermark+turn-spend loop-guard, strong form (tag named + single-member lane-(a) re-attempt + per-turn caps + spent-latch resurface), non-member inertness, C4 closed-room exclusion, C1 clear-contract pins, router/wrapper/wiring-order pins, backstop-drop signature pin | 2026-11-16 @ 66e59faa1 | ✅ 40/40 (28 at the P4 gate tip; +12 = 6 F1 carrier-coverage + 6 F3 config-binding pins — count refreshed by the closeout) — M5/M6/M7/M8 mutations each redden their targeted pins (byte-exact restores sha-verified) |
+| `gc_p4_executed_composition` | `.venv/bin/python -m pytest "tests/unit/services/test_room_nudge.py::TestExecutedGraphComposition" -q --timeout=300` | the review-mandated EXECUTED-graph pins: (1) fire→continuation→pass→END terminates (C1 anti-loop), (2) disabled seam + mid-flight injection drains BEFORE the nudge (C3), (3) enabled seam language_check NOT bypassed with coordinator armed (C2), (4) closed room terminates in one pass (C4), (5) the real INJECTION_CONTINUATION_MAX interaction (drain→nudge→pass = 3 passes, 1 nudge) | 2026-11-16 @ fix-cycle tip | ✅ 5/5 — real compiled graphs via `real_graph_module` + recording ScriptedChatModel; caught the config-drop drain-killer during the fix (A-P4-9) |
+<!-- group-chat-p4-coder-registration-20261116-end -->
 <!-- group-chat-p3-regate-20261116-begin -->
 ## GROUP-CHAT P3 — F-1 RE-GATE (2026-11-16 @ HEAD `f4fe2df16` = fix `ebcd6a115` + A-P3-25/26 docs; verdict **FIXED — the P3 gate flips to overall PASS**; full evidence: RESULTS §8 + `/tmp/gc_p3_gate/regate{,_packs}/`)
 

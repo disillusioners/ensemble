@@ -263,6 +263,36 @@ async def _emit_update(
         )
 
 
+async def _room_nudge_note(
+    manager: "InstanceManager",
+    current_instance_id: str,
+) -> str:
+    """Agent group chat P4 — arm (a): the room-nudge note appended to
+    EVERY todo-update carrier (todo_list_update / todo_graph_update /
+    todo_graph_update_subtask).
+
+    The carrier is NON-NARROWING (review N3 pin): this helper is called
+    on every SUCCESSFUL update regardless of the new status — the
+    guard filter inside the coordinator (shared latch + read-watermark
+    + per-turn spend over the instance's rooms) decides whether a
+    note exists, never the carrier. No coordinator wired (legacy
+    manager embeddings) or any fault ⇒ "" — byte-identical pre-P4
+    result. Never raises.
+    """
+    coordinator = getattr(manager, "_room_nudge_coordinator", None)
+    if coordinator is None:
+        return ""
+    try:
+        return await coordinator.evaluate_todo_boundary(current_instance_id)
+    except Exception as e:  # noqa: BLE001 — nudge never breaks the carrier
+        logger.warning(
+            "room nudge note evaluation failed (instance %s): %r",
+            str(current_instance_id)[:8],
+            e,
+        )
+        return ""
+
+
 def create_todo_tools(
     manager: "InstanceManager",
     current_instance_id: str,
@@ -422,7 +452,8 @@ is rejected with a clear error message. A 200-node cap is enforced.
             await _emit_update(live_event_hub, current_instance_id, todos)
             head = f"\U0001f4cb Updated {lookup_desc} \u2192 {status}."
             body = _format_graph(todos)
-            return f"{head}\n\n{body}{reminder}"
+            room_note = await _room_nudge_note(manager, current_instance_id)
+            return f"{head}\n\n{body}{reminder}{room_note}"
         except Exception as e:
             return f"ERROR: Failed to update todo: {e}"
 
@@ -478,7 +509,8 @@ mutation occurs. For node-id-based updates, use ``todo_graph_update``.
             await _emit_update(live_event_hub, current_instance_id, todos)
             head = f"\U0001f4cb Updated {lookup_desc} \u2192 {status}."
             body = _format_graph(todos)
-            return f"{head}\n\n{body}{reminder}"
+            room_note = await _room_nudge_note(manager, current_instance_id)
+            return f"{head}\n\n{body}{reminder}{room_note}"
         except Exception as e:
             return f"ERROR: Failed to update todo: {e}"
 
@@ -756,7 +788,16 @@ Returns:
                     f"Added {len(added_ids)} sub-tasks to node "
                     f"'{node_id}': {ids_str}."
                 )
-            return f"{head}\n\n{body}"
+            # Agent group chat P4 — arm (a) carrier extension: this
+            # path's manager call DOES compute the reminder
+            # (``add_subtask``/``add_subtasks`` return {"todos",
+            # "reminder", ...}), so it is a reminder-returning todo path
+            # and must be able to carry the room nudge. The tool's
+            # payload contract is UNCHANGED (the reminder text itself is
+            # still not emitted here — only the nudge note is appended,
+            # exactly as on the other carriers).
+            room_note = await _room_nudge_note(manager, current_instance_id)
+            return f"{head}\n\n{body}{room_note}"
         except Exception as e:
             return f"ERROR: Failed to add sub-task: {e}"
 
@@ -892,9 +933,11 @@ Returns:
                             f"\nauto_complete requested but {pending_count} "
                             f"sub-task(s) remain pending."
                         )
+            room_note = await _room_nudge_note(manager, current_instance_id)
             return (
                 f"{head}{extra}{reminder}\n\n"
                 f"{_format_graph(todos, verbose=False)}"
+                f"{room_note}"
             )
         except Exception as e:
             return f"ERROR: Failed to update sub-task: {e}"
@@ -963,9 +1006,16 @@ Returns:
                 )
             todos = result["todos"]
             await _emit_update(live_event_hub, current_instance_id, todos)
+            # Agent group chat P4 — arm (a) carrier extension:
+            # ``remove_subtask`` returns {"todos", "reminder"} — a
+            # reminder-returning todo path whose tool payload drops the
+            # reminder text (payload contract UNCHANGED); the room nudge
+            # note rides it exactly as on the other carriers.
+            room_note = await _room_nudge_note(manager, current_instance_id)
             return (
                 f"Removed sub-task '{subtask_id}' from node '{node_id}'.\n\n"
                 f"{_format_graph(todos, verbose=False)}"
+                f"{room_note}"
             )
         except Exception as e:
             return f"ERROR: Failed to remove sub-task: {e}"

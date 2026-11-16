@@ -372,6 +372,43 @@ def _message_payload(message: RoomMessage) -> dict[str, Any]:
     }
 
 
+def _decode_tagged_members(
+    raw: Any,
+    *,
+    source: str,
+    room_id: Any,
+    message_id: Any,
+    seq: Any,
+) -> list[str]:
+    """Decode a ``tagged_members`` column into a list of member names.
+
+    JSONB arrives NATIVE (list) on PG via psycopg3; JSON (TEXT) on
+    SQLite. Handle both — json.loads on a native list would TypeError
+    into the except and SILENTLY DROP the row (under-delivery).
+
+    ``source`` names the calling query so the corrupt-JSON warning
+    carries the right provenance. Corrupt JSON in a delivery-critical
+    column is a data-integrity signal, NOT expected noise: the only
+    writer (append_message) always binds valid JSON via JSONBType, so
+    corruption means external mutation. WARN with the row identity so
+    it neither raises nor silently vanishes (A-P3-9); the row is still
+    excluded from the pending set — it cannot be tagged-delivered.
+    """
+    if isinstance(raw, (list, tuple)):
+        return [str(t) for t in raw]
+    if isinstance(raw, (str, bytes, bytearray)):
+        try:
+            return [str(t) for t in json.loads(raw or "[]")]
+        except (TypeError, ValueError):
+            logger.warning(
+                "%s: corrupt tagged_members JSON for room=%s message_id=%s "
+                "seq=%s — row excluded from the pending set",
+                source, room_id, message_id, seq,
+            )
+            return []
+    return []
+
+
 class RoomRepository:
     """Sync CRUD + the room transactions over the caller's engine."""
 
@@ -1090,34 +1127,18 @@ class RoomRepository:
         pending: list[dict[str, Any]] = []
         with Session(self._engine) as session:
             for row in session.execute(stmt).all():
-                # JSONB arrives NATIVE (list) on PG via psycopg3; JSON
-                # (TEXT) on SQLite. Handle both — json.loads on a
+                # Shared decode helper (the same discipline as the nudge
+                # snapshot): JSONB arrives NATIVE (list) on PG via
+                # psycopg3; JSON (TEXT) on SQLite — json.loads on a
                 # native list would TypeError into the except and
                 # SILENTLY DROP the row (under-delivery).
-                raw = row.tagged_members
-                if isinstance(raw, (list, tuple)):
-                    tagged = list(raw)
-                elif isinstance(raw, (str, bytes, bytearray)):
-                    try:
-                        tagged = json.loads(raw or "[]")
-                    except (TypeError, ValueError):
-                        # Corrupt JSON in a delivery-critical column is
-                        # a data-integrity signal, NOT expected noise:
-                        # the only writer (append_message) always binds
-                        # valid JSON via JSONBType, so corruption means
-                        # external mutation. WARN with the row identity
-                        # so it neither raises nor silently vanishes
-                        # (A-P3-9); the row is still excluded from the
-                        # pending set — it cannot be tagged-delivered.
-                        logger.warning(
-                            "derive_undelivered_tagged: corrupt "
-                            "tagged_members JSON for room=%s message_id=%s "
-                            "seq=%s — row excluded from the pending set",
-                            row.room_id, row.message_id, row.seq,
-                        )
-                        tagged = []
-                else:
-                    tagged = []
+                tagged = _decode_tagged_members(
+                    row.tagged_members,
+                    source="derive_undelivered_tagged",
+                    room_id=row.room_id,
+                    message_id=row.message_id,
+                    seq=row.seq,
+                )
                 if not tagged:
                     continue
                 pending.append(
@@ -1132,3 +1153,140 @@ class RoomRepository:
                     }
                 )
         return pending
+
+    def nudge_snapshot_for_instance(
+        self, instance_id: str
+    ) -> list[dict[str, Any]]:
+        """P4 nudge scan: per-room pending picture for ONE instance.
+
+        Agent group chat P4 (nudge hooks) substrate read — the
+        coordinator's ONLY DB entry point. Read-only; routes, wakes,
+        injects, and advances NOTHING (same discipline as
+        :meth:`derive_undelivered_tagged`).
+
+        **ACTIVE ROOMS ONLY (C4 fix, 2026-11-16 review):** rooms in
+        ``state='active'`` — a CLOSED room is read-only per the
+        ratified capability row ("closed: no" new-activity nudges);
+        its members are never nudged to check it. This differs
+        deliberately from :meth:`derive_undelivered_tagged` (the
+        DELIVERY re-derivation includes closed rooms — messages in a
+        closed room still deliver through the lanes; the NUDGE is a
+        new-activity prompt, not a delivery). Purged rooms have no
+        rows and are structurally excluded.
+
+        For every ACTIVE membership of ``instance_id`` in those
+        active rooms, returns one dict:
+
+          {
+            "room_id", "room_name", "room_state",
+            "member_name",
+            # "role" is RESERVED — carried for shape parity with the
+            # membership payload; NOT consumed by the nudge arms (a)/(a2).
+            "role",
+            "unread":   COUNT(seq > last_read_seq),
+            "max_seq":  MAX(seq) over the room (0 when empty),
+            "pending_tags": [
+              {"seq", "message_id", "tagged_members", "author_instance_id",
+               "author_name", "text"} — TAGGED rows for THIS member
+              above BOTH cursors (the re-derivation predicate),
+            ],
+          }
+
+        The tag-target filter (is THIS member named on the row?) is
+        applied in Python — the JSONB emptiness/containment predicate
+        differs across drivers (same reason
+        ``derive_undelivered_tagged`` filters TAGGED in Python). A row
+        counts for this member when its member_name OR instance_id
+        appears in ``tagged_members`` (the same exact-match + UUID
+        fallback shape the P3 tag resolution uses).
+
+        Cost: ONE query over the instance's memberships joined to that
+        room's messages (bounded by room GC, RK-5). Instances with no
+        room memberships return ``[]`` — the common case is one
+        indexed membership probe.
+        """
+        member_active = RoomMemberState.ACTIVE.value
+        stmt = sql_text(
+            "SELECT"
+            " m.room_id AS room_id,"
+            " r.name AS room_name,"
+            " r.state AS room_state,"
+            " m.member_name AS member_name,"
+            " m.role AS role,"
+            " m.last_read_seq AS last_read_seq,"
+            " m.last_delivered_seq AS last_delivered_seq,"
+            " msg.id AS message_id,"
+            " msg.seq AS seq,"
+            " msg.tagged_members AS tagged,"
+            " msg.author_instance_id AS author_iid,"
+            " msg.author_name AS author_name,"
+            " msg.text AS text"
+            " FROM chatroom_members m"
+            " JOIN chatrooms r ON r.room_id = m.room_id"
+            " LEFT JOIN room_messages msg ON msg.room_id = m.room_id"
+            " WHERE m.instance_id = :iid"
+            "  AND m.state = :member_active"
+            "  AND r.state = :state_active"
+            " ORDER BY m.room_id, msg.seq"
+        ).bindparams(
+            iid=instance_id,
+            member_active=member_active,
+            state_active=RoomState.ACTIVE.value,
+        )
+        rooms: dict[str, dict[str, Any]] = {}
+        with Session(self._engine) as session:
+            for row in session.execute(stmt).all():
+                bucket = rooms.get(row.room_id)
+                if bucket is None:
+                    bucket = {
+                        "room_id": row.room_id,
+                        "room_name": row.room_name,
+                        "room_state": row.room_state,
+                        "member_name": row.member_name,
+                        # "role" is RESERVED — not consumed by the nudge
+                        # arms (a)/(a2); carried for shape parity.
+                        "role": row.role,
+                        "unread": 0,
+                        "max_seq": 0,
+                        "pending_tags": [],
+                    }
+                    rooms[row.room_id] = bucket
+                if row.seq is None:
+                    # No messages in this room (LEFT JOIN miss).
+                    continue
+                seq = int(row.seq)
+                if seq > bucket["max_seq"]:
+                    bucket["max_seq"] = seq
+                if seq > int(row.last_read_seq):
+                    bucket["unread"] += 1
+                # Tag-target filter in Python (driver-neutral).
+                if (
+                    seq > int(row.last_read_seq)
+                    and seq > int(row.last_delivered_seq)
+                ):
+                    # Same corruption discipline as
+                    # derive_undelivered_tagged (A-P3-9): warn
+                    # with row identity, exclude from the
+                    # pending set, never raise.
+                    tagged = _decode_tagged_members(
+                        row.tagged,
+                        source="nudge_snapshot_for_instance",
+                        room_id=row.room_id,
+                        message_id=row.message_id,
+                        seq=seq,
+                    )
+                    if (
+                        row.member_name in tagged
+                        or instance_id in tagged
+                    ):
+                        bucket["pending_tags"].append(
+                            {
+                                "seq": seq,
+                                "message_id": row.message_id,
+                                "tagged_members": tagged,
+                                "author_instance_id": row.author_iid,
+                                "author_name": row.author_name,
+                                "text": row.text,
+                            }
+                        )
+        return list(rooms.values())

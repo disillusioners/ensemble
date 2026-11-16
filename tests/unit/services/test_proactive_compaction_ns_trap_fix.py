@@ -323,17 +323,24 @@ class TestNsTrapCLETargeting:
     # they pin the line as of the review-cycle-1 re-pin commit.
     _GUARD_ANCHOR = "[Compaction][CLE] empty snapshot read"
     _REPLACEMENT_ANCHOR = "[Compaction][CLE] empty replacement"
-    # Re-pinned 2026-11-11 (turn-end-injection-drain): daemon/graph.py
-    # grew above the CLE nodes — the injection-drain router FACTORY
-    # block (+142 lines) then the fix-back Y1 caveat comment (+6) — so
-    # both guards shifted. The lane's two WIRING SITES landed BELOW the
-    # pins (~13.4k) and contributed NOTHING to either shift
-    # (``git show 4db7758ee`` proves it: +7 above, +9 below). Re-computed
-    # with the ast.If walk above (NOT a blind bump): the innermost
-    # ``ast.If`` carrying each anchor string is now at 9574 / 9736
-    # (9426 / 9588 pre-lane; 9568 / 9730 before the fix-back).
-    _CLE_GUARD_LINE = 9574
-    _CLE_REPLACEMENT_LINE = 9736
+    # Re-pinned 2026-11-16 (group-chat P4): daemon/graph.py grew
+    # again above the CLE nodes — the P4 nudge layer's graph-side
+    # additions (the room_completion_gate node factory + its two
+    # routers, the drain-wrapper docstring/restore, the END-chain
+    # wiring in BOTH language branches, plus the C1-C4 fix cycle's
+    # clear-half + config threading) all landed ABOVE the CLE nodes,
+    # and the tester-gate fix cycle's F3 arity-based config binding
+    # (+ its docstring/comment blocks, the removal of the now-dead
+    # ``_ROUTER_CONFIG_PARAM_NAMES`` frozenset) shifted them further.
+    # Re-computed with the ast.If walk above (NOT a blind bump) —
+    # same recipe as the 2026-11-11 re-pin (precedents: 5995366bb,
+    # 4e0981b57): the innermost ``ast.If`` carrying each anchor
+    # string now sits at 9910 / 10072 (9574 / 9736 before this
+    # re-pin; 9872 / 10034 at the tester-gate's measurement point,
+    # before the F3 edits above the nodes). The PINNED CODE is
+    # byte-identical base-vs-head — only the line anchors drifted.
+    _CLE_GUARD_LINE = 9910
+    _CLE_REPLACEMENT_LINE = 10072
 
     @staticmethod
     def _if_node_with_body_constant(substring: str):

@@ -362,3 +362,15 @@ class RoomChatService:
 
     async def derive_undelivered_tagged(self) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._repo.derive_undelivered_tagged)
+
+    async def nudge_snapshot_for_instance(
+        self, instance_id: str
+    ) -> list[dict[str, Any]]:
+        """P4 nudge scan (off-loop facade) — see the repository method.
+
+        Read-only per-room pending picture for ONE instance; the
+        nudge coordinator's only DB entry point."""
+        return await asyncio.to_thread(
+            self._repo.nudge_snapshot_for_instance,
+            instance_id,
+        )

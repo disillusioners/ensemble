@@ -226,6 +226,59 @@ class RoomDeliveryService:
             "warnings": warnings,
         }
 
+    async def redeliver_tag_for_member(
+        self,
+        *,
+        room_id: str,
+        post: dict[str, Any],
+        member: dict[str, Any],
+    ) -> str:
+        """P4 strong-form re-attempt: the lane-(a) machinery for ONE member.
+
+        Agent group chat P4 (nudge hooks) — the completion gate's tag
+        re-attempt entry. The completion gate (room_nudge coordinator)
+        re-derives TAGGED rows pending for the COMPLETING member (above
+        both of that member's cursors) and calls this to re-run the
+        10-state lane assignment for exactly that member. Scope is
+        deliberately SINGLE-MEMBER: re-routing the whole post via
+        :meth:`route_post` would re-deliver to OTHER tagged members
+        whose cursors already advanced (``_tagged_lane`` does not
+        consult the member's own cursors — routing is lane-first).
+
+        This is a composition entry, not a lane change: it re-reads the
+        room row and delegates to the UNCHANGED ``_tagged_lane`` — the
+        same fresh-status read, DEFECT-A downgrade, injection retry,
+        Y14 admission-gated cursor advance, and Ruling-A proposal mint
+        as any route-time tagged delivery. No lane internals touched.
+
+        Args:
+            room_id: The room whose post is being re-attempted.
+            post: The full message payload (id/seq/text/tagged_members/
+                addressed_members — the append_message payload shape;
+                re-read by the caller from the room log).
+            member: The completing member's membership payload
+                (instance_id + member_name at minimum).
+
+        Returns:
+            The ``_tagged_lane`` outcome string ("injected" /
+            "enqueued" / "parked_paused" / "proposal" /
+            "deferred_cursor") — the caller treats any non-delivered
+            outcome as leave-durable (the row re-derives next turn).
+        """
+        room = await self._room.get_room(room_id)
+        if room is None:
+            # Purged mid-gate (A-P3-25 class): nothing to deliver.
+            return "deferred_cursor"
+        return await self._tagged_lane(
+            room_id=room_id,
+            post=post,
+            member=member,
+            sender_instance_id=str(post.get("author_instance_id") or ""),
+            sender_member_name=str(post.get("author_name") or ""),
+            room=room,
+            at_boot=False,
+        )
+
     # ── tagged lane (10-state map) ────────────────────────────────────────
 
     async def _tagged_lane(
