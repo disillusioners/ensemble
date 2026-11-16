@@ -7,7 +7,7 @@ The Emperor's D-S1 ruling mechanized:
   "N unread" note when the room guards allow. The carrier is the
   tool-result reminder — NOT an injection, NOT an enqueue (corrected
   C1 seam; adaptation #3). The carrier is NON-NARROWING: the note is
-  decided by the guards (``todo_boundary_note``), never by the carrier
+  decided by the guards (``evaluate_todo_boundary``), never by the carrier
   firing only on done-updates.
 
 * **(a2) COMPLETION BOUNDARY** — the ``room_completion_gate`` graph
@@ -25,8 +25,10 @@ The Emperor's D-S1 ruling mechanized:
 
   — the turn component (the id of the instance's current root graph
   task, ``manager._graph_tasks``) caps the family at ≤1 room nudge per
-  turn per room, and the read-watermark (``last_nudged_seq``; durable
-  state = the P1 cursors) prevents turn-after-turn re-nagging for the
+  turn per room, and the read-watermark (``last_nudged_seq`` — a RAM
+  LATCH ENTRY, NOT the durable P1 member cursors
+  ``last_read_seq`` / ``last_delivered_seq``, which the repository
+  scan reads separately) prevents turn-after-turn re-nagging for the
   same message batch. A busy room therefore delays completion by AT
   MOST one continuation per turn — never blocks it.
 
@@ -44,7 +46,9 @@ RAM latch payload per entry (N8 — a bounded duplicate per restart is
 accepted because the registry is RAM):
 
     {"reminder_turn": <turn key or None>,   # per-turn reminder spend
-     "last_nudged_seq": <int>,              # read-watermark (re-arm)
+     "last_nudged_seq": <int>,              # read-watermark (re-arm; a RAM
+                                            #   latch entry — NOT the P1
+                                            #   durable member cursors)
      "tag_turn": <turn key or None>}        # per-turn tag re-attempt spend
 
 Every DB touch is off-loop (the room service bridges via
@@ -78,10 +82,29 @@ ROOM_COMPLETION_ROUTE_KEY = "room_completion_route"
 #: verbatim (compaction's injected-message protection).
 ROOM_NUDGE_MARKER = "room_nudge_reminder"
 
+#: Session-state channel carrying the strong-form tag re-attempt
+#: outcomes — a checkpoint-persisted diagnostic channel, read by tests.
+ROOM_NUDGE_TAG_REATTEMPT_OUTCOMES_KEY = "room_nudge_tag_reattempt_outcomes"
+
+__all__ = [
+    "ROOM_COMPLETION_GATE_NODE_NAME",
+    "ROOM_COMPLETION_ROUTE_KEY",
+    "ROOM_NUDGE_MARKER",
+    "ROOM_NUDGE_TAG_REATTEMPT_OUTCOMES_KEY",
+    "RoomNudgeCoordinator",
+]
+
 #: Cap sanity bound for the per-scan reminder text (lane-(a)
 #: notification discipline: ≤300-char leads; multiple rooms join
 #: names, never bodies).
 _MAX_ROOMS_NAMED = 3
+#: Cap on the tag rows the (a2) reminder names — its own bound (the
+#: value today matches the room-name list cap above).
+_MAX_TAG_ROWS_NAMED = 3
+#: Cap on the arm (a) note text ONLY. The (a2) reminder is bounded BY
+#: CONSTRUCTION instead (≤ _MAX_ROOMS_NAMED rooms, ≤ _MAX_TAG_ROWS_NAMED
+#: tag rows) — this cap is deliberately NOT applied there (the (a2)
+#: reminder text is pin-asserted).
 _MAX_NOTE_CHARS = 300
 
 
@@ -108,13 +131,16 @@ class RoomNudgeCoordinator:
     the todo carrier or the graph turn.
     """
 
-    def __init__(self, manager: Any, logger_: logging.Logger | None = None) -> None:
+    def __init__(self, manager: Any, logger: logging.Logger | None = None) -> None:
         self._manager = manager
-        self._log = logger_ or logger
+        # The parameter shadows the module logger — the fallback
+        # re-resolves it explicitly (the same logger object either way).
+        self._log = logger if logger is not None else logging.getLogger(__name__)
         #: RAM side-snapshot for the drain-wrapper backstop probe:
         #: instance_id → True when the last DB scan saw ≥1 nudge-armed
-        #: room. Refreshed on EVERY coordinator scan; read RAM-only by
-        #: the graph router probe (NO DB in routers). Best-effort by
+        #: room. Refreshed on every SUCCESSFUL coordinator scan (the
+        #: fault path keeps the prior value); read RAM-only by the
+        #: graph router probe (NO DB in routers). Best-effort by
         #: design — the primary (a2) path is the gate node's fresh DB
         #: scan; the backstop is the demoted belt-and-braces.
         self._ram_interest: dict[str, bool] = {}
@@ -124,7 +150,7 @@ class RoomNudgeCoordinator:
     @property
     def latch(self) -> dict[tuple[str, str], dict[str, Any]]:
         """THE shared registry (manager-level RAM, keyed (iid, room))."""
-        return self._manager._room_nudge_latch
+        return getattr(self._manager, "_room_nudge_latch", {})
 
     def _entry(self, instance_id: str, room_id: str) -> dict[str, Any]:
         entries = self.latch
@@ -191,7 +217,7 @@ class RoomNudgeCoordinator:
 
     # ── arm (a) — todo-step boundary ──────────────────────────────────
 
-    async def todo_boundary_note(self, instance_id: str) -> str:
+    async def evaluate_todo_boundary(self, instance_id: str) -> str:
         """The (a) arm: the note appended to a todo-update tool result.
 
         Fires on EVERY successful todo update (the carrier is
@@ -204,28 +230,31 @@ class RoomNudgeCoordinator:
         try:
             turn_key = self.resolve_turn_key(instance_id)
             snapshot = await self._snapshot(instance_id)
-            armed: list[dict[str, Any]] = []
+            # (room, latch entry) pairs — the entry is looked up ONCE
+            # per room and reused by the consumption loop below.
+            armed: list[tuple[dict[str, Any], dict[str, Any]]] = []
             for room in snapshot:
                 entry = self._entry(instance_id, room["room_id"])
                 if (
                     self._reminder_armed(room, entry)
                     and entry.get("reminder_turn") != turn_key
                 ):
-                    armed.append(room)
+                    armed.append((room, entry))
             if not armed:
                 self._remember_interest(instance_id, False)
                 return ""
             # Consume the spend for EVERY armed room, then compose the
             # note (counts are read BEFORE consumption).
             total_unread = 0
-            for room in armed:
-                entry = self._entry(instance_id, room["room_id"])
+            for room, entry in armed:
                 total_unread += int(room.get("unread") or 0)
                 entry["last_nudged_seq"] = int(
                     room.get("max_seq") or 0
                 )
                 entry["reminder_turn"] = turn_key
-            names = [str(r.get("room_name") or r["room_id"]) for r in armed]
+            names = [
+                str(r.get("room_name") or r["room_id"]) for r, _ in armed
+            ]
             note = (
                 f"\n\n📬 Nudge: {total_unread} unread message(s) in your "
                 f"team chatroom(s) {_short_room_list(names)} — consider "
@@ -266,33 +295,31 @@ class RoomNudgeCoordinator:
         try:
             turn_key = self.resolve_turn_key(instance_id)
             snapshot = await self._snapshot(instance_id)
-            reminder_rooms: list[dict[str, Any]] = []
+            # (room, latch entry) pairs — the entry is looked up ONCE
+            # per room and reused by the consumption loop below.
+            reminder_rooms: list[tuple[dict[str, Any], dict[str, Any]]] = []
             pending_tags: list[dict[str, Any]] = []
             for room in snapshot:
                 entry = self._entry(instance_id, room["room_id"])
                 if self._reminder_armed(room, entry) and (
                     entry.get("reminder_turn") != turn_key
                 ):
-                    reminder_rooms.append(room)
+                    reminder_rooms.append((room, entry))
                 rows = room.get("pending_tags") or []
-                if (
-                    rows
-                    and room.get("room_state") != RoomState.ACTIVE.value
-                ):
+                if rows and room.get("room_state") == RoomState.ACTIVE.value:
                     # C4 belt: a closed room's pending tags never fire
                     # the strong form (mirrors _reminder_armed).
-                    rows = []
-                if rows and entry.get("tag_turn") != turn_key:
-                    pending_tags.extend(
-                        dict(
-                            row,
-                            room_id=room["room_id"],
-                            room_name=room.get("room_name")
-                            or room["room_id"],
-                            member_name=room.get("member_name"),
+                    if entry.get("tag_turn") != turn_key:
+                        pending_tags.extend(
+                            dict(
+                                row,
+                                room_id=room["room_id"],
+                                room_name=room.get("room_name")
+                                or room["room_id"],
+                                member_name=room.get("member_name"),
+                            )
+                            for row in rows
                         )
-                        for row in rows
-                    )
             if not reminder_rooms and not pending_tags:
                 self._remember_interest(instance_id, False)
                 return empty
@@ -300,13 +327,13 @@ class RoomNudgeCoordinator:
             # Compose the reminder BEFORE consuming spends (counts are
             # pre-consumption).
             total_unread = sum(
-                int(r.get("unread") or 0) for r in reminder_rooms
+                int(r.get("unread") or 0) for r, _ in reminder_rooms
             )
             lines: list[str] = []
             if reminder_rooms:
                 names = [
                     str(r.get("room_name") or r["room_id"])
-                    for r in reminder_rooms
+                    for r, _ in reminder_rooms
                 ]
                 lines.append(
                     f"You have {total_unread} unread message(s) in your "
@@ -322,7 +349,7 @@ class RoomNudgeCoordinator:
             if pending_tags:
                 tag_bits = []
                 seen: set[str] = set()
-                for row in pending_tags[:_MAX_ROOMS_NAMED]:
+                for row in pending_tags[:_MAX_TAG_ROWS_NAMED]:
                     author = str(row.get("author_name") or "a teammate")
                     tag_names = [
                         t for t in (row.get("tagged_members") or [])
@@ -350,8 +377,7 @@ class RoomNudgeCoordinator:
             )
 
             # Consume the spends (only on fire).
-            for room in reminder_rooms:
-                entry = self._entry(instance_id, room["room_id"])
+            for room, entry in reminder_rooms:
                 entry["last_nudged_seq"] = int(room.get("max_seq") or 0)
                 entry["reminder_turn"] = turn_key
             if pending_tags:
@@ -385,8 +411,9 @@ class RoomNudgeCoordinator:
     def ram_interest(self, instance_id: str) -> bool:
         """RAM-only probe for the drain-wrapper backstop peek.
 
-        True when the most recent coordinator scan for this instance
-        saw nudge-armed rooms AND no scan has since cleared it. This is
+        True when the most recent SUCCESSFUL coordinator scan for this
+        instance saw nudge-armed rooms AND no scan has since cleared
+        it (the fault path keeps the prior value). This is
         deliberately NOT the fire predicate — the peek only decides
         whether to detour to the gate node, which re-evaluates fresh
         (DB + latch) on arrival. No DB in routers; stale-True costs one

@@ -34,6 +34,7 @@ from .tool_pairing_history import (
 from typing import Any, Callable, ClassVar, Mapping, NamedTuple, Optional, cast
 from dataclasses import dataclass, field, replace as _replace
 from datetime import datetime, timezone
+from inspect import signature
 from pathlib import Path
 import asyncio
 import hashlib
@@ -4187,8 +4188,8 @@ class SessionState(MessagesState):
     room_completion_route: str | None = None
     # Diagnostic companion: outcomes of the strong-form tag
     # re-attempts the gate fired alongside the CONTINUE (best-effort,
-    # read by tests/crash-replay; never read by routing).
-    room_nudge_tag_reattempt_outcomes: list | None = None
+    # read by tests; never read by routing).
+    room_nudge_tag_reattempt_outcomes: list[dict] | None = None
     # Persisted diagnostic companion to the in-state nudge marker.  It is
     # intentionally a channel in SessionState (rather than only a transient
     # return value) so checkpoint assertions and crash-replay tests can read
@@ -7785,6 +7786,11 @@ def create_attestation_gate_node(
 # pulls child_reports → graph (the documented cycle); room_nudge is
 # cycle-free itself but must be reached through the package.
 
+#: Parameter names through which a base router may accept the graph
+#: config — routers taking a second positional arg receive
+#: ``(state, config)``.
+_ROUTER_CONFIG_PARAM_NAMES = frozenset({"config", "run_manager", "kwargs"})
+
 
 def create_room_completion_gate_node(
     manager: Any,
@@ -7801,7 +7807,26 @@ def create_room_completion_gate_node(
     from .services.room_nudge import (
         ROOM_COMPLETION_ROUTE_KEY,
         ROOM_NUDGE_MARKER,
+        ROOM_NUDGE_TAG_REATTEMPT_OUTCOMES_KEY,
     )
+
+    def _gate_pass_return() -> dict:
+        """The pass-through return: BOTH channels cleared.
+
+        C1 (2026-11-16 review): the fire path writes
+        ``room_completion_route="agent"`` into checkpoint-persisted
+        state; every non-fire path MUST reset it to ``None`` or the
+        out-edge router re-reads the stale hint and routes "agent"
+        forever — one nudge permanently poisons the thread (measured:
+        GraphRecursionError at limit 30). The attestation gate clears
+        its identical hint on every allow / HOLD / terminal branch
+        (graph.py attestation node — the copied declare-half needs its
+        clear-half). The diagnostic outcomes channel clears with it.
+        """
+        return {
+            ROOM_COMPLETION_ROUTE_KEY: None,
+            ROOM_NUDGE_TAG_REATTEMPT_OUTCOMES_KEY: None,
+        }
 
     async def room_completion_gate_node(
         state: Any, config: Optional[RunnableConfig] = None
@@ -7875,33 +7900,13 @@ def create_room_completion_gate_node(
             effective_instance_id[:8],
             len(pending_tags),
         )
-        # Route hint on the SAME return (checkpoint-durable), the
-        # language_check / attestation plain-dict precedent.
-        # Fire return: the route hint rides checkpoint-durable on the
-        # SAME plain-dict return (the language_check / attestation
-        # precedent) — and the NEXT non-fire pass clears it (above).
+        # Route hint on the SAME plain-dict return (checkpoint-durable)
+        # — the language_check / attestation precedent — and the NEXT
+        # non-fire pass clears it (above).
         return {
             "messages": [nudge],
             ROOM_COMPLETION_ROUTE_KEY: "agent",
-            "room_nudge_tag_reattempt_outcomes": reattempt_outcomes,
-        }
-
-    def _gate_pass_return() -> dict:
-        """The pass-through return: BOTH channels cleared.
-
-        C1 (2026-11-16 review): the fire path writes
-        ``room_completion_route="agent"`` into checkpoint-persisted
-        state; every non-fire path MUST reset it to ``None`` or the
-        out-edge router re-reads the stale hint and routes "agent"
-        forever — one nudge permanently poisons the thread (measured:
-        GraphRecursionError at limit 30). The attestation gate clears
-        its identical hint on every allow / HOLD / terminal branch
-        (graph.py attestation node — the copied declare-half needs its
-        clear-half). The diagnostic outcomes channel clears with it.
-        """
-        return {
-            ROOM_COMPLETION_ROUTE_KEY: None,
-            "room_nudge_tag_reattempt_outcomes": None,
+            ROOM_NUDGE_TAG_REATTEMPT_OUTCOMES_KEY: reattempt_outcomes,
         }
 
     return room_completion_gate_node
@@ -7974,25 +7979,23 @@ def create_room_completion_should_continue(
     if not room_gate_enabled:
         return base_router
 
-    from inspect import signature
-
     from .services.room_nudge import ROOM_COMPLETION_GATE_NODE_NAME
 
     try:
-        _params = list(signature(base_router).parameters.values())
+        params = list(signature(base_router).parameters.values())
     except (TypeError, ValueError):  # pragma: no cover — builtins
-        _params = []
-    _takes_config = any(
-        p.name in ("config", "run_manager", "kwargs")
+        params = []
+    takes_config = any(
+        p.name in _ROUTER_CONFIG_PARAM_NAMES
         or p.kind.name == "VAR_KEYWORD"
-        for p in _params
+        for p in params
     )
 
     def should_continue_with_room_completion(
         state: MessagesState, config: Optional[RunnableConfig] = None
     ) -> str:
         result = (
-            base_router(state, config) if _takes_config else base_router(state)
+            base_router(state, config) if takes_config else base_router(state)
         )
         if result == END or result == ATTESTATION_GATE_NODE_NAME:
             return ROOM_COMPLETION_GATE_NODE_NAME
@@ -13825,12 +13828,12 @@ def build_instance_graph(
             agent_paths[END] = END
         # End-of-turn injection drain (turn-end-injection-drain) — the
         # wrapper sits INSIDE the P4 room wrap (C3 fix, 2026-11-16
-        # review): the room wrap applied FIRST (inner) converted the
-        # terminal verdicts to ``room_completion_gate`` — a verdict
-        # OUTSIDE the injection wrapper's terminal set — so the
-        # wrapper returned before probing the queue and the drain went
-        # DEAD (measured: pending injection + real wrappers → gate
-        # node, no drain, message stranded — for NON-MEMBERS too).
+        # review): BEFORE the C3 fix the room wrap sat INSIDE the
+        # injection wrapper — it converted terminal verdicts to
+        # ``room_completion_gate``, a verdict OUTSIDE the injection
+        # wrapper's terminal set — so the wrapper returned before
+        # probing the queue and the drain went DEAD (pending injection
+        # stranded for members AND non-members).
         # Composition is now room-wrap-OUTERMOST — the
         # disabled-language seam (N4): every terminal verdict the base
         # chain produces (END, or the attestation gate node name)
@@ -13845,14 +13848,14 @@ def build_instance_graph(
         # window (the gate's allow path) that this wrapper cannot reach —
         # HELPER-COVERED by the pipeline's Stage-7 end-of-turn injection
         # drain, not by the in-graph loop-continue.
-        agent_router = create_room_completion_should_continue(
-            create_injection_aware_router(
-                agent_router, injection_slot
-            ),
-            room_gate_enabled=True,
-        ) if room_gate_active else create_injection_aware_router(
+        agent_router = create_injection_aware_router(
             agent_router, injection_slot
         )
+        if room_gate_active:
+            agent_router = create_room_completion_should_continue(
+                agent_router,
+                room_gate_enabled=True,
+            )
         graph.add_conditional_edges("agent", agent_router, agent_paths)
 
     # Watchover interception nodes — sits between agent and tools.

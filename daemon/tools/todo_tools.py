@@ -283,7 +283,7 @@ async def _room_nudge_note(
     if coordinator is None:
         return ""
     try:
-        return await coordinator.todo_boundary_note(current_instance_id)
+        return await coordinator.evaluate_todo_boundary(current_instance_id)
     except Exception as e:  # noqa: BLE001 — nudge never breaks the carrier
         logger.warning(
             "room nudge note evaluation failed (instance %s): %r",

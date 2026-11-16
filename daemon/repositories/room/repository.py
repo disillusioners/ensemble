@@ -372,6 +372,43 @@ def _message_payload(message: RoomMessage) -> dict[str, Any]:
     }
 
 
+def _decode_tagged_members(
+    raw: Any,
+    *,
+    source: str,
+    room_id: Any,
+    message_id: Any,
+    seq: Any,
+) -> list[str]:
+    """Decode a ``tagged_members`` column into a list of member names.
+
+    JSONB arrives NATIVE (list) on PG via psycopg3; JSON (TEXT) on
+    SQLite. Handle both — json.loads on a native list would TypeError
+    into the except and SILENTLY DROP the row (under-delivery).
+
+    ``source`` names the calling query so the corrupt-JSON warning
+    carries the right provenance. Corrupt JSON in a delivery-critical
+    column is a data-integrity signal, NOT expected noise: the only
+    writer (append_message) always binds valid JSON via JSONBType, so
+    corruption means external mutation. WARN with the row identity so
+    it neither raises nor silently vanishes (A-P3-9); the row is still
+    excluded from the pending set — it cannot be tagged-delivered.
+    """
+    if isinstance(raw, (list, tuple)):
+        return [str(t) for t in raw]
+    if isinstance(raw, (str, bytes, bytearray)):
+        try:
+            return [str(t) for t in json.loads(raw or "[]")]
+        except (TypeError, ValueError):
+            logger.warning(
+                "%s: corrupt tagged_members JSON for room=%s message_id=%s "
+                "seq=%s — row excluded from the pending set",
+                source, room_id, message_id, seq,
+            )
+            return []
+    return []
+
+
 class RoomRepository:
     """Sync CRUD + the room transactions over the caller's engine."""
 
@@ -1090,34 +1127,18 @@ class RoomRepository:
         pending: list[dict[str, Any]] = []
         with Session(self._engine) as session:
             for row in session.execute(stmt).all():
-                # JSONB arrives NATIVE (list) on PG via psycopg3; JSON
-                # (TEXT) on SQLite. Handle both — json.loads on a
+                # Shared decode helper (the same discipline as the nudge
+                # snapshot): JSONB arrives NATIVE (list) on PG via
+                # psycopg3; JSON (TEXT) on SQLite — json.loads on a
                 # native list would TypeError into the except and
                 # SILENTLY DROP the row (under-delivery).
-                raw = row.tagged_members
-                if isinstance(raw, (list, tuple)):
-                    tagged = list(raw)
-                elif isinstance(raw, (str, bytes, bytearray)):
-                    try:
-                        tagged = json.loads(raw or "[]")
-                    except (TypeError, ValueError):
-                        # Corrupt JSON in a delivery-critical column is
-                        # a data-integrity signal, NOT expected noise:
-                        # the only writer (append_message) always binds
-                        # valid JSON via JSONBType, so corruption means
-                        # external mutation. WARN with the row identity
-                        # so it neither raises nor silently vanishes
-                        # (A-P3-9); the row is still excluded from the
-                        # pending set — it cannot be tagged-delivered.
-                        logger.warning(
-                            "derive_undelivered_tagged: corrupt "
-                            "tagged_members JSON for room=%s message_id=%s "
-                            "seq=%s — row excluded from the pending set",
-                            row.room_id, row.message_id, row.seq,
-                        )
-                        tagged = []
-                else:
-                    tagged = []
+                tagged = _decode_tagged_members(
+                    row.tagged_members,
+                    source="derive_undelivered_tagged",
+                    room_id=row.room_id,
+                    message_id=row.message_id,
+                    seq=row.seq,
+                )
                 if not tagged:
                     continue
                 pending.append(
@@ -1158,7 +1179,10 @@ class RoomRepository:
 
           {
             "room_id", "room_name", "room_state",
-            "member_name", "role",
+            "member_name",
+            # "role" is RESERVED — carried for shape parity with the
+            # membership payload; NOT consumed by the nudge arms (a)/(a2).
+            "role",
             "unread":   COUNT(seq > last_read_seq),
             "max_seq":  MAX(seq) over the room (0 when empty),
             "pending_tags": [
@@ -1219,6 +1243,8 @@ class RoomRepository:
                         "room_name": row.room_name,
                         "room_state": row.room_state,
                         "member_name": row.member_name,
+                        # "role" is RESERVED — not consumed by the nudge
+                        # arms (a)/(a2); carried for shape parity.
                         "role": row.role,
                         "unread": 0,
                         "max_seq": 0,
@@ -1238,28 +1264,17 @@ class RoomRepository:
                     seq > int(row.last_read_seq)
                     and seq > int(row.last_delivered_seq)
                 ):
-                    raw = row.tagged
-                    if isinstance(raw, (list, tuple)):
-                        tagged = [str(t) for t in raw]
-                    elif isinstance(raw, (str, bytes, bytearray)):
-                        try:
-                            tagged = [
-                                str(t) for t in json.loads(raw or "[]")
-                            ]
-                        except (TypeError, ValueError):
-                            # Same corruption discipline as
-                            # derive_undelivered_tagged (A-P3-9): warn
-                            # with row identity, exclude from the
-                            # pending set, never raise.
-                            logger.warning(
-                                "nudge_snapshot_for_instance: corrupt "
-                                "tagged_members JSON for room=%s "
-                                "message_id=%s seq=%s — row excluded",
-                                row.room_id, row.message_id, seq,
-                            )
-                            tagged = []
-                    else:
-                        tagged = []
+                    # Same corruption discipline as
+                    # derive_undelivered_tagged (A-P3-9): warn
+                    # with row identity, exclude from the
+                    # pending set, never raise.
+                    tagged = _decode_tagged_members(
+                        row.tagged,
+                        source="nudge_snapshot_for_instance",
+                        room_id=row.room_id,
+                        message_id=row.message_id,
+                        seq=seq,
+                    )
                     if (
                         row.member_name in tagged
                         or instance_id in tagged

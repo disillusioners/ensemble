@@ -2412,10 +2412,10 @@ class InstanceManager:
         # watermark + per-turn spend) over the room substrate. The
         # registry object identity is load-bearing (both closures read
         # THIS dict); the coordinator never swaps it.
-        self._room_nudge_latch: dict[tuple[str, str], dict] = {}
+        self._room_nudge_latch: dict[tuple[str, str], dict[str, Any]] = {}
         self._room_nudge_coordinator = RoomNudgeCoordinator(
             manager=self,
-            logger_=logger,
+            logger=logger,
         )
 
         # Child reports service (depends on config, checkpointer, instance_repository via manager)
