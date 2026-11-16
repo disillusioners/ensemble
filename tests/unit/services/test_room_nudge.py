@@ -241,6 +241,274 @@ class TestTodoBoundaryArm:
         assert owner_rows[0]["unread"] == 1  # owner has a seeded row too
 
 
+class TestCarrierCoverage:
+    """F1 — EVERY reminder-returning todo path carries the (a) nudge.
+
+    The spec rides the nudge on EVERY path whose manager call
+    computes the reminder (``update``, ``update_by_index``,
+    ``update_subtask``, ``add_subtask``/``add_subtasks``,
+    ``remove_subtask``) — five tool carriers in total. Each case arms
+    the lane freshly (a new room message re-arms the read-watermark; a
+    new turn key re-arms the per-turn spend) so the assertion is about
+    THE PATH'S CARRIER, not about a latch state left over from the
+    previous case.
+    """
+
+    @staticmethod
+    def _arm(stack):
+        """Post a fresh message (watermark re-arm) + mint a new turn."""
+        _post(stack["svc"], stack["room_id"], text="team update")
+        _new_turn(stack["manager"], "mem-1")
+
+    def _tools(self, stack):
+        from daemon.tools.todo_tools import create_todo_tools
+
+        tools = create_todo_tools(stack["manager"], "mem-1", None)
+        return {t.name: t for t in tools}
+
+    def _setup_node_with_subtask(self, stack, tools):
+        """Create a node carrying one sub-task (no room message yet, so
+        the setup itself cannot consume the latch)."""
+        asyncio.run(tools["todo_graph_create"].coroutine(
+            nodes=[{"id": "n-a1", "text": "parent", "status": "pending"}]
+        ))
+        asyncio.run(tools["todo_graph_add_subtask"].coroutine(
+            node_id="n-a1", list=["child item"]
+        ))
+        return "n-a1"
+
+    def test_list_update_carries_the_nudge(self, stack):
+        tools = self._tools(stack)
+        asyncio.run(tools["todo_list_create"].coroutine(items=["a", "b"]))
+        self._arm(stack)
+        result = asyncio.run(tools["todo_list_update"].coroutine(
+            index=0, status="in_progress"))
+        assert "ERROR" not in result
+        assert "unread" in result and "team chat" in result, (
+            "todo_list_update is a reminder-returning path — it must "
+            "carry the nudge"
+        )
+
+    def test_graph_update_carries_the_nudge(self, stack):
+        tools = self._tools(stack)
+        asyncio.run(tools["todo_graph_create"].coroutine(
+            nodes=[{"id": "n-b2", "text": "parent", "status": "pending"}]
+        ))
+        self._arm(stack)
+        result = asyncio.run(tools["todo_graph_update"].coroutine(
+            node_id="n-b2", status="in_progress"))
+        assert "ERROR" not in result
+        assert "unread" in result and "team chat" in result, (
+            "todo_graph_update must carry the nudge"
+        )
+
+    def test_update_subtask_carries_the_nudge(self, stack):
+        tools = self._tools(stack)
+        node_id = self._setup_node_with_subtask(stack, tools)
+        graph = stack["manager"]._todo_manager.get_graph("mem-1")
+        subtask_id = graph["nodes"][0]["subtasks"][0]["id"]
+        self._arm(stack)
+        result = asyncio.run(tools["todo_graph_update_subtask"].coroutine(
+            node_id=node_id, subtask_id=subtask_id, status="done"))
+        assert "ERROR" not in result
+        assert "unread" in result and "team chat" in result, (
+            "todo_graph_update_subtask must carry the nudge"
+        )
+
+    def test_add_subtask_carries_the_nudge(self, stack):
+        tools = self._tools(stack)
+        asyncio.run(tools["todo_graph_create"].coroutine(
+            nodes=[{"id": "n-c3", "text": "parent", "status": "pending"}]
+        ))
+        self._arm(stack)
+        result = asyncio.run(tools["todo_graph_add_subtask"].coroutine(
+            node_id="n-c3", list=["fresh child"]))
+        assert "ERROR" not in result
+        assert "unread" in result and "team chat" in result, (
+            "todo_graph_add_subtask computes a reminder — it must carry "
+            "the nudge"
+        )
+
+    def test_remove_subtask_carries_the_nudge(self, stack):
+        tools = self._tools(stack)
+        node_id = self._setup_node_with_subtask(stack, tools)
+        graph = stack["manager"]._todo_manager.get_graph("mem-1")
+        subtask_id = graph["nodes"][0]["subtasks"][0]["id"]
+        self._arm(stack)
+        result = asyncio.run(tools["todo_graph_remove_subtask"].coroutine(
+            node_id=node_id, subtask_id=subtask_id))
+        assert "ERROR" not in result
+        assert "unread" in result and "team chat" in result, (
+            "todo_graph_remove_subtask computes a reminder — it must "
+            "carry the nudge"
+        )
+
+    def test_every_reminder_returning_manager_path_is_covered(self, stack):
+        """The inventory pin (F1's structural half): the manager's
+        reminder-returning methods are exactly the six the carrier
+        covers — no silent gap left (the F1 finding was two
+        reminder-returning paths whose tools dropped the computed
+        reminder). Two-sided:
+
+        * runtime probe — each of the six methods returns a payload
+          carrying a ``reminder`` key on a real instance;
+        * docstring scan — NO OTHER public method documents a reminder
+          payload (a new one would have to be audited).
+        """
+        from daemon.services.todo_manager import TodoGraphManager
+
+        mgr = TodoGraphManager()
+        mgr.create("inv-1", ["a", "b"])
+        node_id = mgr.get_graph("inv-1")["nodes"][0]["id"]
+        mgr.add_subtask("inv-1", node_id, "child")
+        subtask_id = mgr.get_graph("inv-1")["nodes"][0]["subtasks"][0]["id"]
+
+        probes = {
+            "update": lambda: mgr.update("inv-1", node_id, "in_progress"),
+            "update_by_index": lambda: mgr.update_by_index(
+                "inv-1", 0, "in_progress"),
+            "update_subtask": lambda: mgr.update_subtask(
+                "inv-1", node_id, subtask_id, "done"),
+            "add_subtask": lambda: mgr.add_subtask(
+                "inv-1", node_id, "child-2"),
+            "add_subtasks": lambda: mgr.add_subtasks(
+                "inv-1", node_id, ["child-3", "child-4"]),
+            "remove_subtask": lambda: mgr.remove_subtask(
+                "inv-1", node_id, subtask_id),
+        }
+        for name, probe in probes.items():
+            payload = probe()
+            assert isinstance(payload, dict), (
+                f"{name} must return a payload dict"
+            )
+            assert "reminder" in payload, (
+                f"{name} is a reminder-returning path — the carrier "
+                "inventory must cover it"
+            )
+        # No OTHER public method documents a reminder payload.
+        documenting = {
+            name for name in dir(TodoGraphManager)
+            if not name.startswith("_")
+            and callable(getattr(TodoGraphManager, name, None))
+            and "reminder" in (getattr(TodoGraphManager, name).__doc__ or "")
+        }
+        assert documenting <= set(probes), (
+            "a NEW reminder-returning manager method appeared "
+            f"({sorted(documenting - set(probes))}) — audit its tool "
+            "path for the room-nudge carrier"
+        )
+
+
+class TestConfigBindingHardening:
+    """F3 — the room wrap's config binding is ARITY-based, so a
+    RENAMED second parameter still receives the config.
+
+    The former name-based heuristic (``config``/``run_manager``/
+    ``kwargs``) failed two ways: a renamed-but-defaulted second param
+    (``cfg=None``) silently DROPPED the config — the drain wrapper
+    then resolved no instance id, skipped its probe and stranded
+    pending injections (the dead-drain defect, latent behind a
+    rename) — and a renamed-REQUIRED second param (``cfg``) raised
+    TypeError on the single-arg call. LangGraph's router contract is
+    POSITIONAL, so the second positional parameter IS the config
+    whatever its name.
+    """
+
+    def test_renamed_defaulted_second_param_receives_the_config(self):
+        """A renamed-but-defaulted second param MUST receive the
+        config (the old heuristic dropped it silently)."""
+        seen = {}
+
+        def base(state, cfg=None):
+            seen["cfg"] = cfg
+            return END
+
+        router = create_room_completion_should_continue(
+            base, room_gate_enabled=True)
+        cfg = {"configurable": {"thread_id": "iid-1"}}
+        verdict = router({}, cfg)
+        assert seen["cfg"] is cfg, (
+            "the config MUST reach the base router's second "
+            "parameter — a dropped config kills the injection drain "
+            "(the queue probe cannot resolve an instance id)"
+        )
+        assert verdict == ROOM_COMPLETION_GATE_NODE_NAME
+
+    def test_renamed_required_second_param_receives_the_config(self):
+        """A renamed-REQUIRED second param must not raise TypeError
+        (the old heuristic's single-arg call blew up)."""
+        seen = {}
+
+        def base(state, cfg):
+            seen["cfg"] = cfg
+            return END
+
+        router = create_room_completion_should_continue(
+            base, room_gate_enabled=True)
+        cfg = {"configurable": {"thread_id": "iid-1"}}
+        verdict = router({}, cfg)
+        assert seen["cfg"] is cfg
+        assert verdict == ROOM_COMPLETION_GATE_NODE_NAME
+
+    def test_single_param_base_receives_state_only(self):
+        """A single-parameter base (``should_continue``-shaped) must
+        still be called with the state alone — no TypeError."""
+        seen = {}
+
+        def base(state):
+            seen["state"] = state
+            return END
+
+        router = create_room_completion_should_continue(
+            base, room_gate_enabled=True)
+        state = {"messages": []}
+        verdict = router(state, {"configurable": {"thread_id": "iid-1"}})
+        assert seen["state"] is state
+        assert verdict == ROOM_COMPLETION_GATE_NODE_NAME
+
+    def test_kwargs_base_receives_the_config_as_keyword(self):
+        """A ``**kwargs``-style base receives the config as a
+        KEYWORD (never dropped, never a TypeError)."""
+        seen = {}
+
+        def base(state, **kw):
+            seen["kw"] = kw
+            return END
+
+        router = create_room_completion_should_continue(
+            base, room_gate_enabled=True)
+        cfg = {"configurable": {"thread_id": "iid-1"}}
+        router({}, cfg)
+        assert seen["kw"].get("config") is cfg
+
+    def test_disabled_gate_returns_the_base_unchanged(self):
+        """``room_gate_enabled=False`` ⇒ the base router is returned
+        UNWRAPPED (legacy wiring byte-identical)."""
+        def base(state, cfg=None):
+            return END
+
+        assert create_room_completion_should_continue(
+            base, room_gate_enabled=False) is base
+
+    def test_drain_logs_loudly_when_the_config_never_arrived(self, caplog):
+        """F3's loud tell: when the drain wrapper sees a terminal
+        verdict but cannot resolve an instance id (the config never
+        arrived), it WARNS — the dead-drain condition is visible, not
+        silent."""
+        slot = MagicMock()
+        slot.get = MagicMock(return_value=None)
+        base = MagicMock(return_value=END)
+        router = create_injection_aware_router(base, slot)
+        with caplog.at_level("WARNING"):
+            router({}, {"configurable": {}})  # no thread_id
+        assert any(
+            "drain is DEAD" in rec.getMessage() for rec in caplog.records
+        ), (
+            "a terminal verdict without a resolvable instance id is the "
+            "dead-drain signature — it must be LOUD"
+        )
+
+
 # =============================================================================
 # (a2) — completion gate
 # =============================================================================
