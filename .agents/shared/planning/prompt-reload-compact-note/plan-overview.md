@@ -85,8 +85,8 @@ Traceability tags: `C1..C6` = Emperor commission clauses (2026-11-16); `E1..E3` 
 
 **Requirement.** C3 + task §4: a note exceeding the cap is refused. Silent truncation is forbidden — it would produce an authoritative layer that silently differs from what the agent wrote.
 
-- **AC3.1** A note of `cap + 1` characters returns `Error: prompt_reload REFUSED — reason=prompt_reload_compact_note_too_large: <message>`, and the message states **both** the cap and the measured length.
-- **AC3.2** A note of **exactly** `cap` characters is **accepted** (the boundary is inclusive).
+- **AC3.1** A note of `cap + 1` characters (where `cap` is **the cap value per the architect's ruling**, standing proposal 8,000) returns `Error: prompt_reload REFUSED — reason=prompt_reload_compact_note_too_large: <message>`, and the message states **both** the cap and the measured length. The refusal code's test fixture uses the standing proposal 8,000 until the ruling lands; the AC then tracks the ruling's value.
+- **AC3.2** A note of **exactly** `cap` characters (per the architect's ruling; standing proposal 8,000) is **accepted** (boundary inclusive per the proposal; the architect may rule either way and the boundary assertion follows the ruling).
 - **AC3.3** No truncation path exists in the admission code: a mutation leg deletes the length check and AC3.1 goes RED.
 - **AC3.4** A refused over-cap note leaves **no** trace in the carrier (AC2.2's spy applies).
 
@@ -112,7 +112,7 @@ Traceability tags: `C1..C6` = Emperor commission clauses (2026-11-16); `E1..E3` 
 **Requirement.** Pick one: ignore, or refuse. **This lane picks REFUSE** (rationale in D4).
 
 - **AC6.1** `prompt_reload(compact=False, compact_note="text")` → REFUSED `prompt_reload_compact_note_without_compact`.
-- **AC6.2** `prompt_reload(compact=False)` (note absent/empty) → **byte-identical** to today's receipt. **Scope note:** commission clause 5's byte-identity promise is scoped to the input subspace `compact=false ∧ compact_note empty/absent` — the shape that exists today. The (false, non-empty-note) shape is a NEW input shape and is out of that promise; this scoping is stated explicitly because it is a deliberate reading of C5 (see D4 and §13 ES-9).
+- **AC6.2** `prompt_reload(compact=False)` (note absent/empty) → **byte-identical** to today's receipt. **Scope statement (verbatim, leader ruling 2026-11-16):** "C5: byte-identity is asserted for `compact=false ∧ note absent/empty` (today's shape). The pair (`compact=false`, note non-empty) is out of byte-identity scope and MUST refuse with `prompt_reload_compact_note_without_compact`." The (false, non-empty-note) shape is a NEW input shape no today-caller ever sends, so refusing it cannot violate byte-identity of existing behavior; IGNORE-WITH-DISCLOSURE is REJECTED (a silent ignore is a swallow; typed refusal is the honest outcome and catches the caller-error case — an agent that meant `compact=true` and mistyped). [leader ruling 2026-11-16]
 - **AC6.3** The refusal NEVER claims a compaction was requested, armed, or performed.
 
 ### R7 — seam safety: the compaction happens at the NEXT TURN BOUNDARY, never mid-turn
@@ -132,8 +132,8 @@ Traceability tags: `C1..C6` = Emperor commission clauses (2026-11-16); `E1..E3` 
 - **AC8.3** The note renders on **ALL THREE** branches of the three-way branch in `build_compaction_doc` (`daemon/compaction.py:998-1032`):
   - (i) a merged GLOBAL is present (`global_overview` truthy);
   - (ii) `mode == "truncation"` — the branch that currently renders **nothing**;
-  - (iii) the merge failed → `global_overview = None` (`daemon/compaction.py:3774-3778`) → the branch that currently renders `GLOBAL_DOC_PLACEHOLDER_GLOBAL` ("(overview unavailable — merge pass failed; the sections below are authoritative)", `daemon/compaction.py:156`).
-  Three separate tests, one per branch. **(iii) is the regression that matters.**
+  - (iii) **MANDATORY, non-negotiable (BINDING 2.1):** the merge failed → `global_overview = None` (`daemon/compaction.py:3774-3778`) → the branch that currently renders `GLOBAL_DOC_PLACEHOLDER_GLOBAL` ("(overview unavailable — merge pass failed; the sections below are authoritative)", `daemon/compaction.py:156`). **"Surviving where the overview died is the feature's claim to exist."** The acceptance demo MUST show the note rendering on the MERGE-FAILED branch SPECIFICALLY — not on the merged branch, not on the truncation branch. This is an explicit AC, not a note or comment.
+  Three separate tests, one per branch. **(iii) is the regression that matters** and is the lane's acceptance artifact.
 - **AC8.4** In note-armed mode the merge-failure **placeholder is not rendered** — the note supersedes it. The compacted context contains no "(overview unavailable …)" text when an authoritative note is present, because that text would assert the absence of an authoritative summary that demonstrably exists.
 
 ### R9 — the note is INDEPENDENT of the merge pass (the core defect this lane fixes)
@@ -166,6 +166,11 @@ Traceability tags: `C1..C6` = Emperor commission clauses (2026-11-16); `E1..E3` 
 ### R11 — content-free observability (the note never lands in an agent-readable log)
 
 **Requirement.** Task §7 risk #9; resident input (3): the note is the agent's working memory and can carry intimate empire content. It rides verbatim in the **RECORD** and the **CONTEXT**; never in an agent-readable log.
+
+**Doctrines cited (BINDING 2.3 — by name):**
+- **Memoir content-free doctrine** — `docs/guidelines/guideline-memoir-reflection-lane.md` (the memoir lane's content-free convention; the memoir dream lane is the conceptual sibling of this lane, and its content-free discipline is the precedent this lane's D8 mirrors).
+- **Decision Module P1 shadow-only content-free doctrine** — `daemon/services/decision/shadow.py` (the shadow writer's module docstring: "CONTENT-FREE BY CONSTRUCTION. Allowed: ids, hashes, scores, probabilities, counts, latencies, enum labels. NEVER: credentials, any part of an auth header, the request payload, the raw response body, or raw user content"; `sanitize_token` replaces anything that is not an opaque token with its sha256 prefix) and `daemon/tools/prompt_assent.py:789-792` (the house docstring pattern: "Content-free by construction (the 'logs content-free v1' doctrine): never persona, never diff content, never the raw or grouped token"). The critical note records the doctrine as "Decision Module P1 is SHADOW-ONLY — overlay observes+logs, never decides; seams 2/3/4 stay unregistered; Logs content-free v1 (ids/hashes/scores)."
+- **House precedent applied:** the same shape as the prior lane's D24 one frozen INFO line per terminal path (counts/flags only, never persona or diff content) — `daemon/tools/prompt_reload.py:104` `_emit_info_line` + `daemon/services/prompt_refresh.py` `format_info_line`.
 
 - **AC11.1** Every log line emitted by the note path carries the note's **length** and **sha256 prefix** only. A grep-pin asserts that a distinctive sentinel string planted in a test note appears in **zero** log lines.
 - **AC11.2** The note text appears in exactly two places: the compaction **record** (the checkpoint) and the compacted **context**. A pin asserts the note is not written to any audit/ledger table that an agent-readable tool can query.
@@ -281,11 +286,20 @@ If the compaction is deferred (see §13 ES-6), the agent must be told **"deferre
 
 ## 6. The note cap
 
-### 6.1 The proposal
+### 6.0 Authority (BINDING 1 — leader ruling 2026-11-16)
 
-> **CAP = 8,000 characters** (measured in Unicode code points, on the raw `compact_note` string as supplied).
+The commission says **"cap: architect sets"**. Therefore the cap value is **the architect's to set**, not this plan's. Everything below — the 8,000-character value, the inclusive boundary, and the budgeting approach (separate never-condensed doc region charged against the 15% doc ceiling, NOT folded into `GLOBAL_OVERVIEW_TOKEN_CAP=600`) — is a **PLAN PROPOSAL** (a good one; the reasoning is kept). When the architect's ruling lands:
 
-Boundary semantics: **inclusive** — a note of exactly 8,000 chars is accepted; 8,001 is refused with `prompt_reload_compact_note_too_large`.
+- **If concurrence** with the proposal, note it in the ledger and the AC updates to match (no change in value).
+- **If delta**, record the delta in the ledger (a new D-entry citing "leader ruling 2026-11-16" + the architect's value) and update the ACs to track the architect's value.
+
+**No new ES slot, no renumbering:** the cap authority is referenced inside the existing slot criteria (ES-1's ceiling-rule criterion and ES-4's render criterion) rather than as a new slot. The cap AC (AC3.1/AC3.2/AC3.3) is written to track "the cap value (standing proposal: 8,000; the architect's ruling is authoritative)" — see R3 below.
+
+### 6.1 The standing proposal
+
+> **STANDING PROPOSAL: CAP = 8,000 characters** (measured in Unicode code points, on the raw `compact_note` string as supplied). The architect's ruling is authoritative; 8,000 is this plan's proposal.
+
+Boundary semantics: **inclusive** — a note of exactly 8,000 chars is accepted; 8,001 is refused with `prompt_reload_compact_note_too_large`. (Inclusive/exclusive boundary is part of the proposal; the architect may rule either way — the AC's boundary assertion follows the ruling.)
 
 ### 6.2 Why 8,000 and not 16,000
 
@@ -358,7 +372,7 @@ Phases 1 and 2 are **engine-independent** and can start immediately. Phases 3–
 
 | Phase | Name | Objective | Tasks | Coupling | Gate |
 |-------|------|-----------|-------|----------|------|
-| 1 | Contract surface: params, cap, refusals, receipts | The tool's public contract is fixed, implemented, and pinned — with NO engine dependency | 8 | independent of the engine; tight with Phase 2 (the carrier) | none — start now |
+| 1 | Contract surface: params, cap, refusals, receipts | The tool's public contract is fixed, implemented, and pinned — with NO engine dependency | 8 | independent of the engine; tight with Phase 2 (the carrier) | **HELD** — gate order plan → architect → councils → build; the receipt vocabulary in particular is exposed to architect amendment (the "deferred, not compacted" case may change the receipt's shape). Phase 1 does NOT start until the plan clears its council. |
 | 2 | The note carrier (GATED: ES-3) | The armed note is carried from the tool call to the seam, survives pause/quiesce/resume, and is consumed exactly once | 6 | tight with Phase 3 (the render) and Phase 5 (the E2E) | **ES-3** |
 | 3 | The note render (GATED: ES-4) | The note renders verbatim in the GLOBAL region on all three branches, independent of the merge pass | 6 | tight with Phase 2 | **ES-4** |
 | 4 | The note-armed seam hook (GATED: ES-5, ES-6) | The compaction fires at a turn boundary, exactly once, with honest deferral | 6 | tight with Phase 2 (carrier) and Phase 3 (render) | **ES-5, ES-6** |
@@ -378,7 +392,7 @@ Phases 1 and 2 are **engine-independent** and can start immediately. Phases 3–
 | 1.7 | Narrow the "zero conversation-history writes" pin to the stated scope | none | AC13.4 |
 | 1.8 | Extend `test_prompt_reload_refusals.py` (15 → 20 tests) + the `REFUSAL_CODES` membership pin | 1.2 | §4 P5; AC2.1..AC6.1 |
 
-**Exit criterion.** The tool's contract is implemented, pinned, and reviewable with **zero** dependency on the engine ruling. `prompt_reload(compact=True)` arms or refuses; it never compacts yet, and it never says it compacted.
+**Exit criterion.** The tool's contract is implemented, pinned, and reviewable. `prompt_reload(compact=True)` arms or refuses; it never compacts yet, and it never says it compacted. **BINDING 3:** the receipt vocabulary is exposed to architect amendment (the "deferred, not compacted" case may change the receipt's shape), so Phase 1 does NOT start until the plan clears its council — the commission's gate order is plan → architect → councils → build. "Engine-independent" describes the contract's *content*, not its *schedule*.
 
 ### Phase 2 — The note carrier (GATED on ES-3) — 6 tasks
 
@@ -477,7 +491,8 @@ Phases 1 and 2 are **engine-independent** and can start immediately. Phases 3–
 |------|--------------|-----|
 | `tests/unit/tools/test_prompt_reload_tool.py` | The "zero conversation-history writes" pin (docstring `:14`, leg `:456`) is **narrowed in scope**, not deleted | AC13.4 |
 | `tests/unit/tools/test_prompt_reload_refusals.py` | 15 tests → 20; the five new codes get one test each | §4 |
-| `tests/unit/tools/test_prompt_reload_pins.py` | The refusal-code membership/count pin is **re-derived by grep** (never copied). **The privileged-set count pin must be RE-DERIVED, not copied** — see §14's note on the pre-existing RED | POK `testgate-01`, task §5 |
+| `tests/unit/tools/test_prompt_reload_pins.py` | **NO edit by this lane** (BINDING OQ-4). The count pin (`len(PRIVILEGED_TOOL_CATEGORIES) == 23`) already matches measured reality, and this lane does not change the privileged set (tool name/category unchanged), so no re-derivation is needed. The pre-existing RED `test_the_prompt_reload_entry_is_second_to_last_in_the_literal` is **quarantined by name** (see §10.7) — do NOT fix it (another lane's pin = scope growth). | POK `testgate-01` |
+| `tests/unit/tools/test_prompt_reload_refusals.py` | The refusal-code membership/count pin is **re-derived by grep** (never copied). | POK `testgate-01`, task §5 |
 | `tests/unit/test_compaction.py` | The merge-failure render leg (branch iii) | AC8.3(iii), AC9.1 |
 | `.agents/tester/PACKS.md` | The new pack's registration row | §12 L0 |
 
@@ -509,10 +524,15 @@ Dual-layer timeout per the house test-pack convention (layer 1: the caller wraps
 - **L1 is not vacuous:** the golden receipt value is captured from the pre-change code, not hand-written.
 - **L5 is not vacuous:** the assertion is on the note's exact bytes (including a sentinel the summarizer could not have produced), not on "some summary is present".
 
-### 10.6 Test surface (house caution)
+### 10.7 Pre-regression QUARANTINE evidence (BINDING OQ-4)
 
-- The compaction-scoped surface is broad: **169** test files under `tests/` mention "compact", carrying **3,562** `def test_` functions. `tests/unit/test_compaction.py` alone carries **125** `def test_` functions (the pack header at `test/packs/compaction_unit_test.sh` claims **130** nodes — a **disclosed discrepancy**: collection was not run read-only, so the node count is UNVERIFIED; parametrization plausibly accounts for the difference). Do not run a bare `pytest tests/` — it collects the whole tree and can run for hours on unrelated suites.
-- The registered compaction pack is `compaction_unit_test` → `test/packs/compaction_unit_test.sh` → `tests/unit/test_compaction.py` (registration at `.agents/tester/PACKS.md:4504`; the 22-file authoritative set at `:4572`).
+**Rule:** this lane does NOT touch `tests/unit/tools/test_prompt_reload_pins.py` at all (it does not change the privileged set, so no re-derivation is owed). The one pre-existing BASE RED in that file is **quarantined by name** so the tester gate excludes it from net-new-reds math, and it surfaces at merge time through the giter's overlap gate.
+
+| Exact node id | File | Reason | Disposition |
+|---|---|---|---|
+| `test_prompt_reload_pins.py::test_the_prompt_reload_entry_is_second_to_last_in_the_literal` | `tests/unit/tools/test_prompt_reload_pins.py` | Pre-existing BASE RED (file is byte-identical to `origin/latest`): the privileged set grew to **23** members under the group-chat lane while this pin encodes an older shape (prompt-reload is **#20 of 23**, not second-to-last; second-to-last is `guidelines`, last is `room`). | **Quarantined by name — NOT fixed by this lane.** If the group-chat landed range touches `daemon/tools/_tool_registry.py` or that test file, the giter's overlap gate surfaces it and the **leader adjudicates** there (correct value belongs to the privileged-set census owner). |
+
+**What this lane asserts about its own reds:** any red **other than** the node id above, in any file this lane touches, is a net-new red and fails the gate. The count pin `len(PRIVILEGED_TOOL_CATEGORIES) == 23` (`test_prompt_reload_pins.py:71`) is **not** edited by this lane and already matches measured reality.
 
 ---
 
@@ -551,8 +571,8 @@ The `max_llm_calls_per_pass` budget line (`daemon/config.py:4317-4322`) belongs 
 | 11 | **The pre-filter silently drops a message the note does not account for** | **High** | Low (ships OFF) | AR-1's mechanically-decidable law (AC14.5); undecidable → falls through unchanged; the filter ships **disabled** (AC14.1); R-B keeps it a separate contract. |
 | 12 | **The pre-filter is mistaken for the Decision Module** — a shadow-only overlay becomes a deciding surface | High | Low | The pre-filter ships OFF and only runs with a note present (AC14.3); the P1 doctrine stays ratified (AC14.7); ES-2/ES-10 keep the naming and the doctrine question explicit. |
 | 13 | **The default path regresses** | High | Low | AC13.1/13.2 golden pins; R-C's one-hook limit; the lane's edits to the compaction path are pinned by the byte-unchanged golden. |
-| 14 | **The privileged-set / census pin is copied, not re-derived** | Medium | Medium | Task §5 and POK `testgate-01`: re-derive by grep at implementation time. **See §14 — the census is 23 today, and one pin in `test_prompt_reload_pins.py` is ALREADY red on `origin/latest` for a reason unrelated to this lane.** |
-| 15 | **The C5 byte-identity promise is read too broadly** — a caller passes `compact=false` + a note and expects today's receipt | Medium | Medium | D4's scoping is explicit: the promise covers `compact=false ∧ note empty/absent`; the other shape is a new input shape with a typed refusal. The leader may overrule D4 (§13 ES-9). |
+| 14 | **Pre-existing RED misattribution** — `test_prompt_reload_pins.py::test_the_prompt_reload_entry_is_second_to_last_in_the_literal` is a BASE RED (file byte-identical to `origin/latest`; privileged set grew to 23 under the group-chat lane while the pin encodes an older shape). This lane does NOT change the privileged set, so this lane has NO reason to edit that file at all. | Low | Low (for this lane) | **Quarantined by name** (§10.7): excluded from net-new-reds math; surfaces at merge time via the giter's overlap gate if the group-chat landed range touches `daemon/tools/_tool_registry.py` or that test file — leader adjudicates there. Do NOT fix it. |
+| 15 | **The C5 byte-identity promise is read too broadly** — a caller passes `compact=false` + a note and expects today's receipt | Medium | Low (now ruled) | D4 is now **CONFIRMED** (leader ruling 2026-11-16): the promise covers `compact=false ∧ note empty/absent` only; the (false, non-empty-note) shape is a new input shape with a typed refusal (`prompt_reload_compact_note_without_compact`). The scoping statement is verbatim in AC6.2. OQ-3 flipped to ANSWERED. |
 | 16 | **The two contracts get conflated** — a reader believes the note path can lose messages | Medium | Medium | R-B + R12: the note path is pure-additive; the pre-filter is the only removal surface, separately authorized, default-OFF. The Guideline (Phase 6 task 6.7) states the two contracts in separate sections. |
 | 17 | **The engine ruling arrives after implementation starts** — Phase 1 is built against a shape the architect overturns | Medium | Medium | Phase 1 is deliberately engine-independent (contract only); Phases 2–4 are gated on ES-3/ES-4/ES-5. If the ruling overturns a Phase-1 decision, only the receipt vocabulary and the refusal codes might move — the acceptance criteria do not. |
 
@@ -583,6 +603,7 @@ The architect owns these. The Emperor's direction (verbatim, authoritative): *"F
 6. If a NEW module is ruled: it must declare its **seam-safety proof** (never mid-turn) and its **budget/kill-switch ownership**, and it must not write the same compaction record the existing engine writes (one writer per record).
 7. If the EXISTING pipeline is upgraded: the upgrade must be a **mode**, not a fork — the note-armed mode must not duplicate the existing pipeline's logic in a second place.
 8. **Content-free logging** (R11) holds for whichever engine is chosen.
+9. **BINDING 1 — the note cap is the architect's to set.** The cap value (standing proposal: 8,000 characters; see §6) and its budgeting approach (a separate never-condensed doc region charged against `COMPACTION_DOC_CEILING_FRACTION = 0.15`, NOT folded into `GLOBAL_OVERVIEW_TOKEN_CAP = 600`) are PLAN PROPOSALS — the architect's ruling is authoritative. If the ruling concurs, note it; if it deltas, record the delta. The engine must be able to honor whichever cap value the ruling sets (an admission-time check before any write, so an over-cap note is refused, never truncated).
 
 **It must NOT break:** AC1.2, AC13.1, AC13.2, AC12.1, AC12.2, R7 (seam safety), R11 (content-free).
 
@@ -666,6 +687,9 @@ The architect owns these. The Emperor's direction (verbatim, authoritative): *"F
 3. If the window does not bind the note-armed path, the ruling must say how the note-armed path avoids double-compaction at the same seam (Risk #2) — the consumption rule (ES-7) is the mechanism.
 4. If the window does bind it, the ruling must specify the **typed refusal/deferral** code and the agent-facing wording.
 5. No branch may leave the agent believing a compaction happened when it did not (R10).
+6. **BINDING 2.2 — the anti-refire preference is now a CRITERION, not advisory:** a note-armed deliberate compact is a **DIFFERENT TRIGGER CLASS** from threshold-triggered automatic compaction; the 60s window exists for the AUTOMATIC class and should not swallow the deliberate one.
+7. **BINDING 2.2 — NON-NEGOTIABLE FLOOR either way:** if the window binds, the receipt MUST say **"deferred, not compacted"** — NEVER a success receipt for work not done. (Already item 1; restated here so the floor cannot be dropped.)
+8. **BINDING 2.2 — rate-limit alternative:** if the architect adopts a rate limit instead of the window, prefer a **HARDCODED MODULE CONSTANT** over a new config knob — this commission allows **NO new knobs beyond the note cap** (BINDING 1 / F4).
 
 ---
 
@@ -790,16 +814,16 @@ The architect owns these. The Emperor's direction (verbatim, authoritative): *"F
 
 ---
 
-## 15. Open questions (for the leader / architect — none blocking Phase 1)
+## 15. Open questions (for the leader / architect — status after the 2026-11-16 amendment round)
 
-| # | Question | Who decides | If unanswered |
-|---|----------|--------------|---------------|
-| Q1 | ES-9's C5 byte-identity scope: is the promise over `compact=false ∧ note-empty`, or over **every** `compact=false` call (which would force D4 to become IGNORE-with-disclosure)? | **Leader** | Phase 1 proceeds under this plan's reading (D4 = REFUSE) and the reading is disclosed in the plan + the ledger. |
-| Q2 | ES-9's clause-4 rewording text — the architect drafts it; the Guideline and the plan's wording quote it. | **Architect** | The plan's two-contracts-separate framing (R-B) stands. |
-| Q3 | ES-10 (AR-5): may the decision-engine overlay ever be a deciding surface? | **Emperor** | Nothing in this lane depends on it; the pre-filter stays default-OFF and note-bound. |
-| Q4 | The pre-existing RED in `test_prompt_reload_pins.py` (`second_to_last`) — owned by the group-chat lane. This lane edits that file and must not silently "fix" another lane's pin. | **Leader** (routing) | The implementer re-derives the census by grep and reports the pre-existing red; the unrelated pin is left alone and flagged. |
-| Q5 | Should the ARMED receipt's outcome token be `compact_note_armed` (this plan's proposal) or a different frozen literal? | **Architect** (frozen-string discipline) | The plan's proposal stands; the literal is pinned by a golden test at implementation, so changing it later is a one-line change. |
-| Q6 | ES-5's hook shape (T3 vs T4) — note that T4's `pause → quiesce → compact → resume` is the blueprint's canonical "mutate a quiescent instance" shape, while T3 is the over-threshold proactive gate. | **Architect** | Phase 4 stays gated; Phase 1 proceeds. |
+| # | Question | Who decides | Status (2026-11-16) |
+|---|----------|--------------|----------------------|
+| Q1 | ES-9's C5 byte-identity scope: is the promise over `compact=false ∧ note-empty`, or over **every** `compact=false` call (which would force D4 to become IGNORE-with-disclosure)? | **Leader** | **ANSWERED — leader ruling 2026-11-16: D4 CONFIRMED.** The promise covers `compact=false ∧ note empty/absent` only. The (false, non-empty-note) shape is a new input shape with a typed refusal (`prompt_reload_compact_note_without_compact`). IGNORE-WITH-DISCLOSURE rejected. Verbatim scope statement in AC6.2. |
+| Q2 | ES-9's clause-4 rewording text — the architect drafts it; the Guideline and the plan's wording quote it. | **Architect** | Pending (architect). The plan's two-contracts-separate framing (R-B) stands. |
+| Q3 | ES-10 (AR-5): may the decision-engine overlay ever be a deciding surface? | **Emperor** | Pending (Emperor, surfaces on next waking). Nothing in this lane depends on it. |
+| Q4 | The pre-existing RED in `test_prompt_reload_pins.py` (`second_to_last`) — owned by the group-chat lane. | **Leader** (routing) | **ANSWERED — leader ruling 2026-11-16: quarantine-classify, do NOT fix, do NOT touch.** This lane does NOT edit that file (it does not change the privileged set). The node id is quarantined by name (§10.7) and surfaces at merge time via the giter's overlap gate if the group-chat landed range touches `daemon/tools/_tool_registry.py` or that test file — leader adjudicates there. |
+| Q5 | Should the ARMED receipt's outcome token be `compact_note_armed` (this plan's proposal) or a different frozen literal? | **Architect** (frozen-string discipline) | Pending (architect). The plan's proposal stands. |
+| Q6 | ES-5's hook shape (T3 vs T4) — note that T4's `pause → quiesce → compact → resume` is the blueprint's canonical "mutate a quiescent instance" shape, while T3 is the over-threshold proactive gate. | **Architect** | Pending (architect). Phase 4 stays gated. |
 
 ---
 
