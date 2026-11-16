@@ -5,6 +5,7 @@
  * stale-instance drift.
  *
  * Size rationale (~2140 lines, single file): this component is the
+ * FE-UI lane marker (group-chat P6 room modal surface): A-P6-23.
  * load-bearing hub for the chat surface — it threads the message
  * lifecycle end-to-end (send → provisional → SSE echo → REST refetch
  * → purge on terminal). Natural future split seam: the optimistic-

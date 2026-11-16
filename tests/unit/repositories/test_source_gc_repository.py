@@ -789,6 +789,11 @@ class TestP11BootNoBehaviorChange:
         "frontend/src/app/components/room-dialog/room-dialog.component.ts",
         "frontend/src/app/models/index.ts",
         "frontend/src/app/models/room.model.ts",
+        # P6 tidier T1 created this suite (the chatrooms describe moved
+        # out of chat.component.spec.ts, count-identical) — added here
+        # per the maintenance rule above, in the same change that
+        # closes the resulting offender (A-P6-24).
+        "frontend/src/app/pages/chat/chat.chatrooms.spec.ts",
         "frontend/src/app/pages/chat/chat.component.spec.ts",
         "frontend/src/app/pages/chat/chat.component.ts",
         "frontend/src/app/pages/chat/chat.html",
