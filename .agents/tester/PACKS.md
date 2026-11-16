@@ -1,3 +1,16 @@
+<!-- group-chat-p4-reverify-20261116-begin -->
+## GROUP-CHAT P4 — SCOPED RE-VERIFY @ `66e59faa1` (2026-11-16; fixes `c249d7fce`/`16f31452d` + pin/doc commits; verdict **AXIS CLOSED**; evidence: `RESULTS/2026-11-16-group-chat-p4-tester-gate.md` §11 + `/tmp/gc_p4_gate/reverify_*`)
+
+| Check | Result |
+|---|---|
+| F2 CLE re-pin | ✅ CORRECT at tip — re-derived via the file's own `ast.If` recipe: 9910/10072 == asserted == claimed; whole file 12/12; counter-mutation discriminates (only 9910/10072 green) |
+| F1 carrier (5 paths) | ✅ CLOSED — all 5 reminder-returning tool paths carry the nudge; base-tree byte-identity 88/86/98/79/63 B; no injection lane; latch 1/turn; payload contract preserved |
+| F3 arity binding (D1) | ✅ CLOSED by construction — name frozenset deleted (`graph.py:7802-7812`), positional-arity binding (`:8020-8025`), 4/4 probe legs + real-graph E2E; loud warn `:5041-5053` exercised; M9 verified on isolated copy (exactly 3/6 redden) |
+| `test_room_nudge.py` | ✅ 40/40 (+12: 6 F1 + 6 F3 pins; 28/28 prior survive) |
+| `TestP11BootNoBehaviorChange` | ✅ 6/6 (per-node counter-mutation teeth, incl. the P4-lane manager-drift node) |
+| `test_language_check.py` STANDALONE | ✅ 124/124 |
+| lineno/SHA completeness sweep | ✅ NO other stale pins on lane files (43 files, 1566P/8F; 4 reds all attributed — quarantine or red-at-base) |
+<!-- group-chat-p4-reverify-20261116-end -->
 <!-- group-chat-p4-tester-gate-20261116-begin -->
 ## GROUP-CHAT P4 — INDEPENDENT TESTER GATE (2026-11-16 @ HEAD `522c6a9ba` = tidier tip; base `adbc7bf21`; verdict **PASS-WITH-NOTES** — behavior/product clean; the regression axis carries 2 net-new TEST-SIDE stale CLE line pins ⇒ the 2-constant re-pin is the must-fix before merge; full evidence: `RESULTS/2026-11-16-group-chat-p4-tester-gate.md` + `/tmp/gc_p4_gate/`)
 
@@ -16,7 +29,7 @@
 
 | Pack | Invocation | Scope | Last run | Status |
 |---|---|---|---|---|
-| `gc_p4_nudge_pins` | `.venv/bin/python -m pytest tests/unit/services/test_room_nudge.py -q --timeout=300` | the P4 lane suite: (a)/(a2) arms, latch+watermark+turn-spend loop-guard, strong form (tag named + single-member lane-(a) re-attempt + per-turn caps + spent-latch resurface), non-member inertness, C4 closed-room exclusion, C1 clear-contract pins, router/wrapper/wiring-order pins, backstop-drop signature pin | 2026-11-16 @ fix-cycle tip | ✅ 28/28 (27 at fix-cycle tip; +1 tidier AST pin — refreshed by the tester gate) — M5/M6/M7/M8 mutations each redden their targeted pins (byte-exact restores sha-verified) |
+| `gc_p4_nudge_pins` | `.venv/bin/python -m pytest tests/unit/services/test_room_nudge.py -q --timeout=300` | the P4 lane suite: (a)/(a2) arms, latch+watermark+turn-spend loop-guard, strong form (tag named + single-member lane-(a) re-attempt + per-turn caps + spent-latch resurface), non-member inertness, C4 closed-room exclusion, C1 clear-contract pins, router/wrapper/wiring-order pins, backstop-drop signature pin | 2026-11-16 @ 66e59faa1 | ✅ 40/40 (28 at the P4 gate tip; +12 = 6 F1 carrier-coverage + 6 F3 config-binding pins — count refreshed by the closeout) — M5/M6/M7/M8 mutations each redden their targeted pins (byte-exact restores sha-verified) |
 | `gc_p4_executed_composition` | `.venv/bin/python -m pytest "tests/unit/services/test_room_nudge.py::TestExecutedGraphComposition" -q --timeout=300` | the review-mandated EXECUTED-graph pins: (1) fire→continuation→pass→END terminates (C1 anti-loop), (2) disabled seam + mid-flight injection drains BEFORE the nudge (C3), (3) enabled seam language_check NOT bypassed with coordinator armed (C2), (4) closed room terminates in one pass (C4), (5) the real INJECTION_CONTINUATION_MAX interaction (drain→nudge→pass = 3 passes, 1 nudge) | 2026-11-16 @ fix-cycle tip | ✅ 5/5 — real compiled graphs via `real_graph_module` + recording ScriptedChatModel; caught the config-drop drain-killer during the fix (A-P4-9) |
 <!-- group-chat-p4-coder-registration-20261116-end -->
 <!-- group-chat-p3-regate-20261116-begin -->

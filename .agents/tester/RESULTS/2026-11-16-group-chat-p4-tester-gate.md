@@ -167,3 +167,35 @@ Base 223F/37E across 26,662 nodes; head 209F/21E across 26,690. Common red set 2
 ## §10 Disposition
 
 Merge-readiness: **conditional on F2's 2-constant re-pin** (test-side, ~2 lines, precedent ×2) — then the regression axis closes EMPTY and this gate's verdict becomes a clean PASS. F1 is an owner decision (accept 0-or-2 reading vs extend the carrier); F3 is a reviewer-lane structural follow-up; F5 is a one-line docs append. No product-behavior regression was found anywhere in the lane.
+
+---
+
+## §11 SCOPED RE-VERIFY @ `66e59faa1` (closeout, 2026-11-16)
+
+The leader-decided F1/F2/F3 fixes landed at `66e59faa1` (3 commits on top of `785cc899e`; 5 files, +358/−25). Scoped re-verification closed every gate item.
+
+| Check | Result | Evidence |
+|---|---|---|
+| **F2 CLE re-pin** | ✅ **CORRECT at this tip** | Re-derived with the file's OWN `ast.If` recipe against the resolved import path (14003-line graph.py): guard **9910** / replacement **10072** = asserted = claimed. Exactly 1 candidate `ast.If` per anchor; the `precall-95` lookalike (8364/8369) correctly excluded. Anchored quotes: `graph.py:9907-9915` (warning+raise), `:10068-10077`. Pack **12/12**; 2 target nodes **2/2**; no collateral. **Non-vacuity:** in-memory counter-mutation — 9872/10034, 9574/9736, 9911/10073, 9909/10071 all RED; ONLY 9910/10072 GREEN. In-file drift trail 9574/9736 → 9872/10034 → 9910/10072. |
+| **F1 carrier** | ✅ **CLOSED** | All **5** reminder-returning tool paths carry the nudge (`todo_tools.py:455/512/936/799/1014`); the 4 no-reminder paths carry none (no new mechanism invented). **Base-tree byte-identity** (`git archive adbc7bf21` extraction, `daemon.__file__` asserted inside): **88/86/98/79/63 B equal on all 5**. No injection lane on any path (7 spies zero; read-only repo call; cursors unchanged). Latch still 1 nudge/turn incl. the newly-extended paths. Payload contract preserved (nudge appended; manager `⏭️ Next:` text still dropped on add/remove_subtask). Pins: 5 per-path non-vacuous (manager reminder text contains neither "unread" nor "team chat") + inventory pin (runtime half strong; docstring half prose-scan MEDIUM — a new method's docstring omitting "reminder" could escape; runtime half is load-bearing). Structural: manager has 6 reminder-returning methods; `add_subtask` (singular) has NO tool path → 5 tool paths, all covered. |
+| **F3 arity binding (D1)** | ✅ **CLOSED by construction** | Name frozenset DELETED (`graph.py:7802-7812` tombstone); binding positional-arity (`takes_config = len(positional) >= 2`, `:8020-8025`) + `takes_config_kw` for `**kwargs` (`:8027`), 3-branch dispatch (`:8029-8037`). 4/4 probe legs: renamed+defaulted → config received, `thread_id='iid-1'`, slot probed, drain fired; renamed+required → no TypeError; `**kwargs` → config as keyword; 1-param → unchanged. Real-graph E2E: slot probed/cleared, injected message delivered, drain strictly BEFORE nudge. Loud warn (`graph.py:5041-5053`) exercised: emitted + turn completes safely. **M9 verified on an isolated `git archive` copy (worktree untouched, shas captured): exactly 3/6 `TestConfigBindingHardening` pins redden — character-for-character the claim; independent probes on the mutant show the drain DEAD and the injection landing one pass later (3→2 passes).** |
+| `test_room_nudge.py` | ✅ **40/40** (33.3 s) | +12 vs 28: 6 F1 carrier-coverage + 6 F3 config-binding pins; all 28 prior present, 0 removed/renamed. |
+| `TestP11BootNoBehaviorChange` | ✅ **6/6** (0.65 s) | Per-node read-only counter-mutation: every node has TEETH, incl. the P4-lane manager-drift node (2 hunks, both marker-bearing). Disclosed caveat: node 3's exact-hunk half early-returns at this HEAD (`sources.py` diff absorbed); node 1's file pin carries the sources.py teeth. |
+| `test_language_check.py` STANDALONE | ✅ **124/124** (2.40 s) | Ambient-auth left intact (over-scrub false negative avoided); `ENSEMBLE_SELF_ENV=dev` pinned over ambient `live`. |
+| Line-number / stale-SHA completeness sweep | ✅ **NO other stale pins on lane files** | 43 files / 49 invocations / 632 s: **1566P / 8F / 0E**. Only ONE absolute-line-pin file in the tree = the F2 family (**12/12 GREEN**). Every other position pin is content-anchored or relative-order (line-drift-immune). All 4 red files attributed: **RED-1** nest-report (quarantine class; **+2 same-class nodes the row did not name — row corrected by this closeout**; all 3 proven red at BASE via base-tree import, identical 5-route set); **RED-2** `test_instance_tools.py` (known quarantine; only line numbers shifted); **RED-3** dbpool census COUNT baseline (pre-existing red at base 618 vs baseline 438; lane contributes +1 family-A site); **RED-4** `test_metrics_family_adjudication.py` SHA-diff (pre-existing at base: 92 offenders; lane adds exactly 2 — ledger item handed to the metrics lane). |
+
+### Strict-letter axis verdict
+
+**CLOSED.** At the gate tip the only net-new survivors were the 2 CLE line pins (F2); both are fixed, re-derived correct at the new tip, and proven discriminating. The completeness sweep found no other lane-caused stale line-number/SHA pin. The 4 residual reds are quarantined or red-at-base (pre-existing) — none is lane-caused net-new.
+
+### Ledger items handed back (non-gating)
+
+1. **RED-4 → metrics lane**: add `daemon/services/room_nudge.py` + `daemon/tools/todo_tools.py` to `PRE_EXISTING_DAEMON_OFFENDERS`, or re-cut `LANE_BASE`.
+2. **RED-1 → done here**: the quarantine row for `test_nest_report_rest_route.py` now names all 3 red node ids.
+3. **PACKS.md** row `gc_p4_nudge_pins` refreshed 28/28 → **40/40** (count truth at the new tip).
+4. **Ambient `ENSEMBLE_SELF_ENV=live` outranks the worktree `.env`** — recommend adding an explicit `ENSEMBLE_SELF_ENV=dev` pin to the lane fence template (two independent workers hit this).
+5. **POK at the 256-entry hard cap** — curator sweep needed (anomalies `835fd7ea`, `d1b753fc`, `48c2a55a`, `f0bb67e4`).
+
+### Final gate verdict (supersedes the §Verdict header)
+
+**PASS — the P4 tester axis is CLOSED.** Behavior/product clean throughout; the one must-fix (F2) is fixed and independently re-derived; F1 and F3 are closed with construction-level evidence; ensure.md Core green.
