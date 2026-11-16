@@ -136,13 +136,16 @@ class RoomNudgeCoordinator:
         # The parameter shadows the module logger — the fallback
         # re-resolves it explicitly (the same logger object either way).
         self._log = logger if logger is not None else logging.getLogger(__name__)
-        #: RAM side-snapshot for the drain-wrapper backstop probe:
+        #: RAM interest snapshot — LANE-INTRODUCED in P4 for the
+        #: (since-DROPPED, A-P4-8) drain-wrapper backstop probe:
         #: instance_id → True when the last DB scan saw ≥1 nudge-armed
         #: room. Refreshed on every SUCCESSFUL coordinator scan (the
-        #: fault path keeps the prior value); read RAM-only by the
-        #: graph router probe (NO DB in routers). Best-effort by
-        #: design — the primary (a2) path is the gate node's fresh DB
-        #: scan; the backstop is the demoted belt-and-braces.
+        #: fault path keeps the prior value). NO production consumer
+        #: remains (the router probe died with the backstop); the
+        #: surface is retained per the O4 leader disposition (dead
+        #: surface, docstring-freshness only) — the executed
+        #: composition pin 3 arms it solely to prove the armed state
+        #: CANNOT bypass the enabled seam's language_check.
         self._ram_interest: dict[str, bool] = {}
 
     # ── latch primitives ──────────────────────────────────────────────
@@ -409,16 +412,19 @@ class RoomNudgeCoordinator:
             pass
 
     def ram_interest(self, instance_id: str) -> bool:
-        """RAM-only probe for the drain-wrapper backstop peek.
+        """RAM interest snapshot probe — LANE-INTRODUCED in P4.
 
-        True when the most recent SUCCESSFUL coordinator scan for this
-        instance saw nudge-armed rooms AND no scan has since cleared
-        it (the fault path keeps the prior value). This is
-        deliberately NOT the fire predicate — the peek only decides
-        whether to detour to the gate node, which re-evaluates fresh
-        (DB + latch) on arrival. No DB in routers; stale-True costs one
-        extra gate evaluation, stale-False falls back to the in-chain
-        gate (the primary (a2) path).
+        History: created for the drain-wrapper backstop peek, which
+        was DROPPED per the A-P4-8 adjudication (the peek-as-
+        implemented bypassed language validation on the enabled seam
+        and was redundant on the disabled seam). NO production
+        consumer remains; the surface is retained per the O4 leader
+        disposition (dead surface, docstring-freshness only). Semantics
+        unchanged: True when the most recent SUCCESSFUL coordinator
+        scan for this instance saw nudge-armed rooms AND no scan has
+        since cleared it (the fault path keeps the prior value). This
+        was never the fire predicate — the in-chain gate node
+        re-evaluates fresh (DB + latch) on every completion.
         """
         try:
             return bool(self._ram_interest.get(instance_id))

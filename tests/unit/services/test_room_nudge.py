@@ -1321,3 +1321,132 @@ class TestExecutedGraphComposition:
             "the gate fired exactly once across the whole drain+nudge "
             "composition (the latch bounds the room side)"
         )
+
+    @pytest.mark.asyncio
+    async def test_strong_form_reattempt_fires_through_the_gate_seam(
+        self, stack, real_graph_module, patch_build_instance_llms,
+    ):
+        """B-1 (P4 approver follow-up): the strong-form re-attempt
+        fires THROUGH the gate seam — the gate node calls
+        ``coordinator.reattempt_pending_tags`` → the delegation-only
+        ``RoomDeliveryService.redeliver_tag_for_member`` → the REAL
+        lane-(a) machinery — and the shared latch caps it at ONE.
+
+        Deletion-mutation-verified (lane report): removing the
+        ``reattempt_pending_tags`` call from the gate node leaves this
+        pin RED (no lane-(a) injection, cursor unadvanced) while every
+        reminder-side pin stays green — the seam was previously
+        unpinned at the executed level."""
+        from langchain_core.messages import HumanMessage
+        from sqlmodel import Session
+
+        from daemon.repositories.instance.models import Instance
+
+        svc, mgr, coord = (
+            stack["svc"], stack["manager"], stack["coordinator"],
+        )
+        iid = "mem-1"
+        # The completing member is RUNNING with a live graph — the
+        # lane-(a) branch the re-attempt must take through the real
+        # delivery service.
+        with Session(stack["eng"]) as s:
+            inst = s.get(Instance, iid)
+            inst.status = "running"
+            s.commit()
+        await _post_async(svc, stack["room_id"], text="urgent",
+                          tagged=["worker"])
+        _new_turn(mgr, iid)
+        counting = _CountingCoordinator(coord)
+        mgr._room_nudge_coordinator = counting
+        mgr.set_injection.reset_mock()
+        slot = _StubInjectionSlot()
+        model, graph = _build_and_run(
+            real_graph_module, patch_build_instance_llms,
+            manager=mgr, iid=iid, slot=slot,
+            responses=[
+                "final one (post-nudge)",
+                "final two (after the tag)",
+            ],
+            language_enabled=False,
+        )
+        await graph.ainvoke(
+            {"messages": [HumanMessage(content="go")]},
+            {"configurable": {"thread_id": iid}},
+        )
+        nudges = _nudges(model)
+        assert len(nudges) == 1, (
+            f"exactly one reminder (latch cap) — got {len(nudges)}"
+        )
+        assert "@worker" in nudges[0].content, (
+            "the reminder must NAME the pending tag (strong form)"
+        )
+        # THE SEAM (B-1): the gate's re-attempt rode the delegation-only
+        # entry into the REAL lane-(a) machinery — ONE injection with
+        # the room stamp, delivered cursor advanced (Y14 admission).
+        assert mgr.set_injection.call_count == 1, (
+            "the strong-form re-attempt must fire through the gate "
+            "seam (reattempt_pending_tags → redeliver_tag_for_member "
+            "→ lane-(a) set_injection); a deleted seam leaves this at "
+            "zero while every reminder-side pin stays green"
+        )
+        source = mgr.set_injection.call_args.kwargs.get("source", "")
+        assert source.startswith(f"room:{stack['room_id']}:lead:1:")
+        member = stack["repo"].get_member(stack["room_id"], iid)
+        assert member["last_delivered_seq"] == 1, (
+            "Y14: the delivered cursor advanced at the re-attempt's "
+            "admission"
+        )
+        assert model.i == 2
+
+    @pytest.mark.asyncio
+    async def test_composed_budget_one_reminder_one_tag_vs_drain_cap(
+        self, stack, real_graph_module, patch_build_instance_llms,
+    ):
+        """B-2/D-9 (P4 approver follow-up, one focused test): the
+        COMPOSED interaction the halves only covered separately — a
+        pending user injection drains first, then the gate fires ONCE
+        carrying BOTH the reminder AND the single tag re-attempt, and
+        the turn terminates: ≤1 reminder + ≤1 tag re-attempt per turn,
+        neither consuming nor reset by the injection continuation
+        budget (INJECTION_CONTINUATION_MAX)."""
+        from langchain_core.messages import HumanMessage
+        from sqlmodel import Session
+
+        from daemon.repositories.instance.models import Instance
+
+        svc, mgr = stack["svc"], stack["manager"]
+        iid = "mem-1"
+        with Session(stack["eng"]) as s:
+            inst = s.get(Instance, iid)
+            inst.status = "running"
+            s.commit()
+        await _post_async(svc, stack["room_id"], text="urgent",
+                          tagged=["worker"])
+        _new_turn(mgr, iid)
+        mgr.set_injection.reset_mock()
+        slot = _StubInjectionSlot()
+        model, graph = _build_and_run(
+            real_graph_module, patch_build_instance_llms,
+            manager=mgr, iid=iid, slot=slot,
+            responses=[
+                "final 1",
+                "final 2 (drained)",
+                "final 3 (post-nudge + tag)",
+            ],
+            language_enabled=False,
+            on_call=[lambda _m: slot.set(iid, "user follow-up mid-turn")],
+        )
+        await graph.ainvoke(
+            {"messages": [HumanMessage(content="go")]},
+            {"configurable": {"thread_id": iid}},
+        )
+        # The user injection drained; the turn terminated in three
+        # passes (drain, nudge, post-gate).
+        assert slot.get(iid) is None
+        assert model.i == 3
+        # ≤1 reminder — and it NAMES the tag (strong form composes).
+        nudges = _nudges(model)
+        assert len(nudges) == 1
+        assert "@worker" in nudges[0].content
+        # ≤1 tag re-attempt — the same gate fire, one lane-(a) action.
+        assert mgr.set_injection.call_count == 1
