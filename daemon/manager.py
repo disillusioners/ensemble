@@ -2397,10 +2397,10 @@ class InstanceManager:
         # only on the engine/config via the manager; the spawn tool
         # and (P5) the room tools consume them.
         self._room_chat_service = RoomChatService(self._engine)
-        # F-3 (A-P6-26): fan the room lifecycle transitions to the SSE
-        # ROOM-SCOPED channels — content-free ``room_*`` audit-class
-        # events only (ids/counts/outcomes; the hub's fail-closed guard
-        # drops anything content-bearing).
+        # agent group chat P6 — F-3 (A-P6-26): fan the room lifecycle
+        # transitions to the SSE ROOM-SCOPED channels — content-free
+        # ``room_*`` audit-class events only (ids/counts/outcomes; the
+        # hub's fail-closed guard drops anything content-bearing).
         self._room_chat_service.set_lifecycle_notifier(
             self._broadcast_room_lifecycle
         )
@@ -16983,8 +16983,8 @@ class InstanceManager:
     async def _broadcast_room_lifecycle(
         self, *, room_id: str, kind: str, data: dict
     ) -> None:
-        """F-3 (A-P6-26): fan a room lifecycle transition to the SSE
-        room-scoped channels.
+        """agent group chat P6 — F-3 (A-P6-26): fan a room lifecycle
+        transition to the SSE room-scoped channels.
 
         The content-free contract is enforced DOWNSTREAM at
         ``LiveEventHub.broadcast_room_event`` (fail-closed guard: only
