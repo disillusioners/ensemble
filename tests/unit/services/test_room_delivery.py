@@ -657,6 +657,67 @@ def test_mint_failure_boot_time_defers_and_keeps_cursor(stack):
     )
 
 
+def test_boot_delivers_only_resolved_tagged_targets_owner_receives_nothing(stack):
+    """F-1 (tester-gate critical) — boot_deliver resolves targets through
+    route_post's resolver semantics BEFORE any lane assignment. A post
+    tagged ONLY to `worker` plus an UNTAGGED owner whose delivered
+    cursor sits at 0 (NO pre-advance workaround — the substrate pair
+    for the owner IS derived) must deliver to `worker` ONLY: the owner
+    receives NOTHING (no injection, no enqueue, no proposal), its
+    status is UNCHANGED (no CAS flip), and its delivered cursor stays
+    0. Mutation-grade: neutralizing the F-1 gate (the filter predicate
+    forced False → boot trusts the substrate's over-included pairs, the
+    pre-fix shape) reddens the owner over-delivery assertions; the
+    byte-identical restore is green."""
+    engine, repo, svc, room_id, caller = stack
+    # owner (caller, member_name "lead") stays idle at cursors 0/0 —
+    # deliberately NOT cursor-pre-advanced: the over-included (owner,
+    # post) pair must be derived and then FILTERED.
+    manager = _make_manager(engine, svc, live_graph=False, inject_ok=True)
+    delivery = RoomDeliveryService(manager, svc)
+
+    post = asyncio.run(svc.append_message(
+        room_id=room_id, author_instance_id=caller, author_name="lead",
+        text_body="solo-tag boot ping", tagged_members=["worker"],
+        addressed_members=[],
+    ))
+
+    # substrate over-inclusion is REAL: the (owner, post) pair derives.
+    derived = repo.derive_undelivered_tagged()
+    derived_members = {r["instance_id"] for r in derived}
+    assert caller in derived_members, "substrate over-includes the untagged owner"
+    assert "child-1" in derived_members, "substrate derives the tagged member"
+
+    counts = asyncio.run(delivery.boot_deliver(engine))
+
+    # the tagged target delivers (the filter must not over-drop).
+    assert counts["delivered"] == 1, "tagged target delivers exactly once"
+    assert counts["deferred"] == 0
+    assert counts["filtered_not_targets"] == 1, "owner pair filtered as non-target"
+    x_row = _member_row(engine, room_id)
+    assert x_row.last_delivered_seq == post["seq"], "target cursor advanced"
+    with Session(engine) as s:
+        assert s.get(Instance, "child-1").status == "running", (
+            "target takes the lane-(b) CAS flip"
+        )
+
+    # THE pin: the UNTAGGED owner receives NOTHING — no seam of any
+    # kind targets the owner; status UNCHANGED (no CAS flip); cursor
+    # UNCHANGED (still 0). Over-included substrate pair ≠ delivery.
+    inject_targets = {c.args[0] for c in manager.set_injection.call_args_list}
+    enqueue_targets = {c.args[0] for c in manager.enqueue_message.await_args_list}
+    assert caller not in inject_targets, "owner never injected at boot"
+    assert caller not in enqueue_targets, "owner never enqueued at boot"
+    assert len(_proposal_rows(engine, room_id)) == 0, "no proposal for a non-target"
+    with Session(engine) as s:
+        owner = s.get(Instance, caller)
+        assert owner.status == "idle", "owner status UNCHANGED (no CAS flip)"
+        from daemon.repositories.room.models import ChatRoomMember
+        owner_row = s.get(ChatRoomMember, (room_id, caller))
+        assert owner_row is not None
+        assert owner_row.last_delivered_seq == 0, "owner cursor UNCHANGED (still 0)"
+
+
 def test_boot_terminal_mints_exactly_once_and_never_routes_parent(stack):
     """C1 — the pinned pair #2 DEDICATED pin: terminal member + tagged
     row at boot → EXACTLY ONE task_proposal row minted, Y14 cursor

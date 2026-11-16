@@ -837,7 +837,20 @@ class RoomDeliveryService:
         per the lane map. Proposals/notices stay durable pending (no
         routing) per pinned pair #2.
 
-        Returns a counts dict (mirrors run_room_boot_regen).
+        F-1 gate: only RESOLVED TAGGED targets are routed. The substrate
+        deliberately over-includes — one (member, row) pair per member
+        whose cursors sit behind ANY tagged row (repository.py SEMANTICS
+        NOTE, P1 resolution #1) — so each pair's target resolution runs
+        HERE (route_post's resolver semantics: active roster, name or
+        32-hex-UUID identity) BEFORE any lane assignment, CAS flip, or
+        cursor advance. Non-target pairs (untagged members and
+        addressed-only addressees — the addressed dimension is
+        digest/no-wake alive and boot never re-routes notices, D4 pair)
+        skip as neither delivered nor deferred (A-P3-20 skip
+        discipline).
+
+        Returns a counts dict (mirrors run_room_boot_regen, plus
+        ``filtered_not_targets``).
         """
         repo = RoomRepository(engine)
         pending = await asyncio.to_thread(repo.derive_undelivered_tagged)
@@ -848,6 +861,11 @@ class RoomDeliveryService:
         # the room log.
         delivered = 0
         deferred = 0
+        filtered = 0
+        # F-1: resolved target identities per (room_id, seq) — the same
+        # post can carry many over-included member pairs; resolve its
+        # tag set once per post, not once per pair.
+        target_identities: dict[tuple[str, int], tuple[set[str], set[str]]] = {}
         for row in pending:
             try:
                 # Fetch the message row to get full post payload.
@@ -865,8 +883,42 @@ class RoomDeliveryService:
                 if post is None:
                     # Defensive: the window must contain exactly the pending seq.
                     continue
-                # Only route if tagged (derive_undelivered_tagged already
-                # filtered tagged non-empty).
+                # F-1 gate: route only RESOLVED TAGGED targets. The old
+                # comment here claimed derive_undelivered_tagged "already
+                # filtered tagged non-empty" — it filters ROWS with a
+                # non-empty tag LIST, never members INTO the tag set: the
+                # substrate deliberately over-includes (repository.py
+                # SEMANTICS NOTE, P1 resolution #1), and pre-fix boot
+                # trusted the over-included pairs, so a post tagged only
+                # to X woke, CAS-flipped, and cursor-advanced every
+                # untagged member (including the owner) at boot.
+                # Resolution is route_post's resolver semantics IDENTICAL
+                # (§6 / A-P3-6): active roster, member_name match or
+                # 32-hex UUID→instance_id match; unresolvable names are
+                # not targets. The filter gates BEFORE any lane
+                # assignment, CAS flip, or cursor advance.
+                cache_key = (row["room_id"], int(row["seq"]))
+                if cache_key not in target_identities:
+                    target_identities[cache_key] = (
+                        await self._resolve_tagged_target_identities(
+                            room_id=row["room_id"], post=post
+                        )
+                    )
+                t_names, t_iids = target_identities[cache_key]
+                if (
+                    row["member_name"] not in t_names
+                    and row["instance_id"] not in t_iids
+                ):
+                    # Not a resolved target. Untagged members receive
+                    # NOTHING at boot. Addressed-only addressees skip
+                    # too: addressing is digest/no-wake for alive
+                    # members (§4.4, F3 pin) and boot never re-routes
+                    # addressed-to-terminal notices (D4 pair, pinned
+                    # pair #2) — the row stays durable above the cursor
+                    # and re-derives until the member's read path
+                    # consumes it. Counts as neither (A-P3-20).
+                    filtered += 1
+                    continue
                 member = await self._room.get_member(row["room_id"], row["instance_id"])
                 if member is None:
                     continue
@@ -936,10 +988,41 @@ class RoomDeliveryService:
             "members_with_pending": len(members),
             "delivered": delivered,
             "deferred": deferred,
+            "filtered_not_targets": filtered,
         }
         self._logger.info(
             "room boot delivery: pending_tagged=%d delivered=%d deferred=%d "
-            "rooms=%d members=%d",
-            counts["pending_rows"], delivered, deferred, len(rooms), len(members),
+            "filtered_not_targets=%d rooms=%d members=%d",
+            counts["pending_rows"], delivered, deferred, filtered,
+            len(rooms), len(members),
         )
         return counts
+
+    async def _resolve_tagged_target_identities(
+        self, *, room_id: str, post: dict[str, Any]
+    ) -> tuple[set[str], set[str]]:
+        """Resolve a post's tagged names against the room's ACTIVE roster —
+        route_post's resolver semantics IDENTICAL (§6 / A-P3-6): a tag
+        matches an active roster member_name, or a 32-hex tag resolves to
+        an active roster instance_id; unresolvable names are NOT targets
+        (route_post warns + skips them). LEFT members are not on the
+        active roster, so a tag to a LEFT member resolves to nothing.
+        Returns the resolved targets as (member_name set, instance_id
+        set). Reads ride the room's fail-closed read predicate with the
+        post AUTHOR as caller — the same predicate route_post's roster
+        read uses (sender = author)."""
+        roster = await self._room.list_members(
+            room_id,
+            caller_instance_id=post["author_instance_id"],
+            active_only=True,
+        )
+        names: set[str] = set()
+        iids: set[str] = set()
+        for tag in list(post.get("tagged_members") or []):
+            hit = next((m for m in roster if m["member_name"] == tag), None)
+            if hit is None and _is_uuid_like(tag):
+                hit = next((m for m in roster if m["instance_id"] == tag), None)
+            if hit is not None:
+                names.add(hit["member_name"])
+                iids.add(hit["instance_id"])
+        return names, iids
