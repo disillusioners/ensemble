@@ -1137,6 +1137,188 @@ class RoomRepository:
             )
             session.commit()
 
+    # ── P6 read surface: the tree room list (HTTP observability) ──────
+
+    def list_rooms_for_tree(self, tree_root_id: str) -> list[dict[str, Any]]:
+        """Every room in the TREE scope, with the FE-facing extras.
+
+        The scope is the room's own anchor: ``chatrooms.tree_root_id``
+        (the join predicate's scope key). A room created by ANY member
+        of the tree is therefore listed — the P6 modal shows "the
+        chatrooms created by that instance('s tree)" (§13.1), not only
+        the ones the instance itself opened.
+
+        Per-room extras (both computed here, never by the caller):
+
+        * ``member_count`` — the ACTIVE roster size (``state=active``;
+          a LEFT row is retired and is not a member of the room).
+        * ``last_message_seq`` — ``MAX(seq)`` of the room's log, or
+          ``None`` for a room that has never been posted to.
+
+        Ordering: ``created_at`` then ``room_id`` (stable, insertion
+        order for the FE list).
+        """
+        if not tree_root_id:
+            return []
+        with Session(self._engine) as session:
+            stmt = (
+                select(ChatRoom)
+                .where(ChatRoom.tree_root_id == tree_root_id)
+                .order_by(ChatRoom.created_at, ChatRoom.room_id)
+            )
+            rooms = session.exec(stmt).all()
+            if not rooms:
+                return []
+            room_ids = [r.room_id for r in rooms]
+            member_counts = self._active_member_counts(session, room_ids)
+            last_seqs = self._last_message_seqs(session, room_ids)
+            out: list[dict[str, Any]] = []
+            for room in rooms:
+                payload = room_payload(room)
+                payload["member_count"] = member_counts.get(room.room_id, 0)
+                payload["last_message_seq"] = last_seqs.get(room.room_id)
+                out.append(payload)
+            return out
+
+    @staticmethod
+    def _active_member_counts(
+        session: Session, room_ids: list[str]
+    ) -> dict[str, int]:
+        """``{room_id: active member count}`` — one grouped COUNT."""
+        if not room_ids:
+            return {}
+        stmt = sql_text(
+            "SELECT room_id, COUNT(*) FROM chatroom_members"
+            " WHERE room_id IN :ids AND state = :state"
+            " GROUP BY room_id"
+        ).bindparams(
+            bindparam("ids", value=list(room_ids), expanding=True),
+            state=RoomMemberState.ACTIVE.value,
+        )
+        return {
+            str(row[0]): int(row[1])
+            for row in session.execute(stmt).all()
+        }
+
+    @staticmethod
+    def _last_message_seqs(
+        session: Session, room_ids: list[str]
+    ) -> dict[str, int]:
+        """``{room_id: MAX(seq)}`` — the room's last message sequence."""
+        if not room_ids:
+            return {}
+        stmt = sql_text(
+            "SELECT room_id, MAX(seq) FROM room_messages"
+            " WHERE room_id IN :ids"
+            " GROUP BY room_id"
+        ).bindparams(bindparam("ids", value=list(room_ids), expanding=True))
+        return {
+            str(row[0]): int(row[1])
+            for row in session.execute(stmt).all()
+        }
+
+    # ── P6 GC scans (mechanics; the POLICY lives in services/room_gc) ─
+
+    def list_rooms_by_state(self, state: str) -> list[dict[str, Any]]:
+        """Every room in one lifecycle state (``active`` / ``closed``).
+
+        The GC scan's input set. The age CUTOFFS are applied by the
+        sweeper (policy), so this method stays a pure accessor.
+        """
+        with Session(self._engine) as session:
+            stmt = (
+                select(ChatRoom)
+                .where(ChatRoom.state == state)
+                .order_by(ChatRoom.created_at, ChatRoom.room_id)
+            )
+            return [room_payload(r) for r in session.exec(stmt).all()]
+
+    def list_active_member_instance_ids(
+        self, room_ids: list[str]
+    ) -> dict[str, list[str]]:
+        """``{room_id: [instance_id, ...]}`` for the ACTIVE roster."""
+        if not room_ids:
+            return {}
+        with Session(self._engine) as session:
+            stmt = select(ChatRoomMember).where(
+                ChatRoomMember.room_id.in_(room_ids),
+                ChatRoomMember.state == RoomMemberState.ACTIVE.value,
+            )
+            out: dict[str, list[str]] = {}
+            for member in session.exec(stmt).all():
+                out.setdefault(member.room_id, []).append(member.instance_id)
+            return out
+
+    def get_instance_records(
+        self, instance_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """``{instance_id: {"status": ..., "parent_id": ...}}``.
+
+        The liveness inputs for the P-idle GC trigger: a participant
+        counts as ALIVE iff its status is non-terminal
+        (``NON_TERMINAL_INSTANCE_STATUSES_FOR_ROOMS`` — ``waiting`` IS
+        alive). A MISSING instance row is not alive (the row is gone;
+        the walk simply stops there).
+        """
+        if not instance_ids:
+            return {}
+        with Session(self._engine) as session:
+            stmt = select(Instance).where(
+                Instance.instance_id.in_(instance_ids)
+            )
+            out: dict[str, dict[str, Any]] = {}
+            for row in session.exec(stmt).all():
+                out[row.instance_id] = {
+                    "status": row.status,
+                    "parent_id": getattr(row, "parent_id", None),
+                }
+            return out
+
+    def rooms_with_undelivered_tagged(
+        self, room_ids: list[str]
+    ) -> set[str]:
+        """Rooms holding a TAGGED row above a participant's DELIVERED cursor.
+
+        The P-idle CURSOR GUARD (architecture §2.2): such a room is
+        SKIPPED by the sweeper — a tagged message that was never
+        delivered is still owed to its addressee, so the room's log
+        must survive the idle sweep.
+
+        The TAGGED filter is applied in PYTHON (the JSON-emptiness
+        predicate differs across drivers — JSONB on PG arrives native,
+        TEXT on SQLite; the same discipline as
+        :meth:`derive_undelivered_tagged`).
+        """
+        if not room_ids:
+            return set()
+        stmt = sql_text(
+            "SELECT m.room_id AS room_id,"
+            " m.instance_id AS instance_id,"
+            " msg.id AS message_id,"
+            " msg.seq AS seq,"
+            " msg.tagged_members AS tagged_members"
+            " FROM chatroom_members m"
+            " JOIN room_messages msg ON msg.room_id = m.room_id"
+            "  AND msg.seq > m.last_delivered_seq"
+            " WHERE m.state = :member_active AND m.room_id IN :ids"
+        ).bindparams(
+            bindparam("ids", value=list(room_ids), expanding=True),
+            member_active=RoomMemberState.ACTIVE.value,
+        )
+        guarded: set[str] = set()
+        with Session(self._engine) as session:
+            for row in session.execute(stmt).all():
+                tagged = _decode_tagged_members(
+                    row.tagged_members,
+                    source="rooms_with_undelivered_tagged",
+                    room_id=row.room_id,
+                    message_id=row.message_id,
+                    seq=row.seq,
+                )
+                if tagged:
+                    guarded.add(str(row.room_id))
+        return guarded
+
     # ── boot regeneration snapshot (P1 — the pinned pair, §10) ─────────
 
     def derive_undelivered_tagged(self) -> list[dict[str, Any]]:

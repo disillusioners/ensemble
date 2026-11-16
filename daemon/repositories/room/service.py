@@ -337,6 +337,46 @@ class RoomChatService:
             caller_instance_id=caller_instance_id,
         )
 
+    # ── P6 read surface (the HTTP observability modal) ────────────────
+
+    async def list_rooms_for_tree(
+        self, tree_root_id: str
+    ) -> list[dict[str, Any]]:
+        """Every room in the tree scope (off-loop) — P6 FE modal."""
+        return await asyncio.to_thread(
+            self._repo.list_rooms_for_tree, tree_root_id
+        )
+
+    # ── P6 GC scans (off-loop wrappers over the repository) ───────────
+
+    async def list_rooms_by_state(self, state: str) -> list[dict[str, Any]]:
+        """Every room in one lifecycle state (the GC scan's input)."""
+        return await asyncio.to_thread(self._repo.list_rooms_by_state, state)
+
+    async def list_active_member_instance_ids(
+        self, room_ids: list[str]
+    ) -> dict[str, list[str]]:
+        """``{room_id: [instance_id, ...]}`` for the ACTIVE roster."""
+        return await asyncio.to_thread(
+            self._repo.list_active_member_instance_ids, room_ids
+        )
+
+    async def get_instance_records(
+        self, instance_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """``{instance_id: {"status", "parent_id"}}`` — liveness inputs."""
+        return await asyncio.to_thread(
+            self._repo.get_instance_records, instance_ids
+        )
+
+    async def rooms_with_undelivered_tagged(
+        self, room_ids: list[str]
+    ) -> set[str]:
+        """Rooms holding an undelivered TAGGED row (the cursor guard)."""
+        return await asyncio.to_thread(
+            self._repo.rooms_with_undelivered_tagged, room_ids
+        )
+
     # ── purge ──────────────────────────────────────────────────────────
 
     async def purge_room(self, room_id: str, *, reason: str) -> dict[str, Any]:
