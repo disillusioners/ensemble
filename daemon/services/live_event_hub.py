@@ -585,4 +585,9 @@ class LiveEventHub:
         """Shutdown the hub, clearing all connections."""
         async with self._lock:
             self._connections.clear()
+            # Symmetric teardown of the dual-key registration lane: the
+            # room-resolution alias registrations ride the same queue as
+            # their instance key, so clearing the connections must clear
+            # the key registry too (no alias bucket outlives shutdown).
+            self._queue_keys.clear()
         logger.info("LiveEventHub shutdown complete")

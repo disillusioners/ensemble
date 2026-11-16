@@ -62,6 +62,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from daemon.auth.decorators import scope_required
+from daemon.repositories.room.repository import RoomNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -233,8 +234,6 @@ async def read_room_messages(
     scope = instance_id.strip() if instance_id else ""
     if not scope:
         scope = str(room.get("owner_instance_id") or "")
-
-    from daemon.repositories.room.repository import RoomNotFoundError
 
     try:
         # ONE extra row probes the exhaustion — the cursor is clamped
