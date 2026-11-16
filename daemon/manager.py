@@ -154,6 +154,7 @@ from .services.title_generation import TitleGenerationService
 # agent group chat P2: room chat service (per-room locks + admission)
 # and the member naming service (D-S3 cascade tiers 2-3).
 from .services.room_naming import RoomNamingService
+from .services.room_delivery import RoomDeliveryService  # agent group chat P3 — delivery router
 from .repositories.room.service import RoomChatService
 from .services.event_publisher import EventPublisherService
 from .services.skill_embedding_service import SkillEmbeddingService
@@ -2392,6 +2393,14 @@ class InstanceManager:
         self._room_chat_service = RoomChatService(self._engine)
         self._room_naming_service = RoomNamingService(
             manager=self,
+            logger=logger,
+        )
+        # agent group chat P3 — delivery router (lane map + addressing +
+        # Ruling-A proposals). Depends on the room chat service + the
+        # manager facade.
+        self._room_delivery_service = RoomDeliveryService(
+            manager=self,
+            room_service=self._room_chat_service,
             logger=logger,
         )
 
@@ -4852,6 +4861,25 @@ class InstanceManager:
                 "room boot regen pass failed (non-fatal, best-effort): "
                 "%r",
                 room_regen_err,
+                exc_info=True,
+            )
+
+        # ── agent group chat P3 — room boot delivery pass ──────────
+        # Re-uses the P1 re-derivation predicate (seq >
+        # max(last_read_seq, last_delivered_seq)) and routes tagged
+        # undelivered rows per the total 10-state lane map. Proposals
+        # and addressed-to-terminal notices stay durable pending (no
+        # parent routing) per pinned pair #2. Best-effort.
+        try:
+            room_delivery_counts = await self._room_delivery_service.boot_deliver(
+                self._engine
+            )
+            logger.debug("room boot delivery counts: %s", room_delivery_counts)
+        except Exception as room_delivery_err:  # noqa: BLE001 — best-effort
+            logger.warning(
+                "room boot delivery pass failed (non-fatal, best-effort): "
+                "%r",
+                room_delivery_err,
                 exc_info=True,
             )
 
@@ -8813,6 +8841,30 @@ class InstanceManager:
             (
                 "ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS "
                 "instance_metadata JSONB"
+            ),
+            # agent group chat P3 (2026-11-15): room_messages proposal-dedup
+            # columns + unique index (source_message_id / trigger / member).
+            # Fresh PG databases get them from SQLModel.metadata.create_all()
+            # via the RoomMessage SQLModel declaration; existing databases
+            # need the ADD COLUMN + CREATE UNIQUE INDEX here. NULLs are
+            # distinct on PG, so ordinary posts (all three NULL) never
+            # collide. SQLite counterpart:
+            # daemon/migrations/versions/20261115_120000_add_room_proposal_dedup_columns.sql
+            (
+                "ALTER TABLE room_messages ADD COLUMN IF NOT EXISTS "
+                "source_message_id BIGINT"
+            ),
+            (
+                "ALTER TABLE room_messages ADD COLUMN IF NOT EXISTS "
+                "trigger TEXT"
+            ),
+            (
+                "ALTER TABLE room_messages ADD COLUMN IF NOT EXISTS "
+                "member TEXT"
+            ),
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_room_messages_proposal_dedup "
+                "ON room_messages (source_message_id, trigger, member)"
             ),
             # instances.attestation_denied_count (Phase 3, 2026-09-05):
             # row-scoped per-instance counter for the leader completion
@@ -16796,6 +16848,11 @@ class InstanceManager:
             # reserved for restart-orphaned rows). Runs BEFORE the DB
             # pools go away so the terminal write lands on a live pool.
             ("shutdown_maintenance_api_service", self._shutdown_maintenance_api_service()),
+            # agent group chat P3 — clear the per-room lock registry on
+            # stop (symmetry with get_room_lock's LRU maintenance).
+            # Hygiene only: locks are loop-local RAM, correctness lives
+            # in the DB backstops; a restart re-derives on demand.
+            ("clear_room_lock_registry", self._clear_room_lock_registry()),
             # Drain the D3 snapshot capture + R10 embedding
             # fire-and-forget tasks BEFORE the DB pools go away —
             # an in-flight terminal write must land on a live pool.
@@ -16824,6 +16881,27 @@ class InstanceManager:
     async def _cancel_all_active_requests(self) -> None:
         """Cancel all active requests in the registry with SHUTDOWN reason."""
         return await self._cancellation_service._cancel_all_active_requests()
+
+    async def _clear_room_lock_registry(self) -> None:
+        """agent group chat P3 shutdown step: drop every per-room
+        chat lock (registry-clear-on-stop symmetry, P3 carry-over).
+        Best-effort like every shutdown step — a missing service
+        (early-boot failure) is a no-op."""
+        service = getattr(self, "_room_chat_service", None)
+        if service is None:
+            return
+        try:
+            dropped = await service.clear_lock_registry()
+            if dropped:
+                logger.info(
+                    "shutdown: cleared %d per-room chat lock(s)", dropped
+                )
+        except Exception as e:  # noqa: BLE001 — best-effort shutdown step
+            logger.error(
+                "Error during shutdown step 'clear_room_lock_registry': %s",
+                e,
+                exc_info=True,
+            )
 
     async def _drain_snapshot_capture_tasks(self) -> None:
         """Drain the D3 snapshot capture/embedding lane during shutdown.

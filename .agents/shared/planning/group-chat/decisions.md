@@ -171,3 +171,201 @@ Recorded 2026-11-15 by the P2 implementation lane (branch `feature/group-chat-p2
 **A-P2-10 · OPT-2 — cap-conjuncts-outside-lock residual (accepted, bounded).** A-P2-5 scopes the per-room lock to the registry's read→insert only. The admission validation (`_validate_room_join`, including the `ROOM_MAX_MEMBERS` and `ROOM_MAX_ACTIVE_ROOMS_PER_TREE` counts) runs BEFORE the lock is acquired, so two spawns admitted at the boundary (e.g. both validated at 15 active) can both insert → a bounded overshoot of ≤ the number of spawns racing the last slot. The `UNIQUE(room_id, member_name)` backstop does NOT catch this (names differ). Accepted because: (a) spawn-into-a-room is parent-driven and effectively sequential in practice; (b) the caps are cost-discipline bounds, not correctness invariants; (c) moving the admission reads inside the lock would hold the lock across DB reads for every spawn and was not warranted. Bound: overshoot ≤ concurrent racers at the boundary (in practice ≤ a handful; never unbounded). P3 inherits this posture unchanged — do not re-litigate; if a later phase needs a hard cap, move `validate_room_join` under `get_room_lock` (a one-block change) rather than adding a new mechanism.
 
 **A-P2-11 · OPT-5 — `room_join` event asymmetry (join defers to P3; leave emits today).** `leave_room` emits a content-free `room_leave` EventKind row TODAY (ids + per-room name, owner's event stream). The spawn join path does NOT emit a `room_join` event at P2 — it emits only the spawn-scoped INFO log line ("spawn room join: room=… instance=… member_name=…") and persists the membership row + JSONB keys. The content-free `room_join` EventKind (registered in P1) is reserved for P3's delivery lanes, which own the event-emission surface alongside tag/address routing. P3: emit `room_join` on admission (content-free, same shape as `room_leave`) — no new kind needed. Do not re-litigate the split; the asymmetry is intentional and recorded.
+
+---
+
+## P3 implementation ambiguity resolutions (appendix A-P3)
+
+Recorded 2026-11-15 by the P3 CORE implementation lane (branch
+`feature/group-chat-p3`, base 09a683ddc) — the ambiguity resolutions
+made while implementing the P3 delivery machinery, persisted in-repo
+per the P1/P2 lesson (O-4) so they survive KV/context TTL.
+
+**A-P3-1 · Injection source composite.** The commission requires BOTH
+author provenance (`internal_agent:<author>`) and the room context
+shape (`room:{room_id}:{sender_name}:{seq}`) on the injection source.
+To avoid the dispatch-chain machinery mis-parsing the composite as an
+instance id, the source is `room:{room_id}:{sender_name}:{seq}:author={author_instance_id}`
+— the room shape stays the prefix (first four segments) and the author
+identity rides the final `author=` segment. The drain site stamps the
+string verbatim onto `HumanMessage.additional_kwargs["source"]`; no
+downstream parser depends on the `internal_agent:` prefix for room
+notifications, so no dispatch-chain side effect is introduced.
+
+**A-P3-2 · Proposal row authorship.** A minted `task_proposal` row
+carries `author_instance_id`/`author_name` of the SENDER of the
+triggering post (the sibling whose @tag/addressing caused it), not the
+room machinery or the parent. Speaker attribution rides the sender;
+the proposal text itself names room + sender + member + options.
+
+**A-P3-3 · `member` in the dedup uniqueness.** The `(source_message_id,
+trigger, member)` uniqueness uses the per-room member NAME (not the
+instance id). Names are per-room unique and never recycled (LEFT rows
+keep their names — A-P2-2), so they are a stable dedup key; instance
+ids would also work but the notice shape + roster resolution key on
+names, so names are the consistent choice.
+
+**A-P3-4 · Lane-(b) CAS lives in the room repository.** The
+instances-table status CAS (`UPDATE instances SET status='running'
+WHERE instance_id=? AND status IN (...)`) is exposed as
+`RoomRepository.cas_instance_status_to_running` even though it touches
+the instances table, because it is a policy-free mechanic (the caller
+derives the allowed set from the enum) and all DB I/O must stay
+engine-passed/sync/off-loop-wrapped. It is the only cross-table method
+in the room repository and is documented as such.
+
+**A-P3-5 · Boot delivery is a separate pass.** `run_room_boot_regen`
+stays a pure derivation (its P1 test stays green); boot delivery per
+the lane map runs as a separate best-effort pass
+(`RoomDeliveryService.boot_deliver`) immediately after, re-using the
+same `derive_undelivered_tagged` predicate. Pinned pair #2 is honored:
+tagged terminal rows mint a durable proposal (Y14 cursor advance) but
+NO parent routing occurs at boot. Non-terminal tagged rows route per
+the lane map (injection/enqueue/park).
+
+**A-P3-6 · `addressed_to` resolution reuses the active roster.** A LEFT
+member or a cross-room name resolves to `None` (warning + skip, post
+still succeeds) because `list_members(active_only=True)` is the
+resolution base — this matches the capability row (LEFT = inactive
+for routing) and the cross-room fail-closed rule without a separate
+code path.
+
+**A-P3-7 · Audit emission is best-effort.** Every `room_*` EventKind
+emission on the delivery paths is wrapped so a failure logs a WARNING
+and never breaks delivery. The content-free contract (ids/counts/
+outcomes only, never message text) is enforced by construction in the
+emitted payloads.
+
+**A-P3-8 · Proposal dedup is checked in Python + the DB backstop.** The
+router checks for an existing proposal row with the same
+`(source_message_id, trigger, member)` before minting (idempotent
+re-route / boot), and the UNIQUE index is the DB-level belt. Both
+layers are needed: the Python check avoids a wasted append + the
+unique-index violation on re-derivation, and the index covers races
+the Python check cannot see.
+
+**A-P3-9 · Corrupt tagged_members JSON warns with the row identity
+(O-6, P3 carry-over lane).** The carried anchor for O-6
+("repository.py:729-740, logger.debug") was STALE: the corrupt-JSON
+branch actually lives in `RoomRepository.derive_undelivered_tagged`
+and, as shipped by the core lane, logged NOTHING — the corrupt row was
+swallowed into `tagged = []` in total silence. Resolved: the branch now
+emits a `logger.warning` carrying room_id + message_id + seq, and the
+row stays excluded from the pending set (a corrupt payload cannot be
+tag-delivered). Rationale for warning over debug: the only writer
+(`append_message`) always binds valid JSON through JSONBType, so a
+corrupt payload implies EXTERNAL mutation of a delivery-critical
+column — a data-integrity signal, not expected noise; and
+`derive_undelivered_tagged` runs at boot + delivery routing, not a hot
+path. "Neither raises nor silently vanishes" is pinned by
+`test_corrupt_tagged_json_warns_and_excludes_row`.
+
+**A-P3-10 · The live PG integrity fingerprint is the NAMED-CONSTRAINT
+form (D1c, verified empirically).** On this deployment's PG (psycopg3,
+fenced `ensemble_dev`, private-schema probe, 2026-11-15), a real
+UNIQUE violation reports `duplicate key value violates unique
+constraint "uq_chatroom_members_room_member_name"` — the named form;
+the dotted-pair message (`chatroom_members.room_id,
+chatroom_members.member_name`) is the SQLITE form and never fires on
+PG. The classifiers accept EITHER shape (fingerprint-or), so both
+drivers classify identically; the execution pin
+(`test_room_migration_runner_execution.py::
+TestConstraintFingerprintDriverDependence`) pins BOTH branches — the
+SQLite form empirically off the executed schema, the PG form via the
+documented psycopg3 message — and the composite-PK negative leg
+(never mistyped as a name collision). The lockstep on constraint NAMES
+is deliberately NOT pinned (SQLite auto-names inline UNIQUEs); the
+driver-honest invariant is (column-set → unique) pairs.
+
+**A-P3-11 · `after_seq` is EXCLUSIVE at the boundary — implemented
+contract confirmed consistent with every doc claim (O-2).**
+`list_messages` returns rows with `seq > after_seq` (strict), ordered
+by seq ASC, truncated to `limit` — i.e. the FIRST `limit` rows above
+the cursor (the pull-model digest window). The boundary row AT
+`after_seq` is excluded; consecutive cursor walks cover the log
+exactly once (no dup, no loss). The re-derivation predicate
+(`seq > max(last_read_seq, last_delivered_seq)`), the unread COUNT
+(`seq > last_read_seq`), and the room_read tool prose all use the same
+strict form — no divergence existed to resolve. Pinned by the four
+window tests (seed N=7 > limit=3: window, boundary exclusion,
+pagination walk, beyond-max empty) in
+`test_room_repository.py`.
+
+**A-P3-12 · The L6 skip (P1) is recorded here — the in-repo referent
+is unrecoverable (D2).** The P1 review record (KV-only,
+`gc_p1_review_followups`) directed: "Record the L6 skip (dual-defaults
+target + rationale) in-repo." Recovery attempt: NO L6-numbered item
+exists anywhere in-repo — not in the group-chat planning docs, not in
+the tests (the only in-repo L-number is the L8 read-surface symmetry
+pin), not in git history of the group-chat lanes, not in the tester
+gate record. The full L6 text therefore lived only in the review
+channel, which has TTL'd. THIS ENTRY is the in-repo record the item
+asked for: the skip STANDS (nothing was implemented for L6 in P1, and
+P3 does not implement it either), the label "dual-defaults target" is
+preserved verbatim for future identification, and if the referent
+resurfaces (e.g. a model-field dual-default like `model_quick`'s
+Field-default + validator-fallback pair — the closest in-repo concept)
+it should be re-filed as a fresh A-P3-n rather than silently folded
+here. Flagged to the reviewer for confirmation at the gate.
+
+**A-P3-13 · `room_join` emission on admission is SAME-TRANSACTION and
+the room read happens BEFORE the first pending add (A-P2-11 closed).**
+`join_room_in_session` now adds ONE content-free `room_join` Event row
+(ids + final per-room name; the room OWNER's event stream — the exact
+`room_leave` shape) in the caller's transaction, so a rolled-back
+admission (UNIQUE name-collision fire) leaves NO phantom event. One
+mechanics note worth keeping: the owner stream is read via
+`session.get(ChatRoom, room_id)` BEFORE the membership row is added —
+a query AFTER the first `add` would trigger SQLAlchemy's
+query-invoked autoflush and move the collision's failure point from
+the CALLER's commit (where the typed backstop classifies it — the
+spawn sim and the standalone path both rely on that ordering) into
+the helper. Pinned by the emission/phantom/parity trio in
+`test_room_membership.py::TestRoomJoinEventEmission`; the pre-existing
+spawn/lifecycle/naming pins stayed green unchanged.
+
+**A-P3-14 · Purge-path FK integrity classification is message-shaped,
+uniform-typed (item 10, conditional — cheap, taken).** The purge's
+IntegrityError wrap now distinguishes FK-shaped failures (PG named
+prose "violates foreign key constraint" / SQLite terse "FOREIGN KEY
+constraint failed" — one probe, both drivers) from every other
+integrity shape, labelling the former `purge FK integrity failure`
+(child-first violated? a referencing table exists?). The TYPE stays
+the base `RoomError` either way — no new exception class, no new
+call-site surface, no migration. The classifier is module-level
+(`is_purge_fk_integrity` / `raise_typed_purge_integrity`) and pinned
+by `TestPurgeFingerprintClassification` (both FK shapes labelled,
+UNIQUE shape keeps the generic label, healthy purge path untouched).
+
+**A-P3-15 · The per-room lock registry clears on stop — hygiene, not
+correctness (item 9).** `RoomChatService.clear_lock_registry()` drops
+every loop-local lock behind the registry guard (returns the count)
+and `manager.shutdown` runs it as a best-effort step
+(`clear_room_lock_registry`) before the DB pools go away. Locks are
+never persisted and correctness lives in the DB backstops
+(RK-13 posture), so the clear is symmetry/hygiene with
+`get_room_lock`'s LRU maintenance — a restart re-derives locks on
+demand. The manager hunks carry the lane marker per the house
+drift-pin discipline; `TestP11BootNoBehaviorChange` stays green.
+
+**A-P3-16 · §4.4 resolution-warning row persistence is DEFERRED to P5 (decision rule applied, not skipped).** §4.4 wants the tag/address resolution warnings on the ROW, not only the `route_post` result dict. The decision rule (existing JSONB field that can carry per-name warnings with NO new migration → persist now) was evaluated against `RoomMessage`'s only JSONB columns — `tagged_members` / `addressed_members` — and REFUSED for both: each is a typed `list[str] | None` carrying a distinct routing semantic (escalation / addressing dimension), and a warning-shaped entry would (a) violate the payload contract every reader assumes (`list(tagged_members or [])` normalization, the TAGGED filter in `derive_undelivered_tagged` → boot re-derivation would attempt lane-routing unresolvable names every boot), and (b) still need a shaped map (name → reason), which a `list[str]` cannot carry cleanly. The raw name lists ARE on the row (append persists them verbatim), so warnings remain re-derivable at read time by re-resolving against the roster; until the P5 tool surface lands a dedicated row-persistence shape (its own migration), warnings ride the `route_post` result dict only. This entry IS the required disposition record.
+
+**A-P3-17 · The lane-(b) CAS-miss / fresh==running branch now DELIVERS (fix) — the pre-fix shape was a silent tagged-notification drop.** Pre-fix (3b092ea85): when the lane-(b) CAS missed (rowcount 0) and the fresh re-read showed `running`, the branch advanced the delivered cursor and returned `"enqueued"` WITHOUT injecting or enqueueing — diverging from the total lane map (running → (a) injection) AND defeating boot re-derivation, because the pre-advanced cursor hid the row from `derive_undelivered_tagged` forever. Fixed shape: attempt delivery now — `running ∧ has_live_graph_task` → lane-(a) injection with the A-P3-1 composite source stamp; `running ∧ ¬has_live_graph_task` → DEFECT-A downgrade to lane-(b) enqueue (a graphless-running member never sees a mid-turn injection); either failure (or any exception) → `deferred_cursor` with the cursor UNTOUCHED, so boot re-derivation retries. Outcome labels are now accurate (`injected` / `enqueued` / `deferred_cursor` — never `"enqueued"` for an undelivered row). Mutation-grade pins: `test_cas_miss_running_injects_and_advances_cursor`, `test_cas_miss_running_inject_failure_leaves_cursor_untouched`, `test_cas_miss_running_graphless_downgrades_to_enqueue` (deterministic race simulation wrapping `cas_instance_status_to_running`) — all six remediation pins redden against the pre-fix file and pass post-fix (verified by swapping `3b092ea85:daemon/services/room_delivery.py` in and re-running).
+
+**A-P3-18 · The CAS→enqueue TOCTOU window is DOCUMENTED, accepted-risk (not guarded).** Window: between `cas_instance_status_to_running` succeeding (lane-(b) admission) and `enqueue_message`'s internal fresh status re-read (the revive gate in the dispatcher), a member completing a FULL turn in that window would land terminal again — and the enqueue would then auto-revive it, the exact terminal auto-revive the CAS pre-flip exists to defeat (Ruling A). Window size: two adjacent async DB operations (CAS commit → queue-stats probe → enqueue prepare) — milliseconds; a member would have to finish a multi-second turn precisely inside them (i.e. the turn completed concurrently with the routing). A post-enqueue status guard is NOT a one-liner: distinguishing "revived by our enqueue" from "went terminal on its own afterwards" needs revive-epoch correlation, not a re-read. Accepted risk: the probability is negligible and the failure mode (a revive the design wanted to prevent) is visible in the audit stream; revisit only if room-paced traffic ever makes the window hot.
+
+**A-P3-19 · Graphless-running PARENT takes the DEFECT-A downgrade (fix) — the §7 "RUNNING → (a)" narrowing is closed.** Pre-fix, a parent in `running ∧ ¬has_live_graph_task` matched NO branch in either proposal-routing site (the addressed-lane parent-target matrix and `_route_proposal_to_parent`): the injection branch required the live graph task, the enqueue branch listed only the idle-family, parked handled only `paused` — so the notice stayed durable-pending with no delivery attempt, silently narrowing §7's total map for this parent state. Both sites now fold `running` into the enqueue branch: graphless-running parent → lane-(b) enqueue (same source/metadata shape as the idle-family), restoring DEFECT-A symmetry with the member-side downgrade. Boot behavior is unchanged: `boot_deliver` never parent-routes (pinned pair #2) and mints proposals directly. Pins: `test_tagged_terminal_graphless_running_parent_gets_enqueue`, `test_addressed_terminal_graphless_running_parent_gets_enqueue` (parent explicitly `running` in the DB + `live_graph=False` — an earlier draft seeded the parent idle and passed for the wrong reason; caught in the mutation pass and fixed).
+
+**A-P3-20 · `boot_deliver` counts OUTCOMES, not attempts (fix, trivial tier taken).** Pre-fix, `delivered` incremented for every routed row regardless of the lane outcome — parked and deferred rows counted as "delivered". The pass now classifies: `deferred_cursor` / `parked_paused` → `deferred` (the row stays above the cursor and re-derives next boot); everything else (`injected` / `enqueued` / proposal-mint, which advances at admission per Y14) → `delivered`. Counts dict gains the `deferred` key (manager consumer only debug-logs the dict — no pinned shape). Skips (unreadable post / departed member / purged room) still count as neither. Pin: `test_boot_deliver_counts_reflect_outcomes` (parked row → deferred; same row delivers on the next boot after the member becomes routable).
+
+**A-P3-21 · The boot pair-#2 race nick is CLOSED by an `at_boot` flag (fix taken, not accepted-risk).** Pre-fix, a member flipping terminal between `boot_deliver`'s lane-assignment status read and `_tagged_lane`'s own re-read took the FULL terminal branch — including `_route_proposal_to_parent` — i.e. parent routing COULD fire at boot across a ms-scale race window, nicking pair #2's absolute "never routed at boot" wording (member still never revived). Disposition: `_tagged_lane` gained `at_boot: bool = False`; the boot pass passes `at_boot=True`, making the terminal branch MINT-ONLY at boot (admission-gated cursor advance, NO parent routing). The C2 option "record accepted-risk" was NOT taken — the flag was genuinely small and restores the absolute wording. Pins: `test_boot_terminal_race_never_routes_parent` (deterministic race: first status read sees alive, lane re-read sees terminal; asserts ZERO parent set_injection/enqueue — mutation-grade, reddens both against the pre-fix 939cf171a file AND under targeted `if at_boot:` removal) and `test_boot_terminal_mints_exactly_once_and_never_routes_parent` (the pair-#2 DEDICATED pin that previously did not exist: terminal member + tagged row at boot → exactly ONE proposal row + Y14 cursor advance + zero parent calls + parent status unchanged — this pin pins an EXISTING guarantee and is not mutation-claimed).
+
+**A-P3-22 · `_mint_proposal` returns an ADMISSION RESULT; all four cursor advances are admission-gated (F1 fix).** Pre-fix, `_mint_proposal` swallowed every append failure (warn + return None) while its four callers advanced the delivered cursor UNCONDITIONALLY — when the parent is terminal/paused the durable proposal row is the SOLE carrier of the D3 one-hop guarantee, so a mint failure silently and PERMANENTLY lost the task_proposal (the advanced cursor hides the row from the cursor-gated `derive_undelivered_tagged`), and violated Y14 (cursor advances at ADMISSION, not at attempt). Fixed contract: `_mint_proposal` returns True iff a durable task_proposal row EXISTS after the call — (a) minted here, (b) DEDUP-PRESENT (the row was already there — that IS admission; treating it as failure would re-deliver proposals forever), or (c) concurrent-winner (the UNIQUE(source_message_id, trigger, member) backstop raced us; the winner's row is verified via the read probe before admitting). Only NO-durable-row → False. All four sites gate BOTH the cursor advance AND the parent routing on admission; False → `deferred_cursor`, cursor untouched, boot re-derivation retries (never silently dropped). Sites: `_tagged_lane` terminal, `_lane_b_enqueue` fresh-terminal re-route, `_addressed_lane` terminal, `boot_deliver` terminal (the last counts deferred). Mutation-grade pins: `test_mint_failure_route_time_defers_and_keeps_cursor` (lane (c), route-time — append-raise injected; asserts deferred_cursor + cursor 0 + no row + no parent call) and `test_mint_failure_boot_time_defers_and_keeps_cursor` (lane (c′)/boot-time — asserts deferred count + cursor 0 + no row); BOTH redden against the pre-fix 939cf171a file (3 failed / 20 passed under the swap) and pass post-fix (23/23).
+
+**A-P3-23 · §4.4's doc-promised "no-wake" pin landed; the carry-over "189" count is CORRECTED as a different-scope/different-tip figure.** Two bookkeeping items. (1) F3: the addressed-to-ALIVE-NOT-RUNNING → digest-only NO-WAKE behavior (long implemented, unpinned) now has its dedicated pin — `test_addressed_alive_not_running_is_digest_only_no_wake` asserts digest_only outcome + ZERO enqueue_message calls + ZERO set_injection calls (addressing alone never interrupts; no MessageQueue row written). This closes §4.4's promised pin #2. (2) C3 record correction: the carry-over lane's "189 passed" was relayed without scope/tip qualification and does NOT reproduce at any single current scope — the reviewer's 939cf171a measurements are the reproducible ones (9-file room set 185; +TestP11 191; TestP11 alone 6; delivery file 18). Reconciliation ARITHMETIC (all node counts measured via `--collect-only` at the remediation tip; the two non-room files are untouched by remediation so collection is tip-valid): the 9-file room set at the pre-remediation tip 3b092ea85 = 185 − 18 + 12 = 179 (delivery file grew 12 → 18 with the iteration-1 pins); + TestP11BootNoBehaviorChange 6 + test_f1_premark_p5.py 4 = 189 EXACTLY — i.e. "189" was the carry-over lane's OWN broader scope (room set + TestP11 + premark file) measured at the OLD tip. The canonical current-tip counts are the fresh re-runs in the iteration-2 report; measured-counts-only discipline applies to every report from here.
+
+**A-P3-24 · The two-hop boot race is CLOSED — and A-P3-21's "pair #2 absolute wording restored" was FALSE as stated (append-only correction).** A-P3-21 closed only the ONE-HOP window (boot read alive → `_tagged_lane` terminal). The race survived one hop deeper: `_lane_b_enqueue` took NO `at_boot`, and its CAS-miss → fresh-terminal re-read branch parent-routed unconditionally — reachable from BOTH alive descents (the graphless-running downgrade and the lane-b CAS path). For running-graphless members the CAS-miss is UNCONDITIONAL (`running` ∉ `LANE_B_CAS_ALLOWED`), so the fresh-read transit there is GUARANTEED, not ms-luck. Fix: `at_boot` threads through both descents into `_lane_b_enqueue`; its fresh-terminal branch is mint-only at boot (`return "proposal"` before the parent-route call) — the boot counting needs no change ("proposal" already classifies delivered). Pin: `test_boot_two_hop_race_never_routes_parent` — member reads alive at BOTH pre-descent reads (boot lane read + `_tagged_lane` re-read), flips terminal hooked on the CAS (alive at descent → terminal at the fresh re-read); PARENT seeded routable-looking (running in DB + live-graph mock) and never mutated, per the C2 one-hop pin's construction lesson — under mutation the reddening assertion is the real `_route_proposal_to_parent` parent-inject call (`set_injection.call_count 1 != 0`), not a parent-status side-effect. Mutation evidence: targeted `if at_boot:` → `if False and at_boot:` sed (the 16-space guard, unique to the fresh-terminal branch) → pin RED (`AssertionError: two-hop window: NEVER parent-inject at boot`); byte-identical restore → GREEN. A first mutation invocation surfaced a transient pytest collection ERROR (not a test verdict); the rerun produced the deterministic red above and is the authoritative evidence. This entry SUPERSEDES the phrasing of A-P3-21's closure claim (the flag then covered only the one-hop branch); the one-hop pin and pair-#2 semantics themselves stand.
+
+**A-P3-25 · The purged-mid-lane None-deref window at `room_delivery.py:377` is DEFERRED (accepted-risk; pairs with the A-P3-18 TOCTOU defer).** Hazard shape: a room purge (P-close/P-idle — ONE transaction deleting `chatrooms`+`chatroom_members`+`room_messages`, R2) landing between a delivery lane's early room reads and its subsequent room-scoped operations leaves those later calls (fresh re-reads, `advance_delivered_cursor`, audit emit) operating on a deleted room — a None-deref or raise on the gone row. Containment is structural: every lane body rides the per-row best-effort try/except (warn + skip), and R2 makes purged rooms NONEXISTENT to every predicate, so the row legitimately stops re-deriving — the failure mode is one contained warning, never a crash or a wrong delivery. Why deferred: the purge triggers are room-paced (closed ≥14d, idle ≥72h + zero non-terminal), so a purge landing inside a ms-scale lane window is negligible; a real guard needs purge-epoch/room-epoch correlation to distinguish "purged mid-lane" from "never existed" — the same not-a-one-liner shape as A-P3-18's revive-epoch need. Disposition mirrors A-P3-18: accepted risk, visible in the audit/warn stream, revisit only if room-paced purge traffic ever makes the window hot.
+
+**A-P3-26 · The lane-(b) CAS writes `instances.status` directly, bypassing the instance state machine — DEFERRED; the delivery-shape substance is CLOSED by A-P3-17/22/24, the bypass itself stays open.** The record: `cas_instance_status_to_running` (room repository) flips `instances.status` via a targeted atomic UPDATE scoped to an explicit allowed set — it does NOT go through the canonical instance state machine (`job_state_machine.py` transition validation), so a room lane can flip a status the canonical machine might refuse, writes no state-machine audit trail (room flips are visible only via room audit events), and derives its allowed set from the room 10-state enum rather than the canonical transition table. What the remediations CLOSED: every delivery-shape consequence of the bypass — the CAS-miss silent drop (A-P3-17), the un-admission-gated cursor advance (A-P3-22), and both boot race windows (A-P3-21/24) — is fixed and mutation-pinned; the bypass no longer loses or over-delivers notifications. What remains OPEN: (1) enum↔machine drift — if the instance lifecycle states or canonical transitions ever change without the room enum following, the CAS set and the canonical allowed-transitions diverge silently (no drift pin exists); (2) the missing state-machine-level audit for room-initiated flips. Deferred because: the flip is atomic, narrowly-targeted (to `running`, only from the explicit allowed set), and every consumer is now gated — the bypass is by-design substrate, not a defect; the drift pin and shared derivation belong to a later surface (P5/P6 tooling or a lifecycle-lane pass) that owns the enum↔machine relationship.

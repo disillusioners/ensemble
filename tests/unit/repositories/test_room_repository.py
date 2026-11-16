@@ -19,11 +19,20 @@ Coverage (commission P1 item 6):
     content-free ``room_purged`` event, typed not-found after);
   * the boot-regen pinned pair (members incl. OWNER; active+closed;
     purged structurally excluded).
+
+P3 carry-overs covered here:
+  * O-2 window/boundary pins (``list_messages`` after_seq/limit —
+    seeded N > limit, window contents, boundary exclusion);
+  * the literal cross-room deny + the tree-scoped-ancestor ALLOW;
+  * the purge FK-fingerprint classification (retry-noise guard);
+  * the corrupt-JSON WARNING pins (O-6 — row excluded, warning
+    carries the room identity).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from typing import Iterator
 
@@ -791,3 +800,263 @@ def test_p1_emits_only_room_purged_kind(repo, engine, room_id, tree):
             ).all()
         }  # SQLModel exec squashes single-column selects to scalars
     assert kinds == {"room_purged"}
+
+
+# ---------------------------------------------------------------------------
+# O-2 (P3 carry-over) — list_messages window semantics: after_seq /
+# limit with MORE rows seeded than the limit
+# ---------------------------------------------------------------------------
+
+
+def _seed_n_messages(repo, room_id, tree, n: int) -> list[int]:
+    return [int(_append(repo, room_id, tree, f"m{i}")["seq"]) for i in range(n)]
+
+
+def test_list_messages_window_seeds_more_than_limit(repo, room_id, tree):
+    """O-2 pin (limit-seeding discipline: N=7 rows > limit=3 — a
+    below-limit fixture would silently assert nothing). The window is
+    the FIRST `limit` rows above the cursor (ORDER BY seq ASC before
+    LIMIT) — the pull-model digest contract."""
+    seqs = _seed_n_messages(repo, room_id, tree, 7)
+    assert seqs == [1, 2, 3, 4, 5, 6, 7]
+    window = repo.list_messages(
+        room_id, caller_instance_id=tree["owner"], after_seq=0, limit=3
+    )
+    assert [m["seq"] for m in window] == [1, 2, 3]
+
+
+def test_list_messages_after_seq_boundary_is_exclusive(repo, room_id, tree):
+    """O-2 pin: the boundary row AT after_seq is EXCLUDED (`seq >
+    after_seq` — strict greater-than). The window resumes at
+    after_seq+1: with rows 1..7 and after_seq=4, the returned window is
+    [5, 6, 7] — row 4 itself is never included. This is the exact
+    implemented contract (repository list_messages: RoomMessage.seq >
+    after_seq); recorded as A-P3-9's neighbor in the appendix."""
+    _seed_n_messages(repo, room_id, tree, 7)
+    window = repo.list_messages(
+        room_id, caller_instance_id=tree["owner"], after_seq=4, limit=10
+    )
+    assert [m["seq"] for m in window] == [5, 6, 7]
+    # The same exclusion at an interior boundary: after_seq=3 → [4..7].
+    window = repo.list_messages(
+        room_id, caller_instance_id=tree["owner"], after_seq=3, limit=10
+    )
+    assert [m["seq"] for m in window] == [4, 5, 6, 7]
+
+
+def test_list_messages_pagination_walk_covers_exactly_once(
+    repo, room_id, tree
+):
+    """O-2 pin: walking consecutive after_seq=last-seen windows covers
+    rows 1..7 exactly once — no duplicate, no loss. This is the
+    digest/watermark walk the delivery cursor machinery relies on."""
+    _seed_n_messages(repo, room_id, tree, 7)
+    seen: list[int] = []
+    cursor = 0
+    while True:
+        window = repo.list_messages(
+            room_id, caller_instance_id=tree["owner"], after_seq=cursor, limit=3
+        )
+        if not window:
+            break
+        seqs = [m["seq"] for m in window]
+        assert seqs == sorted(seqs)  # seq-ordered within the window
+        seen.extend(seqs)
+        cursor = seqs[-1]
+    assert seen == [1, 2, 3, 4, 5, 6, 7]
+
+
+def test_list_messages_after_seq_beyond_max_is_empty(repo, room_id, tree):
+    _seed_n_messages(repo, room_id, tree, 3)
+    assert (
+        repo.list_messages(
+            room_id, caller_instance_id=tree["owner"], after_seq=3, limit=10
+        )
+        == []
+    )
+    assert (
+        repo.list_messages(
+            room_id, caller_instance_id=tree["owner"], after_seq=99, limit=10
+        )
+        == []
+    )
+
+
+# ---------------------------------------------------------------------------
+# O-3 (P3 carry-over) — literal cross-room deny + tree-scoped ancestor
+# ALLOW (the read predicate's two-room behavior)
+# ---------------------------------------------------------------------------
+
+
+def _make_room_for(repo, *, name, tree_root, owner) -> str:
+    return repo.create_room(
+        name=name,
+        tree_root_id=tree_root,
+        owner_instance_id=owner,
+        owner_member_name=f"lead-{name}",
+    )["room"]["room_id"]
+
+
+def test_cross_room_member_denied_reading_other_room(
+    repo, engine, tree, room_id
+):
+    """O-3 pin (LITERAL cross-room deny): an ACTIVE member of room A
+    gets typed not-found on room B — membership does NOT travel across
+    rooms, and room B's owner-ancestry chain does not contain the
+    member (different tree). Both directions pinned."""
+    room_b = _make_room_for(
+        repo, name="beta", tree_root=tree["outsider"], owner=tree["outsider"]
+    )
+    _seed_instance(engine, "beta-worker", tree["outsider"])
+    _join_member(repo._engine, room_b, "beta-worker", "beta-w")
+
+    # child-1 is an ACTIVE member of room A (the room_id fixture) —
+    # and has NO relationship to room B's tree.
+    with pytest.raises(RoomNotFoundError):
+        repo.list_messages(room_b, caller_instance_id=tree["child1"])
+    with pytest.raises(RoomNotFoundError):
+        repo.unread_count(room_b, caller_instance_id=tree["child1"])
+    # The literal reverse: room B's active member on room A.
+    with pytest.raises(RoomNotFoundError):
+        repo.list_messages(room_id, caller_instance_id="beta-worker")
+
+
+def test_tree_scoped_ancestor_allow_reads_both_same_tree_rooms(
+    repo, engine, tree, room_id
+):
+    """O-3 pin (tree-scoped ancestor ALLOW): grand-1 sits ABOVE the
+    owner (parent-1) of BOTH same-tree rooms and reads BOTH via the
+    owner-ancestry chain — with ZERO membership rows in either room.
+    The scope is the CHAIN, per room; membership is irrelevant."""
+    room_b = _make_room_for(
+        repo, name="beta", tree_root=tree["root"], owner=tree["owner"]
+    )
+    _append(repo, room_id, tree, "in room A", author="owner")
+    # Room B's owner member name is "lead-beta" (per-room name, the
+    # fixture helper suffixes it) — append through the repo directly.
+    repo.append_message(
+        room_id=room_b,
+        author_instance_id=tree["owner"],
+        author_name="lead-beta",
+        text_body="in room B",
+    )
+    # grand-1 has NO membership row in either room.
+    assert repo.get_member(room_id, tree["root"]) is None
+    assert repo.get_member(room_b, tree["root"]) is None
+    assert len(repo.list_messages(room_id, caller_instance_id=tree["root"])) == 1
+    assert len(repo.list_messages(room_b, caller_instance_id=tree["root"])) == 1
+
+
+def test_ancestry_scope_does_not_cross_trees(repo, engine, tree):
+    """O-3 pin (tree-SCOPED, negative leg): grand-1's ancestry grants
+    nothing on a room owned OUTSIDE its tree — the chain walks UP from
+    room B's OWNER (beta-owner → beta-root) and never reaches
+    grand-1. Ancestry is per-room-owner, never global."""
+    _seed_instance(engine, "beta-root", None)
+    _seed_instance(engine, "beta-owner", "beta-root")
+    room_b = _make_room_for(
+        repo, name="beta", tree_root="beta-root", owner="beta-owner"
+    )
+    _seed_instance(engine, "beta-worker", "beta-owner")
+    _join_member(repo._engine, room_b, "beta-worker", "beta-w")
+    with pytest.raises(RoomNotFoundError):
+        repo.list_messages(room_b, caller_instance_id=tree["root"])
+
+
+# ---------------------------------------------------------------------------
+# O-6 (P3 carry-over) — corrupt tagged_members JSON: neither raises nor
+# silently vanishes (A-P3-9: it WARNs with the row identity)
+# ---------------------------------------------------------------------------
+
+
+def test_corrupt_tagged_json_warns_and_excludes_row(
+    repo, engine, room_id, tree, caplog
+):
+    """O-6 pin: a corrupt tagged_members payload (external mutation —
+    the only writer always binds valid JSON) makes
+    derive_undelivered_tagged neither raise nor SILENTLY vanish the
+    row: the corrupt row is excluded from the pending set AND a
+    WARNING carrying the room identity is emitted (A-P3-9)."""
+    _append(repo, room_id, tree, "tagged post", tagged=["worker-a"])
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                "UPDATE room_messages SET tagged_members = '{corrupt' "
+                "WHERE room_id = :r"
+            ),
+            {"r": room_id},
+        )
+        conn.commit()
+    with caplog.at_level(
+        logging.WARNING, logger="daemon.repositories.room.repository"
+    ):
+        pending = repo.derive_undelivered_tagged()
+    # The corrupt row cannot be tag-delivered — excluded from pending.
+    assert pending == []
+    corrupt_logs = [
+        r for r in caplog.records if "corrupt" in r.getMessage().lower()
+    ]
+    assert corrupt_logs, (
+        "the corrupt row must announce itself — a silent exclusion is "
+        "exactly the under-delivery hazard A-P3-9 closes"
+    )
+    assert room_id in corrupt_logs[0].getMessage()
+
+
+# ---------------------------------------------------------------------------
+# Item 10 (P3 carry-over) — purge-path FK integrity classification
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeFingerprintClassification:
+    def _synth(self, msg: str) -> IntegrityError:
+        return IntegrityError("stmt", {}, Exception(msg))
+
+    def test_fk_shapes_are_classified_both_drivers(self):
+        """Both FK fingerprint shapes label the purge failure as an FK
+        integrity failure (PG named-constraint prose / SQLite terse
+        form) — and both stay the BASE RoomError type (the classifier
+        shapes the message, never the type — no new surface)."""
+        from daemon.repositories.room.repository import (
+            is_purge_fk_integrity,
+            raise_typed_purge_integrity,
+        )
+
+        pg_fk = self._synth(
+            'UPDATE/DELETE violates foreign key constraint '
+            '"fk_room_messages_room_id_chatrooms" on table "room_messages"'
+        )
+        sqlite_fk = self._synth("FOREIGN KEY constraint failed")
+        for exc in (pg_fk, sqlite_fk):
+            assert is_purge_fk_integrity(exc) is True
+            with pytest.raises(RoomError) as err:
+                raise_typed_purge_integrity(exc, "r1")
+            assert "purge FK integrity failure" in str(err.value)
+            assert not isinstance(err.value, MemberNameCollisionError)
+
+    def test_non_fk_stays_generic_purge_label(self):
+        """A UNIQUE-shaped purge failure keeps the generic purge label
+        (the FK label is reserved — no fingerprint over-match)."""
+        from daemon.repositories.room.repository import (
+            is_purge_fk_integrity,
+            raise_typed_purge_integrity,
+        )
+
+        uniq = self._synth(
+            "UNIQUE constraint failed: chatrooms.room_id"
+        )
+        assert is_purge_fk_integrity(uniq) is False
+        with pytest.raises(RoomError) as err:
+            raise_typed_purge_integrity(uniq, "r1")
+        assert "purge integrity failure" in str(err.value)
+        assert "FK" not in str(err.value)
+
+    def test_healthy_purge_path_still_succeeds(self, repo, engine, room_id, tree):
+        """The classification is classification-only: the healthy purge
+        path is untouched (room gone, typed not-found on the read
+        surface, exactly one content-free event)."""
+        out = repo.purge_room(room_id, reason="classify-healthy")
+        assert out["room_id"] == room_id
+        assert repo.get_room(room_id) is None
+        with pytest.raises(RoomNotFoundError):
+            repo.list_messages(room_id, caller_instance_id=tree["owner"])

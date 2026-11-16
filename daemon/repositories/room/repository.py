@@ -36,6 +36,12 @@ What lives here (mechanics only, no policy):
   INCLUDING THE OWNER, across rooms in ``active | closed`` (purged
   rooms have no rows). PURE re-derivation — it routes, wakes, and
   revives NOTHING (the pinned pair, architecture §10).
+* ``cas_instance_status_to_running`` — the P3 lane-(b) CAS over the
+  ``instances`` table (NOT a room table): atomically flips status to
+  ``running`` iff it is in the caller-derived allowed set, returning
+  the affected rowcount.
+* ``emit_room_event`` — the content-free ``room_*`` EventKind
+  emission surface (ids/counts/outcomes only, never message text).
 
 Policy (caps, admission, tag/address resolution, lane routing, nudges)
 lives in the later phases (P2–P5); this file deliberately has none.
@@ -169,9 +175,20 @@ class MemberNameCollisionError(RoomError, RoomJoinError):
 
 
 class RoomSeqConflictError(RoomError):
-    """``UNIQUE(room_id, seq)`` refused the append. The per-room lock
-    makes this unreachable within one daemon (RK-13 single-writer); it
-    is the DB-level backstop, never expected, always surfaced."""
+    """``UNIQUE(room_id, seq)`` refused the append.
+
+    Reachability (RK-13 amended — the old "never expected" claim was
+    an over-claim): WITHIN one daemon the per-room lock makes the
+    append single-writer, but the lock REGISTRY is an LRU capped at
+    ``MAX_ROOM_LOCKS`` — at >1000 cycling rooms the eviction can drop
+    a lock that is CURRENTLY HELD, letting a second writer enter the
+    same room concurrently. The consequence is bounded and benign per
+    the accepted RK-13 posture (architecture §1.4: the lock is a
+    THROUGHPUT layer; correctness lives in the DB backstop): exactly
+    one winner, the loser surfaces THIS typed error, and the next
+    append self-heals to ``MAX(committed seq) + 1`` (no duplicate, no
+    gap, no skip). Always surfaced, never swallowed.
+    """
 
 
 def is_room_member_integrity(exc: BaseException) -> bool:
@@ -222,6 +239,42 @@ def raise_typed_member_integrity(
     ) from exc
 
 
+def is_purge_fk_integrity(exc: BaseException) -> bool:
+    """FK-shape probe for the purge path — True iff the IntegrityError
+    message matches the FK-violation fingerprint of EITHER driver:
+    PG/psycopg3 reports the named-constraint form
+    (``violates foreign key constraint``), SQLite the terse
+    ``foreign key constraint failed`` (case folded here). One probe,
+    both shapes — the purge must classify identically under either
+    driver (P3 carry-over: purge FK-fingerprint classification).
+    """
+    msg = str(exc).lower()
+    return "foreign key" in msg
+
+
+def raise_typed_purge_integrity(exc: IntegrityError, room_id: str) -> None:
+    """Purge-path classification (P3 carry-over: purge FK-fingerprint
+    classification).
+
+    The purge is child-first so an integrity failure here is abnormal;
+    it surfaces typed as the base :class:`RoomError` either way (NO
+    new exception class = no new call-site surface), but an FK-shaped
+    failure gets its OWN label in the message — ``purge FK integrity
+    failure`` — so a future referencing-table FK (a child table added
+    without the child-first ordering) is distinguishable in logs from
+    any other integrity shape. Deliberately uniform-raise: the
+    fingerprint SHAPES the message, it does not change the type.
+    """
+    if is_purge_fk_integrity(exc):
+        raise RoomError(
+            f"purge FK integrity failure for room={room_id} "
+            f"(child-first violated? a referencing table exists?): {exc}"
+        ) from exc
+    raise RoomError(
+        f"purge integrity failure for room={room_id}: {exc}"
+    ) from exc
+
+
 # ── The single-statement seq-assigning append (module-level, built ONCE) ──
 #
 # ``INSERT ... SELECT COALESCE(MAX(seq), 0) + 1 ...`` so no read-max
@@ -237,6 +290,7 @@ _APPEND_MESSAGE_STMT = sql_text(
     "INSERT INTO room_messages ("
     "  room_id, seq, author_instance_id, author_name,"
     "  text, tagged_members, addressed_members, kind,"
+    "  source_message_id, trigger, member,"
     "  created_at"
     ") SELECT "
     "  :room_id,"
@@ -247,6 +301,9 @@ _APPEND_MESSAGE_STMT = sql_text(
     "  :tagged_members,"
     "  :addressed_members,"
     "  :kind,"
+    "  :source_message_id,"
+    "  :trigger,"
+    "  :member,"
     "  :created_at"
     " FROM room_messages WHERE room_messages.room_id = :room_id"
     " RETURNING id, seq"
@@ -258,6 +315,9 @@ _APPEND_MESSAGE_STMT = sql_text(
     bindparam("tagged_members", type_=JSONBType),
     bindparam("addressed_members", type_=JSONBType),
     bindparam("kind"),
+    bindparam("source_message_id"),
+    bindparam("trigger"),
+    bindparam("member"),
     bindparam("created_at"),
 )
 
@@ -305,6 +365,9 @@ def _message_payload(message: RoomMessage) -> dict[str, Any]:
         "tagged_members": list(message.tagged_members or []),
         "addressed_members": list(message.addressed_members or []),
         "kind": message.kind,
+        "source_message_id": message.source_message_id,
+        "trigger": message.trigger,
+        "member": message.member,
         "created_at": message.created_at,
     }
 
@@ -621,6 +684,9 @@ class RoomRepository:
         tagged_members: list[str] | None = None,
         addressed_members: list[str] | None = None,
         kind: str = RoomMessageKind.MESSAGE.value,
+        source_message_id: int | None = None,
+        trigger: str | None = None,
+        member: str | None = None,
     ) -> dict[str, Any]:
         """Append one message — per-room monotonic seq, single statement.
 
@@ -662,6 +728,9 @@ class RoomRepository:
                     "tagged_members": list(tagged_members or []),
                     "addressed_members": list(addressed_members or []),
                     "kind": kind,
+                    "source_message_id": source_message_id,
+                    "trigger": trigger,
+                    "member": member,
                     "created_at": now,
                 }).first()
                 if result is None:
@@ -684,6 +753,9 @@ class RoomRepository:
             "tagged_members": list(tagged_members or []),
             "addressed_members": list(addressed_members or []),
             "kind": kind,
+            "source_message_id": source_message_id,
+            "trigger": trigger,
+            "member": member,
             "created_at": now,
         }
 
@@ -868,12 +940,7 @@ class RoomRepository:
                 )
                 session.commit()
         except IntegrityError as exc:
-            # Uniform typed wrap (create/append precedent): the purge
-            # is child-first so an integrity failure here is abnormal —
-            # surface it typed, never raw.
-            raise RoomError(
-                f"purge integrity failure for room={room_id}: {exc}"
-            ) from exc
+            raise_typed_purge_integrity(exc, room_id)
         logger.info(
             "room purge complete: room=%s reason=%s messages=%d members=%d",
             room_id,
@@ -888,6 +955,80 @@ class RoomRepository:
             "reason": reason,
             "purged_at": now,
         }
+
+    # ── P3 delivery helpers (instances-table CAS + content-free event) ──
+    #
+    # These two methods are the P3 lane-(b) CAS and the content-free
+    # room_* EventKind emission surface. They touch the ``instances``
+    # / ``event`` tables (NOT the room tables) but are policy-free
+    # mechanics owned by this repository so that ALL DB I/O stays
+    # engine-passed, sync, and off-loop-wrapped by the service layer.
+    # They are used ONLY by ``daemon/services/room_delivery.py``.
+
+    def cas_instance_status_to_running(
+        self, instance_id: str, allowed: frozenset[str]
+    ) -> int:
+        """Atomically flip ``instances.status`` to ``running`` iff it is
+        currently in ``allowed`` (the derived CAS set). Returns the
+        affected row count (0 or 1) — the int rowcount is deliberate
+        (vs the cursor methods' bool-on-miss convention) so the caller
+        distinguishes miss from flip without a re-read. The caller
+        derives ``allowed`` from
+        the 10-state enum (non-terminal minus {running, paused}) — this
+        method never interprets the set.
+
+        Used by lane (b) to defeat the enqueue's terminal auto-revival:
+        by the time ``manager.enqueue_message`` runs, the instance is
+        already ``running``, so its internal revive predicate never
+        fires for a room-routed member.
+        """
+        if not allowed:
+            return 0
+        placeholders = ", ".join(f":s{i}" for i in range(len(allowed)))
+        stmt = sql_text(
+            f"UPDATE instances SET status = 'running' "
+            f"WHERE instance_id = :iid AND status IN ({placeholders})"
+        )
+        params: dict[str, Any] = {"iid": instance_id}
+        for i, v in enumerate(sorted(allowed)):
+            params[f"s{i}"] = v
+        with Session(self._engine) as session:
+            result = session.execute(stmt.bindparams(**params))
+            session.commit()
+            return int(result.rowcount or 0)
+
+    def get_instance_status(self, instance_id: str) -> str | None:
+        """Read the current status of an instance (sync, engine-passed).
+
+        Used by the delivery router for lane assignment + the rowcount-0
+        fallback re-read. Returns None when the row is gone.
+        """
+        with Session(self._engine) as session:
+            row = session.get(Instance, instance_id)
+            return row.status if row is not None else None
+
+    def emit_room_event(
+        self, instance_id: str, kind: str, data: dict[str, Any]
+    ) -> None:
+        """Insert ONE content-free ``room_*`` EventKind row.
+
+        Content-free contract: ``data`` carries ids/counts/outcomes only,
+        never message text. ``instance_id`` is the stream the trace
+        rides (the member for tag-delivery, the parent for proposals).
+        """
+        from daemon.repositories.event.models import Event, EventKind
+
+        now = datetime.now(timezone.utc)
+        with Session(self._engine) as session:
+            session.add(
+                Event(
+                    instance_id=instance_id,
+                    kind=kind,
+                    data=json.dumps(data),
+                    created_at=now,
+                )
+            )
+            session.commit()
 
     # ── boot regeneration snapshot (P1 — the pinned pair, §10) ─────────
 
@@ -960,6 +1101,20 @@ class RoomRepository:
                     try:
                         tagged = json.loads(raw or "[]")
                     except (TypeError, ValueError):
+                        # Corrupt JSON in a delivery-critical column is
+                        # a data-integrity signal, NOT expected noise:
+                        # the only writer (append_message) always binds
+                        # valid JSON via JSONBType, so corruption means
+                        # external mutation. WARN with the row identity
+                        # so it neither raises nor silently vanishes
+                        # (A-P3-9); the row is still excluded from the
+                        # pending set — it cannot be tagged-delivered.
+                        logger.warning(
+                            "derive_undelivered_tagged: corrupt "
+                            "tagged_members JSON for room=%s message_id=%s "
+                            "seq=%s — row excluded from the pending set",
+                            row.room_id, row.message_id, row.seq,
+                        )
                         tagged = []
                 else:
                     tagged = []

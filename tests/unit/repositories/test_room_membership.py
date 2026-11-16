@@ -26,6 +26,7 @@ Coverage (commission P2 scope items 2-4 + plan-overview §6 P2 row):
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from typing import Iterator
 
@@ -527,9 +528,7 @@ class TestLeave:
                 select(Event).where(Event.kind == EventKind.ROOM_LEAVE.value)
             ).all()
             assert len(rows) == 1
-            import json as _json
-
-            data = _json.loads(rows[0].data)
+            data = json.loads(rows[0].data)
             assert data["room_id"] == room_id
             assert data["instance_id"] == "leaver-2"
             assert data["member_name"] == "mailer"
@@ -552,6 +551,91 @@ class TestLeave:
         mine = repo.join_room(room_id=room_id, instance_id="xroom-2",
                               base_name="pilot")
         assert mine["member_name"] == "pilot"  # bare — different room
+
+
+# ---------------------------------------------------------------------------
+# A-P2-11 closed in P3 — room_join emission on admission
+# ---------------------------------------------------------------------------
+
+
+class TestRoomJoinEventEmission:
+    def test_join_emits_content_free_room_join_event(
+        self, engine, repo, tree, room_id
+    ):
+        """A-P2-11 closed in P3: admission emits the reserved
+        content-free ``room_join`` EventKind — SAME shape as
+        ``room_leave`` (ids + per-room name only), riding the room
+        OWNER's event stream, committed in the SAME transaction as the
+        membership row."""
+        seed_instance(engine, "joiner-1", tree["owner"])
+        repo.join_room(room_id=room_id, instance_id="joiner-1",
+                       base_name="tracker")
+        with Session(engine) as s:
+            rows = s.exec(
+                select(Event).where(Event.kind == EventKind.ROOM_JOIN.value)
+            ).all()
+            assert len(rows) == 1
+            data = json.loads(rows[0].data)
+            assert data["room_id"] == room_id
+            assert data["instance_id"] == "joiner-1"
+            assert data["member_name"] == "tracker"
+            # The trace rides the OWNER's stream (the room_leave shape).
+            assert rows[0].instance_id == tree["owner"]
+
+    def test_join_collision_leaves_no_phantom_room_join_event(
+        self, engine, repo, tree, room_id, monkeypatch
+    ):
+        """The event lives in the SAME transaction as the membership
+        row: a rolled-back admission (UNIQUE backstop fire) leaves NO
+        phantom room_join event. The collision is forced by pinning
+        the suffix registry to an already-registered name."""
+        import daemon.repositories.room.membership as _membership
+
+        seed_instance(engine, "first-1", tree["owner"])
+        repo.join_room(room_id=room_id, instance_id="first-1",
+                       base_name="mailer")
+        monkeypatch.setattr(
+            _membership, "resolve_member_name", lambda _reg, base: base
+        )
+        seed_instance(engine, "second-1", tree["owner"])
+        with pytest.raises(MemberNameCollisionError):
+            repo.join_room(room_id=room_id, instance_id="second-1",
+                           base_name="mailer")
+        with Session(engine) as s:
+            join_events = s.exec(
+                select(Event).where(Event.kind == EventKind.ROOM_JOIN.value)
+            ).all()
+            assert len(join_events) == 1, (
+                "a rolled-back admission must leave NO phantom room_join "
+                "event (same-transaction atomicity) — only the FIRST "
+                "join's event exists"
+            )
+            assert "second-1" not in join_events[0].data
+            # owner + fixture child-1 + first-1 — the rolled-back join
+            # added nothing.
+            assert count_rows(engine, ChatRoomMember,
+                              room_id=room_id) == 3
+
+    def test_join_leave_event_parity(self, engine, repo, tree, room_id):
+        """The A-P2-11 asymmetry is retired: a member's lifecycle now
+        emits BOTH the room_join and the room_leave event (same shape,
+        same stream)."""
+        seed_instance(engine, "sym-1", tree["owner"])
+        repo.join_room(room_id=room_id, instance_id="sym-1",
+                       base_name="courier")
+        repo.leave_room(room_id=room_id, instance_id="sym-1")
+        with Session(engine) as s:
+            kinds = sorted(
+                s.exec(
+                    select(Event.kind).where(
+                        Event.kind.in_(
+                            [EventKind.ROOM_JOIN.value,
+                             EventKind.ROOM_LEAVE.value]
+                        )
+                    )
+                ).all()
+            )
+        assert kinds == ["room_join", "room_leave"]
 
 
 # ---------------------------------------------------------------------------

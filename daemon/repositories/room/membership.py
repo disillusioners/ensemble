@@ -49,6 +49,7 @@ somehow over its budget). Resolution recorded in
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -64,6 +65,8 @@ from daemon.repositories.room.models import (
     RoomMemberState,
     RoomState,
 )
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "ROOM_MAX_MEMBERS",
@@ -338,6 +341,11 @@ def join_room_in_session(
     as :class:`MemberNameCollisionError` via the repository's typed
     integrity classifier.
     """
+    # The room row is read FIRST — before any pending add — so no
+    # query-invoked autoflush fires after the membership row is
+    # pending (the collision must keep failing at the CALLER's commit,
+    # where the typed backstop classifies it; A-P2-11 emission note).
+    room = session.get(ChatRoom, room_id)
     registered: set[str] = set(
         session.exec(
             select(ChatRoomMember.member_name).where(
@@ -358,6 +366,35 @@ def join_room_in_session(
         state=RoomMemberState.ACTIVE.value,
     )
     session.add(row)
+    # A-P2-11 (closed in P3): admission emits the reserved content-free
+    # ``room_join`` EventKind — SAME shape as ``room_leave`` (ids +
+    # per-room name only, the OWNER's event stream) and the SAME
+    # transaction, so a rolled-back admission (name collision) leaves
+    # NO phantom event. The asymmetric P2 posture (join silent, leave
+    # emitting) is retired; A-P2-11 documented the deferral. NO query
+    # after this point — the owner stream came from the pre-add read.
+    from daemon.repositories.event.models import Event, EventKind
+
+    owner_stream = room.owner_instance_id if room is not None else instance_id
+    if room is None:
+        logger.warning(
+            "room_join: room row missing for room=%s — event parked on joiner stream",
+            room_id,
+        )
+    session.add(
+        Event(
+            instance_id=owner_stream,
+            kind=EventKind.ROOM_JOIN.value,
+            data=json.dumps(
+                {
+                    "room_id": room_id,
+                    "instance_id": instance_id,
+                    "member_name": final_name,
+                }
+            ),
+            created_at=datetime.now(timezone.utc),
+        )
+    )
     return row
 
 
