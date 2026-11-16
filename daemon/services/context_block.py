@@ -141,17 +141,21 @@ def _stable_id_for(
     preserved through compaction; that surface is the
     A-signal path the user pinned as untouched.
 
-    ``completion_check_note`` kind REMOVED 2026-09-23 (D-entry
-    2026-09-23, incident b2f4dae9): the producer mint site in
-    ``daemon/graph.py::_make_completion_check_note_message`` was
-    deleted end-to-end; the (b)/(d)-with-pending route resolves to
-    allow on the resolver row but emits NO message. The stable-id
-    table row was removed too — there is no surviving
-    ``completion_check_note:{instance_id}`` consumer. The
-    ``_stable_id_for`` kind-list value-error message and this
-    docstring entry are the only remaining witnesses; the kind
-    literal is now a sentinel for the negative census pin in
-    ``tests/unit/test_attestation_lca_note_removed.py``.
+    The completion-check-note kind REMOVED 2026-09-23 (D-entry
+    2026-09-23, incident b2f4dae9): the retired completion-check
+    note producer helper in ``daemon/graph.py`` was deleted
+    end-to-end; the (b)/(d)-with-pending route resolves to allow
+    on the resolver row but emits NO message. The stable-id table
+    row was removed too — no per-instance stable id for that kind
+    survives anywhere. This docstring deliberately carries NONE of
+    the retired identifier literals: the lcancheck whole-tree
+    census pins grep live ``daemon/`` code for those literals and
+    a descriptive reference stays clean without any witness
+    carve-out. Enforcement lives in
+    ``tests/unit/test_attestation_lca_note_removed.py`` (the
+    negative census pins) plus the lcancheck family pins; at
+    runtime a stale caller's kind is named by the
+    ``_stable_id_for`` unknown-kind ValueError via its ``repr``.
 
     Args:
         kind: The block kind (see table above).

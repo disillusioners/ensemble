@@ -37,12 +37,16 @@ deletes. The FIRST sweep of a deployment computes the candidate set,
 reports it, and deletes NOTHING; the flag is persisted (the shared
 meta KV) so a daemon restart does not silently re-arm the dry run
 forever — a restart BEFORE the first sweep simply keeps the dry run
-(fail-safe: a restart never purges unexpectedly). Every later sweep
-purges. A FAILED flag read is RETRIED on the next sweep — the RAM
-latch pins on a successful read only, so one transient KV fault
-never permanently disables the purge (A-P6-25, the M1 adjudication);
-during the uncertainty the sweep stays a dry run (A-P6-6's
-fail-safe direction).
+(fail-safe: a restart never purges unexpectedly). A FAILED flag READ
+is RETRIED on the next sweep — the RAM mirror pins on a successful
+READ only, so one transient KV fault never permanently disables the
+purge (A-P6-25, the M1 adjudication); during the uncertainty the sweep
+stays a dry run (A-P6-6's fail-safe direction). The WRITE side is
+deliberately different (measured, A-P6-26 truthing): marking the dry
+run done pins the RAM mirror IMMEDIATELY and then persists
+best-effort — a FAILED durable write still leaves THIS process
+purging on the in-RAM flag (RAM-only persistence), and only a RESTART
+re-arms the dry run.
 
 **Fail-open posture.** The maintenance loop must never die on a GC
 fault: every candidate is purged independently (one room's failure
@@ -139,8 +143,11 @@ class RoomGcSweeper:
         self._kv_context_key = kv_context_key
         #: RAM mirror of the durable dry-run flag (the KV is the
         #: durable truth; this avoids a KV read on every sweep).
-        #: ``_loaded`` pins ONLY on a successful read (A-P6-25, M1) —
-        #: a failed read is retried on the next sweep.
+        #: The mirror pins on a successful READ (A-P6-25, M1) — a
+        #: failed read is retried on the next sweep — and ALSO pins
+        #: unconditionally on ``_mark_dry_run_done`` (the write path:
+        #: the in-RAM flag holds even when the durable write fails;
+        #: a restart re-arms the dry run).
         self._dry_run_done = False
         self._dry_run_loaded = False
 
@@ -149,14 +156,18 @@ class RoomGcSweeper:
     def _load_dry_run_flag(self) -> bool:
         """Read the durable "the dry run already happened" flag.
 
-        The RAM latch is PINNED ON SUCCESS only (A-P6-25, the M1
-        adjudication): a FAILED read does not latch — the next sweep
-        RETRIES the read, so a transient KV fault never permanently
-        disables the sweep's ability to purge. (Latching before the
-        read would answer every later sweep from a stale RAM value
-        that no successful read ever backed.) During the uncertainty
-        the sweep stays a dry run — the same fail-safe direction as
-        the dry-run-first posture itself (A-P6-6).
+        The READ side of the latch (A-P6-25, the M1 adjudication): the
+        mirror pins on a SUCCESSFUL read only — a FAILED read does not
+        latch, so the next sweep RETRIES the read and the durable truth
+        becomes visible as soon as the fault clears (a
+        latched-from-fault mirror would answer every later sweep from a
+        stale RAM value no successful read ever backed). During the
+        uncertainty the sweep stays a dry run — the same fail-safe
+        direction as the dry-run-first posture itself (A-P6-6).
+
+        (The WRITE side differs by design — see
+        :meth:`_mark_dry_run_done`: the mirror pins there
+        unconditionally, before the best-effort durable write.)
         """
         if self._dry_run_loaded:
             return self._dry_run_done
@@ -183,7 +194,17 @@ class RoomGcSweeper:
         return self._dry_run_done
 
     def _mark_dry_run_done(self) -> None:
-        """Persist the dry-run flag (best effort; failure ⇒ RAM only)."""
+        """Mark the dry run done: pin the RAM mirror, persist best-effort.
+
+        The WRITE side of the latch (measured behavior, A-P6-26
+        truthing — deliberately DIFFERENT from the read side): the RAM
+        mirror is pinned FIRST and UNCONDITIONALLY, then the durable
+        KV write runs best-effort. A FAILED durable write therefore
+        leaves THIS PROCESS purging on the in-RAM flag (RAM-only
+        persistence — the next tick purges without re-reading the KV);
+        only a RESTART (fresh mirror) re-arms the dry run — the
+        fail-safe direction.
+        """
         self._dry_run_done = True
         self._dry_run_loaded = True
         repo = self._kv_repo
