@@ -49,16 +49,14 @@ from daemon.services.context_messages import (
     ROOM_ROSTER_MAX_CHARS,
     build_joined_room_context_message,
 )
-from tests.helpers.room_harness import join_member, make_room, make_room_engine
+from tests.helpers.room_harness import (
+    join_member,
+    make_room,
+    make_room_engine,
+    seed_instance,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-
-
-def _seed_instance(eng: Engine, iid: str, parent: str | None = None) -> None:
-    with Session(eng) as s:
-        s.add(Instance(instance_id=iid, agent_id="ari", agent_dir="/agents/ari",
-                       parent_id=parent, status="idle"))
-        s.commit()
 
 
 @pytest.fixture
@@ -73,9 +71,9 @@ def stack(engine):
     repo = RoomRepository(engine)
     svc = RoomChatService(engine)
     owner = "owner-1"
-    _seed_instance(engine, owner, None)
+    seed_instance(engine, owner, None)
     room_id = make_room(repo, tree_root=owner, owner=owner, owner_member_name="lead")
-    _seed_instance(engine, "child-1", owner)
+    seed_instance(engine, "child-1", owner)
     join_member(engine, room_id, "child-1", "worker")
     manager = MagicMock()
     manager._room_chat_service = svc
@@ -198,7 +196,7 @@ def test_a_long_roster_is_capped(stack):
     engine, repo, svc, room_id, owner, manager = stack
     for i in range(40):
         iid = f"member-{i}"
-        _seed_instance(engine, iid, owner)
+        seed_instance(engine, iid, owner)
         join_member(engine, room_id, iid, f"worker-{i}")
     content = _block(manager, "child-1").content
     roster_line = next(

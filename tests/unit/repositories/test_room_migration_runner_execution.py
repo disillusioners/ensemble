@@ -42,7 +42,7 @@ from __future__ import annotations
 import shutil
 
 import pytest
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import NullPool

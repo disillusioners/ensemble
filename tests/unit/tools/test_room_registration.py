@@ -50,8 +50,6 @@ import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 from daemon.tools._tool_registry import (
@@ -62,7 +60,6 @@ from daemon.tools._tool_registry import (
     discover_source_only_tool_names,
 )
 from daemon.tools.room import (
-    ROOM_CATEGORY_KEY,
     ROOM_TOOLS,
     create_room_tools,
 )
@@ -329,8 +326,12 @@ class TestAllowLists:
 
 class TestTheMembershipGate:
     def test_the_gate_is_the_first_logic_in_each_body(self) -> None:
-        """The membership gate runs BEFORE any write — a refused caller
-        must never touch the room log (RK-7-before-append)."""
+        """The layer-2 AUTHORIZATION gate (``_is_authorized``) is the
+        FIRST logic in each tool body — a literal tool name in an
+        allow list bypasses the category gate, so each body re-checks
+        the caller. (The MEMBERSHIP-before-write property is pinned
+        separately, per verb, below — see
+        ``test_the_post_body_resolves_membership_before_the_append``.)"""
         source = _module_source()
         tree = ast.parse(source)
         bodies = [

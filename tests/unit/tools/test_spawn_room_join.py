@@ -53,37 +53,8 @@ from tests.helpers.room_harness import (
     _make_spawn_sim,
     make_room,
     make_room_engine,
+    seed_raw_room,
 )
-
-
-def _seed_raw_room(engine: Engine, tree_root: str, name: str) -> str:
-    """Insert a ``chatrooms`` row DIRECTLY — bypassing ``create_room``.
-
-    P5 re-gate (A-P5-14): the create path now enforces the tree's
-    active-room cap, so the JOIN-side spawn tests can no longer build
-    their over-budget tree (total >= 9) through ``create_room``. The
-    join-side conjunct is the anomaly backstop for a tree over budget
-    by ANY means — raw seeding is exactly that means.
-    """
-    rid = f"raw-{uuid.uuid4().hex[:12]}"
-    now = "2026-11-15T08:00:00+00:00"
-    with Session(engine) as s:
-        s.add(
-            ChatRoom(
-                room_id=rid,
-                name=name,
-                tree_root_id=tree_root,
-                owner_instance_id=tree_root,
-                state="active",
-                closed_at=None,
-                last_post_at=None,
-                message_count=0,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        s.commit()
-    return rid
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +490,7 @@ class TestJoinRefusals:
         # The create path is CAPPED now (P5 re-gate, A-P5-14) — the
         # 9th create would refuse — so the crowd is seeded RAW.
         for i in range(8):
-            _seed_raw_room(engine, TREE_ROOT, f"crowd-{i}")
+            seed_raw_room(engine, TREE_ROOT, f"crowd-{i}")
         calls: list[dict] = []
         manager = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         result = _run_spawn_tool(
@@ -600,7 +571,7 @@ class TestJoinRefusals:
         # The crowd is seeded RAW — the create path is capped now
         # (P5 re-gate, A-P5-14), the 9th create would refuse.
         for i in range(8):
-            _seed_raw_room(engine, TREE_ROOT, f"crowd-{i}")
+            seed_raw_room(engine, TREE_ROOT, f"crowd-{i}")
         m = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         texts.append(_run_spawn_tool(
             m, agent_id="capture", join_room=room_id

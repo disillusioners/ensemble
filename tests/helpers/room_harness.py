@@ -18,6 +18,7 @@ here — see ``checkpoint_prune_pg.py`` for the sibling pattern).
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Callable
 
 from sqlalchemy import create_engine, event
@@ -30,7 +31,7 @@ import daemon.repositories.event.models  # noqa: F401 — register event
 import daemon.repositories.instance.models  # noqa: F401 — register instances
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.room import membership as room_membership
-from daemon.repositories.room.models import ChatRoomMember
+from daemon.repositories.room.models import ChatRoom, ChatRoomMember
 from daemon.repositories.room.repository import RoomRepository
 
 __all__ = [
@@ -39,6 +40,7 @@ __all__ = [
     "join_member",
     "count_rows",
     "make_room",
+    "seed_raw_room",
     "_make_spawn_sim",
 ]
 
@@ -68,9 +70,12 @@ def make_room_engine(tmp_path, name: str) -> Engine:
 
 
 def seed_instance(
-    eng: Engine, instance_id: str, parent_id: str | None = None
+    eng: Engine,
+    instance_id: str,
+    parent_id: str | None = None,
+    status: str = "idle",
 ) -> None:
-    """Insert one Instance row (agent ``ari``, idle)."""
+    """Insert one Instance row (agent ``ari``, default idle)."""
     with Session(eng) as s:
         s.add(
             Instance(
@@ -78,7 +83,7 @@ def seed_instance(
                 agent_id="ari",
                 agent_dir="/agents/ari",
                 parent_id=parent_id,
-                status="idle",
+                status=status,
             )
         )
         s.commit()
@@ -130,6 +135,37 @@ def make_room(
         owner_instance_id=owner,
         owner_member_name=owner_member_name,
     )["room"]["room_id"]
+
+
+def seed_raw_room(engine: Engine, tree_root: str, name: str) -> str:
+    """Insert a ``chatrooms`` row DIRECTLY — bypassing ``create_room``.
+
+    P5 re-gate (A-P5-14): the create path now enforces the tree's
+    active-room cap, so the JOIN-side tests (membership matrix and
+    spawn join) can no longer build their over-budget tree
+    (total >= 9) through ``create_room``. The join-side conjunct is
+    the anomaly backstop for a tree over budget by ANY means — raw
+    seeding is exactly that means.
+    """
+    rid = f"raw-{uuid.uuid4().hex[:12]}"
+    now = "2026-11-15T08:00:00+00:00"
+    with Session(engine) as s:
+        s.add(
+            ChatRoom(
+                room_id=rid,
+                name=name,
+                tree_root_id=tree_root,
+                owner_instance_id=tree_root,
+                state="active",
+                closed_at=None,
+                last_post_at=None,
+                message_count=0,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        s.commit()
+    return rid
 
 
 def _make_spawn_sim(

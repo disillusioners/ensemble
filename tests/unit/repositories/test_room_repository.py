@@ -1068,18 +1068,27 @@ class TestPurgeFingerprintClassification:
 # ---------------------------------------------------------------------------
 
 
-def test_create_room_refuses_the_ninth_active_room_in_a_tree(repo, tree):
-    """The create path enforces the tree's active-room budget
-    (``ROOM_MAX_ACTIVE_ROOMS_PER_TREE`` = 8), fail-closed BEFORE the
-    insert, raising the SAME typed error the join path raises (one
-    condition, one error type)."""
-    for i in range(8):
+def _fill_tree_with_active_rooms(repo, tree, n: int) -> list[str]:
+    """Seed ``n`` ACTIVE rooms in the tree through ``create_room`` —
+    the shared setup of both cap tests (identical create kwargs); the
+    room ids are returned for tests that need to close one later."""
+    return [
         repo.create_room(
             name=f"crowd-{i}",
             tree_root_id=tree["root"],
             owner_instance_id=tree["owner"],
             owner_member_name=f"lead-{i}",
-        )
+        )["room"]["room_id"]
+        for i in range(n)
+    ]
+
+
+def test_create_room_refuses_the_ninth_active_room_in_a_tree(repo, tree):
+    """The create path enforces the tree's active-room budget
+    (``ROOM_MAX_ACTIVE_ROOMS_PER_TREE`` = 8), fail-closed BEFORE the
+    insert, raising the SAME typed error the join path raises (one
+    condition, one error type)."""
+    _fill_tree_with_active_rooms(repo, tree, 8)
     # 8 ACTIVE rooms — at the cap; the next create is the 9th.
     with pytest.raises(RoomJoinRoomCapError) as excinfo:
         repo.create_room(
@@ -1102,16 +1111,7 @@ def test_create_room_refuses_the_ninth_active_room_in_a_tree(repo, tree):
 def test_create_room_cap_counts_active_only_closed_frees_the_slot(repo, tree):
     """The cap counts ACTIVE rooms only — closing a room frees its
     slot (the same counting base as the join path's cap)."""
-    rids = []
-    for i in range(8):
-        rids.append(
-            repo.create_room(
-                name=f"crowd-{i}",
-                tree_root_id=tree["root"],
-                owner_instance_id=tree["owner"],
-                owner_member_name=f"lead-{i}",
-            )["room"]["room_id"]
-        )
+    rids = _fill_tree_with_active_rooms(repo, tree, 8)
     with pytest.raises(RoomJoinRoomCapError):
         repo.create_room(
             name="blocked",

@@ -34,7 +34,6 @@ cannot be lost by an edit that touches one copy.
 from __future__ import annotations
 
 import asyncio
-import re
 from pathlib import Path
 from typing import Iterator
 from unittest.mock import AsyncMock, MagicMock
@@ -48,7 +47,12 @@ import daemon.repositories.instance.models  # noqa: F401
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.room import RoomChatService, RoomRepository
 from daemon.services.room_delivery import RoomDeliveryService
-from tests.helpers.room_harness import join_member, make_room, make_room_engine
+from tests.helpers.room_harness import (
+    join_member,
+    make_room,
+    make_room_engine,
+    seed_instance,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SOURCE = (
@@ -154,13 +158,6 @@ def engine(tmp_path) -> Iterator[Engine]:
     eng.dispose()
 
 
-def _seed_instance(eng: Engine, iid: str, parent: str | None = None, status: str = "idle") -> None:
-    with Session(eng) as s:
-        s.add(Instance(instance_id=iid, agent_id="ari", agent_dir="/agents/ari",
-                       parent_id=parent, status=status))
-        s.commit()
-
-
 def _manager():
     manager = MagicMock()
     manager.has_live_graph_task = MagicMock(return_value=True)
@@ -179,9 +176,9 @@ def test_the_extracted_terminal_branch_never_routes_the_parent_at_boot(engine):
     repo = RoomRepository(engine)
     svc = RoomChatService(engine)
     owner = "owner-1"
-    _seed_instance(engine, owner, None, "idle")
+    seed_instance(engine, owner, None, "idle")
     room_id = make_room(repo, tree_root=owner, owner=owner, owner_member_name="lead")
-    _seed_instance(engine, "child-1", owner, "completed")
+    seed_instance(engine, "child-1", owner, "completed")
     join_member(engine, room_id, "child-1", "worker")
 
     manager = _manager()
@@ -224,9 +221,9 @@ def test_the_extracted_terminal_branch_routes_the_parent_outside_boot(engine):
     repo = RoomRepository(engine)
     svc = RoomChatService(engine)
     owner = "owner-1"
-    _seed_instance(engine, owner, None, "idle")
+    seed_instance(engine, owner, None, "idle")
     room_id = make_room(repo, tree_root=owner, owner=owner, owner_member_name="lead")
-    _seed_instance(engine, "child-1", owner, "completed")
+    seed_instance(engine, "child-1", owner, "completed")
     join_member(engine, room_id, "child-1", "worker")
 
     manager = _manager()
@@ -263,9 +260,9 @@ def test_the_extracted_parked_branch_emits_the_audit_event(engine):
     repo = RoomRepository(engine)
     svc = RoomChatService(engine)
     owner = "owner-1"
-    _seed_instance(engine, owner, None, "idle")
+    seed_instance(engine, owner, None, "idle")
     room_id = make_room(repo, tree_root=owner, owner=owner, owner_member_name="lead")
-    _seed_instance(engine, "child-1", owner, "paused")
+    seed_instance(engine, "child-1", owner, "paused")
     join_member(engine, room_id, "child-1", "worker")
 
     emitted: list[tuple] = []

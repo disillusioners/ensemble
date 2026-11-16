@@ -43,18 +43,11 @@ from daemon.repositories.room.models import ChatRoom, RoomMessage
 from daemon.services.room_delivery import RoomDeliveryService
 from daemon.tools.room import create_room_tools
 from tests.helpers.room_harness import (
-    count_rows,
     join_member,
     make_room,
     make_room_engine,
+    seed_instance,
 )
-
-
-def _seed_instance(eng: Engine, iid: str, parent: str | None = None, status: str = "idle") -> None:
-    with Session(eng) as s:
-        s.add(Instance(instance_id=iid, agent_id="ari", agent_dir="/agents/ari",
-                       parent_id=parent, status=status))
-        s.commit()
 
 
 def _manager(engine: Engine, svc: RoomChatService):
@@ -86,9 +79,9 @@ def stack(engine):
     repo = RoomRepository(engine)
     svc = RoomChatService(engine)
     owner = "owner-1"
-    _seed_instance(engine, owner, None, "idle")
+    seed_instance(engine, owner, None, "idle")
     room_id = make_room(repo, tree_root=owner, owner=owner, owner_member_name="lead")
-    _seed_instance(engine, "child-1", owner, "idle")
+    seed_instance(engine, "child-1", owner, "idle")
     join_member(engine, room_id, "child-1", "worker")
     return engine, repo, svc, room_id, owner
 
