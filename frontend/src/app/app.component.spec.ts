@@ -2124,4 +2124,3 @@ describe('snapshot-uiux route + menu wiring', () => {
     expect(source).toMatch(/'menu-snapshots'/);
   });
 });
-});
