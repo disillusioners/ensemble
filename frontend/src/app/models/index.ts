@@ -4,6 +4,10 @@
 // rationale); runtime values from the mirrors are imported from the
 // model files directly by the modules that use them.
 //
+// Why this file is large (~1,097 lines): the single barrel
+// aggregation of the FE's wire-mirror types — one import site by
+// design.
+//
 // Instance types
 export type InstanceStatus = 'idle' | 'running' | 'paused' | 'completed' | 'error' | 'terminated' | 'queued' | 'waiting_children' | 'failed';
 

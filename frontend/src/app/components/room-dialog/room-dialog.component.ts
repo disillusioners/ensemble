@@ -8,6 +8,16 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { RoomService } from '../../services/room.service';
 import type { RoomSummary } from '../../models/room.model';
 
+/** The BIG-modal geometry (82vw × 82vh, capped 96vw/96vh) — ONE
+ * definition: the chat component spreads it into ``dialog.open`` and
+ * the spec asserts against it (byte-identical values in both lanes). */
+export const ROOM_DIALOG_SIZE = {
+  width: '82vw',
+  height: '82vh',
+  maxWidth: '96vw',
+  maxHeight: '96vh',
+} as const;
+
 /**
  * Data payload for the chatrooms modal.
  *

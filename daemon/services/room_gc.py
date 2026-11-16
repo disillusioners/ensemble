@@ -50,12 +50,15 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from daemon.repositories.room.models import (
     NON_TERMINAL_INSTANCE_STATUSES_FOR_ROOMS,
     RoomState,
 )
+
+if TYPE_CHECKING:
+    from daemon.repositories.room.service import RoomChatService
 
 logger = logging.getLogger(__name__)
 
@@ -175,8 +178,9 @@ class RoomGcSweeper:
             )
         except Exception as exc:  # noqa: BLE001 — the flag is advisory
             self._log.warning(
-                "room gc: dry-run flag write failed (%r) — the sweep will "
-                "dry-run again on the next tick (fail-safe)",
+                "room gc: the durable dry-run flag write failed (%r) — "
+                "this process will purge on the next tick (the in-RAM "
+                "flag holds); a RESTART re-arms the dry run (fail-safe)",
                 exc,
             )
 
@@ -353,7 +357,7 @@ class RoomGcSweeper:
 
     async def _liveness_map(
         self,
-        service: Any,
+        service: RoomChatService,
         candidates: list[dict[str, Any]],
         member_map: dict[str, list[str]],
         room_rows: list[dict[str, Any]],
@@ -422,7 +426,7 @@ class RoomGcSweeper:
 
     # ── helpers ──────────────────────────────────────────────────────
 
-    def _room_service(self) -> Any:
+    def _room_service(self) -> RoomChatService | None:
         """The room chat service handle (None ⇒ the sweeper no-ops)."""
         service = getattr(self._manager, "_room_chat_service", None)
         if service is None:

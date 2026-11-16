@@ -1,4 +1,10 @@
-"""Instance message API endpoints."""
+"""Instance message API endpoints.
+
+**Why this file is large (~1,152 lines).** The 1,000–3,000-line band
+requires a why-large note: this router aggregates the message and
+SSE lane surfaces — the stream endpoints and their shared
+resolve/auth helpers live together by design.
+"""
 
 import asyncio
 import json
@@ -1018,12 +1024,12 @@ async def _resolve_sse_target(manager: Any, raw_id: str) -> tuple[str, str]:
         )
     try:
         await manager.get_instance(owner)
-    except KeyError:
+    except KeyError as exc:
         # The room exists but its owner instance is gone — the stream
         # has no live target to ride.
         raise HTTPException(
             status_code=404, detail=f"Instance not found: {raw_id}"
-        )
+        ) from exc
     return owner, raw_id
 
 

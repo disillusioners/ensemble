@@ -4,7 +4,7 @@
  * and the per-instance guards that gate async completions against
  * stale-instance drift.
  *
- * Size rationale (~1570 lines, single file): this component is the
+ * Size rationale (~2140 lines, single file): this component is the
  * load-bearing hub for the chat surface — it threads the message
  * lifecycle end-to-end (send → provisional → SSE echo → REST refetch
  * → purge on terminal). Natural future split seam: the optimistic-
@@ -47,7 +47,10 @@ import {
   WatchoverDialogComponent,
   WatchoverDialogResult,
 } from '../../components/watchover-dialog/watchover-dialog.component';
-import { RoomDialogComponent } from '../../components/room-dialog/room-dialog.component';
+import {
+  RoomDialogComponent,
+  ROOM_DIALOG_SIZE,
+} from '../../components/room-dialog/room-dialog.component';
 import type { Agent, InstanceInfo, Message, CommandAck, RejectionReason } from '../../models';
 
 const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
@@ -1913,10 +1916,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       },
       // BIG modal — 82vw × 82vh (the `room-dialog-panel` global rule in
       // styles.scss lifts Material's 560px / 65vh defaults).
-      width: '82vw',
-      height: '82vh',
-      maxWidth: '96vw',
-      maxHeight: '96vh',
+      ...ROOM_DIALOG_SIZE,
       panelClass: 'room-dialog-panel',
       backdropClass: 'room-dialog-backdrop',
     });

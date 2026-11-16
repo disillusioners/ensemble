@@ -137,5 +137,10 @@ class RoomPostTurnCap:
         return True, detail
 
     def reset(self, instance_id: str) -> None:
-        """Drop the instance's budget (an explicit turn-boundary reset)."""
+        """Drop the instance's budget (TEST/OPERATOR-surface only).
+
+        Production turn boundaries do NOT call this — the budget
+        resets inside :meth:`check` when the turn key changes (a new
+        turn mints a fresh entry on the spot).
+        """
         self.counters.pop(instance_id, None)

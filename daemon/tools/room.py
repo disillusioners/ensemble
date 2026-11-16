@@ -66,6 +66,11 @@ House rules honored here:
   ``traceback`` / ``repr(exc)`` never reach the payload).
 * Every message-path DB touch is OFF-LOOP (``asyncio.to_thread`` via
   the room service — the v0.27.14 event-loop discipline).
+
+**Why this file is large (~1,036 lines).** The 1,000–3,000-line band
+requires a why-large note: the four room verbs share ONE
+authorization gate + refusal envelope — splitting them puts the gate
+ordering across a module boundary where the compiler cannot hold it.
 """
 
 from __future__ import annotations
@@ -80,10 +85,15 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from ._tool_registry import register_tool_category
+from daemon.repositories.room.models import (
+    ROOM_READ_DEFAULT_LIMIT,
+    ROOM_READ_MAX_LIMIT,
+)
 
 if TYPE_CHECKING:
     from daemon.repositories.room.service import RoomChatService
     from daemon.services.room_delivery import RoomDeliveryService
+    from daemon.services.room_post_cap import RoomPostTurnCap
 
 logger = logging.getLogger(__name__)
 
@@ -150,10 +160,6 @@ TOKEN_INVALID_ROOM_NAME = "invalid-room-name"
 
 #: The post body cap (architecture §9 — ``post <= 4000 chars``).
 ROOM_POST_MAX_CHARS = 4000
-#: The read window cap (the read tool is the FULL-HISTORY window; the
-#: digest is what stays small).
-ROOM_READ_MAX_LIMIT = 200
-ROOM_READ_DEFAULT_LIMIT = 50
 
 #: The room-NAME bound (A-P5-17) — the name rides the agent-facing
 #: JOINED-ROOM block (the banner) on EVERY turn, so an unbounded name
@@ -284,7 +290,7 @@ def _delivery_service(manager: Any) -> RoomDeliveryService | None:
     return getattr(manager, "_room_delivery_service", None)
 
 
-def _post_cap(manager: Any) -> Any:
+def _post_cap(manager: Any) -> RoomPostTurnCap | None:
     """The §9 per-turn post budget handle, or None.
 
     The manager ALWAYS carries the cap (``manager._room_post_turn_cap``
@@ -654,7 +660,7 @@ def create_room_tools(
                     return _refusal(
                         "room_post",
                         TOKEN_POST_CAP,
-                        f"you already posted "
+                        "you already posted "
                         f"{cap_detail.get('posts_this_turn')} message(s) this "
                         f"turn — the budget is "
                         f"{cap_detail.get('max_posts_per_turn')} posts per "

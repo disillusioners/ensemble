@@ -79,6 +79,8 @@ __all__ = [
     "RoomMessageKind",
     "ROOM_CLOSED_STATES",
     "ROOM_LIVE_STATES",
+    "ROOM_READ_DEFAULT_LIMIT",
+    "ROOM_READ_MAX_LIMIT",
     "TERMINAL_INSTANCE_STATUSES_FOR_ROOMS",
     "NON_TERMINAL_INSTANCE_STATUSES_FOR_ROOMS",
     "ChatRoom",
@@ -178,6 +180,11 @@ NON_TERMINAL_INSTANCE_STATUSES_FOR_ROOMS: frozenset[str] = frozenset(
 # any set — they have no rows at all.
 ROOM_LIVE_STATES: frozenset[str] = frozenset({RoomState.ACTIVE.value})
 ROOM_CLOSED_STATES: frozenset[str] = frozenset({RoomState.CLOSED.value})
+
+#: The room-read window bounds — the agent ``room_read`` tool AND the
+#: operator route (``GET /rooms/{id}/messages``) share ONE definition.
+ROOM_READ_DEFAULT_LIMIT = 50
+ROOM_READ_MAX_LIMIT = 200
 
 
 # ── chatrooms ──────────────────────────────────────────────────────────────

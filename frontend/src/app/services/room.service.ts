@@ -1,4 +1,4 @@
-import { Injectable, inject, signal } from '@angular/core';
+import { Injectable, WritableSignal, inject, signal } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import {
@@ -46,26 +46,26 @@ export class RoomService {
 
   // ── rooms lane ──────────────────────────────────────────────────────────
   /** Rooms created by the viewed instance('s tree). */
-  readonly rooms = signal<RoomSummary[]>([]);
+  readonly rooms: WritableSignal<RoomSummary[]> = signal<RoomSummary[]>([]);
   /** True while a rooms request is in flight. */
-  readonly roomsLoading = signal(false);
+  readonly roomsLoading: WritableSignal<boolean> = signal(false);
   /** Human-readable error for the rooms lane (null = no error). */
-  readonly roomsError = signal<string | null>(null);
+  readonly roomsError: WritableSignal<string | null> = signal<string | null>(null);
   /** HTTP status behind `roomsError` (null = no error) — drives the copy. */
-  readonly roomsErrorStatus = signal<number | null>(null);
+  readonly roomsErrorStatus: WritableSignal<number | null> = signal<number | null>(null);
   private roomsRequestId = 0;
 
   // ── messages lane ───────────────────────────────────────────────────────
   /** The selected room's conversation, ascending by `seq`. */
-  readonly messages = signal<RoomMessage[]>([]);
+  readonly messages: WritableSignal<RoomMessage[]> = signal<RoomMessage[]>([]);
   /** True while a messages request is in flight. */
-  readonly messagesLoading = signal(false);
+  readonly messagesLoading: WritableSignal<boolean> = signal(false);
   /** Human-readable error for the messages lane (null = no error). */
-  readonly messagesError = signal<string | null>(null);
+  readonly messagesError: WritableSignal<string | null> = signal<string | null>(null);
   /** HTTP status behind `messagesError` (null = no error). */
-  readonly messagesErrorStatus = signal<number | null>(null);
+  readonly messagesErrorStatus: WritableSignal<number | null> = signal<number | null>(null);
   /** Cursor for the next page; null when the conversation is exhausted. */
-  readonly nextAfterSeq = signal<number | null>(null);
+  readonly nextAfterSeq: WritableSignal<number | null> = signal<number | null>(null);
   private messagesRequestId = 0;
 
   // ── raw HTTP surface ────────────────────────────────────────────────────
@@ -238,7 +238,10 @@ function describeHttpError(
   if (status === 404) {
     return {
       status,
-      message: `Not found — this ${subject} no longer exists (it may have been purged).`,
+      message:
+        subject === 'chatrooms'
+          ? 'Not found — these chatrooms no longer exist (they may have been purged).'
+          : 'Not found — this conversation is no longer available (it may have been purged).',
     };
   }
   if (status === 403) {

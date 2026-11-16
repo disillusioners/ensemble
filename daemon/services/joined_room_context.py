@@ -424,8 +424,6 @@ async def build_joined_room_context_message(
     )
 
 
-
-
 __all__ = [
     "CONTEXT_KIND_JOINED_ROOM",
     "ROOM_GUIDELINES_TEXT",

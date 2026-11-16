@@ -34,8 +34,6 @@ CONTEXT_PREFIX = "[SYSTEM CONTEXT: "
 CONTEXT_SUFFIX = "]\n\n"
 
 
-
-
 def _make_context_message(
     kind: str,
     title: str,
@@ -91,7 +89,6 @@ def _make_context_message(
     )
 
 
-
 def _stable_id_for(
     kind: str,
     *,
@@ -106,16 +103,17 @@ def _stable_id_for(
     single source of truth — all callers route through this helper so
     the mint site stays grep-able and the formats stay append-only):
 
-    ========================  =============================================  =========================
-    ``kind``                  id format                                       required parts
-    ========================  =============================================  =========================
-    ``project``               ``project:{instance_id}``                       ``instance_id``
-    ``shared_meta_kv``        ``kv:{context_key}``                            ``context_key``
-    ``attestation_nudge``     ``attestation_nudge:{instance_id}``             ``instance_id``
-    ``memoir``                ``memoir:{agent_id}``                           ``agent_id``
-    ``memoir_refresh``        ``memoir_refresh:{instance_id}``                ``instance_id``
-    ``pok``                   ``pok:{project_id}``                            ``project_id``
-    ========================  =============================================  =========================
+    =====================================  ===================================================  =============
+    ``kind``                               id format                                            required parts
+    ``project``                            ``project:{instance_id}``                            ``instance_id``
+    ``shared_meta_kv``                     ``kv:{context_key}``                                 ``context_key``
+    ``attestation_nudge``                  ``attestation_nudge:{instance_id}``                  ``instance_id``
+    ``attestation_final_report_reminder``  ``attestation_final_report_reminder:{instance_id}``  ``instance_id``
+    ``memoir``                             ``memoir:{agent_id}``                                ``agent_id``
+    ``memoir_refresh``                     ``memoir_refresh:{instance_id}``                     ``instance_id``
+    ``joined_room``                        ``joined_room:{instance_id}``                        ``instance_id``
+    ``pok``                                ``pok:{project_id}``                                 ``project_id``
+    =====================================  ===================================================  =============
 
     ``context_key`` is the FULL resolved tree-root partition key — the
     id suffix IS the partition the block content was read from, so
@@ -265,7 +263,6 @@ def _stable_id_for(
     )
 
 
-
 def escape_for_context_block(content: str) -> str:
     """Escape characters that could close an inner data fence.
 
@@ -312,12 +309,8 @@ def escape_for_context_block(content: str) -> str:
     )
 
 
-
-
 __all__ = [
     "CONTEXT_PREFIX",
     "CONTEXT_SUFFIX",
-    "_make_context_message",
-    "_stable_id_for",
     "escape_for_context_block",
 ]

@@ -48,8 +48,9 @@ THE POSTURE (no new auth model)
 
 THE ERROR VOCABULARY (closed)
 ------------------------------
-``400 bad_request`` · ``401`` (the auth middleware) · ``403
-SCOPE_INSUFFICIENT`` · ``404 instance_not_found`` / ``404
+``422`` (FastAPI request validation — the int-typed query params
+fail there before the handler) · ``401`` (the auth middleware) ·
+``403 SCOPE_INSUFFICIENT`` · ``404 instance_not_found`` / ``404
 room_not_found`` · ``503 room_service_unavailable``.
 """
 
@@ -62,24 +63,24 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from daemon.auth.decorators import scope_required
+from daemon.repositories.room.models import (
+    ROOM_READ_DEFAULT_LIMIT,
+    ROOM_READ_MAX_LIMIT,
+)
 from daemon.repositories.room.repository import RoomNotFoundError
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["rooms"])
 
+__all__ = ["router"]
+
 #: The role gate — the SAME scope every other instance read route
 #: uses (the operator lane). The room surface introduces NO new
 #: scope and NO new auth model.
 _SCOPE_READ = "instances:read"
 
-#: The read window's bounds (the SAME bounds as the agent's
-#: ``room_read`` tool: ``ROOM_READ_DEFAULT_LIMIT`` / ``ROOM_READ_MAX_LIMIT``).
-DEFAULT_MESSAGE_LIMIT = 50
-MAX_MESSAGE_LIMIT = 200
-
 #: The closed error vocabulary of THIS route.
-_ERR_BAD_REQUEST = "bad_request"
 _ERR_INSTANCE_NOT_FOUND = "instance_not_found"
 _ERR_ROOM_NOT_FOUND = "room_not_found"
 _ERR_ROOM_SERVICE_UNAVAILABLE = "room_service_unavailable"
@@ -150,7 +151,7 @@ async def list_instance_rooms(instance_id: str, request: Request) -> dict:
             404,
             _ERR_INSTANCE_NOT_FOUND,
             f"Instance not found: {instance_id}",
-        )
+        ) from exc
     if not tree_root:
         raise _err(
             404,
@@ -184,7 +185,8 @@ async def read_room_messages(
     request: Request,
     after_seq: int = Query(0, description="Return rows with seq > after_seq."),
     limit: int = Query(
-        DEFAULT_MESSAGE_LIMIT, description="Window size (max 200)."
+        ROOM_READ_DEFAULT_LIMIT,
+        description=f"Window size (max {ROOM_READ_MAX_LIMIT}).",
     ),
     instance_id: str = Query(
         "",
@@ -205,19 +207,13 @@ async def read_room_messages(
             "the chat-room service is not available in this daemon",
         )
 
-    try:
-        after = int(after_seq)
-    except (TypeError, ValueError):
-        raise _err(400, _ERR_BAD_REQUEST, "after_seq must be an integer")
+    after = after_seq
     if after < 0:
         after = 0
-    try:
-        window = int(limit)
-    except (TypeError, ValueError):
-        raise _err(400, _ERR_BAD_REQUEST, "limit must be an integer")
+    window = limit
     if window <= 0:
-        window = DEFAULT_MESSAGE_LIMIT
-    window = min(window, MAX_MESSAGE_LIMIT)
+        window = ROOM_READ_DEFAULT_LIMIT
+    window = min(window, ROOM_READ_MAX_LIMIT)
 
     # A PURGED room is NONEXISTENT (R2) — the same typed not-found the
     # agent's read tool answers with.
