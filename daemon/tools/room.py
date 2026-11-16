@@ -213,6 +213,58 @@ def _is_authorized(agent_id: str) -> bool:
     return isinstance(agent_id, str) and bool(agent_id.strip())
 
 
+def _gate(
+    label: str, caller_agent_id: str, caller_instance_id: str
+) -> str | None:
+    """The layer-2 gate — the FIRST logic of EVERY room tool body.
+
+    ONE implementation for the four verbs (the H1 extraction): the
+    gate is the SECOND, independent authorization layer (a literal
+    tool name in an allow list bypasses the category gate), so it must
+    be the FIRST thing every body does — before ANY service handle is
+    resolved and before any DB touch.
+
+    Args:
+        label: The tool name — it names the refusal envelope.
+        caller_agent_id: The resolved agent id of the caller.
+        caller_instance_id: The caller's instance id.
+
+    Returns:
+        The refusal envelope when the caller may not use the room tools
+        at all, else ``None`` (the tool continues). The refusal TEXT is
+        byte-identical to the pre-extraction shape (the same labels,
+        tokens and messages).
+    """
+    if not _is_authorized(caller_agent_id):
+        return _refusal(
+            label,
+            TOKEN_UNKNOWN_AGENT,
+            "the room tools require a resolved agent identity",
+        )
+    if not caller_instance_id:
+        return _refusal(
+            label,
+            TOKEN_NOT_AUTHORIZED,
+            "the room tools require a caller instance id",
+        )
+    return None
+
+
+def _internal_error_refusal(label: str) -> str:
+    """The house internal-error envelope (the never-raise backstop).
+
+    ONE implementation for the four verbs (the H1 extraction): an
+    unexpected exception is logged SERVER-SIDE and answered with this
+    generic envelope. The raw exception text NEVER reaches the payload
+    (the PB-F1 leak class).
+    """
+    return _refusal(
+        label,
+        TOKEN_INTERNAL_ERROR,
+        "an unexpected error occurred (logged server-side); retry later",
+    )
+
+
 def _room_service(manager: Any) -> RoomChatService | None:
     """The room service handle, or None when the daemon has none.
 
@@ -423,19 +475,11 @@ def create_room_tools(
     @tool(args_schema=RoomCreateInput)
     async def room_create(name: str, member_name: str = "") -> str:
         """Open a chat-room for your team. Use tool_help("room_create") for details."""
-        # ── the layer-2 gate: FIRST logic in the body.
-        if not _is_authorized(caller_agent_id):
-            return _refusal(
-                "room_create",
-                TOKEN_UNKNOWN_AGENT,
-                "the room tools require a resolved agent identity",
-            )
-        if not caller_instance_id:
-            return _refusal(
-                "room_create",
-                TOKEN_NOT_AUTHORIZED,
-                "the room tools require a caller instance id",
-            )
+        # ── the layer-2 gate: FIRST logic in the body (the ONE
+        # shared helper — the four verbs delegate here, H1).
+        gate_refusal = _gate("room_create", caller_agent_id, caller_instance_id)
+        if gate_refusal is not None:
+            return gate_refusal
         # ── the room-NAME bound (A-P5-17): fail-closed BEFORE any DB
         # touch. The name rides the joined-room block on every turn, so
         # an unbounded name could crowd the ROSTER (then the
@@ -526,11 +570,7 @@ def create_room_tools(
             )
         except Exception:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("room_create failed")
-            return _refusal(
-                "room_create",
-                TOKEN_INTERNAL_ERROR,
-                "an unexpected error occurred (logged server-side); retry later",
-            )
+            return _internal_error_refusal("room_create")
 
     @register_tool_category(ROOM_CATEGORY_KEY)
     @tool(args_schema=RoomPostInput)
@@ -541,19 +581,11 @@ def create_room_tools(
         addressed_to: list[str] | None = None,
     ) -> str:
         """Post a milestone message to a chat-room. Use tool_help("room_post") for details."""
-        # ── the layer-2 gate: FIRST logic in the body.
-        if not _is_authorized(caller_agent_id):
-            return _refusal(
-                "room_post",
-                TOKEN_UNKNOWN_AGENT,
-                "the room tools require a resolved agent identity",
-            )
-        if not caller_instance_id:
-            return _refusal(
-                "room_post",
-                TOKEN_NOT_AUTHORIZED,
-                "the room tools require a caller instance id",
-            )
+        # ── the layer-2 gate: FIRST logic in the body (the ONE
+        # shared helper — the four verbs delegate here, H1).
+        gate_refusal = _gate("room_post", caller_agent_id, caller_instance_id)
+        if gate_refusal is not None:
+            return gate_refusal
         room_service = _room_service(manager)
         if room_service is None:
             return _refusal(
@@ -726,11 +758,7 @@ def create_room_tools(
             )
         except Exception:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("room_post failed")
-            return _refusal(
-                "room_post",
-                TOKEN_INTERNAL_ERROR,
-                "an unexpected error occurred (logged server-side); retry later",
-            )
+            return _internal_error_refusal("room_post")
 
     @register_tool_category(ROOM_CATEGORY_KEY)
     @tool(args_schema=RoomReadInput)
@@ -740,19 +768,11 @@ def create_room_tools(
         limit: int = ROOM_READ_DEFAULT_LIMIT,
     ) -> str:
         """Read a chat-room's messages. Use tool_help("room_read") for details."""
-        # ── the layer-2 gate: FIRST logic in the body.
-        if not _is_authorized(caller_agent_id):
-            return _refusal(
-                "room_read",
-                TOKEN_UNKNOWN_AGENT,
-                "the room tools require a resolved agent identity",
-            )
-        if not caller_instance_id:
-            return _refusal(
-                "room_read",
-                TOKEN_NOT_AUTHORIZED,
-                "the room tools require a caller instance id",
-            )
+        # ── the layer-2 gate: FIRST logic in the body (the ONE
+        # shared helper — the four verbs delegate here, H1).
+        gate_refusal = _gate("room_read", caller_agent_id, caller_instance_id)
+        if gate_refusal is not None:
+            return gate_refusal
         room_service = _room_service(manager)
         if room_service is None:
             return _refusal(
@@ -831,11 +851,7 @@ def create_room_tools(
             )
         except Exception:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("room_read failed")
-            return _refusal(
-                "room_read",
-                TOKEN_INTERNAL_ERROR,
-                "an unexpected error occurred (logged server-side); retry later",
-            )
+            return _internal_error_refusal("room_read")
 
     @register_tool_category(ROOM_CATEGORY_KEY)
     @tool(args_schema=RoomTaskDecisionInput)
@@ -846,19 +862,11 @@ def create_room_tools(
         note: str = "",
     ) -> str:
         """Record your decision on a task proposal in a chat-room. Use tool_help("room_task_decision") for details."""
-        # ── the layer-2 gate: FIRST logic in the body.
-        if not _is_authorized(caller_agent_id):
-            return _refusal(
-                "room_task_decision",
-                TOKEN_UNKNOWN_AGENT,
-                "the room tools require a resolved agent identity",
-            )
-        if not caller_instance_id:
-            return _refusal(
-                "room_task_decision",
-                TOKEN_NOT_AUTHORIZED,
-                "the room tools require a caller instance id",
-            )
+        # ── the layer-2 gate: FIRST logic in the body (the ONE
+        # shared helper — the four verbs delegate here, H1).
+        gate_refusal = _gate("room_task_decision", caller_agent_id, caller_instance_id)
+        if gate_refusal is not None:
+            return gate_refusal
         room_service = _room_service(manager)
         delivery = _delivery_service(manager)
         # TWO services, TWO refusals: a daemon can carry the room
@@ -951,11 +959,7 @@ def create_room_tools(
             return json.dumps({"recorded": True, **result}, indent=2)
         except Exception:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("room_task_decision failed")
-            return _refusal(
-                "room_task_decision",
-                TOKEN_INTERNAL_ERROR,
-                "an unexpected error occurred (logged server-side); retry later",
-            )
+            return _internal_error_refusal("room_task_decision")
 
     room_create._full_doc_ = _build_full_doc("room_create")
     room_post._full_doc_ = _build_full_doc("room_post")
