@@ -156,6 +156,11 @@ from .services.title_generation import TitleGenerationService
 from .services.room_naming import RoomNamingService
 from .services.room_delivery import RoomDeliveryService  # agent group chat P3 — delivery router
 from .services.room_nudge import RoomNudgeCoordinator  # agent group chat P4 — nudge layer
+# agent group chat P6 — the §9 per-turn post budget (A-P6-1) and the
+# GC purge sweeper (R2). Both are manager-level singletons; neither
+# touches a P4-owned seam (the cap MIRRORS the latch's shape).
+from .services.room_post_cap import RoomPostTurnCap
+from .services.room_gc import RoomGcSweeper, ROOM_GC_INTERVAL_HOURS
 from .repositories.room.service import RoomChatService
 from .services.event_publisher import EventPublisherService
 from .services.skill_embedding_service import SkillEmbeddingService
@@ -2417,6 +2422,27 @@ class InstanceManager:
             manager=self,
             logger=logger,
         )
+        # agent group chat P6 — the §9 PER-TURN POST BUDGET (A-P6-1,
+        # BINDING): a MANAGER-LEVEL per-instance_id counter, reset at
+        # the turn boundary. The registry is a manager attribute (the
+        # same shape as the P4 latch above — the service owns the
+        # policy, the manager owns the dict); the turn identity is the
+        # id of the instance's root graph task, so the shape MIRRORS
+        # the P4 latch WITHOUT touching any P4-owned seam.
+        self._room_post_turn_counter: dict[str, dict[str, Any]] = {}
+        self._room_post_turn_cap = RoomPostTurnCap(
+            manager=self,
+            logger=logger,
+        )
+        # agent group chat P6 — the GC PURGE sweeper (R2): the
+        # P-close (14d) / P-idle (72h + no living participant) purge
+        # triggers, wired on the maintenance seam below. It reuses the
+        # EXISTING purge_room transaction (the R2 mechanics live in the
+        # repository; the sweeper owns only the decision).
+        self._room_gc_sweeper = RoomGcSweeper(
+            manager=self,
+            logger=logger,
+        )
 
         # Child reports service (depends on config, checkpointer, instance_repository via manager)
         self._child_reports_service = ChildReportsService(
@@ -4631,6 +4657,22 @@ class InstanceManager:
             "checkpoint_cleanup",
             self.config.persistence.checkpoint_cleanup_interval,
             checkpoint_cleanup.execute,
+        )
+
+        # ── agent group chat P6 — the ROOM GC PURGE sweeper (R2) ──────
+        # The §2.2 GC job: P-close (closed > 14d) and P-idle (active,
+        # idle > 72h, zero living participant among {active members ∪
+        # owner ∪ owner-ancestry}) → a LITERAL DB purge (one
+        # transaction per room: the content-free ``room_purged`` event
+        # + the three deletes). Registered on the SAME maintenance
+        # service as the checkpoint sweep (idle-gated, advisory,
+        # never-raising). The FIRST sweep of a deployment is a DRY RUN
+        # (§2.2 "dry-run first"); the flag is durable, so a restart
+        # does not silently re-arm it forever.
+        self._maintenance_service.register(
+            "room_gc_sweep",
+            ROOM_GC_INTERVAL_HOURS,
+            self._room_gc_sweeper.execute,
         )
 
         # Section 1 / vacuum-maintenance (commission
