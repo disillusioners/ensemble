@@ -138,6 +138,10 @@ TOKEN_NOT_OWNER = "not-the-owner"
 TOKEN_NO_PROPOSAL = "no-such-proposal"
 TOKEN_DUPLICATE_DECISION = "duplicate-decision"
 TOKEN_ROOM_CAP = "room-cap"
+#: The §9 PER-TURN POST BUDGET refusal (A-P6-1) — its OWN token: a
+#: budget exhaustion is a NAMED, actionable condition (post again next
+#: turn), distinct from the room-count cap above.
+TOKEN_POST_CAP = "post-cap"
 #: The room-name bound refusal (A-P5-17) — its OWN token, distinct
 #: from the generic ``invalid-input`` (a name outside the bound is a
 #: NAMED, actionable condition: the agent can fix it by shortening the
@@ -226,6 +230,27 @@ def _delivery_service(manager: Any) -> RoomDeliveryService | None:
     if manager is None:
         return None
     return getattr(manager, "_room_delivery_service", None)
+
+
+def _post_cap(manager: Any) -> Any:
+    """The §9 per-turn post budget handle, or None.
+
+    The manager ALWAYS carries the cap (``manager._room_post_turn_cap``
+    — the manager-level per-instance counter, A-P6-1). The
+    ``isinstance`` gate keeps the ``*_if_available`` posture: a
+    partial/embedded manager (a test double, a stripped manager) has
+    NO cap and therefore NO budget — the cap is a COST control, not an
+    admission gate, so a missing cap degrades to "no budget" rather
+    than to "every post refused".
+    """
+    if manager is None:
+        return None
+    from daemon.services.room_post_cap import RoomPostTurnCap
+
+    cap = getattr(manager, "_room_post_turn_cap", None)
+    if isinstance(cap, RoomPostTurnCap):
+        return cap
+    return None
 
 
 def _tree_root_id(manager: Any, instance_id: str) -> str | None:
@@ -577,6 +602,33 @@ def create_room_tools(
                     f"you are not an active member of room {room_id} — "
                     "posting is refused (fail-closed)",
                 )
+            # ── the §9 PER-TURN POST BUDGET (A-P6-1, BINDING): the
+            # check sits at the PRE-APPEND region — the append is the
+            # commit point of the room log, so a post beyond the
+            # budget must NEVER reach it (the same posture as the
+            # membership gate above). The counter is manager-level,
+            # per instance, and resets at the turn boundary.
+            post_cap = _post_cap(manager)
+            if post_cap is not None:
+                allowed, cap_detail = post_cap.check(caller_instance_id)
+                if not allowed:
+                    logger.warning(
+                        "room_post refused: the per-turn post budget is "
+                        "spent (instance=%s room=%s budget=%s)",
+                        caller_instance_id,
+                        room_id,
+                        cap_detail.get("max_posts_per_turn"),
+                    )
+                    return _refusal(
+                        "room_post",
+                        TOKEN_POST_CAP,
+                        f"you already posted "
+                        f"{cap_detail.get('posts_this_turn')} message(s) this "
+                        f"turn — the budget is "
+                        f"{cap_detail.get('max_posts_per_turn')} posts per "
+                        "member per turn (post a milestone, not a stream); "
+                        "post again next turn",
+                    )
             roster = await room_service.list_members(
                 room_id, caller_instance_id=caller_instance_id, active_only=True
             )
