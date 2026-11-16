@@ -125,7 +125,22 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
         _COUNT_FIND,
         _COUNT_REPLACE,
         "tests/unit/tools/test_guidelines_registration.py",
-        "test_the_set_has_twenty_two_members",
+        "test_the_set_has_twenty_three_members",
+    ),
+    # ── MT-R01 (agent group chat P5, 2026-11-16): the room category's
+    #    MUTATION TARGET — "a category with no mutation target is not
+    #    covered by the matrix" (_tool_registry.py SAME-PR RULE). Same
+    #    derived find/replace shape as MT-01/MT-G01, aimed at the room
+    #    pin file: planting the count minus one must redden the room
+    #    registration pack via its count-pin leg, and the restore must
+    #    return it GREEN byte-identically.
+    (
+        "MT-R01-room-count-pin",
+        "tests/unit/tools/test_room_registration.py",
+        _COUNT_FIND,
+        _COUNT_REPLACE,
+        "tests/unit/tools/test_room_registration.py",
+        "test_the_count_is_twenty_three",
     ),
     (
         "MT-02-availability-re-derived",

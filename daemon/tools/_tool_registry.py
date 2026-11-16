@@ -347,6 +347,19 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # agent, ruling 2026-11-13).
     "guidelines_list",
     "guideline_read",
+    # agent group chat P5 (2026-11-16): the room tool category — the
+    # sibling-collaboration surface (room_create / room_post /
+    # room_read / room_task_decision). Created by the
+    # create_room_tools() factory (daemon/tools/room.py). Factory-built
+    # (not import-time registered), so all four names belong in
+    # DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. The category is
+    # PRIVILEGED (entry #23) — opt-in only, never default-granted; the
+    # runtime MEMBERSHIP gate lives in the tool bodies (fail-closed,
+    # before any write).
+    "room_create",
+    "room_post",
+    "room_read",
+    "room_task_decision",
 })
 
 
@@ -886,6 +899,37 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # entry ships in the SAME commit as those bumps — the set must
     # never be red between two commits).
     "guidelines",
+    # agent group chat P5 (2026-11-16): the ROOM tool category —
+    # ``room_create`` / ``room_post`` / ``room_read`` /
+    # ``room_task_decision``, created by the create_room_tools()
+    # factory (daemon/tools/room.py). PRIVILEGED entry #23 of
+    # PRIVILEGED_TOOL_CATEGORIES (22 -> 23 after the guidelines
+    # entry).
+    #
+    # Why privileged: the room surface is the SIBLING-COLLABORATION
+    # channel — a member can post into a shared room, interrupt a peer
+    # (``@name`` escalates and stops their current work) and, as the
+    # room owner, DECIDE a task proposal. That is authority over
+    # peers, so the empty-allow inherit universe must NOT auto-grant
+    # it. The explicit ``tools.allow: ["room"]`` entries are the
+    # visibility path.
+    #
+    # The SECOND layer is the MEMBERSHIP gate in the tool bodies: a
+    # caller that is not an ACTIVE member of the target room is
+    # refused BEFORE any write (the RK-7-before-append shape — the
+    # append is the commit point of the room log). The privileged
+    # category is NOT sufficient on its own — a LITERAL tool name in an
+    # allow list bypasses the category gate — so BOTH gates are
+    # required. Membership is granted AT SPAWN (the ``join_room``
+    # spawn parameter), so the gate is satisfiable from the first turn
+    # and no mid-life tool mutation is needed.
+    #
+    # SAME-PR pin updates at every file carrying the privileged-set /
+    # count assertion sites (re-derive the census BY GREP at the
+    # ceremony — see the SAME-PR RULE block above) are mandatory (this
+    # entry ships in the SAME commit as those bumps — the set must
+    # never be red between two commits).
+    "room",
 })
 
 
@@ -1465,6 +1509,26 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # (``self-alarm`` → ``self_alarm``, ``wedge-capture`` →
     # ``wedge_capture_*``).
     "guidelines": "daemon.tools.guidelines",
+    # agent group chat P5 (2026-11-16): the room tool category
+    # (``room_create`` / ``room_post`` / ``room_read`` /
+    # ``room_task_decision``). PRIVILEGED category (entry #23 of
+    # PRIVILEGED_TOOL_CATEGORIES): the sibling-collaboration channel —
+    # a member can post into a shared room, interrupt a peer, and (as
+    # the room owner) decide a task proposal. The empty-allow inherit
+    # universe must never auto-grant authority over peers; the
+    # explicit ``tools.allow: ["room"]`` entries are the visibility
+    # path, and every tool body ALSO carries its own MEMBERSHIP gate
+    # (fail-closed, before any write).
+    #
+    # The value MUST be a ``daemon.tools.*`` path — the AST scanner
+    # resolves the value as ``daemon/tools/<parts[2:]>.py``; a
+    # ``daemon.services.*`` value is NEVER discovered and the
+    # exact-equality drift pin fails at boot. The category key is
+    # EXACTLY ``room`` while the tool names are snake_case
+    # (``room_create`` / ``room_post`` / ``room_read`` /
+    # ``room_task_decision``) — the house pattern (``self-alarm`` →
+    # ``self_alarm``, ``wedge-capture`` → ``wedge_capture_*``).
+    "room": "daemon.tools.room",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
     # writers; census stays at 23.
@@ -2045,6 +2109,12 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     # DYNAMIC_TOOL_NAMES for the registration note.
     "guidelines_list",
     "guideline_read",
+    # Factory-built (agent group chat P5, 2026-11-16) — see
+    # DYNAMIC_TOOL_NAMES for the registration note.
+    "room_create",
+    "room_post",
+    "room_read",
+    "room_task_decision",
 })
 
 

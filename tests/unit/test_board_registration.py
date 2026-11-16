@@ -126,6 +126,10 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     # #22 — the FIRST privileged grant to a sonic agent (sonic-leader;
     # ruling 2026-11-13; see daemon/tools/_tool_registry.py).
     "guidelines",
+    # agent group chat P5 (2026-11-16): privileged entry #23 —
+    # the room tool category (room_create / room_post / room_read /
+    # room_task_decision); see daemon/tools/_tool_registry.py.
+    "room",
 })
 
 #: The ONLY agent allowed to hold the board category.
@@ -236,7 +240,7 @@ class TestPrivilegedCategory:
         "ninth entry" is a property of the SET SIZE at the time of the
         phase-1 commit and of the registry's literal order afterwards;
         the comment block in the registry records the ordinal."""
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 22
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 23
         source = (
             REPO_ROOT / "daemon" / "tools" / "_tool_registry.py"
         ).read_text(encoding="utf-8")
@@ -316,7 +320,11 @@ class TestAllowLists:
             # "instance_ops" after "guidelines". The pin's INTENT is
             # unchanged: only the categories appended AFTER the board
             # may follow it.
-            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture", "notify-user", "pok", "nest-report", "memoir", "prompt-reload", "prompt-assent", "guidelines", "instance_read", "instance_ops"],
+            # group-chat P5 (2026-11-16) appended "room" after the
+            # instance_read/instance_ops pair — the SAME-PR trailing
+            # discipline holds (the pin's INTENT is unchanged: only the
+            # categories appended AFTER the board may follow it).
+            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture", "notify-user", "pok", "nest-report", "memoir", "prompt-reload", "prompt-assent", "guidelines", "instance_read", "instance_ops", "room"],
         }
         for agent_id in BOARD_ALLOW_AGENTS:
             allow = self._allow(agent_id)

@@ -144,6 +144,10 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     # #22 — the FIRST privileged grant to a sonic agent (sonic-leader;
     # ruling 2026-11-13; see daemon/tools/_tool_registry.py).
     "guidelines",
+    # agent group chat P5 (2026-11-16): privileged entry #23 —
+    # the room tool category (room_create / room_post / room_read /
+    # room_task_decision); see daemon/tools/_tool_registry.py.
+    "room",
 })
 
 
@@ -223,7 +227,7 @@ class TestPrivilegedCategory:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
     def test_the_set_has_twenty_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 22
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 23
 
 
 class TestAllowLists:

@@ -146,15 +146,15 @@ class TestTheCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_has_twenty_two_members(self) -> None:
+    def test_the_set_has_twenty_three_members(self) -> None:
         # guidelines (2026-11-13) entered as #22 after prompt-assent.
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 22
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 23
 
-    def test_the_derived_set_is_exactly_the_twenty_two_entries(self) -> None:
+    def test_the_derived_set_is_exactly_the_twenty_three_entries(self) -> None:
         """The expected set is DERIVED (the registry's own literal), never
         hardcoded from a prose census."""
         derived = _registry_literal_members()
-        assert len(derived) == 22, sorted(derived)
+        assert len(derived) == 23, sorted(derived)
         assert CATEGORY in derived
         assert PRIVILEGED_TOOL_CATEGORIES == derived
 
@@ -177,13 +177,15 @@ class TestTheCategory:
             for line in literal.splitlines()
             if line.strip().startswith('"')
         ]
-        # guidelines (2026-11-13) appended after prompt-assent —
-        # memoir is now fourth-to-last; the relative discipline is
-        # unchanged.
-        assert entries[-4] == CATEGORY, entries[-4:]
-        assert entries[-3] == "prompt-reload", entries[-4:]
-        assert entries[-2] == "prompt-assent", entries[-4:]
-        assert entries[-1] == "guidelines", entries[-4:]
+        # guidelines (2026-11-13) appended after prompt-assent; the
+        # group-chat P5 room lane (2026-11-16) appended "room" after
+        # that — memoir is now fifth-to-last; the relative discipline
+        # is unchanged (the newer lanes follow memoir).
+        assert entries[-5] == CATEGORY, entries[-5:]
+        assert entries[-4] == "prompt-reload", entries[-5:]
+        assert entries[-3] == "prompt-assent", entries[-5:]
+        assert entries[-2] == "guidelines", entries[-5:]
+        assert entries[-1] == "room", entries[-5:]
 
     def test_the_category_module_resolves_to_a_daemon_tools_path(self) -> None:
         assert CATEGORY_MODULES.get(CATEGORY) == MODULE
@@ -336,14 +338,18 @@ class TestTheAriOnlyAllowList:
         # prompt-assent — the relative tail discipline is unchanged; the
         # 2026-11-14 ari nest-ops fleet grant then appended
         # "instance_read", "instance_ops" after "guidelines".
-        assert allow[-4] == "prompt-assent", (
+        assert allow[-5] == "prompt-assent", (
             "the prompt-assent entry must sit IMMEDIATELY BEFORE the "
             "guidelines entry in ari's allow array (the trailing-entry "
             "discipline)"
         )
-        assert allow[-3] == "guidelines"
-        assert allow[-2] == "instance_read"
-        assert allow[-1] == "instance_ops"
+        assert allow[-4] == "guidelines"
+        assert allow[-3] == "instance_read"
+        assert allow[-2] == "instance_ops"
+        # group-chat P5 (2026-11-16): the room category was appended
+        # AFTER the instance_read/instance_ops pair — the relative tail
+        # discipline is unchanged (the room entry is the TRAILING one).
+        assert allow[-1] == "room"
 
     def test_no_other_agent_carries_the_category(self) -> None:
         offenders: list[str] = []
@@ -369,11 +375,12 @@ class TestTheAriOnlyAllowList:
         source = (REPO_ROOT / "tests/unit/test_board_registration.py").read_text(
             encoding="utf-8"
         )
-        assert '"prompt-reload", "prompt-assent", "guidelines", "instance_read", "instance_ops"]' in source, (
+        assert '"prompt-reload", "prompt-assent", "guidelines", "instance_read", "instance_ops", "room"]' in source, (
             "the board trailing pin must end with prompt-assent + "
-            "guidelines + instance_read + instance_ops (the ari "
+            "guidelines + instance_read + instance_ops + room (the ari "
             "nest-ops fleet grant, 2026-11-14, appended after "
-            "guidelines)"
+            "guidelines; the group-chat P5 room grant, 2026-11-16, "
+            "appended after that)"
         )
         # "pok" re-point 2026-11-08 (POK B4 sweep 16b4e70b2): the board
         # pin's ari literal gained "pok" between "notify-user" and
@@ -382,14 +389,14 @@ class TestTheAriOnlyAllowList:
 
 
 class TestTheCeremonySelfVerification:
-    """The pins outlive the ceremony: every count pin says 21, every
-    exact-set literal agrees with the registry's own, and the standing
-    mutation instrument is lockstepped."""
+    """The pins outlive the ceremony: every count pin says the CURRENT
+    count, every exact-set literal agrees with the registry's own, and
+    the standing mutation instrument is lockstepped."""
 
-    def test_every_count_pin_says_twenty_two(self) -> None:
+    def test_every_count_pin_says_twenty_three(self) -> None:
         for rel in COUNT_PIN_FILES:
             source = (REPO_ROOT / rel).read_text(encoding="utf-8")
-            assert "assert len(PRIVILEGED_TOOL_CATEGORIES) == 22" in source, rel
+            assert "assert len(PRIVILEGED_TOOL_CATEGORIES) == 23" in source, rel
             assert "assert len(PRIVILEGED_TOOL_CATEGORIES) == 20" not in source, (
                 f"{rel}: a stale 20-flavored count pin survived the "
                 f"prompt-assent ceremony"
@@ -397,6 +404,10 @@ class TestTheCeremonySelfVerification:
             assert "assert len(PRIVILEGED_TOOL_CATEGORIES) == 21" not in source, (
                 f"{rel}: a stale 21-flavored count pin survived the "
                 f"guidelines ceremony"
+            )
+            assert "assert len(PRIVILEGED_TOOL_CATEGORIES) == 22" not in source, (
+                f"{rel}: a stale 22-flavored count pin survived the "
+                f"group-chat P5 category mint"
             )
 
     def test_every_expected_set_definition_agrees_with_the_registry(self) -> None:
@@ -444,6 +455,10 @@ class TestTheCeremonySelfVerification:
         assert '"assert len(PRIVILEGED_TOOL_CATEGORIES) == 21"' not in source, (
             "a stale hardcoded 21-flavored literal survived the "
             "guidelines ceremony"
+        )
+        assert '"assert len(PRIVILEGED_TOOL_CATEGORIES) == 22"' not in source, (
+            "a stale hardcoded 22-flavored literal survived the "
+            "group-chat P5 category mint"
         )
 
     def test_the_registry_prose_census_is_corrected(self) -> None:

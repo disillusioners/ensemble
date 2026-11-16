@@ -171,8 +171,8 @@ class TestPrivilegedCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_has_twenty_two_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 22
+    def test_the_set_has_twenty_three_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 23
 
     def test_the_category_follows_metrics_read(self) -> None:
         """The category was appended AFTER ``metrics-read`` (entry #17).
@@ -278,10 +278,18 @@ class TestTheGrants:
         # to DEVOPS ONLY (privileged entry #22) — devops's tail grew by
         # one documented later-lane entry; maintenancer/wanderer are
         # unchanged.
+        # project_future (the devops grant, landed in the tree BEFORE
+        # the group-chat P5 lane started) appended "project_future"
+        # after "guidelines" — devops's tail grew by one MORE
+        # documented later-lane entry. This pin was RED at the P5 base
+        # (adbc7bf21 — base-proven: the base meta.json already ends
+        # with "project_future" while the base expectation did not name
+        # it); the re-aim restores the pin's INTENT (a mis-ordered
+        # array is caught mechanically).
         for agent in ("maintenancer", "devops", "wanderer"):
             allow = _agent_meta(agent)["tools"]["allow"]
             expected_tail = (
-                [CATEGORY, "pok", "nest-report", "guidelines"]
+                [CATEGORY, "pok", "nest-report", "guidelines", "project_future"]
                 if agent == "devops"
                 else [CATEGORY, "pok", "nest-report"]
             )

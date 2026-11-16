@@ -556,6 +556,18 @@ def _ensure_tool_metadata_populated() -> None:
     # resolved at CALL time (never at construction), so the warm-scan
     # stub is boot-neutral even on a release predating the payload.
     from .tools.guidelines import create_guidelines_tools
+    # room tools (agent group chat P5, 2026-11-16): the sibling-
+    # collaboration room surface (``room_create`` / ``room_post`` /
+    # ``room_read`` / ``room_task_decision``). Same cold-boot pattern
+    # as the entries above: the ``@register_tool_category("room")``
+    # decorator must run HERE so the cold-boot metadata scan registers
+    # the category — otherwise the section is MISSING from the granted
+    # agents' rendered prompt until some instance build repopulates the
+    # metadata (the W1-FIX-NOW class, verbatim). The factory only builds
+    # closures — the manager / room service are dereferenced at CALL
+    # time, never at construction, so the warm-scan stub is
+    # boot-neutral.
+    from .tools.room import create_room_tools
 
     # Create dummy instances to get the tools (these create closures with None manager)
     # We just need the tool objects themselves for metadata scanning
@@ -606,6 +618,10 @@ def _ensure_tool_metadata_populated() -> None:
     # builds closures — the manager is unused and the payload dir is
     # resolved and checked at CALL time, never at construction.
     guidelines_tools = create_guidelines_tools(None)
+    # Room tools (agent group chat P5): the factory only builds
+    # closures — the manager and the room service are dereferenced at
+    # CALL time, never at construction.
+    room_tools = create_room_tools(None)
     # create_db_tools reads manager.credential_manager at construction
     # (N1 — shared Fernet handle), so it needs a minimal attribute stub;
     # None is sufficient — the credential manager is only invoked inside
@@ -634,7 +650,7 @@ def _ensure_tool_metadata_populated() -> None:
         system_log_tools, ens_db_tools, knowledge_tools,
         upgrade_tools, db_tools, service_tools, snapshot_tools,
         metrics_read_tools, nest_report_tools, nest_report_read_tools,
-        guidelines_tools,
+        guidelines_tools, room_tools,
     ):
         if factory_tools:
             all_tools.extend(factory_tools)
