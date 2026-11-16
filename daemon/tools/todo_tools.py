@@ -263,6 +263,36 @@ async def _emit_update(
         )
 
 
+async def _room_nudge_note(
+    manager: "InstanceManager",
+    current_instance_id: str,
+) -> str:
+    """Agent group chat P4 — arm (a): the room-nudge note appended to
+    EVERY todo-update carrier (todo_list_update / todo_graph_update /
+    todo_graph_update_subtask).
+
+    The carrier is NON-NARROWING (review N3 pin): this helper is called
+    on every SUCCESSFUL update regardless of the new status — the
+    guard filter inside the coordinator (shared latch + read-watermark
+    + per-turn spend over the instance's rooms) decides whether a
+    note exists, never the carrier. No coordinator wired (legacy
+    manager embeddings) or any fault ⇒ "" — byte-identical pre-P4
+    result. Never raises.
+    """
+    coordinator = getattr(manager, "_room_nudge_coordinator", None)
+    if coordinator is None:
+        return ""
+    try:
+        return await coordinator.todo_boundary_note(current_instance_id)
+    except Exception as e:  # noqa: BLE001 — nudge never breaks the carrier
+        logger.warning(
+            "room nudge note evaluation failed (instance %s): %r",
+            str(current_instance_id)[:8],
+            e,
+        )
+        return ""
+
+
 def create_todo_tools(
     manager: "InstanceManager",
     current_instance_id: str,
@@ -422,7 +452,8 @@ is rejected with a clear error message. A 200-node cap is enforced.
             await _emit_update(live_event_hub, current_instance_id, todos)
             head = f"\U0001f4cb Updated {lookup_desc} \u2192 {status}."
             body = _format_graph(todos)
-            return f"{head}\n\n{body}{reminder}"
+            room_note = await _room_nudge_note(manager, current_instance_id)
+            return f"{head}\n\n{body}{reminder}{room_note}"
         except Exception as e:
             return f"ERROR: Failed to update todo: {e}"
 
@@ -478,7 +509,8 @@ mutation occurs. For node-id-based updates, use ``todo_graph_update``.
             await _emit_update(live_event_hub, current_instance_id, todos)
             head = f"\U0001f4cb Updated {lookup_desc} \u2192 {status}."
             body = _format_graph(todos)
-            return f"{head}\n\n{body}{reminder}"
+            room_note = await _room_nudge_note(manager, current_instance_id)
+            return f"{head}\n\n{body}{reminder}{room_note}"
         except Exception as e:
             return f"ERROR: Failed to update todo: {e}"
 
@@ -892,9 +924,11 @@ Returns:
                             f"\nauto_complete requested but {pending_count} "
                             f"sub-task(s) remain pending."
                         )
+            room_note = await _room_nudge_note(manager, current_instance_id)
             return (
                 f"{head}{extra}{reminder}\n\n"
                 f"{_format_graph(todos, verbose=False)}"
+                f"{room_note}"
             )
         except Exception as e:
             return f"ERROR: Failed to update sub-task: {e}"

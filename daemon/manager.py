@@ -155,6 +155,7 @@ from .services.title_generation import TitleGenerationService
 # and the member naming service (D-S3 cascade tiers 2-3).
 from .services.room_naming import RoomNamingService
 from .services.room_delivery import RoomDeliveryService  # agent group chat P3 — delivery router
+from .services.room_nudge import RoomNudgeCoordinator  # agent group chat P4 — nudge layer
 from .repositories.room.service import RoomChatService
 from .services.event_publisher import EventPublisherService
 from .services.skill_embedding_service import SkillEmbeddingService
@@ -2402,6 +2403,19 @@ class InstanceManager:
             manager=self,
             room_service=self._room_chat_service,
             logger=logger,
+        )
+        # agent group chat P4 — the nudge layer: ONE manager-level RAM
+        # latch registry (keyed (instance_id, room_id)) shared by BOTH
+        # nudge arms — the todo-tool factory's reminder-slot note (a)
+        # and the room_completion_gate graph node (a2) — plus the
+        # coordinator that evaluates the guards (unread>0 + read-
+        # watermark + per-turn spend) over the room substrate. The
+        # registry object identity is load-bearing (both closures read
+        # THIS dict); the coordinator never swaps it.
+        self._room_nudge_latch: dict[tuple[str, str], dict] = {}
+        self._room_nudge_coordinator = RoomNudgeCoordinator(
+            manager=self,
+            logger_=logger,
         )
 
         # Child reports service (depends on config, checkpointer, instance_repository via manager)

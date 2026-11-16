@@ -1132,3 +1132,138 @@ class RoomRepository:
                     }
                 )
         return pending
+
+    def nudge_snapshot_for_instance(
+        self, instance_id: str
+    ) -> list[dict[str, Any]]:
+        """P4 nudge scan: per-room pending picture for ONE instance.
+
+        Agent group chat P4 (nudge hooks) substrate read — the
+        coordinator's ONLY DB entry point. Read-only; routes, wakes,
+        injects, and advances NOTHING (same discipline as
+        :meth:`derive_undelivered_tagged`).
+
+        For every ACTIVE membership of ``instance_id`` in rooms
+        ``active | closed`` (purged rooms have no rows; the pinned
+        pair), returns one dict:
+
+          {
+            "room_id", "room_name", "room_state",
+            "member_name", "role",
+            "unread":   COUNT(seq > last_read_seq),
+            "max_seq":  MAX(seq) over the room (0 when empty),
+            "pending_tags": [
+              {"seq", "message_id", "tagged_members", "author_instance_id",
+               "author_name", "text"} — TAGGED rows for THIS member
+              above BOTH cursors (the re-derivation predicate),
+            ],
+          }
+
+        The tag-target filter (is THIS member named on the row?) is
+        applied in Python — the JSONB emptiness/containment predicate
+        differs across drivers (same reason
+        ``derive_undelivered_tagged`` filters TAGGED in Python). A row
+        counts for this member when its member_name OR instance_id
+        appears in ``tagged_members`` (the same exact-match + UUID
+        fallback shape the P3 tag resolution uses).
+
+        Cost: ONE query over the instance's memberships joined to that
+        room's messages (bounded by room GC, RK-5). Instances with no
+        room memberships return ``[]`` — the common case is one
+        indexed membership probe.
+        """
+        member_active = RoomMemberState.ACTIVE.value
+        stmt = sql_text(
+            "SELECT"
+            " m.room_id AS room_id,"
+            " r.name AS room_name,"
+            " r.state AS room_state,"
+            " m.member_name AS member_name,"
+            " m.role AS role,"
+            " m.last_read_seq AS last_read_seq,"
+            " m.last_delivered_seq AS last_delivered_seq,"
+            " msg.id AS message_id,"
+            " msg.seq AS seq,"
+            " msg.tagged_members AS tagged,"
+            " msg.author_instance_id AS author_iid,"
+            " msg.author_name AS author_name,"
+            " msg.text AS text"
+            " FROM chatroom_members m"
+            " JOIN chatrooms r ON r.room_id = m.room_id"
+            " LEFT JOIN room_messages msg ON msg.room_id = m.room_id"
+            " WHERE m.instance_id = :iid"
+            "  AND m.state = :member_active"
+            "  AND r.state IN (:state_active, :state_closed)"
+            " ORDER BY m.room_id, msg.seq"
+        ).bindparams(
+            iid=instance_id,
+            member_active=member_active,
+            state_active=RoomState.ACTIVE.value,
+            state_closed=RoomState.CLOSED.value,
+        )
+        rooms: dict[str, dict[str, Any]] = {}
+        with Session(self._engine) as session:
+            for row in session.execute(stmt).all():
+                bucket = rooms.get(row.room_id)
+                if bucket is None:
+                    bucket = {
+                        "room_id": row.room_id,
+                        "room_name": row.room_name,
+                        "room_state": row.room_state,
+                        "member_name": row.member_name,
+                        "role": row.role,
+                        "unread": 0,
+                        "max_seq": 0,
+                        "pending_tags": [],
+                    }
+                    rooms[row.room_id] = bucket
+                if row.seq is None:
+                    # No messages in this room (LEFT JOIN miss).
+                    continue
+                seq = int(row.seq)
+                if seq > bucket["max_seq"]:
+                    bucket["max_seq"] = seq
+                if seq > int(row.last_read_seq):
+                    bucket["unread"] += 1
+                # Tag-target filter in Python (driver-neutral).
+                if (
+                    seq > int(row.last_read_seq)
+                    and seq > int(row.last_delivered_seq)
+                ):
+                    raw = row.tagged
+                    if isinstance(raw, (list, tuple)):
+                        tagged = [str(t) for t in raw]
+                    elif isinstance(raw, (str, bytes, bytearray)):
+                        try:
+                            tagged = [
+                                str(t) for t in json.loads(raw or "[]")
+                            ]
+                        except (TypeError, ValueError):
+                            # Same corruption discipline as
+                            # derive_undelivered_tagged (A-P3-9): warn
+                            # with row identity, exclude from the
+                            # pending set, never raise.
+                            logger.warning(
+                                "nudge_snapshot_for_instance: corrupt "
+                                "tagged_members JSON for room=%s "
+                                "message_id=%s seq=%s — row excluded",
+                                row.room_id, row.message_id, seq,
+                            )
+                            tagged = []
+                    else:
+                        tagged = []
+                    if (
+                        row.member_name in tagged
+                        or instance_id in tagged
+                    ):
+                        bucket["pending_tags"].append(
+                            {
+                                "seq": seq,
+                                "message_id": row.message_id,
+                                "tagged_members": tagged,
+                                "author_instance_id": row.author_iid,
+                                "author_name": row.author_name,
+                                "text": row.text,
+                            }
+                        )
+        return list(rooms.values())
