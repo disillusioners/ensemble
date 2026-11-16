@@ -121,6 +121,8 @@ TOKEN_INVALID_INPUT = "invalid-input"
 TOKEN_INTERNAL_ERROR = "internal-error"
 TOKEN_NOT_OWNER = "not-the-owner"
 TOKEN_NO_PROPOSAL = "no-such-proposal"
+TOKEN_DUPLICATE_DECISION = "duplicate-decision"
+TOKEN_ROOM_CAP = "room-cap"
 
 #: The post body cap (architecture §9 — ``post <= 4000 chars``).
 ROOM_POST_MAX_CHARS = 4000
@@ -363,6 +365,11 @@ def create_room_tools(
                 "the chat-room service is not available in this daemon",
             )
         try:
+            from daemon.repositories.room.membership import (
+                ROOM_MAX_ACTIVE_ROOMS_PER_TREE,
+                RoomJoinRoomCapError,
+            )
+
             tree_root = await asyncio.to_thread(
                 _tree_root_id, manager, caller_instance_id
             )
@@ -398,6 +405,23 @@ def create_room_tools(
                     ),
                 },
                 indent=2,
+            )
+        except RoomJoinRoomCapError:
+            # The tree's active-room budget is exhausted (the
+            # repository refuses BEFORE the insert, A-P5-14) — a typed
+            # policy refusal, never the raw repository text.
+            logger.warning(
+                "room_create refused: the caller's tree is at its "
+                "active-room cap (%s)",
+                ROOM_MAX_ACTIVE_ROOMS_PER_TREE,
+            )
+            return _refusal(
+                "room_create",
+                TOKEN_ROOM_CAP,
+                "this tree already holds the maximum number of active "
+                f"rooms (ROOM_MAX_ACTIVE_ROOMS_PER_TREE="
+                f"{ROOM_MAX_ACTIVE_ROOMS_PER_TREE}) — close a room "
+                "before opening another",
             )
         except Exception as exc:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("room_create failed")
@@ -746,10 +770,23 @@ def create_room_tools(
                     f"no task proposal at seq {proposal_seq} in room {room_id}",
                 )
             except RoomError as exc:
+                # PB-F1: the repository raises RoomError with the
+                # IntegrityError EMBEDDED (the dedup-UNIQUE refusal —
+                # constraint name + DETAIL key values). That detail is
+                # server-side only: a static typed refusal below, the
+                # raw text to the server log (never the payload).
+                logger.warning(
+                    "room_task_decision refused: room=%s seq=%s: %s",
+                    room_id,
+                    proposal_seq,
+                    exc,
+                )
                 return _refusal(
                     "room_task_decision",
-                    TOKEN_INVALID_INPUT,
-                    f"the decision could not be recorded: {exc}",
+                    TOKEN_DUPLICATE_DECISION,
+                    "a decision for this proposal is already recorded "
+                    "(one decision per proposal, per member — the "
+                    "dedup rule); the room log is unchanged",
                 )
             return json.dumps({"recorded": True, **result}, indent=2)
         except Exception as exc:  # noqa: BLE001 — house pattern: error string, never raise

@@ -406,7 +406,11 @@ class RoomRepository:
         payload pair. Raises :class:`MemberNameCollisionError` when
         ``UNIQUE(room_id, member_name)`` refuses the seed (P2's
         suffix registry handles the retry; P1 surfaces the typed
-        refusal only).
+        refusal only). Raises :class:`RoomJoinRoomCapError` when the
+        tree's active-room budget (``ROOM_MAX_ACTIVE_ROOMS_PER_TREE``)
+        is already exhausted — refused BEFORE the insert, fail-closed
+        (P5 re-gate; the cap counts ACTIVE rooms only, a closed room
+        frees its slot).
         """
         rid = room_id or _new_room_id()
         now = _utc_now_iso()
@@ -452,6 +456,28 @@ class RoomRepository:
         member_snap = member_payload(owner_row)
         try:
             with Session(self._engine) as session:
+                # P5 re-gate (A-P5-14): the create path enforces the
+                # tree's active-room budget — the SAME constant and the
+                # SAME typed error the join path raises (one condition,
+                # one error type; the join-side conjunct stays as the
+                # anomaly backstop). Refused BEFORE the insert,
+                # fail-closed. The count is ACTIVE rooms only — a
+                # closed room frees its slot.
+                active_rooms = len(
+                    session.exec(
+                        select(ChatRoom).where(
+                            ChatRoom.tree_root_id == tree_root_id,
+                            ChatRoom.state == RoomState.ACTIVE.value,
+                        )
+                    ).all()
+                )
+                if active_rooms >= _membership.ROOM_MAX_ACTIVE_ROOMS_PER_TREE:
+                    raise _membership.RoomJoinRoomCapError(
+                        f"room create refused: tree={tree_root_id} already "
+                        f"holds {active_rooms} active rooms "
+                        f"(ROOM_MAX_ACTIVE_ROOMS_PER_TREE="
+                        f"{_membership.ROOM_MAX_ACTIVE_ROOMS_PER_TREE})"
+                    )
                 session.add(room)
                 session.add(owner_row)
                 session.commit()

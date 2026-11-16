@@ -933,16 +933,33 @@ def _render_joined_room_block(
     unread: int,
 ) -> str:
     """Render the joined-room block body (pure — unit-testable)."""
+    # The factory contract (``_make_context_message``): untrusted
+    # content is ESCAPED before it lands in a ``[SYSTEM CONTEXT: …]``
+    # block — and room/member names ARE agent-supplied free text. The
+    # same treatment the digest text gets below: embedded newlines are
+    # flattened first (the module's own digest-text idiom — a name
+    # must never forge block line structure), then the escape helper
+    # runs. The helper rewrites the ``&``/``<``/``>`` class; every
+    # other character round-trips by its documented design (A-P5-15).
+    room_label = escape_for_context_block(
+        str(room.get("name") or room.get("room_id") or "").replace("\n", " ")
+    )
+    own_label = escape_for_context_block(
+        str(own_name or "").replace("\n", " ")
+    )
     banner = (
-        f'[TEAM ROOM] "{room.get("name") or room.get("room_id")}" — '
-        f"your name in this room: {own_name}"
+        f'[TEAM ROOM] "{room_label}" — '
+        f"your name in this room: {own_label}"
     )
     roster_bits = []
     for member in roster:
         name = member.get("member_name")
         role = member.get("role")
         marker = " (owner)" if role == "owner" else ""
-        roster_bits.append(f"{name}{marker}")
+        safe_name = escape_for_context_block(
+            str(name or "").replace("\n", " ")
+        )
+        roster_bits.append(f"{safe_name}{marker}")
     roster_line = "ROSTER: " + ", ".join(roster_bits) if roster_bits else "ROSTER: (you are alone)"
     if len(roster_line) > ROOM_ROSTER_MAX_CHARS:
         roster_line = roster_line[: ROOM_ROSTER_MAX_CHARS - 3] + "..."
@@ -1036,8 +1053,13 @@ async def build_joined_room_context_message(
             text = str(message.get("text") or "").replace("\n", " ").strip()
             if len(text) > ROOM_DIGEST_LINE_MAX_CHARS:
                 text = text[: ROOM_DIGEST_LINE_MAX_CHARS - 3] + "..."
+            # The AUTHOR name is untrusted too (same contract as the
+            # text and the roster/banner names above).
+            safe_author = escape_for_context_block(
+                str(author or "").replace("\n", " ")
+            )
             digest_lines.append(
-                f"- {author} (seq {seq}): {escape_for_context_block(text)}"
+                f"- {safe_author} (seq {seq}): {escape_for_context_block(text)}"
             )
         sections.append(
             _render_joined_room_block(

@@ -48,6 +48,7 @@ import daemon.repositories.instance.models  # noqa: F401 — register instances
 from daemon.repositories.event.models import Event, EventKind
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.room.models import ChatRoom, ChatRoomMember, RoomMessage
+from daemon.repositories.room.membership import RoomJoinRoomCapError
 from daemon.repositories.room.repository import (
     MemberNameCollisionError,
     RoomClosedError,
@@ -1060,3 +1061,75 @@ class TestPurgeFingerprintClassification:
         assert repo.get_room(room_id) is None
         with pytest.raises(RoomNotFoundError):
             repo.list_messages(room_id, caller_instance_id=tree["owner"])
+
+
+# ---------------------------------------------------------------------------
+# (i) the create-path room cap (P5 review re-gate / A-P5-14)
+# ---------------------------------------------------------------------------
+
+
+def test_create_room_refuses_the_ninth_active_room_in_a_tree(repo, tree):
+    """The create path enforces the tree's active-room budget
+    (``ROOM_MAX_ACTIVE_ROOMS_PER_TREE`` = 8), fail-closed BEFORE the
+    insert, raising the SAME typed error the join path raises (one
+    condition, one error type)."""
+    for i in range(8):
+        repo.create_room(
+            name=f"crowd-{i}",
+            tree_root_id=tree["root"],
+            owner_instance_id=tree["owner"],
+            owner_member_name=f"lead-{i}",
+        )
+    # 8 ACTIVE rooms — at the cap; the next create is the 9th.
+    with pytest.raises(RoomJoinRoomCapError) as excinfo:
+        repo.create_room(
+            name="one-too-many",
+            tree_root_id=tree["root"],
+            owner_instance_id=tree["owner"],
+            owner_member_name="lead-x",
+        )
+    assert "ROOM_MAX_ACTIVE_ROOMS_PER_TREE" in str(excinfo.value)
+    # The refusal inserted NOTHING — still 8 rows for the tree.
+    with Session(repo._engine) as s:
+        held = len(
+            s.exec(
+                select(ChatRoom).where(ChatRoom.tree_root_id == tree["root"])
+            ).all()
+        )
+    assert held == 8, held
+
+
+def test_create_room_cap_counts_active_only_closed_frees_the_slot(repo, tree):
+    """The cap counts ACTIVE rooms only — closing a room frees its
+    slot (the same counting base as the join path's cap)."""
+    rids = []
+    for i in range(8):
+        rids.append(
+            repo.create_room(
+                name=f"crowd-{i}",
+                tree_root_id=tree["root"],
+                owner_instance_id=tree["owner"],
+                owner_member_name=f"lead-{i}",
+            )["room"]["room_id"]
+        )
+    with pytest.raises(RoomJoinRoomCapError):
+        repo.create_room(
+            name="blocked",
+            tree_root_id=tree["root"],
+            owner_instance_id=tree["owner"],
+            owner_member_name="lead-blocked",
+        )
+    # Close one sibling → 7 ACTIVE → the create fits again.
+    with Session(repo._engine) as s:
+        room = s.get(ChatRoom, rids[0])
+        room.state = "closed"
+        s.add(room)
+        s.commit()
+    out = repo.create_room(
+        name="fits-now",
+        tree_root_id=tree["root"],
+        owner_instance_id=tree["owner"],
+        owner_member_name="lead-fits",
+    )
+    assert out["room"]["state"] == "active"
+    assert out["owner_member"]["member_name"] == "lead-fits"

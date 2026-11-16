@@ -64,6 +64,36 @@ from tests.helpers.room_harness import (
     seed_instance,
 )
 
+
+def _seed_raw_room(engine: Engine, tree_root: str, name: str) -> str:
+    """Insert a ``chatrooms`` row DIRECTLY — bypassing ``create_room``.
+
+    P5 re-gate (A-P5-14): the create path now enforces the tree's
+    active-room cap, so the JOIN-side tests can no longer build their
+    over-budget tree (total >= 9) through ``create_room``. The
+    join-side conjunct is the anomaly backstop for a tree over budget
+    by ANY means — raw seeding is exactly that means.
+    """
+    rid = f"raw-{uuid.uuid4().hex[:12]}"
+    now = "2026-11-15T08:00:00+00:00"
+    with Session(engine) as s:
+        s.add(
+            ChatRoom(
+                room_id=rid,
+                name=name,
+                tree_root_id=tree_root,
+                owner_instance_id=tree_root,
+                state="active",
+                closed_at=None,
+                last_post_at=None,
+                message_count=0,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        s.commit()
+    return rid
+
 # ---------------------------------------------------------------------------
 # F9-parity harness (P1 precedent)
 # ---------------------------------------------------------------------------
@@ -224,14 +254,12 @@ class TestValidateRoomJoin:
             repo.leave_room(room_id=room_id, instance_id=f"fill-{i}")
 
         # Room cap: seed 8 OTHER active rooms in the same tree
-        # (the over-budget anomaly — room_create's cap is P5).
+        # (the over-budget anomaly). The create path is CAPPED now
+        # (P5 re-gate, A-P5-14) — 8 creates after the fixture room
+        # would refuse the 9th — so the over-budget tree is seeded
+        # RAW; the join-side conjunct stays the anomaly backstop.
         for i in range(8):
-            repo.create_room(
-                name=f"crowd-{i}",
-                tree_root_id=tree["root"],
-                owner_instance_id=tree["owner"],
-                owner_member_name=f"lead-{i}",
-            )
+            _seed_raw_room(engine, tree["root"], f"crowd-{i}")
         with pytest.raises(RoomJoinRoomCapError):
             validate_room_join(engine, room_id=room_id,
                                joiner_tree_root=tree["root"])
@@ -302,19 +330,23 @@ class TestValidateRoomJoin:
     ):
         """Closed rooms do not count toward the tree's active-room
         budget (the cap is on ACTIVE rooms)."""
-        for i in range(8):
-            rid = repo.create_room(
+        # 7 crowd rooms via the create path → fixture + 7 = 8 ACTIVE
+        # (at the create cap, A-P5-14). The JOIN-side conjunct fires
+        # at total >= 9, so the over-budget room is seeded RAW.
+        for i in range(7):
+            repo.create_room(
                 name=f"crowd-{i}",
                 tree_root_id=tree["root"],
                 owner_instance_id=tree["owner"],
                 owner_member_name=f"lead-{i}",
             )["room"]["room_id"]
+        raw_id = _seed_raw_room(engine, tree["root"], "over-budget")
         with pytest.raises(RoomJoinRoomCapError):
             validate_room_join(engine, room_id=room_id,
                                joiner_tree_root=tree["root"])
-        # Close one sibling → 7 others → the join fits again.
+        # Close the raw room → 8 ACTIVE → the join fits again.
         with Session(engine) as s:
-            room = s.get(ChatRoom, rid)
+            room = s.get(ChatRoom, raw_id)
             room.state = "closed"
             s.add(room)
             s.commit()

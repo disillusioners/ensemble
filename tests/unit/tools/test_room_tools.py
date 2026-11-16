@@ -39,10 +39,15 @@ import daemon.repositories.event.models  # noqa: F401
 import daemon.repositories.instance.models  # noqa: F401
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.room import RoomChatService, RoomRepository
-from daemon.repositories.room.models import RoomMessage
+from daemon.repositories.room.models import ChatRoom, RoomMessage
 from daemon.services.room_delivery import RoomDeliveryService
 from daemon.tools.room import create_room_tools
-from tests.helpers.room_harness import join_member, make_room, make_room_engine
+from tests.helpers.room_harness import (
+    count_rows,
+    join_member,
+    make_room,
+    make_room_engine,
+)
 
 
 def _seed_instance(eng: Engine, iid: str, parent: str | None = None, status: str = "idle") -> None:
@@ -371,3 +376,107 @@ def test_room_task_decision_refuses_an_unknown_proposal(stack):
     )
     assert raw.startswith("Error:"), raw
     assert "no-such-proposal" in raw, raw
+
+
+# ── P5 review re-gate pins (2026-11-16) ───────────────────────────────
+
+
+def test_room_task_decision_duplicate_is_typed_and_never_leaks(stack):
+    """A second decision for the SAME proposal rides the dedup-UNIQUE
+    backstop: the repository raises RoomError with the IntegrityError
+    EMBEDDED, and the tool must answer with a static typed envelope —
+    the constraint name / DETAIL / driver text never reach the payload
+    (the PB-F1 leak class, room.py's own house rule)."""
+    engine, repo, svc, room_id, owner = stack
+    manager = _manager(engine, svc)
+    tools = _tools(manager, owner)
+    # Mint the proposal (a tagged post to a terminal child).
+    with Session(engine) as s:
+        inst = s.get(Instance, "child-1")
+        inst.status = "completed"
+        s.commit()
+    _call(
+        tools["room_post"].ainvoke(
+            {"room_id": room_id, "text": "who can finish scene 4?", "tagged": ["worker"]}
+        )
+    )
+    proposals = [
+        m for m in repo.list_messages(
+            room_id, caller_instance_id=owner, after_seq=0, limit=50
+        )
+        if m["kind"] == "task_proposal"
+    ]
+    proposal = proposals[0]
+    first = _call(
+        tools["room_task_decision"].ainvoke(
+            {
+                "room_id": room_id,
+                "proposal_seq": proposal["seq"],
+                "decision": "revive",
+            }
+        )
+    )
+    assert first.startswith("{"), first
+    # The SECOND decision for the same proposal — the dedup refusal.
+    raw = _call(
+        tools["room_task_decision"].ainvoke(
+            {
+                "room_id": room_id,
+                "proposal_seq": proposal["seq"],
+                "decision": "revive",
+            }
+        )
+    )
+    assert raw.startswith("Error:"), raw
+    assert "duplicate-decision" in raw, raw
+    assert "already recorded" in raw, raw
+    # THE NO-LEAK ASSERTION: neither the constraint identity, nor the
+    # driver text, nor the repository wrapper text may appear.
+    for fragment in (
+        "UNIQUE constraint failed",   # SQLite driver message
+        "duplicate key",              # PG driver message
+        "DETAIL:",                    # PG detail line
+        "source_message_id",          # the constraint's columns
+        "uq_room_messages",           # the constraint name
+        "IntegrityError",             # the wrapped driver exception
+        "append integrity failure",   # the repository wrapper text
+    ):
+        assert fragment not in raw, (fragment, raw)
+    # The refusal persisted NOTHING — exactly one decision on the log.
+    decisions = [
+        m for m in repo.list_messages(
+            room_id, caller_instance_id=owner, after_seq=0, limit=50
+        )
+        if m["kind"] == "task_decision"
+    ]
+    assert len(decisions) == 1, decisions
+
+
+def test_room_create_refuses_when_the_tree_room_cap_is_reached(stack):
+    """The 9th ACTIVE room in one tree is refused — typed at the tool
+    (``room-cap``), repository-enforced (A-P5-14). The tool-created
+    rooms all land in the mocked tree ``tree-1``."""
+    engine, repo, svc, _room_id, owner = stack
+    manager = _manager(engine, svc)
+    tools = _tools(manager, owner)
+    for i in range(8):
+        raw = _call(
+            tools["room_create"].ainvoke({"name": f"scene-{i}", "member_name": "producer"})
+        )
+        assert raw.startswith("{"), (i, raw)
+    # The 9th — the cap refusal.
+    raw = _call(
+        tools["room_create"].ainvoke({"name": "scene-8", "member_name": "producer"})
+    )
+    assert raw.startswith("Error:"), raw
+    assert "room-cap" in raw, raw
+    assert "ROOM_MAX_ACTIVE_ROOMS_PER_TREE=8" in raw, raw
+    assert "close a room" in raw, raw
+    # Nothing was inserted by the refusal — still 8 rooms in the tree.
+    with Session(engine) as s:
+        held = len(
+            s.exec(
+                select(ChatRoom).where(ChatRoom.tree_root_id == "tree-1")
+            ).all()
+        )
+    assert held == 8, held
