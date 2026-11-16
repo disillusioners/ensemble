@@ -27,7 +27,7 @@ META_PATH = AGENT_DIR / "meta.json"
 
 EXPECTED_ID = "video-editor"
 EXPECTED_NAME = "Video Editor"
-EXPECTED_ALLOW = ['bash', 'proc', 'filesystem', 'context', 'shared_meta_kv', 'todo', 'time', 'help', 'midflight', 'image', 'view-views', 'pok', 'nest-report']
+EXPECTED_ALLOW = ['bash', 'proc', 'filesystem', 'context', 'shared_meta_kv', 'todo', 'time', 'help', 'midflight', 'image', 'view-views', 'room', 'pok', 'nest-report']
 EXPECTED_TEAM_MEMBERS = []
 EXPECTED_INNATE_SKILLS = ["dynamic-skill", "todo"]
 EXPECTED_TEMPLATES = ['video-exact-edit.md']

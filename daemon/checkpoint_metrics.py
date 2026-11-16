@@ -276,7 +276,15 @@ def _cardinality_cap() -> int:
 #: regeneration (F-1 trap class: the artifact and this constant move in
 #: the SAME change). The F7 checkpoint ``op`` enum is UNCHANGED by this
 #: bump (its own vocabulary still reads ``{aget, other}``).
-VOCABULARY_VERSION: int = 10
+#: **11** (group-chat, 2026-11-16) — the tool-category vocabulary gained
+#: the ``room`` PRIVILEGED category (entry #23, the agent group-chat
+#: surface: room_create / room_post / room_read / room_task_decision —
+#: the FIRST grant to the video-team pilot quartet), so the frozen
+#: artifact label set grew 65 → 66 and the vocabulary version bumps
+#: WITH the regeneration (F-1 trap class: the artifact and this
+#: constant move in the SAME change). The F7 checkpoint ``op`` enum is
+#: UNCHANGED by this bump.
+VOCABULARY_VERSION: int = 11
 
 
 # ─── Registration-time family metadata (AM-3) ───────────────────────────────

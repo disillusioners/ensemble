@@ -13,7 +13,7 @@ from daemon import checkpoint_metrics as cm
 
 
 class TestVocabularyVersion:
-    def test_the_version_is_ten(self) -> None:
+    def test_the_version_is_eleven(self) -> None:
         """P2-M8 — the bump rode this lane.
 
         The marker rode 1 → 2 with the central-metrics-v1 lane (the F7
@@ -40,10 +40,13 @@ class TestVocabularyVersion:
         READ category (#22, the first privileged grant to a sonic
         agent — sonic-leader) joined the tool-category label set;
         artifact 63 → 64 — both numbers re-derived mechanically at
-        the tree).  The P2-M8 mutation
+        the tree) and 10 → 11 with the group-chat lane (the ``room``
+        PRIVILEGED category (#23, the agent group-chat surface) joined
+        the tool-category label set; artifact 65 → 66 — both numbers
+        re-derived mechanically at the tree).  The P2-M8 mutation
         (the marker left at 1) still REDS this pin.
         """
-        assert cm.VOCABULARY_VERSION == 10
+        assert cm.VOCABULARY_VERSION == 11
 
     def test_the_version_is_an_integer(self) -> None:
         assert isinstance(cm.VOCABULARY_VERSION, int)
