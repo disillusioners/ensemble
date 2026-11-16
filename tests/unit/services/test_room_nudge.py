@@ -19,26 +19,37 @@ Pin map (deliverables 1-7):
   (h)  non-member instances unaffected
   (i)  compaction non-interference (injected-message protection)
   plus the graph-side shape pins: gate node return contract, out-edge
-  router map, terminal-intercept wrapper, drain-wrapper peek
-  priority, and the redeliver entry's lane-(a) delegation.
+  router map, terminal-intercept wrapper, drain-wrapper peek ABSENCE
+  (A2 adjudication), and the redeliver entry's lane-(a) delegation.
+
+Size rationale: ONE file per P4 deliverable group (~1k lines). The
+executed-graph composition pins need the REAL graph builder and the
+real room substrate harness — splitting the file would duplicate that
+harness (and its shared fixtures) for no added signal.
 """
 
 from __future__ import annotations
 
+import ast
 import asyncio
+from pathlib import Path
+from typing import Any
 from pydantic import PrivateAttr
 from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.outputs import ChatResult
 from sqlalchemy.engine import Engine
 from sqlmodel import Session
 
+import daemon.graph  # noqa: F401 — the real module (source-level channel pin)
 import daemon.repositories.event.models  # noqa: F401
 import daemon.repositories.instance.models  # noqa: F401
 from daemon.graph import (
     ATTESTATION_GATE_NODE_NAME,
     END,
+    SessionState,
     create_injection_aware_router,
     create_room_completion_gate_node,
     create_room_completion_should_continue,
@@ -53,6 +64,7 @@ from daemon.services.room_nudge import (
     ROOM_COMPLETION_GATE_NODE_NAME,
     ROOM_COMPLETION_ROUTE_KEY,
     ROOM_NUDGE_MARKER,
+    ROOM_NUDGE_TAG_REATTEMPT_OUTCOMES_KEY,
     RoomNudgeCoordinator,
 )
 from daemon.services.todo_manager import TodoGraphManager
@@ -123,16 +135,21 @@ def stack(tmp_path):
 
 def _post(svc, room_id, author="owner-1", author_name="lead",
           text="hello", tagged=None, addressed=None):
-    return asyncio.run(svc.append_message(
-        room_id=room_id, author_instance_id=author, author_name=author_name,
-        text_body=text, tagged_members=tagged or [], addressed_members=addressed or [],
+    """Sync wrapper over the async twin (ONE append implementation)."""
+    return asyncio.run(_post_async(
+        svc, room_id, author=author, author_name=author_name,
+        text=text, tagged=tagged, addressed=addressed,
     ))
+
+
+#: Page size for the read-all helper — one page covers the pin rooms.
+_READ_ALL_LIMIT = 1000
 
 
 def _read_all(eng, room_id, iid):
     """The member reads the room to the top (advance last_read_seq)."""
     repo = RoomRepository(eng)
-    msgs = repo.list_messages(room_id, after_seq=0, limit=1000,
+    msgs = repo.list_messages(room_id, after_seq=0, limit=_READ_ALL_LIMIT,
                               caller_instance_id=iid)
     top = max((m["seq"] for m in msgs), default=0)
     repo.advance_read_cursor(room_id, iid, top)
@@ -161,16 +178,16 @@ class TestTodoBoundaryArm:
         """Pin (a): unread>0 ⇒ the note; unread==0 ⇒ byte-identical ""."""
         coord = stack["coordinator"]
         _new_turn(stack["manager"], "mem-1")
-        assert asyncio.run(coord.todo_boundary_note("mem-1")) == ""
+        assert asyncio.run(coord.evaluate_todo_boundary("mem-1")) == ""
         _post(stack["svc"], stack["room_id"])  # unread=1 for mem-1
         _post(stack["svc"], stack["room_id"])  # unread=2
-        note = asyncio.run(coord.todo_boundary_note("mem-1"))
+        note = asyncio.run(coord.evaluate_todo_boundary("mem-1"))
         assert "2 unread" in note
         assert "team chatroom" in note
         # After the member READS the room: silent again (fresh turn).
         _new_turn(stack["manager"], "mem-1")
         _read_all(stack["eng"], stack["room_id"], "mem-1")
-        assert asyncio.run(coord.todo_boundary_note("mem-1")) == ""
+        assert asyncio.run(coord.evaluate_todo_boundary("mem-1")) == ""
 
     def test_b_carrier_non_narrowing_fires_on_non_done_update(self, stack):
         """Pin (b): the carrier fires on EVERY successful update — the
@@ -206,7 +223,7 @@ class TestTodoBoundaryArm:
         _new_turn(stack["manager"], "loner-1")
         _post(stack["svc"], stack["room_id"])  # unread for mem-1, not loner
         assert asyncio.run(
-            stack["coordinator"].todo_boundary_note("loner-1")) == ""
+            stack["coordinator"].evaluate_todo_boundary("loner-1")) == ""
         decision = asyncio.run(
             stack["coordinator"].evaluate_completion("loner-1"))
         assert decision["fire"] is False
@@ -270,7 +287,7 @@ class TestCompletionGateArm:
         result2 = asyncio.run(node({}, config))
         assert result2 == {
             ROOM_COMPLETION_ROUTE_KEY: None,
-            "room_nudge_tag_reattempt_outcomes": None,
+            ROOM_NUDGE_TAG_REATTEMPT_OUTCOMES_KEY: None,
         }, (
             "every non-fire path MUST reset room_completion_route to "
             "None — the out-edge router reads the checkpoint-persisted "
@@ -291,13 +308,13 @@ class TestCompletionGateArm:
         node = create_room_completion_gate_node(mgr, "mem-1")
         assert asyncio.run(node({}, {"configurable": {"thread_id": "mem-1"}})) == {
             ROOM_COMPLETION_ROUTE_KEY: None,
-            "room_nudge_tag_reattempt_outcomes": None,
+            ROOM_NUDGE_TAG_REATTEMPT_OUTCOMES_KEY: None,
         }
         # Unwired manager: fail open too (same clear shape).
         assert asyncio.run(create_room_completion_gate_node(
             object(), "mem-1")({}, {"configurable": {"thread_id": "mem-1"}})) == {
             ROOM_COMPLETION_ROUTE_KEY: None,
-            "room_nudge_tag_reattempt_outcomes": None,
+            ROOM_NUDGE_TAG_REATTEMPT_OUTCOMES_KEY: None,
         }
 
     def test_out_edge_router_map(self, stack):
@@ -309,6 +326,39 @@ class TestCompletionGateArm:
         assert r_active({}) == ATTESTATION_GATE_NODE_NAME
         assert r_off({}) == END
         assert r_off({ROOM_COMPLETION_ROUTE_KEY: "agent"}) == "agent"
+
+    def test_session_state_declares_the_room_channels(self):
+        """Both P4 channels are DECLARED on the session schema — the
+        checkpoint-persistence contract: the route hint the out-edge
+        router reads, and the diagnostic re-attempt outcomes channel.
+
+        NOTE: ``SessionState.__annotations__`` is NOT introspectable
+        under pytest — ``tests/conftest.py`` replaces the
+        ``MessagesState`` base with a ``MagicMock()``, so the class
+        inherits mock attribute access (the same constraint
+        ``tests/test_language_check.py`` documents). The pin therefore
+        scans the REAL class source for the DECLARED channel names
+        (annotated assignments) and checks them against the CONSTANTS
+        — a drifted constant or an undeclared channel both redden it.
+        """
+        assert SessionState is not None  # importable from daemon.graph
+        tree = ast.parse(
+            Path(daemon.graph.__file__).read_text(encoding="utf-8")
+        )
+        session_state = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef)
+            and node.name == "SessionState"
+        )
+        declared = {
+            node.target.id
+            for node in session_state.body
+            if isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+        }
+        assert ROOM_COMPLETION_ROUTE_KEY in declared
+        assert ROOM_NUDGE_TAG_REATTEMPT_OUTCOMES_KEY in declared
 
     def test_terminal_intercept_wrapper(self, stack):
         """Wrapper: END and the attestation verdict map to the room
@@ -357,7 +407,7 @@ class TestLoopGuard:
         coord = stack["coordinator"]
         _new_turn(stack["manager"], "mem-1")
         _post(stack["svc"], stack["room_id"])
-        note = asyncio.run(coord.todo_boundary_note("mem-1"))
+        note = asyncio.run(coord.evaluate_todo_boundary("mem-1"))
         assert note != ""
         decision = asyncio.run(coord.evaluate_completion("mem-1"))
         assert decision["fire"] is False, (
@@ -367,7 +417,7 @@ class TestLoopGuard:
         stack["manager"]._room_nudge_latch.clear()
         _new_turn(stack["manager"], "mem-1")
         assert asyncio.run(coord.evaluate_completion("mem-1"))["fire"] is True
-        assert asyncio.run(coord.todo_boundary_note("mem-1")) == ""
+        assert asyncio.run(coord.evaluate_todo_boundary("mem-1")) == ""
 
     def test_f_watermark_rearm_on_new_messages(self, stack):
         """Pin (f): re-fire ONLY when max(seq) > last_nudged — a new
@@ -401,7 +451,7 @@ class TestLoopGuard:
             "watermark but the turn spend holds"
         )
         # The todo arm in the same turn is spent too.
-        assert asyncio.run(coord.todo_boundary_note("mem-1")) == ""
+        assert asyncio.run(coord.evaluate_todo_boundary("mem-1")) == ""
         # Next turn: fires on the new batch.
         _new_turn(stack["manager"], "mem-1")
         decision = asyncio.run(coord.evaluate_completion("mem-1"))
@@ -414,14 +464,14 @@ class TestLoopGuard:
         coord = stack["coordinator"]
         _new_turn(stack["manager"], "mem-1")
         _post(stack["svc"], stack["room_id"], text="m1")
-        assert asyncio.run(coord.todo_boundary_note("mem-1")) != ""
+        assert asyncio.run(coord.evaluate_todo_boundary("mem-1")) != ""
         _post(stack["svc"], stack["room_id"], text="m2")
-        assert asyncio.run(coord.todo_boundary_note("mem-1")) == "", (
+        assert asyncio.run(coord.evaluate_todo_boundary("mem-1")) == "", (
             "≤1 room nudge per turn across the family: the second todo "
             "update in the SAME turn must not re-note"
         )
         _new_turn(stack["manager"], "mem-1")
-        assert asyncio.run(coord.todo_boundary_note("mem-1")) != ""
+        assert asyncio.run(coord.evaluate_todo_boundary("mem-1")) != ""
 
     def test_restarted_process_bounded_duplicate_accepted(self, stack):
         """N8: the RAM latch lost on restart ⇒ one bounded duplicate —
@@ -429,7 +479,7 @@ class TestLoopGuard:
         coord = stack["coordinator"]
         _new_turn(stack["manager"], "mem-1")
         _post(stack["svc"], stack["room_id"])
-        assert asyncio.run(coord.todo_boundary_note("mem-1")) != ""
+        assert asyncio.run(coord.evaluate_todo_boundary("mem-1")) != ""
         # "Restart": RAM latch wiped.
         stack["manager"]._room_nudge_latch.clear()
         assert asyncio.run(coord.evaluate_completion("mem-1"))["fire"] is True
@@ -612,7 +662,7 @@ class TestCompactionAndBackstop:
         _close_room(stack)
         _new_turn(mgr, "mem-1")
         # (a) arm silent.
-        assert asyncio.run(coord.todo_boundary_note("mem-1")) == ""
+        assert asyncio.run(coord.evaluate_todo_boundary("mem-1")) == ""
         # (a2) arm silent — no fire, no pending tags.
         decision = asyncio.run(coord.evaluate_completion("mem-1"))
         assert decision["fire"] is False
@@ -644,19 +694,32 @@ class _RecordingScriptedModel(ScriptedChatModel):
     pass is in flight (the deterministic end-of-turn drop the drain
     exists for)."""
 
-    _recorded_inputs: list = PrivateAttr(default_factory=list)
+    _recorded_inputs: list[list[BaseMessage]] = PrivateAttr(
+        default_factory=list
+    )
     _on_call: list = PrivateAttr(default_factory=list)
 
-    def __init__(self, responses, on_call=None, **kwargs):
+    def __init__(
+        self,
+        responses: list,
+        on_call: list | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(responses=list(responses), i=0, **kwargs)
         self._recorded_inputs = []
         self._on_call = list(on_call or [])
 
     @property
-    def recorded_inputs(self) -> list[list]:
+    def recorded_inputs(self) -> list[list[BaseMessage]]:
         return self._recorded_inputs
 
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
         self._recorded_inputs.append(list(messages))
         hook = (
             self._on_call[len(self._recorded_inputs) - 1]
@@ -710,8 +773,6 @@ def _close_room(stack):
     """Seed the capability row to ``closed`` (no close API exists yet —
     P6 scope; direct row seeding mirrors the harness's direct-insert
     style)."""
-    from sqlmodel import Session
-
     from daemon.repositories.room.models import ChatRoom
 
     with Session(stack["eng"]) as s:
@@ -725,8 +786,6 @@ def _build_and_run(real_graph_module, patch_build_instance_llms, *, manager,
                    user_language="English", on_call=None):
     """Build the REAL production graph over the stack manager; return
     (model, graph). The caller drives astream/ainvoke itself."""
-    from langchain_core.messages import AIMessage
-
     model = _RecordingScriptedModel(
         [AIMessage(content=r) if isinstance(r, str) else r
          for r in responses],
