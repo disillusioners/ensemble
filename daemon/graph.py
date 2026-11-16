@@ -4969,14 +4969,24 @@ def create_injection_aware_router(
     injection_slot: Any | None,
     *,
     max_continuations: int = INJECTION_CONTINUATION_MAX,
-    room_completion_probe: Callable[[str], bool] | None = None,
-    room_gate_node_name: str | None = None,
 ) -> Callable:
     """Wrap a terminal router so a pending user injection CONTINUES the turn.
 
     The wrapper is a no-op when ``injection_slot`` is ``None`` (tests /
     legacy wiring without an injection queue) — the base router is
     returned unchanged.
+
+    Agent group chat P4 (A2 adjudication, 2026-11-16 review): the
+    previously-added room-backstop peek was REMOVED. Measured on
+    executed graphs, the peek-as-implemented was either a LANGUAGE
+    BYPASS (enabled seam: the detour jumped straight to the gate node,
+    skipping the turn-ending reply's language validation — C2) or
+    redundant with the in-chain gate (disabled seam once the room wrap
+    moved OUTSIDE this wrapper — C3). Confine-or-drop was adjudicated;
+    DROPPED with chain preservation: the (a2) completion nudge is fully
+    owned by the in-chain ``room_completion_gate`` node, reachable from
+    BOTH language seams; the injection queue drains FIRST on every
+    terminal verdict exactly as pre-P4.
 
     Args:
         base_router: The agent's terminal router (plain ``should_continue``,
@@ -4985,19 +4995,6 @@ def create_injection_aware_router(
             ``get(instance_id) -> list | None``).
         max_continuations: Bound on consecutive continuations (see
             :data:`INJECTION_CONTINUATION_MAX`).
-        room_completion_probe: Agent group chat P4 — the DEMOTED drain
-            backstop probe (RAM-only: ``instance_id -> bool``). When
-            the injection queue is EMPTY at a terminal verdict and the
-            probe says the instance MAY have nudge-armed rooms, the
-            wrapper detours to ``room_gate_node_name`` — the gate node
-            re-evaluates fresh (DB + shared latch) on arrival. The
-            peek CONSUMES NOTHING (latch/cursors stay untouched — the
-            gate is the consumer); a stale-True costs one extra gate
-            evaluation, a stale-False falls back to the in-chain gate
-            (the primary (a2) path). Priority: the injection queue
-            drains FIRST — user injections outrank room nudges.
-        room_gate_node_name: The detour target (the gate node must be
-            added to the graph for the verdict to be a valid branch).
 
     Returns:
         A routing fn ``(state, config) -> str``. When the base router
@@ -5044,30 +5041,6 @@ def create_injection_aware_router(
             # Ordinary turn end — reset the continuation budget so the
             # NEXT turn starts from zero.
             _counter["consecutive"] = 0
-            # Agent group chat P4 — the DEMOTED drain backstop: the
-            # terminal-verdict peek under the SAME shared latch. RAM
-            # probe only (no DB in routers); the detour target is the
-            # gate node, which performs the real latch-consuming
-            # evaluation. Never routes "agent" directly from here —
-            # only the gate node may hold the turn for rooms.
-            if room_completion_probe is not None and room_gate_node_name:
-                try:
-                    if instance_id and room_completion_probe(instance_id):
-                        logger.info(
-                            "[Injection] turn-end drain: room nudge "
-                            "interest for %s — detouring to %s (gate "
-                            "re-evaluates under the shared latch)",
-                            instance_id[:8],
-                            room_gate_node_name,
-                        )
-                        return room_gate_node_name
-                except Exception:  # pragma: no cover — defensive
-                    logger.warning(
-                        "[Injection] room backstop probe failed for %s — "
-                        "continuing without the detour",
-                        instance_id[:8],
-                        exc_info=True,
-                    )
             return result
         if _counter["consecutive"] >= max_continuations:
             logger.warning(
@@ -7838,8 +7811,14 @@ def create_room_completion_gate_node(
         )
         coordinator = getattr(manager, "_room_nudge_coordinator", None)
         if coordinator is None or not effective_instance_id:
-            # Unwired / unresolvable — fail open, zero side effects.
-            return {}
+            # Unwired / unresolvable — fail open. The CLEAR is
+            # load-bearing (C1 fix): ``room_completion_route`` is a
+            # checkpoint-persisted channel; without the reset a stale
+            # "agent" hint from a prior fire routes back FOREVER (the
+            # measured GraphRecursionError). Mirrors the attestation
+            # gate, which clears its identical hint on every allow /
+            # HOLD / terminal branch.
+            return _gate_pass_return()
 
         try:
             decision = await coordinator.evaluate_completion(
@@ -7851,9 +7830,13 @@ def create_room_completion_gate_node(
                 effective_instance_id[:8],
                 exc,
             )
-            return {}
+            return _gate_pass_return()
         if not decision.get("fire"):
-            return {}
+            # Pass through — AND CLEAR THE HINT (C1 fix): a spent turn
+            # must route to the next chain stage, never back to
+            # "agent". The diagnostic outcomes channel clears with it
+            # (same one-shot-cleanup discipline).
+            return _gate_pass_return()
 
         # Strong form: re-attempt the lane-(a) injection for the
         # pending tagged rows BEFORE the agent re-enters, so the
@@ -7894,10 +7877,31 @@ def create_room_completion_gate_node(
         )
         # Route hint on the SAME return (checkpoint-durable), the
         # language_check / attestation plain-dict precedent.
+        # Fire return: the route hint rides checkpoint-durable on the
+        # SAME plain-dict return (the language_check / attestation
+        # precedent) — and the NEXT non-fire pass clears it (above).
         return {
             "messages": [nudge],
             ROOM_COMPLETION_ROUTE_KEY: "agent",
             "room_nudge_tag_reattempt_outcomes": reattempt_outcomes,
+        }
+
+    def _gate_pass_return() -> dict:
+        """The pass-through return: BOTH channels cleared.
+
+        C1 (2026-11-16 review): the fire path writes
+        ``room_completion_route="agent"`` into checkpoint-persisted
+        state; every non-fire path MUST reset it to ``None`` or the
+        out-edge router re-reads the stale hint and routes "agent"
+        forever — one nudge permanently poisons the thread (measured:
+        GraphRecursionError at limit 30). The attestation gate clears
+        its identical hint on every allow / HOLD / terminal branch
+        (graph.py attestation node — the copied declare-half needs its
+        clear-half). The diagnostic outcomes channel clears with it.
+        """
+        return {
+            ROOM_COMPLETION_ROUTE_KEY: None,
+            "room_nudge_tag_reattempt_outcomes": None,
         }
 
     return room_completion_gate_node
@@ -7953,16 +7957,43 @@ def create_room_completion_should_continue(
     language_check → room_completion_gate → attestation_gate → END
     (or agent → room_completion_gate → attestation_gate → END on the
     disabled-language seam).
+
+    CONFIG THREADING (C3 fix, 2026-11-16 review — discovered by the
+    executed composition pins): the disabled seam wraps the
+    INJECTION-AWARE drain wrapper, whose instance-id resolution reads
+    ``config["configurable"]["thread_id"]``. A single-arg
+    ``base_router(state)`` call silently drops the config — the drain
+    wrapper sees ``instance_id=""``, skips its queue probe, and
+    returns the terminal verdict UNPROBED: the drain goes DEAD for
+    every member AND non-member (measured: pending injection + real
+    wrappers → gate node, no drain). The wrapper therefore threads
+    ``config`` by SIGNATURE: two-parameter base routers receive
+    ``(state, config)``; one-parameter routers (``should_continue``,
+    ``should_end_language_check``) receive ``(state)`` only.
     """
     if not room_gate_enabled:
         return base_router
 
+    from inspect import signature
+
     from .services.room_nudge import ROOM_COMPLETION_GATE_NODE_NAME
+
+    try:
+        _params = list(signature(base_router).parameters.values())
+    except (TypeError, ValueError):  # pragma: no cover — builtins
+        _params = []
+    _takes_config = any(
+        p.name in ("config", "run_manager", "kwargs")
+        or p.kind.name == "VAR_KEYWORD"
+        for p in _params
+    )
 
     def should_continue_with_room_completion(
         state: MessagesState, config: Optional[RunnableConfig] = None
     ) -> str:
-        result = base_router(state)
+        result = (
+            base_router(state, config) if _takes_config else base_router(state)
+        )
         if result == END or result == ATTESTATION_GATE_NODE_NAME:
             return ROOM_COMPLETION_GATE_NODE_NAME
         return result
@@ -13719,15 +13750,15 @@ def build_instance_graph(
         # by the in-graph loop-continue. Do not wrap them here: the
         # language-check path map has no ``"agent"`` key, so a verdict
         # injected at that router would be an invalid branch target.
+        # C2 (2026-11-16 review): NO room backstop here. The prior
+        # peek-at-end_candidate detour jumped straight to the room gate,
+        # SKIPPING language validation of the turn-ending reply
+        # (measured bypass). The in-chain gate below —
+        # end_candidate → language_check → room_completion_gate — owns
+        # the (a2) nudge for this seam; the terminal verdict always
+        # passes through language_check first.
         routing_fn = create_injection_aware_router(
-            routing_fn,
-            injection_slot,
-            room_completion_probe=(
-                room_gate_coordinator.ram_interest if room_gate_active else None
-            ),
-            room_gate_node_name=(
-                ROOM_COMPLETION_GATE_NODE_NAME if room_gate_active else None
-            ),
+            routing_fn, injection_slot
         )
 
         graph.add_conditional_edges("agent", routing_fn, {
@@ -13736,15 +13767,6 @@ def build_instance_graph(
             "agent_repair_ghost": "agent_repair_ghost",  # Phase 2 (B-3): ghost at cap → repair
             "nudge": "nudge",          # Empty after tool: inject prompt
             "end_candidate": "language_check",  # Would-be END: validate language
-            **(
-                # P4 demoted drain backstop: the injection-aware
-                # wrapper may detour a terminal verdict straight to
-                # the room gate node (which re-evaluates under the
-                # shared latch).
-                {ROOM_COMPLETION_GATE_NODE_NAME: ROOM_COMPLETION_GATE_NODE_NAME}
-                if room_gate_active
-                else {}
-            ),
         })
 
         # Language check -> retry or END (END detours through the
@@ -13784,17 +13806,6 @@ def build_instance_graph(
         else:
             agent_router = should_continue
 
-        if room_gate_active:
-            # P4 disabled-language seam: the room gate sits BETWEEN the
-            # base terminal router and the attestation wrapper —
-            # applied OUTERMOST here so both plain END and the
-            # attestation route verdicts reach the room gate first
-            # (N4: the gate composes under EITHER language
-            # configuration).
-            agent_router = create_room_completion_should_continue(
-                agent_router, room_gate_enabled=True
-            )
-
         agent_paths = {
             "tools": tools_target,      # Watchover interception (or direct when no manager)
             "agent": "agent",          # Ghost promise: LLM promised but no tool_call, retry
@@ -13812,26 +13823,35 @@ def build_instance_graph(
                 # Would-be END: attestation gate (would have been END)
                 agent_paths[ATTESTATION_GATE_NODE_NAME] = ATTESTATION_GATE_NODE_NAME
             agent_paths[END] = END
-        # End-of-turn injection drain (turn-end-injection-drain) — see
-        # the language-check branch above for the rationale. The wrapper
-        # intercepts EVERY terminal verdict this branch can produce
-        # (END, or the attestation gate node name) and routes back to
-        # ``agent`` while user injections are still queued.
+        # End-of-turn injection drain (turn-end-injection-drain) — the
+        # wrapper sits INSIDE the P4 room wrap (C3 fix, 2026-11-16
+        # review): the room wrap applied FIRST (inner) converted the
+        # terminal verdicts to ``room_completion_gate`` — a verdict
+        # OUTSIDE the injection wrapper's terminal set — so the
+        # wrapper returned before probing the queue and the drain went
+        # DEAD (measured: pending injection + real wrappers → gate
+        # node, no drain, message stranded — for NON-MEMBERS too).
+        # Composition is now room-wrap-OUTERMOST — the
+        # disabled-language seam (N4): every terminal verdict the base
+        # chain produces (END, or the attestation gate node name)
+        # reaches THIS wrapper first, the queue drains exactly as
+        # pre-P4, and only then does the room wrap convert the
+        # surviving verdict to the gate node (which sits BETWEEN the
+        # base terminal router and the attestation wrapper in effective
+        # chain order).
         #
         # NOT wrapped (Y2, fix-back): the ``attestation_gate`` node's
         # OUT-EDGE router (``should_end_attestation``) owns its own END
         # window (the gate's allow path) that this wrapper cannot reach —
         # HELPER-COVERED by the pipeline's Stage-7 end-of-turn injection
         # drain, not by the in-graph loop-continue.
-        agent_router = create_injection_aware_router(
-            agent_router,
-            injection_slot,
-            room_completion_probe=(
-                room_gate_coordinator.ram_interest if room_gate_active else None
+        agent_router = create_room_completion_should_continue(
+            create_injection_aware_router(
+                agent_router, injection_slot
             ),
-            room_gate_node_name=(
-                ROOM_COMPLETION_GATE_NODE_NAME if room_gate_active else None
-            ),
+            room_gate_enabled=True,
+        ) if room_gate_active else create_injection_aware_router(
+            agent_router, injection_slot
         )
         graph.add_conditional_edges("agent", agent_router, agent_paths)
 

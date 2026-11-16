@@ -57,6 +57,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from daemon.repositories.room.models import RoomState
+
 logger = logging.getLogger(__name__)
 
 #: The (a2) gate node's name in the instance graph (graph.py wiring).
@@ -168,7 +170,19 @@ class RoomNudgeCoordinator:
     @staticmethod
     def _reminder_armed(snapshot_room: dict[str, Any], entry: dict[str, Any]) -> bool:
         """The watermark predicate for ONE room: new messages since the
-        last nudge AND something actually unread."""
+        last nudge AND something actually unread AND the room is
+        ACTIVE.
+
+        C4 (2026-11-16 review): the scan restricts to
+        ``state='active'`` repository-side; this defensive room-state
+        check mirrors the ratified capability row ("closed: no"
+        new-activity nudges) should a future caller ever pass a
+        closed-room row — a closed room is read-only, its members are
+        never nudged (its pending deliveries still ride the P3
+        lanes).
+        """
+        if snapshot_room.get("room_state") != RoomState.ACTIVE.value:
+            return False
         return (
             int(snapshot_room.get("unread") or 0) > 0
             and int(snapshot_room.get("max_seq") or 0)
@@ -261,6 +275,13 @@ class RoomNudgeCoordinator:
                 ):
                     reminder_rooms.append(room)
                 rows = room.get("pending_tags") or []
+                if (
+                    rows
+                    and room.get("room_state") != RoomState.ACTIVE.value
+                ):
+                    # C4 belt: a closed room's pending tags never fire
+                    # the strong form (mirrors _reminder_armed).
+                    rows = []
                 if rows and entry.get("tag_turn") != turn_key:
                     pending_tags.extend(
                         dict(

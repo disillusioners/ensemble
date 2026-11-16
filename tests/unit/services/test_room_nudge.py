@@ -26,6 +26,7 @@ Pin map (deliverables 1-7):
 from __future__ import annotations
 
 import asyncio
+from pydantic import PrivateAttr
 from unittest.mock import MagicMock
 
 import pytest
@@ -38,12 +39,12 @@ import daemon.repositories.instance.models  # noqa: F401
 from daemon.graph import (
     ATTESTATION_GATE_NODE_NAME,
     END,
-    INJECTION_CONTINUATION_MAX,
     create_injection_aware_router,
     create_room_completion_gate_node,
     create_room_completion_should_continue,
     create_should_end_room_completion,
 )
+from tests.support.scripted_chat_model import ScriptedChatModel
 from daemon._content_hardening import is_injected_message
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.room import RoomChatService, RoomRepository
@@ -135,6 +136,15 @@ def _read_all(eng, room_id, iid):
                               caller_instance_id=iid)
     top = max((m["seq"] for m in msgs), default=0)
     repo.advance_read_cursor(room_id, iid, top)
+
+
+async def _post_async(svc, room_id, author="owner-1", author_name="lead",
+                      text="hello", tagged=None, addressed=None):
+    """Async twin of ``_post`` for pins already running inside a loop."""
+    return await svc.append_message(
+        room_id=room_id, author_instance_id=author, author_name=author_name,
+        text_body=text, tagged_members=tagged or [], addressed_members=addressed or [],
+    )
 
 
 def _snapshot_rows(stack, iid):
@@ -240,7 +250,10 @@ class TestCompletionGateArm:
 
     def test_gate_node_return_contract(self, stack):
         """The gate node: fire ⇒ messages + route hint 'agent'; pass ⇒
-        {} (zero side effects)."""
+        BOTH channels CLEARED (C1 fix — the pass-through return resets
+        the checkpoint-persisted hint, mirroring the attestation
+        gate's clear-half; a stale 'agent' hint would route back
+        forever)."""
         node = create_room_completion_gate_node(
             stack["manager"], None)
         config = {"configurable": {"thread_id": "mem-1"}}
@@ -252,12 +265,22 @@ class TestCompletionGateArm:
         assert len(msgs) == 1 and isinstance(msgs[0], HumanMessage)
         assert msgs[0].additional_kwargs[ROOM_NUDGE_MARKER] is True
         assert msgs[0].additional_kwargs["injected_message"] is True
-        # Spent turn: pass ⇒ {}.
+        # Spent turn: pass ⇒ hint CLEARED (not merely absent) — the
+        # pin that would have caught the C1 stale-hint loop.
         result2 = asyncio.run(node({}, config))
-        assert result2 == {}
+        assert result2 == {
+            ROOM_COMPLETION_ROUTE_KEY: None,
+            "room_nudge_tag_reattempt_outcomes": None,
+        }, (
+            "every non-fire path MUST reset room_completion_route to "
+            "None — the out-edge router reads the checkpoint-persisted "
+            "value; an unreset 'agent' hint loops forever"
+        )
 
     def test_gate_node_fail_open_on_coordinator_fault(self, stack):
-        """A coordinator fault never errors the turn (C3 fail-open)."""
+        """A coordinator fault never errors the turn (C3 fail-open) —
+        and the fail-open pass CLEARS the hint like every other
+        non-fire path."""
         mgr = stack["manager"]
 
         class _Boom:
@@ -266,10 +289,16 @@ class TestCompletionGateArm:
 
         mgr._room_nudge_coordinator = _Boom()
         node = create_room_completion_gate_node(mgr, "mem-1")
-        assert asyncio.run(node({}, {"configurable": {"thread_id": "mem-1"}})) == {}
-        # Unwired manager: fail open too.
+        assert asyncio.run(node({}, {"configurable": {"thread_id": "mem-1"}})) == {
+            ROOM_COMPLETION_ROUTE_KEY: None,
+            "room_nudge_tag_reattempt_outcomes": None,
+        }
+        # Unwired manager: fail open too (same clear shape).
         assert asyncio.run(create_room_completion_gate_node(
-            object(), "mem-1")({}, {"configurable": {"thread_id": "mem-1"}})) == {}
+            object(), "mem-1")({}, {"configurable": {"thread_id": "mem-1"}})) == {
+            ROOM_COMPLETION_ROUTE_KEY: None,
+            "room_nudge_tag_reattempt_outcomes": None,
+        }
 
     def test_out_edge_router_map(self, stack):
         """Router: hint ⇒ 'agent'; no hint ⇒ attestation when wired,
@@ -535,7 +564,7 @@ class TestStrongForm:
 
 
 # =============================================================================
-# (i) — compaction non-interference + drain-wrapper backstop
+# (i) — compaction non-interference
 # =============================================================================
 
 
@@ -554,232 +583,414 @@ class TestCompactionAndBackstop:
         assert isinstance(nudge, HumanMessage)
         assert nudge.additional_kwargs.get(ROOM_NUDGE_MARKER) is True
 
-    def test_backstop_peek_detours_on_terminal_with_interest(self, stack):
-        """Drain-wrapper peek: terminal verdict + empty queue + RAM
-        interest ⇒ detour to the gate node; no interest ⇒ verdict;
-        PEEK consumes nothing (latch untouched)."""
-        coord = stack["coordinator"]
-        mgr = stack["manager"]
-        coord._ram_interest["mem-1"] = True
-        slot = MagicMock()
-        slot.get = MagicMock(return_value=None)  # empty queue
-        base = MagicMock(return_value="end_candidate")
-        router = create_injection_aware_router(
-            base, slot,
-            room_completion_probe=coord.ram_interest,
-            room_gate_node_name=ROOM_COMPLETION_GATE_NODE_NAME,
+    def test_backstop_dropped_no_peek_in_wrapper(self, stack):
+        """A2 adjudication: the drain-wrapper backstop was DROPPED —
+        ``create_injection_aware_router`` no longer accepts probe
+        kwargs (the peek-as-implemented was a language bypass on the
+        enabled seam, C2). The signature is the pre-P4 shape."""
+        import inspect
+
+        sig = inspect.signature(create_injection_aware_router)
+        assert "room_completion_probe" not in sig.parameters
+        assert "room_gate_node_name" not in sig.parameters
+
+    def test_c4_closed_room_never_nudges(self, stack):
+        """Pin (4) C4: a CLOSED room is read-only per the ratified
+        capability row — its members get NO nudge (reminder or
+        strong form), though its deliveries still ride the P3
+        lanes."""
+        eng, svc, coord, mgr = (
+            stack["eng"], stack["svc"], stack["coordinator"],
+            stack["manager"],
         )
-        verdict = router({}, {"configurable": {"thread_id": "mem-1"}})
-        assert verdict == ROOM_COMPLETION_GATE_NODE_NAME
-        assert mgr._room_nudge_latch == {}, "peek must consume nothing"
-
-        coord._ram_interest["mem-1"] = False
-        assert router({}, {"configurable": {"thread_id": "mem-1"}}) == (
-            "end_candidate")
-
-    def test_backstop_no_probe_no_detour_and_no_db_in_router(self, stack):
-        """Without the probe (legacy wiring) the wrapper is verdict-
-        identical: the peek never fires."""
-        slot = MagicMock()
-        slot.get = MagicMock(return_value=None)
-        base = MagicMock(return_value=END)
-        router = create_injection_aware_router(base, slot)
-        assert router({}, {"configurable": {"thread_id": "mem-1"}}) == END
-
-    def test_backstop_injection_queue_drains_first(self, stack):
-        """Priority: a pending user injection outranks the room detour —
-        the wrapper routes 'agent' (the existing drain), never the
-        gate, while the queue holds entries."""
-        coord = stack["coordinator"]
-        coord._ram_interest["mem-1"] = True
-        slot = MagicMock()
-        slot.get = MagicMock(return_value=[object()])  # non-empty queue
-        base = MagicMock(return_value="end_candidate")
-        router = create_injection_aware_router(
-            base, slot,
-            room_completion_probe=coord.ram_interest,
-            room_gate_node_name=ROOM_COMPLETION_GATE_NODE_NAME,
+        _post(svc, stack["room_id"], text="pre-close")
+        _post(svc, stack["room_id"], text="pre-close tagged",
+              tagged=["worker"])
+        # Close the room (capability row: closed = read-only). No
+        # close API exists yet (P6 scope) — seed the row directly,
+        # the harness's direct-insert style.
+        _close_room(stack)
+        _new_turn(mgr, "mem-1")
+        # (a) arm silent.
+        assert asyncio.run(coord.todo_boundary_note("mem-1")) == ""
+        # (a2) arm silent — no fire, no pending tags.
+        decision = asyncio.run(coord.evaluate_completion("mem-1"))
+        assert decision["fire"] is False
+        assert decision["pending_tags"] == []
+        # Substrate: the closed room is not even in the scan.
+        assert _snapshot_rows(stack, "mem-1") == []
+        # Delivery re-derivation still sees it (the pinned pair —
+        # delivery is not the nudge).
+        pending = stack["repo"].derive_undelivered_tagged()
+        assert any(r["instance_id"] == "mem-1" for r in pending), (
+            "closed-room DELIVERY unaffected by the nudge exclusion"
         )
-        assert router({}, {"configurable": {"thread_id": "mem-1"}}) == "agent"
-
-    def test_backstop_non_terminal_verdict_never_peeks(self, stack):
-        """Non-terminal verdicts ('tools') pass through untouched — the
-        peek is TERMINAL-verdict-only (the (a) arm owns mid-turn)."""
-        coord = stack["coordinator"]
-        coord._ram_interest["mem-1"] = True
-        slot = MagicMock()
-        slot.get = MagicMock(return_value=None)
-        base = MagicMock(return_value="tools")
-        router = create_injection_aware_router(
-            base, slot,
-            room_completion_probe=coord.ram_interest,
-            room_gate_node_name=ROOM_COMPLETION_GATE_NODE_NAME,
-        )
-        assert router({}, {"configurable": {"thread_id": "mem-1"}}) == "tools"
-        slot.get.assert_not_called()
-
-    def test_injection_cap_budget_unchanged(self, stack):
-        """The injection continuation budget is untouched by the room
-        peek (same INJECTION_CONTINUATION_MAX contract)."""
-        assert INJECTION_CONTINUATION_MAX == 8
-        slot = MagicMock()
-        slot.get = MagicMock(return_value=None)
-        base = MagicMock(return_value=END)
-        router = create_injection_aware_router(
-            base, slot,
-            room_completion_probe=lambda iid: False,
-            room_gate_node_name=ROOM_COMPLETION_GATE_NODE_NAME,
-        )
-        for _ in range(INJECTION_CONTINUATION_MAX + 1):
-            pass  # no continuations: queue empty ⇒ plain verdicts
-        assert router({}, {"configurable": {"thread_id": "mem-1"}}) == END
 
 
 # =============================================================================
-# Wiring-order verification (plan P4 row: the real build_instance_graph)
+# Executed-graph composition pins (the review's new pin class —
+# edge-map pins prove topology, not runtime verdicts; these drive REAL
+# compiled graphs through the REAL wrappers via the
+# ``real_graph_module`` / ``patch_build_instance_llms`` support
+# fixtures and a fail-loud scripted model that RECORDS its inputs)
 # =============================================================================
 
 
-class _RecordingGraph:
-    """Captures add_node / add_conditional_edges / add_edge calls."""
+class _RecordingScriptedModel(ScriptedChatModel):
+    """ScriptedChatModel + per-pass input capture + mid-flight hooks
+    (fail-loud on script exhaustion — an infinite room loop errors
+    instead of passing). ``on_call[i]`` runs BEFORE response i is
+    returned — a hook that calls ``slot.set`` injects WHILE that LLM
+    pass is in flight (the deterministic end-of-turn drop the drain
+    exists for)."""
+
+    _recorded_inputs: list = PrivateAttr(default_factory=list)
+    _on_call: list = PrivateAttr(default_factory=list)
+
+    def __init__(self, responses, on_call=None, **kwargs):
+        super().__init__(responses=list(responses), i=0, **kwargs)
+        self._recorded_inputs = []
+        self._on_call = list(on_call or [])
+
+    @property
+    def recorded_inputs(self) -> list[list]:
+        return self._recorded_inputs
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self._recorded_inputs.append(list(messages))
+        hook = (
+            self._on_call[len(self._recorded_inputs) - 1]
+            if len(self._on_call) >= len(self._recorded_inputs)
+            else None
+        )
+        if hook is not None:
+            hook(messages)
+        return super()._generate(messages, stop=stop,
+                                 run_manager=run_manager, **kwargs)
+
+
+class _StubInjectionSlot:
+    """List-shaped get/clear/set stand-in (the
+    test_turn_end_injection_drain contract)."""
 
     def __init__(self):
-        self.nodes: dict = {}
-        self.cond_edges: list = []
-        self.plain_edges: list = []
+        self._store: dict[str, list[dict]] = {}
+        self.clear_calls: list[str] = []
 
-    def add_node(self, name, fn, *a, **k):
-        self.nodes[name] = fn
+    def get(self, instance_id):
+        queue = self._store.get(instance_id)
+        return list(queue) if queue else None
 
-    def add_conditional_edges(self, start, router, path_map, *a, **k):
-        self.cond_edges.append((start, router, dict(path_map)))
+    def clear(self, instance_id):
+        self.clear_calls.append(instance_id)
+        return self._store.pop(instance_id, None)
 
-    def add_edge(self, start, end, *args, **kwargs):
-        self.plain_edges.append((start, end))
-
-    def set_entry_point(self, *a, **k):
-        pass
-
-    def compile(self, *a, **k):
-        return MagicMock(name="compiled")
-
-
-class TestWiringOrder:
-    """The plan P4 row's wiring-order verification: the chain lands in
-    the REAL build_instance_graph under BOTH language configurations,
-    and legacy (coordinator-less) wiring stays byte-identical."""
-
-    def _build(self, monkeypatch, *, manager, language_enabled):
-        from unittest.mock import patch
-
-        from daemon.services.attestation_gate import (
-            GateSettings,
+    def set(self, instance_id, content):
+        self._store.setdefault(instance_id, []).append(
+            {"content": content, "timestamp": "2026-01-01T00:00:00+00:00"}
         )
 
-        monkeypatch.setattr(
-            "daemon.services.attestation_gate.resolve_gate_settings",
-            lambda: GateSettings(mode="enforce", window=3, deny_bound=3),
+
+class _CountingCoordinator:
+    """Wraps the real coordinator; counts evaluate_completion calls."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.evaluations = 0
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    async def evaluate_completion(self, instance_id):
+        self.evaluations += 1
+        return await self._inner.evaluate_completion(instance_id)
+
+
+def _close_room(stack):
+    """Seed the capability row to ``closed`` (no close API exists yet —
+    P6 scope; direct row seeding mirrors the harness's direct-insert
+    style)."""
+    from sqlmodel import Session
+
+    from daemon.repositories.room.models import ChatRoom
+
+    with Session(stack["eng"]) as s:
+        room = s.get(ChatRoom, stack["room_id"])
+        room.state = "closed"
+        s.commit()
+
+
+def _build_and_run(real_graph_module, patch_build_instance_llms, *, manager,
+                   iid, slot, responses, language_enabled,
+                   user_language="English", on_call=None):
+    """Build the REAL production graph over the stack manager; return
+    (model, graph). The caller drives astream/ainvoke itself."""
+    from langchain_core.messages import AIMessage
+
+    model = _RecordingScriptedModel(
+        [AIMessage(content=r) if isinstance(r, str) else r
+         for r in responses],
+        on_call=on_call,
+    )
+    patch_build_instance_llms(model)
+    graph = real_graph_module.build_instance_graph(
+        tools=[],
+        checkpointer=None,
+        llm_config={"model": "test-model",
+                    "base_url": "http://example.invalid"},
+        system_prompt="you are a test assistant",
+        retry_config={"transient_attempts": 1, "timeout_attempts": 1},
+        injection_slot=slot,
+        manager=manager,
+        user_language=user_language,
+        language_check_enabled=language_enabled,
+        attestation_enabled=False,
+        graph_config={"configurable": {"thread_id": iid}},
+    )
+    return model, graph
+
+
+def _nudges(model) -> list:
+    return [
+        m for call in model.recorded_inputs for m in call
+        if isinstance(m, HumanMessage)
+        and m.additional_kwargs.get(ROOM_NUDGE_MARKER)
+    ]
+
+
+class TestExecutedGraphComposition:
+    """The review-mandated composition pins, EXECUTED.
+
+    Each builds the REAL compiled graph (real LangGraph via the
+    support fixture, real wrappers, real gate node over the stack's
+    coordinator) and drives a full turn. The scripted model fails
+    LOUD when the graph requests more turns than scripted — an
+    infinite room loop (the C1 defect class) errors instead of
+    passing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_composition_1_fire_then_pass_then_end_terminates(
+        self, stack, real_graph_module, patch_build_instance_llms,
+    ):
+        """Pin (1) — the C1 anti-loop pin: fire → continuation → pass →
+        END TERMINATES. Disabled seam (agent → gate directly), one
+        unread room. Under the C1 defect the stale hint re-routes
+        'agent' forever (measured upstream: GraphRecursionError at
+        limit 30; here: script exhaustion)."""
+        svc, mgr, coord = stack["svc"], stack["manager"], stack["coordinator"]
+        iid = "mem-1"
+        await _post_async(svc, stack["room_id"], text="check team")
+        _new_turn(mgr, iid)  # seed the turn key for the whole run
+        counting = _CountingCoordinator(coord)
+        mgr._room_nudge_coordinator = counting
+        slot = _StubInjectionSlot()
+        model, graph = _build_and_run(
+            real_graph_module, patch_build_instance_llms,
+            manager=mgr, iid=iid, slot=slot,
+            responses=["final answer one", "final answer two"],
+            language_enabled=False,
         )
-        monkeypatch.setattr(
-            "daemon.services.attestation_gate._CACHED_GATE_SETTINGS",
+        await graph.ainvoke(
+            {"messages": [HumanMessage(content="go")]},
+            {"configurable": {"thread_id": iid}},
+        )
+        # Terminated with EXACTLY two LLM passes: fire + pass.
+        assert model.i == 2, (
+            f"two passes expected (fire, pass) — got {model.i}; a third "
+            "means the stale hint looped (C1)"
+        )
+        # The gate evaluated exactly twice.
+        assert counting.evaluations == 2
+        # Exactly ONE nudge entered the transcript.
+        assert len(_nudges(model)) == 1
+
+    @pytest.mark.asyncio
+    async def test_composition_2_disabled_seam_pending_queue_drains_first(
+        self, stack, real_graph_module, patch_build_instance_llms,
+    ):
+        """Pin (2) — C3 restored: disabled seam, coordinator armed, a
+        PENDING user injection + unread room. The injection wrapper
+        (now INSIDE the room wrap) drains first; the nudge fires only
+        after the queue is empty. Under the C3 defect the drain is
+        dead: the room gate takes the verdict, the injection strands,
+        and the nudge fires on pass 2 (ordering + drain assertions
+        redden)."""
+        svc, mgr = stack["svc"], stack["manager"]
+        iid = "mem-1"
+        await _post_async(svc, stack["room_id"], text="check team")
+        _new_turn(mgr, iid)
+        slot = _StubInjectionSlot()
+        model, graph = _build_and_run(
+            real_graph_module, patch_build_instance_llms,
+            manager=mgr, iid=iid, slot=slot,
+            responses=[
+                "first final",
+                "second final (after drain)",
+                "third final (after nudge)",
+            ],
+            language_enabled=False,
+            # The injection lands WHILE the first (final) LLM pass is in
+            # flight — the exact stranding window C3 closed.
+            on_call=[lambda _m: slot.set(iid, "user follow-up mid-turn")],
+        )
+        await graph.ainvoke(
+            {"messages": [HumanMessage(content="go")]},
+            {"configurable": {"thread_id": iid}},
+        )
+        # The queue was DRAINED (the C3 dead-drain strands it).
+        assert slot.get(iid) is None
+        assert slot.clear_calls == [iid]
+        # The injected message reached the model.
+        assert any(
+            isinstance(m, HumanMessage)
+            and m.content == "user follow-up mid-turn"
+            for call in model.recorded_inputs for m in call
+        )
+        # Ordering: the injected message enters an EARLIER LLM input
+        # than the room nudge (drain BEFORE nudge).
+        first_inject = next(
+            i for i, call in enumerate(model.recorded_inputs)
+            if any(isinstance(m, HumanMessage)
+                   and m.content == "user follow-up mid-turn"
+                   for m in call)
+        )
+        first_nudge = next(
+            i for i, call in enumerate(model.recorded_inputs)
+            if any(isinstance(m, HumanMessage)
+                   and m.additional_kwargs.get(ROOM_NUDGE_MARKER)
+                   for m in call)
+        )
+        assert first_inject < first_nudge, (
+            "injection drains BEFORE the room nudge fires (C3)"
+        )
+        # Exactly one nudge across the whole composition.
+        assert len(_nudges(model)) == 1
+
+    @pytest.mark.asyncio
+    async def test_composition_3_enabled_seam_language_check_not_bypassed(
+        self, stack, real_graph_module, patch_build_instance_llms,
+    ):
+        """Pin (3) — C2: enabled seam with the coordinator's RAM
+        interest ARMED. A wrong-language (CJK) final answer must be
+        intercepted by language_check (its reminder enters the
+        transcript) BEFORE the room gate fires. Under the C2 detour
+        the reply skipped language validation entirely — no reminder,
+        gate first."""
+        svc, mgr, coord = stack["svc"], stack["manager"], stack["coordinator"]
+        iid = "mem-1"
+        await _post_async(svc, stack["room_id"], text="check team")
+        _new_turn(mgr, iid)
+        coord._ram_interest[iid] = True  # armed: must NOT cause a bypass
+        slot = _StubInjectionSlot()
+        model, graph = _build_and_run(
+            real_graph_module, patch_build_instance_llms,
+            manager=mgr, iid=iid, slot=slot,
+            responses=[
+                "\u9019\u662f\u6700\u7d42\u5831\u544a",       # wrong language (CJK)
+                "Here is my final answer",            # corrected
+                "Here is my final answer, final",     # post-nudge
+            ],
+            language_enabled=True,
+            user_language="English",
+        )
+        await graph.ainvoke(
+            {"messages": [HumanMessage(content="go")]},
+            {"configurable": {"thread_id": iid}},
+        )
+        language_reminder_seen = any(
+            isinstance(m, HumanMessage)
+            and m.additional_kwargs.get("language_check_reminder")
+            for call in model.recorded_inputs for m in call
+        )
+        assert language_reminder_seen, (
+            "language_check MUST intercept the turn-ending reply before "
+            "the room gate — a room detour at end_candidate bypasses "
+            "language validation (C2)"
+        )
+        first_lang = next(
+            i for i, call in enumerate(model.recorded_inputs)
+            if any(isinstance(m, HumanMessage)
+                   and m.additional_kwargs.get("language_check_reminder")
+                   for m in call)
+        )
+        first_nudge = next(
+            (i for i, call in enumerate(model.recorded_inputs)
+             if any(isinstance(m, HumanMessage)
+                    and m.additional_kwargs.get(ROOM_NUDGE_MARKER)
+                    for m in call)),
             None,
         )
-        recording = _RecordingGraph()
-        tools = [MagicMock(name="t1"), MagicMock(name="t2")]
-        with patch("daemon.graph.ThinkingChatOpenAI") as mock_llm_class, \
-                patch("daemon.graph.StateGraph", return_value=recording), \
-                patch("daemon.graph.ToolNode"):
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.bind_tools.return_value = MagicMock()
-            mock_llm_class.return_value = mock_llm_instance
-            from daemon.graph import build_instance_graph
-
-            build_instance_graph(
-                tools=tools,
-                checkpointer=MagicMock(),
-                llm_config={"model": "gpt-4o", "api_key": "t"},
-                system_prompt="p",
-                user_language="English",
-                language_check_enabled=language_enabled,
-                injection_slot=MagicMock(),
-                manager=manager,
-                attestation_enabled=True,
-                graph_config={"configurable": {"thread_id": "mem-1"}},
-            )
-        return recording
-
-    def test_chain_enabled_language(self, monkeypatch, stack):
-        """language_check → room_completion_gate → attestation_gate →
-        END: the language_check out-edge carries ONLY {retry,
-        room gate} (no direct terminal keys); the room gate's own map
-        carries the explicit 'agent' key + attestation + END; the
-        agent-side map carries the room gate as the backstop detour
-        target."""
-        mgr = stack["manager"]
-        recording = self._build(monkeypatch, manager=mgr,
-                                language_enabled=True)
-        assert ROOM_COMPLETION_GATE_NODE_NAME in recording.nodes
-        maps = {start: pm for start, _r, pm in recording.cond_edges}
-        lc_paths = maps["language_check"]
-        assert set(lc_paths) == {"retry", ROOM_COMPLETION_GATE_NODE_NAME}, (
-            "every terminal verdict that survived language check must "
-            "reach the room gate first"
+        assert len(_nudges(model)) == 1
+        assert first_nudge is None or first_lang <= first_nudge, (
+            "language interception precedes or accompanies the room hold"
         )
-        gate_paths = maps[ROOM_COMPLETION_GATE_NODE_NAME]
-        assert gate_paths["agent"] == "agent"
-        assert gate_paths[ATTESTATION_GATE_NODE_NAME] == (
-            ATTESTATION_GATE_NODE_NAME)
-        assert gate_paths[END] == END
-        agent_paths = maps["agent"]
-        assert agent_paths.get(ROOM_COMPLETION_GATE_NODE_NAME) == (
-            ROOM_COMPLETION_GATE_NODE_NAME)
-        # The language_check router is room-gate-wrapped: a completed
-        # state routes to the room gate, not to attestation/END.
-        lc_router = dict(
-            (start, r) for start, r, _pm in recording.cond_edges
-        )["language_check"]
-        assert lc_router({"language_check_retry": False}) == (
-            ROOM_COMPLETION_GATE_NODE_NAME)
-        assert lc_router({"language_check_retry": True}) == "retry"
 
-    def test_chain_disabled_language_seam(self, monkeypatch, stack):
-        """N4: disabled-language seam — the room gate sits between the
-        base terminal router and the attestation wrapper; the agent
-        map carries the room gate (no direct END key)."""
-        mgr = stack["manager"]
-        recording = self._build(monkeypatch, manager=mgr,
-                                language_enabled=False)
-        assert ROOM_COMPLETION_GATE_NODE_NAME in recording.nodes
-        maps = {start: pm for start, _r, pm in recording.cond_edges}
-        agent_paths = maps["agent"]
-        assert agent_paths.get(ROOM_COMPLETION_GATE_NODE_NAME) == (
-            ROOM_COMPLETION_GATE_NODE_NAME)
-        assert END not in agent_paths, (
-            "the room gate owns the pass-through: no direct END key "
-            "on the agent router map"
+    @pytest.mark.asyncio
+    async def test_composition_4_closed_room_turn_terminates_clean(
+        self, stack, real_graph_module, patch_build_instance_llms,
+    ):
+        """Pin (4) — C4 executed: a CLOSED room with unread + a pending
+        tagged row must NOT hold the turn. One LLM pass; no nudge in
+        the transcript. Under the C4 defect the gate fires and the
+        script (1 response) exhausts loudly."""
+        svc, mgr = stack["svc"], stack["manager"]
+        iid = "mem-1"
+        await _post_async(svc, stack["room_id"], text="pre-close")
+        await _post_async(svc, stack["room_id"], tagged=["worker"], text="pre-close tag")
+        _close_room(stack)
+        _new_turn(mgr, iid)
+        slot = _StubInjectionSlot()
+        model, graph = _build_and_run(
+            real_graph_module, patch_build_instance_llms,
+            manager=mgr, iid=iid, slot=slot,
+            responses=["the one and only final"],
+            language_enabled=False,
         )
-        gate_paths = maps[ROOM_COMPLETION_GATE_NODE_NAME]
-        assert gate_paths["agent"] == "agent"
-        assert gate_paths[ATTESTATION_GATE_NODE_NAME] == (
-            ATTESTATION_GATE_NODE_NAME)
-        # The agent router is room-gate-wrapped: END verdict → room gate.
-        agent_router = dict(
-            (start, r) for start, r, _pm in recording.cond_edges
-        )["agent"]
-        final_ai_state = {
-            "messages": [AIMessage(content="final report", tool_calls=[])]
-        }
-        assert agent_router(final_ai_state) == ROOM_COMPLETION_GATE_NODE_NAME
+        await graph.ainvoke(
+            {"messages": [HumanMessage(content="go")]},
+            {"configurable": {"thread_id": iid}},
+        )
+        assert model.i == 1, (
+            "a closed room must never hold the turn (capability row: "
+            "closed ⇒ no nudge)"
+        )
+        assert _nudges(model) == []
 
-    def test_legacy_manager_without_coordinator_is_unwired(self, monkeypatch):
-        """Fail-open absence: a manager without the coordinator wires
-        NOTHING — no room gate node, no path changes."""
-        legacy = MagicMock()
-        del legacy._room_nudge_coordinator  # absent attribute
-        recording = self._build(monkeypatch, manager=legacy,
-                                language_enabled=True)
-        assert ROOM_COMPLETION_GATE_NODE_NAME not in recording.nodes
-        maps = {start: pm for start, _r, pm in recording.cond_edges}
-        assert ROOM_COMPLETION_GATE_NODE_NAME not in maps.get(
-            "language_check", {})
-        assert ROOM_COMPLETION_GATE_NODE_NAME not in maps.get("agent", {})
+    @pytest.mark.asyncio
+    async def test_cap_interaction_injection_budget_unaffected_by_gate(
+        self, stack, real_graph_module, patch_build_instance_llms,
+    ):
+        """The REAL INJECTION_CONTINUATION_MAX interaction: pending
+        injections drain via the wrapper's OWN budget; the room gate's
+        CONTINUE rides the route hint and neither consumes nor resets
+        the injection counter. Executed: 1 pending injection + unread
+        room ⇒ drain pass, then gate fire, then gate pass — exactly
+        three LLM passes and exactly one nudge (the latch, not the
+        injection budget, bounds the room side)."""
+        svc, mgr = stack["svc"], stack["manager"]
+        iid = "mem-1"
+        await _post_async(svc, stack["room_id"], text="check team")
+        _new_turn(mgr, iid)
+        slot = _StubInjectionSlot()
+        model, graph = _build_and_run(
+            real_graph_module, patch_build_instance_llms,
+            manager=mgr, iid=iid, slot=slot,
+            responses=[
+                "final 1",
+                "final 2 (drained)",
+                "final 3 (post-nudge)",
+            ],
+            language_enabled=False,
+            on_call=[lambda _m: slot.set(iid, "injected while final in flight")],
+        )
+        await graph.ainvoke(
+            {"messages": [HumanMessage(content="go")]},
+            {"configurable": {"thread_id": iid}},
+        )
+        assert slot.get(iid) is None  # drained
+        assert model.i == 3
+        assert len(_nudges(model)) == 1, (
+            "the gate fired exactly once across the whole drain+nudge "
+            "composition (the latch bounds the room side)"
+        )

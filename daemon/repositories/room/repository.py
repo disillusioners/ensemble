@@ -1143,9 +1143,18 @@ class RoomRepository:
         injects, and advances NOTHING (same discipline as
         :meth:`derive_undelivered_tagged`).
 
-        For every ACTIVE membership of ``instance_id`` in rooms
-        ``active | closed`` (purged rooms have no rows; the pinned
-        pair), returns one dict:
+        **ACTIVE ROOMS ONLY (C4 fix, 2026-11-16 review):** rooms in
+        ``state='active'`` — a CLOSED room is read-only per the
+        ratified capability row ("closed: no" new-activity nudges);
+        its members are never nudged to check it. This differs
+        deliberately from :meth:`derive_undelivered_tagged` (the
+        DELIVERY re-derivation includes closed rooms — messages in a
+        closed room still deliver through the lanes; the NUDGE is a
+        new-activity prompt, not a delivery). Purged rooms have no
+        rows and are structurally excluded.
+
+        For every ACTIVE membership of ``instance_id`` in those
+        active rooms, returns one dict:
 
           {
             "room_id", "room_name", "room_state",
@@ -1193,13 +1202,12 @@ class RoomRepository:
             " LEFT JOIN room_messages msg ON msg.room_id = m.room_id"
             " WHERE m.instance_id = :iid"
             "  AND m.state = :member_active"
-            "  AND r.state IN (:state_active, :state_closed)"
+            "  AND r.state = :state_active"
             " ORDER BY m.room_id, msg.seq"
         ).bindparams(
             iid=instance_id,
             member_active=member_active,
             state_active=RoomState.ACTIVE.value,
-            state_closed=RoomState.CLOSED.value,
         )
         rooms: dict[str, dict[str, Any]] = {}
         with Session(self._engine) as session:
