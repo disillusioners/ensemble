@@ -1,3 +1,13 @@
+<!-- group-chat-p6-tester-gate-20261116-begin -->
+## GROUP-CHAT P6 — INDEPENDENT TESTER GATE (2026-11-16 @ HEAD `e6d984272`; verdict **FAIL — net-new = 6 deterministic lane-attributable reds**: 4× `tests/unit/metrics/test_metrics_query_scope_cage.py::TestThreeWayCage` count pins 117/39/35 → actual 119/40/36 (the lane updated both sibling manifest sites per A-P6-9 but missed the cage file's own copy) + 2× census reds from lane-added `daemon/services/context_block.py` docstring needles (`test_lcancheck_family_separation.py::…::test_s3_whole_tree_census`, `test_attestation_lca_note_removed.py::…`). ALL other axes PASS incl. the mandatory FE web-automation pass (a)–(f), GC behavior 3/3, §9-cap/M3/SSE-observability, and the 4 pack re-runs below. Findings F-1..F-6 + fix list in `RESULTS/2026-11-16-group-chat-p6-tester-gate.md`; evidence `/tmp/gc_p6_gate/`)
+
+| Pack | Last run (gate) | Status |
+|---|---|---|
+| `gc_p6_pilot_scenario` | 2026-11-16 @ `e6d984272` | ✅ PASS 9/9 (C1–C9; ~10s wall; dual-layer timeouts intact) |
+| `gc_p6_room_mutation_matrix` | 2026-11-16 @ `e6d984272` | ✅ PASS 6/6 legs (GC-M01..M06 markers exact; byte-identity manifest + independent `--verify` CLEAN; tree porcelain-clean before/after; solo run) |
+| `gc_p6_room_family` | 2026-11-16 @ `e6d984272` | ✅ PASS 385/385 · 21 files (same census as the registration; fence verified at /proc-environ level; 5:34 wall) |
+| `gc_p6_lane_scope` | 2026-11-16 @ `e6d984272` | ✅ PASS 216P/1S/1F — the 1 F is EXACTLY the A-P6-18 base-attributable metrics node (matches the P5-gate red; no other reds) |
+<!-- group-chat-p6-tester-gate-20261116-end -->
 <!-- group-chat-p6-coder-registration-20261116-begin -->
 ## GROUP-CHAT P6 — BACKEND LANE 2 (refactor + test-infra + backlog + pilot scenario) — coder registration (2026-11-16; lane `feature/group-chat-p6` @ `cb9fe62d6`; base `4dd8aac42` = the lane-1 merge; registered by the P6 coder lane for the reviewer/tester gates)
 
