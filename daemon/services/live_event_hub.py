@@ -34,6 +34,12 @@ class LiveEventHub:
         # Per-instance connection registry: instance_id -> set of Queues
         self._connections: dict[str, set[asyncio.Queue]] = {}
         
+        # The ALIAS registry (P6 — the room-resolution reuse): a queue
+        # registered under a second stream key (the ROOM id a client
+        # connected with) is tracked here so the removal is SYMMETRIC
+        # (the alias bucket must not outlive its connection).
+        self._queue_keys: dict[asyncio.Queue, set[str]] = {}
+        
         # Lock for thread-safe connection management
         self._lock = asyncio.Lock()
     
@@ -41,32 +47,74 @@ class LiveEventHub:
     # Connection Management
     # -------------------------------------------------------------------------
     
-    async def add_connection(self, instance_id: str, queue: asyncio.Queue) -> None:
+    async def add_connection(
+        self,
+        instance_id: str,
+        queue: asyncio.Queue,
+        *,
+        alias: str | None = None,
+    ) -> None:
         """Register an SSE connection for an instance.
         
         Args:
             instance_id: The instance to stream events for.
             queue: The connection's asyncio.Queue for receiving events.
+            alias: OPTIONAL second stream key for the SAME queue — the
+                room-resolution reuse (P6, A-P6-11). A client that
+                connected the events stream with a ROOM id is
+                registered under the room's OWNER instance AND under the
+                room id, so an event streamed under either key reaches
+                it. ``None`` (the default) keeps the historical
+                single-key shape byte-for-byte.
         """
         async with self._lock:
-            if instance_id not in self._connections:
-                self._connections[instance_id] = set()
-            self._connections[instance_id].add(queue)
-            logger.debug(f"Connection added for {instance_id}, total: {len(self._connections[instance_id])}")
+            keys = {instance_id}
+            if alias:
+                keys.add(alias)
+            for key in keys:
+                if key not in self._connections:
+                    self._connections[key] = set()
+                self._connections[key].add(queue)
+            self._queue_keys[queue] = keys
+            logger.debug(
+                f"Connection added for {instance_id}"
+                + (f" (alias {alias})" if alias else "")
+                + f", total: {len(self._connections[instance_id])}"
+            )
     
-    async def remove_connection(self, instance_id: str, queue: asyncio.Queue) -> None:
+    async def remove_connection(
+        self,
+        instance_id: str,
+        queue: asyncio.Queue,
+        *,
+        alias: str | None = None,
+    ) -> None:
         """Unregister an SSE connection.
         
         Args:
             instance_id: The instance ID.
             queue: The connection's queue to remove.
+            alias: OPTIONAL alias key (the room-resolution reuse). The
+                removal is SYMMETRIC — every key the queue was
+                registered under is cleaned, so no alias bucket
+                outlives its connection.
         """
         async with self._lock:
-            if instance_id in self._connections:
-                self._connections[instance_id].discard(queue)
-                if not self._connections[instance_id]:
-                    del self._connections[instance_id]
-                logger.debug(f"Connection removed for {instance_id}")
+            keys = self._queue_keys.pop(queue, None)
+            if keys is None:
+                # Never registered through ``add_connection`` (or the
+                # registry was reset) — fall back to the caller's keys.
+                keys = {instance_id}
+                if alias:
+                    keys.add(alias)
+            for key in keys:
+                bucket = self._connections.get(key)
+                if bucket is None:
+                    continue
+                bucket.discard(queue)
+                if not bucket:
+                    del self._connections[key]
+            logger.debug(f"Connection removed for {instance_id}")
     
     async def get_connection_count(self, instance_id: str) -> int:
         """Get number of active connections for an instance.
@@ -518,7 +566,19 @@ class LiveEventHub:
             instance_id: The instance ID to clean up.
         """
         async with self._lock:
-            self._connections.pop(instance_id, None)
+            bucket = self._connections.pop(instance_id, None)
+            if bucket:
+                # The alias bookkeeping follows: a queue that still holds
+                # another key (the room-resolution alias) keeps THAT
+                # registration; a queue whose last key was this one is
+                # forgotten entirely.
+                for queue in list(bucket):
+                    keys = self._queue_keys.get(queue)
+                    if keys is None:
+                        continue
+                    keys.discard(instance_id)
+                    if not keys:
+                        self._queue_keys.pop(queue, None)
             logger.debug(f"Cleaned up connections for {instance_id}")
     
     async def shutdown(self) -> None:

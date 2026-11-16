@@ -948,6 +948,85 @@ async def get_message_status(instance_id: str, message_id: str, request: Request
     }
 
 
+# ── the SSE ROOM-RESOLUTION PRE-BRANCH (P6 — A-P6-11) ────────────────────
+#
+# Architecture §8: *"SSE observability only (+room-resolution pre-branch,
+# ``routers/messages.py:960-963``; hub ``services/live_event_hub.py``)"*,
+# and the §13 P6 row: *"UI per §13.1 (R3) + SSE pre-branch + audit
+# surfacing"*.
+#
+# WHAT IT DOES: a client that points the events stream at a ROOM id
+# gets that room's OWNER instance's live stream. The room's
+# content-free event rows ride their instance's stream (P1/P3
+# ``emit_room_event(instance_id=...)`` — the member for a tag delivery,
+# the parent for a proposal), and the owner is inside the
+# owner-ancestry chain, so the room's trace is observable from the room
+# id alone. The resolution is OBSERVABLE: the ``connected`` event
+# carries the resolved instance, the room id and which branch fired.
+#
+# OBSERVABILITY ONLY — the pre-branch resolves a STREAM TARGET and
+# nothing else: it never routes, wakes, revives, delivers or writes.
+# The delivery lanes remain the P3 router's job; the SSE lane stays a
+# read-only surface.
+#
+# FAIL-CLOSED: an id that is neither a live instance nor an existing
+# room answers the typed 404 exactly as before. A PURGED room has no
+# rows ⇒ it is NONEXISTENT (R2) ⇒ 404 — the pre-branch never invents a
+# room that the substrate does not carry.
+
+
+async def _resolve_sse_target(manager: Any, raw_id: str) -> tuple[str, str]:
+    """Resolve the SSE stream target — ``(instance_id, room_id)``.
+
+    The INSTANCE branch is the historical path, unchanged: a live
+    instance id resolves to itself and ``room_id`` is empty. The ROOM
+    branch is the pre-branch: the id resolves as a chat-room and the
+    target becomes the room's owner instance.
+
+    Raises:
+        HTTPException: 404 when the id is neither a live instance nor
+            an existing room (or the room carries no owner).
+    """
+    try:
+        await manager.get_instance(raw_id)
+        return raw_id, ""
+    except KeyError:
+        pass
+    room_service = getattr(manager, "_room_chat_service", None)
+    if room_service is None:
+        raise HTTPException(
+            status_code=404, detail=f"Instance not found: {raw_id}"
+        )
+    try:
+        room = await room_service.get_room(raw_id)
+    except Exception as exc:  # noqa: BLE001 — a broken room read is not-found
+        logger.warning(
+            "SSE room-resolution: the room read failed for %s (%r) — "
+            "not-found",
+            raw_id,
+            exc,
+        )
+        room = None
+    if room is None:
+        raise HTTPException(
+            status_code=404, detail=f"Instance not found: {raw_id}"
+        )
+    owner = str(room.get("owner_instance_id") or "")
+    if not owner:
+        raise HTTPException(
+            status_code=404, detail=f"Instance not found: {raw_id}"
+        )
+    try:
+        await manager.get_instance(owner)
+    except KeyError:
+        # The room exists but its owner instance is gone — the stream
+        # has no live target to ride.
+        raise HTTPException(
+            status_code=404, detail=f"Instance not found: {raw_id}"
+        )
+    return owner, raw_id
+
+
 # 3. GET /instances/{instance_id}/events - SSE stream
 @router.get("/{instance_id}/events", dependencies=[scope_required("instances:read")])
 async def stream_events(instance_id: str, request: Request):
@@ -957,25 +1036,36 @@ async def stream_events(instance_id: str, request: Request):
     if manager.is_shutting_down:
         raise HTTPException(status_code=503, detail="Server is shutting down")
     
-    try:
-        await manager.get_instance(instance_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"Instance not found: {instance_id}")
+    # ── the ROOM-RESOLUTION PRE-BRANCH (P6): an instance id resolves to
+    # itself; a ROOM id resolves to its owner's stream. The room id is
+    # kept as the connection's ALIAS key, so an event streamed under
+    # either key reaches this client.
+    target_instance_id, room_id = await _resolve_sse_target(manager, instance_id)
     
     live_hub: LiveEventHub = request.app.state.live_hub
     
     async def event_generator() -> AsyncGenerator[dict, None]:
-        # 1. Connected event
+        # 1. Connected event — carries the RESOLUTION (the resolved
+        # instance, the room id, and which branch fired), so the
+        # resolution is observable ON the stream.
         yield {
             "event": "connected",
-            "data": json.dumps({"instance_id": instance_id}),
+            "data": json.dumps(
+                {
+                    "instance_id": target_instance_id,
+                    "room_id": room_id,
+                    "resolved_from": "room" if room_id else "instance",
+                }
+            ),
         }
 
         # 2. Create a queue and register it BEFORE any helper that
         # broadcasts through the live hub. Otherwise the broadcast finds
         # zero registered connections and the event is silently dropped.
         queue: asyncio.Queue = asyncio.Queue(maxsize=SSE_QUEUE_MAXSIZE)
-        await live_hub.add_connection(instance_id, queue)
+        await live_hub.add_connection(
+            target_instance_id, queue, alias=room_id or None
+        )
 
         # 2b. Initial context_usage snapshot. Lets the FE indicator populate
         # immediately on connect, without waiting for the next message
@@ -988,7 +1078,9 @@ async def stream_events(instance_id: str, request: Request):
         # task tracked so we don't leak on early disconnect.
         async def _initial_snapshot() -> None:
             try:
-                await manager._messaging_service.emit_context_usage_for_instance(instance_id)
+                await manager._messaging_service.emit_context_usage_for_instance(
+                    target_instance_id
+                )
             except Exception as e:
                 logger.debug(f"Failed to emit initial context usage: {e}")
 
@@ -1011,11 +1103,11 @@ async def stream_events(instance_id: str, request: Request):
                 # the answer endpoint in instances.py).
                 from daemon.services.question_manager import pack_to_dict
                 pending_pack = manager._question_manager.get_question_pack(
-                    instance_id
+                    target_instance_id
                 )
                 if pending_pack is not None and pending_pack.status == "pending":
                     await live_hub.stream_question_pack(
-                        instance_id,
+                        target_instance_id,
                         pack_to_dict(pending_pack),
                     )
             except Exception as e:
@@ -1053,6 +1145,8 @@ async def stream_events(instance_id: str, request: Request):
                 snapshot_task.cancel()
             if not question_replay_task.done():
                 question_replay_task.cancel()
-            await live_hub.remove_connection(instance_id, queue)
+            await live_hub.remove_connection(
+                target_instance_id, queue, alias=room_id or None
+            )
     
     return EventSourceResponse(event_generator(), ping=SSE_PING_INTERVAL)
