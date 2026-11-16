@@ -337,6 +337,97 @@ def test_an_out_of_scope_instance_answers_404(client, engine, svc):
     assert response.json()["detail"]["error"] == "room_not_found"
 
 
+# ── the infra-fault envelope (M3, A-P6-25) ────────────────────────────
+#
+# A faulting room-service call must NEVER escape to the global 500
+# handler (its ``{code: INTERNAL_ERROR, message: str(exc)}`` body is
+# the wrong shape for this surface AND echoes raw fault text to the
+# client). Each pin INJECTS a fault and asserts the TYPED envelope
+# fields — the shape, the vocabulary token, and that the fault text
+# stays server-side.
+
+
+def test_a_faulted_room_list_answers_the_typed_envelope(
+    client, engine, svc, monkeypatch
+):
+    """A faulted room-LIST read answers 503 ``room_service_unavailable``
+    in the ``{error, message}`` envelope — never a raw 500 body."""
+    manager = client.manager
+    seed_instance(engine, "owner-1", None, "idle")
+    manager._known.add("owner-1")
+
+    async def _boom(tree_root):
+        raise RuntimeError("room list boom")
+
+    monkeypatch.setattr(svc, "list_rooms_for_tree", _boom)
+    response = client.get("/api/instances/owner-1/rooms")
+    body = response.json()
+    assert response.status_code == 503
+    assert body["detail"]["error"] == "room_service_unavailable"
+    assert body["detail"]["message"] == (
+        "the room list could not be read right now"
+    )
+    # The security note: the fault text never reaches the wire.
+    assert "boom" not in response.text
+
+
+def test_a_faulted_room_resolution_answers_the_typed_404(
+    client, engine, svc, monkeypatch
+):
+    """A faulted room RESOLUTION answers the SAME fail-closed 404 the
+    SSE lane's pre-branch answers on a broken read (A-P6-11 family):
+    an unresolvable room is never distinguished from an absent one on
+    the wire."""
+    manager = client.manager
+    seed_instance(engine, "owner-1", None, "idle")
+    manager._known.add("owner-1")
+    room_id = _room(engine, svc, tree="owner-1", owner="owner-1")
+
+    async def _boom(target):
+        raise RuntimeError("room resolve boom")
+
+    monkeypatch.setattr(svc, "get_room", _boom)
+    response = client.get(f"/api/rooms/{room_id}/messages")
+    body = response.json()
+    assert response.status_code == 404
+    assert body["detail"]["error"] == "room_not_found"
+    assert "boom" not in response.text
+
+
+def test_a_faulted_log_read_answers_the_typed_503(
+    client, engine, svc, monkeypatch
+):
+    """A faulted LOG read (the room itself resolved fine) answers 503
+    ``room_service_unavailable`` — present-but-faulted, retryable,
+    generic message."""
+    manager = client.manager
+    seed_instance(engine, "owner-1", None, "idle")
+    manager._known.add("owner-1")
+    room_id = _room(engine, svc, tree="owner-1", owner="owner-1")
+
+    real_read = svc.read_messages
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("log read boom")
+
+    monkeypatch.setattr(svc, "read_messages", _boom)
+    response = client.get(f"/api/rooms/{room_id}/messages")
+    body = response.json()
+    assert response.status_code == 503
+    assert body["detail"]["error"] == "room_service_unavailable"
+    assert body["detail"]["message"] == (
+        "the room log could not be read right now"
+    )
+    assert "boom" not in response.text
+
+    # The typed not-found is STILL the answer for a genuinely absent
+    # room — the wrap never shadows the vocabulary's 404 member.
+    monkeypatch.setattr(svc, "read_messages", real_read)
+    response = client.get("/api/rooms/nope/messages")
+    assert response.status_code == 404
+    assert response.json()["detail"]["error"] == "room_not_found"
+
+
 def test_an_active_member_scope_reads_the_room(client, engine, svc):
     manager = client.manager
     seed_instance(engine, "owner-1", None, "idle")

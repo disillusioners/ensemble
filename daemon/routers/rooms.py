@@ -52,6 +52,20 @@ THE ERROR VOCABULARY (closed)
 fail there before the handler) · ``401`` (the auth middleware) ·
 ``403 SCOPE_INSUFFICIENT`` · ``404 instance_not_found`` / ``404
 room_not_found`` · ``503 room_service_unavailable``.
+
+INFRA faults stay inside this closed vocabulary (A-P6-25, the M3
+adjudication): a faulting room-service call is WRAPPED into the typed
+envelope instead of escaping to the global exception handler (whose
+``{code: INTERNAL_ERROR, message: str(exc)}`` body is the wrong shape
+for this surface AND leaks raw fault text to the client — the
+security note). The mapping: a faulted room-LIST or room-LOG read
+answers ``503 room_service_unavailable`` with a GENERIC message (the
+service is present but faulted — retryable); a faulted room
+RESOLUTION answers ``404 room_not_found`` — the SAME fail-closed
+not-found the SSE lane's room-resolution pre-branch answers on a
+broken read (A-P6-11 family: an unresolvable room is never
+distinguished from an absent one on the wire). Fault details go to
+the server log, never into a response body.
 """
 
 from __future__ import annotations
@@ -159,7 +173,24 @@ async def list_instance_rooms(instance_id: str, request: Request) -> dict:
             f"Instance not found: {instance_id}",
         )
 
-    rooms = await room_service.list_rooms_for_tree(tree_root)
+    # The tree's rooms. INFRA-FAULT WRAP (A-P6-25, M3): a faulting
+    # list is answered in the typed envelope — never a raw escape to
+    # the global 500 handler (wrong body shape + fault text to the
+    # client). The room service is PRESENT but faulted ⇒ 503
+    # (retryable), message generic, detail server-side only.
+    try:
+        rooms = await room_service.list_rooms_for_tree(tree_root)
+    except Exception as exc:  # noqa: BLE001 — infra faults stay typed (M3)
+        logger.warning(
+            "room list: listing rooms for tree=%s failed (%r)",
+            tree_root,
+            exc,
+        )
+        raise _err(
+            503,
+            _ERR_ROOM_SERVICE_UNAVAILABLE,
+            "the room list could not be read right now",
+        ) from exc
     return {
         "rooms": [
             {
@@ -216,8 +247,22 @@ async def read_room_messages(
     window = min(window, ROOM_READ_MAX_LIMIT)
 
     # A PURGED room is NONEXISTENT (R2) — the same typed not-found the
-    # agent's read tool answers with.
-    room = await room_service.get_room(room_id)
+    # agent's read tool answers with. INFRA-FAULT WRAP (A-P6-25, M3):
+    # a faulted RESOLUTION answers the SAME fail-closed 404 the SSE
+    # lane's room-resolution pre-branch answers on a broken read
+    # (A-P6-11 family) — an unresolvable room is never distinguished
+    # from an absent one on the wire; the fault detail is server-side.
+    try:
+        room = await room_service.get_room(room_id)
+    except Exception as exc:  # noqa: BLE001 — infra faults stay typed (M3)
+        logger.warning(
+            "room read: resolving room=%s failed (%r)",
+            room_id,
+            exc,
+        )
+        raise _err(
+            404, _ERR_ROOM_NOT_FOUND, f"room not found: {room_id}"
+        ) from exc
     if room is None:
         raise _err(
             404, _ERR_ROOM_NOT_FOUND, f"room not found: {room_id}"
@@ -246,6 +291,20 @@ async def read_room_messages(
             _ERR_ROOM_NOT_FOUND,
             f"room not found for the requested scope: {room_id}",
         )
+    except Exception as exc:  # noqa: BLE001 — infra faults stay typed (M3)
+        # The room EXISTS (resolved above) — a faulted LOG read is a
+        # present-but-faulted service ⇒ 503 (retryable), generic
+        # message, detail server-side only (A-P6-25, M3).
+        logger.warning(
+            "room read: reading the log of room=%s failed (%r)",
+            room_id,
+            exc,
+        )
+        raise _err(
+            503,
+            _ERR_ROOM_SERVICE_UNAVAILABLE,
+            "the room log could not be read right now",
+        ) from exc
 
     has_more = len(rows) > window
     window_rows = rows[:window]
