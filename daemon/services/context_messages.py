@@ -171,6 +171,63 @@ CONTEXT_KIND_POK = "pok"
 # SEPARATE, parallel, stamped context message — it never touches the alarm
 # template or the wake message's kwargs.
 CONTEXT_KIND_MEMOIR_REFRESH = "memoir_refresh"
+
+# Agent group chat P5 (2026-11-16): the JOINED-ROOM block kind. The
+# "system message = guidelines + short digest ONLY; full history behind
+# the read tool" ruling (architecture §5) — this block IS that system
+# message: the working guidelines, the member's OWN NAME (self-
+# recognition for @tag), the roster (incl. the owner) and a SHORT
+# digest (last-N + unread count). NEVER the full history.
+#
+# Stable message id ``joined_room:{instance_id}`` — one block per
+# instance; ``add_messages`` supersedes it in place on every turn, so
+# the digest is always FRESH and never accumulates. Stamping
+# ``context_kind`` lands the block in the truthy-keyed compaction hoist
+# bucket (``daemon/_content_hardening.py`` → ``is_hoisted_injected``),
+# so it survives every later compaction VERBATIM with zero new
+# compaction plumbing.
+#
+# The guidelines TEXT is a STATIC CONSTANT in this module — NEVER an
+# agents/*.md file. The prompt-artifact baseline (agents/*.md is
+# DB-versioned and prompt-sealed) must not move for this feature
+# (RK-8), and a static constant keeps the block's content versioned
+# with the CODE that renders it.
+CONTEXT_KIND_JOINED_ROOM = "joined_room"
+
+#: The room digest's soft cap (architecture §5 — "Caps ≤2000 soft /
+#: 4000 hard"). The digest is the RECENT slice, never the history.
+ROOM_DIGEST_MAX_CHARS = 2000
+#: The whole joined-room block's hard cap.
+ROOM_BLOCK_MAX_CHARS = 4000
+#: The roster section's cap (architecture §5 — "roster incl. owner
+#: ≤600").
+ROOM_ROSTER_MAX_CHARS = 600
+#: How many recent messages the digest carries (architecture §5 — "digest
+#: last-3").
+ROOM_DIGEST_LAST_N = 3
+#: How many characters of a single message body the digest keeps.
+ROOM_DIGEST_LINE_MAX_CHARS = 160
+
+#: THE WORKING GUIDELINES — a STATIC CONSTANT, never an agents/*.md file.
+#:
+#: The text is the COST DISCIPLINE: the team works at milestone
+#: granularity, not as a stream of consciousness (RK-3 — push-bloat is
+#: the top risk; the digest + the read tool are the pull-first
+#: surface). It also carries the warm-join steer (a member joining
+#: mid-flight gets oriented by the roster + digest, not by a wall of
+#: history) and the addressing convention (``@`` interrupts, ``to:``
+#: routes) that §4.4 makes load-bearing.
+ROOM_GUIDELINES_TEXT = (
+    "How this team works: report MILESTONES, not a stream of "
+    "consciousness — one post per milestone, with what changed, what "
+    "you need, and what you are doing next. @name INTERRUPTS a "
+    "teammate (use it only when the work genuinely needs them now); "
+    "to: name ROUTES to them (they see it in their next digest, it "
+    "never interrupts). Address teammates by their room name — the "
+    "roster below carries your own name so you can spot a message "
+    "aimed at you. The full history stays behind room_read; read it "
+    "when you need detail, do not paste it back into the room."
+)
 _AMBIENT_KV_FRESH: bool | None = None
 _AMBIENT_KV_FRESH_BOOT_LOG_EMITTED = False
 
@@ -847,6 +904,165 @@ async def _maybe_pok_context_message(
         return None
 
 
+# ── JOINED-ROOM block (agent group chat P5) ──────────────────────────────
+#
+# The "system message = guidelines + short digest ONLY; full history
+# behind the read tool" ruling (architecture §5). The builder renders
+# FOUR things, in this order:
+#
+#   1. the member's OWN NAME FIRST (Ruling B — self-recognition: the
+#      member must be able to spot a message aimed at it);
+#   2. the guidelines (the STATIC CONSTANT above — milestone-level
+#      messaging, the warm-join steer, the addressing convention);
+#   3. the roster, INCLUDING the owner (≤600 chars);
+#   4. the digest — last-N messages + the unread count (≤2000 chars,
+#      NEVER the full history).
+#
+# The whole block is capped at 4000 chars (the hard cap). Every DB
+# touch is OFF-LOOP (``asyncio.to_thread`` — the v0.27.14 event-loop
+# discipline); the builder never raises (a room-store failure degrades
+# to NO block, never to a broken turn).
+
+
+def _render_joined_room_block(
+    *,
+    room: dict[str, Any],
+    own_name: str,
+    roster: list[dict[str, Any]],
+    digest_lines: list[str],
+    unread: int,
+) -> str:
+    """Render the joined-room block body (pure — unit-testable)."""
+    banner = (
+        f'[TEAM ROOM] "{room.get("name") or room.get("room_id")}" — '
+        f"your name in this room: {own_name}"
+    )
+    roster_bits = []
+    for member in roster:
+        name = member.get("member_name")
+        role = member.get("role")
+        marker = " (owner)" if role == "owner" else ""
+        roster_bits.append(f"{name}{marker}")
+    roster_line = "ROSTER: " + ", ".join(roster_bits) if roster_bits else "ROSTER: (you are alone)"
+    if len(roster_line) > ROOM_ROSTER_MAX_CHARS:
+        roster_line = roster_line[: ROOM_ROSTER_MAX_CHARS - 3] + "..."
+    digest_header = f"RECENT (last {len(digest_lines)} · unread {unread}):"
+    digest_body = "\n".join(digest_lines) if digest_lines else "(nothing posted yet)"
+    digest = f"{digest_header}\n{digest_body}"
+    if len(digest) > ROOM_DIGEST_MAX_CHARS:
+        digest = digest[: ROOM_DIGEST_MAX_CHARS - 3] + "..."
+    body = (
+        f"{banner}\n"
+        f"{ROOM_GUIDELINES_TEXT}\n"
+        f"{roster_line}\n"
+        f"{digest}"
+    )
+    if len(body) > ROOM_BLOCK_MAX_CHARS:
+        body = body[: ROOM_BLOCK_MAX_CHARS - 3] + "..."
+    return body
+
+
+async def build_joined_room_context_message(
+    instance_id: str,
+    manager: Any,
+) -> HumanMessage | None:
+    """Build the JOINED-ROOM block for one instance (or ``None``).
+
+    ``None`` when the instance is not an ACTIVE member of any room (the
+    common case — most instances never join a room) or when the room
+    substrate is not wired on this daemon.
+
+    The stable id ``joined_room:{instance_id}`` makes ``add_messages``
+    SUPERSEDE the previous block in place: exactly ONE joined-room
+    block per instance, refreshed every turn (the digest is never
+    stale, and the block never accumulates).
+    """
+    room_service = getattr(manager, "_room_chat_service", None)
+    if room_service is None:
+        return None
+    try:
+        memberships = await room_service.list_member_rooms(
+            instance_id, active_only=True
+        )
+    except Exception as exc:  # noqa: BLE001 — never-raise
+        logger.warning(
+            "[ContextMessages] joined-room membership read failed for "
+            f"{instance_id[:8]}...: {exc} — no block"
+        )
+        return None
+    if not memberships:
+        return None
+
+    sections: list[str] = []
+    for membership in memberships:
+        room_id = membership.get("room_id")
+        own_name = str(membership.get("member_name") or "")
+        try:
+            room = await room_service.get_room(room_id)
+            if room is None:
+                # Purged rooms are NONEXISTENT (R2) — skip silently.
+                continue
+            roster = await room_service.list_members(
+                room_id, caller_instance_id=instance_id, active_only=True
+            )
+            unread = await room_service.unread_count(
+                room_id, caller_instance_id=instance_id
+            )
+            # The digest is the LAST N rows — read them by the room's
+            # denormalized ``message_count`` (bumped in the SAME
+            # transaction as every append, so it IS the latest seq:
+            # one append = one row = one seq). The counter is what the
+            # digest reads instead of a COUNT(*) over the log (the
+            # denormalized-counter discipline).
+            message_count = int(room.get("message_count") or 0)
+            tail_from = max(message_count - ROOM_DIGEST_LAST_N, 0)
+            messages = await room_service.read_messages(
+                room_id,
+                caller_instance_id=instance_id,
+                after_seq=tail_from,
+                limit=ROOM_DIGEST_LAST_N,
+            )
+        except Exception as exc:  # noqa: BLE001 — never-raise, per-room isolation
+            logger.warning(
+                "[ContextMessages] joined-room read failed for room "
+                f"{room_id}: {exc} — room skipped"
+            )
+            continue
+        recent = list(messages)[-ROOM_DIGEST_LAST_N:]
+        digest_lines = []
+        for message in recent:
+            author = message.get("author_name")
+            seq = message.get("seq")
+            text = str(message.get("text") or "").replace("\n", " ").strip()
+            if len(text) > ROOM_DIGEST_LINE_MAX_CHARS:
+                text = text[: ROOM_DIGEST_LINE_MAX_CHARS - 3] + "..."
+            digest_lines.append(
+                f"- {author} (seq {seq}): {escape_for_context_block(text)}"
+            )
+        sections.append(
+            _render_joined_room_block(
+                room=room,
+                own_name=own_name,
+                roster=roster,
+                digest_lines=digest_lines,
+                unread=int(unread or 0),
+            )
+        )
+
+    if not sections:
+        return None
+    body = "\n\n".join(sections)
+    if len(body) > ROOM_BLOCK_MAX_CHARS:
+        body = body[: ROOM_BLOCK_MAX_CHARS - 3] + "..."
+    return _make_context_message(
+        CONTEXT_KIND_JOINED_ROOM,
+        "Team Room",
+        body,
+        id_=_stable_id_for("joined_room", instance_id=instance_id),
+        source="joined_room",
+    )
+
+
 def _read_instance_metadata(repo: Any, instance_id: str, key: str) -> Any:
     """Off-loop instance-metadata read (the memoir flag-read shape)."""
     row = repo.get(instance_id)
@@ -996,6 +1212,18 @@ def _stable_id_for(
                 "_stable_id_for('memoir_refresh') requires instance_id"
             )
         return f"memoir_refresh:{instance_id}"
+    if kind == "joined_room":
+        # Agent group chat P5 (2026-11-16): the joined-room block is
+        # keyed per INSTANCE — one block per member, superseded in place
+        # by ``add_messages`` on every turn (the digest is always
+        # FRESH; the block never accumulates). The suffix is the
+        # instance, so two members of the SAME room get SEPARATE blocks
+        # (each carries its own name + roster view + unread count).
+        if not instance_id:
+            raise ValueError(
+                "_stable_id_for('joined_room') requires instance_id"
+            )
+        return f"joined_room:{instance_id}"
     if kind == "pok":
         # POK Phase 1 (2026-11-07): the operating-knowledge block is
         # keyed per PROJECT — the audience dimension varies the
@@ -2807,6 +3035,20 @@ async def assemble_context_messages(
         )
         if pok_refresh_msg is not None:
             persistent_after_inject.append(pok_refresh_msg)
+
+        # ── JOINED-ROOM block (agent group chat P5) — PERSISTENT, every turn ──
+        # The "system message = guidelines + short digest ONLY; full
+        # history behind the read tool" ruling (architecture §5). The
+        # stable id ``joined_room:{instance_id}`` supersedes the prior
+        # block IN PLACE, so there is exactly ONE joined-room block per
+        # instance and its digest is FRESH every turn (it never
+        # accumulates). No block when the instance is not a room member
+        # (the common case).
+        joined_room_msg = await build_joined_room_context_message(
+            instance_id=instance_id, manager=manager
+        )
+        if joined_room_msg is not None:
+            persistent_after_inject.append(joined_room_msg)
         return (persistent_after_inject, [])
 
     persistent_msgs: list[HumanMessage] = []
@@ -3168,6 +3410,18 @@ async def assemble_context_messages(
     if refresh_msg is not None:
         persistent_msgs.append(refresh_msg)
 
+    # ── 7. JOINED-ROOM block (agent group chat P5) — every turn ──────────
+    # The turn-1 path emits it too (the guidelines + the member's own
+    # name must be in the FIRST system message a joined member sees —
+    # that is the whole point of the "system message = guidelines +
+    # short digest" ruling). The stable id supersedes the prior block
+    # in place, so there is exactly ONE joined-room block per instance.
+    joined_room_msg = await build_joined_room_context_message(
+        instance_id=instance_id, manager=manager
+    )
+    if joined_room_msg is not None:
+        persistent_msgs.append(joined_room_msg)
+
     return (persistent_msgs, ephemeral_msgs)
 
 
@@ -3189,6 +3443,14 @@ __all__ = [
     "MEMOIR_REFRESH_BLOCK_TITLE",
     "MEMOIR_REFRESH_SOURCE",
     "CONTEXT_KIND_POK",
+    # Agent group chat P5 — the joined-room block
+    "CONTEXT_KIND_JOINED_ROOM",
+    "ROOM_GUIDELINES_TEXT",
+    "ROOM_DIGEST_MAX_CHARS",
+    "ROOM_BLOCK_MAX_CHARS",
+    "ROOM_ROSTER_MAX_CHARS",
+    "ROOM_DIGEST_LAST_N",
+    "build_joined_room_context_message",
     "POK_INJECTION_FLAG",
     "SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS",
     # Pure builder functions
