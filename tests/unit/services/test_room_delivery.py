@@ -214,6 +214,63 @@ def test_unresolvable_left_post_succeeds(stack):
     } in res["warnings"]
 
 
+def test_every_router_warning_branch_mints_the_same_shape(stack):
+    """M1: the router's warning shape is UNIFORM across its branches.
+
+    The room-not-found branch used to return a BARE STRING
+    ("room not found") while every sibling branch returned the
+    structured ``{"kind", "name", "reason"}`` map the router's own
+    docstring publishes (A-P5-5) — a dict-consuming caller raised
+    on the string. The pin asserts the KEY SET is identical across
+    the not-found branch and the resolver's unresolvable branch, and
+    that no branch mints a bare string.
+    """
+    engine, repo, svc, room_id, caller = stack
+    manager = _make_manager(engine, svc, live_graph=True)
+    delivery = RoomDeliveryService(manager, svc)
+
+    async def run_not_found():
+        return await delivery.route_post(
+            room_id="room-does-not-exist",
+            post={
+                "author_instance_id": caller,
+                "author_name": "lead",
+                "seq": 1,
+                "tagged_members": [],
+                "addressed_members": [],
+            },
+        )
+
+    async def run_unresolved():
+        post = await svc.append_message(
+            room_id=room_id, author_instance_id=caller, author_name="lead",
+            text_body="hi", tagged_members=[], addressed_members=["nope-not-a-member"],
+        )
+        return await delivery.route_post(room_id=room_id, post=post)
+
+    not_found = asyncio.run(run_not_found())
+    unresolved = asyncio.run(run_unresolved())
+
+    for res in (not_found, unresolved):
+        assert res["warnings"], res
+        for warning in res["warnings"]:
+            assert isinstance(warning, dict), (
+                f"a bare-string warning breaks a dict consumer: {warning!r}"
+            )
+
+    not_found_warning = not_found["warnings"][0]
+    unresolved_warning = next(
+        w for w in unresolved["warnings"] if w["name"] == "nope-not-a-member"
+    )
+    # The SHAPE-EQUALITY pin: the same key set on both branches.
+    assert set(not_found_warning) == set(unresolved_warning) == {
+        "kind", "name", "reason",
+    }
+    assert not_found_warning["kind"] == "room"
+    assert not_found_warning["name"] == "room-does-not-exist"
+    assert not_found_warning["reason"] == "room-not-found"
+
+
 def test_dedup_no_duplicate_proposal(stack):
     engine, repo, svc, room_id, caller = stack
     with Session(engine) as s:

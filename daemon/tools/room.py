@@ -123,6 +123,11 @@ ROOM_TOOLS: tuple[str, ...] = (
 TOKEN_UNKNOWN_AGENT = "unknown-agent"
 TOKEN_NOT_AUTHORIZED = "not-authorized"
 TOKEN_NO_ROOM_SERVICE = "room-service-unavailable"
+#: The DELIVERY (routing) service token — DISTINCT from the room
+#: service's: a daemon can carry the room service and NOT the
+#: delivery service, and a refusal must never name the wrong
+#: component.
+TOKEN_NO_DELIVERY_SERVICE = "delivery-service-unavailable"
 TOKEN_NOT_A_MEMBER = "not-a-member"
 TOKEN_ROOM_NOT_FOUND = "room-not-found"
 TOKEN_ROOM_CLOSED = "room-closed"
@@ -523,7 +528,7 @@ def create_room_tools(
             resolved_addressed, addr_warnings = resolve_room_targets(
                 roster, addressed_names, kind="addressed"
             )
-            warnings = list(tag_warnings) + list(addr_warnings)
+            warnings: list[dict[str, str]] = list(tag_warnings) + list(addr_warnings)
             # The RESOLVED names persist (architecture §4.4); the
             # UNRESOLVED ones persist as the durable warning set
             # (A-P3-16) — the row carries both, machine-shaped and
@@ -574,6 +579,22 @@ def create_room_tools(
                         "addressed_outcomes": [],
                         "routing_error": True,
                     }
+            else:
+                # NO ROUTER: the post LANDED (the append above is the
+                # durable truth — P3's boot re-derivation recovers the
+                # undelivered tagged rows) but the routing NEVER RAN.
+                # The old shape reported routing_error=false, so the
+                # agent could not tell "nobody to notify" from "the
+                # router is not there". Refusing here would negate an
+                # already-persisted row (dishonest the other way), so
+                # the honest signal is the error flag + the reason
+                # token (A-P5-16).
+                routing = {
+                    "tag_outcomes": [],
+                    "addressed_outcomes": [],
+                    "routing_error": True,
+                    "routing_reason": TOKEN_NO_DELIVERY_SERVICE,
+                }
             return json.dumps(
                 {
                     "seq": appended.get("seq"),
@@ -585,6 +606,7 @@ def create_room_tools(
                     "tag_outcomes": routing.get("tag_outcomes", []),
                     "addressed_outcomes": routing.get("addressed_outcomes", []),
                     "routing_error": bool(routing.get("routing_error")),
+                    "routing_reason": routing.get("routing_reason") or "",
                 },
                 indent=2,
             )
@@ -725,11 +747,22 @@ def create_room_tools(
             )
         room_service = _room_service(manager)
         delivery = _delivery_service(manager)
-        if room_service is None or delivery is None:
+        # TWO services, TWO refusals: a daemon can carry the room
+        # service and NOT the delivery (routing) service. The old
+        # single check named the ROOM service for BOTH cases — the
+        # message told the agent the wrong component was missing.
+        if room_service is None:
             return _refusal(
                 "room_task_decision",
                 TOKEN_NO_ROOM_SERVICE,
                 "the chat-room service is not available in this daemon",
+            )
+        if delivery is None:
+            return _refusal(
+                "room_task_decision",
+                TOKEN_NO_DELIVERY_SERVICE,
+                "the chat-room delivery (routing) service is not "
+                "available in this daemon",
             )
         if not (decision or "").strip():
             return _refusal(

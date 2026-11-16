@@ -234,6 +234,53 @@ def test_room_post_routes_through_the_delivery_service(stack):
     assert payload["tag_outcomes"][0]["member_name"] == "worker"
 
 
+def test_room_post_without_a_delivery_service_persists_and_flags_the_gap(stack):
+    """M2: an ABSENT delivery router is a TRUTHFUL signal.
+
+    The append is the durable truth — the row is committed BEFORE the
+    routing call, so the tool can never refuse the post here (that
+    would negate an already-persisted row). The honest signal is
+    ``routing_error: true`` PLUS the reason token naming the absent
+    router, so the agent can tell "the routing never ran" from
+    "there was nobody to notify" (the old shape reported
+    ``routing_error: false`` for both).
+    """
+    engine, repo, svc, room_id, owner = stack
+    manager = _manager(engine, svc)
+    manager._room_delivery_service = None
+    tools = _tools(manager, owner)
+    raw = _call(
+        tools["room_post"].ainvoke(
+            {"room_id": room_id, "text": "ping", "tagged": ["worker"]}
+        )
+    )
+    payload = json.loads(raw)
+    assert payload["routing_error"] is True, payload
+    assert payload["routing_reason"] == "delivery-service-unavailable", payload
+    # The post LANDED — the append is the durable truth (the boot
+    # re-derivation recovers the undelivered tagged rows).
+    with Session(engine) as s:
+        rows = list(s.exec(select(RoomMessage)).all())
+        assert len(rows) == 1, rows
+        assert rows[0].text == "ping"
+
+
+def test_room_post_with_a_delivery_service_reports_no_routing_error(stack):
+    """The router-present path is UNCHANGED: no error, no reason."""
+    engine, repo, svc, room_id, owner = stack
+    manager = _manager(engine, svc)
+    tools = _tools(manager, owner)
+    raw = _call(
+        tools["room_post"].ainvoke(
+            {"room_id": room_id, "text": "ping", "tagged": ["worker"]}
+        )
+    )
+    payload = json.loads(raw)
+    assert payload["routing_error"] is False, payload
+    assert payload["routing_reason"] == "", payload
+    assert payload["tag_outcomes"], payload
+
+
 # ── room_read ──────────────────────────────────────────────────────────
 
 
@@ -369,6 +416,51 @@ def test_room_task_decision_refuses_an_unknown_proposal(stack):
     )
     assert raw.startswith("Error:"), raw
     assert "no-such-proposal" in raw, raw
+
+
+def test_room_task_decision_without_the_room_service_names_the_room_service(stack):
+    """M5: each missing service names ITSELF.
+
+    The two services are independent (a daemon can carry the room
+    service and NOT the delivery/routing service), so the refusal
+    token must match the component that is actually missing — and
+    must NEVER name the other one.
+    """
+    engine, _repo, svc, room_id, owner = stack
+    manager = _manager(engine, svc)
+    manager._room_chat_service = None
+    tools = _tools(manager, owner)
+    raw = _call(
+        tools["room_task_decision"].ainvoke(
+            {"room_id": room_id, "proposal_seq": 1, "decision": "revive"}
+        )
+    )
+    assert raw.startswith("Error:"), raw
+    assert "room-service-unavailable" in raw, raw
+    assert "delivery-service-unavailable" not in raw, raw
+
+
+def test_room_task_decision_without_the_delivery_service_names_the_delivery_service(
+    stack,
+):
+    """M5: the delivery/routing service has its OWN token + message.
+
+    The pre-fix shape refused with the ROOM service's token and text
+    even when only the delivery service was missing — the agent was
+    told the wrong component was gone.
+    """
+    engine, _repo, svc, room_id, owner = stack
+    manager = _manager(engine, svc)
+    manager._room_delivery_service = None
+    tools = _tools(manager, owner)
+    raw = _call(
+        tools["room_task_decision"].ainvoke(
+            {"room_id": room_id, "proposal_seq": 1, "decision": "revive"}
+        )
+    )
+    assert raw.startswith("Error:"), raw
+    assert "delivery-service-unavailable" in raw, raw
+    assert "room-service-unavailable" not in raw, raw
 
 
 # ── P5 review re-gate pins (2026-11-16) ───────────────────────────────

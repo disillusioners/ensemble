@@ -65,6 +65,10 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "LANE_B_CAS_ALLOWED",
     "RESOLUTION_WARNING_UNRESOLVABLE",
+    "ROUTING_WARNING_KIND_POST",
+    "ROUTING_WARNING_KIND_ROOM",
+    "ROUTING_WARNING_NO_AUTHOR",
+    "ROUTING_WARNING_ROOM_NOT_FOUND",
     "RoomDeliveryService",
     "resolve_room_targets",
 ]
@@ -103,6 +107,17 @@ _TRIGGER_DECISION = "decision"
 #: The resolution-warning reason vocabulary (A-P3-16). A closed set:
 #: every warning the resolver can mint names one of these.
 RESOLUTION_WARNING_UNRESOLVABLE = "unresolvable"
+
+#: The ROUTER-warning KIND vocabulary (closed). Every warning the
+#: router mints OUTSIDE the resolver names one of these; the
+#: resolver's own kinds are ``"tag"`` / ``"addressed"`` (the
+#: ``kind`` argument of :func:`resolve_room_targets`).
+ROUTING_WARNING_KIND_ROOM = "room"
+ROUTING_WARNING_KIND_POST = "post"
+
+#: The ROUTER-warning REASON vocabulary (closed).
+ROUTING_WARNING_ROOM_NOT_FOUND = "room-not-found"
+ROUTING_WARNING_NO_AUTHOR = "no-author"
 
 
 def _is_uuid_like(name: str) -> bool:
@@ -221,6 +236,12 @@ class RoomDeliveryService:
             "addressed_outcomes": [{"member_name", "instance_id", "outcome"}, ...],
             "warnings": [{"kind", "name", "reason"}, ...],
           }
+
+        EVERY branch mints the SAME warning shape — the router's own
+        branches (no-author / room-not-found) and the resolver's
+        (unresolvable) alike. A bare string is NEVER a warning: a
+        dict-consuming caller would raise on it, and the shape is
+        the router's published contract (A-P5-5).
         """
         sender_instance_id = str(post.get("author_instance_id") or "")
         sender_member_name = str(post.get("author_name") or "")
@@ -232,15 +253,27 @@ class RoomDeliveryService:
                 "addressed_outcomes": [],
                 "warnings": [
                     {
-                        "kind": "post",
+                        "kind": ROUTING_WARNING_KIND_POST,
                         "name": "",
-                        "reason": "no-author",
+                        "reason": ROUTING_WARNING_NO_AUTHOR,
                     }
                 ],
             }
         room = await self._room.get_room(room_id)
         if room is None:
-            return {"tag_outcomes": [], "addressed_outcomes": [], "warnings": ["room not found"]}
+            # The room is gone (purged). The SAME structured warning
+            # shape as every other branch — never a bare string.
+            return {
+                "tag_outcomes": [],
+                "addressed_outcomes": [],
+                "warnings": [
+                    {
+                        "kind": ROUTING_WARNING_KIND_ROOM,
+                        "name": room_id,
+                        "reason": ROUTING_WARNING_ROOM_NOT_FOUND,
+                    }
+                ],
+            }
         members = await self._room.list_members(
             room_id, caller_instance_id=sender_instance_id, active_only=True
         )
@@ -252,7 +285,7 @@ class RoomDeliveryService:
         tagged_resolved, tag_warnings = resolve_room_targets(
             members, tagged_raw, kind="tag"
         )
-        warnings: list[Any] = list(tag_warnings)
+        warnings: list[dict[str, str]] = list(tag_warnings)
 
         # Resolve addressed (unresolvable / non-member / LEFT → warning, skip).
         addressed_resolved, addr_warnings = resolve_room_targets(
