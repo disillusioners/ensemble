@@ -3,6 +3,7 @@ import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { MAT_DIALOG_DATA, MatDialogRef } from '@angular/material/dialog';
 import { RoomDialogComponent } from './room-dialog.component';
+import { RoomService } from '../../services/room.service';
 
 /**
  * Behaviour spec for the P6 chatrooms modal.
@@ -258,7 +259,8 @@ describe('RoomDialogComponent', () => {
     fixture.detectChanges();
     // The component's own load is request A; the explicit reload below is
     // request B — A's response lands LAST and must be dropped.
-    component['roomService'].loadRooms('inst-1');
+    const roomService = TestBed.inject(RoomService);
+    roomService.loadRooms('inst-1');
 
     const [stale, fresh] = httpMock.match(ROOMS_URL);
     expect(stale).toBeTruthy();

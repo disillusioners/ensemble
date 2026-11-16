@@ -6,6 +6,10 @@ named mutation leg. Fixture is live-sized (phase4 §6): 100 scheduler
 rows around the 14d boundary (incl. 10 rows <24h), 3 chat rows incl.
 the ``enabled=true, status='stopped'`` trap, 110 executions, 100
 mappings 1:1 + ~3 chat-source mappings (W5/P21, incl. one >30d).
+
+Why this file is large (~1,198 lines): the P1-P21 pins are
+self-contained legs over one live-sized fixture harness — the pins
+share the fixture, so they stay in one module.
 """
 
 from __future__ import annotations

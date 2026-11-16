@@ -41,6 +41,7 @@ __all__ = [
     "count_rows",
     "make_room",
     "seed_raw_room",
+    "resolve_tree_root_id",
     "_make_spawn_sim",
 ]
 
@@ -230,3 +231,26 @@ def _make_spawn_sim(
         return iid, None
 
     return _sim
+
+
+def resolve_tree_root_id(engine: Engine, instance_id: str) -> str | None:
+    """Walk the parent chain to the tree root (the room scope anchor).
+
+    The SHARED walk behind the room lanes' local ``_InstanceRepo``
+    doubles — the pilot scenario and the HTTP API tests delegate here
+    (P6 tidier T5; disclosed out-of-range canonical home, the
+    room-harness P5 precedent). Behavior is byte-identical to the
+    walks it replaced: an unknown id ⇒ ``None``; a broken parent link
+    stops the walk at the deepest reachable row.
+    """
+    with Session(engine) as s:
+        row = s.get(Instance, instance_id)
+        if row is None:
+            return None
+        current = row
+        while current.parent_id:
+            parent = s.get(Instance, current.parent_id)
+            if parent is None:
+                break
+            current = parent
+        return current.instance_id

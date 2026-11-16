@@ -41,13 +41,14 @@ from sqlmodel import Session
 import daemon.repositories.event.models  # noqa: F401
 import daemon.repositories.instance.models  # noqa: F401
 from daemon.repositories.instance.models import Instance
-from daemon.repositories.room.models import ChatRoom
+from daemon.repositories.room.models import ChatRoom, ChatRoomMember
 from daemon.repositories.room.service import RoomChatService
 from daemon.routers.rooms import router as rooms_router
 from tests.helpers.room_harness import (
     join_member,
     make_room,
     make_room_engine,
+    resolve_tree_root_id,
     seed_instance,
 )
 
@@ -107,17 +108,7 @@ class _InstanceRepo:
         self._engine = engine
 
     def get_tree_root_id(self, instance_id: str) -> str | None:
-        with Session(self._engine) as s:
-            row = s.get(Instance, instance_id)
-            if row is None:
-                return None
-            current = row
-            while current.parent_id:
-                parent = s.get(Instance, current.parent_id)
-                if parent is None:
-                    break
-                current = parent
-            return current.instance_id
+        return resolve_tree_root_id(self._engine, instance_id)
 
 
 @pytest.fixture
@@ -213,8 +204,6 @@ def test_the_member_count_counts_the_active_roster_only(client, engine, svc):
     join_member(engine, room_id, "child-2", "worker-2")
     # A LEFT row is retired — it is not a member of the room.
     with Session(engine) as s:
-        from daemon.repositories.room.models import ChatRoomMember
-
         member = s.get(ChatRoomMember, (room_id, "child-2"))
         member.state = "left"
         s.commit()

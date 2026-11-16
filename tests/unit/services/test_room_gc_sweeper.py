@@ -435,3 +435,52 @@ async def test_the_sweeper_is_a_no_op_without_the_room_service(engine):
     summary = await _sweeper(manager).sweep(dry_run=False)
     assert summary["unavailable"] is True
     assert summary["purged"] == []
+
+
+# ---------------------------------------------------------------------------
+# Per-room purge-failure isolation (P6 tidier T7)
+# ---------------------------------------------------------------------------
+
+
+async def test_one_room_purge_failure_lands_in_the_errors_channel(
+    engine, service, monkeypatch
+):
+    """Two candidates; ``purge_room`` raises for EXACTLY one of them.
+
+    The sweep must still purge the OTHER room (one room's failure never
+    stops the rest — the fail-open posture) and report the failure on
+    the ``errors`` channel carrying the room_id/trigger/error keys.
+    """
+    seed_instance(engine, "owner-1")
+    boom_id = make_room(
+        service._repo, tree_root="owner-1", owner="owner-1", name="boom-room"
+    )
+    other_id = make_room(
+        service._repo, tree_root="owner-1", owner="owner-1", name="other-room"
+    )
+    for room_id in (boom_id, other_id):
+        _set_room_times(
+            engine,
+            room_id,
+            state="closed",
+            closed_at=_iso(days=ROOM_GC_CLOSE_AGE_DAYS + 1),
+        )
+
+    real_purge = service.purge_room
+
+    async def _purge_or_boom(room_id, reason=None):
+        if room_id == boom_id:
+            raise RuntimeError("purge boom")
+        return await real_purge(room_id, reason=reason)
+
+    monkeypatch.setattr(service, "purge_room", _purge_or_boom)
+
+    summary = await _sweeper(_manager(engine, service)).sweep(dry_run=False)
+    assert summary["purged"] == [other_id]
+    assert len(summary["errors"]) == 1
+    error = summary["errors"][0]
+    assert error["room_id"] == boom_id
+    assert error["trigger"] == "p_close"
+    assert "purge boom" in error["error"]
+    # The failed room still exists — its purge failed, no partial state.
+    assert service._repo.get_room(boom_id) is not None

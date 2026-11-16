@@ -63,6 +63,7 @@ import sys
 import tempfile
 import time
 import traceback
+from typing import Any
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -127,12 +128,14 @@ from daemon.services.joined_room_context import (  # noqa: E402
 from daemon.services.room_delivery import RoomDeliveryService  # noqa: E402
 from daemon.services.room_nudge import RoomNudgeCoordinator  # noqa: E402
 from daemon.services.room_post_cap import RoomPostTurnCap  # noqa: E402
+from daemon.routers.messages import _resolve_sse_target  # noqa: E402
 from daemon.tools.room import create_room_tools  # noqa: E402
 from sqlmodel import Session, select  # noqa: E402
 
 from tests.helpers.room_harness import (  # noqa: E402
     join_member,
     make_room_engine,
+    resolve_tree_root_id,
     seed_instance,
 )
 
@@ -151,7 +154,6 @@ NAMES = {
 
 SCRIPT_START = time.monotonic()
 SCENARIO_RESULTS: dict[str, str] = {}
-SCENARIO_DETAILS: dict[str, dict] = {}
 
 
 def elapsed() -> float:
@@ -163,9 +165,8 @@ def stamp(msg: str) -> None:
     sys.stdout.flush()
 
 
-def record(check: str, ok: bool, detail: dict) -> None:
+def record(check: str, ok: bool, detail: dict[str, Any]) -> None:
     SCENARIO_RESULTS[check] = "PASS" if ok else "FAIL"
-    SCENARIO_DETAILS[check] = detail
     stamp(f"{check}: {'PASS' if ok else 'FAIL'} — {detail}")
 
 
@@ -176,20 +177,10 @@ class _InstanceRepo:
         self._engine = engine
 
     def get_tree_root_id(self, instance_id: str) -> str | None:
-        with Session(self._engine) as s:
-            row = s.get(Instance, instance_id)
-            if row is None:
-                return None
-            current = row
-            while current.parent_id:
-                parent = s.get(Instance, current.parent_id)
-                if parent is None:
-                    break
-                current = parent
-            return current.instance_id
+        return resolve_tree_root_id(self._engine, instance_id)
 
 
-def _build_manager(engine, svc):
+def _build_manager(engine: Any, svc: Any):
     """The manager stub — the seams the room surfaces touch.
 
     The DELIVERY SINKS are spies (the parent injection / enqueue), so
@@ -224,7 +215,7 @@ def _build_manager(engine, svc):
     return manager
 
 
-def _tools(manager, instance_id: str):
+def _tools(manager: Any, instance_id: str):
     return {
         t.name: t
         for t in create_room_tools(
@@ -294,13 +285,12 @@ async def run_scenario() -> int:
         return_exceptions=True,
     )
     seqs = []
-    texts = []
     for item in results:
         if isinstance(item, Exception):
             continue
         body = json.loads(item)
         seqs.append(body.get("seq"))
-        texts.append(body.get("seq") and body.get("room_id"))
+    failures = [repr(r) for r in results if isinstance(r, Exception)]
     log_rows = repo.list_messages(
         room_id, caller_instance_id=PRODUCER, after_seq=0, limit=50
     )
@@ -312,7 +302,7 @@ async def run_scenario() -> int:
         and seq_list == sorted(seq_list)
         and len(set(seq_list)) == len(seq_list)
         and len(seq_list) >= 2,
-        {"seqs": seq_list, "returned": [s for s in seqs]},
+        {"seqs": seq_list, "returned": [s for s in seqs], "failures": failures},
     )
 
     # ── C4: the milestone reports ride the DIGEST ───────────────────────
@@ -491,8 +481,6 @@ async def run_scenario() -> int:
     )
     # (c) the SSE room-resolution pre-branch resolves the room to its
     #     owner (the §8 pre-branch);
-    from daemon.routers.messages import _resolve_sse_target
-
     resolved_instance, resolved_room = await _resolve_sse_target(
         manager, room_id
     )
