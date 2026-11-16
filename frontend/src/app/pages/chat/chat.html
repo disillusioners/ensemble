@@ -73,6 +73,18 @@
                 <span class="watchover-badge">⚠️ {{ watchoverDenialCount() }}/3</span>
               }
             </button>
+            <!-- Chatrooms (P6 — the human observability surface for
+                 group chat). Sits NEXT TO the watchover toggle; click
+                 opens the BIG chatrooms modal for this instance's tree. -->
+            <button
+              (click)="onOpenChatrooms()"
+              class="toggle-btn room-btn"
+              title="Chatrooms"
+              aria-label="Chatrooms"
+              matTooltip="Chatrooms — rooms created by this instance's tree"
+            >
+              <mat-icon>forum</mat-icon>
+            </button>
             <button
               (click)="onToggleThinking()"
               [class.active]="showThinking()"

@@ -56,6 +56,37 @@ body {
   background: rgba(0, 0, 0, 0.5);
 }
 
+/* Chatrooms modal (P6 group-chat observability surface) — deliberately
+   BIG: architecture-recommendation.md §13.1 requires a "large modal, NOT
+   a cramped tooltip" (≥ 80vw × 80vh).
+
+   The `panelClass` lands on the CDK OVERLAY PANE (the pane carries
+   `cdk-overlay-pane mat-mdc-dialog-panel room-dialog-panel`), and the
+   size itself is set inline by the open() config (width 82vw / height
+   82vh / maxWidth 96vw / maxHeight 96vh) — inline styles beat the
+   stylesheet, which is what lifts Material's 560px pane cap.
+
+   Two overrides are still needed here:
+     * `--mat-dialog-container-color` — the M3 surface colour var, so the
+       panel matches the app's other dark surfaces (#1e293b).
+     * `.mat-mdc-dialog-content { max-height: 65vh }` — Material caps the
+       content area at 65vh, which would shrink the modal's body; the
+       two-pane layout manages its own scrolling instead. */
+.room-dialog-panel {
+  .mat-mdc-dialog-surface {
+    --mat-dialog-container-color: #1e293b;
+  }
+
+  .mat-mdc-dialog-content {
+    max-height: none;
+  }
+}
+
+/* Chatrooms modal backdrop — dimmed like the watchover dialog. */
+.room-dialog-backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+
 // Instance detail overlay — root-mounted dynamically by App.createComponent.
 // Keep this selector global: the created host does not inherit App's
 // component-scoping attribute. The chat/workspace/plane ladder is documented

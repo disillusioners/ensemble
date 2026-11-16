@@ -1,6 +1,8 @@
 import { signal, computed, effect, Component, Inject, inject } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { Router } from '@angular/router';
+import { provideHttpClient } from '@angular/common/http';
+import { provideHttpClientTesting } from '@angular/common/http/testing';
+import { Router, provideRouter } from '@angular/router';
 import { MatDialog } from '@angular/material/dialog';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { of, Subject, throwError } from 'rxjs';
@@ -18,10 +20,29 @@ import {
   mergeMessagesById,
 } from '../../services/message-merge.util';
 import { ChatComponent } from './chat.component';
+import { RoomDialogComponent } from '../../components/room-dialog/room-dialog.component';
 
-jest.mock('ngx-markdown', () => ({
-  MarkdownModule: class MarkdownModule {},
-}));
+// The chat interface renders markdown via ngx-markdown. Angular
+// validates every entry of a standalone component's `imports` array
+// (verifyStandaloneImport) — a bare class is REJECTED the moment the
+// component is first instantiated ("must be a standalone component /
+// directive / pipe or an NgModule"). The mock is therefore a REAL
+// standalone directive carrying the `markdown` selector and the inputs
+// the chat interface binds (`data`, `mermaid`) — so a suite that mounts
+// the real chat template renders it faithfully.
+jest.mock('ngx-markdown', () => {
+  const { Directive } = jest.requireActual('@angular/core');
+  class MarkdownMockDirective {
+    data = '';
+    mermaid = '';
+  }
+  Directive({
+    selector: 'markdown',
+    standalone: true,
+    inputs: ['data', 'mermaid'],
+  })(MarkdownMockDirective);
+  return { MarkdownModule: MarkdownMockDirective };
+});
 
 const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
 
@@ -4259,5 +4280,174 @@ describe('ChatComponent renderedInstance — real component wiring (BUG 1/2 repr
     fixture.detectChanges();
     fixture.detectChanges();
     expect(component.renderedInstance()?.instance_id).toBe('hold-real-b');
+  });
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// P6 — the chatrooms button on the instances surface.
+//
+// Architecture recommendation §13.1 (binding): "CHATROOM ICON next to
+// the WATCHOVER button on the frontend instances surface. Click → BIG
+// POPUP (large modal, NOT a cramped tooltip)".
+//
+// These tests mount the REAL template (no `template: ''` override — the
+// button must be asserted where the operator actually sees it) and
+// assert the DOM placement + the dialog wiring.
+// ─────────────────────────────────────────────────────────────────────────
+describe('ChatComponent chatrooms button (P6) — real template wiring', () => {
+  let fixture: ComponentFixture<ChatComponent>;
+  let component: ChatComponent;
+  let dialogOpen: jest.Mock;
+  let viewState: MockInstancesViewStateService;
+
+  beforeEach(async () => {
+    // jsdom gap: the chat interface calls scrollIntoView when it renders
+    // the message list (the house stub — see chat-interface.component.spec.ts).
+    Element.prototype.scrollIntoView = Element.prototype.scrollIntoView ?? jest.fn();
+    localStorage.clear();
+    jest.clearAllMocks();
+    mockSseService.messages.set([]);
+    mockSseService.events.set([]);
+    mockSseService.statusChange.set(null);
+    mockSseService.latestError.set(null);
+    mockSseService.todos.set([]);
+    mockInstanceService.instances.set([]);
+
+    mockApiService.listAgents.mockReturnValue(of({ agents: [] }));
+    mockApiService.getMessages.mockReturnValue(of([]));
+    mockApiService.getTodos.mockReturnValue(of([]));
+
+    dialogOpen = jest.fn().mockReturnValue({ afterClosed: () => of(null) });
+    viewState = new MockInstancesViewStateService();
+
+    // The REAL template reads two more InstanceService members than the
+    // surrogate suites use (`hasMoreInstances` / `isLoadingMore`) — the
+    // shared mock is extended here rather than mutated, so the other
+    // suites are untouched. The `instances` signal is the SAME object, so
+    // the tests below can drive it.
+    const instanceService = {
+      ...mockInstanceService,
+      hasMoreInstances: jest.fn(() => false),
+      isLoadingMore: jest.fn(() => false),
+      loading: signal(false),
+      totalInstances: signal(0),
+      searchQuery: signal(''),
+      isSearching: signal(false),
+      showKb: signal(false),
+    };
+
+    // The rendered InstanceListComponent calls one more API method than
+    // the surrogate suites exercise.
+    const api = {
+      ...mockApiService,
+      getDefaultAgentVersions: jest.fn().mockReturnValue(of({ default_versions: {} })),
+      getQueues: jest.fn().mockReturnValue(of({ queues: [] })),
+    };
+
+    // The chat header reads the SSE context-usage snapshot; the chat
+    // interface reads the pending-injection card.
+    const sseService = {
+      ...mockSseService,
+      contextUsage: jest.fn(() => null),
+      pendingInjection: signal(null),
+      questionPack: signal(null),
+    };
+
+    await TestBed.configureTestingModule({
+      imports: [ChatComponent],
+      providers: [
+        provideHttpClient(),
+        provideHttpClientTesting(),
+        // The rendered instance list links with routerLink — the real
+        // router providers back it (the ChatComponent's own Router is
+        // mocked below and wins over this one).
+        provideRouter([]),
+        { provide: ApiService, useValue: api },
+        { provide: SseService, useValue: sseService },
+        { provide: TabStateService, useValue: new MockTabStateService() },
+        {
+          provide: WorkspaceOverlayService,
+          useValue: new MockWorkspaceOverlayService(),
+        },
+        { provide: InstancesViewStateService, useValue: viewState },
+        { provide: InstanceService, useValue: instanceService },
+        {
+          provide: ProjectService,
+          useValue: {
+            projects: signal([]),
+            listProjects: jest.fn().mockReturnValue(of({ projects: [] })),
+          },
+        },
+        { provide: MatSnackBar, useValue: mockSnackBar },
+      ],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(ChatComponent);
+    component = fixture.componentInstance;
+    // The component's MatDialog is provided at the COMPONENT level
+    // (ChatComponent imports MatDialogModule), so an environment-level
+    // mock would be shadowed. Spy on the exact instance the component
+    // uses — `dialogOpen` records the call arguments.
+    const componentDialog = (component as unknown as { dialog: MatDialog }).dialog;
+    jest.spyOn(componentDialog, 'open').mockImplementation((...args: unknown[]) => {
+      (dialogOpen as (...a: unknown[]) => unknown)(...args);
+      return { afterClosed: () => of(null) } as never;
+    });
+    fixture.detectChanges();
+  });
+
+  function roomButton(): HTMLElement | null {
+    return (fixture.nativeElement as HTMLElement).querySelector<HTMLElement>('.room-btn');
+  }
+
+  it('renders the chatrooms button in the toggle family, next to the watchover button', () => {
+    const host = fixture.nativeElement as HTMLElement;
+    const roomBtn = roomButton();
+    const watchoverBtn = host.querySelector<HTMLElement>('.watchover-btn');
+
+    expect(roomBtn).toBeTruthy();
+    expect(watchoverBtn).toBeTruthy();
+    // Same button family as the watchover toggle.
+    expect(roomBtn!.classList.contains('toggle-btn')).toBe(true);
+    // Labelled for both pointer and screen-reader users.
+    expect(roomBtn!.getAttribute('aria-label')).toBe('Chatrooms');
+    expect(roomBtn!.getAttribute('title')).toBe('Chatrooms');
+    // Material chat/forum glyph.
+    expect(roomBtn!.querySelector('mat-icon')?.textContent?.trim()).toBe('forum');
+    // Sitting immediately NEXT TO the watchover button (same container).
+    expect(roomBtn!.parentElement).toBe(watchoverBtn!.parentElement);
+    expect(watchoverBtn!.nextElementSibling).toBe(roomBtn!);
+  });
+
+  it('opens the BIG chatrooms modal for the rendered instance', () => {
+    const instance = createMockInstance({
+      instance_id: 'chat-rooms-1',
+      instance_name: 'Producer',
+    });
+    mockInstanceService.instances.set([instance]);
+    viewState.openDetail('all', 'chat-rooms-1');
+    fixture.detectChanges();
+    fixture.detectChanges();
+    expect(component.renderedInstance()?.instance_id).toBe('chat-rooms-1');
+
+    roomButton()!.click();
+    fixture.detectChanges();
+
+    expect(dialogOpen).toHaveBeenCalledTimes(1);
+    const [opened, config] = dialogOpen.mock.calls[0];
+    expect(opened).toBe(RoomDialogComponent);
+    expect(config.data.instanceId).toBe('chat-rooms-1');
+    expect(config.data.instanceName).toBe('Producer');
+    // BIG modal — §13.1 requires a large modal, NOT a cramped tooltip.
+    expect(config.width).toBe('82vw');
+    expect(config.height).toBe('82vh');
+    expect(config.panelClass).toBe('room-dialog-panel');
+  });
+
+  it('is a no-op when no instance is rendered', () => {
+    roomButton()!.click();
+    fixture.detectChanges();
+    expect(dialogOpen).not.toHaveBeenCalled();
   });
 });
