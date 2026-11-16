@@ -1,3 +1,18 @@
+<!-- group-chat-p6-tester-regate-20261116-begin -->
+## GROUP-CHAT P6 — FOCUSED RE-GATE (2026-11-16 @ `5d13a1c6c` = 4 fix commits over `e6d984272`; verdict **PASS-WITH-NOTES — P6 testing axis CLOSED**: net-new 6 → **0**) · F-1/F-2 CLOSED (6/6 nodes green + complete census sibling-sweep: 7/7 executable pin sites match live 119/40/36 + 7-needle census 0 live hits in `daemon/`) · F-3 content exposure CLOSED (adversarial: outsider = 1 content-free event, 6/6 smuggling attempts refused, owner instance stream byte-for-byte identical, room branch replays skipped, pin mutation-proven) · F-4 WRITE side EXACT (READ-side cycle-vs-primitive over-claim = doc-only note). **9 carried notes, 0 blocking.** Evidence: `RESULTS/2026-11-16-group-chat-p6-tester-regate.md` + `/tmp/gc_p6_gate/regate_*`
+
+| Pack / leg | Last run (re-gate) | Status |
+|---|---|---|
+| `gc_p6_pilot_scenario` | 2026-11-16 @ `5d13a1c6c` | ✅ PASS 9/9 (C9's room-channel path unaffected by F-3) |
+| `gc_p6_room_mutation_matrix` | 2026-11-16 @ `5d13a1c6c` | ✅ PASS 6/6 (SOLO wave; markers exact; byte-identity attested; tree clean before/after) |
+| `gc_p6_room_family` | 2026-11-16 @ `5d13a1c6c` | ✅ PASS 385/385 · 21 files (334.5 s; third confirming measurement) |
+| `gc_p6_lane_scope` | 2026-11-16 @ `5d13a1c6c` | ✅ PASS **218P/1S/1F** — the 1 F = the A-P6-18 base-attributable metrics node (offender list byte-identical, zero new); +2 nodes = the 2 F-3 pins |
+| SSE-adjacent corpus (3 files) | 2026-11-16 @ `5d13a1c6c` | ✅ PASS 86/86 (room_sse_resolution 14 + live_event_hub 57 + injection_sse 15; incl. both new F-3 pins) |
+| fault-path cages (12 nodes) | 2026-11-16 @ `5d13a1c6c` | ✅ PASS 12/12 (M1 ×3 · M2 ×6 · M3 ×3) |
+| TestP11 file | 2026-11-16 @ `5d13a1c6c` | ✅ PASS 39/39 (manager.py-marker pin non-vacuous: 5/5 hunks carry the marker) |
+| FE modal leg (3 room specs) | 2026-11-16 @ `5d13a1c6c` | ✅ PASS 28/28 (room.service 17 · room-dialog 8 · chat.chatrooms 3) |
+| FE whole-tree jest + tsc | 2026-11-16 @ `5d13a1c6c` | ✅ 4876/4885 — the same 9 base reds, NO new (attribution proven incl. production sources) + tsc CLEAN |
+<!-- group-chat-p6-tester-regate-20261116-end -->
 <!-- group-chat-p6-tester-gate-20261116-begin -->
 ## GROUP-CHAT P6 — INDEPENDENT TESTER GATE (2026-11-16 @ HEAD `e6d984272`; verdict **FAIL — net-new = 6 deterministic lane-attributable reds**: 4× `tests/unit/metrics/test_metrics_query_scope_cage.py::TestThreeWayCage` count pins 117/39/35 → actual 119/40/36 (the lane updated both sibling manifest sites per A-P6-9 but missed the cage file's own copy) + 2× census reds from lane-added `daemon/services/context_block.py` docstring needles (`test_lcancheck_family_separation.py::…::test_s3_whole_tree_census`, `test_attestation_lca_note_removed.py::…`). ALL other axes PASS incl. the mandatory FE web-automation pass (a)–(f), GC behavior 3/3, §9-cap/M3/SSE-observability, and the 4 pack re-runs below. Findings F-1..F-6 + fix list in `RESULTS/2026-11-16-group-chat-p6-tester-gate.md`; evidence `/tmp/gc_p6_gate/`)
 
