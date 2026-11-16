@@ -38,7 +38,11 @@ reports it, and deletes NOTHING; the flag is persisted (the shared
 meta KV) so a daemon restart does not silently re-arm the dry run
 forever — a restart BEFORE the first sweep simply keeps the dry run
 (fail-safe: a restart never purges unexpectedly). Every later sweep
-purges.
+purges. A FAILED flag read is RETRIED on the next sweep — the RAM
+latch pins on a successful read only, so one transient KV fault
+never permanently disables the purge (A-P6-25, the M1 adjudication);
+during the uncertainty the sweep stays a dry run (A-P6-6's
+fail-safe direction).
 
 **Fail-open posture.** The maintenance loop must never die on a GC
 fault: every candidate is purged independently (one room's failure
@@ -135,16 +139,27 @@ class RoomGcSweeper:
         self._kv_context_key = kv_context_key
         #: RAM mirror of the durable dry-run flag (the KV is the
         #: durable truth; this avoids a KV read on every sweep).
+        #: ``_loaded`` pins ONLY on a successful read (A-P6-25, M1) —
+        #: a failed read is retried on the next sweep.
         self._dry_run_done = False
         self._dry_run_loaded = False
 
     # ── the durable dry-run flag ──────────────────────────────────────
 
     def _load_dry_run_flag(self) -> bool:
-        """Read the durable "the dry run already happened" flag."""
+        """Read the durable "the dry run already happened" flag.
+
+        The RAM latch is PINNED ON SUCCESS only (A-P6-25, the M1
+        adjudication): a FAILED read does not latch — the next sweep
+        RETRIES the read, so a transient KV fault never permanently
+        disables the sweep's ability to purge. (Latching before the
+        read would answer every later sweep from a stale RAM value
+        that no successful read ever backed.) During the uncertainty
+        the sweep stays a dry run — the same fail-safe direction as
+        the dry-run-first posture itself (A-P6-6).
+        """
         if self._dry_run_loaded:
             return self._dry_run_done
-        self._dry_run_loaded = True
         repo = self._kv_repo
         if repo is None:
             repo = getattr(self._manager, "_shared_meta_kv_repo", None)
@@ -153,14 +168,18 @@ class RoomGcSweeper:
             return False
         try:
             values = repo.get_all_as_dict(self._kv_context_key)
-            self._dry_run_done = bool(values.get(ROOM_GC_KV_DRY_RUN_KEY))
         except Exception as exc:  # noqa: BLE001 — the flag is advisory
             self._log.warning(
-                "room gc: dry-run flag read failed (%r) — treating the "
-                "sweep as a dry run (fail-safe)",
+                "room gc: dry-run flag read failed (%r) — treating this "
+                "sweep as a dry run (fail-safe); the read is RETRIED on "
+                "the next sweep (the latch pins on success only)",
                 exc,
             )
             self._dry_run_done = False
+            return False
+        # SUCCESS — only now is the RAM mirror pinned.
+        self._dry_run_done = bool(values.get(ROOM_GC_KV_DRY_RUN_KEY))
+        self._dry_run_loaded = True
         return self._dry_run_done
 
     def _mark_dry_run_done(self) -> None:

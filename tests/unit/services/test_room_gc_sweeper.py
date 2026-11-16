@@ -382,6 +382,67 @@ async def test_a_failing_kv_leaves_the_sweep_in_the_dry_run(engine, service):
     assert service._repo.get_room(room_id) is not None
 
 
+async def test_a_faulted_kv_read_is_not_latched_and_is_retried(
+    engine, service
+):
+    """M1 pin (A-P6-25): the dry-run latch pins ON SUCCESS ONLY.
+
+    A faulting KV read answers "dry run" for THAT sweep and leaves the
+    latch UNSET — the next load RETRIES the read, so the durable truth
+    becomes visible as soon as the fault clears (a latched-from-fault
+    mirror would answer every later sweep from a stale RAM value no
+    successful read ever backed)."""
+    kv = _FakeKv()
+    sweeper = _sweeper(_manager(engine, service), kv)
+
+    kv.fail_read = True
+    assert sweeper._load_dry_run_flag() is False
+    # The invariant: the flag is NOT latched by the fault.
+    assert sweeper._dry_run_loaded is False
+
+    # The durable truth appears WHILE the read is still faulting.
+    kv.values.setdefault("room_gc_test", {})["dry_run_completed"] = True
+    kv.fail_read = False
+    # The read is RETRIED — the durable truth is now visible to the
+    # SAME sweeper instance (a latched-from-fault mirror would answer
+    # the stale False without ever re-reading).
+    assert sweeper._load_dry_run_flag() is True
+    # A successful read HAS pinned the mirror.
+    assert sweeper._dry_run_loaded is True
+
+
+async def test_a_transient_kv_fault_never_permanently_disables_the_purge(
+    engine, service
+):
+    """M1 pin (A-P6-25) — the invariant end-to-end: one transient KV
+    fault (read AND write down for a tick) never permanently disables
+    the sweep's ability to purge; the sweeps converge once the fault
+    clears."""
+    seed_instance(engine, "owner-1", status="completed")
+    room_id = make_room(
+        service._repo, tree_root="owner-1", owner="owner-1", name="retry-room"
+    )
+    _set_room_times(
+        engine, room_id, state="active", last_post_at=_iso(hours=100)
+    )
+    kv = _FakeKv()
+    kv.fail_read = True
+    kv.fail_write = True
+    sweeper = _sweeper(_manager(engine, service), kv)
+
+    # The faulting tick: dry run, nothing purged, nothing persisted.
+    await sweeper.execute()
+    assert service._repo.get_room(room_id) is not None
+    assert kv.values.get("room_gc_test", {}).get("dry_run_completed") is None
+
+    # The fault clears: the flag is retried/persisted, then the purge runs.
+    kv.fail_read = False
+    kv.fail_write = False
+    await sweeper.execute()
+    await sweeper.execute()
+    assert service._repo.get_room(room_id) is None
+
+
 async def test_an_explicit_dry_run_sweep_purges_nothing(engine, service):
     seed_instance(engine, "owner-1", status="completed")
     room_id = make_room(
