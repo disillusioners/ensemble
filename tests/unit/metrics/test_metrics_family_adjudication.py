@@ -839,7 +839,11 @@ class TestTheBudget:
         # category, #22 — the first privileged grant to a sonic agent,
         # sonic-leader — joined the tool-category label set; the SAME
         # axis, a sixth time).
-        assert cm.VOCABULARY_VERSION == 10
+        # room 2026-11-16 (group-chat lane): the sanctioned 10 -> 11
+        # bump (the ``room`` PRIVILEGED category, #23 — the agent
+        # group-chat surface — joined the tool-category label set; the
+        # SAME axis, a seventh time).
+        assert cm.VOCABULARY_VERSION == 11
 
     def test_each_family_stays_inside_its_declared_band(self) -> None:
         specs = registry.registered_families()

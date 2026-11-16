@@ -308,6 +308,7 @@ from .metrics_read import create_metrics_read_tools
 from .prompt_reload import create_prompt_reload_tools
 from .prompt_assent import create_prompt_assent_tools
 from .guidelines import create_guidelines_tools
+from .room import create_room_tools
 from .nest_report import create_nest_report_tools
 from .nest_report_read import create_nest_report_read_tools
 from .memoir import create_memoir_tools
@@ -3008,6 +3009,45 @@ def create_guidelines_tools_if_available(manager, current_instance_id: str, agen
     entry + construction).
     """
     return create_guidelines_tools(
+        manager,
+        current_instance_id=current_instance_id,
+        agent_id=agent_id,
+        agent_tag=agent_tag,
+    )
+
+
+def create_room_tools_if_available(manager, current_instance_id: str, agent_id: str, agent_tag: str | None = None) -> list:
+    """Create the four agent group-chat room tools for one instance/agent.
+
+    Agent group chat Phase 2 / P5 (2026-11-16, Emperor-ratified design).
+    The tools are ``room_create`` / ``room_post`` / ``room_read`` /
+    ``room_task_decision`` (``daemon/tools/room.py``).
+
+    The factory ALWAYS constructs all four: the room service's
+    presence is checked at CALL time (the notify-user / guidelines
+    posture), so a daemon without the room substrate registers cleanly
+    and refuses with the typed ``room-service-unavailable`` envelope at
+    call time — registration is SERVICE-STATE-INDEPENDENT.
+
+    Per-agent visibility is scoped afterwards by ``_apply_tool_filter``
+    via the ``room`` PRIVILEGED category (entry #23) — granted via the
+    explicit ``tools.allow: ["room"]`` entries and NOWHERE else. The
+    privileged category is NOT sufficient on its own — a literal tool
+    name in an allow list bypasses the category gate — so every tool
+    body ALSO carries its own MEMBERSHIP gate (fail-closed, before any
+    write). Both gates are required.
+
+    Membership is granted AT SPAWN (the ``join_room`` spawn
+    parameter), so the membership row exists before the child's tools
+    are built — the in-body gate is satisfiable from the first turn and
+    no mid-life tool mutation is needed.
+
+    Decorator-only registration is SILENTLY INVISIBLE — the extend of
+    this factory's return list inside ``create_instance_tools`` is the
+    third step of the three-step registration seam (decorator + registry
+    entry + construction).
+    """
+    return create_room_tools(
         manager,
         current_instance_id=current_instance_id,
         agent_id=agent_id,
@@ -7467,6 +7507,34 @@ Returns:
     # cleanly and refuses with the typed payload envelope at call time.
     tools.extend(
         create_guidelines_tools_if_available(
+            manager, current_instance_id, agent_id, agent_tag=version_tag
+        )
+    )
+
+    # ── Room tools (agent group chat P5, 2026-11-16) ─────────────────────
+    # Same critical list-append pattern as board_tool_list /
+    # self_alarm_tool_list / the prompt-assent / guidelines extends
+    # above: decorator-only registration is SILENTLY INVISIBLE — this
+    # extend is the third step of the three-step registration seam
+    # (decorator + registry entries + construction).
+    #
+    # PLACEMENT: this extend MUST precede ``create_help_tool`` (which
+    # snapshots the tool list into its index), ``scan_tools_for_full_docs``
+    # and ``_apply_tool_filter`` (which applies the per-agent allow list
+    # and the privileged-category default-deny strip). A later extend is
+    # either invisible to the help tool or BYPASSES the privileged strip.
+    #
+    # The category is PRIVILEGED (entry #23): the room surface is the
+    # sibling-collaboration channel — a member can post into a shared
+    # room, interrupt a peer (``@name``) and, as the room owner,
+    # DECIDE a task proposal. The empty-allow inherit universe must
+    # never auto-grant authority over peers. The audience is spelled by
+    # the ``tools.allow: ["room"]`` entries AND the tool bodies' SECOND,
+    # independent MEMBERSHIP gate — a LITERAL tool name in an allow list
+    # bypasses the category gate, so the category alone cannot spell the
+    # audience. Both gates are required.
+    tools.extend(
+        create_room_tools_if_available(
             manager, current_instance_id, agent_id, agent_tag=version_tag
         )
     )

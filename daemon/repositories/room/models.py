@@ -57,6 +57,7 @@ it as INTEGER — the affinity is dynamic).
 from __future__ import annotations
 
 import enum
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -493,6 +494,36 @@ class RoomMessage(SQLModel, table=True):
         description=(
             "P3: the member name a task_proposal row is about (NULL "
             "otherwise)."
+        ),
+    )
+    # P5 (A-P3-16): the DURABLE addressing-resolution warnings.
+    #
+    # A-P3-16 evaluated the two existing JSONB columns
+    # (``tagged_members`` / ``addressed_members``) as carriers and
+    # REFUSED both: each is a typed ``list[str] | None`` with a distinct
+    # routing semantic (escalation / addressing), and a warning-shaped
+    # entry would (a) violate the payload contract every reader assumes
+    # (``list(tagged_members or [])`` normalization; the TAGGED filter in
+    # ``derive_undelivered_tagged`` would try to lane-route unresolvable
+    # names on every boot) and (b) still need a shaped map (name →
+    # reason) that a ``list[str]`` cannot carry cleanly.
+    #
+    # So the warnings get their OWN column: a JSONB array of
+    # ``{"kind": "tag"|"addressed", "name": str, "reason": str}``
+    # entries, written AT APPEND time (the append is the commit point;
+    # the log is append-only, so there is no later UPDATE path).
+    # EMPTY LIST = no warnings — the common case.
+    resolution_warnings: list[dict[str, Any]] | None = Field(
+        default=None,
+        sa_column=Column(
+            "resolution_warnings", JSONBType, nullable=True, default=list
+        ),
+        description=(
+            "P5 (A-P3-16): durable @tag / addressed_to resolution "
+            "warnings — the per-name reasons a target did not resolve "
+            "(unresolvable / not-a-member / left / cross-room). The row "
+            "carries them so a reader never has to re-resolve against a "
+            "drifted roster to learn that a name missed."
         ),
     )
     created_at: str = Field(

@@ -47,11 +47,13 @@ import daemon.repositories.instance.models  # noqa: F401 — register instances
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.room import RoomChatService, RoomRepository
 from daemon.repositories.room import membership as room_membership
+from daemon.repositories.room.models import ChatRoom
 from daemon.services.room_naming import RoomNamingService
 from tests.helpers.room_harness import (
     _make_spawn_sim,
     make_room,
     make_room_engine,
+    seed_raw_room,
 )
 
 
@@ -485,13 +487,10 @@ class TestJoinRefusals:
     def test_room_cap_refusal(self, engine, room_stack):
         repo, svc, room_id = room_stack
         # The over-budget anomaly: 8 OTHER active rooms in the tree.
+        # The create path is CAPPED now (P5 re-gate, A-P5-14) — the
+        # 9th create would refuse — so the crowd is seeded RAW.
         for i in range(8):
-            repo.create_room(
-                name=f"crowd-{i}",
-                tree_root_id=TREE_ROOT,
-                owner_instance_id=CALLER,
-                owner_member_name=f"owner-{i}",
-            )
+            seed_raw_room(engine, TREE_ROOT, f"crowd-{i}")
         calls: list[dict] = []
         manager = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         result = _run_spawn_tool(
@@ -569,13 +568,10 @@ class TestJoinRefusals:
         repo.leave_room(room_id=room_id, instance_id="fill-0")
         repo.leave_room(room_id=room_id, instance_id="fill-1")
         repo.leave_room(room_id=room_id, instance_id="fill-2")
+        # The crowd is seeded RAW — the create path is capped now
+        # (P5 re-gate, A-P5-14), the 9th create would refuse.
         for i in range(8):
-            repo.create_room(
-                name=f"crowd-{i}",
-                tree_root_id=TREE_ROOT,
-                owner_instance_id=CALLER,
-                owner_member_name=f"owner-{i}",
-            )
+            seed_raw_room(engine, TREE_ROOT, f"crowd-{i}")
         m = _build_manager(engine, svc, _make_spawn_sim(engine, calls))
         texts.append(_run_spawn_tool(
             m, agent_id="capture", join_room=room_id

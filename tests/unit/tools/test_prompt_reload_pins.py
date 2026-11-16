@@ -67,12 +67,12 @@ class TestTheCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_has_twenty_two_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 22
+    def test_the_set_has_twenty_three_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 23
 
-    def test_the_derived_set_is_exactly_the_twenty_two_entries(self) -> None:
+    def test_the_derived_set_is_exactly_the_twenty_three_entries(self) -> None:
         derived = _registry_literal_members()
-        assert len(derived) == 22, sorted(derived)
+        assert len(derived) == 23, sorted(derived)
         assert CATEGORY in derived
         assert PRIVILEGED_TOOL_CATEGORIES == derived
 
@@ -95,9 +95,13 @@ class TestTheCategory:
         # guidelines (2026-11-13) appended after prompt-assent —
         # prompt-reload is now third-to-last; the relative discipline
         # is unchanged.
-        assert entries[-3] == CATEGORY, entries[-4:]
-        assert entries[-2] == "prompt-assent", entries[-4:]
-        assert entries[-1] == "guidelines", entries[-4:]
+        # group-chat P5 (2026-11-16) appended "room" after the
+        # guidelines entry — prompt-reload is now fourth-to-last; the
+        # relative discipline is unchanged.
+        assert entries[-4] == CATEGORY, entries[-5:]
+        assert entries[-3] == "prompt-assent", entries[-5:]
+        assert entries[-2] == "guidelines", entries[-5:]
+        assert entries[-1] == "room", entries[-5:]
 
     def test_the_category_module_resolves_to_a_daemon_tools_path(self) -> None:
         value = CATEGORY_MODULES.get(CATEGORY)
@@ -201,16 +205,20 @@ class TestTheAriOnlyAllowList:
         # ari nest-ops fleet grant (2026-11-14) appended
         # "instance_read", "instance_ops" AFTER guidelines — prompt-reload
         # is now fifth-to-last; the array length grew 39 -> 41.
-        assert allow[-5] == CATEGORY, (
+        # group-chat P5 (2026-11-16) appended "room" AFTER the
+        # instance_read/instance_ops pair — prompt-reload is now
+        # sixth-to-last; the array length grew 41 -> 42.
+        assert allow[-6] == CATEGORY, (
             "the prompt-reload entry must sit IMMEDIATELY BEFORE the "
             "prompt-assent entry in ari's allow array (the trailing-entry "
             "discipline — a later lane may append after it)"
         )
-        assert allow[-4] == "prompt-assent"
-        assert allow[-3] == "guidelines"
-        assert allow[-2] == "instance_read"
-        assert allow[-1] == "instance_ops"
-        assert len(allow) == 41
+        assert allow[-5] == "prompt-assent"
+        assert allow[-4] == "guidelines"
+        assert allow[-3] == "instance_read"
+        assert allow[-2] == "instance_ops"
+        assert allow[-1] == "room"
+        assert len(allow) == 42
 
     def test_no_other_agent_carries_the_category(self) -> None:
         offenders: list[str] = []

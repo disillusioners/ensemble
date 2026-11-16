@@ -33,8 +33,8 @@
       "snapshot_create",
       "snapshot_search",
       "secrets",
-      "pok", "nest-report"
-    ]
+      "pok", "nest-report",
+      "room"]
   },
   "context_injection": {
     "heuristic_match_shared_md_files": true

@@ -93,7 +93,15 @@ GRANT_NOT_LAST_EXCEPTIONS: frozenset[str] = frozenset({"ari"})
 #: lane (2026-11-13) appended ``guidelines`` (privileged entry #22, the
 #: FIRST privileged grant to a sonic agent) to leader / devops /
 #: sonic-leader, whose allow arrays end ``..., "pok", "nest-report"``.
-GRANT_POST_TAIL: frozenset[str] = frozenset({"guidelines"})
+#: The group-chat P5 lane (2026-11-16) appended ``room`` (privileged
+#: entry #23 — the agent group-chat surface) to leader / sonic-leader /
+#: worker, whose allow arrays end ``..., "nest-report", "room"``: the
+#: grant census is the EIGHT-agent design (A-P5-2, decisions.md:379 —
+#: ari / leader / sonic-leader / worker plus the video-team pilot
+#: quartet), so the append is a DELIBERATE CONTRACT UPDATE and the
+#: later-lane category is named here — the same mechanism the
+#: guideline-read-tool lane used.
+GRANT_POST_TAIL: frozenset[str] = frozenset({"guidelines", "room"})
 
 #: The re-pinned allow-array constants — the file, the constant name and
 #: the value the constant MUST carry after the grant.
@@ -116,6 +124,7 @@ ALLOW_ARRAY_CONSTANTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "guidelines",
             "instance_read",
             "instance_ops",
+            "room",
         ),
     ),
     (
@@ -339,19 +348,30 @@ class TestTheRepinnedAllowArrayConstants:
         → 11 (prompt-assent appended at the END, 2026-11-10)
         → 12 (guidelines appended at the END, 2026-11-13 — the
         guideline-read-tool lane; the FIRST privileged grant to a sonic
-        agent, sonic-leader)."""
+        agent, sonic-leader)
+        → 15 (group-chat P5, 2026-11-16 — the ``room`` PRIVILEGED
+        category (#23) appended at the END; the EIGHT-agent grant
+        census is A-P5-2, decisions.md:379: ari IS design-granted —
+        the four generic warm-lane agents (ari / leader / sonic-leader
+        / worker) plus the Emperor's designated video-team pilot
+        quartet. The append is a DELIBERATE CONTRACT UPDATE, not a
+        pin papering-over: the grant census is ratified, and ari's
+        trailing set is the documented class exemption that carries
+        every later-lane privileged grant)."""
         source = (REPO_ROOT / "tests/unit/test_board_registration.py").read_text(
             encoding="utf-8"
         )
         assert (
             '"ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", '
             '"wedge-capture", "notify-user", "pok", "nest-report", '
-            '"memoir", "prompt-reload", "prompt-assent", "guidelines", "instance_read", "instance_ops"],'
+            '"memoir", "prompt-reload", "prompt-assent", "guidelines", "instance_read", "instance_ops", "room"],'
             in source
         ), (
             "the ari trailing set must carry pok inserted BEFORE "
             "nest-report with the memoir/prompt-reload/prompt-assent/"
-            "guidelines tail intact (the 12-entry re-derived value)"
+            "guidelines/instance_read/instance_ops/room tail intact "
+            "(the 15-entry re-derived value — the room grant is the "
+            "group-chat P5 census, A-P5-2)"
         )
 
     def test_the_gaia_constant_is_exactly_the_seven(self) -> None:

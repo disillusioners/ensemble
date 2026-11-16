@@ -27,7 +27,7 @@ META_PATH = AGENT_DIR / "meta.json"
 
 EXPECTED_ID = "video-producer"
 EXPECTED_NAME = "Video Producer"
-EXPECTED_ALLOW = ['instance', 'subtree_messages', 'subtree_status', 'question', 'filesystem', 'context', 'shared_meta_kv', 'todo', 'time', 'help', 'midflight', 'image', 'knowledge', 'view-views', 'pok', 'nest-report']
+EXPECTED_ALLOW = ['instance', 'subtree_messages', 'subtree_status', 'question', 'filesystem', 'context', 'shared_meta_kv', 'todo', 'time', 'help', 'midflight', 'image', 'knowledge', 'view-views', 'room', 'pok', 'nest-report']
 EXPECTED_TEAM_MEMBERS = ['video-capturer', 'video-editor', 'video-verifier']
 EXPECTED_INNATE_SKILLS = ["dynamic-skill", "todo"]
 EXPECTED_TEMPLATES = ['video-planning.md', 'video-project-ops.md']

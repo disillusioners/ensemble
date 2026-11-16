@@ -27,7 +27,7 @@ META_PATH = AGENT_DIR / "meta.json"
 
 EXPECTED_ID = "video-verifier"
 EXPECTED_NAME = "Video Verifier"
-EXPECTED_ALLOW = ['bash', 'proc', 'filesystem', 'image', 'context', 'shared_meta_kv', 'todo', 'time', 'help', 'midflight', 'knowledge', 'pok', 'nest-report']
+EXPECTED_ALLOW = ['bash', 'proc', 'filesystem', 'image', 'context', 'shared_meta_kv', 'todo', 'time', 'help', 'midflight', 'knowledge', 'room', 'pok', 'nest-report']
 EXPECTED_TEAM_MEMBERS = []
 EXPECTED_INNATE_SKILLS = ["dynamic-skill", "todo"]
 EXPECTED_TEMPLATES = ['video-gates.md']

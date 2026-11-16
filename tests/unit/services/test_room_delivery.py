@@ -111,7 +111,6 @@ def test_addressed_to_terminal_does_not_revive_member(stack):
         )
         return await delivery.route_post(
             room_id=room_id, post=post,
-            sender_instance_id=caller, sender_member_name="lead",
         )
     res = asyncio.run(run())
     # member must NOT be revived
@@ -134,7 +133,6 @@ def test_addressed_to_running_no_injection(stack):
         )
         return await delivery.route_post(
             room_id=room_id, post=post,
-            sender_instance_id=caller, sender_member_name="lead",
         )
     res = asyncio.run(run())
     # addressed to running → digest only, NO set_injection call for the member
@@ -160,7 +158,6 @@ def test_co_presence_tag_dominates(stack):
         )
         return await delivery.route_post(
             room_id=room_id, post=post,
-            sender_instance_id=caller, sender_member_name="lead",
         )
     res = asyncio.run(run())
     addr_outcomes = [o["outcome"] for o in res["addressed_outcomes"]]
@@ -179,10 +176,16 @@ def test_cross_room_addressed_fails_closed(stack):
         )
         return await delivery.route_post(
             room_id=room_id, post=post,
-            sender_instance_id=caller, sender_member_name="lead",
         )
     res = asyncio.run(run())
-    assert "addressed unresolved: 'nope-not-a-member'" in res["warnings"]
+    # P5 (A-P3-16): the warning shape is the STRUCTURED
+    # {"kind", "name", "reason"} map — the durable shape the room row
+    # carries. The pre-P5 string form ("addressed unresolved: 'x'") is
+    # superseded: the row-level persistence needs the name AND the
+    # reason as separate fields.
+    assert {
+        "kind": "addressed", "name": "nope-not-a-member", "reason": "unresolvable",
+    } in res["warnings"]
     assert res["addressed_outcomes"] == []
 
 
@@ -203,10 +206,69 @@ def test_unresolvable_left_post_succeeds(stack):
     async def run2():
         return await delivery.route_post(
             room_id=room_id, post=post,
-            sender_instance_id=caller, sender_member_name="lead",
         )
     res = asyncio.run(run2())
-    assert "addressed unresolved: 'worker'" in res["warnings"]
+    # P5 (A-P3-16): structured warning shape (kind/name/reason).
+    assert {
+        "kind": "addressed", "name": "worker", "reason": "unresolvable",
+    } in res["warnings"]
+
+
+def test_every_router_warning_branch_mints_the_same_shape(stack):
+    """M1: the router's warning shape is UNIFORM across its branches.
+
+    The room-not-found branch used to return a BARE STRING
+    ("room not found") while every sibling branch returned the
+    structured ``{"kind", "name", "reason"}`` map the router's own
+    docstring publishes (A-P5-5) — a dict-consuming caller raised
+    on the string. The pin asserts the KEY SET is identical across
+    the not-found branch and the resolver's unresolvable branch, and
+    that no branch mints a bare string.
+    """
+    engine, repo, svc, room_id, caller = stack
+    manager = _make_manager(engine, svc, live_graph=True)
+    delivery = RoomDeliveryService(manager, svc)
+
+    async def run_not_found():
+        return await delivery.route_post(
+            room_id="room-does-not-exist",
+            post={
+                "author_instance_id": caller,
+                "author_name": "lead",
+                "seq": 1,
+                "tagged_members": [],
+                "addressed_members": [],
+            },
+        )
+
+    async def run_unresolved():
+        post = await svc.append_message(
+            room_id=room_id, author_instance_id=caller, author_name="lead",
+            text_body="hi", tagged_members=[], addressed_members=["nope-not-a-member"],
+        )
+        return await delivery.route_post(room_id=room_id, post=post)
+
+    not_found = asyncio.run(run_not_found())
+    unresolved = asyncio.run(run_unresolved())
+
+    for res in (not_found, unresolved):
+        assert res["warnings"], res
+        for warning in res["warnings"]:
+            assert isinstance(warning, dict), (
+                f"a bare-string warning breaks a dict consumer: {warning!r}"
+            )
+
+    not_found_warning = not_found["warnings"][0]
+    unresolved_warning = next(
+        w for w in unresolved["warnings"] if w["name"] == "nope-not-a-member"
+    )
+    # The SHAPE-EQUALITY pin: the same key set on both branches.
+    assert set(not_found_warning) == set(unresolved_warning) == {
+        "kind", "name", "reason",
+    }
+    assert not_found_warning["kind"] == "room"
+    assert not_found_warning["name"] == "room-does-not-exist"
+    assert not_found_warning["reason"] == "room-not-found"
 
 
 def test_dedup_no_duplicate_proposal(stack):
@@ -222,11 +284,9 @@ def test_dedup_no_duplicate_proposal(stack):
             room_id=room_id, author_instance_id=caller, author_name="lead",
             text_body="hi", tagged_members=["worker"], addressed_members=[],
         )
-        r1 = await delivery.route_post(room_id=room_id, post=post,
-                                       sender_instance_id=caller, sender_member_name="lead")
+        r1 = await delivery.route_post(room_id=room_id, post=post)
         # re-route same post → should not mint a second proposal
-        r2 = await delivery.route_post(room_id=room_id, post=post,
-                                       sender_instance_id=caller, sender_member_name="lead")
+        r2 = await delivery.route_post(room_id=room_id, post=post)
         return r1, r2, post
     r1, r2, post = asyncio.run(run())
     # count proposal rows
@@ -250,8 +310,7 @@ def test_parent_terminal_one_hop_no_recursion(stack):
             room_id=room_id, author_instance_id=caller, author_name="lead",
             text_body="hi", tagged_members=["worker"], addressed_members=[],
         )
-        return await delivery.route_post(room_id=room_id, post=post,
-                                         sender_instance_id=caller, sender_member_name="lead")
+        return await delivery.route_post(room_id=room_id, post=post)
     res = asyncio.run(run())
     # owner must NOT be revived
     with Session(engine) as s:
@@ -278,8 +337,7 @@ def test_lane_map_branch_for_paused_member(stack):
             room_id=room_id, author_instance_id=caller, author_name="lead",
             text_body="hi", tagged_members=["worker"], addressed_members=[],
         )
-        return await delivery.route_post(room_id=room_id, post=post,
-                                         sender_instance_id=caller, sender_member_name="lead")
+        return await delivery.route_post(room_id=room_id, post=post)
     res = asyncio.run(run())
     outcomes = [o["outcome"] for o in res["tag_outcomes"]]
     assert "parked_paused" in outcomes
@@ -298,8 +356,7 @@ def test_addressed_terminal_parent_notice_shape(stack):
             room_id=room_id, author_instance_id=caller, author_name="lead",
             text_body="please revive", tagged_members=[], addressed_members=["worker"],
         )
-        return await delivery.route_post(room_id=room_id, post=post,
-                                         sender_instance_id=caller, sender_member_name="lead")
+        return await delivery.route_post(room_id=room_id, post=post)
     res = asyncio.run(run())
     addr_outcomes = [o["outcome"] for o in res["addressed_outcomes"]]
     assert "parent_notice" in addr_outcomes
@@ -359,8 +416,7 @@ def test_cas_miss_running_injects_and_advances_cursor(stack):
             )
             return post, await delivery.route_post(
                 room_id=room_id, post=post,
-                sender_instance_id=caller, sender_member_name="lead",
-            )
+                )
         finally:
             svc.cas_instance_status_to_running = real_cas  # type: ignore[method-assign]
 
@@ -395,8 +451,7 @@ def test_cas_miss_running_inject_failure_leaves_cursor_untouched(stack):
             )
             return post, await delivery.route_post(
                 room_id=room_id, post=post,
-                sender_instance_id=caller, sender_member_name="lead",
-            )
+                )
         finally:
             svc.cas_instance_status_to_running = real_cas  # type: ignore[method-assign]
 
@@ -427,8 +482,7 @@ def test_cas_miss_running_graphless_downgrades_to_enqueue(stack):
             )
             return post, await delivery.route_post(
                 room_id=room_id, post=post,
-                sender_instance_id=caller, sender_member_name="lead",
-            )
+                )
         finally:
             svc.cas_instance_status_to_running = real_cas  # type: ignore[method-assign]
 
@@ -466,7 +520,6 @@ def test_tagged_terminal_graphless_running_parent_gets_enqueue(stack):
         )
         return await delivery.route_post(
             room_id=room_id, post=post,
-            sender_instance_id=caller, sender_member_name="lead",
         )
 
     res = asyncio.run(run())
@@ -503,7 +556,6 @@ def test_addressed_terminal_graphless_running_parent_gets_enqueue(stack):
         )
         return await delivery.route_post(
             room_id=room_id, post=post,
-            sender_instance_id=caller, sender_member_name="lead",
         )
 
     res = asyncio.run(run())
@@ -606,8 +658,7 @@ def test_mint_failure_route_time_defers_and_keeps_cursor(stack):
         try:
             return await delivery.route_post(
                 room_id=room_id, post=post,
-                sender_instance_id=caller, sender_member_name="lead",
-            )
+                )
         finally:
             svc.append_message = real_append  # type: ignore[method-assign]
 
@@ -823,7 +874,6 @@ def test_addressed_alive_not_running_is_digest_only_no_wake(stack):
         )
         return await delivery.route_post(
             room_id=room_id, post=post,
-            sender_instance_id=caller, sender_member_name="lead",
         )
 
     res = asyncio.run(run())

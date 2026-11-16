@@ -13,7 +13,7 @@
     "heuristic_match_shared_md_files": true
   },
   "tools": {
-    "allow": ["instance", "subtree_messages", "subtree_status", "question", "filesystem", "context", "shared_meta_kv", "todo", "time", "help", "midflight", "image", "knowledge", "view-views", "pok", "nest-report"]
+    "allow": ["instance", "subtree_messages", "subtree_status", "question", "filesystem", "context", "shared_meta_kv", "todo", "time", "help", "midflight", "image", "knowledge", "view-views", "room", "pok", "nest-report"]
   },
   "team_members": ["video-capturer", "video-editor", "video-verifier"]
 }

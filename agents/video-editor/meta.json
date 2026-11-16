@@ -10,7 +10,7 @@
   "snapshot_enabled": true,
   "no_force_explore": true,
   "tools": {
-    "allow": ["bash", "proc", "filesystem", "context", "shared_meta_kv", "todo", "time", "help", "midflight", "image", "view-views", "pok", "nest-report"]
+    "allow": ["bash", "proc", "filesystem", "context", "shared_meta_kv", "todo", "time", "help", "midflight", "image", "view-views", "room", "pok", "nest-report"]
   },
   "team_members": []
 }

@@ -48,6 +48,7 @@
     "prompt-reload",
     "question",
     "rag",
+    "room",
     "scheduling",
     "secrets",
     "self",
@@ -66,8 +67,8 @@
     "view-write",
     "wedge-capture"
   ],
-  "count": 65,
+  "count": 66,
   "reserved": "other",
   "source": "daemon/tools/_tool_registry.py CATEGORY_MODULES + @register_tool_category call sites",
-  "vocabulary_version": 10
+  "vocabulary_version": 11
 }

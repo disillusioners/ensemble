@@ -110,6 +110,7 @@ RoomJoinCrossTreeError = _membership.RoomJoinCrossTreeError
 RoomJoinMemberCapError = _membership.RoomJoinMemberCapError
 RoomJoinRoomCapError = _membership.RoomJoinRoomCapError
 RoomLeaveOwnerError = _membership.RoomLeaveOwnerError
+ROOM_MAX_ACTIVE_ROOMS_PER_TREE = _membership.ROOM_MAX_ACTIVE_ROOMS_PER_TREE
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +292,7 @@ _APPEND_MESSAGE_STMT = sql_text(
     "  room_id, seq, author_instance_id, author_name,"
     "  text, tagged_members, addressed_members, kind,"
     "  source_message_id, trigger, member,"
+    "  resolution_warnings,"
     "  created_at"
     ") SELECT "
     "  :room_id,"
@@ -304,6 +306,7 @@ _APPEND_MESSAGE_STMT = sql_text(
     "  :source_message_id,"
     "  :trigger,"
     "  :member,"
+    "  :resolution_warnings,"
     "  :created_at"
     " FROM room_messages WHERE room_messages.room_id = :room_id"
     " RETURNING id, seq"
@@ -318,6 +321,7 @@ _APPEND_MESSAGE_STMT = sql_text(
     bindparam("source_message_id"),
     bindparam("trigger"),
     bindparam("member"),
+    bindparam("resolution_warnings", type_=JSONBType),
     bindparam("created_at"),
 )
 
@@ -368,6 +372,7 @@ def _message_payload(message: RoomMessage) -> dict[str, Any]:
         "source_message_id": message.source_message_id,
         "trigger": message.trigger,
         "member": message.member,
+        "resolution_warnings": list(message.resolution_warnings or []),
         "created_at": message.created_at,
     }
 
@@ -439,7 +444,11 @@ class RoomRepository:
         payload pair. Raises :class:`MemberNameCollisionError` when
         ``UNIQUE(room_id, member_name)`` refuses the seed (P2's
         suffix registry handles the retry; P1 surfaces the typed
-        refusal only).
+        refusal only). Raises :class:`RoomJoinRoomCapError` when the
+        tree's active-room budget (``ROOM_MAX_ACTIVE_ROOMS_PER_TREE``)
+        is already exhausted — refused BEFORE the insert, fail-closed
+        (P5 re-gate; the cap counts ACTIVE rooms only, a closed room
+        frees its slot).
         """
         rid = room_id or _new_room_id()
         now = _utc_now_iso()
@@ -485,6 +494,28 @@ class RoomRepository:
         member_snap = member_payload(owner_row)
         try:
             with Session(self._engine) as session:
+                # P5 re-gate (A-P5-14): the create path enforces the
+                # tree's active-room budget — the SAME constant and the
+                # SAME typed error the join path raises (one condition,
+                # one error type; the join-side conjunct stays as the
+                # anomaly backstop). Refused BEFORE the insert,
+                # fail-closed. The count is ACTIVE rooms only — a
+                # closed room frees its slot.
+                active_rooms = len(
+                    session.exec(
+                        select(ChatRoom).where(
+                            ChatRoom.tree_root_id == tree_root_id,
+                            ChatRoom.state == RoomState.ACTIVE.value,
+                        )
+                    ).all()
+                )
+                if active_rooms >= ROOM_MAX_ACTIVE_ROOMS_PER_TREE:
+                    raise RoomJoinRoomCapError(
+                        f"room create refused: tree={tree_root_id} already "
+                        f"holds {active_rooms} active rooms "
+                        f"(ROOM_MAX_ACTIVE_ROOMS_PER_TREE="
+                        f"{ROOM_MAX_ACTIVE_ROOMS_PER_TREE})"
+                    )
                 session.add(room)
                 session.add(owner_row)
                 session.commit()
@@ -555,6 +586,35 @@ class RoomRepository:
         )
         if active_only:
             stmt = stmt.where(ChatRoomMember.state == RoomMemberState.ACTIVE.value)
+        stmt = stmt.order_by(ChatRoomMember.joined_at)
+        with Session(self._engine) as session:
+            return [
+                member_payload(m) for m in session.exec(stmt).all()
+            ]
+
+    def list_member_rooms(
+        self, instance_id: str, *, active_only: bool = True
+    ) -> list[dict[str, Any]]:
+        """Every room this instance has a membership row in (P5).
+
+        The INVERSE of :meth:`list_members` — the digest builder needs
+        "which rooms am I in?" (the instance's own rooms), while the
+        roster read needs "who is in this room?". The lookup is by the
+        ``idx_chatroom_members_instance_id`` index.
+
+        NOT behind the read predicate: the subject of the query IS the
+        caller (their own membership rows), so there is nothing to
+        authorize — the row set is the caller's own. The returned rows
+        carry the membership state so the caller can filter LEFT rows
+        (``active_only=False`` returns them).
+        """
+        stmt = select(ChatRoomMember).where(
+            ChatRoomMember.instance_id == instance_id
+        )
+        if active_only:
+            stmt = stmt.where(
+                ChatRoomMember.state == RoomMemberState.ACTIVE.value
+            )
         stmt = stmt.order_by(ChatRoomMember.joined_at)
         with Session(self._engine) as session:
             return [
@@ -724,6 +784,7 @@ class RoomRepository:
         source_message_id: int | None = None,
         trigger: str | None = None,
         member: str | None = None,
+        resolution_warnings: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Append one message — per-room monotonic seq, single statement.
 
@@ -740,6 +801,13 @@ class RoomRepository:
         :class:`RoomNotFoundError`. The append ALSO bumps the room's
         denormalized ``message_count`` + ``last_post_at`` in the same
         transaction.
+
+        ``resolution_warnings`` (P5 / A-P3-16) is the DURABLE
+        addressing-resolution warning set — written AT APPEND time
+        because the log is append-only (no UPDATE path exists for a
+        ``room_messages`` row). The caller resolves the targets BEFORE
+        the append (the append is the commit point) and hands the
+        per-name reasons over here.
         """
         now = _utc_now_iso()
         try:
@@ -768,6 +836,7 @@ class RoomRepository:
                     "source_message_id": source_message_id,
                     "trigger": trigger,
                     "member": member,
+                    "resolution_warnings": list(resolution_warnings or []),
                     "created_at": now,
                 }).first()
                 if result is None:
@@ -793,6 +862,7 @@ class RoomRepository:
             "source_message_id": source_message_id,
             "trigger": trigger,
             "member": member,
+            "resolution_warnings": list(resolution_warnings or []),
             "created_at": now,
         }
 

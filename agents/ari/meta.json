@@ -48,7 +48,8 @@
       "prompt-assent",
       "guidelines",
       "instance_read",
-      "instance_ops"
+      "instance_ops",
+      "room"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
   },

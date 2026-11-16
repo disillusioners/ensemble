@@ -8880,6 +8880,20 @@ class InstanceManager:
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_room_messages_proposal_dedup "
                 "ON room_messages (source_message_id, trigger, member)"
             ),
+            # agent group chat P5 (2026-11-16): room_messages
+            # resolution_warnings column (A-P3-16 disposition) — the
+            # DURABLE @tag / addressed_to resolution warning set (the
+            # two existing JSONB routing columns were evaluated as
+            # carriers and REFUSED; see the decisions.md A-P3-16
+            # entry). Fresh PG databases get the column from
+            # SQLModel.metadata.create_all() via the RoomMessage
+            # SQLModel declaration; existing databases need the ADD
+            # COLUMN here. SQLite counterpart:
+            # daemon/migrations/versions/20261116_083000_add_room_resolution_warnings.sql
+            (
+                "ALTER TABLE room_messages ADD COLUMN IF NOT EXISTS "
+                "resolution_warnings JSONB"
+            ),
             # instances.attestation_denied_count (Phase 3, 2026-09-05):
             # row-scoped per-instance counter for the leader completion
             # attestation gate (D5). NOT NULL DEFAULT 0 — existing rows

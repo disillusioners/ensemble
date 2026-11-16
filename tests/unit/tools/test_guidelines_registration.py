@@ -118,6 +118,10 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     # #22 — the FIRST privileged grant to a sonic agent (sonic-leader;
     # ruling 2026-11-13; see daemon/tools/_tool_registry.py).
     "guidelines",
+    # agent group chat P5 (2026-11-16): privileged entry #23 —
+    # the room tool category (room_create / room_post / room_read /
+    # room_task_decision); see daemon/tools/_tool_registry.py.
+    "room",
 })
 
 
@@ -280,11 +284,11 @@ class TestPrivilegedCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_twenty_two_entries(self) -> None:
+    def test_the_set_is_exactly_the_twenty_three_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_twenty_two_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 22
+    def test_the_set_has_twenty_three_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 23
 
 
 class TestTheFourAgentAllowList:
@@ -318,10 +322,17 @@ class TestTheFourAgentAllowList:
         same trailing-append evolution prompt-reload/prompt-assent
         underwent)."""
         allow = self._allow("ari")
-        assert allow[-3] == CATEGORY, (
+        # group-chat P5 (2026-11-16) appended "room" AFTER the
+        # instance_read/instance_ops pair — the guidelines entry is now
+        # FOURTH-to-last; the relative trailing discipline is unchanged
+        # (a later lane may append after it).
+        assert allow[-4] == CATEGORY, (
             f"ari: guidelines must sit immediately before the "
-            f"instance_read/instance_ops pair, got tail {allow[-3:]}"
+            f"instance_read/instance_ops pair, got tail {allow[-4:]}"
         )
+        assert allow[-3] == "instance_read"
+        assert allow[-2] == "instance_ops"
+        assert allow[-1] == "room"
 
     def test_sonic_leader_deny_array_is_untouched(self) -> None:
         """The sonic-leader deny array carries exactly its three

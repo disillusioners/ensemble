@@ -173,30 +173,54 @@ class TestThePokGrantOrdering:
         assert ANCHOR_CATEGORY in allow
         assert allow.index(CATEGORY) == allow.index(ANCHOR_CATEGORY) - 1
         tail = allow[allow.index(CATEGORY) + 2 :]
-        assert tail == ["memoir", "prompt-reload", "prompt-assent", "guidelines", "instance_read", "instance_ops"], (
+        # The tail grew 6 → 7 with the group-chat P5 lane (2026-11-16):
+        # the ``room`` PRIVILEGED category (#23) was appended at the END
+        # of ari's allow. The grant census is the EIGHT-agent design
+        # (A-P5-2, decisions.md:379 — ari / leader / sonic-leader /
+        # worker plus the video-team pilot quartet), so this is a
+        # DELIBERATE CONTRACT UPDATE — the trailing discipline the pin
+        # protects (the tail survives UNREORDERED) is unchanged.
+        assert tail == [
+            "memoir",
+            "prompt-reload",
+            "prompt-assent",
+            "guidelines",
+            "instance_read",
+            "instance_ops",
+            "room",
+        ], (
             f"ari's memoir/prompt-reload/prompt-assent/guidelines/instance_read/"
-            f"instance_ops tail must survive the insert UNREORDERED — tail is {tail}"
+            f"instance_ops/room tail must survive the insert UNREORDERED — tail is {tail}"
         )
 
 
 class TestTheVocabularyArtifactPair:
-    def test_vocabulary_version_is_ten(self) -> None:
-        assert VOCABULARY_VERSION == 10
+    def test_vocabulary_version_is_eleven(self) -> None:
+        # 10 → 11 with the group-chat lane (2026-11-16): the ``room``
+        # PRIVILEGED category (#23) joined the tool-category label set
+        # — the F-1 pair contract: the constant and the artifact move
+        # in the SAME change (the artifact was regenerated into a
+        # scratch path via ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT
+        # and copied over — never hand-edited).
+        assert VOCABULARY_VERSION == 11
 
-    def test_artifact_carries_65_categories_with_pok(self) -> None:
+    def test_artifact_carries_66_categories_with_pok(self) -> None:
         artifact_path = (
             REPO_ROOT / ".agents" / "shared" / "metrics" / "tool-categories.json"
         )
         data = json.loads(artifact_path.read_text(encoding="utf-8"))
-        assert data["count"] == 65, (
-            f"artifact count is {data['count']} — the project_future "
-            "category landed at v0.30.7 without regenerating the artifact "
-            "— the pre-existing pair defect is completed in v0.30.8: "
-            "64 → 65, F-1: regenerate via "
+        assert data["count"] == 66, (
+            f"artifact count is {data['count']} — the room category "
+            "landed with the group-chat P5 lane without regenerating "
+            "the artifact — 65 → 66, F-1: regenerate via "
             "ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT, never hand-edit"
         )
         assert data["vocabulary_version"] == VOCABULARY_VERSION
         assert CATEGORY in data["categories"]
+        assert "room" in data["categories"], (
+            "the room category (#23) must be in the frozen label set — "
+            "a runtime category outside the artifact folds to 'other'"
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover
