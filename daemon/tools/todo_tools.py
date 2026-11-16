@@ -788,7 +788,16 @@ Returns:
                     f"Added {len(added_ids)} sub-tasks to node "
                     f"'{node_id}': {ids_str}."
                 )
-            return f"{head}\n\n{body}"
+            # Agent group chat P4 — arm (a) carrier extension: this
+            # path's manager call DOES compute the reminder
+            # (``add_subtask``/``add_subtasks`` return {"todos",
+            # "reminder", ...}), so it is a reminder-returning todo path
+            # and must be able to carry the room nudge. The tool's
+            # payload contract is UNCHANGED (the reminder text itself is
+            # still not emitted here — only the nudge note is appended,
+            # exactly as on the other carriers).
+            room_note = await _room_nudge_note(manager, current_instance_id)
+            return f"{head}\n\n{body}{room_note}"
         except Exception as e:
             return f"ERROR: Failed to add sub-task: {e}"
 
@@ -997,9 +1006,16 @@ Returns:
                 )
             todos = result["todos"]
             await _emit_update(live_event_hub, current_instance_id, todos)
+            # Agent group chat P4 — arm (a) carrier extension:
+            # ``remove_subtask`` returns {"todos", "reminder"} — a
+            # reminder-returning todo path whose tool payload drops the
+            # reminder text (payload contract UNCHANGED); the room nudge
+            # note rides it exactly as on the other carriers.
+            room_note = await _room_nudge_note(manager, current_instance_id)
             return (
                 f"Removed sub-task '{subtask_id}' from node '{node_id}'.\n\n"
                 f"{_format_graph(todos, verbose=False)}"
+                f"{room_note}"
             )
         except Exception as e:
             return f"ERROR: Failed to remove sub-task: {e}"

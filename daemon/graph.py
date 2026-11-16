@@ -5038,6 +5038,19 @@ def create_injection_aware_router(
                     exc_info=True,
                 )
                 pending = None
+        else:
+            # F3 (2026-11-16 tester gate): the config NEVER arrived
+            # (dropped by a wrapper, or a router invoked without a
+            # configurable thread_id). The drain is then structurally
+            # DEAD — the probe cannot run and pending injections strand
+            # — so the failure is LOUD instead of silent (the
+            # config-drop defect this lane fixed was silent end to
+            # end).
+            logger.warning(
+                "[Injection] turn-end drain: no instance id in the "
+                "runnable config — the injection drain is DEAD for "
+                "this turn (pending injections would strand)"
+            )
         if not pending:
             # Ordinary turn end — reset the continuation budget so the
             # NEXT turn starts from zero.
@@ -7785,11 +7798,18 @@ def create_attestation_gate_node(
 # Lazy import at each use site — the daemon.services package __init__
 # pulls child_reports → graph (the documented cycle); room_nudge is
 # cycle-free itself but must be reached through the package.
-
-#: Parameter names through which a base router may accept the graph
-#: config — routers taking a second positional arg receive
-#: ``(state, config)``.
-_ROUTER_CONFIG_PARAM_NAMES = frozenset({"config", "run_manager", "kwargs"})
+#
+# (The former ``_ROUTER_CONFIG_PARAM_NAMES`` name frozenset was REMOVED
+# in the P4 tester-gate fix cycle: the config binding is now decided by
+# the base router's POSITIONAL ARITY — a router takes ``(state)`` or
+# ``(state, config)`` — so the second positional parameter IS the
+# config whatever its name. A name frozenset failed both ways a rename
+# can break: a renamed-defaulted second param silently dropped the
+# config (drain unprobed → stranded injections) and a renamed-REQUIRED
+# second param raised TypeError. Keeping the name set around would
+# invite reintroduction of the broken heuristic; the arity rule and its
+# mutation-grade pins live in
+# ``create_room_completion_should_continue``.)
 
 
 def create_room_completion_gate_node(
@@ -7985,18 +8005,36 @@ def create_room_completion_should_continue(
         params = list(signature(base_router).parameters.values())
     except (TypeError, ValueError):  # pragma: no cover — builtins
         params = []
-    takes_config = any(
-        p.name in _ROUTER_CONFIG_PARAM_NAMES
-        or p.kind.name == "VAR_KEYWORD"
-        for p in params
-    )
+    # F3 (2026-11-16 tester gate): the binding is ARITY-based, not
+    # NAME-based. LangGraph's router contract is POSITIONAL — a router
+    # takes ``(state)`` or ``(state, config)`` — so the SECOND
+    # POSITIONAL parameter IS the config whatever its name. The former
+    # name heuristic (``config``/``run_manager``/``kwargs``) failed in
+    # two ways: a RENAMED-but-defaulted second param (``cfg=None``)
+    # silently DROPPED the config — the drain wrapper then resolved
+    # no instance id, skipped its queue probe and stranded pending
+    # injections (the C3 dead-drain, latent behind a rename); and a
+    # RENAMED-REQUIRED second param (``cfg``) raised TypeError on the
+    # single-arg call. Arity binding makes both shapes correct by
+    # construction.
+    _positional = [
+        p for p in params
+        if p.kind.name in ("POSITIONAL_ONLY", "POSITIONAL_OR_KEYWORD")
+    ]
+    _has_var_keyword = any(p.kind.name == "VAR_KEYWORD" for p in params)
+    takes_config = len(_positional) >= 2
+    # A ``**kwargs``-style router receives the config as a KEYWORD.
+    takes_config_kw = takes_config is False and _has_var_keyword
 
     def should_continue_with_room_completion(
         state: MessagesState, config: Optional[RunnableConfig] = None
     ) -> str:
-        result = (
-            base_router(state, config) if takes_config else base_router(state)
-        )
+        if takes_config:
+            result = base_router(state, config)
+        elif takes_config_kw:
+            result = base_router(state, config=config)
+        else:
+            result = base_router(state)
         if result == END or result == ATTESTATION_GATE_NODE_NAME:
             return ROOM_COMPLETION_GATE_NODE_NAME
         return result
