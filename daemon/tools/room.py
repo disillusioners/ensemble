@@ -720,10 +720,17 @@ def create_room_tools(
                         "room_post routing failed (room=%s seq=%s): %r",
                         room_id, appended.get("seq"), exc,
                     )
+                    # The EXCEPTION path mints the SAME closed token as
+                    # the absent-router path (A-P5-16's follow-up): the
+                    # delivery service was present but did NOT deliver,
+                    # so the honest signal is the delivery-service token.
+                    # A bare ``routing_error: true`` was indistinguishable
+                    # from "the router is not there".
                     routing = {
                         "tag_outcomes": [],
                         "addressed_outcomes": [],
                         "routing_error": True,
+                        "routing_reason": TOKEN_NO_DELIVERY_SERVICE,
                     }
             else:
                 # NO ROUTER: the post LANDED (the append above is the
@@ -822,14 +829,48 @@ def create_room_tools(
                 await room_service.advance_read_cursor(
                     room_id, caller_instance_id, highest
                 )
-            roster = await room_service.list_members(
-                room_id, caller_instance_id=caller_instance_id, active_only=True
+            # ── the EPILOGUE try (N-2): the roster read is its OWN
+            # failure domain. The messages were already read (and the
+            # read ACK already advanced the cursor) — a roster fault
+            # DEGRADES the answer (an empty roster + the marker), it
+            # never discards them, and the success path and the
+            # degradation path are SEPARATELY OBSERVABLE.
+            roster: list[dict[str, Any]] = []
+            roster_degraded = False
+            try:
+                roster = await room_service.list_members(
+                    room_id,
+                    caller_instance_id=caller_instance_id,
+                    active_only=True,
+                )
+            except Exception as exc:  # noqa: BLE001 — degrade, never raise
+                logger.warning(
+                    "room_read: the roster read failed for room %s (%r) — "
+                    "degraded (the messages are returned without it)",
+                    room_id,
+                    exc,
+                )
+                roster_degraded = True
+            # ── the cursor echo is CLAMPED (N-9): the tool never
+            # echoes a cursor beyond the room's latest seq (the HTTP
+            # surface clamps the same way — "an unclamped cursor is
+            # NEVER echoed"). The denormalized ``message_count`` IS the
+            # latest seq (one append = one row = one seq).
+            room_last_seq = int(room.get("message_count") or 0)
+            last_returned = max(
+                [int(m.get("seq") or 0) for m in messages] or [0]
+            )
+            next_after_seq = (
+                last_returned
+                if last_returned
+                else min(after, room_last_seq)
             )
             return json.dumps(
                 {
                     "room_id": room_id,
                     "room_name": room.get("name"),
                     "state": room.get("state"),
+                    "roster_degraded": roster_degraded,
                     "messages": [
                         {
                             "seq": m.get("seq"),
@@ -843,9 +884,7 @@ def create_room_tools(
                         for m in messages
                     ],
                     "roster": [_member_dict(m) for m in roster],
-                    "next_after_seq": max(
-                        [int(m.get("seq") or 0) for m in messages] or [after]
-                    ),
+                    "next_after_seq": next_after_seq,
                 },
                 indent=2,
             )

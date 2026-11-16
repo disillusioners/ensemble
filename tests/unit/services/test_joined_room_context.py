@@ -180,6 +180,89 @@ def test_the_guidelines_text_is_a_static_constant_not_an_agents_prompt(stack):
         )
 
 
+# ── the digest query bound (D6) ─────────────────────────────────────────
+
+
+class _RecordingService:
+    """A recording proxy over the REAL room service.
+
+    Every room-scoped call the joined-room builder makes is recorded by
+    NAME — the D6 bound is a QUERY-COUNT bound, so the pin has to see
+    the calls, not just the result.
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.calls: list[str] = []
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if name in {
+            "list_member_rooms",
+            "get_room",
+            "list_members",
+            "unread_count",
+            "read_messages",
+        }:
+            async def _recorder(*args, **kwargs):
+                self.calls.append(name)
+                return await attr(*args, **kwargs)
+
+            return _recorder
+        return attr
+
+
+def test_the_digest_issues_a_bounded_number_of_room_queries(stack):
+    """D6 — the N+1 is DOCUMENTED and BOUNDED, not optimized away.
+
+    The builder reads ONE room's digest with FOUR room-scoped calls
+    (``get_room`` → ``list_members`` → ``unread_count`` →
+    ``read_messages``) plus ONE membership read for the whole
+    instance. The digest does NOT run a COUNT(*) over the log — the
+    denormalized ``message_count`` counter (bumped in the SAME
+    transaction as every append) IS the latest seq.
+
+    The bound is ``1 + 4 × rooms`` — and in v1 an instance is in ONE
+    room (architecture §5: "Multi-room: v1 one room/instance"), so the
+    worst case is FIVE calls per turn.
+    """
+    engine, repo, svc, room_id, owner, manager = stack
+    recorder = _RecordingService(svc)
+    manager._room_chat_service = recorder
+    asyncio.run(
+        svc.append_message(
+            room_id=room_id,
+            author_instance_id=owner,
+            author_name="lead",
+            text_body="scene 3 build done",
+        )
+    )
+    recorder.calls.clear()
+    msg = _block(manager, "child-1")
+    assert msg is not None
+    assert recorder.calls == [
+        "list_member_rooms",
+        "get_room",
+        "list_members",
+        "unread_count",
+        "read_messages",
+    ], recorder.calls
+    # The BOUND — one membership read + four calls per room.
+    assert len(recorder.calls) <= 1 + 4 * 1, recorder.calls
+    # No COUNT-style call rode along (the denormalized counter is used).
+    assert all(
+        name
+        in {
+            "list_member_rooms",
+            "get_room",
+            "list_members",
+            "unread_count",
+            "read_messages",
+        }
+        for name in recorder.calls
+    ), recorder.calls
+
+
 # ── the caps ───────────────────────────────────────────────────────────
 
 
