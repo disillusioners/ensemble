@@ -73,6 +73,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import TYPE_CHECKING, Annotated, Any
 
 from langchain_core.tools import tool
@@ -137,6 +138,11 @@ TOKEN_NOT_OWNER = "not-the-owner"
 TOKEN_NO_PROPOSAL = "no-such-proposal"
 TOKEN_DUPLICATE_DECISION = "duplicate-decision"
 TOKEN_ROOM_CAP = "room-cap"
+#: The room-name bound refusal (A-P5-17) — its OWN token, distinct
+#: from the generic ``invalid-input`` (a name outside the bound is a
+#: NAMED, actionable condition: the agent can fix it by shortening the
+#: name, so it deserves a stable token of its own).
+TOKEN_INVALID_ROOM_NAME = "invalid-room-name"
 
 #: The post body cap (architecture §9 — ``post <= 4000 chars``).
 ROOM_POST_MAX_CHARS = 4000
@@ -144,6 +150,36 @@ ROOM_POST_MAX_CHARS = 4000
 #: digest is what stays small).
 ROOM_READ_MAX_LIMIT = 200
 ROOM_READ_DEFAULT_LIMIT = 50
+
+#: The room-NAME bound (A-P5-17) — the name rides the agent-facing
+#: JOINED-ROOM block (the banner) on EVERY turn, so an unbounded name
+#: crowded the block until the ROSTER, then the guidelines, silently
+#: vanished (the B-1 defect: the block lost its REQUIRED content).
+#: 64 chars + a conservative charset: the design's room-name idiom
+#: ('scene-3 build'). The charset also keeps the name free of the
+#: characters the block's escape helper rewrites (``&``/``<``/``>``) —
+#: the escape stays as defense-in-depth for LEGACY rows (A-P5-15).
+ROOM_NAME_MAX_CHARS = 64
+#: The legal room-name shape: an alphanumeric first character, then
+#: alphanumerics / spaces / dots / dashes / underscores.
+ROOM_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$"
+_ROOM_NAME_RE = re.compile(ROOM_NAME_PATTERN)
+
+
+def _is_valid_room_name(name: Any) -> bool:
+    """Is this a legal room name? (the A-P5-17 bound)
+
+    Fail-closed: a non-string, an empty name, an over-long name or a
+    name outside the charset is REFUSED. The bound lives in the TOOL
+    BODY (not only in the pydantic schema) so the agent-facing failure
+    is the house refusal envelope — a typed, pinnable token — instead
+    of a generic schema validation string.
+    """
+    if not isinstance(name, str) or not name:
+        return False
+    if len(name) > ROOM_NAME_MAX_CHARS:
+        return False
+    return _ROOM_NAME_RE.match(name) is not None
 
 
 def _refusal(label: str, token: str, message: str) -> str:
@@ -245,7 +281,11 @@ def create_room_tools(
             Field(
                 description=(
                     "Human-readable room name (what the team calls it, "
-                    "e.g. 'scene-3 build')."
+                    "e.g. 'scene-3 build'). Bounded: at most 64 "
+                    "characters of letters, digits, spaces, dots, "
+                    "dashes or underscores, starting with a letter or "
+                    "a digit — a longer or exotic name is REFUSED "
+                    "(reason=invalid-room-name)."
                 )
             ),
         ]
@@ -371,6 +411,28 @@ def create_room_tools(
                 TOKEN_NOT_AUTHORIZED,
                 "the room tools require a caller instance id",
             )
+        # ── the room-NAME bound (A-P5-17): fail-closed BEFORE any DB
+        # touch. The name rides the joined-room block on every turn, so
+        # an unbounded name could crowd the ROSTER (then the
+        # guidelines) out of the block. A schema-only constraint would
+        # surface a generic validation string; the BODY check is what
+        # makes the refusal TYPED (and pinnable).
+        if not _is_valid_room_name(name):
+            logger.warning(
+                "room_create refused: the room name is outside the bound "
+                "(max %s chars, charset %s)",
+                ROOM_NAME_MAX_CHARS,
+                ROOM_NAME_PATTERN,
+            )
+            return _refusal(
+                "room_create",
+                TOKEN_INVALID_ROOM_NAME,
+                "the room name must be 1-"
+                f"{ROOM_NAME_MAX_CHARS} characters of letters, digits, "
+                "spaces, dots, dashes or underscores, and it must start "
+                "with a letter or a digit — pick a short team name "
+                "(e.g. 'scene-3 build')",
+            )
         room_service = _room_service(manager)
         if room_service is None:
             return _refusal(
@@ -432,8 +494,8 @@ def create_room_tools(
             return _refusal(
                 "room_create",
                 TOKEN_ROOM_CAP,
-                "this tree already holds the maximum number of active "
-                f"rooms (ROOM_MAX_ACTIVE_ROOMS_PER_TREE="
+                "this tree is at or near the active-room cap "
+                f"(ROOM_MAX_ACTIVE_ROOMS_PER_TREE="
                 f"{ROOM_MAX_ACTIVE_ROOMS_PER_TREE}) — close a room "
                 "before opening another",
             )

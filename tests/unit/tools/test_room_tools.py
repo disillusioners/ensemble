@@ -565,3 +565,56 @@ def test_room_create_refuses_when_the_tree_room_cap_is_reached(stack):
             ).all()
         )
     assert held == 8, held
+
+
+def test_room_create_refuses_a_name_outside_the_bound(stack):
+    """A-P5-17 — the room NAME is BOUNDED at creation, with a TYPED
+    refusal (``invalid-room-name``), fail-closed BEFORE any DB touch.
+
+    The bound exists because the name rides the agent-facing
+    joined-room block on EVERY turn: an unbounded name crowded the
+    block until the ROSTER, then the guidelines, silently vanished (the
+    B-1 defect). The bound is 64 chars over a conservative charset
+    (the design's room-name idiom, 'scene-3 build').
+
+    The refusal is TYPED — a schema-only constraint would surface a
+    generic validation string, so the TOOL BODY owns the check.
+    """
+    engine, repo, svc, _room_id, owner = stack
+    manager = _manager(engine, svc)
+    tools = _tools(manager, owner)
+
+    def _held() -> int:
+        with Session(engine) as s:
+            return len(
+                s.exec(
+                    select(ChatRoom).where(ChatRoom.tree_root_id == "tree-1")
+                ).all()
+            )
+
+    before = _held()
+    # The BOUNDARY: 64 legal chars are ACCEPTED, 65 are REFUSED.
+    legal = "a" * 64
+    raw = _call(
+        tools["room_create"].ainvoke({"name": legal, "member_name": "producer"})
+    )
+    assert raw.startswith("{"), raw
+    # 65 chars — one over the bound.
+    raw = _call(
+        tools["room_create"].ainvoke({"name": "a" * 65, "member_name": "producer"})
+    )
+    assert raw.startswith("Error:"), raw
+    assert "invalid-room-name" in raw, raw
+    assert "64" in raw, raw
+    # The CHARSET — the escapable class (``&``/``<``/``>``) and the
+    # structural noise are refused outright.
+    for bad in ("&" * 8, "room <gov>", " room", "-leading", "room\nline", ""):
+        raw = _call(
+            tools["room_create"].ainvoke({"name": bad, "member_name": "producer"})
+        )
+        assert raw.startswith("Error:"), (bad, raw)
+        assert "invalid-room-name" in raw, (bad, raw)
+    # Fail-closed: NOTHING was persisted by the refusals — only the one
+    # accepted room (the legal 64-char name) landed.
+    after = _held()
+    assert after == before + 1, (before, after)

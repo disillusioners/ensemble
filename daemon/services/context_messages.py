@@ -45,7 +45,7 @@ import json
 import logging
 import uuid
 import os
-from typing import Any
+from typing import Any, NamedTuple
 
 from langchain_core.messages import HumanMessage
 
@@ -199,11 +199,34 @@ CONTEXT_KIND_JOINED_ROOM = "joined_room"
 #: this length, so nothing beyond 2000 survives (the architecture §5
 #: "soft" wording does not describe the implemented behavior).
 ROOM_DIGEST_MAX_CHARS = 2000
-#: The whole joined-room block's hard cap.
+#: The whole joined-room block's hard cap — the DELIVERED-body budget
+#: (the design's "4000 hard"). The budget is spent SECTION-AWARE
+#: (A-P5-17): every section's mandatory content is reserved FIRST and
+#: the elastic content (the digest body, then the room label) takes
+#: what is left. A section is never DROPPED.
 ROOM_BLOCK_MAX_CHARS = 4000
 #: The roster section's cap (architecture §5 — "roster incl. owner
 #: ≤600").
 ROOM_ROSTER_MAX_CHARS = 600
+#: The room LABEL's cap inside the block — the ESCAPED worst case of
+#: the creation bound (A-P5-17: 64 raw chars × the 6× expansion of
+#: the ``&`` escape). A LEGACY room name (created before the bound) is
+#: cut HERE, with the block's visible marker, so it can never crowd
+#: out a section (the B-1 defect: an unbounded name voided the
+#: ROSTER, then the guidelines).
+ROOM_LABEL_MAX_CHARS = 384
+#: The room LABEL's floor — the label shrinks before the guidelines /
+#: roster / own-name, but never below this (the member must still be
+#: able to tell WHICH room the block is about).
+ROOM_LABEL_MIN_CHARS = 16
+#: The joined-room block's ENVELOPE overhead (the ``[SYSTEM CONTEXT: …]``
+#: wrapper + the title). The body budget is reduced by it, so the
+#: DELIVERED message (wrapper + body) stays inside
+#: ``ROOM_BLOCK_MAX_CHARS`` — the cap is on what the agent actually
+#: receives.
+_ROOM_BLOCK_WRAPPER_CHARS = (
+    len(CONTEXT_PREFIX) + len("Team Room") + len(CONTEXT_SUFFIX)
+)
 #: How many recent messages the digest carries (architecture §5 — "digest
 #: last-3").
 ROOM_DIGEST_LAST_N = 3
@@ -926,32 +949,46 @@ async def _maybe_pok_context_message(
 # to NO block, never to a broken turn).
 
 
-def _render_joined_room_block(
+class _JoinedRoomParts(NamedTuple):
+    """The FOUR sections of one room's block, BEFORE the budget fit.
+
+    Split out of the renderer so the JOINED builder can size the
+    per-room budget across N rooms BEFORE any section is rendered (the
+    section-aware fit needs the room count).
+    """
+
+    label: str
+    own: str
+    guidelines: str
+    roster_line: str
+    digest_header: str
+    digest_body: str
+
+
+def _joined_room_parts(
     *,
     room: dict[str, Any],
     own_name: str,
     roster: list[dict[str, Any]],
     digest_lines: list[str],
     unread: int,
-) -> str:
-    """Render the joined-room block body (pure — unit-testable)."""
-    # The factory contract (``_make_context_message``): untrusted
-    # content is ESCAPED before it lands in a ``[SYSTEM CONTEXT: …]``
-    # block — and room/member names ARE agent-supplied free text. The
-    # same treatment the digest text gets below: embedded newlines are
-    # flattened first (the module's own digest-text idiom — a name
-    # must never forge block line structure), then the escape helper
-    # runs. The helper rewrites the ``&``/``<``/``>`` class; every
-    # other character round-trips by its documented design (A-P5-15).
+) -> _JoinedRoomParts:
+    """Collect the FOUR sections of one room's block (pure).
+
+    The factory contract (``_make_context_message``): untrusted
+    content is ESCAPED before it lands in a ``[SYSTEM CONTEXT: …]``
+    block — and room/member names ARE agent-supplied free text. The
+    same treatment the digest text gets below: embedded newlines are
+    flattened first (the module's own digest-text idiom — a name
+    must never forge block line structure), then the escape helper
+    runs. The helper rewrites the ``&``/``<``/``>`` class; every
+    other character round-trips by its documented design (A-P5-15).
+    """
     room_label = escape_for_context_block(
         str(room.get("name") or room.get("room_id") or "").replace("\n", " ")
     )
     own_label = escape_for_context_block(
         str(own_name or "").replace("\n", " ")
-    )
-    banner = (
-        f'[TEAM ROOM] "{room_label}" — '
-        f"your name in this room: {own_label}"
     )
     roster_bits: list[str] = []
     for member in roster:
@@ -962,26 +999,97 @@ def _render_joined_room_block(
             str(name or "").replace("\n", " ")
         )
         roster_bits.append(f"{safe_name}{marker}")
-    roster_line = "ROSTER: " + ", ".join(roster_bits) if roster_bits else "ROSTER: (you are alone)"
+    roster_line = (
+        "ROSTER: " + ", ".join(roster_bits)
+        if roster_bits
+        else "ROSTER: (you are alone)"
+    )
     if len(roster_line) > ROOM_ROSTER_MAX_CHARS:
         roster_line = roster_line[: ROOM_ROSTER_MAX_CHARS - 3] + "..."
     digest_header = f"RECENT (last {len(digest_lines)} · unread {unread}):"
-    digest_body = "\n".join(digest_lines) if digest_lines else "(nothing posted yet)"
-    digest = f"{digest_header}\n{digest_body}"
-    if len(digest) > ROOM_DIGEST_MAX_CHARS:
-        digest = digest[: ROOM_DIGEST_MAX_CHARS - 3] + "..."
-    body = (
-        f"{banner}\n"
-        f"{ROOM_GUIDELINES_TEXT}\n"
-        f"{roster_line}\n"
-        f"{digest}"
+    digest_body = (
+        "\n".join(digest_lines) if digest_lines else "(nothing posted yet)"
     )
-    if len(body) > ROOM_BLOCK_MAX_CHARS:
-        # ROOM_BLOCK_MAX_CHARS caps ONE scope here: the PER-ROOM
-        # section (banner + guidelines + roster + digest of a single
-        # room) — the joined-body cap is applied separately below.
-        body = body[: ROOM_BLOCK_MAX_CHARS - 3] + "..."
-    return body
+    return _JoinedRoomParts(
+        label=room_label,
+        own=own_label,
+        guidelines=ROOM_GUIDELINES_TEXT,
+        roster_line=roster_line,
+        digest_header=digest_header,
+        digest_body=digest_body,
+    )
+
+
+def _render_joined_room_block(parts: _JoinedRoomParts, budget: int) -> str:
+    """Render one room's block WITHIN ``budget`` chars.
+
+    The SECTION-AWARE fit (A-P5-17 — the B-1 fix). The four sections
+    (the own-name banner / the guidelines / the roster / the digest)
+    are NEVER dropped: an oversized input degrades the CONTENT, never
+    the STRUCTURE. The elastic content shrinks in a FIXED order — the
+    digest body FIRST (the design's "digest ≤2000 soft"), then the
+    room label — while the guidelines, the roster and the own name
+    NEVER shrink. (The B-1 defect: a blind whole-body slice dropped
+    the ROSTER, then the guidelines, leaving the member with a banner
+    and nothing else.)
+    """
+
+    def _cut(text: str, limit: int) -> str:
+        """The block's VISIBLE truncation idiom (``...`` marker).
+
+        A non-positive limit yields the empty string — the caller keeps
+        the section's MARKER line, so the section stays readable.
+        """
+        if limit <= 0:
+            return ""
+        if len(text) <= limit:
+            return text
+        if limit <= 3:
+            return text[:limit]
+        return text[: limit - 3] + "..."
+
+    # The room LABEL's own cap first (a legacy name is cut HERE — see
+    # ROOM_LABEL_MAX_CHARS), then the budget fit.
+    label = _cut(parts.label, ROOM_LABEL_MAX_CHARS)
+    # The digest's OWN cap (header + body ≤ ROOM_DIGEST_MAX_CHARS) —
+    # the header is the MARKER, so the BODY is what shrinks.
+    digest_body = _cut(
+        parts.digest_body,
+        ROOM_DIGEST_MAX_CHARS - len(parts.digest_header) - 1,
+    )
+    # The MANDATORY content: the banner's fixed parts + the own name +
+    # the guidelines + the roster + the digest's marker line. The
+    # elastic content (the label + the digest body) takes what is left.
+    fixed = (
+        len('[TEAM ROOM] "')
+        + len('" — ')
+        + len("your name in this room: ")
+        + len(parts.own)
+        + len(parts.guidelines)
+        + len(parts.roster_line)
+        + len(parts.digest_header)
+        + 4  # the four newlines of the rendered block
+    )
+    elastic = budget - fixed
+    # The room LABEL keeps its FLOOR (the member must still be able to
+    # tell WHICH room the block is about) — the digest body yields the
+    # space that floor needs (the digest is the elastic section: it
+    # shrinks FIRST).
+    label_floor = min(len(label), ROOM_LABEL_MIN_CHARS)
+    digest_budget = max(elastic - label_floor, 0)
+    if len(digest_body) > digest_budget:
+        digest_body = _cut(digest_body, digest_budget)
+    remaining = elastic - len(digest_body)
+    if len(label) > max(remaining, label_floor):
+        label = _cut(label, max(remaining, label_floor))
+    return (
+        f'[TEAM ROOM] "{label}" — '
+        f"your name in this room: {parts.own}\n"
+        f"{parts.guidelines}\n"
+        f"{parts.roster_line}\n"
+        f"{parts.digest_header}\n"
+        f"{digest_body}"
+    )
 
 
 async def build_joined_room_context_message(
@@ -1015,7 +1123,7 @@ async def build_joined_room_context_message(
     if not memberships:
         return None
 
-    sections: list[str] = []
+    sections: list[_JoinedRoomParts] = []
     for membership in memberships:
         room_id = membership.get("room_id")
         own_name = str(membership.get("member_name") or "")
@@ -1067,7 +1175,7 @@ async def build_joined_room_context_message(
                 f"- {safe_author} (seq {seq}): {escape_for_context_block(text)}"
             )
         sections.append(
-            _render_joined_room_block(
+            _joined_room_parts(
                 room=room,
                 own_name=own_name,
                 roster=roster,
@@ -1078,12 +1186,38 @@ async def build_joined_room_context_message(
 
     if not sections:
         return None
-    body = "\n\n".join(sections)
+    # The SECTION-AWARE budget across the rooms (A-P5-17): the joined
+    # body's 4000 chars are split into a per-room share BEFORE any
+    # section is rendered, so no room's block is ever cut mid-way (the
+    # B-1 defect: the blind whole-body slice dropped the last room's
+    # roster, its guidelines and its digest ENTIRELY).
+    separator = "\n\n"
+    room_count = len(sections)
+    per_room_budget = max(
+        (
+            ROOM_BLOCK_MAX_CHARS
+            - _ROOM_BLOCK_WRAPPER_CHARS
+            - len(separator) * (room_count - 1)
+        )
+        // room_count,
+        0,
+    )
+    body = separator.join(
+        _render_joined_room_block(section, per_room_budget)
+        for section in sections
+    )
     if len(body) > ROOM_BLOCK_MAX_CHARS:
-        # ROOM_BLOCK_MAX_CHARS caps the CONCATENATED joined body here
-        # (all per-room sections joined by a blank line); each section
-        # is capped separately inside _render_joined_room_block.
-        body = body[: ROOM_BLOCK_MAX_CHARS - 3] + "..."
+        # The MANDATORY content of every room (the guidelines + the
+        # roster + the own name) can exceed the hard cap when an
+        # instance belongs to MANY rooms (architecture §5: "Multi-room:
+        # v1 one room/instance; builder multi-room-capable"). The block
+        # then OVERFLOWS rather than dropping a room's orientation
+        # content — and the overflow is LOGGED, never silent.
+        logger.warning(
+            "[ContextMessages] joined-room block exceeded the hard cap "
+            f"({len(body)} > {ROOM_BLOCK_MAX_CHARS}) for {room_count} "
+            "room(s) — the mandatory per-room content is never dropped"
+        )
     return _make_context_message(
         CONTEXT_KIND_JOINED_ROOM,
         "Team Room",
