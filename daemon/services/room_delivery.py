@@ -28,13 +28,19 @@ digest_only (no delivery action); left → skip+warning).
 
 This module is the service the P5 room tools will call; it is also the
 boot-delivery entry point.
+
+Why one module this large: the H1/H2 seam split
+(``_terminal_outcome`` / ``_park_paused`` / ``_reroute_after_cas_miss``
+/ ``_deliver_after_cas_success``) plus the breadth of the total 10-state
+lane map keep it monolithic for now — within the house 1000-3000 band,
+so no split is owed yet.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from sqlalchemy.engine import Engine
 
@@ -46,7 +52,6 @@ from daemon.repositories.room.models import (
     RoomMessageKind,
 )
 from daemon.repositories.room.repository import (
-    RoomError,
     RoomNotFoundError,
     RoomRepository,
 )
@@ -132,7 +137,10 @@ def _is_uuid_like(name: str) -> bool:
 
 
 def resolve_room_targets(
-    members: list[dict[str, Any]], names: list[str], *, kind: str
+    members: list[dict[str, Any]],
+    names: list[str],
+    *,
+    kind: Literal["tag", "addressed"],
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Resolve per-room target names against the ACTIVE roster.
 
@@ -669,8 +677,6 @@ class RoomDeliveryService:
         re-derivation retries it.
         """
         member_name = member["member_name"]
-        # CAS succeeded → member is now running. Busy-guard: mirrors the
-        # enqueue path's get_queue_stats pending/processing probe.
         try:
             stats = await self._manager.get_queue_stats(member_iid)
             busy = bool(stats.get("pending_count", 0) > 0 or stats.get("processing_count", 0) > 0)

@@ -194,8 +194,10 @@ CONTEXT_KIND_MEMOIR_REFRESH = "memoir_refresh"
 # with the CODE that renders it.
 CONTEXT_KIND_JOINED_ROOM = "joined_room"
 
-#: The room digest's soft cap (architecture §5 — "Caps ≤2000 soft /
-#: 4000 hard"). The digest is the RECENT slice, never the history.
+#: The room digest's cap — a HARD truncation at 2000 chars: the
+#: builder slices the digest and appends an ellipsis once it passes
+#: this length, so nothing beyond 2000 survives (the architecture §5
+#: "soft" wording does not describe the implemented behavior).
 ROOM_DIGEST_MAX_CHARS = 2000
 #: The whole joined-room block's hard cap.
 ROOM_BLOCK_MAX_CHARS = 4000
@@ -951,7 +953,7 @@ def _render_joined_room_block(
         f'[TEAM ROOM] "{room_label}" — '
         f"your name in this room: {own_label}"
     )
-    roster_bits = []
+    roster_bits: list[str] = []
     for member in roster:
         name = member.get("member_name")
         role = member.get("role")
@@ -975,6 +977,9 @@ def _render_joined_room_block(
         f"{digest}"
     )
     if len(body) > ROOM_BLOCK_MAX_CHARS:
+        # ROOM_BLOCK_MAX_CHARS caps ONE scope here: the PER-ROOM
+        # section (banner + guidelines + roster + digest of a single
+        # room) — the joined-body cap is applied separately below.
         body = body[: ROOM_BLOCK_MAX_CHARS - 3] + "..."
     return body
 
@@ -1046,7 +1051,7 @@ async def build_joined_room_context_message(
             )
             continue
         recent = list(messages)[-ROOM_DIGEST_LAST_N:]
-        digest_lines = []
+        digest_lines: list[str] = []
         for message in recent:
             author = message.get("author_name")
             seq = message.get("seq")
@@ -1075,6 +1080,9 @@ async def build_joined_room_context_message(
         return None
     body = "\n\n".join(sections)
     if len(body) > ROOM_BLOCK_MAX_CHARS:
+        # ROOM_BLOCK_MAX_CHARS caps the CONCATENATED joined body here
+        # (all per-room sections joined by a blank line); each section
+        # is capped separately inside _render_joined_room_block.
         body = body[: ROOM_BLOCK_MAX_CHARS - 3] + "..."
     return _make_context_message(
         CONTEXT_KIND_JOINED_ROOM,
@@ -3472,6 +3480,7 @@ __all__ = [
     "ROOM_BLOCK_MAX_CHARS",
     "ROOM_ROSTER_MAX_CHARS",
     "ROOM_DIGEST_LAST_N",
+    "ROOM_DIGEST_LINE_MAX_CHARS",
     "build_joined_room_context_message",
     "POK_INJECTION_FLAG",
     "SNAPSHOT_DIGEST_INJECTION_CEILING_TOKENS",

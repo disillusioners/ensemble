@@ -31,12 +31,18 @@ Access posture — TWO layers, BOTH required
    ``PRIVILEGED_TOOL_CATEGORIES``), so it is opt-in-only and never
    joins the default-grant universe. The explicit ``tools.allow:
    ["room"]`` entries are the visibility path.
-2. Every tool body carries its own in-body runtime gate — the
-   MEMBERSHIP gate (RK-7-before-append): a caller that is not an
-   ACTIVE member of the target room is refused, and the refusal
-   happens BEFORE any write. A LITERAL tool name in an allow list
-   bypasses the category gate, so the category alone cannot spell the
-   audience. The gate is the FIRST logic in each body.
+2. Every tool body carries its own in-body runtime gates. The
+   AUTHORIZATION gate (``_is_authorized``) is the FIRST logic in
+   each body: a LITERAL tool name in an allow list bypasses the
+   category gate, so the category alone cannot spell the audience.
+   The MEMBERSHIP gate (RK-7-before-append) precedes every write,
+   carried per verb: ``room_create`` — owner-by-construction (the
+   creator's OWNER row is written in the same transaction);
+   ``room_post`` — an explicit ACTIVE membership row resolved
+   before the append; ``room_read`` — the repository's fail-closed
+   read predicate (active member ∪ owner-ancestry), no in-body
+   membership check; ``room_task_decision`` — an explicit ACTIVE
+   membership row beneath the owner check.
 
 The membership gate is FAIL-CLOSED and it is the pre-append gate:
 ``room_post`` resolves the caller's membership row BEFORE the append
@@ -67,12 +73,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from ._tool_registry import register_tool_category
+
+if TYPE_CHECKING:
+    from daemon.repositories.room.service import RoomChatService
+    from daemon.services.room_delivery import RoomDeliveryService
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +126,6 @@ TOKEN_NO_ROOM_SERVICE = "room-service-unavailable"
 TOKEN_NOT_A_MEMBER = "not-a-member"
 TOKEN_ROOM_NOT_FOUND = "room-not-found"
 TOKEN_ROOM_CLOSED = "room-closed"
-TOKEN_UNKNOWN_ROOM = "unknown-room"
 TOKEN_INVALID_INPUT = "invalid-input"
 TOKEN_INTERNAL_ERROR = "internal-error"
 TOKEN_NOT_OWNER = "not-the-owner"
@@ -159,7 +168,7 @@ def _is_authorized(agent_id: str) -> bool:
     return isinstance(agent_id, str) and bool(agent_id.strip())
 
 
-def _room_service(manager: Any):
+def _room_service(manager: Any) -> RoomChatService | None:
     """The room service handle, or None when the daemon has none.
 
     The ``*_if_available`` posture: a test double / partial-init
@@ -171,7 +180,7 @@ def _room_service(manager: Any):
     return getattr(manager, "_room_chat_service", None)
 
 
-def _delivery_service(manager: Any):
+def _delivery_service(manager: Any) -> RoomDeliveryService | None:
     """The delivery-service handle, or None."""
     if manager is None:
         return None
@@ -423,7 +432,7 @@ def create_room_tools(
                 f"{ROOM_MAX_ACTIVE_ROOMS_PER_TREE}) — close a room "
                 "before opening another",
             )
-        except Exception as exc:  # noqa: BLE001 — house pattern: error string, never raise
+        except Exception:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("room_create failed")
             return _refusal(
                 "room_create",
@@ -579,7 +588,7 @@ def create_room_tools(
                 },
                 indent=2,
             )
-        except Exception as exc:  # noqa: BLE001 — house pattern: error string, never raise
+        except Exception:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("room_post failed")
             return _refusal(
                 "room_post",
@@ -589,7 +598,11 @@ def create_room_tools(
 
     @register_tool_category(ROOM_CATEGORY_KEY)
     @tool(args_schema=RoomReadInput)
-    async def room_read(room_id: str, after_seq: int = 0, limit: int = ROOM_READ_DEFAULT_LIMIT) -> str:
+    async def room_read(
+        room_id: str,
+        after_seq: int = 0,
+        limit: int = ROOM_READ_DEFAULT_LIMIT,
+    ) -> str:
         """Read a chat-room's messages. Use tool_help("room_read") for details."""
         # ── the layer-2 gate: FIRST logic in the body.
         if not _is_authorized(caller_agent_id):
@@ -680,7 +693,7 @@ def create_room_tools(
                 },
                 indent=2,
             )
-        except Exception as exc:  # noqa: BLE001 — house pattern: error string, never raise
+        except Exception:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("room_read failed")
             return _refusal(
                 "room_read",
@@ -756,14 +769,14 @@ def create_room_tools(
                 )
             try:
                 result = await delivery.record_task_decision(
-                room_id=room_id,
-                proposal_seq=int(proposal_seq),
-                decision=decision.strip(),
-                note=(note or "").strip(),
-                decider_instance_id=caller_instance_id,
-                decider_member_name=member["member_name"],
-            )
-            except RoomNotFoundError as exc:
+                    room_id=room_id,
+                    proposal_seq=int(proposal_seq),
+                    decision=decision.strip(),
+                    note=(note or "").strip(),
+                    decider_instance_id=caller_instance_id,
+                    decider_member_name=member["member_name"],
+                )
+            except RoomNotFoundError:
                 return _refusal(
                     "room_task_decision",
                     TOKEN_NO_PROPOSAL,
@@ -789,7 +802,7 @@ def create_room_tools(
                     "dedup rule); the room log is unchanged",
                 )
             return json.dumps({"recorded": True, **result}, indent=2)
-        except Exception as exc:  # noqa: BLE001 — house pattern: error string, never raise
+        except Exception:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("room_task_decision failed")
             return _refusal(
                 "room_task_decision",

@@ -110,6 +110,7 @@ RoomJoinCrossTreeError = _membership.RoomJoinCrossTreeError
 RoomJoinMemberCapError = _membership.RoomJoinMemberCapError
 RoomJoinRoomCapError = _membership.RoomJoinRoomCapError
 RoomLeaveOwnerError = _membership.RoomLeaveOwnerError
+ROOM_MAX_ACTIVE_ROOMS_PER_TREE = _membership.ROOM_MAX_ACTIVE_ROOMS_PER_TREE
 
 logger = logging.getLogger(__name__)
 
@@ -471,12 +472,12 @@ class RoomRepository:
                         )
                     ).all()
                 )
-                if active_rooms >= _membership.ROOM_MAX_ACTIVE_ROOMS_PER_TREE:
-                    raise _membership.RoomJoinRoomCapError(
+                if active_rooms >= ROOM_MAX_ACTIVE_ROOMS_PER_TREE:
+                    raise RoomJoinRoomCapError(
                         f"room create refused: tree={tree_root_id} already "
                         f"holds {active_rooms} active rooms "
                         f"(ROOM_MAX_ACTIVE_ROOMS_PER_TREE="
-                        f"{_membership.ROOM_MAX_ACTIVE_ROOMS_PER_TREE})"
+                        f"{ROOM_MAX_ACTIVE_ROOMS_PER_TREE})"
                     )
                 session.add(room)
                 session.add(owner_row)
