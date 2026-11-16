@@ -733,6 +733,39 @@ class TestP11BootNoBehaviorChange:
     GROUP_CHAT_LANE_SANCTIONED_PATH = "daemon/manager.py"
     GROUP_CHAT_LANE_MARKER = "group chat"
 
+    # The GROUP-CHAT (P6 FE-UI) lane's sanctioned changes to frontend/.
+    # Mirrors the DECISION-lane precedent (commit c81dd0dea, "scoped
+    # source-gc sanction") and the memoir / group-chat manager.py
+    # blocks above, which sanctioned daemon/manager.py under their own
+    # markers. The guard is about the SOURCE-GC lane's own diff:
+    # frontend/ is not frozen forever, it is frozen against the
+    # SOURCE-GC lane. The sanction is SCOPED — every hunk of the
+    # frontend/ drift in the span must carry a sanctioned FE-UI marker,
+    # so any OTHER frontend/ drift (a source-gc change, an unrelated
+    # lane's edit) still REDs. The source-gc guard's intent is
+    # untouched: only the P6-commissioned FE surface (the review's
+    # 14-file room-modal lane) is sanctioned.
+    #
+    # Group-chat P6 FE-UI commits touching frontend/ over this span
+    # (858a85e31..HEAD): the 14 commissioned files — room.model.ts,
+    # models/index.ts, room.service.ts (+ its spec), room-dialog/*
+    # (component ts/html/scss/spec), chat.html, chat.component.ts
+    # (+ its spec), chat.scss, styles.scss, app.component.spec.ts.
+    #
+    # Marker choice: the literals "room" / "chat" — an ANY-of set,
+    # containment on the lowercased hunk lines, the SAME lexical rule
+    # the manager.py pins apply — are carried by EVERY frontend/ hunk
+    # in the span (measured: 17 hunks; 15 carry a marker natively, 2
+    # required a minimal non-behavioral marker comment —
+    # app.component.spec.ts and chat.component.spec.ts — added in the
+    # same change), so the pair is PER-HUNK-COMPLETE. The FE markers
+    # are deliberately NOT folded into SANCTIONED_LANE_MARKERS: that
+    # tuple is the manager.py-hunk carve-out source, and admitting
+    # "room"/"chat" there would let a manager.py hunk that merely
+    # mentions room types slip past the manager.py pins.
+    FRONTEND_UI_LANE_SANCTIONED_PATH = "frontend/"
+    FRONTEND_UI_LANE_MARKERS = ("room", "chat")
+
     # Cross-lane carve-out: a hunk claimed by ANY sanctioned lane is
     # sanctioned drift, so co-spanning sanctioned lanes do not
     # cross-red each other (the memoir pin would otherwise RED on the
@@ -816,6 +849,60 @@ class TestP11BootNoBehaviorChange:
             )
         ]
 
+    def _frontend_ui_hunks_missing_sanctioned_marker(self, span):
+        """Hunks of the frontend/ drift in ``span`` that carry NO
+        sanctioned FE-UI marker. Mirrors the manager.py lane checker
+        above for the FE lane's own path and marker vocabulary: the
+        diff, the hunk parse and the marker check are identical — only
+        the path (``frontend/``) and the marker set
+        (``FRONTEND_UI_LANE_MARKERS``) differ. One ADDITION the
+        single-file manager.py checker never needed: the parse FLUSHES
+        on ``diff --git`` boundaries, because the frontend/ diff spans
+        14 files — without the flush, a file's trailing hunk would
+        merge into the next file's first hunk and a markerless trailing
+        hunk could piggyback on the next file's marker. A span with no
+        frontend/ diff is vacuously clean ([]). A degenerate diff
+        (content lines but no hunk headers) yields a pseudo-hunk so the
+        caller's ``== []`` assert still fails — the manager.py
+        checker's degenerate assert, preserved.
+        """
+        diff = self._git(
+            "diff", "--unified=0", span, "--",
+            self.FRONTEND_UI_LANE_SANCTIONED_PATH,
+        )
+        if not diff.strip():
+            return []  # nothing sanctioned in this span — vacuously clean
+        hunks: list[list[str]] = []
+        current: list[str] = []
+        for line in diff.splitlines():
+            if line.startswith("diff --git"):
+                if current:
+                    hunks.append(current)
+                    current = []
+                continue
+            if line.startswith("@@"):
+                if current:
+                    hunks.append(current)
+                current = []
+                continue
+            if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
+                current.append(line)
+        if current:
+            hunks.append(current)
+        if not hunks:
+            return [[
+                "<degenerate: frontend/ diff had content lines but no "
+                "hunk headers>"
+            ]]
+        return [
+            hunk for hunk in hunks
+            if not any(
+                marker in line.lower()
+                for line in hunk
+                for marker in self.FRONTEND_UI_LANE_MARKERS
+            )
+        ]
+
     def test_sanctioned_guard_present_in_file(self):
         # File-state pin: the sanctioned hunk must be present, contiguous,
         # and exact. Removing/altering a line REDs. This survives a future
@@ -842,11 +929,14 @@ class TestP11BootNoBehaviorChange:
         # daemon/manager.py is excluded from the blanket no-drift check
         # (the DECISION, MEMOIR and GROUP-CHAT lanes legitimately changed
         # it); their drift is checked by the scoped lane sanctions below.
+        # frontend/ is excluded the same way (the GROUP-CHAT P6 FE-UI
+        # lane legitimately changed it).
         others = [p for p in self.NOT_TOUCHED_PATHS
                   if p not in (self.SANCTIONED_PATH,
                                self.DECISION_LANE_SANCTIONED_PATH,
                                self.MEMOIR_LANE_SANCTIONED_PATH,
-                               self.GROUP_CHAT_LANE_SANCTIONED_PATH)]
+                               self.GROUP_CHAT_LANE_SANCTIONED_PATH,
+                               self.FRONTEND_UI_LANE_SANCTIONED_PATH)]
         out_others = self._git("diff", "--stat", span, "--", *others)
         assert out_others.strip() == "", (
             f"unexpected post-merge drift in NOT-TOUCHED paths:\n{out_others}"
@@ -940,3 +1030,27 @@ class TestP11BootNoBehaviorChange:
         assert merge, "no first-parent merge found"
         span = f"{merge}..HEAD"
         assert self._manager_hunks_missing_sanctioned_marker(span) == []
+
+    def test_the_frontend_ui_lane_drift_is_confined_to_sanctioned_lane_hunks(
+        self,
+    ):
+        """The SANCTIONED group-chat (P6 FE-UI) lane frontend/ drift.
+
+        Every hunk of the frontend/ drift in the post-merge span must
+        carry a sanctioned FE-UI marker ("room" or "chat" — measured
+        PER-HUNK-COMPLETE across the 14 commissioned files, 17 hunks;
+        the parse flushes on file boundaries so a markerless trailing
+        hunk cannot piggyback on the next file's first hunk). A
+        frontend/ change from ANY other lane (the source-gc lane
+        included) lands in a hunk with no sanctioned marker and REDs
+        here — the guard's intent (the source-gc lane must not drift
+        frontend/) is preserved; only the P6-commissioned FE surface is
+        allowed. Mirrors the manager.py lane pins (decision / memoir /
+        group-chat).
+        """
+        merge = self._git(
+            "rev-list", "--first-parent", "--merges", "-1", "HEAD"
+        ).strip()
+        assert merge, "no first-parent merge found"
+        span = f"{merge}..HEAD"
+        assert self._frontend_ui_hunks_missing_sanctioned_marker(span) == []

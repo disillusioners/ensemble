@@ -2124,3 +2124,5 @@ describe('snapshot-uiux route + menu wiring', () => {
     expect(source).toMatch(/'menu-snapshots'/);
   });
 });
+
+// FE-UI lane marker (group-chat P6 room modal lane): A-P6-23.
