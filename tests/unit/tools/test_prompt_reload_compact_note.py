@@ -433,8 +433,77 @@ class TestL3RefusalFamilies:
         assert "prompt_reload_compact_note_already_armed" not in pr.REFUSAL_CODES
 
 
-# ── L4 — seam safety (no mid-turn compaction) ──────────────────────────────
+# ── The note carrier (plan §9 Phase 2, tasks 2.1-2.6) ───────────────────────
 
+
+class TestCarrier:
+    """The arm carrier: ``instances.metadata`` JSONB — NO migration, NO
+    DDL, NO schema change (architect §D / ES-3)."""
+
+    async def test_the_arm_lives_in_the_instance_metadata_column(self) -> None:
+        manager = StubManager()
+        await _call(manager, compact=True, compact_note="a note")
+        md = manager._instance_repository.metadata
+        assert md["compact_note_arm"] == "a note"
+        assert "compact_note_armed_at" in md
+        assert "compact_note_sha256_12" in md
+
+    async def test_the_generic_update_path_is_never_used(self) -> None:
+        """The generic repository ``update`` REJECTS the
+        ``instance_metadata`` kwarg by design — the arm goes through the
+        atomic helpers only."""
+        manager = StubManager()
+        await _call(manager, compact=True, compact_note="a note")
+        assert not hasattr(manager._instance_repository, "update")
+
+    async def test_no_cross_instance_leakage(self) -> None:
+        """The note is scoped to the instance that authored it."""
+        repo = StubInstanceRepo()
+        repo.rows["iid-2"] = {"agent_id": "ari", "instance_metadata": {}}
+        manager = StubManager(repo=repo)
+        await _call(manager, compact=True, compact_note="instance one only")
+        other = repo.rows["iid-2"]["instance_metadata"]
+        assert "compact_note_arm" not in other
+        state = pr.read_compact_note_state(repo, "iid-2")
+        assert state.armed is False
+        assert state.note == ""
+
+    async def test_the_consumption_clears_the_arm_and_stamps_the_clock(self) -> None:
+        repo = StubInstanceRepo()
+        manager = StubManager(repo=repo)
+        await _call(manager, compact=True, compact_note="a note")
+        sha = pr.compact_note_sha256_12("a note")
+        assert pr.clear_compact_note_arm(repo, "iid-1", sha256_12=sha)
+        md = repo.metadata
+        assert "compact_note_arm" not in md
+        assert md["compact_note_last_sha256_12"] == sha
+        assert md["compact_note_last_applied_at"]
+        assert md["compact_note_last_deferred"] == pr.DEFERRED_STATE_NONE
+
+    async def test_the_deferred_marker_is_content_free(self) -> None:
+        repo = StubInstanceRepo()
+        assert pr.mark_compact_note_deferred(repo, "iid-1", pr.DEFERRED_STATE_ANTI_REFIRE)
+        assert repo.metadata["compact_note_last_deferred"] == "anti_refire"
+
+    async def test_an_unknown_deferred_state_is_refused(self) -> None:
+        repo = StubInstanceRepo()
+        assert pr.mark_compact_note_deferred(repo, "iid-1", "not-a-state") is False
+        assert "compact_note_last_deferred" not in repo.metadata
+
+    async def test_the_arm_read_never_raises(self) -> None:
+        class RaisingRepo:
+            def get(self, instance_id):
+                raise RuntimeError("db down")
+
+        state = pr.read_compact_note_state(RaisingRepo(), "iid-1")
+        assert state.armed is False
+
+    async def test_a_missing_repository_yields_no_arm(self) -> None:
+        state = pr.read_compact_note_state(None, "iid-1")
+        assert state.armed is False
+
+
+# ── L4 — seam safety (no mid-turn compaction) ──────────────────────────────
 
 class TestL4SeamSafety:
     async def test_no_compact_state_call_during_the_tool_call(self) -> None:
