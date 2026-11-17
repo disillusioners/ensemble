@@ -11,9 +11,10 @@ effect lands on the NEXT turn, never mid-turn).
 
 It ALSO owns the COMPACT-NOTE surface — ``prompt_reload(compact=True,
 compact_note="…")`` (architect §D/§G/§H). The note is the agent's own
-distillation of the conversation; the tool ARMS it and the compaction
-engine lands it at the NEXT QUIESCENT SEAM. The tool NEVER compacts and
-NEVER claims it did: ``ARMED is not COMPACTED`` (the honest tool
+distillation of the conversation; the tool ARMS it, and the daemon then
+appends it as a REQUEST that the agent's OWN model executes on its next
+invoke (the append method — mid-turn, no seam). The tool NEVER compacts
+and NEVER claims it did: ``ARMED is not COMPACTED`` (the honest tool
 contract). Arming is refused — never truncated, never swallowed — when
 the note is missing, over the cap, supplied without ``compact=true``,
 compaction is disabled, or the deliberate-compact rate limit is in
@@ -760,6 +761,17 @@ Compact notes (compact + compact_note)
 - The span the request announces is sized from the SAME effective model
   that answers it (the vision switch included) — the announced span and
   the compaction that replaces it agree.
+- KNOWN LIMITS, disclosed (the daemon classifies your model's reply with
+  a 120-character head scan for 12 refusal markers, so it cannot ask
+  twice): a genuine refusal OUTSIDE those 12 markers is misread as a
+  compaction, and a compaction whose OPENING reads like a refusal is
+  misread as a refusal (the safe side — nothing is compacted and your
+  note stays armed). FAIL-OPEN DIRECTION, plainly: a refusal outside
+  the 12 markers lets the swap fire, the arm is CONSUMED, and the audit
+  row says outcome=compacted.
+- The compaction exchange is consumed as a WHOLE group: when your
+  prompt_reload call was batched with other tools, the parallel sibling
+  tool's result is REMOVED with the group — it is not summarized in.
 
 Accepted consequences (disclosed, by design)
 --------------------------------------------

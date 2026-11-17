@@ -13352,7 +13352,23 @@ _COMPACT_NOTE_REFUSAL_MARKERS = (
 
 
 def _compact_note_looks_like_refusal(text: str) -> bool:
-    """Is the model's reply a TEXT REFUSAL rather than a compaction?"""
+    """Is the model's reply a TEXT REFUSAL rather than a compaction?
+
+    **THE HEURISTIC'S TWO-SIDED COST (mandatory disclosure).** The check
+    is a 120-character HEAD scan for 12 refusal markers:
+
+    * a genuine refusal that falls OUTSIDE the 12 markers is MISREAD as
+      a compaction;
+    * a compaction whose OPENING reads like a refusal is MISREAD as a
+      refusal (the safe direction — no swap fires and the arm stays
+      armed, so the work is re-run rather than mis-recorded).
+
+    **THE FAIL-OPEN DIRECTION, STATED PLAINLY (not softened):** a
+    refusal outside the 12 markers lets the swap fire, the arm is
+    CONSUMED, and the audit row says ``outcome=compacted``. That is the
+    price of a marker-based classifier on a path where the daemon cannot
+    ask the model twice.
+    """
     head = (text or "").strip().lower()[:120]
     if not head:
         return False
@@ -13362,46 +13378,75 @@ def _compact_note_looks_like_refusal(text: str) -> bool:
 def _compact_note_strip_exchange(messages: list) -> tuple[list, list]:
     """Split the tail source into ``(kept, exchange)``.
 
-    The COMPACTION EXCHANGE — the ``prompt_reload`` tool-call AIMessage
-    and the ToolMessage receipt(s) of that call — is CONSUMED by the
-    swap (architect v1.5 §11.3). It must NOT survive into the preserved
-    tail: the receipt's "CONTEXT NOT YET COMPACTED" line would otherwise
-    sit directly below the doc that says the compaction happened (an
-    in-context lie), and the note would render TWICE (once in the doc's
-    GLOBAL, once verbatim in the tool-call args).
+    The COMPACTION EXCHANGE is CONSUMED by the swap (architect v1.5
+    §11.3). It must NOT survive into the preserved tail: the receipt's
+    "CONTEXT NOT YET COMPACTED" line would otherwise sit directly below
+    the doc that says the compaction happened (an in-context lie), and the
+    note would render TWICE (once in the doc's GLOBAL, once verbatim in
+    the tool-call args).
 
-    The exchange is found by the ``prompt_reload`` TOOL CALL (not by
-    position): the AIMessage that carries it and EVERY ToolMessage of
-    that call are stripped as ONE atomic group (a MessageGroup is never
-    split — the house's whole-group atomicity rule).
+    TWO families are removed, and the strip is ANCHORED so it can never
+    leave one behind:
+
+    1. **EVERY ``prompt_reload`` exchange** — every AIMessage that
+       carries a ``prompt_reload`` tool call, AND every ToolMessage of
+       that call. NOT just the first one: a channel can hold a STALE
+       exchange (a failed attempt whose arm stayed armed) next to the
+       CURRENT one, and stripping only the first would leave the current
+       exchange — the tool-call AIMessage (with the note text verbatim in
+       its ``tool_calls`` args) and its receipt — in the tail, which is
+       exactly the C1 harm.
+    2. **EVERY stale compaction-request HumanMessage** in the tail
+       source (``context_kind == "compaction_request"``). The request
+       UNDER REPLY is never in the tail source (the tail source is the
+       channel minus its LAST message, and the adjacency trigger makes
+       the request that last message) — so this can never remove the
+       request being answered.
+
+    **GROUP-ATOMIC SIBLING CONSUMPTION (disclosed):** the exchange is
+    removed as a WHOLE MessageGroup — the house never splits a group.
+    When the ``prompt_reload`` call was batched with OTHER tool calls in
+    the same AIMessage, the parallel sibling tool's result is CONSUMED
+    WITH THE GROUP: it is REMOVED from the context, not summarized into
+    it and not carried into the tail.
     """
     if not messages:
         return [], []
-    ai_msg = None
-    tool_call_ids: set[str] = set()
+    stripped: set[int] = set()
+
+    # (1) EVERY prompt_reload exchange (the AIMessage carrier AND all of
+    #     its ToolMessages — the group is never split).
     for m in messages:
         if getattr(m, "type", None) != "ai":
             continue
-        for tc in (getattr(m, "tool_calls", None) or []):
-            tid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
-            name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
-            if name == "prompt_reload":
-                ai_msg = m
-                break
-        if ai_msg is not None:
-            for tc in (getattr(ai_msg, "tool_calls", None) or []):
-                tid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
-                if tid:
-                    tool_call_ids.add(tid)
-            break
-    if ai_msg is None:
-        return list(messages), []
-    stripped = {id(ai_msg)}
-    for m in messages:
-        if getattr(m, "type", None) != "tool":
+        tool_calls = getattr(m, "tool_calls", None) or []
+        names = [
+            (tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None))
+            for tc in tool_calls
+        ]
+        if "prompt_reload" not in names:
             continue
-        if getattr(m, "tool_call_id", None) in tool_call_ids:
+        stripped.add(id(m))
+        call_ids: set[str] = set()
+        for tc in tool_calls:
+            tid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+            if tid:
+                call_ids.add(tid)
+        for other in messages:
+            if getattr(other, "type", None) != "tool":
+                continue
+            if getattr(other, "tool_call_id", None) in call_ids:
+                stripped.add(id(other))
+
+    # (2) EVERY stale compaction-request HumanMessage in the tail source.
+    for m in messages:
+        if not isinstance(m, HumanMessage):
+            continue
+        if (getattr(m, "additional_kwargs", {}) or {}).get("context_kind") == (
+            "compaction_request"
+        ):
             stripped.add(id(m))
+
     kept = [m for m in messages if id(m) not in stripped]
     exchange = [m for m in messages if id(m) in stripped]
     return kept, exchange

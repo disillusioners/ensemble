@@ -471,7 +471,10 @@ def mark_compact_note_deferred(
     instance_id: str,
     state: str,
 ) -> bool:
-    """Record a DEFERRED seam outcome — the arm PERSISTS.
+    """Record a DEFERRED APPEND-PATH outcome — the arm PERSISTS.
+
+    (v1.5: the append path has NO seam — the request is appended
+    mid-turn and the agent's own model executes it on its next invoke.)
 
     The deferred discriminator is content-free (a label). The next armed
     receipt carries the matching VERBATIM deferred string, so a deferral
