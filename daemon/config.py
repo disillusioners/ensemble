@@ -1660,6 +1660,49 @@ class CompactionConfig(BaseSettings):
     min_messages_before_compaction: int = Field(default=10, description="Minimum number of messages before compaction is considered")
     summarization_chunk_threshold: float = Field(default=0.60, description="Fraction of context window above which summarization uses chunking")
 
+    # ── Compact-note lane (prompt_reload(compact, compact_note)) ──────────────
+    # The TWO knobs the lane's scope fence allows (architect §G / §C SCOPE 5).
+    # The third relevant number — the 900s deliberate-compact rate limit — is
+    # a HARDCODED module constant (``daemon/constants.py``), NOT a knob.
+    #
+    # B6 (env precedence): pydantic-settings gives INIT KWARGS priority over
+    # env vars, so a YAML value would silently defeat an operator's env
+    # override. Both knobs are therefore resolved EXPLICITLY in ``load_config``
+    # (env-first) — the ``_resolve_compaction_model`` / ``_resolve_proactive_enabled``
+    # pattern — and the resolved value is passed as an init kwarg so
+    # pydantic-settings never re-reads the env itself.
+    compact_note_max_chars: int = Field(
+        default=12000,
+        ge=1,
+        validation_alias=AliasChoices(
+            "compact_note_max_chars",
+            "COMPACTION_COMPACT_NOTE_MAX_CHARS",
+        ),
+        description=(
+            "Maximum length (characters) of a compact note accepted by "
+            "``prompt_reload(compact=True, compact_note=...)``. Default "
+            "12000 (architect §G — AUTHORITATIVE). A note over the cap is "
+            "REFUSED (``prompt_reload_note_over_cap``) — NEVER silently "
+            "truncated. The boundary is INCLUSIVE. Env: "
+            "COMPACTION_COMPACT_NOTE_MAX_CHARS."
+        ),
+    )
+    compact_note_prefilter_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "compact_note_prefilter_enabled",
+            "COMPACTION_COMPACT_NOTE_PREFILTER_ENABLED",
+        ),
+        description=(
+            "Kill-switch for the compact-note PRE-FILTER stage (the "
+            "deterministic, zero-LLM marker matcher). Default OFF — the "
+            "stage ships DORMANT. Env: "
+            "COMPACTION_COMPACT_NOTE_PREFILTER_ENABLED "
+            "(0/false/no/off disables). Deliberately NOT set in "
+            "config.yaml."
+        ),
+    )
+
     # ── Proactive-compaction kill-switch (Phase 1 of proactive-compaction-fix) ─
     # Single-source flag governing BOTH auto triggers: the pre-dispatch
     # proactive gate (P1) AND the 95% pre-call reactive hook (P1b,
@@ -7974,6 +8017,106 @@ def _resolve_proactive_enabled(
     return bool(yaml_value)
 
 
+# ── Compact-note lane resolvers (prompt_reload(compact, compact_note)) ────────
+#
+# B6 (the lane's env-precedence disclosure): pydantic-settings gives INIT
+# KWARGS priority over env vars. ``load_config`` passes the YAML section
+# through as init kwargs, so a YAML ``compaction.compact_note_max_chars:``
+# would silently defeat an operator's env override — and a YAML
+# ``compact_note_prefilter_enabled: true`` would silently defeat the
+# pre-filter's kill-switch. Both knobs are therefore resolved EXPLICITLY,
+# ENV-FIRST, and the resolved value is handed back as an init kwarg.
+
+
+#: The documented default for ``compaction.compact_note_max_chars``
+#: (architect §G — the architect's cap is AUTHORITATIVE).
+DEFAULT_COMPACT_NOTE_MAX_CHARS: int = 12000
+
+
+def _resolve_compact_note_max_chars(
+    yaml_value: Any,
+    *,
+    env_value: str | None,
+) -> int:
+    """Pure resolver for ``compaction.compact_note_max_chars``.
+
+    Precedence (documented contract):
+
+      1. ``COMPACTION_COMPACT_NOTE_MAX_CHARS`` (the env name) — when SET
+         and NON-EMPTY (empty/whitespace treated as UNSET, per
+         :func:`_clean_env_value` shell-style ``:-`` semantics), wins
+         outright.
+      2. ``yaml_value`` (``compaction.compact_note_max_chars``) — when the
+         env is unset/empty and the yaml value is a positive int.
+      3. Default ``12000`` (the architect's authoritative cap).
+
+    A malformed env value falls back to the yaml/default rather than
+    bricking boot — the note cap is an admission bound, not a
+    correctness invariant, and a daemon that refuses to boot over a
+    mistyped cap is a worse failure than a wrong cap (which only
+    changes a refusal boundary).
+    """
+    env_clean = _clean_env_value(env_value)
+    if env_clean is not None:
+        try:
+            parsed = int(env_clean)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid COMPACTION_COMPACT_NOTE_MAX_CHARS value %r — "
+                "expected an integer; falling back to the yaml/default "
+                "value.",
+                env_value,
+            )
+        else:
+            if parsed >= 1:
+                return parsed
+            logger.warning(
+                "Invalid COMPACTION_COMPACT_NOTE_MAX_CHARS value %r — "
+                "must be >= 1; falling back to the yaml/default value.",
+                env_value,
+            )
+    if isinstance(yaml_value, int) and not isinstance(yaml_value, bool):
+        if yaml_value >= 1:
+            return yaml_value
+    return DEFAULT_COMPACT_NOTE_MAX_CHARS
+
+
+def _resolve_compact_note_prefilter_enabled(
+    yaml_value: Any,
+    *,
+    env_value: str | None,
+) -> bool:
+    """Pure resolver for ``compaction.compact_note_prefilter_enabled``.
+
+    Precedence (documented contract):
+
+      1. ``COMPACTION_COMPACT_NOTE_PREFILTER_ENABLED`` — when SET and
+         NON-EMPTY, wins outright (the kill-switch must never be
+         defeatable by a YAML value).
+      2. ``yaml_value`` — when the env is unset/empty.
+      3. Default ``False`` — the pre-filter ships DORMANT.
+
+    An operator typo on the kill-switch MUST fail boot loud (the
+    house kill-switch convention — :func:`_parse_bool_switch` raises).
+    """
+    env_clean = _clean_env_value(env_value)
+    if env_clean is not None:
+        return _parse_bool_switch(
+            env_clean, setting="COMPACTION_COMPACT_NOTE_PREFILTER_ENABLED"
+        )
+    if isinstance(yaml_value, bool):
+        return yaml_value
+    if yaml_value is None:
+        return False  # documented default OFF (the stage ships dormant)
+    if isinstance(yaml_value, str):
+        if not yaml_value.strip():
+            return False
+        return _parse_bool_switch(
+            yaml_value, setting="compaction.compact_note_prefilter_enabled"
+        )
+    return bool(yaml_value)
+
+
 # ── service-tool knobs (Phase 1 of service-tool) ────────────────────────────
 #
 # Resolved-once cache (restart-to-flip; Shape-A precedent —
@@ -8898,6 +9041,25 @@ def load_config(config_path: str | None = None) -> Config:
         compaction_config.get("proactive_enabled"),
         ens_value=os.environ.get("ENSEMBLE_PROACTIVE_COMPACTION"),
         cpe_value=os.environ.get("COMPACTION_PROACTIVE_ENABLED"),
+    )
+    # Compact-note lane (prompt_reload(compact, compact_note)) — explicit
+    # resolution for BOTH lane knobs, mirroring the resolvers above. The
+    # init-kwarg-beats-env inversion would otherwise let a YAML
+    # ``compaction.compact_note_max_chars`` defeat an operator's env
+    # override, and a YAML ``compact_note_prefilter_enabled: true``
+    # defeat the pre-filter's kill-switch. The resolved values are
+    # handed back as init kwargs; pydantic-settings never re-reads the
+    # env itself. See ``_resolve_compact_note_max_chars`` /
+    # ``_resolve_compact_note_prefilter_enabled`` for the contracts.
+    compaction_config["compact_note_max_chars"] = _resolve_compact_note_max_chars(
+        compaction_config.get("compact_note_max_chars"),
+        env_value=os.environ.get("COMPACTION_COMPACT_NOTE_MAX_CHARS"),
+    )
+    compaction_config["compact_note_prefilter_enabled"] = (
+        _resolve_compact_note_prefilter_enabled(
+            compaction_config.get("compact_note_prefilter_enabled"),
+            env_value=os.environ.get("COMPACTION_COMPACT_NOTE_PREFILTER_ENABLED"),
+        )
     )
     # kv-ambient C2 (kv-ambient-awareness-fix) — explicit resolution
     # for ``context_messages.kv_ambient_system_default_enabled``

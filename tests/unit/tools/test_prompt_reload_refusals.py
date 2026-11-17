@@ -243,7 +243,10 @@ class TestNonAriLeg:
 
     def test_not_ari_absent_from_the_refused_set(self) -> None:
         assert "prompt_reload_not_ari" not in REFUSAL_CODES
-        assert len(REFUSAL_CODES) == 9
+        # RE-DERIVED by grep from the SOURCE frozenset
+        # (daemon/services/prompt_refresh.py), never copied: the
+        # compact-note lane adds FIVE refused codes (9 -> 14).
+        assert len(REFUSAL_CODES) == 14
         assert len(FAILURE_CODES) == 1
 
     def test_layer1_category_is_privileged_and_layer2_ari_exactly(self) -> None:

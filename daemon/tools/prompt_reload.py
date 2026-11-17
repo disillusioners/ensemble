@@ -9,6 +9,18 @@ path uses, diff old vs new, and evict the cached graph so the NEXT
 dispatch cold-restores onto the new persona (the bare-pop seam — the
 effect lands on the NEXT turn, never mid-turn).
 
+It ALSO owns the COMPACT-NOTE surface — ``prompt_reload(compact=True,
+compact_note="…")`` (architect §D/§G/§H). The note is the agent's own
+distillation of the conversation; the tool ARMS it and the compaction
+engine lands it at the NEXT QUIESCENT SEAM. The tool NEVER compacts and
+NEVER claims it did: ``ARMED is not COMPACTED`` (the honest tool
+contract). Arming is refused — never truncated, never swallowed — when
+the note is missing, over the cap, supplied without ``compact=true``,
+compaction is disabled, or the deliberate-compact rate limit is in
+force. The DEFERRED states (``armed — deferred (…), not compacted``)
+ride the arm-status surface verbatim; a deferral is never dressed up as
+a success receipt.
+
 Access posture — THREE layers, ALL required (notify-user precedent):
 
 1. The ``prompt-reload`` category is PRIVILEGED (entry #20 of
@@ -28,9 +40,12 @@ ON, read PER CALL here — a killed tool REFUSES typed
 shrinks with the switch).
 
 House rules honored: tools NEVER raise; every failure is a typed
-envelope string (REFUSED for codes 1-9, FAILED for the internal-error
-code 10); the ONE frozen INFO line fires on EVERY terminal path
-(D24/AM-15) with counts/flags only.
+envelope string (REFUSED for the 14 refused codes, FAILED for the
+internal-error code); the ONE frozen INFO line fires on EVERY terminal
+path (D24/AM-15) with counts/flags only. The compact-note surface
+carries its OWN content-free INFO line + its OWN outcome namespace
+(``armed_pending_seam``) — the prior lane's frozen marker set and its
+six-value INFO enum are NOT extended (D25 discipline).
 
 Next-turn semantics + provider cache invalidation are DISCLOSED in
 every success report (R9) and in the runbook
@@ -41,7 +56,9 @@ every success report (R9) and in the runbook
 from __future__ import annotations
 
 import logging
+import math
 import os
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import BaseModel, Field
@@ -107,6 +124,344 @@ def _not_ari(agent_id: str) -> str:
         f"ERROR: prompt_reload is available to the "
         f"{PROMPT_RELOAD_AUTHORIZED_AGENT} agent only "
         f"(caller: {agent_id or 'unknown'})."
+    )
+
+
+# ── Compact-note surface helpers (architect §G / §H) ──────────────────────────
+#
+# The compact-note surface carries its OWN outcome namespace
+# (``armed_pending_seam``) and its OWN content-free INFO line — the prior
+# lane's frozen marker set and six-value INFO enum are NOT extended
+# (D25 discipline).
+
+
+def _compaction_config(manager: Any) -> Any:
+    """The manager's ``CompactionConfig`` (or ``None`` when unavailable)."""
+    return getattr(getattr(manager, "config", None), "compaction", None)
+
+
+def _compact_note_cap(manager: Any) -> int:
+    """The compact-note admission cap, in CHARACTERS.
+
+    ``12000`` (the architect's AUTHORITATIVE cap) unless the operator's
+    resolved ``CompactionConfig.compact_note_max_chars`` says otherwise.
+    A note over the cap is REFUSED — never truncated.
+    """
+    from ..config import DEFAULT_COMPACT_NOTE_MAX_CHARS
+
+    cap = getattr(_compaction_config(manager), "compact_note_max_chars", None)
+    if isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1:
+        return cap
+    return DEFAULT_COMPACT_NOTE_MAX_CHARS
+
+
+def _compaction_enabled(manager: Any) -> bool:
+    """Whether compaction is enabled at all (``CompactionConfig.enabled``).
+
+    Defaults to ``True`` when the config is unreachable — the refusal
+    path exists to catch an operator who DISABLED compaction, not to
+    invent a refusal.
+    """
+    enabled = getattr(_compaction_config(manager), "enabled", None)
+    if enabled is None:
+        return True
+    return bool(enabled)
+
+
+def _prefilter_enabled(manager: Any) -> bool:
+    """The compact-note PRE-FILTER kill-switch state (default OFF)."""
+    return bool(
+        getattr(_compaction_config(manager), "compact_note_prefilter_enabled", False)
+    )
+
+
+def _rate_limit_remaining_seconds(
+    last_applied_at: str,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Seconds remaining on the deliberate-compact rate limit.
+
+    The clock is ``compact_note_last_applied_at`` — DELIBERATE (note-guided)
+    compactions ONLY. Returns ``0`` when the window is free.
+
+    A malformed clock fails OPEN (returns ``0``): the rate limit is an
+    anti-abuse bound, and a corrupt clock must not strand an arm
+    permanently.
+    """
+    from ..constants import DELIBERATE_COMPACT_RATE_LIMIT_S
+
+    if not last_applied_at:
+        return 0
+    try:
+        last = datetime.fromisoformat(str(last_applied_at))
+    except (TypeError, ValueError):
+        return 0
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    elapsed = (now - last).total_seconds()
+    remaining = DELIBERATE_COMPACT_RATE_LIMIT_S - elapsed
+    if remaining <= 0:
+        return 0
+    return int(math.ceil(remaining))
+
+
+def _render_armed_receipt(
+    *,
+    note_chars: int,
+    note_sha12: str,
+    cap: int,
+    superseded_previous: bool = False,
+    previous_sha12: str = "",
+    prefilter_enabled: bool = False,
+    status_line: str | None = None,
+) -> str:
+    """The ARMED receipt — what the agent actually sees.
+
+    Content-free: the note's LENGTH and sha256 PREFIX only, never the note
+    body. It NEVER claims the compaction ran — the outcome token is
+    ``armed_pending_seam`` and the closing line says so explicitly.
+    """
+    from ..services.prompt_refresh import (
+        ARMED_EXPECTED_SEAM_CLAUSE,
+        ARMED_NOT_YET_COMPACTED_LINE,
+        ARMED_SEAM_STATEMENT,
+        OUTCOME_ARMED_PENDING_SEAM,
+    )
+
+    lines: list[str] = [
+        f"prompt_reload {OUTCOME_ARMED_PENDING_SEAM} — compact note ARMED; "
+        f"the compaction happens at your next turn boundary.",
+        f"outcome={OUTCOME_ARMED_PENDING_SEAM}",
+        f"note_chars={note_chars}",
+        f"note_sha256={note_sha12}",
+        f"cap={cap}",
+        f"superseded_previous={str(bool(superseded_previous)).lower()}",
+    ]
+    if superseded_previous:
+        lines.append(f"previous_note_sha256={previous_sha12}")
+    lines.append(f"prefilter_enabled={str(bool(prefilter_enabled)).lower()}")
+    lines.append(f"seam={ARMED_SEAM_STATEMENT}; {ARMED_EXPECTED_SEAM_CLAUSE}")
+    if status_line:
+        lines.append(status_line)
+    lines.append(ARMED_NOT_YET_COMPACTED_LINE)
+    return "\n".join(lines)
+
+
+def _instance_repository(manager: Any) -> Any:
+    """The manager's instance repository (the arm carrier's writer)."""
+    return getattr(manager, "_instance_repository", None)
+
+
+def _compact_note_refusal(
+    manager: Any,
+    instance_id: str,
+    agent_id: str,
+    *,
+    code: str,
+    message: str,
+    note: str,
+) -> str:
+    """One content-free INFO line + the house REFUSED envelope.
+
+    A refusal is a DESIGN OUTCOME, not an error (docs/guidelines/README.md
+    item 3) — it rides the REFUSED envelope, never the FAILED one. The
+    message NEVER quotes the note body (P4) and NEVER claims a compaction
+    was requested, armed, or performed.
+    """
+    from ..services.prompt_refresh import (
+        OUTCOME_REFUSED,
+        compact_note_sha256_12,
+        format_compact_note_info_line,
+    )
+
+    logger.info(
+        format_compact_note_info_line(
+            instance_id=instance_id,
+            agent_id=agent_id,
+            outcome=OUTCOME_REFUSED,
+            code=code,
+            note_chars=len(note),
+            note_sha256_12=compact_note_sha256_12(note),
+            prefilter_enabled=_prefilter_enabled(manager),
+        )
+    )
+    return _refusal(code, message)
+
+
+def _handle_compact_note(
+    manager: Any,
+    instance_id: str,
+    agent_id: str,
+    *,
+    compact: bool,
+    compact_note: str,
+) -> str | None:
+    """The compact-note surface — ARM or REFUSE. NEVER compacts.
+
+    Returns the agent-facing string (the ARMED receipt or a REFUSED /
+    FAILED envelope), or ``None`` when the call is NOT on the
+    compact-note surface at all (``compact=false`` with an absent or
+    whitespace-only note) — that is today's shape and stays
+    byte-identical.
+
+    The tool body structurally CANNOT observe a compaction: it writes the
+    arm and returns.
+    """
+    from ..services.prompt_refresh import (
+        ARMED_PENDING_SEAM,
+        CODE_COMPACT_DISABLED,
+        CODE_COMPACT_RATE_LIMITED,
+        CODE_INTERNAL_ERROR,
+        CODE_NOTE_OVER_CAP,
+        CODE_NOTE_REQUIRES_COMPACT,
+        CODE_NOTE_REQUIRED,
+        DEFERRED_STATE_TEXT,
+        OUTCOME_ARMED_PENDING_SEAM,
+        OUTCOME_REFUSED,
+        arm_compact_note,
+        compact_note_sha256_12,
+        format_compact_note_info_line,
+        read_compact_note_state,
+    )
+
+    note = compact_note or ""
+    if not compact:
+        if not note.strip():
+            # Today's shape — byte-identical (the still-armed status line
+            # rides only the ARMED receipt; the plain receipt is frozen).
+            return None
+        return _compact_note_refusal(
+            manager,
+            instance_id,
+            agent_id,
+            code=CODE_NOTE_REQUIRES_COMPACT,
+            message=(
+                "a compact_note was supplied with compact=false — the note "
+                "is only meaningful together with compact=true; re-issue "
+                "the call with compact=true. Nothing was armed."
+            ),
+            note=note,
+        )
+
+    # ── compact=true ─────────────────────────────────────────────────────────
+    if not note.strip():
+        return _compact_note_refusal(
+            manager,
+            instance_id,
+            agent_id,
+            code=CODE_NOTE_REQUIRED,
+            message=(
+                "a compact note is REQUIRED when compact=true — the note is "
+                "the point, not an option; supply compact_note with "
+                "non-empty text. Nothing was armed."
+            ),
+            note=note,
+        )
+
+    cap = _compact_note_cap(manager)
+    note_chars = len(note)
+    if note_chars > cap:
+        return _compact_note_refusal(
+            manager,
+            instance_id,
+            agent_id,
+            code=CODE_NOTE_OVER_CAP,
+            message=(
+                f"the compact note is {note_chars} characters, over the "
+                f"{cap}-character cap — the note is NEVER truncated; "
+                f"shorten it and re-arm. Nothing was armed."
+            ),
+            note=note,
+        )
+
+    if not _compaction_enabled(manager):
+        return _compact_note_refusal(
+            manager,
+            instance_id,
+            agent_id,
+            code=CODE_COMPACT_DISABLED,
+            message=(
+                "compaction is DISABLED in this deployment — arming a note "
+                "that can never land would strand it; enable compaction "
+                "(CompactionConfig.enabled) and re-arm. Nothing was armed."
+            ),
+            note=note,
+        )
+
+    repo = _instance_repository(manager)
+    state = read_compact_note_state(repo, instance_id)
+
+    remaining = _rate_limit_remaining_seconds(state.last_applied_at)
+    if remaining > 0:
+        from ..constants import DELIBERATE_COMPACT_RATE_LIMIT_S
+
+        return _compact_note_refusal(
+            manager,
+            instance_id,
+            agent_id,
+            code=CODE_COMPACT_RATE_LIMITED,
+            message=(
+                f"the deliberate-compact rate limit is in force — "
+                f"{remaining}s remaining before another note-guided "
+                f"compaction may be armed (the limit is "
+                f"{DELIBERATE_COMPACT_RATE_LIMIT_S}s). Nothing was armed; "
+                f"try again after the window."
+            ),
+            note=note,
+        )
+
+    # ── ARM ──────────────────────────────────────────────────────────────────
+    # A second note while one is armed REPLACES the first WITH
+    # DISCLOSURE (``superseded_previous`` + the prior note's sha256
+    # prefix) — never a refusal: a refusal would strand a mistyped note
+    # with no un-arm path.
+    superseded_previous = bool(state.armed)
+    previous_sha12 = state.sha256_12 or (
+        compact_note_sha256_12(state.note) if state.note else ""
+    )
+    status_line: str | None = None
+    if superseded_previous:
+        status_line = DEFERRED_STATE_TEXT.get(state.deferred, ARMED_PENDING_SEAM)
+
+    if repo is None or not arm_compact_note(repo, instance_id, note):
+        # The arm could NOT be written — never claim an arm that does not
+        # exist. This is an INTERNAL failure (not a design outcome), so it
+        # rides the single FAILED code.
+        logger.error(
+            "prompt_reload compact-note: arm write failed for instance=%s",
+            str(instance_id)[:8],
+        )
+        return _failure(
+            CODE_INTERNAL_ERROR,
+            "the compact note could not be armed (the instance metadata "
+            "carrier rejected the write; logged server-side); nothing was "
+            "armed",
+        )
+
+    note_sha12 = compact_note_sha256_12(note)
+    logger.info(
+        format_compact_note_info_line(
+            instance_id=instance_id,
+            agent_id=agent_id,
+            outcome=OUTCOME_ARMED_PENDING_SEAM,
+            code=None,
+            note_chars=note_chars,
+            note_sha256_12=note_sha12,
+            superseded_previous=superseded_previous,
+            prefilter_enabled=_prefilter_enabled(manager),
+            deferred=state.deferred,
+        )
+    )
+    return _render_armed_receipt(
+        note_chars=note_chars,
+        note_sha12=note_sha12,
+        cap=cap,
+        superseded_previous=superseded_previous,
+        previous_sha12=previous_sha12,
+        prefilter_enabled=_prefilter_enabled(manager),
+        status_line=status_line,
     )
 
 
@@ -236,10 +591,40 @@ def create_prompt_reload_tools(
                 ),
             ),
         ]
+        compact: Annotated[
+            bool,
+            Field(
+                default=False,
+                description=(
+                    "Arm a compact note for the NEXT quiet seam. The note "
+                    "is REQUIRED when compact=true (compact=false with a "
+                    "note is refused — ignoring it would be dishonest). "
+                    "The tool ARMS the note; the compaction happens at "
+                    "your next turn boundary, never mid-turn. Optional; "
+                    "default false."
+                ),
+            ),
+        ]
+        compact_note: Annotated[
+            str,
+            Field(
+                default="",
+                description=(
+                    "Your own distillation of this conversation — it rides "
+                    "verbatim into the compacted context, at the GLOBAL "
+                    "OVERVIEW slot. Max 12000 characters (over the cap is "
+                    "refused, never truncated). Optional; default empty."
+                ),
+            ),
+        ]
 
     @register_tool_category(PROMPT_RELOAD_CATEGORY_KEY)
     @tool(args_schema=PromptReloadInput)
-    async def prompt_reload(force: bool = False) -> str:
+    async def prompt_reload(
+        force: bool = False,
+        compact: bool = False,
+        compact_note: str = "",
+    ) -> str:
         """Refresh MY system prompt from the active agent definition; the new persona takes effect on my NEXT turn. Use tool_help("prompt_reload") for details."""
         try:
             # Layer 3 — the in-body agent gate (auth-first: an
@@ -277,6 +662,20 @@ def create_prompt_reload_tools(
                 )
                 _emit_info_line(result, caller_instance_id, caller_agent_id)
                 return _refusal(CODE_DISABLED, f"kill-switch {KILL_SWITCH_ENV} is OFF")
+
+            # ── Compact-note surface ────────────────────────────────────────
+            # ``compact=false`` + no note → today's shape (byte-identical,
+            # returned as ``None``). ``compact=true`` → ARM or REFUSE. The
+            # tool NEVER compacts and NEVER claims it did.
+            compact_reply = _handle_compact_note(
+                manager,
+                caller_instance_id,
+                caller_agent_id,
+                compact=compact,
+                compact_note=compact_note,
+            )
+            if compact_reply is not None:
+                return compact_reply
 
             result = await manager.refresh_instance_prompt(
                 caller_instance_id, force=force
@@ -341,6 +740,25 @@ What it does
 - Returns an abbreviated diff + provenance. When the old persona
   cannot be proven, the report says persona_diff=unavailable rather
   than guessing.
+
+Compact notes (compact + compact_note)
+--------------------------------------
+- compact=true ARMS a note you wrote yourself — your own distillation
+  of this conversation. The note rides VERBATIM into the compacted
+  context at the GLOBAL OVERVIEW slot; the compaction happens at your
+  NEXT turn boundary (the quiescent pre-dispatch gate), NEVER
+  mid-turn.
+- The note is REQUIRED when compact=true, and a note supplied with
+  compact=false is refused (ignoring it would be dishonest).
+- The note is capped (12000 characters). An over-cap note is REFUSED
+  with the length and the cap — it is NEVER silently truncated.
+- ARMED is not COMPACTED. The receipt says outcome=armed_pending_seam
+  and names the three gates that can defer the seam (the
+  minimum-compaction floor, the 60s anti-refire window, and the
+  deliberate-compact rate limit). A second note while one is armed
+  REPLACES the first, with a disclosure of the prior note's digest.
+- The note is never echoed in a log — only its length and digest are
+  observable.
 
 Accepted consequences (disclosed, by design)
 --------------------------------------------
