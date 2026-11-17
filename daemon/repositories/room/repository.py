@@ -59,7 +59,7 @@ thread. Async callers MUST go through
 ``instance_messaging.py:1179-1184``). NEVER call these methods
 directly on the event loop (house constraint §4, v0.27.14-class).
 
-**Why this file is large (~1,544 lines).** The 1,000–3,000-line band
+**Why this file is large (~1,635 lines).** The 1,000–3,000-line band
 requires a why-large note: ONE SQLModel table family with ONE
 transactional writer per table and the ONE purge transaction are
 co-located here on purpose — the transactional boundaries stay

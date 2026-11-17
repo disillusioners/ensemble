@@ -75,7 +75,7 @@ House rules honored here:
 * Every message-path DB touch is OFF-LOOP (``asyncio.to_thread`` via
   the room service — the v0.27.14 event-loop discipline).
 
-**Why this file is large (~1,036 lines).** The 1,000–3,000-line band
+**Why this file is large (~1,195 lines).** The 1,000–3,000-line band
 requires a why-large note: the five room verbs share ONE
 authorization gate + refusal envelope — splitting them puts the gate
 ordering across a module boundary where the compiler cannot hold it.
