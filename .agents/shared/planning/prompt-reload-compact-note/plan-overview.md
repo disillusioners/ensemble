@@ -2,7 +2,7 @@
 
 Date: 2026-11-16 · **Rev 3: 2026-11-17** (architect fold + final consumption ruling)
 Author: planner-side worker via plan-creation skill (Rev 1 engine-agnostic half · Rev 2 leader-ruling amendment · Rev 3 architect fold)
-Status: **Ready for Council (currency pass Rev 10, 2026-11-17)** — the build landed at HEAD `faf2edd9f` against the architect's v1.5 (`206c4fe0c`, the APPEND-method pivot addendum). The plan text below was re-anchored to the shipped truth (the append method); the **seam-era** items (T3/T4 hooks, the armed-aware floor, the three-gate table, the seam-era receipts, the pre-filter) are marked **⛔ SUPERSEDED by Rev 10**. The ownership chain (validator 82/0) is UNCHANGED and still PASSes after this pass (now 2 packs / 17 legs).
+Status: **Ready for Council (currency pass Rev 10, 2026-11-17)** — the build landed at HEAD `fee1357df` (closeout build) against the architect's v1.5 (`206c4fe0c`, the APPEND-method pivot addendum). The plan text below was re-anchored to the shipped truth (the append method); the **seam-era** items (T3/T4 hooks, the armed-aware floor, the three-gate table, the seam-era receipts, the pre-filter) are marked **⛔ SUPERSEDED by Rev 10**. The ownership chain is UNCHANGED and still PASSes after this pass: **validator 76 checks / 0 FAIL (2 packs / 17 legs)**.
 Branch: `feature/prompt-reload-compact-note` (worktree `/home/nea/ensemble-src-wt-prompt-reload-compact`, base tip `858a85e31`)
 Prior art: `.agents/shared/planning/prompt-reload/` (the original prompt_reload lane — ledger format, refusal-vocabulary conventions, honesty discipline)
 
