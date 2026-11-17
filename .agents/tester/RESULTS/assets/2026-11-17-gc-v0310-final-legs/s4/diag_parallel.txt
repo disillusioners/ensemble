@@ -1,0 +1,53 @@
+bringing up nodes...
+bringing up nodes...
+
+F                                                                        [100%]
+=================================== FAILURES ===================================
+[gw0] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-group-chat-release/.venv/bin/python
+E   assert 2.0169925700174645 < 2.0
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.registry:registry.py:1589 Tool config validation: Agent 'maintenancer': deny entry 'git_commit' is neither a known category nor a known tool
+WARNING  daemon.tools.memoir_knob:memoir_knob.py:169 [Memoir] ENSEMBLE_MEMOIR_ENABLED is unset — memoir surface ENABLED by default; set `ENSEMBLE_MEMOIR_ENABLED=false` to disable
+/home/nea/ensemble-src-wt-group-chat-release/tests/unit/tools/test_spawn_room_join.py:285: assert 2.0169925700174645 < 2.0
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-group-chat-release/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/unit/tools/test_spawn_room_join.py::TestJoinHappyPath::test_tier3_agent_fallback_in_result_and_instant
+tests/unit/tools/test_spawn_room_join.py::TestJoinHappyPath::test_tier3_agent_fallback_in_result_and_instant
+tests/unit/tools/test_spawn_room_join.py::TestJoinHappyPath::test_tier3_agent_fallback_in_result_and_instant
+tests/unit/tools/test_spawn_room_join.py::TestJoinHappyPath::test_tier3_agent_fallback_in_result_and_instant
+tests/unit/tools/test_spawn_room_join.py::TestJoinHappyPath::test_tier3_agent_fallback_in_result_and_instant
+tests/unit/tools/test_spawn_room_join.py::TestJoinHappyPath::test_tier3_agent_fallback_in_result_and_instant
+tests/unit/tools/test_spawn_room_join.py::TestJoinHappyPath::test_tier3_agent_fallback_in_result_and_instant
+  /home/nea/ensemble-src-wt-group-chat-release/daemon/tools/instance.py:2439: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    is_async = asyncio.iscoroutinefunction(original_func)
+
+tests/unit/tools/test_spawn_room_join.py: 12 warnings
+  /home/nea/ensemble-src-wt-group-chat-release/daemon/tools/instance.py:2378: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(wrapped_func):
+
+tests/unit/tools/test_spawn_room_join.py::TestJoinHappyPath::test_tier3_agent_fallback_in_result_and_instant
+  /home/nea/ensemble-src-wt-group-chat-release/daemon/tools/instance.py:2660: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    is_async = asyncio.iscoroutinefunction(original_func)
+
+tests/unit/tools/test_spawn_room_join.py::TestJoinHappyPath::test_tier3_agent_fallback_in_result_and_instant
+tests/unit/tools/test_spawn_room_join.py::TestJoinHappyPath::test_tier3_agent_fallback_in_result_and_instant
+tests/unit/tools/test_spawn_room_join.py::TestJoinHappyPath::test_tier3_agent_fallback_in_result_and_instant
+tests/unit/tools/test_spawn_room_join.py::TestJoinHappyPath::test_tier3_agent_fallback_in_result_and_instant
+  /home/nea/ensemble-src-wt-group-chat-release/daemon/tools/instance.py:2567: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(original_func):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/tools/test_spawn_room_join.py::TestJoinHappyPath::test_tier3_agent_fallback_in_result_and_instant
+1 failed, 33 warnings in 12.04s

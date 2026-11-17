@@ -1,0 +1,38 @@
+=== STEP 6: LIVE-UNTOUCHED CONFIRMATION ===
+-- [1] live unit (system-level; --user returns MainPID=0 — the unit lives in the SYSTEM manager) --
+MainPID=700595
+NRestarts=0
+ActiveState=active
+SubState=running
+ActiveEnterTimestamp=Sun 2026-11-15 06:12:13 UTC
+-- [1b] commissioned form (systemctl --user) --
+MainPID=0
+NRestarts=0
+ActiveEnterTimestamp=
+-- [2] state.json key fields --
+   current = 'v0.30.12'
+   previous = 'v0.30.9'
+   in_flight = None
+   pending_op = None
+   pending_restart = None
+   history_len = 393
+   last_history_ts = 2026-11-17T14:39:07Z
+   last_history_event = mcp_server_state
+-- [3] staged release dir integrity --
+5473a25f759ec6ef21fd85ebfb76939658ff4fa4fe9b73e07870ce17d9514743  /home/nea/agents-ensemble/releases/v0.31.0/ensemble-prod
+   manifest.json mtime=1794924560 size=745806
+   ensemble-prod  mtime=1794924445 size=82976720
+-- [4] current release pointer --
+/home/nea/agents-ensemble/releases/v0.30.12
+-- port-claims residue --
+total 0
+drwx------ 2 nea nea  40 Nov 17 14:39 .
+drwx------ 5 nea nea 160 Nov 17 14:22 ..
+-- listener 19101 --
+   CONFIRMED: nothing listening on 19101
+-- scratch processes --
+949599 /bin/sh -c set -u . /tmp/gc_v0310_smoke_state.env T="$EVID/s5-transcript.txt" log(){ printf '### %s :: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$T"; } { echo "=== STEP 6: LIVE-UNTOUCHED CONFIRMATION ===" echo "-- [1] live unit (system-level; --user returns MainPID=0 — the unit lives in the SYSTEM manager) --" systemctl show ensemble-main.service -p MainPID -p NRestarts -p ActiveEnterTimestamp -p ActiveState -p SubState echo "-- [1b] commissioned form (systemctl --user) --" XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus systemctl --user show ensemble-main.service -p MainPID -p NRestarts -p ActiveEnterTimestamp echo "-- [2] state.json key fields --" python3 -c " import json;d=json.load(open('/home/nea/agents-ensemble/releases/state.json')) for k in ('current','previous','in_flight','pending_op','pending_restart'): print('   %s = %r'%(k,d.get(k))) print('   history_len =',len(d.get('history',[]))) print('   last_history_ts =',d.get('history',[])[-1]['ts'] if d.get('history') else None) print('   last_history_event =',d.get('history',[])[-1]['event'] if d.get('history') else None) " echo "-- [3] staged release dir integrity --" sha256sum /home/nea/agents-ensemble/releases/v0.31.0/ensemble-prod stat -c '   manifest.json mtime=%Y size=%s' /home/nea/agents-ensemble/releases/v0.31.0/manifest.json stat -c '   ensemble-prod  mtime=%Y size=%s' /home/nea/agents-ensemble/releases/v0.31.0/ensemble-prod echo "-- [4] current release pointer --" readlink -f /home/nea/agents-ensemble/current echo "-- port-claims residue --" ls -la /run/user/1000/ensemble-port-claims/ 2>&1 echo "-- listener 19101 --" ss -ltn | grep 19101 || echo "   CONFIRMED: nothing listening on 19101" echo "-- scratch processes --" pgrep -af 'gc_v0310_smoke' || echo "   CONFIRMED: no gc_v0310_smoke process remains" echo "-- /tmp scratch roots --" ls -d /tmp/gc_v0310_smoke.* 2>/dev/null | wc -l echo "-- disk --" df -h / | tail -1 } > "$EVID/live-untouched.txt" 2>&1 cat "$EVID/live-untouched.txt" >> "$T" cat "$EVID/live-untouched.txt"
+-- /tmp scratch roots --
+0
+-- disk --
+/dev/sda1       230G  218G   13G  95% /

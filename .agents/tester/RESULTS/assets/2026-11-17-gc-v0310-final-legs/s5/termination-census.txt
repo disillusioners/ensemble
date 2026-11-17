@@ -1,0 +1,15 @@
+-- SIGTERM/SIGKILL occurrences (stdout then stderr) --
+/tmp/gc_v0310_smoke.iqFFqM/boot.stdout.txt:0
+/tmp/gc_v0310_smoke.iqFFqM/boot.stderr.txt:0
+-- word 'killed' in stderr --
+0
+-- reaped=<n> histogram --
+      1 reaped=0
+-- boot_subprocess_sweep / stale-subprocess mentions --
+0
+-- bash reaper master-switch lines --
+14:34:53 - daemon.services.bash_spawn_reaper - INFO - bash reaper: master switch OFF — boot reconcile is a no-op (no repository access)
+14:35:28 - daemon.services.bash_spawn_reaper - INFO - bash reaper: master switch OFF — shutdown durable sweep is a no-op (no repository access)
+-- RAM guard mentions --
+1
+-- lines with an actual termination verb --

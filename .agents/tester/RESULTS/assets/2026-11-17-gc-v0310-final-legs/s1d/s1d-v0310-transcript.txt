@@ -1,0 +1,122 @@
+=== START 2026-11-17T13:56:13Z ===
+--- git status --porcelain (START) ---
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release rev-parse HEAD
+0181dadbf8641c60d7158ad59edfa4a4b36944c8
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release rev-parse v0.31.0^{commit}
+0181dadbf8641c60d7158ad59edfa4a4b36944c8
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release cat-file -t v0.31.0
+tag
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release rev-parse v0.31.0
+c47d3858f934be92a981b7668a98fa2a0efcf150
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release rev-parse v0.30.12^{commit}
+cf43ac00d0dfcaca2bd48d2025b95a6301c35b78
+rc=0
+
+$ bash -c git -C /home/nea/ensemble-src-wt-group-chat-release merge-base --is-ancestor v0.30.12 v0.31.0; echo rc=$?
+rc=0
+rc=0
+
+$ bash -c git -C /home/nea/ensemble-src-wt-group-chat-release status --porcelain | wc -l
+0
+rc=0
+
+$ timeout 30 git -C /home/nea/ensemble-src-wt-group-chat-release ls-remote origin refs/tags/v0.31.0
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release diff --stat v0.30.12 v0.31.0 -- agents/.prompt-artifacts.sha256
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release diff --exit-code v0.30.12 v0.31.0 -- agents/.prompt-artifacts.sha256
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release diff --stat v0.30.12 v0.31.0 -- agents/*.md
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release diff --exit-code v0.30.12 v0.31.0 -- agents/*.md
+rc=0
+
+$ bash -c git -C /home/nea/ensemble-src-wt-group-chat-release show v0.30.12:agents/.prompt-artifacts.sha256 | sha256sum
+50561606a464df3d9484b93f78b1eb6880cc594badf27d69502d8d1f74c54979  -
+rc=0
+
+$ bash -c git -C /home/nea/ensemble-src-wt-group-chat-release show v0.31.0:agents/.prompt-artifacts.sha256 | sha256sum
+50561606a464df3d9484b93f78b1eb6880cc594badf27d69502d8d1f74c54979  -
+rc=0
+
+$ bash -c sha256sum /home/nea/ensemble-src-wt-group-chat-release/agents/.prompt-artifacts.sha256
+50561606a464df3d9484b93f78b1eb6880cc594badf27d69502d8d1f74c54979  /home/nea/ensemble-src-wt-group-chat-release/agents/.prompt-artifacts.sha256
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release diff --exit-code v0.31.0 -- agents/.prompt-artifacts.sha256
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release rev-parse v0.30.12:agents/.prompt-artifacts.sha256
+cb51a277bea6334100f7f6139adfe6bef8512f7a
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release rev-parse v0.31.0:agents/.prompt-artifacts.sha256
+cb51a277bea6334100f7f6139adfe6bef8512f7a
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release rev-parse HEAD:agents/.prompt-artifacts.sha256
+cb51a277bea6334100f7f6139adfe6bef8512f7a
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release diff --stat v0.30.12 v0.31.0 -- agents/*.md
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release diff --exit-code v0.30.12 v0.31.0 -- agents/*.md
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release log --oneline v0.30.12..v0.31.0 -- agents/.prompt-artifacts.sha256
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release log --oneline v0.30.12..v0.31.0 -- agents/*.md
+rc=0
+
+$ bash -c git -C /home/nea/ensemble-src-wt-group-chat-release diff --name-only 'f0fa135e7^' 'f0fa135e7' -- 'agents/*.md'
+agents/ari/rule.md
+agents/ari/tools_note.md
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release diff --name-status v0.30.12 v0.31.0 -- agents/
+M	agents/ari/meta.json
+M	agents/leader/meta.json
+M	agents/sonic-leader/meta.json
+M	agents/video-capturer/meta.json
+M	agents/video-editor/meta.json
+M	agents/video-producer/meta.json
+M	agents/video-verifier/meta.json
+M	agents/worker/meta.json
+rc=0
+
+$ wc -l /home/nea/ensemble-src-wt-group-chat-release/agents/.prompt-artifacts.sha256
+217 /home/nea/ensemble-src-wt-group-chat-release/agents/.prompt-artifacts.sha256
+rc=0
+
+$ awk 'NF!=2 || $1 !~ /^[0-9a-f]{64}$/' ...
+bad=0
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release merge-base --is-ancestor e559b4b80 v0.31.0; echo rc=$?
+rc=1
+outer-rc=0
+
+$ cd /home/nea/ensemble-src-wt-group-chat-release && timeout 120 .venv/bin/python scripts/protection/generate_prompt_artifact_baseline.py --check --tree /home/nea/ensemble-src-wt-group-chat-release
+PROMPT-BASELINE: OK — 217 versioned artifact(s) match .prompt-artifacts.sha256
+rc=0
+
+$ git -C /home/nea/ensemble-src-wt-group-chat-release status --porcelain (END)
+rc=0
+
+=== END 2026-11-17T13:56:59Z ===

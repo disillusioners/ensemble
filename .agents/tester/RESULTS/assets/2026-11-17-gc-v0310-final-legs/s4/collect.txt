@@ -1,0 +1,31 @@
+tests/unit/repositories/test_room_boot_f1_pin.py: 8
+tests/unit/repositories/test_room_capability_row_pin.py: 5
+tests/unit/repositories/test_room_close_producer.py: 9
+tests/unit/repositories/test_room_gc_repository.py: 6
+tests/unit/repositories/test_room_membership.py: 40
+tests/unit/repositories/test_room_migration_runner_execution.py: 16
+tests/unit/repositories/test_room_models_and_migration.py: 13
+tests/unit/repositories/test_room_repository.py: 52
+tests/unit/routers/test_room_http_api.py: 16
+tests/unit/services/test_joined_room_context.py: 16
+tests/unit/services/test_lifecycle_room_join.py: 4
+tests/unit/services/test_room_delivery.py: 26
+tests/unit/services/test_room_delivery_refactor_pins.py: 10
+tests/unit/services/test_room_gc_sweeper.py: 25
+tests/unit/services/test_room_naming.py: 17
+tests/unit/services/test_room_nudge.py: 42
+tests/unit/services/test_room_p6_wiring_pin.py: 6
+tests/unit/services/test_room_post_cap.py: 12
+tests/unit/services/test_spawn_room_join_broadcast.py: 7
+tests/unit/tools/test_room_close.py: 9
+tests/unit/tools/test_room_post_cap.py: 6
+tests/unit/tools/test_room_registration.py: 28
+tests/unit/tools/test_room_tools.py: 26
+tests/unit/tools/test_spawn_room_join.py: 22
+
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-group-chat-release/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html

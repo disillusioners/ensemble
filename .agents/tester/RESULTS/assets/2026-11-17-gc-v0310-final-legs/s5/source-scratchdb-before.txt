@@ -1,0 +1,19 @@
+### SOURCE ensemble_dev_scratch SNAPSHOT (pre-boot) ###
+-- db owner --
+/tmp/gc_v0310_smoke_evidence.dCM1Wx/s5-stage-c.sh: line 32: psql -h 127.0.0.1 -p 5432 -U ensemble_dev_app -d ensemble_dev_scratch -w -Atc: command not found
+-- schema owner --
+/tmp/gc_v0310_smoke_evidence.dCM1Wx/s5-stage-c.sh: line 33: psql -h 127.0.0.1 -p 5432 -U ensemble_dev_app -d ensemble_dev_scratch -w -Atc: command not found
+-- table count --
+/tmp/gc_v0310_smoke_evidence.dCM1Wx/s5-stage-c.sh: line 34: psql -h 127.0.0.1 -p 5432 -U ensemble_dev_app -d ensemble_dev_scratch -w -Atc: command not found
+-- owners histogram --
+/tmp/gc_v0310_smoke_evidence.dCM1Wx/s5-stage-c.sh: line 35: psql -h 127.0.0.1 -p 5432 -U ensemble_dev_app -d ensemble_dev_scratch -w -Atc: command not found
+-- room table columns --
+/tmp/gc_v0310_smoke_evidence.dCM1Wx/s5-stage-c.sh: line 36: psql -h 127.0.0.1 -p 5432 -U ensemble_dev_app -d ensemble_dev_scratch -w -Atc: command not found
+-- room row counts --
+/tmp/gc_v0310_smoke_evidence.dCM1Wx/s5-stage-c.sh: line 37: psql -h 127.0.0.1 -p 5432 -U ensemble_dev_app -d ensemble_dev_scratch -w -Atc: command not found
+-- role_table_grants for ensemble_dev_app --
+/tmp/gc_v0310_smoke_evidence.dCM1Wx/s5-stage-c.sh: line 38: psql -h 127.0.0.1 -p 5432 -U ensemble_dev_app -d ensemble_dev_scratch -w -Atc: command not found
+-- role_usage_grants for ensemble_dev_app --
+/tmp/gc_v0310_smoke_evidence.dCM1Wx/s5-stage-c.sh: line 39: psql -h 127.0.0.1 -p 5432 -U ensemble_dev_app -d ensemble_dev_scratch -w -Atc: command not found
+-- schemas --
+/tmp/gc_v0310_smoke_evidence.dCM1Wx/s5-stage-c.sh: line 40: psql -h 127.0.0.1 -p 5432 -U ensemble_dev_app -d ensemble_dev_scratch -w -Atc: command not found

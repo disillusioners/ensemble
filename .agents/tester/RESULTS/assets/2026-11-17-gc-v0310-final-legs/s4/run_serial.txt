@@ -1,0 +1,29 @@
+........................................................................ [ 17%]
+........................................................................ [ 34%]
+........................................................................ [ 51%]
+........................................................................ [ 68%]
+........................................................................ [ 85%]
+.............................................................            [100%]
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-group-chat-release/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/unit/tools/test_spawn_room_join.py: 175 warnings
+  /home/nea/ensemble-src-wt-group-chat-release/daemon/tools/instance.py:2439: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    is_async = asyncio.iscoroutinefunction(original_func)
+
+tests/unit/tools/test_spawn_room_join.py: 300 warnings
+  /home/nea/ensemble-src-wt-group-chat-release/daemon/tools/instance.py:2378: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(wrapped_func):
+
+tests/unit/tools/test_spawn_room_join.py: 25 warnings
+  /home/nea/ensemble-src-wt-group-chat-release/daemon/tools/instance.py:2660: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    is_async = asyncio.iscoroutinefunction(original_func)
+
+tests/unit/tools/test_spawn_room_join.py: 100 warnings
+  /home/nea/ensemble-src-wt-group-chat-release/daemon/tools/instance.py:2567: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(original_func):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+421 passed, 601 warnings in 372.19s (0:06:12)

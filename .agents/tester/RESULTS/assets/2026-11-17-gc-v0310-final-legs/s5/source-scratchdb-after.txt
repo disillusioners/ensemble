@@ -1,0 +1,15 @@
+-- room cols (expect 9/10/10 untouched) --
+chatroom_members=9
+chatrooms=10
+room_messages=10
+-- room rows --
+chatrooms=0 chatroom_members=0 room_messages=0
+-- owners histogram (expect ensemble=55 ensemble_dev_app=3) --
+ensemble=55
+ensemble_dev_app=3
+-- table count (expect 58) --
+58
+-- schemas --
+public
+-- proposal-dedup index in source? (expect 0 = untouched) --
+0

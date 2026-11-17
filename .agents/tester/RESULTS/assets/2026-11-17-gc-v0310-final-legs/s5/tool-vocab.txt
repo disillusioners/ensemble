@@ -1,0 +1,18 @@
+### TOOL VOCAB — from the STAGED RELEASE DIR (read-only) ###
+-- path searched: /home/nea/agents-ensemble/releases/v0.31.0/agents/*/meta.json (the commission's suggested
+   .agents/shared/metrics/tool-categories.json does NOT exist in the payload) --
+-- agents granting the 'room' tool category --
+   ari/meta.json
+   leader/meta.json
+   sonic-leader/meta.json
+   video-capturer/meta.json
+   video-editor/meta.json
+   video-producer/meta.json
+   video-verifier/meta.json
+   worker/meta.json
+-- count --
+   agents_granting_room=8
+-- category key source (repo) --
+129:ROOM_CATEGORY_KEY = "room"
+500:    @register_tool_category(ROOM_CATEGORY_KEY)
+601:    @register_tool_category(ROOM_CATEGORY_KEY)

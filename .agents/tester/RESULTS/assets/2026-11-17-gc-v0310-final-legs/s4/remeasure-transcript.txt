@@ -1,0 +1,76 @@
+==============================================================
+S4 CONFIRMATORY RE-MEASURE — 2026-11-17T14:46:44Z
+==============================================================
+=== loadavg IMMEDIATELY BEFORE RUN ===
+5.39 8.51 9.23 4/454 964610
+  1min=5.39 5min=8.51 10min=9.23
+=== HEAD verify ===
+HEAD=0181dadbf8641c60d7158ad59edfa4a4b36944c8
+HEAD MATCHES expected release tip
+=== git status --porcelain (BEFORE) ===
+(empty above = clean)
+STATUS_BEFORE_LINES=0
+password extracted: PRESENT len=32 (value redacted, never echoed)
+=== FILE LIST (canonical find-expression) ===
+FILE COUNT = 24
+ASSERT PASS: 24 files
+     1	tests/unit/repositories/test_room_boot_f1_pin.py
+     2	tests/unit/repositories/test_room_capability_row_pin.py
+     3	tests/unit/repositories/test_room_close_producer.py
+     4	tests/unit/repositories/test_room_gc_repository.py
+     5	tests/unit/repositories/test_room_membership.py
+     6	tests/unit/repositories/test_room_migration_runner_execution.py
+     7	tests/unit/repositories/test_room_models_and_migration.py
+     8	tests/unit/repositories/test_room_repository.py
+     9	tests/unit/routers/test_room_http_api.py
+    10	tests/unit/services/test_joined_room_context.py
+    11	tests/unit/services/test_lifecycle_room_join.py
+    12	tests/unit/services/test_room_delivery.py
+    13	tests/unit/services/test_room_delivery_refactor_pins.py
+    14	tests/unit/services/test_room_gc_sweeper.py
+    15	tests/unit/services/test_room_naming.py
+    16	tests/unit/services/test_room_nudge.py
+    17	tests/unit/services/test_room_p6_wiring_pin.py
+    18	tests/unit/services/test_room_post_cap.py
+    19	tests/unit/services/test_spawn_room_join_broadcast.py
+    20	tests/unit/tools/test_room_close.py
+    21	tests/unit/tools/test_room_post_cap.py
+    22	tests/unit/tools/test_room_registration.py
+    23	tests/unit/tools/test_room_tools.py
+    24	tests/unit/tools/test_spawn_room_join.py
+=== COLLECT-ONLY ===
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+421 tests collected in 3.25s
+COLLECT SUMMARY: 421 tests collected in 2.14s
+=== FENCE PROOF (same env wrapper, before pytest) ===
+FENCE: effective POSTGRES_DB=ensemble_dev POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 POSTGRES_USER=ensemble_dev_app ENSEMBLE_SELF_ENV=dev
+FENCE: OK - not ensemble_prod
+FENCE_RC=0
+=== REGISTERED RUN (verbatim) ===
+PYTEST_XARGS_RC=0
+WALL_SECONDS=86
+=== RUN SUMMARY ===
+421 passed, 609 warnings in 79.13s (0:01:19)
+=== FAILURE DETAIL (if any) ===
+=== loadavg IMMEDIATELY AFTER RUN ===
+12.20 10.27 9.80 3/455 971615
+  1min=12.20 5min=10.27 10min=9.80
+=== JUNIT CROSS-CHECK (occurrence counts) ===
+testcase : 421
+failure  : 0
+error    : 0
+skipped  : 0
+=== JUNIT testsuite attrs ===
+errors="0"
+failures="0"
+skipped="0"
+tests="421"
+time="78.825"
+=== PREVIOUSLY-RED NODE elapsed (from junit) ===
+name="test_tier3_agent_fallback_in_result_and_instant" time="2.822"
+=== git status --porcelain (AFTER) ===
+(empty above = clean)
+STATUS_AFTER_LINES=0
+=== HEAD AFTER ===
+0181dadbf8641c60d7158ad59edfa4a4b36944c8

@@ -1,0 +1,30 @@
+=== FINAL INTEGRITY SWEEP ===
+-- evidence dir --
+648K	/tmp/gc_v0310_smoke_evidence.dCM1Wx
+28
+-- transcript line count --
+2195 /tmp/gc_v0310_smoke_evidence.dCM1Wx/s5-transcript.txt
+-- any scratch residue in /tmp --
+/tmp/gc_v0310_smoke_evidence.dCM1Wx
+/tmp/gc_v0310_smoke_state.env
+648K	/tmp/gc_v0310_smoke_evidence.dCM1Wx
+4.0K	/tmp/gc_v0310_smoke_state.env
+-- port-claims --
+0
+-- listener 19101 --
+0
+-- live unit FINAL --
+MainPID=700595
+NRestarts=0
+ActiveEnterTimestamp=Sun 2026-11-15 06:12:13 UTC
+-- state.json current --
+current= v0.30.12 previous= v0.30.9 in_flight= None pending_op= None
+-- staged payload FINAL sha --
+5473a25f759ec6ef21fd85ebfb76939658ff4fa4fe9b73e07870ce17d9514743  /home/nea/agents-ensemble/releases/v0.31.0/ensemble-prod
+-- staged payload FINAL manifest stat --
+mtime=1794924560 size=745806
+-- clone DB gone? --
+0
+-- source scratch DB FINAL --
+psql: error: connection to server at "127.0.0.1", port 5432 failed: fe_sendauth: no password supplied
+tables=58 roomcols=chatroom_members=9,chatrooms=10,room_messages=10 probe_residue=0 rows=0

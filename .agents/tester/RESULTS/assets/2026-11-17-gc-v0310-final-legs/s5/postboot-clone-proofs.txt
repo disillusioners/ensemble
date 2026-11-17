@@ -1,0 +1,40 @@
+### POST-BOOT shape of ensemble_dev_scratch_s5 ###
+-- room tables + column counts --
+chatroom_members cols=9
+chatrooms cols=10
+room_messages cols=14
+-- room_messages column list --
+id integer
+room_id text
+seq bigint
+author_instance_id text
+author_name text
+text text
+tagged_members jsonb
+addressed_members jsonb
+kind text
+created_at text
+source_message_id bigint
+trigger text
+member text
+resolution_warnings jsonb
+-- the 4 new columns present? --
+member,resolution_warnings,source_message_id,trigger
+-- room row counts --
+chatrooms=0 chatroom_members=0 room_messages=0
+-- uq_room_messages_proposal_dedup (index) --
+uq_room_messages_proposal_dedup def=CREATE UNIQUE INDEX uq_room_messages_proposal_dedup ON public.room_messages USING btree (source_message_id, trigger, member)
+-- uq_room_messages_proposal_dedup (constraint) --
+-- room UNIQUE indexes --
+chatroom_members_pkey
+chatrooms_pkey
+room_messages_pkey
+uq_chatroom_members_room_member_name
+uq_room_messages_proposal_dedup
+uq_room_messages_room_seq
+-- total public table count (post-boot) --
+109
+-- schemas list --
+public
+-- gc_pg_probe% residue --
+0

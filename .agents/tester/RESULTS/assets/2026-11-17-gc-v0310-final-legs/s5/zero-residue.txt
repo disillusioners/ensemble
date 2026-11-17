@@ -1,0 +1,32 @@
+-- /tmp/gc_v0310_smoke.* remaining (expect ONLY the evidence dir) --
+-- count --
+0
+-- evidence dir contents --
+total 1764
+drwx------     2 nea  nea     4096 Nov 17 14:39 .
+drwxrwxrwt 17413 root root 1159168 Nov 17 14:39 ..
+-rw-r--r--     1 nea  nea    44543 Nov 17 14:39 boot.stderr.txt
+-rw-r--r--     1 nea  nea        0 Nov 17 14:39 boot.stdout.txt
+-rw-r--r--     1 nea  nea      148 Nov 17 14:34 cgroup-isolation.txt
+-rw-r--r--     1 nea  nea      680 Nov 17 14:32 clone-scratchdb-before.txt
+-rw-r--r--     1 nea  nea       72 Nov 17 14:34 livez-body.json
+-rw-r--r--     1 nea  nea     1106 Nov 17 14:37 postboot-clone-proofs.txt
+-rw-r--r--     1 nea  nea     1768 Nov 17 14:34 readyz-body.json
+-rw-r--r--     1 nea  nea    31302 Nov 17 14:39 residue-sweep.txt
+-rwx------     1 nea  nea     5710 Nov 17 14:19 s5-stage-a.sh
+-rwx------     1 nea  nea     7134 Nov 17 14:22 s5-stage-b.sh
+-rwx------     1 nea  nea     7264 Nov 17 14:25 s5-stage-b3.sh
+-rwx------     1 nea  nea     7267 Nov 17 14:33 s5-stage-b4.sh
+-rwx------     1 nea  nea     7267 Nov 17 14:34 s5-stage-b5.sh
+-rwx------     1 nea  nea     5982 Nov 17 14:32 s5-stage-c.sh
+-rwx------     1 nea  nea     5597 Nov 17 14:37 s5-stage-d.sh
+-rwx------     1 nea  nea     5504 Nov 17 14:39 s5-stage-e.sh
+-rw-r--r--     1 nea  nea   201186 Nov 17 14:39 s5-transcript-copy.txt
+-rw-r--r--     1 nea  nea   233487 Nov 17 14:39 s5-transcript.txt
+-rw-r--r--     1 nea  nea      366 Nov 17 14:37 source-scratchdb-after.txt
+-rw-r--r--     1 nea  nea     1695 Nov 17 14:32 source-scratchdb-before.txt
+-rw-r--r--     1 nea  nea      672 Nov 17 14:37 termination-census.txt
+-rw-r--r--     1 nea  nea       39 Nov 17 14:37 tool-vocab.txt
+-rw-r--r--     1 nea  nea      789 Nov 17 14:32 xfer-owner.sql
+-rw-r--r--     1 nea  nea     1342 Nov 17 14:34 xfer-owner2.sql
+-rw-r--r--     1 nea  nea      111 Nov 17 14:39 zero-residue.txt

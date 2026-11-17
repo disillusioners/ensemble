@@ -1,0 +1,52 @@
+bringing up nodes...
+bringing up nodes...
+
+........................................................................ [ 17%]
+........................................................................ [ 34%]
+........................................................................ [ 51%]
+........................................................................ [ 68%]
+........................................................................ [ 85%]
+.........................................F...................            [100%]
+=================================== FAILURES ===================================
+______ TestJoinHappyPath.test_tier3_agent_fallback_in_result_and_instant _______
+[gw4] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-group-chat-release/.venv/bin/python
+tests/unit/tools/test_spawn_room_join.py:285: in test_tier3_agent_fallback_in_result_and_instant
+    assert elapsed < 2.0  # instant — naming failure never blocks
+    ^^^^^^^^^^^^^^^^^^^^
+E   assert 2.007483320077881 < 2.0
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.registry:registry.py:1589 Tool config validation: Agent 'maintenancer': deny entry 'git_commit' is neither a known category nor a known tool
+WARNING  daemon.tools.memoir_knob:memoir_knob.py:169 [Memoir] ENSEMBLE_MEMOIR_ENABLED is unset — memoir surface ENABLED by default; set `ENSEMBLE_MEMOIR_ENABLED=false` to disable
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-group-chat-release/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/unit/tools/test_spawn_room_join.py: 175 warnings
+  /home/nea/ensemble-src-wt-group-chat-release/daemon/tools/instance.py:2439: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    is_async = asyncio.iscoroutinefunction(original_func)
+
+tests/unit/tools/test_spawn_room_join.py: 300 warnings
+  /home/nea/ensemble-src-wt-group-chat-release/daemon/tools/instance.py:2378: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(wrapped_func):
+
+tests/unit/tools/test_spawn_room_join.py: 25 warnings
+  /home/nea/ensemble-src-wt-group-chat-release/daemon/tools/instance.py:2660: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    is_async = asyncio.iscoroutinefunction(original_func)
+
+tests/unit/tools/test_spawn_room_join.py: 100 warnings
+  /home/nea/ensemble-src-wt-group-chat-release/daemon/tools/instance.py:2567: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(original_func):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/tools/test_spawn_room_join.py::TestJoinHappyPath::test_tier3_agent_fallback_in_result_and_instant
+1 failed, 420 passed, 609 warnings in 78.27s (0:01:18)

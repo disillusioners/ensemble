@@ -1,0 +1,18 @@
+### CLONE ensemble_dev_scratch_s5 SNAPSHOT (pre-boot) ###
+-- db/schema owner --
+ensemble_dev_scratch_s5 owner=ensemble_dev_app
+public owner=ensemble_dev_app
+-- table count --
+58
+-- owners histogram --
+ERROR:  aggregate functions are not allowed in GROUP BY
+LINE 1: select tableowner||'='||count(*) from pg_tables where schema...
+                                ^
+-- room table columns (expect 10/9/10) --
+ERROR:  aggregate functions are not allowed in GROUP BY
+LINE 1: select table_name||' cols='||count(*) from information_schem...
+                                     ^
+-- room row counts (expect 0) --
+chatrooms=0 chatroom_members=0 room_messages=0
+-- gc_pg_probe residue --
+0
