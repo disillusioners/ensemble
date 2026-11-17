@@ -37,16 +37,23 @@ deletes. The FIRST sweep of a deployment computes the candidate set,
 reports it, and deletes NOTHING; the flag is persisted (the shared
 meta KV) so a daemon restart does not silently re-arm the dry run
 forever — a restart BEFORE the first sweep simply keeps the dry run
-(fail-safe: a restart never purges unexpectedly). A FAILED flag READ
-is RETRIED on the next sweep — the RAM mirror pins on a successful
-READ only, so one transient KV fault never permanently disables the
-purge (A-P6-25, the M1 adjudication); during the uncertainty the sweep
-stays a dry run (A-P6-6's fail-safe direction). The WRITE side is
-deliberately different (measured, A-P6-26 truthing): marking the dry
-run done pins the RAM mirror IMMEDIATELY and then persists
-best-effort — a FAILED durable write still leaves THIS process
-purging on the in-RAM flag (RAM-only persistence), and only a RESTART
-re-arms the dry run.
+(fail-safe: a restart never purges unexpectedly).
+
+**The latch is TWO-SIDED — and the READ side is the authoritative
+one.** ONLY a read the store actually ANSWERED may pin the mirror. A
+FAULTED read (or a store that is not there at all) leaves the latch
+UNSET: that tick stays a dry run and the NEXT sweep RE-READS the
+flag and re-decides — so one transient KV fault neither permanently
+disables the purge (A-P6-25, the M1 adjudication) nor CONVERTS into
+a purge (A-P6-6's fail-safe direction — observed on the PRODUCTION
+path: the dry-run completion must NOT latch a flag the store never
+answered). The WRITE side is deliberately different (measured, A-P6-26
+truthing): the dry-run completion pins the RAM mirror FIRST and then
+persists the flag best-effort — a FAILED durable write still leaves
+THIS PROCESS purging on the in-RAM flag (RAM-only persistence) while
+the DURABLE record stays absent, so only a RESTART re-arms the dry
+run. A fault never turns a dry run into a purge: the purge is the NEXT
+tick's authorized action, after a dry run that really happened.
 
 **Fail-open posture.** The maintenance loop must never die on a GC
 fault: every candidate is purged independently (one room's failure
@@ -143,13 +150,23 @@ class RoomGcSweeper:
         self._kv_context_key = kv_context_key
         #: RAM mirror of the durable dry-run flag (the KV is the
         #: durable truth; this avoids a KV read on every sweep).
-        #: The mirror pins on a successful READ (A-P6-25, M1) — a
-        #: failed read is retried on the next sweep — and ALSO pins
-        #: unconditionally on ``_mark_dry_run_done`` (the write path:
-        #: the in-RAM flag holds even when the durable write fails;
-        #: a restart re-arms the dry run).
+        #:
+        #: The mirror pins on a SUCCESSFUL read only — a faulted read
+        #: leaves the latch unset so the next sweep re-reads (A-P6-25,
+        #: M1) — and also pins when the dry run COMPLETES (the write
+        #: path: the in-RAM flag holds even when the durable write
+        #: fails; a restart re-arms the dry run). The write path is
+        #: reached ONLY after an authoritative read (A-P6-6's
+        #: fail-safe: a faulted read never latches a decision the
+        #: store never backed).
         self._dry_run_done = False
         self._dry_run_loaded = False
+        #: Whether the LAST flag resolution came from an AUTHORITATIVE
+        #: read — the store actually answered it. ``False`` after a
+        #: faulted read (or with no store at all): the sweep stays a
+        #: dry run, the latch stays unset, and the next sweep re-reads
+        #: and re-decides.
+        self._dry_run_read_authoritative = False
 
     # ── the durable dry-run flag ──────────────────────────────────────
 
@@ -165,17 +182,42 @@ class RoomGcSweeper:
         uncertainty the sweep stays a dry run — the same fail-safe
         direction as the dry-run-first posture itself (A-P6-6).
 
+        The AUTHORITATIVE flag is tracked in
+        ``self._dry_run_read_authoritative``: it is ``True`` only when
+        the store actually ANSWERED the read (or when the mirror
+        already holds a value a previous authoritative read backed). A
+        faulted read — and a store that is not there at all — leaves it
+        ``False``, and ``execute()`` then refuses to complete the dry
+        run (no latch) so the next sweep re-reads and re-decides.
+
         (The WRITE side differs by design — see
         :meth:`_mark_dry_run_done`: the mirror pins there
         unconditionally, before the best-effort durable write.)
         """
         if self._dry_run_loaded:
+            # The mirror already holds a value an authoritative read
+            # backed (a successful read, or the dry-run completion
+            # that followed one).
+            self._dry_run_read_authoritative = True
             return self._dry_run_done
         repo = self._kv_repo
         if repo is None:
             repo = getattr(self._manager, "_shared_meta_kv_repo", None)
         if repo is None:
+            # No durable store at all: there is NO authoritative read.
+            # The sweep stays a dry run and the latch stays unset (the
+            # next sweep re-reads and re-decides) — a deployment with
+            # no flag store NEVER purges (the fail-safe direction: the
+            # GC leaks rather than purges without a durable dry-run
+            # record).
             self._dry_run_done = False
+            self._dry_run_read_authoritative = False
+            self._log.warning(
+                "room gc: no durable dry-run flag store — treating this "
+                "sweep as a dry run (fail-safe); the read is RETRIED on "
+                "the next sweep (the latch pins on an authoritative read "
+                "only)",
+            )
             return False
         try:
             values = repo.get_all_as_dict(self._kv_context_key)
@@ -187,10 +229,12 @@ class RoomGcSweeper:
                 exc,
             )
             self._dry_run_done = False
+            self._dry_run_read_authoritative = False
             return False
         # SUCCESS — only now is the RAM mirror pinned.
         self._dry_run_done = bool(values.get(ROOM_GC_KV_DRY_RUN_KEY))
         self._dry_run_loaded = True
+        self._dry_run_read_authoritative = True
         return self._dry_run_done
 
     def _mark_dry_run_done(self) -> None:
@@ -204,6 +248,11 @@ class RoomGcSweeper:
         persistence — the next tick purges without re-reading the KV);
         only a RESTART (fresh mirror) re-arms the dry run — the
         fail-safe direction.
+
+        The caller decides WHETHER the dry run really happened: this
+        method is reached only after an AUTHORITATIVE read (a dry run
+        the store backed), never after a faulted one (A-P6-6's
+        fail-safe — a fault never converts a dry run into a purge).
         """
         self._dry_run_done = True
         self._dry_run_loaded = True
@@ -231,19 +280,40 @@ class RoomGcSweeper:
 
         The first sweep of a deployment is a DRY RUN (§2.2 "dry-run
         first"); every later sweep purges.
+
+        The dry run is only COMPLETED (and the latch set) when the
+        flag read was AUTHORITATIVE — the store answered it. A
+        faulted read leaves the latch unset, so the next sweep re-reads
+        the flag and re-decides: a KV fault can never convert a dry
+        run into a purge (A-P6-6's fail-safe).
         """
         try:
             dry_run = not self._load_dry_run_flag()
             summary = await self.sweep(dry_run=dry_run)
             if dry_run:
-                self._mark_dry_run_done()
-                self._log.info(
-                    "room gc: DRY RUN complete — %d candidate(s), "
-                    "%d purged (dry run purges nothing); the next sweep "
-                    "executes the purge",
-                    len(summary.get("candidates", [])),
-                    len(summary.get("purged", [])),
-                )
+                if self._dry_run_read_authoritative:
+                    self._mark_dry_run_done()
+                    self._log.info(
+                        "room gc: DRY RUN complete — %d candidate(s), "
+                        "%d purged (dry run purges nothing); the next sweep "
+                        "executes the purge",
+                        len(summary.get("candidates", [])),
+                        len(summary.get("purged", [])),
+                    )
+                else:
+                    # NOT authoritative — the dry run happened, but the
+                    # flag the store never answered must NOT be latched:
+                    # the next sweep re-reads and re-decides (fail-safe).
+                    self._log.warning(
+                        "room gc: DRY RUN complete — %d candidate(s), %d "
+                        "purged (dry run purges nothing); the dry-run "
+                        "latch was NOT set (the flag read was not "
+                        "authoritative) — the next sweep RE-READS the "
+                        "flag and re-decides (a fault never converts a "
+                        "dry run into a purge)",
+                        len(summary.get("candidates", [])),
+                        len(summary.get("purged", [])),
+                    )
             else:
                 self._log.info(
                     "room gc: sweep complete — %d candidate(s), %d purged, "

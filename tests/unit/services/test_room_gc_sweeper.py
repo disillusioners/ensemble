@@ -387,6 +387,12 @@ async def test_a_faulted_kv_read_is_not_latched_and_is_retried(
 ):
     """M1 pin (A-P6-25): the dry-run latch pins ON SUCCESS ONLY.
 
+    THE PRIMITIVE pin — it exercises the read directly. The PRODUCTION
+    path (``execute()`` — the only path a sweep ever takes) is pinned by
+    ``test_a_faulted_flag_read_never_latches_the_dry_run_on_the_production_path``
+    below: a primitive-only pin cannot see a caller that re-latches the
+    mirror after a faulted read.
+
     A faulting KV read answers "dry run" for THAT sweep and leaves the
     latch UNSET — the next load RETRIES the read, so the durable truth
     becomes visible as soon as the fault clears (a latched-from-fault
@@ -399,6 +405,7 @@ async def test_a_faulted_kv_read_is_not_latched_and_is_retried(
     assert sweeper._load_dry_run_flag() is False
     # The invariant: the flag is NOT latched by the fault.
     assert sweeper._dry_run_loaded is False
+    assert sweeper._dry_run_read_authoritative is False
 
     # The durable truth appears WHILE the read is still faulting.
     kv.values.setdefault("room_gc_test", {})["dry_run_completed"] = True
@@ -409,6 +416,135 @@ async def test_a_faulted_kv_read_is_not_latched_and_is_retried(
     assert sweeper._load_dry_run_flag() is True
     # A successful read HAS pinned the mirror.
     assert sweeper._dry_run_loaded is True
+    assert sweeper._dry_run_read_authoritative is True
+
+
+async def test_a_faulted_flag_read_never_latches_the_dry_run_on_the_production_path(
+    engine, service
+):
+    """M1 pin, RE-AIMED at ``execute()`` — the PRODUCTION path.
+
+    The pre-fix ``execute()`` called ``_mark_dry_run_done()`` after
+    EVERY dry sweep — INCLUDING a sweep whose flag READ had faulted.
+    That pinned the RAM mirror, so the NEXT sweep short-circuited on
+    the mirror (``_dry_run_loaded``) and ran a REAL purge with no
+    durable dry-run record: a KV fault silently CONVERTED into a
+    purge (A-P6-6's fail-safe, broken). The primitive pin above could
+    not see it — ``execute()`` always re-latched.
+
+    The reachable sequence this pin covers:
+
+    * a faulted read ⇒ the tick stays dry AND the latch stays unset;
+    * the next sweep RE-READS and re-decides (still dry while the
+      fault lasts — never a silent purge conversion);
+    * once the fault clears, the sweep re-reads, sees the durable truth
+      (absent) and runs the dry run — and only THEN may the latch be
+      set, so the tick after it purges.
+    """
+    seed_instance(engine, "owner-1", status="completed")
+    room_id = make_room(
+        service._repo, tree_root="owner-1", owner="owner-1", name="fault-room"
+    )
+    _set_room_times(
+        engine, room_id, state="active", last_post_at=_iso(hours=100)
+    )
+    kv = _FakeKv()
+    kv.fail_read = True
+    kv.fail_write = True
+    sweeper = _sweeper(_manager(engine, service), kv)
+
+    # Tick 1 — the read faults: a dry run, nothing purged, NO latch.
+    await sweeper.execute()
+    assert service._repo.get_room(room_id) is not None
+    assert sweeper._dry_run_loaded is False, (
+        "a faulted flag read must NOT latch the dry-run mirror"
+    )
+    assert sweeper._dry_run_read_authoritative is False
+    assert kv.values.get("room_gc_test", {}).get("dry_run_completed") is None
+
+    # Tick 2 — the read is STILL faulting: the latch is still unset, so
+    # the sweep re-reads and stays dry. (Pre-fix this tick PURGED.)
+    await sweeper.execute()
+    assert service._repo.get_room(room_id) is not None, (
+        "a faulted flag read must never convert into a purge"
+    )
+    assert sweeper._dry_run_loaded is False
+    assert kv.values.get("room_gc_test", {}).get("dry_run_completed") is None
+
+    # The fault clears: the next sweep re-reads, sees the durable truth
+    # (absent) and runs a dry run — and only NOW may the latch be set.
+    kv.fail_read = False
+    kv.fail_write = False
+    await sweeper.execute()
+    assert sweeper._dry_run_loaded is True
+    assert sweeper._dry_run_read_authoritative is True
+    assert kv.values["room_gc_test"]["dry_run_completed"] is True
+    assert service._repo.get_room(room_id) is not None
+
+    # The tick after the completed dry run purges.
+    await sweeper.execute()
+    assert service._repo.get_room(room_id) is None
+
+
+async def test_a_failed_durable_write_keeps_the_purge_on_the_ram_mirror_and_a_restart_re_arms(
+    engine, service
+):
+    """The WRITE side of the latch — the DECIDED semantics.
+
+    A successful (authoritative) read + a dry run + a FAILED durable
+    write ⇒ the RAM mirror still carries the decision (this process
+    purges on the next tick — RAM-only persistence) while the DURABLE
+    record stays absent, so a RESTART (a fresh sweeper) re-arms the
+    dry run.
+
+    The fail-safe promise holds: the fault never converts a dry run
+    into a purge — the purge is the NEXT tick's authorized action,
+    after a dry run that really happened. The fault only costs the
+    DURABLE record, and the cost is paid in the fail-safe direction
+    (a restart sweeps dry again).
+    """
+    seed_instance(engine, "owner-1", status="completed")
+    first_id = make_room(
+        service._repo, tree_root="owner-1", owner="owner-1", name="write-fault-a"
+    )
+    _set_room_times(
+        engine, first_id, state="active", last_post_at=_iso(hours=100)
+    )
+    kv = _FakeKv()
+    kv.fail_write = True
+    sweeper = _sweeper(_manager(engine, service), kv)
+
+    # The dry run happened; the durable write failed.
+    await sweeper.execute()
+    assert service._repo.get_room(first_id) is not None
+    assert sweeper._dry_run_done is True, (
+        "the RAM mirror must carry the decision (RAM-only persistence)"
+    )
+    assert sweeper._dry_run_loaded is True
+    assert kv.values.get("room_gc_test", {}).get("dry_run_completed") is None, (
+        "the durable record must be ABSENT after a failed write"
+    )
+
+    # The next tick purges — the RAM mirror is the authority IN-PROCESS.
+    await sweeper.execute()
+    assert service._repo.get_room(first_id) is None
+
+    # A RESTART (a fresh sweeper, the same durable store) re-arms the
+    # dry run: the flag is absent, so the sweep stays dry again.
+    second_id = make_room(
+        service._repo, tree_root="owner-1", owner="owner-1", name="write-fault-b"
+    )
+    _set_room_times(
+        engine, second_id, state="active", last_post_at=_iso(hours=100)
+    )
+    restarted = _sweeper(_manager(engine, service), kv)
+    await restarted.execute()
+    assert service._repo.get_room(second_id) is not None, (
+        "a restart must re-arm the dry run (the durable record is absent)"
+    )
+    # …and the restarted process now holds its own RAM mirror.
+    await restarted.execute()
+    assert service._repo.get_room(second_id) is None
 
 
 async def test_a_transient_kv_fault_never_permanently_disables_the_purge(
