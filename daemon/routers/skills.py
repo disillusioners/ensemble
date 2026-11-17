@@ -1626,8 +1626,10 @@ async def resolve_ab_test(
             "`winner_id` (or `defective_arm_id`) AND `reason` are "
             "REQUIRED; the sample-size gate is bypassed ONLY in "
             "this mode; the resolution runs through "
-            "`SkillStaleDeactivator.resolve_pair` (receipt-BEFORE-"
-            "flip, reversible via the receipt) and is announced as "
+            "`SkillStaleDeactivator.resolve_pair` (which captures "
+            "before_test / before_winner snapshots PRE-flip and "
+            "returns them in the response; reversal rides the "
+            "`--reactivate` tool path) and is announced as "
             "an auditable sink record + anomaly row. The normal "
             "(unset) path stays gated exactly as today."
         ),
@@ -1734,9 +1736,11 @@ async def _resolve_ab_test_sanctioned(
     * Exactly one of ``winner_id`` / ``defective_arm_id``.
     * The target skill must be a live pair member.
     * The terminal write runs through
-      ``SkillStaleDeactivator.resolve_pair`` (receipt-BEFORE-flip;
-      reversible via the receipt) — the auditable unit that was dead
-      code before this wiring.
+      ``SkillStaleDeactivator.resolve_pair`` — it writes NO
+      deactivation receipt; it captures ``before_test`` /
+      ``before_winner`` snapshots PRE-flip and returns them in the
+      response, and reversal rides the ``--reactivate`` tool path.
+      That service unit was dead code before this wiring.
     * The resolution is announced via the capture-observability sink
       (minted run id) and as an anomaly row.
     * The sample-size gate is bypassed ONLY on this path — the
@@ -1875,7 +1879,10 @@ async def _resolve_ab_test_sanctioned(
                 f"{resolved_winner} reason={reason!r} — terminal "
                 "state per the pinned spec (loser inactive+group "
                 "retained, winner active+group cleared, pair row "
-                "resolved). Reversible via the deactivation receipt."
+                "resolved). Reversible via the `--reactivate` tool "
+                "path (resolve_pair writes no deactivation receipt; "
+                "the response carries the pre-flip before_test/"
+                "before_winner snapshots)."
             ),
             severity="major",
             suspected_cause=(

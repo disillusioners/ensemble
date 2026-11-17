@@ -339,6 +339,39 @@ _FULL_REGEN_MARKER_RE = re.compile(
 _MAX_PAYLOAD_DESCRIPTION_CHARS = 512
 
 
+#: Word-token extractor for the carry-over sanction check (review
+#: follow-up, 2026-11-17). Case-insensitive, word-boundary anchored
+#: tokenization — the direction text and the header title are both
+#: normalized through this, so containment is EXACT-TOKEN, never a
+#: substring/prefix accident.
+_CARRY_OVER_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+#: Function words stripped from a header title before the sanction
+#: comparison — they carry no section-identity signal, so requiring
+#: them would make naming trivially easy.
+_CARRY_OVER_STOPWORDS = frozenset(
+    {
+        "a", "an", "the", "of", "and", "or", "for", "to", "in", "on",
+        "with", "by", "at", "from", "as", "is", "are", "be", "its",
+    }
+)
+
+
+def _significant_header_tokens(title: str) -> set[str]:
+    """The significant word tokens of a section header title.
+
+    Lowercase word-boundary tokens with function words removed. The
+    carry-over gate sanctions a vanished section's removal only when
+    EVERY token this returns appears as a token in the direction.
+    """
+    return {
+        tok
+        for tok in _CARRY_OVER_TOKEN_RE.findall(str(title or "").lower())
+        if tok not in _CARRY_OVER_STOPWORDS
+        and (len(tok) >= 2 or tok.isdigit())
+    }
+
+
 def _wants_full_regen(direction: str) -> bool:
     """D5: does the direction EXPLICITLY request full-body regen?"""
     return bool(direction) and bool(_FULL_REGEN_MARKER_RE.search(direction))
@@ -3299,12 +3332,16 @@ class SkillEvolutionService:
         2. **Carry-over** — every parent markdown section header
            (``##``/``###`` lines) must survive into the new content
            UNLESS the direction explicitly names that section for
-           removal/consolidation. For the surgical default this is
-           structurally guaranteed (exact-anchor edits) and the gate
-           is belt-and-braces against applier regressions; for the
-           explicit full-regen mode it is the LOAD-BEARING check that
-           a rewrite did not silently drop sections the direction
-           never mentioned.
+           removal/consolidation. "Names" is EXACT-TOKEN
+           containment: every significant token of the header title
+           (case-insensitive, word-boundary, function words ignored)
+           must appear as a token in the direction — sharing ONE
+           generic word is not naming. For the surgical default this
+           is structurally guaranteed (exact-anchor edits) and the
+           gate is belt-and-braces against applier regressions; for
+           the explicit full-regen mode it is the LOAD-BEARING check
+           that a rewrite did not silently drop sections the
+           direction never mentioned.
 
         Args:
             parent_content: The FULL parent body.
@@ -3337,15 +3374,23 @@ class SkillEvolutionService:
                 continue
             # The header may have been intentionally removed — only a
             # direction that NAMES the section sanctions its removal.
-            header_token = header.lstrip("#").strip().lower()
-            named = bool(header_token) and (
-                header_token in direction_l
-                or any(
-                    word in direction_l
-                    for word in header_token.replace(":", " ").split()
-                    if len(word) >= 4
+            # EXACT-TOKEN containment (review follow-up, 2026-11-17):
+            # the FULL title must be named — every significant token of
+            # the header title has to appear as a word in the direction.
+            # A direction sharing one generic word ("add usage notes"
+            # vs "## Usage Examples") must NOT sanction a deletion.
+            title = header.lstrip("#").strip()
+            required = _significant_header_tokens(title)
+            if required:
+                named = required <= set(
+                    _CARRY_OVER_TOKEN_RE.findall(direction_l)
                 )
-            )
+            else:
+                # No significant tokens at all (pure function-word title)
+                # — fail-closed: nothing nameable, so the removal is NOT
+                # sanctioned. A substring fallback here would sanction
+                # almost any direction.
+                named = False
             if not named:
                 vanished.append(header)
         if vanished:

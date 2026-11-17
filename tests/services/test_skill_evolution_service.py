@@ -3783,6 +3783,60 @@ class TestCarryOverContentGate:
             parent, new, "delete the Remove Me section"
         )
 
+    def test_single_shared_generic_word_does_not_sanction_removal(self):
+        """Review follow-up (2026-11-17): the sanction is EXACT-TOKEN,
+        not any-≥4-char-word. A direction that merely shares ONE
+        generic word with the header ("usage") must NOT sanction
+        deleting "## Usage Examples"."""
+        from daemon.services.skill_evolution_service import (
+            SkillEvolutionService,
+        )
+
+        parent = "# P\n\n## Usage Examples\n\nbody\n\n## Keep Me\n\nb2\n"
+        new = "# P\n\n## Keep Me\n\nb2\n"  # "Usage Examples" vanished
+        with pytest.raises(ValueError, match="carry-over gate"):
+            SkillEvolutionService._gate_evolved_content(
+                parent, new, "add usage notes for the parser"
+            )
+
+    def test_full_title_naming_does_sanction_removal(self):
+        """The genuine case keeps working: a direction naming the FULL
+        section title sanctions the removal (gate passes)."""
+        from daemon.services.skill_evolution_service import (
+            SkillEvolutionService,
+        )
+
+        parent = "# P\n\n## Usage Examples\n\nbody\n\n## Keep Me\n\nb2\n"
+        new = "# P\n\n## Keep Me\n\nb2\n"
+        SkillEvolutionService._gate_evolved_content(
+            parent, new, "remove the Usage Examples section"
+        )
+
+    def test_multi_word_title_requires_every_token(self):
+        """A multi-word title needs ALL its significant tokens: a
+        partial-token direction ("error handling", no "policy") trips
+        the gate, and so does a concatenated non-token form."""
+        from daemon.services.skill_evolution_service import (
+            SkillEvolutionService,
+        )
+
+        parent = (
+            "# P\n\n## Error Handling Policy\n\nbody\n\n## Keep Me\n\nb2\n"
+        )
+        new = "# P\n\n## Keep Me\n\nb2\n"
+        for partial in (
+            "update the error handling section",
+            "rewrite errorhandlingpolicy entirely",
+        ):
+            with pytest.raises(ValueError, match="carry-over gate"):
+                SkillEvolutionService._gate_evolved_content(
+                    parent, new, partial
+                )
+        # All tokens present (order/extra words irrelevant) → sanctioned.
+        SkillEvolutionService._gate_evolved_content(
+            parent, new, "tighten the error handling policy wording"
+        )
+
     def test_empty_content_trips(self):
         from daemon.services.skill_evolution_service import (
             SkillEvolutionService,
