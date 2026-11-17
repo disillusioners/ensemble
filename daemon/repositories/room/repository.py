@@ -11,6 +11,12 @@ What lives here (mechanics only, no policy):
 * ``create_room`` — the transactional room birth: the ``chatrooms`` row
   + the OWNER membership row (``role=owner``, both cursors 0 — D2) in
   ONE commit.
+* ``close_room`` — the ONLY producer of the ``closed`` state: the
+  forward-only ``active → closed`` transition (architecture §3/§5 —
+  "close = parent tool only"), stamping ``closed_at``. The P-close
+  GC arm (``state=closed AND closed_at < now − 14d`` → purge) is
+  unreachable without it — the predicate was ratified, the producer
+  was missing.
 * ``append_message`` — the per-room monotonic-seq append. The seq is
   assigned by a SINGLE-STATEMENT INSERT
   (``INSERT ... SELECT COALESCE(MAX(seq), 0) + 1 ...``) so no read-max
@@ -91,6 +97,7 @@ __all__ = [
     "RoomError",
     "RoomNotFoundError",
     "RoomClosedError",
+    "RoomNotOwnerError",
     "MemberNotFoundError",
     "MemberNameCollisionError",
     "RoomSeqConflictError",
@@ -156,6 +163,18 @@ class RoomNotFoundError(RoomError):
 class RoomClosedError(RoomError):
     """The room exists and is readable, but its state is ``closed`` —
     posts are refused (capability row: closed = read-only)."""
+
+
+class RoomNotOwnerError(RoomError):
+    """The caller is not the room's OWNER.
+
+    The close transition is OWNER-ONLY (architecture §3/§5: "close =
+    parent tool only"): the OWNER is the parent that opened the room.
+    Raised fail-closed by :meth:`RoomRepository.close_room` — the
+    predicate is enforced HERE (the DB layer), not only in the tool
+    body, so a caller that bypasses the tool cannot close a room it
+    does not own.
+    """
 
 
 class MemberNotFoundError(RoomError):
@@ -562,6 +581,72 @@ class RoomRepository:
         raise RoomError(
             f"append integrity failure for room={room_id}: {exc}"
         ) from exc
+
+    # ── the close transition (the ONLY producer of ``closed``) ───────
+
+    def close_room(
+        self, room_id: str, *, owner_instance_id: str
+    ) -> dict[str, Any]:
+        """Close the room — the forward-only ``active → closed`` move.
+
+        The ONLY producer of the ``closed`` state (architecture §3/§5:
+        *"States forward-only: ``active → closed → (purged)``. Close =
+        parent tool only"*). Without this producer the ratified P-close
+        GC arm (``state=closed AND closed_at < now − 14d`` → purge) is
+        UNREACHABLE — the predicate was right, the producer was
+        missing.
+
+        Fail-closed, three typed refusals:
+
+        * :class:`RoomNotFoundError` — the room does not exist (absent
+          or already purged — R2: purged = nonexistent).
+        * :class:`RoomNotOwnerError` — the caller is not the room's
+          OWNER (the owner is the parent that opened the room). The
+          ownership predicate is enforced HERE (the DB layer), not
+          only in the tool body.
+        * :class:`RoomClosedError` — the room is not in the ``active``
+          state (the transition is forward-only; there is no reopen).
+
+        The close is ONE UPDATE of the ``chatrooms`` row: ``state`` →
+        ``closed`` and ``closed_at`` → now. The room LOG is untouched
+        (the capability row: a closed room still reads, still
+        re-derives TAGGED rows until the purge). No ``event`` row is
+        written — the content-free ``room_closed`` trace rides the
+        lifecycle notifier (the SSE room channel), NOT the event
+        table (the event registry is ``room_purged`` + the P3 kinds).
+        """
+        now = _utc_now_iso()
+        with Session(self._engine) as session:
+            room = session.get(ChatRoom, room_id)
+            if room is None:
+                raise RoomNotFoundError(
+                    f"room={room_id} not found (absent or already purged)"
+                )
+            if room.owner_instance_id != owner_instance_id:
+                raise RoomNotOwnerError(
+                    f"room={room_id} is owned by another instance "
+                    "(close is parent-only)"
+                )
+            if room.state != RoomState.ACTIVE.value:
+                raise RoomClosedError(
+                    f"room={room_id} is not active (state={room.state}) "
+                    "— the close transition is forward-only"
+                )
+            room.state = RoomState.CLOSED.value
+            room.closed_at = now
+            room.updated_at = now
+            # The detached payload FIRST — every field is client-set,
+            # and after ``commit()`` the ORM instance expires (reading
+            # it detached would raise DetachedInstanceError).
+            snap = room_payload(room)
+            session.commit()
+        logger.info(
+            "room closed: room=%s owner=%s closed_at=%s",
+            room_id,
+            owner_instance_id,
+            now,
+        )
+        return snap
 
     # ── reads (room / member lookups) ──────────────────────────────────
 

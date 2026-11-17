@@ -57,6 +57,7 @@ from daemon.repositories.room.repository import (
     RoomJoinUnknownRoomError,
     RoomLeaveOwnerError,
     RoomNotFoundError,
+    RoomNotOwnerError,
     RoomRepository,
     RoomSeqConflictError,
 )
@@ -69,6 +70,7 @@ __all__ = [
     "RoomError",
     "RoomNotFoundError",
     "RoomClosedError",
+    "RoomNotOwnerError",
     "MemberNotFoundError",
     "MemberNameCollisionError",
     "RoomSeqConflictError",
@@ -201,6 +203,40 @@ class RoomChatService:
             },
         )
         return room
+
+    # ── the close transition (the ONLY producer of ``closed``) ───────
+
+    async def close_room(
+        self, *, room_id: str, owner_instance_id: str
+    ) -> dict[str, Any]:
+        """Close the room (off-loop) — the ONLY producer of ``closed``.
+
+        The forward-only ``active → closed`` transition (architecture
+        §3/§5: "close = parent tool only"). The P-close GC arm
+        (``state=closed AND closed_at < now − 14d`` → purge) becomes
+        REACHABLE through this producer.
+
+        The F-3 lifecycle broadcast fires AFTER the durable commit —
+        content-free (ids + the state; NO room name, NO member name).
+        A notifier failure never fails the close (best-effort, the
+        observability-must-not-break-mutation rule).
+        """
+        result = await asyncio.to_thread(
+            self._repo.close_room,
+            room_id,
+            owner_instance_id=owner_instance_id,
+        )
+        await self._notify_lifecycle(
+            room_id=room_id,
+            kind="room_closed",
+            data={
+                "room_id": room_id,
+                "owner_instance_id": owner_instance_id,
+                "state": str(result.get("state") or ""),
+                "closed_at": str(result.get("closed_at") or ""),
+            },
+        )
+        return result
 
     # ── append — the ONLY path that takes the per-room lock ────────────
 

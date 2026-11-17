@@ -1,4 +1,4 @@
-"""Agent-facing room tools — the ``room`` category (4 tools).
+"""Agent-facing room tools — the ``room`` category (5 tools).
 
 Agent group chat, Phase 2 / P5 (Emperor-ratified design, 2026-11-15 —
 ``.agents/shared/planning/group-chat/architecture-recommendation.md``,
@@ -7,7 +7,7 @@ the spec of record). The tool surface the Emperor's requirement named:
 milestone reports, changes to the chatroom via toolcall, ...) are
 injected into the instance's SYSTEM MESSAGE."*
 
-The four verbs
+The five verbs
 --------------
 
 * ``room_create`` — open a room (room row + the creator's OWNER
@@ -24,6 +24,12 @@ The four verbs
   the Ruling-A loop-back. The decision is RECORDED ON THE ROOM, so
   the proposal never stays unanswered (the parent-decided tasking
   rule).
+* ``room_close`` — the PARENT closes the room (the ``active → closed``
+  transition). This is the ONLY producer of the ``closed`` state:
+  architecture §3/§5 ratify the closed column of the capability row
+  and §10 ratifies the P-close GC arm (``closed_at < now − 14d`` →
+  purge), but without a producer the whole closed column was
+  unreachable. The verb is OWNER-ONLY ("close = parent tool only").
 
 Access posture — TWO layers, BOTH required
 ------------------------------------------
@@ -42,7 +48,9 @@ Access posture — TWO layers, BOTH required
    before the append; ``room_read`` — the repository's fail-closed
    read predicate (active member ∪ owner-ancestry), no in-body
    membership check; ``room_task_decision`` — an explicit ACTIVE
-   membership row beneath the owner check.
+   membership row beneath the owner check; ``room_close`` — an
+   explicit ACTIVE membership row beneath the OWNER check (close is
+   parent-only).
 
 The membership gate is FAIL-CLOSED and it is the pre-append gate:
 ``room_post`` resolves the caller's membership row BEFORE the append
@@ -68,7 +76,7 @@ House rules honored here:
   the room service — the v0.27.14 event-loop discipline).
 
 **Why this file is large (~1,036 lines).** The 1,000–3,000-line band
-requires a why-large note: the four room verbs share ONE
+requires a why-large note: the five room verbs share ONE
 authorization gate + refusal envelope — splitting them puts the gate
 ordering across a module boundary where the compiler cannot hold it.
 """
@@ -107,6 +115,7 @@ Tools in this category:
 - ``room_post`` — post a message; ``@name`` tags INTERRUPT a member, ``to:`` names ROUTE to one
 - ``room_read`` — read the room log (after_seq + limit)
 - ``room_task_decision`` — the parent's recorded answer to a task proposal
+- ``room_close`` — the OWNER closes the room (a closed room is read-only; it is purged 14 days later)
 
 Working rules (the guidelines text, mirrored in the joined-room system-message block):
 - Report MILESTONES, not a stream of consciousness. One post per milestone; the digest carries the recent ones.
@@ -119,7 +128,7 @@ Working rules (the guidelines text, mirrored in the joined-room system-message b
 #: word; never a variant like ``rooms`` / ``chat`` / ``group-chat``).
 ROOM_CATEGORY_KEY = "room"
 
-#: The four tool names this module constructs — the canonical list the
+#: The five tool names this module constructs — the canonical list the
 #: registry's ``KNOWN_TOOL_NAMES`` / ``DYNAMIC_TOOL_NAMES`` and the
 #: registration pin pack agree with.
 ROOM_TOOLS: tuple[str, ...] = (
@@ -127,6 +136,7 @@ ROOM_TOOLS: tuple[str, ...] = (
     "room_post",
     "room_read",
     "room_task_decision",
+    "room_close",
 )
 
 #: The refusal tokens (the in-process mirror of the door's status
@@ -475,6 +485,14 @@ def create_room_tools(
         note: Annotated[
             str,
             Field(default="", description="Optional one-line rationale."),
+        ]
+
+    class RoomCloseInput(BaseModel):
+        """Input schema for room_close."""
+
+        room_id: Annotated[
+            str,
+            Field(description="The chatroom UUID you own."),
         ]
 
     @register_tool_category(ROOM_CATEGORY_KEY)
@@ -1032,12 +1050,119 @@ def create_room_tools(
             logger.exception("room_task_decision failed")
             return _internal_error_refusal("room_task_decision")
 
+    @register_tool_category(ROOM_CATEGORY_KEY)
+    @tool(args_schema=RoomCloseInput)
+    async def room_close(room_id: str) -> str:
+        """Close a chat-room you own. Use tool_help("room_close") for details."""
+        # ── the layer-2 gate: FIRST logic in the body (the ONE
+        # shared helper — the verbs delegate here, H1).
+        gate_refusal = _gate("room_close", caller_agent_id, caller_instance_id)
+        if gate_refusal is not None:
+            return gate_refusal
+        room_service = _room_service(manager)
+        if room_service is None:
+            return _refusal(
+                "room_close",
+                TOKEN_NO_ROOM_SERVICE,
+                "the chat-room service is not available in this daemon",
+            )
+        try:
+            from daemon.repositories.room.repository import (
+                RoomClosedError,
+                RoomNotFoundError,
+                RoomNotOwnerError,
+            )
+
+            room = await room_service.get_room(room_id)
+            if room is None:
+                # A PURGED room is NONEXISTENT (R2) — the same
+                # not-found refusal the other verbs mint.
+                return _refusal(
+                    "room_close",
+                    TOKEN_ROOM_NOT_FOUND,
+                    f"room {room_id} does not exist (absent or purged)",
+                )
+            # ── the OWNER GATE (architecture §3/§5: "close = parent
+            # tool only"). The room's OWNER is the parent that opened
+            # it. Fail-closed: a member that does not own the room
+            # cannot close it.
+            if room.get("owner_instance_id") != caller_instance_id:
+                return _refusal(
+                    "room_close",
+                    TOKEN_NOT_OWNER,
+                    "only the room owner (the parent) can close a "
+                    "chat-room — close is parent-only",
+                )
+            # ── the MEMBERSHIP GATE beneath the owner check (the house
+            # posture — every write is preceded by an explicit ACTIVE
+            # membership resolution).
+            member = await room_service.get_member(room_id, caller_instance_id)
+            if member is None or member.get("state") != "active":
+                return _refusal(
+                    "room_close",
+                    TOKEN_NOT_A_MEMBER,
+                    f"you are not an active member of room {room_id}",
+                )
+            try:
+                closed = await room_service.close_room(
+                    room_id=room_id,
+                    owner_instance_id=caller_instance_id,
+                )
+            except RoomNotFoundError:
+                return _refusal(
+                    "room_close",
+                    TOKEN_ROOM_NOT_FOUND,
+                    f"room {room_id} does not exist (absent or purged)",
+                )
+            except RoomNotOwnerError:
+                # The repository re-checks the ownership predicate (the
+                # DB layer) — a concurrent owner change lands here.
+                return _refusal(
+                    "room_close",
+                    TOKEN_NOT_OWNER,
+                    "only the room owner (the parent) can close a "
+                    "chat-room — close is parent-only",
+                )
+            except RoomClosedError:
+                # The transition is FORWARD-ONLY (active → closed): a
+                # room that is already closed is not re-closable.
+                return _refusal(
+                    "room_close",
+                    TOKEN_ROOM_CLOSED,
+                    f"room {room_id} is already closed — a closed room "
+                    "is read-only",
+                )
+            return json.dumps(
+                {
+                    "room_id": room_id,
+                    "name": closed.get("name"),
+                    "state": closed.get("state"),
+                    "closed_at": closed.get("closed_at"),
+                    "hint": (
+                        "a closed room is read-only (posts are refused); "
+                        "the room is purged from the database 14 days "
+                        "after the close"
+                    ),
+                },
+                indent=2,
+            )
+        except Exception:  # noqa: BLE001 — house pattern: error string, never raise
+            logger.exception("room_close failed")
+            return _internal_error_refusal("room_close")
+
     room_create._full_doc_ = _build_full_doc("room_create")
     room_post._full_doc_ = _build_full_doc("room_post")
     room_read._full_doc_ = _build_full_doc("room_read")
     room_task_decision._full_doc_ = _build_full_doc("room_task_decision")
+    room_close._full_doc_ = _build_full_doc("room_close")
 
-    return [room_create, room_post, room_read, room_task_decision]
+    return [
+        room_create,
+        room_post,
+        room_read,
+        room_task_decision,
+        room_close,
+    ]
 
 
 def _build_full_doc(label: str) -> str:
@@ -1065,4 +1190,6 @@ def _build_full_doc(label: str) -> str:
         "The category is PRIVILEGED (entry #23) — opt-in via an explicit "
         "tools.allow entry — AND every call is gated on ROOM MEMBERSHIP: "
         "a non-member is refused BEFORE any write (fail-closed).\n"
+        "room_close is OWNER-only (close = parent tool only): a closed "
+        "room is read-only and is purged 14 days after the close.\n"
     )

@@ -349,17 +349,18 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "guideline_read",
     # agent group chat P5 (2026-11-16): the room tool category — the
     # sibling-collaboration surface (room_create / room_post /
-    # room_read / room_task_decision). Created by the
-    # create_room_tools() factory (daemon/tools/room.py). Factory-built
-    # (not import-time registered), so all four names belong in
-    # DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. The category is
-    # PRIVILEGED (entry #23) — opt-in only, never default-granted; the
-    # runtime MEMBERSHIP gate lives in the tool bodies (fail-closed,
+    # room_read / room_task_decision / room_close). Created by the
+    # create_room_tools() factory (daemon/tools/room.py).
+    # Factory-built (not import-time registered), so all five names
+    # belong in DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. The category
+    # is PRIVILEGED (entry #23) — opt-in only, never default-granted;
+    # the runtime MEMBERSHIP gate lives in the tool bodies (fail-closed,
     # before any write).
     "room_create",
     "room_post",
     "room_read",
     "room_task_decision",
+    "room_close",
 })
 
 
@@ -901,18 +902,18 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     "guidelines",
     # agent group chat P5 (2026-11-16): the ROOM tool category —
     # ``room_create`` / ``room_post`` / ``room_read`` /
-    # ``room_task_decision``, created by the create_room_tools()
-    # factory (daemon/tools/room.py). PRIVILEGED entry #23 of
-    # PRIVILEGED_TOOL_CATEGORIES (22 -> 23 after the guidelines
-    # entry).
+    # ``room_task_decision`` / ``room_close``, created by the
+    # create_room_tools() factory (daemon/tools/room.py). PRIVILEGED
+    # entry #23 of PRIVILEGED_TOOL_CATEGORIES (22 -> 23 after the
+    # guidelines entry).
     #
     # Why privileged: the room surface is the SIBLING-COLLABORATION
     # channel — a member can post into a shared room, interrupt a peer
     # (``@name`` escalates and stops their current work) and, as the
-    # room owner, DECIDE a task proposal. That is authority over
-    # peers, so the empty-allow inherit universe must NOT auto-grant
-    # it. The explicit ``tools.allow: ["room"]`` entries are the
-    # visibility path.
+    # room owner, DECIDE a task proposal and CLOSE the room. That is
+    # authority over peers, so the empty-allow inherit universe must
+    # NOT auto-grant it. The explicit ``tools.allow: ["room"]`` entries
+    # are the visibility path.
     #
     # The SECOND layer is the MEMBERSHIP gate in the tool bodies: a
     # caller that is not an ACTIVE member of the target room is
@@ -1511,13 +1512,14 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "guidelines": "daemon.tools.guidelines",
     # agent group chat P5 (2026-11-16): the room tool category
     # (``room_create`` / ``room_post`` / ``room_read`` /
-    # ``room_task_decision``). PRIVILEGED category (entry #23 of
-    # PRIVILEGED_TOOL_CATEGORIES): the sibling-collaboration channel —
-    # a member can post into a shared room, interrupt a peer, and (as
-    # the room owner) decide a task proposal. The empty-allow inherit
-    # universe must never auto-grant authority over peers; the
-    # explicit ``tools.allow: ["room"]`` entries are the visibility
-    # path, and every tool body ALSO carries its own MEMBERSHIP gate
+    # ``room_task_decision`` / ``room_close``). PRIVILEGED category
+    # (entry #23 of PRIVILEGED_TOOL_CATEGORIES): the
+    # sibling-collaboration channel — a member can post into a shared
+    # room, interrupt a peer, and (as the room owner) decide a task
+    # proposal and close the room. The empty-allow inherit universe
+    # must never auto-grant authority over peers; the explicit
+    # ``tools.allow: ["room"]`` entries are the visibility path, and
+    # every tool body ALSO carries its own MEMBERSHIP gate
     # (fail-closed, before any write).
     #
     # The value MUST be a ``daemon.tools.*`` path — the AST scanner
@@ -1526,8 +1528,9 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # exact-equality drift pin fails at boot. The category key is
     # EXACTLY ``room`` while the tool names are snake_case
     # (``room_create`` / ``room_post`` / ``room_read`` /
-    # ``room_task_decision``) — the house pattern (``self-alarm`` →
-    # ``self_alarm``, ``wedge-capture`` → ``wedge_capture_*``).
+    # ``room_task_decision`` / ``room_close``) — the house pattern
+    # (``self-alarm`` → ``self_alarm``, ``wedge-capture`` →
+    # ``wedge_capture_*``).
     "room": "daemon.tools.room",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
@@ -2115,6 +2118,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "room_post",
     "room_read",
     "room_task_decision",
+    "room_close",
 })
 
 

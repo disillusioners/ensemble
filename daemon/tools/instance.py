@@ -3017,13 +3017,13 @@ def create_guidelines_tools_if_available(manager, current_instance_id: str, agen
 
 
 def create_room_tools_if_available(manager, current_instance_id: str, agent_id: str, agent_tag: str | None = None) -> list:
-    """Create the four agent group-chat room tools for one instance/agent.
+    """Create the five agent group-chat room tools for one instance/agent.
 
     Agent group chat Phase 2 / P5 (2026-11-16, Emperor-ratified design).
     The tools are ``room_create`` / ``room_post`` / ``room_read`` /
-    ``room_task_decision`` (``daemon/tools/room.py``).
+    ``room_task_decision`` / ``room_close`` (``daemon/tools/room.py``).
 
-    The factory ALWAYS constructs all four: the room service's
+    The factory ALWAYS constructs all five: the room service's
     presence is checked at CALL time (the notify-user / guidelines
     posture), so a daemon without the room substrate registers cleanly
     and refuses with the typed ``room-service-unavailable`` envelope at

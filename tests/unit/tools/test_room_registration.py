@@ -4,7 +4,7 @@
 The three-step registration seam (decorator + registry entries +
 construction) is proven END-TO-END here, in the guidelines shape:
 
-* (a) the AST discovery finds all four tools in the category module,
+* (a) the AST discovery finds all five tools in the category module,
   and the constructed tools carry ``_tool_category == "room"``;
 * (b) the decorator order is load-bearing and pinned:
   ``@register_tool_category`` ABOVE ``@tool``;
@@ -12,7 +12,7 @@ construction) is proven END-TO-END here, in the guidelines shape:
   path (the AST scanner resolves the value as
   ``daemon/tools/<parts[2:]>.py`` — a ``daemon.services.*`` value is
   never discovered and the drift pin fails at boot);
-* (d) ``DYNAMIC_TOOL_NAMES`` + ``KNOWN_TOOL_NAMES`` carry all four
+* (d) ``DYNAMIC_TOOL_NAMES`` + ``KNOWN_TOOL_NAMES`` carry all five
   names (factory-built, not import-time registered);
 * (e) the ``create_instance_tools`` extend is greppable in source AT
   THE CALL SITE AND precedes ``create_help_tool`` /
@@ -141,6 +141,7 @@ def _stub_manager():
         "read_messages",
         "unread_count",
         "create_room",
+        "close_room",
         "advance_read_cursor",
         "list_member_rooms",
         "get_room",
@@ -172,7 +173,7 @@ def _tools(agent_id: str = "ari", instance_id: str = "iid-1"):
 
 
 class TestRegistration:
-    def test_the_ast_discovery_finds_the_four_tools(self) -> None:
+    def test_the_ast_discovery_finds_the_five_tools(self) -> None:
         """The category module's ``@tool``-decorated names are
         discoverable by the registry's AST scan."""
         discovered = discover_source_only_tool_names()
@@ -496,6 +497,7 @@ class TestTheMembershipGate:
                 {"room_id": "r", "text": "t"},
                 {"room_id": "r"},
                 {"room_id": "r", "proposal_seq": 1, "decision": "revive"},
+                {"room_id": "r"},
             )
         ):
             raw = await tools[index].ainvoke(payload)
@@ -508,6 +510,7 @@ class TestTheMembershipGate:
             room_service.append_message,
             room_service.read_messages,
             room_service.create_room,
+            room_service.close_room,
         ):
             seam.assert_not_called()
 
@@ -525,6 +528,7 @@ class TestTheMembershipGate:
                 {"room_id": "r", "text": "t"},
                 {"room_id": "r"},
                 {"room_id": "r", "proposal_seq": 1, "decision": "revive"},
+                {"room_id": "r"},
             )
         ):
             raw = await tools[index].ainvoke(payload)
