@@ -1,3 +1,19 @@
+<!-- group-chat-p6-tester-regate2-20261117-begin -->
+## GROUP-CHAT P6 — FOCUSED RE-GATE #2 (2026-11-17 @ `7e0cd2db0`; verdict **PASS — P6 TESTING AXIS CLOSED**: 13/13 legs green, **0 findings**, net-new 0). The approver's GC fail-safe blocker (the tester's N-1 doc-drift finding promoted to CODE) is FIXED and mutation-proven (faulted read → no delete + no latch → re-read convergence → real purge; guard `_dry_run_read_authoritative`); `room_close` verified 5/5 incl. the P-close 14d arm E2E; the spawn-join broadcast gap CLOSED (post-commit broadcast, notifier-fault fail-safe); cap single-implementation (one `charge` site at `daemon/tools/room.py:755`); mutation matrix **9/9** + selftest-on-COPY proof (SIGTERM inside the planted window → `daemon/tools/room.py` byte-identical `f502308a…87b07b`); ledger gate 5/5 (mutation-proven ledger reader). Evidence: `RESULTS/2026-11-17-group-chat-p6-tester-regate2.md`
+
+| Pack / leg | Last run (re-gate #2) | Status |
+|---|---|---|
+| `gc_p6_room_family` | 2026-11-17 @ `7e0cd2db0` | ✅ PASS **24 files / 420 nodes / 0 red** (6:09) — **LABEL CORRECTED: the composition is 24 files at this tip** (earlier "21 files" rows were accurate only at their own tips) |
+| `gc_p6_room_mutation_matrix` | 2026-11-17 @ `7e0cd2db0` | ✅ PASS **9/9** legs (M01..M09, incl. the 3 new module-boundary legs) + selftest-on-copy proof; manifest + independent `--verify` CLEAN |
+| `gc_p6_pilot_scenario` | 2026-11-17 @ `7e0cd2db0` | ✅ PASS 9/9 (C9: 12 rows, 1 purge event, purged read + SSE 404) |
+| SSE-adjacent corpus | 2026-11-17 @ `7e0cd2db0` | ✅ PASS **111/111** (86 baseline + 25 new: spawn-join 7 · close-producer 9 · room_close 9) |
+| fault-path cages | 2026-11-17 @ `7e0cd2db0` | ✅ PASS **15/15** (M1 grew 3→6: production-path fail-safe + write-side + purge-failure isolation; no missing nodes) |
+| TestP11 file | 2026-11-17 @ `7e0cd2db0` | ✅ PASS 39/39 (every `manager.py` hunk over `858a85e31..HEAD` carries a sanctioned marker) |
+| ledger gate node (`tests/unit/services/test_group_chat_ledger_gate.py`) | 2026-11-17 @ `7e0cd2db0` | ✅ PASS 5/5 (mutation-proven: a ledger-claim flip REDs the node) |
+| language_check standalone | 2026-11-17 @ `7e0cd2db0` | ✅ PASS 124/124 |
+| tool-sweep net-new vs base `858a85e31` | 2026-11-17 @ `7e0cd2db0` | ✅ **0** (`tests/unit/tools/` 5,213 nodes: failed sets byte-identical both sides — 24 = 24, head_only **0**) |
+| FE (chat room surface) | 2026-11-17 @ `7e0cd2db0` | ✅ **140/140** + modal 8/8 + tsc CLEAN + AOT/prod build PASS; icon visibility PINNED (`chat.html:89 @if (renderedInstance())` — hidden when no instance selected) |
+<!-- group-chat-p6-tester-regate2-20261117-end -->
 <!-- group-chat-p6-tester-regate-20261116-begin -->
 ## GROUP-CHAT P6 — FOCUSED RE-GATE (2026-11-16 @ `5d13a1c6c` = 4 fix commits over `e6d984272`; verdict **PASS-WITH-NOTES — P6 testing axis CLOSED**: net-new 6 → **0**) · F-1/F-2 CLOSED (6/6 nodes green + complete census sibling-sweep: 7/7 executable pin sites match live 119/40/36 + 7-needle census 0 live hits in `daemon/`) · F-3 content exposure CLOSED (adversarial: outsider = 1 content-free event, 6/6 smuggling attempts refused, owner instance stream byte-for-byte identical, room branch replays skipped, pin mutation-proven) · F-4 WRITE side EXACT (READ-side cycle-vs-primitive over-claim = doc-only note). **9 carried notes, 0 blocking.** Evidence: `RESULTS/2026-11-16-group-chat-p6-tester-regate.md` + `/tmp/gc_p6_gate/regate_*`
 
@@ -5,7 +21,7 @@
 |---|---|---|
 | `gc_p6_pilot_scenario` | 2026-11-16 @ `5d13a1c6c` | ✅ PASS 9/9 (C9's room-channel path unaffected by F-3) |
 | `gc_p6_room_mutation_matrix` | 2026-11-16 @ `5d13a1c6c` | ✅ PASS 6/6 (SOLO wave; markers exact; byte-identity attested; tree clean before/after) |
-| `gc_p6_room_family` | 2026-11-16 @ `5d13a1c6c` | ✅ PASS 385/385 · 21 files (334.5 s; third confirming measurement) |
+| `gc_p6_room_family` | 2026-11-16 @ `5d13a1c6c` | ✅ PASS 385/385 · 21 files (334.5 s; third confirming measurement) *(label note 2026-11-17: 21 files was the composition at THIS tip; at `7e0cd2db0` the same find-expression yields **24 files** — see the re-gate #2 block)* |
 | `gc_p6_lane_scope` | 2026-11-16 @ `5d13a1c6c` | ✅ PASS **218P/1S/1F** — the 1 F = the A-P6-18 base-attributable metrics node (offender list byte-identical, zero new); +2 nodes = the 2 F-3 pins |
 | SSE-adjacent corpus (3 files) | 2026-11-16 @ `5d13a1c6c` | ✅ PASS 86/86 (room_sse_resolution 14 + live_event_hub 57 + injection_sse 15; incl. both new F-3 pins) |
 | fault-path cages (12 nodes) | 2026-11-16 @ `5d13a1c6c` | ✅ PASS 12/12 (M1 ×3 · M2 ×6 · M3 ×3) |
