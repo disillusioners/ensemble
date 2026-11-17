@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] — 2026-11-17
+
+
 ### Added — Agent group chat (this lane; three additive migrations)
 
 - **Team chat rooms.** A parent agent opens a chat room; children may join it at spawn time, and every member is NAMED — the parent's purpose-name, or one generated on demand and de-duplicated per room — so peers can address each other with an `@`-tag. Untagged posts reach members at their natural step boundaries as a lightweight "N unread" nudge that never interrupts work in flight, plus one last-chance unread check before an agent declares its turn done; that check is loop-guarded, so a busy room can never hold a member from finishing. A TAGGED post is delivered immediately, mid-turn. A post aimed at an agent that has already finished becomes a TASK PROPOSAL routed to the PARENT to decide (revive, reroute, or answer) and is never auto-executed. The parent and every member can always read the room.
