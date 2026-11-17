@@ -2,9 +2,50 @@
 
 Commissioner: leader (Emperor-authorized C-lane). Implementer: coder.
 Worktree: `/home/nea/ensemble-src-wt-skillfix` @ branch `feature/skill-system-defects`, base `0181dadbf` (= origin/latest).
-Scope: defects 1, 2+C2, 3(C1), 5, 7 + supplement items (a)–(f). Out of scope: 4, 6, 8, 9.
+Scope: defects 1, 2+C2, 3(C1), 5, 7 + supplement items (a)–(f) + decision-package defect D.
+Out of scope: 4, 6, 8, 9.
 
-All anchors below were **grep-verified at plan time (2026-11-17)** against this worktree.
+## DECISION PACKAGE (adjudicated 2026-11-17, wanderer map + orchestrator overlay) — recorded as DECISIONS
+
+- **Q1 (winner policy):** E-6 rule — newer LINEAGE GENERATION wins, by
+  generation number, NEVER timestamps; never crown a verified-defective
+  newer member (corrective-first via the seam where applicable, else the
+  non-defective member). The defective-divert input is EXPLICIT
+  (operator/manifest disposition), never sweep-judgment. ONE mechanism
+  serves C2 + defect 2 + the pending-wiring backlog: a
+  `skill_ab_inactivity_sweep` MaintenanceService companion (house
+  pattern: interval + idle-gated + never-raising), registered beside
+  `skill_metric_scan` / `skill_orphan_sweep` in `daemon/manager.py`
+  (~:4749-4766 AS FOUND, re-derived — manager drifted vs the map) —
+  the hunk carries a sanctioned `decision` marker comment per the
+  drift-guard constraint.
+- **Q2 (C1 placement):** EXTEND the existing REST route
+  `POST /api/skills/{id}/ab-test/resolve` (`daemon/routers/skills.py:1607`
+  AS FOUND) with a sanctioned explicit-winner mode wired to
+  `SkillStaleDeactivator.resolve_pair`
+  (`daemon/services/skill_deactivation.py:1346` AS FOUND — verified DEAD
+  CODE: zero importers). Sanctioned mode REQUIRES explicit winner +
+  reason/provenance; the sample-size gate is bypassed ONLY thus; the
+  announcement record goes through the capture-observability sink; the
+  normal auto-resolution path stays gated as today. resolve_pair gains
+  the winner-side completion per terminal-state spec (d) (winner →
+  group cleared + status='active') — its current apply arm resolves
+  the test row and deactivates losers but leaves the winner's
+  `ab_test_group`/`status` untouched. ALSO: fix the silent-skip
+  observability — the `skill_evolve` A/B-guard refusal returns a plain
+  dict, so the job ledger records SUCCESS with zero mutation;
+  guard-refusals must be distinguishable outcomes (skipped/refused).
+- **Q3 (C3 historical nulls):** LEAVE them (fix-forward only; the sink
+  is schema-free JSONL with zero production readers; the correlation
+  limit is documented in the sink docstring). Fix scope is WIDER than
+  filed: SIX null-producing writers (metrics wrapper, tools seam,
+  dispatcher cap-check-error, `skill_tools.py` fix-dispatch-fault, AND
+  `job_processor.py` execution-refusal records :820/:869 — execution
+  refusals mint too). Correct the false `build_run_record` docstring
+  carve-outs; extend the m2 pin to cover the previously-null paths for
+  real (not only the already-correct dispatcher paths).
+
+All anchors above were **grep-verified at plan time (2026-11-17)** against this worktree.
 Anchors are leads, not contracts; implementation re-greps every site.
 
 ---
@@ -15,23 +56,30 @@ Anchors are leads, not contracts; implementation re-greps every site.
 `_evolve_fix` creates the new generation with `description=skill.description`
 (parent verbatim). The direction / fix payload never influences the description,
 so a scope-change FIX generation is undiscoverable via `skill_search` (both BM25
-and embedding index the description). Same-shape copy exists in `_evolve_derived`
-at `:643` — **left untouched** (out of filing scope; disclosed as follow-up).
+and embedding index the description). **Decision package: BOTH sites** — the
+same-shape copy in `_evolve_derived` at `:643` is IN scope. No description
+field exists in any FIX/DERIVED payload today — the D5 edit-script payload adds
+the description contract (JSON `"description"` key; the pre-existing
+`_RE_KV_DESC` KV-regex at `:154` stays CAPTURED-only — different response
+format, not shared machinery). Load-bearing for discovery: the BM25 corpus, the
+LLM rerank (name+description only), and the trigger-query builder all consume
+the description.
 
 **Fix approach:**
-- The FIX evolution payload gains an optional `description` field (see D5's
-  edit-script protocol: the LLM may emit a new one-line description when the
-  direction changes scope).
-- `_evolve_fix` uses `_resolve_fix_description(parent_description, payload_description)`:
-  payload description when present and non-blank (sanitized, one line, capped);
-  parent description as fallback when absent/blank.
-- This is the same path for first-evolution FIXes and **corrective re-FIXes**
-  (supplement (f)): the post-promote corrective FIXes that re-introduce improved
-  content get correct descriptions by construction — no special-casing.
+- The FIX/DERIVED evolution payload carries an optional `description` field
+  (D5's edit-script protocol: the LLM emits a new one-line description when
+  the direction changes scope).
+- `_evolve_fix` AND `_evolve_derived` use
+  `_resolve_fix_description(parent_description, payload_description)`:
+  payload description when present and non-blank (sanitized, one line, capped
+  512); parent description as fallback when absent/blank.
+- Same path for first-evolution and **corrective re-FIXes** (supplement (f)) —
+  the post-promote corrective FIXes that re-introduce improved content get
+  correct descriptions by construction.
 
-**Test plan:** FIX with a scope-changing payload description → new row carries it;
-FIX with no description in payload → parent fallback; corrective FIX (D2a path)
-→ same behavior.
+**Test plan:** FIX with a scope-changing payload description → new row carries
+it; DERIVED likewise; no description in payload → parent fallback; corrective
+FIX (D2a path) → same behavior.
 
 **Serving-behavior impact:** better `skill_search` discoverability for new
 generations; no serving-path logic change.
@@ -94,16 +142,22 @@ New service method `resolve_ab_test_sanctioned(ab_test_group, *, basis, defectiv
 4. Non-corrective FIX on an `ab_testing` target keeps the existing refusal —
    the guard's normal-shape semantics are preserved.
 
-**Surfaces (all lane-gated like the existing tools):**
-- Admin HTTP: `POST /api/skills/ab-tests/resolve-sanctioned` (operator-visible)
-  + `GET /api/skills/ab-tests/stalled` (sweep listing; supports the post-promote
-  consumption of the 39-pair pending-wiring set one group at a time).
+**Surfaces (DECIDED Q1 supersedes the no-manager-touch stance):**
+- Admin HTTP: the EXISTING `POST /api/skills/{id}/ab-test/resolve` route
+  extended with the sanctioned explicit-winner mode (Q2) + a stalled-pairs
+  listing endpoint (`GET /api/skills/ab-tests/stalled`).
 - Keeper tool lane: `skill_resolve_ab` gains optional `basis` /
   `defective_arm_id`; `skill_evolve` gains `corrective`.
-- **No manager.py changes** (drift-guard constraint). No autonomous timer: the
-  sweep is operator/Ari-invoked — with both skill lanes PAUSED, an autonomous
-  mutator would be the wrong default; the endpoint + anomaly rows are the
-  "operator-visible, auditable" surface. Disclosed as a deliberate design bound.
+- **`skill_ab_inactivity_sweep` MaintenanceService companion** (Q1): house
+  pattern — interval knob + idle-gated + never-raising; registered beside
+  `skill_metric_scan` / `skill_orphan_sweep` in `daemon/manager.py`
+  (~:4749-4766 AS FOUND). The SWEEP detects stalled pairs (predicate:
+  comparisons == 0 ∧ age ≥ `ab_stall_timeout_days`) and SURFACES them
+  (anomaly rows; parked resolution plans) — it resolves ONLY pairs whose
+  E-6 winner is unambiguous AND never diverts on sweep-judgment alone
+  (defective-divert requires an explicit operator/manifest disposition).
+  The manager.py hunk carries a sanctioned `decision` marker comment
+  (drift-guard constraint).
 
 **Test plan:** stalled-basis resolve (E-6 newer-gen winner + exact (d) terminal
 state); refuse when comparisons>0; refuse when age<threshold; generation-tie →
@@ -120,10 +174,39 @@ revert = reactivate + clear `resolved_at` (runbook note, no auto-undo).
 
 ## C1 — sanctioned corrective/retirement for verified-defective arms
 
-Covered by the D2/C2 mechanism above (execution-path fix + `defective_arm`
-basis + surfaces). Supplement (c) honored: the fix is at EXECUTION
-(`_evolve_fix` corrective path), not at admission — the dispatcher seam already
-admits FIX dispatches on pair members.
+**Placement (DECIDED Q2):** EXTEND the existing REST route
+`POST /api/skills/{id}/ab-test/resolve` (`daemon/routers/skills.py:1607` AS
+FOUND) with a **sanctioned explicit-winner mode**, wired to
+`SkillStaleDeactivator.resolve_pair`
+(`daemon/services/skill_deactivation.py:1346` AS FOUND; verified DEAD CODE —
+zero importers; it already carries the receipt-BEFORE-flip invariant,
+receipt rotation, run_id, and `--reactivate` reversal).
+
+- Sanctioned mode contract: explicit `winner_id` + REQUIRED
+  `reason`/provenance (rejected with 400 when missing); the sample-size
+  gate is bypassed ONLY in this mode; the normal auto-resolution path
+  stays gated exactly as today (2026-10-22 confinement intact).
+- resolve_pair gains the winner-side completion per terminal-state spec
+  (d): winner → `ab_test_group=None`, `status='active'` (mirrors the
+  service's forced-winner side effects; its current apply arm stops
+  short). Loser side already matches (d) exactly via the sanctioned
+  `deactivate_skill` writer.
+- Announcement: capture-observability sink record (minted run_id,
+  stage='resolution') + `emit_lane_anomaly` — append-only, auditable.
+- The E-6 winner rule (D2/C2) supplies the default winner when the
+  caller asks the sanctioned mode to decide (stalled basis); an explicit
+  winner overrides. Never sweeps a verified-defective newer member to
+  victory — defective-divert requires an EXPLICIT disposition.
+- **Silent-skip observability (DECIDED Q2):** the `skill_evolve`
+  A/B-guard refusal currently returns a plain dict → the job ledger
+  records SUCCESS with zero mutation. Guard-refusals become
+  distinguishable outcomes (envelope carries `skipped`/`refused`
+  semantics + a sink refusal record), never plain success.
+
+The D2/C2 service machinery (E-6 stall resolver + corrective FIX path)
+remains as designed below — Q2 wires the REST surface through
+resolve_pair; the service method and resolve_pair share the terminal-state
+writer semantics.
 
 **CRITICAL QUESTION — pre-promote applicability (answered):**
 The terminal state uses ONLY lifecycle states and columns that the CURRENT live
@@ -133,18 +216,18 @@ variants — no A/B routing on a resolved pair), resolved `skill_ab_tests` rows
 are inert to the resolver, `is_active=false` rows are unserved. **A retirement
 applied to live data pre-promote IS honored by the current live binary** — it is
 the same state the existing forced-winner path writes. The NEW machinery
-(basis/E-6/corrective param/sweep endpoint) is new-binary-only but consumes and
-writes only existing schema — **no migration, no new table**.
+(sanctioned mode / E-6 / corrective param / sweep) is new-binary-only but
+consumes and writes only existing schema — **no migration, no new table**.
 
-**39-pair pending-wiring table:** no trace in `daemon/migrations/versions/`
-(119 files checked by grep) nor in code (`pending_wiring`/`pending_ab` greps
-empty) ⇒ the data lives only in the live DB. Per supplement (d): designed
-against the `SkillABTest` schema (`ab_test_group`, `skill_id_old/new`,
-`comparisons`, `extension_count`, `created_at`, `resolved_at`,
-`winner_skill_id`); consumption of the live rows is **post-promote** (the
-sweep/resolver accepts group ids one at a time — no live reads from this lane).
+**Pending-wiring backlog table:** no trace in `daemon/migrations/versions/`
+nor in code ⇒ the data lives only in the live DB. Designed against the
+`SkillABTest` schema; consumption of the live rows is **post-promote** (the
+route/resolver accepts group ids one at a time — no live reads from this lane).
 
----
+**Test plan:** route-level sanctioned resolve (winner+reason required;
+400 without reason; sample-size bypass ONLY sanctioned); resolve_pair
+winner-side completion ((d) exact); reversal via receipt reactivate;
+silent-skip observability pin (guard refusal ≠ ledger SUCCESS shape).
 
 ## D5 — destructive regeneration (supplement (a): server-side full-body carry)
 
@@ -166,19 +249,28 @@ sweep/resolver accepts group ids one at a time — no live reads from this lane)
   `{"description": str|null, "edits": [{"op": "replace|delete|insert_after",
   "anchor": "<exact verbatim text>", "replacement"/"text": str}]}`.
 - `_apply_surgical_edits(parent_content, edits)` — pure server-side applier:
-  exact-anchor matching only (no fuzzy); each op whose anchor does not match
-  exactly is REJECTED and logged (count surfaced in the result payload); the
-  body outside edited regions carries the parent **verbatim by construction**,
-  with the FULL parent body in the prompt (3000-char truncation removed from
-  the evolution path entirely).
+  exact-anchor matching only (anchor must occur EXACTLY ONCE; ambiguous
+  anchors rejected, never guessed); each rejected op is skipped and reported;
+  the body outside edited regions carries the parent **verbatim by
+  construction**, with the FULL parent body in the prompt (3000-char
+  truncation removed from the evolution path entirely).
 - Zero applicable ops + no description op ⇒ `ValueError` (fail loud — no
   silent no-op generation, no destructive fallback regen).
 - **Full-body LLM regeneration ONLY on explicit direction** — documented
-  marker phrases in the direction (e.g. "full-body regeneration", "regenerate
-  the entire body", "full rewrite"); marker ⇒ legacy `_generate_evolved_content`
-  path, but now with the FULL parent body in the prompt. The marker list is
-  documented in the method docstring and plan-light; it is the escape hatch
-  (no new feature switch — both skill gates stay untouched).
+  marker phrases (see `_FULL_REGEN_MARKER_RE`); marker ⇒ legacy
+  `_generate_evolved_content` path, with the FULL parent body in the prompt
+  (its `[:3000]` truncation is removed — a rewrite must see what it
+  rewrites). The marker is the escape hatch; no new feature switch.
+- **Fault-guard (decision package):** the `_call_llm` ""-fault path
+  (`"(no content generated)"` at the legacy return) can never become
+  storable content — the FIX/DERIVED flow raises on it instead of creating
+  a broken row.
+- **Content gate (decision package):** FIX/DERIVED get a carry-over gate
+  (CAPTURED already has `_captured_content_gate`) asserting carry-over
+  invariants: parent sections that the direction does NOT name must survive
+  byte-identical — enforced structurally by the surgical path, and asserted
+  as a belt-and-braces gate before the row is created (parent-section
+  presence check).
 - Non-directed default-path behavior stays as close to unchanged as the fix
   allows: A/B wiring, lineage rows, embedding refresh, cooldowns — unchanged;
   only the content-production seam changes.
@@ -186,7 +278,9 @@ sweep/resolver accepts group ids one at a time — no live reads from this lane)
 **Test plan:** parent bodies >8000 and >3000 chars → untouched sections
 byte-identical after surgical FIX (the 4-invariant-regression shape);
 anchor-miss rejected; total-parse-failure raises; full-regen marker takes the
-legacy path (with full parent body in prompt); no-marker never full-regenerates.
+legacy path (with full parent body in prompt); no-marker never full-regenerates;
+""-fault raises (never storable); carry-over gate trips on a hypothetical
+destructive result.
 
 **Serving-behavior impact:** FIX/DERIVED generations stop losing unrelated
 invariants by construction. Highest-risk change of the lane — mitigated by the
@@ -196,34 +290,38 @@ fail-loud contract and per-defect tests.
 
 ## C3 — refused-admission records mint `run_id: null`
 
-**Root cause AS FOUND** (four producers; `build_run_record` at
-`skill_capture_observability.py:825-863` already documents the
-minted-before-the-gate contract that these sites violate):
-1. `daemon/services/skill_metrics_service.py:140-186` — metrics-lane wrapper
-   `_record_capture_lane_off_refusal` accepts NO `run_id` at all → every
-   gate-0 capture refusal on the production path records `run_id: null`.
-2. `daemon/tools/skill_evolution_tools.py:539` — tools-lane
+**Root cause AS FOUND** (SIX producers per DECIDED Q3; `build_run_record` in
+`skill_capture_observability.py` documents the minted-before-the-gate
+contract these sites violate):
+1. `daemon/services/skill_metrics_service.py` — metrics-lane wrapper
+   `_record_capture_lane_off_refusal` (accepts NO `run_id`) → every gate-0
+   capture refusal on the production path records `run_id: null`.
+2. `daemon/tools/skill_evolution_tools.py` — tools-lane
    `record_capture_lane_disabled_refusal` call passes no `run_id`.
-3. `daemon/services/skill_job_dispatcher.py:789` — `cap_check_error` admission
-   record omits `run_id` (the parameter exists on `_check_fix_burst_cap`).
-4. `daemon/tools/skill_tools.py:410` — skill_fix dispatch-fault
+3. `daemon/services/skill_job_dispatcher.py` — `cap_check_error` admission
+   record omits `run_id`.
+4. `daemon/tools/skill_tools.py` — skill_fix dispatch-fault
    `stage="admission"` record passes no `run_id`.
+5. `daemon/services/job_processor.py:820` AS FOUND — queued
+   execution-refusal record (no run id).
+6. `daemon/services/job_processor.py:869` AS FOUND — active
+   execution-refusal record (no run id).
 
 (`enqueue_evolution` and `enqueue_capture` mint correctly — verified.)
 
-**Fix approach:** mint `observability.new_run_id()` before each gate at all
-four sites and thread it through. Tighten the `build_run_record` docstring:
-`stage="admission"` records MUST carry a run id (test-pinned).
+**Fix approach (DECIDED Q3):** ALL SIX sites mint/pass a run id (the
+dispatcher gate pattern is the reference). The `build_run_record` docstring
+is corrected — no false carve-outs: after the fix, an admission OR
+execution refusal record always carries a run id. **Historical null rows
+LEAVE AS-IS** (fix-forward only — schema-free JSONL, zero production
+readers; the correlation limit is documented in the sink docstring). The m2
+pin is EXTENDED to cover the previously-null paths for real (metrics seam,
+tools seam, cap-check-error, dispatch-fault, both execution-refusal sites)
+— the existing m2 pin only exercised the two already-correct dispatcher
+paths.
 
-**Historical null rows — decision: STAY AS-IS.** The sink is an append-only
-JSONL day-file log (`skill_capture_observability` sink), not a DB table: run
-ids that were never minted cannot be reconstructed, and rewriting history in
-an audit log would be worse than the gap. Interpretive rule for reading old
-rows: `run_id: null` on a pre-fix `stage="admission"` record identifies the
-legacy producers listed above. No backfill.
-
-**Test plan:** each of the four refusal paths emits a record with non-null
-run_id; distinct run ids across two consecutive refusals; docstring pin.
+**Test plan:** each of the six refusal paths emits a record with non-null
+run id; distinct run ids across two consecutive refusals; docstring pin.
 
 **Serving-behavior impact:** observability only.
 
@@ -302,6 +400,58 @@ non-empty parent/child lines; fresh-generation shape (92f26d3e class).
 - (e) Diagnosis + e2e test + disclosure above. ✔
 - (f) D1's description path is basis-independent — corrective re-FIXes get
   payload descriptions on the same code path. ✔
+
+## Defect D (decision package, IN scope) — psycopg2 gap = missing URL rewrite
+
+**AS FOUND:** bare `postgresql://` URLs make SQLAlchemy default to the
+psycopg2 driver at `create_engine` — psycopg2 is NOT in pyproject; the
+daemon uses `postgresql+psycopg` (`daemon/repositories/factory.py:389`
+AS FOUND per map). Two audit scripts build engines from operator-supplied
+`--db-url` verbatim:
+- `scripts/audit/skill_counter_reconcile.py` (~:496 AS FOUND — guarded by
+  a try/except, but the failure message is the psycopg2 gap, not the
+  intended liveness error);
+- `scripts/audit/skill_stale_deactivate.py:200` AS FOUND — UNGUARDED
+  (raw traceback).
+
+**Fix approach:** normalize `postgresql://` → `postgresql+psycopg://`
+before `create_engine` in BOTH scripts (the 4-line idiom at
+`tests/integration/test_maintenance_checkpoint_cleanup_api.py:112-117`
+AS FOUND: `_sync_pg_url`). Correct the runbook's prescribed broken forms
+(`.agents/shared/planning/skill-system-revival/phase2-runbook.md:636/:759/:1053`
+AS FOUND — all three prescribe bare `postgresql://`). One e2e PG pin calls
+`module.main(["--db-url", "postgresql+psycopg://…"])` against the
+disposable/dev PG (the bare form would fail with the psycopg2 gap; the
+pin proves the rewrite makes BOTH forms work).
+
+**Test plan:** unit pin on the rewrite helper (both forms accepted);
+e2e pin via `module.main` on PG; runbook grep-clean of bare forms.
+
+**Serving-behavior impact:** operator tooling only.
+
+## Item (e) — capture dark-path RECONCILIATION (decision-package map)
+
+Map (verified): the trigger engine has ZERO capture references; capture
+originates at the task-completion hook —
+`record_task_completion` (`skill_metrics_service.py:358` AS FOUND; the
+`if not injected_ids: return 0` early-return at `:471-472` means the
+eligibility gate runs ONLY for instances with a skill INJECTED) →
+`_check_capture_eligibility` (`:567`; gates: kill-switch `:663`,
+service-wired `:692`, task_succeeded `:698`, injection `:715-731`,
+genuinely-evolved `:733+`) → `enqueue_capture` (the ONLY production call
+site `:814`) → dispatcher gate (`:1126` AS FOUND map). The manual tool
+`skill_execute_capture` BYPASSES `enqueue_capture` (inline LLM + insert,
+no admission record) — it cannot serve as the e2e proof seam.
+
+Reconciliation to produce (code-level, no live reads): why the recent
+window shows ZERO gate evaluations while the historical sink holds
+`capture_lane_off` null records (source=skill_metrics_service ≈65%) —
+candidate causes to discriminate: (i) kill-switch state; (ii) eligibility
+conjunct mismatch vs the census's 499 candidates; (iii) the
+`:471-472` early-return (no injections ⇒ no gate). Deliverable: the
+reasoning pinned in this plan + a NEW e2e capture-admission test wired
+through the REAL enqueue path (`record_task_completion` → … →
+`enqueue_capture`) on the dev DB — NOT through the bypassing tool.
 
 ## E-6 encoding (binding)
 
