@@ -34,14 +34,24 @@ append, which is how a gate gets switched off).
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 PLANNING = REPO_ROOT / ".agents" / "shared" / "planning" / "group-chat"
 DECISIONS = PLANNING / "decisions.md"
 PLAN_OVERVIEW = PLANNING / "plan-overview.md"
+
+#: The LATEST entry number the ledger is expected to carry. The
+#: "no gaps up to whatever max is" shape is BLIND to a deletion of
+#: the highest row (the max just shrinks), so the node anchors the
+#: expected latest number instead — and every future append MUST
+#: bump this constant in the same change that appends the entry.
+EXPECTED_LATEST = 36
 
 
 def _entry(text: str, tag: str) -> str:
@@ -181,14 +191,81 @@ def test_the_a_p6_2_plan_row_pointer_is_landed() -> None:
     )
 
 
-def test_every_a_p6_entry_number_is_used_exactly_once() -> None:
-    """The numbering integrity the two lanes' overlapping proposals
-    needed: each ``A-P6-NN`` tag opens exactly ONE paragraph."""
-    text = _decisions()
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _assert_numbering(text: str) -> None:
+    """The numbering integrity, as a PURE check over a given ledger text.
+
+    Three teeth: every ``A-P6-NN`` tag opens exactly ONE paragraph; the
+    numbers have no gaps; and the LATEST number is the EXPECTED one
+    (``EXPECTED_LATEST``) — a deletion of the highest row shrinks the
+    max instead of leaving a gap, so only the anchor catches it.
+    """
     tags = re.findall(r"^\*\*A-P6-(\d+) \u00b7", text, flags=re.MULTILINE)
     duplicates = sorted({t for t in tags if tags.count(t) > 1})
     assert not duplicates, f"duplicate A-P6 entry numbers: {duplicates}"
     numbers = sorted({int(t) for t in tags})
     assert numbers == list(range(1, max(numbers) + 1)), (
         f"the A-P6 numbering has a gap: {numbers}"
+    )
+    assert max(numbers) == EXPECTED_LATEST, (
+        f"the ledger's latest entry is A-P6-{max(numbers)}, expected "
+        f"A-P6-{EXPECTED_LATEST} — an entry was DELETED, or an append "
+        f"did not bump EXPECTED_LATEST in the same change"
+    )
+
+
+def test_every_a_p6_entry_number_is_used_exactly_once() -> None:
+    """The numbering integrity the two lanes' overlapping proposals
+    needed: each ``A-P6-NN`` tag opens exactly ONE paragraph, the
+    numbers have no gaps, and the LATEST entry is the expected one."""
+    _assert_numbering(_decisions())
+
+
+def _without_highest_entry(text: str, tag: str) -> str:
+    """A SCRATCH copy of the ledger text with one entry removed."""
+    lines = text.splitlines(keepends=True)
+    marker = f"**A-P6-{tag} \u00b7"
+    hits = [i for i, ln in enumerate(lines) if ln.startswith(marker)]
+    assert len(hits) == 1, f"expected one '{marker}' line, found {len(hits)}"
+    del lines[hits[0]]
+    return "".join(lines)
+
+
+def test_the_numbering_node_reds_when_the_highest_row_is_deleted() -> None:
+    """MUTATION LEG (A-P6-35 g): deleting the HIGHEST-numbered entry
+    must RED the numbering node.
+
+    The pre-fix shape ("no gaps up to whatever max is") is BLIND to
+    exactly this deletion — the max simply shrinks and the check still
+    passes. The EXPECTED_LATEST anchor closes it, and this leg proves
+    the anchor bites. The ledger FILE is never written: the leg runs
+    on a scratch copy, and the production bytes are sha-verified
+    unchanged afterwards ("restored byte-identically", trivially —
+    nothing was ever written)."""
+    before = _sha256(DECISIONS)
+    broken = _without_highest_entry(_decisions(), str(EXPECTED_LATEST))
+    with pytest.raises(AssertionError):
+        _assert_numbering(broken)
+    assert _sha256(DECISIONS) == before
+
+
+def test_the_a_p6_26_surface_split_is_recorded() -> None:
+    """A-P6-35 (i) — the entry must reconcile its "NO names" claim BY
+    SURFACE: the SSE room-channel FRAMES carry no names, while the DB
+    AUDIT ROW carries ``member_name`` BY DESIGN (A-P6-34's four
+    fields)."""
+    entry = _entry(_decisions(), "26")
+    assert "carry NO room or member NAMES" in entry, (
+        "A-P6-26 must keep the frames' content-free claim"
+    )
+    assert "DB AUDIT ROW" in entry and "BY DESIGN" in entry, (
+        "A-P6-26 must name the DB audit row as the surface that "
+        "carries member_name by design"
+    )
+    assert "NEVER fanned to a room channel" in entry, (
+        "A-P6-26 must state that the audit row is never fanned to a "
+        "room channel"
     )

@@ -268,7 +268,7 @@ Counting convention: one row per coined/extended artifact; 3 tables = three rows
 | P3 | router per the total 10-state map + derived CAS + rowcount-0 map · Ruling-A branch + one-hop + Y14 + proposal dedup `(source_message_id, trigger, member)` · **R1 addressing: `addressed_to` param + `addressed_members` persistence + the §4.4 routing predicate + the 8 pin tests** · room allow-clause + pin · @tag resolution · fan-out + caps · closed/purged refusals |
 | P4 | nudge (a) every-update reminder · `room_completion_gate` (chain + disabled seam + `"agent"` map) · demoted backstop **(DROPPED — A-P4-8 adjudication; the in-chain gate owns (a2) exclusively)** · manager-level shared latch · strong-form composition + continuation-cap interaction test |
 | P5 | category #23 mint · room tools (grant pinned; room_create seeds the owner row) · creator mid-life availability (static allow-list + in-body gate) · digest builder (async day one; roster incl. owner; **addressing convention in guidelines: `to:` routes, `@` interrupts**) · push composer |
-| P6 | **UI per §13.1 (R3)** + SSE pre-branch + audit surfacing · **GC PURGE sweeper (R2: transactional `room_purged` + deletes; no archive tables; dry-run first)** |
+| P6 | **UI per §13.1 (R3)** + SSE pre-branch + audit surfacing · **GC PURGE sweeper (R2: transactional `room_purged` + deletes; no archive tables; dry-run first)** · **§9 per-turn post budget — server-side at the `room_post` PRE-APPEND chokepoint (A-P6-1 / A-P6-2: a manager-level per-`instance_id` counter, reset at the turn boundary; ≤4 posts/member/turn; the 5th is typed-refused)** |
 
 ### 13.1 P6 UI — THE HUMAN OBSERVABILITY SURFACE (R3, binding — KV `gc_ui_refinement_p6`, verbatim)
 
