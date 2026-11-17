@@ -214,7 +214,9 @@ class StubManager:
         self.instances = {"iid-1": (object(), "/nonexistent")}
         self._instance_repository = repo if repo is not None else StubInstanceRepo()
         self.config = SimpleNamespace(
-            compaction=compaction if compaction is not None else _compaction_config()
+            compaction=compaction if compaction is not None else _compaction_config(),
+            # The configured model the receipt names (model_configured=).
+            llm=SimpleNamespace(model="agentic", model_vision="vision"),
         )
         self.refresh_calls: list[tuple[str, bool]] = []
 
@@ -904,3 +906,139 @@ class TestRefusalMessageTemplates:
             "before another note-guided compaction may be armed (the limit is "
             "{limit}s). Nothing was armed; try again after the window."
         )
+
+
+# ── F11 — the RENDERED refusal messages (the template wiring is pinned) ────
+
+
+class TestRenderedRefusalMessages:
+    """The template CONSTANTS are pinned above; these pin the WIRING —
+    each branch's ``.format()`` must render the live values correctly."""
+
+    async def test_note_requires_compact_renders_verbatim(self) -> None:
+        manager = StubManager()
+        out = await _call(manager, compact=False, compact_note="a note")
+        assert (
+            "a compact_note was supplied with compact=false — the note is only "
+            "meaningful together with compact=true; re-issue the call with "
+            "compact=true. Nothing was armed."
+        ) in out
+
+    async def test_note_required_renders_verbatim(self) -> None:
+        manager = StubManager()
+        out = await _call(manager, compact=True, compact_note="   ")
+        assert (
+            "a compact note is REQUIRED when compact=true — the note is the "
+            "point, not an option; supply compact_note with non-empty text. "
+            "Nothing was armed."
+        ) in out
+
+    async def test_note_over_cap_renders_the_live_values(self) -> None:
+        manager = StubManager()
+        note = "x" * (CAP + 1)
+        out = await _call(manager, compact=True, compact_note=note)
+        assert (
+            f"the compact note is {CAP + 1} characters, over the {CAP}-character "
+            "cap — the note is NEVER truncated; shorten it and re-arm. Nothing "
+            "was armed."
+        ) in out
+
+    async def test_compaction_disabled_renders_verbatim(self) -> None:
+        manager = StubManager(compaction=_compaction_config(enabled=False))
+        out = await _call(manager, compact=True, compact_note="a note")
+        assert (
+            "compaction is DISABLED in this deployment — arming a note that can "
+            "never land would strand it; enable compaction (CompactionConfig.enabled) "
+            "and re-arm. Nothing was armed."
+        ) in out
+
+    async def test_compact_rate_limited_renders_the_live_seconds(self) -> None:
+        manager = StubManager()
+        repo = manager._instance_repository
+        # A LANDED compaction 100s ago ⇒ ~800s remaining.
+        from datetime import datetime, timedelta, timezone
+
+        recent = (datetime.now(timezone.utc) - timedelta(seconds=100)).isoformat()
+        repo.metadata["compact_note_last_applied_at"] = recent
+        out = await _call(manager, compact=True, compact_note="a note")
+        from daemon.constants import DELIBERATE_COMPACT_RATE_LIMIT_S
+
+        assert (
+            "the deliberate-compact rate limit is in force — "
+        ) in out
+        assert "remaining before another note-guided compaction may be armed" in out
+        assert f"(the limit is {DELIBERATE_COMPACT_RATE_LIMIT_S}s)" in out
+
+
+# ── A — the receipt names the model the span is SIZED from ─────────────────
+
+
+class TestReceiptModelConfigured:
+    async def test_the_receipt_carries_the_configured_model(self) -> None:
+        """The agent-facing receipt names the model the compaction is
+        SIZED from (content-free). The model that SERVED the turn is
+        named in the audit line, not here."""
+        manager = StubManager()
+        out = await _call(manager, compact=True, compact_note="a note")
+        assert "model_configured=agentic" in out
+
+    async def test_the_audit_line_names_the_served_model(self) -> None:
+        """The split: the AUDIT line's ``agent_model=`` is the SERVED
+        model (a different field, a different surface)."""
+        from daemon.services.prompt_refresh import format_compact_note_append_line
+
+        line = format_compact_note_append_line(
+            instance_id="iid-1",
+            agent_id="ari",
+            outcome="compacted",
+            note_chars=3,
+            note_sha256_12="abc123def456",
+            agent_model="vision",
+        )
+        assert "agent_model=vision" in line
+        assert "model_configured=" not in line
+
+
+# ── F1 / F2 — the read-back variants (UNVERIFIED and OLDER-note) ───────────
+
+
+class RaisesAfterFailedWriteRepo(StubInstanceRepo):
+    """The write fails AND the read-back raises (a DB outage): the arm
+    state is UNVERIFIED — never "nothing was armed"."""
+
+    def set_metadata(self, instance_id: str, key: str, value):
+        return None  # the write reports failure
+
+    def get(self, instance_id: str):
+        raise RuntimeError("db down")
+
+
+class HoldsOlderNoteRepo(StubInstanceRepo):
+    """The carrier holds an OLDER armed note; the NEW write fails."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._meta("iid-1")["compact_note_arm"] = "THE OLD NOTE"
+        self._meta("iid-1")["compact_note_sha256_12"] = pr.compact_note_sha256_12(
+            "THE OLD NOTE"
+        )
+
+    def set_metadata(self, instance_id: str, key: str, value):
+        return None  # the NEW write reports failure
+
+
+class TestF1F2ReadBackVariants:
+    async def test_f1_an_unperformable_read_back_is_unverified(self) -> None:
+        manager = StubManager(repo=RaisesAfterFailedWriteRepo())
+        out = await _call(manager, compact=True, compact_note="a note")
+        assert "UNVERIFIED" in out
+        assert "nothing was armed" not in out
+        assert "verified by reading it back" not in out
+
+    async def test_f2_an_older_note_is_named_not_advertised(self) -> None:
+        old_sha = pr.compact_note_sha256_12("THE OLD NOTE")
+        manager = StubManager(repo=HoldsOlderNoteRepo())
+        out = await _call(manager, compact=True, compact_note="THE NEW NOTE")
+        assert old_sha in out                       # the OLD digest is NAMED
+        assert pr.compact_note_sha256_12("THE NEW NOTE") not in out
+        assert "did NOT land" in out

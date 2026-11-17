@@ -13987,12 +13987,11 @@ def create_compact_note_agent_node(
             for g in (preserved or []):
                 preserved_msgs.extend(getattr(g, "messages", []) or [])
 
-            if compactable:
-                span_start = compactable[0].start_idx + 1
-                span_end = compactable[-1].end_idx + 1
-            else:
-                span_start = 1
-                span_end = len(kept_msgs) if kept_msgs else 1
+            # ``compactable`` is GUARANTEED non-empty here — the #4 no-op
+            # settle above returns early on the empty case. (The former
+            # ``else`` fallback was UNREACHABLE: F4.)
+            span_start = compactable[0].start_idx + 1
+            span_end = compactable[-1].end_idx + 1
 
             from daemon.compaction import _next_compaction_seq, build_compaction_doc, make_remove_all_sentinel
             from daemon.compaction import CompactionResult

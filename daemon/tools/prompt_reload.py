@@ -156,6 +156,19 @@ def _compact_note_cap(manager: Any) -> int:
     return DEFAULT_COMPACT_NOTE_MAX_CHARS
 
 
+def _configured_model(manager: Any) -> str:
+    """The CONFIGURED model the compact-note span is SIZED from, at ARM
+    time. CONTENT-FREE (a model id is not conversation content).
+
+    This is the model the SIZING is based on — NOT necessarily the model
+    that will SERVE the turn. Which model answers is unwitnessable at
+    arm time; the server's audit line names the SERVED model
+    (``agent_model=`` in the append audit line).
+    """
+    llm = getattr(getattr(manager, "config", None), "llm", None)
+    return str(getattr(llm, "model", "") or "unknown")
+
+
 def _compaction_enabled(manager: Any) -> bool:
     """Whether compaction is enabled at all (``CompactionConfig.enabled``).
 
@@ -230,6 +243,7 @@ def _render_armed_receipt(
     previous_sha12: str = "",
     status_line: str | None = None,
     partial_write: bool = False,
+    model_configured: str = "",
 ) -> str:
     """The ARMED receipt — what the agent actually sees at ARM TIME.
 
@@ -257,6 +271,7 @@ def _render_armed_receipt(
         f"outcome={outcome}",
         f"note_chars={note_chars}",
         f"note_sha256={note_sha12}",
+        f"model_configured={model_configured or 'unknown'}",
         f"cap={cap}",
         f"superseded_previous={str(bool(superseded_previous)).lower()}",
     ]
@@ -503,31 +518,80 @@ def _handle_compact_note(
         repo, instance_id, note, max_chars=cap
     )
     partial_write = False
+    new_sha12 = compact_note_sha256_12(note)
     if not armed_ok:
         # The write REPORTED a failure. Did the arm actually land? A
         # carrier can apply the key and still report failure (the
-        # per-key fallback is NOT atomic) — so the state is READ BACK:
-        # claiming "nothing was armed" over a carrier that HOLDS the arm
-        # would be a falsehood (N4).
-        landed = False
+        # per-key fallback is NOT atomic) — so the state is READ BACK.
+        #
+        # THREE DISTINCT OUTCOMES (never collapsed):
+        #   (1) the read-back could NOT be performed (read_ok=False) —
+        #       the state is UNVERIFIED: never "nothing was armed" (we do
+        #       not know) and never "verified by reading it back" (no
+        #       verification happened);
+        #   (2) an OLDER note survives — NAME it (the new digest must NOT
+        #       be advertised: the swap would execute the OLD note);
+        #   (3) the arm is genuinely absent — the read-back CONFIRMS it.
+        read_state = None
+        read_ok = False
         if repo is not None:
             try:
-                landed = read_compact_note_state(repo, instance_id).armed
+                read_state = read_compact_note_state(repo, instance_id)
+                read_ok = bool(getattr(read_state, "read_ok", False))
             except Exception:  # pragma: no cover — defensive
-                landed = False
-        if landed:
-            partial_write = True
+                read_state = None
+                read_ok = False
+        if not read_ok:
             logger.warning(
-                "prompt_reload compact-note: PARTIAL WRITE for instance=%s "
-                "— the carrier write reported a failure but the carrier "
-                "HOLDS the arm (verified by reading it back)",
+                "prompt_reload compact-note: the arm write reported a "
+                "failure and the READ-BACK could not be performed for "
+                "instance=%s — the arm state is UNVERIFIED",
                 str(instance_id)[:8],
             )
+            return _failure(
+                CODE_INTERNAL_ERROR,
+                "the compact note could not be CONFIRMED as armed (the "
+                "carrier reported a write failure and the read-back could "
+                "not be performed); the arm state is UNVERIFIED — re-check "
+                "before re-arming.",
+            )
+        if read_state is not None and read_state.armed:
+            # The NEW note is PRESENT if its digest matches, OR if no
+            # digest was recorded but the BODY matches (a torn bundle can
+            # land the body and lose the digest).
+            new_is_present = (read_state.sha256_12 or "") == new_sha12 or (
+                not (read_state.sha256_12 or "")
+                and (read_state.note or "") == note
+            )
+            if new_is_present:
+                # (2a) the NEW note landed despite the reported failure.
+                partial_write = True
+                logger.warning(
+                    "prompt_reload compact-note: PARTIAL WRITE for "
+                    "instance=%s — the carrier write reported a failure but "
+                    "the carrier HOLDS the NEW arm (verified by reading it "
+                    "back)",
+                    str(instance_id)[:8],
+                )
+            else:
+                # (2b) an OLDER note survives — the NEW note did NOT land.
+                logger.warning(
+                    "prompt_reload compact-note: the arm write reported a "
+                    "failure and the read-back found an OLDER arm "
+                    "(sha256=%s) for instance=%s — the NEW note did NOT "
+                    "land; the OLD note remains armed",
+                    read_state.sha256_12 or "-",
+                    str(instance_id)[:8],
+                )
+                return _failure(
+                    CODE_INTERNAL_ERROR,
+                    "the NEW compact note did NOT land — the carrier still "
+                    "holds an OLDER armed note (sha256 prefix "
+                    f"{read_state.sha256_12 or '-'}); un-arm or replace it "
+                    "before re-arming.",
+                )
         else:
-            # The arm is genuinely NOT there — the carrier refused the
-            # write and the read-back confirms it. This is an INTERNAL
-            # failure (not a design outcome), so it rides the single
-            # FAILED code.
+            # (3) the arm is genuinely NOT there — the read-back CONFIRMS it.
             logger.error(
                 "prompt_reload compact-note: arm write failed for "
                 "instance=%s — the arm is NOT present (verified by "
@@ -541,7 +605,7 @@ def _handle_compact_note(
                 "was armed",
             )
 
-    note_sha12 = compact_note_sha256_12(note)
+    note_sha12 = new_sha12
     logger.info(
         format_compact_note_info_line(
             instance_id=instance_id,
@@ -564,6 +628,7 @@ def _handle_compact_note(
         previous_sha12=previous_sha12,
         partial_write=partial_write,
         status_line=status_line,
+        model_configured=_configured_model(manager),
     )
 
 
@@ -868,19 +933,24 @@ Compact notes (compact + compact_note)
   list below). An over-cap note is REFUSED with the length and the cap —
   it is NEVER silently truncated.
 - ARMED is not COMPACTED. The receipt reports what actually happened:
-  path=append, and outcome=compacted ONLY after the swap landed and
-  persisted; otherwise empty_reply, tool_calls_reply, refused_reply or
-  append_failed — never a success receipt for work not done. There is
-  no "armed pending seam" and no three gates (the floor predicate and
-  the threshold bypass are removed). A second note while one is armed
-  REPLACES the first, with a disclosure of the prior note's digest.
+  path=append, model_configured=<the model the span is sized from>, and
+  outcome=compacted ONLY after the swap landed and persisted; otherwise
+  empty_reply, tool_calls_reply, refused_reply, append_failed, or
+  armed_partial_write (the carrier write reported a failure but the arm
+  IS present — treat the note as armed) — never a success receipt for
+  work not done. There is no "armed pending seam" and no three gates
+  (the floor predicate and the threshold bypass are removed). A second
+  note while one is armed REPLACES the first, with a disclosure of the
+  prior note's digest.
 - The note is never echoed in a log — only its length and digest are
   observable.
-- The span the request announces is sized from the SAME effective model
-  that answers it (the vision switch included). The announced span is an
-  ESTIMATE: it equals the compaction that replaces it in the normal case,
-  but under failover (a different model answers) it MAY DIFFER — it is a
-  best-effort announcement, not a promise.
+- The span the request announces is sized from the CONFIGURED model at
+  append time (the vision switch applies only if images are already in
+  the channel). The announced span is an ESTIMATE: it equals the
+  compaction that replaces it in the normal case, but under failover (a
+  different model answers) it MAY DIFFER — it is a best-effort
+  announcement, not a promise. (The model that ANSWERS is named in the
+  server-side audit line, not here.)
 - KNOWN LIMITS, disclosed (the daemon classifies your model's reply with
   a 120-character head scan for 12 refusal markers, so it cannot ask
   twice): a genuine refusal OUTSIDE those 12 markers is misread as a

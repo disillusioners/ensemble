@@ -28,3 +28,42 @@ class TestCeilingRule:
             sections, "GLOBAL", 1000
         )
         assert archived >= 1
+
+
+# ── F10 — the honest-truncation marker text is PINNED ──────────────────────
+
+
+class TestHonestTruncationMarker:
+    def _doc(self, *, honest_truncation: bool):
+        from daemon.compaction import build_compaction_doc
+
+        # An over-cap GLOBAL forces the truncation marker.
+        huge = "x " * 4000
+        return build_compaction_doc(
+            instance_id="iid-1",
+            seq=1,
+            mode="summary",
+            compacted_at="2026-11-17T00:00:00+00:00",
+            global_overview=huge,
+            sections=[],
+            total_sections=0,
+            summarized_start=1,
+            summarized_end=10,
+            preserved_count=3,
+            dropped_spans=[],
+            msg_timestamps=None,
+            context_window=None,
+            previous_overview="",
+            honest_truncation=honest_truncation,
+        )
+
+    def test_the_honest_marker_never_claims_section_detail(self) -> None:
+        body = self._doc(honest_truncation=True).content
+        assert "no SECTION DETAIL follows on this path" in body
+        assert "SECTION DETAIL below remains complete" not in body
+
+    def test_the_default_marker_keeps_the_legacy_clause(self) -> None:
+        """Every existing (auto-path) caller is byte-identical: the
+        legacy clause survives when honest_truncation is False."""
+        body = self._doc(honest_truncation=False).content
+        assert "SECTION DETAIL below remains complete" in body

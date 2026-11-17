@@ -14,7 +14,10 @@
 # Owned artifacts (lane-owned):
 #   tests/unit/tools/test_prompt_reload_compact_note.py   (tool level)
 #   tests/unit/tools/test_compact_note_graph_wiring.py    (graph seam)
-#   tests/unit/test_compaction_compact_note.py              (engine level)
+#   tests/unit/test_compaction_compact_note.py   (engine level — ONE leg:
+#                                                    the ceiling rule; the
+#                                                    note-specific engine
+#                                                    legs were REMOVED)
 #
 # The file list below is a SYMBOL-RATIONALED STATIC list: every file was
 # selected by a grep over the lane's changed symbols (the refusal census,
@@ -37,7 +40,9 @@
 #   tests/unit/test_symptom_repair_partition.py   (the REMOVE_ALL
 #                                                    sentinel the swap creates)
 #
-# Legs covered: L1 L2 L3 L4 L5 L6 L7 L10 L11 L12 L14 L15 L16 L17
+# Legs covered: L1 L2 L3 L4 L7 L12 L17 + the graph-seam pins
+# (L5 L6 L10 L11 L14 L15 L16 were REMOVED with the per-piece strip — see
+# the PACKS row, which is the truth).
 #
 # TEST-ENV ONLY. No production code changes, no daemon boot, no ports.
 # No external services. No PostgreSQL contact.

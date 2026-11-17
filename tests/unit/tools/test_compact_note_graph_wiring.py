@@ -1252,3 +1252,55 @@ async def test_n3_the_no_compaction_needed_branch_is_a_no_op_settle(caplog):
     )
     assert "outcome=deferred" in joined
     assert "outcome=compacted" not in joined
+
+
+# ── F3 — the settle-log label EQUALS the settle's own logged outcome ───────
+
+
+async def test_f3_the_settle_warning_label_matches_the_actual_outcome(caplog):
+    """When the channel rebuild fails, the settle records
+    ``channel_rebuild_failed`` — and the settle WARNING must name THAT
+    outcome, not a hardcoded "compacted" (the N7 fix, now pinned)."""
+    import logging as _logging
+
+    repo = FakeRepo()
+    arm_compact_note(repo, "iid-1", NOTE)
+    manager = FakeManager(repo)
+    request = _request_msg()
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)] + [HumanMessage(content="hi")]
+    call, receipt = _exchange_group()
+    state = {"messages": [*fillers, call, receipt, request]}
+    inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
+    graph = FakeGraph(state["messages"])
+    node = create_compact_note_agent_node(
+        inner, manager=manager, compactor=_compactor(),
+        llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
+    )
+    config = {"configurable": {"thread_id": "iid-1"}}
+    with caplog.at_level(_logging.INFO):
+        with patch(
+            "daemon.compaction.build_sentinel_replacement",
+            side_effect=RuntimeError("no rebuild"),
+        ):
+            with patch(
+                "daemon.services._compaction_persist_seam.persist_compaction_result",
+                return_value=True,
+            ):
+                out = await node(state, config)
+    warnings = [
+        rec.getMessage() for rec in caplog.records if rec.levelno >= _logging.WARNING
+    ]
+    settle_warns = [w for w in warnings if "settle outcome=" in w]
+    assert settle_warns, warnings
+    joined = "\n".join(settle_warns)
+    # The label EQUALS the settle's own outcome (channel_rebuild_failed) —
+    # NOT a hardcoded "compacted".
+    assert "settle outcome=channel_rebuild_failed" in joined, joined
+    assert "settle outcome=compacted" not in joined
+    # The audit row agrees.
+    audit = "\n".join(
+        rec.getMessage()
+        for rec in caplog.records
+        if "prompt_reload_compact_note:" in rec.getMessage()
+    )
+    assert "outcome=channel_rebuild_failed" in audit
