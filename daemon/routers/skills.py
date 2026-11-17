@@ -1618,6 +1618,35 @@ async def resolve_ab_test(
             "anything else raises 400."
         ),
     ),
+    sanctioned: bool = Query(
+        default=False,
+        description=(
+            "C1 (2026-11-17) SANCTIONED MODE - the explicit-winner "
+            "resolution for stalled/defective pairs. When true: "
+            "`winner_id` (or `defective_arm_id`) AND `reason` are "
+            "REQUIRED; the sample-size gate is bypassed ONLY in "
+            "this mode; the resolution runs through "
+            "`SkillStaleDeactivator.resolve_pair` (receipt-BEFORE-"
+            "flip, reversible via the receipt) and is announced as "
+            "an auditable sink record + anomaly row. The normal "
+            "(unset) path stays gated exactly as today."
+        ),
+    ),
+    reason: str = Query(
+        default="",
+        description=(
+            "REQUIRED in sanctioned mode - auditable provenance for "
+            "the resolution decision (operator/Emperor-visible)."
+        ),
+    ),
+    defective_arm_id: str | None = Query(
+        default=None,
+        description=(
+            "Sanctioned mode alternative to `winner_id`: name the "
+            "VERIFIED-defective member; the OTHER variant wins "
+            "(E-6: never crown a verified-defective newer member)."
+        ),
+    ),
     evolution: SkillEvolutionService = Depends(get_evolution),
 ) -> dict[str, Any]:
     """Check whether the skill's A/B test should resolve.
@@ -1652,6 +1681,14 @@ async def resolve_ab_test(
         the test group); 500 on unexpected failure.
     """
     try:
+        if sanctioned:
+            return await _resolve_ab_test_sanctioned(
+                skill_id=skill_id,
+                winner_id=winner_id,
+                defective_arm_id=defective_arm_id,
+                reason=reason,
+                evolution=evolution,
+            )
         metrics = await evolution.get_skill_metrics(skill_id)
         if not metrics.get("found"):
             raise HTTPException(
@@ -1680,6 +1717,200 @@ async def resolve_ab_test(
         raise HTTPException(status_code=400, detail={"error": str(e)})
     except Exception as e:
         raise _to_http_500(e, "resolve_ab_test")
+
+
+async def _resolve_ab_test_sanctioned(
+    *,
+    skill_id: str,
+    winner_id: str | None,
+    defective_arm_id: str | None,
+    reason: str,
+    evolution: SkillEvolutionService,
+) -> dict[str, Any]:
+    """C1 (DECIDED Q2): the sanctioned explicit-winner resolution.
+
+    Contract (enforced here):
+    * ``reason`` REQUIRED (auditable provenance).
+    * Exactly one of ``winner_id`` / ``defective_arm_id``.
+    * The target skill must be a live pair member.
+    * The terminal write runs through
+      ``SkillStaleDeactivator.resolve_pair`` (receipt-BEFORE-flip;
+      reversible via the receipt) — the auditable unit that was dead
+      code before this wiring.
+    * The resolution is announced via the capture-observability sink
+      (minted run id) and as an anomaly row.
+    * The sample-size gate is bypassed ONLY on this path — the
+      normal ``resolve_ab_test`` flow above is untouched.
+    """
+    from daemon.services import skill_capture_observability as observability
+    from daemon.services.skill_deactivation import (
+        PairResolutionRefused,
+        SkillStaleDeactivator,
+    )
+
+    if not str(reason or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "sanctioned resolution requires a reason "
+                "(auditable provenance)"
+            },
+        )
+    if bool(winner_id) == bool(defective_arm_id):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "sanctioned mode requires exactly one of "
+                "winner_id / defective_arm_id"
+            },
+        )
+
+    metrics = await evolution.get_skill_metrics(skill_id)
+    if not metrics.get("found"):
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "Skill not found", "skill_id": skill_id},
+        )
+    ab_test = metrics.get("ab_test") or {}
+    ab_group = ab_test.get("ab_test_group")
+    if not ab_group:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "Skill is not in an A/B test",
+                "skill_id": skill_id,
+            },
+        )
+
+    ab_test_repo = getattr(evolution, "_ab_test_repo", None)
+    skill_repo = getattr(evolution, "_skill_repo", None)
+    if ab_test_repo is None or skill_repo is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "skill repositories not available"},
+        )
+
+    resolved_winner = winner_id
+    if resolved_winner is None:
+        # defective_arm_id named: the OTHER variant wins (E-6 — never
+        # crown a verified-defective member).
+        test_row = await asyncio.to_thread(
+            ab_test_repo.get_by_group, ab_group
+        )
+        if test_row is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "No ab_test row for the group",
+                    "ab_test_group": ab_group,
+                },
+            )
+        variants = {
+            str(getattr(test_row, "skill_id_old", "") or ""),
+            str(getattr(test_row, "skill_id_new", "") or ""),
+        }
+        variants.discard("")
+        if defective_arm_id not in variants:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "defective_arm_id is not a variant of "
+                    "the test group",
+                    "defective_arm_id": defective_arm_id,
+                },
+            )
+        resolved_winner = next(
+            vid for vid in variants if vid != defective_arm_id
+        )
+
+    deactivator = SkillStaleDeactivator(
+        skill_repo=skill_repo,
+        ab_test_repo=ab_test_repo,
+    )
+    run_id = observability.new_run_id()
+    try:
+        outcome = await asyncio.to_thread(
+            deactivator.resolve_pair,
+            ab_test_group=ab_group,
+            winner_skill_id=resolved_winner,
+            apply=True,
+        )
+    except PairResolutionRefused as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": f"sanctioned resolution refused: "
+                f"{getattr(exc, 'reason', '') or ''} ({exc})",
+                "ab_test_group": ab_group,
+            },
+        )
+
+    outcome["skill_id"] = skill_id
+    outcome["sanctioned"] = True
+    outcome["reason"] = reason
+
+    # The announcement — auditable, append-only, minted run id.
+    try:
+        observability.append_run_record(
+            observability.build_run_record(
+                stage="resolution",
+                run_id=run_id,
+                agent_id=None,
+                prompt_source="resolve_ab_test_sanctioned",
+                outcome="sanctioned_rest_route",
+                extra={
+                    "ab_test_group": ab_group,
+                    "winner_id": resolved_winner,
+                    "defective_arm_id": defective_arm_id,
+                    "reason": reason,
+                    "applied": bool(outcome.get("applied")),
+                },
+            )
+        )
+        await observability.emit_lane_anomaly(
+            category=observability.CATEGORY_LANE_DEVIATION,
+            description=(
+                "Sanctioned A/B resolution (REST) applied for "
+                f"ab_test_group={ab_group!r}: winner="
+                f"{resolved_winner} reason={reason!r} — terminal "
+                "state per the pinned spec (loser inactive+group "
+                "retained, winner active+group cleared, pair row "
+                "resolved). Reversible via the deactivation receipt."
+            ),
+            severity="major",
+            suspected_cause=(
+                "operator/Emperor-sanctioned closure of a stalled or "
+                "verified-defective A/B pair (E-6 rule)"
+            ),
+            holder=metrics,
+        )
+    except Exception:  # noqa: BLE001 — the resolution stands; announce best-effort
+        logger.warning(
+            "resolve_ab_test_sanctioned: announcement record failed "
+            "for group %s (the resolution itself stands)",
+            ab_group,
+            exc_info=True,
+        )
+    return outcome
+
+
+@router.get("/ab-tests/stalled")
+async def list_stalled_ab_tests(
+    evolution: SkillEvolutionService = Depends(get_evolution),
+) -> dict[str, Any]:
+    """C2: list unresolved A/B pairs in the stalled shape.
+
+    Read-only surfacing for the sweep + the post-promote
+    pending-wiring backlog: ``comparisons == 0`` AND age >=
+    ``ab_stall_timeout_days``. Each entry carries the E-6 default
+    winner (by GENERATION NUMBER) or a ``park_reason`` when the rule
+    cannot decide. Never mutates.
+    """
+    try:
+        stalled = await evolution.find_stalled_ab_tests()
+        return {"stalled": stalled, "count": len(stalled)}
+    except Exception as e:
+        raise _to_http_500(e, "list_stalled_ab_tests")
 
 
 @router.post("/{skill_id}/share")

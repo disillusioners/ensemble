@@ -4765,6 +4765,22 @@ class InstanceManager:
                 self._run_skill_orphan_sweep,
             )
 
+            # [decision] D2/C2 (2026-11-17, Emperor ruling E-6 + Q1):
+            # the skill_ab_inactivity_sweep companion — the ONE
+            # sanctioned resolution mechanism's periodic leg. Finds
+            # zero-traffic A/B pairs (comparisons == 0 AND age >=
+            # ab_stall_timeout_days) that can NEVER self-resolve
+            # (check_ab_test_resolution returns needs_more_data
+            # before the extension bump), resolves the E-6-unambiguous
+            # ones (newer GENERATION NUMBER wins, never timestamps),
+            # and parks + surfaces the rest. Idle-gated +
+            # never-raising like its siblings above.
+            self._maintenance_service.register(
+                "skill_ab_inactivity_sweep",
+                self.config.skill_evolution.metric_scan_interval_hours,
+                self._run_skill_ab_inactivity_sweep,
+            )
+
         # ── project-skill-loader A17 — orphan-purge gc tick ───────────
         # Code-review W3: ``ProjectSkillSourceService.gc_sweep()`` had NO
         # production caller, so the A17 claim ("the durable view stays
@@ -7806,6 +7822,86 @@ class InstanceManager:
             # maintenance loop. The next cycle retries cleanly.
             logger.warning(
                 f"_run_skill_orphan_sweep failed: {exc}"
+            )
+
+    # [decision] D2/C2 (2026-11-17): stalled A/B-pair inactivity
+    # sweep — the periodic leg of the ONE sanctioned resolution
+    # mechanism (Emperor ruling E-6 + orchestrator Q1). House pattern:
+    # interval-gated by the maintenance service, idle-gated, and
+    # never-raising.
+    async def _run_skill_ab_inactivity_sweep(self) -> None:
+        """Resolve/park stalled A/B pairs (zero traffic, aged out).
+
+        A pair whose ``comparisons`` counter never moved can never
+        reach ``ab_sample_size`` and never self-resolves — the
+        resolution tree returns ``needs_more_data`` before the
+        extension bump. This sweep closes that deadlock:
+
+        * STALLED predicate (enforced in code, never judgment):
+          ``comparisons == 0`` AND pair age >=
+          ``ab_stall_timeout_days``.
+        * E-6 winner rule: the NEWER LINEAGE GENERATION wins, decided
+          by generation number and NEVER by timestamps. A generation
+          tie PARKS + SURFACES (anomaly row, no mutation).
+        * Defect-divert is NEVER sweep-judgment: the sweep only
+          resolves pairs no one has flagged; an operator/manifest
+          defective disposition diverts through the sanctioned REST
+          mode / corrective path.
+        * Every resolution and every park is announced (sink record +
+          anomaly row) — operator-visible, auditable.
+        """
+        svc = getattr(self, "_skill_evolution_service", None)
+        if svc is None:
+            logger.debug(
+                "_run_skill_ab_inactivity_sweep: no "
+                "_skill_evolution_service wired — skipping"
+            )
+            return
+        try:
+            stalled = await svc.find_stalled_ab_tests()
+            if not stalled:
+                return
+            resolved = 0
+            parked = 0
+            for entry in stalled:
+                group = entry.get("ab_test_group")
+                if not group:
+                    continue
+                try:
+                    outcome = await svc.resolve_ab_test_sanctioned(
+                        group,
+                        basis="stalled",
+                        reason=(
+                            "inactivity sweep: zero-traffic pair aged "
+                            f"{entry.get('age_days')}d "
+                            "(E-6 default, no defect disposition)"
+                        ),
+                        actor="skill_ab_inactivity_sweep",
+                    )
+                    if outcome.get("resolved"):
+                        resolved += 1
+                    elif outcome.get("parked"):
+                        parked += 1
+                except Exception as item_exc:  # noqa: BLE001 — per-item isolation
+                    logger.warning(
+                        "_run_skill_ab_inactivity_sweep: group %s "
+                        "failed (%s: %s) — continuing",
+                        group,
+                        type(item_exc).__name__,
+                        item_exc,
+                    )
+            logger.info(
+                "_run_skill_ab_inactivity_sweep: %d stalled pair(s) "
+                "— resolved=%d parked=%d",
+                len(stalled),
+                resolved,
+                parked,
+            )
+        except Exception as exc:
+            # Soft-fail: a broken sweep must never break the
+            # maintenance loop. The next cycle retries cleanly.
+            logger.warning(
+                f"_run_skill_ab_inactivity_sweep failed: {exc}"
             )
 
     async def _run_skill_metric_scan(self) -> None:

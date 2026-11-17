@@ -44,6 +44,7 @@ import json
 import logging
 import re
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import openai
@@ -649,6 +650,8 @@ class SkillEvolutionService:
         skill_id: str,
         evolution_type: str,
         direction: str = "",
+        *,
+        corrective: bool = False,
     ) -> dict:
         """Tier 3 evolution — mutate a skill per the analysis verdict.
 
@@ -700,7 +703,9 @@ class SkillEvolutionService:
             )
 
         if evolution_type == EVOLUTION_TYPE_FIX:
-            return await self._evolve_fix(skill, direction)
+            return await self._evolve_fix(
+                skill, direction, corrective=corrective
+            )
         if evolution_type == "DERIVED":
             return await self._evolve_derived(skill, direction)
         raise ValueError(
@@ -717,6 +722,8 @@ class SkillEvolutionService:
         skill: Any,
         direction: str,
         improvement_hints: list[str] | None = None,
+        *,
+        corrective: bool = False,
     ) -> dict:
         """Tier 3 FIX — create a tweaked copy and start an A/B test.
 
@@ -750,18 +757,48 @@ class SkillEvolutionService:
             the dict carries ``skipped=True`` and a ``reason``.
         """
         # GUARD FIRST — never mutate a skill that's already in
-        # an active A/B test (would create nested A/B tests).
-        if getattr(skill, "status", None) == "ab_testing":
+        # an active A/B test (would create nested A/B tests) — EXCEPT
+        # through the SANCTIONED CORRECTIVE path (D2a, 2026-11-17):
+        # `corrective=True` names this skill as a verified-defective
+        # pair member and runs fix-first-then-resolve. Without the
+        # corrective flag the refusal stands (the normal-shape guard
+        # semantics are preserved).
+        if getattr(skill, "status", None) == "ab_testing" and not corrective:
+            skill_id_val = getattr(skill, "id", None)
             logger.warning(
                 f"[SkillEvolution] Refusing FIX on skill "
-                f"id={getattr(skill, 'id', '?')}: already in "
+                f"id={skill_id_val}: already in "
                 f"active A/B testing"
+            )
+            # Q2 silent-skip observability (2026-11-17): this refusal
+            # used to return a plain dict indistinguishable from
+            # success in the job ledger. It now also leaves a sink
+            # record (execution-refused) so a guard refusal is a
+            # DISTINGUISHABLE outcome, never a silent no-op success.
+            observability.record_execution_refusal("ab_guard")
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="execution",
+                    run_id=observability.new_run_id(),
+                    agent_id=None,
+                    prompt_source="_evolve_fix",
+                    outcome="refused",
+                    refusal_reason="ab_guard_ab_testing_target",
+                    extra={"skill_id": skill_id_val},
+                )
             )
             return {
                 "skipped": True,
                 "reason": "skill already in active A/B testing",
-                "skill_id": getattr(skill, "id", None),
+                "skill_id": skill_id_val,
             }
+
+        if getattr(skill, "status", None) == "ab_testing" and corrective:
+            # The sanctioned corrective path — the ONLY way a FIX-born
+            # (ab_testing) generation can itself be fixed (defect 2a
+            # self-deadlock; supplement (c): dispatches on pair members
+            # are admitted but used to DIE here at execution).
+            return await self._evolve_fix_corrective(skill, direction)
 
         # Resolve improvement hints: caller can pre-supply a list,
         # pass ``[]`` to opt out, or leave ``None`` to fetch from
@@ -840,6 +877,132 @@ class SkillEvolutionService:
             "new_skill_id": new_skill.id,
             "old_skill_id": skill.id,
             "ab_test_group": ab_group,
+            "skipped": False,
+        }
+        result.update(production_meta)
+        return result
+
+    async def _evolve_fix_corrective(
+        self,
+        skill: Any,
+        direction: str,
+    ) -> dict:
+        """D2a (2026-11-17): the sanctioned corrective FIX on a pair member.
+
+        Fixes the FIX-path SELF-DEADLOCK: ``_evolve_fix`` used to
+        refuse ``status='ab_testing'`` targets while the SAME call set
+        every FIX-born generation ``ab_testing`` — so a defective
+        FIX-born generation could never itself be fixed (observed
+        09c2746f; dispatches on pair members were admitted but died
+        at this guard — jobs 2b18c0b6/db9a484f/238be875).
+
+        E-6 "fix first, then resolve" — exactly this order:
+
+        1. FIX FIRST: create the corrected generation from this
+           (defective) member — FULL body carried server-side with
+           surgical edits (D5) and the payload description (D1). The
+           corrected generation stands on its own: ``status='active'``,
+           ``is_active=True``, **NO new A/B group** (it did not compete
+           in the pair).
+        2. THEN RESOLVE: the OLD pair resolves to the NON-DEFECTIVE
+           member (this skill's sibling) per the E-6 defective rule —
+           never crown the verified-defective member. Terminal state
+           per the pinned spec: this (defective) member is deactivated
+           with its group retained; the sibling wins with its group
+           cleared; the pair row resolves.
+
+        Args:
+            skill: The verified-defective pair member (the caller's
+                corrective sanction names it — operator/Emperor
+                visible through the corrective=True flag).
+            direction: The corrective direction.
+
+        Returns:
+            Dict with ``new_skill_id`` (the corrected generation),
+            ``winner_id`` (the pair's non-defective survivor),
+            ``resolved`` (the pair resolution outcome), ``skipped``.
+        """
+        ab_group = str(getattr(skill, "ab_test_group", "") or "")
+        if not ab_group:
+            # Not actually a pair member (status desync) — refuse
+            # loudly rather than guess.
+            return {
+                "skipped": True,
+                "reason": (
+                    "corrective FIX refused: skill is ab_testing but "
+                    "carries no ab_test_group"
+                ),
+                "skill_id": getattr(skill, "id", None),
+            }
+
+        ab_test = await asyncio.to_thread(
+            self._ab_test_repo.get_by_group, ab_group
+        )
+        if ab_test is None or getattr(ab_test, "resolved_at", None):
+            return {
+                "skipped": True,
+                "reason": (
+                    "corrective FIX refused: no live ab_test row for "
+                    f"group {ab_group!r}"
+                ),
+                "skill_id": getattr(skill, "id", None),
+            }
+
+        improvement_hints = await self._collect_recent_improvement_hints(
+            skill.id
+        )
+        # D5+D1 machinery: full-body carry + surgical edits + payload
+        # description — the SAME path as a normal FIX (supplement (f):
+        # corrective re-FIXes get correct descriptions by construction).
+        new_content, new_description, production_meta = (
+            await self._produce_evolved_body(
+                skill, direction, improvement_hints
+            )
+        )
+
+        corrected = await asyncio.to_thread(
+            self._skill_repo.create,
+            name=skill.name,
+            description=new_description,
+            content=new_content,
+            project_id=skill.project_id,
+            category=skill.category,
+            lineage_origin="evolved",
+            generation=skill.generation + 1,
+            status="active",
+            is_active=True,
+        )
+
+        await asyncio.to_thread(
+            self._lineage_repo.create,
+            corrected.id,
+            skill.id,
+            change_summary=f"CORRECTIVE FIX: {direction}",
+            content_diff=self._compute_diff(skill.content, new_content),
+        )
+
+        try:
+            await self._embedding_service.update_skill_embeddings(corrected)
+        except Exception as e:  # noqa: BLE001 — best-effort, same as FIX
+            logger.warning(
+                f"[SkillEvolution] Embedding refresh failed for "
+                f"new_skill_id={corrected.id} after corrective FIX: "
+                f"{e!s}. Skill remains BM25-searchable."
+            )
+
+        # THEN RESOLVE — the pair closes to the NON-defective member.
+        resolution = await self.resolve_ab_test_sanctioned(
+            ab_group,
+            basis="defective_arm",
+            defective_arm_id=skill.id,
+            reason=f"corrective FIX via evolve_skill (corrective=True): {direction}",
+            actor="skill_evolve_corrective",
+        )
+
+        result = {
+            "new_skill_id": corrected.id,
+            "winner_id": resolution.get("winner_id"),
+            "resolved": bool(resolution.get("resolved")),
             "skipped": False,
         }
         result.update(production_meta)
@@ -1819,6 +1982,339 @@ class SkillEvolutionService:
             "loser_id": None,
             "reason": "extended",
             "extension_count": new_ext_count,
+        }
+
+    # --------------------------------------------------------
+    # D2/C2/C1 (2026-11-17): the ONE sanctioned resolution mechanism
+    # --------------------------------------------------------
+
+    def _ab_pair_age_days(self, ab_test: Any) -> float:
+        """Age of the pair in days, from the persisted ``created_at``.
+
+        Timestamps are ONLY ever read for the stall TRIGGER gate —
+        NEVER for winner selection (Emperor ruling E-6: winners are
+        decided by GENERATION NUMBER, never timestamps).
+        """
+        raw = getattr(ab_test, "created_at", None) or ""
+        try:
+            created = datetime.fromisoformat(str(raw))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - created).total_seconds() / 86400.0
+        except ValueError:
+            return 0.0
+
+    def _e6_winner(
+        self, ab_test: Any
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """Apply the E-6 winner rule to a pair.
+
+        Returns ``(winner_id, loser_id, park_reason)`` — exactly one of
+        the winner/park outcomes. E-6 (Emperor, 2026-11-17): the NEWER
+        LINEAGE GENERATION wins, decided by GENERATION NUMBER and
+        NEVER by timestamps; a generation TIE parks (surfaced, never
+        guessed). A verified-defective newer member is never crowned
+        here — the caller supplies the defective-divert EXPLICITLY
+        (``defective_arm_id``); sweep code NEVER judges defectiveness.
+        """
+        old_id = str(getattr(ab_test, "skill_id_old", "") or "")
+        new_id = str(getattr(ab_test, "skill_id_new", "") or "")
+        old_row = self._skill_repo.get(old_id) if old_id else None
+        new_row = self._skill_repo.get(new_id) if new_id else None
+        if old_row is None or new_row is None:
+            return None, None, "stalled_variant_row_missing"
+        old_gen = int(getattr(old_row, "generation", 0) or 0)
+        new_gen = int(getattr(new_row, "generation", 0) or 0)
+        # E-6: generation number decides. NEVER created_at.
+        if new_gen > old_gen:
+            return new_id, old_id, None
+        if old_gen > new_gen:
+            return old_id, new_id, None
+        return None, None, "stalled_generation_tie_parked"
+
+    async def find_stalled_ab_tests(
+        self,
+        *,
+        stall_timeout_days: float | None = None,
+    ) -> list[dict]:
+        """List unresolved A/B pairs in the stalled shape.
+
+        STALLED = ``comparisons == 0`` (zero genuine injections — the
+        counter only bumps on real variant routing) AND pair age >= the
+        stall timeout. Traffic-bearing pairs (``comparisons > 0``) are
+        NEVER listed — the mechanism must not pick winners on normal
+        pairs.
+
+        Returns:
+            List of ``{"ab_test_group", "age_days", "skill_id_old",
+            "skill_id_new", "e6_winner_id", "park_reason"}`` entries —
+            ``e6_winner_id`` is ``None`` with a ``park_reason`` when
+            the E-6 rule cannot decide (generation tie / missing row).
+        """
+        if stall_timeout_days is None:
+            stall_timeout_days = float(
+                getattr(self._config, "ab_stall_timeout_days", 7.0) or 7.0
+            )
+        tests = await asyncio.to_thread(self._ab_test_repo.get_active_tests)
+        stalled: list[dict] = []
+        for test in tests or []:
+            comparisons = int(getattr(test, "comparisons", 0) or 0)
+            if comparisons != 0:
+                continue  # traffic-bearing — normal pair, not ours
+            age_days = self._ab_pair_age_days(test)
+            if age_days < stall_timeout_days:
+                continue
+            winner, _loser, park_reason = self._e6_winner(test)
+            stalled.append(
+                {
+                    "ab_test_group": str(
+                        getattr(test, "ab_test_group", "") or ""
+                    ),
+                    "age_days": round(age_days, 2),
+                    "skill_id_old": str(
+                        getattr(test, "skill_id_old", "") or ""
+                    ),
+                    "skill_id_new": str(
+                        getattr(test, "skill_id_new", "") or ""
+                    ),
+                    "comparisons": comparisons,
+                    "e6_winner_id": winner,
+                    "park_reason": park_reason,
+                }
+            )
+        return stalled
+
+    async def resolve_ab_test_sanctioned(
+        self,
+        ab_test_group: str,
+        *,
+        basis: str,
+        defective_arm_id: str | None = None,
+        winner_id: str | None = None,
+        reason: str = "",
+        actor: str = "api",
+    ) -> dict:
+        """The ONE sanctioned resolution mechanism (D2/C2/C1).
+
+        Covers both stalled shapes with two explicit bases:
+
+        * ``basis="stalled"`` — the ZERO-TRAFFIC stall. Enforced in
+          code: ``comparisons == 0`` AND age >=
+          ``ab_stall_timeout_days``. Winner by E-6 (newer GENERATION
+          NUMBER wins; never timestamps). Generation tie ⇒ PARK +
+          SURFACE (anomaly row, no mutation). A defective-divert
+          (``defective_arm_id``) may be supplied EXPLICITLY by the
+          operator — then the non-defective member wins regardless of
+          generation (E-6: never crown a verified-defective newer
+          member).
+        * ``basis="defective_arm"`` — the C1 retirement: the caller
+          names the VERIFIED-defective member; the other member wins.
+          Requires ``defective_arm_id``.
+
+        An explicit ``winner_id`` (sanctioned operator decision)
+        overrides the E-6 default — same contract as the REST route's
+        sanctioned mode.
+
+        Terminal state EXACTLY per the pinned 12-sample spec:
+        loser → ``status='inactive'``, ``is_active=False``,
+        ``ab_test_group`` RETAINED; winner → group cleared,
+        ``status='active'``; pair row → ``winner_skill_id`` +
+        ``resolved_at``.
+
+        NEVER fires on normal (traffic-bearing) pairs: the stalled
+        basis is gated by the stall predicate, and the defective basis
+        requires an explicit operator assertion. ``reason`` is
+        REQUIRED (auditable provenance).
+
+        Args:
+            ab_test_group: The shared group UUID.
+            basis: ``"stalled"`` or ``"defective_arm"``.
+            defective_arm_id: The verified-defective member (required
+                for ``defective_arm``; optional divert for
+                ``stalled``).
+            winner_id: Optional explicit winner (operator decision).
+            reason: REQUIRED human/auditable provenance.
+            actor: Provenance tag for the announcement record.
+
+        Returns:
+            Resolution dict with ``resolved``, ``winner_id``,
+            ``loser_id``, ``reason`` (outcome token), ``basis``.
+
+        Raises:
+            ValueError: on contract violations (bad basis, missing
+                reason, stall predicate unmet, winner not a variant,
+                resolving an already-resolved group).
+        """
+        if basis not in ("stalled", "defective_arm"):
+            raise ValueError(
+                f"basis must be 'stalled' or 'defective_arm', got {basis!r}"
+            )
+        if not str(reason or "").strip():
+            raise ValueError(
+                "sanctioned resolution requires a reason (auditable "
+                "provenance)"
+            )
+        ab_test = await asyncio.to_thread(
+            self._ab_test_repo.get_by_group, ab_test_group
+        )
+        if ab_test is None:
+            raise ValueError(f"no ab_test row for group {ab_test_group!r}")
+        if getattr(ab_test, "resolved_at", None):
+            raise ValueError(
+                f"ab_test_group {ab_test_group!r} is already resolved"
+            )
+        comparisons = int(getattr(ab_test, "comparisons", 0) or 0)
+        variants = {
+            str(getattr(ab_test, "skill_id_old", "") or ""),
+            str(getattr(ab_test, "skill_id_new", "") or ""),
+        }
+        variants.discard("")
+        if len(variants) != 2:
+            raise ValueError(
+                f"ab_test_group {ab_test_group!r} does not carry two "
+                "variants"
+            )
+
+        run_id = observability.new_run_id()
+
+        def _announce(outcome: str, extra: dict) -> None:
+            observability.append_run_record(
+                observability.build_run_record(
+                    stage="resolution",
+                    run_id=run_id,
+                    agent_id=None,
+                    prompt_source="resolve_ab_test_sanctioned",
+                    outcome=outcome,
+                    extra={
+                        "ab_test_group": ab_test_group,
+                        "basis": basis,
+                        "actor": actor,
+                        "reason": reason,
+                        **extra,
+                    },
+                )
+            )
+
+        # ── basis gates ───────────────────────────────────────────
+        if basis == "stalled":
+            stall_timeout_days = float(
+                getattr(self._config, "ab_stall_timeout_days", 7.0) or 7.0
+            )
+            if comparisons != 0:
+                raise ValueError(
+                    f"stalled basis refused: ab_test_group "
+                    f"{ab_test_group!r} has comparisons={comparisons} "
+                    "(traffic-bearing — normal resolution paths only)"
+                )
+            age_days = self._ab_pair_age_days(ab_test)
+            if age_days < stall_timeout_days:
+                raise ValueError(
+                    f"stalled basis refused: age {age_days:.2f}d < "
+                    f"ab_stall_timeout_days={stall_timeout_days}"
+                )
+        else:  # defective_arm
+            if not defective_arm_id or defective_arm_id not in variants:
+                raise ValueError(
+                    "defective_arm basis requires defective_arm_id to "
+                    f"be a variant of {ab_test_group!r}"
+                )
+
+        # ── winner decision (E-6 unless overridden) ───────────────
+        if winner_id is not None:
+            if winner_id not in variants:
+                raise ValueError(
+                    f"winner_id={winner_id!r} is not a variant of "
+                    f"{ab_test_group!r}"
+                )
+            resolved_winner = winner_id
+            outcome_reason = "sanctioned_explicit_winner"
+        elif defective_arm_id is not None:
+            if defective_arm_id not in variants:
+                raise ValueError(
+                    f"defective_arm_id={defective_arm_id!r} is not a "
+                    f"variant of {ab_test_group!r}"
+                )
+            resolved_winner = next(
+                vid for vid in variants if vid != defective_arm_id
+            )
+            outcome_reason = "sanctioned_defective_arm_retired"
+        else:
+            resolved_winner, _loser, park_reason = self._e6_winner(ab_test)
+            if resolved_winner is None:
+                # PARK + SURFACE — no mutation, operator-visible.
+                _announce(
+                    "parked",
+                    {"park_reason": park_reason},
+                )
+                await observability.emit_lane_anomaly(
+                    category=observability.CATEGORY_LANE_DEVIATION,
+                    description=(
+                        "Sanctioned A/B resolution PARKED for "
+                        f"ab_test_group={ab_test_group!r}: "
+                        f"{park_reason} — no winner decided, no "
+                        "mutation performed (operator attention "
+                        "required)."
+                    ),
+                    severity="minor",
+                    suspected_cause=(
+                        "stalled pair the E-6 generation rule cannot "
+                        "decide (tie or missing variant row)"
+                    ),
+                    holder=self._metrics_service,
+                )
+                return {
+                    "resolved": False,
+                    "winner_id": None,
+                    "loser_id": None,
+                    "reason": park_reason,
+                    "basis": basis,
+                    "parked": True,
+                }
+            outcome_reason = "sanctioned_stalled_e6"
+
+        resolved_loser = next(
+            vid for vid in variants if vid != resolved_winner
+        )
+
+        # ── terminal state EXACTLY per the pinned spec ────────────
+        # loser: status='inactive', is_active=False, group RETAINED
+        # (SkillRepository.deactivate does exactly this); winner:
+        # group cleared + status='active'; pair row: winner_skill_id
+        # + resolved_at.
+        await asyncio.gather(
+            asyncio.to_thread(self._skill_repo.deactivate, resolved_loser),
+            asyncio.to_thread(
+                self._ab_test_repo.resolve, ab_test_group, resolved_winner
+            ),
+            asyncio.to_thread(
+                self._skill_repo.update,
+                resolved_winner,
+                ab_test_group=None,
+                status="active",
+            ),
+        )
+
+        _announce(
+            outcome_reason,
+            {"winner_id": resolved_winner, "loser_id": resolved_loser},
+        )
+        logger.info(
+            "[SkillEvolution] Sanctioned resolution %s for %s: "
+            "winner=%s loser=%s reason=%r actor=%r",
+            outcome_reason,
+            ab_test_group,
+            resolved_winner,
+            resolved_loser,
+            reason,
+            actor,
+        )
+        return {
+            "resolved": True,
+            "winner_id": resolved_winner,
+            "loser_id": resolved_loser,
+            "reason": outcome_reason,
+            "basis": basis,
+            "parked": False,
         }
 
     # --------------------------------------------------------

@@ -3799,3 +3799,291 @@ class TestCarryOverContentGate:
         SkillEvolutionService._gate_evolved_content(
             "plain body", "different plain body", "d"
         )
+
+
+# =============================================================================
+# D2/C2/C1 (2026-11-17) — the sanctioned resolution mechanism
+# =============================================================================
+
+
+def _iso_days_ago(days: float) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (
+        datetime.now(timezone.utc) - timedelta(days=days)
+    ).isoformat()
+
+
+class TestSanctionedResolution:
+    """resolve_ab_test_sanctioned: E-6, stall predicate, terminal state."""
+
+    def _make_stalled_pair(
+        self, skill_repo, ab_test_repo, project_id, *, age_days=10.0,
+        comparisons=0, old_gen=1, new_gen=2,
+    ):
+        import uuid as _uuid
+
+        tag = _uuid.uuid4().hex[:8]
+        old = _make_skill(
+            skill_repo, project_id, f"incumbent-{tag}",
+            generation=old_gen,
+        )
+        new = _make_skill(
+            skill_repo, project_id, f"challenger-{tag}",
+            generation=new_gen,
+        )
+        group = str(_uuid.uuid4())
+        for row in (old, new):
+            skill_repo.update(
+                row.id, ab_test_group=group, status="ab_testing"
+            )
+        ab_test_repo.create_ab_test(group, old.id, new.id)
+        # Age the pair row past the stall timeout.
+        engine = ab_test_repo.engine
+        from sqlmodel import Session
+        with Session(engine) as session:
+            from daemon.repositories.skill.models import SkillABTest
+            obj = session.get(SkillABTest, group) or session.exec(
+                __import__("sqlmodel", fromlist=["select"]).select(
+                    SkillABTest
+                ).where(SkillABTest.ab_test_group == group)
+            ).first()
+            obj.created_at = _iso_days_ago(age_days)
+            obj.comparisons = comparisons
+            session.add(obj)
+            session.commit()
+        return group, old, new
+
+    @pytest.mark.asyncio
+    async def test_stalled_resolves_by_e6_newer_generation(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        """Zero-traffic + aged pair → newer GENERATION wins (E-6) and
+        the terminal state matches the pinned spec exactly."""
+        group, old, new = self._make_stalled_pair(
+            skill_repo, ab_test_repo, project_id
+        )
+        result = await evolution_service.resolve_ab_test_sanctioned(
+            group, basis="stalled",
+            reason="sweep: zero traffic for 10d",
+        )
+        assert result["resolved"] is True
+        assert result["winner_id"] == new.id  # generation 2 > 1
+        assert result["loser_id"] == old.id
+
+        # Terminal state EXACTLY per spec (d):
+        loser = skill_repo.get(old.id)
+        assert loser.status == "inactive"
+        assert loser.is_active is False
+        assert loser.ab_test_group == group  # RETAINED
+        winner = skill_repo.get(new.id)
+        assert winner.status == "active"
+        assert winner.ab_test_group is None  # cleared
+        pair = ab_test_repo.get_by_group(group)
+        assert pair.winner_skill_id == new.id
+        assert pair.resolved_at
+
+    @pytest.mark.asyncio
+    async def test_stalled_generation_tie_parks(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        """Equal generation numbers ⇒ PARK + SURFACE — no winner
+        guessed, no mutation."""
+        group, old, new = self._make_stalled_pair(
+            skill_repo, ab_test_repo, project_id,
+            old_gen=3, new_gen=3,
+        )
+        result = await evolution_service.resolve_ab_test_sanctioned(
+            group, basis="stalled", reason="sweep",
+        )
+        assert result["resolved"] is False
+        assert result["parked"] is True
+        assert result["reason"] == "stalled_generation_tie_parked"
+        # NO mutation.
+        for row_id in (old.id, new.id):
+            row = skill_repo.get(row_id)
+            assert row.status == "ab_testing"
+            assert row.is_active is True
+        assert ab_test_repo.get_by_group(group).resolved_at is None
+
+    @pytest.mark.asyncio
+    async def test_stalled_basis_refuses_traffic_bearing_pair(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        """comparisons > 0 ⇒ NEVER (normal pairs are untouchable)."""
+        group, old, new = self._make_stalled_pair(
+            skill_repo, ab_test_repo, project_id, comparisons=3
+        )
+        with pytest.raises(ValueError, match="traffic-bearing"):
+            await evolution_service.resolve_ab_test_sanctioned(
+                group, basis="stalled", reason="sweep",
+            )
+
+    @pytest.mark.asyncio
+    async def test_stalled_basis_refuses_fresh_pair(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        """Age < timeout ⇒ refused (the timeout is the trigger gate)."""
+        group, old, new = self._make_stalled_pair(
+            skill_repo, ab_test_repo, project_id, age_days=1.0
+        )
+        with pytest.raises(ValueError, match="age"):
+            await evolution_service.resolve_ab_test_sanctioned(
+                group, basis="stalled", reason="sweep",
+            )
+
+    @pytest.mark.asyncio
+    async def test_defective_arm_resolves_to_sibling(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        """C1 retirement: the VERIFIED-defective member loses EVEN when
+        it is the newer generation (E-6: never crown a verified-
+        defective newer member)."""
+        group, old, new = self._make_stalled_pair(
+            skill_repo, ab_test_repo, project_id,
+            old_gen=1, new_gen=5,
+        )
+        result = await evolution_service.resolve_ab_test_sanctioned(
+            group, basis="defective_arm", defective_arm_id=new.id,
+            reason="operator: challenger verified defective",
+        )
+        assert result["resolved"] is True
+        assert result["winner_id"] == old.id
+        assert skill_repo.get(new.id).status == "inactive"
+        assert skill_repo.get(new.id).ab_test_group == group
+
+    @pytest.mark.asyncio
+    async def test_reason_is_required(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        group, old, new = self._make_stalled_pair(
+            skill_repo, ab_test_repo, project_id
+        )
+        with pytest.raises(ValueError, match="reason"):
+            await evolution_service.resolve_ab_test_sanctioned(
+                group, basis="stalled",
+            )
+
+    @pytest.mark.asyncio
+    async def test_find_stalled_lists_only_stalled(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        stalled_group, _o, _n = self._make_stalled_pair(
+            skill_repo, ab_test_repo, project_id
+        )
+        traffic_group, _o2, _n2 = self._make_stalled_pair(
+            skill_repo, ab_test_repo, project_id, comparisons=2
+        )
+        fresh_group, _o3, _n3 = self._make_stalled_pair(
+            skill_repo, ab_test_repo, project_id, age_days=0.5
+        )
+        stalled = await evolution_service.find_stalled_ab_tests()
+        groups = [entry["ab_test_group"] for entry in stalled]
+        assert stalled_group in groups
+        assert traffic_group not in groups
+        assert fresh_group not in groups
+
+
+class TestCorrectiveFix:
+    """D2a: the sanctioned corrective FIX un-deadlocks the FIX path."""
+
+    @pytest.mark.asyncio
+    async def test_corrective_fix_on_pair_member(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        """A FIX-born (ab_testing) generation can itself be fixed via
+        corrective=True: corrected gen created ACTIVE, defective
+        member retired, pair resolved to the sibling."""
+        import uuid as _uuid
+
+        parent = _make_skill(
+            skill_repo, project_id, "omega", generation=1,
+        )
+        child = skill_repo.create(
+            name="omega",
+            description="desc for omega",
+            content="content for omega child",
+            project_id=project_id,
+            lineage_origin="evolved",
+            generation=2,
+        )
+        group = str(_uuid.uuid4())
+        for row in (parent, child):
+            skill_repo.update(
+                row.id, ab_test_group=group, status="ab_testing"
+            )
+        ab_test_repo.create_ab_test(group, parent.id, child.id)
+
+        edit_script = json.dumps(
+            {
+                "description": "Omega, corrected tail discipline",
+                "edits": [
+                    {
+                        "op": "replace",
+                        "anchor": "content for omega child",
+                        "replacement": "content for omega child, fixed",
+                    }
+                ],
+            }
+        )
+        with patch.object(
+            evolution_service, "_call_llm",
+            AsyncMock(return_value=edit_script),
+        ):
+            result = await evolution_service.evolve_skill(
+                child.id, "FIX", "repair the defective generation",
+                corrective=True,
+            )
+
+        assert result["skipped"] is False
+        corrected = skill_repo.get(result["new_skill_id"])
+        # Corrected gen: active, standalone (no new A/B group).
+        assert corrected.status == "active"
+        assert corrected.ab_test_group is None
+        assert corrected.generation == 3
+        assert corrected.description == "Omega, corrected tail discipline"
+        assert "fixed" in corrected.content
+        # Pair resolved to the NON-defective sibling (parent).
+        assert result["winner_id"] == parent.id
+        assert skill_repo.get(child.id).status == "inactive"
+        assert skill_repo.get(child.id).ab_test_group == group
+        winner = skill_repo.get(parent.id)
+        assert winner.status == "active"
+        assert winner.ab_test_group is None
+        pair = ab_test_repo.get_by_group(group)
+        assert pair.winner_skill_id == parent.id
+        assert pair.resolved_at
+
+    @pytest.mark.asyncio
+    async def test_non_corrective_fix_on_pair_member_still_refused(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        """The guard's normal-shape semantics are PRESERVED: without
+        corrective=True the FIX on an ab_testing target is refused."""
+        import uuid as _uuid
+
+        parent = _make_skill(skill_repo, project_id, "psi")
+        child = skill_repo.create(
+            name="psi",
+            description="desc for psi",
+            content="content for psi child",
+            project_id=project_id,
+            lineage_origin="evolved",
+            generation=1,
+        )
+        group = str(_uuid.uuid4())
+        for row in (parent, child):
+            skill_repo.update(
+                row.id, ab_test_group=group, status="ab_testing"
+            )
+        ab_test_repo.create_ab_test(group, parent.id, child.id)
+
+        with patch.object(
+            evolution_service, "_call_llm", AsyncMock()
+        ) as mock_llm:
+            result = await evolution_service.evolve_skill(
+                child.id, "FIX", "fix it"
+            )
+        assert result["skipped"] is True
+        assert "A/B testing" in result["reason"]
+        mock_llm.assert_not_called()

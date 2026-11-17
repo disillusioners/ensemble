@@ -1015,6 +1015,37 @@ class TestThePairResolver:
         winner = skill_repo.get(newer.id)
         assert winner.is_active is True
 
+    def test_the_pair_resolver_completes_the_winner_side(
+        self, repos, data_dir
+    ):
+        """C1 (DECIDED Q2, 2026-11-17): the apply arm COMPLETES the
+        winner side per the pinned terminal-state spec — winner ends
+        ``status='active'`` with its ``ab_test_group`` CLEARED (it used
+        to keep the stale group + ``ab_testing`` status), and the
+        pre-flip winner shape rides the result for reversal."""
+        skill_repo, ab_test_repo = repos
+        older, newer, test = _seed_r1_pair(skill_repo, ab_test_repo)
+
+        deactivator = _deactivator(repos, data_dir)
+        result = deactivator.resolve_pair(
+            ab_test_group=R1_GROUP,
+            winner_skill_id=newer.id,
+            apply=True,
+        )
+
+        winner = skill_repo.get(newer.id)
+        assert winner.status == "active"
+        assert winner.ab_test_group is None
+        # The pre-flip winner shape is recorded (reversal support).
+        assert result["before_winner"] == {
+            "ab_test_group": R1_GROUP,
+            "status": "ab_testing",
+        }
+        # The loser RETAINS its group (the pinned spec) — the pair
+        # stays auditable from the loser side too.
+        loser = skill_repo.get(older.id)
+        assert loser.ab_test_group == R1_GROUP
+
     def test_no_winner_is_declared_by_the_shipped_code(self):
         """No shipped call site supplies a winner (Phase 1 declares none)."""
         sources = [

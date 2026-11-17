@@ -1416,16 +1416,46 @@ class SkillStaleDeactivator:
         }
         if not apply:
             return result
-        # APPLY — the test row and the loser rows move as ONE unit.
+        # APPLY — the test row, the loser rows, AND the winner row move
+        # as ONE unit.
+        #
+        # C1 (2026-11-17, DECIDED Q2): the winner side is COMPLETED per
+        # the pinned 12-sample terminal-state spec — winner →
+        # ``ab_test_group=None`` + ``status='active'`` — mirroring
+        # ``SkillEvolutionService.check_ab_test_resolution``'s
+        # forced-winner side effects. Before this change the apply arm
+        # resolved the test row and deactivated the losers but left the
+        # winner carrying its stale ``ab_test_group``/``ab_testing``
+        # status (a desynced single-arm shape).
         before_test = {
             "resolved_at": getattr(test, "resolved_at", None),
             "winner_skill_id": getattr(test, "winner_skill_id", None),
         }
+        before_winner = None
+        winner_row = _skill_by_id(self._skill_repo, winner_skill_id)
+        if winner_row is not None:
+            before_winner = {
+                "ab_test_group": getattr(winner_row, "ab_test_group", None),
+                "status": getattr(winner_row, "status", None),
+            }
         self._ab_test_repo.resolve(ab_test_group, winner_skill_id)
         for item in plan:
             deactivate_skill(self._skill_repo, item["skill_id"])
+        if winner_row is not None:
+            # Dual-column write (is_active + status TOGETHER) — the
+            # module's static dual-column-writer gate forbids any
+            # single-column skill write; the winner is active on both
+            # axes by definition.
+            self._skill_repo.update(
+                winner_skill_id,
+                ab_test_group=None,
+                status="active",
+                is_active=True,
+            )
         result["applied"] = True
         result["before_test"] = before_test
+        if before_winner is not None:
+            result["before_winner"] = before_winner
         return result
 
 
