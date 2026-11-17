@@ -233,8 +233,11 @@ section diverged, this ONE rule decides):** the **first rung that ANSWERS decide
 (cannot-answer) falls through to the next rung. An answered `1` is **downgraded to `2`** when a *stronger* rung was
 unanswerable — an incomplete determination is not positive foreignness (C-3 rationale: on a host with a wedged
 `systemctl`, R2 unanswerable, R3's negative alone must not make the ladder *stricter* than today's check — that would
-preserve the false-halt class on exactly the partially-broken hosts). Counter-mutation **M-NP1c** (Phase 2 §9.2) must
-redden the downgrade's removal:
+preserve the false-halt class on exactly the partially-broken hosts). Counter-mutation **M-NP1c** must redden the
+downgrade's removal — **and its leg is `B-defer-d` / `B-downgrade` (Phase 2 §7.5), NOT NP-4/NP-6** (REVIEW WAVE 2, BL-3):
+both NP fixtures make R2 *answerable*, so the downgrade never engages there and M-NP1c could not redden either. The
+downgrade's own fixture is **R2 unanswerable** (`SC_SHOW_RC=124` or `SC_MAINPID=0`) **∧ R3 answers `1`** ⇒ expect a
+**transient `2`, never a refusal**. The rule, in full:
 
 1. **R1 — argv/cwd ownership.** Already computed by Layer 1 (`owned_spaced`). Holder ∈ set ⇒ `0`. *Zero extra cost.*
 2. **R2 — systemd cgroup containment** (unit mode, Linux only, `_supervision_host_allows_unit`-gated).
@@ -243,14 +246,60 @@ redden the downgrade's removal:
    ⚠️ **SUPERSEDED — raw-substring wording replaced by the binding amendment (decisions.md §2.1 / D-P2-3; architect closure C-0).**
    The original line read "holder `= MainPID` **or** `/proc/<holder>/cgroup` last-line (after final `:`) **contains** the unit
    ControlGroup ⇒ `0`" — a raw substring that over-accepts prefix-collisions (`…/ensemble-main.service-evil.scope`).
-   **The binding predicate, character-for-character identical in decisions.md §2.2(7) and phase2-plan.md §9.1 NP-6:**
-   `pcg == cg || pcg contains "$cg/"`
-   — holder `= MainPID` accepts; otherwise the holder's `/proc/<holder>/cgroup` last line (after final `:`), `pcg`, must equal
-   the unit ControlGroup `cg` or extend it at a segment boundary (followed by `/` or end-of-string) ⇒ `0`.
-   `/proc/<holder>/cgroup` unreadable ⇒ fall through (do **not** decide `1`).
-   This is the rung that would have accepted `1191207/1191605`; it is *the same* predicate Layer 2 already trusts, tightened
-   to segment boundaries. (Legacy Layer 2 keeps its substring byte-identical — decisions.md §2.2(5); a ladder `1` refuses
-   before Layer 2, and ladder-accepted holders skip the Layer-2 re-test — closure C-2, below.)
+   **THE CANONICAL FENCED SOURCE for the R2 predicate (REVIEW WAVE 2, BL-4). Every other copy in the plan set —
+   `phase2-plan.md` §9.1 (NP-6), `phase2-plan.md` §9.2, `decisions.md` §2.2(7) — is a *copy of this block*, never the
+   source. A table cell cannot express the predicate faithfully; copy from here, not from a cell.** The second
+   disjunct is stated as a **PREFIX test** — a shell `case` pattern anchored at the LEFT of `pcg`, not a substring
+   search anywhere in it:
+
+   ```bash
+   # R2 rung — segment-aware unit-ControlGroup containment (pcg = holder's
+   # /proc/<pid>/cgroup last line, text after the final ':'; cg = unit ControlGroup)
+   [ "$pcg" = "$cg" ] && return 0          # (a) exact ControlGroup
+   case "$pcg" in
+       "$cg"/*) return 0 ;;                # (b) PREFIX test: pcg extends cg at a SEGMENT boundary
+       *)       return 1 ;;                # positively not contained (subject to the C-1 downgrade)
+   esac
+   ```
+
+   - holder `= MainPID` accepts before either test (equality arm, unchanged by the amendment);
+   - `"$cg"/*` is a **left-anchored prefix** pattern: `cg` matched literally, then `/`, then anything. It is **NOT**
+     `*"$cg"*` — the raw-substring form the amendment exists to kill;
+   - **canonical predicate string** — this exact string is the one every other copy in the plan set quotes verbatim
+     (`decisions.md` §2.2(7), `plan-overview.md` §5, `phase2-plan.md` §9.1 + §9.2, phase1 §10 T5's acceptance cell):
+     **`pcg == cg || pcg PREFIX-matches "$cg"/`** (table cells escape the pipe as `\|\|`). `PREFIX-matches` is realised
+     in shell as the left-anchored `case "$pcg" in "$cg"/*)` above. The word is **PREFIX**, never `contains` — a
+     substring reading anywhere in this position is the defect BL-4 exists to close. **Copy the fenced block, not a cell.**
+   - `/proc/<holder>/cgroup` unreadable ⇒ the rung **abstains (`2`)**, fall through (do **not** decide `1`);
+   - **degenerate guard (fold [T4], code precedent `lib.sh:8115`, twin at `:7786`)** — `cg` empty or `cg == "/"` ⇒ the
+     rung **abstains (`2`)**, never accepts and never refuses. A `/`-or-empty ControlGroup means the tooling did not
+     resolve a real cgroup; reading it as positive foreignness is *exactly* the false-halt class this lane removes.
+
+   **Predicate truth table (fold [T4] — the false-halt class IS the degenerate row, so it is specified, not left implicit):**
+
+   | `pcg` (holder) | `cg` (unit) | verdict | why it matters |
+   |---|---|---|---|
+   | `/system.slice/ensemble-main.service` | same | `0` accept | equality arm |
+   | `/system.slice/ensemble-main.service/mcp-child.scope` | `/system.slice/ensemble-main.service` | `0` accept | **prefix** at a segment boundary — the incident's shape |
+   | `/evil/system.slice/ensemble-main.service/x` | `/system.slice/ensemble-main.service` | **`1` refuse** | `cg` is **not** a left prefix of `pcg`; a *substring* implementation accepts here ⇒ the mid-path NP-6 cell reddens it |
+   | `/system.slice/ensemble-main.service-evil.scope` | `/system.slice/ensemble-main.service` | **`1` refuse** | suffix-extension (architect closure C-0's stated class) |
+   | *(unreadable)* | any | `2` abstain | no refusal evidence from a missing read |
+   | any | `""` or `/` | `2` abstain | degenerate guard — the false-halt class |
+
+   **Where the canonical string must be re-derived (drift tripwire, fold [T1]):** the shipped matcher is greppable —
+   `grep -n 'in "\$cg"/\*' scripts/upgrade/lib.sh` must return exactly **one** hit (the `_gate_attr_containment` R2
+   arm: the PREFIX form). The raw-substring form `*"$cg"*` exists **three times at base**, all deliberately outside the
+   ladder's path and all kept byte-identical: `lib.sh:7803` and `:7827` (the `supervision DUAL_FIGHT` census, checks A
+   and B) and `:8128` (Layer 2 `_gate_attr_unit_lineage`, decisions.md §2.2(5)); `:7637` is a comment describing them.
+   So the assertion is **not** "zero substring hits in the file" — it is "**no substring hit inside
+   `_gate_attr_containment`**" (`grep` the function body, not the file). An implementation that drifts back to
+   `*"$cg"*` inside the ladder puts a fourth arm *in the new function* and reddens; the legacy three must stay green
+   untouched. Leg-ised as a source-grep assertion in `phase2-plan.md` §9.1 (NP-6).
+   This is the rung that would have accepted `1191207/1191605`. It is **Layer 2's containment *idea*, tightened**: the
+   legacy Layer 2 still runs a raw substring (`lib.sh:8128`) and keeps it **byte-identical** (decisions.md §2.2(5)) because
+   the common path must not change (`I-B2`/`B-order`); the ladder's R2 is the *segment-aware* form, which is strictly
+   narrower — so a rung-level accept can never be wider than what Layer 2 would have granted on the same evidence. (A
+   ladder `1` refuses before Layer 2; ladder-accepted holders skip the Layer-2 re-test — closure C-2, below.)
    *Parse reuse (review wave 1 fold, A32):* the `/proc/<holder>/cgroup` read is the twins-pinned parse — it already exists
    twice in shell (`_supervision_pid_cgroup_leaf` `:7111-7121`, inline at `:8123-8126`). R2 factors the read (tail -n 1 +
    strip the leading `<id>:` prefix) so `_gate_attr_unit_ctx` and the ladder share ONE parse helper with two projections
@@ -525,8 +574,12 @@ weakening the closer**:
 - **Zero `daemon/**` logic changes.** Phase 3 will touch `daemon/tools/upgrade_tools.py:4145` — **a constant value only**
   (`PIPELINE_SCRIPTS_FLOOR_COMMIT`), which is Phase 3's lane and carries no runtime behaviour.
 - **Zero schema/migration delta** ⇒ `rollback_safe=true` (fix-loss-only on rollback) — Phase 3 states it at stage time.
-- No new exported variables, no new `_numeric_knob`s, no new journal event kinds, no new dependencies, no new tools
-  (only `ps`/`lsof`/`systemctl`/`launchctl`, all already used).
+- **No new exported variables, no new OPERATOR knob (see `I-E3`, restated), no new journal event kinds, no new
+  dependencies, no new tools** (only `ps`/`lsof`/`systemctl`/`launchctl`, all already used).
+- **The one new bound** `_GATE_ATTR_DEFER_S` (§5.4) is **not** a contradiction of the line above: clamped `[0,5]`,
+  marker-gated (`ENSEMBLE_TEST_GATE_DEFER=1`), **never exported**, routed through `_numeric_knob` for its integer parse
+  but **not registered** as a knob (no `TABLE_` row, no C-10a entry). Stated here because an earlier blast-radius wording
+  said "no new `_numeric_knob`s" while §5.4/D3 mandates the router — that contradiction is what BL-5 flags.
 
 ---
 
@@ -540,7 +593,7 @@ Dependencies are strict; a task is "done" only when its acceptance holds in-tree
 | T2 | Rewrite the three sites (`:6332-6339`, `:6356-6360`, `:6695-6703`) per §4.3 | T1 | rc=124 legs emit the **byte-identical** legacy WARN + `kind=budget`; rc=3 emits **no** journal row; rc=4/other emit `kind=nonzero_exit` with the true rc; the literal `rc=124` never appears when the child returned otherwise |
 | T3 | Add `_supervision_pid_ancestor_of <pid> <roots…>` near `:7105`; `ps`-absent ⇒ rc 2 | — | Depth-bounded walk; root-absent/`ps`-absent cases pinned |
 | T4 | Factor `_gate_attr_unit_ctx` out of `_gate_attr_unit_lineage`; re-implement the latter on top of it (behaviour-identical) | T3 | All existing unit-lineage/DualFight legs unchanged (messages incl. `MainPID=`/`cgroup=` detail) |
-| T5 | Add `_gate_attr_containment <holder>` implementing R1–R4 (§5.3) | T3, T4 | Matrix unit-proven: owned⇒0, cgroup-child⇒0, ppid-child⇒0, foreign⇒1, tooling-missing⇒2; the `/proc/<holder>/cgroup` parse is factored onto the existing twins-pinned helper family (A32 — `_supervision_pid_cgroup_leaf` `:7111-7121`), **no third parse copy** |
+| T5 | Add `_gate_attr_containment <holder>` implementing R1–R4 (§5.3) | T3, T4 | Matrix unit-proven: owned⇒0, cgroup-child⇒0, ppid-child⇒0, foreign⇒1, tooling-missing⇒2; the `/proc/<holder>/cgroup` parse is factored onto the existing twins-pinned helper family (A32 — `_supervision_pid_cgroup_leaf` `:7111-7121`), **no third parse copy**. **R2 predicate — canonical string (the implementation MUST match phase1 §5.3's fenced block character-for-character; this cell is a POINTER, not the source):** `pcg == cg \|\| pcg PREFIX-matches "$cg/"` — i.e. `[ "$pcg" = "$cg" ]` **or** `case "$pcg" in "$cg"/*)` (left-anchored prefix at a segment boundary; **never** `*"$cg"*`), with `cg` empty/`/` ⇒ abstain `2` (degenerate guard). Source-grep tripwire: exactly one `in "$cg"/*` inside `_gate_attr_containment`, zero `*"$cg"*` there |
 | T6 | Wire the ladder into `_gate_serving_attribution`'s Layer-1 block (nonmatch branch only) | T5 | Common case byte-identical (no systemctl probe issued when nonmatch is empty — provable via the stub `SC_LOG`); refusal prefix preserved; accept path logs INFO **on stderr** (`I-B2b`, §5.3) with no banned literal; `owned_spaced` becomes a properly-threaded local (the leaked global at `:8031` must not become the ladder's shared state — A32) |
 | T7 | Add the pooled deferral (§5.4) + distinct exhaustion detail | T6 | Pool bounds total sleep to `_GATE_ATTR_DEFER_S` (**per shell, seconds-counted, clamped `[0,5]`** — D3); exhaustion ⇒ **transient (2), refusal only at budget end** (leader D1); the exhaustion marker journals event kind `subprocess_wait_timeout` with row token `kind=attr_deferred`, **fire-once latched** (`_GATE_ATTR_WARNED` precedent, §4.2); `0`/`1` short-circuit the loop |
 | **T7b** | **rc=2 consumer at the probe (REVIEW WAVE 1, BL-1, §5.4a)** — in `_handback_serving_probe`, replace the `if ! _gate_serving_attribution …` collapse at `:6103-6106` with an explicit rc capture; transient `2` → probe `return 2` (mirror `:6235`/`:6256`); `0`/`1` arms byte-identical | T7 | A persistent-2 fixture: probe returns **2** (not 1), no `attribution … REFUSED` line, the verifier polls **≥2 iterations**, halt only at the floor-wins verdict (`:6288-6297`) with the exhaustion marker in `HB_VERIFY_REASON` (leg B-defer-e, phase2 §7.5); the green/refusal arms keep today's rc + wording byte-identical (M-B-defer-E must redden the leg) |
@@ -687,14 +740,32 @@ legs. The bias is deliberately asymmetric: *every* refusal must be provable, and
 - **I-B5** *Pidless launchd job + served port* ⇒ rc 1 naming the crash-loop shape.
 - **I-B6** *Wrong version* / *absent version* ⇒ rc 1 with today's wording (the widening must not become a version bypass).
 - **I-B7** *Green with no listener* ⇒ rc 1 unchanged.
-- **I-B8** *Deferral bound*: a permanently unattributable shape (supervisor context present, cgroup unreadable, `ps` absent)
-  sleeps at most `_GATE_ATTR_DEFER_S` in **total** across repeated gate calls in one process; exhaustion ⇒ **transient
-  (2)** with the distinct "UNATTRIBUTABLE … deferring to the verify budget" marker (leader D1 — superseded the earlier
-  "then refuses" wording); the refusal happens **only at budget end** through the floor-wins verdict (`:6288-6297`).
+- **I-B8** *Deferral bound — restated in full (REVIEW WAVE 2, BL-5; supersedes every earlier wording of this invariant,
+  including the "process-global"/"+5 s"/"then refuses" variants):* for a permanently unattributable shape (supervisor
+  context present, cgroup unreadable/`/`, `ps` absent) —
+  (a) **per-shell scope** — the patience pool `_GATE_ATTR_DEFER_REMAIN` is a plain shell variable initialised at source
+  time from `_GATE_ATTR_DEFER_S`; each `$( )` gate call site forks its own pool. There is **no** process-global pool and
+  no cross-shell carry-over;
+  (b) **seconds-counted** — the loop decrements by the **slept duration**, not by an iteration count (`sleep 2` ⇒ −2), so
+  the honest bound is ≤ `_GATE_ATTR_DEFER_S` **seconds**, not "5 iterations ≈ 10 s";
+  (c) **clamped `[0,5]`** — the seam is integer-parsed through the house `_numeric_knob` router (loud-garbage note, never
+  a silent 0) and **then clamped**; a leaked `300` becomes `5` and a leaked `0` stays `0`;
+  (d) **dual-key gated** — a non-default value is honoured **only** when `ENSEMBLE_TEST_GATE_DEFER=1` is also set; absent
+  the marker the pool is always the 5 s default;
+  (e) **exhaustion ⇒ transient `2`** with the **distinct** marker
+  `… containment UNATTRIBUTABLE within <spent>s … — deferring to the verify budget` (leader D1; row token
+  `kind=attr_deferred`, fire-once latched, stderr per `I-B2b`);
+  (f) **refusal happens ONLY at budget end** through the unchanged floor-wins verdict (`:6288-6297`); the deferral never
+  converts a `2` into a `1`, and never into a `0`.
 - **I-B9** *Gate surface parity*: the same healthy-boot shape is accepted by `gate_livez`/`gate_readyz` (not just hand-back),
   and the same foreign shape is refused there.
-- **I-B10** *Halt semantics untouched*: on exhaustion the exact existing chain fires (probe rc 1 → verifier rc 1 →
-  `:6395-6397` warn → `promote.sh:684-699` halt + B4), with **no** nohup fallback.
+- **I-B10** *Halt chain untouched, entered only at budget end* (restated — REVIEW WAVE 2, BL-5): deferral **exhaustion is
+  NOT a halt trigger**; it yields the transient rc `2` and the poll loop continues. The halt chain — probe rc `1` →
+  verifier rc `1` → `:6395-6397` warn → `promote.sh:684-700` halt + B4 leave-txn-open — fires **unchanged, exactly once,
+  and only when the verify budget is spent** (the floor-wins verdict decides, `:6288-6297`), with the exhaustion detail
+  carried into `HB_VERIFY_REASON`/`GATE_ATTRIBUTION_DETAIL`. Between those two ends nothing is introduced: no new
+  intermediate `return`/`exit`, **no** nohup fallback, no early halt. A positively-foreign holder (`1`) still refuses at
+  the first census and never enters the deferral at all.
 - **I-B11** *Portability*: on a Darwin-stubbed `uname` (A25 precedent) no `/proc` read occurs and containment runs on the
   ppid ladder only; on a Plan9-stubbed `uname` the fail-closed dispatch still refuses (A24 idiom).
 - **I-B12** *Mutation-proof*: each new acceptance has a counter-mutation that turns its leg red (e.g. remove R3 ⇒ I-B1 red;
@@ -728,7 +799,16 @@ legs. The bias is deliberately asymmetric: *every* refusal must be provable, and
 
 - **I-E1** `daemon/services/upgrade_journal_sweep.py` and `daemon/tools/upgrade_tools.py` are untouched (S6/S10).
 - **I-E2** C-10a blocks byte-identical (S8).
-- **I-E3** No new exported env, no new `_numeric_knob`, no new journal event kind (`git diff` review + grep).
+- **I-E3** *Hygiene lock — restated (REVIEW WAVE 2, BL-5):* **no new EXPORTED env var, no new OPERATOR knob** (i.e. nothing
+  added to `_numeric_knob`'s operator surface, nothing added to the exported knob family A21, nothing new for the C-10a
+  table), and **no new journal EVENT kind**. The one seam this lane adds — `_GATE_ATTR_DEFER_S` — is **not** an exception
+  to the lock and must not be cited as one: it is a **clamped** (`[0,5]`, D3), **marker-gated** (a non-default value is
+  honoured only under `ENSEMBLE_TEST_GATE_DEFER=1`), **non-exported internal bound** that is *routed through* the
+  `_numeric_knob` helper for its integer parse (loud-garbage note) but **is not registered as a knob** — no `TABLE_` row, no
+  C-10a entry, no operator documentation surface. Positive shape to assert (A7's leg): `_GATE_ATTR_DEFER_S` appears in no
+  `export` statement, in no C-10a table copy, and the resolved value is observable only via the slow-path warning.
+  (`git diff` review + grep.) The old blanket "no new `_numeric_knob`s" is **withdrawn as too strong**: it contradicted
+  §5.4/D3, which mandates the router. A7's assertions are re-cut against this wording (phase2 §6.1 A7).
 
 ### Negative-proof matrix template (Phase 2 owns the fill-in)
 
@@ -739,7 +819,7 @@ legs. The bias is deliberately asymmetric: *every* refusal must be provable, and
 | N3 (dual-supervisor) | launchd pidless job + nohup daemon serving | refuse | — |
 | N4 (wrong version) | green, `version=old` | refuse | — |
 | N5 (no listener) | green via a vanished answerer | refuse | — |
-| N6 (unattributable) | supervisor ctx + unreadable cgroup + no `ps` | refuse after ≤ `_GATE_ATTR_DEFER_S` | measure slept seconds |
+| N6 (unattributable) | supervisor ctx + unreadable/`/` cgroup + no `ps` | **transient `2` after ≤ `_GATE_ATTR_DEFER_S` seconds (per shell)** with the distinct `UNATTRIBUTABLE … deferring to the verify budget` marker — **refusal only at budget end** through the floor-wins verdict (leader D1; `I-B8`, `I-B10`). *The earlier "refuse after ≤ `_GATE_ATTR_DEFER_S`" cell encoded the REJECTED terminal-fail-fast exhaustion (BL-5).* | measure **slept seconds** (never iterations) and assert the gate rc was **2**, not 1 |
 | N7 (rc matrix) | stub rc 0/3/4/7/124 per site | honest labels per I-A1..A4 | — |
 | N8 (stash) | verify refusal | non-empty `hand-back error:` | — |
 | N9 (restart classes) | one per refusal class | one named row each | — |

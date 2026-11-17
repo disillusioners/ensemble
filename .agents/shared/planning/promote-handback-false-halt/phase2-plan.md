@@ -175,6 +175,22 @@ House rule applied: a stub that answers "inactive" with `exit 0` no longer model
 also **logs argv to `SC_LOG`** (existing behaviour) so every leg can assert the *call sequence* and
 **which** subcommands ran — that is how the portability legs prove a Linux-only probe was *not* issued.
 
+**Stub-evolution rule (fold [T1], and it is load-bearing for BL-3's fixture):** the new generation is built as
+**`make_systemctl_stub_v2`** in the new pack — the three existing `make_systemctl_stub` copies
+(`tests/packs/handback_verify_budget_test.sh:202-250`, `tests/test_supervision_stop_handback.sh:104-160`,
+`tests/test_bounded_subprocess_waits.sh:88-131`) are **never mutated**. Reason: those three back ~60 existing assertions
+(§5.3), and an in-place edit would silently re-baseline them the moment the pack is run; a new function keeps the
+"FAILED-list diff vs TRUE pre-fix base" gate (§5.1 rule 2) honest. B-downgrade (§7.5) depends on this: its `SC_SHOW_RC=124`
+/ `SC_MAINPID=0` arms only exist in v2.
+
+**Declared reading of the coupled happy-path pins (fold [T1]):** `tests/test_bounded_subprocess_waits.sh:376`
+(`assert_not_contains … "subprocess_wait_timeout" "$(cat "$CFIX/releases/state.json")"`) and `:377`
+(`assert_not_contains … "systemctl start" "$R_OUT"`) are **adjacent but read different artifacts** — `:376` greps the
+**journal file**, `:377` greps the **captured run output**. They are therefore *not* redundant, and a Phase-1 change that
+routes an INFO line to the wrong channel can redden exactly one of them. Declared here so the regression matrix (§11.2)
+classifies them separately: `:376` = journal-surface (rc-faithfulness of the stub makes it live), `:377` = stdout-surface
+(the 7b banned-literal trap).
+
 **REQUIRED closure — rc-faithful defaults (architect §3):** all three existing `make_systemctl_stub` copies exit `0`
 while printing `inactive`, so **no existing test exercises rc=3 at any site** and the `:376` "no timeout events" pin is
 **currently vacuous**. The new stub must therefore be **rc-faithful by default** (`is-active` ⇒ exit **3** when the status
@@ -243,11 +259,11 @@ Leg names below are the ones actually used in §6–§10 (re-cut after the desig
 | `I-B6` wrong / absent version ⇒ refuse with today's wording | **NP-1**, **NP-2** | M-NP2 |
 | `I-B7` green with no listener ⇒ refuse | **NP-5** | M-NP3 |
 | `I-B8` deferral ≤ `_GATE_ATTR_DEFER_S` **per shell** (≤5 s, seconds-counted, clamped `[0,5]`), exhaustion ⇒ distinct UNATTRIBUTABLE detail **and a transient (2) verdict** — refusal only at budget end (leader D1) | **B-defer-a**, **B-defer-b** | M-B-defer |
-| `I-B8a` **(added — architect closures C-1/C-2, leader D1)** composition rule: the first rung that ANSWERS decides; an answered `1` is downgraded to `2` when a stronger rung was unanswerable; ladder-accepted holders **skip** Layer 2's unit-arm re-test (Layer 2 is refusal-only) | **B-order**, **B3**, **B-defer-a** | **M-NP1c** (downgrade removed ⇒ NP-4/NP-6 red), M-NP1b |
+| `I-B8a` **(added — architect closures C-1/C-2, leader D1; mutation RE-TARGETED — REVIEW WAVE 2, BL-3)** composition rule: the first rung that ANSWERS decides; an answered `1` is downgraded to `2` when a stronger rung was unanswerable; ladder-accepted holders **skip** Layer 2's unit-arm re-test (Layer 2 is refusal-only) | **B-order**, **B3**, **B-defer-a**, **B-defer-d / B-downgrade** (two cells: R2 unanswerable ∧ R3 answers `1` ⇒ transient `2`; resolvable R2 ⇒ refuse at rc 1) | **M-NP1c** (LOOSE direction — unconditional downgrade ⇒ B-downgrade (v) red; NP-4/NP-6 redden collaterally) + **M-NP1c-strict** (downgrade deleted ⇒ B-downgrade (ii)/(iii) red) |
 | `I-B8b` **(added — leader D1)** deferral is a **budget-bounded delay that can never accept**; attribution acceptance is evidence-only; the version conjunct is absolute and outside the widening | **B-defer-a**, **NP-1**, **NP-2**, **NP-8** | M-B-defer |
 | `I-B13` **(added — REVIEW WAVE 1, BL-1; phase1 §5.4a / `D-P1-4`)** rc=2 consumer contract at EVERY gate call site: the probe maps transient 2 → probe `return 2` (T7b — the verifier keeps polling); the one-shot consumers (`gate_version:8159`, promote/restart/rollback gate blocks, `gate_soak` per-tick) map 2 → bounded in-budget retry + the distinct transient wording (T7c) — never a refusal rc 1, never `gate_fail_reason`/`GATE_FAIL`/`REGATE_FAIL` → 8b auto-rollback, never the false `/livez unreachable >Ns` / `version verify mismatch` labels; persistent-2 halts only at budget end with the exhaustion detail in `HB_VERIFY_REASON` | **B-defer-e** (§7.5) | **M-B-defer-E** (the `if !` consumer form restored at `:6103-6106` ⇒ must redden) |
 | `I-B9` gate-surface parity across `gate_livez` / `gate_readyz` / `gate_version` | **B-parity** (+ **NP-9** for the refusal side) | M-NP4 |
-| `I-B10` halt chain untouched (probe 1 → verifier 1 → unit 1 → promote halt+B4, no nohup) | **B-halt**, **B2**, **NP-7a/NP-7b** | M-B2 |
+| `I-B10` **(restated — REVIEW WAVE 2, BL-5)** halt chain untouched (probe 1 → verifier 1 → unit 1 → promote halt+B4, no nohup) **and entered ONLY at budget end** — deferral exhaustion is NOT a halt trigger (it yields transient `2`; `B-downgrade`/`B-defer-a` assert exactly that) | **B-halt**, **B2**, **B-defer-a**, **B-defer-d / B-downgrade**, **NP-7a/NP-7b** | M-B2, M-B-defer-D1 |
 | `I-B11` portability: Darwin ⇒ no `/proc`; Plan9 ⇒ fail-closed | **B7** | — (the `SC_LOG` "no ControlGroup probe" assertion is the proof) |
 | `I-B12` every new acceptance has a counter-mutation | the whole §9.2 matrix + SC-1 | — |
 | `I-C1` verify refusal ⇒ halt detail carries the reason; `none captured` impossible on the unit path | **C-5a**, **C-7** | M-C3 |
@@ -261,7 +277,7 @@ Leg names below are the ones actually used in §6–§10 (re-cut after the desig
 | `I-D4` scope-arm rc 3 no longer journals `kind=budget … timeout` | **A6** | M-A3 |
 | `I-E1` no `daemon/**` logic change | A7 (iv) structural | — |
 | `I-E2` C-10a blocks byte-identical | **B10** | M-B10 |
-| `I-E3` no new exported env, no new `_numeric_knob`, no new journal event kind | **A7** | M-A7 |
+| `I-E3` **(restated — REVIEW WAVE 2, BL-5 / `D-P2-7`)** no new **EXPORTED** env, no new **OPERATOR** knob, no new journal event kind; the one new bound `_GATE_ATTR_DEFER_S` is clamped `[0,5]`, marker-gated, **not exported**, routed through `_numeric_knob` but **not registered** as a knob | **A7** | M-A7 (new event kind) + the `export _GATE_ATTR_DEFER_S` plant (clause iii) |
 
 #### 5.2.2 Phase 1's negative-proof template (Phase 1 §14) → this phase's NP ids
 
@@ -272,7 +288,7 @@ Leg names below are the ones actually used in §6–§10 (re-cut after the desig
 | N3 dual-supervisor launchd pidless | B6 third cell (reuses the existing M7 pin) |
 | N4 wrong version | NP-1 (+ NP-8 for the timing shape) |
 | N5 no listener | NP-5 |
-| N6 unattributable after ≤ defer | B-defer-a (exhaustion ⇒ **transient 2**, refusal only at budget end — leader D1) |
+| N6 unattributable **→ transient `2`** after ≤ defer (per shell, seconds) | B-defer-a (exhaustion ⇒ **transient 2**, refusal only at budget end — leader D1; the phase1 §14 template cell itself was re-worded in review wave 2 / BL-5, it had said "refuse after ≤ defer") |
 | N7 rc matrix per site | A0…A6 |
 | N8 stash | C-5a / C-7 |
 | N9 restart classes | the R-* set |
@@ -287,8 +303,14 @@ Leg names below are the ones actually used in §6–§10 (re-cut after the desig
 | **U-4** | **Exact restart class slugs** — Phase 1 fixes the *shape* ("a stable class slug + the run_id") but not the strings | phase1 §7.2 | R-* legs assert (a) exactly **one** new `halt` row, (b) it carries `run_id=${RUN_ID}`, (c) it carries `class=<[a-z0-9_.-]{3,40}>` (shape, not literal), (d) distinct classes produce **distinct** slugs (cross-leg comparison, no hard-coded vocabulary). A separate **vocabulary-lock** sub-leg pins the literals once, after they land |
 
 **Resolved-by-citation (no longer assumptions):** A-ASSUME-1 (labels: phase1 §4.1/§4.3), A-ASSUME-2 (event kind
-unchanged: phase1 §4.2), A-ASSUME-3 (containment predicate: phase1 §5.3 R2 = `MainPID`-equality OR `/proc/<pid>/cgroup` last-line
-**substring-contains** the unit ControlGroup — so NP-6's prefix-collision is a **real** risk, see §9.1), A-ASSUME-4
+unchanged: phase1 §4.2), A-ASSUME-3 (**containment predicate — RE-STATED (REVIEW WAVE 2, BL-4): phase1 §5.3 R2 =
+`MainPID`-equality OR a **SEGMENT-BOUNDARY PREFIX** match — canonical string
+`pcg == cg || pcg PREFIX-matches "$cg"/`, realised as `case "$pcg" in "$cg"/*)`; **NOT** a substring test. The prefix
+collision (`…/ensemble-main.service-evil.scope`) is therefore **REFUSED by the design**, and the mid-path form
+(`/evil/system.slice/ensemble-main.service/x`) is refused too — that cell exists so a *substring implementation*
+reddens (see §9.1 NP-6). Anything in this file that still says "substring" about the *ladder* is a stale copy; the legacy
+Layer 2 / DUAL_FIGHT substring at `lib.sh:7803/:7827/:8128` is deliberately out of the ladder's path — decisions.md
+§2.2(5)), A-ASSUME-4
 (grace = `_GATE_ATTR_DEFER_S` pooled, not a knob), A-ASSUME-5 (order: ladder runs **only** on a non-empty `nonmatch`;
 no rescue), A-ASSUME-6 (stash: `_handback_stash` over the existing two channels), A-ASSUME-7 (restart rows: `halt`
 kind + slug, 7 sites), A-ASSUME-8 (fail-fast: Phase 1 does **not** touch `:6107-6126` — so the "exactly one MainPID
@@ -325,7 +347,7 @@ unit leg** (cheap, sharp), and each call site gets a **driven** leg (proves the 
 | **A4** | `is-active`, rc 4 / other | `SC_IS_ACTIVE_RC=4` (state `unknown`) and `SC_IS_ACTIVE_RC=1` (state empty) | exactly **one** row, `kind=nonzero_exit`, `rc=<true rc>`, state hint present; never `timeout(`; behaviour unchanged (blank `isact`, continue into the start attempt) |
 | **A5** | `is-active`, timeout arm | `SC_HANG=1` on `is-active` | `kind=budget` + `rc=124` + the **legacy WARN verbatim** (this is what `tests/test_bounded_subprocess_waits.sh:429` pins — it must stay green untouched) |
 | **A6** | restart scope-arm site (`lib.sh` `restart_via_launcher` comp7 arm) | `SC_IS_ACTIVE_RC=3` with `ENSEMBLE_RESTART_UNIT` set, Linux + `/run/systemd/system` + the unit env (reachability precondition) | same as A3 (no budget row, no timeout token, `_log` line, `_sc_isact` blanked, arm proceeds); frozen **7c** tail still present on the failure path; success path **7b-clean** |
-| **A7** | hygiene lock (`I-E3`) | source-level | (i) **no new journal event kind** (the event stays `subprocess_wait_timeout`; the `kind=` row token is the changed surface); (ii) no new `_numeric_knob`; (iii) no new exported env var (contrast: `_GATE_ATTR_DEFER_S` is env-visible but **not exported** and **not** a knob — assert exactly that shape); (iv) `daemon/**` untouched (`git diff --stat` empty for `daemon/`) |
+| **A7** | hygiene lock (`I-E3` — **restated, REVIEW WAVE 2, BL-5**) | source-level | (i) **no new journal event kind** (the event stays `subprocess_wait_timeout`; the `kind=` row token is the changed surface); (ii) **no new EXPORTED env var and no new OPERATOR knob** — i.e. nothing added to the exported family (A21) and nothing added to the C-10a `TABLE_*` surface; (iii) the positive shape of the ONE new bound: `_GATE_ATTR_DEFER_S` appears in **no** `export` statement, in **no** C-10a table copy, and in **no** operator doc; it is integer-parsed through `_numeric_knob` (loud-garbage on non-numeric) and **clamped `[0,5]`**, and a non-default value is honoured only under `ENSEMBLE_TEST_GATE_DEFER=1`. **The mutation `M-A7` (new event kind) must redden (i); a second plant — `export _GATE_ATTR_DEFER_S` — must redden (iii).** The earlier wording "no new `_numeric_knob`" is **withdrawn** (it contradicted §5.4/D3, which mandates the router) and must not be re-imported; (iv) `daemon/**` untouched (`git diff --stat` empty for `daemon/`) |
 | **A8** | start arm (`lib.sh:6383-6391`), non-124 arm — **D2 symmetric row** (added, review wave 1 fold) | `SC_START_RC=1`, `SC_START_ERR=…` (the §4.3 knob contract) | exactly **one** `kind=nonzero_exit` row naming the true rc beside the unchanged WARN (D2: the non-timeout start failure becomes machine-visible); the rc-124 arm keeps its legacy `kind=budget` text verbatim (`SC_HANG=1` sub-case) |
 | **A9** | scope-arm start (`lib.sh:6747-6753`), non-124 arm — **D2 symmetric row** (added, review wave 1 fold) | same knobs on the comp7 path | same as A8 on the scope-arm site; frozen **7c** tail intact; success path 7b-clean |
 
@@ -373,7 +395,7 @@ ran (`is-active` / `reset-failed`), so a leg cannot pass on a path that never pr
 
 Phase 1's landed design (B-primary): a **containment ladder** `R1 owned → R2 systemd cgroup → R3 ppid-ancestry →
 R4 launchd job`, consulted **only when Layer 1 found a non-match**; any `1` ⇒ today's refusal detail prefix
-preserved; all `0` ⇒ `_log` ACCEPTED + skip the Layer-2 unit-arm re-test (closure C-2); no `1` but some `2` ⇒ the
+preserved; all `0` ⇒ the ACCEPTED line **on stderr** (the `printf … >&2` idiom, `I-B2b` / review wave 1 BL-2 — *not* `_log`, which writes stdout when the logfile is unset) + skip the Layer-2 unit-arm re-test (closure C-2); no `1` but some `2` ⇒ the
 **pooled deferral** (`_GATE_ATTR_DEFER_S`, default 5 s, **per-shell**, seconds-counted, clamped `[0,5]`, test-only env seam —
 NOT an exported production knob per D3), whose **exhaustion is transient → budget-bound** (leader D1: the gate returns 2 and
 polling continues within the existing budgets; refusal/halt only at budget end). Rung composition follows the C-1 rule: the
@@ -441,7 +463,7 @@ pinned property:
 
 This leg is the reason the fix's blast radius stays small; it must not be dropped.
 
-### 7.5 B-defer-a / B-defer-b — the pooled deferral (`I-B8`)
+### 7.5 B-defer-a / B-defer-b / **B-defer-d (B-downgrade)** — the pooled deferral and the C-1 composition downgrade (`I-B8`, `I-B8a`)
 
 | Leg | Fixture | Assertion |
 |---|---|---|
@@ -452,6 +474,10 @@ This leg is the reason the fix's blast radius stays small; it must not be droppe
 | **Mutation M-B-defer-D1** | restore the **terminal** fail-fast exhaustion (exhausted `2` ⇒ rc 1) | B-defer-a reddens on its transient verdict (leader D1 — terminal exhaustion is rejected) |
 | **B-defer-e (rc=2 consumer contract — REVIEW WAVE 1, BL-1; `I-B13`; phase1 §5.4a / T7b+T7c)** | persistent `2` from the gate: same forever-`2` fixture as B-defer-a, driven **through the probe** and, as a one-shot twin, through `gate_version`/the livez consumer block | **(i)** the probe returns **2**, not 1 — no `attribution … REFUSED` line anywhere (the T7b rc capture at `:6103-6106` maps the transient per the `:6235`/`:6256` contract); **(ii)** the verifier polls **≥2 iterations** after the first transient (poll/census counter); **(iii)** the halt happens **only** at budget end through the floor-wins verdict (`:6288-6297`) — never a fail-fast; **(iv)** the halt detail carries the `UNATTRIBUTABLE … deferring` exhaustion marker via `HB_VERIFY_REASON` (C-5) — `none captured` never appears; **(v)** one-shot twin: `gate_version`'s consumer (and one livez consumer block) retries within the phase budget and surfaces the **distinct transient wording** — zero occurrences of `version verify mismatch` / `"/livez unreachable >Ns"` / `gate_fail_reason` set from an rc-2 (the mislabel fold), no 8b auto-rollback |
 | **Mutation M-B-defer-E** | restore the pre-fix consumer form `if ! _gate_serving_attribution …` at `lib.sh:6103-6106` (any nonzero gate rc ⇒ probe rc 1) | **B-defer-e reddens on (i)/(ii)** — proving the rc=2 mapping is enforced by a test, not merely documented (the counter-mutation the wave demands) |
+| **B-defer-d / B-downgrade (the C-1 composition downgrade — ADDED, REVIEW WAVE 2, BL-3)** | **R2 UNANSWERABLE ∧ R3 answers `1`**: `SC_SHOW_RC=124` (or `SC_MAINPID=0`) so the ControlGroup/MainPID probe never resolves, **plus** a holder that is positively not contained by R3 — a real `setsid`-escaped pid (precedent `tests/test_promote_launchd_survivorship.sh:684-700`) with an owned seam that excludes it and `ps` **present** on PATH; `_GATE_ATTR_DEFER_S=0` for the deterministic arm, default for the second arm | **(i)** R2 reports `2` (abstain), R3 reports `1`; **(ii)** the answered `1` is **DOWNGRADED to `2`** (C-1: an incomplete determination is not positive foreignness) ⇒ the gate returns **rc 2, NOT 1** — assert the rc explicitly; **(iii)** **no** `attribution … REFUSED` line (the refusal must not fire at the first census); **(iv)** the deferral rung is entered and, at `_GATE_ATTR_DEFER_S=0`, the distinct `UNATTRIBUTABLE … deferring` marker fires once (fire-once latch); **(v)** with a resolvable R2 (contrast cell: `SC_SHOW_RC=0`, real ControlGroup) the **same** foreign holder refuses immediately at rc 1 — proving the downgrade is scoped to the unanswerable case, not a blanket softening |
+| **Mutation M-NP1c — RE-TARGETED, LOOSE DIRECTION ONLY (REVIEW WAVE 2, BL-3)** | **loosen** the downgrade into an **unconditional** rule: every answered `1` becomes `2`, regardless of whether any stronger rung actually abstained (the "only when a stronger rung was unanswerable" guard dropped) | **B-downgrade (leg `B-defer-d`) cell (v)** — with a **resolvable** R2 the foreign holder MUST still refuse at the first census (rc 1); the unconditional downgrade defers it instead ⇒ (v) reddens, and the census/deferral counter climbs where it must stay at 1. Collateral (expected, disclosed): it also reddens **NP-4 / NP-6**, whose answered `1` would likewise become `2`. **Direction discipline (the BL-3 point):** a mutation must *widen* the accept-set or *delay* the refusal to prove a protection; the *strict* direction (deleting the downgrade) only makes the ladder harsher and proves nothing about over-acceptance — that is why the old row, which was strict, could not redden the legs it named |
+| **Mutation M-NP1c-strict — companion (strict direction, kept for completeness)** | **delete** the answered-`1`→`2` downgrade clause entirely (R2's abstain falls through to R3's `1`, which decides) | **B-downgrade** cells **(ii)/(iii)** — the gate returns rc `1` with an `attribution … REFUSED` line and skips the deferral rung, where the leg requires transient `2` + no `REFUSED`. Registered separately so nobody re-imports the old single-row claim: the strict plant reddens only the *deferral* half, the loose plant only the *refusal* half |
+
 
 ### 7.6 B-parity — gate surface parity (`I-B9`; phase1 §5.8 explicitly requests this)
 
@@ -512,9 +538,13 @@ leg asserts **both**: exhaustion ⇒ rc 2 (no early halt), and budget-end ⇒ th
 | **M-B7** | force the unit arm path on any `uname` (drop the host guard) | B7 (Darwin cell) — the `SC_LOG` "no ControlGroup probe" assertion flips |
 | **M-B8** | make an rc-2 census return 1 instead of 0 (a missing tool becomes refusal evidence) | B8 — reverses the house "a missing tool is never refusal evidence" doctrine |
 | **M-B-order** | move the ladder **before** Layer 1 | B-order assertion 1 (a ControlGroup probe appears on the all-owned path) |
-| **M-B-defer** | make the deferral pool per-**call** instead of per-process | B-defer-a (3-call total) |
+| **M-B-defer** | make the deferral pool per-**call** instead of per-**shell** (each of the 3 calls inside one shell gets a fresh pool) | B-defer-a (3-call total) |
 | **M-B-defer-E** | restore the pre-fix `if ! _gate_serving_attribution …` consumer at `lib.sh:6103-6106` (any nonzero ⇒ probe rc 1) | B-defer-e (i)/(ii) — the rc=2 mapping is enforced (REVIEW WAVE 1, BL-1) |
 | **M-B2b** | emit the ACCEPTED INFO via `_log` (stdout when `ENSEMBLE_UPGRADE_LOG_FILE` unset, `:434-443`) instead of the `printf … >&2` idiom (`:6210` precedent) | B-parity-capture (a)/(b) — stdout purity enforced (REVIEW WAVE 1, BL-2) |
+| **M-NP1c** (re-targeted, loose direction only — REVIEW WAVE 2, BL-3) | make the answered-`1`→`2` downgrade **unconditional** in `_gate_attr_containment`'s composition step (drop the "only when a stronger rung was unanswerable" guard) | **B-defer-d / B-downgrade** cell (v) — the resolvable-R2 foreign holder stops refusing at the first census; collateral: NP-4/NP-6 also redden (disclosed) |
+| **M-NP1c-strict** | delete the downgrade clause entirely (strict direction) | **B-defer-d / B-downgrade** cells (ii)/(iii) — transient becomes a refusal |
+| **M-NP1d** | implement R2's second disjunct as the raw substring `*"$cg"*` (the legacy Layer-2 form) | **NP-6 cell (b)** — the mid-path holder `/evil/system.slice/ensemble-main.service/x` is accepted ⇒ the pin reddens |
+| **M-NP6-reach** | delete the R2 invocation from the ladder (R2 skipped) | **NP-6** — the refusal still happens (R3 answers `1`), so the *outcome* is unchanged; the **reach/census-counter assertion** (SC_LOG shows the `show -p ControlGroup` probe, plus the arm printed in the evidence pack) is what reddens ⇒ proves NP-6 exercises R2, not a neighbouring rung |
 | **M-B10** | one word into the `promote.sh` C-10a copy | B10 |
 | **M-NP4** | delete the `_gate_serving_attribution` call in `_handback_serving_probe` | B-parity-refuse, NP-4, NP-9 |
 
@@ -572,22 +602,29 @@ Darwin path (both share `HANDBACK_LAST_ERROR` / the file).
 
 ### 9.1 Scenario matrix (each row = one leg)
 
-**NP-6's binding predicate — the canonical string, carried character-for-character identical to `phase1-plan.md` §5.3 and
-`decisions.md` §2.2(7) (architect closure C-0). The table cell below carries the markdown-escaped rendering form of the same
-string (`\|\|` = `||`); this block is the canonical, copy-verbatim source:**
+**NP-6's binding predicate — canonical source is `phase1-plan.md` §5.3's FENCED BLOCK (REVIEW WAVE 2, BL-4).** The
+block below is a *quotation* of it, kept character-for-character; the fenced block in phase1 §5.3 remains the source of
+record because a markdown table cell cannot express the predicate faithfully (escaping, indentation, and the temptation
+to write "contains" are all cell artifacts). The predicate is a **left-anchored PREFIX test**, not a substring search:
 
 ```
-pcg == cg || pcg contains "$cg/"
+pcg == cg || pcg PREFIX-matches "$cg"/
 ```
+
+Shell realisation (from the canonical block): `[ "$pcg" = "$cg" ]` **or** `case "$pcg" in "$cg"/*)` — `cg` matched
+literally, then `/`, then anything. **`*"$cg"*` is NOT this predicate**; it is the legacy Layer-2 / DUAL_FIGHT form,
+kept byte-identical *there only* (decisions.md §2.2(5)).
+
+⛔ DO NOT COPY the table-cell form — canonical source is phase1 §5.3 fenced block
 
 | id | Scenario | Fixture | Protection that must catch it | Expected outcome |
 |---|---|---|---|---|
 | **NP-1** | **wrong-version green** | `CURL_MODE=wrongver` (`version:"0.0.0"`), holders **all attributable** | version conjunct, `lib.sh:6113-6116` | verifier rc **1**; `version=0.0.0`; `NOT serving the right release`; **no** `hand-back COMPLETE`; **exactly one** MainPID poll (Phase 1 does not touch this block ⇒ the count assertion holds **unqualified**) |
 | **NP-2** | **version-absent green** | `CURL_MODE=noversion`, `PROMOTE_EXPECTED_VERSION` set | `lib.sh:6109-6111` | rc 1; `version field is absent/unparseable` |
 | **NP-3** | **non-2xx** | `CURL_MODE=non2xx` (404) | `_probe_once_classified` red (`:4488-4490`) → probe rc 1 (`:6120-6126`) | rc 1; `hard fail (red …)` |
-| **NP-4** | **genuinely-foreign holder** — positively `1` on every rung: not owned, not in the unit cgroup, no owned ancestor | holder = a real `setsid`-escaped pid (precedent `tests/test_promote_launchd_survivorship.sh:684-700`); owned seam excludes it; `SC_CONTROLGROUP` = a non-matching suffix | ladder returns `1` on **R2** and / or **R3** ⇒ Layer-1 refusal path | rc 1; detail **starts with** the live prefix `port-holder(s):… NOT in the supervision-owned pid set (owned:…)` (`I-B3`) plus Phase 1's ladder suffix; **census polled exactly ONCE** — `I-B4` explicitly forbids a deferral burn on a positive `1` (phase1 §5.4: the loop "stop[s] on `0`/`1`") |
+| **NP-4** | **genuinely-foreign holder** — positively `1` on every rung: not owned, not in the unit cgroup, no owned ancestor | holder = a real `setsid`-escaped pid (precedent `tests/test_promote_launchd_survivorship.sh:684-700`); owned seam excludes it; `SC_CONTROLGROUP` = a non-matching suffix | ladder returns `1` on **R2** and / or **R3** ⇒ Layer-1 refusal path | rc 1; detail **starts with** the live prefix `port-holder(s):… NOT in the supervision-owned pid set (owned:…)` (`I-B3`) plus Phase 1's ladder suffix; **census polled exactly ONCE** — `I-B4` explicitly forbids a deferral burn on a positive `1` (phase1 §5.4: the loop "stop[s] on `0`/`1`"). **BL-3 correction (deleted claim):** the original NP-4 row listed `M-NP1c` among its reddening mutations — **withdrawn**, same reason as NP-6 (R2 answers here, so no downgrade exists to mutate; and the strict plant cannot expose over-acceptance). NP-4's evidence set is `M-NP1` + `M-NP1b` + `M-NP5` (census-count); the C-1 downgrade's own pin is the leg **B-downgrade** (§7.5) |
 | **NP-5** | **no-listener green** | census rc 0 **empty** while curl answers green | `lib.sh:8012-8019` `finds NO listener` | rc 1; `unattributable` |
-| **NP-6** | **prefix-collision containment — HARD PIN (arm (b)-only; binding amendment D-P2-3, architect closure C-0)** | **drivable without `/proc` stubbing**: stub the unit ControlGroup (`SC_CONTROLGROUP`) to a **non-segment-aligned prefix of the test's real cgroup leaf** (e.g. real leaf `…/ensemble-main.service-evil.scope`, stubbed unit CG `/system.slice/ensemble-main.service`) ⇒ raw substring matches (accept), segment-aware refuses. (Adopted architect recommended item 15.) | R2's binding predicate — **character-for-character identical to phase1-plan.md §5.3 and decisions.md §2.2(7)**: `pcg == cg \|\| pcg contains "$cg/"` (canonical form in the block above) ⇒ the prefix-extension collision is **refused** | Leg asserts the **refusal** (rc 1, today's refusal-detail prefix + the ladder suffix) and prints the arm for the evidence pack; **reddens under M-NP1b** (permissive rung) and under **M-NP1c** (composition downgrade removed). The former two-armed text (arm (a) substring ⇒ advisory) is **SUPERSEDED** — arm (b) is the contract (decisions.md §2.2(1)) |
+| **NP-6** | **prefix-collision containment — HARD PIN, TWO CELLS** (arm (b)-only; binding amendment D-P2-3, architect closure C-0; **cell (b) added — REVIEW WAVE 2, BL-4**) | (a) **suffix-extension**: stub the unit ControlGroup (`SC_CONTROLGROUP`) to a **non-segment-aligned prefix of the test's real cgroup leaf** (e.g. real leaf `…/ensemble-main.service-evil.scope`, stubbed unit CG `/system.slice/ensemble-main.service`); (b) **mid-path** (NEW, BL-4): stubbed unit CG `/system.slice/ensemble-main.service` and a holder whose `pcg` is `/evil/system.slice/ensemble-main.service/x` — the ControlGroup appears **in the middle**, so a `*"$cg"*` substring implementation **accepts** while a left-anchored prefix **refuses**. Both drivable without `/proc` stubbing (adopted architect recommended item 15). | R2's binding predicate — **canonical source phase1 §5.3's fenced block**, quoted character-for-character: `pcg == cg \|\| pcg PREFIX-matches "$cg"/` (realised `case "$pcg" in "$cg"/*)`; **not** a substring) ⇒ both collisions are **refused** | Leg asserts **refusal** on both cells (rc 1, today's refusal-detail prefix + the ladder suffix) and prints the arm for the evidence pack; **plus (fold [T1]) the source-grep assertion on the shipped matcher** — within `_gate_attr_containment`'s body: exactly **one** `in "$cg"/*` arm and **zero** `*"$cg"*` arms (the three legacy substring arms at `lib.sh:7803`/`:7827`/`:8128` are outside it and must stay); **reddens under M-NP1b** (permissive rung), under **M-NP1d** (implement the disjunct as `*"$cg"*` ⇒ cell (b) accepts), and under **M-NP6-reach** (delete the R2 invocation ⇒ the refusal comes from a *different* rung: the reach/census-counter assertion reddens). **BL-3 correction (deleted claim):** the *original* NP-6 row said `M-NP1c` reddens it — **withdrawn**. R2 is **answerable** in this fixture, so the downgrade never engages, and the mutation that was assigned (`M-NP1c` as *delete the downgrade*) moves in the strict direction and cannot expose over-acceptance. `M-NP1c` is re-targeted to **`B-downgrade`** and defined as the **loose** plant (unconditional deferral); under that loose form NP-6 reddens only **collaterally** and is not its evidence. NP-6's own evidence set is `M-NP1b` + `M-NP1d` + `M-NP6-reach`. **Positive control (fold [T1]):** the *same* two fixtures with the holder moved INSIDE the unit cgroup (a real `sleep 30` child, real `SC_CONTROLGROUP`) must be **accepted** (rc 0 + the `ACCEPTED … contained in unit` line) — so a red NP-6 cannot be blamed on a broken fixture. The former two-armed text (arm (a) substring ⇒ advisory) is **SUPERSEDED** — arm (b) is the contract (decisions.md §2.2(1)) |
 | **NP-7** | **halt end-to-end** — the commission's literal demand | NP-1 or NP-4 driven to the caller | `_supervision_handback_unit` rc 1 (`:6395-6397`) → caller halt + B4 leave-txn-open (`promote.sh:684-699`) | **NP-7a (lib):** `restart_via_launcher` rc **1**, `NO nohup fallback` present, **no** `hand-back COMPLETE`. **NP-7b (promote, Tier-3 §11.4):** non-zero exit; a `halt` history row containing `unit hand-back failed`; `in_flight` **still open** (B4); no `commit` row; `current` unchanged |
 | **NP-8** | **a late-attributable holder must not convert a wrong version into a pass** | `CURL_MODE=wrongver` **plus** holders that only become attributable after `N` censuses (or a deferral-setting bump) | version conjunct runs **after** attribution on every green (`:6107-6126`) | rc 1 + `version=0.0.0` — and the counter shows the code **did** wait (≥N+1 censuses), i.e. the extra time was spent and *still* correctly refused |
 | **NP-9** | **gate-surface parity on the refusal** (from `I-B9`) | the NP-4 shape driven through `gate_livez` **and** `gate_version` | the same shared gate | both rc 1 with the attribution detail — the widening must not have softened the *other* gates' refusals |
@@ -596,25 +633,56 @@ pcg == cg || pcg contains "$cg/"
 
 ### 9.2 The over-accept counter-mutations (the commission's explicit demand)
 
-**NP-6's binding predicate — character-for-character copy (identical to `phase1-plan.md` §5.3 and `decisions.md` §2.2(7); the
-table cell above carries the markdown-escaped rendering form `\|\|` = `||`):**
+**NP-6's binding predicate — quote of the canonical fenced block in `phase1-plan.md` §5.3** (which is the SOURCE of
+record for every copy; `decisions.md` §2.2(7) and `plan-overview.md` §5 quote the same string). The second disjunct is a
+left-anchored **PREFIX** test, never a substring search:
 
 ```
-pcg == cg || pcg contains "$cg/"
+pcg == cg || pcg PREFIX-matches "$cg"/
 ```
+
+Shell realisation: `[ "$pcg" = "$cg" ]` **or** `case "$pcg" in "$cg"/*)`.
 
 Phase 1 lands a **ladder**, not a grace — so the "widen the accept-set" plant is expressed against the
 ladder. Each row names the plant in Phase 1's terms:
+
+> **BL-3 correction (REVIEW WAVE 2) — why this section's mutation set changed.** The C-1 downgrade fires **only when a
+> stronger rung was UNANSWERABLE** (R2 abstains `2`, R3 then answers `1`). **NP-4's and NP-6's fixtures both make R2
+> answerable** (a real `SC_CONTROLGROUP` resolves and the holder is provably outside it), so the downgrade is never
+> reached there — and the mutation the register had assigned to them, *delete the downgrade*, moves in the **strict**
+> direction (it makes the ladder harsher, never more permissive), so it **cannot** redden an over-acceptance leg in
+> principle. A mutation in the wrong direction is a failed leg (§5.1 rule 1). Fix, applied here and in §7.5:
+> 1. the `SC_SHOW_RC=124`/`SC_MAINPID=0` + non-owned-holder shape is promoted into a **named leg**
+>    (`B-downgrade`, alias `B-defer-d`) with a **two-sided** assertion pair — R2 unanswerable ⇒ transient `2`; R2
+>    resolvable ⇒ refuse at rc 1;
+> 2. `M-NP1c` is re-targeted to it **and defined as the LOOSE direction only** (make the downgrade unconditional:
+>    every answered `1` defers) — that is the plant that widens the accept-set/delays the refusal, and it reddens
+>    `B-downgrade` cell (v) *and* NP-4/NP-6 collaterally;
+> 3. the strict-direction plant survives only as the separately-registered companion **`M-NP1c-strict`** (delete the
+>    downgrade ⇒ `B-downgrade` (ii)/(iii) red), never as evidence about NP-4/NP-6;
+> 4. the two over-claims are deleted from NP-4/NP-6.
+> `M-NP1b` plus the two new NP-6 mutations (`M-NP1d` substring, `M-NP6-reach`) keep NP-4/NP-6 non-vacuous.
+
+⛔ DO NOT COPY the table-cell form — canonical source is phase1 §5.3 fenced block
 
 | Mutation | Plant (on the **copy** of lib.sh) | Must redden |
 |---|---|---|
 | **M-NP1 — remove the `1` classification** | make `_gate_attr_containment` return `0` unconditionally (phase1 §5.3's "Exhausted ⇒ if any rung answered and said no ⇒ `1`" deleted) | **NP-4**, **NP-9**, and B1 becomes vacuous (which is why B1 carries the counter non-vacuity assertion) |
 | **M-NP1b — permissive rung** | make the cgroup test unconditional (`case "$pcg" in *) ;;`) | **NP-4** (R2 path) and **NP-6** |
-| **M-NP1c — composition downgrade removed** (architect closure C-1) | delete the answered-`1`→`2` downgrade clause / let R2's negative fall through to R3 un-downgraded (phase1 §5.3 composition rule) | **NP-4**, **NP-6** |
+| **M-NP1c — composition downgrade, LOOSE DIRECTION ONLY (RE-TARGETED, REVIEW WAVE 2, BL-3)** | make the answered-`1`→`2` downgrade **unconditional** — the "only when a stronger rung was unanswerable" guard removed, so every answered `1` defers | **B-defer-d / B-downgrade** (§7.5) cell (v): with a **resolvable** R2 the foreign holder must still refuse at rc 1 at the first census; the unconditional downgrade defers instead ⇒ red. **Collateral (disclosed, not the target):** NP-4/NP-6 also redden, since their answered `1` becomes `2`. **The former row — "delete the downgrade ⇒ NP-4/NP-6 red" — was vacuous** (the strict direction only makes the ladder harsher, so it can never expose over-acceptance) and is **withdrawn**. The strict-direction companion, registered for completeness and never as the NP-reddening proof, is **M-NP1c-strict** |
 | **M-NP2 — version bypass** | `if [ "$running" != "$PROMOTE_EXPECTED_VERSION" ]; then` → `if false; then` (identical to the existing pack's `M3`, `tests/packs/handback_verify_budget_test.sh:811`) | **NP-1**, **NP-8** |
 | **M-NP3 — no-listener acceptance** | treat an rc-0-empty census as success | **NP-5** |
+| **M-NP2b — absent-version branch ORDERING (fold [T1])** | reorder `_handback_serving_probe`'s green-class arms so the **absent/unparseable** test (`:6109-6111`) runs *before* the **mismatch** test (`:6113-6116`) — i.e. compare first, then check presence | **NP-2** — with the version field absent, the mismatch arm fires instead and the detail reads `NOT serving the right release` (a *mismatch* claim about a field that does not exist) instead of `version field is absent/unparseable`. NP-2 must redden on the **wording**, not only on the rc. This is the mutation that proves NP-2 pins the *branch*, not merely "refused somehow" |
 | **M-NP4 — drop the attribution conjunct** | remove the `_gate_serving_attribution` call in `_handback_serving_probe` | **NP-4**, **NP-9**, B-parity-refuse |
 | **M-NP5 — burn patience on a positive `1`** | let the deferral loop continue when a rung answered `1` (i.e. drop the `1` short-circuit) | **NP-4**'s "exactly one census" assertion, B-defer-a's bound |
+| **M-NP1d — substring regression (BL-4)** | implement R2's second disjunct as the raw substring `case "$pcg" in *"$cg"*)` (the legacy Layer-2 / DUAL_FIGHT form) | **NP-6 cell (b)** — the mid-path holder `/evil/system.slice/ensemble-main.service/x` is accepted; also reddens the source-grep assertion in the NP-6 row (a `*"$cg"*` arm appears **inside** `_gate_attr_containment`) |
+| **M-NP6-reach — unreached rung (BL-4 / fold [T1])** | delete the R2 invocation from the ladder so a neighbouring rung answers | **NP-6's reach assertion** — the refusal still occurs (R3 answers `1`), so only the `SC_LOG` ControlGroup-probe check / census counter reddens. This is the mutation that proves NP-6 exercises R2 rather than a rung that happens to reach the same verdict |
+
+**Scope note on the two patience-widening mutations (REVIEW WAVE 2, BL-3 — so nobody reads them as duplicates).**
+`M-NP5` lives in the **deferral loop** (drop the `1` short-circuit: a mixed `1`/`2` holder set keeps polling); the loose
+`M-NP1c` lives one step earlier in the **composition step** (turn every answered `1` into `2`, so a pure-`1` set stops
+refusing at the first census). NP-4/NP-6 redden under both — `M-NP5` is the pin that lives *with them*, `M-NP1c` is the
+pin for the downgrade clause and its home is `B-downgrade`. Neither is the other's evidence.
 
 **The load-bearing property to state in the evidence pack (verbatim):**
 > *A genuinely wrong release still halts, and the ladder's widenings are each pinned by a counter-mutation
@@ -641,17 +709,26 @@ That is the commission's demand expressed as a two-sided, mechanically-checkable
 
 ### 9.4 Residual risk carried into the report (not hidden)
 
-**Cross-reference: §15 R-5 (cgroup prefix-collision).** Phase 1's R2 uses "cgroup path **contains** the unit ControlGroup"
-(a substring test — the same `case "$pcg" in *"$cg"*)` shape as today's `lib.sh:8127-8134`). A sibling unit
-whose cgroup path is a **suffix-extension** of ours (`…/ensemble-main.service-evil`) would be *accepted*.
-Consequences stated honestly:
+**Cross-reference: §15 R-5 — the prefix-collision residual is CLOSED, and this subsection is re-stated to match
+(REVIEW WAVE 2, BL-4).** An earlier edition of this subsection said *"Phase 1's R2 uses 'cgroup path **contains** the unit
+ControlGroup' (a substring test — the same `case "$pcg" in *"$cg"*)` shape as today's `lib.sh:8127-8134`)"* and then
+carried the collision as an open residual. **That text was the pre-amendment (C-0/D-P2-3) reading and is superseded.**
+Current truth:
 
-- It requires a **second systemd unit whose cgroup name extends ours** to hold our port — an operator-hostile
-  shape, not a plausible accident.
-- The acceptance is **not silent**: Phase 1's accept path logs `attribution [<what>]: ACCEPTED — … contained
-  in unit 'Y' …`, so a post-mortem sees it.
-- NP-6 records which behaviour the shipped code has (arm (a) or (b)) so the residual is **named**, and
-  OQ-P2-3 asks whether to harden now.
+- R2's predicate is a **left-anchored PREFIX** test at a segment boundary — canonical string
+  `pcg == cg || pcg PREFIX-matches "$cg"/`, realised `case "$pcg" in "$cg"/*)`, source of record phase1 §5.3's fenced
+  block. A **suffix-extension** (`…/ensemble-main.service-evil.scope`) and a **mid-path** occurrence
+  (`/evil/system.slice/ensemble-main.service/x`) are both **REFUSED**.
+- The three legacy substring arms in `lib.sh` (`:7803`, `:7827` — `supervision DUAL_FIGHT`; `:8128` — Layer 2
+  `_gate_attr_unit_lineage`) are **outside the ladder's path** and stay byte-identical (decisions.md §2.2(5)); they are
+  not residuals of *this* widening because a ladder `1` refuses before Layer 2 runs and ladder-accepted holders skip the
+  Layer-2 re-test (closure C-2).
+- What remains as a **test-side** residual is only "the implementation silently drifts back to a substring" — pinned by
+  NP-6 (both cells) plus `M-NP1d`, and by the source-grep assertion (exactly one `in "$cg"/*` **inside**
+  `_gate_attr_containment`, zero `*"$cg"*` there).
+- Still genuine and **disclosed, not closed**: `sg`-style *cgroup-namespace* aliasing is out of scope (this lane reads
+  the same `/proc/<pid>/cgroup` text the existing code already trusts); that is the same residual class as P12/P12-sibling
+  in phase1 §5.7, not a new one.
 
 ---
 
@@ -994,8 +1071,8 @@ purely about test-code dependencies and the serialization rule for `lib.sh`-copy
 | **P2-T5** | **§6 Candidate-A legs** (A0–A9, incl. the D2 symmetric-row legs A8/A9) + mutations M-A0..M-A9 | T1, T3, T4 | each A-leg green unmutated, red under its named mutation; A5/A2 prove the legacy rc-124 text is **byte-identical** |
 | **P2-T6** | **§7.1/§7.2** survival (B1, B1b, B1c) + exhaustion (B2) | T2, T4 | B1/B1b/B1c rc 0 with the ACCEPTED log line; B2 rc 1 + bounded |
 | **P2-T7** | **§7.3 rung legs** (B3 cgroup, B4 MainPID, B5 ppid, B6 launchd, B7 Darwin/Plan9, B8 unprobeable) | T2, T4 | each rung classifies `0/1/2` per Phase 1 §5.3 |
-| **P2-T8** | **§7.4/§7.5/§7.6/§7.8** ordering (B-order), deferral (B-defer-a/b/c/**e**), parity (B-parity incl. **B-parity-capture**), halt chain (B-halt) | T5, T6 | B-order's byte-identical transcript + "no ControlGroup probe" both hold; B-defer-a proves the **pool** (3 calls ≤ 1× bound) and the **transient** exhaustion verdict (leader D1); **B-defer-e proves the rc=2 consumer contract end-to-end (probe maps 2→poll, ≥2 iterations, halt only at floor-wins, exhaustion marker in `HB_VERIFY_REASON`; M-B-defer-E reddens it) and B-parity-capture proves gate stdout purity (M-B2b reddens it)** |
-| **P2-T9** | **§9 NEGATIVE PROOF** (NP-1..NP-11) + M-NP1..M-NP1c/M-NP5 | T2, T6, T7 | **NP-4 reddens under M-NP1** and under **M-NP1c**; **NP-6 reddens under M-NP1b and M-NP1c**; NP-4's census-count assertion reddens under M-NP5; NP-1/NP-8 redden under M-NP2 |
+| **P2-T8** | **§7.4/§7.5/§7.6/§7.8** ordering (B-order), deferral (B-defer-a/b/c/**d → B-downgrade**/**e**), parity (B-parity incl. **B-parity-capture**), halt chain (B-halt) | T5, T6 | B-order's byte-identical transcript + "no ControlGroup probe" both hold; B-defer-a proves the **pool** (3 calls ≤ 1× bound) and the **transient** exhaustion verdict (leader D1); **B-downgrade proves the C-1 composition rule two-sidedly (R2 unanswerable `SC_SHOW_RC=124`/`SC_MAINPID=0` ∧ R3 answers `1` ⇒ rc **2**, no `REFUSED` line, deferral entered; resolvable R2 ⇒ the same holder refuses at rc 1) — cell (v) reddens under M-NP1c (loose) and (ii)/(iii) under M-NP1c-strict**; **B-defer-e proves the rc=2 consumer contract end-to-end (probe maps 2→poll, ≥2 iterations, halt only at floor-wins, exhaustion marker in `HB_VERIFY_REASON`; M-B-defer-E reddens it) and B-parity-capture proves gate stdout purity (M-B2b reddens it)** |
+| **P2-T9** | **§9 NEGATIVE PROOF** (NP-1..NP-11) + M-NP1/M-NP1b/M-NP5 + **M-NP1d**/**M-NP6-reach**; **M-NP1c** moved to P2-T8 (it targets the §7.5 leg `B-downgrade`) | T2, T6, T7 | **NP-4 reddens under M-NP1 and M-NP1b**; **NP-6 reddens under M-NP1b, M-NP1d (cell (b), mid-path) and M-NP6-reach** (the reach/counter assertion); NP-4's census-count assertion reddens under M-NP5; NP-1/NP-8 redden under M-NP2. **BL-3: M-NP1c (loose) is asserted against `B-downgrade` cell (v), with NP-4/NP-6 reddening only collaterally; the old "M-NP1c ⇒ NP-4/NP-6 red" evidence claim is withdrawn** (the strict-direction plant cannot expose over-acceptance) |
 | **P2-T10** | **§8 Candidate-C legs** (C-1..C-8) + M-C1..M-C4 | T4 | C-5a passes a **subshell** read (`I-C5`); M-C4 (variable-only stash) reddens it |
 | **P2-T11** | **§10 restart-arm legs** (R-PY, R-SIBLING, R-TORN, R-NOARM, R-POPKIND, R-POPRUN, R-INF) + R0 behaviour matrix + M-NOARM/M-TORN/M-R0 | T3, T4 | one `halt` row per class with the slug shape; `_warn` text byte-unchanged; R0 allowlist exact |
 | **P2-T12** | Regression sweep: standing suites at **FAILED-diff-empty** vs the pre-fix base; `ceremony_wallclock` **green with zero edits** (§7.10) | T5–T11 | diff empty or attributed; §M/§N of `test_supervision_stop_handback.sh` green **without edits** (`I-B3`) |
@@ -1023,7 +1100,7 @@ the pins that already hold the machinery honest.
 | **R-2** | **Vacuity.** A negative leg passes because the code never reached the gate (an earlier step failed), or because a stub answered in a way that made the path unreachable | High — a false negative proof is worse than none | Medium | Every leg carries (a) a **gate needle** (`GATE_ATTRIBUTION_DETAIL`/WARN), (b) a **stub call counter**, (c) a **positive control**. `make_mut`'s `cmp -s` refuses a plant that changed nothing. A mutation that fails to redden its leg is reported as a **failed leg**, never as "no-op" |
 | **R-3** | **Collateral pin breakage** — Phase 1 edits text near pinned sites. The concrete collisions: `tests/test_bounded_subprocess_waits.sh:429` (literal `is-active probe exceeded budget` on a genuine *timeout* leg — must survive), `:327/:343/:359/:428` (site tokens `handback_reset_failed` / `handback_is_active` / `handback_start` / `scope_arm_is_active` — must survive), `:376` (happy path journals **no** `subprocess_wait_timeout`), plus the whole §M/§N blocks of `test_supervision_stop_handback.sh` (M1/M3/M6/M7 detail strings; N1/N2/N2b/N3/N5 launchd stash) | High — blocks the merge | Medium-High | A **regression matrix** is authored **before** T5 (§11.2), classifying every touching assertion as *must-survive* vs *planned delta*. §M/§N run **first** in every regression sweep. Rule: a red is a planned delta **or** a defect — never "fix" it by deleting the assertion. `I-B3` (refusal **prefix** byte-preserved) is the design-side guarantee that M1/M3/M6/M7 need no edits |
 | **R-4** | **Host-class gaps.** R2 needs Linux `/proc`; R3 needs `ps -o ppid=`; the unit arm needs `/run/systemd/system`. On a Darwin runner the fix's *primary* signal (cgroup) is untestable, so a Darwin regression could ship behind a Linux-green | Medium | Medium (this host: Linux, `/run/systemd/system` present, own cgroup under `/system.slice/`) | Every leg **names its host class**; a skipped leg is a loud `_skip` with the named fence, never a silent pass; the evidence pack's verdict line must state which lanes ran where. NP-11 + B7 cover the Darwin *selection* logic natively on this host via the `uname` stub |
-| **R-5** | **NP-6 residual (cgroup prefix-collision) — CLOSED by the binding amendment (D-P2-3 / C-0).** R2 now matches at segment boundaries; the collision shape is refused. Residual is only "implementation drifts back to substring" — caught by the NP-6 hard pin + M-NP1b/M-NP1c | Low (narrow, operator-hostile shape) | Low | NP-6 is a **hard pin** (arm (b)-only) with the **character-identical predicate** carried in phase1 §5.3, phase2 §9.1 and decisions.md §2.2(7); the accept path is **logged** (Phase 1's `ACCEPTED` line) so it is never silent; M-NP1b/M-NP1c redden the permissive and the downgraded variants |
+| **R-5** | **NP-6 residual (cgroup prefix-collision) — CLOSED by the binding amendment (D-P2-3 / C-0).** R2 matches at **segment boundaries via a left-anchored PREFIX test** (`pcg == cg \|\| pcg PREFIX-matches "$cg"/`), so both the suffix-extension (`…-evil.scope`) and the **mid-path** (`/evil/system.slice/…/x`) collisions are refused. Residual is only "implementation drifts back to a substring" — caught by the NP-6 hard pin (two cells) + M-NP1b + **M-NP1d** + **M-NP6-reach** | Low (narrow, operator-hostile shape) | Low | NP-6 is a **hard pin** with the character-identical predicate whose **source of record is phase1 §5.3's fenced block** (quoted in phase2 §9.1/§9.2 and decisions.md §2.2(7)); the accept path is **logged** (Phase 1's `ACCEPTED` line) so it is never silent; M-NP1b reddens the permissive rung and the two NP-6 mutations redden the substring and the unreached-rung variants. **BL-3: M-NP1c is NOT a reddening mutation for NP-6** |
 
 **Secondary (tracked, not blocking):** the 5 pre-`journal_init` restart exits stay journal-silent by
 structure (OQ-P2-2); T11/T12 are optional items whose absence is a **declared parity gap** (U-3).
@@ -1035,7 +1112,7 @@ structure (OQ-P2-2); T11/T12 are optional items whose absence is a **declared pa
 | # | Criterion | How measured | Threshold |
 |---|-----------|--------------|-----------|
 | **SC-1** | Every new pin has a named counter-mutation, and the plant is non-vacuous | the evidence pack's mutation table: one row per assertion family + `restore sha256` before==after | **100%** of new pins; **zero** rows lacking an observed red |
-| **SC-2** | The negative proof is two-sided | run M-NP1 and M-NP1b against NP-4; run **M-NP1c** against NP-4 and NP-6; run M-NP5 against NP-4's census-count assertion | **NP-4 RED under M-NP1 / M-NP1b / M-NP1c**; **NP-6 RED under M-NP1b / M-NP1c**; NP-4's count assertion **RED under M-NP5** |
+| **SC-2** | The negative proof is two-sided | run M-NP1 and M-NP1b against NP-4; run M-NP1b, **M-NP1d** and **M-NP6-reach** against NP-6; run M-NP5 against NP-4's census-count assertion; run **M-NP1c (LOOSE direction)** against **B-downgrade** (§7.5) cell (v) and **M-NP1c-strict** against its (ii)/(iii) | **NP-4 RED under M-NP1 / M-NP1b**; **NP-6 RED under M-NP1b / M-NP1d / M-NP6-reach**; NP-4's count assertion **RED under M-NP5**; **B-downgrade (v) RED under M-NP1c and (ii)/(iii) RED under M-NP1c-strict**. **BL-3: no row may claim NP-4/NP-6 red as *evidence* for M-NP1c** — the strict plant cannot expose over-acceptance; NP-4/NP-6 redden only collaterally under the loose plant, and M-NP5 is the mutation that pins that shape *there* |
 | **SC-3** | A healthy boot with partially-outside holders completes | B1, B1b, B1c | rc 0 **and** the `ACCEPTED … contained in unit` log line **and** (B1b) census counter ≥ N+1 |
 | **SC-4** | A wrong release still halts, at both layers | NP-1..NP-5, NP-9, NP-10 at lib level; NP-7b at Tier 3 | every NP leg's rc/verdict as tabulated; the Tier-3 run leaves `in_flight` **open** (B4), `current` unchanged, **no** `commit` row |
 | **SC-5** | No mislabel survives | A0–A5 (helpers + all three sites) | rc 124 ⇒ `kind=budget` + `timeout(` **byte-identical**; rc 3 ⇒ **no** `kind=budget`/`timeout(`; rc 4/other ⇒ `kind=nonzero_exit` with the true rc; no hard-coded `rc=124` for a non-124 child |
@@ -1055,5 +1132,5 @@ structure (OQ-P2-2); T11/T12 are optional items whose absence is a **declared pa
 |---|---|---|
 | **OQ-P2-1** | Does Phase 2 own the **Tier-3** sandbox promote rehearsal (NP-7b + B2b's caller contract), or does it route to the tester gate? | (a) Phase 2 owns it → I execute §11.4 under the stated gate. (b) Route to the tester gate → NP-7b ships as a **declared gap**, lib-level NP-7a is the compensating pin, and the evidence pack states the promote-level halt is proven only structurally + by the existing template pin |
 | **OQ-P2-2** | Phase 1's restart scope journals **7** classes and leaves **5** pre-`journal_init` exits silent (`:82`, `:96`, `:104`, `:108`, `:145`). Is that acceptable (with R0's pinned allowlist as the visible record), or must those also produce a cause somewhere? | (a) acceptable → R0 pins the 6-entry allowlist and the evidence pack states the limit. (b) must-journal → a design change Phase 1 must own: `:145` cannot journal (init failed) and the arg-parse class runs before any journal exists, so this needs a **non-journal** channel (e.g. a stderr-audit store) and a new Phase-1 task |
-| **OQ-P2-3** | **NP-6 (cgroup prefix-collision)** — **RULED (a) GATE NOW** (leader D-P2-3 + architect C-0): Phase-1's R2 gains segment-aware matching and NP-6 is a **hard pin** (arm (b)-only); M-NP1b **and** M-NP1c must redden it. The predicate is carried character-identically in phase1 §5.3, phase2 §9.1 and decisions.md §2.2(7). *(Resolved — this row is retained as the ruling trail.)* |
+| **OQ-P2-3** | **NP-6 (cgroup prefix-collision)** — **RULED (a) GATE NOW** (leader D-P2-3 + architect C-0): Phase-1's R2 gains segment-aware matching and NP-6 is a **hard pin** (arm (b)-only, **two cells** after BL-4); **M-NP1b + `M-NP1d` (substring) + `M-NP6-reach` must redden it**. The predicate is quoted from its **canonical source, phase1 §5.3's fenced block**, in phase2 §9.1/§9.2 and decisions.md §2.2(7). **BL-3 amendment to this row's original text:** it named `M-NP1c` as a reddening mutation — **withdrawn**, since R2 answers in this fixture and the downgrade therefore cannot engage; `M-NP1c` (loose direction) belongs to `B-downgrade` (§7.5) and reddens NP-6 only collaterally. *(Resolved — this row is retained as the ruling trail.)* |
 | **OQ-P2-4** | ~~If Phase 1 takes optional **T12**, do I own the **Darwin** NP-11 leg?~~ **RULED (b) — NO T12 ⇒ NP-11 DROPPED, parity gap DECLARED in the evidence pack** (leader rulings D-P1-3 + D-P2-4, 2026-11-17). *(Resolved — this row is retained as the ruling trail.)* |
