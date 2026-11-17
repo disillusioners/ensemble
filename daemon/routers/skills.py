@@ -1650,6 +1650,7 @@ async def resolve_ab_test(
         ),
     ),
     evolution: SkillEvolutionService = Depends(get_evolution),
+    metrics_service: SkillMetricsService = Depends(get_metrics),
 ) -> dict[str, Any]:
     """Check whether the skill's A/B test should resolve.
 
@@ -1690,6 +1691,7 @@ async def resolve_ab_test(
                 defective_arm_id=defective_arm_id,
                 reason=reason,
                 evolution=evolution,
+                metrics_service=metrics_service,
             )
         metrics = await evolution.get_skill_metrics(skill_id)
         if not metrics.get("found"):
@@ -1728,6 +1730,7 @@ async def _resolve_ab_test_sanctioned(
     defective_arm_id: str | None,
     reason: str,
     evolution: SkillEvolutionService,
+    metrics_service: SkillMetricsService,
 ) -> dict[str, Any]:
     """C1 (DECIDED Q2): the sanctioned explicit-winner resolution.
 
@@ -1794,21 +1797,40 @@ async def _resolve_ab_test_sanctioned(
             detail={"error": "skill repositories not available"},
         )
 
+    # W2 (review fix round, 2026-11-17): the resolved_at guard — 3-line
+    # parity with the service-level sanctioned resolver
+    # (``SkillEvolutionService.resolve_ab_test_sanctioned``). Without
+    # it, a second POST on the loser's id silently INVERTED an earlier
+    # explicit operator decision (no receipt, no trail). An
+    # already-resolved pair member is REFUSED, never re-resolved.
+    test_row = await asyncio.to_thread(
+        ab_test_repo.get_by_group, ab_group
+    )
+    if test_row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "No ab_test row for the group",
+                "ab_test_group": ab_group,
+            },
+        )
+    if getattr(test_row, "resolved_at", None):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "ab_test_group is already resolved — a "
+                "sanctioned re-resolution would invert the earlier "
+                "explicit decision; reversal goes through the "
+                "deactivation receipt, not a second resolution",
+                "ab_test_group": ab_group,
+                "resolved_at": str(getattr(test_row, "resolved_at")),
+            },
+        )
+
     resolved_winner = winner_id
     if resolved_winner is None:
         # defective_arm_id named: the OTHER variant wins (E-6 — never
         # crown a verified-defective member).
-        test_row = await asyncio.to_thread(
-            ab_test_repo.get_by_group, ab_group
-        )
-        if test_row is None:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "error": "No ab_test row for the group",
-                    "ab_test_group": ab_group,
-                },
-            )
         variants = {
             str(getattr(test_row, "skill_id_old", "") or ""),
             str(getattr(test_row, "skill_id_new", "") or ""),
@@ -1889,7 +1911,13 @@ async def _resolve_ab_test_sanctioned(
                 "operator/Emperor-sanctioned closure of a stalled or "
                 "verified-defective A/B pair (E-6 rule)"
             ),
-            holder=metrics,
+            # W8 (review fix round, 2026-11-17): pass the SERVICE,
+            # not the metrics DICT — ``resolve_anomaly_service``
+            # walks service-shaped attribute paths
+            # (``_skill_job_dispatcher._job_service...``); a dict
+            # yields None on every path and the anomaly half
+            # silently no-ops.
+            holder=metrics_service,
         )
     except Exception:  # noqa: BLE001 — the resolution stands; announce best-effort
         logger.warning(

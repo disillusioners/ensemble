@@ -1683,6 +1683,42 @@ class TestSanctionedResolveRoute:
         assert called["winner_skill_id"] == "skill-old"
         assert called["apply"] is True
 
+    def test_sanctioned_refuses_an_already_resolved_pair(
+        self, skill_app_with_mock_services, monkeypatch
+    ):
+        """W2 (2026-11-17): the resolved_at guard — a second POST on
+        the loser's id must NOT invert the earlier explicit decision
+        (no receipt, no trail). An already-resolved pair is refused."""
+        client = skill_app_with_mock_services["client"]
+        evolution = skill_app_with_mock_services["evolution"]
+        self._metrics_in_group(evolution)
+        evolution._ab_test_repo.get_by_group = MagicMock(
+            return_value=SimpleNamespace(
+                ab_test_group="group-sanctioned",
+                skill_id_old="skill-old",
+                skill_id_new="skill-new",
+                resolved_at="2026-11-17T00:00:00+00:00",
+            )
+        )
+        evolution._skill_repo = MagicMock()
+        called = []
+        monkeypatch.setattr(
+            "daemon.services.skill_deactivation."
+            "SkillStaleDeactivator.resolve_pair",
+            lambda self, **kw: called.append(kw) or {"applied": True},
+        )
+        response = client.post(
+            "/api/skills/skill-abc/ab-test/resolve",
+            params={
+                "sanctioned": "true",
+                "winner_id": "skill-new",
+                "reason": "operator: re-resolve attempt",
+            },
+        )
+        assert response.status_code == 409
+        assert "already resolved" in response.json()["detail"]["error"]
+        assert called == []  # NO mutation — the earlier decision stands
+
     def test_stalled_listing_endpoint(
         self, skill_app_with_mock_services
     ):
