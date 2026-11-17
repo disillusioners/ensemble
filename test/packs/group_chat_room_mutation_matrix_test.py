@@ -30,6 +30,13 @@ Restore discipline (NO ``git checkout --``):
   * after the LAST restore the whole manifest is re-verified — a
         post-run mismatch is a loud FAIL, never a silent pass.
 
+The ``--selftest`` probe runs on a COPY (in the scratch directory
+``LOG_DIR/selftest``): the working tree is never written, so an
+interruption mid-selftest can never leave the production probe file
+truncated. It exercises the SAME verifier over its OWN scratch
+manifest — the selftest can neither corrupt the tree nor clobber the
+matrix's manifest.
+
 The working tree MUST be clean when the matrix starts (the pre-run
 manifest shas are recorded against a committed tree, so a dirty tree is
 attributable to the matrix alone) — the script refuses to run on a
@@ -61,6 +68,12 @@ LOG_DIR = Path(
 )
 RECOVERY_DIR = LOG_DIR / "recovery"
 PYTHON = str(REPO_ROOT / ".venv" / "bin" / "python")
+
+#: The selftest's scratch directory. The selftest's probe runs on a
+#: COPY of the probe file, HERE — the working tree is never written
+#: (a SIGKILL mid-selftest could otherwise leave the production file
+#: truncated, with no journal to restore it from).
+SELFTEST_DIR = LOG_DIR / "selftest"
 
 #: The per-variable scrub. TWO families, both scrubbed BY NAME:
 #: the ``POSTGRES_*`` family (the glob form is a SILENT NO-OP — bash
@@ -218,6 +231,14 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _resolve(rel: str) -> Path:
+    """Resolve a manifest path: repo-relative by default, absolute
+    as-is (the selftest's manifest points at a COPY in its scratch
+    directory, outside the repo)."""
+    candidate = Path(rel)
+    return candidate if candidate.is_absolute() else REPO_ROOT / candidate
+
+
 def _git(*args: str) -> str:
     out = subprocess.run(
         ["git", "-C", str(REPO_ROOT), *args],
@@ -261,7 +282,7 @@ def _record_manifest() -> dict:
 def _verify_manifest(manifest: dict) -> list[str]:
     mismatches: list[str] = []
     for rel, sha in manifest["files"].items():
-        path = REPO_ROOT / rel
+        path = _resolve(rel)
         if not path.exists():
             mismatches.append(f"{rel}: MISSING")
             continue
@@ -384,14 +405,23 @@ def run_matrix() -> int:
     return 0
 
 
-def verify() -> int:
-    manifest_path = LOG_DIR / "pre_run_manifest.json"
+def verify(manifest_path: Path | None = None) -> int:
+    """Re-hash every file the recorded manifest names.
+
+    ``manifest_path`` defaults to the MATRIX's own manifest (the
+    ``--verify`` CLI mode). The selftest passes its OWN scratch
+    manifest (over a COPY of the probe file) so the two never share
+    state — and so the selftest can never delete the matrix's
+    manifest.
+    """
+    if manifest_path is None:
+        manifest_path = LOG_DIR / "pre_run_manifest.json"
     if not manifest_path.exists():
         print("no pre-run manifest — nothing to verify")
         return 1
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     mismatches = _verify_manifest(manifest)
-    inflight = LOG_DIR / "inflight.json"
+    inflight = manifest_path.parent / "inflight.json"
     if inflight.exists():
         print(f"IN-FLIGHT mutation: {inflight.read_text(encoding='utf-8').strip()}")
     if mismatches:
@@ -422,36 +452,63 @@ def recover() -> int:
 
 
 def selftest() -> int:
-    """Exercise the restore/interruption pins."""
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    probe = REPO_ROOT / "daemon" / "tools" / "room.py"
+    """Exercise the restore/interruption pins — ON A COPY.
+
+    THE WORKING TREE IS NEVER WRITTEN. The probe copies the probe file
+    into the selftest's scratch directory and plants the mutation byte
+    in the COPY: the previous shape overwrote ``daemon/tools/room.py``
+    itself, so a SIGKILL mid-selftest left the production file
+    TRUNCATED — with no journal to restore it from (the matrix's
+    journal only covers the matrix's own mutations).
+
+    The manifest/journal/--verify/--recover/--selftest discipline is
+    unchanged: the selftest still exercises the SAME verifier, over a
+    manifest that records the PRE-PLANT sha (a manifest written from
+    the mutated file would match itself and the selftest would be
+    vacuous). The manifest lives in the SCRATCH directory, so the
+    selftest can never clobber the matrix's own manifest.
+    """
+    SELFTEST_DIR.mkdir(parents=True, exist_ok=True)
+    probe_source = REPO_ROOT / "daemon" / "tools" / "room.py"
+    probe = SELFTEST_DIR / "room.py.probe"
+    manifest_path = SELFTEST_DIR / "pre_run_manifest.json"
+    source_sha = _sha256(probe_source)
+    shutil.copyfile(probe_source, probe)
     original = probe.read_bytes()
     try:
         # The manifest records the PRE-PLANT sha — the verifier can then
         # DETECT the planted byte (a manifest written from the mutated
         # file would match itself and the selftest would be vacuous).
-        (LOG_DIR / "pre_run_manifest.json").write_text(
+        manifest_path.write_text(
             json.dumps(
                 {
                     "head_sha": "selftest",
-                    "files": {"daemon/tools/room.py": _sha256(probe)},
+                    "files": {str(probe): _sha256(probe)},
                 },
                 indent=2,
             ),
             encoding="utf-8",
         )
         probe.write_bytes(b"# MUTATION: the selftest byte\n")
-        if verify() != 1:
+        if verify(manifest_path=manifest_path) != 1:
             print("RESULT: FAIL (the verifier did not detect the planted byte)")
             return 1
         probe.write_bytes(original)
-        if verify() != 0:
+        if verify(manifest_path=manifest_path) != 0:
             print("RESULT: FAIL (the verifier did not confirm the restored byte)")
+            return 1
+        # The working tree was NEVER touched by the probe.
+        if _sha256(probe_source) != source_sha:
+            print("RESULT: FAIL (the selftest probe touched the working file)")
             return 1
     finally:
         probe.write_bytes(original)
-        (LOG_DIR / "pre_run_manifest.json").unlink(missing_ok=True)
-    print("RESULT: PASS (the restore/interruption pins hold)")
+        manifest_path.unlink(missing_ok=True)
+        shutil.rmtree(SELFTEST_DIR, ignore_errors=True)
+    print(
+        "RESULT: PASS (the restore/interruption pins hold; the probe ran "
+        "on a copy — the working tree was never written)"
+    )
     return 0
 
 
