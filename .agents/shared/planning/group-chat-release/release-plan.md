@@ -19,6 +19,7 @@ The commissioning brief carried **three factual errors** and **one unstated bloc
 | C-2 | "current live v0.30.13 ⇒ likely v0.31.0" | Live is **v0.30.12** (`state.json: current=v0.30.12, previous=v0.30.9`). v0.30.13 exists as a **tag + CHANGELOG section + pyproject value**, was never promoted, and has no `releases/v0.30.13/`. | v0.30.13 is a **consumed slot** (tag published, CHANGELOG `[0.30.13]` present, `pyproject = 0.30.13`). It must never be re-cut. **v0.31.0** confirmed — and for the *stronger* reason: features ⇒ minor bump (SemVer; CHANGELOG states the project "adheres to Semantic Versioning"). |
 | C-3 | "the scripts-pin worktree floor … name what floor THIS release needs and how to establish it" | The scripts-pin worktree is **stale against the tip floor** and **cannot be used as-is**. The brief's implicit model (v0.29.0 precedent = run from the scripts-pin worktree) is **inverted** by the post-Family-3 invoke-path policy. | **This is the lane's one hard blocker.** See §5.1 — it is *satisfiable*, but only by advancing the live `.env` pin. |
 | C-4 | "the thing most likely to be missed" | The brief's own list is missing the **release-dir retention eviction** (a 4th stage evicts `v0.30.11`) and the **`config.yaml` does-not-travel-with-releases** gate. | Both added below (§2.6, §5.4). |
+| **C-6** | — *(added by the 2026-11-17 S3 measurement pass)* | The **S3 FE-asset leg is now MEASURED** (devops dry-run, release worktree @ `913088277`, no commits). It also surfaced a **stale "system v22" toolchain reference**, an **Angular 21 artifact-set shape** that reads as missing files, and a **verification trap** (esbuild mangles identifiers). | Folded into **§3.5** (new sub-sections 3.5.1–3.5.5) and **§5.3**. **New host-disk precondition** added at §5.2.1. |
 | **C-5** | — *(added by the 2026-11-17 correction pass)* | The **release-prep tester** found **two CRITICAL ceremony-facing defects in this plan** and two wrong recipe facts. They are **fixed in place**: **BLK-1** (§5.4 was booting the **not-yet-promoted binary against `ensemble_prod` on the live port** — a prod-schema-creating, daemon-colliding, fence-open smoke) and **BLK-2** (the five-variable scrub left **`POSTGRES_URL`** live — the one variable that bypasses the prod fence entirely). | **§5.4 is rewritten.** The PG proof (top risk #2) is **CLOSED** by measured evidence. Two items are recorded as **follow-ups, not in this cut** (§8.4). |
 
 **Also corrected (worker-report conflicts, adjudicated against the code):**
@@ -154,6 +155,19 @@ Current state: `releases/` = `v0.30.9` (journal `previous` — **pinned**), `v0.
 
 **Dialect hazards checked — none present.** No partial-index `WHERE` clauses (so the SQLModel Boolean partial-index trap, `WHERE col<>0` being PG-ILLEGAL, does not apply). No `NOT NULL` on a pre-existing population (all three tables are new). FKs are `NO ACTION` and self-contained; `M2`/`M3` require SQLite ≥ 3.35.0 for the **DOWN** `DROP COLUMN` only (the runner gates on it).
 
+**Conclusion — the release can boot green on a live PG that has never seen these migrations.** `create_all` creates the tables; `_ensure_postgres_columns` is idempotent; `run_room_boot_regen` (`daemon/repositories/room/boot.py`) is **best-effort** (wrapped, failure ⇒ WARNING, boot proceeds — `manager.py:4908-4928`); `RoomGcSweeper` no-ops safely when the service is absent (`unavailable=True`) rather than crashing boot.
+
+### 3.2 What the release verification must PROVE per driver
+
+| Driver | What must be proven | Where it is proven |
+|---|---|---|
+| **SQLite** | The runner executes **all three** migrations end-to-end: `pending_versions == ["20261115_080000","20261115_120000","20261116_083000"]`, applied list matches, ledger rows written with `skip_reason=None`, the F1 pre-marked migration is not re-pending, columns pinned, `NO ACTION` FK enforced, index/schema lockstep, DOWN drops exactly what UP created, and the proposal-dedup UNIQUE admits one proposal per `(source_message_id, trigger, member)` while never colliding on all-NULL rows | `tests/unit/repositories/test_room_migration_runner_execution.py` (O-1) |
+| **SQLite** | Exactly one `*_create_chatroom_tables.sql` exists; the stamp convention; 3 × `CREATE TABLE IF NOT EXISTS`; models registered with `SQLModel.metadata`; lifecycle columns at birth; unique-backstop names | `tests/unit/repositories/test_room_models_and_migration.py` |
+| **PostgreSQL** | `create_all` creates the three tables from the **registered** models, and `_ensure_postgres_columns` adds the four columns + the unique index idempotently | ✅ **CLOSED by measurement (2026-11-17 release-prep tester, LEG 1 — PASS-WITH-NOTES).** PG parity **HOLDS** on a real scratch PG. See §3.2.1 for the measured evidence. |
+| **Boot** | Room tables ready at boot; boot regen is non-fatal; the GC latch is two-sided (READ pins on success+retry, WRITE pins unconditionally, RAM-only, restart re-arms) | `tests/unit/repositories/test_room_boot_f1_pin.py`, `test_room_capability_row_pin.py` |
+
+**Conclusion for §3.2:** the release is green on **both** drivers — the SQLite runner path is pinned by `test_room_migration_runner_execution.py` + `test_room_models_and_migration.py`, and the PostgreSQL path is **measured** (§3.2.1). The one thing no leg substitutes for is a **live boot** of the staged payload — that is S5 (§5.4).
+
 ### 3.2.1 PG parity — MEASURED (CLOSES top risk #2)
 
 **Verdict: PG parity HOLDS. No release blocker.** (Source: `.agents/tester/RESULTS/2026-11-17-group-chat-v0310-release-verification.md`, LEG 1, commit `463044ce4`.)
@@ -172,17 +186,6 @@ Current state: `releases/` = `v0.30.9` (journal `previous` — **pinned**), `v0.
 **Cleanup re-verified (tester, post-run):** `schemas now = ['public']` (baseline MATCH) · probe residue (`gc_pg_probe%`) = **0** · the P3/P5 columns were **never** added to `public` · the scratch DB left **as found**.
 
 **Notes (non-blocking):** **N1** PG has **no server-side DEFAULTs** where the SQLite DDL carries `DEFAULT 'active'/0/'message'` — every product path builds rows through the ORM with Python-side defaults, so no impact today (→ follow-up §8.4 F-2). **N2** `uq_room_messages_proposal_dedup` is a `pg_constraint` on the fresh-`create_all` path but a bare `CREATE UNIQUE INDEX` on the `_ensure_postgres_columns` path — **enforcement identical** (proven firing). **N3** physical column ORDER differs between drivers (set/nullability/types identical) — not a contract. **N5** `ensemble_dev_scratch` is **not** a blank DB; its `public` room tables are a genuine pre-P3/P5 shape and were left untouched.
-
-**Conclusion — the release can boot green on a live PG that has never seen these migrations.** `create_all` creates the tables; `_ensure_postgres_columns` is idempotent; `run_room_boot_regen` (`daemon/repositories/room/boot.py`) is **best-effort** (wrapped, failure ⇒ WARNING, boot proceeds — `manager.py:4908-4928`); `RoomGcSweeper` no-ops safely when the service is absent (`unavailable=True`) rather than crashing boot.
-
-### 3.2 What the release verification must PROVE per driver
-
-| Driver | What must be proven | Where it is proven |
-|---|---|---|
-| **SQLite** | The runner executes **all three** migrations end-to-end: `pending_versions == ["20261115_080000","20261115_120000","20261116_083000"]`, applied list matches, ledger rows written with `skip_reason=None`, the F1 pre-marked migration is not re-pending, columns pinned, `NO ACTION` FK enforced, index/schema lockstep, DOWN drops exactly what UP created, and the proposal-dedup UNIQUE admits one proposal per `(source_message_id, trigger, member)` while never colliding on all-NULL rows | `tests/unit/repositories/test_room_migration_runner_execution.py` (O-1) |
-| **SQLite** | Exactly one `*_create_chatroom_tables.sql` exists; the stamp convention; 3 × `CREATE TABLE IF NOT EXISTS`; models registered with `SQLModel.metadata`; lifecycle columns at birth; unique-backstop names | `tests/unit/repositories/test_room_models_and_migration.py` |
-| **PostgreSQL** | `create_all` creates the three tables from the **registered** models, and `_ensure_postgres_columns` adds the four columns + the unique index idempotently | ✅ **CLOSED by measurement (2026-11-17 release-prep tester, LEG 1 — PASS-WITH-NOTES).** PG parity **HOLDS** on a real scratch PG. See §3.2.1 for the measured evidence. |
-| **Boot** | Room tables ready at boot; boot regen is non-fatal; the GC latch is two-sided (READ pins on success+retry, WRITE pins unconditionally, RAM-only, restart re-arms) | `tests/unit/repositories/test_room_boot_f1_pin.py`, `test_room_capability_row_pin.py` |
 
 ### 3.3 The tool-category artifact + VOCABULARY_VERSION — ship as a PAIR, do not regenerate
 
@@ -210,13 +213,106 @@ This is a **ratified-phase contract**, not a lane accident (decisions.md A-P5-2 
 
 ### 3.5 The frontend asset set
 
-**14 files** (the §13.1 P6 FE surface): `frontend/src/app/models/room.model.ts` · `models/index.ts` · `services/room.service.ts` (+ `.spec.ts`) · `components/room-dialog/{room-dialog.component.ts,.html,.scss,.spec.ts}` · `pages/chat/chat.html` · `chat.component.ts` (+ `.spec.ts`) · `chat.scss` · `styles.scss` · `app.component.spec.ts`.
+**14 source files** (the §13.1 P6 FE surface): `frontend/src/app/models/room.model.ts` · `models/index.ts` · `services/room.service.ts` (+ `.spec.ts`) · `components/room-dialog/{room-dialog.component.ts,.html,.scss,.spec.ts}` · `pages/chat/chat.html` · `chat.component.ts` (+ `.spec.ts`) · `chat.scss` · `styles.scss` · `app.component.spec.ts`.
 
-**How the FE ships:** `scripts/upgrade/_build_frontend.sh` runs the Angular build inside `frontend/` → `frontend/dist/frontend/browser/`, then stamps the provenance sidecar `frontend/dist/frontend/browser/index.html.build-provenance.json`. `stage.sh` **verifies** the sidecar against the source tree and then **`rm -f`s the sidecar out of the payload** (the payload tree is web-servable; the sidecar must not be served).
+**How the FE ships:** `scripts/upgrade/_build_frontend.sh` runs the Angular build inside `frontend/` → `frontend/dist/frontend/browser/`, then stamps the provenance sidecar `frontend/dist/frontend/browser/index.html.build-provenance.json`. `stage.sh` **verifies** the sidecar against the SOURCE tree and then **`rm -f`s it out of the payload** (`stage.sh:498`) — the payload tree is web-servable, and the manifest per-file map is computed **after** the rm, so the sidecar is **not** part of the release's integrity contract either.
+
+> **⇒ The sidecar must exist in the SOURCE tree at stage time. It does NOT ship.**
 
 **House rule (mandatory):** TypeScript only via `frontend/`'s local devDependency — `cd frontend && ./node_modules/.bin/tsc --noEmit -p tsconfig.app.json`. **Never** bare `tsc` / `npx tsc` outside `frontend/` (the 2026-10-03 incident: `npx` fetched and executed a registry package named `tsc`).
 
-**Release verification for the FE (§5.3, leg S3):** `tsc --noEmit` exit 0 · `npm run build` succeeds · the sidecar exists in the source tree with `git_dirty=false` and `git_head == release commit` · the staged `frontend/dist/frontend/browser/` contains the room-modal assets · the 14-file surface is present in the built bundle.
+#### 3.5.1 Toolchain — the "system v22" reference is STALE
+
+| Claim | Measured truth |
+|---|---|
+| The stage-lane blueprint says "system v22" | ❌ **STALE.** What actually runs is **nvm v24.21.0 / npm 11.19.0** — nvm is first on PATH |
+| `frontend/package.json` `engines` | **NO `engines` block at all.** `packageManager: npm@10.9.4` is **advisory** only |
+| `@angular/cli@21.2.5` engines | `node: ^20.19.0 \|\| ^22.12.0 \|\| >=24.0.0` · `npm: ^6.11.0 \|\| ^7.5.6 \|\| >=8.0.0` — **both** v22 and v24.21.0 satisfy it, and so does npm 11.19.0 |
+
+⇒ **The recipe PINS v24.21.0 / 11.19.0 rather than inheriting PATH** — a pinned toolchain is the reproducible one. (The house "no Node upgrades without reporting back" rule is respected: nothing was upgraded; an already-installed nvm runtime was *selected*.)
+
+#### 3.5.2 The built artifact set — the Angular 21 shape (NOT a defect)
+
+A reviewer expecting a polyfills bundle or an `assets/` directory finds neither. That is the **correct Angular 21 output**, not a missing-file bug:
+
+| Expected | Actual | Why |
+|---|---|---|
+| `polyfills-*.js` | **ABSENT** | `angular.json` has **no `polyfills` key** — Angular 17+ inlines polyfills into `main` |
+| `assets/` dir | **ABSENT** | the only `assets` entry is `{"glob": "**/*", "input": "public"}` ⇒ the `public/` tree is flattened to the **top level**: `favicon.ico`, `favicon.svg`, `apple-touch-icon.png`, `icons/` |
+| `scripts-*.js` | **present — 3,559,319 B** | it is `mermaid.min.js` — the only entry in `angular.json`'s `scripts` array |
+
+**Measured inventory of `frontend/dist/frontend/browser/` — 96 files / 7,949,189 B (7.58 MiB):**
+
+| Item | Count | Bytes |
+|---|---|---|
+| `chunk-*.js` | **85** | 3,480,246 |
+| `index.html` | 1 | 9,257 |
+| `main-*.js` | 1 | 217,094 |
+| `styles-*.css` | 1 | 655,629 |
+| `scripts-*.js` (mermaid) | 1 | 3,559,319 |
+| icons + favicons (`favicon.ico`, `favicon.svg`, `apple-touch-icon.png`, `icons/favicon-{16,32,48}.png`) | 6 | 27,292 |
+| provenance sidecar | 1 | 352 |
+| **total** | **96** | **7,949,189** |
+
+*Correction to the briefing note:* the chunk count is **85**, not 87 — the **byte total (3,480,246) agrees exactly**. The file census reconciles as **85 chunks + 8 root entries + 3 `icons/` files = 96**. (The sidecar's `build_tool` label is the static string `"npm run build:frontend"` stamped by `_build_frontend.sh:105`; the npm script actually invoked is `build` → `ng build`. The label is descriptive, **not** a resolvable script name.)
+
+**Sidecar content (measured):** `git_head = 913088277b9a55cabfed84ba4c10d6b5c327068c` (**== HEAD**) · `git_head_short = 913088277b9a` · `git_dirty = false` · `build_at = 2026-11-17T11:36:28Z` · `artifact_sha256 = 14d5b946c1c13258181887461f5dc81957ac0dce18d66c21f3f077bc0a24f7ee` — **re-verified independently** against the on-disk `index.html` ⇒ **MATCH**.
+
+#### 3.5.3 🔎 VERIFICATION TRAP — the room surface IS present, but NOT greppable by identifier
+
+The room-dialog surface **is** in the bundle. But **esbuild MANGLES identifiers**, so the natural greps **false-negative**:
+
+| Marker | Greppable? | Where |
+|---|---|---|
+| `RoomDialogComponent` | ❌ **0 files** | — (mangled) |
+| `ROOM_DIALOG_SIZE` | ❌ **0 files** | — (mangled) |
+| `app-room-dialog` | ✅ 1 file | `chunk-HD2VKB7Y.js` |
+| `/api/rooms` | ✅ 1 file | `chunk-HD2VKB7Y.js` |
+| `next_after_seq` | ✅ 1 file | `chunk-HD2VKB7Y.js` |
+| `room-dialog-panel` | ✅ 2 files | `chunk-HD2VKB7Y.js` **+** `styles-T4RYPQ7P.css` |
+
+⇒ **Anchor the S3 assertion on the four string-literal / CSS-class markers above** — never on the identifier names.
+
+**Second trap — the chunk is NOT a modulepreload.** `index.html` contains exactly **one** `modulepreload` occurrence and it does **not** name the room chunk; the room chunk is **lazily referenced from `main-*.js`**. ⇒ a naive *"is the room chunk listed in `index.html`?"* check **false-negatives**. Assert on the **bundle** (the four markers), **not** on `index.html`'s preload list.
+
+#### 3.5.4 DIRT PRECISION — `frontend/.angular` is NOT ignored
+
+`frontend/.gitignore` ignores **only** `/.angular/cache` (plus `/dist`, `/node_modules`). The `.angular` directory **as a whole is not ignored** ⇒ a cache write **outside** `.angular/cache` **dirties the tree** — and `stage.sh` counts `??` (untracked) as dirty. ⇒ after an FE build, **`git status --porcelain` must be EMPTY**; that is part of the S3 pass criterion, not a nicety.
+
+#### 3.5.5 The measured S3 recipe
+
+```bash
+# ── S3 FE BUILD — measured recipe (devops dry-run, release worktree @ 913088277).
+#    PIN the toolchain; do NOT inherit PATH.
+cd /home/nea/ensemble-src-wt-group-chat-release
+export PATH="/home/nea/.nvm/versions/node/v24.21.0/bin:$PATH"   # node v24.21.0 / npm 11.19.0
+node --version && npm --version                                  # → v24.21.0 / 11.19.0
+
+cd frontend
+npm ci                                                          # exit 0
+#   npm 11 SKIPS 5 install-scripts behind allowScripts — EXPECTED, non-fatal.
+#   Verified: esbuild ships via @esbuild/linux-x64 (no postinstall needed).
+./node_modules/.bin/tsc --noEmit -p tsconfig.app.json            # exit 0 (TS 5.9.3, LOCAL devDependency)
+cd ..
+
+#   IMPORTANT: invoke THIS worktree's scripts BY PATH. The ambient
+#   ENSEMBLE_UPGRADE_SCRIPTS_DIR still points at the STALE pin
+#   (ensemble-src-wt-scripts-pin @ bf4bfde6e — 8 commits behind the floor).
+#   THIS worktree's own scripts/upgrade/lib.sh:95 declares
+#   PIPELINE_SCRIPTS_REV=1aa0065e… — which SATISFIES the floor.
+bash scripts/upgrade/_build_frontend.sh                          # exit 0
+
+# ── verify ────────────────────────────────────────────────────────────────
+test -f frontend/dist/frontend/browser/index.html                              # the FE index
+test -f frontend/dist/frontend/browser/index.html.build-provenance.json       # the SOURCE-tree sidecar
+git status --porcelain                                                         # MUST be EMPTY
+
+# ── assert the room surface IS in the bundle (string literals, NOT identifiers)
+grep -rl "app-room-dialog"  frontend/dist/frontend/browser/   # → chunk-*.js
+grep -rl "/api/rooms"       frontend/dist/frontend/browser/   # → chunk-*.js
+grep -rl "next_after_seq"   frontend/dist/frontend/browser/   # → chunk-*.js
+grep -rl "room-dialog-panel" frontend/dist/frontend/browser/  # → chunk-*.js + styles-*.css
+```
 
 ### 3.6 The CHANGELOG entry
 
@@ -356,6 +452,8 @@ That worktree is at `bf4bfde6e`, which **does not contain `1aa0065e`** as an anc
 3. **Restart the daemon** so the tool lane re-reads `.env` — the resolution and the guard both read the live env of the daemon process.
 4. Confirm the pin's `scripts/upgrade/lib.sh` carries the **same** stamp `1aa0065e` (the two-channel rule) and that `sha256sum <pin>/scripts/upgrade/lib.sh` matches the payload's copy.
 
+**🔧 Invoke the release worktree's scripts BY PATH.** The ambient `ENSEMBLE_UPGRADE_SCRIPTS_DIR` still points at the **stale** pin, so anything that shells out to the upgrade scripts from the release worktree must call them **by path** (`bash scripts/upgrade/_build_frontend.sh`, `bash scripts/upgrade/stage.sh …`) rather than through the ambient pin. The release worktree's own `scripts/upgrade/lib.sh:95` declares `PIPELINE_SCRIPTS_REV=1aa0065eb818ff00cb32730fab54d7f2060c42d8` — which **satisfies** the floor — so the worktree's own scripts are the correct ones to run. (The measured S3 run used exactly this path.)
+
 **The alternative — the release-staged path.** Per runbook §10.1 the release-staged promote is the **default**, and it needs no pinned checkout: the payload carries the whole executor family and its own `daemon/plugin_subsystem/` slice, and `stage.sh` fail-closes at stage time if the payload's own staleness predicate cannot execute. **The non-git payload path is safe from the floor gate by design** — `scripts_dir_provenance_verdict` on a **non-git** dir is **WARNING-ONLY**: *"a stamp arms, no stamp warns; NO refusal is reachable from that branch (AC11)"*. The payload's `lib.sh` carries the stamp `1aa0065e`, so a payload-driven promote **arms**.
 
 ⇒ **Recommendation: do BOTH.** Advance the pin (so the *tool-lane* arm can succeed) **and** run the promote from inside the payload (the §10.1 default). If the Emperor prefers the operator lane only (no tool-lane arm), the payload path alone is sufficient — but then the ceremony has **no nonce and no 3-factor attestation**, and the journal shape differs (no `nonce_consumed` row). See §6.
@@ -372,6 +470,14 @@ That worktree is at `bf4bfde6e`, which **does not contain `1aa0065e`** as an anc
 | What if it is not done? | The tool-lane arm **refuses pre-nonce** with `stale-scripts`. The nonce is preserved, so the ceremony can be retried after the fix — **no live damage, no partial flip**. |
 | Is there a bypass? | `ENSEMBLE_ALLOW_STALE_SCRIPTS=1` bypasses with a loud **warn** verdict — per-invocation only, never persisted to `.env` (T6.12). **Do not use it.** It exists for drills, and using it on live would run stale executor scripts against a new payload — the exact hazard the guard exists to stop. |
 
+### 5.2.1 🟡 Host disk precondition — FREE SPACE BEFORE THE STAGE
+
+**Measured 2026-11-17: the host is at 100 % with 2.2 GB free** (`/dev/sda1` — 230 G total, 228 G used). At briefing time it read **99 % / 3.3 GB** — it has **degraded further**, so re-measure immediately before the stage rather than trusting either number.
+
+**Why it matters:** `frontend/node_modules` alone is **691 MB**, and the real stage additionally runs a **PyInstaller build** of `ensemble-prod` (hundreds of MB) *before* assembling the payload — plus the payload tree itself (agents + frontend dist + plugins + guidelines).
+
+⇒ **Precondition: reclaim free space BEFORE the stage.** The leader is scoping a reclamation now. A stage that runs out of disk mid-PyInstaller produces a partial payload — at best a provenance/freshness refusal, at worst a half-written `releases/<ver>/`.
+
 ### 5.3 Stage-verification legs S1–S5
 
 | Leg | What it proves | How | Pass criterion | Fresh? |
@@ -379,9 +485,22 @@ That worktree is at `bf4bfde6e`, which **does not contain `1aa0065e`** as an anc
 | **S1 — release integrity** | The staged artifact is the thing that was built and tagged | `git describe --tags --exact-match HEAD` == `v0.31.0`; manifest ⇄ staged-dir re-hash (`integrity_verify`); sidecar present, `git_head == release commit`, `git_dirty == false`, `artifact_sha256` == artifact hash; `pipeline_scripts_floor_commit` == `pipeline_scripts_rev` | All four legs match; no `non-tip-tree` / `provenance-*` / `stale-provenance` / `dirty-build` token | **fresh** |
 | **S1d — prompt-artifact seal** | No prompt changed outside the sealed lane | §4.3's three checks | All empty/equal | **fresh** |
 | **S2 — migrations on BOTH drivers** | The schema lands on SQLite *and* PostgreSQL | SQLite: `tests/unit/repositories/test_room_migration_runner_execution.py` + `test_room_models_and_migration.py`. PG: room-family suite against a **real PG scratch DB** (`ensemble_dev_scratch`; `ensemble_dev_test_only` does not exist here) — create if needed; **scrub `POSTGRES_*` per-variable, never `env -u POSTGRES_*`** | All 3 migrations apply clean on SQLite (ledger rows, `skip_reason=None`); on PG `create_all` creates the 3 tables and `_ensure_postgres_columns` adds the 4 columns + unique index, idempotently | **fresh — and the PG half does not exist as a test today** |
-| **S3 — FE build** | The FE compiles and the staged dist carries the room surface | `cd frontend && ./node_modules/.bin/tsc --noEmit -p tsconfig.app.json` (exit 0) → `npm run build` → sidecar written; `stage.sh` verifies the sidecar and strips it from the payload; assert the staged `frontend/dist/frontend/browser/` contains the room-modal assets | tsc exit 0; build PASS; sidecar valid; staged assets present | **fresh** |
+| **S3 — FE build** | The FE compiles and the staged dist carries the room surface | **§3.5.5** — the measured recipe: PIN `PATH=/home/nea/.nvm/versions/node/v24.21.0/bin:$PATH` (node v24.21.0 / npm 11.19.0) → `npm ci` (exit 0; npm 11 skips 5 install-scripts behind `allowScripts` — expected, non-fatal; esbuild ships via `@esbuild/linux-x64`) → `./node_modules/.bin/tsc --noEmit -p tsconfig.app.json` (exit 0, TS 5.9.3, local devDep) → `cd ..` → `bash scripts/upgrade/_build_frontend.sh` (exit 0, **by path** — the ambient scripts pin is stale) → assert `index.html` + the SOURCE-tree sidecar + `git status --porcelain` EMPTY + the **four bundle markers** (§3.5.3) | tsc exit 0 · build exit 0 · sidecar present with `git_head == HEAD` and `git_dirty == false` · `git status --porcelain` EMPTY · 96 files / 7,949,189 B in the dist · the room surface present **by string-literal markers** | ✅ **VERIFIED (dry-run)** — measured on the release worktree @ `913088277`; sidecar `git_head == HEAD`, `git_dirty == false`, `artifact_sha256` independently re-verified |
 | **S4 — gate evidence** | The feature's own gates still pass at the release commit | Re-run the registered packs at the release tag: `gc_p6_room_family` (**24 files / 421 nodes — REGISTRY CORRECTED, see §7.7**), `gc_p6_room_mutation_matrix` (9/9), `gc_p6_pilot_scenario` (9/9), SSE-adjacent corpus (111/111), TestP11 (39), nudges (42), language_check (124), ledger gate (5/5, `EXPECTED_LATEST=36`), FE specs (140/140 + modal 8/8) | Counts match the re-gate #2 record; **any count delta is explained**, not hand-waved | ✅ **RE-MEASURED (LEG 3a, PASS)** — 24 files / 421 nodes, **421 passed / 0 red**, 70.93 s under the 300 s cap (xdist `-n 8`; the historical serial run took ~6:02), junitxml agrees (421 tests / 0 failures / 0 errors / 0 skipped), fence proven `ensemble_dev` (never `ensemble_prod`). **Re-confirm at the tag.** |
 | **S5 — boot smoke** | The frozen binary boots green with the new schema — **in a SCRATCH sandbox, never against prod** | **§5.4.3** — the rewritten leg: scratch payload **copy** + scratch DB + scratch `HOME`/`DATA_DIR` + scratch port + the **34-name per-variable scrub** + the **three terminators pinned to `0`** + `ENSEMBLE_SELF_ENV=sandbox` | `livez` version `0.31.0`, `readyz` green (db/queue/services/checkpoint), the three room tables created **in the scratch DB only**, pool clean, **zero** sweep/reaper kills, and **zero trace left behind** | **fresh** — and it must be re-shaped per **BLK-1** |
+
+**Leg status at the release tip (2026-11-17):**
+
+| Leg | Status |
+|---|---|
+| **S1 — release integrity** | pending (stage-time) |
+| **S1d — prompt-artifact seal** | 🟡 **CLOSED pre-cut** (3/3 checks at the `v0.30.12` anchor; seal blob `cb51a277…` byte-identical) — **must be RE-RUN AT THE TAG** (§4.3.2) |
+| **S2 — migrations, both drivers** | ✅ SQLite pinned by the room-migration tests · ✅ PG parity **CLOSED** by measurement (§3.2.1) |
+| **S3 — FE build** | ✅ **VERIFIED (dry-run)** — §3.5.5 + the inventory in §3.5.2 |
+| **S4 — gate evidence** | 🟡 **unverified at the tip** — the room-family re-measure stands at 24 files / 421 nodes (§7.6); the remaining packs are **not** re-measured |
+| **S5 — boot smoke** | 🟡 **unverified** — the leg is now correctly specified (§5.4) but **has not been executed** |
+
+⇒ **S1d (at the tag), S4 and S5 remain.**
 
 **Evidence lands in:** `/home/nea/agents-ensemble/data/upgrade/live/<run_id>.log` (narrative) + `run-<ts>-<pid>.payload.log` (payload), plus `--junitxml` for S4. Use `.txt` names, not `.log` — `.gitignore` has `*.log` and would silently hide a transcript.
 
@@ -702,6 +821,9 @@ Both live guards are mandatory and independent: `require_live_guard` (`ENSEMBLE_
 | **R7** | The **local-latest ref lag** → `non-tip-tree` refusal at stage | 🟡 **OPEN — owned by the ari-stop-int lane**, not this lane (§7.3). A **precondition** for the cut. |
 | **R8** | `rollback_safe` **derive path exits 78** (the whole-file `DROP` grep matches the migrations' DOWN sections) | 🟡 **KNOWN — `ENSEMBLE_ROLLBACK_SAFE=1` must be explicit** at stage time; `contains_contract_phase=true` is expected (§5.5). |
 | **R9** | The stage **evicts `releases/v0.30.11`** (keep-3) | 🟢 **COSMETIC** — disclosed so the missing directory is not read as damage (§2.6). |
+| **R10** | **Host disk exhaustion at stage time** — measured **100 % / 2.2 GB free** (99 % / 3.3 GB at briefing; it has degraded further); `node_modules` alone is 691 MB and a PyInstaller build follows | 🟡 **OPEN — precondition.** Reclaim free space **before** the stage; the leader is scoping a reclamation (§5.2.1). |
+| **R11** | **S3 verified by a DRY-RUN only**; **S1d (at the tag), S4 and S5 remain unverified** | 🟡 **OPEN** — the FE leg is proven; the remaining legs must be run before the ceremony (§5.3 leg status). |
+| **R12** | The S3 **verification trap** — esbuild mangles `RoomDialogComponent` / `ROOM_DIALOG_SIZE` (0 hits) and the room chunk is **not** a `modulepreload` ⇒ a naive grep or `index.html` check **false-negatives** | ✅ **CLOSED** — the S3 assertion now anchors on four proven string-literal / CSS-class markers (§3.5.3). |
 
 ### 7.1 🔴 ICON PLACEMENT — **the Emperor adjudicates before promote**
 
@@ -812,6 +934,8 @@ Per §6.3 — **the abort ladder**: no-flip refusals are free (nonce intact); a 
 **Doctrine sources** — `docs/runbooks/promote-handback-serving-green-closer.md` §9 (the two-sided release-bump requirement; the four user-owned ceremony pre-steps; the disposition doctrine) and §10 (invoke-path policy: release-staged PRIMARY, pinned worktree = recovery) · house critical notes (boot-sweep pin; `env -u POSTGRES_*` no-op; stage.sh `rollback_safe` derive-path; install-dir protection).
 
 **Feature facts** — `.agents/shared/planning/group-chat/{plan-overview,architecture-recommendation,decisions,emperor-open-questions,substrate-map}.md` at tip; A-P5-2, A-P5-8, A-P5-17a, A-P5-17b, A-P6-1, A-P6-22, A-P6-23, A-P6-26, A-P6-35, A-P6-36 · KV `gc_pilot_video_team`, `gc_phase2_go`, `gc_ui_refinement_p6`, `gc_emperor_rulings_20261115` · `.agents/tester/PACKS.md` (P6 re-gate #2 block), `.agents/tester/QUARANTINE.md` (2 group-chat-adjacent entries).
+
+**S3 FE measurement (2026-11-17, devops dry-run, release worktree @ `913088277`, no commits)** — the measured recipe, the Angular 21 artifact-set shape, the verification-trap markers, the dirt precision and the sidecar contents are recorded in §3.5.1–§3.5.5. Anchors verified by this lane at the release tip: `scripts/upgrade/_build_frontend.sh:105` (the static `build_tool` label) · `scripts/upgrade/stage.sh:498` (the sidecar `rm -f` out of the payload, and the manifest per-file map computed after it) · `scripts/upgrade/lib.sh:95` (`PIPELINE_SCRIPTS_REV=1aa0065e…` in the release worktree) · `frontend/.gitignore` (only `/.angular/cache`, `/dist`, `/node_modules`) · `frontend/angular.json` (no `polyfills` key; `assets` = one `public` glob; `scripts` = `mermaid.min.js`) · `frontend/package.json` (no `engines`; `packageManager npm@10.9.4` advisory) · `node_modules/@angular/cli/package.json` `engines` (`node ^20.19.0 || ^22.12.0 || >=24.0.0`). Measured host state: node **v24.21.0** / npm **11.19.0** · `frontend/node_modules` **691 MB** · `/dev/sda1` **100 % used, 2.2 GB free** · dist census **96 files / 7,949,189 B** (85 `chunk-*.js` = 3,480,246 B; `index.html` 9,257; `main-*.js` 217,094; `styles-*.css` 655,629; `scripts-*.js` 3,559,319; icons+favicons 27,292; sidecar 352) · sidecar `artifact_sha256 14d5b946c1c13258181887461f5dc81957ac0dce18d66c21f3f077bc0a24f7ee` **independently re-verified MATCH** · `git status --porcelain` **EMPTY** after the build.
 
 **Release-prep verification (2026-11-17, the correction pass)** — `.agents/tester/RESULTS/2026-11-17-group-chat-v0310-release-verification.md`, commits `463044ce4` → `4b56f992e` → `92fcf26af` in `feature/group-chat-release`; worktree `/home/nea/ensemble-src-wt-group-chat-release`. LEG 1 (PG parity) **PASS-WITH-NOTES** · LEG 2 (prompt seal) **PASS** · LEG 3a (room family) **PASS** · LEG 3b (boot-smoke recipe) **PASS-WITH-NOTES — plan defect**. The only code change in that session is `b47e9165f` (`.agents/tester/PACKS.md` only, append-only, +9/−0) — **no production code, no version bump, no release dir, no tag, no push, no live process started/stopped/killed, no live port bound.**
 
