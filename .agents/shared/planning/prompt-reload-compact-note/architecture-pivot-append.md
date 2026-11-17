@@ -407,3 +407,108 @@ Reuse over invent: `tests/unit/test_compaction.py:76 make_messages` / `:95 make_
 | the daemon restarts between the two | no | resumes from the checkpoint | no (the checkpoint holds the pre-append state) |
 
 **The invariant across every row: the agent never sees a half-compacted context** — either fully compacted (the swap landed) or fully pre-compaction.
+
+---
+
+## 11. Amendment 2 — 2026-11-17 (graph-seam fold-in)
+
+*The append-seam worker measured the graph. Three of its findings **correct this document**; four are rulings this document owed. All anchors re-measured at HEAD `206c4fe0c`.*
+
+### 11.1 CORRECTION — the ceiling rule is SKIPPED on the append path, not applied
+
+§2e said *"Σsections = 0, so the numerator is the GLOBAL alone"*. **That is not what the code does.** The measured gate is `daemon/compaction.py:1026`:
+
+```python
+if context_window is not None and n_sections > 0:
+    sections, archived_line, archived_count = _apply_ceiling_rule(...)
+else:
+    archived_line = None
+    archived_count = 0
+```
+
+With `sections=[]` (the append path) the ceiling rule is **not applied at all** — `_apply_ceiling_rule` is never called, and there is no ARCHIVED line.
+
+**This is acceptable, and it is now stated honestly:** the only size bound on the append path's doc is the **600-token `GLOBAL_OVERVIEW_TOKEN_CAP`** (`daemon/compaction.py:167`), which is tighter than 15 % of any window ≥ 4,000 tokens. The consequence to record: **the append path's doc is bounded by the GLOBAL cap, not by the ceiling rule** — and the request's size instruction (§2c) is therefore the primary control, with the cap as the backstop.
+
+**The one-parameter truncation amendment (§2e) is CONFIRMED as necessary**, by measurement: the truncation marker at `daemon/compaction.py:1078-1080` says *"SECTION DETAIL below remains complete"*, and on the append path there are no sections. Without the amendment the doc would lie.
+
+### 11.2 CORRECTION — the model-override leak has FOUR consult sites, and one of them reaches the WINDOW math
+
+§2b said the override *"is consulted only by the engine's summarization call sites (`:2465`, `:4720`)"*. **Measured, there are four functional consult points** (`daemon/compaction.py`):
+
+| Line | What | Reaches the append path? |
+|---|---|---|
+| `:1326` | `resolve_snapshot_model` inherits the compaction chain | no (no snapshot on this path) |
+| `:2465` | `_effective_model_name` → `resolve_compaction_model(config) or context.model_name` — **the WINDOW math helper** | **YES, if reused — this is the leak** |
+| `:2490` | `_trigger_window_for_model` | **YES, if reused** |
+| `:4678` | the summarizer's `override_model` | no (the append path never summarizes) |
+
+**The leak:** `_effective_model_name` exists precisely so that token/window math follows the **override** model (`:2452-2465`, its own docstring says so). If the append path reuses it — or `_trigger_window_for_model` — the doc's size math would be scaled to a model that **never serves the compaction**, silently undermining the same-model invariant on the one dimension where it is invisible (§2b's cache claim would still hold, but the doc's budget would be wrong for the agent's actual window).
+
+**RULING:** the append path computes its context window as
+
+```python
+get_model_context_limit(agent_model_name, config)   # daemon/compaction.py:1191
+```
+
+directly — **never** `_effective_model_name`, **never** `_trigger_window_for_model`. This is cheap and structural: `select_compactable_groups` takes `context_window` as a **parameter** (`daemon/compaction.py:3562-3570`), so the append path simply passes the agent's window. **No helper changes; no new knob.** The same prohibition covers any future reuse of `build_compaction_doc`'s `context_window` argument.
+
+### 11.3 RULING — message ordering, and what the tail is
+
+Two things had to be settled and the document did not settle them.
+
+**(a) The order is `[doc, *tail]` — the tail AFTER the doc.** This is not a preference: the house's boundary line is `── END OF COMPACTED CONTEXT — everything below is the verbatim recent transcript ──` (`daemon/compaction.py:149-152`). Putting the tail before the doc would make that line false.
+
+**(b) The compaction exchange is CONSUMED, not preserved.** The exchange — the `prompt_reload` tool call, its receipt `ToolMessage`, the appended request, and the model's compaction reply — **must not appear in the preserved tail.** If it did, the compaction text would appear **twice** in the compacted context (once as the doc's GLOBAL, once verbatim as the reply), which defeats the compaction's purpose and doubles the artifact the feature exists to shrink.
+
+⇒ **The swap replaces the compacted span INCLUDING the compaction exchange, and splices the preserved tail from BEFORE the request.** The agent's next turn sees the doc plus its genuinely recent history, and **never sees its own request or its own compaction reply as messages.**
+
+### 11.4 RULING — how the daemon knows the reply IS the compaction
+
+The daemon must distinguish "the model answered the compaction request" from "the model did something else". **Ruling: key off the REQUEST message's own markers — no new channel field.**
+
+The appended `HumanMessage` carries:
+
+```python
+HumanMessage(
+    content="[System request: Compaction] …",
+    additional_kwargs={"injected_message": True, "context_kind": "compaction_request"},
+)
+```
+
+After the invoke, the agent node checks whether the channel's last `HumanMessage` carries `context_kind == "compaction_request"`. If it does, **the reply is the compaction** and the swap arms. If the reply is empty, is a refusal, or carries tool calls, the swap **does not** arm — the append is a no-op and the outcome is recorded honestly as `append_failed` / `empty_reply` (§2g: never imply a compaction that did not happen).
+
+Why this shape and not a channel field: the house already has **both** precedents — the `injected_message` kwarg on injected messages, and the `pending_repair_ghost_terminal` pending-field (`daemon/graph.py:4135`, consumed at `:8902-8932`). The **message marker** is the smaller of the two (no `SessionState` field, no checkpoint-schema surface) and it travels with the request itself, so the request and its identity cannot desynchronize. "Simple always better."
+
+### 11.5 RULING — the turn continues on the NORMAL router; no new flag
+
+After the swap, `should_continue` (`daemon/graph.py:4274-4288`) reads `state["messages"][-1]` — which is now the **tail's** last message, not the compaction reply. Two behaviours are possible, and **both are acceptable**:
+
+- it routes to **`agent`** ⇒ the model re-invokes with the compacted context and continues working (the agent compacted to free context and keeps going — arguably the desired behaviour);
+- it routes to **END** ⇒ the compaction was the turn's work and the next turn starts from the compacted context.
+
+**Ruling: do not add a routing flag; do not add a channel field.** The deliberate-compact rate limit (`DELIBERATE_COMPACT_RATE_LIMIT_S = 900`, `daemon/constants.py:616`) is the backstop against a compaction loop. **The acceptance must PIN the observed routing** (Amendment 1 §10.4 gains a row): the test asserts that after the swap the turn either continues with the compacted context or ends — and that it **never** re-appends the request within the same turn and **never** loops. If the pin shows the router misbehaving (e.g. the turn ends before the agent can ever act on its compacted context), that is a **finding to report**, not a flag to add preemptively.
+
+### 11.6 The `is_turn_boundary` side effect — stamp the request `injected_message=True`
+
+`daemon/graph.py:8862-8864` computes `is_turn_boundary = isinstance(messages[-1], HumanMessage)` — **raw, with no injected-message check**. An appended request HumanMessage at the tail makes the next agent node look like a turn boundary, and `watchover_denial_count` resets (`:8866-8868`).
+
+Ruling: **the request MUST be stamped `additional_kwargs={"injected_message": True, …}`** (which §11.4 already requires for detection). This prevents the **durable-repair-budget** reset (`_is_real_human_message` at `daemon/graph.py:2242-2257` excludes injected messages; `_repair_boundary_reset_state` at `:2287-2300`). The watchover counter reset is **unconditional** and is accepted: it is the same behaviour every injected message already has (the house's injection slot, `daemon/graph.py:9087-9160`), so the append seam introduces no new class of side effect.
+
+### 11.7 The tools-node wrapper's return shape — handle BOTH
+
+The tool result lands via the `"tools"` node (`daemon/graph.py:13555-13568` → `daemon/services/long_tool_nudge.py:752` `wrapped_tools_node` → `ToolNode.ainvoke` at `:906` → a dict `{"messages": [ToolMessage, …]}`; shape handling at `:1014-1021`). **`daemon/services/long_tool_nudge.py` is OUT of the lane's surface.** The graph.py-side append wrapper must therefore be **shape-tolerant** — handle both a dict carrying `messages` and a bare list — mirroring the precedent at `long_tool_nudge.py:1014-1021` rather than assuming one shape.
+
+### 11.8 CORRECTION — the edit surface: WITHDRAW the new-module recommendation
+
+§7 recommended a **new** top-level module (`daemon/_compact_note_append.py`) and flagged a surface widening for the leader to confirm. **Measured, the append path needs no widening.** The graph-seam worker's edit surface is entirely inside the lane's declared list:
+
+`daemon/graph.py` (the tools-node append wrapper + the agent-node swap + the request detection) · `daemon/compaction.py` (the doc wrapper with `sections=[]`, the selection helpers, the sentinel, the honest-truncation parameter, the window-provenance rule of §11.2) · `daemon/services/prompt_refresh.py` (arm / read / settle / receipt) · `daemon/tools/prompt_reload.py` (tool surface) · `daemon/services/instance_messaging.py` (REMOVE the T3 seam) · `daemon/config.py` · `tests/**` · `test/packs/**` · `.agents/tester/PACKS.md` · `docs/guidelines/**`.
+
+**No file from the EXPLICITLY-OUT list is needed.** `daemon/services/decision/**` is untouched; **EX-2 stands.** The new module is **withdrawn** — putting the append logic in the graph (which owns the channel) and the doc wrapper in `compaction.py` (which owns the format) is the smaller surface and the smaller design. The leader's confirmation request in §7 is **no longer needed.**
+
+### 11.9 What remains unverified (the graph fold-in's own honesty)
+
+1. **Repository read-after-write for the arm carrier.** The tools-node wrapper reads `read_compact_note_state` immediately after the tool writes it, inside the same node. Whether the repository returns the fresh row (or a stale cache) is **not verified**. If it is stale, the append would read an unarmed state and silently do nothing — the receipt would say so, but the feature would be inert. **This must be pinned** (a test that writes the arm and reads it back within one node, plus a live check).
+2. **The exact keying of "this reply is the compaction"** against the daemon's real turn semantics is ruled above (§11.4) but not yet exercised against a live turn.
+3. **The observed routing after the swap** (§11.5) — which of the two acceptable behaviours actually occurs, and whether the tail's last message shape makes either one pathological.
