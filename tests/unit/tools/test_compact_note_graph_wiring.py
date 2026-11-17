@@ -779,6 +779,67 @@ async def test_a9_the_tool_calls_reply_has_its_own_label(caplog):
     assert "outcome=append_failed" not in joined
 
 
+@pytest.mark.asyncio
+async def test_a3_a_wrapper_failure_logs_and_settles_honestly(caplog):
+    """A3: a swallowed exception must NOT be silent — the wrapper logs a
+    content-free WARN and settles the arm honestly."""
+    repo = FakeRepo()
+    arm_compact_note(repo, "iid-1", NOTE)
+    manager = FakeManager(repo)
+
+    async def inner(state, config=None):
+        return {
+            "messages": [
+                ToolMessage(content="armed", name="prompt_reload", tool_call_id="tc1")
+            ]
+        }
+
+    node = create_compact_note_tools_node(
+        inner, manager=manager, compactor=None, llm_config={"model": "gpt-4o"}
+    )
+    state = {"messages": [HumanMessage(content="hi")]}
+    config = {"configurable": {"thread_id": "iid-1"}}
+    with caplog.at_level(logging.WARNING):
+        with patch(
+            "daemon.services.prompt_refresh.read_compact_note_state",
+            side_effect=RuntimeError("boom"),
+        ):
+            out = await node(state, config)
+    # The turn is not broken — the tools result passes through.
+    assert isinstance(out["messages"], list) and out["messages"]
+    warnings = [rec.getMessage() for rec in caplog.records if rec.levelno >= logging.WARNING]
+    assert any("CompactNote" in w and "APPEND failed" in w for w in warnings), warnings
+    # Content-free: the note body never reaches the log.
+    assert all(NOTE not in w for w in warnings)
+
+
+@pytest.mark.asyncio
+async def test_routed_the_token_counts_are_real_not_zeros():
+    """ROUTED: the CompactionResult handed to the seam carries HONEST
+    token counts (never a zero that reads as a measurement)."""
+    repo = FakeRepo()
+    arm_compact_note(repo, "iid-1", NOTE)
+    manager = FakeManager(repo)
+    request = _request_msg()
+    state = {"messages": [HumanMessage(content="hi"), request]}
+    inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
+    graph = FakeGraph(state["messages"])
+    node = create_compact_note_agent_node(
+        inner, manager=manager, compactor=_compactor(),
+        llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
+    )
+    config = {"configurable": {"thread_id": "iid-1"}}
+    with patch(
+        "daemon.services._compaction_persist_seam.persist_compaction_result",
+        return_value=True,
+    ) as seam:
+        await node(state, config)
+    result = seam.call_args.kwargs["result"]
+    assert result.tokens_before > 0
+    assert result.tokens_after > 0
+    assert result.tokens_saved == result.tokens_before - result.tokens_after
+
+
 # ── zero decision calls + exports ───────────────────────────────────────────
 
 

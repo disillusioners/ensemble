@@ -37,7 +37,7 @@ The compact-note lane is the **working-context counterpart of the memoir dream l
 
 ## 5. Verification & probe
 
-- Run the lane's pack: `bash test/packs/prompt_reload_compact_note_unit.sh` (76 nodes) — PASS.
+- Run the lane's pack: `bash test/packs/prompt_reload_compact_note_unit.sh` (78 nodes) — PASS.
 - The census pin: `tests/unit/tools/test_prompt_reload_refusals.py` asserts `len(REFUSAL_CODES) == 14` (re-derived by grep from the source frozenset).
 - The graph-seam pins live in `tests/unit/tools/test_compact_note_graph_wiring.py` (append, swap, exchange-consumption, adjacency, refusal, audit fields, ceiling-skip, tail identity, zero decision calls).
 - The golden artifact: the plain receipt's captured value is pinned by its sha256 (`0592b4a0…`), so a silent edit of the golden REDDENS the pin. **The auto-path compacted-DOC golden (AC13.2 / L8) is NOT present in the tree** — that e2e file was never landed; the auto path is unchanged by construction, but no auto-doc golden artifact exists to prove it.

@@ -13786,13 +13786,16 @@ def create_compact_note_agent_node(
                 if mid is not None and mid not in kept_ids:
                     dropped_ids.add(mid)
 
+            # HONEST token counts (never zeros that read as measurements):
+            # the signed difference — on a tiny fixture the compaction can
+            # GROW the context, and a clamped "0 saved" would misreport it.
             tokens_before = estimate_messages_tokens(state_msgs)
             tokens_after = estimate_messages_tokens(replacement_keepables)
             result_obj = CompactionResult(
                 replacement_messages=replacement_keepables,
                 tokens_before=tokens_before,
                 tokens_after=tokens_after,
-                tokens_saved=max(0, tokens_before - tokens_after),
+                tokens_saved=tokens_before - tokens_after,
                 messages_before=len(state_msgs),
                 messages_after=len(replacement_keepables),
                 compaction_type="summary",
