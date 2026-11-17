@@ -31,6 +31,16 @@ spawn call so the tier-4 suffix registry's read→insert — inside the
 spawn transaction — cannot interleave with a concurrent same-room
 join). Tag resolution / routing / nudges are P3–P5 and are
 deliberately absent.
+
+P6 surface (the closed-state producer + the spawn-path join): the
+F-3 lifecycle notifier (``set_lifecycle_notifier``) fans every
+lifecycle transition to the SSE room channel — CONTENT-FREE, best
+effort, never failing the mutation. ``close_room`` is the ONLY
+producer of the ``closed`` state (the forward-only ``active → closed``
+move that makes the ratified P-close GC arm reachable), and
+``notify_spawn_join`` is the producer for a SPAWN-time membership
+join (the spawn path inserts the row inside the spawn transaction, so
+it never rides ``join_room``).
 """
 
 from __future__ import annotations
@@ -330,9 +340,11 @@ class RoomChatService:
             )
         # F-3 lifecycle broadcast — content-free (ids + role; the final
         # member NAME is deliberately NOT carried onto the SSE channel).
-        # NOTE (disclosed gap, A-P6-26): the SPAWN-path join inserts the
-        # membership row INSIDE the spawn transaction and does NOT ride
-        # this method — its join event does not broadcast yet.
+        # The SPAWN-path join (the membership row inserted INSIDE the
+        # spawn transaction) does NOT ride this method — it announces
+        # itself through :meth:`notify_spawn_join` (the A-P6-26 gap,
+        # closed by the D item: the post-spawn read-back point is the
+        # producer), so both producers emit the SAME payload shape.
         await self._notify_lifecycle(
             room_id=room_id,
             kind="room_joined",
@@ -343,6 +355,33 @@ class RoomChatService:
             },
         )
         return member
+
+    async def notify_spawn_join(
+        self, *, room_id: str, instance_id: str, role: str
+    ) -> None:
+        """Announce a SPAWN-path membership join (the F-3 producer gap).
+
+        The spawn path inserts the membership row INSIDE the spawn
+        transaction — it does NOT ride :meth:`join_room` — so its join
+        event had no producer (the gap A-P6-26 disclosed). This method
+        is the producer's PUBLIC seam: the spawn lane calls it AFTER
+        the spawn commit, with the SAME content-free payload shape
+        :meth:`join_room` emits (ids + role; NO names, NO content) —
+        so the two producers cannot drift.
+
+        Best-effort: a notifier failure never fails the spawn (the
+        spawn already committed — observability must not break the
+        mutation).
+        """
+        await self._notify_lifecycle(
+            room_id=room_id,
+            kind="room_joined",
+            data={
+                "room_id": room_id,
+                "instance_id": instance_id,
+                "role": role,
+            },
+        )
 
     async def leave_room(
         self, *, room_id: str, instance_id: str

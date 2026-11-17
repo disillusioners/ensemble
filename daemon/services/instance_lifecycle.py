@@ -2498,6 +2498,21 @@ class InstanceLifecycleService:
                 room_join.role,
                 room_join.tier,
             )
+            # ── the F-3 SPAWN-PATH JOIN BROADCAST (the A-P6-26
+            # disclosed gap, closed by the D item): the spawn-time
+            # membership row is inserted INSIDE the spawn transaction,
+            # so it never rode ``RoomChatService.join_room`` — its
+            # join event had NO producer and the SSE room channel
+            # never saw a spawn-time join. The post-spawn read-back
+            # point (here) IS the producer: the content-free
+            # ``room_join`` event fires AFTER the commit, so the
+            # room channel's reachable set now covers spawn-time
+            # joins as well.
+            self._broadcast_spawn_room_join(
+                room_id=spawn_result.room_id or room_join.room_id,
+                instance_id=instance_id,
+                role=room_join.role,
+            )
 
         if spawn_result.inherited_source:
             logger.info(
@@ -2552,6 +2567,49 @@ class InstanceLifecycleService:
                 )
 
         return instance_id, validated_model_override
+
+    def _broadcast_spawn_room_join(
+        self, *, room_id: str, instance_id: str, role: str
+    ) -> None:
+        """Fire the content-free ``room_join`` event for a SPAWN-time
+        membership join (the F-3 producer gap, A-P6-26).
+
+        The spawn path inserts the membership row INSIDE the spawn
+        transaction, so it never rode
+        ``RoomChatService.join_room`` — the join event had no producer
+        there and the SSE room channel never saw a spawn-time join.
+        The post-spawn read-back point calls THIS seam.
+
+        The event rides the room chat service's lifecycle notifier —
+        the same seam ``join_room`` uses — so the two producers share
+        ONE payload shape (ids + role; NO names, NO content) and
+        cannot drift.
+
+        Best-effort and FAIL-SAFE: the spawn already committed, so a
+        broadcast fault must never break it (the observability must
+        not break the mutation). A daemon without the room service
+        (no room substrate) is a no-op.
+        """
+        service = getattr(self._manager, "_room_chat_service", None)
+        if service is None:
+            return
+        try:
+            from .main_loop_bridge import MainLoopBridge
+
+            MainLoopBridge.run_async_no_wait(
+                service.notify_spawn_join(
+                    room_id=room_id,
+                    instance_id=instance_id,
+                    role=role,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — never break the spawn
+            logger.warning(
+                "spawn room join broadcast failed (room=%s instance=%s): %r",
+                room_id,
+                instance_id,
+                exc,
+            )
 
     def _clear_watchover_termination_marker(self, instance_id: str) -> None:
         """Best-effort clear of a completed watchover termination intent."""
