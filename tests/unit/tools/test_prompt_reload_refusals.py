@@ -243,11 +243,34 @@ class TestNonAriLeg:
 
     def test_not_ari_absent_from_the_refused_set(self) -> None:
         assert "prompt_reload_not_ari" not in REFUSAL_CODES
-        # RE-DERIVED by grep from the SOURCE frozenset
-        # (daemon/services/prompt_refresh.py), never copied: the
-        # compact-note lane adds FIVE refused codes (9 -> 14).
+        # PINNED at 14 by this explicit assertion — the compact-note lane
+        # adds FIVE refused codes (9 -> 14).
         assert len(REFUSAL_CODES) == 14
         assert len(FAILURE_CODES) == 1
+
+    def test_the_census_is_re_derived_from_the_source_literal(self) -> None:
+        """The census is RE-DERIVED from the SOURCE frozenset literal —
+        the literal is parsed and every entry resolved, so the prose and
+        the literal cannot drift apart (the count is not copied)."""
+        import re
+        from pathlib import Path
+
+        import daemon.services.prompt_refresh as pr
+
+        src = Path(pr.__file__).read_text(encoding="utf-8")
+        match = re.search(
+            r"REFUSAL_CODES: frozenset\[str\] = frozenset\(\s*\{(.*?)\}\s*\)",
+            src,
+            re.S,
+        )
+        assert match, "the REFUSAL_CODES literal must be present in the source"
+        names = {
+            name.strip()
+            for name in re.findall(r"\bCODE_[A-Z0-9_]+\b", match.group(1))
+        }
+        assert len(names) == 14, sorted(names)
+        resolved = {getattr(pr, name) for name in names}
+        assert resolved == set(REFUSAL_CODES)
 
     def test_layer1_category_is_privileged_and_layer2_ari_exactly(self) -> None:
         """Layers 1+2 are pinned by test_prompt_reload_pins.py; the

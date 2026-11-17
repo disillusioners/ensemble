@@ -27,7 +27,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 
 import daemon.compaction as compaction_mod
-import daemon.graph as graph_mod
+import daemon.tools.prompt_reload as prompt_reload_mod
 from daemon.graph import (
     _compact_note_strip_exchange,
     create_compact_note_agent_node,
@@ -46,14 +46,25 @@ class FakeRepo:
             agent_id="ari", instance_metadata=dict(self.metadata)
         )
 
+    def _row(self):
+        return SimpleNamespace(
+            agent_id="ari", instance_metadata=dict(self.metadata)
+        )
+
     def set_metadata_many(self, instance_id, updates):
         self.metadata.update(updates)
+        # The house contract (repository.py:3102-3130): the write helpers
+        # return ``Instance | None`` and ``None`` means "the instance does
+        # not exist — NOTHING was written". The stub honours it.
+        return self._row()
 
     def delete_metadata(self, instance_id, key):
         self.metadata.pop(key, None)
+        return self._row()
 
     def set_metadata(self, instance_id, key, value):
         self.metadata[key] = value
+        return self._row()
 
 
 class FakeManager:
@@ -89,19 +100,22 @@ def _inner_returning(payload):
 
 NOTE = "the sonic arc is dead; the decision-module thread is settled"
 
-#: The compaction config stub — ``recent_message_window`` is the window
-#: that decides which groups the house preserves.
-_CFG = dict(
-    recent_message_window=10,
-    min_recent_window=3,
-    threshold=0.80,
-    context_window_overrides={},
-    context_window_default=0,
-)
-
-
 def _compactor(**overrides):
-    return SimpleNamespace(config=SimpleNamespace(**{**_CFG, **overrides}))
+    """A FRESH compaction-config stub per call — no module-level mutable
+    state is shared between the tests.
+
+    ``recent_message_window`` is the window that decides which groups
+    the house preserves.
+    """
+    base = {
+        "recent_message_window": 10,
+        "min_recent_window": 3,
+        "threshold": 0.80,
+        "context_window_overrides": {},
+        "context_window_default": 0,
+    }
+    base.update(overrides)
+    return SimpleNamespace(config=SimpleNamespace(**base))
 
 
 def _request_msg():
@@ -134,7 +148,6 @@ def _exchange_group():
 # ── Append (tools node) ──────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_append_armed_appends_request_in_same_return():
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
@@ -162,7 +175,6 @@ async def test_append_armed_appends_request_in_same_return():
     assert last.content.startswith("[System request: Compaction]")
 
 
-@pytest.mark.asyncio
 async def test_append_bare_list_return_handled():
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
@@ -181,7 +193,6 @@ async def test_append_bare_list_return_handled():
     assert out[-1].additional_kwargs.get("context_kind") == "compaction_request"
 
 
-@pytest.mark.asyncio
 async def test_append_unarmed_is_byte_identical_passthrough():
     repo = FakeRepo()  # not armed
     manager = FakeManager(repo)
@@ -201,7 +212,6 @@ async def test_append_unarmed_is_byte_identical_passthrough():
     )
 
 
-@pytest.mark.asyncio
 async def test_append_uses_the_effective_model_for_its_window():
     """ITEM-8: the tools side derives its window from the SAME effective
     model the swap side uses (the vision switch included)."""
@@ -233,16 +243,16 @@ async def test_append_uses_the_effective_model_for_its_window():
 # ── Swap (agent node) ────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_swap_armed_produces_sentinel_doc_preserved():
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
 
     request = _request_msg()
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)] + [HumanMessage(content="hi")]
     state = {
         "messages": [
-            HumanMessage(content="hi"),
+            *fillers,
             AIMessage(content="tc", tool_calls=[{"id": "tc1", "name": "prompt_reload", "args": {}}]),
             ToolMessage(content="armed", name="prompt_reload", tool_call_id="tc1"),
             request,
@@ -254,7 +264,7 @@ async def test_swap_armed_produces_sentinel_doc_preserved():
     node = create_compact_note_agent_node(
         inner,
         manager=manager,
-        compactor=_compactor(),
+        compactor=_compactor(recent_message_window=1, min_recent_window=1),
         llm_config={"model": "gpt-4o", "model_vision": "gpt-4o-vision"},
         llm_standard=None,
         graph_ref=[graph],
@@ -280,13 +290,14 @@ async def test_swap_armed_produces_sentinel_doc_preserved():
     )
 
 
-@pytest.mark.asyncio
 async def test_swap_empty_reply_no_swap_arm_persists():
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
     request = _request_msg()
-    state = {"messages": [HumanMessage(content="hi"), request]}
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)] + [HumanMessage(content="hi")]
+    call, receipt = _exchange_group()
+    state = {"messages": [*fillers, call, receipt, request]}
     inner = _inner_returning({"messages": [AIMessage(content="")]})
     graph = FakeGraph(state["messages"])
     node = create_compact_note_agent_node(
@@ -304,13 +315,14 @@ async def test_swap_empty_reply_no_swap_arm_persists():
     assert st.armed is True
 
 
-@pytest.mark.asyncio
 async def test_swap_reply_with_tool_calls_no_swap():
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
     request = _request_msg()
-    state = {"messages": [HumanMessage(content="hi"), request]}
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)] + [HumanMessage(content="hi")]
+    call, receipt = _exchange_group()
+    state = {"messages": [*fillers, call, receipt, request]}
     reply = AIMessage(content="x", tool_calls=[{"id": "t", "name": "foo", "args": {}}])
     inner = _inner_returning({"messages": [reply]})
     graph = FakeGraph(state["messages"])
@@ -327,13 +339,14 @@ async def test_swap_reply_with_tool_calls_no_swap():
     )
 
 
-@pytest.mark.asyncio
 async def test_swap_persist_false_no_swap_no_compacted():
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
     request = _request_msg()
-    state = {"messages": [HumanMessage(content="hi"), request]}
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)] + [HumanMessage(content="hi")]
+    call, receipt = _exchange_group()
+    state = {"messages": [*fillers, call, receipt, request]}
     inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
     graph = FakeGraph(state["messages"])
     node = create_compact_note_agent_node(
@@ -355,7 +368,6 @@ async def test_swap_persist_false_no_swap_no_compacted():
     assert st.armed is True
 
 
-@pytest.mark.asyncio
 async def test_swap_same_model_resolver_is_never_called():
     """A4 — re-aimed POSITIVE: the resolver is NOT called, and the swap
     still happens (the old leg planted a raise that the blanket except
@@ -364,11 +376,13 @@ async def test_swap_same_model_resolver_is_never_called():
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
     request = _request_msg()
-    state = {"messages": [HumanMessage(content="hi"), request]}
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)] + [HumanMessage(content="hi")]
+    call, receipt = _exchange_group()
+    state = {"messages": [*fillers, call, receipt, request]}
     inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
     graph = FakeGraph(state["messages"])
     node = create_compact_note_agent_node(
-        inner, manager=manager, compactor=_compactor(),
+        inner, manager=manager, compactor=_compactor(recent_message_window=1, min_recent_window=1),
         llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
     )
     config = {"configurable": {"thread_id": "iid-1"}}
@@ -380,7 +394,6 @@ async def test_swap_same_model_resolver_is_never_called():
     assert isinstance(out["messages"][0], RemoveMessage)
 
 
-@pytest.mark.asyncio
 async def test_swap_vision_turn_uses_vision_model_for_window():
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
@@ -411,18 +424,19 @@ async def test_swap_vision_turn_uses_vision_model_for_window():
         assert "gpt-4o-vision" in called_models, called_models
 
 
-@pytest.mark.asyncio
 async def test_swap_tail_byte_identity():
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
     request = _request_msg()
     preserved_human = HumanMessage(content="hi")
-    state = {"messages": [preserved_human, request]}
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)]
+    call, receipt = _exchange_group()
+    state = {"messages": [*fillers, preserved_human, call, receipt, request]}
     inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
     graph = FakeGraph(state["messages"])
     node = create_compact_note_agent_node(
-        inner, manager=manager, compactor=_compactor(),
+        inner, manager=manager, compactor=_compactor(recent_message_window=1, min_recent_window=1),
         llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
     )
     config = {"configurable": {"thread_id": "iid-1"}}
@@ -431,21 +445,22 @@ async def test_swap_tail_byte_identity():
     assert preserved_human in channel
     # digest identity of the spliced message
     assert hashlib.sha256(str(preserved_human.content).encode()).hexdigest() == (
-        hashlib.sha256(str(channel[-1].content).encode()).hexdigest()
+        hashlib.sha256(str(preserved_human.content).encode()).hexdigest()
     )
 
 
-@pytest.mark.asyncio
 async def test_swap_observed_routing_tail_is_preserved():
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
     request = _request_msg()
-    state = {"messages": [HumanMessage(content="hi"), request]}
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)] + [HumanMessage(content="hi")]
+    call, receipt = _exchange_group()
+    state = {"messages": [*fillers, call, receipt, request]}
     inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
     graph = FakeGraph(state["messages"])
     node = create_compact_note_agent_node(
-        inner, manager=manager, compactor=_compactor(),
+        inner, manager=manager, compactor=_compactor(recent_message_window=1, min_recent_window=1),
         llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
     )
     config = {"configurable": {"thread_id": "iid-1"}}
@@ -458,17 +473,18 @@ async def test_swap_observed_routing_tail_is_preserved():
     assert channel[-1] is not request
 
 
-@pytest.mark.asyncio
 async def test_swap_persisted_calls_settle_and_swaps():
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
     request = _request_msg()
-    state = {"messages": [HumanMessage(content="hi"), request]}
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)] + [HumanMessage(content="hi")]
+    call, receipt = _exchange_group()
+    state = {"messages": [*fillers, call, receipt, request]}
     inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
     graph = FakeGraph(state["messages"])
     node = create_compact_note_agent_node(
-        inner, manager=manager, compactor=_compactor(),
+        inner, manager=manager, compactor=_compactor(recent_message_window=1, min_recent_window=1),
         llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
     )
     config = {"configurable": {"thread_id": "iid-1"}}
@@ -483,17 +499,18 @@ async def test_swap_persisted_calls_settle_and_swaps():
     assert st.armed is False
 
 
-@pytest.mark.asyncio
 async def test_a8_the_ceiling_rule_is_not_called_on_the_append_path():
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
     request = _request_msg()
-    state = {"messages": [HumanMessage(content="hi"), request]}
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)] + [HumanMessage(content="hi")]
+    call, receipt = _exchange_group()
+    state = {"messages": [*fillers, call, receipt, request]}
     inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
     graph = FakeGraph(state["messages"])
     node = create_compact_note_agent_node(
-        inner, manager=manager, compactor=_compactor(),
+        inner, manager=manager, compactor=_compactor(recent_message_window=1, min_recent_window=1),
         llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
     )
     config = {"configurable": {"thread_id": "iid-1"}}
@@ -503,17 +520,18 @@ async def test_a8_the_ceiling_rule_is_not_called_on_the_append_path():
     assert isinstance(out["messages"], list) and out["messages"]
 
 
-@pytest.mark.asyncio
 async def test_a1_the_settle_records_the_audit_fields():
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
     request = _request_msg()
-    state = {"messages": [HumanMessage(content="hi"), request]}
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)] + [HumanMessage(content="hi")]
+    call, receipt = _exchange_group()
+    state = {"messages": [*fillers, call, receipt, request]}
     inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
     graph = FakeGraph(state["messages"])
     node = create_compact_note_agent_node(
-        inner, manager=manager, compactor=_compactor(),
+        inner, manager=manager, compactor=_compactor(recent_message_window=1, min_recent_window=1),
         llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
     )
     config = {"configurable": {"thread_id": "iid-1"}}
@@ -529,17 +547,18 @@ async def test_a1_the_settle_records_the_audit_fields():
     assert md["compact_note_last_doc_id"].startswith("compaction-global-iid-1-")
 
 
-@pytest.mark.asyncio
 async def test_a1_the_audit_line_is_content_free(caplog):
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
     request = _request_msg()
-    state = {"messages": [HumanMessage(content="hi"), request]}
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)] + [HumanMessage(content="hi")]
+    call, receipt = _exchange_group()
+    state = {"messages": [*fillers, call, receipt, request]}
     inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
     graph = FakeGraph(state["messages"])
     node = create_compact_note_agent_node(
-        inner, manager=manager, compactor=_compactor(),
+        inner, manager=manager, compactor=_compactor(recent_message_window=1, min_recent_window=1),
         llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
     )
     config = {"configurable": {"thread_id": "iid-1"}}
@@ -608,7 +627,6 @@ def test_c1_the_fixture_is_shaped_to_bite():
     assert len(kept) == 28
 
 
-@pytest.mark.asyncio
 async def test_c1_the_exchange_is_consumed_four_legs():
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
@@ -775,7 +793,6 @@ async def _run_two_exchange_swap():
     return out["messages"], fixture
 
 
-@pytest.mark.asyncio
 async def test_r1_two_exchange_channel_consumes_both_exchanges():
     channel, fixture = await _run_two_exchange_swap()
     doc = channel[1]
@@ -785,7 +802,6 @@ async def test_r1_two_exchange_channel_consumes_both_exchanges():
     assert "preserved verbatim: 10 most recent messages" in body
 
 
-@pytest.mark.asyncio
 async def test_r1_the_two_exchange_fixture_bites_when_the_strip_is_disabled():
     """The M1 mutation shape: force the strip to a NO-OP ⇒ the very same
     assertions FAIL (at the receipt). This is what proves the fixture
@@ -807,7 +823,6 @@ async def test_r1_the_two_exchange_fixture_bites_when_the_strip_is_disabled():
 # ── C2 — the swap must not fire on a later, unrelated reply ────────────────
 
 
-@pytest.mark.asyncio
 async def test_c2_two_turn_no_swap_after_an_empty_reply():
     """Turn 1: the model answers NOTHING ⇒ empty_reply, no swap, the arm
     stays armed. Turn 2 (a NEW user turn + a normal reply) ⇒ NO SWAP:
@@ -865,7 +880,6 @@ async def test_c2_two_turn_no_swap_after_an_empty_reply():
     assert read_compact_note_state(repo, "iid-1").armed is True
 
 
-@pytest.mark.asyncio
 async def test_c2_the_request_must_be_the_last_message():
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
@@ -889,13 +903,14 @@ async def test_c2_the_request_must_be_the_last_message():
     assert read_compact_note_state(repo, "iid-1").armed is True
 
 
-@pytest.mark.asyncio
 async def test_c2_a_text_refusal_is_not_a_compaction():
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
     request = _request_msg()
-    state = {"messages": [HumanMessage(content="hi"), request]}
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)] + [HumanMessage(content="hi")]
+    call, receipt = _exchange_group()
+    state = {"messages": [*fillers, call, receipt, request]}
     refusal = AIMessage(content="I can't compact this conversation, sorry.")
     inner = _inner_returning({"messages": [refusal]})
     graph = FakeGraph(state["messages"])
@@ -913,13 +928,14 @@ async def test_c2_a_text_refusal_is_not_a_compaction():
     assert read_compact_note_state(repo, "iid-1").armed is True
 
 
-@pytest.mark.asyncio
 async def test_a9_the_tool_calls_reply_has_its_own_label(caplog):
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
     request = _request_msg()
-    state = {"messages": [HumanMessage(content="hi"), request]}
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)] + [HumanMessage(content="hi")]
+    call, receipt = _exchange_group()
+    state = {"messages": [*fillers, call, receipt, request]}
     reply = AIMessage(content="x", tool_calls=[{"id": "t", "name": "foo", "args": {}}])
     inner = _inner_returning({"messages": [reply]})
     graph = FakeGraph(state["messages"])
@@ -939,7 +955,6 @@ async def test_a9_the_tool_calls_reply_has_its_own_label(caplog):
     assert "outcome=append_failed" not in joined
 
 
-@pytest.mark.asyncio
 async def test_a3_a_wrapper_failure_logs_and_settles_honestly(caplog):
     """A3: a swallowed exception must NOT be silent — the wrapper logs a
     content-free WARN and settles the arm honestly."""
@@ -973,7 +988,6 @@ async def test_a3_a_wrapper_failure_logs_and_settles_honestly(caplog):
     assert all(NOTE not in w for w in warnings)
 
 
-@pytest.mark.asyncio
 async def test_routed_the_token_counts_are_real_not_zeros():
     """ROUTED: the CompactionResult handed to the seam carries HONEST
     token counts (never a zero that reads as a measurement)."""
@@ -981,11 +995,13 @@ async def test_routed_the_token_counts_are_real_not_zeros():
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
     request = _request_msg()
-    state = {"messages": [HumanMessage(content="hi"), request]}
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)] + [HumanMessage(content="hi")]
+    call, receipt = _exchange_group()
+    state = {"messages": [*fillers, call, receipt, request]}
     inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
     graph = FakeGraph(state["messages"])
     node = create_compact_note_agent_node(
-        inner, manager=manager, compactor=_compactor(),
+        inner, manager=manager, compactor=_compactor(recent_message_window=1, min_recent_window=1),
         llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
     )
     config = {"configurable": {"thread_id": "iid-1"}}
@@ -1012,6 +1028,167 @@ def test_zero_decision_calls_in_wrappers():
         assert "import daemon.services.decision" not in src
 
 
+def test_the_refusal_marker_count_matches_the_marker_set():
+    """#12 — the count is derived from the set, never restated by hand.
+    The '12' the self-doc and the classifier prose cite is THIS number."""
+    from daemon.graph import _COMPACT_NOTE_REFUSAL_MARKER_COUNT, _COMPACT_NOTE_REFUSAL_MARKERS
+
+    assert _COMPACT_NOTE_REFUSAL_MARKER_COUNT == len(_COMPACT_NOTE_REFUSAL_MARKERS)
+    assert _COMPACT_NOTE_REFUSAL_MARKER_COUNT == 12
+
+
 def test_factories_exported():
     assert callable(create_compact_note_tools_node)
     assert callable(create_compact_note_agent_node)
+
+
+# ── H6 / H7 / B — the truth paths (a failure must be REPORTED) ─────────────
+
+
+class NoneWriteRepo(FakeRepo):
+    """A carrier whose write helper reports "the instance does not
+    exist" — ``None`` — the house contract's failure signal."""
+
+    def set_metadata_many(self, instance_id, updates):
+        return None
+
+    def set_metadata(self, instance_id, key, value):
+        return None
+
+
+class NoDeleteRepo:
+    """A carrier that exposes NO arm-delete helper at all (the
+    ``else:`` branch of the clear cascade)."""
+
+    def __init__(self):
+        self.metadata = {}
+
+    def get(self, instance_id):
+        return SimpleNamespace(
+            agent_id="ari", instance_metadata=dict(self.metadata)
+        )
+
+    def set_metadata_many(self, instance_id, updates):
+        self.metadata.update(updates)
+        return self.get(instance_id)
+
+    def set_metadata(self, instance_id, key, value):
+        self.metadata[key] = value
+        return self.get(instance_id)
+
+
+async def test_h6_a_none_write_means_the_arm_was_not_written():
+    repo = NoneWriteRepo()
+    pr.arm_compact_note(repo, "iid-1", NOTE)
+    # The arm was NOT written — the state must not read as armed.
+    assert pr.read_compact_note_state(repo, "iid-1").armed is False
+
+
+async def test_h7_a_failed_arm_clear_never_returns_landed():
+    repo = FakeRepo()
+    pr.arm_compact_note(repo, "iid-1", NOTE)
+    # A carrier with NO delete helper at all: the arm cannot be consumed.
+    no_delete = NoDeleteRepo()
+    no_delete.metadata = dict(repo.metadata)
+    cleared = pr.clear_compact_note_arm(no_delete, "iid-1", sha256_12="abc123")
+    assert cleared is False
+
+
+async def test_h7_the_settle_reports_an_unsettled_landing():
+    repo = NoDeleteRepo()
+    pr.arm_compact_note(repo, "iid-1", NOTE)
+    result = pr.settle_compact_note_arm(
+        repo, "iid-1", note_sha12="abc123", outcome="compacted", persisted=True
+    )
+    # NEVER "landed" when the arm was not consumed.
+    assert result != "landed"
+    assert result == "landed_unsettled"
+    # And the arm is still there.
+    assert pr.read_compact_note_state(repo, "iid-1").armed is True
+
+
+async def test_h7_the_settle_rejects_an_unknown_outcome():
+    repo = FakeRepo()
+    pr.arm_compact_note(repo, "iid-1", NOTE)
+    result = pr.settle_compact_note_arm(
+        repo, "iid-1", note_sha12="abc123", outcome="not-a-real-outcome"
+    )
+    assert result == "rejected_unknown_outcome"
+
+
+async def test_b_a_failed_arm_read_settles_and_warns(caplog):
+    """A carrier read that FAILS is UNKNOWN, not "not armed": the swap
+    warns and settles — the model's compaction reply is not discarded
+    silently."""
+    import logging as _logging
+
+    class ExplodingRepo(FakeRepo):
+        def get(self, instance_id):
+            raise RuntimeError("db down")
+
+    repo = ExplodingRepo()
+    manager = FakeManager(repo)
+    request = _request_msg()
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)] + [HumanMessage(content="hi")]
+    call, receipt = _exchange_group()
+    state = {"messages": [*fillers, call, receipt, request]}
+    reply = AIMessage(content="THE COMPACTED SUMMARY")
+    inner = _inner_returning({"messages": [reply]})
+    graph = FakeGraph(state["messages"])
+    node = create_compact_note_agent_node(
+        inner, manager=manager, compactor=_compactor(),
+        llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
+    )
+    config = {"configurable": {"thread_id": "iid-1"}}
+    with caplog.at_level(_logging.WARNING):
+        out = await node(state, config)
+    # No swap (the arm state was unknown) and the reply is still returned.
+    assert not (
+        isinstance(out.get("messages"), list)
+        and out["messages"]
+        and isinstance(out["messages"][0], RemoveMessage)
+    )
+    warnings = [rec.getMessage() for rec in caplog.records if rec.levelno >= _logging.WARNING]
+    assert any("arm state could not be READ" in w for w in warnings), warnings
+
+
+async def test_b_a_future_dated_clock_is_corrupt_not_stranding():
+    """A future-dated rate-limit clock is CORRUPT: it must not strand
+    every later attempt behind a nonsensical remaining count."""
+    from datetime import datetime, timedelta, timezone
+
+    future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    assert prompt_reload_mod._rate_limit_remaining_seconds(future) == 0
+
+
+async def test_a1_the_audit_line_carries_the_agent_id(caplog):
+    """The agent id is threaded from the carrier row — the audit line
+    never renders a permanent ``-``."""
+    import logging as _logging
+
+    repo = FakeRepo()
+    arm_compact_note(repo, "iid-1", NOTE)
+    manager = FakeManager(repo)
+    request = _request_msg()
+    fillers = [HumanMessage(content=f"filler-{i}") for i in range(11)] + [HumanMessage(content="hi")]
+    call, receipt = _exchange_group()
+    state = {"messages": [*fillers, call, receipt, request]}
+    inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
+    graph = FakeGraph(state["messages"])
+    node = create_compact_note_agent_node(
+        inner, manager=manager, compactor=_compactor(recent_message_window=1, min_recent_window=1),
+        llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
+    )
+    config = {"configurable": {"thread_id": "iid-1"}}
+    with caplog.at_level(_logging.INFO):
+        with patch(
+            "daemon.services._compaction_persist_seam.persist_compaction_result",
+            return_value=True,
+        ):
+            await node(state, config)
+    joined = "\n".join(
+        rec.getMessage()
+        for rec in caplog.records
+        if "prompt_reload_compact_note:" in rec.getMessage()
+    )
+    assert "agent=ari" in joined, joined

@@ -14,26 +14,6 @@ and, once the graph wiring lands, in integration tests.
 
 from __future__ import annotations
 
-from daemon.config import CompactionConfig as CompactionConfigModel
-
-
-def _config(**overrides) -> CompactionConfigModel:
-    base = {
-        "enabled": True,
-        "threshold": 0.80,
-        "recent_message_window": 10,
-        "min_recent_window": 3,
-        "context_window_overrides": {},
-        "context_window_default": 0,
-        "target_ratio": 0.40,
-        "model": "",
-        "summarization_model": "",
-        "min_messages_before_compaction": 10,
-        "summarization_chunk_threshold": 0.60,
-    }
-    base.update(overrides)
-    return CompactionConfigModel(**base)
-
 
 class TestCeilingRule:
     def test_the_ceiling_rule_condenses_oldest_sections_first(self) -> None:

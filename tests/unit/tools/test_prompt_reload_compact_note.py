@@ -38,13 +38,13 @@ from unittest.mock import patch
 
 import pytest
 
-import daemon.manager  # noqa: F401  (the patch target must be importable)
 import daemon.services.prompt_refresh as pr
 from daemon.services.prompt_refresh import (
     ARMED_PENDING_APPEND,
     ARMED_STILL_ARMED_NO_DOC,
     CODE_COMPACT_DISABLED,
     CODE_COMPACT_RATE_LIMITED,
+    CODE_INTERNAL_ERROR,
     CODE_NOTE_OVER_CAP,
     CODE_NOTE_REQUIRES_COMPACT,
     CODE_NOTE_REQUIRED,
@@ -677,6 +677,14 @@ class TestL12ArmedReceipt:
         )
         assert pr.DEFERRED_STATE_TEXT == {
             pr.DEFERRED_STATE_NO_DOC: ARMED_STILL_ARMED_NO_DOC,
+            pr.DEFERRED_STATE_EMPTY_REPLY: pr.ARMED_DEFERRED_EMPTY_REPLY,
+            pr.DEFERRED_STATE_TOOL_CALLS_REPLY: pr.ARMED_DEFERRED_TOOL_CALLS_REPLY,
+            pr.DEFERRED_STATE_REFUSED_REPLY: pr.ARMED_DEFERRED_REFUSED_REPLY,
+            pr.DEFERRED_STATE_APPEND_FAILED: pr.ARMED_DEFERRED_APPEND_FAILED,
+            pr.DEFERRED_STATE_READ_FAILED: pr.ARMED_DEFERRED_READ_FAILED,
+            pr.DEFERRED_STATE_CHANNEL_REBUILD_FAILED: (
+                pr.ARMED_DEFERRED_CHANNEL_REBUILD_FAILED
+            ),
         }
         assert not hasattr(pr, "ARMED_DEFERRED_ANTI_REFIRE")
         assert not hasattr(pr, "ARMED_DEFERRED_BELOW_FLOOR")
@@ -771,3 +779,35 @@ class TestReadAfterWrite:
         assert state.sha256_12 == pr.compact_note_sha256_12(note)
         # The write's sha prefix is the same one the receipt carries.
         assert len(state.sha256_12) == 12
+
+
+# ── H6 — the arm write's TRUTH (a None write means NOTHING was written) ────
+
+
+class NoneWriteRepo(StubInstanceRepo):
+    """A carrier whose write helper reports "the instance does not
+    exist" — ``None`` — the house contract's failure signal."""
+
+    def set_metadata(self, instance_id: str, key: str, value):
+        self.set_metadata_calls.append((instance_id, key, value))
+        return None
+
+
+class TestH6ArmWriteTruth:
+    async def test_a_none_write_never_renders_the_armed_receipt(self) -> None:
+        """The write helpers return ``Instance | None``; ``None`` means
+        NOTHING was written. The tool must take the FAILED branch — never
+        render the ARMED receipt over an empty carrier."""
+        manager = StubManager(repo=NoneWriteRepo())
+        out = await _call(manager, compact=True, compact_note="a note")
+        assert CODE_INTERNAL_ERROR in out
+        assert "outcome=armed" not in out
+        assert "ARMED" not in out
+
+    async def test_a_none_write_leaves_the_carrier_unarmed(self) -> None:
+        repo = NoneWriteRepo()
+        manager = StubManager(repo=repo)
+        await _call(manager, compact=True, compact_note="a note")
+        state = pr.read_compact_note_state(repo, "iid-1")
+        assert state.armed is False
+        assert state.note == ""
