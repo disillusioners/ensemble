@@ -53,6 +53,7 @@ env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_DB -u POSTGRES_USER \
     -u ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE \
     timeout 210s .venv/bin/python -m pytest \
     tests/unit/tools/test_prompt_reload_compact_note.py \
+    tests/unit/tools/test_compact_note_graph_wiring.py \
     tests/unit/test_compaction_compact_note.py \
     -q --tb=short -p no:cacheprovider
 RC=$?

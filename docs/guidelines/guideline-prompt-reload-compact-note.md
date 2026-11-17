@@ -33,9 +33,9 @@ The compact-note lane is the **working-context counterpart of the memoir dream l
 
 ## 5. Verification & probe
 
-- Run the lane's pack: `bash test/packs/prompt_reload_compact_note_unit.sh` (52 nodes) — PASS.
+- Run the lane's pack: `bash test/packs/prompt_reload_compact_note_unit.sh` (66 nodes) — PASS.
 - The census pin: `tests/unit/tools/test_prompt_reload_refusals.py` asserts `len(REFUSAL_CODES) == 14` (re-derived by grep from the source frozenset).
-- The two VERIFY-ONLY pins (`test_prompt_reload_tool.py`, `test_prompt_reload_pins.py`) pass unedited.
+- The two VERIFY-ONLY pins (`test_prompt_reload_tool.py`, `test_prompt_reload_pins.py`) are part of the verification surface; run them to confirm (not re-run in this round).
 - The ownership-chain validator: 82 checks / 0 FAIL / exit 0.
 
 ## 6. Evidence discipline
