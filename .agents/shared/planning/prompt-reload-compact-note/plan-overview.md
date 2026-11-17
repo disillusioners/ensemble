@@ -1106,7 +1106,7 @@ The architect owns these. The Emperor's direction (verbatim, authoritative): *"F
 
 ## 17. Currency pass (Rev 10, 2026-11-17) — the append method
 
-**The build landed at HEAD `faf2edd9f` against the architect's v1.5 (`206c4fe0c`, the APPEND-method pivot addendum).** The plan text above was re-anchored to the shipped truth. The **seam-era** items are marked **⛔ SUPERSEDED by Rev 10** inline (see the SUPERSEDED list below); the **rewrote** items (the shipped truth) are recorded here.
+**The build landed at HEAD `fee1357df` against the architect's v1.5 (`206c4fe0c`, the APPEND-method pivot addendum).** The plan text above was re-anchored to the shipped truth. The **seam-era** items are marked **⛔ SUPERSEDED by Rev 10** inline (see the SUPERSEDED list below); the **rewrote** items (the shipped truth) are recorded here.
 
 ### 17.1 The shipped truth (the append method) — REWROTE
 
