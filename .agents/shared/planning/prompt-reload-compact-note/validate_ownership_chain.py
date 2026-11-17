@@ -41,7 +41,6 @@ IN_SURFACE = (
     "daemon/graph.py",
     "daemon/config.py",
     "daemon/constants.py",
-    "daemon/_compact_note_prefilter.py",
     "daemon/repositories/instance/",
     "tests/",
     "test/packs/",
