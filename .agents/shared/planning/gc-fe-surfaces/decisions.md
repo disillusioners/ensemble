@@ -67,6 +67,8 @@ GET /api/rooms[?instance_id=<scope-anchor>]
 
 **D1.7 — THE COUPLING (leader-significant; carried to the Open Questions).** The anchor-less mode of the new list is safe **today only because** of the operator-lane breadth above. **If the leader rules the F-3 SSE pre-branch finding to option (c) — mirror the read predicate — and the same reasoning is applied to tighten the messages route, then the anchor-less list becomes a NEW title leak** and must be tightened in the same change, or the FE must be required to pass an anchor. Therefore: **the new list route is implemented so that switching its default from "operator lane" to "anchor-only" is a ONE-PARAMETER change, not a redesign**, and the F-3 disposition is recommended to be settled **before** the route is cut.
 
+> → RESOLVED by leader ruling 2026-11-17 (Q2): **PROCEED** with `GET /api/rooms` exactly as planned (every row predicate-checked fail-closed via the shared `_require_room_access`); the `_ALLOW_ANCHORLESS_GLOBAL_LIST` knob ships **IN THE SAME COMMIT** as the route; the messages-route scope tightening is routed as a **disclosed pre-existing follow-up** (owner: leader-tracked queue) and this lane does **NOT** touch the messages route's default scope. See **LEADER RULINGS (2026-11-17, post-planning)**.
+
 **D1.8 — ERROR VOCABULARY (closed; imitates `rooms.py` exactly).**
 
 | Code | `error` | Trigger |
@@ -144,6 +146,8 @@ The tree-scope vs JOINED delta is a **named delta** (see D5) and the in-repo rec
 
 **D2.1 — MECHANISM: BOUNDED POLLING.** Rejected: SSE for message freshness. Chosen: the house polling pattern — **fetch-on-open + bounded interval while a room surface is OPEN + manual retry + tab-hide stop**. The **room lifecycle** SSE channel is **explicitly DEFERRED**, not rejected forever (D2.6).
 
+> → RESOLVED by leader ruling 2026-11-17 (Q4): the shipped `instance` mode stays **TIMER-FREE** — constraint 4 (stability, byte-behaviour-identical shipped mode) outranks D2.1's breadth; polling is enabled for the **new** `global` / `joined` modes only. The formalization is **left marked for architect adjudication at gate 1**, with the leader's leaning recorded. See **LEADER RULINGS (2026-11-17, post-planning)**.
+
 **D2.2 — CADENCE: 10 s.** Align with the metrics **overview** tab, the fastest-cadence tab in the house family: `POLL_INTERVAL_MS = 10_000` (`frontend/src/app/pages/metrics/overview/overview-tab.component.ts:157`; the charts tab is 15 s — `charts-tab.component.ts:155`; the house pin asserts both — `frontend/src/app/pages/metrics/metrics.bindings.pins.spec.ts:65-66`). One timer per **open surface**, driving **both** lanes (the rooms list and the selected room's conversation) on the same tick. A single shared 10 s tick, not two.
 
 **D2.3 — WHERE THE TIMER LIVES: the SERVICE lane, never the chat page.** The timer lives in the **room service / dialog lane** and is **started when a room surface OPENS and stopped when it CLOSES**. It **must not** live in `chat.component.ts` — the chat page's own spec **BANS** timers: `expect(PROD_CHAT_SOURCE).not.toMatch(/setTimeout|setInterval/)` (`frontend/src/app/pages/chat/chat-send-error.spec.ts:82-88`). The polling surface is therefore the **dialog**, which lives in its own component and its own service.
@@ -203,6 +207,8 @@ The placement ruling (service/dialog lane, never the chat page) is a **hard** co
 
 **"HEADER MENU" — how the words are honored:** the commission's phrase is realized as **the room list pane inside the browser dialog**, opened from the header. A `mat-menu` dropdown that then opens a dialog would be a **double-click** to reach the same content, and the commission's own modifier ("+ a DETAIL view of a selected room (its messages)") makes a dropdown the wrong container. *(Interpretation — flagged for the leader only if the Emperor's intent was a literal dropdown; see Open Questions.)*
 
+> → RESOLVED by leader ruling 2026-11-17 (Q3): **SETTLED-CONFIRMED** — a header control that opens the **global dialog** directly; the "menu" is realized as the browser's room-list pane. No further adjudication required. See **LEADER RULINGS (2026-11-17, post-planning)**.
+
 **D3.2 — THE GLOBAL BROWSER: a GENERALIZED `RoomDialogComponent`, not a sibling.** The shipped `RoomDialogComponent` (`frontend/src/app/components/room-dialog/`) is **generalized in place** into a **three-mode** dialog:
 
 | Mode | List source | Backed by |
@@ -231,6 +237,8 @@ The placement ruling (service/dialog lane, never the chat page) is a **hard** co
 **Ruling:** place the row button **inside the existing row-action cluster** (the pin/pause/terminate cluster), **without adding any WATCHOVER row control** — creating a WATCHOVER button on the instances list would be a **scope expansion** the commission did not ask for, and the commission's (b) is about the **chatroom** button. The row button MUST call `$event.stopPropagation()` so the nested button does not trigger the row's `routerLink` navigation — the **existing** precedent in that exact row is `onTogglePin(instance.instance_id, instance.pinned, $event)` / `onPauseInstance(..., $event)` / `onTerminateInstance(..., $event)` (`instance-list.html:221`, `:233`, `:252`), and the house comment states the reason: *"the row is an `<a [routerLink]>`, so nested buttons need `$event.stopPropagation()`"* (`instance-list.html:213-215`).
 `MatDialog` is **already injected** in the row's component (`frontend/src/app/components/instance-list/instance-list.component.ts:78`) — the row button needs **no** new DI. (The service-broker idiom `LiveViewActionsService` — `frontend/src/app/services/live-view-actions.service.ts:51-98` — is available for callers that should not inject `MatDialog` directly; the row's component already injects it, so **direct injection** is the house-consistent choice here.)
 **Carried to the Open Questions** — the placement is a leader confirmation, not a silent decision.
+
+> → RESOLVED by leader ruling 2026-11-17 (Q1): **RESOLVED-ACCEPTED** as recommended — the button goes in the **existing** row action cluster (pin/pause/terminate); **no** WATCHOVER control exists on the instances-list row (WATCHOVER is a chat-page header control), so the Emperor's "(next to the WATCHOVER button)" phrasing has **no row anchor**; the action cluster IS the row's control group. **FINAL-REPORT DISCLOSURE DUTY:** the report to the Emperor carries this disclosure **and** the one-line move if overruled. See **LEADER RULINGS (2026-11-17, post-planning)**.
 
 **D3.7 — CONDITIONAL-RENDER PRECEDENTS.** The row's conditional-render idioms are established: `@if (!instance.parent_id)` (`instance-list.html:217`, `:249`) and the status-gated pause/resume branch (`:230-246`). The new button follows the **same** idiom (a scoped `@if` on the membership signal).
 
@@ -381,8 +389,117 @@ The drift-guard ruling is elevated to a hard gate because of a **measured** fail
 
 *(collected here, deliberately — one section, per house practice)*
 
+> → **ALL THREE questions below are dispositioned by the leader ruling of 2026-11-17** — see **LEADER RULINGS (2026-11-17, post-planning)**. **Q1 → RESOLVED-ACCEPTED** · **Q2 → RESOLVED-PROCEED** · **Q3 → SETTLED-CONFIRMED**. The question texts below are **preserved verbatim** as the record of what was asked; the rulings are folded as a dated section, not as edits to these bodies.
+
 **Q1 — D3.6 / D5 #6 — the row button's anchor.** The commission places the row button "(next to the WATCHOVER button)", but **the instances list has no WATCHOVER control** (WATCHOVER exists only on the chat-page header). **Recommendation:** place the chatroom row button in the **existing row-action cluster** (pin / pause / terminate) and **do not** create a WATCHOVER row control. **If the Emperor's intent was a different spatial position** (e.g. immediately left of the pin button, or a distinct visual cluster), the answer is a one-line template move — **no architectural consequence either way**. *Decision needed before the FE lane starts; nothing else blocks on it.*
 
 **Q2 — D1.7 — the F-3 coupling (LEADER-SIGNIFICANT).** The anchor-less mode of the new nest-wide list is safe **only** because the shipped messages route defaults its scope to the room OWNER, letting an `instances:read` caller read any room's messages by id (`.agents/tester/RESULTS/2026-11-16-group-chat-p6-tester-gate.md:63`). The F-3 SSE pre-branch finding (`:72`) is **still open** for a disposition (`:83`). **Recommendation: settle F-3 BEFORE the new route is cut**, and land any tightening of the messages route **in the same change** as the list route. If F-3 is ruled to option (c) (mirror the read predicate), the list route's default **must** flip to anchor-only in that same commit — which is why D1.7 requires the default to be a **one-parameter** switch. *If the leader prefers to decouple, the fallback is: the route ships anchor-ONLY from day one (the FE then supplies a scope anchor), at the cost of the nest-wide browser needing a per-instance anchor — i.e. commission item (a) would need re-specification.* **This is the one question that can change the commission's outcome; it is raised rather than assumed.**
 
 **Q3 — D3.1 — the "HEADER MENU" reading.** The commission says the header "grows a HEADER MENU that opens the list of chatrooms + a DETAIL view of a selected room (its messages)". **Recommendation:** a header control that opens the **global browser dialog** directly, with the room list as the dialog's left pane and the conversation as its right pane — a Material menu cannot carry a message pane, and the commission's own detail requirement makes a dropdown the wrong container. **If the Emperor meant a literal dropdown menu** whose items open a second surface, the deviation is one component and one interaction step. *Raised for confirmation only; the recommendation is strong.*
+
+
+---
+
+## LEADER RULINGS (2026-11-17, post-planning)
+
+Folded into the ledger on **2026-11-17**. **Rulings only — no decision body above was rewritten.** Each entry
+is labeled with the question id it answers; the one-line pointer at each affected site points here. The
+question texts in the Open Questions section above are **preserved verbatim** as the record of what was
+asked.
+
+### Q1 — WATCHOVER placement → **RESOLVED-ACCEPTED** (as recommended)
+
+> **Ruling (leader, 2026-11-17):** ACCEPTED as recommended: button goes in the EXISTING row action cluster
+> (pin/pause/terminate); no WATCHOVER control exists on the instances-list row (WATCHOVER is a chat-page header
+> control).
+
+**Recorded in the ledger:**
+- The Emperor's phrasing **"(next to the WATCHOVER button)" has no row anchor** — the instances-list row
+  carries **no** WATCHOVER control (WATCHOVER is a chat-page header control only; D3.6's zero-match grep
+  stands).
+- The **action cluster IS the row's control group** — the button is placed there, carrying the
+  `$event.stopPropagation()` discipline the existing pin/pause/terminate buttons already use
+  (`instance-list.html:216-256`).
+- **FINAL-REPORT DISCLOSURE DUTY:** the report to the Emperor must carry (i) **this disclosure** — the
+  commission's spatial phrasing had no anchor on the instances surface, and the action cluster was used
+  instead — **and** (ii) **the one-line move if overruled** (the placement is a single template-line move; no
+  architectural consequence either way).
+
+**Affects:** D3.6 (ruling text stands), D5 #6 (the named delta is now **resolved**), plan-overview R3, Open
+Questions Q1.
+
+### Q2 — F-3 coupling → **RESOLVED-PROCEED**
+
+> **Ruling (leader, 2026-11-17):** PROCEED with GET /api/rooms exactly as planned: every row
+> predicate-checked fail-closed via the shared _require_room_access; the _ALLOW_ANCHORLESS_GLOBAL_LIST knob
+> ships IN THE SAME COMMIT as the route. The F-3 messages-route scope tightening itself is ROUTED as a
+> disclosed PRE-EXISTING follow-up (owner: leader-tracked queue) — this lane does NOT touch the messages
+> route default scope.
+
+**Rationale to record:** the **video-team pilot is live on this release** exercising room machinery
+(constraint 4); a **mid-flight authz tightening on the messages route is exactly the regression class the
+commission forbids**. The tightening touches the read path a live pilot depends on; the **new** route's shape
+does not — it ships fail-closed, every row predicate-checked, with the flip knob **in the same commit** so the
+tightening stays **one parameter** whenever the owner picks it up.
+
+**Architect remit at gate 1:** the architect re-examines the **security posture of the NEW route's shape** —
+it may tighten the **new** route, **not** the pre-existing messages route.
+
+**Affects:** D1.4 / D1.6 / D1.7 (the coupling is accepted; the knob is same-commit), D1.11 (the disclosure
+paragraph stands; the F-3 disposition is now **routed**, not open), plan-overview R2, Open Questions Q2.
+
+### Q3 — header menu → **SETTLED-CONFIRMED**
+
+> **Ruling (leader, 2026-11-17):** CONFIRMED: header control opening the global dialog.
+
+**Recorded in the ledger:** a header control that opens the **global browser dialog** directly; the "menu" is
+realized as the browser's **room-list pane** (D3.1's realization stands unchanged). No further adjudication
+required.
+
+**Affects:** D3.1 (settled), D5 #1, Open Questions Q3.
+
+### Q4 — instance modal stays timer-free → **ARCHITECT GATE-1 ITEM** (leader leaning: YES)
+
+> **Ruling (leader, 2026-11-17):** Leader leaning YES: constraint 4 (stability, byte-behavior-identical
+> shipped mode) outranks D2.1 breadth. Leave marked for architect formalization at gate 1, with the leaning
+> recorded.
+
+**Recorded in the ledger:** the **leaning is YES** — the shipped `instance` mode stays **timer-free**;
+constraint 4 (stability; byte-behaviour-identical shipped mode) outranks D2.1's breadth, so the polling lane
+is enabled for the **new** `global` / `joined` modes only. The formalization is **left open for the architect
+at gate 1** — the leader's ruling is a **leaning, not a formal adjudication** — and the leaning is recorded
+here so the architect adjudicates against a known position rather than an open question.
+
+**Affects:** D2.1 / D2.3 (placement unchanged: the timer never lives in the chat page, and the `instance` mode
+adds none), plan-overview C-2, Open Questions Q4.
+
+### Q5 — D1.5 descendant closure → **ARCHITECT GATE-1 ITEM**
+
+> **Ruling (leader, 2026-11-17):** Marked for architect adjudication at gate 1; accept the re-formulation if
+> technically sound.
+
+**Recorded in the ledger:** the C-1 re-formulation stands as the item under adjudication — D1.5's literal
+"caller's ancestor set" inverts the shipped predicate, and the implementable one-shot pre-compute is the
+caller's **DESCENDANT closure** (`InstanceRepository.get_tree_ids_permanent`, depth cap 256), with the
+per-room test `owner == caller or owner ∈ descendant_ids`. **Substance preserved:** one decision rule,
+implemented once, two application sites, O(1) per room. The leader's ruling is **conditional on technical
+soundness**, so the architect at gate 1 either accepts the re-formulation or states the defect.
+
+**Affects:** D1.5 (the pre-compute direction is the open item), plan-overview R9 / C-1, Open Questions Q5.
+
+### RELEASE-SLOT NOTE (2026-11-17)
+
+**`origin/latest` drift past this lane's base is EXPECTED** — parallel lanes merge continuously, so the base
+this lane was opened at (`0181dadbf`) will be behind `origin/latest` by cut time. **Drift-sync at merge is the
+giter's standard business**; the merge/reconcile step is not this lane's work product and is not re-litigated
+here.
+
+**This lane NEVER RACES the release slot.** The cut is sequenced by the leader at cut time against the other
+in-flight staging lanes (prompt_reload compact-note; the Emperor's own ceremony queue). The lane's disposition
+stays **staged, NOT promoted** (commission constraint 5 + the commission metadata). The lane's only obligation
+at merge time is to be **rebaseable cleanly** — it does not hold the slot, does not fast-forward the local
+`latest` ref (that is the `ari-stop-int` lane's, per `group-chat-release/release-plan.md:865`), and does not
+treat expected drift as an anomaly.
+
+**Affects:** plan-overview R6 (release-slot sequencing) — the drift **expectation** is recorded; the ownership
+boundary is unchanged.
