@@ -12,6 +12,14 @@ surfaces: the H1 extraction (the shared gate helper), the H2 extraction
 delivery lane (the at_boot guard + the mint-failure admission gate)
 each get a leg whose RED proves the pin has TEETH.
 
+The H2 extraction carries THREE legs of its own (GC-M07/GC-M08/GC-M09 —
+the size criterion, the joined-room ownership, the shared-primitives
+ownership): those three split pins had no mutation leg at all, so a
+split that silently broke would have gone unnoticed. Each of the three
+plants a break that leaves the module IMPORTABLE (the name stays
+defined at runtime — ``if True:`` — so the leg isolates its OWN pin
+instead of tripping the import-surface pin as collateral).
+
 Restore discipline (NO ``git checkout --``):
 
   * each mutation is restored from an IN-MEMORY BYTE COPY of the file
@@ -223,6 +231,52 @@ def build_joined_room_context_message(*args, **kwargs):  # MUTATION: a fork
 """,
         DELIVERY_PACK,
         "test_mint_failure_route_time_defers_and_keeps_cursor",
+    ),
+    # ── GC-M07 (H2 — the SIZE criterion): the extraction's own
+    #    criterion. The file sits at 2998 lines (two under the ceiling);
+    #    padding it back over 3000 MUST red the size pin.
+    (
+        "GC-M07-size-ceiling-crossed",
+        "daemon/services/context_messages.py",
+        """    "assemble_context_messages",
+]
+""",
+        """    "assemble_context_messages",
+]
+"""
+        + "\n".join(f"# MUTATION: padding line {i}" for i in range(400))
+        + "\n",
+        SPLIT_PACK,
+        "test_context_messages_is_under_three_thousand_lines",
+    ),
+    # ── GC-M08 (H2 — the JOINED-ROOM OWNERSHIP): a constant that
+    #    is no longer a MODULE-LEVEL definition must red the ownership
+    #    pin. The mutation wraps it in ``if True:`` — the name stays
+    #    importable (no collateral import failure), only the module-level
+    #    DEFINITION the pin looks for is gone.
+    (
+        "GC-M08-joined-room-name-left-its-module",
+        "daemon/services/joined_room_context.py",
+        """ROOM_DIGEST_MAX_CHARS = 2000
+""",
+        """if True:  # MUTATION: no longer a module-level definition
+    ROOM_DIGEST_MAX_CHARS = 2000
+""",
+        SPLIT_PACK,
+        "test_the_joined_room_builder_is_defined_in_its_own_module",
+    ),
+    # ── GC-M09 (H2 — the SHARED-PRIMITIVES OWNERSHIP): the same
+    #    break in the shared-primitives module must red ITS pin.
+    (
+        "GC-M09-shared-primitive-left-its-module",
+        "daemon/services/context_block.py",
+        """CONTEXT_SUFFIX = "]\\n\\n"
+""",
+        """if True:  # MUTATION: no longer a module-level definition
+    CONTEXT_SUFFIX = "]\\n\\n"
+""",
+        SPLIT_PACK,
+        "test_the_shared_primitives_live_in_the_context_block_module",
     ),
 ]
 
