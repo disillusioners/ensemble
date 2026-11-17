@@ -4109,6 +4109,75 @@ class TestCorrectiveFix:
         assert pair.resolved_at
 
     @pytest.mark.asyncio
+    async def test_corrective_fix_on_a_desynced_member_creates_nothing(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        """W4 (2026-11-17): the membership pre-check happens BEFORE the
+        corrected row is created.
+
+        A desynced pair row (the skill carries the group UUID but is
+        NOT one of the row's two variants) used to pass the liveness
+        check, CREATE the corrected generation, and only then die
+        inside the resolver — leaving an orphan ACTIVE generation.
+        """
+        import uuid as _uuid
+
+        group = str(_uuid.uuid4())
+        member_a = _make_skill(skill_repo, project_id, "sigma-a")
+        member_b = _make_skill(skill_repo, project_id, "sigma-b")
+        for row in (member_a, member_b):
+            skill_repo.update(
+                row.id, ab_test_group=group, status="ab_testing"
+            )
+        ab_test_repo.create_ab_test(group, member_a.id, member_b.id)
+        # The DESYNCED skill: carries the group column, but is NOT one
+        # of the pair row's two variants.
+        desynced = _make_skill(skill_repo, project_id, "sigma-outside")
+        skill_repo.update(
+            desynced.id, ab_test_group=group, status="ab_testing"
+        )
+
+        edit_script = json.dumps(
+            {
+                "edits": [
+                    {
+                        "op": "insert_after",
+                        "anchor": "content for sigma-outside",
+                        "text": " edited",
+                    }
+                ]
+            }
+        )
+        with patch.object(
+            evolution_service, "_call_llm",
+            AsyncMock(return_value=edit_script),
+        ):
+            result = await evolution_service.evolve_skill(
+                desynced.id, "FIX", "repair it", corrective=True
+            )
+
+        assert result["skipped"] is True
+        assert "desync" in result["reason"]
+        # NO orphan generation was created.
+        assert result.get("new_skill_id") is None
+        # NO new generation row exists (the desync is refused BEFORE
+        # creation — the orphan-generation shape is closed).
+        carried = skill_repo.get_ab_variants(group)
+        assert {row.id for row in carried} == {
+            member_a.id,
+            member_b.id,
+            desynced.id,
+        }
+        assert all(row.generation == 0 for row in carried)
+        # The desynced skill was neither retired nor rewritten.
+        after = skill_repo.get(desynced.id)
+        assert after.status == "ab_testing"
+        assert after.is_active is True
+        assert after.content == "content for sigma-outside"
+        # The pair row is untouched (still live, unresolved).
+        assert ab_test_repo.get_by_group(group).resolved_at is None
+
+    @pytest.mark.asyncio
     async def test_non_corrective_fix_on_pair_member_still_refused(
         self, evolution_service, skill_repo, ab_test_repo, project_id
     ):
@@ -4141,3 +4210,69 @@ class TestCorrectiveFix:
         assert result["skipped"] is True
         assert "A/B testing" in result["reason"]
         mock_llm.assert_not_called()
+
+
+class TestDuplicatedAnchorRejection:
+    """W6 (2026-11-17): exact-ONCE anchoring is a D5 core invariant.
+
+    Named mutation: an edit script whose anchor occurs TWICE in the
+    parent body must be REJECTED (never double-applied, never
+    fuzzy-matched to the first occurrence) — otherwise one edit
+    silently lands in the wrong place.
+    """
+
+    @pytest.mark.asyncio
+    async def test_duplicated_anchor_is_rejected_not_applied(
+        self, evolution_service, skill_repo, project_id
+    ):
+        parent = _make_skill(
+            skill_repo, project_id, "rho",
+            content="# Rho\n\nrepeat me\n\nmiddle\n\nrepeat me\n",
+        )
+        edit_script = json.dumps(
+            {
+                "edits": [
+                    {
+                        "op": "replace",
+                        "anchor": "repeat me",
+                        "replacement": "CHANGED",
+                    }
+                ],
+            }
+        )
+        with patch.object(
+            evolution_service, "_call_llm",
+            AsyncMock(return_value=edit_script),
+        ):
+            # Every op was rejected ⇒ no applicable edits + no
+            # description ⇒ the evolution FAILS LOUDLY (no silent
+            # double-apply, no silent no-op generation).
+            with pytest.raises(ValueError, match="no applicable edits"):
+                await evolution_service.evolve_skill(
+                    parent.id, "FIX", "replace the repeated line"
+                )
+        # Nothing was written — the parent is untouched.
+        assert skill_repo.get(parent.id).content == parent.content
+
+    def test_applier_rejects_a_duplicated_anchor_directly(self):
+        """The applier's own contract (unit level): a duplicated anchor
+        is reported as REJECTED and the body is unchanged."""
+        from daemon.services.skill_evolution_service import (
+            _apply_surgical_edits,
+        )
+
+        body = "alpha\nbeta\nalpha\n"
+        new_body, applied, rejected, reasons = _apply_surgical_edits(
+            body,
+            [
+                {
+                    "op": "replace",
+                    "anchor": "alpha",
+                    "replacement": "gamma",
+                }
+            ],
+        )
+        assert applied == 0
+        assert rejected == 1
+        assert reasons and "exactly 1" in reasons[0]
+        assert new_body == body

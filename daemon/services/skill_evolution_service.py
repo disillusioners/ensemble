@@ -981,6 +981,28 @@ class SkillEvolutionService:
                 "skill_id": getattr(skill, "id", None),
             }
 
+        # W4 (review fix round, 2026-11-17): membership pre-check
+        # BEFORE the corrected row is created. A desynced pair row
+        # (the skill carries the group UUID but is NOT one of the
+        # row's two variants) used to pass the liveness check above,
+        # create the corrected generation, and only THEN die inside
+        # ``resolve_ab_test_sanctioned`` (defective_arm_id not a
+        # variant) — leaving an orphan ACTIVE generation behind.
+        pair_variants = {
+            str(getattr(ab_test, "skill_id_old", "") or ""),
+            str(getattr(ab_test, "skill_id_new", "") or ""),
+        }
+        if str(skill.id) not in pair_variants:
+            return {
+                "skipped": True,
+                "reason": (
+                    "corrective FIX refused: skill is not a variant "
+                    f"of the pair row for group {ab_group!r} "
+                    "(ab_test_group column desync)"
+                ),
+                "skill_id": skill.id,
+            }
+
         improvement_hints = await self._collect_recent_improvement_hints(
             skill.id
         )
