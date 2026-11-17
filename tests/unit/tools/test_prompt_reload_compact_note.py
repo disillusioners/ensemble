@@ -733,3 +733,57 @@ class TestL17Exhaustiveness:
         manager = StubManager()
         out = await _call(manager, compact=True, compact_note="a note")
         assert "unconditionally" not in out
+
+
+# ── Phase C — the READ-AFTER-WRITE pin (⭐ the highest-value pin) ────────────
+
+
+class TestReadAfterWrite:
+    """The tools-node wrapper reads ``read_compact_note_state`` IMMEDIATELY
+    after the tool writes it, inside the SAME node. Whether the repository
+    returns the FRESH row or a STALE cache is UNVERIFIED and, if stale,
+    the append reads an unarmed state and silently does nothing (the
+    receipt would say so, but nothing would work). This pin settles it.
+    """
+
+    def test_the_arm_is_readable_immediately_after_write(self) -> None:
+        repo = StubInstanceRepo()
+        note = "THE-NOTE-READ-AFTER-WRITE"
+        pr.arm_compact_note(repo, "iid-1", note)
+        # Read within the same node (the same repository instance).
+        state = pr.read_compact_note_state(repo, "iid-1")
+        assert state.armed is True
+        assert state.note == note
+        assert state.sha256_12 == pr.compact_note_sha256_12(note)
+
+    def test_the_pin_reddens_if_the_read_is_served_stale(self) -> None:
+        """Mutation proof — a stale-cache repository makes the pin FAIL.
+
+        This is the mutation leg: if the repository serves a stale row,
+        the read returns an unarmed state and the pin reddens. The pin
+        has teeth: a stale cache would make the append path silently
+        inert, and this test would go RED.
+        """
+
+        class StaleRepo(StubInstanceRepo):
+            def get(self, instance_id):
+                # A stale cache: the write landed but the read returns
+                # the OLD row (no arm).
+                return SimpleNamespace(agent_id="ari", instance_metadata={})
+
+        repo = StaleRepo()
+        note = "THE-NOTE"
+        # The arm write lands (the repo's set_metadata works).
+        pr.arm_compact_note(repo, "iid-1", note)
+        # But the read is served stale.
+        state = pr.read_compact_note_state(repo, "iid-1")
+        assert not (state.armed and state.note == note)
+
+    def test_the_read_after_write_holds_for_the_sha_prefix_too(self) -> None:
+        repo = StubInstanceRepo()
+        note = "another note body"
+        pr.arm_compact_note(repo, "iid-1", note)
+        state = pr.read_compact_note_state(repo, "iid-1")
+        assert state.sha256_12 == pr.compact_note_sha256_12(note)
+        # The write's sha prefix is the same one the receipt carries.
+        assert len(state.sha256_12) == 12

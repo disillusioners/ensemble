@@ -887,6 +887,7 @@ def build_compaction_doc(
     msg_timestamps: dict | None = None,
     context_window: int | None = None,
     previous_overview: str | None = None,  # pass-2 seed (architect §4)
+    honest_truncation: bool = False,  # append path: no SECTION DETAIL follows
 ) -> SystemMessage:
     """Build the single ``compaction-global-{iid}-{seq}`` doc.
 
@@ -944,6 +945,11 @@ def build_compaction_doc(
             GLOBAL as a seed for cross-pass convergence
             (architect §4 — "the global frame converges across
             passes instead of being re-derived").
+        honest_truncation: APPEND PATH ONLY. When True, the truncation
+            marker drops the misleading "SECTION DETAIL below remains
+            complete" clause (there are no sections on this path) and
+            names the cap + the absence of detail instead. Default
+            False ⇒ every existing caller is byte-identical.
 
     Returns:
         A single ``SystemMessage`` with id
@@ -1013,12 +1019,20 @@ def build_compaction_doc(
             truncated = _truncate_to_token_cap(
                 global_overview, GLOBAL_OVERVIEW_TOKEN_CAP
             )
-            body += (
-                f"{truncated}\n"
-                f"[truncated — full GLOBAL overview text exceeded the "
-                f"GLOBAL_OVERVIEW_TOKEN_CAP={GLOBAL_OVERVIEW_TOKEN_CAP}; "
-                f"SECTION DETAIL below remains complete]\n"
-            )
+            if honest_truncation:
+                body += (
+                    f"{truncated}\n"
+                    f"[truncated — full GLOBAL overview text exceeded the "
+                    f"GLOBAL_OVERVIEW_TOKEN_CAP={GLOBAL_OVERVIEW_TOKEN_CAP}; "
+                    f"no SECTION DETAIL follows on this path]\n"
+                )
+            else:
+                body += (
+                    f"{truncated}\n"
+                    f"[truncated — full GLOBAL overview text exceeded the "
+                    f"GLOBAL_OVERVIEW_TOKEN_CAP={GLOBAL_OVERVIEW_TOKEN_CAP}; "
+                    f"SECTION DETAIL below remains complete]\n"
+                )
         else:
             body += f"{global_overview}\n"
     elif mode == "truncation":
@@ -1052,6 +1066,36 @@ def build_compaction_doc(
     return SystemMessage(
         id=f"{GLOBAL_DOC_ID_PREFIX}{instance_id}-{seq}",
         content=body,
+    )
+
+
+def build_compact_note_request(
+    note: str,
+    *,
+    compacted_span_start: int,
+    compacted_span_end: int,
+    token_cap: int = GLOBAL_OVERVIEW_TOKEN_CAP,
+) -> str:
+    """The VERBATIM appended request (architect v1.5 §2c).
+
+    The note is INLINED; the compacted span and the size instruction
+    are the two ruled additions. There is NO separate keyword channel —
+    the keyword params were withdrawn by the Emperor ("the words were
+    always enough; the parameter was not").
+
+    The request is appended as a ``HumanMessage`` carrying
+    ``additional_kwargs={"injected_message": True,
+    "context_kind": "compaction_request"}`` (§11.4) so the daemon can
+    tell "the model answered the compaction request" from "the model did
+    something else" — without a new channel field.
+    """
+    return (
+        "[System request: Compaction] Your next message is compaction of "
+        "previous messages. Compaction request is: "
+        f"{note} "
+        f"(compacted span: messages #{compacted_span_start}–"
+        f"#{compacted_span_end}; produce a compaction within "
+        f"{token_cap} tokens)"
     )
 
 
