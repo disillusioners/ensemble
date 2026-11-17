@@ -350,7 +350,30 @@ describe('ChatComponent chatrooms button (P6) — real template wiring', () => {
     return (fixture.nativeElement as HTMLElement).querySelector<HTMLElement>('.room-btn');
   }
 
+  /**
+   * Select an instance the way production does: the polled instance
+   * list carries the row, the view-state carries the active id, and
+   * the component's render hold (`renderedInstance`) resolves the
+   * selection into the instance the chat subtree renders.
+   *
+   * The chatrooms button's VISIBILITY is gated on that same hold, so
+   * every suite that needs the button present must select first.
+   */
+  function selectInstance(instanceId: string, instanceName?: string): void {
+    mockInstanceService.instances.set([
+      createMockInstance({ instance_id: instanceId, instance_name: instanceName }),
+    ]);
+    viewState.openDetail('all', instanceId);
+    fixture.detectChanges();
+    fixture.detectChanges();
+    expect(component.renderedInstance()?.instance_id).toBe(instanceId);
+  }
+
   it('renders the chatrooms button in the toggle family, next to the watchover button', () => {
+    // The button is gated on a selected instance (fix G) — select one
+    // so the placement / family / a11y assertions run against the
+    // rendered button.
+    selectInstance('chat-rooms-placement', 'Producer');
     const host = fixture.nativeElement as HTMLElement;
     const roomBtn = roomButton();
     const watchoverBtn = host.querySelector<HTMLElement>('.watchover-btn');
@@ -367,6 +390,43 @@ describe('ChatComponent chatrooms button (P6) — real template wiring', () => {
     // Sitting immediately NEXT TO the watchover button (same container).
     expect(roomBtn!.parentElement).toBe(watchoverBtn!.parentElement);
     expect(watchoverBtn!.nextElementSibling).toBe(roomBtn!);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Fix G (approver gate lane 3): the chatrooms icon used to render as a
+  // visible no-op when no instance was selected — the modal is scoped to
+  // an instance('s tree), so the click could not do anything. The button
+  // is now HIDDEN in that state.
+  // ───────────────────────────────────────────────────────────────────────
+  it('hides the chatrooms button when no instance is selected, and shows it once one is', () => {
+    // No selection: the button must NOT be in the DOM at all (hidden,
+    // not merely disabled — a disabled button still advertises a
+    // feature the operator cannot use).
+    expect(component.renderedInstance()).toBeNull();
+    expect(roomButton()).toBeNull();
+    // The watchover toggle stays visible — the gate is scoped to the
+    // chatrooms icon only.
+    expect(
+      (fixture.nativeElement as HTMLElement).querySelector('.watchover-btn'),
+    ).toBeTruthy();
+
+    // Select an instance → the icon appears.
+    selectInstance('chat-rooms-visibility', 'Producer');
+    const roomBtn = roomButton();
+    expect(roomBtn).toBeTruthy();
+    expect(roomBtn!.classList.contains('toggle-btn')).toBe(true);
+    expect(roomBtn!.classList.contains('room-btn')).toBe(true);
+    expect(roomBtn!.getAttribute('aria-label')).toBe('Chatrooms');
+
+    // Deselect → the icon disappears again (the gate is live, not a
+    // one-way render). The component's own id-clear is the production
+    // deselect path (terminate / new-instance reset) and is what
+    // releases the render hold.
+    component.currentInstanceId.set(null);
+    fixture.detectChanges();
+    fixture.detectChanges();
+    expect(component.renderedInstance()).toBeNull();
+    expect(roomButton()).toBeNull();
   });
 
   it('opens the BIG chatrooms modal for the rendered instance', () => {
@@ -394,9 +454,11 @@ describe('ChatComponent chatrooms button (P6) — real template wiring', () => {
     expect(config.panelClass).toBe('room-dialog-panel');
   });
 
-  it('is a no-op when no instance is rendered', () => {
-    roomButton()!.click();
-    fixture.detectChanges();
+  it('is a no-op when no instance is rendered — the button is absent, so no modal opens', () => {
+    // No selection → the button is not rendered at all (fix G), so
+    // there is nothing to click and no modal can open. The old shape
+    // of this test (clicking an inert button) is gone with the button.
+    expect(roomButton()).toBeNull();
     expect(dialogOpen).not.toHaveBeenCalled();
   });
 });

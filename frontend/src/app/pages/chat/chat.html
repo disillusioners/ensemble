@@ -75,16 +75,28 @@
             </button>
             <!-- Chatrooms (P6 — the human observability surface for
                  group chat). Sits NEXT TO the watchover toggle; click
-                 opens the BIG chatrooms modal for this instance's tree. -->
-            <button
-              (click)="onOpenChatrooms()"
-              class="toggle-btn room-btn"
-              title="Chatrooms"
-              aria-label="Chatrooms"
-              matTooltip="Chatrooms — rooms created by this instance's tree"
-            >
-              <mat-icon>forum</mat-icon>
-            </button>
+                 opens the BIG chatrooms modal for this instance's tree.
+
+                 HIDDEN when no instance is selected: the modal is
+                 scoped to an instance('s tree), so without a selected
+                 instance the button was a visible no-op (click did
+                 nothing). The gate reads the SAME ``renderedInstance``
+                 signal the click handler guards on, so "visible" and
+                 "actionable" cannot drift apart — a transient list-wipe
+                 keeps the hold (and therefore the button) alive, while
+                 a cleared id / confirmed 404 releases it and hides the
+                 button (approver gate lane 3, fix G). -->
+            @if (renderedInstance()) {
+              <button
+                (click)="onOpenChatrooms()"
+                class="toggle-btn room-btn"
+                title="Chatrooms"
+                aria-label="Chatrooms"
+                matTooltip="Chatrooms — rooms created by this instance's tree"
+              >
+                <mat-icon>forum</mat-icon>
+              </button>
+            }
             <button
               (click)="onToggleThinking()"
               [class.active]="showThinking()"
