@@ -126,6 +126,25 @@ Two **independent** live guards, both required (`promote.sh:129`, `:142`):
 
 *(If `bump_version.py` is bypassed, all four version sites must be updated by hand and `uv.lock` re-synced — the four-site lockstep is what `tests/test_api.py` and the frozen binary's `__version__` both assert.)*
 
+#### 2.5.1 The cut sequence — ORDERED (the FE rebuild MUST follow the bump)
+
+> **bump commit → FE REBUILD at that HEAD → sidecar re-stamped → `stage.sh`.**
+
+**Why the order is forced (not stylistic) — four code facts:**
+
+| Step | Code fact |
+|---|---|
+| `stage.sh` does **NOT** rebuild the FE | `:348` — if `frontend/dist/frontend/browser` is missing ⇒ **exit 78** ("refusing to stage a UI-less release"). The FE is a **prebuilt input**, not a stage step |
+| `stage.sh` **VERIFIES** the sidecar, then **COPIES** the prebuilt tree | `:360` (verify) · `:468` (`cp -R` of the prebuilt `browser/` into the payload) · `:498` (`rm -f` the sidecar out of the staged copy) |
+| `_verify_artifact_provenance` refuses a mismatched sidecar | the sidecar's `git_head` must equal the staging `HEAD_SHA`, else refusal token **`stale-provenance`** (exit 78) |
+| `_build_frontend.sh` does **NOT** install dependencies | it runs `npm run build` only — **no `npm ci` / `npm install`** ⇒ **`node_modules` must already exist** |
+
+⇒ **The bump commit changes HEAD ⇒ the sidecar's `git_head` goes stale ⇒ the stage refuses.** The only correct order is to **rebuild the FE at the bumped HEAD** (re-stamping the sidecar with the new `git_head`) and only then stage.
+
+> ⚠️ **The currently-present `frontend/dist/` is ALREADY STALE and MUST NOT be treated as stageable.** Its sidecar stamps `git_head = 913088277b9a55cabfed84ba4c10d6b5c327068c`, while the branch HEAD has moved to `af661ac8e…` ⇒ `_verify_artifact_provenance` would refuse the stage with `stale-provenance` (exit 78). The S3 recipe (§3.5.5) must be **re-run at the bumped HEAD**.
+
+**`frontend/node_modules` is deliberately KEPT** for exactly this reason: `_build_frontend.sh` does not install dependencies, so the post-bump rebuild needs the existing `node_modules` (691 MB) in place. (It is also what the disk decision in §5.2.1 keeps warm.)
+
 ### 2.6 Release-dir retention — the eviction nobody plans for
 
 `RETENTION_KEEP=3` (`lib.sh:403`); `retention_evict` (`lib.sh:8504`) keeps the 3 newest by manifest `staged_at` (dir-mtime fallback) and **never evicts `current` or journal `previous`**.
@@ -272,6 +291,8 @@ The room-dialog surface **is** in the bundle. But **esbuild MANGLES identifiers*
 | `room-dialog-panel` | ✅ 2 files | `chunk-HD2VKB7Y.js` **+** `styles-T4RYPQ7P.css` |
 
 ⇒ **Anchor the S3 assertion on the four string-literal / CSS-class markers above** — never on the identifier names.
+
+> **Run the marker greps against the REBUILT bundle at the bumped HEAD** (§2.5.1). The marker set is **unchanged** (string literals / CSS classes) — only the bundle changes.
 
 **Second trap — the chunk is NOT a modulepreload.** `index.html` contains exactly **one** `modulepreload` occurrence and it does **not** name the room chunk; the room chunk is **lazily referenced from `main-*.js`**. ⇒ a naive *"is the room chunk listed in `index.html`?"* check **false-negatives**. Assert on the **bundle** (the four markers), **not** on `index.html`'s preload list.
 
@@ -470,13 +491,36 @@ That worktree is at `bf4bfde6e`, which **does not contain `1aa0065e`** as an anc
 | What if it is not done? | The tool-lane arm **refuses pre-nonce** with `stale-scripts`. The nonce is preserved, so the ceremony can be retried after the fix — **no live damage, no partial flip**. |
 | Is there a bypass? | `ENSEMBLE_ALLOW_STALE_SCRIPTS=1` bypasses with a loud **warn** verdict — per-invocation only, never persisted to `.env` (T6.12). **Do not use it.** It exists for drills, and using it on live would run stale executor scripts against a new payload — the exact hazard the guard exists to stop. |
 
-### 5.2.1 🟡 Host disk precondition — FREE SPACE BEFORE THE STAGE
+### 5.2.1 ✅ Host disk — RESOLVED BY MEASUREMENT (not by pruning)
 
-**Measured 2026-11-17: the host is at 100 % with 2.2 GB free** (`/dev/sda1` — 230 G total, 228 G used). At briefing time it read **99 % / 3.3 GB** — it has **degraded further**, so re-measure immediately before the stage rather than trusting either number.
+**Reading the gauge:** the host has been reported at **99 % / 3.3 GB**, then **100 % / 2.2 GB**, and is now **1.9 GiB free @ 100 %** (`/dev/sda1` — 230 G total, 229 G used). **`df` fluctuates with concurrent lanes** — during the measurement window `/tmp` moved **79 GB → 71.9 GB** via another lane's cleanup. **Re-measure immediately before the stage; do not trust a stale figure.**
 
-**Why it matters:** `frontend/node_modules` alone is **691 MB**, and the real stage additionally runs a **PyInstaller build** of `ensemble-prod` (hundreds of MB) *before* assembling the payload — plus the payload tree itself (agents + frontend dist + plugins + guidelines).
+**The stage's real footprint, MEASURED** (from the live v0.30.12 release + a stage worktree):
 
-⇒ **Precondition: reclaim free space BEFORE the stage.** The leader is scoping a reclamation now. A stage that runs out of disk mid-PyInstaller produces a partial payload — at best a provenance/freshness refusal, at worst a half-written `releases/<ver>/`.
+| Component | Size |
+|---|---|
+| frozen binary `ensemble-prod` | 79 MB |
+| PyInstaller build workdir (`build/`) | 122 MB |
+| `dist/ensemble-prod` | 79 MB |
+| payload copy | ~175 MB |
+| **gross** | **~376 MB** |
+| keep-3 eviction of `v0.30.9` (offset) | −175 MB |
+| **net** | **~200 MB** |
+
+⇒ **Against 1.9 GiB free, the stage FITS with ~9× headroom.** (Corroborated on this host: the live `releases/v0.30.12` measures **175 MB**, its `ensemble-prod` **79 MB**.)
+
+**Sanctioned reclamation already done — 281.6 MiB:** pip cache · uv cache · `.angular/cache` · 294 `__pycache__` dirs · `.pytest_cache` ⇒ free disk **1.9 GiB @ 100 %**.
+
+**DECISIONS — two levers deliberately NOT taken:**
+
+| Lever | Size on this host | Decision |
+|---|---|---|
+| **Shared-cache prune** | go-build **7.2–7.6 GB** · npm **2.1 GB** | ❌ **NO PRUNE** — the caches stay **WARM for live lanes** |
+| **Reconcile sweep of the `wt-stage-*` worktrees** | **38 worktrees / 46 GB** | ❌ **NO SWEEP** — **foreign-lane disruption is the larger risk**; these are other lanes' worktrees |
+
+⇒ **Host pressure is NOT a release blocker.** Both levers remain available to the operator as **discretionary** actions, **not** as a precondition. A stage that ran out of disk mid-PyInstaller would produce a partial payload (at best a provenance/freshness refusal, at worst a half-written `releases/<ver>/`) — but the measured footprint says that will not happen.
+
+⇒ **R10 is ACCEPTED-WITH-MEASUREMENT** (stage fits; shared caches and foreign worktrees deliberately preserved).
 
 ### 5.3 Stage-verification legs S1–S5
 
@@ -485,7 +529,7 @@ That worktree is at `bf4bfde6e`, which **does not contain `1aa0065e`** as an anc
 | **S1 — release integrity** | The staged artifact is the thing that was built and tagged | `git describe --tags --exact-match HEAD` == `v0.31.0`; manifest ⇄ staged-dir re-hash (`integrity_verify`); sidecar present, `git_head == release commit`, `git_dirty == false`, `artifact_sha256` == artifact hash; `pipeline_scripts_floor_commit` == `pipeline_scripts_rev` | All four legs match; no `non-tip-tree` / `provenance-*` / `stale-provenance` / `dirty-build` token | **fresh** |
 | **S1d — prompt-artifact seal** | No prompt changed outside the sealed lane | §4.3's three checks | All empty/equal | **fresh** |
 | **S2 — migrations on BOTH drivers** | The schema lands on SQLite *and* PostgreSQL | SQLite: `tests/unit/repositories/test_room_migration_runner_execution.py` + `test_room_models_and_migration.py`. PG: room-family suite against a **real PG scratch DB** (`ensemble_dev_scratch`; `ensemble_dev_test_only` does not exist here) — create if needed; **scrub `POSTGRES_*` per-variable, never `env -u POSTGRES_*`** | All 3 migrations apply clean on SQLite (ledger rows, `skip_reason=None`); on PG `create_all` creates the 3 tables and `_ensure_postgres_columns` adds the 4 columns + unique index, idempotently | **fresh — and the PG half does not exist as a test today** |
-| **S3 — FE build** | The FE compiles and the staged dist carries the room surface | **§3.5.5** — the measured recipe: PIN `PATH=/home/nea/.nvm/versions/node/v24.21.0/bin:$PATH` (node v24.21.0 / npm 11.19.0) → `npm ci` (exit 0; npm 11 skips 5 install-scripts behind `allowScripts` — expected, non-fatal; esbuild ships via `@esbuild/linux-x64`) → `./node_modules/.bin/tsc --noEmit -p tsconfig.app.json` (exit 0, TS 5.9.3, local devDep) → `cd ..` → `bash scripts/upgrade/_build_frontend.sh` (exit 0, **by path** — the ambient scripts pin is stale) → assert `index.html` + the SOURCE-tree sidecar + `git status --porcelain` EMPTY + the **four bundle markers** (§3.5.3) | tsc exit 0 · build exit 0 · sidecar present with `git_head == HEAD` and `git_dirty == false` · `git status --porcelain` EMPTY · 96 files / 7,949,189 B in the dist · the room surface present **by string-literal markers** | ✅ **VERIFIED (dry-run)** — measured on the release worktree @ `913088277`; sidecar `git_head == HEAD`, `git_dirty == false`, `artifact_sha256` independently re-verified |
+| **S3 — FE build** | The FE compiles and the staged dist carries the room surface | **§3.5.5** — the measured recipe: PIN `PATH=/home/nea/.nvm/versions/node/v24.21.0/bin:$PATH` (node v24.21.0 / npm 11.19.0) → `npm ci` (exit 0; npm 11 skips 5 install-scripts behind `allowScripts` — expected, non-fatal; esbuild ships via `@esbuild/linux-x64`) → `./node_modules/.bin/tsc --noEmit -p tsconfig.app.json` (exit 0, TS 5.9.3, local devDep) → `cd ..` → `bash scripts/upgrade/_build_frontend.sh` (exit 0, **by path** — the ambient scripts pin is stale) → assert `index.html` + the SOURCE-tree sidecar + `git status --porcelain` EMPTY + the **four bundle markers** (§3.5.3) | tsc exit 0 · build exit 0 · sidecar present with `git_head == HEAD` and `git_dirty == false` · `git status --porcelain` EMPTY · 96 files / 7,949,189 B in the dist · the room surface present **by string-literal markers** | ✅ **VERIFIED (dry-run)** — measured on the release worktree @ `913088277`; sidecar `git_head == HEAD`, `git_dirty == false`, `artifact_sha256` independently re-verified. ⚠️ **BUT the present dist is STALE** (sidecar stamps `913088277`, HEAD is `af661ac8e`) ⇒ **must be REBUILT at the bumped HEAD** (§2.5.1) |
 | **S4 — gate evidence** | The feature's own gates still pass at the release commit | Re-run the registered packs at the release tag: `gc_p6_room_family` (**24 files / 421 nodes — REGISTRY CORRECTED, see §7.7**), `gc_p6_room_mutation_matrix` (9/9), `gc_p6_pilot_scenario` (9/9), SSE-adjacent corpus (111/111), TestP11 (39), nudges (42), language_check (124), ledger gate (5/5, `EXPECTED_LATEST=36`), FE specs (140/140 + modal 8/8) | Counts match the re-gate #2 record; **any count delta is explained**, not hand-waved | ✅ **RE-MEASURED (LEG 3a, PASS)** — 24 files / 421 nodes, **421 passed / 0 red**, 70.93 s under the 300 s cap (xdist `-n 8`; the historical serial run took ~6:02), junitxml agrees (421 tests / 0 failures / 0 errors / 0 skipped), fence proven `ensemble_dev` (never `ensemble_prod`). **Re-confirm at the tag.** |
 | **S5 — boot smoke** | The frozen binary boots green with the new schema — **in a SCRATCH sandbox, never against prod** | **§5.4.3** — the rewritten leg: scratch payload **copy** + scratch DB + scratch `HOME`/`DATA_DIR` + scratch port + the **34-name per-variable scrub** + the **three terminators pinned to `0`** + `ENSEMBLE_SELF_ENV=sandbox` | `livez` version `0.31.0`, `readyz` green (db/queue/services/checkpoint), the three room tables created **in the scratch DB only**, pool clean, **zero** sweep/reaper kills, and **zero trace left behind** | **fresh** — and it must be re-shaped per **BLK-1** |
 
@@ -496,7 +540,7 @@ That worktree is at `bf4bfde6e`, which **does not contain `1aa0065e`** as an anc
 | **S1 — release integrity** | pending (stage-time) |
 | **S1d — prompt-artifact seal** | 🟡 **CLOSED pre-cut** (3/3 checks at the `v0.30.12` anchor; seal blob `cb51a277…` byte-identical) — **must be RE-RUN AT THE TAG** (§4.3.2) |
 | **S2 — migrations, both drivers** | ✅ SQLite pinned by the room-migration tests · ✅ PG parity **CLOSED** by measurement (§3.2.1) |
-| **S3 — FE build** | ✅ **VERIFIED (dry-run)** — §3.5.5 + the inventory in §3.5.2 |
+| **S3 — FE build** | ✅ **VERIFIED (dry-run)** — §3.5.5 + the inventory in §3.5.2 — **but the present dist is stale** (`git_head 913088277` vs HEAD `af661ac8e`) ⇒ **rebuild at the bumped HEAD** (§2.5.1) |
 | **S4 — gate evidence** | 🟡 **unverified at the tip** — the room-family re-measure stands at 24 files / 421 nodes (§7.6); the remaining packs are **not** re-measured |
 | **S5 — boot smoke** | 🟡 **unverified** — the leg is now correctly specified (§5.4) but **has not been executed** |
 
@@ -821,7 +865,7 @@ Both live guards are mandatory and independent: `require_live_guard` (`ENSEMBLE_
 | **R7** | The **local-latest ref lag** → `non-tip-tree` refusal at stage | 🟡 **OPEN — owned by the ari-stop-int lane**, not this lane (§7.3). A **precondition** for the cut. |
 | **R8** | `rollback_safe` **derive path exits 78** (the whole-file `DROP` grep matches the migrations' DOWN sections) | 🟡 **KNOWN — `ENSEMBLE_ROLLBACK_SAFE=1` must be explicit** at stage time; `contains_contract_phase=true` is expected (§5.5). |
 | **R9** | The stage **evicts `releases/v0.30.11`** (keep-3) | 🟢 **COSMETIC** — disclosed so the missing directory is not read as damage (§2.6). |
-| **R10** | **Host disk exhaustion at stage time** — measured **100 % / 2.2 GB free** (99 % / 3.3 GB at briefing; it has degraded further); `node_modules` alone is 691 MB and a PyInstaller build follows | 🟡 **OPEN — precondition.** Reclaim free space **before** the stage; the leader is scoping a reclamation (§5.2.1). |
+| **R10** | **Host disk exhaustion at stage time** | ✅ **ACCEPTED-WITH-MEASUREMENT.** The stage's footprint was **MEASURED**: ~376 MB gross (binary 79 + build 122 + `dist/ensemble-prod` 79 + payload ~175), **~200 MB net** after the keep-3 eviction of `v0.30.9` (−175) ⇒ the stage **fits with ~9× headroom** against 1.9 GiB free. 281.6 MiB of sanctioned reclamation is already done. **No shared-cache prune** (go-build 7.2–7.6 GB, npm 2.1 GB stay **warm for live lanes**) and **no reconcile sweep of the 38 `wt-stage-*` worktrees (46 GB)** — **foreign-lane disruption is the larger risk**. Both remain **discretionary operator levers**, not preconditions. `df` fluctuates with concurrent lanes (3.3 GB → 2.0 GB → 1.9 GiB observed; `/tmp` moved 79 GB → 71.9 GB mid-window via another lane's cleanup) — **re-measure before the stage** (§5.2.1). |
 | **R11** | **S3 verified by a DRY-RUN only**; **S1d (at the tag), S4 and S5 remain unverified** | 🟡 **OPEN** — the FE leg is proven; the remaining legs must be run before the ceremony (§5.3 leg status). |
 | **R12** | The S3 **verification trap** — esbuild mangles `RoomDialogComponent` / `ROOM_DIALOG_SIZE` (0 hits) and the room chunk is **not** a `modulepreload` ⇒ a naive grep or `index.html` check **false-negatives** | ✅ **CLOSED** — the S3 assertion now anchors on four proven string-literal / CSS-class markers (§3.5.3). |
 
@@ -887,7 +931,7 @@ The registered `gc_p6_room_family` history carried **three disagreeing compositi
 | **R0 — Preconditions** | **ari-stop-int lane** (owner) → then **giter** | Reconcile the local-latest ref to `56a5f4a00`. **Do not start the release cut until this lands.** | `git rev-parse latest == 56a5f4a00` |
 | **R1 — Pin advance** | **giter / operator** | Advance `ENSEMBLE_UPGRADE_SCRIPTS_DIR` to a tree containing `1aa0065e…` as an ancestor; update the install `.env`; **restart the daemon**; verify the stamp matches (§5.1) | `merge-base --is-ancestor` rc 0; daemon restarted; `.env` verified |
 | **R2 — Release cut** | **giter** | Create the release branch from `origin/latest`; add the plan doc + `docs/changelog-pending/group-chat.md`; edit `CHANGELOG.md` (`[Unreleased]` → `[0.31.0] — 2026-11-17`, paste the §3.6 block); run `python scripts/bump_version.py minor`; commit `chore(release): bump version to 0.31.0`; **annotated tag** `Release v0.31.0` | `git describe --tags --exact-match HEAD` == `v0.31.0`; the 4 version sites agree |
-| **R3 — Build + stage** | **giter** | Build the binary + FE with provenance sidecars; `ENSEMBLE_UPGRADE_LIVE=1 ENSEMBLE_ROLLBACK_SAFE=1 VERSION=v0.31.0 bash scripts/upgrade/stage.sh live` | `releases/v0.31.0/` complete; `manifest.json` signed; `rollback_safe=true`; `contains_contract_phase=true`; `pipeline_scripts_floor_commit == pipeline_scripts_rev` |
+| **R3 — Build + stage** | **giter** | Build the binary + FE with provenance sidecars — **in the ordered sequence of §2.5.1: the FE is REBUILT at the bumped HEAD (sidecar re-stamped) BEFORE `stage.sh` runs**; `ENSEMBLE_UPGRADE_LIVE=1 ENSEMBLE_ROLLBACK_SAFE=1 VERSION=v0.31.0 bash scripts/upgrade/stage.sh live` | `releases/v0.31.0/` complete; `manifest.json` signed; `rollback_safe=true`; `contains_contract_phase=true`; `pipeline_scripts_floor_commit == pipeline_scripts_rev` |
 | **R4 — Verify S1–S5** | **giter + tester** | Run the five legs (§5.3), including S1d (prompt seal) and the **PG half of S2** | All legs green; every count delta explained |
 | **R5 — Ceremony brief** | **architect → leader** | Hand the Emperor the §6.2 brief: preconditions, inputs, command, pre-checklist, post-verify, abort path, and the §7 disclosures | The Emperor has the brief and the §7.1 icon question is resolved |
 | **R6 — Ceremony** | **the Emperor** | The promote itself | `commit` row; `current == v0.31.0`; §6.2 V1–V10 green |
@@ -934,6 +978,10 @@ Per §6.3 — **the abort ladder**: no-flip refusals are free (nonce intact); a 
 **Doctrine sources** — `docs/runbooks/promote-handback-serving-green-closer.md` §9 (the two-sided release-bump requirement; the four user-owned ceremony pre-steps; the disposition doctrine) and §10 (invoke-path policy: release-staged PRIMARY, pinned worktree = recovery) · house critical notes (boot-sweep pin; `env -u POSTGRES_*` no-op; stage.sh `rollback_safe` derive-path; install-dir protection).
 
 **Feature facts** — `.agents/shared/planning/group-chat/{plan-overview,architecture-recommendation,decisions,emperor-open-questions,substrate-map}.md` at tip; A-P5-2, A-P5-8, A-P5-17a, A-P5-17b, A-P6-1, A-P6-22, A-P6-23, A-P6-26, A-P6-35, A-P6-36 · KV `gc_pilot_video_team`, `gc_phase2_go`, `gc_ui_refinement_p6`, `gc_emperor_rulings_20261115` · `.agents/tester/PACKS.md` (P6 re-gate #2 block), `.agents/tester/QUARANTINE.md` (2 group-chat-adjacent entries).
+
+**Disk measurement (2026-11-17)** — stage footprint ~376 MB gross / **~200 MB net** after the keep-3 eviction ⇒ **fits with ~9× headroom** against **1.9 GiB free @ 100 %** (`/dev/sda1` 230 G / 229 G used). Live `releases/v0.30.12` measures **175 MB**, its `ensemble-prod` **79 MB**. Sanctioned reclamation already done: **281.6 MiB** (pip cache · uv cache · `.angular/cache` · 294 `__pycache__` dirs · `.pytest_cache`). Levers deliberately **not** taken: shared-cache prune (go-build **7.2–7.6 GB**, npm **2.1 GB** — kept **warm for live lanes**) and a reconcile sweep of the **38 `wt-stage-*` worktrees (46 GB)** — **foreign-lane disruption is the larger risk**; both remain discretionary operator levers. `df` fluctuates with concurrent lanes (3.3 GB → 2.0 GB → 1.9 GiB observed; `/tmp` moved 79 GB → 71.9 GB mid-window via another lane's cleanup) — **re-measure before the stage**.
+
+**Cut-sequence anchors (verified at tip by this lane)** — `scripts/upgrade/stage.sh:348` (FE dir required ⇒ exit 78) · `:360` (sidecar verify) · `:468` (`cp -R` of the prebuilt `browser/` into the payload) · `:498` (`rm -f` the sidecar out of the staged copy) · `scripts/upgrade/_build_frontend.sh` (runs `npm run build` only — **no `npm ci` / `npm install`**) · the present dist's sidecar stamps `git_head 913088277…` while the branch HEAD is `af661ac8e…` ⇒ **the present dist is stale and not stageable**.
 
 **S3 FE measurement (2026-11-17, devops dry-run, release worktree @ `913088277`, no commits)** — the measured recipe, the Angular 21 artifact-set shape, the verification-trap markers, the dirt precision and the sidecar contents are recorded in §3.5.1–§3.5.5. Anchors verified by this lane at the release tip: `scripts/upgrade/_build_frontend.sh:105` (the static `build_tool` label) · `scripts/upgrade/stage.sh:498` (the sidecar `rm -f` out of the payload, and the manifest per-file map computed after it) · `scripts/upgrade/lib.sh:95` (`PIPELINE_SCRIPTS_REV=1aa0065e…` in the release worktree) · `frontend/.gitignore` (only `/.angular/cache`, `/dist`, `/node_modules`) · `frontend/angular.json` (no `polyfills` key; `assets` = one `public` glob; `scripts` = `mermaid.min.js`) · `frontend/package.json` (no `engines`; `packageManager npm@10.9.4` advisory) · `node_modules/@angular/cli/package.json` `engines` (`node ^20.19.0 || ^22.12.0 || >=24.0.0`). Measured host state: node **v24.21.0** / npm **11.19.0** · `frontend/node_modules` **691 MB** · `/dev/sda1` **100 % used, 2.2 GB free** · dist census **96 files / 7,949,189 B** (85 `chunk-*.js` = 3,480,246 B; `index.html` 9,257; `main-*.js` 217,094; `styles-*.css` 655,629; `scripts-*.js` 3,559,319; icons+favicons 27,292; sidecar 352) · sidecar `artifact_sha256 14d5b946c1c13258181887461f5dc81957ac0dce18d66c21f3f077bc0a24f7ee` **independently re-verified MATCH** · `git status --porcelain` **EMPTY** after the build.
 
