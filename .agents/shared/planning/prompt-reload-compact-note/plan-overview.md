@@ -2,7 +2,7 @@
 
 Date: 2026-11-16 · **Rev 3: 2026-11-17** (architect fold + final consumption ruling)
 Author: planner-side worker via plan-creation skill (Rev 1 engine-agnostic half · Rev 2 leader-ruling amendment · Rev 3 architect fold)
-Status: **Ready for Council** — the engine shape is RULED (architect decision of record `f159b3e3` + the final consumption ruling, 2026-11-17); see §13 `ENGINE SHAPE — RULED`
+Status: **Ready for Council (currency pass Rev 10, 2026-11-17)** — the build landed at HEAD `faf2edd9f` against the architect's v1.5 (`206c4fe0c`, the APPEND-method pivot addendum). The plan text below was re-anchored to the shipped truth (the append method); the **seam-era** items (T3/T4 hooks, the armed-aware floor, the three-gate table, the seam-era receipts, the pre-filter) are marked **⛔ SUPERSEDED by Rev 10**. The ownership chain (validator 82/0) is UNCHANGED and still PASSes after this pass (now 2 packs / 17 legs).
 Branch: `feature/prompt-reload-compact-note` (worktree `/home/nea/ensemble-src-wt-prompt-reload-compact`, base tip `858a85e31`)
 Prior art: `.agents/shared/planning/prompt-reload/` (the original prompt_reload lane — ledger format, refusal-vocabulary conventions, honesty discipline)
 
@@ -33,7 +33,7 @@ Testable single sentence: **when an agent calls `prompt_reload(compact=True, com
 | S5 | The seam-safety law: compaction at a TURN BOUNDARY, never mid-turn | C1, R-C |
 | S6 | The note's render law: renders on ALL THREE branches of the GLOBAL three-way branch, verbatim, and does not depend on the merge pass | C2, AR-4 |
 | S7 | Content-free arming observability (length + hash prefix only) | task §7 risk #9, resident input (3) |
-| S8 | A DORMANT (default-OFF) pre-filter — **RULED**: a deterministic zero-LLM marker matcher, outside the P1 doctrine, with its own kill lever (ES-2/ES-8) | Emperor direction, R-A, AR-2, AR-1 |
+| S8 | ⛔ **SUPERSEDED by Rev 10 (append method)** — a DORMANT (default-OFF) pre-filter — **RULED**: a deterministic zero-LLM marker matcher, outside the P1 doctrine, with its own kill lever (ES-2/ES-8). **REMOVED:** the keyword params were withdrawn; the marker matcher has no input and no consumer. The pre-filter does not ship. | Emperor direction, R-A, AR-2, AR-1 (superseded) |
 | S9 | The acceptance/test strategy, naming exact files, **THREE** named packs and their PACKS.md registration rows | task §5, AR-4, A-6 |
 | S10 | The scope fence | task §6 |
 | S11 | The Guideline deliverable (written in a later phase, after tester sign-off) | R-D |
@@ -117,7 +117,7 @@ Traceability tags: `C1..C6` = Emperor commission clauses (2026-11-16); `E1..E3` 
 - **AC6.2** `prompt_reload(compact=False)` (note absent/empty) → **byte-identical** to today's receipt. **Scope statement (verbatim, leader ruling 2026-11-16):** "C5: byte-identity is asserted for `compact=false ∧ note absent/empty` (today's shape). The pair (`compact=false`, note non-empty) is out of byte-identity scope and MUST refuse with `prompt_reload_note_requires_compact`." (The code name follows the architect's §G naming; the leader's statement predates the rename.) The (false, non-empty-note) shape is a NEW input shape no today-caller ever sends, so refusing it cannot violate byte-identity of existing behavior; IGNORE-WITH-DISCLOSURE is REJECTED (a silent ignore is a swallow; typed refusal is the honest outcome and catches the caller-error case — an agent that meant `compact=true` and mistyped). [leader ruling 2026-11-16 + architect §G]
 - **AC6.3** The refusal NEVER claims a compaction was requested, armed, or performed.
 
-### R7 — seam safety: the compaction happens at the NEXT TURN BOUNDARY, never mid-turn
+### R7 — ⛔ SUPERSEDED by Rev 10 (append method) — seam safety: the compaction happens at the NEXT TURN BOUNDARY, never mid-turn
 
 **Requirement.** C1 ("TURN BOUNDARY; NEVER mid-turn"). The two mid-turn compaction triggers in the tree are **off-limits**. **Corrected anchors (both, with their roles):** `daemon/graph.py:8394` is the `compact_state` call **inside** `_maybe_precall_compact_95` (def `daemon/graph.py:8138`); `daemon/graph.py:9722` is that helper's **graph-level invocation** (it is NOT a `compact_state` call). T2 is the CLE reactive handler — `except ContextLengthExceededError:` at `daemon/graph.py:9890` — whose `compact_state` calls are at `daemon/graph.py:9990/9998/10019` (plus a commented-out `:9957`).
 
@@ -127,7 +127,7 @@ Traceability tags: `C1..C6` = Emperor commission clauses (2026-11-16); `E1..E3` 
 - **AC7.4** **NAMED HAZARD (verbatim class, final consumption ruling):** *"calling the engine with force=True on an armed note below the floor triggers 50%-tail truncation — FORBIDDEN."* The armed path calls the engine with **`force=False`, NEVER `force=True`**. A mutation leg flips the armed path to `force=True` and asserts the 50%-tail truncation appears (the leg goes RED on the correct implementation). The floor itself is `min_messages_before_compaction` (default **10** — `daemon/config.py:1660`; the constant `MIN_MESSAGES_BEFORE_COMPACTION: int = 10` at `daemon/constants.py:603`); below it, `force=False` yields the clean skip `skipped_below_min_messages` (`daemon/compaction.py:3368-3370`) and **the arm persists**.
   - **POSITIVE-SHAPE PIN (C-1(v)) — the build gate:** below-floor ∧ over-budget ∧ **armed** ⇒ **clean skip, arm persists, still-armed receipt**. **NOTE IN THE PLAN: a flip-to-force=True mutation does NOT catch this hole** — the pin must assert the **positive shape** (below-floor ∧ over-budget ∧ armed ⇒ skip), not merely the absence of the 50%-tail truncation. The hole: the below-floor fall-through is `force OR over_budget` (`daemon/compaction.py:3369-3373` → `:3385-3389`), so an armed T3 with `force=False` still 50%-tail-truncates in the below-floor ∧ over-budget corner; T4 `/compact` consumes the arm while calling `force=True` (`daemon/services/compact_executor.py:1220`); `_last_effort_tail_truncation` (`:2518`) produces a non-empty replacement with **NO GLOBAL doc**, so the note can never render there; and ES-7's predicate (replacement non-empty ∧ persist=True) eats the arm on that outcome — false "applied" provenance + a falsely armed rate limit. **The positive-shape pin is the build gate.**
 
-### R8 — the note rides VERBATIM in the compacted context, at the GLOBAL OVERVIEW slot
+### R8 — ⛔ SUPERSEDED by Rev 10 (append method) — the note rides VERBATIM in the compacted context, at the GLOBAL OVERVIEW slot
 
 **Requirement.** C2: the note must ride verbatim and be rendered where the auto GLOBAL OVERVIEW sits today.
 
@@ -141,7 +141,7 @@ Traceability tags: `C1..C6` = Emperor commission clauses (2026-11-16); `E1..E3` 
 - **AC8.4** The note **never co-exists with another GLOBAL text**: the compacted context contains no "(overview unavailable …)" placeholder and no merged-text text when an authoritative note is present — because that text would assert the absence of an authoritative summary that demonstrably exists, and the v1.1 additive-band shape would have **co-rendered** with it (D25). The merge-failure placeholder is **SUPPRESSED**, not merely outranked.
 - **AC8.5 (NEW — the `previous_overview` suppression predicate, architect v1.2)** The `if previous_overview:` line (`daemon/compaction.py:996-997`, "Previous overview: …") is **SUPPRESSED when a note is consumed**. Reason: after a note-guided compaction the prior doc's GLOBAL **is** the note, so `_extract_previous_overview` (`:222`) would re-emit the **OLD** note verbatim — **uncapped** (that line precedes the cap check) — directly above the new note: unbounded cross-pass duplication. **PIN: two consecutive note-guided compactions** ⇒ the second compacted context contains the NEW note exactly once and contains **no** "Previous overview:" line carrying the old note. **The no-note path keeps `previous_overview` seeding byte-identically** (the auto path's golden pin is unchanged).
 
-### R9 — the note is INDEPENDENT of the merge pass (the core defect this lane fixes)
+### R9 — ⛔ SUPERSEDED by Rev 10 (append method) — the note is INDEPENDENT of the merge pass (the core defect this lane fixes)
 
 **Requirement.** C2: the note "must NOT depend on the merge pass succeeding". AR-4: "Stored" is not sufficient — the agent's **next turn** must actually see it.
 
@@ -149,7 +149,7 @@ Traceability tags: `C1..C6` = Emperor commission clauses (2026-11-16); `E1..E3` 
 - **AC9.2** Under the same forced failure, the sections that survive the merge failure are **still present** — the note does not suppress or replace SECTION DETAIL; it replaces only the GLOBAL region.
 - **AC9.3** **E2E (AR-4, mandatory):** a REAL conversation + a REAL note + the merge pass FORCED TO FAIL → the **agent's next turn** context contains the note. The assertion is made against the context the next turn actually receives, NOT against a stored field, NOT against the checkpoint alone, NOT against a log line. **This is the lane's acceptance artifact.**
 
-### R10 — the honest tool contract: ARMED is not COMPACTED
+### R10 — ⛔ SUPERSEDED by Rev 10 (append method, receipt shape) — the honest tool contract: ARMED is not COMPACTED
 
 **Requirement.** C3 + task §2. A tool that says "compacted" when it only armed is a lie.
 
@@ -162,7 +162,7 @@ Traceability tags: `C1..C6` = Emperor commission clauses (2026-11-16); `E1..E3` 
 | any refusal | the house REFUSED envelope with the typed code | any claim of a compaction |
 | any internal failure | the house FAILED envelope with the typed code | any claim of a compaction |
 
-- **AC10.1** The armed receipt's success token is drawn from a **distinct, frozen** set that does **not** include any "compacted" verb. **RULED (architect §H): the token is `outcome=armed_pending_seam`**, and the receipt carries `note_chars`, `cap`, `note_sha256[:12]`, `superseded_previous?`, the kill-switch state, the expected seam ("your next turn boundary — the quiescent pre-dispatch gate"), and the explicit line **"CONTEXT NOT YET COMPACTED — the compaction happens at your next turn boundary; until then this note remains armed."** (The plan's Rev-2 proposal `compact_note_armed` is superseded; OQ-5 is ANSWERED. The prior lane's frozen sets (`no_change`/`reloaded`/`reloaded_db`/`forced_reload`/`unproven` for the marker; the 6-value INFO enum) are **not** extended — the compact-note surface carries its **own** outcome namespace so the prior lane's pins do not move. Prior ledger D25's "the two sets are DIFFERENT BY DESIGN and must never be reconciled" discipline applied forward.) A **still-armed status line rides every subsequent `prompt_reload` receipt** (architect §H).
+- **AC10.1** ⛔ **SUPERSEDED by Rev 10** — The armed receipt's success token is drawn from a **distinct, frozen** set that does **not** include any "compacted" verb. **RULED (architect §H): the token is `outcome=armed_pending_seam`**, and the receipt carries `note_chars`, `cap`, `note_sha256[:12]`, `superseded_previous?`, the kill-switch state, the expected seam ("your next turn boundary — the quiescent pre-dispatch gate"), and the explicit line **"CONTEXT NOT YET COMPACTED — the compaction happens at your next turn boundary; until then this note remains armed."** (The plan's Rev-2 proposal `compact_note_armed` is superseded; OQ-5 is ANSWERED. The prior lane's frozen sets (`no_change`/`reloaded`/`reloaded_db`/`forced_reload`/`unproven` for the marker; the 6-value INFO enum) are **not** extended — the compact-note surface carries its **own** outcome namespace so the prior lane's pins do not move. Prior ledger D25's "the two sets are DIFFERENT BY DESIGN and must never be reconciled" discipline applied forward.) A **still-armed status line rides every subsequent `prompt_reload` receipt** (architect §H).
 - **AC10.2** The armed receipt states the seam semantics in plain words ("will be applied at the next turn boundary"), and reports the note's **length** and **sha256 prefix** — never the note text.
 - **AC10.3** **How the agent learns the compaction actually happened.** The primary receipt is **CONTEXT-VISIBLE**: because the note rides verbatim in the compacted context (R8), the agent's own next turn *reads its note back out of its context* — the presence of the note IS the proof it landed. This requires no new agent-facing channel and cannot be lost to a log the agent cannot read.
   - **A-4 (§H receipt vocabulary):** the §H receipt vocabulary carries the **anti-refire deferred clause VERBATIM** — **THREE** deferred states are recorded (AC10.5): `armed — deferred (anti-refire window), not compacted`, `armed — deferred (below minimum-compaction floor), not compacted`, and `armed — still armed (last compaction produced no doc), not compacted`. The architect's §H signals 2-4 are the source of record.
@@ -305,7 +305,7 @@ Required content of the armed receipt:
 
 | Element | Content | Why |
 |---------|---------|-----|
-| outcome token | **`armed_pending_seam`** (architect §H; frozen literal, pinned) | a token that cannot be read as "compacted" |
+| outcome token | ⛔ **SUPERSEDED by Rev 10** — **`armed_pending_seam`** (architect §H; frozen literal, pinned). The append path's receipt reports `path=append` and `outcome=compacted/refused/deferred` (§2g of the pivot addendum), never `armed_pending_seam`. | a token that cannot be read as "compacted" |
 | seam statement | "applies at the next turn boundary" (plain words) | the agent must know WHEN, not just THAT |
 | expected-seam clause (v1.4, EXHAUSTIVE) | **"it fires there unless one of exactly three gates applies: the minimum-compaction floor, the 60s anti-refire window, or the deliberate-compact rate limit — this list is exhaustive"** | a reader must not be able to believe the gate list is shorter (v1.4 exhaustiveness pin) |
 | note length | integer | content-free observability (R11) |
@@ -378,7 +378,7 @@ The architect's SCOPE item 5: "**No new knobs beyond two** — `compact_note_max
 
 ---
 
-## 7. The seam-safety law
+## 7. ⛔ SUPERSEDED by Rev 10 (append method) — The seam-safety law (seam-era)
 
 **The law.** A compact-note compaction is triggered **only** at a turn boundary. Never mid-turn. Never inside the tool call.
 
@@ -472,7 +472,7 @@ The finalize brief's declared surface predates the architecture; the architectur
 | 1.1 | Add `compact` / `compact_note` to `PromptReloadInput` + the tool body | none | AC1.1, AC1.3, **L1** |
 | 1.2 | Implement the five refusal codes + envelope routing | 1.1 | AC2.1, AC3.1, AC4.1, AC4.2, AC5.1, AC6.1; AC10.4's code set; **L3** |
 | 1.3 | Implement the cap field on `CompactionConfig` — `compact_note_max_chars` (aliased, default **12000**) + the `load_config` resolver | 1.1 | AC3.1, AC3.2, R6's B5/B6, **L2** |
-| 1.4 | Implement the ARMED receipt + the frozen `armed_pending_seam` token (the architect's ruled outcome token; the pack table and AC10.1 use it) | 1.1 | AC10.1, AC10.2, **L12, L17** (`tests/unit/tools/test_prompt_reload_compact_note.py`) |
+| 1.4 | ⛔ **SUPERSEDED by Rev 10** — Implement the ARMED receipt + the frozen `armed_pending_seam` token (the architect's ruled outcome token; the pack table and AC10.1 use it) | 1.1 | AC10.1, AC10.2, **L12, L17** (`tests/unit/tools/test_prompt_reload_compact_note.py`) |
 | 1.5 | Content-free INFO line (length + sha256 prefix), frozen field order | 1.2 | AC11.1, AC11.3, **L7** |
 | 1.6 | Golden-pin today's `prompt_reload()` receipt byte-for-byte | none | AC1.2, AC13.1 |
 | 1.7 | **VERIFIED-NOT-EDITED:** confirm the "zero conversation-history writes" pin (`test_prompt_reload_tool.py:14`) is GREEN under the lane's carrier — **no edit** (the arm lives in `instances.metadata`) | none | AC13.4 |
@@ -507,7 +507,7 @@ The finalize brief's declared surface predates the architecture; the architectur
 
 **Exit criterion.** The note renders, verbatim, in the GLOBAL region, on all three branches — proven by the merge-failure test.
 
-### Phase 4 — The note-armed seam hook (GATED on ES-5, ES-6) — 10 tasks
+### Phase 4 — ⛔ SUPERSEDED by Rev 10 (append method) — The note-armed seam hook (GATED on ES-5, ES-6) — 10 tasks
 
 | # | Task | Depends On | Acceptance |
 |---|------|------------|------------|
@@ -592,7 +592,7 @@ The finalize brief's declared surface predates the architecture; the architectur
 
 ### 10.3 The NEW packs (A-6 — reconciled count)
 
-**Final number: THREE new packs**, not one. The architect's §I names `prompt_reload_compact_note_unit`, `prompt_reload_compact_note_e2e`, `compaction_note_prefilter_unit`; the plan's earlier "one new pack" understated the surface. Each pack is **REGISTERED in `.agents/tester/PACKS.md` in the same lane** (a pin in an unregistered pack is not gate-verifiable — the house rule).
+**Final number (Rev 10): TWO surviving packs** (the third, `compaction_note_prefilter_unit`, is **SUPERSEDED by Rev 10** and does not ship). The architect's §I names `prompt_reload_compact_note_unit`, `prompt_reload_compact_note_e2e`, `compaction_note_prefilter_unit`; the plan's earlier "one new pack" understated the surface. Each pack is **REGISTERED in `.agents/tester/PACKS.md` in the same lane** (a pin in an unregistered pack is not gate-verifiable — the house rule).
 
 **PACK ROUTING — LANE-OWNED PACKS ONLY (leader Ruling A, 2026-11-17).** **NO lane leg maps into a pre-existing shared pack.** The pre-existing `compaction_unit_test` carries **three conflicting PACKS.md rows** — `:3577` (322/322) · `:4504` (`compaction` narrow, 130/130) · `:4572` (781/0/0) — so a lane leg routed there would **INHERIT that defect** (its gate-verifiability would be ambiguous). The prior lane's `prompt_reload_tool_unit` (`PACKS.md:484`) and `prompt_reload_refusals_unit` (`:483`) are likewise **not this lane's packs**. **Every lane leg routes to the lane's OWN three packs**, matching the architect's §I leg-move table.
 
@@ -600,9 +600,9 @@ The finalize brief's declared surface predates the architecture; the architectur
 
 | Pack (named) | Owned artifact list (test files) | Artifact — pack script | Covers | Legs |
 |---|---|---|---|---|
-| `prompt_reload_compact_note_unit` | `tests/unit/tools/test_prompt_reload_compact_note.py` (NEW) — tool-level **+** `tests/unit/test_compaction_compact_note.py` (NEW) — engine-level | `test/packs/prompt_reload_compact_note_unit.sh` (NEW) | The tool's contract surface — param validation; the five refusal codes; the cap boundary; the ARMED receipt + the frozen `armed_pending_seam` token; the content-free INFO line; the still-armed status line; the supersede disclosure; the never-"compacted" negative grep; the THREE deferred wordings; the exhaustiveness pin — **plus the engine-level legs**: merge-skip ×3 sites, render, ceiling, previous-overview suppression, armed-aware floor, T4, consumption predicate, anti-refire, envelope pins. | L1, L2, L3, L4, L5, L6, L7, L10, L11, L12, L14, L15, L16, L17 |
+| `prompt_reload_compact_note_unit` | `tests/unit/tools/test_prompt_reload_compact_note.py` (NEW) — tool-level **+** `tests/unit/test_compaction_compact_note.py` (NEW) — engine-level | `test/packs/prompt_reload_compact_note_unit.sh` (NEW) | The tool's contract surface — param validation; the five refusal codes; the cap boundary; ⛔ SUPERSEDED by Rev 10 — the ARMED receipt + the frozen `armed_pending_seam` token (the append path's receipt reports `path=append`); the content-free INFO line; the still-armed status line; the supersede disclosure; the never-"compacted" negative grep; the THREE deferred wordings; the exhaustiveness pin — **plus the engine-level legs**: merge-skip ×3 sites, render, ceiling, previous-overview suppression, armed-aware floor, T4, consumption predicate, anti-refire, envelope pins. | L1, L2, L3, L4, L5, L6, L7, L10, L11, L12, L14, L15, L16, L17 |
 | `prompt_reload_compact_note_e2e` | `tests/integration/test_prompt_reload_compact_note_e2e.py` (NEW) | `test/packs/prompt_reload_compact_note_e2e.sh` (NEW) | The AR-4 E2E: a REAL conversation + a REAL note + the merge pass FORCED TO FAIL → the agent's **NEXT TURN** context carries the note verbatim in the GLOBAL band. Modeled on the `test_injected_notes_hoisting_acceptance.py` precedent. **The MERGE-FAILED branch is THE named case of the acceptance artifact.** Also the **byte-identity leg (L8)**, moved out of the shared `tests/integration/test_service_tool_flag_off_byte_identical.py` — **which this lane does NOT edit**. | L8, L9 |
-| `compaction_note_prefilter_unit` | `tests/unit/tools/test_compaction_note_prefilter.py` (NEW) | `test/packs/compaction_note_prefilter_unit.sh` (NEW) | The dormant pre-filter's default-OFF byte-identity (golden-parity: flag-unset vs flag-on-no-note ⇒ identical doc bytes), the marker truth table (marker-match drops; free-text ⇒ ∅; every failure ⇒ ∅; input-list immutability; never-empty wall; whole-group atomicity), and the kill-switch behavior. | L13 |
+| ⛔ `compaction_note_prefilter_unit` | **SUPERSEDED by Rev 10 (append method)** — the pre-filter does not ship (the keyword params were withdrawn; the marker matcher has no input). The row is removed from the active table so the validator parses **2 packs / 17 legs**. The historical record lives in `decisions.md` D-entries + the Rev-9 commit. | — | — | — |
 
 **✅ ROUTING ALIGNED — DIVERGENCE CLOSED (leader Ruling B, 2026-11-17; architect's aligned commit `3f73c6751`).** The architect's §I has **aligned in parallel**: its leg-move table (`architecture-recommendation.md:286`) now routes `prompt_reload_tool_unit` → **`prompt_reload_compact_note_unit`**, and its pack table (`:269`) names the same two owned artifacts — `tests/unit/tools/test_prompt_reload_compact_note.py` (tool-level) **+** `tests/unit/test_compaction_compact_note.py` (engine-level, NEW lane-owned). **The earlier divergence (the architect's §I pointing at the prior lane's `prompt_reload_tool_unit`) is CLOSED — plan and architect now agree.** The census-pin correction landed in the architect's `0cc7f67e6`. (Ledger row: `decisions.md` **D33**.)
 
@@ -618,7 +618,7 @@ The finalize brief's declared surface predates the architecture; the architectur
 
 | Leg | Proves | Assertion (what a test would assert) | File |
 |-----|--------|-------------------------------------|------|
-| **L0** | The packs are registered | `.agents/tester/PACKS.md` contains a row for **EACH of the THREE named packs** — `prompt_reload_compact_note_unit`, `prompt_reload_compact_note_e2e`, `compaction_note_prefilter_unit` (the earlier single `prompt_reload_compact_note.sh` is **SUPERSEDED**); each pack runs green from a clean tree. **OWNING TASK: 6.1.** | `.agents/tester/PACKS.md` + the three pack scripts |
+| **L0** | The packs are registered | `.agents/tester/PACKS.md` contains a row for **EACH of the TWO surviving named packs** — `prompt_reload_compact_note_unit`, `prompt_reload_compact_note_e2e` (the third, `compaction_note_prefilter_unit`, is **SUPERSEDED by Rev 10** and does not ship); each pack runs green from a clean tree. **OWNING TASK: 6.1.** | `.agents/tester/PACKS.md` + the two pack scripts |
 | **L1** | Param validation | The args schema has exactly `force`/`compact`/`compact_note` with the right defaults; `prompt_reload()` returns today's receipt **byte-identical**. **OWNING TASK: 1.1.** | `tests/unit/tools/test_prompt_reload_compact_note.py` (the `prompt_reload_compact_note_unit` pack) |
 | **L2** | Cap boundary | **12,000** chars → accepted; 12,001 → REFUSED `prompt_reload_note_over_cap` with cap + length in the message; **no** truncation (the note is absent from the carrier). **OWNING TASK: 1.3.** | `tests/unit/tools/test_prompt_reload_compact_note.py` (the `prompt_reload_compact_note_unit` pack) |
 | **L3** | Both refusal families | All five codes reachable, each on its exact input, each in the REFUSED envelope, each with zero carrier side effect, each message free of a "compacted" claim. **OWNING TASK: 1.2.** (The **census pin** at `test_prompt_reload_refusals.py:246` is the ONE shared-file edit, owned by task **1.8** — it is a SOURCE census, not a leg.) | `tests/unit/tools/test_prompt_reload_compact_note.py` (the `prompt_reload_compact_note_unit` pack) |
@@ -628,14 +628,14 @@ The finalize brief's declared surface predates the architecture; the architectur
 | **L7** | Content-free logging | A sentinel string planted in the note appears in **zero** log lines; the INFO line carries length + sha256 prefix only; the note is not in any agent-readable table. **OWNING TASK: 1.5.** | `tests/unit/tools/test_prompt_reload_compact_note.py` + a log-capture fixture (the `prompt_reload_compact_note_unit` pack) |
 | **L8** | The default path is byte-unchanged | `prompt_reload()` receipt byte-identical (golden); a fixed fixture's auto-compacted doc byte-identical (golden); the registry + census unchanged. **OWNING TASK: 4.6.** (**Routing per the architect's §I leg-move table:** the byte-identity leg lives in the **lane-owned** e2e file; the prior shared byte-identity file is **NOT edited** by this lane — see §10.3's routing table.) | `tests/integration/test_prompt_reload_compact_note_e2e.py` (the `prompt_reload_compact_note_e2e` pack) |
 | **L9** | **AR-4 E2E (the acceptance artifact)** | **D27 binding: L9 asserts the SKIP itself** — the note renders in the GLOBAL region on the merge-failed-by-skip path and the placeholder never co-emits. The **monkeypatch-fail stub survives as the L6 no-note control** (proving the no-note path still runs the merge). The **acceptance demo shows the note on the MERGE-FAILED branch specifically** ("overview dies by skip; note survives where it died"). Asserted against the context the next turn receives — not a stored field, not the checkpoint alone, not a log line. **OWNING TASK: 6.2.** | `tests/integration/test_prompt_reload_compact_note_e2e.py` (the `prompt_reload_compact_note_e2e` pack) |
-| **L10** | **The D25 merge-skip pin (architect §I, VERBATIM)** | **"≥2 batches + armed note ⇒ no merge LLM call ⇒ per-batch sections survive ⇒ note in the GLOBAL region, no placeholder co-emission."** Asserted against the chunked path (`_summarize_chunked` def `daemon/compaction.py:3922`, sole caller `:3624`, merge call at `:4187-4191`) — the site that fires FIRST on full success and collapses the outcome to `summaries=[merged]`, so the outer sites (`:3687-3691`, `:3768-3772`) never execute. The assertion is **no merge LLM call** (a spy on the merge client), **per-batch sections present**, the **note in the GLOBAL region**, and **no "(overview unavailable …)" placeholder co-emitted**. **OWNING TASK: 3.6.** | `tests/unit/test_compaction_compact_note.py` (the `prompt_reload_compact_note_unit` pack) |
-| **L11** | **The `previous_overview` suppression pin (AC8.5)** | **Two consecutive note-guided compactions** ⇒ the second compacted context contains the **NEW** note exactly once and contains **no** "Previous overview:" line carrying the old note; the no-note path keeps `previous_overview` seeding byte-identically (the auto-path golden pin is unchanged). **OWNING TASK: 3.6.** | `tests/unit/test_compaction_compact_note.py` (the `prompt_reload_compact_note_unit` pack) |
-| **L12** | The ARMED receipt + still-armed status line + supersede disclosure + never-"compacted" negative grep | The receipt carries `outcome=armed_pending_seam`; the still-armed line appears only in the armed state; a supersede carries `superseded_previous=true` + the prior note's sha256[:12]; the armed receipt never contains "compacted". **OWNING TASK: 1.4.** | `tests/unit/tools/test_prompt_reload_compact_note.py` (the `prompt_reload_compact_note_unit` pack) |
-| **L13** | The pre-filter truth table + default-OFF byte-identity + kill-switch | Predicate truth table: marker-match drops; free-text ⇒ ∅; every failure ⇒ ∅; input-list immutability; never-empty wall; whole-group atomicity; flag-unset vs flag-on-no-note ⇒ identical doc bytes; kill-switch off ⇒ identity. **OWNING TASK: 5.7.** | `tests/unit/tools/test_compaction_note_prefilter.py` (the `compaction_note_prefilter_unit` pack) |
-| **L14** | **The T4 pin (architect §I, discrepancy 2)** | Arm present ⇒ the executor passes `force=False` at `compact_executor.py:1220`; a spy on the engine call asserts `force=False` whenever an arm exists, and `force=True` only when unarmed. **OWNING TASK: 4.9** (not double-owned). | `tests/unit/tools/test_prompt_reload_compact_note.py` + `tests/unit/test_compaction_compact_note.py` (the `prompt_reload_compact_note_unit` pack) |
-| **L15** | **The consumption-predicate pin (architect §I, discrepancy 1)** | Doc-less outcomes (`emergency_truncation`, `tail_truncation_last_effort`) do **NOT** consume the arm and do **NOT** write `compact_note_last_applied_at`; `_truncate_fallback`'s outcome (**DOES**) consumes the arm. Asserted as a spy on the arm-clear + the receipt-state write. **OWNING TASK: 4.10.** | `tests/unit/test_compaction_compact_note.py` (the `prompt_reload_compact_note_unit` pack) |
-| **L16** | **The AC7.4 positive-shape pin (C-1(v), the build gate)** | Below-floor ∧ over-budget ∧ **armed** ⇒ **clean skip (`skipped_below_min_messages_armed`), arm persists, still-armed receipt**; a flip-to-`force=True` mutation does NOT catch this hole — the pin must assert the **positive shape**. **OWNING TASK: 4.10.** | `tests/unit/test_compaction_compact_note.py` (the `prompt_reload_compact_note_unit` pack) |
-| **L17** | **The v1.4 EXHAUSTIVENESS PIN** | The receipt's expected-seam clause names **exactly three gates** (floor / 60s anti-refire window / rate limit) and states the list is exhaustive; a reader must not be able to believe the gate list is shorter. **OWNING TASK: 1.4.** | `tests/unit/tools/test_prompt_reload_compact_note.py` (the `prompt_reload_compact_note_unit` pack) — **routing ALIGNED with the architect's §I (commit `3f73c6751`): lane-owned pack** |
+| **L10** | ⛔ **SUPERSEDED by Rev 10** — The D25 merge-skip pin (architect §I, VERBATIM) | **"≥2 batches + armed note ⇒ no merge LLM call ⇒ per-batch sections survive ⇒ note in the GLOBAL region, no placeholder co-emission."** Asserted against the chunked path (`_summarize_chunked` def `daemon/compaction.py:3922`, sole caller `:3624`, merge call at `:4187-4191`) — the site that fires FIRST on full success and collapses the outcome to `summaries=[merged]`, so the outer sites (`:3687-3691`, `:3768-3772`) never execute. The assertion is **no merge LLM call** (a spy on the merge client), **per-batch sections present**, the **note in the GLOBAL region**, and **no "(overview unavailable …)" placeholder co-emitted**. **OWNING TASK: 3.6.** | `tests/unit/test_compaction_compact_note.py` (the `prompt_reload_compact_note_unit` pack) |
+| **L11** | ⛔ **SUPERSEDED by Rev 10** — The `previous_overview` suppression pin (AC8.5) | **Two consecutive note-guided compactions** ⇒ the second compacted context contains the **NEW** note exactly once and contains **no** "Previous overview:" line carrying the old note; the no-note path keeps `previous_overview` seeding byte-identically (the auto-path golden pin is unchanged). **OWNING TASK: 3.6.** | `tests/unit/test_compaction_compact_note.py` (the `prompt_reload_compact_note_unit` pack) |
+| **L12** | ⛔ **SUPERSEDED by Rev 10 (receipt shape)** — The ARMED receipt + still-armed status line + supersede disclosure + never-"compacted" negative grep | The receipt carries `outcome=armed_pending_seam` (⛔ superseded — the append path's receipt reports `path=append`); the still-armed line appears only in the armed state; a supersede carries `superseded_previous=true` + the prior note's sha256[:12]; the armed receipt never contains "compacted". **OWNING TASK: 1.4.** | `tests/unit/tools/test_prompt_reload_compact_note.py` (the `prompt_reload_compact_note_unit` pack) |
+| ⛔ **L13** | **SUPERSEDED by Rev 10** — the pre-filter does not ship (the keyword params were withdrawn; the marker matcher has no input). The leg is removed from the active table so the validator parses **17 legs**. | — | — |
+| **L14** | ⛔ **SUPERSEDED by Rev 10** — The T4 pin (architect §I, discrepancy 2) | Arm present ⇒ the executor passes `force=False` at `compact_executor.py:1220`; a spy on the engine call asserts `force=False` whenever an arm exists, and `force=True` only when unarmed. **OWNING TASK: 4.9** (not double-owned). | `tests/unit/tools/test_prompt_reload_compact_note.py` + `tests/unit/test_compaction_compact_note.py` (the `prompt_reload_compact_note_unit` pack) |
+| **L15** | ⛔ **SUPERSEDED by Rev 10** — The consumption-predicate pin (architect §I, discrepancy 1) | Doc-less outcomes (`emergency_truncation`, `tail_truncation_last_effort`) do **NOT** consume the arm and do **NOT** write `compact_note_last_applied_at`; `_truncate_fallback`'s outcome (**DOES**) consumes the arm. Asserted as a spy on the arm-clear + the receipt-state write. **OWNING TASK: 4.10.** | `tests/unit/test_compaction_compact_note.py` (the `prompt_reload_compact_note_unit` pack) |
+| **L16** | ⛔ **SUPERSEDED by Rev 10** — The AC7.4 positive-shape pin (C-1(v), the build gate) | Below-floor ∧ over-budget ∧ **armed** ⇒ **clean skip (`skipped_below_min_messages_armed`), arm persists, still-armed receipt**; a flip-to-`force=True` mutation does NOT catch this hole — the pin must assert the **positive shape**. **OWNING TASK: 4.10.** | `tests/unit/test_compaction_compact_note.py` (the `prompt_reload_compact_note_unit` pack) |
+| **L17** | ⛔ **SUPERSEDED by Rev 10** — The v1.4 EXHAUSTIVENESS PIN | The receipt's expected-seam clause names **exactly three gates** (floor / 60s anti-refire window / rate limit) and states the list is exhaustive; a reader must not be able to believe the gate list is shorter. **OWNING TASK: 1.4.** | `tests/unit/tools/test_prompt_reload_compact_note.py` (the `prompt_reload_compact_note_unit` pack) — **routing ALIGNED with the architect's §I (commit `3f73c6751`): lane-owned pack** |
 
 ### 10.5 Non-vacuity (the house's standing demand)
 
@@ -716,8 +716,8 @@ The `max_llm_calls_per_pass` budget line (`daemon/config.py:4317-4322`) belongs 
 | 15 | **The C5 byte-identity promise is read too broadly** — a caller passes `compact=false` + a note and expects today's receipt | Medium | Low (now ruled) | D4 is **CONFIRMED** (leader ruling 2026-11-16) and **concurred** by the architect (§G): the promise covers `compact=false ∧ note empty/absent` only; the other shape is a new input shape with a typed refusal (`prompt_reload_note_requires_compact`). The scoping statement is verbatim in AC6.2. OQ-3 is ANSWERED. |
 | 16 | **The two contracts get conflated** — a reader believes the note path can lose messages | Medium | Medium | R-B + R12: the note path is pure-additive; the pre-filter is the only removal surface, separately authorized, default-OFF. The Guideline (Phase 6 task 6.7) states the two contracts in separate sections. |
 | 17 | **The engine ruling arrives after implementation starts** — Phase 1 is built against a shape the architect overturns | Medium | Medium | Phase 1 is deliberately engine-independent (contract only); Phases 2–4 are gated on ES-3/ES-4/ES-5. If the ruling overturns a Phase-1 decision, only the receipt vocabulary and the refusal codes might move — the acceptance criteria do not. **CLOSED by the fold:** the architect's ruling (f159b3e3) and the final consumption ruling have landed; the residual risk is now the council's, not the architect's. |
-| 18 | **⛔ `force=True` on an armed note below the floor ⇒ 50%-tail truncation (the verbatim tail loses half its messages)** — the NAMED HAZARD | **Critical** | Low (if implemented to the ruling) | The armed path calls the engine with **`force=False`, NEVER `force=True`** (final consumption ruling; ES-5). `force=False` inherits the engine's own floor → the clean skip `skipped_below_min_messages` (`daemon/compaction.py:3368-3370`), and **the arm persists** rather than being silently consumed. AC7.4 carries the mutation leg (flip the armed path to `force=True` → the 50%-tail truncation appears → the leg goes RED on a correct implementation) **AND the positive-shape pin (C-1(v))** (below-floor ∧ over-budget ∧ armed ⇒ clean skip, arm persists, still-armed receipt). **Phase 4 tasks 4.7 and 4.8 correct the executor's `force=True` docstrings** (`daemon/services/compact_executor.py:12-16` and `:1199-1201`) so no implementer misreads `force` as bypassing the floor — the docstring is the build-time guard against this hole. The floor is `min_messages_before_compaction` (default 10 — `daemon/config.py:1660`; `MIN_MESSAGES_BEFORE_COMPACTION` at `daemon/constants.py:603`). |
-| 19 | **The honest-deferral receipt is skipped** — the armed path swallows a dedup/floor deferral and reports success | **High** | Low | The THREE deferred states are **verbatim receipt strings** — `armed — deferred (anti-refire window), not compacted`, `armed — deferred (below minimum-compaction floor), not compacted`, and `armed — still armed (last compaction produced no doc), not compacted` — mandated by the final consumption ruling and carried by AC10.5. **Never a success receipt for work not done** (resident input (2), non-negotiable). |
+| 18 | ⛔ **SUPERSEDED by Rev 10** — **⛔ `force=True` on an armed note below the floor ⇒ 50%-tail truncation (the verbatim tail loses half its messages)** — the NAMED HAZARD | **Critical** | Low (if implemented to the ruling) | The armed path calls the engine with **`force=False`, NEVER `force=True`** (final consumption ruling; ES-5). `force=False` inherits the engine's own floor → the clean skip `skipped_below_min_messages` (`daemon/compaction.py:3368-3370`), and **the arm persists** rather than being silently consumed. AC7.4 carries the mutation leg (flip the armed path to `force=True` → the 50%-tail truncation appears → the leg goes RED on a correct implementation) **AND the positive-shape pin (C-1(v))** (below-floor ∧ over-budget ∧ armed ⇒ clean skip, arm persists, still-armed receipt). **Phase 4 tasks 4.7 and 4.8 correct the executor's `force=True` docstrings** (`daemon/services/compact_executor.py:12-16` and `:1199-1201`) so no implementer misreads `force` as bypassing the floor — the docstring is the build-time guard against this hole. The floor is `min_messages_before_compaction` (default 10 — `daemon/config.py:1660`; `MIN_MESSAGES_BEFORE_COMPACTION` at `daemon/constants.py:603`). |
+| 19 | ⛔ **SUPERSEDED by Rev 10** — **The honest-deferral receipt is skipped** — the armed path swallows a dedup/floor deferral and reports success | **High** | Low | The THREE deferred states are **verbatim receipt strings** — `armed — deferred (anti-refire window), not compacted`, `armed — deferred (below minimum-compaction floor), not compacted`, and `armed — still armed (last compaction produced no doc), not compacted` — mandated by the final consumption ruling and carried by AC10.5. **Never a success receipt for work not done** (resident input (2), non-negotiable). |
 | 20 | **The 900s rate limit is not enforced at arm time** — a tight deliberate-compact loop starves the agent's own context | Medium | Low | `DELIBERATE_COMPACT_RATE_LIMIT_S = 900` is a **hardcoded module constant, NO knob**, enforced **at arm time** with the typed refusal `prompt_reload_compact_rate_limited` echoing the remaining seconds (AC16.2). The clock is `compact_note_last_applied_at`, counting DELIBERATE compactions only. |
 
 ---
@@ -767,7 +767,7 @@ The architect owns these. The Emperor's direction (verbatim, authoritative): *"F
 
 ---
 
-### ES-2 — Pre-filter shape + its seam-safety invariant
+### ES-2 — ⛔ SUPERSEDED by Rev 10 (append method) — Pre-filter shape + its seam-safety invariant
 
 > **✅ RULED.** Architect `architecture-recommendation.md` §E "The seam-safety invariant — RULING" + §F "Pre-filter failure surface" + the "Pre-filter decision matrix" (2026-11-17).
 >
@@ -823,7 +823,7 @@ The architect owns these. The Emperor's direction (verbatim, authoritative): *"F
 
 ---
 
-### ES-4 — Render slot vs assembly slot (and the in-context outcome marker)
+### ES-4 — ⛔ SUPERSEDED by Rev 10 (append method) — Render slot vs assembly slot (and the in-context outcome marker)
 
 > **✅ RULED — v1.2 (D25 sharpening).** Architect `architecture-recommendation.md` §D "Note placement + composition" (v1.2) + §D.1 "D25 RULING" + §H (v1.1) + §I — committed `f159b3e37` and amended `2933eca78` (2026-11-17).
 >
@@ -865,7 +865,7 @@ The architect owns these. The Emperor's direction (verbatim, authoritative): *"F
 
 ---
 
-### ES-5 — Where the note-armed forced turn-boundary compaction hooks
+### ES-5 — ⛔ SUPERSEDED by Rev 10 (append method) — Where the note-armed forced turn-boundary compaction hooks
 
 > **✅ RULED (final consumption ruling, leader injection 2026-11-17).** Fills the slot that was held pending the architect's amendment.
 >
@@ -888,7 +888,7 @@ The architect owns these. The Emperor's direction (verbatim, authoritative): *"F
 
 ---
 
-### ES-6 — Dedup interaction (the 60s anti-thrash window) vs the note-armed force
+### ES-6 — ⛔ SUPERSEDED by Rev 10 (append method) — Dedup interaction (the 60s anti-thrash window) vs the note-armed force
 
 > **✅ RULED (final consumption ruling, leader injection 2026-11-17).** Fills the slot that was held pending the architect's amendment.
 >
@@ -916,7 +916,7 @@ The architect owns these. The Emperor's direction (verbatim, authoritative): *"F
 
 ---
 
-### ES-7 — Note-consumption atomicity (**at-most-once** across crash/retry)
+### ES-7 — ⛔ SUPERSEDED by Rev 10 (append method) — Note-consumption atomicity (**at-most-once** across crash/retry)
 
 > **✅ RULED (architect §D, now final — the leader's final consumption ruling closes the slot).**
 >
@@ -938,7 +938,7 @@ The architect owns these. The Emperor's direction (verbatim, authoritative): *"F
 
 ---
 
-### ES-8 — Pre-filter default state, kill lever, and budget
+### ES-8 — ⛔ SUPERSEDED by Rev 10 (append method) — Pre-filter default state, kill lever, and budget
 
 > **✅ RULED.** Architect `architecture-recommendation.md` §C "Governance tension — RULING" + SCOPE item 5 + the "Pre-filter decision matrix" + the "Default-state table" (2026-11-17).
 >
@@ -1079,7 +1079,7 @@ The architect owns these. The Emperor's direction (verbatim, authoritative): *"F
 | Q2 | ES-9's clause-4 rewording text | **Architect** | **ANSWERED** — the architect's draft is ADOPTED verbatim (ES-9); the Guideline (Phase 6 task 6.7) quotes it. |
 | Q3 | ES-10 (AR-5): may the decision-engine overlay ever be a deciding surface? | **Emperor** | **FILLED (recorded, not decided)** — the doctrine stays ratified and untouched; the lane's design is inert to the answer. Surfaces on the Emperor's next waking; **does not block this plan**. |
 | Q4 | The `second_to_last` pin in `test_prompt_reload_pins.py` (`second_to_last`) | **Leader** (routing) | **ANSWERED** — leader ruling 2026-11-16 + A-1 correction: the node is **GREEN at base `858a85e31`** (assertion body measures `entries[-4]`); the premise that it was red is false. Do NOT fix it; if it redds in the tester phase, classify then, on measurement. |
-| Q5 | The ARMED receipt's outcome token | **Architect** (frozen-string discipline) | **ANSWERED** — `outcome=armed_pending_seam` (architect §H), carried by AC10.1. |
+| Q5 | ⛔ **SUPERSEDED by Rev 10** — The ARMED receipt's outcome token | **Architect** (frozen-string discipline) | **ANSWERED** — `outcome=armed_pending_seam` (architect §H), carried by AC10.1. **The append path's receipt reports `path=append`/`outcome=compacted`, never `armed_pending_seam`.** |
 | Q6 | ES-1…ES-11 (the engine-shaped slots) | **Architect** | **ANSWERED 11/11** — architect decision of record **f159b3e3** (ES-1/2/3/4/8/9) + the **final consumption ruling** (ES-5/6/7) + ES-10 filled as recorded-not-decided. **No slot remains open.** |
 
 **Residual items that are NOT questions** — they are flagged tensions carried to the council round in `decisions.md` (D25–D27): the merge-skip call-site coverage gap, the architect's `§D` merge-range drift, and the "merge forced to fail" E2E degeneracy under "merge skipped by construction".
@@ -1098,3 +1098,98 @@ The architect owns these. The Emperor's direction (verbatim, authoritative): *"F
 - **The compaction doc's ceiling rule already has the right shape for a protected region.** `COMPACTION_DOC_CEILING_FRACTION = 0.15` condenses the oldest sections first and never the GLOBAL (`:985-991`) — exactly the policy the note needs (B1/B2). The note joins the protected set.
 - **The two "JEV"s are different things** (§11) and the pre-filter slot must name which one it binds to, if either.
 - **The memoir lane is the doctrinal sibling, not the code sibling.** The dream consolidates episodic memory; the note consolidates working memory. The kinship line is documentation; the mechanics are unrelated (F5).
+
+
+---
+
+## 17. Currency pass (Rev 10, 2026-11-17) — the append method
+
+**The build landed at HEAD `faf2edd9f` against the architect's v1.5 (`206c4fe0c`, the APPEND-method pivot addendum).** The plan text above was re-anchored to the shipped truth. The **seam-era** items are marked **⛔ SUPERSEDED by Rev 10** inline (see the SUPERSEDED list below); the **rewrote** items (the shipped truth) are recorded here.
+
+### 17.1 The shipped truth (the append method) — REWROTE
+
+1. **THE FINAL SURFACE** — `prompt_reload(compact: bool = false, compact_note: str = "")` — **ONE bool, ONE string**. The keyword param was **WITHDRAWN** before it landed (no orphaned code). *"The words were always enough; the parameter was not."*
+2. **THE MECHANISM (the append method)** — the daemon appends `[System request: Compaction] Your next message is compaction of previous messages. Compaction request is: <note>` to the agent's own list; the **AGENT'S OWN MODEL** answers it in the same turn; the daemon wraps the model's output in the house doc format (`sections=[]`, the note **ABSENT** from the doc, the honest-truncation param), **swaps the history** (the exchange CONSUMED), **splices `[doc, *preserved]`**, and **settles the arm only after the swap persists**.
+3. **THE TWO LEADER RULINGS** — (a) tail = the daemon splices the last K verbatim (house K, no new knob); (b) house engine = RETAINED as the **UNTOUCHED auto path** (the note path is **ONE path**; NO note-path fallback — a note-guided compaction is requested from a running turn, so the context is within the agent model's window by construction; an append that cannot run **REFUSES**, never silently degrades).
+4. **THE INVARIANTS** (folded as ACs): same-model (STRUCTURAL — the append path makes no model call of its own, so the compaction is served by the turn's effective model; `resolve_compaction_model` structurally unreachable; `COMPACTION_MODEL` governs the auto path only) · window provenance (`get_model_context_limit(agent_model)` directly on the swap side; never `_effective_model_name`/`_trigger_window_for_model`) · ceiling **SKIPPED** (`sections=[]` ⇒ the `:1026` gate never runs; the 600-token GLOBAL cap is the only bound; the honest-truncation param required) · ordering `[doc, *tail]` · the exchange consumed · marker-based reply detection (`context_kind == "compaction_request"`) · turn continuation reads the tail's last message, no routing flag · the receipt says only what happened.
+5. **THE REFUSAL VOCABULARY** — the **REAL** set: 14 REFUSED + 1 FAILED, derived from the landed source (`daemon/services/prompt_refresh.py:178-196`). The keyword-without-compact refusal **never existed** on this branch.
+6. **THE OPEN ITEMS carried for the tester:** live-turn execution unverified (the swap's real landing, the observed routing, the read-after-write against the live repository — a live smoke belongs to the gate); the base-capture gap (the adjacent `tests/unit/services/` compaction family unmeasured in the ∅ base red-set).
+
+### 17.2 The SUPERSEDED list (every item, with file:line)
+
+| Item | Location | Reason |
+|---|---|---|
+| S8 — the dormant pre-filter | `plan:29` (scope row) · `plan:203` (R14) · `plan:219-225` (AC14.1–14.7) · `plan:420` (F4) · `plan:527` (Phase 5) · `plan:531-537` (tasks 5.1–5.7) · `plan:605` (§10.3 row) · `plan:634` (L13) | the keyword params were withdrawn; the marker matcher has no input and no consumer. The pre-filter does not ship. |
+| The T3 threshold bypass | `plan:387` (ES-5) · `plan:514` (task 4.1) · `plan:724` (Risk #18) | the append path never runs the engine's compaction |
+| The T4 `force=False` hook | `plan:522` (task 4.9) · `plan:633` (L14) · `plan:719` (Risk #18) | note-specific force semantics on `/compact` are removed |
+| The armed-aware floor predicate | `plan:523` (task 4.10) · `plan:637` (L16) | it governs the engine's compaction when an arm exists; the append path never runs the engine |
+| The note-first GLOBAL arm | `plan:135` (AC8.2) · `plan:139` (AC8.3) · `plan:141` (AC8.4) · `plan:830-835` (ES-4) | on the append path the model wrote the compaction; the note must not be re-rendered |
+| The `_merge_summaries` merge-skip entry guard | `plan:505` (task 3.6) · `plan:629` (L10) · `plan:839-847` (ES-4) | the append path never calls the engine's compaction, and the auto path never has a note ⇒ the guard can never fire |
+| The `previous_overview` suppression | `plan:142` (AC8.5) · `plan:632` (L11) | part of the note render that is removed |
+| The seam-era receipts — `armed_pending_seam` token | `plan:165` (AC10.1) · `plan:308` (§5.2) | the append path's receipt reports `path=append` and `outcome=compacted/refused/deferred` |
+| The three-gate clause + the three deferred-state strings | `plan:310` (§5.2) · `plan:168` (AC10.3) · `plan:170` (AC10.5) · `plan:328` (§5.4) · `plan:391-403` (§7 three-gate table) · `plan:638` (L17) | the append path has **different outcomes** (compacted / refused / append_failed / empty_reply) and **no gates** |
+| The note-as-rendered-in-GLOBAL law | `plan:130-142` (R8, AC8.1–8.5) | the note is the **request**, not a layer; it is never re-rendered into the doc |
+| R14 + AC14.1–AC14.7 | `plan:203` (R14) · `plan:219-225` (AC14.1–14.7) | the pre-filter does not ship |
+| Phase 4 + tasks 4.1–4.10 | `plan:510-525` | the seam hooks are removed; the arm lifecycle (arm/read/clear/settle) survives, re-pointed at the append outcome |
+| Phase 5 + tasks 5.1–5.7 | `plan:527-539` | the pre-filter does not ship |
+| L10, L11, L13, L14, L15, L16, L17 | `plan:629-638` | the seam/pre-filter legs are removed |
+| `daemon/_compact_note_prefilter.py` (331 lines) | §4 of the pivot addendum's REMOVE inventory | the pre-filter does not ship |
+| `tests/unit/tools/test_compaction_note_prefilter.py` (422 lines) | §4 of the pivot addendum | tests a removed component |
+| `test/packs/compaction_note_prefilter_unit.sh` | §4 of the pivot addendum | same |
+| `compaction_note_prefilter_unit` PACKS.md row | `PACKS.md` (one row) | removed by NAME |
+
+### 17.3 The REWROTE list (the shipped truth, with pointers)
+
+| Item | Where it lives now |
+|---|---|
+| The final surface (one bool, one string) | §1 (R1/R2) + `daemon/tools/prompt_reload.py` |
+| The append method (request append + agent's own model + wrap + swap + tail splice) | §17.1 item 2 + the pivot addendum §2 |
+| The two leader rulings (tail splice = house K; house engine = untouched auto path, no fallback) | §17.1 item 3 + pivot addendum §2f + §5 |
+| The invariants (same-model, window provenance, ceiling skipped, ordering, exchange consumed, marker detection, turn continuation, receipt honesty) | §17.1 item 4 + pivot addendum §11 |
+| The honest-truncation parameter on `build_compaction_doc` (one additive keyword-only param, default `False`) | pivot addendum §2e + §11.1 |
+| The refusal vocabulary (the real 14) | §4 + pivot addendum §8.3 |
+| The receipt (path=append, outcome, effective model, note length+hash, tail count, doc id, selection statement) | pivot addendum §2g |
+| The keyword-param withdrawal | pivot addendum §0 + §8.4 + the D34 ledger row |
+
+### 17.4 The REAL refusal vocabulary (derived from the landed source)
+
+`daemon/services/prompt_refresh.py:178-196` — `REFUSAL_CODES: frozenset[str] = frozenset({...})` holds **14** codes; `FAILURE_CODES` holds **1** (`prompt_reload_internal_error`). The census pin (`tests/unit/tools/test_prompt_reload_refusals.py:249`) asserts `len(REFUSAL_CODES) == 14` and **it has already landed with the build** (marked LANDED — not pending).
+
+| # | Code | Origin |
+|---|---|---|
+| 1 | `prompt_reload_disabled` | original ladder |
+| 2 | `prompt_reload_agent_dir_unresolved` | original ladder |
+| 3 | `prompt_reload_dir_invalid` | original ladder |
+| 4 | `prompt_reload_manifest_missing_live` | original ladder |
+| 5 | `prompt_reload_manifest_unreadable` | original ladder |
+| 6 | `prompt_reload_manifest_mismatch` | original ladder |
+| 7 | `prompt_reload_agent_meta_invalid` | original ladder |
+| 8 | `prompt_reload_compose_failed` | original ladder |
+| 9 | `prompt_reload_db_unavailable` | original ladder |
+| 10 | `prompt_reload_note_required` | compact-note lane (absent OR whitespace-only — one code) |
+| 11 | `prompt_reload_note_over_cap` | compact-note lane (> 12,000 chars ⇒ refused, **never truncated**) |
+| 12 | `prompt_reload_note_requires_compact` | compact-note lane (note without `compact=true` — the **coherence rule**, stays) |
+| 13 | `prompt_reload_compact_disabled` | compact-note lane (`compact=true` while compaction disabled) |
+| 14 | `prompt_reload_compact_rate_limited` | compact-note lane (900 s deliberate-compact rate limit, arm time) |
+
+**The keyword-without-compact refusal never existed on this branch** — the keyword param was never landed, so no code is removed and the count stays 14. (`prompt_reload_compact_note_already_armed` was already retired earlier: a second note REPLACES the first with disclosure.)
+
+### 17.5 The keyword-param withdrawal — ledger row (quote)
+
+Pivot addendum §0 + §8.4: *"The keyword params are withdrawn (ruling (C) moot): the tool surface is `prompt_reload(compact=True, compact_note="…")` and nothing else. The words were always enough; the parameter was not."* And §8.4: *"The **narrow keyword ruling** — keyword acceptance form, keyword bounds, keyword refusal codes, the keyword request text — is **WITHDRAWN by the Emperor** … It was never delivered (the keyword scope addition was refused by the busy-guard and never landed on this branch), so **no code is orphaned by the withdrawal**; the withdrawal removes a *plan*, not a *shipped capability*."* (Ledger row: `decisions.md` **D34**.)
+
+### 17.6 Code-vs-summary contradictions (code wins; disclosed)
+
+1. **§2e (Rev 9) said** *"Σsections = 0, so the numerator is the GLOBAL alone"* — implying the 15% ceiling rule runs on the append path. **The code does not run it.** `daemon/compaction.py:1026`: `if context_window is not None and n_sections > 0:` — with `sections=[]` the ceiling rule is **skipped entirely**; `_apply_ceiling_rule` is never called and there is no ARCHIVED line. **Code wins.** The append path's doc is bounded by the **600-token `GLOBAL_OVERVIEW_TOKEN_CAP`** (`daemon/compaction.py:167`) only. (Pivot addendum §11.1.)
+2. **§2b (Rev 9) said** the override *"is consulted only by the engine's summarization call sites (`:2465`, `:4720`)"*. **Measured, there are four consult points** (`:1326` `resolve_snapshot_model`, `:2465` `_effective_model_name`, `:2490` `_trigger_window_for_model`, `:4678` the summarizer's `override_model`), and `:2465`/`:2490` **do reach the append path's window math if reused**. **Code wins.** Ruling: the append path computes its window as `get_model_context_limit(agent_model_name, config)` directly (`daemon/compaction.py:1191`), never `_effective_model_name`/`_trigger_window_for_model`. (Pivot addendum §11.2.)
+3. **§2d (Rev 9) said** the swap is mid-turn and "permitted" — the commission's "never mid-turn" wording is superseded by the Emperor's mechanism. **Code confirms** the house's node-return commit is the mechanism (`daemon/compaction.py:302-314`, `make_remove_all_sentinel`). The swap IS mid-turn, and that is the house's own compensation. (Pivot addendum §2d + §11.3.)
+4. **The note-as-request text** (pivot addendum §2c) is `"[System request: Compaction] Your next message is compaction of previous messages. Compaction request is: <compact_note>"` — the plan's earlier seam-era receipt strings (`armed_pending_seam`, the three deferred states, the three-gate clause) never shipped. (Pivot addendum §2c + §8.4.)
+
+### 17.7 The open items carried for the tester
+
+1. **Live-turn execution unverified** — the swap's real landing, the observed routing, the read-after-write against the live repository (the tools-node wrapper reads `read_compact_note_state` immediately after the tool writes it, inside the same node — stale-cache risk). A live smoke belongs to the gate.
+2. **Base-capture gap** — the adjacent `tests/unit/services/` compaction family is unmeasured in the ∅ base red-set (POK `testgate-01`).
+
+### 17.8 The census pin is LANDED
+
+`tests/unit/tools/test_prompt_reload_refusals.py:249` asserts `len(REFUSAL_CODES) == 14` (and `:250` asserts `len(FAILURE_CODES) == 1`). **The plan's "re-derived by grep" instruction is now a verification, not a pending edit.** The lane's one shared-file edit is **done** (landed with the build).

@@ -193,9 +193,9 @@ def main() -> int:
     for leg in legs:
         owners = leg_to_packs.get(leg, [])
         if leg == "L0":
-            ok = len(packs) == 3
+            ok = len(packs) == 2
             rep.add("(iii)", leg, ok,
-                    "" if ok else "L0 is the registration leg over all three packs")
+                    "" if ok else "L0 is the registration leg over both surviving packs")
             continue
         ok = len(owners) == 1
         rep.add("(iii)", leg, ok,
