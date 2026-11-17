@@ -187,6 +187,22 @@ def _human_summary(report: Any) -> str:
     return "\n".join(lines)
 
 
+def _sync_pg_url(dsn: str) -> str:
+    """Defect D (2026-11-17): normalize a postgresql:// DSN for the
+    SYNC psycopg3 driver.
+
+    SQLAlchemy defaults a bare ``postgresql://`` URL to the psycopg2
+    driver — which is NOT a dependency of this project (the daemon
+    uses ``postgresql+psycopg`` at ``daemon/repositories/factory.py``).
+    A bare URL therefore died with a raw ModuleNotFoundError/ImportError
+    traceback. The 4-line idiom mirrors
+    ``tests/integration/test_maintenance_checkpoint_cleanup_api.py``.
+    """
+    if dsn.startswith("postgresql://"):
+        return "postgresql+psycopg://" + dsn[len("postgresql://"):]
+    return dsn
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Returns the process exit code."""
     args = build_parser().parse_args(argv)
@@ -197,7 +213,21 @@ def main(argv: list[str] | None = None) -> int:
         else resolve_receipt_path(args.data_dir)
     )
 
-    engine = create_engine(args.db_url, future=True)
+    try:
+        engine = create_engine(_sync_pg_url(args.db_url), future=True)
+        # A cheap liveness probe so an unreachable host / bad
+        # credential fails HERE, loudly and cleanly — not as a raw
+        # traceback halfway through the first repository call
+        # (defect D: the script used to be fully unguarded).
+        from sqlalchemy import text as _text
+
+        with engine.connect() as _conn:
+            _conn.execute(_text("SELECT 1"))
+    except Exception as exc:  # noqa: BLE001 — a bad URL must be loud, not a traceback
+        print(
+            f"ERROR: cannot open {args.db_url!r}: {exc}", file=sys.stderr
+        )
+        return 1
     skill_repo = SkillRepository(engine)
     ab_test_repo = SkillABTestRepository(engine)
 

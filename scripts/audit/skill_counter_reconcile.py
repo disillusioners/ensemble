@@ -493,7 +493,16 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        engine = create_engine(args.db_url, future=True)
+        # Defect D (2026-11-17): a bare postgresql:// URL makes
+        # SQLAlchemy default to psycopg2 (not installed); normalize to
+        # the project's psycopg3 driver first — same idiom as
+        # skill_stale_deactivate._sync_pg_url.
+        db_url = args.db_url
+        if db_url.startswith("postgresql://"):
+            db_url = (
+                "postgresql+psycopg://" + db_url[len("postgresql://"):]
+            )
+        engine = create_engine(db_url, future=True)
         # A cheap liveness probe so a bad URL fails HERE, loudly, and not
         # halfway through a write loop.
         _read_clock(engine)
