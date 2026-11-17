@@ -29,7 +29,9 @@ WHAT IT PROVES (the numbered checks)
       history is NOT there);
   C5  a tag ACROSS lanes delivers (the delivery outcome + the DURABLE
       record of that delivery: the member's delivered cursor, Y14 —
-      the content-free audit row carries ids + the outcome only);
+      the audit row EXISTS, EXACTLY ONE, outcome "enqueued", with the
+      emitter's EXACT four payload fields room_id / seq / member_name /
+      outcome and no message text in any of them);
   C6  the unread → nudge path fires ONCE per turn (the loop-guard) and
       the note names the REAL unread count (the VALUE is pinned, not
       just the word);
@@ -404,6 +406,27 @@ async def run_scenario() -> int:
         for row in audit_rows
         if row.kind == EventKind.ROOM_TAG_DELIVERY.value
     ]
+    # THE AUDIT ROW IS REAL, EXACTLY ONE, AND TYPED (A-P6-34). The
+    # pre-fix check was an all() over the rows — VACUOUSLY True at
+    # zero rows — and asserted neither the row's existence, nor its
+    # count, nor its outcome. The payload is the emitter's EXACT
+    # 4-field contract (room_delivery._emit_delivery_event):
+    # room_id / seq / member_name / outcome. member_name is the DB
+    # AUDIT ROW's field BY DESIGN — the SSE room-channel FRAMES carry
+    # no names (A-P6-26's surface split); the DB row names the member
+    # so the audit trail is attributable. The message text appears in
+    # NO field.
+    audit_exists_exactly_one = len(tag_events) == 1
+    audit_payload = (
+        json.loads(tag_events[0].data or "{}") if tag_events else {}
+    )
+    audit_keys_exact = set(audit_payload) == {
+        "room_id",
+        "seq",
+        "member_name",
+        "outcome",
+    }
+    audit_outcome_enqueued = audit_payload.get("outcome") == "enqueued"
     audit_content_free = all(
         "the plates need a colour pass" not in (row.data or "")
         for row in tag_events
@@ -415,6 +438,9 @@ async def run_scenario() -> int:
         and tag_outcomes[0]["member_name"] == "capturer"
         and tag_outcomes[0]["outcome"] == "enqueued"
         and delivered_cursor == tagged_seq
+        and audit_exists_exactly_one
+        and audit_keys_exact
+        and audit_outcome_enqueued
         and audit_content_free,
         {
             "tag_outcomes": tag_outcomes,
@@ -422,6 +448,10 @@ async def run_scenario() -> int:
             "tagged_seq": tagged_seq,
             "delivered_cursor": delivered_cursor,
             "audit_rows": len(tag_events),
+            "audit_exists_exactly_one": audit_exists_exactly_one,
+            "audit_payload_keys": sorted(audit_payload),
+            "audit_keys_exact": audit_keys_exact,
+            "audit_outcome": audit_payload.get("outcome"),
             "audit_content_free": audit_content_free,
         },
     )
