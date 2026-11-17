@@ -522,15 +522,32 @@ class TestL4SeamSafety:
         assert f"outcome={OUTCOME_ARMED_PENDING_SEAM}" in out
 
     async def test_the_note_armed_hook_is_not_registered_in_the_mid_turn_sites(self) -> None:
-        """T1/T2 (the mid-turn triggers) must NOT read the arm."""
-        import daemon.graph as graph_mod
-        import daemon.services.instance_messaging as im_mod
+        """T1/T2 (the mid-turn triggers) must NOT read the arm.
 
-        for module in (graph_mod, im_mod):
-            source = module.__file__
-            with open(source, encoding="utf-8") as fh:
-                text = fh.read()
-            assert "compact_note" not in text, source
+        T1 (``graph.py::_maybe_precall_compact_95``) and T2 (the CLE
+        reactive handler) BOTH live in ``daemon/graph.py`` — that file
+        must not mention the note at all. The note-armed hook lives at
+        T3 (``daemon/services/instance_messaging.py``), a QUIESCENT
+        pre-dispatch seam.
+        """
+        import daemon.graph as graph_mod
+
+        with open(graph_mod.__file__, encoding="utf-8") as fh:
+            text = fh.read()
+        assert "compact_note" not in text, "T1/T2 must stay arm-blind"
+
+    async def test_the_mid_turn_sites_are_untouched_by_the_lane(self) -> None:
+        """``daemon/graph.py`` is EXPLICITLY UNTOUCHED by this lane."""
+        import subprocess
+
+        out = subprocess.run(
+            ["git", "diff", "--name-only", "858a85e31", "--", "daemon/graph.py"],
+            cwd=__import__("pathlib").Path(__file__).resolve().parents[3],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert out.stdout.strip() == "", out.stdout
 
 
 # ── L7 — content-free logging ───────────────────────────────────────────────

@@ -26,7 +26,7 @@ LLM call" is asserted by a spy on the merge client, not by the outcome.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -470,3 +470,450 @@ class TestL10MergeSkip:
         assert NOTE_SENTINEL in region
         # The per-batch sections survive.
         assert "── SECTION DETAIL ──" in doc.content
+
+
+# ── L16 — the AC7.4 POSITIVE-SHAPE pin (the build gate) ────────────────────
+
+
+class TestL16ArmedAwareFloor:
+    """Architect §D.2(iv) — the armed-aware floor predicate.
+
+    The below-floor fall-through is ``force OR over_budget``; an armed
+    call with ``force=False`` still 50%-tail-truncates in the
+    below-floor AND over-budget corner. The pin asserts the POSITIVE
+    SHAPE (a clean skip), NOT merely the absence of the truncation —
+    a flip-to-``force=True`` mutation does NOT catch this hole.
+    """
+
+    @staticmethod
+    def _below_floor_over_budget_context(note: str):
+        config = _config(
+            min_messages_before_compaction=10,
+            context_window_overrides={"gpt-4o": 1000},
+        )
+        context = CompactionContext(
+            messages=_messages(3),          # BELOW the floor (10)
+            system_prompt_tokens=5000,      # OVER budget (window 1000 × 0.80)
+            model_name="gpt-4o",
+            config=config,
+            llm_config={},
+            compact_note=note,
+        )
+        return config, context
+
+    @pytest.mark.asyncio
+    async def test_below_floor_and_over_budget_and_armed_is_a_clean_skip(self) -> None:
+        config, context = self._below_floor_over_budget_context(NOTE_SENTINEL)
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(context, force=False)
+        assert result is not None
+        assert result.compaction_type == "skipped_below_min_messages_armed"
+        # NO tail truncation: the replacement is EMPTY (the tail-truncation
+        # path produces a NON-empty replacement).
+        assert result.replacement_messages == []
+
+    @pytest.mark.asyncio
+    async def test_the_control_the_unarmed_path_tail_truncates(self) -> None:
+        """Non-vacuity: WITHOUT the note the same fixture falls through to
+        the 50%-tail last-effort floor — so the clean skip above is
+        load-bearing."""
+        config, context = self._below_floor_over_budget_context("")
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(context, force=False)
+        assert result is not None
+        assert result.compaction_type == "tail_truncation_last_effort"
+        assert result.replacement_messages  # the tail truncation DID happen
+
+    @pytest.mark.asyncio
+    async def test_the_arm_persists_and_the_deferral_is_recorded(self) -> None:
+        """The clean skip does NOT consume the arm; the deferred state is
+        recorded so the next armed receipt says "deferred, not
+        compacted"."""
+        from daemon.services import prompt_refresh as pr
+
+        repo = _CarrierRepo()
+        pr.arm_compact_note(repo, "iid-1", NOTE_SENTINEL)
+        config, context = self._below_floor_over_budget_context(NOTE_SENTINEL)
+        compactor = ContextCompactor(config, {})
+        result = await compactor.compact_state(context, force=False)
+        outcome = pr.settle_compact_note_arm(
+            repo,
+            "iid-1",
+            note_sha12=pr.compact_note_sha256_12(NOTE_SENTINEL),
+            result=result,
+            persisted=True,
+        )
+        assert outcome == pr.DEFERRED_STATE_BELOW_FLOOR
+        assert repo.metadata["compact_note_arm"] == NOTE_SENTINEL
+        assert repo.metadata["compact_note_last_deferred"] == pr.DEFERRED_STATE_BELOW_FLOOR
+        assert "compact_note_last_applied_at" not in repo.metadata
+
+
+# ── L15 — the consumption predicate ─────────────────────────────────────────
+
+
+class _CarrierRepo:
+    """A tiny in-memory ``instances.metadata`` carrier stub."""
+
+    def __init__(self) -> None:
+        self.metadata: dict = {}
+
+    def get(self, instance_id: str):
+        return MagicMock(instance_metadata=self.metadata)
+
+    def set_metadata(self, instance_id: str, key: str, value):
+        self.metadata[key] = value
+
+    def delete_metadata(self, instance_id: str, key: str):
+        self.metadata.pop(key, None)
+
+
+def _result(compaction_type: str, *, replacement=("doc",)):
+    return MagicMock(
+        compaction_type=compaction_type,
+        replacement_messages=list(replacement),
+    )
+
+
+class TestL15ConsumptionPredicate:
+    """Architect §D.2(i) — the arm is consumed ONLY by a DOC-PRODUCING
+    compaction. ``emergency_truncation`` / ``tail_truncation_last_effort``
+    do NOT consume it; ``_truncate_fallback``'s outcome DOES."""
+
+    def test_the_doc_less_outcomes_do_not_consume_the_arm(self) -> None:
+        from daemon.services import prompt_refresh as pr
+
+        for ctype in ("emergency_truncation", "tail_truncation_last_effort"):
+            repo = _CarrierRepo()
+            pr.arm_compact_note(repo, "iid-1", NOTE_SENTINEL)
+            outcome = pr.settle_compact_note_arm(
+                repo,
+                "iid-1",
+                note_sha12=pr.compact_note_sha256_12(NOTE_SENTINEL),
+                result=_result(ctype),
+                persisted=True,
+            )
+            assert outcome == pr.DEFERRED_STATE_NO_DOC, ctype
+            assert repo.metadata["compact_note_arm"] == NOTE_SENTINEL
+            assert "compact_note_last_applied_at" not in repo.metadata
+
+    def test_the_truncate_fallback_outcome_consumes_the_arm(self) -> None:
+        from daemon.services import prompt_refresh as pr
+
+        repo = _CarrierRepo()
+        pr.arm_compact_note(repo, "iid-1", NOTE_SENTINEL)
+        outcome = pr.settle_compact_note_arm(
+            repo,
+            "iid-1",
+            note_sha12=pr.compact_note_sha256_12(NOTE_SENTINEL),
+            result=_result("truncation"),
+            persisted=True,
+        )
+        assert outcome == pr.COMPACT_NOTE_LANDED
+        assert "compact_note_arm" not in repo.metadata
+        assert repo.metadata["compact_note_last_sha256_12"] == (
+            pr.compact_note_sha256_12(NOTE_SENTINEL)
+        )
+        assert repo.metadata["compact_note_last_applied_at"]
+
+    def test_a_stamp_only_write_does_not_consume_the_arm(self) -> None:
+        """The seam's bool alone cannot distinguish a full write from the
+        stamp-only anti-refire write — an unwritten doc leaves the arm."""
+        from daemon.services import prompt_refresh as pr
+
+        repo = _CarrierRepo()
+        pr.arm_compact_note(repo, "iid-1", NOTE_SENTINEL)
+        outcome = pr.settle_compact_note_arm(
+            repo,
+            "iid-1",
+            note_sha12=pr.compact_note_sha256_12(NOTE_SENTINEL),
+            result=_result("summarization", replacement=()),
+            persisted=True,
+        )
+        assert outcome == pr.DEFERRED_STATE_NO_DOC
+        assert repo.metadata["compact_note_arm"] == NOTE_SENTINEL
+
+    def test_a_refused_persist_does_not_consume_the_arm(self) -> None:
+        from daemon.services import prompt_refresh as pr
+
+        repo = _CarrierRepo()
+        pr.arm_compact_note(repo, "iid-1", NOTE_SENTINEL)
+        outcome = pr.settle_compact_note_arm(
+            repo,
+            "iid-1",
+            note_sha12=pr.compact_note_sha256_12(NOTE_SENTINEL),
+            result=_result("summarization"),
+            persisted=False,
+        )
+        assert outcome == pr.DEFERRED_STATE_NO_DOC
+        assert repo.metadata["compact_note_arm"] == NOTE_SENTINEL
+
+    def test_the_anti_refire_deferral_is_recorded(self) -> None:
+        from daemon.services import prompt_refresh as pr
+
+        repo = _CarrierRepo()
+        pr.arm_compact_note(repo, "iid-1", NOTE_SENTINEL)
+        outcome = pr.settle_compact_note_arm(
+            repo,
+            "iid-1",
+            note_sha12=pr.compact_note_sha256_12(NOTE_SENTINEL),
+            result=None,
+            persisted=False,
+        )
+        assert outcome == pr.DEFERRED_STATE_ANTI_REFIRE
+        assert repo.metadata["compact_note_last_deferred"] == pr.DEFERRED_STATE_ANTI_REFIRE
+        assert repo.metadata["compact_note_arm"] == NOTE_SENTINEL
+
+
+# ── L14 — the T4 pin (the executor's engine call) ──────────────────────────
+
+
+def _executor_manager(*, arm_note: str = "", force_spy: list | None = None):
+    """A minimal ``InstanceManager`` stub for the ``/compact`` executor.
+
+    Self-contained on purpose — the lane's legs must not depend on a
+    SHARED test file's internals (the lane's shared-file edit budget is
+    ONE: the refusal census pin).
+    """
+    from daemon.config import SlashCommandConfig
+    from daemon.services.compact_executor import ContextCompactor
+
+    mgr = MagicMock()
+    mgr._lifecycle_service = MagicMock()
+    mgr._lifecycle_service.get_instance_info = MagicMock(
+        return_value={
+            "status": "idle",
+            "id": "inst-test",
+            "metadata": {},
+            "children": [],
+        }
+    )
+    compactor_cfg = _config(
+        min_messages_before_compaction=2,
+        recent_message_window=2,
+        min_recent_window=1,
+        context_window_overrides={"gpt-4o": 128_000},
+    )
+    compactor = ContextCompactor(config=compactor_cfg, llm_config={})
+    if force_spy is not None:
+        async def _fake_compact_state(ctx, force=False):
+            force_spy.append(force)
+            return None
+        compactor.compact_state = _fake_compact_state
+    mgr._compactor = compactor
+    mgr.config = MagicMock()
+    mgr.config.llm.model = "gpt-4o"
+    mgr.config.compaction = compactor_cfg
+    mgr.config.slash_commands = SlashCommandConfig(noop_floor_ratio=0.05)
+
+    async def _gate_run(instance_id, holder_id, holder_kind, work_fn):
+        return await work_fn()
+
+    mgr.execution_gate = MagicMock()
+    mgr.execution_gate.run = AsyncMock(side_effect=_gate_run)
+    mgr.pause_instance_cascade = AsyncMock(
+        return_value={"paused_ids": [], "skipped_ids": []}
+    )
+    mgr.resume_instance_cascade = AsyncMock(
+        return_value={"resumed_ids": [], "skipped_ids": []}
+    )
+
+    async def _quiescent(instance_id, timeout):
+        return True
+
+    mgr.wait_for_instance_quiescent = AsyncMock(side_effect=_quiescent)
+
+    graph = MagicMock()
+    state = MagicMock()
+    state.next = ()
+    state.values = {"messages": _messages(15, 4000), "compacted_at": None}
+    state.config = {"configurable": {"thread_id": "inst-test"}}
+    graph.aget_state = AsyncMock(return_value=state)
+    graph.aupdate_state = AsyncMock()
+
+    async def _get_instance(instance_id):
+        return graph
+
+    mgr.get_instance = AsyncMock(side_effect=_get_instance)
+    mgr._messaging_service = MagicMock()
+    mgr._messaging_service.emit_context_usage_for_instance = AsyncMock()
+    mgr._live_hub = MagicMock()
+
+    async def _stream(*a, **k):
+        return None
+
+    mgr._live_hub.stream_message = AsyncMock(side_effect=_stream)
+    mgr._task_repo = MagicMock()
+    mgr._task_repo.has_instance_busy = MagicMock(return_value=False)
+
+    repo = _CarrierRepo()
+    if arm_note:
+        repo.metadata["compact_note_arm"] = arm_note
+        import hashlib
+
+        repo.metadata["compact_note_sha256_12"] = hashlib.sha256(
+            arm_note.encode("utf-8")
+        ).hexdigest()[:12]
+    mgr._instance_repository = repo
+    return mgr
+
+
+async def _run_executor(mgr) -> None:
+    from daemon.services.command_dispatcher import (
+        CommandContext,
+        CommandDispatcher,
+    )
+    from daemon.services.compact_executor import execute_compact
+
+    dispatcher = CommandDispatcher(
+        enabled=True,
+        escape_prefix="//",
+        min_interval_s=10,
+        state_ttl_s=600,
+        max_state_per_instance=20,
+    )
+    dispatcher._state.record_start(
+        instance_id="inst-test",
+        command_id="cmd-active",
+        command="compact",
+        ttl_seconds=600,
+    )
+    dispatcher._inflight["inst-test"] = "cmd-active"
+    dispatcher._manager = mgr
+    ctx = CommandContext(
+        dispatcher=dispatcher, command_id="cmd-active", instance_id="inst-test"
+    )
+    await execute_compact(
+        mgr,
+        instance_id="inst-test",
+        command_id="cmd-active",
+        context=ctx,
+    )
+
+
+class TestL14T4ForceFlag:
+    """Architect §D.2(ii) — arm present ⇒ the executor calls the engine
+    with ``force=False``; ``force=True`` only when unarmed."""
+
+    @pytest.mark.asyncio
+    async def test_the_armed_path_passes_force_false(self) -> None:
+        force_spy: list = []
+        mgr = _executor_manager(arm_note=NOTE_SENTINEL, force_spy=force_spy)
+        await _run_executor(mgr)
+        assert force_spy == [False], force_spy
+
+    @pytest.mark.asyncio
+    async def test_the_unarmed_path_keeps_force_true(self) -> None:
+        force_spy: list = []
+        mgr = _executor_manager(force_spy=force_spy)
+        await _run_executor(mgr)
+        assert force_spy == [True], force_spy
+
+    @pytest.mark.asyncio
+    async def test_the_note_rides_in_the_context(self) -> None:
+        seen: list = []
+
+        async def _fake_compact_state(ctx, force=False):
+            seen.append(getattr(ctx, "compact_note", ""))
+            return None
+
+        mgr = _executor_manager(arm_note=NOTE_SENTINEL)
+        mgr._compactor.compact_state = _fake_compact_state
+        await _run_executor(mgr)
+        assert seen == [NOTE_SENTINEL]
+
+
+# ── The T3 gate (the quiescent pre-dispatch seam) ──────────────────────────
+
+
+def _t3_service(*, arm_note: str = ""):
+    """A real ``InstanceMessagingService`` against a mocked manager."""
+    from daemon.services.instance_messaging import InstanceMessagingService
+
+    mgr = MagicMock()
+    mgr.config = MagicMock()
+    mgr.config.compaction = _config()
+    mgr.config.llm.model = "gpt-4o"
+    repo = _CarrierRepo()
+    if arm_note:
+        repo.metadata["compact_note_arm"] = arm_note
+    mgr._instance_repository = repo
+    mgr._instance_repository.get = MagicMock(
+        return_value=MagicMock(status="idle", instance_metadata=repo.metadata)
+    )
+    mgr._compactor = MagicMock()
+    mgr._compactor._trigger_window = MagicMock(return_value=1_000_000)
+    mgr._compactor.compact_state = AsyncMock(return_value=None)
+    mgr.message_metadata_repo = None
+    manager_cancellation = MagicMock()
+    manager_cancellation.manager = mgr
+    svc = InstanceMessagingService(
+        manager=mgr,
+        cancellation_service=manager_cancellation,
+    )
+    svc._get_system_prompt_tokens = AsyncMock(return_value=0)
+    return svc, mgr, repo
+
+
+class TestT3Gate:
+    """Architect §H, gate mechanics 1 — the T3 gate reads the arm, puts
+    the note in the context, and calls the engine with ``force=False``."""
+
+    @pytest.mark.asyncio
+    async def test_the_armed_note_rides_into_the_engine_context(self) -> None:
+        svc, mgr, _repo = _t3_service(arm_note=NOTE_SENTINEL)
+        graph = MagicMock()
+        graph.aget_state = AsyncMock(
+            return_value=MagicMock(values={"messages": _messages(20)}, next=())
+        )
+        await svc._maybe_compact_context("inst-test", graph, {})
+        assert mgr._compactor.compact_state.await_count == 1
+        ctx = mgr._compactor.compact_state.await_args.args[0]
+        assert ctx.compact_note == NOTE_SENTINEL
+        # The engine is called with force=False — the forcing NEVER uses
+        # the force flag.
+        assert mgr._compactor.compact_state.await_args.kwargs.get("force", False) is False
+
+    @pytest.mark.asyncio
+    async def test_the_unarmed_path_passes_no_note(self) -> None:
+        svc, mgr, _repo = _t3_service()
+        graph = MagicMock()
+        graph.aget_state = AsyncMock(
+            return_value=MagicMock(values={"messages": _messages(20)}, next=())
+        )
+        await svc._maybe_compact_context("inst-test", graph, {})
+        ctx = mgr._compactor.compact_state.await_args.args[0]
+        assert ctx.compact_note == ""
+
+    @pytest.mark.asyncio
+    async def test_the_threshold_bypass_is_note_gated(self) -> None:
+        """The armed note FORCES the compaction at the seam — the 80%
+        threshold is BYPASSED (the gate measures SIZE; the note measures
+        RELEVANCE). The unarmed path keeps today's behaviour."""
+        config = _config(
+            min_messages_before_compaction=2,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1_000_000},
+        )
+        context = CompactionContext(
+            messages=_messages(4),
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=config,
+            llm_config={},
+            compact_note=NOTE_SENTINEL,
+        )
+        compactor = ContextCompactor(config, {})
+        armed = await compactor.compact_state(context, force=False)
+        assert armed is not None, "the armed note must bypass the threshold"
+
+        unarmed_context = CompactionContext(
+            messages=_messages(4),
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=config,
+            llm_config={},
+        )
+        unarmed = await compactor.compact_state(unarmed_context, force=False)
+        assert unarmed is None, "the unarmed path is byte-identical"

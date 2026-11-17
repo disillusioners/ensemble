@@ -3432,6 +3432,35 @@ class ContextCompactor:
                     * context.config.threshold
                 )
             )
+            # ARMED-AWARE FLOOR PREDICATE (architect §D.2(iv)) — NOTE-GATED.
+            #
+            # When a compact note is armed and the context is BELOW the
+            # floor, the engine takes the CLEAN SKIP — regardless of
+            # ``force`` / ``over_budget``. The pre-lane fall-through is
+            # ``force OR over_budget``, so an armed call with
+            # ``force=False`` still 50%-tail-truncates in the
+            # below-floor AND over-budget corner: half the verbatim tail
+            # is dropped, the note can never render there (the outcome
+            # produces NO doc), and the arm would be consumed by a
+            # doc-less outcome (false \"applied\" provenance). The clean
+            # skip closes the repeat-truncation spiral: the arm PERSISTS
+            # and fires when the floor is crossed.
+            #
+            # SKIPPED ENTIRELY WHEN UNARMED — the no-note path is
+            # byte-identical.
+            if getattr(context, "compact_note", ""):
+                logger.info(
+                    "[Compaction] skipping: %d selectable messages "
+                    "(minimum: %d, preserved_injected=%d); armed note — "
+                    "clean skip, the arm persists and no tail truncation "
+                    "occurs",
+                    len(selectable_messages),
+                    context.config.min_messages_before_compaction,
+                    len(hoisted_injected),
+                )
+                return anti_refire_skip(
+                    skip_reason="skipped_below_min_messages_armed"
+                )
             if not force and not over_budget:
                 # same rationale as the all-injected skip above.
                 return anti_refire_skip(
@@ -3480,7 +3509,23 @@ class ContextCompactor:
         # following the OVERRIDE window via ``_effective_model_name``.
         context_window = self._trigger_window(context)
         threshold_tokens = int(context_window * context.config.threshold)
-        if not force and total_tokens <= threshold_tokens:
+        # Compact-note lane (architect §H, gate mechanics 1) — an ARMED
+        # note FORCES a note-guided compaction at the next quiescent
+        # seam: the 80% threshold is BYPASSED. The gate measures SIZE;
+        # the note measures RELEVANCE (the Emperor's use case is true at
+        # 30% fill as at 90%). The forcing NEVER uses ``force=True``
+        # (that flag bypasses the dedup AND falls through to the
+        # 50%-tail last-effort floor below the minimum) — it is a
+        # NOTE-GATED bypass of the threshold check only.
+        #
+        # Mid-turn sites (T1/T2) NEVER read the arm, so their
+        # ``compact_note`` is empty and this check is byte-identical for
+        # them (and for every unarmed caller).
+        if (
+            not force
+            and not getattr(context, "compact_note", "")
+            and total_tokens <= threshold_tokens
+        ):
             logger.debug(
                 f"Skipping compaction: {total_tokens} tokens "
                 f"<= threshold {threshold_tokens}"

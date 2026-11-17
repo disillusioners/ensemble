@@ -1492,6 +1492,28 @@ class InstanceMessagingService:
             system_prompt_tokens = await self._get_system_prompt_tokens(instance_id)
             last_compacted_at = state.values.get('compacted_at')
 
+            # ── Compact-note lane (T3) — read the ARMED note ───────────────
+            # The carrier is ``instances.metadata`` JSONB (architect §D /
+            # ES-3) — NO migration, NO DDL. The read is best-effort: a
+            # missing row or a DB hiccup yields the EMPTY state, so the
+            # no-note path stays byte-identical.
+            #
+            # T3 is a QUIESCENT seam (the pre-dispatch gate) — the note
+            # is never read mid-turn (T1/T2 stay arm-blind by
+            # construction).
+            from .prompt_refresh import (
+                compact_note_sha256_12,
+                read_compact_note_state,
+            )
+
+            _compact_note_state = read_compact_note_state(
+                getattr(self._manager, "_instance_repository", None), instance_id
+            )
+            compact_note = _compact_note_state.note if _compact_note_state.armed else ""
+            compact_note_sha12 = (
+                _compact_note_state.sha256_12 or compact_note_sha256_12(compact_note)
+            )
+
             # COMPACTION NEVER-BLOCKED (Verdict A) — record the
             # baseline message count for the growth check on the
             # next streak. A "successful" engine call resets the
@@ -1529,12 +1551,35 @@ class InstanceMessagingService:
                 last_compacted_at=last_compacted_at,
                 instance_id=instance_id,
                 msg_timestamps=_extract_msg_timestamps(messages),
+                # Compact-note lane (T3 — architect §H, gate mechanics 1).
+                # The ARMED note rides in the context; the engine then
+                # (a) bypasses the 80% threshold, (b) skips the merge
+                # pass, and (c) renders the note in the GLOBAL region.
+                # The engine is called with ``force=False`` — the
+                # forcing NEVER uses the force flag (see the engine's
+                # armed-aware floor predicate).
+                compact_note=compact_note,
             )
-            
+
             # Compact state
             result = await self._compactor.compact_state(context)
 
             if result is None:
+                # The engine declined to run. On the ARMED path this is
+                # the 60s ANTI-REFIRE dedup window (the threshold check
+                # is bypassed for an armed note) — the arm PERSISTS and
+                # the deferral is disclosed verbatim on the next armed
+                # receipt. NEVER a success receipt for work not done.
+                if compact_note:
+                    from .prompt_refresh import settle_compact_note_arm as _settle
+
+                    _settle(
+                        getattr(self._manager, "_instance_repository", None),
+                        instance_id,
+                        note_sha12=compact_note_sha12,
+                        result=None,
+                        persisted=False,
+                    )
                 return
 
             messages_before = len(messages)
@@ -1578,13 +1623,30 @@ class InstanceMessagingService:
             from ._compaction_persist_seam import (
                 persist_compaction_result as _persist_seam,
             )
-            await _persist_seam(
+            _persisted = await _persist_seam(
                 self._manager,
                 instance_id=instance_id,
                 result=result,
                 mid_turn=False,
                 abort_policy="fail_open",
             )
+            # Compact-note lane (T3) — settle the ARMED note AFTER the
+            # compaction record has been persisted (two stores, a
+            # persist-then-delete crash window: at-most-once in steady
+            # state, at-least-once re-application inside the window).
+            # A doc-less outcome (emergency / tail truncation), a floor
+            # skip and the anti-refire deferral leave the arm ARMED with
+            # the matching deferred discriminator recorded.
+            if compact_note:
+                from .prompt_refresh import settle_compact_note_arm as _settle
+
+                _settle(
+                    getattr(self._manager, "_instance_repository", None),
+                    instance_id,
+                    note_sha12=compact_note_sha12,
+                    result=result,
+                    persisted=bool(_persisted),
+                )
             # DEFER (round-2, Lane 5 — conditional deferred):
             # wire ``_ensure_tool_result_pairing`` from graph.py:318
             # here on the proactive path (and the executor floor
