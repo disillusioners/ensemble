@@ -382,6 +382,12 @@ class DeactivationReceipt:
     entries: list[DeactivationEntry] = field(default_factory=list)
     refusals: list[RefusalEntry] = field(default_factory=list)
     observations: list[ObservationEntry] = field(default_factory=list)
+    # W3 (2026-11-17): sanctioned pair resolutions ride the SAME
+    # receipt (their loser/winner skill pairs are claimed in
+    # ``entries``; the pair-specific reversal data lives here).
+    pair_resolutions: list[PairResolutionEntry] = field(
+        default_factory=list
+    )
 
     # ── suppression ──────────────────────────────────────────
     def suppression_keys(self) -> set[tuple[str, str]]:
@@ -415,6 +421,9 @@ class DeactivationReceipt:
             "observations": [
                 observation.to_json() for observation in self.observations
             ],
+            "pair_resolutions": [
+                pair.to_json() for pair in self.pair_resolutions
+            ],
         }
 
     @classmethod
@@ -435,6 +444,69 @@ class DeactivationReceipt:
                 ObservationEntry.from_json(item)
                 for item in (payload.get("observations") or [])
             ],
+            pair_resolutions=[
+                PairResolutionEntry.from_json(item)
+                for item in (payload.get("pair_resolutions") or [])
+            ],
+        )
+
+
+@dataclass
+class PairResolutionEntry:
+    """One SANCTIONED pair resolution — the reversible unit (W3).
+
+    Added 2026-11-17 (review fix round): ``resolve_pair``'s apply arm
+    writes this BEFORE the first flip so ``--reactivate`` genuinely
+    reverses a sanctioned resolution. The skill-row (is_active,
+    status) pairs reverse through the receipt's ordinary
+    ``entries`` (the loser + the winner are claimed there with
+    ``rule_id='sanctioned_pair_resolution'``); THIS entry carries the
+    pair-resolution-specific reversal data the generic entries cannot:
+    the winner's cleared ``ab_test_group`` and the ``skill_ab_tests``
+    row's resolved state.
+    """
+
+    ab_test_group: str
+    winner_skill_id: str
+    loser_skill_id: str
+    reason: str = ""
+    run_id: str = ""
+    touched_at_iso: str = ""
+    #: The ``skill_ab_tests`` row's pre-resolution state.
+    before_resolved_at: Optional[str] = None
+    before_winner_skill_id: Optional[str] = None
+    reactivated_at: Optional[str] = None
+    applied: bool = False
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "ab_test_group": self.ab_test_group,
+            "winner_skill_id": self.winner_skill_id,
+            "loser_skill_id": self.loser_skill_id,
+            "reason": self.reason,
+            "run_id": self.run_id,
+            "touched_at_iso": self.touched_at_iso,
+            "before_resolved_at": self.before_resolved_at,
+            "before_winner_skill_id": self.before_winner_skill_id,
+            "reactivated_at": self.reactivated_at,
+            "applied": self.applied,
+        }
+
+    @classmethod
+    def from_json(cls, payload: dict[str, Any]) -> "PairResolutionEntry":
+        return cls(
+            ab_test_group=str(payload.get("ab_test_group") or ""),
+            winner_skill_id=str(payload.get("winner_skill_id") or ""),
+            loser_skill_id=str(payload.get("loser_skill_id") or ""),
+            reason=str(payload.get("reason") or ""),
+            run_id=str(payload.get("run_id") or ""),
+            touched_at_iso=str(payload.get("touched_at_iso") or ""),
+            before_resolved_at=payload.get("before_resolved_at"),
+            before_winner_skill_id=payload.get("before_winner_skill_id"),
+            reactivated_at=payload.get("reactivated_at"),
+            # Same H3 legacy tolerance as DeactivationEntry: a receipt
+            # written before the flag existed carries only applied rows.
+            applied=bool(payload.get("applied", True)),
         )
 
 
@@ -1337,6 +1409,76 @@ class SkillStaleDeactivator:
                     "outcome": "reactivated" if apply else "would_reactivate",
                 }
             )
+        # ── W3 (review fix round, 2026-11-17): the pair-resolution
+        # reversal half. The skill-row (is_active, status) pairs were
+        # restored by the generic entry loop above; the
+        # pair-SPECIFIC state reverses here — the winner's cleared
+        # ``ab_test_group`` and the ``skill_ab_tests`` row's resolved
+        # state — so ``--reactivate`` genuinely reverses a sanctioned
+        # resolution instead of leaving a both-arms-active-but-resolved
+        # half-state.
+        for pair_entry in receipt.pair_resolutions:
+            if pair_entry.reactivated_at:
+                results.append(
+                    {
+                        "ab_test_group": pair_entry.ab_test_group,
+                        "outcome": "pair_already_reactivated",
+                        "reactivated_at": pair_entry.reactivated_at,
+                    }
+                )
+                continue
+            if apply:
+                winner_row = _skill_by_id(
+                    self._skill_repo, pair_entry.winner_skill_id
+                )
+                if winner_row is not None:
+                    # Restore the winner into the pair it was crowned
+                    # out of. Dual-column write per the module gate.
+                    self._skill_repo.update(
+                        pair_entry.winner_skill_id,
+                        ab_test_group=pair_entry.ab_test_group,
+                        status="ab_testing",
+                        is_active=True,
+                    )
+                # Un-resolve the pair row back to its recorded prior
+                # state (a sanctioned resolution resolves a previously
+                # LIVE pair, so the prior state is the live one).
+                ab_engine = getattr(self._ab_test_repo, "engine", None)
+                if ab_engine is not None:
+                    with Session(ab_engine) as session:
+                        row = session.exec(
+                            select(SkillABTest).where(
+                                SkillABTest.ab_test_group
+                                == pair_entry.ab_test_group
+                            )
+                        ).first()
+                        if row is not None:
+                            row.resolved_at = pair_entry.before_resolved_at
+                            row.winner_skill_id = (
+                                pair_entry.before_winner_skill_id
+                            )
+                            session.add(row)
+                            session.commit()
+                else:  # pragma: no cover — defensive double, mirrors _skill_by_id
+                    logger.warning(
+                        "[SkillDeactivation] pair reversal could not "
+                        "un-resolve ab_test_group=%s: the ab_test repo "
+                        "exposes no engine",
+                        pair_entry.ab_test_group,
+                    )
+                pair_entry.reactivated_at = now
+            results.append(
+                {
+                    "ab_test_group": pair_entry.ab_test_group,
+                    "winner_skill_id": pair_entry.winner_skill_id,
+                    "loser_skill_id": pair_entry.loser_skill_id,
+                    "outcome": (
+                        "pair_reactivated"
+                        if apply
+                        else "pair_would_reactivate"
+                    ),
+                }
+            )
         if apply:
             receipt.updated_at_iso = now
             save_receipt(target, receipt)
@@ -1438,9 +1580,98 @@ class SkillStaleDeactivator:
                 "ab_test_group": getattr(winner_row, "ab_test_group", None),
                 "status": getattr(winner_row, "status", None),
             }
-        self._ab_test_repo.resolve(ab_test_group, winner_skill_id)
+        # ── W3 (review fix round, 2026-11-17): RECEIPT BEFORE THE
+        # FIRST FLIP. The reversibility the sanctioned REST mode
+        # promises is IMPLEMENTED here, not worded: the loser + the
+        # winner are claimed as ordinary receipt entries (their prior
+        # (is_active, status) pairs reverse via ``--reactivate``'s
+        # generic loop), and the pair-specific reversal data (the
+        # winner's cleared ``ab_test_group``, the ``skill_ab_tests``
+        # row's resolved state) rides a ``PairResolutionEntry`` on the
+        # SAME receipt. Planned state (applied=False) is rotated +
+        # atomically written BEFORE any mutation, then re-written per
+        # flip — the same write pattern as ``reconcile``'s apply arm
+        # (H3: a flipped row must never lack a recorded prior pair).
+        run_id = uuid.uuid4().hex[:12]
+        now = _now_iso()
+        receipt = load_receipt(self._receipt_path)
+        planned_entries: list[DeactivationEntry] = []
         for item in plan:
-            deactivate_skill(self._skill_repo, item["skill_id"])
+            before_pair = item.get("before") or {}
+            planned_entries.append(
+                DeactivationEntry(
+                    skill_id=item["skill_id"],
+                    name=str(item.get("name") or ""),
+                    rule_id="sanctioned_pair_resolution",
+                    before=SkillPair(
+                        is_active=bool(before_pair.get("is_active")),
+                        status=str(before_pair.get("status") or ""),
+                    ),
+                    after=SkillPair(*CANONICAL_INACTIVE),
+                    touched_at_iso=now,
+                    run_id=run_id,
+                    project_id=None,
+                    reason=f"ab_test_group={ab_test_group}",
+                )
+            )
+        if winner_row is not None:
+            planned_entries.append(
+                DeactivationEntry(
+                    skill_id=winner_skill_id,
+                    name=str(getattr(winner_row, "name", "") or ""),
+                    rule_id="sanctioned_pair_resolution",
+                    before=SkillPair(
+                        is_active=bool(
+                            getattr(winner_row, "is_active", True)
+                        ),
+                        status=str(
+                            getattr(winner_row, "status", "") or ""
+                        ),
+                    ),
+                    after=SkillPair(*CANONICAL_ACTIVE),
+                    touched_at_iso=now,
+                    run_id=run_id,
+                    project_id=None,
+                    reason=f"ab_test_group={ab_test_group} winner",
+                )
+            )
+        pair_entry = PairResolutionEntry(
+            ab_test_group=ab_test_group,
+            winner_skill_id=winner_skill_id,
+            loser_skill_id=",".join(
+                item["skill_id"] for item in plan
+            ),
+            reason=f"sanctioned resolution run_id={run_id}",
+            run_id=run_id,
+            touched_at_iso=now,
+            before_resolved_at=before_test.get("resolved_at"),
+            before_winner_skill_id=before_test.get("winner_skill_id"),
+        )
+        receipt.entries.extend(planned_entries)
+        receipt.pair_resolutions.append(pair_entry)
+        receipt.run_id = run_id
+        receipt.updated_at_iso = now
+        rotate_receipt(self._receipt_path, run_id)
+        _atomic_write_json(self._receipt_path, receipt.to_json())
+
+        self._ab_test_repo.resolve(ab_test_group, winner_skill_id)
+        for entry in planned_entries:
+            if entry.after == SkillPair(*CANONICAL_INACTIVE) and (
+                entry.before.is_active
+            ):
+                deactivate_skill(self._skill_repo, entry.skill_id)
+            else:
+                write_skill_pair(
+                    self._skill_repo,
+                    entry.skill_id,
+                    is_active=entry.after.is_active,
+                    status=entry.after.status,
+                )
+            entry.applied = True
+            # Per-flip incremental persistence (same contract as the
+            # reconcile apply arm): a failure between two flips still
+            # leaves a receipt carrying every prior pair.
+            _atomic_write_json(self._receipt_path, receipt.to_json())
         if winner_row is not None:
             # Dual-column write (is_active + status TOGETHER) — the
             # module's static dual-column-writer gate forbids any
@@ -1452,8 +1683,13 @@ class SkillStaleDeactivator:
                 status="active",
                 is_active=True,
             )
+        pair_entry.applied = True
+        receipt.updated_at_iso = _now_iso()
+        _atomic_write_json(self._receipt_path, receipt.to_json())
         result["applied"] = True
         result["before_test"] = before_test
+        result["receipt_run_id"] = run_id
+        result["receipt_path"] = str(self._receipt_path)
         if before_winner is not None:
             result["before_winner"] = before_winner
         return result
