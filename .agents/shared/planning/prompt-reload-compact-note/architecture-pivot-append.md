@@ -330,3 +330,80 @@ The **narrow keyword ruling** — keyword acceptance form, keyword bounds, keywo
 ---
 
 **Signed:** architect, 2026-11-17. Additive to v1.4 (`a95edb33`); supersedes v1.4 on the note-path mechanism only.
+
+---
+
+## 10. Amendment 1 — 2026-11-17 (post-worker fold-in)
+
+*Companion: the T2 phase park record is `architecture-park-t2.md` @ the same commit. The park records the withdrawn decision-family adjudication, the batched-verdict measurement, and the EX-2 "moot, not retired" position.*
+
+### 10.1 The pre-filter removal inventory — CORRECTED and COMPLETED
+
+My §4 list was incomplete. The worker fold-in found **five leak sites** my list missed. The complete REMOVE inventory:
+
+| # | Path | What is removed |
+|---|---|---|
+| 1 | `daemon/_compact_note_prefilter.py` | the whole file (331 lines / 11,917 bytes): `filter_candidate_groups`, `parse_marker_accounts`, `PrefilterResult` |
+| 2 | `daemon/compaction.py:3593-3610` | the gate block — the lazy import at `:3599`, the `filter_candidate_groups` call, and the `context._compact_note_positions` / `context._compact_note_dropped_spans` stash |
+| 3 | `daemon/config.py:1690-1700` **and `:8026-8115` and `:9049-9062`** | the `compact_note_prefilter_enabled` field **and its resolver and its `load_config` wiring** — the field alone is not the leak; the wiring is |
+| 4 | `daemon/tools/prompt_reload.py:171-174` **and its callers at `:287`, `:453`, `:463`** | the `_prefilter_enabled` reader and every call site |
+| 5 | `daemon/services/prompt_refresh.py:1020` and `:1036` | the `prefilter_enabled` **parameter on `format_compact_note_info_line`** and the log field it feeds |
+| 6 | `daemon/tools/prompt_reload.py:615` | the docstring mention of the pre-filter |
+| 7 | `tests/unit/tools/test_compaction_note_prefilter.py` | the whole file (28 tests — the truth table, the never-empty wall, the atomicity) |
+| 8 | `test/packs/compaction_note_prefilter_unit.sh` | the whole file |
+| 9 | `.agents/tester/PACKS.md` | **the one row** (worktree line 492). The `prompt_reload_compact_note_unit` row STAYS. **Check the MAIN repo copy too — the worktree's copy may lag, and the group-chat lane is adding rows to the same shared file.** Remove by NAME, never by position; the merge keeps both newest-first |
+| 10 | `daemon/compaction.py` | the §3 note plumbing (P3.1–P3.4, P4.1–P4.5): the note render + note-first GLOBAL arm, the `_merge_summaries` merge-skip entry guard, the `CompactionContext.compact_note` field, the armed-aware floor predicate, the note-gated threshold bypass |
+| 11 | `daemon/services/instance_messaging.py` | the T3 note seam |
+| 12 | `daemon/services/compact_executor.py` | the T4 note hook + the `_ENGINE_SKIPPED_TYPES_TO_NOOP_REASON` note row |
+| 13 | `daemon/services/prompt_refresh.py` | `classify_compact_note_outcome` |
+
+**The gate:** a repo-wide grep for `compact_note_prefilter_enabled`, `_compact_note_prefilter`, `filter_candidate_groups`, `parse_marker_accounts`, `PrefilterResult`, and `prefilter_enabled` must return **nothing** before the commit lands. A knob, a reader, a resolver, a log field, and a docstring mention are all leaks — a config field with a surviving reader is not a default, it is a leak.
+
+### 10.2 K counts GROUPS; the receipt counts MESSAGES
+
+A distinction the implementer needs and my §2f did not spell out: `recent_window` and `min_recent_window` are **GROUP** counts — `select_compactable_groups` slices `groups[-window:]` — while the doc's `preserved_count` field is a **MESSAGE** count ("Number of preserved-tail messages", `daemon/compaction.py:944`). The splice is therefore whole groups; the number reported is messages. **Both come from the house; neither is a new number.** No new constant, no new knob.
+
+### 10.3 The append path's outcomes need NO new refusal code — the census stays 14
+
+The fold-in flagged that the append path's refusals (over-window, same-model violation) would need new codes. **They do not**, for two reasons:
+
+1. **There is no same-model violation to refuse.** The invariant is structural (§2b): the append path makes no model call of its own, so there is nothing to mismatch and nothing to refuse.
+2. **The append path's outcomes ride the house's EXISTING outcome/info-line channel** (`format_compact_note_info_line` + the `OUTCOME_*` vocabulary), **not** the tool's refusal envelope. The tool's refusal vocabulary is the **arm-time** vocabulary, and it stays at **14**.
+
+The append path therefore **adds outcome labels** (compacted / deferred / append-failed) to the `OUTCOME_*` vocabulary — which is **not** the `REFUSAL_CODES` census. **The census pin stays `== 14`** (`tests/unit/tools/test_prompt_reload_refusals.py`). This is recorded explicitly because a drift here would look like an unexplained census change.
+
+### 10.4 The acceptance harness — the concrete pins
+
+Reuse over invent: `tests/unit/test_compaction.py:76 make_messages` / `:95 make_tool_message`, and `tests/unit/test_compaction_compact_note.py:32 NOTE_SENTINEL` / `:38 _config` / `:70 _messages` / `:96 _doc`.
+
+| Pin | Assertion | Negative control |
+|---|---|---|
+| **same-model invariant** | capture the model id that served the compaction at the invoke site; assert it **is** the turn's effective model, and assert `resolve_compaction_model` is **never called** on the append path (a spy on `daemon.compaction.resolve_compaction_model`) | with `COMPACTION_MODEL` pinned to a different id: the compaction is still produced on the agent's model, and the receipt records `compaction_model_override_applied=false` |
+| **receipt auditability** | the receipt names the effective model, the note's length + hash, the tail count K, the path, the doc id, the selection statement; `compacted` appears **only** when the swap landed | force the swap to fail ⇒ the receipt must **not** say `compacted` |
+| **note-as-request** | at the invoke, the appended message's text is present and equals `"[System request: Compaction] Your next message is compaction of previous messages. Compaction request is: <note>"`; the model's output is what lands in the doc's GLOBAL region; **the note text is absent from the doc** | — |
+| **tail byte-identity** | per-message digests of the pre-compaction tail are **identical** after the splice | — |
+| **default byte-identity** | sha256 of the rendered doc bytes across the no-note run and a golden baseline; plus the note markers **absent** on the no-note path | — |
+| **doc format** | the doc carries `[CONTEXT COMPACTION — mode=`, `── GLOBAL OVERVIEW ──`, `── END OF COMPACTED CONTEXT — …`, the preserved count, the self id; the 15 % ceiling holds; no "SECTION DETAIL below remains complete" claim (there are no sections) | a mutated marker must redden the pin |
+| **refusals** | one assertion per code: `note_required`, `note_over_cap` (refused, **never truncated**), `note_requires_compact` (the coherence rule — stays), `compact_disabled`, `compact_rate_limited` (900 s, `daemon/constants.py:616`) | — |
+| **zero decision calls** | the decision family is never consulted; `DENIED_SEAM_ROLES` is untouched — **EX-2 stands** | — |
+| **removal visible** | the pre-filter module, its test file, and its pack script do not exist; the §10.1 grep returns nothing | — |
+
+### 10.5 Two honest caveats the harness inherits
+
+- **No compaction golden fixture exists** — not in `tests/fixtures/`, not in `.agents/tester/`. The byte-parity baseline must be **bootstrapped** using the house's `git archive <base_sha> | tar -x` pattern (capture inside the extraction so `daemon.__file__` resolves to the BASE tree).
+- **`model_dump_json()` stability is version-dependent.** Verify it against the pinned LangChain before relying on it for the tail digest; the fallback is `sha256(m.content.encode())` for text-only messages, which loses metadata.
+
+### 10.6 The degradation matrix (append path) — the shape the implementation must hold to
+
+| Condition | Compaction? | Turn completes? | Anything misrepresented? |
+|---|---|---|---|
+| the agent's model call fails / times out | no | yes | no |
+| the reply is empty or is not a compaction | no (the swap refuses) | yes | no |
+| the reply exceeds the doc budget | no (refused, or honestly truncated) | yes | no |
+| the context cannot take the request | no | yes | no |
+| the note is missing / over cap | no (arm-time refusal) | yes | no |
+| the deliberate-compact rate limit fires | no (refusal) | yes | no |
+| the append lands but the swap fails | no | **the turn fails** | **the risk** — mitigated: the arm settles only AFTER the swap, so the state re-runs rather than half-applies |
+| the daemon restarts between the two | no | resumes from the checkpoint | no (the checkpoint holds the pre-append state) |
+
+**The invariant across every row: the agent never sees a half-compacted context** — either fully compacted (the swap landed) or fully pre-compaction.
