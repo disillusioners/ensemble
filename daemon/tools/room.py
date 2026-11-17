@@ -234,7 +234,8 @@ def _gate(
 ) -> str | None:
     """The layer-2 gate — the FIRST logic of EVERY room tool body.
 
-    ONE implementation for the four verbs (the H1 extraction): the
+    ONE implementation for the five verbs (the H1 extraction; the
+    fifth verb, ``room_close``, joined in P6): the
     gate is the SECOND, independent authorization layer (a literal
     tool name in an allow list bypasses the category gate), so it must
     be the FIRST thing every body does — before ANY service handle is
@@ -269,7 +270,8 @@ def _gate(
 def _internal_error_refusal(label: str) -> str:
     """The house internal-error envelope (the never-raise backstop).
 
-    ONE implementation for the four verbs (the H1 extraction): an
+    ONE implementation for the five verbs (the H1 extraction; the
+    fifth verb, ``room_close``, joined in P6): an
     unexpected exception is logged SERVER-SIDE and answered with this
     generic envelope. The raw exception text NEVER reaches the payload
     (the PB-F1 leak class).
@@ -500,7 +502,7 @@ def create_room_tools(
     async def room_create(name: str, member_name: str = "") -> str:
         """Open a chat-room for your team. Use tool_help("room_create") for details."""
         # ── the layer-2 gate: FIRST logic in the body (the ONE
-        # shared helper — the four verbs delegate here, H1).
+        # shared helper — the five verbs delegate here, H1).
         gate_refusal = _gate("room_create", caller_agent_id, caller_instance_id)
         if gate_refusal is not None:
             return gate_refusal
@@ -606,7 +608,7 @@ def create_room_tools(
     ) -> str:
         """Post a milestone message to a chat-room. Use tool_help("room_post") for details."""
         # ── the layer-2 gate: FIRST logic in the body (the ONE
-        # shared helper — the four verbs delegate here, H1).
+        # shared helper — the five verbs delegate here, H1).
         gate_refusal = _gate("room_post", caller_agent_id, caller_instance_id)
         if gate_refusal is not None:
             return gate_refusal
@@ -826,7 +828,7 @@ def create_room_tools(
     ) -> str:
         """Read a chat-room's messages. Use tool_help("room_read") for details."""
         # ── the layer-2 gate: FIRST logic in the body (the ONE
-        # shared helper — the four verbs delegate here, H1).
+        # shared helper — the five verbs delegate here, H1).
         gate_refusal = _gate("room_read", caller_agent_id, caller_instance_id)
         if gate_refusal is not None:
             return gate_refusal
@@ -952,7 +954,7 @@ def create_room_tools(
     ) -> str:
         """Record your decision on a task proposal in a chat-room. Use tool_help("room_task_decision") for details."""
         # ── the layer-2 gate: FIRST logic in the body (the ONE
-        # shared helper — the four verbs delegate here, H1).
+        # shared helper — the five verbs delegate here, H1).
         gate_refusal = _gate("room_task_decision", caller_agent_id, caller_instance_id)
         if gate_refusal is not None:
             return gate_refusal
@@ -983,6 +985,7 @@ def create_room_tools(
             )
         try:
             from daemon.repositories.room.repository import (
+                RoomClosedError,
                 RoomError,
                 RoomNotFoundError,
             )
@@ -1025,6 +1028,26 @@ def create_room_tools(
                     "room_task_decision",
                     TOKEN_NO_PROPOSAL,
                     f"no task proposal at seq {proposal_seq} in room {room_id}",
+                )
+            except RoomClosedError:
+                # The room was CLOSED between the owner/member checks
+                # and the append (a closed room refuses posts — the
+                # repository's forward-only transition). This became
+                # REACHABLE when room_close landed (A-P6-30). The
+                # generic RoomError branch below would answer
+                # ``duplicate-decision`` ("a decision for this proposal
+                # is already recorded") — which is FALSE here: the
+                # proposal was never decided, the ROOM is closed. The
+                # EXISTING room-closed token is the honest member of
+                # the closed vocabulary (room_close and room_post
+                # already mint it) — NO new token, no vocabulary
+                # growth, and the agent can tell the two conditions
+                # apart.
+                return _refusal(
+                    "room_task_decision",
+                    TOKEN_ROOM_CLOSED,
+                    f"room {room_id} is closed — a closed room is "
+                    "read-only, so no decision can be recorded on it",
                 )
             except RoomError as exc:
                 # PB-F1: the repository raises RoomError with the

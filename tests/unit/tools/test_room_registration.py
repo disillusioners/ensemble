@@ -421,7 +421,7 @@ class TestTheMembershipGate:
             and test.func.id == "_is_authorized"
         )
 
-    def test_exactly_one_gate_helper_serves_the_four_verbs(self) -> None:
+    def test_exactly_one_gate_helper_serves_the_five_verbs(self) -> None:
         """The census: the shared helper is called EXACTLY once per
         verb — a body that keeps its own copy (or drops the gate) is
         caught here."""

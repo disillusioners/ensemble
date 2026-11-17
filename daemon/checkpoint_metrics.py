@@ -279,6 +279,9 @@ def _cardinality_cap() -> int:
 #: **11** (group-chat, 2026-11-16) — the tool-category vocabulary gained
 #: the ``room`` PRIVILEGED category (entry #23, the agent group-chat
 #: surface: room_create / room_post / room_read / room_task_decision —
+#: (``room_close`` joined LATER, in P6, with NO vocabulary bump — a new
+#: VERB in an existing category adds no CATEGORY, so the category now
+#: carries FIVE verbs) —
 #: the FIRST grant to the video-team pilot quartet), so the frozen
 #: artifact label set grew 65 → 66 and the vocabulary version bumps
 #: WITH the regeneration (F-1 trap class: the artifact and this

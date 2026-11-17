@@ -625,6 +625,58 @@ def test_room_task_decision_duplicate_is_typed_and_never_leaks(stack):
     assert len(decisions) == 1, decisions
 
 
+def test_room_task_decision_on_a_closed_room_is_room_closed_not_duplicate(stack):
+    """(A-P6-35 j) A decision on a CLOSED room is a NAMED condition —
+    ``room-closed`` — never ``duplicate-decision``.
+
+    ``room_close`` (A-P6-30) made the closed state REACHABLE, so a
+    decision recorded after the close rides the repository's
+    ``RoomClosedError`` — a SUBCLASS of ``RoomError``. Without its own
+    branch the generic ``RoomError`` handler answered
+    ``duplicate-decision`` with "already recorded", which is FALSE
+    here: the proposal was never decided, the ROOM is closed. The
+    EXISTING ``room-closed`` token is minted (NO new token, no
+    vocabulary growth) and the message states the real reason."""
+    engine, repo, svc, room_id, owner = stack
+    manager = _manager(engine, svc)
+    tools = _tools(manager, owner)
+    # Mint the proposal (a tagged post to a terminal child).
+    with Session(engine) as s:
+        inst = s.get(Instance, "child-1")
+        inst.status = "completed"
+        s.commit()
+    _call(
+        tools["room_post"].ainvoke(
+            {"room_id": room_id, "text": "who can finish scene 4?", "tagged": ["worker"]}
+        )
+    )
+    proposals = [
+        m
+        for m in repo.list_messages(
+            room_id, caller_instance_id=owner, after_seq=0, limit=50
+        )
+        if m["kind"] == "task_proposal"
+    ]
+    proposal = proposals[0]
+    # CLOSE the room (the owner's own verb) — the state is now live.
+    closed_raw = _call(tools["room_close"].ainvoke({"room_id": room_id}))
+    assert closed_raw.startswith("{"), closed_raw
+    # The decision on the CLOSED room: room-closed, never duplicate.
+    raw = _call(
+        tools["room_task_decision"].ainvoke(
+            {
+                "room_id": room_id,
+                "proposal_seq": proposal["seq"],
+                "decision": "revive",
+            }
+        )
+    )
+    assert raw.startswith("Error:"), raw
+    assert "room-closed" in raw, raw
+    assert "duplicate-decision" not in raw, raw
+    assert "already recorded" not in raw, raw
+
+
 def test_room_create_refuses_when_the_tree_room_cap_is_reached(stack):
     """The 9th ACTIVE room in one tree is refused — typed at the tool
     (``room-cap``), repository-enforced (A-P5-14). The tool-created

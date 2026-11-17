@@ -556,9 +556,10 @@ def _ensure_tool_metadata_populated() -> None:
     # resolved at CALL time (never at construction), so the warm-scan
     # stub is boot-neutral even on a release predating the payload.
     from .tools.guidelines import create_guidelines_tools
-    # room tools (agent group chat P5, 2026-11-16): the sibling-
+    # room tools (agent group chat P5, 2026-11-16; ``room_close``
+    # joined in P6): the sibling-
     # collaboration room surface (``room_create`` / ``room_post`` /
-    # ``room_read`` / ``room_task_decision``). Same cold-boot pattern
+    # ``room_read`` / ``room_task_decision`` / ``room_close``). Same cold-boot pattern
     # as the entries above: the ``@register_tool_category("room")``
     # decorator must run HERE so the cold-boot metadata scan registers
     # the category — otherwise the section is MISSING from the granted
