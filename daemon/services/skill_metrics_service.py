@@ -142,6 +142,7 @@ def _record_capture_lane_off_refusal(
     agent_id: Any = None,
     task_message: Any = None,
     prompt_source: str = "skill_metrics_service",
+    run_id: str | None = None,
 ) -> None:
     """Count AND record one capture-lane-OFF admission refusal (C2 seam).
 
@@ -162,12 +163,22 @@ def _record_capture_lane_off_refusal(
     (uncounted) instead of breaking the capture path. The helper itself
     never raises.
 
+    C3 (2026-11-17): ``run_id`` is now accepted and threaded. The caller
+    mints it BEFORE the gate (the same minted-before-the-gate contract as
+    ``SkillJobDispatcher.enqueue_capture``) so a REFUSED admission record
+    never carries a silent ``run_id=None``. Historical pre-fix sink rows
+    with ``run_id: null`` stay as-is (append-only audit log — the ids were
+    never minted and cannot be reconstructed; see plan-light C3).
+
     Args:
         agent_id: The originating agent id, when known.
         task_message: The raw prompt text. Used ONLY to derive the prompt
             SHAPE downstream (length bucket + sha256 prefix) — the raw
             text is never copied into the record.
         prompt_source: Which producer minted the attempt.
+        run_id: The attempt's run id — minted by the caller BEFORE the
+            gate. ``None`` is tolerated for back-compat with callers
+            that predate the parameter, but production callers pass it.
     """
     try:
         from daemon.services import skill_capture_observability as observability
@@ -185,6 +196,7 @@ def _record_capture_lane_off_refusal(
             agent_id=agent_id,
             task_message=task_message,
             prompt_source=prompt_source,
+            run_id=run_id,
         )
     except Exception as exc:  # noqa: BLE001 — observability NEVER breaks the lane
         logger.warning(
@@ -640,6 +652,22 @@ class SkillMetricsService:
             the metrics service itself does not act on the
             return value.
         """
+        # C3 (2026-11-17): mint the attempt's run id BEFORE the gate.
+        # A REFUSED admission is still an ATTEMPT and must be
+        # correlatable with its refusal record — the same contract as
+        # ``SkillJobDispatcher.enqueue_evolution`` /
+        # ``enqueue_capture`` (minted-before-the-gate). Defensive: if
+        # the observability module is somehow missing the mint helper,
+        # ``None`` flows through exactly as before (back-compat).
+        try:
+            from daemon.services import (
+                skill_capture_observability as _observability,
+            )
+
+            attempt_run_id: str | None = _observability.new_run_id()
+        except Exception:  # noqa: BLE001 — observability NEVER breaks the gate
+            attempt_run_id = None
+
         # Gate 0: ENSEMBLE_SKILL_CAPTURE_ENABLED kill-switch
         # (default OFF). When the kill-switch is OFF, the trigger
         # is skipped entirely — no agent metadata lookup, no
@@ -679,10 +707,17 @@ class SkillMetricsService:
             #
             # The recorder is defensive: a missing symbol or a raising sink
             # degrades to the previous behaviour and never breaks the gate.
+            #
+            # C3 (2026-11-17): the run id is minted at the TOP of this
+            # method (before Gate 0) and threaded here — a REFUSED
+            # admission record must never carry a silent ``run_id=None``
+            # (the same minted-before-the-gate contract as
+            # ``SkillJobDispatcher.enqueue_capture``).
             _record_capture_lane_off_refusal(
                 agent_id=agent_id,
                 task_message=task_message,
                 prompt_source="skill_metrics_service",
+                run_id=attempt_run_id,
             )
             return None
 

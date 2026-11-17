@@ -535,11 +535,16 @@ the returned payload is a JSON metrics document.
             # C2 tools-lane seam (observability completion): count and record
             # the capture-lane-off ADMISSION refusal before building the envelope.
             # Never raises into the tool lane.
+            # C3 (2026-11-17): mint the run id BEFORE the gate so the
+            # refused-admission record never carries a silent
+            # ``run_id=None`` (minted-before-the-gate contract, same as
+            # the dispatcher's ``enqueue_capture``).
             try:
                 observability.record_capture_lane_disabled_refusal(
                     agent_id=agent_id,
                     task_message=task_message,
                     prompt_source="skill_execute_capture",
+                    run_id=observability.new_run_id(),
                 )
             except Exception as exc:  # pragma: no cover — tool lane containment
                 logger.warning(

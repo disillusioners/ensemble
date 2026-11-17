@@ -762,6 +762,11 @@ class SkillJobDispatcher:
             observability.append_run_record(
                 observability.build_run_record(
                     stage="admission",
+                    # C3 (2026-11-17): thread the attempt's run id —
+                    # this record IS minted mid-attempt (the id exists
+                    # at the call site); it must never carry a silent
+                    # ``run_id=None``.
+                    run_id=run_id,
                     outcome="cap_check_error",
                     extra={
                         "skill_id": skill_id,

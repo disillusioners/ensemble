@@ -409,6 +409,15 @@ async def _announce_fix_dispatch_fault(
     observability.append_run_record(
         observability.build_run_record(
             stage="admission",
+            # C3 (2026-11-17): mint a run id for the faulted ATTEMPT —
+            # a dropped/recorded-after-fault admission record must
+            # never carry a silent ``run_id=None`` (the minted-record
+            # contract on ``stage="admission"`` records; see
+            # ``build_run_record``). Minted here because this is the
+            # LAST point where the attempt is still in hand — the
+            # dispatcher (which normally mints before its gates) is
+            # the component that FAULTED.
+            run_id=observability.new_run_id(),
             outcome="refused" if dropped else "admitted_after_fault",
             refusal_reason=FIX_DISPATCH_FAULT_REASON if dropped else None,
             extra={
