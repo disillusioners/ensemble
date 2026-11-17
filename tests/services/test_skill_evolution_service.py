@@ -424,7 +424,7 @@ class TestEvolveFix:
         with patch.object(
             evolution_service,
             "_call_llm",
-            AsyncMock(return_value="new improved content"),
+            AsyncMock(return_value='{"description": null, "edits": [{"op": "replace", "anchor": "content for alpha", "replacement": "new improved content"}]}'),
         ):
             result = await evolution_service.evolve_skill(
                 old.id, "FIX", "tighten errors"
@@ -502,7 +502,7 @@ class TestEvolveFix:
         with patch.object(
             evolution_service,
             "_call_llm",
-            AsyncMock(return_value="new content"),
+            AsyncMock(return_value='{"description": null, "edits": [{"op": "replace", "anchor": "content for alpha", "replacement": "new content"}]}'),
         ):
             result = await evolution_service.evolve_skill(
                 old.id, "FIX", "tighten"
@@ -527,7 +527,7 @@ class TestEvolveFix:
         with patch.object(
             evolution_service,
             "_call_llm",
-            AsyncMock(return_value="new content"),
+            AsyncMock(return_value='{"description": null, "edits": [{"op": "replace", "anchor": "content for alpha", "replacement": "new content"}]}'),
         ):
             result = await evolution_service.evolve_skill(
                 old_a.id, "FIX", "tighten"
@@ -543,7 +543,7 @@ class TestEvolveFix:
         with patch.object(
             evolution_service,
             "_call_llm",
-            AsyncMock(return_value="another content"),
+            AsyncMock(return_value='{"description": null, "edits": [{"op": "replace", "anchor": "content for beta", "replacement": "another content"}]}'),
         ):
             result2 = await evolution_service.evolve_skill(
                 old_b.id, "FIX", "tighten more"
@@ -569,7 +569,7 @@ class TestEvolveDerived:
         with patch.object(
             evolution_service,
             "_call_llm",
-            AsyncMock(return_value="derived content"),
+            AsyncMock(return_value='{"description": null, "edits": [{"op": "replace", "anchor": "content for alpha", "replacement": "derived content"}]}'),
         ):
             result = await evolution_service.evolve_skill(
                 old.id, "DERIVED", "specialize for sub-task"
@@ -3354,3 +3354,448 @@ def _sink_sandbox(tmp_path, request):
         observability.reset_counters()
         observability.set_anomaly_reporter(None)
         lane_test_end(request.node.nodeid, before)
+
+
+# =============================================================================
+# D5 + D1 (2026-11-17) — surgical verbatim-carry evolution + payload
+# descriptions
+# =============================================================================
+
+
+def _long_parent_body() -> str:
+    """A parent body >8000 chars with four distinguishable sections.
+
+    Section markers near the END (beyond both the historical 3000-char
+    evolution-prompt truncation and the 8000-char skill_view display
+    cap) — the exact shape whose tail used to be destroyed.
+    """
+    sections = []
+    for idx, name in enumerate(
+        ("Scope", "Fallbacks", "Timeouts", "Evidence Discipline")
+    ):
+        filler = " ".join(f"filler-{name.lower().replace(' ', '-')}-{i}" for i in range(160))
+        sections.append(f"## {name}\n\n{filler}\n\nTAIL-MARKER-{idx}\n")
+    return "# Parent Skill\n\n" + "\n".join(sections)
+
+
+class TestSurgicalEvolutionDefault:
+    """D5: verbatim-carry BY DEFAULT; full-body LLM regen ONLY on marker."""
+
+    @pytest.mark.asyncio
+    async def test_surgical_fix_carries_parent_verbatim(
+        self, evolution_service, skill_repo, project_id
+    ):
+        """The untouched 3 of 4 sections (and the tail markers past
+        3000/8000 chars) survive a FIX byte-identical — the observed
+        4-invariant-regression shape cannot recur by construction."""
+        parent = _make_skill(
+            skill_repo, project_id, "gamma",
+            content=_long_parent_body(),
+        )
+        edit_script = json.dumps(
+            {
+                "description": "Gamma, narrowed to timeout discipline",
+                "edits": [
+                    {
+                        "op": "replace",
+                        "anchor": "## Fallbacks",
+                        "replacement": "## Fallbacks\n\n(placeholder)",
+                    }
+                ],
+            }
+        )
+        with patch.object(
+            evolution_service, "_call_llm",
+            AsyncMock(return_value=edit_script),
+        ):
+            result = await evolution_service.evolve_skill(
+                parent.id, "FIX", "tighten fallback section only"
+            )
+        assert result["skipped"] is False
+        assert result["mode"] == "surgical"
+        assert result["edits_applied"] == 1
+
+        new_skill = skill_repo.get(result["new_skill_id"])
+        # D5: untouched sections carry verbatim.
+        assert "## Scope" in new_skill.content
+        assert "## Timeouts" in new_skill.content
+        assert "## Evidence Discipline" in new_skill.content
+        for idx in range(4):
+            assert f"TAIL-MARKER-{idx}" in new_skill.content
+        # D1: payload description wins over the parent's.
+        assert (
+            new_skill.description
+            == "Gamma, narrowed to timeout discipline"
+        )
+
+    @pytest.mark.asyncio
+    async def test_surgical_prompt_carries_full_parent_body(
+        self, evolution_service, skill_repo, project_id
+    ):
+        """The surgical prompt embeds the FULL parent body — no
+        3000-char truncation anywhere in the evolution path."""
+        parent = _make_skill(
+            skill_repo, project_id, "delta",
+            content=_long_parent_body(),
+        )
+        edit_script = json.dumps({"edits": []})
+
+        async def _capture(prompt: str, model=None):
+            _capture.prompt = prompt
+            return edit_script
+
+        with patch.object(evolution_service, "_call_llm", side_effect=_capture):
+            with pytest.raises(ValueError, match="no applicable edits"):
+                await evolution_service.evolve_skill(
+                    parent.id, "FIX", "description-only rescope"
+                )
+        # The FULL body rode the prompt (the tail sits past 3000).
+        full_body = _long_parent_body()
+        assert "TAIL-MARKER-3" in _capture.prompt
+        assert full_body[-2000:] in _capture.prompt
+
+    @pytest.mark.asyncio
+    async def test_description_only_change_allowed_with_empty_edits(
+        self, evolution_service, skill_repo, project_id
+    ):
+        """Empty edits + a payload description = a legitimate
+        scope-relabel FIX (D1's exact filed shape: content carried,
+        description fixed)."""
+        parent = _make_skill(
+            skill_repo, project_id, "epsilon",
+            content="content for epsilon",
+        )
+        edit_script = json.dumps(
+            {
+                "description": "Epsilon, rescoped to audit walks",
+                "edits": [],
+            }
+        )
+        with patch.object(
+            evolution_service, "_call_llm",
+            AsyncMock(return_value=edit_script),
+        ):
+            result = await evolution_service.evolve_skill(
+                parent.id, "FIX", "rescope to audit walks only"
+            )
+        assert result["skipped"] is False
+        new_skill = skill_repo.get(result["new_skill_id"])
+        assert new_skill.description == "Epsilon, rescoped to audit walks"
+        assert new_skill.content == "content for epsilon"
+
+    @pytest.mark.asyncio
+    async def test_full_regen_only_on_explicit_marker(
+        self, evolution_service, skill_repo, project_id
+    ):
+        """Without the marker, a markdown-body LLM response is a
+        PROTOCOL FAILURE (ValueError) — never silently treated as the
+        new body. With the marker, the legacy full-regen path runs and
+        its prompt carries the FULL parent body."""
+        parent = _make_skill(
+            skill_repo, project_id, "zeta",
+            content=_long_parent_body(),
+        )
+
+        # (a) No marker: markdown response → ValueError, no row.
+        with patch.object(
+            evolution_service, "_call_llm",
+            AsyncMock(return_value="# whole new body, trust me"),
+        ):
+            with pytest.raises(ValueError, match="edit script"):
+                await evolution_service.evolve_skill(
+                    parent.id, "FIX", "tighten timeouts"
+                )
+
+        # (b) Marker: legacy path runs; markdown is accepted; the
+        # prompt saw the full body.
+        captured = {}
+
+        async def _capture(prompt: str, model=None):
+            captured["prompt"] = prompt
+            return "# Parent Skill\n\n" + _long_parent_body()
+
+        with patch.object(evolution_service, "_call_llm", side_effect=_capture):
+            result = await evolution_service.evolve_skill(
+                parent.id, "FIX",
+                "full-body regeneration: rewrite the whole thing",
+            )
+        assert result["skipped"] is False
+        assert result["mode"] == "full_regen"
+        assert "TAIL-MARKER-3" in captured["prompt"]
+
+    @pytest.mark.asyncio
+    async def test_empty_llm_response_never_becomes_content(
+        self, evolution_service, skill_repo, project_id
+    ):
+        """D5 fault-guard: the historical '(no content generated)'
+        sentinel can NEVER become storable content — an empty LLM
+        response in full-regen mode FAILS the evolution."""
+        parent = _make_skill(
+            skill_repo, project_id, "eta",
+            content="# Eta\n\n## Body\n\ncontent",
+        )
+        for response in ("", "   ", "(no content generated)"):
+            with patch.object(
+                evolution_service, "_call_llm",
+                AsyncMock(return_value=response),
+            ):
+                with pytest.raises(ValueError):
+                    await evolution_service.evolve_skill(
+                        parent.id, "FIX",
+                        "full rewrite of the entire body",
+                    )
+
+    @pytest.mark.asyncio
+    async def test_anchor_miss_rejected_and_reported(
+        self, evolution_service, skill_repo, project_id
+    ):
+        """A wrong anchor is REJECTED (never fuzzy-applied); the good
+        op still applies; the rejection rides the result meta."""
+        parent = _make_skill(
+            skill_repo, project_id, "theta",
+            content="# Theta\n\n## Section One\n\nalpha\n",
+        )
+        edit_script = json.dumps(
+            {
+                "edits": [
+                    {
+                        "op": "replace",
+                        "anchor": "alpha",
+                        "replacement": "beta",
+                    },
+                    {
+                        "op": "replace",
+                        "anchor": "THIS ANCHOR DOES NOT EXIST",
+                        "replacement": "whatever",
+                    },
+                ],
+            }
+        )
+        with patch.object(
+            evolution_service, "_call_llm",
+            AsyncMock(return_value=edit_script),
+        ):
+            result = await evolution_service.evolve_skill(
+                parent.id, "FIX", "swap alpha for beta"
+            )
+        assert result["edits_applied"] == 1
+        assert result["edits_rejected"] == 1
+        assert result["edit_rejections"]
+        new_skill = skill_repo.get(result["new_skill_id"])
+        assert "beta" in new_skill.content
+        assert "## Section One" in new_skill.content
+
+    @pytest.mark.asyncio
+    async def test_all_anchors_miss_raises(
+        self, evolution_service, skill_repo, project_id
+    ):
+        """Zero applicable ops + no description → fail loud (no silent
+        no-op generation, no destructive fallback)."""
+        parent = _make_skill(
+            skill_repo, project_id, "iota",
+            content="content for iota",
+        )
+        edit_script = json.dumps(
+            {
+                "edits": [
+                    {
+                        "op": "replace",
+                        "anchor": "NOPE",
+                        "replacement": "x",
+                    }
+                ],
+            }
+        )
+        with patch.object(
+            evolution_service, "_call_llm",
+            AsyncMock(return_value=edit_script),
+        ):
+            with pytest.raises(ValueError, match="no applicable edits"):
+                await evolution_service.evolve_skill(
+                    parent.id, "FIX", "fix something"
+                )
+
+    @pytest.mark.asyncio
+    async def test_fenced_json_tolerated(
+        self, evolution_service, skill_repo, project_id
+    ):
+        """LLMs love fences; one fenced JSON block parses fine."""
+        parent = _make_skill(
+            skill_repo, project_id, "kappa",
+            content="content for kappa",
+        )
+        fenced = (
+            "```json\n"
+            + json.dumps(
+                {
+                    "edits": [
+                        {
+                            "op": "insert_after",
+                            "anchor": "content for kappa",
+                            "text": "\n\n## Added Section\n",
+                        }
+                    ]
+                }
+            )
+            + "\n```"
+        )
+        with patch.object(
+            evolution_service, "_call_llm",
+            AsyncMock(return_value=fenced),
+        ):
+            result = await evolution_service.evolve_skill(
+                parent.id, "FIX", "add a section"
+            )
+        assert result["skipped"] is False
+        new_skill = skill_repo.get(result["new_skill_id"])
+        assert "## Added Section" in new_skill.content
+        assert new_skill.content.startswith("content for kappa")
+
+
+class TestPayloadDescriptions:
+    """D1: description from the payload on BOTH sites; parent fallback."""
+
+    @pytest.mark.asyncio
+    async def test_fix_falls_back_to_parent_description(
+        self, evolution_service, skill_repo, project_id
+    ):
+        """No payload description (null) → the parent description
+        survives as the fallback (unchanged-scope FIX)."""
+        parent = _make_skill(
+            skill_repo, project_id, "lambda",
+            content="content for lambda",
+            description="original lambda description",
+        )
+        edit_script = json.dumps(
+            {
+                "description": None,
+                "edits": [
+                    {
+                        "op": "replace",
+                        "anchor": "content for lambda",
+                        "replacement": "content for lambda v2",
+                    }
+                ],
+            }
+        )
+        with patch.object(
+            evolution_service, "_call_llm",
+            AsyncMock(return_value=edit_script),
+        ):
+            result = await evolution_service.evolve_skill(
+                parent.id, "FIX", "typo fix"
+            )
+        new_skill = skill_repo.get(result["new_skill_id"])
+        assert new_skill.description == "original lambda description"
+
+    @pytest.mark.asyncio
+    async def test_derived_gets_payload_description(
+        self, evolution_service, skill_repo, project_id
+    ):
+        """The DERIVED site (:643-equivalent) gets the same contract —
+        payload description when scope changes, parent fallback."""
+        parent = _make_skill(
+            skill_repo, project_id, "mu",
+            content="content for mu",
+            description="parent mu description",
+        )
+        edit_script = json.dumps(
+            {
+                "description": "Mu, specialized for nightly audits",
+                "edits": [
+                    {
+                        "op": "insert_after",
+                        "anchor": "content for mu",
+                        "text": "\n\nNightly-audit specifics.",
+                    }
+                ],
+            }
+        )
+        with patch.object(
+            evolution_service, "_call_llm",
+            AsyncMock(return_value=edit_script),
+        ):
+            result = await evolution_service.evolve_skill(
+                parent.id, "DERIVED", "specialize for nightly audits"
+            )
+        new_skill = skill_repo.get(result["new_skill_id"])
+        assert new_skill.name == "mu-specialized"
+        assert (
+            new_skill.description == "Mu, specialized for nightly audits"
+        )
+
+    @pytest.mark.asyncio
+    async def test_derived_falls_back_to_parent_description(
+        self, evolution_service, skill_repo, project_id
+    ):
+        parent = _make_skill(
+            skill_repo, project_id, "nu",
+            content="content for nu",
+            description="parent nu description",
+        )
+        edit_script = json.dumps(
+            {
+                "description": "   ",
+                "edits": [
+                    {
+                        "op": "insert_after",
+                        "anchor": "content for nu",
+                        "text": " more",
+                    }
+                ],
+            }
+        )
+        with patch.object(
+            evolution_service, "_call_llm",
+            AsyncMock(return_value=edit_script),
+        ):
+            result = await evolution_service.evolve_skill(
+                parent.id, "DERIVED", "specialize"
+            )
+        new_skill = skill_repo.get(result["new_skill_id"])
+        assert new_skill.description == "parent nu description"
+
+
+class TestCarryOverContentGate:
+    """D5: the FIX/DERIVED carry-over gate (belt-and-braces)."""
+
+    def test_vanished_header_without_direction_name_trips(self):
+        from daemon.services.skill_evolution_service import (
+            SkillEvolutionService,
+        )
+
+        parent = "# P\n\n## Keep Me\n\nbody\n\n## Also Keep\n\nbody2\n"
+        new = "# P\n\n## Keep Me\n\nbody\n"  # "Also Keep" vanished
+        with pytest.raises(ValueError, match="carry-over gate"):
+            SkillEvolutionService._gate_evolved_content(
+                parent, new, "unrelated direction"
+            )
+
+    def test_vanished_header_named_in_direction_passes(self):
+        from daemon.services.skill_evolution_service import (
+            SkillEvolutionService,
+        )
+
+        parent = "# P\n\n## Keep Me\n\nbody\n\n## Remove Me\n\nbody2\n"
+        new = "# P\n\n## Keep Me\n\nbody\n"
+        # The direction names the section → sanctioned removal.
+        SkillEvolutionService._gate_evolved_content(
+            parent, new, "delete the Remove Me section"
+        )
+
+    def test_empty_content_trips(self):
+        from daemon.services.skill_evolution_service import (
+            SkillEvolutionService,
+        )
+
+        with pytest.raises(ValueError, match="empty"):
+            SkillEvolutionService._gate_evolved_content("parent", "  ", "d")
+
+    def test_no_headers_no_constraint(self):
+        from daemon.services.skill_evolution_service import (
+            SkillEvolutionService,
+        )
+
+        SkillEvolutionService._gate_evolved_content(
+            "plain body", "different plain body", "d"
+        )
