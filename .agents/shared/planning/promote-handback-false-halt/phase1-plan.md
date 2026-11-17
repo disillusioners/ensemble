@@ -253,21 +253,33 @@ downgrade's own fixture is **R2 unanswerable** (`SC_SHOW_RC=124` or `SC_MAINPID=
    search anywhere in it:
 
    ```bash
-   # R2 rung — segment-aware unit-ControlGroup containment (pcg = holder's
-   # /proc/<pid>/cgroup last line, text after the final ':'; cg = unit ControlGroup)
-   [ "$pcg" = "$cg" ] && return 0          # (a) exact ControlGroup
+   # R2 rung — segment-aware unit-ControlGroup containment
+   #   pcg = holder's /proc/<pid>/cgroup last line, text after the final ':'
+   #   cg  = the unit ControlGroup ("" or "/" => abstain, never decide)
+   if [ -z "$cg" ] || [ "$cg" = "/" ]; then
+       return 2                                   # degenerate: deciding tooling gave no cgroup
+   fi
+   if [ "$pcg" = "$cg" ]; then                    # (a) exact ControlGroup
+       return 0
+   fi
    case "$pcg" in
-       "$cg"/*) return 0 ;;                # (b) PREFIX test: pcg extends cg at a SEGMENT boundary
-       *)       return 1 ;;                # positively not contained (subject to the C-1 downgrade)
+       "$cg"/*) return 0 ;;                       # (b) PREFIX test: extends cg at a SEGMENT boundary
+       *)       return 1 ;;                       # positively not contained (subject to the C-1 downgrade)
    esac
    ```
+   (Deliberately `if`/`case` rather than the terser `[ "$pcg" = "$cg" ] && return 0` compound: a standalone `A && B`
+   list returns the *test's* status on the non-equal path — the right answer by luck here, the wrong habit everywhere
+   else, and it is a `set -e` landmine in any caller that arms it. `lib.sh` arms no `set -e` today (verified: no `set -e`
+   in the file), so this is defensive, not a live bug. Callers must still propagate the three-valued rc verbatim — the
+   `0/1/2` contract of `I-B13`/`§5.4a`.)
 
    - holder `= MainPID` accepts before either test (equality arm, unchanged by the amendment);
    - `"$cg"/*` is a **left-anchored prefix** pattern: `cg` matched literally, then `/`, then anything. It is **NOT**
      `*"$cg"*` — the raw-substring form the amendment exists to kill;
    - **canonical predicate string** — this exact string is the one every other copy in the plan set quotes verbatim
      (`decisions.md` §2.2(7), `plan-overview.md` §5, `phase2-plan.md` §9.1 + §9.2, phase1 §10 T5's acceptance cell):
-     **`pcg == cg || pcg PREFIX-matches "$cg"/`** (table cells escape the pipe as `\|\|`). `PREFIX-matches` is realised
+     **`pcg == cg || pcg PREFIX-matches "$cg"/`** (table cells escape the pipe as `\|\|`; a degenerate `cg` of `""`/`/`
+     short-circuits to abstain `2` **before** either disjunct). `PREFIX-matches` is realised
      in shell as the left-anchored `case "$pcg" in "$cg"/*)` above. The word is **PREFIX**, never `contains` — a
      substring reading anywhere in this position is the defect BL-4 exists to close. **Copy the fenced block, not a cell.**
    - `/proc/<holder>/cgroup` unreadable ⇒ the rung **abstains (`2`)**, fall through (do **not** decide `1`);
