@@ -1,0 +1,274 @@
+# Phase 3 — Release Mechanics (floor/stamp re-pin, version bump, staging choreography, rollback adjudication)
+
+**Commission:** `promote-machinery defect fix: healthy-boot false-halt` (`fix/promote-handback-false-halt`)
+**Plan set:** `.agents/shared/planning/promote-handback-false-halt/` — Phase 3 of 3 (PLANNING ONLY)
+**Base tree:** worktree `/home/nea/ensemble-src-wt-hbfix`, branch `fix/promote-handback-false-halt`, base `0181dadbf8641c60d7158ad59edfa4a4b36944c8`
+**Fence (verified):** `.env` → `ENSEMBLE_SELF_ENV=dev`, `POSTGRES_DB=ensemble_dev`, `POSTGRES_HOST=127.0.0.1`, `POSTGRES_PORT=5432`, `POSTGRES_USER=ensemble_dev_app`, `DAEMON_PORT=8079` (mode `600`); **no `.venv`** (lazy — no bare `python`); `origin/latest` = `eca98397d` (**55 commits ahead of the lane base** — see §4.3/T3).
+
+> **ID namespace note.** Phase 1 (code fixes A/B/C + restart-arm scope) and Phase 2 (tests/rehearsal/negative proof) are being planned by sibling workers in parallel and were NOT present when this file was authored. To avoid a numbering collision this file uses a **phase-scoped namespace**: `P3-D#` (decisions), `P3-R#` (risks/requirements), `P3-T#` (tasks), `AC-P3-#` (acceptance criteria). Phase 1/Phase 2 numbering is **preserved and cross-referenced, never renumbered**. The consolidator should keep the `P3-` prefix and APPEND rather than renumber if it flattens the set. (Same convention as the precedent `promote-handback-halt/phase3-plan.md`.)
+
+> **Artifact status.** PLANNING ONLY. No file outside this one was created or modified. No `stage.sh` / `promote.sh` / `bump_version.py` was executed. No tag was cut. No live-install write. `/home/nea/agents-ensemble` was read-only (manifest, `state.json`, `releases/`, `.env`).
+
+> **Sibling-phase reconciliation (performed after `phase1-plan.md` and `phase2-plan.md` landed — both were absent when this file was first authored).** Phase 1 owns `P1–P12` + `T1–T8` (unprefixed `T`); Phase 2 owns `P2-*` (`P2-1…P2-3`, `P2-T1…P2-T15`); this file owns `P3-*` — **no numeric collision**. Phase 1's §11 (code-commit choreography) explicitly assigns the floor re-pin, the version bump, the tag and the staging sequence to Phase 3 and independently names the same two-commit shape (`M` then `B`) and the same re-pin targets (`lib.sh:95`, `upgrade_tools.py:4145`) — **Phase 1 and Phase 3 agree on the mechanics**. Phase 1 also states the pair re-pin *"carries no runtime behaviour"* (`:390`) — consistent with P3-D3 (the prose around the constants is not edited). Phase 2's §9 negative proof (NP-1…NP-8) is orthogonal to Phase 3 (it proves the *fixed* verifier still halts wrong releases); the one cross-phase seam is **P3-R4** below — Phase 1/Phase 2 must not add a file under `scripts/upgrade/` or `daemon/plugin_subsystem/` without registering it in `executor_family_paths`, or the coverage gate (F7) fails at stage time.
+
+---
+
+## 1. Objective
+
+Phase 3 delivers the **release mechanics** that carry the Phase-1/Phase-2 fix out of the tree and into a staged, ceremony-ready release — and nothing else:
+
+1. The **floor/stamp re-pin**: the two-line edit that moves `PIPELINE_SCRIPTS_REV` (`scripts/upgrade/lib.sh:95`) and `PIPELINE_SCRIPTS_FLOOR_COMMIT` (`daemon/tools/upgrade_tools.py:4145`) onto the commit that actually introduced this lane's ceremony-relevant `scripts/upgrade` semantics — with the chicken-and-egg resolved explicitly and every validation predicate mapped.
+2. The **version-bump sequence**: a re-derived free version slot, the house bump fileset, and the CHANGELOG entry content this lane owes.
+3. The **staging sequence**: merge → push → bump → annotated tag → detached tip-identity stage worktree → FE rebuild → sidecar re-stamp → `stage.sh live`, ending with the 4-way sha256 identity check and the ceremony-ready gate.
+4. The **`rollback_safe` adjudication**: an explicit `ENSEMBLE_ROLLBACK_SAFE=1` with the delta-scoped rationale, and the honest statement of what a rollback to `v0.31.0` means for this lane.
+5. The **release-commit choreography**: the ordered commit list for the whole lane with explicit-path git commands, so the merge/bump/tag sequence is reproducible and auditable.
+
+Phase 3 **ends at a ceremony-ready staged release**. The live promote remains the Emperor's ceremony and is NOT performed here (P3-D7).
+
+---
+
+## 2. Scope
+
+### In scope
+
+- The two-line constant re-pin and its commit-graph placement (P3-D1).
+- Version-slot derivation, `bump_version.py` invocation semantics, the house bump fileset, CHANGELOG content requirements.
+- The staged-release sequence (order, argv, the four identity legs, the live fence, the ceremony-ready gate).
+- `rollback_safe` adjudication + the manifest recording site + the rollback semantics.
+- The ordered commit list with explicit-path git commands and the house commit-message forms.
+- The ceremony preconditions (scripts-pin advance, arm-time guard inputs, floor/stamp parity at arm time).
+
+### Out of scope
+
+- **Phase 1's code fixes** (Candidates A/B/C, the restart-arm `scope_arm_is_active` conflation, the serving-attribution gate, the unit-arm retry). Phase 3 **references** those defect sites; it never specifies their behaviour.
+- **Phase 2's test/rehearsal/negative-proof work** (the pack, the rehearsal, the mutation proof).
+- The live **promote** ceremony, the nonce, the 3-factor user attestation, the `current` flip, the rollback decision.
+- The `plan-overview.md` consolidation (the planner's job) and the planning-docs commit (the planner consolidates it).
+- Any change to the daemon's *behaviour*; Phase 3 changes **one constant** in daemon code and nothing else.
+
+---
+
+## 3. Verified mechanics (the facts this phase is built on)
+
+Every anchor below was re-read in `/home/nea/ensemble-src-wt-hbfix` on 2026-11-17 (worktree values are authoritative; the shared checkout `/home/nea/ensemble-src` is DETACHED at `bf4bfde6e` and behind).
+
+| # | Fact | Anchor |
+|---|------|--------|
+| F1 | `PIPELINE_SCRIPTS_REV` (scripts side) = `1aa0065eb818ff00cb32730fab54d7f2060c42d8` | `scripts/upgrade/lib.sh:95` |
+| F2 | `PIPELINE_SCRIPTS_FLOOR_COMMIT` (daemon side) = the **same** sha | `daemon/tools/upgrade_tools.py:4145` |
+| F3 | The two **must be byte-equal** ("D6-8 — the two travel together"); a mismatch is a stage-time refusal | `lib.sh:748-751` |
+| F4 | The stamp must be **40-hex lowercase** (a short form is refused) | `lib.sh:740-742` |
+| F5 | The stamp must **resolve to a commit in the tree** | `lib.sh:744-746` |
+| F6 | The floor must be an **ancestor of the built tree HEAD** (`git merge-base --is-ancestor`) | `lib.sh:783-787` |
+| F7 | The stamped commit must **contain every shipped executor-family path** (17 paths) | `stage.sh:817` → `executor_family.sh:315-331` |
+| F8 | Stage-time extraction regexes are **format-exact**: `^PIPELINE_SCRIPTS_FLOOR_COMMIT = "<7-40 lowercase hex>"$` and `^PIPELINE_SCRIPTS_REV=<value>` | `stage.sh:774`, `stage.sh:795` |
+| F9 | Arm-time guard: reads the stamp from `<scripts_dir>/lib.sh` (64 KiB window) and compares the **daemon-binary floor** against `<scripts_dir>` HEAD **by ancestry** | `upgrade_tools.py:4135-4179`, `:4189-4209`, `:4334-4373` |
+| F10 | At arm time there is **no** stamp-vs-floor equality check (that is a stage-time rule only); the arm-time rules are *stamp parses* + *floor is an ancestor of the scripts dir HEAD* | verified: no `stamp == floor` comparison in `upgrade_tools.py` |
+| F11 | The arm-time guard is judged **before** `consume_pending_action` ⇒ a refusal **never burns the nonce** | `upgrade_tools.py:3924-3946` |
+| F12 | The executor runs `bash <scripts_dir>/promote.sh` — `scripts_dir` comes from `_resolve_scripts_dir`, whose **first** candidate is the explicit `ENSEMBLE_UPGRIPE_SCRIPTS_DIR` | `manager.py:6601`; `upgrade_tools.py:2031-2060` |
+| F13 | The live install pins that env to the **scripts-pin worktree**; the live install has **no** `scripts/` dir at its root | live `.env:107`; `ls /home/nea/agents-ensemble/scripts` → absent |
+| F14 | The fixture run's stop script resolved from the scripts-pin worktree — the ceremony really does execute *that* tree | `r-20261117-171207-e2f9.log:17` |
+| F15 | The live `state.json` `scripts_dir` values are the scripts-pin worktree (3 rows) | `releases/state.json` |
+| F16 | The scripts-pin worktree is at `0181dadbf` (detached), **clean**, `1aa0065eb` is an ancestor of it ⇒ arm-clean today | `git -C /home/nea/ensemble-src-wt-scripts-pin` |
+| F17 | The **frozen binary** carries the daemon-side floor constant (module code, PyInstaller PYZ — literal grep is blocked; the v0.29.0 ceremony already recorded this as a method-adjusted verification) | `upgrade_tools.py:4145` inside the bundle; `staged_release_v0290_ceremony_notes` |
+| F18 | `stage.sh` requires `git describe --tags --exact-match HEAD == VERSION` else **exit 78** | `stage.sh:203-207` |
+| F19 | `stage.sh` L1 tip-identity: staging tree HEAD must equal `refs/remotes/origin/latest` (fallback `refs/heads/latest`) | `stage.sh:220` → `lib.sh:3619-3626`, `:4243-4273` |
+| F20 | `stage.sh` L2 provenance: both artifacts need a **well-formed sidecar** with `git_head == HEAD_SHA`, `git_dirty == false`, `artifact_sha256` matching — else exit 78 | `lib.sh:4048-4180` |
+| F21 | `stage.sh` refuses a **UI-less** release (FE must be built) and verifies the FE sidecar | `stage.sh:348-378` |
+| F22 | The FE provenance sidecar is **stripped from the payload** (web-servable); the binary sidecar lives beside the artifact **in the staging worktree only** | `stage.sh:488-496`; `lib.sh:3398-3401` |
+| F23 | `rollback_safe` derivation greps the **full migration history** (110/133 files match `DROP TABLE|DROP COLUMN`) ⇒ the unset path **refuses** (exit 78); the explicit env is **mandatory** | `stage.sh:383-420`; `stage.sh:409` |
+| F24 | `rollback_safe` is recorded in the release `manifest.json` | `stage.sh:839`; consumers `promote.sh:1009-1016`, `rollback.sh:174-177`, `lib.sh:8987-8990` |
+| F25 | This lane adds **zero migrations**; `origin/latest`'s drift adds zero migrations | `git diff --name-only 0181dadbf origin/latest -- daemon/migrations/versions/` → 0 files |
+| F26 | House bump commit shape with the pair re-pinned in the **same** commit = 7 files | `3f45cd6dd` (v0.30.4): CHANGELOG, `daemon/__init__.py`, `daemon/tools/upgrade_tools.py`, `pyproject.toml`, `scripts/upgrade/lib.sh`, `tests/test_api.py`, `uv.lock` |
+| F27 | The house bump message form is **`chore(release): bump version to <ver>`** — used by the two most recent bumps (`v0.31.0` @ `0181dadbf`, `v0.30.13` @ `83a237bc5`) and by every release from `v0.30.6`–`v0.30.9` onward. `bump_version.py`'s own commit form is **`! New version <ver>`** (its literal, `bump_version.py:150`) and was used at least once (`v0.30.12` @ `66cb3891a`) — a **4-file** set with no CHANGELOG. Both forms exist in history; the `chore(release)` form is the current house habit and the one that carries the re-pin. | `git log --grep="chore(release): bump version"` vs `git log --grep="New version"`; `bump_version.py:150` |
+| F27b | `bump_version.py`'s own output is a **4-file** commit (no CHANGELOG unless the CHANGELOG is already dirty) and its `uv sync` step would **materialise a `.venv` in the worktree** (the worktree has none — lazy per `wt.claim.hbfix`) — a mutation plus a network dependency, for version strings that are mechanical replacements. | `bump_version.py:84-117` (`uv sync` at `:117`), `:126-159` (the targeted commit); worktree has no `.venv` (verified) |
+| F28 | House release order = merge → bump → **annotated tag** → detached stage worktree at the tag → FE rebuild → sidecar → `stage.sh` | POK `release-01-bump-tag-then-stage-order`; aegis `phase6-plan.md` |
+| F29 | Tag push order: **HEAD:latest first, then the tag** | aegis `phase6-plan.md:98-100` (`f13a4f59e`) |
+| F30 | Version slot at authoring time: `pyproject 0.31.0`, max local tag `v0.31.0`, max remote tag `v0.31.0`, live `releases/` max `v0.31.0` ⇒ next free = **`v0.31.1`** — **re-derive at bump time** | `pyproject.toml:3`, `git tag`, `git ls-remote --tags origin`, `ls releases/` |
+| F31 | `origin/latest` = `eca98397d`, **55 commits** past the lane base `0181dadbf`; the drift touches **none** of `scripts/upgrade/`, `daemon/tools/upgrade_tools.py`, `daemon/migrations/`, `frontend/` | `git diff --name-only 0181dadbf origin/latest` (24 files, none in those paths) |
+| F32 | Local `latest` is **232 commits behind** `origin/latest` and is **checked out in another worktree** (`/home/nea/ensemble-src-wt-ari-stop-int` @ `cf43ac00d`) ⇒ git refuses a second `latest` checkout | `git rev-list --count latest..origin/latest`; `git worktree list` |
+| F33 | `bump_version.py` = 165 lines; bumps 4 version files (+CHANGELOG if dirty), runs `uv sync`, then a **targeted** commit | `bump_version.py:56-159`; `uv` at `/home/nea/.local/bin/uv` (0.12.5), on PATH |
+| F34 | The live `v0.31.0` manifest carries `rollback_safe: true` **with** `contains_contract_phase: true` ⇒ the explicit adjudication is the established path for this install | `releases/v0.31.0/manifest.json` |
+| F35 | The live `v0.31.0` binary sha256 **==** its manifest `binary_sha256` (the 4-way identity holds for the shipped release) | `5473a25f759ec6ef21fd85ebfb76939658ff4fa4fe9b73e07870ce17d9514743` |
+| F36 | The shared checkout is DETACHED (not on `latest`) ⇒ the shared-checkout branch-lock problem is currently absent | `/home/nea/ensemble-src` @ `bf4bfde6e` |
+
+---
+
+## 4. Design
+
+### 4.1 The chicken-and-egg, stated exactly
+
+The floor/stamp pair must name **one commit** (F3), and that commit must be:
+
+- **40-hex** (F4),
+- **resolvable in the release tree** (F5),
+- an **ancestor of the built tree HEAD** (F6),
+- and **contain every shipped executor-family path** (F7).
+
+The lane's Phase-1 fix **modifies `scripts/upgrade/lib.sh` and `scripts/upgrade/promote.sh` — both are executor-family members** (`executor_family.sh:78-96`, members #7 and #8). So the commit that "introduces the current ceremony-relevant `scripts/upgrade` semantics" is a commit that **edits the very file that carries the stamp**.
+
+**The impossibility.** A commit cannot contain its own sha: the sha is computed *over* the tree, so writing "M = my own sha" into `lib.sh` inside commit M is a hash fixed-point — unconstructible. (Topologically it would even be legal: `git merge-base --is-ancestor X X` is true. The blocker is cryptographic, not topological.) Therefore the value must name a commit that **already exists** when the re-pin is written ⇒ **the minimum graph is two commits**: the fix lands first, the re-pin rides on a **later** commit.
+
+**The house already solved this, twice.**
+
+- `f8dc874f7` — *"The floor stamp at 68c6ee055 predates the config_compat_* executor-family members (landed 802eac803) — a stage from source failed its own D6-8 stamp-coverage gate. Re-pin both stamps … to `1aa0065eb…` (the E2E-round HEAD containing the full family) … **No self-reference: the value is an ancestor of this commit; normal commit, no amend.**"* → the re-pin commit names **its own parent**.
+- `3f45cd6dd` (the v0.30.4 bump) — carried the version bump **and** the pair re-pinned to `68c6ee05` ("Merge branch 'feature/guideline-read-tool' into latest") **in the same 7-file commit** (F26).
+
+So the accepted house relationship is: **the named commit's tree is the shipped tree modulo the stamp line itself.** The stamp is a *revision identifier*, not a content hash.
+
+### 4.2 Commit-graph options (each with its predicate coverage)
+
+Let **F** = the fix commit(s) on `fix/promote-handback-false-halt`, **M** = the merge commit that lands them on `latest`, **B** = the version-bump commit, **T** = the annotated release tag.
+
+| Option | Shape | `lib.sh:740` 40-hex | `lib.sh:744` resolves | `lib.sh:748` stamp==floor | `lib.sh:783` floor ancestor of built tree | `stage.sh:817` coverage | `upgrade_tools.py:4135-4179` arm-time | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| **A — RECOMMENDED** | `F → M (merge --no-ff onto latest) → B (bump + re-pin to M) → T` | ✅ M is 40-hex | ✅ M is in the release history | ✅ both set to M in B | ✅ M is B's parent ⇒ ancestor of T | ✅ all 17 family paths exist at M | ✅ floor=M ⇒ next ceremony needs the pinned dir to contain M ⇒ **enforces the fix** | **ADOPT** |
+| B — bump re-pins to `B`'s parent | same graph, value = "whatever B's parent is" | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ only correct **iff** B's parent **is** M | **REJECT** (see below) |
+| C — re-pin names `T` (the tag) | value = the tag's own commit | ✅ | ✅ | ✅ | ✅ (T is HEAD) | ✅ | ⚠️ | **IMPOSSIBLE** (self-reference: T cannot contain T's sha) |
+| D — keep the old pair (`1aa0065eb`), ship the fix | one commit, no re-pin | ✅ | ✅ | ✅ | ✅ | ✅ (all 17 exist at `1aa0065eb`) | ❌ **the guard stops enforcing the fix** | **REJECT** (see below) |
+| E — `REV` and `FLOOR` diverge | e.g. REV=M, FLOOR=F | ✅ | ✅ | ❌ | ✅ | ✅ | — | **REJECTED BY CONTRACT** (F3) |
+
+**Why B is rejected (as a *rule*, not as an accident).** "Name B's parent" is a *convenience* that silently becomes wrong the moment anything lands between `M` and `B` on `latest` — and `origin/latest` is currently 55 commits ahead of the lane base (F31), so other lanes are demonstrably landing. If B's parent is some unrelated commit, the stamp names a revision whose `scripts/upgrade` semantics are **not** the ones that shipped, and the D3 truthfulness rationale (F7's own docstring) is void. The house's own wording is *"the merge commit that introduces the ceremony-relevant scripts/upgrade semantics"* (`stage.sh:756-770`, `lib.sh:741`) — that is a **named commit**, never a positional one. **Pin to M explicitly.**
+
+**Why D is rejected — the deep reason.** Keeping `1aa0065eb` is *mechanically invisible at stage time*: every stage-time predicate still passes (F4/F5/F6/F7 all hold for `1aa0065eb`, verified — all 17 family paths exist at it). The failure is **downstream and semantic**: the arm-time guard's entire purpose (D6-10, `upgrade_tools.py:4232-4237`) is *"a tree that does not contain the fix commit object cannot contain the fix"*. With the floor left at `1aa0065eb`, a **stale scripts tree that predates the fix** still satisfies the ancestry check and still ARMS. The release would ship the fix in the payload while the guard silently stops demanding it. This is the lane's whole point lost, and **stage.sh will not catch it** ⇒ Phase 3 must add an explicit release-time assertion (P3-T7), not rely on the stage gates.
+
+**Why C is impossible but "the floor names the tag" is a natural mistake.** The *tag* is a legitimate floor value — the tag's **target commit** is a fine thing to name, and if the fix's release commit is `R` then `R` is a perfectly good value. What is impossible is naming **the commit that carries the re-pin itself**. Phase 3 therefore pins the value to **M**, and the tag sits on **B** (a descendant of M), so the ancestor predicate (F6) is satisfied with room to spare.
+
+**The recommended shape, concretely (P3-D1):**
+
+```
+  fix/promote-handback-false-halt
+        │  F1..Fn   (Phase-1 code fixes — scripts/upgrade/lib.sh, scripts/upgrade/promote.sh)
+        │  F'..F'n  (Phase-2 tests/packs — test/, tests/)
+        │
+        ▼  merge --no-ff  (into latest) ──► M   ← THE FLOOR/STAMP VALUE
+        │
+        ▼  commit "chore(release): bump version to <v>"
+           7 files: CHANGELOG.md · daemon/__init__.py · daemon/tools/upgrade_tools.py
+                    · pyproject.toml · scripts/upgrade/lib.sh · tests/test_api.py · uv.lock
+           (upgrade_tools.py:4145  → PIPELINE_SCRIPTS_FLOOR_COMMIT = "<M>")
+           (lib.sh:95             → PIPELINE_SCRIPTS_REV=<M>)                    B
+        │
+        ▼  git tag -a v<v> -m "<annotation>"                                      T
+        │
+        ▼  git worktree add --detach <stage-wt> v<v>
+           FE rebuild + binary rebuild at T → sidecars → stage.sh live
+```
+
+### 4.3 Why the floor bump is not cosmetic — it is the enforcement mechanism
+
+The daemon-side floor is read from the **running daemon's module** (`upgrade_tools.py:3940`, `:4145`) — i.e. from the **frozen binary** (F17). The arm-time guard then asks: *is the floor an ancestor of the pinned scripts dir's HEAD?* (F9).
+
+| ceremony | arming daemon's floor | pinned scripts dir must contain | consequence |
+|---|---|---|---|
+| promote `v0.31.1` | `1aa0065eb` (the **live v0.31.0** binary, F2) | `1aa0065eb` | arm-clean today (F16) — **but the executing scripts are the pinned tree's (F12-F15), so the fix only runs if the pinned tree is advanced** (P3-T9) |
+| promote `v0.31.2` (next) | `M` (the `v0.31.1` binary) | `M` | the fix is now **demanded**; a stale pinned tree ⇒ pre-nonce refusal (F11), recoverable by advancing the pin |
+
+⇒ **The re-pin is the mechanism that makes the fix enforceable at the next ceremony.** That is the reason it is mandatory, and it is why the plan treats "the re-pin was forgotten" as a **silent** failure (P3-R1) rather than a loud one.
+
+### 4.4 The live ceremony runs the **pinned** tree — the fix-to-live path
+
+This is the load-bearing operational finding of Phase 3, and it is easy to get wrong because the release payload *does* ship `scripts/upgrade/*` (`stage.sh:521` → verified present at `releases/v0.31.0/scripts/upgrade/`).
+
+But the daemon resolves the executor tree as (F12-F13): explicit `ENSEMBLE_UPGRIPADE_SCRIPTS_DIR` → the module's own repo → `<install_dir>/scripts/upgrade`. The live install **pins the first** (live `.env:107` → the scripts-pin worktree) and has **no** `scripts/` at its root (F13) — the payload copy at `releases/<v>/scripts/upgrade/` is **not** an auto-resolved candidate (`<install_dir>/scripts/upgrade` ≠ `<install_dir>/current/scripts/upgrade`). The fixture run confirms the executing tree was the scripts-pin worktree (F14, F15).
+
+⇒ **The fix reaches live only through the scripts-pin worktree.** Staging the release does not deploy the fixed `lib.sh`/`promote.sh` into the executing path. The pinned worktree must be advanced to a tree containing `M` — and that is an **operator-owned ceremony precondition** (P3-D6, P3-T9), because the live `.env` pin is operator-owned.
+
+The cleanest target: point the scripts-pin worktree at **the release tag `T` itself** (detached). Then the executing `lib.sh` is the fixed one *and* its stamp equals the new floor — one checkout satisfies F12 (the fix executes), the next-ceremony ancestry (F9/F10), and stamp/floor parity in the armed tree.
+
+### 4.5 `rollback_safe` adjudication
+
+- The derivation path (unset) greps the **whole** migration history: 110 of 133 files match `DROP TABLE|DROP COLUMN` ⇒ `contains_contract_phase=true` ⇒ the derivation **refuses** (exit 78, `stage.sh:409`). The explicit env is therefore **mandatory, not optional** (F23).
+- The **adjudication rationale is delta-scoped, not history-scoped**: the migration delta between the previous release tag (`v0.31.0`, the currently promoted release per `state.json` `current`) and the new tag is **EMPTY** — this lane adds no `.sql` and `origin/latest`'s drift adds none (F25). No schema drift is introduced by `v0.31.1` ⇒ `rollback_safe = true` is legitimate.
+- The live install's own `v0.31.0` manifest carries `rollback_safe: true` **with** `contains_contract_phase: true` (F34) — the identical adjudication shape, so this lane matches the established precedent rather than inventing one.
+- Recorded in the release `manifest.json` (F24); consumed by `promote.sh`'s T5 gate (the **previous** release must be `rollback_safe`), `rollback.sh`, and the adopt/sweep path.
+- **What a rollback to `v0.31.0` means for this lane (P3-D5):** the old release's `scripts/upgrade/` — the **defective** `lib.sh`/`promote.sh` — come back, so the healthy-boot false-halt class **returns** on the next promote until the lane is re-promoted. `rollback_safe: true` means *schema-safe to roll back into*; it does **not** mean *defect-free*. The daemon-side floor also reverts to `1aa0065eb`, so the arm-time guard reverts to demanding `1aa0065eb` — which any recent pinned tree satisfies — i.e. the guard stops demanding the fix again, exactly as in option D.
+
+---
+
+## 5. Decisions
+
+| ID | Decision | Rationale (cite) | Rejected alternatives |
+|----|----------|------------------|------------------------|
+| **P3-D1** | **Floor/stamp value = `M`**, the merge commit that lands the lane's fix on `latest`. The re-pin rides in the **version-bump commit `B`** (7-file house bump commit). | Self-reference is unconstructible (§4.1); house precedent `3f45cd6dd` (F26) and `f8dc874f7` ("value is an ancestor of this commit"); `stage.sh:756-770` + `lib.sh:741` name *the merge commit that introduces the ceremony-relevant semantics*. Predicates: F4 ✅ F5 ✅ F6 ✅ F7 ✅ (all 17 family paths exist at `M`). | B (positional "B's parent" — silently wrong once another commit lands between `M` and `B`; `origin/latest` is 55 commits ahead, F31); C (self-reference, impossible); D (stale floor ⇒ the guard stops enforcing the fix, §4.2); E (stamp/floor divergence refused by contract, F3). |
+| **P3-D2** | **Never edit the pair by hand-editing a value that is not a real 40-hex sha in the tree.** The re-pin is written as a **targeted 2-line edit inside the bump commit** — never a separate "fix(floor)" commit unless the coverage gate demands one. | The two constants are format-exact (F8) and the value must resolve in the release tree (F5). `f8dc874f7`'s separate re-pin commit existed because the **coverage gate had already failed** (new family members) — a condition that does not arise here *provided Phase 1 adds no new shipped family member*. | A separate re-pin commit: one more commit for no gain; keep as the **fallback** if the coverage gate fails (P3-R4). |
+| **P3-D3** | **The re-pin edits exactly two lines**, in the house's existing shapes: `scripts/upgrade/lib.sh:95` → `PIPELINE_SCRIPTS_REV=<M>`; `daemon/tools/upgrade_tools.py:4145` → `PIPELINE_SCRIPTS_FLOOR_COMMIT = "<M>"`. The `lib.sh` header comment (`:88-94`) and the `upgrade_tools.py` docstring (`:4146-4161`) are **left untouched** — they describe the mechanism, not the value. | F8 (the extraction seds are format-exact: spaces around `=`, double quotes, own line); F26 (the house 7-file bump shape); editing prose risks the extraction regexes. | Reformatting the constants; adding a "value as of <date>" comment to the constant line. |
+| **P3-D4** | **Version slot is re-derived at bump time** on all three axes (local tags / remote tags / live `releases/` dirs), taking the lowest free slot strictly above every reserved line. At authoring time that is **`v0.31.1`**; it is **not** hardcoded. | F30; the stale project-metadata note `"next_free_version_slot: v0.29.1"` is obsolete (F30 shows `v0.31.0` live); other lanes are active (the group-chat FE fast-follow lane is open per project history). | Hardcoding `v0.31.1`; trusting the project-metadata slot. |
+| **P3-D5** | **`rollback_safe` is adjudicated explicitly as `1`**, with the rationale *delta-empty* (the migration delta between the previous release tag and the new tag is empty; the destructive-DDL grep is full-history and informational only). | F23 (unset ⇒ refuse), F25 (zero migrations), `stage.sh:383-420` (the delta-scoped legitimacy rule), F34 (the live install's own precedent). | Leaving it unset (exit 78); adjudicating `0` (unwarranted — nothing schema-bearing ships). |
+| **P3-D6** | **The scripts-pin worktree advance is an OPERATOR-OWNED ceremony precondition, recorded in the tag annotation, the stage journal and the handoff report — NOT performed by this lane.** Target: the release tag `T` (detached), so the executing tree carries both the fix and the new stamp. | F12-F15 (the ceremony executes the pinned tree), F9 (the next ceremony demands `M`), F11 (a stale pin refuses pre-nonce — loud and recoverable). The live `.env` pin is operator-owned. | Letting the lane move the operator's live-pinned worktree; re-pointing the live `.env` at the stage worktree (changes the install's `.env` — an operator decision with its own fence). |
+| **P3-D7** | **The plan ends at a ceremony-ready staged release.** `promote.sh` is **recorded, never executed**; the `current` symlink is not flipped; the live journal's promote fields stay untouched. | The commission's scope; the promote is the Emperor's 3-factor ceremony; the promote-fields fence is the house protection (aegis G6.5). | Running a "dry" promote against live; flipping `current` as a smoke test. |
+| **P3-D8** | **`stage.sh` runs from a **detached** worktree at the tag `T`, and the tag is created **after** the bump commit `B` and pushed with the `HEAD:latest` → tag order.** | F18 (exact-tag guard), F19 (L1 tip-identity — the staging tree must be at the integration tip, so `B` must be on `latest` and `origin/latest` before staging), F28/F29 (house order + push order). | Staging from the lane worktree (three exit-78 guards: exact-tag, tip-identity, provenance `git_head`); pushing the tag before `latest`. |
+| **P3-D9** | **The binary is REBUILT at the tag; `--skip-build` is NOT used.** The re-pin changes `daemon/tools/upgrade_tools.py`, which is compiled **into the frozen binary** (F17) — a pre-bump binary would carry the **old** floor constant, so the manifest's `pipeline_scripts_floor_commit` (read from the *source* tree at stage time) would disagree with the constant the shipped daemon actually enforces. | F17, `stage.sh:224-300` (build path writes the provenance sidecar), `stage.sh:566` (`BIN_SHA` from the staged tree), F20. | `--skip-build` with a pre-bump binary (floor divergence, undetectable by the manifest); `--skip-build` with a binary built at `T` (equivalent to rebuilding, but adds a hand-rolled step). |
+| **P3-D10** | **The bump is ONE 7-file house commit — `chore(release): bump version to <ver>` — carrying the version files, the CHANGELOG section and the pair re-pin together.** `bump_version.py patch` may be used to **derive the target version and make the 4 mechanical version edits**, but **its own commit is not the release commit**: it is 4-file (no CHANGELOG unless already dirty — F27b), its message is `! New version <ver>`, and its `uv sync` materialises a `.venv` in the lazy worktree. Reconciliation with Phase 1 (which names `scripts/bump_version.py patch`): run the script for the derivation+edits, then `git reset --soft HEAD~1` (a house-known recovery operation) and re-commit **all 7 paths explicitly** with the house message. | F26/F27/F27b (message form, file set, `uv sync` side-effect); F28 (the bump commit is the tagged commit); `bump_version.py:119-159` (its targeted adds are correct, but its message and file set are not the release commit's). | `bump_version.py` verbatim (wrong message form for the current house, 4-file set, `uv sync` churn, and a **separate** commit from the re-pin — which would also break the single-`M` shape? no, it would still satisfy every predicate, but it splits the release commit and departs from `3f45cd6dd`); `git add -A` (forbidden). |
+| **P3-D11** | **The merge is `--no-ff` onto `latest`, and the drift is cleared first.** `origin/latest` is 55 commits ahead of the lane base (F31) and touches none of the release-mechanics paths (F31) but does touch `daemon/` and `.agents/tester/PACKS.md` (Phase 1/2's surface). The lane branch is brought onto `origin/latest` before the merge. | House FINALIZE convention (fetch + verify `latest` unmoved from the branch base — moved ⇒ STOP and report; rebase-vs-merge is the leader's call); F31/F32. | Merging without clearing the drift (the bump would be based on a 55-commit-stale tree); rebasing silently (the leader's call — this plan only names the requirement). |
+| **P3-D12** | **The version of the release is the one derived at bump time and it is `v`-prefixed** in `VERSION=`, in the tag name, and in the `manifest.json` `version` field. | F18 (`git describe --exact-match` yields the `v`-prefixed tag); `stage.sh:196-201` refuses an empty/malformed `VERSION`; ADR-009 D3. | A bare `0.31.1` (refused pre-build, no partial release dir left behind). |
+
+---
+
+## 6. Tasks
+
+Ordering: **T1 → T2 → T3 → (T4, T5) → T6 → T7 → T8 → T9 → T10**. T1-T3 are the pre-flight; T4/T5 are the two release commits; T6-T8 are the staging sequence; T9-T10 are the ceremony hand-off.
+
+| ID | Task | Outcome (testable) | Touchpoints | Depends on | Risks | AC |
+|----|------|--------------------|-------------|------------|-------|-----|
+| **T1** | **Re-derive the release inputs** (read-only): version slot on all three axes; `M`'s eligibility; the drift census. | A recorded table: local max tag, remote max tag, live `releases/` max, `pyproject` version ⇒ the derived slot; and `git diff --name-only <base> origin/latest` proving the release-mechanics paths are drift-free. | `git tag -l 'v0.*'`; `git ls-remote --tags origin`; `ls /home/nea/agents-ensemble/releases/`; `git diff --name-only` | — | P3-R2 | AC1 |
+| **T2** | **Compute `M`**: land Phase-1+Phase-2 on the lane branch, merge `--no-ff` onto `latest` ⇒ `M`. | `M` is a real commit in `latest`'s first-parent line, contains the fix, and contains all 17 executor-family paths. Verify: `git merge-base --is-ancestor <F> M`; `for p in $(bash scripts/upgrade/executor_family.sh --paths); do git cat-file -e "M:$p"; done`. | branch `fix/promote-handback-false-halt`; `latest` (worktree — see P3-R3) | T1, Phase 1, Phase 2 | P3-R2, P3-R3 | AC2 |
+| **T3** | **Clear the drift** (leader disposition on rebase-vs-merge) and record the outcome. | The lane branch contains `origin/latest`; the overlap with Phase 1/2's files is enumerated and each conflict resolved house-style (PACKS.md ⇒ keep-both newest-first). | lane branch; `origin/latest` (`eca98397d`) | T1 | P3-R2 | AC3 |
+| **T4** | **The bump commit `B`** — 7 files, one commit, house message. Edit `pyproject.toml:3`, `daemon/__init__.py:3`, the `tests/test_api.py` version assert, `uv.lock`'s `ensemble` package entry, insert the CHANGELOG section, and **apply the re-pin** (P3-D1/P3-D3): `lib.sh:95 → PIPELINE_SCRIPTS_REV=<M>` and `upgrade_tools.py:4145 → PIPELINE_SCRIPTS_FLOOR_COMMIT = "<M>"`. Commit: `git add -- <7 paths>` then `git commit -m "chore(release): bump version to <v>" -- <7 paths>`. | `git show --stat B` shows **exactly 7 files, 1 insertion/1 deletion each** (the two constant lines + the five version/CHANGELOG lines); `git show B:scripts/upgrade/lib.sh | sed -n 95p` == `PIPELINE_SCRIPTS_REV=<M>`; `git show B:daemon/tools/upgrade_tools.py | sed -n 4145p` == `PIPELINE_SCRIPTS_FLOOR_COMMIT = "<M>"`; `git merge-base --is-ancestor M B` exits 0. | `pyproject.toml`, `daemon/__init__.py`, `tests/test_api.py`, `uv.lock`, `CHANGELOG.md`, `scripts/upgrade/lib.sh`, `daemon/tools/upgrade_tools.py` | T2, T3 | P3-R1, P3-R5 | AC4, AC5 |
+| **T5** | **The annotated tag `T`** at `B`, then push in house order. | `git cat-file -t T` == `tag`; `git rev-parse T^{commit}` == `B`; the annotation names (i) the rollback adjudication (`rollback_safe=true`, delta-empty), (ii) the floor/stamp re-pin value (`M`), (iii) the **no-promote disclosure**, (iv) the scripts-pin advance precondition. Push: `git push origin HEAD:latest` **then** `git push origin T`. | tag object on `B`; `origin/latest` | T4 | P3-R2 | AC6 |
+| **T6** | **The detached stage worktree at the tag.** | `git worktree add --detach <stage-wt> T`; the worktree HEAD == `B`; `git describe --tags --exact-match HEAD` == the version token (F18). The worktree is **kept** with both sidecars until the ceremony. | new worktree (sibling of the lane worktree) | T5 | P3-R6 | AC7 |
+| **T7** | **The release-time floor/stamp + coverage assertion (the anti-D guard).** Run the verdict helpers directly against the stage tree **before** staging, and assert `M` specifically — do not rely on `stage.sh` to catch a stale pair (D). | `source scripts/upgrade/lib.sh`; `_pipeline_scripts_stamp_verdict "<M>" "<M>" <stage-wt>` ⇒ empty + rc 0; `_pipeline_scripts_floor_verdict "<M>" <stage-wt>` ⇒ empty + rc 0; `executor_family_verify_stamp_coverage <stage-wt> "<M>"` ⇒ empty. **Plus** the explicit D-guard: the shipped `lib.sh:95`/`upgrade_tools.py:4145` both equal `M` (grep-verified), and `M` is an ancestor of `HEAD` in the stage tree. | `scripts/upgrade/lib.sh` (helpers, read-only), `scripts/upgrade/executor_family.sh` | T6 | P3-R1 | AC8 |
+| **T8** | **Build + stage.** (a) FE: `npm ci` (node_modules absent in a fresh worktree) then `bash scripts/upgrade/_build_frontend.sh` **at the tag** (writes the FE sidecar with `git_head == HEAD`, `git_dirty == false`). (b) Binary: let `stage.sh` build it (P3-D9) — `stage.sh` resolves `uv` itself and writes the binary sidecar at `stage.sh:284-285`. (c) Stage: `ENSEMBLE_UPGRADE_LIVE=1 ENSEMBLE_ROLLBACK_SAFE=1 VERSION=<v> bash scripts/upgrade/stage.sh live --version <v>` — the `live` TARGET token is **mandatory** (`stage.sh:141`, `:189`: a bare invocation resolves to **demo**), and `ENSEMBLE_UPGRADE_LIVE=1` is the *guard*, not the selector. | Exit 0; the release dir exists at `/home/nea/agents-ensemble/releases/<v>/`; the manifest records `version`, `binary_version`, `pipeline_scripts_floor_commit == M`, `pipeline_scripts_rev == M`, `rollback_safe == true`, `known_schema_gen`; **no** `current` flip; the journal's promote fields unchanged. | `scripts/upgrade/stage.sh`; `scripts/upgrade/_build_frontend.sh`; `frontend/`; `dist/` | T6, T7 | P3-R5, P3-R6 | AC9, AC10 |
+| **T9** | **The 4-way sha256 identity + payload hygiene + live fence.** Re-hash all four sources (never trust a sidecar): (1) `<install>/releases/<v>/ensemble-prod`, (2) `<stage-wt>/dist/ensemble-prod`, (3) `manifest.json` `binary_sha256`, (4) `<stage-wt>/dist/ensemble-prod.build-provenance.json` `artifact_sha256`; the sidecar's `git_head` must equal the tag target (either direction — an annotated tag peels) and `git_dirty` must be `false`. Then the payload hygiene (source-less: no `.env`, no FE sidecar inside the release dir) and the **live fence**: whole-file `state.json` sha (PRIMARY, fail-closed) plus promote fields + `.env` sha + `current` symlink + livez projection + live PID, captured **pre** and **post** stage and machine-diffed. | All four shas equal; every fence leg byte-identical; a moved fence ⇒ the leg FAILS with attribution, never a silent pass. The staging worktree + **both** sidecars survive into the ceremony window. | release dir; `<stage-wt>/dist/`; `releases/state.json`; `<install>/.env` | T8 | P3-R5, P3-R6 | AC11, AC12 |
+| **T10** | **The ceremony hand-off.** Write the handoff report: the version, the 4-way sha, the manifest delta, the **recorded (not executed)** promote command, the ceremony preconditions (scripts-pin advance to `T`; the arm-time guard inputs; the rollback-window state), the disclosures, and the explicit statement that `promote.sh` was never run and `current` was not flipped. | The report names everything the Emperor needs without re-deriving anything; `promote.sh` never executed; `current` still points at `v0.31.0`. | handoff report; stage journal | T9 | P3-R7 | AC13 |
+
+---
+
+## 7. Acceptance criteria
+
+| ID | Criterion |
+|----|-----------|
+| **AC1** | The release version is **re-derived** on all three axes (local tags / remote tags / live `releases/` dirs) at bump time and the derivation is recorded; the slot is the lowest free one strictly above every reserved line. |
+| **AC2** | `M` (the merge commit landing the lane's fix on `latest`) exists in the release history, is the fix's introduction point, and **contains all 17 executor-family paths** (verified per-path with `git cat-file -e "M:<path>"`). |
+| **AC3** | The lane branch contains `origin/latest`; the drift overlap with Phase 1/2's files is enumerated and resolved house-style. |
+| **AC4** | The bump commit `B` touches **exactly 7 files** — `CHANGELOG.md`, `daemon/__init__.py`, `daemon/tools/upgrade_tools.py`, `pyproject.toml`, `scripts/upgrade/lib.sh`, `tests/test_api.py`, `uv.lock` — one line each, with the house message `chore(release): bump version to <v>`, committed with **explicit paths** (never `git add -A`). |
+| **AC5** | Both constants in `B` carry the **same** 40-hex sha equal to `M`, in the house's format-exact shapes (`lib.sh:95` unquoted; `upgrade_tools.py:4145` double-quoted with spaces around `=`); `git merge-base --is-ancestor M B` exits 0; `git show --stat B` shows no other file. |
+| **AC6** | `T` is an **annotated** tag at `B` whose annotation names the rollback adjudication, the floor/stamp value `M`, the no-promote disclosure and the scripts-pin precondition; it is pushed **after** `HEAD:latest`. |
+| **AC7** | The staging worktree is **detached at `T`**; `git describe --tags --exact-match HEAD` == the version token. |
+| **AC8** | Before staging, the release-time verdicts pass against the stage tree: stamp verdict (40-hex + resolves + `stamp == floor`) and floor verdict (`merge-base --is-ancestor floor HEAD`) are both empty/rc-0, and the coverage verdict over the 17 family paths is empty. **The floor value is asserted to be `M` specifically** — a stale-but-consistent pair is caught here, because `stage.sh` would NOT catch it. |
+| **AC9** | `stage.sh` exits 0 with the argv `ENSEMBLE_UPGRADE_LIVE=1 ENSEMBLE_ROLLBACK_SAFE=1 VERSION=<v> bash scripts/upgrade/stage.sh live --version <v>`; the release dir exists; the manifest records `rollback_safe: true` with `known_schema_gen` and `contains_contract_phase`; the `current` symlink is **not** flipped; the journal's promote fields are untouched. |
+| **AC10** | The FE is built **at the tag** and the binary is **rebuilt at the tag**; both sidecars report `git_head == the tag target` and `git_dirty == false`. The manifest's `pipeline_scripts_floor_commit` equals the constant compiled into the shipped binary (verified by module-symbol/behaviour method — PYZ blocks literal grep, F17). |
+| **AC11** | The 4-way sha256 identity holds on a **re-hash**: release-dir binary == staging-worktree `dist/ensemble-prod` == manifest `binary_sha256` == binary sidecar `artifact_sha256`. The release dir carries **no** sidecar copy; the staging worktree holds both sidecars and survives into the ceremony window. |
+| **AC12** | The live fence holds: the whole-file `state.json` sha is byte-identical pre/post stage (PRIMARY, fail-closed), as are the promote fields, the install `.env` sha, the `current` symlink target, the stable livez projection and the live PID set. Any delta ⇒ the leg FAILS with attribution. |
+| **AC13** | The handoff report records the promote command **without executing it**, states `promote.sh` was never run and `current` was not flipped, and carries the ceremony preconditions (scripts-pin advance to `T`; the arm-time guard's floor-ancestry requirement; the rollback-window state). |
+
+---
+
+## 8. Risks
+
+| ID | Risk | Impact | Likelihood | Mitigation |
+|----|------|--------|------------|------------|
+| **P3-R1** | **The re-pin is forgotten or lands stale** (option D). Mechanically invisible at stage time: the old pair still satisfies every stage-time predicate (F4-F7 all hold for `1aa0065eb`), so the release ships green — while the arm-time guard stops demanding the fix and a pre-fix scripts tree still arms (§4.2, §4.3). | **High** — the lane's fix is in the release but is not enforced at the next ceremony, and the failure is silent until a future promote runs the stale machinery. | Low | (a) The re-pin is a **mandatory line item of the bump commit** (T4), not an optional extra; (b) **T7** asserts the pair equals `M` *specifically* before staging — `stage.sh` is not trusted to catch this; (c) the manifest's `pipeline_scripts_floor_commit`/`pipeline_scripts_rev` are cross-checked against the shipped binary's compiled constant (AC10). |
+| **P3-R2** | **The tip moves under the choreography** (it has already moved 55 commits since the lane base — F31; the local `latest` is 232 behind — F32; the group-chat FE fast-follow lane is open). A merge that lands on a stale tree, or a bump cut before another lane's merge, breaks the L1 tip-identity guard (F19) and the exact-tag guard (F18) at stage time. | **High** — three exit-78 guards fire at the worst moment (after the bump and tag are cut), or the release ships a stale tree. | High | (a) T1/T3 re-derive and clear the drift **before** T4; (b) the house FINALIZE rule: fetch + verify `latest` unmoved from the branch base — moved ⇒ **STOP and report** (new-latest sha / subject / distance / overlap), and rebase-vs-merge is the **leader's call**, never silent; (c) the tag is cut **last** (T5), after the bump, so a moved tip invalidates the tag before any build spend; (d) the version slot is re-derived at bump time (P3-D4) so a concurrently-claimed slot is caught before the commit. |
+| **P3-R3** | **The merge's target branch is checked out elsewhere.** Local `latest` is held by `/home/nea/ensemble-src-wt-ari-stop-int` (F32) and git 2.43 refuses the same branch in two worktrees. Merging into `latest` from the wrong worktree, or parking the shared checkout without restoring it, strands state. | Medium — a stalled release lane, or a stranded shared checkout. | Medium | The merge runs in a **dedicated** worktree that owns `latest` (or the holder is parked first, with the shared checkout restored to its recorded state afterwards — F36: the shared checkout is currently detached, so the branch-lock problem is absent today); the worktree/branch ledger is recorded in the handoff report; the lane's own worktree is never used to hold `latest`. |
+| **P3-R4** | **Phase 1 adds a new shipped executor-family member** (a new file under `scripts/upgrade/`, or a new `daemon/plugin_subsystem/` slice) **without** adding it to `executor_family_paths` (`executor_family.sh:78-96`). Two sub-cases: (i) not registered ⇒ the file is **not shipped** (the payload installs only the canonical list, `stage.sh:521`) and the fix silently does not reach live; (ii) registered but the stamp not moved ⇒ the **coverage gate fails** (F7) at stage time with exit 78 and the exact remedy text. | High — (i) is a silent partial delivery; (ii) is a loud late refusal after the bump and tag are cut. | Medium | **Cross-phase contract on Phase 1**: any new file under `scripts/upgrade/` or `daemon/plugin_subsystem/` that must ship is added to `executor_family_paths` **in the lane branch** (so `M` contains both the member and the list edit — AC2); T7 runs the coverage verdict over the 17 (or more) paths **before** staging, not at stage time; if the coverage gate is the only trigger, the re-pin is split into a separate `fix(floor):` commit exactly as `f8dc874f7` did (P3-D2's fallback). |
+| **P3-R5** | **The staged artifact is not what the ceremony will run.** The release payload ships `scripts/upgrade/*` (verified) while the ceremony executes the **pinned** tree (F12-F15) — so a stage that is perfectly green can still promote with the *defective* `lib.sh`/`promote.sh`. | **High** — the ceremony would run the old machinery and reproduce the false-halt the lane exists to fix. | Medium | (a) P3-D6 makes the scripts-pin advance an explicit **operator-owned ceremony precondition** named in the tag annotation, the stage journal and the handoff report; (b) the handoff states plainly that the payload copy is **not** the executing tree; (c) the ceremony preconditions are verified *before* the ceremony, not discovered during it. |
+| **P3-R6** | **Provenance/sidecar loss or a stale build.** The binary sidecar exists **only** in the staging worktree (F22); the FE sidecar is stripped from the payload; a worktree removed before the ceremony destroys the evidence and forces a rebuild. A build from a dirty tree yields `git_dirty: true` ⇒ exit 78. | Medium — a re-stage (and possibly a re-tag) is needed; the v0.25.2 provenance-gap class is the precedent. | Low | (a) T8 builds **at the tag** in the detached worktree (P3-D9), so both sidecars carry `git_head == T` and `git_dirty == false`; (b) the staging worktree is **kept** with both sidecars until after the ceremony (house Blocker-6 pattern) and the cleanup is recorded as a **post-ceremony** step, not performed by this lane; (c) T9 re-hashes all four sources rather than trusting any sidecar. |
+| **P3-R7** | **The promote is run by mistake** (the recorded command is executed rather than recorded), flipping `current` on live. | **High** — an unauthorised live change. | Low | P3-D7 forbids it; the command appears only in the handoff report and the tag annotation; the lane's exit criterion states `promote.sh` was never run; the live fence (AC12) is the detector. |
+
+---
+
+## 9. Coupling
+
+- **Tight with Phase 1** — Phase 1 owns the *behaviour*; Phase 3 owns the *provenance* of that behaviour. The single cross-phase contract is **P3-R4** (any new shipped family member must be registered inside the lane branch, so `M` contains it).
+- **Tight with Phase 2** — Phase 2's tests/packs land on the same branch and are part of `M`'s content; Phase 2 must not add a file under `scripts/upgrade/` or `daemon/plugin_subsystem/` without registering it (same contract).
+- **Tight with the planner** — the planner owns `plan-overview.md` and the planning-docs commit; this file owns only `phase3-plan.md`.
+- **Independent of** the live daemon (which this lane never touches) and of the promote ceremony (which it never performs).
+
+---
+
+## 10. Open questions for the dispatcher
+
+- **P3-Q1 (leader call, blocking T2/T3):** the tip has moved 55 commits since the lane base (F31) and the drift touches `daemon/` + `.agents/tester/PACKS.md` — Phase 1/2's surface. **Rebase or merge onto `origin/latest`?** The house FINALIZE convention makes this the leader's call. Phase 3's mechanics work either way; only `M`'s identity (and hence the stamp value) changes.
+- **P3-Q2 (owner):** who performs the **scripts-pin advance** (P3-D6/T9)? The live `.env` pin is operator-owned; the worktree advance is a checkout on a shared operator asset. Phase 3's recommendation is that it is **operator-owned and recorded as a ceremony precondition**, with the target = the release tag.
+- **P3-Q3 (adjudication, non-blocking):** the CHANGELOG entry's disclosure set for this lane (fix summary, the floor/stamp re-pin, the `rollback_safe` adjudication, the no-promote disclosure, and the scripts-pin precondition) — confirm the shape with the planner so Phase 3's T4 wording and the consolidator's `plan-overview.md` agree.
