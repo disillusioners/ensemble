@@ -25,11 +25,14 @@ WHAT IT PROVES (the numbered checks)
   C3  per-shot tasking THROUGH THE PARENT — the parent records the
       decision on the room (the Ruling-A loop-back);
   C4  the milestone reports ride the digest (the joined-room block:
-      own name + guidelines + roster + the LAST-N, never the history);
-  C5  a tag ACROSS lanes delivers (the delivery outcome + the durable
-      tag-delivery event);
+      own name + the GUIDELINES text + roster + the LAST-N, and the
+      history is NOT there);
+  C5  a tag ACROSS lanes delivers (the delivery outcome + the DURABLE
+      record of that delivery: the member's delivered cursor, Y14 —
+      the content-free audit row carries ids + the outcome only);
   C6  the unread → nudge path fires ONCE per turn (the loop-guard) and
-      the note names the unread count;
+      the note names the REAL unread count (the VALUE is pinned, not
+      just the word);
   C7  RULING A — a member that COMPLETED mid-run is never revived: the
       tag becomes a durable TASK PROPOSAL routed to the PARENT, and the
       parent's own status is untouched;
@@ -58,6 +61,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 import sys
 import tempfile
@@ -123,6 +127,8 @@ from daemon.repositories.room.models import ChatRoom, RoomMessageKind  # noqa: E
 from daemon.repositories.room.repository import RoomRepository  # noqa: E402
 from daemon.repositories.room.service import RoomChatService  # noqa: E402
 from daemon.services.joined_room_context import (  # noqa: E402
+    ROOM_DIGEST_LAST_N,
+    ROOM_GUIDELINES_TEXT,
     build_joined_room_context_message,
 )
 from daemon.services.room_delivery import RoomDeliveryService  # noqa: E402
@@ -270,6 +276,16 @@ async def run_scenario() -> int:
     editor_tools = _tools(manager, EDITOR)
     verifier_tools = _tools(manager, VERIFIER)
 
+    # ── the PRE-ROLL: two older lines ──────────────────────────────────
+    # The digest carries the LAST-N rows (never the history). The C4
+    # proof needs a message that falls OUTSIDE that window, so the room
+    # log starts with two lines the window will later drop.
+    for pre_roll_line in ("history line alpha", "history line beta"):
+        await _call(
+            verifier_tools["room_post"],
+            {"room_id": room_id, "text": pre_roll_line},
+        )
+
     # ── C2: PARALLEL lane posts ─────────────────────────────────────────
     # Two lanes post concurrently (the per-room lock serialises the seq
     # allocation — the log stays monotonic and BOTH posts land).
@@ -313,20 +329,48 @@ async def run_scenario() -> int:
     )
     content = block.content if block is not None else ""
     digest_has_capture = "shot 3 plates captured" in content
+    # The guidelines are the STATIC constant the block carries (the
+    # "system message = guidelines + short digest" ruling) — the WHOLE
+    # text, not a loose fragment.
+    has_guidelines = ROOM_GUIDELINES_TEXT in content
+    # "never the history": the OLDEST line (the pre-roll, outside the
+    # last-N window) must NOT be in the block, and the block carries at
+    # most the window's worth of the room's lines.
+    room_lines = (
+        "history line alpha",
+        "history line beta",
+        "shot 3 plates captured",
+        "shot 3 rough cut online",
+    )
+    carried = [line for line in room_lines if line in content]
+    history_absent = "history line alpha" not in content
     record(
         "C4-digest-carries-the-milestones",
         block is not None
         and "your name in this room: capturer" in content
         and "ROSTER:" in content
+        and has_guidelines
+        and history_absent
+        and len(carried) <= ROOM_DIGEST_LAST_N
         and digest_has_capture,
         {
             "has_own_name": "your name in this room: capturer" in content,
             "has_roster": "ROSTER:" in content,
+            "has_guidelines": has_guidelines,
             "has_milestone": digest_has_capture,
+            "history_absent": history_absent,
+            "carried_lines": carried,
+            "carried_count": len(carried),
+            "digest_window": ROOM_DIGEST_LAST_N,
         },
     )
 
     # ── C5: a tag ACROSS lanes delivers ────────────────────────────────
+    # The capturer is IDLE-but-live ⇒ the lane-(b) SUCCESS path (the
+    # delivery rides the queue). The DURABLE record of that delivery is
+    # the member's DELIVERED CURSOR — Y14: the cursor advances at
+    # ADMISSION — NOT an event. The content-free audit row the lane
+    # emits carries ids + the outcome ONLY (never the message text).
     raw = await _call(
         producer_tools["room_post"],
         {
@@ -337,12 +381,49 @@ async def run_scenario() -> int:
     )
     tag_payload = json.loads(raw)
     tag_outcomes = tag_payload.get("tag_outcomes") or []
+    tagged_seq = int(tag_payload.get("seq") or 0)
+    capturer_member = next(
+        (
+            m
+            for m in svc._repo.list_members(
+                room_id, caller_instance_id=PRODUCER, active_only=True
+            )
+            if m["instance_id"] == CAPTURER
+        ),
+        None,
+    )
+    delivered_cursor = (
+        int(capturer_member["last_delivered_seq"])
+        if capturer_member is not None
+        else -1
+    )
+    with Session(engine) as s:
+        audit_rows = list(s.exec(select(Event)).all())
+    tag_events = [
+        row
+        for row in audit_rows
+        if row.kind == EventKind.ROOM_TAG_DELIVERY.value
+    ]
+    audit_content_free = all(
+        "the plates need a colour pass" not in (row.data or "")
+        for row in tag_events
+    )
     record(
         "C5-tag-across-lanes",
         tag_payload.get("routing_error") is False
         and len(tag_outcomes) == 1
-        and tag_outcomes[0]["member_name"] == "capturer",
-        {"tag_outcomes": tag_outcomes, "routing_error": tag_payload.get("routing_error")},
+        and tag_outcomes[0]["member_name"] == "capturer"
+        and tag_outcomes[0]["outcome"] == "enqueued"
+        and delivered_cursor == tagged_seq
+        and audit_content_free,
+        {
+            "tag_outcomes": tag_outcomes,
+            "routing_error": tag_payload.get("routing_error"),
+            "tagged_seq": tagged_seq,
+            "delivered_cursor": delivered_cursor,
+            "audit_rows": len(tag_events),
+            "audit_content_free": audit_content_free,
+        },
     )
 
     # ── C6: the unread → nudge path (and its loop-guard) ───────────────
@@ -354,10 +435,26 @@ async def run_scenario() -> int:
     note_again = await manager._room_nudge_coordinator.evaluate_todo_boundary(
         CAPTURER
     )
+    # The note NAMES the unread count — and the VALUE must be the
+    # room's REAL unread count (a substring check alone would let a
+    # "0 unread" note pass).
+    real_unread = int(
+        await svc.unread_count(room_id, caller_instance_id=CAPTURER) or 0
+    )
+    count_match = re.search(r"Nudge:\s*(\d+)\s+unread", note)
+    named_unread = int(count_match.group(1)) if count_match else -1
     record(
         "C6-unread-nudge-loop-guard",
-        "unread" in note.lower() and note_again == "",
-        {"note": note[:120], "second_note": note_again},
+        count_match is not None
+        and named_unread == real_unread
+        and real_unread > 0
+        and note_again == "",
+        {
+            "note": note[:120],
+            "second_note": note_again,
+            "named_unread": named_unread,
+            "real_unread": real_unread,
+        },
     )
 
     # ── C7: RULING A — a COMPLETED member is never revived ─────────────
