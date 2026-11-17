@@ -62,7 +62,7 @@ the verification log and the planner's outstanding actions.
 | # | ID | Decision (one line) | Binds | Ratifier |
 |---|----|---------------------|-------|----------|
 | 1 | `D-P1-1` | rc=3 is **not journaled** (INFO `_log` only); rc=124 keeps the legacy byte-identical budget row; rc=4/other → `kind=nonzero_exit` with the true rc; the hard-coded `rc=124` at the reset-failed site dies | `phase1-plan.md` §4.1, §4.3, §15.1 | Dispatcher (FINAL) |
-| 2 | `D-P1-2` | Deferral is a **test-only seam** `_GATE_ATTR_DEFER_S` = 5 s **pooled**, *not* a `_numeric_knob` | `phase1-plan.md` §5.4, §15.2 | Dispatcher (FINAL) |
+| 2 | `D-P1-2` | Deferral is a **test-only seam** `_GATE_ATTR_DEFER_S` = 5 s **pooled**, *not* a `_numeric_knob` — **AMENDED by leader ruling D3 (2026-11-17): the letter is "not an *exported production knob*; garbage is parsed via the house `_numeric_knob` router + a mandatory `[0,5]` ceiling"** | `phase1-plan.md` §5.4 (amended), §15.2; `phase2-plan.md` §5.2.3 U-2 (resolved), §7.5 | Dispatcher (FINAL) → **amended by leader D3** |
 | 3 | `D-P1-3` | **T11 rides** the lane as its own commit; **T12 is deferred** to a named follow-up lane | `phase1-plan.md` §6, §10 (`T11`/`T12`), §15.3 | Dispatcher (FINAL) |
 | 4 | `L-1` | **Candidate A adopted** — taxonomy at the three call sites + two pure-string helpers; event kind unchanged | `phase1-plan.md` §4 | Dispatcher (FINAL) |
 | 5 | `L-2` | **Candidate B adopted** — containment ladder R1–R4 as a **second accept path** + pooled deferral; advisory rescue rejected-for-verdict / kept-as-forensics | `phase1-plan.md` §5 | Dispatcher (FINAL) |
@@ -72,7 +72,7 @@ the verification log and the planner's outstanding actions.
 | 9 | `D-P2-2` | The **5 pre-journal-init silent restart exits are ACCEPTABLE**; `R0` pins the allowlist; the non-journal stderr-audit channel joins the deferred register | `phase2-plan.md` §10.1, §17 (`OQ-P2-2`) | Dispatcher (FINAL) |
 | 10 | `D-P2-3` | **NP-6 gated NOW** — Phase-1's **R2 rung gains SEGMENT-AWARE matching**; `NP-6` becomes a hard pin; `M-NP1b` must redden it | **AMENDMENT** — `phase1-plan.md` §5.3 (see §2) | Dispatcher (FINAL) |
 | 11 | `D-P2-4` | **Darwin `NP-11` DROPPED** — declared parity gap in the evidence pack (follows the `T12` deferral) | `phase2-plan.md` §9.1, §17 (`OQ-P2-4`) | Dispatcher (FINAL) |
-| 12 | `D-P3-1` | **Rebase-vs-merge DEFERRED TO THE LEADER** (house FINALIZE). Mechanics are agnostic; only `M`'s identity / the stamp value changes. **Do not decide it here.** | `phase3-plan.md` §10 (`P3-Q1`), `P3-D11` | Dispatcher → **leader** (§9) |
+| 12 | `D-P3-1` | ~~**Rebase-vs-merge DEFERRED TO THE LEADER**~~ **✅ RESOLVED — leader ruling (2026-11-17): MERGE.** Sync-merge `origin/latest` into the lane branch **before surgery**; re-grep the anchor register post-merge. Merge-shape consequences recorded in **§10** | `phase3-plan.md` §10 (`P3-Q1` — resolved), `P3-D11`, `T3`, §8.1; `plan-overview.md` §9 | Dispatcher → **leader → RESOLVED (MERGE)** |
 | 13 | `D-P3-2` | **Scripts-pin advance is OPERATOR-OWNED**, recorded as a ceremony precondition, target = the release tag | `phase3-plan.md` §4.4, `P3-D6`, §10 (`P3-Q2`) | Dispatcher (FINAL) |
 | 14 | `D-P3-3` | **CHANGELOG disclosure set CONFIRMED** — five items; `plan-overview.md` mirrors the same set | `phase3-plan.md` §10 (`P3-Q3`), §6 (`P3-T4`) | Dispatcher (FINAL) |
 | 15 | `L-5` | **Floor graph ratified**: `P3-D1` — stamp/floor = **merge commit `M`**, re-pin rides bump commit `B`; `F→M→B→T` | `phase3-plan.md` §4.1–§4.3, §5 (`P3-D1`) | Dispatcher (FINAL) |
@@ -171,8 +171,14 @@ shapes that refuse today gain a containment answer:
 | **R3** | bounded ppid walk (depth ≤ 12) into the owned **set** (`_supervision_pid_ancestor_of`) | POSIX `ps`; also serves Darwin |
 | **R4** | Darwin launchd job lineage; **empty job pid while a holder serves ⇒ `1`** (dual-supervisor refusal preserved) | bounded `launchctl` |
 
-Verdicts: any `1` ⇒ refuse with **today's detail prefix byte-for-byte** (+ a ladder suffix); all `0` ⇒ `_log` `ACCEPTED …` and continue to
-Layer 2; no `1` and some `2` ⇒ the **pooled deferral** (`D-P1-2`), exhaustion ⇒ distinct `… UNATTRIBUTABLE within <n>s … failing closed` ⇒ rc 1.
+Verdicts: any `1` ⇒ refuse with **today's detail prefix byte-for-byte** (+ a ladder suffix); all `0` ⇒ `_log` `ACCEPTED …` and
+**skip Layer 2's unit-arm re-test for the ladder-accepted holders** (architect closure C-2 — Layer 2 is refusal-only); no `1`
+and some `2` ⇒ the **pooled deferral** (`D-P1-2` as amended by D3: per-shell, seconds-counted, clamped `[0,5]`), whose
+**exhaustion is transient → budget-bound** (leader D1: a distinct `… UNATTRIBUTABLE within <n>s … deferring to the verify budget`
+marker, the gate returns **2**, and the refusal/halt happens **only at budget end** — terminal fail-fast exhaustion is
+rejected). **Bound semantics of record: attribution acceptance = evidence-only (ladder); deferral = a budget-bounded delay that
+can never accept; the version conjunct = absolute and outside the widening.** Rung composition follows the C-1 rule (first
+ANSWERING rung decides; an answered `1` downgrades to `2` when a stronger rung was unanswerable).
 **Advisory rescue: rejected for the verdict, kept as forensics.** The in-process `SUPERVISION_*` channel is already reliable and strictly better
 than a stamp read; the daemon `supervision_boot` advisory is **racy by contract** (may not be journaled at ~38 s in) and would put a
 probabilistic input into a fail-closed conjunct.
@@ -355,21 +361,34 @@ removes the class rather than documenting it.
 3. **Implementation touchpoints.** `P3`-unrelated: Phase-1 **`T5`** (`_gate_attr_containment`, rung R2) and **`T4`** (`_gate_attr_unit_ctx`,
    which resolves `_GA_UNIT_MAINPID` + `_GA_UNIT_CG` once per invocation and is the natural home of the matcher). The equality arm
    (holder `== MainPID`) is unaffected.
-4. **`phase1-plan.md` §5.3's body text is now STALE at row 2.** The phase file is **not edited** (commission constraint), so the ledger of
-   record is **this register**. The coding commission implements §2.1, not the phase file's substring wording. This is the
+4. **~~`phase1-plan.md` §5.3's body text is now STALE at row 2. The phase file is not edited (commission constraint), so the ledger of
+   record is this register. The coding commission implements §2.1, not the phase file's substring wording. This is the
    `plan-body-ledger-agreement` hazard in the precise form it warns about: *body ≠ ledger; the ledger wins; predicate strings must match
-   character-for-character.*
+   character-for-character.*~~**
+   **✅ RESOLVED — architect closure C-0 (2026-11-17): the body/ledger divergence is CLOSED.** The leader's enrichment fold
+   authorises the phase files to be updated, so `phase1-plan.md` §5.3 now carries the binding predicate **verbatim** with a
+   `⚠️ SUPERSEDED` marker on the old raw-substring text, and `phase2-plan.md` §9.1 NP-6 is **arm (b)-only** with the same
+   character-identical predicate. **Body and ledger now agree** — the `plan-body-ledger-agreement` hazard (body wins;
+   predicate strings must match character-for-character) is discharged, not merely recorded. The ledger of record remains
+   this register; the phase files are now conformant copies.
 5. **Scope of the amendment — R2 ONLY.** The pre-existing **Layer 2** `_gate_attr_unit_lineage` (`lib.sh:8100-8137`) keeps its substring
    test **byte-identical** (the common path must not change — `I-B2`/`B-order`). This is sound, not an inconsistency:
    - a **non-owned** holder can reach Layer 2 only via a ladder `0` acceptance (any `1` refuses first);
    - when `nonmatch` is **empty**, every holder is already owned, so Layer 2's substring cannot convert a *foreign* holder into an accept.
    Therefore the residual over-accept surface is exactly the ladder's acceptances — which is precisely what `NP-6` now pins.
 6. **The documented P12 residual is untouched** by this amendment: "a second supervisor **inside** our unit cgroup" remains accepted (systemd
-   only starts it), an operator-hostile shape, unchanged risk class (`phase1-plan.md` §5.7 P12).
+   only starts it), an operator-hostile shape, unchanged risk class (`phase1-plan.md` §5.7 P12). Its **sibling** — a stale-incarnation holder under
+   `KillMode=mixed` (architect closure C-7) — is ladder-accepted and caught by the version conjunct; documented as `P12-sibling`, not gated.
+7. **The binding predicate, character-for-character identical in all three places (architect C-0, 2026-11-17):**
+
+   `pcg == cg || pcg contains "$cg/"`
+
+   carried at `decisions.md` §2.1/§2.2(7), `phase1-plan.md` §5.3 (R2 row, with the `⚠️ SUPERSEDED` marker on the old raw-substring
+   text), and `phase2-plan.md` §9.1 (NP-6, arm (b)-only). The coding commission's task text quotes it verbatim.
 
 ### 2.3 Where it is bound
 
-`phase1-plan.md` §5.3 (amended), §14 `I-B4`/`I-B12`; `phase2-plan.md` §9.1 (`NP-6`), §9.2 (`M-NP1b`), §17 (`OQ-P2-3` — **answered: arm (b)**).
+`phase1-plan.md` §5.3 (amended — body now conformant), §14 `I-B4`/`I-B12`; `phase2-plan.md` §9.1 (`NP-6`, arm (b)-only), §9.2 (`M-NP1b` **and** `M-NP1c`), §17 (`OQ-P2-3` — **answered: arm (b)**); `phase3-plan.md` (unaffected — the amendment touches no release-mechanics path).
 
 ---
 
@@ -532,6 +551,7 @@ technical rationale the board owner applies.
 | 4 | **Tier-3 promote-level rehearsal** (`NP-7b`, `B2b` caller contract) | **NOT deferred — OWNED ELSEWHERE**: routed to the **tester gate** (`D-P2-1`) | route decision, not a gap-waiver | lib-level `NP-7a`; `§N3` template pin; `§11.4` hand-off spec | tester gate (coding commission cycle) |
 | 5 | `make_systemctl_stub` 3-copy consolidation | **ROUTED FINDING** (`RG-6`), not this lane | consolidation would churn 3 standing suites | the `§4.3` knob contract is the consolidation spec; the new stub is a superset | future consolidation |
 | 6 | `test_release_journal.sh` 600 s cap (RC=124 at this tip) | **FILED** (`RG-6`-adjacent / §12.3) | pre-existing, disclosed in PACKS | aggregator keeps it `--full`-only with its disclosure | existing lane |
+| 7 | **Allowlist stderr-only closure** (set the log file before the arg-parse refusals) | **DEFERRED** — architect recommended item 16, planner judgment (2026-11-17) | touching arg-parse ordering in `restart.sh` for a class the lane already covers via the pinned allowlist; the residual is disclosed, not silent | `R0` pins the **6-entry allowlist**; stderr + client log carry the refusal | rides with #3 (future id `28ca6ab0`) |
 
 **Not in this register** (explicitly out of scope, so they are not mistaken for deferrals): the arm's `pending_op` persistence, the
 `lock_acquire` `to_thread` move, the boot-sweep default (board sub-items 2–4); the ambient-`POSTGRES_*`/auth-scrub debt in standing suites;
@@ -696,7 +716,12 @@ only `tests/**` + `PACKS.md` rows. **17 family paths verified.** If implementati
 
 ---
 
-## 9. Open item escalated to the leader — `D-P3-1` (rebase vs merge)
+## 9. Open item escalated to the leader — `D-P3-1` (rebase vs merge) — ✅ **RESOLVED: MERGE**
+
+> **RESOLUTION (leader ruling, 2026-11-17):** **`D-P3-1` = MERGE.** The lane branch is **sync-merged** with `origin/latest`
+> before surgery, and the **anchor register is re-grepped after the merge**. This item is closed; the record below is retained as
+> the ruling trail. Merge-shape consequences and the folded enforcement points are in **§10**; the plan text that framed this as
+> open has been updated (`phase3-plan.md` §10 / `P3-D11` / `T3`, `plan-overview.md` §9).
 
 **Recorded as the lane's SINGLE escalated decision.** The planner escalates it in the final report; `plan-overview.md` must carry it to the
 caller.
@@ -801,3 +826,82 @@ All read-only in `/home/nea/ensemble-src-wt-hbfix` at record time.
 **No decision in this register re-opens a dispatcher ruling.** Where a ruling narrowed a plan (`T12`, `NP-11`, rc=3 journaling), the narrowing
 is explicit, its compensating coverage is named, and the affected phase-plan section is cited so the coding commission works from the ledger
 of record — this file — where the phase body and the ledger disagree.
+
+---
+
+## 10. Architect enrichment adoption record (leader rulings + adversarial closures folded — 2026-11-17)
+
+**Source:** `architecture-recommendation.md` @ `3aeb3f583` — architect (controller) synthesis of a 3-worker adversarial fan-out
+(`2a9c662e` bound analysis · `99ea32aa` rc-taxonomy/fences · `02e9054d` floor/fix-to-live/interplay); verdict
+**SAFE-WITH-CLOSURES**; method-degradation note recorded in that file (the canonical design-skill canon is absent from this
+project's bank — nearest-method skills substituted; reports anchor-verified against the tree). **This section appends; no
+existing decision is renumbered** — consistent with `§4.4`'s "append, don't renumber" and the house rule that a body/ledger
+divergence must be closed rather than argued.
+
+### 10.1 Leader rulings (final — encoded here)
+
+| Ruling | Decision | Folded into |
+|---|---|---|
+| **D-P3-1** | **MERGE** (decided at dispatch time) — sync-merge `origin/latest` into the branch before surgery; **re-grep the anchor register post-merge**. Plan text that framed this as open is updated. | `§9` (RESOLVED), `§1` row 12, `phase3-plan.md` §10 / `P3-D11` / `T3`, `plan-overview.md` §9 |
+| **D1** | **ADOPT transient→budget-bound** (architect recommendation). The deferral pool is bounded by the verify budget floor; **exhaustion refuses (halt) only at budget end**. **Terminal fail-fast exhaustion is REJECTED** — it re-conflates the transient/terminal classes the ladder separates. | `phase1-plan.md` §5.4/§5.6/§12/§13, `phase2-plan.md` §5.2 (`I-B8`/`I-B8b`), §7.5 (`B-defer-a` + `M-B-defer-D1`), §7.8 (`B-halt`) |
+| **D2** | **ADOPT — add the rows** (sites 4/5 journal symmetry: the `start` arms gain symmetric `kind=nonzero_exit` rows on a genuine non-124 rc). | `phase1-plan.md` §4.3 note; `phase2-plan.md` §6 A-legs |
+| **D3** | **ADOPT the `D-P1-2` letter amendment** — "not a `_numeric_knob`" ⇒ "not an *exported production knob*; garbage parsed via the house `_numeric_knob` router **plus a mandatory `[0,5]` ceiling**". | `§1` row 2 (AMENDED), `phase1-plan.md` §5.4, `phase2-plan.md` §5.2.3 U-2 (resolved) |
+
+**Bound semantics of record (leader D1 — verbatim):** *attribution acceptance = evidence-only (ladder); deferral = a
+budget-bounded delay that can never accept; the version conjunct = absolute and outside the widening.*
+
+### 10.2 BLOCKING closures (folded — all three closed in the plan-of-record)
+
+| # | Closure | Where it now lives |
+|---|---|---|
+| **C-0** | Body/ledger divergence on the very predicate the amendment exists to fix — the phase files now carry the binding predicate **character-for-character**, with `⚠️ SUPERSEDED` markers on the old raw-substring text; NP-6 is arm (b)-only. | `phase1-plan.md` §5.3 (R2 row), `phase2-plan.md` §9.1 (NP-6), `§2.1`/`§2.2(7)` — the canonical string: `pcg == cg \|\| pcg contains "$cg/"` |
+| **C-1** | One normative composition rule — the **first rung that ANSWERS decides**; an answered `1` is **downgraded to `2`** when a stronger rung was unanswerable (an incomplete determination is not positive foreignness); counter-mutation **M-NP1c** added. | `phase1-plan.md` §5.3 (intro + rung 5), `phase2-plan.md` §9.2 (`M-NP1c`), §5.2 (`I-B8a`), §16 `SC-2` |
+| **T7** | The "assert pair == M" assertion was **circular** (stage-time knows nothing of `M`; the manifest floor field has zero consumers) — replaced by the **graph+content** assertion set (content-at-X markers, minimal-introduction, shape proof, `X^2` == lane tip) with **`M_sha` recorded externally** in the tag annotation/handoff; AC10 restated as the `sidecar.git_head == B` ∧ `git show B:upgrade_tools.py` chain. | `phase3-plan.md` T7, AC8, AC10, §4.1 (two-commit truthfulness wording), §8.1 (S1–S7 ledger + the P3-T08 phantom-red note) |
+
+### 10.3 REQUIRED items folded (8 — all adopted)
+
+| # | Item | Where |
+|---|---|---|
+| 4 | Seam containment: integer-parse via the `_numeric_knob` router, **clamp `[0,5]`**, **seconds-counted** pool, explicit `>0` loop guard, honest **per-shell** scope (the original "process-global" and "+5 s" claims were wrong: pool=5 × `sleep 2` = 10 s, and `$( )` call sites fork a fresh pool), I-B8 + C-10a arithmetic corrected in both copies | `phase1-plan.md` §5.4, §12 (R2); `phase2-plan.md` §5.2.3 U-2, §7.5 |
+| 5 | The rc=3 INFO line carries the **site token** + state + rc; the `inactive\|activating` fallback literal fixed; no "expected" claim for the `failed` state | `phase1-plan.md` §4.3; `phase2-plan.md` §6 A3/A6 |
+| 6 | **Stub fidelity**: all three existing `systemctl` stubs exit 0 while printing `inactive` ⇒ no test exercised rc=3 and the `:376` pin was **vacuous**; the new stub is **rc-faithful by default** (exit 3 on inactive) with `SC_*_RC` overrides | `phase2-plan.md` §4.3 |
+| 7 | **C-2**: skip Layer 2's unit-arm re-test for ladder-accepted holders (Layer 2 is **refusal-only**); the stale "when nonmatch is empty every holder is owned" rationale is replaced | `phase1-plan.md` §5.3 (all-`0` arm), `§2.2(5)`; `phase2-plan.md` §5.2 (`I-B8a`) |
+| 8 | **C-5**: R3 completion semantics stated (a reparented orphan's walk **completes** ⇒ answered `1`) | `phase1-plan.md` §5.3 (R3) |
+| 9 | **Pin preconditions** (git-shape, clean tree, exact-HEAD == T's sha, no `.env` edit) + **pin-BEFORE-promote ordering** (provable: T ⊇ `0181dadbf` ⊃ floor `1aa0065eb`) + the restart-lane unguarded-window disclosure + the `docs/runbooks/upgrade-drills.md:550` drift correction | `phase3-plan.md` §5 |
+| 10 | **`halt`-row VIOLATION/paging widening** disclosed (it changes a machine-checkable gate: `ledger_check.py:74` `VIOLATION_EVENTS` + `ALERT_KIND_BY_EVENT["halt"]` pages) and pinned | `phase1-plan.md` §12; `phase2-plan.md` §10.0 (leg `R-WIDENING` + `M-R-WIDENING`) |
+| 11 | Plan-set updates: D-P3-1 ruling recorded; halt-span anchor corrected to `promote.sh:684-700`; S2-benign note | `§9`; `phase1-plan.md` §5.6; `phase3-plan.md` §8.1 |
+
+### 10.4 RECOMMENDED items — planner judgment (adopt vs defer, one-line rationale each)
+
+| # | Item | Disposition | Rationale |
+|---|---|---|---|
+| 12 | Dual-key test marker for the seam (`ENSEMBLE_TEST_GATE_DEFER=1`) | **ADOPT** | Closes the leaked-`0` false-halt direction; no planned test needs a value >5 ⇒ zero testability cost; D3's letter change unblocks it |
+| 13 | Sites 4/5 symmetric rows | **ADOPTED (by ruling D2)** | Leader ruling, not a planner call — recorded here for completeness of the register |
+| 14 | C-7 `KillMode=mixed` stale-incarnation documented as a P12 sibling | **ADOPT** | Documentation-only, closes a real residual class honestly (ladder-accepted, caught by the version conjunct) at zero code cost |
+| 15 | Drivable NP-6 equivalent (stub cg = non-segment-aligned prefix of the real leaf) | **ADOPT** | Makes the C-0 hard pin executable **without `/proc` stubbing**; without it the pin would be undrivable and the closure cosmetic |
+| 16 | Allowlist stderr-only closure (set the log file before arg-parse refusals) | **DEFER** | Touches arg-parse ordering in `restart.sh` for a class the lane already covers via the pinned allowlist; rides with the deferred non-journal audit channel (future `28ca6ab0`) |
+| 17 | Two-commit-minimum truthfulness wording | **ADOPT** | Wording-only; prevents a future "why not one commit?" re-litigation and states the real reason (truthfulness, not mechanics) |
+
+### 10.5 Adjudication of record (architect §1.3)
+
+The incident host's survival path is **R2** (unit-cgroup containment) — **not R3**. There was **no systemctl wedge**: fixture-log
+lines 20 and 21 carry the **same second**, so "exceeded budget (5s)" was the **mislabel wrapping a fast rc=3 return** (the
+plan's own root-cause finding). The C-1 downgrade clause remains correct design for genuinely-wedged hosts (a class the WARN
+path proves exists) but is **not load-bearing on the incident replay**.
+
+### 10.6 Honest caveat carried (not buried) — the absolute version claim is FALSE
+
+`gate_livez` / `gate_readyz` (`lib.sh:8142-8143`) carry **no** version conjunct, and the restart/rollback surfaces can skip the
+version check conditionally (`restart.sh:320-336`, `rollback.sh:277`). The absolute claim "no call site accepts green without a
+version check" is **false**. The correct claim: **the promote/hand-back path is version-backed end-to-end** — the version compare
+runs after attribution on every green in `_handback_serving_probe` (`lib.sh:6107-6116`), before it in `gate_version`
+(`:8150-8160`), per hard-green tick in `gate_soak` (`:8383-8388`), with `PROMOTE_EXPECTED_VERSION` unconditionally armed
+(`promote.sh:541-544`) — and the promote's `gate_version` (`promote.sh:853`) runs **before** the commit step (`:868+`).
+**No wrong release can reach `current` through a widened gate.** Disclosed as residual **P13** in `phase1-plan.md` §5.7.
+
+### 10.7 Carried into the CHANGELOG / tag annotation set (leader D-P3-3, five items — unchanged)
+
+1. Fix summary · 2. Floor/stamp re-pin to `M` (and the non-circular T7 proof, with `M_sha` external) · 3. `rollback_safe=1`
+adjudication · 4. No-promote disclosure · 5. **Scripts-pin precondition — extended** with the new pin preconditions (git-shape,
+clean tree, exact-HEAD) and the **pin-BEFORE-promote ordering**, plus the **restart-lane unguarded window** disclosure and the
+**`halt`-row VIOLATION/paging widening** disclosure.

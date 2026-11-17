@@ -175,6 +175,12 @@ House rule applied: a stub that answers "inactive" with `exit 0` no longer model
 also **logs argv to `SC_LOG`** (existing behaviour) so every leg can assert the *call sequence* and
 **which** subcommands ran — that is how the portability legs prove a Linux-only probe was *not* issued.
 
+**REQUIRED closure — rc-faithful defaults (architect §3):** all three existing `make_systemctl_stub` copies exit `0`
+while printing `inactive`, so **no existing test exercises rc=3 at any site** and the `:376` "no timeout events" pin is
+**currently vacuous**. The new stub must therefore be **rc-faithful by default** (`is-active` ⇒ exit **3** when the status
+word is `inactive`/`activating`; `reset-failed` likewise), so `:376` becomes a live policy pin and the incident is
+**reproducible in-test**. The `SC_*_RC` knobs above override the faithful default for the legs that need a specific rc.
+
 ---
 
 ## 5. Test-design doctrine for this phase
@@ -210,11 +216,11 @@ Read from `phase1-plan.md` (19:27Z). Facts that change this phase's legs:
 | **New micro-helpers** `_bounded_rc_kind` / `_bounded_rc_reason` next to `_run_bounded` (T1) | pure string functions | §6 gains a **direct unit leg** on these helpers — cheaper and sharper than driving three call sites for the pure-string half |
 | **Event kind unchanged** (`subprocess_wait_timeout`); only the `kind=` row token changes | no new event kind, no `_OUTCOME_LABELS` edit, no daemon change | `I-E3` (no new event kind) becomes the assertion; the earlier A7 "new kind needs a label" leg collapses into it |
 | **B = containment ladder** R1 owned → R2 systemd cgroup → R3 ppid-ancestry → R4 launchd job, attempted **only when Layer 1 found a nonmatch** | B-primary | §7.1 asserts the ladder; §7.4 gains the **ordering invariant** (no extra `systemctl show` when nonmatch is empty — Phase 1 `I-B2`); §7.3's rung legs are now **required**, not conditional; §7.6 adds **gate-surface parity** (Phase 1 §5.8 asks for it explicitly) |
-| **B-secondary = pooled deferral** `_GATE_ATTR_DEFER_S` (default 5, **test-only seam**, env-visible, NOT a `_numeric_knob`, NOT exported) + distinct "UNATTRIBUTABLE … failing closed" detail | inside `_gate_serving_attribution` only | §7.5 adds the deferral legs (`I-B8`); the seam being **env-visible** is what makes them drivable (`=0` and default) |
+| **B-secondary = pooled deferral** `_GATE_ATTR_DEFER_S` (default 5 s, **test-only seam**, env-visible, NOT an exported production knob — D3: integer-parsed via the `_numeric_knob` router, **clamped `[0,5]`**, **seconds-counted**, per-shell) + distinct "UNATTRIBUTABLE … deferring to the verify budget" detail; exhaustion ⇒ **transient (2)**, refusal only at budget end (leader D1) | inside `_gate_serving_attribution` only | §7.5 adds the deferral legs (`I-B8`); the seam being **env-visible** is what makes them drivable (`=0` and default) |
 | **No budget knob changes** (A21 untouched) ⇒ C-10a **no numeric edit**, only a one-line comment in **both** copies (T9) | B10 stays mandatory, B9 (knob delta) becomes **N/A unless** the numbers move | §7.7 keeps **B10** mandatory (Phase 1's T9 edits both copies, so the sync pin is the proof that both edits landed); B9 is demoted to a **guard** (§7.10): `ceremony_wallclock` must stay green **with zero edits** |
 | **C = `_handback_stash` wrapper** reusing `HANDBACK_LAST_ERROR` + `$$`-file, touchpoints C-1 clear-on-entry, C-2 reset-failed, C-3 is-active (stashes **both** arms incl. benign rc 3 — "context of a later failure"), C-4 start's `first`, C-5 verifier reason via new global `HB_VERIFY_REASON` + explicit file write from inside the verifier, C-6 clear on success | readers **unchanged** | §8's legs map 1:1 to C-1…C-6 (plus `I-C5` subshell survival, which is the file channel — the sharpest leg) |
 | **Restart arm = 7 journaled classes** at `restart.sh:122, 136, 148, 155, 161, 165, 173`, kind `halt`, `\|\| true`, class slug | `I-D1` | §10's silent set **shrinks from 12 to 5** (`:82`, `:96`, `:104`, `:108`, `:145`); those plus the post-adoption advisory `:192` form the **6-entry R0 allowlist** (see §10.1) |
-| **Optional T11** (`promote.sh:1051-1056` rollback halt gains `HB_ERR`) and **T12** (launchd flip-verify widening) | Phase 1 recommends T11 **in**, T12 **in only if Phase 2 can prove the immediate-refusal leg on a Darwin stub** | OQ-P2-4 (new): if T12 is taken, §9 NP-4 gains a Darwin variant; if not, it is a declared parity gap |
+| **Optional T11 / T12** | **RULED (D-P1-3 + D-P2-4, 2026-11-17): T11 RIDES the lane** (`promote.sh:1051-1056` rollback halt gains `HB_ERR`); **T12 is DEFERRED** to a named follow-up lane (future id `143a045c`) and `NP-11` is **dropped** as a declared parity gap | T11 **in** → C-7 gains a rollback-template row; T12 **deferred** → §9 NP-11 is dropped and the gap is declared in the evidence pack |
 
 #### 5.2.1 Phase 1 invariant → Phase 2 leg map
 
@@ -234,7 +240,9 @@ Leg names below are the ones actually used in §6–§10 (re-cut after the desig
 | `I-B5` pidless launchd job + served port ⇒ refuse | **B6** (third cell) — reuses the existing M7 shape | — (existing pin) |
 | `I-B6` wrong / absent version ⇒ refuse with today's wording | **NP-1**, **NP-2** | M-NP2 |
 | `I-B7` green with no listener ⇒ refuse | **NP-5** | M-NP3 |
-| `I-B8` deferral ≤ `_GATE_ATTR_DEFER_S` **total per process**, then a distinct UNATTRIBUTABLE detail | **B-defer-a**, **B-defer-b** | M-B-defer |
+| `I-B8` deferral ≤ `_GATE_ATTR_DEFER_S` **per shell** (≤5 s, seconds-counted, clamped `[0,5]`), exhaustion ⇒ distinct UNATTRIBUTABLE detail **and a transient (2) verdict** — refusal only at budget end (leader D1) | **B-defer-a**, **B-defer-b** | M-B-defer |
+| `I-B8a` **(added — architect closures C-1/C-2, leader D1)** composition rule: the first rung that ANSWERS decides; an answered `1` is downgraded to `2` when a stronger rung was unanswerable; ladder-accepted holders **skip** Layer 2's unit-arm re-test (Layer 2 is refusal-only) | **B-order**, **B3**, **B-defer-a** | **M-NP1c** (downgrade removed ⇒ NP-4/NP-6 red), M-NP1b |
+| `I-B8b` **(added — leader D1)** deferral is a **budget-bounded delay that can never accept**; attribution acceptance is evidence-only; the version conjunct is absolute and outside the widening | **B-defer-a**, **NP-1**, **NP-2**, **NP-8** | M-B-defer |
 | `I-B9` gate-surface parity across `gate_livez` / `gate_readyz` / `gate_version` | **B-parity** (+ **NP-9** for the refusal side) | M-NP4 |
 | `I-B10` halt chain untouched (probe 1 → verifier 1 → unit 1 → promote halt+B4, no nohup) | **B-halt**, **B2**, **NP-7a/NP-7b** | M-B2 |
 | `I-B11` portability: Darwin ⇒ no `/proc`; Plan9 ⇒ fail-closed | **B7** | — (the `SC_LOG` "no ControlGroup probe" assertion is the proof) |
@@ -261,7 +269,7 @@ Leg names below are the ones actually used in §6–§10 (re-cut after the desig
 | N3 dual-supervisor launchd pidless | B6 third cell (reuses the existing M7 pin) |
 | N4 wrong version | NP-1 (+ NP-8 for the timing shape) |
 | N5 no listener | NP-5 |
-| N6 unattributable after ≤ defer | B-defer-a |
+| N6 unattributable after ≤ defer | B-defer-a (exhaustion ⇒ **transient 2**, refusal only at budget end — leader D1) |
 | N7 rc matrix per site | A0…A6 |
 | N8 stash | C-5a / C-7 |
 | N9 restart classes | the R-* set |
@@ -271,8 +279,8 @@ Leg names below are the ones actually used in §6–§10 (re-cut after the desig
 | # | Still open | Where it is open | How the leg stays robust |
 |---|---|---|---|
 | **U-1** | **rc=3 policy**: Phase 1 recommends *no journal row, `_log` only* (phase1 §4.1) but lists it as an **open decision** (phase1 §15.1), with the alternative "journal `kind=nonzero_exit` for rc 3 too" | `phase1-plan.md` §15.1 | A3/A6 assert the **invariant that holds under both**: rc 3 must produce **no `kind=budget` row** and **no `timeout(` token**; if a row exists it must carry `kind=nonzero_exit` and `rc=3`. One extra assertion ("zero rows at all") is written **separately and marked policy-pinned**, so a decision flip reddens exactly one named assertion instead of the leg |
-| **U-2** | **Deferral exposure**: `_GATE_ATTR_DEFER_S` as an env-visible test seam (**recommended**) vs promoted to a `_numeric_knob` | phase1 §15.2 | B-defer-a drives the bound through one indirection (`P2_DEFER_SETTING`, resolved by a single grep at authoring time: either the env var or the knob). If neither is settable, B8 falls back to a **wall-clock bound** (total defer ≤ 6 s measured) and the gap is a routed finding |
-| **U-3** | **T11 / T12 optional items**: rollback-halt `HB_ERR` (`promote.sh:1051-1056`) and the launchd flip-verify widening (T12 — Phase 1 takes it only if Phase 2 can prove the Darwin immediate-refusal leg) | phase1 §15.3 | If T11 lands → C-7 gains a rollback-template row. If T12 lands → §9 NP-4 gains a **Darwin variant** (ppid-only ladder, immediate refusal). If either is dropped, it is a **declared parity gap** in the evidence pack, never a silent omission |
+| **U-2** | ~~Deferral exposure~~ **RESOLVED (leader D1/D3, 2026-11-17):** the seam is **not an exported production knob**; it is integer-parsed via the house `_numeric_knob` router (loud-garbage note), **clamped to `[0,5]`**, counted in **seconds**, per-shell, never exported; a non-default override is honoured **only** under the dual-key test marker `ENSEMBLE_TEST_GATE_DEFER=1` | phase1 §5.4 (amended), decisions.md §10 (D1/D3) | B-defer-a drives the bound through one indirection (`P2_DEFER_SETTING`, resolved by a single grep at authoring time: the env var). If it is not settable, B8 falls back to a **wall-clock bound** (total defer ≤ 6 s measured) and the gap is a routed finding. **New assertions:** a leaked `300` clamps to 5; a non-numeric value raises the loud-garbage path (not a silent 0); the `until`-form infinite loop is impossible (the `>0` guard) |
+| **U-3** | ~~**T11 / T12 optional items**~~ **RESOLVED (D-P1-3 + D-P2-4, 2026-11-17): T11 IN** (rollback-halt `HB_ERR`, `promote.sh:1051-1056`) → C-7 gains a rollback-template row; **T12 DEFERRED** (launchd flip-verify widening) → **NP-11 dropped**, the parity gap is **declared** in the evidence pack, never a silent omission | phase1 §15.3 (resolved marker), `decisions.md` §6 | No residual open question; the deferred item carries a named follow-up (future id `143a045c`) |
 | **U-4** | **Exact restart class slugs** — Phase 1 fixes the *shape* ("a stable class slug + the run_id") but not the strings | phase1 §7.2 | R-* legs assert (a) exactly **one** new `halt` row, (b) it carries `run_id=${RUN_ID}`, (c) it carries `class=<[a-z0-9_.-]{3,40}>` (shape, not literal), (d) distinct classes produce **distinct** slugs (cross-leg comparison, no hard-coded vocabulary). A separate **vocabulary-lock** sub-leg pins the literals once, after they land |
 
 **Resolved-by-citation (no longer assumptions):** A-ASSUME-1 (labels: phase1 §4.1/§4.3), A-ASSUME-2 (event kind
@@ -310,7 +318,7 @@ unit leg** (cheap, sharp), and each call site gets a **driven** leg (proves the 
 | **A0** | `_bounded_rc_kind` / `_bounded_rc_reason` (new, next to `_run_bounded`) | source lib.sh, direct call | `(124) → budget`; `(3)(4)(7)(1)(0) → nonzero_exit` / the corresponding reason strings; **no I/O** (no fork: assert by wall-clock < 50 ms × 100 calls, and no file writes); **`_run_bounded` itself untouched** (`I-A5`: assert `git diff` has no hunk in `:4856-4882`) |
 | **A1** | `lib.sh` reset-failed site (Phase 1 §4.3 item 1) | `SC_RESET_FAILED_RC=1`, `SC_RESET_FAILED_ERR="Failed to reset failed state: Access denied"` | (i) `rc=1` in the row (not the hard-coded `124`); (ii) `kind=nonzero_exit`; (iii) **no** `timeout(`; (iv) the hand-back **continues** (best-effort by design); (v) **stderr reachability** — Phase 1's C-2 adds an errfile capture to this site (today `lib.sh:6332` redirects both streams to `/dev/null`), so the child's first stderr line is available to the stash (leg C-2 carries the assertion; A1 only checks the row is not poisoned by it) |
 | **A2** | reset-failed, timeout arm | `SC_HANG=1` on `reset-failed` | legacy: `kind=budget`, `rc=124`, legacy WARN text preserved ⇒ the honest branch is **not** silenced (anti-over-correction) |
-| **A3** | `is-active` pre-flight site | `SC_IS_ACTIVE_RC=3`, `SC_IS_ACTIVE=inactive`, holders attributable, curl `ok` + expected version | (i) **no `kind=budget` row anywhere**; (ii) **no `timeout(` token**; (iii) **policy-pinned (U-1):** zero new journal rows at all, and a `_log` line naming the state (`inactive`/`activating`); (iv) the run **completes** (rc 0) |
+| **A3** | `is-active` pre-flight site | `SC_IS_ACTIVE_RC=3`, `SC_IS_ACTIVE=inactive`, holders attributable, curl `ok` + expected version | (i) **no `kind=budget` row anywhere**; (ii) **no `timeout(` token**; (iii) **policy-pinned (U-1):** zero new journal rows at all, and a `_log` line naming the state (`inactive`/`activating`); (iv) the run **completes** (rc 0); (v) **REQUIRED (architect §3):** the INFO line carries the **site token** (`handback_is_active` / `scope_arm_is_active` — the tokens `tests/test_bounded_subprocess_waits.sh:327/343/428` assert), the **state**, and the **rc**, and the fallback literal is `unknown` (never the literal string `inactive|activating`) |
 | **A4** | `is-active`, rc 4 / other | `SC_IS_ACTIVE_RC=4` (state `unknown`) and `SC_IS_ACTIVE_RC=1` (state empty) | exactly **one** row, `kind=nonzero_exit`, `rc=<true rc>`, state hint present; never `timeout(`; behaviour unchanged (blank `isact`, continue into the start attempt) |
 | **A5** | `is-active`, timeout arm | `SC_HANG=1` on `is-active` | `kind=budget` + `rc=124` + the **legacy WARN verbatim** (this is what `tests/test_bounded_subprocess_waits.sh:429` pins — it must stay green untouched) |
 | **A6** | restart scope-arm site (`lib.sh` `restart_via_launcher` comp7 arm) | `SC_IS_ACTIVE_RC=3` with `ENSEMBLE_RESTART_UNIT` set, Linux + `/run/systemd/system` + the unit env (reachability precondition) | same as A3 (no budget row, no timeout token, `_log` line, `_sc_isact` blanked, arm proceeds); frozen **7c** tail still present on the failure path; success path **7b-clean** |
@@ -353,9 +361,12 @@ ran (`is-active` / `reset-failed`), so a leg cannot pass on a path that never pr
 
 Phase 1's landed design (B-primary): a **containment ladder** `R1 owned → R2 systemd cgroup → R3 ppid-ancestry →
 R4 launchd job`, consulted **only when Layer 1 found a non-match**; any `1` ⇒ today's refusal detail prefix
-preserved; all `0` ⇒ `_log` ACCEPTED + continue; no `1` but some `2` ⇒ the **pooled deferral**
-(`_GATE_ATTR_DEFER_S`, default 5 s, process-global, test-only env seam). This section's legs are re-cut to that
-design — there is no longer a "which accept criterion?" question.
+preserved; all `0` ⇒ `_log` ACCEPTED + skip the Layer-2 unit-arm re-test (closure C-2); no `1` but some `2` ⇒ the
+**pooled deferral** (`_GATE_ATTR_DEFER_S`, default 5 s, **per-shell**, seconds-counted, clamped `[0,5]`, test-only env seam —
+NOT an exported production knob per D3), whose **exhaustion is transient → budget-bound** (leader D1: the gate returns 2 and
+polling continues within the existing budgets; refusal/halt only at budget end). Rung composition follows the C-1 rule: the
+**first rung that ANSWERS decides**, and an answered `1` is **downgraded to `2`** when a stronger rung was unanswerable.
+This section's legs are re-cut to that design — there is no longer a "which accept criterion?" question.
 
 ### 7.1 B1 — HEALTHY-BOOT SURVIVAL (the incident, positive direction)
 
@@ -379,7 +390,7 @@ the fixture logs never recorded pid→process identity (research-findings-lane �
 **R2 cgroup containment only** (assert `SC_LOG` shows the ControlGroup probe; assert the owned seam printed a set
 that provably excludes both pids).
 
-### 7.2 B2 — EXHAUSTION (fail closed, halt semantics untouched)
+### 7.2 B2 — EXHAUSTION (positively-foreign refuses immediately; deferral exhaustion is transient — leader D1)
 
 | Item | Value |
 |---|---|
@@ -422,9 +433,11 @@ This leg is the reason the fix's blast radius stays small; it must not be droppe
 
 | Leg | Fixture | Assertion |
 |---|---|---|
-| **B-defer-a (bound)** | rung answers `2` forever: `SC_CONTROLGROUP=""` (unobservable) **and** no `ps` on PATH **and** owned seam empty | total deferral per **process** ≤ `_GATE_ATTR_DEFER_S` (resolve the setting via `P2_DEFER_SETTING`: env var if present, else the knob — one grep at authoring time; U-2). Drive **three** gate calls in one process and assert total slept ≤ the bound (not 3× it) — the pool, not per-call patience. Then the distinct detail `… containment UNATTRIBUTABLE within <n>s … failing closed` and rc 1 |
+| **B-defer-a (bound)** | rung answers `2` forever: `SC_CONTROLGROUP=""` (unobservable) **and** no `ps` on PATH **and** owned seam empty | total deferral per **shell** ≤ `_GATE_ATTR_DEFER_S` (resolve the setting via `P2_DEFER_SETTING`: the env var — one grep at authoring time; U-2). Drive **three** gate calls in one shell and assert total slept ≤ the bound (not 3× it) — the pool, not per-call patience. Then the distinct detail `… containment UNATTRIBUTABLE within <n>s …` **and a transient verdict (rc 2, NOT rc 1)** — leader D1: exhaustion ⇒ transient; the refusal happens **only at budget end** through the floor-wins path. Additional assertions (architect §2): a leaked `300` clamps to 5; a non-numeric value takes the loud-garbage path; the pool is counted in **seconds**; the `until`-form infinite loop is impossible |
 | **B-defer-b (short-circuit)** | rung answers `0` on the second census | the loop **stops** on `0` (no exhaustion, rc 0) — and the counter shows exactly 2 censuses, not the full pool |
-| **Mutation M-B-defer** | make the pool per-**call** instead of per-process (the rejected shape) | B-defer-a reddens on the 3-call total |
+| **B-defer-c (dual-key, added)** | `ENSEMBLE_TEST_GATE_DEFER` marker absent | a non-default `_GATE_ATTR_DEFER_S` is **ignored** (the pool stays at the 5 s default) — the leaked-`0` false-halt direction is closed |
+| **Mutation M-B-defer** | make the pool per-**call** instead of per-shell (the rejected shape) | B-defer-a reddens on the 3-call total |
+| **Mutation M-B-defer-D1** | restore the **terminal** fail-fast exhaustion (exhausted `2` ⇒ rc 1) | B-defer-a reddens on its transient verdict (leader D1 — terminal exhaustion is rejected) |
 
 ### 7.6 B-parity — gate surface parity (`I-B9`; phase1 §5.8 explicitly requests this)
 
@@ -454,10 +467,13 @@ files**. Silent drift is therefore invisible today.
 
 ### 7.8 B-halt — the halt chain is untouched (`I-B10`)
 
-Structural + driven: on exhaustion the chain must be probe rc 1 → verifier rc 1 → `_supervision_handback_unit`
+Structural + driven: the chain must be probe rc 1 → verifier rc 1 → `_supervision_handback_unit`
 rc 1 → caller halt + B4, with **no** nohup fallback and **no** new intermediate exit path. Assertions: the
 greppable chain sites are unchanged (`git diff` shows no hunk introducing a new `return`/`exit` between the
-verifier and the caller), and the driven B2 leg still prints `NO nohup fallback`.
+verifier and the caller), and the driven B2 leg still prints `NO nohup fallback`. **Amended by leader D1:** the
+chain is entered **at budget end** (the floor-wins verdict), not by a terminal deferral exhaustion — a deferral
+exhaustion yields the **transient** rc 2 and the chain fires later, through the unchanged budget-end path. The
+leg asserts **both**: exhaustion ⇒ rc 2 (no early halt), and budget-end ⇒ the full chain above.
 
 ### 7.9 Consolidated counter-mutation table for §7 (one row per acceptance)
 
@@ -531,6 +547,14 @@ Darwin path (both share `HANDBACK_LAST_ERROR` / the file).
 
 ### 9.1 Scenario matrix (each row = one leg)
 
+**NP-6's binding predicate — the canonical string, carried character-for-character identical to `phase1-plan.md` §5.3 and
+`decisions.md` §2.2(7) (architect closure C-0). The table cell below carries the markdown-escaped rendering form of the same
+string (`\|\|` = `||`); this block is the canonical, copy-verbatim source:**
+
+```
+pcg == cg || pcg contains "$cg/"
+```
+
 | id | Scenario | Fixture | Protection that must catch it | Expected outcome |
 |---|---|---|---|---|
 | **NP-1** | **wrong-version green** | `CURL_MODE=wrongver` (`version:"0.0.0"`), holders **all attributable** | version conjunct, `lib.sh:6113-6116` | verifier rc **1**; `version=0.0.0`; `NOT serving the right release`; **no** `hand-back COMPLETE`; **exactly one** MainPID poll (Phase 1 does not touch this block ⇒ the count assertion holds **unqualified**) |
@@ -538,14 +562,21 @@ Darwin path (both share `HANDBACK_LAST_ERROR` / the file).
 | **NP-3** | **non-2xx** | `CURL_MODE=non2xx` (404) | `_probe_once_classified` red (`:4488-4490`) → probe rc 1 (`:6120-6126`) | rc 1; `hard fail (red …)` |
 | **NP-4** | **genuinely-foreign holder** — positively `1` on every rung: not owned, not in the unit cgroup, no owned ancestor | holder = a real `setsid`-escaped pid (precedent `tests/test_promote_launchd_survivorship.sh:684-700`); owned seam excludes it; `SC_CONTROLGROUP` = a non-matching suffix | ladder returns `1` on **R2** and / or **R3** ⇒ Layer-1 refusal path | rc 1; detail **starts with** the live prefix `port-holder(s):… NOT in the supervision-owned pid set (owned:…)` (`I-B3`) plus Phase 1's ladder suffix; **census polled exactly ONCE** — `I-B4` explicitly forbids a deferral burn on a positive `1` (phase1 §5.4: the loop "stop[s] on `0`/`1`") |
 | **NP-5** | **no-listener green** | census rc 0 **empty** while curl answers green | `lib.sh:8012-8019` `finds NO listener` | rc 1; `unattributable` |
-| **NP-6** | **prefix-collision containment** (RESIDUAL RISK — see §9.4) | holder = a real pid whose cgroup path **ends** `…/ensemble-main.service-evil`; `SC_CONTROLGROUP=/system.slice/ensemble-main.service` | R2 is a **substring** test (phase1 §5.3: cgroup "contains the unit ControlGroup"), so a suffix-collision **would be accepted** | **Two documented arms, printed by the leg so the state is never ambiguous:** (a) substring retained ⇒ record an **ADVISORY finding** naming the collision (`containment prefix-collision accepts a foreign cgroup`) and route it (OQ-P2-3); (b) Phase 1 tightens to segment-aware ⇒ the leg **refuses** and becomes a hard pin. The leg never silently passes in either arm |
+| **NP-6** | **prefix-collision containment — HARD PIN (arm (b)-only; binding amendment D-P2-3, architect closure C-0)** | **drivable without `/proc` stubbing**: stub the unit ControlGroup (`SC_CONTROLGROUP`) to a **non-segment-aligned prefix of the test's real cgroup leaf** (e.g. real leaf `…/ensemble-main.service-evil.scope`, stubbed unit CG `/system.slice/ensemble-main.service`) ⇒ raw substring matches (accept), segment-aware refuses. (Adopted architect recommended item 15.) | R2's binding predicate — **character-for-character identical to phase1-plan.md §5.3 and decisions.md §2.2(7)**: `pcg == cg \|\| pcg contains "$cg/"` (canonical form in the block above) ⇒ the prefix-extension collision is **refused** | Leg asserts the **refusal** (rc 1, today's refusal-detail prefix + the ladder suffix) and prints the arm for the evidence pack; **reddens under M-NP1b** (permissive rung) and under **M-NP1c** (composition downgrade removed). The former two-armed text (arm (a) substring ⇒ advisory) is **SUPERSEDED** — arm (b) is the contract (decisions.md §2.2(1)) |
 | **NP-7** | **halt end-to-end** — the commission's literal demand | NP-1 or NP-4 driven to the caller | `_supervision_handback_unit` rc 1 (`:6395-6397`) → caller halt + B4 leave-txn-open (`promote.sh:684-699`) | **NP-7a (lib):** `restart_via_launcher` rc **1**, `NO nohup fallback` present, **no** `hand-back COMPLETE`. **NP-7b (promote, Tier-3 §11.4):** non-zero exit; a `halt` history row containing `unit hand-back failed`; `in_flight` **still open** (B4); no `commit` row; `current` unchanged |
 | **NP-8** | **a late-attributable holder must not convert a wrong version into a pass** | `CURL_MODE=wrongver` **plus** holders that only become attributable after `N` censuses (or a deferral-setting bump) | version conjunct runs **after** attribution on every green (`:6107-6126`) | rc 1 + `version=0.0.0` — and the counter shows the code **did** wait (≥N+1 censuses), i.e. the extra time was spent and *still* correctly refused |
 | **NP-9** | **gate-surface parity on the refusal** (from `I-B9`) | the NP-4 shape driven through `gate_livez` **and** `gate_version` | the same shared gate | both rc 1 with the attribution detail — the widening must not have softened the *other* gates' refusals |
 | **NP-10** | **pre-stop MainPID equality** (phase1 §5.7 P9) | `mainpid == prestop` | verifier `lib.sh:6218-6221` (**drift note:** Phase 1 §6 C-5 cites `:6207-6213` for this verdict, but those lines are the *budget printf*; the prestop-equal WARN + `return 1` are at `:6219-6220`) | rc 1 (`EQUALS the pre-stop pid`) — must stay untouched by the ladder work |
-| **NP-11** | **Darwin variant of NP-4** (only if Phase 1 takes optional **T12**) | `uname` → Darwin, ppid-only ladder, holder with no owned ancestor | R3 answers `1` | rc 1 **immediately** (D-1's "no grace for wrong-process" preserved). If T12 is dropped, this leg is a **declared parity gap** (U-3), never a silent omission |
+| **NP-11** | ~~**Darwin variant of NP-4** (only if Phase 1 takes optional **T12**)~~ — **DROPPED (leader ruling D-P2-4, follows the T12 deferral D-P1-3): declared parity gap**, recorded in the evidence pack, never a silent omission | — (dropped) | — | — | (deferred; future id `143a045c`) |
 
 ### 9.2 The over-accept counter-mutations (the commission's explicit demand)
+
+**NP-6's binding predicate — character-for-character copy (identical to `phase1-plan.md` §5.3 and `decisions.md` §2.2(7); the
+table cell above carries the markdown-escaped rendering form `\|\|` = `||`):**
+
+```
+pcg == cg || pcg contains "$cg/"
+```
 
 Phase 1 lands a **ladder**, not a grace — so the "widen the accept-set" plant is expressed against the
 ladder. Each row names the plant in Phase 1's terms:
@@ -553,7 +584,8 @@ ladder. Each row names the plant in Phase 1's terms:
 | Mutation | Plant (on the **copy** of lib.sh) | Must redden |
 |---|---|---|
 | **M-NP1 — remove the `1` classification** | make `_gate_attr_containment` return `0` unconditionally (phase1 §5.3's "Exhausted ⇒ if any rung answered and said no ⇒ `1`" deleted) | **NP-4**, **NP-9**, and B1 becomes vacuous (which is why B1 carries the counter non-vacuity assertion) |
-| **M-NP1b — permissive rung** | make the cgroup test unconditional (`case "$pcg" in *) ;;`) | **NP-4** (R2 path) and **NP-6(b)** |
+| **M-NP1b — permissive rung** | make the cgroup test unconditional (`case "$pcg" in *) ;;`) | **NP-4** (R2 path) and **NP-6** |
+| **M-NP1c — composition downgrade removed** (architect closure C-1) | delete the answered-`1`→`2` downgrade clause / let R2's negative fall through to R3 un-downgraded (phase1 §5.3 composition rule) | **NP-4**, **NP-6** |
 | **M-NP2 — version bypass** | `if [ "$running" != "$PROMOTE_EXPECTED_VERSION" ]; then` → `if false; then` (identical to the existing pack's `M3`, `tests/packs/handback_verify_budget_test.sh:811`) | **NP-1**, **NP-8** |
 | **M-NP3 — no-listener acceptance** | treat an rc-0-empty census as success | **NP-5** |
 | **M-NP4 — drop the attribution conjunct** | remove the `_gate_serving_attribution` call in `_handback_serving_probe` | **NP-4**, **NP-9**, B-parity-refuse |
@@ -599,6 +631,19 @@ Consequences stated honestly:
 ---
 
 ## 10. Restart-arm tests — "clean audits, no cause" must be impossible
+
+### 10.0 REQUIRED — the `halt`-row widening is a behaviour change to a machine-checkable gate (architect §6)
+
+`halt` rows are **not inert**: `ledger_check.py:74` `VIOLATION_EVENTS` includes `halt`, and
+`ALERT_KIND_BY_EVENT["halt"]` pages each as `upgrade_cap_halt`. The seven newly-journaled restart refusals therefore
+mark the drill cycle **VIOLATION** (breaking the N-clean streak) and page — a **behaviour change to a machine-checkable
+gate**, not merely a new log line. It is defensible (post-adoption restarts already journal `halt`), but it must be
+**disclosed** (CHANGELOG + tag annotation) and **pinned** here:
+
+- **Leg R-WIDENING (added):** drive one refusal class and assert (a) exactly one `halt` row is written, (b) the
+  drill-cycle ledger verdict flips to VIOLATION for that cycle, (c) the alert kind resolves to `upgrade_cap_halt`, and
+  (d) the **pre-existing** clean-cycle count is unaffected by cycles with no restart refusal.
+- **Mutation M-R-WIDENING:** remove the `halt` kind from the refusal rows ⇒ R-WIDENING reddens on (a)/(b).
 
 ### 10.1 The exit-78 census, re-counted against Phase 1's landed scope
 
@@ -924,8 +969,8 @@ purely about test-code dependencies and the serialization rule for `lib.sh`-copy
 | **P2-T5** | **§6 Candidate-A legs** (A0–A7) + mutations M-A0..M-A7 | T1, T3, T4 | each A-leg green unmutated, red under its named mutation; A5/A2 prove the legacy rc-124 text is **byte-identical** |
 | **P2-T6** | **§7.1/§7.2** survival (B1, B1b, B1c) + exhaustion (B2) | T2, T4 | B1/B1b/B1c rc 0 with the ACCEPTED log line; B2 rc 1 + bounded |
 | **P2-T7** | **§7.3 rung legs** (B3 cgroup, B4 MainPID, B5 ppid, B6 launchd, B7 Darwin/Plan9, B8 unprobeable) | T2, T4 | each rung classifies `0/1/2` per Phase 1 §5.3 |
-| **P2-T8** | **§7.4/§7.5/§7.6/§7.8** ordering (B-order), deferral (B-defer-a/b), parity (B-parity), halt chain (B-halt) | T5, T6 | B-order's byte-identical transcript + "no ControlGroup probe" both hold; B-defer-a proves the **pool** (3 calls ≤ 1× bound) |
-| **P2-T9** | **§9 NEGATIVE PROOF** (NP-1..NP-11) + M-NP1..M-NP5 | T2, T6, T7 | **NP-4 reddens under M-NP1**; NP-4's census-count assertion reddens under M-NP5; NP-1/NP-8 redden under M-NP2 |
+| **P2-T8** | **§7.4/§7.5/§7.6/§7.8** ordering (B-order), deferral (B-defer-a/b/c), parity (B-parity), halt chain (B-halt) | T5, T6 | B-order's byte-identical transcript + "no ControlGroup probe" both hold; B-defer-a proves the **pool** (3 calls ≤ 1× bound) and the **transient** exhaustion verdict (leader D1) |
+| **P2-T9** | **§9 NEGATIVE PROOF** (NP-1..NP-11) + M-NP1..M-NP1c/M-NP5 | T2, T6, T7 | **NP-4 reddens under M-NP1** and under **M-NP1c**; **NP-6 reddens under M-NP1b and M-NP1c**; NP-4's census-count assertion reddens under M-NP5; NP-1/NP-8 redden under M-NP2 |
 | **P2-T10** | **§8 Candidate-C legs** (C-1..C-8) + M-C1..M-C4 | T4 | C-5a passes a **subshell** read (`I-C5`); M-C4 (variable-only stash) reddens it |
 | **P2-T11** | **§10 restart-arm legs** (R-PY, R-SIBLING, R-TORN, R-NOARM, R-POPKIND, R-POPRUN, R-INF) + R0 behaviour matrix + M-NOARM/M-TORN/M-R0 | T3, T4 | one `halt` row per class with the slug shape; `_warn` text byte-unchanged; R0 allowlist exact |
 | **P2-T12** | Regression sweep: standing suites at **FAILED-diff-empty** vs the pre-fix base; `ceremony_wallclock` **green with zero edits** (§7.10) | T5–T11 | diff empty or attributed; §M/§N of `test_supervision_stop_handback.sh` green **without edits** (`I-B3`) |
@@ -953,7 +998,7 @@ the pins that already hold the machinery honest.
 | **R-2** | **Vacuity.** A negative leg passes because the code never reached the gate (an earlier step failed), or because a stub answered in a way that made the path unreachable | High — a false negative proof is worse than none | Medium | Every leg carries (a) a **gate needle** (`GATE_ATTRIBUTION_DETAIL`/WARN), (b) a **stub call counter**, (c) a **positive control**. `make_mut`'s `cmp -s` refuses a plant that changed nothing. A mutation that fails to redden its leg is reported as a **failed leg**, never as "no-op" |
 | **R-3** | **Collateral pin breakage** — Phase 1 edits text near pinned sites. The concrete collisions: `tests/test_bounded_subprocess_waits.sh:429` (literal `is-active probe exceeded budget` on a genuine *timeout* leg — must survive), `:327/:343/:359/:428` (site tokens `handback_reset_failed` / `handback_is_active` / `handback_start` / `scope_arm_is_active` — must survive), `:376` (happy path journals **no** `subprocess_wait_timeout`), plus the whole §M/§N blocks of `test_supervision_stop_handback.sh` (M1/M3/M6/M7 detail strings; N1/N2/N2b/N3/N5 launchd stash) | High — blocks the merge | Medium-High | A **regression matrix** is authored **before** T5 (§11.2), classifying every touching assertion as *must-survive* vs *planned delta*. §M/§N run **first** in every regression sweep. Rule: a red is a planned delta **or** a defect — never "fix" it by deleting the assertion. `I-B3` (refusal **prefix** byte-preserved) is the design-side guarantee that M1/M3/M6/M7 need no edits |
 | **R-4** | **Host-class gaps.** R2 needs Linux `/proc`; R3 needs `ps -o ppid=`; the unit arm needs `/run/systemd/system`. On a Darwin runner the fix's *primary* signal (cgroup) is untestable, so a Darwin regression could ship behind a Linux-green | Medium | Medium (this host: Linux, `/run/systemd/system` present, own cgroup under `/system.slice/`) | Every leg **names its host class**; a skipped leg is a loud `_skip` with the named fence, never a silent pass; the evidence pack's verdict line must state which lanes ran where. NP-11 + B7 cover the Darwin *selection* logic natively on this host via the `uname` stub |
-| **R-5** | **NP-6 residual (cgroup prefix-collision).** R2's substring containment accepts a sibling unit whose cgroup path extends ours | Medium (narrow, operator-hostile shape) | Low-Medium | NP-6 records which arm the shipped code is in and prints it; the accept path is **logged** (Phase 1's `ACCEPTED` line) so it is never silent; OQ-P2-3 decides whether to harden now |
+| **R-5** | **NP-6 residual (cgroup prefix-collision) — CLOSED by the binding amendment (D-P2-3 / C-0).** R2 now matches at segment boundaries; the collision shape is refused. Residual is only "implementation drifts back to substring" — caught by the NP-6 hard pin + M-NP1b/M-NP1c | Low (narrow, operator-hostile shape) | Low | NP-6 is a **hard pin** (arm (b)-only) with the **character-identical predicate** carried in phase1 §5.3, phase2 §9.1 and decisions.md §2.2(7); the accept path is **logged** (Phase 1's `ACCEPTED` line) so it is never silent; M-NP1b/M-NP1c redden the permissive and the downgraded variants |
 
 **Secondary (tracked, not blocking):** the 5 pre-`journal_init` restart exits stay journal-silent by
 structure (OQ-P2-2); T11/T12 are optional items whose absence is a **declared parity gap** (U-3).
@@ -965,7 +1010,7 @@ structure (OQ-P2-2); T11/T12 are optional items whose absence is a **declared pa
 | # | Criterion | How measured | Threshold |
 |---|-----------|--------------|-----------|
 | **SC-1** | Every new pin has a named counter-mutation, and the plant is non-vacuous | the evidence pack's mutation table: one row per assertion family + `restore sha256` before==after | **100%** of new pins; **zero** rows lacking an observed red |
-| **SC-2** | The negative proof is two-sided | run M-NP1 and M-NP1b against NP-4; run M-NP5 against NP-4's census-count assertion | **NP-4 RED under M-NP1 / M-NP1b**; NP-4's count assertion **RED under M-NP5** |
+| **SC-2** | The negative proof is two-sided | run M-NP1 and M-NP1b against NP-4; run **M-NP1c** against NP-4 and NP-6; run M-NP5 against NP-4's census-count assertion | **NP-4 RED under M-NP1 / M-NP1b / M-NP1c**; **NP-6 RED under M-NP1b / M-NP1c**; NP-4's count assertion **RED under M-NP5** |
 | **SC-3** | A healthy boot with partially-outside holders completes | B1, B1b, B1c | rc 0 **and** the `ACCEPTED … contained in unit` log line **and** (B1b) census counter ≥ N+1 |
 | **SC-4** | A wrong release still halts, at both layers | NP-1..NP-5, NP-9, NP-10 at lib level; NP-7b at Tier 3 | every NP leg's rc/verdict as tabulated; the Tier-3 run leaves `in_flight` **open** (B4), `current` unchanged, **no** `commit` row |
 | **SC-5** | No mislabel survives | A0–A5 (helpers + all three sites) | rc 124 ⇒ `kind=budget` + `timeout(` **byte-identical**; rc 3 ⇒ **no** `kind=budget`/`timeout(`; rc 4/other ⇒ `kind=nonzero_exit` with the true rc; no hard-coded `rc=124` for a non-124 child |
@@ -984,5 +1029,5 @@ structure (OQ-P2-2); T11/T12 are optional items whose absence is a **declared pa
 |---|---|---|
 | **OQ-P2-1** | Does Phase 2 own the **Tier-3** sandbox promote rehearsal (NP-7b + B2b's caller contract), or does it route to the tester gate? | (a) Phase 2 owns it → I execute §11.4 under the stated gate. (b) Route to the tester gate → NP-7b ships as a **declared gap**, lib-level NP-7a is the compensating pin, and the evidence pack states the promote-level halt is proven only structurally + by the existing template pin |
 | **OQ-P2-2** | Phase 1's restart scope journals **7** classes and leaves **5** pre-`journal_init` exits silent (`:82`, `:96`, `:104`, `:108`, `:145`). Is that acceptable (with R0's pinned allowlist as the visible record), or must those also produce a cause somewhere? | (a) acceptable → R0 pins the 6-entry allowlist and the evidence pack states the limit. (b) must-journal → a design change Phase 1 must own: `:145` cannot journal (init failed) and the arg-parse class runs before any journal exists, so this needs a **non-journal** channel (e.g. a stderr-audit store) and a new Phase-1 task |
-| **OQ-P2-3** | **NP-6 (cgroup prefix-collision)**: gate pin now (Phase 1 tightens R2 to segment-aware) or advisory finding routed to the next lane? | (a) gate → Phase 1's R2 gains a segment-aware match and NP-6 becomes a hard pin (and M-NP1b must redden it). (b) advisory → NP-6 records the observed arm and the finding routes; the residual is named in the evidence pack (R-5) |
-| **OQ-P2-4** | If Phase 1 takes optional **T12** (launchd flip-verify widening), do I own the **Darwin** NP-11 leg? | (a) yes → NP-11 is written and must pass on a Darwin-stubbed run (ppid-only ladder, immediate refusal). (b) no T12 → NP-11 is dropped and the parity gap is **declared** in the evidence pack (Phase 1's own recommendation is T12-in-only-if-provable, so this is the natural fallback) |
+| **OQ-P2-3** | **NP-6 (cgroup prefix-collision)** — **RULED (a) GATE NOW** (leader D-P2-3 + architect C-0): Phase-1's R2 gains segment-aware matching and NP-6 is a **hard pin** (arm (b)-only); M-NP1b **and** M-NP1c must redden it. The predicate is carried character-identically in phase1 §5.3, phase2 §9.1 and decisions.md §2.2(7). *(Resolved — this row is retained as the ruling trail.)* |
+| **OQ-P2-4** | ~~If Phase 1 takes optional **T12**, do I own the **Darwin** NP-11 leg?~~ **RULED (b) — NO T12 ⇒ NP-11 DROPPED, parity gap DECLARED in the evidence pack** (leader rulings D-P1-3 + D-P2-4, 2026-11-17). *(Resolved — this row is retained as the ruling trail.)* |
