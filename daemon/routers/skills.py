@@ -1739,8 +1739,9 @@ async def _resolve_ab_test_sanctioned(
     * Exactly one of ``winner_id`` / ``defective_arm_id``.
     * The target skill must be a live pair member.
     * The terminal write runs through
-      ``SkillStaleDeactivator.resolve_pair`` — it writes NO
-      deactivation receipt; it captures ``before_test`` /
+      ``SkillStaleDeactivator.resolve_pair`` — it WRITES the
+      deactivation receipt BEFORE the first flip (the reversal
+      record); it captures ``before_test`` /
       ``before_winner`` snapshots PRE-flip and returns them in the
       response, and reversal rides the ``--reactivate`` tool path.
       That service unit was dead code before this wiring.
@@ -1902,9 +1903,13 @@ async def _resolve_ab_test_sanctioned(
                 "state per the pinned spec (loser inactive+group "
                 "retained, winner active+group cleared, pair row "
                 "resolved). Reversible via the `--reactivate` tool "
-                "path (resolve_pair writes no deactivation receipt; "
-                "the response carries the pre-flip before_test/"
-                "before_winner snapshots)."
+                "path: the apply arm writes the deactivation receipt "
+                "BEFORE the first flip (loser + winner claimed with "
+                "their prior pairs, plus the pair-resolution entry "
+                "carrying the winner's cleared group and the pair "
+                "row's prior resolved state) — the response also "
+                "carries receipt_path / receipt_run_id and the "
+                "before_test/before_winner snapshots."
             ),
             severity="major",
             suspected_cause=(
