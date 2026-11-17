@@ -45,6 +45,7 @@ target is not covered by the matrix").
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -534,6 +535,153 @@ class TestTheMembershipGate:
             raw = await tools[index].ainvoke(payload)
             assert raw.startswith("Error:"), (index, raw)
             assert "unknown-agent" in raw, (index, raw)
+
+
+# ── F. the house refusal helpers (the G pins) ──────────────────────────
+
+
+class TestTheHouseRefusalHelpers:
+    """The house refusal machinery — the never-raise backstop and the
+    gate's SECOND branch.
+
+    Two pins (the G item):
+
+    * **the gate's SECOND branch** — the H1 extraction left the helper
+      with two branches: the authorization check (the first) and the
+      caller-instance-id check (the second). Only the FIRST was
+      pinned; the SECOND (a blank instance id ⇒ the
+      ``not-authorized`` refusal) now has its own pin.
+    * **the internal-error census** — the house never-raise backstop
+      ``_internal_error_refusal`` is called EXACTLY once per verb:
+      a body that dropped it would raise into the agent turn, and a
+      body that grew a second copy would drift from the shared
+      envelope.
+    """
+
+    def test_the_gate_second_branch_refuses_a_blank_instance_id(self) -> None:
+        """The SECOND branch of the shared gate: no instance id ⇒
+        ``not-authorized``.
+
+        The first branch (the agent identity) passes here — the
+        caller IS resolved — so the refusal can only come from the
+        second branch.
+        """
+        manager = MagicMock()
+        manager._room_chat_service = MagicMock()
+        manager._room_delivery_service = MagicMock()
+        tools = create_room_tools(
+            manager, current_instance_id="", agent_id="ari"
+        )
+        payloads = (
+            {"name": "r"},
+            {"room_id": "r", "text": "t"},
+            {"room_id": "r"},
+            {"room_id": "r", "proposal_seq": 1, "decision": "revive"},
+            {"room_id": "r"},
+        )
+        for index, payload in enumerate(payloads):
+            raw = asyncio.run(tools[index].ainvoke(payload))
+            assert raw.startswith("Error:"), (index, raw)
+            assert "reason=not-authorized" in raw, (index, raw)
+
+    def test_the_gate_second_branch_is_the_instance_id_check(self) -> None:
+        """The structural twin: the second branch tests the INSTANCE id.
+
+        A helper that dropped the second branch (or swapped it for
+        something else) REDs here.
+        """
+        tree = ast.parse(_module_source())
+        helpers = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_gate"
+        ]
+        assert len(helpers) == 1
+        statements = [
+            node
+            for node in helpers[0].body
+            if not (
+                isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            )
+        ]
+        branches = [node for node in statements if isinstance(node, ast.If)]
+        assert len(branches) == 2, branches
+        second = branches[1]
+        test = second.test
+        if isinstance(test, ast.UnaryOp):
+            test = test.operand
+        assert isinstance(test, ast.Name) and test.id == "caller_instance_id", (
+            "the gate's second branch must test the caller instance id"
+        )
+
+    def test_every_verb_carries_exactly_one_internal_error_backstop(
+        self,
+    ) -> None:
+        """The census: one ``_internal_error_refusal`` per verb.
+
+        The house never-raise backstop — an unexpected exception is
+        logged SERVER-SIDE and answered with the generic envelope (the
+        PB-F1 leak class). A body that dropped it raises into the agent
+        turn; a body that grew a second copy drifts from the shared
+        envelope.
+        """
+        tree = ast.parse(_module_source())
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_internal_error_refusal"
+        ]
+        assert len(calls) == len(TOOL_NAMES), (
+            f"expected one internal-error backstop per verb "
+            f"({len(TOOL_NAMES)}), got {len(calls)}"
+        )
+        # Each call names its OWN verb — the envelope labels the tool.
+        labels = []
+        for call in calls:
+            assert call.args, ast.dump(call)
+            label = call.args[0]
+            assert isinstance(label, ast.Constant), ast.dump(label)
+            labels.append(label.value)
+        assert sorted(labels) == sorted(TOOL_NAMES), labels
+
+    async def test_a_faulting_verb_answers_the_house_envelope(self) -> None:
+        """The behavioral bite: an unexpected exception NEVER raises and
+        NEVER leaks the raw text.
+
+        The PB-F1 leak class: ``str(exc)`` / ``repr(exc)`` must not
+        reach the payload.
+        """
+        manager, room_service = _stub_manager()
+        boom = "sensitive-internal-detail"
+        room_service.get_room = AsyncMock(side_effect=RuntimeError(boom))
+        room_service.create_room = AsyncMock(side_effect=RuntimeError(boom))
+        tools = {
+            t.name: t
+            for t in create_room_tools(
+                manager, current_instance_id="iid-1", agent_id="ari"
+            )
+        }
+        payloads = {
+            "room_create": {"name": "r"},
+            "room_post": {"room_id": "r", "text": "t"},
+            "room_read": {"room_id": "r"},
+            "room_task_decision": {
+                "room_id": "r",
+                "proposal_seq": 1,
+                "decision": "revive",
+            },
+            "room_close": {"room_id": "r"},
+        }
+        for name, payload in payloads.items():
+            raw = await tools[name].ainvoke(payload)
+            assert raw.startswith("Error:"), (name, raw)
+            assert f"{name} REFUSED" in raw, (name, raw)
+            assert "reason=internal-error" in raw, (name, raw)
+            assert boom not in raw, (name, raw)
 
 
 # ── E. the mutation target ────────────────────────────────────────────
