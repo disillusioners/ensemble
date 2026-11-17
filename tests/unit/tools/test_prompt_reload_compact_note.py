@@ -52,7 +52,7 @@ from daemon.services.prompt_refresh import (
     CODE_NOTE_OVER_CAP,
     CODE_NOTE_REQUIRES_COMPACT,
     CODE_NOTE_REQUIRED,
-    OUTCOME_ARMED_PENDING_SEAM,
+    OUTCOME_ARMED,
 )
 from daemon.tools.prompt_reload import create_prompt_reload_tools
 
@@ -404,7 +404,7 @@ class TestL3RefusalFamilies:
             datetime.now(timezone.utc) - timedelta(seconds=1000)
         ).isoformat()
         out = await _call(manager, compact=True, compact_note="a note")
-        assert f"outcome={OUTCOME_ARMED_PENDING_SEAM}" in out
+        assert f"outcome={OUTCOME_ARMED}" in out
 
     async def test_every_refusal_carries_no_compacted_claim(self) -> None:
         manager = StubManager(compaction=_compaction_config(enabled=False))
@@ -518,7 +518,7 @@ class TestL4SeamSafety:
             manager = StubManager()
             out = await _call(manager, compact=True, compact_note="a note")
         assert calls == []
-        assert f"outcome={OUTCOME_ARMED_PENDING_SEAM}" in out
+        assert f"outcome={OUTCOME_ARMED}" in out
 
     async def test_the_note_armed_hook_is_not_registered_in_the_mid_turn_sites(self) -> None:
         """T1/T2 (the mid-turn triggers) must NOT read the arm.
@@ -600,17 +600,17 @@ class TestL12ArmedReceipt:
     async def test_the_receipt_carries_the_frozen_outcome_token_and_fields(self) -> None:
         manager = StubManager()
         out = await _call(manager, compact=True, compact_note="a note")
-        assert f"outcome={OUTCOME_ARMED_PENDING_SEAM}" in out
+        assert f"outcome={OUTCOME_ARMED}" in out
         assert "note_chars=6" in out
         assert f"cap={CAP}" in out
         assert re.search(r"note_sha256=[0-9a-f]{12}\b", out)
         assert "superseded_previous=false" in out
 
-    async def test_the_receipt_states_the_seam_and_the_explicit_not_yet_line(self) -> None:
+    async def test_the_receipt_states_the_explicit_not_yet_line(self) -> None:
         manager = StubManager()
         out = await _call(manager, compact=True, compact_note="a note")
-        assert ARMED_NOT_YET_COMPACTED_LINE in out
-        assert "your next turn boundary" in out
+        assert "CONTEXT NOT YET COMPACTED" in out
+        assert "a REQUEST your model will execute on its next invoke" in out
 
     async def test_the_receipt_never_affirmatively_claims_a_compaction(self) -> None:
         manager = StubManager()
@@ -711,22 +711,22 @@ class TestL17Exhaustiveness:
         ]
         assert "unconditionally" not in clause
 
-    async def test_the_receipt_carries_the_expected_seam_clause(self) -> None:
+    async def test_the_receipt_carries_the_append_path_fields(self) -> None:
         manager = StubManager()
         out = await _call(manager, compact=True, compact_note="a note")
-        assert ARMED_EXPECTED_SEAM_CLAUSE in out
+        assert "path=append" in out
+        assert "selection=the model made the final selection" in out
+        assert "outcome=armed" in out
 
-    async def test_a_reader_cannot_believe_the_gate_list_is_shorter(self) -> None:
-        """The three gate NAMES must each appear — a reader must not be
-        able to believe the list is shorter."""
+    async def test_the_receipt_carries_no_three_gate_claim(self) -> None:
+        """Under v1.5 the note path is ONE path (append); there is NO
+        seam transition and NO 'three gates' (the floor predicate + the
+        threshold bypass are removed)."""
         manager = StubManager()
         out = await _call(manager, compact=True, compact_note="a note")
-        for gate in (
-            "the minimum-compaction floor",
-            "the 60s anti-refire window",
-            "the deliberate-compact rate limit",
-        ):
-            assert gate in out, gate
+        assert "three gates" not in out
+        assert "armed_pending_seam" not in out
+        assert "unconditionally" not in out
 
     async def test_the_gate_list_is_not_extended_by_the_receipt(self) -> None:
         """The word 'unconditionally' is GONE from the agent-facing literal."""

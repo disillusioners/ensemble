@@ -209,23 +209,23 @@ def _render_armed_receipt(
     previous_sha12: str = "",
     status_line: str | None = None,
 ) -> str:
-    """The ARMED receipt — what the agent actually sees.
+    """The ARMED receipt — what the agent actually sees at ARM TIME.
 
     Content-free: the note's LENGTH and sha256 PREFIX only, never the note
-    body. It NEVER claims the compaction ran — the outcome token is
-    ``armed_pending_seam`` and the closing line says so explicitly.
+    body. Under v1.5 the note is a REQUEST the agent's own model executes;
+    there is NO seam transition and NO "three gates" (the armed-aware
+    floor predicate and the threshold bypass are removed). The receipt
+    reports what actually happened: the note is armed, awaiting the
+    append at the next invoke. The OUTCOME (``compacted`` / ``deferred``
+    / ``append_failed`` / ``empty_reply``) is reported after the swap
+    lands — never here, and never as a success for work not done.
     """
-    from ..services.prompt_refresh import (
-        ARMED_EXPECTED_SEAM_CLAUSE,
-        ARMED_NOT_YET_COMPACTED_LINE,
-        ARMED_SEAM_STATEMENT,
-        OUTCOME_ARMED_PENDING_SEAM,
-    )
+    from ..services.prompt_refresh import OUTCOME_ARMED
 
     lines: list[str] = [
-        f"prompt_reload {OUTCOME_ARMED_PENDING_SEAM} — compact note ARMED; "
-        f"the compaction happens at your next turn boundary.",
-        f"outcome={OUTCOME_ARMED_PENDING_SEAM}",
+        f"prompt_reload {OUTCOME_ARMED} — compact note ARMED; the note is "
+        f"a REQUEST your model will execute on its next invoke.",
+        f"outcome={OUTCOME_ARMED}",
         f"note_chars={note_chars}",
         f"note_sha256={note_sha12}",
         f"cap={cap}",
@@ -233,10 +233,14 @@ def _render_armed_receipt(
     ]
     if superseded_previous:
         lines.append(f"previous_note_sha256={previous_sha12}")
-    lines.append(f"seam={ARMED_SEAM_STATEMENT}; {ARMED_EXPECTED_SEAM_CLAUSE}")
+    lines.append("path=append")
+    lines.append("selection=the model made the final selection")
     if status_line:
         lines.append(status_line)
-    lines.append(ARMED_NOT_YET_COMPACTED_LINE)
+    lines.append(
+        "CONTEXT NOT YET COMPACTED — the note is a REQUEST your model will "
+        "execute on its next invoke; until then this note remains armed."
+    )
     return "\n".join(lines)
 
 
@@ -308,7 +312,7 @@ def _handle_compact_note(
         CODE_NOTE_REQUIRES_COMPACT,
         CODE_NOTE_REQUIRED,
         DEFERRED_STATE_TEXT,
-        OUTCOME_ARMED_PENDING_SEAM,
+        OUTCOME_ARMED,
         OUTCOME_REFUSED,
         arm_compact_note,
         compact_note_sha256_12,
@@ -435,7 +439,7 @@ def _handle_compact_note(
         format_compact_note_info_line(
             instance_id=instance_id,
             agent_id=agent_id,
-            outcome=OUTCOME_ARMED_PENDING_SEAM,
+            outcome=OUTCOME_ARMED,
             code=None,
             note_chars=note_chars,
             note_sha256_12=note_sha12,

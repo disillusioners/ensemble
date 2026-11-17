@@ -213,8 +213,12 @@ CODE_ENVELOPES: dict[str, str] = {
 # not move (D25 discipline: the two sets are DIFFERENT BY DESIGN and must
 # never be reconciled).
 
-#: The ARMED outcome token (architect §H). FROZEN literal.
-OUTCOME_ARMED_PENDING_SEAM = "armed_pending_seam"
+#: The ARMED outcome token (v1.5 §2g). Re-shaped: the note is now a
+#: REQUEST the agent's own model executes; the receipt reports what
+#: actually happened. There is NO "armed pending seam" (the seam is
+#: gone) and NO "three gates" (the floor predicate + threshold bypass
+#: are removed).
+OUTCOME_ARMED = "armed"
 
 #: The seam statement, in plain words — the agent must know WHEN, not just THAT.
 ARMED_SEAM_STATEMENT = (
