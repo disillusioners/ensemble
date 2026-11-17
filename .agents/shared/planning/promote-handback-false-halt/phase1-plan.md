@@ -269,9 +269,13 @@ downgrade's own fixture is **R2 unanswerable** (`SC_SHOW_RC=124` or `SC_MAINPID=
    ```
    (Deliberately `if`/`case` rather than the terser `[ "$pcg" = "$cg" ] && return 0` compound: a standalone `A && B`
    list returns the *test's* status on the non-equal path — the right answer by luck here, the wrong habit everywhere
-   else, and it is a `set -e` landmine in any caller that arms it. `lib.sh` arms no `set -e` today (verified: no `set -e`
-   in the file), so this is defensive, not a live bug. Callers must still propagate the three-valued rc verbatim — the
-   `0/1/2` contract of `I-B13`/`§5.4a`.)
+   else, and a `set -e` landmine in any caller that arms it. **Verified at write time:** every script in
+   `scripts/upgrade/` arms `set -u` only (`lib.sh` has no `set` line at all; `promote.sh:69`, `restart.sh:63`,
+   `rollback.sh:32`, `stage.sh:117`, `status.sh:26`, `adopt-unit.sh:92`, `executor_family.sh:72`, `_build_frontend.sh:37`
+   = `set -u`), so this is defensive, not a live bug — but the `:4825` comment in `lib.sh` asserts "these scripts run with
+   `set -e`", i.e. a future reader may reasonably assume it. **The three-valued rc must survive either way:** callers
+   propagate `0/1/2` verbatim per `I-B13`/`§5.4a`, and a bare `rung-set && …` chain must never be introduced in the
+   ladder's path.)
 
    - holder `= MainPID` accepts before either test (equality arm, unchanged by the amendment);
    - `"$cg"/*` is a **left-anchored prefix** pattern: `cg` matched literally, then `/`, then anything. It is **NOT**
