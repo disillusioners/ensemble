@@ -1019,20 +1019,19 @@ def build_compaction_doc(
             truncated = _truncate_to_token_cap(
                 global_overview, GLOBAL_OVERVIEW_TOKEN_CAP
             )
-            if honest_truncation:
-                body += (
-                    f"{truncated}\n"
-                    f"[truncated — full GLOBAL overview text exceeded the "
-                    f"GLOBAL_OVERVIEW_TOKEN_CAP={GLOBAL_OVERVIEW_TOKEN_CAP}; "
-                    f"no SECTION DETAIL follows on this path]\n"
-                )
-            else:
-                body += (
-                    f"{truncated}\n"
-                    f"[truncated — full GLOBAL overview text exceeded the "
-                    f"GLOBAL_OVERVIEW_TOKEN_CAP={GLOBAL_OVERVIEW_TOKEN_CAP}; "
-                    f"SECTION DETAIL below remains complete]\n"
-                )
+            # The two markers differ ONLY in their last clause — compute
+            # the differing clause once and build the marker once.
+            tail_clause = (
+                "no SECTION DETAIL follows on this path"
+                if honest_truncation
+                else "SECTION DETAIL below remains complete"
+            )
+            body += (
+                f"{truncated}\n"
+                f"[truncated — full GLOBAL overview text exceeded the "
+                f"GLOBAL_OVERVIEW_TOKEN_CAP={GLOBAL_OVERVIEW_TOKEN_CAP}; "
+                f"{tail_clause}]\n"
+            )
         else:
             body += f"{global_overview}\n"
     elif mode == "truncation":

@@ -606,9 +606,10 @@ SUMMARIZATION_CHUNK_THRESHOLD: float = 0.60  # Chunk threshold for summarization
 # ── Compact-note lane (prompt_reload(compact, compact_note)) ────────────────────
 # The deliberate-compact rate limit (architect §H gate (iii) / ES-6).
 #
-# A HARDCODED module constant — deliberately NOT a config knob (the lane's
-# scope fence allows exactly TWO new knobs: ``compact_note_max_chars`` and
-# a config knob). Enforced at ARM time as the typed
+# A HARDCODED module constant — deliberately NOT a config knob. The lane
+# introduced exactly ONE knob (``CompactionConfig.compact_note_max_chars``);
+# this rate limit is the second relevant number and it is NOT configurable.
+# Enforced at ARM time as the typed
 # refusal ``prompt_reload_compact_rate_limited``; the clock is the
 # instance's ``compact_note_last_applied_at`` (deliberate/note-guided
 # compactions ONLY). 900s = 15 min: 15x the automatic 60s dedup window, so

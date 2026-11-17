@@ -172,9 +172,11 @@ CODE_COMPACT_RATE_LIMITED = "prompt_reload_compact_rate_limited"
 
 #: codes 1-14 — the REFUSED envelope (notify_user.py:314-316 shape).
 #: 1-9 are the original prompt-refresh ladder; 10-14 are the compact-note
-#: lane's five (architect §G). The count is RE-DERIVED by grep, never
-#: copied — the census pin in ``tests/unit/tools/test_prompt_reload_refusals.py``
-#: asserts 14.
+#: lane's five (architect §G). The count is PINNED at 14 by an explicit
+#: assertion in ``tests/unit/tools/test_prompt_reload_refusals.py``, and
+#: that pin RE-DERIVES the set from THIS source literal (it parses the
+#: frozenset below and resolves every entry) — so the prose and the
+#: literal cannot drift apart.
 REFUSAL_CODES: frozenset[str] = frozenset(
     {
         CODE_DISABLED,
@@ -236,6 +238,38 @@ ARMED_STILL_ARMED_NO_DOC = (
     "armed — still armed (the last append produced no doc), not compacted"
 )
 
+#: The PER-OUTCOME deferred discriminators. Each distinct append-path
+#: outcome gets its OWN label (a single shared "no_doc" label would
+#: flatten four different failures into one indistinguishable state on
+#: the agent-facing receipt).
+DEFERRED_STATE_EMPTY_REPLY = "empty_reply"
+DEFERRED_STATE_TOOL_CALLS_REPLY = "tool_calls_reply"
+DEFERRED_STATE_REFUSED_REPLY = "refused_reply"
+DEFERRED_STATE_APPEND_FAILED = "append_failed"
+DEFERRED_STATE_READ_FAILED = "read_failed"
+DEFERRED_STATE_CHANNEL_REBUILD_FAILED = "channel_rebuild_failed"
+
+#: The agent-facing receipt wordings for those deferrals (VERBATIM).
+ARMED_DEFERRED_EMPTY_REPLY = (
+    "armed — deferred (the model answered with nothing), not compacted"
+)
+ARMED_DEFERRED_TOOL_CALLS_REPLY = (
+    "armed — deferred (the model answered with tool calls), not compacted"
+)
+ARMED_DEFERRED_REFUSED_REPLY = (
+    "armed — deferred (the model refused to compact), not compacted"
+)
+ARMED_DEFERRED_APPEND_FAILED = (
+    "armed — deferred (the append did not land), not compacted"
+)
+ARMED_DEFERRED_READ_FAILED = (
+    "armed — deferred (the arm state could not be read), not compacted"
+)
+ARMED_DEFERRED_CHANNEL_REBUILD_FAILED = (
+    "armed — deferred (the compacted channel could not be rebuilt), "
+    "not compacted"
+)
+
 #: The persisted deferred-state discriminators (CONTENT-FREE — a label,
 #: never note text). The arm-status surface maps them to the verbatim
 #: receipt strings above.
@@ -245,6 +279,12 @@ DEFERRED_STATE_NO_DOC = "no_doc"
 #: Discriminator → verbatim receipt string.
 DEFERRED_STATE_TEXT: dict[str, str] = {
     DEFERRED_STATE_NO_DOC: ARMED_STILL_ARMED_NO_DOC,
+    DEFERRED_STATE_EMPTY_REPLY: ARMED_DEFERRED_EMPTY_REPLY,
+    DEFERRED_STATE_TOOL_CALLS_REPLY: ARMED_DEFERRED_TOOL_CALLS_REPLY,
+    DEFERRED_STATE_REFUSED_REPLY: ARMED_DEFERRED_REFUSED_REPLY,
+    DEFERRED_STATE_APPEND_FAILED: ARMED_DEFERRED_APPEND_FAILED,
+    DEFERRED_STATE_READ_FAILED: ARMED_DEFERRED_READ_FAILED,
+    DEFERRED_STATE_CHANNEL_REBUILD_FAILED: ARMED_DEFERRED_CHANNEL_REBUILD_FAILED,
 }
 
 
@@ -273,7 +313,7 @@ COMPACT_NOTE_LAST_APPLIED_AT_KEY = "compact_note_last_applied_at"
 #: sha256 prefix of the last consumed note.
 COMPACT_NOTE_LAST_SHA256_12_KEY = "compact_note_last_sha256_12"
 #: ADDITIVE (beyond the architect's five keys): the deferred-state
-#: discriminator of the last quiescent seam. The agent must be told
+#: discriminator of the last APPEND-PATH outcome. The agent must be told
 #: "deferred, not compacted" — a deferred state that nobody remembers
 #: cannot be disclosed. CONTENT-FREE (a label, never note text).
 COMPACT_NOTE_LAST_DEFERRED_KEY = "compact_note_last_deferred"
@@ -307,6 +347,13 @@ class CompactNoteState:
     deferred: str = DEFERRED_STATE_NONE
     last_applied_at: str = ""
     last_sha256_12: str = ""
+    #: ``False`` when the carrier READ ITSELF failed (no repository, a DB
+    #: error) — the "unknown" case. It is DISTINCT from "not armed": an
+    #: unknown state must never be treated as a known-negative.
+    read_ok: bool = True
+    #: The owning agent id (read off the carrier row) — the audit line's
+    #: agent field is never a permanent ``-``.
+    agent_id: str = ""
 
 
 def _read_instance_metadata_dict(instance: Any) -> dict | None:
@@ -336,17 +383,28 @@ def read_compact_note_state(repository: Any, instance_id: str) -> CompactNoteSta
     """
     state = CompactNoteState()
     if repository is None:
+        # NO carrier wired — the arm state is UNKNOWN, not "not armed".
+        state.read_ok = False
+        logger.warning(
+            "prompt_reload compact-note: no carrier repository for "
+            "instance=%s — the arm state is UNKNOWN",
+            str(instance_id)[:8],
+        )
         return state
     try:
         row = repository.get(instance_id)
-    except Exception:  # pragma: no cover — defensive; never raises
-        logger.debug(
-            "prompt_reload compact-note: arm read failed for instance=%s",
+    except Exception as exc:  # pragma: no cover — defensive; never raises
+        state.read_ok = False
+        logger.warning(
+            "prompt_reload compact-note: arm read failed for instance=%s "
+            "error_class=%s — the arm state is UNKNOWN",
             str(instance_id)[:8],
+            type(exc).__name__,
         )
         return state
     if row is None:
         return state
+    state.agent_id = str(getattr(row, "agent_id", "") or "")
     md = _read_instance_metadata_dict(row)
     if not md:
         return state
@@ -365,29 +423,55 @@ def read_compact_note_state(repository: Any, instance_id: str) -> CompactNoteSta
 
 
 def _write_instance_metadata(repository: Any, instance_id: str, updates: dict[str, Any]) -> bool:
-    """Write a bundle of metadata keys atomically. NEVER raises.
+    """Write a bundle of metadata keys. NEVER raises.
 
-    Prefers the repository's atomic multi-key helper (``set_metadata_many``
-    — ONE dialect-aware UPDATE); falls back to per-key ``set_metadata``
-    (also a dialect-aware single-statement UPDATE, so concurrent writers
-    targeting different keys compose correctly). The generic ``update``
-    method REJECTS ``instance_metadata`` by design and is never used.
+    When the repository exposes the atomic multi-key helper
+    (``set_metadata_many`` — ONE dialect-aware UPDATE), the write is
+    ATOMIC. Otherwise the per-key ``set_metadata`` fallback runs — one
+    statement per key — which is NOT atomic (a partial crash can leave
+    a torn bundle). The generic ``update`` method REJECTS
+    ``instance_metadata`` by design and is never used.
     """
+    # NOTE: the "atomically" claim above is true ONLY of the
+    # ``set_metadata_many`` branch; the per-key fallback is NOT atomic.
     if repository is None:
         return False
     try:
         if hasattr(repository, "set_metadata_many"):
-            repository.set_metadata_many(instance_id, updates)
+            updated = repository.set_metadata_many(instance_id, updates)
+            if updated is None:
+                # The house contract (tunables.py:191-198): the write
+                # helpers return ``Instance | None`` and ``None`` means
+                # THE INSTANCE DOES NOT EXIST — NOTHING was written.
+                # Reporting success here would render an ARMED receipt
+                # over an empty carrier.
+                logger.warning(
+                    "prompt_reload compact-note: metadata write returned "
+                    "None (instance not found) for instance=%s — NOTHING "
+                    "was written",
+                    str(instance_id)[:8],
+                )
+                return False
             return True
         if hasattr(repository, "set_metadata"):
             for key, value in updates.items():
-                repository.set_metadata(instance_id, key, value)
+                updated = repository.set_metadata(instance_id, key, value)
+                if updated is None:
+                    logger.warning(
+                        "prompt_reload compact-note: metadata write "
+                        "returned None (instance not found) for "
+                        "instance=%s key=%s — NOTHING was written",
+                        str(instance_id)[:8],
+                        key,
+                    )
+                    return False
             return True
-    except Exception:  # pragma: no cover — defensive; never raises
-        logger.debug(
+    except Exception as exc:  # pragma: no cover — defensive; never raises
+        logger.warning(
             "prompt_reload compact-note: metadata write failed for "
-            "instance=%s",
+            "instance=%s error_class=%s",
             str(instance_id)[:8],
+            type(exc).__name__,
         )
     return False
 
@@ -398,6 +482,7 @@ def arm_compact_note(
     note: str,
     *,
     armed_at: str | None = None,
+    max_chars: int | None = None,
 ) -> bool:
     """ARM the note on the carrier. Returns ``True`` on a successful write.
 
@@ -405,7 +490,36 @@ def arm_compact_note(
     body is NEVER logged (R11 — the memoir-lane content-free doctrine and
     the decision-family shadow-lane content-free doctrine are the
     precedent this follows).
+
+    THE PRECONDITIONS ARE ENFORCED HERE — not only in the tool layer: the
+    note must be non-empty and no longer than ``max_chars`` (the default
+    cap; the tool passes its RESOLVED cap). An empty or over-cap note is
+    REFUSED (``False``) and NOTHING is written — the cap must not live
+    exclusively in the tool.
     """
+    from ..config import DEFAULT_COMPACT_NOTE_MAX_CHARS
+
+    limit = (
+        int(max_chars)
+        if isinstance(max_chars, int) and not isinstance(max_chars, bool) and max_chars >= 1
+        else DEFAULT_COMPACT_NOTE_MAX_CHARS
+    )
+    if not isinstance(note, str) or not note.strip():
+        logger.warning(
+            "prompt_reload compact-note: refused to arm an EMPTY note for "
+            "instance=%s — nothing was written",
+            str(instance_id)[:8],
+        )
+        return False
+    if len(note) > limit:
+        logger.warning(
+            "prompt_reload compact-note: refused to arm an over-cap note "
+            "(%d chars > %d) for instance=%s — nothing was written",
+            len(note),
+            limit,
+            str(instance_id)[:8],
+        )
+        return False
     stamp = armed_at or datetime.now(timezone.utc).isoformat()
     ok = _write_instance_metadata(
         repository,
@@ -451,16 +565,44 @@ def clear_compact_note_arm(
         },
     )
     if not ok:
+        logger.warning(
+            "prompt_reload_compact_note: arm-clear stamp write failed for "
+            "instance=%s — the arm was NOT consumed",
+            str(instance_id)[:8],
+        )
         return False
     try:
         if hasattr(repository, "delete_metadata"):
-            repository.delete_metadata(instance_id, COMPACT_NOTE_ARM_KEY)
+            deleted = repository.delete_metadata(
+                instance_id, COMPACT_NOTE_ARM_KEY
+            )
         elif hasattr(repository, "delete_metadata_if_present"):
-            repository.delete_metadata_if_present(instance_id, COMPACT_NOTE_ARM_KEY)
-    except Exception:  # pragma: no cover — defensive; never raises
-        logger.debug(
-            "prompt_reload_compact_note: arm clear failed for instance=%s",
+            deleted = repository.delete_metadata_if_present(
+                instance_id, COMPACT_NOTE_ARM_KEY
+            )
+        else:
+            # NO delete helper at all — the arm is STILL ARMED. Claiming
+            # the consumption here would strand a note that can never be
+            # applied.
+            logger.warning(
+                "prompt_reload_compact_note: the carrier exposes NO arm "
+                "delete helper for instance=%s — the arm was NOT consumed",
+                str(instance_id)[:8],
+            )
+            return False
+        if deleted is False:
+            logger.warning(
+                "prompt_reload_compact_note: arm delete reported failure "
+                "for instance=%s — the arm was NOT consumed",
+                str(instance_id)[:8],
+            )
+            return False
+    except Exception as exc:  # pragma: no cover — defensive; never raises
+        logger.warning(
+            "prompt_reload_compact_note: arm clear failed for instance=%s "
+            "error_class=%s — the arm was NOT consumed",
             str(instance_id)[:8],
+            type(exc).__name__,
         )
         return False
     return True
@@ -507,6 +649,17 @@ APPEND_OUTCOME_EMPTY_REPLY = "empty_reply"
 APPEND_OUTCOME_TOOL_CALLS_REPLY = "tool_calls_reply"
 APPEND_OUTCOME_REFUSED_REPLY = "refused_reply"
 APPEND_OUTCOME_APPEND_FAILED = "append_failed"
+#: The swap landed and persisted, but the node's channel could not be
+#: rebuilt from the house helper — the durable state and the committed
+#: channel may disagree. NOT reported as ``compacted``.
+APPEND_OUTCOME_CHANNEL_REBUILD_FAILED = "channel_rebuild_failed"
+#: The carrier read FAILED — the arm state is UNKNOWN (not "not armed"),
+#: so the swap cannot be trusted to be armed and the model's compaction
+#: reply must not be discarded silently.
+APPEND_OUTCOME_READ_FAILED = "read_failed"
+#: RESERVED / UNPRODUCIBLE by construction (no caller reaches it — the
+#: append path has no gate that defers it). Kept as vocabulary only; it
+#: is NOT emitted and NOT mapped to a deferred label.
 APPEND_OUTCOME_DEFERRED = "deferred"
 
 APPEND_OUTCOMES: frozenset[str] = frozenset(
@@ -516,9 +669,22 @@ APPEND_OUTCOMES: frozenset[str] = frozenset(
         APPEND_OUTCOME_TOOL_CALLS_REPLY,
         APPEND_OUTCOME_REFUSED_REPLY,
         APPEND_OUTCOME_APPEND_FAILED,
+        APPEND_OUTCOME_CHANNEL_REBUILD_FAILED,
+        APPEND_OUTCOME_READ_FAILED,
         APPEND_OUTCOME_DEFERRED,
     }
 )
+
+#: Outcome → its deferred discriminator (the arm PERSISTS on these).
+_DEFERRED_STATE_FOR_OUTCOME: dict[str, str] = {
+    APPEND_OUTCOME_EMPTY_REPLY: DEFERRED_STATE_EMPTY_REPLY,
+    APPEND_OUTCOME_TOOL_CALLS_REPLY: DEFERRED_STATE_TOOL_CALLS_REPLY,
+    APPEND_OUTCOME_REFUSED_REPLY: DEFERRED_STATE_REFUSED_REPLY,
+    APPEND_OUTCOME_APPEND_FAILED: DEFERRED_STATE_APPEND_FAILED,
+    APPEND_OUTCOME_CHANNEL_REBUILD_FAILED: DEFERRED_STATE_CHANNEL_REBUILD_FAILED,
+    APPEND_OUTCOME_READ_FAILED: DEFERRED_STATE_READ_FAILED,
+    APPEND_OUTCOME_DEFERRED: DEFERRED_STATE_NO_DOC,
+}
 
 
 def settle_compact_note_arm(
@@ -553,6 +719,17 @@ def settle_compact_note_arm(
     carrier AND emitted as ONE content-free INFO line — they are the
     receipt's honesty surface (v1.5 §2g), not decoration.
     """
+    if outcome not in APPEND_OUTCOMES:
+        # FAIL-CLOSED on an unknown label: an outcome nobody recognises
+        # must never be recorded as a settled arm.
+        logger.warning(
+            "prompt_reload compact-note: unknown append outcome=%r for "
+            "instance=%s — refusing to settle (fail-closed)",
+            outcome,
+            str(instance_id)[:8],
+        )
+        return "rejected_unknown_outcome"
+
     audit = {
         COMPACT_NOTE_LAST_AGENT_MODEL_KEY: agent_model or "",
         COMPACT_NOTE_LAST_OVERRIDE_APPLIED_KEY: bool(override_applied),
@@ -560,13 +737,47 @@ def settle_compact_note_arm(
         COMPACT_NOTE_LAST_TAIL_SPLICED_KEY: int(tail_spliced or 0),
         COMPACT_NOTE_LAST_DOC_ID_KEY: doc_id or "",
     }
-    _write_instance_metadata(repository, instance_id, audit)
+    audit_ok = _write_instance_metadata(repository, instance_id, audit)
+    if not audit_ok:
+        logger.warning(
+            "prompt_reload compact-note: the AUDIT bundle was NOT written "
+            "for instance=%s outcome=%s",
+            str(instance_id)[:8],
+            outcome,
+        )
+
+    if outcome == APPEND_OUTCOME_COMPACTED and persisted:
+        cleared = clear_compact_note_arm(
+            repository, instance_id, sha256_12=note_sha12
+        )
+        if cleared:
+            settle_result = "landed"
+            logged_outcome = APPEND_OUTCOME_COMPACTED
+        else:
+            # The swap landed but the ARM WAS NOT CONSUMED — never report
+            # "compacted" for an arm that is still armed.
+            settle_result = "landed_unsettled"
+            logged_outcome = "landed_unsettled"
+            logger.warning(
+                "prompt_reload compact-note: the swap landed but the arm "
+                "was NOT consumed for instance=%s — the compaction will "
+                "re-run",
+                str(instance_id)[:8],
+            )
+    else:
+        deferred_state = _DEFERRED_STATE_FOR_OUTCOME.get(
+            outcome, DEFERRED_STATE_NO_DOC
+        )
+        mark_compact_note_deferred(repository, instance_id, deferred_state)
+        settle_result = deferred_state
+        logged_outcome = outcome
+
     try:
         logger.info(
             format_compact_note_append_line(
                 instance_id=instance_id,
                 agent_id=agent_id,
-                outcome=outcome,
+                outcome=logged_outcome,
                 note_chars=note_chars,
                 note_sha256_12=note_sha12,
                 agent_model=agent_model,
@@ -577,16 +788,13 @@ def settle_compact_note_arm(
             )
         )
     except Exception:  # pragma: no cover — defensive; never raises
-        logger.debug(
+        logger.warning(
             "prompt_reload compact-note: audit line emission failed for "
-            "instance=%s",
+            "instance=%s error_class=%s",
             str(instance_id)[:8],
+            type(sys.exc_info()[1]).__name__,
         )
-    if outcome == APPEND_OUTCOME_COMPACTED and persisted:
-        clear_compact_note_arm(repository, instance_id, sha256_12=note_sha12)
-        return "landed"
-    mark_compact_note_deferred(repository, instance_id, DEFERRED_STATE_NO_DOC)
-    return DEFERRED_STATE_NO_DOC
+    return settle_result
 
 # ── Canonical disclosure literals (plan-overview §10, W5 — ONE literal
 # per bullet id; referenced BY ID everywhere else, never paraphrased) ────────

@@ -60,7 +60,7 @@ import logging
 import math
 import os
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Callable
 
 from pydantic import BaseModel, Field
 from langchain_core.tools import tool
@@ -181,8 +181,16 @@ def _rate_limit_remaining_seconds(
 
     A malformed clock fails OPEN (returns ``0``): the rate limit is an
     anti-abuse bound, and a corrupt clock must not strand an arm
-    permanently.
+    permanently. A FUTURE-dated clock is the same class of corruption
+    and fails open the same way (logged at WARNING).
+
+    REAL EXPOSURE (disclosed, not fixed): the clock is stamped ONLY on
+    a LANDED compaction (``clear_compact_note_arm``), so a NON-LANDING
+    arm can be re-armed each turn — the rate limit does not protect
+    against a note that never lands. The malformed-clock fail-open is
+    deliberate and bounded by that exposure; it is not a defect.
     """
+
     from ..constants import DELIBERATE_COMPACT_RATE_LIMIT_S
 
     if not last_applied_at:
@@ -195,6 +203,18 @@ def _rate_limit_remaining_seconds(
         last = last.replace(tzinfo=timezone.utc)
     now = now or datetime.now(timezone.utc)
     elapsed = (now - last).total_seconds()
+    if elapsed < 0:
+        # A FUTURE-dated clock is CORRUPT — the same class as a malformed
+        # one. Treating it as "the window is still open" would strand
+        # EVERY later attempt (including a replacement note) behind a
+        # nonsensical remaining count. Fail OPEN, loudly.
+        logger.warning(
+            "prompt_reload compact-note: the deliberate-compact clock is "
+            "in the FUTURE (elapsed=%.0fs) — treated as corrupt; the rate "
+            "limit is not enforced for this attempt",
+            elapsed,
+        )
+        return 0
     remaining = DELIBERATE_COMPACT_RATE_LIMIT_S - elapsed
     if remaining <= 0:
         return 0
@@ -251,7 +271,6 @@ def _instance_repository(manager: Any) -> Any:
 
 
 def _compact_note_refusal(
-    manager: Any,
     instance_id: str,
     agent_id: str,
     *,
@@ -322,90 +341,108 @@ def _handle_compact_note(
     )
 
     note = compact_note or ""
-    if not compact:
-        if not note.strip():
-            # Today's shape — byte-identical (the still-armed status line
-            # rides only the ARMED receipt; the plain receipt is frozen).
-            return None
-        return _compact_note_refusal(
-            manager,
-            instance_id,
-            agent_id,
-            code=CODE_NOTE_REQUIRES_COMPACT,
-            message=(
+    if not compact and not note.strip():
+        # Today's shape — byte-identical (the still-armed status line
+        # rides only the ARMED receipt; the plain receipt is frozen).
+        return None
+
+    cap = _compact_note_cap(manager)
+    note_chars = len(note)
+
+    # ── The refusal ladder — ONE table, ONE call shape ────────────────────
+    # Each row is (code, guard, message). The FIRST row whose guard fires
+    # IS the refusal; the evaluation order is the row order. The five
+    # code names are the census (pinned at 14) and are UNCHANGED.
+    #
+    # ORDER / MASKING (documented, not reordered — the census re-pin rides
+    # a later lane): ``note_over_cap`` is evaluated BEFORE
+    # ``compact_disabled`` and ``compact_rate_limited``. A note that is
+    # BOTH over-cap AND (disabled / rate-limited) is reported as
+    # ``note_over_cap`` — the remediation advice names the cap, not the
+    # disabled/rate-limit state. Every refusal is still TRUE and TYPED;
+    # only the surfaced cause is the one that fires first. Reordering is
+    # deferred: the census and the refusal tests ride the later lane.
+    # The carrier state is read LAZILY (only the rate-limit row and the
+    # arm need it), so an early refusal never touches the DB.
+    repo = _instance_repository(manager)
+    state_box: dict[str, Any] = {}
+
+    def _state():
+        if "value" not in state_box:
+            state_box["value"] = read_compact_note_state(repo, instance_id)
+        return state_box["value"]
+
+    remaining_box: dict[str, int] = {}
+
+    def _remaining() -> int:
+        if "value" not in remaining_box:
+            remaining_box["value"] = _rate_limit_remaining_seconds(
+                _state().last_applied_at
+            )
+        return remaining_box["value"]
+
+    from ..constants import DELIBERATE_COMPACT_RATE_LIMIT_S
+
+    ladder: tuple[tuple[str, Callable[[], bool], Callable[[], str]], ...] = (
+        (
+            CODE_NOTE_REQUIRES_COMPACT,
+            lambda: (not compact) and bool(note.strip()),
+            lambda: (
                 "a compact_note was supplied with compact=false — the note "
                 "is only meaningful together with compact=true; re-issue "
                 "the call with compact=true. Nothing was armed."
             ),
-            note=note,
-        )
-
-    # ── compact=true ─────────────────────────────────────────────────────────
-    if not note.strip():
-        return _compact_note_refusal(
-            manager,
-            instance_id,
-            agent_id,
-            code=CODE_NOTE_REQUIRED,
-            message=(
+        ),
+        (
+            CODE_NOTE_REQUIRED,
+            lambda: compact and not note.strip(),
+            lambda: (
                 "a compact note is REQUIRED when compact=true — the note is "
                 "the point, not an option; supply compact_note with "
                 "non-empty text. Nothing was armed."
             ),
-            note=note,
-        )
-
-    cap = _compact_note_cap(manager)
-    note_chars = len(note)
-    if note_chars > cap:
-        return _compact_note_refusal(
-            manager,
-            instance_id,
-            agent_id,
-            code=CODE_NOTE_OVER_CAP,
-            message=(
+        ),
+        (
+            CODE_NOTE_OVER_CAP,
+            lambda: note_chars > cap,
+            lambda: (
                 f"the compact note is {note_chars} characters, over the "
                 f"{cap}-character cap — the note is NEVER truncated; "
                 f"shorten it and re-arm. Nothing was armed."
             ),
-            note=note,
-        )
-
-    if not _compaction_enabled(manager):
-        return _compact_note_refusal(
-            manager,
-            instance_id,
-            agent_id,
-            code=CODE_COMPACT_DISABLED,
-            message=(
+        ),
+        (
+            CODE_COMPACT_DISABLED,
+            lambda: not _compaction_enabled(manager),
+            lambda: (
                 "compaction is DISABLED in this deployment — arming a note "
                 "that can never land would strand it; enable compaction "
                 "(CompactionConfig.enabled) and re-arm. Nothing was armed."
             ),
-            note=note,
-        )
-
-    repo = _instance_repository(manager)
-    state = read_compact_note_state(repo, instance_id)
-
-    remaining = _rate_limit_remaining_seconds(state.last_applied_at)
-    if remaining > 0:
-        from ..constants import DELIBERATE_COMPACT_RATE_LIMIT_S
-
-        return _compact_note_refusal(
-            manager,
-            instance_id,
-            agent_id,
-            code=CODE_COMPACT_RATE_LIMITED,
-            message=(
+        ),
+        (
+            CODE_COMPACT_RATE_LIMITED,
+            lambda: _remaining() > 0,
+            lambda: (
                 f"the deliberate-compact rate limit is in force — "
-                f"{remaining}s remaining before another note-guided "
+                f"{_remaining()}s remaining before another note-guided "
                 f"compaction may be armed (the limit is "
                 f"{DELIBERATE_COMPACT_RATE_LIMIT_S}s). Nothing was armed; "
                 f"try again after the window."
             ),
-            note=note,
-        )
+        ),
+    )
+    for code, guard, message in ladder:
+        if guard():
+            return _compact_note_refusal(
+                instance_id,
+                agent_id,
+                code=code,
+                message=message(),
+                note=note,
+            )
+
+    state = _state()
 
     # ── ARM ──────────────────────────────────────────────────────────────────
     # A second note while one is armed REPLACES the first WITH
@@ -420,7 +457,7 @@ def _handle_compact_note(
     if superseded_previous:
         status_line = DEFERRED_STATE_TEXT.get(state.deferred, ARMED_PENDING_APPEND)
 
-    if repo is None or not arm_compact_note(repo, instance_id, note):
+    if repo is None or not arm_compact_note(repo, instance_id, note, max_chars=cap):
         # The arm could NOT be written — never claim an arm that does not
         # exist. This is an INTERNAL failure (not a design outcome), so it
         # rides the single FAILED code.
@@ -605,10 +642,11 @@ def create_prompt_reload_tools(
             Field(
                 default="",
                 description=(
-                    "Your own distillation of this conversation — it rides "
-                    "verbatim into the compacted context, at the GLOBAL "
-                    "OVERVIEW slot. Max 12000 characters (over the cap is "
-                    "refused, never truncated). Optional; default empty."
+                    "Your own distillation of this conversation — it is the "
+                    "REQUEST your own model executes on its next invoke "
+                    "(it is NOT rendered into the compaction doc). Max the "
+                    "configured cap (default 12000 characters; over the cap "
+                    "is refused, never truncated). Optional; default empty."
                 ),
             ),
         ]
@@ -747,8 +785,16 @@ Compact notes (compact + compact_note)
   compaction happens on that invoke, not at a quiescent gate.
 - The note is REQUIRED when compact=true, and a note supplied with
   compact=false is refused (ignoring it would be dishonest).
-- The note is capped (12000 characters). An over-cap note is REFUSED
-  with the length and the cap — it is NEVER silently truncated.
+- You can ALSO be refused for reasons that are not about the note: if
+  compaction is DISABLED in this deployment (arming a note that can
+  never land would strand it), or if the 900-second deliberate-compact
+  rate limit is still in force from an earlier note-guided compaction
+  (the refusal echoes the seconds remaining). Both are typed refusals,
+  and neither arms anything.
+- The note is capped at the CONFIGURED cap (default 12000 characters;
+  the operator may raise or lower it — see the cap knob in the refusal
+  list below). An over-cap note is REFUSED with the length and the cap —
+  it is NEVER silently truncated.
 - ARMED is not COMPACTED. The receipt reports what actually happened:
   path=append, and outcome=compacted ONLY after the swap landed and
   persisted; otherwise empty_reply, tool_calls_reply, refused_reply or

@@ -1599,6 +1599,13 @@ _PROACTIVE_FALSE_BOOLS: frozenset[str] = frozenset({"0", "false", "no", "off"})
 _PROACTIVE_TRUE_BOOLS: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 
 
+#: The documented default for ``compaction.compact_note_max_chars``
+#: (architect §G — the architect's cap is AUTHORITATIVE). It lives HERE,
+#: above the class, so the Field default, the resolver and the prose can
+#: all name the SAME number instead of restating it.
+DEFAULT_COMPACT_NOTE_MAX_CHARS: int = 12000
+
+
 class CompactionConfig(BaseSettings):
     """Context compaction configuration."""
 
@@ -1661,18 +1668,21 @@ class CompactionConfig(BaseSettings):
     summarization_chunk_threshold: float = Field(default=0.60, description="Fraction of context window above which summarization uses chunking")
 
     # ── Compact-note lane (prompt_reload(compact, compact_note)) ──────────────
-    # The TWO knobs the lane's scope fence allows (architect §G / §C SCOPE 5).
-    # The third relevant number — the 900s deliberate-compact rate limit — is
-    # a HARDCODED module constant (``daemon/constants.py``), NOT a knob.
+    # The ONE knob the lane's scope fence allows (architect §G / §C SCOPE 5):
+    # ``compact_note_max_chars``. The other relevant number — the 900s
+    # deliberate-compact rate limit — is a HARDCODED module constant
+    # (``daemon/constants.py``), NOT a knob.
     #
     # B6 (env precedence): pydantic-settings gives INIT KWARGS priority over
     # env vars, so a YAML value would silently defeat an operator's env
-    # override. Both knobs are therefore resolved EXPLICITLY in ``load_config``
+    # override. The knob is therefore resolved EXPLICITLY in ``load_config``
     # (env-first) — the ``_resolve_compaction_model`` / ``_resolve_proactive_enabled``
     # pattern — and the resolved value is passed as an init kwarg so
-    # pydantic-settings never re-reads the env itself.
+    # pydantic-settings does not re-read the env on the ``load_config`` path
+    # (a DIRECTLY constructed ``CompactionConfig()`` — e.g. the one in
+    # ``daemon/loader.py`` — DOES honour the env alias).
     compact_note_max_chars: int = Field(
-        default=12000,
+        default=DEFAULT_COMPACT_NOTE_MAX_CHARS,
         ge=1,
         validation_alias=AliasChoices(
             "compact_note_max_chars",
@@ -1681,8 +1691,9 @@ class CompactionConfig(BaseSettings):
         description=(
             "Maximum length (characters) of a compact note accepted by "
             "``prompt_reload(compact=True, compact_note=...)``. Default "
-            "12000 (architect §G — AUTHORITATIVE). A note over the cap is "
-            "REFUSED (``prompt_reload_note_over_cap``) — NEVER silently "
+            f"{DEFAULT_COMPACT_NOTE_MAX_CHARS} (architect §G — "
+            "AUTHORITATIVE). A note over the cap is REFUSED "
+            "(``prompt_reload_note_over_cap``) — NEVER silently "
             "truncated. The boundary is INCLUSIVE. Env: "
             "COMPACTION_COMPACT_NOTE_MAX_CHARS."
         ),
@@ -8010,11 +8021,6 @@ def _resolve_proactive_enabled(
 # would silently defeat an operator's env override. The knob is therefore
 # resolved EXPLICITLY, ENV-FIRST, and the resolved value is handed back as
 # an init kwarg.
-
-
-#: The documented default for ``compaction.compact_note_max_chars``
-#: (architect §G — the architect's cap is AUTHORITATIVE).
-DEFAULT_COMPACT_NOTE_MAX_CHARS: int = 12000
 
 
 def _resolve_compact_note_max_chars(
