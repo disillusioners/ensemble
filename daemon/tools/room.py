@@ -351,7 +351,7 @@ def create_room_tools(
     agent_id: str = "",
     agent_tag: str | None = None,
 ) -> list:
-    """Create the four room tools for one instance/agent.
+    """Create the five agent group-chat room tools for one instance/agent.
 
     Args:
         manager: The instance manager — supplies the room service
