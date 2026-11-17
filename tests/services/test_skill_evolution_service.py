@@ -1921,6 +1921,163 @@ def assert_full_file_set_acceptance(runs: Any) -> None:
 class TestCheckABTestResolution:
     """Tests for ``SkillEvolutionService.check_ab_test_resolution``."""
 
+
+class TestForcedWinnerResolvedAtGuard:
+    """Round-2 review (2026-11-17): the forced-winner Path 0 refuses an
+    ALREADY-RESOLVED pair.
+
+    The loser RETAINS its ``ab_test_group`` after a resolution
+    (``SkillRepository.deactivate`` writes only is_active + status) and
+    the pair row still names both variants — so the loser was accepted
+    as ``winner_id`` and a second forced resolve silently INVERTED the
+    earlier decision. The guard fires before any winner decision and
+    before any mutation. The normal auto-resolution path (no forced
+    winner) is untouched.
+    """
+
+    def _resolved_pair(self, skill_repo, ab_test_repo, project_id):
+        """A pair that is ALREADY resolved, with the loser keeping its
+        group (the terminal-state spec's shape)."""
+        import uuid as _uuid
+
+        loser = _make_skill(skill_repo, project_id, "r2-loser")
+        winner = _make_skill(skill_repo, project_id, "r2-winner")
+        group = str(_uuid.uuid4())
+        for row in (loser, winner):
+            skill_repo.update(
+                row.id, ab_test_group=group, status="ab_testing"
+            )
+        ab_test_repo.create_ab_test(group, loser.id, winner.id)
+        for _ in range(12):
+            ab_test_repo.increment_comparison(group)
+        # Resolve it: winner crowned, loser deactivated with its group
+        # RETAINED (the pinned terminal-state shape).
+        skill_repo.deactivate(loser.id)
+        skill_repo.update(
+            winner.id, ab_test_group=None, status="active"
+        )
+        ab_test_repo.resolve(group, winner.id)
+        return group, loser, winner
+
+    @pytest.mark.asyncio
+    async def test_forced_winner_on_a_resolved_pair_is_refused(
+        self, evolution_service, skill_repo, ab_test_repo,
+        fake_metrics_service, project_id,
+    ):
+        """A second forced resolve on the resolved pair's LOSER id is
+        REFUSED — and NOTHING mutates."""
+        group, loser, winner = self._resolved_pair(
+            skill_repo, ab_test_repo, project_id
+        )
+        fake_metrics_service.get_ab_comparison_stats.return_value = {
+            "skill_id_a": loser.id,
+            "skill_id_b": winner.id,
+            "completion_rate_a": 0.9,
+            "completion_rate_b": 0.4,
+            "difference": 0.5,
+            "comparisons": 12,
+            "extension_count": 0,
+            "ready_to_resolve": True,
+            "needs_more_data": False,
+        }
+        before_pair = ab_test_repo.get_by_group(group)
+        before_resolved_at = before_pair.resolved_at
+        before_winner_id = before_pair.winner_skill_id
+
+        # The LOSER's id is accepted as a variant by the pre-guard
+        # validation (it is still in the pair row) — the resolved_at
+        # guard is what refuses it.
+        with pytest.raises(ValueError, match="already resolved"):
+            await evolution_service.check_ab_test_resolution(
+                group, winner_id=loser.id
+            )
+
+        # NO mutation: the pair row, the loser and the winner are all
+        # exactly as they were.
+        after_pair = ab_test_repo.get_by_group(group)
+        assert after_pair.resolved_at == before_resolved_at
+        assert after_pair.winner_skill_id == before_winner_id
+        after_loser = skill_repo.get(loser.id)
+        assert after_loser.is_active is False
+        assert after_loser.status == "inactive"
+        assert after_loser.ab_test_group == group  # retained
+        after_winner = skill_repo.get(winner.id)
+        assert after_winner.is_active is True
+        assert after_winner.status == "active"
+        assert after_winner.ab_test_group is None
+
+    @pytest.mark.asyncio
+    async def test_normal_auto_resolution_on_an_unresolved_pair_still_resolves(
+        self, evolution_service, skill_repo, ab_test_repo,
+        fake_metrics_service, project_id,
+    ):
+        """The guard does NOT over-fire: the normal auto-resolution path
+        (no forced winner) on an UNRESOLVED, traffic-bearing pair still
+        resolves exactly as before."""
+        old = _make_skill(skill_repo, project_id, "r2-old")
+        new = _make_skill(skill_repo, project_id, "r2-new")
+        group = "g-r2-auto"
+        ab_test_repo.create_ab_test(group, old.id, new.id)
+        # Traffic on the PERSISTED row (the source of truth).
+        for _ in range(12):
+            ab_test_repo.increment_comparison(group)
+        fake_metrics_service.get_ab_comparison_stats.return_value = {
+            "skill_id_a": old.id,
+            "skill_id_b": new.id,
+            "completion_rate_a": 0.4,
+            "completion_rate_b": 0.9,
+            "difference": 0.5,
+            "comparisons": 12,
+            "extension_count": 0,
+            "ready_to_resolve": True,
+            "needs_more_data": False,
+        }
+
+        result = await evolution_service.check_ab_test_resolution(group)
+
+        assert result["resolved"] is True
+        assert result["reason"] == "threshold_met"
+        assert result["winner_id"] == new.id
+        assert result["loser_id"] == old.id
+        pair = ab_test_repo.get_by_group(group)
+        assert pair.resolved_at is not None
+        assert pair.winner_skill_id == new.id
+
+    @pytest.mark.asyncio
+    async def test_forced_winner_on_an_unresolved_pair_still_resolves(
+        self, evolution_service, skill_repo, ab_test_repo,
+        fake_metrics_service, project_id,
+    ):
+        """The forced-winner path on an UNRESOLVED pair is untouched by
+        the guard (it still force-resolves at/above sample size)."""
+        old = _make_skill(skill_repo, project_id, "r2-f-old")
+        new = _make_skill(skill_repo, project_id, "r2-f-new")
+        group = "g-r2-forced"
+        ab_test_repo.create_ab_test(group, old.id, new.id)
+        for _ in range(12):
+            ab_test_repo.increment_comparison(group)
+        fake_metrics_service.get_ab_comparison_stats.return_value = {
+            "skill_id_a": old.id,
+            "skill_id_b": new.id,
+            "completion_rate_a": 0.4,
+            "completion_rate_b": 0.9,
+            "difference": 0.5,
+            "comparisons": 12,
+            "extension_count": 0,
+            "ready_to_resolve": True,
+            "needs_more_data": False,
+        }
+
+        result = await evolution_service.check_ab_test_resolution(
+            group, winner_id=new.id
+        )
+
+        assert result["resolved"] is True
+        assert result["reason"] == "forced_winner"
+        assert result["winner_id"] == new.id
+        assert ab_test_repo.get_by_group(group).winner_skill_id == new.id
+
+
     async def test_ab_resolution_not_enough_comparisons(
         self, evolution_service, skill_repo, ab_test_repo,
         fake_metrics_service, project_id,

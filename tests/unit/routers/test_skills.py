@@ -1683,6 +1683,43 @@ class TestSanctionedResolveRoute:
         assert called["winner_skill_id"] == "skill-old"
         assert called["apply"] is True
 
+    def test_non_sanctioned_forced_winner_on_a_resolved_pair_is_400(
+        self, skill_app_with_mock_services
+    ):
+        """Round-2 review (2026-11-17): the NON-sanctioned forced-winner
+        branch surfaces the service-level resolved_at refusal as a sane
+        HTTP error (400 — the endpoint maps the service's ValueError) —
+        the service-level refusal stands alone; this only pins the
+        surface."""
+        client = skill_app_with_mock_services["client"]
+        evolution = skill_app_with_mock_services["evolution"]
+        evolution.get_skill_metrics = AsyncMock(
+            return_value={
+                "skill_id": "skill-abc",
+                "found": True,
+                "skill": _skill_dict(),
+                "stats": {},
+                "usage_recent_count": 0,
+                "ab_test": {
+                    "ab_test_group": "group-resolved",
+                    "comparisons": 12,
+                    "extension_count": 0,
+                    "resolved_at": "2026-11-17T00:00:00+00:00",
+                },
+            }
+        )
+        evolution.check_ab_test_resolution = AsyncMock(
+            side_effect=ValueError(
+                "ab_test_group 'group-resolved' is already resolved"
+            )
+        )
+        response = client.post(
+            "/api/skills/skill-abc/ab-test/resolve",
+            params={"winner_id": "skill-abc"},
+        )
+        assert response.status_code == 400
+        assert "already resolved" in response.json()["detail"]["error"]
+
     def test_sanctioned_refuses_an_already_resolved_pair(
         self, skill_app_with_mock_services, monkeypatch
     ):

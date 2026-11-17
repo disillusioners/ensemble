@@ -1837,6 +1837,25 @@ class SkillEvolutionService:
         # side effects as Paths 2 / 3 so the persisted state
         # matches the auto-resolution outcome.
         if winner_id is not None:
+            # Round-2 review (2026-11-17): resolved_at parity guard —
+            # the SAME semantics as the sanctioned resolver's guard
+            # (``resolve_ab_test_sanctioned``): a pair that is
+            # ALREADY RESOLVED must never be forced to a winner. The
+            # loser RETAINS its ``ab_test_group`` after a resolution
+            # (``SkillRepository.deactivate`` writes only is_active +
+            # status), and ``get_ab_comparison_stats`` returns the pair
+            # row's variant ids — so the loser is accepted as
+            # ``winner_id`` and a second forced resolve silently
+            # INVERTED the earlier decision. The guard fires BEFORE
+            # any winner decision and before any mutation.
+            #
+            # Scope: the FORCED-WINNER path only. The normal
+            # auto-resolution path (no ``winner_id``) is untouched —
+            # behaviour there is exactly as before.
+            if getattr(ab_test, "resolved_at", None):
+                raise ValueError(
+                    f"ab_test_group {ab_test_group!r} is already resolved"
+                )
             skill_id_a = stats.get("skill_id_a")
             skill_id_b = stats.get("skill_id_b")
             if winner_id not in (skill_id_a, skill_id_b):
