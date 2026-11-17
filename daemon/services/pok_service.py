@@ -100,7 +100,8 @@ POK_SLUG_MAX_CHARS = 44
 #: derived per-entry render ceiling (§4.5 bounded arithmetic).
 POK_ENTRY_RENDER_MAX_CHARS = 332
 #: refuse-never-evict active cap — PER PROJECT, not per audience.
-POK_ACTIVE_CAP_PER_PROJECT = 256
+#: Raised to the current value by the 2026-11-17 storage-cap directive.
+POK_ACTIVE_CAP_PER_PROJECT = 512
 #: pin admission cap — PER PROJECT (pins render in every audience view
 #: that can see the entry).
 POK_PIN_CAP_PER_PROJECT = 2

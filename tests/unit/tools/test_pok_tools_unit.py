@@ -117,7 +117,10 @@ class TestRegistrationSurface:
         description = tools[0].description or ""
         assert "<active_cap>" not in description
         assert f"at {POK_ACTIVE_CAP_PER_PROJECT} active" in description
+        # Negative guards against a BAKED literal — keep every retired
+        # value pinned here (64 = pre-2026-11-10, 256 = the pre-512 cap).
         assert "64 active entries" not in description
+        assert "256 active entries" not in description
 
         # Discriminating: the description must READ from the constant
         # at build time, not bake a hardcoded literal.
