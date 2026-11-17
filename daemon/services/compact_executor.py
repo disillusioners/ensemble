@@ -4,31 +4,17 @@ Phase 1 / WS-2 (architect §2, §4, §6): the executor is the
 ``/compact`` handler registered into the
 :class:`CommandDispatcher`. It drives the existing
 :class:`daemon.compaction.ContextCompactor` engine — force-bypasses
-the THRESHOLD ONLY. Phase 2 of the never-blocked
+the THRESHOLD ONLY (dedup + min-messages still apply inside the
+engine — WS-2.1 narrowed). Phase 2 of the never-blocked
 commission (C1) added a budget predicate at the engine's skip
-sites: the engine returns the pre-commission stamp-only
+sites: the engine now returns the pre-commission stamp-only
 no-op (``replacement_messages=[]``, ``compaction_type=
 "skipped_injections_dominate"`` or ``"skipped_below_min_messages"``)
 on under-budget + not-force skip conditions, and falls through
 to the 50%-tail last-effort floor only on over-budget OR
-force=True.
-
-**MEASURED ``force`` SEMANTICS (corrected — architect §D.2(iii)):**
-the clean skip requires ``not force AND not over_budget``;
-``force=True`` OR over-budget falls through to the 50%-tail
-last-effort floor (``_last_effort_tail_truncation``), which DROPS
-HALF THE VERBATIM TAIL and produces NO doc. ``force`` does NOT
-bypass the min-messages floor — it OPTS INTO the floor. (The
-earlier wording here — "Under force, the engine still honors
-min-messages (WS-2.1)" — was the misleading claim the compact-note
-lane's below-floor hole exploited; it is corrected here.)
-
-**COMPACT-NOTE LANE (architect §D.2(ii)):** an ARMED note changes
-the executor's engine call: the executor passes ``force=False``
-(NEVER ``force=True`` on the armed path) and threads the note into
-the context so it renders in the GLOBAL OVERVIEW region. An
-UNARMED ``/compact`` keeps ``force=True`` byte-identically.
-
+force=True. Under force, the engine still honors min-messages
+(WS-2.1); force does NOT bypass the budget predicate — it
+opts INTO the floor rather than bypassing it.
 Writes the result back to the LangGraph checkpoint via the
 proactive-path recipe (``instance_messaging.py`` ~:1190-1202,
 D3 sentinel single-write + D12 ``compacted_at`` stamp).
@@ -279,14 +265,6 @@ _NOOP_REASON_INJECTIONS_DOMINATE = "injections_dominate"
 _ENGINE_SKIPPED_TYPES_TO_NOOP_REASON: dict[str, str] = {
     "skipped_injections_dominate": _NOOP_REASON_INJECTIONS_DOMINATE,
     "skipped_below_min_messages": _NOOP_REASON_TOO_FEW_MESSAGES,
-    # Compact-note lane (architect §D.2(iv)) — the ARMED-aware floor
-    # predicate's CLEAN SKIP. It IS a below-floor skip (the arm PERSISTS
-    # and fires when the floor is crossed) → the same user-facing noop
-    # reason. The completeness guard in
-    # ``tests/unit/services/test_compact_executor.py`` requires EVERY
-    # engine-emitted ``skipped_*`` type to be mapped here — the engine
-    # and this table can never drift.
-    "skipped_below_min_messages_armed": _NOOP_REASON_TOO_FEW_MESSAGES,
 }
 
 _FAILURE_KIND_TIMEOUT = "timeout"
@@ -1218,51 +1196,17 @@ async def execute_compact(
         try:
             # 9. Build CompactionContext + call compact_state(force=True).
             llm_cfg = compactor.llm_config_with_headers or {}
-            # MEASURED ``force`` SEMANTICS (corrected — architect
-            # §D.2(iii)): the engine handles dedup + min-messages
-            # internally. The CLEAN SKIP requires ``not force AND not
-            # over_budget``; ``force=True`` OR over-budget falls through
-            # to the 50%-tail last-effort floor (which drops half the
-            # verbatim tail and produces NO doc). ``force`` OPTS INTO
-            # the floor — it does NOT bypass it. On the ARMED note path
-            # the engine is called with ``force=False`` and the
-            # engine's ARMED-AWARE floor predicate
-            # (``skipped_below_min_messages_armed``) takes the clean
-            # skip instead.
-            # The executor's pre-checks above only bypass the threshold
-            # (which the engine also honors).
-            #
-            # COMPACT-NOTE LANE (architect §D.2(ii)) — the ARMED note
-            # changes TWO things here: the executor calls the engine
-            # with ``force=False`` (NEVER ``force=True`` on the armed
-            # path — ``force=True`` below the minimum-messages floor
-            # FALLS THROUGH to the 50%-tail last-effort truncation,
-            # which drops half the verbatim tail and produces NO doc),
-            # and the note rides in the context so it renders in the
-            # GLOBAL region. An UNARMED ``/compact`` keeps
-            # ``force=True`` byte-identically.
-            #
+            # The engine handles dedup + min-messages internally
+            # (those checks still apply under force — WS-2.1
+            # narrowed). The executor's pre-checks above only bypass
+            # the threshold (which the engine also honors — the
+            # bypass lives in the engine's force flag).
             # F1 fix (2026-09-01) — pre-stamp the first-appearance
             # ``{msg_id: iso_ts}`` map so the SECTION DETAIL
             # conversation-time clause renders in the doc (architect
             # §4). F2 fix (2026-09-01) — pass ``instance_id`` so the
             # doc id is ``compaction-global-{iid}-{seq}`` (not
             # ``compaction-global--{seq}``) and seq is per-instance.
-            from .prompt_refresh import (
-                compact_note_sha256_12,
-                read_compact_note_state,
-            )
-
-            _compact_note_state = read_compact_note_state(
-                getattr(manager, "_instance_repository", None), instance_id
-            )
-            compact_note = (
-                _compact_note_state.note if _compact_note_state.armed else ""
-            )
-            compact_note_sha12 = (
-                _compact_note_state.sha256_12
-                or compact_note_sha256_12(compact_note)
-            )
             ctx = CompactionContext(
                 messages=messages,
                 system_prompt_tokens=system_prompt_tokens,
@@ -1272,11 +1216,8 @@ async def execute_compact(
                 last_compacted_at=last_compacted_at,
                 instance_id=instance_id,
                 msg_timestamps=_extract_msg_timestamps(messages),
-                compact_note=compact_note,
             )
-            result = await compactor.compact_state(
-                ctx, force=not bool(compact_note)
-            )
+            result = await compactor.compact_state(ctx, force=True)
             if result is None:
                 # Engine returned None — "can't compact" path. This
                 # is NOT a below-floor noop (different semantics —
@@ -1351,25 +1292,6 @@ async def execute_compact(
                     instance_id=instance_id,
                     result=result,
                 )
-
-                # Compact-note lane (T4) — settle the ARMED note AFTER
-                # the compaction record has been persisted (two stores, a
-                # persist-then-delete crash window: at-most-once in steady
-                # state, at-least-once re-application inside the window).
-                # A doc-less outcome leaves the arm ARMED with the
-                # matching deferred discriminator recorded.
-                if compact_note:
-                    from .prompt_refresh import (
-                        settle_compact_note_arm as _settle_note,
-                    )
-
-                    _settle_note(
-                        getattr(manager, "_instance_repository", None),
-                        instance_id,
-                        note_sha12=compact_note_sha12,
-                        result=result,
-                        persisted=True,
-                    )
 
                 # 11. Map engine result → executor outcome via the
                 # dedicated engine→wire mapping function (approver

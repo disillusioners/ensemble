@@ -23,7 +23,6 @@ Compaction Strategies:
 
 import asyncio
 import copy
-import hashlib
 import logging
 import time
 import uuid
@@ -790,7 +789,6 @@ def _apply_ceiling_rule(
     sections: list[dict],
     global_overview: str | None,
     context_window: int,
-    note: str = "",
 ) -> tuple[list[dict], str | None, int]:
     """Apply architect §6.4 ceiling rule.
 
@@ -799,28 +797,16 @@ def _apply_ceiling_rule(
     degrade: GLOBAL + ARCHIVED line, sections dropped to metadata only
     (start/end indices, no body).
 
-    Compact-note lane (architect §D "Budget policy"): when a NOTE is
-    consumed it occupies the GLOBAL region (the merged overview / the
-    merge-failure placeholder are NOT rendered), so the numerator counts
-    the NOTE — the same region, counted once. The note is a
-    never-condensed class: it is NEVER a condensation candidate, and it
-    is NEVER render-truncated. **With no note the computation is
-    bit-identical** (the estimate is SKIPPED entirely, not
-    estimated-as-zero).
-
     Returns:
         ``(condensed_sections, archived_line_or_none, archived_count)``
         where ``archived_line_or_none`` is the literal ARCHIVED-line
         text to embed in the doc, ``None`` if ceiling was respected.
     """
     cap_tokens = int(context_window * COMPACTION_DOC_CEILING_FRACTION)
-    # The GLOBAL region's content: the note when one is consumed, else
-    # the merged overview (or the merge-failure placeholder).
-    global_part = note if note else (global_overview or GLOBAL_DOC_PLACEHOLDER_GLOBAL)
     # Approximate via estimate_messages_tokens (the loader's tiktoken
     # path; cheap and bounded). Cap is in TOKENS, not chars.
     current_tokens = estimate_messages_tokens(
-        [SystemMessage(content=global_part)]
+        [SystemMessage(content=global_overview or GLOBAL_DOC_PLACEHOLDER_GLOBAL)]
     ) + sum(
         estimate_messages_tokens([SystemMessage(content=s["body"])])
         for s in sections
@@ -846,7 +832,7 @@ def _apply_ceiling_rule(
         }
         archived += 1
         current_tokens = estimate_messages_tokens(
-            [SystemMessage(content=global_part)]
+            [SystemMessage(content=global_overview or GLOBAL_DOC_PLACEHOLDER_GLOBAL)]
         ) + sum(
             estimate_messages_tokens([SystemMessage(content=s["body"])])
             for s in condensed
@@ -885,16 +871,6 @@ def _format_section_header(
     return header
 
 
-def _compact_note_sha8(note: str) -> str:
-    """The content-free digest prefix of a compact note (sha256, 8 hex).
-
-    Used by the doc envelope's additive ``note_sha8=`` marker (architect
-    §H signal 1). LENGTH + DIGEST ONLY — the note body never enters a
-    log or an envelope field.
-    """
-    return hashlib.sha256(note.encode("utf-8")).hexdigest()[:8]
-
-
 def build_compaction_doc(
     *,
     instance_id: str,
@@ -911,7 +887,6 @@ def build_compaction_doc(
     msg_timestamps: dict | None = None,
     context_window: int | None = None,
     previous_overview: str | None = None,  # pass-2 seed (architect §4)
-    compact_note: str = "",  # the authored note (compact-note lane)
 ) -> SystemMessage:
     """Build the single ``compaction-global-{iid}-{seq}`` doc.
 
@@ -969,15 +944,6 @@ def build_compaction_doc(
             GLOBAL as a seed for cross-pass convergence
             (architect §4 — "the global frame converges across
             passes instead of being re-derived").
-        compact_note: The AUTHORED note (the compact-note lane). When
-            non-empty it renders VERBATIM as the FIRST body of the
-            GLOBAL OVERVIEW region and REPLACES the three-way chain
-            (the merged text / the truncation arm / the merge-failure
-            placeholder). It is NEVER render-truncated (NOT subject to
-            ``GLOBAL_OVERVIEW_TOKEN_CAP``) and the ``previous_overview``
-            seed is SUPPRESSED while it is present (after a note-guided
-            compaction the prior doc's GLOBAL IS the note, so re-emitting
-            it would duplicate the note uncapped above the new one).
 
     Returns:
         A single ``SystemMessage`` with id
@@ -1008,15 +974,6 @@ def build_compaction_doc(
     if dropped_spans:
         header_parts.append(f"dropped without summary: {dropped_clause}")
     header_parts.append(f"preserved verbatim: {preserved_count} most recent messages (below this notice)")
-    # Compact-note lane (architect §H signal 1) — the CONTENT-FREE
-    # in-context outcome marker. Provenance rides the ENVELOPE, not the
-    # GLOBAL slot, so the slot stays byte-equal to the note and the
-    # verbatim contract holds exactly. Length + digest prefix only —
-    # never the note body.
-    if compact_note:
-        header_parts.append("note_guided=true")
-        header_parts.append(f"note_sha8={_compact_note_sha8(compact_note)}")
-        header_parts.append(f"note_chars={len(compact_note)}")
     header_parts.append(f"self_id=compaction-global-{instance_id}-{seq}]")
     envelope = " | ".join(header_parts) + "\n"
 
@@ -1026,9 +983,9 @@ def build_compaction_doc(
     # §6.3 — "absent-on-failure" of the bounded best-effort).
     if context_window is not None and n_sections > 0:
         # Pass 1 of the ceiling rule: condense OLDEST sections if over
-        # cap, never the GLOBAL (and never the note).
+        # cap, never the GLOBAL.
         sections, archived_line, archived_count = _apply_ceiling_rule(
-            sections, global_overview, context_window, note=compact_note
+            sections, global_overview, context_window
         )
     else:
         archived_line = None
@@ -1036,60 +993,43 @@ def build_compaction_doc(
 
     body = envelope + "\n── GLOBAL OVERVIEW ──\n"
 
-    if compact_note:
-        # NOTE-FIRST GATE (architect §D / ES-4) — the FIRST arm of the
-        # GLOBAL OVERVIEW region. The note REPLACES the three-way chain:
-        # it IS the authoritative overview, so no other GLOBAL text may
-        # co-render with it. Co-rendering the "(overview unavailable …)"
-        # placeholder under an authoritative note would assert the
-        # absence of a summary that demonstrably exists (double text and
-        # a lie).
-        #
-        # The note is NEVER render-truncated — it is NOT subject to
-        # ``GLOBAL_OVERVIEW_TOKEN_CAP`` (the ONLY cap is the arm-time
-        # typed refusal). The ``previous_overview`` seed is SUPPRESSED
-        # here: after a note-guided compaction the prior doc's GLOBAL IS
-        # the note, and that line precedes the cap check (uncapped) — it
-        # would re-emit the OLD note verbatim above the new one.
-        body += f"{compact_note}\n"
-    else:
-        if previous_overview:
-            body += f"Previous overview: {previous_overview}\n\n"
-        if global_overview:
-            # W5 fix (2026-09-01) — enforce
-            # ``GLOBAL_OVERVIEW_TOKEN_CAP`` at doc assembly. Today
-            # the cap is prompt-soft only (the merge prompt says
-            # "keep under ~600 tokens"); an over-long GLOBAL text
-            # from a misbehaving model OR a multi-section partial
-            # path would blow the cap silently. Truncate to the
-            # cap when the body exceeds it, appending a
-            # ``[truncated — see SECTION DETAIL for arc-local
-            # detail]`` marker so the user knows the GLOBAL is
-            # not the full text.
-            global_tokens = estimate_messages_tokens(
-                [SystemMessage(content=global_overview)]
+    if previous_overview:
+        body += f"Previous overview: {previous_overview}\n\n"
+    if global_overview:
+        # W5 fix (2026-09-01) — enforce
+        # ``GLOBAL_OVERVIEW_TOKEN_CAP`` at doc assembly. Today
+        # the cap is prompt-soft only (the merge prompt says
+        # "keep under ~600 tokens"); an over-long GLOBAL text
+        # from a misbehaving model OR a multi-section partial
+        # path would blow the cap silently. Truncate to the
+        # cap when the body exceeds it, appending a
+        # ``[truncated — see SECTION DETAIL for arc-local
+        # detail]`` marker so the user knows the GLOBAL is
+        # not the full text.
+        global_tokens = estimate_messages_tokens(
+            [SystemMessage(content=global_overview)]
+        )
+        if global_tokens > GLOBAL_OVERVIEW_TOKEN_CAP:
+            truncated = _truncate_to_token_cap(
+                global_overview, GLOBAL_OVERVIEW_TOKEN_CAP
             )
-            if global_tokens > GLOBAL_OVERVIEW_TOKEN_CAP:
-                truncated = _truncate_to_token_cap(
-                    global_overview, GLOBAL_OVERVIEW_TOKEN_CAP
-                )
-                body += (
-                    f"{truncated}\n"
-                    f"[truncated — full GLOBAL overview text exceeded the "
-                    f"GLOBAL_OVERVIEW_TOKEN_CAP={GLOBAL_OVERVIEW_TOKEN_CAP}; "
-                    f"SECTION DETAIL below remains complete]\n"
-                )
-            else:
-                body += f"{global_overview}\n"
-        elif mode == "truncation":
-            # Architect §6.3 — bounded best-effort GLOBAL call failed or
-            # was skipped; the envelope already lists the dropped spans,
-            # so the doc has no body text here. The boundary line
-            # immediately follows.
-            pass
+            body += (
+                f"{truncated}\n"
+                f"[truncated — full GLOBAL overview text exceeded the "
+                f"GLOBAL_OVERVIEW_TOKEN_CAP={GLOBAL_OVERVIEW_TOKEN_CAP}; "
+                f"SECTION DETAIL below remains complete]\n"
+            )
         else:
-            # merge pass failed (W2-adjacent); placeholder.
-            body += f"{GLOBAL_DOC_PLACEHOLDER_GLOBAL}\n"
+            body += f"{global_overview}\n"
+    elif mode == "truncation":
+        # Architect §6.3 — bounded best-effort GLOBAL call failed or
+        # was skipped; the envelope already lists the dropped spans,
+        # so the doc has no body text here. The boundary line
+        # immediately follows.
+        pass
+    else:
+        # merge pass failed (W2-adjacent); placeholder.
+        body += f"{GLOBAL_DOC_PLACEHOLDER_GLOBAL}\n"
 
     if n_sections > 0:
         body += "\n── SECTION DETAIL ──\n"
@@ -1374,12 +1314,6 @@ class CompactionContext:
     # ``compact_state`` callers stamp it before invoking the doc
     # builder.
     msg_timestamps: dict | None = None
-    # Compact-note lane (architect §D / ES-1) — the AUTHORED note, when
-    # one is armed and consumed at this seam. It renders VERBATIM in the
-    # GLOBAL OVERVIEW region and REPLACES the merge pass (the
-    # ``_merge_summaries`` entry guard). Additive default ``""`` — the
-    # no-note path is byte-identical.
-    compact_note: str = ""
 
 
 @dataclass
@@ -3432,35 +3366,6 @@ class ContextCompactor:
                     * context.config.threshold
                 )
             )
-            # ARMED-AWARE FLOOR PREDICATE (architect §D.2(iv)) — NOTE-GATED.
-            #
-            # When a compact note is armed and the context is BELOW the
-            # floor, the engine takes the CLEAN SKIP — regardless of
-            # ``force`` / ``over_budget``. The pre-lane fall-through is
-            # ``force OR over_budget``, so an armed call with
-            # ``force=False`` still 50%-tail-truncates in the
-            # below-floor AND over-budget corner: half the verbatim tail
-            # is dropped, the note can never render there (the outcome
-            # produces NO doc), and the arm would be consumed by a
-            # doc-less outcome (false \"applied\" provenance). The clean
-            # skip closes the repeat-truncation spiral: the arm PERSISTS
-            # and fires when the floor is crossed.
-            #
-            # SKIPPED ENTIRELY WHEN UNARMED — the no-note path is
-            # byte-identical.
-            if getattr(context, "compact_note", ""):
-                logger.info(
-                    "[Compaction] skipping: %d selectable messages "
-                    "(minimum: %d, preserved_injected=%d); armed note — "
-                    "clean skip, the arm persists and no tail truncation "
-                    "occurs",
-                    len(selectable_messages),
-                    context.config.min_messages_before_compaction,
-                    len(hoisted_injected),
-                )
-                return anti_refire_skip(
-                    skip_reason="skipped_below_min_messages_armed"
-                )
             if not force and not over_budget:
                 # same rationale as the all-injected skip above.
                 return anti_refire_skip(
@@ -3509,23 +3414,7 @@ class ContextCompactor:
         # following the OVERRIDE window via ``_effective_model_name``.
         context_window = self._trigger_window(context)
         threshold_tokens = int(context_window * context.config.threshold)
-        # Compact-note lane (architect §H, gate mechanics 1) — an ARMED
-        # note FORCES a note-guided compaction at the next quiescent
-        # seam: the 80% threshold is BYPASSED. The gate measures SIZE;
-        # the note measures RELEVANCE (the Emperor's use case is true at
-        # 30% fill as at 90%). The forcing NEVER uses ``force=True``
-        # (that flag bypasses the dedup AND falls through to the
-        # 50%-tail last-effort floor below the minimum) — it is a
-        # NOTE-GATED bypass of the threshold check only.
-        #
-        # Mid-turn sites (T1/T2) NEVER read the arm, so their
-        # ``compact_note`` is empty and this check is byte-identical for
-        # them (and for every unarmed caller).
-        if (
-            not force
-            and not getattr(context, "compact_note", "")
-            and total_tokens <= threshold_tokens
-        ):
+        if not force and total_tokens <= threshold_tokens:
             logger.debug(
                 f"Skipping compaction: {total_tokens} tokens "
                 f"<= threshold {threshold_tokens}"
@@ -4474,28 +4363,6 @@ class ContextCompactor:
             ``False`` only when the merge call timed out / errored
             after the single retry.
         """
-        # ── NOTE-GUARDED ENTRY (architect §D.1 — the skip's SINGLE home)
-        # ──────────────────────────────────────────────────────────────────
-        # The FIRST STATEMENT of this function (before the empty-set and
-        # single-summary branches). A guard at the single CALLEE covers
-        # merge sites 1/2/3 AND every future call site BY CONSTRUCTION —
-        # site-enumeration gates are exactly the drift class D25 caught.
-        #
-        # When a compact note is consumed the merge pass is NOT RUN: the
-        # note occupies the GLOBAL region's authority, and the merge
-        # overview and the note must NEVER coexist in one doc.
-        #
-        # The return is the EXISTING failure-ladder shape ``("", False)``
-        # (A-3): the annotation is ``-> tuple[str, bool]`` and the
-        # documented ladder is "merge fail/timeout → ("", False)". A
-        # ``None`` first element would violate both (and would produce
-        # ``summaries=[None]`` at the chunked call site).
-        if getattr(context, "compact_note", ""):
-            logger.info(
-                "[Compaction] merge skipped: note-guided mode (instance=%s)",
-                (context.instance_id or "")[:8],
-            )
-            return "", False
         if not partial_summaries:
             return "", False
         if len(partial_summaries) == 1:
@@ -4861,7 +4728,6 @@ class ContextCompactor:
             context_window=context_window,
             previous_overview=previous_overview,
             msg_timestamps=msg_timestamps,
-            compact_note=context.compact_note,
         )
 
     @staticmethod
@@ -5020,7 +4886,6 @@ class ContextCompactor:
             context_window=context_window,
             previous_overview=previous_overview,
             msg_timestamps=msg_timestamps,
-            compact_note=context.compact_note,
         )
 
     async def _truncate_fallback(
@@ -5182,7 +5047,6 @@ class ContextCompactor:
             context_window=context_window,
             previous_overview=previous_overview,
             msg_timestamps=msg_timestamps,
-            compact_note=context.compact_note,
         )
         # 3. Flatten preserved tail (multimodal content → text,
         # original ids preserved). The caller re-attaches injected.

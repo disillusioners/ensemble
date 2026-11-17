@@ -501,88 +501,33 @@ def mark_compact_note_deferred(
     )
 
 
-#: The compaction outcomes that produce a DOC (architect §D.2(i)).
-#: ``_truncate_fallback``'s outcome (``"truncation"``) IS doc-producing
-#: — it emits a doc whose GLOBAL region renders the note.
-COMPACT_NOTE_DOC_PRODUCING_TYPES: frozenset[str] = frozenset(
-    {
-        "summarization",
-        "chunked_summarization",
-        "partial_summary",
-        "truncation",
-    }
-)
-
-#: The DOC-LESS outcomes — they never consume the arm (architect §D.2(i)).
-COMPACT_NOTE_DOC_LESS_TYPES: frozenset[str] = frozenset(
-    {
-        "emergency_truncation",
-        "tail_truncation_last_effort",
-    }
-)
-
-#: The outcome discriminator for a LANDED (doc-producing) compaction.
-COMPACT_NOTE_LANDED = "landed"
-
-
-def classify_compact_note_outcome(result: Any) -> str:
-    """Classify a seam outcome for an ARMED note.
-
-    Returns :data:`COMPACT_NOTE_LANDED` when the compaction produced a
-    DOC (the arm is consumed), otherwise the deferred discriminator
-    (``below_floor`` / ``no_doc`` / ``anti_refire``).
-
-    ``result is None`` means the engine declined to run — on the armed
-    path that is the 60s ANTI-REFIRE dedup window (the threshold check
-    is bypassed for an armed note), so the arm is deferred, never
-    dropped.
-    """
-    if result is None:
-        return DEFERRED_STATE_ANTI_REFIRE
-    compaction_type = str(getattr(result, "compaction_type", "") or "")
-    if compaction_type in COMPACT_NOTE_DOC_LESS_TYPES:
-        return DEFERRED_STATE_NO_DOC
-    if compaction_type in ("skipped_below_min_messages_armed", "skipped_below_min_messages"):
-        return DEFERRED_STATE_BELOW_FLOOR
-    if compaction_type in COMPACT_NOTE_DOC_PRODUCING_TYPES:
-        return COMPACT_NOTE_LANDED
-    return DEFERRED_STATE_NO_DOC
-
 
 def settle_compact_note_arm(
     repository: Any,
     instance_id: str,
     *,
     note_sha12: str,
-    result: Any,
-    persisted: bool,
+    outcome: str,
+    persisted: bool = True,
 ) -> str:
-    """Settle an ARMED note after a QUIESCENT seam.
+    """Settle an ARMED note after the APPEND outcome.
 
-    The consumption predicate (architect §D.2(i) + ES-7):
+    Re-purposed for the append path (architect v1.5 §2d/§2g): the arm is
+    consumed (cleared) ONLY when the swap landed — i.e. ``outcome ==
+    "compacted"`` AND ``persisted`` is True. Otherwise the arm PERSISTS
+    with the matching deferred discriminator recorded, so a crash before
+    the settle re-runs rather than half-applies (the receipt must never
+    say ``compacted`` before the swap lands).
 
-    * the arm is consumed ONLY on a DOC-PRODUCING outcome whose
-      replacement was actually WRITTEN (``persisted`` is ``True`` and
-      the replacement is non-empty) — the seam's bool alone cannot
-      distinguish a full write from the stamp-only anti-refire write;
-    * a doc-less outcome (emergency / tail truncation), a floor skip and
-      the anti-refire deferral all leave the arm ARMED, with the
-      matching deferred discriminator recorded.
-
-    Returns the outcome discriminator (``"landed"`` or the deferred
-    state).
+    ``outcome`` is one of the append path's outcome labels:
+    ``"compacted"`` / ``"deferred"`` / ``"append_failed"`` /
+    ``"empty_reply"`` (and the refusal labels at arm time).
     """
-    state = classify_compact_note_outcome(result)
-    if state != COMPACT_NOTE_LANDED:
-        mark_compact_note_deferred(repository, instance_id, state)
-        return state
-    if not persisted or not getattr(result, "replacement_messages", None):
-        # The doc was NOT written — the arm PERSISTS (at-least-once
-        # re-application at the next quiescent seam).
-        mark_compact_note_deferred(repository, instance_id, DEFERRED_STATE_NO_DOC)
-        return DEFERRED_STATE_NO_DOC
-    clear_compact_note_arm(repository, instance_id, sha256_12=note_sha12)
-    return COMPACT_NOTE_LANDED
+    if outcome == "compacted" and persisted:
+        clear_compact_note_arm(repository, instance_id, sha256_12=note_sha12)
+        return "landed"
+    mark_compact_note_deferred(repository, instance_id, DEFERRED_STATE_NO_DOC)
+    return DEFERRED_STATE_NO_DOC
 
 # ── Canonical disclosure literals (plan-overview §10, W5 — ONE literal
 # per bullet id; referenced BY ID everywhere else, never paraphrased) ────────
