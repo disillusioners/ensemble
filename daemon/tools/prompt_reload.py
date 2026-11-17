@@ -229,6 +229,7 @@ def _render_armed_receipt(
     superseded_previous: bool = False,
     previous_sha12: str = "",
     status_line: str | None = None,
+    partial_write: bool = False,
 ) -> str:
     """The ARMED receipt — what the agent actually sees at ARM TIME.
 
@@ -241,12 +242,19 @@ def _render_armed_receipt(
     / ``append_failed`` / ``empty_reply``) is reported after the swap
     lands — never here, and never as a success for work not done.
     """
-    from ..services.prompt_refresh import OUTCOME_ARMED
+    from ..services.prompt_refresh import (
+        OUTCOME_ARMED,
+        OUTCOME_ARMED_PARTIAL_WRITE,
+    )
 
+    # A PARTIAL WRITE is still ARMED (the carrier holds the note) — but
+    # the write REPORTED a failure, so the receipt says so rather than
+    # claiming a clean write.
+    outcome = OUTCOME_ARMED_PARTIAL_WRITE if partial_write else OUTCOME_ARMED
     lines: list[str] = [
-        f"prompt_reload {OUTCOME_ARMED} — compact note ARMED; the note is "
+        f"prompt_reload {outcome} — compact note ARMED; the note is "
         f"a REQUEST your model will execute on its next invoke.",
-        f"outcome={OUTCOME_ARMED}",
+        f"outcome={outcome}",
         f"note_chars={note_chars}",
         f"note_sha256={note_sha12}",
         f"cap={cap}",
@@ -262,6 +270,12 @@ def _render_armed_receipt(
         "CONTEXT NOT YET COMPACTED — the note is a REQUEST your model will "
         "execute on its next invoke; until then this note remains armed."
     )
+    if partial_write:
+        lines.append(
+            "PARTIAL WRITE — the carrier write reported a failure but the "
+            "arm IS present (verified by reading it back); the note is "
+            "armed and will be executed as usual."
+        )
     return "\n".join(lines)
 
 
@@ -368,6 +382,7 @@ def _handle_compact_note(
         CODE_NOTE_REQUIRED,
         DEFERRED_STATE_TEXT,
         OUTCOME_ARMED,
+        OUTCOME_ARMED_PARTIAL_WRITE,
         OUTCOME_REFUSED,
         arm_compact_note,
         compact_note_sha256_12,
@@ -484,27 +499,56 @@ def _handle_compact_note(
     if superseded_previous:
         status_line = DEFERRED_STATE_TEXT.get(state.deferred, ARMED_PENDING_APPEND)
 
-    if repo is None or not arm_compact_note(repo, instance_id, note, max_chars=cap):
-        # The arm could NOT be written — never claim an arm that does not
-        # exist. This is an INTERNAL failure (not a design outcome), so it
-        # rides the single FAILED code.
-        logger.error(
-            "prompt_reload compact-note: arm write failed for instance=%s",
-            str(instance_id)[:8],
-        )
-        return _failure(
-            CODE_INTERNAL_ERROR,
-            "the compact note could not be armed (the instance metadata "
-            "carrier rejected the write; logged server-side); nothing was "
-            "armed",
-        )
+    armed_ok = repo is not None and arm_compact_note(
+        repo, instance_id, note, max_chars=cap
+    )
+    partial_write = False
+    if not armed_ok:
+        # The write REPORTED a failure. Did the arm actually land? A
+        # carrier can apply the key and still report failure (the
+        # per-key fallback is NOT atomic) — so the state is READ BACK:
+        # claiming "nothing was armed" over a carrier that HOLDS the arm
+        # would be a falsehood (N4).
+        landed = False
+        if repo is not None:
+            try:
+                landed = read_compact_note_state(repo, instance_id).armed
+            except Exception:  # pragma: no cover — defensive
+                landed = False
+        if landed:
+            partial_write = True
+            logger.warning(
+                "prompt_reload compact-note: PARTIAL WRITE for instance=%s "
+                "— the carrier write reported a failure but the carrier "
+                "HOLDS the arm (verified by reading it back)",
+                str(instance_id)[:8],
+            )
+        else:
+            # The arm is genuinely NOT there — the carrier refused the
+            # write and the read-back confirms it. This is an INTERNAL
+            # failure (not a design outcome), so it rides the single
+            # FAILED code.
+            logger.error(
+                "prompt_reload compact-note: arm write failed for "
+                "instance=%s — the arm is NOT present (verified by "
+                "reading it back)",
+                str(instance_id)[:8],
+            )
+            return _failure(
+                CODE_INTERNAL_ERROR,
+                "the compact note could not be armed (the instance metadata "
+                "carrier rejected the write; logged server-side); nothing "
+                "was armed",
+            )
 
     note_sha12 = compact_note_sha256_12(note)
     logger.info(
         format_compact_note_info_line(
             instance_id=instance_id,
             agent_id=agent_id,
-            outcome=OUTCOME_ARMED,
+            outcome=(
+                OUTCOME_ARMED_PARTIAL_WRITE if partial_write else OUTCOME_ARMED
+            ),
             code=None,
             note_chars=note_chars,
             note_sha256_12=note_sha12,
@@ -518,6 +562,7 @@ def _handle_compact_note(
         cap=cap,
         superseded_previous=superseded_previous,
         previous_sha12=previous_sha12,
+        partial_write=partial_write,
         status_line=status_line,
     )
 
@@ -832,8 +877,10 @@ Compact notes (compact + compact_note)
 - The note is never echoed in a log — only its length and digest are
   observable.
 - The span the request announces is sized from the SAME effective model
-  that answers it (the vision switch included) — the announced span and
-  the compaction that replaces it agree.
+  that answers it (the vision switch included). The announced span is an
+  ESTIMATE: it equals the compaction that replaces it in the normal case,
+  but under failover (a different model answers) it MAY DIFFER — it is a
+  best-effort announcement, not a promise.
 - KNOWN LIMITS, disclosed (the daemon classifies your model's reply with
   a 120-character head scan for 12 refusal markers, so it cannot ask
   twice): a genuine refusal OUTSIDE those 12 markers is misread as a

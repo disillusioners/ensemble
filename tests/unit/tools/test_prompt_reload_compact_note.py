@@ -49,6 +49,7 @@ from daemon.services.prompt_refresh import (
     CODE_NOTE_REQUIRES_COMPACT,
     CODE_NOTE_REQUIRED,
     OUTCOME_ARMED,
+    OUTCOME_ARMED_PARTIAL_WRITE,
 )
 from daemon.tools.prompt_reload import create_prompt_reload_tools
 
@@ -811,3 +812,95 @@ class TestH6ArmWriteTruth:
         state = pr.read_compact_note_state(repo, "iid-1")
         assert state.armed is False
         assert state.note == ""
+
+
+# ── N4 — the arm-write VARIANT MATRIX (three variants, three outcomes) ────
+
+
+class AppliesButReportsNoneRepo(StubInstanceRepo):
+    """A carrier that APPLIES the key but reports ``None`` (a partial
+    write) — and has NO atomic multi-key helper, so the per-key fallback
+    runs. The write state is therefore UNVERIFIED by the return value."""
+
+    def set_metadata(self, instance_id: str, key: str, value):
+        self.set_metadata_calls.append((instance_id, key, value))
+        self._meta(instance_id)[key] = value
+        return None  # the write landed, the RETURN does not say so
+
+
+class TestN4ArmWriteVariantMatrix:
+    async def test_full_write_arms_cleanly(self) -> None:
+        """FULL WRITE ⇒ the ARMED receipt, the arm present."""
+        repo = StubInstanceRepo()
+        manager = StubManager(repo=repo)
+        out = await _call(manager, compact=True, compact_note="a note")
+        assert f"outcome={OUTCOME_ARMED}" in out
+        assert "PARTIAL WRITE" not in out
+        assert pr.read_compact_note_state(repo, "iid-1").armed is True
+
+    async def test_a_none_write_is_the_failed_envelope(self) -> None:
+        """NONE-WRITE (the write did not land) ⇒ the FAILED envelope and
+        the honest 'nothing was armed'."""
+        repo = NoneWriteRepo()
+        manager = StubManager(repo=repo)
+        out = await _call(manager, compact=True, compact_note="a note")
+        assert CODE_INTERNAL_ERROR in out
+        assert "nothing was armed" in out
+        assert "outcome=armed" not in out
+        assert pr.read_compact_note_state(repo, "iid-1").armed is False
+
+    async def test_a_partial_write_reports_the_partial_write_outcome(self) -> None:
+        """PARTIAL WRITE (the carrier HOLDS the arm although the write
+        reported failure) ⇒ a DISTINCT outcome — NEVER 'nothing was
+        armed' over a carrier that holds the arm."""
+        repo = AppliesButReportsNoneRepo()
+        manager = StubManager(repo=repo)
+        out = await _call(manager, compact=True, compact_note="a note")
+        assert "nothing was armed" not in out
+        assert f"outcome={OUTCOME_ARMED_PARTIAL_WRITE}" in out
+        assert "PARTIAL WRITE" in out
+        # The arm IS there — the receipt says so.
+        assert pr.read_compact_note_state(repo, "iid-1").armed is True
+
+
+# ── 🔴 5 — the five refusal MESSAGES are pinned (the agent's only
+# remediation guidance — the codes were pinned, the WORDS were not) ────────
+
+
+class TestRefusalMessageTemplates:
+    def test_the_five_refusal_message_templates_are_pinned(self) -> None:
+        """The TEMPLATE constants are pinned verbatim (the rendered
+        dynamic strings carry live values and are not pinned here)."""
+        from daemon.tools.prompt_reload import (
+            _COMPACT_NOTE_MSG_COMPACT_DISABLED,
+            _COMPACT_NOTE_MSG_COMPACT_RATE_LIMITED,
+            _COMPACT_NOTE_MSG_NOTE_OVER_CAP,
+            _COMPACT_NOTE_MSG_NOTE_REQUIRED,
+            _COMPACT_NOTE_MSG_NOTE_REQUIRES_COMPACT,
+        )
+
+        assert _COMPACT_NOTE_MSG_NOTE_REQUIRES_COMPACT == (
+            "a compact_note was supplied with compact=false — the note is only "
+            "meaningful together with compact=true; re-issue the call with "
+            "compact=true. Nothing was armed."
+        )
+        assert _COMPACT_NOTE_MSG_NOTE_REQUIRED == (
+            "a compact note is REQUIRED when compact=true — the note is the "
+            "point, not an option; supply compact_note with non-empty text. "
+            "Nothing was armed."
+        )
+        assert _COMPACT_NOTE_MSG_NOTE_OVER_CAP == (
+            "the compact note is {note_chars} characters, over the "
+            "{cap}-character cap — the note is NEVER truncated; shorten it and "
+            "re-arm. Nothing was armed."
+        )
+        assert _COMPACT_NOTE_MSG_COMPACT_DISABLED == (
+            "compaction is DISABLED in this deployment — arming a note that can "
+            "never land would strand it; enable compaction (CompactionConfig.enabled) "
+            "and re-arm. Nothing was armed."
+        )
+        assert _COMPACT_NOTE_MSG_COMPACT_RATE_LIMITED == (
+            "the deliberate-compact rate limit is in force — {remaining}s remaining "
+            "before another note-guided compaction may be armed (the limit is "
+            "{limit}s). Nothing was armed; try again after the window."
+        )

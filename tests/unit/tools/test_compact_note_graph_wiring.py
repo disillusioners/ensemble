@@ -813,11 +813,25 @@ async def test_r1_the_two_exchange_fixture_bites_when_the_strip_is_disabled():
         channel, fixture = await _run_two_exchange_swap()
     doc = channel[1]
     body = doc.content if isinstance(doc.content, str) else str(doc.content)
+    # The shared helper MUST fail (the fixture bites).
     with pytest.raises(AssertionError):
         _assert_two_exchange_consumed(channel, fixture, body)
-    # And the harm is exactly what the reviewer described: the CURRENT
-    # receipt survives the swap.
-    assert fixture["receipt2"] in channel
+    # LEG-BY-LEG: with the strip neutered, THREE of the FOUR legs are
+    # RED (their absence-assertions fail — the harmful items survive):
+    #   leg 1 (the request under reply) is STRUCTURALLY excluded — the
+    #         current request is never in the tail source, so it survives
+    #         the swap either way;
+    #   leg 2 (the CURRENT tool-call AIMessage) — RED;
+    #   leg 3 (the CURRENT receipt ToolMessage) — RED;
+    #   leg 4 (the note text in the tool_call args) — RED.
+    assert fixture["request2"] not in channel          # leg 1 stays green
+    assert fixture["call2"] in channel                 # leg 2 RED
+    assert fixture["receipt2"] in channel              # leg 3 RED
+    assert any(
+        NOTE_2 in str(tc)
+        for m in channel
+        for tc in (getattr(m, "tool_calls", None) or [])
+    )                                                  # leg 4 RED
 
 
 # ── C2 — the swap must not fire on a later, unrelated reply ────────────────
@@ -1192,3 +1206,49 @@ async def test_a1_the_audit_line_carries_the_agent_id(caplog):
         if "prompt_reload_compact_note:" in rec.getMessage()
     )
     assert "agent=ari" in joined, joined
+
+# ── N3 — the #4 branch (nothing compactable) is a NO-OP SETTLE ─────────────
+
+
+async def test_n3_the_no_compaction_needed_branch_is_a_no_op_settle(caplog):
+    """A channel SHORTER than the preserved window ⇒ nothing is
+    compactable ⇒ NO swap, NO doc, the arm STAYS ARMED, and the no-doc
+    deferred discriminator is recorded (the receipt must not claim work
+    that did not happen)."""
+    import logging as _logging
+
+    repo = FakeRepo()
+    arm_compact_note(repo, "iid-1", NOTE)
+    manager = FakeManager(repo)
+    request = _request_msg()
+    # ONE message before the request ⇒ one group ⇒ inside the default
+    # preserved window (10) ⇒ nothing is compactable.
+    state = {"messages": [HumanMessage(content="hi"), request]}
+    inner = _inner_returning({"messages": [AIMessage(content="A COMPACTION")]})
+    graph = FakeGraph(state["messages"])
+    node = create_compact_note_agent_node(
+        inner, manager=manager, compactor=_compactor(),
+        llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
+    )
+    config = {"configurable": {"thread_id": "iid-1"}}
+    with caplog.at_level(_logging.INFO):
+        out = await node(state, config)
+    channel = out["messages"]
+    # NO sentinel — nothing was swapped.
+    assert not (
+        isinstance(channel, list) and channel and isinstance(channel[0], RemoveMessage)
+    )
+    # NO doc — no compaction was claimed.
+    assert not any(isinstance(m, SystemMessage) for m in channel)
+    # The arm STAYS ARMED.
+    assert pr.read_compact_note_state(repo, "iid-1").armed is True
+    # The no-doc deferred discriminator is recorded.
+    assert repo.metadata["compact_note_last_deferred"] == pr.DEFERRED_STATE_NO_DOC
+    # And the audit row says "deferred" — not "compacted".
+    joined = "\n".join(
+        rec.getMessage()
+        for rec in caplog.records
+        if "prompt_reload_compact_note:" in rec.getMessage()
+    )
+    assert "outcome=deferred" in joined
+    assert "outcome=compacted" not in joined

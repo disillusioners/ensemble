@@ -221,6 +221,11 @@ CODE_ENVELOPES: dict[str, str] = {
 #: gone) and NO "three gates" (the floor predicate + threshold bypass
 #: are removed).
 OUTCOME_ARMED = "armed"
+#: The PARTIAL-WRITE outcome token: the carrier write REPORTED a failure
+#: but the carrier HOLDS the arm (the write-back was verified by reading
+#: the arm). DISTINCT from ``OUTCOME_ARMED`` (the write succeeded) and
+#: from the refusal vocabulary — the census stays 14.
+OUTCOME_ARMED_PARTIAL_WRITE = "armed_partial_write"
 
 #: The plain armed status line — the note is ARMED and the append has
 #: not happened yet. v1.5: there is NO seam (the append is mid-turn) and
@@ -442,25 +447,34 @@ def _write_instance_metadata(repository: Any, instance_id: str, updates: dict[st
             if updated is None:
                 # The house contract (tunables.py:191-198): the write
                 # helpers return ``Instance | None`` and ``None`` means
-                # THE INSTANCE DOES NOT EXIST — NOTHING was written.
-                # Reporting success here would render an ARMED receipt
-                # over an empty carrier.
+                # THE INSTANCE DOES NOT EXIST. Reporting success here
+                # would render an ARMED receipt over an empty carrier —
+                # so the failure is reported.
+                #
+                # WHAT WE DO **NOT** CLAIM: that NOTHING was written. A
+                # carrier that applies the key and still reports ``None``
+                # (a partial write) is possible — the write state is
+                # UNVERIFIED here, and the CALLER verifies it by reading
+                # the arm back (the tool's partial-write branch).
                 logger.warning(
-                    "prompt_reload compact-note: metadata write returned "
-                    "None (instance not found) for instance=%s — NOTHING "
-                    "was written",
+                    "prompt_reload compact-note: metadata write reported "
+                    "None (instance not found) for instance=%s — the write "
+                    "state is UNVERIFIED (the carrier may have applied it)",
                     str(instance_id)[:8],
                 )
                 return False
             return True
         if hasattr(repository, "set_metadata"):
+            # The PER-KEY fallback is NOT atomic: a mid-loop failure
+            # leaves a TORN bundle (some keys written, others not).
             for key, value in updates.items():
                 updated = repository.set_metadata(instance_id, key, value)
                 if updated is None:
                     logger.warning(
                         "prompt_reload compact-note: metadata write "
-                        "returned None (instance not found) for "
-                        "instance=%s key=%s — NOTHING was written",
+                        "reported None (instance not found) for "
+                        "instance=%s key=%s — the write state is UNVERIFIED "
+                        "(the carrier may have applied it)",
                         str(instance_id)[:8],
                         key,
                     )
@@ -657,9 +671,9 @@ APPEND_OUTCOME_CHANNEL_REBUILD_FAILED = "channel_rebuild_failed"
 #: so the swap cannot be trusted to be armed and the model's compaction
 #: reply must not be discarded silently.
 APPEND_OUTCOME_READ_FAILED = "read_failed"
-#: RESERVED / UNPRODUCIBLE by construction (no caller reaches it — the
-#: append path has no gate that defers it). Kept as vocabulary only; it
-#: is NOT emitted and NOT mapped to a deferred label.
+#: The DEFERRED outcome: the append ran but produced NO compaction (e.g.
+#: nothing was compactable — the #4 no-op settle). It IS emitted, and it
+#: maps to the NO-DOC deferred discriminator (the arm stays armed).
 APPEND_OUTCOME_DEFERRED = "deferred"
 
 APPEND_OUTCOMES: frozenset[str] = frozenset(

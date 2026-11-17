@@ -13913,6 +13913,11 @@ def create_compact_note_agent_node(
             min_window = getattr(cfg_obj, "min_recent_window", _COMPACT_NOTE_DEFAULT_MIN_WINDOW) if cfg_obj is not None else _COMPACT_NOTE_DEFAULT_MIN_WINDOW
             threshold = getattr(cfg_obj, "threshold", _COMPACT_NOTE_DEFAULT_THRESHOLD) if cfg_obj is not None else _COMPACT_NOTE_DEFAULT_THRESHOLD
             system_prompt_tokens = _COMPACT_NOTE_SYSTEM_PROMPT_TOKENS
+            # ITEM-8 (leader-ratified): the window MUST come from the
+            # SAME effective model the swap side uses (the vision switch
+            # included) — the announced span is read by the model in the
+            # very turn it answers, so a window sized for another model
+            # is the same receipt-truth class as the in-context lie.
             agent_model_name = _compact_note_effective_model(state_msgs, llm_config, llm_standard, reply_msg)
             context_window = 0
             try:
@@ -14154,7 +14159,15 @@ def create_compact_note_agent_node(
                 note_chars=note_chars,
                 agent_id=agent_id,
             )
-            _log_compact_note_settle(instance_id, "compacted", settle_result)
+            _log_compact_note_settle(
+                instance_id,
+                (
+                    APPEND_OUTCOME_COMPACTED
+                    if rebuild_ok
+                    else APPEND_OUTCOME_CHANNEL_REBUILD_FAILED
+                ),
+                settle_result,
+            )
 
             if isinstance(result, dict):
                 result = dict(result)
@@ -14163,9 +14176,9 @@ def create_compact_note_agent_node(
                 return result
             return {"messages": channel, "compacted_at": compacted_at}
         except Exception as exc:
-            import traceback as _tb
-            print("SWAP EXC:", type(exc).__name__, exc)
-            print(_tb.format_exc())
+            # CONTENT-FREE: the class name only — an exception MESSAGE can
+            # carry conversation content (the note is live in this scope),
+            # so no traceback and no stdout write here.
             logger.warning(
                 "[CompactNote] SWAP failed instance=%s error_class=%s — "
                 "no compaction was performed; the note stays armed",

@@ -6,15 +6,23 @@
 # The compact-note lane's TOOL-level + ENGINE-level + GRAPH-SEAM unit
 # legs (plan §10.3), PLUS every SIBLING file whose assertions depend on
 # the lane's changed symbols (the refusal census, the armed outcome
-# literals and the house doc-format markers). The file set is selected by
-# SYMBOL, not by name: a name-pattern selection missed
-# tests/unit/services/test_prompt_refresh_primitive.py and hid the stale
-# 9-vs-14 census pin (tidier H1).
+# literals and the house doc-format markers). The file set is a
+# SYMBOL-RATIONALED STATIC list (see below) — a name-pattern selection
+# missed tests/unit/services/test_prompt_refresh_primitive.py and hid
+# the stale 9-vs-14 census pin (tidier H1).
 #
 # Owned artifacts (lane-owned):
 #   tests/unit/tools/test_prompt_reload_compact_note.py   (tool level)
 #   tests/unit/tools/test_compact_note_graph_wiring.py    (graph seam)
 #   tests/unit/test_compaction_compact_note.py              (engine level)
+#
+# The file list below is a SYMBOL-RATIONALED STATIC list: every file was
+# selected by a grep over the lane's changed symbols (the refusal census,
+# the armed outcome literals, the house doc-format markers) and then
+# FROZEN here. It is NOT derived at run time — a symbol-DERIVED selection
+# remains a FOLLOW-UP. (The tidier-H1 rationale stands: a NAME-pattern
+# selection missed tests/unit/services/test_prompt_refresh_primitive.py
+# and hid the stale 9-vs-14 census pin.)
 #
 # SIBLING files (symbol-dependent — included so the pack cannot hide a
 # red the lane caused):
@@ -26,6 +34,8 @@
 #   tests/unit/services/test_compact_executor.py           (doc-format markers)
 #   tests/unit/services/test_compact_executor_revive_brick_e2e.py (doc format)
 #   tests/unit/services/test_injected_notes_hoisting_sweep_gaps.py (doc format)
+#   tests/unit/test_symptom_repair_partition.py   (the REMOVE_ALL
+#                                                    sentinel the swap creates)
 #
 # Legs covered: L1 L2 L3 L4 L5 L6 L7 L10 L11 L12 L14 L15 L16 L17
 #
@@ -82,6 +92,7 @@ env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_DB -u POSTGRES_USER \
     tests/unit/services/test_compact_executor.py \
     tests/unit/services/test_compact_executor_revive_brick_e2e.py \
     tests/unit/services/test_injected_notes_hoisting_sweep_gaps.py \
+    tests/unit/test_symptom_repair_partition.py \
     -q --tb=short -p no:cacheprovider
 RC=$?
 
