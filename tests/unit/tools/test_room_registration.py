@@ -4,7 +4,7 @@
 The three-step registration seam (decorator + registry entries +
 construction) is proven END-TO-END here, in the guidelines shape:
 
-* (a) the AST discovery finds all four tools in the category module,
+* (a) the AST discovery finds all five tools in the category module,
   and the constructed tools carry ``_tool_category == "room"``;
 * (b) the decorator order is load-bearing and pinned:
   ``@register_tool_category`` ABOVE ``@tool``;
@@ -12,7 +12,7 @@ construction) is proven END-TO-END here, in the guidelines shape:
   path (the AST scanner resolves the value as
   ``daemon/tools/<parts[2:]>.py`` — a ``daemon.services.*`` value is
   never discovered and the drift pin fails at boot);
-* (d) ``DYNAMIC_TOOL_NAMES`` + ``KNOWN_TOOL_NAMES`` carry all four
+* (d) ``DYNAMIC_TOOL_NAMES`` + ``KNOWN_TOOL_NAMES`` carry all five
   names (factory-built, not import-time registered);
 * (e) the ``create_instance_tools`` extend is greppable in source AT
   THE CALL SITE AND precedes ``create_help_tool`` /
@@ -45,6 +45,7 @@ target is not covered by the matrix").
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -141,6 +142,7 @@ def _stub_manager():
         "read_messages",
         "unread_count",
         "create_room",
+        "close_room",
         "advance_read_cursor",
         "list_member_rooms",
         "get_room",
@@ -172,7 +174,7 @@ def _tools(agent_id: str = "ari", instance_id: str = "iid-1"):
 
 
 class TestRegistration:
-    def test_the_ast_discovery_finds_the_four_tools(self) -> None:
+    def test_the_ast_discovery_finds_the_five_tools(self) -> None:
         """The category module's ``@tool``-decorated names are
         discoverable by the registry's AST scan."""
         discovered = discover_source_only_tool_names()
@@ -326,12 +328,21 @@ class TestAllowLists:
 
 class TestTheMembershipGate:
     def test_the_gate_is_the_first_logic_in_each_body(self) -> None:
-        """The layer-2 AUTHORIZATION gate (``_is_authorized``) is the
-        FIRST logic in each tool body — a literal tool name in an
-        allow list bypasses the category gate, so each body re-checks
-        the caller. (The MEMBERSHIP-before-write property is pinned
-        separately, per verb, below — see
-        ``test_the_post_body_resolves_membership_before_the_append``.)"""
+        """The layer-2 AUTHORIZATION gate is the FIRST logic in each
+        tool body — a literal tool name in an allow list bypasses the
+        category gate, so each body re-checks the caller. (The
+        MEMBERSHIP-before-write property is pinned separately, per verb,
+        below — see
+        ``test_the_post_body_resolves_membership_before_the_append``.)
+
+        RE-AIMED (P6 H1, 2026-11-16): the gate now lives in ONE shared
+        helper (``_gate``) instead of four copies, so the FIRST logic
+        statement of each body DELEGATES to that helper. The pin keeps
+        its intent — the gate is still the first thing every body does —
+        and it keeps its teeth: an inlined check (a body that does its
+        own authorization) REDS here, and a helper that stops checking
+        REDS ``test_the_shared_gate_helper_checks_the_caller_first``.
+        """
         source = _module_source()
         tree = ast.parse(source)
         bodies = [
@@ -342,10 +353,9 @@ class TestTheMembershipGate:
         ]
         assert len(bodies) == len(TOOL_NAMES)
         for body in bodies:
-            # The gate call is the FIRST executable statement of the
-            # body (the gate is an ``if not _is_authorized(...):`` head).
-            # The tool DOCSTRING is the body's first statement — it is
-            # skipped (it is not logic).
+            # The gate delegation is the FIRST executable statement of
+            # the body. The tool DOCSTRING is the body's first
+            # statement — it is skipped (it is not logic).
             statements = list(body.body)
             if (
                 statements
@@ -355,20 +365,78 @@ class TestTheMembershipGate:
             ):
                 statements = statements[1:]
             first = statements[0]
-            assert isinstance(first, ast.If), (
-                f"{body.name}: the first statement must be the "
-                f"authorization gate, got {type(first).__name__}"
+            call = None
+            if isinstance(first, (ast.Assign, ast.Expr)):
+                call = first.value
+            assert isinstance(call, ast.Call), (
+                f"{body.name}: the first statement must delegate to the "
+                f"shared gate helper, got {type(first).__name__}"
             )
-            test = first.test
-            # The gate head is ``not _is_authorized(...)`` — the ``not``
-            # wraps the call.
-            if isinstance(test, ast.UnaryOp):
-                test = test.operand
-            assert isinstance(test, ast.Call), body.name
             assert (
-                isinstance(test.func, ast.Name)
-                and test.func.id == "_is_authorized"
-            ), body.name
+                isinstance(call.func, ast.Name) and call.func.id == "_gate"
+            ), (
+                f"{body.name}: the first statement must call the shared "
+                f"_gate helper, got {ast.dump(call.func)}"
+            )
+            # The helper is told WHICH verb it guards (the refusal
+            # envelope names the tool).
+            assert call.args, body.name
+            label = call.args[0]
+            assert (
+                isinstance(label, ast.Constant) and label.value == body.name
+            ), f"{body.name}: the gate must name its own verb"
+
+    def test_the_shared_gate_helper_checks_the_caller_first(self) -> None:
+        """The helper's FIRST logic is the ``_is_authorized`` check — the
+        gate is still first, one layer down. A helper that stopped
+        checking (or checked later) REDS here."""
+        tree = ast.parse(_module_source())
+        helpers = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_gate"
+        ]
+        assert len(helpers) == 1, "exactly ONE shared _gate helper"
+        statements = list(helpers[0].body)
+        if (
+            statements
+            and isinstance(statements[0], ast.Expr)
+            and isinstance(statements[0].value, ast.Constant)
+            and isinstance(statements[0].value.value, str)
+        ):
+            statements = statements[1:]
+        first = statements[0]
+        assert isinstance(first, ast.If), (
+            "the shared gate helper's first logic must be the "
+            f"authorization check, got {type(first).__name__}"
+        )
+        test = first.test
+        # The gate head is ``not _is_authorized(...)`` — the ``not``
+        # wraps the call.
+        if isinstance(test, ast.UnaryOp):
+            test = test.operand
+        assert isinstance(test, ast.Call)
+        assert (
+            isinstance(test.func, ast.Name)
+            and test.func.id == "_is_authorized"
+        )
+
+    def test_exactly_one_gate_helper_serves_the_five_verbs(self) -> None:
+        """The census: the shared helper is called EXACTLY once per
+        verb — a body that keeps its own copy (or drops the gate) is
+        caught here."""
+        tree = ast.parse(_module_source())
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_gate"
+        ]
+        assert len(calls) == len(TOOL_NAMES), (
+            f"expected one _gate call per verb ({len(TOOL_NAMES)}), got "
+            f"{len(calls)}"
+        )
 
     def test_the_post_body_resolves_membership_before_the_append(self) -> None:
         """The APPEND is the commit point of the room log — the
@@ -416,6 +484,37 @@ class TestTheMembershipGate:
         assert "not-a-member" in raw, raw
         room_service.append_message.assert_not_called()
 
+    async def test_a_refused_caller_touches_no_room_service(self) -> None:
+        """The gate is FIRST — a refused caller reaches NO service seam
+        (no DB touch at all). The behavioral bite of the H1 extraction:
+        the shared helper runs BEFORE the service handle is resolved."""
+        manager, room_service = _stub_manager()
+        tools = create_room_tools(
+            manager, current_instance_id="iid-1", agent_id=""
+        )
+        for index, payload in enumerate(
+            (
+                {"name": "r"},
+                {"room_id": "r", "text": "t"},
+                {"room_id": "r"},
+                {"room_id": "r", "proposal_seq": 1, "decision": "revive"},
+                {"room_id": "r"},
+            )
+        ):
+            raw = await tools[index].ainvoke(payload)
+            assert raw.startswith("Error:"), (index, raw)
+            assert "unknown-agent" in raw, (index, raw)
+        for seam in (
+            room_service.get_room,
+            room_service.get_member,
+            room_service.list_members,
+            room_service.append_message,
+            room_service.read_messages,
+            room_service.create_room,
+            room_service.close_room,
+        ):
+            seam.assert_not_called()
+
     async def test_an_unresolved_agent_is_refused(self) -> None:
         """The second gate: a blank agent id never reaches the room."""
         manager = MagicMock()
@@ -430,11 +529,159 @@ class TestTheMembershipGate:
                 {"room_id": "r", "text": "t"},
                 {"room_id": "r"},
                 {"room_id": "r", "proposal_seq": 1, "decision": "revive"},
+                {"room_id": "r"},
             )
         ):
             raw = await tools[index].ainvoke(payload)
             assert raw.startswith("Error:"), (index, raw)
             assert "unknown-agent" in raw, (index, raw)
+
+
+# ── F. the house refusal helpers (the G pins) ──────────────────────────
+
+
+class TestTheHouseRefusalHelpers:
+    """The house refusal machinery — the never-raise backstop and the
+    gate's SECOND branch.
+
+    Two pins (the G item):
+
+    * **the gate's SECOND branch** — the H1 extraction left the helper
+      with two branches: the authorization check (the first) and the
+      caller-instance-id check (the second). Only the FIRST was
+      pinned; the SECOND (a blank instance id ⇒ the
+      ``not-authorized`` refusal) now has its own pin.
+    * **the internal-error census** — the house never-raise backstop
+      ``_internal_error_refusal`` is called EXACTLY once per verb:
+      a body that dropped it would raise into the agent turn, and a
+      body that grew a second copy would drift from the shared
+      envelope.
+    """
+
+    def test_the_gate_second_branch_refuses_a_blank_instance_id(self) -> None:
+        """The SECOND branch of the shared gate: no instance id ⇒
+        ``not-authorized``.
+
+        The first branch (the agent identity) passes here — the
+        caller IS resolved — so the refusal can only come from the
+        second branch.
+        """
+        manager = MagicMock()
+        manager._room_chat_service = MagicMock()
+        manager._room_delivery_service = MagicMock()
+        tools = create_room_tools(
+            manager, current_instance_id="", agent_id="ari"
+        )
+        payloads = (
+            {"name": "r"},
+            {"room_id": "r", "text": "t"},
+            {"room_id": "r"},
+            {"room_id": "r", "proposal_seq": 1, "decision": "revive"},
+            {"room_id": "r"},
+        )
+        for index, payload in enumerate(payloads):
+            raw = asyncio.run(tools[index].ainvoke(payload))
+            assert raw.startswith("Error:"), (index, raw)
+            assert "reason=not-authorized" in raw, (index, raw)
+
+    def test_the_gate_second_branch_is_the_instance_id_check(self) -> None:
+        """The structural twin: the second branch tests the INSTANCE id.
+
+        A helper that dropped the second branch (or swapped it for
+        something else) REDs here.
+        """
+        tree = ast.parse(_module_source())
+        helpers = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_gate"
+        ]
+        assert len(helpers) == 1
+        statements = [
+            node
+            for node in helpers[0].body
+            if not (
+                isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            )
+        ]
+        branches = [node for node in statements if isinstance(node, ast.If)]
+        assert len(branches) == 2, branches
+        second = branches[1]
+        test = second.test
+        if isinstance(test, ast.UnaryOp):
+            test = test.operand
+        assert isinstance(test, ast.Name) and test.id == "caller_instance_id", (
+            "the gate's second branch must test the caller instance id"
+        )
+
+    def test_every_verb_carries_exactly_one_internal_error_backstop(
+        self,
+    ) -> None:
+        """The census: one ``_internal_error_refusal`` per verb.
+
+        The house never-raise backstop — an unexpected exception is
+        logged SERVER-SIDE and answered with the generic envelope (the
+        PB-F1 leak class). A body that dropped it raises into the agent
+        turn; a body that grew a second copy drifts from the shared
+        envelope.
+        """
+        tree = ast.parse(_module_source())
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_internal_error_refusal"
+        ]
+        assert len(calls) == len(TOOL_NAMES), (
+            f"expected one internal-error backstop per verb "
+            f"({len(TOOL_NAMES)}), got {len(calls)}"
+        )
+        # Each call names its OWN verb — the envelope labels the tool.
+        labels = []
+        for call in calls:
+            assert call.args, ast.dump(call)
+            label = call.args[0]
+            assert isinstance(label, ast.Constant), ast.dump(label)
+            labels.append(label.value)
+        assert sorted(labels) == sorted(TOOL_NAMES), labels
+
+    async def test_a_faulting_verb_answers_the_house_envelope(self) -> None:
+        """The behavioral bite: an unexpected exception NEVER raises and
+        NEVER leaks the raw text.
+
+        The PB-F1 leak class: ``str(exc)`` / ``repr(exc)`` must not
+        reach the payload.
+        """
+        manager, room_service = _stub_manager()
+        boom = "sensitive-internal-detail"
+        room_service.get_room = AsyncMock(side_effect=RuntimeError(boom))
+        room_service.create_room = AsyncMock(side_effect=RuntimeError(boom))
+        tools = {
+            t.name: t
+            for t in create_room_tools(
+                manager, current_instance_id="iid-1", agent_id="ari"
+            )
+        }
+        payloads = {
+            "room_create": {"name": "r"},
+            "room_post": {"room_id": "r", "text": "t"},
+            "room_read": {"room_id": "r"},
+            "room_task_decision": {
+                "room_id": "r",
+                "proposal_seq": 1,
+                "decision": "revive",
+            },
+            "room_close": {"room_id": "r"},
+        }
+        for name, payload in payloads.items():
+            raw = await tools[name].ainvoke(payload)
+            assert raw.startswith("Error:"), (name, raw)
+            assert f"{name} REFUSED" in raw, (name, raw)
+            assert "reason=internal-error" in raw, (name, raw)
+            assert boom not in raw, (name, raw)
 
 
 # ── E. the mutation target ────────────────────────────────────────────

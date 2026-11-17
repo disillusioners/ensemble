@@ -11,6 +11,12 @@ What lives here (mechanics only, no policy):
 * ``create_room`` — the transactional room birth: the ``chatrooms`` row
   + the OWNER membership row (``role=owner``, both cursors 0 — D2) in
   ONE commit.
+* ``close_room`` — the ONLY producer of the ``closed`` state: the
+  forward-only ``active → closed`` transition (architecture §3/§5 —
+  "close = parent tool only"), stamping ``closed_at``. The P-close
+  GC arm (``state=closed AND closed_at < now − 14d`` → purge) is
+  unreachable without it — the predicate was ratified, the producer
+  was missing.
 * ``append_message`` — the per-room monotonic-seq append. The seq is
   assigned by a SINGLE-STATEMENT INSERT
   (``INSERT ... SELECT COALESCE(MAX(seq), 0) + 1 ...``) so no read-max
@@ -52,6 +58,12 @@ thread. Async callers MUST go through
 ``asyncio.to_thread`` (the canonical off-loop idiom — exemplar
 ``instance_messaging.py:1179-1184``). NEVER call these methods
 directly on the event loop (house constraint §4, v0.27.14-class).
+
+**Why this file is large (~1,635 lines).** The 1,000–3,000-line band
+requires a why-large note: ONE SQLModel table family with ONE
+transactional writer per table and the ONE purge transaction are
+co-located here on purpose — the transactional boundaries stay
+readable as a single unit.
 """
 
 from __future__ import annotations
@@ -85,6 +97,7 @@ __all__ = [
     "RoomError",
     "RoomNotFoundError",
     "RoomClosedError",
+    "RoomNotOwnerError",
     "MemberNotFoundError",
     "MemberNameCollisionError",
     "RoomSeqConflictError",
@@ -150,6 +163,18 @@ class RoomNotFoundError(RoomError):
 class RoomClosedError(RoomError):
     """The room exists and is readable, but its state is ``closed`` —
     posts are refused (capability row: closed = read-only)."""
+
+
+class RoomNotOwnerError(RoomError):
+    """The caller is not the room's OWNER.
+
+    The close transition is OWNER-ONLY (architecture §3/§5: "close =
+    parent tool only"): the OWNER is the parent that opened the room.
+    Raised fail-closed by :meth:`RoomRepository.close_room` — the
+    predicate is enforced HERE (the DB layer), not only in the tool
+    body, so a caller that bypasses the tool cannot close a room it
+    does not own.
+    """
 
 
 class MemberNotFoundError(RoomError):
@@ -556,6 +581,72 @@ class RoomRepository:
         raise RoomError(
             f"append integrity failure for room={room_id}: {exc}"
         ) from exc
+
+    # ── the close transition (the ONLY producer of ``closed``) ───────
+
+    def close_room(
+        self, room_id: str, *, owner_instance_id: str
+    ) -> dict[str, Any]:
+        """Close the room — the forward-only ``active → closed`` move.
+
+        The ONLY producer of the ``closed`` state (architecture §3/§5:
+        *"States forward-only: ``active → closed → (purged)``. Close =
+        parent tool only"*). Without this producer the ratified P-close
+        GC arm (``state=closed AND closed_at < now − 14d`` → purge) is
+        UNREACHABLE — the predicate was right, the producer was
+        missing.
+
+        Fail-closed, three typed refusals:
+
+        * :class:`RoomNotFoundError` — the room does not exist (absent
+          or already purged — R2: purged = nonexistent).
+        * :class:`RoomNotOwnerError` — the caller is not the room's
+          OWNER (the owner is the parent that opened the room). The
+          ownership predicate is enforced HERE (the DB layer), not
+          only in the tool body.
+        * :class:`RoomClosedError` — the room is not in the ``active``
+          state (the transition is forward-only; there is no reopen).
+
+        The close is ONE UPDATE of the ``chatrooms`` row: ``state`` →
+        ``closed`` and ``closed_at`` → now. The room LOG is untouched
+        (the capability row: a closed room still reads, still
+        re-derives TAGGED rows until the purge). No ``event`` row is
+        written — the content-free ``room_closed`` trace rides the
+        lifecycle notifier (the SSE room channel), NOT the event
+        table (the event registry is ``room_purged`` + the P3 kinds).
+        """
+        now = _utc_now_iso()
+        with Session(self._engine) as session:
+            room = session.get(ChatRoom, room_id)
+            if room is None:
+                raise RoomNotFoundError(
+                    f"room={room_id} not found (absent or already purged)"
+                )
+            if room.owner_instance_id != owner_instance_id:
+                raise RoomNotOwnerError(
+                    f"room={room_id} is owned by another instance "
+                    "(close is parent-only)"
+                )
+            if room.state != RoomState.ACTIVE.value:
+                raise RoomClosedError(
+                    f"room={room_id} is not active (state={room.state}) "
+                    "— the close transition is forward-only"
+                )
+            room.state = RoomState.CLOSED.value
+            room.closed_at = now
+            room.updated_at = now
+            # The detached payload FIRST — every field is client-set,
+            # and after ``commit()`` the ORM instance expires (reading
+            # it detached would raise DetachedInstanceError).
+            snap = room_payload(room)
+            session.commit()
+        logger.info(
+            "room closed: room=%s owner=%s closed_at=%s",
+            room_id,
+            owner_instance_id,
+            now,
+        )
+        return snap
 
     # ── reads (room / member lookups) ──────────────────────────────────
 
@@ -1136,6 +1227,188 @@ class RoomRepository:
                 )
             )
             session.commit()
+
+    # ── P6 read surface: the tree room list (HTTP observability) ──────
+
+    def list_rooms_for_tree(self, tree_root_id: str) -> list[dict[str, Any]]:
+        """Every room in the TREE scope, with the FE-facing extras.
+
+        The scope is the room's own anchor: ``chatrooms.tree_root_id``
+        (the join predicate's scope key). A room created by ANY member
+        of the tree is therefore listed — the P6 modal shows "the
+        chatrooms created by that instance('s tree)" (§13.1), not only
+        the ones the instance itself opened.
+
+        Per-room extras (both computed here, never by the caller):
+
+        * ``member_count`` — the ACTIVE roster size (``state=active``;
+          a LEFT row is retired and is not a member of the room).
+        * ``last_message_seq`` — ``MAX(seq)`` of the room's log, or
+          ``None`` for a room that has never been posted to.
+
+        Ordering: ``created_at`` then ``room_id`` (stable, insertion
+        order for the FE list).
+        """
+        if not tree_root_id:
+            return []
+        with Session(self._engine) as session:
+            stmt = (
+                select(ChatRoom)
+                .where(ChatRoom.tree_root_id == tree_root_id)
+                .order_by(ChatRoom.created_at, ChatRoom.room_id)
+            )
+            rooms = session.exec(stmt).all()
+            if not rooms:
+                return []
+            room_ids = [r.room_id for r in rooms]
+            member_counts = self._active_member_counts(session, room_ids)
+            last_seqs = self._last_message_seqs(session, room_ids)
+            out: list[dict[str, Any]] = []
+            for room in rooms:
+                payload = room_payload(room)
+                payload["member_count"] = member_counts.get(room.room_id, 0)
+                payload["last_message_seq"] = last_seqs.get(room.room_id)
+                out.append(payload)
+            return out
+
+    @staticmethod
+    def _active_member_counts(
+        session: Session, room_ids: list[str]
+    ) -> dict[str, int]:
+        """``{room_id: active member count}`` — one grouped COUNT."""
+        if not room_ids:
+            return {}
+        stmt = sql_text(
+            "SELECT room_id, COUNT(*) FROM chatroom_members"
+            " WHERE room_id IN :ids AND state = :state"
+            " GROUP BY room_id"
+        ).bindparams(
+            bindparam("ids", value=list(room_ids), expanding=True),
+            state=RoomMemberState.ACTIVE.value,
+        )
+        return {
+            str(row[0]): int(row[1])
+            for row in session.execute(stmt).all()
+        }
+
+    @staticmethod
+    def _last_message_seqs(
+        session: Session, room_ids: list[str]
+    ) -> dict[str, int]:
+        """``{room_id: MAX(seq)}`` — the room's last message sequence."""
+        if not room_ids:
+            return {}
+        stmt = sql_text(
+            "SELECT room_id, MAX(seq) FROM room_messages"
+            " WHERE room_id IN :ids"
+            " GROUP BY room_id"
+        ).bindparams(bindparam("ids", value=list(room_ids), expanding=True))
+        return {
+            str(row[0]): int(row[1])
+            for row in session.execute(stmt).all()
+        }
+
+    # ── P6 GC scans (mechanics; the POLICY lives in services/room_gc) ─
+
+    def list_rooms_by_state(self, state: str) -> list[dict[str, Any]]:
+        """Every room in one lifecycle state (``active`` / ``closed``).
+
+        The GC scan's input set. The age CUTOFFS are applied by the
+        sweeper (policy), so this method stays a pure accessor.
+        """
+        with Session(self._engine) as session:
+            stmt = (
+                select(ChatRoom)
+                .where(ChatRoom.state == state)
+                .order_by(ChatRoom.created_at, ChatRoom.room_id)
+            )
+            return [room_payload(r) for r in session.exec(stmt).all()]
+
+    def list_active_member_instance_ids(
+        self, room_ids: list[str]
+    ) -> dict[str, list[str]]:
+        """``{room_id: [instance_id, ...]}`` for the ACTIVE roster."""
+        if not room_ids:
+            return {}
+        with Session(self._engine) as session:
+            stmt = select(ChatRoomMember).where(
+                ChatRoomMember.room_id.in_(room_ids),
+                ChatRoomMember.state == RoomMemberState.ACTIVE.value,
+            )
+            out: dict[str, list[str]] = {}
+            for member in session.exec(stmt).all():
+                out.setdefault(member.room_id, []).append(member.instance_id)
+            return out
+
+    def get_instance_records(
+        self, instance_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """``{instance_id: {"status": ..., "parent_id": ...}}``.
+
+        The liveness inputs for the P-idle GC trigger: a participant
+        counts as ALIVE iff its status is non-terminal
+        (``NON_TERMINAL_INSTANCE_STATUSES_FOR_ROOMS`` — ``waiting`` IS
+        alive). A MISSING instance row is not alive (the row is gone;
+        the walk simply stops there).
+        """
+        if not instance_ids:
+            return {}
+        with Session(self._engine) as session:
+            stmt = select(Instance).where(
+                Instance.instance_id.in_(instance_ids)
+            )
+            out: dict[str, dict[str, Any]] = {}
+            for row in session.exec(stmt).all():
+                out[row.instance_id] = {
+                    "status": row.status,
+                    "parent_id": getattr(row, "parent_id", None),
+                }
+            return out
+
+    def rooms_with_undelivered_tagged(
+        self, room_ids: list[str]
+    ) -> set[str]:
+        """Rooms holding a TAGGED row above a participant's DELIVERED cursor.
+
+        The P-idle CURSOR GUARD (architecture §2.2): such a room is
+        SKIPPED by the sweeper — a tagged message that was never
+        delivered is still owed to its addressee, so the room's log
+        must survive the idle sweep.
+
+        The TAGGED filter is applied in PYTHON (the JSON-emptiness
+        predicate differs across drivers — JSONB on PG arrives native,
+        TEXT on SQLite; the same discipline as
+        :meth:`derive_undelivered_tagged`).
+        """
+        if not room_ids:
+            return set()
+        stmt = sql_text(
+            "SELECT m.room_id AS room_id,"
+            " m.instance_id AS instance_id,"
+            " msg.id AS message_id,"
+            " msg.seq AS seq,"
+            " msg.tagged_members AS tagged_members"
+            " FROM chatroom_members m"
+            " JOIN room_messages msg ON msg.room_id = m.room_id"
+            "  AND msg.seq > m.last_delivered_seq"
+            " WHERE m.state = :member_active AND m.room_id IN :ids"
+        ).bindparams(
+            bindparam("ids", value=list(room_ids), expanding=True),
+            member_active=RoomMemberState.ACTIVE.value,
+        )
+        guarded: set[str] = set()
+        with Session(self._engine) as session:
+            for row in session.execute(stmt).all():
+                tagged = _decode_tagged_members(
+                    row.tagged_members,
+                    source="rooms_with_undelivered_tagged",
+                    room_id=row.room_id,
+                    message_id=row.message_id,
+                    seq=row.seq,
+                )
+                if tagged:
+                    guarded.add(str(row.room_id))
+        return guarded
 
     # ── boot regeneration snapshot (P1 — the pinned pair, §10) ─────────
 

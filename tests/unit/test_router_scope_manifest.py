@@ -187,6 +187,15 @@ PINNED_SCOPE_MANIFEST: dict[str, frozenset[str] | str] = {
     # route's lone ``maintenance:read`` is NOT our model; the three
     # QUERY routes' any-of set IS.
     "/api/nest-reports": "maintenance:read|metrics:read",
+    # agent group chat P6 (2026-11-16) — the ROOM READ surface the
+    # observability modal rides (GET /api/rooms/{room_id}/messages).
+    # The family carries the EXISTING ``instances:read`` scope — the
+    # deliberate scope-REUSE convention (the same scope every other
+    # instance read route uses; NO new scope is minted, and the room
+    # surface introduces no new auth model). The sibling route
+    # (GET /api/instances/{instance_id}/rooms) joins the EXISTING
+    # /api/instances family and declares the same scope.
+    "/api/rooms": "instances:read",
 }
 
 #: The wildcard sentinel as stored in the manifest.
@@ -327,9 +336,9 @@ class TestSourceMatchTarget:
         """
         source = API_PY.read_text()
         matches = re.findall(r"api_router\.include_router\(", source)
-        assert len(matches) == 39, (
+        assert len(matches) == 40, (
             f"api_router.include_router( census drifted: {len(matches)} "
-            "(pinned 39 = 36 unconditional + 2 auth-ON-gated + 1 "
+            "(pinned 40 = 37 unconditional + 2 auth-ON-gated + 1 "
             "gateway-flag-gated (WS)). New mount? "
             "Declare its family in PINNED_SCOPE_MANIFEST above."
         )
@@ -435,6 +444,17 @@ class TestScopeManifestCage:
         NO new scope, NO new manifest family — growing the cage count
         113 → 114. The MOUNT census (38) and the CLASS-manifest family
         count (34) are UNCHANGED; only the declared-route census moved.
+
+        agent group chat P6 (2026-11-16) added the ROOM READ surface
+        (the observability modal's backend): TWO scope-decorated
+        routes — GET /api/instances/{instance_id}/rooms (joins the
+        EXISTING /api/instances family) and GET
+        /api/rooms/{room_id}/messages (the NEW /api/rooms family,
+        declared ``instances:read`` — the deliberate scope-REUSE
+        convention; NO new scope is minted) — growing the declared-route
+        census 117 → 119, the MOUNT census 39 → 40 (ONE new mount) and
+        the CLASS-manifest family count 35 → 36 (the new /api/rooms
+        family, pinned as protected-default).
         """
         declared = [
             r
@@ -443,8 +463,8 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 117, (
-            f"declared-route census drifted: {len(declared)} (pinned 117)"
+        assert len(declared) == 119, (
+            f"declared-route census drifted: {len(declared)} (pinned 119)"
         )
 
     def test_manifest_entries_valid(self):

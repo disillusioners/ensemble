@@ -4,7 +4,8 @@
  * and the per-instance guards that gate async completions against
  * stale-instance drift.
  *
- * Size rationale (~1570 lines, single file): this component is the
+ * Size rationale (~2140 lines, single file): this component is the
+ * FE-UI lane marker (group-chat P6 room modal surface): A-P6-23.
  * load-bearing hub for the chat surface — it threads the message
  * lifecycle end-to-end (send → provisional → SSE echo → REST refetch
  * → purge on terminal). Natural future split seam: the optimistic-
@@ -47,6 +48,10 @@ import {
   WatchoverDialogComponent,
   WatchoverDialogResult,
 } from '../../components/watchover-dialog/watchover-dialog.component';
+import {
+  RoomDialogComponent,
+  ROOM_DIALOG_SIZE,
+} from '../../components/room-dialog/room-dialog.component';
 import type { Agent, InstanceInfo, Message, CommandAck, RejectionReason } from '../../models';
 
 const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
@@ -1886,6 +1891,35 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.messages.update(msgs => {
       const next = msgs.filter(m => m.message_id !== messageId);
       return next.length === msgs.length ? msgs : next;
+    });
+  }
+
+  /**
+   * Open the chatrooms modal for the rendered instance's tree — the P6
+   * human observability surface for group chat (architecture §13.1:
+   * "CHATROOM ICON next to the WATCHOVER button … Click → BIG POPUP
+   * (large modal, NOT a cramped tooltip)"). The modal lists the rooms
+   * created by that instance('s tree) and lets the operator read any
+   * room's conversation.
+   *
+   * The same guard as ``onToggleWatchover``: during the transient
+   * re-show window there may be no rendered instance — the click is a
+   * no-op then (the button sits next to the watchover toggle, which
+   * behaves identically).
+   */
+  protected onOpenChatrooms(): void {
+    const instance = this.renderedInstance();
+    if (!instance) return;
+    this.dialog.open(RoomDialogComponent, {
+      data: {
+        instanceId: instance.instance_id,
+        instanceName: instance.instance_name ?? null,
+      },
+      // BIG modal — 82vw × 82vh (the `room-dialog-panel` global rule in
+      // styles.scss lifts Material's 560px / 65vh defaults).
+      ...ROOM_DIALOG_SIZE,
+      panelClass: 'room-dialog-panel',
+      backdropClass: 'room-dialog-backdrop',
     });
   }
 

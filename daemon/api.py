@@ -116,6 +116,7 @@ from daemon.routers import (
     wedge_capture_router,    # /api/wedge-captures (wedge-capture: the capture evidence store)
     metrics_router,         # /api/metrics (checkpoint read instrumentation surface)
     nest_reports_router,    # /api/nest-reports (nest-anomaly-report lane: the anomaly domain route)
+    rooms_router,           # /api/rooms/* + /api/instances/{id}/rooms (P6 group-chat observability modal)
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
@@ -6144,6 +6145,11 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # /api/nest-reports is owned by this router).  The ``metrics_router``
     # include above is the placement precedent.
     api_router.include_router(nest_reports_router)      # /api/nest-reports
+    # agent group chat P6 — the ROOM READ surface the observability
+    # modal rides: /api/instances/{id}/rooms + /api/rooms/{id}/messages.
+    # Mounted HERE (inside api_router, BEFORE the SPA catch-all) — the
+    # same placement precedent as the nest-reports door above.
+    api_router.include_router(rooms_router)             # /api/rooms/*
     # Phase 3 / plane-integration-revival — POST /api/plane/sync/{project_id}.
     # The router is mounted BEFORE the SPA catch-all (the catch-all
     # only fires for unmatched paths; the prefix /api/plane is owned

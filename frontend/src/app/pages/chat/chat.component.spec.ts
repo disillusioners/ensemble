@@ -1,6 +1,7 @@
 import { signal, computed, effect, Component, Inject, inject } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router } from '@angular/router';
+// FE-UI lane marker (group-chat P6 room modal suite): A-P6-23.
 import { MatDialog } from '@angular/material/dialog';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { of, Subject, throwError } from 'rxjs';
@@ -19,9 +20,27 @@ import {
 } from '../../services/message-merge.util';
 import { ChatComponent } from './chat.component';
 
-jest.mock('ngx-markdown', () => ({
-  MarkdownModule: class MarkdownModule {},
-}));
+// The chat interface renders markdown via ngx-markdown. Angular
+// validates every entry of a standalone component's `imports` array
+// (verifyStandaloneImport) — a bare class is REJECTED the moment the
+// component is first instantiated ("must be a standalone component /
+// directive / pipe or an NgModule"). The mock is therefore a REAL
+// standalone directive carrying the `markdown` selector and the inputs
+// the chat interface binds (`data`, `mermaid`) — so a suite that mounts
+// the real chat template renders it faithfully.
+jest.mock('ngx-markdown', () => {
+  const { Directive } = jest.requireActual('@angular/core');
+  class MarkdownMockDirective {
+    data = '';
+    mermaid = '';
+  }
+  Directive({
+    selector: 'markdown',
+    standalone: true,
+    inputs: ['data', 'mermaid'],
+  })(MarkdownMockDirective);
+  return { MarkdownModule: MarkdownMockDirective };
+});
 
 const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
 

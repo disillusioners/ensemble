@@ -54,6 +54,7 @@ from daemon.repositories.room.repository import (
     RoomClosedError,
     RoomError,
     RoomNotFoundError,
+    RoomNotOwnerError,
     RoomRepository,
     RoomSeqConflictError,
 )
@@ -78,6 +79,7 @@ __all__ = [
     "RoomError",
     "RoomNotFoundError",
     "RoomClosedError",
+    "RoomNotOwnerError",
     "MemberNotFoundError",
     "MemberNameCollisionError",
     "RoomSeqConflictError",

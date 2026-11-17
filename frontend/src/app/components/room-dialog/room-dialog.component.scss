@@ -1,0 +1,262 @@
+// RoomDialogComponent — the P6 chatrooms modal (architecture §13.1).
+//
+// The modal is deliberately BIG (82vw × 82vh, see the `room-dialog-panel`
+// global rule in styles.scss): it is a two-pane observability surface, not
+// a tooltip. The two panes are:
+//   (a) rooms   — the chatrooms created by the instance('s tree)
+//   (b) conversation — the selected room's messages, paged
+//
+// The dark palette mirrors the rest of the app's surfaces (the chat header
+// toggles, the workspace panes): #1e293b panels, #334155 borders, #94a3b8
+// secondary text, #e2e8f0 primary text.
+
+// The file-local palette (P6 tidier T8 — pure substitution, zero
+// output change): the SAME hexes the head comment documents.
+$panel: #1e293b;
+$border: #334155;
+$text-secondary: #94a3b8;
+$accent: #38bdf8;
+$green: #10b981;
+
+:host {
+  display: block;
+  color: var(--text-color, #e2e8f0);
+}
+
+.room-dialog-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+
+  .title-icon {
+    color: $accent;
+  }
+
+  .title-text {
+    font-size: 1.05rem;
+    font-weight: 600;
+  }
+
+  .dialog-instance-name {
+    color: rgba(226, 232, 240, 0.7);
+    font-size: 0.8rem;
+    font-weight: 400;
+    margin-left: 0.25rem;
+  }
+}
+
+.room-dialog-content {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.room-modal-body {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) 1fr;
+  gap: 1rem;
+  height: 100%;
+  min-height: 320px;
+  align-items: stretch;
+}
+
+.rooms-pane,
+.conversation-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  border: 1px solid $border;
+  border-radius: 0.5rem;
+  background-color: #0f172a;
+  overflow: hidden;
+}
+
+.pane-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid $border;
+  background-color: $panel;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #e2e8f0;
+
+  .pane-header-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pane-header-count {
+    margin-left: auto;
+    padding: 0.0625rem 0.375rem;
+    border-radius: 0.25rem;
+    background-color: rgba(56, 189, 248, 0.15);
+    color: $accent;
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.pane-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  flex: 1;
+  padding: 1.25rem;
+  text-align: center;
+  color: $text-secondary;
+  font-size: 0.8rem;
+
+  .pane-state-text {
+    max-width: 32ch;
+  }
+}
+
+.pane-state-error {
+  color: #f87171;
+
+  .pane-state-text {
+    color: #fca5a5;
+  }
+}
+
+.pane-retry-btn {
+  margin-top: 0.25rem;
+}
+
+// ── rooms pane ──────────────────────────────────────────────────────────
+
+.room-list {
+  list-style: none;
+  margin: 0;
+  padding: 0.25rem;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.room-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  width: 100%;
+  padding: 0.5rem 0.625rem;
+  border: 1px solid transparent;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: #e2e8f0;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+
+  &:hover {
+    background-color: $panel;
+  }
+
+  &:focus-visible {
+    outline: 2px solid $accent;
+    outline-offset: 1px;
+  }
+}
+
+.room-item-selected {
+  background-color: rgba(56, 189, 248, 0.12);
+  border-color: rgba(56, 189, 248, 0.35);
+}
+
+.room-item-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-item-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  font-size: 0.7rem;
+  color: $text-secondary;
+}
+
+.room-item-state {
+  padding: 0.0625rem 0.3125rem;
+  border-radius: 0.25rem;
+  background-color: rgba(16, 185, 129, 0.15);
+  color: $green;
+  text-transform: lowercase;
+}
+
+.room-item-state-closed {
+  background-color: rgba(148, 163, 184, 0.15);
+  color: $text-secondary;
+}
+
+.room-item-last-empty {
+  font-style: italic;
+  opacity: 0.75;
+}
+
+// ── conversation pane ───────────────────────────────────────────────────
+
+.message-list {
+  list-style: none;
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.room-message {
+  padding: 0.375rem 0;
+  border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+
+  &:last-child {
+    border-bottom: none;
+  }
+}
+
+.message-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-size: 0.7rem;
+  color: $text-secondary;
+}
+
+.message-author {
+  font-weight: 600;
+  color: $accent;
+}
+
+.message-kind {
+  padding: 0.0625rem 0.3125rem;
+  border-radius: 0.25rem;
+  background-color: rgba(148, 163, 184, 0.15);
+  color: $text-secondary;
+  text-transform: lowercase;
+}
+
+.message-content {
+  margin-top: 0.125rem;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: #e2e8f0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.load-more-row {
+  display: flex;
+  justify-content: center;
+  padding: 0.5rem;
+  border-top: 1px solid $border;
+}

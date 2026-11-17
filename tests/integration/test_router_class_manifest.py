@@ -159,6 +159,15 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
     # (``tests/unit/test_router_scope_manifest.py``); the auth-OFF
     # 503 fail-closed gate lives in the route.
     "/api/nest-reports": frozenset({"pd"}),
+    # agent group chat P6 (2026-11-16): the ROOM READ surface the
+    # observability modal rides (GET /api/rooms/{room_id}/messages).
+    # No route carries an explicit class tag ⇒ protected-default
+    # ("pd"), the metrics/nest-reports precedent. The SCOPE declaration
+    # lives in the scope cage (``tests/unit/test_router_scope_manifest.py``
+    # — the family declares the EXISTING ``instances:read`` scope); the
+    # sibling route (GET /api/instances/{instance_id}/rooms) joins the
+    # EXISTING /api/instances family.
+    "/api/rooms": frozenset({"pd"}),
     "/api/webhooks": frozenset({"module_lane"}),  # FR-40 module lane
     "/api/work": frozenset({"pd"}),
     "/api/workspace": frozenset({"pd"}),
@@ -399,4 +408,4 @@ class TestRouterClassManifest:
         # Phase 5 / Memoir Store v2 persona gate added the
         # /api/memoir family — the api_families count grew from 34
         # to 35.
-        assert len(api_families) == 35, sorted(api_families)
+        assert len(api_families) == 36, sorted(api_families)

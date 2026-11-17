@@ -1,4 +1,4 @@
-"""Agent-facing room tools — the ``room`` category (4 tools).
+"""Agent-facing room tools — the ``room`` category (5 tools).
 
 Agent group chat, Phase 2 / P5 (Emperor-ratified design, 2026-11-15 —
 ``.agents/shared/planning/group-chat/architecture-recommendation.md``,
@@ -7,7 +7,7 @@ the spec of record). The tool surface the Emperor's requirement named:
 milestone reports, changes to the chatroom via toolcall, ...) are
 injected into the instance's SYSTEM MESSAGE."*
 
-The four verbs
+The five verbs
 --------------
 
 * ``room_create`` — open a room (room row + the creator's OWNER
@@ -24,6 +24,12 @@ The four verbs
   the Ruling-A loop-back. The decision is RECORDED ON THE ROOM, so
   the proposal never stays unanswered (the parent-decided tasking
   rule).
+* ``room_close`` — the PARENT closes the room (the ``active → closed``
+  transition). This is the ONLY producer of the ``closed`` state:
+  architecture §3/§5 ratify the closed column of the capability row
+  and §10 ratifies the P-close GC arm (``closed_at < now − 14d`` →
+  purge), but without a producer the whole closed column was
+  unreachable. The verb is OWNER-ONLY ("close = parent tool only").
 
 Access posture — TWO layers, BOTH required
 ------------------------------------------
@@ -42,7 +48,9 @@ Access posture — TWO layers, BOTH required
    before the append; ``room_read`` — the repository's fail-closed
    read predicate (active member ∪ owner-ancestry), no in-body
    membership check; ``room_task_decision`` — an explicit ACTIVE
-   membership row beneath the owner check.
+   membership row beneath the owner check; ``room_close`` — an
+   explicit ACTIVE membership row beneath the OWNER check (close is
+   parent-only).
 
 The membership gate is FAIL-CLOSED and it is the pre-append gate:
 ``room_post`` resolves the caller's membership row BEFORE the append
@@ -66,6 +74,11 @@ House rules honored here:
   ``traceback`` / ``repr(exc)`` never reach the payload).
 * Every message-path DB touch is OFF-LOOP (``asyncio.to_thread`` via
   the room service — the v0.27.14 event-loop discipline).
+
+**Why this file is large (~1,195 lines).** The 1,000–3,000-line band
+requires a why-large note: the five room verbs share ONE
+authorization gate + refusal envelope — splitting them puts the gate
+ordering across a module boundary where the compiler cannot hold it.
 """
 
 from __future__ import annotations
@@ -80,10 +93,15 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from ._tool_registry import register_tool_category
+from daemon.repositories.room.models import (
+    ROOM_READ_DEFAULT_LIMIT,
+    ROOM_READ_MAX_LIMIT,
+)
 
 if TYPE_CHECKING:
     from daemon.repositories.room.service import RoomChatService
     from daemon.services.room_delivery import RoomDeliveryService
+    from daemon.services.room_post_cap import RoomPostTurnCap
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +115,7 @@ Tools in this category:
 - ``room_post`` — post a message; ``@name`` tags INTERRUPT a member, ``to:`` names ROUTE to one
 - ``room_read`` — read the room log (after_seq + limit)
 - ``room_task_decision`` — the parent's recorded answer to a task proposal
+- ``room_close`` — the OWNER closes the room (a closed room is read-only; it is purged 14 days later)
 
 Working rules (the guidelines text, mirrored in the joined-room system-message block):
 - Report MILESTONES, not a stream of consciousness. One post per milestone; the digest carries the recent ones.
@@ -109,7 +128,7 @@ Working rules (the guidelines text, mirrored in the joined-room system-message b
 #: word; never a variant like ``rooms`` / ``chat`` / ``group-chat``).
 ROOM_CATEGORY_KEY = "room"
 
-#: The four tool names this module constructs — the canonical list the
+#: The five tool names this module constructs — the canonical list the
 #: registry's ``KNOWN_TOOL_NAMES`` / ``DYNAMIC_TOOL_NAMES`` and the
 #: registration pin pack agree with.
 ROOM_TOOLS: tuple[str, ...] = (
@@ -117,6 +136,7 @@ ROOM_TOOLS: tuple[str, ...] = (
     "room_post",
     "room_read",
     "room_task_decision",
+    "room_close",
 )
 
 #: The refusal tokens (the in-process mirror of the door's status
@@ -138,6 +158,10 @@ TOKEN_NOT_OWNER = "not-the-owner"
 TOKEN_NO_PROPOSAL = "no-such-proposal"
 TOKEN_DUPLICATE_DECISION = "duplicate-decision"
 TOKEN_ROOM_CAP = "room-cap"
+#: The §9 PER-TURN POST BUDGET refusal (A-P6-1) — its OWN token: a
+#: budget exhaustion is a NAMED, actionable condition (post again next
+#: turn), distinct from the room-count cap above.
+TOKEN_POST_CAP = "post-cap"
 #: The room-name bound refusal (A-P5-17) — its OWN token, distinct
 #: from the generic ``invalid-input`` (a name outside the bound is a
 #: NAMED, actionable condition: the agent can fix it by shortening the
@@ -146,10 +170,6 @@ TOKEN_INVALID_ROOM_NAME = "invalid-room-name"
 
 #: The post body cap (architecture §9 — ``post <= 4000 chars``).
 ROOM_POST_MAX_CHARS = 4000
-#: The read window cap (the read tool is the FULL-HISTORY window; the
-#: digest is what stays small).
-ROOM_READ_MAX_LIMIT = 200
-ROOM_READ_DEFAULT_LIMIT = 50
 
 #: The room-NAME bound (A-P5-17) — the name rides the agent-facing
 #: JOINED-ROOM block (the banner) on EVERY turn, so an unbounded name
@@ -209,6 +229,60 @@ def _is_authorized(agent_id: str) -> bool:
     return isinstance(agent_id, str) and bool(agent_id.strip())
 
 
+def _gate(
+    label: str, caller_agent_id: str, caller_instance_id: str
+) -> str | None:
+    """The layer-2 gate — the FIRST logic of EVERY room tool body.
+
+    ONE implementation for the five verbs (the H1 extraction; the
+    fifth verb, ``room_close``, joined in P6): the
+    gate is the SECOND, independent authorization layer (a literal
+    tool name in an allow list bypasses the category gate), so it must
+    be the FIRST thing every body does — before ANY service handle is
+    resolved and before any DB touch.
+
+    Args:
+        label: The tool name — it names the refusal envelope.
+        caller_agent_id: The resolved agent id of the caller.
+        caller_instance_id: The caller's instance id.
+
+    Returns:
+        The refusal envelope when the caller may not use the room tools
+        at all, else ``None`` (the tool continues). The refusal TEXT is
+        byte-identical to the pre-extraction shape (the same labels,
+        tokens and messages).
+    """
+    if not _is_authorized(caller_agent_id):
+        return _refusal(
+            label,
+            TOKEN_UNKNOWN_AGENT,
+            "the room tools require a resolved agent identity",
+        )
+    if not caller_instance_id:
+        return _refusal(
+            label,
+            TOKEN_NOT_AUTHORIZED,
+            "the room tools require a caller instance id",
+        )
+    return None
+
+
+def _internal_error_refusal(label: str) -> str:
+    """The house internal-error envelope (the never-raise backstop).
+
+    ONE implementation for the five verbs (the H1 extraction; the
+    fifth verb, ``room_close``, joined in P6): an
+    unexpected exception is logged SERVER-SIDE and answered with this
+    generic envelope. The raw exception text NEVER reaches the payload
+    (the PB-F1 leak class).
+    """
+    return _refusal(
+        label,
+        TOKEN_INTERNAL_ERROR,
+        "an unexpected error occurred (logged server-side); retry later",
+    )
+
+
 def _room_service(manager: Any) -> RoomChatService | None:
     """The room service handle, or None when the daemon has none.
 
@@ -226,6 +300,27 @@ def _delivery_service(manager: Any) -> RoomDeliveryService | None:
     if manager is None:
         return None
     return getattr(manager, "_room_delivery_service", None)
+
+
+def _post_cap(manager: Any) -> RoomPostTurnCap | None:
+    """The §9 per-turn post budget handle, or None.
+
+    The manager ALWAYS carries the cap (``manager._room_post_turn_cap``
+    — the manager-level per-instance counter, A-P6-1). The
+    ``isinstance`` gate keeps the ``*_if_available`` posture: a
+    partial/embedded manager (a test double, a stripped manager) has
+    NO cap and therefore NO budget — the cap is a COST control, not an
+    admission gate, so a missing cap degrades to "no budget" rather
+    than to "every post refused".
+    """
+    if manager is None:
+        return None
+    from daemon.services.room_post_cap import RoomPostTurnCap
+
+    cap = getattr(manager, "_room_post_turn_cap", None)
+    if isinstance(cap, RoomPostTurnCap):
+        return cap
+    return None
 
 
 def _tree_root_id(manager: Any, instance_id: str) -> str | None:
@@ -256,7 +351,7 @@ def create_room_tools(
     agent_id: str = "",
     agent_tag: str | None = None,
 ) -> list:
-    """Create the four room tools for one instance/agent.
+    """Create the five agent group-chat room tools for one instance/agent.
 
     Args:
         manager: The instance manager — supplies the room service
@@ -394,23 +489,23 @@ def create_room_tools(
             Field(default="", description="Optional one-line rationale."),
         ]
 
+    class RoomCloseInput(BaseModel):
+        """Input schema for room_close."""
+
+        room_id: Annotated[
+            str,
+            Field(description="The chatroom UUID you own."),
+        ]
+
     @register_tool_category(ROOM_CATEGORY_KEY)
     @tool(args_schema=RoomCreateInput)
     async def room_create(name: str, member_name: str = "") -> str:
         """Open a chat-room for your team. Use tool_help("room_create") for details."""
-        # ── the layer-2 gate: FIRST logic in the body.
-        if not _is_authorized(caller_agent_id):
-            return _refusal(
-                "room_create",
-                TOKEN_UNKNOWN_AGENT,
-                "the room tools require a resolved agent identity",
-            )
-        if not caller_instance_id:
-            return _refusal(
-                "room_create",
-                TOKEN_NOT_AUTHORIZED,
-                "the room tools require a caller instance id",
-            )
+        # ── the layer-2 gate: FIRST logic in the body (the ONE
+        # shared helper — the five verbs delegate here, H1).
+        gate_refusal = _gate("room_create", caller_agent_id, caller_instance_id)
+        if gate_refusal is not None:
+            return gate_refusal
         # ── the room-NAME bound (A-P5-17): fail-closed BEFORE any DB
         # touch. The name rides the joined-room block on every turn, so
         # an unbounded name could crowd the ROSTER (then the
@@ -501,11 +596,7 @@ def create_room_tools(
             )
         except Exception:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("room_create failed")
-            return _refusal(
-                "room_create",
-                TOKEN_INTERNAL_ERROR,
-                "an unexpected error occurred (logged server-side); retry later",
-            )
+            return _internal_error_refusal("room_create")
 
     @register_tool_category(ROOM_CATEGORY_KEY)
     @tool(args_schema=RoomPostInput)
@@ -516,19 +607,11 @@ def create_room_tools(
         addressed_to: list[str] | None = None,
     ) -> str:
         """Post a milestone message to a chat-room. Use tool_help("room_post") for details."""
-        # ── the layer-2 gate: FIRST logic in the body.
-        if not _is_authorized(caller_agent_id):
-            return _refusal(
-                "room_post",
-                TOKEN_UNKNOWN_AGENT,
-                "the room tools require a resolved agent identity",
-            )
-        if not caller_instance_id:
-            return _refusal(
-                "room_post",
-                TOKEN_NOT_AUTHORIZED,
-                "the room tools require a caller instance id",
-            )
+        # ── the layer-2 gate: FIRST logic in the body (the ONE
+        # shared helper — the five verbs delegate here, H1).
+        gate_refusal = _gate("room_post", caller_agent_id, caller_instance_id)
+        if gate_refusal is not None:
+            return gate_refusal
         room_service = _room_service(manager)
         if room_service is None:
             return _refusal(
@@ -577,6 +660,50 @@ def create_room_tools(
                     f"you are not an active member of room {room_id} — "
                     "posting is refused (fail-closed)",
                 )
+            # ── the §9 PER-TURN POST BUDGET (A-P6-1, BINDING; the M2
+            # consume-on-success adjudication, A-P6-25): the CHECK
+            # sits at the PRE-APPEND region — the append is the commit
+            # point of the room log, so a post beyond the budget must
+            # NEVER reach it (the same posture as the membership gate
+            # above; A-P6-1's settled posture is unchanged). The
+            # CHARGE, however, is applied only AFTER a successful
+            # append (the consume site below the append): a post that
+            # fails (closed / not-found / a fault) must not spend the
+            # budget — the M2 fairness fix. The budget has exactly ONE
+            # implementation (the E collapse): ``peek`` is the
+            # READ-ONLY check and ``charge`` is the single consuming
+            # path, both owned by the cap module — this body no longer
+            # re-derives the arithmetic, so no caller can reintroduce
+            # consume-on-check. The known race (ACCEPTABLE per
+            # A-P6-25): the check is READ-ONLY, so two concurrent
+            # posts of the SAME instance in the SAME turn can both
+            # pass it before either is charged — a racy extra post can
+            # slip through the check-to-charge window. The budget is a
+            # soft §9 cost control, not an admission gate: the
+            # overshoot costs one extra row, never an unbounded
+            # stream. The counter is manager-level, per instance, and
+            # resets at the turn boundary.
+            post_cap = _post_cap(manager)
+            if post_cap is not None:
+                allowed, cap_detail = post_cap.peek(caller_instance_id)
+                if not allowed:
+                    logger.warning(
+                        "room_post refused: the per-turn post budget is "
+                        "spent (instance=%s room=%s budget=%s)",
+                        caller_instance_id,
+                        room_id,
+                        cap_detail.get("max_posts_per_turn"),
+                    )
+                    return _refusal(
+                        "room_post",
+                        TOKEN_POST_CAP,
+                        "you already posted "
+                        f"{cap_detail.get('posts_this_turn')} message(s) this "
+                        f"turn — the budget is "
+                        f"{cap_detail.get('max_posts_per_turn')} posts per "
+                        "member per turn (post a milestone, not a stream); "
+                        "post again next turn",
+                    )
             roster = await room_service.list_members(
                 room_id, caller_instance_id=caller_instance_id, active_only=True
             )
@@ -619,6 +746,15 @@ def create_room_tools(
                     TOKEN_ROOM_NOT_FOUND,
                     f"room {room_id} does not exist (absent or purged)",
                 )
+            # ── the §9 CHARGE (the M2 consume-on-success consume site,
+            # A-P6-25): the append SUCCEEDED — only now is the slot
+            # spent. Every failure path above (closed / not-found /
+            # the catch-all) returned or raised BEFORE this site, so a
+            # failed append leaves the budget untouched — the next
+            # post keeps its full allowance. The charge is the cap's
+            # SINGLE consuming path (the E collapse).
+            if post_cap is not None:
+                post_cap.charge(caller_instance_id)
             # Route the post (the delivery router). Typed error
             # surfacing: the router has no try/except of its own, so
             # the tool owns the boundary — a routing failure NEVER
@@ -636,10 +772,17 @@ def create_room_tools(
                         "room_post routing failed (room=%s seq=%s): %r",
                         room_id, appended.get("seq"), exc,
                     )
+                    # The EXCEPTION path mints the SAME closed token as
+                    # the absent-router path (A-P5-16's follow-up): the
+                    # delivery service was present but did NOT deliver,
+                    # so the honest signal is the delivery-service token.
+                    # A bare ``routing_error: true`` was indistinguishable
+                    # from "the router is not there".
                     routing = {
                         "tag_outcomes": [],
                         "addressed_outcomes": [],
                         "routing_error": True,
+                        "routing_reason": TOKEN_NO_DELIVERY_SERVICE,
                     }
             else:
                 # NO ROUTER: the post LANDED (the append above is the
@@ -674,11 +817,7 @@ def create_room_tools(
             )
         except Exception:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("room_post failed")
-            return _refusal(
-                "room_post",
-                TOKEN_INTERNAL_ERROR,
-                "an unexpected error occurred (logged server-side); retry later",
-            )
+            return _internal_error_refusal("room_post")
 
     @register_tool_category(ROOM_CATEGORY_KEY)
     @tool(args_schema=RoomReadInput)
@@ -688,19 +827,11 @@ def create_room_tools(
         limit: int = ROOM_READ_DEFAULT_LIMIT,
     ) -> str:
         """Read a chat-room's messages. Use tool_help("room_read") for details."""
-        # ── the layer-2 gate: FIRST logic in the body.
-        if not _is_authorized(caller_agent_id):
-            return _refusal(
-                "room_read",
-                TOKEN_UNKNOWN_AGENT,
-                "the room tools require a resolved agent identity",
-            )
-        if not caller_instance_id:
-            return _refusal(
-                "room_read",
-                TOKEN_NOT_AUTHORIZED,
-                "the room tools require a caller instance id",
-            )
+        # ── the layer-2 gate: FIRST logic in the body (the ONE
+        # shared helper — the five verbs delegate here, H1).
+        gate_refusal = _gate("room_read", caller_agent_id, caller_instance_id)
+        if gate_refusal is not None:
+            return gate_refusal
         room_service = _room_service(manager)
         if room_service is None:
             return _refusal(
@@ -750,14 +881,48 @@ def create_room_tools(
                 await room_service.advance_read_cursor(
                     room_id, caller_instance_id, highest
                 )
-            roster = await room_service.list_members(
-                room_id, caller_instance_id=caller_instance_id, active_only=True
+            # ── the EPILOGUE try (N-2): the roster read is its OWN
+            # failure domain. The messages were already read (and the
+            # read ACK already advanced the cursor) — a roster fault
+            # DEGRADES the answer (an empty roster + the marker), it
+            # never discards them, and the success path and the
+            # degradation path are SEPARATELY OBSERVABLE.
+            roster: list[dict[str, Any]] = []
+            roster_degraded = False
+            try:
+                roster = await room_service.list_members(
+                    room_id,
+                    caller_instance_id=caller_instance_id,
+                    active_only=True,
+                )
+            except Exception as exc:  # noqa: BLE001 — degrade, never raise
+                logger.warning(
+                    "room_read: the roster read failed for room %s (%r) — "
+                    "degraded (the messages are returned without it)",
+                    room_id,
+                    exc,
+                )
+                roster_degraded = True
+            # ── the cursor echo is CLAMPED (N-9): the tool never
+            # echoes a cursor beyond the room's latest seq (the HTTP
+            # surface clamps the same way — "an unclamped cursor is
+            # NEVER echoed"). The denormalized ``message_count`` IS the
+            # latest seq (one append = one row = one seq).
+            room_last_seq = int(room.get("message_count") or 0)
+            last_returned = max(
+                [int(m.get("seq") or 0) for m in messages] or [0]
+            )
+            next_after_seq = (
+                last_returned
+                if last_returned
+                else min(after, room_last_seq)
             )
             return json.dumps(
                 {
                     "room_id": room_id,
                     "room_name": room.get("name"),
                     "state": room.get("state"),
+                    "roster_degraded": roster_degraded,
                     "messages": [
                         {
                             "seq": m.get("seq"),
@@ -771,19 +936,13 @@ def create_room_tools(
                         for m in messages
                     ],
                     "roster": [_member_dict(m) for m in roster],
-                    "next_after_seq": max(
-                        [int(m.get("seq") or 0) for m in messages] or [after]
-                    ),
+                    "next_after_seq": next_after_seq,
                 },
                 indent=2,
             )
         except Exception:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("room_read failed")
-            return _refusal(
-                "room_read",
-                TOKEN_INTERNAL_ERROR,
-                "an unexpected error occurred (logged server-side); retry later",
-            )
+            return _internal_error_refusal("room_read")
 
     @register_tool_category(ROOM_CATEGORY_KEY)
     @tool(args_schema=RoomTaskDecisionInput)
@@ -794,19 +953,11 @@ def create_room_tools(
         note: str = "",
     ) -> str:
         """Record your decision on a task proposal in a chat-room. Use tool_help("room_task_decision") for details."""
-        # ── the layer-2 gate: FIRST logic in the body.
-        if not _is_authorized(caller_agent_id):
-            return _refusal(
-                "room_task_decision",
-                TOKEN_UNKNOWN_AGENT,
-                "the room tools require a resolved agent identity",
-            )
-        if not caller_instance_id:
-            return _refusal(
-                "room_task_decision",
-                TOKEN_NOT_AUTHORIZED,
-                "the room tools require a caller instance id",
-            )
+        # ── the layer-2 gate: FIRST logic in the body (the ONE
+        # shared helper — the five verbs delegate here, H1).
+        gate_refusal = _gate("room_task_decision", caller_agent_id, caller_instance_id)
+        if gate_refusal is not None:
+            return gate_refusal
         room_service = _room_service(manager)
         delivery = _delivery_service(manager)
         # TWO services, TWO refusals: a daemon can carry the room
@@ -834,6 +985,7 @@ def create_room_tools(
             )
         try:
             from daemon.repositories.room.repository import (
+                RoomClosedError,
                 RoomError,
                 RoomNotFoundError,
             )
@@ -877,6 +1029,26 @@ def create_room_tools(
                     TOKEN_NO_PROPOSAL,
                     f"no task proposal at seq {proposal_seq} in room {room_id}",
                 )
+            except RoomClosedError:
+                # The room was CLOSED between the owner/member checks
+                # and the append (a closed room refuses posts — the
+                # repository's forward-only transition). This became
+                # REACHABLE when room_close landed (A-P6-30). The
+                # generic RoomError branch below would answer
+                # ``duplicate-decision`` ("a decision for this proposal
+                # is already recorded") — which is FALSE here: the
+                # proposal was never decided, the ROOM is closed. The
+                # EXISTING room-closed token is the honest member of
+                # the closed vocabulary (room_close and room_post
+                # already mint it) — NO new token, no vocabulary
+                # growth, and the agent can tell the two conditions
+                # apart.
+                return _refusal(
+                    "room_task_decision",
+                    TOKEN_ROOM_CLOSED,
+                    f"room {room_id} is closed — a closed room is "
+                    "read-only, so no decision can be recorded on it",
+                )
             except RoomError as exc:
                 # PB-F1: the repository raises RoomError with the
                 # IntegrityError EMBEDDED (the dedup-UNIQUE refusal —
@@ -899,18 +1071,121 @@ def create_room_tools(
             return json.dumps({"recorded": True, **result}, indent=2)
         except Exception:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("room_task_decision failed")
+            return _internal_error_refusal("room_task_decision")
+
+    @register_tool_category(ROOM_CATEGORY_KEY)
+    @tool(args_schema=RoomCloseInput)
+    async def room_close(room_id: str) -> str:
+        """Close a chat-room you own. Use tool_help("room_close") for details."""
+        # ── the layer-2 gate: FIRST logic in the body (the ONE
+        # shared helper — the verbs delegate here, H1).
+        gate_refusal = _gate("room_close", caller_agent_id, caller_instance_id)
+        if gate_refusal is not None:
+            return gate_refusal
+        room_service = _room_service(manager)
+        if room_service is None:
             return _refusal(
-                "room_task_decision",
-                TOKEN_INTERNAL_ERROR,
-                "an unexpected error occurred (logged server-side); retry later",
+                "room_close",
+                TOKEN_NO_ROOM_SERVICE,
+                "the chat-room service is not available in this daemon",
             )
+        try:
+            from daemon.repositories.room.repository import (
+                RoomClosedError,
+                RoomNotFoundError,
+                RoomNotOwnerError,
+            )
+
+            room = await room_service.get_room(room_id)
+            if room is None:
+                # A PURGED room is NONEXISTENT (R2) — the same
+                # not-found refusal the other verbs mint.
+                return _refusal(
+                    "room_close",
+                    TOKEN_ROOM_NOT_FOUND,
+                    f"room {room_id} does not exist (absent or purged)",
+                )
+            # ── the OWNER GATE (architecture §3/§5: "close = parent
+            # tool only"). The room's OWNER is the parent that opened
+            # it. Fail-closed: a member that does not own the room
+            # cannot close it.
+            if room.get("owner_instance_id") != caller_instance_id:
+                return _refusal(
+                    "room_close",
+                    TOKEN_NOT_OWNER,
+                    "only the room owner (the parent) can close a "
+                    "chat-room — close is parent-only",
+                )
+            # ── the MEMBERSHIP GATE beneath the owner check (the house
+            # posture — every write is preceded by an explicit ACTIVE
+            # membership resolution).
+            member = await room_service.get_member(room_id, caller_instance_id)
+            if member is None or member.get("state") != "active":
+                return _refusal(
+                    "room_close",
+                    TOKEN_NOT_A_MEMBER,
+                    f"you are not an active member of room {room_id}",
+                )
+            try:
+                closed = await room_service.close_room(
+                    room_id=room_id,
+                    owner_instance_id=caller_instance_id,
+                )
+            except RoomNotFoundError:
+                return _refusal(
+                    "room_close",
+                    TOKEN_ROOM_NOT_FOUND,
+                    f"room {room_id} does not exist (absent or purged)",
+                )
+            except RoomNotOwnerError:
+                # The repository re-checks the ownership predicate (the
+                # DB layer) — a concurrent owner change lands here.
+                return _refusal(
+                    "room_close",
+                    TOKEN_NOT_OWNER,
+                    "only the room owner (the parent) can close a "
+                    "chat-room — close is parent-only",
+                )
+            except RoomClosedError:
+                # The transition is FORWARD-ONLY (active → closed): a
+                # room that is already closed is not re-closable.
+                return _refusal(
+                    "room_close",
+                    TOKEN_ROOM_CLOSED,
+                    f"room {room_id} is already closed — a closed room "
+                    "is read-only",
+                )
+            return json.dumps(
+                {
+                    "room_id": room_id,
+                    "name": closed.get("name"),
+                    "state": closed.get("state"),
+                    "closed_at": closed.get("closed_at"),
+                    "hint": (
+                        "a closed room is read-only (posts are refused); "
+                        "the room is purged from the database 14 days "
+                        "after the close"
+                    ),
+                },
+                indent=2,
+            )
+        except Exception:  # noqa: BLE001 — house pattern: error string, never raise
+            logger.exception("room_close failed")
+            return _internal_error_refusal("room_close")
 
     room_create._full_doc_ = _build_full_doc("room_create")
     room_post._full_doc_ = _build_full_doc("room_post")
     room_read._full_doc_ = _build_full_doc("room_read")
     room_task_decision._full_doc_ = _build_full_doc("room_task_decision")
+    room_close._full_doc_ = _build_full_doc("room_close")
 
-    return [room_create, room_post, room_read, room_task_decision]
+    return [
+        room_create,
+        room_post,
+        room_read,
+        room_task_decision,
+        room_close,
+    ]
 
 
 def _build_full_doc(label: str) -> str:
@@ -938,4 +1213,6 @@ def _build_full_doc(label: str) -> str:
         "The category is PRIVILEGED (entry #23) — opt-in via an explicit "
         "tools.allow entry — AND every call is gated on ROOM MEMBERSHIP: "
         "a non-member is refused BEFORE any write (fail-closed).\n"
+        "room_close is OWNER-only (close = parent tool only): a closed "
+        "room is read-only and is purged 14 days after the close.\n"
     )

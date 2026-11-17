@@ -331,6 +331,94 @@ def test_room_read_honours_the_after_seq_cursor(stack):
     assert [m["text"] for m in payload["messages"]] == ["two"], payload
 
 
+# ── the P6 backlog pins (N-9, A-P5-16, N-2) ───────────────────────────
+
+
+def test_room_read_never_echoes_an_unclamped_cursor(stack):
+    """N-9 — the cursor echo is CLAMPED.
+
+    The HTTP surface clamps the same way ("an unclamped cursor is NEVER
+    echoed"); the agent-tool path used to echo the CALLER's cursor when
+    the window came back empty, so a caller could pass an arbitrary
+    number and get it back as "where to resume". The tool now clamps
+    the cursor to the room's latest seq.
+    """
+    engine, repo, svc, room_id, owner = stack
+    manager = _manager(engine, svc)
+    tools = _tools(manager, owner)
+    _call(tools["room_post"].ainvoke({"room_id": room_id, "text": "one"}))
+    _call(tools["room_post"].ainvoke({"room_id": room_id, "text": "two"}))
+    # A cursor FAR beyond the room's latest seq (the log ends at seq 2).
+    raw = _call(
+        tools["room_read"].ainvoke({"room_id": room_id, "after_seq": 999_999})
+    )
+    payload = json.loads(raw)
+    assert payload["messages"] == [], payload
+    assert payload["next_after_seq"] == 2, payload
+    # The CLAMPED cursor is a REAL position: resuming from it returns
+    # nothing (the log is exhausted), never a phantom row.
+    raw = _call(
+        tools["room_read"].ainvoke(
+            {"room_id": room_id, "after_seq": payload["next_after_seq"]}
+        )
+    )
+    assert json.loads(raw)["messages"] == []
+
+
+def test_room_read_reports_a_degraded_roster_separately(stack):
+    """N-2 — the epilogue try is its OWN failure domain.
+
+    The messages were already read (and the read ACK already advanced
+    the cursor); a roster fault must DEGRADE the answer, never discard
+    the messages. The success path and the degradation path are
+    separately observable (``roster_degraded``).
+    """
+    engine, repo, svc, room_id, owner = stack
+    manager = _manager(engine, svc)
+    tools = _tools(manager, owner)
+    _call(tools["room_post"].ainvoke({"room_id": room_id, "text": "one"}))
+
+    # The SUCCESS path — the roster rides along.
+    raw = _call(tools["room_read"].ainvoke({"room_id": room_id}))
+    payload = json.loads(raw)
+    assert payload["roster_degraded"] is False, payload
+    assert payload["roster"], payload
+
+    # The DEGRADATION path — the roster read raises.
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("roster store is down")
+
+    svc.list_members = _boom
+    raw = _call(tools["room_read"].ainvoke({"room_id": room_id}))
+    payload = json.loads(raw)
+    assert payload["roster_degraded"] is True, payload
+    assert payload["roster"] == [], payload
+    # The MESSAGES survived — the degradation never discards them.
+    assert [m["text"] for m in payload["messages"]] == ["one"], payload
+
+
+def test_room_post_mints_the_routing_reason_when_the_router_raises(stack):
+    """A-P5-16's follow-up — the routing EXCEPTION path carries the
+    reason token (the closed M5 split vocabulary), so the agent can
+    tell "the router failed" from "there was nobody to notify"."""
+    engine, repo, svc, room_id, owner = stack
+    manager = _manager(engine, svc)
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("the delivery router exploded")
+
+    manager._room_delivery_service.route_post = _boom
+    tools = _tools(manager, owner)
+    raw = _call(tools["room_post"].ainvoke({"room_id": room_id, "text": "ping"}))
+    payload = json.loads(raw)
+    assert payload["routing_error"] is True, payload
+    assert payload["routing_reason"] == "delivery-service-unavailable", payload
+    # The post LANDED — the append is the durable truth.
+    with Session(engine) as s:
+        rows = list(s.exec(select(RoomMessage)).all())
+    assert len(rows) == 1, rows
+
+
 # ── room_task_decision ─────────────────────────────────────────────────
 
 
@@ -535,6 +623,58 @@ def test_room_task_decision_duplicate_is_typed_and_never_leaks(stack):
         if m["kind"] == "task_decision"
     ]
     assert len(decisions) == 1, decisions
+
+
+def test_room_task_decision_on_a_closed_room_is_room_closed_not_duplicate(stack):
+    """(A-P6-35 j) A decision on a CLOSED room is a NAMED condition —
+    ``room-closed`` — never ``duplicate-decision``.
+
+    ``room_close`` (A-P6-30) made the closed state REACHABLE, so a
+    decision recorded after the close rides the repository's
+    ``RoomClosedError`` — a SUBCLASS of ``RoomError``. Without its own
+    branch the generic ``RoomError`` handler answered
+    ``duplicate-decision`` with "already recorded", which is FALSE
+    here: the proposal was never decided, the ROOM is closed. The
+    EXISTING ``room-closed`` token is minted (NO new token, no
+    vocabulary growth) and the message states the real reason."""
+    engine, repo, svc, room_id, owner = stack
+    manager = _manager(engine, svc)
+    tools = _tools(manager, owner)
+    # Mint the proposal (a tagged post to a terminal child).
+    with Session(engine) as s:
+        inst = s.get(Instance, "child-1")
+        inst.status = "completed"
+        s.commit()
+    _call(
+        tools["room_post"].ainvoke(
+            {"room_id": room_id, "text": "who can finish scene 4?", "tagged": ["worker"]}
+        )
+    )
+    proposals = [
+        m
+        for m in repo.list_messages(
+            room_id, caller_instance_id=owner, after_seq=0, limit=50
+        )
+        if m["kind"] == "task_proposal"
+    ]
+    proposal = proposals[0]
+    # CLOSE the room (the owner's own verb) — the state is now live.
+    closed_raw = _call(tools["room_close"].ainvoke({"room_id": room_id}))
+    assert closed_raw.startswith("{"), closed_raw
+    # The decision on the CLOSED room: room-closed, never duplicate.
+    raw = _call(
+        tools["room_task_decision"].ainvoke(
+            {
+                "room_id": room_id,
+                "proposal_seq": proposal["seq"],
+                "decision": "revive",
+            }
+        )
+    )
+    assert raw.startswith("Error:"), raw
+    assert "room-closed" in raw, raw
+    assert "duplicate-decision" not in raw, raw
+    assert "already recorded" not in raw, raw
 
 
 def test_room_create_refuses_when_the_tree_room_cap_is_reached(stack):

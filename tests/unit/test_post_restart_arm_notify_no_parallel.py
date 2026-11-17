@@ -128,6 +128,21 @@ PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     # The guard's intent is UNCHANGED: an unauthorized 40th mount
     # still fails this test loudly.
     "nest_reports_router",  # /api/nest-reports (anomaly domain read door)
+    # agent group chat P6 lane (2026-11-16): the chat-room READ door
+    # (/api/rooms/{room_id}/messages + /api/instances/{id}/rooms — the
+    # Emperor's §13.1 human observability modal's backend, A-P6-3). The
+    # rationale the guard demands, for this addition:
+    #   (a) it is NOT an HTTP endpoint for the wake — it is a READ
+    #       surface for the room log, and it adds no wake path;
+    #   (b) it is registered UNCONDITIONALLY, so the OFF-state route
+    #       table grows by this one family — accepted for the same
+    #       reason the nest-reports / wedge-capture / metrics families
+    #       above are;
+    #   (c) it reuses the EXISTING ``instances:read`` scope (A-P6-3:
+    #       NO new auth model), and the accompanying censuses (the scope
+    #       manifest + the class manifest, A-P6-9) were updated in the
+    #       SAME commit as the mount.
+    "rooms_router",         # /api/rooms/* (the chat-room read door)
     "plane_router",         # /api/plane
     "tmp_images_router",    # /api/tmp_images
     "prompts_router",       # /api/prompts (agent-prompt-immutability Phase B T5)

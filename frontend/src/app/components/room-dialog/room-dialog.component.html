@@ -1,0 +1,147 @@
+<h2 mat-dialog-title class="room-dialog-title">
+  <mat-icon class="title-icon" aria-hidden="true">forum</mat-icon>
+  <span class="title-text">Chatrooms</span>
+  @if (data.instanceName) {
+    <span class="dialog-instance-name">{{ data.instanceName }}</span>
+  }
+</h2>
+
+<mat-dialog-content class="room-dialog-content">
+  <div class="room-modal-body">
+    <!-- (a) the chatrooms created by this instance('s tree) -->
+    <section class="rooms-pane" aria-label="Chatrooms">
+      <header class="pane-header">
+        <span class="pane-header-text">Chatrooms</span>
+        @if (rooms().length > 0) {
+          <span class="pane-header-count">{{ rooms().length }}</span>
+        }
+      </header>
+
+      @if (roomsLoading()) {
+        <div class="pane-state" role="status">
+          <mat-spinner diameter="24"></mat-spinner>
+          <span class="pane-state-text">Loading chatrooms…</span>
+        </div>
+      } @else if (roomsError(); as error) {
+        <div class="pane-state pane-state-error" role="alert">
+          <mat-icon aria-hidden="true">error_outline</mat-icon>
+          <span class="pane-state-text">{{ error }}</span>
+          <button mat-stroked-button type="button" class="pane-retry-btn" (click)="retryRooms()">
+            Retry
+          </button>
+        </div>
+      } @else if (rooms().length === 0) {
+        <div class="pane-state">
+          <mat-icon aria-hidden="true">forum</mat-icon>
+          <span class="pane-state-text">No chatrooms for this instance yet.</span>
+        </div>
+      } @else {
+        <ul class="room-list">
+          @for (room of rooms(); track room.room_id) {
+            <li>
+              <button
+                type="button"
+                class="room-item"
+                [class.room-item-selected]="room.room_id === selectedRoomId()"
+                [attr.aria-pressed]="room.room_id === selectedRoomId()"
+                (click)="selectRoom(room)"
+              >
+                <span class="room-item-name">{{ room.name }}</span>
+                <span class="room-item-meta">
+                  <span class="room-item-state" [class.room-item-state-closed]="room.closed">
+                    {{ room.closed ? 'closed' : 'active' }}
+                  </span>
+                  <span class="room-item-members">
+                    {{ room.member_count }} {{ room.member_count === 1 ? 'member' : 'members' }}
+                  </span>
+                  @if (room.last_message_at) {
+                    <span class="room-item-last" [title]="'Last message at ' + room.last_message_at">
+                      {{ room.last_message_at | date: 'short' }}
+                    </span>
+                  } @else {
+                    <span class="room-item-last room-item-last-empty">no messages yet</span>
+                  }
+                </span>
+              </button>
+            </li>
+          }
+        </ul>
+      }
+    </section>
+
+    <!-- (b) the selected room's conversation -->
+    <section class="conversation-pane" aria-label="Conversation">
+      <header class="pane-header">
+        <span class="pane-header-text">{{ selectedRoom()?.name ?? 'Conversation' }}</span>
+        @if (selectedRoom(); as room) {
+          <span
+            class="room-item-state"
+            [class.room-item-state-closed]="room.closed"
+            matTooltip="{{ room.member_count }} member(s)"
+          >
+            {{ room.closed ? 'closed' : 'active' }}
+          </span>
+        }
+      </header>
+
+      @if (!selectedRoomId()) {
+        <div class="pane-state">
+          <mat-icon aria-hidden="true">chat_bubble_outline</mat-icon>
+          <span class="pane-state-text">Select a chatroom to read its conversation.</span>
+        </div>
+      } @else if (messagesError(); as error) {
+        <div class="pane-state pane-state-error" role="alert">
+          <mat-icon aria-hidden="true">error_outline</mat-icon>
+          <span class="pane-state-text">{{ error }}</span>
+          <button mat-stroked-button type="button" class="pane-retry-btn" (click)="retryMessages()">
+            Retry
+          </button>
+        </div>
+      } @else if (messagesLoading() && messages().length === 0) {
+        <div class="pane-state" role="status">
+          <mat-spinner diameter="24"></mat-spinner>
+          <span class="pane-state-text">Loading messages…</span>
+        </div>
+      } @else if (messages().length === 0) {
+        <!-- A room with zero messages is an EMPTY CONVERSATION, not an error. -->
+        <div class="pane-state">
+          <mat-icon aria-hidden="true">chat_bubble_outline</mat-icon>
+          <span class="pane-state-text">No messages in this chatroom yet.</span>
+        </div>
+      } @else {
+        <ol class="message-list">
+          @for (message of messages(); track message.seq) {
+            <li class="room-message">
+              <div class="message-meta">
+                <span class="message-author">{{ message.member_name }}</span>
+                <span class="message-time">{{ message.created_at | date: 'short' }}</span>
+                @if (message.kind && message.kind !== 'message') {
+                  <span class="message-kind">{{ message.kind }}</span>
+                }
+              </div>
+              <div class="message-content">{{ message.content }}</div>
+            </li>
+          }
+        </ol>
+      }
+
+      @if (selectedRoomId() && !messagesError() && nextAfterSeq() !== null) {
+        <div class="load-more-row">
+          <button
+            mat-stroked-button
+            type="button"
+            class="load-more-btn"
+            [disabled]="messagesLoading()"
+            (click)="loadMore()"
+          >
+            {{ messagesLoading() ? 'Loading…' : 'Load more' }}
+          </button>
+        </div>
+      }
+    </section>
+  </div>
+</mat-dialog-content>
+
+<mat-dialog-actions align="end">
+  <button mat-button type="button" (click)="close()">Close</button>
+</mat-dialog-actions>

@@ -4,6 +4,11 @@
 // rationale); runtime values from the mirrors are imported from the
 // model files directly by the modules that use them.
 //
+// Why this file is large (~1,097 lines): the single barrel
+// aggregation of the FE's wire-mirror types — one import site by
+// design.
+// FE-UI lane marker (group-chat P6 room modal surface): A-P6-23.
+//
 // Instance types
 export type InstanceStatus = 'idle' | 'running' | 'paused' | 'completed' | 'error' | 'terminated' | 'queued' | 'waiting_children' | 'failed';
 
@@ -1054,6 +1059,19 @@ export interface MaintenanceErrorBody {
 
 // Snapshot subsystem types (snapshot-uiux v1) — see snapshot.model.ts
 export * from "./snapshot.model";
+
+// Group-chat room read surface (P6 — the human observability modal).
+// See room.model.ts for the pinned wire contract + the normalizers
+// (extra-field tolerance + fail-closed row dropping).
+//
+// TYPE-ONLY re-export, for the same reason the metrics mirror below is
+// type-only: the barrel is imported by EAGER modules (the app shell and
+// several pages), and a VALUE re-export would put the room normalizers
+// into the INITIAL bundle — every operator downloads the room vocabulary
+// at startup, whether or not they ever open a chatroom. The runtime
+// values (the normalizers) stay with their only consumer, the room
+// service, which lives in the lazily-mounted chat chunk.
+export type * from './room.model';
 
 // Remote Hands / MCP Gateway types (Phase C — the read-only operator
 // surface: machines / sessions / audit). See mcps-gateway.model.ts for

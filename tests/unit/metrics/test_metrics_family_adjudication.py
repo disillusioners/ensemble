@@ -235,13 +235,23 @@ PRE_EXISTING_DAEMON_OFFENDERS = frozenset(
         "daemon/repositories/source/repository.py",
         "daemon/routers/__init__.py",
         "daemon/routers/live_views.py",
+        # agent group chat P6 lane (2026-11-16): the SSE room-resolution
+        # pre-branch rode the events route (the daemon path this lane
+        # changed).
+        "daemon/routers/messages.py",
         "daemon/routers/mcp_servers.py",
         "daemon/routers/nest_reports.py",
         "daemon/routers/schedules.py",
         "daemon/routers/sources.py",
         "daemon/services/anomaly_service.py",
+        "daemon/services/context_block.py",
         "daemon/services/context_messages.py",
         "daemon/services/instance_messaging.py",
+        # agent group chat P6 lane (2026-11-16): the H2 extraction's two
+        # new modules (the shared block primitives + the joined-room
+        # block) and the hub's room-resolution alias registration.
+        "daemon/services/joined_room_context.py",
+        "daemon/services/live_event_hub.py",
         "daemon/services/live_views.py",
         "daemon/services/memoir_briefing.py",
         "daemon/services/memoir_embedding_worker.py",
@@ -255,6 +265,13 @@ PRE_EXISTING_DAEMON_OFFENDERS = frozenset(
         "daemon/services/project_skill_source/model.py",
         "daemon/services/prompt_refresh.py",
         "daemon/services/release_manifest.py",
+        # agent group chat P4 lane (2026-11-15/16): the nudge
+        # coordinator. Registered per the P4 tester gate's RED-4
+        # disposition (2026-11-16, "add daemon/services/room_nudge.py +
+        # daemon/tools/todo_tools.py to PRE_EXISTING_DAEMON_OFFENDERS") —
+        # the offender stays NAMED and attributable instead of surfacing
+        # as a new offender in a later lane's red.
+        "daemon/services/room_nudge.py",
         "daemon/services/scheduling_service.py",
         "daemon/services/skill_injection_service.py",
         "daemon/services/skill_search_service.py",
@@ -280,8 +297,16 @@ PRE_EXISTING_DAEMON_OFFENDERS = frozenset(
         "daemon/tools/pok.py",
         "daemon/tools/prompt_reload.py",
         "daemon/tools/provenance.py",
+        # agent group chat P6 lane (2026-11-16): the room tool surface
+        # (the H1 gate extraction + the P6 backlog fixes).
+        "daemon/tools/room.py",
         "daemon/tools/scheduling.py",
         "daemon/tools/skill_tools.py",
+        # agent group chat P4 lane (2026-11-15/16): the todo-tool
+        # reminder carriers (the P4 nudge carriers ride the reminder
+        # return). Registered with the P4 nudge coordinator above —
+        # the P4 tester gate's RED-4 disposition (2026-11-16).
+        "daemon/tools/todo_tools.py",
         "daemon/tools/upgrade_journal.py",
         "daemon/tools/upgrade_tools.py",
     }

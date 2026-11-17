@@ -1,4 +1,10 @@
-"""Instance message API endpoints."""
+"""Instance message API endpoints.
+
+**Why this file is large (~1,152 lines).** The 1,000–3,000-line band
+requires a why-large note: this router aggregates the message and
+SSE lane surfaces — the stream endpoints and their shared
+resolve/auth helpers live together by design.
+"""
 
 import asyncio
 import json
@@ -948,6 +954,105 @@ async def get_message_status(instance_id: str, message_id: str, request: Request
     }
 
 
+# ── the SSE ROOM-RESOLUTION PRE-BRANCH (P6 — A-P6-11; F-3 per A-P6-26) ────
+#
+# Architecture §8: *"SSE observability only (+room-resolution pre-branch,
+# ``routers/messages.py:960-963``; hub ``services/live_event_hub.py``)"*,
+# and the §13 P6 row: *"UI per §13.1 (R3) + SSE pre-branch + audit
+# surfacing"*.
+#
+# WHAT IT DOES (F-3 — leader adjudication, option b): a client that
+# points the events stream at a ROOM id gets a ROOM-SCOPED,
+# CONTENT-FREE channel. The room id resolves to its owner instance for
+# LIVENESS validation only (a room whose owner instance is gone is a
+# typed 404 — the stream needs a live anchor); the CONNECTION itself is
+# registered as a room channel (``live_hub.add_room_channel``) and
+# receives ONLY the content-free ``room_*`` audit-class lifecycle
+# events (created / joined / left / closed / purged shapes —
+# ids/counts/outcomes, broadcast via
+# ``live_hub.broadcast_room_event``). NO message bodies, NO
+# checkpoint / tool-result / question-pack content, NO context-usage
+# snapshots, and NO owner identity disclosure beyond what the
+# resolution ack already carries. The pre-F-3 behavior — the queue
+# aliased onto the owner's instance stream (the dual-key registration)
+# — leaked the owner's content-bearing events to any outsider who
+# named a room id; that ride-along is REMOVED.
+#
+# The human's authorization stays ROLE-LEVEL (the route's
+# ``instances:read`` scope — the observability premise is unchanged);
+# room CONTENT stays behind the fail-closed read API (the observability
+# modal's typed routes — the modal does NOT depend on SSE content).
+#
+# The OWNER's OWN instance stream is UNCHANGED: a direct instance-id
+# subscription keeps the historical registration, the initial
+# context-usage snapshot, the question-pack replay and every
+# content-bearing event, byte-for-byte.
+#
+# OBSERVABILITY ONLY — the pre-branch resolves a STREAM TARGET and
+# nothing else: it never routes, wakes, revives, delivers or writes.
+# The delivery lanes remain the P3 router's job; the SSE lane stays a
+# read-only surface.
+#
+# FAIL-CLOSED: an id that is neither a live instance nor an existing
+# room answers the typed 404 exactly as before. A PURGED room has no
+# rows ⇒ it is NONEXISTENT (R2) ⇒ 404 — the pre-branch never invents a
+# room that the substrate does not carry.
+
+
+async def _resolve_sse_target(manager: Any, raw_id: str) -> tuple[str, str]:
+    """Resolve the SSE stream target — ``(instance_id, room_id)``.
+
+    The INSTANCE branch is the historical path, unchanged: a live
+    instance id resolves to itself and ``room_id`` is empty. The ROOM
+    branch is the pre-branch: the id resolves as a chat-room and the
+    OWNER instance is returned as the LIVENESS ANCHOR — the connection
+    itself is registered as a room channel (F-3), not on the owner's
+    stream; the owner's identity surfaces only in the resolution ack.
+
+    Raises:
+        HTTPException: 404 when the id is neither a live instance nor
+            an existing room (or the room carries no owner).
+    """
+    try:
+        await manager.get_instance(raw_id)
+        return raw_id, ""
+    except KeyError:
+        pass
+    room_service = getattr(manager, "_room_chat_service", None)
+    if room_service is None:
+        raise HTTPException(
+            status_code=404, detail=f"Instance not found: {raw_id}"
+        )
+    try:
+        room = await room_service.get_room(raw_id)
+    except Exception as exc:  # noqa: BLE001 — a broken room read is not-found
+        logger.warning(
+            "SSE room-resolution: the room read failed for %s (%r) — "
+            "not-found",
+            raw_id,
+            exc,
+        )
+        room = None
+    if room is None:
+        raise HTTPException(
+            status_code=404, detail=f"Instance not found: {raw_id}"
+        )
+    owner = str(room.get("owner_instance_id") or "")
+    if not owner:
+        raise HTTPException(
+            status_code=404, detail=f"Instance not found: {raw_id}"
+        )
+    try:
+        await manager.get_instance(owner)
+    except KeyError as exc:
+        # The room exists but its owner instance is gone — the stream
+        # has no live target to ride.
+        raise HTTPException(
+            status_code=404, detail=f"Instance not found: {raw_id}"
+        ) from exc
+    return owner, raw_id
+
+
 # 3. GET /instances/{instance_id}/events - SSE stream
 @router.get("/{instance_id}/events", dependencies=[scope_required("instances:read")])
 async def stream_events(instance_id: str, request: Request):
@@ -957,25 +1062,45 @@ async def stream_events(instance_id: str, request: Request):
     if manager.is_shutting_down:
         raise HTTPException(status_code=503, detail="Server is shutting down")
     
-    try:
-        await manager.get_instance(instance_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"Instance not found: {instance_id}")
+    # ── the ROOM-RESOLUTION PRE-BRANCH (P6): an instance id resolves to
+    # itself; a ROOM id validates against its owner for liveness only —
+    # the CONNECTION becomes a room-scoped CONTENT-FREE channel (F-3).
+    target_instance_id, room_id = await _resolve_sse_target(manager, instance_id)
     
     live_hub: LiveEventHub = request.app.state.live_hub
     
     async def event_generator() -> AsyncGenerator[dict, None]:
-        # 1. Connected event
+        # 1. Connected event — carries the RESOLUTION (the resolved
+        # instance, the room id, and which branch fired), so the
+        # resolution is observable ON the stream. The room branch adds
+        # the ``channel`` discriminator (additive — F-3); the instance
+        # branch keeps the historical shape byte-for-byte.
+        connected_data: dict[str, Any] = {
+            "instance_id": target_instance_id,
+            "room_id": room_id,
+            "resolved_from": "room" if room_id else "instance",
+        }
+        if room_id:
+            connected_data["channel"] = "room"
         yield {
             "event": "connected",
-            "data": json.dumps({"instance_id": instance_id}),
+            "data": json.dumps(connected_data),
         }
 
         # 2. Create a queue and register it BEFORE any helper that
         # broadcasts through the live hub. Otherwise the broadcast finds
         # zero registered connections and the event is silently dropped.
+        #
+        # The registration IS the content boundary (F-3): a room-resolved
+        # subscription registers as a ROOM CHANNEL — it can only receive
+        # content-free room_* lifecycle broadcasts — while a direct
+        # instance subscription keeps the historical instance-keyed
+        # registration with its full content stream.
         queue: asyncio.Queue = asyncio.Queue(maxsize=SSE_QUEUE_MAXSIZE)
-        await live_hub.add_connection(instance_id, queue)
+        if room_id:
+            await live_hub.add_room_channel(room_id, queue)
+        else:
+            await live_hub.add_connection(target_instance_id, queue)
 
         # 2b. Initial context_usage snapshot. Lets the FE indicator populate
         # immediately on connect, without waiting for the next message
@@ -986,13 +1111,21 @@ async def stream_events(instance_id: str, request: Request):
         # Run it as a background task so any DB I/O in get_messages happens
         # off the SSE send-path. create_task + add_done_callback keeps the
         # task tracked so we don't leak on early disconnect.
+        #
+        # INSTANCE BRANCH ONLY (F-3): a room-resolved subscription is
+        # content-free — the owner's context usage is owner content and
+        # MUST NOT be replayed onto a room channel.
         async def _initial_snapshot() -> None:
             try:
-                await manager._messaging_service.emit_context_usage_for_instance(instance_id)
+                await manager._messaging_service.emit_context_usage_for_instance(
+                    target_instance_id
+                )
             except Exception as e:
                 logger.debug(f"Failed to emit initial context usage: {e}")
 
-        snapshot_task = asyncio.create_task(_initial_snapshot())
+        snapshot_task = (
+            asyncio.create_task(_initial_snapshot()) if not room_id else None
+        )
 
         # 2c. Initial question-pack replay. Mirrors the
         # ``GET /{instance_id}/question`` endpoint in
@@ -1004,6 +1137,9 @@ async def stream_events(instance_id: str, request: Request):
         # ``create_task`` for symmetry with ``snapshot_task`` above
         # (keeps the SSE send-path off the critical path even though
         # ``get_question_pack`` is in-memory and cheap).
+        #
+        # INSTANCE BRANCH ONLY (F-3): the owner's pending question pack
+        # is owner content — a room channel never receives it.
         async def _initial_question_pack_replay() -> None:
             try:
                 # Lazy import keeps the service out of every other path
@@ -1011,11 +1147,11 @@ async def stream_events(instance_id: str, request: Request):
                 # the answer endpoint in instances.py).
                 from daemon.services.question_manager import pack_to_dict
                 pending_pack = manager._question_manager.get_question_pack(
-                    instance_id
+                    target_instance_id
                 )
                 if pending_pack is not None and pending_pack.status == "pending":
                     await live_hub.stream_question_pack(
-                        instance_id,
+                        target_instance_id,
                         pack_to_dict(pending_pack),
                     )
             except Exception as e:
@@ -1023,7 +1159,11 @@ async def stream_events(instance_id: str, request: Request):
                     f"Failed to replay pending question pack on connect: {e}"
                 )
 
-        question_replay_task = asyncio.create_task(_initial_question_pack_replay())
+        question_replay_task = (
+            asyncio.create_task(_initial_question_pack_replay())
+            if not room_id
+            else None
+        )
 
         try:
             while True:
@@ -1049,10 +1189,16 @@ async def stream_events(instance_id: str, request: Request):
             # Cancel the initial snapshot / question-pack replay if still
             # running so we don't do a wasted checkpointer round-trip /
             # question-pack replay after the client has gone.
-            if not snapshot_task.done():
+            if snapshot_task is not None and not snapshot_task.done():
                 snapshot_task.cancel()
-            if not question_replay_task.done():
+            if (
+                question_replay_task is not None
+                and not question_replay_task.done()
+            ):
                 question_replay_task.cancel()
-            await live_hub.remove_connection(instance_id, queue)
+            if room_id:
+                await live_hub.remove_room_channel(room_id, queue)
+            else:
+                await live_hub.remove_connection(target_instance_id, queue)
     
     return EventSourceResponse(event_generator(), ping=SSE_PING_INTERVAL)
