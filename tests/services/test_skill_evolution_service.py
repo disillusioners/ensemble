@@ -2007,6 +2007,55 @@ class TestForcedWinnerResolvedAtGuard:
         assert after_winner.ab_test_group is None
 
     @pytest.mark.asyncio
+    async def test_auto_resolution_on_a_resolved_pair_is_refused(
+        self, evolution_service, skill_repo, ab_test_repo,
+        fake_metrics_service, project_id,
+    ):
+        """Path 2 (auto/threshold) mirror guard: an auto-resolution
+        (NO forced winner) on an ALREADY-RESOLVED pair is REFUSED — and
+        nothing mutates (the earlier decision stands).
+
+        The loser RETAINS its ``ab_test_group`` after a resolution, so
+        the endpoint can still reach this branch through the loser; a
+        second auto-resolution would silently INVERT the earlier
+        decision. The guard fires before any winner pick and before any
+        mutation.
+        """
+        group, loser, winner = self._resolved_pair(
+            skill_repo, ab_test_repo, project_id
+        )
+        fake_metrics_service.get_ab_comparison_stats.return_value = {
+            "skill_id_a": loser.id,
+            "skill_id_b": winner.id,
+            "completion_rate_a": 0.4,
+            "completion_rate_b": 0.9,
+            "difference": 0.5,
+            "comparisons": 12,
+            "extension_count": 0,
+            "ready_to_resolve": True,
+            "needs_more_data": False,
+        }
+        before_pair = ab_test_repo.get_by_group(group)
+        before_resolved_at = before_pair.resolved_at
+        before_winner_id = before_pair.winner_skill_id
+
+        with pytest.raises(ValueError, match="already resolved"):
+            await evolution_service.check_ab_test_resolution(group)
+
+        # NO mutation — the earlier decision stands untouched.
+        after_pair = ab_test_repo.get_by_group(group)
+        assert after_pair.resolved_at == before_resolved_at
+        assert after_pair.winner_skill_id == before_winner_id
+        after_winner = skill_repo.get(winner.id)
+        assert after_winner.is_active is True
+        assert after_winner.status == "active"
+        assert after_winner.ab_test_group is None
+        after_loser = skill_repo.get(loser.id)
+        assert after_loser.is_active is False
+        assert after_loser.status == "inactive"
+        assert after_loser.ab_test_group == group  # retained
+
+    @pytest.mark.asyncio
     async def test_normal_auto_resolution_on_an_unresolved_pair_still_resolves(
         self, evolution_service, skill_repo, ab_test_repo,
         fake_metrics_service, project_id,

@@ -1995,6 +1995,21 @@ class SkillEvolutionService:
 
         # Path 2: threshold met.
         if difference >= min_diff:
+            # Mirror guard (2026-11-17, leader ruling — Path 2): the
+            # SAME semantics as the forced-winner Path 0 guard
+            # (~:1840-1858) and the sanctioned resolver's guard: a pair
+            # that is ALREADY RESOLVED must never be resolved again —
+            # the loser RETAINS its ``ab_test_group`` after a
+            # resolution, so the endpoint can still reach this branch
+            # through the loser and a second auto-resolution would
+            # silently INVERT the earlier decision. The guard fires
+            # BEFORE any winner pick and BEFORE any mutation; the
+            # threshold / difference / extension RULE below is
+            # unchanged.
+            if getattr(ab_test, "resolved_at", None):
+                raise ValueError(
+                    f"ab_test_group {ab_test_group!r} is already resolved"
+                )
             winner_id, loser_id = _pick_winner()
             await asyncio.gather(
                 asyncio.to_thread(self._skill_repo.deactivate, loser_id),
