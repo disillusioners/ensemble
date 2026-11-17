@@ -53,6 +53,21 @@ class _Unset:
 
 UNSET = _Unset()
 
+#: Slug→row resolution precedence (mechanics, not policy): the row that
+#: OWNS a slug. The ACTIVE row owns it; an ARCHIVED row owns it when no
+#: active row exists (terminal, forward-only); a SUPERSEDED row is an
+#: ANCESTOR and never owns its slug while a descendant exists.
+#:
+#: The precedence is applied in PYTHON over the full slug match set —
+#: NOT by an ORDER BY the database is free to ignore — so the owner is
+#: PLAN-INDEPENDENT (PostgreSQL and SQLite choose different indexes for
+#: the same WHERE clause; see the ``resolve_slug_row`` docstring).
+_SLUG_OWNER_STATUS_RANK: dict[str, int] = {
+    "active": 0,
+    "archived": 1,
+    "superseded": 2,
+}
+
 
 class POKRepository:
     """CRUD + the supersede transaction over the caller's engine."""
@@ -69,6 +84,16 @@ class POKRepository:
     def get_by_slug(
         self, project_id: str, slug: str, *, status: str | None = "active"
     ) -> ProjectOperatingKnowledge | None:
+        """The first row matching (project, slug[, status]).
+
+        ⚠️ THE UNFILTERED FORM (``status=None``) IS **NOT** A SLUG
+        RESOLVER: with a lineage present (a superseded ancestor + its
+        active successor share one slug) the row returned is whichever
+        one the DATABASE PLAN yields first — PostgreSQL returns the
+        ROOT ancestor, SQLite returns the active row. MUTATION PATHS
+        MUST USE :meth:`resolve_slug_row`; this method is an
+        inspection helper.
+        """
         stmt = select(ProjectOperatingKnowledge).where(
             ProjectOperatingKnowledge.project_id == project_id,
             ProjectOperatingKnowledge.slug == slug,
@@ -77,6 +102,72 @@ class POKRepository:
             stmt = stmt.where(ProjectOperatingKnowledge.status == status)
         with Session(self._engine) as session:
             return session.exec(stmt).first()
+
+    def resolve_slug_row(
+        self,
+        project_id: str,
+        slug: str,
+        *,
+        scope: str = "owner",
+    ) -> ProjectOperatingKnowledge | None:
+        """Resolve a slug to ITS row — DETERMINISTIC, plan-independent.
+
+        One slug is carried by a WHOLE LINEAGE: every supersede
+        inserts a successor with the SAME slug, so a slug can map to
+        several rows (the superseded ancestors + the active head). A
+        single-row fetch over that set picks whichever row the
+        database plan yields first — PostgreSQL's plan for the
+        unfiltered WHERE returned the ROOT ancestor, so the curation
+        path refused every successor-generation row with
+        ``pok_not_found`` (measured: PG ``Index Scan using
+        idx_pok_project_id`` → heap order → root first; SQLite's plan
+        returned the active row — the bug was plan-dependent, which is
+        why the SQLite unit pack never showed it).
+
+        The owner is therefore resolved HERE, in Python, over the full
+        match set:
+
+        * ``scope="owner"`` (default) → the row that OWNS the slug:
+          the active row; else the most recent archived row; else the
+          most recent superseded row (a dead ancestor — the service
+          layer refuses to curate it).
+        * ``scope="active"`` → the ACTIVE row only. The write path's
+          prior: an archived row is TERMINAL (archived is
+          forward-only) and a superseded row is an ancestor — neither
+          is supersede-able, so neither may be picked there.
+
+        Ties inside one status are broken by the most recent row
+        (``created_at`` then ``id``) — the terminal row of that status
+        owns the slug.
+        """
+        if scope not in ("owner", "active"):
+            raise ValueError(f"unknown slug-resolution scope {scope!r}")
+        stmt = select(ProjectOperatingKnowledge).where(
+            ProjectOperatingKnowledge.project_id == project_id,
+            ProjectOperatingKnowledge.slug == slug,
+        )
+        if scope == "active":
+            stmt = stmt.where(ProjectOperatingKnowledge.status == "active")
+        with Session(self._engine) as session:
+            rows = list(session.exec(stmt).all())
+        if not rows:
+            return None
+        if scope == "active":
+            # Structurally ONE active row per (project, slug) — the
+            # uq_pok_active_slug partial unique index. The max() is a
+            # deterministic tie-break should the index ever be absent.
+            return max(rows, key=lambda r: (r.created_at or "", r.id or ""))
+        best_rank = min(
+            _SLUG_OWNER_STATUS_RANK.get(r.status, len(_SLUG_OWNER_STATUS_RANK))
+            for r in rows
+        )
+        same = [
+            r
+            for r in rows
+            if _SLUG_OWNER_STATUS_RANK.get(r.status, len(_SLUG_OWNER_STATUS_RANK))
+            == best_rank
+        ]
+        return max(same, key=lambda r: (r.created_at or "", r.id or ""))
 
     def list_entries(
         self,

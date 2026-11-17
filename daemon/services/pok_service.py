@@ -408,7 +408,12 @@ class POKService:
                 "post-escape per W5)",
             )
         # 5. exact-dup / supersede / laundering on the active slug.
-        prior = self._repo.get_by_slug(project_id, slug, status="active")
+        # The write path's prior is the ACTIVE row ONLY (scope
+        # "active"): an ARCHIVED row is terminal (archived is
+        # forward-only — superseding it would resurrect it) and a
+        # SUPERSEDED row is an ancestor. Same resolver as the curation
+        # path, one explicit scope apart.
+        prior = self._repo.resolve_slug_row(project_id, slug, scope="active")
         if prior is not None:
             if normalize_body(prior.body) == normalize_body(body):
                 # Exact-dup no-op echo (Phase-1 behavior): the tier
@@ -861,8 +866,25 @@ class POKService:
                 "(omitted leaves the tier unchanged — trust-tier "
                 "addendum T-3)",
             )
-        row = self._repo.get_by_slug(project_id, slug, status=None)
-        if row is None or row.status == "superseded":
+        # THE row that OWNS this slug (deterministic, plan-independent).
+        # The lookup this replaces was an UNFILTERED single-row fetch
+        # whose row was chosen by the DATABASE PLAN: with a lineage
+        # present (a superseded ancestor and its active successor share
+        # one slug) PostgreSQL returned the ROOT ancestor, whose status
+        # is 'superseded' → the refusal below fired on EVERY
+        # successor-generation row ("pok_not_found" on rows that
+        # pok_query reports as active). The resolver picks the owner by
+        # status precedence (active > archived > superseded).
+        row = self._repo.resolve_slug_row(project_id, slug, scope="owner")
+        if row is None:
+            raise POKError(
+                "pok_not_found",
+                f"no entry {slug!r} on this project",
+            )
+        if row.status == "superseded":
+            # Every superseded row has a successor by construction, so
+            # this is only reachable when the head of the chain is
+            # gone — the dead ancestor is never curated directly.
             raise POKError(
                 "pok_not_found",
                 f"no active/archived entry {slug!r} on this project "

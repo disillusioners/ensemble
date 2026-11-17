@@ -679,3 +679,185 @@ class TestCountActiveInFamilyBoundary:
         assert normalize_body("A\nB") == "a b"
         assert content_hash("x") == content_hash("x")
         assert content_hash("x") != content_hash("y")
+
+
+# ── TASK-2: the slug→row resolver — curation must reach the OWNER ───────
+
+
+class TestSlugOwnerResolution:
+    """Curating a slug must flip THE ROW THAT OWNS IT.
+
+    ONE slug is carried by a WHOLE LINEAGE: every supersede inserts a
+    successor with the SAME slug (``uq_pok_active_slug`` frees the
+    slug for the successor), so ``(project, slug)`` matches SEVERAL
+    rows — the superseded ancestors plus the active head. The curator's
+    lookup used to be an UNFILTERED single-row fetch, so the row it
+    reached was whichever one the DATABASE PLAN returned first
+    (PostgreSQL: the ROOT ancestor → every successor-generation row
+    refused with ``pok_not_found``; SQLite: the active row — the
+    defect was PLAN-DEPENDENT, which is why this SQLite pack never
+    showed it).
+
+    The owner is resolved by STATUS PRECEDENCE (active > archived >
+    superseded), applied over the whole match set — never by an
+    ordering the database is free to choose.
+
+    NON-VACUITY — how these legs fail under a ROOT-WALK resolution
+    (the resolver walks the slug's lineage to the ROOT ancestor):
+    * the root is the SUPERSEDED row, so ``curate(slug,
+      archived=True)`` flips the ROOT (its status leaves 'superseded'
+      for 'archived') and leaves the SUCCESSOR 'active' — the curator's
+      intent is silently lost and the head keeps being injected;
+    * and the root's ``superseded_by_id`` wire is rewritten, i.e. an
+      ANCESTOR is mutated by a successor-generation curation.
+    The legs below assert the opposite: the SUCCESSOR's row id is the
+    one that changes, and every ancestor keeps its status, its
+    ``superseded_by_id`` wire and its flags.
+    """
+
+    def test_curate_archives_the_successor_and_leaves_the_root_untouched(
+        self, svc: POKService
+    ) -> None:
+        v1 = svc.upsert(project_id="p1", slug="chain-01-a", body="v1", agent_id="d")
+        v2 = svc.upsert(
+            project_id="p1", slug="chain-01-a", body="v2 differs", agent_id="d"
+        )
+        assert v2.action == "superseded"
+        assert svc._repo.get(v1.entry.id).status == "superseded"
+
+        out = svc.curate(
+            project_id="p1", slug="chain-01-a", agent_id="leader", archived=True
+        )
+        # OBSERVABLE STATE — which row changed, by row id + status.
+        assert out.id == v2.entry.id
+        assert svc._repo.get(v2.entry.id).status == "archived"
+        # SAFETY — the ROOT ancestor is untouched (status, wire, flags).
+        root = svc._repo.get(v1.entry.id)
+        assert root.status == "superseded"
+        assert root.superseded_by_id == v2.entry.id
+        assert root.pinned is False
+        assert root.disputed is False
+
+    def test_curate_never_mutates_any_ancestor_of_a_three_generation_chain(
+        self, svc: POKService
+    ) -> None:
+        v1 = svc.upsert(project_id="p1", slug="chain-02-a", body="v1", agent_id="d")
+        v2 = svc.upsert(
+            project_id="p1", slug="chain-02-a", body="v2 differs", agent_id="d"
+        )
+        v3 = svc.upsert(
+            project_id="p1", slug="chain-02-a", body="v3 differs more", agent_id="d"
+        )
+        assert v3.action == "superseded"
+
+        out = svc.curate(
+            project_id="p1", slug="chain-02-a", agent_id="leader", archived=True
+        )
+        assert out.id == v3.entry.id
+        assert svc._repo.get(v3.entry.id).status == "archived"
+        # BOTH ancestors keep their status AND their lineage wire.
+        first = svc._repo.get(v1.entry.id)
+        second = svc._repo.get(v2.entry.id)
+        assert first.status == "superseded"
+        assert first.superseded_by_id == v2.entry.id
+        assert second.status == "superseded"
+        assert second.superseded_by_id == v3.entry.id
+        # The chain is still walkable end to end (query renders it).
+        chain = svc._repo.lineage(v3.entry.id)
+        assert [r.id for r in chain] == [v1.entry.id, v2.entry.id, v3.entry.id]
+
+    def test_curate_on_a_root_only_slug_flips_only_that_row(
+        self, svc: POKService
+    ) -> None:
+        """A slug with NO successor: the root IS the owner — it flips,
+        and nothing else in the project moves."""
+        v1 = svc.upsert(project_id="p1", slug="solo-01-a", body="solo fact", agent_id="d")
+        before = {
+            r.id
+            for r in svc._repo.list_entries(
+                "p1", statuses=("active", "superseded", "archived")
+            )
+        }
+        out = svc.curate(
+            project_id="p1", slug="solo-01-a", agent_id="leader", archived=True
+        )
+        assert out.id == v1.entry.id
+        assert svc._repo.get(v1.entry.id).status == "archived"
+        # No OTHER row changed: the id set is identical (a descendant
+        # of a curated root must never be created or flipped).
+        after = {
+            r.id
+            for r in svc._repo.list_entries(
+                "p1", statuses=("active", "superseded", "archived")
+            )
+        }
+        assert after == before
+        assert len(
+            [r for r in svc._repo.list_entries(
+                "p1", statuses=("active", "superseded", "archived")
+            ) if r.slug == "solo-01-a"]
+        ) == 1
+
+    def test_curate_does_not_resurrect_an_archived_ancestor(
+        self, svc: POKService
+    ) -> None:
+        """Archive → re-add (a FRESH active row, not a supersede) →
+        curate again: the ARCHIVED ancestor stays archived (forward-
+        only) and the active head is the one that flips."""
+        v1 = svc.upsert(project_id="p1", slug="arch-01-a", body="first fact", agent_id="d")
+        svc.curate(project_id="p1", slug="arch-01-a", agent_id="leader", archived=True)
+        assert svc._repo.get(v1.entry.id).status == "archived"
+
+        v2 = svc.upsert(
+            project_id="p1", slug="arch-01-a", body="second fact differs", agent_id="d"
+        )
+        assert v2.action == "created"  # the archived row is NOT supersede-able
+
+        out = svc.curate(
+            project_id="p1", slug="arch-01-a", agent_id="leader", archived=True
+        )
+        assert out.id == v2.entry.id
+        assert svc._repo.get(v2.entry.id).status == "archived"
+        # The archived ancestor is untouched — never un-archived,
+        # never re-statused.
+        assert svc._repo.get(v1.entry.id).status == "archived"
+
+    def test_unknown_slug_still_refuses_not_found(self, svc: POKService) -> None:
+        """A genuinely-absent slug keeps the not-found refusal."""
+        with pytest.raises(POKError) as ei:
+            svc.curate(
+                project_id="p1",
+                slug="never-written-01-a",
+                agent_id="leader",
+                archived=True,
+            )
+        assert ei.value.code == "pok_not_found"
+
+    def test_resolver_picks_the_active_owner_not_the_root(
+        self, svc: POKService
+    ) -> None:
+        """The resolver CONTRACT (repo level): the owner of a slug is
+        its active row — never the superseded root, whatever the
+        database plan returns first."""
+        v1 = svc.upsert(project_id="p1", slug="chain-03-a", body="v1", agent_id="d")
+        v2 = svc.upsert(
+            project_id="p1", slug="chain-03-a", body="v2 differs", agent_id="d"
+        )
+        owner = svc._repo.resolve_slug_row("p1", "chain-03-a", scope="owner")
+        active = svc._repo.resolve_slug_row("p1", "chain-03-a", scope="active")
+        assert owner.id == v2.entry.id
+        assert owner.status == "active"
+        assert active.id == v2.entry.id
+        assert owner.id != v1.entry.id
+
+    def test_resolver_active_scope_never_returns_an_archived_row(
+        self, svc: POKService
+    ) -> None:
+        """The write path's scope: an ARCHIVED row is terminal — the
+        'active' scope must not hand it back as a supersede target."""
+        v1 = svc.upsert(project_id="p1", slug="term-01-a", body="first fact", agent_id="d")
+        svc.curate(project_id="p1", slug="term-01-a", agent_id="leader", archived=True)
+        assert svc._repo.resolve_slug_row("p1", "term-01-a", scope="active") is None
+        owner = svc._repo.resolve_slug_row("p1", "term-01-a", scope="owner")
+        assert owner.id == v1.entry.id
+        assert owner.status == "archived"

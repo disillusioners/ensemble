@@ -419,6 +419,11 @@ def create_pok_tools(
         """Curate THIS project's operating knowledge (leader /
         project-manager ONLY).
 
+        The slug resolves to THE ROW THAT OWNS IT — the active row of
+        that slug's lineage (a successor-generation slug still carries
+        its superseded ancestors under the same slug); the ancestors
+        are never the curation target and are never mutated.
+
         Use tool_help() for details. Flips (all optional, combinable):
         - ``pinned``: core tier (ALWAYS injected first). Cap 2 per
           project — the 3rd pin refuses naming the current pins.

@@ -431,3 +431,52 @@ class TestTypedEchoTaxonomy:
         out = tools[0].invoke({"slug": "noop-a", "body": "same"})
         assert out["action"] == "no-op"
         assert "note" in out
+
+    def test_curate_reaches_the_owner_row_of_a_lineage(self, tool_env) -> None:
+        """The TOOL surface must reach the row that OWNS the slug.
+
+        A successor-generation slug (born by supersede) carries a
+        whole lineage under one slug; the curator's lookup used to
+        land on the ROOT ancestor (the row the database plan returned
+        first) → ``pok_not_found`` on a row pok_query reports as
+        active. The tool must now flip the OWNER (the active head)
+        and echo ITS row id.
+        """
+        writer = create_pok_tools(
+            _manager(tool_env, "p1", "developer"),
+            current_instance_id="inst-1",
+            agent_id="developer",
+        )
+        writer[0].invoke({"slug": "chain-01-a", "body": "v1"})
+        writer[0].invoke({"slug": "chain-01-a", "body": "v2 differs"})
+        from daemon.services.pok_service import POKService
+
+        repo = POKService(tool_env.engine)._repo
+        rows = [
+            r
+            for r in repo.list_entries("p1", statuses=("active", "superseded"))
+            if r.slug == "chain-01-a"
+        ]
+        head = next(r for r in rows if r.status == "active")
+        root = next(r for r in rows if r.status == "superseded")
+
+        curator = create_pok_tools(
+            _manager(tool_env, "p1", "leader"),
+            current_instance_id="inst-1",
+            agent_id="leader",
+        )
+        out = curator[2].invoke({"slug": "chain-01-a", "archived": True})
+        assert out.get("code") != "pok_not_found", out
+        assert out["id"] == head.id
+        assert out["status"] == "archived"
+        # The root ancestor is untouched.
+        assert repo.get(root.id).status == "superseded"
+
+    def test_curate_unknown_slug_surfaces_the_not_found_code(self, tool_env) -> None:
+        curator = create_pok_tools(
+            _manager(tool_env, "p1", "leader"),
+            current_instance_id="inst-1",
+            agent_id="leader",
+        )
+        out = curator[2].invoke({"slug": "never-written-01-a", "archived": True})
+        assert out.get("code") == "pok_not_found", out
