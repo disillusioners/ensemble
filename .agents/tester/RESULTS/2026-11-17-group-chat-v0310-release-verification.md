@@ -23,6 +23,7 @@
 - **BLK-1 (critical, ceremony-facing)** — the plan's §5.4 "safe invocation" boots the **not-yet-promoted** binary against the **live prod DB on the live port** (`ENSEMBLE_SELF_ENV=live`, `POSTGRES_DB=ensemble_prod`, `PORT=9797`). `create_all` would create the three room tables in prod **outside the promote ceremony**, the boot collides with the running live daemon on 9797, and `ENSEMBLE_SELF_ENV=live` opens the prod-DSN carve-out (`daemon/ensemble_config.py:269`). If the promote then aborts, prod carries the new schema under the old binary.
 - **BLK-2 (critical, ceremony-facing)** — the plan's §5.4 scrub is **incomplete**, and the decisive gap is **`POSTGRES_URL`**. It is a full DSN returned **verbatim** by `_build_pg_connection_string` (`daemon/persistence.py:233-235`) — it **short-circuits** the `POSTGRES_*` builder **and bypasses `assert_prod_dsn_sanctioned`**, which resolves the DB name only from `POSTGRES_DB`. Dry-run probe (no connection opened): with the five canonical vars scrubbed and `POSTGRES_URL` ambient, the resolver returned the poisoned prod DSN **verbatim**; with both present, the ambient `POSTGRES_URL` still won. `DATABASE_URL`, `DATABASE_URL_POSTGRES` and the libpq `PG*` family were checked at the daemon-boot level and are **not** redirect vectors (the daemon always passes a complete URL; libpq gives URL params precedence over `PG*`) — they stay in the scrub as hygiene, and `PGSSLMODE`/`PGPASSFILE` can still fill gaps the URL omits.
 - **BLK-3 (minor, code-level — NOT release-blocking)** — `daemon/services/spawn_env_policy.py` strips the `PG*` family and `DATABASE_URL` but **not** `POSTGRES_URL`, so spawned children inherit an ambient `POSTGRES_URL`. Follow-up for a later release, not this cut.
+- **WATCH-1 (not a blocker today — S1d must be re-run AT the tag)** — the parked branch `feature/video-mock-prompts` (commit `e559b4b80`) carries a future seal re-pin (11 seal rows **+ 8 `agents/*.md`** for the video team). It is not an ancestor of HEAD or v0.30.12, so it is out of range today and S1d is unaffected. But if it merges into the release line **before the v0.31.0 tag is cut**, §4.3 check #2 flips non-empty and check #3 becomes a legitimate re-pin.
 
 ---
 
@@ -85,8 +86,35 @@ The scratch DB is left **as found**; the P3/P5 columns were never added to `publ
 - `agents/` census base→HEAD: **only the eight `meta.json` files** (the opt-in `room` grant). Sample hunk (ari): `"instance_ops"` → `"instance_ops", "room"`.
 - `meta.json` is provably outside the seal: `VERSIONED_PROMPT_ARTIFACTS` (`daemon/tools/prompt_artifacts.py`) is `.md`-only and `_depth2_match()` matches only filenames in that set → `meta.json` can never be sealed or emitted.
 
-### Plan-anchored variant (v0.30.12 → release tip)
-The plan's §4.3 anchors the three checks at the **previous release tag**, a stricter question than "on-disk == HEAD-committed". Follow-up dispatched; result appended below.
+### Plan-anchored variant (§4.3's three checks, anchored at `v0.30.12`) — PASS
+The plan's §4.3 anchors the three checks at the **previous release tag**, a stricter question than "on-disk == HEAD-committed". `v0.30.12` is present as a local tag (no fetch, no tag creation); `v0.30.12^{commit}` = `cf43ac00d`, an ancestor of HEAD. `v0.31.0` does not exist yet → HEAD substituted.
+
+| Plan check (§4.3) | Command | Result |
+|---|---|---|
+| 1 — seal unchanged | `git diff --stat v0.30.12 HEAD -- agents/.prompt-artifacts.sha256` | **EMPTY** (rc 0) |
+| 2 — no prompt changed | `git diff --stat v0.30.12 HEAD -- 'agents/*.md'` | **EMPTY** (rc 0) |
+| 3 — seal value unchanged | `git show v0.30.12:agents/.prompt-artifacts.sha256 \| sha256sum` vs `sha256sum agents/.prompt-artifacts.sha256` | **EQUAL** — both `50561606…4979` |
+
+Stronger than content-diff: the **git blob is identical** at both ends — `git rev-parse v0.30.12:agents/.prompt-artifacts.sha256` == `git rev-parse HEAD:…` == `cb51a277bea6334100f7f6139adfe6bef8512f7a`.
+
+- **No re-pin in range**: `git log --oneline v0.30.12..HEAD -- agents/.prompt-artifacts.sha256` is empty. The seal's last modification on the release line is `f0fa135e7` (2026-11-14, the ari nest-ops prompt ceremony) — an ancestor of v0.30.12, i.e. the seal has been frozen since *before* the previous release.
+- **Live-shipped seal == release-tip seal**: the shipped `releases/v0.30.12/agents/.prompt-artifacts.sha256` (and `v0.30.11/`, `v0.30.9/`) carry the same `50561606…4979`, and the staged `manifest.json` pins `agents_manifest[".prompt-artifacts.sha256"]` to the same digest. The checker also passes `rc=0` against the LIVE staged payload.
+- **Live state (read-only)**: `current -> releases/v0.30.12`, `previous=v0.30.9`, `pending_op=None`, `pending_actions={}` → live = v0.30.12, **no promote in flight**.
+- **Census completeness**: of the **197** changed paths across the whole `v0.30.12..HEAD` range, exactly **8** are under `agents/` and **0** end in `.md`; `git diff --name-status` shows only the 8 `M` meta.json rows (no adds/deletes/renames).
+- **Pathspec non-vacuity proven**: the same `agents/*.md` pathspec against a known historical prompt edit (`f0fa135e7`, which edited `agents/ari/rule.md` + `tools_note.md`) correctly lists both — an empty diff on a pathspec that matches nothing would prove nothing.
+- **`--all` trap (recorded)**: `git log v0.30.12..HEAD --all -- agents/.prompt-artifacts.sha256` returns `e559b4b80` — a commit on the **parked** branch `feature/video-mock-prompts`, not an ancestor of HEAD or v0.30.12. The plain (no `--all`) form is the correct scope.
+
+### §4.3's fourth clause — "the frozen binary's embedded prompt-artifact set matches the seal": HYBRID
+Definitive answer; the clause splits in two:
+- **The binary does NOT embed the artifacts or the seal.** `ensemble.spec` `datas` holds exactly four entries (`pyproject.toml`, `daemon/migrations`, `daemon/services/live_views/assets`, `.agents/shared/metrics/tool-categories.json`) — **no `agents/` entry**; confirmed against the live binary via `pyi-archive_viewer -l`. The `.md` artifacts and the seal ship as a **payload directory** `releases/<ver>/agents/`, and the frozen daemon resolves its agents root at runtime as `Path(sys.executable).parent/'agents'`.
+- **What the binary DOES embed is the set constant.** The live binary's PYZ contains `daemon.tools.prompt_artifacts` with the frozenset `['growth.md','memory.md','rule.md','skill.md','soul.md','tools.md','tools_note.md','workflow.md']`, the `BASELINE_FILENAME` literal and the summary token.
+- **Set-vs-seal check: CLOSABLE PRE-CUT — and CLOSED.** The constant's source is byte-identical across the range (`git rev-parse v0.30.12:daemon/tools/prompt_artifacts.py` == `HEAD:` == `24286fc4c47af95594b7e8783b9d1b6cfa54274c`), so the binary that will be frozen embeds the identical set; the seal's basenames are a strict subset of it (5 distinct basenames on disk ⊆ the 8-member constant).
+- **Byte-level payload re-hash: STRICTLY POST-STAGE, and already automated.** `stage.sh` runs `prompt_artifact_drift_leg` (`stage.sh:1001-1035`), which re-hashes the staged `agents/` tree against the shipped baseline. It is **reported, not gating** (allow-stale policy): drift is logged + journaled and staging continues.
+
+**Ceremony brief, one line:** *S1d = 3 git checks (hard gate; closable and closed pre-cut, but MUST be re-run AT the tag) + stage-time payload re-hash (reported, non-blocking, automated).*
+
+### WATCH — S1d must be re-run AT the tag (not a blocker today)
+The parked branch `feature/video-mock-prompts` carries commit `e559b4b80` ("re-pin 11 video-team seal lines after mock-scene prompt edits"), which changes 11 seal rows **and** 8 `agents/*.md` (video-capturer/editor/producer/verifier `rule.md`/`soul.md`/`workflow.md` + `video-producer/skills-template/video-planning.md`). It is **not** an ancestor of HEAD nor of v0.30.12, so it is outside today's range and S1d is unaffected. But the Emperor's 2026-11-15 directive parks the video-team lane until *after* group-chat promotion, and the video-team pilot runs post-promote. **If that branch merges into the release line before the v0.31.0 tag is cut, check #2 flips non-empty and check #3 becomes a legitimate re-pin** — so S1d must be re-run AT the tag, not merely pre-cut. (Filed as anomaly `c2a34dcb`.)
 
 ### Chain-shape note (non-blocking)
 P2's merge first-parent is `907f2f5917`, not P1's `e3787d4b8` — P2 was branched from an earlier tip. The census is unaffected (the aggregate base→HEAD diff is contiguous; every per-merge `agents/*.md` diff is empty), but the release brief should not assume a linear phase chain.
