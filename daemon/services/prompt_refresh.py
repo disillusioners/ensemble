@@ -1017,7 +1017,6 @@ def format_compact_note_info_line(
     note_chars: int,
     note_sha256_12: str,
     superseded_previous: bool = False,
-    prefilter_enabled: bool = False,
     deferred: str = DEFERRED_STATE_NONE,
 ) -> str:
     """The compact-note surface's ONE content-free INFO line.
@@ -1033,7 +1032,6 @@ def format_compact_note_info_line(
         f"agent={agent_id} outcome={outcome} code={code or '-'} "
         f"note_chars={note_chars} note_sha256={note_sha256_12} "
         f"superseded_previous={str(bool(superseded_previous)).lower()} "
-        f"prefilter_enabled={str(bool(prefilter_enabled)).lower()} "
         f"deferred={deferred or '-'}"
     )
 

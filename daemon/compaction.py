@@ -3569,48 +3569,6 @@ class ContextCompactor:
             injected_tokens=injected_tokens,
         )
 
-        # ── Compact-note lane — the DORMANT PRE-FILTER (architect §E/§F)
-        # ──────────────────────────────────────────────────────────────────
-        # The gate is ``enabled AND note_present`` — with no note the
-        # module is never even IMPORTED (it is lazily imported so the
-        # engine pays nothing when the filter is off) and the candidate
-        # list is untouched.
-        #
-        # The pre-filter's ONLY input is the compactable partition
-        # output of ``select_compactable_groups`` — the verbatim tail,
-        # the hoisted injections, the sentinel and the ceiling are all
-        # outside its reach.
-        #
-        # The pre-filter's holes must stay VISIBLE: the kept groups'
-        # ORIGINAL positions are stashed on the context so the doc's
-        # span arithmetic stays in the ORIGINAL coordinate space (one
-        # index space, honest), and the dropped groups are itemized in
-        # the envelope's existing dropped-spans clause — never silently
-        # vanished.
-        #
-        # EVERY failure ⇒ skip-the-filter, never fail-the-compaction;
-        # and identity is the SAME CODE PATH as "off".
-        context._compact_note_positions = None
-        context._compact_note_dropped_spans = []
-        if getattr(context.config, "compact_note_prefilter_enabled", False) and (
-            getattr(context, "compact_note", "")
-        ):
-            try:
-                from ._compact_note_prefilter import filter_candidate_groups
-
-                _prefilter = filter_candidate_groups(
-                    compactable, context.compact_note, enabled=True
-                )
-                compactable = _prefilter.kept
-                context._compact_note_positions = _prefilter.kept_positions or None
-                context._compact_note_dropped_spans = _prefilter.dropped_spans
-            except Exception:  # pragma: no cover — defensive; never fatal
-                logger.warning(
-                    "[compact-note prefilter] stage failed — skipping the "
-                    "filter (identity); the compaction proceeds normally",
-                    exc_info=True,
-                )
-
         timestamp = datetime.now(timezone.utc).isoformat()
 
         # Architect §6.3 — stamp the context with the values the
@@ -4866,12 +4824,6 @@ class ContextCompactor:
         # pass an absolute map if needed.)
         start_idx = 1
         end_idx = sum(len(g.messages) for g in compactable)
-        _note_positions = getattr(context, "_compact_note_positions", None)
-        if _note_positions:
-            # Compact-note lane — the pre-filter's holes keep the doc's
-            # coordinates in the ORIGINAL compactable space.
-            start_idx = _note_positions[0][0]
-            end_idx = _note_positions[-1][1]
         start_id = compactable[0].messages[0].id if compactable else None
         end_id = compactable[-1].messages[-1].id if compactable else None
         seq = _next_compaction_seq(context.messages, instance_id)
@@ -4905,9 +4857,7 @@ class ContextCompactor:
             summarized_start=start_idx,
             summarized_end=end_idx,
             preserved_count=_count_preserved(context, compactable),
-            dropped_spans=list(
-                getattr(context, "_compact_note_dropped_spans", None) or []
-            ),
+            dropped_spans=[],
             context_window=context_window,
             previous_overview=previous_overview,
             msg_timestamps=msg_timestamps,
@@ -4963,25 +4913,14 @@ class ContextCompactor:
             batch_groups = compactable[batch_i * batch_size:(batch_i + 1) * batch_size]
             if not batch_groups:
                 break
-            _note_positions = getattr(context, "_compact_note_positions", None)
-            if _note_positions:
-                # Compact-note lane — the pre-filter's holes keep the
-                # doc's coordinates in the ORIGINAL compactable space
-                # (one index space; the dropped groups are itemized
-                # separately in the envelope's dropped-spans clause).
-                _first = batch_i * batch_size
-                _last = min((batch_i + 1) * batch_size, len(_note_positions)) - 1
-                start_idx = _note_positions[_first][0]
-                end_idx = _note_positions[_last][1]
-            else:
-                # ORIGINAL coordinates: walk back over every compactable
-                # group BEFORE this batch's start.
-                prior_msgs = sum(
-                    len(g.messages)
-                    for g in compactable[: batch_i * batch_size]
-                )
-                start_idx = prior_msgs + 1
-                end_idx = prior_msgs + sum(len(g.messages) for g in batch_groups)
+            # ORIGINAL coordinates: walk back over every compactable
+            # group BEFORE this batch's start.
+            prior_msgs = sum(
+                len(g.messages)
+                for g in compactable[: batch_i * batch_size]
+            )
+            start_idx = prior_msgs + 1
+            end_idx = prior_msgs + sum(len(g.messages) for g in batch_groups)
             start_id = batch_groups[0].messages[0].id
             end_id = batch_groups[-1].messages[-1].id
             if body:
@@ -5032,7 +4971,6 @@ class ContextCompactor:
         from the first-appearance map (architect §4).
         """
         compactable = getattr(context, "_compactable_groups_for_doc", None)
-        _note_positions = getattr(context, "_compact_note_positions", None)
         if compactable is None:
             total_sections = len(batch_sections)
             summarized_start = batch_sections[0]["start_idx"] if batch_sections else 1
@@ -5045,11 +4983,6 @@ class ContextCompactor:
             )
             summarized_start = 1
             summarized_end = sum(len(g.messages) for g in compactable)
-            if _note_positions:
-                # Compact-note lane — the pre-filter's holes keep the
-                # doc's coordinates in the ORIGINAL compactable space.
-                summarized_start = _note_positions[0][0]
-                summarized_end = _note_positions[-1][1]
         seq = _next_compaction_seq(context.messages, instance_id)
         context_window = get_model_context_limit(
             effective_model_name, context.config
@@ -5064,28 +4997,14 @@ class ContextCompactor:
             surviving_starts = {
                 b["start_idx"] for b in batch_sections
             }
-            if _note_positions:
-                for i in range(0, len(compactable), batch_size):
-                    s = _note_positions[i][0]
-                    e = _note_positions[
-                        min(i + batch_size, len(_note_positions)) - 1
-                    ][1]
-                    if s not in surviving_starts:
-                        dropped_spans.append((s, e))
-            else:
-                s_idx = 0
-                for i in range(0, len(compactable), batch_size):
-                    bg = compactable[i:i + batch_size]
-                    s = s_idx + 1
-                    e = s_idx + sum(len(g.messages) for g in bg)
-                    if s not in surviving_starts:
-                        dropped_spans.append((s, e))
-                    s_idx = e
-        # Compact-note lane — the pre-filter's dropped groups are
-        # itemized here (never silently vanished).
-        dropped_spans.extend(
-            list(getattr(context, "_compact_note_dropped_spans", None) or [])
-        )
+            s_idx = 0
+            for i in range(0, len(compactable), batch_size):
+                bg = compactable[i:i + batch_size]
+                s = s_idx + 1
+                e = s_idx + sum(len(g.messages) for g in bg)
+                if s not in surviving_starts:
+                    dropped_spans.append((s, e))
+                s_idx = e
         return build_compaction_doc(
             instance_id=instance_id,
             seq=seq,
@@ -5237,12 +5156,6 @@ class ContextCompactor:
         # the compactable window is dropped without summary).
         start_idx = 1
         end_idx = sum(len(g.messages) for g in compactable) if compactable else 0
-        _note_positions = getattr(context, "_compact_note_positions", None)
-        if _note_positions:
-            # Compact-note lane — the pre-filter's holes keep the doc's
-            # coordinates in the ORIGINAL compactable space.
-            start_idx = _note_positions[0][0]
-            end_idx = _note_positions[-1][1]
         start_id = compactable[0].messages[0].id if compactable else None
         end_id = compactable[-1].messages[-1].id if compactable else None
         seq = _next_compaction_seq(context.messages, iid)
@@ -5250,11 +5163,6 @@ class ContextCompactor:
             self._effective_model_name(context), context.config
         )
         dropped_spans = [(start_idx, end_idx)] if compactable else []
-        # Compact-note lane — the pre-filter's dropped groups are
-        # itemized here (never silently vanished).
-        dropped_spans.extend(
-            list(getattr(context, "_compact_note_dropped_spans", None) or [])
-        )
         # Preserved-tail count for the envelope header.
         context._preserved_count_for_doc = sum(
             len(g.messages) for g in preserved

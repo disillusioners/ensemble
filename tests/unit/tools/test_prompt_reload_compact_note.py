@@ -198,7 +198,6 @@ def _compaction_config(**overrides):
     base = {
         "enabled": True,
         "compact_note_max_chars": CAP,
-        "compact_note_prefilter_enabled": False,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -606,7 +605,6 @@ class TestL12ArmedReceipt:
         assert f"cap={CAP}" in out
         assert re.search(r"note_sha256=[0-9a-f]{12}\b", out)
         assert "superseded_previous=false" in out
-        assert "prefilter_enabled=false" in out
 
     async def test_the_receipt_states_the_seam_and_the_explicit_not_yet_line(self) -> None:
         manager = StubManager()

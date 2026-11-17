@@ -168,13 +168,6 @@ def _compaction_enabled(manager: Any) -> bool:
     return bool(enabled)
 
 
-def _prefilter_enabled(manager: Any) -> bool:
-    """The compact-note PRE-FILTER kill-switch state (default OFF)."""
-    return bool(
-        getattr(_compaction_config(manager), "compact_note_prefilter_enabled", False)
-    )
-
-
 def _rate_limit_remaining_seconds(
     last_applied_at: str,
     *,
@@ -214,7 +207,6 @@ def _render_armed_receipt(
     cap: int,
     superseded_previous: bool = False,
     previous_sha12: str = "",
-    prefilter_enabled: bool = False,
     status_line: str | None = None,
 ) -> str:
     """The ARMED receipt — what the agent actually sees.
@@ -241,7 +233,6 @@ def _render_armed_receipt(
     ]
     if superseded_previous:
         lines.append(f"previous_note_sha256={previous_sha12}")
-    lines.append(f"prefilter_enabled={str(bool(prefilter_enabled)).lower()}")
     lines.append(f"seam={ARMED_SEAM_STATEMENT}; {ARMED_EXPECTED_SEAM_CLAUSE}")
     if status_line:
         lines.append(status_line)
@@ -284,7 +275,6 @@ def _compact_note_refusal(
             code=code,
             note_chars=len(note),
             note_sha256_12=compact_note_sha256_12(note),
-            prefilter_enabled=_prefilter_enabled(manager),
         )
     )
     return _refusal(code, message)
@@ -450,7 +440,6 @@ def _handle_compact_note(
             note_chars=note_chars,
             note_sha256_12=note_sha12,
             superseded_previous=superseded_previous,
-            prefilter_enabled=_prefilter_enabled(manager),
             deferred=state.deferred,
         )
     )
@@ -460,7 +449,6 @@ def _handle_compact_note(
         cap=cap,
         superseded_previous=superseded_previous,
         previous_sha12=previous_sha12,
-        prefilter_enabled=_prefilter_enabled(manager),
         status_line=status_line,
     )
 

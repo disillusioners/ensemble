@@ -608,7 +608,7 @@ SUMMARIZATION_CHUNK_THRESHOLD: float = 0.60  # Chunk threshold for summarization
 #
 # A HARDCODED module constant — deliberately NOT a config knob (the lane's
 # scope fence allows exactly TWO new knobs: ``compact_note_max_chars`` and
-# ``compact_note_prefilter_enabled``). Enforced at ARM time as the typed
+# a config knob). Enforced at ARM time as the typed
 # refusal ``prompt_reload_compact_rate_limited``; the clock is the
 # instance's ``compact_note_last_applied_at`` (deliberate/note-guided
 # compactions ONLY). 900s = 15 min: 15x the automatic 60s dedup window, so
