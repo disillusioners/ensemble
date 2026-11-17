@@ -497,6 +497,106 @@ proven end-to-end; the live darkness is an operator env decision
 (``ENSEMBLE_SKILL_CAPTURE_ENABLED=1``), outside this commission's
 no-flip constraint.
 
+## REVIEW FIX ROUND (2026-11-17, APPROVE-WITH-NOTES, 0 critical)
+
+### Code fixes (mandatory, blocking-before-promote)
+
+- **W2 — resolved_at guard on the sanctioned REST mode.** The
+  sanctioned branch now reads the pair row ONCE and REFUSES an
+  already-resolved pair (409) before any winner decision — 3-line
+  parity with the service-level guard
+  (``resolve_ab_test_sanctioned``). Without it a second POST on the
+  loser's id silently INVERTED an earlier explicit operator decision
+  (no receipt, no trail).
+- **W3 — reversibility IMPLEMENTED (not reworded).**
+  ``SkillStaleDeactivator.resolve_pair``'s apply arm now writes the
+  RECEIPT BEFORE THE FIRST FLIP (planned state ``applied=False``,
+  rotated + atomically written, then re-written per flip — the
+  reconcile apply arm's write pattern). The loser + winner are claimed
+  as ordinary receipt entries (their ``(is_active, status)`` pairs
+  reverse via the generic loop); the pair-SPECIFIC reversal data (the
+  winner's cleared ``ab_test_group``, the ``skill_ab_tests`` row's
+  resolved state) rides a new ``PairResolutionEntry`` section on the
+  SAME receipt. ``reactivate()`` gained the matching reversal branch
+  (restores the winner's group + status, un-resolves the pair row).
+  The router wording is now accurate-by-implementation.
+- **W4 — corrective membership pre-check BEFORE row creation.**
+  ``_evolve_fix_corrective`` now refuses a skill that carries the
+  group UUID but is NOT one of the pair row's two variants
+  (ab_test_group column desync) BEFORE the corrected generation is
+  created — the old order created the row and only then died inside
+  the resolver, leaving an orphan ACTIVE generation.
+- **W8 — the anomaly half no longer silently no-ops.** The router's
+  sanctioned announcement passed the metrics DICT as the anomaly
+  ``holder``; ``resolve_anomaly_service`` walks SERVICE-shaped
+  attribute paths, so the walk yielded ``None``. The route now
+  injects the metrics SERVICE (``Depends(get_metrics)``) and passes
+  that.
+
+### Test coverage shipped with the fixes
+
+- **W6 — duplicated-anchor rejection pin.** A duplicated anchor is
+  REJECTED (never double-applied, never fuzzy-matched to the first
+  occurrence): pinned at the applier level and through the FIX path
+  (all-ops-rejected ⇒ the evolution fails loudly, nothing written).
+  Named mutation: an executed duplicated-anchor mutation now REDS
+  these pins.
+- **W9 — sweep behavior pack** (``tests/unit/test_skill_ab_inactivity_sweep.py``):
+  registration (beside the sibling sweeps) + the decision-marker
+  pin, one stalled resolve, one tie park, per-item isolation,
+  never-raising, missing-service no-op, and the comparisons>0 refusal
+  (a traffic-bearing pair is NEVER listed). **Full-boot integration
+  is DISCLOSED-UNVERIFIED** — the pack drives the wrapper directly;
+  the boot-time registration + idle-gate are covered by the staging
+  smoke, not here.
+- **Cheap item — the "no shipped call site supplies a winner" pin is
+  now TRUE again.** The scan was widened to the skills ROUTER (the
+  sanctioned mode supplies a winner there) and allowlisted: the
+  router's only ``winner_skill_id=`` occurrence is the sanctioned
+  helper's call, and that helper requires an explicit reason and
+  refuses an already-resolved pair.
+
+### Leader decisions folded in
+
+- **W5 — duplicate-ACTIVE post-corrective is DOCUMENTED as
+  intended-temporary.** A corrective FIX creates the corrected
+  generation as an ACTIVE sibling (the defective member is retired
+  and the pair resolves to the non-defective member) — so a
+  corrected generation and the survivor are both ACTIVE for a moment.
+  Auto-crowning at creation time would be a creation-time winner-pick
+  (forbidden). **Operational rule: a corrective dispatch ALWAYS pairs
+  the corrective FIX with its corrective resolution** — the corrected
+  generation is crowned through the sanctioned resolution path
+  (reason + receipt), never by the creation path.
+- **W7 — sweep posture: NO knob, disposition pass instead.** The
+  disposition manifest is SEEDED ON THIS BRANCH:
+  ``daemon/services/skill_ab_disposition_manifest.py`` carries the SIX
+  divert pairs of the E-6 pending-wiring table, basis
+  ``defective_arm``, winners = the non-defective members, exactly:
+  1b8e4d80→8bb22eb8; 8f8cee3a→08e67030; b77128c5→76e3e1a7;
+  604550ac→c595f7cf; 4ba4086d→0757f082; f3bc3a3e→607425ef.
+  It is DATA (stdlib-only, import-time inert, matched by 8-char id
+  prefix) and NOTHING auto-applies it — the divert stays an explicit
+  operator act with its own reason + receipt (pinned by
+  ``tests/unit/test_skill_ab_disposition_manifest.py``).
+  **Promote-ceremony runbook step (one added step):** post-promote,
+  run the READ-ONLY stalled listing
+  (``GET /api/skills/ab-tests/stalled``), DIFF it against the
+  pre-inspected 37-pair table, and RECORD the diff on the board —
+  then arm steady state. No code knob is added.
+
+### Tester baselines (pass-through)
+
+* 6 failures in ``tests/manager/test_phase4_metrics_trigger_init.py``
+  — environment-dependent, CONFIRMED at base ``0181dadbf`` by both
+  councilors (sqlite migration syntax error in this env).
+* 3 ambient observability reds — identical at base.
+* Env discipline for every run: **per-variable** scrub —
+  ``-u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD
+  -u POSTGRES_HOST -u POSTGRES_PORT -u ENSEMBLE_SKILL_CAPTURE_ENABLED
+  -u ENSEMBLE_SKILL_EVOLUTION_ENABLED``; glob scrubs
+  (``env -u ENSEMBLE_SKILL_*``) are NO-OPS.
+
 ## E-6 encoding (binding)
 
 Winner rule in `resolve_ab_test_sanctioned` and the corrective path: **newer
