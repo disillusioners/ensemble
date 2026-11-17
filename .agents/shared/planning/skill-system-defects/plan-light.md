@@ -453,6 +453,50 @@ reasoning pinned in this plan + a NEW e2e capture-admission test wired
 through the REAL enqueue path (`record_task_completion` → … →
 `enqueue_capture`) on the dev DB — NOT through the bypassing tool.
 
+## Item (e) — capture dark-path RECONCILIATION (code-level, DELIVERED)
+
+The chain verified in code (no live reads): usage rows flowing ⇒
+``record_task_completion`` ran ⇒ ``_check_capture_eligibility`` was
+CALLED (it runs unconditionally after usage rows, soft-fail) ⇒ Gate 0
+evaluated. Reconciled candidate causes of the live darkness, in
+likelihood order:
+
+1. **Kill-switch default OFF + env unset (dominant, structural).**
+   ``ENSEMBLE_SKILL_CAPTURE_ENABLED`` landed OFF by default
+   (b96c0d671, 2026-09-17; first shipped v0.13.10 tagged 2026-09-22)
+   and the deployment env does not set it (the dev worktree .env sets
+   NEITHER gate — verified). With the env unset, Gate 0 refuses EVERY
+   candidate before any evaluation: the trigger is dark BY DESIGN,
+   not by regression. The observed stop date (2026-09-01) PREDATES
+   the flag's first release — the initial stop had an earlier cause
+   not derivable from the repo alone (eligible-population predicates
+   or the v0.13.x promote cadence); disclosed as a precise
+   uncertainty, not half-fixed.
+2. **Invalid-env soft-fail darkness (CLOSED by this lane).** A
+   misconfigured value (ValueError from the resolver) was contained
+   by the ``record_task_completion`` soft-fail boundary with ONE
+   warning line and ZERO sink residue — invisible in both surfaces.
+   FIXED: the boundary now leaves a ``capture_gate_error`` sink
+   record + counter (raise contract unchanged; the existing
+   containment pins stay green).
+3. **Historical sink evidence is CONSISTENT with Gate 0 firing**: the
+   ``capture_lane_off`` null-run-id records (source=
+   skill_metrics_service ≈65%) prove the metrics seam refused — the
+   pre-C3 records were uncorrelatable by run id, now fixed. A recent
+   window with ZERO such records while usage rows flow would point at
+   cause 2 or sink-destination drift on the deployment — those are
+   live-side discriminations (out of this lane).
+
+**The durable proof:** a NEW e2e capture-admission test
+(``tests/integration/test_skill_capture_admission_e2e_dev.py`) drives
+the REAL chain on the DEV DB with the gate ON — real skill/queue/job/
+lock repositories, real ``JobQueueService`` + ``SkillJobDispatcher``,
+``system_parallel_queue`` routing, ``capture_run_id`` in the job
+metadata correlated with the sink's ADMITTED record. The chain is
+proven end-to-end; the live darkness is an operator env decision
+(``ENSEMBLE_SKILL_CAPTURE_ENABLED=1``), outside this commission's
+no-flip constraint.
+
 ## E-6 encoding (binding)
 
 Winner rule in `resolve_ab_test_sanctioned` and the corrective path: **newer

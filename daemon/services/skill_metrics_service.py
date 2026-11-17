@@ -569,6 +569,43 @@ class SkillMetricsService:
                 f"SkillMetricsService: CAPTURED eligibility check "
                 f"failed for instance {instance_id}: {exc}"
             )
+            # Item (e) residue (2026-11-17): the soft-fail boundary
+            # used to leave NO durable record — an INVALID
+            # ENSEMBLE_SKILL_CAPTURE_ENABLED value (ValueError from the
+            # resolver) made the capture trigger silently dark in BOTH
+            # the logs' visibility (a single WARNING line) AND the sink
+            # (zero records), which is one of the reconciled candidate
+            # causes of the live "zero gate evaluations" window. The
+            # raise contract is UNCHANGED (the hook still returns
+            # cleanly; the ValueError still propagates from
+            # ``_check_capture_eligibility`` to direct callers) — but
+            # the boundary now leaves a sink record so the darkness is
+            # countable.
+            try:
+                from daemon.services import (
+                    skill_capture_observability as _observability,
+                )
+
+                _observability.record_admission_refusal(
+                    "capture_gate_error"
+                )
+                _observability.append_run_record(
+                    _observability.build_run_record(
+                        stage="admission",
+                        run_id=_observability.new_run_id(),
+                        agent_id=agent_id,
+                        prompt_source="skill_metrics_service",
+                        task_message=task_message,
+                        outcome="refused",
+                        refusal_reason="capture_gate_error",
+                        extra={
+                            "instance_id": instance_id,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        },
+                    )
+                )
+            except Exception:  # noqa: BLE001 — residue is best-effort
+                pass
 
         return inserted
 
