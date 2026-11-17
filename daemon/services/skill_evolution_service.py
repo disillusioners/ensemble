@@ -1997,7 +1997,7 @@ class SkillEvolutionService:
         if difference >= min_diff:
             # Mirror guard (2026-11-17, leader ruling — Path 2): the
             # SAME semantics as the forced-winner Path 0 guard
-            # (~:1840-1858) and the sanctioned resolver's guard: a pair
+            # (~:1855-1858) and the sanctioned resolver's guard: a pair
             # that is ALREADY RESOLVED must never be resolved again —
             # the loser RETAINS its ``ab_test_group`` after a
             # resolution, so the endpoint can still reach this branch
@@ -2031,6 +2031,19 @@ class SkillEvolutionService:
 
         # Path 3: out of extensions → force-resolve.
         if extension_count >= max_ext:
+            # Mirror guard (2026-11-17, leader ruling — Path 3): the
+            # SAME semantics as the Path 0 / Path 2 / sanctioned
+            # guards — a pair that is ALREADY RESOLVED must never be
+            # resolved again. Path 3 re-picks a winner and overwrites
+            # ``winner_skill_id`` / ``resolved_at`` on the resolved row
+            # (the same inversion class), and it is reachable via the
+            # endpoint through the loser (which RETAINS its
+            # ``ab_test_group``). The guard fires BEFORE any winner
+            # pick and BEFORE any mutation.
+            if getattr(ab_test, "resolved_at", None):
+                raise ValueError(
+                    f"ab_test_group {ab_test_group!r} is already resolved"
+                )
             winner_id, loser_id = _pick_winner()
             logger.info(
                 f"[SkillEvolution] A/B test {ab_test_group}: max_extensions "
@@ -2056,6 +2069,16 @@ class SkillEvolutionService:
             }
 
         # Path 4: extend.
+        # Mirror guard (2026-11-17, leader ruling — Path 4): the SAME
+        # semantics as the Path 0 / Path 2 / Path 3 / sanctioned
+        # guards — a pair that is ALREADY RESOLVED must not be mutated
+        # again; ``increment_extension`` would bump the extension
+        # counter on a closed row. The guard fires AFTER the row load
+        # and BEFORE the mutation.
+        if getattr(ab_test, "resolved_at", None):
+            raise ValueError(
+                f"ab_test_group {ab_test_group!r} is already resolved"
+            )
         await asyncio.to_thread(
             self._ab_test_repo.increment_extension, ab_test_group
         )

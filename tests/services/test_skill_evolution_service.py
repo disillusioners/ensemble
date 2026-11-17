@@ -2007,6 +2007,103 @@ class TestForcedWinnerResolvedAtGuard:
         assert after_winner.ab_test_group is None
 
     @pytest.mark.asyncio
+    async def test_path3_force_resolve_on_a_resolved_pair_is_refused(
+        self, evolution_service, skill_repo, ab_test_repo,
+        fake_metrics_service, project_id,
+    ):
+        """Path 3 (extension-forced resolution) mirror guard: on an
+        ALREADY-RESOLVED pair the force-resolve is REFUSED — and
+        nothing mutates.
+
+        Path 3 re-picks a winner and overwrites ``winner_skill_id`` /
+        ``resolved_at`` on the resolved row (the same inversion class
+        as W2 / Path 0 / Path 2), reachable through the loser (which
+        RETAINS its ``ab_test_group``).
+        """
+        group, loser, winner = self._resolved_pair(
+            skill_repo, ab_test_repo, project_id
+        )
+        # Path 3's precondition: extensions exhausted.
+        for _ in range(3):
+            ab_test_repo.increment_extension(group)
+        fake_metrics_service.get_ab_comparison_stats.return_value = {
+            "skill_id_a": loser.id,
+            "skill_id_b": winner.id,
+            "completion_rate_a": 0.6,
+            "completion_rate_b": 0.65,
+            "difference": 0.05,  # < min_difference → Path 3 (not Path 2)
+            "comparisons": 12,
+            "extension_count": 3,  # == max_extensions
+            "ready_to_resolve": False,
+            "needs_more_data": True,
+        }
+        before_pair = ab_test_repo.get_by_group(group)
+        before_resolved_at = before_pair.resolved_at
+        before_winner_id = before_pair.winner_skill_id
+        before_extensions = before_pair.extension_count
+
+        with pytest.raises(ValueError, match="already resolved"):
+            await evolution_service.check_ab_test_resolution(group)
+
+        # NO mutation — the earlier decision stands untouched.
+        after_pair = ab_test_repo.get_by_group(group)
+        assert after_pair.resolved_at == before_resolved_at
+        assert after_pair.winner_skill_id == before_winner_id
+        assert after_pair.extension_count == before_extensions
+        after_winner = skill_repo.get(winner.id)
+        assert after_winner.is_active is True
+        assert after_winner.status == "active"
+        assert after_winner.ab_test_group is None
+        after_loser = skill_repo.get(loser.id)
+        assert after_loser.is_active is False
+        assert after_loser.status == "inactive"
+        assert after_loser.ab_test_group == group  # retained
+
+    @pytest.mark.asyncio
+    async def test_path4_extend_on_a_resolved_pair_is_refused(
+        self, evolution_service, skill_repo, ab_test_repo,
+        fake_metrics_service, project_id,
+    ):
+        """Path 4 (extend) mirror guard: on an ALREADY-RESOLVED pair the
+        extension increment is REFUSED — and the extension counter does
+        not move."""
+        group, loser, winner = self._resolved_pair(
+            skill_repo, ab_test_repo, project_id
+        )
+        fake_metrics_service.get_ab_comparison_stats.return_value = {
+            "skill_id_a": loser.id,
+            "skill_id_b": winner.id,
+            "completion_rate_a": 0.6,
+            "completion_rate_b": 0.65,
+            "difference": 0.05,  # < min_difference → Path 4 (extend)
+            "comparisons": 12,
+            "extension_count": 0,  # extensions remaining → Path 4
+            "ready_to_resolve": False,
+            "needs_more_data": True,
+        }
+        before_pair = ab_test_repo.get_by_group(group)
+        before_resolved_at = before_pair.resolved_at
+        before_winner_id = before_pair.winner_skill_id
+        before_extensions = before_pair.extension_count
+
+        with pytest.raises(ValueError, match="already resolved"):
+            await evolution_service.check_ab_test_resolution(group)
+
+        # NO extension increment, NO other mutation.
+        after_pair = ab_test_repo.get_by_group(group)
+        assert after_pair.extension_count == before_extensions
+        assert after_pair.resolved_at == before_resolved_at
+        assert after_pair.winner_skill_id == before_winner_id
+        after_winner = skill_repo.get(winner.id)
+        assert after_winner.is_active is True
+        assert after_winner.status == "active"
+        assert after_winner.ab_test_group is None
+        after_loser = skill_repo.get(loser.id)
+        assert after_loser.is_active is False
+        assert after_loser.status == "inactive"
+        assert after_loser.ab_test_group == group  # retained
+
+    @pytest.mark.asyncio
     async def test_auto_resolution_on_a_resolved_pair_is_refused(
         self, evolution_service, skill_repo, ab_test_repo,
         fake_metrics_service, project_id,
