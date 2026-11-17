@@ -48,7 +48,7 @@ Where a phase plan's citation and the tree disagree, the tree wins and the disag
 
 ### 0.3 Reading order
 
-§1 is the register (24 decisions, one row each, with detail blocks). §2 is the **one binding amendment**. §3–§5 are the substantive
+§1 is the register (27 decisions — 24 at first issue plus the three review-wave-2 folds `D-P2-5/6/7`, one row each, with detail blocks). §2 is the **one binding amendment**. §3–§5 are the substantive
 ratifications (release graph, negative proof, coalescence). §6–§7 are the registers the coding commission must carry (deferred items,
 corrections — so stale claims are never re-imported). §8 is the consistency pass. §9 is the single escalated item. Appendices A–C are
 the verification log and the planner's outstanding actions.
@@ -57,7 +57,7 @@ the verification log and the planner's outstanding actions.
 
 ## 1. Decision register
 
-### 1.0 Index (24 decisions)
+### 1.0 Index (27 decisions — 24 at first issue + 3 review-wave-2 folds)
 
 | # | ID | Decision (one line) | Binds | Ratifier |
 |---|----|---------------------|-------|----------|
@@ -85,6 +85,9 @@ the verification log and the planner's outstanding actions.
 | 22 | `L-12` | **Corrections register adopted as authoritative** over stale commission/research claims | §7 below | Dispatcher (FINAL) |
 | 23 | `D-P1-4` | **rc=2 consumer contract at every gate call site** (REVIEW WAVE 1, BL-1): the probe maps transient 2 → probe `return 2` (T7b, `:6103-6106`); `gate_version:8159` + the one-shot consumers mirror the same 0/1/2 mapping with bounded retries + the distinct transient wording — never `gate_fail_reason` → 8b auto-rollback, never the `/livez unreachable >Ns` mislabel; exhaustion marker journals `subprocess_wait_timeout` with row token `kind=attr_deferred` (fire-once latched) and rides `HB_VERIFY_REASON`; §5.4's "statement form" bullet re-scoped to sleep/pool only | `phase1-plan.md` §3 (A29–A32), §4.2, §5.3/§5.4/**§5.4a**/§5.6, §9, §10 (T7b/T7c), §11 (C3), §12 (R4), §14 (`I-B13`), §15 (S11); `phase2-plan.md` §7.5 (**B-defer-e**/M-B-defer-E), §16 (SC-12) | Plan review wave 1 (FINAL) |
 | 24 | `D-P1-5` | **Gate-emitted INFO rides STDERR + `I-B2b` stdout purity** (REVIEW WAVE 1, BL-2): accept line + transient marker use the `printf … >&2` idiom (`:6210` precedent) — `_log` is stdout when the logfile is unset (`:434-443`) and gate calls are `$()`-captured; §4.3's `_log` at sites 2/3 is safe (statement context) | `phase1-plan.md` §5.3, §14 (`I-B2b`), §15 (S12); `phase2-plan.md` §7.6 (**B-parity-capture**/M-B2b), §16 (SC-12) | Plan review wave 1 (FINAL) |
+| 25 | `D-P2-5` | **BL-3 — the C-1 downgrade gets a leg that can actually redden it.** The downgrade (`answered 1 → 2` when a stronger rung was unanswerable) is unreachable in NP-4/NP-6 (their R2 is *answerable*), so `M-NP1c` was vacuous. Resolved by promoting the `SC_SHOW_RC=124`/`SC_MAINPID=0` + non-owned-holder shape into the named leg **`B-defer-d` / `B-downgrade`**, re-targeting `M-NP1c` to it, deleting the over-claims from NP-4/NP-6, and restating SC-2 / P2-T9 / R-5 / §10.2 C-1 | `phase2-plan.md` §7.5 (`B-defer-d`/`M-NP1c`), §7.9, §9.1 (NP-6), §9.2, §14 (P2-T8/P2-T9), §15 (R-5), §16 (SC-2), §10.2 (C-1); `phase1-plan.md` §5.3 (M-NP1c pointer) | Plan review wave 2 (FINAL) |
+| 26 | `D-P2-6` | **BL-4 — C-0's character-for-character claim is made TRUE.** The pre-amendment raw-substring predicate still lived in phase2 §9.4 / §5.2.3, and the fenced quotes still said `contains`; canonical source of record is fixed as **phase1 §5.3's fenced block** (PREFIX test `case "$pcg" in "$cg"/*)`), every other copy is a marked quotation above a `⛔ DO NOT COPY the table-cell form` line, and NP-6 gains a **mid-path cell** + `M-NP1d` so a substring implementation reddens | `phase1-plan.md` §5.3 (source) + §10 T5 (pointer); `phase2-plan.md` §5.2.3 (A-ASSUME-3), §9.1 (NP-6, two cells), §9.2 (+`M-NP1d`), §9.4, §14 (P2-T9), §15 (R-5), §16 (SC-2); `decisions.md` §2.1/§2.2(4)/§2.2(7); `plan-overview.md` §4/§5 | Plan review wave 2 (FINAL) |
+| 27 | `D-P2-7` | **BL-5 — the REJECTED D1 semantics are purged from the invariant hand-off.** phase1 §14 `I-B8` (per-shell / seconds-counted / clamped `[0,5]` / exhaustion ⇒ transient 2 with the distinct marker / refusal only at budget end), `I-B10`, the `N6` template row, and `I-E3` ("no new EXPORTED env / OPERATOR knob; the seam is a clamped, marker-gated, non-exported internal bound routed through `_numeric_knob`") are rewritten; §9's blast-radius "no new `_numeric_knob`s" contradiction is closed; §14 and §9/I-E3 join the §10.1 fold lists | `phase1-plan.md` §14 (`I-B8`/`I-B10`/`I-E3`/`N6`), §9 (blast radius); `decisions.md` §10.1, §10.8; `plan-overview.md` §5 | Plan review wave 2 (FINAL) |
 
 **Nothing in this register weakens a phase plan's hard constraints.** Where a decision *narrows* the plan (`T12`, `NP-11`), the narrowing is
 explicit and its compensating coverage is named (§6).
@@ -225,7 +228,7 @@ shapes that refuse today gain a containment answer:
 | Rung | Predicate | Cost / portability |
 |---|---|---|
 | **R1** | holder ∈ argv/cwd-anchored owned set (already computed) | zero extra cost |
-| **R2** | unit mode, Linux: holder `== MainPID` **or** `/proc/<holder>/cgroup` last-line contains the unit ControlGroup — **AMENDED to segment-aware matching, §2** | 2 bounded `systemctl show` probes, resolved once per gate invocation (`_gate_attr_unit_ctx`) |
+| **R2** | unit mode, Linux: holder `== MainPID` **or** the holder's cgroup last-line matches the unit ControlGroup at a **segment boundary** — PREFIX test `case "$pcg" in "$cg"/*)`, canonical string `pcg == cg \|\| pcg PREFIX-matches "$cg"/` (**AMENDED to segment-aware matching — §2; canonical fenced source phase1 §5.3**) | 2 bounded `systemctl show` probes, resolved once per gate invocation (`_gate_attr_unit_ctx`) |
 | **R3** | bounded ppid walk (depth ≤ 12) into the owned **set** (`_supervision_pid_ancestor_of`) | POSIX `ps`; also serves Darwin |
 | **R4** | Darwin launchd job lineage; **empty job pid while a holder serves ⇒ `1`** (dual-supervisor refusal preserved) | bounded `launchctl` |
 
@@ -403,10 +406,10 @@ annotation; the lane's exit criterion states `promote.sh` was never run; the liv
 
 | | Before (`phase1-plan.md` §5.3, R2) | After (`D-P2-3`, binding) |
 |---|---|---|
-| Predicate | holder `= MainPID` **or** `/proc/<holder>/cgroup` last-line **contains** the unit ControlGroup (**raw substring**) | holder `= MainPID` **or** the cgroup last-line matches the ControlGroup at a **segment boundary** — i.e. `pcg == cg` **or** `pcg` contains `"$cg/"` (the match must be followed by `/` or end-of-string) |
+| Predicate | holder `= MainPID` **or** `/proc/<holder>/cgroup` last-line **contains** the unit ControlGroup (**raw substring**) | holder `= MainPID` **or** the cgroup last-line matches the ControlGroup at a **segment boundary** — i.e. **`pcg == cg` OR `pcg` PREFIX-matches `"$cg"/`** (shell: `[ "$pcg" = "$cg" ]` or `case "$pcg" in "$cg"/*)` — a **left-anchored prefix**, `cg` literal then `/` then anything; **not** a substring anywhere in `pcg`). Canonical source: `phase1-plan.md` §5.3's fenced block |
 | Failure mode | a sibling/nested cgroup whose path **extends** ours (`/system.slice/ensemble.slice2/...` vs ours `/system.slice/ensemble.slice`) is **accepted** — raw substring over-accepts across slice-hierarchy prefixes | a prefix-extension cgroup is **not** matched ⇒ rung answers `1` ⇒ refuse |
 
-**Why the amendment is right.** The raw substring test is exactly today's `lib.sh:8119-8135` shape transplanted into a new rung; copying it
+**Why the amendment is right.** The raw substring test is exactly today's `lib.sh:8127-8135` shape (the `case "$pcg" in *"$cg"*)` decision block inside `_gate_attr_unit_lineage`) transplanted into a new rung; copying it
 would import the over-accept into the *widening* path, where the accept-side consequence is new. Segment-awareness costs one comparison and
 removes the class rather than documenting it.
 
@@ -414,8 +417,15 @@ removes the class rather than documenting it.
 
 1. **`NP-6` becomes a HARD PIN.** `phase2-plan.md` §9.1 `NP-6` was written two-armed (arm (a) substring retained ⇒ advisory; arm (b)
    segment-aware ⇒ refusal). **Arm (b) is now the contract.** The leg asserts the **refusal** and prints the arm for the evidence pack.
-2. **`M-NP1b` must redden `NP-6`.** The mutation "make the cgroup test unconditional / permissive (`case "$pcg" in *) ;;`)" must turn `NP-6`
-   red. `NP-6` without a reddening mutation is a failed leg (`phase2-plan.md` §9.2, `SC-1`/`SC-2`).
+   **Review wave 2 (BL-4) extends the leg to TWO cells:** (a) the suffix-extension collision (`…/ensemble-main.service-evil.scope`) and
+   (b) the **mid-path** collision (`/evil/system.slice/ensemble-main.service/x`) — cell (b) is the one a raw-substring implementation
+   *accepts* while a left-anchored prefix refuses, so it is the cell that catches the exact copy-risk this amendment exists to remove.
+2. **`M-NP1b` must redden `NP-6`** — the mutation "make the cgroup test unconditional / permissive (`case "$pcg" in *) ;;`)" must turn
+   `NP-6` red; `NP-6` without a reddening mutation is a failed leg (`phase2-plan.md` §9.2, `SC-1`/`SC-2`). **Two further mutations are
+   now also required (review wave 2):** `M-NP1d` (implement R2's second disjunct as the raw substring `*"$cg"*`) must redden cell (b),
+   and `M-NP6-reach` (delete the R2 invocation so a neighbouring rung refuses) must redden the **reach/census-counter** assertion —
+   otherwise NP-6 could pass without ever exercising R2. **`M-NP1c` is NOT in this set** (BL-3): R2 is answerable in the NP-6 fixture,
+   so the C-1 downgrade cannot engage; its home is leg `B-downgrade` (§7.5).
 3. **Implementation touchpoints.** `P3`-unrelated: Phase-1 **`T5`** (`_gate_attr_containment`, rung R2) and **`T4`** (`_gate_attr_unit_ctx`,
    which resolves `_GA_UNIT_MAINPID` + `_GA_UNIT_CG` once per invocation and is the natural home of the matcher). The equality arm
    (holder `== MainPID`) is unaffected.
@@ -423,12 +433,19 @@ removes the class rather than documenting it.
    record is this register. The coding commission implements §2.1, not the phase file's substring wording. This is the
    `plan-body-ledger-agreement` hazard in the precise form it warns about: *body ≠ ledger; the ledger wins; predicate strings must match
    character-for-character.*~~**
-   **✅ RESOLVED — architect closure C-0 (2026-11-17): the body/ledger divergence is CLOSED.** The leader's enrichment fold
-   authorises the phase files to be updated, so `phase1-plan.md` §5.3 now carries the binding predicate **verbatim** with a
-   `⚠️ SUPERSEDED` marker on the old raw-substring text, and `phase2-plan.md` §9.1 NP-6 is **arm (b)-only** with the same
-   character-identical predicate. **Body and ledger now agree** — the `plan-body-ledger-agreement` hazard (body wins;
-   predicate strings must match character-for-character) is discharged, not merely recorded. The ledger of record remains
-   this register; the phase files are now conformant copies.
+   **✅ RESOLVED — architect closure C-0 (2026-11-17), and RE-CLOSED after review wave 2 found it only PARTIALLY applied
+   (BL-4, 2026-11-17).** First pass: `phase1-plan.md` §5.3 gained the binding predicate verbatim with a `⚠️ SUPERSEDED`
+   marker, and `phase2-plan.md` §9.1 NP-6 was made arm (b)-only. **That was not enough** — the raw-substring wording
+   survived in `phase2-plan.md` §9.4 and §5.2.3 (A-ASSUME-3), and the predicate was still rendered as *"contains"* in the
+   §9.1/§9.2 fenced quotes, in `plan-overview.md` §5, in this very item, and in phase1 T5's acceptance cell — so C-0's
+   claim ("character-for-character, everywhere") was FALSE and a coder copying any of those cells would have shipped the
+   over-accept. **Wave-2 closure (`D-P2-6`, §10.8): the predicate is now a PREFIX test stated once per file, with the
+   single canonical fenced source at `phase1-plan.md` §5.3** — the string is
+   `pcg == cg || pcg PREFIX-matches "$cg"/` (shell: `[ "$pcg" = "$cg" ]` **or** `case "$pcg" in "$cg"/*)`), and every
+   other occurrence is a marked *quotation* with a `⛔ DO NOT COPY the table-cell form — canonical source is phase1 §5.3
+   fenced block` line above its table. Copies now: phase1 §5.3 (source), phase1 §10 T5 (pointer), phase2 §9.1 NP-6
+   (two cells), phase2 §9.2 (quote), phase2 §5.2.3 A-ASSUME-3 (restated), phase2 §9.4 (restated), plan-overview §5, and
+   this register §2.1/§2.2(7). **Body and ledger agree — verified by grep, not asserted.**
 5. **Scope of the amendment — R2 ONLY.** The pre-existing **Layer 2** `_gate_attr_unit_lineage` (`lib.sh:8100-8137`) keeps its substring
    test **byte-identical** (the common path must not change — `I-B2`/`B-order`). This is sound, not an inconsistency:
    - a **non-owned** holder can reach Layer 2 only via a ladder `0` acceptance (any `1` refuses first);
@@ -437,12 +454,17 @@ removes the class rather than documenting it.
 6. **The documented P12 residual is untouched** by this amendment: "a second supervisor **inside** our unit cgroup" remains accepted (systemd
    only starts it), an operator-hostile shape, unchanged risk class (`phase1-plan.md` §5.7 P12). Its **sibling** — a stale-incarnation holder under
    `KillMode=mixed` (architect closure C-7) — is ladder-accepted and caught by the version conjunct; documented as `P12-sibling`, not gated.
-7. **The binding predicate, character-for-character identical in all three places (architect C-0, 2026-11-17):**
+7. **The binding predicate — ONE canonical string, quoted character-for-character in every copy (architect C-0, 2026-11-17; re-closed review wave 2 / BL-4 / `D-P2-6`). Canonical SOURCE: the fenced shell block in `phase1-plan.md` §5.3:**
 
-   `pcg == cg || pcg contains "$cg/"`
+   `pcg == cg || pcg PREFIX-matches "$cg"/`
 
-   carried at `decisions.md` §2.1/§2.2(7), `phase1-plan.md` §5.3 (R2 row, with the `⚠️ SUPERSEDED` marker on the old raw-substring
-   text), and `phase2-plan.md` §9.1 (NP-6, arm (b)-only). The coding commission's task text quotes it verbatim.
+   — the second disjunct is a **left-anchored prefix** test (`case "$pcg" in "$cg"/*)`; `cg` literal, then `/`, then
+   anything), **never** a substring search (`*"$cg"*`). Carried at `decisions.md` §2.1/§2.2(7), **`phase1-plan.md` §5.3
+   (the CANONICAL FENCED SOURCE — the shell block there is the source of record; the `⚠️ SUPERSEDED` marker sits on the
+   old raw-substring text)**, `phase1-plan.md` §10 (T5 acceptance cell — a pointer, not a copy),
+   `phase2-plan.md` §9.1 (NP-6, arm (b)-only, TWO cells incl. the mid-path cell), §9.2 (quoted above a `⛔ DO NOT COPY`
+   line), §5.2.3 A-ASSUME-3 and §9.4 (both restated), and `plan-overview.md` §5. The coding commission's task text quotes
+   the §5.3 fenced block verbatim.
 
 ### 2.3 Where it is bound
 
@@ -721,8 +743,8 @@ render the token `inactive|activating` (a `${var:-word}` expansion is not a choi
 
 | File | Namespaces in use |
 |---|---|
-| `phase1-plan.md` | `A1–A28` (anchor register), `T1–T12` (tasks), `C0–C6` (commits), `C-1…C-6` (stash touchpoints), `R1–R4` (containment **rungs**), `R1–R5` (§12 **risks**), `P1–P12` (protection matrix), `I-A1…I-E3` (invariants, **29**), `N1–N9` (negative-proof template), `S1–S10` (success), `D-P1-1…3` |
-| `phase2-plan.md` | `D1–D7` (incidents), `A0–A7` (Candidate-A legs), `B1–B10` + `B-*` (Candidate-B legs), `C-1…C-8` (Candidate-C legs), `NP-1…NP-11`, `M-*` (mutations), `R-*` (restart legs), `R0`, `RG-1…RG-7`, `P2-T1…P2-T16`, `U-1…U-4`, `OQ-P2-1…4`, `R-1…R-5` (risks), `SC-1…SC-11` |
+| `phase1-plan.md` | `A1–A32` (anchor register; A29–A32 added review wave 1), `T1–T12` + **`T7b`/`T7c`** (tasks), `C0–C6` (commits), `C-1…C-6` (stash touchpoints), `R1–R4` (containment **rungs**), `R1–R5` (§12 **risks**), `P1–P13` + `P12-sibling` (protection matrix), `I-A1…I-E3` (invariants, **31** after `I-B2b`/`I-B13`), `N1–N9` (negative-proof template), `S1–S12` (success; S11/S12 review wave 1), `D-P1-1…5` |
+| `phase2-plan.md` | `D1–D7` (incidents), `A0–A9` (Candidate-A legs; A8/A9 review wave 1), `B1–B10` + `B-*` (Candidate-B legs, incl. **`B-defer-d`/`B-downgrade`** and `B-defer-e`), `C-1…C-8` (Candidate-C legs), `NP-1…NP-11`, `M-*` (mutations, incl. **`M-NP1d`**, **`M-NP6-reach`**, **`M-NP1c-strict`**), `R-*` (restart legs), `R0`, `RG-1…RG-7`, `P2-T1…P2-T16`, `U-1…U-4`, `OQ-P2-1…4`, `R-1…R-5` (risks), `SC-1…SC-12` |
 | `phase3-plan.md` | `F1–F36` (facts), `P3-D1…P3-D12`, `P3-R1…P3-R7`, `T1…T10` (**should be `P3-T*`**), `AC1…AC13` (**should be `AC-P3-*`**), `P3-Q1…P3-Q3` |
 
 ### 8.3 Findings (listed explicitly; **not** silently fixed in the phase files)
@@ -765,6 +787,14 @@ render the token `inactive|activating` (a `${var:-word}` expansion is not a choi
 `T`/`P3-T` task is reachable from an AC; the commit graph (`C1…C6` → `F`) matches Phase 3's `F→M→B→T`.
 
 ### 8.5 The one cross-plan seam that must not be lost
+
+**Wave-2 addition (REVIEW WAVE 2, BL-3/BL-4/BL-5).** Three further cross-plan seams were reconciled and must not be lost:
+(a) the **C-1 downgrade's only home** is `B-defer-d`/`B-downgrade` (phase2 §7.5) — no other leg may claim it;
+(b) the **R2 predicate has exactly ONE canonical source** (the fenced block in phase1 §5.3) — every other occurrence in
+every file is a marked quotation above a `⛔ DO NOT COPY` line, and `M-NP1d` + the source-grep assertion are what keep a
+substring implementation from shipping;
+(c) the **D1/D3 deferral semantics have exactly one wording** (phase1 §14 `I-B8`) and `I-E3`'s hygiene lock reads
+"exported/operator knob", never "not a `_numeric_knob`" — the router is mandated, so the older phrasing is a defect.
 
 **`phase3-plan.md` `P3-R4`** (also `phase2-plan.md` §2 out-of-scope row 2): any **new shipped file** under `scripts/upgrade/` or
 `daemon/plugin_subsystem/` must be added to `executor_family_paths` **inside the lane branch** (so `M` contains both the member and the list
@@ -901,9 +931,9 @@ divergence must be closed rather than argued.
 | Ruling | Decision | Folded into |
 |---|---|---|
 | **D-P3-1** | **MERGE** (decided at dispatch time) — sync-merge `origin/latest` into the branch before surgery; **re-grep the anchor register post-merge**. Plan text that framed this as open is updated. | `§9` (RESOLVED), `§1` row 12, `phase3-plan.md` §10 / `P3-D11` / `T3`, `plan-overview.md` §9 |
-| **D1** | **ADOPT transient→budget-bound** (architect recommendation). The deferral pool is bounded by the verify budget floor; **exhaustion refuses (halt) only at budget end**. **Terminal fail-fast exhaustion is REJECTED** — it re-conflates the transient/terminal classes the ladder separates. | `phase1-plan.md` §5.4/§5.6/§12/§13, `phase2-plan.md` §5.2 (`I-B8`/`I-B8b`), §7.5 (`B-defer-a` + `M-B-defer-D1`), §7.8 (`B-halt`) |
+| **D1** | **ADOPT transient→budget-bound** (architect recommendation). The deferral pool is bounded by the verify budget floor; **exhaustion refuses (halt) only at budget end**. **Terminal fail-fast exhaustion is REJECTED** — it re-conflates the transient/terminal classes the ladder separates. | `phase1-plan.md` §5.4/§5.6/§12/§13, **§14 (`I-B8` — full restatement: per-shell, seconds-counted, clamped `[0,5]`, distinct marker, refusal only at budget end — and `I-B10`, the halt chain entered only at budget end; plus the §14 `N6` template row; REVIEW WAVE 2, BL-5 / `D-P2-7`)**, `phase2-plan.md` §5.2 (`I-B8`/`I-B8b`), §7.5 (`B-defer-a` + `M-B-defer-D1`), §7.8 (`B-halt`) |
 | **D2** | **ADOPT — add the rows** (sites 4/5 journal symmetry: the `start` arms gain symmetric `kind=nonzero_exit` rows on a genuine non-124 rc). | `phase1-plan.md` §4.3 note; `phase2-plan.md` §6 A-legs |
-| **D3** | **ADOPT the `D-P1-2` letter amendment** — "not a `_numeric_knob`" ⇒ "not an *exported production knob*; garbage parsed via the house `_numeric_knob` router **plus a mandatory `[0,5]` ceiling**". | `§1` row 2 (AMENDED), `phase1-plan.md` §5.4, `phase2-plan.md` §5.2.3 U-2 (resolved) |
+| **D3** | **ADOPT the `D-P1-2` letter amendment** — "not a `_numeric_knob`" ⇒ "not an *exported production knob*; garbage parsed via the house `_numeric_knob` router **plus a mandatory `[0,5]` ceiling**". | `§1` row 2 (AMENDED), `phase1-plan.md` §5.4, **§9 (blast-radius — the "no new `_numeric_knob`s" line rewritten to the exported/operator-knob form) and §14 `I-E3` (restated — same wording; REVIEW WAVE 2, BL-5 / `D-P2-7`)**, `phase2-plan.md` §5.2.3 U-2 (resolved), §6.1 A7 (assertions re-cut to the restated `I-E3`) |
 
 **Bound semantics of record (leader D1 — verbatim):** *attribution acceptance = evidence-only (ladder); deferral = a
 budget-bounded delay that can never accept; the version conjunct = absolute and outside the widening.*
@@ -912,8 +942,8 @@ budget-bounded delay that can never accept; the version conjunct = absolute and 
 
 | # | Closure | Where it now lives |
 |---|---|---|
-| **C-0** | Body/ledger divergence on the very predicate the amendment exists to fix — the phase files now carry the binding predicate **character-for-character**, with `⚠️ SUPERSEDED` markers on the old raw-substring text; NP-6 is arm (b)-only. | `phase1-plan.md` §5.3 (R2 row), `phase2-plan.md` §9.1 (NP-6), `§2.1`/`§2.2(7)` — the canonical string: `pcg == cg \|\| pcg contains "$cg/"` |
-| **C-1** | One normative composition rule — the **first rung that ANSWERS decides**; an answered `1` is **downgraded to `2`** when a stronger rung was unanswerable (an incomplete determination is not positive foreignness); counter-mutation **M-NP1c** added. | `phase1-plan.md` §5.3 (intro + rung 5), `phase2-plan.md` §9.2 (`M-NP1c`), §5.2 (`I-B8a`), §16 `SC-2` |
+| **C-0** | Body/ledger divergence on the very predicate the amendment exists to fix. **Wave-1 pass was PARTIAL** (review wave 2 / BL-4 / `D-P2-6`): §9.4, §5.2.3 A-ASSUME-3 and several cells still said `contains`. **Now fully closed**: the canonical **fenced block** lives in `phase1-plan.md` §5.3 (PREFIX test), every other copy is a marked quotation above a `⛔ DO NOT COPY the table-cell form — canonical source is phase1 §5.3 fenced block` line, and NP-6 is arm (b)-only with a **mid-path** second cell. | `phase1-plan.md` §5.3 (source) + §10 T5 (pointer), `phase2-plan.md` §9.1 (NP-6, 2 cells), §9.2, §5.2.3, §9.4, `§2.1`/`§2.2(4)`/`§2.2(7)`, `plan-overview.md` §5 — the canonical string: `pcg == cg \|\| pcg PREFIX-matches "$cg"/` |
+| **C-1** | One normative composition rule — the **first rung that ANSWERS decides**; an answered `1` is **downgraded to `2`** when a stronger rung was unanswerable (an incomplete determination is not positive foreignness); counter-mutation **M-NP1c** added. **Re-targeted in wave 2 (BL-3 / `D-P2-5`)**: the downgrade is unreachable in NP-4/NP-6 (R2 answerable there), so `M-NP1c` now reddens the new leg **`B-defer-d`/`B-downgrade`** and the NP-4/NP-6 over-claims are withdrawn. | `phase1-plan.md` §5.3 (intro + rung 5), `phase2-plan.md` **§7.5 (`B-defer-d` + `M-NP1c` re-target)**, §7.9, §9.1 (NP-6), §9.2 (`M-NP1c`), §10.2 (this row), §5.2 (`I-B8a`), §14 (P2-T8/P2-T9), §15 (R-5), §16 `SC-2` |
 | **T7** | The "assert pair == M" assertion was **circular** (stage-time knows nothing of `M`; the manifest floor field has zero consumers) — replaced by the **graph+content** assertion set (content-at-X markers, minimal-introduction, shape proof, `X^2` == lane tip) with **`M_sha` recorded externally** in the tag annotation/handoff; AC10 restated as the `sidecar.git_head == B` ∧ `git show B:upgrade_tools.py` chain. | `phase3-plan.md` T7, AC8, AC10, §4.1 (two-commit truthfulness wording), §8.1 (S1–S7 ledger + the P3-T08 phantom-red note) |
 
 ### 10.3 REQUIRED items folded (8 — all adopted)
@@ -963,3 +993,29 @@ runs after attribution on every green in `_handback_serving_probe` (`lib.sh:6107
 adjudication · 4. No-promote disclosure · 5. **Scripts-pin precondition — extended** with the new pin preconditions (git-shape,
 clean tree, exact-HEAD) and the **pin-BEFORE-promote ordering**, plus the **restart-lane unguarded window** disclosure and the
 **`halt`-row VIOLATION/paging widening** disclosure.
+
+### 10.8 Review wave 2 — closure record (`D-P2-5` / `D-P2-6` / `D-P2-7`, 2026-11-17)
+
+**Source:** plan review, wave 2 of 4 (blockers **BL-3** mutation vacuity, **BL-4** segment-aware predicate absent from
+several copies, **BL-5** rejected D1 semantics still in the invariant hand-off). All three are **plan-text** defects —
+no design change. Encode-as-you-go record:
+
+| Blocker | What was wrong | What changed | Where |
+|---|---|---|---|
+| **BL-3** → `D-P2-5` | `M-NP1c` ("delete the C-1 downgrade") could not redden NP-4/NP-6: the downgrade fires only when a *stronger* rung was **unanswerable**, and both fixtures give R2 an answerable read | The `SC_SHOW_RC=124`/`SC_MAINPID=0` + non-owned-holder shape is promoted to the named leg **`B-defer-d` / `B-downgrade`** (expect transient `2`, no `REFUSED` line, deferral entered; contrast cell with a resolvable R2 ⇒ `1`); `M-NP1c` re-targeted to it; the NP-4/NP-6 red-claims **deleted**; SC-2, P2-T9, R-5, P2-T8, §7.9 and §10.2 C-1 restated | `phase2-plan.md` §7.5 (new rows), §7.9 (2 new rows), §9.1 NP-6, §9.2 (row + BL-3 note), §14 (P2-T8/P2-T9), §15 (R-5), §16 (SC-2) |
+| **BL-4** → `D-P2-6` | The pre-amendment raw-substring predicate survived in `phase2 §9.4` and `§5.2.3 A-ASSUME-3`, and every fenced quotation still read `contains` — so `decisions §2.2(4)`'s "character-for-character" claim was FALSE | Canonical source of record fixed as **phase1 §5.3's fenced shell block** (PREFIX test); §9.4 + §5.2.3 rewritten; every quoting table preceded by `⛔ DO NOT COPY the table-cell form — canonical source is phase1 §5.3 fenced block`; **mid-path NP-6 cell** (`/evil/system.slice/ensemble-main.service/x`) + `M-NP1d`; truth table + `cg == "/"` degenerate guard added; T5's acceptance cell carries the canonical string; §2.1/§2.2(4)/§2.2(7) and plan-overview §4/§5 re-worded so the claim is true | `phase1-plan.md` §5.3/§10 T5; `phase2-plan.md` §5.2.3, §9.1, §9.2, §9.4, §14, §15, §16; `decisions.md` §2.1/§2.2; `plan-overview.md` §4/§5 |
+| **BL-5** → `D-P2-7` | `phase1 §14` still encoded the REJECTED D1 semantics (`I-B8` "process-global"/terminal-refuse wording, `I-B10`, the `N6` template row's "refuse after ≤ defer"), and `§9`/`I-E3` said "no new `_numeric_knob`s" while `§5.4`/D3 mandates the router + `[0,5]` clamp | `I-B8` rewritten in full (per-shell / seconds-counted / clamped `[0,5]` / marker-gated / exhaustion ⇒ **transient 2** with the distinct `UNATTRIBUTABLE … deferring` marker / **refusal only at budget end**); `I-B10` restated (halt chain entered **only** at budget end); the §14 `N6` row now expects the transient verdict; `I-E3` restated as "no new EXPORTED env / OPERATOR knob (the seam is a clamped, marker-gated, non-exported internal bound routed through `_numeric_knob`)"; the §9 blast-radius contradiction closed; **§14 and §9/I-E3 added to the §10.1 fold lists** (D1, D3) | `phase1-plan.md` §14 (`I-B8`/`I-B10`/`I-E3`/`N6`), §9; `decisions.md` §10.1, this table |
+
+**Not applied as written (disclosed).** Two items of the wave-2 spec refer to artifacts that do not exist in the tree as
+described, so they were applied in their *intent* rather than literally:
+
+1. *"add the canonical predicate string to phase1 T5's acceptance cell"* — done, but as a **pointer plus the canonical
+   string**, not a verbatim copy of the fenced block: a table cell cannot carry the block faithfully, and duplicating the
+   block is the copy-risk this wave exists to remove. T5's cell says the implementation must match §5.3 character-for-character.
+2. *"[T5] research-findings-lane.md line ~88 cites `stage.sh:~810-816` — wrong file in the text"* — **no such citation
+   exists anywhere in the plan set** (`grep -rn '810-816' *.md` → 0 hits; the line ~88 citation in that file is
+   `executor_family.sh:176-181`). Spot-verified against the worktree: the tag-scope/truthfulness passage it points at is
+   **`stage.sh:803-816`** (comment + `executor_family_verify_stamp_coverage` call at `:817`), and `executor_family.sh:176-181`
+   is `executor_family_manifest_lines` — a **function body**, not the truthfulness comment. That is a real (minor) citation
+   defect, so it was repaired by pointing the lane file at the *right* pair of anchors; see `research-findings-lane.md`
+   §bump_version.py bullet. Recorded here rather than silently "fixed" per the spec's assumed text.
