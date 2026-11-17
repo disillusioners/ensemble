@@ -1228,6 +1228,15 @@ Returns:
                 else:
                     lines.append(content)
             # Lineage section.
+            #
+            # D7 (2026-11-17, anomaly c24f4d39): render the keys
+            # ``SkillLineage.to_dict()`` actually emits —
+            # ``{skill_id, parent_skill_id, change_summary,
+            # content_diff, created_at}``. The renderer USED TO read
+            # ``from_skill_id`` / ``to_skill_id`` / ``relation_type``
+            # — keys that exist on NO lineage dict — so every skill
+            # with lineage rendered blank lines (fresh generations
+            # showed an empty "## Lineage" body).
             if parents or children:
                 lines.append("")
                 lines.append("## Lineage")
@@ -1236,16 +1245,19 @@ Returns:
                     lines.append("Parents:")
                     for p in parents:
                         lines.append(
-                            f"- from_skill_id={p.get('from_skill_id', '')} "
-                            f"relation_type={p.get('relation_type', '')}"
+                            f"- parent_skill_id="
+                            f"{p.get('parent_skill_id', '')} "
+                            f"change_summary="
+                            f"{p.get('change_summary', '')}"
                         )
                 if children:
                     lines.append("")
                     lines.append("Children:")
                     for c in children:
                         lines.append(
-                            f"- to_skill_id={c.get('to_skill_id', '')} "
-                            f"relation_type={c.get('relation_type', '')}"
+                            f"- skill_id={c.get('skill_id', '')} "
+                            f"change_summary="
+                            f"{c.get('change_summary', '')}"
                         )
             return "\n".join(lines)
         except Exception as e:
