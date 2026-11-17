@@ -270,6 +270,41 @@ def _instance_repository(manager: Any) -> Any:
     return getattr(manager, "_instance_repository", None)
 
 
+# ── Compact-note refusal MESSAGE TEMPLATES (per-code) ──────────────────────
+#
+# The five code names are the census (pinned at 14) and are UNCHANGED.
+# The message LITERALS are hoisted here as templates (the variable parts
+# are format placeholders) so the five branches stay readable — but the
+# DECISION LADDER below is five EXPLICIT ``if`` branches, NOT a table:
+# the code is chosen by CONDITIONS (note present → cap → disabled → rate
+# limit), not by lookup. See the H4 ruling (re-briefed 2026-11-17).
+_COMPACT_NOTE_MSG_NOTE_REQUIRES_COMPACT = (
+    "a compact_note was supplied with compact=false — the note is only "
+    "meaningful together with compact=true; re-issue the call with "
+    "compact=true. Nothing was armed."
+)
+_COMPACT_NOTE_MSG_NOTE_REQUIRED = (
+    "a compact note is REQUIRED when compact=true — the note is the "
+    "point, not an option; supply compact_note with non-empty text. "
+    "Nothing was armed."
+)
+_COMPACT_NOTE_MSG_NOTE_OVER_CAP = (
+    "the compact note is {note_chars} characters, over the "
+    "{cap}-character cap — the note is NEVER truncated; shorten it and "
+    "re-arm. Nothing was armed."
+)
+_COMPACT_NOTE_MSG_COMPACT_DISABLED = (
+    "compaction is DISABLED in this deployment — arming a note that can "
+    "never land would strand it; enable compaction (CompactionConfig.enabled) "
+    "and re-arm. Nothing was armed."
+)
+_COMPACT_NOTE_MSG_COMPACT_RATE_LIMITED = (
+    "the deliberate-compact rate limit is in force — {remaining}s remaining "
+    "before another note-guided compaction may be armed (the limit is "
+    "{limit}s). Nothing was armed; try again after the window."
+)
+
+
 def _compact_note_refusal(
     instance_id: str,
     agent_id: str,
@@ -349,10 +384,10 @@ def _handle_compact_note(
     cap = _compact_note_cap(manager)
     note_chars = len(note)
 
-    # ── The refusal ladder — ONE table, ONE call shape ────────────────────
-    # Each row is (code, guard, message). The FIRST row whose guard fires
-    # IS the refusal; the evaluation order is the row order. The five
-    # code names are the census (pinned at 14) and are UNCHANGED.
+    # ── The refusal ladder — FIVE EXPLICIT ``if`` BRANCHES ──────────────────
+    # The FIRST branch whose guard fires IS the refusal; the evaluation
+    # order is the branch order (top to bottom). The five code names are
+    # the census (pinned at 14) and are UNCHANGED.
     #
     # ORDER / MASKING (documented, not reordered — the census re-pin rides
     # a later lane): ``note_over_cap`` is evaluated BEFORE
@@ -362,85 +397,77 @@ def _handle_compact_note(
     # disabled/rate-limit state. Every refusal is still TRUE and TYPED;
     # only the surfaced cause is the one that fires first. Reordering is
     # deferred: the census and the refusal tests ride the later lane.
-    # The carrier state is read LAZILY (only the rate-limit row and the
-    # arm need it), so an early refusal never touches the DB.
+    # The carrier state is read LAZILY (only the rate-limit branch needs
+    # it), so an early refusal never touches the DB.
     repo = _instance_repository(manager)
-    state_box: dict[str, Any] = {}
 
-    def _state():
-        if "value" not in state_box:
-            state_box["value"] = read_compact_note_state(repo, instance_id)
-        return state_box["value"]
+    if not compact and note.strip():
+        return _compact_note_refusal(
+            instance_id,
+            agent_id,
+            code=CODE_NOTE_REQUIRES_COMPACT,
+            message=_COMPACT_NOTE_MSG_NOTE_REQUIRES_COMPACT,
+            note=note,
+        )
 
-    remaining_box: dict[str, int] = {}
+    if compact and not note.strip():
+        return _compact_note_refusal(
+            instance_id,
+            agent_id,
+            code=CODE_NOTE_REQUIRED,
+            message=_COMPACT_NOTE_MSG_NOTE_REQUIRED,
+            note=note,
+        )
 
+    if note_chars > cap:
+        return _compact_note_refusal(
+            instance_id,
+            agent_id,
+            code=CODE_NOTE_OVER_CAP,
+            message=_COMPACT_NOTE_MSG_NOTE_OVER_CAP.format(
+                note_chars=note_chars, cap=cap
+            ),
+            note=note,
+        )
+
+    if not _compaction_enabled(manager):
+        return _compact_note_refusal(
+            instance_id,
+            agent_id,
+            code=CODE_COMPACT_DISABLED,
+            message=_COMPACT_NOTE_MSG_COMPACT_DISABLED,
+            note=note,
+        )
+
+    # The rate-limit branch is the ONLY one that touches the carrier
+    # (lazily). The state is read here and only here.
+    _state_box: dict[str, Any] = {}
+    def _state() -> Any:
+        if "value" not in _state_box:
+            _state_box["value"] = read_compact_note_state(repo, instance_id)
+        return _state_box["value"]
+
+    _remaining_box: dict[str, int] = {}
     def _remaining() -> int:
-        if "value" not in remaining_box:
-            remaining_box["value"] = _rate_limit_remaining_seconds(
+        if "value" not in _remaining_box:
+            _remaining_box["value"] = _rate_limit_remaining_seconds(
                 _state().last_applied_at
             )
-        return remaining_box["value"]
+        return _remaining_box["value"]
 
-    from ..constants import DELIBERATE_COMPACT_RATE_LIMIT_S
+    if _remaining() > 0:
+        from ..constants import DELIBERATE_COMPACT_RATE_LIMIT_S
 
-    ladder: tuple[tuple[str, Callable[[], bool], Callable[[], str]], ...] = (
-        (
-            CODE_NOTE_REQUIRES_COMPACT,
-            lambda: (not compact) and bool(note.strip()),
-            lambda: (
-                "a compact_note was supplied with compact=false — the note "
-                "is only meaningful together with compact=true; re-issue "
-                "the call with compact=true. Nothing was armed."
+        return _compact_note_refusal(
+            instance_id,
+            agent_id,
+            code=CODE_COMPACT_RATE_LIMITED,
+            message=_COMPACT_NOTE_MSG_COMPACT_RATE_LIMITED.format(
+                remaining=_remaining(),
+                limit=DELIBERATE_COMPACT_RATE_LIMIT_S,
             ),
-        ),
-        (
-            CODE_NOTE_REQUIRED,
-            lambda: compact and not note.strip(),
-            lambda: (
-                "a compact note is REQUIRED when compact=true — the note is "
-                "the point, not an option; supply compact_note with "
-                "non-empty text. Nothing was armed."
-            ),
-        ),
-        (
-            CODE_NOTE_OVER_CAP,
-            lambda: note_chars > cap,
-            lambda: (
-                f"the compact note is {note_chars} characters, over the "
-                f"{cap}-character cap — the note is NEVER truncated; "
-                f"shorten it and re-arm. Nothing was armed."
-            ),
-        ),
-        (
-            CODE_COMPACT_DISABLED,
-            lambda: not _compaction_enabled(manager),
-            lambda: (
-                "compaction is DISABLED in this deployment — arming a note "
-                "that can never land would strand it; enable compaction "
-                "(CompactionConfig.enabled) and re-arm. Nothing was armed."
-            ),
-        ),
-        (
-            CODE_COMPACT_RATE_LIMITED,
-            lambda: _remaining() > 0,
-            lambda: (
-                f"the deliberate-compact rate limit is in force — "
-                f"{_remaining()}s remaining before another note-guided "
-                f"compaction may be armed (the limit is "
-                f"{DELIBERATE_COMPACT_RATE_LIMIT_S}s). Nothing was armed; "
-                f"try again after the window."
-            ),
-        ),
-    )
-    for code, guard, message in ladder:
-        if guard():
-            return _compact_note_refusal(
-                instance_id,
-                agent_id,
-                code=code,
-                message=message(),
-                note=note,
-            )
+            note=note,
+        )
 
     state = _state()
 
