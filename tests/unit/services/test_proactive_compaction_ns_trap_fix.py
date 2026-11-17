@@ -335,12 +335,13 @@ class TestNsTrapCLETargeting:
     # Re-computed with the ast.If walk above (NOT a blind bump) —
     # same recipe as the 2026-11-11 re-pin (precedents: 5995366bb,
     # 4e0981b57): the innermost ``ast.If`` carrying each anchor
-    # string now sits at 9910 / 10072 (9574 / 9736 before this
-    # re-pin; 9872 / 10034 at the tester-gate's measurement point,
-    # before the F3 edits above the nodes). The PINNED CODE is
-    # byte-identical base-vs-head — only the line anchors drifted.
-    _CLE_GUARD_LINE = 9910
-    _CLE_REPLACEMENT_LINE = 10072
+    # string now sits at 9926 / 10088 (9574 / 9736 before the first
+    # re-pin; 9872 / 10034 at the tester-gate's measurement point;
+    # 9910 / 10072 before the compact-note lane's graph.py growth
+    # above the CLE block). The PINNED CODE is byte-identical
+    # base-vs-head — only the line anchors drifted.
+    _CLE_GUARD_LINE = 9926
+    _CLE_REPLACEMENT_LINE = 10088
 
     @staticmethod
     def _if_node_with_body_constant(substring: str):

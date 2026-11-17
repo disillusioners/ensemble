@@ -536,6 +536,13 @@ class TestBehaviorLegs:
 
 
 REPO_DOCS_GUIDELINES = REPO_ROOT / "docs" / "guidelines"
+#: The shipped-guideline count, DERIVED from the directory (never a
+#: copied literal — a new guideline file moves this automatically). The
+#: lane added docs/guidelines/guideline-prompt-reload-compact-note.md,
+#: which is why the old hardcoded 5 had to become a derivation.
+EXPECTED_GUIDELINE_COUNT = len(tuple(REPO_DOCS_GUIDELINES.glob("*.md")))
+
+
 CANONICAL_SLUGS = (
     "guideline-live-views-passcode",
     "guideline-memoir-reflection-lane",
@@ -544,13 +551,15 @@ CANONICAL_SLUGS = (
 
 
 class TestParserHappyPath:
-    async def test_c1_listing_serves_the_five_shipped_files(self) -> None:
+    async def test_c1_listing_serves_all_shipped_files(self) -> None:
         raw = await _tools(agent_id="ari", base_dir=REPO_DOCS_GUIDELINES)[
             "guidelines_list"
         ].ainvoke({})
         payload = json.loads(raw)
         entries = payload["guidelines"]
-        assert len(entries) == 5, [e["slug"] for e in entries]
+        assert len(entries) == EXPECTED_GUIDELINE_COUNT, [
+            e["slug"] for e in entries
+        ]
         by_slug = {e["slug"]: e for e in entries}
         for slug in CANONICAL_SLUGS:
             entry = by_slug[slug]
@@ -584,7 +593,7 @@ class TestParserHappyPath:
             # purpose = the first paragraph after the §1 heading
             assert entry["purpose"] in text, slug
 
-    async def test_c5_verbatim_round_trip_all_five(self) -> None:
+    async def test_c5_verbatim_round_trip_all_shipped(self) -> None:
         tools = _tools(agent_id="ari", base_dir=REPO_DOCS_GUIDELINES)
         read = tools["guideline_read"]
         for path in sorted(REPO_DOCS_GUIDELINES.glob("*.md")):
@@ -746,7 +755,7 @@ async def test_every_granted_agent_can_list_and_read(agent_id: str) -> None:
     tools = _tools(agent_id=agent_id, base_dir=REPO_DOCS_GUIDELINES)
     raw = await tools["guidelines_list"].ainvoke({})
     entries = json.loads(raw)["guidelines"]
-    assert len(entries) == 5
+    assert len(entries) == EXPECTED_GUIDELINE_COUNT
     raw = await tools["guideline_read"].ainvoke(
         {"slug": "guideline-notify-user-bounds"}
     )

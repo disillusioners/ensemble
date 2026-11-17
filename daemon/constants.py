@@ -603,6 +603,19 @@ COMPACTION_TARGET_RATIO: float = 0.40  # Target 40% context after compaction
 MIN_MESSAGES_BEFORE_COMPACTION: int = 10  # Minimum messages before compaction
 SUMMARIZATION_CHUNK_THRESHOLD: float = 0.60  # Chunk threshold for summarization
 
+# ── Compact-note lane (prompt_reload(compact, compact_note)) ────────────────────
+# The deliberate-compact rate limit (architect §H gate (iii) / ES-6).
+#
+# A HARDCODED module constant — deliberately NOT a config knob. The lane
+# introduced exactly ONE knob (``CompactionConfig.compact_note_max_chars``);
+# this rate limit is the second relevant number and it is NOT configurable.
+# Enforced at ARM time as the typed
+# refusal ``prompt_reload_compact_rate_limited``; the clock is the
+# instance's ``compact_note_last_applied_at`` (deliberate/note-guided
+# compactions ONLY). 900s = 15 min: 15x the automatic 60s dedup window, so
+# the two trigger classes stay numerically distinct by an order of magnitude.
+DELIBERATE_COMPACT_RATE_LIMIT_S: int = 900  # 15 min between deliberate (note-guided) compactions
+
 # ── Health & Monitoring ───────────────────────────────────────────────────────────
 OBSERVER_HEALTH_CHECK_INTERVAL_S: int = 300  # Observer health check interval (5 min)
 
