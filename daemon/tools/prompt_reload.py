@@ -736,26 +736,30 @@ What it does
 Compact notes (compact + compact_note)
 --------------------------------------
 - compact=true ARMS a note you wrote yourself — your own distillation
-  of this conversation. The note rides VERBATIM into the compacted
-  context at the GLOBAL OVERVIEW slot; the compaction happens at your
-  NEXT turn boundary (the quiescent pre-dispatch gate), NEVER
-  mid-turn.
+  of this conversation. The note is the REQUEST your own model executes
+  on its next invoke: the daemon appends it as a user message to your
+  message list and your own model writes the compaction (same model =>
+  same provider). Nothing is re-rendered into the doc; the note is
+  never a layer. The append is mid-turn and explicitly permitted;
+  compaction happens on that invoke, not at a quiescent gate.
 - The note is REQUIRED when compact=true, and a note supplied with
   compact=false is refused (ignoring it would be dishonest).
 - The note is capped (12000 characters). An over-cap note is REFUSED
   with the length and the cap — it is NEVER silently truncated.
-- ARMED is not COMPACTED. The receipt says outcome=armed_pending_seam
-  and names the three gates that can defer the seam (the
-  minimum-compaction floor, the 60s anti-refire window, and the
-  deliberate-compact rate limit). A second note while one is armed
-  REPLACES the first, with a disclosure of the prior note's digest.
+- ARMED is not COMPACTED. The receipt reports what actually happened
+  (path=append, outcome=compacted only after the swap lands, otherwise
+  deferred/append_failed/empty_reply). There is no "armed pending seam"
+  and no three gates (the floor predicate and threshold bypass are
+  removed). A second note while one is armed REPLACES the first, with a
+  disclosure of the prior note's digest.
 - The note is never echoed in a log — only its length and digest are
   observable.
 
 Accepted consequences (disclosed, by design)
 --------------------------------------------
-- The effect lands on the NEXT turn (never mid-turn); an in-flight
-  turn completes on the old persona unharmed.
+- The effect lands on the SAME turn via the append (mid-turn is
+  permitted for this path); the agent's own model produces the
+  compaction and the history is swapped in place.
 - Reloading the persona invalidates provider prompt caches — accepted.
 - The FE-visible system message may lag until the next display
   rebuild; no display-parity promise.

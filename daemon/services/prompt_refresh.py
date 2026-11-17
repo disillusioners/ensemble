@@ -220,23 +220,25 @@ CODE_ENVELOPES: dict[str, str] = {
 #: are removed).
 OUTCOME_ARMED = "armed"
 
-#: The seam statement, in plain words — the agent must know WHEN, not just THAT.
+#: The seam statement, in plain words — v1.5: the note is a REQUEST
+#: the agent's own model executes on its next invoke (mid-turn append);
+#: there is NO quiescent pre-dispatch gate and NO three gates.
 ARMED_SEAM_STATEMENT = (
-    "your next turn boundary — the quiescent pre-dispatch gate"
+    "your next invoke — the daemon appends the request mid-turn and "
+    "your own model writes the compaction"
 )
 
-#: The expected-seam clause (architect v1.4 — EXHAUSTIVE three gates).
+#: The expected-seam clause (architect v1.5 — the seam is gone).
 #:
-#: The list is EXHAUSTIVE BY RULING: a reader must not be able to believe
-#: the gate list is shorter. The three gates are (i) the armed-aware
-#: minimum-compaction floor, (ii) the pre-existing 60s AUTOMATIC anti-refire
-#: dedup window, (iii) the 900s deliberate-compact rate limit (enforced at
-#: ARM time as a typed refusal — NOT a seam deferral). The word
-#: "unconditionally" is GONE.
+#: Under v1.5 there is no seam and no gates: the append is mid-turn and
+#: the same-model invariant is structural. The prior "three gates"
+#: (minimum-compaction floor, 60s anti-refire window, deliberate-compact
+#: rate limit) are removed; only the 900s deliberate-compact rate limit
+#: survives, enforced at ARM time as a typed refusal.
 ARMED_EXPECTED_SEAM_CLAUSE = (
-    "it fires there unless one of exactly three gates applies: the "
-    "minimum-compaction floor, the 60s anti-refire window, or the "
-    "deliberate-compact rate limit — this list is exhaustive"
+    "it is executed by your own model on this turn's invoke — there is "
+    "no seam and no gate list; the 900s deliberate-compact rate limit "
+    "is enforced at arm time"
 )
 
 #: The explicit "not yet" line — MANDATORY in the armed receipt.

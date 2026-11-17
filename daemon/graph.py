@@ -13500,7 +13500,7 @@ def build_instance_graph(
     # threads ``injection_slot`` and ``live_hub`` into the agent-node
     # closure so the graph can consume pending user injections without
     # importing InstanceManager (preserves test isolation).
-    graph.add_node("agent", create_agent_node(
+    _agent_node_inner = create_agent_node(
         llm_with_tools,
         system_prompt,
         compactor=compactor,
@@ -13540,7 +13540,159 @@ def build_instance_graph(
         empty_streak_manager=manager,
         # Ladder phase-2 B-4 / D-1: the shared per-turn repair latch.
         turn_repair_latch=turn_repair_latch,
-    ))
+    )
+
+    async def _compact_note_agent_node(state: Any, config: Optional[RunnableConfig] = None) -> Any:
+        """Graph-seam SWAP (architect v1.5 §2d/§11): when this invocation
+        answered a compaction request (the channel's last HumanMessage
+        carries ``context_kind == "compaction_request"``), wrap the model's
+        reply in the house doc format and return the sentinel-first channel
+        value ``[sentinel, doc, *preserved_tail]``. The exchange is
+        consumed (not preserved). Otherwise delegate unchanged.
+        """
+        result = await _agent_node_inner(state, config)
+        try:
+            cfg = config if isinstance(config, dict) else (config or {})
+            if not isinstance(cfg, dict):
+                cfg = {}
+            configurable = cfg.get("configurable") if isinstance(cfg.get("configurable"), dict) else {}
+            instance_id = configurable.get("thread_id") if isinstance(configurable, dict) else None
+
+            state_msgs = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
+            state_msgs = list(state_msgs or [])
+
+            request_idx = None
+            for i in range(len(state_msgs) - 1, -1, -1):
+                m = state_msgs[i]
+                if isinstance(m, HumanMessage) and (getattr(m, "additional_kwargs", {}) or {}).get("context_kind") == "compaction_request":
+                    request_idx = i
+                    break
+            if request_idx is None:
+                return result
+
+            result_msgs = None
+            if isinstance(result, dict):
+                result_msgs = result.get("messages")
+            elif isinstance(result, list):
+                result_msgs = result
+            if not isinstance(result_msgs, list):
+                return result
+
+            reply_text = ""
+            reply_has_tool_calls = False
+            for m in reversed(result_msgs):
+                if isinstance(m, AIMessage):
+                    c = getattr(m, "content", "")
+                    if isinstance(c, list):
+                        c = "".join(str(x) for x in c)
+                    reply_text = c or ""
+                    if getattr(m, "tool_calls", None):
+                        reply_has_tool_calls = True
+                    break
+
+            repo = getattr(manager, "_instance_repository", None) if manager is not None else None
+            from daemon.services.prompt_refresh import read_compact_note_state, settle_compact_note_arm
+
+            arm_state = read_compact_note_state(repo, instance_id) if instance_id else None
+            if arm_state is None or not getattr(arm_state, "armed", False):
+                return result
+
+            if not reply_text or reply_has_tool_calls:
+                settle_compact_note_arm(
+                    repo, instance_id,
+                    note_sha12=getattr(arm_state, "sha256_12", "") or "",
+                    outcome="empty_reply" if not reply_text else "append_failed",
+                    persisted=False,
+                )
+                return result
+
+            pre_request_msgs = list(state_msgs[:request_idx])
+            from daemon.compaction import identify_boundary_groups, select_compactable_groups
+            from daemon.loader import estimate_messages_tokens
+
+            groups = identify_boundary_groups(pre_request_msgs)
+            cfg_obj = getattr(compactor, "config", None) if compactor is not None else None
+            recent_window = getattr(cfg_obj, "recent_message_window", 10) if cfg_obj is not None else 10
+            min_window = getattr(cfg_obj, "min_recent_window", 3) if cfg_obj is not None else 3
+            threshold = getattr(cfg_obj, "threshold", 0.80) if cfg_obj is not None else 0.80
+            system_prompt_tokens = 0
+            agent_model_name = ""
+            if isinstance(llm_config, dict):
+                agent_model_name = llm_config.get("model", "") or ""
+            context_window = 0
+            try:
+                from daemon.compaction import get_model_context_limit
+                context_window = get_model_context_limit(agent_model_name, cfg_obj)
+            except Exception:
+                context_window = 0
+            if not context_window or context_window <= 0:
+                from daemon.compaction import get_model_context_limit
+                context_window = get_model_context_limit(agent_model_name, None)
+            if context_window <= 0:
+                context_window = 4000
+
+            compactable, preserved, _window = select_compactable_groups(
+                groups,
+                recent_window=recent_window,
+                min_window=min_window,
+                context_window=context_window,
+                system_prompt_tokens=system_prompt_tokens,
+                estimate_fn=estimate_messages_tokens,
+                config_threshold=threshold,
+            )
+            preserved_msgs = []
+            for g in (preserved or []):
+                preserved_msgs.extend(getattr(g, "messages", []) or [])
+
+            if compactable:
+                span_start = compactable[0].start_idx + 1
+                span_end = compactable[-1].end_idx + 1
+            else:
+                span_start = 1
+                span_end = len(pre_request_msgs) if pre_request_msgs else 1
+
+            from daemon.compaction import _next_compaction_seq, build_compaction_doc, make_remove_all_sentinel
+            seq = _next_compaction_seq(pre_request_msgs, instance_id or "")
+            from datetime import datetime, timezone
+            compacted_at = datetime.now(timezone.utc).isoformat()
+            from daemon.compaction import GLOBAL_OVERVIEW_TOKEN_CAP
+            doc = build_compaction_doc(
+                instance_id=instance_id or "",
+                seq=seq,
+                mode="summary",
+                compacted_at=compacted_at,
+                global_overview=reply_text,
+                sections=[],
+                total_sections=0,
+                summarized_start=span_start,
+                summarized_end=span_end,
+                preserved_count=len(preserved_msgs),
+                dropped_spans=[],
+                msg_timestamps=None,
+                context_window=context_window,
+                previous_overview="",
+                honest_truncation=True,
+            )
+            sentinel = make_remove_all_sentinel()
+            new_messages = [sentinel, doc, *preserved_msgs]
+
+            settle_compact_note_arm(
+                repo, instance_id,
+                note_sha12=getattr(arm_state, "sha256_12", "") or "",
+                outcome="compacted",
+                persisted=True,
+            )
+
+            if isinstance(result, dict):
+                result = dict(result)
+                result["messages"] = new_messages
+                result["compacted_at"] = compacted_at
+                return result
+            return {"messages": new_messages, "compacted_at": compacted_at}
+        except Exception:
+            return result
+
+    graph.add_node("agent", _compact_note_agent_node)
     # Function-local import (deferred from the graph.py module top to
     # break the cold-start cycle through
     # ``daemon.services.child_reports``). The singleton and wrapper
@@ -13552,18 +13704,112 @@ def build_instance_graph(
         LONG_TOOL_REGISTRY,
         wrapped_tools_node,
     )
-    graph.add_node(
-        "tools",
-        # Long-tool-nudge wrapper (long_tool_nudge.py): stamps every
-        # tool_call at batch entry into the module-level
-        # ``LONG_TOOL_REGISTRY`` singleton (shared with the
-        # lifespan-wired scanner in api.py — per-graph allocation is
-        # forbidden), delegates to the bare ToolNode, and ALWAYS
-        # clears in ``finally`` (pause-cancel + task-cap included)
-        # with the per-completion ``[LongToolNudge] TOOL_COMPLETED``
-        # log line and the AD-9 healthy-gated episode close.
-        wrapped_tools_node(tools, registry=LONG_TOOL_REGISTRY),
-    )
+    _wrapped_tools = wrapped_tools_node(tools, registry=LONG_TOOL_REGISTRY)
+
+    async def _compact_note_tools_node(state: Any, config: Optional[RunnableConfig] = None) -> Any:
+        """Graph-seam APPEND (architect v1.5 §2a/§11.7).
+
+        Wraps the bare tools node. When the batch produced a
+        ``prompt_reload`` ToolMessage AND the compact-note arm is armed
+        (read AFTER the tool's write — read-after-write pin), appends the
+        ``HumanMessage`` request built from
+        :func:`daemon.compaction.build_compact_note_request` to the SAME
+        node return — one atomic channel write. Shape-tolerant (handles
+        both ``{"messages": [...]}`` and a bare list).
+        """
+        result = await _wrapped_tools(state, config)
+        try:
+            cfg = config if isinstance(config, dict) else (config or {})
+            if not isinstance(cfg, dict):
+                cfg = {}
+            configurable = cfg.get("configurable") if isinstance(cfg.get("configurable"), dict) else {}
+            instance_id = configurable.get("thread_id") if isinstance(configurable, dict) else None
+
+            result_msgs = None
+            if isinstance(result, dict):
+                result_msgs = result.get("messages")
+            elif isinstance(result, list):
+                result_msgs = result
+            if not isinstance(result_msgs, list):
+                return result
+            has_prompt_reload = any(
+                isinstance(m, ToolMessage) and getattr(m, "name", None) == "prompt_reload"
+                for m in result_msgs
+            )
+            if not has_prompt_reload or not instance_id:
+                return result
+
+            from daemon.services.prompt_refresh import read_compact_note_state
+
+            repo = getattr(manager, "_instance_repository", None) if manager is not None else None
+            arm_state = read_compact_note_state(repo, instance_id)
+            if arm_state is None or not getattr(arm_state, "armed", False):
+                return result
+
+            # Compactable span from the current state messages.
+            state_msgs = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
+            state_msgs = list(state_msgs or [])
+            from daemon.compaction import identify_boundary_groups, select_compactable_groups
+            from daemon.loader import estimate_messages_tokens
+
+            groups = identify_boundary_groups(state_msgs)
+            cfg_obj = getattr(compactor, "config", None) if compactor is not None else None
+            recent_window = getattr(cfg_obj, "recent_message_window", 10) if cfg_obj is not None else 10
+            min_window = getattr(cfg_obj, "min_recent_window", 3) if cfg_obj is not None else 3
+            threshold = getattr(cfg_obj, "threshold", 0.80) if cfg_obj is not None else 0.80
+            system_prompt_tokens = 0
+            agent_model_name = ""
+            if isinstance(llm_config, dict):
+                agent_model_name = llm_config.get("model", "") or ""
+            context_window = 0
+            try:
+                from daemon.compaction import get_model_context_limit
+                context_window = get_model_context_limit(agent_model_name, cfg_obj)
+            except Exception:
+                context_window = 0
+            if not context_window or context_window <= 0:
+                from daemon.compaction import get_model_context_limit
+                context_window = get_model_context_limit(agent_model_name, None)
+            if context_window <= 0:
+                context_window = 4000
+
+            compactable, _preserved, _window = select_compactable_groups(
+                groups,
+                recent_window=recent_window,
+                min_window=min_window,
+                context_window=context_window,
+                system_prompt_tokens=system_prompt_tokens,
+                estimate_fn=estimate_messages_tokens,
+                config_threshold=threshold,
+            )
+            if compactable:
+                span_start = compactable[0].start_idx + 1
+                span_end = compactable[-1].end_idx + 1
+            else:
+                span_start = 1
+                span_end = len(state_msgs) if state_msgs else 1
+
+            from daemon.compaction import GLOBAL_OVERVIEW_TOKEN_CAP, build_compact_note_request
+            request_text = build_compact_note_request(
+                arm_state.note,
+                compacted_span_start=span_start,
+                compacted_span_end=span_end,
+                token_cap=GLOBAL_OVERVIEW_TOKEN_CAP,
+            )
+            req_msg = HumanMessage(
+                content=request_text,
+                additional_kwargs={"injected_message": True, "context_kind": "compaction_request"},
+            )
+            if isinstance(result, dict) and isinstance(result.get("messages"), list):
+                result = dict(result)
+                result["messages"] = [*result["messages"], req_msg]
+            elif isinstance(result, list):
+                result = [*result, req_msg]
+        except Exception:
+            pass
+        return result
+
+    graph.add_node("tools", _compact_note_tools_node)
     # Phase 2 (B-3): ghost-promise repair node. The router emits
     # ``"agent_repair_ghost"`` from ``should_continue`` when the
     # trailing-ghost counter is at the cap AND the master ladder

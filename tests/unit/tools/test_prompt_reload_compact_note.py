@@ -520,33 +520,17 @@ class TestL4SeamSafety:
         assert calls == []
         assert f"outcome={OUTCOME_ARMED}" in out
 
-    async def test_the_note_armed_hook_is_not_registered_in_the_mid_turn_sites(self) -> None:
-        """T1/T2 (the mid-turn triggers) must NOT read the arm.
-
-        T1 (``graph.py::_maybe_precall_compact_95``) and T2 (the CLE
-        reactive handler) BOTH live in ``daemon/graph.py`` — that file
-        must not mention the note at all. The note-armed hook lives at
-        T3 (``daemon/services/instance_messaging.py``), a QUIESCENT
-        pre-dispatch seam.
-        """
+    async def test_the_graph_seam_carries_the_append_and_swap(self) -> None:
+        """v1.5 (Amendment 2): the graph DOES carry the append (tools
+        node) and the swap (agent node). The auto-path mid-turn sites
+        (precall 95% hook, CLE reactive handler) remain arm-blind."""
         import daemon.graph as graph_mod
 
         with open(graph_mod.__file__, encoding="utf-8") as fh:
             text = fh.read()
-        assert "compact_note" not in text, "T1/T2 must stay arm-blind"
-
-    async def test_the_mid_turn_sites_are_untouched_by_the_lane(self) -> None:
-        """``daemon/graph.py`` is EXPLICITLY UNTOUCHED by this lane."""
-        import subprocess
-
-        out = subprocess.run(
-            ["git", "diff", "--name-only", "858a85e31", "--", "daemon/graph.py"],
-            cwd=__import__("pathlib").Path(__file__).resolve().parents[3],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert out.stdout.strip() == "", out.stdout
+        assert "compaction_request" in text
+        assert "build_compact_note_request" in text
+        assert "make_remove_all_sentinel" in text
 
 
 # ── L7 — content-free logging ───────────────────────────────────────────────
@@ -693,23 +677,11 @@ class TestL12ArmedReceipt:
 
 
 class TestL17Exhaustiveness:
-    async def test_the_expected_seam_clause_names_exactly_three_gates(self) -> None:
+    async def test_the_expected_seam_clause_has_no_three_gates(self) -> None:
         clause = ARMED_EXPECTED_SEAM_CLAUSE
-        assert "exactly three gates" in clause
-        assert "this list is exhaustive" in clause
-        assert "minimum-compaction floor" in clause
-        assert "60s anti-refire window" in clause
-        assert "deliberate-compact rate limit" in clause
-        # EXACTLY three gate names — no FOURTH gate is named.
-        listed = clause.split("applies: ", 1)[1].split(" — this list is exhaustive", 1)[0]
-        items = [part.strip() for part in listed.replace("or ", "").split(",")]
-        assert len(items) == 3, items
-        assert items == [
-            "the minimum-compaction floor",
-            "the 60s anti-refire window",
-            "the deliberate-compact rate limit",
-        ]
-        assert "unconditionally" not in clause
+        assert "no seam and no gate list" in clause
+        assert "no three gates" in clause or "no gate list" in clause
+        assert "exactly three gates" not in clause
 
     async def test_the_receipt_carries_the_append_path_fields(self) -> None:
         manager = StubManager()
