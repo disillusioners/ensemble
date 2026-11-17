@@ -742,7 +742,19 @@ class TestP11BootNoBehaviorChange:
     # still REDs every pin. Counter-mutation proof of non-vacuity:
     # stripping "group chat" from a P1 hunk leaves it markerless and
     # REDs all three manager.py pins (decision, memoir, group-chat).
-    SANCTIONED_LANE_MARKERS = ("decision", "memoir", "group chat")
+    # The COMPACT-NOTE (prompt_reload(compact, compact_note)) lane's
+    # sanctioned change to daemon/constants.py — the +13 block carrying
+    # DELIBERATE_COMPACT_RATE_LIMIT_S and its comment header. Same
+    # scoped-sanction pattern as the manager.py lanes above: the path is
+    # exempted from the blanket no-drift check and every hunk of ITS
+    # drift must carry the lane marker ("compact-note", present in the
+    # hunk's own section header: "Compact-note lane (prompt_reload(
+    # compact, compact_note))"), so any OTHER lane's constants.py drift
+    # still REDs.
+    COMPACT_NOTE_LANE_SANCTIONED_PATH = "daemon/constants.py"
+    COMPACT_NOTE_LANE_MARKER = "compact-note"
+
+    SANCTIONED_LANE_MARKERS = ("decision", "memoir", "group chat", "compact-note")
 
     # The EXACT added lines of the leader-sanctioned None guard (content
     # pin, indentation preserved; diff '+' prefixes stripped). The file
@@ -771,7 +783,7 @@ class TestP11BootNoBehaviorChange:
             ["git", *args], capture_output=True, text=True, check=False
         ).stdout
 
-    def _manager_hunks_missing_sanctioned_marker(self, span):
+    def _manager_hunks_missing_sanctioned_marker(self, span, path=None):
         """Hunks of the daemon/manager.py drift in ``span`` that carry
         NO sanctioned-lane marker. ``SANCTIONED_LANE_MARKERS`` is the
         single source (the cross-lane carve-out lives there — never
@@ -786,7 +798,8 @@ class TestP11BootNoBehaviorChange:
         assert, preserved.
         """
         diff = self._git(
-            "diff", "--unified=0", span, "--", self.DECISION_LANE_SANCTIONED_PATH
+            "diff", "--unified=0", span, "--",
+            path or self.DECISION_LANE_SANCTIONED_PATH,
         )
         if not diff.strip():
             return []  # nothing sanctioned in this span — vacuously clean
@@ -846,7 +859,8 @@ class TestP11BootNoBehaviorChange:
                   if p not in (self.SANCTIONED_PATH,
                                self.DECISION_LANE_SANCTIONED_PATH,
                                self.MEMOIR_LANE_SANCTIONED_PATH,
-                               self.GROUP_CHAT_LANE_SANCTIONED_PATH)]
+                               self.GROUP_CHAT_LANE_SANCTIONED_PATH,
+                               self.COMPACT_NOTE_LANE_SANCTIONED_PATH)]
         out_others = self._git("diff", "--stat", span, "--", *others)
         assert out_others.strip() == "", (
             f"unexpected post-merge drift in NOT-TOUCHED paths:\n{out_others}"
@@ -871,6 +885,30 @@ class TestP11BootNoBehaviorChange:
         assert added == self.SANCTIONED_HUNK_LINES, (
             "daemon/routers/sources.py diff is not EXACTLY the sanctioned "
             f"None-guard hunk.\nadded={added!r}"
+        )
+
+    def test_the_compact_note_lane_constants_drift_is_confined_to_sanctioned_hunks(
+        self,
+    ):
+        """The SANCTIONED compact-note lane's daemon/constants.py drift.
+
+        Every hunk of the constants.py drift in the post-merge span must
+        carry a sanctioned-lane marker (the lane's own section header
+        carries "compact-note"). Any OTHER lane's constants.py drift lands
+        in a markerless hunk and REDs here — the source-gc guard's intent
+        (constants.py must not drift) is preserved; only a sanctioned
+        lane's own constant block is allowed.
+        """
+        merge = self._git(
+            "rev-list", "--first-parent", "--merges", "-1", "HEAD"
+        ).strip()
+        assert merge, "no first-parent merge found"
+        span = f"{merge}..HEAD"
+        assert (
+            self._manager_hunks_missing_sanctioned_marker(
+                span, path=self.COMPACT_NOTE_LANE_SANCTIONED_PATH
+            )
+            == []
         )
 
     def test_the_decision_lane_manager_drift_is_confined_to_decision_hunks(self):

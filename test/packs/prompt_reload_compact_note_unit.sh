@@ -39,6 +39,8 @@
 #   tests/unit/services/test_injected_notes_hoisting_sweep_gaps.py (doc format)
 #   tests/unit/test_symptom_repair_partition.py   (the REMOVE_ALL
 #                                                    sentinel the swap creates)
+#   tests/unit/services/test_proactive_compaction_ns_trap_fix.py (the CLE
+#                                                    line pins graph.py grew)
 #
 # Legs covered: L1 L2 L3 L4 L7 L12 L17 + the graph-seam pins
 # (L5 L6 L10 L11 L14 L15 L16 were REMOVED with the per-piece strip — see
@@ -98,6 +100,7 @@ env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_DB -u POSTGRES_USER \
     tests/unit/services/test_compact_executor_revive_brick_e2e.py \
     tests/unit/services/test_injected_notes_hoisting_sweep_gaps.py \
     tests/unit/test_symptom_repair_partition.py \
+    tests/unit/services/test_proactive_compaction_ns_trap_fix.py \
     -q --tb=short -p no:cacheprovider
 RC=$?
 
