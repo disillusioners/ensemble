@@ -19,7 +19,7 @@ The commissioning brief carried **three factual errors** and **one unstated bloc
 | C-2 | "current live v0.30.13 ⇒ likely v0.31.0" | Live is **v0.30.12** (`state.json: current=v0.30.12, previous=v0.30.9`). v0.30.13 exists as a **tag + CHANGELOG section + pyproject value**, was never promoted, and has no `releases/v0.30.13/`. | v0.30.13 is a **consumed slot** (tag published, CHANGELOG `[0.30.13]` present, `pyproject = 0.30.13`). It must never be re-cut. **v0.31.0** confirmed — and for the *stronger* reason: features ⇒ minor bump (SemVer; CHANGELOG states the project "adheres to Semantic Versioning"). |
 | C-3 | "the scripts-pin worktree floor … name what floor THIS release needs and how to establish it" | The scripts-pin worktree is **stale against the tip floor** and **cannot be used as-is**. The brief's implicit model (v0.29.0 precedent = run from the scripts-pin worktree) is **inverted** by the post-Family-3 invoke-path policy. | **This is the lane's one hard blocker.** See §5.1 — it is *satisfiable*, but only by advancing the live `.env` pin. |
 | C-4 | "the thing most likely to be missed" | The brief's own list is missing the **release-dir retention eviction** (a 4th stage evicts `v0.30.11`) and the **`config.yaml` does-not-travel-with-releases** gate. | Both added below (§2.6, §5.4). |
-| **C-6** | — *(added by the 2026-11-17 S3 measurement pass)* | The **S3 FE-asset leg is now MEASURED** (devops dry-run, release worktree @ `913088277`, no commits). It also surfaced a **stale "system v22" toolchain reference**, an **Angular 21 artifact-set shape** that reads as missing files, and a **verification trap** (esbuild mangles identifiers). | Folded into **§3.5** (new sub-sections 3.5.1–3.5.5) and **§5.3**. **New host-disk precondition** added at §5.2.1. |
+| **C-7** | — *(added by the 2026-11-17 S5 execution pass)* | §5.4.3 was **NOT EXECUTABLE AS WRITTEN** — a literal follower hit **exit 78 pre-TCP** at the payload's own DB-resolution guard and could misread it as an artifact defect. Four plan defects (**PD-1..PD-4**): the missing `ENSEMBLE_DB_AMBIENT_ALLOW=1` (the tier-2 ambient guard), the missing family-wide `ENSEMBLE_AUTH_*` scrub, a `timeout 30` bound that cannot reach `livez`, and a scratch-DB role that cannot `create_all` in place. | **§5.4.3 now mirrors the EXECUTED recipe** (S5 ✅ PASS-WITH-DISCLOSURES 5/5). The three open legs — **S1d, S4, S5 — are now ALL CLOSED** (§5.3). | — *(added by the 2026-11-17 S3 measurement pass)* | The **S3 FE-asset leg is now MEASURED** (devops dry-run, release worktree @ `913088277`, no commits). It also surfaced a **stale "system v22" toolchain reference**, an **Angular 21 artifact-set shape** that reads as missing files, and a **verification trap** (esbuild mangles identifiers). | Folded into **§3.5** (new sub-sections 3.5.1–3.5.5) and **§5.3**. **New host-disk precondition** added at §5.2.1. |
 | **C-5** | — *(added by the 2026-11-17 correction pass)* | The **release-prep tester** found **two CRITICAL ceremony-facing defects in this plan** and two wrong recipe facts. They are **fixed in place**: **BLK-1** (§5.4 was booting the **not-yet-promoted binary against `ensemble_prod` on the live port** — a prod-schema-creating, daemon-colliding, fence-open smoke) and **BLK-2** (the five-variable scrub left **`POSTGRES_URL`** live — the one variable that bypasses the prod fence entirely). | **§5.4 is rewritten.** The PG proof (top risk #2) is **CLOSED** by measured evidence. Two items are recorded as **follow-ups, not in this cut** (§8.4). |
 
 **Also corrected (worker-report conflicts, adjudicated against the code):**
@@ -537,14 +537,14 @@ That worktree is at `bf4bfde6e`, which **does not contain `1aa0065e`** as an anc
 
 | Leg | Status |
 |---|---|
-| **S1 — release integrity** | pending (stage-time) |
-| **S1d — prompt-artifact seal** | 🟡 **CLOSED pre-cut** (3/3 checks at the `v0.30.12` anchor; seal blob `cb51a277…` byte-identical) — **must be RE-RUN AT THE TAG** (§4.3.2) |
-| **S2 — migrations, both drivers** | ✅ SQLite pinned by the room-migration tests · ✅ PG parity **CLOSED** by measurement (§3.2.1) |
-| **S3 — FE build** | ✅ **VERIFIED (dry-run)** — §3.5.5 + the inventory in §3.5.2 — **but the present dist is stale** (`git_head 913088277` vs HEAD `af661ac8e`) ⇒ **rebuild at the bumped HEAD** (§2.5.1) |
-| **S4 — gate evidence** | 🟡 **unverified at the tip** — the room-family re-measure stands at 24 files / 421 nodes (§7.6); the remaining packs are **not** re-measured |
-| **S5 — boot smoke** | 🟡 **unverified** — the leg is now correctly specified (§5.4) but **has not been executed** |
+| **S1 — release integrity** | ✅ **staged + verified by the release lane** — `releases/v0.31.0` complete, 4-way sha `5473a25f…14743` verified (release-dir binary == worktree dist == manifest == sidecar; sidecar `git_head=0181dadbf dirty=false`); gates passed: tip-identity, provenance, describe-exact-match, floor+stamp `1aa0065e`, plugin-staleness `fresh`, prompt-artifact baseline 217 artifacts; `rollback_safe=true source=explicit=true contains_contract_phase=true` (expected) |
+| **S1d — prompt-artifact seal** | ✅ **PASS 19/19 AT THE TAG `c47d3858f`** — the seal blob `cb51a277bea6334100f7f6139adfe6bef8512f7a` is **blob-identical across `v0.30.12` → `v0.31.0` → HEAD** (re-verified by this lane), **0 `agents/*.md` moved**, **no baseline bump, no seal re-pin** (the parked `video-mock-prompts` branch never merged into the release line — WATCH-1 discharged). Evidence `/tmp/gc_s1d_v0310.qjWrhu/`; durable RESULTS copies are being committed by the tester on this branch in parallel |
+| **S2 — migrations, both drivers** | ✅ SQLite pinned by the room-migration tests · ✅ PG parity **CLOSED** by measurement (§3.2.1) — and the S5 boot exercised the `_ensure_postgres_columns` 10→14 path live in the clone |
+| **S3 — FE build** | ✅ **DONE** — the FE was rebuilt at the bumped HEAD `0181dadbf` and the staged payload carries it (the stage's own provenance gates passed) |
+| **S4 — gate evidence** | ✅ **PASS** — the registered shape **24 files / 421 nodes / 0 red reproduced on a quiet host at `0181dadbf`, 86 s**; the earlier 420/1 reading was a **host-load artifact** (4-way classification; anomaly `621fb76f` resolved). Evidence `/tmp/gc_s4_remeasure.3EoUsi/` |
+| **S5 — boot smoke** | ✅ **PASS-WITH-DISCLOSURES 5/5** — the staged v0.31.0 payload boots sandboxed: `livez` **0.31.0**, `readyz` **4/4**, room tables **scratch-DB-only** (10/9/14 cols + the dedup index), **zero** sweep/reaper kills, cgroup `/user.slice/` proven, **zero residue**, live untouched on all four facts. Evidence `/tmp/gc_v0310_smoke_evidence.dCM1Wx/`; §5.4.3 now mirrors the executed recipe |
 
-⇒ **S1d (at the tag), S4 and S5 remain.**
+⇒ **All verification legs are CLOSED.** What remains is the **ceremony itself** (§6.2): the scripts-pin advance (§5.1 — R1), the Emperor's icon-placement ruling (§7.1 — R3), and the tag push at finalize. The branch ref sitting ahead of the tag is the expected audit-trail pattern.
 
 **Evidence lands in:** `/home/nea/agents-ensemble/data/upgrade/live/<run_id>.log` (narrative) + `run-<ts>-<pid>.payload.log` (payload), plus `--junitxml` for S4. Use `.txt` names, not `.log` — `.gitignore` has `*.log` and would silently hide a transcript.
 
@@ -553,6 +553,8 @@ That worktree is at `bf4bfde6e`, which **does not contain `1aa0065e`** as an anc
 > **CORRECTION PASS 2026-11-17.** The release-prep tester found **two CRITICAL ceremony-facing defects in this section** and two wrong recipe facts. Both are fixed below; the previous text is superseded. Evidence: `.agents/tester/RESULTS/2026-11-17-group-chat-v0310-release-verification.md` (commits `463044ce4` → `4b56f992e` → `92fcf26af`).
 
 #### 5.4.0 🔴 BLK-1 — the smoke must NEVER boot the pre-promote binary against prod
+
+> **AMENDED 2026-11-17 (PD-1..PD-4).** §5.4.3 has been **rewritten to mirror the executed recipe** — the earlier text was not executable (four defects; see §5.4.3a). The leg itself is **closed**: S5 ✅ **PASS-WITH-DISCLOSURES 5/5** (§5.3). The BLK-1/BLK-2 principles below are unchanged and remain the governing rules.
 
 **What the previous revision said (wrong):** boot `releases/v0.31.0/ensemble-prod` with `ENSEMBLE_SELF_ENV=live`, `POSTGRES_DB=ensemble_prod`, `PORT=9797`.
 
@@ -660,17 +662,47 @@ The launcher keeps its own copy of the resolution (`launcher.sh:1435-1460`). ⇒
 
 **The pin is load-bearing, and the ambient guard is NOT there:** the **live** install's `.env` carries `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0`, but a **worktree** `.env` does **not** (0 occurrences) — a worktree smoke that relies on ambient inheritance gets **no guard at all**.
 
-#### 5.4.3 The corrected S5 leg (the verified shape)
+#### 5.4.3 The S5 leg — the EXECUTED recipe (PD-1..PD-4 folded in) ✅
+
+**Leg status: ✅ PASS-WITH-DISCLOSURES 5/5** — the staged v0.31.0 payload boots sandboxed: `livez` reports **0.31.0**, `readyz` **4/4**, the room tables land **scratch-DB-only** (10/9/14 cols + the dedup index), **zero** sweep/reaper kills, cgroup `/user.slice/` proven, **zero residue**, and the live system untouched on all four facts. Evidence: `/tmp/gc_v0310_smoke_evidence.dCM1Wx/` (deviations ledger `DEVIATIONS.md`, D1–D9).
+
+##### 5.4.3a The four defects the previous text carried (PD-1..PD-4) — and their fixes
+
+| PD | Defect (measured) | Fix (now in the recipe) |
+|---|---|---|
+| **PD-1** | Run verbatim, the boot died **pre-TCP, exit 78** at the payload's own DB-resolution guard: *"tier=ambient (ensemble.json absent) with ambient `POSTGRES_*` present … and `ENSEMBLE_DB_AMBIENT_ALLOW != 1`"* (`daemon/ensemble_config.py:186`, the tier-2 ambient guard). The plan's recipe sets `POSTGRES_HOST`+`POSTGRES_DB` with a fresh empty `ENSEMBLE_DATA_DIR` — exactly the refused combination. | **`ENSEMBLE_DB_AMBIENT_ALLOW=1`** — grants **tier-2 only** and is **NEVER consulted by `assert_prod_dsn_sanctioned`** (`ensemble_config.py:289-294`: *"permanently removed from the prod-name decision path"*) ⇒ **the prod fence stays armed**. The house harness template already sets it on every booting leg (`tests/support/wedge_smoke.py:581`). |
+| **PD-2** | The 34-name scrub **omitted the ambient `ENSEMBLE_AUTH_*` family**. With 7 ambient `ENSEMBLE_AUTH_*` vars inherited from the live daemon (`ENABLED=true`, `EXTERNAL_REDIRECT_BASE=https://www.ensem.dev`), the auth preflight refused the scratch bind origin: *"external_redirect_base origin https://www.ensem.dev != bind origin http://127.0.0.1:19101 → exiting 78 (EX_CONFIG)"*. The payload's own `config.yaml` ships `auth.enabled: false` — the refusal came **only** from the leaked ambient family. | **A family-wide ambient `ENSEMBLE_*` scrub, DYNAMICALLY enumerated** (house doctrine: family-wide, never enumerated). 19 names in this environment, incl. the 7 `ENSEMBLE_AUTH_*` — and it also removes the stale ambient `ENSEMBLE_UPGRADE_SCRIPTS_DIR` pin (`bf4bfde6e`). |
+| **PD-3** | `timeout -k 5 30` **cannot reach `livez`**. `daemon/__main__.py:832-841` (source-verified): the socket is **pre-bound but not listening** during the ~29 s lifespan startup ⇒ a probe in that window gets `ECONNREFUSED`. A 30 s bound leaves no room for the probe. | **Bound ≥ 120 s; the executed run used `timeout -k 5 180`.** Measured: `livez`/`readyz` first answered at **t = 22 s** — but only after the two config fences (PD-1, PD-2) were cleared. |
+| **PD-4** | A named scratch-DB role **cannot `create_all` in place** (privilege wall): `ensemble_dev_scratch` holds 58 tables, **55 owned by the superuser role `ensemble`**; `ensemble_dev_app` owns only the 3 room tables ⇒ `create_all` aborts on `CREATE TABLE project_future … REFERENCES projects` (*permission denied*, exit 3), and `ALTER` is **not grantable** for tables (⇒ `_ensure_postgres_columns` fails too — *must be owner*). Matches the standing POK note. | **Boot against a RE-OWNED TEMPLATE CLONE** (e.g. `ensemble_dev_scratch_s5`) — same server, same role, same password, **same pre-P3/P5 room shape (10 cols)** so the `_ensure_postgres_columns` 10→14 path is still exercised — while the shared fixture `ensemble_dev_scratch` is **never a boot target and stays byte-for-byte unchanged**. |
+
+##### 5.4.3b The executed recipe
 
 ```bash
-# ── S5 BOOT SMOKE — scratch everything. Never prod, never the live port,
-#    never the pre-promote binary against the live DSN. (BLK-1)
-SCRATCH="$(mktemp -d /tmp/gc_v0310_smoke.XXXXXX)"                   # scratch root, outside any install dir
-cp -a /home/nea/agents-ensemble/releases/v0.31.0 "$SCRATCH/payload"  # COPY: never boot in place
-mkdir -p "$SCRATCH/home" "$SCRATCH/data"                            # fresh empty HOME + DATA_DIR (no ensemble.json)
-cp "$SCRATCH/payload/config.yaml" "$SCRATCH/config.yaml"            # scratch config copy
+# ══ STEP 0 — the scratch DB (PD-4): a RE-OWNED TEMPLATE CLONE, not the shared fixture ══
+#    NEVER the shared fixture; NEVER prod. The CLONE is the only boot target.
+CLONE=ensemble_dev_scratch_s5
+psql -d postgres -w -c "DROP DATABASE IF EXISTS $CLONE;"                 # idempotent pre-clean
+psql -d postgres -w -c "CREATE DATABASE $CLONE TEMPLATE ensemble_dev_scratch;"
+psql -d "$CLONE" -w -c "REASSIGN OWNED BY ensemble TO ensemble_dev_app;" # CLONE ONLY — never prod
+# verify the clone's shape == the source shape (58 tables; room tables 10 cols; 0 rows)
 
-# ── 34-name per-variable scrub. `env -u POSTGRES_*` is a SILENT NO-OP. (BLK-2)
+# ══ STEP 1 — the scratch environment (BLK-1) ══
+SCRATCH="$(mktemp -d /tmp/gc_v0310_smoke.XXXXXX)"                       # outside any install dir
+cp -a /home/nea/agents-ensemble/releases/v0.31.0 "$SCRATCH/payload"     # COPY: never boot in place
+mkdir -p "$SCRATCH/home" "$SCRATCH/data"                                # fresh empty HOME + DATA_DIR
+cp "$SCRATCH/payload/config.yaml" "$SCRATCH/config.yaml"                # scratch config copy
+find "$SCRATCH/payload" -maxdepth 3 -name 'ensemble.json'               # poison check — must be EMPTY
+
+# ══ STEP 2 — family-wide ambient ENSEMBLE_* scrub (PD-2) ══
+#    Enumerating this family is a losing game — scrub EVERY ambient ENSEMBLE_* name,
+#    then re-pin only the deliberate ones in STEP 3. (Placement matters: this
+#    expansion sits AFTER the enumerated -u list and BEFORE the assignments.)
+ENS_SCRUB=""
+for n in $(env | sed -n 's/^\(ENSEMBLE_[A-Za-z0-9_]*\)=.*/\1/p' | sort -u); do
+  ENS_SCRUB="$ENS_SCRUB -u $n"
+done
+
+# ══ STEP 3 — the boot (PD-1 + PD-2 + PD-3 folded in) ══
 env -u POSTGRES_URL -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_DB \
     -u POSTGRES_USER -u POSTGRES_PASSWORD \
     -u DATABASE_URL -u DATABASE_URL_POSTGRES \
@@ -678,8 +710,8 @@ env -u POSTGRES_URL -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_DB \
     -u PGSSLMODE -u PGSERVICE -u PGSERVICEFILE -u PGSSLCERT -u PGSSLKEY \
     -u PGSSLROOTCERT -u PGCONNECT_TIMEOUT -u PGAPPNAME -u PGOPTIONS -u PGDATA \
     -u PORT -u DAEMON_PORT -u HOST -u LIMITS_METRICS_LISTENER_PORT \
-    -u ENSEMBLE_UPGRADE_LIVE -u ENSEMBLE_CONFIG -u ENSEMBLE_DATA_DIR -u DATA_DIR \
     -u PLANE_MCP_WORKSPACE_SLUG -u PLANE_BASE_URL \
+    $ENS_SCRUB \
     \
     # ── the three boot-time terminators, pinned OFF (absent ⇒ ON) ─────────
     HOME="$SCRATCH/home" \
@@ -687,35 +719,36 @@ env -u POSTGRES_URL -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_DB \
     ENSEMBLE_BASH_ORPHAN_REAPER=0 \
     ENSEMBLE_RAM_GUARD=0 \
     \
-    # ── scratch identity: the prod fence must be ARMED, not sanctioned ───
+    # ── scratch identity + the tier-2 sanction (PD-1). The prod fence stays
+    #    ARMED: ENSEMBLE_DB_AMBIENT_ALLOW is never consulted by
+    #    assert_prod_dsn_sanctioned (ensemble_config.py:289). ──────────────
     ENSEMBLE_SELF_ENV=sandbox \
     ENSEMBLE_CONFIG="$SCRATCH/config.yaml" \
     ENSEMBLE_DATA_DIR="$SCRATCH/data" \
+    ENSEMBLE_DB_AMBIENT_ALLOW=1 \
     PORT=19101 HOST=127.0.0.1 \
     \
-    # ── scratch DB (never ensemble_prod) ─────────────────────────────────
-    POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 POSTGRES_DB=ensemble_dev_scratch \
-    POSTGRES_USER=<scratch-role> POSTGRES_PASSWORD=<redacted> \
-    timeout -k 5 30 "$SCRATCH/payload/ensemble-prod"
+    # ── the CLONE is the boot target (PD-4) — never the shared fixture ────
+    POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 POSTGRES_DB="$CLONE" \
+    POSTGRES_USER=ensemble_dev_app POSTGRES_PASSWORD=<redacted> \
+    setsid timeout -k 5 180 "$SCRATCH/payload/ensemble-prod"
+
+#    NOTE (PD-3): the bound is 180 s, NOT 30 — the port is bound-but-not-listening
+#    for ~29 s of lifespan startup; livez first answered at t=22 s here.
+#    Isolation: launch inside  systemd-run --user --scope --unit=gc-s5-smoke  —
+#    the cgroup must read /user.slice/ and NOT ensemble-main.service.
 ```
 
-**Pre-boot assertions (fail closed before the binary is allowed to start):**
-- `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES` is **set** and equals `0` — **never unset**; likewise the reaper and the RAM guard.
-- `PORT` is set, is in the scratch range (**not 9797**), and `PORT != DAEMON_PORT`.
-- `POSTGRES_DB != ensemble_prod`; `POSTGRES_HOST != 10.44.0.2` (the remote prod host).
-- The payload copy is **not** under `/home/nea/agents-ensemble` (⇒ no live auto-derive).
-- `ENSEMBLE_SELF_ENV` is **not** `live`.
+**Probe loop:** poll `http://127.0.0.1:19101/livez` and `/readyz` (≤2 s per probe) until both answer, within the 180 s bound. **Pass bodies (measured):** `livez` → `{"status":"alive","uptime_seconds":6.03,"version":"0.31.0"}`; `readyz` → `"status":"ready"` with **all four components true** (`database`, `queue_freshness`, `services`, `checkpoint_saver`).
 
-**Isolation:** run inside a **systemd transient unit** whose `/proc/<MainPID>/cgroup` shows `/user.slice/` and **NOT** `ensemble-main.service` — no shared-cgroup fallback. A daemon-child shell inherits the live daemon's cgroup; the sweep would then classify live processes as orphans.
+**One isolation nuance (deviation D6):** the smoke itself runs under `systemd-run --user --scope` (cgroup `/user.slice/`), but the **live-unit read** for the "live untouched" fact uses **`systemctl show` (the SYSTEM manager)** — `ensemble-main.service` lives in `/system.slice/…`, so the `--user` form returns `MainPID=0`/empty. Record both.
 
-**Pass criterion:** the binary boots in the scratch sandbox; `livez` reports version `0.31.0`; `readyz` is green; the three room tables are created **in the scratch DB only**; the log shows **zero** sweep/reaper kills.
-
-**Abort path — the smoke must leave NO trace:**
-1. `timeout -k 5 30` bounds the run; if the binary does not exit, it is killed.
-2. Drop the probe's private schema / scratch DB and re-verify: `schemas now = ['public']` (baseline MATCH) and probe residue (`gc_pg_probe%`) = **0** — the tester's cleanup discipline.
-3. `rm -rf "$SCRATCH"` — the scratch tree lives under `/tmp`, never under an install dir.
-4. **Nothing was written to prod** — because prod was never a target: no `POSTGRES_URL`, `POSTGRES_DB != ensemble_prod`, `ENSEMBLE_SELF_ENV=sandbox`, a fresh empty `ENSEMBLE_DATA_DIR`, and a scratch port.
-5. Assert post-hoc: the three room tables are **absent** from prod — they must not exist until the ceremony's own boot.
+**Abort path — the smoke leaves NO trace (updated with the executed teardown):**
+1. Terminate the `systemd-run` client with **SIGTERM after the health evidence is captured** (deviation D7: the daemon shut down **gracefully** — "Application shutdown complete" — no SIGKILL needed; the 180 s bound is the backstop, not the exit).
+2. `psql -d postgres -w -c "DROP DATABASE IF EXISTS $CLONE;"` — drop the clone.
+3. Residue sweep: the clone, the source fixture, and `/tmp` (the smoke's own port-claim files) — **all zero-residue-verified**.
+4. `rm -rf "$SCRATCH"` — the scratch tree lives under `/tmp`, never under an install dir.
+5. **Prod was never reachable — by construction** (deviation D9): `POSTGRES_URL` scrubbed · `POSTGRES_DB ≠ ensemble_prod` · `POSTGRES_HOST=127.0.0.1` (prod is `10.44.0.2`) · `ENSEMBLE_SELF_ENV=sandbox` (fence armed). The live prod credential was even proven **unusable** against the local server (`FATAL: password authentication failed`) — fails closed. The local cluster's `ensemble_prod` was never touched: no `REASSIGN OWNED`, no cross-DB ownership move.
 
 #### 5.4.4 What the previous revision got right (kept)
 
@@ -861,12 +894,12 @@ Both live guards are mandatory and independent: `require_live_guard` (`ENSEMBLE_
 | **R3** | **Icon placement** ambiguity (§13.1's instances-row reading vs the built chat-page header) | 🔴 **OPEN — the Emperor adjudicates before the cut** (§7.1). A list-row choice is a **follow-up FE change BEFORE promote**. |
 | **R4** | The **boot smoke touching prod** (schema drift under the old binary + daemon collision + the carve-out open) | ✅ **CLOSED** — §5.4 is rewritten: scratch payload **copy** + scratch DB + scratch `HOME`/`DATA_DIR` + scratch port + `ENSEMBLE_SELF_ENV=sandbox`, with a no-trace abort path (§5.4.3). |
 | **R5** | The **five-variable scrub leaving `POSTGRES_URL` live** (bypasses the prod fence entirely) | ✅ **CLOSED** — the scrub is now the full per-variable list including `POSTGRES_URL`, with the `persistence.py:233-235` short-circuit and the `resolved_postgres_db_name` bypass cited (§5.4.1). |
-| **R6** | The **prompt-artifact seal moving** under the release | 🟡 **WATCH — sealed and frozen.** Seal blob `cb51a277…` byte-identical at `v0.30.12` and at the tip; zero `agents/*.md` changed; the binary embeds the **set constant** (byte-identical source) while artifacts+seal ship as a **payload directory** whose re-hash is **post-stage and automated** (`prompt_artifact_drift_leg`, reported-not-gating). **S1d must be re-run AT THE TAG** (§4.3.2, WATCH-1 / `feature/video-mock-prompts` @ `e559b4b80`). |
+| **R6** | The **prompt-artifact seal moving** under the release | 🟡 **WATCH — sealed and frozen.** Seal blob `cb51a277…` byte-identical at `v0.30.12` and at the tip; zero `agents/*.md` changed; the binary embeds the **set constant** (byte-identical source) while artifacts+seal ship as a **payload directory** whose re-hash is **post-stage and automated** (`prompt_artifact_drift_leg`, reported-not-gating). **S1d was re-run AT THE TAG** (`c47d3858f`) — **PASS 19/19**; the parked `video-mock-prompts` branch never merged into the release line, so WATCH-1 is **discharged**. |
 | **R7** | The **local-latest ref lag** → `non-tip-tree` refusal at stage | 🟡 **OPEN — owned by the ari-stop-int lane**, not this lane (§7.3). A **precondition** for the cut. |
 | **R8** | `rollback_safe` **derive path exits 78** (the whole-file `DROP` grep matches the migrations' DOWN sections) | 🟡 **KNOWN — `ENSEMBLE_ROLLBACK_SAFE=1` must be explicit** at stage time; `contains_contract_phase=true` is expected (§5.5). |
 | **R9** | The stage **evicts `releases/v0.30.11`** (keep-3) | 🟢 **COSMETIC** — disclosed so the missing directory is not read as damage (§2.6). |
 | **R10** | **Host disk exhaustion at stage time** | ✅ **ACCEPTED-WITH-MEASUREMENT.** The stage's footprint was **MEASURED**: ~376 MB gross (binary 79 + build 122 + `dist/ensemble-prod` 79 + payload ~175), **~200 MB net** after the keep-3 eviction of `v0.30.9` (−175) ⇒ the stage **fits with ~9× headroom** against 1.9 GiB free. 281.6 MiB of sanctioned reclamation is already done. **No shared-cache prune** (go-build 7.2–7.6 GB, npm 2.1 GB stay **warm for live lanes**) and **no reconcile sweep of the 38 `wt-stage-*` worktrees (46 GB)** — **foreign-lane disruption is the larger risk**. Both remain **discretionary operator levers**, not preconditions. `df` fluctuates with concurrent lanes (3.3 GB → 2.0 GB → 1.9 GiB observed; `/tmp` moved 79 GB → 71.9 GB mid-window via another lane's cleanup) — **re-measure before the stage** (§5.2.1). |
-| **R11** | **S3 verified by a DRY-RUN only**; **S1d (at the tag), S4 and S5 remain unverified** | 🟡 **OPEN** — the FE leg is proven; the remaining legs must be run before the ceremony (§5.3 leg status). |
+| **R11** | **S3 verified by a DRY-RUN only**; S1d/S4/S5 unverified | ✅ **CLOSED** — S1d **PASS 19/19 at the tag** `c47d3858f`; S4 **PASS** (24/421/0 at `0181dadbf`, 86 s — the 420/1 was host-load, anomaly `621fb76f` resolved); S5 **PASS-WITH-DISCLOSURES 5/5** (§5.3 leg status). |
 | **R12** | The S3 **verification trap** — esbuild mangles `RoomDialogComponent` / `ROOM_DIALOG_SIZE` (0 hits) and the room chunk is **not** a `modulepreload` ⇒ a naive grep or `index.html` check **false-negatives** | ✅ **CLOSED** — the S3 assertion now anchors on four proven string-literal / CSS-class markers (§3.5.3). |
 
 ### 7.1 🔴 ICON PLACEMENT — **the Emperor adjudicates before promote**
@@ -978,6 +1011,8 @@ Per §6.3 — **the abort ladder**: no-flip refusals are free (nonce intact); a 
 **Doctrine sources** — `docs/runbooks/promote-handback-serving-green-closer.md` §9 (the two-sided release-bump requirement; the four user-owned ceremony pre-steps; the disposition doctrine) and §10 (invoke-path policy: release-staged PRIMARY, pinned worktree = recovery) · house critical notes (boot-sweep pin; `env -u POSTGRES_*` no-op; stage.sh `rollback_safe` derive-path; install-dir protection).
 
 **Feature facts** — `.agents/shared/planning/group-chat/{plan-overview,architecture-recommendation,decisions,emperor-open-questions,substrate-map}.md` at tip; A-P5-2, A-P5-8, A-P5-17a, A-P5-17b, A-P6-1, A-P6-22, A-P6-23, A-P6-26, A-P6-35, A-P6-36 · KV `gc_pilot_video_team`, `gc_phase2_go`, `gc_ui_refinement_p6`, `gc_emperor_rulings_20261115` · `.agents/tester/PACKS.md` (P6 re-gate #2 block), `.agents/tester/QUARANTINE.md` (2 group-chat-adjacent entries).
+
+**S5 execution + leg closure (2026-11-17)** — §5.4.3 now mirrors the **executed** recipe; the four plan defects (PD-1 `ENSEMBLE_DB_AMBIENT_ALLOW` / PD-2 the `ENSEMBLE_AUTH_*` family scrub / PD-3 the 180 s bound / PD-4 the re-owned template clone) are folded in with their code anchors: `daemon/ensemble_config.py:186` (tier-2 ambient guard) and `:289-294` (the var is never consulted by the prod fence) · `daemon/__main__.py:832-841` (bound-but-not-listening ~29 s) · `tests/support/wedge_smoke.py:581` (the house template sets the allowance). Deviations ledger D1–D9: `/tmp/gc_v0310_smoke_evidence.dCM1Wx/DEVIATIONS.md` — D6 (`systemctl show`, system manager, for the live-unit read) and D9 (prod unreachable **by construction**) are recorded in the leg. **Leg verdicts:** S1d ✅ 19/19 at `c47d3858f` (seal `cb51a277…` blob-identical `v0.30.12`→`v0.31.0`→HEAD — re-verified by this lane; evidence `/tmp/gc_s1d_v0310.qjWrhu/`) · S4 ✅ 24/421/0 at `0181dadbf` in 86 s on a quiet host (the 420/1 was host-load; anomaly `621fb76f` resolved; evidence `/tmp/gc_s4_remeasure.3EoUsi/`) · S5 ✅ PASS-WITH-DISCLOSURES 5/5 (livez 0.31.0, readyz 4/4, room tables scratch-only, zero kills, `/user.slice/`, zero residue, live untouched).
 
 **Disk measurement (2026-11-17)** — stage footprint ~376 MB gross / **~200 MB net** after the keep-3 eviction ⇒ **fits with ~9× headroom** against **1.9 GiB free @ 100 %** (`/dev/sda1` 230 G / 229 G used). Live `releases/v0.30.12` measures **175 MB**, its `ensemble-prod` **79 MB**. Sanctioned reclamation already done: **281.6 MiB** (pip cache · uv cache · `.angular/cache` · 294 `__pycache__` dirs · `.pytest_cache`). Levers deliberately **not** taken: shared-cache prune (go-build **7.2–7.6 GB**, npm **2.1 GB** — kept **warm for live lanes**) and a reconcile sweep of the **38 `wt-stage-*` worktrees (46 GB)** — **foreign-lane disruption is the larger risk**; both remain discretionary operator levers. `df` fluctuates with concurrent lanes (3.3 GB → 2.0 GB → 1.9 GiB observed; `/tmp` moved 79 GB → 71.9 GB mid-window via another lane's cleanup) — **re-measure before the stage**.
 
