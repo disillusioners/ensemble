@@ -87,10 +87,18 @@ ANCHORS-ARE-LEADS: every row below was re-read while writing this plan, not copi
 | A26 | journal kinds: `subprocess_wait_timeout` is informational, labelled at `upgrade_tools.py:1317`; `_TERMINAL_EVENTS` (`upgrade_journal.py:2529-2557`) does **not** contain it; `nonzero_exit` exists only as a `kind=` **row token** (`lib.sh:5290`, `:5320`) | event-kind adjudication input | yes |
 | A27 | closer: `upgrade_journal_sweep.py:2325`, P1–P9 `:2335-2350`, `UPGRADE_CLOSER_BOOT_GRACE_S=300` `:143`, floor `max(…, HANDBACK_VERIFY_BUDGET_S)` `:176/:2154/:2177-2178` | must not be touched / must stay satisfied | yes |
 | A28 | `_log` / `_logv` / `_warn` at `lib.sh:434/450/460` | log writers available (`_log` = narrative INFO, LOG_TAG-prefixed + logfile-aware; `_logv` = verbatim body writer, no prefix — not for INFO lines) | yes |
+| A29 | `lib.sh:6103-6106` the probe's gate consumer | `if ! _gate_serving_attribution "hand-back verify"` — collapses ANY nonzero rc (incl. the new transient `2`) into probe rc 1 ⇒ the fail-fast halt | yes |
+| A30 | `lib.sh:8142-8162` the post-flip gates | `gate_livez`/`gate_readyz` propagate the gate rc verbatim through `&&` (`:8142-8143`); `gate_version` collapses it at `:8159` (`_gate_serving_attribution … \|\| return 1`); one-shot CONSUMERS then collapse rc 2 into a fail reason: `promote.sh:790/793` + `:799/847` (`gate_fail_reason="/livez unreachable >Ns"` / `"/readyz unreachable >Ns"` → **8b AUTO-ROLLBACK** at `:926-927`), `promote.sh:853` (`"version verify mismatch"`), `restart.sh:284-290`/`:294-300` (`GATE_FAIL="… unreachable >Ns"`), `rollback.sh:267-270`/`:272-275`/`:278` (`REGATE_FAIL`), `promote.sh:1060-1072` (re-gate) | yes |
+| A31 | writers-by-channel | `_log` writes **stdout** when `ENSEMBLE_UPGRADE_LOG_FILE` is unset (`lib.sh:434-443`, the `printf … 2>/dev/null` at `:442`); `_warn` is stderr (`:460-469`); the in-`$()` stderr-INFO precedent is the verifier's budget `printf … >&2` (`:6210`, "the pid must be the ONLY thing on stdout") | yes |
+| A32 | `lib.sh:8031` `owned_spaced` + `lib.sh:7111-7121` `_supervision_pid_cgroup_leaf` | `owned_spaced` is a **leaked global** (absent from `:8005`'s `local` list) — the ladder must thread it explicitly, not widen the leak; the twins-pinned `/proc/<pid>/cgroup` parse already has TWO shell copies (`_supervision_pid_cgroup_leaf`, and inline at `:8123-8126`) — R2 must reuse/factor, never mint a third | yes |
 
 **Drift corrections carried forward** (research → actual): `_gate_serving_attribution` is `:8004-8092`, **not**
 `:6921-6955` (that range is `_supervision_owned_pids`); `promote.sh:676-680` is a **comment block** — there are no
-frozen/exported `SUPERVISION_*` vars; `scope_arm_is_active` is a journal **site label**, not a function.
+frozen/exported `SUPERVISION_*` vars; `scope_arm_is_active` is a journal **site label**, not a function. Review-wave
+correction (2026-11-17, BL-1): the shorthand "`gate_livez`/`gate_readyz` have the identical `|| return 1` collapse
+(:8159)" is imprecise — `:8159` is **`gate_version`'s** collapse; `gate_livez`/`gate_readyz` propagate the gate rc
+verbatim through `&&` and the collapse happens at their **one-shot consumers** (`promote.sh:790/793`, `:799/847`,
+`restart.sh:284-290`, `rollback.sh:267-270`, etc. — A30). Same defect class, different line; §5.4a treats all of them.
 
 ---
 
@@ -139,6 +147,12 @@ honest-branch precedent `stop_via_stop_script` (`:5281-5291` unit arm, `:5311-53
   forensic gain — precisely the blast-radius expansion this lane must avoid.
 - Mitigation for the naming debt: one comment line at each changed site stating "the event kind names the bounded-wait
   *family*; the row's `kind=` names the *outcome*". Recorded as a deliberate, documented debt, not an oversight.
+- **Deferral-exhaustion carrier (REVIEW WAVE 1, BL-1 — §5.4a):** the transient-exhaustion marker journals the **same
+  event kind** `subprocess_wait_timeout` with a **NEW `kind=` row token** (`kind=attr_deferred`) — the A26/M-A7
+  contract ("the event kind names the family; the `kind=` row token is the changed surface"). **No new EVENT kind**
+  ⇒ `I-E3` and the A7 hygiene lock stay green (M-A7's plant — a new event kind — remains the red proof). The row is
+  **fire-once latched** per site-invocation family (precedent `_GATE_ATTR_WARNED`, `lib.sh:7995-8002`): the verifier's
+  poll loop must not mint one row per 2 s iteration.
 
 ### 4.3 Concrete edits (three sites)
 
@@ -163,6 +177,14 @@ Shared micro-helper (new, next to `_run_bounded` at `:4883`) to avoid three copi
 # _bounded_rc_reason <rc> <state-hint>  → "timeout(BUDGET_KNOB=<v>)" | "nonzero rc=<rc>[ state=<hint>]"
 ```
 Both are pure string functions (no I/O) so the three call sites keep their own site label / unit / budget-knob name.
+
+**Writer-channel note (REVIEW WAVE 1, BL-2 — `D-P1-5`):** the `_log` INFO lines this section adds at site 2 (is-active
+preflight) and site 3 (scope arm) are **safe as-is** — both live in **statement context** (every caller of
+`restart_via_launcher` / `_supervision_handback_unit` is `if ! …`-form: `promote.sh:684`, `:1051`, `restart.sh:251`,
+`rollback.sh:249`; grep-verified — never inside a `$()` capture), so stdout is not being captured there. The rule differs
+at the GATE surfaces: any INFO emitted by `_gate_serving_attribution` (accept line, transient/exhaustion marker) MUST
+ride stderr via the `printf … >&2` idiom (`:6210` precedent) because gate calls ARE `$()`-captured — see §5.3 and
+invariant **I-B2b**.
 
 **Note (amended by leader ruling D2 — sites 4/5 journal symmetry):** `lib.sh:6383-6391` (start arm) and `:6747-6753`
 (scope-arm start) keep their honest `=124` timeout arms **and now add symmetric `kind=nonzero_exit` rows for a genuine
@@ -229,6 +251,10 @@ redden the downgrade's removal:
    This is the rung that would have accepted `1191207/1191605`; it is *the same* predicate Layer 2 already trusts, tightened
    to segment boundaries. (Legacy Layer 2 keeps its substring byte-identical — decisions.md §2.2(5); a ladder `1` refuses
    before Layer 2, and ladder-accepted holders skip the Layer-2 re-test — closure C-2, below.)
+   *Parse reuse (review wave 1 fold, A32):* the `/proc/<holder>/cgroup` read is the twins-pinned parse — it already exists
+   twice in shell (`_supervision_pid_cgroup_leaf` `:7111-7121`, inline at `:8123-8126`). R2 factors the read (tail -n 1 +
+   strip the leading `<id>:` prefix) so `_gate_attr_unit_ctx` and the ladder share ONE parse helper with two projections
+   (the helper's leaf basename; R2's full last-line path) — a **third copy must not be minted**.
 3. **R3 — ppid ancestry into the owned set** (portable: POSIX `ps`, so it also serves Darwin/launchd and nohup/script
    shapes). New `_supervision_pid_ancestor_of <pid> <roots-spaced>`: bounded walk (depth 12, same shape as
    `_supervision_pid_in_launchd_lineage` `:7092-7105`) testing membership in the *owned set* (not a single root).
@@ -248,9 +274,17 @@ Then the gate's Layer-1 block becomes:  - `nonmatch` empty → **unchanged, byte
     (`"port-holder(s):${nonmatch} NOT in the supervision-owned pid set (owned:${owned_spaced:-<none>}) — the :${PORT} answerer is not this install's daemon"`) plus a suffix naming the ladder verdict
     (e.g. `; containment ladder: outside unit 'X' cgroup and no ancestor in the owned set`) — the *prefix* is what the
     M-section pins assert (`M1`/`M3`: `"999999 NOT in the supervision-owned pid set"`, `owned:<none>`), so those legs stay green.
-  - **all `0`** → `_log` (INFO, success path) e.g.
+  - **all `0`** → INFO **on STDERR** (REVIEW WAVE 1, BL-2 — invariant `I-B2b`), e.g.
     `attribution [<what>]: ACCEPTED — port-holder(s):X contained in unit 'Y' (cgroup containment; the argv-anchored owned set does not cover them)`
-    and **skip Layer 2's unit-arm re-test for the holders the ladder already accepted** (architect closure C-2 — Layer 2
+    emitted with the `printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "…" >&2` idiom (the `:6210` budget-printf
+    precedent — A31). **NOT `_log`**: `_log` writes **stdout** when `ENSEMBLE_UPGRADE_LOG_FILE` is unset (`:434-443`,
+    the `printf … 2>/dev/null` at `:442`), and every gate call runs inside a `$()` capture — `LIVEZ_JSON="$(gate_livez)"`
+    (`promote.sh:790`), `READYZ_JSON="$(gate_readyz)"` (`:799`), `newpid="$(_supervision_unit_serving …)"` (`:6395`) —
+    where the captured payload must be the ONLY stdout content (the captured pid a single numeric token; the JSON body
+    unpolluted). The refusal arm already rides `_warn` (stderr, `:460-469`) — unchanged. The same stderr rule binds the
+    gate's transient/exhaustion marker (§5.4).
+    The accept path must also **skip Layer 2's unit-arm re-test for the holders the ladder already accepted** (architect
+    closure C-2 — Layer 2
     is refusal-only and can never accept; re-testing an accepted holder risks a silent false veto in the mixed case where
     unit probes resolve but the holder's `/proc/<pid>/cgroup` is unreadable. This corrects the earlier rationale "when
     nonmatch is empty every holder is owned", now false on the ladder path — decisions.md §2.2(5) as amended by C-2).
@@ -285,15 +319,25 @@ iterations, not seconds) and scope ("process-global" is false at `$( )` call sit
 - **exhaustion semantics (leader ruling D1 — transient→budget-bound; SUPERSEDES the original terminal fail-fast):**
   pool exhausted with the holder still `2` ⇒ the gate returns **2 (transient)** with a **distinct journaled exhaustion
   marker** (`… containment UNATTRIBUTABLE within ${spent}s (unit MainPID/ControlGroup unresolvable, ps unavailable) —
-  deferring to the verify budget`); poll-loop consumers keep polling **within their existing budgets**; refusal and halt
-  happen **only at budget end** through the normal floor-wins verdict path (`:6288-6297`). Terminal fail-fast exhaustion
+  deferring to the verify budget` — journaled per §4.2's carrier: event kind `subprocess_wait_timeout`, row token
+  `kind=attr_deferred`, fire-once latched `_GATE_ATTR_WARNED`-style, WARN text on stderr per I-B2b);
+  poll-loop consumers keep polling **within their existing budgets** — and "poll-loop consumers" means exactly **ONE**
+  call site, `_handback_serving_probe`'s verifier loop: the other four consumer surfaces are one-shot and collapse any
+  nonzero rc today (REVIEW WAVE 1, BL-1 — the probe's own `if !` consumer at `:6103-6106` is one of them; the full
+  consumer contract is §5.4a and tasks **T7b/T7c**). Refusal and halt happen **only at budget end** through the normal
+  floor-wins verdict path (`:6288-6297`), with the exhaustion detail carried into `HB_VERIFY_REASON` (Candidate C,
+  §6 C-5). Terminal fail-fast exhaustion
   is **REJECTED** — it re-conflates exactly the transient/terminal classes the ladder separates (a boot attributable at
   t+8 s would halt with ~290 s of verify budget unspent). Cost of the ruling: a never-attributable pathological boot burns
   the full verify budget before halting — bounded, rare, and every safety property holds. **Bound semantics of record
   (leader D1): attribution acceptance is EVIDENCE-ONLY (a rung's answered `0`); the deferral is a BUDGET-BOUNDED DELAY
   that can NEVER accept; the version conjunct is ABSOLUTE and outside the widening.**
-- statement form only (unchanged: `_gate_serving_attribution` is called as a statement everywhere the sleep matters; the
-  existing `RG_LIVEZ="$(gate_livez)"` at `promote.sh` runs *inside* a subshell but merely inherits the sleep, which is fine).
+- **sleep/pool semantics only (re-scoped — REVIEW WAVE 1, BL-1):** the original bullet claimed "`_gate_serving_attribution`
+  is called as a statement everywhere the sleep matters … which is fine". That claim is RE-SCOPED to the **sleep/pool
+  inheritance alone** (a `$( )` call site forks a fresh per-shell pool and merely inherits the ≤5 s sleep — that part is
+  fine and unchanged). It must NOT be read as licensing the **rc-consumption form**: the probe's `if !
+  _gate_serving_attribution` consumer (`:6103-6106`) captures rc and collapses `2` into a refusal — T7b reworks it; the
+  one-shot gate consumers collapse `2` into a fail reason — T7c reworks them (§5.4a).
 
 Why pooled rather than per-call: the verifier calls the gate once per 2 s poll iteration; a per-call 5 s defer would let a
 pathological "never attributable" boot consume `300 s` in ~25 iterations instead of ~150 (a 6× slowdown of a halt we must
@@ -307,6 +351,45 @@ existing budget. C-10a sync (A22): both copies get the *same* one-line comment s
 (`≤5 s per shell deferral pool`) — **byte-identical** in `lib.sh:157-181` and `promote.sh:309-327`; no numeric edit; B10
 (Phase 2 §7.7) is the sync pin.
 
+### 5.4a — the rc=2 consumer contract at every gate call site (REVIEW WAVE 1, BL-1; `D-P1-4`)
+
+The deferral makes `_gate_serving_attribution` a **three-valued** predicate (`0` accept / `1` refuse / `2` transient).
+The earlier claim "poll-loop consumers keep polling" is true for exactly **one** of the five consumer surfaces —
+`_handback_serving_probe`'s verifier loop. The probe's own gate consumer (`:6103-6106`, A29) and the post-flip one-shot
+surfaces (A30) collapse ANY nonzero rc today; left alone, the widened gate's transient `2` would reproduce the very
+false-halt this lane removes — through the probe as an immediate rc-1 fail-fast, and through the one-shot consumers as a
+**mislabelled auto-rollback** (`gate_fail_reason` → promote **8b AUTO-ROLLBACK**, `promote.sh:926-927`):
+
+| # | Consumer surface | Today's collapse | Defect if unfixed |
+|---|---|---|---|
+| 1 | `_handback_serving_probe`'s gate consumer (`lib.sh:6103-6106`) — the ONLY poll-loop | `if ! _gate_serving_attribution "hand-back verify"` ⇒ any nonzero becomes probe rc 1 | a transient `2` = the same fail-fast halt this lane exists to remove |
+| 2 | `gate_livez` / `gate_readyz` (`lib.sh:8142-8143`, rc propagates verbatim) and their ONE-SHOT consumers: `promote.sh:790/793`, `:799/847`; `restart.sh:284-290` / `:294-300`; `rollback.sh:267-270` / `:272-275`; `promote.sh:1060-1063` / `:1065-1068` | `if LIVEZ_JSON="$(gate_livez)"; then … else gate_fail_reason="…unreachable >Ns"` | rc `2` mints the FALSE label `"/livez unreachable >${LIVEZ_BUDGET_S}s"` (the daemon **answered green** — nothing was unreachable) → `gate_fail_reason` → 8b auto-rollback |
+| 3 | `gate_version` (`lib.sh:8159`) | `_gate_serving_attribution "version verify" \|\| return 1` | rc `2` becomes `"version verify mismatch"` (`promote.sh:853`) → 8b auto-rollback on a healthy boot |
+| 4 | `gate_soak` (inherits the gate per-tick via `gate_version` `:8294`/`:8383`) and its consumer (`promote.sh:864`) | `if ! gate_version …` per tick; `\|\| gate_fail_reason="soak failure"` | a transient `2` mid-soak = a spurious soak failure |
+
+**Treatment (adjudication of record — `D-P1-4`, decisions.md §1 row 23): every consumer mirrors the probe's rc
+contract — `0` accept / `1` refuse (today's wording AND disposition, byte-unchanged) / `2` transient.** Concretely:
+
+- **T7b (the probe, `:6103-6106`):** capture the gate rc; map `2` → probe `return 2` — the same contract the verifier
+  already honours for the boot-transient probe arms (`:6235`/`:6256`, "transient — poll to the deadline"). The green-class
+  body keeps rc `0`/`1` behaviour byte-identical (version conjunct, house-red — untouched).
+- **T7c (the one-shot consumers):** at `gate_version:8159` the `\|\| return 1` collapse is **replaced by an explicit rc
+  capture**; at the livez/readyz/soak consumer blocks the `else`/`||` arms gain the rc distinction. A transient `2` gets
+  a **bounded retry within the site's existing budget** (re-issue the gate call after a short sleep — the
+  `_enforce_deadline` phase blocks already bound each phase), and if the retries exhaust, the surface text is the
+  **distinct transient wording** (`version verify: attribution deferred (transient — retrying)` /
+  `livez green but attribution deferred (transient)`), **never** the budget-fail label `"/livez unreachable >Ns"`, never
+  `"version verify mismatch"`, never `gate_fail_reason`/`GATE_FAIL`/`REGATE_FAIL` → auto-rollback. The mislabel fold is
+  normative: an rc-2 arm reusing the "unreachable >Ns" label would mint a NEW dishonest label class (green ≠ unreachable).
+- **Persistent-2 coverage:** a host where the gate answers `2` forever still halts — through the probe at the floor-wins
+  verdict (`:6288-6297`) with the exhaustion detail in `HB_VERIFY_REASON` (leg **B-defer-e**, phase2 §7.5), and through a
+  one-shot consumer after its bounded retries with the transient wording (same leg, one-shot twin). Honest wording, inside
+  the existing budgets — the fail-fast/disposition classes stay separated.
+
+**Where recorded:** this subsection (phase1 treatment list), task rows T7b/T7c (§10), commit paths C3 (§11), invariant
+**I-B13** (§14), leg **B-defer-e** + mutation **M-B-defer-E** (phase2 §7.5/§7.9), and the decisions.md register row
+`D-P1-4`.
+
 ### 5.5 Portability
 
 - `uname -s` dispatch stays the house idiom (A24): R2 is entered only through `_supervision_host_allows_unit`, which runs the
@@ -318,7 +401,8 @@ existing budget. C-10a sync (A22): both copies get the *same* one-line comment s
 ### 5.6 Behaviour at deferral exhaustion (amended by leader ruling D1)
 
 **Halt semantics unchanged — but the path is budget-bound.** Pool exhaustion with the holder still `2` ⇒ the gate returns
-**2 (transient)** ⇒ the verifier keeps polling within its existing budget; when the budget floor finally wins
+**2 (transient)** ⇒ the verifier keeps polling within its existing budget **via the T7b rc-mapped probe consumer (before
+T7b the `if !` form at `:6103-6106` collapsed the `2` into an immediate rc-1 refusal — §5.4a)**; when the budget floor finally wins
 (`:6288-6297` floor-wins verdicts), the existing chain fires unchanged: verifier `return 1` (`:6234`/`:6256`) ⇒
 `_supervision_handback_unit` `return 1` (`:6395-6397`) ⇒ `promote.sh:684-700` halt + B4 leave-txn-open (halt-span anchor
 corrected to `:700` per architect §3). A **positively-foreign holder still refuses at the first census** — it never enters
@@ -371,7 +455,7 @@ Touchpoints:
 | C-2 | `:6332-6339` reset-failed, both arms | `reset-failed: rc=$sbrc${first:+ — $first}` / `reset-failed: timeout(${SYSTEMCTL_PROBE_BUDGET_S}s)` (needs a tiny errfile capture on the non-124 arm; currently `>/dev/null 2>&1`) |
 | C-3 | `:6356-6360` is-active, both arms | `is-active: rc=$isact_rc state=${isact:-<none>}` (no stash for the benign rc=3? — **yes stash**, it is the *context* of a later failure, and the last write wins) |
 | C-4 | `:6383-6391` start, non-124 arm | stash `first` (the first stderr line, **already captured** and today only WARNed — highest-value loss); 124 arm stashes the timeout wording |
-| C-5 | `:6395-6397` verify refusal | stash the verifier's reason: new global `HB_VERIFY_REASON` set by `_supervision_unit_serving` at each `return 1` (`:6207-6213` prestop-equal, attribution, `:6288-6297` floor bands, final budget verdict) **plus an explicit file write from inside the verifier** (it runs in `$( )`) |
+| C-5 | `:6395-6397` verify refusal | stash the verifier's reason: new global `HB_VERIFY_REASON` set by `_supervision_unit_serving` at each `return 1` (`:6218-6221` prestop-equal — anchor corrected from the earlier `:6207-6213` draft citation (budget printf; CP-5/CP-8), attribution, `:6288-6297` floor bands, final budget verdict) **and at budget end when the trailing polls were deferral transients** (REVIEW WAVE 1, BL-1: the last gate `UNATTRIBUTABLE … deferring` marker is threaded from `GATE_ATTRIBUTION_DETAIL` into `HB_VERIFY_REASON` before the floor-wins/budget verdict fires, so the halt text says WHY the budget ran out) **plus an explicit file write from inside the verifier** (it runs in `$( )`) |
 | C-6 | success path (after verify succeeds, before `return 0`) | **clear** both channels (`:6558` precedent) |
 
 Optional (low risk, listed for approval): `promote.sh:1051-1056` (the *rollback* hand-back halt) also interpolates
@@ -434,8 +518,10 @@ weakening the closer**:
 
 ## 9. Blast-radius statement (loud, on purpose)
 
-- **Files changed by this phase: `scripts/upgrade/lib.sh`, `scripts/upgrade/restart.sh`, and (optionally)
-  `scripts/upgrade/promote.sh`** (C-10a comment sync + the optional rollback halt `HB_ERR`). Bash only.
+- **Files changed by this phase: `scripts/upgrade/lib.sh`, `scripts/upgrade/restart.sh`, `scripts/upgrade/promote.sh`,
+  and `scripts/upgrade/rollback.sh`** (lib.sh = A/B/C + T7b; restart.sh = T10 + the T7c restart gate consumers;
+  promote.sh = T7c promote gate consumers + C-10a comment sync + T11 rollback halt; rollback.sh = the T7c rollback
+  re-gate consumers, `:267-278`). Bash only.
 - **Zero `daemon/**` logic changes.** Phase 3 will touch `daemon/tools/upgrade_tools.py:4145` — **a constant value only**
   (`PIPELINE_SCRIPTS_FLOOR_COMMIT`), which is Phase 3's lane and carries no runtime behaviour.
 - **Zero schema/migration delta** ⇒ `rollback_safe=true` (fix-loss-only on rollback) — Phase 3 states it at stage time.
@@ -454,9 +540,11 @@ Dependencies are strict; a task is "done" only when its acceptance holds in-tree
 | T2 | Rewrite the three sites (`:6332-6339`, `:6356-6360`, `:6695-6703`) per §4.3 | T1 | rc=124 legs emit the **byte-identical** legacy WARN + `kind=budget`; rc=3 emits **no** journal row; rc=4/other emit `kind=nonzero_exit` with the true rc; the literal `rc=124` never appears when the child returned otherwise |
 | T3 | Add `_supervision_pid_ancestor_of <pid> <roots…>` near `:7105`; `ps`-absent ⇒ rc 2 | — | Depth-bounded walk; root-absent/`ps`-absent cases pinned |
 | T4 | Factor `_gate_attr_unit_ctx` out of `_gate_attr_unit_lineage`; re-implement the latter on top of it (behaviour-identical) | T3 | All existing unit-lineage/DualFight legs unchanged (messages incl. `MainPID=`/`cgroup=` detail) |
-| T5 | Add `_gate_attr_containment <holder>` implementing R1–R4 (§5.3) | T3, T4 | Matrix unit-proven: owned⇒0, cgroup-child⇒0, ppid-child⇒0, foreign⇒1, tooling-missing⇒2 |
-| T6 | Wire the ladder into `_gate_serving_attribution`'s Layer-1 block (nonmatch branch only) | T5 | Common case byte-identical (no systemctl probe issued when nonmatch is empty — provable via the stub `SC_LOG`); refusal prefix preserved; accept path logs INFO with no banned literal |
-| T7 | Add the pooled deferral (§5.4) + distinct exhaustion detail | T6 | Pool bounds total sleep to `_GATE_ATTR_DEFER_S` (**per shell, seconds-counted, clamped `[0,5]`** — D3); exhaustion ⇒ **transient (2), refusal only at budget end** (leader D1); `0`/`1` short-circuit the loop |
+| T5 | Add `_gate_attr_containment <holder>` implementing R1–R4 (§5.3) | T3, T4 | Matrix unit-proven: owned⇒0, cgroup-child⇒0, ppid-child⇒0, foreign⇒1, tooling-missing⇒2; the `/proc/<holder>/cgroup` parse is factored onto the existing twins-pinned helper family (A32 — `_supervision_pid_cgroup_leaf` `:7111-7121`), **no third parse copy** |
+| T6 | Wire the ladder into `_gate_serving_attribution`'s Layer-1 block (nonmatch branch only) | T5 | Common case byte-identical (no systemctl probe issued when nonmatch is empty — provable via the stub `SC_LOG`); refusal prefix preserved; accept path logs INFO **on stderr** (`I-B2b`, §5.3) with no banned literal; `owned_spaced` becomes a properly-threaded local (the leaked global at `:8031` must not become the ladder's shared state — A32) |
+| T7 | Add the pooled deferral (§5.4) + distinct exhaustion detail | T6 | Pool bounds total sleep to `_GATE_ATTR_DEFER_S` (**per shell, seconds-counted, clamped `[0,5]`** — D3); exhaustion ⇒ **transient (2), refusal only at budget end** (leader D1); the exhaustion marker journals event kind `subprocess_wait_timeout` with row token `kind=attr_deferred`, **fire-once latched** (`_GATE_ATTR_WARNED` precedent, §4.2); `0`/`1` short-circuit the loop |
+| **T7b** | **rc=2 consumer at the probe (REVIEW WAVE 1, BL-1, §5.4a)** — in `_handback_serving_probe`, replace the `if ! _gate_serving_attribution …` collapse at `:6103-6106` with an explicit rc capture; transient `2` → probe `return 2` (mirror `:6235`/`:6256`); `0`/`1` arms byte-identical | T7 | A persistent-2 fixture: probe returns **2** (not 1), no `attribution … REFUSED` line, the verifier polls **≥2 iterations**, halt only at the floor-wins verdict (`:6288-6297`) with the exhaustion marker in `HB_VERIFY_REASON` (leg B-defer-e, phase2 §7.5); the green/refusal arms keep today's rc + wording byte-identical (M-B-defer-E must redden the leg) |
+| **T7c** | **rc=2 mapping at the one-shot gate consumers (§5.4a, `D-P1-4`)** — `gate_version:8159` collapses `\|\| return 1` → explicit rc capture; livez/readyz/soak consumer blocks (`promote.sh:790-794`, `:799-848`, `:853`, `:864`; `restart.sh:284-290`, `:294-300`; `rollback.sh:267-278`; `promote.sh:1060-1072`) gain the same `0/1/2` branch: transient `2` → bounded in-budget retry then the **distinct transient wording** — never `"/livez unreachable >Ns"` (the review's mislabel fold: green ≠ unreachable), never `"version verify mismatch"`, never `gate_fail_reason`/`GATE_FAIL`/`REGATE_FAIL` → 8b auto-rollback | T7b | One-shot persistent-2 fixture: bounded retries fire (counter-asserted), final text is the transient wording, exit disposition unchanged for `0`/`1`; `gate_soak` treats a per-tick `2` as no-green-this-tick, not soak failure |
 | T8 | Candidate C: `_handback_stash` + C-1…C-6 touchpoints + `HB_VERIFY_REASON` | T2 (same file region, serialized) | Fixture: unit verify refusal ⇒ `hand-back error:` is **non-empty** in the halt detail; success path clears both channels; a stale pre-hand-back seed cannot surface |
 | T9 | C-10a comment sync (both copies) | T6, T7 | `sed`-extracted blocks in `lib.sh` and `promote.sh` are **byte-identical** |
 | T10 | Restart-lane rows at the seven refusal sites (§7.2) | T2 | Fixture per class: one `halt` row naming the class; exit codes unchanged; `|| true` best-effort proven on a TORN journal |
@@ -480,7 +568,7 @@ Branch: `fix/promote-handback-false-halt` (this worktree). Bash-only; identity `
 | C0 | `docs(promote-handback-false-halt): phase-1 code-fix design` | `.agents/shared/planning/promote-handback-false-halt/phase1-plan.md` |
 | C1 | `fix(upgrade): classify bounded systemctl probe returns honestly` | `scripts/upgrade/lib.sh` (T1, T2) |
 | C2 | `fix(upgrade): accept supervisor-contained port holders in serving attribution` | `scripts/upgrade/lib.sh` (T3–T6) |
-| C3 | `fix(upgrade): bound attribution deferral for unattributable port holders` | `scripts/upgrade/lib.sh` (T7, T9) |
+| C3 | `fix(upgrade): bound attribution deferral for unattributable port holders` | `scripts/upgrade/lib.sh` (T7, **T7b**, T9) **+ the T7c one-shot consumer mapping: `promote.sh` (`:790-794`, `:799-848`, `:853`, `:864`, `:1060-1072`), `restart.sh` (`:284-300`), `rollback.sh` (`:267-278`)** — one commit owns the whole rc=2 consumer contract so it reviews as a unit (REVIEW WAVE 1, BL-1; `D-P1-4`) |
 | C4 | `fix(upgrade): stash the systemd hand-back diagnosis for halt text` | `scripts/upgrade/lib.sh` (+ `scripts/upgrade/promote.sh` iff T11 accepted) |
 | C5 | `fix(upgrade): journal restart preflight refusals` | `scripts/upgrade/restart.sh` (T10) |
 | C6 (**deferred**) | ~~`fix(upgrade): containment widening for the launchd flip-verify attribution`~~ — **NOT CUT in this lane** (T12 deferred per D-P1-3) | — (follow-up lane) |
@@ -501,9 +589,12 @@ git add scripts/upgrade/lib.sh \
 
 Ordering constraints:
 - C1 must land **before** C2: the deferral/containment code paths assume the honest journal vocabulary when they log.
-- C2 before C3 (C3's exhaustion detail is a refusal-path sibling of C2's ladder).
+- C2 before C3 (C3's exhaustion detail is a refusal-path sibling of C2's ladder; C3 now also carries the T7c one-shot
+  consumer mapping — lib.sh + promote.sh + restart.sh + rollback.sh — so the whole rc=2 contract reviews as one unit).
 - C4 last among the `lib.sh` candidates: it touches the same functions' failure arms and is the easiest to review alone.
-- C5 independent of C1–C4 (different file) — may land any time; keep it after C2 so the lane's headline fix reviews first.
+- C5 shares `restart.sh` with C3 (C3 = gate-consumer rc mapping at `:284-300`; C5 = the preflight refusal rows) — keep the
+  two restart.sh edit series **serialized** (one edit per message; the house parallel-edit race rule) and land C3 first so
+  the rc vocabulary exists before the refusal rows cite it.
 - C6 droppable without affecting C1–C5.
 - **Phase 3 owns everything after C6**: merge → bump commit (`scripts/bump_version.py patch`) → re-pin
   `lib.sh:95 PIPELINE_SCRIPTS_REV` **and** `upgrade_tools.py:4145 PIPELINE_SCRIPTS_FLOOR_COMMIT` to the **merge commit sha**
@@ -519,7 +610,7 @@ Ordering constraints:
 | R1 | **Widening is too permissive** on some shape we did not enumerate (e.g. a foreign process that happens to be a descendant of an owned pid, or a monitor sidecar launched by the daemon) | High — the protection this conjunct exists for | Medium | Ladder accepts only (cgroup ∈ our unit) or (ancestor ∈ our argv/cwd-anchored owned set). A daemon-launched sidecar holding our port is *inside our tree* by definition and the same acceptance Layer 2 already grants today (P12 residual, documented). Phase 2's negative matrix (P5, P8, P9) must prove refusals survive; mutation-proof required (green-under-own-revert needs a counter-mutation red) |
 | R2 | **Deferral eats ceremony wall-clock** or amplifies across poll iterations | Medium (halt quality / total wall-clock) | Medium | **Per-shell** pool (≤5 s per shell, counted in seconds — architect §2 corrected the original "5 s per process" arithmetic and scope); `[0,5]` clamp + dual-key marker ⇒ a leaked value cannot extend it; exhaustion is **transient → budget-bound** (leader D1), never an immediate terminal refusal; `0`/`1` short-circuit; no knob change ⇒ closer coupling intact; C-10a note in both copies |
 | R3 | **Pinned log/test contracts break** (7b substring, 7c wording, M1/M3/M6/M7 details, rc=124 WARN) | High (blocks merge) | Medium-High (text edits near pinned sites) | Explicit byte-preservation list in T2/T6 acceptance; run the four packs before each commit; keep the refusal **prefix** verbatim and append only a suffix; keep rc=124 arms untouched |
-| R4 | **Hidden coupling** of the gate change into `status.sh --verify` (`:128` reads `GATE_ATTRIBUTION_DETAIL`) or promote's `gate_fail_reason` rendering | Medium (misleading operator text) | Medium | `GATE_ATTRIBUTION_DETAIL` remains a single-line string with the same prefix; the accept path leaves it empty; Phase 2 pins `status --verify` behaviour on both an accepted-widened and a refused shape |
+| R4 | **Hidden coupling** of the gate change into `status.sh --verify` (`:128` reads `GATE_ATTRIBUTION_DETAIL`) or promote's `gate_fail_reason` rendering | Medium (misleading operator text) | Medium | `GATE_ATTRIBUTION_DETAIL` remains a single-line string with the same prefix; the accept path leaves it empty; Phase 2 pins `status --verify` behaviour on both an accepted-widened and a refused shape. T7c (§5.4a) is the rc=2-specific half: a transient `2` never lands in `gate_fail_reason`/`GATE_FAIL`/`REGATE_FAIL`, and its surface wording is the distinct transient text — so an rc-2 cannot mint the false `"/livez unreachable >Ns"` label (the review's mislabel fold) or drive the 8b auto-rollback |
 | R5 | **Review surface too big in one file** — five commits in `lib.sh` (9052 lines) invite a silent regression | Medium | Medium | Strict commit ordering, one edit per message, `git diff` per commit, `bash -n` after every edit, packs run per commit; C4 separated (failure-arm-only) |
 
 Secondary (tracked, not blocking): Darwin path (R3/R4 rungs) is proven only by stub harnesses — no Darwin host in this lane;
@@ -555,6 +646,8 @@ Linux fix as the certified one.
 | S8 | Table sync | `sed`-extract both C-10a blocks, `cmp` | Byte-identical |
 | S9 | No new refusal-literal regressions | `assert_not_contains "systemctl start"` on all success paths | Zero hits |
 | S10 | Closer untouched | `git diff --stat -- daemon/services/upgrade_journal_sweep.py` | Empty |
+| S11 | rc=2 consumer contract (I-B13, §5.4a) | persistent-2 fixtures at the probe and at one `gate_version`/livez consumer | probe returns 2 and the verifier polls ≥2 iterations; one-shot consumers retry within budget and surface the transient wording; zero occurrences of rc-2 landing in `gate_fail_reason`/`GATE_FAIL`/`REGATE_FAIL` or the `/livez unreachable >Ns` / `version verify mismatch` labels; the M-B-defer-E counter-mutation (restored `if !` consumer) reddens the leg |
+| S12 | Gate stdout purity (I-B2b) | capture `LIVEZ_JSON="$(gate_livez)"` etc. on an accepted-widened green | captured stdout parses as the probe body alone (no INFO prefix); the verifier's captured pid is a single numeric token; M-B2b (ACCEPTED line via `_log`) reddens it |
 
 ---
 
@@ -583,14 +676,21 @@ legs. The bias is deliberately asymmetric: *every* refusal must be provable, and
 - **I-B3** *Refusal prefix invariant*: every refusal detail still starts with
   `port-holder(s):<pids> NOT in the supervision-owned pid set (owned:<set>)` — the M1/M3/M6/M7 assertions stay green
   **without edits**.
+- **I-B2b** *Gate-call stdout purity* (REVIEW WAVE 1, BL-2): every `$()`-captured gate call keeps byte-identical stdout —
+  `LIVEZ_JSON`/`READYZ_JSON`/`RG_LIVEZ` carry ONLY the probe body, `gate_version`'s captured stdout carries only its
+  payload, and the verifier's captured `newpid` is a **single numeric token**. All gate-emitted INFO — accept line
+  (§5.3) and transient/exhaustion marker (§5.4) — rides **STDERR** (`printf '%s[%s]: %s\n' … >&2`, the `:6210`
+  budget-printf precedent, A31): `_log` writes stdout when `ENSEMBLE_UPGRADE_LOG_FILE` is unset (`:434-443`) and would
+  pollute the captured payload. The refusal arm rides `_warn` (already stderr) — unchanged.
 - **I-B4** *Foreign holder*: a holder that is not owned, not in our unit cgroup and has no owned ancestor ⇒ rc 1 **at the
   first census** (no deferral burn).
 - **I-B5** *Pidless launchd job + served port* ⇒ rc 1 naming the crash-loop shape.
 - **I-B6** *Wrong version* / *absent version* ⇒ rc 1 with today's wording (the widening must not become a version bypass).
 - **I-B7** *Green with no listener* ⇒ rc 1 unchanged.
 - **I-B8** *Deferral bound*: a permanently unattributable shape (supervisor context present, cgroup unreadable, `ps` absent)
-  sleeps at most `_GATE_ATTR_DEFER_S` in **total** across repeated gate calls in one process, then refuses with the distinct
-  "UNATTRIBUTABLE … failing closed" detail.
+  sleeps at most `_GATE_ATTR_DEFER_S` in **total** across repeated gate calls in one process; exhaustion ⇒ **transient
+  (2)** with the distinct "UNATTRIBUTABLE … deferring to the verify budget" marker (leader D1 — superseded the earlier
+  "then refuses" wording); the refusal happens **only at budget end** through the floor-wins verdict (`:6288-6297`).
 - **I-B9** *Gate surface parity*: the same healthy-boot shape is accepted by `gate_livez`/`gate_readyz` (not just hand-back),
   and the same foreign shape is refused there.
 - **I-B10** *Halt semantics untouched*: on exhaustion the exact existing chain fires (probe rc 1 → verifier rc 1 →
@@ -599,6 +699,13 @@ legs. The bias is deliberately asymmetric: *every* refusal must be provable, and
   ppid ladder only; on a Plan9-stubbed `uname` the fail-closed dispatch still refuses (A24 idiom).
 - **I-B12** *Mutation-proof*: each new acceptance has a counter-mutation that turns its leg red (e.g. remove R3 ⇒ I-B1 red;
   remove the `1`-classification ⇒ I-B4 red).
+- **I-B13** *rc=2 consumer contract* (REVIEW WAVE 1, BL-1, §5.4a / `D-P1-4`): a transient `2` from the gate is consumed as
+  transient at EVERY call site — the probe maps it to probe-rc 2 (`return 2`, mirror `:6235`/`:6256`) so the verifier keeps
+  polling; the one-shot consumers (`gate_version:8159`, promote/restart/rollback gate blocks, `gate_soak` per-tick) map it
+  to a bounded in-budget retry and the distinct transient wording — **never** a refusal rc 1, never
+  `gate_fail_reason`/`GATE_FAIL`/`REGATE_FAIL` → 8b auto-rollback, never the false `"/livez unreachable >Ns"` /
+  `"version verify mismatch"` labels. A persistent `2` still halts only at budget end (floor-wins verdict) with the
+  exhaustion detail in `HB_VERIFY_REASON` (leg B-defer-e).
 
 **C — diagnosis**
 

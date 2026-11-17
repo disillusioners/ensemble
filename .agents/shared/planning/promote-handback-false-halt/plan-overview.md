@@ -5,6 +5,7 @@
 **Planned:** 2026-11-17 (UTC) by the planner dispatch tree (2 explorers, 4 workers; instance IDs in the delivery report)
 **Status:** PLANNING COMPLETE — no implementation, no rehearsals executed, no commits to `scripts/upgrade/**`, no stage, **no promote** (the live promote ceremony stays the Emperor's).
 **Amended:** 2026-11-17 — architect adversarial enrichment (`architecture-recommendation.md` @ `3aeb3f583`, verdict SAFE-WITH-CLOSURES) folded in: leader rulings **D-P3-1 = MERGE**, **D1** (deferral exhaustion → transient/budget-bound), **D2** (sites 4/5 rows), **D3** (`D-P1-2` letter amendment); blocking closures **C-0** (body/ledger predicate agreement), **C-1** (composition rule + `M-NP1c`), **T7** (non-circular assertion set). Adoption record: `decisions.md` §10.
+**Amended (review wave 1, 2026-11-17):** plan-review blockers **BL-1** (`D-P1-4` — the rc=2 consumer contract: probe maps transient 2 → `return 2` (T7b); `gate_version:8159` + the one-shot consumers map 2 → bounded retry + transient wording (T7c), never `gate_fail_reason` → 8b auto-rollback) and **BL-2** (`D-P1-5` — gate INFO rides stderr, invariant `I-B2b`) folded into phase1 §5.4a / §10 / §11 / §14 and phase2 §7.5 (leg `B-defer-e` + `M-B-defer-E`) / §7.6 (leg `B-parity-capture` + `M-B2b`). Cheap folds adopted: the `:6218-6221` anchor correction in C-5, the `owned_spaced`/`_supervision_pid_cgroup_leaf` reuse notes (A32), the `/livez unreachable >Ns` mislabel ban, and the D2 start-arm legs A8/A9.
 
 ---
 
@@ -30,8 +31,8 @@ Recovery precedent: the daemon-side serving-green closer (`upgrade_journal_sweep
 |---|---|---|
 | `research-findings-code.md` | explorer | grep-verified code sites, drift table, test-harness inventory (45 KB) |
 | `research-findings-lane.md` | explorer | fixture timeline, restart twins, release/floor/staging mechanics (31 KB) |
-| `phase1-plan.md` | worker | Code-fix design: A/B/C + restart arm + coalescence; 28-row anchor register; tasks T1–T12; commits C0–C6; 29 design invariants I-A1…I-E3 |
-| `phase2-plan.md` | worker | Test + rehearsal strategy; negative proof NP-1…NP-11 (+31 mutations); rehearsal tiers 0/1/2/3/3b; registration RG-1..RG-7 |
+| `phase1-plan.md` | worker | Code-fix design: A/B/C + restart arm + coalescence; 28-row anchor register; tasks T1–T12 (+ **T7b/T7c**, review wave 1); commits C0–C6; 31 design invariants I-A1…I-E3 (incl. **I-B2b**, **I-B13**) |
+| `phase2-plan.md` | worker | Test + rehearsal strategy; negative proof NP-1…NP-11 (+31 mutations); rehearsal tiers 0/1/2/3/3b; registration RG-1..RG-7; review-wave-1 legs **B-defer-e** (rc=2 consumer contract, M-B-defer-E) + **B-parity-capture** (stdout purity, M-B2b) + **A8/A9** (D2 start-arm rows) |
 | `phase3-plan.md` | worker | Release mechanics: floor/stamp re-pin commit-graph (P3-D1), version bump, staging sequence, rollback_safe |
 | `decisions.md` | worker | **The decision record** — 22 ratified decisions + §10 architect-enrichment adoption record (4 leader rulings, 3 blocking closures, 8 required items, 6 recommended items with adopt/defer), corrections register, consistency pass |
 | `architecture-recommendation.md` | architect | Adversarial enrichment input (3-worker fan-out, verdict SAFE-WITH-CLOSURES) — folded into the phase files + `decisions.md` §10 |

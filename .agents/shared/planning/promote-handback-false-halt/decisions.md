@@ -48,7 +48,7 @@ Where a phase plan's citation and the tree disagree, the tree wins and the disag
 
 ### 0.3 Reading order
 
-§1 is the register (22 decisions, one row each, with detail blocks). §2 is the **one binding amendment**. §3–§5 are the substantive
+§1 is the register (24 decisions, one row each, with detail blocks). §2 is the **one binding amendment**. §3–§5 are the substantive
 ratifications (release graph, negative proof, coalescence). §6–§7 are the registers the coding commission must carry (deferred items,
 corrections — so stale claims are never re-imported). §8 is the consistency pass. §9 is the single escalated item. Appendices A–C are
 the verification log and the planner's outstanding actions.
@@ -57,7 +57,7 @@ the verification log and the planner's outstanding actions.
 
 ## 1. Decision register
 
-### 1.0 Index (22 decisions)
+### 1.0 Index (24 decisions)
 
 | # | ID | Decision (one line) | Binds | Ratifier |
 |---|----|---------------------|-------|----------|
@@ -83,6 +83,8 @@ the verification log and the planner's outstanding actions.
 | 20 | `L-10` | **Coalescence closure recorded** for board item `wi-d3579d7c` #1 — this lane removes the producer; the closer is untouched | `phase1-plan.md` §8 | Dispatcher (FINAL) |
 | 21 | `L-11` | **Deferred register adopted** (T12, NP-11, non-journal restart-audit channel) | §6 below | Dispatcher (FINAL) |
 | 22 | `L-12` | **Corrections register adopted as authoritative** over stale commission/research claims | §7 below | Dispatcher (FINAL) |
+| 23 | `D-P1-4` | **rc=2 consumer contract at every gate call site** (REVIEW WAVE 1, BL-1): the probe maps transient 2 → probe `return 2` (T7b, `:6103-6106`); `gate_version:8159` + the one-shot consumers mirror the same 0/1/2 mapping with bounded retries + the distinct transient wording — never `gate_fail_reason` → 8b auto-rollback, never the `/livez unreachable >Ns` mislabel; exhaustion marker journals `subprocess_wait_timeout` with row token `kind=attr_deferred` (fire-once latched) and rides `HB_VERIFY_REASON`; §5.4's "statement form" bullet re-scoped to sleep/pool only | `phase1-plan.md` §3 (A29–A32), §4.2, §5.3/§5.4/**§5.4a**/§5.6, §9, §10 (T7b/T7c), §11 (C3), §12 (R4), §14 (`I-B13`), §15 (S11); `phase2-plan.md` §7.5 (**B-defer-e**/M-B-defer-E), §16 (SC-12) | Plan review wave 1 (FINAL) |
+| 24 | `D-P1-5` | **Gate-emitted INFO rides STDERR + `I-B2b` stdout purity** (REVIEW WAVE 1, BL-2): accept line + transient marker use the `printf … >&2` idiom (`:6210` precedent) — `_log` is stdout when the logfile is unset (`:434-443`) and gate calls are `$()`-captured; §4.3's `_log` at sites 2/3 is safe (statement context) | `phase1-plan.md` §5.3, §14 (`I-B2b`), §15 (S12); `phase2-plan.md` §7.6 (**B-parity-capture**/M-B2b), §16 (SC-12) | Plan review wave 1 (FINAL) |
 
 **Nothing in this register weakens a phase plan's hard constraints.** Where a decision *narrows* the plan (`T12`, `NP-11`), the narrowing is
 explicit and its compensating coverage is named (§6).
@@ -139,6 +141,62 @@ asserts exactly the "env-visible, not exported, not a knob" shape.
 
 **Binds:** `phase1-plan.md` §6 (T11 touchpoint), §10 (`T11`/`T12`), §15.3; commit `C4` carries T11.
 **Phase-2 legs:** `C-7` gains the rollback template row; the Darwin legs (`B6`/`B7`) stay as written; `NP-11` is dropped per `D-P2-4`.
+
+---
+
+#### `D-P1-4` — rc=2 consumer contract at every gate call site · **ADOPTED (REVIEW WAVE 1, blocker BL-1)**
+
+**The defect the review found.** The deferral makes `_gate_serving_attribution` three-valued (`0`/`1`/`2`), but the plan only
+re-verified ONE consumer: `_handback_serving_probe` consumes the gate via `if ! _gate_serving_attribution …`
+(`lib.sh:6103-6106`), collapsing ANY nonzero rc — including the new transient `2` — into probe rc 1 ⇒ the same fail-fast
+halt this lane exists to remove. The post-flip gates collapse identically: `gate_version` at `lib.sh:8159`
+(`_gate_serving_attribution … || return 1`), and the one-shot consumers land rc `2` in
+`gate_fail_reason`/`GATE_FAIL`/`REGATE_FAIL` (`promote.sh:790/793`, `:799/847`, `:853`; `restart.sh:284-290`, `:294-300`;
+`rollback.sh:267-278`; `promote.sh:1060-1072`) → the promote's **8b AUTO-ROLLBACK** (`promote.sh:926-927`) on a healthy
+boot. "Poll-loop consumers keep polling" is true for exactly **one** of the five consumer surfaces.
+
+**Ruling.** Every consumer **mirrors the probe's rc contract** — `0` accept / `1` refuse (today's wording and disposition
+byte-unchanged) / `2` transient:
+
+- **T7b (probe):** capture the gate rc at `:6103`; map transient `2` → probe `return 2` (mirror the verifier's existing
+  transient arms `:6235`/`:6256`).
+- **T7c (one-shot consumers):** `gate_version:8159`'s `|| return 1` collapse is replaced by an explicit rc capture —
+  **adjudicated consistently**: the version gate gets the SAME rc=2→transient/defer mapping as the probe and
+  livez/readyz, **NOT** `gate_fail_reason` → auto-rollback. A transient `2` gets a bounded in-budget retry and, if it
+  persists, the **distinct transient wording** — never the mislabel `"/livez unreachable >Ns"` (the daemon answered
+  green; nothing was unreachable), never `"version verify mismatch"`.
+- The exhaustion marker journals event kind `subprocess_wait_timeout` with a **new `kind=` row token**
+  (`kind=attr_deferred`), fire-once latched (`_GATE_ATTR_WARNED` precedent `lib.sh:7995-8002`) — **no new EVENT kind**,
+  so `I-E3`/A7/M-A7 stay intact; the marker's INFO text rides stderr (`I-B2b`).
+- The exhaustion detail is carried into **`HB_VERIFY_REASON`** (phase1 §6 C-5) so the budget-end halt text names WHY.
+- The phase1 §5.4 "statement form unchanged" bullet is **re-scoped to sleep/pool semantics only**; it no longer pins the
+  broken `if !` rc-consumption form.
+
+**Binds:** `phase1-plan.md` §3 (A29–A32), §4.2, §5.3, §5.4, **§5.4a**, §5.6, §9, §10 (T7b/T7c), §11 (C3 paths), §12 (R4),
+§14 (**I-B13**), §15 (S11/S12); `phase2-plan.md` §5.2.0/§5.2.1, §6.3, **§7.5 leg B-defer-e + mutation M-B-defer-E**, §7.9,
+§8.1 (C-5b), §14 (P2-T8), §16 (SC-12).
+**Counter-mutation:** **M-B-defer-E** — restoring the pre-fix `if !` consumer form MUST redden B-defer-e.
+**Provenance:** plan-review repair wave 1 (2026-11-17), applied verbatim from the review fold; no design redesign, no
+safety bound weakened (the fail-fast/refusal classes stay separated; a persistent-2 still halts at budget end).
+
+---
+
+#### `D-P1-5` — gate-emitted INFO rides STDERR + I-B2b stdout purity · **ADOPTED (REVIEW WAVE 1, blocker BL-2)**
+
+**The defect the review found.** phase1 §5.3 specified the accept-path INFO via `_log` — but `_log` writes **stdout** when
+`ENSEMBLE_UPGRADE_LOG_FILE` is unset (`lib.sh:434-443`, the bare `printf … 2>/dev/null` at `:442`), and every gate call
+runs inside a `$()` capture (`promote.sh:790/799`, `newpid="$(_supervision_unit_serving …)"` at `:6395`) where the
+captured payload must be the ONLY stdout content — the pid a single numeric token, the JSON bodies unpolluted.
+
+**Ruling.** All gate-emitted INFO — the accept line (§5.3) and the transient/exhaustion marker (§5.4) — uses the
+`printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "…" >&2` idiom (the `:6210` budget-printf precedent). The refusal
+arm already rides `_warn` (stderr, `:460-469`) — unchanged. §4.3's `_log` additions at the is-active (site 2) and scope-arm
+(site 3) sites are **safe as-is**: both live in statement context (every `restart_via_launcher` /
+`_supervision_handback_unit` caller is `if ! …`-form; grep-verified), never inside a `$()` capture.
+
+**Binds:** `phase1-plan.md` §5.3, §14 (**I-B2b**), §15 (S12); `phase2-plan.md` §5.2.1, **§7.6 leg B-parity-capture +
+mutation M-B2b**, §7.9, §14 (P2-T8), §16 (SC-12).
+**Provenance:** plan-review repair wave 1 (2026-11-17).
 
 ---
 
