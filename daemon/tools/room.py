@@ -311,61 +311,6 @@ def _post_cap(manager: Any) -> RoomPostTurnCap | None:
     return None
 
 
-def _room_post_budget_check(
-    cap: RoomPostTurnCap, instance_id: str
-) -> tuple[bool, dict[str, Any]]:
-    """The READ-ONLY §9 budget check (the M2 consume-on-success
-    adjudication, A-P6-25).
-
-    Mirrors ``RoomPostTurnCap.check`` WITHOUT consuming: the returned
-    ``(allowed, detail)`` answers "is this post within budget?" and
-    the detail carries the numbers the refusal quotes (the budget,
-    the posts already spent this turn, the turn key). The cap module
-    is the policy owner and is deliberately NOT modified here (its
-    ``check`` consumes by contract) — the tool charges the counter
-    SEPARATELY, only after the append lands (see
-    ``_room_post_budget_charge``). The ``_max`` peek is a read of the
-    frozen module's configured budget (its public surface exposes no
-    reader); the fallback is the §9 constant.
-    """
-    from daemon.services.room_post_cap import ROOM_POSTS_PER_TURN
-
-    registry = cap.counters
-    turn_key = cap.resolve_turn_key(instance_id)
-    entry = registry.get(instance_id)
-    spent = 0
-    if entry is not None and entry.get("turn") == turn_key:
-        spent = int(entry.get("count") or 0)
-    max_posts = int(getattr(cap, "_max", ROOM_POSTS_PER_TURN))
-    return (
-        spent < max_posts,
-        {
-            "max_posts_per_turn": max_posts,
-            "posts_this_turn": spent,
-            "turn_key": turn_key,
-        },
-    )
-
-
-def _room_post_budget_charge(cap: RoomPostTurnCap, instance_id: str) -> None:
-    """The §9 CHARGE — spend ONE slot AFTER the append landed (the M2
-    consume-on-success adjudication, A-P6-25).
-
-    Same registry entry shape the cap owns (``{"turn": …, "count": …}``
-    — the manager-level dict, the cap's ``counters`` property); a
-    changed turn key (the reset hook) starts a fresh entry at 1. A
-    post that FAILED (closed / not-found / a fault) never reaches
-    this site, so a failed append leaves the budget untouched.
-    """
-    registry = cap.counters
-    turn_key = cap.resolve_turn_key(instance_id)
-    entry = registry.get(instance_id)
-    if entry is None or entry.get("turn") != turn_key:
-        registry[instance_id] = {"turn": turn_key, "count": 1}
-        return
-    entry["count"] = int(entry.get("count") or 0) + 1
-
-
 def _tree_root_id(manager: Any, instance_id: str) -> str | None:
     """Resolve the caller's tree root (the room's scope anchor).
 
@@ -704,8 +649,13 @@ def create_room_tools(
             # CHARGE, however, is applied only AFTER a successful
             # append (the consume site below the append): a post that
             # fails (closed / not-found / a fault) must not spend the
-            # budget — the M2 fairness fix. The known race (ACCEPTABLE
-            # per A-P6-25): this check is READ-ONLY, so two concurrent
+            # budget — the M2 fairness fix. The budget has exactly ONE
+            # implementation (the E collapse): ``peek`` is the
+            # READ-ONLY check and ``charge`` is the single consuming
+            # path, both owned by the cap module — this body no longer
+            # re-derives the arithmetic, so no caller can reintroduce
+            # consume-on-check. The known race (ACCEPTABLE per
+            # A-P6-25): the check is READ-ONLY, so two concurrent
             # posts of the SAME instance in the SAME turn can both
             # pass it before either is charged — a racy extra post can
             # slip through the check-to-charge window. The budget is a
@@ -715,9 +665,7 @@ def create_room_tools(
             # resets at the turn boundary.
             post_cap = _post_cap(manager)
             if post_cap is not None:
-                allowed, cap_detail = _room_post_budget_check(
-                    post_cap, caller_instance_id
-                )
+                allowed, cap_detail = post_cap.peek(caller_instance_id)
                 if not allowed:
                     logger.warning(
                         "room_post refused: the per-turn post budget is "
@@ -783,9 +731,10 @@ def create_room_tools(
             # spent. Every failure path above (closed / not-found /
             # the catch-all) returned or raised BEFORE this site, so a
             # failed append leaves the budget untouched — the next
-            # post keeps its full allowance.
+            # post keeps its full allowance. The charge is the cap's
+            # SINGLE consuming path (the E collapse).
             if post_cap is not None:
-                _room_post_budget_charge(post_cap, caller_instance_id)
+                post_cap.charge(caller_instance_id)
             # Route the post (the delivery router). Typed error
             # surfacing: the router has no try/except of its own, so
             # the tool owns the boundary — a routing failure NEVER

@@ -13,6 +13,16 @@ WHAT IT PROVES (the budget's own layer):
 * **A missing turn key shares the budget** — the fail-safe direction
   (fewer posts, never more), the P4 latch's posture.
 
+**THE E COLLAPSE — ONE implementation (the budget's API shape).**
+
+* ``peek`` is the READ-ONLY check: it NEVER advances the counter.
+* ``charge`` is the SINGLE consuming path.
+* The old ``check`` (which consumed by contract) is GONE — a caller
+  that reaches for the old name gets an ``AttributeError`` instead of
+  a silent budget spend. The consume-on-success rule (A-P6-25) is
+  therefore structural: the only way to spend budget is to call
+  ``charge``, and the tool calls it AFTER the append lands.
+
 The tool-level chokepoint (the refusal the AGENT sees) is pinned in
 ``tests/unit/tools/test_room_post_cap.py``.
 """
@@ -45,8 +55,16 @@ def cap(manager):
 
 
 def _post(cap: RoomPostTurnCap, instance_id: str) -> bool:
-    allowed, _detail = cap.check(instance_id)
-    return allowed
+    """One budgeted post: the READ-ONLY check, then the explicit charge.
+
+    The consume-on-success shape (A-P6-25): a refused post NEVER
+    charges — the budget is spent only by an explicit ``charge`` call.
+    """
+    allowed, _detail = cap.peek(instance_id)
+    if not allowed:
+        return False
+    cap.charge(instance_id)
+    return True
 
 
 def test_four_posts_succeed_and_the_fifth_is_refused(cap):
@@ -110,8 +128,8 @@ def test_a_missing_turn_key_shares_the_budget(cap):
 
 def test_the_refusal_detail_quotes_the_budget(cap):
     for _ in range(ROOM_POSTS_PER_TURN):
-        cap.check("inst-1")
-    allowed, detail = cap.check("inst-1")
+        _post(cap, "inst-1")
+    allowed, detail = cap.peek("inst-1")
     assert allowed is False
     assert detail["max_posts_per_turn"] == ROOM_POSTS_PER_TURN
     assert detail["posts_this_turn"] == ROOM_POSTS_PER_TURN
@@ -123,3 +141,50 @@ def test_an_explicit_reset_clears_the_budget(cap):
     assert _post(cap, "inst-1") is False
     cap.reset("inst-1")
     assert _post(cap, "inst-1") is True
+
+
+# ── the E collapse: ONE implementation, NO consuming check ──────────────
+
+
+def test_the_consuming_check_api_is_gone(cap):
+    """The old ``check`` consumed by contract — it is REMOVED.
+
+    A caller reaching for the old name gets an ``AttributeError``
+    instead of a silent budget spend: the consume-on-check hazard the
+    E item closed can no longer be reintroduced by name.
+    """
+    assert not hasattr(cap, "check"), (
+        "RoomPostTurnCap.check consumed by contract — the E collapse "
+        "removed it; the read-only check is peek()"
+    )
+
+
+def test_a_peek_never_consumes(cap, manager):
+    """The check is READ-ONLY: peeking past the budget changes nothing.
+
+    Counter-mutation proof: a peek that DID consume would leave
+    ``count`` at 1+ — the assertion below REDS it.
+    """
+    for _ in range(ROOM_POSTS_PER_TURN + 3):
+        allowed, _detail = cap.peek("inst-1")
+        assert allowed is True
+    entry = manager._room_post_turn_counter.get("inst-1")
+    assert entry is None or int(entry.get("count") or 0) == 0, entry
+
+
+def test_the_charge_is_the_only_consuming_path(cap):
+    """The cap's PUBLIC API is exactly ``peek`` / ``charge`` / ``reset``.
+
+    A resurrected ``check`` (the old consuming name) or a second
+    consumer (a sneaky ``consume``) REDS this census — the surface is
+    closed, so the single-consuming-path rule is structural, not a
+    convention.
+    """
+    public = {
+        name
+        for name in dir(cap)
+        if not name.startswith("_") and callable(getattr(cap, name, None))
+    }
+    assert public == {"peek", "charge", "reset", "resolve_turn_key"}, sorted(
+        public
+    )

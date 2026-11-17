@@ -15,9 +15,20 @@ module.
   instance's current ROOT GRAPH TASK, which is stable within a turn
   and changes on the next dispatch. A new turn key ⇒ a fresh budget.
   NO P4-owned seam is touched: the shape is MIRRORED, not shared.
-* The counter is incremented in ``room_post`` at the PRE-APPEND region
-  — the append is the commit point of the room log, so the check must
-  precede it (the same posture as the membership gate).
+* The counter is CHECKED in ``room_post`` at the PRE-APPEND region —
+  the append is the commit point of the room log, so the check must
+  precede it (the same posture as the membership gate). The counter
+  ADVANCES only AFTER a successful append (the consume-on-success
+  rule, A-P6-25): a post that failed (closed / not-found / a fault)
+  never spends budget.
+
+**ONE implementation of the budget (the E collapse).** The policy
+lives HERE and nowhere else: :meth:`RoomPostTurnCap.peek` is the
+READ-ONLY check and :meth:`RoomPostTurnCap.charge` is the SINGLE
+consuming path. The tool body calls both directly — there is no
+second copy of the budget arithmetic in ``daemon/tools/room.py``, so
+a future caller cannot silently reintroduce consume-on-check (the
+latent hazard the E item closed).
 * The refusal at the 5th post is TYPED (the house refusal envelope):
   four posts succeed, the fifth is refused.
 
@@ -107,40 +118,65 @@ class RoomPostTurnCap:
         except Exception:  # noqa: BLE001 — fail safe
             return None
 
-    # ── the check ─────────────────────────────────────────────────────
+    # ── the check (READ-ONLY) + the charge (the ONLY consume) ────────
 
-    def check(self, instance_id: str) -> tuple[bool, dict[str, Any]]:
-        """Consume ONE post slot for ``instance_id``.
+    def peek(self, instance_id: str) -> tuple[bool, dict[str, Any]]:
+        """Is ONE more post within budget for ``instance_id``? (READ-ONLY)
 
         Returns ``(allowed, detail)``. ``detail`` carries the numbers
         the refusal message quotes (the budget, the posts already
-        spent in this turn, the turn key). The counter is NOT advanced
-        on a refusal — a refused post does not consume budget.
+        spent in this turn, the turn key).
+
+        **A peek NEVER consumes.** The counter is advanced ONLY by
+        :meth:`charge` — the explicit consume site the tool calls
+        AFTER a successful append (the consume-on-success rule,
+        A-P6-25). A refused post therefore never spends budget, and a
+        check can never be mistaken for a consume.
         """
         registry = self.counters
         turn_key = self.resolve_turn_key(instance_id)
         entry = registry.get(instance_id)
-        if entry is None or entry.get("turn") != turn_key:
-            # A new turn ⇒ a fresh budget (the RESET hook).
-            entry = {"turn": turn_key, "count": 0}
-            registry[instance_id] = entry
-        spent = int(entry.get("count") or 0)
+        spent = 0
+        if entry is not None and entry.get("turn") == turn_key:
+            spent = int(entry.get("count") or 0)
         detail = {
             "max_posts_per_turn": self._max,
             "posts_this_turn": spent,
             "turn_key": turn_key,
         }
-        if spent >= self._max:
-            return False, detail
-        entry["count"] = spent + 1
-        detail["posts_this_turn"] = spent + 1
-        return True, detail
+        return spent < self._max, detail
+
+    def charge(self, instance_id: str) -> dict[str, Any]:
+        """SPEND ONE post slot for ``instance_id`` (the ONLY consume).
+
+        The single consuming path of the §9 budget (the E collapse):
+        the tool calls it at the CONSUME SITE — after the append
+        landed (A-P6-25: a failed append must not spend the budget).
+        A changed turn key (the reset hook) starts a fresh entry at 1.
+
+        Returns the post-charge detail (the same shape :meth:`peek`
+        returns) so a caller can log the spend.
+        """
+        registry = self.counters
+        turn_key = self.resolve_turn_key(instance_id)
+        entry = registry.get(instance_id)
+        if entry is None or entry.get("turn") != turn_key:
+            registry[instance_id] = {"turn": turn_key, "count": 1}
+            spent = 1
+        else:
+            spent = int(entry.get("count") or 0) + 1
+            entry["count"] = spent
+        return {
+            "max_posts_per_turn": self._max,
+            "posts_this_turn": spent,
+            "turn_key": turn_key,
+        }
 
     def reset(self, instance_id: str) -> None:
         """Drop the instance's budget (TEST/OPERATOR-surface only).
 
         Production turn boundaries do NOT call this — the budget
-        resets inside :meth:`check` when the turn key changes (a new
+        resets inside :meth:`charge` when the turn key changes (a new
         turn mints a fresh entry on the spot).
         """
         self.counters.pop(instance_id, None)
