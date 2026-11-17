@@ -1529,7 +1529,6 @@ class InstanceMessagingService:
                 last_compacted_at=last_compacted_at,
                 instance_id=instance_id,
                 msg_timestamps=_extract_msg_timestamps(messages),
-                # Compact-note lane (T3 — architect §H, gate mechanics 1).
             )
 
             # Compact state
@@ -1579,7 +1578,7 @@ class InstanceMessagingService:
             from ._compaction_persist_seam import (
                 persist_compaction_result as _persist_seam,
             )
-            _persisted = await _persist_seam(
+            await _persist_seam(
                 self._manager,
                 instance_id=instance_id,
                 result=result,

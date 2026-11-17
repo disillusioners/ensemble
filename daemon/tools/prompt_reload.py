@@ -44,7 +44,7 @@ envelope string (REFUSED for the 14 refused codes, FAILED for the
 internal-error code); the ONE frozen INFO line fires on EVERY terminal
 path (D24/AM-15) with counts/flags only. The compact-note surface
 carries its OWN content-free INFO line + its OWN outcome namespace
-(``armed_pending_seam``) — the prior lane's frozen marker set and its
+(``armed``) — the prior lane's frozen marker set and its
 six-value INFO enum are NOT extended (D25 discipline).
 
 Next-turn semantics + provider cache invalidation are DISCLOSED in
@@ -130,9 +130,9 @@ def _not_ari(agent_id: str) -> str:
 # ── Compact-note surface helpers (architect §G / §H) ──────────────────────────
 #
 # The compact-note surface carries its OWN outcome namespace
-# (``armed_pending_seam``) and its OWN content-free INFO line — the prior
-# lane's frozen marker set and six-value INFO enum are NOT extended
-# (D25 discipline).
+# (``armed``) and its OWN content-free INFO line — the prior lane's
+# frozen marker set and six-value INFO enum are NOT extended (D25
+# discipline).
 
 
 def _compaction_config(manager: Any) -> Any:
@@ -304,7 +304,7 @@ def _handle_compact_note(
     arm and returns.
     """
     from ..services.prompt_refresh import (
-        ARMED_PENDING_SEAM,
+        ARMED_PENDING_APPEND,
         CODE_COMPACT_DISABLED,
         CODE_COMPACT_RATE_LIMITED,
         CODE_INTERNAL_ERROR,
@@ -417,7 +417,7 @@ def _handle_compact_note(
     )
     status_line: str | None = None
     if superseded_previous:
-        status_line = DEFERRED_STATE_TEXT.get(state.deferred, ARMED_PENDING_SEAM)
+        status_line = DEFERRED_STATE_TEXT.get(state.deferred, ARMED_PENDING_APPEND)
 
     if repo is None or not arm_compact_note(repo, instance_id, note):
         # The arm could NOT be written — never claim an arm that does not
@@ -588,12 +588,14 @@ def create_prompt_reload_tools(
             Field(
                 default=False,
                 description=(
-                    "Arm a compact note for the NEXT quiet seam. The note "
-                    "is REQUIRED when compact=true (compact=false with a "
-                    "note is refused — ignoring it would be dishonest). "
-                    "The tool ARMS the note; the compaction happens at "
-                    "your next turn boundary, never mid-turn. Optional; "
-                    "default false."
+                    "Arm a compact note — your own distillation of this "
+                    "conversation. The note is REQUIRED when compact=true "
+                    "(compact=false with a note is refused — ignoring it "
+                    "would be dishonest). The tool ARMS the note; the "
+                    "daemon then appends it as a REQUEST and your own "
+                    "model writes the compaction on its next invoke "
+                    "(mid-turn — there is no quiet seam and no gate). "
+                    "Optional; default false."
                 ),
             ),
         ]
@@ -746,14 +748,18 @@ Compact notes (compact + compact_note)
   compact=false is refused (ignoring it would be dishonest).
 - The note is capped (12000 characters). An over-cap note is REFUSED
   with the length and the cap — it is NEVER silently truncated.
-- ARMED is not COMPACTED. The receipt reports what actually happened
-  (path=append, outcome=compacted only after the swap lands, otherwise
-  deferred/append_failed/empty_reply). There is no "armed pending seam"
-  and no three gates (the floor predicate and threshold bypass are
-  removed). A second note while one is armed REPLACES the first, with a
-  disclosure of the prior note's digest.
+- ARMED is not COMPACTED. The receipt reports what actually happened:
+  path=append, and outcome=compacted ONLY after the swap landed and
+  persisted; otherwise empty_reply, tool_calls_reply, refused_reply or
+  append_failed — never a success receipt for work not done. There is
+  no "armed pending seam" and no three gates (the floor predicate and
+  the threshold bypass are removed). A second note while one is armed
+  REPLACES the first, with a disclosure of the prior note's digest.
 - The note is never echoed in a log — only its length and digest are
   observable.
+- The span the request announces is sized from the SAME effective model
+  that answers it (the vision switch included) — the announced span and
+  the compaction that replaces it agree.
 
 Accepted consequences (disclosed, by design)
 --------------------------------------------

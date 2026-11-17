@@ -220,59 +220,30 @@ CODE_ENVELOPES: dict[str, str] = {
 #: are removed).
 OUTCOME_ARMED = "armed"
 
-#: The seam statement, in plain words — v1.5: the note is a REQUEST
-#: the agent's own model executes on its next invoke (mid-turn append);
-#: there is NO quiescent pre-dispatch gate and NO three gates.
-ARMED_SEAM_STATEMENT = (
-    "your next invoke — the daemon appends the request mid-turn and "
-    "your own model writes the compaction"
-)
+#: The plain armed status line — the note is ARMED and the append has
+#: not happened yet. v1.5: there is NO seam (the append is mid-turn) and
+#: NO gate list, so the literal must not teach a quiescent gate.
+ARMED_PENDING_APPEND = "armed — pending append, not compacted"
 
-#: The expected-seam clause (architect v1.5 — the seam is gone).
+#: The ONE producible deferred receipt string (v1.5 vocabulary sweep).
 #:
-#: Under v1.5 there is no seam and no gates: the append is mid-turn and
-#: the same-model invariant is structural. The prior "three gates"
-#: (minimum-compaction floor, 60s anti-refire window, deliberate-compact
-#: rate limit) are removed; only the 900s deliberate-compact rate limit
-#: survives, enforced at ARM time as a typed refusal.
-ARMED_EXPECTED_SEAM_CLAUSE = (
-    "it is executed by your own model on this turn's invoke — there is "
-    "no seam and no gate list; the 900s deliberate-compact rate limit "
-    "is enforced at arm time"
-)
-
-#: The explicit "not yet" line — MANDATORY in the armed receipt.
-ARMED_NOT_YET_COMPACTED_LINE = (
-    "CONTEXT NOT YET COMPACTED — the compaction happens at your next "
-    "turn boundary; until then this note remains armed."
-)
-
-#: The THREE deferred receipt strings (VERBATIM — architect §G / AC10.5).
-#: A deferred compaction is NEVER a success receipt for work not done.
-ARMED_DEFERRED_ANTI_REFIRE = (
-    "armed — deferred (anti-refire window), not compacted"
-)
-ARMED_DEFERRED_BELOW_FLOOR = (
-    "armed — deferred (below minimum-compaction floor), not compacted"
-)
+#: The prior "three gates" (the armed-aware minimum-compaction floor and
+#: the 60s anti-refire window) were REMOVED with the note-path plumbing
+#: (architect v1.5 §3), so their deferred literals were UNPRODUCIBLE —
+#: pinned by tests but never emitted. They are DELETED here: the code,
+#: the self-doc and the tests now agree on ONE deferred vocabulary.
 ARMED_STILL_ARMED_NO_DOC = (
-    "armed — still armed (last compaction produced no doc), not compacted"
+    "armed — still armed (the last append produced no doc), not compacted"
 )
-#: The plain armed status line (nothing deferred yet).
-ARMED_PENDING_SEAM = "armed — pending seam, not compacted"
 
 #: The persisted deferred-state discriminators (CONTENT-FREE — a label,
 #: never note text). The arm-status surface maps them to the verbatim
 #: receipt strings above.
 DEFERRED_STATE_NONE = ""
-DEFERRED_STATE_ANTI_REFIRE = "anti_refire"
-DEFERRED_STATE_BELOW_FLOOR = "below_floor"
 DEFERRED_STATE_NO_DOC = "no_doc"
 
 #: Discriminator → verbatim receipt string.
 DEFERRED_STATE_TEXT: dict[str, str] = {
-    DEFERRED_STATE_ANTI_REFIRE: ARMED_DEFERRED_ANTI_REFIRE,
-    DEFERRED_STATE_BELOW_FLOOR: ARMED_DEFERRED_BELOW_FLOOR,
     DEFERRED_STATE_NO_DOC: ARMED_STILL_ARMED_NO_DOC,
 }
 
@@ -306,6 +277,14 @@ COMPACT_NOTE_LAST_SHA256_12_KEY = "compact_note_last_sha256_12"
 #: "deferred, not compacted" — a deferred state that nobody remembers
 #: cannot be disclosed. CONTENT-FREE (a label, never note text).
 COMPACT_NOTE_LAST_DEFERRED_KEY = "compact_note_last_deferred"
+#: The APPEND-PATH audit keys (architect v1.5 §2g — the receipt's
+#: honesty surface). CONTENT-FREE: a model id, a boolean, a count and a
+#: doc id — NEVER conversation content and NEVER note text.
+COMPACT_NOTE_LAST_AGENT_MODEL_KEY = "compact_note_last_agent_model"
+COMPACT_NOTE_LAST_OVERRIDE_APPLIED_KEY = "compact_note_last_override_applied"
+COMPACT_NOTE_LAST_OVERRIDE_CONFIGURED_KEY = "compact_note_last_override_configured"
+COMPACT_NOTE_LAST_TAIL_SPLICED_KEY = "compact_note_last_tail_spliced"
+COMPACT_NOTE_LAST_DOC_ID_KEY = "compact_note_last_doc_id"
 
 
 def compact_note_sha256_12(note: str) -> str:
@@ -508,6 +487,37 @@ def mark_compact_note_deferred(
 
 
 
+#: The APPEND-PATH outcome labels (architect v1.5 §2g + §11.4 + the
+#: §10.6 degradation matrix). They are OUTCOME labels — NOT refusal
+#: codes — so the ``REFUSAL_CODES`` census stays at 14.
+#:
+#: * ``compacted``      — the swap landed AND persisted
+#: * ``empty_reply``    — the model answered with NOTHING (no compaction)
+#: * ``tool_calls_reply`` — the model answered with TOOL CALLS (not a
+#:   compaction) — a DISTINCT label from ``append_failed``, which the
+#:   spec reserves for "the append landed but the swap did not"
+#: * ``refused_reply``  — the model answered with a text REFUSAL
+#: * ``append_failed``  — the append landed but the swap did not persist
+#: * ``deferred``       — the append did not run (no seam gate in v1.5)
+APPEND_OUTCOME_COMPACTED = "compacted"
+APPEND_OUTCOME_EMPTY_REPLY = "empty_reply"
+APPEND_OUTCOME_TOOL_CALLS_REPLY = "tool_calls_reply"
+APPEND_OUTCOME_REFUSED_REPLY = "refused_reply"
+APPEND_OUTCOME_APPEND_FAILED = "append_failed"
+APPEND_OUTCOME_DEFERRED = "deferred"
+
+APPEND_OUTCOMES: frozenset[str] = frozenset(
+    {
+        APPEND_OUTCOME_COMPACTED,
+        APPEND_OUTCOME_EMPTY_REPLY,
+        APPEND_OUTCOME_TOOL_CALLS_REPLY,
+        APPEND_OUTCOME_REFUSED_REPLY,
+        APPEND_OUTCOME_APPEND_FAILED,
+        APPEND_OUTCOME_DEFERRED,
+    }
+)
+
+
 def settle_compact_note_arm(
     repository: Any,
     instance_id: str,
@@ -515,6 +525,13 @@ def settle_compact_note_arm(
     note_sha12: str,
     outcome: str,
     persisted: bool = True,
+    agent_model: str = "",
+    override_applied: bool = False,
+    override_configured: str = "",
+    tail_spliced: int = 0,
+    doc_id: str = "",
+    note_chars: int = 0,
+    agent_id: str = "",
 ) -> str:
     """Settle an ARMED note after the APPEND outcome.
 
@@ -525,11 +542,44 @@ def settle_compact_note_arm(
     the settle re-runs rather than half-applies (the receipt must never
     say ``compacted`` before the swap lands).
 
-    ``outcome`` is one of the append path's outcome labels:
-    ``"compacted"`` / ``"deferred"`` / ``"append_failed"`` /
-    ``"empty_reply"`` (and the refusal labels at arm time).
+    ``outcome`` is one of the append path's outcome labels (see
+    :data:`APPEND_OUTCOMES`) — NOT a refusal code (the census stays 14).
+
+    The AUDIT fields (effective model, the override's applied/configured
+    state, the spliced-tail count, the doc id) are written into the
+    carrier AND emitted as ONE content-free INFO line — they are the
+    receipt's honesty surface (v1.5 §2g), not decoration.
     """
-    if outcome == "compacted" and persisted:
+    audit = {
+        COMPACT_NOTE_LAST_AGENT_MODEL_KEY: agent_model or "",
+        COMPACT_NOTE_LAST_OVERRIDE_APPLIED_KEY: bool(override_applied),
+        COMPACT_NOTE_LAST_OVERRIDE_CONFIGURED_KEY: override_configured or "",
+        COMPACT_NOTE_LAST_TAIL_SPLICED_KEY: int(tail_spliced or 0),
+        COMPACT_NOTE_LAST_DOC_ID_KEY: doc_id or "",
+    }
+    _write_instance_metadata(repository, instance_id, audit)
+    try:
+        logger.info(
+            format_compact_note_append_line(
+                instance_id=instance_id,
+                agent_id=agent_id,
+                outcome=outcome,
+                note_chars=note_chars,
+                note_sha256_12=note_sha12,
+                agent_model=agent_model,
+                compaction_model_override_applied=override_applied,
+                compaction_model_override_configured=override_configured,
+                tail_spliced=tail_spliced,
+                doc_id=doc_id,
+            )
+        )
+    except Exception:  # pragma: no cover — defensive; never raises
+        logger.debug(
+            "prompt_reload compact-note: audit line emission failed for "
+            "instance=%s",
+            str(instance_id)[:8],
+        )
+    if outcome == APPEND_OUTCOME_COMPACTED and persisted:
         clear_compact_note_arm(repository, instance_id, sha256_12=note_sha12)
         return "landed"
     mark_compact_note_deferred(repository, instance_id, DEFERRED_STATE_NO_DOC)
@@ -957,6 +1007,43 @@ def format_info_line(
 #: six-value outcome enum are PINNED (D24/D25) and are NOT extended by this
 #: lane — the compact-note surface carries its own namespace.
 COMPACT_NOTE_INFO_PREFIX = "prompt_reload_compact_note:"
+
+
+def format_compact_note_append_line(
+    instance_id: str,
+    agent_id: str,
+    outcome: str,
+    *,
+    note_chars: int,
+    note_sha256_12: str,
+    agent_model: str = "",
+    compaction_model_override_applied: bool = False,
+    compaction_model_override_configured: str = "",
+    tail_spliced: int = 0,
+    doc_id: str = "",
+) -> str:
+    """The APPEND-PATH audit line — the receipt's honesty surface.
+
+    CONTENT-FREE BY CONSTRUCTION (architect v1.5 §2b/§2g): the effective
+    MODEL ID, the override's applied/configured state, the note's LENGTH
+    and sha256 PREFIX, the spliced-tail count and the doc id. NEVER
+    conversation content, NEVER note text.
+
+    It is a SEPARATE line from :func:`format_compact_note_info_line`
+    (whose field order is FROZEN by AC11.3) — the arm-time line and the
+    append-outcome line are different events.
+    """
+    return (
+        f"{COMPACT_NOTE_INFO_PREFIX} instance={instance_id} "
+        f"agent={agent_id or '-'} outcome={outcome} path=append "
+        f"agent_model={agent_model or '-'} "
+        f"compaction_model_override_applied="
+        f"{str(bool(compaction_model_override_applied)).lower()} "
+        f"compaction_model_override_configured="
+        f"{compaction_model_override_configured or '-'} "
+        f"note_chars={note_chars} note_sha256={note_sha256_12} "
+        f"tail_spliced={int(tail_spliced or 0)} doc_id={doc_id or '-'}"
+    )
 
 
 def format_compact_note_info_line(

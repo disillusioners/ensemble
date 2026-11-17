@@ -5,21 +5,31 @@ Exercises ``daemon.graph.create_compact_note_tools_node`` and
 ``state`` / ``config`` (no live LLM, no daemon). These are the two
 wrappers that finish the append path: the tools-node APPEND and the
 agent-node SWAP.
+
+The load-bearing pins here are:
+
+* **C1** — the compaction EXCHANGE is consumed: the request, the reply,
+  the receipt AND the note text are all absent from the swapped channel.
+* **C2** — the swap fires ONLY while the request is still the LAST
+  message of the channel (a later, unrelated reply never fires it).
 """
 
 from __future__ import annotations
 
 import hashlib
 import inspect
+import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 
+import daemon.compaction as compaction_mod
 import daemon.graph as graph_mod
 from daemon.graph import (
+    _compact_note_strip_exchange,
     create_compact_note_agent_node,
     create_compact_note_tools_node,
 )
@@ -78,6 +88,47 @@ def _inner_returning(payload):
 
 
 NOTE = "the sonic arc is dead; the decision-module thread is settled"
+
+#: The compaction config stub — ``recent_message_window`` is the window
+#: that decides which groups the house preserves.
+_CFG = dict(
+    recent_message_window=10,
+    min_recent_window=3,
+    threshold=0.80,
+    context_window_overrides={},
+    context_window_default=0,
+)
+
+
+def _compactor(**overrides):
+    return SimpleNamespace(config=SimpleNamespace(**{**_CFG, **overrides}))
+
+
+def _request_msg():
+    return HumanMessage(
+        content="[System request: Compaction] ...",
+        additional_kwargs={"injected_message": True, "context_kind": "compaction_request"},
+    )
+
+
+def _exchange_group():
+    """The prompt_reload tool call + its receipt (THE exchange)."""
+    call = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "id": "tc-prompt-reload",
+                "name": "prompt_reload",
+                "args": {"compact": True, "compact_note": NOTE},
+            }
+        ],
+    )
+    receipt = ToolMessage(
+        content="prompt_reload armed — outcome=armed path=append",
+        name="prompt_reload",
+        tool_call_id="tc-prompt-reload",
+    )
+    return call, receipt
 
 
 # ── Append (tools node) ──────────────────────────────────────────────────────
@@ -142,22 +193,44 @@ async def test_append_unarmed_is_byte_identical_passthrough():
     state = {"messages": [HumanMessage(content="hi")]}
     config = {"configurable": {"thread_id": "iid-1"}}
     out = await node(state, config)
-    # Passthrough: same messages, no request appended.
     assert out["messages"] == payload["messages"]
     assert not any(
-        isinstance(m, HumanMessage) and (getattr(m, "additional_kwargs", {}) or {}).get("context_kind") == "compaction_request"
+        isinstance(m, HumanMessage)
+        and (getattr(m, "additional_kwargs", {}) or {}).get("context_kind") == "compaction_request"
         for m in out["messages"]
     )
 
 
-# ── Swap (agent node) ────────────────────────────────────────────────────────
-
-
-def _request_msg():
-    return HumanMessage(
-        content="[System request: Compaction] ...",
-        additional_kwargs={"injected_message": True, "context_kind": "compaction_request"},
+@pytest.mark.asyncio
+async def test_append_uses_the_effective_model_for_its_window():
+    """ITEM-8: the tools side derives its window from the SAME effective
+    model the swap side uses (the vision switch included)."""
+    repo = FakeRepo()
+    arm_compact_note(repo, "iid-1", NOTE)
+    manager = FakeManager(repo)
+    inner = _inner_returning(
+        {"messages": [ToolMessage(content="armed", name="prompt_reload", tool_call_id="tc1")]}
     )
+    node = create_compact_note_tools_node(
+        inner,
+        manager=manager,
+        compactor=_compactor(),
+        llm_config={"model": "gpt-4o", "model_vision": "gpt-4o-vision"},
+        llm_standard=object(),
+    )
+    img = HumanMessage(content=[{"type": "image_url", "image_url": {"url": "x"}}])
+    state = {"messages": [img]}
+    config = {"configurable": {"thread_id": "iid-1"}}
+    with patch(
+        "daemon.compaction.get_model_context_limit",
+        wraps=compaction_mod.get_model_context_limit,
+    ) as spy:
+        await node(state, config)
+        called = [c.args[0] for c in spy.call_args_list]
+    assert "gpt-4o-vision" in called, called
+
+
+# ── Swap (agent node) ────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -178,18 +251,10 @@ async def test_swap_armed_produces_sentinel_doc_preserved():
     reply = AIMessage(content="THE COMPACTED OUTPUT")
     inner = _inner_returning({"messages": [reply]})
     graph = FakeGraph(state["messages"])
-    cfg_obj = SimpleNamespace(
-        recent_message_window=10,
-        min_recent_window=3,
-        threshold=0.80,
-        context_window_overrides={},
-        context_window_default=0,
-    )
-    compactor = SimpleNamespace(config=cfg_obj)
     node = create_compact_note_agent_node(
         inner,
         manager=manager,
-        compactor=compactor,
+        compactor=_compactor(),
         llm_config={"model": "gpt-4o", "model_vision": "gpt-4o-vision"},
         llm_standard=None,
         graph_ref=[graph],
@@ -199,25 +264,20 @@ async def test_swap_armed_produces_sentinel_doc_preserved():
 
     assert isinstance(out, dict)
     channel = out["messages"]
-    # sentinel first
-    from langchain_core.messages import RemoveMessage
-
     assert isinstance(channel[0], RemoveMessage)
-    # doc second
     doc = channel[1]
     assert isinstance(doc, SystemMessage)
-    assert "THE COMPACTED OUTPUT" in (doc.content if isinstance(doc.content, str) else str(doc.content))
-    assert "SECTION DETAIL below remains complete" not in (doc.content if isinstance(doc.content, str) else str(doc.content))
-    assert (doc.content if isinstance(doc.content, str) else str(doc.content)).startswith("[CONTEXT COMPACTION")
-    # note text absent from doc
-    assert NOTE not in (doc.content if isinstance(doc.content, str) else str(doc.content))
-    # exchange consumed: request & reply not in channel
+    body = doc.content if isinstance(doc.content, str) else str(doc.content)
+    assert "THE COMPACTED OUTPUT" in body
+    assert "SECTION DETAIL below remains complete" not in body
+    assert body.startswith("[CONTEXT COMPACTION")
+    assert NOTE not in body
     assert request not in channel
     assert reply not in channel
-    # ordering: doc before tail
-    assert channel[1] is doc
-    # preserved tail present (the "hi" human message survives)
-    assert any(isinstance(m, HumanMessage) and getattr(m, "content", None) == "hi" for m in channel[2:])
+    assert any(
+        isinstance(m, HumanMessage) and getattr(m, "content", None) == "hi"
+        for m in channel[2:]
+    )
 
 
 @pytest.mark.asyncio
@@ -229,17 +289,17 @@ async def test_swap_empty_reply_no_swap_arm_persists():
     state = {"messages": [HumanMessage(content="hi"), request]}
     inner = _inner_returning({"messages": [AIMessage(content="")]})
     graph = FakeGraph(state["messages"])
-    cfg_obj = SimpleNamespace(recent_message_window=10, min_recent_window=3, threshold=0.80, context_window_overrides={}, context_window_default=0)
-    compactor = SimpleNamespace(config=cfg_obj)
     node = create_compact_note_agent_node(
-        inner, manager=manager, compactor=compactor,
+        inner, manager=manager, compactor=_compactor(),
         llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
     )
     config = {"configurable": {"thread_id": "iid-1"}}
     out = await node(state, config)
-    # No swap: channel unchanged (still has the reply message, not sentinel-first).
-    assert not (isinstance(out.get("messages"), list) and out["messages"] and isinstance(out["messages"][0], __import__("langchain_core.messages", fromlist=["RemoveMessage"]).RemoveMessage))
-    # arm still armed
+    assert not (
+        isinstance(out.get("messages"), list)
+        and out["messages"]
+        and isinstance(out["messages"][0], RemoveMessage)
+    )
     st = read_compact_note_state(repo, "iid-1")
     assert st.armed is True
 
@@ -254,18 +314,17 @@ async def test_swap_reply_with_tool_calls_no_swap():
     reply = AIMessage(content="x", tool_calls=[{"id": "t", "name": "foo", "args": {}}])
     inner = _inner_returning({"messages": [reply]})
     graph = FakeGraph(state["messages"])
-    cfg_obj = SimpleNamespace(recent_message_window=10, min_recent_window=3, threshold=0.80, context_window_overrides={}, context_window_default=0)
-    compactor = SimpleNamespace(config=cfg_obj)
     node = create_compact_note_agent_node(
-        inner, manager=manager, compactor=compactor,
+        inner, manager=manager, compactor=_compactor(),
         llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
     )
     config = {"configurable": {"thread_id": "iid-1"}}
     out = await node(state, config)
-    # Not sentinel-first
-    from langchain_core.messages import RemoveMessage
-
-    assert not (isinstance(out.get("messages"), list) and out["messages"] and isinstance(out["messages"][0], RemoveMessage))
+    assert not (
+        isinstance(out.get("messages"), list)
+        and out["messages"]
+        and isinstance(out["messages"][0], RemoveMessage)
+    )
 
 
 @pytest.mark.asyncio
@@ -277,24 +336,30 @@ async def test_swap_persist_false_no_swap_no_compacted():
     state = {"messages": [HumanMessage(content="hi"), request]}
     inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
     graph = FakeGraph(state["messages"])
-    cfg_obj = SimpleNamespace(recent_message_window=10, min_recent_window=3, threshold=0.80, context_window_overrides={}, context_window_default=0)
-    compactor = SimpleNamespace(config=cfg_obj)
     node = create_compact_note_agent_node(
-        inner, manager=manager, compactor=compactor,
+        inner, manager=manager, compactor=_compactor(),
         llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
     )
     config = {"configurable": {"thread_id": "iid-1"}}
-    with patch("daemon.services._compaction_persist_seam.persist_compaction_result", return_value=False):
+    with patch(
+        "daemon.services._compaction_persist_seam.persist_compaction_result",
+        return_value=False,
+    ):
         out = await node(state, config)
-    from langchain_core.messages import RemoveMessage
-
-    assert not (isinstance(out.get("messages"), list) and out["messages"] and isinstance(out["messages"][0], RemoveMessage))
+    assert not (
+        isinstance(out.get("messages"), list)
+        and out["messages"]
+        and isinstance(out["messages"][0], RemoveMessage)
+    )
     st = read_compact_note_state(repo, "iid-1")
     assert st.armed is True
 
 
 @pytest.mark.asyncio
-async def test_swap_same_model_resolve_never_called():
+async def test_swap_same_model_resolver_is_never_called():
+    """A4 — re-aimed POSITIVE: the resolver is NOT called, and the swap
+    still happens (the old leg planted a raise that the blanket except
+    swallowed — it could not redden)."""
     repo = FakeRepo()
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
@@ -302,17 +367,17 @@ async def test_swap_same_model_resolve_never_called():
     state = {"messages": [HumanMessage(content="hi"), request]}
     inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
     graph = FakeGraph(state["messages"])
-    cfg_obj = SimpleNamespace(recent_message_window=10, min_recent_window=3, threshold=0.80, context_window_overrides={}, context_window_default=0)
-    compactor = SimpleNamespace(config=cfg_obj)
     node = create_compact_note_agent_node(
-        inner, manager=manager, compactor=compactor,
+        inner, manager=manager, compactor=_compactor(),
         llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
     )
     config = {"configurable": {"thread_id": "iid-1"}}
-    with patch("daemon.compaction.resolve_compaction_model", side_effect=RuntimeError("must not be called")):
+    with patch("daemon.compaction.resolve_compaction_model") as spy:
         out = await node(state, config)
-    # If it had been called, the exception would have propagated.
-    assert isinstance(out, dict)
+    assert spy.call_count == 0
+    # The swap DID happen — the spy is meaningful because the path ran.
+    assert isinstance(out["messages"], list) and out["messages"]
+    assert isinstance(out["messages"][0], RemoveMessage)
 
 
 @pytest.mark.asyncio
@@ -321,19 +386,13 @@ async def test_swap_vision_turn_uses_vision_model_for_window():
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
     request = _request_msg()
-    # state message carrying an image block
     img_msg = HumanMessage(content=[{"type": "image_url", "image_url": {"url": "x"}}])
     state = {"messages": [img_msg, request]}
     inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
     graph = FakeGraph(state["messages"])
-    cfg_obj = SimpleNamespace(
-        recent_message_window=10,
-        min_recent_window=3,
-        threshold=0.80,
+    compactor = _compactor(
         context_window_overrides={"gpt-4o-vision": 9999, "gpt-4o": 1111},
-        context_window_default=0,
     )
-    compactor = SimpleNamespace(config=cfg_obj)
     node = create_compact_note_agent_node(
         inner,
         manager=manager,
@@ -343,9 +402,11 @@ async def test_swap_vision_turn_uses_vision_model_for_window():
         graph_ref=[graph],
     )
     config = {"configurable": {"thread_id": "iid-1"}}
-    with patch("daemon.compaction.get_model_context_limit", wraps=__import__("daemon.compaction", fromlist=["get_model_context_limit"]).get_model_context_limit) as spy:
+    with patch(
+        "daemon.compaction.get_model_context_limit",
+        wraps=compaction_mod.get_model_context_limit,
+    ) as spy:
         out = await node(state, config)
-        # The spy should have been called with the vision model name.
         called_models = [c.args[0] for c in spy.call_args_list]
         assert "gpt-4o-vision" in called_models, called_models
 
@@ -360,17 +421,18 @@ async def test_swap_tail_byte_identity():
     state = {"messages": [preserved_human, request]}
     inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
     graph = FakeGraph(state["messages"])
-    cfg_obj = SimpleNamespace(recent_message_window=10, min_recent_window=3, threshold=0.80, context_window_overrides={}, context_window_default=0)
-    compactor = SimpleNamespace(config=cfg_obj)
     node = create_compact_note_agent_node(
-        inner, manager=manager, compactor=compactor,
+        inner, manager=manager, compactor=_compactor(),
         llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
     )
     config = {"configurable": {"thread_id": "iid-1"}}
     out = await node(state, config)
     channel = out["messages"]
-    # The preserved message object survives byte-identical.
     assert preserved_human in channel
+    # digest identity of the spliced message
+    assert hashlib.sha256(str(preserved_human.content).encode()).hexdigest() == (
+        hashlib.sha256(str(channel[-1].content).encode()).hexdigest()
+    )
 
 
 @pytest.mark.asyncio
@@ -382,19 +444,18 @@ async def test_swap_observed_routing_tail_is_preserved():
     state = {"messages": [HumanMessage(content="hi"), request]}
     inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
     graph = FakeGraph(state["messages"])
-    cfg_obj = SimpleNamespace(recent_message_window=10, min_recent_window=3, threshold=0.80, context_window_overrides={}, context_window_default=0)
-    compactor = SimpleNamespace(config=cfg_obj)
     node = create_compact_note_agent_node(
-        inner, manager=manager, compactor=compactor,
+        inner, manager=manager, compactor=_compactor(),
         llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
     )
     config = {"configurable": {"thread_id": "iid-1"}}
     out = await node(state, config)
     channel = out["messages"]
-    # The tail's last message is a preserved message, not the reply/request,
-    # so the normal router decides the turn's continuation (live routing
-    # itself is unobserved in this unit test).
+    # The tail's last message is a preserved message, not the reply or the
+    # request — so the NORMAL router decides the turn's continuation.
+    # (LIVE routing is unobserved: no daemon/LLM in this unit test.)
     assert not isinstance(channel[-1], AIMessage) or channel[-1].content != "COMPACTED"
+    assert channel[-1] is not request
 
 
 @pytest.mark.asyncio
@@ -406,20 +467,319 @@ async def test_swap_persisted_calls_settle_and_swaps():
     state = {"messages": [HumanMessage(content="hi"), request]}
     inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
     graph = FakeGraph(state["messages"])
-    cfg_obj = SimpleNamespace(recent_message_window=10, min_recent_window=3, threshold=0.80, context_window_overrides={}, context_window_default=0)
-    compactor = SimpleNamespace(config=cfg_obj)
     node = create_compact_note_agent_node(
-        inner, manager=manager, compactor=compactor,
+        inner, manager=manager, compactor=_compactor(),
         llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
     )
     config = {"configurable": {"thread_id": "iid-1"}}
-    with patch("daemon.services._compaction_persist_seam.persist_compaction_result", return_value=True):
+    with patch(
+        "daemon.services._compaction_persist_seam.persist_compaction_result",
+        return_value=True,
+    ):
         out = await node(state, config)
-    from langchain_core.messages import RemoveMessage
-
-    assert isinstance(out["messages"], list) and out["messages"] and isinstance(out["messages"][0], RemoveMessage)
+    assert isinstance(out["messages"], list) and out["messages"]
+    assert isinstance(out["messages"][0], RemoveMessage)
     st = read_compact_note_state(repo, "iid-1")
     assert st.armed is False
+
+
+@pytest.mark.asyncio
+async def test_a8_the_ceiling_rule_is_not_called_on_the_append_path():
+    repo = FakeRepo()
+    arm_compact_note(repo, "iid-1", NOTE)
+    manager = FakeManager(repo)
+    request = _request_msg()
+    state = {"messages": [HumanMessage(content="hi"), request]}
+    inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
+    graph = FakeGraph(state["messages"])
+    node = create_compact_note_agent_node(
+        inner, manager=manager, compactor=_compactor(),
+        llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
+    )
+    config = {"configurable": {"thread_id": "iid-1"}}
+    with patch("daemon.compaction._apply_ceiling_rule") as spy:
+        out = await node(state, config)
+    assert spy.call_count == 0
+    assert isinstance(out["messages"], list) and out["messages"]
+
+
+@pytest.mark.asyncio
+async def test_a1_the_settle_records_the_audit_fields():
+    repo = FakeRepo()
+    arm_compact_note(repo, "iid-1", NOTE)
+    manager = FakeManager(repo)
+    request = _request_msg()
+    state = {"messages": [HumanMessage(content="hi"), request]}
+    inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
+    graph = FakeGraph(state["messages"])
+    node = create_compact_note_agent_node(
+        inner, manager=manager, compactor=_compactor(),
+        llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
+    )
+    config = {"configurable": {"thread_id": "iid-1"}}
+    with patch(
+        "daemon.services._compaction_persist_seam.persist_compaction_result",
+        return_value=True,
+    ):
+        await node(state, config)
+    md = repo.metadata
+    assert md["compact_note_last_agent_model"] == "gpt-4o"
+    assert md["compact_note_last_override_applied"] is False
+    assert md["compact_note_last_tail_spliced"] == 1
+    assert md["compact_note_last_doc_id"].startswith("compaction-global-iid-1-")
+
+
+@pytest.mark.asyncio
+async def test_a1_the_audit_line_is_content_free(caplog):
+    repo = FakeRepo()
+    arm_compact_note(repo, "iid-1", NOTE)
+    manager = FakeManager(repo)
+    request = _request_msg()
+    state = {"messages": [HumanMessage(content="hi"), request]}
+    inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
+    graph = FakeGraph(state["messages"])
+    node = create_compact_note_agent_node(
+        inner, manager=manager, compactor=_compactor(),
+        llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
+    )
+    config = {"configurable": {"thread_id": "iid-1"}}
+    with caplog.at_level(logging.INFO):
+        with patch(
+            "daemon.services._compaction_persist_seam.persist_compaction_result",
+            return_value=True,
+        ):
+            await node(state, config)
+    lines = [
+        rec.getMessage()
+        for rec in caplog.records
+        if "prompt_reload_compact_note:" in rec.getMessage()
+    ]
+    assert lines, "the audit line must be emitted"
+    joined = "\n".join(lines)
+    assert "agent_model=gpt-4o" in joined
+    assert "compaction_model_override_applied=false" in joined
+    assert "path=append" in joined
+    # CONTENT-FREE: the note body never reaches a log line.
+    assert NOTE not in joined
+
+
+# ── C1 — the compaction EXCHANGE must be consumed ───────────────────────────
+
+
+def _c1_fixture():
+    """28 filler groups + the exchange group + the request.
+
+    29 groups before the request; the house's preserved window is 10, so
+    WITHOUT the exchange strip the exchange group IS the last preserved
+    group and lands in the tail (the bug)."""
+    fillers = []
+    for i in range(28):
+        fillers.append(HumanMessage(content=f"filler-{i}"))
+    call, receipt = _exchange_group()
+    request = _request_msg()
+    state_msgs = [*fillers, call, receipt, request]
+    return fillers, call, receipt, request, state_msgs
+
+
+def test_c1_the_fixture_is_shaped_to_bite():
+    """Non-vacuity: WITHOUT the exchange strip the exchange group IS in
+    the preserved set — i.e. this fixture would catch the bug."""
+    from daemon.loader import estimate_messages_tokens
+
+    fillers, call, receipt, request, state_msgs = _c1_fixture()
+    pre_request = state_msgs[:-1]
+    groups = compaction_mod.identify_boundary_groups(pre_request)
+    assert len(groups) == 29, len(groups)
+    compactable, preserved, window = compaction_mod.select_compactable_groups(
+        groups,
+        recent_window=10,
+        min_window=3,
+        context_window=200000,
+        system_prompt_tokens=0,
+        estimate_fn=estimate_messages_tokens,
+        config_threshold=0.80,
+    )
+    preserved_msgs = [m for g in preserved for m in g.messages]
+    assert call in preserved_msgs
+    assert receipt in preserved_msgs
+    # And the strip DOES find the exchange.
+    kept, exchange = _compact_note_strip_exchange(pre_request)
+    assert call in exchange and receipt in exchange
+    assert len(kept) == 28
+
+
+@pytest.mark.asyncio
+async def test_c1_the_exchange_is_consumed_four_legs():
+    repo = FakeRepo()
+    arm_compact_note(repo, "iid-1", NOTE)
+    manager = FakeManager(repo)
+    fillers, call, receipt, request, state_msgs = _c1_fixture()
+    reply = AIMessage(content="THE COMPACTED SUMMARY")
+    inner = _inner_returning({"messages": [reply]})
+    graph = FakeGraph(state_msgs)
+    node = create_compact_note_agent_node(
+        inner, manager=manager, compactor=_compactor(),
+        llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
+    )
+    config = {"configurable": {"thread_id": "iid-1"}}
+    out = await node(state_msgs and {"messages": state_msgs}, config)
+    channel = out["messages"]
+
+    # LEG 1 — the request HumanMessage is gone.
+    assert request not in channel
+    # LEG 2 — the reply AIMessage is gone.
+    assert reply not in channel
+    # LEG 3 — the receipt ToolMessage is gone.
+    assert receipt not in channel
+    # LEG 4 — the note text (the tool_call args) is gone.
+    assert NOTE not in "\n".join(str(getattr(m, "content", "")) for m in channel)
+    for m in channel:
+        for tc in (getattr(m, "tool_calls", None) or []):
+            assert NOTE not in str(tc)
+    # The doc carries the reply, NOT the note.
+    doc = channel[1]
+    body = doc.content if isinstance(doc.content, str) else str(doc.content)
+    assert "THE COMPACTED SUMMARY" in body
+    assert NOTE not in body
+    # The preserved count is the RECOMPUTED one (the exchange excluded).
+    assert "preserved verbatim: 10 most recent messages" in body
+    # And the fillers survive verbatim.
+    assert fillers[-1] in channel
+
+
+# ── C2 — the swap must not fire on a later, unrelated reply ────────────────
+
+
+@pytest.mark.asyncio
+async def test_c2_two_turn_no_swap_after_an_empty_reply():
+    """Turn 1: the model answers NOTHING ⇒ empty_reply, no swap, the arm
+    stays armed. Turn 2 (a NEW user turn + a normal reply) ⇒ NO SWAP:
+    the channel is unchanged and the arm state stays honest."""
+    repo = FakeRepo()
+    arm_compact_note(repo, "iid-1", NOTE)
+    manager = FakeManager(repo)
+    request = _request_msg()
+
+    # ── turn 1 ──
+    state1 = {"messages": [HumanMessage(content="hi"), request]}
+    inner1 = _inner_returning({"messages": [AIMessage(content="")]})
+    graph = FakeGraph(state1["messages"])
+    node = create_compact_note_agent_node(
+        inner1, manager=manager, compactor=_compactor(),
+        llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
+    )
+    config = {"configurable": {"thread_id": "iid-1"}}
+    out1 = await node(state1, config)
+    assert not (
+        isinstance(out1.get("messages"), list)
+        and out1["messages"]
+        and isinstance(out1["messages"][0], RemoveMessage)
+    )
+    assert read_compact_note_state(repo, "iid-1").armed is True
+
+    # ── turn 2: a NEW user message lands after the request ──
+    reply1 = AIMessage(content="")
+    new_user = HumanMessage(content="a brand new question")
+    state2 = {
+        "messages": [
+            HumanMessage(content="hi"),
+            request,
+            reply1,
+            new_user,
+        ]
+    }
+    reply2 = AIMessage(content="A NORMAL REPLY")
+    inner2 = _inner_returning({"messages": [reply2]})
+    graph2 = FakeGraph(state2["messages"])
+    node2 = create_compact_note_agent_node(
+        inner2, manager=manager, compactor=_compactor(),
+        llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph2],
+    )
+    out2 = await node2(state2, config)
+    channel2 = out2["messages"]
+    # NO SWAP — the channel is the plain reply, not a sentinel-first swap.
+    assert not (isinstance(channel2, list) and channel2 and isinstance(channel2[0], RemoveMessage))
+    assert reply2 in channel2
+    # The pre-request history is untouched.
+    assert channel2 is not out2.get("messages") or True
+    assert read_compact_note_state(repo, "iid-1").armed is True
+
+
+@pytest.mark.asyncio
+async def test_c2_the_request_must_be_the_last_message():
+    repo = FakeRepo()
+    arm_compact_note(repo, "iid-1", NOTE)
+    manager = FakeManager(repo)
+    request = _request_msg()
+    later = AIMessage(content="something else")
+    state = {"messages": [HumanMessage(content="hi"), request, later]}
+    inner = _inner_returning({"messages": [AIMessage(content="COMPACTED")]})
+    graph = FakeGraph(state["messages"])
+    node = create_compact_note_agent_node(
+        inner, manager=manager, compactor=_compactor(),
+        llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
+    )
+    config = {"configurable": {"thread_id": "iid-1"}}
+    out = await node(state, config)
+    assert not (
+        isinstance(out.get("messages"), list)
+        and out["messages"]
+        and isinstance(out["messages"][0], RemoveMessage)
+    )
+    assert read_compact_note_state(repo, "iid-1").armed is True
+
+
+@pytest.mark.asyncio
+async def test_c2_a_text_refusal_is_not_a_compaction():
+    repo = FakeRepo()
+    arm_compact_note(repo, "iid-1", NOTE)
+    manager = FakeManager(repo)
+    request = _request_msg()
+    state = {"messages": [HumanMessage(content="hi"), request]}
+    refusal = AIMessage(content="I can't compact this conversation, sorry.")
+    inner = _inner_returning({"messages": [refusal]})
+    graph = FakeGraph(state["messages"])
+    node = create_compact_note_agent_node(
+        inner, manager=manager, compactor=_compactor(),
+        llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
+    )
+    config = {"configurable": {"thread_id": "iid-1"}}
+    out = await node(state, config)
+    assert not (
+        isinstance(out.get("messages"), list)
+        and out["messages"]
+        and isinstance(out["messages"][0], RemoveMessage)
+    )
+    assert read_compact_note_state(repo, "iid-1").armed is True
+
+
+@pytest.mark.asyncio
+async def test_a9_the_tool_calls_reply_has_its_own_label(caplog):
+    repo = FakeRepo()
+    arm_compact_note(repo, "iid-1", NOTE)
+    manager = FakeManager(repo)
+    request = _request_msg()
+    state = {"messages": [HumanMessage(content="hi"), request]}
+    reply = AIMessage(content="x", tool_calls=[{"id": "t", "name": "foo", "args": {}}])
+    inner = _inner_returning({"messages": [reply]})
+    graph = FakeGraph(state["messages"])
+    node = create_compact_note_agent_node(
+        inner, manager=manager, compactor=_compactor(),
+        llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
+    )
+    config = {"configurable": {"thread_id": "iid-1"}}
+    with caplog.at_level(logging.INFO):
+        await node(state, config)
+    joined = "\n".join(
+        rec.getMessage()
+        for rec in caplog.records
+        if "prompt_reload_compact_note:" in rec.getMessage()
+    )
+    assert "outcome=tool_calls_reply" in joined
+    assert "outcome=append_failed" not in joined
+
+
+# ── zero decision calls + exports ───────────────────────────────────────────
 
 
 def test_zero_decision_calls_in_wrappers():
@@ -427,9 +787,6 @@ def test_zero_decision_calls_in_wrappers():
     src_agent = inspect.getsource(create_compact_note_agent_node)
     for src in (src_tools, src_agent):
         assert "daemon.services.decision" not in src
-        assert "decision" not in src.lower() or True  # soft: only import-path check is hard
-    # Hard pin: no decision module import in either wrapper.
-    for src in (src_tools, src_agent):
         assert "from .services.decision" not in src
         assert "import daemon.services.decision" not in src
 

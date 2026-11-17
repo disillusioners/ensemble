@@ -13331,15 +13331,112 @@ def should_end_watchover(state: Any, config: Optional[RunnableConfig] = None) ->
 
 
 # ---- module-level factories inserted before build_instance_graph ----
-def create_compact_note_tools_node(inner_node, *, manager=None, compactor=None, llm_config=None):
+#: Content-free refusal markers (architect v1.5 §11.4 / §10.6 — a text
+#: REFUSAL must not be treated as a compaction). Matched against the
+#: FIRST 120 characters of the reply, so a compaction that merely quotes
+#: a refusal deep in its text is not misread as one.
+_COMPACT_NOTE_REFUSAL_MARKERS = (
+    "i can't",
+    "i cannot",
+    "i can not",
+    "i won't",
+    "i will not",
+    "i'm unable",
+    "i am unable",
+    "unable to comply",
+    "i refuse",
+    "i'm not going to",
+    "i am not going to",
+    "no compaction",
+)
+
+
+def _compact_note_looks_like_refusal(text: str) -> bool:
+    """Is the model's reply a TEXT REFUSAL rather than a compaction?"""
+    head = (text or "").strip().lower()[:120]
+    if not head:
+        return False
+    return any(marker in head for marker in _COMPACT_NOTE_REFUSAL_MARKERS)
+
+
+def _compact_note_strip_exchange(messages: list) -> tuple[list, list]:
+    """Split the tail source into ``(kept, exchange)``.
+
+    The COMPACTION EXCHANGE — the ``prompt_reload`` tool-call AIMessage
+    and the ToolMessage receipt(s) of that call — is CONSUMED by the
+    swap (architect v1.5 §11.3). It must NOT survive into the preserved
+    tail: the receipt's "CONTEXT NOT YET COMPACTED" line would otherwise
+    sit directly below the doc that says the compaction happened (an
+    in-context lie), and the note would render TWICE (once in the doc's
+    GLOBAL, once verbatim in the tool-call args).
+
+    The exchange is found by the ``prompt_reload`` TOOL CALL (not by
+    position): the AIMessage that carries it and EVERY ToolMessage of
+    that call are stripped as ONE atomic group (a MessageGroup is never
+    split — the house's whole-group atomicity rule).
+    """
+    if not messages:
+        return [], []
+    ai_msg = None
+    tool_call_ids: set[str] = set()
+    for m in messages:
+        if getattr(m, "type", None) != "ai":
+            continue
+        for tc in (getattr(m, "tool_calls", None) or []):
+            tid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+            name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+            if name == "prompt_reload":
+                ai_msg = m
+                break
+        if ai_msg is not None:
+            for tc in (getattr(ai_msg, "tool_calls", None) or []):
+                tid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                if tid:
+                    tool_call_ids.add(tid)
+            break
+    if ai_msg is None:
+        return list(messages), []
+    stripped = {id(ai_msg)}
+    for m in messages:
+        if getattr(m, "type", None) != "tool":
+            continue
+        if getattr(m, "tool_call_id", None) in tool_call_ids:
+            stripped.add(id(m))
+    kept = [m for m in messages if id(m) not in stripped]
+    exchange = [m for m in messages if id(m) in stripped]
+    return kept, exchange
+
+
+def create_compact_note_tools_node(
+    inner_node,
+    *,
+    manager=None,
+    compactor=None,
+    llm_config=None,
+    llm_standard=None,
+):
+    """The APPEND half of the compact-note seam (architect v1.5 §2a/§11.7).
+
+    Wraps the bare tools node. When the batch produced a
+    ``prompt_reload`` ToolMessage AND the compact-note arm is armed
+    (read AFTER the tool's write — the read-after-write pin), appends the
+    ``HumanMessage`` request built from
+    :func:`daemon.compaction.build_compact_note_request` to the SAME node
+    return — ONE atomic channel write. Shape-tolerant (handles both
+    ``{"messages": [...]}`` and a bare list).
+    """
+
     async def _node(state: Any, config: Optional[RunnableConfig] = None) -> Any:
         result = await inner_node(state, config)
+        instance_id = ""
+        repo = None
         try:
             cfg = config if isinstance(config, dict) else (config or {})
             if not isinstance(cfg, dict):
                 cfg = {}
             configurable = cfg.get("configurable") if isinstance(cfg.get("configurable"), dict) else {}
             instance_id = configurable.get("thread_id") if isinstance(configurable, dict) else None
+            repo = getattr(manager, "_instance_repository", None) if manager is not None else None
 
             result_msgs = None
             if isinstance(result, dict):
@@ -13357,7 +13454,6 @@ def create_compact_note_tools_node(inner_node, *, manager=None, compactor=None, 
 
             from daemon.services.prompt_refresh import read_compact_note_state
 
-            repo = getattr(manager, "_instance_repository", None) if manager is not None else None
             arm_state = read_compact_note_state(repo, instance_id)
             if arm_state is None or not getattr(arm_state, "armed", False):
                 return result
@@ -13373,9 +13469,14 @@ def create_compact_note_tools_node(inner_node, *, manager=None, compactor=None, 
             min_window = getattr(cfg_obj, "min_recent_window", 3) if cfg_obj is not None else 3
             threshold = getattr(cfg_obj, "threshold", 0.80) if cfg_obj is not None else 0.80
             system_prompt_tokens = 0
-            agent_model_name = ""
-            if isinstance(llm_config, dict):
-                agent_model_name = llm_config.get("model", "") or ""
+            # ITEM-8 (leader-ratified): the window MUST come from the
+            # SAME effective model the swap side uses (the vision switch
+            # included) — the announced span is read by the model in the
+            # very turn it answers, so a window sized for another model
+            # is the same receipt-truth class as the in-context lie.
+            agent_model_name = _compact_note_effective_model(
+                state_msgs, llm_config, llm_standard
+            )
             context_window = 0
             try:
                 from daemon.compaction import get_model_context_limit
@@ -13420,9 +13521,40 @@ def create_compact_note_tools_node(inner_node, *, manager=None, compactor=None, 
                 result["messages"] = [*result["messages"], req_msg]
             elif isinstance(result, list):
                 result = [*result, req_msg]
-        except Exception:
-            pass
+        except Exception as exc:
+            # A3: a swallowed exception is a SILENT no-op — the agent
+            # would believe a compaction is coming. Log it (CONTENT-FREE:
+            # no note text) and settle the arm HONESTLY.
+            logger.warning(
+                "[CompactNote] APPEND failed instance=%s error_class=%s — "
+                "no compaction was requested; the note stays armed",
+                str(instance_id)[:8],
+                type(exc).__name__,
+            )
+            try:
+                from daemon.services.prompt_refresh import (
+                    APPEND_OUTCOME_APPEND_FAILED,
+                    read_compact_note_state,
+                    settle_compact_note_arm,
+                )
+
+                arm_state = read_compact_note_state(repo, instance_id) if instance_id else None
+                if arm_state is not None and getattr(arm_state, "armed", False):
+                    settle_compact_note_arm(
+                        repo,
+                        instance_id,
+                        note_sha12=getattr(arm_state, "sha256_12", "") or "",
+                        outcome=APPEND_OUTCOME_APPEND_FAILED,
+                        persisted=False,
+                        note_chars=len(getattr(arm_state, "note", "") or ""),
+                    )
+            except Exception:  # pragma: no cover — defensive
+                logger.debug(
+                    "[CompactNote] APPEND failure settle failed for instance=%s",
+                    str(instance_id)[:8],
+                )
         return result
+
     return _node
 
 
@@ -13453,9 +13585,34 @@ def _compact_note_effective_model(state_msgs, llm_config, llm_standard, reply=No
     return served or "unknown"
 
 
-def create_compact_note_agent_node(inner_node, *, manager=None, compactor=None, llm_config=None, llm_standard=None, graph_ref=None):
+def create_compact_note_agent_node(
+    inner_node,
+    *,
+    manager=None,
+    compactor=None,
+    llm_config=None,
+    llm_standard=None,
+    graph_ref=None,
+):
+    """The SWAP half of the compact-note seam (architect v1.5 §2d/§11).
+
+    Fires ONLY while the compaction request is STILL THE LAST MESSAGE of
+    the channel — i.e. on the FIRST invoke after the append. That
+    adjacency is load-bearing (C2): after a failed attempt the request
+    marker would otherwise survive in the channel and a LATER, unrelated
+    reply would fire the swap, replacing the whole pre-request history
+    with a doc whose GLOBAL is that unrelated reply.
+
+    On a reply that IS a compaction the node builds the house doc and
+    returns the sentinel-first channel value (the node's own task commit
+    lands it). The exchange (tool call + receipt + request + reply) is
+    CONSUMED — it never survives into the tail.
+    """
+
     async def _node(state: Any, config: Optional[RunnableConfig] = None) -> Any:
         result = await inner_node(state, config)
+        instance_id = ""
+        repo = None
         try:
             cfg = config if isinstance(config, dict) else (config or {})
             if not isinstance(cfg, dict):
@@ -13466,13 +13623,15 @@ def create_compact_note_agent_node(inner_node, *, manager=None, compactor=None, 
             state_msgs = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
             state_msgs = list(state_msgs or [])
 
-            request_idx = None
-            for i in range(len(state_msgs) - 1, -1, -1):
-                m = state_msgs[i]
-                if isinstance(m, HumanMessage) and (getattr(m, "additional_kwargs", {}) or {}).get("context_kind") == "compaction_request":
-                    request_idx = i
-                    break
-            if request_idx is None:
+            # ── The trigger (C2): the request must be the LAST message ──
+            if not state_msgs:
+                return result
+            request = state_msgs[-1]
+            if not (
+                isinstance(request, HumanMessage)
+                and (getattr(request, "additional_kwargs", {}) or {}).get("context_kind")
+                == "compaction_request"
+            ):
                 return result
 
             result_msgs = None
@@ -13498,26 +13657,59 @@ def create_compact_note_agent_node(inner_node, *, manager=None, compactor=None, 
                     break
 
             repo = getattr(manager, "_instance_repository", None) if manager is not None else None
-            from daemon.services.prompt_refresh import read_compact_note_state, settle_compact_note_arm
+            from daemon.services.prompt_refresh import (
+                APPEND_OUTCOME_APPEND_FAILED,
+                APPEND_OUTCOME_COMPACTED,
+                APPEND_OUTCOME_EMPTY_REPLY,
+                APPEND_OUTCOME_REFUSED_REPLY,
+                APPEND_OUTCOME_TOOL_CALLS_REPLY,
+                read_compact_note_state,
+                settle_compact_note_arm,
+            )
 
             arm_state = read_compact_note_state(repo, instance_id) if instance_id else None
             if arm_state is None or not getattr(arm_state, "armed", False):
                 return result
 
-            if not reply_text or reply_has_tool_calls:
+            note_chars = len(getattr(arm_state, "note", "") or "")
+            note_sha12 = getattr(arm_state, "sha256_12", "") or ""
+
+            # ── The reply must BE a compaction (v1.5 §11.4 / §10.6) ──
+            if not reply_text:
                 settle_compact_note_arm(
                     repo, instance_id,
-                    note_sha12=getattr(arm_state, "sha256_12", "") or "",
-                    outcome="empty_reply" if not reply_text else "append_failed",
+                    note_sha12=note_sha12,
+                    outcome=APPEND_OUTCOME_EMPTY_REPLY,
                     persisted=False,
+                    note_chars=note_chars,
+                )
+                return result
+            if reply_has_tool_calls:
+                settle_compact_note_arm(
+                    repo, instance_id,
+                    note_sha12=note_sha12,
+                    outcome=APPEND_OUTCOME_TOOL_CALLS_REPLY,
+                    persisted=False,
+                    note_chars=note_chars,
+                )
+                return result
+            if _compact_note_looks_like_refusal(reply_text):
+                settle_compact_note_arm(
+                    repo, instance_id,
+                    note_sha12=note_sha12,
+                    outcome=APPEND_OUTCOME_REFUSED_REPLY,
+                    persisted=False,
+                    note_chars=note_chars,
                 )
                 return result
 
-            pre_request_msgs = list(state_msgs[:request_idx])
+            # ── The tail source: BEFORE the exchange (C1) ──────────────
+            pre_request_msgs = list(state_msgs[:-1])
+            kept_msgs, exchange_msgs = _compact_note_strip_exchange(pre_request_msgs)
             from daemon.compaction import identify_boundary_groups, select_compactable_groups
             from daemon.loader import estimate_messages_tokens
 
-            groups = identify_boundary_groups(pre_request_msgs)
+            groups = identify_boundary_groups(kept_msgs)
             cfg_obj = getattr(compactor, "config", None) if compactor is not None else None
             recent_window = getattr(cfg_obj, "recent_message_window", 10) if cfg_obj is not None else 10
             min_window = getattr(cfg_obj, "min_recent_window", 3) if cfg_obj is not None else 3
@@ -13554,14 +13746,13 @@ def create_compact_note_agent_node(inner_node, *, manager=None, compactor=None, 
                 span_end = compactable[-1].end_idx + 1
             else:
                 span_start = 1
-                span_end = len(pre_request_msgs) if pre_request_msgs else 1
+                span_end = len(kept_msgs) if kept_msgs else 1
 
             from daemon.compaction import _next_compaction_seq, build_compaction_doc, make_remove_all_sentinel
             from daemon.compaction import CompactionResult
-            seq = _next_compaction_seq(pre_request_msgs, instance_id or "")
+            seq = _next_compaction_seq(kept_msgs, instance_id or "")
             from datetime import datetime, timezone
             compacted_at = datetime.now(timezone.utc).isoformat()
-            from daemon.compaction import GLOBAL_OVERVIEW_TOKEN_CAP
             doc = build_compaction_doc(
                 instance_id=instance_id or "",
                 seq=seq,
@@ -13584,13 +13775,24 @@ def create_compact_note_agent_node(inner_node, *, manager=None, compactor=None, 
             # Build the CompactionResult for the seam.
             kept_ids = {getattr(m, "id", None) for m in preserved_msgs}
             kept_ids.discard(None)
-            doc_id = getattr(doc, "id", None)
             replacement_keepables = [doc, *preserved_msgs]
+            # The dropped ids: every channel message that is NOT in the
+            # preserved tail — the compacted span AND the exchange (the
+            # tool call + its receipt) AND the request itself. They are
+            # removed by the sentinel (the exchange is CONSUMED).
+            dropped_ids = set()
+            for m in state_msgs:
+                mid = getattr(m, "id", None)
+                if mid is not None and mid not in kept_ids:
+                    dropped_ids.add(mid)
+
+            tokens_before = estimate_messages_tokens(state_msgs)
+            tokens_after = estimate_messages_tokens(replacement_keepables)
             result_obj = CompactionResult(
                 replacement_messages=replacement_keepables,
-                tokens_before=0,
-                tokens_after=0,
-                tokens_saved=0,
+                tokens_before=tokens_before,
+                tokens_after=tokens_after,
+                tokens_saved=max(0, tokens_before - tokens_after),
                 messages_before=len(state_msgs),
                 messages_after=len(replacement_keepables),
                 compaction_type="summary",
@@ -13601,12 +13803,6 @@ def create_compact_note_agent_node(inner_node, *, manager=None, compactor=None, 
                 total_summary_status=None,
                 global_overview=reply_text,
             )
-            # compute dropped ids = all state ids minus preserved ids
-            dropped_ids = set()
-            for m in state_msgs:
-                mid = getattr(m, "id", None)
-                if mid is not None and mid not in kept_ids:
-                    dropped_ids.add(mid)
             result_obj.compacted_ids = frozenset(dropped_ids)
 
             # Persist via the seam (mid_turn, fail_open) — mirror graph.py:8408.
@@ -13630,12 +13826,24 @@ def create_compact_note_agent_node(inner_node, *, manager=None, compactor=None, 
             except Exception:
                 persisted = False
 
+            override_configured = ""
+            try:
+                override_configured = str(
+                    getattr(cfg_obj, "model", "") or getattr(cfg_obj, "summarization_model", "") or ""
+                )
+            except Exception:
+                override_configured = ""
+
             if not persisted:
                 settle_compact_note_arm(
                     repo, instance_id,
-                    note_sha12=getattr(arm_state, "sha256_12", "") or "",
-                    outcome="append_failed",
+                    note_sha12=note_sha12,
+                    outcome=APPEND_OUTCOME_APPEND_FAILED,
                     persisted=False,
+                    agent_model=agent_model_name,
+                    override_applied=False,
+                    override_configured=override_configured,
+                    note_chars=note_chars,
                 )
                 return result
 
@@ -13649,9 +13857,15 @@ def create_compact_note_agent_node(inner_node, *, manager=None, compactor=None, 
                 channel = [sentinel, doc, *preserved_msgs]
             settle_compact_note_arm(
                 repo, instance_id,
-                note_sha12=getattr(arm_state, "sha256_12", "") or "",
-                outcome="compacted",
+                note_sha12=note_sha12,
+                outcome=APPEND_OUTCOME_COMPACTED,
                 persisted=True,
+                agent_model=agent_model_name,
+                override_applied=False,
+                override_configured=override_configured,
+                tail_spliced=len(preserved_msgs),
+                doc_id=str(getattr(doc, "id", "") or ""),
+                note_chars=note_chars,
             )
 
             if isinstance(result, dict):
@@ -13660,8 +13874,39 @@ def create_compact_note_agent_node(inner_node, *, manager=None, compactor=None, 
                 result["compacted_at"] = compacted_at
                 return result
             return {"messages": channel, "compacted_at": compacted_at}
-        except Exception:
+        except Exception as exc:
+            # A3: never swallow silently — the agent must learn (from the
+            # log and from the honest settle) that no compaction happened.
+            logger.warning(
+                "[CompactNote] SWAP failed instance=%s error_class=%s — "
+                "no compaction was performed; the note stays armed",
+                str(instance_id)[:8],
+                type(exc).__name__,
+            )
+            try:
+                from daemon.services.prompt_refresh import (
+                    APPEND_OUTCOME_APPEND_FAILED,
+                    read_compact_note_state,
+                    settle_compact_note_arm,
+                )
+
+                arm_state = read_compact_note_state(repo, instance_id) if instance_id else None
+                if arm_state is not None and getattr(arm_state, "armed", False):
+                    settle_compact_note_arm(
+                        repo,
+                        instance_id,
+                        note_sha12=getattr(arm_state, "sha256_12", "") or "",
+                        outcome=APPEND_OUTCOME_APPEND_FAILED,
+                        persisted=False,
+                        note_chars=len(getattr(arm_state, "note", "") or ""),
+                    )
+            except Exception:  # pragma: no cover — defensive
+                logger.debug(
+                    "[CompactNote] SWAP failure settle failed for instance=%s",
+                    str(instance_id)[:8],
+                )
             return result
+
     return _node
 
 
@@ -13886,6 +14131,9 @@ def build_instance_graph(
             manager=manager,
             compactor=compactor,
             llm_config=llm_config_with_headers,
+            # ITEM-8 (leader-ratified): the tools side derives its window
+            # from the SAME effective model the swap side uses.
+            llm_standard=llm_standard,
         ),
     )
     # Phase 2 (B-3): ghost-promise repair node. The router emits

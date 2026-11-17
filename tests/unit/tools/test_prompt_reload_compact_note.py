@@ -41,11 +41,7 @@ import pytest
 import daemon.manager  # noqa: F401  (the patch target must be importable)
 import daemon.services.prompt_refresh as pr
 from daemon.services.prompt_refresh import (
-    ARMED_DEFERRED_ANTI_REFIRE,
-    ARMED_DEFERRED_BELOW_FLOOR,
-    ARMED_EXPECTED_SEAM_CLAUSE,
-    ARMED_NOT_YET_COMPACTED_LINE,
-    ARMED_PENDING_SEAM,
+    ARMED_PENDING_APPEND,
     ARMED_STILL_ARMED_NO_DOC,
     CODE_COMPACT_DISABLED,
     CODE_COMPACT_RATE_LIMITED,
@@ -130,13 +126,20 @@ FROZEN_RESULT = pr.PromptRefreshResult(
     },
 )
 
+#: The re-runnable golden digest of ``GOLDEN_PLAIN_RECEIPT`` (A2 — the
+#: golden is a BYTE artifact, and this digest makes the artifact's
+#: identity checkable without re-reading the string by eye). Measured on
+#: the captured base-tree value; a change to the golden REDDENS this pin.
+GOLDEN_PLAIN_RECEIPT_SHA256 = (
+    "0592b4a0fe960b2894763a45f2eb6f80f1bfa42430f15a41648893ae907dd183"
+)
+
 #: The documented cap (architect §G — AUTHORITATIVE).
 CAP = 12000
 
-#: The three deferred states (VERBATIM — architect §G / AC10.5).
+#: The ONE producible deferred state (v1.5 vocabulary sweep — the prior
+#: anti-refire / below-floor literals were UNPRODUCIBLE and are deleted).
 ALL_DEFERRED_WORDINGS = (
-    ARMED_DEFERRED_ANTI_REFIRE,
-    ARMED_DEFERRED_BELOW_FLOOR,
     ARMED_STILL_ARMED_NO_DOC,
 )
 
@@ -290,6 +293,16 @@ class TestL1ParamValidationAndGolden:
         manager = StubManager()
         out = await _tool(manager).ainvoke({"force": False})
         assert out == GOLDEN_PLAIN_RECEIPT
+
+    async def test_the_golden_artifact_digest_is_stable(self) -> None:
+        """A2 — the golden is a re-runnable artifact: its sha256 is
+        pinned, so a silent edit of the captured receipt REDDENS here."""
+        import hashlib
+
+        assert (
+            hashlib.sha256(GOLDEN_PLAIN_RECEIPT.encode()).hexdigest()
+            == GOLDEN_PLAIN_RECEIPT_SHA256
+        )
 
     async def test_plain_call_touches_the_prompt_refresh_path_unchanged(self) -> None:
         manager = StubManager()
@@ -481,8 +494,8 @@ class TestCarrier:
 
     async def test_the_deferred_marker_is_content_free(self) -> None:
         repo = StubInstanceRepo()
-        assert pr.mark_compact_note_deferred(repo, "iid-1", pr.DEFERRED_STATE_ANTI_REFIRE)
-        assert repo.metadata["compact_note_last_deferred"] == "anti_refire"
+        assert pr.mark_compact_note_deferred(repo, "iid-1", pr.DEFERRED_STATE_NO_DOC)
+        assert repo.metadata["compact_note_last_deferred"] == "no_doc"
 
     async def test_an_unknown_deferred_state_is_refused(self) -> None:
         repo = StubInstanceRepo()
@@ -634,17 +647,17 @@ class TestL12ArmedReceipt:
         manager = StubManager()
         await _call(manager, compact=True, compact_note="first note")
         out = await _call(manager, compact=True, compact_note="second note")
-        assert ARMED_PENDING_SEAM in out
+        assert ARMED_PENDING_APPEND in out
 
     async def test_the_still_armed_status_line_carries_the_deferred_state(self) -> None:
         manager = StubManager()
         await _call(manager, compact=True, compact_note="first note")
         manager._instance_repository.metadata["compact_note_last_deferred"] = (
-            "anti_refire"
+            pr.DEFERRED_STATE_NO_DOC
         )
         out = await _call(manager, compact=True, compact_note="second note")
-        assert ARMED_DEFERRED_ANTI_REFIRE in out
-        assert ARMED_PENDING_SEAM not in out
+        assert ARMED_STILL_ARMED_NO_DOC in out
+        assert ARMED_PENDING_APPEND not in out
 
     async def test_the_plain_receipt_carries_no_status_line(self) -> None:
         """The still-armed line is ADDITIVE IN THE ARMED STATE only — the
@@ -653,18 +666,23 @@ class TestL12ArmedReceipt:
         await _call(manager, compact=True, compact_note="first note")
         out = await _tool(manager).ainvoke({"force": False})
         assert out == GOLDEN_PLAIN_RECEIPT
-        assert ARMED_PENDING_SEAM not in out
+        assert ARMED_PENDING_APPEND not in out
 
-    async def test_the_three_deferred_wordings_are_the_canonical_literals(self) -> None:
-        assert ARMED_DEFERRED_ANTI_REFIRE == (
-            "armed — deferred (anti-refire window), not compacted"
-        )
-        assert ARMED_DEFERRED_BELOW_FLOOR == (
-            "armed — deferred (below minimum-compaction floor), not compacted"
-        )
+    async def test_the_one_deferred_wording_is_the_canonical_literal(self) -> None:
+        """v1.5 vocabulary sweep: the anti-refire / below-floor deferred
+        literals were UNPRODUCIBLE (their gates are removed) — they are
+        deleted, and ONE deferred vocabulary remains."""
         assert ARMED_STILL_ARMED_NO_DOC == (
-            "armed — still armed (last compaction produced no doc), not compacted"
+            "armed — still armed (the last append produced no doc), not compacted"
         )
+        assert pr.DEFERRED_STATE_TEXT == {
+            pr.DEFERRED_STATE_NO_DOC: ARMED_STILL_ARMED_NO_DOC,
+        }
+        assert not hasattr(pr, "ARMED_DEFERRED_ANTI_REFIRE")
+        assert not hasattr(pr, "ARMED_DEFERRED_BELOW_FLOOR")
+        assert not hasattr(pr, "ARMED_EXPECTED_SEAM_CLAUSE")
+        assert not hasattr(pr, "ARMED_SEAM_STATEMENT")
+        assert not hasattr(pr, "ARMED_NOT_YET_COMPACTED_LINE")
 
     async def test_the_atomic_multi_key_write_path_is_used_when_available(self) -> None:
         repo = AtomicStubInstanceRepo()
@@ -677,12 +695,6 @@ class TestL12ArmedReceipt:
 
 
 class TestL17Exhaustiveness:
-    async def test_the_expected_seam_clause_has_no_three_gates(self) -> None:
-        clause = ARMED_EXPECTED_SEAM_CLAUSE
-        assert "no seam and no gate list" in clause
-        assert "no three gates" in clause or "no gate list" in clause
-        assert "exactly three gates" not in clause
-
     async def test_the_receipt_carries_the_append_path_fields(self) -> None:
         manager = StubManager()
         out = await _call(manager, compact=True, compact_note="a note")
