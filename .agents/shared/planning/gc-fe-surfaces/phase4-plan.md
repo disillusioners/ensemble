@@ -1,0 +1,66 @@
+# Phase 4: Gates, Budget, No-Regression Evidence
+
+## Objective
+
+Prove the assembled branch: establish the **base** evidence first so every delta is attributable, run the full verification pack (BE legs, FE jest, type-check, **production** build with a declared manifest delta, FE web automation), audit the drift-guard markers/allowlist and the route-census pins, then drive the **gates chain** and prepare the **staged** release — **no live promote**.
+
+## Tasks
+
+| # | Task | Depends On | Acceptance |
+|---|---|---|---|
+| **1** | **BASE evidence first (attribution discipline).** Before claiming anything, capture at base `0181dadbf` (separate worktree or `git archive` extraction — never dirty this worktree): (a) the FE jest whole-tree failure list; (b) the **production** build's budget WARN/ERROR set — specifically confirm whether `instance-list.scss` (15,813 B today) already WARNs at base; (c) the BE pytest failure list for the touched packs; (d) the initial-bundle byte figure + chunk inventory. Store the artifacts under `/tmp/gc_fe_base_evidence/` and reference them in the report. | P1–P3 | Base artifacts exist and are cited; every later delta is expressed as a diff against them (net-new = FAILED-list diff vs the true base). |
+| **2** | **BE legs.** New spec + shipped contract spec + censuses + both router cages + the room family pack. | 1 | All green; the mount census still 40 and the class-family count still 36 (only the declared-route census moved 119 → 120). |
+| **3** | **FE unit legs.** Whole-tree jest **plus** the named must-stay-green set: `room.service.spec.ts`, `room-dialog.component.spec.ts`, `chat.chatrooms.spec.ts` (four shipped pins **unedited**), `chat-send-error.spec.ts`, `chat.component.spec.ts`, `instance-list.component.spec.ts`, `app.component.spec.ts` (BUG-3 pin), `app.routes.spec.ts`. | 1 | Whole-tree delta vs base = **zero net-new** reds; the named set green. |
+| **4** | **Type-check.** `cd frontend && ./node_modules/.bin/tsc --noEmit -p tsconfig.app.json` (local bin — **never** bare `tsc`/`npx tsc`, the standing house prohibition). | 1 | EXIT 0. |
+| **5** | **Production build + manifest-delta declaration (AM-23, D4.3).** `cd frontend && ./node_modules/.bin/ng build --configuration production`. Compare output against the base capture: initial-bundle bytes, chunk file inventory. **Declare** in the stage-prep checklist: expected delta = **ZERO initial-bundle growth** + one lazy chunk file added/re-homed (a second importer of `RoomDialogComponent` may re-home the dialog between the chat and instances chunks). **Any budget WARN is a reported finding, not a silent pass** — and any WARN present at base is attributed as pre-existing, with the measured delta stated. | 1 | EXIT 0; zero **new** budget WARN; the declared delta matches the measured one (or the deviation is explained in the report). |
+| **6** | **FE web automation (P6-gate §2 style).** Real Angular UI, headless browser, fenced dev daemon, temp FE proxy (zero repo edits). Assertions: (i) the new header control is **adjacent** to the shipped room icon inside `.toggle-buttons` and always rendered; (ii) clicking it opens the overlay with the **measured** `82vw × 82vh` geometry (`cdk-overlay-pane.room-dialog-panel`, `tooltipPresent=false`); (iii) the **joined** popup from an instances-list row measures the same geometry; (iv) rooms-pane **isolation**: in `instance` mode another tree's room is not listed (unchanged behaviour), in `joined` mode a room the instance has not joined is not listed, in `global` mode the nest-wide list appears; (v) fail-closed states: no joined rooms ⇒ no row button; failed list fetch ⇒ typed error surface + Retry, zero fabricated rows. **Fences:** fenced dev DB (never `ensemble_prod`), explicit `PORT` + `DAEMON_PORT`, `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` pinned, and `ENSEMBLE_DB_AMBIENT_ALLOW=1` when the ambient env carries `POSTGRES_*` (POK `rogue-fence-ambient-allow-var` — pre-bind or the boot exits 78). | 5 | All five rows PASS with recorded measurements; cleanup attested (rooms purged, instances removed, ports released, `git status` porcelain 0). |
+| **7** | **Drift-guard + census audit.** (a) Every committed `frontend/` hunk carries a `room`/`chat` marker on its ± lines — audit **per hunk**, remembering that the parse **flushes on `diff --git`** boundaries (a markerless trailing hunk must not piggyback on the next file). (b) `FRONTEND_UI_LANE_SANCTIONED_FILES` contains all four instance-list paths. (c) The three declared-route census sites agree at **120**; the mount census (40) and family count (36) are unchanged; the `api_router` mount-census pin is unchanged (A-P6-20). (d) Daemon-side hunks carry `room`/`chat` wording (`daemon/routers/rooms.py` is not in `NOT_TOUCHED_PATHS`, so no BE sanction is required — recorded, not assumed). | P1–P3 | Guard green; audit table (file → hunk count → marker verdict) attached to the report; census triple stated explicitly. |
+| **8** | **Gates chain (constraint 5).** Dispatch in order, attaching tasks 1–7 evidence: **architect adjudication** (must rule on C-1/Q5 pre-compute direction and C-2/Q4 polling scope, and confirm Q2's disposition path) → **reviewer council** → **fresh approver** → **code council / tidier / tester as warranted**. No phase is skipped; a REJECT loops back to the owning phase (never patched inside P4). | 1–7 | Sign-offs recorded in order; every REJECT has a re-verification leg; no self-approval. |
+| **9** | **Release-slot sequencing + staged release prep (NO live promote).** (i) Reconcile this branch onto the **then-current** `origin/latest` (measured today: 55 commits ahead of base, tip `eca98397d`) and re-run tasks 2–5 on the reconciled tree — a merge into `latest` before the cut is the leader's call, this phase only states the requirement and the evidence. (ii) **Do not** attempt the local `latest` fast-forward: it is owned by the **`ari-stop-int`** lane (`group-chat-release/release-plan.md:865`, `:888-892`); wait for it, because `stage.sh`'s tip-identity gate refuses `non-tip-tree` (`scripts/upgrade/stage.sh:220`; `scripts/upgrade/lib.sh:4243`, token at `:3387`). (iii) Prepare the stage-prep checklist: version slot, declared FE-manifest delta, the pin sets to watch, the plugin/`allow-stale` posture untouched, and the explicit **no-live-promote** disposition. | 8 | Checklist written; sequencing dependencies named with shas; **zero** promote/stage mutations performed without the leader's explicit instruction. |
+
+## Files
+
+**Modify:** the stage-prep checklist / evidence ledger under `.agents/shared/planning/gc-fe-surfaces/` (e.g. `gate-evidence.md`, created by this phase) — **no production code changes are expected in this phase**. Any code change discovered here is routed back to P1/P2/P3, never patched in place.
+
+**Create:** `.agents/shared/planning/gc-fe-surfaces/gate-evidence.md` (the evidence pack: base artifacts, deltas, measurements, audit tables, sign-off record).
+
+## Tests / Legs
+
+| Leg | Command | Pass |
+|---|---|---|
+| BE — new surface | `.venv/bin/python -m pytest -q tests/unit/routers/test_rooms_list_api.py` | green |
+| BE — shipped contract + cages | `.venv/bin/python -m pytest -q tests/unit/routers/test_room_http_api.py tests/unit/routers/test_room_sse_resolution.py tests/unit/metrics/test_metrics_query_scope_cage.py tests/unit/test_router_scope_manifest.py tests/integration/test_router_class_manifest.py` | green |
+| BE — drift guard | `.venv/bin/python -m pytest -q tests/unit/repositories/test_source_gc_repository.py` | green |
+| FE — whole tree | `cd frontend && ./node_modules/.bin/jest` | zero net-new reds vs base |
+| FE — named set | `./node_modules/.bin/jest src/app/services/room.service.spec.ts src/app/components/room-dialog/room-dialog.component.spec.ts src/app/pages/chat/chat.chatrooms.spec.ts src/app/pages/chat/chat-send-error.spec.ts src/app/pages/chat/chat.component.spec.ts src/app/components/instance-list/instance-list.component.spec.ts src/app/app.component.spec.ts src/app/app.routes.spec.ts` | green |
+| FE — types | `cd frontend && ./node_modules/.bin/tsc --noEmit -p tsconfig.app.json` | EXIT 0 |
+| FE — production build | `cd frontend && ./node_modules/.bin/ng build --configuration production` | EXIT 0, zero new WARN |
+| Web automation | the P6-gate §2 harness (fenced dev daemon + headless browser) | 5/5 rows PASS, measurements recorded |
+
+## Risks
+
+| Risk | Mitigation |
+|---|---|
+| **Attribution failure** — a pre-existing red/warn gets blamed on (or hidden by) this lane. | Task 1 captures base evidence **first**; every claim is a diff. The `instance-list.scss` 8 kB-warn posture is explicitly measured at base. |
+| **R4 (budget):** the production leg is the only leg that can fail a budget (`angular.json:64-75`; the dev config carries none, `:77-82`). | Production leg is mandatory; a dev-config build is **never** accepted as budget evidence (AM-23, `central-metrics-v1/architecture-recommendation-v2.md:59`, `:174`). |
+| **R6 (release-slot sequencing):** the branch is stale relative to `origin/latest` and the local `latest` ref lags 232 commits. | Task 9: reconcile before the cut; **wait** on `ari-stop-int` for the local-latest fast-forward; never race it. |
+| **R7 (gates):** a phase order collapsed "for speed". | Task 8 fixes the order; P4 owns no code edits, so it cannot paper over a defect. |
+| **Web-automation fence breach** (dev DB resolution / live sweep). | Explicit `POSTGRES_*` dev values, explicit `PORT` + `DAEMON_PORT`, `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0`, `ENSEMBLE_DB_AMBIENT_ALLOW=1` when ambient vars are present; ports 8088/9797/8079 untouched; cleanup attested. |
+| **Census triple drift** across the three pinned sites. | Task 7(c) states all three counts; any mismatch is a finding, not a re-pin. |
+| **`git archive`-based base legs** produce vacuous git-pins (the known gitless-extraction class). | Where a pin reads git history, run it in a real worktree at base, not in an extracted tree; disclose the method per pin. |
+
+## No-Regression Evidence Required in the Report
+
+1. The four shipped chat pins pass **unedited** (`chat.chatrooms.spec.ts:372`, `:401`, `:432`, `:457`).
+2. `instance`-mode request set is unchanged (spec case (iii) in P2-8: `/api/instances/{id}/rooms` only, no `/api/rooms`, no timer).
+3. `chat.component.ts` contains zero `setTimeout`/`setInterval`.
+4. Initial-bundle bytes unchanged (or the deviation explained); chunk inventory diff attached.
+5. Constraint-1 **disclosure paragraph** carried verbatim from `decisions.md` D1.11 into the final report.
+
+## Coupling
+
+Loose with P1–P3 — this phase consumes their outputs and re-runs their legs; it holds **no** production-file ownership.
+
+## Exit Criterion
+
+Base evidence exists and every delta is attributed; all legs green; the production build passes with zero new budget WARN and a declared-and-matched manifest delta; the FE web automation rows pass with recorded measurements; the drift-guard/census audit is attached; architect → reviewer council → fresh approver (+ code council / tidier / tester as warranted) sign-offs are recorded **in that order**; the stage-prep checklist exists with the release-slot sequencing dependencies (reconcile point + `ari-stop-int` ownership) named; and **no live promote has occurred**.
