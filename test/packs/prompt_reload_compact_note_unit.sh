@@ -3,10 +3,29 @@
 #
 # Pack: prompt_reload_compact_note_unit
 #
-# The compact-note lane's TOOL-level + ENGINE-level unit legs (plan §10.3).
-# Owned artifacts (BOTH lane-owned and NEW):
+# The compact-note lane's TOOL-level + ENGINE-level + GRAPH-SEAM unit
+# legs (plan §10.3), PLUS every SIBLING file whose assertions depend on
+# the lane's changed symbols (the refusal census, the armed outcome
+# literals and the house doc-format markers). The file set is selected by
+# SYMBOL, not by name: a name-pattern selection missed
+# tests/unit/services/test_prompt_refresh_primitive.py and hid the stale
+# 9-vs-14 census pin (tidier H1).
+#
+# Owned artifacts (lane-owned):
 #   tests/unit/tools/test_prompt_reload_compact_note.py   (tool level)
+#   tests/unit/tools/test_compact_note_graph_wiring.py    (graph seam)
 #   tests/unit/test_compaction_compact_note.py              (engine level)
+#
+# SIBLING files (symbol-dependent — included so the pack cannot hide a
+# red the lane caused):
+#   tests/unit/services/test_prompt_refresh_primitive.py   (REFUSAL_CODES census)
+#   tests/unit/tools/test_prompt_reload_refusals.py        (REFUSAL_CODES census)
+#   tests/unit/tools/test_prompt_reload_tool.py            (tool surface)
+#   tests/unit/tools/test_prompt_reload_pins.py            (tool surface)
+#   tests/unit/test_compaction.py                          (doc-format markers)
+#   tests/unit/services/test_compact_executor.py           (doc-format markers)
+#   tests/unit/services/test_compact_executor_revive_brick_e2e.py (doc format)
+#   tests/unit/services/test_injected_notes_hoisting_sweep_gaps.py (doc format)
 #
 # Legs covered: L1 L2 L3 L4 L5 L6 L7 L10 L11 L12 L14 L15 L16 L17
 #
@@ -55,6 +74,14 @@ env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_DB -u POSTGRES_USER \
     tests/unit/tools/test_prompt_reload_compact_note.py \
     tests/unit/tools/test_compact_note_graph_wiring.py \
     tests/unit/test_compaction_compact_note.py \
+    tests/unit/services/test_prompt_refresh_primitive.py \
+    tests/unit/tools/test_prompt_reload_refusals.py \
+    tests/unit/tools/test_prompt_reload_tool.py \
+    tests/unit/tools/test_prompt_reload_pins.py \
+    tests/unit/test_compaction.py \
+    tests/unit/services/test_compact_executor.py \
+    tests/unit/services/test_compact_executor_revive_brick_e2e.py \
+    tests/unit/services/test_injected_notes_hoisting_sweep_gaps.py \
     -q --tb=short -p no:cacheprovider
 RC=$?
 
