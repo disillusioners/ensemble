@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — POK active-entry storage cap 256 → 512; curator slug→row resolver fix (`feature/pok-cap-curator-resolver`)
+
+- **Storage cap 256 → 512.** The per-project cap on active operating-knowledge entries (`POK_ACTIVE_CAP_PER_PROJECT`, `daemon/services/pok_service.py`) moves 256 → 512 (`6832fd49c`). At the 256 cap the store was REFUSING agent knowledge writes (`pok_active_cap`, refuse-never-evict — the cap never evicts); enforcement is Python-only, so no schema migration, CHECK or trigger was added. The per-turn INJECTION budget is a SEPARATE standing constraint and did not move: `POK_BLOCK_MAX_ENTRIES` (8) and `POK_BLOCK_MAX_CHARS` (2,900) are byte-identical.
+- **Curator slug→row resolver.** `pok_curate` returned `pok_not_found` for successor-generation rows. One slug is carried by a whole lineage (every supersede inserts a successor with the SAME slug), and the slug→row lookup was an unordered, status-unfiltered `first()` — so the row it returned was DB-PLANNER-DEPENDENT: on the live PostgreSQL plan it reached the SUPERSEDED ROOT ancestor, while SQLite's plan returned the active row, which is why the SQLite unit pack never showed it. Resolution is now deterministic and plan-independent (`71c7800e1`): the owner of a slug is resolved in Python over the full match set — active > archived > superseded, ties broken by `created_at` then `id`, descending — and both mutation call sites use it (the curate path and the upsert's prior lookup).
+- **The silent wrong-row class is closed.** The worse failure was no error at all: with an archived root coexisting with an active successor, a flip landed on the INVISIBLE dead row while the tool reported curated success. The deterministic owner resolver removes that class.
+- **The cap refusal now names the TRUE cure.** The `pok_active_cap` message advertised "archive a superseded fact via pok_curate" — un-actionable twice over (a superseded row is curated THROUGH its successor, and the named cure target is an ACTIVE row, exactly the class the broken resolver refused), so the escape hatch could fail with `pok_not_found` at the cap and hard-lock the store. It now names the real cure: archive the named ACTIVE entry by slug via `pok_curate` (`7b6d4a646`).
+- **Doctrine.** The durable fix behind the churn is the guideline `docs/guidelines/guideline-pok-durable-vs-rolling-state.md` (draft): the store holds DURABLE operating knowledge — rolling state-snapshots parked there never expire and rot silently, which is what forces the cap up; reclaiming capacity is a content-class problem, not a capacity problem.
+
 ## [0.31.0] — 2026-11-17
 
 
