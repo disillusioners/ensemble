@@ -8,9 +8,9 @@ T3.6 / AC1 / AC2 / AC7; packs
 What this suite pins:
 
 * **AC1 — cold-path extraction & alias normalization**: an episode with
-  ``stars=["The Emperor", "agents-ensemble"]`` creates/updates the
+  ``stars=["The user", "agents-ensemble"]`` creates/updates the
   canonical stars and records ``memoir_line`` edges; the alias
-  resolution maps "the Emperor" onto the ONE canonical "The Emperor"
+  resolution maps "the user" onto the ONE canonical "The user"
   star; the ``last_pass_id`` guard leaves ``mention_count`` untouched on
   a same-pass re-run and increments on a distinct pass;
 * **AC1/DD-12 — background extraction NEVER increments heat**: the
@@ -218,7 +218,7 @@ class TestExtractionAndAlias:
         ep_id = _episode(
             repo,
             "ep-1",
-            stars=["The Emperor", "agents-ensemble"],
+            stars=["The user", "agents-ensemble"],
             created_at=NOW - timedelta(days=1),
         )
         svc = _svc(constellation_repo)
@@ -226,7 +226,7 @@ class TestExtractionAndAlias:
             [
                 _stand_in(
                     ep_id,
-                    stars=["The Emperor", "agents-ensemble"],
+                    stars=["The user", "agents-ensemble"],
                     body="a moment",
                     event_at=NOW - timedelta(days=1),
                 )
@@ -236,38 +236,38 @@ class TestExtractionAndAlias:
         )
         assert written == 2
 
-        emperor = constellation_repo.resolve_star(AGENT, "The Emperor")
+        emperor = constellation_repo.resolve_star(AGENT, "The user")
         project = constellation_repo.resolve_star(AGENT, "agents-ensemble")
         assert emperor is not None
         assert project is not None
-        assert emperor.name == "The Emperor"
+        assert emperor.name == "The user"
         card = constellation_repo.get_star_card(AGENT, emperor.id)
         assert [line["episode_id"] for line in card["lines"]] == [ep_id]
 
     def test_alias_resolution_maps_lowercase_surface_to_the_canonical_star(
         self, repo, constellation_repo
     ):
-        """"the Emperor" resolves onto the ONE canonical "The Emperor" star."""
+        """"the user" resolves onto the ONE canonical "The user" star."""
         ep1 = _episode(
-            repo, "ep-1", stars=["The Emperor"], created_at=NOW - timedelta(days=2)
+            repo, "ep-1", stars=["The user"], created_at=NOW - timedelta(days=2)
         )
         ep2 = _episode(
-            repo, "ep-2", stars=["the Emperor"], created_at=NOW - timedelta(days=1)
+            repo, "ep-2", stars=["the user"], created_at=NOW - timedelta(days=1)
         )
         svc = _svc(constellation_repo)
         svc.extract(
             [
-                _stand_in(ep1, stars=["The Emperor"], body="b", event_at=NOW - timedelta(days=2)),
-                _stand_in(ep2, stars=["the Emperor"], body="b", event_at=NOW - timedelta(days=1)),
+                _stand_in(ep1, stars=["The user"], body="b", event_at=NOW - timedelta(days=2)),
+                _stand_in(ep2, stars=["the user"], body="b", event_at=NOW - timedelta(days=1)),
             ],
             pass_id="pass-1",
             now=NOW,
         )
 
-        canonical = constellation_repo.resolve_star(AGENT, "The Emperor")
+        canonical = constellation_repo.resolve_star(AGENT, "The user")
         assert canonical is not None
         # The lowercase surface does NOT mint a second star — it resolves.
-        resolved = constellation_repo.resolve_star(AGENT, "the Emperor")
+        resolved = constellation_repo.resolve_star(AGENT, "the user")
         assert resolved is not None
         assert resolved.id == canonical.id
         with Session(constellation_repo.engine) as session:
@@ -276,23 +276,23 @@ class TestExtractionAndAlias:
             ).all()
             assert len(star_rows) == 1  # ONE canonical node, not two
         aliases = constellation_repo.get_star_card(AGENT, canonical.id)["aliases"]
-        assert "the Emperor" in [a["alias"] for a in aliases]
+        assert "the user" in [a["alias"] for a in aliases]
 
     def test_the_last_pass_id_guard_prevents_double_counting(
         self, repo, constellation_repo
     ):
         """Re-running the SAME pass leaves ``mention_count`` unchanged (SF2)."""
         ep_id = _episode(
-            repo, "ep-1", stars=["The Emperor"], created_at=NOW - timedelta(days=1)
+            repo, "ep-1", stars=["The user"], created_at=NOW - timedelta(days=1)
         )
         svc = _svc(constellation_repo)
         chunk = [
             _stand_in(
-                ep_id, stars=["The Emperor"], body="b", event_at=NOW - timedelta(days=1)
+                ep_id, stars=["The user"], body="b", event_at=NOW - timedelta(days=1)
             )
         ]
         svc.extract(chunk, pass_id="pass-7", now=NOW)
-        star = constellation_repo.resolve_star(AGENT, "The Emperor")
+        star = constellation_repo.resolve_star(AGENT, "The user")
         card = constellation_repo.get_star_card(AGENT, star.id)
         assert card["lines"][0]["mention_count"] == 1
 
@@ -305,16 +305,16 @@ class TestExtractionAndAlias:
         self, repo, constellation_repo
     ):
         ep_id = _episode(
-            repo, "ep-1", stars=["The Emperor"], created_at=NOW - timedelta(days=1)
+            repo, "ep-1", stars=["The user"], created_at=NOW - timedelta(days=1)
         )
         svc = _svc(constellation_repo)
         chunk = [
             _stand_in(
-                ep_id, stars=["The Emperor"], body="b", event_at=NOW - timedelta(days=1)
+                ep_id, stars=["The user"], body="b", event_at=NOW - timedelta(days=1)
             )
         ]
         svc.extract(chunk, pass_id="pass-1", now=NOW)
-        star = constellation_repo.resolve_star(AGENT, "The Emperor")
+        star = constellation_repo.resolve_star(AGENT, "The user")
         svc.extract(chunk, pass_id="pass-2", now=NOW)
         card = constellation_repo.get_star_card(AGENT, star.id)
         assert card["lines"][0]["mention_count"] == 2
@@ -329,14 +329,14 @@ class TestExtractionAndAlias:
         and flips this test RED.)
         """
         ep_id = _episode(
-            repo, "ep-1", stars=["The Emperor"], created_at=NOW - timedelta(days=1)
+            repo, "ep-1", stars=["The user"], created_at=NOW - timedelta(days=1)
         )
         svc = _svc(constellation_repo)
         svc.extract(
             [
                 _stand_in(
                     ep_id,
-                    stars=["The Emperor"],
+                    stars=["The user"],
                     body="b",
                     event_at=NOW - timedelta(days=1),
                 )
@@ -344,7 +344,7 @@ class TestExtractionAndAlias:
             pass_id="pass-1",
             now=NOW,
         )
-        star = constellation_repo.resolve_star(AGENT, "The Emperor")
+        star = constellation_repo.resolve_star(AGENT, "The user")
         with Session(constellation_repo.engine) as session:
             stored = session.get(MemoirStar, star.id)
             assert float(stored.heat) == 0.0
@@ -354,7 +354,7 @@ class TestExtractionAndAlias:
 
 
 class TestTwoTier:
-    LONG_BODY = "the emperor reviewed the ranks of the realm " * 40  # >1200 chars
+    LONG_BODY = "the user reviewed the ranks of the realm " * 40  # >1200 chars
 
     def _five_episodes_over_1200_chars(self, repo, tag: str) -> list[str]:
         """Five distinct episodes whose bodies total >1200 chars."""
@@ -386,12 +386,12 @@ class TestTwoTier:
             repo,
             "ep-1",
             body=self.LONG_BODY,
-            stars=["The Emperor"],
+            stars=["The user"],
             created_at=NOW - timedelta(days=1),
         )
         svc = _svc(constellation_repo)
         star = constellation_repo.upsert_star(
-            AGENT, "The Emperor", "person", event_at=NOW - timedelta(days=1)
+            AGENT, "The user", "person", event_at=NOW - timedelta(days=1)
         )
         for pass_n in range(10):
             constellation_repo.record_line(
@@ -414,7 +414,7 @@ class TestTwoTier:
             [
                 _stand_in(
                     ep_id,
-                    stars=["The Emperor"],
+                    stars=["The user"],
                     body=self.LONG_BODY,
                     event_at=NOW,
                 )
@@ -527,7 +527,7 @@ class TestSeed:
         The walk is oldest-first (the absorbed ids are exactly the
         ``MEMOIR_REFLECTION_NIGHTLY_CAP`` oldest by ``created_at``), the
         cap holds (the 5 newest stay unreflected and un-extracted), and
-        the seeded "The Emperor" star is then queryable through the real
+        the seeded "The user" star is then queryable through the real
         ``memoir_about`` tool with its historical episode line.
         """
         monkeypatch.delenv("ENSEMBLE_MEMOIR_ENABLED", raising=False)
@@ -539,8 +539,8 @@ class TestSeed:
                 repo.insert_episode(
                     agent_id=AGENT,
                     title=f"historical ruling {i}",
-                    body=f"the emperor ratified ruling {i} of the memoir lane",
-                    stars=["The Emperor"],
+                    body=f"the user ratified ruling {i} of the memoir lane",
+                    stars=["The user"],
                     created_at=created,
                     event_at=created,
                 )
@@ -563,7 +563,7 @@ class TestSeed:
 
         # The Constellation absorbed the historical mentions — and ONLY
         # the capped slice of them.
-        star = constellation_repo.resolve_star(AGENT, "The Emperor")
+        star = constellation_repo.resolve_star(AGENT, "The user")
         assert star is not None
         fragments = _svc(constellation_repo).fragments_count(star.id, AGENT)
         assert fragments == MEMOIR_REFLECTION_NIGHTLY_CAP
@@ -579,10 +579,10 @@ class TestSeed:
                 agent_id=AGENT,
             )
         }
-        result = await tools["memoir_about"].ainvoke({"star": "The Emperor"})
+        result = await tools["memoir_about"].ainvoke({"star": "The user"})
         assert isinstance(result, str)
         assert "REFUSED" not in result
-        assert "=== STAR: The Emperor" in result
+        assert "=== STAR: The user" in result
         # The card is POPULATED with its historical episode lines — the
         # card renders the most recent 10 of the absorbed slice, so the
         # NEWEST absorbed ruling leads.
@@ -739,7 +739,7 @@ def _stored_heat(engine, star_id: str) -> float:
         return float(row.heat)
 
 
-def _seed_a_populated_star(repo, constellation_repo, tag: str = "The Emperor"):
+def _seed_a_populated_star(repo, constellation_repo, tag: str = "The user"):
     """One star with TWO connected episodes (the populated-card shape)."""
     ids = []
     for index in range(2):
@@ -782,7 +782,7 @@ class TestTheHeatHonesty:
     ):
         monkeypatch.delenv("ENSEMBLE_MEMOIR_ENABLED", raising=False)
         _seed_a_populated_star(repo, constellation_repo)
-        star = constellation_repo.resolve_star(AGENT, "The Emperor")
+        star = constellation_repo.resolve_star(AGENT, "The user")
         assert _stored_heat(engine, star.id) == 0.0
 
         # THE FAULT: the episode table is gone ⇒ the connected-episode
@@ -799,10 +799,10 @@ class TestTheHeatHonesty:
                 agent_id=AGENT,
             )
         }
-        result = await tools["memoir_about"].ainvoke({"star": "The Emperor"})
+        result = await tools["memoir_about"].ainvoke({"star": "The user"})
         # The dossier STILL renders (fail-soft) — the tool never raises.
         assert "REFUSED" not in result
-        assert "=== STAR: The Emperor" in result
+        assert "=== STAR: The user" in result
         assert "(none)" in result.split("Connected Episodes (recent):")[1]
         # THE HONESTY GUARD: the stored heat did NOT move.
         assert _stored_heat(engine, star.id) == 0.0
@@ -819,7 +819,7 @@ class TestTheHeatHonesty:
         """
         monkeypatch.delenv("ENSEMBLE_MEMOIR_ENABLED", raising=False)
         _seed_a_populated_star(repo, constellation_repo)
-        star = constellation_repo.resolve_star(AGENT, "The Emperor")
+        star = constellation_repo.resolve_star(AGENT, "The user")
         assert _stored_heat(engine, star.id) == 0.0
 
         # THE DELETION: the episode rows are gone, the edges stay.
@@ -835,9 +835,9 @@ class TestTheHeatHonesty:
                 agent_id=AGENT,
             )
         }
-        result = await tools["memoir_about"].ainvoke({"star": "The Emperor"})
+        result = await tools["memoir_about"].ainvoke({"star": "The user"})
         assert "REFUSED" not in result
-        assert "=== STAR: The Emperor" in result
+        assert "=== STAR: The user" in result
         assert "(none)" in result.split("Connected Episodes (recent):")[1]
         # THE HONESTY GUARD: the stored heat did NOT move.
         assert _stored_heat(engine, star.id) == 0.0
@@ -1024,7 +1024,7 @@ class TestTheDurablePassIdentity:
             repo,
             "ep-durable",
             body="a tagged memory the heuristic seed resolves",
-            stars=["The Emperor"],
+            stars=["The user"],
             created_at=NOW - timedelta(hours=2),
         )
 
@@ -1043,7 +1043,7 @@ class TestTheDurablePassIdentity:
         )
 
         service.run_in_day_pass(now=NOW)
-        star = constellation_repo.resolve_star(AGENT, "The Emperor")
+        star = constellation_repo.resolve_star(AGENT, "The user")
         line = _line_row(repo.engine, star.id)
         assert line is not None
         first_pass_id = line.last_pass_id
@@ -1101,7 +1101,7 @@ class TestTheDurablePassIdentity:
 
         service.run_in_day_pass(now=NOW)
 
-        star = constellation_repo.resolve_star(AGENT, "The Emperor")
+        star = constellation_repo.resolve_star(AGENT, "The user")
         # THE ATOMICITY: no edge survived the failed unit ...
         assert _line_row(repo.engine, star.id) is None
         # ... and no mark either.
@@ -1203,7 +1203,7 @@ class TestTheSeedSurvivesAParseFailure:
             repo,
             "ep-parse-failed",
             body="a tagged memory the heuristic seed resolves",
-            stars=["The Emperor"],
+            stars=["The user"],
             created_at=NOW - timedelta(hours=1),
         )
 
@@ -1228,6 +1228,6 @@ class TestTheSeedSurvivesAParseFailure:
         # THE BATCH REALLY FAILED.
         assert "batch_parse_failed" in outcome.notes
         # THE SEED STILL HAPPENED: the star and its edge are there.
-        star = constellation_repo.resolve_star(AGENT, "The Emperor")
+        star = constellation_repo.resolve_star(AGENT, "The user")
         assert star is not None
         assert _line_row(repo.engine, star.id) is not None

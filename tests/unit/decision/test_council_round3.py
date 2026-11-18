@@ -257,7 +257,7 @@ async def test_c1_a_detached_consult_never_applies_even_when_ratified_deciding()
     registry.transition_stage(
         "snapshot.l3.selection",
         DecisionStage.DECIDING,
-        review=ReviewRecord(reviewer="council", ratified_by="the Emperor"),
+        review=ReviewRecord(reviewer="council", ratified_by="the user"),
     )
     overlay = DecisionOverlay(
         registry=registry,

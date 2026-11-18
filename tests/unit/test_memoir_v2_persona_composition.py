@@ -62,7 +62,7 @@ def engine():
 @pytest.fixture
 def persona_repo(engine):
     repo = MemoirPersonaRepository(engine)
-    draft = repo.create_draft("ari", "# Ari Persona\n\nI am Ari, companion to the Emperor.", source="seed")
+    draft = repo.create_draft("ari", "# Ari Persona\n\nI am Ari, companion to the user.", source="seed")
     repo.submit(draft.id)
     actor = MagicMock()
     actor.auth_method = "session"
@@ -128,7 +128,7 @@ class TestPersonaComposition:
                     "reasoning": "Introduces new operational protocol.",
                 })
             # Composition prompt
-            return "# Ari Persona\n\nI am Ari, companion to the Emperor.\n\n## Principles\n- Always verify backups before initiating upgrades."
+            return "# Ari Persona\n\nI am Ari, companion to the user.\n\n## Principles\n- Always verify backups before initiating upgrades."
 
         svc = MemoirPersonaGateService(engine, persona_repository=persona_repo, llm_caller=fake_llm)
         syn = _make_synthesis(engine, claim="Always verify backups before initiating upgrades")

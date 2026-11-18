@@ -192,19 +192,19 @@ def test_the_known_episode_ids_guard_on_postgres(repo, reflection_repo):
 
 def test_the_synthesis_dedup_key_on_postgres(syntheses_repo):
     """V2-17: the composite key is stable and order-independent."""
-    first = synthesis_dedup_key("the Emperor is patient", ["b", "a"])
-    second = synthesis_dedup_key("the Emperor is patient", ["a", "b"])
+    first = synthesis_dedup_key("the user is patient", ["b", "a"])
+    second = synthesis_dedup_key("the user is patient", ["a", "b"])
     assert first == second
-    assert first != synthesis_dedup_key("the Emperor is patient", ["a"])
+    assert first != synthesis_dedup_key("the user is patient", ["a"])
 
 
 def test_the_dedup_returns_the_existing_row_on_postgres(syntheses_repo):
     episode_id = "ep1"
     row = syntheses_repo.create_synthesis(
-        AGENT, "the Emperor is patient", [episode_id], "CREATE", 0.9
+        AGENT, "the user is patient", [episode_id], "CREATE", 0.9
     )
     duplicate = syntheses_repo.find_duplicate(
-        AGENT, "the Emperor is patient", [episode_id]
+        AGENT, "the user is patient", [episode_id]
     )
     assert duplicate is not None
     assert duplicate.id == row.id
@@ -212,7 +212,7 @@ def test_the_dedup_returns_the_existing_row_on_postgres(syntheses_repo):
 
 def test_the_search_matches_the_claim_on_postgres(syntheses_repo):
     syntheses_repo.create_synthesis(
-        AGENT, "the Emperor prefers the zebra", ["ep1"], "CREATE", 0.9
+        AGENT, "the user prefers the zebra", ["ep1"], "CREATE", 0.9
     )
     rows = syntheses_repo.search_active(AGENT, "zebra", 5)
     assert len(rows) == 1
@@ -221,13 +221,13 @@ def test_the_search_matches_the_claim_on_postgres(syntheses_repo):
 
 def test_the_supersession_is_atomic_on_postgres(syntheses_repo):
     old = syntheses_repo.create_synthesis(
-        AGENT, "the Emperor is patient", ["ep1"], "CREATE", 0.9
+        AGENT, "the user is patient", ["ep1"], "CREATE", 0.9
     )
     new = syntheses_repo.supersede_with(
         AGENT,
         old.id,
         {
-            "claim": "the Emperor is very patient",
+            "claim": "the user is very patient",
             "source_episode_ids": ["ep1"],
             "verb": "REFINE",
             "confidence": 0.95,
@@ -244,13 +244,13 @@ def test_the_supersession_is_atomic_on_postgres(syntheses_repo):
 def test_a_second_supersede_fails_loudly_on_postgres(syntheses_repo):
     """The concurrent double-claim guard: loud, never a silent double-link."""
     old = syntheses_repo.create_synthesis(
-        AGENT, "the Emperor is patient", ["ep1"], "CREATE", 0.9
+        AGENT, "the user is patient", ["ep1"], "CREATE", 0.9
     )
     syntheses_repo.supersede_with(
         AGENT,
         old.id,
         {
-            "claim": "the Emperor is very patient",
+            "claim": "the user is very patient",
             "source_episode_ids": ["ep1"],
             "verb": "REFINE",
             "confidence": 0.95,
@@ -261,7 +261,7 @@ def test_a_second_supersede_fails_loudly_on_postgres(syntheses_repo):
             AGENT,
             old.id,
             {
-                "claim": "the Emperor is impatient",
+                "claim": "the user is impatient",
                 "source_episode_ids": ["ep1"],
                 "verb": "CORRECT",
                 "confidence": 0.6,
@@ -277,7 +277,7 @@ def test_the_record_line_pass_id_guard_on_postgres(
     """The phase-1 review note, proven on PostgreSQL: a NULL pass id
     NEVER increments ``mention_count``."""
     episode_id = repo.insert_episode(agent_id=AGENT, body="one", importance=9)
-    star = constellation_repo.upsert_star(AGENT, "the Emperor", "person")
+    star = constellation_repo.upsert_star(AGENT, "the user", "person")
     first = constellation_repo.record_line(AGENT, star.id, episode_id, pass_id=None)
     assert first.mention_count == 1
     second = constellation_repo.record_line(AGENT, star.id, episode_id, pass_id=None)
@@ -291,7 +291,7 @@ def test_the_record_line_pass_id_guard_on_postgres(
 def test_the_heat_increment_on_postgres(repo, constellation_repo):
     """W5's write path works on PostgreSQL."""
     repo.insert_episode(agent_id=AGENT, body="one", importance=9)
-    star = constellation_repo.upsert_star(AGENT, "the Emperor", "person")
+    star = constellation_repo.upsert_star(AGENT, "the user", "person")
     heat = constellation_repo.increment_heat(AGENT, star.id)
     assert heat == 1.0
     with Session(constellation_repo.engine) as session:

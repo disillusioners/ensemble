@@ -123,7 +123,7 @@ def build_attestation(
             channel_type="dm",
             is_dm=True,
             external_user_id="dm:112233445566",
-            user_name="The Emperor",
+            user_name="The user",
             guild_id=None,
         ),
         approver_subject="my-discord-bot:112233445566",

@@ -232,7 +232,7 @@ class TestPrivilegedCategory:
 
 class TestAllowLists:
     """The two categories are held by {ari, maintenancer} (D-1 / D-2 /
-    D-13, amended 2026-11-14 (Emperor directive 2026-11-14)).
+    D-13, amended 2026-11-14 (user directive 2026-11-14)).
 
     The leader does NOT hold them; no other agent's allow list gains
     either.

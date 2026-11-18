@@ -224,7 +224,7 @@ def test_the_syntheses_section_renders_before_the_episodes(
     episode_id = _seed(repo, body="the zebra choice")
     syntheses_repo.create_synthesis(
         AGENT,
-        "the Emperor prefers the zebra",
+        "the user prefers the zebra",
         [episode_id],
         "CREATE",
         0.9,
@@ -239,7 +239,7 @@ def test_the_syntheses_section_renders_before_the_episodes(
 def test_the_footer_carries_the_syntheses_count(repo, syntheses_repo):
     episode_id = _seed(repo, body="the zebra choice")
     syntheses_repo.create_synthesis(
-        AGENT, "the Emperor prefers the zebra", [episode_id], "CREATE", 0.9
+        AGENT, "the user prefers the zebra", [episode_id], "CREATE", 0.9
     )
     result = _service(repo, syntheses_repo, lane=True).recall(AGENT, "zebra", 5)
     assert "syntheses=1" in result.footer
@@ -260,7 +260,7 @@ def test_the_syntheses_are_capped(repo, syntheses_repo):
     for index, episode_id in enumerate(episode_ids):
         syntheses_repo.create_synthesis(
             AGENT,
-            f"the Emperor prefers the zebra number {index}",
+            f"the user prefers the zebra number {index}",
             [episode_id],
             "CREATE",
             0.9,
@@ -274,7 +274,7 @@ def test_the_syntheses_are_ordered_strongest_first(repo, syntheses_repo):
     for index, episode_id in enumerate(episode_ids):
         syntheses_repo.create_synthesis(
             AGENT,
-            f"the Emperor prefers the zebra number {index}",
+            f"the user prefers the zebra number {index}",
             [episode_id],
             "CREATE",
             0.1 + index * 0.3,
@@ -350,8 +350,8 @@ def test_an_explicit_recall_hit_increments_the_star_heat(
     repo, syntheses_repo, constellation_repo
 ):
     """W5: the stars the RETURNED episodes cite get their heat up."""
-    episode_id = _seed(repo, body="the zebra choice", stars=["the Emperor"])
-    star = constellation_repo.upsert_star(AGENT, "the Emperor", "person")
+    episode_id = _seed(repo, body="the zebra choice", stars=["the user"])
+    star = constellation_repo.upsert_star(AGENT, "the user", "person")
     assert star.heat == 0.0
     service = _service(repo, syntheses_repo, constellation_repo, lane=True)
     result = service.recall(AGENT, "zebra", 5)
@@ -363,9 +363,9 @@ def test_the_heat_is_not_incremented_for_a_dropped_episode(
     repo, syntheses_repo, constellation_repo
 ):
     """Only the SHIPPED episodes' stars are heated."""
-    star = constellation_repo.upsert_star(AGENT, "the Emperor", "person")
+    star = constellation_repo.upsert_star(AGENT, "the user", "person")
     # An episode that does NOT match the query is never shipped.
-    _seed(repo, body="a completely unrelated memory", stars=["the Emperor"])
+    _seed(repo, body="a completely unrelated memory", stars=["the user"])
     service = _service(repo, syntheses_repo, constellation_repo, lane=True)
     result = service.recall(AGENT, "zebra", 5)
     assert not result.episodes
@@ -376,7 +376,7 @@ def test_the_heat_increment_never_breaks_the_recall(
     repo, syntheses_repo, constellation_repo
 ):
     """A failing heat write NEVER destroys the recall."""
-    _seed(repo, body="the zebra choice", stars=["the Emperor"])
+    _seed(repo, body="the zebra choice", stars=["the user"])
 
     class _Boom:
         def resolve_star(self, agent_id, name):
@@ -422,7 +422,7 @@ async def test_the_tool_renders_the_syntheses_section_first(
     tools = {tool.name: tool for tool in create_memoir_tools(manager, agent_id=AGENT)}
     episode_id = _seed(repo, body="the zebra choice")
     syntheses_repo.create_synthesis(
-        AGENT, "the Emperor prefers the zebra", [episode_id], "CREATE", 0.9
+        AGENT, "the user prefers the zebra", [episode_id], "CREATE", 0.9
     )
     text = await tools["memoir_recall"].ainvoke({"query": "zebra"})
     assert isinstance(text, str)
@@ -451,7 +451,7 @@ async def test_the_tool_with_the_lane_off_is_the_v1_envelope(
     tools = {tool.name: tool for tool in create_memoir_tools(manager, agent_id=AGENT)}
     episode_id = _seed(repo, body="the zebra choice")
     syntheses_repo.create_synthesis(
-        AGENT, "the Emperor prefers the zebra", [episode_id], "CREATE", 0.9
+        AGENT, "the user prefers the zebra", [episode_id], "CREATE", 0.9
     )
     text = await tools["memoir_recall"].ainvoke({"query": "zebra"})
     assert MEMOIR_SYNTHESES_SECTION_HEADER not in text

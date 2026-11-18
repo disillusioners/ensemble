@@ -210,7 +210,7 @@ class TestEffectiveResolverParity:
     ):
         """Approving a NEWER baseline after mint ⇒ the re-check hash
         diverges ⇒ ``token-content-mismatch`` (the J-3 #3 guarantee)."""
-        human = ActorContext(subject="emperor", auth_method=AUTH_METHOD_SESSION)
+        human = ActorContext(subject="the user", auth_method=AUTH_METHOD_SESSION)
         submitter = actor_from_instance("inst-1", "ari")
 
         base = pv_repo.create_draft(
