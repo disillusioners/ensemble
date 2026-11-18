@@ -3016,11 +3016,21 @@ class DependencyBus:
         **Caller responsibility**: the bus does NOT auto-replay.
         The caller (the lifespan wiring in
         ``init_dependency_bus``) inspects the returned tuples and
-        enqueues each FollowUp as a new task, then calls
-        :meth:`mark_enqueued` to stamp the dedup marker. This
-        separation keeps the bus narrow (state machine only) and
-        makes the caller's enqueueing policy independently
-        testable.
+        RE-ENQUEUES each recovered FollowUp through its own delivery
+        path, then calls :meth:`mark_enqueued` to stamp the dedup
+        marker. (R2: the old wording — "enqueues each FollowUp as a
+        new task" — was stale since the FollowUp/task split and
+        contradicted the durability stance.) This separation keeps the
+        bus narrow (state machine only) and makes the caller's
+        enqueueing policy independently testable.
+
+        **R2 / the B1 durability stance**: this recovery path is the
+        source of the NAMED duplicate window — a row that was
+        enqueued but whose ``enqueued_at`` stamp never landed is
+        re-enqueued here (the predicate is ``enqueued_at IS NULL``;
+        the ``delivered_watch_id`` marker is NOT consulted), so the
+        delivery is AT-LEAST-ONCE with one bounded duplicate per
+        crash-in-window.
 
         The ``enqueued_at IS NULL`` filter is what makes the
         restart safe: a previously-clean restart (where every FIRED

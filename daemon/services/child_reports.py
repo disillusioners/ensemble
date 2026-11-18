@@ -987,13 +987,23 @@ class ChildReportsService:
                 except Exception as enq_err:
                     # An enqueue failure must NEVER fail the completion
                     # path (same posture as the terminate precedent's
-                    # dead-letter / stamp handling): the row stays FIRED
-                    # and the wake is lost — the at-most-once residual
-                    # the durability stance documents.
+                    # dead-letter / stamp handling).
+                    #
+                    # R2: the honest wording — the row stays FIRED and
+                    # UNSTAMPED (``enqueued_at IS NULL``), so the wake
+                    # is **DEFERRED**, not lost: the restart recovery
+                    # (Pass 1) re-enqueues it on the next boot, and the
+                    # delivery marker does NOT block that path (it
+                    # prevents only same-path re-claims). The old text
+                    # ("the wake is lost — the at-most-once residual")
+                    # pointed at a claim the B1 stance WITHDREW and was
+                    # factually wrong.
                     logger.warning(
                         "_fire_terminal_child_and_deliver: enqueue "
                         "failed (non-fatal) for target=%s... — the row "
-                        "stays FIRED and the wake is lost: %s: %s",
+                        "stays FIRED and unstamped, so the wake is "
+                        "DEFERRED to the next Pass-1 recovery (the "
+                        "marker does not block it): %s: %s",
                         str(fu.target_instance_id or "")[:8],
                         type(enq_err).__name__,
                         enq_err,

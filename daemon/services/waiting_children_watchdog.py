@@ -184,9 +184,16 @@ WATCHDOG_SOURCE: str = "system:watchdog"
 #: durable ``MessageQueue.source`` column.
 WEDGE_SOURCE: str = "system:watchdog:wedge"
 
-#: Retained for backward test compatibility only (S4 replaced the
-#: TTL cooldown with row-check episode termination). Do NOT delete:
-#: existing tests import this symbol. No runtime use remains.
+#: **WITHDRAWN (S4, wake-path-carrier-fix)** — the suppression TTL is
+#: GONE: it no longer functions as a suppression window. The wedge
+#: episode ends on the ROW-CHECK (the stamped reason code stops
+#: holding) and the dedupe is the reason-code fingerprint — not a
+#: timer. The DELTA-2 rationale it carried (a re-parked parent must
+#: become re-eligible) is served by the S4/B2 episode-end evaluation
+#: instead. The constant is kept ONLY as an import-compatible symbol
+#: (no runtime path and — since the S4 TTL test was rewritten — no
+#: test in this tree references it); it MUST NOT be reintroduced as a
+#: suppression window.
 WEDGE_REARM_COOLDOWN_SECONDS: float = 30 * 60
 
 
@@ -438,7 +445,7 @@ def _build_wedge_notice(
     reason_codes: list[str] | None = None,
     subject_child_ids: list[str] | None = None,
     queued_report_id: str | None = None,
-    non_terminal_child_count: int | None = 0,
+    non_terminal_child_count: int | None = None,
 ) -> str:
     """Build the directive wedge-notice for ``parent_id``.
 
@@ -474,7 +481,12 @@ def _build_wedge_notice(
         queued_report_id: The ``message_queue`` row id of the queued
             completion report (for the ``queued_report`` line).
         non_terminal_child_count: M — the non-terminal child count
-            (for the ``non_terminal_children`` line).
+            (for the ``non_terminal_children`` line). ``int | None``:
+            ``None`` means the count is UNKNOWN (the read failed, or
+            it returned an empty set while the children gate said
+            children exist) and renders "at least one child (the exact
+            count is unknown)" — never a fabricated 0 (B4(1), fold-in
+            #8). The DEFAULT is ``None`` (unknown), not 0.
 
     Returns:
         The notice text.
@@ -516,9 +528,10 @@ def _build_wedge_notice(
         )
     if WEDGE_REASON_NON_TERMINAL_CHILDREN in codes:
         if non_terminal_child_count is None:
-            # B4(1): a failed count read renders "unknown" — never a
-            # fabricated 0 in a human-facing notice.
-            count_text = "an unknown number (read failed)"
+            # B4(1)/#8: an UNKNOWN count renders "at least one child"
+            # — the gate said children exist, so 0 would be a
+            # fabricated lie in a human-facing notice.
+            count_text = "at least one child (the exact count is unknown)"
         else:
             count_text = str(non_terminal_child_count)
         lines.append(
@@ -825,8 +838,10 @@ class WaitingChildrenWatchdog:
             return {}
         return bus.fetch_pending_subject_for_targets_sync(list(parent_ids))
 
-    def _queued_completion_report_id(self, parent_id: str) -> str | None:
-        """The queued ``completion_report`` row id (or None).
+    def _queued_completion_report_id(
+        self, parent_id: str
+    ) -> tuple[bool, str | None]:
+        """The queued ``completion_report`` row check — TRI-STATE.
 
         The ROW check behind the ``queued_report`` reason code: a
         ``completion_report`` message row EXISTS for this parent and
@@ -834,10 +849,20 @@ class WaitingChildrenWatchdog:
         NOT be emitted and the notice MUST NOT claim one — the old
         template claimed it unconditionally (FALSE in 100% of the
         notices ever minted).
+
+        **R1(6): the read outcome is tri-state** — a swallowed error
+        used to be indistinguishable from "no queued report", so the
+        code could END an episode on a queue-read blip:
+
+        * ``(True, "mq-...")`` — a queued report EXISTS (the code holds);
+        * ``(True, None)`` — the read succeeded, NO queued report (the
+          code does NOT hold);
+        * ``(False, None)`` — the read FAILED (UNKNOWN — the caller must
+          not end an episode on it).
         """
         repo = getattr(self._manager, "_queue_repository", None)
         if repo is None:
-            return None
+            return (True, None)
         try:
             rows = repo.get_by_instance(parent_id)
         except Exception as exc:  # noqa: BLE001 — fail-soft (no claim)
@@ -848,7 +873,7 @@ class WaitingChildrenWatchdog:
                 type(exc).__name__,
                 exc,
             )
-            return None
+            return (False, None)
         if not isinstance(rows, (list, tuple)):
             # An async double (AsyncMock) hands back a coroutine — a
             # sync helper must not await it, and a coroutine is NOT
@@ -858,7 +883,7 @@ class WaitingChildrenWatchdog:
                     rows.close()
                 except Exception:  # noqa: BLE001
                     pass
-            return None
+            return (False, None)
         for row in rows:
             if getattr(row, "type", None) != "completion_report":
                 continue
@@ -885,8 +910,8 @@ class WaitingChildrenWatchdog:
                 "system:watchdog",
             ):
                 continue
-            return getattr(row, "message_id", None)
-        return None
+            return (True, getattr(row, "message_id", None))
+        return (True, None)
 
     def _count_non_terminal_children(self, parent_id: str) -> int | None:
         """M — the parent's non-terminal child count (the
@@ -934,20 +959,39 @@ class WaitingChildrenWatchdog:
         *,
         subjects: dict[str, tuple[int, list]],
         parents_with_children: set[str],
-    ) -> bool:
-        """B2: does ONE stamped reason code still hold for ``parent_id``?
+        subjects_read_failed: bool = False,
+    ) -> bool | None:
+        """B2/R1: does ONE stamped reason code still hold for
+        ``parent_id``?
 
         Evaluated against the CURRENT row-checks — for every open
         episode, including parents that have left the WC scan set.
+
+        **R1: TRI-STATE.** ``None`` means UNKNOWN — the read behind
+        that code FAILED. An unknown must NEVER be read as "the code
+        stopped holding": the end-evaluation leaves the episode
+        UNTOUCHED on any ``None`` (a read failure may not end an
+        episode — it may only postpone the verdict).
         """
         if code == WEDGE_REASON_PENDING_WATCHERS:
+            if subjects_read_failed:
+                return None
             _total, _rows = subjects.get(parent_id, (0, []))
             return bool(_rows)
         if code == WEDGE_REASON_NO_LIVE_CARRIER:
-            return not self._has_live_carrier_task(parent_id)
+            _carrier = self._has_live_carrier_task(parent_id)
+            if _carrier is None:
+                return None
+            return not _carrier
         if code == WEDGE_REASON_QUEUED_REPORT:
-            return self._queued_completion_report_id(parent_id) is not None
+            _read_ok, _msg_id = self._queued_completion_report_id(parent_id)
+            if not _read_ok:
+                return None
+            return _msg_id is not None
         if code == WEDGE_REASON_NON_TERMINAL_CHILDREN:
+            # The children gate's own fallback is fail-CLOSED (a failed
+            # read marks every candidate as HAVING children), so this
+            # leg is never UNKNOWN.
             return parent_id in parents_with_children
         return False
 
@@ -988,7 +1032,7 @@ class WaitingChildrenWatchdog:
         self._wedge_emission_cache = enabled
         return enabled
 
-    def _has_live_carrier_task(self, instance_id: str) -> bool:
+    def _has_live_carrier_task(self, instance_id: str) -> bool | None:
         """Return True iff ``instance_id`` has any live
         PROCESS_REPORT Task (PENDING or RUNNING).
 
@@ -1010,14 +1054,20 @@ class WaitingChildrenWatchdog:
            wedge pass becomes a no-op for those tests so the
            existing hang-detection assertions are not disturbed.
 
+        **R1(3): the outcome is TRI-STATE** — a repo call that RAISES
+        returns ``None`` (UNKNOWN), not ``False``: an unknown carrier
+        state must not be read as "no carrier" (that would mint a
+        false wedge notice) NOR end an open episode.
+
         Args:
             instance_id: The parent instance ID whose live-carrier
                 presence we are checking.
 
         Returns:
-            True iff a live PROCESS_REPORT Task exists for this
-            instance_id, False otherwise (no task, all terminal, or
-            no usable repo wired).
+            ``True`` iff a live PROCESS_REPORT Task exists for this
+            instance_id; ``False`` if there is none (no task, all
+            terminal, or no usable repo wired); ``None`` if the read
+            FAILED (unknown — callers must not act on it).
         """
         import inspect as _inspect
         repo = self._task_repository
@@ -1042,9 +1092,19 @@ class WaitingChildrenWatchdog:
             # Injected repo does not implement the helper —
             # silent no-op (same as the no-repo case).
             return True
-        live = repo.list_live_process_report_carriers_for_instance(
-            instance_id
-        )
+        try:
+            live = repo.list_live_process_report_carriers_for_instance(
+                instance_id
+            )
+        except Exception as exc:  # noqa: BLE001 — R1(3): UNKNOWN
+            logger.warning(
+                "[Watchdog] live-carrier probe failed for %s...: "
+                "%s: %s",
+                instance_id[:8],
+                type(exc).__name__,
+                exc,
+            )
+            return None
         # AsyncMock test fixtures return coroutines from method
         # calls — detect and treat as having-a-carrier (True)
         # so the wedge pass stays silent for tests that mock
@@ -1857,6 +1917,11 @@ class WaitingChildrenWatchdog:
             # would end its own episode and restore the hourly
             # re-notification loop).
             subjects: dict[str, tuple[int, list["DependencyWatcher"]]] = {}
+            # R1(1): the subject read's failure is RECORDED, not
+            # silently absorbed — every consumer below must fail
+            # CLOSED on it (a fabricated "no watchers" would admit
+            # healthy parents to the classic-wedge arm).
+            subjects_read_failed = False
             try:
                 subjects = self._fetch_wedge_subjects(
                     _subject_candidates
@@ -1864,10 +1929,12 @@ class WaitingChildrenWatchdog:
             except Exception as exc:  # noqa: BLE001 — fail-soft
                 logger.warning(
                     f"[Watchdog] Wedge subject read failed; treating "
-                    f"every parent as having no unfulfillable watcher "
-                    f"(classic wedge shape). exc={exc}"
+                    f"every parent as UNKNOWN (fail-closed: no "
+                    f"classic-wedge admission on a failed read). "
+                    f"exc={exc}"
                 )
                 subjects = {}
+                subjects_read_failed = True
             for parent_id in parent_ids:
                 self._wedge_parents_scanned_total += 1
                 # Skip PAUSED parents — same rationale as the
@@ -1936,7 +2003,14 @@ class WaitingChildrenWatchdog:
                 # ~9x as many parents). A parent with NO watchers at
                 # all is the classic wedge (nothing to wait for and
                 # nothing to deliver it) — in scope, as before.
-                if _subject_rows:
+                if subjects_read_failed:
+                    # R1(5): FAIL-CLOSED — with a failed subject read
+                    # the totals are FABRICATED (``total_pending == 0``
+                    # means "we could not read", not "there are no
+                    # watchers"), so the classic-wedge arm must NOT be
+                    # admitted on a failed read.
+                    _in_scope = False
+                elif _subject_rows:
                     _in_scope = True
                 elif (
                     _total_pending == 0
@@ -1949,13 +2023,23 @@ class WaitingChildrenWatchdog:
                     # The ROW-CHECK ended the episode (the S4 subject
                     # is empty for this parent) — drop the entry so a
                     # later recurrence may notify again.
-                    self._wedge_notified.pop(parent_id, None)
+                    # R1: a FAILED read is not a row-check verdict —
+                    # the entry must survive it (fail-closed).
+                    if not subjects_read_failed:
+                        self._wedge_notified.pop(parent_id, None)
                     continue
                 # Wedge condition part 1: zero live carrier. If a
                 # carrier exists, the wedge is NOT active — the
                 # existing carrier will deliver (the natural claim
                 # path).
-                if self._has_live_carrier_task(parent_id):
+                _carrier_state = self._has_live_carrier_task(parent_id)
+                if _carrier_state is None:
+                    # R1(3): the carrier read FAILED — UNKNOWN. Fail
+                    # CLOSED: no notice on an unknown carrier state
+                    # (a false wedge notice is the harm), and the
+                    # episode must NOT end on it.
+                    continue
+                if _carrier_state:
                     # Composition property: the revival seam worked.
                     # Clear any prior wedge episode for this parent
                     # so a future genuine wedge can re-notify.
@@ -1967,10 +2051,10 @@ class WaitingChildrenWatchdog:
                     _codes.append(WEDGE_REASON_PENDING_WATCHERS)
                 # The carrier gate above guarantees this fact holds.
                 _codes.append(WEDGE_REASON_NO_LIVE_CARRIER)
-                _queued_report_id = self._queued_completion_report_id(
-                    parent_id
+                _queue_read_ok, _queued_report_id = (
+                    self._queued_completion_report_id(parent_id)
                 )
-                if _queued_report_id:
+                if _queue_read_ok and _queued_report_id:
                     _codes.append(WEDGE_REASON_QUEUED_REPORT)
                 _non_terminal_count: int | None = 0
                 if _has_non_terminal_children:
@@ -1980,6 +2064,12 @@ class WaitingChildrenWatchdog:
                     _non_terminal_count = (
                         self._count_non_terminal_children(parent_id)
                     )
+                    if _non_terminal_count == 0:
+                        # #8: a successful-but-EMPTY children read is
+                        # SELF-CONTRADICTING with the gate (which said
+                        # this parent HAS non-terminal children) ⇒ the
+                        # count is UNKNOWN, never a fabricated 0.
+                        _non_terminal_count = None
                 # ── Episode dedupe (S4): NO TTL ─────────────────────
                 # The episode fingerprint is the REASON-CODE SET (the
                 # DEDUPE_KEY is (parent_id, reason_code)). The
@@ -2162,16 +2252,48 @@ class WaitingChildrenWatchdog:
             # next WC pass (the set grows ⇒ a new notice).
             for _p in list(self._wedge_notified):
                 _stamped = self._wedge_notified.get(_p) or ()
-                _surviving = tuple(
-                    code
-                    for code in _stamped
-                    if self._wedge_code_still_holds(
-                        _p,
-                        code,
-                        subjects=subjects,
-                        parents_with_children=parents_with_non_term_children,
+                # R1(4): per-parent isolation + the UNKNOWN rule. An
+                # exception, or ANY stamped code that evaluates to
+                # None (its read FAILED), leaves the entry UNTOUCHED —
+                # a read failure may POSTPONE the verdict, never end
+                # the episode, and never re-notify.
+                try:
+                    _verdicts = [
+                        self._wedge_code_still_holds(
+                            _p,
+                            code,
+                            subjects=subjects,
+                            parents_with_children=(
+                                parents_with_non_term_children
+                            ),
+                            subjects_read_failed=subjects_read_failed,
+                        )
+                        for code in _stamped
+                    ]
+                    if any(_v is None for _v in _verdicts):
+                        # UNKNOWN on at least one stamped code — leave
+                        # the episode exactly as it is.
+                        logger.info(
+                            f"[Watchdog] wedge episode for {_p[:8]}... "
+                            f"left UNTOUCHED — a stamped reason code's "
+                            f"read FAILED (the verdict is postponed, "
+                            f"not decided)."
+                        )
+                        continue
+                    _surviving = tuple(
+                        code
+                        for code, _v in zip(_stamped, _verdicts)
+                        if _v
                     )
-                )
+                except Exception as exc:  # noqa: BLE001 — fail-closed
+                    logger.warning(
+                        f"[Watchdog] wedge episode evaluation failed "
+                        f"for {_p[:8]}...: %s: %s — the episode is left "
+                        f"UNTOUCHED",
+                        type(exc).__name__,
+                        exc,
+                    )
+                    continue
                 if _surviving != _stamped:
                     if _surviving:
                         # Narrowed: the surviving codes' episodes

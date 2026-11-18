@@ -2661,7 +2661,13 @@ class TestS4NoticeSurface:
     ):
         """T5(a) — two passes, the same (parent, reason_code) and the
         condition still true ⇒ EXACTLY ONE notice row (no TTL, no
-        duplicate)."""
+        duplicate).
+
+        SHIPPED SEMANTICS (S4/B2): the episode is the per-code set —
+        the entry holds the REASON-CODE FINGERPRINT, and while every
+        stamped code still holds the fingerprint matches ⇒ no second
+        notice. There is NO TTL: the old suppression window was
+        withdrawn (the episode ends on the row-check, not on a timer)."""
         parent = _s1_seed_instance(
             engine, "s4-ep", parent_id=None,
             status="waiting_children",
@@ -2685,7 +2691,12 @@ class TestS4NoticeSurface:
     ):
         """T5(b) — the notice's OWN WC→RUNNING→WC flip does NOT end
         the episode ⇒ still exactly ONE notice row (a membership-based
-        end would restore the hourly re-notification loop)."""
+        end would restore the hourly re-notification loop).
+
+        SHIPPED SEMANTICS (S4/B2): the flip moves the parent OUT of
+        the WC scan set, but the episode's stamped codes all still
+        hold ⇒ the entry is neither narrowed nor dropped ⇒ the next
+        pass fingerprint-matches ⇒ no second notice."""
         parent = _s1_seed_instance(
             engine, "s4-flip", parent_id=None,
             status="waiting_children",
@@ -2723,8 +2734,18 @@ class TestS4NoticeSurface:
     ):
         """T5(c) — the ROW-CHECK turning false (the subject empties:
         the watched child is running again ⇒ the wait is fulfillable
-        again) DOES end the episode ⇒ a later recurrence notifies
-        again."""
+        again) ends THAT CODE's episode ⇒ a later recurrence notifies
+        again.
+
+        SHIPPED SEMANTICS (S4/B2, per-code — NOT the withdrawn
+        drop-the-whole-episode rule): the ``pending_watchers`` code
+        stops holding ⇒ its episode ends and the entry NARROWS to the
+        still-holding codes (here: ``no_live_carrier``) WITHOUT
+        re-notifying for them. The entry is dropped outright only when
+        the LAST stamped code stops holding (the single-code classic
+        shape — pinned by the B3 test in
+        ``tests/unit/services/test_waiting_children_watchdog.py``).
+        A code that REAPPEARS is a new episode ⇒ a new notice."""
         parent = _s1_seed_instance(
             engine, "s4-recur", parent_id=None,
             status="waiting_children",
@@ -2919,4 +2940,139 @@ class TestS4NoticeSurface:
         assert len(_s4_notice_rows(engine)) == 1, (
             "T6: the per-tick read must pick the mid-run flip up "
             "(no restart)"
+        )
+
+
+class TestS3BlipPaths:
+    """R3 — the BLIP paths: a READ FAILURE must never end an episode,
+    never admit a classic-wedge notice, and never crash the tick.
+
+    House rule r2: observable ROW STATE (the notice rows) + the
+    episode map — never a string grep.
+    """
+
+    async def test_r3a_subject_read_failure_leaves_the_episode_untouched(
+        self, engine, s1_bus, s1_manager, monkeypatch
+    ):
+        """R3(a) — a subject-read FAILURE ⇒ the episode map is
+        UNCHANGED and ZERO new notice rows (the read failure may
+        postpone the verdict, never decide it)."""
+        parent = _s1_seed_instance(
+            engine, "s4-blip-subject", parent_id=None,
+            status="waiting_children",
+        )
+        _s1_seed_instance(
+            engine, "s4-blip-subject-dead", parent_id=None,
+            status="completed",
+        )
+        # The parent ALSO carries an UNFULFILLABLE watcher (its watched
+        # child is already terminal) ⇒ the stamped codes include
+        # ``pending_watchers`` — the code whose read is about to fail.
+        # (Without it the episode's stamped codes would not touch the
+        # subject read at all and the case would not discriminate.)
+        _s3_seed_watcher(
+            engine, target_instance_id=parent,
+            child_id="s4-blip-subject-dead",
+        )
+        s1_manager._queue_repository = _s4_queue_repo(engine)
+        w = _s4_watchdog(s1_manager)
+
+        # Tick 1 — the wedge fires and opens the episode.
+        await w.run_once()
+        assert len(_s4_notice_rows(engine)) == 1
+        stamped = w._wedge_notified.get(parent)
+        assert stamped, "R3(a) harness: the episode must be open"
+        assert "pending_watchers" in stamped, (
+            f"R3(a) harness: the stamped codes must include the "
+            f"subject-read leg (got {stamped!r})"
+        )
+
+        # The subject read now FAILS.
+        def _boom(*args, **kwargs):
+            raise RuntimeError("subject read exploded")
+
+        monkeypatch.setattr(
+            s1_bus, "fetch_pending_subject_for_targets_sync", _boom
+        )
+
+        await w.run_once()
+
+        assert len(_s4_notice_rows(engine)) == 1, (
+            "R3(a): a subject-read failure must emit ZERO new notices"
+        )
+        assert w._wedge_notified.get(parent) == stamped, (
+            "R3(a): a subject-read failure must leave the episode map "
+            f"UNCHANGED (got {w._wedge_notified.get(parent)!r}, "
+            f"expected {stamped!r})"
+        )
+
+    async def test_r3b_subject_read_failure_emits_no_classic_wedge_row(
+        self, engine, s1_bus, s1_manager, monkeypatch
+    ):
+        """R3(b) — a subject-read failure on a CHILDLESS parent ⇒ ZERO
+        classic-wedge rows: the totals are fabricated on a failed read,
+        so the classic arm must not be admitted."""
+        _s1_seed_instance(
+            engine, "s4-blip-classic", parent_id=None,
+            status="waiting_children",
+        )
+        _s1_seed_instance(
+            engine, "s4-blip-classic-dead", parent_id=None,
+            status="completed",
+        )
+        s1_manager._queue_repository = _s4_queue_repo(engine)
+        w = _s4_watchdog(s1_manager)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("subject read exploded")
+
+        monkeypatch.setattr(
+            s1_bus, "fetch_pending_subject_for_targets_sync", _boom
+        )
+
+        await w.run_once()
+
+        assert _s4_notice_rows(engine) == [], (
+            "R3(b): a failed subject read must NOT admit the classic-"
+            "wedge arm (no false wedge notice on a DB hiccup)"
+        )
+
+    async def test_r3c_carrier_read_exception_completes_the_tick(
+        self, engine, s1_bus, s1_manager, monkeypatch
+    ):
+        """R3(c) — a carrier-read EXCEPTION ⇒ the tick COMPLETES (no
+        crash) and the episode is UNCHANGED (no notice, no drop)."""
+        parent = _s1_seed_instance(
+            engine, "s4-blip-carrier", parent_id=None,
+            status="waiting_children",
+        )
+        _s1_seed_instance(
+            engine, "s4-blip-carrier-dead", parent_id=None,
+            status="completed",
+        )
+        s1_manager._queue_repository = _s4_queue_repo(engine)
+        w = _s4_watchdog(s1_manager)
+
+        await w.run_once()
+        assert len(_s4_notice_rows(engine)) == 1
+        stamped = w._wedge_notified.get(parent)
+        assert stamped
+
+        def _carrier_boom(*args, **kwargs):
+            raise RuntimeError("carrier probe exploded")
+
+        monkeypatch.setattr(
+            s1_manager._task_repo,
+            "list_live_process_report_carriers_for_instance",
+            _carrier_boom,
+        )
+
+        await w.run_once()  # the tick must COMPLETE
+
+        assert len(_s4_notice_rows(engine)) == 1, (
+            "R3(c): a carrier-read failure must emit ZERO new notices"
+        )
+        assert w._wedge_notified.get(parent) == stamped, (
+            "R3(c): a carrier-read failure must leave the episode map "
+            f"UNCHANGED (got {w._wedge_notified.get(parent)!r})"
         )
