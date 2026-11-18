@@ -236,12 +236,12 @@ class TestExtractionAndAlias:
         )
         assert written == 2
 
-        emperor = constellation_repo.resolve_star(AGENT, "The user")
+        star = constellation_repo.resolve_star(AGENT, "The user")
         project = constellation_repo.resolve_star(AGENT, "agents-ensemble")
-        assert emperor is not None
+        assert star is not None
         assert project is not None
-        assert emperor.name == "The user"
-        card = constellation_repo.get_star_card(AGENT, emperor.id)
+        assert star.name == "The user"
+        card = constellation_repo.get_star_card(AGENT, star.id)
         assert [line["episode_id"] for line in card["lines"]] == [ep_id]
 
     def test_alias_resolution_maps_lowercase_surface_to_the_canonical_star(
