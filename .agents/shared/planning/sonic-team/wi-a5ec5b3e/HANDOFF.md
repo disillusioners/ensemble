@@ -84,3 +84,17 @@ none — every bash call stayed under the 600 s default; the stage.sh build ran 
 MEDIUM (verdict at plan-open, unchanged). One max-1 re-dispatch consumed: M1-R (stop-ensemble.sh wrapper
 closure) — evidence-driven extension after M2 refuted the shared-script premise and identified the wrapper as
 the real mechanism. No handover raised; no override consumed.
+
+## POSTSCRIPT (2026-11-18 ~19:0xZ) — VERSION-SLOT COLLISION, FINALIZE STOP
+A concurrent lane (gc-fe-surfaces, tagger giter) cut and PUSHED v0.31.3 (tag 18:21:44Z -> bump e062f4b75)
+and STAGED releases/v0.31.3 into the live install at 18:31:35Z while our coders worked. origin/latest is
+now c48a55431 (docs gc-fe-surfaces) — moved past our verified base 2618eb212. Their release does NOT
+contain this commission's guard fix (the shared guard module is ABSENT on latest; their 0.31.3 CHANGELOG
+section is group-chat FE content only). Overlapping files base..newlatest vs ours: the 5 bump files +
+.agents/tester/PACKS.md (both lanes appended sections — keep-both on merge).
+Consequences: our local integration (tip below) is COMPLETE and verified (pack 128/128) but UNPUSHED and
+UNTAGGED by us; tag+stage are BLOCKED pending leader adjudication. Options: (a) re-slot to v0.31.4 — merge
+new latest into our integration, CHANGELOG/uv.lock re-bounce to the M4 owner, PACKS keep-both, tag, stage;
+(b) leader-authorized v0.31.3 re-cut including the fix (their release is staged-not-promoted; re-stage
+overwrites in place — cross-lane call). Sequencing vs their pending promote ceremony is leader-owned.
+Local integration tip at stop: see git log -1 HEAD (HANDOFF commit). No push of our line occurred.
