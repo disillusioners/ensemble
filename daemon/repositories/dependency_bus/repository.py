@@ -73,6 +73,12 @@ _PENDING_STATE: str = DependencyWatcherState.PENDING.value
 # ``rearm_cancelled``, Debug Phase 4 2026-09-07).
 _CANCELLED_STATE: str = DependencyWatcherState.CANCELLED.value
 
+# The DELIVERY-ONCE marker key (S1 — wake-path-carrier-fix, task 2c).
+# Carried in the EXISTING ``watcher_metadata`` JSONB column (DB column
+# ``metadata``) — no new column, no migration. The VALUE is the row's
+# own ``watch_id``, so the marker is keyed to the watch_id it claims.
+DELIVERED_WATCH_ID_KEY: str = "delivered_watch_id"
+
 
 class DependencyWatcherRepository:
     """SQLModel-based repository for the ``dependency_watchers`` table.
@@ -602,6 +608,76 @@ class DependencyWatcherRepository:
     # --------------------------------------------------------
     # STATE TRANSITION (atomic backpressure primitive)
     # --------------------------------------------------------
+
+    def mark_delivered_watch_id(self, watch_id: str) -> bool:
+        """Claim the DELIVERY-ONCE marker for ``watch_id`` (atomic).
+
+        **S1 (wake-path-carrier-fix, task 2c)** — the distinct
+        delivery marker that makes a terminal-lane FollowUp delivery
+        AT-MOST-ONCE.
+
+        The marker is written into the EXISTING ``watcher_metadata``
+        JSONB column (DB column ``metadata``) under the key
+        ``delivered_watch_id`` — **no new column, no new table, no
+        migration** — and the value is the row's own ``watch_id``, so
+        the marker is *keyed to the watch_id* it claims.
+
+        The write is a **guarded** UPDATE: the predicate is "the
+        ``delivered_watch_id`` key is absent", so two concurrent
+        delivery attempts for the same row cannot both claim it —
+        exactly one wins, the other sees ``rowcount == 0`` and must
+        treat the attempt as a no-op.
+
+        The write commits in **its own transaction** (this helper
+        opens its own session and commits) — a same-transaction write
+        spanning the claim and the caller's ``enqueue_message`` is NOT
+        implementable, because ``manager.enqueue_message`` owns its own
+        session (``instance_lifecycle.py:6015-6018``).
+
+        The JSON path predicate is rendered portably by SQLAlchemy:
+        ``metadata ->> 'delivered_watch_id'`` on PostgreSQL and
+        ``JSON_EXTRACT(metadata, '$."delivered_watch_id"')`` on SQLite
+        (the project's two drivers) — no per-dialect SQL fork.
+
+        Args:
+            watch_id: The watcher row's id (the marker's key).
+
+        Returns:
+            ``True`` iff this call claimed the marker (the caller MAY
+            enqueue). ``False`` when the marker was already present
+            (a re-enqueue attempt ⇒ the caller MUST NOT enqueue) or
+            the row does not exist.
+        """
+        with Session(self.engine) as session:
+            row = session.exec(
+                select(DependencyWatcher).where(
+                    DependencyWatcher.watch_id == watch_id
+                )
+            ).first()
+            if row is None:
+                return False
+            existing = row.watcher_metadata or {}
+            if not isinstance(existing, dict):
+                existing = {}
+            if existing.get(DELIVERED_WATCH_ID_KEY):
+                # Already claimed — a re-enqueue attempt is a no-op.
+                return False
+            merged = {**existing, DELIVERED_WATCH_ID_KEY: watch_id}
+            stmt = (
+                sa_update(DependencyWatcher)
+                .where(DependencyWatcher.watch_id == watch_id)
+                .where(
+                    DependencyWatcher.watcher_metadata[
+                        DELIVERED_WATCH_ID_KEY
+                    ]
+                    .as_string()
+                    .is_(None)
+                )
+                .values(watcher_metadata=merged)
+            )
+            result = session.execute(stmt)
+            session.commit()
+            return bool(result.rowcount)
 
     def mark_enqueued_by_source_target(
         self,

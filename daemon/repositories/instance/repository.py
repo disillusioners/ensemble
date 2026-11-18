@@ -1093,6 +1093,41 @@ class SQLModelInstanceRepository:
             rows = db_session.exec(stmt).all()
         return {row[0]: row[1] for row in rows}
 
+    def get_parent_ids(
+        self, instance_ids: list[str]
+    ) -> dict[str, str | None]:
+        """Return ``{instance_id: parent_id}`` for ``instance_ids``.
+
+        The batched sibling of :meth:`get_statuses` — one query for
+        the whole set, no N+1 read pattern.
+
+        **S1 (wake-path-carrier-fix)** — serves the ``DELIVER(w)``
+        delivery filter: the terminal lanes must know a watched
+        child's STRUCTURAL parent (the permanent ``instances.parent_id``
+        column) to decide whether a fired FollowUp may be delivered by
+        the bus at all (``DELIVER(w)`` is false when the watcher's
+        target IS the child's structural parent — that waiter is served
+        by the report lane, not by the bus).
+
+        Args:
+            instance_ids: The ids to read. An empty list returns ``{}``
+                without touching the DB.
+
+        Returns:
+            The ``parent_id`` of every id that exists (``None`` for a
+            root instance — a root has no structural parent). Unknown
+            ids are absent from the mapping.
+        """
+        if not instance_ids:
+            return {}
+        chunk = list(dict.fromkeys(instance_ids))
+        stmt = select(
+            Instance.instance_id, Instance.parent_id
+        ).where(Instance.instance_id.in_(chunk))
+        with SQLModelSession(self.engine) as db_session:
+            rows = db_session.exec(stmt).all()
+        return {row[0]: row[1] for row in rows}
+
     def find_stale_paused_instances(
         self,
         *,

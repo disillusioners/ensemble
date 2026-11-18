@@ -44,6 +44,32 @@ to the terminal-event stream) does the actual FollowUp enqueueing.
 This split keeps the bus narrow (state machine only) and makes the
 caller's enqueueing policy independently testable.
 
+Delivery durability stance (wake-path-carrier-fix, S1)
+------------------------------------------------------
+
+The terminal lanes (COMPLETED / TOOL-INVOCATION / ERROR) now fire
+the target-agnostic child-keyed watcher set through
+:meth:`DependencyBus.fire_for_terminal_child`. The BUS never
+enqueues — the CALLER does — so the delivery posture of that fire is
+part of this module's contract. The stance below is copied VERBATIM
+from the lane's plan of record
+(``.agents/shared/planning/wake-path-carrier-fix/plan-overview.md``
+§(a.5) "DELIVERY DURABILITY STANCE — EXPLICIT"):
+
+**The plan's stance, stated plainly:**
+
+1. **The target is AT-MOST-ONCE delivery, with a named, bounded at-least-once window** — **not** at-least-once and **not** "exactly-once".
+2. **Mechanism: `DELIVERY-ONCE(w)`** (§PREDICATE LEDGER) — a **distinct delivery marker** (`delivered_watch_id`) **committed BEFORE the enqueue, in its own transaction**. The "same transaction as the enqueue" phrasing was **unachievable**: `manager.enqueue_message` owns its own session (`instance_lifecycle.py:6015-6018` — *"a single transaction spanning both passes is NOT implementable because `manager.enqueue_message` owns its own session"*) and §(g) fence (r4) forbids altering it. A pre-committed marker yields exactly the **at-most-once** property this plan claims: any re-enqueue attempt observes the marker and no-ops.
+3. **Pass 1's predicate must be made sound** — today's `enqueued_at IS NULL` predicate is unsound **because `enqueued_at` semantics are ALREADY SPLIT across four write sites with two incompatible meanings** (`models.py:125-128` — the field is described as both a "stamp by the bus AFTER the caller successfully enqueued" dedup marker *and* a re-delivery marker). The plan **does not repair the split** (out of scope, and the four writers are in a contended file) — it **avoids depending on it** by using the distinct marker.
+4. **Residual, accepted and documented:** a crash in the window between the marker's own commit and the enqueue's own commit (two transactions — the only shape achievable without altering `enqueue_message`) remains at-most-once-lost. **It does not resurrect the wedge** because the row is `FIRED` and S3 no longer counts it against the park (`FULFILLABLE` excludes self-referential and terminal-child rows; a `FIRED` row is not counted at all by `count_pending_for_target`). ⇒ **the crash window degrades to a lost notification, never to a permanent park.** That is the property that matters, and it is why the durability stance is a *documented constraint* rather than a blocker.
+
+The marker lives in the EXISTING ``watcher_metadata`` JSONB column
+(DB column ``metadata``) under the key ``delivered_watch_id`` — **no
+new column, no new table, no migration**. It is claimed through
+:meth:`DependencyBus.claim_delivery`, which commits in its OWN
+transaction (the repository helper opens its own session), so the
+marker is durable BEFORE the caller's ``enqueue_message`` runs.
+
 Wiring contract
 ---------------
 
@@ -591,7 +617,44 @@ class DependencyBus:
                 the child terminates. The bus serializes it via
                 :meth:`FollowUp.to_payload` and stores the result
                 in the JSONB ``follow_up_payload`` column.
+
+        Raises:
+            Nothing — a refused arm is a LOGGED no-op, never an
+                exception (the arm sites are tool boundaries).
+
+        Note:
+            **An arm WITHOUT ``metadata["child_id"]`` is REFUSED**
+            (no row is minted). The child id is load-bearing: the
+            target-agnostic child-keyed fire
+            (:meth:`DependencyBus.fire_for_terminal_child`) matches
+            on ``follow_up_payload.metadata.child_id`` and CANNOT key
+            a row that does not carry it — an un-keyable row would sit
+            PENDING forever (the exact wedge shape this lane exists
+            to close). Both production arm lanes stamp the key — the
+            spawn / ``send_message`` lane (``daemon/tools/instance.py``
+            ``_register_child_completion_watcher``) and the nudge lane
+            (``daemon/tools/instance_ops.py``
+            ``_register_nudge_completion_watcher``) — so the refusal
+            is a no-op in production and a loud guard against a future
+            arm lane that forgets the key.
         """
+        # ── S1 (wake-path-carrier-fix, task 1b) — REFUSE an arm that
+        # cannot be keyed. The refusal is deliberately LOUD (WARNING):
+        # the arm sites do not inspect ``watch``'s return value, so a
+        # silent refusal would read as a successful arm and the missing
+        # watcher would only surface much later as a stuck parent.
+        _child_id = (follow_up.metadata or {}).get("child_id")
+        if not _child_id or not isinstance(_child_id, str):
+            logger.warning(
+                "bus watch REFUSED — follow_up.metadata.child_id is "
+                "missing; the target-agnostic child-keyed fire cannot "
+                "match this row, so no watcher is minted "
+                "(source_task_id=%s..., target=%s...)",
+                str(source_task_id)[:8],
+                follow_up.target_instance_id[:8],
+                extra={"completion_delivery_path": "bus"},
+            )
+            return
         # Phase 1 (2026-06-23): generation counter and per-parent
         # locking moved from :class:`CorrelationManager` onto the
         # bus. The counter bump is OUTSIDE any lock (plain dict
@@ -1581,6 +1644,220 @@ class DependencyBus:
             extra={"completion_delivery_path": "bus"},
         )
         return fired
+
+    async def fire_for_terminal_child(
+        self, child_instance_id: str, outcome: Outcome
+    ) -> list[FollowUp]:
+        """Fire every PENDING watcher waiting on ``child_instance_id``.
+
+        **S1 (wake-path-carrier-fix)** — the target-agnostic,
+        child-keyed fire for the terminal lanes that lacked one.
+
+        Why this method exists (the measured asymmetry): the bus had
+        three fire primitives with three different key shapes.
+
+        * ``emit_terminal(task_id)`` — keyed on ``source_task_id``
+          (the child's FINAL task). A multi-turn child's watcher was
+          registered against its FIRST task, so the key never matched
+          ⇒ the watcher stayed PENDING forever.
+        * ``emit_terminal_for_child_instance(parent, child)`` — keyed on
+          the PAIR ``(target == parent, metadata.child_id == child)``,
+          i.e. the STRUCTURAL parent. A nudger (or any non-structural
+          waiter) is never that parent ⇒ the pair is never emitted.
+        * ``fire_for_terminated_target(target)`` — keyed on
+          ``metadata.child_id`` ACROSS EVERY TARGET (the shape this
+          method has) but reachable ONLY from the TERMINATE path
+          (``instance_lifecycle._cancel_bus_watchers_for``).
+
+        ⇒ The COMPLETED, TOOL-INVOCATION and ERROR lanes had **no**
+        target-agnostic child-keyed fire at all: a watcher armed by a
+        nudger (or by any waiter that is not the child's structural
+        parent) could NEVER be fired on those lanes, and the parent's
+        ``count_pending_for_target`` gate held the park forever.
+
+        **Matcher — ``FIRE_SET(instance)``:** every PENDING row whose
+        ``follow_up_payload.metadata.child_id`` equals
+        ``child_instance_id``, across EVERY target. NO staleness
+        exclusion, NO generation counter, NO episode discrimination:
+        every matching PENDING row is a genuine waiter, so firing them
+        all is the correct semantics (two nudgers on one child = two
+        waiters = both wake). The "is this child terminal?" question
+        lives in S3's ``FULFILLABLE(w)``, not here — the two predicates
+        are complementary, not competing.
+
+        **Exactly-once:** the same primitive every other emit path
+        uses — :meth:`DependencyWatcherRepository.transition_state` is a
+        guarded ``WHERE state = 'PENDING'`` UPDATE, so a concurrent
+        emit that already fired the row yields ``rowcount == 0`` and
+        the loser skips. On the healthy spawn lane the task-keyed emit
+        (``emit_terminal``) and the pair-keyed corrective emit
+        (``emit_terminal_for_child_instance``) fire FIRST ⇒ this
+        supplementary fire sees ``rowcount == 0`` on the already-fired
+        row ⇒ **no-op**. This is a SUPPLEMENT, never a replacement.
+
+        **The bus does NOT enqueue.** This method returns the fired
+        FollowUps; the CALLER (the terminal lane) applies the
+        ``DELIVER(w)`` filter, the dead-letter skip, the
+        ``DELIVERY-ONCE`` marker claim, the enqueue and the
+        ``enqueued_at`` stamp. The bus stays a state machine.
+
+        Args:
+            child_instance_id: The instance that just reached a
+                terminal transition. Matched against the watchers'
+                ``follow_up_payload.metadata.child_id``.
+            outcome: The terminal outcome. Used for the structured log
+                lines only — the fired FollowUp's own message text is
+                NOT rewritten here (the report lane owns the message
+                content; rewriting it would double-stamp markers the
+                parent-LLM-visible payload already carries).
+
+        Returns:
+            The FollowUps atomically transitioned from PENDING to
+            FIRED by this call, each carrying the additive metadata
+            keys ``source_task_id`` (the row's task key — the caller
+            needs it to stamp ``mark_enqueued_by_source_target``; the
+            nudge arm path does NOT stamp it into the payload, so this
+            is the ``ENRICH(w)`` step) and ``watch_id`` (the row's own
+            identity — the ``DELIVERY-ONCE`` delivery marker is keyed
+            by watch_id). Empty list when no PENDING watcher was
+            waiting on this child, or when a concurrent emit already
+            fired them.
+        """
+        pending_rows = await asyncio.to_thread(
+            self._repo.fetch_pending_for_child_instance, child_instance_id
+        )
+
+        if not pending_rows:
+            logger.debug(
+                f"bus fire_for_terminal_child: child="
+                f"{child_instance_id[:8]}, outcome={outcome.status}, "
+                f"no pending watchers",
+                extra={"completion_delivery_path": "bus"},
+            )
+            return []
+
+        fired: list[FollowUp] = []
+        fired_at = self._now_iso()
+        fired_state = DependencyWatcherState.FIRED.value
+
+        for row in pending_rows:
+            task_id = row.source_task_id
+            # Serialize against a concurrent task-keyed emit_terminal
+            # on the same source task (same lock discipline as
+            # emit_terminal_for_child_instance) so the cache pop below
+            # cannot race a concurrent emit's transition.
+            lock = await self._get_lock(task_id)
+            async with lock:
+                transitioned = await asyncio.to_thread(
+                    self._repo.transition_state,
+                    row.watch_id,
+                    fired_state,
+                    fired_at,
+                )
+                if not transitioned:
+                    # rowcount == 0 — a concurrent emit (or the
+                    # healthy-path F1/F2 pair) already fired this
+                    # watcher. Skip: exactly-once delivery.
+                    logger.debug(
+                        f"bus fire_for_terminal_child: "
+                        f"watch_id={row.watch_id[:8]} already terminal "
+                        f"(skipped, no double-deliver)",
+                        extra={"completion_delivery_path": "bus"},
+                    )
+                    continue
+                fu = FollowUp.from_payload(row.follow_up_payload)
+                # Additive metadata keys only (F3's contract): the
+                # row's task key (the caller needs it to stamp the
+                # enqueue) and the row's own identity (the caller needs
+                # it to key the DELIVERY-ONCE marker). The message
+                # text is left untouched — the report lane owns the
+                # parent-visible content.
+                enriched_meta = {
+                    **fu.metadata,
+                    "source_task_id": task_id,
+                    "watch_id": row.watch_id,
+                }
+                fu = dataclass_replace(fu, metadata=enriched_meta)
+                # Persist the enriched payload onto the FIRED row so
+                # the stored row matches what was delivered (the same
+                # shape F3 persists). Best-effort: a failure leaves the
+                # row's original payload — the enrichment is additive,
+                # never load-bearing for delivery.
+                try:
+                    await asyncio.to_thread(
+                        self._repo.update_follow_up_payload,
+                        row.watch_id,
+                        fu.to_payload(),
+                    )
+                except Exception as enrich_err:
+                    logger.debug(
+                        f"bus fire_for_terminal_child: payload "
+                        f"enrichment persist failed (non-fatal) for "
+                        f"watch_id={row.watch_id[:8]}: {enrich_err}",
+                        extra={"completion_delivery_path": "bus"},
+                    )
+                fired.append(fu)
+                # Pop the cache entry for this task — its PENDING
+                # watcher(s) are now FIRED (or were already fired by a
+                # concurrent emit). Mirrors emit_terminal's cache-pop
+                # epilogue; a later watch() re-creates the entry.
+                self._pending.pop(task_id, None)
+                logger.info(
+                    f"bus fire_for_terminal_child fired: "
+                    f"child={child_instance_id[:8]}, "
+                    f"watch_id={row.watch_id[:8]}, "
+                    f"parent={fu.target_instance_id[:8]}, "
+                    f"outcome={outcome.status}",
+                    extra={"completion_delivery_path": "bus"},
+                )
+
+        logger.info(
+            f"bus fire_for_terminal_child: "
+            f"child={child_instance_id[:8]}, "
+            f"outcome={outcome.status}, "
+            f"pending_rows={len(pending_rows)}, fired={len(fired)}",
+            extra={"completion_delivery_path": "bus"},
+        )
+        return fired
+
+    async def claim_delivery(self, watch_id: str) -> bool:
+        """Claim the DELIVERY-ONCE marker for ``watch_id``.
+
+        **S1 (wake-path-carrier-fix, task 2c)** — the distinct
+        delivery marker (``delivered_watch_id``) that makes the
+        terminal-lane delivery AT-MOST-ONCE.
+
+        The marker is written into the EXISTING ``watcher_metadata``
+        JSONB column (DB column ``metadata``) — **no new column, no
+        new table, no migration** — and is committed in **its own
+        transaction** (the repository helper opens its own session).
+        The caller MUST claim BEFORE it enqueues: a same-transaction
+        write spanning the claim and the enqueue is NOT implementable
+        because ``manager.enqueue_message`` owns its own session
+        (``instance_lifecycle.py:6015-6018``), and altering that is
+        forbidden by the lane's fence (r4).
+
+        Semantics:
+
+        * ``True`` — this call claimed the marker ⇒ the caller MAY
+          enqueue.
+        * ``False`` — the marker was already present (a re-enqueue
+          attempt) or the row does not exist ⇒ the caller MUST NOT
+          enqueue (the attempt is a **no-op**).
+
+        The claim is atomic: the write is a guarded UPDATE whose
+        predicate is "the marker key is absent", so two concurrent
+        attempts cannot both claim the same row.
+
+        Args:
+            watch_id: The watcher row's id — the marker's key.
+
+        Returns:
+            ``True`` iff this call claimed the marker.
+        """
+        return await asyncio.to_thread(
+            self._repo.mark_delivered_watch_id, watch_id
+        )
 
     async def cancel_for_source(self, source_task_id: str) -> int:
         """Cancel all PENDING watchers keyed on ``source_task_id``.

@@ -36,9 +36,10 @@ defense-in-depth backstop.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from types import MethodType
+from types import MethodType, SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -47,11 +48,17 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session as SQLModelSessionLib
 from sqlmodel import SQLModel
+from sqlmodel import select as sqlmodel_select
 
+from daemon.repositories.dependency_bus import (
+    DependencyWatcher,
+    DependencyWatcherRepository,
+)
 from daemon.repositories.instance.models import (
     Instance,
     InstanceStatus,
 )
+from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.message_queue.models import (
     MessageQueue,
     MessageStatus,
@@ -67,11 +74,15 @@ from daemon.repositories.task.models import (
     TaskType,
 )
 from daemon.repositories.task.repository import TaskRepository
+from daemon.services.child_reports import ChildReportsService
+from daemon.services.dependency_bus import DependencyBus, set_dependency_bus
+from daemon.services.error_reporting import ErrorReportingService
 from daemon.services.waiting_children_watchdog import (
     WEDGE_SOURCE,
     WaitingChildrenWatchdog,
     _build_wedge_notice,
 )
+from daemon.write_pause_guard import WritePauseGuard
 
 
 # ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -855,3 +866,886 @@ class TestAliveInstanceStatusesMembership:
 # (Kept in the seam-invariant file because Pattern (d) is the
 # reconciler-level contract; this file focuses on the carrier-revival
 # + watchdog-backstop seams which are not covered there.)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# S1 (wake-path-carrier-fix) — the target-agnostic child-keyed fire
+#
+# T1 / T1b / T1c / T1d / T1e / T1f / T7.
+#
+# EVERY assertion below is OBSERVABLE ROW STATE — watcher rows
+# (``state`` / ``fired_at`` / ``enqueued_at`` / ``watcher_metadata``),
+# ``message_queue`` rows, ``instances.status`` — NEVER a log line and
+# never a string grep on the source.
+#
+# The harness drives the REAL producer paths:
+#   * COMPLETED  → ``ChildReportsService._process_child_completion_and_notify_parent``
+#                  (the real async entry point → the real DB-sync helper →
+#                  the real ``_dispatch_post_commit_side_effects``)
+#   * TOOL-INVOCATION → the same real entry point, with the tool-lane
+#                  fixture (``invoked_as_tool``)
+#   * ROOT       → the same real entry point, with a root child
+#                  (``parent_id is None``)
+#   * ERROR      → ``ErrorReportingService._send_error_report``
+#
+# The watchers are armed through the REAL arm lanes
+# (``daemon.tools.instance_ops._register_nudge_completion_watcher`` for the
+# nudge lane, ``daemon.tools.instance._register_child_completion_watcher``
+# for the spawn lane) — never by inserting rows by hand.
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def s1_bus(engine):
+    """A REAL ``DependencyBus`` over the real repository.
+
+    ``bus.start()`` is deliberately NOT called: the S1 fire and the
+    delivery both read the DB directly (the in-memory ``_pending``
+    cache is a hot-path optimization only), and the boot-time orphan
+    sweep would cancel the seeded watchers (their source task is
+    already terminal at the moment of the child's transition — the
+    production shape). The singleton is registered so the production
+    code paths find it, and cleared after the test.
+    """
+    bus = DependencyBus(DependencyWatcherRepository(engine))
+    set_dependency_bus(bus)
+    try:
+        yield bus
+    finally:
+        set_dependency_bus(None)
+
+
+class _RecordingEnqueue:
+    """A fake ``manager.enqueue_message`` that writes REAL rows.
+
+    Two jobs:
+
+    1. Write a real ``message_queue`` row so the tests can assert on
+       OBSERVABLE ROW STATE (the bus-sourced delivery rows) instead of
+       on mock call counts.
+    2. Snapshot the delivery-marker state (``watcher_metadata``
+       ``delivered_watch_id``) of every watcher row AT ENQUEUE TIME.
+       That snapshot is what proves the two-transaction ordering of
+       the DELIVERY-ONCE marker: the marker must already be committed
+       when the enqueue happens (the marker is committed BEFORE the
+       enqueue, in its own transaction).
+    """
+
+    def __init__(self, engine):
+        self.engine = engine
+        self.calls: list[dict] = []
+        self.marker_snapshots: list[dict[str, bool]] = []
+
+    async def __call__(
+        self,
+        *,
+        instance_id: str,
+        message: str,
+        source: str = "api",
+        priority: int = 1,
+        images=None,
+        metadata=None,
+        **kwargs,
+    ):
+        meta = dict(metadata or {})
+        with SQLModelSessionLib(self.engine) as s:
+            markers = {
+                row.watch_id: bool(
+                    (row.watcher_metadata or {}).get("delivered_watch_id")
+                )
+                for row in s.exec(sqlmodel_select(DependencyWatcher))
+            }
+            message_id = f"mq-{uuid.uuid4().hex[:12]}"
+            s.add(
+                MessageQueue(
+                    message_id=message_id,
+                    instance_id=instance_id,
+                    content=message,
+                    source=source,
+                    type=MessageType.COMPLETION_REPORT.value,
+                    status=MessageStatus.READY.value,
+                    priority=priority,
+                    enqueued_at=datetime.now(timezone.utc),
+                    message_metadata=meta,
+                )
+            )
+            s.commit()
+        self.calls.append(
+            {
+                "message_id": message_id,
+                "instance_id": instance_id,
+                "source": source,
+                "metadata": meta,
+                "message": message,
+            }
+        )
+        self.marker_snapshots.append(markers)
+        return SimpleNamespace(
+            message_id=message_id,
+            instance_id=instance_id,
+            status=MessageStatus.READY.value,
+        )
+
+
+@pytest.fixture
+def s1_manager(engine):
+    """A manager mock wired to the REAL engine + repositories.
+
+    Mirrors ``tests/test_child_completion_pending_task_guard.py``'s
+    minimal manager (engine + write_guard) and adds the pieces the
+    completion / error lanes read: the instance + task repositories,
+    the live hub, the queue repository (the error lane's dedup read)
+    and the recording enqueue.
+    """
+    mgr = MagicMock()
+    mgr.engine = engine
+    mgr._engine = engine
+    mgr.write_guard = WritePauseGuard()
+    mgr._instance_repository = SQLModelInstanceRepository(engine=engine)
+    mgr._task_repo = TaskRepository(engine, on_pending_task=lambda: None)
+    mgr._live_hub = MagicMock()
+    mgr._live_hub.stream_status_change = AsyncMock()
+    mgr._live_hub.stream_lifecycle = AsyncMock()
+    mgr._checkpointer = None
+    mgr.config = MagicMock()
+    mgr.config.report_repair = MagicMock()
+    mgr.config.report_repair.enabled = False
+    mgr.config.report_repair.repair_excluded_agents = []
+    mgr.config.report_repair.size_ratio_threshold = 5.0
+    mgr.config.report_repair.lookback_messages = 3
+    mgr._report_injection_pending = set()
+    # No mission-record service: the spawn arm lane would otherwise mint a
+    # MagicMock commission id and the FollowUp payload could not be
+    # JSON-serialized (the bus stores the payload as JSONB).
+    mgr.mission_record_service = None
+    queue_repo = MagicMock()
+    queue_repo.list = MagicMock(return_value=[])
+    mgr._queue_repository = queue_repo
+    mgr.enqueue_message = _RecordingEnqueue(engine)
+    return mgr
+
+
+@pytest.fixture
+def s1_service(s1_manager):
+    svc = ChildReportsService(manager=s1_manager, events_service=None)
+    s1_manager._child_reports_service = svc
+    return svc
+
+
+@pytest.fixture
+def s1_error_service(s1_manager):
+    return ErrorReportingService(manager=s1_manager, events_service=None)
+
+
+def _s1_seed_instance(
+    engine,
+    instance_id: str,
+    *,
+    parent_id: str | None = None,
+    status: str = InstanceStatus.RUNNING.value,
+    invoked_as_tool: bool = False,
+) -> str:
+    """Insert one Instance row directly via SQLModel."""
+    meta = {"invoked_as_tool": True} if invoked_as_tool else {}
+    with SQLModelSessionLib(engine) as s:
+        s.add(
+            Instance(
+                instance_id=instance_id,
+                agent_id="tester",
+                agent_dir="/tmp/tester",
+                agent_name="tester",
+                parent_id=parent_id,
+                status=status,
+                version=1,
+                instance_metadata=meta,
+            )
+        )
+        s.commit()
+    return instance_id
+
+
+def _s1_seed_task(
+    engine,
+    *,
+    instance_id: str,
+    message_id: str,
+    status: str = TaskStatus.RUNNING.value,
+) -> None:
+    """Insert one Task row (the message→task key the arm lanes resolve)."""
+    with SQLModelSessionLib(engine) as s:
+        s.add(
+            Task(
+                task_type=TaskType.PROCESS_MESSAGE.value,
+                instance_id=instance_id,
+                message_id=message_id,
+                status=status,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        s.commit()
+
+
+async def _s1_arm_nudge(
+    manager,
+    engine,
+    *,
+    nudger_instance_id: str,
+    worker_instance_id: str,
+    task_message_id: str = "nudge-msg-1",
+) -> str:
+    """Arm a watcher through the REAL nudge lane.
+
+    ``_register_nudge_completion_watcher`` is the production mint for
+    the nudge lane: the watcher's TARGET is the NUDGER (not the
+    child's structural parent) and its payload carries
+    ``metadata.child_id`` — the key the S1 matcher keys on.
+
+    The arm uses the ``injection`` lane with a RUNNING task on the
+    worker: that is the production shape at the moment the worker
+    reaches its terminal transition (its turn has run), and a RUNNING
+    task does not trip the completion producer's pending-task guard.
+    """
+    from daemon.tools.instance_ops import _register_nudge_completion_watcher
+
+    _s1_seed_task(
+        engine,
+        instance_id=worker_instance_id,
+        message_id=task_message_id,
+        status=TaskStatus.RUNNING.value,
+    )
+    minted = await _register_nudge_completion_watcher(
+        manager,
+        nudger_instance_id=nudger_instance_id,
+        worker_instance_id=worker_instance_id,
+        message_id=task_message_id,
+        lane="injection",
+    )
+    assert minted is True, (
+        f"T1 harness: the nudge arm lane must mint a watcher "
+        f"(nudger={nudger_instance_id!r}, worker={worker_instance_id!r})"
+    )
+    return task_message_id
+
+
+async def _s1_arm_spawn(
+    manager,
+    engine,
+    *,
+    parent_instance_id: str,
+    child_instance_id: str,
+    message_id: str = "spawn-msg-1",
+) -> str:
+    """Arm a watcher through the REAL spawn lane (the healthy path).
+
+    ``_register_child_completion_watcher`` is the production mint for
+    the ``send_message`` / spawn lane: the watcher's TARGET is the
+    child's STRUCTURAL parent — the waiter the report lane owns.
+    """
+    from daemon.tools.instance import _register_child_completion_watcher
+
+    _s1_seed_task(
+        engine,
+        instance_id=child_instance_id,
+        message_id=message_id,
+        status=TaskStatus.RUNNING.value,
+    )
+    result = await _register_child_completion_watcher(
+        manager,
+        parent_instance_id=parent_instance_id,
+        child_instance_id=child_instance_id,
+        message_id=message_id,
+    )
+    assert result is None, (
+        f"T1b harness: the spawn arm lane must mint a watcher without "
+        f"error (got {result!r})"
+    )
+    return message_id
+
+
+def _s1_watcher_rows(engine) -> list:
+    """Every watcher row, as plain rows (state / fired_at / metadata)."""
+    with SQLModelSessionLib(engine) as s:
+        return list(s.exec(sqlmodel_select(DependencyWatcher)))
+
+
+def _s1_watcher_for(engine, target_instance_id: str, child_id: str):
+    """The watcher row armed for ``child_id`` whose target is ``target``."""
+    for row in _s1_watcher_rows(engine):
+        meta = (row.follow_up_payload or {}).get("metadata") or {}
+        if (
+            row.target_instance_id == target_instance_id
+            and meta.get("child_id") == child_id
+        ):
+            return row
+    return None
+
+
+def _s1_bus_delivery_rows(engine, watch_id: str) -> list:
+    """The message_queue rows the BUS delivered for ``watch_id``.
+
+    A bus delivery is identifiable by the S1 enrichment the fire
+    stamps onto the FollowUp metadata (``watch_id``) — the report
+    lane's own rows never carry it.
+    """
+    with SQLModelSessionLib(engine) as s:
+        return [
+            row
+            for row in s.exec(sqlmodel_select(MessageQueue))
+            if (row.message_metadata or {}).get("watch_id") == watch_id
+        ]
+
+
+def _s1_rows_for_instance(engine, instance_id: str) -> list:
+    with SQLModelSessionLib(engine) as s:
+        return [
+            row
+            for row in s.exec(sqlmodel_select(MessageQueue))
+            if row.instance_id == instance_id
+        ]
+
+
+class TestS1TerminalChildFire:
+    """S1 — the target-agnostic child-keyed fire on the terminal lanes.
+
+    The defect being closed: the bus's three fire primitives were
+    keyed on the child's FINAL task (``emit_terminal``) or on the
+    (STRUCTURAL parent, child) PAIR (``emit_terminal_for_child_instance``),
+    and the only target-agnostic child-keyed primitive
+    (``fire_for_terminated_target``) was reachable ONLY from the
+    TERMINATE path. A watcher armed by a NUDGER therefore could never
+    be fired on the COMPLETED / TOOL-INVOCATION / ERROR lanes — its
+    target's pending count never dropped and the waiter stayed parked
+    forever.
+    """
+
+    @pytest.mark.asyncio
+    async def test_t1_completed_lane_fires_the_nudge_armed_watcher(
+        self, engine, s1_bus, s1_manager, s1_service,
+    ):
+        """T1 — a COMPLETED child fires the nudge-armed watcher.
+
+        Harness: the REAL entry point
+        ``_process_child_completion_and_notify_parent`` (→ the real
+        DB-sync helper → the real
+        ``_dispatch_post_commit_side_effects``).
+
+        Asserted OBSERVABLE STATE: the watcher's ``state`` /
+        ``fired_at``, the watcher's target's PENDING count, the
+        delivered ``message_queue`` row, and the DELIVERY-ONCE marker.
+        """
+        # The waiter (the nudger) and the child's STRUCTURAL parent
+        # are DIFFERENT instances — that difference is the whole point:
+        # the pair-keyed emit (F2) can never reach this watcher.
+        _s1_seed_instance(engine, "s1-nudger")
+        _s1_seed_instance(engine, "s1-structural-parent")
+        _s1_seed_instance(engine, "s1-child", parent_id="s1-structural-parent")
+
+        await _s1_arm_nudge(
+            s1_manager,
+            engine,
+            nudger_instance_id="s1-nudger",
+            worker_instance_id="s1-child",
+        )
+
+        watcher = _s1_watcher_for(engine, "s1-nudger", "s1-child")
+        assert watcher is not None, (
+            "T1 harness: the nudge lane must have armed a watcher for "
+            "the child"
+        )
+        watch_id = watcher.watch_id
+        assert watcher.state == "PENDING", (
+            f"T1 harness: the watcher must start PENDING (got {watcher.state!r})"
+        )
+
+        # ── Drive the REAL producer path.
+        await s1_service._process_child_completion_and_notify_parent(
+            "s1-child", "s1-final-msg"
+        )
+
+        fired = _s1_watcher_for(engine, "s1-nudger", "s1-child")
+        assert fired is not None, "T1: the watcher row must still exist"
+        assert fired.state == "FIRED", (
+            f"T1: a COMPLETED child must FIRE the nudge-armed watcher "
+            f"(state={fired.state!r})"
+        )
+        assert fired.fired_at is not None, (
+            "T1: the fired watcher must carry a fired_at timestamp"
+        )
+        # The park gate: the watcher's target no longer counts this
+        # watcher ⇒ its PENDING count dropped to zero.
+        assert s1_bus.count_pending_for_target_sync("s1-nudger") == 0, (
+            "T1: the watcher's target must have zero PENDING watchers "
+            "after the fire"
+        )
+        # The delivery: exactly ONE bus-sourced message_queue row for
+        # this watcher.
+        delivered = _s1_bus_delivery_rows(engine, watch_id)
+        assert len(delivered) == 1, (
+            f"T1: exactly ONE bus delivery expected for the fired "
+            f"watcher (got {len(delivered)})"
+        )
+        assert delivered[0].instance_id == "s1-nudger", (
+            "T1: the delivery must land on the watcher's target"
+        )
+        # The DELIVERY-ONCE marker (the distinct ``delivered_watch_id``
+        # key in the EXISTING watcher_metadata JSONB).
+        marker = (fired.watcher_metadata or {}).get("delivered_watch_id")
+        assert marker == watch_id, (
+            f"T1: the delivery marker must be keyed to the watch_id "
+            f"(got {marker!r})"
+        )
+
+    @pytest.mark.asyncio
+    async def test_t1b_healthy_spawn_path_delivers_nothing_to_the_parent(
+        self, engine, s1_bus, s1_manager, s1_service,
+    ):
+        """T1b — the healthy spawn path stays bus-free for the parent.
+
+        The structural parent armed the watcher (the REAL spawn arm
+        lane) ⇒ the watcher's target IS the child's structural parent
+        ⇒ ``DELIVER(w)`` is false ⇒ the bus must NOT deliver a
+        FollowUp to it (the report lane owns that waiter).
+        """
+        _s1_seed_instance(engine, "s1b-structural-parent")
+        _s1_seed_instance(engine, "s1b-child", parent_id="s1b-structural-parent")
+
+        await _s1_arm_spawn(
+            s1_manager,
+            engine,
+            parent_instance_id="s1b-structural-parent",
+            child_instance_id="s1b-child",
+        )
+
+        watcher = _s1_watcher_for(engine, "s1b-structural-parent", "s1b-child")
+        assert watcher is not None, (
+            "T1b harness: the spawn lane must have armed a watcher for "
+            "the child"
+        )
+        watch_id = watcher.watch_id
+
+        await s1_service._process_child_completion_and_notify_parent(
+            "s1b-child", "s1b-final-msg"
+        )
+
+        fired = _s1_watcher_for(engine, "s1b-structural-parent", "s1b-child")
+        assert fired is not None, "T1b: the watcher row must still exist"
+        assert fired.state == "FIRED", (
+            f"T1b: the healthy path must still fire the parent's watcher "
+            f"(state={fired.state!r})"
+        )
+        assert fired.fired_at is not None, (
+            "T1b: the fired watcher must carry a fired_at timestamp"
+        )
+        # The fence: NO bus-sourced delivery to the structural parent.
+        assert _s1_bus_delivery_rows(engine, watch_id) == [], (
+            "T1b: the structural parent must receive NO bus FollowUp on "
+            "the healthy path (DELIVER(w) is false)"
+        )
+        bus_sourced = [
+            row
+            for row in _s1_rows_for_instance(engine, "s1b-structural-parent")
+            if (row.message_metadata or {}).get("watch_id")
+        ]
+        assert bus_sourced == [], (
+            "T1b: no message_queue row carrying the bus enrichment may "
+            f"exist for the structural parent (got {len(bus_sourced)})"
+        )
+        # The supplementary fire did not claim a delivery for that row
+        # (the row was already FIRED by the healthy path's own emits).
+        assert not (fired.watcher_metadata or {}).get("delivered_watch_id"), (
+            "T1b: the structural parent's watcher must NOT carry the "
+            "delivery marker (the bus never delivered it)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_t1c_tool_invocation_lane_fires_the_watcher(
+        self, engine, s1_bus, s1_manager, s1_service,
+    ):
+        """T1c — the TOOL-INVOCATION lane fires the watcher too.
+
+        THE CENSUS GAP: that branch emits NO bus terminal of its own,
+        so before S1 a watcher waiting on a tool-invocation child could
+        never be fired at all.
+
+        The lane is identified by the child's own row state: the
+        tool lane stamps ``instances.status = COMPLETED`` (the regular
+        completion lane does not stamp the status in the bus-authoritative
+        era), so the status is the observable that proves which
+        producer branch ran.
+        """
+        _s1_seed_instance(engine, "s1c-nudger")
+        _s1_seed_instance(engine, "s1c-structural-parent")
+        _s1_seed_instance(
+            engine,
+            "s1c-child",
+            parent_id="s1c-structural-parent",
+            invoked_as_tool=True,
+        )
+
+        await _s1_arm_nudge(
+            s1_manager,
+            engine,
+            nudger_instance_id="s1c-nudger",
+            worker_instance_id="s1c-child",
+        )
+        watcher = _s1_watcher_for(engine, "s1c-nudger", "s1c-child")
+        assert watcher is not None, "T1c harness: the watcher must exist"
+        watch_id = watcher.watch_id
+
+        await s1_service._process_child_completion_and_notify_parent(
+            "s1c-child", "s1c-final-msg"
+        )
+
+        with SQLModelSessionLib(engine) as s:
+            child = s.get(Instance, "s1c-child")
+        assert child.status == InstanceStatus.COMPLETED.value, (
+            f"T1c harness: the tool lane must have run (the child must be "
+            f"COMPLETED, got {child.status!r})"
+        )
+        fired = _s1_watcher_for(engine, "s1c-nudger", "s1c-child")
+        assert fired is not None, "T1c: the watcher row must still exist"
+        assert fired.state == "FIRED", (
+            f"T1c: a tool-invocation child must FIRE the nudge-armed "
+            f"watcher (state={fired.state!r})"
+        )
+        assert fired.fired_at is not None, (
+            "T1c: the fired watcher must carry a fired_at timestamp"
+        )
+        assert s1_bus.count_pending_for_target_sync("s1c-nudger") == 0, (
+            "T1c: the watcher's target must have zero PENDING watchers"
+        )
+        assert len(_s1_bus_delivery_rows(engine, watch_id)) == 1, (
+            "T1c: exactly ONE bus delivery expected for the fired watcher"
+        )
+
+    @pytest.mark.asyncio
+    async def test_t1d_two_nudgers_both_fire_and_a_stale_row_fires_once(
+        self, engine, s1_bus, s1_manager, s1_service,
+    ):
+        """T1d — the plain matcher's semantics.
+
+        Two nudgers on the SAME child are two genuine waiters ⇒ BOTH
+        must wake (two waiters, two wakes). The stale-but-PENDING row
+        (an earlier episode's watcher on the same child) fires
+        EXACTLY ONCE: the guarded ``WHERE state='PENDING'`` UPDATE
+        makes every later fire a no-op, so its ``fired_at`` is stable
+        and it never delivers twice.
+        """
+        _s1_seed_instance(engine, "s1d-nudger-a")
+        _s1_seed_instance(engine, "s1d-nudger-b")
+        _s1_seed_instance(engine, "s1d-stale-nudger")
+        _s1_seed_instance(engine, "s1d-structural-parent")
+        _s1_seed_instance(engine, "s1d-child", parent_id="s1d-structural-parent")
+
+        await _s1_arm_nudge(
+            s1_manager,
+            engine,
+            nudger_instance_id="s1d-nudger-a",
+            worker_instance_id="s1d-child",
+            task_message_id="s1d-msg-a",
+        )
+        await _s1_arm_nudge(
+            s1_manager,
+            engine,
+            nudger_instance_id="s1d-nudger-b",
+            worker_instance_id="s1d-child",
+            task_message_id="s1d-msg-b",
+        )
+        # The STALE row: armed in an earlier episode on the same child
+        # (its source task is already terminal — the live row 8a1f60d7
+        # shape). It is a genuine PENDING waiter by the plain matcher.
+        await _s1_arm_nudge(
+            s1_manager,
+            engine,
+            nudger_instance_id="s1d-stale-nudger",
+            worker_instance_id="s1d-child",
+            task_message_id="s1d-msg-stale",
+        )
+
+        row_a = _s1_watcher_for(engine, "s1d-nudger-a", "s1d-child")
+        row_b = _s1_watcher_for(engine, "s1d-nudger-b", "s1d-child")
+        row_stale = _s1_watcher_for(engine, "s1d-stale-nudger", "s1d-child")
+        assert row_a and row_b and row_stale, (
+            "T1d harness: all three watchers must be armed"
+        )
+
+        await s1_service._process_child_completion_and_notify_parent(
+            "s1d-child", "s1d-final-msg"
+        )
+
+        for label, row in (
+            ("nudger-a", row_a),
+            ("nudger-b", row_b),
+            ("stale", row_stale),
+        ):
+            fresh = _s1_watcher_for(engine, row.target_instance_id, "s1d-child")
+            assert fresh.state == "FIRED", (
+                f"T1d: the {label} waiter must be FIRED "
+                f"(state={fresh.state!r})"
+            )
+            assert fresh.fired_at is not None, (
+                f"T1d: the {label} waiter must carry a fired_at timestamp"
+            )
+
+        # Each waiter got exactly ONE delivery.
+        for label, row in (
+            ("nudger-a", row_a),
+            ("nudger-b", row_b),
+            ("stale", row_stale),
+        ):
+            delivered = _s1_bus_delivery_rows(engine, row.watch_id)
+            assert len(delivered) == 1, (
+                f"T1d: the {label} waiter must receive exactly ONE "
+                f"delivery (got {len(delivered)})"
+            )
+
+        # The stale row fires EXACTLY ONCE: a second terminal transition
+        # must not re-stamp it and must not deliver again.
+        stale_fired_at = _s1_watcher_for(
+            engine, "s1d-stale-nudger", "s1d-child"
+        ).fired_at
+        await s1_service._fire_terminal_child_and_deliver(
+            "s1d-child", "completed"
+        )
+        stale_after = _s1_watcher_for(engine, "s1d-stale-nudger", "s1d-child")
+        assert stale_after.fired_at == stale_fired_at, (
+            "T1d: the stale row must fire exactly once (its fired_at "
+            "must not be re-stamped by a later fire)"
+        )
+        assert len(
+            _s1_bus_delivery_rows(engine, stale_after.watch_id)
+        ) == 1, (
+            "T1d: the stale row must never deliver twice"
+        )
+
+    @pytest.mark.asyncio
+    async def test_t1e_error_lane_fires_the_nudge_armed_watcher(
+        self, engine, s1_bus, s1_manager, s1_service, s1_error_service,
+    ):
+        """T1e — the ERROR lane fires the watcher too.
+
+        Harness: the REAL ``ErrorReportingService._send_error_report``
+        path (not a direct bus call) — the ERROR lane emits F1 + F2
+        only, so before S1 a nudge-armed watcher on an erroring child
+        could never be fired (strictly worse than the completion
+        wedge: the mission-HOLD guards block every commission
+        abandonment while a PENDING watcher exists).
+        """
+        _s1_seed_instance(engine, "s1e-nudger")
+        _s1_seed_instance(engine, "s1e-structural-parent")
+        _s1_seed_instance(engine, "s1e-child", parent_id="s1e-structural-parent")
+
+        await _s1_arm_nudge(
+            s1_manager,
+            engine,
+            nudger_instance_id="s1e-nudger",
+            worker_instance_id="s1e-child",
+        )
+        watcher = _s1_watcher_for(engine, "s1e-nudger", "s1e-child")
+        assert watcher is not None, "T1e harness: the watcher must exist"
+        watch_id = watcher.watch_id
+
+        await s1_error_service._send_error_report(
+            "s1e-child",
+            "boom — the child failed",
+            error_type="max_retries_exceeded",
+            message_id="s1e-err-msg",
+        )
+
+        fired = _s1_watcher_for(engine, "s1e-nudger", "s1e-child")
+        assert fired is not None, "T1e: the watcher row must still exist"
+        assert fired.state == "FIRED", (
+            f"T1e: an erroring child must FIRE the nudge-armed watcher "
+            f"(state={fired.state!r})"
+        )
+        assert fired.fired_at is not None, (
+            "T1e: the fired watcher must carry a fired_at timestamp"
+        )
+        assert s1_bus.count_pending_for_target_sync("s1e-nudger") == 0, (
+            "T1e: the watcher's target must have zero PENDING watchers"
+        )
+        assert len(_s1_bus_delivery_rows(engine, watch_id)) == 1, (
+            "T1e: exactly ONE bus delivery expected for the fired watcher"
+        )
+        assert (fired.watcher_metadata or {}).get(
+            "delivered_watch_id"
+        ) == watch_id, (
+            "T1e: the delivery marker must be keyed to the watch_id"
+        )
+
+    @pytest.mark.asyncio
+    async def test_t1f_root_child_lane_fires_the_nudge_armed_watcher(
+        self, engine, s1_bus, s1_manager, s1_service,
+    ):
+        """T1f — a ROOT child's nudge-armed watcher fires.
+
+        The root lane emits NO bus terminal of its own (the producer
+        stamps ``parent_id=None``), so before S1 a nudge-armed watcher
+        on a root child had no fire anywhere on that lane.
+
+        The lane is identified by the child's own row state: the root
+        lane stamps ``instances.status = COMPLETED``.
+        """
+        _s1_seed_instance(engine, "s1f-nudger")
+        _s1_seed_instance(engine, "s1f-root-child", parent_id=None)
+
+        await _s1_arm_nudge(
+            s1_manager,
+            engine,
+            nudger_instance_id="s1f-nudger",
+            worker_instance_id="s1f-root-child",
+        )
+        watcher = _s1_watcher_for(engine, "s1f-nudger", "s1f-root-child")
+        assert watcher is not None, "T1f harness: the watcher must exist"
+        watch_id = watcher.watch_id
+
+        await s1_service._process_child_completion_and_notify_parent(
+            "s1f-root-child", "s1f-final-msg"
+        )
+
+        with SQLModelSessionLib(engine) as s:
+            child = s.get(Instance, "s1f-root-child")
+        assert child.status == InstanceStatus.COMPLETED.value, (
+            f"T1f harness: the root lane must have run (the root child "
+            f"must be COMPLETED, got {child.status!r})"
+        )
+        fired = _s1_watcher_for(engine, "s1f-nudger", "s1f-root-child")
+        assert fired is not None, "T1f: the watcher row must still exist"
+        assert fired.state == "FIRED", (
+            f"T1f: a ROOT child's nudge-armed watcher must be FIRED "
+            f"(state={fired.state!r})"
+        )
+        assert fired.fired_at is not None, (
+            "T1f: the fired watcher must carry a fired_at timestamp"
+        )
+        assert s1_bus.count_pending_for_target_sync("s1f-nudger") == 0, (
+            "T1f: the watcher's target must have zero PENDING watchers"
+        )
+        assert len(_s1_bus_delivery_rows(engine, watch_id)) == 1, (
+            "T1f: exactly ONE bus delivery expected for the fired watcher"
+        )
+
+    @pytest.mark.asyncio
+    async def test_t7_healthy_path_fence_and_delivery_once_ordering(
+        self, engine, s1_bus, s1_manager, s1_service,
+    ):
+        """T7 — the fence: the healthy path is observably unchanged.
+
+        Two waiters on one child: the STRUCTURAL parent (the healthy
+        spawn lane) and a NUDGER. The healthy path must:
+
+        * still fire the parent's watcher (the parent's park gate is
+          released — ``count_pending_for_target`` drops to 0);
+        * deliver NOTHING bus-sourced to the structural parent
+          (``DELIVER(w)`` is false — the report lane owns it);
+        * deliver EXACTLY ONE bus-sourced row to the nudger;
+        * carry the DELIVERY-ONCE marker on the delivered row, keyed to
+          its watch_id, and the marker must ALREADY be committed when
+          the enqueue happens (the two-transaction ordering: the
+          marker is committed BEFORE the enqueue, in its own
+          transaction).
+        """
+        _s1_seed_instance(engine, "t7-structural-parent")
+        _s1_seed_instance(engine, "t7-child", parent_id="t7-structural-parent")
+        _s1_seed_instance(engine, "t7-nudger")
+
+        await _s1_arm_spawn(
+            s1_manager,
+            engine,
+            parent_instance_id="t7-structural-parent",
+            child_instance_id="t7-child",
+        )
+        await _s1_arm_nudge(
+            s1_manager,
+            engine,
+            nudger_instance_id="t7-nudger",
+            worker_instance_id="t7-child",
+            task_message_id="t7-nudge-msg",
+        )
+
+        spawn_row = _s1_watcher_for(engine, "t7-structural-parent", "t7-child")
+        nudge_row = _s1_watcher_for(engine, "t7-nudger", "t7-child")
+        assert spawn_row and nudge_row, (
+            "T7 harness: both the spawn-lane and the nudge-lane watcher "
+            "must be armed"
+        )
+
+        await s1_service._process_child_completion_and_notify_parent(
+            "t7-child", "t7-final-msg"
+        )
+
+        # (i) The healthy path still fires the parent's watcher.
+        spawn_fired = _s1_watcher_for(engine, "t7-structural-parent", "t7-child")
+        assert spawn_fired.state == "FIRED", (
+            f"T7: the healthy path must still fire the parent's watcher "
+            f"(state={spawn_fired.state!r})"
+        )
+        assert spawn_fired.fired_at is not None, (
+            "T7: the parent's fired watcher must carry a fired_at timestamp"
+        )
+        # The park gate that holds the parent in WAITING_CHILDREN is
+        # released (the bus no longer counts the parent as waiting).
+        assert s1_bus.count_pending_for_target_sync("t7-structural-parent") == 0, (
+            "T7: the parent's PENDING count must be 0 after the child's "
+            "completion (the park gate is released)"
+        )
+
+        # (ii) NO bus-sourced row to the structural parent.
+        parent_bus_rows = [
+            row
+            for row in _s1_rows_for_instance(engine, "t7-structural-parent")
+            if (row.message_metadata or {}).get("watch_id")
+        ]
+        assert parent_bus_rows == [], (
+            "T7: the structural parent must receive NO bus-sourced row "
+            f"(got {len(parent_bus_rows)})"
+        )
+        assert _s1_bus_delivery_rows(engine, spawn_fired.watch_id) == [], (
+            "T7: the spawn-lane watcher must not be delivered by the bus"
+        )
+
+        # (iii) EXACTLY ONE delivery for the nudger's watcher.
+        nudge_fired = _s1_watcher_for(engine, "t7-nudger", "t7-child")
+        assert nudge_fired.state == "FIRED", (
+            f"T7: the nudge-armed watcher must be FIRED "
+            f"(state={nudge_fired.state!r})"
+        )
+        assert nudge_fired.fired_at is not None, (
+            "T7: the nudge-armed watcher must carry a fired_at timestamp"
+        )
+        delivered = _s1_bus_delivery_rows(engine, nudge_fired.watch_id)
+        assert len(delivered) == 1, (
+            f"T7: EXACTLY ONE bus delivery expected for the nudge-armed "
+            f"watcher (got {len(delivered)})"
+        )
+        assert delivered[0].instance_id == "t7-nudger", (
+            "T7: the delivery must land on the nudger"
+        )
+
+        # (iv) The DELIVERY-ONCE marker: keyed to the watch_id and
+        # committed BEFORE the message_queue row appeared.
+        marker = (nudge_fired.watcher_metadata or {}).get("delivered_watch_id")
+        assert marker == nudge_fired.watch_id, (
+            f"T7: the delivery marker must be keyed to the watch_id "
+            f"(got {marker!r})"
+        )
+        # The ordering proof: at the moment the enqueue happened, the
+        # marker was ALREADY committed on the row (the fake enqueue
+        # snapshotted the marker state of every watcher row at enqueue
+        # time).
+        enqueue_snapshots = s1_manager.enqueue_message.marker_snapshots
+        bus_enqueues = [
+            (call, snapshot)
+            for call, snapshot in zip(
+                s1_manager.enqueue_message.calls, enqueue_snapshots
+            )
+            if (call["metadata"] or {}).get("watch_id")
+        ]
+        assert bus_enqueues, (
+            "T7 harness: the bus delivery must have called enqueue_message"
+        )
+        for call, snapshot in bus_enqueues:
+            assert snapshot.get(nudge_fired.watch_id) is True, (
+                "T7: the delivery marker must be committed BEFORE the "
+                "enqueue (two-transaction ordering)"
+            )
