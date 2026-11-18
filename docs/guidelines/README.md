@@ -152,6 +152,8 @@ Rules of the lifecycle:
 | `guideline-live-views-passcode.md` | Live-views passcode + session-bypass gate | base v0.26-era; gate rewrite v0.29.7 |
 | `guideline-notify-user-bounds.md` | `notify_user` bounds & doctrine | v0.26.x–v0.27.x era (ari-voice) |
 
+Later additions (not part of the original seed set): `guideline-prompt-reload-compact-note.md` (v0.31.x era, merged upstream of this lane) and `guideline-pok-durable-vs-rolling-state.md` (this lane).
+
 Each is template-shaped and self-contained. All three were verified against
 the v0.30.0-era tree (origin/latest @ `ee2b46d3b` / stage worktree
 `ensemble-src-wt-stage-v0300`) except where marked `UNVERIFIED:` inline.
