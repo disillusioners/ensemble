@@ -1944,3 +1944,427 @@ class TestS2NudgeArmGuardAndOrdering:
             "watcher mint is strictly after the committed enqueue"
         )
         assert _s1_rows_for_instance(engine, worker) == []
+
+
+# ═════════════════════════════════════════════════════════════════════
+# S3 (wake-path-carrier-fix, phase 3) — the QUALIFIED park count.
+#
+# PARK(parent) = count_fulfillable_pending_for_target(parent) > 0.
+# The raw count could not tell an unfulfillable backlog (child already
+# terminal, or self-referential) from a genuine in-flight wait, so a
+# stale watcher held the park forever.
+#
+# FULFILLABLE(w) = NOT (child_id == target_instance_id)
+#                  AND (child_id IS NULL
+#                       OR status-of(child_id) NOT IN INSTANCE_TERMINAL_SET)
+#
+# Fail-CLOSED: every uncertainty counts the row as fulfillable (the
+# park HOLDS; releasing a park requires proof).
+# ═════════════════════════════════════════════════════════════════════
+
+
+def _s3_seed_watcher(
+    engine,
+    *,
+    target_instance_id: str,
+    child_id: str | None = None,
+    source_task_id: str = "s3-src-task",
+    state: str = "PENDING",
+) -> str:
+    """Insert one ``dependency_watchers`` row directly (row state only)."""
+    metadata = {} if child_id is None else {"child_id": child_id}
+    watch_id = f"w-{uuid.uuid4().hex[:12]}"
+    with SQLModelSessionLib(engine) as s:
+        row = DependencyWatcher(
+            watch_id=watch_id,
+            source_task_id=source_task_id,
+            target_instance_id=target_instance_id,
+            follow_up_payload={
+                "message": "nudge: the child finished",
+                "source": "internal_agent:s3-nudger",
+                "metadata": metadata,
+            },
+            state=state,
+            created_at=datetime.now(timezone.utc),
+        )
+        s.add(row)
+        s.commit()
+    return watch_id
+
+
+def _s3_instance_status(engine, instance_id: str) -> str | None:
+    with SQLModelSessionLib(engine) as s:
+        row = s.get(Instance, instance_id)
+        return row.status if row is not None else None
+
+
+class TestS3QualifiedParkCount:
+    """S3 — the qualified park count + the fail-closed table."""
+
+    async def test_failclosed_child_id_null_is_fulfillable(
+        self, engine, s1_bus
+    ):
+        """Row 1 — ``child_id`` IS NULL ⇒ FULFILLABLE (fail-open here
+        would release a park while a child may be in flight)."""
+        _s3_seed_watcher(engine, target_instance_id="s3-null", child_id=None)
+
+        assert s1_bus.count_fulfillable_pending_for_target_sync(
+            "s3-null"
+        ) == 1, (
+            "S3: a watcher with no child_id must count as fulfillable "
+            "(the park holds)"
+        )
+
+    async def test_failclosed_missing_child_row_is_fulfillable(
+        self, engine, s1_bus
+    ):
+        """Row 2 — the child's instance row is MISSING ⇒ FULFILLABLE."""
+        _s3_seed_watcher(
+            engine, target_instance_id="s3-missing", child_id="s3-gone"
+        )
+
+        assert s1_bus.count_fulfillable_pending_for_target_sync(
+            "s3-missing"
+        ) == 1, (
+            "S3: a watcher whose child row is missing must count as "
+            "fulfillable (fail-closed)"
+        )
+
+    async def test_failclosed_ghost_child_is_fulfillable(
+        self, engine, s1_bus
+    ):
+        """Row 3 — a GHOST child (idle, version=1, no msgs/tasks) ⇒
+        FULFILLABLE (``idle`` ∉ INSTANCE_TERMINAL_SET)."""
+        _s1_seed_instance(
+            engine, "s3-ghost-child", status="idle"
+        )
+        _s3_seed_watcher(
+            engine, target_instance_id="s3-ghost", child_id="s3-ghost-child"
+        )
+
+        assert s1_bus.count_fulfillable_pending_for_target_sync(
+            "s3-ghost"
+        ) == 1, (
+            "S3: a ghost child (idle) must count as fulfillable"
+        )
+
+    async def test_failclosed_status_read_raises_is_fulfillable(
+        self, engine, s1_bus, monkeypatch
+    ):
+        """Row 4 — the status read RAISES ⇒ every row counts as
+        FULFILLABLE (fail-closed: the park holds)."""
+        _s1_seed_instance(
+            engine, "s3-raise-child", status="running"
+        )
+        _s3_seed_watcher(
+            engine, target_instance_id="s3-raise", child_id="s3-raise-child"
+        )
+
+        def _boom(self, instance_ids):
+            raise RuntimeError("status read exploded")
+
+        monkeypatch.setattr(
+            SQLModelInstanceRepository, "get_statuses", _boom
+        )
+
+        assert s1_bus.count_fulfillable_pending_for_target_sync(
+            "s3-raise"
+        ) == 1, (
+            "S3: a failing status read must count the row as fulfillable "
+            "(fail-closed — the park holds)"
+        )
+
+    async def test_self_referential_watcher_is_excluded(
+        self, engine, s1_bus
+    ):
+        """Row 5 — ``child_id == target_instance_id`` ⇒ NOT FULFILLABLE
+        — the ONLY positive exclusion."""
+        _s1_seed_instance(engine, "s3-self", status="running")
+        _s3_seed_watcher(
+            engine, target_instance_id="s3-self", child_id="s3-self"
+        )
+
+        assert s1_bus.count_fulfillable_pending_for_target_sync(
+            "s3-self"
+        ) == 0, (
+            "S3: a self-referential watcher must NOT count (it can never "
+            "be fulfilled — the park must not be held by it)"
+        )
+        # The RAW count still sees it — the qualification is what changed.
+        assert s1_bus.count_pending_for_target_sync("s3-self") == 1
+
+    async def test_terminal_child_is_not_fulfillable(self, engine, s1_bus):
+        """The positive exclusion's counterpart — a TERMINAL child makes
+        the row unfulfillable (the park is released)."""
+        _s1_seed_instance(
+            engine, "s3-dead-child", status="completed"
+        )
+        _s3_seed_watcher(
+            engine, target_instance_id="s3-dead", child_id="s3-dead-child"
+        )
+
+        assert s1_bus.count_pending_for_target_sync("s3-dead") == 1, (
+            "S3 harness: the RAW count must still see the row"
+        )
+        assert s1_bus.count_fulfillable_pending_for_target_sync(
+            "s3-dead"
+        ) == 0, (
+            "S3: a watcher whose child is already terminal must NOT "
+            "count (the park is released)"
+        )
+
+
+class TestS3ParkDoors:
+    """S3 — the park DOORS: the qualified predicate switched at every
+    park site, with the fence (a genuinely-pending FULFILLABLE watcher
+    still parks)."""
+
+    async def test_t3_root_completion_releases_unfulfillable_backlog(
+        self, engine, s1_bus, s1_manager, s1_service
+    ):
+        """T3 — the NON-VACUOUS case: the REAL root completion chain.
+
+        Fixture: a nudge-armed, NON-tree-linked watcher whose child is
+        already TERMINAL; RAW_PARK(root) is still true; the root has
+        zero non-terminal children.
+
+        Chain driven (all REAL):
+            ``_process_child_completion_and_notify_parent`` (producer)
+              → ``_process_child_completion_db_sync`` (R2/R3/R4 gates)
+              → the ``root_completed`` emission branch
+              → ``_root_completion_gate`` (the D-1 leg)
+              → the WAITING_CHILDREN downgrade write.
+
+        WITHOUT the qualified count the D-1 leg reads raw>0 (backlog)
+        and downgrades the root back to WAITING_CHILDREN — the park
+        persists. WITH it, the root COMPLETES.
+        """
+        root = "t3-root"
+        _s1_seed_instance(engine, root, parent_id=None)
+        # The watched child is TERMINAL and NOT tree-linked to the root
+        # (a nudge watcher is not a tree edge).
+        _s1_seed_instance(
+            engine, "t3-dead-child", parent_id=None, status="completed"
+        )
+        _s3_seed_watcher(
+            engine, target_instance_id=root, child_id="t3-dead-child"
+        )
+
+        # The RAW park precondition — the defect's input (the RAW
+        # count is the pre-S3 shape, so this assert holds in BOTH the
+        # fixed and the counter-mutated code: it documents the
+        # fixture, it does not carry the test).
+        assert s1_bus.count_pending_for_target_sync(root) == 1, (
+            "T3 harness: RAW_PARK(root) must still be true (the raw "
+            "count sees the unfulfillable backlog)"
+        )
+
+        await s1_service._process_child_completion_and_notify_parent(
+            root, "t3-root-final-msg"
+        )
+
+        # THE CHAIN ASSERTIONS (first, deliberately): the root must
+        # NOT be parked and MUST have completed through the REAL
+        # chain. Under the counter-mutation (the qualified count
+        # reverted to the raw count) this is the assert that reddens
+        # — the chain itself parks the root.
+        status = _s3_instance_status(engine, root)
+        assert status != "waiting_children", (
+            f"T3: an unfulfillable backlog must NOT park the root "
+            f"(status={status!r})"
+        )
+        assert status == "completed", (
+            f"T3: the root must COMPLETE through the full chain "
+            f"(status={status!r})"
+        )
+        # The fixture fact (post-chain): the backlog is unfulfillable,
+        # so the qualified count is zero.
+        assert s1_bus.count_fulfillable_pending_for_target_sync(root) == 0, (
+            "T3 harness: the qualified count must be zero (the backlog "
+            "is unfulfillable — its child is already terminal)"
+        )
+        # The backlog is still on the books — the release came from the
+        # QUALIFICATION, not from the watcher disappearing.
+        assert s1_bus.count_pending_for_target_sync(root) == 1, (
+            "T3: the watcher row must still exist (the park was "
+            "released by the qualified count, not by a delete)"
+        )
+
+    async def test_t3_fence_r1_park_holds_for_fulfillable_watcher(
+        self, engine, s1_bus, s1_manager
+    ):
+        """T3 fence (R1) — a genuinely-pending FULFILLABLE watcher still
+        parks: the REAL ``_maybe_transition_to_waiting_children`` writes
+        WAITING_CHILDREN."""
+        from daemon.services.message_processing_pipeline import (
+            MessageProcessingPipeline,
+        )
+
+        root = "t3-fence-root"
+        _s1_seed_instance(engine, root, parent_id=None)
+        # A LIVE (running) child ⇒ the watcher IS fulfillable.
+        _s1_seed_instance(
+            engine, "t3-live-child", parent_id=None, status="running"
+        )
+        _s3_seed_watcher(
+            engine, target_instance_id=root, child_id="t3-live-child"
+        )
+
+        pipeline = MessageProcessingPipeline(
+            execution_gate=MagicMock(), manager=s1_manager
+        )
+        transitioned = await pipeline._maybe_transition_to_waiting_children(
+            root
+        )
+
+        assert transitioned is True, (
+            "T3 fence: a FULFILLABLE pending watcher must still park "
+            "the parent (R1)"
+        )
+        assert _s3_instance_status(engine, root) == "waiting_children", (
+            "T3 fence: the parent must be WAITING_CHILDREN"
+        )
+
+    async def test_t3_fence_r1_no_park_for_unfulfillable_backlog(
+        self, engine, s1_bus, s1_manager
+    ):
+        """T3 fence (R1, negative) — an UNFULFILLABLE-only backlog does
+        NOT park: the same REAL helper returns False and the status
+        stays RUNNING."""
+        from daemon.services.message_processing_pipeline import (
+            MessageProcessingPipeline,
+        )
+
+        root = "t3-nopark-root"
+        _s1_seed_instance(engine, root, parent_id=None)
+        _s1_seed_instance(
+            engine, "t3-nopark-dead", parent_id=None, status="completed"
+        )
+        _s3_seed_watcher(
+            engine, target_instance_id=root, child_id="t3-nopark-dead"
+        )
+
+        pipeline = MessageProcessingPipeline(
+            execution_gate=MagicMock(), manager=s1_manager
+        )
+        transitioned = await pipeline._maybe_transition_to_waiting_children(
+            root
+        )
+
+        assert transitioned is False, (
+            "T3: an unfulfillable backlog must NOT park the parent (R1)"
+        )
+        assert _s3_instance_status(engine, root) == "running", (
+            "T3: the parent must stay RUNNING (no park written)"
+        )
+
+    async def test_t3_fence_r4_same_tx_gate_still_parks(
+        self, engine, s1_bus, s1_manager, s1_service
+    ):
+        """T3 fence (R4) — the in-transaction gate still parks on a
+        FULFILLABLE watcher: driving the REAL producer leaves the root
+        un-completed (deferred), never COMPLETED."""
+        root = "t3-r4-root"
+        _s1_seed_instance(engine, root, parent_id=None)
+        _s1_seed_instance(
+            engine, "t3-r4-live", parent_id=None, status="running"
+        )
+        _s3_seed_watcher(
+            engine, target_instance_id=root, child_id="t3-r4-live"
+        )
+
+        assert s1_bus.count_fulfillable_pending_for_target_sync(root) == 1
+
+        await s1_service._process_child_completion_and_notify_parent(
+            root, "t3-r4-final-msg"
+        )
+
+        status = _s3_instance_status(engine, root)
+        assert status != "completed", (
+            f"T3 fence (R4): a FULFILLABLE pending watcher must still "
+            f"hold the root (status={status!r})"
+        )
+
+
+
+class TestS3HealerBusLegs:
+    """S3 — the healer's bus legs (R5 refusal + R6 reconcile-zone skip).
+
+    The healer's legs read the SAME qualified count, so an
+    unfulfillable-only backlog must not hold the heal.
+    """
+
+    @staticmethod
+    def _healer(manager):
+        from daemon.services.mission_strand_healer import (
+            MissionStrandHealer,
+        )
+
+        return MissionStrandHealer(
+            manager=manager, interval_seconds=300
+        )
+
+    async def test_r5_healer_does_not_refuse_on_unfulfillable_backlog(
+        self, engine, s1_bus, s1_manager
+    ):
+        """R5 — the healer's zero-obligation bus leg refuses with
+        ``reason=bus_pending=N`` on the RAW count. With the qualified
+        count an unfulfillable-only backlog must NOT refuse the heal."""
+        root = "s3-heal-root"
+        _s1_seed_instance(engine, root, parent_id=None)
+        _s1_seed_instance(
+            engine, "s3-heal-dead", parent_id=None, status="completed"
+        )
+        _s3_seed_watcher(
+            engine, target_instance_id=root, child_id="s3-heal-dead"
+        )
+
+        # Fixture shape proof: the RAW count WOULD have refused.
+        assert s1_bus.count_pending_for_target_sync(root) == 1, (
+            "R5 harness: the raw count must see the backlog"
+        )
+        assert s1_bus.count_fulfillable_pending_for_target_sync(root) == 0
+
+        healer = self._healer(s1_manager)
+        outcome: dict = {}
+        try:
+            outcome = await healer._heal_instance_locked(root)
+        except Exception as exc:  # noqa: BLE001 — the drive leg may fail
+            outcome = {"raised": type(exc).__name__}
+
+        assert not str(outcome.get("reason", "")).startswith(
+            "bus_pending"
+        ), (
+            f"R5: the healer must not refuse on an unfulfillable "
+            f"backlog (outcome={outcome!r})"
+        )
+
+    async def test_r6_reconcile_zone_does_not_skip_on_unfulfillable_backlog(
+        self, engine, s1_bus, s1_manager
+    ):
+        """R6 — the reconcile-zone bus probe skips with
+        ``reason=bus-pending`` on the RAW count; the qualified count
+        must not produce that skip."""
+        root = "s3-rz-root"
+        _s1_seed_instance(engine, root, parent_id=None)
+        _s1_seed_instance(
+            engine, "s3-rz-dead", parent_id=None, status="completed"
+        )
+        _s3_seed_watcher(
+            engine, target_instance_id=root, child_id="s3-rz-dead"
+        )
+
+        assert s1_bus.count_pending_for_target_sync(root) == 1
+        assert s1_bus.count_fulfillable_pending_for_target_sync(root) == 0
+
+        healer = self._healer(s1_manager)
+        outcome: dict = {}
+        try:
+            outcome = await healer._heal_running_zombie_locked(root)
+        except Exception as exc:  # noqa: BLE001
+            outcome = {"raised": type(exc).__name__}
+
+        assert "bus" not in str(outcome.get("reason", "")).lower(), (
+            f"R6: the reconcile-zone probe must not skip on an "
+            f"unfulfillable backlog (outcome={outcome!r})"
+        )

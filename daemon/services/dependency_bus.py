@@ -406,6 +406,60 @@ async def cancel_bus_watchers_for_task_async(
 # -------------------------------------------------------------------------
 
 
+# ── S3 (wake-path-carrier-fix, phase 3) — the park-predicate vocabulary ────
+#
+# Frozen per the lane's predicate ledger — implement VERBATIM, no
+# re-derivation:
+#
+# * ``INSTANCE_TERMINAL_SET`` — INSTANCE-status values ONLY (never
+#   task statuses; the task vocabulary lacks ``terminated``/``error``).
+# * ``FULFILLABLE(w)`` =
+#       NOT (w.follow_up_payload.metadata.child_id == w.target_instance_id)
+#       AND (w.follow_up_payload.metadata.child_id IS NULL
+#            OR instance-status-of(w.follow_up_payload.metadata.child_id)
+#               NOT IN INSTANCE_TERMINAL_SET)
+# * ``PARK(parent)`` = count_fulfillable_pending_for_target(parent) > 0
+INSTANCE_TERMINAL_SET: frozenset[str] = frozenset(
+    {"completed", "terminated", "error", "failed"}
+)
+
+
+def _watched_child_id_of(row: Any) -> str | None:
+    """Extract ``follow_up_payload.metadata.child_id`` (None-safe)."""
+    payload = getattr(row, "follow_up_payload", None)
+    if not isinstance(payload, dict):
+        return None
+    meta = payload.get("metadata")
+    if not isinstance(meta, dict):
+        return None
+    child_id = meta.get("child_id")
+    return child_id if isinstance(child_id, str) and child_id else None
+
+
+def watcher_row_is_fulfillable(
+    row: Any,
+    child_statuses: dict[str, str],
+) -> bool:
+    """FULFILLABLE(w) — the pure per-row predicate (S3).
+
+    ``child_statuses`` is the batched by-id ``get_statuses`` map; an
+    id ABSENT from the map (instance row missing, or the whole read
+    failed upstream) counts as FULFILLABLE — fail-closed: the park
+    holds unless the child is PROVEN terminal, or the row is
+    self-referential (the only positive exclusion).
+    """
+    child_id = _watched_child_id_of(row)
+    if child_id is None:
+        return True
+    target_instance_id = getattr(row, "target_instance_id", None)
+    if child_id == target_instance_id:
+        return False
+    status = child_statuses.get(child_id)
+    if status is None:
+        return True
+    return status not in INSTANCE_TERMINAL_SET
+
+
 class DependencyBus:
     """In-process service layer over :class:`DependencyWatcherRepository`.
 
@@ -1330,6 +1384,124 @@ class DependencyBus:
             given target instance.
         """
         return self._repo.count_pending_for_target(target_instance_id)
+
+    # ── S3 (wake-path-carrier-fix, phase 3) — the qualified park count ──
+
+    def _instance_statuses_batched(
+        self, child_ids: list[str]
+    ) -> dict[str, str]:
+        """Batched BY-ID instance-status read (``get_statuses``).
+
+        **S3 liveness read** — deliberately the by-id form, NEVER the
+        parent-linkage-keyed tree-children enumeration: a nudge-armed
+        watcher's child is NOT tree-linked to the watcher's target, so
+        a linkage-keyed read would silently miss it (and any test
+        anchored on it would pass vacuously — the council's blocking
+        correction).
+        """
+        if not child_ids:
+            return {}
+        from ..repositories.instance.repository import (
+            SQLModelInstanceRepository,
+        )
+
+        return SQLModelInstanceRepository(self._repo.engine).get_statuses(
+            child_ids
+        )
+
+    def _count_fulfillable_rows(
+        self,
+        target_instance_id: str,
+        rows: list[DependencyWatcher],
+    ) -> int:
+        """Count the FULFILLABLE rows among ``rows`` (pure given rows).
+
+        Implements ``PARK(parent)``'s numerator — the frozen
+        ``FULFILLABLE(w)`` predicate with the fail-CLOSED posture
+        (every uncertainty counts the row as fulfillable, so the park
+        HOLDS; releasing a park requires proof, not absence of news):
+
+        * ``child_id`` IS NULL / non-str  → FULFILLABLE (a child may
+          be in flight; fail-open here would release a live park);
+        * child instance row MISSING from the status map → FULFILLABLE;
+        * child is a ghost (idle, version=1, no msgs/tasks) →
+          FULFILLABLE (``idle`` ∉ ``INSTANCE_TERMINAL_SET``);
+        * the status read RAISES → FULFILLABLE for EVERY row (the
+          whole batch — mirror of the healer's fail-closed skip
+          posture at ``mission_strand_healer.py:1243-1248``);
+        * ``child_id == target_instance_id`` (self-referential) →
+          NOT FULFILLABLE — the ONLY positive exclusion.
+        """
+        child_ids = sorted(
+            {
+                cid
+                for cid in (
+                    _watched_child_id_of(row) for row in rows
+                )
+                if isinstance(cid, str) and cid and cid != target_instance_id
+            }
+        )
+        try:
+            statuses = self._instance_statuses_batched(child_ids)
+        except Exception as exc:  # noqa: BLE001 — fail-CLOSED
+            logger.warning(
+                "bus count_fulfillable: instance-status read failed "
+                "for target=%s... (%s: %s) — counting ALL %d PENDING "
+                "rows as fulfillable (fail-closed: the park holds)",
+                str(target_instance_id)[:8],
+                type(exc).__name__,
+                exc,
+                len(rows),
+                extra={"completion_delivery_path": "bus"},
+            )
+            return len(rows)
+        return sum(
+            1
+            for row in rows
+            if watcher_row_is_fulfillable(row, statuses)
+        )
+
+    def count_fulfillable_pending_for_target_sync(
+        self,
+        target_instance_id: str,
+        *,
+        pending_rows: list[DependencyWatcher] | None = None,
+    ) -> int:
+        """**S3** — the QUALIFIED park count (sync twin, N7).
+
+        ``PARK(parent)`` ⇔ this count ``> 0``. Replaces the RAW
+        ``count_pending_for_target[_sync]`` at every park door: the
+        raw count cannot distinguish an unfulfillable backlog (its
+        child already terminal, or self-referential) from a genuine
+        in-flight wait, so a stale watcher held a park forever.
+
+        ``pending_rows``: rows fetched by the CALLER inside its own
+        open transaction (the R4 in-transaction shape — the park
+        decision must be computed inside that existing transaction).
+        When omitted, the PENDING rows are fetched through the
+        repository's own session (the R2/R3/R5/R6 worker-thread
+        shape). No per-row session N+1 in either shape: rows in one
+        read, child statuses in ONE batched ``get_statuses`` read.
+        """
+        rows = (
+            list(pending_rows)
+            if pending_rows is not None
+            else self._repo.fetch_pending_for_target(target_instance_id)
+        )
+        return self._count_fulfillable_rows(target_instance_id, rows)
+
+    async def count_fulfillable_pending_for_target(
+        self, target_instance_id: str
+    ) -> int:
+        """**S3** — async variant of the qualified park count (R1).
+
+        See :meth:`count_fulfillable_pending_for_target_sync` for the
+        frozen predicate and the fail-closed posture.
+        """
+        return await asyncio.to_thread(
+            self.count_fulfillable_pending_for_target_sync,
+            target_instance_id,
+        )
 
     def pending_watchers_for_pair(
         self,

@@ -393,6 +393,45 @@ class ChildReportsService:
             )
             return 0
 
+    def _bus_count_fulfillable_pending_for_target_sync(
+        self, target_instance_id: str
+    ) -> int:
+        """S3 (wake-path-carrier-fix): the QUALIFIED park count.
+
+        Identical envelope to
+        :meth:`_bus_count_pending_for_target_sync` (fail-OPEN wrapper,
+        bus-singleton-missing → 0) but the count is the S3 QUALIFIED
+        count: only FULFILLABLE PENDING watchers (child_id null /
+        missing-row / ghost / read-failure all count — the park holds;
+        a TERMINAL child or a self-referential row does NOT).
+
+        Used by the D-1 emission-time ``_root_completion_gate`` bus
+        leg: without the qualified read there, S3 qualifies R2/R3/R4,
+        stamps the root COMPLETED, and this gate reads raw>0 (backlog)
+        and downgrades the root back to WAITING_CHILDREN — the park
+        persists through the gate. The load-bearing same-tx authority
+        remains R4's in-transaction gate; this leg is the
+        defense-in-depth re-check (same split as the raw sibling).
+        """
+        from .dependency_bus import get_dependency_bus
+
+        bus = get_dependency_bus()
+        if bus is None:
+            return 0
+
+        try:
+            return bus.count_fulfillable_pending_for_target_sync(
+                target_instance_id
+            )
+        except Exception as e:  # noqa: BLE001 — FAIL-OPEN envelope
+            logger.warning(
+                f"bus.count_fulfillable_pending_for_target_sync failed "
+                f"for {target_instance_id[:8]}...: {e} — treating as 0 "
+                f"(FAIL-OPEN envelope, mirrors the raw sibling; the "
+                f"R4 same-tx gate remains the load-bearing authority)"
+            )
+            return 0
+
     async def _emit_terminal_via_bus(
         self,
         task_id: int | None,
@@ -2933,7 +2972,9 @@ Provide a concise summary:"""
             # path; the caller wrap at child_reports.py:4133-4143 catches any
             # unexpected exception and fails the gate open too, so a missing
             # bus or DB hiccup cannot block the publish permanently.
-            bus_pending = self._bus_count_pending_for_target_sync(instance_id)
+            bus_pending = self._bus_count_fulfillable_pending_for_target_sync(
+                instance_id
+            )
             if bus_pending > 0:
                 return False, f"bus_pending={bus_pending}", False
 
@@ -3807,7 +3848,11 @@ Provide a concise summary:"""
                     # ``_sync`` variant runs the COUNT(*) directly on
                     # the helper's session (no event-loop hop, safe to
                     # call from this worker-thread sync function).
-                    pending_children = bus.count_pending_for_target_sync(instance_id)
+                    # S3 (wake-path-carrier-fix): the QUALIFIED count —
+                    # PARK counts FULFILLABLE PENDING rows only.
+                    pending_children = bus.count_fulfillable_pending_for_target_sync(
+                        instance_id
+                    )
                 else:
                     # ─── A8: HARD ERROR (not graceful degradation) ─────────
                     # Bus is None is an INVALID state. Mirrors the
@@ -3874,7 +3919,12 @@ Provide a concise summary:"""
                 # (it remains in scope after the ``return`` guard at
                 # the end of the previous block).
                 if bus is not None:
-                    all_children_done = bus.count_pending_for_target_sync(instance_id) == 0
+                    # S3 (wake-path-carrier-fix): the qualified twin —
+                    # all-children-done means zero FULFILLABLE PENDING
+                    # watchers (an unfulfillable backlog must not defer).
+                    all_children_done = bus.count_fulfillable_pending_for_target_sync(
+                        instance_id
+                    ) == 0
                     if not all_children_done:
                         # Bus still has pending watchers for this root.
                         #
@@ -3960,16 +4010,59 @@ Provide a concise summary:"""
                     # (fail-OPEN, LAST — B.S.6/B.S.7). The (b) LOG attach
                     # at the COMPLETED stamp below runs ONLY when this
                     # gate and the tasks gate both reported zero.
-                    _bus_pending_stmt = (
-                        select(func.count())
-                        .select_from(DependencyWatcher)
-                        .where(DependencyWatcher.target_instance_id == instance_id)
+                    #
+                    # S3 (wake-path-carrier-fix): the RAW COUNT(*) is
+                    # now a ROW FETCH on this same session — the park
+                    # decision is computed INSIDE this existing
+                    # transaction (the C2 same-tx discipline is
+                    # preserved: the watcher rows and the status
+                    # UPDATE below share one transaction). The fetched
+                    # rows are then QUALIFIED
+                    # (``count_fulfillable_pending_for_target_sync``)
+                    # — PARK counts FULFILLABLE PENDING rows only; the
+                    # child-status leg of the qualification is ONE
+                    # batched by-id ``get_statuses`` read (never a
+                    # per-row session N+1, never the parent-linkage
+                    # tree-children form — nudge watchers are not
+                    # tree-linked). Fail-CLOSED posture preserved: a
+                    # status-read failure inside the qualify counts
+                    # every row as fulfillable (the park holds).
+                    #
+                    # ── S3 PHASE NOTE — the RAW boundary stays RAW ──
+                    # These reader sites deliberately keep the RAW
+                    # count_pending_for_target (they are NOT park
+                    # doors; switching changes their meaning). Line
+                    # anchors are as-measured at this commit:
+                    #   * the child-LIVENESS door (terminal-row
+                    #     reactivation / ghost dedup — counts
+                    #     child-instance rows, not watchers;
+                    #     child_reports.py:3737);
+                    #   * the completion doors — the post-R4
+                    #     live-children cross-check (:4122), the
+                    #     own-queue MessageQueue count (:4499/:4511)
+                    #     and the active-children count (:4714):
+                    #     completion defers, they cannot create or
+                    #     hold a park;
+                    #   * job_feedback_observer ×5 (:470/:1173/:2786/
+                    #     :2942/:3838) + job_recovery_service:1319;
+                    #   * the ``_bus_count_pending_for_target_sync``
+                    #     helper (:314-:394) and its 5 callers;
+                    #   * error_reporting:263; manager:13852.
+                    _bus_pending_rows = session.exec(
+                        sqlmodel_select(DependencyWatcher)
+                        .where(
+                            DependencyWatcher.target_instance_id == instance_id
+                        )
                         .where(
                             DependencyWatcher.state
                             == DependencyWatcherState.PENDING.value
                         )
+                    ).all()
+                    bus_pending = (
+                        _get_bus().count_fulfillable_pending_for_target_sync(
+                            instance_id, pending_rows=_bus_pending_rows
+                        )
                     )
-                    bus_pending = int(session.scalar(_bus_pending_stmt) or 0)
                     if bus_pending > 0:
                         # Bug fix (2026-06-22): transition
                         # ``instance.status`` to ``WAITING_CHILDREN``
