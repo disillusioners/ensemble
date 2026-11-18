@@ -707,9 +707,10 @@ class TestSlugOwnerResolution:
     lookup used to be an UNFILTERED single-row fetch, so the row it
     reached was whichever one the DATABASE PLAN returned first
     (PostgreSQL: the ROOT ancestor → every successor-generation row
-    refused with ``pok_not_found``; SQLite: the active row — the
-    defect was PLAN-DEPENDENT, which is why this SQLite pack never
-    showed it).
+    refused with ``pok_not_found``). The lookup is index-choice/
+    plan-dependent and engine-agnostic — an unordered fetch MAY return
+    either row depending on which index the planner picks — which is
+    why this SQLite pack never showed the defect.
 
     The owner is resolved by STATUS PRECEDENCE (active > archived >
     superseded), applied over the whole match set — never by an

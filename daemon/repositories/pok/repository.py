@@ -146,6 +146,11 @@ class POKRepository:
         Ties inside one status are broken by the most recent row
         (``created_at`` then ``id``) — the terminal row of that status
         owns the slug.
+
+        Multi-archived ambiguity: when a slug's only rows are ARCHIVED
+        (archive → upsert → archive), the MOST-RECENT archived row owns
+        the slug; older archived rows are unreachable by slug (terminal,
+        never injected — no correctness exposure).
         """
         if scope not in ("owner", "active"):
             raise ValueError(f"unknown slug-resolution scope {scope!r}")
@@ -174,6 +179,10 @@ class POKRepository:
             if _SLUG_OWNER_STATUS_RANK.get(r.status, len(_SLUG_OWNER_STATUS_RANK))
             == best_rank
         ]
+        # (created_at, id) DESC invariant: all writers stamp created_at
+        # via a uniform single-writer format (_utc_now_iso()); a uuid4 id
+        # breaks an exact timestamp tie, and a future seeder writing "Z"
+        # vs "+00:00" would order differently.
         return max(same, key=lambda r: (r.created_at or "", r.id or ""))
 
     def list_entries(
