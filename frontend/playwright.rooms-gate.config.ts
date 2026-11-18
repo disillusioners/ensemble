@@ -24,7 +24,9 @@
  */
 import { defineConfig, devices } from '@playwright/test';
 
-const PORT = Number(process.env.ROOMS_GATE_PORT ?? '14204');
+const _rawPort = process.env.ROOMS_GATE_PORT;
+const _parsedPort = _rawPort ? Number(_rawPort) : NaN;
+const PORT = Number.isFinite(_parsedPort) && _parsedPort > 0 ? _parsedPort : 14204;
 const BASE_URL = `http://localhost:${PORT}`;
 
 export default defineConfig({
@@ -35,10 +37,10 @@ export default defineConfig({
   fullyParallel: false,
   timeout: 60_000,
   expect: { timeout: 10_000 },
-  outputDir: '/tmp/rooms-gate-evidence/artifacts',
+  outputDir: `/tmp/rooms-gate-evidence-${process.pid}/artifacts`,
   reporter: [
     ['line'],
-    ['json', { outputFile: '/tmp/rooms-gate-evidence/results.json' }],
+    ['json', { outputFile: `/tmp/rooms-gate-evidence-${process.pid}/results.json` }],
   ],
   use: {
     baseURL: BASE_URL,
