@@ -3,7 +3,7 @@
 **Doc-set Rev 7** (Phase-2 amendment, 2026-11-15: user RATIFIED all 7 items as recommended + refinements R1 addressing→parent-nudge / R2 purge-from-DB / R3 P6 UI — folded; on top of Rev 6 final fix pass). **Status:** Phase-1 DESIGN (planning-only). NO implementation, NO code changes, NO commits/pushes — a giter instance finalizes git at end of mission.
 **Date:** 2026-11-15 · **Commission:** user directive via Ari.
 **Evidence base:** three investigation reports (gc-wanderer-msg, gc-wanderer-lifecycle, gc-wanderer-precedent), all anchors at repo tip `bf4bfde6e` — consolidated in **substrate-map.md** (§A–§J).
-**Companion docs:** substrate-map.md · decisions.md (9 SETTLED; 6 OPEN **all resolved**, pointers per entry) · **architecture-recommendation.md (architect delivery, Rev 6)** · **emperor-open-questions.md (7 ratification items + 3 adaptation disclosures — the Phase-1 endpoint)**.
+**Companion docs:** substrate-map.md · decisions.md (9 SETTLED; 6 OPEN **all resolved**, pointers per entry) · **architecture-recommendation.md (architect delivery, Rev 6)** · **open-questions.md (7 ratification items + 3 adaptation disclosures — the Phase-1 endpoint)**.
 **Live state:** planner framing COMPLETE → architect delivery COMPLETE → **RATIFIED 2026-11-15 (all 7 as recommended + R1–R3) → PHASE-2 GO** (implement per phased plan; report at phase boundaries; promote ceremony = the user's) → architect delivery COMPLETE (C1, F-A/B/C, iterations 001–003 reconciled: capability row, join predicate, corrected post-graph chain, total 10-state lane map, owner cursor seed, one-hop proposals, pinned boot pair, two-conjunct restore) → **awaiting user ratification**. Next dispatch after ratification: plan-creation cycle authoring `phaseN-plan.md` files.
 
 ---
@@ -50,7 +50,7 @@ Full substrate citations per ruling: decisions.md D-S1..D-S6.
 
 ## 5. Phase-1 scope & non-goals
 
-**Scope — DELIVERED 5-file set:** `.agents/shared/planning/group-chat/` in worktree `/home/nea/ensemble-src-wt-group-chat-design` — plan-overview.md · substrate-map.md · decisions.md · architecture-recommendation.md (Rev 6) · emperor-open-questions.md (7 items + 3 disclosures).
+**Scope — DELIVERED 5-file set:** `.agents/shared/planning/group-chat/` in worktree `/home/nea/ensemble-src-wt-group-chat-design` — plan-overview.md · substrate-map.md · decisions.md · architecture-recommendation.md (Rev 6) · open-questions.md (7 items + 3 disclosures).
 
 **Non-goals:** NO implementation · NO code changes · NO commits/pushes · NO agents/*.md edits · NO re-litigating settled rulings · NO implementation-instance spawns.
 
@@ -103,5 +103,5 @@ Architect regroup in architecture-recommendation.md §13. Proper `phaseN-plan.md
 - `substrate-map.md` — consolidated evidence §A–§J at bf4bfde6e (+ correction provenance), [R]/[A]/[M] tags, MISSING summary (12 items).
 - `decisions.md` — 9 SETTLED; 6 OPEN all RESOLVED with pointers + ratification items; D1–D5 design rules recorded.
 - `architecture-recommendation.md` — architect delivery of record (Rev 6): substrate verdict; dimensions B–J incl. the capability row, join predicate, total 10-state lane map, owner cursor seed, one-hop proposals, pinned boot pair, two-conjunct restore; RK responses; ledger 17R/11A/14M; Phase-2+ shape.
-- `emperor-open-questions.md` — Phase-1 endpoint: 7 ratification items + 3 adaptation disclosures.
+- `open-questions.md` — Phase-1 endpoint: 7 ratification items + 3 adaptation disclosures.
 - `plan-overview.md` — this document.

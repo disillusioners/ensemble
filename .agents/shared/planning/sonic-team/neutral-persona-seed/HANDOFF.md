@@ -59,7 +59,7 @@ identical across the 4 gap-fixed doc files; markdown pipe/backtick/bold counts i
 - docstring-prose sub-class: 39 lines across 26 daemon files; comment sub-class 20 lines; SQL-comment sub-class
   8 lines across 5 migrations (DDL bytes untouched — verified); .agents/** 127 files + CHANGELOG = prose only.
 
-(c) COMPLETE REMAINING-HIT LIST (75 in the 5 trees, 31 in .agents/**, 0 in CHANGELOG.md) — every one justified:
+(c) COMPLETE REMAINING-HIT LIST (75 in the 5 trees, 20 in .agents/**, 0 in CHANGELOG.md) — every one justified:
 - daemon (10): repositories/memoir/models.py:188 (PIN_ACTORS enum — the API contract), models.py:222 +
   migrations/versions/20261105_102821_create_memoir_tables.sql:87 (SQL CHECK mirror of the enum),
   tools/memoir.py:700,:727,:861,:969,:970,:1339,:1350 (actor-claim help/refusal text stating the enum values).
@@ -69,10 +69,10 @@ identical across the 4 gap-fixed doc files; markdown pipe/backtick/bold counts i
   brief-mandated negative-guard asserts). These lowercase values ARE the wire contract (PIN_ACTORS is validated
   at daemon/repositories/memoir/repository.py:1731 and daemon/tools/memoir.py:863/:972).
 - agents (1): agents/ari/tools_note.md:941 (actor-claim doctrine text).
-- .agents/** (31): 19 actor-claim enum literals in 15 ari-memoir-store docs; 10 references to the PRESERVED
-  plan-file path `.../group-chat/emperor-open-questions.md` (file name is a citation token; its content was
-  swept); tester/RESULTS/2026-11-05-memoir-g2-pg-corpus.md:98 (documents the lowercase enum + the refused
-  uppercase form); tester/RESULTS/2026-11-15-group-chat-p1-tester-gate.md:81 (path reference).
+- .agents/** (20): 19 actor-claim enum literals in 15 ari-memoir-store docs;
+  tester/RESULTS/2026-11-05-memoir-g2-pg-corpus.md:98 (documents the lowercase enum + the refused uppercase
+  form). The former plan-file PATH reference class was REMOVED by the neutral filename rename — those lines now
+  cite `open-questions.md` and carry no persona token.
 - EXCLUDED BY DECISION: this HANDOFF.md and CENSUS.md (report artifacts — they name the tokens by necessity);
   plugins/opendesign/** (5, vendored artwork + HASHES.sha256 integrity — leader ruling: KEEP, never edited).
 
@@ -119,7 +119,7 @@ Worktree: /Users/nguyenminhkha/workdir/ens-neutral-persona-seed (branch fix/neut
 Scrub ambient prod env first; use the worktree's own .venv (`daemon.__file__` resolves inside the worktree).
 
 1. Strict gate: `git grep -nwIi -E 'emperor|empress|empyrea|my dear|your majesty' -- daemon tests docs/guidelines
-   scripts agents` -> 75 lines, each in the (c) list above. `.agents/**` -> 31 carve-out lines.
+   scripts agents` -> 75 lines, each in the (c) list above. `.agents/**` -> 20 carve-out lines.
    `git grep -nwIi -E 'emperor|empress|empyrea' -- CHANGELOG.md` -> 0.
 2. Unit leg: `.venv/bin/python -m pytest -q <the 33 touched tests/unit files>` -> 748 passed / 6 failed; the 6 are
    A/B-proven identical at base 3c64d47f5 (see base-ab-evidence.md): 3 seal-map/grants reds (stale rows

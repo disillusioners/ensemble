@@ -5,7 +5,7 @@
 **Method:** Architect controller → 🏛️ substrate council (2/2, `agentic`+`coding`, UNANIMOUS, governor `0e8f6375`) + 4 parallel dimension analysts; architect aggregated and writes this file.
 **Evidence base:** substrate-map.md §A–§J (tip `bf4bfde6e`) + in-worktree verification. **Verified anchors (each read at pin before stamping):** 10-state enum `models.py:20-35` (`waiting` = "Active but no in-flight work"); `task_context` stamp `instance_messaging.py:5157-5162`; language-check :4758/:4770/:4807-4812; DEFECT-A guard `instance.py:4792-4816`; F-1 predicate SQL `message_queue/repository.py:1312-1322`; post-graph chain def `manager.py:11703` (+ facade :11717; call sites :8368/:11880/:15746; internal `services/child_reports.py:1019`); END-chain region graph.py:13378-13415; wrapper quartet :4942-4952 / :4984-4986 / :4995 / :5040, cap :4933; `TurnRepairLatch` :13159; todo reminder-return todo_manager.py:403-461 + `_compute_reminder` :1198-1276; context kinds = 14; `ALIVE_INSTANCE_STATUSES` constants.py:1066-1072; `MISSION_RECEIPT_SCAN_CAP` daemon/services/midflight_qa.py:194; `QA_WATCHER_ROW_CAP` daemon/services/work_notifier.py:1339 (def :1583); hoisting compaction.py:337/:425/:3233 (budget :1404, threshold :1589, caps :1650); `CHECKPOINT_TTL_HOURS` constants.py:170; `daemon/loader.py:972/:1356`; `services/skill_meta_parser.py:94`; TitleGenerationService class :17.
 **⚠️ DEGRADED — skill bank miss (design-skill family):** design skills absent from the project bank (known gap); manual discipline prompts used; flag stands.
-**Companion:** emperor-open-questions.md (7 items — **ALL RATIFIED 2026-11-15 as recommended**; decision record unaltered, banner added) + 3 adaptation disclosures.
+**Companion:** open-questions.md (7 items — **ALL RATIFIED 2026-11-15 as recommended**; decision record unaltered, banner added) + 3 adaptation disclosures.
 
 ---
 
@@ -282,4 +282,4 @@ Counting convention: one row per coined/extended artifact; 3 tables = three rows
 
 - **HIGH:** substrate (ratified); capability row incl. purge (R2); join predicate; total 10-state lane map; addressing mechanics (R1, pinned); owner-cursor substrate; one-hop rule; pinned boot pair; two-conjunct restore; post-graph chain; nudge seams.
 - **MEDIUM:** cost constants (env-tunable).
-- **Ratified items are no longer flips:** #1–#7 settled by the user's ratification (banner in emperor-open-questions.md). Remaining design-level contingencies: cross-tree rooms (join + read predicates re-scope) and a future multi-writer topology (RK-13 hardening path).
+- **Ratified items are no longer flips:** #1–#7 settled by the user's ratification (banner in open-questions.md). Remaining design-level contingencies: cross-tree rooms (join + read predicates re-scope) and a future multi-writer topology (RK-13 hardening path).

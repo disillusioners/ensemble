@@ -5,7 +5,7 @@
 Provenance: user directive via Ari (Discord 2026-11-15); rulings settled 2026-11-15 (two naming-cascade additions arrived mid-design, same date); evidence = three investigation reports at repo tip bf4bfde6e, consolidated in substrate-map.md (§A–§J).
 **Rev history:** F-A (verbatim ruling re-paste from the KV source of record) · F-B (wrapper anchors re-verified) · F-C (architect risk → RK-13) · iteration-001 (END-chain order B1, GC accepted-loss B2, carrier precision N3, post-graph cite N10) · iteration-002 (closed-state capability row B1', join-admission predicate B2', post-graph chain correction B3', constants-derived CAS B4') · **iteration-003 final fix (Rev 6): D1 — lane map TOTAL over the 10-state enum (`waiting` assigned); D2 — owner membership row seeded at room_create; D3 — one-hop proposal rule for terminal parents; D4 — pinned boot pair; D5 — two-conjunct restore rule.** **Phase-2 amendment (Doc-set Rev 7, 2026-11-15):** D-S10..D-S13 — user ratification + refinements R1 (addressing→parent-nudge), R2 (purge-from-DB), R3 (P6 UI direction).
 
-Legend: **SETTLED** = binding (user rulings verbatim-faithful). **OPEN** = framed by the planner, owned by the ARCHITECT — **all six RESOLVED**; pointers per entry; ratification item numbers refer to emperor-open-questions.md.
+Legend: **SETTLED** = binding (user rulings verbatim-faithful). **OPEN** = framed by the planner, owned by the ARCHITECT — **all six RESOLVED**; pointers per entry; ratification item numbers refer to open-questions.md.
 
 ---
 
@@ -75,7 +75,7 @@ Legend: **SETTLED** = binding (user rulings verbatim-faithful). **OPEN** = frame
 Phase-1 = DESIGN ONLY: markdown doc set under `.agents/shared/planning/group-chat/`; NO implementation/code/commits — giter finalizes git. Absolute paths.
 
 ### D-S8 · Lane boundary
-Planner framed; ARCHITECT delivered (architecture-recommendation.md Rev 6 + emperor-open-questions.md). **Live state: awaiting user ratification.**
+Planner framed; ARCHITECT delivered (architecture-recommendation.md Rev 6 + open-questions.md). **Live state: awaiting user ratification.**
 
 ### D-S9 · House constraints
 Off-loop async I/O (exemplars instance_messaging.py:1179-1184); explicit boot story vs F-1 (manager.py:1407-1600; predicate SQL repository.py:1312-1322; pinned pair in architecture §10); zero baseline/seal impact; migration doctrine; no over-build.
@@ -109,7 +109,7 @@ Off-loop async I/O (exemplars instance_messaging.py:1179-1184); explicit boot st
 
 ### D-S10 · RATIFICATION — all 7 items as recommended
 **Ruling (verbatim — KV `gc_phase2_go`):** "RATIFIED 2026-11-15: ALL 7 decision items AS RECOMMENDED. … PHASE 2 GO: implement per phased plan P1 substrate/persistence+boot → P2 membership/spawn/naming → P3 delivery → P4 nudges ∥ P5 tool+guidelines → P6 UI/audit+GC; full house gates per phase; prompt-artifact discipline; staged release lane when ready; live promote ceremony = the user's. Report at phase boundaries; escalate only on genuine blockers/design-changing decisions."
-**Effect:** emperor-open-questions.md items #1–#7 are RATIFIED (the decision record there is unaltered; a banner records this); the Phase-1 recommendations are binding for Phase-2 implementation per the phased plan.
+**Effect:** open-questions.md items #1–#7 are RATIFIED (the decision record there is unaltered; a banner records this); the Phase-1 recommendations are binding for Phase-2 implementation per the phased plan.
 
 ### D-S11 · REFINEMENT 1 — addressing extends Ruling A (item #2)
 **Ruling (verbatim — KV `gc_phase2_go` excerpt):** "REFINEMENT 1 (item #2): untagged→idle-but-LIVE member = digest/nudge, NO wake (as recommended); untagged-but-ADDRESSED-to-TERMINAL member → NUDGE THE PARENT (parent decides revive/reroute/answer; extends Ruling A; exact mechanics of how an untagged-but-addressed post identifies its target = to be designed + pinned)."
