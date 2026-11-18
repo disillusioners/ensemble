@@ -7,6 +7,8 @@ import { MatDialog } from '@angular/material/dialog';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { signal, computed } from '@angular/core';
 import { of } from 'rxjs';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 
 import { InstanceListComponent } from './instance-list.component';
 import { RoomDialogComponent, ROOM_DIALOG_SIZE } from '../room-dialog/room-dialog.component';
@@ -196,14 +198,23 @@ describe('InstanceListComponent rooms-btn (gc-fe-surfaces P3)', () => {
     expect(fixture.nativeElement.querySelector('.rooms-btn')).not.toBeNull();
   });
 
-  // (vi) appears at both consumer surfaces (same component, no host branching)
+  // (vi) documented inputs: the control's accessible name + tooltip.
+  // Dual-host rendering (chat sidebar + /instances page both mount this
+  // shared component) is a STRUCTURAL property of the component, not a
+  // DOM-observable one in this single-host harness — see instance-list.html
+  // (the component carries no host branching), so the documented-inputs
+  // contract is what THIS harness can pin.
   it('(vi) component renders the control with documented inputs (both hosts)', () => {
     // Hosts: chat.html:8 and instances.component.html:22 — same shared child.
-    const inst = makeInstance({ instance_id: 'inst-1' });
+    const inst = makeInstance({ instance_id: 'inst-1', instance_name: 'Tester' });
     setup([inst]);
     fixture.detectChanges();
     flushRooms({ rooms: [JOINED_ROOM], truncated: false });
-    expect(fixture.nativeElement.querySelector('.rooms-btn')).not.toBeNull();
+    const btn = fixture.nativeElement.querySelector('.rooms-btn') as HTMLButtonElement;
+    expect(btn).not.toBeNull();
+    // instance-list.html:235-236 — the template is the source of truth.
+    expect(btn.getAttribute('title')).toBe('Chatrooms this instance joined');
+    expect(btn.getAttribute('aria-label')).toBe('Chatrooms joined by Tester');
   });
 
   // (vii) row routerLink not triggered by button
@@ -231,6 +242,15 @@ describe('InstanceListComponent rooms-btn (gc-fe-surfaces P3)', () => {
     flushRooms({ rooms: [{ ...JOINED_ROOM, member_instance_ids: ['child-1'] }], truncated: false });
     const childRow = fixture.nativeElement.querySelector('.instance-item.child-row');
     expect(childRow).not.toBeNull();
+    // The child row CONTAINS the room button — the row that carries the
+    // discriminator is also the row the W-12 offset applies to.
+    expect(childRow.querySelector('.rooms-btn')).not.toBeNull();
+    // W-12 discriminator pin. jsdom computes no stylesheet layout, so the
+    // assertion reads the SCSS SOURCE (the house raw-text pin form): the
+    // child-row offset must exist exactly as written.
+    const scss = readFileSync(join(__dirname, 'instance-list.scss'), 'utf-8');
+    expect(scss).toContain('.instance-item.child-row .rooms-btn');
+    expect(scss).toMatch(/\.instance-item\.child-row \.rooms-btn\s*\{[^}]*right:\s*72px/);
   });
 
   // (ix) truncation warning renders

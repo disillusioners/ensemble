@@ -15,7 +15,6 @@ import {
 
 /**
  * Room read API client — the FE half of the P6 group-chat observability
- * Room read API client — the FE half of the P6 group-chat observability
  * surface (architecture recommendation §13.1) plus the gc-fe-surfaces
  * room lane (the global browser).
  *

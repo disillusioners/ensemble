@@ -5,8 +5,12 @@
  * Dedicated config (W-14 choice (b)): does NOT inherit the shared
  * `playwright.config.ts` (which boots dev.sh on 8079 and sweeps all 35 e2e
  * specs). Binds NEITHER 9797/9798 (live) NOR 8079/8088 (other dev lanes);
- * asserts its own unused FE port at start (A-9). The pinned sweep
- * (`ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0`) and ambient-allow guards stay.
+ * picks its own FE port (default 14204). The guard against an occupant is
+ * `reuseExistingServer: false` in the webServer block below — Playwright
+ * FAILS LOUDLY instead of attaching to a server already on the port, so a
+ * stray process on 14204 can never be silently reused (and is never
+ * killed). The pinned sweep (`ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0`)
+ * and ambient-allow guards stay.
  *
  * Mechanism (cloned from `playwright.metrics-gate.config.ts`):
  *   - FE dev server (`ng serve`) started/stopped by Playwright's webServer.
