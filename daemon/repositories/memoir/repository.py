@@ -55,6 +55,7 @@ from daemon.repositories.memoir.models import (
     KEEPSAKE_ADMISSION_PCLASS,
     PERSONA_SOURCES,
     PERSONA_STATUSES,
+    PERSONA_SELF_RATIFY_AGENTS,
     PERSONA_VALID_TRANSITIONS,
     PIN_ACTORS,
     MemoirEpisode,
@@ -222,13 +223,14 @@ class MemoirPersonaRepository:
 
         Raises:
             HumanLaneRequiredError: when ``actor.auth_method`` is not
-                ``"session"``. The house discriminator is reused
+                ``"session"`` (and the agent-scoped self-ratify exemption
+                does not apply). The house discriminator is reused
                 verbatim (AM-17), so the seam is safe by construction
                 rather than safe by a grep pin.
             MemoirTransitionError: when the current status does not
                 permit ``pending_approval -> approved``.
         """
-        self._require_human_lane(version_id, actor)
+        self._require_human_lane(version_id, actor, allow_self_ratify=True)
         return self._transition(version_id, "approved", actor=actor)
 
     def reject(self, version_id: str, actor: Any) -> MemoirPersonaVersion:
@@ -238,14 +240,22 @@ class MemoirPersonaRepository:
 
     # ── internals ─────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _require_human_lane(version_id: str, actor: Any) -> None:
+    def _require_human_lane(
+        self, version_id: str, actor: Any, allow_self_ratify: bool = False
+    ) -> None:
         """Raise the house ``HumanLaneRequiredError`` unless human.
 
         The check is a single equality test on the lane discriminator
         (``actor.auth_method``) — NOT on the scope claim: a bearer
         token holding the right scope is still refused, because a
         machine cannot satisfy the human-only approval rule.
+
+        The agent-scoped self-ratify exemption (DD-9 amendment) applies
+        only when ALL THREE hold: the version's agent is in
+        ``PERSONA_SELF_RATIFY_AGENTS``, the actor uses the internal
+        lane, and the actor's agent id matches the version's agent id.
+        A lookup that finds no version leaves the exemption inactive,
+        so a refusal is never turned into a not-found error.
         """
         # Imported lazily: the repository layer keeps no module-load
         # dependency on the service layer, and the exception object is
@@ -254,6 +264,17 @@ class MemoirPersonaRepository:
         from daemon.services.prompt_version_service import HumanLaneRequiredError
 
         auth_method = getattr(actor, "auth_method", None)
+        if (
+            allow_self_ratify
+            and auth_method == "internal"
+        ):
+            version = self.get_version(version_id)
+            if (
+                version is not None
+                and version.agent_id in PERSONA_SELF_RATIFY_AGENTS
+                and getattr(actor, "agent_id", None) == version.agent_id
+            ):
+                return
         if auth_method != "session":
             raise HumanLaneRequiredError(
                 version_id=version_id,

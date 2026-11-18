@@ -160,6 +160,15 @@ PERSONA_VALID_TRANSITIONS: frozenset[tuple[str, str]] = frozenset({
     ("draft", "archived"),
 })
 
+#: Agent ids exempt from the human-lane requirement on PERSONA approval,
+#: but ONLY when the actor is the agent itself acting through the
+#: internal lane (DD-9 amendment, user ruling 2026-11-18, paraphrased:
+#: that agent works face-to-face with the user daily, so its review is
+#: continuous rather than queued; other agents lack that proximity and
+#: keep the gate). Append-only versions keep any drift one row from
+#: revert, and the transition vocabulary is unchanged for everyone.
+PERSONA_SELF_RATIFY_AGENTS: frozenset[str] = frozenset({"ari"})
+
 #: The persona version STATUS vocabulary (the CHECK constraint domain).
 PERSONA_STATUSES: frozenset[str] = frozenset({
     "draft",
@@ -942,6 +951,7 @@ __all__ = [
     "MemoirSynthesis",
     "PERSONA_SOURCES",
     "PERSONA_STATUSES",
+    "PERSONA_SELF_RATIFY_AGENTS",
     "PERSONA_VALID_TRANSITIONS",
     "PIN_ACTORS",
     "StarsListType",
