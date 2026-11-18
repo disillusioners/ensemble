@@ -455,6 +455,14 @@ class TestScopeManifestCage:
         census 117 → 119, the MOUNT census 39 → 40 (ONE new mount) and
         the CLASS-manifest family count 35 → 36 (the new /api/rooms
         family, pinned as protected-default).
+
+        gc-fe-surfaces P1 (2026-11-17) added the THIRD room read route
+        (GET /api/rooms — the bounded nest-wide browser list) on the
+        SAME /api/rooms family and the SAME mount, riding the SAME
+        ``instances:read`` scope ⇒ only the declared-route census moved:
+        119 → 120. The MOUNT census (40) and the CLASS-manifest family
+        count (36) are UNCHANGED, and the scope-manifest family map
+        needs NO edit — ``/api/rooms`` is already declared.
         """
         declared = [
             r
@@ -463,8 +471,8 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 119, (
-            f"declared-route census drifted: {len(declared)} (pinned 119)"
+        assert len(declared) == 120, (
+            f"declared-route census drifted: {len(declared)} (pinned 120)"
         )
 
     def test_manifest_entries_valid(self):

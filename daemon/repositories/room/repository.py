@@ -59,7 +59,7 @@ thread. Async callers MUST go through
 ``instance_messaging.py:1179-1184``). NEVER call these methods
 directly on the event loop (house constraint §4, v0.27.14-class).
 
-**Why this file is large (~1,635 lines).** The 1,000–3,000-line band
+**Why this file is large (~1,792 lines).** The 1,000–3,000-line band
 requires a why-large note: ONE SQLModel table family with ONE
 transactional writer per table and the ONE purge transaction are
 co-located here on purpose — the transactional boundaries stay
@@ -71,6 +71,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections.abc import Collection
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -132,6 +133,11 @@ logger = logging.getLogger(__name__)
 # parent cycles: the walk gives up and the caller is simply not in the
 # chain ⇒ typed not-found).
 _ANCESTRY_WALK_DEPTH = 256
+
+# The nest-wide list's server-side clamp (NEW local constant — NOT
+# daemon/constants.py MAX_PAGE_LIMIT, which is 100). The clamp PATTERN
+# (daemon/routers/instances.py:486) is a shape precedent only.
+ROOM_LIST_MAX_LIMIT = 500
 
 
 def _utc_now_iso() -> str:
@@ -367,6 +373,18 @@ def room_payload(room: ChatRoom) -> dict[str, Any]:
         "created_at": room.created_at,
         "updated_at": room.updated_at,
     }
+
+
+def _room_readable(*, is_active_member: bool, owner_ancestry_ok: bool) -> bool:
+    """The shared fail-closed read decision (single definition).
+
+    A room is readable iff the caller is an active member (the owner's
+    seeded row satisfies this) OR the caller is in the owner-ancestry
+    chain. Fail-closed: False when both inputs are falsey. The "room
+    row exists" conjunct stays with the caller — an absent/purged room
+    never reaches either branch.
+    """
+    return is_active_member or owner_ancestry_ok
 
 
 def member_payload(member: ChatRoomMember) -> dict[str, Any]:
@@ -760,10 +778,24 @@ class RoomRepository:
                     f"purged rooms are nonexistent)"
                 )
             member = session.get(ChatRoomMember, (room_id, caller_instance_id))
-            if member is not None and member.state == RoomMemberState.ACTIVE.value:
-                return room_payload(room)
-            chain = self._owner_ancestry_chain(session, room)
-            if caller_instance_id in chain:
+            is_active_member = (
+                member is not None
+                and member.state == RoomMemberState.ACTIVE.value
+            )
+            # The ancestry walk is the EXPENSIVE half of the predicate
+            # (up to ``_ANCESTRY_WALK_DEPTH`` row gets). The decision is
+            # an OR, so an active member already satisfies it — walk only
+            # when the membership branch missed (the shipped 10 s-poll
+            # perf shape). Behaviour is identical: the walk could only
+            # ever flip a False to True, and False OR x == x.
+            owner_ancestry_ok = False
+            if not is_active_member:
+                chain = self._owner_ancestry_chain(session, room)
+                owner_ancestry_ok = caller_instance_id in chain
+            if _room_readable(
+                is_active_member=is_active_member,
+                owner_ancestry_ok=owner_ancestry_ok,
+            ):
                 return room_payload(room)
             raise RoomNotFoundError(
                 f"room={room_id} not found for caller={caller_instance_id} "
@@ -1331,14 +1363,139 @@ class RoomRepository:
         if not room_ids:
             return {}
         with Session(self._engine) as session:
-            stmt = select(ChatRoomMember).where(
-                ChatRoomMember.room_id.in_(room_ids),
-                ChatRoomMember.state == RoomMemberState.ACTIVE.value,
+            return self._active_member_instance_ids(session, room_ids)
+
+    def _active_member_instance_ids(
+        self, session: Session, room_ids: list[str]
+    ) -> dict[str, list[str]]:
+        """Session-accepting variant (W-5) of the roster helper."""
+        if not room_ids:
+            return {}
+        stmt = select(ChatRoomMember).where(
+            ChatRoomMember.room_id.in_(room_ids),
+            ChatRoomMember.state == RoomMemberState.ACTIVE.value,
+        )
+        out: dict[str, list[str]] = {}
+        for member in session.exec(stmt).all():
+            out.setdefault(member.room_id, []).append(member.instance_id)
+        return out
+
+    def _attach_extras(
+        self,
+        rooms: list[ChatRoom],
+        member_counts: dict[str, int],
+        last_seqs: dict[str, int],
+        roster: dict[str, list[str]],
+    ) -> list[dict[str, Any]]:
+        """Assemble the room rows + their batched extras (AM-4/C-1).
+
+        The ONE extras-assembly shape shared by the nest-wide list and
+        the caller-scoped list: the base row payload plus the batched
+        ``member_count`` / ``last_message_seq`` and the ACTIVE roster.
+        """
+        out: list[dict[str, Any]] = []
+        for room in rooms:
+            payload = room_payload(room)
+            payload["member_count"] = member_counts.get(room.room_id, 0)
+            payload["last_message_seq"] = last_seqs.get(room.room_id)
+            payload["member_instance_ids"] = list(
+                roster.get(room.room_id, [])
             )
-            out: dict[str, list[str]] = {}
-            for member in session.exec(stmt).all():
-                out.setdefault(member.room_id, []).append(member.instance_id)
-            return out
+            out.append(payload)
+        return out
+
+    def list_all_rooms_with_extras(
+        self, limit: int = 200
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Nest-wide room list with batched extras (AM-4/C-1).
+
+        ONE row session (rows + counts + seqs) + ONE roster session.
+        Server-clamped to ``ROOM_LIST_MAX_LIMIT`` (500). Returns
+        ``(rows, truncated)``.
+        """
+        effective = max(1, min(int(limit), ROOM_LIST_MAX_LIMIT))
+        with Session(self._engine) as session:
+            stmt = (
+                select(ChatRoom)
+                .order_by(ChatRoom.created_at, ChatRoom.room_id)
+                .limit(effective + 1)
+            )
+            rooms = list(session.exec(stmt).all())
+            truncated = len(rooms) > effective
+            rooms = rooms[:effective]
+            if not rooms:
+                return [], truncated
+            room_ids = [r.room_id for r in rooms]
+            member_counts = self._active_member_counts(session, room_ids)
+            last_seqs = self._last_message_seqs(session, room_ids)
+        # roster session (separate)
+        roster = self.list_active_member_instance_ids(
+            [r.room_id for r in rooms]
+        )
+        out = self._attach_extras(rooms, member_counts, last_seqs, roster)
+        return out, truncated
+
+    def list_readable_rooms_for_caller(
+        self,
+        caller_instance_id: str,
+        *,
+        descendant_ids: Collection[str] | None = None,
+        limit: int = 200,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Anchor-present list: scan → predicate → clamp (C-1).
+
+        Pre-computes the caller's ACTIVE membership set per room and
+        uses the shared ``_room_readable`` decision. Returns
+        ``(rows, truncated)`` where ``truncated`` counts readable
+        omissions.
+
+        Ordering (C-1(a)): the FULL ``(created_at, room_id)`` scan is
+        predicate-checked first, and only THEN clamped — clamp-then-
+        filter would silently drop a joined room past the page boundary
+        and report an instance as room-less. The heavy batched extras
+        (``member_count`` / ``last_message_seq``) are computed only for
+        the CLAMPED readable rows: a row the clamp dropped must not pay
+        for aggregates it never returns.
+        """
+        if descendant_ids is None:
+            descendant_ids = set()
+        descendant_set = set(descendant_ids)
+        effective = max(1, min(int(limit), ROOM_LIST_MAX_LIMIT))
+        with Session(self._engine) as session:
+            stmt = select(ChatRoom).order_by(
+                ChatRoom.created_at, ChatRoom.room_id
+            )
+            all_rooms = list(session.exec(stmt).all())
+            if not all_rooms:
+                return [], False
+            room_ids = [r.room_id for r in all_rooms]
+            roster = self._active_member_instance_ids(session, room_ids)
+        readable: list[ChatRoom] = []
+        for room in all_rooms:
+            active_members = set(roster.get(room.room_id, []))
+            is_active_member = caller_instance_id in active_members
+            owner = room.owner_instance_id
+            owner_ancestry_ok = (
+                owner == caller_instance_id or owner in descendant_set
+            )
+            if not _room_readable(
+                is_active_member=is_active_member,
+                owner_ancestry_ok=owner_ancestry_ok,
+            ):
+                continue
+            readable.append(room)
+        truncated = len(readable) > effective
+        returned = readable[:effective]
+        if not returned:
+            return [], truncated
+        returned_ids = [r.room_id for r in returned]
+        with Session(self._engine) as session:
+            member_counts = self._active_member_counts(session, returned_ids)
+            last_seqs = self._last_message_seqs(session, returned_ids)
+        out = self._attach_extras(
+            returned, member_counts, last_seqs, roster
+        )
+        return out, truncated
 
     def get_instance_records(
         self, instance_ids: list[str]

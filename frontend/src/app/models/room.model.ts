@@ -18,6 +18,18 @@
  *                         "content":str,"created_at":iso,"kind":str}],
  *             "next_after_seq":int|null}
  *
+ *   GET /api/rooms?instance_id=<id>&limit=<int>
+ *     → 200 {"rooms":[{"room_id":str,"name":str,"tree_root_id":str,
+ *                      "owner_instance_id":str,"state":str,
+ *                      "member_count":int,"member_instance_ids":str[],
+ *                      "last_message_at":iso|null,"last_message_seq":int|null,
+ *                      "created_at":iso}],
+ *             "truncated":bool}
+ *
+ *   The nest-wide route emits the lifecycle STATE (`"active"` /
+ *   `"closed"`) — not the `closed` boolean the instance-scoped route
+ *   emits; the boolean is DERIVED from the state (see `RoomSummary`).
+ *
  * Two invariants the FE depends on:
  *
  * 1. EXTRA FIELDS ARE TOLERATED SILENTLY. The backend may add fields to
@@ -38,7 +50,13 @@ export interface RoomSummary {
   name: string;
   /** ISO-8601 creation timestamp. */
   created_at: string;
-  /** True once the room is closed (closed rooms stay readable). */
+  /**
+   * True once the room is closed (closed rooms stay readable).
+   *
+   * For the GLOBAL row (`GET /api/rooms`) this boolean is DERIVED from
+   * that route's `state` field (`state === 'closed'`) — that route
+   * emits the lifecycle state, not this boolean.
+   */
   closed: boolean;
   /** Active member count (the owner counts). */
   member_count: number;
@@ -51,6 +69,22 @@ export interface RoomSummary {
 /** `GET /api/instances/{instance_id}/rooms` response envelope. */
 export interface RoomListResponse {
   rooms: RoomSummary[];
+}
+
+/** A chatroom as listed by the nest-wide `GET /api/rooms` surface. */
+export interface GlobalRoomSummary extends RoomSummary {
+  /** The room's tree-root anchor (the scope the room was created in). */
+  tree_root_id: string;
+  /** The instance that owns the room (the owner-ancestry anchor). */
+  owner_instance_id: string;
+  /** The ACTIVE member instance ids (the room's roster). */
+  member_instance_ids: string[];
+}
+
+/** `GET /api/rooms` response envelope (bounded). */
+export interface GlobalRoomListResponse {
+  rooms: GlobalRoomSummary[];
+  truncated?: boolean;
 }
 
 /** A single room message (one member's post in a room). */
@@ -127,6 +161,36 @@ export function normalizeRoomSummary(raw: unknown): RoomSummary | null {
   };
 }
 
+/** Normalize the global (nest-wide) rooms envelope. */
+export function normalizeGlobalRoomListResponse(raw: unknown): GlobalRoomListResponse {
+  const rec = asRecord(raw);
+  const list = rec && Array.isArray(rec['rooms']) ? (rec['rooms'] as unknown[]) : [];
+  const rooms: GlobalRoomSummary[] = [];
+  for (const entry of list) {
+    const r = asRecord(entry);
+    if (!r) continue;
+    // The shared room-row mapping — the global route adds three fields
+    // and DERIVES `closed` (it emits `state`, not `closed`).
+    const base = normalizeRoomSummary(entry);
+    if (!base) continue;
+    const memberIds = Array.isArray(r['member_instance_ids'])
+      ? (r['member_instance_ids'] as unknown[]).filter((x): x is string => typeof x === 'string')
+      : [];
+    const global: GlobalRoomSummary = {
+      ...base,
+      // The global route emits the lifecycle STATE, not the `closed`
+      // boolean — the boolean is derived from it.
+      closed: base.closed || r['state'] === 'closed',
+      tree_root_id: asString(r['tree_root_id']),
+      owner_instance_id: asString(r['owner_instance_id']),
+      member_instance_ids: memberIds,
+    };
+    rooms.push(global);
+  }
+  const truncated = rec ? rec['truncated'] === true : false;
+  return { rooms, truncated };
+}
+
 /** Normalize the rooms envelope — unknown fields are dropped, not rendered. */
 export function normalizeRoomListResponse(raw: unknown): RoomListResponse {
   const rec = asRecord(raw);
@@ -171,4 +235,15 @@ export function normalizeRoomMessagesResponse(raw: unknown): RoomMessagesRespons
     messages,
     next_after_seq: rec ? asFiniteNumber(rec['next_after_seq']) : null,
   };
+}
+
+/** Build a membership map: instance_id -> has >= 1 joined room. */
+export function buildMembershipMap(rows: GlobalRoomSummary[]): Map<string, boolean> {
+  const map = new Map<string, boolean>();
+  for (const row of rows) {
+    for (const id of row.member_instance_ids || []) {
+      map.set(id, true);
+    }
+  }
+  return map;
 }

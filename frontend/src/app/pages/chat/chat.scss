@@ -173,7 +173,12 @@
 // Chatrooms button (P6) — icon-only member of the toggle family. It
 // opens the chatrooms modal (a surface switch, not a state toggle), so
 // it carries no `.active` state — just the family's chrome.
-.toggle-btn.room-btn {
+//
+// The all-chatrooms browser control (gc-fe-surfaces item (a)) is the
+// second icon-only member: the same family chrome, the same no-`.active`
+// posture — it opens the nest-wide room browser.
+.toggle-btn.room-btn,
+.toggle-btn.rooms-browser-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;

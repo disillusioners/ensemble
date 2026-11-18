@@ -787,6 +787,22 @@ class TestP11BootNoBehaviorChange:
         "frontend/src/app/components/room-dialog/room-dialog.component.scss",
         "frontend/src/app/components/room-dialog/room-dialog.component.spec.ts",
         "frontend/src/app/components/room-dialog/room-dialog.component.ts",
+        # gc-fe-surfaces P3 (surfaces (b)+(c)): instance-list row button +
+        # conditional visibility — three modified + the new spec (AM-7/W-2).
+        "frontend/src/app/components/instance-list/instance-list.component.ts",
+        "frontend/src/app/components/instance-list/instance-list.html",
+        "frontend/src/app/components/instance-list/instance-list.scss",
+        "frontend/src/app/components/instance-list/instance-list.rooms-btn.spec.ts",
+        # gc-fe-surfaces P4 (W-14): committed rooms-gate e2e spec + dedicated config.
+        "frontend/e2e/group-chat-rooms-gate.spec.ts",
+        "frontend/playwright.rooms-gate.config.ts",
+        # gc-fe-surfaces G2 (daemon-fenced rooms gate): the committed daemon
+        # spec + its dedicated daemon config + its proxy conf — sanctioned in
+        # the SAME change that touches them (F-1's maintenance rule: extend
+        # the sanctioned surface in the same change that adds the path).
+        "frontend/e2e/group-chat-rooms-gate.daemon.spec.ts",
+        "frontend/playwright.rooms-gate.daemon.config.ts",
+        "frontend/proxy.gcfe-e2e.conf.json",
         "frontend/src/app/models/index.ts",
         "frontend/src/app/models/room.model.ts",
         # P6 tidier T1 created this suite (the chatrooms describe moved
