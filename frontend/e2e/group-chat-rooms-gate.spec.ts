@@ -22,6 +22,20 @@ const ROOMS_RESPONSE = {
 
 test.describe('group-chat rooms gate', () => {
   test.beforeEach(async ({ page }) => {
+    // Session bootstrap probe: an authenticated principal so the app does
+    // not redirect to the daemon login page under the stubbed setup.
+    await page.route('**/api/auth/me', async (route: Route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          subject: 'e2e-user',
+          scopes: ['instances:read'],
+          auth_method: 'test',
+          expires_at: '2099-01-01T00:00:00Z',
+        }),
+      });
+    });
     // Stub the rooms endpoint so no daemon is required.
     await page.route('**/api/rooms**', async (route: Route) => {
       await route.fulfill({
