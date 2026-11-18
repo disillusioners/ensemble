@@ -380,6 +380,7 @@ def _build_evolution_service(stats, *, skill_id_a="skill-a", skill_id_b="skill-b
     ab_row = MagicMock()
     ab_row.comparisons = 20  # >= ab_sample_size (20)
     ab_row.extension_count = 0
+    ab_row.resolved_at = None  # MagicMock trap: auto-attr is truthy; guard at :2009 reads it
     svc._ab_test_repo.get_by_group = MagicMock(return_value=ab_row)
 
     # Mock the side-effect sync calls so they don't crash.
