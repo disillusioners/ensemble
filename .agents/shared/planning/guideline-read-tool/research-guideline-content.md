@@ -13,7 +13,7 @@ Directory listing: README.md, TEMPLATE.md, guideline-live-views-passcode.md, gui
 ```
 1: # Guidelines for agents-ensemble — the feature proposal
 2: 
-3: **Status:** CANONICAL — homed 2026-11-13; placement Emperor-ratified at
+3: **Status:** CANONICAL — homed 2026-11-13; placement user-ratified at
 4: docs/guidelines/ (versioned with the system, promoted with each release);
 5: lifecycle now live.
 6: 
@@ -35,7 +35,7 @@ Directory listing: README.md, TEMPLATE.md, guideline-live-views-passcode.md, gui
 1: # Guideline TEMPLATE
 2: 
 3: > Distilled from ENSEMBLE-30 ("prompt-assent enablement", hand-crafted by
-4: > Emperor + Ari, 2026-11-12) — the first guideline. Copy this file, rename
+4: > the user + Ari, 2026-11-12) — the first guideline. Copy this file, rename
 5: > to `guideline-<feature-slug>.md`, fill every section IN ORDER. A section
 6: > with nothing to say says "none" — it is never deleted.
 7: 
@@ -232,7 +232,7 @@ DENIED-sonic set = sonic-coder, sonic-developer, sonic-reviewer, sonic-tester (n
 
 ## Serving note (release payload)
 
-README.md L3–L5 states the placement contract: "homed 2026-11-13; placement Emperor-ratified at docs/guidelines/ (versioned with the system, promoted with each release); lifecycle now live" — consistent with serving docs/guidelines/ from the release payload.
+README.md L3–L5 states the placement contract: "homed 2026-11-13; placement user-ratified at docs/guidelines/ (versioned with the system, promoted with each release); lifecycle now live" — consistent with serving docs/guidelines/ from the release payload.
 
 ## Sources
 

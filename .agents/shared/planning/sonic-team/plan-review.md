@@ -38,7 +38,7 @@ The plan set is unusually strong: mechanically-checkable ACs with a counter-muta
 
 **MF-3 🟠 — D16 "no live install dirs" contradicts Phase 4's sanctioned stage-live write-path.**
 - Evidence: `decisions.md:26` (D16) vs `phase4-stage-runbook.md:19` (C7 "this runbook stages live"), `:62-68`, `:82` — `stage.sh live` necessarily writes `$HOME/agents-ensemble/releases/$VERSION` and idempotently sets the install `.env` marker. A lane reading D16 literally refuses Phase 4; one reading the runbook violates D16.
-- Fix: reconcile in one line — "live contact" = live **runtime state only** (daemon port, live DB, `current` symlink flip, `state.json` promote fields, promote/nonce, restart); the `releases/` staging write-path is the Emperor-sanctioned STAGE act. Record per D15.
+- Fix: reconcile in one line — "live contact" = live **runtime state only** (daemon port, live DB, `current` symlink flip, `state.json` promote fields, promote/nonce, restart); the `releases/` staging write-path is the user-sanctioned STAGE act. Record per D15.
 
 **MF-4 🟠 — Bump/tag/push actor unnamed while D16/D17 route ALL commits through giter tonight.**
 - Evidence: `phase4-stage-runbook.md:40-50` (§2.3 bump "makes a targeted commit") and `:52-58` (§2.4 tag + push) never name the actor; `decisions.md:26-27` binds every lane's commits to the giter lane with pre-approval.
@@ -56,7 +56,7 @@ The plan set is unusually strong: mechanically-checkable ACs with a counter-muta
 6. **Phase-1 exit circularity:** `phase1:466` gates Phase-1 closure on A29, which is the Phase-2 pack (`phase2:13`). Resolve: Phase-1 exit = A1–A28 green; A29 is the Phase-2 gate that unblocks Phase 3.
 7. **Rule (i) restatement:** `ENSEMBLE_DB_AMBIENT_ALLOW=1` is correctly pinned in the procedure (`dryrun-boot-procedure.md:56-60`) but absent from the phase3 §3 pin list (`phase3-dryrun-spec.md:40-50`) — restate it so AC-P3-3 can assert it from the spec.
 8. **phase3:76 token grep casing:** greps lowercase tokens vs Title-Case headers ("## Files touched") — specify `-i` or exact header strings.
-9. **C7 "operator confirms"** (`phase4:19`) is a human-ask inside an overnight runbook — pre-resolve now per D15/A1d (the Emperor's STAGE directive satisfies it) and record the adjudication.
+9. **C7 "operator confirms"** (`phase4:19`) is a human-ask inside an overnight runbook — pre-resolve now per D15/A1d (the user's STAGE directive satisfies it) and record the adjudication.
 10. **Version derivation:** `phase4:31-36` uses local `git tag --list` — this host has documented local/origin tag divergence (POK release-02). Derive from a remote-aware listing (`git ls-remote --tags origin` cross-checked) and record the source.
 11. **×7 budget honesty:** a tiny dry-run feature never approaches 2100 steps — the morning report should call the multiplier **config/pin-proven** (A4/A5), not wall-proven. (Also: plan cites `config.yaml:190`; the worktree value sits at `:204` — line drift, value 300 verified.)
 12. **"8 modified = 1+7" framing:** `phase1:410,438`/A16 vs `plan-overview.md:170`/DEV-1 — `ari/rule.md` is both pre-existing-drifted and edited this lane; state plainly in the morning report: "8 modified rows vs committed base = ari/rule.md (drifted at base, re-hashed this lane) + 7 pre-existing drift repairs."

@@ -165,7 +165,7 @@ Re-derived from the prior component-E § SANCTIONED-LANE ENUMERATION — read in
 | **S7** | fenced-mirror legs green | all legs (existing refuse-foreign/db-poison/happy + new tier1-name-refusal/foreign-holder/same-install-handover) pass their expected-exit + marker assertions; **per-family assertion channels pinned:** B2 family markers (incl. `tier=resolved-dsn-targets-prod`) on stderr/journald; A2/claim-gate family markers on the file log; harness provenance assert (daemon.__file__ in worktree) passes; live-untouched invariants verified pre+post | tester |
 | **S8** | sanctioned scratch-boot acceptance green | the 16-lane census trip-risk re-affirmations recorded + the named E2E lane (staged-binary mirror) reaches readyz 200 with claim take + clean shutdown; scratch names never trip the prod predicate | tester (+ developer for unit-level lanes) |
 | **S9** | (D) measurement recorded (PURE TELEMETRY — arms nothing) | RESULTS file exists at the conventioned path with N ≥ 5 cycles, per-cycle U + exit codes, the verdict line (median U > 58s ⇒ trigger would have fired / ≤ 58s ⇒ dormant — recorded as historical evidence only; the trigger is RETIRED by the CLOSED-BY-A2 closure once C1+C2+C3 hold), and the fast-refuse-ON single-cycle U evidence. Closure conditions C1 (A2 merged) + C3 (U ≤ 58s) verified here; C2 lives in S9b | tester |
-| **S9b** | live-unit `RestartPreventExitStatus` property check (C2) | ONE READ-ONLY root-side `systemctl show ensemble-main.service -p RestartPreventExitStatus` ⇒ expect `=78`. Attached to S9 as an operator leg at stage time. **IF access-refused from agent context, it RIDES THE EMPEROR'S PROMOTE-CEREMONY CHECKLIST and does NOT block staging.** Both-way verdict pre-drafted: ≠78 ⇒ (D) reverts to DEFER-WITH-TRIGGER until the live unit is regenerated via `adopt-unit.sh` (restores `:110` by construction) | operator (root-side) |
+| **S9b** | live-unit `RestartPreventExitStatus` property check (C2) | ONE READ-ONLY root-side `systemctl show ensemble-main.service -p RestartPreventExitStatus` ⇒ expect `=78`. Attached to S9 as an operator leg at stage time. **IF access-refused from agent context, it RIDES THE USER'S PROMOTE-CEREMONY CHECKLIST and does NOT block staging.** Both-way verdict pre-drafted: ≠78 ⇒ (D) reverts to DEFER-WITH-TRIGGER until the live unit is regenerated via `adopt-unit.sh` (restores `:110` by construction) | operator (root-side) |
 
 ---
 
@@ -183,7 +183,7 @@ Re-derived from the prior component-E § SANCTIONED-LANE ENUMERATION — read in
 8. **Reviewer** (plan-body/ledger predicate agreement: BF-7 strings vs the B2 plan body, character-for-character).
 9. **Tester gates S1–S9b** (S1–S5 against the staged artifact at stage time).
 10. **Stage cut** (giter; version slot from the LIVE census at stage time — do not assume; refs floor = current latest at stage time).
-11. **NO PROMOTE** — the ceremony is the Emperor's.
+11. **NO PROMOTE** — the ceremony is the user's.
 
 **Role split:** developer = code + pins + matrix rows + trip-risk re-affirmations; tester = mirror legs, measurement, S1–S9 execution; giter = stage cut; reviewer between 7 and 9.
 

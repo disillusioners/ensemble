@@ -473,7 +473,7 @@ Run from the worktree root. `jq` or `python3 -c` is acceptable; `grep -F` is exa
 
 ## 9. Deviations & Evidence Conflicts (LOUD)
 
-**D1 — Leg B vs steering S6 (model lane).** B:§5/§1 recommends mirroring `coder`'s `llm_model: "coding"` for the sonic coder (`coding` → coder/worker/canary/cracker/hacker/sweeper). **Steering S6 overrides: pin ALL FOUR to `"agentic"`.** Binding decision = S6. Reason recorded: the coding lane is dead (provider 402 until 2026-11-17T11:43:43Z, project history) and `agentic` is a legal lane (`config.yaml:96`). **Open decision for the Emperor:** re-pin to `coding` after 2026-11-17 if the lane proves faster. Implemented as `"agentic"` ×4.
+**D1 — Leg B vs steering S6 (model lane).** B:§5/§1 recommends mirroring `coder`'s `llm_model: "coding"` for the sonic coder (`coding` → coder/worker/canary/cracker/hacker/sweeper). **Steering S6 overrides: pin ALL FOUR to `"agentic"`.** Binding decision = S6. Reason recorded: the coding lane is dead (provider 402 until 2026-11-17T11:43:43Z, project history) and `agentic` is a legal lane (`config.yaml:96`). **Open decision for the user:** re-pin to `coding` after 2026-11-17 if the lane proves faster. Implemented as `"agentic"` ×4.
 
 **D2 — Duty block mandate NOT in steering (discovered).** `tests/unit/test_anomaly_report_duty_prompts.py` (the nest-anomaly duty pack) walks EVERY `agents/<dir>/meta.json` and requires the byte-identical `## Reporting Anomalies` block as the LAST top-level section; mutation leg M-P5-4 explicitly reds a new agent dir without it. Steering S1–S9 never mention it. **Added as mandatory work**: all 4 `rule.md` files end with the exact `DUTY_BLOCK` (§4.5). This is an evidence-driven addition, not a design change.
 

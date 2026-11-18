@@ -8,7 +8,7 @@
 
 ## 1. Purpose & doctrine anchor
 
-R3: "build v1, plan v2+v3 ahead; **plan v4 when v2 starts**." v2 starts now — this lane — so the obligation fires. This page is the discharge. R1 still rules the present (kingdom-level only, no federation/sync), and R1's binding clause is about format: "Format choices must not foreclose the Constella-era door." That is the only legal content a v4 sketch can have today — **constraint flowing backward into v2, never a design flowing forward.** The founding lesson (`design.md` §1) stays the ordering principle: memory precedes federation. Concretely, the backward pressure lands in exactly one place: the §5 checklist — v2 choices that look free now and are expensive to undo after a foreign kingdom has parsed them.
+R3: "build v1, plan v2+v3 ahead; **plan v4 when v2 starts**." v2 starts now — this lane — so the obligation fires. This page is the discharge. R1 still rules the present (kingdom-level only, no federation/sync), and R1's binding clause is about format: "Format choices must not foreclose the constellation-era door." That is the only legal content a v4 sketch can have today — **constraint flowing backward into v2, never a design flowing forward.** The founding lesson (`design.md` §1) stays the ordering principle: memory precedes federation. Concretely, the backward pressure lands in exactly one place: the §5 checklist — v2 choices that look free now and are expensive to undo after a foreign kingdom has parsed them.
 
 What v2 is building (the surface this sketch must not damage): two-cadence reflection writing cited syntheses (verbs CREATE / CORROBORATE / REFINE / CORRECT, supersedes chains, confidence, validity intervals), the Constellation (`memoir_star` + alias table + `memoir_line`), and the JEV-gated persona lane with PENDING proposals.
 
@@ -22,7 +22,7 @@ Deliberately NOT synced: heat and access stats (kingdom-local by construction �
 
 Import semantics (one sketch-level rule worth stating): a foreign belief lands as a NEW local synthesis row citing the foreign original — an import is a CORROBORATE-class act under v2's verb enum, never a silent copy; each kingdom's supersedes chain stays kingdom-local and gains a citable cross-kingdom edge.
 
-The **stargate** — commissioning vocabulary for the exchange-mediator concept; `roadmap.md` v4 provisionally names the same shape "the Constella protocol as transport/negotiation layer" — owns exactly three things: identity verification between kingdoms, transfer of mirror deltas, and conflict DETECTION (the optimistic-lock check made inter-kingdom). It owns no memory: no shared graph DB, no shared store, no new service (R4 holds; DD-17's no-graph-DB logic extends to the federation shape). The mediator is a negotiator of deltas, not a keeper of truths.
+The **stargate** — commissioning vocabulary for the exchange-mediator concept; `roadmap.md` v4 provisionally names the same shape "the constellation protocol as transport/negotiation layer" — owns exactly three things: identity verification between kingdoms, transfer of mirror deltas, and conflict DETECTION (the optimistic-lock check made inter-kingdom). It owns no memory: no shared graph DB, no shared store, no new service (R4 holds; DD-17's no-graph-DB logic extends to the federation shape). The mediator is a negotiator of deltas, not a keeper of truths.
 
 ## 3. Persona merge policies between kingdoms
 
@@ -30,7 +30,7 @@ The merge unit is the persona *version document*, never "the self": bounded, ver
 
 ## 4. Keepsake governance under federation
 
-R2: two pin paths, `pinned_by ∈ {empress, emperor}`, actor recorded. Under federation, `pinned_by` stays a **claim with a recorded actor**, never a global truth: the kingdom of origin rides the mirror beside the keepsake, so a foreign reader can tell "our Emperor pinned" from "a foreign record claims an Emperor pinned." Un-pin and re-pin across kingdoms are new claims appended to the chain (DD-8), never edits to a foreign record. Kingdom-local budgets stay kingdom-local: the keepsake cap discipline (DD-3, reject-don't-evict) is per-kingdom — a foreign keepsake renders in the mirror as a claim and never consumes ours. This hardens `design.md` §14-2 (pin attribution): federation moves attribution across a trust boundary, so whatever attribution rule v2 settles on must produce records a stranger can verify.
+R2: two pin paths, `pinned_by ∈ {empress, emperor}`, actor recorded. Under federation, `pinned_by` stays a **claim with a recorded actor**, never a global truth: the kingdom of origin rides the mirror beside the keepsake, so a foreign reader can tell "our user pinned" from "a foreign record claims a user pinned." Un-pin and re-pin across kingdoms are new claims appended to the chain (DD-8), never edits to a foreign record. Kingdom-local budgets stay kingdom-local: the keepsake cap discipline (DD-3, reject-don't-evict) is per-kingdom — a foreign keepsake renders in the mirror as a claim and never consumes ours. This hardens `design.md` §14-2 (pin attribution): federation moves attribution across a trust boundary, so whatever attribution rule v2 settles on must produce records a stranger can verify.
 
 ## 5. KEEP-V2-OPEN checklist (the load-bearing section)
 

@@ -95,7 +95,7 @@ Flag policy — **required tonight vs premise-inapplicable**:
 | Flag / env | Tonight | Why |
 |---|---|---|
 | `VERSION=<derived>` (env-first) | **REQUIRED** | Explicit version; must equal the exact tag at HEAD (`stage.sh:180-191`, exit 78 otherwise) |
-| `ENSEMBLE_UPGRADE_LIVE=1` | **REQUIRED** | `require_live_guard` refuses live without it (`stage.sh:176` → `lib.sh:1431-1442`, exit 78). **A-STAGE-3:** this arms the target guard ONLY — no promote, no nonce, no `state.json` promote-field writes; the Emperor's no-live-promote boundary is untouched (standard house invocation, v0.29.15 precedent) |
+| `ENSEMBLE_UPGRADE_LIVE=1` | **REQUIRED** | `require_live_guard` refuses live without it (`stage.sh:176` → `lib.sh:1431-1442`, exit 78). **A-STAGE-3:** this arms the target guard ONLY — no promote, no nonce, no `state.json` promote-field writes; the user's no-live-promote boundary is untouched (standard house invocation, v0.29.15 precedent) |
 | `ENSEMBLE_ROLLBACK_SAFE=1` | **REQUIRED — explicit form (SUPERSEDES the earlier "unset/derive" expectation in this row)** | `stage.sh:357-363` runs a FULL-HISTORY, comment-blind `grep -liE 'DROP\s+TABLE\|DROP\s+COLUMN'` over ALL `daemon/migrations/versions/*.sql`; ANY match ⇒ `contains_contract_phase=true` ⇒ the unset path **exits 78** (`:382-388`) — giter's preconditions audit: **106 legacy files match**, so the unset/default path is UNREACHABLE on this tree. Expected log token: `rollback_safe=true source=explicit=true` (`:371` + `:927`). Deliberate leader adjudication per A-STAGE-1 (§4) |
 | `--skip-build` | **Only if** a prebuilt `dist/ensemble-prod` from the SAME commit with a valid provenance sidecar exists; otherwise omit so the stage builds and OWNS provenance (`stage.sh:207-290`) | A dirty/stale binary is refused by the provenance gate |
 | `--allow-stale-stage` | **NOT APPLICABLE — do not use** | It unlocks tip-identity + provenance refusals (`stage.sh:87-95`). If stage refuses, STOP and fix the tree — never override tonight |
@@ -155,13 +155,13 @@ Note on (b): if the live `current` sits several staged releases behind (v0.29.2x
 
 ## 4. STOP LINE — NO PROMOTE
 
-**This runbook ends at a staged release.** Promote is the Emperor's ceremony.
+**This runbook ends at a staged release.** Promote is the user's ceremony.
 
 - Do NOT run `scripts/upgrade/promote.sh`, do not flip `current`, do not restart the live daemon.
 - Deliver the promote-command TEMPLATE (not executed) in the morning report:
 
 ```bash
-# TEMPLATE ONLY — Emperor's ceremony owns the decision and the execution.
+# TEMPLATE ONLY — the user's ceremony owns the decision and the execution.
 # From the scripts-pin worktree (or the stage worktree — CWD selects the executing script):
 ENSEMBLE_UPGRADE_LIVE=1 VERSION=<derived> bash scripts/upgrade/promote.sh live --f2-verified-closed
 ```
@@ -177,7 +177,7 @@ ENSEMBLE_UPGRADE_LIVE=1 VERSION=<derived> bash scripts/upgrade/promote.sh live -
 4. **Dry-run evidence path** — the Phase-3 bundle path (or `README` index); PASS verdict reference.
 5. **Pack result** — `sonic_agent_defs_unit_test` PASS + the PACKS.md row location + run duration.
 6. **Deviation list** — every item from the three phase files' Deviations sections that materialized, plus anything new, with evidence.
-7. **Open decisions for the Emperor** — (a) promote or not (with the template), (b) patch-vs-minor version choice if it was a judgment call, (c) any VERIFY-AT-IMPL item that landed differently than specified, (d) untested surfaces (snapshot chain — see `phase3-dryrun-spec.md` §8.4).
+7. **Open decisions for the user** — (a) promote or not (with the template), (b) patch-vs-minor version choice if it was a judgment call, (c) any VERIFY-AT-IMPL item that landed differently than specified, (d) untested surfaces (snapshot chain — see `phase3-dryrun-spec.md` §8.4).
 8. **Zero-migration statement** + rollback_safe rationale verbatim (§3.4) **+ the A-STAGE-1 `ENSEMBLE_ROLLBACK_SAFE=1` adjudication disclosure (§4)**.
 
 ## 6. Acceptance criteria

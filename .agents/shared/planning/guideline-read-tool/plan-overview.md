@@ -2,7 +2,7 @@
 
 Date: 2026-11-13T18:40Z
 Author: planner[v2] via plan-creation worker
-Status: Draft — design Emperor-FIXED (ruling 2026-11-13); architect refines the runtime-resolution seam before implementation
+Status: Draft — design user-FIXED (ruling 2026-11-13); architect refines the runtime-resolution seam before implementation
 
 ## Objective
 
@@ -28,7 +28,7 @@ Give privileged agents a read-only window onto the shipped guideline corpus: a n
 - Guideline CONTENT changes: `docs/guidelines/` (5 files) is already landed at this base (merge `5316e0cd3`) and is untouched.
 - `lib.sh` / `executor_family.sh` edits: guidelines is NOT an executor-family member (never add it to `executor_family_paths` — would trip the coverage gate); integrity coverage comes from the stage-local re-hash leg, not `lib.sh`'s loop (which stays `agents frontend`, lib.sh:4102).
 - Kill-switch: NONE — RULED (architect, Q4, BINDING 2026-11-13): pure read surface, doubly gated, the payload is the natural off-switch; no kill-switch, no env knob.
-- Promote: NO promote — the Emperor's ceremony.
+- Promote: NO promote — the user's ceremony.
 
 ### Scope boundary justifications
 

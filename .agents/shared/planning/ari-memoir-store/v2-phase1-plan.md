@@ -176,7 +176,7 @@ The purity pin `test_memoir_write_purity_unit.py:154-176` is deliberately amende
 
 #### `MemoirConstellationRepository` (`daemon/repositories/memoir/constellation_repository.py`)
 - `upsert_star(agent_id, name, star_type, description=None, event_at=None) -> MemoirStar`: Upserts a canonical star. If existing, updates `last_touched_at = max(existing, event_at)`.
-- `add_alias(agent_id, star_id, alias) -> MemoirStarAlias`: Binds alias string (e.g. "my dear", "the Emperor") to canonical star id.
+- `add_alias(agent_id, star_id, alias) -> MemoirStarAlias`: Binds alias string (e.g. "the operator", "the user") to canonical star id.
 - `resolve_star(agent_id, query_name) -> MemoirStar | None`: Resolves by canonical name OR alias.
 - `record_line(agent_id, star_id, episode_id, event_at, pass_id=None) -> MemoirLine`: Upserts an episodic mention line. If conflict on `(star_id, episode_id)`, increments `mention_count` only if `last_pass_id IS DISTINCT FROM pass_id` (or fallback `last_pass_id IS NULL OR last_pass_id != pass_id`), updating `last_mentioned_at` and `last_pass_id`.
 - `get_star_card(agent_id, star_id) -> dict`: Returns star record, all aliases, recent mention lines, and 1-hop neighbor stars.

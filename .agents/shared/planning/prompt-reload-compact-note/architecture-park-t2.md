@@ -11,7 +11,7 @@ This file exists so that the **disappearance** of a phase is on the record, with
 
 ## 1. The PARK
 
-**T2 — the decision-family accelerator tier — was adjudicated under the Emperor's directive of 2026-11-16** (the "decision call need optimization … at most 10 decision call … prefer use on the most match removal keywords, long message" directive). That adjudication produced a full design: the advisory-verdict shape, the quota constant, the T1→T2 interface, the EX-2 resolution, the enablement posture, the cost accounting, and the acceptance harness.
+**T2 — the decision-family accelerator tier — was adjudicated under the user's directive of 2026-11-16** (the "decision call need optimization … at most 10 decision call … prefer use on the most match removal keywords, long message" directive). That adjudication produced a full design: the advisory-verdict shape, the quota constant, the T1→T2 interface, the EX-2 resolution, the enablement posture, the cost accounting, and the acceptance harness.
 
 **It was withdrawn by a same-day directive. Verbatim:**
 
@@ -19,7 +19,7 @@ This file exists so that the **disappearance** of a phase is on the record, with
 
 **The FINAL design of this feature, in one sentence:** *the compaction LLM selects inline, given the messages list + the note, with the model doing the selection itself and **no decision-family involvement of any kind**.* In the shipped form (v1.5) that is the **append method**: the daemon appends the note as a request to the agent's own message list, the agent's own model writes the compaction, and the daemon swaps the history. The model sees everything and does the selection — there is no pre-filter, no shortlist, no tier, and no second model.
 
-**Consequence for the earlier tiering:** Ari's T0/T1/T2 tiering is superseded by the Emperor's mechanism ruling, not by this park. T0 (note-marker drops) and T1 (a zero-LLM ranked shortlist) are **not** re-adjudicated here; they were overtaken by a later ruling that removed the need for a selection substrate altogether (the model selects). The pre-filter module landed on the branch (`daemon/_compact_note_prefilter.py`, 331 lines, commit `8611f7b34`) is **removed, visibly in the diff** — see v1.5 §4.
+**Consequence for the earlier tiering:** Ari's T0/T1/T2 tiering is superseded by the user's mechanism ruling, not by this park. T0 (note-marker drops) and T1 (a zero-LLM ranked shortlist) are **not** re-adjudicated here; they were overtaken by a later ruling that removed the need for a selection substrate altogether (the model selects). The pre-filter module landed on the branch (`daemon/_compact_note_prefilter.py`, 331 lines, commit `8611f7b34`) is **removed, visibly in the diff** — see v1.5 §4.
 
 **Nothing from the T2 adjudication ships.** No `DECISION_*` call, no quota, no per-call latency, no seam, no provisioning, no registry entry, no ledger row, no import of `daemon/services/decision/**` from any file this feature touches.
 
@@ -47,7 +47,7 @@ This file exists so that the **disappearance** of a phase is on the record, with
 - "Not configured" is not a state this feature can be in — the feature has no dependency to configure.
 - No core path depends on the module; a deployment that never enables the decision module has a **complete** feature.
 - The receipt states plainly which path ran (v1.5 §2g: `path=append`, `outcome=compacted | refused`, and the effective model).
-- Provisioning remains the operator's choice and the Emperor's billing call — **and this feature makes no provisioning demand**.
+- Provisioning remains the operator's choice and the user's billing call — **and this feature makes no provisioning demand**.
 
 ---
 
@@ -107,7 +107,7 @@ The family's own budgets (`daemon/services/decision/overlay.py:299-320`): per-se
 
 ## 5. Ruling (C) — WITHDRAWN, NOT RULED
 
-**Ruling (C) (the caller-supplied `compact_removal_keyword` list) was withdrawn by the Emperor before it was ever ruled on. Verbatim:**
+**Ruling (C) (the caller-supplied `compact_removal_keyword` list) was withdrawn by the user before it was ever ruled on. Verbatim:**
 
 > "yes, and you don't need to think the 'compact_removal_keyword' as the tool now not need it. it just need compaction note 😄"
 

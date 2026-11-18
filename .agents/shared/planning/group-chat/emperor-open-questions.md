@@ -1,8 +1,8 @@
-# Agent Group Chat — Open Questions for the Emperor
+# Agent Group Chat — Open Questions for the user
 
 **Doc-set Rev 6** (single alignment stamp; 2026-11-15 final fix pass). **Status:** Phase-1 endpoint deliverable · **Date:** 2026-11-15.
 **Provenance:** distilled from architecture-recommendation.md (🏛️ council 2/2 unanimous + 4 dimension analyses, all anchor-verified at tip `bf4bfde6e`).
-> ✅ **RATIFIED 2026-11-15 — ALL 7 ITEMS AS RECOMMENDED** (Emperor, via KV key `gc_phase2_go`). Two binding refinements (R1: untagged-but-ADDRESSED-to-TERMINAL member → NUDGE THE PARENT; R2: archived rooms PURGED FROM THE DATABASE — literal DB cleanup) + the P6 UI direction (chatroom icon → big modal on the instances surface) are recorded as settled design in decisions.md D-S10..D-S13 and architecture-recommendation.md Rev 7 (§4.4 / §2 / §13.1). The 7 items below are the UNALTERED decision record.
+> ✅ **RATIFIED 2026-11-15 — ALL 7 ITEMS AS RECOMMENDED** (the user, via KV key `gc_phase2_go`). Two binding refinements (R1: untagged-but-ADDRESSED-to-TERMINAL member → NUDGE THE PARENT; R2: archived rooms PURGED FROM THE DATABASE — literal DB cleanup) + the P6 UI direction (chatroom icon → big modal on the instances surface) are recorded as settled design in decisions.md D-S10..D-S13 and architecture-recommendation.md Rev 7 (§4.4 / §2 / §13.1). The 7 items below are the UNALTERED decision record.
 
 **Reading guide:** 7 items, ordered by decision-impact. Each is a genuine choice with real trade-offs; everything else is settled within the rulings or is an implementation detail. Recommendations are ours to ratify or flip — the design bends at any of these without re-opening the substrate. Three adaptation disclosures follow the items (not decision items).
 
@@ -54,7 +54,7 @@
 
 **QUESTION:** Surface rooms in the UI now via the existing instance-events SSE route (plus a ~3-line room-resolution fix), or defer all room UI to a later phase?
 **CONTEXT:** The reuse claim ("zero new auth surfaces") held ONLY with a room-resolution pre-branch — the route currently 404s on any non-instance id. The stream is operator/FE-tier observability (lossy, at-most-once), never a delivery lane; members read via the room tool. Durable content-free audit rows (post/join/leave/tag-delivery/proposal) are recommended regardless.
-**OPTIONS:** (a) v1: pre-branch + room-keyed SSE publish + audit EventKinds — humans watch the team work live, tiny change; (b) Audit rows only, SSE later — less surface, but the Emperor's "this is how a real team works" is invisible to humans until later; (c) No room observability in v1.
+**OPTIONS:** (a) v1: pre-branch + room-keyed SSE publish + audit EventKinds — humans watch the team work live, tiny change; (b) Audit rows only, SSE later — less surface, but the user's "this is how a real team works" is invisible to humans until later; (c) No room observability in v1.
 **OUR RECOMMENDATION:** (a) — observability was part of the commission's spirit, the change is ~3 lines + additive event kinds, and it forces the audit lane to exist from day one.
 
 ---

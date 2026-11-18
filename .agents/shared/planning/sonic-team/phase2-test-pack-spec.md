@@ -8,7 +8,7 @@
 
 ## AMENDMENT 2026-11-14 — sonic routing (v0.30.5; supersedes A7/A10/A11 + the registry row)
 
-The blast-radius predicate is REMOVED (Ruling A, Emperor 2026-11-14). This phase-2 spec is
+The blast-radius predicate is REMOVED (Ruling A, user 2026-11-14). This phase-2 spec is
 the v1 HISTORICAL record; the OPERATIVE pack is `test/packs/sonic_agent_defs_checks.py`.
 Superseded legs: **A7** (blast globs) and **A10** (blast escalation line) are REMOVED — A10
 now pins the developer pause/handover; **A11** anchors moved to the "Sonic Team (Default)"

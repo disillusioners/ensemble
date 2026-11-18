@@ -1,20 +1,20 @@
 # Agent Group Chat — Phase-1 DESIGN · Plan Overview
 
-**Doc-set Rev 7** (Phase-2 amendment, 2026-11-15: Emperor RATIFIED all 7 items as recommended + refinements R1 addressing→parent-nudge / R2 purge-from-DB / R3 P6 UI — folded; on top of Rev 6 final fix pass). **Status:** Phase-1 DESIGN (planning-only). NO implementation, NO code changes, NO commits/pushes — a giter instance finalizes git at end of mission.
-**Date:** 2026-11-15 · **Commission:** Emperor directive via Ari.
+**Doc-set Rev 7** (Phase-2 amendment, 2026-11-15: user RATIFIED all 7 items as recommended + refinements R1 addressing→parent-nudge / R2 purge-from-DB / R3 P6 UI — folded; on top of Rev 6 final fix pass). **Status:** Phase-1 DESIGN (planning-only). NO implementation, NO code changes, NO commits/pushes — a giter instance finalizes git at end of mission.
+**Date:** 2026-11-15 · **Commission:** user directive via Ari.
 **Evidence base:** three investigation reports (gc-wanderer-msg, gc-wanderer-lifecycle, gc-wanderer-precedent), all anchors at repo tip `bf4bfde6e` — consolidated in **substrate-map.md** (§A–§J).
 **Companion docs:** substrate-map.md · decisions.md (9 SETTLED; 6 OPEN **all resolved**, pointers per entry) · **architecture-recommendation.md (architect delivery, Rev 6)** · **emperor-open-questions.md (7 ratification items + 3 adaptation disclosures — the Phase-1 endpoint)**.
-**Live state:** planner framing COMPLETE → architect delivery COMPLETE → **RATIFIED 2026-11-15 (all 7 as recommended + R1–R3) → PHASE-2 GO** (implement per phased plan; report at phase boundaries; promote ceremony = Emperor's) → architect delivery COMPLETE (C1, F-A/B/C, iterations 001–003 reconciled: capability row, join predicate, corrected post-graph chain, total 10-state lane map, owner cursor seed, one-hop proposals, pinned boot pair, two-conjunct restore) → **awaiting Emperor ratification**. Next dispatch after ratification: plan-creation cycle authoring `phaseN-plan.md` files.
+**Live state:** planner framing COMPLETE → architect delivery COMPLETE → **RATIFIED 2026-11-15 (all 7 as recommended + R1–R3) → PHASE-2 GO** (implement per phased plan; report at phase boundaries; promote ceremony = the user's) → architect delivery COMPLETE (C1, F-A/B/C, iterations 001–003 reconciled: capability row, join predicate, corrected post-graph chain, total 10-state lane map, owner cursor seed, one-hop proposals, pinned boot pair, two-conjunct restore) → **awaiting user ratification**. Next dispatch after ratification: plan-creation cycle authoring `phaseN-plan.md` files.
 
 ---
 
 ## 1. Objectives
 
-1. Make sibling collaboration first-class: parent opens a chat-room; agents work together ("This is how a real team work not just with their leader, they work together too." — Emperor).
-2. Deliver the DESIGN DOC SET: requirements (verbatim-faithful), substrate map, decision log, risk register, architect recommendation, Emperor open-question list.
-3. Frame in planner docs; architect answers (delivered); Emperor ratifies.
+1. Make sibling collaboration first-class: parent opens a chat-room; agents work together ("This is how a real team work not just with their leader, they work together too." — the user).
+2. Deliver the DESIGN DOC SET: requirements (verbatim-faithful), substrate map, decision log, risk register, architect recommendation, user open-question list.
+3. Frame in planner docs; architect answers (delivered); the user ratifies.
 
-## 2. Emperor requirements (verbatim-faithful)
+## 2. user requirements (verbatim-faithful)
 
 - When a parent needs a group of agents working together in real-time, it opens a chat-room.
 - Agents created by the parent via create-instance can OPTIONALLY join a chatroom UUID (join param at spawn).
@@ -23,7 +23,7 @@
 - Rationale: "This is how a real team work not just with their leader, they work together too."
 - Related: warm/reusable lanes preferred over duplicates; handoffs via team messages; group chat = the general mechanism making sibling collaboration first-class.
 
-## 3. SETTLED CONSTRAINTS — binding Emperor rulings (2026-11-15; record verbatim as constraints, NOT open questions)
+## 3. SETTLED CONSTRAINTS — binding user rulings (2026-11-15; record verbatim as constraints, NOT open questions)
 
 1. **DELIVERY=HYBRID rhythm-aware:** (a) unread NUDGE at TODO-STEP boundaries (lightweight 'N unread' injection, no interruption of in-flight work); (a2) COMPLETION-BOUNDARY NUDGE — before the instance declares its turn/task done, last-chance 'check unread team messages' nudge; fires only when unread>0 at turn-completion; MUST carry a loop-guard (once-per-turn latch OR only-if-new-messages-since-last-room-read) so a busy room cannot block completion forever; tagged/blocking message at completion time = strong form, composes with parent-wake. (b) NAMED members + @TAGGING — TAGGED message = INJECTED MID-TURN immediately (importance escalation); untagged waits for nudges.
    *(Mechanism note — NOT ruling text: (a) rides the reminder slot EVERY todo update returns (todo_manager.py:403-461; `_compute_reminder` :1198-1276), filtered by the shared latch + watermark — not done-only; the drain wrapper is terminal-verdict-only (a2-side backstop; graph.py:4933 cap, :4955-5040); the (a2) chain is `language_check → room_completion_gate → attestation_gate → END`; the loop-guard's purpose is the clause above.)* **(SUPERSEDED — P4 implementation, A-P4-4/8/14: the drain wrapper is NOT a nudge backstop — the peek-as-implemented was dropped per the A2 adjudication and the (a2) completion nudge is owned exclusively by the in-chain `room_completion_gate` node, wired at BOTH language seams. Final mechanism: the (a) carrier is the reminder-return slot across all FIVE reminder-returning todo tool paths (`todo_list_update` / `todo_graph_update` / `todo_graph_update_subtask` / `todo_graph_add_subtask` / `todo_graph_remove_subtask` — A-P4-15 F1); the (a2) gate is the language-check HOLD shape with a checkpoint-durable route hint CLEARED on every non-fire pass (C1); the loop-guard is the two-dimension shared latch (per-turn spend + read-watermark, A-P4-2); behavior is pinned by the executed-composition pin class (A-P4-14), not by wiring-edge maps.)*
@@ -90,7 +90,7 @@ Architect regroup in architecture-recommendation.md §13. Proper `phaseN-plan.md
 
 ## 8. Success criteria — design phase
 
-1. **Emperor-ruling coverage:** all 6 rulings (+ additions) SETTLED; verbatim blocks verified against the KV source.
+1. **user-ruling coverage:** all 6 rulings (+ additions) SETTLED; verbatim blocks verified against the KV source.
 2. **Anchor-grounded:** all report anchors preserved in substrate-map.md; drifts caught and corrected.
 3. **Open questions distilled:** 6 framed, resolved, presented for ratification.
 4. **Zero baseline/seal impact demonstrable.**

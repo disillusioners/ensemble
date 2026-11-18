@@ -10,7 +10,7 @@
 
 Deliver the cold-path Constellation graph layer and the entity-centric retrieval tool:
 1. Implement the cold-path entity extraction pipeline in `MemoirConstellationService`: extracts entities from `memoir_episodes.stars[]` and narrative bodies during reflection passes, maps them to canonical stars via deterministic canonicalization rules, and records weighted edges in `memoir_line` with `last_pass_id` crash-recovery idempotence (SF2).
-2. Implement bounded historical seed pass (C2 / Leader ruling 2026-11-09): Nightly reflection passes walk pre-cutover episodes oldest-first under existing 30-episode/budget caps, extracting stars into Constellation so historical entities ("The Emperor") are queryable from day 1.
+2. Implement bounded historical seed pass (C2 / Leader ruling 2026-11-09): Nightly reflection passes walk pre-cutover episodes oldest-first under existing 30-episode/budget caps, extracting stars into Constellation so historical entities ("The user") are queryable from day 1.
 3. Implement the LightRAG M4 two-tier description synthesizer:
    - *Tier 1 (Small):* Plain concatenation/join of episode excerpts when fragments < 5 or total text < 1200 chars.
    - *Tier 2 (Grown):* LLM summarization into a coherent entity card (~300 words) when thresholds are exceeded and cooldown has elapsed.
@@ -84,8 +84,8 @@ def memoir_about(
 
 ### 3.3 Output Dossier Format
 ```text
-=== STAR: The Emperor (type: person, heat: 42.5) ===
-Aliases: my dear, Emperor, He
+=== STAR: The user (type: person, heat: 42.5) ===
+Aliases: the operator, user, He
 First Seen: 2026-10-01 | Last Touched: 2026-11-09 | Summary As Of: 2026-11-09 03:15:00 UTC
 
 Description:
@@ -97,7 +97,7 @@ Connected Episodes (recent):
 - [2026-11-04] R1-R4 constitutional rulings ratified
 
 Neighbor Stars (1-hop):
-- Empress (person) — 14 shared episodes
+- the assistant (person) — 14 shared episodes
 - agents-ensemble (project) — 38 shared episodes
 ```
 
@@ -108,7 +108,7 @@ Neighbor Stars (1-hop):
 | ID | Task | Outcome (testable) | Touchpoints | Depends on | Risks carried | AC |
 |----|------|--------------------|-------------|------------|---------------|----|
 | **T3.1** | Implement `MemoirConstellationService` in `daemon/services/memoir_constellation_service.py` with entity extraction (heuristic + bounded LLM fallback, Suggestion #3) and deterministic alias linking. | Service parses `episodes.stars[]` and narrative text; creates/updates `memoir_star` and `memoir_line` with `last_pass_id` guard. | `daemon/services/memoir_constellation_service.py` | P1 | R9 | AC1 |
-| **T3.1b** | Implement bounded historical seed pass (C2 / Leader ruling 2026-11-09): Nightly pass scans unreflected backlog oldest-first (`ORDER BY created_at ASC LIMIT 30`) seeding Constellation from v1 corpus. | Pre-cutover episodes extracted into Constellation; "The Emperor" queryable on day 1 under existing 30-episode/budget caps. | `daemon/services/memoir_reflection_worker.py`, `daemon/services/memoir_constellation_service.py` | T3.1, P2 | — | AC7 |
+| **T3.1b** | Implement bounded historical seed pass (C2 / Leader ruling 2026-11-09): Nightly pass scans unreflected backlog oldest-first (`ORDER BY created_at ASC LIMIT 30`) seeding Constellation from v1 corpus. | Pre-cutover episodes extracted into Constellation; "The user" queryable on day 1 under existing 30-episode/budget caps. | `daemon/services/memoir_reflection_worker.py`, `daemon/services/memoir_constellation_service.py` | T3.1, P2 | — | AC7 |
 | **T3.2** | Implement LightRAG M4 two-tier description synthesizer measuring fragments as `COUNT(*)` of lines and updating `description_as_of` within 2-call constellation budget. | Entities with <5 distinct citing episodes join raw snippets; entities with ≥5 distinct episodes trigger LLM summarization with 24h cooldown. | `daemon/services/memoir_constellation_service.py` | T3.1 | R3 | AC2 |
 | **T3.3** | Implement `memoir_about` tool in `daemon/tools/memoir.py` with two-layer gate, two-part heat scoring (`MEMOIR_HEAT_DECAY_LAMBDA = 0.005`), frozen 19-code refusal mapping, and zero-episode empty-dossier success render. | Calling tool with valid star returns formatted card; zero-episode star returns empty-dossier success; missing/invalid star returns mapped refusal codes without raising exceptions. | `daemon/tools/memoir.py` | P1, T3.2 | — | AC3 |
 | **T3.4** | Update tool registration in `daemon/tools/_tool_registry.py` and `MEMOIR_TOOL_NAMES` frozenset in `daemon/tools/memoir.py`. | `MEMOIR_TOOL_NAMES` holds 6 tools; tool factory instantiates `memoir_about` for Ari; denied for other agents. | `daemon/tools/memoir.py`, `daemon/tools/_tool_registry.py` | T3.3 | R7 | AC4 |
@@ -121,13 +121,13 @@ Neighbor Stars (1-hop):
 
 | ID | Criterion |
 |---|---|
-| **AC1** | Cold-path extraction & alias normalization: Processing an episode with `stars=["The Emperor", "agents-ensemble"]` creates/updates canonical stars and records `memoir_line` edges; alias resolution maps "the Emperor" to "The Emperor"; `last_pass_id` guard prevents duplicate mention counts on crash retry. |
+| **AC1** | Cold-path extraction & alias normalization: Processing an episode with `stars=["The user", "agents-ensemble"]` creates/updates canonical stars and records `memoir_line` edges; alias resolution maps "the user" to "The user"; `last_pass_id` guard prevents duplicate mention counts on crash retry. |
 | **AC2** | Two-tier description threshold & budget: Entity with 1 episode mentioned 10 times (`COUNT(*)=1`, `SUM=10`) stays Tier 1 (plain join); entity with 5 distinct episodes (`COUNT(*)=5`) and >1200 chars triggers Tier 2 LLM summarization (capped at 2 calls/pass) and sets `description_as_of`; subsequent runs within 24h use cached summary. |
 | **AC3** | `memoir_about` tool safety & empty dossier: Unauthorized agent calling `memoir_about` returns `memoir_not_authorized`; knob OFF returns `memoir_disabled`; missing star returns `memoir_query_required`; non-existent star returns `memoir_not_found`; star with 0 linked episodes returns empty-dossier SUCCESS. No exceptions raised. |
 | **AC4** | Registration integrity: `len(MEMOIR_TOOL_NAMES) == 6`; `discover_source_only_tool_names` includes `memoir_about`; tool resolves cleanly when Ari instance spawns. |
 | **AC5** | Category ordinal safety: Category ordinal is verified by dynamic grep derivation in test assertions; zero test files contain hardcoded category numbers. |
 | **AC6 (Mutation)** | Measuring fragments via `SUM(mention_count)` flips AC2 RED; returning `memoir_not_found` for zero-episode stars flips AC3 RED; incrementing heat during background extraction flips AC1 RED. |
-| **AC7** | Historical corpus seed (C2): Running initial nightly pass over historical v1 corpus populates `memoir_star` for "The Emperor"; subsequent `memoir_about("The Emperor")` returns populated card with historical episode lines. |
+| **AC7** | Historical corpus seed (C2): Running initial nightly pass over historical v1 corpus populates `memoir_star` for "The user"; subsequent `memoir_about("The user")` returns populated card with historical episode lines. |
 
 ---
 

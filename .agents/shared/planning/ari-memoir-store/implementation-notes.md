@@ -36,7 +36,7 @@ Consolidates `phase-notes.md`, `phase-notes-p3.md`, `phase-notes-p4p6.md`,
   `mutation-matrix-digest.json`).
 - Guardrail sweep (D7.9): no touched `daemon/loader.py`, no agents meta.json
   except ari, no pyproject/uv.lock change, no plugins/frontend, no new
-  external dependency, no sync/federation surface (Constella door intact).
+  external dependency, no sync/federation surface (the constellation door intact).
 - FC9 record (T7.8): baseline 48,170 → 50,266; growth 2,096 = 4.35 %;
   both bounds PASS. Caveats: scratch HOME lacked project-experience.md
   (baseline slightly understated); no MCP names bound. Recorded per

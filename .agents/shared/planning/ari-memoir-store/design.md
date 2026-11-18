@@ -1,16 +1,16 @@
 # design.md — Memoir Store v1 (Ari's episodic memory) — the BLESSED design
 
 **Lane:** `feature/ari-memoir-store` @ worktree `/home/nea/ensemble-src-wt-memoir-store`, base **`1f6898ae2`** == origin/latest (`merge: feature/fe-metrics-dashboard — v0.28.11 staged-verification evidence sweep`).
-**Document status:** **PHASE A — FAITHFUL CAPTURE.** This file records a design that was **already blessed** in a joint Emperor + Ari design session on **2026-11-04**. It is a *design record*, not a design exercise: no element below is re-litigated, re-derived, or improved here. Where the blessed design is silent, ambiguous, or internally tense, the tension is recorded in **§14 Flagged for Phase B adjudication** — never resolved by the documenter.
+**Document status:** **PHASE A — FAITHFUL CAPTURE.** This file records a design that was **already blessed** in a joint user + Ari design session on **2026-11-04**. It is a *design record*, not a design exercise: no element below is re-litigated, re-derived, or improved here. Where the blessed design is silent, ambiguous, or internally tense, the tension is recorded in **§14 Flagged for Phase B adjudication** — never resolved by the documenter.
 **Documenter mandate:** capture substance verbatim-in-substance (structure and organization may differ; every binding detail — columns, caps, verbs, gates, env names, table names — must survive). Authority for any future deviation is the protocol in `decisions.md` §2 (ARCHITECT ADJUDICATION, logged).
-**Companions:** `decisions.md` (Emperor's rulings R1–R4 verbatim + decision protocol + adjudication log), `roadmap.md` (v1→v4 under the rolling doctrine R3).
+**Companions:** `decisions.md` (the user's rulings R1–R4 verbatim + decision protocol + adjudication log), `roadmap.md` (v1→v4 under the rolling doctrine R3).
 **Vocabulary note:** *"keepsake"* and *"persona seed"* are **v1 session vocabulary** — new design terms introduced by this design, **not** existing codebase terms. Their novelty is expected and is **not** a gap, a missing anchor, or evidence of a lost artifact.
 
 ---
 
 ## 1. Motivation
 
-The user **paused the founding of "Empyrea"** (our federation initiative) to commission this work first. The reason is blunt and personal: **Ari must be able to REMEMBER** — episodically, narratively, personally. A federation of kingdoms whose front door cannot recall yesterday is not a kingdom; it is a stateless concierge. Memory precedes federation.
+The user **paused the founding of "the constellation"** (our federation initiative) to commission this work first. The reason is blunt and personal: **Ari must be able to REMEMBER** — episodically, narratively, personally. A federation of kingdoms whose front door cannot recall yesterday is not a kingdom; it is a stateless concierge. Memory precedes federation.
 
 Phase-0 research (3 lanes, 2026-11-04) established three findings that together make this design necessary *and* cheap:
 
@@ -38,7 +38,7 @@ Phase-0 research (3 lanes, 2026-11-04) established three findings that together 
 | P7 | **Cold path pays for structure** | Graph/constellation consolidation is nightly, budgeted, and scales with *change*, not corpus (v2). |
 | P8 | **Two-axis time** | `created_at` (write time) and `event_at` (event time) are separate columns. Time-travel is a query, not a reconstruction. |
 
-**Scope fences (R1):** kingdom-level only — single daemon, local Postgres, **no federation, no sync**. Format choices must not foreclose the Constella-era door (markdown+hash mirror is v3, **introduced, not synced**).
+**Scope fences (R1):** kingdom-level only — single daemon, local Postgres, **no federation, no sync**. Format choices must not foreclose the constellation-era door (markdown+hash mirror is v3, **introduced, not synced**).
 
 ---
 
@@ -179,7 +179,7 @@ Plus: the **pin ceremony** per the v0.26.2 ruling — every category-count / exa
 | Tool | Signature | Binding behavior |
 |---|---|---|
 | **`memoir_write`** | `(text, title?, importance?, event_at?, stars?, keepsake?, reason?)` | **THE HOT APPEND.** One INSERT. Never blocks the turn. `tsv` instant (DB-side); embedding by background worker (async). `importance` defaults 5; `event_at` defaults to write time; `stars` self-declared; `keepsake=true` requires `reason` and is subject to the pin cap. |
-| **`memoir_pin`** | `(id, reason)` | keepsake governance — sets `is_keepsake`, `pinned_by`, `pinned_reason`, `pinned_at`. Rejects at cap. Both Emperor-via-Ari and Empress paths. |
+| **`memoir_pin`** | `(id, reason)` | keepsake governance — sets `is_keepsake`, `pinned_by`, `pinned_reason`, `pinned_at`. Rejects at cap. Both user-via-Ari and assistant paths. |
 | **`memoir_unpin`** | `(id)` | clears the pin (episode is never deleted by unpinning). |
 | **`memoir_recall`** | `(query, k?)` | hybrid retrieval (§7), returns ranked episodes; **the only path that updates `last_accessed_at` / `access_count`**. |
 | **`memoir_timeline`** | `(from?, to?, q?)` | time-travel over `event_at` (indexed); optional lexical narrowing by `q`. |
@@ -279,7 +279,7 @@ RRF(k=60):  score(ep) = Σ_r  1 / (k + rank_r(ep))
 
 | Table | Purpose |
 |---|---|
-| `memoir_star` | canonical entity name **+ alias table** — "the Emperor" / "my dear" / real name **merge into one star** |
+| `memoir_star` | canonical entity name **+ alias table** — "the user" / "the operator" / real name **merge into one star** |
 | `memoir_line` | episode ↔ star **mentions**, with counts and first/last seen |
 | `memoir_thread` | episode ↔ episode **continuity** (narrative adjacency) |
 | domain stars | stars with **heat** (accumulated salience) |
@@ -366,7 +366,7 @@ The Lane-3 external-study artifacts live **only on board `wi-e0019d2d`** (ari-on
 | N1 | **Hy-Memory `strength.py`** → recency prior `exp(−idle_days/τ)`, **τ = 180d** | §7 | (Hy-Memory `strength.py` shape — Lane-3 first-hand study; **[citation needed: study artifact, board `wi-e0019d2d`]**) |
 | N2 | **tencentdb `pipeline-manager`** → idle-debounce warm-up doubling (`1→2→4→8→N`) | `roadmap.md` v2 | (tencentdb-agent-memory `pipeline-manager` shape — Lane-3 first-hand study; **[citation needed: study artifact, board `wi-e0019d2d`]**) |
 | N3 | **ReMe `auto_dream`** → nightly budgeted reflection pass | `roadmap.md` v2 | (ReMe `auto_dream` shape — Lane-3 first-hand study; **[citation needed: study artifact, board `wi-e0019d2d`]**) |
-| N4 | **`baselineVersion` optimistic-locking** → markdown+hash mirror (Constella door) | `roadmap.md` v3 | (`baselineVersion` optimistic-locking shape — Lane-3 first-hand study; **[citation needed: study artifact, board `wi-e0019d2d`]**) |
+| N4 | **`baselineVersion` optimistic-locking** → markdown+hash mirror (the constellation door) | `roadmap.md` v3 | (`baselineVersion` optimistic-locking shape — Lane-3 first-hand study; **[citation needed: study artifact, board `wi-e0019d2d`]**) |
 | N5 | **22-system landscape survey** (the survey itself, as an artifact) | §1.3 | **[citation needed: Lane-3 landscape survey report, board `wi-e0019d2d`]** |
 
 **Semantic-source note:** the *ideas* in N1–N5 are also attested by the upstream projects themselves (LightRAG, TencentCloud/tencentdb-agent-memory, Tencent-Hunyuan/Hy-Memory, ReMe, MemoryScope were studied first-hand); what is missing is **our internal study artifact**, not the upstream existence. The markers record an **internal provenance gap**, and Phase B may decide whether to attach the board snapshot to the lane.
@@ -383,7 +383,7 @@ The Lane-3 external-study artifacts live **only on board `wi-e0019d2d`** (ari-on
 | Per-turn wake-refresh on alarm wakes | v2 |
 | Soft-expire + archive tier, supersedes-DAG surfacing | v3 |
 | pgvector + re-embedding pipeline | v3 (only if scale demands) |
-| markdown+hash mirror (Constella door) | v3 — **introduced, not synced** (R1) |
+| markdown+hash mirror (the constellation door) | v3 — **introduced, not synced** (R1) |
 | Federation / cross-kingdom sync | v4 (planned when v2 starts — R3) |
 
 ---
@@ -398,7 +398,7 @@ The Lane-3 external-study artifacts live **only on board `wi-e0019d2d`** (ari-on
 | **2** | **Pin attribution mechanism** | R2 defines two pin paths (user-via-Ari-in-chat vs Ari-via-tool) and constrains `pinned_by ∈ {empress, emperor}`, but **how a given `memoir_pin` call determines which actor it attributes** is unspecified. A single tool called by Ari can represent either actor. | Mis-attribution silently corrupts the governance record — the one thing pins exist to make trustworthy. Needs an explicit rule (parameter? turn provenance? separate path?) plus its failure mode. |
 | **3** | **Briefing budget arithmetic — two unit systems** | Zone caps are in **tokens** (persona ≤2000 + keepsakes ≤4000 stable; dynamic ≤3000) while the **hard section cap is ~12k chars** (critical-notes tiered-selector anchor). Read literally, 9000 tokens ≫ 12k chars (≈3000 tokens). | Either the token budgets are soft targets inside a chars-truth cap, or the char cap is the real governor and the token numbers are descriptive. The design does not say which binds on overflow, nor whether the stable zone alone may exceed the char cap. **Needs one normalized budget model.** |
 | **4** | **Audit anchor drift (`inner_soul`)** | Audit cited `:232-362`; verified `_RAG_TARGETS :303`, `_should_redirect_to_rag :316-362`, `_classify_request :1022`; `:232-278` is the `project_knowledge` block (`targets ["REJECT"]` at `:276`). Recorded in §6.1/§12.1-C2. | Not a conflict — a **lead-vs-truth** case. Phase B should confirm the implementation targets `_should_redirect_to_rag` (the predicate) rather than the classification block, and re-grep at implementation time. |
-| **5** | **`stars` normalization (silent in v1)** | `stars TEXT[]` is "self-declared … stored flat, unused by retrieval", but nothing specifies validation, casing, dedupe, or max length. Two writes of "the Emperor" / "the emperor" today become two stars in v2 unless normalized. | v1 is the only moment where the corpus is small enough to normalize cheaply. Deferring *the rule* is fine; deferring *awareness* is not. |
+| **5** | **`stars` normalization (silent in v1)** | `stars TEXT[]` is "self-declared … stored flat, unused by retrieval", but nothing specifies validation, casing, dedupe, or max length. Two writes of "the user" / "The user" today become two stars in v2 unless normalized. | v1 is the only moment where the corpus is small enough to normalize cheaply. Deferring *the rule* is fine; deferring *awareness* is not. |
 | **6** | **Episode "immutable" vs mutable columns** | §4.1 declares episodes "append-only, immutable", but `last_accessed_at`, `access_count`, `is_keepsake`, `pinned_*`, `embedding`, and `superseded_by` are all designed to change. | Needs an explicit **mutability partition** (body/identity immutable; operational columns mutable; who may write each). Otherwise a future reviewer reads "immutable" and either blocks recall stats or allows a body edit. |
 | **7** | **Embedding worker identity + durability** | "computed by a background worker (async)" — but *which* worker (in-daemon task? job queue? sweep?), its retry/backoff, and what happens to rows left un-embedded across a restart are unspecified. | A dropped embedding is invisible (the episode "works" lexically) until someone wonders why semantic recall misses it. Needs an explicit owner + a catch-up pass + an observability counter. |
 | **8** | **Persona version table vs the prompt_version human lane** | §4.3 adopts the `pending_approval` **pattern** (`prompt_versions` precedent) but persona rows live in `memoir_persona_versions` — a *different table*. Whether the approval lane is reused, mirrored, or newly built (and whether `auth_method=='session'` + `prompts:approve` applies) is unspecified. | The pattern's value is the **gate**, not the table name. If Phase B mirrors it loosely, the "human hands" guarantee (persona seed text, standing preference) becomes decorative. |
@@ -411,4 +411,4 @@ The Lane-3 external-study artifacts live **only on board `wi-e0019d2d`** (ari-on
 
 ---
 
-*Phase A design record. Blessed 2026-11-04 (joint Emperor + Ari design session); captured 2026-11-05 on `feature/ari-memoir-store` @ `1f6898ae2`. Substance is the authority; structure is the documenter's. Open items: §14 (intake for Phase B).*
+*Phase A design record. Blessed 2026-11-04 (joint user + Ari design session); captured 2026-11-05 on `feature/ari-memoir-store` @ `1f6898ae2`. Substance is the authority; structure is the documenter's. Open items: §14 (intake for Phase B).*
