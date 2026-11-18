@@ -25,6 +25,7 @@ interface RoomRow {
   name: string;
   created_at: string;
   closed: boolean;
+  state: 'active' | 'closed';
   member_count: number;
   last_message_at: string | null;
   last_message_seq: number | null;
@@ -39,6 +40,7 @@ function roomRow(overrides: Partial<RoomRow> = {}): RoomRow {
     name: 'anchored-room',
     created_at: '2026-01-01T00:00:00Z',
     closed: false,
+    state: 'active',
     member_count: 2,
     last_message_at: null,
     last_message_seq: null,
