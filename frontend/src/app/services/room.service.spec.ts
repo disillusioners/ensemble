@@ -535,4 +535,145 @@ describe('RoomService', () => {
     }
   });
 
+  it('stopPolling clears the interval — no tick after close/destroy', () => {
+    jest.useFakeTimers();
+    try {
+      service.openRoom('r-1');
+      httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages').flush({
+        messages: [],
+        next_after_seq: null,
+      });
+      service.startPolling();
+      service.stopPolling();
+      jest.advanceTimersByTime(60_000);
+      httpMock.expectNone((r) => r.url === '/api/rooms/r-1/messages');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('an in-flight tick is skipped — no stacked requests', () => {
+    jest.useFakeTimers();
+    try {
+      service.openRoom('r-1');
+      httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages').flush({
+        messages: [],
+        next_after_seq: null,
+      });
+      service.startPolling();
+      jest.advanceTimersByTime(10_000); // tick 1 issues a request
+      jest.advanceTimersByTime(20_000); // ticks 2 + 3 must be SKIPPED
+      const reqs = httpMock.match((r) => r.url === '/api/rooms/r-1/messages');
+      expect(reqs.length).toBe(1);
+      reqs[0].flush({ messages: [], next_after_seq: null });
+      service.stopPolling();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('a newer poll response wins over a slower older one (supersede token)', () => {
+    service.openRoom('r-1');
+    httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages').flush({
+      messages: [],
+      next_after_seq: null,
+    });
+    // Request A (token 1), then a stop/refresh cycle releases the flag and
+    // starts request B (token 2) — both still open.
+    service.refreshOpenRoom();
+    service.stopPolling();
+    service.refreshOpenRoom();
+    const open = httpMock.match((r) => r.url === '/api/rooms/r-1/messages');
+    expect(open.length).toBe(2);
+    const [a, b] = open;
+    // B (newer token) lands first with seq 2 …
+    b.flush({
+      messages: [{ seq: 2, instance_id: 'i-1', member_name: 'a', content: 'newer', created_at: '', kind: 'message' }],
+      next_after_seq: null,
+    });
+    // … then the OLDER request A lands carrying a HIGHER seq: the token,
+    // not the seq, decides — A must be dropped entirely.
+    a.flush({
+      messages: [{ seq: 9, instance_id: 'i-1', member_name: 'a', content: 'older-but-higher', created_at: '', kind: 'message' }],
+      next_after_seq: null,
+    });
+    expect(service.messages().map((m) => m.seq)).toEqual([2]);
+  });
+
+  it('polling pauses while hidden and resumes on visibilitychange', () => {
+    jest.useFakeTimers();
+    const hiddenSpy = jest.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+    try {
+      service.openRoom('r-1');
+      httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages').flush({
+        messages: [],
+        next_after_seq: null,
+      });
+      service.startPolling();
+      hiddenSpy.mockReturnValue(true);
+      document.dispatchEvent(new Event('visibilitychange'));
+      jest.advanceTimersByTime(30_000);
+      httpMock.expectNone((r) => r.url === '/api/rooms/r-1/messages');
+
+      hiddenSpy.mockReturnValue(false);
+      document.dispatchEvent(new Event('visibilitychange')); // resume
+      httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages').flush({
+        messages: [],
+        next_after_seq: null,
+      });
+      // The interval keeps ticking after the resume.
+      jest.advanceTimersByTime(10_000);
+      httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages').flush({
+        messages: [],
+        next_after_seq: null,
+      });
+      service.stopPolling();
+    } finally {
+      hiddenSpy.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('the poll cursor is the max loaded seq and the tick never mutates nextAfterSeq', () => {
+    service.openRoom('r-1');
+    httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages').flush({
+      messages: [
+        { seq: 3, instance_id: 'i-1', member_name: 'a', content: 'three', created_at: '', kind: 'message' },
+        { seq: 7, instance_id: 'i-1', member_name: 'a', content: 'seven', created_at: '', kind: 'message' },
+      ],
+      next_after_seq: null, // exhausted cursor
+    });
+    expect(service.nextAfterSeq()).toBeNull();
+
+    service.refreshOpenRoom();
+    const poll = httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages');
+    // Cursor = max loaded seq (7), NOT the exhausted nextAfterSeq (null).
+    expect(poll.request.params.get('after_seq')).toBe('7');
+    poll.flush({
+      messages: [{ seq: 9, instance_id: 'i-1', member_name: 'a', content: 'nine', created_at: '', kind: 'message' }],
+      next_after_seq: 9,
+    });
+    expect(service.messages().map((m) => m.seq)).toEqual([3, 7, 9]);
+    // The freeze is deliberate: the tick must not touch nextAfterSeq.
+    expect(service.nextAfterSeq()).toBeNull();
+    // …and loadMore stays frozen (no request) rather than re-paging.
+    service.loadMessages('r-1', true);
+    httpMock.expectNone((r) => r.url === '/api/rooms/r-1/messages');
+  });
+
+  it('an idle tick with no room open issues no request and sets no error', () => {
+    jest.useFakeTimers();
+    try {
+      service.startPolling();
+      jest.advanceTimersByTime(30_000);
+      expect(httpMock.match(() => true).length).toBe(0);
+      expect(service.messagesError()).toBeNull();
+      expect(service.messagesErrorStatus()).toBeNull();
+      expect(service.stale()).toBe(false);
+      service.stopPolling();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
 });

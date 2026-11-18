@@ -15,10 +15,11 @@ import {
 
 /**
  * Room read API client — the FE half of the P6 group-chat observability
+ * Room read API client — the FE half of the P6 group-chat observability
  * surface (architecture recommendation §13.1) plus the gc-fe-surfaces
- * global lane.
+ * room lane (the global browser).
  *
- * Lanes, ONE requestId guard each (the snapshots-page precedent —
+ * Room lanes, ONE requestId guard each (the snapshots-page precedent —
  * `snapshots.component.ts` `listRequestId`, `snapshot-detail-drawer`
  * `detailRequestId` / `digestRequestId`):
  *
@@ -47,7 +48,7 @@ import {
  * Errors are FAIL-CLOSED and honest: the affected lane is emptied and an
  * explicit error message is published (404 → not-found, 403 → out of
  * scope, 0 → unreachable). No fabricated rows ever reach the template.
- * The polling lane degrades differently: it KEEPS the last-good rows and
+ * The room polling lane degrades differently: it KEEPS the last-good rows and
  * raises the `stale` flag (the honest "this may be out of date" state).
  */
 @Injectable({ providedIn: 'root' })
@@ -72,7 +73,7 @@ export class RoomService {
   readonly roomsErrorStatus: WritableSignal<number | null> = signal<number | null>(null);
   private roomsRequestId = 0;
 
-  // ── messages lane (shipped) ──────────────────────────────────────────
+  // ── room messages lane (shipped) ─────────────────────────────────────
   /** The selected room's conversation, ascending by `seq`. */
   readonly messages: WritableSignal<RoomMessage[]> = signal<RoomMessage[]>([]);
   /** True while a messages request is in flight. */
