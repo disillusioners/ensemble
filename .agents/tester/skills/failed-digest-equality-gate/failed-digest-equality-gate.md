@@ -1,5 +1,13 @@
 # Base-vs-Head FAILED-Digest Equality Gate (project canon)
 
+> **v1.0.3 (2026-11-18)** — MESSAGE-SUFFIX fold (POK sweep wave-3 owner
+> routing): `pytest -rEf` prints `FAILED <node-id> - <message>`; §4's
+> prefix-strip alone left the ` - <message>` suffix attached, so the same
+> node could appear as BOTH net-new and fixed in one comparison. §4 now
+> strips the suffix on BOTH pipelines (trap recorded:
+> RESULTS/2026-11-02-handback-halt-tier2.md:46 — shard-01: 7/7 raw → 4/4
+> corrected).
+
 > **v1.0.2 (2026-10-31)** — FORM-TAG fold (R3 rider, project-skill-loader Phase-4 gate
 > finding F5): every recorded digest carries its FORM — `BARE-ID` (sorted node ids,
 > prefix stripped; this skill's native form) or `GREP-FULL` (raw `grep -E
@@ -47,8 +55,13 @@ timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST \
 #    drops every ERROR line (collection/setup errors), so an additive lane —
 #    whose new files are ABSENT at BASE and therefore ERROR there — can look
 #    digest-clean while BASE was erroring.
-grep -E '^(FAILED|ERROR)' base.out | sort | sed -E 's/^(FAILED|ERROR) //' > base.nodeids.txt
-grep -E '^(FAILED|ERROR)' head.out | sort | sed -E 's/^(FAILED|ERROR) //' > head.nodeids.txt
+#    SUFFIX (v1.0.3, 2026-11-18): pytest -rEf prints 'FAILED <node-id> -
+#    <message>'; the prefix-strip alone leaves the ' - <message>' suffix
+#    attached, so the SAME node can appear as BOTH net-new and fixed
+#    (trap recorded: RESULTS/2026-11-02-handback-halt-tier2.md:46). Strip
+#    the suffix on BOTH legs.
+grep -E '^(FAILED|ERROR)' base.out | sort | sed -E 's/^(FAILED|ERROR) //; s/ - .*$//' > base.nodeids.txt
+grep -E '^(FAILED|ERROR)' head.out | sort | sed -E 's/^(FAILED|ERROR) //; s/ - .*$//' > head.nodeids.txt
 sha256sum base.nodeids.txt head.nodeids.txt
 
 # 5. Verify BOTH ways: cmp AND comm in both directions.
