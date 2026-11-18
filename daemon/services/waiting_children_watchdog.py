@@ -438,7 +438,7 @@ def _build_wedge_notice(
     reason_codes: list[str] | None = None,
     subject_child_ids: list[str] | None = None,
     queued_report_id: str | None = None,
-    non_terminal_child_count: int = 0,
+    non_terminal_child_count: int | None = 0,
 ) -> str:
     """Build the directive wedge-notice for ``parent_id``.
 
@@ -515,9 +515,15 @@ def _build_wedge_notice(
             f"and no carrier is scheduled."
         )
     if WEDGE_REASON_NON_TERMINAL_CHILDREN in codes:
+        if non_terminal_child_count is None:
+            # B4(1): a failed count read renders "unknown" — never a
+            # fabricated 0 in a human-facing notice.
+            count_text = "an unknown number (read failed)"
+        else:
+            count_text = str(non_terminal_child_count)
         lines.append(
             f"  - {WEDGE_REASON_NON_TERMINAL_CHILDREN}: "
-            f"{non_terminal_child_count} children are still "
+            f"{count_text} children are still "
             f"non-terminal."
         )
     lines.append("")
@@ -882,9 +888,15 @@ class WaitingChildrenWatchdog:
             return getattr(row, "message_id", None)
         return None
 
-    def _count_non_terminal_children(self, parent_id: str) -> int:
+    def _count_non_terminal_children(self, parent_id: str) -> int | None:
         """M — the parent's non-terminal child count (the
-        ``non_terminal_children`` reason code's number)."""
+        ``non_terminal_children`` reason code's number).
+
+        B4(1): a FAILED read returns ``None`` — NEVER a fabricated 0.
+        The count feeds a human-facing notice; "0 children" from a
+        failed read is a lie that would steer the operator toward
+        terminate-and-respawn against live children.
+        """
         try:
             child_ids = self._repo.list_child_ids_permanent(parent_id)
         except Exception as exc:  # noqa: BLE001 — fail-soft
@@ -895,7 +907,7 @@ class WaitingChildrenWatchdog:
                 type(exc).__name__,
                 exc,
             )
-            return 0
+            return None
         if not child_ids:
             return 0
         try:
@@ -908,12 +920,36 @@ class WaitingChildrenWatchdog:
                 type(exc).__name__,
                 exc,
             )
-            return 0
+            return None
         return sum(
             1
             for child_id in child_ids
             if statuses.get(child_id) not in TERMINAL_INSTANCE_STATUSES
         )
+
+    def _wedge_code_still_holds(
+        self,
+        parent_id: str,
+        code: str,
+        *,
+        subjects: dict[str, tuple[int, list]],
+        parents_with_children: set[str],
+    ) -> bool:
+        """B2: does ONE stamped reason code still hold for ``parent_id``?
+
+        Evaluated against the CURRENT row-checks — for every open
+        episode, including parents that have left the WC scan set.
+        """
+        if code == WEDGE_REASON_PENDING_WATCHERS:
+            _total, _rows = subjects.get(parent_id, (0, []))
+            return bool(_rows)
+        if code == WEDGE_REASON_NO_LIVE_CARRIER:
+            return not self._has_live_carrier_task(parent_id)
+        if code == WEDGE_REASON_QUEUED_REPORT:
+            return self._queued_completion_report_id(parent_id) is not None
+        if code == WEDGE_REASON_NON_TERMINAL_CHILDREN:
+            return parent_id in parents_with_children
+        return False
 
     def _wedge_notice_emission_enabled(self) -> bool:
         """The kill-switch read — EMISSION ONLY, read PER TICK.
@@ -1771,29 +1807,41 @@ class WaitingChildrenWatchdog:
             # the third ``NOT EXISTS`` clause at
             # ``_build_zombie_scan_sql``:1083-1087 but in the inverse
             # direction (parents WITH non-terminal children).
+            # ── B2: the CANDIDATES come FIRST — the WC parents PLUS
+            # every parent with an OPEN episode. The children gate and
+            # the subject read both run over this union so that an
+            # open episode's codes can be re-evaluated even after the
+            # parent has LEFT the WC scan set (its own notice flipped
+            # WC→RUNNING).
+            _subject_candidates = sorted(
+                set(parent_ids) | set(self._wedge_notified)
+            )
             parents_with_non_term_children: set[str] = set()
             try:
                 parents_with_non_term_children = (
                     self._repo.parents_with_non_terminal_children(
-                        list(parent_ids)
+                        list(_subject_candidates)
                     )
                 )
             except Exception as exc:
-                # The children gate is a safety filter, not a load-
-                # bearing data source — on a repo blip, fall back to
-                # ``set()`` (treat every parent as having NO non-
-                # terminal children) so the wedge pass CAN still fire
-                # for genuinely wedged parents. The outer try/except
-                # below handles the ``self._has_live_carrier_task``
-                # branch; this scoped handler keeps the gate itself
-                # from masking a transient SQL hiccup with a
-                # silently-disabled backstop.
+                # B4(2): FAIL-CLOSED. The old fallback (``set()``)
+                # treated every WC parent as childless on a repo blip
+                # — admitting healthy parents to the classic-wedge arm
+                # and minting FALSE wedge notices on a DB hiccup
+                # (plan success criterion #7: a legitimately-parked
+                # parent gets no notice). A read failure now treats
+                # every candidate as HAVING children: the classic-
+                # wedge arm (``total_pending == 0 and no children``)
+                # stays closed until the read recovers; only the S4
+                # subject arm (a genuinely unfulfillable wait, read
+                # from the bus) can still notify.
                 logger.warning(
                     f"[Watchdog] Wedge children-gate query failed; "
-                    f"treating all WC parents as zero-non-terminal-"
-                    f"children. exc={exc}"
+                    f"FAIL-CLOSED: treating every candidate parent as "
+                    f"HAVING non-terminal children (the classic-wedge "
+                    f"arm stays closed). exc={exc}"
                 )
-                parents_with_non_term_children = set()
+                parents_with_non_term_children = set(_subject_candidates)
             # ── S4: the SUBJECT read (the watchdog's FIRST bus read) ──
             # One batched read for the whole tick: the PENDING watcher
             # rows of every candidate parent plus ONE batched
@@ -1808,9 +1856,6 @@ class WaitingChildrenWatchdog:
             # enqueue flips WC→RUNNING, so a membership-based end
             # would end its own episode and restore the hourly
             # re-notification loop).
-            _subject_candidates = sorted(
-                set(parent_ids) | set(self._wedge_notified)
-            )
             subjects: dict[str, tuple[int, list["DependencyWatcher"]]] = {}
             try:
                 subjects = self._fetch_wedge_subjects(
@@ -1927,9 +1972,11 @@ class WaitingChildrenWatchdog:
                 )
                 if _queued_report_id:
                     _codes.append(WEDGE_REASON_QUEUED_REPORT)
-                _non_terminal_count = 0
+                _non_terminal_count: int | None = 0
                 if _has_non_terminal_children:
                     _codes.append(WEDGE_REASON_NON_TERMINAL_CHILDREN)
+                    # B4(1): None (a failed read) flows through to the
+                    # builder, which renders "unknown (read failed)".
                     _non_terminal_count = (
                         self._count_non_terminal_children(parent_id)
                     )
@@ -1984,9 +2031,11 @@ class WaitingChildrenWatchdog:
                         priority=0,
                         metadata={
                             "wedge_notice": True,
-                            "wedge_reason": (
-                                "wc_parent_zero_children_no_carrier"
-                            ),
+                            # Res6 (review advisory): derived from the
+                            # SAME reason codes the notice body renders
+                            # — the old flat literal went stale the
+                            # moment S4 composed the body from codes.
+                            "wedge_reason": ",".join(_codes),
                         },
                     )
                     # ── Batch A — A5 (2026-09-11): direct notify ────
@@ -2090,29 +2139,54 @@ class WaitingChildrenWatchdog:
         #    would end the episode it just raised and restore the
         #    hourly re-notification loop (T5b).
         if self._wedge_notified:
-            # S4: the episode-end purge is re-based onto the ROW-CHECK
-            # — the parent's S4 subject is EMPTY while it still has
-            # PENDING watchers (all of them fulfillable ⇒ the parent
-            # is legitimately parked and the ``pending_watchers``
-            # episode is over). It is NOT re-based on WC membership:
-            # the notice's OWN enqueue flips WC→RUNNING, so a
-            # membership-based end would end its own episode and
-            # restore the hourly re-notification loop (T5b).
-            ended_for_wedge = {
-                p for p in self._wedge_notified
-                if (
-                    subjects.get(p, (0, []))[0] > 0
-                    and not subjects.get(p, (0, []))[1]
+            # ── B2 (review blocker): the episode-end evaluation now
+            # covers EVERY open episode — INCLUDING parents that have
+            # LEFT the WC scan set (their own notice flipped
+            # WC→RUNNING). The old purge required ``total_pending > 0``
+            # and only ran for scanned parents, so a genuinely
+            # resolved episode NEVER ended: a later same-code
+            # recurrence fingerprint-matched and the parent was
+            # PERMANENTLY SILENCED. The plan body wins: an episode
+            # ends on the FIRST TICK on which its reason code no
+            # longer holds — evaluated here against the parent's
+            # CURRENT row-checks (the subject read and the children
+            # gate both already cover the open-episode candidates).
+            #
+            # Per-code semantics: a stamped code that stops holding
+            # ENDS that code's episode. The surviving codes keep the
+            # entry (narrowed, WITHOUT re-notifying — their episodes
+            # continue); when the last code stops holding the entry
+            # is dropped outright and a later recurrence of ANY of
+            # them may notify again. A code that REAPPEARS is caught
+            # by the in-loop fingerprint comparison on the parent's
+            # next WC pass (the set grows ⇒ a new notice).
+            for _p in list(self._wedge_notified):
+                _stamped = self._wedge_notified.get(_p) or ()
+                _surviving = tuple(
+                    code
+                    for code in _stamped
+                    if self._wedge_code_still_holds(
+                        _p,
+                        code,
+                        subjects=subjects,
+                        parents_with_children=parents_with_non_term_children,
+                    )
                 )
-            }
-            if ended_for_wedge:
-                for _p in ended_for_wedge:
-                    self._wedge_notified.pop(_p, None)
-                logger.info(
-                    f"[Watchdog] {len(ended_for_wedge)} wedge "
-                    f"episode(s) dropped — the subject row-check no "
-                    f"longer holds (the waits are fulfillable again)."
-                )
+                if _surviving != _stamped:
+                    if _surviving:
+                        # Narrowed: the surviving codes' episodes
+                        # continue (no re-notify for them).
+                        self._wedge_notified[_p] = _surviving
+                    else:
+                        # Fully resolved: the episode is over.
+                        self._wedge_notified.pop(_p, None)
+                    logger.info(
+                        f"[Watchdog] wedge episode for {_p[:8]}... "
+                        f"{'narrowed' if _surviving else 'ended'} — a "
+                        f"stamped reason code no longer holds "
+                        f"(stamped={list(_stamped)}, "
+                        f"surviving={list(_surviving)})."
+                    )
 
         return stats
 

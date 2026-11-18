@@ -51,17 +51,49 @@ The terminal lanes (COMPLETED / TOOL-INVOCATION / ERROR) now fire
 the target-agnostic child-keyed watcher set through
 :meth:`DependencyBus.fire_for_terminal_child`. The BUS never
 enqueues — the CALLER does — so the delivery posture of that fire is
-part of this module's contract. The stance below is copied VERBATIM
-from the lane's plan of record
-(``.agents/shared/planning/wake-path-carrier-fix/plan-overview.md``
-§(a.5) "DELIVERY DURABILITY STANCE — EXPLICIT"):
+part of this module's contract. The stance below SUPERSEDES the
+plan-of-record §(a.5) wording (the review's B1 correction, 2026-11-18:
+the plan's "at-most-once-with-a-lost-wake" claim was wrong in BOTH
+directions — the lost-wake window is covered, and an unbounded-at-the-
+time duplicate window was left unnamed):
 
-**The plan's stance, stated plainly:**
+**The honest stance (B1):**
 
-1. **The target is AT-MOST-ONCE delivery, with a named, bounded at-least-once window** — **not** at-least-once and **not** "exactly-once".
-2. **Mechanism: `DELIVERY-ONCE(w)`** (§PREDICATE LEDGER) — a **distinct delivery marker** (`delivered_watch_id`) **committed BEFORE the enqueue, in its own transaction**. The "same transaction as the enqueue" phrasing was **unachievable**: `manager.enqueue_message` owns its own session (`instance_lifecycle.py:6015-6018` — *"a single transaction spanning both passes is NOT implementable because `manager.enqueue_message` owns its own session"*) and §(g) fence (r4) forbids altering it. A pre-committed marker yields exactly the **at-most-once** property this plan claims: any re-enqueue attempt observes the marker and no-ops.
-3. **Pass 1's predicate must be made sound** — today's `enqueued_at IS NULL` predicate is unsound **because `enqueued_at` semantics are ALREADY SPLIT across four write sites with two incompatible meanings** (`models.py:125-128` — the field is described as both a "stamp by the bus AFTER the caller successfully enqueued" dedup marker *and* a re-delivery marker). The plan **does not repair the split** (out of scope, and the four writers are in a contended file) — it **avoids depending on it** by using the distinct marker.
-4. **Residual, accepted and documented:** a crash in the window between the marker's own commit and the enqueue's own commit (two transactions — the only shape achievable without altering `enqueue_message`) remains at-most-once-lost. **It does not resurrect the wedge** because the row is `FIRED` and S3 no longer counts it against the park (`FULFILLABLE` excludes self-referential and terminal-child rows; a `FIRED` row is not counted at all by `count_pending_for_target`). ⇒ **the crash window degrades to a lost notification, never to a permanent park.** That is the property that matters, and it is why the durability stance is a *documented constraint* rather than a blocker.
+1. **The delivery is AT-LEAST-ONCE with a NAMED, BOUNDED DUPLICATE
+   WINDOW** — not at-most-once, not exactly-once.
+2. **The mechanism (``DELIVERY-ONCE(w)``)** — a distinct delivery
+   marker (``delivered_watch_id``) committed BEFORE the enqueue, in
+   its own transaction — prevents only **SAME-PATH re-claims**: the
+   in-process delivery loop re-running after its own failure sees the
+   marker and no-ops. It does NOT bind the restart recovery path.
+   (A same-transaction claim+enqueue is unimplementable:
+   ``manager.enqueue_message`` owns its own session
+   — ``instance_lifecycle.py:6015-6018`` — and the §(g) fence (r4)
+   forbids altering it.)
+3. **The duplicate window, named:** a crash between the ENQUEUE's
+   commit and the ``enqueued_at`` stamp leaves the row ``FIRED`` ∧
+   ``enqueued_at IS NULL`` ∧ the marker set ∧ the message already
+   queued ⇒ resume Pass-1 (the crash-recovery re-enqueue at
+   ``instance_lifecycle.py:6106-6116``, whose predicate is
+   ``enqueued_at IS NULL`` and which does NOT consult
+   ``delivered_watch_id``) re-enqueues ⇒ **ONE DUPLICATE delivery**
+   (bounded: one extra delivery per crash-in-window; the duplicate is
+   a message, never a state corruption).
+4. **The previously-documented "marker-then-crash lost wake" is
+   COVERED:** a crash between the marker's commit and the enqueue's
+   commit leaves the row re-deliverable by Pass 1, which delivers
+   exactly once (the marker does not block Pass 1); the restart-path
+   consumer (``api.py:5345+``, the bus bootstrap) finalizes only —
+   not a duplicate source.
+5. **No permanent park in either window** (the property that
+   matters): a ``FIRED`` row is not counted by the S3 qualified park
+   count, so a crash-in-window degrades to at most a duplicate
+   message — never to a permanent park.
+
+A marker-aware Pass-1 filter (consulting ``delivered_watch_id`` in
+the recovery predicate) would close the duplicate window but lives in
+an AVOID file for this lane — it is recorded as a follow-up advisory,
+NOT applied here.
 
 The marker lives in the EXISTING ``watcher_metadata`` JSONB column
 (DB column ``metadata``) under the key ``delivered_watch_id`` — **no
@@ -2065,8 +2097,11 @@ class DependencyBus:
         """Claim the DELIVERY-ONCE marker for ``watch_id``.
 
         **S1 (wake-path-carrier-fix, task 2c)** — the distinct
-        delivery marker (``delivered_watch_id``) that makes the
-        terminal-lane delivery AT-MOST-ONCE.
+        delivery marker (``delivered_watch_id``). **B1 correction:**
+        the marker's guarantee is AT-LEAST-ONCE with a named, bounded
+        duplicate window — it prevents only SAME-PATH re-claims (the
+        in-process delivery loop re-running after its own failure),
+        NOT at-most-once delivery.
 
         The marker is written into the EXISTING ``watcher_metadata``
         JSONB column (DB column ``metadata``) — **no new column, no
@@ -2082,9 +2117,17 @@ class DependencyBus:
 
         * ``True`` — this call claimed the marker ⇒ the caller MAY
           enqueue.
-        * ``False`` — the marker was already present (a re-enqueue
-          attempt) or the row does not exist ⇒ the caller MUST NOT
-          enqueue (the attempt is a **no-op**).
+        * ``False`` — the marker was already present (a same-path
+          re-claim attempt) or the row does not exist ⇒ the caller
+          MUST NOT enqueue (the attempt is a **no-op**).
+
+        **The duplicate window (named, B1):** a crash between the
+        ENQUEUE's commit and the ``enqueued_at`` stamp leaves the row
+        ``FIRED`` ∧ ``enqueued_at IS NULL`` ∧ the marker set ∧ the
+        message already queued ⇒ resume Pass-1 re-enqueues (its
+        predicate is ``enqueued_at IS NULL``; it does NOT consult
+        this marker) ⇒ ONE duplicate delivery. The restart-path
+        consumer finalizes only — not a duplicate source.
 
         The claim is atomic: the write is a guarded UPDATE whose
         predicate is "the marker key is absent", so two concurrent

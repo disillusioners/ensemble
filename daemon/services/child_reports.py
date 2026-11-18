@@ -772,7 +772,16 @@ class ChildReportsService:
         2. **DELIVERY-ONCE marker claim** — committed in its OWN
            transaction BEFORE the enqueue (a same-transaction write
            spanning the claim and the enqueue is unimplementable:
-           ``manager.enqueue_message`` owns its own session);
+           ``manager.enqueue_message`` owns its own session). **B1
+           correction:** the marker prevents only SAME-PATH re-claims
+           (this loop re-running after its own failure); the delivery
+           posture is AT-LEAST-ONCE with a NAMED duplicate window —
+           a crash between the enqueue's commit and the
+           ``enqueued_at`` stamp leaves ``FIRED`` ∧
+           ``enqueued_at IS NULL`` ∧ marker set ∧ the message already
+           queued ⇒ resume Pass-1 re-enqueues (it does not consult
+           ``delivered_watch_id``) ⇒ ONE duplicate delivery. Never a
+           permanent park (S3 does not count FIRED rows).
         3. ``manager.enqueue_message`` (JAFP-preserved — creates NO
            JobItem);
         4. ``bus.mark_enqueued_by_source_target`` — the C1 dedup stamp,

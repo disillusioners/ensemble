@@ -1616,51 +1616,149 @@ class TestWedgeRearmAfterCooldown:
             task_repository=task_repo,
         )
 
-    async def test_repark_rearms_and_refires_after_cooldown(
+    async def test_episode_end_on_condition_false_and_recurrence_notifies(
         self, repo, manager, make_instance
     ) -> None:
-        from daemon.services.waiting_children_watchdog import (
-            WEDGE_REARM_COOLDOWN_SECONDS,
+        """B2/B3 (review blockers): an episode ends on the FIRST tick
+        on which its reason code no longer holds — evaluated for
+        EVERY open episode, INCLUDING a parent that has LEFT the WC
+        scan set — and a later recurrence of the same code notifies
+        again.
+
+        This REPLACES the withdrawn TTL test (the old test fed a
+        FLOAT into the tuple-typed ``_wedge_notified`` map, so its
+        "cooldown elapsed" pass came from the float-vs-tuple mismatch
+        — the WRONG reason — and it asserted TTL semantics that S4
+        withdrew).
+
+        Observable: the wedge-notice ``message_queue`` ROW COUNT
+        (house rule r2 — row state, never a string grep).
+        """
+        from types import SimpleNamespace
+
+        from sqlmodel import Session as _S
+        from sqlmodel import select as _sel
+
+        from daemon.repositories.message_queue.models import (
+            MessageQueue as _MQ,
         )
+        from daemon.services.waiting_children_watchdog import (
+            WEDGE_SOURCE,
+        )
+
+        # The carrier probe is controllable: empty ⇒ no live carrier
+        # (the no_live_carrier code holds); one row ⇒ it does not.
+        carrier_rows: list = []
+        task_repo = MagicMock()
+        task_repo.list_live_process_report_carriers_for_instance = (
+            lambda instance_id: list(carrier_rows)
+        )
+
+        # A recording enqueue: every notice becomes a REAL
+        # message_queue row (the observable).
+        notice_counter = {"n": 0}
+
+        async def _record_enqueue(*, instance_id, message, source,
+                                  priority=1, metadata=None, **kw):
+            notice_counter["n"] += 1
+            message_id = f"wedge-row-{notice_counter['n']}"
+            with _S(repo.engine) as session:
+                session.add(
+                    _MQ(
+                        message_id=message_id,
+                        instance_id=instance_id,
+                        content=message,
+                        type="completion_report",
+                        source=source,
+                        status="ready",
+                        priority=priority,
+                        message_metadata=dict(metadata or {}),
+                    )
+                )
+                session.commit()
+            return SimpleNamespace(message_id=message_id)
+
+        manager.enqueue_message = _record_enqueue
+
+        def _wedge_rows() -> int:
+            with _S(repo.engine) as session:
+                return len(
+                    [
+                        r
+                        for r in session.exec(_sel(_MQ))
+                        if r.source == WEDGE_SOURCE
+                    ]
+                )
+
+        def _set_status(instance_id: str, status: str) -> None:
+            with _S(repo.engine) as session:
+                row = session.get(
+                    __import__(
+                        "daemon.repositories.instance.models",
+                        fromlist=["Instance"],
+                    ).Instance,
+                    instance_id,
+                )
+                row.status = status
+                session.add(row)
+                session.commit()
 
         # The wedged shape: WC parent + COMPLETED child + no carrier.
         parent_id = make_instance(
             status=InstanceStatus.WAITING_CHILDREN,
-            instance_id="wc-parent-rearm",
+            instance_id="wc-parent-b3",
         )
         make_instance(status=InstanceStatus.COMPLETED, parent_id=parent_id)
-        w = self._watchdog(repo, manager)
-
-        # Tick 1: the wedge fires (the wake is enqueued).
-        await w.run_once()
-        assert manager.enqueue_message.await_count == 1
-        assert w.wedge_notices_enqueued == 1
-
-        # The wake RE-PARKS: the mocked enqueue wrote nothing, so the
-        # parent is still WC with no carrier and no children — the
-        # exact live re-park posture.
-        manager.enqueue_message.reset_mock()
-
-        # Tick 2 (within the cooldown): the original anti-spam
-        # contract holds — silent.
-        await w.run_once()
-        assert manager.enqueue_message.await_count == 0, (
-            "within the cooldown the wedge must stay silent"
+        w = WaitingChildrenWatchdog(
+            repo,
+            manager,
+            interval_seconds=1,
+            hang_threshold_seconds=1,
+            task_repository=task_repo,
         )
-        assert w.wedge_notices_enqueued == 1
 
-        # The cooldown elapses (re-park age > WEDGE_REARM_COOLDOWN):
-        # the pass RE-ARMS and re-fires — the DELTA-2 contract. The
-        # monotonic anchor is aged directly (no wall-clock sleep).
-        w._wedge_notified[parent_id] = (
-            time.monotonic() - WEDGE_REARM_COOLDOWN_SECONDS - 1
-        )
+        # Tick 1: notice #1 (the episode opens).
         await w.run_once()
-        assert manager.enqueue_message.await_count == 1, (
-            "DELTA 2: a re-parked parent must be wedge-eligible "
-            "again after the cooldown — not one-shot-forever"
+        assert _wedge_rows() == 1, "tick 1 must notify once"
+        assert parent_id in w.wedge_episodes
+
+        # (i) WITHIN the episode: the notice's own WC→RUNNING flip and
+        # the re-park — the condition holds throughout — STILL one
+        # notice row.
+        _set_status(parent_id, InstanceStatus.RUNNING.value)
+        await w.run_once()
+        _set_status(parent_id, InstanceStatus.WAITING_CHILDREN.value)
+        await w.run_once()
+        assert _wedge_rows() == 1, (
+            "B3(i): within one episode (incl. the WC→RUNNING→WC flip) "
+            "exactly one notice"
         )
-        assert w.wedge_notices_enqueued == 2
+
+        # (ii) the condition genuinely turns FALSE while the parent is
+        # OUT of the WC scan set: a live carrier appears ⇒ the
+        # no_live_carrier code stops holding ⇒ the B2 end-evaluation
+        # (which covers open episodes beyond the scan set) ends the
+        # episode.
+        _set_status(parent_id, InstanceStatus.RUNNING.value)
+        carrier_rows.append(object())  # a live carrier exists now
+        await w.run_once()
+        assert parent_id not in w.wedge_episodes, (
+            "B3(ii): the episode must END when its reason code no "
+            "longer holds — even for a parent outside the WC scan set"
+        )
+        assert _wedge_rows() == 1, "the episode end itself adds no notice"
+
+        # The recurrence: the carrier completes and the parent
+        # re-parks ⇒ the same code holds again ⇒ a NEW episode ⇒
+        # notice #2. (Without the B2 fix the stale entry
+        # fingerprint-matches and the parent is PERMANENTLY silenced.)
+        carrier_rows.clear()
+        _set_status(parent_id, InstanceStatus.WAITING_CHILDREN.value)
+        await w.run_once()
+        assert _wedge_rows() == 2, (
+            "B3(ii): a later recurrence of the same code MUST notify "
+            "again — a permanently-silenced parent is the B2 defect"
+        )
 
     async def test_episode_survives_leave_wc_and_ends_on_the_row_check(
         self, repo, manager, make_instance

@@ -34,7 +34,13 @@ logger = logging.getLogger(__name__)
 KB_AGENT_IDS = frozenset(["experiencer", "kb-importer", "kb-writer", "blueprinter"])
 
 # Terminal instance statuses — the conversation has ENDED. Fixed tuple (not a
-# set) so the rendered ``IN (...)`` bind order is deterministic. Mirrors
+# set) so the rendered ``IN (...)`` bind order is deterministic.
+# SHADOW-HAZARD CROSS-REF (wake-path-carrier-fix review advisory): the
+# ``TERMINAL_INSTANCE_STATUSES`` frozenset at ``daemon/constants.py:1022``
+# is MEMBER-EQUAL to this tuple today. They are deliberately NOT
+# consolidated (this one must stay a tuple — the deterministic bind
+# order is load-bearing for the rendered SQL); any edit to either MUST
+# keep them member-equal. Mirrors
 # ``_TERMINAL_STATUSES_FOR_ZOMBIE_SCAN`` and the FE contract
 # ``isTerminalInstanceStatus`` (frontend/src/app/models/instance-node.model.ts)
 # whose ``isLiveInstanceStatus`` is the exact complement — the ``activity``

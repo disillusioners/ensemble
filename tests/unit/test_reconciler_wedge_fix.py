@@ -2741,19 +2741,36 @@ class TestS4NoticeSurface:
         await w.run_once()
         assert len(_s4_notice_rows(engine)) == 1
 
-        # The row-check turns false: the watched child runs again ⇒ the
-        # watcher becomes FULFILLABLE ⇒ the subject is empty.
+        # The row-check turns false — AND (the B2 re-derivation) the
+        # parent has LEFT the WC scan set first (its own notice's flip
+        # posture): the episode must still END on the condition-false
+        # tick. Under the pre-B2 code the end-evaluation never ran for
+        # a parent outside the scan set and the old purge required
+        # ``total_pending > 0``, so the episode NEVER ended and the
+        # parent was PERMANENTLY silenced on recurrence.
+        with SQLModelSessionLib(engine) as s:
+            row = s.get(Instance, parent)
+            row.status = "running"
+            s.add(row)
+            s.commit()
         with SQLModelSessionLib(engine) as s:
             row = s.get(Instance, child)
-            row.status = "running"
+            row.status = "running"  # the watcher becomes FULFILLABLE
             s.add(row)
             s.commit()
         await w.run_once()
         assert len(_s4_notice_rows(engine)) == 1, (
             "T5(c): the subject is empty now — no new notice"
         )
-        assert parent not in w.wedge_episodes, (
-            "T5(c): the episode must END when the row-check stops holding"
+        # Per-code episode semantics (B2): the ``pending_watchers``
+        # code's episode ENDED (its row-check stopped holding) — the
+        # entry NARROWS to the still-holding ``no_live_carrier`` code
+        # instead of being dropped outright. (In the classic single-
+        # code shape the entry drops entirely — pinned by the B3 test
+        # in tests/unit/services/test_waiting_children_watchdog.py.)
+        assert w._wedge_notified.get(parent) == ("no_live_carrier",), (
+            "T5(c)/B2: the pending_watchers episode must END when its "
+            f"row-check stops holding — entry={w._wedge_notified.get(parent)!r}"
         )
 
         # The recurrence: the child goes terminal again ⇒ the subject
@@ -2763,9 +2780,15 @@ class TestS4NoticeSurface:
             row.status = "completed"
             s.add(row)
             s.commit()
+        with SQLModelSessionLib(engine) as s:
+            row = s.get(Instance, parent)
+            row.status = "waiting_children"
+            s.add(row)
+            s.commit()
         await w.run_once()
         assert len(_s4_notice_rows(engine)) == 2, (
-            "T5(c): a later recurrence must notify again"
+            "T5(c)/B2: a later recurrence must notify again — a "
+            "permanently-silenced parent is the B2 defect"
         )
 
     # ── T6: the kill-switch (emission only, per tick) ──────────────
