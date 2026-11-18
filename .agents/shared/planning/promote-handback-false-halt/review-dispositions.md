@@ -124,3 +124,12 @@ entries below are **plan-text edits only** (no code, no implementation).
 | Item | Disposition | Where |
 |---|---|---|
 | **Approver iter 001 follow-on sweep** — reconciled every ID-family enumeration in the plan dir to current truth: two known-stale instances (`decisions.md` §8.3 **CP-12** `NP-1…NP-11`→`NP-1…NP-12`; `decisions.md` §8.2 `SC-1…SC-13`→`SC-1…SC-14`), plus task ranges (`T1–T12`→`T1–T14`, `P2-T1…P2-T15`→`…T16`), protection matrix (`P1–P13`→`P1–P15`), success criteria (`S1–S12`→`S1–S14`), decisions register (`D-P1-1…5`→`…9`, 29→31 rows with D-P1-8/D-P1-9 indexed), invariant count (29→31), mutation-id count (12→13 with M-NP1-accept), phase3 stale cross-refs (`P1–P12`/`T1–T8`/`NP-1…NP-8`), and coverage-note `P1–P12`→`P1–P15`. Historical records (CP rows, BL-R2-2 counts) kept but marked "as of". Historical records left untouched: dated `wc -l` line counts (already dated). | **ADOPTED (this sweep)** | decisions.md (§8.2/§8.3/§1.0/coverage note/CP-3/CP-4/CP-11/CP-12); phase1-plan.md namespace (via decisions); phase2-plan.md §2; phase3-plan.md §1 preamble; review-dispositions.md (BL-R2-2 marked historical) |
+
+---
+
+## WAVE B — R2 fold (2026-11-18, commit wave B)
+
+| Item | Disposition | Where it lives |
+|---|---|---|
+| R2 fold adopted per-delta (deltas 1-17): phase2 NEW legs B-gate-1..4, B-soak-t, B-status, B-census, B-contract + M-gate-collapse, M-gate-read, M-soak-reset, M-soak-pershell-poison; B-carrier [superseded-by B-gate family]/M-B-carrier [superseded-by M-gate-*] superseded; SC-12/SC-13/SC-14 re-cut to table end-states; decisions corrected-premise record + D-P1-10 + strike D-P1-8 (i)/(vi) + D-P1-4 framing + probe-2 asymmetry + rollback adjudication + six residuals + anchor corrections + strike list; phase3 CHANGELOG disclosure set grows by one → six items; review-dispositions row added | **ADOPTED (wave B)** | phase2 §18; decisions §9b + register row 32; phase3 T4/T5/AC6/P3-Q3; review-dispositions this row |
+| Not-applied-verbatim items | none — all 17 deltas applied; phase3 edit kept T4/T5 at lines 249/250 with 7 cells each (in-place, no line-count change above 249) | phase3 lines 249-250 |
