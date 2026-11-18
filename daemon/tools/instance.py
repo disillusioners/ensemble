@@ -3019,7 +3019,7 @@ def create_guidelines_tools_if_available(manager, current_instance_id: str, agen
 def create_room_tools_if_available(manager, current_instance_id: str, agent_id: str, agent_tag: str | None = None) -> list:
     """Create the five agent group-chat room tools for one instance/agent.
 
-    Agent group chat Phase 2 / P5 (2026-11-16, Emperor-ratified design).
+    Agent group chat Phase 2 / P5 (2026-11-16, user-ratified design).
     The tools are ``room_create`` / ``room_post`` / ``room_read`` /
     ``room_task_decision`` / ``room_close`` (``daemon/tools/room.py``).
 
@@ -7147,7 +7147,7 @@ Returns:
     #     auto-grant it.
     #   * ``instance_ops``  — the six audited acts (terminate, reclaim,
     #     nudge, mark, answer, dismiss). Destructive; holders {ari,
-    #     maintenancer} per the Emperor directive 2026-11-14
+    #     maintenancer} per the user directive 2026-11-14
     #     (commission ari-instance-stop-grant) — D-13 single-owner
     #     population amended; the audit ledger, protected-target
     #     two-tier policy, provenance gates and the fleet terminate
@@ -7462,7 +7462,7 @@ Returns:
     # either invisible to the help tool or BYPASSES the privileged strip.
     #
     # The category is PRIVILEGED (entry #21): the conversational
-    # approval lane mints and consumes ASSENT TOKENS on the Emperor's
+    # approval lane mints and consumes ASSENT TOKENS on the user's
     # behalf — the empty-allow inherit universe must never hold that
     # authority. The ari-only audience is spelled by the
     # ``tools.allow: ["prompt-assent"]`` entry (agents/ari/meta.json)

@@ -14,7 +14,7 @@ spec of record):
    ``ROOM_NAME_MODEL_TIMEOUT_S = 3.0`` — the ONE place a spawn waits
    on naming (the bounded SUCCESS-path wait; the ruling's "never
    block spawn on naming" reads as "never block on naming FAILURE" —
-   explicit ratification line, emperor item #6).
+   explicit ratification line, the user item #6).
 3. Quick-model FAILURE (error/timeout/unavailable/empty) →
    deterministic fallback = the agent id as the base name (e.g.
    ``capture``; tier 4's registry turns a collision into

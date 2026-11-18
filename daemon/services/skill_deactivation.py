@@ -46,7 +46,7 @@ visible and enumerable.
 
 NO WINNERS ARE DECLARED
 
-The 27-pair A/B backlog is the Emperor's call (plan Ruling E / open item
+The 27-pair A/B backlog is the user's call (plan Ruling E / open item
 E-6). :meth:`SkillStaleDeactivator.resolve_pair` REFUSES to act without an
 explicit ``winner_skill_id`` — the shipped code never supplies one.
 
@@ -1494,7 +1494,7 @@ class SkillStaleDeactivator:
     ) -> dict[str, Any]:
         """Resolve one A/B pair as ONE reversible unit.
 
-        The winner decision is the Emperor's (plan Ruling E / open item
+        The winner decision is the user's (plan Ruling E / open item
         E-6). This method REFUSES to act without an explicit
         ``winner_skill_id`` — the shipped code never supplies one.
 

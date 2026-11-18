@@ -1,5 +1,5 @@
 """The ``prompt_assent`` tool — the conversational approval lane
-("The Emperor's Word / Assent") — Phase 2 (tool surface + registration).
+("The user's Word / Assent") — Phase 2 (tool surface + registration).
 
 One tool, FOUR verbs (AR-2 — ``action ∈ {list, mint, approve, reject}``),
 behind the house's THREE-LAYER access posture:
@@ -43,7 +43,7 @@ requires a live, FRESH factor-2 window, and the mint context
 DAEMON-SIDE from the WINDOW'S MESSAGE ROW (the nested
 ``metadata["discord"]``) — NEVER from tool arguments. Without that, a
 prompt-injected ari could mint for any CORE pending row and supersede
-the Emperor's live token (DoS + authority fabrication). The mint branch:
+the user's live token (DoS + authority fabrication). The mint branch:
 
     M-4a. the row exists / is CORE class / is ``pending_approval``
           → ``item-not-found`` / ``item-not-assentable`` / ``item-not-pending``
@@ -844,7 +844,7 @@ def _emit_info_line(
 def canonical_token_form(token: str) -> str:
     """Normalize an echoed token to the STORED raw form.
 
-    The Emperor may echo the grouped rendering (``CONFIRM-XXXX-XXXX``)
+    The user may echo the grouped rendering (``CONFIRM-XXXX-XXXX``)
     or the raw one; the durable row stores ``sha256`` of the RAW form
     (``CONFIRM-XXXXXXXX``). This maps any accepted spelling onto the
     raw form so the hash lookup is stable. Non-token strings are
@@ -1910,7 +1910,7 @@ async def _list_branch(
     """The READ surface — the CORE pending rows. Side-effect free.
 
     NOT agent-filtered: the relay lane must be able to approve any
-    agent's row. The body goes to the Emperor's chat, NEVER into the
+    agent's row. The body goes to the user's chat, NEVER into the
     daemon log (the INFO line stays content-free).
     """
     pv_repo = getattr(manager, "_prompt_version_repo", None)
@@ -2383,7 +2383,7 @@ async def _decide_branch(
     # THE 4f SPLIT (T2.5 / refusal-cell-matrix §1.3 — BLOCKING). This site
     # used to call ``_record_mismatch`` UNCONDITIONALLY, before the code's
     # class was examined — so five Phase-1.5 refusals would have REVOKED the
-    # Emperor's live token (threshold 5) and burned the K-9 budget. Now:
+    # user's live token (threshold 5) and burned the K-9 budget. Now:
     #   * the two NEW codes (operator fault / re-designation) refuse BEFORE
     #     the recording call — no counter motion, no revoke, no budget burn
     #     (A-9, A-10 / AC7);

@@ -1,7 +1,7 @@
 """The ``prompt_assent_tokens`` SQLModel table — the conversational-assent token store.
 
 One row per minted assent token (the ``prompt-assent`` commission — the
-conversational approval lane, "The Emperor's Word / Assent"). The ruling of
+conversational approval lane, "The user's Word / Assent"). The ruling of
 record is ``.agents/shared/planning/prompt-assent/architecture-recommendation.md``
 @ ``df8da01a6`` (§1 D-1 amendments, §2.1 schema); this model is the canonical
 source for the PostgreSQL ``create_all`` path (``daemon/api.py`` N1 REQUIRED
@@ -12,7 +12,7 @@ entry's failure aborts boot).
 HASH-ONLY STORAGE (D-1 amendment 1 / S-3)
 -----------------------------------------
 The raw token exists EXACTLY ONCE in the universe — in the mint response
-shown to the Emperor. Durable state carries only:
+shown to the user. Durable state carries only:
 
 * ``token_hash`` — ``sha256(token)`` (lower-case hex). There is deliberately
   NO column for the raw token (the ``body_sha256`` reasoning: there is no

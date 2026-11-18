@@ -1036,7 +1036,7 @@ class InstanceManager:
             MemoirStar,
             MemoirStarAlias,
         )
-        # POK Phase 1 (project-operating-knowledge, Emperor GO
+        # POK Phase 1 (project-operating-knowledge, user GO
         # 2026-11-07): register the 2 lane tables BEFORE create_all so
         # the PG boot path lands them on existing PG databases
         # (SQLModel.metadata.create_all is the PG source-of-truth per
@@ -1049,7 +1049,7 @@ class InstanceManager:
             ProjectOperatingKnowledge,
             ProjectOperatingKnowledgeEmbedding,
         )
-        # Agent group chat Phase 2 / P1 (Emperor-ratified design,
+        # Agent group chat Phase 2 / P1 (user-ratified design,
         # 2026-11-15): register the 3 room substrate tables BEFORE
         # create_all so the PG boot path lands them on existing PG
         # databases (SQLModel.metadata.create_all is the PG
@@ -4765,7 +4765,7 @@ class InstanceManager:
                 self._run_skill_orphan_sweep,
             )
 
-            # [decision] D2/C2 (2026-11-17, Emperor ruling E-6 + Q1):
+            # [decision] D2/C2 (2026-11-17, user ruling E-6 + Q1):
             # the skill_ab_inactivity_sweep companion — the ONE
             # sanctioned resolution mechanism's periodic leg. Finds
             # zero-traffic A/B pairs (comparisons == 0 AND age >=
@@ -7826,7 +7826,7 @@ class InstanceManager:
 
     # [decision] D2/C2 (2026-11-17): stalled A/B-pair inactivity
     # sweep — the periodic leg of the ONE sanctioned resolution
-    # mechanism (Emperor ruling E-6 + orchestrator Q1). House pattern:
+    # mechanism (user ruling E-6 + orchestrator Q1). House pattern:
     # interval-gated by the maintenance service, idle-gated, and
     # never-raising.
     async def _run_skill_ab_inactivity_sweep(self) -> None:

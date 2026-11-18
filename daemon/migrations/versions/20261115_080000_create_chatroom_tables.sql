@@ -1,5 +1,5 @@
 -- Migration: create agent group chat tables (Phase 2 / P1 substrate)
---           (Emperor-ratified design: .agents/shared/planning/group-chat/
+--           (user-ratified design: .agents/shared/planning/group-chat/
 --           architecture-recommendation.md §1.3 — the spec of record)
 -- Created: 2026-11-15
 -- Phase: group-chat P1 — substrate / persistence core + boot

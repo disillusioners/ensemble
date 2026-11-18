@@ -1,5 +1,5 @@
 -- Migration: create the prompt_assent_tokens ledger (the conversational
---           approval lane — "The Emperor's Word / Assent").
+--           approval lane — "The user's Word / Assent").
 -- Created: 2026-11-10
 -- Commission: prompt-assent, Phase 1 (token, lane and ledger primitives)
 --             @ base 0efdf106f; branch feature/prompt-assent.
@@ -15,7 +15,7 @@
 --
 -- WHY HASH-ONLY (D-1 amendment 1 / S-3):
 --   The raw token exists EXACTLY ONCE — in the mint response shown to
---   the Emperor. Durable state carries token_hash = sha256(token) and
+--   the user. Durable state carries token_hash = sha256(token) and
 --   render_sha256 = sha256(canonical render). There is deliberately NO
 --   raw-token column and NO token_display column (the grouped render
 --   minus dashes IS the raw secret; it is rendered at mint time only,

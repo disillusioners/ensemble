@@ -12,7 +12,7 @@ Six callable tools, four families (pin/unpin are one family):
   result says so (``semantic_status: "pending"`` — AM-23: the model must
   be TOLD the semantic index lags).
 * ``memoir_pin(id, reason, actor)`` — keepsake governance. The ``actor``
-  is a CLAIM, never derived (R2): the caller names empress/emperor and a
+  is a CLAIM, never derived (R2): the caller names an actor claim and a
   wrong claim is detectable at write time (the result carries the house
   provenance class beside the claim — D4.10). ``actor`` is REQUIRED.
 * ``memoir_unpin(id)`` — the BLESSED signature (no ``actor``: no column
