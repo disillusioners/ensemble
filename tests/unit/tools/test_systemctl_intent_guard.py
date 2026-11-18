@@ -485,3 +485,193 @@ async def test_proc_lane_allows_wrapper_read_and_readonly():
         text = await pr.coroutine(command=command, timeout=-1)
         assert "timeout must be >= 0" in text, (command, text)
         assert "refused by the rogue-containment" not in text, (command, text)
+
+
+# ===========================================================================
+# RUNNER / PIPE / SCHEDULER LAUNDERING (2026-11-18 reviewer round)
+# ===========================================================================
+# The pre-2026-11-18 TEXT guard refused any command text carrying
+# ("systemctl" AND a mutating verb AND an ensemble-family token). The
+# structural matcher replaced that text scan and LOST the
+# literal-through-runner class: a payload handed to an executor is DATA to
+# the producer and never reached the command-word analysis. The reviewer
+# confirmed 12 such bypasses (all allowed by the merged guard, all refused
+# by the old text guard).
+#
+# The fix keeps the old guard's conjunction verbatim as the SHAPE test and
+# adds a DELIVERY test (the payload must actually reach an executor), plus
+# runner awareness:
+#   * PIPE  — producer | executor (stdin-reading shell / scheduler / xargs
+#             / ssh) with the mutating-ensemble shape in the payload;
+#   * RUNNER — su -c / runuser -c / ssh host '<cmd>' (command string),
+#             systemd-run / watch (argv), xargs (operands from stdin ⇒ a
+#             non-readonly tail with no operand or a {} placeholder FAILS
+#             CLOSED);
+#   * SCHEDULER — at / batch / crontab (they RUN what they are handed).
+#
+# Counter-mutations (each leg REDDENS its own family):
+#   * M6a — neutralise the shape matcher ⇒ pipe/scheduler/executed-context
+#     deny pins RED;
+#   * M6b — neutralise the runner branches ⇒ runner deny pins RED;
+#   * M6c — drop the xargs fail-closed operand rule ⇒ xargs deny pins RED;
+#   * M6d — make the laundering rule refuse UNCONDITIONALLY (over-broad)
+#     ⇒ the read-only-through-runner ALLOW pins RED.
+# ===========================================================================
+
+
+_PIPE_LAUNDER_SHAPES = [
+    "echo 'systemctl restart ensemble-main' | bash",
+    "printf 'systemctl restart ensemble-main' | sh",
+    "cat <<EOF | bash\nsystemctl restart ensemble-main\nEOF",
+    "echo 'systemctl stop ensemble-prod' | dash",
+    "echo 'systemctl kill ensemble-main' | ssh host 'sh'",
+    "echo 'systemctl restart ensemble-main' | bash -c 'cat'",
+]
+
+
+@pytest.mark.parametrize("command", _PIPE_LAUNDER_SHAPES)
+def test_pipe_into_executor_refused(command):
+    """The payload is DATA to the producer and is EXECUTED by the consumer."""
+    assert guard.systemctl_violation(command) is not None
+
+
+_XARGS_STDIN_SHAPES = [
+    "echo ensemble-main.service | xargs systemctl restart",
+    "list-unit-files | grep ensemble-main | xargs -r systemctl restart",
+    "echo ensemble-main | xargs -I{} systemctl restart {}",
+    "echo ensemble-main | xargs systemctl stop",
+]
+
+
+@pytest.mark.parametrize("command", _XARGS_STDIN_SHAPES)
+def test_xargs_stdin_operands_fail_closed(command):
+    """xargs takes its operands from STDIN: the target is not statically
+    known ⇒ a non-readonly systemctl tail FAILS CLOSED."""
+    assert guard.systemctl_violation(command) == guard.UNRESOLVED_UNIT_TOKEN
+
+
+_RUNNER_SHAPES = [
+    "su -c 'systemctl restart ensemble-main'",
+    "su root -c 'systemctl restart ensemble-main'",
+    'runuser -u root -c "systemctl restart ensemble-main"',
+    "systemd-run systemctl restart ensemble-main",
+    "systemd-run --unit=foo systemctl restart ensemble-main",
+    "watch systemctl restart ensemble-main",
+    "watch -n 5 systemctl restart ensemble-main",
+    "ssh localhost 'systemctl restart ensemble-main'",
+    "ssh -p 2222 localhost 'systemctl restart ensemble-main'",
+    "bash -c \"$(echo 'systemctl restart ensemble-main')\"",
+]
+
+
+@pytest.mark.parametrize("command", _RUNNER_SHAPES)
+def test_runner_shapes_refused(command):
+    """su/runuser carry a command string, systemd-run/watch an argv, ssh a
+    remote command string — none of them is an escape."""
+    assert guard.systemctl_violation(command) is not None
+
+
+_SCHEDULER_SHAPES = [
+    "echo 'systemctl restart ensemble-main' | at now",
+    "echo 'systemctl restart ensemble-main' | batch",
+    "echo '0 5 * * * systemctl restart ensemble-main' | crontab -",
+]
+
+
+@pytest.mark.parametrize("command", _SCHEDULER_SHAPES)
+def test_scheduler_handoff_refused(command):
+    """at/batch/crontab RUN what they are handed — the payload is a command
+    (a crontab line carries the shape, not a bare command word)."""
+    assert guard.systemctl_violation(command) is not None
+
+
+def test_shape_matcher_matches_the_old_text_guard_conjunction():
+    """The shape test is the OLD text guard's conjunction (its verb set and
+    token set, same substring semantics), widened with the verbs the
+    STRUCTURAL matcher refuses on its own — so a piped shape is never
+    weaker than the same verb in command position.
+    Counter-mutation: drop the verb arm ⇒ the read-only leg reddens."""
+    assert guard._text_has_mutating_ensemble_shape(
+        "systemctl restart ensemble-main"
+    )
+    assert guard._text_has_mutating_ensemble_shape(
+        "0 5 * * * systemctl stop ensemble-prod.service"
+    )
+    # a NEW verb the structural matcher refuses on its own (unknown ⇒ fail
+    # closed) is refused in the piped shape too
+    assert guard._text_has_mutating_ensemble_shape(
+        "systemctl freeze ensemble-main"
+    )
+    assert not guard._text_has_mutating_ensemble_shape(
+        "systemctl status ensemble-main"
+    )
+    assert not guard._text_has_mutating_ensemble_shape(
+        "systemctl restart nginx"
+    )
+    assert not guard._text_has_mutating_ensemble_shape(
+        "grep restart ensemble-main docs"
+    )
+
+
+_LAUNDER_ALLOW = [
+    # read-only through every runner must stay green
+    "echo 'systemctl status ensemble-main' | bash",
+    "watch systemctl status ensemble-main",
+    "ssh localhost 'systemctl show ensemble-main'",
+    "ssh -p 2222 localhost 'systemctl show ensemble-main'",
+    "systemd-run systemctl status ensemble-main",
+    "su -c 'systemctl status ensemble-main'",
+    'runuser -u root -c "systemctl is-active ensemble-main"',
+    "xargs systemctl status",
+    "xargs echo hello",
+    "ssh localhost",
+    # a payload that only lands in data stays allowed
+    "echo 'systemctl restart nginx' | bash",
+    "echo 'systemctl restart ensemble-main' | grep -n restart",
+    "printf '%s\\n' 'systemctl stop ensemble-prod' > /tmp/reminder.txt",
+    "grep -n 'systemctl restart ensemble-main' docs/ops.md",
+    "echo 'do not systemctl stop ensemble-main'",
+    "cat > notes.md <<'EOF'\nrun systemctl restart ensemble-main to recover\nEOF",
+    "journalctl -u ensemble-main -n 20 | grep -i enable",
+    "systemctl status ensemble-main | grep ensemble",
+]
+
+
+@pytest.mark.parametrize("command", _LAUNDER_ALLOW)
+def test_laundering_deny_is_scoped(command):
+    """The laundering deny must not swallow read-only inspection or prose."""
+    assert guard.systemctl_violation(command) is None
+
+
+def test_bash_seam_refuses_laundering_shapes():
+    assert _pkill_overlay_violation(
+        "echo 'systemctl restart ensemble-main' | bash"
+    ) is not None
+    assert _pkill_overlay_violation("su -c 'systemctl restart ensemble-main'") is not None
+    assert _pkill_overlay_violation("ssh localhost 'systemctl restart ensemble-main'") is not None
+    assert _pkill_overlay_violation("echo 'systemctl status ensemble-main' | bash") is None
+    assert _pkill_overlay_violation("watch systemctl status ensemble-main") is None
+
+
+async def test_proc_lane_refuses_laundering_shapes():
+    pr = _proc_run()
+    for command in (
+        "echo 'systemctl restart ensemble-main' | bash",
+        "su -c 'systemctl restart ensemble-main'",
+        "echo 'systemctl restart ensemble-main' | at now",
+    ):
+        text = await pr.coroutine(command=command)
+        assert text.startswith(
+            "Error: refused by the rogue-containment pkill overlay guard"
+        ), (command, text)
+
+
+async def test_proc_lane_allows_readonly_through_runner():
+    pr = _proc_run()
+    for command in (
+        "echo 'systemctl status ensemble-main' | bash",
+        "ssh localhost 'systemctl show ensemble-main'",
+    ):
+        text = await pr.coroutine(command=command, timeout=-1)
+        assert "timeout must be >= 0" in text, (command, text)
+        assert "refused by the rogue-containment" not in text, (command, text)
