@@ -62,6 +62,11 @@ UNSET = _Unset()
 #: NOT by an ORDER BY the database is free to ignore — so the owner is
 #: PLAN-INDEPENDENT (PostgreSQL and SQLite choose different indexes for
 #: the same WHERE clause; see the ``resolve_slug_row`` docstring).
+#:
+#: Caveat: the rank above is the *owner* scope. A superseded row IS
+#: still returned as a last resort when no active or archived row
+#: remains — a dead ancestor, refused by the service layer (see
+#: ``resolve_slug_row`` scope="owner").
 _SLUG_OWNER_STATUS_RANK: dict[str, int] = {
     "active": 0,
     "archived": 1,
@@ -120,9 +125,11 @@ class POKRepository:
         unfiltered WHERE returned the ROOT ancestor, so the curation
         path refused every successor-generation row with
         ``pok_not_found`` (measured: PG ``Index Scan using
-        idx_pok_project_id`` → heap order → root first; SQLite's plan
-        returned the active row — the bug was plan-dependent, which is
-        why the SQLite unit pack never showed it).
+        idx_pok_project_id`` → heap order → root first). The unordered
+        lookup MAY return either row — it is index-choice/plan-dependent
+        (e.g. idx_pok_project_id vs idx_pok_project_status) — on ANY
+        engine, including SQLite, which is why the SQLite unit pack
+        never showed the bug.
 
         The owner is therefore resolved HERE, in Python, over the full
         match set:
