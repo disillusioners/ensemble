@@ -159,3 +159,66 @@ Both blockers are additive edits to `gate-evidence.md` (the lane-owned ledger). 
 
 ---
 *[Verification artifacts: drift guard re-run 39/39 at HEAD; independent counter-mutation 2F/37P with PRE==POST sha256 `db4703769794…`; committed-tree probe in a throwaway detached worktree (unsanctioned marker-bearing path ⇒ 2F/37P), worktree removed; bundle/warn facts re-derived from `/tmp/gcfe_g4_*` and `frontend/dist`; ledger/tester/code claims each grep-verified against the tree.]*
+
+---
+
+# Iteration 002 — LEDGER-ONLY RE-CHECK
+
+- **Date:** 2026-11-18 · **Mode:** ledger-only re-check of `acbcd43e0` (`docs(gc-fe-surfaces): ledger correction — approver-001 blockers`; 1 file, +35/−19, zero code / frozen-artifact diff).
+- **Scope:** the delta `acbcd43e0` only. No code re-review, no re-test (the ledger commit changed no product code and no test).
+- **Basis:** iteration-001's two blockers (ledger-scoped) + notes N3 / N4 / N5.
+
+## VERDICT (iteration 002): **APPROVED**
+
+**Both iteration-001 blockers are closed, and the closure is exact.** The code was already sound and is unchanged; the gate record that the promotion note is written from is now truthful, self-consistent and complete on every point I raised. **The lane may proceed to giter merge + staged release. No live promote (commission constraint 5).**
+
+*Iteration 001's `REJECTED` verdict is superseded by this approval for the lane as it now stands at `acbcd43e0`; it remains in the file as the historical record of why the ledger was corrected.*
+
+## 1. BLOCKER 1 — deviation (a) restored and correctly dispositioned — **CLOSED**
+
+| Requirement | Verification | Result |
+|---|---|---|
+| (a) restored **byte-for-byte** vs the pre-deletion state (`1079c7365^` = `e079725450c`) | Extracted the 7-line `(a)` block from `1079c7365^:…/gate-evidence.md` and from HEAD, then `diff` — **empty** (identical). Both blocks hash to `sha256 be2f9d06eb5aa7084406a2b3954fab74c5f97a66c208cedb4019ab7c353a6a39`, **the same sha the ledger publishes** for the recovered block. Byte-for-byte restoration is PROVEN, not asserted. | **PASS** |
+| **(a)(i) verbatim** — "the promotion note must NOT cite the e2e gate as header-icon-adjacency evidence" | Present character-for-character inside the restored block (`gate-evidence.md:366-367`), and restated in the appended status update as **"STILL STANDS verbatim"**. The prohibition was restored as condition text, not paraphrased away. | **PASS** |
+| **(a)(ii) satisfied** via the tester's daemon-fenced execution | Recorded at `:372`: artifact `6fe3ad005`, `frontend/e2e/group-chat-rooms-gate.daemon.spec.ts:89`, toggle cluster `watchover-btn \| room-btn \| rooms-browser-btn \| think-btn \| tools-btn \| system-btn` ⇒ `roomIdx=1`, `browserIdx=2`, **adjacency Δ=1**, PASS. Verified against the tree: `daemon.spec.ts:89` is a **live** `test(...)` with **no** `test.skip` — it is genuinely the executing row, not a skipped copy. | **PASS** |
+| **(a)(iii) satisfied** — the stubbed row stays SKIPPED, reason-tagged, **not conflated** with the daemon-fenced PASS | `group-chat-rooms-gate.spec.ts:279` still carries `test.skip(true, 'adjacency requires the daemon-fenced leader gate — unit-pinned at chat.chatrooms.spec.ts (pins at :372,:401,:432,:457) and P2 cases')` — visible, explicit, reason-tagged. The appended **"Truth posture (do NOT conflate)"** paragraph states it explicitly: the stubbed row stays SKIPPED (fixture defect real and root-caused, spec byte-restored `sha256 0914adf0…`), the ADJACENCY EVIDENCE is the daemon-fenced execution, **"Neither may be presented as the other."** | **PASS** |
+| the six named rows refreshed cleanly | `:4` HEAD anchor → `a1b2ce44c` with the "this ledger's own correction commit follows it" qualifier; `:65` dangling `(a)` reference → points at the restored EOF section; `:92` "deferred to the leader-run gate" → "**EXECUTED and PASSED** in the daemon-fenced run"; `:113-118` "DEFERRED-to-leader-gate" → "**RESOLVED — the daemon-fenced run EXECUTED the row and PASSED**" + "The stubbed config keeps its explicit skip — NOT adjacency evidence"; `:150` F-A table → "**SKIPPED (stubbed) / PASS (daemon-fenced)**" with the evidence named; `:339` Verify row → the stubbed skip kept, the daemon-fenced PASS named as the evidence. All six verified by reading the new text. | **PASS** |
+
+**No stale adjacency claim survives.** A full sweep of all 17 `adjacen*` occurrences in the corrected ledger returns **zero** rows matching `deferred|outstanding|pending|must execute` outside the restored (a) block's own historical text (which is correct — it is the original condition wording, now followed by its satisfied status). The stubbed-config run is still cited at `:208` for the geometry rows only — never as adjacency evidence.
+
+## 2. BLOCKER 2 — both false clauses gone, posture re-anchored — **CLOSED**
+
+| Clause | Hits at HEAD |
+|---|---|
+| "a client-side status keeps the raw fallback" (old `:279`) | **0** |
+| "The raw-message fallback is retained for <500 only." (second instance, old `:265` — caught by the worker, not by me) | **0** |
+| any other claim that a raw-message fallback survives | **0** (a full `fallback` sweep returns no surviving raw-transport claim) |
+
+Re-anchored to the shipped posture: the W1 section now reads "**NO branch consults the raw transport message** (see deviation (b) above)" and the pin sentence reads "the raw transport message is **NEVER consulted on EITHER branch** (>=500 or <500) — the TYPED 404/403/0 copies are byte-equivalent and pinned (deviation (b), :258)". This matches the tree exactly (`room.service.ts:604-608`: the `<500` path consults `raw.error` only) and matches the shipped spec pin (`room.service.spec.ts:845`, "an untyped `<500` status renders the fixed generic copy — no transport string, no URL"). The `:258` cross-reference resolves to the (b) entry.
+
+## 3. NOTES — N3 / N4 / N5 dispositioned
+
+- **N3 — CLOSED.** Deviation (b) is now explicitly named **"a SHIPPED-SURFACE delta, like W1"** and states that it applies to the same three `describeHttpError` call sites — the two SHIPPED lanes plus the NEW global lane — with the instruction "**the promotion note MUST carry (b) alongside W1 as a shipped-surface delta**". Exactly the disclosure the note asked for.
+- **N4 — CLOSED.** The anchors are refreshed in both places: the W1 deviation entry (`:236-237` → `:212` rooms / `:259` messages / `:342` global, marked "HEAD anchors") and the fixed-constants table (`:271-273`). I re-derived them against the tree: `room.service.ts:212` = `describeHttpError(err, 'chatrooms')` (shipped `loadRooms`), `:259` = `'messages'` (shipped `loadMessages`), `:342` = `'global-chatrooms'` (new `loadGlobalRooms`) — **all three correct**.
+- **N5 — DECLINED BY SCOPE, accepted as a carried advisory.** The fail-closed anchor branch (`room.service.ts:305-317`) still returns before `++this.globalRoomsRequestId`, so an in-flight prior response can still land behind the error state. I confirmed the code is unchanged in this respect. Deferring it is correct scope: N5 is a **code** advisory, not a ledger claim, the ledger makes no assertion about it (grep: zero mentions — nothing is falsely marked fixed), and its impact is bounded — the template's `@else if (globalRoomsError(); as error)` branch (`:100`) wins over the list, so the fail-closed posture survives in the UI. **Carry it as an open advisory into the lane backlog**; it must not be silently closed by this ledger pass.
+
+## 4. PRESERVATION — verified
+
+| Check | Result |
+|---|---|
+| W3 leader correction intact **verbatim** | **PASS** — the 9-line W3 block diffed byte-for-byte against `a1b2ce44c` (empty diff). |
+| F-E erratum intact **verbatim** | **PASS** — the 4-line F-E block diffed byte-for-byte against `a1b2ce44c` (empty diff). |
+| First 358 lines **zero-shift** (append-only at EOF) | **PASS** — 358 → 374 lines; all 9 in-place hunks have **equal old/new line counts** (`@@ -1,7 +1,7 @@`, `-62,7 +62,7`, `-89,7 +89,7`, `-110,12 +110,12`, `-147,7 +147,7`, `-233,8 +233,8`, `-255,28 +255,28`, `-336,7 +336,7`) and only the final hunk appends (`@@ -356,3 +356,19 @@`). No line number moved, so **every pre-existing line citation inside the ledger — including the F-E erratum's own `:63` and `:167` — still resolves to the same content** (both spot-verified). |
+| Frozen artifacts untouched | **PASS** — `decisions.md` `6d156bc7…`, `spec.md` `ef3ad1bf…`, `code-review.md` `aaeedd40…` — all sha256-identical to their pre-approval values; `plan-review.md` and `approval.md` likewise unchanged. |
+| Diff strictly confined to `gate-evidence.md` | **PASS** — `acbcd43e0 --name-only` lists exactly one file; non-ledger files changed in the commit: **0**; `git diff --stat a1b2ce44c..HEAD` touches only `gate-evidence.md`. |
+| Drift guard still green at the new tip | **PASS** — re-run at `acbcd43e0`: **39 passed**. The `frontend/` diff against the guard's fixed base is unchanged by the two documentation commits. |
+
+## 5. NON-BLOCKING NOTE (iteration 002)
+
+- **N8 — `:66` retains the pre-correction tense; its pointer target `:208` was likewise not refreshed.** `gate-evidence.md:66` still reads "the skip is the header-adjacency row (explicit, reason-tagged skip **owned by the leader's daemon-fenced run**)" and points at the Revival-3 Verify table (`:205`), whose playwright row (`:208`) reads "4 passed, 1 skipped (35.1s), zero failures; geometry 1050×590 px ×2" without naming the daemon-fenced PASS. This bullet was **not** in the leader's refresh list, and it is **not** a false claim — every clause in it is true (the stubbed run did yield 4 passed / 1 skipped; the skip IS the adjacency row and IS reason-tagged; the daemon-fenced run IS that row's owner, and did execute it). It is a **stale-tense cross-reference**, and it is the one place a reader could still infer that the daemon-fenced run is outstanding. It does **not** contradict the record: the load-bearing statements are refreshed in five places (`:92`, `:113-118`, `:150`, `:339`, and the restored (a) section at `:360-374`), and the prohibition (a)(i) is restored verbatim, so a promotion-note writer reaches the correct conclusion and cannot cite the stubbed gate as adjacency evidence. **Suggested one-clause fix (optional, no re-review needed):** append "— since EXECUTED daemon-fenced (Δ=1, `6fe3ad005`); see 'Deviation (a) RESTORED' at EOF" to `:66`, and add the same pointer to `:208`.
+
+## 6. CLOSING
+
+Iteration-001 blockers 1 and 2 are **closed with exact, independently verified restorations**. The ledger is now truthful on every point I raised, self-consistent, append-only in structure, and confined to the lane-owned file; the frozen artifacts, the code, the tests and the drift guard are all untouched and green. **APPROVE — the lane moves straight to giter merge + staged release (no live promote).** N3 and N4 are closed; N5 and N8 are carried as open, non-blocking advisories.
+
+*Evidence: byte-for-byte restoration diff + sha match (`be2f9d06…`); W3/F-E block diffs (empty); hunk-header zero-shift audit; frozen-artifact sha comparison; `git show --name-only` confinement; 0-hit greps for both false clauses; anchor re-derivation against `room.service.ts`; live/skip inspection of both e2e specs; drift guard re-run 39/39 at `acbcd43e0`.*
