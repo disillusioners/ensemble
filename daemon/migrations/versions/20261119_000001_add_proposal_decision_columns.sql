@@ -1,0 +1,71 @@
+-- Migration: add the DECISION axis to memoir_proposal_ledger
+-- Created: 2026-11-19
+-- PRECONDITION: sqlite>=3.35.0
+-- Lane: queue-windows-and-neutrality-guard / m2-decision-store
+--
+-- Adds THREE nullable columns to ``memoir_proposal_ledger``:
+--   * decision_status — NULL (UNDECIDED) | 'accepted' | 'declined'.
+--     A SEPARATE axis from ``notification_status``: that column is a
+--     DELIVERY vocabulary (pending/enqueued/sent/failed) and stays a
+--     closed four-token set — a decision token must never enter it.
+--     The CHECK rides the column definition; its text is BYTE-IDENTICAL
+--     to the model's ``ck_memoir_proposal_ledger_decision_status``
+--     CheckConstraint in daemon/repositories/memoir/models.py.
+--   * decided_by      — the reviewer's actor-claim token. Validated
+--     against PIN_ACTORS at the service seam; never written as a
+--     free-form name.
+--   * decided_at      — the aware-UTC instant the decision was recorded.
+--
+-- THE COLUMN TYPES (SQLite side): ``decision_status TEXT``,
+-- ``decided_by TEXT``, ``decided_at TIMESTAMP``. SQLite is dynamically
+-- typed (both TIMESTAMP and DATETIME carry NUMERIC affinity there), and
+-- the MODEL is the source of truth for the PostgreSQL side — it renders
+-- ``TIMESTAMP WITH TIME ZONE`` for the timezone-aware ``decided_at``.
+--
+-- WHY: a reviewed proposal must never re-notify, and must never be
+-- confusable with one nobody read. The selection path (zone render AND
+-- notify target) excludes every row with a non-NULL decision_status, so
+-- a decided row simply leaves the open set; the review write is a
+-- compare-and-set on ``decision_status IS NULL`` (at most ONE decision).
+--
+-- IDEMPOTENCY / HOUSE FORM
+--   - SQLite (this file): PLAIN ``ADD COLUMN`` — ``IF NOT EXISTS`` is a
+--     hard syntax error for ADD COLUMN in SQLite. The runner treats a
+--     ``duplicate column name`` failure as an idempotent SKIP
+--     (daemon/migrations/runner.py apply_migration), so a database that
+--     already carries the columns (fresh boots create them via
+--     create_all BEFORE the runner runs) converges and still records
+--     the ledger row.
+--   - The CHECK is accepted on a POPULATED table by SQLite: existing
+--     rows carry NULL, which the constraint's leading ``IS NULL`` arm
+--     admits (verified empirically before this file was written).
+--   - PostgreSQL: NOT this file. Fresh PG databases get the columns +
+--     the CHECK from SQLModel.metadata.create_all (the model is the PG
+--     source of truth); EXISTING PG databases get them from the
+--     SEPARATE, fail-soft
+--     ``InstanceManager._ensure_memoir_proposal_decision_columns`` boot
+--     step (one DO block, ``ADD COLUMN IF NOT EXISTS`` x3, WARNING on
+--     failure — it is NOT in the shared all-or-nothing ensure list, so a
+--     failure here can never abort the boot or roll back another lane).
+--   - RELEASE-GATED on PG: the live daemon runs OLDER code, so the
+--     columns exist only AFTER this binary boots. Until then a review
+--     attempt must degrade to a typed refusal (the service raises a
+--     ValueError subclass carrying ``.code``), never crash.
+--
+-- RUNTIME-SPLITTER NOTE: semicolons appear only inside FULL-LINE
+-- ``--`` comments (stripped by the runner before its ``;`` split).
+
+-- UP
+
+ALTER TABLE memoir_proposal_ledger ADD COLUMN decision_status TEXT CHECK (decision_status IS NULL OR decision_status IN ('accepted', 'declined'));
+ALTER TABLE memoir_proposal_ledger ADD COLUMN decided_by TEXT;
+ALTER TABLE memoir_proposal_ledger ADD COLUMN decided_at TIMESTAMP;
+
+-- DOWN
+--
+-- ADDITIVE rollback (house posture): the three columns are retained.
+-- Dropping them would destroy the recorded review history (who decided
+-- what, and when) — the one thing this migration exists to keep. A
+-- rollback of the FEATURE is therefore a code revert, not a schema
+-- revert; an operator who truly must drop them can do so manually with
+-- three ``ALTER TABLE ... DROP COLUMN`` statements (SQLite 3.35+).

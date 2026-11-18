@@ -212,6 +212,7 @@ def test_submit_is_a_seam_without_a_v1_caller():
         "daemon/services/memoir_persona_gate.py",
         "daemon/routers/memoir.py",
         "daemon/api.py",
+        "daemon/tools/memoir.py",
     }
     # SET EQUALITY, not a subset: an allowed file that stops referencing the
     # repository is as much a pin event as a new caller appearing.

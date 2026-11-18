@@ -317,6 +317,8 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "memoir_recall",
     "memoir_timeline",
     "memoir_about",
+    "memoir_review",
+    "memoir_persona_ratify",
     # prompt-reload (2026-11-06, prompt-reload lane): the ONE
     # ari-self-service prompt refresh tool — created by the
     # create_prompt_reload_tools() factory
@@ -2081,6 +2083,8 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "memoir_recall",
     "memoir_timeline",
     "memoir_about",
+    "memoir_review",
+    "memoir_persona_ratify",
     "terminate_instance",
     "time",
     "todo_clear",

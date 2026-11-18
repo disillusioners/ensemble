@@ -1094,6 +1094,19 @@ class InstanceManager:
             # ALTER TABLE ... DROP COLUMN IF EXISTS statements are
             # executed here. Idempotent via IF EXISTS.
             self._ensure_postgres_drop_legacy_columns()
+            # ── The keepsake-proposal DECISION columns (the review axis) ──
+            # A SEPARATE, fail-soft ensure — NOT the shared statement list.
+            # The shared list of ``_ensure_postgres_columns`` runs inside
+            # ONE transaction: a single bad entry there aborts the whole
+            # boot and rolls back every OTHER lane's ensure statement. This
+            # lane's DDL therefore runs in its own transaction with its own
+            # try/except, so a failure is CONTAINED (a warning; the boot
+            # continues) instead of taking the other lanes' schema with
+            # it. RELEASE-GATED: the live daemon runs OLDER code, so the
+            # columns exist only after a daemon built from this source
+            # boots — until then a review attempt degrades to a typed
+            # refusal, never a crash.
+            self._ensure_memoir_proposal_decision_columns()
             # ── Phase 5: drop the seven legacy job_queue_items columns ──
             # (status, started_at, completed_at, result_summary,
             # error_message, cancelled_at, failed_at). admission_state
@@ -11099,6 +11112,90 @@ class InstanceManager:
                     f"message_queue row(s) — moved ref entries from "
                     f"'images' to the new dedicated 'image_refs' column"
                 )
+
+    def _ensure_memoir_proposal_decision_columns(self) -> None:
+        """Add the keepsake-proposal DECISION columns on PostgreSQL.
+
+        WHY A SEPARATE METHOD (and not the shared statement list): the
+        shared ``statements`` list of :meth:`_ensure_postgres_columns`
+        runs inside ONE ``with self._engine.begin()`` transaction — a
+        single bad entry aborts the WHOLE boot ("Application startup
+        failed") and rolls back every OTHER lane's ensure statement. This
+        lane's DDL is therefore NOT in that list: it runs in its own
+        transaction with its own ``try/except``, so a failure here is
+        CONTAINED (it logs a warning and the boot continues) instead of
+        taking every other lane's schema with it.
+
+        THE DDL (one idempotent DO block):
+
+          * ``decision_status`` TEXT + the model's CHECK constraint;
+          * ``decided_by`` TEXT;
+          * ``decided_at`` TIMESTAMPTZ (the model is
+            ``DateTime(timezone=True)``, so PG renders TIMESTAMPTZ).
+
+        ``ADD COLUMN IF NOT EXISTS`` makes each statement idempotent, and
+        the surrounding ``EXCEPTION WHEN others THEN RAISE WARNING``
+        block makes the WHOLE ensure atomic in the failure case: a
+        partial state (one column added, another not) rolls back with
+        the block, so the three columns are either all there or none of
+        them is. The WARNING is the operator's signal — a swallowed
+        failure with no line in the log would be invisible.
+
+        RELEASE-GATED (read before trusting this method): the LIVE
+        daemon runs OLDER code, so these columns exist only AFTER a
+        daemon built from THIS source boots. Until then a review attempt
+        must degrade to a typed refusal (the service raises a
+        ``ValueError`` subclass carrying ``.code``), never crash. This
+        method only PREPARES the schema for the next boot.
+        """
+        from sqlalchemy import text
+
+        statements = [
+            (
+                "DO $$\n"
+                "BEGIN\n"
+                "    IF to_regclass('memoir_proposal_ledger') IS NOT NULL THEN\n"
+                "        ALTER TABLE memoir_proposal_ledger\n"
+                "            ADD COLUMN IF NOT EXISTS decision_status TEXT;\n"
+                "        ALTER TABLE memoir_proposal_ledger\n"
+                "            ADD COLUMN IF NOT EXISTS decided_by TEXT;\n"
+                "        ALTER TABLE memoir_proposal_ledger\n"
+                "            ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ;\n"
+                "        IF NOT EXISTS (\n"
+                "            SELECT 1 FROM pg_constraint\n"
+                "            WHERE conrelid = to_regclass('memoir_proposal_ledger')\n"
+                "              AND conname = "
+                "'ck_memoir_proposal_ledger_decision_status'\n"
+                "        ) THEN\n"
+                "            ALTER TABLE memoir_proposal_ledger\n"
+                "                ADD CONSTRAINT ck_memoir_proposal_ledger_decision_status\n"
+                "                CHECK (decision_status IS NULL OR decision_status IN "
+                "('accepted', 'declined'));\n"
+                "        END IF;\n"
+                "    END IF;\n"
+                "EXCEPTION WHEN others THEN\n"
+                "    RAISE WARNING 'memoir proposal decision columns not ensured'\n"
+                "        USING DETAIL = SQLERRM;\n"
+                "END $$\n"
+            ),
+        ]
+        try:
+            with self._engine.begin() as conn:
+                for stmt in statements:
+                    conn.execute(text(stmt))
+        except Exception as exc:  # noqa: BLE001 — a lane ensure never aborts boot
+            logger.warning(
+                "[Memoir] proposal-decision column ensure failed (%s: %s) — the "
+                "boot continues; a review attempt degrades to a typed refusal "
+                "until the columns exist",
+                type(exc).__name__,
+                exc,
+            )
+            return
+        logger.debug(
+            "Memoir proposal decision columns ensured (or already present) "
+            "on PostgreSQL"
+        )
 
     def _ensure_postgres_drop_legacy_columns(self) -> None:
         """Drop the legacy completion-state columns on PostgreSQL.
