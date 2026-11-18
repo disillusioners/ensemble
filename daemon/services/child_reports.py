@@ -6420,10 +6420,11 @@ Provide a concise summary:"""
             # return — NOT at the top of the method (a top placement
             # would pre-empt the pair-emit and deliver a synthetic
             # message to the structural parent on EVERY healthy
-            # completion). NOT before the ``:5622`` / ``:5694`` early
-            # returns: those demote a NON-terminal instance (an early
-            # exit, not a completion) — the instance is not terminal
-            # there, so no fire is due.
+            # completion). NOT before the ``:6014`` / ``:6086`` early
+            # returns (the tree-liveness demote and the L6-hold
+            # demote): those demote a NON-terminal instance to
+            # WAITING_CHILDREN (an early exit, not a completion) — the
+            # instance is not terminal there, so no fire is due.
             await self._fire_terminal_child_and_deliver(
                 instance_id,
                 "completed",

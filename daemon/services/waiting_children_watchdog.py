@@ -878,9 +878,15 @@ class WaitingChildrenWatchdog:
                 continue
             if getattr(row, "status", None) in ("completed", "failed"):
                 continue
-            # EXCLUDE the watchdog's OWN notices: a wedge/hang notice
-            # is itself a ``completion_report``-typed row, so without
-            # this the notice would observe ITSELF on the next tick —
+            # EXCLUDE the watchdog's OWN notices — belt-and-braces
+            # SECOND LAYER. The notices are NOT ``completion_report``
+            # rows: ``enqueue_message`` derives ``type="system"`` for
+            # a ``system:`` source (``instance_messaging.
+            # _derive_internal_message_type``), so the ``type`` filter
+            # above already excludes them. The metadata/source filters
+            # below are a REDUNDANT guard, kept for the case where a
+            # notice ever lands typed as a completion report: without
+            # it the notice would observe ITSELF on the next tick —
             # the ``queued_report`` code would appear, the episode
             # fingerprint would change, and the pass would notify
             # again (an endless self-notice loop).
@@ -2066,11 +2072,16 @@ class WaitingChildrenWatchdog:
         #    carrier between ticks has its wedge entry dropped. This
         #    is the cheap + frequent case — most wedge notices
         #    resolve themselves once the sub-shape (c) seam runs.
-        # 2. Parent-left-WC purge below: a parent that leaves
-        #    ``WAITING_CHILDREN`` entirely (terminal report, external
-        #    message, revival) has its wedge entry dropped, mirroring
-        #    the hang-pass ``departed_parent_pairs`` rule. A future
-        #    WC re-entry with a fresh wedge can re-notify.
+        # 2. ROW-CHECK purge below: a parent whose S4 subject row-check
+        #    turns FALSE — its S4_NOTICE_SUBJECT (the PENDING watchers
+        #    that can no longer fire) goes EMPTY while it still has
+        #    PENDING waits — has its wedge entry dropped. That parent
+        #    is legitimately parked again, so the episode is over and a
+        #    later recurrence may notify afresh. WC MEMBERSHIP is
+        #    deliberately NOT the trigger: the notice's OWN enqueue
+        #    flips the parent WC→RUNNING, so a membership-based end
+        #    would end the episode it just raised and restore the
+        #    hourly re-notification loop (T5b).
         if self._wedge_notified:
             # S4: the episode-end purge is re-based onto the ROW-CHECK
             # — the parent's S4 subject is EMPTY while it still has

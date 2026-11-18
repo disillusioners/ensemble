@@ -54,6 +54,7 @@ from daemon.repositories.dependency_bus import (
     DependencyWatcher,
     DependencyWatcherRepository,
 )
+from daemon.repositories.event.models import Event
 from daemon.repositories.instance.models import (
     Instance,
     InstanceStatus,
@@ -1223,6 +1224,25 @@ def _s1_rows_for_instance(engine, instance_id: str) -> list:
         ]
 
 
+def _s1_event_rows(engine, instance_id: str) -> list:
+    """The Event rows written for ``instance_id`` (lifecycle footprint).
+
+    The lane discriminator for T1c / T1f: the REGULAR completion
+    lane writes an ``instance_completed`` event for the child (and a
+    ``child_completed`` event for the structural parent); the TOOL and
+    ROOT lanes write NEITHER (they skip the parent notification). The
+    reader SEES producer-written event rows through this file's
+    in-memory engine (the regular lane's two events are visible), so
+    their absence is observable evidence — not a blind assertion.
+    """
+    with SQLModelSessionLib(engine) as s:
+        return [
+            row
+            for row in s.exec(sqlmodel_select(Event))
+            if row.instance_id == instance_id
+        ]
+
+
 class TestS1TerminalChildFire:
     """S1 — the target-agnostic child-keyed fire on the terminal lanes.
 
@@ -1386,11 +1406,30 @@ class TestS1TerminalChildFire:
         so before S1 a watcher waiting on a tool-invocation child could
         never be fired at all.
 
-        The lane is identified by the child's own row state: the
-        tool lane stamps ``instances.status = COMPLETED`` (the regular
-        completion lane does not stamp the status in the bus-authoritative
-        era), so the status is the observable that proves which
-        producer branch ran.
+        LANE SELECTION vs LANE EVIDENCE — they are not the same thing,
+        and only the first one is available here:
+
+        * The lane is SELECTED by the fixture: ``invoked_as_tool=True``
+          is the producer's tool-lane selector
+          (``child_reports.py:4603``) and the harness drives the REAL
+          entry point, so the tool branch is the one that ran.
+        * ``instances.status`` is NOT lane-discriminating: the REGULAR
+          branch stamps COMPLETED too (``child_reports.py:4806``). The
+          status assert below is therefore a HARNESS SANITY CHECK (the
+          child reached its terminal stamp), NOT evidence of which
+          producer branch ran. (Measured on a file-backed SQLite: the
+          regular lane's child ends COMPLETED *with* a parent-report
+          message, a PROCESS_REPORT task and a report-injection
+          obligation for the structural parent; the tool lane's child
+          ends COMPLETED *without* any of them.)
+        * The lane IS evidenced by the LIFECYCLE-EVENT footprint: the
+          regular lane writes an ``instance_completed`` event for the
+          child and a ``child_completed`` event for the structural
+          parent; the tool lane writes NEITHER (it skips the parent
+          notification). The absence asserted below is therefore a real
+          discriminator in this harness — the reader demonstrably SEES
+          producer-written event rows (the regular lane's two are
+          visible through the same in-memory engine).
         """
         _s1_seed_instance(engine, "s1c-nudger")
         _s1_seed_instance(engine, "s1c-structural-parent")
@@ -1418,8 +1457,25 @@ class TestS1TerminalChildFire:
         with SQLModelSessionLib(engine) as s:
             child = s.get(Instance, "s1c-child")
         assert child.status == InstanceStatus.COMPLETED.value, (
-            f"T1c harness: the tool lane must have run (the child must be "
-            f"COMPLETED, got {child.status!r})"
+            f"T1c harness: the child must have reached its terminal stamp "
+            f"(COMPLETED, got {child.status!r})"
+        )
+        # LANE DISCRIMINATOR — NOT the status (the regular lane stamps
+        # COMPLETED too, ``child_reports.py:4806``). The tool branch
+        # writes NO lifecycle event: the REGULAR lane writes
+        # ``instance_completed`` for the child and ``child_completed``
+        # for the structural parent, the tool lane writes NEITHER (it
+        # skips the parent notification). The reader sees the regular
+        # lane's events through this same engine, so their absence is
+        # observable evidence that the TOOL branch ran.
+        assert _s1_event_rows(engine, "s1c-child") == [], (
+            f"T1c: the tool lane must write NO lifecycle event for the "
+            f"child (the regular lane writes instance_completed) — got "
+            f"{_s1_event_rows(engine, 's1c-child')!r}"
+        )
+        assert _s1_event_rows(engine, "s1c-structural-parent") == [], (
+            "T1c: the tool lane must write NO child_completed event for "
+            "the structural parent (it skips the parent notification)"
         )
         fired = _s1_watcher_for(engine, "s1c-nudger", "s1c-child")
         assert fired is not None, "T1c: the watcher row must still exist"
@@ -1602,8 +1658,24 @@ class TestS1TerminalChildFire:
         stamps ``parent_id=None``), so before S1 a nudge-armed watcher
         on a root child had no fire anywhere on that lane.
 
-        The lane is identified by the child's own row state: the root
-        lane stamps ``instances.status = COMPLETED``.
+        LANE SELECTION vs LANE EVIDENCE:
+
+        * The lane is SELECTED by the fixture: ``parent_id=None`` is the
+          producer's root-lane selector (``child_reports.py:4274``) and
+          the harness drives the REAL entry point, so the root branch is
+          the one that ran.
+        * ``instances.status`` is NOT lane-discriminating: the REGULAR
+          branch stamps COMPLETED too (``child_reports.py:4806``), so
+          the status assert below is a HARNESS SANITY CHECK (the child
+          reached its terminal stamp), NOT evidence of which producer
+          branch ran.
+        * The lane IS evidenced by the LIFECYCLE-EVENT footprint: the
+          regular lane writes an ``instance_completed`` event for the
+          child (and a ``child_completed`` event for the parent); the
+          root lane writes NEITHER — it has no parent to notify. NOTE:
+          the root lane's observable footprint is IDENTICAL to the tool
+          lane's (T1c), so this discriminator separates the root lane
+          from the REGULAR lane, not from the tool lane.
         """
         _s1_seed_instance(engine, "s1f-nudger")
         _s1_seed_instance(engine, "s1f-root-child", parent_id=None)
@@ -1625,8 +1697,20 @@ class TestS1TerminalChildFire:
         with SQLModelSessionLib(engine) as s:
             child = s.get(Instance, "s1f-root-child")
         assert child.status == InstanceStatus.COMPLETED.value, (
-            f"T1f harness: the root lane must have run (the root child "
-            f"must be COMPLETED, got {child.status!r})"
+            f"T1f harness: the child must have reached its terminal stamp "
+            f"(COMPLETED, got {child.status!r})"
+        )
+        # LANE DISCRIMINATOR — NOT the status (the regular lane stamps
+        # COMPLETED too, ``child_reports.py:4806``). The root branch
+        # writes NO lifecycle event: the REGULAR lane writes
+        # ``instance_completed`` for the child, the root lane writes
+        # NEITHER (it has no parent to notify). The reader sees the
+        # regular lane's events through this same engine, so their
+        # absence is observable evidence that the ROOT branch ran.
+        assert _s1_event_rows(engine, "s1f-root-child") == [], (
+            f"T1f: the root lane must write NO lifecycle event for the "
+            f"child (the regular lane writes instance_completed) — got "
+            f"{_s1_event_rows(engine, 's1f-root-child')!r}"
         )
         fired = _s1_watcher_for(engine, "s1f-nudger", "s1f-root-child")
         assert fired is not None, "T1f: the watcher row must still exist"
@@ -2717,8 +2801,24 @@ class TestS4NoticeSurface:
         assert w.wedge_parents_scanned >= 1, (
             "T6: the switch must NOT disable the detection"
         )
-        # CLASSIFICATION still ran: the parent's codes were computed.
-        assert parent in w.wedge_episodes or True  # classification is internal
+        # CLASSIFICATION still ran — but the reason CODES have NO public
+        # surface (the watchdog exposes only ``wedge_episodes``,
+        # ``wedge_parents_scanned`` and ``wedge_notices_enqueued``), so
+        # there is nothing observable to assert about the codes
+        # themselves. The reachable public observable of the
+        # classification's CONSEQUENCE is the EPISODE SET: the episode
+        # stamp rides with the EMISSION, so a suppressed emission must
+        # leave the parent's episode UNSTAMPED (flipping the switch back
+        # ON then notifies again without a restart).
+        assert parent not in w.wedge_episodes, (
+            f"T6: SWITCH_OFF must not stamp a wedge episode for the "
+            f"parent (the episode stamp rides with the emission) — got "
+            f"{sorted(w.wedge_episodes)!r}"
+        )
+        assert w.wedge_notices_enqueued == 0, (
+            f"T6: SWITCH_OFF must not enqueue a wedge notice (counted "
+            f"{w.wedge_notices_enqueued})"
+        )
         # THE HEALING PATH still sees the backlog: the healer's bus leg
         # refuses on a FULFILLABLE backlog — the switch must not reach
         # it. (A switch wired into the healer would make this FAIL.)
