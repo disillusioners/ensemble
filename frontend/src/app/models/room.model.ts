@@ -169,20 +169,18 @@ export function normalizeGlobalRoomListResponse(raw: unknown): GlobalRoomListRes
   for (const entry of list) {
     const r = asRecord(entry);
     if (!r) continue;
-    const roomId = asString(r['room_id']).trim();
-    if (!roomId) continue;
-    const memberCount = asFiniteNumber(r['member_count']);
+    // The shared room-row mapping — the global route adds three fields
+    // and DERIVES `closed` (it emits `state`, not `closed`).
+    const base = normalizeRoomSummary(entry);
+    if (!base) continue;
     const memberIds = Array.isArray(r['member_instance_ids'])
       ? (r['member_instance_ids'] as unknown[]).filter((x): x is string => typeof x === 'string')
       : [];
     const global: GlobalRoomSummary = {
-      room_id: roomId,
-      name: asString(r['name']).trim() || roomId,
-      created_at: asString(r['created_at']),
-      closed: r['closed'] === true || r['state'] === 'closed',
-      member_count: memberCount === null ? 0 : memberCount,
-      last_message_at: asNullableString(r['last_message_at']),
-      last_message_seq: asFiniteNumber(r['last_message_seq']),
+      ...base,
+      // The global route emits the lifecycle STATE, not the `closed`
+      // boolean — the boolean is derived from it.
+      closed: base.closed || r['state'] === 'closed',
       tree_root_id: asString(r['tree_root_id']),
       owner_instance_id: asString(r['owner_instance_id']),
       member_instance_ids: memberIds,

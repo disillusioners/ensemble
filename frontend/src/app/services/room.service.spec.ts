@@ -3,6 +3,37 @@ import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { RoomService } from './room.service';
 
+/** The wire shape of one nest-wide room row (`GET /api/rooms`). */
+type GlobalRoomWire = {
+  room_id: string;
+  name: string;
+  tree_root_id: string;
+  owner_instance_id: string;
+  state: string;
+  member_count: number;
+  member_instance_ids: string[];
+  last_message_at: string | null;
+  last_message_seq: number | null;
+  created_at: string;
+};
+
+/** One nest-wide room row — the canonical shape plus per-test overrides. */
+function makeRoom(overrides: Partial<GlobalRoomWire> = {}): GlobalRoomWire {
+  return {
+    room_id: 'r-1',
+    name: 'room',
+    tree_root_id: 't-1',
+    owner_instance_id: 'o-1',
+    state: 'active',
+    member_count: 2,
+    member_instance_ids: ['o-1', 'c-1'],
+    last_message_at: null,
+    last_message_seq: null,
+    created_at: '2026-11-16T10:00:00+00:00',
+    ...overrides,
+  };
+}
+
 /**
  * Contract spec for the P6 room read API client.
  *
@@ -357,20 +388,7 @@ describe('RoomService', () => {
   it('loadGlobalRooms global publishes rows + truncated', () => {
     service.loadGlobalRooms('global');
     httpMock.expectOne('/api/rooms').flush({
-      rooms: [
-        {
-          room_id: 'r-1',
-          name: 'room',
-          tree_root_id: 't-1',
-          owner_instance_id: 'o-1',
-          state: 'active',
-          member_count: 2,
-          member_instance_ids: ['o-1', 'c-1'],
-          last_message_at: null,
-          last_message_seq: null,
-          created_at: '2026-11-16T10:00:00+00:00',
-        },
-      ],
+      rooms: [makeRoom()],
       truncated: true,
     });
     expect(service.globalRooms().length).toBe(1);
@@ -399,30 +417,19 @@ describe('RoomService', () => {
     expect(req.request.params.get('instance_id')).toBe('inst-9');
     req.flush({
       rooms: [
-        {
+        makeRoom({
           room_id: 'r-joined',
           name: 'joined',
-          tree_root_id: 't-1',
-          owner_instance_id: 'o-1',
-          state: 'active',
-          member_count: 2,
           member_instance_ids: ['o-1', 'inst-9'],
-          last_message_at: null,
-          last_message_seq: null,
-          created_at: '2026-11-16T10:00:00+00:00',
-        },
-        {
+        }),
+        makeRoom({
           room_id: 'r-other',
           name: 'other',
-          tree_root_id: 't-1',
           owner_instance_id: 'inst-9',
-          state: 'active',
           member_count: 1,
           member_instance_ids: ['o-2'],
-          last_message_at: null,
-          last_message_seq: null,
           created_at: '2026-11-16T10:01:00+00:00',
-        },
+        }),
       ],
       truncated: false,
     });
@@ -435,18 +442,12 @@ describe('RoomService', () => {
     service.loadGlobalRooms('global');
     httpMock.expectOne('/api/rooms').flush({
       rooms: [
-        {
+        makeRoom({
           room_id: 'r-any',
           name: 'any',
-          tree_root_id: 't-1',
-          owner_instance_id: 'o-1',
-          state: 'active',
           member_count: 1,
           member_instance_ids: ['o-1'],
-          last_message_at: null,
-          last_message_seq: null,
-          created_at: '2026-11-16T10:00:00+00:00',
-        },
+        }),
       ],
       truncated: false,
     });
@@ -466,18 +467,12 @@ describe('RoomService', () => {
     service.loadGlobalRooms('global');
     httpMock.expectOne('/api/rooms').flush({
       rooms: [
-        {
+        makeRoom({
           room_id: 'r-2',
           name: 'still here',
-          tree_root_id: 't-1',
-          owner_instance_id: 'o-1',
-          state: 'active',
           member_count: 1,
           member_instance_ids: ['o-1'],
-          last_message_at: null,
-          last_message_seq: null,
-          created_at: '2026-11-16T10:00:00+00:00',
-        },
+        }),
       ],
       truncated: false,
     });
@@ -489,18 +484,11 @@ describe('RoomService', () => {
     service.loadGlobalRooms('global');
     httpMock.expectOne('/api/rooms').flush({
       rooms: [
-        {
-          room_id: 'r-1',
+        makeRoom({
           name: 'back',
-          tree_root_id: 't-1',
-          owner_instance_id: 'o-1',
-          state: 'active',
           member_count: 1,
           member_instance_ids: ['o-1'],
-          last_message_at: null,
-          last_message_seq: null,
-          created_at: '2026-11-16T10:00:00+00:00',
-        },
+        }),
       ],
       truncated: false,
     });

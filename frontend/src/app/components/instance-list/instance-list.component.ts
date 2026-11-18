@@ -108,7 +108,6 @@ export class InstanceListComponent implements OnInit, AfterViewInit, OnDestroy {
   // gc-fe-surfaces P3: anchor-less membership map (instance_id -> has >=1 joined room).
   private readonly membershipMap = signal<Map<string, boolean>>(new Map());
   protected readonly roomMapError = signal<string | null>(null);
-  private readonly roomMapLoading = signal(false);
   protected readonly roomMapTruncated = signal<boolean>(false);
 
   // Manual refresh state
@@ -235,7 +234,6 @@ export class InstanceListComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   private loadRoomMap(): void {
-    this.roomMapLoading.set(true);
     this.roomMapError.set(null);
     this.roomMapTruncated.set(false);
     this.roomService
@@ -246,13 +244,11 @@ export class InstanceListComponent implements OnInit, AfterViewInit, OnDestroy {
           const normalized = normalizeGlobalRoomListResponse(resp);
           this.membershipMap.set(buildMembershipMap(normalized.rooms));
           this.roomMapTruncated.set(normalized.truncated === true);
-          this.roomMapLoading.set(false);
         },
         error: () => {
           this.membershipMap.set(new Map());
           this.roomMapError.set('Could not load chatroom membership.');
           this.roomMapTruncated.set(false);
-          this.roomMapLoading.set(false);
         },
       });
   }

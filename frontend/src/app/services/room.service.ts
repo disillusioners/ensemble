@@ -295,7 +295,10 @@ export class RoomService {
    */
   loadGlobalRooms(mode: 'global' | 'joined', scopeInstanceId?: string | null): void {
     this.globalRoomsMode = mode;
-    this.globalRoomsScope = scopeInstanceId ?? null;
+    // The scope anchor belongs to the JOINED mode only — the anchor-less
+    // ('global') mode never reads it back, so a stale anchor is never
+    // stored.
+    this.globalRoomsScope = mode === 'joined' ? scopeInstanceId ?? null : null;
     const anchor = mode === 'joined' ? (scopeInstanceId ?? null) : null;
     const reqId = ++this.globalRoomsRequestId;
     this.globalRoomsLoading.set(true);

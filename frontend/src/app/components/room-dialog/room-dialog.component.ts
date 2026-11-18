@@ -204,7 +204,7 @@ export class RoomDialogComponent implements OnInit, OnDestroy {
 
     if (this.isGlobalMode) {
       // The nest-wide browser — ANCHOR-LESS (AM-9). It polls (D2.2).
-      this.roomService.loadGlobalRooms('global', null);
+      this.loadRoomsForMode();
       this.roomService.startPolling();
       return;
     }
@@ -218,13 +218,32 @@ export class RoomDialogComponent implements OnInit, OnDestroy {
 
     if (this.isJoinedMode) {
       // The per-instance popup — ANCHORED (AM-9). It polls (D2.2).
-      this.roomService.loadGlobalRooms('joined', instanceId);
+      this.loadRoomsForMode();
       this.roomService.startPolling();
       return;
     }
 
     // The SHIPPED 'instance' mode — the same request as before, and
     // TIMER-FREE (Q4: the timer object never exists in this mode).
+    this.loadRoomsForMode();
+  }
+
+  /**
+   * The mode → fetch dispatch — the ONE place that decides WHICH room
+   * list THIS mode reads (NO polling here: the poll is the caller's
+   * concern).
+   */
+  private loadRoomsForMode(): void {
+    if (this.isGlobalMode) {
+      this.roomService.loadGlobalRooms('global', null);
+      return;
+    }
+    const instanceId = this.data.instanceId;
+    if (!instanceId) return;
+    if (this.isJoinedMode) {
+      this.roomService.loadGlobalRooms('joined', instanceId);
+      return;
+    }
     this.roomService.loadRooms(instanceId);
   }
 
@@ -255,17 +274,7 @@ export class RoomDialogComponent implements OnInit, OnDestroy {
    * nest-wide dialog must never silently revert to tree scope).
    */
   protected retryRooms(): void {
-    if (this.isGlobalMode) {
-      this.roomService.loadGlobalRooms('global', null);
-      return;
-    }
-    const instanceId = this.data.instanceId;
-    if (!instanceId) return;
-    if (this.isJoinedMode) {
-      this.roomService.loadGlobalRooms('joined', instanceId);
-      return;
-    }
-    this.roomService.loadRooms(instanceId);
+    this.loadRoomsForMode();
   }
 
   /** Re-fetch the open conversation's first page after a failure. */
