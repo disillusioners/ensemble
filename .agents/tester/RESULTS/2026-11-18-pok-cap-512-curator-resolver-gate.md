@@ -104,3 +104,24 @@ Registered `pok_pg_materialization` invocation + PG_TEST_* to the fenced scratch
 ## Housekeeping
 
 Scratch DBs `ensemble_dev_scratch_pokcap(_cap)` **dropped** (0 remain). Worktrees `/tmp/pokcap-base`, `/tmp/pokcap-head` left in place (evidence re-runs; `/tmp`-ephemeral). Live store final state: 256 active / 9 archived / 54 superseded / 319 total — probe row archived, nothing else touched.
+
+
+---
+
+# ADDENDUM (2026-11-18, same gate session): T7 + T8
+
+## T7 — PACKS.md `pok_service_unit` cap marker → A-13 form: **APPLIED (fix case)**
+
+`74722abb8` was a **count-only** re-stamp — the registered row still carried `49 nodes` + `[active cap 256 — Emperor directive 2026-11-10]`. One row edited in place: count → `57 nodes (re-count 2026-11-18 @ 47ecca4c6; +8 TestSlugOwnerResolution)`; AC19's bare `256-cap` neutralized to `cap refuse`; marker → **`[active cap 512 — commission 2026-11-17, no Emperor directive cited]`** (A-13 form, byte-verbatim, present exactly once); Last Run/Status stamped per the house convention (`PASS 57/57 HEAD · 49/49 BASE (2026-11-18 gate, net-new ∅)`). Post-edit: **zero** 256-era markers remain in PACKS.md. Commit **`63f816b55`** (`docs(packs): pok_service_unit cap marker -> A-13 512 form`, explicit pathspec, 1 file / +1/−1). Historical surfaces (CHANGELOG [0.29.11], RESULTS, discharge registers) byte-intact.
+
+## T8 — Doctrine pointer row LANDED on the live store: **SUCCESS**
+
+Via the NEW-code service upsert path from the isolated tree `/tmp/pokcap-head` (T4 protocol; identity gate `ensemble_prod`/`ensemble`/PG 18.4 passed before any write; slug-absence gate 0 rows; `agent_id=leader`, `audience=both`, `domain=other`):
+
+- **Row id `57704ef0-379c-4eb6-815b-fed8fa737f71`** · `action='created'` (first attempt) · `status='active'` · created `2026-11-18T03:01:56Z`
+- **Body byte-exact** (`BODY_EXACT_MATCH=True`; intended sha256 == stored sha256 `51d9778c…`; 222 chars / 224 UTF-8 bytes; em-dash present; no trailing period) — slug `pok-scope-01-rolling-state-out`, pointing at `guideline-pok-durable-vs-rolling-state`
+- **Counts: active 256 → 257 (+1), archived 9 / superseded 54 unchanged, total 319 → 320 (+1)** — exactly the sanctioned row, nothing else (comm-diff AFTER−BEFORE = `{57704ef0…}` only; BEFORE−AFTER = ∅). **Nothing archived** — PM's post-merge curation owns that.
+- Zero-collateral + secret-scan 0 hits; harness `/tmp/pokcap_gate/doctrine_row_t8.py`, log `doctrine_row_t8.log`, snapshots `active_ids_{before,after}_t8.txt` (sha `d614c798…` → `83fa3f72…`).
+- Post-write live store: **257 active under the live daemon's old cap 256 — harmless (cap gates writes, not reads); post-promote 257/512.**
+
+Deviations (both BENIGN): T4-inherited harness summary `None`s (log cosmetics; §-level evidence lines correct); one read-only probe used a guessed column name `agent_id` (`UndefinedColumn`; physical column is `created_by_agent`) — redone via ORM.
