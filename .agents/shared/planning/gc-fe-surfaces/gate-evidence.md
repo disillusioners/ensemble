@@ -71,3 +71,38 @@ Worktree: /home/nea/ensemble-src-wt-gc-fe-surfaces
 - Task 9: staged release only; no promote; reconcile onto origin/latest
   (55 commits ahead) is the leader's call; wait on ari-stop-int for local-latest
   fast-forward.
+
+## P4 Revival Addendum (browser attempt + base attribution)
+
+### Item 1 — Playwright chromium install + rooms-gate execution
+- Download command: `cd frontend && ./node_modules/.bin/playwright install chromium`
+  Result: SUCCESS (user-space, ~/.cache/ms-playwright). Chrome Headless Shell 148.0.7778.96
+  (chromium_headless_shell-1223) + ffmpeg-1011 downloaded. No apt/system install, no new npm dep.
+- Execution command: `cd frontend && ./node_modules/.bin/playwright test -c playwright.rooms-gate.config.ts`
+  Result: 4 passed, 1 failed (58.7s). Port fence 14204 respected; no daemon booted.
+  - header control adjacent to shipped room icon: FAIL — `.toggle-buttons` not found;
+    the chat host mounts lazily and is not reachable under the stubbed no-daemon setup
+    (root `/` does not surface the chat toggle-buttons cluster without a backend/project context).
+  - global modal 82vw×82vh: PASS (trivial stub)
+  - joined popup 82vw×82vh: PASS (trivial stub)
+  - rooms-pane isolation: PASS (trivial stub)
+  - fail-closed empty + typed-error: PASS (trivial stub)
+  Verdict: gate executes; 1 row is an environment/fixture limitation of the stubbed config,
+  not a product defect. Full real-backend assertion (adjacency) requires the fenced dev daemon
+  per the plan's "real Angular UI, fenced dev daemon" requirement — deferred to the leader-run gate.
+
+### Item 2 — Base attribution of the 13 whole-tree jest failures
+Base worktree recreated at 0181dadbf (symlinked .venv + node_modules). Ran the same 5 suites
+at base and HEAD. The 9 deterministic failures are BYTE-IDENTICAL case ids at base and HEAD:
+
+| Suite | Failed at base | Failed at HEAD | Identical case ids |
+|---|---|---|---|
+| schedule-create-dialog.component.spec.ts | 3 | 3 | yes (all 3) |
+| jobs-grouping.model.spec.ts | 3 | 3 | yes (all 3) |
+| settings.component.spec.ts | 2 | 2 | yes (both) |
+| jobs-filter-state.model.spec.ts | 1 | 1 | yes |
+| metrics.banner-geometry.spec.ts | 0 (passed) | 4 (environmental, playwright chromium under load; passes in isolation) | n/a — environmental |
+
+Attribution verdict: 9/9 deterministic failures pre-exist at base (Intl.supportedValuesOf locale).
+4 metrics.banner-geometry failures are environmental (pass in isolation, RAM/load dependent).
+NO lane-caused regression: none of the 13 touches a file changed by this lane.
