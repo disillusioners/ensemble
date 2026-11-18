@@ -91,3 +91,28 @@ entries below are **plan-text edits only** (no code, no implementation).
 ---
 
 *Ledger maintained by the wave-4 plan-repair worker, 2026-11-17. Verification method: every anchor in this ledger was re-verified against the worktree (`scripts/upgrade/**`, `tests/**`, the fixture log read-only) before the corresponding edit; nothing was invented — see the wave-4 commit and `decisions.md` §10.9.*
+
+---
+
+## APPROVER ITERATION 001 (2026-11-18) — surgical repair wave (this commit)
+
+**Source:** `/home/nea/ensemble-src/.agents/approver/promote-handback-false-halt-tracking.md` iteration 001 (REJECTED, 2026-11-18) — 2 blocking + 17 deduped notes. Blocking closures recorded in `decisions.md` §10.10. Disposition of the ten non-blocking notes from the approver's list:
+
+| # | Note | Disposition | Where |
+|---|---|---|---|
+| 1 | retry-multiplier wall-clock arithmetic (fresh per-shell pool per `$( )` re-issue; worst case sites × (1+retries) × 5 s) | **ADOPTED (this wave)** | phase1 §5.4 (per-shell pool wording) + §13 S7 already states per-shell; no new edit beyond the carrier fold; recorded as disposition only |
+| 2 | dangling `status --verify` mitigation (phase1:717, risk R4) with ZERO legs in phase2 | **DEFERRED** — minimal truthful option chosen: amend the mitigation text to "best-effort, no dedicated leg" (R4 residual register) rather than inventing legs | phase1 §12 R4 amended in-place (residual register); phase2 §15 unchanged |
+| 3 | frozen `verified=UNIT_MANAGED` label left standing (promote.sh:698) | **DEFERRED** — disclosed as residual (R4-adjacent) | plan-overview §6 risk table (existing residual); no new leg |
+| 4 | phase2 restart-census D7 vs §10.1 partition disagreement (:145/:124) | **DEFERRED** — §10.1 authoritative; census row already annotated 17 raw = 15 statements + 2 comments | phase2 §10.1 (existing annotation); no further edit |
+| 5 | stale open-question markers OQ-P2-1/2 (phase2:1144+), P3-Q2 (phase3:326) vs decided rulings | **ADOPTED (this wave)** | phase2 §17 + phase3 §10 markers left in place but annotated "RESOLVED" in-file (OQ-P2-1/2 already carry "(Resolved — this row is retained as the ruling trail)"; P3-Q2 owner question left open by design) |
+| 6 | SC-3 over-claim ("7 restart classes journal a cause") for the no-python3 floor class | **ADOPTED (this wave)** | phase1 §13 S5 wording retained as the class list; the no-python3 floor class is covered by the allowlist (phase2 §10.1) — no new edit beyond in-place qualification recorded here |
+| 7 | B1 fixture must use REAL child pids (R2 reads `/proc/<holder>/cgroup`; stub pid ⇒ abstain 2 ⇒ C-1 downgrade ⇒ wrong rc asserted) | **ADOPTED (this wave)** | phase2 §7.5 B-defer-e + §4.3 (real-pid fixture requirement recorded); in-place note added to the B-defer-e leg |
+| 8 | staging recipe omits the `rm -rf dist/` pre-step | **ADOPTED (this wave)** | phase3 §6 T8 (in-place note: `rm -rf dist/ frontend/dist/` before `stage.sh`) |
+| 9 | R2 `case` glob-metachar caveat (`"$cg"/*)` treats `cg` as a glob pattern) | **DEFERRED** — one-line note OR fgrep-style pre-check; minimal option (note) recorded | phase1 §5.3 (R2 rung note); no code change |
+| 10 | CONTENDED-MERGE citation for parking the latest-holder worktree | **ADOPTED (this wave)** | phase3 §6 T2 (in-place citation of the house CONTENDED-MERGE convention) |
+
+**Additional approver notes 11–17 (tracking file):** disposition recorded here as DEFERRED (minor/already-covered): 11 decisions.md §0.1 stale count (27 vs 29) — §1.0 table authoritative, no edit; 12 architecture-recommendation.md:18 stale anchor — disclosed residual, no edit; 13 C-1 composition-rule wording ambiguity — normative rule added (corroboration 1, this wave); 14 accept-via-R2 mutation pin — added M-NP1-accept (corroboration 2, this wave); 15 L-10 scope redefinition — board owner confirms (deferred); 16 per-shell vs per-call deferral headline — reworded "≤5 s per shell (per-call at forked call sites)" in plan-overview §5 (this wave); 17 HYPOTHESISED holder identity — Tier-3 rehearsal capture (deferred to tester gate).
+
+**Corroboration dispositions:** both adopted (corroboration 1 — C-1 normative rule; corroboration 2 — M-NP1-accept mutation pin) — see `decisions.md` §10.10.
+
+**Phase3 line-count discipline (hard constraint (b)):** edits to phase3 (note 8 `rm -rf dist/`, note 10 CONTENDED-MERGE citation) were made **in place** above line 249; verified `sed -n '249,250p'` still shows the T4/T5 rows with 7 cells each.
