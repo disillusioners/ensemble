@@ -339,7 +339,7 @@ if [ -n "$CLEAN_PGID" ]; then
   [ "$MT" = "4" ] && pass B2 "4 memoir tables present" || fail B2 "memoir tables=$MT/4"
   [ "$TSV" = "tsvector|ALWAYS" ] && pass B3 "tsv GENERATED ALWAYS column present" || fail B3 "tsv shape=$TSV"
   [ "$GIN" = "1" ] && pass B4 "GIN index present" || fail B4 "GIN index=$GIN"
-  q "INSERT INTO memoir_episodes (id, agent_id, body, created_at, event_at, importance, is_keepsake, access_count, embedding_attempts) VALUES ('w8-clean-1','ari','the memoir world remembers the emperor', now(), now(), 5, false, 0, 0);" >/dev/null
+  q "INSERT INTO memoir_episodes (id, agent_id, body, created_at, event_at, importance, is_keepsake, access_count, embedding_attempts) VALUES ('w8-clean-1','ari','the memoir world remembers the user', now(), now(), 5, false, 0, 0);" >/dev/null
   HIT="$(q "SELECT count(*) FROM memoir_episodes WHERE tsv @@ plainto_tsquery('english','memoir');")"
   [ "$HIT" = "1" ] && pass B5 "tsv populates on INSERT and matches the query" || fail B5 "tsv match count=$HIT"
   L3="$(q "SELECT to_regclass('public.instance_execution_leases') IS NOT NULL;")"
