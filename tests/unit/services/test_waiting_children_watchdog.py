@@ -1662,13 +1662,19 @@ class TestWedgeRearmAfterCooldown:
         )
         assert w.wedge_notices_enqueued == 2
 
-    async def test_cooldown_entry_cleared_on_leave_wc(
+    async def test_episode_survives_leave_wc_and_ends_on_the_row_check(
         self, repo, manager, make_instance
     ) -> None:
-        """The episode-boundary purge (parent left WC) still drops
-        the cooldown entry outright — immediate re-eligibility on a
-        future genuine wedge, unchanged from the pre-DELTA-2
-        contract."""
+        """S4: the episode-end boundary is the ROW-CHECK, NOT WC
+        membership.
+
+        The notice's OWN enqueue flips WC→RUNNING — so a
+        membership-based end would end its own episode and restore the
+        hourly re-notification loop. The entry therefore SURVIVES the
+        parent leaving WAITING_CHILDREN, and is dropped only when the
+        row-check stops holding (the parent's S4 subject is empty
+        while it still has PENDING watchers).
+        """
         parent_id = make_instance(
             status=InstanceStatus.WAITING_CHILDREN,
             instance_id="wc-parent-leave",
@@ -1680,7 +1686,7 @@ class TestWedgeRearmAfterCooldown:
         assert w.wedge_notices_enqueued == 1
         assert parent_id in w.wedge_episodes
 
-        # Parent leaves WC (terminal). The purge drops the entry.
+        # Parent leaves WC (terminal) — the episode SURVIVES.
         from daemon.repositories.instance.models import Instance as I
         with Session(w._repo.engine) as session:
             row = session.get(I, parent_id)
@@ -1688,6 +1694,7 @@ class TestWedgeRearmAfterCooldown:
             session.add(row)
             session.commit()
         await w.run_once()
-        assert parent_id not in w.wedge_episodes, (
-            "leave-WC must drop the cooldown entry (episode boundary)"
+        assert parent_id in w.wedge_episodes, (
+            "S4: leaving WAITING_CHILDREN must NOT end the episode — the "
+            "notice's own WC→RUNNING flip would end its own episode"
         )

@@ -156,6 +156,7 @@ import logging
 import time
 from typing import Any
 
+from daemon.constants import TERMINAL_INSTANCE_STATUSES
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.services.report_integrity_guard import parent_has_active_b_notice
@@ -195,6 +196,40 @@ WEDGE_SOURCE: str = "system:watchdog:wedge"
 #: (parent left WC / live carrier appeared) drop the entry outright
 #: and re-enable immediately, unchanged.
 WEDGE_REARM_COOLDOWN_SECONDS: float = 30 * 60
+
+
+# ── S4 (wake-path-carrier-fix, phase 4) — the notice surface ──────────────
+#
+# The wedge notice used to be composed from a TEMPLATE that asserted a
+# queue state the watchdog never read ("A PROCESS_REPORT message is in
+# your queue but no worker is scheduled to deliver it") — FALSE in 100%
+# of the notices ever minted (the watchdog read NO bus rows at all).
+# S4 replaces the template with a COMPOSED notice: every line is a
+# REASON CODE whose check is a ROW check, and a code is emitted ONLY
+# when its check holds.
+#
+# The codes:
+#
+# * ``pending_watchers`` — the S4_NOTICE_SUBJECT of the parent is
+#   non-empty: at least one PENDING watcher that is NOT fulfillable
+#   (its watched child is already terminal, or the watcher is
+#   self-referential) — i.e. a wait that can NO LONGER FIRE.
+# * ``no_live_carrier`` — NO live PROCESS_REPORT carrier task is
+#   scheduled for this parent.
+# * ``queued_report`` — a ``completion_report`` row EXISTS in
+#   ``message_queue`` and has not completed yet (the row id is cited).
+# * ``non_terminal_children`` — the parent still has M non-terminal
+#   children (the park is legitimate while they run).
+WEDGE_REASON_PENDING_WATCHERS: str = "pending_watchers"
+WEDGE_REASON_NO_LIVE_CARRIER: str = "no_live_carrier"
+WEDGE_REASON_QUEUED_REPORT: str = "queued_report"
+WEDGE_REASON_NON_TERMINAL_CHILDREN: str = "non_terminal_children"
+
+#: The kill-switch key (settings registry). EMISSION ONLY: it gates the
+#: notice ENQUEUE and nothing else — never detection, classification,
+#: the S1 fire, the S2 arm, the S3 park predicate, the healer, or the
+#: report lane. Default: NOTICES ON (absence of the key = on).
+WEDGE_NOTICE_EMISSION_KEY: str = "wedge_notice_emission_enabled"
 
 
 def _format_age_human(age_seconds: float) -> str:
@@ -405,44 +440,118 @@ def _build_release_notice(
     return "\n".join(lines)
 
 
-def _build_wedge_notice(parent_id: str) -> str:
+def _build_wedge_notice(
+    parent_id: str,
+    *,
+    reason_codes: list[str] | None = None,
+    subject_child_ids: list[str] | None = None,
+    queued_report_id: str | None = None,
+    non_terminal_child_count: int = 0,
+) -> str:
     """Build the directive wedge-notice for ``parent_id``.
 
-    The wedge signature is a parent in ``WAITING_CHILDREN`` with
-    ZERO non-terminal children AND ZERO live ``PROCESS_REPORT``
-    carrier tasks (the report message is in the queue, but no
-    worker is going to deliver it). The notice tells the parent
-    that a fresh carrier should be enqueued (the sub-shape (c)
-    revival seam in ``manager._reconcile_deferred_report`` does
-    this directly when it sweeps the injection row, but the
-    watchdog backstop catches the gap until that sweep runs) and
-    offers the same playbook as the hang notice.
+    **S4 (wake-path-carrier-fix, phase 4)** — the notice is COMPOSED
+    from the reason codes, never from a template that asserts an
+    unread queue state.
 
-    Kept terse and directive per the hang-notice contract.
+    The old template claimed, unconditionally, "A PROCESS_REPORT
+    message is in your queue but no worker is scheduled to deliver
+    it." — a claim the watchdog had NO evidence for (it read no bus
+    rows at all), so it was FALSE in 100% of the notices ever minted.
+    S4 makes every line a row-checked fact:
+
+    * ``pending_watchers`` — N PENDING watchers that can no longer
+      fire (the S4 subject), with the watched children cited;
+    * ``no_live_carrier`` — no live PROCESS_REPORT carrier task;
+    * ``queued_report`` — a ``completion_report`` row EXISTS and has
+      not completed (the row id is CITED — the claim is only made
+      when the row check holds);
+    * ``non_terminal_children`` — M children are still non-terminal.
+
+    A code is rendered ONLY when it is in ``reason_codes`` — the
+    caller computes those from the row checks, so this builder can
+    never assert a state that was not observed.
 
     Args:
-        parent_id: The parent instance ID (used only for context
-            in the leading line — readers can correlate with their
-            own instance-id surface).
+        parent_id: The parent instance ID (used only for context in
+            the leading line).
+        reason_codes: The codes whose checks held (see the module
+            constants). Unknown codes are ignored.
+        subject_child_ids: The watched child ids of the unfulfillable
+            watchers (for the ``pending_watchers`` line).
+        queued_report_id: The ``message_queue`` row id of the queued
+            completion report (for the ``queued_report`` line).
+        non_terminal_child_count: M — the non-terminal child count
+            (for the ``non_terminal_children`` line).
+
+    Returns:
+        The notice text.
     """
+    codes = set(reason_codes or [])
     short = parent_id[:8] if len(parent_id) > 8 else parent_id
     lines: list[str] = [
         f"[system:watchdog:wedge] Wedge notice — your "
-        f"WAITING_CHILDREN turn is parked with no live carrier "
-        f"task and zero non-terminal children ({short}...). "
-        f"A PROCESS_REPORT message is in your queue but no worker "
-        f"is scheduled to deliver it.",
+        f"WAITING_CHILDREN turn is parked ({short}...).",
         "",
-        "Recommended playbook (in order):",
+    ]
+    if codes:
+        lines.append(
+            "Reason codes: " + ", ".join(sorted(codes)) + "."
+        )
+    else:
+        lines.append("Reason codes: (none observed).")
+    lines.append("")
+    lines.append("Findings (each one checked against a row):")
+    if WEDGE_REASON_PENDING_WATCHERS in codes:
+        children = [str(c)[:8] for c in (subject_child_ids or [])]
+        child_text = ", ".join(children) if children else "unknown"
+        lines.append(
+            f"  - {WEDGE_REASON_PENDING_WATCHERS}: "
+            f"{len(subject_child_ids or [])} pending dependency "
+            f"watchers (watched children: {child_text}) that can no "
+            f"longer fire."
+        )
+    if WEDGE_REASON_NO_LIVE_CARRIER in codes:
+        lines.append(
+            f"  - {WEDGE_REASON_NO_LIVE_CARRIER}: no live "
+            f"PROCESS_REPORT carrier task is scheduled for this turn."
+        )
+    if WEDGE_REASON_QUEUED_REPORT in codes:
+        lines.append(
+            f"  - {WEDGE_REASON_QUEUED_REPORT}: a completion_report "
+            f"message (id={queued_report_id or 'unknown'}) is queued "
+            f"and no carrier is scheduled."
+        )
+    if WEDGE_REASON_NON_TERMINAL_CHILDREN in codes:
+        lines.append(
+            f"  - {WEDGE_REASON_NON_TERMINAL_CHILDREN}: "
+            f"{non_terminal_child_count} children are still "
+            f"non-terminal."
+        )
+    lines.append("")
+    lines.append("Recommended playbook (in order):")
+    lines.append(
         "  1. The reconciler should self-heal on its next sweep — "
         "if this notice repeats, check the manager logs for "
-        "sub-shape (c, c_revival) lines.",
+        "sub-shape (c, c_revival) lines."
+    )
+    lines.append(
         "  2. If the wedge persists, call `send_message` to "
         "yourself (any message) — the resulting PROCESS_MESSAGE "
-        "task will wake the parked turn.",
-        "  3. As a last resort, terminate and re-spawn — this "
-        "rebuilds the carrier surface from scratch.",
-    ]
+        "task will wake the parked turn."
+    )
+    if WEDGE_REASON_NON_TERMINAL_CHILDREN in codes:
+        # Terminate-and-respawn would ORPHAN the live children — the
+        # code tells the operator they are still running.
+        lines.append(
+            "  3. Children are still running — do NOT terminate and "
+            "re-spawn: let them report first."
+        )
+    else:
+        lines.append(
+            "  3. As a last resort, terminate and re-spawn — this "
+            "rebuilds the carrier surface from scratch."
+        )
     return "\n".join(lines)
 
 
@@ -578,7 +687,16 @@ class WaitingChildrenWatchdog:
         # ``WEDGE_REARM_COOLDOWN_SECONDS``, so each re-park gets a
         # fresh wake at the pass's cadence instead of eternal
         # silence.
-        self._wedge_notified: dict[str, float] = {}
+        # S4: the wedge-episode map — parent id → the REASON-CODE
+        # FINGERPRINT (the sorted tuple of the codes whose row-checks
+        # held when the notice was emitted). NOT a timestamp: the TTL
+        # is dropped (S4) — an episode ends on the ROW-CHECK (the S4
+        # subject empty), never on a timer and never on WC membership
+        # (the notice's own enqueue flips WC→RUNNING).
+        self._wedge_notified: dict[str, tuple[str, ...]] = {}
+        # The per-tick memo of the emission kill-switch (ONE settings
+        # read per tick; reset at the top of every ``run_once``).
+        self._wedge_emission_cache: bool | None = None
 
         # Wedge-pass counters (observability — separate from the
         # ``run_once`` stats dict so existing 4-key tests stay
@@ -703,6 +821,135 @@ class WaitingChildrenWatchdog:
         return self._nudge_counts.get((parent_id, child_id), 0)
 
     # ─── Wedge-fix backstop helper ─────────────────────────────────────
+
+    # ─── S4 (wake-path-carrier-fix, phase 4) — the notice surface ────
+
+    def _fetch_wedge_subjects(
+        self, parent_ids: list[str]
+    ) -> dict[str, tuple[int, list]]:
+        """The batched SUBJECT read — the watchdog's FIRST bus read.
+
+        Returns ``{parent_id: (total_pending, unfulfillable_rows)}``:
+        the S4_NOTICE_SUBJECT (the PENDING watchers that can no longer
+        fire) and the total PENDING count (which distinguishes "no
+        watchers at all" — the classic wedge — from "watchers, all
+        fulfillable" — the legitimately-parked parent, OUT OF SCOPE).
+
+        The bus is not wired in some fixtures → an empty map (the
+        classic-wedge shape), which keeps the pre-S4 behaviour for
+        those callers.
+        """
+        from daemon.services.dependency_bus import get_dependency_bus
+
+        bus = get_dependency_bus()
+        if bus is None:
+            return {}
+        return bus.fetch_pending_subject_for_targets_sync(list(parent_ids))
+
+    def _queued_completion_report_id(self, parent_id: str) -> str | None:
+        """The queued ``completion_report`` row id (or None).
+
+        The ROW check behind the ``queued_report`` reason code: a
+        ``completion_report`` message row EXISTS for this parent and
+        has not completed yet. When no such row exists the code MUST
+        NOT be emitted and the notice MUST NOT claim one — the old
+        template claimed it unconditionally (FALSE in 100% of the
+        notices ever minted).
+        """
+        repo = getattr(self._manager, "_queue_repository", None)
+        if repo is None:
+            return None
+        try:
+            rows = repo.get_by_instance(parent_id)
+        except Exception:  # noqa: BLE001 — fail-soft (no claim)
+            return None
+        if not isinstance(rows, (list, tuple)):
+            # An async double (AsyncMock) hands back a coroutine — a
+            # sync helper must not await it, and a coroutine is NOT
+            # evidence. Close it so it does not warn.
+            if hasattr(rows, "close"):
+                try:
+                    rows.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            return None
+        for row in rows:
+            if getattr(row, "type", None) != "completion_report":
+                continue
+            if getattr(row, "status", None) in ("completed", "failed"):
+                continue
+            # EXCLUDE the watchdog's OWN notices: a wedge/hang notice
+            # is itself a ``completion_report``-typed row, so without
+            # this the notice would observe ITSELF on the next tick —
+            # the ``queued_report`` code would appear, the episode
+            # fingerprint would change, and the pass would notify
+            # again (an endless self-notice loop).
+            meta = getattr(row, "message_metadata", None) or {}
+            if meta.get("wedge_notice") or meta.get("watchdog_notice"):
+                continue
+            if getattr(row, "source", None) in (
+                "system:watchdog:wedge",
+                "system:watchdog",
+            ):
+                continue
+            return getattr(row, "message_id", None)
+        return None
+
+    def _count_non_terminal_children(self, parent_id: str) -> int:
+        """M — the parent's non-terminal child count (the
+        ``non_terminal_children`` reason code's number)."""
+        try:
+            child_ids = self._repo.list_child_ids_permanent(parent_id)
+        except Exception:  # noqa: BLE001 — fail-soft
+            return 0
+        if not child_ids:
+            return 0
+        try:
+            statuses = self._repo.get_statuses(list(child_ids))
+        except Exception:  # noqa: BLE001 — fail-soft
+            return 0
+        return sum(
+            1
+            for child_id in child_ids
+            if statuses.get(child_id) not in TERMINAL_INSTANCE_STATUSES
+        )
+
+    def _wedge_notice_emission_enabled(self) -> bool:
+        """The kill-switch read — EMISSION ONLY, read PER TICK.
+
+        The registry key alone is VOID: ``self._enabled`` is a
+        BOOT-time read, so the switch is read from the settings
+        service on every tick (the value is memoised per tick — ONE
+        DB read per tick, not one per parent).
+
+        Default: NOTICES ON (the absence of the key means ON). The
+        switch gates the notice ENQUEUE and NOTHING else — never
+        detection, classification, the S1 fire, the S2 arm, the S3
+        park predicate, the healer or the report lane.
+        """
+        cached = getattr(self, "_wedge_emission_cache", None)
+        if cached is not None:
+            return cached
+        enabled = True
+        svc = getattr(self._manager, "_settings_service", None)
+        if svc is not None:
+            try:
+                overrides = svc.get_overrides()
+            except Exception:  # noqa: BLE001 — fail-OPEN (notices on)
+                overrides = None
+            if isinstance(overrides, dict):
+                value = overrides.get(WEDGE_NOTICE_EMISSION_KEY)
+                if value is not None:
+                    enabled = bool(value)
+            elif overrides is not None and hasattr(overrides, "close"):
+                # An async service double — never awaited here; close
+                # the coroutine so it does not warn.
+                try:
+                    overrides.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        self._wedge_emission_cache = enabled
+        return enabled
 
     def _has_live_carrier_task(self, instance_id: str) -> bool:
         """Return True iff ``instance_id`` has any live
@@ -957,6 +1204,11 @@ class WaitingChildrenWatchdog:
         next parent is processed. The whole ``run_once`` does NOT
         abort on a per-parent failure.
         """
+        # S4: the emission kill-switch is read PER TICK — clear
+        # the per-tick memo (the registry key alone is VOID: the
+        # watchdog's ``_enabled`` is a boot-time read).
+        self._wedge_emission_cache = None
+
         stats = {
             "parents_scanned": 0,
             "parents_skipped_paused": 0,
@@ -1541,6 +1793,35 @@ class WaitingChildrenWatchdog:
                     f"children. exc={exc}"
                 )
                 parents_with_non_term_children = set()
+            # ── S4: the SUBJECT read (the watchdog's FIRST bus read) ──
+            # One batched read for the whole tick: the PENDING watcher
+            # rows of every candidate parent plus ONE batched
+            # child-status read (never a per-parent N+1). The subject
+            # of a parent is the set of PENDING watchers that can NO
+            # LONGER FIRE (their watched child is already terminal, or
+            # the watcher is self-referential) — the S4_NOTICE_SUBJECT.
+            #
+            # The candidates are the WC parents PLUS the parents with
+            # an OPEN episode: an episode ends on the ROW-CHECK (the
+            # subject empty), NOT on WC membership (the notice's own
+            # enqueue flips WC→RUNNING, so a membership-based end
+            # would end its own episode and restore the hourly
+            # re-notification loop).
+            _subject_candidates = sorted(
+                set(parent_ids) | set(self._wedge_notified)
+            )
+            subjects: dict[str, tuple[int, list]] = {}
+            try:
+                subjects = self._fetch_wedge_subjects(
+                    _subject_candidates
+                )
+            except Exception as exc:  # noqa: BLE001 — fail-soft
+                logger.warning(
+                    f"[Watchdog] Wedge subject read failed; treating "
+                    f"every parent as having no unfulfillable watcher "
+                    f"(classic wedge shape). exc={exc}"
+                )
+                subjects = {}
             for parent_id in parent_ids:
                 self._wedge_parents_scanned_total += 1
                 # Skip PAUSED parents — same rationale as the
@@ -1592,18 +1873,38 @@ class WaitingChildrenWatchdog:
                     )
                     if not _l6_anchor:
                         continue
-                # Wedge condition part 3: zero non-terminal children.
-                # A HEALTHY WC parent waiting on live children has no
-                # carrier yet (carriers are created at child
-                # completion, NOT at parent-park time); without this
-                # gate the next check would spuriously fire on a
-                # healthy parent. Batched — the query above paid for
-                # the entire WC-parent set once, not per-parent.
-                if parent_id in parents_with_non_term_children:
-                    # Healthy parent — children still in flight. Drop
-                    # any stale wedge episode so a future genuine
-                    # wedge (after the last child completes) can
-                    # re-notify.
+                # ── S4 (wake-path-carrier-fix, phase 4): the subject ──
+                # The S4_NOTICE_SUBJECT of this parent — the PENDING
+                # watchers that can NO LONGER FIRE (child already
+                # terminal, or self-referential) — plus the total
+                # PENDING count. Batched over the whole tick (one
+                # bus read + ONE batched child-status read).
+                _total_pending, _subject_rows = subjects.get(
+                    parent_id, (0, [])
+                )
+                _has_non_terminal_children = (
+                    parent_id in parents_with_non_term_children
+                )
+                # ── IN SCOPE (S4) ────────────────────────────────────
+                # A parent whose only PENDING waits are FULFILLABLE is
+                # LEGITIMATELY parked — it is OUT OF SCOPE (zero
+                # notices; the raw-PENDING reading would have fired on
+                # ~9x as many parents). A parent with NO watchers at
+                # all is the classic wedge (nothing to wait for and
+                # nothing to deliver it) — in scope, as before.
+                if _subject_rows:
+                    _in_scope = True
+                elif (
+                    _total_pending == 0
+                    and not _has_non_terminal_children
+                ):
+                    _in_scope = True
+                else:
+                    _in_scope = False
+                if not _in_scope:
+                    # The ROW-CHECK ended the episode (the S4 subject
+                    # is empty for this parent) — drop the entry so a
+                    # later recurrence may notify again.
                     self._wedge_notified.pop(parent_id, None)
                     continue
                 # Wedge condition part 1: zero live carrier. If a
@@ -1616,29 +1917,61 @@ class WaitingChildrenWatchdog:
                     # so a future genuine wedge can re-notify.
                     self._wedge_notified.pop(parent_id, None)
                     continue
-                # Anti-spam: cooldown-based re-eligibility (DELTA 2,
-                # watcher-loss terminal strand 2026-10-14 — replaces
-                # the one-shot-forever ``in`` check). A wedge notice
-                # fires at most once per
-                # ``WEDGE_REARM_COOLDOWN_SECONDS`` per parent: a wake
-                # that RE-PARKS (gate re-blocks, root back to WC, no
-                # carrier, no children) re-arms automatically once
-                # the cooldown elapses, so the pass re-fires at its
-                # cadence instead of staying silent for the daemon
-                # lifetime. Within the cooldown the parent is
-                # skipped (the original anti-spam contract).
-                _last_wedge = self._wedge_notified.get(parent_id)
-                if (
-                    _last_wedge is not None
-                    and (time.monotonic() - _last_wedge)
-                    < WEDGE_REARM_COOLDOWN_SECONDS
-                ):
+                # ── The reason codes (each a ROW check) ─────────────
+                _codes: list[str] = []
+                if _subject_rows:
+                    _codes.append(WEDGE_REASON_PENDING_WATCHERS)
+                # The carrier gate above guarantees this fact holds.
+                _codes.append(WEDGE_REASON_NO_LIVE_CARRIER)
+                _queued_report_id = self._queued_completion_report_id(
+                    parent_id
+                )
+                if _queued_report_id:
+                    _codes.append(WEDGE_REASON_QUEUED_REPORT)
+                _non_terminal_count = 0
+                if _has_non_terminal_children:
+                    _codes.append(WEDGE_REASON_NON_TERMINAL_CHILDREN)
+                    _non_terminal_count = (
+                        self._count_non_terminal_children(parent_id)
+                    )
+                # ── Episode dedupe (S4): NO TTL ─────────────────────
+                # The episode fingerprint is the REASON-CODE SET (the
+                # DEDUPE_KEY is (parent_id, reason_code)). The
+                # episode ends when a code's row-check stops holding
+                # — NOT on a timer, and NOT on WC membership (the
+                # notice's own enqueue flips WC→RUNNING, so a
+                # membership-based end would end its own episode and
+                # bring back the hourly re-notification loop).
+                _fingerprint = tuple(sorted(_codes))
+                if self._wedge_notified.get(parent_id) == _fingerprint:
+                    # Same episode (same codes) — already notified.
+                    continue
+                # ── Kill switch (EMISSION ONLY, per-tick read) ─────
+                # The switch gates the ENQUEUE and nothing else:
+                # detection, classification, the codes and the
+                # subject read all ran above. When the emission is
+                # suppressed the episode is NOT stamped, so turning
+                # the switch back ON notifies (no restart needed).
+                if not self._wedge_notice_emission_enabled():
                     continue
                 # Compose + deliver the wedge notice. Same
                 # ``enqueue_message`` wake primitive as the hang
                 # pass — it writes MessageQueue + Task rows, flips
                 # WC→RUNNING, and notifies the worker pool.
-                notice = _build_wedge_notice(parent_id=parent_id)
+                notice = _build_wedge_notice(
+                    parent_id=parent_id,
+                    reason_codes=_codes,
+                    subject_child_ids=[
+                        str(
+                            ((_row.follow_up_payload or {}).get(
+                                "metadata", {}
+                            ) or {}).get("child_id", "")
+                        )
+                        for _row in _subject_rows
+                    ],
+                    queued_report_id=_queued_report_id,
+                    non_terminal_child_count=_non_terminal_count,
+                )
                 await self._manager.enqueue_message(
                     instance_id=parent_id,
                     message=notice,
@@ -1704,7 +2037,10 @@ class WaitingChildrenWatchdog:
                 # DELTA 2: stamp the notify instant (cooldown anchor).
                 # The cooldown re-arms the pass for the NEXT wake if
                 # this one re-parks.
-                self._wedge_notified[parent_id] = time.monotonic()
+                # S4: the episode stamp is the REASON-CODE FINGERPRINT
+                # (not a timestamp — the TTL is dropped; the episode
+                # ends on the row-check, not on a timer).
+                self._wedge_notified[parent_id] = _fingerprint
                 self._wedge_notices_enqueued_total += 1
                 logger.warning(
                     f"[Watchdog] Wedge notice enqueued for parent "
@@ -1736,18 +2072,28 @@ class WaitingChildrenWatchdog:
         #    the hang-pass ``departed_parent_pairs`` rule. A future
         #    WC re-entry with a fresh wedge can re-notify.
         if self._wedge_notified:
-            still_waiting_for_wedge = set(parent_ids)
-            departed_for_wedge = {
+            # S4: the episode-end purge is re-based onto the ROW-CHECK
+            # — the parent's S4 subject is EMPTY while it still has
+            # PENDING watchers (all of them fulfillable ⇒ the parent
+            # is legitimately parked and the ``pending_watchers``
+            # episode is over). It is NOT re-based on WC membership:
+            # the notice's OWN enqueue flips WC→RUNNING, so a
+            # membership-based end would end its own episode and
+            # restore the hourly re-notification loop (T5b).
+            ended_for_wedge = {
                 p for p in self._wedge_notified
-                if p not in still_waiting_for_wedge
+                if (
+                    subjects.get(p, (0, []))[0] > 0
+                    and not subjects.get(p, (0, []))[1]
+                )
             }
-            if departed_for_wedge:
-                for _p in departed_for_wedge:
+            if ended_for_wedge:
+                for _p in ended_for_wedge:
                     self._wedge_notified.pop(_p, None)
                 logger.info(
-                    f"[Watchdog] {len(departed_for_wedge)} wedge "
-                    f"episode(s) dropped — parent left "
-                    f"WAITING_CHILDREN."
+                    f"[Watchdog] {len(ended_for_wedge)} wedge "
+                    f"episode(s) dropped — the subject row-check no "
+                    f"longer holds (the waits are fulfillable again)."
                 )
 
         return stats

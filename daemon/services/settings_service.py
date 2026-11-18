@@ -685,6 +685,43 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
             "config.yaml decision.seams.snapshot_l3_selection_stage > shadow."
         ),
     ),
+    # ── wedge-notice emission kill-switch (S4 — wake-path-carrier-fix) ──
+    # The SEVENTH requires_restart=False key (the seventh).
+    #
+    # SCOPE: EMISSION ONLY. The switch gates the wedge-NOTICE ENQUEUE
+    # and NOTHING else — never the watchdog's detection, never the
+    # reason-code classification, never the S1 fire, the S2 arm, the
+    # S3 park predicate, the mission-strand healer, or the report
+    # lane. A switch wired into any of those would SILENCE THE FIX
+    # (and the live defect) instead of the notice.
+    #
+    # DEFAULT: NOTICES ON. The absence of the key means ON (the
+    # watchdog's per-tick read treats "no override row" as "on"), so
+    # an operator must EXPLICITLY turn it off.
+    #
+    # PER-TICK READ: the registry key alone is VOID — the watchdog's
+    # own ``_enabled`` flag is a BOOT-time read, so the switch is read
+    # from the settings service on EVERY tick (the value is memoised
+    # per tick: ONE DB read per tick). A mid-run flip therefore takes
+    # effect with NO restart.
+    "wedge_notice_emission_enabled": ManagedKeySpec(
+        key="wedge_notice_emission_enabled",
+        config_path="wedge_notice_emission_enabled",
+        env_var="WEDGE_NOTICE_EMISSION_ENABLED",
+        value_type="bool",
+        default=True,
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "Wedge-notice EMISSION kill-switch (S4). OFF suppresses the "
+            "wedge-notice ENQUEUE only — detection, classification, the "
+            "S1 fire, the S2 arm, the S3 park predicate, the healer and "
+            "the report lane are untouched. DEFAULT ON: the absence of "
+            "the key means notices are emitted. Takes effect on the next "
+            "watchdog tick WITHOUT a restart (the watchdog reads it per "
+            "tick — the registry key alone is void)."
+        ),
+    ),
 }
 
 

@@ -1490,6 +1490,71 @@ class DependencyBus:
         )
         return self._count_fulfillable_rows(target_instance_id, rows)
 
+    def fetch_pending_subject_for_targets_sync(
+        self, target_instance_ids: list[str]
+    ) -> dict[str, tuple[int, list[DependencyWatcher]]]:
+        """**S4 (wake-path-carrier-fix, phase 4)** — the subject read.
+
+        For each target, return ``(total_pending, unfulfillable_rows)``:
+
+        * ``total_pending`` — how many PENDING watchers target it.
+        * ``unfulfillable_rows`` — the subset that is NOT
+          ``FULFILLABLE`` (the S4_NOTICE_SUBJECT: the waits that can
+          no longer fire).
+
+        ONE batched read for the whole set: the watcher rows come from
+        a single IN-query (:meth:`DependencyWatcherRepository.
+        fetch_pending_for_targets`) and the child liveness comes from
+        ONE batched ``get_statuses`` read — no per-target N+1.
+
+        The liveness leg is the SAME fail-closed posture as
+        :meth:`count_fulfillable_pending_for_target_sync`: a missing
+        instance row, a read failure, or a null ``child_id`` counts as
+        FULFILLABLE (so an uncertainty never manufactures a subject).
+        """
+        ids = [str(i) for i in (target_instance_ids or []) if i]
+        if not ids:
+            return {}
+        rows = self._repo.fetch_pending_for_targets(ids)
+        by_target: dict[str, list[DependencyWatcher]] = {}
+        for row in rows:
+            by_target.setdefault(row.target_instance_id, []).append(row)
+        child_ids = sorted(
+            {
+                cid
+                for cid in (
+                    _watched_child_id_of(row) for row in rows
+                )
+                if isinstance(cid, str) and cid
+            }
+        )
+        try:
+            statuses = self._instance_statuses_batched(child_ids)
+        except Exception as exc:  # noqa: BLE001 — fail-CLOSED
+            logger.warning(
+                "bus fetch_pending_subject: instance-status read failed "
+                "(%s: %s) — every row counts as fulfillable (fail-closed)",
+                type(exc).__name__,
+                exc,
+                extra={"completion_delivery_path": "bus"},
+            )
+            statuses = {}
+            read_failed = True
+        else:
+            read_failed = False
+        out: dict[str, tuple[int, list[DependencyWatcher]]] = {}
+        for target, target_rows in by_target.items():
+            if read_failed:
+                unfulfillable: list[DependencyWatcher] = []
+            else:
+                unfulfillable = [
+                    row
+                    for row in target_rows
+                    if not watcher_row_is_fulfillable(row, statuses)
+                ]
+            out[target] = (len(target_rows), unfulfillable)
+        return out
+
     async def count_fulfillable_pending_for_target(
         self, target_instance_id: str
     ) -> int:

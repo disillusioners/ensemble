@@ -68,6 +68,7 @@ from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.services.waiting_children_watchdog import (
     WaitingChildrenWatchdog,
+    WEDGE_REASON_NO_LIVE_CARRIER,
 )
 
 
@@ -335,10 +336,14 @@ class TestA5WedgeNotifyWork:
         w = _build_wedge_watchdog(
             repo, manager, worker_pool=worker_pool,
         )
-        # Pre-seed the cooldown so the wedge skip applies.
-        # (DELTA 2: cooldown map — parent → monotonic instant; a
-        # fresh instant is inside the re-arm window.)
-        w._wedge_notified[parent_id] = time.monotonic()
+        # Pre-seed the episode so the wedge skip applies.
+        # S4 (wake-path-carrier-fix, phase 4): the episode map is keyed
+        # by parent and holds the REASON-CODE FINGERPRINT — the TTL is
+        # DROPPED (an episode ends on the row-check, not on a timer),
+        # so the pre-seeded value is the code set this parent's
+        # situation produces (a classic wedge: no watchers, no carrier,
+        # no non-terminal children).
+        w._wedge_notified[parent_id] = (WEDGE_REASON_NO_LIVE_CARRIER,)
 
         stats = await w.run_once()
 

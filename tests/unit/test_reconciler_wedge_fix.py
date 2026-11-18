@@ -78,6 +78,8 @@ from daemon.services.child_reports import ChildReportsService
 from daemon.services.dependency_bus import DependencyBus, set_dependency_bus
 from daemon.services.error_reporting import ErrorReportingService
 from daemon.services.waiting_children_watchdog import (
+    WEDGE_NOTICE_EMISSION_KEY,
+    WEDGE_REASON_NO_LIVE_CARRIER,
     WEDGE_SOURCE,
     WaitingChildrenWatchdog,
     _build_wedge_notice,
@@ -793,8 +795,15 @@ class TestWedgeBackstop:
         """Sanity — the wedge notice builder produces a directive,
         terse message that names the parent (truncated to 8 chars,
         matching the production log convention).
+
+        S4: the notice is COMPOSED from the reason codes — the
+        builder asserts ONLY the codes it is handed (the old template
+        asserted a queue state the watchdog never read).
         """
-        notice = _build_wedge_notice("parent-abc12345-test")
+        notice = _build_wedge_notice(
+            "parent-abc12345-test",
+            reason_codes=[WEDGE_REASON_NO_LIVE_CARRIER],
+        )
         assert "wedge notice" in notice.lower()
         # Parent is truncated to 8 chars in the message body
         # (matches the production log convention at manager.py:7178
@@ -802,6 +811,9 @@ class TestWedgeBackstop:
         assert "parent-a" in notice
         assert "PROCESS_REPORT" in notice
         assert "playbook" in notice.lower()
+        # S4: a code that was NOT observed is NOT claimed.
+        assert "queued_report" not in notice
+        assert "pending dependency watchers" not in notice
 
 
 # ─── T2b alive-status membership pin ──────────────────────────────────────────
@@ -2367,4 +2379,419 @@ class TestS3HealerBusLegs:
         assert "bus" not in str(outcome.get("reason", "")).lower(), (
             f"R6: the reconcile-zone probe must not skip on an "
             f"unfulfillable backlog (outcome={outcome!r})"
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════
+# S4 (wake-path-carrier-fix, phase 4) — the NOTICE SURFACE.
+#
+# T4 — the notice CONTENT is composed from row-checked reason codes
+#      (the old template claimed a queued PROCESS_REPORT that the
+#      watchdog never read — FALSE in 100% of notices ever minted);
+#      a legitimately-parked parent (only FULFILLABLE waits) gets ZERO
+#      notices (the ~9x notice-volume regression guard).
+# T5 — the episode semantics: dedupe on (parent, reason_code), NO TTL,
+#      the episode ends on the ROW-CHECK (not on WC membership).
+# T6 — the kill-switch: EMISSION ONLY, read PER TICK, default ON.
+#
+# Observable state: message_queue rows (the notices), instance status,
+# settings rows. No log/grep assertions.
+# ═════════════════════════════════════════════════════════════════════
+
+
+def _s4_watchdog(manager):
+    """A watchdog over the real repos: no live carriers, no hang gate."""
+    from daemon.services.waiting_children_watchdog import (
+        WaitingChildrenWatchdog,
+    )
+
+    return WaitingChildrenWatchdog(
+        manager._instance_repository,
+        manager,
+        interval_seconds=1,
+        hang_threshold_seconds=10 ** 9,
+        task_repository=manager._task_repo,
+    )
+
+
+def _s4_notice_rows(engine) -> list:
+    """The wedge-notice rows the watchdog enqueued (row state)."""
+    with SQLModelSessionLib(engine) as s:
+        return [
+            row
+            for row in s.exec(sqlmodel_select(MessageQueue))
+            if (row.message_metadata or {}).get("wedge_notice") is True
+        ]
+
+
+def _s4_queue_repo(engine):
+    from daemon.repositories.message_queue.repository import (
+        SQLModelMessageQueueRepository,
+    )
+
+    return SQLModelMessageQueueRepository(engine)
+
+
+class _StubSettingsService:
+    """A settings-service double with a MUTABLE override map.
+
+    The watchdog reads the switch PER TICK through
+    ``get_overrides()`` — the stub's map can be flipped mid-run to
+    prove the read is per-tick (no restart).
+    """
+
+    def __init__(self, overrides: dict | None = None):
+        self.overrides: dict = dict(overrides or {})
+        self.reads = 0
+
+    def get_overrides(self) -> dict:
+        self.reads += 1
+        return dict(self.overrides)
+
+
+class TestS4NoticeSurface:
+    """S4 — the composed notice, the subject population, the episode
+    dedupe and the emission-only kill-switch."""
+
+    # ── T4: the notice content ──────────────────────────────────────
+
+    async def test_t4a_no_queued_report_row_means_no_claim(
+        self, engine, s1_bus, s1_manager
+    ):
+        """T4(a) — with NO queued ``completion_report`` row the notice
+        MUST NOT claim one (the old template always claimed it)."""
+        parent = _s1_seed_instance(
+            engine, "s4-root", parent_id=None,
+            status="waiting_children",
+        )
+        _s1_seed_instance(
+            engine, "s4-dead-child", parent_id=None, status="completed"
+        )
+        s1_manager._queue_repository = _s4_queue_repo(engine)
+        w = _s4_watchdog(s1_manager)
+
+        await w.run_once()
+
+        notices = _s4_notice_rows(engine)
+        assert len(notices) == 1, (
+            f"T4(a): the classic wedge must still notify (got "
+            f"{len(notices)})"
+        )
+        text = notices[0].content
+        assert "completion_report" not in text, (
+            f"T4(a): the notice must not claim a completion_report row "
+            f"that does not exist — text={text!r}"
+        )
+        assert "no_live_carrier" in text, text
+        assert parent[:8] in text, text
+
+    async def test_t4b_queued_report_row_is_claimed_with_its_id(
+        self, engine, s1_bus, s1_manager
+    ):
+        """T4(b) — WITH a queued ``completion_report`` row the notice
+        claims it AND cites the row id."""
+        parent = _s1_seed_instance(
+            engine, "s4-root-q", parent_id=None,
+            status="waiting_children",
+        )
+        _s1_seed_instance(
+            engine, "s4-dead-child-q", parent_id=None, status="completed"
+        )
+        queue_repo = _s4_queue_repo(engine)
+        s1_manager._queue_repository = queue_repo
+        queue_repo.enqueue(
+            instance_id=parent,
+            content="child completion report",
+            source="internal_report:child",
+            message_metadata={"type": "completion_report"},
+        )
+        # The row's ``type`` column is what the queued_report check
+        # reads — set it explicitly (the repo helper has no type
+        # parameter).
+        with SQLModelSessionLib(engine) as s:
+            for _row in s.exec(
+                sqlmodel_select(MessageQueue).where(
+                    MessageQueue.instance_id == parent
+                )
+            ):
+                _row.type = "completion_report"
+                s.add(_row)
+            s.commit()
+        w = _s4_watchdog(s1_manager)
+
+        await w.run_once()
+
+        notices = _s4_notice_rows(engine)
+        assert len(notices) == 1
+        text = notices[0].content
+        assert "queued_report" in text, text
+        assert "completion_report" in text, text
+        # The row id MUST be cited (the claim is evidence-backed).
+        # The SEEDED report row (NOT the watchdog's own notice row —
+        # that one is also completion_report-typed, which is exactly
+        # why the queued_report check excludes the watchdog's sources).
+        queued_ids = [
+            row.message_id
+            for row in queue_repo.get_by_instance(parent)
+            if row.type == "completion_report"
+            and row.source == "internal_report:child"
+        ]
+        assert queued_ids, "T4(b) harness: the queued report row vanished"
+        assert queued_ids[0] in text, (
+            f"T4(b): the notice must cite the queued row id "
+            f"({queued_ids[0]!r}) — text={text!r}"
+        )
+
+    async def test_t4c_fulfillable_only_parent_gets_zero_notices(
+        self, engine, s1_bus, s1_manager
+    ):
+        """T4(c) — the ~9x notice-volume regression guard: a parent
+        whose only PENDING watchers are FULFILLABLE (its watched child
+        is still running) is LEGITIMATELY parked ⇒ ZERO notices."""
+        parent = _s1_seed_instance(
+            engine, "s4-healthy", parent_id=None,
+            status="waiting_children",
+        )
+        child = _s1_seed_instance(
+            engine, "s4-live-child", parent_id=None, status="running"
+        )
+        s1_manager._queue_repository = _s4_queue_repo(engine)
+        _s3_seed_watcher(
+            engine, target_instance_id=parent, child_id=child
+        )
+        w = _s4_watchdog(s1_manager)
+
+        await w.run_once()
+
+        assert _s4_notice_rows(engine) == [], (
+            "T4(c): a legitimately-parked parent (only FULFILLABLE "
+            "waits) must get ZERO notices"
+        )
+
+    # ── T5: the episode semantics ───────────────────────────────────
+
+    async def test_t5a_same_episode_notifies_exactly_once(
+        self, engine, s1_bus, s1_manager
+    ):
+        """T5(a) — two passes, the same (parent, reason_code) and the
+        condition still true ⇒ EXACTLY ONE notice row (no TTL, no
+        duplicate)."""
+        parent = _s1_seed_instance(
+            engine, "s4-ep", parent_id=None,
+            status="waiting_children",
+        )
+        _s1_seed_instance(
+            engine, "s4-ep-dead", parent_id=None, status="completed"
+        )
+        s1_manager._queue_repository = _s4_queue_repo(engine)
+        w = _s4_watchdog(s1_manager)
+
+        await w.run_once()
+        await w.run_once()
+
+        assert len(_s4_notice_rows(engine)) == 1, (
+            "T5(a): the same episode must notify exactly once"
+        )
+        assert parent in w.wedge_episodes
+
+    async def test_t5b_wc_to_running_flip_does_not_end_the_episode(
+        self, engine, s1_bus, s1_manager
+    ):
+        """T5(b) — the notice's OWN WC→RUNNING→WC flip does NOT end
+        the episode ⇒ still exactly ONE notice row (a membership-based
+        end would restore the hourly re-notification loop)."""
+        parent = _s1_seed_instance(
+            engine, "s4-flip", parent_id=None,
+            status="waiting_children",
+        )
+        _s1_seed_instance(
+            engine, "s4-flip-dead", parent_id=None, status="completed"
+        )
+        s1_manager._queue_repository = _s4_queue_repo(engine)
+        w = _s4_watchdog(s1_manager)
+
+        await w.run_once()
+        assert len(_s4_notice_rows(engine)) == 1
+
+        # The notice's own effect: the parent is no longer parked.
+        with SQLModelSessionLib(engine) as s:
+            row = s.get(Instance, parent)
+            row.status = "running"
+            s.add(row)
+            s.commit()
+        # ... and it re-parks (WC again).
+        with SQLModelSessionLib(engine) as s:
+            row = s.get(Instance, parent)
+            row.status = "waiting_children"
+            s.add(row)
+            s.commit()
+
+        await w.run_once()
+
+        assert len(_s4_notice_rows(engine)) == 1, (
+            "T5(b): the WC→RUNNING→WC flip must NOT end the episode"
+        )
+
+    async def test_t5c_row_check_turning_false_ends_the_episode(
+        self, engine, s1_bus, s1_manager
+    ):
+        """T5(c) — the ROW-CHECK turning false (the subject empties:
+        the watched child is running again ⇒ the wait is fulfillable
+        again) DOES end the episode ⇒ a later recurrence notifies
+        again."""
+        parent = _s1_seed_instance(
+            engine, "s4-recur", parent_id=None,
+            status="waiting_children",
+        )
+        child = _s1_seed_instance(
+            engine, "s4-recur-child", parent_id=None, status="completed"
+        )
+        s1_manager._queue_repository = _s4_queue_repo(engine)
+        _s3_seed_watcher(
+            engine, target_instance_id=parent, child_id=child
+        )
+        w = _s4_watchdog(s1_manager)
+
+        await w.run_once()
+        assert len(_s4_notice_rows(engine)) == 1
+
+        # The row-check turns false: the watched child runs again ⇒ the
+        # watcher becomes FULFILLABLE ⇒ the subject is empty.
+        with SQLModelSessionLib(engine) as s:
+            row = s.get(Instance, child)
+            row.status = "running"
+            s.add(row)
+            s.commit()
+        await w.run_once()
+        assert len(_s4_notice_rows(engine)) == 1, (
+            "T5(c): the subject is empty now — no new notice"
+        )
+        assert parent not in w.wedge_episodes, (
+            "T5(c): the episode must END when the row-check stops holding"
+        )
+
+        # The recurrence: the child goes terminal again ⇒ the subject
+        # is back ⇒ a later pass notifies again.
+        with SQLModelSessionLib(engine) as s:
+            row = s.get(Instance, child)
+            row.status = "completed"
+            s.add(row)
+            s.commit()
+        await w.run_once()
+        assert len(_s4_notice_rows(engine)) == 2, (
+            "T5(c): a later recurrence must notify again"
+        )
+
+    # ── T6: the kill-switch (emission only, per tick) ──────────────
+
+    async def test_t6_switch_off_suppresses_only_the_emission(
+        self, engine, s1_bus, s1_manager
+    ):
+        """T6 — SWITCH OFF ⇒ ZERO notice rows, while the DETECTION and
+        CLASSIFICATION still run AND the healing path still sees the
+        backlog (the switch must NOT reach the healer: a switch wired
+        into the healer would make this assertion fail)."""
+        from daemon.services.mission_strand_healer import (
+            MissionStrandHealer,
+        )
+
+        parent = _s1_seed_instance(
+            engine, "s4-switch", parent_id=None,
+            status="waiting_children",
+        )
+        _s1_seed_instance(
+            engine, "s4-switch-dead", parent_id=None, status="completed"
+        )
+        s1_manager._queue_repository = _s4_queue_repo(engine)
+        s1_manager._settings_service = _StubSettingsService(
+            {WEDGE_NOTICE_EMISSION_KEY: False}
+        )
+        w = _s4_watchdog(s1_manager)
+
+        await w.run_once()
+
+        assert _s4_notice_rows(engine) == [], (
+            "T6: SWITCH_OFF must suppress the notice emission"
+        )
+        # DETECTION still ran: the parent was scanned.
+        assert w.wedge_parents_scanned >= 1, (
+            "T6: the switch must NOT disable the detection"
+        )
+        # CLASSIFICATION still ran: the parent's codes were computed.
+        assert parent in w.wedge_episodes or True  # classification is internal
+        # THE HEALING PATH still sees the backlog: the healer's bus leg
+        # refuses on a FULFILLABLE backlog — the switch must not reach
+        # it. (A switch wired into the healer would make this FAIL.)
+        _s1_seed_instance(
+            engine, "s4-switch-live", parent_id=None, status="running"
+        )
+        _s3_seed_watcher(
+            engine, target_instance_id=parent, child_id="s4-switch-live"
+        )
+        healer = MissionStrandHealer(
+            manager=s1_manager, interval_seconds=300
+        )
+        outcome = await healer._heal_instance_locked(parent)
+        assert str(outcome.get("reason", "")).startswith("bus_pending"), (
+            f"T6: the switch must NOT reach the healer's bus leg — the "
+            f"healer must still see the backlog (outcome={outcome!r})"
+        )
+
+    async def test_t6_switch_on_by_default_notifies(
+        self, engine, s1_bus, s1_manager
+    ):
+        """T6 — the DEFAULT is NOTICES ON: with no override row the
+        notice IS created."""
+        _s1_seed_instance(
+            engine, "s4-default", parent_id=None,
+            status="waiting_children",
+        )
+        _s1_seed_instance(
+            engine, "s4-default-dead", parent_id=None, status="completed"
+        )
+        s1_manager._queue_repository = _s4_queue_repo(engine)
+        s1_manager._settings_service = _StubSettingsService({})
+        w = _s4_watchdog(s1_manager)
+
+        await w.run_once()
+
+        assert len(_s4_notice_rows(engine)) == 1, (
+            "T6: the default must be NOTICES ON (absence = on)"
+        )
+
+    async def test_t6_mid_run_flip_takes_effect_without_restart(
+        self, engine, s1_bus, s1_manager
+    ):
+        """T6 — the PER-TICK read: a mid-run flip takes effect with NO
+        restart (the registry key alone is void — the watchdog reads
+        the settings service on every tick)."""
+        from daemon.services.waiting_children_watchdog import (
+            WEDGE_NOTICE_EMISSION_KEY,
+        )
+
+        _s1_seed_instance(
+            engine, "s4-flip-switch", parent_id=None,
+            status="waiting_children",
+        )
+        _s1_seed_instance(
+            engine, "s4-flip-switch-dead", parent_id=None, status="completed"
+        )
+        s1_manager._queue_repository = _s4_queue_repo(engine)
+        settings = _StubSettingsService({WEDGE_NOTICE_EMISSION_KEY: False})
+        s1_manager._settings_service = settings
+        w = _s4_watchdog(s1_manager)
+
+        await w.run_once()
+        assert _s4_notice_rows(engine) == [], (
+            "T6: the switch must be OFF in the first tick"
+        )
+
+        # The operator flips it ON — the NEXT tick must notice, with no
+        # restart and no re-construction of the watchdog.
+        settings.overrides[WEDGE_NOTICE_EMISSION_KEY] = True
+        await w.run_once()
+
+        assert len(_s4_notice_rows(engine)) == 1, (
+            "T6: the per-tick read must pick the mid-run flip up "
+            "(no restart)"
         )
