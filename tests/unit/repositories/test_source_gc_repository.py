@@ -793,6 +793,9 @@ class TestP11BootNoBehaviorChange:
         "frontend/src/app/components/instance-list/instance-list.html",
         "frontend/src/app/components/instance-list/instance-list.scss",
         "frontend/src/app/components/instance-list/instance-list.rooms-btn.spec.ts",
+        # gc-fe-surfaces P4 (W-14): committed rooms-gate e2e spec + dedicated config.
+        "frontend/e2e/group-chat-rooms-gate.spec.ts",
+        "frontend/playwright.rooms-gate.config.ts",
         "frontend/src/app/models/index.ts",
         "frontend/src/app/models/room.model.ts",
         # P6 tidier T1 created this suite (the chatrooms describe moved
