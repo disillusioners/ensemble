@@ -33,7 +33,8 @@ import {
  *   conversation.
  * * **global lane** — `GET /api/rooms[?instance_id=…]` (gc-fe-surfaces
  *   phase 1). Its OWN requestId guard and its OWN publication signals
- *   (`globalRooms` / `globalRoomsTruncated`) so the shipped lanes stay
+ *   (`globalRooms`, `globalRoomsTruncated`, `globalRoomsLoading`,
+ *   `globalRoomsError`, `globalRoomsErrorStatus`) so the shipped lanes stay
  *   byte-identical. `global` mode is ANCHOR-LESS (the nest-wide
  *   browser); `joined` mode is ANCHORED on the row's instance and then
  *   FILTERED client-side by `member_instance_ids` — the FE only decides
@@ -183,9 +184,9 @@ export class RoomService {
       const params = new HttpParams()
         .set('instance_id', scopeInstanceId)
         .set('limit', String(ROOM_LIST_MAX_LIMIT));
-      return this.http.get<GlobalRoomListResponse>(`${RoomService.ROOMS_URL}`, { params });
+      return this.http.get<GlobalRoomListResponse>(RoomService.ROOMS_URL, { params });
     }
-    return this.http.get<GlobalRoomListResponse>(`${RoomService.ROOMS_URL}`);
+    return this.http.get<GlobalRoomListResponse>(RoomService.ROOMS_URL);
   }
 
   // ── stateful lanes (guarded) ─────────────────────────────────────────
@@ -372,7 +373,11 @@ export class RoomService {
     this.pollInFlight = false;
   }
 
-  /** Re-issue the CURRENT mode's global list (manual/periodic refresh). */
+  /**
+   * Re-issue the CURRENT mode's global list — the MANUAL refresh seam
+   * (and the spec seam). Nothing periodic calls it: the poll tick
+   * refreshes the OPEN ROOM's messages, never the list.
+   */
   refreshRooms(): void {
     this.loadGlobalRooms(this.globalRoomsMode, this.globalRoomsScope);
   }
@@ -476,10 +481,15 @@ function mergeMessagesBySeq(current: RoomMessage[], incoming: RoomMessage[]): Ro
 }
 
 /**
- * The room-read SUBJECTS — each surface owns its OWN copy set (code
+ * The room-read SUBJECTS — the copy set is resolved PER subject (code
  * review finding W1). The three lanes are DISTINCT surfaces: the
  * instance's chatrooms list, the open conversation, and the nest-wide
  * browser. A fixed 5xx constant is therefore never shared between them.
+ *
+ * The entries are NOT all distinct: `'chatrooms'` and
+ * `'global-chatrooms'` deliberately share a byte-identical `noun` and
+ * `generic` (the same surface, two list scopes) — ONLY their
+ * `serverError` constant differs.
  */
 type RoomErrorSubject = 'chatrooms' | 'messages' | 'global-chatrooms';
 

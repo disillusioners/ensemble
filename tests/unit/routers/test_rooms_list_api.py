@@ -42,7 +42,7 @@ from sqlmodel import Session
 import daemon.repositories.event.models  # noqa: F401
 import daemon.repositories.instance.models  # noqa: F401
 from daemon.repositories.instance.models import Instance
-from daemon.repositories.room.models import ChatRoom, ChatRoomMember
+from daemon.repositories.room.models import ChatRoom
 from daemon.repositories.room.service import RoomChatService
 from daemon.routers import rooms as rooms_module
 from daemon.routers.rooms import router as rooms_router
@@ -181,12 +181,19 @@ def _pin_knob_default():
         rooms_module._ALLOW_ANCHORLESS_GLOBAL_LIST = original
 
 
-def _seed_tree(engine, manager, root: str) -> None:
+def _seed_tree(engine: Engine, manager: _Manager, root: str) -> None:
     seed_instance(engine, root, None, "idle")
     manager._known.add(root)
 
 
-def _make_room(engine, svc, tree, owner, name="alpha", state="active"):
+def _make_room(
+    engine: Engine,
+    svc: RoomChatService,
+    tree: str,
+    owner: str,
+    name: str = "alpha",
+    state: str = "active",
+) -> str:
     rid = make_room(svc._repo, tree_root=tree, owner=owner, name=name)
     if state == "closed":
         with Session(engine) as s:
@@ -196,7 +203,7 @@ def _make_room(engine, svc, tree, owner, name="alpha", state="active"):
     return rid
 
 
-def _stamp_created_at(engine, rid: str, seq: int) -> None:
+def _stamp_created_at(engine: Engine, rid: str, seq: int) -> None:
     """Pin a room's ``created_at`` — the ordering key is deterministic."""
     with Session(engine) as s:
         row = s.get(ChatRoom, rid)

@@ -18,6 +18,18 @@
  *                         "content":str,"created_at":iso,"kind":str}],
  *             "next_after_seq":int|null}
  *
+ *   GET /api/rooms?instance_id=<id>&limit=<int>
+ *     → 200 {"rooms":[{"room_id":str,"name":str,"tree_root_id":str,
+ *                      "owner_instance_id":str,"state":str,
+ *                      "member_count":int,"member_instance_ids":str[],
+ *                      "last_message_at":iso|null,"last_message_seq":int|null,
+ *                      "created_at":iso}],
+ *             "truncated":bool}
+ *
+ *   The nest-wide route emits the lifecycle STATE (`"active"` /
+ *   `"closed"`) — not the `closed` boolean the instance-scoped route
+ *   emits; the boolean is DERIVED from the state (see `RoomSummary`).
+ *
  * Two invariants the FE depends on:
  *
  * 1. EXTRA FIELDS ARE TOLERATED SILENTLY. The backend may add fields to
@@ -38,7 +50,13 @@ export interface RoomSummary {
   name: string;
   /** ISO-8601 creation timestamp. */
   created_at: string;
-  /** True once the room is closed (closed rooms stay readable). */
+  /**
+   * True once the room is closed (closed rooms stay readable).
+   *
+   * For the GLOBAL row (`GET /api/rooms`) this boolean is DERIVED from
+   * that route's `state` field (`state === 'closed'`) — that route
+   * emits the lifecycle state, not this boolean.
+   */
   closed: boolean;
   /** Active member count (the owner counts). */
   member_count: number;
@@ -55,8 +73,11 @@ export interface RoomListResponse {
 
 /** A chatroom as listed by the nest-wide `GET /api/rooms` surface. */
 export interface GlobalRoomSummary extends RoomSummary {
+  /** The room's tree-root anchor (the scope the room was created in). */
   tree_root_id: string;
+  /** The instance that owns the room (the owner-ancestry anchor). */
   owner_instance_id: string;
+  /** The ACTIVE member instance ids (the room's roster). */
   member_instance_ids: string[];
 }
 
@@ -152,7 +173,7 @@ export function normalizeGlobalRoomListResponse(raw: unknown): GlobalRoomListRes
     if (!roomId) continue;
     const memberCount = asFiniteNumber(r['member_count']);
     const memberIds = Array.isArray(r['member_instance_ids'])
-      ? (r['member_instance_ids'] as unknown[]).filter((x) => typeof x === 'string') as string[]
+      ? (r['member_instance_ids'] as unknown[]).filter((x): x is string => typeof x === 'string')
       : [];
     const global: GlobalRoomSummary = {
       room_id: roomId,
@@ -217,7 +238,6 @@ export function normalizeRoomMessagesResponse(raw: unknown): RoomMessagesRespons
     next_after_seq: rec ? asFiniteNumber(rec['next_after_seq']) : null,
   };
 }
-
 
 /** Build a membership map: instance_id -> has >= 1 joined room. */
 export function buildMembershipMap(rows: GlobalRoomSummary[]): Map<string, boolean> {

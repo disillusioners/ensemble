@@ -11,8 +11,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 
 import { InstanceListComponent } from './instance-list.component';
-import { RoomDialogComponent, ROOM_DIALOG_SIZE } from '../room-dialog/room-dialog.component';
-import { RoomService } from '../../services/room.service';
+import { RoomDialogComponent } from '../room-dialog/room-dialog.component';
 import { ApiService } from '../../services/api.service';
 import { InstanceService } from '../../services/instance.service';
 import { InstancePrefsService } from '../../services/instance-prefs.service';

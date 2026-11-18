@@ -145,6 +145,11 @@ _SCOPE_READ = "instances:read"
 _ERR_INSTANCE_NOT_FOUND = "instance_not_found"
 _ERR_ROOM_NOT_FOUND = "room_not_found"
 _ERR_ROOM_SERVICE_UNAVAILABLE = "room_service_unavailable"
+_ERR_BAD_REQUEST = "bad_request"
+
+#: The room-list route's DEFAULT page size — advisory, the server clamps
+#: every request into ``[1, ROOM_LIST_MAX_LIMIT]``.
+_ROOM_LIST_DEFAULT_LIMIT = 200
 
 
 def _err(status_code: int, error: str, message: str) -> HTTPException:
@@ -254,14 +259,13 @@ async def list_instance_rooms(instance_id: str, request: Request) -> dict:
     }
 
 
-
 @router.get(
     "/rooms",
     dependencies=[scope_required(_SCOPE_READ)],
 )
 async def list_rooms(
     request: Request,
-    limit: int = Query(200),
+    limit: int = Query(_ROOM_LIST_DEFAULT_LIMIT),
     instance_id: str | None = Query(
         None,
         description=(
@@ -295,12 +299,10 @@ async def list_rooms(
     present = "instance_id" in raw_params
     raw_value = raw_params.get("instance_id") if present else None
 
-    # Server-side clamp.
-    try:
-        req_limit = int(limit)
-    except (TypeError, ValueError):
-        req_limit = 200
-    clamped_limit = max(1, min(req_limit, ROOM_LIST_MAX_LIMIT))
+    # Server-side clamp. ``limit`` is ALREADY int-coerced by FastAPI (a
+    # non-integer query value 422s before the handler runs), so a
+    # defensive re-coercion here would be dead code.
+    clamped_limit = max(1, min(limit, ROOM_LIST_MAX_LIMIT))
 
     # Present-but-empty / whitespace ⇒ 422 bad_request (malformed), in
     # BOTH knob states (presence check precedes the knob gate).
@@ -309,7 +311,7 @@ async def list_rooms(
         if stripped == "":
             raise _err(
                 422,
-                "bad_request",
+                _ERR_BAD_REQUEST,
                 "instance_id must not be empty",
             )
 
@@ -353,7 +355,7 @@ async def list_rooms(
             404,
             _ERR_INSTANCE_NOT_FOUND,
             "Instance not found",
-        )
+        ) from exc
     # descendant closure off-loop
     try:
         descendant_ids = await asyncio.to_thread(
@@ -367,10 +369,9 @@ async def list_rooms(
             exc,
         )
         descendant_ids = [anchor]
-    descendant_set = set(descendant_ids or [])
     try:
         rows, truncated = await room_service.list_readable_rooms(
-            anchor, clamped_limit, descendant_ids=descendant_set
+            anchor, clamped_limit, descendant_ids=descendant_ids
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("room list (anchored): listing failed (%r)", exc)
@@ -382,7 +383,7 @@ async def list_rooms(
     return _shape_rows(rows, truncated)
 
 
-def _shape_rows(rows, truncated):
+def _shape_rows(rows: list[dict[str, Any]], truncated: bool) -> dict[str, Any]:
     return {
         "rooms": [
             {

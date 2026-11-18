@@ -6,10 +6,22 @@ import { RoomService } from './room.service';
 /**
  * Contract spec for the P6 room read API client.
  *
- * Covers: the two GETs + their URL/param shape, the pinned response
- * shapes, extra-field tolerance, the fail-closed 404/403 paths, and the
- * increment-and-capture requestId guards on BOTH lanes (the rapid
- * instance-switch / room-switch race protection).
+ * Covers the THREE routes of the room read surface:
+ *
+ * * `GET /api/instances/{id}/rooms` — the shipped instance lane: the
+ *   URL/param shape, the pinned response shape, extra-field tolerance,
+ *   the fail-closed 404/403 paths and the increment-and-capture
+ *   requestId guard (the rapid instance-switch race protection);
+ * * `GET /api/rooms/{room_id}/messages` — the messages lane: the paging
+ *   cursor and the rapid room-switch guard;
+ * * `GET /api/rooms[?instance_id=…]` — the GLOBAL lane
+ *   (gc-fe-surfaces): the anchor-less nest-wide read, the anchored
+ *   joined read, the client-side joined filter, the `truncated`
+ *   envelope flag and the A-12 open-room presence reconciliation.
+ *
+ * Plus the POLLING lane (the 10 s tick, the hidden-tab skip, the
+ * in-flight guard, the `stale` flag) and the W-1 status-class split of
+ * the error copy — a body-less 5xx never renders the transport string.
  */
 describe('RoomService', () => {
   let service: RoomService;
@@ -311,7 +323,6 @@ describe('RoomService', () => {
     });
     expect(service.messages().map((m) => m.seq)).toEqual([1]);
   });
-
 
   // ── global lane (gc-fe-surfaces) ────────────────────────────────────
 
