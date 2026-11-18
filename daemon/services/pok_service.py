@@ -456,16 +456,16 @@ class POKService:
         active_count = self._repo.count_active(project_id)
         if active_count >= POK_ACTIVE_CAP_PER_PROJECT:
             cure = self._repo.oldest_least_verified_active(project_id)
+            cure_slug = cure.slug if cure is not None else None
             raise POKError(
                 "pok_active_cap",
                 f"project holds {active_count} active POK entries — the "
                 f"{POK_ACTIVE_CAP_PER_PROJECT}-cap refuses rather than "
                 f"evicts (terminal {POK_ACTIVE_CAP_PER_PROJECT}-cap "
-                "lockout is CURABLE: archive a "
-                "superseded fact via pok_curate)",
-                oldest_least_verified=(
-                    cure.slug if cure is not None else None
-                ),
+                "lockout is CURABLE: archive the named ACTIVE entry "
+                f"{cure_slug!r} via pok_curate, by slug — the slug "
+                "resolves to that ACTIVE row)",
+                oldest_least_verified=cure_slug,
             )
         # 8. family admission (§4.5: family max 3 active).
         family = _slug_family(slug)
