@@ -90,7 +90,7 @@ Target release v0.30.11 (tag slot re-verified free at cut time; see Bash-raises 
   untouched (commission OUT OF SCOPE).
 - ENSEMBLE_LOG_OPENAI_LEVEL is captured at import/reload time (mirrors the existing
   _CONSOLE/_FILE_LEVEL pattern) — a running daemon needs a restart to change it.
-- LIVE behavior unchanged until the Emperor's promote: live still floods openai
+- LIVE behavior unchanged until the user's promote: live still floods openai
   DEBUG and still logs the old lie until v0.30.11 is promoted.
 - git fetch on this host reports pre-existing tag clobber rejections (v0.27.5,
   v0.29.6) — local tag divergence predates this commission; not touched.

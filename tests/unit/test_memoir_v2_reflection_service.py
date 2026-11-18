@@ -401,7 +401,7 @@ def test_a_duplicate_belief_returns_the_existing_row(
         return _envelope(
             [
                 {
-                    "claim": "the Emperor is patient",
+                    "claim": "the user is patient",
                     "source_episode_ids": [episode_id],
                     "verb": "CREATE",
                     "confidence": 0.8,
@@ -416,11 +416,11 @@ def test_a_duplicate_belief_returns_the_existing_row(
 
     # The SAME claim over the SAME sources — the dedup key hits.
     duplicate = syntheses_repo.find_duplicate(
-        AGENT, "the Emperor is patient", [episode_id]
+        AGENT, "the user is patient", [episode_id]
     )
     assert duplicate is not None
     assert (
-        synthesis_dedup_key("the Emperor is patient", [episode_id])
+        synthesis_dedup_key("the user is patient", [episode_id])
         == synthesis_dedup_key(
             duplicate.claim, list(duplicate.source_episode_ids or [])
         )
@@ -721,7 +721,7 @@ def test_the_reflection_engine_always_passes_an_explicit_pass_id(
                     "mentions": [
                         {
                             "episode_id": episode_id,
-                            "name": "the Emperor",
+                            "name": "the user",
                             "star_type": "person",
                         }
                     ],
@@ -770,7 +770,7 @@ def test_a_null_pass_id_never_increments_the_mention_count(
         )
         session.commit()
 
-    star = constellation_repo.upsert_star(AGENT, "the Emperor", "person")
+    star = constellation_repo.upsert_star(AGENT, "the user", "person")
     first = constellation_repo.record_line(AGENT, star.id, episode_id, pass_id=None)
     assert first.mention_count == 1
     second = constellation_repo.record_line(AGENT, star.id, episode_id, pass_id=None)
@@ -1106,7 +1106,7 @@ def test_a_write_failure_leaves_the_episode_unmarked_for_the_next_pass(
         return _envelope(
             [
                 {
-                    "claim": "the Emperor prefers the zebra",
+                    "claim": "the user prefers the zebra",
                     "source_episode_ids": [episode_id],
                     "verb": "CREATE",
                     "confidence": 0.8,
@@ -1153,7 +1153,7 @@ def test_the_write_failure_log_states_the_qualified_idempotence(
         return _envelope(
             [
                 {
-                    "claim": "the Emperor prefers the zebra",
+                    "claim": "the user prefers the zebra",
                     "source_episode_ids": [episode_id],
                     "verb": "CREATE",
                     "confidence": 0.8,

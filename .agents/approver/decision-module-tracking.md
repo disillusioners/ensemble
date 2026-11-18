@@ -119,7 +119,7 @@ VERIFIED CLEAN (independent, from source): K1 enforce-mode shadow (judge_plan_on
 
 POSITIVE: K1 closed. The design content is substantively sound and anchor-verified by two independent workers. The remaining blockers are ONE live design sentence and the evidence artefact's own accounting.
 
-STATUS: **ESCALATED** — max iterations reached (3). Escalated to the Emperor via the Leader.
+STATUS: **ESCALATED** — max iterations reached (3). Escalated to the user via the Leader.
 
 ---
 ---
@@ -137,5 +137,5 @@ Verification evidence: the independent checker returned READY on 2026-11-09 10:1
 
 Correction to the header above: the committed set is 6 documents / 1,606 lines (the "5 docs, 1223 lines" note predates the addition of `anchor-audit.md`).
 
-Disposition: the approver certified the DESIGN CONTENT sound at iteration 003; the items it blocked on were one sentence and three evidence-instrument defects, all now repaired and independently verified. The set lands as the design of record pending Emperor ratification. Implementation remains gated on that ratification.
+Disposition: the approver certified the DESIGN CONTENT sound at iteration 003; the items it blocked on were one sentence and three evidence-instrument defects, all now repaired and independently verified. The set lands as the design of record pending user ratification. Implementation remains gated on that ratification.
 ---

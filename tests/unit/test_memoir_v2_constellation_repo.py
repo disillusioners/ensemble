@@ -79,8 +79,8 @@ def _now() -> datetime:
 
 
 def test_an_upsert_creates_the_star(repo):
-    star = repo.upsert_star("ari", "the Emperor", "person")
-    assert star.name == "the Emperor"
+    star = repo.upsert_star("ari", "the user", "person")
+    assert star.name == "the user"
     assert star.star_type == "person"
     assert star.heat == 0.0
     assert star.description == ""
@@ -89,23 +89,23 @@ def test_an_upsert_creates_the_star(repo):
 
 
 def test_an_upsert_of_the_same_name_returns_the_same_row(repo):
-    first = repo.upsert_star("ari", "the Emperor", "person")
-    second = repo.upsert_star("ari", "the Emperor", "person")
+    first = repo.upsert_star("ari", "the user", "person")
+    second = repo.upsert_star("ari", "the user", "person")
     assert second.id == first.id
 
 
 def test_two_agents_may_each_own_a_star_of_the_same_name(repo):
-    first = repo.upsert_star("ari", "the Emperor", "person")
-    second = repo.upsert_star("zoe", "the Emperor", "person")
+    first = repo.upsert_star("ari", "the user", "person")
+    second = repo.upsert_star("zoe", "the user", "person")
     assert first.id != second.id
 
 
 def test_the_last_touched_at_only_moves_forward(repo):
     old = _now() - timedelta(days=3)
-    star = repo.upsert_star("ari", "the Emperor", "person", event_at=old)
+    star = repo.upsert_star("ari", "the user", "person", event_at=old)
     # A LATE-written mention carries an OLDER event time — the timeline
     # must not rewind.
-    repo.upsert_star("ari", "the Emperor", "person", event_at=old - timedelta(days=1))
+    repo.upsert_star("ari", "the user", "person", event_at=old - timedelta(days=1))
     with Session(repo.engine) as session:
         row = session.get(type(star), star.id)
         assert coerce_to_aware_utc(row.last_touched_at) == coerce_to_aware_utc(
@@ -113,7 +113,7 @@ def test_the_last_touched_at_only_moves_forward(repo):
         )
     # A NEWER event time moves it forward.
     newer = _now()
-    repo.upsert_star("ari", "the Emperor", "person", event_at=newer)
+    repo.upsert_star("ari", "the user", "person", event_at=newer)
     with Session(repo.engine) as session:
         row = session.get(type(star), star.id)
         assert coerce_to_aware_utc(row.last_touched_at) >= coerce_to_aware_utc(newer)
@@ -122,9 +122,9 @@ def test_the_last_touched_at_only_moves_forward(repo):
 def test_the_upsert_never_rewrites_an_existing_description(repo):
     """``update_star_description`` is the SOLE writer of the description
     family — the upsert must not create a second writer for it."""
-    star = repo.upsert_star("ari", "the Emperor", "person", description="a warm figure")
+    star = repo.upsert_star("ari", "the user", "person", description="a warm figure")
     assert star.description == "a warm figure"
-    repo.upsert_star("ari", "the Emperor", "person", description="a different figure")
+    repo.upsert_star("ari", "the user", "person", description="a different figure")
     with Session(repo.engine) as session:
         row = session.get(type(star), star.id)
         assert row.description == "a warm figure"
@@ -134,16 +134,16 @@ def test_the_upsert_never_rewrites_an_existing_description(repo):
 
 
 def test_an_alias_resolves_to_its_canonical_star(repo):
-    star = repo.upsert_star("ari", "the Emperor", "person")
-    repo.add_alias("ari", star.id, "my dear")
-    resolved = repo.resolve_star("ari", "my dear")
+    star = repo.upsert_star("ari", "the user", "person")
+    repo.add_alias("ari", star.id, "the operator")
+    resolved = repo.resolve_star("ari", "the operator")
     assert resolved is not None
     assert resolved.id == star.id
 
 
 def test_the_canonical_name_resolves_to_itself(repo):
-    star = repo.upsert_star("ari", "the Emperor", "person")
-    resolved = repo.resolve_star("ari", "the Emperor")
+    star = repo.upsert_star("ari", "the user", "person")
+    resolved = repo.resolve_star("ari", "the user")
     assert resolved is not None and resolved.id == star.id
 
 
@@ -153,24 +153,24 @@ def test_an_unknown_surface_form_resolves_to_nothing(repo):
 
 def test_an_alias_collision_raises_the_unique_constraint_refusal(repo):
     """The alias table is an IDENTITY map: one alias, one star."""
-    first = repo.upsert_star("ari", "the Emperor", "person")
-    second = repo.upsert_star("ari", "the Empress", "person")
-    repo.add_alias("ari", first.id, "my dear")
+    first = repo.upsert_star("ari", "the user", "person")
+    second = repo.upsert_star("ari", "the owner", "person")
+    repo.add_alias("ari", first.id, "the operator")
     with pytest.raises(IntegrityError):
-        repo.add_alias("ari", second.id, "my dear")
+        repo.add_alias("ari", second.id, "the operator")
 
 
 def test_an_alias_of_one_agent_does_not_leak_into_another(repo):
-    star = repo.upsert_star("ari", "the Emperor", "person")
-    repo.add_alias("ari", star.id, "my dear")
-    assert repo.resolve_star("zoe", "my dear") is None
+    star = repo.upsert_star("ari", "the user", "person")
+    repo.add_alias("ari", star.id, "the operator")
+    assert repo.resolve_star("zoe", "the operator") is None
 
 
 # ── the edge and the crash-recovery guard ────────────────────────────────
 
 
 def test_a_line_is_recorded_with_a_mention_count_of_one(repo, engine):
-    star = repo.upsert_star("ari", "the Emperor", "person")
+    star = repo.upsert_star("ari", "the user", "person")
     _episode(engine, "ep1")
     line = repo.record_line("ari", star.id, "ep1", _now(), pass_id="pass-1")
     assert line.mention_count == 1
@@ -182,7 +182,7 @@ def test_a_line_is_recorded_with_a_mention_count_of_one(repo, engine):
 def test_re_recording_a_line_with_the_same_pass_leaves_the_count_unchanged(repo, engine):
     """THE CRASH-RECOVERY GUARD — a re-run of the SAME pass must not
     double-count the mention."""
-    star = repo.upsert_star("ari", "the Emperor", "person")
+    star = repo.upsert_star("ari", "the user", "person")
     _episode(engine, "ep1")
     first = repo.record_line("ari", star.id, "ep1", _now(), pass_id="pass-1")
     second = repo.record_line("ari", star.id, "ep1", _now(), pass_id="pass-1")
@@ -194,7 +194,7 @@ def test_re_recording_a_line_with_the_same_pass_leaves_the_count_unchanged(repo,
 
 
 def test_a_distinct_pass_increments_the_mention_count(repo, engine):
-    star = repo.upsert_star("ari", "the Emperor", "person")
+    star = repo.upsert_star("ari", "the user", "person")
     _episode(engine, "ep1")
     repo.record_line("ari", star.id, "ep1", _now(), pass_id="pass-1")
     second = repo.record_line("ari", star.id, "ep1", _now(), pass_id="pass-2")
@@ -203,7 +203,7 @@ def test_a_distinct_pass_increments_the_mention_count(repo, engine):
 
 
 def test_a_new_line_is_a_new_row(repo, engine):
-    star = repo.upsert_star("ari", "the Emperor", "person")
+    star = repo.upsert_star("ari", "the user", "person")
     _episode(engine, "ep1")
     _episode(engine, "ep2")
     first = repo.record_line("ari", star.id, "ep1", _now(), pass_id="pass-1")
@@ -216,7 +216,7 @@ def test_a_new_line_is_a_new_row(repo, engine):
 
 
 def test_updating_the_description_stamps_the_cooldown_watermark(repo):
-    star = repo.upsert_star("ari", "the Emperor", "person")
+    star = repo.upsert_star("ari", "the user", "person")
     stamp = _now()
     assert repo.update_star_description("ari", star.id, "a patient figure", stamp) is True
     with Session(repo.engine) as session:
@@ -234,7 +234,7 @@ def test_updating_the_description_of_an_unknown_star_is_false(repo):
 
 
 def test_the_heat_accumulator_increments(repo):
-    star = repo.upsert_star("ari", "the Emperor", "person")
+    star = repo.upsert_star("ari", "the user", "person")
     assert repo.increment_heat("ari", star.id) == 1.0
     assert repo.increment_heat("ari", star.id, 2.5) == 3.5
     with Session(repo.engine) as session:
@@ -244,7 +244,7 @@ def test_the_heat_accumulator_increments(repo):
 
 def test_the_heat_accumulator_never_goes_negative(repo):
     """The model's ``heat >= 0.0`` CHECK must never abort a write."""
-    star = repo.upsert_star("ari", "the Emperor", "person")
+    star = repo.upsert_star("ari", "the user", "person")
     repo.increment_heat("ari", star.id, 1.0)
     assert repo.increment_heat("ari", star.id, -5.0) == 0.0
 
@@ -258,14 +258,14 @@ def test_the_heat_accumulator_of_an_unknown_star_raises(repo):
 
 
 def test_the_star_card_carries_the_star_its_aliases_and_its_lines(repo, engine):
-    star = repo.upsert_star("ari", "the Emperor", "person")
-    repo.add_alias("ari", star.id, "my dear")
+    star = repo.upsert_star("ari", "the user", "person")
+    repo.add_alias("ari", star.id, "the operator")
     _episode(engine, "ep1")
     repo.record_line("ari", star.id, "ep1", _now(), pass_id="pass-1")
     card = repo.get_star_card("ari", star.id)
     assert card["star"]["id"] == star.id
-    assert card["star"]["name"] == "the Emperor"
-    assert [alias["alias"] for alias in card["aliases"]] == ["my dear"]
+    assert card["star"]["name"] == "the user"
+    assert [alias["alias"] for alias in card["aliases"]] == ["the operator"]
     assert len(card["lines"]) == 1
     assert card["lines"][0]["episode_id"] == "ep1"
 
@@ -279,8 +279,8 @@ def test_the_star_card_of_an_unknown_star_is_empty(repo):
 
 
 def test_the_one_hop_query_returns_the_connected_stars(repo, engine):
-    star = repo.upsert_star("ari", "the Emperor", "person")
-    friend = repo.upsert_star("ari", "the Empress", "person")
+    star = repo.upsert_star("ari", "the user", "person")
+    friend = repo.upsert_star("ari", "the owner", "person")
     stranger = repo.upsert_star("ari", "the Garden", "place")
     _episode(engine, "ep1")
     repo.record_line("ari", star.id, "ep1", _now(), pass_id="pass-1")

@@ -243,6 +243,6 @@ Retire the stale/shadow DB skill rows, reversibly, before F can inject. Mechanis
 # Open questions (not blocking)
 
 1. **R3 identities** — the legacy gate-runner copies must be identified by a live-DB signature query before any deactivation (`9e79ccad` is not in the Phase-0 enumeration; `76e3e1a7a` has zero repo hits). No row is deactivated until identified (plan's hard rule stands).
-2. **Receipt visibility trade-off** — `data_dir` keeps the receipt out of the repo (no secret/planning churn) but is less discoverable to operators; if the Emperor wants it in the planning dir, that is a one-line path change, but it would make each boot write into a tracked tree — recommend `data_dir`.
+2. **Receipt visibility trade-off** — `data_dir` keeps the receipt out of the repo (no secret/planning churn) but is less discoverable to operators; if the user wants it in the planning dir, that is a one-line path change, but it would make each boot write into a tracked tree — recommend `data_dir`.
 3. **Second check-site anchor** — `metrics_listener.py:419` is worker-cited; the architect re-verified `metrics_census.py:355` only. The invariant claim (exactly 2) is consistent but the listener anchor should be re-opened at implementation start.
 4. **"15 live series"** — taken from the disclosure, not re-derived; irrelevant to the polarity fix (the registry has no `skill-*` family at all).

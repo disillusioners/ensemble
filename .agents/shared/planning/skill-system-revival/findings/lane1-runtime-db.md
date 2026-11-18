@@ -271,7 +271,7 @@ linked_job_ids    = ["f0617e19-bb39-4a5b-a9bb-6fb8d790ccb3"]
 project_id        = (null)
 
 body_md:
-Commission from the Emperor (2026-11-09): skill capture is currently disabled because the
+Commission from the user (2026-11-09): skill capture is currently disabled because the
 agent handling it was broken/flaky (misreading instructions/instance messages, attempting
 forbidden file edits in project). Goal: (1) read the most recent skill capture runs if they
 still exist, (2) re-enable skill capture soon with monitoring, (3) fix abnormality, improve
@@ -432,7 +432,7 @@ The live log (`/home/nea/agents-ensemble/data/logs/ensemble.log`, 8.7 MB + 5 rot
 **OQ-4 — CLOSED: the demo environment carries no skill history, so it is NOT a live skill surface.**
 Censused `ensemble_demo` (demo daemon PID 2133): `skills`=**1**, `skill_usage_records`=**4**, `skill_triggers`=**6**, `job_queue_items`=**20**, `instances`=**6**; `job_queue_items` with a skill-related `job_type`: **0 rows**; `instances` with a skill/keeper `agent_id`: **0 rows**. → The demo environment has never run a capture or evolution job. (Its binary version was not determined.)
 
-**OQ-5 — Whether the Oct-22 keeper actually attempted project file edits.** The board record says "pause caught it pre-write" / "ZERO repo writes" (note 87) and "made ZERO repo file changes (pause caught it pre-write)" (note 83), and that `/tmp/skillfix/*` (5 files incl. a never-executed `land.py`) was preserved as evidence. I did **not** verify `/tmp/skillfix/*` (it is outside the DB; and the critical note marks it "never execute"). → *The Emperor's symptom "it tried to use tools to edit files in the project" is corroborated by the board narrative but the actual filesystem artefacts were not re-verified by this lane.*
+**OQ-5 — Whether the Oct-22 keeper actually attempted project file edits.** The board record says "pause caught it pre-write" / "ZERO repo writes" (note 87) and "made ZERO repo file changes (pause caught it pre-write)" (note 83), and that `/tmp/skillfix/*` (5 files incl. a never-executed `land.py`) was preserved as evidence. I did **not** verify `/tmp/skillfix/*` (it is outside the DB; and the critical note marks it "never execute"). → *The user's symptom "it tried to use tools to edit files in the project" is corroborated by the board narrative but the actual filesystem artefacts were not re-verified by this lane.*
 
 **OQ-6 — The 2026-10-21 "10 keeper runs / commit 660e73453" artefact.** The board note reports it (10 files, +476/−1, COMMITTED+PUSHED, user-ruled KEEP). My DB evidence independently reproduces the *job* burst (skill `20f916b3` 3× in 37.1 min, 10-job window) but **not** the commit contents — the repo checkout is 2 weeks behind and I did not run `git show 660e73453`. → *Any claim about WHAT those 10 files were requires a repo-history lane, not mine.*
 
@@ -481,7 +481,7 @@ created_at         = 2026-11-09T05:07:04.691440+00:00
 updated_at         = 2026-11-09T05:08:47.140391+00:00
 
 body_md (verbatim):
-Commission from the Emperor (2026-11-09): skill capture is currently disabled because the
+Commission from the user (2026-11-09): skill capture is currently disabled because the
 agent handling it was broken/flaky (misreading instructions/instance messages, attempting
 forbidden file edits in project). Goal: (1) read the most recent skill capture runs if they
 still exist, (2) re-enable skill capture soon with monitoring, (3) fix abnormality, improve

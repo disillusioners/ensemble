@@ -1,7 +1,7 @@
 """The ``/api/rooms/*`` HTTP room-read surface — the P6 human
 observability modal's backend (architecture §13.1, R3).
 
-The Emperor's P6 UI direction (KV ``gc_ui_refinement_p6``, verbatim):
+The user's P6 UI direction (KV ``gc_ui_refinement_p6``, verbatim):
 *"CHATROOM ICON next to the WATCHOVER button on the frontend instances
 surface. Click → BIG POPUP … showing (a) chatrooms created by that
 instance('s tree) and (b) messages in each room … Rides the SAME

@@ -289,7 +289,7 @@ def diff_roster(
 
     The diff covers the CENSUS FACTS only — the agent set, whether the
     agent declares the flag, and the effective live value.  The per-axis
-    columns are the DECISION surface (the Emperor's Phase-2 call) and
+    columns are the DECISION surface (the user's Phase-2 call) and
     are deliberately NOT diffed against the live value; see
     :func:`policy_violations` for the invariant that does constrain
     them.

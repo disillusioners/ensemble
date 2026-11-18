@@ -13,7 +13,7 @@ duplicate of the design or the code.
 
 `D3-folded-into-POK` — the parked guidelines work item is folded into
 the Project Operating Knowledge (POK) trust tier. Decision status:
-**DECIDED-mechanism-attached** (ratified by the Emperor 2026-11-07;
+**DECIDED-mechanism-attached** (ratified by the user 2026-11-07;
 the mechanism is this lane's implementation — D3 is UN-PARKED).
 
 ## Mechanism (one line)

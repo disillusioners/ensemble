@@ -16,7 +16,7 @@
 > The `PromptAssentConfig` / `ENSEMBLE_PROMPT_ASSENT_` naming in this file has been corrected to
 > the canonical spelling (architect §7 defect 1).
 
-**Commission:** "prompt-assent" — the conversational approval lane (*The Emperor's Word / Assent*).
+**Commission:** "prompt-assent" — the conversational approval lane (*The user's Word / Assent*).
 **Role of this document:** technical-analysis channel of a planning lane. It equips the architect
 and the plan-creation worker that follows. It is NOT the plan.
 
@@ -117,7 +117,7 @@ VERIFIED: TTL 300 s, `threading.Lock`, refusal vocabulary `nonce-mismatch` /
   whole file. But it is **RAM-only**: it dies with the daemon. The promote nonce is
   disk-persisted for exactly that reason (`upgrade_journal.py:1898-1899`: *"survives
   MessageQueue wipe + daemon death"*). A prompt approval is a *state change to the live
-  persona* — losing the token on a daemon restart means the Emperor re-mints. Acceptable but
+  persona* — losing the token on a daemon restart means the user re-mints. Acceptable but
   inferior.
 
 **(d) The install-journal file store** (`upgrade_journal.py:1986-1994`, `releases/state.json`).
@@ -130,7 +130,7 @@ per-row CAS for the consume). It remains acceptable as the *kill-switch / config
 ### Trade-offs that actually decide it
 
 - **Restart semantics mid-TTL.** (a) survives; (c) does not. A 60-minute token is long enough
-  that a daemon restart during the Emperor's deliberation is a *routine* event, not an edge
+  that a daemon restart during the user's deliberation is a *routine* event, not an edge
   case.
 - **Multi-daemon reality.** The project runs **multiple ensemble instances across remote VMs**
   (project metadata: `upgrade_workflow_preference`). Those are separate deployments with
@@ -186,12 +186,12 @@ factor-2 window's `expires_at` with the same constant, and `manager.py:270-272` 
 
 **Important precision — the two clocks are INDEPENDENT.** The factor-2 window is stamped when
 the **reply** message is dispatched (`manager.py:11489-11505`, the single dispatch funnel), not
-when the token is minted. So the token TTL governs "how long the Emperor has to reply", and the
+when the token is minted. So the token TTL governs "how long the user has to reply", and the
 window TTL governs "how long the reply's authorization lives". They need not be equal.
 
 **RECOMMENDATION: 60 minutes**, reusing `upgrade_journal.NONCE_TTL_S` as the SSOT (import it;
 do not declare a new constant). Matching the house value is free, coherent with ADR-036, and
-long enough for "show diff → Emperor reads → replies" without forcing a re-mint. A shorter TTL
+long enough for "show diff → the user reads → replies" without forcing a re-mint. A shorter TTL
 (15 min) increases re-mint friction; a longer TTL widens the window in which a stale token can
 be echoed.
 
@@ -202,13 +202,13 @@ token is **superseded** (invalid for use, but distinguishable from "used").
 
 **RECOMMENDATION: (iii) supersede.** Rationale: "burn" and "supersede" behave identically for
 authorization, but they mean different things in the audit and produce different refusal
-messages. A token the Emperor chose *not* to use (re-minted because it expired or because he
+messages. A token the user chose *not* to use (re-minted because it expired or because he
 asked for a fresh diff) must not read as `token-already-used` — that would make the audit say
 "he approved with it and we consumed it". Superseded tokens get their own refusal
 (`token-superseded`) and their own status.
 
-**Re-mint must re-show the diff.** The commission says Ari "shows the Emperor with the diff".
-A re-mint without the diff would present a bare token — the Emperor has no way to know what he
+**Re-mint must re-show the diff.** The commission says Ari "shows the user with the diff".
+A re-mint without the diff would present a bare token — the user has no way to know what he
 is authorising. So the mint response carries: item identity (agent / artifact / version), the
 **diff** (pending content vs effective content), the token (grouped), and the expiry. The diff
 is rendered by the **tool**, from `repo.get_effective(agent_id, version_tag, artifact)`
@@ -242,9 +242,9 @@ keeping a defence-in-depth attempt counter.
 
 **RECOMMENDATION:**
 - **Token length: 8 base32 chars (40 bits), reusing the house `mint_nonce` alphabet and
-  display shape.** It costs *nothing* operationally (Ari shows it in a code block; the Emperor
+  display shape.** It costs *nothing* operationally (Ari shows it in a code block; the user
   copies it — the promote nonce is 8 chars too and is grouped as `CONFIRM-XXXX-XXXX`), and it
-  removes the brute-force conversation from the review entirely. **If the Emperor insists on a
+  removes the brute-force conversation from the review entirely. **If the user insists on a
   short code, 6 chars is acceptable *only* with the counter + lockout below** — flagged as
   **DECISION D-3**.
 - **Per-item attempt counter**: every token mismatch on an item increments `attempts` on that
@@ -274,7 +274,7 @@ binding) and against a confused-deputy replay (handled by the CAS).
 **RECOMMENDATION: (ii)+(iii) — transition first, consume second, and prefer same-transaction.**
 
 - **Transition-then-consume** is the safe ordering: if the transition fails, the token is
-  untouched (a refusal must not destroy the Emperor's token because of a typo in the item id
+  untouched (a refusal must not destroy the user's token because of a typo in the item id
   or a transient DB error — the house rule *"refusals never burn"*). If the consume then fails,
   the worst case is a **live token on an already-decided row** — and that token is powerless,
   because the CAS rejects the re-apply. Benign.
@@ -327,7 +327,7 @@ conditions**:
 
 > **⚠ OVERRULED @ `df8da01a6` (D-2).** The architect ruled **default OFF (fail-closed)**, not
 > default ON: this is the first lane that can change a live agent's **own guardrails** through a
-> chat message, and the house's most recent Emperor-ratified posture for a novel authority surface
+> chat message, and the house's most recent user-ratified posture for a novel authority surface
 > (Decision Module P1, 2026-11-09) is *"dormant by default, nothing decides anything"*. The flip
 > to ON is one env var per environment — no code change. **ONE shared fail-closed OFF default
 > constant** is consumed by both the P2 defensive resolver and the P4 config class.
@@ -337,7 +337,7 @@ conditions**:
    so an unauthorised caller cannot probe the knob's state.
 
 **Honest counter-argument for the architect:** this lane is the first one in the tree that can
-change a live agent's *own* guardrails through a chat message. If the Emperor wants the lane
+change a live agent's *own* guardrails through a chat message. If the user wants the lane
 dormant until he has used it once, option (b) costs one env var and buys that assurance.
 **Flagged as DECISION D-2** — the commission asked for it explicitly.
 
@@ -494,8 +494,8 @@ that requires a typed `AssentAttestation`.**
 1. **The tool args can never carry the approver identity.** The tool signature accepts only
    `(version_id, action, token, user_confirmed, reject_reason)`. The *approver* is derived
    entirely from **daemon-owned** evidence: the message row (`source`, `message_metadata`) and the
-   source registry. Ari physically cannot assert "the Emperor is X" — it can only forward a
-   token that only the Emperor's turn could have produced.
+   source registry. Ari physically cannot assert "the user is X" — it can only forward a
+   token that only the user's turn could have produced.
 2. **The attestation is not constructible from arguments.** `AssentAttestation` is produced by
    the assent service **only after** the three-factor gate passes; it carries
    `{item_binding, human_message_id, human_identity, source_id, external_user_id, token_id,
@@ -634,13 +634,13 @@ CORE-only predicate `state='pending_approval' AND artifact_class='CORE'`).
 
 **(b) An ari-facing READ tool** over `repo.list_pending()` + `svc.list_pending()`, using the
 `inner_soul` plumbing (`_run_coro_sync` `:1250` + `_get_prompt_version_service` `:1273-1283`).
-No router/DB-surface change; works in-process; returns exactly the rows Ari shows the Emperor.
+No router/DB-surface change; works in-process; returns exactly the rows Ari shows the user.
 
 **(c) `shared_meta_kv` snapshot** — *"cheapest to READ, most expensive to keep TRUE"*
 (`approval-path.md:128`). The approve/reject path runs through the HTTP service, so the KV write
 hooks would have to land in `svc.approve`/`svc.reject` **and** in the repo path the tool calls
 directly — two hook sites, one of which is a service bypass. **Drift risk is real: a stale
-pending list means the Emperor approves a row that has already moved.**
+pending list means the user approves a row that has already moved.**
 
 ### RECOMMENDATION — (b), built on the repo/service primitives (a) also needs
 
@@ -648,7 +648,7 @@ pending list means the Emperor approves a row that has already moved.**
 not a route.**
 
 - The repo method is needed **regardless** — the mint step needs the item's key
-  (`agent_id`/`version_tag`/`artifact`/`version`) and the tool needs to show the Emperor what is
+  (`agent_id`/`version_tag`/`artifact`/`version`) and the tool needs to show the user what is
   pending. Clone `count_pending`'s CORE-only predicate (`:3024-3027`) and return rows ordered by
   `created_at`.
 - The **tool** beats the route for this consumer: no new public endpoint, no scope plumbing, no
@@ -678,7 +678,7 @@ not a route.**
 ### Shape: one mutator + one reader, or one tool with three actions?
 
 The commission suggests **one** tool (`prompt_assent`) that "acts on a PENDING row by id" and
-also mentions a **LIST companion** and a **mint** step (Ari "shows the Emperor with the diff",
+also mentions a **LIST companion** and a **mint** step (Ari "shows the user with the diff",
 the token is "re-mintable").
 
 **Options.**
@@ -888,9 +888,9 @@ artifact that will be copied forward next time). The research note's §4.4 list 
 | ID | Decision | Options | My recommendation |
 |---|---|---|---|
 | **D-1** | Token store | (a) new PG table · (b) columns on `prompt_versions` · (c) in-memory | **(a) new PG table** — no `_ensure_postgres_columns` entry → no boot-abort surface; survives restart; independent GC |
-| **D-2** | Kill-switch default | fail-open (default ON) · fail-closed (default OFF) | **⚠ OVERRULED @ `df8da01a6` — RULED: fail-closed (default OFF)**, read at call time, tool stays registered, `mint` refused too, gate order = ari → switch → 3-factor → mutate, indeterminate values fail closed, ONE shared default constant across P2/P4. *(The flip to ON is one env var per environment — Emperor-owned, architect §8.1.)* |
+| **D-2** | Kill-switch default | fail-open (default ON) · fail-closed (default OFF) | **⚠ OVERRULED @ `df8da01a6` — RULED: fail-closed (default OFF)**, read at call time, tool stays registered, `mint` refused too, gate order = ari → switch → 3-factor → mutate, indeterminate values fail closed, ONE shared default constant across P2/P4. *(The flip to ON is one env var per environment — user-owned, architect §8.1.)* |
 | **D-3** | Token length | 8 chars / 40 bits (house) · 6 chars / 30 bits (commission) | **8 chars** — costs nothing operationally, removes the brute-force argument. **6 acceptable only with the per-item attempt counter + lockout + a global per-instance bound** |
-| **D-4** | Single-use enforcement point | consume-on-success (separate txn) · consume inside the transition txn (requires extending `atomic_transition`) | **transition-then-consume, preferably same-transaction.** The state-machine CAS already blocks double-apply; the ordering matters only so a *refusal* never burns the Emperor's token |
+| **D-4** | Single-use enforcement point | consume-on-success (separate txn) · consume inside the transition txn (requires extending `atomic_transition`) | **transition-then-consume, preferably same-transaction.** The state-machine CAS already blocks double-apply; the ordering matters only so a *refusal* never burns the user's token |
 | **D-5** | Which chat sources are in scope, and the per-source "approving user" key | discord-only first · all registered chat types | **discord first** (the commission's "e.g. my-discord-bot"), with the user key taken from the adapter metadata (`user_id`), **not** from `external_user_id` (a guild-channel `external_user_id` is a CHANNEL) |
 | **D-6** | Extra window-freshness bound beyond the three factors | none (promote parity) · bound `stamped_at` to ≤10 min | **bound it** — the silent-resume path (`manager.py:11503`) can leave an earlier turn's window alive; this lane changes live personas |
 | **D-7** | Surface scope | classic `prompt_versions` only · both (`prompt_versions` **and** the memoir persona lane) | **Phase 1 = classic `prompt_versions` only**; the persona lane is a different table/repo/audit shape and doubles the blast radius of a trust-model change |
@@ -929,7 +929,7 @@ artifact that will be copied forward next time). The research note's §4.4 list 
    the state change (`repository.py:1493-1511`). If a future refactor moves the audit write out
    of the transaction, the relay provenance and the state change can diverge. A pin is warranted.
 10. **Ari is a confused deputy by construction.** It renders the diff and the token and relays
-    the Emperor's reply. A prompt-injected Ari could try to present a *stale* diff or a
+    the user's reply. A prompt-injected Ari could try to present a *stale* diff or a
     truncated one. Mitigation: the token is bound to the ITEM, the item's content is what the
     token row was minted against — **the plan should bind the token to a content hash of the
     pending row** so a mutated pending row invalidates the token. *(This is an addition beyond

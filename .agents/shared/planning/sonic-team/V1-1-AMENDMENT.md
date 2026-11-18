@@ -1,8 +1,8 @@
 # Sonic Team — COMBINED v1.1+v1.2 Amendment Record (2026-11-13)
 
-**Lane:** Emperor's combined amendment lane · **Worktree:** `/home/nea/ensemble-src-wt-sonic-v11` (branch `feature/sonic-team-v1-1`) · **Scope:** prompts + allow-lists + pins + harness docs ONLY — no staging, no daemon boot, no live contact, steady-team agent dirs untouched, shared `kb-writer` untouched.
+**Lane:** the user's combined amendment lane · **Worktree:** `/home/nea/ensemble-src-wt-sonic-v11` (branch `feature/sonic-team-v1-1`) · **Scope:** prompts + allow-lists + pins + harness docs ONLY — no staging, no daemon boot, no live contact, steady-team agent dirs untouched, shared `kb-writer` untouched.
 
-**Ruling:** Emperor, 2026-11-13 — v1.2 is MERGED INTO v1.1: **one release, one ceremony.** The v1.1 knowledge grant to sonic-coder is REVERSED; the new `sonic-developer` layer carries the planning explore; coders keep SOURCE exploration (RAG excluded). Binding clarification (verbatim): *"sonic coder still has explore but read file/src, not using rag tool."*
+**Ruling:** the user, 2026-11-13 — v1.2 is MERGED INTO v1.1: **one release, one ceremony.** The v1.1 knowledge grant to sonic-coder is REVERSED; the new `sonic-developer` layer carries the planning explore; coders keep SOURCE exploration (RAG excluded). Binding clarification (verbatim): *"sonic coder still has explore but read file/src, not using rag tool."*
 
 **Authoritative frozen strings:** `phase1-implementation-spec-v1.1.md` (same dir). Decision ledger: `decisions.md` §"Combined v1.1+v1.2 rework" (R1–R15).
 
@@ -68,7 +68,7 @@
 5. **FE pre-build:** frontend build before stage.sh so the FE bundle is present.
 6. **Stage:** `ENSEMBLE_UPGRADE_LIVE=1 ENSEMBLE_ROLLBACK_SAFE=1 VERSION=v0.30.1 stage.sh live` — wait for the receipt (STDOUT-only; releases/state.json journals promotes only). `rollback_safe=true source=explicit=true` + `contains_contract_phase=true` are the EXPECTED tokens (legacy-tree derive-path is unusable — standing POK).
 7. **Verify:** 4-way sha equality (release dir == dist == manifest == sidecar) + `generate_prompt_artifact_baseline.py --check --tree <release>` (baseline rides the release; expect 201) + stage-verify pack.
-8. **Promote:** the Emperor's — NOT part of this lane, NOT assumed.
+8. **Promote:** the user's — NOT part of this lane, NOT assumed.
 
 ## 6. Evidence pointers (this lane)
 
@@ -77,7 +77,7 @@
 - Anomaly duty pins: `tests/unit/test_anomaly_report_duty_prompts.py` + `test_anomaly_report_grant_pins.py` + `test_pok_grant_pins.py` — the 4 canary-rooted reds in duty_prompts are PRE-EXISTING and base-attributed (standing per the decisions ledger; `agents/canary` fenced — NOT touched, NOT regressed).
 - Baseline: before 197 → after **201** (`--check --tree` rc=0); delta = 16 reworked sonic `.md` sha updates + 4 sonic-developer row adds; zero steady-team rows moved.
 - Commits: `git log --oneline ee2b46d3b..HEAD` (this branch; targeted pathspec commits only; NO history rewrite of the landed v1.1 arc). Dry-run evidence commits on this branch: run-1 `b1d8bcf7c` · MF-1 addendum `d6fff7f1b` · re-run `a8505c39e` · V12 re-adjudication `16100e872`. Final verdict under the refined census: **V0–V14 = 15/15 PASS** (evidence-preserving re-adjudication — same transcripts, refined mapping only; no third run performed).
-- Ruling + dispatch: Emperor ruling 2026-11-13 (combined v1.1+v1.2; one release, one ceremony).
+- Ruling + dispatch: user ruling 2026-11-13 (combined v1.1+v1.2; one release, one ceremony).
 
 ## 7. Dry-run evidence record (re-run + re-adjudication, 2026-11-13)
 
@@ -101,7 +101,7 @@
 - **Migration delta:** `daemon/__init__.py` only (version string `0.30.0` → `0.30.1`); version-only, NOT a migration; `scripts/` untouched
 - **rollback_safe:** true (source=explicit)
 - **Staged at:** 2026-11-13T11:12:11Z; known_schema_gen `20261112_124200_add_snapshot_agent_space_key.sql`; contains_contract_phase true
-- **Promote:** NOT performed (Emperor-owned). Stage worktree `/home/nea/ensemble-src-wt-stage-v0301` kept.
+- **Promote:** NOT performed (user-owned). Stage worktree `/home/nea/ensemble-src-wt-stage-v0301` kept.
 
 ### FRESHNESS OVERRIDE — TAKEN (manual audit record; system journal append FAILED)
 
@@ -126,4 +126,4 @@
 - **rollback_safe:** true (source=explicit=true); **contains_contract_phase:** true (EXPECTED — legacy-migration grep, not a stop); known_schema_gen `20261112_124200_add_snapshot_agent_space_key.sql`
 - **Staged at:** 2026-11-13T13:24:39Z (manifest `staged_at`)
 - **Fence proofs:** `readlink $HOME/agents-ensemble/current` = `releases/v0.30.0` BEFORE and AFTER the stage — UNCHANGED; NO `promote.sh` invocation; NO daemon restart; `releases/state.json` last modified 12:50Z (predates the stage) — promote fields untouched; v0.30.0/v0.30.1 release dirs untouched. The `ENSEMBLE_SELF_ENV=live` marker staged into the install `.env` is the sanctioned stage act.
-- **Promote:** NOT performed (Emperor-owned). Stage worktree `/home/nea/ensemble-src-wt-stage-v0302` kept.
+- **Promote:** NOT performed (user-owned). Stage worktree `/home/nea/ensemble-src-wt-stage-v0302` kept.

@@ -111,7 +111,7 @@ def _adapter():
 
 class TestGroupDmDiscriminator:
     def test_one_to_one_dm_and_group_dm_classify_distinctly(self):
-        user = _User("112233445566", "The Emperor")
+        user = _User("112233445566", "The user")
         intruder = _User("666655554444", "The Pretender")
 
         dm = _adapter()._normalize_incoming(_message(_DMChannel(user), user))
@@ -132,7 +132,7 @@ class TestGroupDmDiscriminator:
         assert is_private_assent_channel(group_meta) is False
 
     def test_guild_channel_not_private_and_untouched(self):
-        user = _User("112233445566", "The Emperor")
+        user = _User("112233445566", "The user")
         msg = _adapter()._normalize_incoming(
             _message(_GuildChannel(), user, guild=_Guild())
         )

@@ -1,4 +1,4 @@
-"""Agent group chat room substrate — Phase 2 / P1 (Emperor-ratified design).
+"""Agent group chat room substrate — Phase 2 / P1 (user-ratified design).
 
 Three tables + sync repository + off-loop async facade:
 

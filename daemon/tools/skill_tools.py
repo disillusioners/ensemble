@@ -409,6 +409,15 @@ async def _announce_fix_dispatch_fault(
     observability.append_run_record(
         observability.build_run_record(
             stage="admission",
+            # C3 (2026-11-17): mint a run id for the faulted ATTEMPT —
+            # a dropped/recorded-after-fault admission record must
+            # never carry a silent ``run_id=None`` (the minted-record
+            # contract on ``stage="admission"`` records; see
+            # ``build_run_record``). Minted here because this is the
+            # LAST point where the attempt is still in hand — the
+            # dispatcher (which normally mints before its gates) is
+            # the component that FAULTED.
+            run_id=observability.new_run_id(),
             outcome="refused" if dropped else "admitted_after_fault",
             refusal_reason=FIX_DISPATCH_FAULT_REASON if dropped else None,
             extra={
@@ -1228,6 +1237,15 @@ Returns:
                 else:
                     lines.append(content)
             # Lineage section.
+            #
+            # D7 (2026-11-17, anomaly c24f4d39): render the keys
+            # ``SkillLineage.to_dict()`` actually emits —
+            # ``{skill_id, parent_skill_id, change_summary,
+            # content_diff, created_at}``. The renderer USED TO read
+            # ``from_skill_id`` / ``to_skill_id`` / ``relation_type``
+            # — keys that exist on NO lineage dict — so every skill
+            # with lineage rendered blank lines (fresh generations
+            # showed an empty "## Lineage" body).
             if parents or children:
                 lines.append("")
                 lines.append("## Lineage")
@@ -1236,16 +1254,19 @@ Returns:
                     lines.append("Parents:")
                     for p in parents:
                         lines.append(
-                            f"- from_skill_id={p.get('from_skill_id', '')} "
-                            f"relation_type={p.get('relation_type', '')}"
+                            f"- parent_skill_id="
+                            f"{p.get('parent_skill_id', '')} "
+                            f"change_summary="
+                            f"{p.get('change_summary', '')}"
                         )
                 if children:
                     lines.append("")
                     lines.append("Children:")
                     for c in children:
                         lines.append(
-                            f"- to_skill_id={c.get('to_skill_id', '')} "
-                            f"relation_type={c.get('relation_type', '')}"
+                            f"- skill_id={c.get('skill_id', '')} "
+                            f"change_summary="
+                            f"{c.get('change_summary', '')}"
                         )
             return "\n".join(lines)
         except Exception as e:

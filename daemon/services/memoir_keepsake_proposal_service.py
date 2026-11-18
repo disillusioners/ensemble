@@ -61,7 +61,7 @@ WHAT THIS MODULE OWNS
 
 WHAT THIS MODULE NEVER DOES
 
-* It NEVER pins (V2-D 6.3 / R2). Pinning stays the Emperor/Empress
+* It NEVER pins (V2-D 6.3 / R2). Pinning stays the actor-claim
   confirmation path through the v1 ``memoir_pin(id, reason, actor)``
   tool — the actor gate that records WHO confirmed. Proposals are never
   auto-pinned, and this module holds no reference to the pin writer.

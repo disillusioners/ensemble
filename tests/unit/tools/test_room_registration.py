@@ -73,7 +73,7 @@ TOOL_NAMES: frozenset[str] = frozenset(ROOM_TOOLS)
 #: privileged panel — it is the team lanes: the top orchestrators
 #: (ari / leader / sonic-leader), the generic warm worker lane, and
 #: the video-team pilot (producer + capturer + editor + verifier —
-#: the Emperor's designated FIRST pilot of group chat). The
+#: the user's designated FIRST pilot of group chat). The
 #: MEMBERSHIP gate in the tool bodies is the real authority: a
 #: granted agent that is not a member of the room still gets nothing.
 GRANTED_AGENTS: tuple[str, ...] = (

@@ -5,7 +5,7 @@
 - **Executor:** worker `dbc64097` (revived; same instance that ran this gate's G7/G8 PG legs). Evidence: `/tmp/sgc-sv/`. Flake ledger: **empty** — every leg first-shot.
 - **Prior gates:** functional gate NO-GO @ `7b6fa2cdf` → fix @ `fadb2dde1` → scoped re-gate **GO** (`d7fbcaf13` evidence riders on the branch) → this leg verifies the FROZEN bytes.
 
-## VERDICT: **PASS — CEREMONY-READY** (all S1–S5 legs green; the Emperor's 3-factor nonce ceremony owns the flip)
+## VERDICT: **PASS — CEREMONY-READY** (all S1–S5 legs green; the user's 3-factor nonce ceremony owns the flip)
 
 | Leg | Verdict | Evidence |
 |---|---|---|

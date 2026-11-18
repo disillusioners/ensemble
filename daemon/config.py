@@ -1599,6 +1599,13 @@ _PROACTIVE_FALSE_BOOLS: frozenset[str] = frozenset({"0", "false", "no", "off"})
 _PROACTIVE_TRUE_BOOLS: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 
 
+#: The documented default for ``compaction.compact_note_max_chars``
+#: (architect §G — the architect's cap is AUTHORITATIVE). It lives HERE,
+#: above the class, so the Field default, the resolver and the prose can
+#: all name the SAME number instead of restating it.
+DEFAULT_COMPACT_NOTE_MAX_CHARS: int = 12000
+
+
 class CompactionConfig(BaseSettings):
     """Context compaction configuration."""
 
@@ -1659,6 +1666,38 @@ class CompactionConfig(BaseSettings):
     summarization_model: str = Field(default="", description="Legacy alias for ``model``. Kept for backwards compatibility; ignored when ``model`` is set")
     min_messages_before_compaction: int = Field(default=10, description="Minimum number of messages before compaction is considered")
     summarization_chunk_threshold: float = Field(default=0.60, description="Fraction of context window above which summarization uses chunking")
+
+    # ── Compact-note lane (prompt_reload(compact, compact_note)) ──────────────
+    # The ONE knob the lane's scope fence allows (architect §G / §C SCOPE 5):
+    # ``compact_note_max_chars``. The other relevant number — the 900s
+    # deliberate-compact rate limit — is a HARDCODED module constant
+    # (``daemon/constants.py``), NOT a knob.
+    #
+    # B6 (env precedence): pydantic-settings gives INIT KWARGS priority over
+    # env vars, so a YAML value would silently defeat an operator's env
+    # override. The knob is therefore resolved EXPLICITLY in ``load_config``
+    # (env-first) — the ``_resolve_compaction_model`` / ``_resolve_proactive_enabled``
+    # pattern — and the resolved value is passed as an init kwarg so
+    # pydantic-settings does not re-read the env on the ``load_config`` path
+    # (a DIRECTLY constructed ``CompactionConfig()`` — e.g. the one in
+    # ``daemon/loader.py`` — DOES honour the env alias).
+    compact_note_max_chars: int = Field(
+        default=DEFAULT_COMPACT_NOTE_MAX_CHARS,
+        ge=1,
+        validation_alias=AliasChoices(
+            "compact_note_max_chars",
+            "COMPACTION_COMPACT_NOTE_MAX_CHARS",
+        ),
+        description=(
+            "Maximum length (characters) of a compact note accepted by "
+            "``prompt_reload(compact=True, compact_note=...)``. Default "
+            f"{DEFAULT_COMPACT_NOTE_MAX_CHARS} (architect §G — "
+            "AUTHORITATIVE). A note over the cap is REFUSED "
+            "(``prompt_reload_note_over_cap``) — NEVER silently "
+            "truncated. The boundary is INCLUSIVE. Env: "
+            "COMPACTION_COMPACT_NOTE_MAX_CHARS."
+        ),
+    )
 
     # ── Proactive-compaction kill-switch (Phase 1 of proactive-compaction-fix) ─
     # Single-source flag governing BOTH auto triggers: the pre-dispatch
@@ -2981,7 +3020,7 @@ class ServicesConfig(BaseSettings):
             "SERVICES_MISSION_STRAND_HEAL_RUNNING_ZOMBIE_BATCH_CAP."
         ),
     )
-    # source-gc (board wi-ed230eb4, Emperor directive 2026-11-07):
+    # source-gc (board wi-ed230eb4, user directive 2026-11-07):
     # knobs for ``SourcesGcService`` — the sweep that archives +
     # deletes unused terminal scheduler rows (``source_configs`` rows
     # that are ``source_type='scheduler' AND enabled=false AND status
@@ -3458,7 +3497,7 @@ class PromptAssentConfig(BaseSettings):
     lane is off ⇒ the tool refuses ``lane-disabled`` (the tool STAYS
     registered; ``mint`` is refused too). This is the first lane in the
     tree that can change a live agent's own guardrails through a chat
-    message; the house's most recent Emperor-ratified posture for a
+    message; the house's most recent user-ratified posture for a
     novel authority surface (Decision Module P1, 2026-11-09: "dormant by
     default, nothing decides anything") is exactly this shape. Arming is
     ONE env var per environment — no code change.
@@ -6438,6 +6477,17 @@ class SkillEvolutionConfig(EmbeddingConfig):
     ab_min_difference: float = Field(default=0.15)  # Loser must be at least 15% worse
     max_extensions: int = Field(default=3)
 
+    # ── D2/C2 (2026-11-17): stalled-pair inactivity timeout ──────────
+    # A pair with ``comparisons == 0`` (zero genuine injections — the
+    # counter bumps ONLY on real variant routing) older than this many
+    # days is STALLED: it can never reach ``ab_sample_size`` and never
+    # self-resolves (``check_ab_test_resolution`` returns
+    # ``needs_more_data`` before the extension bump). The sanctioned
+    # resolver (E-6 rule) may close such pairs; the age gate is the
+    # TRIGGER condition only — winner selection is by GENERATION
+    # NUMBER, never timestamps (user ruling E-6, 2026-11-17).
+    ab_stall_timeout_days: float = Field(default=7.0)
+
     # ── Multi-metric composite scoring (Milestone 2 Phase 3) ──
     # Weights for the 5-metric composite A/B winner score.
     # All weights should sum to 1.0.
@@ -7974,6 +8024,64 @@ def _resolve_proactive_enabled(
     return bool(yaml_value)
 
 
+# ── Compact-note lane resolver (prompt_reload(compact, compact_note)) ──────────
+#
+# B6 (the lane's env-precedence disclosure): pydantic-settings gives INIT
+# KWARGS priority over env vars. ``load_config`` passes the YAML section
+# through as init kwargs, so a YAML ``compaction.compact_note_max_chars:``
+# would silently defeat an operator's env override. The knob is therefore
+# resolved EXPLICITLY, ENV-FIRST, and the resolved value is handed back as
+# an init kwarg.
+
+
+def _resolve_compact_note_max_chars(
+    yaml_value: Any,
+    *,
+    env_value: str | None,
+) -> int:
+    """Pure resolver for ``compaction.compact_note_max_chars``.
+
+    Precedence (documented contract):
+
+      1. ``COMPACTION_COMPACT_NOTE_MAX_CHARS`` (the env name) — when SET
+         and NON-EMPTY (empty/whitespace treated as UNSET, per
+         :func:`_clean_env_value` shell-style ``:-`` semantics), wins
+         outright.
+      2. ``yaml_value`` (``compaction.compact_note_max_chars``) — when the
+         env is unset/empty and the yaml value is a positive int.
+      3. Default ``12000`` (the architect's authoritative cap).
+
+    A malformed env value falls back to the yaml/default rather than
+    bricking boot — the note cap is an admission bound, not a
+    correctness invariant, and a daemon that refuses to boot over a
+    mistyped cap is a worse failure than a wrong cap (which only
+    changes a refusal boundary).
+    """
+    env_clean = _clean_env_value(env_value)
+    if env_clean is not None:
+        try:
+            parsed = int(env_clean)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid COMPACTION_COMPACT_NOTE_MAX_CHARS value %r — "
+                "expected an integer; falling back to the yaml/default "
+                "value.",
+                env_value,
+            )
+        else:
+            if parsed >= 1:
+                return parsed
+            logger.warning(
+                "Invalid COMPACTION_COMPACT_NOTE_MAX_CHARS value %r — "
+                "must be >= 1; falling back to the yaml/default value.",
+                env_value,
+            )
+    if isinstance(yaml_value, int) and not isinstance(yaml_value, bool):
+        if yaml_value >= 1:
+            return yaml_value
+    return DEFAULT_COMPACT_NOTE_MAX_CHARS
+
+
 # ── service-tool knobs (Phase 1 of service-tool) ────────────────────────────
 #
 # Resolved-once cache (restart-to-flip; Shape-A precedent —
@@ -8898,6 +9006,17 @@ def load_config(config_path: str | None = None) -> Config:
         compaction_config.get("proactive_enabled"),
         ens_value=os.environ.get("ENSEMBLE_PROACTIVE_COMPACTION"),
         cpe_value=os.environ.get("COMPACTION_PROACTIVE_ENABLED"),
+    )
+    # Compact-note lane (prompt_reload(compact, compact_note)) — explicit
+    # resolution for the lane knob, mirroring the resolvers above. The
+    # init-kwarg-beats-env inversion would otherwise let a YAML
+    # ``compaction.compact_note_max_chars`` defeat an operator's env
+    # override. The resolved value is handed back as an init kwarg;
+    # pydantic-settings never re-reads the env itself. See
+    # ``_resolve_compact_note_max_chars`` for the contract.
+    compaction_config["compact_note_max_chars"] = _resolve_compact_note_max_chars(
+        compaction_config.get("compact_note_max_chars"),
+        env_value=os.environ.get("COMPACTION_COMPACT_NOTE_MAX_CHARS"),
     )
     # kv-ambient C2 (kv-ambient-awareness-fix) — explicit resolution
     # for ``context_messages.kv_ambient_system_default_enabled``

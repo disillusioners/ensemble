@@ -1,6 +1,6 @@
 # Scope & Doctrine — Ensemble Decision Module (Thin Client + Seam Registry)
 
-> **Status:** **RATIFIED P1 SHADOW-ONLY — Emperor ratification 2026-11-09: "yeah, look good, go ahead, shadow only for now".** Design of record. P1 implementation authorised (client + registry + shadow instrumentation); seams 2/3/4 unregistered; S4 shadow-only. (The leader's giter commits at finalize.)
+> **Status:** **RATIFIED P1 SHADOW-ONLY — user ratification 2026-11-09: "yeah, look good, go ahead, shadow only for now".** Design of record. P1 implementation authorised (client + registry + shadow instrumentation); seams 2/3/4 unregistered; S4 shadow-only. (The leader's giter commits at finalize.)
 > **Base:** branch `docs/decision-module` @ `5da1021f2` · Worktree `/home/nea/ensemble-src-wt-decision-module-design`
 > **Role in this set:** **NORMATIVE ANCHOR.** This file is the single source of the doctrine, the exclusion list, the census, the proxy surface digest, and the infra precedents. Every other document in this set cites **this file by §id** and never re-quotes it.
 
@@ -22,7 +22,7 @@ Scope items covered by this set:
 | 6 | Phasing | `controls-and-phasing.md` |
 | 7 | Rejected alternatives | `architecture-recommendation.md` |
 
-Everything below is the **design of record, ratified P1 SHADOW-ONLY**. The doctrine, exclusion list, census, proxy surface digest, and infra precedents stand as ratified; P1 implementation (client + registry + shadow instrumentation) is authorised. Emperor ratification of any further transition (shadow → deciding) gates later phases.
+Everything below is the **design of record, ratified P1 SHADOW-ONLY**. The doctrine, exclusion list, census, proxy surface digest, and infra precedents stand as ratified; P1 implementation (client + registry + shadow instrumentation) is authorised. user ratification of any further transition (shadow → deciding) gates later phases.
 
 ### §0.1 Citation map (how the set cites this file)
 
@@ -71,7 +71,7 @@ Everything below is the **design of record, ratified P1 SHADOW-ONLY**. The doctr
 
 > **Bonus:** heuristic-underneath = permanent shadow-logging A/B baseline (log Jev choice next to heuristic choice per seam before letting Jev win).
 
-**Design reading (this set):** the heuristic runs first and always; the overlay's answer is logged **next to** the heuristic's answer for the same input. **No seam may move from shadow to deciding until its shadow window has been reviewed and the Emperor has ratified the transition.** Shadow logging is permanent infrastructure, not a temporary scaffold — it survives promotion to deciding.
+**Design reading (this set):** the heuristic runs first and always; the overlay's answer is logged **next to** the heuristic's answer for the same input. **No seam may move from shadow to deciding until its shadow window has been reviewed and the user has ratified the transition.** Shadow logging is permanent infrastructure, not a temporary scaffold — it survives promotion to deciding.
 
 ---
 
@@ -114,7 +114,7 @@ Stable ids for citation elsewhere in this set: **EX-1** retry classification · 
 The list is **closed by default**. Extending it is a doctrine change, not an implementation detail.
 
 1. **CAUSE (required).** An extension request must state, in writing: the decision site and its anchor; why the site was believed eligible (i.e. which part of the "exact/deterministic" judgement changed); and what makes the new site *not* exact/deterministic. A request without a cause is not reviewable and is refused.
-2. **APPROVER (required).** The standing list originates in a **user-ratified** doctrine (`2026-09-26`). Only the **Emperor (the user)** may approve an extension. The architect, the planner, and the reviewer lanes may recommend; they may not approve.
+2. **APPROVER (required).** The standing list originates in a **user-ratified** doctrine (`2026-09-26`). Only the **user (the user)** may approve an extension. The architect, the planner, and the reviewer lanes may recommend; they may not approve.
 3. **Registration-time enforcement.** The seam registry enforces this list **at registration time** — a registration naming an EX-1…EX-5 role is refused before any call path exists. The deny-list is *referenced* by §id in `seam-registry.md`, never re-quoted there.
 4. **Downstream re-verification.** The anchors above are **v0.15.0-era** (the source document's own header states they are exact only for that commit). Before any future commission touches an excluded seam, its anchors must be re-verified at the target HEAD and a corrections table published (house convention: `decisions.md` D6 pattern — `.agents/shared/planning/promote-handback-halt/decisions.md`) — never silently patched.
 

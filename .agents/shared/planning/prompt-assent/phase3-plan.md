@@ -128,7 +128,7 @@ pending row, and **no token burn**.
 - The provenance chain is **reconstructable** from the ledger: token ↔ item ↔ message ↔ human ↔
   relay agent ↔ time.
 - The audit payload carries **`render_sha256`** — the hash of the **exact canonical render bytes**
-  the Emperor was shown — so the shown-bytes guarantee is auditable after the fact.
+  the user was shown — so the shown-bytes guarantee is auditable after the fact.
 - The **raw token appears nowhere** in durable state — grep the token table and the audit ledger
   after a mint→approve cycle; only `sha256(token)[:12]` fingerprints.
 - The FE path still works: the same row type can still be approved by the session lane.

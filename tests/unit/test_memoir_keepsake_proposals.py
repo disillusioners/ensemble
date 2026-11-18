@@ -1783,7 +1783,7 @@ class TestReflectionPassIntegration:
 
 class TestNoPinAuthority:
     def test_the_module_holds_no_pin_writer_reference(self):
-        """V2-D 6.3 / R2 — pinning is the Emperor/Empress path only.
+        """V2-D 6.3 / R2 — pinning is the user/owner path only.
 
         The AST census (docstrings legitimately NAME the forbidden
         symbols; the pin is about REFERENCES) asserts the service never

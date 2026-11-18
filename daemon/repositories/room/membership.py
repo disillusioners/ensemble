@@ -2,7 +2,7 @@
 
 Phase-2 of the agent group chat lane (design:
 ``.agents/shared/planning/group-chat/architecture-recommendation.md``
-§2/§6/§9 — Emperor-ratified 2026-11-15, the spec of record). This module
+§2/§6/§9 — user-ratified 2026-11-15, the spec of record). This module
 owns the THREE P2 membership primitives:
 
 1. ``validate_room_join`` — THE pinned spawn-time admission predicate

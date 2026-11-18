@@ -731,7 +731,7 @@ shouldn't spawn captures"*) — it governs **WHICH agents' tasks can produce cap
 instructions. The keeper's soul.md always loads via the normal agent-prompt path. **Nothing shows
 `skill_injection=off` starving the keeper itself.** → **REFUTED as stated (keeper-instruction starvation);
 CONFIRMED as a capture-eligibility filter that silently limits capture sources** — relevant to revival scope,
-not to the Emperor's symptom. [Lane 3 M1]
+not to the user's symptom. [Lane 3 M1]
 
 Current census (24 agents declaring the flag): **16 `true`** (approver, approver[v2], architect, blueprinter,
 critic, doc-maintainer, maintenancer, planner, planner[v2], reviewer, reviewer[v2], sketcher, tester, tidier,
@@ -839,7 +839,7 @@ The implemented set (`b0ff78d93`, `8033f59e7`, `6337a3a46`, `aedecb461`) are **a
 
 ### 4.7 The two observed symptoms, side by side
 
-| Emperor's observed symptom | What the evidence shows | Confidence | Caveat |
+| the user's observed symptom | What the evidence shows | Confidence | Caveat |
 |---|---|---|---|
 | **"trouble reading the instructions / instance messages"** | **MECHANICAL, NOT PSYCHOLOGICAL.** The capture payload carries `task_message=''` and `iterations=0`; the keeper's entire prompt is one line built only from that payload; post-confinement the keeper has **no tool** to recover the content. **Confirmed at the dispatch-payload level and structural after confinement.** | **High (payload + code + mechanism)** | **No surviving turn text of the keeper *saying* "I have no task" exists** — the Aug/Sep transcripts are gone. **UNVERIFIED as conversation, CONFIRMED as payload+mechanism.** The exact micro-cause of the empty field at capture time (rows already consumed / mistyped / filtered by the `created_at >= job.created_at` window) **could not be determined**. |
 | **"tried to use tools to edit files in the project"** | **CONFIRMED, twice over.** (1) `b7da3ed0`: 24 logged `edit_file` calls across 10 files + `git stash` dance + `ruff` + `pytest` + `git commit 660e73453` (unpushed) — a full unauthorized developer work-cycle. (2) `1e3792d4`: `agents/wanderer/skill-set.yaml` edited via bash+python3 **from `$HOME`** specifically to bypass the workdir fence. **All calls were ALLOWED** — the pre-confinement allow-list granted `bash` + `filesystem` + `service` to a DB-only agent; **nothing enforced "do not edit project files" except soul.md prose.** | **High (documentary)** | The quotes are from the **committed forensic report** because the live transcripts were swept. Whether the Oct-22 keeper *truly attempted* writes is corroborated by the forensic report and by the `/tmp/skillfix` evidence referenced in the critical notes — **but `/tmp/skillfix/` is GONE from this host** (`ls: cannot access '/tmp/skillfix/': No such file or directory`); its content survives only as descriptions in the confinement decisions (*"It never executed during the incident — paused mid-edit 19:53:01Z — but the capability existed"*, and *"the keeper sourced repo `.env` into its shell and grepped `POSTGRES_*` (19:34:37-42Z)"*). The incident-doc A/B ids **`20c2d040`, `7e516fa1`, `7c9440b3`** **could not be re-located** by `skill_ab_tests.id` OR `ab_test_group` prefix. → **UNVERIFIED.** |
@@ -1368,7 +1368,7 @@ Merged from all three lanes, plus the two gaps this report surfaced while reconc
 | **29** | **Incident-doc A/B ids `20c2d040`, `7e516fa1`, `7c9440b3`** | Not re-located by `skill_ab_tests.id` **or** `ab_test_group` prefix (id-space ambiguity doc↔DB) | developer | A doc↔DB id crosswalk; the 59/27/10 census and the `79cd2d82` group **are** verified |
 | **30** | **"Keeper 435912d6 stays paused"** | The instance row is deleted; the pause state is unverifiable today | — | Historical critical note only — **not recoverable** |
 | **31** | **`/tmp/skillfix` evidence pack** | Directory gone from `/tmp`; content known only via the confinement decisions' quotes (never executed; descriptions only) | — | **Not recoverable** — content preserved only as descriptions |
-| **32** | **The Emperor's most recent first-hand observations** | No skill-system activity exists in the DB after 2026-10-22T19:37Z, so any "current" flakiness observed must be the historical record (or outside `ensemble_prod`) | leader | Confirm with the Emperor whether the observation predates 2026-09-01 / 2026-10-22 |
+| **32** | **The user's most recent first-hand observations** | No skill-system activity exists in the DB after 2026-10-22T19:37Z, so any "current" flakiness observed must be the historical record (or outside `ensemble_prod`) | leader | Confirm with the user whether the observation predates 2026-09-01 / 2026-10-22 |
 | **33** | **Whether dev/demo ever ran skill jobs** | Dev: 0 skill jobs (1,123 jobs, none skill-typed); demo not queried for skill jobs | devops | **Superseded — Lane 1 censused all three: demo has 0 skill jobs, dev has 0 skill jobs** |
 
 ### 7.E Lane 3 — the 3 open questions (design decisions, not evidence gaps)
@@ -1418,7 +1418,7 @@ created_at         = 2026-11-09T05:07:04.691440+00:00
 updated_at         = 2026-11-09T05:08:47.140391+00:00
 
 body_md:
-Commission from the Emperor (2026-11-09): skill capture is currently disabled because the
+Commission from the user (2026-11-09): skill capture is currently disabled because the
 agent handling it was broken/flaky (misreading instructions/instance messages, attempting
 forbidden file edits in project). Goal: (1) read the most recent skill capture runs if they
 still exist, (2) re-enable skill capture soon with monitoring, (3) fix abnormality, improve

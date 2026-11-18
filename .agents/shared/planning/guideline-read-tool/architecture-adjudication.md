@@ -1,7 +1,7 @@
 # Architecture Adjudication: guideline-read-tool — Q1–Q4 verdicts + sanity rulings
 
 Date: 2026-11-13T19:05Z
-Adjudicator: architect (Emperor's process, diagnosis-of-seam mandate)
+Adjudicator: architect (the user's process, diagnosis-of-seam mandate)
 Base: worktree `/home/nea/ensemble-src-wt-guideline-read-tool` @ `eb85d99a7` (branch `feature/guideline-read-tool`, clean)
 Evidence: two independent read-only verification legs dispatched against this tree —
 (A) release-pipeline mechanics (stage/manifest/floor/integrity/consumers), (B) runtime-resolution + privileged-gate mechanics.
@@ -66,7 +66,7 @@ assert "no guidelines exist" when the truth is "payload not present in this rele
 undiagnosable). A live release predating the payload therefore boots and registers cleanly; the tools
 refuse with the typed token. This also covers future-binary-on-old-release-dir shapes (manual/partial installs).
 
-**Emperor's invariant check:** LIVE runtime never reads repo paths — enforced BY THE FORK: the repo path
+**the user's invariant check:** LIVE runtime never reads repo paths — enforced BY THE FORK: the repo path
 is computable only in the non-frozen branch; a frozen binary cannot reach it. The invariant needs no
 additional guardrail.
 
@@ -146,7 +146,7 @@ branch; no unconditional fallback; no except-path that falls back to repo paths 
 
 ---
 
-## Q4 — KILL-SWITCH: NO — BINDING (recorded per the Emperor's pre-ruling)
+## Q4 — KILL-SWITCH: NO — BINDING (recorded per the user's pre-ruling)
 
 No kill-switch. Rationale: (i) pure read surface — no writes, no ledger, no external effects; DR-3-spirit
 switches protect surfaces with side effects (the notify-user knob protects a SEND surface; there is

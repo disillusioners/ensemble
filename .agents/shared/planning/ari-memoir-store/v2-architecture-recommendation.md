@@ -251,7 +251,7 @@ Implementation: ONE shared `_classify_numeric` helper in `daemon/config.py` cons
 
 ## §6 — Decisions Pending
 
-None blocking implementation — every ruling above is Level-4 authority. ONE visibility flag, non-blocking: the importance ruling (§3-A2) supersedes a Level-5 storage detail of the blessed V2-10 capability (score lands in `poignancy`, not by overwriting `importance`). It preserves the blessed capability semantically through the COALESCE consumer; if the Emperor specifically wants the LLM score to *visibly replace* ari's declared importance, that is a Level-2 preference that would require a deliberate DD-8 amendment — the leader may surface it at the next checkpoint.
+None blocking implementation — every ruling above is Level-4 authority. ONE visibility flag, non-blocking: the importance ruling (§3-A2) supersedes a Level-5 storage detail of the blessed V2-10 capability (score lands in `poignancy`, not by overwriting `importance`). It preserves the blessed capability semantically through the COALESCE consumer; if the user specifically wants the LLM score to *visibly replace* ari's declared importance, that is a Level-2 preference that would require a deliberate DD-8 amendment — the leader may surface it at the next checkpoint.
 
 ---
 

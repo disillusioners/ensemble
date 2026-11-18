@@ -285,7 +285,10 @@ stub message instead of raising.
     @register_tool_category("skill-evolution")
     @tool
     async def skill_evolve(
-        skill_id: str, evolution_type: str, direction: str
+        skill_id: str,
+        evolution_type: str,
+        direction: str,
+        corrective: bool = False,
     ) -> str:
         """Run a Tier 3 evolution pass on a skill.
 
@@ -295,6 +298,11 @@ stub message instead of raising.
         original; ``DERIVED`` creates a specialized sibling; ``CAPTURED``
         wraps ``direction`` + the skill into a task-details dict and
         runs the capture flow.
+
+        D2a (2026-11-17): ``corrective=True`` (FIX only) is the
+        SANCTIONED CORRECTIVE path for a verified-defective A/B pair
+        member — fix-first-then-resolve (E-6). Without it, FIX on an
+        ``ab_testing`` target is still refused.
         """
         # A14 (P7): file-backed skills never enter evolution machinery.
         if is_pf_address(skill_id or ""):
@@ -317,6 +325,7 @@ stub message instead of raising.
             skill_id,
             evolution_type,
             direction,
+            corrective=corrective,
         )
 
     skill_evolve._full_doc_ = """\
@@ -355,13 +364,25 @@ proposed diff.
 
     @register_tool_category("skill-evolution")
     @tool
-    async def skill_resolve_ab(ab_test_group: str) -> str:
+    async def skill_resolve_ab(
+        ab_test_group: str,
+        basis: str = "",
+        defective_arm_id: str = "",
+        reason: str = "",
+    ) -> str:
         """Resolve an in-flight skill A/B test group.
 
         Delegates to ``SkillEvolutionService.check_ab_test_resolution(
         ab_test_group)``. Inspects the persisted test row + per-variant
         stats and decides whether to resolve, extend, or wait for more
         data.
+
+        D2/C2/C1 (2026-11-17): with ``basis="stalled"`` or
+        ``basis="defective_arm"`` the call routes to the SANCTIONED
+        resolver (``resolve_ab_test_sanctioned``) — the E-6 winner
+        rule for zero-traffic stalled pairs, or the retirement of a
+        VERIFIED-defective arm (``defective_arm_id`` + ``reason``
+        required). Never fires on traffic-bearing pairs.
         """
         # B2 fix round 1 (D3): this path is a SECOND inline mutation
         # path and it was UNGATED. The reviewer drove it with the lane
@@ -374,6 +395,32 @@ proposed diff.
         lane_reason = _evolution_lane_refusal_reason(manager)
         if lane_reason is not None:
             return _lane_refusal(lane_reason)
+
+        if basis in ("stalled", "defective_arm"):
+            kwargs = {}
+            if defective_arm_id:
+                kwargs["defective_arm_id"] = defective_arm_id
+            if reason:
+                kwargs["reason"] = reason
+            else:
+                return json.dumps(
+                    {
+                        "error": (
+                            "sanctioned resolution (basis="
+                            f"{basis!r}) requires a reason — "
+                            "auditable provenance"
+                        )
+                    },
+                    indent=2,
+                )
+            return await _invoke_service(
+                manager,
+                "_skill_evolution_service",
+                "resolve_ab_test_sanctioned",
+                ab_test_group,
+                basis=basis,
+                **kwargs,
+            )
 
         return await _invoke_service(
             manager,
@@ -535,11 +582,16 @@ the returned payload is a JSON metrics document.
             # C2 tools-lane seam (observability completion): count and record
             # the capture-lane-off ADMISSION refusal before building the envelope.
             # Never raises into the tool lane.
+            # C3 (2026-11-17): mint the run id BEFORE the gate so the
+            # refused-admission record never carries a silent
+            # ``run_id=None`` (minted-before-the-gate contract, same as
+            # the dispatcher's ``enqueue_capture``).
             try:
                 observability.record_capture_lane_disabled_refusal(
                     agent_id=agent_id,
                     task_message=task_message,
                     prompt_source="skill_execute_capture",
+                    run_id=observability.new_run_id(),
                 )
             except Exception as exc:  # pragma: no cover — tool lane containment
                 logger.warning(

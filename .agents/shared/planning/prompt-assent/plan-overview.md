@@ -1,4 +1,4 @@
-# Plan Overview: prompt-assent — the conversational approval lane (*The Emperor's Word / Assent*)
+# Plan Overview: prompt-assent — the conversational approval lane (*The user's Word / Assent*)
 
 | Field | Value |
 |---|---|
@@ -21,7 +21,7 @@
 
 ## Objective
 
-**An approval said out loud in chat is a first-class approval: the Emperor's word, relayed by Ari
+**An approval said out loud in chat is a first-class approval: the user's word, relayed by Ari
 with verifiable provenance, approves or rejects a PENDING prompt-version row exactly as the FE
 session lane does — and the ledger can afterwards reconstruct who approved, from where, in which
 message, on which item, at what time.**
@@ -36,7 +36,7 @@ non-user-origin turn) refuses with a typed code and no state change.*
 
 ## The Doctrine
 
-> **FE-UI is a deeper view; the working path is conversation. The Emperor's word, relayed by C2 with provenance, is a first-class approval lane.**
+> **FE-UI is a deeper view; the working path is conversation. The user's word, relayed by C2 with provenance, is a first-class approval lane.**
 
 Full text and its three binding consequences: [`doctrine.md`](doctrine.md).
 
@@ -68,7 +68,7 @@ The doctrine is the **north star**, and three clauses drive the entire shape of 
 | **S-9** | The **kill-switch** `ENSEMBLE_PROMPT_ASSENT_ENABLED` (class **`PromptAssentConfig`**), read at call time; the tool stays registered; **`mint` is refused too** when off; **default OFF (fail-closed)**; **ONE shared default constant** consumed by both the P2 resolver and the P4 class | BLESSED-6; **D-2 RULED — default OFF @ `df8da01a6`** |
 | **S-10** | The **ari-EXACTLY registration** (category + `agents/ari/meta.json` allow entry + in-body `agent_id` gate) and the **complete pin set** | BLESSED-1; the SAME-PR rule (`daemon/tools/_tool_registry.py:366-417`) |
 | **S-11** | The **full test matrix** (happy path + five mandated refusals + the token-store + registration proofs) | BLESSED-6; house testing conventions |
-| **S-12** | A **STAGED RELEASE** (no live promote) | The ceremony belongs to the Emperor |
+| **S-12** | A **STAGED RELEASE** (no live promote) | The ceremony belongs to the user |
 
 ### Out of Scope
 
@@ -79,7 +79,7 @@ The doctrine is the **north star**, and three clauses drive the entire shape of 
 | **O-3** | **A new public HTTP endpoint** for the relay or the pending list | The only consumer is Ari, in-process. An HTTP surface would add scope plumbing, a public attack surface, and AuthContext-forgery temptation (D-8 option (b), rejected) |
 | **O-4** | **Changing `approve()` / `reject()` / `atomic_transition`'s existing semantics** | F4 and the FE contract must hold unchanged. The lane gets a **separate** entrypoint |
 | **O-5** | **Forking `classify_user_origin`** or deriving chat types from source-id prefixes | BLESSED-2 — the trust anchor is single-sourced. The classifier's chat set is deliberately **not** `constants.CHAT_SOURCE_PREFIXES` (`daemon/tools/upgrade_journal.py:4089-4093`) — do not dedup the two |
-| **O-6** | **A live promote / ceremony** | House rule: **STAGED RELEASE ONLY** from this lane. The ceremony belongs to the Emperor |
+| **O-6** | **A live promote / ceremony** | House rule: **STAGED RELEASE ONLY** from this lane. The ceremony belongs to the user |
 | **O-7** | **Executing** the E2E acceptance step | The artifact write path is **human-session-only** by design (`daemon/tools/prompt_artifacts.py` `check_write`). It is a **planned** acceptance step (see Acceptance E2E below) |
 | **O-8** | **Chat sources beyond the D-5 ruling** | Source scope is an architect decision (D-5), not a planning assumption |
 | **O-9** | **Docker** | House rule — native only, no Docker on this host |
@@ -225,14 +225,14 @@ shape, and it is **human-session-only** — which is why it is a natural accepta
 lane whose entire purpose is to make human approval reachable from chat.
 
 **The planned acceptance step (to be executed AFTER the staged release is promoted by the
-Emperor's ceremony — NOT in this lane, NOT in the developer lane):**
+the user's ceremony — NOT in this lane, NOT in the developer lane):**
 
 | # | Step | Expected observation |
 |---|---|---|
 | **E2E-0** | **⚠ ARMING STEP (O-C) — the lane must be ARMED before any other E2E step, or every subsequent step is vacuous.** Because D-2 was **RULED default OFF**, an unarmed environment refuses every call with `lane-disabled` — and an unarmed E2E would "pass" for the wrong reason. Set `ENSEMBLE_PROMPT_ASSENT_ENABLED=1` in the environment under test and **restart the daemon** (the switch is read at call time from the process env) | The lane is armed: a call now proceeds past the kill-switch to the ari gate and the factor gates. **An unarmed E2E is treated as NOT RUN, not as passed** — the E2E report must state the armed/unarmed state explicitly |
 | **E2E-1** | A PENDING `prompt_versions` row exists for `agents/ari/tools_note.md` (the T3.5 re-stamp candidate), in state `pending_approval`, CORE class | The row is visible to `repo.list_pending()` |
-| **E2E-2** | Ari calls `prompt_assent(action="mint", version_id=<that row>)` **inside a live, fresh factor-2 user-origin window** (the mint gate, K-2 — a mint without one is refused `no-user-origin-turn` and writes **no** token row) | The response carries the item identity, the **canonical diff** (pending content vs effective content, rendered by the **one shared helper** — the effective side **is** included), the **token** (grouped), the expiry, **and `render_sha256`** — the sha256 of the **exact canonical render bytes** shown to the Emperor. The mint context (`source_id`, `channel_id`, `is_dm`, `user_id`) is derived **daemon-side from the window's message row**, never from tool args; a mint outside a **1:1 DM** is refused `mint-requires-private-channel` |
-| **E2E-3** | Ari shows the Emperor the diff + token in chat; the Emperor replies with the token **verbatim** in that message's content | The reply's `source` classifies as user-origin; the window is stamped for Ari's instance |
+| **E2E-2** | Ari calls `prompt_assent(action="mint", version_id=<that row>)` **inside a live, fresh factor-2 user-origin window** (the mint gate, K-2 — a mint without one is refused `no-user-origin-turn` and writes **no** token row) | The response carries the item identity, the **canonical diff** (pending content vs effective content, rendered by the **one shared helper** — the effective side **is** included), the **token** (grouped), the expiry, **and `render_sha256`** — the sha256 of the **exact canonical render bytes** shown to the user. The mint context (`source_id`, `channel_id`, `is_dm`, `user_id`) is derived **daemon-side from the window's message row**, never from tool args; a mint outside a **1:1 DM** is refused `mint-requires-private-channel` |
+| **E2E-3** | Ari shows the user the diff + token in chat; the user replies with the token **verbatim** in that message's content | The reply's `source` classifies as user-origin; the window is stamped for Ari's instance |
 | **E2E-4** | Ari calls `prompt_assent(action="approve", version_id=<that row>, token=<echoed>, user_confirmed=True)` **in that same turn** | The row transitions to `approved`; one `prompt_audit_events` row is written with the full relay provenance |
 | **E2E-5** | Read the ledger back | The event's payload carries approving user (`discord:<user_id>` — the **nested** `metadata["discord"]["user_id"]`), source, approving **message id** (daemon **and** platform-side), relay agent `ari`, timestamp, `token_fingerprint`, and **`render_sha256`** — and **no raw token** anywhere |
 | **E2E-6** | The effective prompt for `agents/ari/tools_note.md` now reflects the approved content | `repo.get_effective` returns the newly approved content |
@@ -266,7 +266,7 @@ step itself.
 | **H-1** | **Every new SQLModel table requires its own `*.sql` in `daemon/migrations/versions/` — zero exceptions.** The migration directory currently holds **127** `*.sql` files (observed at `0efdf106f`); the new token table makes it 128 | **P1** — the new `prompt_assent_tokens` table gets `YYYYMMDD_HHMMSS_create_prompt_assent_tokens.sql`, UP first / DOWN last, every statement idempotent (`IF NOT EXISTS` / `IF EXISTS`), index names **byte-identical** to the SQLModel `__table_args__` (parity test: `tests/migration/test_prompt_versions_index_parity.py`) |
 | **H-2** | **The new table rides the `create_all` seam (`daemon/api.py:1142-1143`) and thereby AVOIDS the `_ensure_postgres_columns` one-transaction boot-abort surface (`daemon/manager.py:10036-10038`).** Both facts are stated deliberately: the new-table rule is what keeps this lane off the boot-abort path | **P1** — a missed import at the seam = **no table on PG** = every token INSERT fails (the "N1 REQUIRED seam" note at `daemon/api.py:1142-1143`). A brand-new table needs **no** `_ensure_postgres_columns` mirror. If anyone later adds a **column** to an existing table for this lane, they re-open the boot-abort surface — treat that as a release-gate event |
 | **H-3** | **No Docker — native only** | Every phase |
-| **H-4** | **STAGED RELEASE ONLY — no live promote from this lane. The ceremony belongs to the Emperor** | **P4** — deliver a staged release + runbook; stop there |
+| **H-4** | **STAGED RELEASE ONLY — no live promote from this lane. The ceremony belongs to the user** | **P4** — deliver a staged release + runbook; stop there |
 | **H-5** | **Kill-switch env knob** (`ENSEMBLE_PROMPT_ASSENT_ENABLED`, class **`PromptAssentConfig`**); read at call time; the tool stays registered; **`mint` refused too**; **indeterminate values fail CLOSED**; **default OFF (fail-closed) — RULED @ `df8da01a6`**; **ONE shared default constant** consumed by both the P2 resolver and the P4 class (the prior "resolver off / class on" split is a **defect under either default**) | **P4** (config class + the shared constant) + **P2** (call-time read) |
 | **H-6** | **Net-new tests = FAILED-list diff vs a TRUE pre-fix base, same commands.** A test already failing before the change does not count as a new red | **P4** |
 | **H-7** | **Env scrub PER-VARIABLE.** `env -u POSTGRES_*` is a **silent NO-OP** (bash does not glob env names) — scrub one by one: `env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT <cmd>` | Every test phase |
@@ -304,7 +304,7 @@ Full register with mitigations and structural pins: [`risks.md`](risks.md).
 > **⚠ STATUS UPDATE — reconciliation pass 1 (`df8da01a6`):** the architect has **RULED** on all
 > nine decisions and all three judgement calls. The rows below now carry the ruling; the
 > **overrule-cost** column records what the architect accepted as the price of that ruling.
-> **The only items still open are Emperor-owned** (architect §8): the kill-switch default flip
+> **The only items still open are user-owned** (architect §8): the kill-switch default flip
 > timing, guild-channel approval, and the persona surface (D-7) — none of which blocks the
 > developer lane.
 
@@ -313,9 +313,9 @@ Full register with mitigations and structural pins: [`risks.md`](risks.md).
 | # | Decision | Options | **Recommendation** | Cost of overruling |
 |---|---|---|---|---|
 | **D-1** | Token store persistence | (a) new PG table · (b) columns on `prompt_versions` · (c) in-memory | **(a) new PG table `prompt_assent_tokens`** — no `_ensure_postgres_columns` entry ⇒ **no boot-abort surface**; survives restart; independent GC; correct if two daemons ever share a PG | (b) puts a mint write on the hottest prompt table and re-opens the one-transaction boot-abort surface (`daemon/manager.py:10036-10038`); (c) loses tokens across a routine daemon restart inside a 60-minute window |
-| **D-2** | Kill-switch default | fail-open (default ON) · fail-closed (default OFF) | **RULED — default OFF (fail-closed) @ `df8da01a6`** — the architect **OVERRULED** the planner's fail-open recommendation. Read at call time; the tool stays registered; **`mint` refused too**; the switch sits **behind** the ari gate; indeterminate values **fail closed**; **ONE shared default constant** consumed by both the P2 resolver and the P4 class. Rationale of record: first lane that can change a live agent's **own guardrails** through a chat message; the house's most recent Emperor-ratified posture for a novel authority surface (Decision Module P1, 2026-11-09) is *"dormant by default, nothing decides anything"*; the FE lane covers approvals meanwhile | **Ruled — no longer open.** Flipping to ON is **one env var per environment**, no code change (architect §8 decision 1; Emperor-owned, non-blocking for the developer lane) |
+| **D-2** | Kill-switch default | fail-open (default ON) · fail-closed (default OFF) | **RULED — default OFF (fail-closed) @ `df8da01a6`** — the architect **OVERRULED** the planner's fail-open recommendation. Read at call time; the tool stays registered; **`mint` refused too**; the switch sits **behind** the ari gate; indeterminate values **fail closed**; **ONE shared default constant** consumed by both the P2 resolver and the P4 class. Rationale of record: first lane that can change a live agent's **own guardrails** through a chat message; the house's most recent user-ratified posture for a novel authority surface (Decision Module P1, 2026-11-09) is *"dormant by default, nothing decides anything"*; the FE lane covers approvals meanwhile | **Ruled — no longer open.** Flipping to ON is **one env var per environment**, no code change (architect §8 decision 1; user-owned, non-blocking for the developer lane) |
 | **D-3** | Token length | 8 chars / 40 bits (house) · 6 chars / 30 bits (commission) | **RULED — 8 chars / 40 bits** @ `df8da01a6` (the commission's ~6-char is **rejected**); echo matching reuses `nonce_in_content` **verbatim** (`daemon/tools/upgrade_journal.py:231-246`) with `nonce_normalize` semantics — **no new regex**. **D-3b (K-9): the hourly per-relay-instance bound has a ruled mechanism** — an **in-RAM** counter keyed by relay `instance_id`, owned by **P2** (tool gate), configurable via `PromptAssentConfig.hourly_mismatch_budget` (default **10**), exhaustion → `mismatch-budget-exceeded`. In-RAM is deliberate: per-process defence-in-depth, **not a trust decision**; the **durable** leg is the PG per-token `attempts` + lockout | **Ruled.** Disclosed limitation: **multi-daemon deployments do not share the RAM budget** (per-instance by design) — the only ledgered residual in the set |
-| **D-4** | Single-use enforcement point | consume-on-success (separate txn) · consume inside the transition txn | **transition-then-consume, preferably same-transaction** — the state-machine CAS already blocks double-apply; the ordering exists so a *refusal* never burns the Emperor's token | Consume-then-transition burns the token on a non-decision. Same-transaction requires extending a **core** method (`atomic_transition`) — an architect call |
+| **D-4** | Single-use enforcement point | consume-on-success (separate txn) · consume inside the transition txn | **transition-then-consume, preferably same-transaction** — the state-machine CAS already blocks double-apply; the ordering exists so a *refusal* never burns the user's token | Consume-then-transition burns the token on a non-decision. Same-transaction requires extending a **core** method (`atomic_transition`) — an architect call |
 | **D-5** | Which chat sources, and the per-source "approving user" key | discord-first · all registered chat types | **discord first**, with the user key taken from the adapter metadata `user_id` — **not** from `external_user_id` (a guild-channel `external_user_id` is a **CHANNEL**) | A broader source set requires explicit per-source extraction rules; an implicit extraction is a correctness bug waiting to happen |
 | **D-6** | Extra window-freshness bound | none (promote parity) · bound `stamped_at` to ≤10 min | **bound it** — the silent-resume path (`daemon/manager.py:11503`) can leave an earlier turn's window alive; this lane changes live personas | Promote parity would accept a 60-minute-old window — looser than we want for a persona-changing lane |
 | **D-7** | Surface scope | classic `prompt_versions` only · both | **classic `prompt_versions` only (Phase 1)**; the persona lane is a different table/repo/audit shape and doubles the blast radius of a trust-model change | "Both" requires a second ledger for the persona surface (persona rows write **no** `prompt_audit_events`) — **not covered by this plan** |

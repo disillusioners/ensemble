@@ -100,7 +100,8 @@ POK_SLUG_MAX_CHARS = 44
 #: derived per-entry render ceiling (§4.5 bounded arithmetic).
 POK_ENTRY_RENDER_MAX_CHARS = 332
 #: refuse-never-evict active cap — PER PROJECT, not per audience.
-POK_ACTIVE_CAP_PER_PROJECT = 256
+#: Raised to the current value by the 2026-11-17 storage-cap directive.
+POK_ACTIVE_CAP_PER_PROJECT = 512
 #: pin admission cap — PER PROJECT (pins render in every audience view
 #: that can see the entry).
 POK_PIN_CAP_PER_PROJECT = 2
@@ -357,7 +358,7 @@ class POKService:
                 "pok_audience_invalid",
                 "audience must be one of "
                 f"{POK_AUDIENCES} (stated at capture, default "
-                f"{POK_DEFAULT_AUDIENCE!r} — Emperor ruling ER-1)",
+                f"{POK_DEFAULT_AUDIENCE!r} — user ruling ER-1)",
             )
         # 2.5 trust-tier statement (Phase 2 — addendum T-1): vocabulary
         # check, then the AUTHORITY gate. The gate fires BEFORE any
@@ -407,7 +408,12 @@ class POKService:
                 "post-escape per W5)",
             )
         # 5. exact-dup / supersede / laundering on the active slug.
-        prior = self._repo.get_by_slug(project_id, slug, status="active")
+        # The write path's prior is the ACTIVE row ONLY (scope
+        # "active"): an ARCHIVED row is terminal (archived is
+        # forward-only — superseding it would resurrect it) and a
+        # SUPERSEDED row is an ancestor. Same resolver as the curation
+        # path, one explicit scope apart.
+        prior = self._repo.resolve_slug_row(project_id, slug, scope="active")
         if prior is not None:
             if normalize_body(prior.body) == normalize_body(body):
                 # Exact-dup no-op echo (Phase-1 behavior): the tier
@@ -450,16 +456,16 @@ class POKService:
         active_count = self._repo.count_active(project_id)
         if active_count >= POK_ACTIVE_CAP_PER_PROJECT:
             cure = self._repo.oldest_least_verified_active(project_id)
+            cure_slug = cure.slug if cure is not None else None
             raise POKError(
                 "pok_active_cap",
                 f"project holds {active_count} active POK entries — the "
                 f"{POK_ACTIVE_CAP_PER_PROJECT}-cap refuses rather than "
                 f"evicts (terminal {POK_ACTIVE_CAP_PER_PROJECT}-cap "
-                "lockout is CURABLE: archive a "
-                "superseded fact via pok_curate)",
-                oldest_least_verified=(
-                    cure.slug if cure is not None else None
-                ),
+                "lockout is CURABLE: archive the named ACTIVE entry "
+                f"{cure_slug!r} via pok_curate, by slug — the slug "
+                "resolves to that ACTIVE row)",
+                oldest_least_verified=cure_slug,
             )
         # 8. family admission (§4.5: family max 3 active).
         family = _slug_family(slug)
@@ -860,8 +866,25 @@ class POKService:
                 "(omitted leaves the tier unchanged — trust-tier "
                 "addendum T-3)",
             )
-        row = self._repo.get_by_slug(project_id, slug, status=None)
-        if row is None or row.status == "superseded":
+        # THE row that OWNS this slug (deterministic, plan-independent).
+        # The lookup this replaces was an UNFILTERED single-row fetch
+        # whose row was chosen by the DATABASE PLAN: with a lineage
+        # present (a superseded ancestor and its active successor share
+        # one slug) PostgreSQL returned the ROOT ancestor, whose status
+        # is 'superseded' → the refusal below fired on EVERY
+        # successor-generation row ("pok_not_found" on rows that
+        # pok_query reports as active). The resolver picks the owner by
+        # status precedence (active > archived > superseded).
+        row = self._repo.resolve_slug_row(project_id, slug, scope="owner")
+        if row is None:
+            raise POKError(
+                "pok_not_found",
+                f"no entry {slug!r} on this project",
+            )
+        if row.status == "superseded":
+            # Every superseded row has a successor by construction, so
+            # this is only reachable when the head of the chain is
+            # gone — the dead ancestor is never curated directly.
             raise POKError(
                 "pok_not_found",
                 f"no active/archived entry {slug!r} on this project "

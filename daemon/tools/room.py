@@ -1,8 +1,8 @@
 """Agent-facing room tools — the ``room`` category (5 tools).
 
-Agent group chat, Phase 2 / P5 (Emperor-ratified design, 2026-11-15 —
+Agent group chat, Phase 2 / P5 (user-ratified design, 2026-11-15 —
 ``.agents/shared/planning/group-chat/architecture-recommendation.md``,
-the spec of record). The tool surface the Emperor's requirement named:
+the spec of record). The tool surface the user's requirement named:
 *"When joined, a new tool + guidelines for working with the team (send
 milestone reports, changes to the chatroom via toolcall, ...) are
 injected into the instance's SYSTEM MESSAGE."*
@@ -220,7 +220,7 @@ def _is_authorized(agent_id: str) -> bool:
     name in an allow list bypasses the category gate).
 
     The room audience is NOT a fixed agent list — it is whoever the
-    Emperor's team lanes are. The gate is therefore structural, not
+    user's team lanes are. The gate is therefore structural, not
     name-based: the caller must present a NON-EMPTY agent id. The
     AUTHORITY that actually matters is the MEMBERSHIP gate in each
     body (an authorized agent that is not a member of the room still

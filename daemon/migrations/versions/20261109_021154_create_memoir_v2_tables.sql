@@ -12,7 +12,7 @@
 --     ``last_touched_at``), the heat accumulator and the 24h
 --     summarization cooldown watermark (``description_as_of``).
 --   * ``memoir_star_alias``      — alternative surface forms resolved
---     to a canonical star ("the Emperor" -> the Emperor node).
+--     to a canonical star ("the user" -> the user node).
 --   * ``memoir_line``            — the weighted co-occurrence EDGES
 --     between a star and an episode, carrying the ``last_pass_id``
 --     crash-recovery guard (SF2 / V2-29).

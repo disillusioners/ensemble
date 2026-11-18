@@ -16,7 +16,7 @@
 ## 1. Objective
 
 > **SCOPE FENCE: NO live promotion, NO arming, NO live-install mutation in this lane — staging
-> only; the ceremony is a separate, post-lane Emperor act.**
+> only; the ceremony is a separate, post-lane user act.**
 
 **Extend the conversational assent lane from "only a 1:1 DM counts" to "a 1:1 DM **or** an
 operator-designated Discord channel pinned to one human counts" — without weakening a single
@@ -24,9 +24,9 @@ hardening: the three conjunctive factors, the live factor-2 window, the TTL'd si
 the `render_sha256` binding, the append-only provenance, the default-OFF kill-switch and the
 DM path's behaviour all stay exactly as they are in staged v0.29.18.**
 
-One sentence that marks this feature complete: *the Emperor mints in his real working channel —
+One sentence that marks this feature complete: *the user mints in his real working channel —
 a Discord server channel the operator designated and pinned to him — ari relays the diff and the
-token, the Emperor's echoed word approves it, and the ledger reconstructs the whole chain (who,
+token, the user's echoed word approves it, and the ledger reconstructs the whole chain (who,
 from where, in which message, on which item, at what time) while a stranger in the same room,
 a group DM, an undesignated channel and a broken configuration each refuse with their own typed
 code and leave no trace.*
@@ -50,7 +50,7 @@ This is the **first tracked record** of the ruling anywhere in the repository �
 v0.29.18 ceremony notes carry **no** designated-channels mention.
 
 **The parent lane's doctrine is inherited unchanged** — *"FE-UI is a deeper view; the working path
-is conversation. The Emperor's word, relayed by C2 with provenance, is a first-class approval
+is conversation. The user's word, relayed by C2 with provenance, is a first-class approval
 lane."* Phase 1.5 adds a **surface** to the conversational path; it changes **no** FE byte, and
 it adds **no** new way to approve without a human turn.
 
@@ -82,8 +82,8 @@ it adds **no** new way to approve without a human turn.
 | **O-4** | **Any schema change** — no new table, no new column, no new migration, no `daemon/api.py` touch | D-5 — the ledger already proves the designated-channel mint |
 | **O-5** | **The `artifact_class` gate** (`daemon/tools/prompt_assent.py:1681-1686` — the earlier `:1685-1692` was stale) — CORE rows only | unchanged; **Q-3 RULED: unchanged** (architect §7) |
 | **O-6** | **More than one approver per channel** | BLESSED-1 — "exactly ONE pinned approver per designated channel"; the map shape makes it unrepresentable (Q-2) |
-| **O-7** | **Thread inheritance** (a thread inside a designated channel) | D-9 — exact channel-id match only; the Emperor may name a thread's own id explicitly (Q-1) |
-| **O-8** | **A live promote, a ceremony, or arming the lane** | house rule — staging only; arming is a separate post-promote Emperor decision |
+| **O-7** | **Thread inheritance** (a thread inside a designated channel) | D-9 — exact channel-id match only; the user may name a thread's own id explicitly (Q-1) |
+| **O-8** | **A live promote, a ceremony, or arming the lane** | house rule — staging only; arming is a separate post-promote user decision |
 | **O-9** | **Executing the T3.5 re-stamp** (`agents/ari/tools_note.md`) | the artifact write path is human-session-only (`daemon/tools/prompt_artifacts.py`); it is an acceptance **subject**, not a lane deliverable |
 | **O-10** | **A DB-tier or HTTP-tier designation write surface** | D-3 — the DB settings tier is **agent-writable** (`daemon/tools/settings_tools.py:483` + `agents/ari/meta.json:37`) |
 | **O-11** | **Touching the parent plan set** (`../prompt-assent/*.md`) | **D-1** — the parent's ruling lineage stays intact. **⚠ AMENDED @ the architect's §11 row 10:** the **runbook** is **THIS lane's** file (F-11, Phase 4 writes it) and the **planning-side ceremony notes** are **THIS lane's** new file (F-13); only the **release-dir** ceremony notes belong to the build lane |
@@ -222,9 +222,9 @@ The full register is [`risks.md`](risks.md). The **top five** for this lane:
 |---|---|---|---|
 | **R-1** | **The designation map is agent-settable.** The DB settings tier is agent-writable, so the map must not live there. The residual is the **bash → `.env` → restart** path | **CRITICAL** — unvetted channel expansion by the minting agent | **D-3** (**RULED**: ENV stands) · **D-15** (**LEADER-RULED**: accept with controls — the effective-map log line (FIRST-resolution + on-digest-change, **D-20**), the map digest in the mint provenance, the rewritten residual). **The residual is *accepted*, not closed**: the restart is **provenance-gated, not operator-gated**, and `.env` is mode 600 **owner `nea` group `nea`** (mode 600 does not separate uids). The standing mitigation: even a malicious map cannot mint without the **pinned human's** turn |
 | **R-2** | **A group DM or an undesignated channel slips through** because the predicate was extended carelessly — and **the ordering is convention, not code shape**: every existing pin is **outcome-only** and stays green under a map-first ordering while a group DM mints | **HIGH** — the multi-occupant boundary is the lane's core protection | **ONE classification function** owns the leg ordering (architect §4.4); **M-15** pins the previously unpinnable shape (a group DM whose channel id IS in a valid map) **with a counter-mutation**; the runtime resolver-raises pin proves `INVARIANT-DM` by execution; **M-9/M-11** cover the invalid-map orderings |
-| **R-3** | **The new codes burn the durable counter** — as originally specified, the 4f site records **unconditionally** (`daemon/tools/prompt_assent.py:2021`), so **five** approve-side new-code refusals would **revoke the Emperor's live token** (threshold 5) | **HIGH** — an availability DoS *and* a token-revocation bug | **The 4f split** (matrix §1.3) — the mismatch-class branch keeps the recording; the two new codes refuse **before** it; the three genuine mismatch sites are untouched. **Phase 2 owns the edit (T2.5)** |
+| **R-3** | **The new codes burn the durable counter** — as originally specified, the 4f site records **unconditionally** (`daemon/tools/prompt_assent.py:2021`), so **five** approve-side new-code refusals would **revoke the user's live token** (threshold 5) | **HIGH** — an availability DoS *and* a token-revocation bug | **The 4f split** (matrix §1.3) — the mismatch-class branch keeps the recording; the two new codes refuse **before** it; the three genuine mismatch sites are untouched. **Phase 2 owns the edit (T2.5)** |
 | **R-20** | **The token + the full prompt diff are posted into a multi-occupant room**, and a bystander's relayed token is the **real** token ⇒ a lockout DoS on the legitimate approver | **HIGH** — disclosure + a DoS | **LEADER RULING 1** (**D-14**): **accept-and-record**, with the delivery mode an **explicit, overridable default** flagged in the ceremony notes; the probe's hygiene rules (single-occupant channel, consume before reuse, never paste a token) |
-| **R-21** | **NT-5 — last-speaker-wins**: a bystander's reply between the Emperor's turn and the tool call re-points the window ⇒ the Emperor's attempt refuses `approver-not-pinned` | **MEDIUM** — a cheap continuous DoS | fail-closed; the runbook's **last-speaker rule**; probe legs 3/5 carry the discriminator; per-user-window hardening is a **follow-up, out of scope** |
+| **R-21** | **NT-5 — last-speaker-wins**: a bystander's reply between the user's turn and the tool call re-points the window ⇒ the user's attempt refuses `approver-not-pinned` | **MEDIUM** — a cheap continuous DoS | fail-closed; the runbook's **last-speaker rule**; probe legs 3/5 carry the discriminator; per-user-window hardening is a **follow-up, out of scope** |
 
 ---
 
@@ -305,7 +305,7 @@ Measurable and verifiable — each is checkable without a judgement call.
 
 ### ACC-1 — The real workflow (BLESSED-5)
 
-**A mint in the Emperor's designated channel, approved by his echoed word, with full provenance.**
+**A mint in the user's designated channel, approved by his echoed word, with full provenance.**
 
 The ledger must reconstruct: *the pinned approver's user id · the designated channel id ·
 `mint_is_dm=0` · the message id of the approving turn · the item (`version_id`) · the render
@@ -315,7 +315,7 @@ hash · the relay agent · the timestamps* — and **never** the raw token.
 
 The **6-leg** probe in `decisions.md` **D-11** — legs 1-2 unchanged (DM, group DM), legs 3, 4A, 4, 5 new
 (designated channel, non-designated channel, non-pinned user). **All six outcomes are recorded
-before the lane is relied upon.** **Arming remains a separate post-promote Emperor decision.**
+before the lane is relied upon.** **Arming remains a separate post-promote user decision.**
 
 ### ACC-3 — The owed T3.5 re-stamp
 

@@ -100,7 +100,7 @@ class DecisionStage(str, Enum):
     """The per-seam stage key's two values (``seam-registry.md`` §3.4).
 
     ``shadow`` logs the A/B row and never acts (the safe default, the
-    only one compatible with D3). ``deciding`` is the Emperor-ratified
+    only one compatible with D3). ``deciding`` is the user-ratified
     stage — unreachable in P1 (the registry refuses the transition).
     """
 

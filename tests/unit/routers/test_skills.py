@@ -22,6 +22,7 @@ Coverage groups
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -760,6 +761,87 @@ class TestABTest:
         )
         response = client.post("/api/skills/missing/ab-test/resolve")
         assert response.status_code == 404
+
+
+class TestSanctionedResolveRefusals:
+    """GAP-6: the surfaced sanctioned-resolution refusals (REST 400).
+
+    Both refusals are non-member ids driven through the REAL router →
+    REAL ``SkillStaleDeactivator`` path with mocked repositories:
+    the HTTP surface must never resolve a pair on a variant that is
+    not one of its two members.
+    """
+
+    @staticmethod
+    def _wire(env: dict[str, Any]) -> MagicMock:
+        evolution = env["evolution"]
+        evolution.get_skill_metrics = AsyncMock(
+            return_value={
+                "skill_id": "skill-a",
+                "found": True,
+                "skill": _skill_dict("skill-a"),
+                "stats": {},
+                "usage_recent_count": 0,
+                "ab_test": {"ab_test_group": "group-sanctioned"},
+            }
+        )
+        test_row = SimpleNamespace(
+            skill_id_old="skill-a",
+            skill_id_new="skill-b",
+            resolved_at=None,
+        )
+        evolution._ab_test_repo = MagicMock()
+        evolution._ab_test_repo.get_by_group = MagicMock(
+            return_value=test_row
+        )
+        evolution._skill_repo = MagicMock()
+        return evolution
+
+    def test_sanctioned_winner_not_a_variant_returns_400(
+        self, skill_app_with_mock_services
+    ):
+        """A winner id OUTSIDE the pair ⇒ ``PairResolutionRefused(
+        "skipped_winner_not_a_variant")`` surfaced as HTTP 400.
+
+        Mutation bar: remove the deactivator's variant guard ⇒ the
+        pair resolves (200) ⇒ RED.
+        """
+        client = skill_app_with_mock_services["client"]
+        self._wire(skill_app_with_mock_services)
+        response = client.post(
+            "/api/skills/skill-a/ab-test/resolve",
+            params={
+                "sanctioned": "true",
+                "winner_id": "skill-outsider",
+                "reason": "operator decision",
+            },
+        )
+        assert response.status_code == 400
+        error = response.json()["detail"]["error"]
+        assert "skipped_winner_not_a_variant" in error
+
+    def test_sanctioned_defective_arm_not_a_variant_returns_400(
+        self, skill_app_with_mock_services
+    ):
+        """A ``defective_arm_id`` OUTSIDE the pair ⇒ HTTP 400 with the
+        explicit router message.
+
+        Mutation bar: remove the router's defective-arm variant guard
+        ⇒ the OTHER variant is crowned (200) ⇒ RED.
+        """
+        client = skill_app_with_mock_services["client"]
+        self._wire(skill_app_with_mock_services)
+        response = client.post(
+            "/api/skills/skill-a/ab-test/resolve",
+            params={
+                "sanctioned": "true",
+                "defective_arm_id": "skill-outsider",
+                "reason": "operator decision",
+            },
+        )
+        assert response.status_code == 400
+        error = response.json()["detail"]["error"]
+        assert "defective_arm_id is not a variant" in error
 
 
 class TestShare:
@@ -1555,3 +1637,226 @@ def _sink_sandbox(tmp_path, request):
         observability.reset_counters()
         observability.set_anomaly_reporter(None)
         lane_test_end(request.node.nodeid, before)
+
+
+# ---------------------------------------------------------------------------
+# C1 (2026-11-17) — sanctioned explicit-winner mode on the resolve route
+# ---------------------------------------------------------------------------
+
+
+class TestSanctionedResolveRoute:
+    """The sanctioned mode: explicit winner + reason REQUIRED, routed
+    through SkillStaleDeactivator.resolve_pair (the auditable unit),
+    announced via the capture-observability sink. The normal path
+    stays gated as today."""
+
+    @pytest.fixture(autouse=True)
+    def _sink_sandbox(self, tmp_path, request):
+        from daemon.services import skill_capture_observability as obs
+        from tests.helpers.skill_sink_redirect import (
+            lane_test_end,
+            lane_test_start,
+            restore_safe_sink_redirect,
+            snapshot_real_sink_dir,
+        )
+
+        node_id = request.node.nodeid
+        lane_test_start(node_id)
+        before = snapshot_real_sink_dir()
+        obs.configure_sink(tmp_path)
+        try:
+            yield tmp_path
+        finally:
+            restore_safe_sink_redirect()
+            lane_test_end(node_id, before)
+
+    def _metrics_in_group(self, evolution):
+        evolution.get_skill_metrics = AsyncMock(
+            return_value={
+                "skill_id": "skill-abc",
+                "found": True,
+                "skill": _skill_dict(),
+                "stats": {},
+                "usage_recent_count": 0,
+                "ab_test": {
+                    "ab_test_group": "group-sanctioned",
+                    "comparisons": 0,
+                    "extension_count": 0,
+                },
+            }
+        )
+
+    def test_sanctioned_requires_reason(
+        self, skill_app_with_mock_services, monkeypatch
+    ):
+        client = skill_app_with_mock_services["client"]
+        evolution = skill_app_with_mock_services["evolution"]
+        self._metrics_in_group(evolution)
+        called = []
+        monkeypatch.setattr(
+            "daemon.services.skill_deactivation."
+            "SkillStaleDeactivator.resolve_pair",
+            lambda self, **kw: called.append(kw) or {"applied": True},
+        )
+        response = client.post(
+            "/api/skills/skill-abc/ab-test/resolve",
+            params={"sanctioned": "true", "winner_id": "skill-new"},
+        )
+        assert response.status_code == 400
+        assert "reason" in response.json()["detail"]["error"]
+        assert called == []  # nothing mutated
+
+    def test_sanctioned_requires_exactly_one_of_winner_or_defective(
+        self, skill_app_with_mock_services, monkeypatch
+    ):
+        client = skill_app_with_mock_services["client"]
+        evolution = skill_app_with_mock_services["evolution"]
+        self._metrics_in_group(evolution)
+        response = client.post(
+            "/api/skills/skill-abc/ab-test/resolve",
+            params={"sanctioned": "true", "reason": "stalled pair"},
+        )
+        assert response.status_code == 400
+        assert "exactly one" in response.json()["detail"]["error"]
+
+    def test_sanctioned_resolves_via_resolve_pair(
+        self, skill_app_with_mock_services, monkeypatch
+    ):
+        client = skill_app_with_mock_services["client"]
+        evolution = skill_app_with_mock_services["evolution"]
+        self._metrics_in_group(evolution)
+        # defective_arm_id path: the pair row decides the survivor.
+        evolution._ab_test_repo.get_by_group = MagicMock(
+            return_value=SimpleNamespace(
+                ab_test_group="group-sanctioned",
+                skill_id_old="skill-old",
+                skill_id_new="skill-new",
+                resolved_at=None,
+            )
+        )
+        evolution._skill_repo = MagicMock()
+        called = {}
+        monkeypatch.setattr(
+            "daemon.services.skill_deactivation."
+            "SkillStaleDeactivator.resolve_pair",
+            lambda self, **kw: called.update(kw)
+            or {
+                "ab_test_group": kw["ab_test_group"],
+                "winner_skill_id": kw["winner_skill_id"],
+                "applied": True,
+            },
+        )
+        response = client.post(
+            "/api/skills/skill-abc/ab-test/resolve",
+            params={
+                "sanctioned": "true",
+                "defective_arm_id": "skill-new",
+                "reason": "operator: challenger verified defective",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["sanctioned"] is True
+        # The OTHER variant won (E-6: never crown the defective one).
+        assert body["winner_skill_id"] == "skill-old"
+        assert body["reason"] == "operator: challenger verified defective"
+        # resolve_pair was applied with the explicit winner.
+        assert called["winner_skill_id"] == "skill-old"
+        assert called["apply"] is True
+
+    def test_non_sanctioned_forced_winner_on_a_resolved_pair_is_400(
+        self, skill_app_with_mock_services
+    ):
+        """Round-2 review (2026-11-17): the NON-sanctioned forced-winner
+        branch surfaces the service-level resolved_at refusal as a sane
+        HTTP error (400 — the endpoint maps the service's ValueError) —
+        the service-level refusal stands alone; this only pins the
+        surface."""
+        client = skill_app_with_mock_services["client"]
+        evolution = skill_app_with_mock_services["evolution"]
+        evolution.get_skill_metrics = AsyncMock(
+            return_value={
+                "skill_id": "skill-abc",
+                "found": True,
+                "skill": _skill_dict(),
+                "stats": {},
+                "usage_recent_count": 0,
+                "ab_test": {
+                    "ab_test_group": "group-resolved",
+                    "comparisons": 12,
+                    "extension_count": 0,
+                    "resolved_at": "2026-11-17T00:00:00+00:00",
+                },
+            }
+        )
+        evolution.check_ab_test_resolution = AsyncMock(
+            side_effect=ValueError(
+                "ab_test_group 'group-resolved' is already resolved"
+            )
+        )
+        response = client.post(
+            "/api/skills/skill-abc/ab-test/resolve",
+            params={"winner_id": "skill-abc"},
+        )
+        assert response.status_code == 400
+        assert "already resolved" in response.json()["detail"]["error"]
+
+    def test_sanctioned_refuses_an_already_resolved_pair(
+        self, skill_app_with_mock_services, monkeypatch
+    ):
+        """W2 (2026-11-17): the resolved_at guard — a second POST on
+        the loser's id must NOT invert the earlier explicit decision
+        (no receipt, no trail). An already-resolved pair is refused."""
+        client = skill_app_with_mock_services["client"]
+        evolution = skill_app_with_mock_services["evolution"]
+        self._metrics_in_group(evolution)
+        evolution._ab_test_repo.get_by_group = MagicMock(
+            return_value=SimpleNamespace(
+                ab_test_group="group-sanctioned",
+                skill_id_old="skill-old",
+                skill_id_new="skill-new",
+                resolved_at="2026-11-17T00:00:00+00:00",
+            )
+        )
+        evolution._skill_repo = MagicMock()
+        called = []
+        monkeypatch.setattr(
+            "daemon.services.skill_deactivation."
+            "SkillStaleDeactivator.resolve_pair",
+            lambda self, **kw: called.append(kw) or {"applied": True},
+        )
+        response = client.post(
+            "/api/skills/skill-abc/ab-test/resolve",
+            params={
+                "sanctioned": "true",
+                "winner_id": "skill-new",
+                "reason": "operator: re-resolve attempt",
+            },
+        )
+        assert response.status_code == 409
+        assert "already resolved" in response.json()["detail"]["error"]
+        assert called == []  # NO mutation — the earlier decision stands
+
+    def test_stalled_listing_endpoint(
+        self, skill_app_with_mock_services
+    ):
+        client = skill_app_with_mock_services["client"]
+        evolution = skill_app_with_mock_services["evolution"]
+        evolution.find_stalled_ab_tests = AsyncMock(
+            return_value=[
+                {
+                    "ab_test_group": "group-1",
+                    "age_days": 12.0,
+                    "skill_id_old": "a",
+                    "skill_id_new": "b",
+                    "comparisons": 0,
+                    "e6_winner_id": "b",
+                    "park_reason": None,
+                }
+            ]
+        )
+        response = client.get("/api/skills/ab-tests/stalled")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["count"] == 1
+        assert body["stalled"][0]["ab_test_group"] == "group-1"

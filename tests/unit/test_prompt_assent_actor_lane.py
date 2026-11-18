@@ -216,7 +216,7 @@ class TestEntrypointRefusals:
     ):
         att = build_attestation(version_id=pending_row.version_id)
         session_actor = ActorContext(
-            subject="emperor", auth_method=AUTH_METHOD_SESSION
+            subject="the user", auth_method=AUTH_METHOD_SESSION
         )
         with pytest.raises(ValueError, match="assent-relay"):
             pv_repo.approve_assent(

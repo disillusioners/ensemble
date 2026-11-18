@@ -59,7 +59,7 @@ def engine():
 @pytest.fixture
 def persona_repo(engine):
     repo = MemoirPersonaRepository(engine)
-    draft = repo.create_draft("ari", "# Ari Persona v1\n\nI am Ari, companion to the Emperor.", source="seed")
+    draft = repo.create_draft("ari", "# Ari Persona v1\n\nI am Ari, companion to the user.", source="seed")
     repo.submit(draft.id)
     repo.approve(draft.id, _Actor("session"))
     return repo

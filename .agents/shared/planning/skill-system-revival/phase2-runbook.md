@@ -11,10 +11,10 @@
 
 **THIS RUNBOOK COVERS THE SWITCH FLIP ONLY.** It assumes the Phase-1 release is **ALREADY LIVE**.
 
-The promote is a **SEPARATE, Emperor-owned 3-factor nonce ceremony**, run from the **scripts-pin worktree**
+The promote is a **SEPARATE, user-owned 3-factor nonce ceremony**, run from the **scripts-pin worktree**
 (`/home/nea/ensemble-src-wt-scripts-pin`) — **not** from this worktree, **not** from the canonical dir. **This document
 contains NO promote command, on purpose.** If the release is not live yet, this runbook is not the thing you run; stop and
-go to the promote ceremony (`phase1-plan.md` §14.3 documents the command shape; it is executed by the Emperor, not by
+go to the promote ceremony (`phase1-plan.md` §14.3 documents the command shape; it is executed by the user, not by
 this runbook's reader).
 
 **WHAT THIS RUNBOOK DOES NOT DO:** it does not flip any `meta.json` flag, does not declare an A/B winner, does not
@@ -397,7 +397,7 @@ is **REFUSED** and enumerated as `skipped_open_ab_test`; the pair-resolver refus
   also diverges (`:848-861`).
 * **THE 0 TARGET IS EXPLICITLY BLOCKED-ON THE E-6 DECISION** (`:863-865`, verbatim: *"The **0 target is BLOCKED-ON the
   A/B resolution decision** (Ruling E) — do NOT read this gauge's non-zero value as a Phase-1 regression"*). E-6 is the
-  Emperor's decision on **which variant wins** in each of the 27 pairs (`phase1-plan.md` §16.3 E-6; `decisions.md`
+  the user's decision on **which variant wins** in each of the 27 pairs (`phase1-plan.md` §16.3 E-6; `decisions.md`
   DS-44). **Nobody in this lane, in this runbook, may move this gauge to 0.**
 * **⇒ GO/NO-GO:** the gauge must read **exactly 32** at the pre-flight. A value **> 32** is a drift — investigate.
   A value **< 32** is a **winner declared somewhere** — **STOP**.
@@ -633,7 +633,7 @@ curl -sS http://127.0.0.1:9797/api/metrics/capture-lane | tee /tmp/capture-lane.
 # 2. the A4 gauge + drift (the §5.1 G5/G6 baseline)
 cd /home/nea/ensemble-src-wt-skill-revival-phase1
 .venv/bin/python scripts/audit/skill_counter_reconcile.py \
-  --db-url "postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}" \
+  --db-url "postgresql+psycopg://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}" \
   --measure --json | tee /tmp/a4.before.json
 
 # 3. the anomaly baseline
@@ -756,7 +756,7 @@ readings to show `drift == 0` **AND** the two readings to be **≥ 24 h apart**:
 
 ```bash
 cd /home/nea/ensemble-src-wt-skill-revival-phase1
-DB_URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}"
+DB_URL="postgresql+psycopg://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}"
 
 # 1. DRY RUN FIRST — always.
 .venv/bin/python scripts/audit/skill_counter_reconcile.py --db-url "$DB_URL" --measure --json | tee /tmp/a4.t0.json
@@ -907,7 +907,7 @@ switch value is invalid and the resolver will **raise** on first use (fail-close
 
 ### 9.1 **No winner may be declared for the 27 stranded A/B pairs — and that refusal is a FEATURE**
 
-* Choosing which variant of `code-fix` / `dev-strategy` / `git-commit` / `plan-creation` survives is the **Emperor's
+* Choosing which variant of `code-fix` / `dev-strategy` / `git-commit` / `plan-creation` survives is the **the user's
   E-6 decision** (`phase1-plan.md` §16.3 E-6) — a quality decision with real consequences that belongs to the
   orchestrator, not to this lane and not to this runbook.
 * **The mechanism REFUSES without it.** The pair-resolver refuses with `skipped_no_winner_decision`
@@ -937,7 +937,7 @@ the dynamic injection path (`daemon/services/instance_messaging.py:4312-4314`,
 
 ⇒ **Per-axis arming needs a SECOND key or an explicit coupling ruling.** There is no per-axis switch today, and this
 runbook must not pretend otherwise: **flipping an agent's `skill_injection` to `true` makes that agent capture-eligible
-AND injection-enabled at the same moment.** The plan's roster manifest is per-axis precisely so the Emperor can make that
+AND injection-enabled at the same moment.** The plan's roster manifest is per-axis precisely so the user can make that
 decision in Phase 2 (`phase1-plan.md` §10 — *"The manifest must say, per agent, 'capture-enabled' and separately
 'injection-enabled'"*).
 
@@ -1022,7 +1022,7 @@ decision in Phase 2 (`phase1-plan.md` §10 — *"The manifest must say, per agen
 
 ## 12. THE PROMOTE IS NOT THIS RUNBOOK
 
-**The promote is a SEPARATE, Emperor-owned 3-factor nonce ceremony.**
+**The promote is a SEPARATE, user-owned 3-factor nonce ceremony.**
 
 * It is executed **from the scripts-pin worktree** (`/home/nea/ensemble-src-wt-scripts-pin`) — **CWD selects the
   executing script**, so it must NOT be run from this feature worktree (which would execute modified ceremony code) and
@@ -1050,7 +1050,7 @@ export PGPORT=$(grep -m1 '^POSTGRES_PORT=' "$INSTALL_DIR/.env" | cut -d= -f2-)
 export PGDATABASE=$(grep -m1 '^POSTGRES_DB=' "$INSTALL_DIR/.env" | cut -d= -f2-)
 export PGUSER=$(grep -m1 '^POSTGRES_USER=' "$INSTALL_DIR/.env" | cut -d= -f2-)
 export PGPASSWORD=$(grep -m1 '^POSTGRES_PASSWORD=' "$INSTALL_DIR/.env" | cut -d= -f2-)
-DB_URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}"
+DB_URL="postgresql+psycopg://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}"
 PROJECT_ID=$(psql -Atc "SELECT project_id FROM projects WHERE name='agents-ensemble';")
 
 # ── 1. READ the brake ─────────────────────────────────────────────────────
