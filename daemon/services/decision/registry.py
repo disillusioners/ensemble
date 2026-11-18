@@ -376,7 +376,7 @@ class SeamRegistry:
                     "shadow -> deciding requires an explicit review + "
                     "ratification record (D3); no seam may move to deciding "
                     "until its shadow window has been reviewed and the "
-                    "Emperor has ratified the transition"
+                    "user has ratified the transition"
                 )
             self._ratified[seam_id] = review
         self._stages[seam_id] = to_stage

@@ -358,7 +358,7 @@ class POKService:
                 "pok_audience_invalid",
                 "audience must be one of "
                 f"{POK_AUDIENCES} (stated at capture, default "
-                f"{POK_DEFAULT_AUDIENCE!r} — Emperor ruling ER-1)",
+                f"{POK_DEFAULT_AUDIENCE!r} — user ruling ER-1)",
             )
         # 2.5 trust-tier statement (Phase 2 — addendum T-1): vocabulary
         # check, then the AUTHORITY gate. The gate fires BEFORE any

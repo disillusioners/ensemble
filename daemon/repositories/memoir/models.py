@@ -100,7 +100,7 @@ class StarsListType(TypeDecorator):
     """A flat list of entity mentions — ``TEXT[]`` on PG, JSON on SQLite.
 
     Contract (D1.8, architect-verified round-trip on both drivers for
-    ``["the user", "the user"]``, ``None`` and ``[]``):
+    ``["the user", "The user"]``, ``None`` and ``[]``):
 
     * ``impl = JSON`` and ``cache_ok = True``.
     * ``load_dialect_impl`` → ``dialect.type_descriptor(ARRAY(Text()))``

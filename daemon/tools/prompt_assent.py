@@ -1606,7 +1606,7 @@ def create_prompt_assent_tools(
                     "list — the pending CORE prompt versions (read "
                     "only); mint — mint an assent token for one pending item "
                     "(gated on a live user turn); approve / reject — relay "
-                    "the Emperor's decision for a minted token. Any other "
+                    "the user's decision for a minted token. Any other "
                     "verb is refused with invalid-arguments."
                 ),
             ),
@@ -1626,7 +1626,7 @@ def create_prompt_assent_tools(
             Field(
                 default="",
                 description=(
-                    "The grouped assent token the Emperor received at mint "
+                    "The grouped assent token the user received at mint "
                     "time (approve / reject only). It must also appear in "
                     "the human message that triggered this turn."
                 ),
@@ -1840,7 +1840,7 @@ async def _dispatch(
         return _refusal(
             "invalid-arguments",
             "the token is REQUIRED for approve/reject — it is the grouped "
-            "token the Emperor received at mint time",
+            "token the user received at mint time",
         )
 
     # ── the READ surface (side-effect free) ────────────────────────────
