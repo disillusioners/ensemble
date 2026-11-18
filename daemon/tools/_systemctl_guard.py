@@ -90,9 +90,11 @@ The coverage is restored WITHOUT re-introducing the prose over-block, by
 splitting the old conjunction into two halves:
 
 * **SHAPE** — the payload text carries ("systemctl" AND a mutating verb AND
-  an ensemble-family token). This is the OLD guard's conjunction, verbatim
-  (same verb set, same token set, same substring semantics), so coverage is
-  never weaker than the guard being replaced.
+  an ensemble-family token). This is the OLD guard's conjunction (same token
+  set, same substring semantics), with its verb set WIDENED by the verbs the
+  structural matcher refuses on its own (unknown verbs fail closed against
+  an ensemble unit) — so a piped shape is never weaker than the same verb in
+  command position.
 * **DELIVERY** — the payload actually REACHES an executor:
   * a PIPE into a stdin-reading shell, a scheduler (``at``/``batch``/
     ``crontab`` — they RUN what they are handed), ``xargs`` (stdin becomes
@@ -290,13 +292,16 @@ _ARGV_RUNNER_VALUE_OPTIONS: frozenset[str] = frozenset({
     "--on-active", "--property", "--unit", "--uid", "--gid",
 })
 
-#: The mutating-verb set of the pre-2026-11-18 TEXT guard. The text-level
-#: laundering shape below reproduces that guard's conjunction exactly:
-#: ("systemctl" token) AND (a mutating verb) AND (an ensemble-family token)
-#: — anywhere in the same text.
+#: The mutating-verb set of the pre-2026-11-18 TEXT guard, PLUS the verbs
+#: the STRUCTURAL matcher refuses on its own (unknown verbs FAIL CLOSED
+#: against an ensemble unit). The shape test must never be weaker than
+#: either: a NEW systemctl verb (``freeze``, ``preset``, ``revert``,
+#: ``link``, ``edit``, ``import``, ``set-property``) piped through an
+#: executor is refused exactly like the verbs the old guard knew.
 _MUTATING_VERB_RE = re.compile(
     r"\b(?:stop|restart|kill|disable|mask|reload|daemon-reload|enable|start"
-    r"|try-restart|isolate)\b"
+    r"|try-restart|isolate|freeze|preset|revert|link|edit|import"
+    r"|set-property|unset-property|add|remove)\b"
 )
 
 #: The ensemble family token set of the pre-2026-11-18 TEXT guard (substring
@@ -1189,10 +1194,13 @@ def _pipeline_wrapper_violation(
 
 
 def _text_has_mutating_ensemble_shape(text: str) -> bool:
-    """The old text guard's conjunction, reproduced verbatim.
+    """The old text guard's conjunction, reproduced (and slightly widened).
 
     ("systemctl" token) AND (a mutating verb) AND (an ensemble-family
-    token) — anywhere in the same text.
+    token) — anywhere in the same text. The verb set is the old guard's
+    set PLUS the verbs the structural matcher refuses on its own (unknown
+    verbs fail closed against an ensemble unit), so the piped shape is never
+    weaker than the same verb in command position.
     """
     lower = text.lower()
     if "systemctl" not in lower:

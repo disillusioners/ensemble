@@ -586,14 +586,21 @@ def test_scheduler_handoff_refused(command):
 
 
 def test_shape_matcher_matches_the_old_text_guard_conjunction():
-    """The shape test is the OLD text guard's conjunction, verbatim: the
-    "systemctl" token AND a mutating verb AND an ensemble-family token.
+    """The shape test is the OLD text guard's conjunction (its verb set and
+    token set, same substring semantics), widened with the verbs the
+    STRUCTURAL matcher refuses on its own — so a piped shape is never
+    weaker than the same verb in command position.
     Counter-mutation: drop the verb arm ⇒ the read-only leg reddens."""
     assert guard._text_has_mutating_ensemble_shape(
         "systemctl restart ensemble-main"
     )
     assert guard._text_has_mutating_ensemble_shape(
         "0 5 * * * systemctl stop ensemble-prod.service"
+    )
+    # a NEW verb the structural matcher refuses on its own (unknown ⇒ fail
+    # closed) is refused in the piped shape too
+    assert guard._text_has_mutating_ensemble_shape(
+        "systemctl freeze ensemble-main"
     )
     assert not guard._text_has_mutating_ensemble_shape(
         "systemctl status ensemble-main"
