@@ -5,6 +5,12 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.5] — 2026-11-18
+
+### Fixed — agent tool-lane unit-control guard laundering closure (`wi-a5ec5b3e`)
+
+- Fixed: agent tool-lane unit-control guard laundering closure — pipe-into-shell and xargs-stdin shapes, unpeeled runners (su/runuser/systemd-run/watch/ssh), and scheduler handoff (at/batch/crontab) now refused with read-only inspection still allowed (reviewer finding on wi-a5ec5b3e, 12 bypass class); pins + counter-mutations extended
+
 ## [0.31.4] — 2026-11-18
 
 ### Fixed — agent tool-lane systemctl guard intent-match inversion (`wi-a5ec5b3e`)
