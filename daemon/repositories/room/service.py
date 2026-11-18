@@ -48,6 +48,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
+from collections.abc import Collection
 from typing import Any
 
 from sqlalchemy.engine import Engine
@@ -510,14 +511,14 @@ class RoomChatService:
         self,
         caller_instance_id: str,
         limit: int = 200,
-        descendant_ids: set[str] | None = None,
+        descendant_ids: Collection[str] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Caller-scoped room list (off-loop) — returns (rows, truncated)."""
         return await asyncio.to_thread(
             self._repo.list_readable_rooms_for_caller,
             caller_instance_id,
-            descendant_ids,
-            limit,
+            descendant_ids=descendant_ids,
+            limit=limit,
         )
 
     # ── P6 GC scans (off-loop wrappers over the repository) ───────────

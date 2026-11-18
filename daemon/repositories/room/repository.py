@@ -59,7 +59,7 @@ thread. Async callers MUST go through
 ``instance_messaging.py:1179-1184``). NEVER call these methods
 directly on the event loop (house constraint §4, v0.27.14-class).
 
-**Why this file is large (~1,780 lines).** The 1,000–3,000-line band
+**Why this file is large (~1,792 lines).** The 1,000–3,000-line band
 requires a why-large note: ONE SQLModel table family with ONE
 transactional writer per table and the ONE purge transaction are
 co-located here on purpose — the transactional boundaries stay
@@ -71,6 +71,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections.abc import Collection
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -1379,6 +1380,30 @@ class RoomRepository:
             out.setdefault(member.room_id, []).append(member.instance_id)
         return out
 
+    def _attach_extras(
+        self,
+        rooms: list[ChatRoom],
+        member_counts: dict[str, int],
+        last_seqs: dict[str, int],
+        roster: dict[str, list[str]],
+    ) -> list[dict[str, Any]]:
+        """Assemble the room rows + their batched extras (AM-4/C-1).
+
+        The ONE extras-assembly shape shared by the nest-wide list and
+        the caller-scoped list: the base row payload plus the batched
+        ``member_count`` / ``last_message_seq`` and the ACTIVE roster.
+        """
+        out: list[dict[str, Any]] = []
+        for room in rooms:
+            payload = room_payload(room)
+            payload["member_count"] = member_counts.get(room.room_id, 0)
+            payload["last_message_seq"] = last_seqs.get(room.room_id)
+            payload["member_instance_ids"] = list(
+                roster.get(room.room_id, [])
+            )
+            out.append(payload)
+        return out
+
     def list_all_rooms_with_extras(
         self, limit: int = 200
     ) -> tuple[list[dict[str, Any]], bool]:
@@ -1407,21 +1432,14 @@ class RoomRepository:
         roster = self.list_active_member_instance_ids(
             [r.room_id for r in rooms]
         )
-        out: list[dict[str, Any]] = []
-        for room in rooms:
-            payload = room_payload(room)
-            payload["member_count"] = member_counts.get(room.room_id, 0)
-            payload["last_message_seq"] = last_seqs.get(room.room_id)
-            payload["member_instance_ids"] = list(
-                roster.get(room.room_id, [])
-            )
-            out.append(payload)
+        out = self._attach_extras(rooms, member_counts, last_seqs, roster)
         return out, truncated
 
     def list_readable_rooms_for_caller(
         self,
         caller_instance_id: str,
-        descendant_ids: set[str] | None = None,
+        *,
+        descendant_ids: Collection[str] | None = None,
         limit: int = 200,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Anchor-present list: scan → predicate → clamp (C-1).
@@ -1474,15 +1492,9 @@ class RoomRepository:
         with Session(self._engine) as session:
             member_counts = self._active_member_counts(session, returned_ids)
             last_seqs = self._last_message_seqs(session, returned_ids)
-        out: list[dict[str, Any]] = []
-        for room in returned:
-            payload = room_payload(room)
-            payload["member_count"] = member_counts.get(room.room_id, 0)
-            payload["last_message_seq"] = last_seqs.get(room.room_id)
-            payload["member_instance_ids"] = list(
-                roster.get(room.room_id, [])
-            )
-            out.append(payload)
+        out = self._attach_extras(
+            returned, member_counts, last_seqs, roster
+        )
         return out, truncated
 
     def get_instance_records(

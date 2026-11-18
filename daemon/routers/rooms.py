@@ -151,6 +151,54 @@ _ERR_BAD_REQUEST = "bad_request"
 #: every request into ``[1, ROOM_LIST_MAX_LIMIT]``.
 _ROOM_LIST_DEFAULT_LIMIT = 200
 
+#: The historical wide DEFAULT of the F-3 knob — unchanged behaviour.
+#: Kept as its own name so the env-var resolution below has an explicit
+#: fallback to fall back TO (unset / blank / unparseable ⇒ this).
+_ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT: bool = True
+
+#: The operator-facing env var that re-defaults the knob WITHOUT a code
+#: release (a daemon restart re-runs this import). Name + parse rule +
+#: fallback are documented in the module docstring (A3).
+_ANCHORLESS_GLOBAL_LIST_ENV = "ENSEMBLE_ALLOW_ANCHORLESS_GLOBAL_LIST"
+_ANCHORLESS_TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
+_ANCHORLESS_FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
+
+
+def _resolve_allow_anchorless_global_list() -> bool:
+    """Resolve the knob's default ONCE, at import (A3).
+
+    Strict parse of ``ENSEMBLE_ALLOW_ANCHORLESS_GLOBAL_LIST``:
+    case-insensitive ``1/true/yes/on`` ⇒ True, ``0/false/no/off`` ⇒
+    False. Unset, blank, or unparseable ⇒ the historical wide default
+    (:data:`_ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT`). An unparseable
+    value is LOUD (WARNING) but never fatal — a typo cannot take the
+    anchor-less lane down, and it cannot silently tighten it either.
+    """
+    raw = os.environ.get(_ANCHORLESS_GLOBAL_LIST_ENV)
+    if raw is None or not raw.strip():
+        return _ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT
+    token = raw.strip().lower()
+    if token in _ANCHORLESS_TRUE_TOKENS:
+        return True
+    if token in _ANCHORLESS_FALSE_TOKENS:
+        return False
+    logger.warning(
+        "rooms: %s=%r is not a boolean token (accepted: %s / %s) — "
+        "falling back to the default %r",
+        _ANCHORLESS_GLOBAL_LIST_ENV,
+        raw,
+        sorted(_ANCHORLESS_TRUE_TOKENS),
+        sorted(_ANCHORLESS_FALSE_TOKENS),
+        _ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT,
+    )
+    return _ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT
+
+
+# Module-level knob (F-3 tightening switch) — single branch consults it.
+# Its DEFAULT is env-resolved at import (A3); tests flip the attribute
+# itself via ``monkeypatch.setattr``.
+_ALLOW_ANCHORLESS_GLOBAL_LIST: bool = _resolve_allow_anchorless_global_list()
+
 
 def _err(status_code: int, error: str, message: str) -> HTTPException:
     """The typed ``{error, message}`` body (the house router shape)."""
@@ -402,55 +450,6 @@ def _shape_rows(rows: list[dict[str, Any]], truncated: bool) -> dict[str, Any]:
         ],
         "truncated": bool(truncated),
     }
-
-
-#: The historical wide DEFAULT of the F-3 knob — unchanged behaviour.
-#: Kept as its own name so the env-var resolution below has an explicit
-#: fallback to fall back TO (unset / blank / unparseable ⇒ this).
-_ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT: bool = True
-
-#: The operator-facing env var that re-defaults the knob WITHOUT a code
-#: release (a daemon restart re-runs this import). Name + parse rule +
-#: fallback are documented in the module docstring (A3).
-_ANCHORLESS_GLOBAL_LIST_ENV = "ENSEMBLE_ALLOW_ANCHORLESS_GLOBAL_LIST"
-_ANCHORLESS_TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
-_ANCHORLESS_FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
-
-
-def _resolve_allow_anchorless_global_list() -> bool:
-    """Resolve the knob's default ONCE, at import (A3).
-
-    Strict parse of ``ENSEMBLE_ALLOW_ANCHORLESS_GLOBAL_LIST``:
-    case-insensitive ``1/true/yes/on`` ⇒ True, ``0/false/no/off`` ⇒
-    False. Unset, blank, or unparseable ⇒ the historical wide default
-    (:data:`_ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT`). An unparseable
-    value is LOUD (WARNING) but never fatal — a typo cannot take the
-    anchor-less lane down, and it cannot silently tighten it either.
-    """
-    raw = os.environ.get(_ANCHORLESS_GLOBAL_LIST_ENV)
-    if raw is None or not raw.strip():
-        return _ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT
-    token = raw.strip().lower()
-    if token in _ANCHORLESS_TRUE_TOKENS:
-        return True
-    if token in _ANCHORLESS_FALSE_TOKENS:
-        return False
-    logger.warning(
-        "rooms: %s=%r is not a boolean token (accepted: %s / %s) — "
-        "falling back to the default %r",
-        _ANCHORLESS_GLOBAL_LIST_ENV,
-        raw,
-        sorted(_ANCHORLESS_TRUE_TOKENS),
-        sorted(_ANCHORLESS_FALSE_TOKENS),
-        _ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT,
-    )
-    return _ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT
-
-
-# Module-level knob (F-3 tightening switch) — single branch consults it.
-# Its DEFAULT is env-resolved at import (A3); tests flip the attribute
-# itself via ``monkeypatch.setattr``.
-_ALLOW_ANCHORLESS_GLOBAL_LIST: bool = _resolve_allow_anchorless_global_list()
 
 
 @router.get(
