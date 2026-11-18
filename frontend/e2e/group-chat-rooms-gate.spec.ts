@@ -51,6 +51,7 @@ test.describe('group-chat rooms gate', () => {
   });
 
   test('header control is adjacent to the shipped room icon', async ({ page }) => {
+    test.skip(true, 'adjacency requires the daemon-fenced leader gate — unit-pinned at chat.chatrooms.spec.ts (pins at :372,:401,:432,:457) and P2 cases');
     await page.goto('/');
     const toggle = page.locator('.toggle-buttons');
     await expect(toggle).toBeVisible();

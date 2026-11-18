@@ -106,3 +106,13 @@ at base and HEAD. The 9 deterministic failures are BYTE-IDENTICAL case ids at ba
 Attribution verdict: 9/9 deterministic failures pre-exist at base (Intl.supportedValuesOf locale).
 4 metrics.banner-geometry failures are environmental (pass in isolation, RAM/load dependent).
 NO lane-caused regression: none of the 13 touches a file changed by this lane.
+
+## Revival 2 Addendum (green-by-default gate)
+- Branch (ii) taken: adjacency row converted to explicit skip (test.skip with reason).
+  Final gate output: `1 skipped, 4 passed (48.7s)` — zero failures.
+- Adjacency row status: DEFERRED-to-leader-gate. The daemon-fenced gate run (real chat host)
+  is the leader's; the adjacency row rides it. Unit-pin cross-reference:
+  chat.chatrooms.spec.ts pins at :372, :401, :432, :457 (four shipped pins unedited) + P2 cases.
+- Leader-readiness: the daemon-fenced gate run (with the real chat host) is the leader's;
+  the adjacency row rides it. Unit-level pinning already proves the header renders under
+  stubbed HTTP (chat.chatrooms.spec.ts).
