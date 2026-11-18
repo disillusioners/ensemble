@@ -252,11 +252,15 @@ class TestAc16DisputeAndArchive:
         assert out.action == "created"
 
     def test_archived_forward_only(self, svc: POKService) -> None:
-        svc.upsert(project_id="p1", slug="arch-a", body="old fact", agent_id="d")
+        out = svc.upsert(project_id="p1", slug="arch-a", body="old fact", agent_id="d")
         svc.curate(
             project_id="p1", slug="arch-a", agent_id="leader", archived=True
         )
-        row = svc._repo.get_by_slug("p1", "arch-a", status=None)
+        # Re-read BY ROW ID (house shape: capture the id from the write
+        # outcome, re-read by id). A by-slug ``status=None`` re-read is
+        # the UNORDERED query the curator defect lived in — it returns
+        # whichever row the database plan yields first.
+        row = svc._repo.get(out.entry.id)
         assert row.status == "archived"
         assert row.pinned is False
         with pytest.raises(POKError) as ei:
@@ -354,6 +358,15 @@ class TestAc19TerminalityCured:
         assert "pok_curate" in ei.value.message
         cure = ei.value.details.get("oldest_least_verified")
         assert cure, "the refusal must NAME the cure target"
+        # The named cure must be the TRUE one: the named ACTIVE row,
+        # archived BY SLUG. The old message advertised "archive a
+        # superseded fact" — un-actionable, since a superseded row is
+        # curated THROUGH its successor (and the resolver used to
+        # refuse exactly this class of slug ⇒ the escape hatch could
+        # fail with pok_not_found at the cap ⇒ a hard lock).
+        assert "superseded fact" not in ei.value.message
+        assert "ACTIVE entry" in ei.value.message
+        assert cure in ei.value.message
         # archive the named cure → the write succeeds
         svc.curate(project_id="p2", slug=cure, agent_id="leader", archived=True)
         out = svc.upsert(
@@ -801,9 +814,19 @@ class TestSlugOwnerResolution:
     def test_curate_does_not_resurrect_an_archived_ancestor(
         self, svc: POKService
     ) -> None:
-        """Archive → re-add (a FRESH active row, not a supersede) →
-        curate again: the ARCHIVED ancestor stays archived (forward-
-        only) and the active head is the one that flips."""
+        """E1 — THE COEXIST CASE: an ARCHIVED root beside an ACTIVE
+        successor under one slug.
+
+        Archive frees the slug; a later upsert inserts a FRESH active
+        row beside the dead one. The OLD resolver could return the
+        ARCHIVED root (status=None accepts it — only 'superseded' was
+        rejected) ⇒ the flip landed on an INVISIBLE dead row while the
+        tool reported ``"action": "curated"`` SUCCESS, and a pin on it
+        was invisible to the active-only pin accounting.
+
+        Required: the ACTIVE successor owns the slug — the flip lands
+        on it, and the dead root is NEVER written.
+        """
         v1 = svc.upsert(project_id="p1", slug="arch-01-a", body="first fact", agent_id="d")
         svc.curate(project_id="p1", slug="arch-01-a", agent_id="leader", archived=True)
         assert svc._repo.get(v1.entry.id).status == "archived"
@@ -812,15 +835,50 @@ class TestSlugOwnerResolution:
             project_id="p1", slug="arch-01-a", body="second fact differs", agent_id="d"
         )
         assert v2.action == "created"  # the archived row is NOT supersede-able
+        # The COEXIST state: one ARCHIVED dead row + one ACTIVE owner
+        # under the same slug.
+        dead = svc._repo.get(v1.entry.id)
+        owner = svc._repo.get(v2.entry.id)
+        assert dead.status == "archived"
+        assert owner.status == "active"
+        dead_before = (dead.status, dead.pinned, dead.updated_at)
 
         out = svc.curate(
             project_id="p1", slug="arch-01-a", agent_id="leader", archived=True
         )
+        # The flip landed on the ACTIVE owner — by row id.
         assert out.id == v2.entry.id
         assert svc._repo.get(v2.entry.id).status == "archived"
-        # The archived ancestor is untouched — never un-archived,
-        # never re-statused.
-        assert svc._repo.get(v1.entry.id).status == "archived"
+        # The dead root was NOT written at all (status, flags AND the
+        # update stamp are untouched) — never un-archived, never
+        # re-statused, never pinned.
+        dead_after = svc._repo.get(v1.entry.id)
+        assert (dead_after.status, dead_after.pinned, dead_after.updated_at) == (
+            dead_before
+        )
+        assert dead_after.status == "archived"
+
+    def test_curate_prefers_the_active_owner_over_an_archived_row(
+        self, svc: POKService
+    ) -> None:
+        """E1 — the resolver's PREFERENCE is observable: with an
+        ARCHIVED row and an ACTIVE row under one slug, the owner is
+        the ACTIVE one (the archived row only owns the slug while no
+        active row exists)."""
+        v1 = svc.upsert(project_id="p1", slug="pref-01-a", body="first fact", agent_id="d")
+        svc.curate(project_id="p1", slug="pref-01-a", agent_id="leader", archived=True)
+        v2 = svc.upsert(
+            project_id="p1", slug="pref-01-a", body="second fact differs", agent_id="d"
+        )
+        owner = svc._repo.resolve_slug_row("p1", "pref-01-a", scope="owner")
+        assert owner.id == v2.entry.id
+        assert owner.status == "active"
+        assert owner.id != v1.entry.id
+        # A pin lands on the ACTIVE owner too (the active-only pin
+        # accounting can see it).
+        svc.curate(project_id="p1", slug="pref-01-a", agent_id="leader", pinned=True)
+        assert svc._repo.get(v2.entry.id).pinned is True
+        assert svc._repo.get(v1.entry.id).pinned is False
 
     def test_unknown_slug_still_refuses_not_found(self, svc: POKService) -> None:
         """A genuinely-absent slug keeps the not-found refusal."""
