@@ -9,8 +9,10 @@
  * `reuseExistingServer: false` in the webServer block below — Playwright
  * FAILS LOUDLY instead of attaching to a server already on the port, so a
  * stray process on 14204 can never be silently reused (and is never
- * killed). The pinned sweep (`ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0`)
- * and ambient-allow guards stay.
+ * killed). That IS the whole guard: the webServer block sets NO env, and
+ * none is needed — `ng serve` boots NO daemon for this rooms gate (there
+ * is no sweep to pin and no ambient-allow env), and every API call is
+ * stubbed inside the spec (the metrics-gate precedent).
  *
  * Mechanism (cloned from `playwright.metrics-gate.config.ts`):
  *   - FE dev server (`ng serve`) started/stopped by Playwright's webServer.

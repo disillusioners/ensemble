@@ -61,8 +61,8 @@ Worktree: /home/nea/ensemble-src-wt-gc-fe-surfaces
 - d66b2e260 test(gc-fe-surfaces): P4 rooms-gate playwright config + e2e spec (dedicated port fence, W-14)
 
 ## Deviations
-- None behavioral. Added a non-behavioral data-gc-room-chat attribute on the
-  instance-list row <a> to carry the drift-guard marker on the P3 child-row hunk.
+- NOT "None behavioral" (deviation (f)): the NAMED finding **W1** (the 5xx-copy leak in
+  `describeHttpError`, `room.service.ts:492-493`) IS a behavioral deviation — closed in the close-out addendum below, which also carries this ledger's NEW deviations (W1's shipped-surface 5xx-copy delta, A7's discriminator change, deviation (a)'s adjacency-row wording). The only NON-behavioral deviation is the `data-gc-room-chat` attribute on the instance-list row <a> to carry the drift-guard marker on the P3 child-row hunk.
 - Playwright browsers absent -> web-automation execution not run (reported, not installed).
 
 ## Leader-readiness (tasks 8-9)
@@ -220,3 +220,133 @@ landed yet): `pytest -q tests/unit/repositories/test_source_gc_repository.py` �
 marker token (the e2e spec + config via their line-1 lane comment, the rooms-btn
 spec via its line-1 lane comment, the room.service.ts deletion hunk because the
 removed line itself names the room read API).
+
+## Code-council close-out addendum (2026-11-18 — code-council verdict; FE+LEDGER lane)
+
+Authority: `.agents/shared/planning/gc-fe-surfaces/code-review.md` (§2 W1, §3
+A1/A2/A7/A8, §5 F-E, §6 conditions 1/4/5/6). This is the FE+LEDGER lane:
+`daemon/**` and `tests/unit/routers/test_rooms_list_api.py` belong to the
+parallel BE coder and were NOT touched here. `decisions.md` and every other
+frozen gate artifact stay FROZEN — this file is the only ledger extended.
+
+### Deviations added by this close-out
+
+- **W1 — SHIPPED-SURFACE delta (the 5xx copy of the SHIPPED lanes changes).**
+  `describeHttpError` has exactly THREE call sites, all in
+  `frontend/src/app/services/room.service.ts`: `:200` (SHIPPED rooms lane),
+  `:247` (SHIPPED messages lane), `:311` (NEW global lane). The status-class
+  split replaces the 5xx copy on ALL THREE, so the two SHIPPED lanes' 5xx copy
+  changes — a shipped-surface delta under commission constraint 4, disclosed in
+  the promotion note. The <500 behaviour (404 / 403 / 0) is UNCHANGED and the
+  shipped 404/403 pins stay green. Attribution: code council W1 (ADVISORY →
+  WARNING), 2026-11-18; fixed in this lane.
+- **A7 — a PLAN-PINNED detail changed (the child-row discriminator).** The plan
+  pinned `depth > 0`; A7 (advisor-driven, leader-routed) changed it to
+  `parent_id` truthiness so the discriminator AGREES with the button set (the
+  pin/terminate buttons render only for a parent-less row, and a child row's
+  room button sits at `right: 72px`, not `104px`). BEFORE: a row whose parent is
+  absent from the loaded list was promoted to the tree root by `instanceTree`
+  (`instance-list.component.ts:159-164`) and styled as a root (104px) while its
+  button set stayed a child's — the 32px gap. AFTER: the row carries
+  `.child-row` (72px) and agrees with its button set. The SCSS is untouched
+  (root = 104px / child = 72px preserved) and the `.instance-item.child-row
+  .rooms-btn` + `right: 72px` pins stay. The council's literal phrasing ("key
+  the discriminator on `!instance.parent_id`") would INVERT the class semantics
+  (a parent-less ROOT row becoming a `child-row`); the coherent reading — the
+  discriminator agrees with the button set — was implemented and is disclosed
+  in the lane's final report.
+- **(a) — the browser-level adjacency row stays SKIPPED and VISIBLE.** The
+  rooms-gate's header-adjacency row is an explicit `test.skip` (daemon-fenced,
+  leader-owned). It is NOT adjacency evidence: **the promotion note must NOT cite
+  the e2e gate as header-icon-adjacency evidence.** The leader's daemon-fenced
+  run (routed to the TESTER — this lane does NOT run it) must execute that row
+  BEFORE the staged release is gate-complete. The automated adjacency evidence
+  is the unit pins (`chat.chatrooms.spec.ts:372/401/432/457`) plus the P3 cases.
+
+### W1 — the 5xx transport-string leak (FIXED)
+
+`describeHttpError` now partitions its UNTYPED branch by STATUS CLASS: on >=500
+(and on an UNKNOWN status) the RAW TRANSPORT MESSAGE IS NEVER CONSULTED — only
+the server's TYPED detail (`raw.error` → `detail.message`), else a FIXED,
+subject-specific constant. The raw-message fallback is retained for <500 only.
+The fixed constants, one per call-site subject (no copy is shared between
+surfaces):
+
+| Subject / call site | Fixed 5xx constant |
+|---|---|
+| rooms lane (`:200`, SHIPPED) | `The server could not load these chatrooms — try again.` |
+| messages lane (`:247`, SHIPPED) | `The server could not load this conversation — try again.` |
+| global lane (`:311`, NEW) | `The server could not load the chatroom list — try again.` |
+
+Pins (`room.service.spec.ts`, the W-1 cases): a body-less 5xx renders the
+fixed subject-specific constant and contains NO url / NO "Http failure
+response" / NO status text; a 5xx WITH a server detail renders that detail; a
+structured detail renders `detail.message`; the <500 copies (404 / 403 / 0) are
+UNCHANGED; a client-side status keeps the raw fallback.
+
+**BROWSER-LEVEL PROOF (the e2e 500 leg, `group-chat-rooms-gate.spec.ts:408-429`
+— structure-only assertions, unchanged):** the leg's own `observed-5xx-copy`
+annotation now records
+`The server could not load the chatroom list — try again.`
+(the pre-fix observed string was the transport leak
+`Http failure response for <url>/api/rooms?instance_id=…: 500 Internal Server
+Error` — see the Revivals' FINDING above). The Revival-3 FINDING is therefore
+CLOSED as a product defect.
+
+### A1 / A2 / A7 / A8 — what landed
+
+- **A1** — the JOINED (anchored) read now asks for the route's hard page cap
+  explicitly (`limit=500`, mirroring the server's `ROOM_LIST_MAX_LIMIT`), because
+  the server clamps the READABLE set BEFORE the FE filters the joined subset
+  client-side (clamp-then-filter). The ANCHOR-LESS (global) lane keeps its
+  posture — NO `limit`: it shows every row it receives, so a wider window buys
+  no completeness, only a changed request shape. Pinned in
+  `room.service.spec.ts`.
+- **A2** — the truncation notice is hoisted OUT of the non-empty `@else`, so an
+  EMPTY view discloses the truncation too; the empty copy is truncation-aware
+  ("No joined chatrooms are shown — the readable list was truncated, so some may
+  be missing."); and the notice's number is the POST-FILTER joined count
+  ("showing N of this instance's joined chatrooms." — the wording now names the
+  set the number counts). Three spec cases added (empty+truncated,
+  empty+not-truncated, non-empty+truncated).
+- **A7** — the child-row discriminator keys on `parent_id` (see the deviation
+  above); the P3 spec case (viii) keeps its three pins (child-row ⇒ `.rooms-btn`
+  presence, `.instance-item.child-row .rooms-btn`, `right: 72px`) and two cases
+  were added for the new semantics (the promoted-to-root row; the non-inverted
+  root row).
+- **A8** — `playwright.rooms-gate.config.ts` comment corrected: the webServer
+  block sets NO env (it pinned nothing), and the REAL guard is
+  `reuseExistingServer: false` — `ng serve` boots NO daemon, so there is no
+  sweep and no ambient-allow env to pin (the metrics-gate precedent).
+  Comment-only, zero behaviour.
+
+### Named erratum — W3 (the leader-quote correction) — 2026-11-18, LEADER-ISSUED, recorded by this lane
+
+Routing note: the correction itself is routed to the LEADER for the record (the
+code council's §5 routes W3 to the leader, not to the ledger); this entry is the
+ledger's named restatement of the leader-issued wording. `decisions.md` stays
+untouched (frozen).
+
+> The quoted ruling text in decisions.md:477/:92 ('every row predicate-checked fail-closed via the shared _require_room_access') is SUPERSEDED for the ANCHOR-LESS path by the accurate formulation: on the ANCHORED path (instance_id present) every row IS predicate-checked fail-closed via the shared rule; on the ANCHOR-LESS path the route returns the NEST-WIDE room list UNFILTERED — which the architect's S-2 adjudication accepted for the GLOBAL browser surface, because the FE principal already holds instances:read (room ids/titles were already discoverable; the incremental information class is the ACTIVE member roster, disclosed per AM-1) — and the _ALLOW_ANCHORLESS_GLOBAL_LIST knob exists so that tightening lands without a release. SUBSTANCE UNCHANGED (the leader PROCEED ruling stands); only the quoted wording was inaccurate. This correction is restated to the Emperor in the lane's final report.
+
+### Named erratum — F-E (the code-review lane's ready-to-paste entry) — 2026-11-18, code-review lane
+
+> **F-E erratum (2026-11-18, code-review lane).** `decisions.md` D2.2's clause *"driving both lanes … on the same tick"* is superseded by the AM-5 fold: one timer drives the conversation lane only; the rooms list refreshes on open and on explicit retry. `decisions.md` D2.4 (`:201`) and `:203` already record the AM-5 skip and the cursor policy — this entry corrects D2.2's stale clause only; `decisions.md` remains untouched. Separately, this ledger's "Deviations — None behavioral" summary (`:63`) flattens the Revival-3 5xx-copy product finding (`:167`); see code-review finding W1 (ADVISORY→WARNING: `room.service.ts:492-493`, `describeHttpError`).
+
+### Verify (this close-out — FE+LEDGER lane, all run in the lane worktree)
+
+| Command | Result |
+|---|---|
+| `jest src/app/services/room.service.spec.ts` | **41/41** (33 base + 8 new W-1/A-1 pins) |
+| `jest src/app/components/room-dialog/room-dialog.component.spec.ts` | **19/19** (16 base + 3 new A-2 cases) |
+| `jest src/app/components/instance-list/instance-list.rooms-btn.spec.ts` | **11/11** (9 base + 2 new A-7 cases) |
+| `jest src/app/components/instance-list/instance-list.component.spec.ts` | **84/84** (unchanged) |
+| `tsc --noEmit -p tsconfig.app.json` | **EXIT 0** |
+| `playwright test -c playwright.rooms-gate.config.ts` | **4 passed, 1 skipped** (42.6s) — the adjacency row stays skipped |
+| mutation — A-7 discriminator back to `depth > 0` | rooms-btn **(x) REDDENS** (1 failed / 11) |
+| mutation — W-1 5xx path re-consults the raw message | room.service **3 W-1 cases REDDEN** (3 failed / 41) |
+| mutation — A-2 notice back inside the non-empty `@else` | room-dialog **(ix) REDDENS** (1 failed / 19) |
+
+Line references: the `## Deviations` section is still at `:63` and the Revivals'
+5xx-copy FINDING is still at `:167` — this addendum is APPENDED, so the
+council's verbatim F-E text cites the same lines it cited at review time.

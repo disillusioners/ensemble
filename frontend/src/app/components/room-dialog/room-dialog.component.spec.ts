@@ -665,8 +665,59 @@ describe('RoomDialogComponent — the per-instance joined mode', () => {
     expect(textOf(fixture)).toContain('joined-room');
     expect(textOf(fixture)).not.toContain('not-joined-room');
 
-    // The joined popup carries its OWN truncation notice (N6).
+    // The joined popup carries its OWN truncation notice (N6). A-2: the
+    // number is the POST-FILTER joined count (exactly 1 room is shown)
+    // and the wording names THAT set — the cause stays named too.
     expect(textOf(fixture)).toContain('More rooms not shown');
-    expect(textOf(fixture)).toContain("instance's readable rooms");
+    expect(textOf(fixture)).toContain('the readable list was truncated');
+    expect(textOf(fixture)).toContain("showing 1 of this instance's joined chatrooms");
+  });
+
+  // ── A-2 (code council): the truncation notice is hoisted OUT of the
+  //    non-empty branch, the empty copy is truncation-aware, and the
+  //    notice counts the POST-FILTER joined rooms.
+
+  it('(ix) A-2: an EMPTY joined view whose readable list was truncated does NOT read as "joined nothing" — and the notice still renders', () => {
+    fixture.detectChanges();
+    const req = httpMock.expectOne((r) => r.url === '/api/rooms');
+    expect(req.request.params.get('instance_id')).toBe('inst-9');
+    // Truncated, and the only row is NOT joined by this instance ⇒ the
+    // joined view is empty even though the readable list was cut.
+    req.flush({ rooms: [NOT_JOINED_ROOM], truncated: true });
+    fixture.detectChanges();
+
+    expect(roomItemsOf(fixture).length).toBe(0);
+    // The empty copy is truncation-aware …
+    expect(textOf(fixture)).toContain('the readable list was truncated');
+    expect(textOf(fixture)).not.toContain('This instance has not joined any chatroom.');
+    // … and the truncation notice renders in the EMPTY branch too (it is
+    // hoisted out of the non-empty @else).
+    expect(textOf(fixture)).toContain('More rooms not shown');
+  });
+
+  it('(x) A-2: an EMPTY joined view that is NOT truncated keeps the plain copy and shows NO notice', () => {
+    fixture.detectChanges();
+    const req = httpMock.expectOne((r) => r.url === '/api/rooms');
+    req.flush({ rooms: [], truncated: false });
+    fixture.detectChanges();
+
+    expect(roomItemsOf(fixture).length).toBe(0);
+    expect(textOf(fixture)).toContain('This instance has not joined any chatroom.');
+    expect(textOf(fixture)).not.toContain('More rooms not shown');
+    expect(textOf(fixture)).not.toContain('the readable list was truncated');
+  });
+
+  it('(xi) A-2: the truncation notice counts the POST-FILTER joined rooms (not the rows the server sent)', () => {
+    fixture.detectChanges();
+    const req = httpMock.expectOne((r) => r.url === '/api/rooms');
+    const secondJoined = { ...JOINED_ROOM, room_id: 'r-joined-2', name: 'joined-room-2' };
+    // Two joined + one not joined ⇒ the pane shows 2, so the copy must
+    // say 2 (NOT the 3 rows the server sent).
+    req.flush({ rooms: [JOINED_ROOM, NOT_JOINED_ROOM, secondJoined], truncated: true });
+    fixture.detectChanges();
+
+    expect(roomItemsOf(fixture).length).toBe(2);
+    expect(textOf(fixture)).toContain("showing 2 of this instance's joined chatrooms");
+    expect(textOf(fixture)).not.toContain('showing 3 of this instance');
   });
 });

@@ -159,22 +159,39 @@ export class RoomDialogComponent implements OnInit, OnDestroy {
    */
   protected readonly scopeError = signal<string | null>(null);
 
-  /** The rooms-pane empty copy for the non-instance modes. */
+  /**
+   * The rooms-pane empty copy for the non-instance modes.
+   *
+   * A-2 — the copy is TRUNCATION-AWARE. An empty JOINED view whose
+   * readable list was truncated must NOT read as "this instance joined
+   * nothing": the joined rooms it DID join may lie past the server's
+   * cut. The global mode gets the same treatment.
+   */
   protected get globalEmptyCopy(): string {
-    return this.isJoinedMode
-      ? 'This instance has not joined any chatroom.'
+    if (this.isJoinedMode) {
+      return this.globalRoomsTruncated()
+        ? 'No joined chatrooms are shown — the readable list was truncated, so some may be missing.'
+        : 'This instance has not joined any chatroom.';
+    }
+    return this.globalRoomsTruncated()
+      ? 'No chatrooms are shown — the list was truncated.'
       : 'No chatrooms in this nest yet.';
   }
 
   /**
    * The honest truncation copy — the list is a PREFIX of the nest, never
    * the whole thing (N8/N6).
+   *
+   * A-2 — the number is the POST-FILTER count (the joined rooms this
+   * pane actually shows) and the wording names THAT set, so the number
+   * and the sentence describe the same thing. The cause stays named:
+   * it was the READABLE list the server cut.
    */
   protected get truncationCopy(): string {
     if (this.isJoinedMode) {
       return (
-        'More rooms not shown — this instance\'s readable rooms were ' +
-        `truncated at ${this.globalRooms().length}.`
+        'More rooms not shown — the readable list was truncated; showing ' +
+        `${this.listedRooms().length} of this instance's joined chatrooms.`
       );
     }
     return `More rooms not shown — showing the first ${this.listedRooms().length} of the nest.`;

@@ -165,13 +165,24 @@ export class RoomService {
   }
 
   /**
-   * `GET /api/rooms[?instance_id=<id>]` — the global lane's raw fetch.
-   * A scope anchor turns the read into the caller-scoped list; without
-   * one the read is the nest-wide (knob-gated) breadth.
+   * `GET /api/rooms[?instance_id=<id>&limit=<n>]` — the global lane's
+   * raw fetch. A scope anchor turns the read into the caller-scoped
+   * list; without one the read is the nest-wide (knob-gated) breadth.
+   *
+   * A-1 — the ANCHORED (joined) read asks for the route's hard page cap
+   * explicitly. The server clamps the READABLE set FIRST and the FE
+   * filters the joined subset client-side AFTERWARDS, so the server's
+   * default page (200) can cut the very rooms the joined view should
+   * show. Asking for the cap gives the post-clamp filter the full
+   * readable set. The ANCHOR-LESS read keeps its posture (no `limit`):
+   * it shows every row it receives, so a wider window buys no
+   * completeness — only a changed request shape.
    */
   fetchAllRooms(scopeInstanceId?: string | null): Observable<GlobalRoomListResponse> {
     if (scopeInstanceId) {
-      const params = new HttpParams().set('instance_id', scopeInstanceId);
+      const params = new HttpParams()
+        .set('instance_id', scopeInstanceId)
+        .set('limit', String(ROOM_LIST_MAX_LIMIT));
       return this.http.get<GlobalRoomListResponse>(`${RoomService.ROOMS_URL}`, { params });
     }
     return this.http.get<GlobalRoomListResponse>(`${RoomService.ROOMS_URL}`);
@@ -308,7 +319,7 @@ export class RoomService {
         if (this.globalRoomsRequestId !== reqId) return; // stale — dropped
         this.globalRooms.set([]);
         this.globalRoomsTruncated.set(false);
-        const described = describeHttpError(err, 'chatrooms');
+        const described = describeHttpError(err, 'global-chatrooms');
         this.globalRoomsErrorStatus.set(described.status);
         this.globalRoomsError.set(described.message);
         this.globalRoomsLoading.set(false);
@@ -433,6 +444,14 @@ export const ROOM_MESSAGE_PAGE_LIMIT = 50;
 /** The contract's hard cap for the `limit` query parameter. */
 export const ROOM_MESSAGE_MAX_LIMIT = 200;
 
+/**
+ * The room LIST route's hard page-size cap — mirrors the server's
+ * `ROOM_LIST_MAX_LIMIT` (`daemon/routers/rooms.py`). The joined lane
+ * requests it explicitly (A-1): the server clamps the READABLE set
+ * before the FE filters the joined subset client-side.
+ */
+export const ROOM_LIST_MAX_LIMIT = 500;
+
 /** Clamp a requested page size into the contract's [1, 200] window. */
 function clampLimit(limit: number): number {
   if (!Number.isFinite(limit)) return ROOM_MESSAGE_PAGE_LIMIT;
@@ -457,40 +476,99 @@ function mergeMessagesBySeq(current: RoomMessage[], incoming: RoomMessage[]): Ro
 }
 
 /**
+ * The room-read SUBJECTS — each surface owns its OWN copy set (code
+ * review finding W1). The three lanes are DISTINCT surfaces: the
+ * instance's chatrooms list, the open conversation, and the nest-wide
+ * browser. A fixed 5xx constant is therefore never shared between them.
+ */
+type RoomErrorSubject = 'chatrooms' | 'messages' | 'global-chatrooms';
+
+/**
+ * The per-subject copy set.
+ *
+ * * `noun` — the subject noun used by the typed 403 copy.
+ * * `generic` — the UNTYPED (<500) fallback.
+ * * `serverError` — the FIXED 5xx constant: no URL, no status text, no
+ *   raw interpolation (W1 — the transport string must never render).
+ */
+const ROOM_ERROR_COPY: Record<
+  RoomErrorSubject,
+  { noun: string; generic: string; serverError: string }
+> = {
+  chatrooms: {
+    noun: 'chatrooms',
+    generic: 'Failed to load chatrooms.',
+    serverError: 'The server could not load these chatrooms — try again.',
+  },
+  messages: {
+    noun: 'messages',
+    generic: 'Failed to load messages.',
+    serverError: 'The server could not load this conversation — try again.',
+  },
+  'global-chatrooms': {
+    noun: 'chatrooms',
+    generic: 'Failed to load chatrooms.',
+    serverError: 'The server could not load the chatroom list — try again.',
+  },
+};
+
+/**
  * Map an HTTP failure onto an HONEST, human-readable message. The lanes
  * are fail-closed: the caller empties the affected list and shows this
  * text — never a fabricated row.
+ *
+ * W1 — the UNTYPED branch is partitioned by STATUS CLASS. Angular ALWAYS
+ * populates `HttpErrorResponse.message` with the transport string
+ * (`Http failure response for <url>: 500 Internal Server Error`), so a
+ * body-less 5xx must never fall through to it: the URL and the status
+ * text would render in the user-visible chatroom pane. On a server-class
+ * failure only the server's TYPED detail (`raw.error` → `detail.message`)
+ * is consulted; otherwise a FIXED, subject-specific constant.
  */
 function describeHttpError(
   err: unknown,
-  subject: 'chatrooms' | 'messages',
+  subject: RoomErrorSubject,
 ): { status: number | null; message: string } {
   const raw = (err ?? {}) as {
     status?: unknown;
     message?: unknown;
     error?: unknown;
   };
+  const copy = ROOM_ERROR_COPY[subject];
   const status = typeof raw.status === 'number' ? raw.status : null;
   if (status === 404) {
     return {
       status,
       message:
-        subject === 'chatrooms'
-          ? 'Not found — these chatrooms no longer exist (they may have been purged).'
-          : 'Not found — this conversation is no longer available (it may have been purged).',
+        subject === 'messages'
+          ? 'Not found — this conversation is no longer available (it may have been purged).'
+          : 'Not found — these chatrooms no longer exist (they may have been purged).',
     };
   }
   if (status === 403) {
     return {
       status,
-      message: `Access denied — these ${subject} are outside your scope.`,
+      // The 403 copy keeps its shipped wording — the subject noun comes
+      // from the per-subject copy set ("chatrooms" / "messages").
+      message: `Access denied — these ${copy.noun} are outside your scope.`,
     };
   }
   if (status === 0) {
     return { status, message: 'Could not reach the server.' };
   }
+  // W1 — server class (5xx) or an UNKNOWN status: the transport message
+  // is NEVER consulted on this path (a chatroom URL and its status text
+  // must not reach the pane). Only the server's typed detail is, and a
+  // body-less failure falls back to the fixed constant.
+  if (status === null || status >= 500) {
+    const detail = extractErrorDetail(raw.error);
+    return { status, message: detail ?? copy.serverError };
+  }
+  // <500 — a client-side status carries no server internals, so the raw
+  // message fallback stays here (and only here).
   const detail = extractErrorDetail(raw.error) ?? extractErrorDetail(raw.message);
-  return { status, message: detail ?? `Failed to load ${subject}.` };
+  // The generic fallback of the chatrooms/messages lanes — unchanged.
+  return { status, message: detail ?? copy.generic };
 }
 
 /** Pull a message out of a FastAPI error body (`{detail: ...}`). */

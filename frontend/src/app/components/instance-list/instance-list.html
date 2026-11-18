@@ -131,6 +131,13 @@
   @let hasChildren = node.children.length > 0;
   @let expanded = isExpanded(instance.instance_id);
   
+  <!-- A-7 (code council): the child-row discriminator keys on parent_id —
+       the SAME key the BUTTON SET uses (the pin/terminate buttons render
+       only for a parent-less row, so a child row's room button sits at
+       right: 72px, not 104px). Keying it on the tree DEPTH disagreed with
+       that set whenever instanceTree promotes an absent-parent instance
+       to the root: the row was styled as a root (104px) while its button
+       set stayed a child's. -->
   <a
     [routerLink]="['/projects', getProjectContext(), 'instances', instance.instance_id]"
     class="instance-item"
@@ -138,7 +145,7 @@
     [class.has-children]="hasChildren"
     [class.pinned]="isPinned(instance)"
     data-gc-room-chat="1"
-    [class.child-row]="depth > 0"
+    [class.child-row]="!!instance.parent_id"
     [style.padding-left.px]="16 + depth * 16"
   >
     <div class="instance-content">

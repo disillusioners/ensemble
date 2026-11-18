@@ -105,44 +105,49 @@
               Retry
             </button>
           </div>
-        } @else if (listedRooms().length === 0) {
-          <div class="pane-state">
-            <mat-icon aria-hidden="true">forum</mat-icon>
-            <span class="pane-state-text">{{ globalEmptyCopy }}</span>
-          </div>
         } @else {
-          <ul class="room-list">
-            @for (room of listedRooms(); track room.room_id) {
-              <li>
-                <button
-                  type="button"
-                  class="room-item"
-                  [class.room-item-selected]="room.room_id === selectedRoomId()"
-                  [attr.aria-pressed]="room.room_id === selectedRoomId()"
-                  (click)="selectRoom(room)"
-                >
-                  <span class="room-item-name">{{ room.name }}</span>
-                  <span class="room-item-meta">
-                    <span class="room-item-state" [class.room-item-state-closed]="room.closed">
-                      {{ room.closed ? 'closed' : 'active' }}
-                    </span>
-                    <span class="room-item-members">
-                      {{ room.member_count }} {{ room.member_count === 1 ? 'member' : 'members' }}
-                    </span>
-                    @if (room.last_message_at) {
-                      <span class="room-item-last" [title]="'Last message at ' + room.last_message_at">
-                        {{ room.last_message_at | date: 'short' }}
+          @if (listedRooms().length === 0) {
+            <div class="pane-state">
+              <mat-icon aria-hidden="true">forum</mat-icon>
+              <span class="pane-state-text">{{ globalEmptyCopy }}</span>
+            </div>
+          } @else {
+            <ul class="room-list">
+              @for (room of listedRooms(); track room.room_id) {
+                <li>
+                  <button
+                    type="button"
+                    class="room-item"
+                    [class.room-item-selected]="room.room_id === selectedRoomId()"
+                    [attr.aria-pressed]="room.room_id === selectedRoomId()"
+                    (click)="selectRoom(room)"
+                  >
+                    <span class="room-item-name">{{ room.name }}</span>
+                    <span class="room-item-meta">
+                      <span class="room-item-state" [class.room-item-state-closed]="room.closed">
+                        {{ room.closed ? 'closed' : 'active' }}
                       </span>
-                    } @else {
-                      <span class="room-item-last room-item-last-empty">no messages yet</span>
-                    }
-                  </span>
-                </button>
-              </li>
-            }
-          </ul>
+                      <span class="room-item-members">
+                        {{ room.member_count }} {{ room.member_count === 1 ? 'member' : 'members' }}
+                      </span>
+                      @if (room.last_message_at) {
+                        <span class="room-item-last" [title]="'Last message at ' + room.last_message_at">
+                          {{ room.last_message_at | date: 'short' }}
+                        </span>
+                      } @else {
+                        <span class="room-item-last room-item-last-empty">no messages yet</span>
+                      }
+                    </span>
+                  </button>
+                </li>
+              }
+            </ul>
+          }
           @if (globalRoomsTruncated()) {
-            <!-- The list is a PREFIX of the nest — say so (N8/N6). -->
+            <!-- The list is a PREFIX of the nest — say so (N8/N6). A-2:
+                 the notice is hoisted OUT of the non-empty branch, so an
+                 EMPTY view discloses the truncation too (and the empty
+                 copy itself is truncation-aware). -->
             <div class="pane-truncated" role="status">
               <mat-icon aria-hidden="true">info</mat-icon>
               <span class="pane-truncated-text">{{ truncationCopy }}</span>

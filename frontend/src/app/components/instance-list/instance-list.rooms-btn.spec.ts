@@ -230,7 +230,10 @@ describe('InstanceListComponent rooms-btn (gc-fe-surfaces P3)', () => {
     expect(navigateSpy).not.toHaveBeenCalled();
   });
 
-  // (viii) child-row discriminator
+  // (viii) child-row discriminator — A-7 (code council): the
+  // discriminator keys on parent_id, the SAME key the BUTTON SET uses
+  // (the pin/terminate buttons render only for a parent-less row, and a
+  // child row's room button sits at right: 72px, not 104px).
   it('(viii) child row carries .child-row class', () => {
     const child = makeInstance({ instance_id: 'child-1', parent_id: 'parent-1' });
     const parent = makeInstance({ instance_id: 'parent-1', parent_id: null });
@@ -262,5 +265,43 @@ describe('InstanceListComponent rooms-btn (gc-fe-surfaces P3)', () => {
     const warn = fixture.nativeElement.querySelector('.room-map-truncated');
     expect(warn).not.toBeNull();
     expect((warn.textContent || '').toLowerCase()).toContain('truncated');
+  });
+
+  // (x) A-7: instanceTree PROMOTES an absent-parent instance to the root,
+  // so the tree DEPTH is 0 while the BUTTON SET still treats the row as a
+  // child (no pin/terminate ⇒ the room button belongs at the child
+  // offset). The discriminator must AGREE with the button set — keying
+  // it on the depth left the row styled as a root (104px) on a child row
+  // (the 32px gap).
+  it('(x) A-7: an instance whose parent is ABSENT from the list still renders as a child row', () => {
+    const orphan = makeInstance({ instance_id: 'orphan-1', parent_id: 'missing-parent' });
+    setup([orphan]);
+    fixture.detectChanges();
+    flushRooms({ rooms: [{ ...JOINED_ROOM, member_instance_ids: ['orphan-1'] }], truncated: false });
+
+    const row = fixture.nativeElement.querySelector('.instance-item') as HTMLElement;
+    expect(row).not.toBeNull();
+    // The tree promoted it to the root, but the button set is a child's:
+    // the pin button is NOT rendered.
+    expect(row.querySelector('.pin-btn')).toBeNull();
+    // ⇒ the discriminator agrees with the button set.
+    expect(row.classList.contains('child-row')).toBe(true);
+    // … and the child-row room button is present.
+    expect(row.querySelector('.rooms-btn')).not.toBeNull();
+  });
+
+  // (xi) A-7: the discriminator does NOT invert — a parent-less root row
+  // is NOT a child row (its button set is the root's: the pin renders).
+  it('(xi) A-7: a parent-less root row does NOT carry .child-row', () => {
+    const root = makeInstance({ instance_id: 'root-1', parent_id: null });
+    setup([root]);
+    fixture.detectChanges();
+    flushRooms({ rooms: [{ ...JOINED_ROOM, member_instance_ids: ['root-1'] }], truncated: false });
+
+    const row = fixture.nativeElement.querySelector('.instance-item') as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(row.classList.contains('child-row')).toBe(false);
+    // The root button set renders the pin button.
+    expect(row.querySelector('.pin-btn')).not.toBeNull();
   });
 });

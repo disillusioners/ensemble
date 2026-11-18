@@ -320,6 +320,8 @@ describe('RoomService', () => {
     const req = httpMock.expectOne('/api/rooms');
     expect(req.request.method).toBe('GET');
     expect(req.request.params.has('instance_id')).toBe(false);
+    // A-1 — the anchor-less lane keeps its posture: NO explicit limit.
+    expect(req.request.params.has('limit')).toBe(false);
     req.flush({ rooms: [], truncated: false });
   });
 
@@ -327,6 +329,17 @@ describe('RoomService', () => {
     service.fetchAllRooms('inst-9').subscribe();
     const req = httpMock.expectOne((r) => r.url === '/api/rooms');
     expect(req.request.params.get('instance_id')).toBe('inst-9');
+    req.flush({ rooms: [], truncated: false });
+  });
+
+  it('A-1: the JOINED read asks for the server-side page cap (the post-clamp filter needs the full readable set)', () => {
+    service.fetchAllRooms('inst-9').subscribe();
+    const req = httpMock.expectOne((r) => r.url === '/api/rooms');
+    expect(req.request.params.get('instance_id')).toBe('inst-9');
+    // The server clamps the READABLE set (its default page is 200) BEFORE
+    // the FE filters the joined subset client-side — so the joined read
+    // asks for the route's hard cap explicitly.
+    expect(req.request.params.get('limit')).toBe('500');
     req.flush({ rooms: [], truncated: false });
   });
 
@@ -676,4 +689,119 @@ describe('RoomService', () => {
     }
   });
 
+  // ── W-1 — the 5xx transport-string leak (code council) ─────────────────
+  //
+  // Angular ALWAYS populates HttpErrorResponse.message with the transport
+  // string ("Http failure response for <url>: 500 Internal Server Error"),
+  // so a body-less 5xx used to render the URL + the status text in the
+  // pane. The server-error path now renders a FIXED, subject-specific
+  // constant and NEVER consults the raw transport message.
+
+  it('W-1: a body-less 5xx renders the fixed chatrooms copy (rooms lane) — no URL, no status text', () => {
+    service.loadRooms('inst-1');
+    httpMock
+      .expectOne('/api/instances/inst-1/rooms')
+      .flush(null, { status: 500, statusText: 'Internal Server Error' });
+    expect(service.rooms()).toEqual([]);
+    expect(service.roomsErrorStatus()).toBe(500);
+    expect(service.roomsError()).toBe('The server could not load these chatrooms — try again.');
+    // No transport string, no URL, no status text.
+    expect(service.roomsError()).not.toContain('Http failure response');
+    expect(service.roomsError()).not.toContain('/api/instances/inst-1/rooms');
+    expect(service.roomsError()).not.toContain('500');
+    expect(service.roomsError()).not.toContain('Internal Server Error');
+  });
+
+  it('W-1: a body-less 5xx renders the fixed conversation copy (messages lane)', () => {
+    service.loadMessages('r-1', false);
+    httpMock
+      .expectOne((r) => r.url === '/api/rooms/r-1/messages')
+      .flush(null, { status: 503, statusText: 'Service Unavailable' });
+    expect(service.messages()).toEqual([]);
+    expect(service.messagesErrorStatus()).toBe(503);
+    expect(service.messagesError()).toBe('The server could not load this conversation — try again.');
+    expect(service.messagesError()).not.toContain('Http failure response');
+    expect(service.messagesError()).not.toContain('/api/rooms/r-1/messages');
+    expect(service.messagesError()).not.toContain('503');
+  });
+
+  it('W-1: a body-less 5xx renders the fixed chatroom-list copy (global lane)', () => {
+    service.loadGlobalRooms('joined', 'inst-9');
+    httpMock
+      .expectOne((r) => r.url === '/api/rooms')
+      .flush(null, { status: 500, statusText: 'Internal Server Error' });
+    expect(service.globalRooms()).toEqual([]);
+    expect(service.globalRoomsErrorStatus()).toBe(500);
+    expect(service.globalRoomsError()).toBe('The server could not load the chatroom list — try again.');
+    expect(service.globalRoomsError()).not.toContain('Http failure response');
+    expect(service.globalRoomsError()).not.toContain('instance_id');
+    expect(service.globalRoomsError()).not.toContain('500');
+  });
+
+  it('W-1: a 5xx WITH a server detail renders that detail (not the fixed constant)', () => {
+    service.loadRooms('inst-1');
+    httpMock
+      .expectOne('/api/instances/inst-1/rooms')
+      .flush(
+        { detail: 'the room service is unavailable' },
+        { status: 500, statusText: 'Internal Server Error' },
+      );
+    expect(service.roomsError()).toBe('the room service is unavailable');
+    expect(service.roomsError()).not.toContain('Http failure response');
+  });
+
+  it('W-1: a 5xx with a structured detail renders detail.message', () => {
+    service.loadRooms('inst-1');
+    httpMock
+      .expectOne('/api/instances/inst-1/rooms')
+      .flush(
+        { detail: { message: 'the room list could not be read right now' } },
+        { status: 500, statusText: 'Internal Server Error' },
+      );
+    expect(service.roomsError()).toBe('the room list could not be read right now');
+  });
+
+  it('W-1: the typed sub-500 copies are UNCHANGED (404 / 403 / 0)', () => {
+    // 404 — the rooms lane.
+    service.loadRooms('inst-1');
+    httpMock
+      .expectOne('/api/instances/inst-1/rooms')
+      .flush({ detail: 'not found' }, { status: 404, statusText: 'Not Found' });
+    expect(service.roomsErrorStatus()).toBe(404);
+    expect(service.roomsError()).toBe(
+      'Not found — these chatrooms no longer exist (they may have been purged).',
+    );
+
+    // 403 — the global lane keeps the shipped "these chatrooms" wording.
+    service.loadGlobalRooms('global');
+    httpMock
+      .expectOne((r) => r.url === '/api/rooms')
+      .flush({ detail: 'forbidden' }, { status: 403, statusText: 'Forbidden' });
+    expect(service.globalRoomsErrorStatus()).toBe(403);
+    expect(service.globalRoomsError()).toBe(
+      'Access denied — these chatrooms are outside your scope.',
+    );
+
+    // 0 — unreachable (the status branch wins over the status-class split).
+    service.loadMessages('r-1', false);
+    httpMock
+      .expectOne((r) => r.url === '/api/rooms/r-1/messages')
+      .flush(null, { status: 0, statusText: 'Unknown Error' });
+    expect(service.messagesErrorStatus()).toBe(0);
+    expect(service.messagesError()).toBe('Could not reach the server.');
+  });
+
+  it('W-1: a CLIENT-side status keeps the raw fallback — never the fixed server-error copy', () => {
+    service.loadRooms('inst-1');
+    httpMock
+      .expectOne('/api/instances/inst-1/rooms')
+      .flush(null, { status: 422, statusText: 'Unprocessable Entity' });
+    expect(service.roomsErrorStatus()).toBe(422);
+    // The fixed 5xx constant is NOT used below 500 (the raw-message
+    // fallback is retained there).
+    expect(service.roomsError()).not.toBe(
+      'The server could not load these chatrooms — try again.',
+    );
+    expect(service.roomsError()).toContain('422');
+  });
 });
