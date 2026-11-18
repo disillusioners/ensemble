@@ -1,6 +1,9 @@
 """DB-backed daemon runtime settings — managed-key registry, the ONE
 shared tier resolver, override CRUD, and the boot apply hook.
 
+Module-size rationale (band 1000–3000): single owner of the settings
+registry + resolution ladder + boot apply; cohesive, not split.
+
 (db-backed-settings commission, Phase 1; plan set:
 ``.agents/shared/planning/db-backed-settings/`` — BINDING.)
 
@@ -686,7 +689,7 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
         ),
     ),
     # ── wedge-notice emission kill-switch (S4 — wake-path-carrier-fix) ──
-    # The SEVENTH requires_restart=False key (the seventh).
+    # The SEVENTH requires_restart=False key.
     #
     # SCOPE: EMISSION ONLY. The switch gates the wedge-NOTICE ENQUEUE
     # and NOTHING else — never the watchdog's detection, never the

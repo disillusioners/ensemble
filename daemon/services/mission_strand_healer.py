@@ -1,5 +1,7 @@
 """Mission-strand healer — watcher-loss terminal strand (2026-10-14).
 
+Module-size rationale (band 1000-3000): cohesive single module; not split.
+
 Closes the wedge class the live RCA adjudicated (mission b6e24d78 /
 receipt 6fc156f3): a spawned-but-never-dispatched grandchild worker
 persisted NON-TERMINAL (idle, never-dispatched ghost, terminal direct

@@ -1,5 +1,7 @@
 """Reconciler wedge-fix regression tests (T1, T2, T3, T4).
 
+Module-size rationale (band 1000-3000): cohesive single module; not split.
+
 These tests pin the four contracts introduced by the wedge-fix batch:
 
 * T1 — JobItem-less PROCESS_REPORT PENDING task + OLD terminal

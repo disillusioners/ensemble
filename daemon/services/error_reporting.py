@@ -687,6 +687,8 @@ class ErrorReportingService:
                         # above already fired the row), and its
                         # delivery is per-row filtered by
                         # ``DELIVER(w)`` inside the helper.
+                        # Cross-module call into ChildReportsService._fire_terminal_child_and_deliver
+                        # (S1 fire + delivery); kept as a private seam by design.
                         try:
                             await _child_reports_svc._fire_terminal_child_and_deliver(
                                 instance_id,

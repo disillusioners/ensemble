@@ -1,5 +1,7 @@
 """Instance ACT tools — the ``instance_ops`` privileged category (6 tools).
 
+Module-size rationale (band 1000-3000): cohesive single module; not split.
+
 Six ACTS over the instance fleet, each one an audited, gated wrapper
 over an EXISTING daemon primitive (D-3 — no new daemon subsystem):
 

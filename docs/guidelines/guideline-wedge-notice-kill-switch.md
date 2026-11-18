@@ -85,7 +85,7 @@ into any of those would silence the FIX, not the notice.
 ## 6. Evidence discipline
 
 - The notices themselves are `message_queue` rows (type
-  `completion_report`, source `system:watchdog:wedge`) carrying the
+  `system`, source `system:watchdog:wedge`) carrying the
   `wedge_notice` metadata flag and the reason codes in the body.
 - The watchdog keeps in-memory per-parent episode fingerprints (the
   reason-code set); they are **process-local** and reset on daemon restart.

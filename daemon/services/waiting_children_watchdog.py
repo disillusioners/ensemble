@@ -1,5 +1,7 @@
 """WAITING_CHILDREN hang watchdog.
 
+Module-size rationale (band 1000-3000): single owner of the hang + wedge passes; cohesive, not split.
+
 Issue: when a parent enters ``WAITING_CHILDREN`` to await one or more
 child completion reports, it sleeps on its dependency watcher until
 ``child_reports`` / ``error_reporting`` drains. The event-driven path
@@ -153,8 +155,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from daemon.repositories.dependency_bus.models import DependencyWatcher
 
 from daemon.constants import TERMINAL_INSTANCE_STATUSES
 from daemon.repositories.instance.models import InstanceStatus
@@ -180,21 +184,9 @@ WATCHDOG_SOURCE: str = "system:watchdog"
 #: durable ``MessageQueue.source`` column.
 WEDGE_SOURCE: str = "system:watchdog:wedge"
 
-#: DELTA 2 (watcher-loss terminal strand, 2026-10-14) — wedge-pass
-#: re-arm cooldown. After a wedge notice fires, the parent becomes
-#: wedge-eligible again once this much wall-clock time has elapsed
-#: (``time.monotonic()`` based), EVEN IF it never left
-#: WAITING_CHILDREN: the wake re-running the completion path and
-#: re-parking (gate re-blocks, no carrier, no children) must NOT
-#: silence the backstop for the daemon lifetime — the one-shot
-#: ``set``-membership anti-spam did exactly that (live evidence
-#: 2026-10-14: fired 10:30:31, re-parked 10:33:40, silent
-#: thereafter). 30 minutes: below the default 1h scan cadence, so a
-#: re-parked parent is re-eligible by the NEXT tick (re-park →
-#: re-arm → next tick re-wake), while still bounding duplicate
-#: notices when the cadence is tightened. Episode-boundary clears
-#: (parent left WC / live carrier appeared) drop the entry outright
-#: and re-enable immediately, unchanged.
+#: Retained for backward test compatibility only (S4 replaced the
+#: TTL cooldown with row-check episode termination). Do NOT delete:
+#: existing tests import this symbol. No runtime use remains.
 WEDGE_REARM_COOLDOWN_SECONDS: float = 30 * 60
 
 
@@ -665,34 +657,15 @@ class WaitingChildrenWatchdog:
         # episode-end logic.
         self._notified: set[tuple[str, str]] = set()
 
-        # Wedge-fix backstop cooldown map: parents currently in a
-        # notified wedge episode → the ``time.monotonic()`` instant of
-        # the last wedge notice. INDEPENDENT of ``_notified`` so a
-        # hang notice does not preempt a wedge notice (and vice
-        # versa) — they target different signatures. An episode ends
-        # when the parent leaves ``WAITING_CHILDREN`` or a live
-        # carrier appears.
-        #
-        # DELTA 2 (watcher-loss terminal strand, 2026-10-14) — the
-        # previous bare ``set[str]`` was ONE-SHOT-FOREVER for a
-        # wake that RE-PARKS: the wedge fired, the wake re-ran the
-        # completion path, the gate re-blocked, the root re-parked
-        # at WAITING_CHILDREN with no carrier and no children — and
-        # the entry (only cleared by leave-WC/live-carrier, neither
-        # of which happens on a re-park) silenced the wedge pass for
-        # the DAEMON LIFETIME (live evidence 2026-10-14: fired
-        # 10:30:31, re-hit the gate 10:33:40, re-parked, silent
-        # thereafter). Cooldown-based re-eligibility: a re-parked
-        # parent becomes wedge-eligible again after
-        # ``WEDGE_REARM_COOLDOWN_SECONDS``, so each re-park gets a
-        # fresh wake at the pass's cadence instead of eternal
-        # silence.
-        # S4: the wedge-episode map — parent id → the REASON-CODE
+        # Wedge-episode map: parent id → the REASON-CODE
         # FINGERPRINT (the sorted tuple of the codes whose row-checks
-        # held when the notice was emitted). NOT a timestamp: the TTL
-        # is dropped (S4) — an episode ends on the ROW-CHECK (the S4
-        # subject empty), never on a timer and never on WC membership
-        # (the notice's own enqueue flips WC→RUNNING).
+        # held when the notice was emitted). INDEPENDENT of
+        # ``_notified`` so a hang notice does not preempt a wedge
+        # notice (and vice versa) — they target different
+        # signatures. NOT a timestamp: the TTL cooldown is dropped
+        # (S4) — an episode ends on the ROW-CHECK (the S4 subject
+        # empty), never on a timer and never on WC membership (the
+        # notice's own enqueue flips WC→RUNNING).
         self._wedge_notified: dict[str, tuple[str, ...]] = {}
         # The per-tick memo of the emission kill-switch (ONE settings
         # read per tick; reset at the top of every ``run_once``).
@@ -826,7 +799,7 @@ class WaitingChildrenWatchdog:
 
     def _fetch_wedge_subjects(
         self, parent_ids: list[str]
-    ) -> dict[str, tuple[int, list]]:
+    ) -> dict[str, tuple[int, list["DependencyWatcher"]]]:
         """The batched SUBJECT read — the watchdog's FIRST bus read.
 
         Returns ``{parent_id: (total_pending, unfulfillable_rows)}``:
@@ -861,7 +834,14 @@ class WaitingChildrenWatchdog:
             return None
         try:
             rows = repo.get_by_instance(parent_id)
-        except Exception:  # noqa: BLE001 — fail-soft (no claim)
+        except Exception as exc:  # noqa: BLE001 — fail-soft (no claim)
+            logger.warning(
+                "[Watchdog] _queued_completion_report_id failed for "
+                "%s...: %s: %s",
+                parent_id[:8],
+                type(exc).__name__,
+                exc,
+            )
             return None
         if not isinstance(rows, (list, tuple)):
             # An async double (AsyncMock) hands back a coroutine — a
@@ -890,7 +870,8 @@ class WaitingChildrenWatchdog:
             # the ``queued_report`` code would appear, the episode
             # fingerprint would change, and the pass would notify
             # again (an endless self-notice loop).
-            meta = getattr(row, "message_metadata", None) or {}
+            _mm = getattr(row, "message_metadata", None)
+            meta = _mm if isinstance(_mm, dict) else {}
             if meta.get("wedge_notice") or meta.get("watchdog_notice"):
                 continue
             if getattr(row, "source", None) in (
@@ -906,13 +887,27 @@ class WaitingChildrenWatchdog:
         ``non_terminal_children`` reason code's number)."""
         try:
             child_ids = self._repo.list_child_ids_permanent(parent_id)
-        except Exception:  # noqa: BLE001 — fail-soft
+        except Exception as exc:  # noqa: BLE001 — fail-soft
+            logger.warning(
+                "[Watchdog] _count_non_terminal_children list failed for "
+                "%s...: %s: %s",
+                parent_id[:8],
+                type(exc).__name__,
+                exc,
+            )
             return 0
         if not child_ids:
             return 0
         try:
             statuses = self._repo.get_statuses(list(child_ids))
-        except Exception:  # noqa: BLE001 — fail-soft
+        except Exception as exc:  # noqa: BLE001 — fail-soft
+            logger.warning(
+                "[Watchdog] _count_non_terminal_children statuses failed "
+                "for %s...: %s: %s",
+                parent_id[:8],
+                type(exc).__name__,
+                exc,
+            )
             return 0
         return sum(
             1
@@ -1816,7 +1811,7 @@ class WaitingChildrenWatchdog:
             _subject_candidates = sorted(
                 set(parent_ids) | set(self._wedge_notified)
             )
-            subjects: dict[str, tuple[int, list]] = {}
+            subjects: dict[str, tuple[int, list["DependencyWatcher"]]] = {}
             try:
                 subjects = self._fetch_wedge_subjects(
                     _subject_candidates
@@ -1871,9 +1866,7 @@ class WaitingChildrenWatchdog:
                 # with live children or a live carrier stays silent.
                 if parent_has_active_b_notice(parent_id):
                     _l6_anchor = (
-                        (parent_row.instance_metadata or {}).get(
-                            L6_ANCHOR_META_KEY
-                        )
+                        (parent_row.instance_metadata.get(L6_ANCHOR_META_KEY) if isinstance(parent_row.instance_metadata, dict) else None)
                         if parent_row is not None
                         else None
                     )
@@ -1964,95 +1957,109 @@ class WaitingChildrenWatchdog:
                 # ``enqueue_message`` wake primitive as the hang
                 # pass — it writes MessageQueue + Task rows, flips
                 # WC→RUNNING, and notifies the worker pool.
-                notice = _build_wedge_notice(
-                    parent_id=parent_id,
-                    reason_codes=_codes,
-                    subject_child_ids=[
-                        str(
-                            ((_row.follow_up_payload or {}).get(
-                                "metadata", {}
-                            ) or {}).get("child_id", "")
-                        )
-                        for _row in _subject_rows
-                    ],
-                    queued_report_id=_queued_report_id,
-                    non_terminal_child_count=_non_terminal_count,
-                )
-                await self._manager.enqueue_message(
-                    instance_id=parent_id,
-                    message=notice,
-                    source=WEDGE_SOURCE,
-                    priority=0,
-                    metadata={
-                        "wedge_notice": True,
-                        "wedge_reason": (
-                            "wc_parent_zero_children_no_carrier"
-                        ),
-                    },
-                )
-                # ── Batch A — A5 (2026-09-11): direct notify ────
-                # ``enqueue_message`` internally calls
-                # ``worker_pool.notify_work()`` once the Task row is
-                # committed, but that notify has proven unreliable
-                # on the wedge-notice path (incident 33252
-                # 2026-09-11: the wedge notice was stranded PENDING
-                # for zero claims ever). The cause is opaque — could
-                # be a lost wake between the enqueue commit and the
-                # pool's notify, or a defer-gate race that parked the
-                # notice behind a busy witness.
-                #
-                # The defensive fix: dispatch a DIRECT notify from
-                # the watchdog, AFTER ``enqueue_message`` returns, so
-                # the pool sees the wake regardless of whatever race
-                # swallowed the creation-time notify. Idempotent on
-                # the pool side (``notify_work()`` is a condition-
-                # variable signal — double-notify is wasted but
-                # benign). Wrapped in try/except so a transient
-                # pool-side blip does NOT abort the sweep (A3 sweep
-                # is the systemic backstop).
-                # Phase 2 / chat-source-worker-lane (D5): route
-                # through the manager helper — both default + chat
-                # pools receive the wake so freshly-eligible rows on
-                # either lane surface in the next claim cycle. The
-                # helper None-guards every pool and per-pool
-                # exceptions are swallowed (A3 sweep is the systemic
-                # backstop).
-                #
-                # The wedge-pass wake site is async (this is inside
-                # a coroutine), so we await the helper's return
-                # value when it is a coroutine — preserves the
-                # pre-Phase-B ``inspect.iscoroutine`` handling for
-                # ``AsyncMock`` fixtures that return a coroutine on
-                # ``notify_work()`` (otherwise the un-awaited
-                # coroutine emits a ``RuntimeWarning`` and breaks
-                # ``assert_awaited_once`` tests).
-                #
-                # ``safe_notify_all_pools`` (Phase B) holds the
-                # Mock-compat ``__dict__``-probe + try/except +
-                # legacy-fixture fallback logic that used to be
-                # duplicated here. Consolidated here as a single
-                # helper call with sync/async dispatch.
-                import inspect
+                try:
+                    notice = _build_wedge_notice(
+                        parent_id=parent_id,
+                        reason_codes=_codes,
+                        subject_child_ids=[
+                            str(
+                                (
+                                    (lambda _m: _m.get("child_id", "") if isinstance(_m, dict) else "")
+                                )(
+                                    (
+                                        (lambda _p: (_p.get("metadata") if isinstance(_p, dict) else None))
+                                        (_row.follow_up_payload if isinstance(_row.follow_up_payload, dict) else {})
+                                    )
+                                )
+                            )
+                            for _row in _subject_rows
+                        ],
+                        queued_report_id=_queued_report_id,
+                        non_terminal_child_count=_non_terminal_count,
+                    )
+                    await self._manager.enqueue_message(
+                        instance_id=parent_id,
+                        message=notice,
+                        source=WEDGE_SOURCE,
+                        priority=0,
+                        metadata={
+                            "wedge_notice": True,
+                            "wedge_reason": (
+                                "wc_parent_zero_children_no_carrier"
+                            ),
+                        },
+                    )
+                    # ── Batch A — A5 (2026-09-11): direct notify ────
+                    # ``enqueue_message`` internally calls
+                    # ``worker_pool.notify_work()`` once the Task row is
+                    # committed, but that notify has proven unreliable
+                    # on the wedge-notice path (incident 33252
+                    # 2026-09-11: the wedge notice was stranded PENDING
+                    # for zero claims ever). The cause is opaque — could
+                    # be a lost wake between the enqueue commit and the
+                    # pool's notify, or a defer-gate race that parked the
+                    # notice behind a busy witness.
+                    #
+                    # The defensive fix: dispatch a DIRECT notify from
+                    # the watchdog, AFTER ``enqueue_message`` returns, so
+                    # the pool sees the wake regardless of whatever race
+                    # swallowed the creation-time notify. Idempotent on
+                    # the pool side (``notify_work()`` is a condition-
+                    # variable signal — double-notify is wasted but
+                    # benign). Wrapped in try/except so a transient
+                    # pool-side blip does NOT abort the sweep (A3 sweep
+                    # is the systemic backstop).
+                    # Phase 2 / chat-source-worker-lane (D5): route
+                    # through the manager helper — both default + chat
+                    # pools receive the wake so freshly-eligible rows on
+                    # either lane surface in the next claim cycle. The
+                    # helper None-guards every pool and per-pool
+                    # exceptions are swallowed (A3 sweep is the systemic
+                    # backstop).
+                    #
+                    # The wedge-pass wake site is async (this is inside
+                    # a coroutine), so we await the helper's return
+                    # value when it is a coroutine — preserves the
+                    # pre-Phase-B ``inspect.iscoroutine`` handling for
+                    # ``AsyncMock`` fixtures that return a coroutine on
+                    # ``notify_work()`` (otherwise the un-awaited
+                    # coroutine emits a ``RuntimeWarning`` and breaks
+                    # ``assert_awaited_once`` tests).
+                    #
+                    # ``safe_notify_all_pools`` (Phase B) holds the
+                    # Mock-compat ``__dict__``-probe + try/except +
+                    # legacy-fixture fallback logic that used to be
+                    # duplicated here. Consolidated here as a single
+                    # helper call with sync/async dispatch.
+                    import inspect
 
-                notify_result = safe_notify_all_pools(
-                    self._manager,
-                    site_label="[Watchdog] wedge-pass",
-                )
-                if inspect.iscoroutine(notify_result):
-                    await notify_result
-                # DELTA 2: stamp the notify instant (cooldown anchor).
-                # The cooldown re-arms the pass for the NEXT wake if
-                # this one re-parks.
-                # S4: the episode stamp is the REASON-CODE FINGERPRINT
-                # (not a timestamp — the TTL is dropped; the episode
-                # ends on the row-check, not on a timer).
-                self._wedge_notified[parent_id] = _fingerprint
-                self._wedge_notices_enqueued_total += 1
-                logger.warning(
-                    f"[Watchdog] Wedge notice enqueued for parent "
-                    f"{parent_id[:8]}... (no live carrier, zero "
-                    f"non-terminal children); waking parked WC turn."
-                )
+                    notify_result = safe_notify_all_pools(
+                        self._manager,
+                        site_label="[Watchdog] wedge-pass",
+                    )
+                    if inspect.iscoroutine(notify_result):
+                        await notify_result
+                    # S4: stamp the REASON-CODE FINGERPRINT as the episode
+                    # marker (not a timestamp — the TTL cooldown is
+                    # dropped; the episode ends on the row-check, not on a
+                    # timer). The fingerprint re-arms the pass for the NEXT
+                    # wake if this one re-parks with a different reason set.
+                    self._wedge_notified[parent_id] = _fingerprint
+                    self._wedge_notices_enqueued_total += 1
+                    logger.warning(
+                        f"[Watchdog] Wedge notice enqueued for parent "
+                        f"{parent_id[:8]}... (no live carrier, zero "
+                        f"non-terminal children); waking parked WC turn."
+                    )
+                except Exception as _parent_err:  # noqa: BLE001 — per-parent isolation
+                    logger.warning(
+                        "[Watchdog] wedge composition/delivery failed for "
+                        "parent %s...: %s: %s",
+                        parent_id[:8],
+                        type(_parent_err).__name__,
+                        _parent_err,
+                    )
+                    continue
         except Exception as exc:
             # Per-tick error isolation — a wedge-pass failure must
             # NOT crash the whole ``run_once``. The hang pass already

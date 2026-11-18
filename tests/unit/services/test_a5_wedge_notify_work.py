@@ -55,7 +55,6 @@ carrier) is forced via mocks so the wedge pass actually fires.
 from __future__ import annotations
 
 import logging
-import time
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 

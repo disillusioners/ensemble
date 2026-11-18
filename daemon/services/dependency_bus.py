@@ -114,6 +114,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlmodel import Session, select
 
+from daemon.constants import TERMINAL_INSTANCE_STATUSES
 from daemon.repositories.dependency_bus import (
     DependencyWatcher,
     DependencyWatcherRepository,
@@ -419,12 +420,10 @@ async def cancel_bus_watchers_for_task_async(
 #            OR instance-status-of(w.follow_up_payload.metadata.child_id)
 #               NOT IN INSTANCE_TERMINAL_SET)
 # * ``PARK(parent)`` = count_fulfillable_pending_for_target(parent) > 0
-INSTANCE_TERMINAL_SET: frozenset[str] = frozenset(
-    {"completed", "terminated", "error", "failed"}
-)
+INSTANCE_TERMINAL_SET: frozenset[str] = TERMINAL_INSTANCE_STATUSES
 
 
-def _watched_child_id_of(row: Any) -> str | None:
+def _watched_child_id_of(row: DependencyWatcher) -> str | None:
     """Extract ``follow_up_payload.metadata.child_id`` (None-safe)."""
     payload = getattr(row, "follow_up_payload", None)
     if not isinstance(payload, dict):
@@ -437,7 +436,7 @@ def _watched_child_id_of(row: Any) -> str | None:
 
 
 def watcher_row_is_fulfillable(
-    row: Any,
+    row: DependencyWatcher,
     child_statuses: dict[str, str],
 ) -> bool:
     """FULFILLABLE(w) — the pure per-row predicate (S3).
@@ -1477,7 +1476,11 @@ class DependencyBus:
 
         ``pending_rows``: rows fetched by the CALLER inside its own
         open transaction (the R4 in-transaction shape — the park
-        decision must be computed inside that existing transaction).
+        decision's watcher-row leg is computed inside that existing
+        transaction). The child-status leg runs via
+        ``_instance_statuses_batched`` in a SEPARATE repository
+        session (C2 serialization is held by the per-parent lock,
+        not by sharing this transaction with the status read).
         When omitted, the PENDING rows are fetched through the
         repository's own session (the R2/R3/R5/R6 worker-thread
         shape). No per-row session N+1 in either shape: rows in one
@@ -1512,7 +1515,7 @@ class DependencyBus:
         instance row, a read failure, or a null ``child_id`` counts as
         FULFILLABLE (so an uncertainty never manufactures a subject).
         """
-        ids = [str(i) for i in (target_instance_ids or []) if i]
+        ids = list(dict.fromkeys(str(i) for i in (target_instance_ids or []) if i))
         if not ids:
             return {}
         rows = self._repo.fetch_pending_for_targets(ids)
@@ -1528,6 +1531,7 @@ class DependencyBus:
                 if isinstance(cid, str) and cid
             }
         )
+        read_failed = False
         try:
             statuses = self._instance_statuses_batched(child_ids)
         except Exception as exc:  # noqa: BLE001 — fail-CLOSED

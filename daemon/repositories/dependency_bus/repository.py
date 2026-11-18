@@ -655,12 +655,21 @@ class DependencyWatcherRepository:
                 )
             ).first()
             if row is None:
+                logger.debug(
+                    "mark_delivered_watch_id: row missing for watch_id=%s...",
+                    str(watch_id)[:8],
+                )
                 return False
             existing = row.watcher_metadata or {}
             if not isinstance(existing, dict):
                 existing = {}
             if existing.get(DELIVERED_WATCH_ID_KEY):
                 # Already claimed — a re-enqueue attempt is a no-op.
+                logger.debug(
+                    "mark_delivered_watch_id: already claimed for "
+                    "watch_id=%s...",
+                    str(watch_id)[:8],
+                )
                 return False
             merged = {**existing, DELIVERED_WATCH_ID_KEY: watch_id}
             stmt = (

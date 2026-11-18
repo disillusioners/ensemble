@@ -1,5 +1,7 @@
 """Path-agnostic pipeline for message processing.
 
+Module-size rationale (band 1000-3000): cohesive single module; not split.
+
 Phase 5 of the CorrelationManager migration. The daemon has two physical
 dispatchers that both process user/internal messages against an
 instance's langgraph thread:
