@@ -4881,6 +4881,58 @@ _run_bounded() {
     return "$rc"
 }
 
+# _bounded_rc_kind <rc> — the HONEST outcome class of a bounded-child rc, as
+# the journal ROW token (`kind=`). Pure string function, no I/O, no side
+# effects: the three probe call sites keep their own site label / unit /
+# budget-knob name (T1, promote-handback-halt Phase 1 §4.3).
+#
+# WHY the taxonomy lives HERE and not in _run_bounded: _run_bounded is the
+# house's portable replacement for GNU timeout(1) and its only legitimate
+# remap is 137|143 → 124 (a killed child). Teaching it `systemctl` semantics
+# would poison every other caller (stop_via_stop_script, _df_systemctl), so
+# _run_bounded stays BYTE-UNCHANGED and the taxonomy is applied where the
+# child rc is INTERPRETED (§4.1 of the plan).
+#
+#   124 → budget        (the watcher SIGTERM→SIGKILL'd the child at the budget)
+#   else → nonzero_exit (a GENUINE command failure — including rc 3, which
+#                        `systemctl is-active` returns for every inactive unit;
+#                        the CALL SITE decides whether that deserves a journal
+#                        row at all — §4.3 site 2 grants rc 3 an INFO line only)
+_bounded_rc_kind() {
+    case "${1:-}" in
+        124) printf '%s' "budget" ;;
+        *)   printf '%s' "nonzero_exit" ;;
+    esac
+}
+
+# _bounded_rc_reason <rc> [<state-hint>] [<budget-descriptor>] — the ROW
+# `reason=` payload for a bounded-child rc. Pure string function.
+#   124 → "timeout(<budget-descriptor>)"   (byte-identical to legacy when the
+#         caller passes e.g. SYSTEMCTL_PROBE_BUDGET_S=5)
+#   else → "nonzero rc=<rc>" [+ " state=<state-hint>" when a hint is given]
+# The caller supplies the `child: ` prefix (it owns the site label/unit), so
+# the 124 arms can reproduce the legacy journal text character-for-character.
+_bounded_rc_reason() {
+    local __rc="${1:-}" __hint="${2:-}" __bdescr="${3:-}"
+    case "$__rc" in
+        124) printf 'timeout(%s)' "${__bdescr:-budget}" ;;
+        *)
+            if [ -n "$__hint" ]; then
+                printf 'nonzero rc=%s state=%s' "$__rc" "$__hint"
+            else
+                printf 'nonzero rc=%s' "$__rc"
+            fi
+            ;;
+    esac
+}
+
+# _bounded_state_hint <raw> — sanitize a probe's stdout token for journaling
+# ([a-z-]{1,20}; empty → empty, the caller applies its own fallback literal).
+# Keeps hostile/garbled probe output out of the single-line journal field.
+_bounded_state_hint() {
+    printf '%s' "${1:-}" | tr -cd 'a-z-' | cut -c1-20
+}
+
 # _resolve_wait_s_mirror <env_file> — PARENT-SIDE mirror of the child's
 # WAIT_S resolution chain (scripts/stop-ensemble.sh:113 + 270-289 + 292-307).
 # SYNC-GUARD: this function MUST stay byte-identical in semantics to the
@@ -6333,10 +6385,24 @@ _supervision_handback_unit() {
         :
     else
         local sbrc=$?
-        _warn "reset-failed probe exceeded budget (${SYSTEMCTL_PROBE_BUDGET_S}s) for $unit — continuing (best-effort; child SIGTERM→SIGKILL'd)"
-        journal_history_append subprocess_wait_timeout \
-            "site=handback_reset_failed kind=budget reason=$(printf 'child: timeout(SYSTEMCTL_PROBE_BUDGET_S=%s)' "$SYSTEMCTL_PROBE_BUDGET_S") unit=$unit rc=124 — SIGTERM→SIGKILL, continuing (best-effort)" \
-            || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+        # D-P1-1 / I-A1..A4 (promote-handback-halt Phase 1 §4.3 site 1): the
+        # rc is CLASSIFIED, never assumed. The legacy arm hard-coded `rc=124`
+        # and said "exceeded budget" for EVERY nonzero rc — on a healthy
+        # hand-back `reset-failed` can exit nonzero for an ordinary reason,
+        # and the mislabel is what made the incident's journal read as a
+        # timeout. The event kind names the bounded-wait FAMILY; the row's
+        # `kind=` names the OUTCOME (§4.2).
+        if [ "$(_bounded_rc_kind "$sbrc")" = "budget" ]; then
+            _warn "reset-failed probe exceeded budget (${SYSTEMCTL_PROBE_BUDGET_S}s) for $unit — continuing (best-effort; child SIGTERM→SIGKILL'd)"
+            journal_history_append subprocess_wait_timeout \
+                "site=handback_reset_failed kind=budget reason=child: $(_bounded_rc_reason "$sbrc" "" "SYSTEMCTL_PROBE_BUDGET_S=${SYSTEMCTL_PROBE_BUDGET_S}") unit=$unit rc=$sbrc — SIGTERM→SIGKILL, continuing (best-effort)" \
+                || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+        else
+            _warn "reset-failed probe FAILED (rc=$sbrc) for $unit — continuing (best-effort)"
+            journal_history_append subprocess_wait_timeout \
+                "site=handback_reset_failed kind=nonzero_exit reason=child: $(_bounded_rc_reason "$sbrc") unit=$unit rc=$sbrc — nonzero rc, continuing (best-effort; the probe's own failure is never fatal)" \
+                || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+        fi
     fi
     # 2. is-active preflight — ALREADY-ACTIVE ≠ SUCCESS: a unit start on
     #    an active unit is a NO-OP that exits 0 (the false-success
@@ -6354,10 +6420,36 @@ _supervision_handback_unit() {
     isact="$(_run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" is-active "$unit" 2>/dev/null)"
     isact_rc=$?
     if [ "$isact_rc" -ne 0 ]; then
-        _warn "is-active probe exceeded budget (${SYSTEMCTL_PROBE_BUDGET_S}s) for $unit — treating as NOT-active; continuing into the start attempt (the MainPID/port verify owns the verdict)"
-        journal_history_append subprocess_wait_timeout \
-            "site=handback_is_active kind=budget reason=$(printf 'child: timeout(SYSTEMCTL_PROBE_BUDGET_S=%s)' "$SYSTEMCTL_PROBE_BUDGET_S") unit=$unit rc=$isact_rc — treating as not-active, continuing" \
-            || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+        # D-P1-1 / I-A1..A4 (§4.3 site 2): THREE-WAY honest split. 124 is the
+        # only budget class; rc 4 (is-active: unknown / systemd could not
+        # decide) and any other nonzero are genuine command failures and get
+        # `kind=nonzero_exit` with the TRUE rc; rc 3 ("inactive" OR
+        # "activating") is systemctl's ROUTINE pre-start answer on every
+        # healthy hand-back, so it gets an INFO line and NO journal row —
+        # journaling it would put a failure-shaped row in the forensic
+        # surface of every clean ceremony (§4.1 refinement, D-P1-1).
+        __isact_kind="$(_bounded_rc_kind "$isact_rc")"
+        if [ "$__isact_kind" = "budget" ]; then
+            _warn "is-active probe exceeded budget (${SYSTEMCTL_PROBE_BUDGET_S}s) for $unit — treating as NOT-active; continuing into the start attempt (the MainPID/port verify owns the verdict)"
+            journal_history_append subprocess_wait_timeout \
+                "site=handback_is_active kind=budget reason=child: $(_bounded_rc_reason "$isact_rc" "" "SYSTEMCTL_PROBE_BUDGET_S=${SYSTEMCTL_PROBE_BUDGET_S}") unit=$unit rc=$isact_rc — treating as not-active, continuing" \
+                || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+        elif [ "$isact_rc" = "3" ]; then
+            # The site token is REQUIRED in the INFO line — post-mortem greps
+            # for `handback_is_active` must still find this site when it takes
+            # the routine path (tests/test_bounded_subprocess_waits.sh:327/343/428).
+            # The state token falls back to `unknown` (never the
+            # `${isact:-inactive|activating}` form, which renders that literal
+            # pipe text when stdout is empty — CP-10).
+            __isact_state="$(_bounded_state_hint "${isact}")"
+            [ -n "$__isact_state" ] || __isact_state="unknown"
+            _log "is-active: site=handback_is_active state=${__isact_state} rc=3 — routine pre-start answer; proceeding into the start attempt"
+        else
+            _warn "is-active probe FAILED (rc=$isact_rc state=${isact:-<none>}) for $unit — treating as NOT-active; continuing into the start attempt (the MainPID/port verify owns the verdict)"
+            journal_history_append subprocess_wait_timeout \
+                "site=handback_is_active kind=nonzero_exit reason=child: $(_bounded_rc_reason "$isact_rc" "$(_bounded_state_hint "${isact}")") unit=$unit rc=$isact_rc state=$(_bounded_state_hint "${isact}") — nonzero probe rc, treating as not-active, continuing" \
+                || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+        fi
         isact=""
     fi
     [ "$isact" = "active" ] \
@@ -6383,9 +6475,15 @@ _supervision_handback_unit() {
         if [ "$sbrc" = "124" ]; then
             _warn "unit start exceeded budget — under-budget child (HANDBACK_START_BUDGET_S=${HANDBACK_START_BUDGET_S}s) was SIGTERM→SIGKILL'd; unit=$unit — halting for the caller's B4 policy (NO nohup fallback — Amendment #1)"
             journal_history_append subprocess_wait_timeout \
-                "site=handback_start kind=budget reason=$(printf 'child: timeout(HANDBACK_START_BUDGET_S=%s)' "$HANDBACK_START_BUDGET_S") unit=$unit rc=124 — SIGTERM→SIGKILL, halting for caller's B4 policy" \
+                "site=handback_start kind=budget reason=child: $(_bounded_rc_reason "$sbrc" "" "HANDBACK_START_BUDGET_S=${HANDBACK_START_BUDGET_S}") unit=$unit rc=$sbrc — SIGTERM→SIGKILL, halting for caller's B4 policy" \
                 || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
         else
+            # Leader ruling D2 (phase1 §4.3 note) — journal SYMMETRY: a genuine
+            # non-124 start failure gets its own `kind=nonzero_exit` row so it
+            # is machine-visible with the TRUE rc (the WARN text is unchanged).
+            journal_history_append subprocess_wait_timeout \
+                "site=handback_start kind=nonzero_exit reason=child: $(_bounded_rc_reason "$sbrc") unit=$unit rc=$sbrc — nonzero rc (not a timeout), halting for caller's B4 policy" \
+                || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
             _warn "unit hand-back FAILED: unit $unit did not come up (${first:-no stderr}) — NO nohup fallback (Amendment #1: a fallback re-creates the survivor lineage and abandons Restart=/journald ownership) — halting for the caller's B4 policy"
         fi
         return 1
@@ -6695,10 +6793,26 @@ restart_via_launcher() {
         _sc_isact="$(_run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" is-active "$ENSEMBLE_RESTART_UNIT" 2>/dev/null)"
         _sc_rc=$?
         if [ "$_sc_rc" -ne 0 ]; then
-            _warn "is-active probe exceeded budget (${SYSTEMCTL_PROBE_BUDGET_S}s) for $ENSEMBLE_RESTART_UNIT — treating as NOT-active; continuing (probe timeout never fails the launcher start on its own)"
-            journal_history_append subprocess_wait_timeout \
-                "site=scope_arm_is_active kind=budget reason=$(printf 'child: timeout(SYSTEMCTL_PROBE_BUDGET_S=%s)' "$SYSTEMCTL_PROBE_BUDGET_S") unit=$ENSEMBLE_RESTART_UNIT rc=$_sc_rc — treating as not-active, continuing" \
-                || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+            # D-P1-1 / I-A1..A4 / I-D4 (§4.3 site 3 — the scope arm, identical
+            # three-way split to site 2): rc 124 only is a budget class; rc 3
+            # is the routine pre-start answer (INFO, NO journal row — the twins'
+            # incident shape was exactly this rc being journaled as a timeout);
+            # rc 4/other is a genuine probe failure with the TRUE rc.
+            if [ "$(_bounded_rc_kind "$_sc_rc")" = "budget" ]; then
+                _warn "is-active probe exceeded budget (${SYSTEMCTL_PROBE_BUDGET_S}s) for $ENSEMBLE_RESTART_UNIT — treating as NOT-active; continuing (probe timeout never fails the launcher start on its own)"
+                journal_history_append subprocess_wait_timeout \
+                    "site=scope_arm_is_active kind=budget reason=child: $(_bounded_rc_reason "$_sc_rc" "" "SYSTEMCTL_PROBE_BUDGET_S=${SYSTEMCTL_PROBE_BUDGET_S}") unit=$ENSEMBLE_RESTART_UNIT rc=$_sc_rc — treating as not-active, continuing" \
+                    || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+            elif [ "$_sc_rc" = "3" ]; then
+                __sc_state="$(_bounded_state_hint "${_sc_isact}")"
+                [ -n "$__sc_state" ] || __sc_state="unknown"
+                _log "is-active: site=scope_arm_is_active state=${__sc_state} rc=3 — routine pre-start answer; proceeding into the start attempt"
+            else
+                _warn "is-active probe FAILED (rc=$_sc_rc state=${_sc_isact:-<none>}) for $ENSEMBLE_RESTART_UNIT — treating as NOT-active; continuing (probe failure never fails the launcher start on its own)"
+                journal_history_append subprocess_wait_timeout \
+                    "site=scope_arm_is_active kind=nonzero_exit reason=child: $(_bounded_rc_reason "$_sc_rc" "$(_bounded_state_hint "${_sc_isact}")") unit=$ENSEMBLE_RESTART_UNIT rc=$_sc_rc state=$(_bounded_state_hint "${_sc_isact}") — treating as not-active, continuing" \
+                    || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+            fi
             _sc_isact=""
         fi
         if [ "$_sc_isact" = "active" ]; then
@@ -6747,10 +6861,16 @@ restart_via_launcher() {
             if [ "$_sc_rc" = "124" ]; then
                 _warn "$SYSTEMCTL_BIN start $ENSEMBLE_RESTART_UNIT timed out (budget=${SCOPE_START_BUDGET_S}s) — falling back to nohup launcher (comp7 opt-in path)"
                 journal_history_append subprocess_wait_timeout \
-                    "site=scope_arm_start kind=budget reason=$(printf 'child: timeout(SCOPE_START_BUDGET_S=%s)' "$SCOPE_START_BUDGET_S") unit=$ENSEMBLE_RESTART_UNIT rc=124 — SIGTERM→SIGKILL, falling back to nohup" \
+                    "site=scope_arm_start kind=budget reason=child: $(_bounded_rc_reason "$_sc_rc" "" "SCOPE_START_BUDGET_S=${SCOPE_START_BUDGET_S}") unit=$ENSEMBLE_RESTART_UNIT rc=$_sc_rc — SIGTERM→SIGKILL, falling back to nohup" \
                     || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
             else
                 _warn "systemctl start $ENSEMBLE_RESTART_UNIT failed: ${_sc_first:-no stderr} — falling back to nohup launcher (comp7 opt-in path)"
+                # Leader ruling D2 (phase1 §4.3 note) — journal SYMMETRY: the
+                # genuine non-124 arm gets its own `kind=nonzero_exit` row (the
+                # frozen 7c WARN wording above stays BYTE-IDENTICAL).
+                journal_history_append subprocess_wait_timeout \
+                    "site=scope_arm_start kind=nonzero_exit reason=child: $(_bounded_rc_reason "$_sc_rc") unit=$ENSEMBLE_RESTART_UNIT rc=$_sc_rc — nonzero rc (not a timeout), falling back to nohup" \
+                    || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
             fi
         fi
     fi
