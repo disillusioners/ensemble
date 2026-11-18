@@ -127,3 +127,47 @@ def test_stale_deactivate_bare_postgresql_url_guards_cleanly(dev_dsn):
     finally:
         sys.path.remove(str(_SCRIPTS))
     assert rc == 1
+
+
+def test_failure_paths_never_echo_the_password(dev_dsn, capsys):
+    """Item 2 (2026-11-17, tester-escalated credential hygiene): the
+    cannot-open failure paths of BOTH audit scripts must NEVER echo the
+    cleartext password.
+
+    Drives a deliberately-FAILING open with a password-bearing
+    ``--db-url`` (a FAKE password literal + an unreachable host — the
+    defect-D guarded-unreachable-host idiom, no network dependency)
+    and asserts the password never appears in stderr. Counter-mutation
+    proven in the tester's scratch venue (reintroduce the cleartext
+    ``{args.db_url!r}`` print → this pin REDS).
+    """
+    import importlib
+
+    secret = "pin-secret-pw-do-not-leak"
+    leaky_url = (
+        f"postgresql://pinuser:{secret}@127.0.0.1:1/ensemble_dev"
+    )
+    sys.path.insert(0, str(_SCRIPTS))
+    try:
+        stale = importlib.import_module("skill_stale_deactivate")
+        reconcile = importlib.import_module("skill_counter_reconcile")
+
+        # (a) the stale-deactivate script's guarded failure path.
+        rc_a = stale.main(["--db-url", leaky_url])
+        err_a = capsys.readouterr().err
+        assert rc_a == 1
+        assert "ERROR: cannot open" in err_a  # the error IS surfaced…
+        assert secret not in err_a, (  # …but never the password
+            "skill_stale_deactivate echoed the cleartext password"
+        )
+
+        # (b) the counter-reconcile script's guarded failure path.
+        rc_b = reconcile.main(["--db-url", leaky_url, "--measure"])
+        err_b = capsys.readouterr().err
+        assert rc_b == 1
+        assert "ERROR: cannot open" in err_b
+        assert secret not in err_b, (
+            "skill_counter_reconcile echoed the cleartext password"
+        )
+    finally:
+        sys.path.remove(str(_SCRIPTS))

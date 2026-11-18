@@ -610,6 +610,8 @@ the non-defective member (defective_arm basis).
 Per-defect commits (`<type>: <desc>`); this plan committed first as
 `docs(skill): …`. No version bump / CHANGELOG / release work (v0.31.1 is
 giter's). Both skill gates stay ON/untouched. No live-DB contact (reads
-included). No manager.py hunks (design avoids it). No new SQLModel tables ⇒ no
+included). manager.py carries exactly 2 hunks (the `skill_ab_inactivity_sweep`
+registration + the wrapper — both `[decision]`-marked per the drift-guard
+constraint; ledger corrected 2026-11-17, body wins). No new SQLModel tables ⇒ no
 migration files. Tests run with explicit paths, per-variable POSTGRES_*
 scrubbing, ENSEMBLE_SELF_ENV=dev, worktree `.venv` only.

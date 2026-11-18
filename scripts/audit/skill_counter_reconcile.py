@@ -473,6 +473,19 @@ def _emit(payload: dict[str, Any], *, as_json: bool) -> None:
             print("  ... (key sample truncated; the JSON reading carries it)")
 
 
+def _redact_dsn(dsn: str) -> str:
+    """Item 1 (2026-11-17, tester-escalated credential hygiene): mask
+    the password in a DSN before echoing it — the cannot-open failure
+    path used to print the cleartext POSTGRES_PASSWORD to stderr.
+    Non-URL input passes through unchanged. Same helper shape as
+    ``skill_stale_deactivate._redact_dsn`` (the scripts stay
+    self-contained, mirroring the ``_sync_pg_url`` duplication).
+    """
+    import re as _re
+
+    return _re.sub(r":([^:@/]+)@", ":***@", str(dsn))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -507,7 +520,13 @@ def main(argv: list[str] | None = None) -> int:
         # halfway through a write loop.
         _read_clock(engine)
     except Exception as exc:  # noqa: BLE001
-        print(f"ERROR: cannot open {args.db_url!r}: {exc}", file=sys.stderr)
+        # Item 1 (2026-11-17, tester-escalated credential hygiene): the
+        # echo is REDACTED — the cleartext POSTGRES_PASSWORD must never
+        # reach stderr.
+        print(
+            f"ERROR: cannot open {_redact_dsn(args.db_url)!r}: {exc}",
+            file=sys.stderr,
+        )
         return 1
 
     if args.measure:

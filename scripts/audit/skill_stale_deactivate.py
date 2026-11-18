@@ -203,6 +203,17 @@ def _sync_pg_url(dsn: str) -> str:
     return dsn
 
 
+def _redact_dsn(dsn: str) -> str:
+    """Item 1 (2026-11-17, tester-escalated credential hygiene): mask
+    the password in a DSN before echoing it. The cannot-open failure
+    path used to print ``args.db_url!r`` — cleartext POSTGRES_PASSWORD
+    to stderr. Non-URL input passes through unchanged.
+    """
+    import re as _re
+
+    return _re.sub(r":([^:@/]+)@", ":***@", str(dsn))
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Returns the process exit code."""
     args = build_parser().parse_args(argv)
@@ -225,7 +236,8 @@ def main(argv: list[str] | None = None) -> int:
             _conn.execute(_text("SELECT 1"))
     except Exception as exc:  # noqa: BLE001 — a bad URL must be loud, not a traceback
         print(
-            f"ERROR: cannot open {args.db_url!r}: {exc}", file=sys.stderr
+            f"ERROR: cannot open {_redact_dsn(args.db_url)!r}: {exc}",
+            file=sys.stderr,
         )
         return 1
     skill_repo = SkillRepository(engine)
