@@ -7224,20 +7224,72 @@ _supervision_pid_in_launchd_lineage() {
     return 1
 }
 
-# _supervision_pid_cgroup_leaf <pid> — basename of the pid's cgroup LEAF,
-# or nothing. TWINS-PINNED parse (~6 lines, duplicated in the python twin
-# _supervision_read_cgroup_leaf — cross-language seam; see the section
-# comment). EVERY /proc read is behind [ -r ... ] per the P1 contract.
-_supervision_pid_cgroup_leaf() {
-    local pid="$1" line path leaf
+# _supervision_pid_cgroup_path <pid> — the pid's cgroup LAST LINE with the
+# leading `<id>:` prefix stripped (the full cgroup PATH, e.g.
+# /system.slice/ensemble-main.service/mcp-child.scope), or nothing.
+# TWINS-PINNED parse: the ONE shared read used by both projections —
+# _supervision_pid_cgroup_leaf (basename) and the containment ladder's R2
+# rung (full path). A third copy of this parse must never be minted
+# (promote-handback-halt Phase 1 §5.3, A32). EVERY /proc read is behind
+# [ -r ... ] per the P1 contract.
+_supervision_pid_cgroup_path() {
+    local pid="${1:-}" line path
     [ -n "$pid" ] || return 1
     [ -r "/proc/$pid/cgroup" ] || return 1
     line="$(tail -n 1 "/proc/$pid/cgroup" 2>/dev/null)" || return 1
     [ -n "$line" ] || return 1
     path="${line##*:}"
+    printf '%s\n' "$path"
+}
+
+# _supervision_pid_cgroup_leaf <pid> — basename of the pid's cgroup LEAF,
+# or nothing. TWINS-PINNED parse (~6 lines, duplicated in the python twin
+# _supervision_read_cgroup_leaf — cross-language seam; see the section
+# comment). EVERY /proc read is behind [ -r ... ] per the P1 contract.
+# Projection over _supervision_pid_cgroup_path (ONE parse, two projections).
+_supervision_pid_cgroup_leaf() {
+    local pid="$1" path leaf
+    [ -n "$pid" ] || return 1
+    path="$(_supervision_pid_cgroup_path "$pid" 2>/dev/null)" || return 1
+    [ -n "$path" ] || return 1
     leaf="${path##*/}"
     [ -n "$leaf" ] || return 1
     printf '%s\n' "$leaf"
+}
+
+# _supervision_pid_ancestor_of <pid> <roots-spaced> — is <pid> inside the
+# given pid SET (spaced list) by birth, i.e. is it a root itself or a
+# bounded ppid-descendant of one? T3 (promote-handback-halt Phase 1 §5.3
+# rung R3). Same bounded-walk shape as _supervision_pid_in_launchd_lineage
+# (depth 12) but testing membership in the argv/cwd-anchored OWNED SET
+# (Layer 1's trust root) rather than a single job pid — portable, because it
+# uses POSIX `ps` only (so it also serves Darwin / nohup shapes).
+#
+# Returns: 0 = reachable (contained); 1 = the walk COMPLETED without
+# entering the set (a reparented orphan ends at pid 1 — answered, and pid
+# reuse is judged on the CURRENT occupant, so no false accept is reachable,
+# architect closure C-5); 2 = cannot answer (`ps` unavailable — a missing
+# tool is NEVER refusal evidence, the _gate_attr_unprobeable contract).
+_supervision_pid_ancestor_of() {
+    local cur="${1:-}" roots="${2:-}" depth=0
+    [ -n "$cur" ] || return 2
+    # An EMPTY owned set is an ANSWERED negative: nothing can be the
+    # ancestor of a process that is not in a set that has no members
+    # (phase1 P8 / M3 — "R1 empty, R2 n/a, R3 root set empty => 1").
+    [ -n "$roots" ] || return 1
+    command -v ps >/dev/null 2>&1 || return 2
+    while [ -n "$cur" ] && [ "$depth" -lt 12 ]; do
+        case " $roots " in
+            *" $cur "*) return 0 ;;
+        esac
+        cur="$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d '[:space:]')"
+        case "$cur" in
+            ''|0|1) return 1 ;;
+            *[!0-9]*) return 1 ;;
+        esac
+        depth=$(( depth + 1 ))
+    done
+    return 1
 }
 
 # _supervision_unit_from_dotenv — read ENSEMBLE_RESTART_UNIT directly from
@@ -8121,9 +8173,159 @@ _gate_attr_unprobeable() {
     _GATE_ATTR_WARNED=1
     _warn "attribution [$1]: skipped (${2}) — the serving-process conjunct cannot be evaluated on this host/shape (Fix #2; gates do NOT refuse on a missing probe tool, but this is NOT a pass evidence)"
 }
+# _gate_attr_containment <holder> [<owned-spaced>] [<what>] — THE containment
+# ladder (T5, promote-handback-halt Phase 1 §5.3). Classifies ONE port holder
+# against the supervised tree. Three-valued, fail-closed:
+#   0 = CONTAINED (an answered accept — evidence-only)
+#   1 = positively NOT contained (today's refusal)
+#   2 = unattributable-yet (the deciding tooling could not answer) -> deferral
+#
+# Rungs, in cost order (each rung is only reached if every earlier rung could
+# not ANSWER):
+#   R1  argv/cwd ownership       — holder in the owned set. Zero extra cost.
+#   R2  systemd cgroup containment — unit mode + Linux only. Segment-aware:
+#       pcg == cg || pcg PREFIX-matches "$cg"/  (canonical predicate; the raw
+#       substring form is the over-accept this lane exists to kill — decisions
+#       §2.1/D-P2-3. The legacy Layer 2 substring stays byte-identical and is
+#       deliberately NOT this rung).
+#   R3  ppid ancestry into the OWNED SET (POSIX ps — also the Darwin path).
+#   R4  launchd job lineage (Darwin): a registered-but-pidless job while the
+#       port is served is the v0.30.3 dual-supervisor shape -> refuse.
+#
+# COMPOSITION RULE (architect closure C-1, NORMATIVE): the FIRST rung that
+# ANSWERS decides (0 accept / 1 refuse); only a 2 (cannot-answer) falls
+# through. An answered 1 is DOWNGRADED to 2 when a STRONGER (earlier) rung was
+# unanswerable — an incomplete determination is not positive foreignness, else
+# a wedged systemctl would make the ladder STRICTER than today's check.
+_gate_attr_containment() {
+    local h="${1:-}" owned_space="${2:-}" what="${3:-gate}"
+    local pcg cg mainpid rc lpid r4_rc __pre
+    [ -n "$h" ] || return 2
+
+    # ── R1 — argv/cwd ownership ──────────────────────────────────────
+    # `owned_space` is THREADED EXPLICITLY (T6/A32): the legacy gate has a
+    # leaked `owned_spaced` global, and the ladder must not become its second
+    # reader. An EMPTY owned set answers NOTHING here (no member can match) —
+    # R3 then answers the negative (P8/M3: `owned:<none>` still refuses).
+    if [ -n "$owned_space" ]; then
+        case " $owned_space " in
+            *" $h "*) return 0 ;;
+        esac
+    fi
+
+    # ── R2 — systemd cgroup containment (unit mode, Linux+systemd only) ──
+    local r2_ran=0 r2_unanswered=0
+    if [ "${SUPERVISION_MODE:-}" = "unit" ] && [ -n "${SUPERVISION_UNIT:-}" ] \
+       && _supervision_host_allows_unit; then
+        r2_ran=1
+        # ONE ctx resolve per gate invocation (the cache is reset at gate entry
+        # — T6); a second holder reuses the same MainPID/ControlGroup.
+        if [ "${_GA_CTX_READY:-0}" != "1" ]; then
+            if _gate_attr_unit_ctx "$what" >/dev/null 2>&1; then
+                _GA_CTX_READY=1
+            else
+                _GA_CTX_READY=0
+                _GA_CTX_REASON="${_GA_UNIT_UNPROBEABLE_WHY:-unknown}"
+            fi
+        fi
+        if [ "$_GA_CTX_READY" != "1" ]; then
+            r2_unanswered=1
+        else
+            mainpid="$_GA_UNIT_MAINPID"
+            cg="$_GA_UNIT_CG"
+            # the equality arm (unchanged by the amendment)
+            if [ "$h" = "$mainpid" ]; then
+                return 0
+            fi
+            # degenerate guard: "" or "/" => the tooling resolved no real
+            # cgroup. This is THE false-halt class — abstain, never decide.
+            if [ -z "$cg" ] || [ "$cg" = "/" ]; then
+                r2_unanswered=1
+            else
+                pcg="$(_supervision_pid_cgroup_path "$h" 2>/dev/null)"
+                if [ -z "$pcg" ]; then
+                    r2_unanswered=1        # unreadable /proc read is no evidence
+                elif [ "$pcg" = "$cg" ]; then
+                    return 0               # (a) exact ControlGroup
+                else
+                    # (b) SEGMENT-BOUNDARY PREFIX test. The case pattern is
+                    # anchored at the LEFT of $pcg: $cg literal, then '/', then
+                    # anything. A cgroup name containing glob metacharacters
+                    # would be mis-read as a PATTERN, so the prefix form is
+                    # pre-checked with a LITERAL string comparison instead of
+                    # relying on the glob (approver iter-001 note 9).
+                    __pre=0
+                    case "$pcg" in "$cg"/*) __pre=1 ;; esac
+                    # The case pattern treats a cgroup name's glob
+                    # metacharacters as PATTERN syntax, so it can mis-match in
+                    # either direction; the quoted parameter expansion below is
+                    # the AUTHORITATIVE literal prefix test (approver iter-001
+                    # note 9). Accept if EITHER form says prefix.
+                    if [ "$__pre" = "1" ] || [ "${pcg#"$cg"/}" != "$pcg" ]; then
+                        return 0
+                    fi
+                    # positively NOT contained. R2 is the strongest rung, so an
+                    # answered 1 here is final (the C-1 downgrade applies to the
+                    # WEAKER R3 negative when R2 was unanswerable — below).
+                    return 1
+                fi
+            fi
+        fi
+    fi
+
+    # ── R3 — ppid ancestry into the owned set (portable / Darwin) ─────
+    rc=0
+    _supervision_pid_ancestor_of "$h" "$owned_space" || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        1) if [ "$r2_unanswered" = "1" ]; then
+               : # DOWNGRADE (C-1): a stronger rung could not answer, so this
+                 # negative is not positive foreignness — fall through.
+           else
+               return 1
+           fi
+           ;;
+        *) : ;;   # ps unavailable — cannot answer, fall through to R4
+    esac
+
+    # ── R4 — launchd job lineage (Darwin; the dual-supervisor refusal) ──
+    if [ "${SUPERVISION_MODE:-}" = "launchd" ] && [ -n "${SUPERVISION_UNIT:-}" ] \
+       && _supervision_host_allows_launchd; then
+        lpid="$(_supervision_launchd_job_pid "$SUPERVISION_UNIT")"
+        r4_rc=$?
+        case "$r4_rc" in
+            2) : ;;   # probe failure — no evidence, keep abstaining
+            *)
+                if [ -z "$lpid" ]; then
+                    # registered-but-pidless job while a holder serves: refuse
+                    # (the v0.30.3 shape; M7 pin preserved)
+                    return 1
+                fi
+                if _supervision_pid_in_launchd_lineage "$h" "$lpid"; then
+                    return 0
+                fi
+                return 1
+                ;;
+        esac
+    fi
+
+    # ── Exhausted ────────────────────────────────────────────────────
+    return 2
+}
+
 _gate_serving_attribution() {
-    local what="${1:-gate}" holders h owned nonmatch="" lpid lrc hrc
+    local what="${1:-gate}" holders h owned owned_spaced nonmatch="" lpid lrc hrc
+    local ladder_accept ladder_refuse ladder_unattrib l2_holders __lrc __h
     GATE_ATTRIBUTION_DETAIL=""
+    # Per-invocation ctx cache: the ladder resolves the unit MainPID /
+    # ControlGroup at most ONCE per gate call (T4/T6); resetting here keeps it
+    # per-invocation, so a $( ) fork and a statement call never share state.
+    _GA_CTX_READY=0
+    _GA_CTX_REASON=""
+    # owned_spaced is a PROPER LOCAL now (A32): it was a leaked global, and
+    # the ladder must not become its second reader — it is threaded into
+    # _gate_attr_containment explicitly instead.
+    owned_spaced=""
     holders="$(_supervision_port_holders)"
     hrc=$?
     case "$hrc" in
@@ -8157,13 +8359,65 @@ _gate_serving_attribution() {
         esac
     done
     if [ -n "$nonmatch" ]; then
-        # owned_spaced (NOT $owned) in the detail: GATE_ATTRIBUTION_DETAIL is
-        # threaded into promote's gate_fail_reason and from there into the
-        # journal event detail — a single-line quoted string by contract (the
-        # same reason the bootstrap stash flattens newlines to ';').
-        GATE_ATTRIBUTION_DETAIL="port-holder(s):${nonmatch} NOT in the supervision-owned pid set (owned:${owned_spaced:-<none>}) — the :${PORT} answerer is not this install's daemon"
-        _warn "attribution [$what]: REFUSED —$GATE_ATTRIBUTION_DETAIL (ensemble-vm §5.1: :9797 held by kubectl/monitor while the daemon serves :9798)"
-        return 1
+        # ── Layer 1b: THE CONTAINMENT LADDER (T6, B-primary) ──────────────
+        # Layer 1 (argv/cwd ownership) is the cheap accept and stays FIRST, so
+        # the common all-owned path never reaches this block and issues ZERO
+        # extra probes (I-B2 — byte-identical common case). The ladder is
+        # attempted ONLY on shapes that refuse today: a holder that is
+        # demonstrably inside the supervised tree (unit cgroup / owned
+        # ancestor / launchd lineage) is a HEALTHY boot, not a foreign one —
+        # the incident class (inherited-LISTEN-fd MCP children of the
+        # supervised daemon) is exactly this shape.
+        ladder_accept=""
+        ladder_refuse=""
+        ladder_unattrib=""
+        for h in $nonmatch; do
+            [ -n "$h" ] || continue
+            __lrc=0
+            _gate_attr_containment "$h" "$owned_spaced" "$what" || __lrc=$?
+            case "$__lrc" in
+                0) ladder_accept="$ladder_accept $h" ;;
+                1) ladder_refuse="$ladder_refuse $h" ;;
+                *) ladder_unattrib="$ladder_unattrib $h" ;;
+            esac
+        done
+        # CONSUME CLEARS / DEFINITIVE-FAILURE PRECEDENCE (ruling D): a refusal
+        # is never downgraded by a deferral classification, and no carrier
+        # survives past this block (see _gate_consume in C3's helper family).
+        if [ -n "$ladder_refuse" ]; then
+            # owned_spaced (NOT $owned) in the detail: GATE_ATTRIBUTION_DETAIL
+            # is threaded into promote's gate_fail_reason and from there into
+            # the journal event detail — a single-line quoted string by
+            # contract. The PREFIX is byte-identical to the pre-fix refusal
+            # (the M1/M3/M6/M7 pins assert it); the ladder verdict is appended
+            # as a SUFFIX only.
+            GATE_ATTRIBUTION_DETAIL="port-holder(s):${nonmatch} NOT in the supervision-owned pid set (owned:${owned_spaced:-<none>}) — the :${PORT} answerer is not this install's daemon; containment ladder:${ladder_refuse}"
+            _warn "attribution [$what]: REFUSED —$GATE_ATTRIBUTION_DETAIL (ensemble-vm §5.1: :9797 held by kubectl/monitor while the daemon serves :9798)"
+            return 1
+        fi
+        if [ -n "$ladder_accept" ]; then
+            # INFO on STDERR, never _log: every gate call runs inside a $( )
+            # capture (LIVEZ_JSON="$(gate_livez)", newpid="$(_supervision_
+            # unit_serving …)") where the captured payload must be the ONLY
+            # stdout content (I-B2b; the :6210 budget-printf precedent).
+            printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "attribution [$what]: ACCEPTED — port-holder(s):${ladder_accept} contained in the supervised tree (cgroup containment / owned ancestry; the argv-anchored owned set does not cover them)" >&2 2>/dev/null
+            # Layer 2 (refusal-only, and deliberately still raw-substring)
+            # must NOT re-test holders the ladder already accepted — closure
+            # C-2: re-testing risks a silent false veto in the mixed case where
+            # the unit probes resolve but the holder's /proc/<pid>/cgroup is
+            # unreadable.
+            l2_holders="$(printf '%s\n' $holders | while IFS= read -r __h; do
+                case " $ladder_accept " in *" $__h "*) ;; *) printf '%s\n' "$__h" ;; esac
+            done)"
+        fi
+        if [ -n "$ladder_unattrib" ]; then
+            # ── Deferral rung is added by T7 (C3). Until then an
+            # unattributable-yet holder keeps TODAY'S refusal — the ladder
+            # must never ACCEPT on missing evidence.
+            GATE_ATTRIBUTION_DETAIL="port-holder(s):${nonmatch} NOT in the supervision-owned pid set (owned:${owned_spaced:-<none>}) — the :${PORT} answerer is not this install's daemon; containment ladder: unattributable${ladder_unattrib}"
+            _warn "attribution [$what]: REFUSED —$GATE_ATTRIBUTION_DETAIL"
+            return 1
+        fi
     fi
     # ── Layer 2: supervisor lineage (consume the PRE-STOP classify) ──
     case "${SUPERVISION_MODE:-}" in
@@ -8204,10 +8458,54 @@ _gate_serving_attribution() {
                 # word-splits per holder (F1 council fix: a quoted pass made a
                 # multi-holder host probe /proc/"p1 NL p2"/cgroup and
                 # false-refuse with garbled detail).
-                _gate_attr_unit_lineage "$what" $holders || return 1
+                # closure C-2: skip holders the ladder already accepted
+                _gate_attr_unit_lineage "$what" ${l2_holders-$holders} || return 1
             fi
             ;;
     esac
+    return 0
+}
+
+# _gate_attr_unit_ctx <what> — resolve the unit's MainPID + ControlGroup ONCE
+# per gate invocation (T4, promote-handback-halt Phase 1 §5.3). Sets the two
+# globals `_GA_UNIT_MAINPID` / `_GA_UNIT_CG` and returns:
+#   0 = resolved (both values usable)
+#   2 = unprobeable (systemctl tool/budget/unit-state failure, MainPID 0, or a
+#       degenerate ControlGroup of ""/"") — the caller ABSTAINS, never decides
+#       (a "/"-or-empty ControlGroup means the tooling resolved no real cgroup;
+#       reading it as positive foreignness is exactly the false-halt class this
+#       lane removes — the code precedent is the twin guard in the legacy
+#       lineage arm).
+# The single factored home of the two bounded `systemctl show` probes: the
+# containment ladder's R2 rung and the legacy Layer 2 arm BOTH read it, so a
+# gate invocation that reaches either path pays for at most two probes and the
+# probe arithmetic lives in exactly one place.
+_GA_UNIT_MAINPID=""
+_GA_UNIT_CG=""
+_GA_UNIT_UNPROBEABLE_WHY=""
+_gate_attr_unit_ctx() {
+    local what="${1:-gate}" tmp rc_main main_pid cg
+    tmp="$(mktemp -t attr.XXXXXX 2>/dev/null || printf '/tmp/attr.%s.out' "$$")"
+    _run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" show "$SUPERVISION_UNIT" -p MainPID --value > "$tmp" 2>/dev/null
+    rc_main=$?
+    main_pid="$(cat "$tmp" 2>/dev/null)"
+    if [ "$rc_main" -ne 0 ] || [ -z "$main_pid" ] || [ "$main_pid" = "0" ]; then
+        rm -f "$tmp" 2>/dev/null
+        _GA_UNIT_MAINPID=""; _GA_UNIT_CG=""
+        _GA_UNIT_UNPROBEABLE_WHY="MainPID"
+        return 2
+    fi
+    _GA_UNIT_MAINPID="$main_pid"
+    _run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" show "$SUPERVISION_UNIT" -p ControlGroup --value > "$tmp" 2>/dev/null
+    cg="$(cat "$tmp" 2>/dev/null)"
+    rm -f "$tmp" 2>/dev/null
+    if [ -z "$cg" ] || [ "$cg" = "/" ]; then
+        _GA_UNIT_MAINPID="$main_pid"; _GA_UNIT_CG=""
+        _GA_UNIT_UNPROBEABLE_WHY="ControlGroup"
+        return 2
+    fi
+    _GA_UNIT_CG="$cg"
+    _GA_UNIT_UNPROBEABLE_WHY=""
     return 0
 }
 
@@ -8219,31 +8517,32 @@ _gate_serving_attribution() {
 # ANSWERED-but-uncontainable holder is a mismatch → refuse.
 _gate_attr_unit_lineage() {
     local what="$1"; shift
-    local h main_pid cg pcg rc_main
-    _gate_attr_unit_lineage_out="$(mktemp -t attr.XXXXXX 2>/dev/null || printf '/tmp/attr.%s.out' "$$")"
-    _run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" show "$SUPERVISION_UNIT" -p MainPID --value > "$_gate_attr_unit_lineage_out" 2>/dev/null
-    rc_main=$?
-    main_pid="$(cat "$_gate_attr_unit_lineage_out" 2>/dev/null)"
-    if [ "$rc_main" -ne 0 ] || [ -z "$main_pid" ] || [ "$main_pid" = "0" ]; then
-        rm -f "$_gate_attr_unit_lineage_out" 2>/dev/null
-        _gate_attr_unprobeable "$what" "systemd MainPID unresolvable for '$SUPERVISION_UNIT' (tool/budget/unit state)"
+    local h main_pid cg pcg
+    # T4: behaviour-identical re-implementation on top of the factored ctx
+    # resolver (ONE home for the two bounded probes). The messages — including
+    # the `MainPID=` / `cgroup=` detail tokens — stay BYTE-IDENTICAL.
+    if ! _gate_attr_unit_ctx "$what"; then
+        # Distinguish the two unprobeable shapes so the loud note keeps its
+        # legacy wording: an unresolvable MainPID vs an unobservable
+        # ControlGroup.
+        if [ "${_GA_UNIT_UNPROBEABLE_WHY:-}" = "ControlGroup" ]; then
+            _gate_attr_unprobeable "$what" "unit '$SUPERVISION_UNIT' ControlGroup unobservable — containment unverifiable"
+        else
+            _gate_attr_unprobeable "$what" "systemd MainPID unresolvable for '$SUPERVISION_UNIT' (tool/budget/unit state)"
+        fi
         return 0
     fi
-    _run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" show "$SUPERVISION_UNIT" -p ControlGroup --value > "$_gate_attr_unit_lineage_out" 2>/dev/null
-    cg="$(cat "$_gate_attr_unit_lineage_out" 2>/dev/null)"
-    rm -f "$_gate_attr_unit_lineage_out" 2>/dev/null
-    if [ -z "$cg" ] || [ "$cg" = "/" ]; then
-        _gate_attr_unprobeable "$what" "unit '$SUPERVISION_UNIT' ControlGroup unobservable — containment unverifiable"
-        return 0
-    fi
+    main_pid="$_GA_UNIT_MAINPID"
+    cg="$_GA_UNIT_CG"
     for h in "$@"; do
         [ -n "$h" ] || continue
         [ "$h" = "$main_pid" ] && continue
-        pcg=""
-        if [ -r "/proc/$h/cgroup" ]; then
-            pcg="$(tail -n 1 "/proc/$h/cgroup" 2>/dev/null)"
-            pcg="${pcg##*:}"
-        fi
+        # The legacy raw-substring containment test is DELIBERATELY kept
+        # byte-identical (decisions.md §2.2(5)): Layer 2 is refusal-only and
+        # the common path must not change. The ladder's R2 rung is the
+        # segment-aware (strictly narrower) form; a ladder-accepted holder
+        # never reaches this re-test (closure C-2).
+        pcg="$(_supervision_pid_cgroup_path "$h" 2>/dev/null)"
         case "$pcg" in
             *"$cg"*) ;;
             *)
