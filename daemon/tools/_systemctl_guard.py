@@ -41,6 +41,40 @@ Intent is decided over **execution positions**, not over raw text:
 5. Wrappers (``sudo``, ``env``, ``nohup``, ...), ``bash -c``/``sh -c``,
    ``eval`` and ``xargs <cmd>`` are peeled/recursed so the shapes cannot be
    laundered through a runner.
+6. The repo's own unit-stop WRAPPER (``scripts/stop-ensemble.sh``) is REFUSED
+   in any execution position, however invoked (see below). The wrapper hides
+   the destructive verb entirely: its ``UNIT_MANAGED`` branch runs
+   ``systemctl stop "$SU_UNIT"`` with the unit composed from
+   ``ENSEMBLE_SUPERVISION_RESULT``, so the agent's command text
+   (``bash scripts/stop-ensemble.sh``) carries neither a ``systemctl`` token
+   nor a live-unit token and the structural matcher above never sees it.
+
+UNIT-STOP WRAPPER (2026-11-18 follow-up — the ACTUAL kill mechanism)
+--------------------------------------------------------------------
+The three outages were not raw ``systemctl`` calls: the agent ran
+``bash scripts/stop-ensemble.sh``, whose unit-owned branch composes the unit
+from ``ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:<unit>`` and issues
+``systemctl stop``/``systemctl kill`` itself (``/tmp/.ensemble-stop-sc.*``
+sentinel mtimes match the three journald stop events sub-second). Two rules:
+
+* **Wrapper execution is refused by basename** wherever the segment EXECUTES
+  it: direct command word (``./scripts/stop-ensemble.sh``, an absolute path, a
+  bare ``stop-ensemble.sh`` resolved via PATH), as the script argument of a
+  shell interpreter (``bash|sh|dash <path>``, including after ``env``/``sudo``
+  /``nohup``/``timeout`` prefixes), via ``source``/``.``, ``find -exec``, and
+  ``bash < <path>`` / ``cat <path> | bash``. ANY arguments and ANY environment
+  are refused — ``DRY_RUN=1`` included: no agent-lane use of this wrapper is
+  sanctioned (the supervision/upgrade machinery invokes it directly, never
+  through the bash/proc tool lane).
+* **Env-primed scripts are refused generally**: a segment that BOTH invokes a
+  script path AND carries (or inherits, prefix/``export``/``env``) an
+  ``ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:*`` assignment is refused, even
+  for a copy of the wrapper under another name.
+
+Read-only inspection of the file stays allowed (``cat``/``grep``/``ls`` with
+no shell execution). Similar-but-different script names (``stop-all.sh``,
+``stop-ensemble.sh.bak``) stay allowed — the deny is a basename equality on
+the exact wrapper, not a substring.
 
 Everything here is a PURE function: no I/O, no process state, no environment
 reads. The ambient-only fence (``ENSEMBLE_FENCED_TEST_CONTEXT``) is read by
@@ -57,9 +91,14 @@ from typing import Sequence
 __all__ = [
     "LIVE_NAME_PATTERNS",
     "MEANINGFUL_PATH_PATTERNS",
+    "PROTECTED_WRAPPER_NAMES",
+    "SUPERVISION_MARKER_VAR",
+    "SUPERVISION_MANAGED_PREFIX",
+    "SUPERVISION_PRIMED_TOKEN",
     "SYSTEMCTL_MUTATING",
     "SYSTEMCTL_READONLY",
     "UNRESOLVED_UNIT_TOKEN",
+    "WRAPPER_VIOLATION_TOKEN",
     "is_kill_like",
     "kill_leg_violation",
     "overlay_violation",
@@ -128,6 +167,27 @@ SYSTEMCTL_MUTATING: frozenset[str] = frozenset({
 #: non-None return from this module means REFUSE; this token makes the
 #: fail-closed branch legible in refusals and tests.
 UNRESOLVED_UNIT_TOKEN = "unresolved-unit"
+
+#: The agent-lane-refused unit-stop wrapper. The supervision/upgrade
+#: machinery (``scripts/upgrade/lib.sh`` ``stop_via_stop_script``) invokes
+#: this script DIRECTLY; an agent that runs it through the bash/proc tool
+#: lane is performing a unit stop. Matched by BASENAME EQUALITY — copies in
+#: any directory are the same risk (the outage ran it from the repo root);
+#: similar-but-different names stay allowed.
+PROTECTED_WRAPPER_NAMES: tuple[str, ...] = ("stop-ensemble.sh",)
+
+#: Refusal token for rule 1 (wrapper execution).
+WRAPPER_VIOLATION_TOKEN = "unit-stop-wrapper"
+
+#: The supervision classification env var that drives the wrapper's
+#: unit-owned ``systemctl stop`` branch (frozen in ``scripts/upgrade/lib.sh``).
+SUPERVISION_MARKER_VAR = "ENSEMBLE_SUPERVISION_RESULT"
+
+#: The VALUE prefix that selects the unit-owned branch.
+SUPERVISION_MANAGED_PREFIX = "UNIT_MANAGED:"
+
+#: Refusal token for rule 2 (env-primed script invocation).
+SUPERVISION_PRIMED_TOKEN = "supervision-primed-script"
 
 #: ``systemctl`` options that consume the following token as a value, so the
 #: option's argument is not mistaken for the verb (``systemctl -t service
@@ -693,6 +753,14 @@ def _command_word_index(words: _Segment, env: dict[str, str]) -> int | None:
     while k < n:
         text, ok = _resolve_word(words[k], env, 0)
         if not ok:
+            # An unresolvable LEADING ASSIGNMENT (``X="$1" systemctl ...``)
+            # is still an assignment, not the command word — skip it, or
+            # the whole segment escapes analysis (the literal
+            # ``systemctl restart ensemble-main`` after it would be missed).
+            probe = _word_literal_prefix(words[k])
+            if probe and _ASSIGN_RE.match(probe):
+                k += 1
+                continue
             return k
         # Leading ``NAME=value`` prefixes are environment assignments, not the
         # command word (``UNIT=x systemctl restart "$UNIT"``).
@@ -720,6 +788,26 @@ def _command_word_index(words: _Segment, env: dict[str, str]) -> int | None:
                     k += 1
                     continue
                 break
+        elif base in ("sudo", "doas"):
+            # ``sudo -u root <cmd>`` — without peeling the options the
+            # command word resolves to ``-u`` and BOTH the systemctl and
+            # the wrapper checks miss the shape entirely.
+            while k < n:
+                arg, arg_ok = _resolve_word(words[k], env, 0)
+                if not arg_ok:
+                    break
+                if arg.startswith("-"):
+                    if arg in (
+                        "-u", "--user", "-g", "--group", "-h", "--host",
+                        "-p", "--prompt", "-C", "--close-from",
+                        "-T", "--command-timeout", "-R", "--chroot",
+                        "-D", "--chdir", "-U", "--other-user",
+                    ):
+                        k += 2
+                    else:
+                        k += 1
+                    continue
+                break
         if base == "env":
             while k < n:
                 arg, arg_ok = _resolve_word(words[k], env, 0)
@@ -735,6 +823,219 @@ def _command_word_index(words: _Segment, env: dict[str, str]) -> int | None:
                     k += 1
                     continue
                 break
+    return None
+
+
+# ---------------------------------------------------------------------------
+# unit-stop wrapper — basename execution refusal + supervision-primed scripts
+# ---------------------------------------------------------------------------
+
+
+def _basename(text: str) -> str:
+    """Basename of a single-token path; "" when the text is not one token."""
+    text = text.strip().strip("\"'")
+    if not text or any(ch.isspace() for ch in text):
+        return ""
+    return text.rsplit("/", 1)[-1].lower()
+
+
+def _word_literal_prefix(word: _Word) -> str:
+    """The literal characters of a word (variables/substitutions dropped).
+
+    ``ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:"$U"`` yields the prefix up to
+    the variable, which is enough to recognise the assignment SHAPE.
+    """
+    return "".join(value for kind, value in word if kind == _LIT)
+
+
+def _shell_script_arg(words: _Segment, k: int, env: dict[str, str]) -> _Word | None:
+    """The word a shell interpreter would execute as a script file, if any.
+
+    ``bash -c '<payload>'`` returns None (the payload is a command STRING, and
+    it is recursed into separately). ``bash < <file>`` returns ``<file>`` —
+    stdin redirection executes the file. An unresolvable candidate is returned
+    verbatim so the caller can still check its literal prefix.
+    """
+    value_opts = ("-o", "+o", "-O", "+O", "--rcfile", "--init-file")
+    j = k + 1
+    n = len(words)
+    while j < n:
+        text, ok = _resolve_word(words[j], env, 0)
+        if not ok:
+            return words[j]
+        if text in ("-c", "-lc", "-ic", "--command"):
+            return None
+        if text == "<":
+            return words[j + 1] if j + 1 < n else None
+        if text.startswith("-") or text.startswith("+"):
+            j += 2 if text in value_opts else 1
+            continue
+        return words[j]
+    return None
+
+
+def _script_invocation(words: _Segment, env: dict[str, str]) -> bool:
+    """Does this segment invoke a script file (rule 2's script-path half)?"""
+    k = _command_word_index(words, env)
+    if k is None or k >= len(words):
+        return False
+    cmd_text, cmd_ok = _resolve_word(words[k], env, 0)
+    if not cmd_ok:
+        return False
+    base = _basename(cmd_text)
+    if base in _SHELLS or base in ("source", "."):
+        script = _shell_script_arg(words, k, env)
+        if script is not None:
+            return True
+        # ``bash -c '<payload>'``: the payload is a command STRING — it
+        # invokes a script when its own (first) command word is one.
+        for i in range(k + 1, len(words) - 1):
+            flag, flag_ok = _resolve_word(words[i], env, 0)
+            if flag_ok and flag in ("-c", "-lc", "-ic", "--command"):
+                payload, payload_ok = _resolve_word(words[i + 1], env, 0)
+                if payload_ok:
+                    return _text_invokes_script(payload, env)
+        return False
+    if not base:
+        return False
+    if base.endswith(".sh") or base.endswith(".bash"):
+        return True
+    return "/" in cmd_text and not cmd_text.startswith("-")
+
+
+def _text_invokes_script(text: str, env: dict[str, str]) -> bool:
+    """Does a command STRING invoke a script file as its command word?"""
+    for words in _scan(text):
+        k = _command_word_index(words, env)
+        if k is None or k >= len(words):
+            continue
+        cmd_text, ok = _resolve_word(words[k], env, 0)
+        if not ok:
+            return True
+        base = _basename(cmd_text)
+        if base.endswith(".sh") or base.endswith(".bash"):
+            return True
+        if "/" in cmd_text and not cmd_text.startswith("-"):
+            return True
+    return False
+
+
+def _shell_reads_stdin(words: _Segment, env: dict[str, str]) -> bool:
+    """A shell interpreter fed on stdin (no script argument, or ``< file``).
+
+    A ``-c`` payload is a command STRING (recursed into separately), so it
+    does NOT make the shell a stdin reader.
+    """
+    k = _command_word_index(words, env)
+    if k is None or k >= len(words):
+        return False
+    text, ok = _resolve_word(words[k], env, 0)
+    if not ok or _basename(text) not in _SHELLS:
+        return False
+    stdin_redirect = False
+    saw_script = False
+    j = k + 1
+    n = len(words)
+    while j < n:
+        t, t_ok = _resolve_word(words[j], env, 0)
+        if not t_ok:
+            return False
+        if t in ("-c", "-lc", "-ic", "--command"):
+            return False
+        if t == "<":
+            stdin_redirect = True
+            j += 1
+            continue
+        if t in (">", ">>"):
+            j += 1
+            continue
+        if t.startswith("-") or t.startswith("+"):
+            j += 1
+            continue
+        saw_script = True
+        j += 1
+    return stdin_redirect or not saw_script
+
+
+def _protected_wrapper_violation(words: _Segment, env: dict[str, str]) -> str | None:
+    """Rule 1: does this segment EXECUTE the unit-stop wrapper?"""
+    k = _command_word_index(words, env)
+    if k is None or k >= len(words):
+        return None
+    cmd_text, cmd_ok = _resolve_word(words[k], env, 0)
+    if cmd_ok and _basename(cmd_text) in PROTECTED_WRAPPER_NAMES:
+        return WRAPPER_VIOLATION_TOKEN
+
+    # ``find ... -exec <wrapper> ...`` / ``-execdir`` / interactive forms.
+    for j, word in enumerate(words):
+        text, ok = _resolve_word(word, env, 0)
+        if not ok or text not in ("-exec", "-execdir", "-ok", "-okdir"):
+            continue
+        if j + 1 < len(words):
+            nxt, nxt_ok = _resolve_word(words[j + 1], env, 0)
+            if nxt_ok and _basename(nxt) in PROTECTED_WRAPPER_NAMES:
+                return WRAPPER_VIOLATION_TOKEN
+
+    if cmd_ok and (_basename(cmd_text) in _SHELLS or _basename(cmd_text) in ("source", ".")):
+        script = _shell_script_arg(words, k, env)
+        if script is not None:
+            text, ok = _resolve_word(script, env, 0)
+            probe = text if ok else _word_literal_prefix(script)
+            if _basename(probe) in PROTECTED_WRAPPER_NAMES:
+                return WRAPPER_VIOLATION_TOKEN
+    return None
+
+
+def _segment_has_supervision_marker(words: _Segment, env: dict[str, str]) -> bool:
+    """Does this segment ASSIGN ``ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:*``?
+
+    Recognised in every assignment position: a leading ``NAME=value`` prefix,
+    after ``export``/``declare``/..., and as an ``env`` argument. A resolved
+    value must start with the ``UNIT_MANAGED:`` prefix; when the word does not
+    resolve statically, its LITERAL prefix is checked, so
+    ``ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:"$U"`` is still recognised.
+    """
+    k = _command_word_index(words, env)
+    if k is None:
+        return False
+    candidates: list[_Word] = list(words[:k])
+    if k < len(words):
+        head, head_ok = _resolve_word(words[k], env, 0)
+        if head_ok and _basename(head) in (
+            "export", "declare", "local", "readonly", "typeset",
+        ):
+            candidates.extend(words[k + 1:])
+    needle = SUPERVISION_MARKER_VAR + "="
+    for word in candidates:
+        text, ok = _resolve_word(word, env, 0)
+        probe = text if ok else _word_literal_prefix(word)
+        if not probe.startswith(needle):
+            continue
+        if probe[len(needle):].startswith(SUPERVISION_MANAGED_PREFIX):
+            return True
+    return False
+
+
+def _has_protected_word(segments: Sequence[_Segment], env: dict[str, str]) -> bool:
+    """Any single-token word in code position that IS the wrapper basename?"""
+    for words in segments:
+        for word in words:
+            text, ok = _resolve_word(word, env, 0)
+            probe = text if ok else _word_literal_prefix(word)
+            if probe and _basename(probe) in PROTECTED_WRAPPER_NAMES:
+                return True
+    return False
+
+
+def _pipeline_wrapper_violation(
+    segments: Sequence[_Segment], env: dict[str, str]
+) -> str | None:
+    """``cat <wrapper> | bash`` / ``bash < <wrapper>`` cross-segment shape."""
+    if not _has_protected_word(segments, env):
+        return None
+    for words in segments:
+        if _shell_reads_stdin(words, env):
+            return WRAPPER_VIOLATION_TOKEN
     return None
 
 
@@ -787,10 +1088,24 @@ def _systemctl_segment_violation(words: _Segment, env: dict[str, str], depth: in
     return None
 
 
-def _segment_violation(words: _Segment, env: dict[str, str], depth: int) -> str | None:
-    """Analyse one simple-command segment (recursing into executing hooks)."""
+def _segment_violation(
+    words: _Segment, env: dict[str, str], depth: int, marker: bool = False
+) -> str | None:
+    """Analyse one simple-command segment (recursing into executing hooks).
+
+    ``marker`` is True when a ``ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:*``
+    assignment applies to this segment (its own prefix assignment, an
+    ``export``/``env`` assignment in the segment, or inherited from a
+    preceding segment / enclosing shell).
+    """
     if depth > _MAX_DEPTH:
         return UNRESOLVED_UNIT_TOKEN
+
+    violation = _protected_wrapper_violation(words, env)
+    if violation is not None:
+        return violation
+    if marker and _script_invocation(words, env):
+        return SUPERVISION_PRIMED_TOKEN
 
     violation = _systemctl_segment_violation(words, env, depth)
     if violation is not None:
@@ -801,7 +1116,7 @@ def _segment_violation(words: _Segment, env: dict[str, str], depth: int) -> str 
     for word in words:
         for kind, value in word:
             if kind == _EXP and value.strip():
-                nested = _command_text_violation(value, depth + 1)
+                nested = _command_text_violation(value, depth + 1, marker)
                 if nested is not None:
                     return nested
 
@@ -823,7 +1138,7 @@ def _segment_violation(words: _Segment, env: dict[str, str], depth: int) -> str 
                 payload, payload_ok = _resolve_word(words[i + 1], env, 0)
                 if not payload_ok:
                     return UNRESOLVED_UNIT_TOKEN
-                return _command_text_violation(payload, depth + 1)
+                return _command_text_violation(payload, depth + 1, marker)
         return None
 
     if base == "eval":
@@ -833,7 +1148,7 @@ def _segment_violation(words: _Segment, env: dict[str, str], depth: int) -> str 
         for w in words[k + 1:]:
             if not _resolve_word(w, env, 0)[1]:
                 return UNRESOLVED_UNIT_TOKEN
-        return _command_text_violation(payload_text, depth + 1)
+        return _command_text_violation(payload_text, depth + 1, marker)
 
     if base == "xargs":
         # ``xargs systemctl restart <unit>`` executes the tail as a command.
@@ -854,32 +1169,51 @@ def _segment_violation(words: _Segment, env: dict[str, str], depth: int) -> str 
             return sub_violation
         sub_cmd, sub_ok = _resolve_word(words[j], env, 0)
         if sub_ok and sub_cmd.rsplit("/", 1)[-1].lower() in _SHELLS:
-            return _segment_violation(words[j:], env, depth + 1)
+            return _segment_violation(words[j:], env, depth + 1, marker)
         return None
 
     return None
 
 
-def _command_text_violation(text: str, depth: int = 0) -> str | None:
+def _command_text_violation(
+    text: str, depth: int = 0, marker: bool = False
+) -> str | None:
     if depth > _MAX_DEPTH:
         return UNRESOLVED_UNIT_TOKEN
     code, executed = _strip_heredocs(text, {})
     segments = _scan(code)
     env = _collect_assignments(segments)
-    # Heredoc bodies may carry assignments too (``bash <<EOF`` with UNIT=...).
+    # ``ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:*`` carries forward segment
+    # by segment (a prefix assignment on one segment does not reach the NEXT
+    # command in real shell semantics; carrying it is the conservative
+    # reading of the contract and only ever fires alongside a script
+    # invocation).
+    carried = marker
     for words in segments:
-        violation = _segment_violation(words, env, depth)
+        seg_marker = _segment_has_supervision_marker(words, env)
+        eff_marker = carried or seg_marker
+        violation = _segment_violation(words, env, depth, eff_marker)
         if violation is not None:
             return violation
+        carried = eff_marker
     for body in executed:
-        nested = _command_text_violation(body, depth + 1)
+        nested = _command_text_violation(body, depth + 1, carried)
         if nested is not None:
             return nested
+    violation = _pipeline_wrapper_violation(segments, env)
+    if violation is not None:
+        return violation
     return None
 
 
 def systemctl_violation(command) -> str | None:
-    """Return a refusal token when the command mutates an ensemble unit."""
+    """Return a refusal token when the command mutates an ensemble unit.
+
+    Also refuses execution of the unit-stop wrapper (``stop-ensemble.sh``)
+    and env-primed (``ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:*``) script
+    invocations — the shapes whose destructive verb is hidden inside a
+    script, not present in the command text.
+    """
     return _command_text_violation(_as_text(command), 0)
 
 

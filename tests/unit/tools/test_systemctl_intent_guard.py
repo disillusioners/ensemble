@@ -313,3 +313,175 @@ async def test_proc_lane_delegates_to_bash_wrapper():
         "from daemon.tools.bash import _pkill_overlay_violation"
         in inspect.getsource(proc_mod.create_proc_tools)
     )
+
+
+# ---------------------------------------------------------------------------
+# DENY leg 4 — the unit-stop WRAPPER ``scripts/stop-ensemble.sh``
+# ---------------------------------------------------------------------------
+# The ACTUAL kill mechanism of all three 2026-11-18 outages (D2 hunt): the
+# agent ran ``bash scripts/stop-ensemble.sh``; its UNIT_MANAGED branch
+# composes the unit from ``ENSEMBLE_SUPERVISION_RESULT`` and issues
+# ``systemctl stop``/``kill`` ITSELF, so the command text carries neither a
+# ``systemctl`` token nor a live-unit token. Every invocation shape below is
+# refused by BASENAME EQUALITY, in any directory, with ANY args/env —
+# ``DRY_RUN=1`` included (no agent-lane use of the wrapper is sanctioned;
+# the supervision machinery invokes it directly, never via this lane).
+#
+# Counter-mutation M5a: neutralise ``_protected_wrapper_violation`` (plant
+# ``return None`` at its top) ⇒ every pin here returns None and REDDENs.
+# ---------------------------------------------------------------------------
+
+_WRAPPER_SHAPES = [
+    "bash scripts/stop-ensemble.sh",
+    "sh /home/nea/ensemble-src/scripts/stop-ensemble.sh",
+    "dash scripts/stop-ensemble.sh",
+    "./scripts/stop-ensemble.sh",
+    "stop-ensemble.sh",
+    "/home/nea/agents-ensemble/scripts/stop-ensemble.sh",
+    "env DRY_RUN=1 bash scripts/stop-ensemble.sh",
+    "DRY_RUN=1 bash scripts/stop-ensemble.sh",
+    "bash scripts/stop-ensemble.sh --force",
+    "cd /home/nea/ensemble-src && bash scripts/stop-ensemble.sh",
+    "sudo bash scripts/stop-ensemble.sh",
+    "sudo -u root bash scripts/stop-ensemble.sh",
+    "nohup bash scripts/stop-ensemble.sh &",
+    "timeout 60 bash scripts/stop-ensemble.sh",
+    "setsid bash scripts/stop-ensemble.sh",
+    "bash -c 'scripts/stop-ensemble.sh'",
+    "sh -c 'bash scripts/stop-ensemble.sh'",
+    "bash <<'EOF'\nscripts/stop-ensemble.sh\nEOF",
+    "cat scripts/stop-ensemble.sh | bash",
+    "bash < scripts/stop-ensemble.sh",
+    "source scripts/stop-ensemble.sh",
+    ". scripts/stop-ensemble.sh",
+    "find /tmp -name '*.sh' -exec ./scripts/stop-ensemble.sh {} \\;",
+    "xargs bash scripts/stop-ensemble.sh",
+    "eval 'bash scripts/stop-ensemble.sh'",
+    "echo $(bash scripts/stop-ensemble.sh)",
+    'W=scripts/stop-ensemble.sh; bash "$W"',
+    'ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:"$U" bash scripts/stop-ensemble.sh',
+]
+
+
+@pytest.mark.parametrize("command", _WRAPPER_SHAPES)
+def test_unit_stop_wrapper_refused_any_invocation(command):
+    assert guard.systemctl_violation(command) == guard.WRAPPER_VIOLATION_TOKEN
+
+
+def test_wrapper_table_exported_and_exact():
+    """The deny is a basename EQUALITY on the exact wrapper — not a substring
+    over the command text (that would re-create the over-block)."""
+    assert guard.PROTECTED_WRAPPER_NAMES == ("stop-ensemble.sh",)
+    assert guard.SUPERVISION_MARKER_VAR == "ENSEMBLE_SUPERVISION_RESULT"
+    assert guard.SUPERVISION_MANAGED_PREFIX == "UNIT_MANAGED:"
+    assert guard.systemctl_violation("bash scripts/stop-ensemble.sh.bak") is None
+
+
+# ---------------------------------------------------------------------------
+# DENY leg 5 — env-primed (``ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:*``)
+# script invocation, i.e. a COPY of the wrapper under another name/path.
+#
+# Counter-mutation M5b: make ``_segment_has_supervision_marker`` return False
+# unconditionally ⇒ every pin here returns None and REDDENs.
+# ---------------------------------------------------------------------------
+
+_PRIMED_SHAPES = [
+    "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-main bash /tmp/other-stop.sh",
+    "export ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-main; bash /tmp/other-stop.sh",
+    'ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:"$U" bash ./scripts/copy-stop.sh',
+    "env ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-main bash /tmp/x.sh",
+    "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-main bash -c './stop-copy.sh'",
+    'ENSEMBLE_SUPERVISION_RESULT="UNIT_MANAGED:ensemble-main" bash scripts/copy.sh',
+]
+
+
+@pytest.mark.parametrize("command", _PRIMED_SHAPES)
+def test_supervision_primed_script_refused(command):
+    assert guard.systemctl_violation(command) == guard.SUPERVISION_PRIMED_TOKEN
+
+
+# ---------------------------------------------------------------------------
+# DENY leg 6 — command-word resolution must not be hijacked by an
+# UNRESOLVABLE leading assignment (``X="$1" systemctl ...`` used to make the
+# whole segment escape analysis — the literal unit token behind it was
+# missed). Counter-mutation: revert the assignment-shaped skip in
+# ``_command_word_index`` ⇒ both pins return None.
+# ---------------------------------------------------------------------------
+
+
+def test_unresolved_assignment_prefix_does_not_hide_command():
+    assert guard.systemctl_violation('X="$1" systemctl restart ensemble-main') == "ensemble-main"
+    assert guard.systemctl_violation('UNIT=$(cat f) systemctl stop ensemble-daemon') == "ensemble-daemon"
+
+
+def test_sudo_option_peel_resolves_command_word():
+    """``sudo -n systemctl restart <unit>`` used to resolve its command word
+    to ``-n`` and slip through. Counter-mutation: drop the sudo/doas
+    option-peel arm in ``_command_word_index`` ⇒ returns None."""
+    assert guard.systemctl_violation("sudo -n systemctl restart ensemble-main") == "ensemble-main"
+    assert guard.systemctl_violation("sudo -u root systemctl stop ensemble-daemon") == "ensemble-daemon"
+
+
+# ---------------------------------------------------------------------------
+# ALLOW leg — the wrapper deny is SCOPED: reads, prose, and similar-but-
+# different script names stay allowed.
+#
+# Counter-mutation: reimplement the wrapper deny as a raw substring over the
+# command text (``if "stop-ensemble.sh" in text``) ⇒ the read/prose pins
+# here refuse and REDDEN.
+# ---------------------------------------------------------------------------
+
+_WRAPPER_ALLOW = [
+    "cat scripts/stop-ensemble.sh",
+    'grep -n "stop-ensemble.sh" docs/ops.md',
+    "git log --oneline -- scripts/stop-ensemble.sh",
+    "bash scripts/stop-all.sh",
+    "bash scripts/stop-ensemble.sh.bak",
+    "bash scripts/stop-ensemble2.sh",
+    "bash scripts/restart-ensemble-helper.sh",
+    "ls scripts/ | grep stop",
+    "echo 'bash scripts/stop-ensemble.sh is the operator stop path'",
+    "cat > notes.md <<'EOF'\nrun bash scripts/stop-ensemble.sh to stop\nEOF",
+    'grep -rn "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED" scripts/',
+    "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-main echo ok",
+    "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-main systemctl status ensemble-main",
+    "bash tests/helpers/my-helper.sh --flag",
+    "python scripts/backfill_snapshot_agent_space.py --dry",
+]
+
+
+@pytest.mark.parametrize("command", _WRAPPER_ALLOW)
+def test_wrapper_deny_scoped_no_overblock(command):
+    assert guard.systemctl_violation(command) is None
+
+
+# ---------------------------------------------------------------------------
+# SEAM — bash lane + proc lane both refuse the wrapper shapes
+# ---------------------------------------------------------------------------
+
+
+def test_bash_seam_refuses_wrapper_allows_read():
+    assert _pkill_overlay_violation("bash scripts/stop-ensemble.sh") == guard.WRAPPER_VIOLATION_TOKEN
+    assert _pkill_overlay_violation("bash scripts/stop-ensemble.sh --force") == guard.WRAPPER_VIOLATION_TOKEN
+    assert _pkill_overlay_violation("cat scripts/stop-ensemble.sh") is None
+
+
+async def test_proc_lane_refuses_wrapper_and_primed():
+    pr = _proc_run()
+    for command in (
+        "bash scripts/stop-ensemble.sh",
+        "./scripts/stop-ensemble.sh",
+        "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-main bash /tmp/other-stop.sh",
+    ):
+        text = await pr.coroutine(command=command)
+        assert text.startswith(
+            "Error: refused by the rogue-containment pkill overlay guard"
+        ), (command, text)
+
+
+async def test_proc_lane_allows_wrapper_read_and_readonly():
+    pr = _proc_run()
+    for command in ("cat scripts/stop-ensemble.sh", "systemctl status ensemble-main"):
+        text = await pr.coroutine(command=command, timeout=-1)
+        assert "timeout must be >= 0" in text, (command, text)
+        assert "refused by the rogue-containment" not in text, (command, text)
