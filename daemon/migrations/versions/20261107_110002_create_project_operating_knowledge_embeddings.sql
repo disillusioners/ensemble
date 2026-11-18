@@ -2,7 +2,7 @@
 -- (POK Phase 1, T1 — the ranking-only vector companion)
 -- Created: 2026-11-07
 -- Phase: Phase 1 core surface of the project-operating-knowledge (POK)
---        commission (Emperor GO 2026-11-07; branch
+--        commission (user GO 2026-11-07; branch
 --        feature/project-operating-knowledge, base 6b571771d).
 --
 -- What lives here:

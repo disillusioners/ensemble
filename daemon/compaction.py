@@ -1079,7 +1079,7 @@ def build_compact_note_request(
 
     The note is INLINED; the compacted span and the size instruction
     are the two ruled additions. There is NO separate keyword channel —
-    the keyword params were withdrawn by the Emperor ("the words were
+    the keyword params were withdrawn by the user ("the words were
     always enough; the parameter was not").
 
     The request is appended as a ``HumanMessage`` carrying

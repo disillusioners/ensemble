@@ -3020,7 +3020,7 @@ class ServicesConfig(BaseSettings):
             "SERVICES_MISSION_STRAND_HEAL_RUNNING_ZOMBIE_BATCH_CAP."
         ),
     )
-    # source-gc (board wi-ed230eb4, Emperor directive 2026-11-07):
+    # source-gc (board wi-ed230eb4, user directive 2026-11-07):
     # knobs for ``SourcesGcService`` — the sweep that archives +
     # deletes unused terminal scheduler rows (``source_configs`` rows
     # that are ``source_type='scheduler' AND enabled=false AND status
@@ -3497,7 +3497,7 @@ class PromptAssentConfig(BaseSettings):
     lane is off ⇒ the tool refuses ``lane-disabled`` (the tool STAYS
     registered; ``mint`` is refused too). This is the first lane in the
     tree that can change a live agent's own guardrails through a chat
-    message; the house's most recent Emperor-ratified posture for a
+    message; the house's most recent user-ratified posture for a
     novel authority surface (Decision Module P1, 2026-11-09: "dormant by
     default, nothing decides anything") is exactly this shape. Arming is
     ONE env var per environment — no code change.
@@ -6485,7 +6485,7 @@ class SkillEvolutionConfig(EmbeddingConfig):
     # ``needs_more_data`` before the extension bump). The sanctioned
     # resolver (E-6 rule) may close such pairs; the age gate is the
     # TRIGGER condition only — winner selection is by GENERATION
-    # NUMBER, never timestamps (Emperor ruling E-6, 2026-11-17).
+    # NUMBER, never timestamps (user ruling E-6, 2026-11-17).
     ab_stall_timeout_days: float = Field(default=7.0)
 
     # ── Multi-metric composite scoring (Milestone 2 Phase 3) ──

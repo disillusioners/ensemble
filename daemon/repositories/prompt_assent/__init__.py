@@ -1,6 +1,6 @@
 """The ``prompt_assent`` repository package (2026-11-10).
 
-The durable leg of the conversational approval lane ("The Emperor's Word /
+The durable leg of the conversational approval lane ("The user's Word /
 Assent"): the ``prompt_assent_tokens`` table (hash-only, item-bound,
 mint-context-bound), its repository (mint / find / consume / own-transaction
 attempt counters / TTL sweep) and the fail-closed private-channel

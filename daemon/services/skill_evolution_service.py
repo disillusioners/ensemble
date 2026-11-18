@@ -946,7 +946,7 @@ class SkillEvolutionService:
 
         Args:
             skill: The verified-defective pair member (the caller's
-                corrective sanction names it — operator/Emperor
+                corrective sanction names it — operator/user
                 visible through the corrective=True flag).
             direction: The corrective direction.
 
@@ -2104,7 +2104,7 @@ class SkillEvolutionService:
         """Age of the pair in days, from the persisted ``created_at``.
 
         Timestamps are ONLY ever read for the stall TRIGGER gate —
-        NEVER for winner selection (Emperor ruling E-6: winners are
+        NEVER for winner selection (user ruling E-6: winners are
         decided by GENERATION NUMBER, never timestamps).
         """
         raw = getattr(ab_test, "created_at", None) or ""
@@ -2122,7 +2122,7 @@ class SkillEvolutionService:
         """Apply the E-6 winner rule to a pair.
 
         Returns ``(winner_id, loser_id, park_reason)`` — exactly one of
-        the winner/park outcomes. E-6 (Emperor, 2026-11-17): the NEWER
+        the winner/park outcomes. E-6 (the user, 2026-11-17): the NEWER
         LINEAGE GENERATION wins, decided by GENERATION NUMBER and
         NEVER by timestamps; a generation TIE parks (surfaced, never
         guessed). A verified-defective newer member is never crowned

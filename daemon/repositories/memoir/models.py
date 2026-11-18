@@ -100,7 +100,7 @@ class StarsListType(TypeDecorator):
     """A flat list of entity mentions — ``TEXT[]`` on PG, JSON on SQLite.
 
     Contract (D1.8, architect-verified round-trip on both drivers for
-    ``["Emperor", "the Emperor"]``, ``None`` and ``[]``):
+    ``["the user", "the user"]``, ``None`` and ``[]``):
 
     * ``impl = JSON`` and ``cache_ok = True``.
     * ``load_dialect_impl`` → ``dialect.type_descriptor(ARRAY(Text()))``
@@ -472,8 +472,8 @@ class MemoirSynthesis(SQLModel, table=True):
 class MemoirStar(SQLModel, table=True):
     """One canonical entity node of the Constellation.
 
-    A star is the CANONICAL surface form of an entity — "the Emperor",
-    not "my dear". Alternative surface forms live in
+    A star is the CANONICAL surface form of an entity — "the user",
+    not "the operator". Alternative surface forms live in
     :class:`MemoirStarAlias` and resolve back to this row.
 
     ``heat`` is the accumulated-recall accumulator (never negative —
@@ -534,7 +534,7 @@ Index(
 class MemoirStarAlias(SQLModel, table=True):
     """One alternative surface form bound to a canonical star.
 
-    "my dear", "the Emperor", "Your Majesty" — every one of them is an
+    "the operator", "the user", "the owner" — every one of them is an
     ALIAS of exactly one canonical star, per agent. The
     ``uq_memoir_alias_agent_alias`` unique constraint is what makes the
     alias table an IDENTITY map rather than a suggestion list: one alias

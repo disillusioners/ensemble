@@ -1,6 +1,6 @@
 """Agent group chat P4 — the nudge layer (rhythm-aware delivery, arm (a)+(a2)).
 
-The Emperor's D-S1 ruling mechanized:
+The user's D-S1 ruling mechanized:
 
 * **(a) TODO-STEP BOUNDARY** — the reminder slot EVERY todo update
   returns (``{"todos": [...], "reminder": str}``) carries a lightweight

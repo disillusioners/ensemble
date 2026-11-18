@@ -163,7 +163,7 @@ surface keeps working.
 #: The agents allowed to operate the act surface. The privileged
 #: category gates VISIBILITY; this set gates AUTHORITY. Both are
 #: required (a literal-tool-name allow entry bypasses the category
-#: gate). Emperor directive 2026-11-14 (commission ari-instance-stop-grant):
+#: gate). user directive 2026-11-14 (commission ari-instance-stop-grant):
 #: D-13 single-owner population amended to {ari, maintenancer}; the audit
 #: ledger, protected-target two-tier policy, provenance gates and the fleet
 #: terminate budget are UNCHANGED and bind every holder.
