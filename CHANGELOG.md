@@ -5,6 +5,12 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.3] — 2026-11-18
+
+### Fixed — agent tool-lane systemctl guard intent-match inversion (`wi-a5ec5b3e`)
+
+- Fixed: agent tool-lane systemctl guard intent-match inversion — composed restart/stop of ensemble units refused, read-only inspection allowed; proc lane covered (incident 2026-11-18, wi-a5ec5b3e)
+
 ## [0.31.2] — 2026-11-18
 
 ### Fixed — skill-system defect fixes C1/C2/C3 + skill-keeper verification (`feature/skill-system-defects`)
