@@ -1,0 +1,11 @@
+worktree: /home/nea/ensemble-src-wt-prompt-reload-compact-base
+HEAD: 858a85e31489c7db9e9275955e63c021cfc5a2c4
+ENSEMBLE_SELF_ENV=dev
+POSTGRES_HOST=127.0.0.1
+POSTGRES_PORT=5432
+POSTGRES_DB=ensemble_dev
+DAEMON_PORT=8079
+venv_python: Python 3.14.7
+venv_path: /home/nea/ensemble-src-wt-prompt-reload-compact-base/.venv
+daemon.__file__: /home/nea/ensemble-src-wt-prompt-reload-compact-base/daemon/__init__.py
+timestamp: 2026-11-16T22:56:03Z

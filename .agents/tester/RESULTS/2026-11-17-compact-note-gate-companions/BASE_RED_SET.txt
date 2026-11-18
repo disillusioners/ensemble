@@ -1,0 +1,83 @@
+# BASE EVIDENCE — prompt_reload(compact, compact_note) lane
+
+Base commit: 858a85e31489c7db9e9275955e63c021cfc5a2c4 (== origin/latest at lane start; origin/latest verified UNMOVED at capture time)
+Base worktree: /home/nea/ensemble-src-wt-prompt-reload-compact-base (detached @ base; tracked files byte-identical to base; git status empty even with --untracked-files=all)
+Scratch: /tmp/compact-note-base-evidence-20261116T225534Z
+Fence: POSTGRES_DB=ensemble_dev; POSTGRES_HOST=127.0.0.1:5432; ENSEMBLE_SELF_ENV=dev; DAEMON_PORT=8079; DATABASE_URL unset; whole ENSEMBLE_AUTH_* family unset (7 names: ALLOWED_ORIGINS, CLIENT_ID, CLIENT_SECRET, DISCOVERY_URL, ENABLED, EXTERNAL_REDIRECT_BASE, ISSUER); all values redacted in transcripts
+Venv: <base-wt>/.venv (Python 3.14.7); daemon.__file__ AND the base worktree's _editable_impl_ensemble.pth both resolve the BASE tree
+
+## STABLE BASE RED-SET: EMPTY (∅)
+
+Captured surface: 341 nodes across 8 runs (2 + 3 + 3). ZERO FAILED lines in every run; ZERO ERROR lines in every run.
+Consequence for the post-build gate: no pre-existing red absorbs anything — ANY red on the HEAD leg is NET-NEW.
+
+## Per-group results
+
+| group | scope | nodes | runs | result |
+|---|---|---|---|---|
+| A | 4 prompt_reload files (direct pytest) | 90 | 2 | PASS 90/90 x2 |
+| B | registered pack compaction_unit_test -> tests/unit/test_compaction.py | 130 | 3 | PASS 130/130 x3 |
+| C | 3 compaction-scoped files + services/test_proactive_compaction_ns_trap_fix.py (path-corrected) | 121 | 3 | PASS 121/121 x3 |
+
+Node counts A: test_prompt_refresh_primitive.py 42 · test_prompt_reload_tool.py 20 · test_prompt_reload_refusals.py 15 · test_prompt_reload_pins.py 13
+Node counts C: test_compaction_never_blocked.py 40 · test_compaction_escape_hatches_round2.py 38 · test_compaction_model_config.py 31 · services/test_proactive_compaction_ns_trap_fix.py 12
+Pack B: exactly ONE file, 130 nodes, script-internal timeout 210s, outer command-level timeout 240s, identical node set x3
+
+## FLAKY NODES: NONE
+
+No node was red on any run, so no flake candidates exist (a flake requires >=1 red AND >=1 green). Nothing to exclude from net-new math by name.
+
+## QUARANTINE CROSS-CHECK (base copy, authoritative — 183 lines)
+
+NO active row names any file in the captured surface. Rows touching the area:
+
+- L62 "Neighborhood pre-existing family set": names test_compaction_e2e.py (ABSENT at base) + test_message_queue_e2e.py + test_instance_messaging_queue_routing.py — all outside the captured surface.
+- L122 agent-snapshot-v1 consolidated set: names services/test_proactive_compaction_fix_p1.py (x2 T6 anti-drift), test_compaction_empty_guard_fallback.py (partition-order flake), test_inner_soul_compaction.py (L182) — ALL outside the captured surface, so the known base-red families there remain UNMEASURED by this leg.
+- L155 group-chat P5 composition-flake class: names test_prompt_reload_refusals.py x2 + test_prompt_reload_tool.py x9 — INSIDE group A, but every one of those nodes is GREEN at base in serial runs (that row is an xdist shard-composition artifact; it did not materialize here).
+- Drift explained: the main checkout (bf4bfde6e) is an ANCESTOR of base 858a85e31, so its QUARANTINE.md copy is older — the rows it lacks are age, not a registration gap.
+
+## GAPS (uncaptured — named)
+
+1. NOT RUN (tracked at base, outside the brief's file list): tests/unit/services/test_proactive_compaction_fix_p1.py (+ _p1b, _p2, _symptom_acceptance), tests/unit/test_compaction_multimodal.py, tests/unit/test_compaction_empty_guard_fallback.py, tests/unit/tools/test_inner_soul_compaction.py. The first carries a QUARANTINE-named base-red family (x2) — if the gate widens to the compaction engine's adjacent files, measure that base state separately.
+2. NO HEAD leg was run. This artifact is base-only; every HEAD claim must be diffed against this EMPTY set.
+3. The P5 composition-flake node ids were not re-extracted from RESULTS/2026-11-16-group-chat-p5-tester-gate.md — not needed, group A is green.
+4. The brief's path tests/unit/test_proactive_compaction_ns_trap_fix.py does not exist at base; the real path is tests/unit/services/test_proactive_compaction_ns_trap_fix.py (substitution declared, file WAS run).
+
+## GATE-READINESS RISKS (found at base, deliberately NOT fixed)
+
+1. anomaly 992788fb (MAJOR): test/packs/compaction_unit_test.sh uses `set -euo pipefail` with an UNGUARDED `RC=$?` capture — on a red run the "RESULT: FAIL"/"RESULT: TIMEOUT" contract is UNREACHABLE; the gate would see a bare pytest rc (1/4/5) indistinguishable from a crash. Probe proof: SCRIPT_RC=3 with NO RESULT line. The base copy was left byte-identical (a base capture must not modify). RECOMMENDATION: guard the RC capture in the pack BEFORE the HEAD leg, as a separate explicit test-infrastructure change; until then the gate must treat "rc != 0 with no RESULT line" as FAIL, not TIMEOUT.
+2. anomaly f23f51bb (MINOR): .agents/tester/PACKS.md carries 3 rows for compaction_unit_test with conflicting scope claims (322 / 781 / 130). Only the row stating 1 file / 130 tests matches the script.
+
+## Scope discipline applied
+
+Group A: 4 files x 2 runs (leader-authorized reduction from 3 — low-risk prompt_reload surface). Group B: registered pack x 3 runs. Group C: 4 files x 3 runs. NO whole-tree run; no lane worktree touched; no live install touched; no daemon boots; port 8088 never touched.
+
+## EVIDENCE INDEX
+
+Every file in /tmp/compact-note-base-evidence-20261116T225534Z — name, byte size, sha256 prefix (16 hex chars). Generated by `ls -l` + `sha256sum`. Names, sizes and hashes only: NO file contents are reproduced here and NO secret values are present in this table.
+
+Credential fingerprint (house rule: name + value sha256 prefix, never the raw value): `POSTGRES_PASSWORD` = `sha256:abbb408e73d5b177`. The raw value occurs ZERO times under this scratch dir — the three `*_env_fence.txt` artifacts carry the literal redaction placeholder `<redacted>` for every value (host, port, db, user, env, password), so the credential was never written here.
+
+| file | bytes | sha256 (prefix) |
+|---|---|---|
+| BASE_RED_SET.md | 5420 *(body)* | d488a4d35b3d6866 *(body fingerprint — a file cannot contain its own final hash)* |
+| fence.txt | 435 | 99466a2eb5b197db |
+| grpA_ambient_names.txt | 190 | bdcd4c858e8044c0 |
+| grpA_collect.txt | 712 | 0db35406b38a86d6 |
+| grpA_env_fence.txt | 468 | e75e43440cd6fa6d |
+| grpA_run1.txt | 696 | 5d6c0f69fde8edaa |
+| grpA_run2.txt | 696 | 82b98a6d90386350 |
+| grpC_ambient_names.txt | 190 | bdcd4c858e8044c0 |
+| grpC_collect.txt | 15867 | f2b041e05b041efa |
+| grpC_env_fence.txt | 624 | 32bca19b2f809894 |
+| grpC_run1.txt | 1704 | 199439af202a040d |
+| grpC_run2.txt | 1704 | 02f0cf7c8a9c3944 |
+| grpC_run3.txt | 1704 | 90ceab31a48aaaca |
+| pack_ambient_names.txt | 190 | bdcd4c858e8044c0 |
+| pack_env_fence.txt | 468 | e75e43440cd6fa6d |
+| pack_run1.txt | 1523 | 15f2905b9083aa28 |
+| pack_run2.txt | 1523 | 1c0fb2b89a944d5b |
+| pack_run3.txt | 1523 | 0164675756ee28ae |
+| packs_git_intake.txt | 1248 | 26ac1729bc184475 |
+
+Index regenerated: 2026-11-16T23:17:48Z (UTC). Files indexed: 19. The 8 original content sections above are byte-identical to the pre-edit version (body fingerprint above, sha256 prefix d488a4d35b3d6866).
