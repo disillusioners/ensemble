@@ -1,6 +1,6 @@
 # Release Recipe: v0.30.3 (guideline-read-tool vehicle)
 
-Executor: **giter** (later phase). NO PROMOTE — promote is the Emperor's ceremony. This recipe sequences the phases into the release vehicle; the floor-constant step is the only non-obvious ordering constraint.
+Executor: **giter** (later phase). NO PROMOTE — promote is the user's ceremony. This recipe sequences the phases into the release vehicle; the floor-constant step is the only non-obvious ordering constraint.
 
 ## Prerequisites
 
@@ -26,9 +26,9 @@ Executor: **giter** (later phase). NO PROMOTE — promote is the Emperor's cerem
    - `rollback_safe=true source=explicit`, `contains_contract_phase=true`, `known_schema_gen` unchanged, `staged_at` fresh, `git_dirty:false`;
    - `releases/state.json` promote fields untouched (stage journals nothing — stages leave no trace in state.json).
 7. **Arm-time consequence (note for the NEXT ceremony)** — with the floor advanced, the operator's pinned scripts worktree (`ensemble-src-wt-scripts-pin` / `ENSEMBLE_UPGRADE_SCRIPTS_DIR`) must move to ≥ the new merge commit before the next arm, or arm refuses `stale-scripts` (`upgrade_tools.py:4360-4367`; escape `ENSEMBLE_ALLOW_STALE_SCRIPTS=1` warn-only). Record this in the ceremony notes.
-8. **STOP — NO PROMOTE.** The vehicle is staged and ceremony-ready; promote belongs to the Emperor.
+8. **STOP — NO PROMOTE.** The vehicle is staged and ceremony-ready; promote belongs to the user.
 
-## Ceremony-record contents (for the Emperor's promote)
+## Ceremony-record contents (for the user's promote)
 
 - v0.30.3 = the FIRST release carrying the guidelines runtime payload (`releases/<v>/guidelines/`) — the guidelines' first shippable runtime artifact; the tool cannot serve any guideline newer than the running release (INTENDED).
 - sonic-first note: `guidelines` = first privileged-category grant to a sonic agent (sonic-leader; census-backed).

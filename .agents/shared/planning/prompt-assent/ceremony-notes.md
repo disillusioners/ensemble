@@ -1,4 +1,4 @@
-# Ceremony Notes — v0.29.18 (prompt-assent: The Emperor's Word / Assent)
+# Ceremony Notes — v0.29.18 (prompt-assent: The user's Word / Assent)
 
 **Prepared by:** devops · **Cut date:** 2026-11-11 · **Status:** STAGED, ceremony-ready.
 **NOT promoted. NOT armed. NOT restarted.** `current` still points at `releases/v0.29.15`.
@@ -7,9 +7,9 @@
 
 ## The era line
 
-> **v0.29.18 — the Emperor's Word.** The assent lane ships: the working path is
+> **v0.29.18 — the user's Word.** The assent lane ships: the working path is
 > conversation, and a relayed word with provenance is a first-class approval lane.
-> The lane is **dormant** until the Emperor arms it — one env var, no code change.
+> The lane is **dormant** until the user arms it — one env var, no code change.
 
 ## Staged version
 
@@ -274,7 +274,7 @@ Release dirs on the host, newest `staged_at` first:
    memoir 28 green, mutation teeth intact).
 10. **The DOCTRINE, verbatim** (`.agents/shared/planning/prompt-assent/doctrine.md`):
 
-    > **FE-UI is a deeper view; the working path is conversation. The Emperor's word,
+    > **FE-UI is a deeper view; the working path is conversation. The user's word,
     > relayed by C2 with provenance, is a first-class approval lane.**
 
     "FE-UI is a deeper view" is *not* "the FE goes away" — the FE approval lane remains.
@@ -306,6 +306,6 @@ floor            2147c0298a09a5d7c5a0caeea04cdc51ed1ebcaa   (ARM-CLEAN, scripts-
 migration head   20261110_221500_create_prompt_assent_tokens.sql   (128 files)
 rollback_safe    true  (explicit; additive table, no FK, old binary blind to it)
 lane state       DEFAULT-OFF — inert until ENSEMBLE_PROMPT_ASSENT_ENABLED=1
-armed by         the Emperor, after the K-3 live DM probe — not before
+armed by         the user, after the K-3 live DM probe — not before
 live now         v0.29.15 @ :9797, MainPID 2390156, NRestarts 0, state.json byte-identical
 ```

@@ -130,7 +130,7 @@ PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     "nest_reports_router",  # /api/nest-reports (anomaly domain read door)
     # agent group chat P6 lane (2026-11-16): the chat-room READ door
     # (/api/rooms/{room_id}/messages + /api/instances/{id}/rooms — the
-    # Emperor's §13.1 human observability modal's backend, A-P6-3). The
+    # user's §13.1 human observability modal's backend, A-P6-3). The
     # rationale the guard demands, for this addition:
     #   (a) it is NOT an HTTP endpoint for the wake — it is a READ
     #       surface for the room log, and it adds no wake path;

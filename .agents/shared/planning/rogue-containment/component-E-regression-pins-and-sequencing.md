@@ -141,7 +141,7 @@ For each §7 item: in-lane or routed, one-line reason.
 8. Tester (mutation-proof: the matrix legs + counter-mutations, all RED legs in the fenced mirror only).
 9. Stage cut (giter; version slot from LIVE census at stage time — refs floor v0.29.19; do not assume the next slot; `ENSEMBLE_UPGRADE_LIVE=1` + `--f2-verified-closed` at ceremony).
 10. Staged verification with legs proving E-i/ii/iii FROM THE STAGED ARTIFACT: 4-way sha equality (release dir == dist == manifest == sidecar) + sidecar witness; CArchive census with full-prefix `uniq -d` (duplicate-member detection); PROMPT-BASELINE both trees (181/181 expected); measured interpreter cpython-3.14 recorded.
-11. **NO PROMOTE** — the ceremony is the Emperor's.
+11. **NO PROMOTE** — the ceremony is the user's.
 
 **Zero-migration expectation:** confirm from A/B — A D7 (filesystem JSON claim, no SQLModel table, no `*.sql`); B §14 (zero tables; only an optional DELETE of an orphaned `limits.metrics_listener_port` row — data cleanup, not schema). Rider-(d) retires a managed-key registry entry which is DATA cleanup, not schema — note it as the one DB-touching task, with its cleanup shape per component-B task list: (a) remove the `ManagedKeySpec` entry from `MANAGED_KEYS` in `settings_service.py`; (b) optionally DELETE the orphaned `app_settings` row `WHERE key='limits.metrics_listener_port'` (best-effort, idempotent, no migration); (c) update the settings UI/registry docstring; (d) the env escape hatch `LIMITS_METRICS_LISTENER_PORT` remains honored.
 

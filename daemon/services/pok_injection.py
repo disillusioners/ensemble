@@ -140,7 +140,7 @@ POK_FAMILY_RE = re.compile(POK_FAMILY_SLUG_PATTERN)
 
 #: Default audiences for ACTIVE injection (§4.5.1 — design-time
 #: constants in code; ER-1 ruling: leader INCLUDED in operation —
-#: it runs the ops lanes). v0.30.5 sonic-routing amendment (Emperor
+#: it runs the ops lanes). v0.30.5 sonic-routing amendment (user
 #: ruling 2026-11-14): the sonic team is the DEFAULT project-work lane,
 #: so sonic-leader + sonic-developer join `operation` and sonic-developer
 #: joins `implementation` — ops + implementation knowledge reaches the

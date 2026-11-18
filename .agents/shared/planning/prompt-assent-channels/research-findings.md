@@ -214,7 +214,7 @@ CLOSED" (`daemon/tools/upgrade_journal.py`); an indeterminate knob fails closed
 | `risks.md` is the **only** risks file in the whole planning tree | `.agents/shared/planning/prompt-assent/risks.md` |
 | `architecture-recommendation.md` **wins on conflict** (header rule) | `.agents/shared/planning/prompt-assent/architecture-recommendation.md` (header) |
 | The K-3 gate as written — arm ⇒ 1:1-DM mint ⇒ group-DM refusal ⇒ (optional) absent-discriminator ⇒ record both | `.agents/shared/planning/prompt-assent/ceremony-notes.md:236-244`; `docs/runbooks/prompt-assent.md:160-185` |
-| The arming wording — *"armed by the Emperor, after the K-3 live DM probe — not before"* | `.agents/shared/planning/prompt-assent/ceremony-notes.md:308-309` |
+| The arming wording — *"armed by the user, after the K-3 live DM probe — not before"* | `.agents/shared/planning/prompt-assent/ceremony-notes.md:308-309` |
 | The owed T3.5 re-stamp (`agents/ari/tools_note.md`, `grep -c memoir_about` = 0 today) — human-session-only, an acceptance **subject**, not a lane deliverable | `.agents/shared/planning/prompt-assent/plan-overview.md:220-225,:86,:232-233` |
 | v0.29.18 staged facts | `staged_at 2026-11-11T09:00:12Z` · release dir `/home/nea/agents-ensemble/releases/v0.29.18` · built from `df4a92732` · annotated tag `a4d7233f2 → df4a92732` (pushed by name) · 4-way binary sha `aa78f632c4529f9c883647cae5d4743f3e52199ca6dec39e5bf5abdbcabf3e8e` · migration head `20261110_221500` (128 files) · `rollback_safe=true` |
 | **The ceremony notes contain NO designated-channels mention** — this extension is newer than the notes | `.agents/shared/planning/prompt-assent/ceremony-notes.md` (full read) |
@@ -251,4 +251,4 @@ planning-lane fact).
 | Neither pass asked about **threads** | `decisions.md` **D-9** — exact channel-id match only; no thread inheritance |
 | Neither pass asked about **duplicate JSON keys** (Python's `json.loads` silently keeps the LAST one) | `decisions.md` **D-4** — the parser uses `object_pairs_hook` and **refuses** a duplicate key |
 | Neither pass asked whether the map's **validity** should fail at BOOT | `decisions.md` **D-4** — fail loud at **use** time with a typed refusal; a boot abort on a config typo is refused |
-| Neither pass asked whether a **wrong user in a designated room** should burn the K-9 budget | `decisions.md` **D-8** — it must NOT (a stranger could DoS the Emperor's minting by burning the relay's hourly budget) |
+| Neither pass asked whether a **wrong user in a designated room** should burn the K-9 budget | `decisions.md` **D-8** — it must NOT (a stranger could DoS the user's minting by burning the relay's hourly budget) |

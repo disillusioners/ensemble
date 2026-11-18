@@ -1,4 +1,4 @@
-# Runbook — `prompt_assent` (the conversational approval lane, "The Emperor's Word / Assent")
+# Runbook — `prompt_assent` (the conversational approval lane, "the user's Word / Assent")
 
 Status: **dormant by default** — shipped by the prompt-assent commission
 (2026-11-10, Phase 4); **Phase 1.5 (designated channels, pinned-approver
@@ -11,7 +11,7 @@ authority: `.agents/shared/planning/prompt-assent/architecture-recommendation.md
 where the two sets differ).
 
 The doctrine: *FE-UI is a deeper view; the working path is conversation.
-The Emperor's word, relayed by C2 with provenance, is a first-class
+The user's word, relayed by C2 with provenance, is a first-class
 approval lane.*
 
 ## What it does
@@ -27,7 +27,7 @@ One tool, four verbs (`action ∈ {list, mint, approve, reject}`):
   PINNED APPROVER is speaking (see *The designation map* below). The
   mint context is derived from the window's message row — never
   from tool arguments.
-- **approve / reject** — relay the Emperor's decision for a minted
+- **approve / reject** — relay the user's decision for a minted
   token. The token must be echoed in the human's own message (factor 3),
   on the SAME surface the mint happened on — the same 1:1 DM by the
   same human, or the same designated channel by its pinned approver
@@ -71,7 +71,7 @@ One tool, four verbs (`action ∈ {list, mint, approve, reject}`):
 - The tool **stays registered** when the lane is off — ari sees the
   tool and gets the typed refusal; the surface never shrinks with the
   switch. `mint` is refused too.
-- **The arming gate**: the lane is **armed by the Emperor, after the
+- **The arming gate**: the lane is **armed by the user, after the
   K-3 live designated-channel probe — not before**. The default-OFF
   statement above is unchanged — the surface ships inert, and arming
   remains an explicit operator act. Because the probe itself requires
@@ -156,7 +156,7 @@ byte-pinned to the base commit); do not "fix" the longer import paths.
   nothing in the running process — **edit `.env`, then restart the
   daemon**, and confirm the fresh map-parse log line
   (`designation_map state=… count=… map_digest=… errors=…`).
-- **Never commit it**: the map names the Emperor's private rooms and
+- **Never commit it**: the map names the user's private rooms and
   their pinned humans — operator-private configuration. It lives in the
   environment's `.env` (mode 600) and NOWHERE else: never in the repo,
   never in a planning doc, never in a chat transcript (this runbook's
@@ -269,7 +269,7 @@ relay asserts.
 drafts** — because the relay lane must be able to approve any agent's
 row. There is NO agent filter. The tool's INFO log line stays
 content-free (counts and flags only, never persona or diff content);
-the list BODY goes to the Emperor's chat, not to the daemon log.
+the list BODY goes to the user's chat, not to the daemon log.
 
 ### 5. Refusals write NO ledger row (O-G)
 
@@ -303,7 +303,7 @@ never to authority.
 | State | How it is reached | Meaning |
 |---|---|---|
 | `ARMED-TENTATIVE` | `ENSEMBLE_PROMPT_ASSENT_ENABLED=1` + restart | the probe's PRECONDITION. A mint alone grants nothing; the exposure is the room disclosure — the mint response posts the token + the canonical diff into the room |
-| `ARMED-OPERATIONAL` | all six outcomes recorded AND the Emperor declares reliance | the lane may be relied upon |
+| `ARMED-OPERATIONAL` | all six outcomes recorded AND the user declares reliance | the lane may be relied upon |
 | `DISARMED` | unset the knob + restart ⇒ every verb refuses `lane-disabled` | back to inert |
 
 **The probe runs INSIDE `ARMED-TENTATIVE` and ENDS with an explicit
@@ -330,7 +330,7 @@ channel actually designated, so the narrowness proof is meaningful.
    (see *The designation map* above). Setting the map means editing
    `.env` AND restarting; confirm the map-parse log line before
    Phase B.
-3. **≥ 2 pending CORE `prompt_versions`**, Emperor-created (the
+3. **≥ 2 pending CORE `prompt_versions`**, user-created (the
    artifact write path is human-session-only), and a **different
    subject item per minting leg** — a live token blocks re-mint of its
    item; `force=true` supersedes.
@@ -348,7 +348,7 @@ channel actually designated, so the narrowness proof is meaningful.
    pass.
 8. **The second human (leg 5) must be a second ACCOUNT.** A second
    device shares the `user_id` and degenerates leg 5 into leg 3. The
-   Emperor's own alt account is the strongest choice — it proves the
+   user's own alt account is the strongest choice — it proves the
    pin binds the ACCOUNT, not the person.
 
 ### Phase A — the map UNSET (the baseline: with no map, nothing is designated)
@@ -358,7 +358,7 @@ log line — before moving on.
 
 - **Leg 2 — group DM.** Create a Discord group DM (≤ 10 recipients)
   containing the relay bot and at least one other human; from the
-  Emperor's account, ask ari to mint for a pending item.
+  user's account, ask ari to mint for a pending item.
   **Expect: `mint-requires-private-channel`** — and NO token row and NO
   audit row (the refusal writes no ledger row). Proves the
   multi-occupant discriminator fires.
@@ -367,7 +367,7 @@ log line — before moving on.
   with the map UNSET. **Expect: `mint-requires-private-channel`, no
   row.** This is the **A** of the A/B pair — the refusal under "no
   map", in the very room Phase B will mint in.
-- **Leg 1 — 1:1 DM.** From the Emperor's account, DM the relay bot
+- **Leg 1 — 1:1 DM.** From the user's account, DM the relay bot
   directly (no other occupant) and mint for a different pending item.
   **Expect: a mint response** (diff + `token: CONFIRM-…`); the token
   row reads `mint_is_dm=1`, `mint_user_id` = the probe account,
@@ -423,9 +423,9 @@ check the map-parse log line (`state=1 entries`) before continuing.
 
 A guild channel is ONE instance for all humans, and the user-origin
 window re-arms on every non-silent dispatch: **a bystander's reply
-between the Emperor's turn and the tool call re-points the window**,
-and the Emperor's own attempt then refuses `approver-not-pinned`.
-**The Emperor must be the LAST speaker** in the probe channel; a
+between the user's turn and the tool call re-points the window**,
+and the user's own attempt then refuses `approver-not-pinned`.
+**The user must be the LAST speaker** in the probe channel; a
 bystander's reply within the 600 s freshness bound invalidates the
 attempt — **re-run, do not adjudicate**.
 
@@ -449,10 +449,10 @@ attempt — **re-run, do not adjudicate**.
    - **Ratify**: with all six outcomes recorded, declare the lane
      `ARMED-OPERATIONAL` and rely on it.
 3. **An unrun leg 2 or leg 5 is NOT a pass.** The gap is recorded as an
-   explicit Emperor acceptance; the multi-occupant discriminator then
+   explicit user acceptance; the multi-occupant discriminator then
    stays unit-proven only — exactly the class K-3 exists for.
 
-## "The Emperor said yes and nothing happened" — troubleshooting
+## "The user said yes and nothing happened" — troubleshooting
 
 Work down the refusal the tool returned (every terminal path returns
 ONE typed envelope):
@@ -463,7 +463,7 @@ ONE typed envelope):
 | `no-user-origin-turn` (names the observed source) | the relay has no live factor-2 window — the "yes" did not come through a user-origin source, or the daemon restarted since (the window is in-memory) | ask again in a fresh message from the bound chat source; a restart between mint and reply always requires a fresh turn |
 | `user-origin-window-expired` | more than 60 min since the window was stamped | ask again in a fresh message |
 | `user-origin-window-stale` | the window was stamped > 10 min ago (the D-6 freshness bound; silent resume keeps an OLD stamp — this is the anti-replay bound doing its job) | ask again in a fresh message |
-| `token-content-mismatch` — ECHO mismatch (factor 3g) | the token was not in the HUMAN's message content (only in the tool args), or the echoed spelling did not normalize — the envelope says "this turn's human message does not carry the token" | have the Emperor echo the token verbatim (grouped or raw both accepted) in his own reply |
+| `token-content-mismatch` — ECHO mismatch (factor 3g) | the token was not in the HUMAN's message content (only in the tool args), or the echoed spelling did not normalize — the envelope says "this turn's human message does not carry the token" | have the user echo the token verbatim (grouped or raw both accepted) in his own reply |
 | `token-content-mismatch` — RENDER drift (D-4/O-L, in-transaction) | the canonical render moved since the mint — the pending or effective side changed underneath the outstanding token — the envelope says "the canonical render moved since mint (pending or effective side changed)" | re-mint against the CURRENT content (the mint re-shows the diff against the current render) and approve with the fresh token — the outstanding token does not match the moved render |
 | `token-content-mismatch` — budget asymmetry | this code consumes the IN-RAM hourly mismatch budget (K-9/D-3b — default 10/h per relay instance) but NOT the durable per-token `attempts` counter. The RENDER-drift cause raises INSIDE the guarded transaction, and the durable counter can never share that transaction (the D-4 blocking rule — a counter inside it would be reset by the rollback); the ECHO cause is refused at the factor-gate layer, before the token row is resolved | read the hourly budget as the ONLY bound this code moves — it cannot lock a token out durably (`token-locked` is unreachable from this code) |
 | `token-mismatch` / `token-item-mismatch` | the token does not match this item / any live row | re-mint (re-shows the diff); check the version_id |

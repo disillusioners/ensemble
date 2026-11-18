@@ -208,18 +208,18 @@ def test_stars_is_a_text_array_and_embedding_is_jsonb(pg_engine):
 
 
 def test_the_stars_round_trip_on_pg(pg_engine):
-    """``["Emperor", "the Emperor"]``, ``None`` and ``[]`` on PG."""
+    """``["the user", "The user"]``, ``None`` and ``[]`` on PG."""
     from sqlmodel import Session
 
     with Session(pg_engine) as session:
-        _insert_episode(session, "pg-stars-list", stars=["Emperor", "the Emperor"])
+        _insert_episode(session, "pg-stars-list", stars=["the user", "The user"])
         _insert_episode(session, "pg-stars-none", stars=None)
         _insert_episode(session, "pg-stars-empty", stars=[])
     with Session(pg_engine) as session:
         from sqlmodel import select
 
         rows = {row.id: row for row in session.exec(select(MemoirEpisode)).all()}
-        assert rows["pg-stars-list"].stars == ["Emperor", "the Emperor"]
+        assert rows["pg-stars-list"].stars == ["the user", "The user"]
         assert rows["pg-stars-none"].stars is None
         assert rows["pg-stars-empty"].stars == []
 

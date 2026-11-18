@@ -228,7 +228,7 @@ Turns the BF-2 (live-false-refuse) risk from asserted to measured-at-stage-time,
 
 1. **Design only for this worker** — this plan is the artifact; the developer lane implements §8.
 2. **Worktree discipline**: all reads/writes in `/home/nea/ensemble-src-wt-rogue-contain`; NEVER touch `/home/nea/ensemble-src` (canonical checkout — detached HEAD + dirty; writes forbidden).
-3. **No live mutation anywhere**: no connections to `ensemble_prod`, no DELETE/UPDATE on live, no state.json promote-field changes, NO promote (the Emperor's ceremony owns promotes).
+3. **No live mutation anywhere**: no connections to `ensemble_prod`, no DELETE/UPDATE on live, no state.json promote-field changes, NO promote (the user's ceremony owns promotes).
 4. **launcher.sh / systemd unit template / live `.env`: ZERO touches** (analysis §6 binding principle).
 5. **No new exit codes**; 78 only, via the shipped refuse track. 75 stays budget-exempt-tempfail; everything else stays crash.
 6. **No pkill**; no `rm -rf` outside tmp_path fixtures; no background-process kills.

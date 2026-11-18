@@ -168,7 +168,7 @@ def build_discord_meta(
         "channel_id": channel_id,
         "channel_type": channel_type,
         "user_id": user_id,
-        "user_name": "The Emperor",
+        "user_name": "The user",
         "message_id": "discord-platform-msg-1",
         "is_dm": is_dm,
         "is_group_dm": is_group_dm,

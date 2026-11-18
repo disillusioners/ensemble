@@ -1,7 +1,7 @@
 """W9 (2026-11-17) — the ``skill_ab_inactivity_sweep`` behavior pack.
 
 The sweep is the periodic leg of the ONE sanctioned resolution
-mechanism (Emperor ruling E-6 + orchestrator Q1). It finds zero-traffic
+mechanism (user ruling E-6 + orchestrator Q1). It finds zero-traffic
 A/B pairs (comparisons == 0 AND age >= ``ab_stall_timeout_days``),
 resolves the E-6-unambiguous ones, and parks + surfaces the rest.
 

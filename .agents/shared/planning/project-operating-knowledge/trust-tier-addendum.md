@@ -1,6 +1,6 @@
 # POK — Trust-Tier Mechanism Addendum (D3 un-park)
 
-**Companion to:** `architecture-recommendation.md` v3.4 + `decisions.md` (A-2…A-19, ER-1) in this directory; closes planner gap **G-1** (`implementation-readiness.md:58`). **D3 status: DECIDED-mechanism-attached** (decision ratified by the Emperor 2026-11-07; this addendum supplies the mechanism; one non-blocking role question carried in §T-8).
+**Companion to:** `architecture-recommendation.md` v3.4 + `decisions.md` (A-2…A-19, ER-1) in this directory; closes planner gap **G-1** (`implementation-readiness.md:58`). **D3 status: DECIDED-mechanism-attached** (decision ratified by the user 2026-11-07; this addendum supplies the mechanism; one non-blocking role question carried in §T-8).
 **Method:** architect-planned; single worker analysis (`structural-design`, instance 750e5833); DESIGN ONLY — no code.
 **Parked-material census (honest):** NOT in-repo — no guidelines planning dir exists; `wi-d2abe4f7` appears only inside this design set; the preserved "Guidelines system" draft text lives in project-history event `8ffd3082-a1bb-4273-a5ea-e9ac87f5ceca` (dev daemon, unreachable at authoring time; documented not-in-repo/not-in-RAG by `plane-pm-issue-tools/phase5-plan.md:37-41`); the board is ari-owned. Designed from the POK design's own vocabulary: parked guidelines = **"Dev-curated immutable reference"** (arch §2 row 11).
 
@@ -52,10 +52,10 @@
 
 Zero new tools, zero new categories, `pok_query` untouched. `pok_upsert` +1 optional param, `pok_curate` +1 optional param ⇒ **no `VOCABULARY_VERSION` bump, no tool-categories artifact regen, no `TOOL_REQUIRED_AGENTS` entry, B4 40-agent sweep untouched** (A-16 tracks categories/tools, not params). Only registration-adjacent delta: the one additive `.sql` + `_ensure_postgres_columns` entry.
 
-## T-8 Risks + the one Emperor question
+## T-8 Risks + the one user question
 
 - 🔴 Curated-band starvation (unbounded corpus per view) → capped 2/view; universal read keeps everything reachable.
 - 🟡 In-block `[CURATED]` marker vs the 332c ceiling → query-only default (§T-4).
 - 🟡 SQLite `ADD COLUMN … CHECK` authoring → prove on throwaway SQLite before landing.
-- 🟡 **"Dev-curated" role reading (the one Emperor question):** v3.4's ONLY curator concept is leader/PM (A-9); this addendum maps dev-curated → leader/PM. Confirm-or-amend: if "dev-curated" intended a developer-agent curator set, that is a one-row A-9 matrix change — additive, zero schema impact; flagged at the Phase-2 gate, non-blocking.
+- 🟡 **"Dev-curated" role reading (the one user question):** v3.4's ONLY curator concept is leader/PM (A-9); this addendum maps dev-curated → leader/PM. Confirm-or-amend: if "dev-curated" intended a developer-agent curator set, that is a one-row A-9 matrix change — additive, zero schema impact; flagged at the Phase-2 gate, non-blocking.
 - 🟢 Tier-flip history: covered by the A-9 recording surface (typed echo + `ens_system_log`).

@@ -3,7 +3,7 @@
 The pure, dependency-free half of the prompt-assent Phase-1.5 extension
 ("designated channels, pinned-approver model"). The operator designates a
 Discord channel and pins **exactly one** human to it; a turn in that channel
-by that human is *private-equivalent* to a 1:1 DM (the Emperor's doctrine —
+by that human is *private-equivalent* to a 1:1 DM (the user's doctrine —
 *"we consider channel is private/dm for now"*).
 
 THIS MODULE OWNS THREE THINGS AND NOTHING ELSE

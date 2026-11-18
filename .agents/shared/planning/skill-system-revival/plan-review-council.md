@@ -41,7 +41,7 @@ How `applied` is actually populated (prose, no code blocks):
 
 **So:** A3's test *"∃ a usage row with applied == True (the skill was genuinely used)"* cannot be distinguished from today's test. Repointing `has_applied_for_instance` → `has_used_skill_for_instance(applied==True)` changes at most 4 rows. The code's own comment at `skill_metrics_service.py:641-645` even states that gating on `feedback_applied` is deliberate ("a skill may have been offered to the agent without being consumed"), and the 3,457 `selected AND task_succeeded AND feedback_applied IS NULL` rows *should* be capture-eligible under that stated intent — which is exactly what the current gate already does.
 
-**Verdict on A3: premise incorrect, fix a no-op, pins vacuous (F-1).** If the Emperor wants "genuinely used" attribution, the change is a *new* writer (completion hook sets `applied=True` when the skill was in context), with its own blast-radius census — not a gate repoint.
+**Verdict on A3: premise incorrect, fix a no-op, pins vacuous (F-1).** If the user wants "genuinely used" attribution, the change is a *new* writer (completion hook sets `applied=True` when the skill was in context), with its own blast-radius census — not a gate repoint.
 
 ---
 
@@ -194,7 +194,7 @@ Severity legend: **CRITICAL** = blocks the plan's own exit criteria or ships a v
 
 ## Open questions for the dispatcher / architect
 
-1. **A3 direction (blocks APPROVE).** Does the Emperor want "attributed = feedback says applied" (current, documented behaviour — then A3 becomes a metric-label fix) or "attributed = the skill was in context when the task ran" (then the `update_completion` writer must be built, with its own census)? The plan cannot choose both.
+1. **A3 direction (blocks APPROVE).** Does the user want "attributed = feedback says applied" (current, documented behaviour — then A3 becomes a metric-label fix) or "attributed = the skill was in context when the task ran" (then the `update_completion` writer must be built, with its own census)? The plan cannot choose both.
 2. **E4 vs the A/B backlog (blocks APPROVE).** Does the unresolved `regression-ab-partition-run` pair get auto-retired (product decision — requires picking a winner or voiding the experiment) or does it stay active until the Phase-2 disposition, with only the E4.3 injection filter as protection? DS-34 currently says the latter; R1/acceptance #2 currently say the former.
 3. **D's retention substrate.** Log sink (no schema change, keeps the no-diff census) or table (schema change, breaks it)? This one decision flips a release-gate item.
 4. **E1's cap substrate.** Is a dedicated admission stamp acceptable in `job_items` metadata, or does E1 need a purpose-built ledger row? The current key-based count cannot work (F-9).

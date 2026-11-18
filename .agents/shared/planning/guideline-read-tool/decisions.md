@@ -1,6 +1,6 @@
 # Decisions: guideline-read-tool
 
-Planning-time decisions under the FIXED design (Emperor ruling 2026-11-13 — structure only, nothing re-litigated). Open questions for the architect at the end.
+Planning-time decisions under the FIXED design (user ruling 2026-11-13 — structure only, nothing re-litigated). Open questions for the architect at the end.
 
 ## Decided
 

@@ -3,7 +3,7 @@
 **Lane:** `feature/memoir-v2-reflecting-mind` @ worktree `/home/nea/ensemble-src-wt-memoir-v2`  
 **Base commit:** `f49006b922492f72ca032c56e26d20468f7a3afd` (branched from `origin/latest`)  
 **Status:** **AUTHORITATIVE IMPLEMENTATION SPECIFICATION (Adjudicated).** Folded against architect's adjudication (`v2-architecture-recommendation.md`, commit `3cdbcb712`); leader rulings and review council repairs incorporated 2026-11-09.  
-**Authority stack:** Constitutional Rulings R1–R4 (Emperor, 2026-11-04) > Blessed v2 Scope (Emperor, 2026-11-09) > Sibling R3 Constraint (`v4-federated-sketch.md` §5 KEEP-V2-OPEN checklist) > Architect Adjudication (`v2-architecture-recommendation.md` — 9 rulings, 7 addenda, 19 register items) > Leader Rulings & Review Council Adjudications (2026-11-09) > This Plan (`v2-plan-overview.md` + `v2-phaseN-plan.md`) > Code Implementation.  
+**Authority stack:** Constitutional Rulings R1–R4 (the user, 2026-11-04) > Blessed v2 Scope (the user, 2026-11-09) > Sibling R3 Constraint (`v4-federated-sketch.md` §5 KEEP-V2-OPEN checklist) > Architect Adjudication (`v2-architecture-recommendation.md` — 9 rulings, 7 addenda, 19 register items) > Leader Rulings & Review Council Adjudications (2026-11-09) > This Plan (`v2-plan-overview.md` + `v2-phaseN-plan.md`) > Code Implementation.  
 **Sibling deliverable notice:** Sibling deliverable `v4-federated-sketch.md` (60 lines, design-only, discharging R3's "plan v4 when v2 starts") is PRESENT ON DISK in this planning directory and committed together with this plan set. It is referenced throughout this plan as backwards design pressure; it is NOT re-authored here.  
 **Predecessor artifacts (FROZEN):** The 24 v1 planning documents under `.agents/shared/planning/ari-memoir-store/` remain frozen. v2 is strictly additive.  
 **Doctrine & Safety Notice (P-7):** All file:line anchors cited in this plan are DATED evidence verified on 2026-11-09. Recorded line numbers are leads — **always re-grep at use time**.
@@ -20,11 +20,11 @@ v2 delivers the **8-item commission (7 build capabilities + v4 federation sketch
 3. **New Tool `memoir_about(star)`:** Entity-centric recall tool in the existing `memoir` category (ari-only, two-layer gate, refusal vocabulary mapped onto the frozen 19-code set). Zero-episode stars return an empty-dossier SUCCESS render (sections say "none"), NOT `memoir_not_found`.
 4. **The Persona Gate (JEV):** Activating the dormant persona submission seam. Reflection proposes persona diffs gated by a strict classifier (`conflict > boundary_change > new_rule` force regeneration; `reinforcement` and `none` are suppressed). Proposals land `pending_approval` and require HUMAN session approval (`auth_method == "session"`). Classifier failure parks candidates (`terminal:gate_unavailable` at 5 attempts) rather than silently dropping them. Approver proved v1 has no proposal-visibility surface; the SF9 escape clause fires — a minimal human-lane-gated REST surface (list/approve/reject of pending versions, 403 `HUMAN_LANE_REQUIRED` outside sessions) is in scope (B1 / V2-37, superseding V2-32).
 5. **Asynchronous Poignancy Scorer & Importance Ruling (§3-A2):** `importance` remains **WRITE-FROZEN** (authored record preserved); LLM score (1–10) lands in the NEW `poignancy INTEGER NULL` column; all consumers read effective importance = `COALESCE(poignancy, importance)`. Pre-existing history is seeded `poignancy_status = 'legacy'` at cutover using storage literal `'2026-11-09 00:00:00'` (SF11); opt-in backfill via `ENSEMBLE_MEMOIR_POIGNANCY_BACKFILL_MAX=0` (default disabled). Recall tie-break ranks on `COALESCE(poignancy, importance)` (SF1).
-6. **Keepsake Promotion Proposals:** Reflection identifies candidate keepsakes; staged in durable table `memoir_proposal_ledger` (C3) with once-ever-per-episode constraint (W2 / V2-36); surfaced via a dedicated Proposals section in the wake briefing (measured ≤ 1000 chars, trim-rung order cross-referenced to V2-D 6.5) + at most ONE gentle notification per day bridged via `manager.enqueue_message(instance_id, message, source='system:memoir-proposal')` to Ari's lane (B4 / V2-40, consumed ONLY on an accepted enqueue). Dual governance (Emperor/Empress confirmation required; never auto-pinned).
+6. **Keepsake Promotion Proposals:** Reflection identifies candidate keepsakes; staged in durable table `memoir_proposal_ledger` (C3) with once-ever-per-episode constraint (W2 / V2-36); surfaced via a dedicated Proposals section in the wake briefing (measured ≤ 1000 chars, trim-rung order cross-referenced to V2-D 6.5) + at most ONE gentle notification per day bridged via `manager.enqueue_message(instance_id, message, source='system:memoir-proposal')` to Ari's lane (B4 / V2-40, consumed ONLY on an accepted enqueue). Dual governance (actor-claim confirmation required; never auto-pinned).
 7. **Wake-Refresh Seam (Option B Amended):** Refreshed memory context on self-alarm wakes into existing sessions via a parallel stamped context message block (`context_kind="memoir_refresh"`, stable id `memoir_refresh:{instance_id}`, no once-flag), carrying full fresh briefing render within DR-1 budget (SF6, persona 2000 tokens), gated on threaded `wake_source == "scheduler"`, preserving scheduler unstamped bare-HUMAN attestation (L4).
 8. **The Federation (v4 Sketch, Sibling Deliverable):** Discharging R3 rolling roadmap doctrine (`v4-federated-sketch.md`), feeding backward design pressure into v2 constraints.
 
-Staged as a release (v0.29.8+ coordinated at stage time via Shared Meta KV census), with **NO live promote** (the Emperor's 3-factor ceremony owns the promotion).
+Staged as a release (v0.29.8+ coordinated at stage time via Shared Meta KV census), with **NO live promote** (the user's 3-factor ceremony owns the promotion).
 
 ---
 
@@ -73,7 +73,7 @@ Staged as a release (v0.29.8+ coordinated at stage time via Shared Meta KV censu
 ## 3. Binding-Input Summary
 
 This implementation plan treats the following artifacts as binding specification:
-1. **The Blessed v2 Scope (Emperor, 2026-11-09):** The 7 core build capabilities detailed in the task commission (with Cited Syntheses merged under The Dream, W3).
+1. **The Blessed v2 Scope (the user, 2026-11-09):** The 7 core build capabilities detailed in the task commission (with Cited Syntheses merged under The Dream, W3).
 2. **Constitutional Rulings R1–R4 (`decisions.md` §1):** Kingdom-level only, dual keepsake governance, rolling roadmap doctrine, learn-not-adopt.
 3. **v1 Adjudicated Architecture (`plan-overview.md` and `decisions.md`):** DR-1 (24,000 ceiling / 48,000 backstop), DR-3 (kill-switch truth table), DD-8 (append-only), DD-9 (human-lane persona approval), DD-10 (context block, no system prompt freeze), DD-13 (factory-captured agent id), DD-20 (hot-path append purity).
 4. **Architect Adjudication (`v2-architecture-recommendation.md`):** Level-4 authority: 9 rulings (Q1–Q9), 7 addenda (A1–A7), and 19-item corrections register.
@@ -201,4 +201,4 @@ The implementation enforces a four-tiered verification battery:
    - Verify 4-way SHA-256 match: release dir == dist == manifest == sidecar.
    - Annotated git tag cut and pushed to origin.
 4. **Handoff (NO Promote):**
-   - The promote script (`promote.sh`) is reserved exclusively for the Emperor's 3-factor ceremony. This lane does NOT promote.
+   - The promote script (`promote.sh`) is reserved exclusively for the user's 3-factor ceremony. This lane does NOT promote.

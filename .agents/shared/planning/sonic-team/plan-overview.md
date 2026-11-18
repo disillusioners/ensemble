@@ -17,7 +17,7 @@
 1. **Cut inter-phase gaps + handoff overhead** via a one-wave fan-out (sonic-leader spawns coder; on coder's report spawns reviewer+tester in ONE wave, END TURN once; verdict-bearing reports — Leg B:90 designer-lane lesson: round-trip COUNT is the first-order cost). *Measure:* sonic commission wall-clock for a small/medium low-coupling feature ≤ 4 h (vs [Leg A] median 8–41 h), with per-phase gap share < 5% (vs 10–20%).
 2. **Eliminate the kb-writer/experience spawn mass:** ZERO `kb-writer` spawns and ZERO `experience()` calls per routine sonic commission (vs 46.4% of all instances [Leg A]). *Measure:* spawn-count audit of the dry-run + first real commission shows 0/0.
 3. **Preserve quality via blast-radius escalation + dual gates:** every sonic commission carries a sonic-reviewer verdict AND a sonic-tester pack-scoped gate; any blast-radius predicate hit returns the commission to Ari (steady team). *Measure:* 100% of commissions carry both gates; 0 migrations; 0 steady-team files modified (sole exception: the sanctioned Ari triage note, S4).
-4. **Promote-ready by morning, zero migrations:** staged release with 4-way sha match + PROMPT-BASELINE verify green; NO promote (the promote ceremony is the Emperor's). *Measure:* stage journal shows 4-way sha equality + baseline verify PASS + `rollback_safe` trivially true (content-only release).
+4. **Promote-ready by morning, zero migrations:** staged release with 4-way sha match + PROMPT-BASELINE verify green; NO promote (the promote ceremony is the user's). *Measure:* stage journal shows 4-way sha equality + baseline verify PASS + `rollback_safe` trivially true (content-only release).
 5. **All new pins gate-verifiable:** every sonic assertion lives in the `sonic_agent_defs` pack REGISTERED in `.agents/tester/PACKS.md` (aegis lesson: a pinned condition in NO registered pack cannot be gate-verified). *Measure:* pack row present + all assertions green + mutation legs RED-proven.
 
 ## 3. Scope fence
@@ -31,7 +31,7 @@
 | Baseline regen (`agents/.prompt-artifacts.sha256`) | 181 → 197 rows (+16 sonic artifacts) + side-effect repair of 8 pre-existing drift rows — see §11 DEV-1 |
 | `sonic_agent_defs` test pack + pins | Registered in PACKS.md; assertions per S9; mutation legs |
 | Dry-run E2E (fenced, zero live contact) | Per `phase3-dryrun-spec.md`; `dryrun-boot-procedure.md` DELIVERED + VERIFIED 2026-11-12 (triple-exercised; helpers `fenced-launch.py` + `dryrun-verify.py` present) — Phase 3 consumes it as AUTHORITATIVE (audit-then-run; §7e RESOLVED) |
-| Staging to promote-ready | merge → bump (version RE-DERIVED from tags at bump time) → annotated tag → `stage.sh` → 4-way sha + PROMPT-BASELINE verify; NO promote (S11). **Live-contact reconciliation (MF-3, per D16):** live contact = live RUNTIME state only (daemon ports 9797/9798, live DB, `current` symlink flip, `state.json` promote fields, promote/nonce, restart); the `releases/<version>` staging write-path + the install-`.env` marker write are the Emperor-sanctioned STAGE act — explicitly permitted, NOT "live contact" |
+| Staging to promote-ready | merge → bump (version RE-DERIVED from tags at bump time) → annotated tag → `stage.sh` → 4-way sha + PROMPT-BASELINE verify; NO promote (S11). **Live-contact reconciliation (MF-3, per D16):** live contact = live RUNTIME state only (daemon ports 9797/9798, live DB, `current` symlink flip, `state.json` promote fields, promote/nonce, restart); the `releases/<version>` staging write-path + the install-`.env` marker write are the user-sanctioned STAGE act — explicitly permitted, NOT "live contact" |
 | Giter commit lane usage | All commits on `feature/sonic-team-v1` via giter with pre-approval in the dispatch envelope (Leg B:106–109) |
 
 **OUT**
@@ -42,7 +42,7 @@
 | Any daemon code change | Content-only release: agent dirs + tests + Ari note + baseline (hard constraint) |
 | Any migration | Zero by design; rollback trivially safe (old release ignores new agent dirs) |
 | Steady-team file modifications | Forbidden (sole exception: Ari note above, spec-only in this plan set) |
-| Promote | Emperor's ceremony; plan ends at promote-ready |
+| Promote | the user's ceremony; plan ends at promote-ready |
 | Chat-source adapter config (addressing sonic-leader) | Deferred — open decision (b), §7 |
 | Privilege transfer (attestation tap / POK curator / mcp_rpc+wedge categories) | Deliberately NOT inherited (Leg B:25) — open decision (c), §7 |
 | Measurement / token-cost loop | Out of v1; MUST-BUILD if wanted (Leg C §5a) — open decision (d), §7 |
@@ -116,7 +116,7 @@ Strongest couplings: (1) **Phase 2 ↔ Phase 1 frozen strings** — the pack ass
 
 *L/D = likelihood/damage (L/M/H).
 
-## 7. Open decisions for the Emperor
+## 7. Open decisions for the user
 
 | # | Decision | Options | Default if no answer | Impact |
 |---|----------|---------|----------------------|--------|
@@ -158,7 +158,7 @@ Strongest couplings: (1) **Phase 2 ↔ Phase 1 frozen strings** — the pack ass
 
 - **State:** PROMOTE-READY — staged release dir + tag on `latest`; 4-way sha match (release dir == dist == manifest == sidecar); PROMPT-BASELINE verify green against the regenerated 197-row baseline; `rollback_safe` trivially true (zero migrations, content-only).
 - **Evidence pointers:** this planning dir (findings + specs + decisions); `sonic_agent_defs` pack results + PACKS.md row; dry-run report (Phase 3); stage journal + sha manifest (Phase 4); deviation list (§11 + decisions.md §3) surfaced FIRST in the morning report.
-- **The promote command is the Emperor's** — exact command lives in `phase4-stage-runbook.md` (version re-derived at bump time; nothing pre-hardcoded here). NO lane promotes.
+- **The promote command is the user's** — exact command lives in `phase4-stage-runbook.md` (version re-derived at bump time; nothing pre-hardcoded here). NO lane promotes.
 - **Open decisions (§7) presented for ruling**, defaults already in effect.
 - If any phase failed honestly: promote-ready is OFF the table; the morning report carries the failure verdict + evidence, and NOTHING is staged (S10 discipline).
 

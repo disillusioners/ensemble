@@ -78,7 +78,7 @@ Behavior notes (design observations, NOT defects, not in brief requirements): `c
 
 ## Anomalies / environment notes
 
-- Worktree dirt: 4 modified-UNCOMMITTED planning docs (`.agents/shared/planning/group-chat/{decisions,architecture-recommendation,emperor-open-questions,plan-overview}.md`) — pre-existed the gate, code/tests clean at HEAD `cc44d8416`; merge lane must resolve (disclosed, untouched by gate).
+- Worktree dirt: 4 modified-UNCOMMITTED planning docs (`.agents/shared/planning/group-chat/{decisions,architecture-recommendation,open-questions,plan-overview}.md`) — pre-existed the gate, code/tests clean at HEAD `cc44d8416`; merge lane must resolve (disclosed, untouched by gate).
 - PACKS.md registration debt: NO group-chat P1 pack block in worktree or main copy (worktree copy = superset with rogue-p2 block; drift is one-directional).
 - Scratch-DB privilege split on `ensemble_dev_scratch`: `ensemble_dev_app` owns room tables but not `instances`/`event`/`message_queue` → behavior worker used a private shadow schema (`gcval_26841`, dropped after); superuser-scratch provisioning gap noted (POK e2s0-01).
 - Both workers hit `/bin/sh` (dash) harness quirks (`PIPESTATUS`/process-substitution unsupported) — worked around, results unaffected.

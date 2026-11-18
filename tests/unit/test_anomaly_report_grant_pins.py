@@ -353,7 +353,7 @@ class TestTheRepinnedAllowArrayConstants:
         category (#23) appended at the END; the EIGHT-agent grant
         census is A-P5-2, decisions.md:379: ari IS design-granted —
         the four generic warm-lane agents (ari / leader / sonic-leader
-        / worker) plus the Emperor's designated video-team pilot
+        / worker) plus the user's designated video-team pilot
         quartet. The append is a DELIBERATE CONTRACT UPDATE, not a
         pin papering-over: the grant census is ratified, and ari's
         trailing set is the documented class exemption that carries

@@ -14,7 +14,7 @@ architecture-recommendation v3.4 §4.1 — the column set is VERBATIM):
   scoring with the lag surfaced (AC14); the row is never
   authoritative content.
 
-AUDIENCE DIMENSION (Emperor ruling ER-1, 2026-11-07): ``audience``
+AUDIENCE DIMENSION (user ruling ER-1, 2026-11-07): ``audience``
 ∈ {operation, implementation, both} gates ACTIVE injection ONLY.
 ``pok_query`` NEVER filters by audience (universal read, ER-1.4 —
 injection is curated; reading is free). ``audience_agents`` (TEXT
@@ -97,7 +97,7 @@ POK_DOMAINS: tuple[str, ...] = (
     "catalog",
     "other",
 )
-#: Emperor ruling ER-1: the classification stated at capture,
+#: user ruling ER-1: the classification stated at capture,
 #: curator-adjustable. Gates ACTIVE injection ONLY — never retrieval.
 POK_AUDIENCES: tuple[str, ...] = ("operation", "implementation", "both")
 POK_PROVENANCE_VALUES: tuple[str, ...] = ("declared", "observed")

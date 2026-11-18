@@ -1,4 +1,4 @@
-# TESTER GATE — commission "prompt-assent" (the Emperor's Word / Assent conversational approval lane)
+# TESTER GATE — commission "prompt-assent" (the user's Word / Assent conversational approval lane)
 
 | Field | Value |
 |---|---|
@@ -21,7 +21,7 @@
 | **A** | Tier-2 whole-tree dual-side FAILED-list diff (base ↔ tip, identical commands) | **FAIL — net-new = 2** (N-1, N-2; deterministic, 3× isolated, both arms) |
 | **B** | Lane packs at final tip (249-node matrix + 107-node P3) + post-tidier counter-mutation spot-verify | **PASS** |
 | **C** | PG seams: disposable-cluster boot smoke · 128th `.sql` via the real SQLite MigrationRunner · PG durable legs | **PASS 3/3** |
-| **D** | K-3 live probe (W-1 flip-on hard gate) | **OUTSTANDING** → the Emperor's ceremony lane (not a gate failure; blocks arming, not staging) |
+| **D** | K-3 live probe (W-1 flip-on hard gate) | **OUTSTANDING** → the user's ceremony lane (not a gate failure; blocks arming, not staging) |
 | **E** | T3.5-shaped E2E on the real dev daemon (9 legs + kill-switch matrix) | **PASS 9/9** (1 disclosed harness simulation, 1 expectation correction) |
 | **ensure.md Core** | concurrency pack · `dev.sh` graceful-shutdown flag · converted-async callers (+ no-dead-code) | **PASS 3/3** (+1 nice-to-have) — the concurrency pack's **raw exit 1** is a quarantined, base-proven pre-existing row, not a net-new defect (see §7.1) |
 
@@ -197,9 +197,9 @@ Daemon SIGTERM **after** verifying pid owns :8179 + `cwd` = feature worktree + c
 
 **Adjudicated in-line by the tester** (no worker): the environment cannot drive the probe and it must not be faked.
 
-- **Not drivable from any environment on this host.** Recon verified, key-names-only, that **no** `DISCORD_*` / `TELEGRAM_*` / `SLACK_*` / `WHATSAPP_*` credentials exist in the worktree `.env`, the live install `.env`, or the canonical `.env`. The procedure needs the Emperor's **1:1 DM** to the relay bot **and** a **Discord group DM** (bot + another human) — human-interactive by design ("operator-run, once").
+- **Not drivable from any environment on this host.** Recon verified, key-names-only, that **no** `DISCORD_*` / `TELEGRAM_*` / `SLACK_*` / `WHATSAPP_*` credentials exist in the worktree `.env`, the live install `.env`, or the canonical `.env`. The procedure needs the user's **1:1 DM** to the relay bot **and** a **Discord group DM** (bot + another human) — human-interactive by design ("operator-run, once").
 - **Procedure verified present**: `docs/runbooks/prompt-assent.md` (added `04cfaaabe`, amended `029416f2e`) — §"Arming / disarming (the kill-switch)" ≈ line 31 (default OFF, fail-closed per D-2) and §"The K-3 live confirmation (the outstanding pre-ship probe)" ≈ line 160 (5 steps: arm → 1:1 DM leg expecting a mint → group-DM leg expecting `mint-requires-private-channel` with no token row → optional fail-closed leg → file evidence). The refusal taxonomy the probe asserts is present.
-- **Disposition:** ledgered **OUTSTANDING** — it transfers to the Emperor's ceremony lane. Per the commission's own ruling it blocks **arming any environment**, not the stage cut. The live leg was **not** simulated, faked, or approximated.
+- **Disposition:** ledgered **OUTSTANDING** — it transfers to the user's ceremony lane. Per the commission's own ruling it blocks **arming any environment**, not the stage cut. The live leg was **not** simulated, faked, or approximated.
 
 ---
 
@@ -262,7 +262,7 @@ Worker `0539d04f`, skill `e2e-test`. Wall-clock 41m47s (05:39:59Z → 06:21:46Z)
 - **Discord-first simulation — the one harness intervention.** The api chat path cannot carry `metadata["discord"]` (the Discord adapter's build site needs a live gateway), so mint/approve required injecting the adapter-shaped metadata into the `message_queue` row of the lane's **own** test message. The pure-API leg (3a) is the honest counter-measure (typed refusal, no token row). Everything else — window stamping, factor gates, mint/approve transactions, the D-4 hook, ledger writes — ran through real daemon code paths via real ari LLM turns. **Not a product defect.** This is precisely the fidelity gap the OUTSTANDING K-3 live probe owns.
 - **Typed no-window refusal needed a genuinely non-user-origin dispatch** onto an instance with **no** window (an `instance_ops:` nudge onto a fresh instance). A nudge onto an instance that already had a user turn lands in the RAM-injection lane and **keeps** the old window (observed `token-channel-mismatch`). `send_message` to ari is blocked (no agent lists `ari` in `team_members`); `ask_questions` is hidden for API-created instances (source_type gate).
 - **Notable agent-layer finding:** the `maintenancer` agent **refused** to relay an approval-shaped nudge ("a self-attestation of user confirmation at a gate that confirmation never reached through a user-origin channel"), filed a `report_anomaly`, and complied only once the message was framed as a `mint` — the agent layer, not just the tool, defends the boundary.
-- **Leftover dev-DB artifacts** (disclosed, no real agent affected): 2 approved `prompt_versions` rows for `prompt-assist-e2e-probe`, 2 consumed token rows, 6 audit events, and the test instances (ari ×2, maintenancer ×3) in `ensemble_dev`; **0 pending rows left**. `ari`'s owed T3.5 `tools_note.md` re-stamp was deliberately **not** performed (separate, Emperor-owned lane).
+- **Leftover dev-DB artifacts** (disclosed, no real agent affected): 2 approved `prompt_versions` rows for `prompt-assist-e2e-probe`, 2 consumed token rows, 6 audit events, and the test instances (ari ×2, maintenancer ×3) in `ensemble_dev`; **0 pending rows left**. `ari`'s owed T3.5 `tools_note.md` re-stamp was deliberately **not** performed (separate, user-owned lane).
 - Harness slip (self-corrected): the first driver always posted to *ari*, so three "nudge" instructions went to ari instead of the maintenancer — detected via the missing queue rows and fixed by parameterising the target instance; **no invalid conclusion was drawn from it**.
 
 ---

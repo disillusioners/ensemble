@@ -7764,7 +7764,7 @@ def create_attestation_gate_node(
 # Agent group chat P4 — room completion gate (the (a2) completion nudge)
 # ============================================================================
 #
-# The Emperor's rhythm-aware delivery, arm (a2): before the instance
+# The user's rhythm-aware delivery, arm (a2): before the instance
 # declares its turn done, a last-chance "check unread team messages"
 # nudge — IN-GRAPH at the END decision (the post-graph finalization was
 # evaluated and rejected; nudges fire IN-GRAPH).

@@ -6,7 +6,7 @@
 
 ## VERDICT: **SOUND-WITH-AMENDMENTS**
 
-D1–D6 are structurally sound and anchor-faithful — every load-bearing planner anchor re-verified against code. **One critical amendment (AM-1: the delete txn as specified is race-unsafe)** plus ten further folds (AM-2..AM-11), none structural. One Emperor-facing decision is carried to the leader (SP-1 clutter-relief recipe — §2.1 / §8), everything else is decided here.
+D1–D6 are structurally sound and anchor-faithful — every load-bearing planner anchor re-verified against code. **One critical amendment (AM-1: the delete txn as specified is race-unsafe)** plus ten further folds (AM-2..AM-11), none structural. One user-facing decision is carried to the leader (SP-1 clutter-relief recipe — §2.1 / §8), everything else is decided here.
 
 ---
 
@@ -30,7 +30,7 @@ D1–D6 are structurally sound and anchor-faithful — every load-bearing planne
 3. Boot 2 collects all rows terminal ≥7d (median age ~10d ⇒ most of the 100 rows, spread over ~4 ticks / ~4h at batch cap 25).
 4. Restore `RETENTION=14` (boot 3).
 
-**Emperor-facing trade, stated plainly:** do nothing → the clutter clears by ~2026-11-21; run the recipe → the clutter clears within hours of promote at the cost of one documented env step at an already-scheduled ceremony.
+**user-facing trade, stated plainly:** do nothing → the clutter clears by ~2026-11-21; run the recipe → the clutter clears within hours of promote at the cost of one documented env step at an already-scheduled ceremony.
 
 **Why 7d floor, not the planner's documented `retention=1` lever:** resume-after-reap is a bare `ValueError("Schedule not found")` (scheduling_service.py:988-991) — a reaped 3-day-old paused schedule is a broken promise. 7d honors the pause/resume window while still collecting ~most of the backlog; resume before collection writes `enabled=true`, which the fence then excludes forever. 0h is additionally unreachable (`ge=1` + repo re-check).
 
@@ -136,15 +136,15 @@ Interaction (recorded): batch cap decouples pass-1 volume from violence (100 row
 ## 7. Risks (merged, deduped — highest severity + most specific variant kept)
 
 - 🔴 **AM-1 race** — delete txn without in-txn re-assert + lock silently destroys a just-resumed schedule (or a just-edited paused one) — REQUIRED fold before P4.
-- 🔴 **Commission-sentence vs D3** — expectation defect at the Emperor level unless SP-1 recipe (or sentence correction) is adopted at the gates.
+- 🔴 **Commission-sentence vs D3** — expectation defect at the user level unless SP-1 recipe (or sentence correction) is adopted at the gates.
 - 🟡 **AM-3 archive PK collision is reachable** (REST create accepts scheduler + explicit id) — plain-INSERT fail-loud policy + pin; never ON CONFLICT (stale-snapshot absorption corrupts the audit).
 - 🟡 **Two-write consumed transition** (registry.py:524-528; self_alarm.py:1109-1110) — crash window `(stopped, enabled=true)` excluded by the enabled fence; AM-9 pin; non-atomicity itself routed as pre-existing debt.
 - 🟡 **Resume-after-reap UX** — bare `ValueError("Schedule not found")`; disclosure strings (AM-5) + routed docs note.
 - 🟢 instance_mappings deleted without archive (executions carry instance_id — linkage survives); ERROR exclusion + observed_error_rows counter; SourceCleanup rationale fix; processed_messages parity no-op.
 
-## 8. Decisions pending (leader/Emperor — everything else decided)
+## 8. Decisions pending (leader/user — everything else decided)
 
-1. **SP-1 recipe adoption (Emperor-facing):** run the promote-time retention=7 (+optional one-boot dry-run observe) recipe → clutter cleared within hours of promote; or do nothing → cleared by ~2026-11-21. Architect recommendation: **run the recipe**. Both are safe; this is a UX-timeline call the Emperor owns.
+1. **SP-1 recipe adoption (user-facing):** run the promote-time retention=7 (+optional one-boot dry-run observe) recipe → clutter cleared within hours of promote; or do nothing → cleared by ~2026-11-21. Architect recommendation: **run the recipe**. Both are safe; this is a UX-timeline call the user owns.
 2. **D2 standing-policy ratification** (paused-recurring reaped at 14d, disclosed via AM-5) — planner already flagged for plan council; architect concurs with the uniform rule.
 
 ## 9. Routed follow-ups (recorded, out of scope)

@@ -16,7 +16,7 @@ renders its VISIBLE members contiguous), AC22 (the audience-filtered
 injection views: devops/ari/leader see operation ∪ both; developer
 and worker see both only; each view within the same 8/2,900 budget).
 
-The §11 payload shape (8 slugs, the Emperor's classifications) is the
+The §11 payload shape (8 slugs, the user's classifications) is the
 fixture — the same set the dogfood will seed.
 """
 

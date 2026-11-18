@@ -456,7 +456,7 @@ class TestWritePinUnpin:
     ):
         result = await tools["memoir_write"].ainvoke(
             {
-                "text": "the emperor set the doctrine",
+                "text": "the user set the doctrine",
                 "keepsake": True,
                 "reason": "binding doctrine",
                 "actor": "emperor",

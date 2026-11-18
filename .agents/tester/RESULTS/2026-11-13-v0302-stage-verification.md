@@ -1,7 +1,7 @@
 # Stage Verification — v0.30.2 (sonic team roster & support-parity amendment)
 
 **Lane:** STAGE-VERIFICATION (independent verifier = tester; every value re-derived by worker legs, zero relayed numbers trusted)
-**Date:** 2026-11-13 (UTC) · **Verdict: ALL 5 LEGS PASS — promote-ready evidence complete; NO promote performed (Emperor's ceremony)**
+**Date:** 2026-11-13 (UTC) · **Verdict: ALL 5 LEGS PASS — promote-ready evidence complete; NO promote performed (the user's ceremony)**
 **Scope ruling (leader):** TARGETED — declarative meta/grant delta; no runtime code, no migrations; v0.30.1's V0–V14 dry-run remains valid for unchanged machinery. No full suite, no dry-run re-executed.
 **Workers:** S1 `1866da43` · S2 `f6b88c4e` · S5a `38c269d7` · S5b `8eca52f4` · S3 `ef547f32` · S4 `eca3b89e` · hygiene `81b11e0a`
 
@@ -64,7 +64,7 @@ All 8 checks MATCH the S1 before-state (captured 13:40:30Z, before any leg): `cu
 
 - **S5a** registered pack `sonic_agent_defs_unit_test.sh` (static + real through production auth gate), run at HEAD `c50a7631a` under test-leader adjudication (docs-only path proof: `afc172de7..c50a7631a` = 1 path `.agents/shared/planning/sonic-team/V1-1-AMENDMENT.md`; 0 under `agents/`, 0 under `test/`): exit 0 in 12s — static 14/14; self-test 55/55 RED + fixture 14/14; `A2-real` (discovery + spawn positives + coder deny-by-default) and `A3-real` (high-risk spawn negatives denied) green; pytest phase 23 passed.
 - **S5b** enumerated unit legs (stage worktree @ tag): grant pins 15 passed; pok pins 10 passed; duty prompts 4 failed / 15 passed = EXACTLY the 4 documented pre-existing canary-rooted reds (byte-attributed to `agents/canary/rule.md`; zero net-new); aegis security family 556 passed (baseline 201); `tests/test_api.py -k "health or version"` → 1 node (`test_health_check`) passed. Disclosure: the "health or version" universe in that file is a single node; version-string pins live in the bump files (verified in S1).
-- ensure.md scoping: Core gates taken as the changed-pack set (sonic pack + grant-pin files + test_api health) — ALL PASS. `concurrency_atomic_unit_test` / dev.sh static gate OUT of blast radius (declarative content-only delta; zero daemon/ code, zero migrations — known_schema_gen unchanged vs v0.30.1). No Release Gate (not a promote-blocking judgment trigger; promote is the Emperor's ceremony).
+- ensure.md scoping: Core gates taken as the changed-pack set (sonic pack + grant-pin files + test_api health) — ALL PASS. `concurrency_atomic_unit_test` / dev.sh static gate OUT of blast radius (declarative content-only delta; zero daemon/ code, zero migrations — known_schema_gen unchanged vs v0.30.1). No Release Gate (not a promote-blocking judgment trigger; promote is the user's ceremony).
 
 ## Defects & disclosures register (this lane)
 
@@ -76,6 +76,6 @@ All 8 checks MATCH the S1 before-state (captured 13:40:30Z, before any leg): `cu
 
 ## Fence verdict
 
-**ZERO live contact · NO promote · NO tag moves · steady team untouched · worktrees clean · release payload byte-stable.** Promote remains the Emperor's ceremony.
+**ZERO live contact · NO promote · NO tag moves · steady team untouched · worktrees clean · release payload byte-stable.** Promote remains the user's ceremony.
 
 Evidence files (mode 600): `/tmp/v0302-s1-evidence.txt`, `/tmp/v0302-s2-{selftest,e2e}.txt`, `/tmp/v0302-s3-evidence.txt`, `/tmp/v0302-s4-evidence.txt`, `/tmp/v0302-s5a.txt`, `/tmp/v0302-s5b-{1,2,3,4,5,5-collect}.txt`.

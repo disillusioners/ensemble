@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-12T23:1xZ · **Executor:** stage-verify worker (reads-only; no boots; umask 077; logs `/tmp/stageverify/`)
 - **Release:** `/home/nea/agents-ensemble/releases/v0.29.23` · tag `v0.29.23` (object `0ade29c3c…`, peeled `3db6ba97e…` == `origin/latest`) · staged_at 2026-11-12T23:03:37Z (manifest)
-- **VERDICT: ✅ PASS — promote-ready from the tester lane (promote remains the Emperor's ceremony).**
+- **VERDICT: ✅ PASS — promote-ready from the tester lane (promote remains the user's ceremony).**
 
 ## Legs
 | Leg | Result | Evidence |

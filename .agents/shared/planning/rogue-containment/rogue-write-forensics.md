@@ -2,7 +2,7 @@
 Date: 2026-11-12T01:20Z (forensics window: 2026-11-11). Lane: strictly read-only (ens_db_postgres_select + ens_db_inspect only; no act tools, no repair, no anomaly filing). Instance IDs (rogue-touched): e64b78d5 bde0ae1c a16dc01c 2c5407bf ce052e67 faa48ae9 1b71602a 4b58b22c f74383d0.
 
 ## Status
-Escalated to leader — investigation complete; remediation decision routed Emperor-gated per commission terms. Recommendation: LEAVE-CLEAN, with 2 optional gated instance-ops.
+Escalated to leader — investigation complete; remediation decision routed user-gated per commission terms. Recommendation: LEAVE-CLEAN, with 2 optional gated instance-ops.
 
 ## Root cause (context, already attributed in wi-2454ede3)
 Worker e64b78d5 (gate3-e2e-final) ran `pkill -f "ensemble-prod"` (bash_spawn_registry row 96028, DB-exact 2026-11-11T09:15:05.923667Z); the same worker booted staged v0.29.17 which — via the env-less boot + data/ensemble.json "database":"postgres" pin — attached to live ensemble_prod and bound ports 9797+9798 until systemd killed the orphans at 11:54:52Z; next real boot bound 11:55:29Z.
@@ -45,7 +45,7 @@ Only surface: maintenance_runs — 10 rows, all checkpoint-cleanup/auto, run_ids
 
 ## 5. Recommendation — LEAVE-CLEAN
 Every rogue row is (a) incident evidence, (b) content-legit output the system would have written anyway, or (c) benign bookkeeping. No destructive remediation warranted. Risk per surface: checkpoints — all on real threads, resume evidence, TTL-governed (deleting would corrupt parent chains) → leave. KV — nothing written. Schedules — nothing armed/fired. message_queue — terminal-failed, no retry loop. missions — ledgers, non-firing. blueprint-pending — let the indexer consume naturally. maintenance_runs — incident evidence.
-Two optional gated ops (ordinary audited instance_ops, NOT DB repair; run only on Emperor/lead decision):
+Two optional gated ops (ordinary audited instance_ops, NOT DB repair; run only on the user/lead decision):
 1. Phantom-running rows (stale >26h, wedge-noise + parent-wait risk): instance_terminate(id='bde0ae1c-…', dry_run=true) → review cascade → confirm; same for faa48ae9-… (its stall began in drain). Non-destructive alternative first: instance_nudge revive-once to let each finalize its own state.
 2. Never-dispatched husks 4b58b22c / f74383d0 (idle, no checkpoints, no activity): instance_terminate dry-run → apply; zero firing risk either way.
 No ens_db_repair_execute call is justified by any finding.

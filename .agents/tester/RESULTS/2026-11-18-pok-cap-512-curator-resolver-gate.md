@@ -99,7 +99,7 @@ Registered `pok_pg_materialization` invocation + PG_TEST_* to the fenced scratch
 ## Gaps / open risks
 
 - **None unrun.** Six commissioned tasks, all executed to measured outcomes. The two non-producible observations (live plan flip D4; live dual-active tie-break D2) are stated as unproven with named substitute evidence, not skipped.
-- Live daemon still runs OLD code (v0.31.0, cap 256) until the Emperor's promote — every live statement here says so honestly: T4/T5 prove **the new code against the real store**, not the live daemon's config.
+- Live daemon still runs OLD code (v0.31.0, cap 256) until the user's promote — every live statement here says so honestly: T4/T5 prove **the new code against the real store**, not the live daemon's config.
 
 ## Housekeeping
 
@@ -112,7 +112,7 @@ Scratch DBs `ensemble_dev_scratch_pokcap(_cap)` **dropped** (0 remain). Worktree
 
 ## T7 — PACKS.md `pok_service_unit` cap marker → A-13 form: **APPLIED (fix case)**
 
-`74722abb8` was a **count-only** re-stamp — the registered row still carried `49 nodes` + `[active cap 256 — Emperor directive 2026-11-10]`. One row edited in place: count → `57 nodes (re-count 2026-11-18 @ 47ecca4c6; +8 TestSlugOwnerResolution)`; AC19's bare `256-cap` neutralized to `cap refuse`; marker → **`[active cap 512 — commission 2026-11-17, no Emperor directive cited]`** (A-13 form, byte-verbatim, present exactly once); Last Run/Status stamped per the house convention (`PASS 57/57 HEAD · 49/49 BASE (2026-11-18 gate, net-new ∅)`). Post-edit: **zero** 256-era markers remain in PACKS.md. Commit **`63f816b55`** (`docs(packs): pok_service_unit cap marker -> A-13 512 form`, explicit pathspec, 1 file / +1/−1). Historical surfaces (CHANGELOG [0.29.11], RESULTS, discharge registers) byte-intact.
+`74722abb8` was a **count-only** re-stamp — the registered row still carried `49 nodes` + `[active cap 256 — user directive 2026-11-10]`. One row edited in place: count → `57 nodes (re-count 2026-11-18 @ 47ecca4c6; +8 TestSlugOwnerResolution)`; AC19's bare `256-cap` neutralized to `cap refuse`; marker → **`[active cap 512 — commission 2026-11-17, no user directive cited]`** (A-13 form, byte-verbatim, present exactly once); Last Run/Status stamped per the house convention (`PASS 57/57 HEAD · 49/49 BASE (2026-11-18 gate, net-new ∅)`). Post-edit: **zero** 256-era markers remain in PACKS.md. Commit **`63f816b55`** (`docs(packs): pok_service_unit cap marker -> A-13 512 form`, explicit pathspec, 1 file / +1/−1). Historical surfaces (CHANGELOG [0.29.11], RESULTS, discharge registers) byte-intact.
 
 ## T8 — Doctrine pointer row LANDED on the live store: **SUCCESS**
 

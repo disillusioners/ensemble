@@ -2,7 +2,7 @@
 
 Three tables, ONE package (the lane's repo home; design
 ``.agents/shared/planning/group-chat/architecture-recommendation.md``
-§1.3, Emperor-ratified 2026-11-15 — the spec of record):
+§1.3, user-ratified 2026-11-15 — the spec of record):
 
 * :class:`ChatRoom` — ``chatrooms`` — room identity + scope + lifecycle.
   One row per chat-room. ``tree_root_id`` anchors the room scope (the

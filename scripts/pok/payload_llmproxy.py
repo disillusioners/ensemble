@@ -48,7 +48,7 @@ STRING stays design-verbatim (ruling: correct, must not change).
 
 STATUS: dev-proven (ensemble_dev, Phase 3 dogfood), LIVE-GATED — Phase 1.5
 live replay runs this same module against the live llmproxy project row
-and is owned by the leader (the Emperor's promote gate), not this script.
+and is owned by the leader (the user's promote gate), not this script.
 
 Attribution: ``agent_id='leader'`` — the design's curator-of-record for
 this payload (plan §4.5 "leader-curated"); it is also what enables the

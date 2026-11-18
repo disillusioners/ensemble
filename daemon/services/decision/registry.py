@@ -127,7 +127,7 @@ class StageTransitionRefused(Exception):
 class ReviewRecord:
     """The review + ratification record a stage transition requires (D3).
 
-    ``ratified_by`` must name the Emperor's ratification explicitly — a
+    ``ratified_by`` must name the user's ratification explicitly — a
     review alone is NOT a ratification.
     """
 
@@ -362,7 +362,7 @@ class SeamRegistry:
         """Move a seam's stage — REFUSING an unratified promotion (D3).
 
         A ``shadow`` → ``deciding`` transition requires an explicit
-        review + ratification record (the Emperor's ratification). In P1
+        review + ratification record (the user's ratification). In P1
         the apply path is therefore PRESENT but UNREACHABLE.
 
         Raises:
@@ -376,7 +376,7 @@ class SeamRegistry:
                     "shadow -> deciding requires an explicit review + "
                     "ratification record (D3); no seam may move to deciding "
                     "until its shadow window has been reviewed and the "
-                    "Emperor has ratified the transition"
+                    "user has ratified the transition"
                 )
             self._ratified[seam_id] = review
         self._stages[seam_id] = to_stage

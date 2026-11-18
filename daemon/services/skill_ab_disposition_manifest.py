@@ -5,7 +5,7 @@ WHY THIS MODULE EXISTS (2026-11-17, W7 — leader decision)
 The sweep posture is **NO knob**: the ``skill_ab_inactivity_sweep``
 never carries a "which pairs to divert" switch. Diverts come from an
 EXPLICIT disposition — an operator/leader-named pair — never from
-sweep judgment (Emperor ruling E-6: never crown a verified-defective
+sweep judgment (user ruling E-6: never crown a verified-defective
 newer member; the corrective-first / non-defective-member branch is
 reached through an explicit disposition).
 

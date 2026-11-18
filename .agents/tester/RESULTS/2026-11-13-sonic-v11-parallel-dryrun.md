@@ -210,11 +210,11 @@ PASS — `sk-proj-` 0 hits · `sk-ant-` 0 hits · OPENAI key prefix `e33c34f5af4
 
 ## 11.9 V12 re-adjudication — refined census (leader ruling, 2026-11-13)
 
-**Ruling (leader):** criterion refinement — NOT a third run, NOT a coder prompt amendment. The Emperor's requirement is that the coder explores the SOURCE ("sonic coder still has explore but read file/src"); the TOOL is not specified. coderB's bash `cat` IS source exploration. The original bash-exclusion was a false-tightening: bash was dropped as *ambiguous* evidence ("coders must bash to commit"), which does not exclude bash READ commands as exploration evidence.
+**Ruling (leader):** criterion refinement — NOT a third run, NOT a coder prompt amendment. The user's requirement is that the coder explores the SOURCE ("sonic coder still has explore but read file/src"); the TOOL is not specified. coderB's bash `cat` IS source exploration. The original bash-exclusion was a false-tightening: bash was dropped as *ambiguous* evidence ("coders must bash to commit"), which does not exclude bash READ commands as exploration evidence.
 
 **Refined V12/F15 census (authoritative for this re-adjudication):**
 1. Admissible file-exploration evidence = ANY file-read call: filesystem `read_file`/`grep_files`/`glob_files`/`list_directory` **OR** bash-based reads (`cat`, `head`, `tail`, `sed -n`, `grep`, `rg`, `awk`, `nl`). Count each occurrence; V12 passes at census ≥ 1.
-2. **ABSOLUTE and unchanged:** RAG `explore` tool calls == 0 per coder (the two-sided pin's exclusion side is what the Emperor mandated).
+2. **ABSOLUTE and unchanged:** RAG `explore` tool calls == 0 per coder (the two-sided pin's exclusion side is what the user mandated).
 3. NON-evidence: bash commit/merge/write commands (`git commit`, `git merge`, `git add`), `edit_file`, `write_file` — never counted as exploration.
 
 **Re-adjudication on the EXISTING run-2 transcripts (no new boot; evidence-preserving — same transcripts, refined mapping only):**
