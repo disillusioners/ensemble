@@ -115,3 +115,9 @@ worktree at the tag, fresh build (dist/ + frontend/dist/ removed first), ENSEMBL
 ENSEMBLE_ROLLBACK_SAFE=1 (delta since v0.31.3: our fix + docs; no new migrations; additive-only).
 NO promote — Emperor's ceremony owns the flip. Staged-at evidence of record: the live
 releases/v0.31.4/manifest.json staged_at field + releases/state.json history (authoritative timestamps).
+
+## POSTSCRIPT v2 addendum — pre-tag drift absorb
+origin/latest moved again pre-push (c48a55431 -> ba76545e9: two pok-sweep family-cap DOCS commits, single
+disjoint file, zero overlap). Absorbed via merge --no-ff; gate pack re-run green on the new tip
+(/tmp/wia5ec5b3e-int2/pack-final.log); local-only tag v0.31.4 re-pointed to the final tip below (never
+pushed at the earlier position — no public ref moved). Our-work isolated range: c48a55431..<tag>.
