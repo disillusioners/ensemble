@@ -44,6 +44,24 @@ it in parallel):
   instance_not_found``). A ``state`` field names the lifecycle state
   (``active`` / ``closed``); a purged room has no rows at all.
 
+KNOB DEFAULT — OPERATOR-TIGHTENABLE WITHOUT A RELEASE (A3)
+-----------------------------------------------------------
+The knob's DEFAULT is resolved ONCE, at import, from the environment
+variable ``ENSEMBLE_ALLOW_ANCHORLESS_GLOBAL_LIST``:
+
+* **unset** ⇒ the historical wide default (``True``);
+* **set to a strictly parseable boolean** (case-insensitive ``1`` /
+  ``true`` / ``yes`` / ``on`` ⇒ True; ``0`` / ``false`` / ``no`` /
+  ``off`` ⇒ False) ⇒ that value;
+* **set to anything else** ⇒ the historical default (``True``) plus a
+  ``WARNING`` in the daemon log — an unparseable tightening request
+  never tightens silently and never crashes the import.
+
+The resolution happens at import time only (a restart, not a release,
+is enough), the knob stays a plain module attribute (tests flip it with
+``monkeypatch.setattr``), and EXACTLY ONE branch in the handler consults
+it — the env var introduces no second anchor-less path.
+
 ``state`` vs ``closed`` — a DECIDED divergence, not an accident: the
 messages-era room list (``GET /api/instances/{id}/rooms``) emits the
 boolean ``closed`` and its contract is FROZEN at v0.31.0 for that
@@ -97,6 +115,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -384,8 +403,53 @@ def _shape_rows(rows, truncated):
     }
 
 
+#: The historical wide DEFAULT of the F-3 knob — unchanged behaviour.
+#: Kept as its own name so the env-var resolution below has an explicit
+#: fallback to fall back TO (unset / blank / unparseable ⇒ this).
+_ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT: bool = True
+
+#: The operator-facing env var that re-defaults the knob WITHOUT a code
+#: release (a daemon restart re-runs this import). Name + parse rule +
+#: fallback are documented in the module docstring (A3).
+_ANCHORLESS_GLOBAL_LIST_ENV = "ENSEMBLE_ALLOW_ANCHORLESS_GLOBAL_LIST"
+_ANCHORLESS_TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
+_ANCHORLESS_FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
+
+
+def _resolve_allow_anchorless_global_list() -> bool:
+    """Resolve the knob's default ONCE, at import (A3).
+
+    Strict parse of ``ENSEMBLE_ALLOW_ANCHORLESS_GLOBAL_LIST``:
+    case-insensitive ``1/true/yes/on`` ⇒ True, ``0/false/no/off`` ⇒
+    False. Unset, blank, or unparseable ⇒ the historical wide default
+    (:data:`_ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT`). An unparseable
+    value is LOUD (WARNING) but never fatal — a typo cannot take the
+    anchor-less lane down, and it cannot silently tighten it either.
+    """
+    raw = os.environ.get(_ANCHORLESS_GLOBAL_LIST_ENV)
+    if raw is None or not raw.strip():
+        return _ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT
+    token = raw.strip().lower()
+    if token in _ANCHORLESS_TRUE_TOKENS:
+        return True
+    if token in _ANCHORLESS_FALSE_TOKENS:
+        return False
+    logger.warning(
+        "rooms: %s=%r is not a boolean token (accepted: %s / %s) — "
+        "falling back to the default %r",
+        _ANCHORLESS_GLOBAL_LIST_ENV,
+        raw,
+        sorted(_ANCHORLESS_TRUE_TOKENS),
+        sorted(_ANCHORLESS_FALSE_TOKENS),
+        _ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT,
+    )
+    return _ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT
+
+
 # Module-level knob (F-3 tightening switch) — single branch consults it.
-_ALLOW_ANCHORLESS_GLOBAL_LIST: bool = True
+# Its DEFAULT is env-resolved at import (A3); tests flip the attribute
+# itself via ``monkeypatch.setattr``.
+_ALLOW_ANCHORLESS_GLOBAL_LIST: bool = _resolve_allow_anchorless_global_list()
 
 
 @router.get(
