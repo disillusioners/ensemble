@@ -4,24 +4,24 @@
 Companion checker for pack ``sonic_agent_defs_unit_test`` (see the .sh
 sibling for the invocation contract).  Implements the phase-2 spec
 (``phase2-test-pack-spec.md``) assertions PLUS the sonic-routing
-amendment pins (Emperor ruling 2026-11-14, decisions.md "Sonic routing
+amendment pins (user ruling 2026-11-14, decisions.md "Sonic routing
 amendment") — each derived from the frozen blocks of the combined spec
 (``phase1-implementation-spec-v1.1.md``, amend block 2026-11-14) — the
 spec wins on any mismatch (spec §7-4 VERIFY-AT-IMPL doctrine).
 
-Combined shape (Emperor ruling 2026-11-13: v1.2 merged into v1.1): FIVE
+Combined shape (user ruling 2026-11-13: v1.2 merged into v1.1): FIVE
 sonic agents — the new ``sonic-developer`` layer plans/splits/dispatches/
 merges and authors HANDOFF-v2; ``sonic-coder`` is a one-shot MODULE
 executor (source exploration expected, RAG excluded, commits its module
 branch, returns a compact module report); ``sonic-reviewer`` and
 ``sonic-tester`` operate at INTEGRATION level (HANDOFF-v2 + base..merged).
 
-v0.30.2 amendment (Emperor ruling 2026-11-13, decisions.md R16-R19):
+v0.30.2 amendment (user ruling 2026-11-13, decisions.md R16-R19):
 giter re-added to sonic-leader + added to sonic-developer (escape hatch),
 devops on the leader, and the image read-trio granted to leader/developer/
 coder/reviewer via allow "image" + deny "image_save" (critic pattern).
 
-v0.30.5 sonic-routing amendment (Emperor ruling 2026-11-14, four rulings):
+v0.30.5 sonic-routing amendment (user ruling 2026-11-14, four rulings):
   A — the FROZEN blast-radius predicate (the frozen 14-glob block) is REMOVED; routing
       is by COMPLEXITY, not paths.  The developer assesses complexity after
       explore+plan and PAUSES on high/extremely-high with a handover
@@ -104,11 +104,11 @@ SONIC_AGENTS = (
     "sonic-tester",
 )
 
-# ---- FROZEN [sonic-tools-v2] (combined spec §1.2/§1.3/§2.1 + Emperor ruling
+# ---- FROZEN [sonic-tools-v2] (combined spec §1.2/§1.3/§2.1 + user ruling
 # 2026-11-13: knowledge granted to sonic-developer + sonic-leader ONLY;
 # coder/reviewer/tester ZERO-KNOWLEDGE — the coder grant is REVERSED; coder
 # keeps SOURCE exploration with file tools, excluded ONLY from the RAG call)
-# ---- v0.30.2 roster & support-parity amendment (Emperor ruling 2026-11-13,
+# ---- v0.30.2 roster & support-parity amendment (user ruling 2026-11-13,
 # decisions.md R16-R19): giter re-added to sonic-leader AND added to
 # sonic-developer (escape hatch — workflow/worktree expertise); devops on the
 # leader (rarely invoked by design — infra/deploy escape hatch); the image
