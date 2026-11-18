@@ -936,6 +936,13 @@ class _RecordingEnqueue:
         self.calls: list[dict] = []
         self.marker_snapshots: list[dict[str, bool]] = []
 
+    def _next_message_id(self) -> str:
+        """The message id factory (a hook — S2 overrides it to make
+        the enqueue lane's message id deterministic so a Task row can
+        be pre-seeded for the watcher mint's ``get_by_message``
+        resolution)."""
+        return f"mq-{uuid.uuid4().hex[:12]}"
+
     async def __call__(
         self,
         *,
@@ -955,7 +962,7 @@ class _RecordingEnqueue:
                 )
                 for row in s.exec(sqlmodel_select(DependencyWatcher))
             }
-            message_id = f"mq-{uuid.uuid4().hex[:12]}"
+            message_id = self._next_message_id()
             s.add(
                 MessageQueue(
                     message_id=message_id,
@@ -1749,3 +1756,191 @@ class TestS1TerminalChildFire:
                 "T7: the delivery marker must be committed BEFORE the "
                 "enqueue (two-transaction ordering)"
             )
+
+
+# ═════════════════════════════════════════════════════════════════════
+# S2 (wake-path-carrier-fix, phase 2) — the nudge arm-time self-surgery
+# guard + the C-1 mint-ordering pin. Real act lane
+# (``create_instance_ops_tools`` → ``instance_nudge``), observable ROW
+# STATE only (dependency_watchers + message_queue rows).
+# ═════════════════════════════════════════════════════════════════════
+
+
+class _ActEnqueue(_RecordingEnqueue):
+    """``_RecordingEnqueue`` adapted for the ACT path.
+
+    Two deltas:
+
+    1. The act calls ``manager.enqueue_message(target, message,
+       source=...)`` POSITIONALLY — the recorder's keyword-only
+       signature is widened here.
+    2. The message id is FIXED (so a ``Task`` row can be pre-seeded
+       under it for the watcher mint's ``get_by_message`` resolution)
+       and the enqueue can be made to RAISE (the C-1 ordering pin).
+    """
+
+    def __init__(self, engine, message_id: str = "mq-s2-act-1",
+                 raises: Exception | None = None):
+        super().__init__(engine)
+        self._fixed_id = message_id
+        self._raises = raises
+
+    def _next_message_id(self) -> str:
+        return self._fixed_id
+
+    async def __call__(self, instance_id=None, message=None,
+                       source="api", **kwargs):
+        if self._raises is not None:
+            raise self._raises
+        return await super().__call__(
+            instance_id=instance_id, message=message, source=source,
+            **kwargs,
+        )
+
+
+@pytest.fixture
+def s2_manager(engine, s1_manager, s1_bus):
+    """``s1_manager`` + the two seams the ACT path needs that the S1
+    service-level harness never touched: id resolution (``get_instance``
+    resolving every seeded id exactly — the fuzzy lane stays unused)
+    and a graph-task registry with no live task (the act's enqueue
+    lane, not the injection lane)."""
+    s1_manager.get_instance = AsyncMock(return_value=object())
+    s1_manager.find_near_instance = MagicMock(return_value=[])
+    s1_manager._graph_tasks = {}
+    return s1_manager
+
+
+def _s2_nudge_tool(manager, current_instance_id: str):
+    """The REAL ``instance_nudge`` act, built for one caller."""
+    import daemon.tools.instance_ops as io
+
+    tools = io.create_instance_ops_tools(
+        manager,
+        current_instance_id=current_instance_id,
+        agent_id="ari",
+    )
+    return next(t for t in tools if t.name == "instance_nudge")
+
+
+class TestS2NudgeArmGuardAndOrdering:
+    """S2 — the nudge arm-time self-surgery guard.
+
+    T2 pins the refusal (self-nudge ⇒ act refuses AND ZERO watcher
+    rows — the row-state assertion is the point); T2-preview pins the
+    dry-run path refusing identically; T2b pins the value PRESERVED
+    (a non-child nudge still mints the watcher and delivers the
+    message — the guard is a SELF guard, not a tree guard); C-1 pins
+    the mint ordering (a failed enqueue leaves ZERO watcher rows).
+    """
+
+    async def test_t2_root_self_nudge_refused_zero_watcher_rows(
+        self, engine, s2_manager
+    ):
+        """T2 — the live 17efd2ef shape: a ROOT instance nudging
+        ITSELF. The act refuses (self-surgery token) and NO
+        dependency_watchers row exists — the refusal fires BEFORE the
+        arm, so the unfulfillable self-watcher is never minted."""
+        root = _s1_seed_instance(engine, "ari-17efd2ef-root", parent_id=None)
+        s2_manager.enqueue_message = _ActEnqueue(engine)
+
+        out = await _s2_nudge_tool(s2_manager, root).ainvoke(
+            {"id": root, "message": "resume the sweep",
+             "reason": "self re-entry", "dry_run": False}
+        )
+
+        assert out.startswith("Error: INSTANCE_NUDGE REFUSED"), out
+        assert "reason=self-surgery-refused" in out, out
+        assert "send_message to yourself" in out, out
+        # The row-state point: ZERO watcher rows, ZERO delivered rows.
+        assert _s1_watcher_rows(engine) == [], (
+            "T2: a refused self-nudge must mint ZERO watcher rows"
+        )
+        assert _s1_rows_for_instance(engine, root) == [], (
+            "T2: a refused self-nudge must deliver NOTHING"
+        )
+        assert s2_manager.enqueue_message.calls == []
+
+    async def test_t2_dry_run_preview_refuses_identically(
+        self, engine, s2_manager
+    ):
+        """T2 (preview) — the dry-run path hits the SAME guard: a
+        preview of a refused act is a refusal, not a preview."""
+        root = _s1_seed_instance(engine, "ari-17efd2ef-root", parent_id=None)
+        s2_manager.enqueue_message = _ActEnqueue(engine)
+
+        out = await _s2_nudge_tool(s2_manager, root).ainvoke(
+            {"id": root, "message": "resume the sweep",
+             "reason": "self re-entry", "dry_run": True}
+        )
+
+        assert out.startswith("Error: INSTANCE_NUDGE REFUSED"), out
+        assert "reason=self-surgery-refused" in out, out
+        # It is a REFUSAL, not a preview envelope.
+        assert '"dry_run": true' not in out.lower(), out
+        assert "NO mutation happened" not in out, out
+        assert _s1_watcher_rows(engine) == []
+
+    async def test_t2b_non_child_nudge_still_mints_and_delivers(
+        self, engine, s2_manager
+    ):
+        """T2b — the guard is a SELF guard, NOT a tree guard: a nudge
+        to a NON-CHILD target (the ari → sonic-leader shape — two
+        roots, no tree relation) still mints the PENDING watcher AND
+        delivers the message (a message_queue row exists)."""
+        nudger = _s1_seed_instance(engine, "ari-op-root", parent_id=None)
+        worker = _s1_seed_instance(
+            engine, "sonic-leader-worker", parent_id=None
+        )
+        # The enqueue lane's fixed message id, with a REAL Task under
+        # it — the watcher mint resolves its source task by message id.
+        _s1_seed_task(
+            engine, instance_id=worker, message_id="mq-s2-act-1"
+        )
+        s2_manager.enqueue_message = _ActEnqueue(engine, "mq-s2-act-1")
+
+        out = await _s2_nudge_tool(s2_manager, nudger).ainvoke(
+            {"id": worker, "message": "please report the lane status",
+             "reason": "operational ping", "dry_run": False}
+        )
+
+        assert '"delivered": true' in out.lower(), out
+        row = _s1_watcher_for(engine, nudger, worker)
+        assert row is not None, (
+            "T2b: a non-child nudge MUST mint the completion watcher "
+            "(the guard is not a tree guard)"
+        )
+        assert row.state == "PENDING", (
+            f"T2b: the minted watcher must be PENDING (got {row.state!r})"
+        )
+        assert _s1_rows_for_instance(engine, worker), (
+            "T2b: the nudge message MUST be delivered (message_queue row)"
+        )
+
+    async def test_c1_failed_enqueue_leaves_zero_watcher_rows(
+        self, engine, s2_manager
+    ):
+        """C-1 ordering pin — the nudge act's enqueue → early-return →
+        commission → watcher ordering: when the enqueue RAISES, the
+        act returns the error envelope at the early return (AC-9b,
+        audit row left pending) and ZERO watcher rows exist — the
+        commission and the watcher mint are strictly AFTER the
+        committed enqueue."""
+        nudger = _s1_seed_instance(engine, "ari-c1-root", parent_id=None)
+        worker = _s1_seed_instance(engine, "c1-worker", parent_id=None)
+        s2_manager.enqueue_message = _ActEnqueue(
+            engine, raises=RuntimeError("enqueue lane exploded")
+        )
+
+        out = await _s2_nudge_tool(s2_manager, nudger).ainvoke(
+            {"id": worker, "message": "please finish",
+             "reason": "c1 ordering pin", "dry_run": False}
+        )
+
+        assert out.startswith("ERROR:"), out
+        assert "RuntimeError" in out, out
+        assert _s1_watcher_rows(engine) == [], (
+            "C-1: a FAILED enqueue must mint ZERO watcher rows — the "
+            "watcher mint is strictly after the committed enqueue"
+        )
+        assert _s1_rows_for_instance(engine, worker) == []

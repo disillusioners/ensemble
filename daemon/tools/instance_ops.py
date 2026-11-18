@@ -1510,6 +1510,35 @@ Examples:
             target_id = await _resolve_target(manager, id)
         except ValueError as exc:
             return _refusal(label, "instance-not-found", str(exc))
+        # S2 (wake-path-carrier-fix) — the nudge lane's SELF-surgery
+        # refusal. Guard condition is ``target == commissioner`` ONLY:
+        # a nudger nudging ITSELF (the live wedge shape, ari root
+        # 17efd2ef) arms a completion watcher whose TARGET is the
+        # nudger and whose watched CHILD is also the nudger — the
+        # target then parks waiting on itself (count_pending_for_target
+        # never drops), with no external worker that could complete the
+        # watched id. The sanctioned self-re-entry lane is
+        # send_message-to-self (the wedge-notice playbook,
+        # waiting_children_watchdog.py :436-438): the spawn arm is
+        # tree-guarded, so it delivers the message WITHOUT arming a
+        # completion watcher. This is deliberately NOT a tree guard —
+        # a nudge to a NON-CHILD target (e.g. ari → sonic-leader) is a
+        # real workflow and keeps working. Placed BEFORE ``_target_state``
+        # and before the ``dry_run`` branch: the DRY-RUN preview path
+        # refuses identically (a preview of a refused act is a refusal,
+        # not a preview).
+        if target_id == caller_instance_id:
+            return _refusal(
+                label,
+                "self-surgery-refused",
+                "an act tool never operates on its own session. To "
+                "re-enter your own turn, use send_message to yourself: "
+                "the spawn arm is tree-guarded and will deliver the "
+                "message without arming a completion watcher (which is "
+                "what you want — a self-watcher can never fire). Never "
+                "instance_nudge yourself: that lane is the one that "
+                "minted the unfulfillable self-watcher.",
+            )
         info = await asyncio.to_thread(_target_state, manager, target_id)
         if info is None:
             return _refusal(label, "instance-not-found", f"no instance row for {target_id!r}")
