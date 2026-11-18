@@ -152,3 +152,49 @@ plan-approval (both workers)
 Merges: fold-phases#1 ≡ fold-render#3 (same P3 cell); fold-phases#2 grouped into blocker 4 (same defect class). No downgrades, no upgrades, no approver-introduced blockers. Both worker verdicts REJECTED → aggregated REJECTED. **Iteration 003 is the cap** — a third rejection escalates to the Leader per the 3-iteration rule. The four residues are one-word-to-one-cell folds; a single careful sweep clears them.
 
 *Tracking: .agents/approver/gc-fe-surfaces-tracking.md (iteration 002 appended; next 003 — CAP).*
+
+---
+
+# Iteration 003 — CAP (fold commit db56e822b)
+
+## VERDICT: REJECTED
+## Iteration: 003 (FINAL — max iterations reached, escalated to Leader)
+
+**Worker:** approve-worker-fold-003 (2997be9f), cold, `plan-review.md`/`approval.md` barred, sweep report not trusted — all findings re-derived in-file; 13/13 hunks of the fold diff re-read; table-integrity scan programmatic (0 malformed rows); fold verified **surgical — NO new contradiction introduced**.
+
+## Residue-contract status
+| Item | Status |
+|---|---|
+| R1 — N9 422 chain | **PARTIAL** — 4 owning sites correct end-to-end (`Query(None)` + presence detection BEFORE the knob gate; task-5 cover leg wire-distinguishable from both 404s; Tests row; criterion 5 "5/5"; A-2 taxonomy fixed) — but 2 contradicting cells survive (blockers 1–2) |
+| R2 — N11 byte-variants | **FOLDED** — all 12 hits classified: honest-form ×8 (DI-scope disclosure carried at every site), annotated-quotes ×2 (leader-ruling records preserved verbatim + superseded markers), frozen-constant ×1, scope-qualified ×2 (true at stated scope, non-contradicting) |
+| R3 — criterion re-points | **PARTIAL** — all 5 named refs re-pointed AND content-verified against the criterion bodies; 2 sibling risk rows stale (blocker 3) |
+| R4 — counts | **FOLDED** — P3 NINE (i)–(ix) across 5 sibling cells (8+1 arithmetic exposed); AM-7 "(nine cases)"; P2 EIGHT/+8 consistent (6+2) |
+| R5 — pipe escapes | **FOLDED** — both instances (`decisions.md:123`, `phase1-plan.md:17`); 0 malformed table rows set-wide |
+| R6 — R15 mirror | **FOLDED** — bidirectional (overview R15 ↔ D1.4-a), same anchors, same hazard class |
+
+## Blocking Issues (3 — surviving residues; remediation is one line each)
+
+### 1. D1.8 amendment paragraph still pins 404 for the present-but-empty spellings
+- **Ref:** `decisions.md:108` — "The refusal fires for **every anchor-absent spelling** — `GET /api/rooms`, `?instance_id=` (empty), `?instance_id=%20` (whitespace), `?limit=5` — each answering the **404**" — contradicts the five owning sites (`decisions.md:61`/`:100`, `phase1-plan.md:16`/`:18`, `plan-overview.md:282`). An implementer following D1.8 makes the knob-OFF refusal catch the empty spelling ⇒ 404, breaking the pinned 422 leg.
+- **Fold:** rewrite so the knob-OFF refusal enumerates only the two anchor-absent spellings (`GET /api/rooms`, `?limit=5`) and defers the present-but-empty pair to the 422 row.
+
+### 2. Task-5 acceptance cell contradicts its own row's re-scoped cover cell
+- **Ref:** `phase1-plan.md:18` acceptance — "the knob-OFF legs assert the **404** shape for **all four spellings**" — while the same row's cover cell (updated by this fold) splits the four into two anchor-absent (404) + two present-but-empty (422), and the Tests block (`:37`) was updated to match. The executable AC is the un-updated cell.
+- **Fold:** "…the knob-OFF legs assert the **404** shape for the two anchor-ABSENT spellings (`GET /api/rooms`, `?limit=5`); the 422 leg asserts **422 `bad_request`** for `?instance_id=` / `?instance_id=%20`."
+
+### 3. Two sibling risk rows still cite "(21/22)" after the C-1 row was corrected to 20/21
+- **Refs:** `plan-overview.md:111` (R16) and `phase1-plan.md:78` (P1 risk) — "two separate criteria **(21/22)**"; criterion 22 is Polling mechanics, not a bound criterion. `plan-overview.md:253` (C-1) now says 20/21 — the set disagrees with itself.
+- **Fold:** "(21/22)" → "(20/21)" at both sites.
+
+**Note (align with fix #1):** `decisions.md:100` scopes the 422 to "with the knob ON" while the owning sites hold it in **both** knob states (presence check precedes the knob gate) — align the wording.
+
+## Escalation
+Max iterations reached (3) — escalated to Leader. Iterations 001 (7 blockers) and 002 (4 blockers) were folded with progressively better fidelity (001: 5 FOLDED + residue; 002: 4 FOLDED + residue; 003: 4/6 FOLDED, 2 PARTIAL); the three remaining items are one-line prose edits in cells adjacent to those the folds corrected — the pattern is incomplete-sweep, not misunderstanding. Leader disposition: apply the three folds (+ the `:100` alignment) and the plan is, on all evidence across three iterations, ceremony-ready.
+
+## Skills Used
+plan-approval
+
+## Session IDs
+- approve-worker-fold-003: 2997be9f-f3f6-471f-be30-67366afe5618
+
+*Tracking: .agents/approver/gc-fe-surfaces-tracking.md (iteration 003 FINAL — ESCALATED).*
