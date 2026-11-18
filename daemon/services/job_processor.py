@@ -819,6 +819,12 @@ class JobProcessor:
             observability.append_run_record(
                 observability.build_run_record(
                     stage="execution",
+                    # C3 (2026-11-17, DECIDED Q3): execution-refusal
+                    # records mint a run id too — the refused execution
+                    # is an attempt and must be correlatable (the job
+                    # id rides `extra`; the run id is the lane-wide
+                    # correlation key).
+                    run_id=observability.new_run_id(),
                     agent_id=None,
                     prompt_source="job_processor",
                     outcome="refused",
@@ -868,6 +874,9 @@ class JobProcessor:
         observability.append_run_record(
             observability.build_run_record(
                 stage="execution",
+                # C3 (2026-11-17, DECIDED Q3): same minting contract as
+                # the queued branch above.
+                run_id=observability.new_run_id(),
                 agent_id=None,
                 prompt_source="job_processor",
                 outcome="refused",

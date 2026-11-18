@@ -633,7 +633,7 @@ curl -sS http://127.0.0.1:9797/api/metrics/capture-lane | tee /tmp/capture-lane.
 # 2. the A4 gauge + drift (the §5.1 G5/G6 baseline)
 cd /home/nea/ensemble-src-wt-skill-revival-phase1
 .venv/bin/python scripts/audit/skill_counter_reconcile.py \
-  --db-url "postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}" \
+  --db-url "postgresql+psycopg://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}" \
   --measure --json | tee /tmp/a4.before.json
 
 # 3. the anomaly baseline
@@ -756,7 +756,7 @@ readings to show `drift == 0` **AND** the two readings to be **≥ 24 h apart**:
 
 ```bash
 cd /home/nea/ensemble-src-wt-skill-revival-phase1
-DB_URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}"
+DB_URL="postgresql+psycopg://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}"
 
 # 1. DRY RUN FIRST — always.
 .venv/bin/python scripts/audit/skill_counter_reconcile.py --db-url "$DB_URL" --measure --json | tee /tmp/a4.t0.json
@@ -1050,7 +1050,7 @@ export PGPORT=$(grep -m1 '^POSTGRES_PORT=' "$INSTALL_DIR/.env" | cut -d= -f2-)
 export PGDATABASE=$(grep -m1 '^POSTGRES_DB=' "$INSTALL_DIR/.env" | cut -d= -f2-)
 export PGUSER=$(grep -m1 '^POSTGRES_USER=' "$INSTALL_DIR/.env" | cut -d= -f2-)
 export PGPASSWORD=$(grep -m1 '^POSTGRES_PASSWORD=' "$INSTALL_DIR/.env" | cut -d= -f2-)
-DB_URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}"
+DB_URL="postgresql+psycopg://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}"
 PROJECT_ID=$(psql -Atc "SELECT project_id FROM projects WHERE name='agents-ensemble';")
 
 # ── 1. READ the brake ─────────────────────────────────────────────────────

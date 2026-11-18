@@ -4,7 +4,7 @@ The primitive is tested against a STUBBED manager (instances dict +
 prompt_cache + instance repo) with the loader imported through
 ``daemon.manager`` (the patch seam) monkeypatched — the phase-1 gate:
 validation matrix green (live/dev shapes via PURE fixtures), the
-three-fixture divergence matrix (AM-5), every code typed (9 REFUSED +
+three-fixture divergence matrix (AM-5), every code typed (14 REFUSED +
 1 FAILED), no-op never pops, hash/bust + repo-probe + ``reloaded_db`` +
 ``unproven`` legs green.
 
@@ -142,8 +142,10 @@ class TestResultShapeAndVocabulary:
             "unproven",
         }
 
-    def test_refused_vocabulary_is_nine_plus_one_failed(self) -> None:
-        assert len(REFUSAL_CODES) == 9
+    def test_refused_vocabulary_is_fourteen_plus_one_failed(self) -> None:
+        # The census is 14 REFUSED (9 from the original prompt-refresh
+        # ladder + the 5 compact-note codes) + 1 FAILED.
+        assert len(REFUSAL_CODES) == 14
         assert FAILURE_CODES == {"prompt_reload_internal_error"}
         assert not (REFUSAL_CODES & FAILURE_CODES)
         # The one-for-one swap (AM-6): not_ari absent, manifest_unreadable present.

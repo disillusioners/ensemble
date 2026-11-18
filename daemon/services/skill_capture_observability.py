@@ -847,6 +847,15 @@ def build_run_record(
     means "this record was minted OUTSIDE an admission attempt" (e.g.
     a cap-check error, or a deviation announcement) — not "the run id
     was forgotten".
+
+    C3 (2026-11-17) — the invariant is now TOTAL on
+    ``stage="admission"`` records: every producer site mints (or
+    threads) a run id (the metrics seam, the tools seam, the burst-cap
+    error site, the fix-dispatch-fault site, both dispatcher gates).
+    A NEW ``stage="admission"`` record with ``run_id=None`` is a
+    defect. Historical pre-C3 sink rows with ``run_id: null`` stay
+    as-is — the ids were never minted and cannot be reconstructed;
+    read them as "legacy producer" (see plan-light C3).
     """
     record: dict[str, Any] = {
         "stage": stage,

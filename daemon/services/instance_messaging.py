@@ -1530,7 +1530,7 @@ class InstanceMessagingService:
                 instance_id=instance_id,
                 msg_timestamps=_extract_msg_timestamps(messages),
             )
-            
+
             # Compact state
             result = await self._compactor.compact_state(context)
 

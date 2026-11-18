@@ -85,6 +85,9 @@ INJECTION_MODULE = (
 )
 MANAGER_MODULE = REPO_ROOT / "daemon" / "manager.py"
 OPERATOR_SCRIPT = REPO_ROOT / "scripts" / "audit" / "skill_stale_deactivate.py"
+#: The skills router — the C1 SANCTIONED winner surface (scanned
+#: separately + allowlisted; see the widened winner pin below).
+SKILLS_ROUTER = REPO_ROOT / "daemon" / "routers" / "skills.py"
 
 #: The plan's canonical R1 instance (the PROOF fixture — the RULE stays
 #: rule-based; DS-11 forbids an id list as the deactivation predicate).
@@ -1015,8 +1018,122 @@ class TestThePairResolver:
         winner = skill_repo.get(newer.id)
         assert winner.is_active is True
 
+    def test_the_pair_resolver_completes_the_winner_side(
+        self, repos, data_dir
+    ):
+        """C1 (DECIDED Q2, 2026-11-17): the apply arm COMPLETES the
+        winner side per the pinned terminal-state spec — winner ends
+        ``status='active'`` with its ``ab_test_group`` CLEARED (it used
+        to keep the stale group + ``ab_testing`` status), and the
+        pre-flip winner shape rides the result for reversal."""
+        skill_repo, ab_test_repo = repos
+        older, newer, test = _seed_r1_pair(skill_repo, ab_test_repo)
+
+        deactivator = _deactivator(repos, data_dir)
+        result = deactivator.resolve_pair(
+            ab_test_group=R1_GROUP,
+            winner_skill_id=newer.id,
+            apply=True,
+        )
+
+        winner = skill_repo.get(newer.id)
+        assert winner.status == "active"
+        assert winner.ab_test_group is None
+        # The pre-flip winner shape is recorded (reversal support).
+        assert result["before_winner"] == {
+            "ab_test_group": R1_GROUP,
+            "status": "ab_testing",
+        }
+        # The loser RETAINS its group (the pinned spec) — the pair
+        # stays auditable from the loser side too.
+        loser = skill_repo.get(older.id)
+        assert loser.ab_test_group == R1_GROUP
+
+    def test_the_pair_resolver_writes_a_receipt_before_the_first_flip(
+        self, repos, data_dir
+    ):
+        """W3 (2026-11-17): the apply arm writes the receipt BEFORE the
+        first flip (H3 parity) — the receipt is the ONLY reversal
+        record, so a flipped row must never lack a recorded prior
+        pair."""
+        skill_repo, ab_test_repo = repos
+        older, newer, _test = _seed_r1_pair(skill_repo, ab_test_repo)
+
+        deactivator = _deactivator(repos, data_dir)
+        result = deactivator.resolve_pair(
+            ab_test_group=R1_GROUP,
+            winner_skill_id=newer.id,
+            apply=True,
+        )
+
+        assert result["applied"] is True
+        receipt_file = Path(result["receipt_path"])
+        assert receipt_file.exists(), "the receipt must exist after apply"
+        payload = json.loads(receipt_file.read_text(encoding="utf-8"))
+        pair_entries = payload.get("pair_resolutions") or []
+        assert len(pair_entries) == 1
+        entry = pair_entries[0]
+        assert entry["ab_test_group"] == R1_GROUP
+        assert entry["winner_skill_id"] == newer.id
+        assert entry["loser_skill_id"] == older.id
+        assert entry["applied"] is True
+        # The loser + winner are claimed as ordinary receipt entries
+        # (their (is_active, status) pairs reverse via reactivate).
+        claimed = {
+            item["skill_id"]
+            for item in (payload.get("entries") or [])
+            if item.get("rule_id") == "sanctioned_pair_resolution"
+        }
+        assert claimed == {older.id, newer.id}
+
+    def test_reactivate_reverses_a_sanctioned_resolution(
+        self, repos, data_dir
+    ):
+        """W3: the reversibility the sanctioned REST mode PROMISES is
+        implemented — ``reactivate`` restores the winner's group, the
+        loser's pair, and un-resolves the pair row."""
+        skill_repo, ab_test_repo = repos
+        older, newer, _test = _seed_r1_pair(skill_repo, ab_test_repo)
+
+        deactivator = _deactivator(repos, data_dir)
+        deactivator.resolve_pair(
+            ab_test_group=R1_GROUP,
+            winner_skill_id=newer.id,
+            apply=True,
+        )
+        # Post-resolution state.
+        assert skill_repo.get(newer.id).ab_test_group is None
+        assert skill_repo.get(newer.id).status == "active"
+        assert skill_repo.get(older.id).status == "inactive"
+        assert ab_test_repo.get_by_group(R1_GROUP).resolved_at is not None
+
+        results = deactivator.reactivate(apply=True)
+        outcomes = {item.get("outcome") for item in results}
+        assert "pair_reactivated" in outcomes
+
+        # The pair is live again.
+        winner = skill_repo.get(newer.id)
+        assert winner.ab_test_group == R1_GROUP
+        assert winner.status == "ab_testing"
+        assert winner.is_active is True
+        loser = skill_repo.get(older.id)
+        assert loser.is_active is True
+        assert loser.status == "ab_testing"
+        pair = ab_test_repo.get_by_group(R1_GROUP)
+        assert pair.resolved_at is None
+        assert pair.winner_skill_id is None
+
     def test_no_winner_is_declared_by_the_shipped_code(self):
-        """No shipped call site supplies a winner (Phase 1 declares none)."""
+        """No shipped call site supplies a winner (Phase 1 declares none).
+
+        WIDENED (2026-11-17, review fix round): the scan now also
+        covers the SKILLS ROUTER — the sanctioned REST mode supplies a
+        winner there (the C1 sanctioned explicit-winner path), so the
+        router is scanned SEPARATELY and allowlisted: its only
+        ``winner_skill_id=`` occurrence is the sanctioned helper's
+        call, and that helper is gated on the operator's explicit
+        winner + reason. The other three surfaces stay winner-free.
+        """
         sources = [
             E4_MODULE.read_text(encoding="utf-8"),
             INJECTION_MODULE.read_text(encoding="utf-8"),
@@ -1026,6 +1143,22 @@ class TestThePairResolver:
             assert "winner_skill_id=" not in source or (
                 "winner_skill_id: Optional[str] = None" in source
             )
+
+        # The router: the ONLY sanctioned winner supply.
+        router_source = SKILLS_ROUTER.read_text(encoding="utf-8")
+        occurrences = router_source.count("winner_skill_id=")
+        assert occurrences == 1, (
+            "the skills router may supply a winner ONLY through the "
+            f"sanctioned helper (found {occurrences} occurrences)"
+        )
+        assert "winner_skill_id=resolved_winner" in router_source
+        # …and that helper is the SANCTIONED one: it requires an
+        # explicit reason and refuses an already-resolved pair.
+        helper = router_source.split(
+            "async def _resolve_ab_test_sanctioned", 1
+        )[1]
+        assert "requires a reason" in helper
+        assert "already resolved" in helper
 
 
 # ============================================================
