@@ -72,7 +72,7 @@ entry is the record.
 - **Risk:** none structural. `docs/` is already the home of runbooks; this
   is the same pattern one level up in abstraction.
 
-### Option (ii): the empyrea repo
+### Option (ii): the constellation repo
 
 - **For:** cross-project doctrine (if guidelines ever span several daemons
   or the harness), and it sits next to the operator's other standing docs.
