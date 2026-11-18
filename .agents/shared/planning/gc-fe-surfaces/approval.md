@@ -92,3 +92,63 @@ plan-approval (both workers)
 Dedup: workers' #1 (surfaces) ≡ #2 (phases) merged into blocker #1; allowlist-count notes merged; criterion-numbering notes merged. No Blocking→Note downgrades; no Note→Blocking upgrades; no approver-introduced blockers. Both worker verdicts REJECTED → aggregated REJECTED.
 
 *Tracking: .agents/approver/gc-fe-surfaces-tracking.md (iteration 001 appended; next iteration 002).*
+
+---
+
+# Iteration 002 — Fold Verification (fold commit fd590eafb)
+
+## VERDICT: REJECTED
+## Iteration: 002
+
+**Workers:** approve-worker-fold-phases (85f19040) · approve-worker-fold-render (8b763950), both cold, `plan-review.md`/`approval.md` barred. Both REJECTED.
+
+## Fold status (001 blockers)
+| 001 blocker | Status |
+|---|---|
+| 1. truncated render ownership (P2-3/P3-4/C-1/P1-8 split + N6/N7) | **FOLDED — all legs** (render + named spec cases everywhere; C-1 re-pointed; P1-8 split clean) |
+| 2. off-loop subtree walk | **FOLDED** (`await asyncio.to_thread(manager.get_tree_ids_permanent, …)` in P1 task 3; D1.9 row; D1.4-a per-tick cost line) |
+| 3. dedicated globalRooms signal | **FOLDED** ((ii) gone; P2-3 owns template binding; shipped `rooms()` untouched; instance-mode AC preserved) |
+| 4. child-row discriminator | **FOLDED** (`[class.child-row]="depth > 0"` + `.instance-item.child-row .rooms-btn { right: 72px }`; alternative rejected WITH reason; case (viii) names the mechanism) |
+| 5. counts == enumeration | **PARTIAL** (core landed: P3 9/(i)–(ix) + criterion 24 "9/9"; P2 8/+8 — but 2 stale refs survived; see blocker 4) |
+| 6. dedicated rooms-gate Playwright config | **FOLDED** (rooms-gate config named, testMatch pinned, own port pair, explicit no-inheritance from the 8079 shared config, port-fence assertion; house precedents verified on disk) |
+| 7. P4 Files-block ownership | **FOLDED** (e2e spec + config + allowlist test enumerated; claim scoped to frontend/src/** + daemon/**; 7(b) counts the config row) |
+
+Notes: N1 **FOLDED** (four paths everywhere, mirror spec unsanctioned, no surviving "five"). Structural re-scan **CLEAN** (one Risks section R1–R17 in order; criteria 1–25 no gaps/dupes; orphan R14 removed).
+
+## Blocking Issues (4 — all fold residue, all small)
+
+### 1. N9 not folded — the 422 typed refusal is an assertion without an owner
+- **Refs:** `decisions.md:61` + `:100` (decision, claims "each is a spec leg (P1 task 5)") vs `phase1-plan.md:18` task 5 (no 422 leg — pins `?instance_id=`/`%20` to **404** "anchor-absent spelling") + `:37` Tests block + `phase1-plan.md:16` task 3 (`instance_id: str = Query("")` — cannot distinguish absent from present-but-empty) + `plan-overview.md:124` criterion 5 (4 codes, no 422) + `plan-overview.md:282` A-2 taxonomy label conflict. `grep "422\|bad_request"` across phase plans → zero.
+- **Fold:** add the 422 `bad_request` leg to **P1 task 5** (knob-ON present-but-empty spellings, wire-distinguishable from both anchor-absent 404 and bad-anchor 404) + its Tests-block row; **criterion 5 → 5 codes "5/5"**; change the router spec to `Query(None)` with explicit presence detection so the handler can implement the distinction; fix the A-2 row to label `?instance_id=`/`%20` as present-but-empty (distinct regime from true absence).
+- *(Orchistrator answer to the worker's open question 1: yes — task 5 additive + criterion 5, not a new task.)*
+
+### 2. N11 partial — and the fold introduced two NEW direct contradictions
+- **Refs:** `decisions.md:266` (honest form: "byte-identity is NOT claimed") vs `decisions.md:137` ("the shipped mode's byte-identity is the constraint-4 duty") and `:303` ("preserves the shipped modal byte-for-byte") — plan's own prose, now self-contradicting. Stale variants: `decisions.md:506` (US spelling "byte-behavior-identical" — invisible to a UK-spelling grep), `:511`; `plan-overview.md:205`, `:209` (plan-prose mirrors; the fold DID reword the sibling at `decisions.md:182`).
+- **Fold:** correct the plan's own prose (`:137`, `:303`, overview `:205`/`:209`) to the D3.4 honest form; for the verbatim leader-ruling record regions (`:506`, `:511`) do NOT rewrite the quotes — append a one-line annotation "(historical ruling record; superseded by the N11 honest form at D3.4)". *(Orchistrator answer to open question 2: quoted records stay byte-untouched + annotated; only plan prose is corrected.)*
+
+### 3. Five stale criterion cross-references after the 21–26 → 20–25 renumber
+- **Refs:** `plan-overview.md:228` AM-4 "criteria 21/22" → now **20/21**; `:229` AM-5 "criterion 23" → **22**; `:233` AM-9 "criterion 24" → **23**; `:272` W-11 "criterion 24" → **23**; `:292` A-12 "criterion 23" → **22**. (The fold swept only AM-7 and C-3.)
+- **Fold:** re-point the five refs to the post-renumber ids. *(Orchistrator answer to open question 3: re-pointing is the smaller edit — do not restore the old numbering.)*
+
+### 4. Count residue (merged: fold-phases #1/#2 ≡ fold-render #3)
+- **Refs:** `phase3-plan.md:17` task 7 mid-cell prose "the **seven** DOM cases below (i)–(viii)" (title says NINE, enumeration (i)–(ix), acceptance "9/9" — three of four carriers agree; the prose is stale) · `plan-overview.md:231` AM-7 row "criterion **24** (seven cases)" → "(nine cases)".
+- **Fold:** two one-word/one-number edits.
+
+## Notes (non-blocking)
+- `decisions.md:123` D1.9 row has an unescaped `|` (`set[str] | None`) breaking the 3-column table render — the fold rewrote that row and left the pipe; escape it.
+- `plan-overview.md:253` C-1 still says "criterion 21 split" while citing "criteria 20/21" — reword to "criteria 20/21".
+- R15 risk row does not mirror the closure per-tick cost line (D1.4-a carries it) — recommend mirroring for discoverability.
+- Task 7(b) "THREE committed-path rows … the spec, the config, and the four instance-list paths" groups six files in three rows — loose but not a count contradiction.
+- P4 references to criterion 15 unaffected by the renumber — verified.
+
+## Skills Used
+plan-approval (both workers)
+
+## Session IDs
+- approve-worker-fold-phases: 85f19040-a5e7-43ec-abc5-4d33e08ab2da
+- approve-worker-fold-render: 8b763950-0812-4028-9469-1aad1c5645e1
+
+## Aggregation
+Merges: fold-phases#1 ≡ fold-render#3 (same P3 cell); fold-phases#2 grouped into blocker 4 (same defect class). No downgrades, no upgrades, no approver-introduced blockers. Both worker verdicts REJECTED → aggregated REJECTED. **Iteration 003 is the cap** — a third rejection escalates to the Leader per the 3-iteration rule. The four residues are one-word-to-one-cell folds; a single careful sweep clears them.
+
+*Tracking: .agents/approver/gc-fe-surfaces-tracking.md (iteration 002 appended; next 003 — CAP).*
