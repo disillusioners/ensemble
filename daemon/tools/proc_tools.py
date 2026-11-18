@@ -2577,10 +2577,19 @@ def create_proc_tools(current_instance_id: str = "") -> list:
             On failure: ``"Error: ..."`` string describing why
             (process cap reached, command not found, etc.).
         """
-        # rogue-containment (iter-1 D2b): apply the SAME pkill overlay
-        # predicate to proc_run's command so a pkill refused in bash
-        # cannot be re-issued via a background process. Fence env is
-        # ambient (proc_run has no env overlay).
+        # rogue-containment (iter-1 D2b; intent model 2026-11-18): apply
+        # the SAME overlay predicate to proc_run's command so anything
+        # refused in bash cannot be re-issued via a background process.
+        # The predicate is bash's thin wrapper over the shared pure matcher
+        # ``daemon/tools/_systemctl_guard.py``, so the proc lane inherits the
+        # whole intent model: kill legs (pkill/killall/fuser/kill/xargs-kill)
+        # AND systemctl intent — mutating verbs against the ensemble's own
+        # units are refused regardless of token composition
+        # (``UNIT=...; systemctl restart "$UNIT"``), statically
+        # unresolvable operands fail closed, and read-only verbs
+        # (status/show/is-active/cat/list-*/show-environment/help) are
+        # allowed against any unit. Fence env is ambient (proc_run has no
+        # env overlay).
         try:
             from daemon.tools.bash import _pkill_overlay_violation
 
