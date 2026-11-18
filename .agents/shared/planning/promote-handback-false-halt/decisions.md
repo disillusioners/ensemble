@@ -24,9 +24,9 @@ listing + `.env` key-name scan only), and no tag was cut.
 
 | # | Input | Lines (verified) | Its role here |
 |---|-------|------------------|---------------|
-| 1 | `phase1-plan.md` | 587 | code-fix design: Candidates A/B/C, containment ladder, restart arm, commit choreography C0–C6, invariants `I-A1…I-E3`, §15 open decisions |
-| 2 | `phase2-plan.md` | 988 | tests / rehearsal / negative proof: legs `A0–A7`, `B1–B10`, `C-1…C-8`, `NP-1…NP-11`, restart legs + `R0`, tiers 0/1/2/3/3b, registration `RG-1…RG-7`, §17 open questions |
-| 3 | `phase3-plan.md` | 274 | release mechanics: commit-graph options, `P3-D1…D12`, `rollback_safe`, staging sequence, §10 open questions |
+| 1 | `phase1-plan.md` | 906 | code-fix design: Candidates A/B/C, containment ladder, restart arm, commit choreography C0–C8, invariants `I-A1…I-E3`, §15 open decisions |
+| 2 | `phase2-plan.md` | 1151 | tests / rehearsal / negative proof: legs `A0–A7`, `B1–B10`, `C-1…C-8`, `NP-1…NP-12`, restart legs + `R0`, tiers 0/1/2/3/3b, registration `RG-1…RG-7`, §17 open questions |
+| 3 | `phase3-plan.md` | 330 | release mechanics: commit-graph options, `P3-D1…D12`, `rollback_safe`, staging sequence, §10 open questions |
 | 4 | `research-findings-code.md` | 689 | code evidence base (Q1–Q11 + drift table + NOT-FOUND list) |
 | 5 | `research-findings-lane.md` | 171 | incident/lane evidence base (Q1–Q7, plan-input constants) |
 | 6 | The dispatch brief's nine rulings | — | **the authority**: every ruling is recorded verbatim in §1, none re-opened |
@@ -34,6 +34,10 @@ listing + `.env` key-name scan only), and no tag was cut.
 **ANCHORS-ARE-LEADS.** Every `file:line` in this register was re-read in **this worktree** while writing it (Appendix A logs the greps).
 Where a phase plan's citation and the tree disagree, the tree wins and the disagreement is recorded in §7 — the phase files are
 **not** repaired in place (commission constraint: this register owns `decisions.md` only).
+**Line counts re-verified 2026-11-18 (delta review round 2)** with `wc -l` against the plan-of-record as committed in this
+wave: `phase1-plan.md` **906**, `phase2-plan.md` **1151**, `phase3-plan.md` **330**, `research-findings-code.md` 689,
+`research-findings-lane.md` 171. (The earlier row values — 587 / 988 / 274 — were stale: they predate the wave-1…wave-4
+folds and the BL-6/BL-7/BL-8/BL-9 amendments.)
 
 ### 0.2 ID conventions (append-only; nothing renumbered)
 
@@ -83,8 +87,8 @@ the verification log and the planner's outstanding actions.
 | 20 | `L-10` | **Coalescence closure recorded** for board item `wi-d3579d7c` #1 — this lane removes the producer; the closer is untouched | `phase1-plan.md` §8 | Dispatcher (FINAL) |
 | 21 | `L-11` | **Deferred register adopted** (T12, NP-11, non-journal restart-audit channel) | §6 below | Dispatcher (FINAL) |
 | 22 | `L-12` | **Corrections register adopted as authoritative** over stale commission/research claims | §7 below | Dispatcher (FINAL) |
-| 23 | `D-P1-4` | **rc=2 consumer contract at every gate call site** (REVIEW WAVE 1, BL-1): the probe maps transient 2 → probe `return 2` (T7b, `:6103-6106`); `gate_version:8159` + the one-shot consumers mirror the same 0/1/2 mapping with bounded retries + the distinct transient wording — never `gate_fail_reason` → 8b auto-rollback, never the `/livez unreachable >Ns` mislabel; exhaustion marker journals `subprocess_wait_timeout` with row token `kind=attr_deferred` (fire-once latched) and rides `HB_VERIFY_REASON`; §5.4's "statement form" bullet re-scoped to sleep/pool only | `phase1-plan.md` §3 (A29–A32), §4.2, §5.3/§5.4/**§5.4a**/§5.6, §9, §10 (T7b/T7c), §11 (C3), §12 (R4), §14 (`I-B13`), §15 (S11); `phase2-plan.md` §7.5 (**B-defer-e**/M-B-defer-E), §16 (SC-12) | Plan review wave 1 (FINAL) |
-| 24 | `D-P1-5` | **Gate-emitted INFO rides STDERR + `I-B2b` stdout purity** (REVIEW WAVE 1, BL-2): accept line + transient marker use the `printf … >&2` idiom (`:6210` precedent) — `_log` is stdout when the logfile is unset (`:434-443`) and gate calls are `$()`-captured; §4.3's `_log` at sites 2/3 is safe (statement context) | `phase1-plan.md` §5.3, §14 (`I-B2b`), §15 (S12); `phase2-plan.md` §7.6 (**B-parity-capture**/M-B2b), §16 (SC-12) | Plan review wave 1 (FINAL) |
+| 23 | `D-P1-4` | **rc=2 consumer contract at every gate call site** (REVIEW WAVE 1, BL-1): the probe maps transient 2 → probe `return 2` (T7b, `:6103-6106`); `gate_version:8159` + the one-shot consumers mirror the same 0/1/2 mapping with bounded retries + the distinct transient wording — never `gate_fail_reason` → 8b auto-rollback, never the `/livez unreachable >Ns` mislabel; exhaustion marker journals `subprocess_wait_timeout` with row token `kind=attr_deferred` (fire-once latched) and rides `HB_VERIFY_REASON`; §5.4's "statement form" bullet re-scoped to sleep/pool only | `phase1-plan.md` §3 (A29–A32), §4.2, §5.3/§5.4/**§5.4a**/§5.6, §9, §10 (T7b/T7c), §11 (C3), §12 (R4), §14 (`I-B13`), §13 (S11); `phase2-plan.md` §7.5 (**B-defer-e**/M-B-defer-E), §16 (SC-12) | Plan review wave 1 (FINAL) |
+| 24 | `D-P1-5` | **Gate-emitted INFO rides STDERR + `I-B2b` stdout purity** (REVIEW WAVE 1, BL-2): accept line + transient marker use the `printf … >&2` idiom (`:6210` precedent) — `_log` is stdout when the logfile is unset (`:434-443`) and gate calls are `$()`-captured; §4.3's `_log` at sites 2/3 is safe (statement context) | `phase1-plan.md` §5.3, §14 (`I-B2b`), §13 (S12); `phase2-plan.md` §7.6 (**B-parity-capture**/M-B2b), §16 (SC-12) | Plan review wave 1 (FINAL) |
 | 25 | `D-P2-5` | **BL-3 — the C-1 downgrade gets a leg that can actually redden it.** The downgrade (`answered 1 → 2` when a stronger rung was unanswerable) is unreachable in NP-4/NP-6 (their R2 is *answerable*), so `M-NP1c` was vacuous. Resolved by promoting the `SC_SHOW_RC=124`/`SC_MAINPID=0` + non-owned-holder shape into the named leg **`B-defer-d` / `B-downgrade`**, re-targeting `M-NP1c` to it, deleting the over-claims from NP-4/NP-6, and restating SC-2 / P2-T9 / R-5 / §10.2 C-1 | `phase2-plan.md` §7.5 (`B-defer-d`/`M-NP1c`), §7.9, §9.1 (NP-6), §9.2, §14 (P2-T8/P2-T9), §15 (R-5), §16 (SC-2), §10.2 (C-1); `phase1-plan.md` §5.3 (M-NP1c pointer) | Plan review wave 2 (FINAL) |
 | 26 | `D-P2-6` | **BL-4 — C-0's character-for-character claim is made TRUE.** The pre-amendment raw-substring predicate still lived in phase2 §9.4 / §5.2.3, and the fenced quotes still said `contains`; canonical source of record is fixed as **phase1 §5.3's fenced block** (PREFIX test `case "$pcg" in "$cg"/*)`), every other copy is a marked quotation above a `⛔ DO NOT COPY the table-cell form` line, and NP-6 gains a **mid-path cell** + `M-NP1d` so a substring implementation reddens | `phase1-plan.md` §5.3 (source) + §10 T5 (pointer); `phase2-plan.md` §5.2.3 (A-ASSUME-3), §9.1 (NP-6, two cells), §9.2 (+`M-NP1d`), §9.4, §14 (P2-T9), §15 (R-5), §16 (SC-2); `decisions.md` §2.1/§2.2(4)/§2.2(7); `plan-overview.md` §4/§5 | Plan review wave 2 (FINAL) |
 | 27 | `D-P2-7` | **BL-5 — the REJECTED D1 semantics are purged from the invariant hand-off.** phase1 §14 `I-B8` (per-shell / seconds-counted / clamped `[0,5]` / exhaustion ⇒ transient 2 with the distinct marker / refusal only at budget end), `I-B10`, the `N6` template row, and `I-E3` ("no new EXPORTED env / OPERATOR knob; the seam is a clamped, marker-gated, non-exported internal bound routed through `_numeric_knob`") are rewritten; §9's blast-radius "no new `_numeric_knob`s" contradiction is closed; §14 and §9/I-E3 join the §10.1 fold lists | `phase1-plan.md` §14 (`I-B8`/`I-B10`/`I-E3`/`N6`), §9 (blast radius); `decisions.md` §10.1, §10.8; `plan-overview.md` §5 | Plan review wave 2 (FINAL) |
@@ -240,7 +244,7 @@ and some `2` ⇒ the **pooled deferral** (`D-P1-2` as amended by D3: per-shell, 
 **exhaustion is transient → budget-bound** (leader D1: a distinct `… UNATTRIBUTABLE within <n>s … deferring to the verify budget`
 marker, the gate returns **2**, and the refusal/halt happens **only at budget end** — terminal fail-fast exhaustion is
 rejected). **Bound semantics of record: attribution acceptance = evidence-only (ladder); deferral = a budget-bounded delay that
-can never accept; the version conjunct = absolute and outside the widening.** Rung composition follows the C-1 rule (first
+can never accept; the version conjunct = absolute and outside the widening.** ⚠️ **BL-9: per-surface — see §10.1** (the conjunct is absolute exactly where it is ARMED; it was EMPTY on the restart/rollback surfaces until phase1 T13/T14 armed it). Rung composition follows the C-1 rule (first
 ANSWERING rung decides; an answered `1` downgrades to `2` when a stronger rung was unanswerable).
 **Advisory rescue: rejected for the verdict, kept as forensics.** The in-process `SUPERVISION_*` channel is already reliable and strictly better
 than a stamp read; the daemon `supervision_boot` advisory is **racy by contract** (may not be journaled at ~38 s in) and would put a
@@ -280,8 +284,11 @@ daemon-side label; `refusal` is produce-once by `upgrade_tools._refusal` — a s
 → python3, `lib.sh:1935-1950`), and at the TORN site the journal is torn: best-effort is the only honest promise. The row is **visibility**,
 never a gate. Documented side effect (accepted): `halt` ∈ `_TERMINAL_EVENTS`, so it lands in the restart-kind wake superset — conservative
 direction (notify, never miss).
-**Allowlist (per `D-P2-2`):** 5 sites remain silent — `:82`, `:96`, `:104`, `:108` (before `journal_init` at `:143`) and `:145`
+**Allowlist (per `D-P2-2`):** 5 sites remain silent — `:82`, `:97`, `:105`, `:108` (before `journal_init` at `:143`) and `:145`
 (`journal_init` itself failed); plus the post-adoption advisory `:192`. **`R0` pins the 6-entry allowlist as an exact line set.**
+(Coordinates are the **`exit 78` statement lines** — R0's parser anchor, per §7.2 (h); the companion `_warn`/echo line of each site
+sits one or two lines above it: `:96`→`:97`, `:104`→`:105`, `:122`→`:124`, `:136`→`:137`. Verified read-only against
+`scripts/upgrade/restart.sh`: **15** code `exit 78` statements, **17** raw grep hits.)
 **Explicitly NOT in scope:** persisting the arm's `pending_op`, the `lock_acquire` `to_thread`, and the boot-sweep default (board sub-items
 2–4).
 **Binds:** `phase1-plan.md` §7; `phase2-plan.md` §10.1–§10.2.
@@ -302,7 +309,7 @@ is the compensating pin. `phase2-plan.md` **§11.4** is the hand-off spec for th
 
 #### `D-P2-2` — 5 pre-journal-init silent exits · **ACCEPTABLE**
 
-**Ruling.** The five silent exits — `:82`, `:96`, `:104`, `:108` (all before `journal_init` at `:143`) and `:145` (`journal_init` itself
+**Ruling.** The five silent exits — `:82`, `:97`, `:105`, `:108` (all before `journal_init` at `:143`) and `:145` (`journal_init` itself
 failed) — are **acceptable**; `R0` pins the allowlist as the visible record. The **non-journal stderr-audit channel** joins `T12` in the
 deferred register (§6).
 **Clarification recorded (so the count never drifts).** The `R0` allowlist is **6 entries**: those 5 **plus** `:192` (post-adoption advisory —
@@ -472,7 +479,7 @@ removes the class rather than documenting it.
 
 ### 2.3 Where it is bound
 
-`phase1-plan.md` §5.3 (amended — body now conformant), §14 `I-B4`/`I-B12`; `phase2-plan.md` §9.1 (`NP-6`, arm (b)-only), §9.2 (`M-NP1b` **and** `M-NP1c`), §17 (`OQ-P2-3` — **answered: arm (b)**); `phase3-plan.md` (unaffected — the amendment touches no release-mechanics path).
+`phase1-plan.md` §5.3 (amended — body now conformant), §14 `I-B4`/`I-B12`; `phase2-plan.md` §9.1 (`NP-6`, arm (b)-only), §9.2 (`M-NP1b` **and** `M-NP1d`/`M-NP6-reach` — **`M-NP1c` is NOT in this set**: R2 is answerable in the NP-6 fixture, so the C-1 downgrade never engages there; its home is the leg `B-downgrade` and the loose-direction mutation `M-NP1c`, §2.2(2) and §7.5), §17 (`OQ-P2-3` — **answered: arm (b)**); `phase3-plan.md` (unaffected — the amendment touches no release-mechanics path).
 
 ---
 
@@ -561,7 +568,7 @@ promoted), so a concurrently-claimed slot must be caught **before** the bump com
 Two-sided obligation: (a) every wrong-release class still halts; (b) the containment ladder never **over-accepts** — demonstrated by
 counter-mutations that **widen the accept-set and must redden** the negative section.
 
-### 4.2 `NP-1…NP-11` → the catching check that must still fire
+### 4.2 `NP-1…NP-12` → the catching check that must still fire
 
 | NP | Scenario | Catching check (unchanged) | Expected | Reddening counter-mutation |
 |---|---|---|---|---|
@@ -571,12 +578,14 @@ counter-mutations that **widen the accept-set and must redden** the negative sec
 | **NP-4** | genuinely-foreign holder (positively `1` on every rung) | ladder ⇒ Layer-1 refusal prefix `:8039-8047` | rc 1; detail **starts with** the live prefix + ladder suffix; **census polled exactly ONCE** (no deferral burn on a positive `1`) | **`M-NP1`** (remove the `1` classification) / **`M-NP1b`** (permissive cgroup test); `M-NP5` reddens the one-census assertion |
 | **NP-5** | no-listener green | `:8012-8019` "answered green but lsof finds NO listener" | rc 1 | `M-NP3` (treat rc-0-empty as success) |
 | **NP-6** | **prefix-collision containment** | **now a hard pin: segment-aware R2 refuses** (§2) | rc 1 | **`M-NP1b` must redden it** |
+| **NP-7** | halt end-to-end — the commission's literal demand (the aggregate row; the two surface pins are the sub-rows below) | see **NP-7a** (lib level) and **NP-7b** (promote level) | see the two sub-rows | — (the sub-rows carry their own counter-mutations) |
 | **NP-7a** | halt end-to-end (lib level) | `_supervision_handback_unit` rc 1 (`:6395-6397`) | `restart_via_launcher` rc 1; `NO nohup fallback`; no `hand-back COMPLETE` | `M-B2` |
 | **NP-7b** | halt end-to-end (promote level) | caller halt + B4 leave-txn-open (`promote.sh:684-699`, **verified**) | non-zero exit; `halt` row; `in_flight` **still open**; no `commit` row; `current` unchanged | routed to the tester gate (`D-P2-1`) — **declared gap** |
 | **NP-8** | late-attributable holder + wrong version | version conjunct runs **after** attribution on every green (`:6107-6126`) | rc 1 + `version=0.0.0`; counter proves the code **did** wait | `M-NP2` |
 | **NP-9** | gate-surface parity on the **refusal** | the same shared gate | `gate_livez` **and** `gate_version` both rc 1 with the detail | `M-NP4` (drop the attribution call) |
 | **NP-10** | pre-stop MainPID equality | verifier **`:6218-6221`** (verified: WARN + `return 1`; `:6207-6213` is the budget printf) | rc 1 (`EQUALS the pre-stop pid`) | untouched-by-ladder work; no mutation needed (regression obligation) |
 | **NP-11** | Darwin variant of `NP-4` | — | **DROPPED** (`D-P2-4`) | declared parity gap |
+| **NP-12** | **restart/rollback-context stale incarnation with the BL-9 per-surface arming IN PLACE** (the P12-sibling shape driven through the non-promote surfaces) | the hand-back version conjunct (`lib.sh:6107-6116`), armed per-surface by phase1 **T13/T14** (`restart.sh:251` / `rollback.sh:249`) | rc 1 with the `NOT serving the right release` wording on **both** armed surfaces; **no** `hand-back COMPLETE`, never a recorded-verified pass | **M-NP12** (delete the arming ⇒ the conjunct is empty ⇒ 2xx-only ⇒ the stale build is recorded as verified) |
 
 **Coverage note (P → NP).** Phase-1's §5.7 protection matrix `P1–P12` is the design's promise; the NP set above is where it becomes red-able:
 `P1→NP-1`, `P2→NP-2`, `P3→NP-3`, `P4→NP-5`, `P5→NP-4`, `P6→B6(pidless)`/`NP-11-dropped`, `P7→B6`, `P8→NP-4` (`owned:<none>`), `P9→NP-10`,
@@ -635,7 +644,7 @@ technical rationale the board owner applies.
 |---|---|---|---|---|---|
 | 1 | **T12** — Darwin `_flip_verify_portattribution` widening (`lib.sh:6996`) | **DEFERRED** to a named follow-up lane | incident is Linux/unit-anchored; R3/R4 already give mode-general accept paths; widening without a provable Darwin stub leg exceeds the ceremony-critical minimum | `B7` arm selection; `B6` launchd rung; Linux fix is the certified one | follow-up lane |
 | 2 | **NP-11** — Darwin variant of `NP-4` | **DROPPED** (declared parity gap) | mechanical consequence of #1 | `NP-9` parity on **this** host; `B6`/`B7` | declared in the evidence pack |
-| 3 | **Non-journal restart-audit channel** for the 5 pre-`journal_init` exits (`:82`, `:96`, `:104`, `:108`, `:145`) | **DEFERRED** (joins #1 in the deferred register) | a journal write is structurally impossible there; visibility exists on stderr + client log | `R0` pins the **6-entry allowlist**; `R-PY` two-sided leg | follow-up lane |
+| 3 | **Non-journal restart-audit channel** for the 5 pre-`journal_init` exits (`:82`, `:97`, `:105`, `:108`, `:145` — `exit 78` statement lines) | **DEFERRED** (joins #1 in the deferred register) | a journal write is structurally impossible there; visibility exists on stderr + client log | `R0` pins the **6-entry allowlist**; `R-PY` two-sided leg | follow-up lane |
 | 4 | **Tier-3 promote-level rehearsal** (`NP-7b`, `B2b` caller contract) | **NOT deferred — OWNED ELSEWHERE**: routed to the **tester gate** (`D-P2-1`) | route decision, not a gap-waiver | lib-level `NP-7a`; `§N3` template pin; `§11.4` hand-off spec | tester gate (coding commission cycle) |
 | 5 | `make_systemctl_stub` 3-copy consolidation | **ROUTED FINDING** (`RG-6`), not this lane | consolidation would churn 3 standing suites | the `§4.3` knob contract is the consolidation spec; the new stub is a superset | future consolidation |
 | 6 | `test_release_journal.sh` 600 s cap (RC=124 at this tip) | **FILED** (`RG-6`-adjacent / §12.3) | pre-existing, disclosed in PACKS | aggregator keeps it `--full`-only with its disclosure | existing lane |
@@ -720,7 +729,10 @@ tag annotations and handoff reports ⇒ **use the verified spelling** in every a
 - `phase2-plan.md` §10.1 says "the table below uses the **exit** lines" but four rows carry **_warn**/one-off line numbers
   (`:96`→exit `:97`, `:104`→exit `:105`, `:122`→exit `:124`, `:136`→exit `:137`).
 - **Binding for `R0`:** anchor on literal `exit 78` statements, self-check `grep -c` (17 raw hits ⇒ 15 code + 2 comments), and classify every
-  code site. The **allowlist stays 6** (`:82`, `:96`, `:104`, `:108`, `:145`, `:192` by `_warn`/statement line).
+  code site. The **allowlist stays 6** — pinned on the **`exit 78` statement lines** (`:82`, `:97`, `:105`, `:108`, `:145`, `:192`); the
+  companion `_warn`/echo line of each site sits one or two lines above it (`:96`→`:97`, `:104`→`:105`, `:122`→`:124`, `:136`→`:137`).
+  *(Corrected in the delta review round 2: this sentence previously re-asserted the mixed `_warn`/exit set and would have pinned the wrong
+  coordinates. The same correction is applied in `phase2-plan.md` §10.1.)*
 
 **(i) Phase-3's own ID convention vs its content.** The header declares `P3-D#` / `P3-R#` / **`P3-T#`** / **`AC-P3-#`**, but the document
 uses **unprefixed `T1–T10`** and **`AC1–AC13`** — which **collide** with Phase-1's `T1–T12`. Its "no numeric collision" note is therefore only
@@ -753,7 +765,7 @@ render the token `inactive|activating` (a `${var:-word}` expansion is not a choi
 | File | Namespaces in use |
 |---|---|
 | `phase1-plan.md` | `A1–A32` (anchor register; A29–A32 added review wave 1), `T1–T12` + **`T7b`/`T7c`** (tasks), `C0–C6` (commits), `C-1…C-6` (stash touchpoints), `R1–R4` (containment **rungs**), `R1–R5` (§12 **risks**), `P1–P13` + `P12-sibling` (protection matrix), `I-A1…I-E3` (invariants, **31** after `I-B2b`/`I-B13`), `N1–N9` (negative-proof template), `S1–S12` (success; S11/S12 review wave 1), `D-P1-1…5` |
-| `phase2-plan.md` | `D1–D7` (incidents), `A0–A9` (Candidate-A legs; A8/A9 review wave 1), `B1–B10` + `B-*` (Candidate-B legs, incl. **`B-defer-d`/`B-downgrade`** and `B-defer-e`), `C-1…C-8` (Candidate-C legs), `NP-1…NP-11`, `M-*` (mutations, incl. **`M-NP1d`**, **`M-NP6-reach`**, **`M-NP1c-strict`**), `R-*` (restart legs), `R0`, `RG-1…RG-7`, `P2-T1…P2-T16`, `U-1…U-4`, `OQ-P2-1…4`, `R-1…R-5` (risks), `SC-1…SC-12` |
+| `phase2-plan.md` | `D1–D7` (incidents), `A0–A9` (Candidate-A legs; A8/A9 review wave 1), `B1–B10` + `B-*` (Candidate-B legs, incl. **`B-defer-d`/`B-downgrade`** and `B-defer-e`), `C-1…C-8` (Candidate-C legs), `NP-1…NP-12`, `M-*` (mutations, incl. **`M-NP1d`**, **`M-NP6-reach`**, **`M-NP1c-strict`**, **`M-NP12`**), `R-*` (restart legs), `R0`, `RG-1…RG-7`, `P2-T1…P2-T16`, `U-1…U-4`, `OQ-P2-1…4`, `R-1…R-5` (risks), `SC-1…SC-13` |
 | `phase3-plan.md` | `F1–F36` (facts), `P3-D1…P3-D12`, `P3-R1…P3-R7`, `T1…T10` (**should be `P3-T*`**), `AC1…AC13` (**should be `AC-P3-*`**), `P3-Q1…P3-Q3` |
 
 ### 8.3 Findings (listed explicitly; **not** silently fixed in the phase files)
@@ -1004,10 +1016,13 @@ version check" is **false**. The correct claim: **the promote/hand-back path is 
 runs after attribution on every green in `_handback_serving_probe` (`lib.sh:6107-6116`), before it in `gate_version`
 (`:8150-8160`), per hard-green tick in `gate_soak` (`:8383-8388`), with `PROMOTE_EXPECTED_VERSION` unconditionally armed
 (`promote.sh:546-556` — anchor corrected from the earlier `:541-544` cite, REVIEW WAVE 4 BL-9) — and the promote's `gate_version` (`promote.sh:853`) runs **before** the commit step (`:868+`).
-**No wrong release can reach `current` through a widened gate.** **Per-surface note (REVIEW WAVE 4, BL-9, register row
+**No wrong release can reach `current` through a widened gate on an ARMED surface** (promote — unconditional; restart/rollback — after phase1 T13/T14). **Per-surface note (REVIEW WAVE 4, BL-9, register row
 `D-P1-7`):** the restart/rollback skip named above — and the same surfaces' conjunct-empty hand-back window — is now
 **closed by ARMING the expected version from the target manifest before the shared gate** (phase1 T13/T14), so a stale
-incarnation can no longer be recorded as verified there. Disclosed as residual **P13** in `phase1-plan.md` §5.7.
+incarnation can no longer be recorded as verified there. **The bound does NOT hold on an unarmed surface** (pre-T13/T14
+restart/rollback read an empty conjunct ⇒ 2xx-only degradation), and it does not hold on the arming's own **degraded path** —
+an unresolvable manifest keeps the conjunct EMPTY for that invocation (`version=skipped-no-manifest`, LOUD, never a silent
+2xx-pass). Disclosed as residuals **P13** + **P15** in `phase1-plan.md` §5.7.
 
 ### 10.7 Carried into the CHANGELOG / tag annotation set (leader D-P3-3, five items — unchanged)
 
