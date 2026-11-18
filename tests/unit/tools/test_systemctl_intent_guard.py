@@ -195,6 +195,11 @@ _READONLY_COMMANDS = [
     "systemctl show ensemble-main --property=Restart",
     "systemctl status ensemble-main -n 20 | grep -i restart",
     "journalctl -u ensemble-main -n 20 | grep -i enable",
+    # the value options are consumed, so the verb is still read-only
+    "systemctl show ensemble-main -P Restart",
+    "systemctl show -P Restart ensemble-main",
+    "systemctl -P cat status ensemble-main",
+    "systemctl --boot-loader-entry cat status ensemble-main",
 ]
 
 
@@ -602,6 +607,32 @@ _RUNNER_SHAPES = [
     "systemd-run --description plain systemctl restart ensemble-main",
     "systemd-run --working-directory /tmp systemctl restart ensemble-main",
     "systemd-run --uid root systemctl restart ensemble-main",
+    # ``env -S`` / ``env --split-string`` SPLIT the string and RUN it
+    "env -S 'systemctl restart ensemble-main'",
+    "env --split-string=systemctl restart ensemble-main",
+    "env --split-string 'systemctl restart ensemble-main'",
+    # ``timeout``'s SIGNAL is a WORD: the numeric-duration rule does
+    # not skip it, so the command behind it was never analysed
+    "timeout -s TERM 5 systemctl restart ensemble-main",
+    "timeout --signal=TERM 5 systemctl restart ensemble-main",
+    # the xargs long options that consume a value
+    "xargs --arg-file /dev/null bash -c 'systemctl restart ensemble-main'",
+    "xargs --delimiter : bash -c 'systemctl restart ensemble-main'",
+    "xargs --max-args 1 bash -c 'systemctl restart ensemble-main'",
+    # ``su``/``runuser`` accept the ATTACHED command-string form
+    "su -c'systemctl restart ensemble-main'",
+    "su --command=systemctl restart ensemble-main",
+    # ``ssh host`` with NO remote command still forwards stdin
+    "echo 'systemctl restart ensemble-main' | ssh host",
+    # the xargs tail's command word is found by peeling the wrappers
+    "xargs env bash -c 'systemctl restart ensemble-main'",
+    # an option the tool does NOT have has an unknown arity ⇒ FAIL
+    # CLOSED (the tail could anchor on the option's VALUE and miss the
+    # command behind it) — including for a read-only tail
+    "systemd-run --not-an-option systemctl status ensemble-main",
+    "watch --not-an-option systemctl status ensemble-main",
+    "xargs --not-an-option bash -c 'systemctl status ensemble-main'",
+    "systemd-run --not-an-option systemctl restart ensemble-main",
 ]
 
 
@@ -616,6 +647,10 @@ _SCHEDULER_SHAPES = [
     "echo 'systemctl restart ensemble-main' | at now",
     "echo 'systemctl restart ensemble-main' | batch",
     "echo '0 5 * * * systemctl restart ensemble-main' | crontab -",
+    # the schedulers RUN their stdin too (``crontab -`` installs the
+    # body as a crontab; ``at``/``batch`` run the lines they are handed)
+    "crontab <<'EOF'\nsystemctl restart ensemble-main\nEOF",
+    "at now <<'EOF'\nsystemctl restart ensemble-main\nEOF",
 ]
 
 
@@ -684,6 +719,14 @@ _LAUNDER_ALLOW = [
     "systemd-run --description plain systemctl status ensemble-main",
     "watch -n 5 systemctl status ensemble-main",
     "watch -q 5 systemctl status ensemble-main",
+    # read-only through the same runners, and the PROSE heredoc stays
+    # data (only a shell/scheduler reader EXECUTES its stdin)
+    "env -S 'systemctl status ensemble-main'",
+    "timeout -s TERM 5 systemctl status ensemble-main",
+    "xargs --arg-file /dev/null bash -c 'systemctl status ensemble-main'",
+    "su -c'systemctl status ensemble-main'",
+    "echo 'systemctl status ensemble-main' | ssh host",
+    "cat > cron.txt <<'EOF'\nrun systemctl restart ensemble-main to recover\nEOF",
 ]
 
 
@@ -760,6 +803,13 @@ _SYSTEMCTL_OPTION_ANCHOR_SHAPES = [
     "systemctl --machine mycontainer restart ensemble-main",
     "systemctl --root /mnt restart ensemble-main",
     "systemctl --job-mode replace restart ensemble-main",
+    # the v255 value options that were MISSING from the table: with them
+    # absent the parser lands on the option's VALUE and the real verb
+    # behind it is never analysed
+    "systemctl -P cat stop ensemble-main",
+    "systemctl --boot-loader-entry cat stop ensemble-main",
+    "systemctl --image-policy plain stop ensemble-main",
+    "systemctl --boot-loader-menu 12:00 stop ensemble-main",
 ]
 
 

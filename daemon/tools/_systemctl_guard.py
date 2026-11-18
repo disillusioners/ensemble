@@ -209,6 +209,15 @@ SYSTEMCTL_MUTATING: frozenset[str] = frozenset({
     "isolate",
 })
 
+#: The mutating verbs the TAIL scan treats as mutating: the contract's set
+#: plus the v255 verbs the structural matcher refuses on its own. A tail
+#: verb only matters when an ensemble unit FOLLOWS it.
+_SYSTEMCTL_TAIL_MUTATING: frozenset[str] = SYSTEMCTL_MUTATING | frozenset({
+    "clean", "freeze", "thaw", "preset", "preset-all", "revert", "link",
+    "edit", "import", "set-property", "unset-property", "add", "remove",
+    "reload-or-restart", "try-reload-or-restart", "reenable",
+})
+
 #: Returned when an operand/verb could not be resolved statically. Any
 #: non-None return from this module means REFUSE; this token makes the
 #: fail-closed branch legible in refusals and tests.
@@ -240,10 +249,14 @@ SUPERVISION_PRIMED_TOKEN = "supervision-primed-script"
 #: restart <unit>``).
 _OPTIONS_WITH_VALUE: frozenset[str] = frozenset({
     "-H", "--host", "-M", "--machine", "-t", "--type", "--state",
-    "-p", "--property", "-n", "--lines", "-o", "--output", "-s", "--signal",
+    "-p", "--property", "-P", "-n", "--lines", "-o", "--output", "-s", "--signal",
     "--kill-whom", "--kill-value", "--root", "--image", "--job-mode",
     "--what", "--drop-in", "--message", "--preset-mode", "--when",
     "--timestamp", "--reboot-argument", "--check-inhibitors",
+    # v255 value options that were missing from the table: with them absent
+    # the parser lands on the option's VALUE and the real verb behind it is
+    # never analysed (``systemctl -P cat stop <unit>``).
+    "--image-policy", "--boot-loader-menu", "--boot-loader-entry",
 })
 
 #: Shell reserved words that can precede a command on the same line
@@ -274,6 +287,27 @@ _COMMAND_STRING_RUNNERS: frozenset[str] = frozenset({"su", "runuser"})
 #: Runners whose tail (after their own options) is an ARGV — a command plus
 #: its arguments: ``systemd-run <cmd> ...``, ``watch <cmd> ...``.
 _ARGV_RUNNERS: frozenset[str] = frozenset({"systemd-run", "watch"})
+
+#: ``xargs`` options that consume the following word as a value (the long
+#: forms of the ones the table already carried, plus the mandatory-value
+#: long options). The OPTIONAL-value long options (``--replace[=R]``,
+#: ``--eof[=END]``) are deliberately absent: their ``=``-form is one token
+#: and their space form does not take the next word.
+_XARGS_VALUE_OPTIONS: frozenset[str] = frozenset({
+    "-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a",
+    "--arg-file", "--delimiter", "--max-lines", "--max-args", "--max-procs",
+    "--max-chars", "--process-slot-var",
+})
+
+#: The BOOLEAN (value-less) options of ``xargs``, verified against
+#: ``xargs --help`` on this host (2026-11-19). The optional-value long
+#: options (``--eof[=END]``, ``--replace[=R]``) and the attached ``-l`` are
+#: here: their ``=``-form is one token and their space form takes nothing.
+_XARGS_FLAG_OPTIONS: frozenset[str] = frozenset({
+    "-0", "--null", "-e", "--eof", "-i", "--replace", "-l", "-o", "--open-tty",
+    "-p", "--interactive", "-r", "--no-run-if-empty", "-t", "--verbose",
+    "-x", "--exit", "--show-limits", "--help", "--version",
+})
 
 #: Schedulers that EXECUTE a command handed to them on stdin (``at now``,
 #: ``batch``, ``crontab -``): the piped payload is a command that will run.
@@ -317,6 +351,26 @@ _WATCH_VALUE_OPTIONS: frozenset[str] = frozenset({
     "-n", "--interval", "-q", "--equexit",
 })
 
+#: The BOOLEAN (value-less) options of ``systemd-run``, verified against
+#: ``systemd-run --help`` on this host (2026-11-19). An option that is in
+#: NEITHER set is one the tool does not have: its arity is unknown, so the
+#: tail analysis cannot anchor ⇒ FAIL CLOSED.
+_SYSTEMD_RUN_FLAG_OPTIONS: frozenset[str] = frozenset({
+    "-h", "--help", "--version", "--no-ask-password", "--user", "--scope",
+    "--slice-inherit", "--no-block", "-r", "--remain-after-exit", "--wait",
+    "--send-sighup", "-d", "--same-dir", "-t", "--pty", "-P", "--pipe",
+    "-q", "--quiet", "-G", "--collect", "-S", "--shell",
+})
+
+#: The BOOLEAN (value-less) options of util-linux ``watch``, verified
+#: against ``watch --help`` on this host (2026-11-19).
+_WATCH_FLAG_OPTIONS: frozenset[str] = frozenset({
+    "-b", "--beep", "-c", "--color", "-C", "--no-color", "-d", "--differences",
+    "-e", "--errexit", "-g", "--chgexit", "-p", "--precise", "-r", "--no-rerun",
+    "-t", "--no-title", "-w", "--no-wrap", "-x", "--exec", "-h", "--help",
+    "-v", "--version",
+})
+
 #: Prefixes of the ``systemd-run`` options that consume the following word
 #: as a value (the timer options). ``--on-*`` covers ``--on-active``,
 #: ``--on-boot``, ``--on-startup``, ``--on-unit-active``,
@@ -333,6 +387,26 @@ _ARGV_RUNNER_VALUE_FLAGS: frozenset[str] = frozenset({
 })
 
 
+def _argv_runner_option_name(text: str) -> str:
+    """The option NAME (the token up to an ``=value``)."""
+    return text.split("=", 1)[0]
+
+
+def _argv_runner_option_is_known(text: str, base: str) -> bool:
+    """Is this an option the runner actually HAS?
+
+    An option that is in NEITHER the value set nor the boolean set has an
+    unknown arity: the tail analysis could anchor on its value and miss
+    the command behind it ⇒ the caller fails closed.
+    """
+    name = _argv_runner_option_name(text)
+    if base == "watch":
+        return name in _WATCH_VALUE_OPTIONS or name in _WATCH_FLAG_OPTIONS
+    if name in _SYSTEMD_RUN_VALUE_OPTIONS or name in _SYSTEMD_RUN_FLAG_OPTIONS:
+        return True
+    return name.startswith(_ARGV_RUNNER_VALUE_PREFIXES)
+
+
 def _argv_runner_option_consumes_value(text: str, base: str) -> bool:
     """Does this argv-runner option consume the NEXT word as its value?
 
@@ -341,12 +415,13 @@ def _argv_runner_option_consumes_value(text: str, base: str) -> bool:
     """
     if "=" in text:
         return False
+    name = _argv_runner_option_name(text)
     if base == "watch":
-        return text in _WATCH_VALUE_OPTIONS
-    if text in _SYSTEMD_RUN_VALUE_OPTIONS:
+        return name in _WATCH_VALUE_OPTIONS
+    if name in _SYSTEMD_RUN_VALUE_OPTIONS:
         return True
-    if text.startswith(_ARGV_RUNNER_VALUE_PREFIXES):
-        return text not in _ARGV_RUNNER_VALUE_FLAGS
+    if name.startswith(_ARGV_RUNNER_VALUE_PREFIXES):
+        return name not in _ARGV_RUNNER_VALUE_FLAGS
     return False
 
 
@@ -719,7 +794,13 @@ def _line_end(text: str, pos: int) -> int:
 
 
 def _is_shell_stdin_line(line_text: str, env: dict[str, str]) -> bool:
-    """Is the heredoc attached to a shell interpreter reading stdin?"""
+    """Is the heredoc attached to a reader that EXECUTES its stdin?
+
+    A shell interpreter runs the body as commands, and the SCHEDULERS
+    (``at`` / ``batch`` / ``crontab``) run it too: ``crontab -`` installs
+    the body as a crontab read from stdin, and ``at`` / ``batch`` run the
+    lines they are handed.
+    """
     segments = _scan(line_text)
     if not segments:
         return False
@@ -730,7 +811,8 @@ def _is_shell_stdin_line(line_text: str, env: dict[str, str]) -> bool:
     text, ok = _resolve_word(words[k], env, 0)
     if not ok:
         return False
-    return text.rsplit("/", 1)[-1].lower() in _SHELLS
+    base = text.rsplit("/", 1)[-1].lower()
+    return base in _SHELLS or base in _SCHEDULERS
 
 
 def _strip_heredocs(
@@ -970,7 +1052,14 @@ def _command_word_index(words: _Segment, env: dict[str, str]) -> int | None:
             while k < n:
                 arg, arg_ok = _resolve_word(words[k], env, 0)
                 if arg_ok and arg.startswith("-"):
-                    if arg in ("-n", "--adjustment", "-c", "-i", "-o"):
+                    if arg in (
+                        "-n", "--adjustment", "-c", "-i", "-o",
+                        # ``timeout``'s own value options: the SIGNAL is a
+                        # WORD, so the numeric-duration rule below does not
+                        # skip it and the command behind it is never
+                        # analysed (``timeout -s TERM 5 systemctl ...``).
+                        "-s", "--signal", "-k", "--kill-after",
+                    ):
                         k += 2
                         continue
                     k += 1
@@ -1277,6 +1366,75 @@ def _text_has_mutating_ensemble_shape(text: str) -> bool:
     return bool(_ENSEMBLE_TOKEN_RE.search(lower))
 
 
+def _join_command_words(
+    value: str, words: _Segment, start: int, env: dict[str, str]
+) -> str:
+    """The command string a split option carries: its value plus the rest."""
+    parts = [value] if value else []
+    for word in words[start:]:
+        text, ok = _resolve_word(word, env, 0)
+        parts.append(text if ok else _word_literal_prefix(word))
+    return " ".join(p for p in parts if p)
+
+
+def _env_split_string_payload(words: _Segment, env: dict[str, str]) -> str | None:
+    """The COMMAND STRING carried by ``env -S`` / ``env --split-string``.
+
+    ``env -S 'systemctl restart <unit>'`` SPLITS the string and RUNS it, so
+    the string is an EXECUTED command — not an opaque value. The effective
+    command string is the option's own value plus the words that follow it:
+    the unquoted ``--split-string=cmd arg ...`` form puts the rest of the
+    command line behind the option.
+    """
+    i = 0
+    n = len(words)
+    while i < n:
+        text, ok = _resolve_word(words[i], env, 0)
+        if ok and _ASSIGN_RE.match(text):
+            i += 1
+            continue
+        break
+    if i >= n:
+        return None
+    head, head_ok = _resolve_word(words[i], env, 0)
+    if not head_ok or _basename(head) != "env":
+        return None
+    j = i + 1
+    while j < n:
+        text, ok = _resolve_word(words[j], env, 0)
+        if not ok:
+            return None
+        if _ASSIGN_RE.match(text):
+            j += 1
+            continue
+        if text.startswith("--split-string="):
+            return _join_command_words(text[len("--split-string="):], words, j + 1, env)
+        if text == "--split-string":
+            if j + 1 >= n:
+                return None
+            value, value_ok = _resolve_word(words[j + 1], env, 0)
+            if not value_ok:
+                return None
+            return _join_command_words(value, words, j + 2, env)
+        if text.startswith("-S") and len(text) > 2:
+            return _join_command_words(text[2:], words, j + 1, env)
+        if text == "-S":
+            if j + 1 >= n:
+                return None
+            value, value_ok = _resolve_word(words[j + 1], env, 0)
+            if not value_ok:
+                return None
+            return _join_command_words(value, words, j + 2, env)
+        if text.startswith("-"):
+            if text in ("-u", "--unset", "-C", "--chdir"):
+                j += 2
+            else:
+                j += 1
+            continue
+        break
+    return None
+
+
 def _shell_has_c_payload(words: _Segment, env: dict[str, str]) -> bool:
     """Does this shell segment carry a ``-c '<command string>'`` payload?"""
     k = _command_word_index(words, env)
@@ -1343,7 +1501,10 @@ def _executor_kind(words: _Segment, env: dict[str, str]) -> str | None:
         return "xargs"
     if base == "eval":
         return "eval"
-    if base == "ssh" and _ssh_remote_words(words, k, env):
+    if base == "ssh":
+        # ``ssh host`` with NO remote command starts a remote login shell
+        # and FORWARDS the client's stdin — the payload IS delivered, so the
+        # segment is an executor either way.
         return "ssh"
     return None
 
@@ -1475,6 +1636,24 @@ def _systemctl_segment_violation(
     if verb is None:
         return None
     if verb in SYSTEMCTL_READONLY:
+        # A read-only verb is NOT the end of the analysis. When an option's
+        # arity is mis-parsed (a value option missing from the table), the
+        # option's VALUE lands in the verb slot and the REAL command stays
+        # in the operand tail — ``systemctl -P cat stop <unit>``. The parse
+        # therefore CONTINUES: a MUTATING verb found later, FOLLOWED BY an
+        # ensemble unit, is refused. ``systemctl status <unit>`` stays
+        # allowed — the unit is an operand of the read-only verb with no
+        # mutating verb in front of it (the property-name over-block stays
+        # dropped: a property VALUE is consumed by its option, so it never
+        # reaches this scan).
+        for i, (tok, tok_ok) in enumerate(operands):
+            if not tok_ok:
+                continue
+            if tok.lower() not in _SYSTEMCTL_TAIL_MUTATING:
+                continue
+            for later, later_ok in operands[i + 1:]:
+                if later_ok and _unit_is_ensemble(later):
+                    return _unit_base(later)
         return None
     if not operands:
         if require_operand:
@@ -1547,6 +1726,14 @@ def _segment_violation(
                 if nested is not None:
                     return nested
 
+    # ``env -S '<cmd string>'`` / ``env --split-string=<cmd string>`` RUN the
+    # string: it is an EXECUTED command, not an opaque option value.
+    env_payload = _env_split_string_payload(words, env)
+    if env_payload is not None:
+        nested = _command_text_violation(env_payload, depth + 1, marker, True)
+        if nested is not None:
+            return nested
+
     k = _command_word_index(words, env)
     if k is None or k >= len(words):
         return None
@@ -1579,16 +1766,37 @@ def _segment_violation(
 
     if base in _COMMAND_STRING_RUNNERS:
         # ``su -c '<cmd>'`` / ``runuser -u root -c '<cmd>'`` — the payload is
-        # a COMMAND STRING run by a shell (as the target user).
-        for i in range(k + 1, len(words) - 1):
+        # a COMMAND STRING run by a shell (as the target user). These
+        # runners' getopt also accepts the ATTACHED form (``su -c<cmd>``),
+        # so the payload can ride inside the option token itself. The SHELL
+        # branch below deliberately does NOT: bash/sh/zsh reject the
+        # attached form, and accepting it there would over-block.
+        # The effective command string of the option is its VALUE plus the
+        # words that follow it (the ``=``-form carries only the first word
+        # of the command line) — the conservative reading, and the one the
+        # OLD text guard used when it scanned the whole text.
+        for i in range(k + 1, len(words)):
             flag, flag_ok = _resolve_word(words[i], env, 0)
             if not flag_ok:
                 continue
-            if flag in ("-c", "--command"):
+            value: str | None = None
+            start = i + 1
+            if flag.startswith("--command="):
+                value = flag[len("--command="):]
+            elif flag.startswith("-c") and not flag.startswith("--") and len(flag) > 2:
+                value = flag[2:]
+            elif flag in ("-c", "--command"):
+                if i + 1 >= len(words):
+                    continue
                 payload, payload_ok = _resolve_word(words[i + 1], env, 0)
                 if not payload_ok:
                     return UNRESOLVED_UNIT_TOKEN
-                return _command_text_violation(payload, depth + 1, marker, True)
+                value = payload
+                start = i + 2
+            if value is None:
+                continue
+            effective = _join_command_words(value, words, start, env)
+            return _command_text_violation(effective, depth + 1, marker, True)
         return None
 
     if base == "ssh":
@@ -1617,6 +1825,13 @@ def _segment_violation(
             if not ok:
                 break
             if text.startswith("-"):
+                if not _argv_runner_option_is_known(text, base):
+                    # An option the runner does NOT have: its arity is
+                    # unknown, so the tail analysis could anchor on the
+                    # option's VALUE and never analyse the command behind
+                    # it ⇒ FAIL CLOSED (the same convention as an
+                    # unresolvable operand).
+                    return UNRESOLVED_UNIT_TOKEN
                 j += (
                     2 if _argv_runner_option_consumes_value(text, base) else 1
                 )
@@ -1632,9 +1847,14 @@ def _segment_violation(
         while j < len(words):
             text, ok = _resolve_word(words[j], env, 0)
             if ok and text.startswith("-"):
-                if text in ("-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"):
+                if text in _XARGS_VALUE_OPTIONS:
                     j += 2
                     continue
+                if text.split("=", 1)[0] not in _XARGS_FLAG_OPTIONS:
+                    # An option xargs does NOT have: its arity is unknown,
+                    # so the tail could anchor on the option's VALUE and
+                    # never analyse the command behind it ⇒ FAIL CLOSED.
+                    return UNRESOLVED_UNIT_TOKEN
                 j += 1
                 continue
             break
@@ -1648,9 +1868,15 @@ def _segment_violation(
         )
         if sub_violation is not None:
             return sub_violation
-        sub_cmd, sub_ok = _resolve_word(words[j], env, 0)
-        if sub_ok and sub_cmd.rsplit("/", 1)[-1].lower() in _SHELLS:
-            return _segment_violation(words[j:], env, depth + 1, marker, executed)
+        # The tail's command word is found by peeling the WRAPPER prefixes
+        # (``xargs env bash -c '...'``) — its FIRST word is not necessarily
+        # the command.
+        tail = words[j:]
+        ck = _command_word_index(tail, env)
+        if ck is not None and ck < len(tail):
+            sub_cmd, sub_ok = _resolve_word(tail[ck], env, 0)
+            if sub_ok and _basename(sub_cmd) in _SHELLS:
+                return _segment_violation(tail, env, depth + 1, marker, executed)
         return None
 
     return None
