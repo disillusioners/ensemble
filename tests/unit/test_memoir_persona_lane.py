@@ -302,3 +302,23 @@ def test_self_ratify_nonexistent_version_raises_human_lane(repo):
     """(viii) non-human actor + nonexistent version id -> HumanLaneRequiredError."""
     with pytest.raises(HumanLaneRequiredError):
         repo.approve("does-not-exist", actor=_Actor("bearer"))
+
+
+def test_self_ratify_internal_self_actor_missing_version_raises_human_lane(repo):
+    """MUTATION-SENSITIVE: the internal lane on a missing row is a LANE refusal.
+
+    The self-ratify exemption's lookup must never turn a refusal into a
+    not-found error: a nonexistent version id cannot satisfy the
+    exemption's preconditions (there is no row whose agent could match
+    the actor), so the call fails the human lane — with the house lane
+    error class, not a plain ``ValueError``.
+    """
+    with pytest.raises(HumanLaneRequiredError) as excinfo:
+        repo.approve("does-not-exist", actor=_SelfActor("internal", "ari"))
+    # The CLASS is pinned exactly: HumanLaneRequiredError subclasses
+    # ValueError, so a plain ValueError would satisfy a bare
+    # ``pytest.raises(ValueError)`` — the class pin is what kills the
+    # not-found mutant.
+    assert type(excinfo.value) is HumanLaneRequiredError
+    assert excinfo.value.version_id == "does-not-exist"
+    assert "not found" not in str(excinfo.value)
