@@ -63,7 +63,7 @@ Worktree: /home/nea/ensemble-src-wt-gc-fe-surfaces
 ## Deviations
 - NOT "None behavioral" (deviation (f)): the NAMED finding **W1** (the 5xx-copy leak in
   `describeHttpError`, `room.service.ts:492-493`) IS a behavioral deviation — closed in the close-out addendum below, which also carries this ledger's NEW deviations (W1's shipped-surface 5xx-copy delta, A7's discriminator change, deviation (a)'s adjacency-row wording). The only NON-behavioral deviation is the `data-gc-room-chat` attribute on the instance-list row <a> to carry the drift-guard marker on the P3 child-row hunk.
-- Playwright browsers absent -> web-automation execution not run (reported, not installed).
+- CORRECTED in place (was: "Playwright browsers absent -> web-automation execution not run (reported, not installed)" — true at the P4 moment, stale since): browsers were subsequently installed user-space (~/.cache/ms-playwright, no apt/system install) and the rooms-gate WAS executed — final state 4 passed, 1 skipped, 0 failed; the skip is the header-adjacency row (explicit, reason-tagged skip owned by the leader's daemon-fenced run) — see the "Revival 3 Addendum" Verify table (:205).
 
 ## Leader-readiness (tasks 8-9)
 - Task 8 gates chain: architect adjudication DONE; reviewer council DONE;
