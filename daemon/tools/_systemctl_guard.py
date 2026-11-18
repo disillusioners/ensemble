@@ -243,7 +243,7 @@ _OPTIONS_WITH_VALUE: frozenset[str] = frozenset({
     "-p", "--property", "-n", "--lines", "-o", "--output", "-s", "--signal",
     "--kill-whom", "--kill-value", "--root", "--image", "--job-mode",
     "--what", "--drop-in", "--message", "--preset-mode", "--when",
-    "--timestamp", "--mkdir", "--reboot-argument", "--check-inhibitors",
+    "--timestamp", "--reboot-argument", "--check-inhibitors",
 })
 
 #: Shell reserved words that can precede a command on the same line
@@ -286,11 +286,69 @@ _SSH_VALUE_OPTIONS: frozenset[str] = frozenset({
     "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w",
 })
 
-#: Options of the argv runners that consume the following word as a value.
-_ARGV_RUNNER_VALUE_OPTIONS: frozenset[str] = frozenset({
-    "-n", "-p", "-t", "-T", "-u", "-g", "-M", "-P", "-E", "-C", "-H",
-    "--on-active", "--property", "--unit", "--uid", "--gid",
+#: Options of ``systemd-run`` that consume the following word as a value.
+#: Verified against ``systemd-run --help`` on this host (2026-11-19): every
+#: option listed there with a VALUE — ``--host=``, ``--machine=``,
+#: ``--unit=``, ``--property=``, ``--description=``, ``--slice=``,
+#: ``--expand-environment=``, ``--service-type=``, ``--uid=``, ``--gid=``,
+#: ``--nice=``, ``--working-directory=``, ``--setenv=``,
+#: ``--path-property=``, ``--socket-property=``. The TIMER options
+#: (``--on-active=``, ``--on-boot=``, ``--on-startup=``,
+#: ``--on-unit-active=``, ``--on-unit-inactive=``, ``--on-calendar=``,
+#: ``--timer-property=``) are matched by PREFIX — see
+#: ``_ARGV_RUNNER_VALUE_PREFIXES``.
+#:
+#: An option that takes a value and is treated as a FLAG makes the tail
+#: analysis anchor on the VALUE: the real command (which follows it) is
+#: then never analysed, and a dangerous tail slips through.
+_SYSTEMD_RUN_VALUE_OPTIONS: frozenset[str] = frozenset({
+    "-H", "--host", "-M", "--machine", "-u", "--unit", "-p", "--property",
+    "--description", "--slice", "--expand-environment", "--service-type",
+    "--uid", "--gid", "--nice", "--working-directory", "-E", "--setenv",
+    "--path-property", "--socket-property",
 })
+
+#: Options of util-linux ``watch`` that consume the following word as a
+#: value (``watch --help`` on this host, 2026-11-19): ``-n/--interval``
+#: and ``-q/--equexit``. ``watch -t`` is ``--no-title`` and ``watch -p`` is
+#: ``--precise`` on this host — both are FLAGS, so neither may be treated
+#: as value-consuming (that is why the two runners do NOT share a set).
+_WATCH_VALUE_OPTIONS: frozenset[str] = frozenset({
+    "-n", "--interval", "-q", "--equexit",
+})
+
+#: Prefixes of the ``systemd-run`` options that consume the following word
+#: as a value (the timer options). ``--on-*`` covers ``--on-active``,
+#: ``--on-boot``, ``--on-startup``, ``--on-unit-active``,
+#: ``--on-unit-inactive`` and ``--on-calendar``; ``--timer-*`` covers
+#: ``--timer-property``.
+_ARGV_RUNNER_VALUE_PREFIXES: tuple[str, ...] = ("--on-", "--timer-")
+
+#: The ``systemd-run`` options in the prefixes above that take NO value
+#: (they are FLAGS). A prefix rule must not swallow the word after them:
+#: the tail analysis would anchor one word late and a dangerous tail
+#: would slip through.
+_ARGV_RUNNER_VALUE_FLAGS: frozenset[str] = frozenset({
+    "--on-timezone-change", "--on-clock-change",
+})
+
+
+def _argv_runner_option_consumes_value(text: str, base: str) -> bool:
+    """Does this argv-runner option consume the NEXT word as its value?
+
+    ``--opt=value`` is a single self-contained token: it never consumes
+    the following word, so the ``=``-forms keep working untouched.
+    """
+    if "=" in text:
+        return False
+    if base == "watch":
+        return text in _WATCH_VALUE_OPTIONS
+    if text in _SYSTEMD_RUN_VALUE_OPTIONS:
+        return True
+    if text.startswith(_ARGV_RUNNER_VALUE_PREFIXES):
+        return text not in _ARGV_RUNNER_VALUE_FLAGS
+    return False
+
 
 #: The mutating-verb set of the pre-2026-11-18 TEXT guard, PLUS the verbs
 #: the STRUCTURAL matcher refuses on its own (unknown verbs FAIL CLOSED
@@ -468,20 +526,27 @@ def _merge_literals(parts: _Word) -> _Word:
     return merged
 
 
-def _scan_segments(text: str) -> tuple[list[_Segment], list[str]]:
+def _scan_segments(text: str) -> tuple[list[_Segment], list[str], bool]:
     """Lex a command string into simple-command segments of words.
 
-    Returns ``(segments, separators)`` where ``separators[i]`` is the
-    operator that TERMINATED segment ``i`` ("" for the last one). The
+    Returns ``(segments, separators, saw_pipe)`` where ``separators[i]`` is
+    the operator that TERMINATED segment ``i`` ("" for the last one). The
     pipeline rule needs the distinction between a PIPE ("|") and a plain
     sequence (";", "&", newline): only a pipe hands the previous stage's
     OUTPUT to the next stage.
+
+    ``saw_pipe`` is True when the text carries a PIPE operator OUTSIDE
+    quotes. The separator list cannot answer that question on its own: a
+    segment that ends on an EMPTY word DROPS its separator (the operator
+    between the two halves of a subshell is swallowed that way), so the
+    pipe presence is tracked by the lexer while it scans.
     """
     segments: list[_Segment] = []
     seps: list[str] = []
     words: _Segment = []
     cur: _Word = []
     started = False
+    saw_pipe = False
     i = 0
     n = len(text)
 
@@ -560,6 +625,8 @@ def _scan_segments(text: str) -> tuple[list[_Segment], list[str]]:
             i += 1
             continue
         if ch == "\n" or ch in ";&|()":
+            if ch == "|":
+                saw_pipe = True
             end_segment(ch)
             i += 1
             continue
@@ -567,7 +634,7 @@ def _scan_segments(text: str) -> tuple[list[_Segment], list[str]]:
         started = True
         i += 1
     end_segment()
-    return segments, seps
+    return segments, seps, saw_pipe
 
 
 def _scan(text: str) -> list[_Segment]:
@@ -1323,8 +1390,36 @@ def _pipeline_laundering_violation(
     seps: Sequence[str],
     env: dict[str, str],
     data_bodies: Sequence[tuple[str, str]],
+    code: str = "",
+    saw_pipe: bool = False,
 ) -> str | None:
-    """A payload with the mutating-ensemble SHAPE handed to an EXECUTOR."""
+    """A payload with the mutating-ensemble SHAPE handed to an EXECUTOR.
+
+    Two independent tests; together they are never weaker than the OLD
+    text guard, which refused ANY command text carrying the shape:
+
+    * WHOLE TEXT — the command's ENTIRE stripped code carries the shape
+      AND the command pipes into an EXECUTOR. The adjacency test alone is
+      NOT enough: the segment that PRODUCES a pipe-fed payload is not
+      always the segment that CARRIES it. A subshell ``( ... )``, a brace
+      group ``{ ... ; }`` and every intermediate forwarding stage
+      (``| cat |``, ``| tee FILE |``, ``| grep ... |``) move the payload
+      away from the segment that sits next to the executor, so an
+      adjacency-scoped test lets real laundering shapes through.
+    * ADJACENCY — the segment next to the executor produces the payload
+      ITSELF. Its words are RESOLVED, so a payload that only exists after
+      an environment substitution is still seen here.
+
+    The pipe is detected on the RAW stripped code (the lexer tracks it: a
+    segment that ends on an EMPTY word DROPS its separator, so the
+    separator list cannot answer the question), and the executor is any
+    segment whose ``_executor_kind`` is not None. A pipe with NO executor
+    stays DATA (the read-only/prose ALLOW legs depend on it).
+    """
+    if saw_pipe and code and _text_has_mutating_ensemble_shape(code):
+        for words in segments:
+            if _executor_kind(words, env) is not None:
+                return LAUNDERED_TOKEN
     for i, words in enumerate(segments):
         sep = seps[i] if i < len(seps) else ""
         if sep != "|":
@@ -1522,7 +1617,9 @@ def _segment_violation(
             if not ok:
                 break
             if text.startswith("-"):
-                j += 2 if text in _ARGV_RUNNER_VALUE_OPTIONS else 1
+                j += (
+                    2 if _argv_runner_option_consumes_value(text, base) else 1
+                )
                 continue
             break
         if j >= len(words):
@@ -1568,7 +1665,7 @@ def _command_text_violation(
     if depth > _MAX_DEPTH:
         return UNRESOLVED_UNIT_TOKEN
     code, executed_bodies, data_bodies = _strip_heredocs(text, {})
-    segments, seps = _scan_segments(code)
+    segments, seps, saw_pipe = _scan_segments(code)
     env = _collect_assignments(segments)
     # ``ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:*`` carries forward segment
     # by segment (a prefix assignment on one segment does not reach the NEXT
@@ -1598,7 +1695,9 @@ def _command_text_violation(
     violation = _pipeline_wrapper_violation(segments, env)
     if violation is not None:
         return violation
-    violation = _pipeline_laundering_violation(segments, seps, env, data_bodies)
+    violation = _pipeline_laundering_violation(
+        segments, seps, env, data_bodies, code, saw_pipe
+    )
     if violation is not None:
         return violation
     return None

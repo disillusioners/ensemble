@@ -526,6 +526,19 @@ _PIPE_LAUNDER_SHAPES = [
     "echo 'systemctl stop ensemble-prod' | dash",
     "echo 'systemctl kill ensemble-main' | ssh host 'sh'",
     "echo 'systemctl restart ensemble-main' | bash -c 'cat'",
+    # The segment that PRODUCES a pipe-fed payload is not always the
+    # segment that CARRIES it: a subshell, a brace group and every
+    # intermediate forwarding stage move the payload away from the
+    # executor's neighbour, so the SHAPE test is applied to the WHOLE
+    # stripped text of a command that pipes into an executor.
+    "(echo 'systemctl restart ensemble-main') | bash",
+    "{ echo 'systemctl restart ensemble-main'; } | bash",
+    "echo 'systemctl restart ensemble-main' | cat | bash",
+    "echo 'systemctl restart ensemble-main' | tee /tmp/x.log | bash",
+    "echo 'systemctl restart ensemble-main' | grep ensemble-main | bash",
+    "echo 'systemctl restart ensemble-main' | cat | tee /tmp/x.log | bash",
+    # the executor need not be a shell
+    "echo 'systemctl restart ensemble-main' | cat | at now",
 ]
 
 
@@ -561,6 +574,34 @@ _RUNNER_SHAPES = [
     "ssh localhost 'systemctl restart ensemble-main'",
     "ssh -p 2222 localhost 'systemctl restart ensemble-main'",
     "bash -c \"$(echo 'systemctl restart ensemble-main')\"",
+    # A runner option that CONSUMES the next word (the systemd-run
+    # timer options) must not hide the tail: the value is skipped and
+    # the command behind it is analysed.
+    'systemd-run --on-calendar "12:00" systemctl restart ensemble-main',
+    "systemd-run --on-boot 60 systemctl restart ensemble-main",
+    "systemd-run --on-startup 30 systemctl restart ensemble-main",
+    "systemd-run --on-unit-active 30 systemctl restart ensemble-main",
+    "systemd-run --on-unit-inactive 30 systemctl restart ensemble-main",
+    "systemd-run --timer-property AccuracySec=1s systemctl restart ensemble-main",
+    # the `=`-forms are one self-contained token and keep working
+    "systemd-run --on-calendar=12:00 systemctl restart ensemble-main",
+    # an option that takes NO value must not swallow the command
+    "systemd-run --on-clock-change systemctl restart ensemble-main",
+    "systemd-run --on-timezone-change systemctl restart ensemble-main",
+    "systemd-run -P systemctl restart ensemble-main",
+    "systemd-run -t systemctl restart ensemble-main",
+    "watch -p systemctl restart ensemble-main",
+    "watch -t systemctl restart ensemble-main",
+    "watch -q 5 systemctl restart ensemble-main",
+    # the timer-option value must not be able to swallow the command
+    # that FOLLOWS it either (a second option after the value used to
+    # anchor the tail analysis on the option, not on the command)
+    'systemd-run --on-calendar "12:00" --unit foo systemctl restart ensemble-main',
+    "systemd-run --timer-property AccuracySec=1s --unit foo systemctl restart ensemble-main",
+    # the plain value options of the runner are consumed as well
+    "systemd-run --description plain systemctl restart ensemble-main",
+    "systemd-run --working-directory /tmp systemctl restart ensemble-main",
+    "systemd-run --uid root systemctl restart ensemble-main",
 ]
 
 
@@ -634,6 +675,15 @@ _LAUNDER_ALLOW = [
     "cat > notes.md <<'EOF'\nrun systemctl restart ensemble-main to recover\nEOF",
     "journalctl -u ensemble-main -n 20 | grep -i enable",
     "systemctl status ensemble-main | grep ensemble",
+    # read-only through a runner option that CONSUMES the next word
+    'systemd-run --on-calendar "12:00" systemctl status ensemble-main',
+    "systemd-run --on-calendar=12:00 systemctl status ensemble-main",
+    "systemd-run --on-boot 60 systemctl status ensemble-main",
+    "systemd-run --on-unit-inactive 30 systemctl status ensemble-main",
+    "systemd-run --timer-property AccuracySec=1s systemctl status ensemble-main",
+    "systemd-run --description plain systemctl status ensemble-main",
+    "watch -n 5 systemctl status ensemble-main",
+    "watch -q 5 systemctl status ensemble-main",
 ]
 
 
@@ -675,3 +725,67 @@ async def test_proc_lane_allows_readonly_through_runner():
         text = await pr.coroutine(command=command, timeout=-1)
         assert "timeout must be >= 0" in text, (command, text)
         assert "refused by the rogue-containment" not in text, (command, text)
+
+
+# ===========================================================================
+# wave-3 (2026-11-19) — the guard-inversion CLOSING fixes
+#
+#   * the pipe/executor laundering rule applies the SHAPE test to the WHOLE
+#     stripped text: the segment that PRODUCES a pipe-fed payload is not
+#     always the segment that CARRIES it (a subshell, a brace group, an
+#     intermediate forwarding stage), so an adjacency-scoped test left real
+#     laundering shapes ALLOWED;
+#   * a runner option that CONSUMES the next word (the systemd-run timer
+#     options) no longer hides the tail behind the option's value;
+#   * a systemctl option that takes NO value no longer eats the verb.
+#
+# Counter-mutations:
+#   * M6g — revert the whole-text pipe rule to adjacency-scoped payload
+#     analysis ⇒ the pipe-shape deny pins RED;
+#   * M6h — drop the runner option value-consumption ⇒ the runner-shape
+#     deny pins RED.
+# ===========================================================================
+
+_SYSTEMCTL_OPTION_ANCHOR_SHAPES = [
+    # ``--mkdir`` takes NO value (it is a flag): treating it as
+    # value-consuming made the tail analysis anchor on the VALUE, so the
+    # VERB was eaten and the unit became the verb. The command was
+    # ALLOWED although ``systemctl --mkdir restart <unit>`` really does
+    # restart the unit.
+    "systemctl --mkdir restart ensemble-main",
+    "systemctl --mkdir stop ensemble-main",
+    # the value-consuming options still consume their value, so the verb
+    # is found and the ensemble unit is refused
+    "systemctl --host myhost restart ensemble-main",
+    "systemctl --machine mycontainer restart ensemble-main",
+    "systemctl --root /mnt restart ensemble-main",
+    "systemctl --job-mode replace restart ensemble-main",
+]
+
+
+@pytest.mark.parametrize("command", _SYSTEMCTL_OPTION_ANCHOR_SHAPES)
+def test_systemctl_option_anchor_shapes_refused(command):
+    """A ``systemctl`` option must not be able to eat the verb."""
+    assert guard.systemctl_violation(command) is not None
+
+
+def test_property_name_colliding_with_a_mutating_verb():
+    """The disclosed SHAPE residual — the EXECUTED context.
+
+    A property name that COLLIDES with a mutating verb (``-p Restart``)
+    is REFUSED once the command is EXECUTED: the shape test sees the
+    verb. The DIRECT context stays ALLOWED — that over-block is the one
+    this guard deliberately dropped, and it is pinned as allowed here so
+    the two contexts cannot drift apart silently.
+    """
+    assert guard.systemctl_violation("systemctl show ensemble-main -p Restart") is None
+    assert guard.systemctl_violation(
+        "systemctl show ensemble-main --property=Restart"
+    ) is None
+    for command in (
+        "ssh localhost 'systemctl show ensemble-main -p Restart'",
+        "su -c 'systemctl show ensemble-main -p Restart'",
+        'bash -c "systemctl show ensemble-main -p Restart"',
+        "echo 'systemctl show ensemble-main -p Restart' | bash",
+    ):
+        assert guard.systemctl_violation(command) is not None, command
