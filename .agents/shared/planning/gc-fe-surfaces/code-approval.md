@@ -222,3 +222,24 @@ Re-anchored to the shipped posture: the W1 section now reads "**NO branch consul
 Iteration-001 blockers 1 and 2 are **closed with exact, independently verified restorations**. The ledger is now truthful on every point I raised, self-consistent, append-only in structure, and confined to the lane-owned file; the frozen artifacts, the code, the tests and the drift guard are all untouched and green. **APPROVE — the lane moves straight to giter merge + staged release (no live promote).** N3 and N4 are closed; N5 and N8 are carried as open, non-blocking advisories.
 
 *Evidence: byte-for-byte restoration diff + sha match (`be2f9d06…`); W3/F-E block diffs (empty); hunk-header zero-shift audit; frozen-artifact sha comparison; `git show --name-only` confinement; 0-hit greps for both false clauses; anchor re-derivation against `room.service.ts`; live/skip inspection of both e2e specs; drift guard re-run 39/39 at `acbcd43e0`.*
+
+## 7. POST-MERGE RE-VERIFICATION (concurrent `origin/latest` absorption)
+
+While this re-check was in flight, a merge landed on the branch between the ledger fix and this commit — `fafa7adc9 merge: absorb origin/latest drift (0181dadbf..3a8ce7c56, v0.31.1+v0.31.2 lanes) into gc-fe-surfaces pre-release` (parents `acbcd43e0` + `3a8ce7c56`; 281 files, +31442/−1118). Because it moved the tip **under** an approval, I re-verified the approval still holds at the post-merge tree rather than assume it:
+
+| Check at the post-merge tip | Result |
+|---|---|
+| Lane-owned files touched by the merge | **1** — `daemon/routers/rooms.py`, and its ONLY change is **one docstring word** in the module header ("The Emperor's P6 UI direction" → "The user's P6 UI direction"); 1 changed content line, **zero behavioural lines**, so every `rooms.py` line anchor the ledger cites is unmoved. |
+| `frontend/` files touched | **0** ⇒ the lane's FE surface, the 217,094 B initial bundle, the 85 chunks, the 18/18 warn set and the B4b 134 B headroom are all unaffected by the absorption. |
+| The lane's own planning dir (`.agents/shared/planning/gc-fe-surfaces/`) | **0 files touched** — `decisions.md` `6d156bc7…`, `spec.md` `ef3ad1bf…`, `code-review.md` `aaeedd40…`, `gate-evidence.md` `d0c4c57b…` all sha256-identical to their pre-merge values. |
+| Drift guard at the post-merge tip | **40 passed / 0 failed** (the merge added one other lane's `daemon/constants.py` carve-out test; the FE-UI sanction — allowlist, markers, `FRONTEND_UI_LANE_SANCTIONED_BASE`, file-state compensator — is **untouched** by that change). |
+| The lane's own BE gate at the post-merge tip | `tests/unit/routers/test_rooms_list_api.py` → **41 passed** (unchanged). |
+| `room.service.ts` anchors after the merge | **`:212` / `:259` / `:342` — unchanged** (the file was not touched by the merge). |
+
+**The merge does not invalidate this approval.** It also required no change to either blocker fix.
+
+- **N9 — the ledger's `:4` HEAD anchor now precedes the merge.** `gate-evidence.md:4` reads `HEAD: a1b2ce44c … this ledger's own correction commit follows it`; after the absorption it is followed by that commit **and** by `fafa7adc9`. This is **not** a defect for the ledger's subject — the merge changed zero `frontend/` files and zero behavioural lane lines, so `a1b2ce44c` genuinely identifies the code state the ledger describes — but the anchor is two commits behind the tip. **Optional refresh (no re-review needed):** restate `:4` as the lane's code state rather than a sha, or point it at the merge sha with a note that the merge carried no lane-code or frontend change.
+
+## 8. FINAL DISPOSITION (iteration 002)
+
+**APPROVED.** The ledger correction `acbcd43e0` closes both iteration-001 blockers exactly and completely, with every restoration independently proven byte-for-byte rather than asserted; the three named notes are dispositioned (N3 closed, N4 closed, N5 correctly declined by scope and carried as an open advisory); the frozen artifacts, the code, the tests and the drift guard are untouched and green; and the concurrent `origin/latest` absorption was re-verified to change nothing this approval rests on. **The lane proceeds to giter merge + staged release — no live promote (commission constraint 5).** Open, non-blocking advisories carried forward: **N5** (fail-closed branch does not invalidate an in-flight request), **N8** (`:66` / `:208` stale-tense cross-reference — one-clause pointer optional), **N9** (`:4` anchor predates the merge).
