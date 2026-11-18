@@ -833,6 +833,11 @@ class ChildReportsService:
                 parent_err,
             )
             parent_map = {}
+        if not isinstance(parent_map, dict):
+            # A non-dict read (a mocked repository) must not make the
+            # DELIVER(w) filter silently pass — treat the structural
+            # parent as unknown (fail-OPEN on the delivery, as above).
+            parent_map = {}
 
         # Dead-letter check — one batched status read for every target.
         target_ids = sorted(
@@ -907,7 +912,21 @@ class ChildReportsService:
                 # The claim commits in its own transaction; a second
                 # attempt for the same watch_id observes the marker and
                 # no-ops (at-most-once).
-                claimed = await bus.claim_delivery(watch_id)
+                try:
+                    claimed = await bus.claim_delivery(watch_id)
+                except Exception as claim_err:
+                    # A marker failure must NOT fail the completion
+                    # path — the row is already FIRED (the fire is the
+                    # state transition; the delivery is best-effort).
+                    logger.warning(
+                        "_fire_terminal_child_and_deliver: delivery marker "
+                        "claim failed (non-fatal) for watch_id=%s... — the "
+                        "delivery is skipped: %s: %s",
+                        str(watch_id)[:8],
+                        type(claim_err).__name__,
+                        claim_err,
+                    )
+                    continue
                 if not claimed:
                     logger.info(
                         "_fire_terminal_child_and_deliver: delivery marker "
@@ -920,12 +939,28 @@ class ChildReportsService:
                 # JAFP: manager.enqueue_message creates NO JobItem — the
                 # internal MessageQueue + Task seam is the bus's delivery
                 # contract.
-                _enq_result = await self._manager.enqueue_message(
-                    instance_id=fu.target_instance_id,
-                    message=fu.message,
-                    source=fu.source,
-                    metadata=dict(fu.metadata),
-                )
+                try:
+                    _enq_result = await self._manager.enqueue_message(
+                        instance_id=fu.target_instance_id,
+                        message=fu.message,
+                        source=fu.source,
+                        metadata=dict(fu.metadata),
+                    )
+                except Exception as enq_err:
+                    # An enqueue failure must NEVER fail the completion
+                    # path (same posture as the terminate precedent's
+                    # dead-letter / stamp handling): the row stays FIRED
+                    # and the wake is lost — the at-most-once residual
+                    # the durability stance documents.
+                    logger.warning(
+                        "_fire_terminal_child_and_deliver: enqueue "
+                        "failed (non-fatal) for target=%s... — the row "
+                        "stays FIRED and the wake is lost: %s: %s",
+                        fu.target_instance_id[:8],
+                        type(enq_err).__name__,
+                        enq_err,
+                    )
+                    continue
                 if _enq_result is not None and getattr(
                     _enq_result, "message_id", None
                 ):
