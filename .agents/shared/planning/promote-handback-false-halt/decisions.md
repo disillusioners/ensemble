@@ -57,7 +57,7 @@ the verification log and the planner's outstanding actions.
 
 ## 1. Decision register
 
-### 1.0 Index (27 decisions — 24 at first issue + 3 review-wave-2 folds)
+### 1.0 Index (29 decisions — 24 at first issue + 3 review-wave-2 folds + 2 review-wave-4 folds)
 
 | # | ID | Decision (one line) | Binds | Ratifier |
 |---|----|---------------------|-------|----------|
@@ -88,6 +88,8 @@ the verification log and the planner's outstanding actions.
 | 25 | `D-P2-5` | **BL-3 — the C-1 downgrade gets a leg that can actually redden it.** The downgrade (`answered 1 → 2` when a stronger rung was unanswerable) is unreachable in NP-4/NP-6 (their R2 is *answerable*), so `M-NP1c` was vacuous. Resolved by promoting the `SC_SHOW_RC=124`/`SC_MAINPID=0` + non-owned-holder shape into the named leg **`B-defer-d` / `B-downgrade`**, re-targeting `M-NP1c` to it, deleting the over-claims from NP-4/NP-6, and restating SC-2 / P2-T9 / R-5 / §10.2 C-1 | `phase2-plan.md` §7.5 (`B-defer-d`/`M-NP1c`), §7.9, §9.1 (NP-6), §9.2, §14 (P2-T8/P2-T9), §15 (R-5), §16 (SC-2), §10.2 (C-1); `phase1-plan.md` §5.3 (M-NP1c pointer) | Plan review wave 2 (FINAL) |
 | 26 | `D-P2-6` | **BL-4 — C-0's character-for-character claim is made TRUE.** The pre-amendment raw-substring predicate still lived in phase2 §9.4 / §5.2.3, and the fenced quotes still said `contains`; canonical source of record is fixed as **phase1 §5.3's fenced block** (PREFIX test `case "$pcg" in "$cg"/*)`), every other copy is a marked quotation above a `⛔ DO NOT COPY the table-cell form` line, and NP-6 gains a **mid-path cell** + `M-NP1d` so a substring implementation reddens | `phase1-plan.md` §5.3 (source) + §10 T5 (pointer); `phase2-plan.md` §5.2.3 (A-ASSUME-3), §9.1 (NP-6, two cells), §9.2 (+`M-NP1d`), §9.4, §14 (P2-T9), §15 (R-5), §16 (SC-2); `decisions.md` §2.1/§2.2(4)/§2.2(7); `plan-overview.md` §4/§5 | Plan review wave 2 (FINAL) |
 | 27 | `D-P2-7` | **BL-5 — the REJECTED D1 semantics are purged from the invariant hand-off.** phase1 §14 `I-B8` (per-shell / seconds-counted / clamped `[0,5]` / exhaustion ⇒ transient 2 with the distinct marker / refusal only at budget end), `I-B10`, the `N6` template row, and `I-E3` ("no new EXPORTED env / OPERATOR knob; the seam is a clamped, marker-gated, non-exported internal bound routed through `_numeric_knob`") are rewritten; §9's blast-radius "no new `_numeric_knob`s" contradiction is closed; §14 and §9/I-E3 join the §10.1 fold lists | `phase1-plan.md` §14 (`I-B8`/`I-B10`/`I-E3`/`N6`), §9 (blast radius); `decisions.md` §10.1, §10.8; `plan-overview.md` §5 | Plan review wave 2 (FINAL) |
+| 28 | `D-P1-6` | **BL-8 (LEADER RULING) — RC3 (root cause #3, unit-arm zero retry) is SUBSUMED, not dropped.** A bare unit-arm retry re-halts later on the SAME refused attribution (the refusal is evidence-based, not boot-timing-based); D1's budget-bound deferral already provides the bounded re-probe at the verifier level. **Unit-arm retry-parity is EXPLICITLY DEFERRED to the T12 sibling lane** (§6 row 8); the false "Phase 1 fixes the unit-arm retry" claim at phase3 §2 is corrected; phase2 §3 D5 carries the disposition | `phase1-plan.md` §2 (out-of-scope row), §12 (RC3 disposition); `phase2-plan.md` §3 (D5 disposition); `phase3-plan.md` §2 (out-of-scope correction); `plan-overview.md` §2 item 3; `decisions.md` §6 row 8 | Plan review wave 4 (FINAL, leader ruling) |
+| 29 | `D-P1-7` | **BL-9 (LEADER RULING, Option A) — per-surface version arming.** The "version conjunct absolute and outside the widening" invariant is restated PER-SURFACE: it is absolute where ARMED (promote, `promote.sh:546-556`) and was EMPTY on restart/rollback (2xx-only degradation, `lib.sh:1593`/`:6107`) — so the leader adopts **arming the expected version from the TARGET release manifest on restart.sh + rollback.sh BEFORE the shared gate** (T13/T14); refuse-to-widen REJECTED (keeps the false-halt alive on 2 of 3 surfaces). NP-12 + M-NP12 pin it; risk row with owner: phase1 §12 R6; `:541-544`→`:546-556` anchor folded | `phase1-plan.md` §5.4 (per-surface restatement), §5.7 (P12-sibling + P13), §10 (T13/T14), §12 (R6); `phase2-plan.md` §9.1 (NP-12), §9.2 (M-NP12); `decisions.md` §10.1 (scope note), §10.9 | Plan review wave 4 (FINAL, leader ruling) |
 
 **Nothing in this register weakens a phase plan's hard constraints.** Where a decision *narrows* the plan (`T12`, `NP-11`), the narrowing is
 explicit and its compensating coverage is named (§6).
@@ -326,7 +328,9 @@ deferred work.
 
 ### 1.4 Phase 3 — release mechanics
 
-#### `D-P3-1` — rebase vs merge · **DEFERRED TO THE LEADER** → recorded as the lane's single escalated item in **§9**
+#### `D-P3-1` — rebase vs merge · ~~**DEFERRED TO THE LEADER**~~ **✅ RESOLVED: MERGE** (leader ruling, 2026-11-17; review wave 4 closes the last open framings)
+
+~~recorded as the lane's single escalated item in **§9**~~ → **RESOLVED: MERGE** — sync-merge `origin/latest` into the lane branch **before surgery** and **re-grep the anchor register post-merge**; the full resolution text lives in **§9** (retitled there) and the fold record in **§10.1**. Phase-3 mechanics (P3-D11/T3) already carry the decided form.
 
 #### `D-P3-2` — scripts-pin advance owner · **ADOPTED (operator-owned, ceremony precondition)**
 
@@ -381,7 +385,7 @@ annotation; the lane's exit criterion states `promote.sh` was never run; the liv
 | `P3-D9` | **rebuild the binary at the tag**; `--skip-build` is **not** used (the floor constant is compiled into the frozen binary — a pre-bump binary would disagree with the manifest) | ratified |
 | `P3-D10` | **one 7-file house commit** `chore(release): bump version to <ver>`; `bump_version.py patch` derives the version + makes the 4 mechanical edits, then `git reset --soft HEAD~1` and re-commit **all 7 explicit paths** (its own commit is 4-file, message `! New version`, and its `uv sync` would materialise a `.venv` in this lazy worktree) | ratified |
 | `P3-D12` | the release version is **`v`-prefixed** in `VERSION=`, the tag, and the manifest | ratified |
-| `P3-D11` | merge **`--no-ff`** onto `latest` with the drift cleared first — **mechanics agnostic pending `D-P3-1`** (only `M`'s identity changes) | ratified-no-override |
+| `P3-D11` | merge **`--no-ff`** onto `latest` with the drift cleared first — **mechanics agnostic — `D-P3-1` ✅ RESOLVED: MERGE** (leader ruling, 2026-11-17; only `M`'s identity changes — review wave 4 annotation on the earlier "pending" wording) | ratified-no-override |
 
 ---
 
@@ -606,7 +610,12 @@ counter-mutations that **widen the accept-set and must redden** the negative sec
    ⇒ no closer rescue is needed. (This run class has now fired **three** times: v0.29.0, v0.29.1, v0.31.0.)
 2. **The closer's predicates are untouched.** P5 (`flipped == true`) stays; P9 (`intent_flip` authorization) stays; the P6/P8 windows stay. A
    `flipped=false` dead-actor txn is still **not** closable — by design: there is no flip to justify a commit, and widening P5 would let an
-   unflipped arm be "committed" on health alone, which is the authorization hole P9 exists to close.
+   unflipped arm be "committed" on health alone, which is the authorization hole P9 exists to close. **The board item's premise is REFUTED by
+   the fixture (explicit narrowing, verified — review wave 4 process fact): fixture line 19 (`17:29:27Z`) records `current -> releases/v0.31.0
+   (atomic flip)` — the incident's txn was `flipped=true`** (the flip had LANDED; the closer's P5 matched and the daemon-side serving-green
+   closer committed at 17:39:04Z), so the promote-kind `flipped=false` live closer the board item asked for was never the incident's recovery
+   path. **Sanctioned disposition: producer closed by this lane; the `flipped=false` live closer is deliberately NOT built** (building it would
+   either duplicate the boot sweep or open the P9 authorization hole).
 3. **`daemon/services/upgrade_journal_sweep.py` is unchanged** (S10 / `I-E1`), and **no budget knob changes** ⇒ the grace coupling
    `max(UPGRADE_CLOSER_BOOT_GRACE_S, HANDBACK_VERIFY_BUDGET_S)` remains satisfied as written, and the closer keeps its full 300 s / boot-grace
    behaviour on genuinely unhealthy boots.
@@ -631,6 +640,7 @@ technical rationale the board owner applies.
 | 5 | `make_systemctl_stub` 3-copy consolidation | **ROUTED FINDING** (`RG-6`), not this lane | consolidation would churn 3 standing suites | the `§4.3` knob contract is the consolidation spec; the new stub is a superset | future consolidation |
 | 6 | `test_release_journal.sh` 600 s cap (RC=124 at this tip) | **FILED** (`RG-6`-adjacent / §12.3) | pre-existing, disclosed in PACKS | aggregator keeps it `--full`-only with its disclosure | existing lane |
 | 7 | **Allowlist stderr-only closure** (set the log file before the arg-parse refusals) | **DEFERRED** — architect recommended item 16, planner judgment (2026-11-17) | touching arg-parse ordering in `restart.sh` for a class the lane already covers via the pinned allowlist; the residual is disclosed, not silent | `R0` pins the **6-entry allowlist**; stderr + client log carry the refusal | rides with #3 (future id `28ca6ab0`) |
+| 8 | **Unit-arm retry-parity** — `_supervision_handback_unit` starts once (`lib.sh:6377`) and verifies once (`:6395-6397`); launchd's twin retries ×2 (`:6541-6557`). Root cause #3 (RC3) of the incident | **DEFERRED (leader ruling, review wave 4 BL-8)** to the T12 sibling lane (future id `143a045c`) — register row `D-P1-6` | **SUBSUMED by D1's budget-bound deferral**: the incident halt was an *attribution refusal*; a bare unit-arm retry would re-halt later on the SAME refused attribution, so the retry approximates nothing that the verifier-level bounded re-probe (phase1 §5.4) does not already provide | `B-defer-e` (persistent-2 polls to budget end) + the floor-wins verdict halt (`:6288-6297`) with `HB_VERIFY_REASON` carrying the exhaustion detail; phase2 §3 D5 carries the disposition | T12 sibling lane |
 
 **Not in this register** (explicitly out of scope, so they are not mistaken for deferrals): the arm's `pending_op` persistence, the
 `lock_acquire` `to_thread` move, the boot-sweep default (board sub-items 2–4); the ambient-`POSTGRES_*`/auth-scrub debt in standing suites;
@@ -779,7 +789,7 @@ render the token `inactive|activating` (a `${var:-word}` expansion is not a choi
 | Phase 2 `OQ-P2-2` 5 silent exits | `D-P2-2` → acceptable, `R0` pins the allowlist |
 | Phase 3 `P3-Q2` scripts-pin owner | `D-P3-2` → operator-owned precondition |
 | Phase 3 `P3-Q3` CHANGELOG set | `D-P3-3` → five items confirmed |
-| Phase 3 `P3-Q1` rebase-vs-merge | `D-P3-1` → **escalated to the leader** (§9) |
+| Phase 3 `P3-Q1` rebase-vs-merge | `D-P3-1` → **escalated to the leader** (§9) — ✅ **RESOLVED: MERGE** (leader ruling, 2026-11-17; wave-4 annotation) |
 
 **Dangling references:** none found. Every `§`-cross-reference inside the set resolves (Phase 1 §4/§5/§6/§7/§8/§10–§15; Phase 2
 §4.2/§4.3/§5.2/§5.3/§7.5/§9/§10.1/§11.2/§11.4/§12/§13/§17; Phase 3 §4.1–§4.5/§5/§6/§7/§8/§10); every invariant `I-*` has a leg row; every
@@ -877,11 +887,11 @@ All read-only in `/home/nea/ensemble-src-wt-hbfix` at record time.
 
 ## Appendix B — Planner actions outstanding (not satisfied by this file)
 
-1. **Author `plan-overview.md`** with: the five-item disclosure set (`D-P3-3`); the **escalated `D-P3-1`** carried explicitly (`§9`); the
+1. **Author `plan-overview.md`** with: the five-item disclosure set (`D-P3-3`); the **escalated `D-P3-1`** carried explicitly (`§9`) — *(wave-4 annotation: since ✅ RESOLVED: MERGE; §9 now carries the resolution)*; the
    phase table (`phase1/2/3-plan.md`); the amendment pointer (§2); the deferred register (§6); the **29** invariants (CP-11).
 2. **Mirror the correction register** (§7) into the overview's assumptions/notes so a future reader of the overview alone does not re-import
    the "(a) not registered" claim or the env-name typos.
-3. **Record `D-P3-1` as open** in the overview's open-questions section until the leader rules.
+3. **Record `D-P3-1` as open** in the overview's open-questions section until the leader rules. *(⚠️ wave-4 forward-pointer: since ✅ RESOLVED — **MERGE**, leader ruling 2026-11-17; the overview's §9 carries the resolution and no open-question framing remains; this historical action text is left as written per the ledger convention.)*
 4. **Do not renumber** anything when consolidating (`L-*` are the only minted IDs; phase namespaces are preserved).
 
 ---
@@ -898,7 +908,7 @@ All read-only in `/home/nea/ensemble-src-wt-hbfix` at record time.
 | 5 pre-journal-init exits (phase2 §17) | `D-P2-2` | §1.3, §6 |
 | NP-6 prefix collision (phase2 §17) | `D-P2-3` | **§2 (amendment)**, §4.2 |
 | Darwin NP-11 (phase2 §17) | `D-P2-4` | §1.3, §4.2, §6 |
-| rebase vs merge (phase3 §10) | `D-P3-1` | **§9 (escalated)** |
+| rebase vs merge (phase3 §10) | `D-P3-1` | **§9 (escalated → ✅ RESOLVED: MERGE** — leader ruling, 2026-11-17; wave-4 annotation)** |
 | scripts-pin owner (phase3 §10) | `D-P3-2` | §1.4 |
 | CHANGELOG disclosure set (phase3 §10) | `D-P3-3` | §1.4, Appendix B |
 | floor graph (phase3 §4.2/§5) | `L-5` | **§3.1–§3.2** |
@@ -937,13 +947,23 @@ divergence must be closed rather than argued.
 **Bound semantics of record (leader D1 — verbatim):** *attribution acceptance = evidence-only (ladder); deferral = a
 budget-bounded delay that can never accept; the version conjunct = absolute and outside the widening.*
 
+**Scope note (REVIEW WAVE 4, BL-9 — leader ruling; scope-clarifying, not a re-litigation):** the D1 sentence's "version
+conjunct = absolute and outside the widening" is true **per-surface, not surface-free**: the conjunct is absolute exactly
+where it is ARMED — the promote surface (`promote.sh:546-556`; the earlier `:541-544` cite was loose) — and on
+rollback/restart it was EMPTY (the hand-back window reads an empty default, `lib.sh:1593`/`:6107`; promote.sh's own
+comment documents the "2xx, no version comparison" degradation), where a stale incarnation could be recorded as verified.
+**Ruling: Option (A) — arm the expected version from the TARGET release manifest on restart.sh + rollback.sh BEFORE the
+shared gate** (phase1 T13/T14; `restart.sh:251` / `rollback.sh:249`); **refuse-to-widen was REJECTED** (it would keep the
+false-halt alive on 2 of the 3 surfaces). Per-surface invariant + negative proof: NP-12 / M-NP12; risk row with owner:
+phase1 §12 R6. Register row `D-P1-7`.
+
 ### 10.2 BLOCKING closures (folded — all three closed in the plan-of-record)
 
 | # | Closure | Where it now lives |
 |---|---|---|
 | **C-0** | Body/ledger divergence on the very predicate the amendment exists to fix. **Wave-1 pass was PARTIAL** (review wave 2 / BL-4 / `D-P2-6`): §9.4, §5.2.3 A-ASSUME-3 and several cells still said `contains`. **Now fully closed**: the canonical **fenced block** lives in `phase1-plan.md` §5.3 (PREFIX test), every other copy is a marked quotation above a `⛔ DO NOT COPY the table-cell form — canonical source is phase1 §5.3 fenced block` line, and NP-6 is arm (b)-only with a **mid-path** second cell. | `phase1-plan.md` §5.3 (source) + §10 T5 (pointer), `phase2-plan.md` §9.1 (NP-6, 2 cells), §9.2, §5.2.3, §9.4, `§2.1`/`§2.2(4)`/`§2.2(7)`, `plan-overview.md` §5 — the canonical string: `pcg == cg \|\| pcg PREFIX-matches "$cg"/` |
 | **C-1** | One normative composition rule — the **first rung that ANSWERS decides**; an answered `1` is **downgraded to `2`** when a stronger rung was unanswerable (an incomplete determination is not positive foreignness); counter-mutation **M-NP1c** added. **Re-targeted in wave 2 (BL-3 / `D-P2-5`)**: the downgrade is unreachable in NP-4/NP-6 (R2 answerable there), so `M-NP1c` now reddens the new leg **`B-defer-d`/`B-downgrade`** and the NP-4/NP-6 over-claims are withdrawn. | `phase1-plan.md` §5.3 (intro + rung 5), `phase2-plan.md` **§7.5 (`B-defer-d` + `M-NP1c` re-target)**, §7.9, §9.1 (NP-6), §9.2 (`M-NP1c`), §10.2 (this row), §5.2 (`I-B8a`), §14 (P2-T8/P2-T9), §15 (R-5), §16 `SC-2` |
-| **T7** | The "assert pair == M" assertion was **circular** (stage-time knows nothing of `M`; the manifest floor field has zero consumers) — replaced by the **graph+content** assertion set (content-at-X markers, minimal-introduction, shape proof, `X^2` == lane tip) with **`M_sha` recorded externally** in the tag annotation/handoff; AC10 restated as the `sidecar.git_head == B` ∧ `git show B:upgrade_tools.py` chain. | `phase3-plan.md` T7, AC8, AC10, §4.1 (two-commit truthfulness wording), §8.1 (S1–S7 ledger + the P3-T08 phantom-red note) |
+| **T7** | The "assert pair == M" assertion was **circular** (stage-time knows nothing of `M`; the manifest floor field has zero consumers) — replaced by the **graph+content** assertion set (content-at-X markers, minimal-introduction, shape proof, `X^2` == lane tip) with **`M_sha` recorded externally** in the tag annotation/handoff; AC10 restated as the `sidecar.git_head == B` ∧ `git show B:upgrade_tools.py` chain. ⚠️ **Wave-3/4 forward-pointer (historical row left as written):** the §8.1 note's **"P3-T08" label was renamed to `P3-PK-FLOORSTAMP` at its definition site** in phase3-plan.md; and this row's "M_sha recorded externally" summary predates BL-6 — **the read-back landed as T7 assertion (6)**, executed inside T5 immediately after `git tag -a`, gating every push (mismatch ⇒ `git tag -d` + STOP, nothing pushed); see phase3-plan.md T5/T7. | `phase3-plan.md` T7, AC8, AC10, §4.1 (two-commit truthfulness wording), §8.1 (S1–S7 ledger + the P3-T08 phantom-red note — label now `P3-PK-FLOORSTAMP`, see the forward-pointer above) |
 
 ### 10.3 REQUIRED items folded (8 — all adopted)
 
@@ -983,8 +1003,11 @@ version check conditionally (`restart.sh:320-336`, `rollback.sh:277`). The absol
 version check" is **false**. The correct claim: **the promote/hand-back path is version-backed end-to-end** — the version compare
 runs after attribution on every green in `_handback_serving_probe` (`lib.sh:6107-6116`), before it in `gate_version`
 (`:8150-8160`), per hard-green tick in `gate_soak` (`:8383-8388`), with `PROMOTE_EXPECTED_VERSION` unconditionally armed
-(`promote.sh:541-544`) — and the promote's `gate_version` (`promote.sh:853`) runs **before** the commit step (`:868+`).
-**No wrong release can reach `current` through a widened gate.** Disclosed as residual **P13** in `phase1-plan.md` §5.7.
+(`promote.sh:546-556` — anchor corrected from the earlier `:541-544` cite, REVIEW WAVE 4 BL-9) — and the promote's `gate_version` (`promote.sh:853`) runs **before** the commit step (`:868+`).
+**No wrong release can reach `current` through a widened gate.** **Per-surface note (REVIEW WAVE 4, BL-9, register row
+`D-P1-7`):** the restart/rollback skip named above — and the same surfaces' conjunct-empty hand-back window — is now
+**closed by ARMING the expected version from the target manifest before the shared gate** (phase1 T13/T14), so a stale
+incarnation can no longer be recorded as verified there. Disclosed as residual **P13** in `phase1-plan.md` §5.7.
 
 ### 10.7 Carried into the CHANGELOG / tag annotation set (leader D-P3-3, five items — unchanged)
 
@@ -1018,3 +1041,19 @@ described, so they were applied in their *intent* rather than literally:
    is `executor_family_manifest_lines` — a **function body**, not the truthfulness comment. That is a real (minor) citation
    defect, so it was repaired by pointing the lane file at the *right* pair of anchors; see `research-findings-lane.md`
    §bump_version.py bullet. Recorded here rather than silently "fixed" per the spec's assumed text.
+
+### 10.9 Review wave 4 — closure record (`D-P1-6` / `D-P1-7`, 2026-11-17)
+
+**Source:** plan review, wave 4 of 4 (final wave) — blockers **BL-8** (root cause #3 — the unit-arm zero retry — silently
+dropped, plus the false "Phase 1 fixes the unit-arm retry" claim at phase3 §2) and **BL-9** (the "version conjunct absolute
+and outside the widening" invariant over-broad: the conjunct is armed on exactly one surface; on restart/rollback it is
+empty and the serving check degrades to 2xx-only, so a stale incarnation could be recorded as verified there). **Both
+blockers carry LEADER RULINGS — encoded in substance, not re-litigated.** Also folded in this wave: the remaining T4
+register/prose hygiene, the remaining T5 anchor repairs, the wave-3 leftover sweep, and the process facts (board-fold
+sanction narrowing; the 5-pid census re-confirmation). Full per-item disposition ledger:
+`review-dispositions.md` (this directory).
+
+| Blocker | What was wrong | Ruling + what changed | Where |
+|---|---|---|---|
+| **BL-8** → `D-P1-6` | RC3 (root cause #3 — `_supervision_handback_unit` starts once `:6377` / verifies once `:6395-6397`) was named a root cause but never dispositioned; phase3 §2 falsely listed "the unit-arm retry" among Phase 1's code fixes | **LEADER RULING: RC3 is SUBSUMED by D1's budget-bound deferral** (bounded re-probe for the unattributable-yet class at the verifier level; a bare unit-arm retry would only re-halt later on the same refused attribution) **and unit-arm retry-parity is EXPLICITLY DEFERRED to the T12 sibling lane.** Disposition written into phase1 §2 (out-of-scope row) + §12 (RC3 disposition paragraph) + decisions §6 (row 8); phase3 §2 corrected; phase2 §3 D5 mapped to the deferral-tolerance legs (`B-defer-e`, floor-wins halt); plan-overview §2 item 3 carries the pointer | `phase1-plan.md` §2/§12; `phase3-plan.md` §2; `phase2-plan.md` §3 (D5); `decisions.md` §6 row 8; `plan-overview.md` §2 |
+| **BL-9** → `D-P1-7` | The invariant sentence "the version conjunct is ABSOLUTE and outside the widening" (phase1 §5.4, and the D1 verbatim quote in decisions §10.1) is over-broad: `PROMOTE_EXPECTED_VERSION` is armed in exactly ONE place (`promote.sh:546-556` — the `:541-544` span cite was loose); the shared gate reached by `restart.sh:251` and `rollback.sh:249` runs with the conjunct EMPTY (2xx-only degradation, stated by promote.sh's own `:546-556` comment and keyed at `lib.sh:6107`/`1593`), so a stale incarnation could be recorded as verified there — the P12-sibling row's "caught by the version conjunct" was false on those surfaces | **LEADER RULING: OPTION (A) — arm the expected version from the TARGET release manifest on the rollback/restart surfaces BEFORE the shared gate** (refuse-to-widen REJECTED — it would keep the false-halt alive on 2 of the 3 surfaces; arming makes the bound hold per-surface and keeps the widening safe everywhere). Added: phase1 tasks **T13** (restart.sh, `:251`, ADR-027 current-release identity source) + **T14** (rollback.sh, `:249`, target-manifest read hoisted from `:192`); the per-surface invariant restatement (phase1 §5.4); P12-sibling + P13 corrected per-surface (phase1 §5.7); **NP-12** leg + **M-NP12** counter-mutation (phase2 §9.1/§9.2); risk register row **R6** with owner (phase1 §12); scope note on the D1 verbatim quote (§10.1); `:541-544`→`:546-556` anchor repaired in phase1 §5.7 P13 and decisions §10.6 | `phase1-plan.md` §5.4/§5.7/§10/§12; `phase2-plan.md` §9.1/§9.2; `decisions.md` §10.1/§10.6/§1.0 rows 28-29 |

@@ -120,7 +120,7 @@ and record `M_sha=<40-hex>` in the **tag annotation** and the handoff — the au
 
 ### 4.3 Stale re-pin ledger
 
-S1 (rebase rewrites M) ⇒ P-5 CLOSED · S2 (lane lands between M and B) ⇒ **NOT A DEFECT** (named-commit design is exactly why it's benign) · S3 (M re-created) ⇒ P-5 CLOSED · S4 (T moved) ⇒ exact-match + tip-identity CLOSED · S5 (B cherry-picked) ⇒ closed/benign · **S6 (fix missing at M) ⇒ closed only by §4.2(2)** · S7 (re-pin inside M) ⇒ closed by §4.2(4). Operational note: `tests/test_pipeline_scripts_floor_stamp.sh` P3-T08 is circular by construction and **will redden in the lane worktree after B** (tree without M) — run post-B validation in the stage worktree or after the FF, or the lane chases a phantom red.
+S1 (rebase rewrites M) ⇒ P-5 CLOSED · S2 (lane lands between M and B) ⇒ **NOT A DEFECT** (named-commit design is exactly why it's benign) · S3 (M re-created) ⇒ P-5 CLOSED · S4 (T moved) ⇒ exact-match + tip-identity CLOSED · S5 (B cherry-picked) ⇒ closed/benign · **S6 (fix missing at M) ⇒ closed only by §4.2(2)** · S7 (re-pin inside M) ⇒ closed by §4.2(4). Operational note: `tests/test_pipeline_scripts_floor_stamp.sh` P3-T08 is circular by construction and **will redden in the lane worktree after B** (tree without M) — run post-B validation in the stage worktree or after the FF, or the lane chases a phantom red. ⚠️ **Mapping marker (wave 4; this historical file is otherwise left as written):** "P3-T08" was renamed **`P3-PK-FLOORSTAMP`** at its definition site in `phase3-plan.md` (wave 3) — the label here refers to that same pin.
 
 ### 4.4 Merge-agnosticism (D-P3-1 = MERGE)
 

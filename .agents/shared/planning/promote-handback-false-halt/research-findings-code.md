@@ -462,7 +462,7 @@ What is actually "frozen" around the hand-back, and what it implies for changing
    `UGPRADE_CLOSER_BOOT_GRACE_S ≥ HANDBACK_VERIFY_BUDGET_S`, comment `lib.sh:222-233`) — so lowering
    or redefining that knob has a daemon-side consequence.
 4. **Bound-table duplication** — the C-10a table is byte-identical in `lib.sh:157-173` and
-   `promote.sh:309-327` ("single source of truth holds only while BOTH carry the same table").
+   `promote.sh:309-325` (span corrected from the earlier `309-327` cite — the identical span is 17 lines; `promote.sh:326-327` is the identity claim; REVIEW WAVE 4 fold [T5]) ("single source of truth holds only while BOTH carry the same table").
 
 Implication: verify-behaviour changes can live entirely inside `lib.sh` (promote.sh needs no edit), but
 log-text additions must respect 7b/7c, and changing the budget knob family must keep the C-10a table

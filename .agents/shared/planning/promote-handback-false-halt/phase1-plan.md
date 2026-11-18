@@ -49,6 +49,7 @@ error.*
 | `upgrade_journal_sweep.py` closer predicates P1–P9 / boot-grace coupling | The closer is the safety net that recovered the incident; touching it would be a second, unforced risk (§8). |
 | Widening `_supervision_owned_pids` itself (adding MCP children) | Wrong layer: the owned set is the *argv/cwd ownership* census used by stop machinery (`scripts/stop-ensemble.sh` mirror). Widening it would change STOP behaviour (what a kill may target). Containment belongs in the attribution gate, not in the kill selector. |
 | Restart-lane rewrite / arm-side `pending_op` persistence | The twins' root cause (arm never persisted) is upstream of `restart.sh`; this phase only makes the refusal *visible*. |
+| Unit-arm retry-parity (root cause #3 / RC3: `_supervision_handback_unit` starts once (`:6377`) and verifies once (`:6395-6397`), vs launchd's ×2 bootstrap retry (`:6541-6557`)) | **SUBSUMED — leader ruling, review wave 4 (BL-8).** The incident halt was an *attribution refusal*, not a boot-timing miss: a bare unit-arm retry would re-encounter the SAME refused attribution and only re-halt later, inside a second start budget. The bounded re-probe the retry would have approximated already exists at the verifier level — D1's budget-bound deferral re-censuses and re-classifies inside the existing verify budget (§5.4). Retry-parity is **EXPLICITLY DEFERRED** to the T12 sibling lane (decisions.md §6 row 8; `D-P1-6`). |
 | `/proc/net/tcp`, `ss`, `fuser`, `readlink /proc/<pid>/fd` | Net-new signals with no precedent in `scripts/` (grep: zero hits); the two ladders we adopt already exist in-tree. |
 
 ---
@@ -80,8 +81,8 @@ ANCHORS-ARE-LEADS: every row below was re-read while writing this plan, not copi
 | A19 | `promote.sh:684-699` hand-back halt | `HB_ERR` + B4 leave-txn-open; `promote.sh:1051-1056` is the *rollback* hand-back halt (no `HB_ERR`) | yes |
 | A20 | `restart.sh:122,136,148,155,161,165,173` | the six (plus python-floor) `_warn`-only exit-78 refusals with **no journal row** | yes |
 | A21 | knobs `lib.sh:191`, `:225-237` (`HANDBACK_VERIFY_BUDGET_S=300` **exported** `:233`, FLOOR 180, GRACE 60, TAIL 120, `SYSTEMCTL_PROBE_BUDGET_S=5`, `HANDBACK_START_BUDGET_S=60`) | budget family | yes |
-| A22 | C-10a bound table duplicated **byte-identically** `lib.sh:157-181` / `promote.sh:309-327` (`:326` states the invariant) | must stay in sync | yes |
-| A23 | frozen 7b/7c: `assert_not_contains "systemctl start"` (`tests/test_supervision_stop_handback.sh:288,768,840,862`; `tests/test_bounded_subprocess_waits.sh:376`), frozen 7c wording (`lib.sh:6748`, `:6753`) | log-text contracts | yes |
+| A22 | C-10a bound table: the **byte-identical span is 17 lines** — `lib.sh:157-173` == `promote.sh:309-325` (anchor range corrected from the earlier loose `157-181`/`309-327` cite, REVIEW WAVE 4 fold [T5], per decisions.md CP-5/Correction (g); `lib.sh:174` is the knob line and `promote.sh:326-327` is the identity claim, outside the identical span) | must stay in sync | yes |
+| A23 | frozen 7b/7c: `assert_not_contains "systemctl start"` (`tests/test_supervision_stop_handback.sh:288,768,840,862`; `tests/test_bounded_subprocess_waits.sh:377` — anchor corrected from the earlier `:376` cite, which is the adjacent *journal-surface* pin; REVIEW WAVE 4 fold [T5], per decisions.md CP-9), frozen 7c wording (`lib.sh:6748`, `:6753`) | log-text contracts | yes |
 | A24 | `lib.sh:5417-5421` `_supervision_host_allows_unit` (`uname -s` FIRST, then `/run/systemd/system`) | portability gate | yes |
 | A25 | test seams: `tests/test_bounded_subprocess_waits.sh:88-140` systemctl stub (**is-active exits 0 always**), `tests/test_supervision_stop_handback.sh:1576-1700` §M attribution legs, `tests/packs/handback_verify_budget_test.sh:86-122,252-270,386-392` call-counting lsof + owned-set override | the harnesses Phase 2 extends | yes |
 | A26 | journal kinds: `subprocess_wait_timeout` is informational, labelled at `upgrade_tools.py:1317`; `_TERMINAL_EVENTS` (`upgrade_journal.py:2529-2557`) does **not** contain it; `nonzero_exit` exists only as a `kind=` **row token** (`lib.sh:5290`, `:5320`) | event-kind adjudication input | yes |
@@ -325,7 +326,7 @@ downgrade's own fixture is **R2 unanswerable** (`SC_SHOW_RC=124` or `SC_MAINPID=
    `_supervision_pid_in_launchd_lineage` `:7092-7105`) testing membership in the *owned set* (not a single root).
    Reachable ⇒ `0`. A reparented orphan's walk **completes** (terminates at pid 1) without entering the owned set ⇒
    answered `1` — stated explicitly (architect closure C-5; pid reuse is judged on the *current* occupant, so no false
-   accept is reachable). `command -v ps` absent ⇒ `2` (a missing tool is never refusal evidence — `:801` precedent).
+   accept is reachable). `command -v ps` absent ⇒ `2` (a missing tool is never refusal evidence — the `_gate_attr_unprobeable` contract's precedent, `lib.sh:7985-7988`; anchor corrected from the earlier `:801` cite, REVIEW WAVE 4 fold [T5]).
 4. **R4 — launchd job lineage** (Darwin): if `SUPERVISION_MODE=launchd` and `SUPERVISION_UNIT` is set, resolve the job
    pid (`_supervision_launchd_job_pid`, bounded). **Empty pid while a holder serves ⇒ `1`** (the v0.30.3 dual-supervisor
    shape — must keep refusing, pinned by `tests/test_supervision_stop_handback.sh` M7). Probe failure ⇒ fall through to
@@ -397,6 +398,20 @@ iterations, not seconds) and scope ("process-global" is false at `$( )` call sit
   the full verify budget before halting — bounded, rare, and every safety property holds. **Bound semantics of record
   (leader D1): attribution acceptance is EVIDENCE-ONLY (a rung's answered `0`); the deferral is a BUDGET-BOUNDED DELAY
   that can NEVER accept; the version conjunct is ABSOLUTE and outside the widening.**
+
+  **Per-surface restatement (REVIEW WAVE 4, BL-9 — leader ruling, supersedes the surface-free reading of the last
+  clause): the "absolute" conjunct holds exactly where it is ARMED.** On the promote surface it is armed unconditionally
+  (`PROMOTE_EXPECTED_VERSION="$BIN_VERSION"`, `promote.sh:546-556` — anchor corrected from the earlier `:541-544` cite;
+  `:541` is the manifest read and `:542-544` the refuse-on-empty; the arming statement itself is `:556` under the
+  `D-P1-9` comment block `:546-555`). On the **restart/rollback surfaces the conjunct is EMPTY today** — promote.sh's own
+  comment states it: *"Unset contexts (restart.sh / rollback.sh) read an empty default in lib.sh ⇒ the serving check
+  degrades to '2xx, no version comparison'"* (`lib.sh:6107` keys the conjunct on `${PROMOTE_EXPECTED_VERSION:-}`; the
+  default is empty at `lib.sh:1593`) — so there a ladder-accepted stale incarnation (the P12-sibling shape) would degrade
+  to a 2xx-only verified pass. **Leader ruling — OPTION (A): ARM, do NOT refuse-to-widen.** Refusing to widen where the
+  conjunct is absent would keep the false-halt alive on 2 of the 3 surfaces; arming the expected version from the TARGET
+  release manifest before the shared gate (tasks **T13** restart.sh / **T14** rollback.sh, §10) makes the bound hold
+  per-surface and keeps the widening safe everywhere. The negative proof is **NP-12 + M-NP12** (phase2 §9.1/§9.2); the
+  risk register row with owner is §12 **R6**; register row `D-P1-7`.
 - **sleep/pool semantics only (re-scoped — REVIEW WAVE 1, BL-1):** the original bullet claimed "`_gate_serving_attribution`
   is called as a statement everywhere the sleep matters … which is fine". That claim is RE-SCOPED to the **sleep/pool
   inheritance alone** (a `$( )` call site forks a fresh per-shell pool and merely inherits the ≤5 s sleep — that part is
@@ -413,7 +428,7 @@ still issue). A **per-shell pool** bounds the patience to ≤5 s per shell, inde
 **no daemon change**. **Honest worst case (I-B8 as corrected by architect §2):** ≤5 s per shell that invokes the gate;
 across the promote flow's separate `$( )` call sites the theoretical worst case is ≈ +20 s total — still inside every
 existing budget. C-10a sync (A22): both copies get the *same* one-line comment stating the honest sub-budget
-(`≤5 s per shell deferral pool`) — **byte-identical** in `lib.sh:157-181` and `promote.sh:309-327`; no numeric edit; B10
+(`≤5 s per shell deferral pool`) — **byte-identical** across the 17-line span (`lib.sh:157-173` == `promote.sh:309-325`; anchor range corrected from the earlier loose cite, REVIEW WAVE 4 fold [T5]); no numeric edit; B10
 (Phase 2 §7.7) is the sync pin.
 
 ### 5.4a — the rc=2 consumer contract at every gate call site (REVIEW WAVE 1, BL-1; `D-P1-4`)
@@ -475,6 +490,13 @@ the deferral rung. No nohup fallback (Amendment #1) is introduced or removed any
 
 ### 5.7 Protection matrix (input to Phase 2's negative proofs)
 
+**Threat model of this matrix (stated explicitly, review wave 4): LOCAL process threats only** — a stale incarnation of
+our own daemon, another local install's daemon, a locally-started monitor/`kubectl` sidecar, a daemon-launched child, an
+operator-hostile **local** process binding the port. **NOT remote/network adversaries**: these surfaces defend *which
+local process answers the port*, not who can reach the port; remote reach policy (bind address/firewall) lives outside
+`scripts/upgrade/**` and is unchanged by this lane. Rows marked *residual* are documented-not-gated by deliberate
+adjudication (each names why the residual is acceptable).
+
 | # | Threat | Still caught by (unchanged) |
 |---|---|---|
 | P1 | Wrong release serving green (old binary, right unit) | `_handback_serving_probe` version compare `:6113-6116` → rc 1 |
@@ -489,8 +511,10 @@ the deferral rung. No nohup fallback (Amendment #1) is introduced or removed any
 | P10 | Containment tooling unavailable for the whole deferral window | pool exhausted ⇒ **transient (2)**, not an immediate refusal (leader D1) — the refusal happens **only at budget end** through the floor-wins verdict (`:6288-6297`); a positively-foreign holder never enters this rung |
 | P11 | Non-2xx from the unit's *child* while the daemon is dead (post-crash inherited socket) | no green ⇒ probe transient/red; never accepted |
 | P12 | Second supervisor **inside** our unit cgroup | Only possible if our unit started it (systemd); the same acceptance Layer 2 already grants. Documented residual, unchanged risk class |
-| **P12-sibling** | **Stale-incarnation holder under `KillMode=mixed`** (adopted, architect closure C-7) | Ladder-accepted (same unit cgroup) — **caught by the version conjunct (P1)**, since the stale holder serves the previous build. Documented, not gated; identical residual class as P12 |
-| **P13** | **Green via `gate_livez`/`gate_readyz` — these gates carry NO version conjunct** (honest caveat, architect §0) | **Disclosed residual**: the absolute claim "no call site accepts green without a version check" is FALSE. The correct claim: the **promote/hand-back path is version-backed end-to-end** (version compare in `_handback_serving_probe` `:6107-6116`, `gate_version` `:8150-8160` before the compare, `gate_soak` per hard-green tick `:8383-8388`, `PROMOTE_EXPECTED_VERSION` unconditionally armed `promote.sh:541-544`) and the promote's `gate_version` (`promote.sh:853`) runs **before** the commit step (`:868+`). The restart/rollback surfaces can skip the version check conditionally (`restart.sh:320-336`, `rollback.sh:277`) — no wrong release can reach `current` through a widened gate |
+| **P12-sibling** | **Stale-incarnation holder under `KillMode=mixed`** (adopted, architect closure C-7) | Ladder-accepted (same unit cgroup). **Caught by the version conjunct (P1) on the PROMOTE surface** (conjunct armed, `promote.sh:546-556`). On restart/rollback the conjunct was EMPTY (2xx-only degradation — §5.4's per-surface restatement, REVIEW WAVE 4 BL-9) ⇒ **T13/T14 arm the expected version from the target manifest before the shared gate**, so the class is caught per-surface. Documented, not gated; identical residual class as P12 |
+| **P13** | **Green via `gate_livez`/`gate_readyz` — these gates carry NO version conjunct** (honest caveat, architect §0) | **Disclosed residual**: the absolute claim "no call site accepts green without a version check" is FALSE. The correct claim: the **promote/hand-back path is version-backed end-to-end** (version compare in `_handback_serving_probe` `:6107-6116`, `gate_version` `:8150-8160` before the compare, `gate_soak` per hard-green tick `:8383-8388`, `PROMOTE_EXPECTED_VERSION` unconditionally armed `promote.sh:546-556` — anchor corrected from the earlier `:541-544` cite, REVIEW WAVE 4 BL-9) and the promote's `gate_version` (`promote.sh:853`) runs **before** the commit step (`:868+`). The restart/rollback surfaces can skip the version check conditionally (`restart.sh:319-338` — identity source is the CURRENT release manifest, skipped when the symlink/manifest is unresolvable; `rollback.sh:276-278` — conditional on `TO_BIN_VERSION`, read from the target manifest at `:192`) — and their hand-back window had NO conjunct at all (`PROMOTE_EXPECTED_VERSION` empty, `lib.sh:1593`/`:6107` ⇒ 2xx-only degradation). **BL-9 closes the gap by ARMING, not by refusing to widen:** T13/T14 arm the expected version from the target manifest before the shared gate on both surfaces, so a stale incarnation can no longer be recorded as verified there and **no wrong release can reach `current` through a widened gate on ANY surface** |
+| **P12-tertiary** | **Cgroup-escaped descendant** (RESIDUAL row, wave 4): a daemon descendant that LEAVES the unit cgroup (moved to its own scope, re-cgrouped post-fork, daemon-launched-then-reparented) — it is lineage-child but NOT cgroup-contained | **Disclosed residual**: R2 answers **`1` (positively not contained)** ⇒ the ladder refuses — the acceptance is deliberately narrower than lineage; the same holder is refused by today's Layer-1 census too, so the widening grants nothing here and takes nothing away (no regression, no new halt). Documented, not gated; unchanged risk class. The C-1 downgrade does NOT rescue it (R2 ANSWERED, so no stronger rung was unanswerable) |
+| **P14** | **R3-when-reached is a NEW acceptance class vs Layer 2** (RESIDUAL row, wave 4): a holder accepted via R3 ppid-ancestry into the argv/cwd-owned set need not be inside the unit cgroup — legacy Layer 2 (`_gate_attr_unit_lineage`) would NOT have accepted it | **Disclosed residual**: R3's trust root is the SAME argv/cwd-anchored owned set Layer 1 already trusts (an owned ancestor, depth-bounded ≤ 12, `_supervision_pid_in_launchd_lineage` shape) — acceptance breadth is anchored to the owned set's existing trust, not to a new signal; reparented orphans walk to completion ⇒ answered `1` (C-5, no false accept). Pinned by I-B12's remove-R3 counter-mutation (I-B1 reddens). On Linux-with-systemd the cgroup rung answers first for cgroup members, so R3 matters only for the escaped/nohup shapes — exactly where Layer 2 never reached |
 
 ### 5.8 One-fix-many-surfaces (deliberate)
 
@@ -619,6 +643,8 @@ Dependencies are strict; a task is "done" only when its acceptance holds in-tree
 | T10 | Restart-lane rows at the seven refusal sites (§7.2) | T2 | Fixture per class: one `halt` row naming the class; exit codes unchanged; `\|\| true` best-effort proven on a TORN journal |
 | T11 | (Optional) `promote.sh:1051-1056` rollback halt gains `HB_ERR` | T8 | Rollback hand-back halt detail carries the stash text |
 | T12 | **DEFERRED (leader ruling D-P1-3, 2026-11-17)** — containment widening for `_flip_verify_portattribution` (`:6996`), D-1 grace preserved → a named follow-up lane (future id `143a045c`); **not implemented in this lane** | — (deferred) | Not applicable in-lane; deferral rationale and compensating coverage are in `decisions.md` §6 |
+| **T13** | **Per-surface version arming — `restart.sh` (REVIEW WAVE 4, BL-9; leader ruling Option A)**: before `restart_via_launcher` (`restart.sh:251`), derive the expected version from the TARGET release manifest — the CURRENT release, the same ADR-027 identity source the `restart.sh:319-338` version-identity check reads — and arm the hand-back probe's expected-version channel (`PROMOTE_EXPECTED_VERSION`, a plain non-exported variable: the `promote.sh:546-556` `D-P1-9` channel shape; `lib.sh:1593` default empty, `lib.sh:6107` the conjunct key). A genuinely unresolvable manifest keeps today's LOUD degraded skip (warn + `version=skipped-no-manifest` detail, ADR-033 posture) — disclosed in `GATE_DETAIL`, never a silent 2xx-pass | T6 (the gate surfaces it protects) | Fixture: stale-incarnation holder (previous build, same unit cgroup — the P12-sibling shape) + armed restart ⇒ hand-back verify refuses on the version conjunct (`:6113-6116` wording, rc 1) before any attribution accept can matter; the unresolvable-manifest path journals `version=skipped-no-manifest` |
+| **T14** | **Per-surface version arming — `rollback.sh` (BL-9 twin)**: hoist the target-manifest read above the hand-back — `TO_BIN_VERSION="$(manifest_field "$TO_VERSION" binary_version …)"` is already computed at `rollback.sh:192`; derive/assign it (and arm the same channel) BEFORE `restart_via_launcher` (`rollback.sh:249`). The existing re-gate check (`:276-278`) is unchanged and remains the second net | T6 | Fixture: stale-incarnation holder serving the displaced build + armed rollback ⇒ hand-back verify refuses (wrong version vs `TO_VERSION`'s manifest); with the arming deleted (**M-NP12**) the surface degrades to 2xx-only and the stale build is recorded as verified — the **NP-12** leg reddens |
 
 **Serialization rule:** T1→T2→T8 all edit the same `lib.sh` regions; T3→T4→T5→T6→T7 likewise. Never two `edit_file`
 calls on `lib.sh` in one parallel block (house parallel-edit race: corrupts the file tail). One edit per message, then
@@ -672,7 +698,7 @@ Ordering constraints:
 
 ---
 
-## 12. Phase risks (top 5)
+## 12. Phase risks (top 6)
 
 | # | Risk | Impact | Likelihood | Mitigation |
 |---|---|---|---|---|
@@ -681,10 +707,20 @@ Ordering constraints:
 | R3 | **Pinned log/test contracts break** (7b substring, 7c wording, M1/M3/M6/M7 details, rc=124 WARN) | High (blocks merge) | Medium-High (text edits near pinned sites) | Explicit byte-preservation list in T2/T6 acceptance; run the four packs before each commit; keep the refusal **prefix** verbatim and append only a suffix; keep rc=124 arms untouched |
 | R4 | **Hidden coupling** of the gate change into `status.sh --verify` (`:128` reads `GATE_ATTRIBUTION_DETAIL`) or promote's `gate_fail_reason` rendering | Medium (misleading operator text) | Medium | `GATE_ATTRIBUTION_DETAIL` remains a single-line string with the same prefix; the accept path leaves it empty; Phase 2 pins `status --verify` behaviour on both an accepted-widened and a refused shape. T7c (§5.4a) is the rc=2-specific half: a transient `2` never lands in `gate_fail_reason`/`GATE_FAIL`/`REGATE_FAIL`, and its surface wording is the distinct transient text — so an rc-2 cannot mint the false `"/livez unreachable >Ns"` label (the review's mislabel fold) or drive the 8b auto-rollback |
 | R5 | **Review surface too big in one file** — five commits in `lib.sh` (9052 lines) invite a silent regression | Medium | Medium | Strict commit ordering, one edit per message, `git diff` per commit, `bash -n` after every edit, packs run per commit; C4 separated (failure-arm-only) |
+| **R6** | **Per-surface version conjunct is EMPTY on restart/rollback** — a ladder-accepted stale incarnation (the P12-sibling shape) would degrade to a 2xx-only verified pass on 2 of the 3 surfaces (the hand-back window reads an empty default, `lib.sh:1593`/`:6107`; promote.sh's `:546-556` comment states the degradation) | High (a wrong/stale build recorded as verified) | Medium (requires a stale holder surviving into a restart/rollback) | **REVIEW WAVE 4, BL-9 — leader ruling Option (A): ARM the expected version from the TARGET release manifest before the shared gate.** T13 (restart.sh, `:251`, ADR-027 current-release identity source) + T14 (rollback.sh, `:249`, target-manifest read hoisted from `:192`; re-gate `:276-278` unchanged as second net). Refuse-to-widen was REJECTED — it would keep the false-halt alive on those surfaces. Pinned by **NP-12 + M-NP12** (phase2 §9.1/§9.2). **Owner: Phase-1 implementer (T13/T14); verification: Phase-2 NP-12 leg + M-NP12 counter-mutation; plan-level owner of record: the coding commission's phase-1 worker** |
 
 Secondary (tracked, not blocking): Darwin path (R3/R4 rungs) is proven only by stub harnesses — no Darwin host in this lane;
 the optional T12 is **deferred** to a follow-up lane (leader ruling D-P1-3) and is treated as "best-effort parity", with the
 Linux fix as the certified one.
+
+**RC3 disposition (review wave 4, BL-8 — leader ruling):** root cause #3 of the overview (§2 item 3; phase2 §3 D5) — the
+unit arm's zero retry (`:6377` single start / `:6395-6397` single verify vs launchd's ×2 bootstrap `:6541-6557`) — is
+**SUBSUMED by D1's budget-bound deferral, not silently dropped**: on the incident shape the halt was an *attribution
+refusal*, and a bare retry would only re-halt later on the SAME refused attribution (the refusal is evidence-based, not
+boot-timing-based). The bounded re-probe for the unattributable-yet class already lives at the verifier level (§5.4/D1).
+**Unit-arm retry-parity is EXPLICITLY DEFERRED to the T12 sibling lane** (decisions.md §6 row 8, register row `D-P1-6`);
+no phase-1 task implements it, and phase2 adds no D5-specific leg — the deferral-tolerance legs (`B-defer-e`, floor-wins
+halt) already pin the honest behaviour of the unretried verify.
 
 **Disclosed residual + behaviour widenings folded from the architect's adversarial pass (2026-11-17):**
 - **P13 residual (honest caveat):** `gate_livez`/`gate_readyz` carry no version conjunct, and restart/rollback can skip the
@@ -846,9 +882,13 @@ legs. The bias is deliberately asymmetric: *every* refusal must be provable, and
 
 1. **rc=3 policy** (§4.1): recommend *no journal row, `_log` only* (deviates from "taxonomy at all three sites" literally).
    Alternative: journal `kind=nonzero_exit` for rc=3 as well — then Phase 2's "healthy boot journals nothing" assertion must
-   be written as "no `kind=budget` rows" instead. **Recommendation: no row.**
+   be written as "no `kind=budget` rows" instead. **Recommendation: no row.** **✅ RESOLVED (`D-P1-1`, decisions.md §1 row 1,
+   2026-11-17): no journal row — ADOPTED as recommended** (review wave 4 closes the open framing).
 2. **Deferral constant exposure** (§5.4): recommend a test-only seam (`_GATE_ATTR_DEFER_S`, env-visible, not a knob) at
    **5 s**. Alternative: promote to a `_numeric_knob` + C-10a numeric update — more visible to operators, more churn.
+   **✅ RESOLVED (`D-P1-2` + leader amendment D3, decisions.md §1 row 2, 2026-11-17): the test-only seam ADOPTED at 5 s —
+   with the amended letter (router integer-parse + mandatory `[0,5]` clamp, never exported)** (review wave 4 closes the
+   open framing).
 3. **T11/T12 (optional items)**: `promote.sh:1051-1056` `HB_ERR` (one line, recommended **in**) and the launchd
    `_flip_verify_portattribution` widening (recommended **in only if** Phase 2 can prove the immediate-refusal leg on a
    Darwin stub; otherwise defer to a follow-up lane — the Linux incident does not require it).
