@@ -76,6 +76,49 @@ no shell execution). Similar-but-different script names (``stop-all.sh``,
 ``stop-ensemble.sh.bak``) stay allowed — the deny is a basename equality on
 the exact wrapper, not a substring.
 
+RUNNER / PIPE / SCHEDULER LAUNDERING (2026-11-18 reviewer round)
+------------------------------------------------------------------
+The pre-2026-11-18 TEXT guard refused any command text that carried
+("systemctl" AND a mutating verb AND an ensemble-family token). The
+structural matcher replaced that text scan and, in doing so, LOST the
+literal-through-runner class: a payload handed to an executor is DATA to
+the producer and never reached the command-word analysis. The reviewer
+confirmed 12 such bypasses (allowed by the merged guard, refused by the old
+text guard).
+
+The coverage is restored WITHOUT re-introducing the prose over-block, by
+splitting the old conjunction into two halves:
+
+* **SHAPE** — the payload text carries ("systemctl" AND a mutating verb AND
+  an ensemble-family token). This is the OLD guard's conjunction, verbatim
+  (same verb set, same token set, same substring semantics), so coverage is
+  never weaker than the guard being replaced.
+* **DELIVERY** — the payload actually REACHES an executor:
+  * a PIPE into a stdin-reading shell, a scheduler (``at``/``batch``/
+    ``crontab`` — they RUN what they are handed), ``xargs`` (stdin becomes
+    the argument vector) or ``ssh`` (stdin is forwarded to the remote
+    command);
+  * a nested COMMAND STRING (``bash -c``, ``eval``, a shell's heredoc-stdin)
+    whose text is itself the executed command.
+
+A payload that only lands in a file, a variable or a grep pattern is DATA
+and stays allowed — the prose/doc-write pins depend on that.
+
+Runner awareness was added in the same round, because the runner is where
+the payload stops being visible:
+
+* ``su -c '<cmd>'`` / ``runuser -u root -c '<cmd>'`` / ``ssh host '<cmd>'``
+  carry a COMMAND STRING (recursed into);
+* ``systemd-run <cmd> ...`` / ``watch <cmd> ...`` carry an ARGV (analysed
+  as a command segment);
+* ``xargs <cmd>`` takes its OPERANDS FROM STDIN — a non-readonly systemctl
+  tail with no operand, or a ``{}`` placeholder, has an unknown target and
+  FAILS CLOSED.
+
+RESIDUAL (stated, not hidden): a payload the runner reads at RUN time from
+a FILE (``bash -c "$(cat script.sh)"``) is invisible to static analysis —
+the guard sees the substitution, never the file's content.
+
 Everything here is a PURE function: no I/O, no process state, no environment
 reads. The ambient-only fence (``ENSEMBLE_FENCED_TEST_CONTEXT``) is read by
 the callers (``daemon/tools/bash.py``; ``proc_run`` reaches the same wrapper
@@ -89,6 +132,7 @@ import re
 from typing import Sequence
 
 __all__ = [
+    "LAUNDERED_TOKEN",
     "LIVE_NAME_PATTERNS",
     "MEANINGFUL_PATH_PATTERNS",
     "PROTECTED_WRAPPER_NAMES",
@@ -220,6 +264,50 @@ _WRAPPER_ARG_WORDS: frozenset[str] = frozenset({"timeout", "nice", "ionice", "st
 #: Shell interpreters whose ``-c`` payload — and whose heredoc stdin — is
 #: executed as commands rather than kept as data.
 _SHELLS: frozenset[str] = frozenset({"bash", "sh", "zsh", "dash", "ksh", "ash", "fish", "mksh"})
+
+#: Runners whose ``-c``/tail payload is a COMMAND STRING (interpreted by a
+#: shell): ``su -c '<cmd>'``, ``runuser -u root -c '<cmd>'``.
+_COMMAND_STRING_RUNNERS: frozenset[str] = frozenset({"su", "runuser"})
+
+#: Runners whose tail (after their own options) is an ARGV — a command plus
+#: its arguments: ``systemd-run <cmd> ...``, ``watch <cmd> ...``.
+_ARGV_RUNNERS: frozenset[str] = frozenset({"systemd-run", "watch"})
+
+#: Schedulers that EXECUTE a command handed to them on stdin (``at now``,
+#: ``batch``, ``crontab -``): the piped payload is a command that will run.
+_SCHEDULERS: frozenset[str] = frozenset({"at", "batch", "crontab"})
+
+#: ``ssh`` options that consume the following word as a value (so the value
+#: is never mistaken for the host name).
+_SSH_VALUE_OPTIONS: frozenset[str] = frozenset({
+    "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l",
+    "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w",
+})
+
+#: Options of the argv runners that consume the following word as a value.
+_ARGV_RUNNER_VALUE_OPTIONS: frozenset[str] = frozenset({
+    "-n", "-p", "-t", "-T", "-u", "-g", "-M", "-P", "-E", "-C", "-H",
+    "--on-active", "--property", "--unit", "--uid", "--gid",
+})
+
+#: The mutating-verb set of the pre-2026-11-18 TEXT guard. The text-level
+#: laundering shape below reproduces that guard's conjunction exactly:
+#: ("systemctl" token) AND (a mutating verb) AND (an ensemble-family token)
+#: — anywhere in the same text.
+_MUTATING_VERB_RE = re.compile(
+    r"\b(?:stop|restart|kill|disable|mask|reload|daemon-reload|enable|start"
+    r"|try-restart|isolate)\b"
+)
+
+#: The ensemble family token set of the pre-2026-11-18 TEXT guard (substring
+#: semantics, exactly as that guard matched it — the shape must never be
+#: WEAKER than the guard it replaces).
+_ENSEMBLE_TOKEN_RE = re.compile(
+    r"(?:ensemble-prod|ensemble-daemon|ensemble-main|ensemble-demo|agents-ensemble)"
+)
+
+#: Refusal token for the laundering family (payload handed to an executor).
+LAUNDERED_TOKEN = "laundered-payload"
 
 _ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=")
 _UNIT_FAMILY_RE = re.compile(r"^(?:ensemble|ens|agents[-_]?ensemble)(?:[-@.:]|$)")
@@ -375,9 +463,17 @@ def _merge_literals(parts: _Word) -> _Word:
     return merged
 
 
-def _scan(text: str) -> list[_Segment]:
-    """Lex a command string into simple-command segments of words."""
+def _scan_segments(text: str) -> tuple[list[_Segment], list[str]]:
+    """Lex a command string into simple-command segments of words.
+
+    Returns ``(segments, separators)`` where ``separators[i]`` is the
+    operator that TERMINATED segment ``i`` ("" for the last one). The
+    pipeline rule needs the distinction between a PIPE ("|") and a plain
+    sequence (";", "&", newline): only a pipe hands the previous stage's
+    OUTPUT to the next stage.
+    """
     segments: list[_Segment] = []
+    seps: list[str] = []
     words: _Segment = []
     cur: _Word = []
     started = False
@@ -391,11 +487,15 @@ def _scan(text: str) -> list[_Segment]:
             cur = []
             started = False
 
-    def end_segment() -> None:
+    def end_segment(sep: str = "") -> None:
         nonlocal words
         end_word()
         if words:
             segments.append(words)
+            # The separator that TERMINATED this segment ("" for the last).
+            # The pipeline rule needs this to tell a PIPE ("|") from a
+            # sequence (";", "&", newline).
+            seps.append(sep)
             words = []
 
     while i < n:
@@ -455,14 +555,19 @@ def _scan(text: str) -> list[_Segment]:
             i += 1
             continue
         if ch == "\n" or ch in ";&|()":
-            end_segment()
+            end_segment(ch)
             i += 1
             continue
         cur.append((_LIT, ch))
         started = True
         i += 1
     end_segment()
-    return segments
+    return segments, seps
+
+
+def _scan(text: str) -> list[_Segment]:
+    """Lex a command string into simple-command segments of words."""
+    return _scan_segments(text)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -556,14 +661,26 @@ def _is_shell_stdin_line(line_text: str, env: dict[str, str]) -> bool:
     return text.rsplit("/", 1)[-1].lower() in _SHELLS
 
 
-def _strip_heredocs(text: str, env: dict[str, str]) -> tuple[str, list[str]]:
-    """Remove heredoc bodies from ``text``; return (code_only, executed_bodies)."""
+def _strip_heredocs(
+    text: str, env: dict[str, str]
+) -> tuple[str, list[str], list[tuple[str, str]]]:
+    """Remove heredoc bodies from ``text``.
+
+    Returns ``(code_only, executed_bodies, data_bodies)``:
+    * ``executed_bodies`` — bodies fed to a shell interpreter's stdin (they
+      ARE commands);
+    * ``data_bodies`` — ``(delimiter, body)`` pairs fed to some other
+      command (they are DATA — but a producer whose stdout is piped into
+      an executor HANDS THAT DATA OVER, which the pipeline rule accounts
+      for).
+    """
     ops = _heredoc_operators(text)
     if not ops:
-        return text, []
+        return text, [], []
 
     removed: list[tuple[int, int]] = []
     executed: list[str] = []
+    data: list[tuple[str, str]] = []
     cursor = 0
     i = 0
     while i < len(ops):
@@ -596,6 +713,8 @@ def _strip_heredocs(text: str, env: dict[str, str]) -> tuple[str, list[str]]:
             body = text[body_start:body_end]
             if is_shell:
                 executed.append(body)
+            else:
+                data.append((o_delim, body))
             removed.append((body_start, term_end))
             body_cursor = term_end
             cursor = term_end
@@ -612,7 +731,7 @@ def _strip_heredocs(text: str, env: dict[str, str]) -> tuple[str, list[str]]:
             out.append(text[pos:start])
         pos = min(end, len(text))
     out.append(text[pos:])
-    return "".join(out), executed
+    return "".join(out), executed, data
 
 
 # ---------------------------------------------------------------------------
@@ -639,7 +758,7 @@ def _resolve_substitution(inner: str, env: dict[str, str], depth: int) -> tuple[
     """Resolve a trivial ``$(echo <literal>)`` / ``$(printf %s <literal>)``."""
     if depth > _MAX_DEPTH:
         return "", False
-    code, executed = _strip_heredocs(inner, env)
+    code, executed, _data = _strip_heredocs(inner, env)
     if executed:
         return "", False
     segments = _scan(code)
@@ -1039,7 +1158,188 @@ def _pipeline_wrapper_violation(
     return None
 
 
-def _systemctl_segment_violation(words: _Segment, env: dict[str, str], depth: int) -> str | None:
+# ---------------------------------------------------------------------------
+# runner / pipe / scheduler laundering (2026-11-18 reviewer round)
+# ---------------------------------------------------------------------------
+# The pre-2026-11-18 TEXT guard refused any command text that carried
+# ("systemctl" AND a mutating verb AND an ensemble-family token). The
+# structural matcher replaced that text scan, and in doing so it LOST the
+# literal-through-runner class: a payload handed to an executor
+# (``echo 'systemctl restart ensemble-main' | bash``, ``su -c '...'``,
+# ``ssh host '...'``, ``systemd-run ...``, ``at now``) is DATA to the
+# producer and never reached the command-word analysis.
+#
+# The rule below restores that coverage WITHOUT re-introducing the prose
+# over-block:
+#
+# * SHAPE — the payload text carries ("systemctl" AND a mutating verb AND
+#   an ensemble-family token). This is the OLD guard's conjunction, kept
+#   verbatim (same verb set, same token set, same substring semantics), so
+#   coverage is never weaker than the guard being replaced.
+# * DELIVERY — the payload is actually HANDED to an executor: a pipe into a
+#   stdin-reading shell / scheduler / xargs, or a nested command string
+#   (``bash -c``, ``eval``, a shell's heredoc-stdin) whose expansions feed
+#   the executed text. A payload that only lands in a file, a variable or a
+#   grep pattern is DATA and stays allowed (the prose pins depend on it).
+# * RUNNERS — ``su -c`` / ``runuser -c`` / ``ssh host '<cmd>'`` carry a
+#   COMMAND STRING (recursed into); ``systemd-run`` / ``watch`` carry an
+#   ARGV (analysed as a command segment); ``xargs`` takes its operands from
+#   STDIN, so a non-readonly systemctl tail with no operand (or a ``{}``
+#   placeholder) FAILS CLOSED.
+
+
+def _text_has_mutating_ensemble_shape(text: str) -> bool:
+    """The old text guard's conjunction, reproduced verbatim.
+
+    ("systemctl" token) AND (a mutating verb) AND (an ensemble-family
+    token) — anywhere in the same text.
+    """
+    lower = text.lower()
+    if "systemctl" not in lower:
+        return False
+    if not _MUTATING_VERB_RE.search(lower):
+        return False
+    return bool(_ENSEMBLE_TOKEN_RE.search(lower))
+
+
+def _shell_has_c_payload(words: _Segment, env: dict[str, str]) -> bool:
+    """Does this shell segment carry a ``-c '<command string>'`` payload?"""
+    k = _command_word_index(words, env)
+    if k is None or k >= len(words):
+        return False
+    text, ok = _resolve_word(words[k], env, 0)
+    if not ok or _basename(text) not in _SHELLS:
+        return False
+    for i in range(k + 1, len(words)):
+        flag, flag_ok = _resolve_word(words[i], env, 0)
+        if flag_ok and flag in ("-c", "-lc", "-ic", "--command"):
+            return True
+    return False
+
+
+def _ssh_remote_words(
+    words: _Segment, k: int, env: dict[str, str]
+) -> list[_Word]:
+    """The words of the REMOTE command of an ``ssh`` segment (may be empty).
+
+    ``ssh [options] host [command...]`` — the command (if any) is a COMMAND
+    STRING run on the far side, and stdin is forwarded to it.
+    """
+    j = k + 1
+    n = len(words)
+    while j < n:
+        text, ok = _resolve_word(words[j], env, 0)
+        if not ok:
+            return []
+        if text.startswith("-"):
+            j += 2 if text in _SSH_VALUE_OPTIONS else 1
+            continue
+        break
+    return list(words[j + 1:])
+
+
+def _executor_kind(words: _Segment, env: dict[str, str]) -> str | None:
+    """What kind of EXECUTOR is this segment? None when it consumes nothing.
+
+    * ``shell`` — a shell fed on stdin (``bash``, ``sh`` with no script);
+    * ``shell-c`` — a shell whose ``-c`` payload is a command string;
+    * ``scheduler`` — ``at`` / ``batch`` / ``crontab`` (they RUN what they
+      are handed);
+    * ``xargs`` — stdin becomes the argument vector;
+    * ``eval`` — its argument is evaluated as commands;
+    * ``ssh`` — stdin is forwarded to the REMOTE command.
+    """
+    k = _command_word_index(words, env)
+    if k is None or k >= len(words):
+        return None
+    cmd, ok = _resolve_word(words[k], env, 0)
+    if not ok:
+        return None
+    base = _basename(cmd)
+    if base in _SHELLS:
+        if _shell_reads_stdin(words, env):
+            return "shell"
+        if _shell_has_c_payload(words, env):
+            return "shell-c"
+        return None
+    if base in _SCHEDULERS:
+        return "scheduler"
+    if base == "xargs":
+        return "xargs"
+    if base == "eval":
+        return "eval"
+    if base == "ssh" and _ssh_remote_words(words, k, env):
+        return "ssh"
+    return None
+
+
+def _owned_bodies(
+    words: _Segment, data_bodies: Sequence[tuple[str, str]]
+) -> list[str]:
+    """The heredoc bodies whose ``<<DELIM`` operator sits in this segment."""
+    probes: list[str] = []
+    for word in words:
+        text, ok = _resolve_word(word, {}, 0)
+        probes.append(text if ok else _word_literal_prefix(word))
+    owned: list[str] = []
+    for delim, body in data_bodies:
+        for probe in probes:
+            if not probe.startswith("<<"):
+                continue
+            tail = probe[2:].lstrip("-").strip("'\"")
+            if tail == delim:
+                owned.append(body)
+                break
+    return owned
+
+
+def _segment_payload_text(
+    words: _Segment,
+    env: dict[str, str],
+    data_bodies: Sequence[tuple[str, str]],
+) -> str | None:
+    """The text this segment PRODUCES on stdout (its output payload)."""
+    parts: list[str] = []
+    for word in words:
+        text, ok = _resolve_word(word, env, 0)
+        parts.append(text if ok else _word_literal_prefix(word))
+    for body in _owned_bodies(words, data_bodies):
+        parts.append(body)
+    if not parts:
+        return None
+    return " ".join(parts)
+
+
+def _pipeline_laundering_violation(
+    segments: Sequence[_Segment],
+    seps: Sequence[str],
+    env: dict[str, str],
+    data_bodies: Sequence[tuple[str, str]],
+) -> str | None:
+    """A payload with the mutating-ensemble SHAPE handed to an EXECUTOR."""
+    for i, words in enumerate(segments):
+        sep = seps[i] if i < len(seps) else ""
+        if sep != "|":
+            continue
+        if i + 1 >= len(segments):
+            continue
+        target = segments[i + 1]
+        if _executor_kind(target, env) is None:
+            continue
+        payload = _segment_payload_text(words, env, data_bodies)
+        if payload is None:
+            continue
+        if _text_has_mutating_ensemble_shape(payload):
+            return LAUNDERED_TOKEN
+    return None
+
+
+def _systemctl_segment_violation(
+    words: _Segment,
+    env: dict[str, str],
+    depth: int,
+    require_operand: bool = False,
+) -> str | None:
     k = _command_word_index(words, env)
     if k is None or k >= len(words):
         return None
@@ -1074,6 +1374,11 @@ def _systemctl_segment_violation(words: _Segment, env: dict[str, str], depth: in
     if verb in SYSTEMCTL_READONLY:
         return None
     if not operands:
+        if require_operand:
+            # ``xargs systemctl <mutating-verb>`` — the unit operands come
+            # from STDIN, so the target is not statically known ⇒ FAIL
+            # CLOSED (returning None here was the laundering hole).
+            return UNRESOLVED_UNIT_TOKEN
         # No unit operand: nothing to target (``systemctl daemon-reload``,
         # a bare ``systemctl stop`` which is an error anyway) => allowed.
         return None
@@ -1083,13 +1388,26 @@ def _systemctl_segment_violation(words: _Segment, env: dict[str, str], depth: in
             return UNRESOLVED_UNIT_TOKEN
         if any(g in operand for g in _GLOB_CHARS):
             return UNRESOLVED_UNIT_TOKEN
+        if _is_xargs_placeholder(operand):
+            # ``xargs -I{} systemctl restart {}`` — the operand comes from
+            # STDIN ⇒ FAIL CLOSED.
+            return UNRESOLVED_UNIT_TOKEN
         if _unit_is_ensemble(operand):
             return _unit_base(operand)
     return None
 
 
+def _is_xargs_placeholder(operand: str) -> bool:
+    """Is this operand an ``xargs`` replacement placeholder (``{}``)?"""
+    return bool(operand) and operand.startswith("{") and operand.endswith("}")
+
+
 def _segment_violation(
-    words: _Segment, env: dict[str, str], depth: int, marker: bool = False
+    words: _Segment,
+    env: dict[str, str],
+    depth: int,
+    marker: bool = False,
+    executed: bool = False,
 ) -> str | None:
     """Analyse one simple-command segment (recursing into executing hooks).
 
@@ -1097,6 +1415,12 @@ def _segment_violation(
     assignment applies to this segment (its own prefix assignment, an
     ``export``/``env`` assignment in the segment, or inherited from a
     preceding segment / enclosing shell).
+
+    ``executed`` is True when the text being analysed IS a command string
+    that a nested interpreter will RUN (``bash -c '<payload>'``, ``eval``'s
+    argument, a shell's heredoc-stdin body). In that context a literal
+    mutating-ensemble shape in the text is itself a refusal — the text will
+    be interpreted as commands.
     """
     if depth > _MAX_DEPTH:
         return UNRESOLVED_UNIT_TOKEN
@@ -1116,7 +1440,7 @@ def _segment_violation(
     for word in words:
         for kind, value in word:
             if kind == _EXP and value.strip():
-                nested = _command_text_violation(value, depth + 1, marker)
+                nested = _command_text_violation(value, depth + 1, marker, executed)
                 if nested is not None:
                     return nested
 
@@ -1138,7 +1462,7 @@ def _segment_violation(
                 payload, payload_ok = _resolve_word(words[i + 1], env, 0)
                 if not payload_ok:
                     return UNRESOLVED_UNIT_TOKEN
-                return _command_text_violation(payload, depth + 1, marker)
+                return _command_text_violation(payload, depth + 1, marker, True)
         return None
 
     if base == "eval":
@@ -1148,7 +1472,54 @@ def _segment_violation(
         for w in words[k + 1:]:
             if not _resolve_word(w, env, 0)[1]:
                 return UNRESOLVED_UNIT_TOKEN
-        return _command_text_violation(payload_text, depth + 1, marker)
+        return _command_text_violation(payload_text, depth + 1, marker, True)
+
+    if base in _COMMAND_STRING_RUNNERS:
+        # ``su -c '<cmd>'`` / ``runuser -u root -c '<cmd>'`` — the payload is
+        # a COMMAND STRING run by a shell (as the target user).
+        for i in range(k + 1, len(words) - 1):
+            flag, flag_ok = _resolve_word(words[i], env, 0)
+            if not flag_ok:
+                continue
+            if flag in ("-c", "--command"):
+                payload, payload_ok = _resolve_word(words[i + 1], env, 0)
+                if not payload_ok:
+                    return UNRESOLVED_UNIT_TOKEN
+                return _command_text_violation(payload, depth + 1, marker, True)
+        return None
+
+    if base == "ssh":
+        # ``ssh [options] host [command...]`` — the remote command is a
+        # COMMAND STRING.
+        cmd_words = _ssh_remote_words(words, k, env)
+        if not cmd_words:
+            return None
+        payload_parts: list[str] = []
+        for w in cmd_words:
+            text, ok = _resolve_word(w, env, 0)
+            if not ok:
+                return UNRESOLVED_UNIT_TOKEN
+            payload_parts.append(text)
+        return _command_text_violation(
+            " ".join(payload_parts), depth + 1, marker, True
+        )
+
+    if base in _ARGV_RUNNERS:
+        # ``systemd-run <cmd> ...`` / ``watch <cmd> ...`` — the tail after
+        # the runner's own options is an ARGV (command + arguments).
+        j = k + 1
+        n = len(words)
+        while j < n:
+            text, ok = _resolve_word(words[j], env, 0)
+            if not ok:
+                break
+            if text.startswith("-"):
+                j += 2 if text in _ARGV_RUNNER_VALUE_OPTIONS else 1
+                continue
+            break
+        if j >= len(words):
+            return None
+        return _segment_violation(words[j:], env, depth + 1, marker, executed)
 
     if base == "xargs":
         # ``xargs systemctl restart <unit>`` executes the tail as a command.
@@ -1164,24 +1535,32 @@ def _segment_violation(
             break
         if j >= len(words):
             return None
-        sub_violation = _systemctl_segment_violation(words[j:], env, depth + 1)
+        # The operands of an xargs tail come from STDIN: a non-readonly
+        # systemctl tail with no operand (or a ``{}`` placeholder) has an
+        # UNKNOWN target ⇒ FAIL CLOSED.
+        sub_violation = _systemctl_segment_violation(
+            words[j:], env, depth + 1, require_operand=True
+        )
         if sub_violation is not None:
             return sub_violation
         sub_cmd, sub_ok = _resolve_word(words[j], env, 0)
         if sub_ok and sub_cmd.rsplit("/", 1)[-1].lower() in _SHELLS:
-            return _segment_violation(words[j:], env, depth + 1, marker)
+            return _segment_violation(words[j:], env, depth + 1, marker, executed)
         return None
 
     return None
 
 
 def _command_text_violation(
-    text: str, depth: int = 0, marker: bool = False
+    text: str,
+    depth: int = 0,
+    marker: bool = False,
+    executed: bool = False,
 ) -> str | None:
     if depth > _MAX_DEPTH:
         return UNRESOLVED_UNIT_TOKEN
-    code, executed = _strip_heredocs(text, {})
-    segments = _scan(code)
+    code, executed_bodies, data_bodies = _strip_heredocs(text, {})
+    segments, seps = _scan_segments(code)
     env = _collect_assignments(segments)
     # ``ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:*`` carries forward segment
     # by segment (a prefix assignment on one segment does not reach the NEXT
@@ -1192,15 +1571,26 @@ def _command_text_violation(
     for words in segments:
         seg_marker = _segment_has_supervision_marker(words, env)
         eff_marker = carried or seg_marker
-        violation = _segment_violation(words, env, depth, eff_marker)
+        violation = _segment_violation(words, env, depth, eff_marker, executed)
         if violation is not None:
             return violation
         carried = eff_marker
-    for body in executed:
-        nested = _command_text_violation(body, depth + 1, carried)
+    for body in executed_bodies:
+        nested = _command_text_violation(body, depth + 1, carried, True)
         if nested is not None:
             return nested
+    if executed and _text_has_mutating_ensemble_shape(code):
+        # This text IS a command string that a nested interpreter will RUN
+        # (``bash -c``, ``eval``, a shell's heredoc-stdin): a literal
+        # mutating-ensemble shape in it is itself the refusal. This is the
+        # old text guard's strength, kept for the executed context only.
+        # It runs AFTER the structural analysis so the more specific token
+        # (the resolved unit) wins where both apply.
+        return LAUNDERED_TOKEN
     violation = _pipeline_wrapper_violation(segments, env)
+    if violation is not None:
+        return violation
+    violation = _pipeline_laundering_violation(segments, seps, env, data_bodies)
     if violation is not None:
         return violation
     return None

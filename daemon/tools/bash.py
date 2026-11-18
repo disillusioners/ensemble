@@ -1976,8 +1976,17 @@ Returns:
 #       * heredoc bodies, single-quoted text, ``echo``/``printf``/``grep``
 #         arguments are DATA — documenting ``systemctl restart <unit>`` in a
 #         doc-write no longer trips the guard. ``bash -c``, ``bash <<EOF``
-#         (heredoc-as-stdin), ``eval`` and ``xargs <cmd>`` are recursed into,
-#         so quoting through a runner is not an escape.
+#         (heredoc-as-stdin), ``eval``, ``su -c``, ``runuser -c``,
+#         ``ssh host '<cmd>'``, ``systemd-run``/``watch`` (argv) and
+#         ``xargs <cmd>`` are recursed into, and a payload HANDED TO an
+#         executor (piped into a shell / scheduler / xargs / ssh) is
+#         refused when it carries the pre-2026-11-18 text guard's
+#         mutating-ensemble shape. Quoting through a runner is therefore
+#         NOT an escape for the shapes this guard can see statically.
+#         RESIDUAL (stated, not hidden): a payload the runner reads at RUN
+#         time from a FILE (``bash -c "$(cat script.sh)"``) is invisible to
+#         static analysis — the guard sees the substitution, never the
+#         file's content.
 #   - pkill / killall / fuser / ``kill`` / ``xargs kill`` keep the ORIGINAL
 #     text-scoped semantics (a quoted target stays refused). Their prose
 #     over-block residual is unchanged and disclosed in the commission report.
