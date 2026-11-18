@@ -6143,7 +6143,7 @@ _pipeline_self_excluded() {
 #           quarantine language); the CALLER owns the halt.
 #         2 = transient (keep polling — the daemon is booting).
 _handback_serving_probe() {
-    local running hspc_rc=0
+    local running hspc_rc=0 __attr_rc=0
     _probe_once_classified "/livez" "${PORT:-}" || hspc_rc=$?
     case "$hspc_rc" in
         0)
@@ -6152,10 +6152,23 @@ _handback_serving_probe() {
             # A mismatch is probe-level FAIL-FAST (the probe's own vocabulary:
             # no amount of polling fixes a foreign answerer — the incident's
             # nohup-serves-while-launchd-crash-loops shape).
-            if ! _gate_serving_attribution "hand-back verify"; then
-                _warn "hand-back verify: serving-process attribution REFUSED${GATE_ATTRIBUTION_DETAIL:+ — $GATE_ATTRIBUTION_DETAIL} (probe-level fail-fast, Fix #2); NOT success"
-                return 1
-            fi
+            # T7b (BL-1, I-B13): explicit rc capture — the old `if !` form
+            # collapsed the transient `2` into a refusal, which is exactly the
+            # green-class fail-fast that false-halted healthy boots.
+            __attr_rc=0
+            _gate_serving_attribution "hand-back verify" || __attr_rc=$?
+            case "$__attr_rc" in
+                1)
+                    _warn "hand-back verify: serving-process attribution REFUSED${GATE_ATTRIBUTION_DETAIL:+ — $GATE_ATTRIBUTION_DETAIL} (probe-level fail-fast, Fix #2); NOT success"
+                    return 1
+                    ;;
+                2)
+                    # transient: keep polling within the caller's verify budget
+                    return 2
+                    ;;
+                0) : ;;
+                *) return 2 ;;   # contract violation — treated as transient (I-B13)
+            esac
             if [ -n "${PROMOTE_EXPECTED_VERSION:-}" ]; then
                 running="$(_json_field "${_PROBE_BODY:-}" version 2>/dev/null)" || running=""
                 if [ -z "$running" ]; then
@@ -8173,6 +8186,146 @@ _gate_attr_unprobeable() {
     _GATE_ATTR_WARNED=1
     _warn "attribution [$1]: skipped (${2}) — the serving-process conjunct cannot be evaluated on this host/shape (Fix #2; gates do NOT refuse on a missing probe tool, but this is NOT a pass evidence)"
 }
+# ── rc=2 consumer contract — the helper family (T7d-v2, R2 §2.1-2.2) ────────
+# Canonical carrier: gate_defer_reason — the SINGLE transient-carrier name
+# (the per-surface aliases are STRUCK). Read/written exclusively via
+# ${gate_defer_reason:-} forms => set -u-safe by construction. _gate_consume
+# is the SOLE WRITER (statement position only — never inside $( )); every
+# guard/success/logbook branch reads _gate_outcome (the SOLE READER), never a
+# carrier variable — that is what makes an omitted-site read structurally
+# impossible on the read side (T7g census, I-B14).
+#
+# Wording classes are CLOSED vocabularies: definitive labels
+# (/livez unreachable >Ns, version verify mismatch, soak failure, ...) go ONLY
+# into the surface's failure carrier (byte-preserved); transient labels go
+# ONLY into gate_defer_reason + the gate-defer: halt detail. Never cross-
+# contaminated (D-P1-4 / T7c).
+gate_defer_reason=""
+# _gate_consume <surface> <rc> <label> — consume a one-shot gate call's rc.
+#   rc=0: no-op (echo ok).
+#   rc=1: set the surface's FAILURE CARRIER with today's byte-exact string;
+#         return 1 so the caller's existing branch keeps its shape.
+#   rc=2: set gate_defer_reason (transient wording — never a definitive
+#         label), failure carrier UNTOUCHED, write ONE halt row per run
+#         (fire-once latch = the carrier itself), _warn per tick, return 2.
+#   unknown rc: contract violation -> treated as 2 + a warn row.
+# Post-defer chain semantics (§5.4a-1, ruling D-P1-14, NORMATIVE precedence
+# fail > defer > ok):
+#   (1) DEFINITIVE-FAILURE PRECEDENCE — a defer never downgrades a definitive
+#       failure: _gate_consume refuses to mint a defer carrier while the
+#       surface's failure carrier is already set (the fail wins; the defer
+#       tick is recorded on stderr only).
+#   (2) LATER-GREEN SUPERSESSION — an earlier defer does not veto a later
+#       attributed ^ version-correct green at the cycle's terminal read; the
+#       consuming reads below therefore clear the carrier on a definitive ok
+#       (consume clears — rule 3).
+#   (3) CONSUME CLEARS — the carrier never leaks across stages/cycles: every
+#       consumption clears it after the read.
+_gate_consume() {
+    local __surface="$1" __rc="$2" __label="$3"
+    case "$__rc" in
+        0)
+            # A definitive ok supersedes an earlier defer in this cycle
+            # (rule 2) and the carrier is cleared after the read (rule 3).
+            gate_defer_reason=""
+            printf '%s' "ok"
+            return 0
+            ;;
+        1)
+            # Definitive failure: the failure carrier wins (rule 1) and any
+            # stale defer token from an earlier gate in this cycle is
+            # irrelevant to the fail path — clear it so the halt/rollback
+            # branch never renders two verdicts.
+            gate_defer_reason=""
+            printf '%s' "fail"
+            return 1
+            ;;
+        2)
+            if [ -n "${gate_fail_reason:-}${GATE_FAIL:-}${REGATE_FAIL:-}" ]; then
+                # rule 1: a definitive failure already recorded in this cycle
+                # is NEVER downgraded by a defer.
+                _warn "gate-consume [$__surface]: transient at '$__label' IGNORED — a definitive failure is already recorded this cycle (fail > defer)"
+                printf '%s' "defer-suppressed"
+                return 2
+            fi
+            if [ -n "${gate_defer_reason:-}" ]; then
+                # fire-once: one halt row per run per surface (the latch IS the
+                # carrier); still warn per tick.
+                _warn "gate-consume [$__surface]: '$__label' attribution deferred again (transient) — $gate_defer_reason"
+                printf '%s' "defer"
+                return 2
+            fi
+            gate_defer_reason="$__label: attribution deferred (transient — budget expired)"
+            _warn "gate-consume [$__surface]: '$__label' attribution DEFERRED (transient) — $gate_defer_reason"
+            journal_history_append halt "gate-defer: $__surface $__label — $gate_defer_reason (transient; NOT a failure verdict; no rollback, no quarantine)"                 || true
+            printf '%s' "defer"
+            return 2
+            ;;
+        *)
+            # Contract violation (I-B13): an unknown rc is treated as 2.
+            _warn "gate-contract violation: $__surface '$__label' returned rc=$__rc (expected 0|1|2) — treating as transient"
+            gate_defer_reason="$__label: gate-contract violation (rc=$__rc treated as transient)"
+            journal_history_append halt "gate-defer: $__surface $__label — $gate_defer_reason (contract violation; treated as transient)"                 || true
+            printf '%s' "defer"
+            return 2
+            ;;
+    esac
+}
+# _gate_outcome <surface> — THE reader. Echoes ok | fail | defer from the
+# surface's carriers; guards branch on THIS token, never on a carrier read.
+_gate_outcome() {
+    local __surface="$1"
+    case "$__surface" in
+        promote)
+            if [ -n "${gate_fail_reason:-}" ]; then printf '%s' "fail"
+            elif [ -n "${gate_defer_reason:-}" ]; then printf '%s' "defer"
+            else printf '%s' "ok"; fi
+            ;;
+        restart)
+            if [ -n "${GATE_FAIL:-}" ]; then printf '%s' "fail"
+            elif [ -n "${gate_defer_reason:-}" ]; then printf '%s' "defer"
+            else printf '%s' "ok"; fi
+            ;;
+        rollback)
+            if [ -n "${REGATE_FAIL:-}" ]; then printf '%s' "fail"
+            elif [ -n "${gate_defer_reason:-}" ]; then printf '%s' "defer"
+            else printf '%s' "ok"; fi
+            ;;
+        *)
+            _warn "gate-contract violation: _gate_outcome called with unknown surface '$__surface'"
+            printf '%s' "fail"
+            ;;
+    esac
+}
+# _gate_defer_reset — CONSUME CLEARS (rule 3): stage/cycle boundaries reset
+# the carrier so it never leaks.
+_gate_defer_reset() { gate_defer_reason=""; }
+
+# ── T7 — the pooled deferral seam (I-B8, leader D1/D3; NOT an exported knob,
+# NOT registered — routed through _numeric_knob for its integer parse, then
+# CLAMPED to [0,5], and honoured only under the dual-key test marker
+# ENSEMBLE_TEST_GATE_DEFER=1; never exported; per-shell by construction).
+# The pool counts SECONDS (decrement by the slept duration — the honest bound
+# is <= _GATE_ATTR_DEFER_S seconds per shell, not iterations).
+_GATE_ATTR_DEFER_S="$(_numeric_knob _GATE_ATTR_DEFER_S "${_GATE_ATTR_DEFER_S:-}" 5)"
+case "$_GATE_ATTR_DEFER_S" in
+    ''|*[!0-9]*) _GATE_ATTR_DEFER_S=5 ;;
+esac
+if [ "$_GATE_ATTR_DEFER_S" -gt 5 ]; then
+    _GATE_ATTR_DEFER_S=5   # clamp: a leaked 300 becomes 5 (D3)
+fi
+if [ "$_GATE_ATTR_DEFER_S" -lt 0 ]; then
+    _GATE_ATTR_DEFER_S=0
+fi
+if [ "${ENSEMBLE_TEST_GATE_DEFER:-0}" != "1" ]; then
+    _GATE_ATTR_DEFER_S=5   # dual-key: a non-default value is honoured ONLY
+                           # under the explicit test marker; absent => 5
+fi
+# Per-shell patience pool, initialised at source time from the clamped seam.
+_GATE_ATTR_DEFER_REMAIN="$_GATE_ATTR_DEFER_S"
+# Fire-once latch for the exhaustion marker (the _GATE_ATTR_WARNED precedent).
+_GATE_ATTR_EXHAUST_LATCH=""
+
 # _gate_attr_containment <holder> [<owned-spaced>] [<what>] — THE containment
 # ladder (T5, promote-handback-halt Phase 1 §5.3). Classifies ONE port holder
 # against the supervised tree. Three-valued, fail-closed:
@@ -8410,13 +8563,88 @@ _gate_serving_attribution() {
                 case " $ladder_accept " in *" $__h "*) ;; *) printf '%s\n' "$__h" ;; esac
             done)"
         fi
+        # ── The DEFERRAL RUNG (T7, I-B8, leader D1) ────────────────────────
+        # The residual "unattributable-yet" class: the deciding tooling could
+        # not answer (systemctl wedged, cgroup unreadable, ps absent). The
+        # ladder NEVER accepts on missing evidence — it DEFERS, bounded by a
+        # per-shell patience pool that counts SECONDS (the honest bound is
+        # <= _GATE_ATTR_DEFER_S seconds per shell, never iterations).
+        # Exhaustion => the TRANSIENT rc 2 (leader D1): refusal happens ONLY
+        # at the caller's budget end through the unchanged floor-wins verdict.
+        # A positively-foreign holder (ladder_refuse) never reaches this rung.
         if [ -n "$ladder_unattrib" ]; then
-            # ── Deferral rung is added by T7 (C3). Until then an
-            # unattributable-yet holder keeps TODAY'S refusal — the ladder
-            # must never ACCEPT on missing evidence.
-            GATE_ATTRIBUTION_DETAIL="port-holder(s):${nonmatch} NOT in the supervision-owned pid set (owned:${owned_spaced:-<none>}) — the :${PORT} answerer is not this install's daemon; containment ladder: unattributable${ladder_unattrib}"
-            _warn "attribution [$what]: REFUSED —$GATE_ATTRIBUTION_DETAIL"
-            return 1
+            _GATE_ATTR_DEFER_REMAIN="$_GATE_ATTR_DEFER_S"
+            while [ "${_GATE_ATTR_DEFER_REMAIN:-0}" -gt 0 ]; do
+                sleep 2
+                _GATE_ATTR_DEFER_REMAIN=$(( _GATE_ATTR_DEFER_REMAIN - 2 ))
+                [ "$_GATE_ATTR_DEFER_REMAIN" -lt 0 ] && _GATE_ATTR_DEFER_REMAIN=0
+                # re-census + re-classify
+                holders="$(_supervision_port_holders)"
+                hrc=$?
+                if [ "$hrc" = "2" ] || [ -z "$holders" ]; then
+                    # still unattributable — keep waiting (or the pool ends)
+                    continue
+                fi
+                owned="$(_supervision_owned_pids 2>/dev/null)"
+                owned_spaced="$(printf '%s' "$owned" | tr '\n' ' ')"
+                nonmatch=""
+                for h in $holders; do
+                    [ -n "$h" ] || continue
+                    case " $owned_spaced " in
+                        *" $h "*) ;;
+                        *) nonmatch="$nonmatch $h" ;;
+                    esac
+                done
+                if [ -z "$nonmatch" ]; then
+                    # every holder is owned now — accept (evidence-only).
+                    GATE_ATTRIBUTION_DETAIL=""
+                    return 0
+                fi
+                ladder_accept=""; ladder_refuse=""; ladder_unattrib=""
+                for h in $nonmatch; do
+                    [ -n "$h" ] || continue
+                    __lrc=0
+                    _gate_attr_containment "$h" "$owned_spaced" "$what" || __lrc=$?
+                    case "$__lrc" in
+                        0) ladder_accept="$ladder_accept $h" ;;
+                        1) ladder_refuse="$ladder_refuse $h" ;;
+                        *) ladder_unattrib="$ladder_unattrib $h" ;;
+                    esac
+                done
+                if [ -n "$ladder_refuse" ]; then
+                    # a definitive negative arrived during the deferral window:
+                    # refuse NOW (the deferral never downgrades a fail).
+                    GATE_ATTRIBUTION_DETAIL="port-holder(s):${nonmatch} NOT in the supervision-owned pid set (owned:${owned_spaced:-<none>}) — the :${PORT} answerer is not this install's daemon; containment ladder:${ladder_refuse}"
+                    _warn "attribution [$what]: REFUSED —$GATE_ATTRIBUTION_DETAIL (ensemble-vm §5.1: :9797 held by kubectl/monitor while the daemon serves :9798)"
+                    return 1
+                fi
+                if [ -n "$ladder_accept" ]; then
+                    printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "attribution [$what]: ACCEPTED — port-holder(s):${ladder_accept} contained in the supervised tree (cgroup containment / owned ancestry; the argv-anchored owned set does not cover them)" >&2 2>/dev/null
+                    l2_holders="$(printf '%s\n' $holders | while IFS= read -r __h; do
+                        case " $ladder_accept " in *" $__h "*) ;; *) printf '%s\n' "$__h" ;; esac
+                    done)"
+                    break
+                fi
+                # still unattributable — loop until the pool is exhausted
+            done
+            if [ -n "$ladder_accept" ]; then
+                : # accepted inside the deferral window (evidence-only)
+            else
+                # ── EXHAUSTION (leader D1): TRANSIENT, not a refusal ──────
+                # The distinct marker rides STDERR (I-B2b) and journals ONE
+                # fire-once row (the latch) with the NEW row token
+                # kind=attr_deferred — the EVENT kind stays
+                # subprocess_wait_timeout (no new event kind, I-E3).
+                if [ -z "$_GATE_ATTR_EXHAUST_LATCH" ]; then
+                    _GATE_ATTR_EXHAUST_LATCH=1
+                    journal_history_append subprocess_wait_timeout \
+                        "site=gate_attr kind=attr_deferred reason=child: containment UNATTRIBUTABLE within ${_GATE_ATTR_DEFER_S}s (unit MainPID/ControlGroup unresolvable, ps unavailable) — deferring to the verify budget" \
+                        || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+                fi
+                printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "attribution [$what]: containment UNATTRIBUTABLE within ${_GATE_ATTR_DEFER_S}s (unit MainPID/ControlGroup unresolvable, ps unavailable) — deferring to the verify budget" >&2 2>/dev/null
+                GATE_ATTRIBUTION_DETAIL="port-holder(s):${nonmatch} NOT in the supervision-owned pid set (owned:${owned_spaced:-<none>}) — containment UNATTRIBUTABLE within ${_GATE_ATTR_DEFER_S}s — deferring to the verify budget (transient)"
+                return 2
+            fi
         fi
     fi
     # ── Layer 2: supervisor lineage (consume the PRE-STOP classify) ──
@@ -8558,8 +8786,45 @@ _gate_attr_unit_lineage() {
 # gate_livez / gate_readyz — budgeted probes (D2). Print body; nonzero on fail.
 # Fix #2: a green answer is only trusted when the attribution conjunct
 # holds (the SUPERVISED daemon answers — see _gate_serving_attribution).
-gate_livez()  { _probe "/livez"  "$LIVEZ_BUDGET_S"  "$PORT" && _gate_serving_attribution "/livez"; }
-gate_readyz() { _probe "/readyz" "$READYZ_BUDGET_S" "$PORT" && _gate_serving_attribution "/readyz"; }
+# ROW 2 (phase1 §5.4b, ruling D-P1-15): the probe's budget-exhaustion rc 2
+# ("NOBODY ANSWERED" — the daemon is dead/unreachable) is NORMALIZED to rc 1
+# at livez/readyz: no answer at all IS a health verdict, so the 8b
+# auto-rollback stays armed (the B-dead-daemon leg). The gate's own rc 2
+# (green but UNATTRIBUTABLE) is NOT normalized — it stays transient and is
+# consumed as a deferral by the one-shot consumers (T7c). This asymmetry is
+# deliberate and recorded (phase1 §5.4a).
+_gate_livez_rc() {
+    local __rc=0 __grc=0
+    _probe "/livez" "$LIVEZ_BUDGET_S" "$PORT" || __rc=$?
+    case "$__rc" in
+        0) ;;
+        2) return 1 ;;   # nobody answered => definitive health failure
+        *) return "$__rc" ;;
+    esac
+    _gate_serving_attribution "/livez" || __grc=$?
+    case "$__grc" in
+        0) return 0 ;;
+        2) return 2 ;;   # transient: green but unattributable
+        *) return 1 ;;
+    esac
+}
+_gate_readyz_rc() {
+    local __rc=0 __grc=0
+    _probe "/readyz" "$READYZ_BUDGET_S" "$PORT" || __rc=$?
+    case "$__rc" in
+        0) ;;
+        2) return 1 ;;   # nobody answered => definitive health failure
+        *) return "$__rc" ;;
+    esac
+    _gate_serving_attribution "/readyz" || __grc=$?
+    case "$__grc" in
+        0) return 0 ;;
+        2) return 2 ;;   # transient: green but unattributable
+        *) return 1 ;;
+    esac
+}
+gate_livez()  { _gate_livez_rc; }
+gate_readyz() { _gate_readyz_rc; }
 
 # gate_version <expected> — one-shot /livez version check (D2/ADR-027: the
 # RUNNING daemon must self-report the manifest's binary_version).
@@ -8567,7 +8832,7 @@ gate_readyz() { _probe "/readyz" "$READYZ_BUDGET_S" "$PORT" && _gate_serving_att
 # the conjunct rides the green answer (gate_soak's per-tick version
 # check inherits the attribution from this site).
 gate_version() {
-    local expected="$1" body running
+    local expected="$1" body running __vrc=0
     body="$(_probe_once "/livez" "$PORT")"
     [ -n "$body" ] || { _warn "version verify: /livez not answering on :$PORT"; return 1; }
     running="$(_json_field "$body" version)"
@@ -8575,7 +8840,15 @@ gate_version() {
         _warn "version verify MISMATCH: running=$running expected=$expected (manifest binary_version)"
         return 1
     fi
-    _gate_serving_attribution "version verify" || return 1
+    # ROW 2: the direct collapse (`|| return 1`) is REMOVED — the gate's rc is
+    # captured so a TRANSIENT attribution deferral (rc 2) survives to the
+    # consumer instead of being laundered into a definitive "version verify
+    # mismatch" (which would arm the 8b auto-rollback on a healthy boot).
+    __vrc=0
+    _gate_serving_attribution "version verify" || __vrc=$?
+    if [ "$__vrc" != "0" ]; then
+        return "$__vrc"
+    fi
     _log "version verify OK: $running"
     return 0
 }
@@ -8710,7 +8983,17 @@ gate_soak() {
                 _warn "soak FAILURE: /readyz went red at ${waited}s (conservative mode)"
                 return 1
             fi
-            gate_version "$expected" > /dev/null || { _warn "soak FAILURE: version drifted at ${waited}s (conservative mode)"; return 1; }
+            # T7f / note 8 (decisions §9c): the soak tick routes through the
+            # gate family. A per-tick FRESH pool, and a transient tick is
+            # INCONCLUSIVE (streak-freeze) — never a definitive failure.
+            _GATE_ATTR_DEFER_REMAIN="$_GATE_ATTR_DEFER_S"
+            __svrc=0
+            gate_version "$expected" > /dev/null || __svrc=$?
+            case "$__svrc" in
+                0) : ;;
+                2) _log "soak: version tick INCONCLUSIVE at ${waited}s (attribution deferred — transient; streak frozen, counter neither advanced nor reset)";;
+                *) _warn "soak FAILURE: version drifted at ${waited}s (conservative mode)"; return 1 ;;
+            esac
             now="$(_now_epoch)"
             [ "$now" -lt "$deadline" ] || break
             sleep 30
@@ -8736,6 +9019,14 @@ gate_soak() {
     #   NEVER extend past it (requirements §4.3 P3).
     local consecutive_hold=0
     local granted=0
+    # ROW 19 (T7f): INCONCLUSIVE-tick counter — the cap-reach discriminator
+    # that separates "we could not tell" (rc 2, transient) from "genuinely
+    # never green" (rc 1, auto-rollback).
+    local __soak_inconclusive=0
+    # ROW 19 (T7f): INCONCLUSIVE-tick counter — the cap-reach discriminator
+    # that separates "we could not tell" (rc 2, transient) from "genuinely
+    # never green" (rc 1, auto-rollback).
+    local __soak_inconclusive=0
     local soak_absolute_bound=$(( soak_start + ADAPTIVE_SOAK_CAP_S + GRACE_EXTENSION_CAP_S_INT ))
     while :; do
         lock_heartbeat
@@ -8798,11 +9089,27 @@ gate_soak() {
         # into an instant soak failure (the C2 violation). A genuine
         # drift still arrives on a 200 tick and fails exactly per the
         # pin.
+        # T7f / note 8 (decisions §9c): the soak tick MUST route through the
+        # gate family — a per-tick FRESH pool (the pool is reset at the top of
+        # each tick's version check), and a transient tick is INCONCLUSIVE
+        # (streak-freeze: it neither increments nor resets consecutive_green).
+        local __soak_tick_rc=0 __soak_version_rc=0
+        local observation_kind="RESET"
         if [ "$livez_rc" = "0" ] && [ "$readyz_rc" = "0" ]; then
-            if ! gate_version "$expected" > /dev/null; then
-                _warn "soak FAILURE: version drifted at ${waited}s (lib.sh:4258 pin)"
-                return 1
-            fi
+            _GATE_ATTR_DEFER_REMAIN="$_GATE_ATTR_DEFER_S"
+            gate_version "$expected" > /dev/null || __soak_version_rc=$?
+            __soak_tick_rc="$__soak_version_rc"
+        fi
+        if [ "$__soak_tick_rc" = "2" ]; then
+            __soak_inconclusive=$(( ${__soak_inconclusive:-0} + 1 ))
+            __soak_inconclusive=$(( ${__soak_inconclusive:-0} + 1 ))
+            # INCONCLUSIVE — a third observation kind, distinct from the
+            # probe-transient RESET (which is preserved). The streak FREEZES.
+            _log "soak: version tick INCONCLUSIVE at ${waited}s (attribution deferred — transient; streak frozen, counter neither advanced nor reset)"
+            observation_kind="INCONCLUSIVE"
+        elif [ "$__soak_tick_rc" != "0" ] && [ "$__soak_tick_rc" != "" ]; then
+            _warn "soak FAILURE: version drifted at ${waited}s (lib.sh:4258 pin)"
+            return 1
         fi
         # Advance the consecutive-green counter ONLY on real green
         # results (boot-grace-suppressed and busy-amnesty soft-greens
@@ -8834,7 +9141,8 @@ gate_soak() {
         # breaks and resets) — a stream of holds can never manufacture
         # greens, and a never-green daemon still ends at cap-reach with
         # consecutive_green < 3 => return 1 => auto-rollback.
-        local observation_kind="RESET"
+        # (observation_kind is declared ABOVE, before the tick-rc block, so the
+        # INCONCLUSIVE arm can set it — T7f.)
         # One leak parse per tick — the same unchanged body fed BOTH the
         # HELD classification below and the extension guard (the parsers
         # are pure; re-parsing per site would be wasted work).
@@ -8851,6 +9159,13 @@ gate_soak() {
             observation_kind="HELD"
         fi
         case "$observation_kind" in
+            INCONCLUSIVE)
+                # STREAK-FREEZE (T7f, R2 §2.4): a transient tick neither
+                # advances nor resets the streak — incrementing would
+                # manufacture greens from unattributable observations, and
+                # resetting would let a transient storm reach the cap with
+                # zero greens.
+                ;;
             GREEN)
                 if [ "$consecutive_hold" -gt "$MAX_HOLDS_PER_GREEN" ]; then
                     # The hold budget is SPENT: a green behind more than
@@ -8911,6 +9226,24 @@ gate_soak() {
             if [ "$consecutive_green" -ge "$adaptive_n" ]; then
                 _log "soak SUCCESS at cap (${waited}s) — ${consecutive_green} consecutive greens"
                 return 0
+            fi
+            # ROW 19 (phase1 §5.4b) — cap-reach disposition. A cap reached
+            # with INCONCLUSIVE ticks and no definitive red is NOT a health
+            # verdict: it returns the TRANSIENT rc 2 so the promote consumer
+            # takes the defer arm (never 8b). A genuine never-green
+            # (inconclusive == 0) keeps the C-1 anti-silent-commit rc 1.
+            if [ "${__soak_inconclusive:-0}" -gt 0 ]; then
+                _warn "soak: cap-reach at ${waited}s with consecutive_green=$consecutive_green < $adaptive_n AND ${__soak_inconclusive} inconclusive (unattributable) tick(s) — INCONCLUSIVE, deferring (transient; NOT an auto-rollback verdict)"
+                return 2
+            fi
+            # ROW 19 (phase1 §5.4b) — cap-reach disposition. A cap reached
+            # with INCONCLUSIVE ticks and no definitive red is NOT a health
+            # verdict: it returns the TRANSIENT rc 2 so the promote consumer
+            # takes the defer arm (never 8b). A genuine never-green
+            # (inconclusive == 0) keeps the C-1 anti-silent-commit rc 1.
+            if [ "${__soak_inconclusive:-0}" -gt 0 ]; then
+                _warn "soak: cap-reach at ${waited}s with consecutive_green=$consecutive_green < $adaptive_n AND ${__soak_inconclusive} inconclusive (unattributable) tick(s) — INCONCLUSIVE, deferring (transient; NOT an auto-rollback verdict)"
+                return 2
             fi
             _warn "soak FAILURE: cap-reach at ${waited}s with consecutive_green=$consecutive_green < $adaptive_n — auto-rollback route (C-1: never-green commit bug under sustained DB churn)"
             return 1
