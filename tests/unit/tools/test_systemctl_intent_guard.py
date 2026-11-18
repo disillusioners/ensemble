@@ -1,0 +1,487 @@
+"""Intent-match pins for the shared systemctl/kill guard (2026-11-18 outage).
+
+WHAT THESE PINS DEFEND
+======================
+The pre-2026-11-18 guard classified ``systemctl`` verbs correctly but tested
+the live-unit family with a plain SUBSTRING match over the raw command text.
+That inverted the intent match in BOTH directions:
+
+* UNDER-BLOCK — composed / variable-indirected unit tokens passed clean;
+  three live outages came through that hole.
+* OVER-BLOCK — non-executing prose (heredoc doc-writes, ``printf``, ``grep``
+  patterns) and read-only inspection whose *property name* is a mutating-verb
+  word (``systemctl show <unit> -p Restart``) were refused.
+
+Every pin family below names the counter-mutation that reddens it. All pins
+are PURE (no spawn); the module-local recorder at the top is a structural
+tripwire for the two seam pins that call the real tool coroutines — under any
+mutant, including refusal-gate-bypassing ones, a spawn is captured and turned
+into a RED pin with a zero-exec proof instead of a live kill. NOTHING is ever
+executed.
+"""
+
+import asyncio
+import importlib
+import inspect
+
+import pytest
+
+from daemon.tools import _systemctl_guard as guard
+from daemon.tools.bash import _pkill_overlay_violation
+from daemon.tools.proc_tools import create_proc_tools
+
+
+# ---------------------------------------------------------------------------
+# STRUCTURAL spawn-seam neuter — record-instead-of-spawn (house pattern)
+# ---------------------------------------------------------------------------
+
+
+class _RecordedSpawnStub:
+    """Inert stand-in for ``asyncio.subprocess.Process`` — never a process."""
+
+    def __init__(self, seq: int) -> None:
+        self.pid = 2_000_000 + seq
+        self.returncode = 0
+        self.stdout = None
+        self.stderr = None
+
+    async def wait(self) -> int:
+        return self.returncode
+
+
+@pytest.fixture(autouse=True)
+def _spawn_seam_recorder(monkeypatch):
+    """Record-instead-of-spawn for every pin in this file."""
+    spawns: list = []
+    seq = 0
+
+    async def _record_exec(*args, **kwargs):
+        nonlocal seq
+        seq += 1
+        spawns.append({"argv": list(args), "cwd": kwargs.get("cwd")})
+        return _RecordedSpawnStub(seq)
+
+    async def _record_shell(command, *args, **kwargs):
+        nonlocal seq
+        seq += 1
+        spawns.append({"argv": [command], "cwd": kwargs.get("cwd")})
+        return _RecordedSpawnStub(seq)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _record_exec, raising=True)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", _record_shell, raising=True)
+    yield
+    assert not spawns, (
+        "STRUCTURAL SPAWN GUARD tripped (test_systemctl_intent_guard): the "
+        f"recorder captured {len(spawns)} spawn attempt(s) that the refusal "
+        f"gate failed to stop: {spawns!r}. NOTHING was executed — the "
+        "recorder returned an inert stub — but the guard under test is "
+        "bypassed and this pin family must REDDEN under such a mutant."
+    )
+
+
+# ---------------------------------------------------------------------------
+# DENY leg — composition / indirection resolution
+# ---------------------------------------------------------------------------
+# Counter-mutations that redden this family:
+#   * reverting to the substring match (no assignment resolution) ⇒ every
+#     composed shape below returns None;
+#   * dropping the var/exp arms of _resolve_parts ⇒ same;
+#   * dropping the family check ⇒ the literal leg returns None.
+# ---------------------------------------------------------------------------
+
+
+def test_literal_ensemble_unit_still_refused():
+    assert guard.systemctl_violation("systemctl restart ensemble-main") == "ensemble-main"
+    assert guard.systemctl_violation("systemctl --user stop ensemble-demo.service") == "ensemble-demo"
+    assert guard.systemctl_violation("sudo systemctl start ensemble-prod.service") == "ensemble-prod"
+    assert guard.systemctl_violation("systemctl restart agents-ensemble") == "agents-ensemble"
+
+
+def test_same_string_assignment_resolved():
+    """The three outage shapes: variable-indirected unit operands."""
+    assert guard.systemctl_violation(
+        'UNIT=ensemble-main.service; systemctl restart "$UNIT"'
+    ) == "ensemble-main"
+    assert guard.systemctl_violation(
+        "S=ensemble; systemctl restart ${S}-main"
+    ) == "ensemble-main"
+    assert guard.systemctl_violation(
+        'systemctl restart "$(echo ensemble-main)"'
+    ) == "ensemble-main"
+
+
+def test_quoted_composition_resolved():
+    assert guard.systemctl_violation('systemctl restart ensemble-"main"') == "ensemble-main"
+    assert guard.systemctl_violation('systemctl restart "ensemble"-"main"') == "ensemble-main"
+    # The brief's short-stem composition shape: a composed operand carrying our
+    # stem is not "clearly non-ensemble", so it is treated as ours.
+    assert guard.systemctl_violation('systemctl stop ENS-"main"') == "ens-main"
+
+
+def test_assignment_before_command_on_one_line():
+    assert guard.systemctl_violation(
+        'UNIT=ensemble-daemon.service systemctl restart "$UNIT"'
+    ) == "ensemble-daemon"
+
+
+def test_unresolvable_operand_fails_closed():
+    """Contract 1: an operand not statically resolvable to a clearly
+    non-ensemble unit is REFUSED (fail-closed), never allowed."""
+    assert guard.systemctl_violation('systemctl restart "$UNIT"') == guard.UNRESOLVED_UNIT_TOKEN
+    assert guard.systemctl_violation('systemctl restart "$(cat /tmp/unit.txt)"') != None  # noqa: E711
+    assert guard.systemctl_violation("systemctl restart 'ensemble-*'") != None  # noqa: E711
+    assert guard.systemctl_violation('systemctl restart "$(readlink -f unit)"') != None  # noqa: E711
+
+
+def test_unknown_verb_fails_closed():
+    """Only the read-only allowlist is allowed; an unknown verb against an
+    ensemble unit is refused (a future mutating verb cannot slip through)."""
+    assert guard.systemctl_violation("systemctl freeze ensemble-main") != None  # noqa: E711
+    assert guard.systemctl_violation("systemctl preset ensemble-main") != None  # noqa: E711
+
+
+def test_shell_keyword_prefixed_command_refused():
+    """``if systemctl restart <unit>; then`` — the keyword is not the command
+    word (counter-mutation: drop the _SHELL_KEYWORDS peel ⇒ returns None)."""
+    assert guard.systemctl_violation(
+        "if systemctl restart ensemble-main; then echo done; fi"
+    ) == "ensemble-main"
+    assert guard.systemctl_violation(
+        "while :; do systemctl stop ensemble-daemon; done"
+    ) == "ensemble-daemon"
+
+
+def test_ansi_c_quoted_operand_fails_closed():
+    r"""ANSI-C quoting (``$'\x65nsemble-main'``) hides the literal from any
+    static resolver ⇒ FAIL CLOSED (counter-mutation: treat ``$'...'`` as a
+    plain literal ⇒ the composed-but-objectively-literal operand resolves
+    to a non-family token and is ALLOWED)."""
+    assert guard.systemctl_violation(r"systemctl restart $'\x65nsemble-main'") == guard.UNRESOLVED_UNIT_TOKEN
+
+
+def test_runner_laundered_shapes_refused():
+    """Quoting the kill shape through a runner is not an escape."""
+    assert guard.systemctl_violation("bash -c 'systemctl restart ensemble-main'") == "ensemble-main"
+    assert guard.systemctl_violation("bash <<'EOF'\nsystemctl restart ensemble-main\nEOF") == "ensemble-main"
+    assert guard.systemctl_violation("echo $(systemctl restart ensemble-main)") == "ensemble-main"
+    assert guard.systemctl_violation("xargs systemctl restart ensemble-main") == "ensemble-main"
+    assert guard.systemctl_violation("eval 'systemctl restart ensemble-main'") == "ensemble-main"
+
+
+# ---------------------------------------------------------------------------
+# ALLOW leg — read-only inspection must pass end-to-end
+# ---------------------------------------------------------------------------
+# Counter-mutations that redden this family:
+#   * restoring the text scan for the systemctl leg (verb words matched
+#     anywhere in the text) ⇒ ``-p Restart`` and the prose cases refuse;
+#   * dropping SYSTEMCTL_READONLY ⇒ all read-only pins refuse;
+#   * making the deny unconditional (refuse every systemctl) ⇒ they refuse.
+# ---------------------------------------------------------------------------
+
+_READONLY_COMMANDS = [
+    "systemctl status ensemble-main",
+    "systemctl status ensemble-main --no-pager",
+    "systemctl show ensemble-main",
+    "systemctl is-active ensemble-main --no-pager",
+    "systemctl is-enabled ensemble-main",
+    "systemctl is-failed ensemble-main",
+    "systemctl cat ensemble-main | head -5",
+    "systemctl list-units | grep ensemble",
+    "systemctl list-unit-files --type=service | grep ensemble",
+    "systemctl show-environment",
+    "systemctl get-default",
+    # Property names that ARE mutating-verb words — the original over-block.
+    "systemctl show ensemble-main -p Restart",
+    "systemctl show ensemble-main --property=Restart",
+    "systemctl status ensemble-main -n 20 | grep -i restart",
+    "journalctl -u ensemble-main -n 20 | grep -i enable",
+]
+
+
+@pytest.mark.parametrize("command", _READONLY_COMMANDS)
+def test_readonly_allowed(command):
+    assert guard.systemctl_violation(command) is None
+
+
+def test_non_ensemble_mutation_allowed():
+    """The deny is scoped to the ensemble's own units."""
+    assert guard.systemctl_violation("systemctl restart nginx") is None
+    assert guard.systemctl_violation("systemctl --user restart postgresql@16-main") is None
+    assert guard.systemctl_violation("systemctl daemon-reload") is None
+
+
+def test_non_executing_text_allowed():
+    """Doc-writes / prose / search patterns are DATA, not kill intent."""
+    assert guard.systemctl_violation(
+        "cat > notes.md <<'EOF'\nrun systemctl restart ensemble-main to recover\nEOF"
+    ) is None
+    assert guard.systemctl_violation(
+        "printf '%s\\n' 'systemctl stop ensemble-prod' > /tmp/reminder.txt"
+    ) is None
+    assert guard.systemctl_violation(
+        "grep -n 'systemctl restart ensemble-main' docs/ops.md"
+    ) is None
+    assert guard.systemctl_violation("echo 'do not systemctl stop ensemble-main'") is None
+
+
+# ---------------------------------------------------------------------------
+# Kill legs — UNCHANGED text-scoped semantics (defence in depth)
+# ---------------------------------------------------------------------------
+
+
+def test_kill_legs_intact():
+    assert guard.kill_leg_violation("pkill -f ensemble-prod") == "ensemble-prod"
+    assert guard.kill_leg_violation("pkill -f 'ensemble-main'") == "ensemble-main"
+    assert guard.kill_leg_violation("killall ensemble-daemon") == "ensemble-daemon"
+    assert guard.kill_leg_violation("fuser -k 9797/tcp") == "9797"
+    assert guard.kill_leg_violation("kill -9 $(pgrep -f ensemble-prod)") == "ensemble-prod"
+    assert guard.kill_leg_violation("pkill -f my-scratch-daemon") is None
+    assert guard.kill_leg_violation("echo skill management") is None
+
+
+# ---------------------------------------------------------------------------
+# SEAM — bash lane delegates to the shared module; fence stays ambient-only
+# ---------------------------------------------------------------------------
+
+
+def test_bash_seam_delegates_to_shared_module():
+    bash_mod = importlib.import_module("daemon.tools.bash")
+    src = inspect.getsource(bash_mod._pkill_overlay_violation)
+    assert "_systemctl_guard_overlay_violation" in src
+    assert "_PKILL_OVERLAY_LIVE_NAME_PATTERNS == ()" not in src
+
+
+def test_shared_module_is_pure_no_env_reads():
+    """The fence read lives at the bash seam ONLY (shared module = pure)."""
+    src = inspect.getsource(guard)
+    assert "os.environ" not in src
+
+
+def test_bash_seam_both_directions():
+    assert _pkill_overlay_violation('S=ensemble; systemctl restart ${S}-main') == "ensemble-main"
+    assert _pkill_overlay_violation("systemctl status ensemble-main") is None
+
+
+def test_bash_seam_fence_ambient_only(monkeypatch):
+    monkeypatch.delenv("ENSEMBLE_FENCED_TEST_CONTEXT", raising=False)
+    overlay = {"ENSEMBLE_FENCED_TEST_CONTEXT": "1"}
+    assert _pkill_overlay_violation('systemctl stop "$UNRESOLVED_UNIT"', env=overlay) is not None
+    monkeypatch.setenv("ENSEMBLE_FENCED_TEST_CONTEXT", "1")
+    assert _pkill_overlay_violation('systemctl stop "$UNRESOLVED_UNIT"') is None
+
+
+# ---------------------------------------------------------------------------
+# SEAM — proc lane inherits the whole model through the delegation
+# ---------------------------------------------------------------------------
+
+
+def _proc_run():
+    return next(t for t in create_proc_tools("scig-pin-instance") if t.name == "proc_run")
+
+
+async def test_proc_lane_refuses_composed_shapes():
+    pr = _proc_run()
+    for command in (
+        'UNIT=ensemble-main.service; systemctl restart "$UNIT"',
+        'S=ensemble; systemctl restart ${S}-main',
+        'systemctl restart "$(echo ensemble-main)"',
+        "systemctl restart ensemble-main",
+    ):
+        text = await pr.coroutine(command=command)
+        assert text.startswith(
+            "Error: refused by the rogue-containment pkill overlay guard"
+        ), (command, text)
+
+
+async def test_proc_lane_allows_readonly():
+    """Read-only must reach the timeout validation (i.e. pass the guard)."""
+    pr = _proc_run()
+    for command in (
+        "systemctl status ensemble-main",
+        "systemctl show ensemble-main -p Restart",
+        "systemctl list-units | grep ensemble",
+    ):
+        text = await pr.coroutine(command=command, timeout=-1)
+        assert "timeout must be >= 0" in text, (command, text)
+        assert "refused by the rogue-containment" not in text, (command, text)
+
+
+async def test_proc_lane_delegates_to_bash_wrapper():
+    """Structural: proc_run still imports the bash wrapper at call time."""
+    proc_mod = importlib.import_module("daemon.tools.proc_tools")
+    assert (
+        "from daemon.tools.bash import _pkill_overlay_violation"
+        in inspect.getsource(proc_mod.create_proc_tools)
+    )
+
+
+# ---------------------------------------------------------------------------
+# DENY leg 4 — the unit-stop WRAPPER ``scripts/stop-ensemble.sh``
+# ---------------------------------------------------------------------------
+# The ACTUAL kill mechanism of all three 2026-11-18 outages (D2 hunt): the
+# agent ran ``bash scripts/stop-ensemble.sh``; its UNIT_MANAGED branch
+# composes the unit from ``ENSEMBLE_SUPERVISION_RESULT`` and issues
+# ``systemctl stop``/``kill`` ITSELF, so the command text carries neither a
+# ``systemctl`` token nor a live-unit token. Every invocation shape below is
+# refused by BASENAME EQUALITY, in any directory, with ANY args/env —
+# ``DRY_RUN=1`` included (no agent-lane use of the wrapper is sanctioned;
+# the supervision machinery invokes it directly, never via this lane).
+#
+# Counter-mutation M5a: neutralise ``_protected_wrapper_violation`` (plant
+# ``return None`` at its top) ⇒ every pin here returns None and REDDENs.
+# ---------------------------------------------------------------------------
+
+_WRAPPER_SHAPES = [
+    "bash scripts/stop-ensemble.sh",
+    "sh /home/nea/ensemble-src/scripts/stop-ensemble.sh",
+    "dash scripts/stop-ensemble.sh",
+    "./scripts/stop-ensemble.sh",
+    "stop-ensemble.sh",
+    "/home/nea/agents-ensemble/scripts/stop-ensemble.sh",
+    "env DRY_RUN=1 bash scripts/stop-ensemble.sh",
+    "DRY_RUN=1 bash scripts/stop-ensemble.sh",
+    "bash scripts/stop-ensemble.sh --force",
+    "cd /home/nea/ensemble-src && bash scripts/stop-ensemble.sh",
+    "sudo bash scripts/stop-ensemble.sh",
+    "sudo -u root bash scripts/stop-ensemble.sh",
+    "nohup bash scripts/stop-ensemble.sh &",
+    "timeout 60 bash scripts/stop-ensemble.sh",
+    "setsid bash scripts/stop-ensemble.sh",
+    "bash -c 'scripts/stop-ensemble.sh'",
+    "sh -c 'bash scripts/stop-ensemble.sh'",
+    "bash <<'EOF'\nscripts/stop-ensemble.sh\nEOF",
+    "cat scripts/stop-ensemble.sh | bash",
+    "bash < scripts/stop-ensemble.sh",
+    "source scripts/stop-ensemble.sh",
+    ". scripts/stop-ensemble.sh",
+    "find /tmp -name '*.sh' -exec ./scripts/stop-ensemble.sh {} \\;",
+    "xargs bash scripts/stop-ensemble.sh",
+    "eval 'bash scripts/stop-ensemble.sh'",
+    "echo $(bash scripts/stop-ensemble.sh)",
+    'W=scripts/stop-ensemble.sh; bash "$W"',
+    'ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:"$U" bash scripts/stop-ensemble.sh',
+]
+
+
+@pytest.mark.parametrize("command", _WRAPPER_SHAPES)
+def test_unit_stop_wrapper_refused_any_invocation(command):
+    assert guard.systemctl_violation(command) == guard.WRAPPER_VIOLATION_TOKEN
+
+
+def test_wrapper_table_exported_and_exact():
+    """The deny is a basename EQUALITY on the exact wrapper — not a substring
+    over the command text (that would re-create the over-block)."""
+    assert guard.PROTECTED_WRAPPER_NAMES == ("stop-ensemble.sh",)
+    assert guard.SUPERVISION_MARKER_VAR == "ENSEMBLE_SUPERVISION_RESULT"
+    assert guard.SUPERVISION_MANAGED_PREFIX == "UNIT_MANAGED:"
+    assert guard.systemctl_violation("bash scripts/stop-ensemble.sh.bak") is None
+
+
+# ---------------------------------------------------------------------------
+# DENY leg 5 — env-primed (``ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:*``)
+# script invocation, i.e. a COPY of the wrapper under another name/path.
+#
+# Counter-mutation M5b: make ``_segment_has_supervision_marker`` return False
+# unconditionally ⇒ every pin here returns None and REDDENs.
+# ---------------------------------------------------------------------------
+
+_PRIMED_SHAPES = [
+    "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-main bash /tmp/other-stop.sh",
+    "export ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-main; bash /tmp/other-stop.sh",
+    'ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:"$U" bash ./scripts/copy-stop.sh',
+    "env ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-main bash /tmp/x.sh",
+    "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-main bash -c './stop-copy.sh'",
+    'ENSEMBLE_SUPERVISION_RESULT="UNIT_MANAGED:ensemble-main" bash scripts/copy.sh',
+]
+
+
+@pytest.mark.parametrize("command", _PRIMED_SHAPES)
+def test_supervision_primed_script_refused(command):
+    assert guard.systemctl_violation(command) == guard.SUPERVISION_PRIMED_TOKEN
+
+
+# ---------------------------------------------------------------------------
+# DENY leg 6 — command-word resolution must not be hijacked by an
+# UNRESOLVABLE leading assignment (``X="$1" systemctl ...`` used to make the
+# whole segment escape analysis — the literal unit token behind it was
+# missed). Counter-mutation: revert the assignment-shaped skip in
+# ``_command_word_index`` ⇒ both pins return None.
+# ---------------------------------------------------------------------------
+
+
+def test_unresolved_assignment_prefix_does_not_hide_command():
+    assert guard.systemctl_violation('X="$1" systemctl restart ensemble-main') == "ensemble-main"
+    assert guard.systemctl_violation('UNIT=$(cat f) systemctl stop ensemble-daemon') == "ensemble-daemon"
+
+
+def test_sudo_option_peel_resolves_command_word():
+    """``sudo -n systemctl restart <unit>`` used to resolve its command word
+    to ``-n`` and slip through. Counter-mutation: drop the sudo/doas
+    option-peel arm in ``_command_word_index`` ⇒ returns None."""
+    assert guard.systemctl_violation("sudo -n systemctl restart ensemble-main") == "ensemble-main"
+    assert guard.systemctl_violation("sudo -u root systemctl stop ensemble-daemon") == "ensemble-daemon"
+
+
+# ---------------------------------------------------------------------------
+# ALLOW leg — the wrapper deny is SCOPED: reads, prose, and similar-but-
+# different script names stay allowed.
+#
+# Counter-mutation: reimplement the wrapper deny as a raw substring over the
+# command text (``if "stop-ensemble.sh" in text``) ⇒ the read/prose pins
+# here refuse and REDDEN.
+# ---------------------------------------------------------------------------
+
+_WRAPPER_ALLOW = [
+    "cat scripts/stop-ensemble.sh",
+    'grep -n "stop-ensemble.sh" docs/ops.md',
+    "git log --oneline -- scripts/stop-ensemble.sh",
+    "bash scripts/stop-all.sh",
+    "bash scripts/stop-ensemble.sh.bak",
+    "bash scripts/stop-ensemble2.sh",
+    "bash scripts/restart-ensemble-helper.sh",
+    "ls scripts/ | grep stop",
+    "echo 'bash scripts/stop-ensemble.sh is the operator stop path'",
+    "cat > notes.md <<'EOF'\nrun bash scripts/stop-ensemble.sh to stop\nEOF",
+    'grep -rn "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED" scripts/',
+    "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-main echo ok",
+    "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-main systemctl status ensemble-main",
+    "bash tests/helpers/my-helper.sh --flag",
+    "python scripts/backfill_snapshot_agent_space.py --dry",
+]
+
+
+@pytest.mark.parametrize("command", _WRAPPER_ALLOW)
+def test_wrapper_deny_scoped_no_overblock(command):
+    assert guard.systemctl_violation(command) is None
+
+
+# ---------------------------------------------------------------------------
+# SEAM — bash lane + proc lane both refuse the wrapper shapes
+# ---------------------------------------------------------------------------
+
+
+def test_bash_seam_refuses_wrapper_allows_read():
+    assert _pkill_overlay_violation("bash scripts/stop-ensemble.sh") == guard.WRAPPER_VIOLATION_TOKEN
+    assert _pkill_overlay_violation("bash scripts/stop-ensemble.sh --force") == guard.WRAPPER_VIOLATION_TOKEN
+    assert _pkill_overlay_violation("cat scripts/stop-ensemble.sh") is None
+
+
+async def test_proc_lane_refuses_wrapper_and_primed():
+    pr = _proc_run()
+    for command in (
+        "bash scripts/stop-ensemble.sh",
+        "./scripts/stop-ensemble.sh",
+        "ENSEMBLE_SUPERVISION_RESULT=UNIT_MANAGED:ensemble-main bash /tmp/other-stop.sh",
+    ):
+        text = await pr.coroutine(command=command)
+        assert text.startswith(
+            "Error: refused by the rogue-containment pkill overlay guard"
+        ), (command, text)
+
+
+async def test_proc_lane_allows_wrapper_read_and_readonly():
+    pr = _proc_run()
+    for command in ("cat scripts/stop-ensemble.sh", "systemctl status ensemble-main"):
+        text = await pr.coroutine(command=command, timeout=-1)
+        assert "timeout must be >= 0" in text, (command, text)
+        assert "refused by the rogue-containment" not in text, (command, text)
