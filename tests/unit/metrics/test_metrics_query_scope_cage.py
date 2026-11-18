@@ -49,7 +49,7 @@ API_PY = REPO_ROOT / "daemon" / "api.py"
 
 #: The three-way cage form (declared-route · mount · class manifest).
 #: Re-pinned for the memoir-v2 phase-5 mount (2128cf7d2, +3/+1/+1 over base 113/38/34, union the capture-lane read site +1 declared), then again for the group-chat room read surface (A-P6-9: +2 declared/+1 mount/+1 family -> 119/40/36); the sibling pins are test_router_scope_manifest.py (119/40) + test_router_class_manifest.py (36) — this file carries its OWN copy of the three counts, keep all three sites in step.
-DECLARED_ROUTE_CENSUS = 119
+DECLARED_ROUTE_CENSUS = 120
 MOUNT_CENSUS = 40
 CLASS_MANIFEST_FAMILIES = 36
 
@@ -93,7 +93,7 @@ def app_routes():
 class TestThreeWayCage:
     """The three-way cage form — all three pins at once."""
 
-    def test_the_declared_route_census_reads_119(self, app_routes):
+    def test_the_declared_route_census_reads_120(self, app_routes):
         declared = [
             route
             for route in app_routes

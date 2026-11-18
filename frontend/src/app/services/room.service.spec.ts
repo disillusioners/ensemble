@@ -311,4 +311,62 @@ describe('RoomService', () => {
     });
     expect(service.messages().map((m) => m.seq)).toEqual([1]);
   });
+
+
+  // ── global lane (gc-fe-surfaces) ────────────────────────────────────
+
+  it('fetchAllRooms global issues GET /api/rooms with no query', () => {
+    service.fetchAllRooms(null).subscribe();
+    const req = httpMock.expectOne('/api/rooms');
+    expect(req.request.method).toBe('GET');
+    expect(req.request.params.has('instance_id')).toBe(false);
+    req.flush({ rooms: [], truncated: false });
+  });
+
+  it('fetchAllRooms joined issues GET /api/rooms?instance_id=<id>', () => {
+    service.fetchAllRooms('inst-9').subscribe();
+    const req = httpMock.expectOne((r) => r.url === '/api/rooms');
+    expect(req.request.params.get('instance_id')).toBe('inst-9');
+    req.flush({ rooms: [], truncated: false });
+  });
+
+  it('loadGlobalRooms global publishes rows + truncated', () => {
+    service.loadGlobalRooms('global');
+    httpMock.expectOne('/api/rooms').flush({
+      rooms: [
+        {
+          room_id: 'r-1',
+          name: 'room',
+          tree_root_id: 't-1',
+          owner_instance_id: 'o-1',
+          state: 'active',
+          member_count: 2,
+          member_instance_ids: ['o-1', 'c-1'],
+          last_message_at: null,
+          last_message_seq: null,
+          created_at: '2026-11-16T10:00:00+00:00',
+        },
+      ],
+      truncated: true,
+    });
+    expect(service.globalRooms().length).toBe(1);
+    expect(service.globalRooms()[0].member_instance_ids).toEqual(['o-1', 'c-1']);
+    expect(service.globalRoomsTruncated()).toBe(true);
+  });
+
+  it('openRoom sets openRoomId and resetMessages clears it', () => {
+    service.openRoom('r-1');
+    httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages').flush({
+      messages: [],
+      next_after_seq: null,
+    });
+    expect(service.openRoomId()).toBe('r-1');
+    service.resetMessages();
+    expect(service.openRoomId()).toBeNull();
+  });
+
+  it('POLL_INTERVAL_MS is 10000', () => {
+    expect(service.POLL_INTERVAL_MS).toBe(10_000);
+  });
+
 });

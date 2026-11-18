@@ -53,6 +53,19 @@ export interface RoomListResponse {
   rooms: RoomSummary[];
 }
 
+/** A chatroom as listed by the nest-wide `GET /api/rooms` surface. */
+export interface GlobalRoomSummary extends RoomSummary {
+  tree_root_id: string;
+  owner_instance_id: string;
+  member_instance_ids: string[];
+}
+
+/** `GET /api/rooms` response envelope (bounded). */
+export interface GlobalRoomListResponse {
+  rooms: GlobalRoomSummary[];
+  truncated?: boolean;
+}
+
 /** A single room message (one member's post in a room). */
 export interface RoomMessage {
   /** Per-room monotonic sequence number — the paging key. */
@@ -127,6 +140,38 @@ export function normalizeRoomSummary(raw: unknown): RoomSummary | null {
   };
 }
 
+/** Normalize the global (nest-wide) rooms envelope. */
+export function normalizeGlobalRoomListResponse(raw: unknown): GlobalRoomListResponse {
+  const rec = asRecord(raw);
+  const list = rec && Array.isArray(rec['rooms']) ? (rec['rooms'] as unknown[]) : [];
+  const rooms: GlobalRoomSummary[] = [];
+  for (const entry of list) {
+    const r = asRecord(entry);
+    if (!r) continue;
+    const roomId = asString(r['room_id']).trim();
+    if (!roomId) continue;
+    const memberCount = asFiniteNumber(r['member_count']);
+    const memberIds = Array.isArray(r['member_instance_ids'])
+      ? (r['member_instance_ids'] as unknown[]).filter((x) => typeof x === 'string') as string[]
+      : [];
+    const global: GlobalRoomSummary = {
+      room_id: roomId,
+      name: asString(r['name']).trim() || roomId,
+      created_at: asString(r['created_at']),
+      closed: r['closed'] === true || r['state'] === 'closed',
+      member_count: memberCount === null ? 0 : memberCount,
+      last_message_at: asNullableString(r['last_message_at']),
+      last_message_seq: asFiniteNumber(r['last_message_seq']),
+      tree_root_id: asString(r['tree_root_id']),
+      owner_instance_id: asString(r['owner_instance_id']),
+      member_instance_ids: memberIds,
+    };
+    rooms.push(global);
+  }
+  const truncated = rec ? rec['truncated'] === true : false;
+  return { rooms, truncated };
+}
+
 /** Normalize the rooms envelope — unknown fields are dropped, not rendered. */
 export function normalizeRoomListResponse(raw: unknown): RoomListResponse {
   const rec = asRecord(raw);
@@ -171,4 +216,16 @@ export function normalizeRoomMessagesResponse(raw: unknown): RoomMessagesRespons
     messages,
     next_after_seq: rec ? asFiniteNumber(rec['next_after_seq']) : null,
   };
+}
+
+
+/** Build a membership map: instance_id -> has >= 1 joined room. */
+export function buildMembershipMap(rows: GlobalRoomSummary[]): Map<string, boolean> {
+  const map = new Map<string, boolean>();
+  for (const row of rows) {
+    for (const id of row.member_instance_ids || []) {
+      map.set(id, true);
+    }
+  }
+  return map;
 }

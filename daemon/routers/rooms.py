@@ -8,7 +8,7 @@ instance('s tree) and (b) messages in each room … Rides the SAME
 room-read API as the agents' read tool (members ∪ owner-ancestry
 predicate, fail-closed) with the FE's own auth posture."*
 
-TWO ROUTES (the wire contract is BINDING — the frontend codes against
+THREE ROUTES (the wire contract is BINDING — the frontend codes against
 it in parallel):
 
 * ``GET /api/instances/{instance_id}/rooms`` →
@@ -81,7 +81,10 @@ from daemon.repositories.room.models import (
     ROOM_READ_DEFAULT_LIMIT,
     ROOM_READ_MAX_LIMIT,
 )
-from daemon.repositories.room.repository import RoomNotFoundError
+from daemon.repositories.room.repository import (
+    ROOM_LIST_MAX_LIMIT,
+    RoomNotFoundError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +208,135 @@ async def list_instance_rooms(instance_id: str, request: Request) -> dict:
             for room in rooms
         ]
     }
+
+
+
+@router.get(
+    "/rooms",
+    dependencies=[scope_required(_SCOPE_READ)],
+)
+async def list_rooms(request: Request, limit: int = Query(200)) -> dict:
+    """Nest-wide room list (the global browser, gc-fe-surfaces phase 1).
+
+    Optional ``instance_id`` query param anchors the read to that
+    instance's scope (fail-closed predicate). Absent ⇒ anchor-less
+    (knob-gated by ``_ALLOW_ANCHORLESS_GLOBAL_LIST``).
+    """
+    manager = _get_manager(request)
+    room_service = _room_service(manager)
+    if room_service is None:
+        raise _err(
+            503,
+            _ERR_ROOM_SERVICE_UNAVAILABLE,
+            "the chat-room service is not available in this daemon",
+        )
+
+    # Presence detection via raw query string (Query(None) cannot
+    # distinguish absent from present-but-empty).
+    raw_params = request.query_params
+    present = "instance_id" in raw_params
+    raw_value = raw_params.get("instance_id") if present else None
+
+    # Server-side clamp.
+    try:
+        req_limit = int(limit)
+    except (TypeError, ValueError):
+        req_limit = 200
+    clamped_limit = max(1, min(req_limit, ROOM_LIST_MAX_LIMIT))
+
+    # Present-but-empty / whitespace ⇒ 422 bad_request (malformed), in
+    # BOTH knob states (presence check precedes the knob gate).
+    if present:
+        stripped = (raw_value or "").strip()
+        if stripped == "":
+            raise _err(
+                422,
+                "bad_request",
+                "instance_id must not be empty",
+            )
+
+    # Anchor-less path.
+    if not present:
+        if not _ALLOW_ANCHORLESS_GLOBAL_LIST:
+            raise _err(
+                404,
+                _ERR_INSTANCE_NOT_FOUND,
+                "Instance not found",
+            )
+        try:
+            rows, truncated = await room_service.list_all_rooms(clamped_limit)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("room list (global): listing failed (%r)", exc)
+            raise _err(
+                503,
+                _ERR_ROOM_SERVICE_UNAVAILABLE,
+                "the room list could not be read right now",
+            ) from exc
+        return _shape_rows(rows, truncated)
+
+    # Anchored path.
+    anchor = (raw_value or "").strip()
+    # Pure DB read for existence (never manager.get_instance — C-4).
+    try:
+        await asyncio.to_thread(manager.get_instance_info, anchor)
+    except KeyError:
+        raise _err(
+            404,
+            _ERR_INSTANCE_NOT_FOUND,
+            f"Instance not found: {anchor}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("room list (anchored): instance lookup failed (%r)", exc)
+        raise _err(
+            404,
+            _ERR_INSTANCE_NOT_FOUND,
+            f"Instance not found: {anchor}",
+        )
+    # descendant closure off-loop
+    try:
+        descendant_ids = await asyncio.to_thread(
+            manager.get_tree_ids_permanent, anchor
+        )
+    except Exception as exc:  # noqa: BLE001
+        descendant_ids = [anchor]
+    descendant_set = set(descendant_ids or [])
+    try:
+        rows, truncated = await room_service.list_readable_rooms(
+            anchor, clamped_limit, descendant_ids=descendant_set
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("room list (anchored): listing failed (%r)", exc)
+        raise _err(
+            503,
+            _ERR_ROOM_SERVICE_UNAVAILABLE,
+            "the room list could not be read right now",
+        ) from exc
+    return _shape_rows(rows, truncated)
+
+
+def _shape_rows(rows, truncated):
+    return {
+        "rooms": [
+            {
+                "room_id": r.get("room_id"),
+                "name": r.get("name"),
+                "tree_root_id": r.get("tree_root_id"),
+                "owner_instance_id": r.get("owner_instance_id"),
+                "state": r.get("state"),
+                "member_count": int(r.get("member_count") or 0),
+                "member_instance_ids": list(r.get("member_instance_ids") or []),
+                "last_message_at": r.get("last_post_at"),
+                "last_message_seq": r.get("last_message_seq"),
+                "created_at": r.get("created_at"),
+            }
+            for r in rows
+        ],
+        "truncated": bool(truncated),
+    }
+
+
+# Module-level knob (F-3 tightening switch) — single branch consults it.
+_ALLOW_ANCHORLESS_GLOBAL_LIST: bool = True
 
 
 @router.get(

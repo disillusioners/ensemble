@@ -463,8 +463,8 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 119, (
-            f"declared-route census drifted: {len(declared)} (pinned 119)"
+        assert len(declared) == 120, (
+            f"declared-route census drifted: {len(declared)} (pinned 120)"
         )
 
     def test_manifest_entries_valid(self):
