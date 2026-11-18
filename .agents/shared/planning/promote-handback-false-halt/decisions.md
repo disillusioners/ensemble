@@ -48,7 +48,7 @@ folds and the BL-6/BL-7/BL-8/BL-9 amendments.)
   adjudicate (A/B/C adoption, the floor-graph ratification, the negative-proof doctrine, the deferred/corrections registers). Minted here so
   the phase files' own namespaces stay free; **never** does an `L-n` overwrite or renumber a `D-*`.
 - Phase-3 tasks and criteria are cited as **`P3-T1…P3-T10`** and **`AC-P3-1…13`** — a *citation relabel only*, to stop a collision with
-  Phase-1's unprefixed `T1–T12` (finding **CP-3/CP-4**, §8). The phase file itself is untouched.
+  Phase-1's unprefixed `T1–T14` (finding **CP-3/CP-4**, §8). The phase file itself is untouched.
 
 ### 0.3 Reading order
 
@@ -61,7 +61,7 @@ the verification log and the planner's outstanding actions.
 
 ## 1. Decision register
 
-### 1.0 Index (29 decisions — 24 at first issue + 3 review-wave-2 folds + 2 review-wave-4 folds)
+### 1.0 Index (31 decisions — 24 at first issue + 3 review-wave-2 folds + 2 review-wave-4 folds + 2 approver-iteration-001 folds)
 
 | # | ID | Decision (one line) | Binds | Ratifier |
 |---|----|---------------------|-------|----------|
@@ -94,6 +94,8 @@ the verification log and the planner's outstanding actions.
 | 27 | `D-P2-7` | **BL-5 — the REJECTED D1 semantics are purged from the invariant hand-off.** phase1 §14 `I-B8` (per-shell / seconds-counted / clamped `[0,5]` / exhaustion ⇒ transient 2 with the distinct marker / refusal only at budget end), `I-B10`, the `N6` template row, and `I-E3` ("no new EXPORTED env / OPERATOR knob; the seam is a clamped, marker-gated, non-exported internal bound routed through `_numeric_knob`") are rewritten; §9's blast-radius "no new `_numeric_knob`s" contradiction is closed; §14 and §9/I-E3 join the §10.1 fold lists | `phase1-plan.md` §14 (`I-B8`/`I-B10`/`I-E3`/`N6`), §9 (blast radius); `decisions.md` §10.1, §10.8; `plan-overview.md` §5 | Plan review wave 2 (FINAL) |
 | 28 | `D-P1-6` | **BL-8 (LEADER RULING) — RC3 (root cause #3, unit-arm zero retry) is SUBSUMED, not dropped.** A bare unit-arm retry re-halts later on the SAME refused attribution (the refusal is evidence-based, not boot-timing-based); D1's budget-bound deferral already provides the bounded re-probe at the verifier level. **Unit-arm retry-parity is EXPLICITLY DEFERRED to the T12 sibling lane** (§6 row 8); the false "Phase 1 fixes the unit-arm retry" claim at phase3 §2 is corrected; phase2 §3 D5 carries the disposition | `phase1-plan.md` §2 (out-of-scope row), §12 (RC3 disposition); `phase2-plan.md` §3 (D5 disposition); `phase3-plan.md` §2 (out-of-scope correction); `plan-overview.md` §2 item 3; `decisions.md` §6 row 8 | Plan review wave 4 (FINAL, leader ruling) |
 | 29 | `D-P1-7` | **BL-9 (LEADER RULING, Option A) — per-surface version arming.** The "version conjunct absolute and outside the widening" invariant is restated PER-SURFACE: it is absolute where ARMED (promote, `promote.sh:546-556`) and was EMPTY on restart/rollback (2xx-only degradation, `lib.sh:1593`/`:6107`) — so the leader adopts **arming the expected version from the TARGET release manifest on restart.sh + rollback.sh BEFORE the shared gate** (T13/T14); refuse-to-widen REJECTED (keeps the false-halt alive on 2 of 3 surfaces). NP-12 + M-NP12 pin it; risk row with owner: phase1 §12 R6; `:541-544`→`:546-556` anchor folded | `phase1-plan.md` §5.4 (per-surface restatement), §5.7 (P12-sibling + P13), §10 (T13/T14), §12 (R6); `phase2-plan.md` §9.1 (NP-12), §9.2 (M-NP12); `decisions.md` §10.1 (scope note), §10.9 | Plan review wave 4 (FINAL, leader ruling) |
+| 30 | `D-P1-8` | **Named transient carrier `gate_defer_reason` (BLOCKING 1, approver iter 001)** — ruling (a) adopted, (b) rejected: the carrier is consumed by the EXISTING B4 leave-txn-open halt path; never empty-checked into commit/flip/record-success; never enters 8b auto-rollback; halt row carries TRANSIENT wording; exhaustion detail rides `HB_VERIFY_REASON`; B4 leave-txn-open preserved | `phase1-plan.md` §5.4b, §10 (T7d), §11 (C3), §12 (R7), §13 (S14), §14 (I-B13 re-cut); `phase2-plan.md` §7.5 (B-carrier + M-B-carrier), §16 (SC-12/SC-14); `decisions.md` §10.10 | Approver iteration 001 (FINAL) |
+| 31 | `D-P1-9` | **SC-12/SC-13/I-B13 re-cut on every rc (0/1/2) including the transient path (BLOCKING 2, approver iter 001)** — every one of SC-12/SC-13/I-B13 names `gate_defer_reason` explicitly; verified against `rollback.sh:266-279` and `restart.sh:286-301` | `phase1-plan.md` §5.4b + §14; `phase2-plan.md` §16 (SC-12/SC-13 re-cut); `phase2-plan.md` §7.5 (B-carrier) | Approver iteration 001 (FINAL) |
 
 **Nothing in this register weakens a phase plan's hard constraints.** Where a decision *narrows* the plan (`T12`, `NP-11`), the narrowing is
 explicit and its compensating coverage is named (§6).
@@ -587,7 +589,7 @@ counter-mutations that **widen the accept-set and must redden** the negative sec
 | **NP-11** | Darwin variant of `NP-4` | — | **DROPPED** (`D-P2-4`) | declared parity gap |
 | **NP-12** | **restart/rollback-context stale incarnation with the BL-9 per-surface arming IN PLACE** (the P12-sibling shape driven through the non-promote surfaces) | the hand-back version conjunct (`lib.sh:6107-6116`), armed per-surface by phase1 **T13/T14** (`restart.sh:251` / `rollback.sh:249`) | rc 1 with the `NOT serving the right release` wording on **both** armed surfaces; **no** `hand-back COMPLETE`, never a recorded-verified pass | **M-NP12** (delete the arming ⇒ the conjunct is empty ⇒ 2xx-only ⇒ the stale build is recorded as verified) |
 
-**Coverage note (P → NP).** Phase-1's §5.7 protection matrix `P1–P12` is the design's promise; the NP set above is where it becomes red-able:
+**Coverage note (P → NP).** Phase-1's §5.7 protection matrix `P1–P15` is the design's promise (P13–P15 are disclosed residuals; P12-sibling/P12-tertiary are variants); the NP set above is where it becomes red-able:
 `P1→NP-1`, `P2→NP-2`, `P3→NP-3`, `P4→NP-5`, `P5→NP-4`, `P6→B6(pidless)`/`NP-11-dropped`, `P7→B6`, `P8→NP-4` (`owned:<none>`), `P9→NP-10`,
 `P10→B-defer-a`, `P11→NP-3/NP-5 class`, `P12→documented residual` (structural, not substring-related).
 
@@ -735,9 +737,9 @@ tag annotations and handoff reports ⇒ **use the verified spelling** in every a
   coordinates. The same correction is applied in `phase2-plan.md` §10.1.)*
 
 **(i) Phase-3's own ID convention vs its content.** The header declares `P3-D#` / `P3-R#` / **`P3-T#`** / **`AC-P3-#`**, but the document
-uses **unprefixed `T1–T10`** and **`AC1–AC13`** — which **collide** with Phase-1's `T1–T12`. Its "no numeric collision" note is therefore only
-true for `D`/`R`. Also its note says "Phase 1 owns … `T1–T8`", but Phase 1 has **`T1–T12`** (T9 = C-10a sync, T10 = restart rows,
-T11/T12 = optional). **Disposition:** cited here as `P3-T*` / `AC-P3-*`; phase file unedited; the commission must not treat the note's
+uses **unprefixed `T1–T10`** and **`AC1–AC13`** — which **collide** with Phase-1's `T1–T14`. Its "no numeric collision" note is therefore only
+true for `D`/`R`. Also its note says "Phase 1 owns … `T1–T8`", but Phase 1 has **`T1–T14`** (T9 = C-10a sync, T10 = restart rows,
+T11/T12 = optional, plus T7b/T7c/T7d and T13/T14 from the review waves). **Disposition:** cited here as `P3-T*` / `AC-P3-*`; phase file unedited; the commission must not treat the note's
 "T1–T8" as the Phase-1 task range.
 
 **(j) `plan-overview.md` does not exist yet.** The lane directory holds exactly five files (both research files + three phase plans).
@@ -764,8 +766,8 @@ render the token `inactive|activating` (a `${var:-word}` expansion is not a choi
 
 | File | Namespaces in use |
 |---|---|
-| `phase1-plan.md` | `A1–A32` (anchor register; A29–A32 added review wave 1), `T1–T12` + **`T7b`/`T7c`** (tasks), `C0–C6` (commits), `C-1…C-6` (stash touchpoints), `R1–R4` (containment **rungs**), `R1–R5` (§12 **risks**), `P1–P13` + `P12-sibling` (protection matrix), `I-A1…I-E3` (invariants, **31** after `I-B2b`/`I-B13`), `N1–N9` (negative-proof template), `S1–S12` (success; S11/S12 review wave 1), `D-P1-1…5` |
-| `phase2-plan.md` | `D1–D7` (incidents), `A0–A9` (Candidate-A legs; A8/A9 review wave 1), `B1–B10` + `B-*` (Candidate-B legs, incl. **`B-defer-d`/`B-downgrade`** and `B-defer-e`), `C-1…C-8` (Candidate-C legs), `NP-1…NP-12`, `M-*` (mutations, incl. **`M-NP1d`**, **`M-NP6-reach`**, **`M-NP1c-strict`**, **`M-NP12`**), `R-*` (restart legs), `R0`, `RG-1…RG-7`, `P2-T1…P2-T16`, `U-1…U-4`, `OQ-P2-1…4`, `R-1…R-5` (risks), `SC-1…SC-13` |
+| `phase1-plan.md` | `A1–A32` (anchor register; A29–A32 added review wave 1), `T1–T14` + **`T7b`/`T7c`/`T7d`** (tasks), `C0–C6` (commits), `C-1…C-6` (stash touchpoints), `R1–R4` (containment **rungs**), `R1–R5` (§12 **risks**), `P1–P15` + `P12-sibling`/`P12-tertiary` (protection matrix), `I-A1…I-E3` (invariants, **31** after `I-B2b`/`I-B13`), `N1–N9` (negative-proof template), `S1–S14` (success; S11–S14 review waves), `D-P1-1…9` |
+| `phase2-plan.md` | `D1–D7` (incidents), `A0–A9` (Candidate-A legs; A8/A9 review wave 1), `B1–B10` + `B-*` (Candidate-B legs, incl. **`B-defer-d`/`B-downgrade`**, `B-defer-e`, **`B-carrier`**), `C-1…C-8` (Candidate-C legs), `NP-1…NP-12`, `M-*` (mutations, incl. **`M-NP1d`**, **`M-NP6-reach`**, **`M-NP1c-strict`**, **`M-NP12`**, **`M-NP1-accept`**, **`M-B-carrier`**), `R-*` (restart legs), `R0`, `RG-1…RG-7`, `P2-T1…P2-T16`, `U-1…U-4`, `OQ-P2-1…4`, `R-1…R-5` (risks), `SC-1…SC-14` |
 | `phase3-plan.md` | `F1–F36` (facts), `P3-D1…P3-D12`, `P3-R1…P3-R7`, `T1…T10` (**should be `P3-T*`**), `AC1…AC13` (**should be `AC-P3-*`**), `P3-Q1…P3-Q3` |
 
 ### 8.3 Findings (listed explicitly; **not** silently fixed in the phase files)
@@ -774,7 +776,7 @@ render the token `inactive|activating` (a `${var:-word}` expansion is not a choi
 |---|---|---|---|
 | **CP-1** | `phase1-plan.md` uses **`R1–R4`** for the containment **rungs** (§5.3) **and** **`R1–R5`** for the phase **risks** (§12) — same letter+digit space inside one file. | doc-hygiene (high confusion risk) | **No content conflict.** Binding citation rule: "rung R2" / "§12 R3". The amendment (§2) is phrased against "R2 the rung". |
 | **CP-2** | Three near-identical label families for different objects: **commits** `C0–C6`, **stash touchpoints** `C-1…C-6`, **Phase-2 legs** `C-1…C-8`. | doc-hygiene | Cite as "commit `C4`" / "touchpoint `C-4`" / "leg `C-4`". Leg names deliberately mirror their touchpoints (1:1 mapping is a feature), but `C4`≠`C-4`. |
-| **CP-3** | Phase 3 declares `P3-T#` / `AC-P3-#` but uses unprefixed `T1–T10` / `AC1–AC13`, colliding with Phase-1's `T1–T12`. | namespace collision (real) | Correction **(i)**; this register relabels at citation (`P3-T*`, `AC-P3-*`); phase file unedited. |
+| **CP-3** | Phase 3 declares `P3-T#` / `AC-P3-#` but uses unprefixed `T1–T10` / `AC1–AC13`, colliding with Phase-1's `T1–T14`. | namespace collision (real) | Correction **(i)**; this register relabels at citation (`P3-T*`, `AC-P3-*`); phase file unedited. |
 | **CP-4** | Phase 3's note says Phase 1 owns "`T1–T8`"; Phase 1 actually has **`T1–T12`** (T9/T10 landed in the plan; T11/T12 optional). | stale cross-reference | Correction **(i)**. |
 | **CP-5** | Phase-1 `A22` block range (`157-181`/`309-327`) overstates the byte-identical span (17 lines: `157-173`/`309-325`). | anchor range drift | Correction **(g)**; `B10`'s anchor-based extraction is correct as specified. |
 | **CP-6** | Phase-2 scope item 5 says "`exit 78` site (**18**)"; its own §10.1 table yields **15** restart.sh code sites (+2 external rows = 17). | arithmetic drift | Correction **(h)**; `R0` must self-check the literal `grep -c`. |
@@ -782,8 +784,8 @@ render the token `inactive|activating` (a `${var:-word}` expansion is not a choi
 | **CP-8** | Phase-1 `C-5` cites `:6207-6213` for the pre-stop verdict; actual `:6218-6221` (`:6207-6213` = budget printf). | anchor drift | **Already flagged by Phase 2 (`NP-10`); confirmed by re-measurement**; correction **(d)**. |
 | **CP-9** | Phase-1 `A23` cites the happy-path 7b pin at `:376`; actual `:377`. | cosmetic | Correction **(d)**; leg anchors on `:377`. |
 | **CP-10** | Phase-1 §4.3's example `_log` string would render the two-token fallback literal (the words `inactive` and `activating` joined by a bare vertical bar) instead of a single state word. | implementation hazard | Correction **(k)**; implement the sanitized token Phase 1 itself requires. |
-| **CP-11** | Invariant count: the dispatch brief says "**25** invariants `I-A1…I-E3`"; the tree has **29** (`A1–A5`=5, `B1–B12`=12, `C1–C5`=5, `D1–D4`=4, `E1–E3`=3). Phase 2's mapping table covers **all 29**. | count drift (brief) | **29 is the count of record.** No invariant is unmapped; nothing needs adding. |
-| **CP-12** | Phase-3 header says "Phase 2's §9 negative proof (`NP-1…NP-8`)"; Phase 2's NP set is `NP-1…NP-11`. | stale cross-reference | Cosmetic; the union `NP-1…NP-11` governs (`NP-9`/`NP-10`/`NP-11` are Phase-2's own additions after Phase 3 was drafted). |
+| **CP-11** | Invariant count: the dispatch brief says "**25** invariants `I-A1…I-E3`"; the tree has **31** (`A1–A5`=5, `B1–B13` + `I-B2b`=14, `C1–C5`=5, `D1–D4`=4, `E1–E3`=3). Phase 2's mapping table covers **all 31** (incl. `I-B8a`/`I-B8b` added in phase2). | count drift (brief) | **31 is the count of record.** No invariant is unmapped; nothing needs adding. |
+| **CP-12** | Phase-3 header says "Phase 2's §9 negative proof (`NP-1…NP-8`)"; Phase 2's NP set is `NP-1…NP-12`. | stale cross-reference | Cosmetic; the union `NP-1…NP-12` governs (`NP-9`/`NP-10`/`NP-11`/`NP-12` are Phase-2's own additions after Phase 3 was drafted). |
 | **CP-13** | Phase-3 F12/§4.4 env-name typos (`ENSEMBLE_UPGRIPE_…` / `ENSEMBLE_UPGRIPADE_…`). | **operational** (copy hazard) | Correction **(f)**. |
 | **CP-14** | `plan-overview.md` absent while two decisions assign it duties. | pending artifact | Correction **(j)**; planner action (Appendix B). |
 
