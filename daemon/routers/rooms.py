@@ -8,7 +8,7 @@ instance('s tree) and (b) messages in each room … Rides the SAME
 room-read API as the agents' read tool (members ∪ owner-ancestry
 predicate, fail-closed) with the FE's own auth posture."*
 
-TWO ROUTES (the wire contract is BINDING — the frontend codes against
+THREE ROUTES (the wire contract is BINDING — the frontend codes against
 it in parallel):
 
 * ``GET /api/instances/{instance_id}/rooms`` →
@@ -28,6 +28,49 @@ it in parallel):
   to the last RETURNED seq (the client resumes from there); it is
   ``null`` when the window is exhausted. An unclamped cursor is NEVER
   echoed.
+
+* ``GET /api/rooms?instance_id=&limit=`` →
+  ``{"rooms": [{"room_id", "name", "tree_root_id",
+  "owner_instance_id", "state", "member_count",
+  "member_instance_ids", "last_message_at", "last_message_seq",
+  "created_at"}], "truncated": bool}``
+  — the NEST-WIDE browser list (gc-fe-surfaces phase 1). ``limit`` is
+  advisory: the server clamps to ``[1, ROOM_LIST_MAX_LIMIT=500]``
+  (default 200) and ``truncated`` says whether rows were cut. With
+  ``instance_id`` the list is the caller-scoped readable set (the SAME
+  fail-closed predicate as the messages route, filter-then-clamp);
+  without it the read is the operator-lane nest-wide breadth, gated by
+  the module knob ``_ALLOW_ANCHORLESS_GLOBAL_LIST`` (knob-OFF ⇒ ``404
+  instance_not_found``). A ``state`` field names the lifecycle state
+  (``active`` / ``closed``); a purged room has no rows at all.
+
+KNOB DEFAULT — OPERATOR-TIGHTENABLE WITHOUT A RELEASE (A3)
+-----------------------------------------------------------
+The knob's DEFAULT is resolved ONCE, at import, from the environment
+variable ``ENSEMBLE_ALLOW_ANCHORLESS_GLOBAL_LIST``:
+
+* **unset** ⇒ the historical wide default (``True``);
+* **set to a strictly parseable boolean** (case-insensitive ``1`` /
+  ``true`` / ``yes`` / ``on`` ⇒ True; ``0`` / ``false`` / ``no`` /
+  ``off`` ⇒ False) ⇒ that value;
+* **set to anything else** ⇒ the historical default (``True``) plus a
+  ``WARNING`` in the daemon log — an unparseable tightening request
+  never tightens silently and never crashes the import.
+
+The resolution happens at import time only (a restart, not a release,
+is enough), the knob stays a plain module attribute (tests flip it with
+``monkeypatch.setattr``), and EXACTLY ONE branch in the handler consults
+it — the env var introduces no second anchor-less path.
+
+``state`` vs ``closed`` — a DECIDED divergence, not an accident: the
+messages-era room list (``GET /api/instances/{id}/rooms``) emits the
+boolean ``closed`` and its contract is FROZEN at v0.31.0 for that
+shipped consumer; the new nest-wide route emits the fuller ``state``
+string because its row is the richer shape (roster + owner + tree
+anchors) and the FE global lane needs the lifecycle truth rather than a
+derived boolean. The two routes share no row schema by design; adding
+``state`` to the frozen route is a v0.32.0-class contract change, not a
+drive-by.
 
 THE POSTURE (no new auth model)
 -------------------------------
@@ -72,6 +115,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -81,7 +125,10 @@ from daemon.repositories.room.models import (
     ROOM_READ_DEFAULT_LIMIT,
     ROOM_READ_MAX_LIMIT,
 )
-from daemon.repositories.room.repository import RoomNotFoundError
+from daemon.repositories.room.repository import (
+    ROOM_LIST_MAX_LIMIT,
+    RoomNotFoundError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +145,59 @@ _SCOPE_READ = "instances:read"
 _ERR_INSTANCE_NOT_FOUND = "instance_not_found"
 _ERR_ROOM_NOT_FOUND = "room_not_found"
 _ERR_ROOM_SERVICE_UNAVAILABLE = "room_service_unavailable"
+_ERR_BAD_REQUEST = "bad_request"
+
+#: The room-list route's DEFAULT page size — advisory, the server clamps
+#: every request into ``[1, ROOM_LIST_MAX_LIMIT]``.
+_ROOM_LIST_DEFAULT_LIMIT = 200
+
+#: The historical wide DEFAULT of the F-3 knob — unchanged behaviour.
+#: Kept as its own name so the env-var resolution below has an explicit
+#: fallback to fall back TO (unset / blank / unparseable ⇒ this).
+_ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT: bool = True
+
+#: The operator-facing env var that re-defaults the knob WITHOUT a code
+#: release (a daemon restart re-runs this import). Name + parse rule +
+#: fallback are documented in the module docstring (A3).
+_ANCHORLESS_GLOBAL_LIST_ENV = "ENSEMBLE_ALLOW_ANCHORLESS_GLOBAL_LIST"
+_ANCHORLESS_TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
+_ANCHORLESS_FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
+
+
+def _resolve_allow_anchorless_global_list() -> bool:
+    """Resolve the knob's default ONCE, at import (A3).
+
+    Strict parse of ``ENSEMBLE_ALLOW_ANCHORLESS_GLOBAL_LIST``:
+    case-insensitive ``1/true/yes/on`` ⇒ True, ``0/false/no/off`` ⇒
+    False. Unset, blank, or unparseable ⇒ the historical wide default
+    (:data:`_ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT`). An unparseable
+    value is LOUD (WARNING) but never fatal — a typo cannot take the
+    anchor-less lane down, and it cannot silently tighten it either.
+    """
+    raw = os.environ.get(_ANCHORLESS_GLOBAL_LIST_ENV)
+    if raw is None or not raw.strip():
+        return _ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT
+    token = raw.strip().lower()
+    if token in _ANCHORLESS_TRUE_TOKENS:
+        return True
+    if token in _ANCHORLESS_FALSE_TOKENS:
+        return False
+    logger.warning(
+        "rooms: %s=%r is not a boolean token (accepted: %s / %s) — "
+        "falling back to the default %r",
+        _ANCHORLESS_GLOBAL_LIST_ENV,
+        raw,
+        sorted(_ANCHORLESS_TRUE_TOKENS),
+        sorted(_ANCHORLESS_FALSE_TOKENS),
+        _ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT,
+    )
+    return _ALLOW_ANCHORLESS_GLOBAL_LIST_DEFAULT
+
+
+# Module-level knob (F-3 tightening switch) — single branch consults it.
+# Its DEFAULT is env-resolved at import (A3); tests flip the attribute
+# itself via ``monkeypatch.setattr``.
+_ALLOW_ANCHORLESS_GLOBAL_LIST: bool = _resolve_allow_anchorless_global_list()
 
 
 def _err(status_code: int, error: str, message: str) -> HTTPException:
@@ -204,6 +304,153 @@ async def list_instance_rooms(instance_id: str, request: Request) -> dict:
             }
             for room in rooms
         ]
+    }
+
+
+@router.get(
+    "/rooms",
+    dependencies=[scope_required(_SCOPE_READ)],
+)
+async def list_rooms(
+    request: Request,
+    limit: int = Query(_ROOM_LIST_DEFAULT_LIMIT),
+    instance_id: str | None = Query(
+        None,
+        description=(
+            "OPTIONAL scope instance (BLOCKER-1(d)). Declared as "
+            "Query(None) so the parameter is part of the OpenAPI "
+            "surface; PRESENCE is still read from the raw query "
+            "string below — Query(None) cannot distinguish absent "
+            "from present-but-empty, and the N9 taxonomy depends on "
+            "the difference."
+        ),
+    ),
+) -> dict:
+    """Nest-wide room list (the global browser, gc-fe-surfaces phase 1).
+
+    Optional ``instance_id`` query param anchors the read to that
+    instance's scope (fail-closed predicate). Absent ⇒ anchor-less
+    (knob-gated by ``_ALLOW_ANCHORLESS_GLOBAL_LIST``).
+    """
+    manager = _get_manager(request)
+    room_service = _room_service(manager)
+    if room_service is None:
+        raise _err(
+            503,
+            _ERR_ROOM_SERVICE_UNAVAILABLE,
+            "the chat-room service is not available in this daemon",
+        )
+
+    # Presence detection via raw query string (Query(None) cannot
+    # distinguish absent from present-but-empty).
+    raw_params = request.query_params
+    present = "instance_id" in raw_params
+    raw_value = raw_params.get("instance_id") if present else None
+
+    # Server-side clamp. ``limit`` is ALREADY int-coerced by FastAPI (a
+    # non-integer query value 422s before the handler runs), so a
+    # defensive re-coercion here would be dead code.
+    clamped_limit = max(1, min(limit, ROOM_LIST_MAX_LIMIT))
+
+    # Present-but-empty / whitespace ⇒ 422 bad_request (malformed), in
+    # BOTH knob states (presence check precedes the knob gate).
+    if present:
+        stripped = (raw_value or "").strip()
+        if stripped == "":
+            raise _err(
+                422,
+                _ERR_BAD_REQUEST,
+                "instance_id must not be empty",
+            )
+
+    # Anchor-less path.
+    if not present:
+        if not _ALLOW_ANCHORLESS_GLOBAL_LIST:
+            raise _err(
+                404,
+                _ERR_INSTANCE_NOT_FOUND,
+                "Instance not found",
+            )
+        try:
+            rows, truncated = await room_service.list_all_rooms(clamped_limit)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("room list (global): listing failed (%r)", exc)
+            raise _err(
+                503,
+                _ERR_ROOM_SERVICE_UNAVAILABLE,
+                "the room list could not be read right now",
+            ) from exc
+        return _shape_rows(rows, truncated)
+
+    # Anchored path.
+    anchor = (raw_value or "").strip()
+    # Pure DB read for existence (never manager.get_instance — C-4).
+    # A-3: ONE fixed, input-free message in BOTH refusal branches of this
+    # route — the knob-OFF refusal below and the bad-anchor 404 share the
+    # exact same string, so the two are wire-indistinguishable and neither
+    # discloses the knob nor echoes client input.
+    try:
+        await asyncio.to_thread(manager.get_instance_info, anchor)
+    except KeyError:
+        raise _err(
+            404,
+            _ERR_INSTANCE_NOT_FOUND,
+            "Instance not found",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("room list (anchored): instance lookup failed (%r)", exc)
+        raise _err(
+            404,
+            _ERR_INSTANCE_NOT_FOUND,
+            "Instance not found",
+        ) from exc
+    # descendant closure off-loop
+    closure_faulted = False
+    try:
+        descendant_ids = await asyncio.to_thread(
+            manager.get_tree_ids_permanent, anchor
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "room list (anchored): the descendant closure of instance=%s "
+            "could not be computed (%r) — falling back to anchor-only",
+            anchor,
+            exc,
+        )
+        descendant_ids = [anchor]
+        closure_faulted = True
+    try:
+        rows, truncated = await room_service.list_readable_rooms(
+            anchor, clamped_limit, descendant_ids=descendant_ids
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("room list (anchored): listing failed (%r)", exc)
+        raise _err(
+            503,
+            _ERR_ROOM_SERVICE_UNAVAILABLE,
+            "the room list could not be read right now",
+        ) from exc
+    return _shape_rows(rows, truncated or closure_faulted)
+
+
+def _shape_rows(rows: list[dict[str, Any]], truncated: bool) -> dict[str, Any]:
+    return {
+        "rooms": [
+            {
+                "room_id": r.get("room_id"),
+                "name": r.get("name"),
+                "tree_root_id": r.get("tree_root_id"),
+                "owner_instance_id": r.get("owner_instance_id"),
+                "state": r.get("state"),
+                "member_count": int(r.get("member_count") or 0),
+                "member_instance_ids": list(r.get("member_instance_ids") or []),
+                "last_message_at": r.get("last_post_at"),
+                "last_message_seq": r.get("last_message_seq"),
+                "created_at": r.get("created_at"),
+            }
+            for r in rows
+        ],
+        "truncated": bool(truncated),
     }
 
 

@@ -1,0 +1,3076 @@
+# POK Phase-0 Census — ACTIVE rows, project 83da04de (byte-exact)
+
+- generated_at (UTC): 2026-11-18T14:36:04Z
+- db: ensemble_prod   table: project_operating_knowledge   project_id: 83da04de-a410-4fb5-9e92-251a99d28a52
+- active_discriminator: status='active'
+- active_count: 282   sql_count_star_active: 282
+- reconciliation: enumerated rows == SELECT count(*) == 282
+- per_row_sha_verified: 282/282 sha256(body) == content_sha256
+- bodies_digest_sha256: d6c358b8bc1927ac02ad36eccf954d2543074347ef54fdc63bff980cc92fe249   (sha256 of all bodies joined with \n, ORDER BY id)
+- total_body_bytes: 61952
+- pinned: 0   disputed: 0
+
+## Counts by dimension
+
+| domain | count |
+|---|---|
+| verify | 142 |
+| artifact | 46 |
+| environment | 35 |
+| other | 32 |
+| deploy | 24 |
+| catalog | 3 |
+
+| audience | count |
+|---|---|
+| both | 196 |
+| operation | 56 |
+| implementation | 30 |
+
+| source_tier | count |
+|---|---|
+| agent | 282 |
+
+## Intake baseline (created_at >= 2026-11-11)
+
+window: 2026-11-11 .. 2026-11-18T14:36:04Z (lexical TEXT compare, matches SQL predicate) — count: 216 (slugs sorted by created_at)
+
+- prompt-assent-02-category-registration-seam
+- prompt-assent-01-gate-owner-and-evidence
+- prompt-assent-03-paths-use-assent-not-assist
+- services-unit-pre-existing-reds-2026-11-11
+- pg-ensure-cols-is-one-txn
+- gate-whole-tree-slow-skill-sink-test
+- gate3-base-failed-list-0efdf106f
+- flake-01-ab-control-arm-attribution
+- git-01-canonical-detached-diff-trap
+- merged-shape-guard-verification-method
+- source-gc-drift-guard-landing-shape
+- prompt-assist-04-freshness-leg-second-race
+- ab-39a27f20-strict-superset-fix-pending
+- mutation-03-git-restore-byte-exact-proof
+- mutation-02-worktree-scratch-venue
+- prompt-assist-02-killswitch-boot-raise
+- prompt-assist-01-discord-first-mint
+- dev-boot-04-ambient-env-scrub
+- wiring-02-phase2-window
+- wiring-01-capture-dispatcher-seam
+- wiring-03-grep-scoped-miss
+- land-01-merge-shape-guards
+- stagerelease-02-stage-vs-promote-origin
+- skillab-01-zero-traffic-ab-stall
+- stagerelease-01-binary-sql-toc-census-route
+- skillab-02-keeper-rule-zero-traffic-fix
+- pyinst-01-frozen-binary-audit-route
+- prompt-assist-tier2-gate-netnew-2
+- skill-fix-defer-sql-census-8e9853e9
+- wtgate-01-isolation-ladder-decides
+- wtgate-02-base-leg-provisioning-artifacts
+- seal-01-restamp-requires-unseal-row
+- census-01-cross-lane-migration-pins
+- skillab-03-comparison-counter-semantics
+- skillevo-01-content-pipeline-no-patch-mode
+- gate-crosslane-pins-01-class
+- prompt-assent-flip-on-gate
+- prompt-assent-pg-server-defaults-gap
+- packconv-03-unregistered-pack-no-coverage
+- seal-02-repin-dict-keeps-base-value
+- seal-03-repin-mutation-proof-triple
+- git-01-commit-msg-before-dashdash
+- census-pin-lane-ownership-form
+- seal-partition-repin-sha-orientation
+- memoir-census-pin-lane-scoped
+- mutation-proof-must-target-pin-property
+- memoir-census-pin-biting-mutations
+- commissioned-proof-list-is-not-ground-truth
+- git-sha-transcription-discipline
+- git-update-ref-worktree-index-stale
+- baseleg-02-worktree-vs-archive-choice
+- sql-01-instances-updated-at-varchar
+- trustbound-01-settings-tier-agent-writable
+- discord-02-user-origin-arms-by-source-type
+- discord-01-channel-identity-already-present
+- trustbound-02-granting-knob-must-be-env
+- forensics-02-debug-log-evicts-evidence
+- w3-f18-store-not-callable-typeerror
+- tag-read-01-lsremote-yields-tagobj
+- discord-03-assent-predicate-fix
+- forensics-02-maintenance-runs-death-clock
+- supervise-01-launcher-loop-is-the-respawner
+- launcher-01-sha256-pin-chain
+- deathclock-01-maintenance-runs-interrupted
+- bind-01-uvicorn-bind-after-lifespan
+- board-01-ari-only-write-path-leader-blocked
+- bind-02-fix-contract-exit-code-preservation
+- shutdown-01-teardown-order
+- shutdown-02-port-hold-truth
+- shutdown-03-lifespan-budgets
+- capture-admission-gate-chain
+- e2e-staged-binary-isolated-boot
+- capture-admission-empty-usage-table
+- bind-03-uvicorn-closes-9797-first
+- launcher-01-respawn-is-internal-not-systemd
+- portfence-01-daemon-port-comes-from-port-env
+- bootlog-01-pre-import-logs-unobservable
+- bindfix-01-prebind-without-listen
+- bindfix-03-blocked-boot-zero-startup
+- bootlog-02-prebind-installs-log-handlers
+- killfoot-01-broad-pkill-pattern-hits-live
+- forensics-04-registry-truncates-command-text
+- sweep-01-predicate-would-have-reaped-rogue
+- portfence-02-daemon-hands-port-to-children
+- injection-01-fifo-lifetime-teardown
+- wt-merge-v02917-stale-index-ref-move
+- ram-guard-01-ambient-bash-stamp-inherited
+- bind-mut-01-scratch-wt-py-resolve
+- injection-02-no-revive-hard-terminal
+- burstabort-01-bind-retry-u-cap
+- bindfix-02-budget-for-transient-holders
+- portfence-03-metrics-port-env-knob-works
+- teigate-01-auth-cluster-identical-both-sides
+- uvvenv-01-no-pip-use-importlib
+- bindrace-01-planning-docs-untracked-wip
+- rogue-01-write-quant-method
+- prompt-assent-04-dm-shield-tool-gate
+- prompt-assent-05-auth-env-scrub-family
+- assent-p15-local-imports-are-mutation-pins
+- prompt-assent-06-freshness-bound-flake
+- provider-01-402-wake-kill
+- packs-01-conflict-keep-both-newest-first
+- land-02-stage-order-push-tag-stage
+- merge-01-ram-guard-containment-env-order
+- stage-ceremony-census-proofs
+- raw-delete-silent-zero-rows
+- ac-comment-token-grep-collision
+- dryrun-fd-inheritance-fence
+- stageverify-01-receipt-stdout-only
+- dispatch-truncation-recover-queue
+- kv-setkv-replaces-whole-value
+- stage-v0300-worktree-head-nuance
+- env-nonsource-wt-sonic-v0302
+- worktree-env-fence-shape-recheck
+- sonic-01-git-grant-boundary
+- guidelines-01-empty-basedir-cwd-injection
+- scripts-pin-01-floor-087f782af
+- sonic-02-complexity-routing-doctrine
+- sonic-03-blast-gate-removed
+- gate-auth-env-302-poison
+- staging-01-scratch-boot-db-ambient-allow
+- terminate-budget-01-fleet-3-per-24h
+- sonic-bump-version-selfcommits
+- sonic-stage-fresh-wt-fe-prebuild
+- none-vs-zeropulse-signal-shape
+- log-truth-pin-observed-flag-mutation
+- plan-anchor-supersession-post-absorb
+- rogue-p2-corpus-routed-to-v03012-rulings
+- e2s0-01-mirror-claims-and-scratch-db-wall
+- boot-auto-cleanup-throttle-gap
+- launcher-stats-restart-forensics
+- bash-spawn-registry-pid-census
+- pid-numeric-band-not-identity
+- rogue-cleanup-rider-recorded-addendum
+- identity-01-mainpid-vs-binder-pid
+- rogue-p2-evidence-locations
+- staged-dirs-v0309-inventory
+- canonical-checkout-clean-20261114
+- fidelity-01-diff-verbatim-blocks
+- source-gc-02-cross-lane-carve-out-cure
+- group-chat-02-p1-committed-docs-stale
+- group-chat-03-p2-typed-collision-fix
+- py-fromimport-staticmethod-importerror
+- gc-gate-01-fence-family-exclusions
+- gc-gate-fence-family-and-xunit2-digest-trap
+- gc-p3-swallow-advance-class-sweep
+- gc-gate-02-floor-scope-composition-flakes
+- gc-gate-03-filter-side-pin
+- gc-p3-04-test-preadvance-blindspot
+- gc-p3-boot-pin-file-node-count
+- gc-boot-01-addressed-rows-never-derive
+- porcelain-midwrite-false-positive
+- graph-seam-pins-need-executed-composition
+- testgate-02-standalone-packs
+- testgate-01-explicit-paths
+- language-check-order-scoped-isolation
+- pytest-01-sessionstate-annotations-mock
+- packs-row-count-drift-after-style-pass
+- gate-langcheck-auth-scrub-false-negative
+- group-chat-p4-nudge-latch-manager-ram
+- gc-p4-02-executed-graph-probe-recipe
+- gc-p4-01-nudge-gate-executed-graph-green
+- gc-p4-cle-line-tripwire-repin
+- gc-p4-junitxml-is-the-red-source
+- baseleg-01-git-archive-no-dotgit
+- abskill-01-canon-file-family4-gap
+- failed-digest-gate-canon-sync-pending
+- gc-p5-room-gate-node-baseline
+- priv-category-rotates-mutation-matrix
+- gc-p5-no-packs-row-added
+- await-sweep-resolution-gaps
+- pg-schema-fence-connect-args-not-listener
+- gc-p5-room-create-cap-race
+- group-chat-p4-01-carrier-reminder-slot-gap
+- gc-p4-03-note-drop-turn-end-reminder
+- testenv-01-unit-shard-hard-abort
+- gc-p3-testp11-class-identity
+- quarantine-01-row-names-all-reds
+- review-01-remeasure-base-red-claims
+- source-gc-drift-guards-branch-tip-sensitive
+- group-chat-01-design-landed
+- worktree-01-venv-branch-binding
+- release-01-bump-tag-then-stage-order
+- rogue-fence-ambient-allow-var
+- auth-lane-scrub-ensemble-auth-env
+- skill-ab-resolve-01-guard-parity-all-paths
+- skill-ab-resolve-02-svc-sanctioned-unpinned
+- audit-script-dsn-password-stderr-leak
+- pok-scope-01-rolling-state-out
+- parallel-01-write-then-verify
+- disk-01-stage-wt-reclaim-gates
+- disk-03-tag-lineage-unmerged-stage-trees
+- disk-02-evidence-sidecar-manifest
+- promote-02-handback-halt-self-resolve
+- skill-e6-04-a4-gauge-grew-not-collapsed
+- promote-01-false-halt-self-commits
+- skill-e6-03-promote-did-not-resolve-backlog
+- skill-e6-02-sweep-crowns-newer-gen
+- predicate-discriminator-01-durable-key
+- plan-predicate-ledger-01-attestation
+- e6-manifest-pairs-live-db-only
+- access-predicate-01-narrow-stub-hides
+- access-predicate-02-exact-result-set-leg
+- review-01-shared-helper-blast-radius
+- review-02-describe-http-error-call-sites
+- e6-db-pin-skip-guard-fence
+- skillab-manifest-02-claims-withdrawn
+- skillab-manifest-01-no-consumer
+- dispatch-01-worker-barrier-stall
+- evidence-commit-ab-fdc2bb4f-restored
+- testgate-03-double-drift-hides-branch
+- evidence-02-wt-sweep-rescue-durable
+- skillab-dev-zero-rows-ro-grant-gap
+- pack-ci-top-level-unit-ungated
+- packs-registration-01-canonical-stale
+- packs-registration-02-house-grep-audit
+
+## Rows (282, full bodies verbatim, ORDER BY id)
+
+### git-update-ref-worktree-index-stale
+
+id: 03410d9e-c7e5-48ac-b08d-3deafb4a6218 | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T08:28:17.368727+00:00 | updated_at: 2026-11-11T08:28:17.368805+00:00 | last_verified: 2026-11-11T08:28:17.368386+00:00 | verify_count: 0 | access_count: 7 | last_accessed_at: 2026-11-18T06:31:10.826021+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: df0ef64cd82636a462fc21e164bbe068108e24a7f2bcdf23059c5072cb1a16a1 | body_bytes: 221
+
+```text
+git update-ref on a branch held by another worktree leaves files untouched but the index stale: staged entries are a ref-move artifact, not work. Owner must git reset --hard; never commit that diff (it reverts the merge).
+```
+
+### prompt-assent-03-paths-use-assent-not-assist
+
+id: 03a6ad0a-3e07-43f2-914e-2b5c17a68d20 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T04:04:36.698301+00:00 | updated_at: 2026-11-11T04:04:36.698351+00:00 | last_verified: 2026-11-11T04:04:36.697834+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-18T06:31:43.028083+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: a997f9c6154a649b6d73ea3e815e671fbe3bb82db5da7d4e7140a1e44197356c | body_bytes: 234
+
+```text
+prompt-assent lane PATHS use "assent", not "assist": worktree ensemble-src-wt-prompt-assent, planning dir .agents/shared/planning/prompt-assent/, branch feature/prompt-assist. A dispatch naming "prompt-assist" as a path yields ENOENT.
+```
+
+### ac-comment-token-grep-collision
+
+id: 06195af2-700a-4352-8430-a9ed0eeaa350 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-12T17:34:52.257835+00:00 | updated_at: 2026-11-12T17:34:52.257916+00:00 | last_verified: 2026-11-12T17:34:52.257406+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:27:11.567533+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: fb14aa651f45541adc22bee7d6e78e34e8343c9fda27e1a1dc3d5d07501673e7 | body_bytes: 239
+
+```text
+AC trap: plan mandates a doctrine comment in an artifact while an AC whole-file negative-greps that same token, making the AC unsatisfiable vs its own file. Fix: scope negative greps to non-comment lines; never weaken the mandated comment.
+```
+
+### land-02-stage-order-push-tag-stage
+
+id: 063d3d90-a211-4b19-a980-1f68b32b2cd3 | domain: deploy | audience: operation | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-12T11:10:04.534436+00:00 | updated_at: 2026-11-12T11:10:04.534529+00:00 | last_verified:  | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:31:10.826021+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 0e35f5c811a588e1bf6253a9aadf83824af0298b14de8462112f62ef514105d0 | body_bytes: 208
+
+```text
+stage.sh _tip_sha reads refs/remotes/origin/latest: tip-identity = tag exists + HEAD == tagged commit, so order is merge, push latest, push tag, THEN stage from a clean dedicated worktree; e2e runs post-push.
+```
+
+### bind-01-uvicorn-bind-after-lifespan
+
+id: 06767c96-bb29-4935-9dfd-03c8ae97c240 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T12:57:44.432840+00:00 | updated_at: 2026-11-11T12:57:44.432928+00:00 | last_verified: 2026-11-11T12:57:44.432479+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-11T13:44:30.439823+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 3ab0ab829761b6c6648f4ae2caa846779f20027b9fb06d112ca34c73c46953e1 | body_bytes: 228
+
+```text
+uvicorn binds 9797 without reuse_port AFTER lifespan startup. Exit map: 78 auth (RestartPreventExitStatus), 75 PG down, 1 bind EADDRINUSE, 3 lifespan failure. MetricsListener 9798 = stdlib ThreadingHTTPServer in api.py lifespan.
+```
+
+### skillab-01-zero-traffic-ab-stall
+
+id: 07df8535-8389-4f53-9d50-86b683b73864 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T07:24:15.188913+00:00 | updated_at: 2026-11-11T07:24:15.188996+00:00 | last_verified: 2026-11-11T07:24:15.188403+00:00 | verify_count: 0 | access_count: 6 | last_accessed_at: 2026-11-18T05:06:42.382966+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 4a790f7c4eb73109de3abc35f9b8e48250e3bddb921f42f43cef6cfaf80a3ad0 | body_bytes: 234
+
+```text
+Zero-traffic skill FIX opens an A/B group with NO exit: comparisons stays 0, so check_ab_test_resolution returns needs_more_data at skill_evolution_service.py:1462 — BEFORE the extension_count bump (:1536); both gens stay is_active.
+```
+
+### skill-ab-resolve-01-guard-parity-all-paths
+
+id: 0a2a4864-408f-43b4-81dd-109ac1458d21 | domain: artifact | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: developer
+created_at: 2026-11-17T23:00:05.782994+00:00 | updated_at: 2026-11-17T23:00:05.783063+00:00 | last_verified:  | verify_count: 0 | access_count: 14 | last_accessed_at: 2026-11-18T06:30:14.624136+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 8167bae2c0c002f8cd8ed2b476c0a9144898ec34e1fb863f91dde29f607223ac | body_bytes: 206
+
+```text
+Skill A/B resolve guards ALL 4 mutating paths (0/2/3/4) + sanctioned router 409. Residual: resolve_pair has NO internal resolved_at refusal — router-only protection (TOCTOU); no other production importer.
+```
+
+### packconv-01-extend-file-owes-no-new-row
+
+id: 0a5f7ac5-e382-42b0-9aca-daabbbeab9b9 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: tester
+created_at: 2026-11-09T10:47:13.143092+00:00 | updated_at: 2026-11-09T10:47:13.143142+00:00 | last_verified: 2026-11-09T10:47:13.142739+00:00 | verify_count: 0 | access_count: 14 | last_accessed_at: 2026-11-16T03:50:58.246984+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 1592a7647d46feb43b4bbb340f608f8ea094660b91dbeac8afddba8f6a2a6ae8 | body_bytes: 197
+
+```text
+House rule: EXTENDING an already-registered test file owes NO new test/packs/*.sh and NO new PACKS.md row. A new pack script + row are owed only for a NEW test file not covered by an existing pack.
+```
+
+### gc-gate-02-floor-scope-composition-flakes
+
+id: 0a6870dc-77ba-4822-a86c-f03e7925acec | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T00:33:01.423570+00:00 | updated_at: 2026-11-16T00:33:01.423632+00:00 | last_verified: 2026-11-16T00:33:01.422778+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-16T00:43:30.627522+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: aad10f48c4d13ca7d4c44e6d73b647b87d701eb128182c8c7d566bc9314398dd | body_bytes: 228
+
+```text
+gc Tier-2 gate: floor=tests/unit only (tests/manager + tests/ root never collected). Serial fail-sets byte-identical across head/base trees = xdist-composition flake proof; gitless-base passes for git-shelling tests are vacuous.
+```
+
+### gc-p5-no-packs-row-added
+
+id: 0b00c36b-8bdf-4c5e-8ee5-ef91453880e5 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T08:31:36.722997+00:00 | updated_at: 2026-11-16T08:31:36.723043+00:00 | last_verified: 2026-11-16T08:31:36.722645+00:00 | verify_count: 0 | access_count: 5 | last_accessed_at: 2026-11-17T00:47:01.932527+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 32f78eb41b6e3143d8fc9fec2db335d9305ca7d4f9b6130cfca92e4ac191d685 | body_bytes: 197
+
+```text
+P5 branch adbc7bf21..77a869057 adds NO .agents/tester/PACKS.md row (byte-identical to base): the 13-file room pack and P5 evidence are unregistered, unlike the P3 lane's gc_p3_room_concurrency row.
+```
+
+### pg-ensure-cols-is-one-txn
+
+id: 0b2ed8c5-850e-405b-9c50-4e7ab4537e3b | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T04:43:19.218301+00:00 | updated_at: 2026-11-11T04:43:19.218353+00:00 | last_verified: 2026-11-11T04:43:19.217776+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 6d90c22354c15d48f13ebfa70e085b1c4194713f826c8bcc4d99161a21d17305 | body_bytes: 214
+
+```text
+_ensure_postgres_columns runs ONE transaction, NO per-statement try/except (manager.py:10036-10038; only two legacy backfill loops isolate). 467/467 blobs verified. The '7-blocks' claim is FALSE (anomaly 85327a01).
+```
+
+### dryrun-fd-inheritance-fence
+
+id: 0bd0304c-b65f-412c-ba9b-e0bccb8d5b50 | domain: environment | audience: operation | source_tier: agent | provenance: observed | created_by_agent: devops
+created_at: 2026-11-12T19:59:25.571072+00:00 | updated_at: 2026-11-12T19:59:25.571146+00:00 | last_verified: 2026-11-12T19:59:25.569955+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-15T00:29:40.222287+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 3d9a9418541b091abad69db402c5bb237649152d9b1339d4f4310ffc69a0d73c | body_bytes: 224
+
+```text
+Scratch daemon launched from an agent bash inherits LIVE listener fds (fd=6==9797); env -i does not close fds. Pre-exec os.closerange(3,4096) then exec python -m daemon; verify scratch pid absent from live ports in ss -ltnp.
+```
+
+### decision-proxy-typed-answer-shapes
+
+id: 0bec76e8-9cfa-4ac5-be19-d165afa6864b | domain: artifact | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: architect
+created_at: 2026-11-09T05:25:50.576726+00:00 | updated_at: 2026-11-09T05:25:50.576786+00:00 | last_verified: 2026-11-09T05:25:50.576204+00:00 | verify_count: 0 | access_count: 7 | last_accessed_at: 2026-11-10T03:06:21.175138+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 76b0e5984837daf95b291eff540c4b9590e0c00e56e950f2ea2aced6365bcbf7 | body_bytes: 228
+
+```text
+Proxy /v1/decisions: choice = picked value + full probabilities[] + confidence; score = scalar + level-indexed probabilities[]; predicate = probability. input is NOT edge-validated; missing input mis-signals 502 - pre-flight it.
+```
+
+### predicate-discriminator-01-durable-key
+
+id: 0ca49c26-52bf-43e6-8013-437b0256fc93 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-18T06:16:32.079507+00:00 | updated_at: 2026-11-18T06:16:32.079563+00:00 | last_verified: 2026-11-18T06:16:32.078920+00:00 | verify_count: 0 | access_count: 24 | last_accessed_at: 2026-11-18T06:31:10.713421+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: c3ae0d43fa5feca818f306a9c9231a470ccaf84690e34a550a665019cc22cd8f | body_bytes: 239
+
+```text
+In-memory per-parent counters (bus self.generation) cannot be a row-level match discriminator. source_task_id terminality is the durable key, and it belongs to the PARK/fulfillable predicate (child INSTANCE status), not the fire predicate.
+```
+
+### promote-01-false-halt-self-commits
+
+id: 0d372d77-a2b7-4f4c-a299-59985c560bd5 | domain: deploy | audience: operation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-18T05:17:26.754010+00:00 | updated_at: 2026-11-18T05:17:26.754075+00:00 | last_verified:  | verify_count: 0 | access_count: 7 | last_accessed_at: 2026-11-18T06:29:08.989247+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 73cb36ae732804fe393ce63afa5f5f330fa735b31471afbcd72d41b6c10c59aa | body_bytes: 230
+
+```text
+Hand-back halt root cause: _gate_serving_attribution Layer 1 needs every :9797 LISTEN holder argv-owned, but the daemon's children inherit the listen fd so it always refuses. It self-commits ~9min later via the daemon-side closer.
+```
+
+### skill-03-refusal-observability-split
+
+id: 0d8b1d7a-a743-4178-9bd3-dd982635a70e | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T06:36:34.770513+00:00 | updated_at: 2026-11-09T06:36:34.770568+00:00 | last_verified: 2026-11-09T06:36:34.770123+00:00 | verify_count: 0 | access_count: 10 | last_accessed_at: 2026-11-18T06:32:15.520404+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: e85d148df54702d907f26a762988897a79d480a5cb6a1486d2c29cdeaddc9302 | body_bytes: 225
+
+```text
+Skill lane refusals split two ways: refused ADMISSION writes NO row (enqueue returns None, no lane_disabled row); refused EXECUTION of a queued row writes terminally at daemon/services/job_processor.py:787. Not contradictory.
+```
+
+### skill-e6-04-a4-gauge-grew-not-collapsed
+
+id: 0df359fe-4a6b-4c93-9cae-816798a97ee5 | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-18T05:16:33.253962+00:00 | updated_at: 2026-11-18T05:16:33.254017+00:00 | last_verified: 2026-11-18T05:16:33.253528+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T05:21:58.741839+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 54de7b850a4b3ac08f34682a2fafd1039815d914a8973318ebf507e101957ca2 | body_bytes: 207
+
+```text
+A4 gauge has NOT collapsed: watch #7 40 keys/100 rows, watch #8 44 keys/112 rows (+4/+12) - diverging families minted faster than resolutions landed. Gauge counts ALL rows incl. inactive; test on KEYS count.
+```
+
+### wiring-01-capture-dispatcher-seam
+
+id: 0e3dd745-ee9c-4c43-bc95-c49e1159fd28 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T06:49:04.402844+00:00 | updated_at: 2026-11-11T06:49:04.402923+00:00 | last_verified: 2026-11-11T06:49:04.402480+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-11T12:44:22.080851+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 70aff445aa690ec7fa7dfd74caca815d803b85755dd070d4bb14eff6e1883597 | body_bytes: 236
+
+```text
+Capture-dispatcher binding sits at TWO seams: daemon/manager.py (boot-time) and daemon/api.py (api seam). SkillMetricsService.set_job_dispatcher is the real setter; routers/skills.py set_skill_job_dispatcher differs (REST fix endpoint).
+```
+
+### merge-01-ram-guard-containment-env-order
+
+id: 118778a7-2c8b-4b15-84d9-6482a6c1faa1 | domain: other | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: developer
+created_at: 2026-11-12T13:33:57.935360+00:00 | updated_at: 2026-11-12T13:33:57.935464+00:00 | last_verified: 2026-11-12T13:33:57.934616+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-15T00:29:40.251587+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: a6c14c88b3413a67f8e0d05852089beb1b1f5b61b813f61cde4512a914eaa4a7 | body_bytes: 213
+
+```text
+Merge becc9884c (tip 766571982): containment env order = _apply_spawn_boundary(overlay) -> secrets -> KMS -> own stamp -> FOREIGN-stamp pop -> spawn; ram S1 registers post-spawn; dead None-materialisation dropped.
+```
+
+### prompt-assist-04-freshness-leg-second-race
+
+id: 12d2e95b-1aba-4d42-8086-39bd5ba850db | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T05:31:38.463354+00:00 | updated_at: 2026-11-11T05:31:38.463442+00:00 | last_verified:  | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 5940ecfbafe0b8a81cc111df94e896033140f977f3fd7f558ccb87a802154897 | body_bytes: 229
+
+```text
+prompt-assist freshness leg is STILL flaky (~13-20%): now_iso() floors the stamp, so a 599s backdate has effective age = 599 + frac + async elapsed, crossing the 600s bound. 8b22e76a5 widened only the TTL. @029416f2e: 2/6 flaked.
+```
+
+### bindrace-01-planning-docs-untracked-wip
+
+id: 144879ed-e125-4ba9-92a3-8ed7c6263390 | domain: artifact | audience: operation | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-12T01:08:31.018229+00:00 | updated_at: 2026-11-12T01:08:31.018284+00:00 | last_verified: 2026-11-12T01:08:31.017655+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 3d46d87d9496428815bd05c3c27ba75e8cca02088ee33b4555d322c9ea70ce3f | body_bytes: 231
+
+```text
+bind-race planning docs are untracked WIP ONLY: worktree ensemble-src-wt-bind-race @7472b9084 (feature/bind-race-fix); no commits touch .agents/shared/planning/bind-race/. Expect filesystem-only; search sibling worktrees, not refs.
+```
+
+### services-unit-pre-existing-reds-2026-11-11
+
+id: 14b29e68-528b-4ba0-a570-22b29239110d | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: coder
+created_at: 2026-11-11T04:21:32.279303+00:00 | updated_at: 2026-11-11T04:21:32.279351+00:00 | last_verified: 2026-11-11T04:21:32.278856+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-18T06:32:15.520404+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: a122551d6bff9327fc06a766a84cfe4dcb4c761b7860c330a9a7cf8cbfbcdee4 | body_bytes: 215
+
+```text
+tests/unit/services/ has 17 pre-existing reds at base 0efdf106f (api.py text-pin, bash reaper, child reports, job queue proxy, scheduling, service tool). Park new work in /tmp and re-run to prove they are not yours.
+```
+
+### sealmap-01-location-and-inplay-files
+
+id: 14d726d6-ec58-4fd2-9382-a4889e91e1b1 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: tester
+created_at: 2026-11-09T10:48:07.034995+00:00 | updated_at: 2026-11-09T10:48:07.035081+00:00 | last_verified: 2026-11-09T10:48:07.033787+00:00 | verify_count: 0 | access_count: 11 | last_accessed_at: 2026-11-18T06:32:15.281036+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 510ae6f53a74bee86ecb58c22ba7b664df6fc5310eff58f76b3829473c93834e | body_bytes: 223
+
+```text
+SEALED_SHA_BASELINES (35 rows) = tests/test_chart_image_delivery_e2e.py:1425-1580. Neither snapshot_search_service.py nor snapshot_tools.py is sealed, so that fix owes NO re-pin; daemon/constants.py IS sealed (4453ef30…).
+```
+
+### injection-02-no-revive-hard-terminal
+
+id: 14f18418-a5aa-475a-9335-ec882cc21448 | domain: artifact | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: developer
+created_at: 2026-11-11T16:06:43.694920+00:00 | updated_at: 2026-11-11T16:06:43.694982+00:00 | last_verified: 2026-11-11T16:06:43.694423+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 1b3d6929d8c66c17fe94f50b493f781ac5943cba0d84dffcfd26c43f527598b3 | body_bytes: 242
+
+```text
+End-of-turn drain enqueue SKIPS hard-terminal statuses (TERMINATED/ERROR/FAILED) read fresh from repo — else Stage-7 revives a watchover-terminated instance (@4e0981b57). COMPLETED revives by design; PAUSED untouched; probe error fails OPEN
+```
+
+### baseleg-02-worktree-vs-archive-choice
+
+id: 17782666-d708-4242-b6c3-3dad98590c20 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T08:42:09.198328+00:00 | updated_at: 2026-11-11T08:42:09.198386+00:00 | last_verified: 2026-11-11T08:42:09.197741+00:00 | verify_count: 0 | access_count: 7 | last_accessed_at: 2026-11-18T06:32:15.382108+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 8aa41d544d4199ae590a79807a1cbe4ab7bb3b60c8bebd7daea410f967ce6081 | body_bytes: 235
+
+```text
+Git-dependent pins under test -> detached `git worktree` base leg (carries .git); reserve git-archive for pure-filesystem pins, parked under a project-controlled scratch parent, never /tmp (temp-dir exemptions manufacture false diffs).
+```
+
+### disk-02-evidence-sidecar-manifest
+
+id: 18d02e1d-4dc2-420d-b8c1-2268deba9676 | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-18T04:49:44.501749+00:00 | updated_at: 2026-11-18T04:49:44.501804+00:00 | last_verified: 2026-11-18T04:49:44.501261+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:28:15.024305+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: b1492db527850e6d8779f79f81f0ba5b16790bc89affcab6c0809d8f00751bf6 | body_bytes: 176
+
+```text
+Wt-sweep rule: evidence-only dirt (.agents/** install-audit family) is side-carred to /tmp with a sha256 MANIFEST then removed; uncommitted code-WIP dirt is NEVER auto-removed.
+```
+
+### plan-anchor-supersession-post-absorb
+
+id: 1a3aad07-7bb4-4662-9e15-d6348b7d7985 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: approver
+created_at: 2026-11-14T20:32:35.552371+00:00 | updated_at: 2026-11-14T20:32:35.552427+00:00 | last_verified: 2026-11-14T20:32:35.551910+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-17T11:05:22.945164+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: fd2f9bd5ae22cf6afc7222d22a5a5a1c5f8e514e2dec808297be58f302516d2e | body_bytes: 233
+
+```text
+Post-absorb rebase can leave a plan corpus's anchors (version slot, commit shas) behind the lane's newer finalize rulings; approval stays valid only with an explicit note routing the executor to the KV rulings for stage-time anchors.
+```
+
+### source-gc-02-cross-lane-carve-out-cure
+
+id: 1a88b07f-1f0e-497d-8383-6f97ff4589bb | domain: verify | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-15T08:58:52.000326+00:00 | updated_at: 2026-11-15T08:58:52.000441+00:00 | last_verified: 2026-11-15T08:58:51.999479+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-18T06:31:10.774644+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 2732c3049ea5019922221fa70c7d92ebb5719607a69c38013931d82748146838 | body_bytes: 235
+
+```text
+P11 drift-guard cure 7bc6bff74: lane pins red on other sanctioned lanes' manager.py hunks; SANCTIONED_LANE_MARKERS tuple carves them out. Counter-mutation = TEMP COMMIT + soft reset: history pins diff commits, worktree edits invisible.
+```
+
+### access-predicate-01-narrow-stub-hides
+
+id: 1adf26b3-7cd5-4068-be7d-b08b33a0fbc3 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-18T06:31:42.977148+00:00 | updated_at: 2026-11-18T06:31:42.977246+00:00 | last_verified: 2026-11-18T06:31:42.976604+00:00 | verify_count: 0 | access_count: 6 | last_accessed_at: 2026-11-18T06:33:03.797662+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: b25e5a14df02e48ec8c9f87308262fecbd0781c343aaa5453a05a7553a14e1a0 | body_bytes: 230
+
+```text
+Narrow test double hid a disjunct: stubbed get_tree_ids_permanent returned DIRECT children while the real repo returns the FULL permanent subtree, so the owner-in-descendant_set disjunct could be deleted with 18 cases still green.
+```
+
+### bootlog-02-prebind-installs-log-handlers
+
+id: 1b01b44a-fca1-4ff2-bb7d-91651aebf312 | domain: artifact | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: coder
+created_at: 2026-11-11T13:44:53.482678+00:00 | updated_at: 2026-11-11T13:44:53.482728+00:00 | last_verified: 2026-11-11T13:44:53.482240+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: de2f4bbd7d4ff25eb4e57968be6e09267fc4b3d6a8bf39b89f88d5241fa66de0 | body_bytes: 186
+
+```text
+The serve seam installs install_root_logging() BEFORE the pre-bind: the root logger has no handler until daemon.api imports, so bind diagnostics would otherwise never reach ensemble.log.
+```
+
+### forensics-02-maintenance-runs-death-clock
+
+id: 1ca5cd95-1b5f-41c4-878d-7ca3234d02b0 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: maintenancer
+created_at: 2026-11-11T12:52:58.670545+00:00 | updated_at: 2026-11-11T12:52:58.670636+00:00 | last_verified: 2026-11-11T12:52:58.670044+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-11T12:53:20.169140+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 10e38fc3717f4462e6eac10a07fb90ca0e5d64c2f7bf46e6fd061c0d47bf7626 | body_bytes: 215
+
+```text
+checkpoint-cleanup maintenance_runs rows are a DEATH CLOCK surviving log eviction: an 'interrupted' run's completed_at IS the daemon death ts; next started_at = next boot + ~60s (60.1s ±0.15, 9/9, 2026-11-11 loop).
+```
+
+### gc-gate-fence-family-and-xunit2-digest-trap
+
+id: 1cd099e4-3df3-4715-9cfd-f84a4df588cb | domain: other | audience: operation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-15T17:20:10.140569+00:00 | updated_at: 2026-11-15T17:20:10.140624+00:00 | last_verified: 2026-11-15T17:20:10.140102+00:00 | verify_count: 0 | access_count: 7 | last_accessed_at: 2026-11-18T06:27:30.285530+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: e78fed9b58b172dfae2243f5f401609bbd96e6f2eb641a3874d0c48d9de60fec | body_bytes: 242
+
+```text
+GC-gate: 5 shard files (resource/anomaly/mission) fence-abort on ensemble_dev — isolate each (RC=1) or xdist dies RC=3. junitxml xunit2 lacks file attr: re-derive ids tree-anchored. Ambient ENSEMBLE_AUTH_* leaks past task fence (both legs).
+```
+
+### portfence-02-daemon-hands-port-to-children
+
+id: 1d515874-703e-4476-9079-9a2fbffaac56 | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: architect
+created_at: 2026-11-11T14:46:35.688788+00:00 | updated_at: 2026-11-11T14:46:35.688934+00:00 | last_verified: 2026-11-11T14:46:35.688094+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-11T14:50:40.881970+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 7f0ac48e8827f4c37b99c28bbb9b8e4458cb4cfa4fa3ecdf8997610b87a810e1 | body_bytes: 216
+
+```text
+The daemon exports its .env PORT (live 9797) into its own environment and hands it down to every child it spawns (service_spawner.py Popen with no env=). The 2026-11-11 delivery vector is open on the live host today.
+```
+
+### seal-01-restamp-requires-unseal-row
+
+id: 1e7126c5-2bce-40c5-a282-1688a02cf4e2 | domain: artifact | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T07:27:14.326930+00:00 | updated_at: 2026-11-11T07:27:14.327018+00:00 | last_verified: 2026-11-11T07:27:14.326555+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-11T07:54:07.819344+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: a3a3670276e0ee86d0927f5e07c16c258db582f6a3868b93e95602e098c2835e | body_bytes: 233
+
+```text
+Re-stamping a SEALED_SHA_BASELINES row in a test requires moving that same row out of SEAL_UNTOUCHED_BASE_VALUES in the same edit; the anti-blanket-re-stamp invariant goes red if the row is only re-stamped (prompt-assist tier2 gate).
+```
+
+### portfence-03-metrics-port-env-knob-works
+
+id: 22e0fb94-e287-4edc-a1ea-36b7aafc298b | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T20:40:36.484171+00:00 | updated_at: 2026-11-11T20:40:36.484239+00:00 | last_verified: 2026-11-11T20:40:36.483483+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-18T06:19:54.895240+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: e32047c5414227a2aa0f5caa9d168602f4c10366c4f6ab48e163a6e10d226f45 | body_bytes: 218
+
+```text
+The metrics port 9798 IS runtime-fenceable via LIMITS_METRICS_LISTENER_PORT (proven on the staged binary: a control boot moved it to 19050 cleanly). It is merely unfenced BY DEFAULT and not covered by PORT/DAEMON_PORT.
+```
+
+### stage-02-boot-smoke-copy
+
+id: 244ccc17-eed3-4929-a6d4-d00c968f5ea4 | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-09T03:53:00.345387+00:00 | updated_at: 2026-11-09T03:53:00.345443+00:00 | last_verified: 2026-11-09T03:53:00.345058+00:00 | verify_count: 0 | access_count: 12 | last_accessed_at: 2026-11-18T06:31:42.892756+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: edbcbdee603c220e742160d1701e7dceb09fc626d2ea1ae29c43f18bbba91951 | body_bytes: 237
+
+```text
+Staged boot smoke: copy to scratch, pin ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0, isolate HOME+DATA_DIR, SYSTEM_ENCRYPTION_KEY in a 0600 file, fence live state.json PRE/MID/POST. PyInstaller forks the server: find pids via /proc/pid/cwd.
+```
+
+### proxydec-04-tmp-9router-key-file
+
+id: 2625eeb1-a744-47af-9f65-ab76dcb81ad0 | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: devops
+created_at: 2026-11-09T10:53:47.185960+00:00 | updated_at: 2026-11-09T10:53:47.186020+00:00 | last_verified: 2026-11-09T10:53:47.185476+00:00 | verify_count: 0 | access_count: 8 | last_accessed_at: 2026-11-18T06:32:15.411960+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: c031b6f3f268e494d8c400e13294566c2e48b8fb287760ebb0c05534acf4cb45 | body_bytes: 216
+
+```text
+Hygiene: /tmp/9router.key (mode 600, 35 bytes, sha16 562054bb49f7c317, mtime 2026-11-09T07:23Z) holds the LIVE 9router API key — byte-identical to the proxy store credential. Not mine; flagged for the hygiene lane.
+```
+
+### source-gc-drift-guard-landing-shape
+
+id: 26cbdc9d-e2f4-43d9-939d-05e874263a94 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T05:23:29.143835+00:00 | updated_at: 2026-11-11T05:23:29.143920+00:00 | last_verified: 2026-11-11T05:23:29.143460+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-16T16:34:33.023838+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 804d5c06cb39f1c0d729fe4386c3dc00d3411d8043f06edbe71d53772c3cb7d7 | body_bytes: 195
+
+```text
+P11 source-gc drift guards turn GREEN only if the landing commit is a merge on the first-parent chain (git merge --no-ff). Squash/rebase landings leave the span non-empty and the guards stay RED.
+```
+
+### evidence-commit-ab-fdc2bb4f-restored
+
+id: 28889a8b-1234-4f28-88c6-6bce224d12ec | domain: catalog | audience: both | source_tier: agent | provenance: observed | created_by_agent: skill-keeper
+created_at: 2026-11-18T08:16:44.945132+00:00 | updated_at: 2026-11-18T08:16:44.945186+00:00 | last_verified: 2026-11-18T08:16:44.944630+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 935d37979067667a64acd8ac6c2079304d5cfb815644dda6bcda55136a06f1ae | body_bytes: 238
+
+```text
+evidence-commit skill: fdc2bb4f resolved (winner 9a4a1f54); gen-2 de7a5ffb in group 7a36fb63 = repaired superset, live-surface rules restored, frontmatter stripped. OWED: DB description still pre-FIX text; retire 9a4a1f54 once gen-2 wins.
+```
+
+### testgate-01-explicit-paths
+
+id: 28fbf220-25dc-48f2-877e-9a398a9eeeec | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-16T03:51:07.546070+00:00 | updated_at: 2026-11-16T03:51:07.546125+00:00 | last_verified: 2026-11-16T03:51:07.545684+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-16T23:47:54.032740+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: bb15f6b5c6ae9bd6bc539f659d91bf8f4c3f8356efc2294230f8c27b690b93af | body_bytes: 230
+
+```text
+Never run bare pytest (tests/ or -q): silent whole-tree collection can run 1h+ into unrelated suites. Every invocation: .venv/bin/python -m pytest with EXPLICIT file paths, bounded file list; abort any run over ~5min and split it.
+```
+
+### abskill-01-canon-file-family4-gap
+
+id: 2e5dfed4-232e-4efd-8452-2ca3443c7782 | domain: artifact | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: skill-keeper
+created_at: 2026-11-16T08:06:15.309562+00:00 | updated_at: 2026-11-16T08:06:15.309661+00:00 | last_verified:  | verify_count: 0 | access_count: 6 | last_accessed_at: 2026-11-18T06:29:08.922076+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: cb2bb5c9c45e7000bcd52151038f1c151457ffce5ed1bf021e34ee0b1db35c5e | body_bytes: 213
+
+```text
+Canon ab-base-leg-provisioning-artifacts lists 3 families; DB copy gen 1 (de796413) adds family 4 + .git pre-flight. Port both into the canon file; re-point its 'supersedes <id>' line at the A/B winner (a617317b).
+```
+
+### testenv-01-unit-shard-hard-abort
+
+id: 2f2aca22-1778-48a4-af5e-77ed24e324e8 | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-16T10:10:24.960036+00:00 | updated_at: 2026-11-16T10:10:24.960110+00:00 | last_verified:  | verify_count: 0 | access_count: 13 | last_accessed_at: 2026-11-18T06:35:31.944041+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 5033dc983ab4f8ae370621fd03aa4fcd749ddaac652667901a117a9ba4a94e62 | body_bytes: 235
+
+```text
+Unit-shard env: scrub POSTGRES_* PER-VARIABLE, pin nothing. Session fences pytest.exit HARD-ABORT unless POSTGRES_DB is ensemble_dev_test_only/ensemble_test_only; ensemble_dev aborts EXCEPT the prompt-cache fence (allows ensemble_dev).
+```
+
+### group-chat-01-design-landed
+
+id: 30291831-3763-4e6a-9df4-a4938e0038dc | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-17T08:33:48.876784+00:00 | updated_at: 2026-11-17T08:33:48.876949+00:00 | last_verified:  | verify_count: 0 | access_count: 41 | last_accessed_at: 2026-11-18T06:30:14.592232+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 54cd89b71fde66b6d66634e5fb1951484d23f6b808610f68f34903f77daa2751 | body_bytes: 226
+
+```text
+Group-chat Phase-2 COMPLETE @ 56a5f4a00 (6 approved phases): room store + migration 131, naming cascade, delivery lanes, nudges, tool #23 + joined-room block, UI modal + GC. Next: staged release lane; live promote = Emperor's.
+```
+
+### access-predicate-02-exact-result-set-leg
+
+id: 302cf615-5c13-423e-992e-0c13e50aafb5 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-18T06:31:43.066575+00:00 | updated_at: 2026-11-18T06:31:43.066637+00:00 | last_verified: 2026-11-18T06:31:43.066137+00:00 | verify_count: 0 | access_count: 6 | last_accessed_at: 2026-11-18T06:33:03.797662+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 6af9b3f665bd570dab538e5a2344ad5e3c173028cf2f10510a46559c904f24a7 | body_bytes: 231
+
+```text
+Access-predicate disjuncts need an e2e HTTP leg with the anchor STRICTLY ABOVE the owner, asserting the EXACT result set (not a membership subset). Counter-mutation proves observability: deleting the disjunct must redden the suite.
+```
+
+### quarantine-01-chart-seal-row-is-stale
+
+id: 3087ee94-3800-49f9-8748-4f81f1c4432d | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: tester
+created_at: 2026-11-09T11:01:46.042277+00:00 | updated_at: 2026-11-09T11:01:46.042356+00:00 | last_verified: 2026-11-09T11:01:46.041041+00:00 | verify_count: 0 | access_count: 11 | last_accessed_at: 2026-11-18T06:21:10.625979+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 2c7f50fdcf7a40a81e6af1b0fc47b9101c836cd3ee5971b6db33fab3aae72f86 | body_bytes: 220
+
+```text
+QUARANTINE.md 'chart stale-seals x1' row is STALE — chart seal tripwire is GREEN at base 818411107 (35/35 seal rows match). Row was true only at its own base 1fecf7c3f (7 stale rows), repaired by 2026-11-05/07 re-pins.
+```
+
+### decision-client-contract-invariant-185-v187
+
+id: 31162c8d-4e5f-4e01-b824-a48da933d07c | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: devops
+created_at: 2026-11-09T11:21:27.344276+00:00 | updated_at: 2026-11-09T11:21:27.344355+00:00 | last_verified:  | verify_count: 0 | access_count: 20 | last_accessed_at: 2026-11-18T06:31:43.230263+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 41b97d7ffd07f51ce25eb4f8c54cfa3030afd64ec05d2feff60655435e34e268 | body_bytes: 223
+
+```text
+Decision contract UNCHANGED 185 to v187 (route /v1/decisions; answers[].name joins questions[].name). Client sends the OpenAI-decisions shape; proxy translates to canonical R3/R4 for System One (v185 nested = 422 upstream).
+```
+
+### testgate-03-double-drift-hides-branch
+
+id: 31c5ad09-76e6-4c96-82a6-cb87cdb762ad | domain: verify | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: coder
+created_at: 2026-11-18T08:31:50.907393+00:00 | updated_at: 2026-11-18T08:31:50.907447+00:00 | last_verified: 2026-11-18T08:31:50.906916+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T09:16:06.088850+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: bea34717869eb4d0ff2f5c552d5a3e195c1766e0ddc53e1cbf902bba33d86386 | body_bytes: 240
+
+```text
+testgate-03: a test double that RE-implements a facade (stub walks only DIRECT children, the real one the FULL subtree) hides the product branch it feeds. Delegate the double to the real callable; add a case with the anchor ABOVE the owner.
+```
+
+### anchor-ledger-02-claim-level-anchor-checks
+
+id: 32e9b30f-ea30-4e78-bcd2-beb4b2711bec | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T10:26:11.806373+00:00 | updated_at: 2026-11-09T10:26:11.806443+00:00 | last_verified: 2026-11-09T10:26:11.805845+00:00 | verify_count: 0 | access_count: 7 | last_accessed_at: 2026-11-09T11:48:59.579132+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 4849eabd43bfd386ae8cad4a0ff5491b43a00ce528f89e020455ac20920963e8 | body_bytes: 222
+
+```text
+Doc-anchor audits verify at CLAIM level: re-derive each anchor, paste the construct, check it supports THAT row's claim; classify comment/blank anchors separately; a 'clean bill' from an unverified detector is no evidence.
+```
+
+### discord-01-channel-identity-already-present
+
+id: 33b8d86a-ddfc-4422-9d5a-7677eb9d795c | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T12:47:20.587314+00:00 | updated_at: 2026-11-11T12:47:20.587373+00:00 | last_verified: 2026-11-11T12:47:20.586915+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 944dbcf7e1cc2ce7d4042c65a40e1773a4571bd0d640301c009a456402fce07d | body_bytes: 216
+
+```text
+Discord guild-channel turns already carry daemon-side identity: guild_id, channel_id, channel_type, thread_id, parent_channel_id, user_id, is_dm, is_group_dm, all under nested metadata["discord"] in the turn payload.
+```
+
+### disk-01-stage-wt-reclaim-gates
+
+id: 3446af40-1cce-4309-9f51-f359da7da6b8 | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: giter
+created_at: 2026-11-18T04:45:31.519413+00:00 | updated_at: 2026-11-18T04:45:31.519485+00:00 | last_verified: 2026-11-18T04:45:31.518841+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T04:48:44.186495+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: f2ae4092748adc173e03597be790f4c3a66399d2e6a438ccec4564f0579168dc | body_bytes: 230
+
+```text
+Stage worktrees (~1.4GB each) dominate disk; reclaim once version < live. Keep staged-not-promoted + scripts-pin. Gates: HEAD ancestor of origin/latest + porcelain-clean + no /proc cwd/exe ref. Ari lane tip IDs are commission IDs.
+```
+
+### sql-01-instances-updated-at-varchar
+
+id: 37202ac5-6431-4f89-ba4e-4730a40407b2 | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: maintenancer
+created_at: 2026-11-11T12:11:45.640489+00:00 | updated_at: 2026-11-11T12:11:45.640545+00:00 | last_verified: 2026-11-11T12:11:45.640118+00:00 | verify_count: 0 | access_count: 11 | last_accessed_at: 2026-11-16T21:18:26.451037+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 35f37bbee86a5335864e95c9b26e8e0bb19b1b941a639e2f7b25fc8cbf422bcd | body_bytes: 190
+
+```text
+instances.updated_at/created_at are VARCHAR ISO ('2026-11-11T...+00:00'); a >= '2026-11-11 11:00' filter mismatches T-format rows. Use last_activity_at (real timestamp) or T-format literals.
+```
+
+### packdrift-01-detached-head-pin-false-red
+
+id: 3811f78c-66e2-4003-bf54-6ea964af93df | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-09T10:57:16.078288+00:00 | updated_at: 2026-11-09T10:57:16.078341+00:00 | last_verified: 2026-11-09T10:57:16.077821+00:00 | verify_count: 0 | access_count: 9 | last_accessed_at: 2026-11-11T08:28:09.181772+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 9cd4fb3d370b5131e86c67b299451c77d7260f93e63a1b6aa36c37a6b5510086 | body_bytes: 226
+
+```text
+Pack drift pins that assert a branch name (git rev-parse --abbrev-ref HEAD == literal) fire on a DETACHED-HEAD worktree and run ZERO tests: same false red on base and HEAD legs, so the pack adds nothing to a net-new-reds diff.
+```
+
+### log-truth-pin-observed-flag-mutation
+
+id: 3915cc34-a103-47a9-9742-be41c6505cc6 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-14T19:51:19.535418+00:00 | updated_at: 2026-11-14T19:51:19.535467+00:00 | last_verified: 2026-11-14T19:51:19.535061+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-17T08:35:51.825447+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 1ca4c12f5ffc0df5c8be1f4e0e2d2ba4ee906adf04babe9d9ff9d15458a6330b | body_bytes: 233
+
+```text
+sweep-truth-gate-hygiene v0.30.11: log-truth pins - mutate the OBSERVED flag/cause, not just the producer; a dispatched=True pin survived notify_work=None via truthy MagicMock pool; non-vacuous only via the observation-side mutation.
+```
+
+### launcher-01-respawn-is-internal-not-systemd
+
+id: 3989b5bb-01d2-4e8b-b0f1-87ffdb2b529c | domain: deploy | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T13:25:35.584542+00:00 | updated_at: 2026-11-11T13:25:35.584597+00:00 | last_verified: 2026-11-11T13:25:35.584012+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:30:14.657840+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: c7f5f5e0dc5a976fbd0f7081de5f9a555c4c0a44134be48829a87564cada61f4 | body_bytes: 204
+
+```text
+Launcher respawn is INTERNAL and sequential (wait + backoff sleep); systemd supervises only the launcher, so RestartSec/StartLimit never gate a daemon crash-loop. Burst budget (5/600s) resets each ladder.
+```
+
+### views-fix10-forwarded-veto-contract
+
+id: 398eacbc-09ce-4c1d-95f4-1feb97de5bed | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T03:23:45.086785+00:00 | updated_at: 2026-11-09T03:23:45.086848+00:00 | last_verified: 2026-11-09T03:23:45.085449+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-10T03:06:35.201846+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: ab1d5b2268dca004e13df40a8cc033a568fa4f209ec8c366c95552c81f644c8c | body_bytes: 207
+
+```text
+FIX-10 views origin gate: forwarded values (XFH, RFC7239 Forwarded) can only VETO, never vouch. First XFH comma value and first Forwarded element host= are evaluated; first XFH LINE wins in a declared front.
+```
+
+### portfence-01-daemon-port-comes-from-port-env
+
+id: 3b219d3e-c497-4382-a3bb-f3a2bb67e48f | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T13:25:41.923959+00:00 | updated_at: 2026-11-11T13:25:41.924016+00:00 | last_verified: 2026-11-11T13:25:41.923471+00:00 | verify_count: 0 | access_count: 7 | last_accessed_at: 2026-11-18T06:30:14.579335+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 78222fc453475d95f050fe54ed07c2a79a70f0f7eb6f661f0a234909ffdd77a3 | body_bytes: 192
+
+```text
+daemon.port resolves from config.yaml ${PORT:-8088}, NOT DAEMON_PORT. An ambient PORT in a shell silently binds the live port. The MetricsListener 9798 is not fenced at all (anomaly 07e8410c).
+```
+
+### release-02-fetch-tag-clobber-two-locals
+
+id: 3cab92fd-5cae-4f21-afcd-eb3b23c9a2e9 | domain: deploy | audience: both | source_tier: agent | provenance: observed | created_by_agent: giter
+created_at: 2026-11-09T10:33:03.403117+00:00 | updated_at: 2026-11-09T10:33:03.403177+00:00 | last_verified: 2026-11-09T10:33:03.402573+00:00 | verify_count: 0 | access_count: 9 | last_accessed_at: 2026-11-17T22:12:56.670530+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 095063bd79ca9f3529368f42109d0667e34d2857b8b046d2e8966def00ca9aa3 | body_bytes: 232
+
+```text
+On this host `git fetch origin --tags --prune` exits 1: local v0.27.5 and v0.29.6 would clobber origin's. v0.27.5 local is a DIVERGENT commit (different tree); v0.29.6 local is tree-equal but commit-distinct. Do not force-overwrite.
+```
+
+### e6-db-pin-skip-guard-fence
+
+id: 3cf663c7-debf-4777-8c06-49eb5cd0b082 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-18T06:35:38.259198+00:00 | updated_at: 2026-11-18T06:35:38.259256+00:00 | last_verified: 2026-11-18T06:35:38.258610+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:50:05.007350+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: a85dfeae80c255e83de1e65643a2bccfd987e3378df5470545bf2678781d8d4f | body_bytes: 207
+
+```text
+A skip-guarded DB-backed pin for the E-6 pairs is still DB-backed: it must hard-require POSTGRES_DB=ensemble_dev plus user/password/host/port, scrubbed per-variable — "env -u POSTGRES_*" is a silent no-op.
+```
+
+### trustbound-01-settings-tier-agent-writable
+
+id: 3cf9d408-f13d-47ab-95bf-c3f365137f26 | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T12:47:20.556601+00:00 | updated_at: 2026-11-11T12:47:20.556655+00:00 | last_verified: 2026-11-11T12:47:20.556039+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:19:22.404512+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: c27d013879c0fdb481b2677a8221035107c0e6eb5927eebfe50559a4cb267699 | body_bytes: 217
+
+```text
+The app_settings managed-key tier is AGENT-WRITABLE: the settings category is granted to ari and leader, so an agent can write registered managed keys via settings_set. Read tier as agent-reachable, not operator-only.
+```
+
+### kv-setkv-replaces-whole-value
+
+id: 3fbd3865-1fa9-45cc-8a85-eb04f3ad450c | domain: environment | audience: operation | source_tier: agent | provenance: observed | created_by_agent: giter
+created_at: 2026-11-13T04:50:03.391003+00:00 | updated_at: 2026-11-13T04:50:03.391059+00:00 | last_verified: 2026-11-13T04:50:03.390384+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 256509b7690dcde8531a1cf392bf2ffb08bd13d4cfc0a81b51cd3843fd62ffd3 | body_bytes: 242
+
+```text
+shared_meta_kv set_kv REPLACES the whole value per key — a partial object clobbers the row. Always rewrite the COMPLETE object (merge prior echo first). 2026-11-13: a census row lost its fields to a partial update; repaired by full rewrite.
+```
+
+### capture-admission-gate-chain
+
+id: 401db875-3233-43e0-bb24-0a7ccccafc15 | domain: artifact | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: developer
+created_at: 2026-11-11T13:12:04.600402+00:00 | updated_at: 2026-11-11T13:12:04.600534+00:00 | last_verified: 2026-11-11T13:12:04.599684+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-18T06:31:43.140113+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: d6d3f0dfbac63430993cc69c47e3c286c8339994577e26457871f6ca02b498fd | body_bytes: 199
+
+```text
+Capture admission needs ALL of: injected-skill metadata non-empty; ENSEMBLE_SKILL_CAPTURE_ENABLED=1; task_succeeded; agent skill_injection=true; no genuinely-evolved row; iterations>5 OR duration>60.
+```
+
+### shutdown-01-teardown-order
+
+id: 41408276-aea2-437b-b2e4-507ea11802ad | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T13:02:11.556814+00:00 | updated_at: 2026-11-11T13:02:11.556963+00:00 | last_verified: 2026-11-11T13:02:11.556077+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 751da316281c02057f7ff5c8aa714779d174ab76b176d243da36b223e15b71db | body_bytes: 194
+
+```text
+Daemon wind-down: uvicorn closes the 9797 listener first (server.py:275-276), then drains (60s cap), then runs the api.py lifespan teardown (3987-4506) and manager.shutdown() (manager.py:16514).
+```
+
+### verify-plan-ruling-sync-grep-derived
+
+id: 42483d0d-1842-4331-b18f-00448d6a4e7a | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: reviewer
+created_at: 2026-11-10T20:23:01.430333+00:00 | updated_at: 2026-11-10T20:23:01.430386+00:00 | last_verified: 2026-11-10T20:23:01.429846+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-18T06:27:11.256754+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 4677dd3e42bea96be706dfa7d1442b3fb76bc637a8155e6ca283497403599e1b | body_bytes: 238
+
+```text
+Ruling committed after phase docs does NOT propagate — phase plans are the build contract. Reconcile in one pass + binding-order header per phase doc; sweeps grep-DERIVED, never list-derived (the ruling's own drift list missed 3 sites).
+```
+
+### planner-todo-store-ram-only
+
+id: 429277a9-7335-4185-9d73-5070f02f6396 | domain: environment | audience: operation | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-10T18:38:37.766058+00:00 | updated_at: 2026-11-10T18:38:37.766111+00:00 | last_verified: 2026-11-10T18:38:37.765592+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T02:26:46.120799+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: f9cbbbf8cb81e2a6d5187fd08308b4436fc2a4c95a694a88082498f049433ad5 | body_bytes: 231
+
+```text
+Planner todo store is RAM-only: a mid-cycle manager restart (2026-11-10 ram-auto-termination) wipes it. Not data loss — rebuild the fan-in graph with current statuses from subtree/instance state; child instances survive restarts.
+```
+
+### prompt-assent-flip-on-gate
+
+id: 4441123e-8b9c-4168-b78b-525c3653c5a9 | domain: deploy | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T07:44:55.975168+00:00 | updated_at: 2026-11-11T07:44:55.975225+00:00 | last_verified: 2026-11-11T07:44:55.974625+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-17T11:05:31.363300+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: c6da42d0dec3de4ac57611eda624d3711678f0e04f483d7b322cd4d679960cb1 | body_bytes: 236
+
+```text
+prompt-assent lane is DEFAULT-OFF: arm only with ENSEMBLE_PROMPT_ASSENT_ENABLED=1 AND the executed+ledgered K-3 live Discord 1:1-vs-group-DM probe. Invalid env value fails closed AT BOOT (loud error, port never bound), not at call time.
+```
+
+### wtgate-01-isolation-ladder-decides
+
+id: 45381908-df2a-4f54-b4a5-feba1e267c9e | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T07:27:14.308746+00:00 | updated_at: 2026-11-11T07:27:14.308802+00:00 | last_verified: 2026-11-11T07:27:14.308119+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: e084176b43e3c84e6fa1069f7139c43a9caf5616fd33b0bc78deee61b908fb53 | body_bytes: 233
+
+```text
+Whole-tree dual-side gate: sweep-level FAILED-set delta is dominated by parallel-shard composition artifacts. The 3x-per-arm isolation ladder is the decider, never the sweep. Of 11 net-new candidates, only 2 were real head-only reds.
+```
+
+### supervise-01-launcher-loop-is-the-respawner
+
+id: 4693269e-cd91-4d27-8e0b-b26fd998b3d0 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T12:53:26.512792+00:00 | updated_at: 2026-11-11T12:53:26.512927+00:00 | last_verified: 2026-11-11T12:53:26.512183+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: bd9051b54e326867b40fafb0eeab572ed24c96bf1fea601455610801c5e8aefe | body_bytes: 211
+
+```text
+Prod respawner = launcher.sh's OWN loop (63 daemon restarts 09:00-11:55Z under ONE launcher PID); systemd RestartSec=10 + StartLimit never engaged. Burst abort (>5 crashes/600s) unreachable at ~93s child uptime.
+```
+
+### bindfix-02-budget-for-transient-holders
+
+id: 47a9e957-d487-4dd2-b2ac-41b50e4a02ca | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: coder
+created_at: 2026-11-11T16:33:52.846567+00:00 | updated_at: 2026-11-11T16:33:52.846641+00:00 | last_verified:  | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: cef6ab5a603a3a2c364e7c7ce71a8926c433eb5a85f28419edcd74b6dad52aa5 | body_bytes: 232
+
+```text
+Bind budgets fit transient holders, not teardowns: the launcher is sequential, dead 36-191s before each bind. Default 30s, HARD-CAPPED at 30s: frozen-path B ~18.3s keeps U~=48.3s <=58s, so the launcher's burst abort stays reachable.
+```
+
+### skillab-dev-zero-rows-ro-grant-gap
+
+id: 47bf5bc7-17ae-45e7-a0a1-4ca2f96d5f2b | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-18T08:46:12.479694+00:00 | updated_at: 2026-11-18T08:46:12.479742+00:00 | last_verified: 2026-11-18T08:46:12.479224+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 9be4cb4f42edd5b8eb4e06a12695cda43a8be69c3451d62ae968ee4dae4e3b88 | body_bytes: 227
+
+```text
+skill_ab DB-backed pins self-skip on dev (ensemble_dev has 0 skill_ab_tests rows; six E-6 pairs live only in prod). Close gaps read-only via prod daemon DSN; ensemble_prod_ro lacks SELECT on skills/skill_ab_tests — grant gap.
+```
+
+### pack-ci-top-level-unit-ungated
+
+id: 481dc43b-3933-424a-8881-2c144a3c91aa | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-18T08:46:42.955739+00:00 | updated_at: 2026-11-18T08:46:42.955905+00:00 | last_verified: 2026-11-18T08:46:42.954997+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-18T09:16:06.088850+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: b64a9318a7fa5592ce69b25773bd84d3500b1caccdd18d6fbc6e5c7eba4fae41 | body_bytes: 228
+
+```text
+Top-level tests/unit/*.py files have NO pack: sweeps cover tools/services/integration/unit/routers + named unit subdirs only. Landing one: grep packs, register pack+PACKS.md row. Known orphans: 2 skill_ab files, 31 pins ungated.
+```
+
+### git-sha-transcription-discipline
+
+id: 48b2c876-f0b6-46bc-8ec2-d0f576c95830 | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T08:28:17.367059+00:00 | updated_at: 2026-11-11T08:28:17.367116+00:00 | last_verified: 2026-11-11T08:28:17.366496+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 4714bd32b2f5ff9c58d0403e7481f3c2163a85ba73397230fad8859f8ba2d64e | body_bytes: 222
+
+```text
+Never retype a 40-char git object id from tool output into a later command; a mistyped char yields a silent wrong receipt. Pass ids via shell vars, print them in 10-char chunks, verify literals with if [ \"$a\" = \"$b\" ].
+```
+
+### bindfix-03-blocked-boot-zero-startup
+
+id: 4a4ac838-3522-4774-8b21-7d6b053e9563 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: coder
+created_at: 2026-11-11T13:44:47.464186+00:00 | updated_at: 2026-11-11T13:44:47.464233+00:00 | last_verified: 2026-11-11T13:44:47.463698+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 9d63d91af45172eff20ba753bf78b45fc47492d0015b1875e8c501d5e95de998 | body_bytes: 207
+
+```text
+Pre-bind precedes the lifespan startup, so a daemon that cannot get the port does 0 startup steps (no migrations, MCP warmup, pool setup) and 0 teardown steps - the old shape paid both on every failed cycle.
+```
+
+### scripts-pin-01-floor-087f782af
+
+id: 4bc55921-4b74-4ac0-af39-599835dcabfc | domain: deploy | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-14T02:17:35.188857+00:00 | updated_at: 2026-11-14T02:17:35.188951+00:00 | last_verified:  | verify_count: 0 | access_count: 6 | last_accessed_at: 2026-11-17T19:14:15.168630+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 953ca3b49339f95ba7574ed58f4e072d824a5a78a89ca751a96486a023286423 | body_bytes: 216
+
+```text
+PIPELINE_SCRIPTS_FLOOR_COMMIT + lib.sh PIPELINE_SCRIPTS_REV = 68c6ee0558a93a7d519862f2cdca4b0c8c1e320c since v0.30.4; pin HEAD c1a179234 on latest 3f45cd6dd; supersedes 087f782af. M22 helper literal tracks the stamp.
+```
+
+### packs-01-conflict-keep-both-newest-first
+
+id: 4c327bbf-5e10-49a3-bacd-178db833d4fe | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-12T11:08:40.076842+00:00 | updated_at: 2026-11-12T11:08:40.076927+00:00 | last_verified: 2026-11-12T11:08:40.076471+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-17T03:11:01.880754+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: b4faf5df720f4ef70b82436ffde704f72800e6d456c4593cf784dfa53fd2056c | body_bytes: 221
+
+```text
+PACKS.md merge conflict class: both lanes append a section at EOF - resolve keep-both newest-first plus ONE inserted blank separator line before the next heading (a heading glued to a table row breaks markdown rendering).
+```
+
+### discord-02-user-origin-arms-by-source-type
+
+id: 4ce6a0ec-150b-4da7-b29d-f5fc6104d6e6 | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T12:47:20.571577+00:00 | updated_at: 2026-11-11T12:47:20.571627+00:00 | last_verified: 2026-11-11T12:47:20.571152+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-18T06:31:10.714664+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 33bd48e3cdf2674f05111ff1f233c8eae45e56734daac7fc394e8eb90329e6bd | body_bytes: 231
+
+```text
+classify_user_origin arms the user-origin window by SOURCE type (discord included), not by channel type. So extending a DM-only approval gate to server channels is a pure predicate change: no adapter, trust-anchor or schema change.
+```
+
+### packconv-02-cite-packs-lines-at-base-tree
+
+id: 4ec06afb-d0bf-464a-aeb1-ea3726900284 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: tester
+created_at: 2026-11-09T10:47:28.922068+00:00 | updated_at: 2026-11-09T10:47:28.922170+00:00 | last_verified: 2026-11-09T10:47:28.921154+00:00 | verify_count: 0 | access_count: 10 | last_accessed_at: 2026-11-10T10:58:36.087574+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 6db587b7a0092e549c3c0963a1a32fde144df7dd30a86c868532ffc48f1e0fa3 | body_bytes: 230
+
+```text
+Cite .agents/tester/PACKS.md line numbers against the tree asserted (base 818411107), not canonical — canonical is ~2wk behind origin/latest, shifting rows 1400 lines (embed_consumers_unit_test = :2821 at base, :1407 canonical).
+```
+
+### raw-delete-silent-zero-rows
+
+id: 4f51fc74-c5d1-450c-98cf-78310785e44d | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-12T17:20:03.780828+00:00 | updated_at: 2026-11-12T17:20:03.780926+00:00 | last_verified: 2026-11-12T17:20:03.780086+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:31:43.273095+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: d27b59ae2a4e9e16e2f80266e1310d1c46ddbe8bb020777f70bb256e4422da6e | body_bytes: 234
+
+```text
+prune_excess (pending_repository.py:462): raw text("DELETE..IN") deletes 0 rows, reports success — cap invariant breaks. Core delete() + rowcount==len(victims) guard; typed exception -> {"error": str} (mcp_server/repository.py:146).
+```
+
+### anchor-ledger-01-verified-escape-hatch
+
+id: 503bc69e-d256-40ae-81d2-6952018863de | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-09T08:34:01.649748+00:00 | updated_at: 2026-11-09T08:34:01.649810+00:00 | last_verified: 2026-11-09T08:34:01.649308+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-10T03:07:55.459739+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 9260accc975c9a9253de8614a35141be36e3f89e85f81166b04db2308b7e6252 | body_bytes: 227
+
+```text
+Anchor-ledger VERIFIED has an existence-level escape hatch: 11 of 27 rows cite only 'path resolves + line exists'. The 21 UNVERIFIED rows are a resolver artifact (bare :NNNN, no owning file in the row), not unverifiable claims.
+```
+
+### views-origin-parser-nonbrowser-spellings
+
+id: 50699970-4d49-4827-8066-db6bebf3d666 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T03:23:45.090378+00:00 | updated_at: 2026-11-09T03:23:45.090427+00:00 | last_verified: 2026-11-09T03:23:45.090036+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:28:15.331545+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 3d522670c0c0b2cc03ce147fcd0c74ff91bc9be62c3b3e7ebac0d5a41d1ac86d | body_bytes: 180
+
+```text
+Views origin parser grants (303) non-browser-reachable Origin spellings: scheme-less //host, userinfo https://evil@host, Origin with path. Not browser-reachable, so no CSRF impact.
+```
+
+### quarantine-01-row-names-all-reds
+
+id: 52ea474f-141a-41f2-84f0-91915bd1e2cb | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-16T10:38:58.095653+00:00 | updated_at: 2026-11-16T10:38:58.095764+00:00 | last_verified: 2026-11-16T10:38:58.094851+00:00 | verify_count: 0 | access_count: 21 | last_accessed_at: 2026-11-17T12:34:14.823971+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 93e0a302305655519f5b81326767cbf65d3b14d99982cf228b31a21faadb6bca | body_bytes: 233
+
+```text
+QUARANTINE.md rows must name EVERY red node: AM1 route-set row named 1 of 3 reds in TestAM1TheRouteSetPin (metrics.py @ a67b74066); same-class reds ride mechanism text only. Base-leg-all-green is VACUOUS with gitless base extraction.
+```
+
+### identity-01-mainpid-vs-binder-pid
+
+id: 5371ffc5-7190-4d4e-84a8-51c5cf11e82b | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-15T00:36:33.701448+00:00 | updated_at: 2026-11-15T00:36:33.701503+00:00 | last_verified: 2026-11-15T00:36:33.700940+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-16T10:01:41.351579+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 8fa0c9f3744ffd6c32203ac9388e6bcbf45ac6d2afc7774cc42250ecfe7a04fc | body_bytes: 234
+
+```text
+ensemble-main MainPID=launcher.sh wrapper, NOT the 9797 binder (binder=ensemble-prod child, 305455, stable reads 2026-11-15). Identity=listener binder pid; fd-inherited pids on ss rows (fd=6 children) churn by design - never identity.
+```
+
+### prompt-assent-04-dm-shield-tool-gate
+
+id: 537b950c-79e0-44bd-960e-9e235a66d3e7 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: tester
+created_at: 2026-11-12T04:04:22.362856+00:00 | updated_at: 2026-11-12T04:04:22.362975+00:00 | last_verified: 2026-11-12T04:04:22.357012+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-17T11:05:31.363300+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: d062697e46b41e529cac06489da2e3c49905cd083538d2ae3c70fa9a9c58acf2 | body_bytes: 223
+
+```text
+prompt-assent DM shield is TOOL-GATE-level (prompt_assent.py mint `not is_private`; approve 4f `is_private` short-circuit); classifier leg-1 is unreachable defense-in-depth — aim DM-invariance mutations at the tool gates.
+```
+
+### merged-shape-guard-verification-method
+
+id: 542a14aa-1c30-49da-a595-30781faddca7 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T05:23:29.135789+00:00 | updated_at: 2026-11-11T05:23:29.135843+00:00 | last_verified: 2026-11-11T05:23:29.135180+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-17T12:34:14.823971+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: cfd3f1b894238357ce01c67a7ecb1a16b233d760ea7f7c16ea25167743a489b8 | body_bytes: 170
+
+```text
+Prove a branch-tip-sensitive guard with A/B arms in ONE throwaway clone: no-ff merge leg (green), feature-tip leg (red), squash-landing leg (red). One arm proves nothing.
+```
+
+### dev-boot-04-ambient-env-scrub
+
+id: 54873836-670f-4182-8206-ca38e6adec92 | domain: environment | audience: operation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T06:22:10.690683+00:00 | updated_at: 2026-11-11T06:22:10.690745+00:00 | last_verified: 2026-11-11T06:22:10.690306+00:00 | verify_count: 0 | access_count: 7 | last_accessed_at: 2026-11-18T06:26:32.456526+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 0e71f595a233ac2ff6ab599eb8299360abdaaaccbd2325ff0642f10d7031cdf3 | body_bytes: 217
+
+```text
+A daemon-child shell inherits LIVE knobs: ENSEMBLE_AUTH_ENABLED=true (API 302 to login), POSTGRES_* to ensemble_prod on 10.44.0.2, ENSEMBLE_UPGRADE_LIVE=1, skill capture/evolution ON. Scrub them for any dev test boot.
+```
+
+### tick-budget-01-not-a-wall-clock-bound
+
+id: 55f08572-bb61-4e40-9c49-5d0c2d99140d | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: governor
+created_at: 2026-11-09T11:12:08.567452+00:00 | updated_at: 2026-11-09T11:12:08.567511+00:00 | last_verified: 2026-11-09T11:12:08.566918+00:00 | verify_count: 0 | access_count: 19 | last_accessed_at: 2026-11-18T04:48:44.186495+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 8518b7e8243d77d7fe56acbff91da448fdf2789743ce42b69904d683e9276714 | body_bytes: 206
+
+```text
+Tick budget checked only BETWEEN items is not a wall-clock bound (memoir: 60s label vs ~135s real tick). House shape = per-item asyncio.wait_for, as the embedding lane does (memoir_embedding_worker.py:649).
+```
+
+### capture-admission-empty-usage-table
+
+id: 55fd015e-318c-42ad-8e18-21f4881d8e32 | domain: verify | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: developer
+created_at: 2026-11-11T13:12:12.305412+00:00 | updated_at: 2026-11-11T13:12:12.305469+00:00 | last_verified: 2026-11-11T13:12:12.304746+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-11T13:45:23.038460+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: fcc848b1595e1e09bfda92c034e3a58b2590d4c91b06836e20d23f1dcde35499 | body_bytes: 160
+
+```text
+Empty skill_usage_records means NOT genuinely evolved, so Gate 4 passes: has_genuinely_evolved uses select(1) limit(1) and returns False on an empty population.
+```
+
+### deathclock-01-maintenance-runs-interrupted
+
+id: 562d4234-53d6-4d43-97a6-3e30e94ff60a | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T12:57:44.428723+00:00 | updated_at: 2026-11-11T12:57:44.428811+00:00 | last_verified: 2026-11-11T12:57:44.428251+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-11T12:59:26.928900+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 7bf0721c88074ac7b8921e897ec15ee9d216d65862a38f77969cc9e8255e1ef2 | body_bytes: 215
+
+```text
+Daemon death clock: every boot >~60s starts an auto checkpoint-cleanup run; each death interrupts it. maintenance_runs.started_at + interrupted = measured death ts. Boots dying <60s leave no durable row (dead zone).
+```
+
+### none-vs-zeropulse-signal-shape
+
+id: 56a78011-9b58-4862-a387-372f9c000cb7 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-14T19:51:19.506559+00:00 | updated_at: 2026-11-14T19:51:19.506612+00:00 | last_verified: 2026-11-14T19:51:19.506075+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 1c246bf812140367d30f1ce2d231c0bc68a7683bcbf402f75a516ec9defc5873 | body_bytes: 182
+
+```text
+sweep-truth-gate-hygiene v0.30.11 shape rule: a signal changing None->bool/int must distinguish unwired (None) from 0-pulsed (bool(0)) - truthy-Mock fixtures keep passing either way.
+```
+
+### proxydec-02-systemone-canonical-wire
+
+id: 575a2c21-934c-4b91-bb43-6250c25e6345 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: devops
+created_at: 2026-11-09T10:53:40.142698+00:00 | updated_at: 2026-11-09T10:53:40.142748+00:00 | last_verified: 2026-11-09T10:53:40.142360+00:00 | verify_count: 0 | access_count: 5 | last_accessed_at: 2026-11-10T03:07:05.498952+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: fd84c52955b97ccf1c5711592b4abe1607e7c967758a181b37f50789f8e91e92 | body_bytes: 230
+
+```text
+System One upstreams (9router, OpenRouter) accept ONLY the v187 canonical wire: choice criteria = top-level map label->description; score criteria = top-level label array. The v185 nested shape 422s on 9router, 400s on OpenRouter.
+```
+
+### pok-scope-01-rolling-state-out
+
+id: 57704ef0-379c-4eb6-815b-fed8fa737f71 | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-18T03:01:56.399668+00:00 | updated_at: 2026-11-18T03:01:56.399706+00:00 | last_verified: 2026-11-18T03:01:56.399277+00:00 | verify_count: 0 | access_count: 15 | last_accessed_at: 2026-11-18T06:30:14.634277+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 51d9778cb5461505063d1759a6636af36daedad90ae498579c80c36b3f89b4f9 | body_bytes: 224
+
+```text
+POK holds DURABLE operating knowledge only. Rolling state (release/staging inventories, dated counts) rots silently — route it to KV / critical notes / board / release tree. Doctrine: guideline-pok-durable-vs-rolling-state
+```
+
+### user-tz-asia-ho-chi-minh-confirmed
+
+id: 5814007c-9c80-430f-9fbe-259049e59dd9 | domain: environment | audience: operation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-10T18:44:03.758001+00:00 | updated_at: 2026-11-10T18:44:03.758074+00:00 | last_verified: 2026-11-10T18:44:03.757468+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 9181b14037830b020e4c00e4dce25bbb52db7a6d9667942b73ec10bbd3af0aaf | body_bytes: 238
+
+```text
+Emperor's timezone is Asia/Ho_Chi_Minh (2026-11-10). Daemon stores NO user tz preference: the time tool resolves to host-local UTC while the prompt label says ICT — they disagree, so pass Asia/Ho_Chi_Minh explicitly to scheduling tools.
+```
+
+### bind-03-uvicorn-closes-9797-first
+
+id: 59ea590b-89ee-42c5-b453-43dcd452b033 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T13:12:19.440326+00:00 | updated_at: 2026-11-11T13:12:19.440382+00:00 | last_verified: 2026-11-11T13:12:19.439795+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:25:05.155119+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 1348999b7d1063bf8d7b6dc5d146e0be4e4fee339cd69d65eb7b96a605fa465c | body_bytes: 236
+
+```text
+uvicorn closes the 9797 LISTENING socket FIRST in Server.shutdown(), before the ≤60s drain and lifespan shutdown. The daemon teardown never holds 9797; 9798 closes late (api.py step 19). The 60-75s wind-down premise is FALSE for 9797.
+```
+
+### bind-mut-01-scratch-wt-py-resolve
+
+id: 5a20bfca-0bc3-4a2b-8906-2a1ba3fddf4a | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T15:34:46.855522+00:00 | updated_at: 2026-11-11T15:34:46.855597+00:00 | last_verified: 2026-11-11T15:34:46.855053+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-17T11:19:29.641179+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 87156d7393283ef077f9913d95531634e4f757758e276fa9dbf8005c65303861 | body_bytes: 221
+
+```text
+Scratch-worktree mutation runs: PYTHONPATH=<wt> + lane .venv mis-resolves while CWD is any repo tree (cwd '' precedes PYTHONPATH). cd neutral first; then PYTHONPATH beats the editable .pth. Print daemon.__file__ to prove.
+```
+
+### decision-module-01-p1-lane-base-branch
+
+id: 5a2da4bf-4ee4-4a6d-89be-c8add578bade | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: explorer
+created_at: 2026-11-09T10:38:51.207714+00:00 | updated_at: 2026-11-09T10:38:51.207769+00:00 | last_verified: 2026-11-09T10:38:51.207258+00:00 | verify_count: 0 | access_count: 22 | last_accessed_at: 2026-11-18T06:31:10.647710+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 646042d21f0039b636a2bc1707767f32b6404953c8803b88ffd15822c8fcd010 | body_bytes: 214
+
+```text
+Decision Module P1 lane: branch from origin/latest @ 818411107 (design of record merged there). docs/decision-module branch+worktree deleted; canonical checkout detached @013895287 and dirty — never branch there.
+```
+
+### staged-dirs-v0309-inventory
+
+id: 5b20d029-ead1-4db7-a482-d087417e4d8c | domain: deploy | audience: operation | source_tier: agent | provenance: observed | created_by_agent: giter
+created_at: 2026-11-15T02:03:36.055817+00:00 | updated_at: 2026-11-15T02:03:36.055937+00:00 | last_verified:  | verify_count: 0 | access_count: 10 | last_accessed_at: 2026-11-18T14:16:54.683531+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 29fcd39c44de716c15c84bd8fb86ae68907cbd01a8cc46dfdb86048057edd8d3 | body_bytes: 228
+
+```text
+Releases 2026-11-15: STAGED v0.30.12 (rollback_safe=true source=explicit, zero migrations; 4-way sha 87f6caa5b61b8693; tag 80bb61ecb at merge cf43ac00d, both tags pushed). Live stays v0.30.9 — NO promote. Dirs: v0.30.12/.9/.7.
+```
+
+### gate-crosslane-pins-01-class
+
+id: 5bde28d2-44fb-4a03-9629-033c97b64b36 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T07:44:25.984941+00:00 | updated_at: 2026-11-11T07:44:25.985000+00:00 | last_verified: 2026-11-11T07:44:25.984418+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:27:11.406439+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 7de253ebee085a90ce7160b9f5a5a1ff30329e39d86c4b6467d7ecb2c569b66b | body_bytes: 231
+
+```text
+Before staging a branch adding a migration or touching a sealed segment, grep for other lanes' pins asserting a global count or untouched-seal baseline. Cross-lane pins are head-only reds; adjudicate via owning lane or seal re-pin.
+```
+
+### gc-gate-01-fence-family-exclusions
+
+id: 5ddf201c-4879-478b-a759-5e6d909237f3 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-15T17:17:26.397198+00:00 | updated_at: 2026-11-15T17:17:26.397253+00:00 | last_verified: 2026-11-15T17:17:26.396759+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-18T06:31:10.774644+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 67bbd35c0d78255f2b5f2c2988f30631fe86efd995d4229aa9396ba68d17e94a | body_bytes: 229
+
+```text
+Gate shards on pinned ensemble_dev: exclude services/resource_{traceback,anomaly} + routers/resources_{traceback,anomalies}; session fences pytest.exit HARD-ABORT unless POSTGRES_DB in {ensemble_dev_test_only,ensemble_test_only}.
+```
+
+### canonical-checkout-clean-20261114
+
+id: 5ee30592-7c56-468d-8bfc-97198a3224bc | domain: environment | audience: operation | source_tier: agent | provenance: observed | created_by_agent: giter
+created_at: 2026-11-15T02:04:25.486207+00:00 | updated_at: 2026-11-15T02:04:25.486279+00:00 | last_verified:  | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:27:30.319070+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: fff820366368bf9f0ae51b7bf0993da5533c87061def2ffd73b1c11974a2cf37 | body_bytes: 229
+
+```text
+Canonical ensemble-src: detached @ bf4bfde6e; THREE external unstaged files by 02Z Nov 15 (repository.py + worker_pool.py = sweep-identical; approver active.md) + 134 untracked. Never commit/clean; self-resolves at next tip move.
+```
+
+### stageverify-01-receipt-stdout-only
+
+id: 5fd0bf6f-90df-431a-8898-4345c297c057 | domain: deploy | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-12T23:18:34.243793+00:00 | updated_at: 2026-11-12T23:18:34.243843+00:00 | last_verified: 2026-11-12T23:18:34.243402+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: fbdde25d181747a39fd28755976a5861739f3e5346d93a1a77f90d4797d1b75b | body_bytes: 232
+
+```text
+stage.sh:927 receipt is STDOUT-only; releases/state.json journals promotes only (stages leave no trace). Verify via release manifest (rollback_safe, contains_contract_phase, staged_at, known_schema_gen) + sidecar git_head/git_dirty.
+```
+
+### sysone-01-9router-route
+
+id: 60ac039b-0226-4f1d-9d47-a21a784d3f72 | domain: deploy | audience: both | source_tier: agent | provenance: observed | created_by_agent: devops
+created_at: 2026-11-09T10:54:21.697565+00:00 | updated_at: 2026-11-09T10:54:21.697716+00:00 | last_verified: 2026-11-09T10:54:21.696844+00:00 | verify_count: 0 | access_count: 5 | last_accessed_at: 2026-11-10T03:07:05.498952+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 382171c3e2ebd77d771cc8c1c656ab4b0ae991b0847c411d5b2df84c3a86e912 | body_bytes: 229
+
+```text
+9router serves System One: POST ninerouter.9router.svc:20128/v1/systemone -> 200 (model oc/jev-1.13-free) with the proxy's own key; /v1/decisions is 404. Its credential provider is 'openai', so the proxy picks the openai adapter.
+```
+
+### skill-fix-defer-sql-census-8e9853e9
+
+id: 621444b6-49f0-44a7-b7d2-d5b7a9421978 | domain: catalog | audience: both | source_tier: agent | provenance: observed | created_by_agent: skill-keeper
+created_at: 2026-11-11T07:26:30.263276+00:00 | updated_at: 2026-11-11T07:26:30.263334+00:00 | last_verified: 2026-11-11T07:26:30.262722+00:00 | verify_count: 0 | access_count: 14 | last_accessed_at: 2026-11-18T06:47:21.710385+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: fb87960c26b4235f45b39dca724f04001b97ad5f91f247be051d2e50fb0f31bb | body_bytes: 229
+
+```text
+DEFERRED FIX: binary-embedded-sql-census-and-prefix-trap, A/B group 8e9853e9 at 0/20 comparisons; both arms refuse FIX (nested A/B guard). On resolution: strip BODY_START/BODY_END lines, reword description to lead with TOC route.
+```
+
+### flake-01-ab-control-arm-attribution
+
+id: 62b35ab5-9f1a-48c9-a119-1d0ab020c5fb | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T05:07:06.033487+00:00 | updated_at: 2026-11-11T05:07:06.033540+00:00 | last_verified: 2026-11-11T05:07:06.033084+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:19:22.570193+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: a20c102db455ed5a0ab2c435e160dfa7048f80c497ca097708316150acad40fe | body_bytes: 224
+
+```text
+To attribute a post-change test red: back the change up to /tmp, revert to HEAD, then run the cell N=30 in isolation on BOTH arms and compare FAILURE RATES. A wall-clock flake needs a rate comparison; one run proves nothing.
+```
+
+### pytest-01-sessionstate-annotations-mock
+
+id: 6397a64b-6a31-418d-a94e-c3c01dd1dd3e | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T05:28:12.890092+00:00 | updated_at: 2026-11-16T05:28:12.890151+00:00 | last_verified: 2026-11-16T05:28:12.889394+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:30:14.725527+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 4d497456c94c446e0ed3c776b19f12fd9fbf2fd8a813696898b04c5d4f3e0f96 | body_bytes: 232
+
+```text
+SessionState.__annotations__ is UNUSABLE under pytest: tests/conftest.py mocks langgraph.graph.MessagesState, so daemon.graph.SessionState is a MagicMock and attribute access raises. Pins must AST-scan the real class source instead.
+```
+
+### skillab-02-keeper-rule-zero-traffic-fix
+
+id: 63f64bbe-4f96-45a7-860e-bafb07aa7fca | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T07:25:07.428529+00:00 | updated_at: 2026-11-11T07:25:07.428592+00:00 | last_verified: 2026-11-11T07:25:07.427934+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-18T05:13:24.708225+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: a15ec9dc12331ea51cf1ae42d61a42b2be15ab7848714935f76124614d26ae8b | body_bytes: 238
+
+```text
+Keeper rule: a FIX on a zero-traffic skill never resolves via A/B (comparisons stays 0); the 'zero uses deactivate bypassing A/B' doctrine has NO implementation. Re-assert: skill_feedback note + deferred skill_fix RE-TARGET; report stall.
+```
+
+### verify-03-two-detectors-four-guards
+
+id: 65759d88-be5d-4524-9fc4-8804931cce30 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T11:51:28.645527+00:00 | updated_at: 2026-11-09T11:51:28.645587+00:00 | last_verified:  | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-17T09:47:43.169798+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 8266ffd6189257478abc3ab122a5bc096e8d46e5b8d80ad70e5c6656b8afbac9 | body_bytes: 234
+
+```text
+snapshot-l3: 4 of 6 new tests are green-at-base invariance guards (declined-stays-empty, selection-follows-pick, exception-path baseline, prompt-window + JSON contract); only 2 are detectors. Deleted FALSE comment = not lost coverage.
+```
+
+### burstabort-01-bind-retry-u-cap
+
+id: 66300d26-d2a7-4962-9a3f-bc5c8e0b92c3 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: coder
+created_at: 2026-11-11T16:33:52.841776+00:00 | updated_at: 2026-11-11T16:33:52.841846+00:00 | last_verified:  | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: e4ca7cc9464a43099f7c069879531a9112e861bcc30a7afd52974c5621df6830 | body_bytes: 213
+
+```text
+Bind-retry budget is coupled to the launcher's burst abort: 6 crashes in 600s need 310+5U<=600 (U<=58s). Effective budget HARD-CAPPED at 30s; frozen-path B ~18.3s so U~=48.3s. Over-ceiling requests clamped loudly.
+```
+
+### proxy-decision-lane-always-on-no-flag
+
+id: 67c296fc-7daa-48f4-bdf6-6d8eacec4bf2 | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: wanderer
+created_at: 2026-11-09T04:32:13.493114+00:00 | updated_at: 2026-11-09T04:32:13.493197+00:00 | last_verified:  | verify_count: 0 | access_count: 10 | last_accessed_at: 2026-11-18T06:32:15.520404+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 058b2caf18bb64bd85180072e7e59aa57414343c2ae6eba9b6a58927fce0d8f9 | body_bytes: 185
+
+```text
+Proxy /v1/decisions is always-on in code (no env flag). 'Disabled' = deployed state: upstream 4xx (Zen 422/402), missing credential, dead base. models.enabled=0 does NOT gate the route.
+```
+
+### memoir-census-pin-lane-scoped
+
+id: 67d72ca9-1eaf-4a23-af6c-2fa2388db0d9 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T08:14:27.666100+00:00 | updated_at: 2026-11-11T08:14:27.666159+00:00 | last_verified: 2026-11-11T08:14:27.665510+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-11T08:17:34.179638+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 6fa183ff3f2a5862e34fc70533cca7b11b802790df13e0c4b60a506515eeeaa0 | body_bytes: 210
+
+```text
+Lane-scoped memoir migration-census pin: lane's own file is in the working-tree delta, delta non-empty, and over LANE_BASE_COMMIT..LANE_COMMIT the delta is exactly one file. Foreign lane files cannot redden it.
+```
+
+### group-chat-03-p2-typed-collision-fix
+
+id: 68246f52-81a1-4cb6-8577-b6a1c18a973a | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-15T14:28:07.003458+00:00 | updated_at: 2026-11-15T14:28:07.003510+00:00 | last_verified: 2026-11-15T14:28:07.003009+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-17T19:09:58.593434+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 6215c4c7099fcdd3e4e1f250518e4b25e38b99c4a47a8eabe57880720ea2754f | body_bytes: 234
+
+```text
+P2 fed9e15b4 (worktree, unmerged): MemberNameCollisionError now DUAL-FAMILY (RoomError+RoomJoinError); spawn room-join handler catches it via dedicated except ordered BEFORE except RoomJoinError; distinct head, not generic join error.
+```
+
+### evidence-02-wt-sweep-rescue-durable
+
+id: 691bd4f6-86b8-4bb4-9ee1-286b86725a33 | domain: environment | audience: operation | source_tier: agent | provenance: observed | created_by_agent: giter
+created_at: 2026-11-18T08:41:17.864457+00:00 | updated_at: 2026-11-18T08:41:17.864507+00:00 | last_verified: 2026-11-18T08:41:17.864013+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T08:45:57.414060+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: dafa4210494858179f8b4349c3831508204c4478e5e793c70c4a3ac2f76f7e71 | body_bytes: 227
+
+```text
+2026-11-18 WT-sweep rescue is DURABLE at /home/nea/agents-ensemble/data/evidence/wt-sweep-rescue-20261118T0433Z (1108 files, sha-verified, secrets clean, non-payload). Owners: designer=install-audit x4; tester=gate-base 154 raw
+```
+
+### gate3-base-failed-list-0efdf106f
+
+id: 6a646041-e234-4b1b-a3e4-e2ca30790ae6 | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T04:45:49.522428+00:00 | updated_at: 2026-11-11T04:45:49.522512+00:00 | last_verified: 2026-11-11T04:45:49.522010+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-17T09:47:52.170355+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: ea6df75bf126b0fd361668dd97938046601a2198293158d49a25cf1cb6f38ba8 | body_bytes: 197
+
+```text
+Gate A BASE leg (0efdf106f, v0.29.15): 36545 nodes/1590 files; 492 unique failed ids on 3.13 vs 491 on 3.14 (467 common); closure exact 36533 executed; perf-matrix file excluded (12 nodes, rc=124).
+```
+
+### prompt-assent-02-category-registration-seam
+
+id: 6b58af57-7a84-4125-ac6d-e3bd55ea8c9e | domain: artifact | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: coder
+created_at: 2026-11-11T00:36:32.758752+00:00 | updated_at: 2026-11-11T00:36:32.758805+00:00 | last_verified: 2026-11-11T00:36:32.758259+00:00 | verify_count: 0 | access_count: 8 | last_accessed_at: 2026-11-18T06:29:08.980543+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 1cf826fa816e71afc88550c3b4b515d91b140fba557850e2de66372332b94f51 | body_bytes: 233
+
+```text
+A new privileged tool category = 4 registry entries + ari meta.json tail + metrics VOCABULARY bump + regenerated tool-categories.json + 15 grep-derived pin files 20->21, all in ONE commit. Re-derive the registry census prose by grep.
+```
+
+### wt-merge-v02917-stale-index-ref-move
+
+id: 6b8398a2-9cc2-4bc3-8e64-414371818222 | domain: other | audience: operation | source_tier: agent | provenance: observed | created_by_agent: giter
+created_at: 2026-11-11T15:26:50.429017+00:00 | updated_at: 2026-11-11T15:26:50.429084+00:00 | last_verified:  | verify_count: 0 | access_count: 5 | last_accessed_at: 2026-11-18T06:31:43.038062+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 2f7d733011075379953f38f86325ad3ed087f163ba9c830da5606eeca93af0da | body_bytes: 213
+
+```text
+CLOSED 2026-11-11: wt-merge-v02917's frozen v0.29.17-tree index was pure residue — discarded, ff-synced, scope-D evidence merged as 5c757de92; worktree removed. Stale-index hazard moot: no worktree holds latest.
+```
+
+### prompt-assist-01-discord-first-mint
+
+id: 6cdf61f7-a340-4624-8db8-9342c6a377dc | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T06:22:10.681933+00:00 | updated_at: 2026-11-11T06:22:10.681991+00:00 | last_verified: 2026-11-11T06:22:10.681433+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-11T12:20:02.461410+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: a93fe4193880e9d5b49f8c9e5aae970fa46b217af4baea7b661a9de1581c7ff7 | body_bytes: 193
+
+```text
+prompt-assent is Discord-first: an api turn ARMS the factor-2 window, but mint/approve need the window row's nested metadata.discord (is_dm/is_group_dm) or refuse mint-requires-private-channel.
+```
+
+### ram-guard-01-ambient-bash-stamp-inherited
+
+id: 6f01e769-236c-4365-98ec-4e332a27dd60 | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: coder
+created_at: 2026-11-11T15:27:20.807943+00:00 | updated_at: 2026-11-11T15:27:20.808012+00:00 | last_verified:  | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-11T15:37:25.694417+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: caca454fdf08fcfc5f26e0edec22c356ae4835c3a0a66c4fac4441fe968dabc4 | body_bytes: 238
+
+```text
+RAM-guard P6 is LANE-AWARE (leader 2026-11-11): the ladder reads the spawn's own lane stamp; matching=VERIFIED, absent=proceed+unverified++, a foreign lane stamp=refuse. The proc lane strips the ambient bash var so its own stamp verifies.
+```
+
+### provider-01-402-wake-kill
+
+id: 6f44fde8-da8c-41b5-b55f-ed0ec4da66e4 | domain: environment | audience: operation | source_tier: agent | provenance: observed | created_by_agent: maintenancer
+created_at: 2026-11-12T08:29:06.517028+00:00 | updated_at: 2026-11-12T08:29:06.517091+00:00 | last_verified: 2026-11-12T08:29:06.516509+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-12T11:07:44.120144+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: b1c4d23ec7362451a1f3aa2cdeb993b3032b29a9d58509448034d4c5d5ed1f6f | body_bytes: 235
+
+```text
+Provider 402 (insufficient_balance: coding-plan quota + empty wallet) killed 4 turns in 2m10s on 2026-11-12 07:48-07:50Z across 2 projects; each instance landed status=error, no auto-retry. Failover recovered 08:13Z; wallet still owed.
+```
+
+### sonic-02-complexity-routing-doctrine
+
+id: 700bd23b-e8b9-4f12-9858-1b133cae1047 | domain: other | audience: operation | source_tier: agent | provenance: declared | created_by_agent: developer
+created_at: 2026-11-14T04:03:47.100245+00:00 | updated_at: 2026-11-14T04:03:47.100367+00:00 | last_verified: 2026-11-14T04:03:47.099332+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-18T06:27:30.319070+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 9868a432076421ead4e379b2ff842874f38c9ce3cbf3c07485421ab5f70aca2b | body_bytes: 226
+
+```text
+Sonic routing (staged v0.30.5): complexity, not paths. Sonic = default ~80-90%; expert team = heavy ~10-20%. High verdict -> developer pauses + handover suggestion; user/ari/leader overrides proceed but never hide the verdict.
+```
+
+### release-01-bump-tag-then-stage-order
+
+id: 7079c358-d0dd-41ff-ad89-08f6df7da724 | domain: deploy | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-17T12:22:58.828978+00:00 | updated_at: 2026-11-17T12:22:58.829046+00:00 | last_verified:  | verify_count: 0 | access_count: 5 | last_accessed_at: 2026-11-18T06:31:43.134591+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: a5736970437547419468d2bcceb74186e188105885cee198d3d89133ef913516 | body_bytes: 210
+
+```text
+Release order: bump commit -> ANNOTATED tag -> stage worktree DETACHED at tag -> FE REBUILD at that HEAD -> sidecar re-stamp -> stage.sh; tag-before-stage mandatory (git describe --exact-match HEAD == VERSION).
+```
+
+### proxy-decision-provider-model-bound
+
+id: 71df5f42-dcc2-4ff9-a956-61ffd1f9e28e | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-09T04:29:45.851774+00:00 | updated_at: 2026-11-09T04:29:45.851839+00:00 | last_verified: 2026-11-09T04:29:45.851251+00:00 | verify_count: 0 | access_count: 15 | last_accessed_at: 2026-11-10T05:35:32.863373+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 8b9dc91361cb0b413559b9177a18b838ffa1568bd9c820cda5bc97a66eb39c27 | body_bytes: 206
+
+```text
+Proxy decision provider is bound to the CREDENTIAL row (provider column), never the request: model -> kind=decision gate -> credential -> registry lookup by cred.Provider. Request carries no provider field.
+```
+
+### shutdown-02-port-hold-truth
+
+id: 72ef05e8-738d-4d79-afee-b72b034f7b3b | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T13:02:30.129458+00:00 | updated_at: 2026-11-11T13:02:30.129512+00:00 | last_verified: 2026-11-11T13:02:30.129004+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-11T13:39:31.708863+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 7178903bccdcafb30d4c9ea376f150ff677ef1d55722764500bb29a7f6f417ad | body_bytes: 203
+
+```text
+9797 is NOT held by the daemon wind-down (listener closes first). The 2026-11-11 EADDRINUSE loop was an orphaned ensemble-prod app holding the LISTEN socket; systemd cgroup cleanup freed it at 11:54:52Z.
+```
+
+### auth-lane-scrub-ensemble-auth-env
+
+id: 74245f23-8e20-4ec3-87ea-99bedd7044be | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-17T14:46:42.665658+00:00 | updated_at: 2026-11-17T14:46:42.665726+00:00 | last_verified:  | verify_count: 0 | access_count: 31 | last_accessed_at: 2026-11-17T23:48:39.389818+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 4aee95018ee9808277047992228d24cb678c210983dbbaff691deed1977b5d06 | body_bytes: 232
+
+```text
+Auth ambient scrub: FULL ENSEMBLE_AUTH_* family (7 vars) or NONE — never partial: ambient ENABLED=true → pydantic missing-issuer reds (P4) or preflight refuses scratch bind origin, exit 78 (S5; payload ships auth.enabled:false).
+```
+
+### graph-seam-pins-need-executed-composition
+
+id: 74e1093d-5112-45a6-9e24-1b7f64908f89 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: reviewer
+created_at: 2026-11-16T03:34:44.911604+00:00 | updated_at: 2026-11-16T03:34:44.911664+00:00 | last_verified: 2026-11-16T03:34:44.910608+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:30:14.725527+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 0ac0622c8fc7820ca24a8bc5f992076391bb36dd3fac1593dc4609433debd3c6 | body_bytes: 250
+
+```text
+Edge-map/wiring-order pins bind the real build_instance_graph but prove TOPOLOGY, not runtime verdicts. Graph-seam changes need EXECUTED-graph composition pins: node→router→next-node (fire→continuation→pass→END; drain with non-empty queue).
+```
+
+### failed-digest-gate-canon-sync-pending
+
+id: 7686e376-0e8e-430d-b768-969b7f336cf4 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: skill-keeper
+created_at: 2026-11-16T08:17:38.732518+00:00 | updated_at: 2026-11-16T08:17:38.732585+00:00 | last_verified:  | verify_count: 0 | access_count: 5 | last_accessed_at: 2026-11-18T04:46:29.854843+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 612bc47ad01dc882e80ab60568cd30998f8ac93c0648925b079e8df11e387a8d | body_bytes: 211
+
+```text
+Serving surface: PF canon pf:tester:failed-digest-equality-gate SHADOWS both DB generations; its §4 still greps the log. Canon amendment is owned by the tester/giter lane (skill-keeper cannot write repo files).
+```
+
+### agent-01-skill-injection-flag-scope
+
+id: 77bb3c69-bb35-42d3-b81e-5ff643847146 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-importer
+created_at: 2026-11-09T08:09:51.697383+00:00 | updated_at: 2026-11-09T08:09:51.697450+00:00 | last_verified: 2026-11-09T08:09:51.696746+00:00 | verify_count: 0 | access_count: 8 | last_accessed_at: 2026-11-18T05:13:24.708225+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 79c0594cfc4cb7dbebf1df7978601954b9080199257bd47253203882c5d90499 | body_bytes: 232
+
+```text
+Agent meta.json skill_injection gates dynamic per-turn skill discovery; absent key = false (fail-closed, daemon/registry.py meta.get). 15 dirs true / 11 logical agents; skill-keeper lacks the flag so its A/B group can never resolve.
+```
+
+### packs-registration-01-canonical-stale
+
+id: 77df7328-7d17-4680-a5b0-1710d323d3ad | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: developer
+created_at: 2026-11-18T09:03:36.751688+00:00 | updated_at: 2026-11-18T09:03:36.751803+00:00 | last_verified: 2026-11-18T09:03:36.750753+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T14:16:54.683531+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 0caa509d2bc3d8480133e27b3d19b4abcedc963d29aa3aaddfeb4e887dc3a6a6 | body_bytes: 203
+
+```text
+PACKS.md registration audits: read rows from the branch worktree or origin/latest, never the canonical checkout - it is detached and can predate registration merges; grep-empty there is not orphan proof.
+```
+
+### proxy-git-topology-local-master-lags-origin
+
+id: 782dda8a-6b00-46ac-ab65-dbb2bb5b50fc | domain: verify | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: devops
+created_at: 2026-11-09T11:31:52.327286+00:00 | updated_at: 2026-11-09T11:31:52.327373+00:00 | last_verified:  | verify_count: 0 | access_count: 8 | last_accessed_at: 2026-11-18T06:31:43.230263+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 10cfd9c07ee46e1e84abd2dc5c6cd73c7d853af3097753c75d6207eeed1b1783 | body_bytes: 200
+
+```text
+llm-supervisor-proxy local master lags origin/master: local HEAD 9cf17bb vs origin/master 43fb7e5 (v187). The DEPLOYED build is v187 (runtime /fe/api/version=187) - always diff the exact deployed SHA.
+```
+
+### review-02-describe-http-error-call-sites
+
+id: 783a1451-b41b-47c9-9e5f-1152480a2109 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-18T06:33:11.025553+00:00 | updated_at: 2026-11-18T06:33:11.025672+00:00 | last_verified: 2026-11-18T06:33:11.025137+00:00 | verify_count: 0 | access_count: 5 | last_accessed_at: 2026-11-18T06:50:05.007350+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: db026b8ac81d682bcadcc159c1c2d667fa6e95756a96f34bea8f24e057160e9f | body_bytes: 224
+
+```text
+describeHttpError (frontend/src/app/services/room.service.ts) has 3 call sites: rooms :200 and messages :247 are SHIPPED, global :311 is NEW. Fixing its 5xx transport-string leak alters shipped copy: a shipped-surface delta.
+```
+
+### rogue-cleanup-rider-recorded-addendum
+
+id: 78f7a7ca-01e8-471a-a903-0056bcf9ec97 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-14T23:51:15.406989+00:00 | updated_at: 2026-11-14T23:51:15.407048+00:00 | last_verified: 2026-11-14T23:51:15.406336+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-15T00:29:40.251587+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 5b09087e98ef300f01214906534fa8ae184f802dca33f570c559e30dfa8d621b | body_bytes: 238
+
+```text
+Cleanup riders outside git leave no trace once deleted. Rule: non-commit rider lands a one-line RECORDED addendum (path tally+bytes+staleness-proof) in matrix/RESULTS at execution time; else unverifiable-by-construction, paper-trail debt.
+```
+
+### forensics-02-debug-log-evicts-evidence
+
+id: 796d5f18-d13e-4445-8623-3b0327cc30ec | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T12:47:37.790640+00:00 | updated_at: 2026-11-11T12:47:37.790691+00:00 | last_verified: 2026-11-11T12:47:37.790206+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-18T06:19:54.895240+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: b8179976724cba1a6ec564cb7edd1435ba679ad148c6a03e4cb0c4752f050694 | body_bytes: 213
+
+```text
+Daemon log level is DEBUG by default: LLM token-streams rotate ~10MB/20min and keep-6 evicts the earliest evidence, so an incident's first minutes are unrecoverable. A pin to INFO would preserve forensic evidence.
+```
+
+### plan-predicate-ledger-01-attestation
+
+id: 7ba83375-7854-4121-b7c5-48c74b3140e3 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-18T06:16:32.101163+00:00 | updated_at: 2026-11-18T06:16:32.101221+00:00 | last_verified: 2026-11-18T06:16:32.100667+00:00 | verify_count: 0 | access_count: 40 | last_accessed_at: 2026-11-18T06:31:43.302428+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 6af5ee90295939312df6a74e7c3356a6e7cec1cf4d6ade7065ac9c93b92ada8f | body_bytes: 231
+
+```text
+Approver rejects string-level drift, not design. Use: §PREDICATE LEDGER (one canonical string each), closing ATTESTATION (char-for-char, names changed rows), DELETION RECORD for withdrawn predicates, no stale x-refs in companions.
+```
+
+### plan-body-ledger-agreement
+
+id: 7c9b9fa5-f991-4d79-bcc5-92156d3cd50b | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T11:57:32.142560+00:00 | updated_at: 2026-11-09T11:57:32.142652+00:00 | last_verified:  | verify_count: 0 | access_count: 100 | last_accessed_at: 2026-11-18T06:30:14.614300+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: dc67d7808be60f9051163edaf154702a13a88ceebf1be9a1df7ec7f7cd9de853 | body_bytes: 226
+
+```text
+A plan's ledger can assert FIXED while the BODY still gates on the old predicate. Diff body vs ledger every cycle: body wins; predicate strings must match character-for-character — no marker-grep check detects this mismatch.
+```
+
+### land-01-merge-shape-guards
+
+id: 7d38955d-869b-4453-a5af-157e5ff43ec6 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T06:49:04.417047+00:00 | updated_at: 2026-11-11T06:49:04.417093+00:00 | last_verified: 2026-11-11T06:49:04.416713+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-11T08:28:09.181772+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: c22825efbdffd6ee57ca603c71cf8dfde215d73255ed33ac106c42cc26ec1017 | body_bytes: 225
+
+```text
+Git-span drift guards (TestP11BootNoBehaviorChange) are green ONLY on a --no-ff merged shape; squash/rebase keeps them red by design. Release landings must be merge --no-ff, then verify first-parent merge and empty span diff.
+```
+
+### snapshot-l3-01-malformed-json-empty-collapse
+
+id: 7f83772d-20e9-45a8-bacc-2054750909a9 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: tester
+created_at: 2026-11-09T10:47:13.122912+00:00 | updated_at: 2026-11-09T10:47:13.122968+00:00 | last_verified: 2026-11-09T10:47:13.122458+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-17T09:47:43.169798+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: dda40e8358b12570dd76c26b4b29dd2fbe88f35570a2edfb7ecb28403049b7ea | body_bytes: 216
+
+```text
+Base 818411107: snapshot_search_service.py:667-669 — malformed LLM JSON makes _parse_selection return None, _llm_select return [], bypassing the :410 except handler; result collapses to empty, not stage-2 fallback.
+```
+
+### review-01-remeasure-base-red-claims
+
+id: 7fe8e816-7659-4789-9210-acc7f32e1459 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-16T22:14:07.833672+00:00 | updated_at: 2026-11-16T22:14:07.833727+00:00 | last_verified: 2026-11-16T22:14:07.833194+00:00 | verify_count: 0 | access_count: 28 | last_accessed_at: 2026-11-18T02:40:53.167604+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 2565a4bf9cd3aa6d249d4247d132bb45823fd1b851e071587e47c933944b9f39 | body_bytes: 233
+
+```text
+Review lesson 2026-11-17: a plan claimed a pre-existing base red 4+ times, but the pin was GREEN at 858a85e31 (entries[-4] == prompt-reload shape) — premise false at base. Re-measure base-red claims at review time; never copy them.
+```
+
+### prompt-assent-06-freshness-bound-flake
+
+id: 800f13b5-4fe0-43fb-9ac0-aa9e644c3ebc | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: tester
+created_at: 2026-11-12T05:09:43.705014+00:00 | updated_at: 2026-11-12T05:09:43.705077+00:00 | last_verified: 2026-11-12T05:09:43.704342+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-12T11:07:44.120144+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 13c4f8480f6f89ad3196af9b80e46b5c4ecdacdd46c47378a5ed57910ae66780 | body_bytes: 209
+
+```text
+prompt-assent phase3 pack: TestTheFreshnessBound::test_inside_the_bound_is_fresh is a PRE-EXISTING 600s-boundary flake (~13-20%, no code change); record attempt counts in the PACKS row, never "fix" it in-lane.
+```
+
+### packconv-03-unregistered-pack-no-coverage
+
+id: 8075071c-f3a4-465b-b28b-5f35891c39b2 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T07:45:06.693123+00:00 | updated_at: 2026-11-11T07:45:06.693231+00:00 | last_verified: 2026-11-11T07:45:06.692300+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-18T08:45:57.383174+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: facd2f7196c527659b77b9ca62d87d526eb481f56a49ec260cefb7a631fee323 | body_bytes: 202
+
+```text
+Gate pre-flight: grep PACKS.md for every pack script the change set ships. A script with no registry row never enters the pack runner, so its coverage is NOT passing coverage - it counts toward no gate.
+```
+
+### stage-release-gate-sequence
+
+id: 80cfdede-096d-4fe6-8be5-2526362cfaa0 | domain: deploy | audience: operation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-09T08:34:32.903235+00:00 | updated_at: 2026-11-09T08:34:32.903288+00:00 | last_verified: 2026-11-09T08:34:32.902696+00:00 | verify_count: 0 | access_count: 6 | last_accessed_at: 2026-11-11T12:41:55.639007+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 6d09b75b7f98794688880440f379cb68fb18241ea63408823190dc4437c8e385 | body_bytes: 228
+
+```text
+Stage: clean worktree detached at the BUMP commit. 4-way sha must be RECOMPUTED - the build-time sidecar is the independent witness (manifest sha is computed from the COPY). PROMPT-BASELINE 181/181 both trees = tester-side gate.
+```
+
+### snapshot-l3-04-drift-pin-identity-hazard
+
+id: 81447a12-7a29-463e-a0c2-514d9039c1fd | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: tester
+created_at: 2026-11-09T11:12:58.815489+00:00 | updated_at: 2026-11-09T11:12:58.815544+00:00 | last_verified: 2026-11-09T11:12:58.814539+00:00 | verify_count: 0 | access_count: 5 | last_accessed_at: 2026-11-10T03:09:20.221293+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: fbcd9ac87569871bacf9421626995ff78efd7f13c1a74cc4f33a332ad920213f | body_bytes: 213
+
+```text
+HEAD-leg hazard: TestDriftPin x4 (inspect.getsource identity checks) require _tokenize/_bm25_score/_extract_json_object to stay DIRECT un-wrapped imports from skill_search_service; inlining the helper breaks them.
+```
+
+### seal-03-repin-mutation-proof-triple
+
+id: 823d48a9-2c52-44e5-a7de-7c5d0695b66c | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T07:54:28.057094+00:00 | updated_at: 2026-11-11T07:54:28.057151+00:00 | last_verified: 2026-11-11T07:54:28.056573+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-16T19:49:12.564748+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 0a50659861b947dd3f604815b18d33a715330e3468c8b553de95c400ef458d31 | body_bytes: 229
+
+```text
+Re-pin proof: blanket re-stamp an untouched row -> untouched test reds; leave a re-pinned row at base -> re-pinned test reds; restore byte-identically (sha256 + clean diff). Seal values = content-sha256 64-hex, not git blob shas.
+```
+
+### promote-02-handback-halt-self-resolve
+
+id: 82491ef9-c31f-4bf7-9f9d-5e0bb1ee808f | domain: deploy | audience: operation | source_tier: agent | provenance: observed | created_by_agent: devops
+created_at: 2026-11-18T04:57:26.476857+00:00 | updated_at: 2026-11-18T04:57:26.476947+00:00 | last_verified: 2026-11-18T04:57:26.476356+00:00 | verify_count: 0 | access_count: 7 | last_accessed_at: 2026-11-18T06:31:43.302428+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: b79c7f546dac1d5ba0f50e8161d48540889005428562bd35389a2ba2ef696f21 | body_bytes: 236
+
+```text
+Hand-back halt (probe rc=3 vs 5s budget) self-resolves: serving_green_commit + sweep closes pending_op ~9-11min later (2nd case 2026-11-18 v0.31.2). Watch: state.json history tail + GET :9797/livez|readyz. No restart; counter untouched.
+```
+
+### w3-f18-store-not-callable-typeerror
+
+id: 82a3ca1c-07ad-4fc9-9ca6-6bbd65e97b06 | domain: other | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T12:47:37.793468+00:00 | updated_at: 2026-11-11T12:47:37.793520+00:00 | last_verified: 2026-11-11T12:47:37.792975+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-18T06:28:15.332939+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 7c778caf134a5235449c7cf0ad4fecadc3ca9dcdf77f3acf18ca81c5e175b38a | body_bytes: 234
+
+```text
+Routed (not fixed in the bind-race lane): w3 F18 metrics wiring raises TypeError every ~10s — 'InMemoryMachineStore'/'TombstoneStore' object is not callable at daemon/services/metrics_query/wiring/w3.py:234,240 — keeping F18 dark.
+```
+
+### skill-lane-flip-verify-restart
+
+id: 83a4b2d3-dd41-4f85-b799-11db50aefaee | domain: deploy | audience: operation | source_tier: agent | provenance: observed | created_by_agent: coder
+created_at: 2026-11-10T21:19:10.228544+00:00 | updated_at: 2026-11-10T21:19:10.228600+00:00 | last_verified: 2026-11-10T21:19:10.228090+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-11T14:50:40.881970+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 45bd19d332093dff53d7f1be7a5c62feedef010236126df3ab252486018cee04 | body_bytes: 198
+
+```text
+Skill lane flips: the live .env edit does not reach a running daemon. Verify the restart landed by reading /proc/<pid>/environ for ENSEMBLE_SKILL_CAPTURE_ENABLED=1, or by journal restart timestamps.
+```
+
+### await-sweep-resolution-gaps
+
+id: 845d3eb3-fb3b-4798-a9d2-b004bdd079dd | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T08:31:36.735691+00:00 | updated_at: 2026-11-16T08:31:36.735742+00:00 | last_verified: 2026-11-16T08:31:36.735278+00:00 | verify_count: 0 | access_count: 9 | last_accessed_at: 2026-11-16T09:40:55.330563+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 15202e7ef521e490a863b580eca2320255ccfa7877fa53558f31f01c8ea051c3 | body_bytes: 232
+
+```text
+R3 await sweep needs Attribute-on-Attribute resolution (self._manager.get_queue_stats): self/cls-name matching misses it. Broad matching false-positives on dict.get (daemon has async def get()). Cross-check logs for 'never awaited'.
+```
+
+### dispatch-truncation-recover-queue
+
+id: 84a12798-6be5-4628-96b3-92dfc20e90fa | domain: other | audience: operation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-13T00:08:20.769939+00:00 | updated_at: 2026-11-13T00:08:20.770007+00:00 | last_verified: 2026-11-13T00:08:20.769508+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:28:15.238674+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 496a2bb6a6b8959209c756b7109de81f03c6863e61f60d608072e977da77abb8 | body_bytes: 239
+
+```text
+Dispatch prompts can arrive truncated, silently dropping trailing sections like drift blocks. Recover full text read-only from message_queue by message_id. Verify claimed version and anchors against the live row before trusting a dispatch.
+```
+
+### gate-whole-tree-slow-skill-sink-test
+
+id: 84d2889b-fbbc-4a6f-b0fc-a3acc712687f | domain: verify | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T04:45:45.914065+00:00 | updated_at: 2026-11-11T04:45:45.914121+00:00 | last_verified: 2026-11-11T04:45:45.913500+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-11T05:06:58.096078+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 5678d88ca6896ba3a50c846130102a4446a8b4297544736730c91174101ee098 | body_bytes: 202
+
+```text
+Gate shard sizing: test_skill_sink_class_containment_pins.py::test_n2_... spends ~241s in setup (3.13) and >300s under xdist (3.14). Isolate that file into its own serial shard or the shard hits rc=124.
+```
+
+### tag-read-01-lsremote-yields-tagobj
+
+id: 8644714c-2638-401c-bcbc-ff295f3d92e0 | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: giter
+created_at: 2026-11-11T12:48:25.653187+00:00 | updated_at: 2026-11-11T12:48:25.653248+00:00 | last_verified: 2026-11-11T12:48:25.652536+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 888f21f66a18b28266e0cb956507627d9d021b8eb9f8bf1dc3de8de4051ff2bd | body_bytes: 217
+
+```text
+ls-remote --tags prints the TAG OBJECT sha for annotated tags, not the commit - peel with git rev-parse and the commit suffix. Local v0.29.6 peels to bc15a55d8 (LOCAL-ONLY, not an ancestor); origin peels to f49006b92.
+```
+
+### e2e-staged-binary-isolated-boot
+
+id: 86508503-31af-456b-9cfe-db66a6a10639 | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: developer
+created_at: 2026-11-11T13:12:12.277146+00:00 | updated_at: 2026-11-11T13:12:12.277198+00:00 | last_verified: 2026-11-11T13:12:12.276689+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-17T11:26:56.293968+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: bb0b4c90cf7cc7a615f78f7e1c15fd8d155a9ab5c55fddb5d7516e93fe24ec04 | body_bytes: 184
+
+```text
+Isolated staged-binary boot: copy the release dir to <tmproot>/releases/<ver>, pin ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0, sandbox self-env, own PG cluster and port; never 9797/9798.
+```
+
+### gc-p5-room-gate-node-baseline
+
+id: 86b7af58-c0d1-4872-98d1-a2297f9d6772 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T08:31:36.551485+00:00 | updated_at: 2026-11-16T08:31:36.551597+00:00 | last_verified:  | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-18T06:32:15.330507+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 40a8464b91db509b228a445c9b24ebde5848245a1020cfafc7dfd54da74c0869 | body_bytes: 180
+
+```text
+P5 room gate = 13 *room*-named test files under tests/ (test_room_*.py glob finds only 10). 257 nodes @ db54b61f5, 262 @ 77a869057 (+5 micro-lane). Tidier's 299 does NOT reproduce.
+```
+
+### enforcement-dormant-column-fence
+
+id: 86baab1e-7f76-4dd9-b2bf-deff994f1087 | domain: artifact | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-10T18:34:20.911140+00:00 | updated_at: 2026-11-10T18:34:20.911255+00:00 | last_verified: 2026-11-10T18:34:20.910432+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-11T12:39:43.363326+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: a61e31b9e56a887a31158df84fa4e6de48f938ffbc43546f260046b13f9ce210 | body_bytes: 221
+
+```text
+Enforcement code must NOT name resource_pid_map dormant columns (action/action_by/acted_at) in any daemon/ file — tests/test_resource_control_seam.py greps for them (2 fences). Use a RAM-only registry for kill verdicts.
+```
+
+### packs-registration-02-house-grep-audit
+
+id: 8719ee0d-0e3b-4010-a8c8-a0f9875751ef | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-18T09:16:08.946546+00:00 | updated_at: 2026-11-18T09:16:08.946604+00:00 | last_verified: 2026-11-18T09:16:08.945994+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-18T14:16:54.683531+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 490ac291d703329d4597fa03071122b93fb92a53409700ba93d1bb94d550ae89 | body_bytes: 232
+
+```text
+PACKS.md registration audit: house grep = basename grep -r over test/packs/ AND tests/packs/ + basename grep over .agents/tester/PACKS.md; .txt target lists count. Dir-sweep packs = coverage; root-file loose hits = known blind spot.
+```
+
+### gc-p4-02-executed-graph-probe-recipe
+
+id: 8820fcd6-9851-45dc-8cd8-4885a55080db | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T06:09:27.973228+00:00 | updated_at: 2026-11-16T06:09:27.973280+00:00 | last_verified: 2026-11-16T06:09:27.972753+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-17T11:56:31.273362+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 7b09ab536d95d4aefeaa4f4ac039d78980d7c3279d39564a49cc26ebbd700d64 | body_bytes: 228
+
+```text
+Executed-graph P4 probe recipe: build the real graph via build_instance_graph over a file-backed SQLite room substrate, patch build_instance_llms to a scripted model, spy the gate-node factory for route verdicts. No PG, no prod.
+```
+
+### mutation-01-guards-need-counter-mutation
+
+id: 887dc716-4cd2-4366-b3c0-e2bc41a25e47 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-10T08:48:59.774789+00:00 | updated_at: 2026-11-10T08:48:59.774906+00:00 | last_verified:  | verify_count: 0 | access_count: 41 | last_accessed_at: 2026-11-18T06:30:24.166738+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 12210e15c5a7c0e2135db2af3cbbb6e69f2425bebe0eb47c7d0728641fe06e84 | body_bytes: 220
+
+```text
+A test green under its own leg's revert is not vacuous if a COUNTER-mutation reddens it. Absence-only and raw-text pins are prose-satisfiable — re-aim at the POSITIVE shape; 'mutation failures: 1' is signal, not flake.
+```
+
+### worktree-03-upstream-auto-set-hazard
+
+id: 88d8d1af-df59-4037-9e15-70b4a0570d47 | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: giter
+created_at: 2026-11-09T10:40:25.685981+00:00 | updated_at: 2026-11-09T10:40:25.686043+00:00 | last_verified: 2026-11-09T10:40:25.685507+00:00 | verify_count: 0 | access_count: 18 | last_accessed_at: 2026-11-16T20:58:28.288803+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: d27686a3bb6aeb7b27334f24f2e2f2ba19759353d5df330aa29db33f43ea07cf | body_bytes: 211
+
+```text
+Feature branches here carry NO upstream (4/5 siblings unset). `git worktree add -b <b> origin/latest` auto-sets upstream=origin/latest (push hazard); branch from the exact SHA instead, then `push -u origin <b>`.
+```
+
+### plan-anchor-paths-need-grep-verify
+
+id: 894df877-0c9e-41f4-abac-03a6d8f05ebf | domain: artifact | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-10T21:39:23.572093+00:00 | updated_at: 2026-11-10T21:39:23.572150+00:00 | last_verified: 2026-11-10T21:39:23.571508+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-17T21:34:42.050796+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: a8862d4208c66b9deca90c0eb83876d0b463ff153fb18fc490ea94538fea0ae1 | body_bytes: 233
+
+```text
+Plan anchors are NOT self-verifying: pid_registry is at daemon/services/resource_monitor/pid_registry.py (NOT repositories/); read_pss_rollup is SELF-ONLY; list_group_members hardcodes /proc. Grep before trusting a planning-doc path.
+```
+
+### launcher-01-sha256-pin-chain
+
+id: 898c5f9c-6a6e-4885-b317-c8202d9e43c4 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T12:53:26.518858+00:00 | updated_at: 2026-11-11T12:53:26.518961+00:00 | last_verified: 2026-11-11T12:53:26.518536+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:30:14.657840+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: d456ad57e41a30a776714e9ca369d44f43df2c21bd2b0c4302a380b9a3868e3d | body_bytes: 200
+
+```text
+launcher_sha256 pins ONLY releases/<ver>/launcher.sh: stage.sh:439 computes + :595 writes it; lib.sh:4059-4069 verifies it. INSTALL_DIR/launcher.sh is NOT pinned (lib.sh:4987 copies it in at promote).
+```
+
+### stage-01-live-mode-guards
+
+id: 8a4c19c3-619c-4921-9948-9c10c6887f07 | domain: deploy | audience: operation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-09T03:53:00.343622+00:00 | updated_at: 2026-11-09T03:53:00.343684+00:00 | last_verified: 2026-11-09T03:53:00.343137+00:00 | verify_count: 0 | access_count: 17 | last_accessed_at: 2026-11-18T06:29:09.030702+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: d03691bfcd5cee0c5250f866ff62544d15f1cada7b9d3e509ea623afbc0db885 | body_bytes: 235
+
+```text
+Staging to the live install dir needs ENSEMBLE_UPGRADE_LIVE=1 (live guard), --allow-stale-stage for a non-tip tree, ENSEMBLE_ROLLBACK_SAFE=1 when the migration delta is empty. The override journal append fails pre-lock: no audit event.
+```
+
+### terminate-budget-01-fleet-3-per-24h
+
+id: 8a66b0a4-e0cd-4ed6-8830-760470aea19f | domain: other | audience: operation | source_tier: agent | provenance: observed | created_by_agent: maintenancer
+created_at: 2026-11-14T10:11:52.302800+00:00 | updated_at: 2026-11-14T10:11:52.302895+00:00 | last_verified: 2026-11-14T10:11:52.302314+00:00 | verify_count: 0 | access_count: 9 | last_accessed_at: 2026-11-18T06:31:10.693979+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 4b95aecd3d409cb2e4571aa5b3d205deafae5663deb3f2f8dbccd2309cc08962 | body_bytes: 232
+
+```text
+instance_terminate fleet budget = 3 acts/24h; a cascade counts as ONE act (bde0ae1c + 14 children = 1 on 2026-11-14). Over-budget is refused terminate-budget-exceeded, audited outcome=refused; retry after window rolls or raise knob.
+```
+
+### rogue-p2-evidence-locations
+
+id: 8c05b44a-10e0-44c6-a3ac-8e6958b3bd97 | domain: artifact | audience: operation | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-15T01:43:33.441171+00:00 | updated_at: 2026-11-15T01:43:33.441233+00:00 | last_verified: 2026-11-15T01:43:33.440482+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: a22c0c911bc7319a44a80dbe7d7481f0b8053704a023bcde1bf5d5e05cc66048 | body_bytes: 233
+
+```text
+rogue-containment-p2 evidence: commits 3ff13f9bf+b88fedec6 on feature/rogue-port-containment (local-only, finalize pushes); RAW logs NOT in git - durable copy /home/nea/rogue-p2-rescue-archive-20261115/ (tally: RELOCATION-RECORD.md).
+```
+
+### worktree-deletion-claim-verify-first
+
+id: 8c548d8f-1c52-4109-bc2c-a9543bc2c778 | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-10T19:45:31.496273+00:00 | updated_at: 2026-11-10T19:45:31.496340+00:00 | last_verified: 2026-11-10T19:45:31.495780+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-17T12:34:14.823971+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 507619df45415078c344cd5a7b4e2124de50b68c47cc0833ef3cd81c664d0d20 | body_bytes: 239
+
+```text
+Worktree-deleted claim from a child? Verify disk/git truth first (worktree list, .git marker, rev-parse). Recover: sha256-verified copy + orphan removal; file one corrective anomaly. Root 2026-11-10: name drift prompt-assent/prompt-assist.
+```
+
+### verify-01-red-receipt-overlay
+
+id: 8c5f62ac-9a83-4168-adf8-ef7cc5a36f18 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T11:51:28.649738+00:00 | updated_at: 2026-11-09T11:51:28.649794+00:00 | last_verified:  | verify_count: 0 | access_count: 11 | last_accessed_at: 2026-11-16T22:14:00.356354+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 3dc59f5cacd74cbfe5a4edaaf5431cc7f28873ea688e8f58ed63c2d76730b998 | body_bytes: 229
+
+```text
+Red receipt by overlay: copy ONLY the HEAD test file onto base, daemon/ at base, prove FAIL@base + PASS@HEAD, restore, re-run. Import resolves in worktree. Prod-at-base: hash == blob 141b6f651; HEAD-only markers 0x base, 4x HEAD.
+```
+
+### env-nonsource-wt-sonic-v0302
+
+id: 8ea08878-0c5c-4751-a4a5-f994f12339e2 | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-13T13:50:25.027245+00:00 | updated_at: 2026-11-13T13:50:25.027300+00:00 | last_verified: 2026-11-13T13:50:25.026720+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-14T04:02:03.985602+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 24594404830cfa79da3d80f78a42f3f49b2d27ce4179dfe56fb011fd81073bfc | body_bytes: 236
+
+```text
+wt-sonic-team-v0302 .env MALFORMED: password bare on line 9, no POSTGRES_PASSWORD key, so sourcing EXECUTES it and leaks. Extract per-line via sed (line 9 = password), verify by sha-prefix only, never echo. Repair owned by giter/leader.
+```
+
+### group-chat-p4-01-carrier-reminder-slot-gap
+
+id: 8ebed7dc-69fc-4c73-a6e1-95b3d0903234 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T10:05:53.348503+00:00 | updated_at: 2026-11-16T10:05:53.348576+00:00 | last_verified:  | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-17T21:33:38.020169+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 752d5b9d56957941299089931abc78045943d4471ff426466dd2baf02e652080 | body_bytes: 184
+
+```text
+SUPERSEDED 2026-11-16: the 2-path carrier gap is FIXED (c249d7fce). Carrier now on all 5 todo tool paths; manager has 6 reminder methods (add_subtask singular = manager-only, no tool).
+```
+
+### rogue-p2-corpus-routed-to-v03012-rulings
+
+id: 931d44a9-cec2-40f7-a677-dada29acc51f | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-14T20:55:47.045124+00:00 | updated_at: 2026-11-14T20:55:47.045179+00:00 | last_verified: 2026-11-14T20:55:47.044571+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-15T00:29:40.251587+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: d1263771ae2bb0c7ca7b512946966f174ef1d3f4539e5c413dc7c8108c04da51 | body_bytes: 234
+
+```text
+rogue-p2 corpus @ fb803579c: CHANGELOG anchors now v0.30.12 (3-subsection shape, forestry=giter); 119/122 counts dropped; E2 AH rows = A2 14/15/13/5.6/AH-10; factory env-wins cite verified factory.py:360 (:316 create_postgres_engine).
+```
+
+### killfoot-01-broad-pkill-pattern-hits-live
+
+id: 93832c2d-dee6-45bd-adc7-ee40514a7de5 | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T13:45:15.699810+00:00 | updated_at: 2026-11-11T13:45:15.699861+00:00 | last_verified: 2026-11-11T13:45:15.699337+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-14T23:06:30.119173+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 5acf3bf22e454bb2c1760225af399f3a1062fbdd2c42ffdfabc81ca826b2ff89 | body_bytes: 183
+
+```text
+An agent `pkill -f "ensemble-prod"` matches the LIVE daemon (its cmdline contains that string) and kills it. Scope kills to a pid/pgid or scratch path, never a production binary name.
+```
+
+### skill-e6-02-sweep-crowns-newer-gen
+
+id: 944483d7-0678-434c-a2c6-f6a0f09e003d | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-18T06:04:17.044050+00:00 | updated_at: 2026-11-18T06:04:17.044150+00:00 | last_verified:  | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-18T06:29:08.999231+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 3d9322cba39c6085c2114b4aafcdb628ab242bd2e08d8492dde00493f70825ed | body_bytes: 224
+
+```text
+skill_ab_inactivity_sweep: skips when busy; E-6 NEWER-gen wins, tie parks; honors ZERO overrides. Pause knobs: config+restart ONLY - raise ab_stall_timeout_days (env SKILL_EVOLUTION_AB_STALL_TIMEOUT_DAYS); no runtime switch.
+```
+
+### seal-02-repin-dict-keeps-base-value
+
+id: 9635dc88-1cff-4beb-97b0-37b707fe08e8 | domain: artifact | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T07:53:05.573147+00:00 | updated_at: 2026-11-11T07:53:05.573277+00:00 | last_verified: 2026-11-11T07:53:05.572565+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:31:10.716492+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 886023f1fd1a223445a7a7dc26c1de862389f80389cf7423201b26c8673f4fad | body_bytes: 218
+
+```text
+A re-pinned row keeps its BASE sha in SEAL_REPINNED_BASE_VALUES (the value it moved FROM); the map carries the current sha. Putting the NEW sha in that dict REDs test_the_re_pinned_rows_moved (seal[rel] == base_value).
+```
+
+### census-01-cross-lane-migration-pins
+
+id: 96546e3e-6bd3-4f3b-aa2b-cad1c875eb30 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T07:27:14.337578+00:00 | updated_at: 2026-11-11T07:27:14.337687+00:00 | last_verified: 2026-11-11T07:27:14.337043+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:30:14.639354+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 72d392eb8c012dbb8eef821fa8c93125b37967ee6c1eefb7424ed0a6fb60be4f | body_bytes: 239
+
+```text
+Cross-lane census pins: any lane that adds a migration file must update sibling lanes' migration census pins in the same change — a census pin compares the working tree against a lane base commit, so a sibling lane's migration breaks it.
+```
+
+### memoir-census-pin-biting-mutations
+
+id: 970a600e-f6f1-4a3c-b346-1fd37c565870 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T08:17:41.989214+00:00 | updated_at: 2026-11-11T08:17:41.989259+00:00 | last_verified: 2026-11-11T08:17:41.988673+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-11T08:28:09.181772+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: ed48279b28ae6dbbaed1665ca1b3c472a861bf3a3fdf2b557ae6537703585eee | body_bytes: 209
+
+```text
+Memoir census pin's biting mutations: (a) lane's own migration file removed from the working-tree delta -> RED; (b) lane commit range re-pointed at a foreign-lane commit -> RED; both restored byte-identically.
+```
+
+### baseleg-01-git-archive-no-dotgit
+
+id: 988c8902-f633-4f4a-af17-e1ef71c2b700 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: skill-keeper
+created_at: 2026-11-16T08:05:11.123298+00:00 | updated_at: 2026-11-16T08:05:11.123387+00:00 | last_verified:  | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-16T08:15:11.695631+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: b95e05c421eff493042ccb88fa18968be5ce342d41bdc1d37a11df0c2307a025 | body_bytes: 210
+
+```text
+A gitless base leg INVERTS git-dependent pins: assert-non-empty pins go RED at base (artifact; GIT_DIR re-run); assert-EMPTY pins PASS VACUOUSLY and manufacture a NET-NEW verdict. Pre-flight: test -e BASE/.git.
+```
+
+### stage-sh-live-requires-live-arming-var
+
+id: 9938e652-125c-46f8-8e8d-6ba11c1a0b02 | domain: deploy | audience: operation | source_tier: agent | provenance: observed | created_by_agent: tester
+created_at: 2026-11-09T03:54:59.724388+00:00 | updated_at: 2026-11-09T03:54:59.724454+00:00 | last_verified: 2026-11-09T03:54:59.723965+00:00 | verify_count: 0 | access_count: 14 | last_accessed_at: 2026-11-18T06:32:15.165646+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: c0826db2e44c384c9abcad40221bdcfc297f7f71b4775c17cc95311b003b4712 | body_bytes: 191
+
+```text
+stage.sh live refuses without ENSEMBLE_UPGRADE_LIVE=1 (runbook §8.1) — that var arms STAGING into the live install dir, not promote; stage.sh never flips `current`; promote.sh alone flips.
+```
+
+### boot-auto-cleanup-throttle-gap
+
+id: 9a7d4f95-3721-4b7b-8e74-976429690908 | domain: environment | audience: operation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-14T23:01:16.008848+00:00 | updated_at: 2026-11-14T23:01:16.008948+00:00 | last_verified: 2026-11-14T23:01:16.008328+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-14T23:06:30.119173+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 98de0179097006e374a0c1354fc09736df338db489567692e289897edfc82f6c | body_bytes: 224
+
+```text
+Boot-time checkpoint-cleanup is throttled, not unconditional: the 21:57:50Z 2026-11-14 boot minted NO maintenance_runs row though the last run was 12:44 — deathclock-01's every-boot claim carries an undocumented condition.
+```
+
+### skill-01-off-by-absence-restart-asymmetry
+
+id: 9c6975e7-f091-4584-b578-03e6571e6bb7 | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-09T06:35:25.399032+00:00 | updated_at: 2026-11-09T06:35:25.399094+00:00 | last_verified: 2026-11-09T06:35:25.398536+00:00 | verify_count: 0 | access_count: 23 | last_accessed_at: 2026-11-18T06:30:14.624136+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 789bb434d8404229bcfbe9edf20349d78302705983f058b5a194928644271864 | body_bytes: 226
+
+```text
+Skill capture/evolution are off by ABSENCE of env vars; capture has no YAML path. Switches resolve per-call but .env is boot-parsed only, so ON needs a daemon restart; the only live brake is job_queues.is_paused (instant OFF).
+```
+
+### teigate-01-auth-cluster-identical-both-sides
+
+id: 9c93b4c2-03ff-41cb-a36f-e3dc0536af35 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T21:55:14.997539+00:00 | updated_at: 2026-11-11T21:55:14.997596+00:00 | last_verified: 2026-11-11T21:55:14.997007+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 1a0366a074a01becc1b3d445450be582987a8eb95cb8c3f0a0bd70eff0dc1ba9 | body_bytes: 234
+
+```text
+teigate 1111: 39 auth-cluster red IDs IDENTICAL base+branch isolated. Root: ambient ENSEMBLE_AUTH_DISCOVERY_URL/ISSUER vs fixture idp.test -> AuthConfig ValidationError + stale lg-1.0.9 imports. Branch-independent, not merge-blocking.
+```
+
+### uvvenv-01-no-pip-use-importlib
+
+id: 9dfeee42-b102-47f2-b155-89545455bfbf | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T21:55:15.000527+00:00 | updated_at: 2026-11-11T21:55:15.000577+00:00 | last_verified: 2026-11-11T21:55:15.000191+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 013662cc63debbe171c2c70e37df6cc8bfbad677e4b1555989e26909cd319bfd | body_bytes: 209
+
+```text
+uv venvs ship NO pip module: `.venv/bin/python -m pip list` prints NOTHING - empty != broken. Probe via importlib.metadata. teigate 1111: lane+2 scratch venvs all 'empty' yet langgraph 1.0.9 intact everywhere.
+```
+
+### trustbound-02-granting-knob-must-be-env
+
+id: 9e4f3964-82fb-4f6d-97fb-a4e3b1269b66 | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T12:47:29.095222+00:00 | updated_at: 2026-11-11T12:47:29.095278+00:00 | last_verified: 2026-11-11T12:47:29.094631+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:29:08.990581+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 4e8abaadf4ae5a687925d87a5647a8668cd00be4e5b9e514fbf6a2b0c295e4f8 | body_bytes: 204
+
+```text
+Authority-GRANTING config (e.g. pinned-approver map) belongs in an ENSEMBLE_* env knob read at call time, never the DB settings tier, or the minting agent self-grants. DB tier suits disable-only switches.
+```
+
+### gc-p3-04-test-preadvance-blindspot
+
+id: 9e76cac1-2282-4752-b11c-4e51611247b3 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T00:59:17.059192+00:00 | updated_at: 2026-11-16T00:59:17.059259+00:00 | last_verified: 2026-11-16T00:59:17.058038+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-16T19:59:36.619732+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 5c70ff9c9fbffbd69d3fabb986352804be42acc19a47dd777c3bb96ed070fd91 | body_bytes: 240
+
+```text
+gc P3 F-1 gate lesson: cursor-pre-advance fixtures blind tests to over-inclusion defects — 5 boot tests hid boot_deliver routing all over-included pairs. Boot passes need a no-workaround pin resolving targets before CAS or cursor advance.
+```
+
+### pid-numeric-band-not-identity
+
+id: 9ffd660b-20ef-487c-9fed-e83faa27eb19 | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-14T23:39:08.778102+00:00 | updated_at: 2026-11-14T23:39:08.778155+00:00 | last_verified: 2026-11-14T23:39:08.777571+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-15T00:29:40.251587+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: feee12f0180407f52ce0dc4fc7a328632aaa8c5d0ab13489b1881942f5777d10 | body_bytes: 219
+
+```text
+PID numeric band proves nothing about identity — space wraps (daemon generations 3.0M–4.1M then 305455); client/probe PIDs share the band. Identity = MainPID or listener-owner read, never pgrep -f or ss client rows.
+```
+
+### language-check-order-scoped-isolation
+
+id: a14275fa-53e2-4d88-b782-3398d0a63bfb | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: reviewer
+created_at: 2026-11-16T04:50:28.917467+00:00 | updated_at: 2026-11-16T04:50:28.917521+00:00 | last_verified: 2026-11-16T04:50:28.916957+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 720e548c333daa2c95aa07d92a62e3f032705d4f9efd4e053a9a202e73d53f78 | body_bytes: 229
+
+```text
+test_language_check.py: order-scoped 1-failure in shared pytest processes after real-graph-fixture files (langgraph-mock eviction + call-time ToolNode import). Run it standalone in gate lanes; pre-existing at base, not P4-caused.
+```
+
+### quarantine-02-family-rows-need-node-mapping
+
+id: a17dd744-2be5-447d-a1ba-7941b2303e9c | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: tester
+created_at: 2026-11-09T11:12:58.821696+00:00 | updated_at: 2026-11-09T11:12:58.821745+00:00 | last_verified: 2026-11-09T11:12:58.821371+00:00 | verify_count: 0 | access_count: 15 | last_accessed_at: 2026-11-18T06:28:15.331545+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: ecf635088bfd2d9b8f7826290952b12a844eaf93584c79df5701f9b7fe66c92e | body_bytes: 218
+
+```text
+QUARANTINE.md rows can be FAMILY-level (e.g. 'snapshot gate drift x1' covers test_gate_flag_enabled_on_targets without naming it). A node-id matcher misreports such a base red as net-new; map family to node explicitly.
+```
+
+### promote-scripts-dir-provenance
+
+id: a2146e7e-05d1-4476-b984-e5fba6630913 | domain: deploy | audience: operation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-09T07:49:10.355464+00:00 | updated_at: 2026-11-09T07:49:10.355551+00:00 | last_verified: 2026-11-09T07:49:10.354984+00:00 | verify_count: 0 | access_count: 11 | last_accessed_at: 2026-11-18T06:32:15.411960+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 6e198a05d4aa5a12769a9e40be541e48a2c34d4a2fde2af9cd53d78fd85c8432 | body_bytes: 206
+
+```text
+Promote runs from the scripts-pin worktree @84df6b55c: arm-time guard needs lib.sh stamp == floor 2147c0298 and floor as ancestor. Canonical dir is arm-INELIGIBLE (dirty index). Live runtime = CPython 3.14.
+```
+
+### audit-script-dsn-password-stderr-leak
+
+id: a2b768e2-631c-48e2-8c6f-becd2092eeca | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-17T23:53:52.751748+00:00 | updated_at: 2026-11-17T23:53:52.751805+00:00 | last_verified: 2026-11-17T23:53:52.751219+00:00 | verify_count: 0 | access_count: 9 | last_accessed_at: 2026-11-18T06:30:14.639354+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 751c3a89ad2bdff1bf68b004743eb9ac486f86b5598005a551cb54c733af7e99 | body_bytes: 230
+
+```text
+Hazard: scripts/audit/skill_stale_deactivate.py (defect-D commit 5b8fef156) and skill_counter_reconcile.py print the full DSN incl. POSTGRES_PASSWORD to stderr on connect failure — pytest evidence packs leak the dev DB password.
+```
+
+### gc-p4-03-note-drop-turn-end-reminder
+
+id: a3020315-8141-4552-aaba-3f351e5a27ee | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T10:06:07.988030+00:00 | updated_at: 2026-11-16T10:06:07.988099+00:00 | last_verified:  | verify_count: 0 | access_count: 6 | last_accessed_at: 2026-11-17T11:05:22.945164+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 106eca4dd2c78e5a33d8fed5c3dc1790f13cd550d9ee7c6d5f2d0e9ab76b6817 | body_bytes: 227
+
+```text
+SUPERSEDED 2026-11-16: the add/remove_subtask drop is FIXED (c249d7fce). Auditor caution: the inventory pin's no-gap half is a CASE-SENSITIVE 'reminder' docstring scan — a new reminder method whose docstring omits it ESCAPES.
+```
+
+### forensics-04-registry-truncates-command-text
+
+id: a5071152-2999-40cf-a49e-2f0a72366347 | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T13:45:40.074250+00:00 | updated_at: 2026-11-11T13:45:40.074305+00:00 | last_verified: 2026-11-11T13:45:40.073650+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:25:04.727265+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 2bda06db5931418b96ad6540803b799e2fbd7197be2a59474bf2c82a485a2909 | body_bytes: 167
+
+```text
+bash_spawn_registry.command_sanitized truncates to the FIRST TOKEN. For kill/pkill forensics the checkpoint_writes blobs are the only full-text carrier of the command.
+```
+
+### prompt-assent-pg-server-defaults-gap
+
+id: a527d168-c0c3-4af0-90be-24b65895b222 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T07:44:55.982712+00:00 | updated_at: 2026-11-11T07:44:55.982771+00:00 | last_verified: 2026-11-11T07:44:55.982248+00:00 | verify_count: 0 | access_count: 5 | last_accessed_at: 2026-11-18T06:31:43.273095+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: fa59832d2af1301eedc3118d376393a29a9c4d3028d140fb276bc2c054b62b33 | body_bytes: 227
+
+```text
+prompt_assent_tokens has NO server-side defaults (version_tag/mint_is_dm/attempts/status are client-side only): a raw-SQL INSERT omitting them hits NOT NULL. ORM insert paths unaffected. Disclosed by the tester gate 2026-11-11.
+```
+
+### group-chat-p4-nudge-latch-manager-ram
+
+id: a6e24bfd-79f5-4d16-8b67-42d2a3fbe6b4 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T06:09:14.328674+00:00 | updated_at: 2026-11-16T06:09:14.328771+00:00 | last_verified: 2026-11-16T06:09:14.324632+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-18T06:27:11.366199+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: d03186742f2b953ec1e4ad49ebb0f1f2137183810ae9e36c4b64ba0264af4269 | body_bytes: 240
+
+```text
+P4 nudge latch is MANAGER-level RAM (manager._room_nudge_latch): a fresh coordinator does NOT lose it - only a new manager or a cleared dict does. Latch rows appear per SCANNED room even when unarmed; 'zero rows' holds for non-members only.
+```
+
+### census-pin-lane-ownership-form
+
+id: a883b76b-77cd-45b0-b9d0-b0c9acd8bc24 | domain: verify | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T07:55:19.108739+00:00 | updated_at: 2026-11-11T07:55:19.108770+00:00 | last_verified: 2026-11-11T07:55:19.108257+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:25:05.070595+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 7c28bb41171217bc58b300478647c8fe554318e2a9e9cd3533d7565ec7851a1c | body_bytes: 231
+
+```text
+A census pin counting a lane's own files must be lane-scoped, not global: assert the lane's own file is PRESENT in the tree delta, and pin the lane's closed commit range for exactness. Global equality re-breaks on every later lane.
+```
+
+### gc-p4-cle-line-tripwire-repin
+
+id: a98aed66-f8f1-41c8-9b81-215cbfd261f1 | domain: verify | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T07:54:14.053590+00:00 | updated_at: 2026-11-16T07:54:14.053656+00:00 | last_verified: 2026-11-16T07:54:14.052483+00:00 | verify_count: 0 | access_count: 10 | last_accessed_at: 2026-11-18T06:30:14.725527+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: fb483f7338f25bb13d8e272ae78c2a51c256e60a4d8e1adb569930f824e0d081 | body_bytes: 226
+
+```text
+Edits to daemon/graph.py above the compaction CLE nodes shift two hard-coded pins in test_proactive_compaction_ns_trap_fix.py (_CLE_GUARD_LINE/_CLE_REPLACEMENT_LINE). Re-pin in the same change; precedent 5995366bb + 4e0981b57.
+```
+
+### porcelain-midwrite-false-positive
+
+id: a9c59c72-90d7-4a2e-a93d-0d03020d8b95 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: skill-keeper
+created_at: 2026-11-16T01:11:54.755252+00:00 | updated_at: 2026-11-16T01:11:54.755306+00:00 | last_verified: 2026-11-16T01:11:54.754753+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-16T03:20:18.041278+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 335bc9a312b2aac6058e1e7966faad39c22219609ebb7de17de3fc7f774f8c0c | body_bytes: 218
+
+```text
+Porcelain ` M <file>` can be a mid-write sample: git hashed a file mid-truncate in an external no-op rewrite (bytes == HEAD). Empty `git diff --stat HEAD -- <path>` + mtime after run end = transient, no verdict impact.
+```
+
+### pyinst-01-frozen-binary-audit-route
+
+id: a9ccce7d-f252-47b4-be6b-88688315ddfd | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T07:25:47.341944+00:00 | updated_at: 2026-11-11T07:25:47.342031+00:00 | last_verified: 2026-11-11T07:25:47.341266+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-11T07:26:53.295696+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 78dcc78e7879f9696abae5cee457dccfc3050f653d235791cc9a946be1c6a181 | body_bytes: 231
+
+```text
+PyInstaller frozen-binary audit: use CArchiveReader(binary).toc — datas are typecode 'x' + COMPRESSED, so strings/grep yields TOC names, never content; strip path prefix before set-compare. Grep fallback needs a negative control.
+```
+
+### stage-ceremony-census-proofs
+
+id: aa71a679-1776-4c1f-80d0-6f52026e5792 | domain: deploy | audience: operation | source_tier: agent | provenance: observed | created_by_agent: giter
+created_at: 2026-11-12T14:25:26.428564+00:00 | updated_at: 2026-11-12T14:25:26.428614+00:00 | last_verified: 2026-11-12T14:25:26.428114+00:00 | verify_count: 0 | access_count: 7 | last_accessed_at: 2026-11-18T06:29:08.923711+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 749df0c50082cb8f2524a7ca2a7d19d399e1816b25095bb63a28b84724589183 | body_bytes: 233
+
+```text
+Stage census: live pointer=INSTALL_ROOT/current; PROMPT-BASELINE 181 = 6 names @ agents/*/*, verify via agents/.prompt-artifacts.sha256 sha256sum -c from release root; CArchive data-class dup basenames baseline-normal, module dups 0.
+```
+
+### mutation-03-git-restore-byte-exact-proof
+
+id: ab081457-5852-4aab-a27c-a750bbe6cb70 | domain: verify | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T05:35:35.018941+00:00 | updated_at: 2026-11-11T05:35:35.019000+00:00 | last_verified: 2026-11-11T05:35:35.018351+00:00 | verify_count: 0 | access_count: 7 | last_accessed_at: 2026-11-17T23:48:39.389818+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 1564622abad433f73ee8c34593ae77937cc656e2e21f0b11b576eff97bc50f44 | body_bytes: 158
+
+```text
+Counter-mutation restore proof: use git restore <file> (byte-exact from the object store), then compare sha256 before mutation vs after restore (PRE == POST).
+```
+
+### decision-kill-switch-liveness-triad
+
+id: ac17acb8-91f0-4bd1-8aad-4a893b6d3044 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T06:12:52.053297+00:00 | updated_at: 2026-11-09T06:12:52.053365+00:00 | last_verified: 2026-11-09T06:12:52.052812+00:00 | verify_count: 0 | access_count: 12 | last_accessed_at: 2026-11-10T03:11:19.587468+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 5d88dc7aa3b33aca913320678cb36811c8d4836e18472a3225bf6791c68ba38e | body_bytes: 218
+
+```text
+Kill-switch liveness needs 3 named parts: a concrete write channel, restart-durable persistence, and explicit composition with pre-existing boot-snapshot gates. Kill must target the retained baseline path, not a floor.
+```
+
+### bootlog-01-pre-import-logs-unobservable
+
+id: adbca413-a40b-4e75-97b2-cf43aaedc9b1 | domain: artifact | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T13:33:06.033725+00:00 | updated_at: 2026-11-11T13:33:06.033785+00:00 | last_verified: 2026-11-11T13:33:06.033204+00:00 | verify_count: 0 | access_count: 5 | last_accessed_at: 2026-11-18T06:32:15.263435+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 5affa58596169abc79f20b3b307a497fb3f28f1c3532017b7d31ee18d1fd83ae | body_bytes: 232
+
+```text
+Boot logging hazard: daemon.api is lazily imported by uvicorn.run, and that import installs the root handler. Log lines emitted BEFORE it (e.g. in __main__.py pre-bind code) are unobservable. Use WARNING+ for pre-import diagnostics.
+```
+
+### skill-02-evolution-switch-precedence
+
+id: ae25adfe-c162-44af-8b9a-94b69a0dfcd6 | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T06:36:34.763973+00:00 | updated_at: 2026-11-09T06:36:34.764035+00:00 | last_verified: 2026-11-09T06:36:34.763478+00:00 | verify_count: 0 | access_count: 25 | last_accessed_at: 2026-11-18T06:31:43.178301+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 5fc08e2e298066f177a5693c1fdff8426f3f15929fc71944cd7cce0e4f3bf563 | body_bytes: 222
+
+```text
+Evolution switch precedence: env ENSEMBLE_SKILL_EVOLUTION_ENABLED > YAML skill_evolution.evolution_lane_enabled > alias env SKILL_EVOLUTION_EVOLUTION_LANE_ENABLED > default False. No validation_alias; YAML passes verbatim.
+```
+
+### bindfix-01-prebind-without-listen
+
+id: ae5c5d2b-4cf9-4bba-81bb-53a7d5d15096 | domain: artifact | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: coder
+created_at: 2026-11-11T13:44:40.350475+00:00 | updated_at: 2026-11-11T13:44:40.350552+00:00 | last_verified: 2026-11-11T13:44:40.349868+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:25:05.155119+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: e15d0113a69b5fe670c53b95b6483d185c3afc3048d6999a215930505add026c | body_bytes: 201
+
+```text
+Listener pre-bound WITHOUT listen() and handed to uvicorn (asyncio does the listen): a startup-time probe still gets ECONNREFUSED, identical to an unbound port. No TOCTOU window between bind and serve.
+```
+
+### mutation-02-worktree-scratch-venue
+
+id: af8770ff-08b6-4f16-a861-d1f394248b7a | domain: verify | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T05:36:02.829593+00:00 | updated_at: 2026-11-11T05:36:02.829643+00:00 | last_verified: 2026-11-11T05:36:02.829103+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-18T06:27:11.353725+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 90bd6e545a6940c5b2e2a90d3a53e8011b5fa27599666266c943addfd974196a | body_bytes: 212
+
+```text
+Counter-mutation venue: git worktree add --detach /tmp/<scratch> <tip> + uv sync --frozen in scratch tree (~1s warm cache). Check: print daemon.__file__ and tests.__file__ (editable .pth points at worktree root).
+```
+
+### skillab-03-comparison-counter-semantics
+
+id: af8815b5-5623-439d-97d7-973bfe7a5c30 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T07:28:05.656366+00:00 | updated_at: 2026-11-11T07:28:05.656424+00:00 | last_verified: 2026-11-11T07:28:05.655922+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-11T07:29:06.269655+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 490b5b75cd29334a80f339cee531e0775661bc8544dca386cd01b2f6b598bc4e | body_bytes: 215
+
+```text
+comparisons bumps ONLY on genuine injections (_select_ab_variant→increment_comparison); record_feedback on-miss rows do NOT. No autonomous resolver — re-run deferred FIX manually once real injections accumulate.
+```
+
+### stagerelease-02-stage-vs-promote-origin
+
+id: b03c4a69-46c9-4143-a05f-0b2aa975c865 | domain: deploy | audience: operation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T07:12:00.020727+00:00 | updated_at: 2026-11-11T07:12:00.020782+00:00 | last_verified: 2026-11-11T07:12:00.020305+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-18T03:39:34.250034+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 43a2b6b0e48b3bbf1f49f5a9db619c9c333fe46967a0184f014f1b2ec6fb5ad8 | body_bytes: 180
+
+```text
+Stage and promote run from DIFFERENT worktrees: stage.sh uses the CWD worktree's lib.sh; promote must run from the scripts-pin (older set) because CWD selects the executing script.
+```
+
+### skillab-manifest-01-no-consumer
+
+id: b0611691-7a2e-4756-95ad-882a23131455 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-18T06:50:51.609739+00:00 | updated_at: 2026-11-18T06:50:51.609806+00:00 | last_verified:  | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 1d3bd0f25479737e5de4a4ca96992d247be47862c1ba3ecdba9a04b94936e64e | body_bytes: 221
+
+```text
+skill_ab_disposition_manifest has ZERO daemon consumers. Sweep uses the plain newer-gen default; declared pairs do NOT auto-divert. 3 of 6 resolved 2026-11-18; 3 remain open, crossing the 7d gate 2026-11-23 ~08:00-09:21Z.
+```
+
+### prompt-assist-tier2-gate-netnew-2
+
+id: b0808ff3-0289-418b-821f-d474b913f833 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T07:25:59.444732+00:00 | updated_at: 2026-11-11T07:25:59.444789+00:00 | last_verified: 2026-11-11T07:25:59.444233+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-11T07:54:01.325894+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 2526d1b4f2cfbcdbd8adae6c3c97101a2e851f12b31867dbd5e3a79c395f6a41 | body_bytes: 221
+
+```text
+Tier-2 whole-tree gate on feature/prompt-assist FAILED, net-new=2: branch re-stamped SEALED_SHA_BASELINES[discord/adapter.py] without moving it out of SEAL_UNTOUCHED_BASE_VALUES; new migration broke the memoir census pin.
+```
+
+### scheduling-01-self-alarm-reuse-instance
+
+id: b1dc0c7e-f45f-4eb4-8780-fff1debf1818 | domain: other | audience: operation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-10T20:16:25.927783+00:00 | updated_at: 2026-11-10T20:16:25.927835+00:00 | last_verified: 2026-11-10T20:16:25.927301+00:00 | verify_count: 0 | access_count: 5 | last_accessed_at: 2026-11-18T06:31:10.796330+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 5d931b5daf5e01ac9ed162cc1e294a0942d8bf3e99b6d298a7a6f2f45c319445 | body_bytes: 235
+
+```text
+task_schedule default instance_mode=new_instance spawns a NEW instance of the calling agent, not a message to the current one. Self-alarms must pass instance_mode='reuse_instance' or each fire adds an extra sibling acting on the brief.
+```
+
+### gate-mutation-reproof-restore-protocol
+
+id: b2322fc3-dd19-4646-812e-bca86f83fa70 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-10T23:50:19.756791+00:00 | updated_at: 2026-11-10T23:50:19.756849+00:00 | last_verified: 2026-11-10T23:50:19.756030+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-18T06:31:10.836071+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 326cc4e77a446cd59c1148ef55882365af2c19bb74d0b22c2e9a6f6d5b5373ef | body_bytes: 228
+
+```text
+Mutation re-proof: byte-identical backups outside the tree in /tmp, mutate working tree only, run one test file under timeout 300, restore from backup, prove restore by sha256 == PRE plus porcelain empty and git diff HEAD empty.
+```
+
+### worktree-01-venv-branch-binding
+
+id: b29ef98f-af6c-426d-bdbe-d11f4e1d6e87 | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: skill-keeper
+created_at: 2026-11-17T11:25:45.959146+00:00 | updated_at: 2026-11-17T11:25:45.959210+00:00 | last_verified:  | verify_count: 0 | access_count: 12 | last_accessed_at: 2026-11-17T12:34:14.823971+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 86fabe166561497845a9a33ca07985548863933fd80ba1a66d390eda36a101a8 | body_bytes: 228
+
+```text
+Never reuse the main .venv (its .pth pins the main tree); shell CWD defaults to /home/nea/ensemble-src, so an un-cd'd run imports the CANONICAL tree. cd first; assert daemon AND daemon.graph; miss = PROVENANCE-UNSAFE (leg VOID).
+```
+
+### mutation-proof-must-target-pin-property
+
+id: b2d5169e-e5bf-4d9f-9a14-d8175becfe6b | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: tester
+created_at: 2026-11-11T08:16:50.526070+00:00 | updated_at: 2026-11-11T08:16:50.526135+00:00 | last_verified: 2026-11-11T08:16:50.525367+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-18T06:19:54.852440+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 7a2b242955d082544128892c02ad400232be6d19415e6e93c1209ee103fb65a5 | body_bytes: 187
+
+```text
+A mutation proof must attack the pin's OWN property: if a repaired pin is deliberately immune to a defect class, removing that class cannot redden it. Inverted proof spec, not a weak pin.
+```
+
+### py-fromimport-staticmethod-importerror
+
+id: b43c6db1-91cd-429e-ae41-3d1f3f2d065f | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-15T14:28:07.014702+00:00 | updated_at: 2026-11-15T14:28:07.014753+00:00 | last_verified: 2026-11-15T14:28:07.014363+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-17T22:12:56.787844+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 6cf6bf8a1831118bfc1ddcbbd575bad1e6c468696f623b479308ed9ba86af795 | body_bytes: 233
+
+```text
+Latent P2 defect fixed: instance_lifecycle.py imported staticmethod _raise_typed_integrity module-level; collision path would ImportError. Gotcha: from-imports cannot reach class attributes; use RoomRepository._raise_typed_integrity.
+```
+
+### e6-manifest-pairs-live-db-only
+
+id: b5a24f38-8b3f-4d9c-b88e-0f5a7e7d760e | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: coder
+created_at: 2026-11-18T06:27:31.294446+00:00 | updated_at: 2026-11-18T06:27:31.294502+00:00 | last_verified: 2026-11-18T06:27:31.293813+00:00 | verify_count: 0 | access_count: 19 | last_accessed_at: 2026-11-18T08:45:57.414060+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: dfb19456ac2c8030577926d2a925b1b779148a4cd1e520c15cf38d1d8ea2a0b3 | body_bytes: 146
+
+```text
+The six E-6 A/B pairs exist only in the LIVE db; ensemble_dev has ZERO skill_ab_tests rows, so id-resolution pins for them must be static (no DB).
+```
+
+### shared-meta-kv-01-list-value-encoding
+
+id: b6086bf6-3f82-4d08-bf35-f985e56ce114 | domain: other | audience: operation | source_tier: agent | provenance: observed | created_by_agent: governor
+created_at: 2026-11-09T10:53:48.457241+00:00 | updated_at: 2026-11-09T10:53:48.457296+00:00 | last_verified: 2026-11-09T10:53:48.456770+00:00 | verify_count: 0 | access_count: 6 | last_accessed_at: 2026-11-10T03:04:59.346356+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 9dbe297b1ebb95956f7346a1479abd91f020e4655d35afcb5921c9b3cdefeb28 | body_bytes: 207
+
+```text
+shared_meta_kv echoes non-empty list values as {"item": [...]}: a populated councilors array round-trips wrapped, an empty [] stays a plain list. Unwrap on read when recovering a manifest; write lists as-is.
+```
+
+### skillevo-01-content-pipeline-no-patch-mode
+
+id: b74babf8-bf32-4063-a1fd-8d04b309ea65 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T07:29:22.568963+00:00 | updated_at: 2026-11-11T07:29:22.569021+00:00 | last_verified: 2026-11-11T07:29:22.568360+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:31:10.702690+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 9961f9742b9a90416080fb1935f78b96b781128f6770332743b66e23666dfccf | body_bytes: 228
+
+```text
+skill-evolve has NO patch mode: _evolve_fix always regenerates the whole body via _generate_evolved_content; BODY_START/BODY_END are model-invented markers, not code. Fix: strip marker lines + add mechanical line-level FIX mode.
+```
+
+### source-gc-drift-guards-branch-tip-sensitive
+
+id: b93a2b9a-72b0-403d-8f9b-2d3f9b316fd4 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-16T23:15:45.794493+00:00 | updated_at: 2026-11-16T23:15:45.794557+00:00 | last_verified:  | verify_count: 0 | access_count: 39 | last_accessed_at: 2026-11-18T06:28:15.197724+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 0bc847cc595b3122544a6b223cb9d4f1523cf68fbe8db5400b77bd4c2f97c5d8 | body_bytes: 236
+
+```text
+P11 drift guards: committed manager.py hunks need a sanctioned marker ('decision', 'memoir', 'group chat') else lane pins RED. Guard diffs COMMITTED span (working-tree blind); pins redden only after commit. Fix: marker comment per hunk.
+```
+
+### seal-partition-repin-sha-orientation
+
+id: ba8fb078-1327-47c7-a524-ee01e2ed3e79 | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: tester
+created_at: 2026-11-11T08:04:06.378856+00:00 | updated_at: 2026-11-11T08:04:06.378941+00:00 | last_verified: 2026-11-11T08:04:06.378322+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-18T06:31:10.716492+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: d6c987b768820502ffd685ff648d307a0de0918ddaf9171a5f6760f93f235112 | body_bytes: 200
+
+```text
+Seal re-pin rule: SEAL_REPINNED_BASE_VALUES stores the BASE sha (moved FROM); SEALED_SHA_BASELINES stores the CURRENT sha. Assert is seal[rel] != base_value — current sha in the re-pinned dict REDS.
+```
+
+### review-01-shared-helper-blast-radius
+
+id: bdfb7de6-1fbb-4c4b-8217-42c3389a73a1 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-18T06:33:11.015710+00:00 | updated_at: 2026-11-18T06:33:11.015769+00:00 | last_verified: 2026-11-18T06:33:11.015112+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:35:31.944041+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: dc26e4defb235a56dd1ced93fd9ac1ba4a05cbb8dd1b08ebc5e7f7f7a0393228 | body_bytes: 219
+
+```text
+A fix inside a shared frontend helper has blast radius across shipped lanes: count call sites, classify shipped vs new, and disclose shipped-copy changes as a deviation entry pinned by a test, never as a lane-local fix.
+```
+
+### disk-03-tag-lineage-unmerged-stage-trees
+
+id: bed25def-a69b-489a-9f62-9966b3208b24 | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-18T04:49:44.484166+00:00 | updated_at: 2026-11-18T04:49:44.484224+00:00 | last_verified: 2026-11-18T04:49:44.483523+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:28:15.024305+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: de55531af2d1de6bd477ea61c372bd9cefc8a95430343ed12bc9c2f702547ab7 | body_bytes: 208
+
+```text
+Tag lineage check before treating UNMERGED stage worktrees as protected: stage-v0296 was a local-only superseded release; its tag preserves the tree, so superseded stage trees may be removed even if UNMERGED.
+```
+
+### skill-ab-resolve-02-svc-sanctioned-unpinned
+
+id: bf54c278-c9fd-4aa9-b216-728aebf0b6cb | domain: verify | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-17T23:39:09.836125+00:00 | updated_at: 2026-11-17T23:39:09.836192+00:00 | last_verified: 2026-11-17T23:39:09.835056+00:00 | verify_count: 0 | access_count: 6 | last_accessed_at: 2026-11-18T06:27:11.525564+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: bb4078b41fb63c50e553fdbb349c251c63d8ffb11b1e46567f77f495ee6fdb7c | body_bytes: 208
+
+```text
+Skill A/B resolve: the SERVICE sanctioned guard (skill_evolution_service.py:2274-2277) is UNPINNED — removal leaves all 3 lane pin files GREEN. Only the ROUTER 409 mirror (routers/skills.py:1818) is pinned.
+```
+
+### launcher-stats-restart-forensics
+
+id: c06b531f-3310-4cf2-8d74-645ba6ce762e | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-14T23:01:23.380446+00:00 | updated_at: 2026-11-14T23:01:23.380478+00:00 | last_verified: 2026-11-14T23:01:23.380094+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-14T23:06:30.119173+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 8a5456af9ef51e74a6b72d3f69d3fb1e449565fad72717bedbde0cdc33fc3e9c | body_bytes: 174
+
+```text
+Restart forensics post-rotation: the launcher state block (window_start/last_exit/crash_count/last_uptime) reconstructs a daemon death to the second (anomaly 64c82ac6 audit).
+```
+
+### flake-01-ab-resolution-staticpool-race
+
+id: c0d669a4-24e8-46f1-adc2-2e189ffedfdb | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: giter
+created_at: 2026-11-09T08:11:10.776925+00:00 | updated_at: 2026-11-09T08:11:10.776991+00:00 | last_verified: 2026-11-09T08:11:10.776201+00:00 | verify_count: 0 | access_count: 7 | last_accessed_at: 2026-11-18T05:06:42.382966+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: da42937522474ace3e36938d56c160afcc90cf88dca2a2ae8ae1784764a1be94 | body_bytes: 231
+
+```text
+test_ab_resolution_threshold_met flakes on concurrent use of the shared StaticPool SQLite conn: check_ab_test_resolution fans repo calls via asyncio.to_thread (:1449). PROVEN: inline to_thread 0/12 vs normal 2/12 fail. QUARANTINED.
+```
+
+### gate-auth-env-302-poison
+
+id: c15be838-547b-48b0-9544-c190b2fb7ac5 | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-14T04:58:54.308369+00:00 | updated_at: 2026-11-14T04:58:54.308423+00:00 | last_verified: 2026-11-14T04:58:54.307949+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:35:31.944041+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: fe95d64c3775d6ea9785e4ff3e8497d048c9e22a5346240db59dffd11d03ea33 | body_bytes: 234
+
+```text
+Ambient ENSEMBLE_AUTH_ENABLED=true makes API tests importing daemon.api.app 302-fail (request_denied_302): head==base both red, auth-scrub rerun green 26/26. Scrub ENSEMBLE_AUTH_* per-variable with POSTGRES_* at every gate pytest leg.
+```
+
+### shutdown-03-lifespan-budgets
+
+id: c19a92a0-6049-471d-8cb9-4a200f58088b | domain: verify | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T13:02:30.131414+00:00 | updated_at: 2026-11-11T13:02:30.131470+00:00 | last_verified: 2026-11-11T13:02:30.130933+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-11T13:33:31.067917+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 9fc158f213cb215e08801bfc633f453179b2e4905ab34a17dcf37928ba726508 | body_bytes: 225
+
+```text
+Longest teardown steps (measured 108s): bash reaper sweep 60s deadline (bash_spawn_reaper.py:132), worker pools 30s each (pool_orchestrator.py:742), metrics sampler join max(5,interval)=10s on the event loop (sampler.py:143).
+```
+
+### views-verify-post-rate-limit-pacing
+
+id: c229af6a-047d-4e9a-bb5b-52a28b6742ee | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-09T03:22:10.104297+00:00 | updated_at: 2026-11-09T03:22:10.104349+00:00 | last_verified: 2026-11-09T03:22:10.103945+00:00 | verify_count: 0 | access_count: 17 | last_accessed_at: 2026-11-18T02:22:01.191937+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 0bf4e32604b17008c950edea9ec41d631bf0d7df659b8f61f25a0a0fe22a5495 | body_bytes: 196
+
+```text
+Views verify POST limiter takes a token on EVERY POST (403s included): capacity 5, refill 5/min => pace sweeps >=13s (else 429); a 403 must leave failed_attempts UNCHANGED (gate precedes compare).
+```
+
+### test-pack-01-embed-consumers-drift-pin
+
+id: c22b3254-a988-4c9b-9211-75e61f1322ce | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: wanderer
+created_at: 2026-11-09T10:35:36.459092+00:00 | updated_at: 2026-11-09T10:35:36.459151+00:00 | last_verified: 2026-11-09T10:35:36.458597+00:00 | verify_count: 0 | access_count: 14 | last_accessed_at: 2026-11-18T06:27:30.285530+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 89b9d09ba33574a7210302b54ac0f74edd61751357e11f05f7ffc18c35ffb8d1 | body_bytes: 191
+
+```text
+embed_consumers_unit_test pack hard-fails its DRIFT pin on any branch but fix/embedding-gzip-exemption (pack script :31-38). New embedding-consumer tests need a NEW pack row, not that script.
+```
+
+### verify-02-snapshot-l3-red-set
+
+id: c2915561-aae8-49a1-af92-eb1247c05814 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T11:50:43.012591+00:00 | updated_at: 2026-11-09T11:50:43.012663+00:00 | last_verified:  | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-16T10:38:39.361458+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: cddf3c121c018bdb3568212aa0bc0695c438932ac5dd0551aa8ee0557f59fc9a | body_bytes: 234
+
+```text
+snapshot-l3 red receipt: of 6 new tests exactly 2 are red-at-base by design (LEG A malformed stage-3 -> reranked[:limit]; LEG B prompt stage2_score field); the other 4 are green-at-base regression guards. Expecting all 6 red is WRONG.
+```
+
+### ab-39a27f20-strict-superset-fix-pending
+
+id: c367d252-4c33-4a4d-9e94-bf2821a10361 | domain: catalog | audience: both | source_tier: agent | provenance: observed | created_by_agent: skill-keeper
+created_at: 2026-11-11T05:35:26.024719+00:00 | updated_at: 2026-11-11T05:35:26.024775+00:00 | last_verified: 2026-11-11T05:35:26.023930+00:00 | verify_count: 0 | access_count: 8 | last_accessed_at: 2026-11-18T06:47:21.738404+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: f396501752e15b9eab22d1a02d3033bd2c9b03a351ae1d2492bed87ca787a6c6 | body_bytes: 188
+
+```text
+A/B 39a27f20 blocks corrective FIX: 38bad026 over-trimmed parent 0757f082. On resolution: rebuild strict superset (winner + 4 restored sections + Landing-shape), diff-verify BEFORE insert.
+```
+
+### staging-01-scratch-boot-db-ambient-allow
+
+id: c4108ce5-9a63-44dc-a309-d8b70d24eda6 | domain: environment | audience: operation | source_tier: agent | provenance: observed | created_by_agent: giter
+created_at: 2026-11-14T07:06:35.647536+00:00 | updated_at: 2026-11-14T07:06:35.647619+00:00 | last_verified: 2026-11-14T07:06:35.646980+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:31:43.110189+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 010c0ceb8f0245ec3cf9146c8740d2bc7ece90e3001f7c734423662f6faa1684 | body_bytes: 210
+
+```text
+Scratch boot vs fresh PG: with no ensemble.json, ambient POSTGRES_* is refused pre-TCP — set ENSEMBLE_DB_AMBIENT_ALLOW=1; also ENSEMBLE_FENCED_TEST_CONTEXT=1 so the overlay guard allows a /tmp scratch mirror.
+```
+
+### prompt-assist-02-killswitch-boot-raise
+
+id: c5a24a7b-1b82-4ff0-a467-8185be8c43fb | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-11T06:22:04.261859+00:00 | updated_at: 2026-11-11T06:22:04.261950+00:00 | last_verified: 2026-11-11T06:22:04.261308+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-11T12:44:22.080851+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 933ec944a6ae31bd92716c45c91b845e886f13c38b34fc1a5fe5b9545f4a3dff | body_bytes: 228
+
+```text
+An INVALID ENSEMBLE_PROMPT_ASSENT_ENABLED raises at BOOT (pydantic ValidationError, PromptAssentConfig.enabled) so the daemon never starts; unset boots clean, default OFF, tool stays registered, every verb refuses lane-disabled.
+```
+
+### sonic-stage-fresh-wt-fe-prebuild
+
+id: c5eab064-6b05-4697-b85a-9ccc2f6647c5 | domain: deploy | audience: operation | source_tier: agent | provenance: observed | created_by_agent: sonic-developer
+created_at: 2026-11-14T19:26:08.441001+00:00 | updated_at: 2026-11-14T19:26:08.441076+00:00 | last_verified: 2026-11-14T19:26:08.440515+00:00 | verify_count: 0 | access_count: 6 | last_accessed_at: 2026-11-17T21:43:02.875211+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 0b6078ffc063a6a68ee49340ee01aaad6fa9b037ef13e0e98f9be53f006f0919 | body_bytes: 207
+
+```text
+stage.sh in a FRESH sonic worktree fails FE assembly (ng not found; refuses UI-less release): cd frontend && npm ci, then scripts/upgrade/_build_frontend.sh, then re-run stage.sh (reuses dist/ensemble-prod).
+```
+
+### parallel-01-write-then-verify
+
+id: c65ace8b-5685-4651-bedf-fb839668d925 | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-18T03:12:59.344715+00:00 | updated_at: 2026-11-18T03:12:59.344776+00:00 | last_verified: 2026-11-18T03:12:59.344112+00:00 | verify_count: 0 | access_count: 12 | last_accessed_at: 2026-11-18T06:30:14.341340+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: c5fe39ec69e16ec1207d6308a5bfa5556fd363b78aac02882108ce48161952d4 | body_bytes: 230
+
+```text
+Never batch a verification SELECT in the same parallel block as the write it verifies — the read can see a pre-write snapshot and mimic 'not applied'. Serialize write-then-verify; suspect the race before the system (2026-11-17).
+```
+
+### testgate-02-standalone-packs
+
+id: c6a7a4ec-02c1-4802-bf3c-3488c8025b9b | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-16T03:51:07.535421+00:00 | updated_at: 2026-11-16T03:51:07.535482+00:00 | last_verified: 2026-11-16T03:51:07.534678+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-16T10:01:41.351579+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: d94529e290ad983975a56d93ba37de82a9315e50e731f8063cae0ff53b62ca98 | body_bytes: 227
+
+```text
+Mutation packs under test/packs/ are STANDALONE scripts, not pytest modules: pytest collects 0 tests (exit 5) and they REFUSE on a dirty tree. Invoke .venv/bin/python test/packs/<file>.py only AFTER the tree is committed clean.
+```
+
+### sealcheck-01-readonly-git-objects-check
+
+id: c86b80a0-ef7e-4832-a986-825468c29e61 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T11:17:28.307375+00:00 | updated_at: 2026-11-09T11:17:28.307452+00:00 | last_verified: 2026-11-09T11:17:28.306730+00:00 | verify_count: 0 | access_count: 16 | last_accessed_at: 2026-11-10T23:45:24.532985+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: e7327e0a29dc370e1313e55c9ad08f23f9ac9ecd68a90305fb9d75d8ee65b210 | body_bytes: 218
+
+```text
+Seal-map staleness is checkable read-only, no second worktree: AST-parse SEALED_SHA_BASELINES from git show base:tests/test_chart_image_delivery_e2e.py, hash each path via git show base:path, compare with expected pin.
+```
+
+### wiring-03-grep-scoped-miss
+
+id: c9dbbdc0-f3e7-4c3c-ab81-1e9ea9f878a4 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T06:49:04.413864+00:00 | updated_at: 2026-11-11T06:49:04.413953+00:00 | last_verified: 2026-11-11T06:49:04.413406+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 9f0d8670a30a03ec880d71db0188f64f9af70e15622211234314ca8f5cbeec04 | body_bytes: 211
+
+```text
+No production caller concluded by grepping ONE file is an inference, not evidence. Trace the boot path (lifespan to manager to service) before declaring a wiring hole; a grep-scoped miss made a false root cause.
+```
+
+### sonic-01-git-grant-boundary
+
+id: cb66b258-f3b0-4310-9b8b-b371a57af9f5 | domain: other | audience: operation | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-13T17:56:42.183020+00:00 | updated_at: 2026-11-13T17:56:42.183084+00:00 | last_verified: 2026-11-13T17:56:42.182097+00:00 | verify_count: 0 | access_count: 7 | last_accessed_at: 2026-11-18T06:27:30.319070+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: a564f1d82b4b811f12dfe19c69a61be9eac20f22902f35b506d5775d42c82f04 | body_bytes: 238
+
+```text
+Sonic grants: coder=worktree/branch/pathspec commits; developer=module merges --no-ff in-worktree; none push or merge to origin/latest. DoD of merged+pushed always ends ESCALATED: pre-assign landing tail or hand off worktree+tip+verdicts.
+```
+
+### git-01-canonical-detached-diff-trap
+
+id: cb7dea97-b329-4d46-aeb1-f479ef3acbd9 | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T05:21:32.778661+00:00 | updated_at: 2026-11-11T05:21:32.778738+00:00 | last_verified: 2026-11-11T05:21:32.778061+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: da8440e1b9e0135e0dc458e6cc1118bf25e07c819123ddb417703f99782a44e3 | body_bytes: 226
+
+```text
+Canonical checkout /home/nea/ensemble-src = DETACHED @013895287, 2wk behind origin/latest: diffs run there are silently wrong. cd into the worktree before ANY git diff/log/status; verify via --name-only | wc -l + per-dir sums.
+```
+
+### gc-p3-boot-pin-file-node-count
+
+id: cc74e0b8-c712-44b1-86f8-569fed13f078 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T01:08:09.565264+00:00 | updated_at: 2026-11-16T01:08:09.565320+00:00 | last_verified: 2026-11-16T01:08:09.564760+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-16T23:37:29.884586+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: d977935375d56510d20066dbd1c7e378c500164140bd38384888e5d9c2cec65a | body_bytes: 208
+
+```text
+group-chat P3 boot-pin file tests/unit/repositories/test_room_boot_f1_pin.py holds exactly 8 nodes — stable at 3274fe96e/bdd546942/ebcd6a115/HEAD. F-1 fix ebcd6a115 touched only room_delivery.py + its test.
+```
+
+### gc-p4-junitxml-is-the-red-source
+
+id: ccf336d0-2ff7-4764-a062-8666083e0bfc | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T07:54:14.071846+00:00 | updated_at: 2026-11-16T07:54:14.071951+00:00 | last_verified: 2026-11-16T07:54:14.071203+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-16T07:58:36.530534+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: d21d7426907f125f3f3be3c6ec61125da4784f27510be87d89dce25fdbdc45ad | body_bytes: 232
+
+```text
+pytest -r is single-valued: '-rf -rs' yields only SKIPPED; under xdist the test-red FAILED/ERROR summary lines are absent. Harvest BARE-ID red ids from junitxml - it is the only complete red set and its counts match the log summary.
+```
+
+### wtgate-02-base-leg-provisioning-artifacts
+
+id: cd554b35-1625-487e-b0ad-1e455ef6382f | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T07:27:14.323525+00:00 | updated_at: 2026-11-11T07:27:14.323579+00:00 | last_verified: 2026-11-11T07:27:14.323108+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:32:15.435556+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 2b4f37eafdeda61f57628a686b4634c848fc6499bf98f4e68209cf557849c08e | body_bytes: 234
+
+```text
+Base-leg-only reds from a /tmp worktree are provisioning artifacts, not branch fixes: plugin-registry checkout-family assertion (dir must match ^ensemble-src(-wt-...)?$) and workdir guardrail pins (ab-base-leg-provisioning-artifacts).
+```
+
+### e2s0-01-mirror-claims-and-scratch-db-wall
+
+id: ce03ba0c-3ade-450b-8aed-4d0bc26497a8 | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-14T21:04:47.128483+00:00 | updated_at: 2026-11-14T21:04:47.128541+00:00 | last_verified: 2026-11-14T21:04:47.127915+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: ab6d4eceda45cec49b2678c4f440109a412bbc0d86accf5a07bbd7ab1a0ca9de | body_bytes: 236
+
+```text
+E2 step-0 fix 9b59bafcd: claims hit resolved ENSEMBLE_PORT_CLAIMS_DIR + per-leg verdicts; refusal legs PASS. Happy env-blocked: no scratch DB ensemble_dev_app can own (rolcreatedb=FALSE), project_future exits 3; needs superuser scratch.
+```
+
+### sysone-02-openrouter-route
+
+id: ce9f71f3-1f8d-43bf-88ab-e3d4932e1bb5 | domain: deploy | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T11:02:21.788319+00:00 | updated_at: 2026-11-09T11:31:52.326008+00:00 | last_verified: 2026-11-09T11:31:52.326008+00:00 | verify_count: 0 | access_count: 18 | last_accessed_at: 2026-11-10T18:06:43.000849+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 55447ff06ad4ec14358125c7ddb5469180931c91c56b8bf63a1928e19a5b5052 | body_bytes: 212
+
+```text
+OpenRouter serves System One: POST https://openrouter.ai/api/v1/systemone -> 200 (model typesafe/jev-1.13, snapshot 20260917); /api/v1/decisions is 404. Model ids must be provider-prefixed (gpt-4o-mini rejected).
+```
+
+### gate-langcheck-auth-scrub-false-negative
+
+id: ceae2f60-5269-43ba-8c5e-82ecb5ab874d | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T05:45:05.380954+00:00 | updated_at: 2026-11-16T05:45:05.381010+00:00 | last_verified: 2026-11-16T05:45:05.380427+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-18T06:27:11.567533+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: e506cdb4c1dd3d8ed65757bac8a392b41adb4411136bebf4444228fbb7d47c60 | body_bytes: 216
+
+```text
+Gate lanes: do NOT scrub ENSEMBLE_AUTH_ISSUER for language_check. Ambient auth.enabled=true + issuer are required by Config(); scrubbing causes 2 false-negative failures. Scrub only for scope-cage route-census files.
+```
+
+### discord-03-assent-predicate-fix
+
+id: ceef3982-96f2-403d-94b2-c67928136729 | domain: other | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T12:52:28.730298+00:00 | updated_at: 2026-11-11T12:52:28.730407+00:00 | last_verified: 2026-11-11T12:52:28.729587+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-11T12:53:20.169140+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 9f945552eb42b6f12d4a301669f7562c62bcd23a3769e9c2f6b44464f9a98b97 | body_bytes: 239
+
+```text
+Assent-to-server-channels is a PREDICATE fix, not data: identity (channel/user/guild) in metadata['discord'] (adapter.py:1080); is_private_assent_channel (mint_context.py:29-50) fails only its is_dm leg; no migration (proof: mint_is_dm=0).
+```
+
+### decisionctl-01-kill-channel
+
+id: d00581d4-a4ad-4613-a0f5-136927f5c6d2 | domain: other | audience: both | source_tier: agent | provenance: declared | created_by_agent: developer
+created_at: 2026-11-09T10:45:09.050155+00:00 | updated_at: 2026-11-09T10:45:09.050210+00:00 | last_verified: 2026-11-09T10:45:09.049638+00:00 | verify_count: 0 | access_count: 15 | last_accessed_at: 2026-11-11T12:46:49.339907+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 25cae2f7d67636d633fcd12dcf9b07bc298e7b45a6800d82721333ffc423b8ee | body_bytes: 198
+
+```text
+Decision Module kill channel is the daemon-settings surface (settings:write, DB-backed), never the agent-callable tunable. Read per consult; write then read back and verify, fail closed on mismatch.
+```
+
+### rogue-01-write-quant-method
+
+id: d19b0275-61ec-4617-a147-5ed21b23fd76 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-12T01:25:34.517301+00:00 | updated_at: 2026-11-12T01:25:34.517381+00:00 | last_verified: 2026-11-12T01:25:34.516827+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-18T06:31:10.797723+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: ca05a40f976a7a4097138acbc469cc02a49e5be25ad99bec7978b13d16b52d43 | body_bytes: 214
+
+```text
+Rogue-write quantification: anchor checkpoint times via checkpoint->>'ts' (ids NOT clock-decodable); attribute bash rows by boot_id; split window at dying daemon's last write; 3-bucket sweep of timestamped columns.
+```
+
+### gc-p3-testp11-class-identity
+
+id: d284beff-b352-4e4e-9864-4c4b207c36f2 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-16T10:14:35.051721+00:00 | updated_at: 2026-11-16T10:14:35.051796+00:00 | last_verified:  | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-16T10:38:39.361458+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 6d348267b0ffc263491aa32e3a7d78fb429864ad5fb42b12000a66ef88140dd8 | body_bytes: 226
+
+```text
+VERIFIED at P4 66e59faa1: TestP11BootNoBehaviorChange = ONE file tests/unit/repositories/test_source_gc_repository.py, ONE class, 6 nodes; git-diff boot-shape pin, NOT a DB test. Same-named classes: disambiguate by node count.
+```
+
+### snapshot-l3-02-base-red-set-one
+
+id: d31fa038-69b7-4690-aa17-5a4817c007d6 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T11:50:43.010610+00:00 | updated_at: 2026-11-09T11:50:43.010685+00:00 | last_verified:  | verify_count: 0 | access_count: 9 | last_accessed_at: 2026-11-18T06:28:15.152766+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 90c847dab9da3ee57dc25fa72017ff0cca3c21df17ce7326357388bb6e3eb9a8 | body_bytes: 220
+
+```text
+snapshot-l3 base 818411107 (172 nodes / 3 files, zero variance): suite red set = exactly 1, test_gate_flag_enabled_on_targets (quarantined agent-meta drift). SCOPE: suite baseline = 1; FIX red set = the 2 new-test nodes.
+```
+
+### prompt-assent-05-auth-env-scrub-family
+
+id: d51b6509-1dfa-4f97-b4e3-60ade9192d38 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: tester
+created_at: 2026-11-12T04:04:22.388662+00:00 | updated_at: 2026-11-12T04:04:22.388718+00:00 | last_verified: 2026-11-12T04:04:22.388281+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-16T10:00:58.357281+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 8732f03aef7be571b6fc66d131eb5e76332c7d60ae6e1b0c3fa4724c4d4bb898 | body_bytes: 221
+
+```text
+prompt-assent unit legs: ambient ENSEMBLE_AUTH_ENABLED=true (live shells) leaks via pydantic-settings, failing 2 kill_switch config nodes; scrub the FULL ENSEMBLE_AUTH_* family per-variable, not just ISSUER/DISCOVERY_URL.
+```
+
+### skill-e6-03-promote-did-not-resolve-backlog
+
+id: d5fde27d-8a2f-477e-b400-4faf1edb6216 | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-18T05:45:05.637552+00:00 | updated_at: 2026-11-18T05:45:05.637619+00:00 | last_verified:  | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-18T06:04:17.534660+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 11c792924b977c2ece288155f6ef68c3427a0ca6ebd55b915f2c9abc64f4c7e2 | body_bytes: 240
+
+```text
+E-6 'resolve AT PROMOTE' UNMET by the sweep: 0 sweep-resolved since v0.31.2 (04:38:30Z); 2 pairs resolved by operator lane (05:31Z, 05:33Z). The wiring only ARMED the idle-gated sweep; the rest need an idle tick or explicit operator action.
+```
+
+### bash-spawn-registry-pid-census
+
+id: d7d8bdde-8852-41b3-aecc-9514175c92c1 | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-14T23:39:08.772112+00:00 | updated_at: 2026-11-14T23:39:08.772167+00:00 | last_verified: 2026-11-14T23:39:08.771538+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:26:32.383545+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 72f5c04e133384827ff4efaf4c555ce1173e0ccbf2d89c9a59c417199476731f | body_bytes: 216
+
+```text
+bash_spawn_registry stamps boot_id + daemon_pid on every bash spawn — a daemon-generation census (first→last row per boot_id) surviving log rotation; proved stability when probes falsely claimed churn (c4d8cc2c).
+```
+
+### injection-01-fifo-lifetime-teardown
+
+id: d8a53f13-55d3-44fb-a46a-8fddec30c35e | domain: artifact | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: developer
+created_at: 2026-11-11T15:22:17.057010+00:00 | updated_at: 2026-11-11T15:22:17.057094+00:00 | last_verified: 2026-11-11T15:22:17.056266+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:31:10.797723+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: e9c41b2f7d42eca4cf87014a0911b86dde537e9b963a1006098f4b0a4824f7c9 | body_bytes: 232
+
+```text
+Injection FIFO cleaners: pause-path, lifecycle cleanup, clear_all_instances, 1h TTL sweep — per-turn graph teardown NEVER pops it (@5995366bb). Drain helper must stay PEEK-ONLY; teardown-ordering has NO test pin (inspection-only).
+```
+
+### sysone-03-openrouter-decision-model-row
+
+id: da205d55-4c98-4bed-97b9-dae06f5e1731 | domain: deploy | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T11:02:21.801429+00:00 | updated_at: 2026-11-09T11:02:21.801482+00:00 | last_verified: 2026-11-09T11:02:21.801039+00:00 | verify_count: 0 | access_count: 25 | last_accessed_at: 2026-11-18T06:19:54.884523+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: f60aae86375d6f8e0a2b03c647c33eee0e7fd0455fb412e5548a0e742befe729 | body_bytes: 221
+
+```text
+OpenRouter decision provider needs NO new key: add a decision-kind model row bound to credentials.id=openrouter with internal_model=typesafe/jev-1.13 (provider-prefixed). The gap was a missing model row, not a credential.
+```
+
+### bind-02-fix-contract-exit-code-preservation
+
+id: dac8bc83-9fa9-4a15-a78f-21bb2b8cb691 | domain: artifact | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T13:01:25.327200+00:00 | updated_at: 2026-11-11T13:01:25.327254+00:00 | last_verified: 2026-11-11T13:01:25.326685+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-11T13:44:30.439823+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 4f915cc9f05e3aa78fb0a1882d6d1744a8263ec86d0e57dfc74bb3a4b62cf6eb | body_bytes: 215
+
+```text
+Bind fix must wrap ONLY the socket bind: on EADDRINUSE wait with bounded backoff then bind; on exhaustion exit 1 as today. Must NOT retry the exit-78 auth refusal or exit-75 PG refusal (RestartPreventExitStatus=78).
+```
+
+### sonic-bump-version-selfcommits
+
+id: df5f8463-318a-4373-8c79-5f5bc102cfba | domain: deploy | audience: operation | source_tier: agent | provenance: observed | created_by_agent: sonic-developer
+created_at: 2026-11-14T19:26:08.401602+00:00 | updated_at: 2026-11-14T19:26:08.401661+00:00 | last_verified: 2026-11-14T19:26:08.400989+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:27:30.243782+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: af6d15042df3cd963c8aeb4f774cf6f0e1eb6acdb7cf782ddd3c2ea2cf0414b9 | body_bytes: 213
+
+```text
+bump_version.py SELF-COMMITS each run ("! New version X") + runs uv sync — skip a claimed slot by running patch TWICE from base and tagging only the final; the intermediate bump commit rides the branch untagged.
+```
+
+### packs-row-count-drift-after-style-pass
+
+id: e025f995-669c-4cb2-9a52-d502b4184bf5 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T05:42:39.058977+00:00 | updated_at: 2026-11-16T05:42:39.059032+00:00 | last_verified: 2026-11-16T05:42:39.058444+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-16T06:09:14.260053+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 0496bd69632eb9629d96104083421ee00928f181e93a49bce39f6a35435e9a89 | body_bytes: 223
+
+```text
+PACKS.md registered rows record the count at the tip they were written; a later style/tidier pass that adds pins leaves that row stale. Reconcile the row count against a --collect-only count before reporting a gate verdict.
+```
+
+### skillab-manifest-02-claims-withdrawn
+
+id: e22957fd-6b5d-43ff-b486-2dead9206b69 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: developer
+created_at: 2026-11-18T06:47:29.138137+00:00 | updated_at: 2026-11-18T06:47:29.138206+00:00 | last_verified: 2026-11-18T06:47:29.137289+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-18T06:50:05.007350+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: f74337fce61dea0fea43f372f93d5e165c0ada2d1e128a39da928ee9e9cc41ac | body_bytes: 216
+
+```text
+E-6 manifest: 3 of 6 verified-defective claims withdrawn 2026-11-18 (rows 8f8cee3a, b77128c5, 1b8e4d80 - no finding). Data-only, zero daemon consumers; pin enforces a named evidence id per entry. Never blanket-apply.
+```
+
+### proc-01-no-durable-registry
+
+id: e5af1e76-54fb-4693-83c8-5fce42c8532c | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-10T18:43:20.095550+00:00 | updated_at: 2026-11-10T18:43:20.095606+00:00 | last_verified: 2026-11-10T18:43:20.095037+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:31:43.273095+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 8956491bb78d2132f7178ad1aa082f0942f4a0bcac1eef37d7f24b4aa0740c78 | body_bytes: 238
+
+```text
+proc_run has NO registry: bash.py:414 + stdio_wrapper.py:783 touch pid_registry; only bash writes bash_spawn_registry rows. Cross-lane features (RAM auto-termination) need a NEW write path; proc state is RAM-only BackgroundProcessManager.
+```
+
+### gc-p3-swallow-advance-class-sweep
+
+id: e6265ac0-9f0c-405e-8784-66ec8ab1d50a | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-15T20:32:35.751585+00:00 | updated_at: 2026-11-15T20:32:35.751641+00:00 | last_verified: 2026-11-15T20:32:35.751020+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-16T00:43:30.627522+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: b245dd617e720b1d33d1a475b16ede208d354ef30a42b0cce39110c19699ac2f | body_bytes: 233
+
+```text
+Gate lesson (gc P3 2026-11-15, F1): a class-named remediation must sweep sibling sites. Swallow-then-advance = silent durable-row loss. Fix: primitives return an admission result; gate advance+routing on it; False -> deferred_cursor.
+```
+
+### fidelity-01-diff-verbatim-blocks
+
+id: e6db45c4-180f-442e-9d11-a5c78d46e54c | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: reviewer
+created_at: 2026-11-15T04:45:30.570626+00:00 | updated_at: 2026-11-15T04:45:30.570722+00:00 | last_verified:  | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: b5d52df08bc1c5c77c99fb5f215fb097fa7d186e4225205249e933581ba26624 | body_bytes: 234
+
+```text
+'Verbatim'-labeled ruling blocks: diff vs the live KV source before approval — glyph swaps AND dropped parentheticals both fail (recurred group-chat Rev 6 after Rev 2 gating); anchors re-verified at the pin before 'verified' stamps.
+```
+
+### group-chat-02-p1-committed-docs-stale
+
+id: e71966f5-75fa-49f6-ba95-01768d3afaba | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-15T12:40:14.395290+00:00 | updated_at: 2026-11-15T12:40:14.395346+00:00 | last_verified: 2026-11-15T12:40:14.394739+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-15T14:27:54.433562+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 05b61c81c462f64d8602e11774c2960df0b77f86f80cd74d85b696c287d5b101 | body_bytes: 215
+
+```text
+group-chat P1 @cc44d8416: committed docs carry PRE-ratification 'archived' design; ratified R2 purge wording only in 4 UNCOMMITTED worktree docs (+KV gc_phase2_go); code implements R2 — merge MUST land those docs.
+```
+
+### commissioned-proof-list-is-not-ground-truth
+
+id: e9d9e684-47c7-472e-a1bb-f6ab43702f47 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-11T08:17:41.995783+00:00 | updated_at: 2026-11-11T08:17:41.995832+00:00 | last_verified: 2026-11-11T08:17:41.995461+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-14T19:50:30.874753+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: ddbacb5fe8b116845da6af826ae5c8315d3e1cb83e99c4603beb8aae1c8eb679 | body_bytes: 220
+
+```text
+Commissioned proof lists are inputs, not ground truth: if the repaired pin is deliberately immune to that defect class, the spec is inverted — re-derive it; don't call the pin weak, don't paper over a non-biting plant.
+```
+
+### rogue-fence-ambient-allow-var
+
+id: e9e65ac8-50f8-47a8-b2ff-32d0056c07c9 | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-17T14:46:42.627221+00:00 | updated_at: 2026-11-17T14:46:42.627291+00:00 | last_verified:  | verify_count: 0 | access_count: 28 | last_accessed_at: 2026-11-18T08:45:57.414060+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: b384c35715a8e8a37b7526312e9938c651793ec8a6e2ca26f90d48693e1c6b20 | body_bytes: 228
+
+```text
+Fenced scratch boots (ambient POSTGRES_*): ENSEMBLE_DB_AMBIENT_ALLOW=1 pre-bind or exit 78 — v0.31.0 guard daemon/ensemble_config.py:186. Grant tier-2 ONLY: assert_prod_dsn_sanctioned never consults it, prod fence stays armed.
+```
+
+### snapshot-l3-05-decline-byte-identical
+
+id: eae94324-55dc-49b4-b428-c0bf7500f7ea | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T11:51:28.643692+00:00 | updated_at: 2026-11-09T11:51:28.643762+00:00 | last_verified:  | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-16T20:21:55.160838+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 0ac5f9f7cd441b9c33f145a87d82cb6f9b8f72eb05ed499cc0fb2af6745ca74f | body_bytes: 237
+
+```text
+snapshot-l3 LEG A: decline clause `if not parsed: return []` is BYTE-IDENTICAL base vs HEAD (fix PREPENDS `if parsed is None:` above it; `[] is None` is False so decline still empty). LEG B: prompt now carries stage2_score per candidate.
+```
+
+### sonic-03-blast-gate-removed
+
+id: ebe4f878-ac79-4d9e-8ccb-ceebedfa1aa4 | domain: other | audience: operation | source_tier: agent | provenance: declared | created_by_agent: developer
+created_at: 2026-11-14T04:03:47.113895+00:00 | updated_at: 2026-11-14T04:03:47.113969+00:00 | last_verified: 2026-11-14T04:03:47.113464+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-18T06:33:03.797662+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 0a9703ee2bdfa615fa633e70f6d801650f5a0332f32b0bf2f11392e0c973cdeb | body_bytes: 224
+
+```text
+'Daemon work never routes to sonic' + [sonic-blast-radius-v1] gate: SUPERSEDED/REMOVED by Ruling A (staged v0.30.5, feature/sonic-routing-v0305). Quick core-file changes are legitimate sonic work; routing is complexity-only.
+```
+
+### baseleg-01-phase1-base-red-set-protocol
+
+id: ec0c0cd6-6a4c-420d-bde3-e1e5dbe4b733 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: giter
+created_at: 2026-11-09T08:20:53.511577+00:00 | updated_at: 2026-11-09T08:20:53.511639+00:00 | last_verified: 2026-11-09T08:20:53.511060+00:00 | verify_count: 0 | access_count: 7 | last_accessed_at: 2026-11-16T10:38:39.361458+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: e3ebcb891904ec7cf7834905238742bad22b7ff08879dbbae049da448000ead4 | body_bytes: 213
+
+```text
+Phase-1 base leg = 3 stable reds (SQLite 20260714_000001); AB-resolution node EXCLUDED (quarantined flaky 15-38%). Diff base SETS over >=3 runs vs head SETS against a named quarantine list, never single-run diffs.
+```
+
+### wiring-02-phase2-window
+
+id: ec808433-cd65-4076-95f5-7593f96e0906 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T06:49:04.387073+00:00 | updated_at: 2026-11-11T06:49:04.387123+00:00 | last_verified: 2026-11-11T06:49:04.386573+00:00 | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-17T11:05:44.179089+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 8d1dd9c74c11d10d92ac79655a9c723707e96c9c95e1d773a8d7bfb54e13d798 | body_bytes: 184
+
+```text
+Phase-2 zero lane admissions was measured in the pre-flip window (capture lane still OFF) — never evidence of a wiring hole. Re-measure only after the restart that carries the flags.
+```
+
+### worktree-env-fence-shape-recheck
+
+id: f28a5c98-7326-44a2-95b3-110f0f288b7f | domain: environment | audience: operation | source_tier: agent | provenance: observed | created_by_agent: giter
+created_at: 2026-11-13T14:11:57.506494+00:00 | updated_at: 2026-11-13T14:11:57.506550+00:00 | last_verified: 2026-11-13T14:11:57.505943+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T06:27:11.537674+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: a9ddd2de78782af040e2640501a6274804813b7bcfc2e0f033be8bd143f857a0 | body_bytes: 239
+
+```text
+v0.30.2: worktree .env fence mangled mid-commission (line 9 lost POSTGRES_PASSWORD= key, bare value; anomalies e5bc2dc4/86925d60). Re-verify fence shape at EVERY touchpoint: 0 bare non-comment lines, exactly 1 POSTGRES_PASSWORD=, mode 600.
+```
+
+### dispatch-01-worker-barrier-stall
+
+id: f2deaad1-1399-494d-84c7-e18a2cec6b18 | domain: other | audience: operation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-18T08:08:20.026281+00:00 | updated_at: 2026-11-18T08:08:20.026345+00:00 | last_verified: 2026-11-18T08:08:20.025743+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: cbdbbb68ad47787812e1f2867e3b9714eb1bed734b10bdcb08141ba29077f6a6 | body_bytes: 239
+
+```text
+Sub-worker fan-out can wedge: workers that never dispatch (zero messages, queued=0) block the parent on a barrier that never satisfies. Diagnose via subtree_status + subtree_messages; terminate them, redirect the parent to finish directly.
+```
+
+### worktree-02-python-version-divergence
+
+id: f3fc3c4e-0b7e-4aad-9f88-9c03a913347f | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: giter
+created_at: 2026-11-09T07:46:20.815163+00:00 | updated_at: 2026-11-09T07:46:20.815236+00:00 | last_verified:  | verify_count: 0 | access_count: 5 | last_accessed_at: 2026-11-16T19:49:12.564748+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 75a20ccdb4e716eb7c1246bfad82f8230a945fd7af51b971da16d04a908c2671 | body_bytes: 235
+
+```text
+LIVE runtime = CPython 3.14 (v0.29.5/6/7 embed cpython-314); canonical .venv 3.13.15 is a stale outlier. No repo pin; manifest records NO python_version (gap). 3.13-vs-3.14 skill-lane diff: identical failed-lists (3 failed/456 passed).
+```
+
+### bump-01-preflight-preconditions
+
+id: f4227ca6-365e-4f3a-aae2-d66e069f7a42 | domain: deploy | audience: both | source_tier: agent | provenance: observed | created_by_agent: giter
+created_at: 2026-11-09T08:39:23.526751+00:00 | updated_at: 2026-11-09T08:39:23.526813+00:00 | last_verified: 2026-11-09T08:39:23.526141+00:00 | verify_count: 0 | access_count: 5 | last_accessed_at: 2026-11-18T06:27:11.353725+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 41f9d086d6f2abdd5cb1bf2ffa9acd201d6e9e0feeda3fc51530e95a12180f72 | body_bytes: 213
+
+```text
+Bump preflight: PATH=$HOME/.local/bin:$PATH (bump_version.py:117 calls bare `uv sync`); ROOT=Path(__file__).parent.parent = worktree-local; targeted adds (no git add -A); legacy message `! New version X` -> amend.
+```
+
+### gc-p5-room-create-cap-race
+
+id: f42b8098-3a12-44cc-939f-a3cce6848d3a | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-16T09:35:28.914789+00:00 | updated_at: 2026-11-16T09:35:28.914864+00:00 | last_verified:  | verify_count: 0 | access_count: 7 | last_accessed_at: 2026-11-16T10:05:24.380739+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 70a0dac0fb3bf223565eb46521f2b1c377171c49853930bf27906e645dabc95a | body_bytes: 234
+
+```text
+create cap 8/tree is check-then-act (COUNT repo:467-474 vs INSERT :482-484), no lock/DB cap; overshoot scales w/ racers (100->50-59); at-8 tree safe. JOIN-side worse: member cap pre-lock. Refusal string untruthful (A-P5-14 falsified).
+```
+
+### stagerelease-01-binary-sql-toc-census-route
+
+id: f5aafdd4-b2fc-4ae2-a5c1-5ba295da2596 | domain: verify | audience: operation | source_tier: agent | provenance: observed | created_by_agent: skill-keeper
+created_at: 2026-11-11T07:24:24.451264+00:00 | updated_at: 2026-11-11T07:24:24.451324+00:00 | last_verified:  | verify_count: 0 | access_count: 1 | last_accessed_at: 2026-11-16T23:50:50.110190+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 52fc1ace38b345917a38d699403157caf2efb892c0d4c6c1d9fbc13623cc14f4 | body_bytes: 239
+
+```text
+Embedded .sql in a frozen PyInstaller binary is COMPRESSED (typecode x, flag 1): grep finds TOC NAME strings only, never content. PRIMARY census = CArchiveReader(binary).toc; set-compare vs the STAGED COMMIT tree; needs a negative control.
+```
+
+### gc-boot-01-addressed-rows-never-derive
+
+id: f6a155ae-ea34-4e0c-a0ed-aa5640dff442 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T01:10:25.781778+00:00 | updated_at: 2026-11-16T01:10:25.781835+00:00 | last_verified: 2026-11-16T01:10:25.781312+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:32:15.382108+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: c72c74478a7ea02fe7a755529a954f1fcfec775dddc29e303a8631e1c85f195f | body_bytes: 226
+
+```text
+gc boot substrate: pending pairs are ROOM-scoped and only rows with non-empty tagged_members derive — addressed-only posts never enter the boot set; the F-1 filter bites on the addressed member of a TAGGED row (co-presence).
+```
+
+### assent-p15-local-imports-are-mutation-pins
+
+id: f6f5dbb7-35f1-4e6a-9498-8aff9c175f07 | domain: verify | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: coder
+created_at: 2026-11-12T04:46:11.105944+00:00 | updated_at: 2026-11-12T04:46:11.105999+00:00 | last_verified: 2026-11-12T04:46:11.105401+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:31:43.302428+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 96a5d3fe9980e4a57aca69add8f1f6421cae8efb3e498480040be5afb14c1430 | body_bytes: 240
+
+```text
+prompt-assent function-local imports are LOAD-BEARING: classify_user_origin grep-pinned (Mutation6), nonce_in_content home-module-patched (Mutation1), is_private via mint_context ns (P-2b). Hoisting vacates the counter-mutations (40b6c936).
+```
+
+### pg-schema-fence-connect-args-not-listener
+
+id: f709fcd9-b484-473c-9b93-791e216614cc | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T09:27:18.884577+00:00 | updated_at: 2026-11-16T09:27:18.884650+00:00 | last_verified:  | verify_count: 0 | access_count: 10 | last_accessed_at: 2026-11-18T06:27:11.300742+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 3e1f7b8c2e3d02b08be590b4b28491068b2e0bdc645f7726325cea940e3ae851 | body_bytes: 238
+
+```text
+PG private-schema fence: search_path via connect_args options; NEVER ',public'. ensemble_dev already has public.chatrooms/chatroom_members, so create_all(checkfirst) skips and probe DML lands in shared rows. Assert current_schema() first.
+```
+
+### views-origin-gate-contract
+
+id: f8410545-15db-4737-afa2-96a68baceb63 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T03:23:45.052277+00:00 | updated_at: 2026-11-09T03:23:45.052353+00:00 | last_verified:  | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-10T03:09:35.095074+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 71c712881916acda517877337b1fa5c36dd313f22cbec0cb91ec8fe54fbf10f0 | body_bytes: 229
+
+```text
+Views origin gate (FIX-10): a present Origin must match a vouched name (audience / declared base / loopback). Case, trailing-dot, port-elision and scheme mismatch GRANT by design; evil FIRST XFH poisons a matching Origin (K4/K2).
+```
+
+### priv-category-rotates-mutation-matrix
+
+id: f879ae39-6e2c-4814-b9be-008a5538e942 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T08:31:36.708915+00:00 | updated_at: 2026-11-16T08:31:36.708968+00:00 | last_verified: 2026-11-16T08:31:36.708435+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-18T06:30:24.166738+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: b9963ea81d09e92e9cf55c21afa2276ac1eb5adc2a6bc41b5187faea0ed87e14 | body_bytes: 222
+
+```text
+New privileged tool category ROTATES test/packs/metrics_read_mutation_matrix_test.py (find-string derives from len(PRIVILEGED_TOOL_CATEGORIES) at import; stale id => SKIPPED+FAIL). Editing it is lane-legitimate + REQUIRED.
+```
+
+### stage-v0300-worktree-head-nuance
+
+id: f87d0ddb-2095-44e7-aac1-a6cf4866a8ce | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: sonic-reviewer
+created_at: 2026-11-13T06:24:42.878029+00:00 | updated_at: 2026-11-13T06:24:42.878096+00:00 | last_verified: 2026-11-13T06:24:42.877440+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 25bad8d6a963026446ee1080d8280dc1e523104eed0f8dd37d23be0ef72a6ece | body_bytes: 206
+
+```text
+stage-v0300 worktree HEAD = bb4daa596 (v0.30.0 bump commit); origin/latest ee2b46d3b is ONE docs-only commit on top — code-identical. "Verified @ ee2b46d3b" claims checked against this worktree reproduce.
+```
+
+### gc-gate-03-filter-side-pin
+
+id: f8a54e0f-a551-4b85-9e70-1d88d647efc6 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-16T00:43:46.121585+00:00 | updated_at: 2026-11-16T00:43:46.121641+00:00 | last_verified: 2026-11-16T00:43:46.121018+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-16T19:59:36.619732+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 616ae2e1fa52c545bf7bad6ac6e7a33e9c2863e16ecfe6e9c93bfd544c5f36f6 | body_bytes: 232
+
+```text
+gc P3 lesson 2026-11-15: pin the FILTER side when substrate over-includes by design. boot_deliver never called the tag resolver; boot tests pre-advanced the cursor so it shipped. Test: seed a non-target member, no cursor workaround.
+```
+
+### board-01-ari-only-write-path-leader-blocked
+
+id: f906c77d-98ea-41ad-9b49-75679bbd0a9d | domain: other | audience: operation | source_tier: agent | provenance: observed | created_by_agent: leader
+created_at: 2026-11-11T13:01:25.321247+00:00 | updated_at: 2026-11-11T13:01:25.321306+00:00 | last_verified: 2026-11-11T13:01:25.320603+00:00 | verify_count: 0 | access_count: 3 | last_accessed_at: 2026-11-18T06:31:10.814998+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 26b5e2521508977625ad97cd9d9111fb5dd9cd175d37e84674e01317fc4661b2 | body_bytes: 232
+
+```text
+Board writes are ari-only (privileged category + tools.allow row + in-body agent_id gate). The leader lane cannot spawn or message 'ari' — its team-membership gate refuses. Route board notes to a lane that owns the board category.
+```
+
+### prompt-assent-01-gate-owner-and-evidence
+
+id: f91f7c0b-0fef-4a8b-8cc0-e2a117731c5d | domain: artifact | audience: implementation | source_tier: agent | provenance: observed | created_by_agent: coder
+created_at: 2026-11-11T00:36:48.586765+00:00 | updated_at: 2026-11-11T00:36:48.586813+00:00 | last_verified: 2026-11-11T00:36:48.586339+00:00 | verify_count: 0 | access_count: 5 | last_accessed_at: 2026-11-18T06:31:43.257639+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: c5784fde8fdebfa0b019c373679e6fb32f6af027ecafb16d2c59de0622d53750 | body_bytes: 223
+
+```text
+prompt-assent P2 (2026-11-10): the three-factor gate's ONE owner is daemon/tools/prompt_assent.py; the window is manager._user_origin_windows; the mint context comes from the window message row's nested metadata["discord"].
+```
+
+### git-01-commit-msg-before-dashdash
+
+id: fb0cc19f-b1ce-4fa9-b9e9-a91e7a9b38ec | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: developer
+created_at: 2026-11-11T07:54:56.842020+00:00 | updated_at: 2026-11-11T07:54:56.842131+00:00 | last_verified: 2026-11-11T07:54:56.841178+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T03:41:42.408649+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 2f141c6c4a633f7c1d1eb8ccc1eb90854b9b658163d1add96e15e77b3e64751f | body_bytes: 179
+
+```text
+Commit message must precede the `--` pathspec: `git commit -m "msg" -- <path>`. After `--`, git reads `-m`+msg as pathspecs — the message is silently swallowed, no commit lands.
+```
+
+### guidelines-01-empty-basedir-cwd-injection
+
+id: fc47eff8-3433-415c-8581-9f59dd96097a | domain: artifact | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-13T23:40:12.958753+00:00 | updated_at: 2026-11-13T23:40:12.958837+00:00 | last_verified: 2026-11-13T23:40:12.957954+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-14T04:02:03.985602+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: d6a9bb4966108ec905ff3758120e5b94282e23a9296b7fe13e67e4881f4d565f | body_bytes: 235
+
+```text
+guidelines.py: empty base_dir passes not-None guard -> injected as process CWD, cwd-dependent; repo-root cwd returned 12 repo *.md as fake entries vs typed refusal. Unadjudicated; live passes None; cure if adjudicated: falsy = missing.
+```
+
+### proxydec-01-openrouter-key-held
+
+id: fc96dc4b-b385-4bf3-86c9-4f31d34e9e1d | domain: deploy | audience: both | source_tier: agent | provenance: observed | created_by_agent: devops
+created_at: 2026-11-09T10:53:40.141037+00:00 | updated_at: 2026-11-09T10:53:40.141094+00:00 | last_verified: 2026-11-09T10:53:40.140567+00:00 | verify_count: 0 | access_count: 7 | last_accessed_at: 2026-11-18T06:27:30.214441+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 63a2b08954b04afc7f5f6c26671fa13d72c6cb1156ae1af0a2ada59cb1b5d197 | body_bytes: 217
+
+```text
+Proxy store already holds a working OpenRouter key (id=openrouter, len 73, sha16 5add86cdf9f95859). It serves System One (model typesafe/jev-1.13 -> 200). The openrouter decision gap is a missing model row, not a key.
+```
+
+### sweep-01-predicate-would-have-reaped-rogue
+
+id: fd049861-8a9a-4a47-95e2-d38a702f8889 | domain: environment | audience: both | source_tier: agent | provenance: observed | created_by_agent: architect
+created_at: 2026-11-11T14:46:35.662845+00:00 | updated_at: 2026-11-11T14:46:35.662949+00:00 | last_verified: 2026-11-11T14:46:35.662333+00:00 | verify_count: 0 | access_count: 0 | last_accessed_at: 
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: c1d6c9abacd375fdf1895291a7259cf49f165e5745032137eb0fb7910fc17799 | body_bytes: 208
+
+```text
+The boot sweep predicate would have reaped the 2026-11-11 rogue daemon (its ppid chain is broken, so it is not a descendant). It never fired only because the live .env disarms it. Do not narrow the predicate.
+```
+
+### gc-p4-01-nudge-gate-executed-graph-green
+
+id: ff138b47-ed4b-4fe8-aebb-b1f48ff72700 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: worker
+created_at: 2026-11-16T06:09:27.988813+00:00 | updated_at: 2026-11-16T06:09:27.988943+00:00 | last_verified: 2026-11-16T06:09:27.988242+00:00 | verify_count: 0 | access_count: 2 | last_accessed_at: 2026-11-18T04:46:29.854843+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: aa3aa09581e2b2b62dc2530ad28e7dd6710ec7ebe837371f323febd872b682f9 | body_bytes: 205
+
+```text
+P4 nudge gate validated at the executed-graph level (522c6a9ba, 8 probes green). The drain config-threading guard is load-bearing: dropping config resolves instance_id='' and strands the pending injection.
+```
+
+### views-session-bypass-rekill2-dead
+
+id: ff5843e7-9a38-45d7-8d1a-e36cfbfa1eb2 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T03:23:45.093513+00:00 | updated_at: 2026-11-09T03:23:45.093564+00:00 | last_verified: 2026-11-09T03:23:45.093178+00:00 | verify_count: 0 | access_count: 4 | last_accessed_at: 2026-11-10T16:07:19.726670+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: a21ba8ed7143d1e42065c0665b6cefac5a5fa024b74ed2f4d557a8e0dd4397c1 | body_bytes: 218
+
+```text
+views-session-bypass lane tip 4be947eee: 6c543ecc exploit DEAD on the wire (3/3 re-kills -> 403); no third bypass class across 75 probes. Evidence: .agents/tester/RESULTS/assets/2026-11-09-views-session-bypass/rekill2/
+```
+
+### sealmap-03-older-base-red-not-attributable
+
+id: ffe47734-be35-4088-83d1-e4a45a0df0c0 | domain: verify | audience: both | source_tier: agent | provenance: observed | created_by_agent: kb-writer
+created_at: 2026-11-09T11:17:16.063538+00:00 | updated_at: 2026-11-09T11:17:16.063591+00:00 | last_verified: 2026-11-09T11:17:16.063180+00:00 | verify_count: 0 | access_count: 20 | last_accessed_at: 2026-11-17T22:14:24.240108+00:00
+pinned: f | disputed: f | superseded_by_id: (none) | content_sha256: 22fcb8f0411db36dc3c0f30d5e254d922a11902756c1678a283b3f1bbfc1285e | body_bytes: 210
+
+```text
+Re-pin adjudication: a seal red proven at an older base (1fecf7c3f) is NOT attributable to lanes operating since; the map is self-consistent at base 818411107 (35/35), so HEAD-leg divergence is lane-introduced.
+```
+
