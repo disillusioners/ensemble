@@ -152,6 +152,7 @@ DEFAULT_AUDIENCE_SETS: dict[str, frozenset[str]] = {
 }
 
 
+# CANONICAL: models.py::POK_FAMILY_SLUG_PATTERN + pok_service.py::_slug_family — do not drift
 def _slug_family(slug: str) -> str | None:
     m = POK_FAMILY_RE.match(slug)
     return m.group(1) if m else None

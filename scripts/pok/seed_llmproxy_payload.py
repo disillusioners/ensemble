@@ -282,7 +282,6 @@ def _validate_payload() -> None:
             raise SystemExit(f"REFUSED (domain) {entry.slug}: {entry.domain}")
         if entry.audience not in ("operation", "implementation", "both"):
             raise SystemExit(f"REFUSED (audience) {entry.slug}: {entry.audience}")
-        parts = entry.slug.split("-")
         # Realign to the canonical family derivation (multi-token head
         # before the leftmost -NN- ordinal) — single source: POK_FAMILY_RE.
         m = POK_FAMILY_RE.match(entry.slug)

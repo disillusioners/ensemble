@@ -378,6 +378,17 @@ class TestAc19TerminalityCured:
         assert out.action == "created"
 
     def test_family_full_refusal_names_the_cure(self, svc: POKService) -> None:
+        """PREMISE CORRECTION (fix iteration 1, F1): the refusal must
+        advertise a WORKABLE cure.
+
+        A same-slug supersede is COUNT-PRESERVING by construction (the
+        prior active row leaves ``active`` in the same transaction the
+        successor enters it — both carry the same slug, hence the same
+        family) — it does NOT free a slot; only ARCHIVING one via
+        pok_curate does. The old message offered the supersede as a
+        slot-freeing cure, which is the unworkable-cure defect. This
+        test now pins the WORKABLE cure and, if a supersede is
+        mentioned at all, pins its non-slot-freeing qualifier."""
         from daemon.services.pok_service import POK_FAMILY_MAX
 
         for i in range(POK_FAMILY_MAX):
@@ -395,6 +406,18 @@ class TestAc19TerminalityCured:
                 agent_id="developer",
             )
         assert ei.value.code == "pok_family_full"
+        msg = ei.value.message
+        # the family, its LIVE size, and the ACTIVE member slugs
+        assert "'dep'" in msg
+        assert f"holds {POK_FAMILY_MAX} active entries" in msg
+        for i in range(POK_FAMILY_MAX):
+            assert f"dep-{i + 1:02d}-m" in msg
+        # the ONLY slot-freeing cure is ARCHIVE-via-pok_curate …
+        assert "archive one via pok_curate to free a slot" in msg
+        # … and a supersede, if offered, must be qualified as NOT
+        # slot-freeing (a bare supersede claim = the F1 defect).
+        if "supersede" in msg:
+            assert "does not free a slot" in msg.lower()
 
     def test_pin_cap_refusal_names_the_current_pins(self, svc: POKService) -> None:
         from daemon.services.pok_service import POK_PIN_CAP_PER_PROJECT
@@ -716,9 +739,37 @@ class TestMultiTokenFamilyKey:
         assert ei.value.code == "pok_family_full"
         msg = str(ei.value)
         assert "prompt-assent" in msg
-        assert "3" in msg
+        # COUNT PIN (fix iteration 1, F2): a bare `"3" in msg` is
+        # satisfiable by the BOUND digit alone (3 appears in the bound
+        # text too) — it proved nothing about the LIVE count. Pin the
+        # phrase that carries the live count AND the structured value
+        # the service passes (POKError.details).
+        assert f"holds {POK_FAMILY_MAX} active entries" in msg
+        assert ei.value.details["active_count"] == POK_FAMILY_MAX
+        assert ei.value.details["family"] == "prompt-assent"
         for i in range(POK_FAMILY_MAX):
             assert f"prompt-assent-{i + 1:02d}-x" in msg
+
+    def test_family_key_regex_pins_direct(self) -> None:
+        """DIRECT pins on the corrected family key (fix iteration 1,
+        F3).
+
+        The corrected regex was otherwise pinned only TRANSITIVELY:
+        under the OLD single-token pattern this class still reported
+        3 passes — the other tests were pattern-insensitive. These
+        pins are on the helper itself: a multi-token head IS a family
+        key (group 1 = the whole letter-led token run), and a slug
+        with no ``-NN-`` ordinal is NOT family-ordered."""
+        from daemon.services.pok_service import _slug_family
+
+        # positives — the hyphenated head is the family key
+        assert _slug_family("prompt-assent-01-x") == "prompt-assent"
+        assert _slug_family("snapshot-l3-02-y") == "snapshot-l3"
+        assert _slug_family("skill-e6-04-a4-gauge") == "skill-e6"
+        # negatives — no NN ordinal → no family (None → the service
+        # skips the family-count check entirely)
+        assert _slug_family("daoduc-helm-release-v28-kubectl-patch") is None
+        assert _slug_family("artifact-is-container-image") is None
 
     def test_unnumbered_prefix_counting(self, svc: POKService) -> None:
         svc.upsert(project_id="pu", slug="verify-03-a", body="a", agent_id="d")

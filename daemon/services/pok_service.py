@@ -483,7 +483,10 @@ class POKService:
                     f"active entries — the bound is {POK_FAMILY_MAX} "
                     "(POK_FAMILY_MAX); active members: "
                     f"{', '.join(members)}; cure: supersede one via "
-                    "same-slug upsert, or archive one via pok_curate",
+                    "same-slug upsert to fold the new fact into it "
+                    "(family size UNCHANGED — it does NOT free a slot), "
+                    "or archive one via pok_curate to free a slot for a "
+                    "new row",
                     family=family,
                     active_count=family_active,
                     members=members,
