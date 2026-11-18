@@ -7,12 +7,12 @@
 #
 # Scope (AC1 + AC7):
 #   * entity extraction from ``stars[]`` (canonical stars + memoir_line
-#     edges), alias normalization ("the Emperor" → "The Emperor"), and
+#     edges), alias normalization ("the user" → "The user"), and
 #     the ``last_pass_id`` crash-recovery guard;
 #   * background extraction NEVER increments the stored heat (DD-12);
 #   * the bounded historical seed (C2 / V2-27): the nightly pass walks
 #     the pre-cutover backlog OLDEST-FIRST under the nightly cap, and the
-#     seeded "The Emperor" star is queryable through memoir_about.
+#     seeded "The user" star is queryable through memoir_about.
 #
 # Dual-layer timeout: Layer 1 = the caller's outer timeout (recommended
 # 300 s — EVERY command on this lane is timeout-wrapped); Layer 2 = the

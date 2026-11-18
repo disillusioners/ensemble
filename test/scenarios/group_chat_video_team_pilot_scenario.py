@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The agent group chat VIDEO-TEAM PILOT — the E2E shakedown scenario.
 
-Agent group chat Phase 2 / P6 (2026-11-16). The Emperor's designated
+Agent group chat Phase 2 / P6 (2026-11-16). The user's designated
 FIRST pilot of the room surface (KV ``gc_pilot_video_team``): *"VIDEO
 TEAM = designated FIRST PILOT of group chat … producer / capturer /
 editor / verifier coordinate through a chatroom as NAMED MEMBERS instead
