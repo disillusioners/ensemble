@@ -121,3 +121,31 @@ origin/latest moved again pre-push (c48a55431 -> ba76545e9: two pok-sweep family
 disjoint file, zero overlap). Absorbed via merge --no-ff; gate pack re-run green on the new tip
 (/tmp/wia5ec5b3e-int2/pack-final.log); local-only tag v0.31.4 re-pointed to the final tip below (never
 pushed at the earlier position — no public ref moved). Our-work isolated range: c48a55431..<tag>.
+
+## POSTSCRIPT v3 (2026-11-18 ~21:0xZ) — RE-DISPATCH #1: reviewer 12-bypass laundering closure, v0.31.5
+sonic-reviewer verdict NEEDS-REVISION on the frozen surface (12 confirmed bypasses in the
+literal-through-runner class, all ALLOWED by the merged guard, all REFUSED by the OLD live text guard).
+STATE NOTE: the verdict crossed my execution AFTER v0.31.4 was already tagged+pushed+staged
+(04b3d50ac, 20:11:45Z) — per the leader's own pushed-ref precedent the fix rides v0.31.5; v0.31.4 and
+v0.31.3 both stand staged-not-promoted (Emperor's ceremony chooses). Re-cut path if the leader rules
+otherwise: fix branch sonic/wi-a5ec5b3e/guard-laundering re-merges onto any authorized re-cut line.
+FIX (owner coder, branch sonic/wi-a5ec5b3e/guard-laundering @ 5f6945a8a; 13343b45b closure +
+488687c5f PACKS rev3 + 5f6945a8a verb-set widen): SHAPE = the old text-guard conjunction (token + widened
+mutating verb set + ensemble-family token) with DELIVERY required (payload must reach an executor:
+stdin-shell/scheduler/xargs/ssh pipe, or nested -c/eval/heredoc command string); su/runuser/ssh recursed as
+command strings; systemd-run/watch segment-analysed; xargs non-readonly tail with no operand or {} FAILS
+CLOSED. All 12 reviewer shapes + 10 variants REFUSED; 18 read-only-through-runner ALLOW legs green;
+bash.py runner-claim wording made true; PACKS REV3 wording matches the actual pin set.
+GATES ON FINAL TIP (int3, sonic/wi-a5ec5b3e/integration-2): guard code byte-identical to 5f6945a8a
+(verified) — coder legs M6a-f stand (12/11/4/8/9/4 RED, restores sha-verified,
+/tmp/wia5ec5b3e-guard2/m6-sha256-final.log); my legs re-run at tip: M1 79F / M2 24F / M3c 20F / M4 3F+3E /
+M5a 31F / M5b 8F / M5c 37F, restores byte-identical to clean sha 37bbf0d9…, final 134/134, porcelain clean
+(/tmp/wia5ec5b3e-int3/mutation-legs.log); FULL pack 173/173 (/tmp/wia5ec5b3e-int3/pack.log).
+NEW RESIDUALS (disclosed): file-read-at-runtime payloads (bash -c "$(cat script.sh)", at <file) invisible
+to static analysis; non-shell stdin interpreters (python -c read(0), perl) outside the executor set;
+xargs non-readonly no-operand (daemon-reload) deliberately fails closed (over-block, reviewer's rule);
+text-level SHAPE can refuse a read-only-looking payload inside -c/eval/heredoc contexts (matches the OLD
+guard — deliberately not weakened).
+Tag v0.31.5 at THIS commit = branch tip; push HEAD:latest + integration-2 branch + tag; stage
+releases/v0.31.5 (fresh build, FE pre-built this time). NO promote. Fourth-occurrence surface open until
+the ceremony flips live past the OLD guard (live still runs v0.31.2).
