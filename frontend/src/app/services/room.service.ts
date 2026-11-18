@@ -279,6 +279,7 @@ export class RoomService {
     this.messagesLoading.set(false);
     this.openRoomId.set(null);
     this.openRoomAbsent.set(false);
+    this.stale.set(false);
   }
 
   /**
@@ -300,6 +301,21 @@ export class RoomService {
     // stored.
     this.globalRoomsScope = mode === 'joined' ? scopeInstanceId ?? null : null;
     const anchor = mode === 'joined' ? (scopeInstanceId ?? null) : null;
+
+    // ITEM 1 — fail-closed on a missing anchor in `joined` mode: NO
+    // request, an honest error state, an empty list. The joined lane is
+    // ANCHORED by contract; a dropped anchor must never silently degrade
+    // into the unanchored global posture.
+    if (mode === 'joined' && !anchor) {
+      this.globalRoomsLoading.set(false);
+      this.globalRooms.set([]);
+      this.globalRoomsTruncated.set(false);
+      this.globalRoomsErrorStatus.set(null);
+      this.globalRoomsError.set('No instance was supplied for this chatroom view.');
+      this.evaluateOpenRoomPresence([]);
+      return;
+    }
+
     const reqId = ++this.globalRoomsRequestId;
     this.globalRoomsLoading.set(true);
     this.globalRoomsError.set(null);
@@ -408,10 +424,21 @@ export class RoomService {
         this.messages.update((current) => mergeMessagesBySeq(current, normalized.messages));
         // cursor policy: do NOT mutate nextAfterSeq
         this.stale.set(false);
+        // A-12 — a successful poll means the room is still readable, so
+        // clear the vanished-room posture (and let a later vanished poll
+        // re-raise it).
+        this.openRoomAbsent.set(false);
       },
-      error: () => {
+      error: (err: unknown) => {
         if (token !== this.pollSeq) return; // superseded — dropped
+        // Classify honestly: a transient fault keeps the last-good rows
+        // and raises `stale`; a 404 means the room itself is gone.
+        const raw = (err ?? {}) as { status?: unknown };
+        const status = typeof raw.status === 'number' ? raw.status : null;
         this.stale.set(true);
+        if (status === 404) {
+          this.openRoomAbsent.set(true);
+        }
         // An errored observable terminates WITHOUT a `complete` emission —
         // release the flag here too, or polling wedges (D17).
         this.pollInFlight = false;
@@ -577,10 +604,10 @@ function describeHttpError(
     const detail = extractErrorDetail(raw.error);
     return { status, message: detail ?? copy.serverError };
   }
-  // <500 — a client-side status carries no server internals, so the raw
-  // message fallback stays here (and only here).
-  const detail = extractErrorDetail(raw.error) ?? extractErrorDetail(raw.message);
-  // The generic fallback of the chatrooms/messages lanes — unchanged.
+  // <500 — a client-side status carries no server internals, so only the
+  // server's typed detail is consulted; the raw transport message is
+  // NEVER used (W1 leak removal, now covering the untyped <500 class).
+  const detail = extractErrorDetail(raw.error);
   return { status, message: detail ?? copy.generic };
 }
 

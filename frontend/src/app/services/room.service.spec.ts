@@ -438,6 +438,13 @@ describe('RoomService', () => {
     expect(service.globalRooms().map((r) => r.room_id)).toEqual(['r-joined']);
   });
 
+  it('ITEM1: joined mode with a dropped anchor makes no request and surfaces an error', () => {
+    service.loadGlobalRooms('joined', null);
+    httpMock.expectNone((r) => r.url === '/api/rooms');
+    expect(service.globalRooms()).toEqual([]);
+    expect(service.globalRoomsError()).toBeTruthy();
+  });
+
   it('global mode does NOT filter by member_instance_ids', () => {
     service.loadGlobalRooms('global');
     httpMock.expectOne('/api/rooms').flush({
@@ -503,6 +510,30 @@ describe('RoomService', () => {
     expect(service.openRoomAbsent()).toBe(false);
   });
 
+  it('ITEM2: a poll whose room is gone raises absent; a later poll restoring it clears', () => {
+    service.openRoom('r-1');
+    httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages').flush({
+      messages: [],
+      next_after_seq: null,
+    });
+    expect(service.openRoomAbsent()).toBe(false);
+
+    // Poll where the room vanished (404).
+    service.refreshOpenRoom();
+    httpMock
+      .expectOne((r) => r.url === '/api/rooms/r-1/messages')
+      .flush({ detail: 'room not found' }, { status: 404, statusText: 'Not Found' });
+    expect(service.openRoomAbsent()).toBe(true);
+
+    // Later poll restoring it (success) clears.
+    service.refreshOpenRoom();
+    httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages').flush({
+      messages: [],
+      next_after_seq: null,
+    });
+    expect(service.openRoomAbsent()).toBe(false);
+  });
+
   it('a successful poll clears stale; a failed poll sets it and polling keeps working', () => {
     service.openRoom('r-1');
     httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages').flush({
@@ -525,6 +556,27 @@ describe('RoomService', () => {
     });
     expect(service.stale()).toBe(false);
     expect(service.messages().map((m) => m.seq)).toEqual([1]);
+  });
+
+  it('ITEM5: a poll error sets stale; opening a different room clears it', () => {
+    service.openRoom('r-1');
+    httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages').flush({
+      messages: [],
+      next_after_seq: null,
+    });
+    service.refreshOpenRoom();
+    httpMock
+      .expectOne((r) => r.url === '/api/rooms/r-1/messages')
+      .flush({ detail: 'boom' }, { status: 500, statusText: 'Server Error' });
+    expect(service.stale()).toBe(true);
+
+    // Open a different room ⇒ stale cleared.
+    service.openRoom('r-2');
+    httpMock.expectOne((r) => r.url === '/api/rooms/r-2/messages').flush({
+      messages: [],
+      next_after_seq: null,
+    });
+    expect(service.stale()).toBe(false);
   });
 
   it('startPolling on a hidden tab issues no tick; a visible tab does', () => {
@@ -790,17 +842,17 @@ describe('RoomService', () => {
     expect(service.messagesError()).toBe('Could not reach the server.');
   });
 
-  it('W-1: a CLIENT-side status keeps the raw fallback — never the fixed server-error copy', () => {
+  it('W-1: an untyped <500 status renders the fixed generic copy — no transport string, no URL', () => {
     service.loadRooms('inst-1');
     httpMock
       .expectOne('/api/instances/inst-1/rooms')
       .flush(null, { status: 422, statusText: 'Unprocessable Entity' });
     expect(service.roomsErrorStatus()).toBe(422);
-    // The fixed 5xx constant is NOT used below 500 (the raw-message
-    // fallback is retained there).
-    expect(service.roomsError()).not.toBe(
-      'The server could not load these chatrooms — try again.',
-    );
-    expect(service.roomsError()).toContain('422');
+    // The raw transport message is NEVER consulted on this path now
+    // (leak removal covers the untyped <500 class too).
+    expect(service.roomsError()).toBe('Failed to load chatrooms.');
+    expect(service.roomsError()).not.toContain('Http failure response');
+    expect(service.roomsError()).not.toContain('/api/instances/inst-1/rooms');
+    expect(service.roomsError()).not.toContain('422');
   });
 });

@@ -276,6 +276,29 @@ def test_anchor_present_denial(client, engine, svc):
     assert rid not in ids
 
 
+def test_closure_fault_sets_truncated_true(client, engine, svc, monkeypatch):
+    manager = client.manager
+    seed_instance(engine, "owner-1", None, "idle")
+    seed_instance(engine, "child-1", "owner-1", "idle")
+    manager._known.update({"owner-1", "child-1"})
+    rid = _make_room(engine, svc, "owner-1", "owner-1")
+    join_member(engine, rid, "child-1", "worker")
+
+    # Fault the descendant-closure compute.
+    def _boom(*a, **k):
+        raise RuntimeError("closure boom")
+
+    monkeypatch.setattr(manager, "get_tree_ids_permanent", _boom)
+
+    resp = client.get("/api/rooms?instance_id=owner-1")
+    assert resp.status_code == 200
+    body = resp.json()
+    # The readable anchor-owned rooms are still present.
+    assert rid in [r["room_id"] for r in body["rooms"]]
+    # But completeness is no longer claimed.
+    assert body["truncated"] is True
+
+
 def test_anchor_present_positives(client, engine, svc):
     manager = client.manager
     seed_instance(engine, "owner-1", None, "idle")

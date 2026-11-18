@@ -233,7 +233,10 @@ export class InstanceListComponent implements OnInit, AfterViewInit, OnDestroy {
     this.loadRoomMap();
   }
 
+  private roomMapRequestId = 0;
+
   private loadRoomMap(): void {
+    const reqId = ++this.roomMapRequestId;
     this.roomMapError.set(null);
     this.roomMapTruncated.set(false);
     this.roomService
@@ -241,11 +244,13 @@ export class InstanceListComponent implements OnInit, AfterViewInit, OnDestroy {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (resp) => {
+          if (this.roomMapRequestId !== reqId) return; // stale — dropped
           const normalized = normalizeGlobalRoomListResponse(resp);
           this.membershipMap.set(buildMembershipMap(normalized.rooms));
           this.roomMapTruncated.set(normalized.truncated === true);
         },
         error: () => {
+          if (this.roomMapRequestId !== reqId) return; // stale — dropped
           this.membershipMap.set(new Map());
           this.roomMapError.set('Could not load chatroom membership.');
           this.roomMapTruncated.set(false);

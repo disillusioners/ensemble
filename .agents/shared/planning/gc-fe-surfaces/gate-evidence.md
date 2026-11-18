@@ -255,13 +255,7 @@ frozen gate artifact stay FROZEN — this file is the only ledger extended.
   (a parent-less ROOT row becoming a `child-row`); the coherent reading — the
   discriminator agrees with the button set — was implemented and is disclosed
   in the lane's final report.
-- **(a) — the browser-level adjacency row stays SKIPPED and VISIBLE.** The
-  rooms-gate's header-adjacency row is an explicit `test.skip` (daemon-fenced,
-  leader-owned). It is NOT adjacency evidence: **the promotion note must NOT cite
-  the e2e gate as header-icon-adjacency evidence.** The leader's daemon-fenced
-  run (routed to the TESTER — this lane does NOT run it) must execute that row
-  BEFORE the staged release is gate-complete. The automated adjacency evidence
-  is the unit pins (`chat.chatrooms.spec.ts:372/401/432/457`) plus the P3 cases.
+- **(b) — W1 leak removal broadened to the untyped <500 class (item 7).** `describeHttpError`'s <500 path now consults `raw.error` only and drops `extractErrorDetail(raw.message)`, so a body-less 4xx renders the fixed subject-specific generic copy instead of Angular's transport string (which carried the chatroom URL). Same leak-removal class as W1, now covering untyped <500. Shipped typed copies (404 / 403 / 0) unchanged; the lane's own `toContain('422')` pin re-aimed. Attribution: tidier-routed correctness pass, 2026-11-18.
 
 ### W1 — the 5xx transport-string leak (FIXED)
 
@@ -361,4 +355,4 @@ council's verbatim F-E text cites the same lines it cited at review time.
 
 Attribution: the BE close-out lane's run, cross-checked by the independent fix-cycle reviewer's in-memory reproduction (same RED result, reached without touching tracked files).
 
-**Disclosure (council-scoped residual, NOT a W1 breach — recorded for the Emperor's awareness, deliberately NOT fixed here):** a body-less 4xx still renders Angular's transport string, including the chatroom URL. That is the council's own W1 scoping — the raw-message fallback is restricted to <500 and the <500 copies are pinned UNCHANGED. Optional one-line fix if ever wanted: on the <500 path consult `raw.error` only and drop `extractErrorDetail(raw.message)`.
+**Disclosure (RESOLVED 2026-11-18, tidier-routed correctness pass):** the council-scoped residual (a body-less 4xx rendering Angular's transport string, including the chatroom URL) is now closed by the SAME leak-removal class as W1, extended to the untyped <500 path: `describeHttpError` now consults `raw.error` only on that path and drops `extractErrorDetail(raw.message)`, so a body-less 4xx renders the fixed subject-specific generic copy (`Failed to load chatrooms.` / `Failed to load messages.`) instead of the transport string. The shipped typed copies (404 / 403 / 0) are UNCHANGED and their pins stay green; only the lane's own `toContain('422')` pin was re-aimed at the new behaviour. Attribution: tidier-routed correctness pass, item 7, 2026-11-18.

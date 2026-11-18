@@ -405,6 +405,7 @@ async def list_rooms(
             "Instance not found",
         ) from exc
     # descendant closure off-loop
+    closure_faulted = False
     try:
         descendant_ids = await asyncio.to_thread(
             manager.get_tree_ids_permanent, anchor
@@ -417,6 +418,7 @@ async def list_rooms(
             exc,
         )
         descendant_ids = [anchor]
+        closure_faulted = True
     try:
         rows, truncated = await room_service.list_readable_rooms(
             anchor, clamped_limit, descendant_ids=descendant_ids
@@ -428,7 +430,7 @@ async def list_rooms(
             _ERR_ROOM_SERVICE_UNAVAILABLE,
             "the room list could not be read right now",
         ) from exc
-    return _shape_rows(rows, truncated)
+    return _shape_rows(rows, truncated or closure_faulted)
 
 
 def _shape_rows(rows: list[dict[str, Any]], truncated: bool) -> dict[str, Any]:

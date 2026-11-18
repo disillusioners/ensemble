@@ -500,6 +500,14 @@ describe('RoomDialogComponent — the nest-wide global mode', () => {
     expect(textOf(fixture)).not.toContain('No chatrooms for this instance yet.');
   });
 
+  it('ITEM3: absent copy is NOT rendered for a plain empty list (no absent flag)', () => {
+    fixture.detectChanges();
+    httpMock.expectOne((r) => r.url === '/api/rooms').flush({ rooms: [], truncated: false });
+    fixture.detectChanges();
+
+    expect(textOf(fixture)).not.toContain('no longer available');
+  });
+
   it('(iv) polls on the 10 s cadence, stops on destroy, and renders the honest stale copy when a tick fails', () => {
     fixture.detectChanges();
     httpMock

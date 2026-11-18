@@ -111,6 +111,7 @@ export class RoomDialogComponent implements OnInit, OnDestroy {
   protected readonly globalRoomsLoading = this.roomService.globalRoomsLoading;
   protected readonly globalRoomsError = this.roomService.globalRoomsError;
   protected readonly stale = this.roomService.stale;
+  protected readonly openRoomAbsent = this.roomService.openRoomAbsent;
 
   /**
    * The dialog's mode — ``'instance'`` when the payload omits it, so the

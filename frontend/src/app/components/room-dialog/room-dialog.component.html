@@ -195,7 +195,7 @@
             Retry
           </button>
         </div>
-      } @else if (!isInstanceMode && !selectedRoom()) {
+      } @else if (!isInstanceMode && openRoomAbsent()) {
         <!-- A-12: the open room vanished from the refreshed list — the
              selection survives BY ID and the pane says the room is gone
              (never an empty conversation that reads as live-but-silent). -->
