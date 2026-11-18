@@ -917,7 +917,7 @@ memoir_write(
     text="The user chose the hybrid ranker over pure lexical after the 12-episode recall felt thin.",
     title="ranker decision",
     importance=8,
-    stars=["@empress"],
+    stars=["@ari"],
 )
 memoir_recall(query="how did we pick the ranker", k=5)
 memoir_timeline(since="2026-11-01T00:00:00+00:00", q="deploy")

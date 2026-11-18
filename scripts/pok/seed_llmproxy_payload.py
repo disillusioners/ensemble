@@ -10,7 +10,7 @@ path does it (``daemon/manager.py``: register the POK models, then
 intentionally a NO-OP on non-SQLite engines).
 
 STATUS: dev-proven, LIVE-GATED. This script targets ensemble_dev only;
-the Phase-1.5 LIVE replay is owned by the leader (Emperor promote gate).
+the Phase-1.5 LIVE replay is owned by the leader (user promote gate).
 
 Safety contract (house env-poison discipline, anomaly 101a02e4):
   * the ambient login shell carries PROD PG vars — this script NEVER

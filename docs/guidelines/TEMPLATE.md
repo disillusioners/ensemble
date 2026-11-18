@@ -1,7 +1,7 @@
 # Guideline TEMPLATE
 
 > Distilled from ENSEMBLE-30 ("prompt-assent enablement", hand-crafted by
-> Emperor + Ari, 2026-11-12) — the first guideline. Copy this file, rename
+> the user + Ari, 2026-11-12) — the first guideline. Copy this file, rename
 > to `guideline-<feature-slug>.md`, fill every section IN ORDER. A section
 > with nothing to say says "none" — it is never deleted.
 
