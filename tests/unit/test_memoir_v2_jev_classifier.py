@@ -71,7 +71,7 @@ def engine():
 def persona_repo(engine):
     repo = MemoirPersonaRepository(engine)
     # Seed active persona version 1
-    draft = repo.create_draft("ari", "# Ari Persona\n\nI am Ari, loyal companion to the Emperor.", source="seed")
+    draft = repo.create_draft("ari", "# Ari Persona\n\nI am Ari, loyal companion to the user.", source="seed")
     repo.submit(draft.id)
     actor = MagicMock()
     actor.auth_method = "session"
@@ -114,7 +114,7 @@ class TestJevHeuristicFilter:
     def test_pleasantry_classified_as_none_without_llm(self, gate_service):
         active = "# Ari Persona\n\nI am Ari."
         # Pleasantries
-        res = gate_service.evaluate_heuristic(active, "Good morning Emperor, hope you have a nice day!")
+        res = gate_service.evaluate_heuristic(active, "Good morning the user, hope you have a nice day!")
         assert res is not None
         assert res.classification == "none"
         assert res.source == "heuristic"
@@ -145,23 +145,23 @@ class TestJevHeuristicFilter:
         assert res.classification == "none"
 
     def test_verbatim_claim_classified_as_reinforcement_without_llm(self, gate_service):
-        active = "# Ari Persona\n\nI am Ari, loyal companion to the Emperor."
-        res = gate_service.evaluate_heuristic(active, "loyal companion to the Emperor")
+        active = "# Ari Persona\n\nI am Ari, loyal companion to the user."
+        res = gate_service.evaluate_heuristic(active, "loyal companion to the user")
         assert res is not None
         assert res.classification == "reinforcement"
         assert res.source == "heuristic"
 
     def test_corroborate_verb_with_existing_terms_classified_as_reinforcement(self, gate_service):
-        active = "# Ari Persona\n\nI am Ari, loyal companion to the Emperor."
-        res = gate_service.evaluate_heuristic(active, "Ari is a companion to Emperor", verb="CORROBORATE")
+        active = "# Ari Persona\n\nI am Ari, loyal companion to the user."
+        res = gate_service.evaluate_heuristic(active, "Ari is a companion to the user", verb="CORROBORATE")
         assert res is not None
         assert res.classification == "reinforcement"
 
     def test_novel_substantial_claim_defers_to_llm(self, gate_service):
-        active = "# Ari Persona\n\nI am Ari, loyal companion to the Emperor."
+        active = "# Ari Persona\n\nI am Ari, loyal companion to the user."
         res = gate_service.evaluate_heuristic(
             active,
-            "The Emperor commanded that Ari must supervise all external deployments without asking.",
+            "The user commanded that Ari must supervise all external deployments without asking.",
             verb="CREATE",
         )
         assert res is None
@@ -293,7 +293,7 @@ class TestCandidateParkingInJevLedger:
             persona_repository=persona_repo,
             llm_caller=counting_llm,
         )
-        syn = _make_synthesis(engine, claim="Ari will stay loyal to the Emperor", verb="CREATE")
+        syn = _make_synthesis(engine, claim="Ari will stay loyal to the user", verb="CREATE")
 
         # First evaluation: LLM classifies reinforcement
         outcome1 = svc.process_candidate(syn)
@@ -376,7 +376,7 @@ class TestSuppressionRule:
             llm_caller=counting_llm,
         )
         versions_before = persona_repo.list_versions("ari")
-        syn = _make_synthesis(engine, claim="Ari will stay loyal to the Emperor", verb="CREATE")
+        syn = _make_synthesis(engine, claim="Ari will stay loyal to the user", verb="CREATE")
 
         outcome = svc.process_candidate(syn)
         assert outcome.status == "suppressed"
@@ -434,7 +434,7 @@ class TestHeuristicOrdering:
             persona_repository=persona_repo,
             llm_caller=counting_llm,
         )
-        syn = _make_synthesis(engine, claim="Good morning Emperor, hope you have a nice day!", verb="CREATE")
+        syn = _make_synthesis(engine, claim="Good morning the user, hope you have a nice day!", verb="CREATE")
 
         outcome = svc.process_candidate(syn)
         assert calls == []
@@ -454,7 +454,7 @@ class TestHeuristicOrdering:
             llm_caller=counting_llm,
         )
         # The claim is ALREADY asserted verbatim in the active persona.
-        syn = _make_synthesis(engine, claim="loyal companion to the Emperor", verb="CREATE")
+        syn = _make_synthesis(engine, claim="loyal companion to the user", verb="CREATE")
 
         outcome = svc.process_candidate(syn)
         assert calls == []

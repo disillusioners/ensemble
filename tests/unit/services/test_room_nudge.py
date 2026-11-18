@@ -1,6 +1,6 @@
 """P4 nudge hooks behavior pins (agent group chat, arm (a) + (a2)).
 
-The Emperor's rhythm-aware delivery mechanized. Real file-backed
+The user's rhythm-aware delivery mechanized. Real file-backed
 SQLite (F9-parity harness), real RoomChatService + (where the strong
 form needs it) RoomDeliveryService over a plain fake manager whose
 lifecycle seams are controlled per test.

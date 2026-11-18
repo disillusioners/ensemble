@@ -422,9 +422,9 @@ def test_the_constellation_repository_runs_on_postgres(pg_engine):
         )
 
     repo = MemoirConstellationRepository(pg_engine)
-    star = repo.upsert_star("ari", "the Emperor", "person")
-    repo.add_alias("ari", star.id, "my dear")
-    assert repo.resolve_star("ari", "my dear").id == star.id
+    star = repo.upsert_star("ari", "The user", "person")
+    repo.add_alias("ari", star.id, "the operator")
+    assert repo.resolve_star("ari", "the operator").id == star.id
     line = repo.record_line("ari", star.id, "ep1", datetime.now(timezone.utc), pass_id="p1")
     again = repo.record_line("ari", star.id, "ep1", datetime.now(timezone.utc), pass_id="p1")
     assert again.mention_count == line.mention_count == 1
@@ -439,14 +439,14 @@ def test_the_syntheses_repository_runs_on_postgres(pg_engine):
     repo = MemoirSynthesesRepository(pg_engine)
     with pytest.raises(ValueError):
         repo.create_synthesis("ari", "a claim", [], "CREATE", 0.9)
-    row = repo.create_synthesis("ari", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
-    duplicate = repo.create_synthesis("ari", "the emperor is patient", ["ep2"], "CREATE", 0.9)
+    row = repo.create_synthesis("ari", "The user is patient", ["ep1"], "CREATE", 0.9)
+    duplicate = repo.create_synthesis("ari", "the user is patient", ["ep2"], "CREATE", 0.9)
     assert duplicate.id == row.id
     new = repo.supersede_with(
         "ari",
         row.id,
         {
-            "claim": "the Emperor is very patient",
+            "claim": "The user is very patient",
             "source_episode_ids": ["ep1", "ep2"],
             "verb": "REFINE",
             "confidence": 0.95,

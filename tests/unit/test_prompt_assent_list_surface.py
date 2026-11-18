@@ -9,7 +9,7 @@ The read surface over the Phase-1 ``list_pending`` primitives:
 * it is NOT agent-filtered — the relay lane must be able to approve ANY
   agent's row (DECIDED-2);
 * it is BOUNDED (default 50, max 200);
-* the list body goes to the Emperor's chat, NOT into the daemon log (the
+* the list body goes to the user's chat, NOT into the daemon log (the
   INFO line stays content-free).
 """
 

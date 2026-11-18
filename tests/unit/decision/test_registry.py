@@ -441,7 +441,7 @@ async def test_a_ratified_transition_is_accepted() -> None:
     stage = registry.transition_stage(
         "snapshot.l3.selection",
         DecisionStage.DECIDING,
-        review=ReviewRecord(reviewer="council", ratified_by="the Emperor"),
+        review=ReviewRecord(reviewer="council", ratified_by="the user"),
     )
     assert stage is DecisionStage.DECIDING
     assert registry.is_deciding_permitted("snapshot.l3.selection") is True

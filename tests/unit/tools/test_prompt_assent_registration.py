@@ -446,7 +446,7 @@ class TestThePhase1_5PlacedCodes:
         )
         assert PHASE1_5_PLACED_CODES.isdisjoint(MISMATCH_CODES), (
             "a Phase-1.5 code in MISMATCH_CODES would let a stranger or an "
-            "operator typo revoke the Emperor's live token"
+            "operator typo revoke the user's live token"
         )
         assert "token-approver-mismatch" in MISMATCH_CODES, (
             "token-approver-mismatch keeps ONLY its 4e different-human role — "
@@ -609,7 +609,7 @@ class TestThePhase1_5CodeShape:
     def test_the_4f_split_refuses_before_record_mismatch(self) -> None:
         """THE 4f SPLIT (T2.5 — BLOCKING): a Phase-1.5 code must return
         BEFORE ``_record_mismatch`` — five such refusals would otherwise
-        revoke the Emperor's live token."""
+        revoke the user's live token."""
         import ast
         import textwrap
 

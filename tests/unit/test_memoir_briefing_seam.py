@@ -390,7 +390,7 @@ def test_a_failing_persona_read_still_ships_the_keepsakes(
     repo.seed_persona_if_absent(MEMOIR_AGENT_ID)
     keepsake_id = repo.insert_episode(
         agent_id=MEMOIR_AGENT_ID,
-        body="the emperor set the doctrine",
+        body="the user set the doctrine",
         title="doctrine",
         is_keepsake=True,
         pinned_by="emperor",

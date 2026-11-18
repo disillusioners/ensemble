@@ -60,21 +60,21 @@ def _now() -> datetime:
 
 def test_a_synthesis_without_citations_is_refused(repo):
     with pytest.raises(ValueError) as excinfo:
-        repo.create_synthesis("ari", "the Emperor is patient", None, "CREATE", 0.9)
+        repo.create_synthesis("ari", "the user is patient", None, "CREATE", 0.9)
     assert "source_episode_ids" in str(excinfo.value)
 
 
 def test_a_synthesis_with_an_empty_citation_list_is_refused(repo):
     with pytest.raises(ValueError) as excinfo:
-        repo.create_synthesis("ari", "the Emperor is patient", [], "CREATE", 0.9)
+        repo.create_synthesis("ari", "the user is patient", [], "CREATE", 0.9)
     assert "source_episode_ids" in str(excinfo.value)
 
 
 def test_a_cited_synthesis_is_written(repo):
     row = repo.create_synthesis(
-        "ari", "the Emperor is patient", ["ep1", "ep2"], "CREATE", 0.9
+        "ari", "the user is patient", ["ep1", "ep2"], "CREATE", 0.9
     )
-    assert row.claim == "the Emperor is patient"
+    assert row.claim == "the user is patient"
     assert row.verb == "CREATE"
     assert row.confidence == 0.9
     assert list(row.source_episode_ids) == ["ep1", "ep2"]
@@ -101,23 +101,23 @@ def test_every_verb_of_the_vocabulary_is_accepted(repo):
 
 
 def test_a_duplicate_claim_inside_the_window_returns_the_existing_row(repo):
-    first = repo.create_synthesis("ari", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
-    second = repo.create_synthesis("ari", "the Emperor is patient", ["ep2"], "CREATE", 0.9)
+    first = repo.create_synthesis("ari", "the user is patient", ["ep1"], "CREATE", 0.9)
+    second = repo.create_synthesis("ari", "the user is patient", ["ep2"], "CREATE", 0.9)
     assert second.id == first.id
     assert len(repo.list_active_syntheses("ari")) == 1
 
 
 def test_the_dedup_key_normalizes_case_and_whitespace(repo):
-    first = repo.create_synthesis("ari", "The Emperor   is patient", ["ep1"], "CREATE", 0.9)
-    second = repo.create_synthesis("ari", "the emperor is patient", ["ep2"], "CREATE", 0.9)
+    first = repo.create_synthesis("ari", "The user   is patient", ["ep1"], "CREATE", 0.9)
+    second = repo.create_synthesis("ari", "the user is patient", ["ep2"], "CREATE", 0.9)
     assert second.id == first.id
 
 
 def test_the_dedup_key_normalizes_unicode_to_nfc(repo):
     # "é" as ONE code point (NFC) versus "e" + U+0301 (NFD) — the same
     # character, so the same claim.
-    composed = "the Emperor is caf\u00e9"
-    decomposed = "the Emperor is cafe\u0301"
+    composed = "the user is caf\u00e9"
+    decomposed = "the user is cafe\u0301"
     assert composed != decomposed
     assert normalize_claim(composed) == normalize_claim(decomposed)
     first = repo.create_synthesis("ari", composed, ["ep1"], "CREATE", 0.9)
@@ -126,37 +126,37 @@ def test_the_dedup_key_normalizes_unicode_to_nfc(repo):
 
 
 def test_a_claim_outside_the_window_is_written_again(repo):
-    first = repo.create_synthesis("ari", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
+    first = repo.create_synthesis("ari", "the user is patient", ["ep1"], "CREATE", 0.9)
     # Age the first row past the 2-day window.
     with Session(repo.engine) as session:
         row = session.get(MemoirSynthesis, first.id)
         row.created_at = _now() - timedelta(days=3)
         session.add(row)
         session.commit()
-    second = repo.create_synthesis("ari", "the Emperor is patient", ["ep2"], "CREATE", 0.9)
+    second = repo.create_synthesis("ari", "the user is patient", ["ep2"], "CREATE", 0.9)
     assert second.id != first.id
     assert len(repo.list_active_syntheses("ari")) == 2
 
 
 def test_a_superseded_claim_does_not_block_a_new_write(repo):
-    first = repo.create_synthesis("ari", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
+    first = repo.create_synthesis("ari", "the user is patient", ["ep1"], "CREATE", 0.9)
     repo.supersede_with(
         "ari",
         first.id,
         {
-            "claim": "the Emperor is very patient",
+            "claim": "the user is very patient",
             "source_episode_ids": ["ep1"],
             "verb": "REFINE",
             "confidence": 0.95,
         },
     )
-    second = repo.create_synthesis("ari", "the Emperor is patient", ["ep2"], "CREATE", 0.9)
+    second = repo.create_synthesis("ari", "the user is patient", ["ep2"], "CREATE", 0.9)
     assert second.id != first.id
 
 
 def test_the_dedup_is_scoped_to_one_agent(repo):
-    first = repo.create_synthesis("ari", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
-    second = repo.create_synthesis("zoe", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
+    first = repo.create_synthesis("ari", "the user is patient", ["ep1"], "CREATE", 0.9)
+    second = repo.create_synthesis("zoe", "the user is patient", ["ep1"], "CREATE", 0.9)
     assert second.id != first.id
 
 
@@ -164,12 +164,12 @@ def test_the_dedup_is_scoped_to_one_agent(repo):
 
 
 def test_supersede_with_links_both_pointers(repo):
-    old = repo.create_synthesis("ari", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
+    old = repo.create_synthesis("ari", "the user is patient", ["ep1"], "CREATE", 0.9)
     new = repo.supersede_with(
         "ari",
         old.id,
         {
-            "claim": "the Emperor is very patient",
+            "claim": "the user is very patient",
             "source_episode_ids": ["ep1", "ep2"],
             "verb": "REFINE",
             "confidence": 0.95,
@@ -187,7 +187,7 @@ def test_supersede_with_links_both_pointers(repo):
 def test_supersede_with_is_atomic_the_insert_and_the_pointer_land_together(repo):
     """The insert, the old row's pointer and the new row's back-pointer
     are ONE transaction — a failure in any part leaves NOTHING behind."""
-    old = repo.create_synthesis("ari", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
+    old = repo.create_synthesis("ari", "the user is patient", ["ep1"], "CREATE", 0.9)
     before = len(repo.list_active_syntheses("ari"))
     with pytest.raises(ValueError):
         repo.supersede_with(
@@ -221,7 +221,7 @@ def test_supersede_with_refuses_an_unknown_old_row(repo):
 
 
 def test_supersede_with_refuses_a_second_supersession(repo):
-    old = repo.create_synthesis("ari", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
+    old = repo.create_synthesis("ari", "the user is patient", ["ep1"], "CREATE", 0.9)
     repo.supersede_with(
         "ari",
         old.id,
@@ -246,7 +246,7 @@ def test_supersede_with_refuses_a_second_supersession(repo):
 
 
 def test_supersede_with_refuses_an_out_of_vocabulary_verb(repo):
-    old = repo.create_synthesis("ari", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
+    old = repo.create_synthesis("ari", "the user is patient", ["ep1"], "CREATE", 0.9)
     with pytest.raises(ValueError):
         repo.supersede_with(
             "ari",
@@ -268,21 +268,21 @@ def test_get_synthesis_returns_none_for_an_unknown_id(repo):
 
 
 def test_get_synthesis_returns_the_row(repo):
-    row = repo.create_synthesis("ari", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
+    row = repo.create_synthesis("ari", "the user is patient", ["ep1"], "CREATE", 0.9)
     fetched = repo.get_synthesis(row.id)
     assert fetched is not None
     assert fetched.id == row.id
-    assert fetched.claim == "the Emperor is patient"
+    assert fetched.claim == "the user is patient"
 
 
 def test_the_active_listing_excludes_the_superseded_rows(repo):
-    first = repo.create_synthesis("ari", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
+    first = repo.create_synthesis("ari", "the user is patient", ["ep1"], "CREATE", 0.9)
     repo.create_synthesis("ari", "the garden is quiet", ["ep2"], "CREATE", 0.8)
     repo.supersede_with(
         "ari",
         first.id,
         {
-            "claim": "the Emperor is very patient",
+            "claim": "the user is very patient",
             "source_episode_ids": ["ep1"],
             "verb": "REFINE",
             "confidence": 0.95,
@@ -290,11 +290,11 @@ def test_the_active_listing_excludes_the_superseded_rows(repo):
     )
     active = repo.list_active_syntheses("ari")
     assert first.id not in {row.id for row in active}
-    assert {row.claim for row in active} == {"the Emperor is very patient", "the garden is quiet"}
+    assert {row.claim for row in active} == {"the user is very patient", "the garden is quiet"}
 
 
 def test_the_active_listing_is_scoped_to_one_agent(repo):
-    repo.create_synthesis("ari", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
+    repo.create_synthesis("ari", "the user is patient", ["ep1"], "CREATE", 0.9)
     assert repo.list_active_syntheses("zoe") == []
 
 
@@ -317,12 +317,12 @@ def test_the_active_listing_honours_its_limit(repo):
 
 def test_a_second_supersede_on_the_same_old_row_fails_loudly(repo):
     """The second attempt is REFUSED — never a silent double-link."""
-    old = repo.create_synthesis("ari", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
+    old = repo.create_synthesis("ari", "the user is patient", ["ep1"], "CREATE", 0.9)
     first = repo.supersede_with(
         "ari",
         old.id,
         {
-            "claim": "the Emperor is very patient",
+            "claim": "the user is very patient",
             "source_episode_ids": ["ep1"],
             "verb": "REFINE",
             "confidence": 0.95,
@@ -333,7 +333,7 @@ def test_a_second_supersede_on_the_same_old_row_fails_loudly(repo):
             "ari",
             old.id,
             {
-                "claim": "the Emperor is impatient",
+                "claim": "the user is impatient",
                 "source_episode_ids": ["ep1"],
                 "verb": "CORRECT",
                 "confidence": 0.6,
@@ -355,7 +355,7 @@ def test_the_pointer_update_is_guarded_by_the_superseded_by_predicate(
     the transaction rolls back (no orphan, no double-link)."""
     from sqlalchemy import event, text as sql_text
 
-    old = repo.create_synthesis("ari", "the Emperor is patient", ["ep1"], "CREATE", 0.9)
+    old = repo.create_synthesis("ari", "the user is patient", ["ep1"], "CREATE", 0.9)
     fired = {"n": 0}
 
     def _rival_claims_the_row(conn, cursor, statement, parameters, context, executemany):
@@ -379,7 +379,7 @@ def test_the_pointer_update_is_guarded_by_the_superseded_by_predicate(
                 "ari",
                 old.id,
                 {
-                    "claim": "the Emperor is very patient",
+                    "claim": "the user is very patient",
                     "source_episode_ids": ["ep1"],
                     "verb": "REFINE",
                     "confidence": 0.95,

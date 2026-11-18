@@ -244,14 +244,14 @@ def test_the_one_insert_works_on_pg_with_an_array_and_a_timestamp(repo):
         body="the preserved first day",
         title="First Day",
         importance=8,
-        stars=["Emperor", "the Emperor"],
+        stars=["the user", "The user"],
         event_at="2026-03-01T10:00:00+00:00",
     )
     with Session(repo.engine) as session:
         row = session.exec(
             select(MemoirEpisode).where(MemoirEpisode.id == episode)
         ).first()
-        assert row.stars == ["Emperor", "the Emperor"]
+        assert row.stars == ["the user", "The user"]
         assert row.importance == 8
         assert row.event_at.year == 2026
         assert row.event_at.month == 3
@@ -272,7 +272,7 @@ def test_the_stars_round_trip_on_pg(repo):
                 body="a",
                 created_at=_now(),
                 event_at=_now(),
-                stars=["Emperor", "the Emperor"],
+                stars=["the user", "The user"],
             )
         )
         session.add(
@@ -298,7 +298,7 @@ def test_the_stars_round_trip_on_pg(repo):
         session.commit()
     with Session(repo.engine) as session:
         rows = {row.id: row for row in session.exec(select(MemoirEpisode)).all()}
-        assert rows["pg-stars-list"].stars == ["Emperor", "the Emperor"]
+        assert rows["pg-stars-list"].stars == ["the user", "The user"]
         assert rows["pg-stars-none"].stars is None
         assert rows["pg-stars-empty"].stars == []
 

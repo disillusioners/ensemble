@@ -183,7 +183,7 @@ class TestRelayAuditPayload:
             actor=submitter,
         )
         row = pv_repo.submit_for_approval(row.version_id, submitter)
-        human = ActorContext(subject="emperor", auth_method=AUTH_METHOD_SESSION)
+        human = ActorContext(subject="the user", auth_method=AUTH_METHOD_SESSION)
         pv_repo.approve(row.version_id, human)
         with _S(sqlite_engine) as session:
             event = session.exec(
@@ -199,7 +199,7 @@ class TestRelayAuditPayload:
             "approver_subject",
             "approver_auth_method",
         }, "the FE payload shape gained keys — NOT byte-identical"
-        assert payload["approver_subject"] == "emperor"
+        assert payload["approver_subject"] == "the user"
         assert payload["approver_auth_method"] == "session"
 
     def test_no_existing_event_row_modified(

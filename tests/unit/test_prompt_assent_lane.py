@@ -557,7 +557,7 @@ class TestTheMintBranch:
             }
         )
         assert "prompt_assent mint" in forced
-        # The re-mint RE-SHOWS the diff (a bare token tells the Emperor
+        # The re-mint RE-SHOWS the diff (a bare token tells the user
         # nothing — S-4 (iii)).
         assert "--- BEGIN CANONICAL RENDER ---" in forced
         live = repo.find_live(pending_row.version_id)
