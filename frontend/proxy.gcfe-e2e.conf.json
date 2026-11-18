@@ -1,3 +1,4 @@
+// FE-UI lane marker (group-chat gc-fe-surfaces P4/G2 rooms gate): real-daemon leg.
 {
   "/api": {
     "target": "http://127.0.0.1:8079",
