@@ -461,5 +461,78 @@ describe('ChatComponent chatrooms button (P6) — real template wiring', () => {
     expect(roomButton()).toBeNull();
     expect(dialogOpen).not.toHaveBeenCalled();
   });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // gc-fe-surfaces (P2) — the NEST-WIDE room browser control.
+  //
+  // It sits NEXT TO the shipped per-instance chatrooms icon (which keeps
+  // its instance gate) and opens the SAME dialog in 'global' mode. The
+  // shipped four pins above stay unedited.
+  // ───────────────────────────────────────────────────────────────────────
+  describe('the all-chatrooms browser control (gc-fe-surfaces)', () => {
+    function roomsBrowserButton(): HTMLElement | null {
+      return (fixture.nativeElement as HTMLElement).querySelector<HTMLElement>(
+        '.rooms-browser-btn',
+      );
+    }
+
+    it('renders the browser control in the toggle family, ungated (no instance needed)', () => {
+      // No selection — the browser spans the WHOLE nest, so the control
+      // stays actionable (the shipped per-instance icon hides instead).
+      expect(component.renderedInstance()).toBeNull();
+      const btn = roomsBrowserButton();
+      expect(btn).toBeTruthy();
+      expect(btn!.classList.contains('toggle-btn')).toBe(true);
+      // A DISTINCT class — the shipped `.room-btn` helper keeps working.
+      expect(btn!.classList.contains('room-btn')).toBe(false);
+      // Same container as the watchover toggle and the shipped room icon.
+      expect(btn!.parentElement!.classList.contains('toggle-buttons')).toBe(true);
+      // Labelled for both pointer and screen-reader users.
+      expect(btn!.getAttribute('aria-label')).toBe('All chatrooms');
+      expect(btn!.getAttribute('title')).toBe('All chatrooms (this nest)');
+      // A distinct glyph — the shipped room icon is 'forum'.
+      const glyph = btn!.querySelector('mat-icon')?.textContent?.trim();
+      expect(glyph).toBe('view_list');
+      expect(glyph).not.toBe('forum');
+    });
+
+    it('sits between the shipped room icon and the think button', () => {
+      selectInstance('chat-rooms-browser-placement', 'Producer');
+      const host = fixture.nativeElement as HTMLElement;
+      const watchoverBtn = host.querySelector<HTMLElement>('.watchover-btn');
+      const roomBtn = roomButton();
+      const browserBtn = roomsBrowserButton();
+      const thinkBtn = host.querySelector<HTMLElement>('.think-btn');
+
+      expect(watchoverBtn).toBeTruthy();
+      expect(roomBtn).toBeTruthy();
+      expect(browserBtn).toBeTruthy();
+      expect(thinkBtn).toBeTruthy();
+      // The shipped adjacency pin keeps holding: watchover → room-btn.
+      expect(watchoverBtn!.nextElementSibling).toBe(roomBtn!);
+      // The new control lands right AFTER the shipped room icon...
+      expect(roomBtn!.nextElementSibling).toBe(browserBtn!);
+      // ... and BEFORE the think button.
+      expect(browserBtn!.nextElementSibling).toBe(thinkBtn!);
+    });
+
+    it('opens the room dialog in global mode with the BIG geometry', () => {
+      roomsBrowserButton()!.click();
+      fixture.detectChanges();
+
+      expect(dialogOpen).toHaveBeenCalledTimes(1);
+      const [opened, config] = dialogOpen.mock.calls[0];
+      expect(opened).toBe(RoomDialogComponent);
+      // The nest-wide browser — NOT the instance-scoped mode.
+      expect(config.data.mode).toBe('global');
+      expect(config.data.instanceId).toBeUndefined();
+      // BIG modal — the same geometry constant as the shipped modal.
+      expect(config.width).toBe(ROOM_DIALOG_SIZE.width);
+      expect(config.height).toBe(ROOM_DIALOG_SIZE.height);
+      expect(config.maxWidth).toBe(ROOM_DIALOG_SIZE.maxWidth);
+      expect(config.maxHeight).toBe(ROOM_DIALOG_SIZE.maxHeight);
+      expect(config.panelClass).toBe('room-dialog-panel');
+    });
+  });
 });
 

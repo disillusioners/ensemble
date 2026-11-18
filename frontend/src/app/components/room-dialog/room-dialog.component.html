@@ -1,6 +1,12 @@
 <h2 mat-dialog-title class="room-dialog-title">
   <mat-icon class="title-icon" aria-hidden="true">forum</mat-icon>
-  <span class="title-text">Chatrooms</span>
+  @if (isGlobalMode) {
+    <span class="title-text">All chatrooms in this nest</span>
+  } @else if (isJoinedMode) {
+    <span class="title-text">Chatrooms joined by {{ data.instanceName ?? 'this instance' }}</span>
+  } @else {
+    <span class="title-text">Chatrooms</span>
+  }
   @if (data.instanceName) {
     <span class="dialog-instance-name">{{ data.instanceName }}</span>
   }
@@ -8,64 +14,142 @@
 
 <mat-dialog-content class="room-dialog-content">
   <div class="room-modal-body">
-    <!-- (a) the chatrooms created by this instance('s tree) -->
+    <!-- (a) the chatrooms of this dialog's scope: the instance('s tree)
+         in the shipped 'instance' mode, the WHOLE NEST in the 'global'
+         mode, the instance's JOINED rooms in the 'joined' mode. -->
     <section class="rooms-pane" aria-label="Chatrooms">
       <header class="pane-header">
         <span class="pane-header-text">Chatrooms</span>
         @if (rooms().length > 0) {
           <span class="pane-header-count">{{ rooms().length }}</span>
         }
+        @if (!isInstanceMode && listedRooms().length > 0) {
+          <span class="pane-header-count">{{ listedRooms().length }}</span>
+        }
       </header>
 
-      @if (roomsLoading()) {
-        <div class="pane-state" role="status">
-          <mat-spinner diameter="24"></mat-spinner>
-          <span class="pane-state-text">Loading chatrooms…</span>
-        </div>
-      } @else if (roomsError(); as error) {
+      @if (scopeError(); as scopeMessage) {
+        <!-- Defensive: the mode needs an instance scope and none was
+             supplied — NO request was made, so say so honestly. -->
         <div class="pane-state pane-state-error" role="alert">
           <mat-icon aria-hidden="true">error_outline</mat-icon>
-          <span class="pane-state-text">{{ error }}</span>
-          <button mat-stroked-button type="button" class="pane-retry-btn" (click)="retryRooms()">
-            Retry
-          </button>
+          <span class="pane-state-text">{{ scopeMessage }}</span>
         </div>
-      } @else if (rooms().length === 0) {
-        <div class="pane-state">
-          <mat-icon aria-hidden="true">forum</mat-icon>
-          <span class="pane-state-text">No chatrooms for this instance yet.</span>
-        </div>
-      } @else {
-        <ul class="room-list">
-          @for (room of rooms(); track room.room_id) {
-            <li>
-              <button
-                type="button"
-                class="room-item"
-                [class.room-item-selected]="room.room_id === selectedRoomId()"
-                [attr.aria-pressed]="room.room_id === selectedRoomId()"
-                (click)="selectRoom(room)"
-              >
-                <span class="room-item-name">{{ room.name }}</span>
-                <span class="room-item-meta">
-                  <span class="room-item-state" [class.room-item-state-closed]="room.closed">
-                    {{ room.closed ? 'closed' : 'active' }}
-                  </span>
-                  <span class="room-item-members">
-                    {{ room.member_count }} {{ room.member_count === 1 ? 'member' : 'members' }}
-                  </span>
-                  @if (room.last_message_at) {
-                    <span class="room-item-last" [title]="'Last message at ' + room.last_message_at">
-                      {{ room.last_message_at | date: 'short' }}
+      } @else if (isInstanceMode) {
+        <!-- The SHIPPED instance-mode pane — unchanged (same list source,
+             same copy, same error/retry states). -->
+        @if (roomsLoading()) {
+          <div class="pane-state" role="status">
+            <mat-spinner diameter="24"></mat-spinner>
+            <span class="pane-state-text">Loading chatrooms…</span>
+          </div>
+        } @else if (roomsError(); as error) {
+          <div class="pane-state pane-state-error" role="alert">
+            <mat-icon aria-hidden="true">error_outline</mat-icon>
+            <span class="pane-state-text">{{ error }}</span>
+            <button mat-stroked-button type="button" class="pane-retry-btn" (click)="retryRooms()">
+              Retry
+            </button>
+          </div>
+        } @else if (rooms().length === 0) {
+          <div class="pane-state">
+            <mat-icon aria-hidden="true">forum</mat-icon>
+            <span class="pane-state-text">No chatrooms for this instance yet.</span>
+          </div>
+        } @else {
+          <ul class="room-list">
+            @for (room of rooms(); track room.room_id) {
+              <li>
+                <button
+                  type="button"
+                  class="room-item"
+                  [class.room-item-selected]="room.room_id === selectedRoomId()"
+                  [attr.aria-pressed]="room.room_id === selectedRoomId()"
+                  (click)="selectRoom(room)"
+                >
+                  <span class="room-item-name">{{ room.name }}</span>
+                  <span class="room-item-meta">
+                    <span class="room-item-state" [class.room-item-state-closed]="room.closed">
+                      {{ room.closed ? 'closed' : 'active' }}
                     </span>
-                  } @else {
-                    <span class="room-item-last room-item-last-empty">no messages yet</span>
-                  }
-                </span>
-              </button>
-            </li>
+                    <span class="room-item-members">
+                      {{ room.member_count }} {{ room.member_count === 1 ? 'member' : 'members' }}
+                    </span>
+                    @if (room.last_message_at) {
+                      <span class="room-item-last" [title]="'Last message at ' + room.last_message_at">
+                        {{ room.last_message_at | date: 'short' }}
+                      </span>
+                    } @else {
+                      <span class="room-item-last room-item-last-empty">no messages yet</span>
+                    }
+                  </span>
+                </button>
+              </li>
+            }
+          </ul>
+        }
+        <!-- end of the shipped instance-mode chatroom list -->
+      } @else {
+        <!-- The nest-wide ('global') / per-instance ('joined') pane —
+             it reads the DEDICATED global lane, never the shipped one. -->
+        @if (globalRoomsLoading()) {
+          <div class="pane-state" role="status">
+            <mat-spinner diameter="24"></mat-spinner>
+            <span class="pane-state-text">Loading chatrooms…</span>
+          </div>
+        } @else if (globalRoomsError(); as error) {
+          <div class="pane-state pane-state-error" role="alert">
+            <mat-icon aria-hidden="true">error_outline</mat-icon>
+            <span class="pane-state-text">{{ error }}</span>
+            <button mat-stroked-button type="button" class="pane-retry-btn" (click)="retryRooms()">
+              Retry
+            </button>
+          </div>
+        } @else if (listedRooms().length === 0) {
+          <div class="pane-state">
+            <mat-icon aria-hidden="true">forum</mat-icon>
+            <span class="pane-state-text">{{ globalEmptyCopy }}</span>
+          </div>
+        } @else {
+          <ul class="room-list">
+            @for (room of listedRooms(); track room.room_id) {
+              <li>
+                <button
+                  type="button"
+                  class="room-item"
+                  [class.room-item-selected]="room.room_id === selectedRoomId()"
+                  [attr.aria-pressed]="room.room_id === selectedRoomId()"
+                  (click)="selectRoom(room)"
+                >
+                  <span class="room-item-name">{{ room.name }}</span>
+                  <span class="room-item-meta">
+                    <span class="room-item-state" [class.room-item-state-closed]="room.closed">
+                      {{ room.closed ? 'closed' : 'active' }}
+                    </span>
+                    <span class="room-item-members">
+                      {{ room.member_count }} {{ room.member_count === 1 ? 'member' : 'members' }}
+                    </span>
+                    @if (room.last_message_at) {
+                      <span class="room-item-last" [title]="'Last message at ' + room.last_message_at">
+                        {{ room.last_message_at | date: 'short' }}
+                      </span>
+                    } @else {
+                      <span class="room-item-last room-item-last-empty">no messages yet</span>
+                    }
+                  </span>
+                </button>
+              </li>
+            }
+          </ul>
+          @if (globalRoomsTruncated()) {
+            <!-- The list is a PREFIX of the nest — say so (N8/N6). -->
+            <div class="pane-truncated" role="status">
+              <mat-icon aria-hidden="true">info</mat-icon>
+              <span class="pane-truncated-text">{{ truncationCopy }}</span>
+            </div>
           }
-        </ul>
+          <!-- end of the nest-wide chatroom list -->
+        }
       }
     </section>
 
@@ -84,6 +168,15 @@
         }
       </header>
 
+      @if (stale()) {
+        <!-- A refresh failed: the last-known chatroom messages are still
+             on screen, but they are STALE — say so (N7). -->
+        <div class="pane-stale" role="status">
+          <mat-icon aria-hidden="true">history</mat-icon>
+          <span class="pane-stale-text">Refresh failed — showing the last known messages.</span>
+        </div>
+      }
+
       @if (!selectedRoomId()) {
         <div class="pane-state">
           <mat-icon aria-hidden="true">chat_bubble_outline</mat-icon>
@@ -96,6 +189,16 @@
           <button mat-stroked-button type="button" class="pane-retry-btn" (click)="retryMessages()">
             Retry
           </button>
+        </div>
+      } @else if (!isInstanceMode && !selectedRoom()) {
+        <!-- A-12: the open room vanished from the refreshed list — the
+             selection survives BY ID and the pane says the room is gone
+             (never an empty conversation that reads as live-but-silent). -->
+        <div class="pane-state pane-state-absent">
+          <mat-icon aria-hidden="true">report</mat-icon>
+          <span class="pane-state-text">
+            {{ selectedRoomLabel() }} is no longer available — it was closed or is no longer listed.
+          </span>
         </div>
       } @else if (messagesLoading() && messages().length === 0) {
         <div class="pane-state" role="status">
