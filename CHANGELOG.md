@@ -5,6 +5,16 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.2] — 2026-11-18
+
+### Fixed — skill-system defect fixes C1/C2/C3 + skill-keeper verification (`feature/skill-system-defects`)
+
+- C1/C2: sanctioned E-6 resolution mechanism (stalled sweep, corrective FIX, REST mode, resolve_pair wiring); every resolution path — forced-winner Path 0, auto Path 2, Paths 3/4, REST mode — refuses an already-resolved pair; receipt-before-first-flip; reactivate reverses a sanctioned resolution (W2/W3/W8)
+- C3: corrective membership pre-check before row creation — no orphan generation (W4); duplicated-anchor rejection (W6); exact-token section sanction + honest reversal wording
+- A/B disposition manifest service + inactivity sweep; capture-admission hardening; run_id observability pins
+- Credential hygiene: audit scripts no longer echo the DSN (cleartext password redaction on failure paths + stderr pin)
+- Tester gate: PASS-WITH-FINDINGS — 29/29 counter-mutation cycles RED, net-new reds 0, quarantine clean
+
 ## [0.31.1] — 2026-11-18
 
 ### Fixed — POK active-entry storage cap 256 → 512; curator slug→row resolver fix (`feature/pok-cap-curator-resolver`)
