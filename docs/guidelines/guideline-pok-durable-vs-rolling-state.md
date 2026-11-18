@@ -68,6 +68,6 @@ draft — authored 2026-11-17 by the pok-cap-curator lane's TASK-3 executor; a h
 - Injection budget: `POK_BLOCK_MAX_ENTRIES = 8` (`daemon/services/pok_service.py:122`), `POK_BLOCK_MAX_CHARS = 2_900` (`:120`); enforcement `daemon/services/pok_injection.py:379-380,474`.
 - Guideline house: `docs/guidelines/README.md` (naming, placement, lifecycle); shape `docs/guidelines/TEMPLATE.md`.
 - CHANGELOG: entry titled exactly "POK active-entry storage cap 256 → 512; curator slug→row resolver fix" — landing-in-lane (absent from `CHANGELOG.md` at write time, 2026-11-17); historical arc: `## [0.29.11] — 2026-11-10` "POK active-entry admission cap raised 64 → 256" at `CHANGELOG.md:218-222` (byte-intact).
-- Critical note: <id pending — leader to supply after creation>
+- Critical note (doctrine): `571c4019-f44d-4a46-bbe2-aba4911bf1c2` — "DOCTRINE — POK holds DURABLE operating knowledge only; rolling state routes to KV / critical notes / board / release tree; storage cap ≠ injection budget" (convention, high); paired POK pointer row: `pok-scope-01-rolling-state-out` (slug reserved — row lands in a later lane).
 - Board item: none found (searched `.agents/shared/` + `git log --grep`, read-only, 2026-11-17).
 - Lane commission: tracked via shared_meta_kv claim `wt.claim.pok-cap-curator` (worktree `ensemble-src-wt-pok-cap`, branch `feature/pok-cap-curator-resolver`, no promote).
