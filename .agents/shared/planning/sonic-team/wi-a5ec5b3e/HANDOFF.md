@@ -98,3 +98,20 @@ new latest into our integration, CHANGELOG/uv.lock re-bounce to the M4 owner, PA
 (b) leader-authorized v0.31.3 re-cut including the fix (their release is staged-not-promoted; re-stage
 overwrites in place — cross-lane call). Sequencing vs their pending promote ceremony is leader-owned.
 Local integration tip at stop: see git log -1 HEAD (HANDOFF commit). No push of our line occurred.
+
+## POSTSCRIPT v2 (2026-11-18 ~19:4xZ) — LEADER-ADJUDICATED RE-SLOT TO v0.31.4
+Adjudication: option (a) — v0.31.3 (gc-fe-surfaces, already staged-not-promoted) stands; our guard fix rides
+v0.31.4 folding their content + the fix. Continuation branch sonic/wi-a5ec5b3e/continuation (this worktree,
+NEW per house rule) from frozen fa56a27d3; origin/latest c48a55431 absorbed via merge --no-ff (merge commit
+89997afbb, M4 owner resolved CHANGELOG both-sides-newest-first, PACKS keep-both verified); re-bump commit
+a296ec713 -> version 0.31.4 at 4 sites. Isolated our-work range: c48a55431..<tag tip>.
+GATE RE-RUN ON POST-MERGE TIP (leader condition — green or no tag): gate pack 128/128
+(/tmp/wia5ec5b3e-int2/pack.log); mutation legs ALL RED under own plants, restores sha-verified, porcelain
+clean, final 89/89 (/tmp/wia5ec5b3e-int2/mutation-legs.log; M3 first plant mis-aimed -> DISCARDED, corrected
+plant = raw-text scan at entry, 10F; disclosure mirrors M1-R's own discarded-plant precedent).
+Tag v0.31.4 (annotated) at THIS commit = branch tip; push: HEAD:latest + sonic/wi-a5ec5b3e/continuation +
+tag (L1 tip-identity for stage). Stage: releases/v0.31.4 via the normal stage flow from a clean detached
+worktree at the tag, fresh build (dist/ + frontend/dist/ removed first), ENSEMBLE_UPGRADE_LIVE=1
+ENSEMBLE_ROLLBACK_SAFE=1 (delta since v0.31.3: our fix + docs; no new migrations; additive-only).
+NO promote — Emperor's ceremony owns the flip. Staged-at evidence of record: the live
+releases/v0.31.4/manifest.json staged_at field + releases/state.json history (authoritative timestamps).
