@@ -115,7 +115,7 @@ describe('InstanceListComponent rooms-btn (gc-fe-surfaces P3)', () => {
   }
 
   afterEach(() => {
-    try { httpMock.verify(); } catch (e) { /* ignore */ }
+    httpMock.verify();
   });
 
   function flushRooms(payload: any) {
