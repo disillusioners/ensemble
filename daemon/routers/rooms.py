@@ -29,6 +29,31 @@ it in parallel):
   ``null`` when the window is exhausted. An unclamped cursor is NEVER
   echoed.
 
+* ``GET /api/rooms?instance_id=&limit=`` →
+  ``{"rooms": [{"room_id", "name", "tree_root_id",
+  "owner_instance_id", "state", "member_count",
+  "member_instance_ids", "last_message_at", "last_message_seq",
+  "created_at"}], "truncated": bool}``
+  — the NEST-WIDE browser list (gc-fe-surfaces phase 1). ``limit`` is
+  advisory: the server clamps to ``[1, ROOM_LIST_MAX_LIMIT=500]``
+  (default 200) and ``truncated`` says whether rows were cut. With
+  ``instance_id`` the list is the caller-scoped readable set (the SAME
+  fail-closed predicate as the messages route, filter-then-clamp);
+  without it the read is the operator-lane nest-wide breadth, gated by
+  the module knob ``_ALLOW_ANCHORLESS_GLOBAL_LIST`` (knob-OFF ⇒ ``404
+  instance_not_found``). A ``state`` field names the lifecycle state
+  (``active`` / ``closed``); a purged room has no rows at all.
+
+``state`` vs ``closed`` — a DECIDED divergence, not an accident: the
+messages-era room list (``GET /api/instances/{id}/rooms``) emits the
+boolean ``closed`` and its contract is FROZEN at v0.31.0 for that
+shipped consumer; the new nest-wide route emits the fuller ``state``
+string because its row is the richer shape (roster + owner + tree
+anchors) and the FE global lane needs the lifecycle truth rather than a
+derived boolean. The two routes share no row schema by design; adding
+``state`` to the frozen route is a v0.32.0-class contract change, not a
+drive-by.
+
 THE POSTURE (no new auth model)
 -------------------------------
 * The role gate is the EXISTING ``instances:read`` scope — the same
@@ -215,7 +240,21 @@ async def list_instance_rooms(instance_id: str, request: Request) -> dict:
     "/rooms",
     dependencies=[scope_required(_SCOPE_READ)],
 )
-async def list_rooms(request: Request, limit: int = Query(200)) -> dict:
+async def list_rooms(
+    request: Request,
+    limit: int = Query(200),
+    instance_id: str | None = Query(
+        None,
+        description=(
+            "OPTIONAL scope instance (BLOCKER-1(d)). Declared as "
+            "Query(None) so the parameter is part of the OpenAPI "
+            "surface; PRESENCE is still read from the raw query "
+            "string below — Query(None) cannot distinguish absent "
+            "from present-but-empty, and the N9 taxonomy depends on "
+            "the difference."
+        ),
+    ),
+) -> dict:
     """Nest-wide room list (the global browser, gc-fe-surfaces phase 1).
 
     Optional ``instance_id`` query param anchors the read to that
@@ -277,20 +316,24 @@ async def list_rooms(request: Request, limit: int = Query(200)) -> dict:
     # Anchored path.
     anchor = (raw_value or "").strip()
     # Pure DB read for existence (never manager.get_instance — C-4).
+    # A-3: ONE fixed, input-free message in BOTH refusal branches of this
+    # route — the knob-OFF refusal below and the bad-anchor 404 share the
+    # exact same string, so the two are wire-indistinguishable and neither
+    # discloses the knob nor echoes client input.
     try:
         await asyncio.to_thread(manager.get_instance_info, anchor)
     except KeyError:
         raise _err(
             404,
             _ERR_INSTANCE_NOT_FOUND,
-            f"Instance not found: {anchor}",
+            "Instance not found",
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("room list (anchored): instance lookup failed (%r)", exc)
         raise _err(
             404,
             _ERR_INSTANCE_NOT_FOUND,
-            f"Instance not found: {anchor}",
+            "Instance not found",
         )
     # descendant closure off-loop
     try:
@@ -298,6 +341,12 @@ async def list_rooms(request: Request, limit: int = Query(200)) -> dict:
             manager.get_tree_ids_permanent, anchor
         )
     except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "room list (anchored): the descendant closure of instance=%s "
+            "could not be computed (%r) — falling back to anchor-only",
+            anchor,
+            exc,
+        )
         descendant_ids = [anchor]
     descendant_set = set(descendant_ids or [])
     try:

@@ -369,4 +369,170 @@ describe('RoomService', () => {
     expect(service.POLL_INTERVAL_MS).toBe(10_000);
   });
 
+  it('loadGlobalRooms joined filters rows by member_instance_ids', () => {
+    service.loadGlobalRooms('joined', 'inst-9');
+    const req = httpMock.expectOne((r) => r.url === '/api/rooms');
+    expect(req.request.params.get('instance_id')).toBe('inst-9');
+    req.flush({
+      rooms: [
+        {
+          room_id: 'r-joined',
+          name: 'joined',
+          tree_root_id: 't-1',
+          owner_instance_id: 'o-1',
+          state: 'active',
+          member_count: 2,
+          member_instance_ids: ['o-1', 'inst-9'],
+          last_message_at: null,
+          last_message_seq: null,
+          created_at: '2026-11-16T10:00:00+00:00',
+        },
+        {
+          room_id: 'r-other',
+          name: 'other',
+          tree_root_id: 't-1',
+          owner_instance_id: 'inst-9',
+          state: 'active',
+          member_count: 1,
+          member_instance_ids: ['o-2'],
+          last_message_at: null,
+          last_message_seq: null,
+          created_at: '2026-11-16T10:01:00+00:00',
+        },
+      ],
+      truncated: false,
+    });
+    // The SERVICE lane owns the joined filter (task 9(ii)) — every
+    // consumer gets the same correct set.
+    expect(service.globalRooms().map((r) => r.room_id)).toEqual(['r-joined']);
+  });
+
+  it('global mode does NOT filter by member_instance_ids', () => {
+    service.loadGlobalRooms('global');
+    httpMock.expectOne('/api/rooms').flush({
+      rooms: [
+        {
+          room_id: 'r-any',
+          name: 'any',
+          tree_root_id: 't-1',
+          owner_instance_id: 'o-1',
+          state: 'active',
+          member_count: 1,
+          member_instance_ids: ['o-1'],
+          last_message_at: null,
+          last_message_seq: null,
+          created_at: '2026-11-16T10:00:00+00:00',
+        },
+      ],
+      truncated: false,
+    });
+    expect(service.globalRooms().map((r) => r.room_id)).toEqual(['r-any']);
+  });
+
+  it('A-12: a vanished open room keeps its selection and raises the absent flag', () => {
+    service.openRoom('r-1');
+    httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages').flush({
+      messages: [],
+      next_after_seq: null,
+    });
+    expect(service.openRoomId()).toBe('r-1');
+    expect(service.openRoomAbsent()).toBe(false);
+
+    // The refreshed list no longer contains r-1.
+    service.loadGlobalRooms('global');
+    httpMock.expectOne('/api/rooms').flush({
+      rooms: [
+        {
+          room_id: 'r-2',
+          name: 'still here',
+          tree_root_id: 't-1',
+          owner_instance_id: 'o-1',
+          state: 'active',
+          member_count: 1,
+          member_instance_ids: ['o-1'],
+          last_message_at: null,
+          last_message_seq: null,
+          created_at: '2026-11-16T10:00:00+00:00',
+        },
+      ],
+      truncated: false,
+    });
+    // Selection preserved BY ID; the pane gets the honest absent state.
+    expect(service.openRoomId()).toBe('r-1');
+    expect(service.openRoomAbsent()).toBe(true);
+
+    // It reappears ⇒ the flag clears.
+    service.loadGlobalRooms('global');
+    httpMock.expectOne('/api/rooms').flush({
+      rooms: [
+        {
+          room_id: 'r-1',
+          name: 'back',
+          tree_root_id: 't-1',
+          owner_instance_id: 'o-1',
+          state: 'active',
+          member_count: 1,
+          member_instance_ids: ['o-1'],
+          last_message_at: null,
+          last_message_seq: null,
+          created_at: '2026-11-16T10:00:00+00:00',
+        },
+      ],
+      truncated: false,
+    });
+    expect(service.openRoomAbsent()).toBe(false);
+
+    // A new selection resets the flag.
+    service.openRoom('r-2');
+    httpMock.expectOne((r) => r.url === '/api/rooms/r-2/messages').flush({
+      messages: [],
+      next_after_seq: null,
+    });
+    expect(service.openRoomAbsent()).toBe(false);
+  });
+
+  it('a successful poll clears stale; a failed poll sets it and polling keeps working', () => {
+    service.openRoom('r-1');
+    httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages').flush({
+      messages: [],
+      next_after_seq: null,
+    });
+    expect(service.stale()).toBe(false);
+
+    service.refreshOpenRoom();
+    httpMock
+      .expectOne((r) => r.url === '/api/rooms/r-1/messages')
+      .flush({ detail: 'boom' }, { status: 500, statusText: 'Server Error' });
+    expect(service.stale()).toBe(true);
+
+    // The in-flight flag was released (D17) — a second tick CAN issue.
+    service.refreshOpenRoom();
+    httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages').flush({
+      messages: [{ seq: 1, instance_id: 'i-1', member_name: 'a', content: 'new', created_at: '', kind: 'message' }],
+      next_after_seq: null,
+    });
+    expect(service.stale()).toBe(false);
+    expect(service.messages().map((m) => m.seq)).toEqual([1]);
+  });
+
+  it('startPolling on a hidden tab issues no tick; a visible tab does', () => {
+    jest.useFakeTimers();
+    const hiddenSpy = jest.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    try {
+      service.openRoom('r-1');
+      httpMock.expectOne((r) => r.url === '/api/rooms/r-1/messages').flush({
+        messages: [],
+        next_after_seq: null,
+      });
+      service.startPolling();
+      jest.advanceTimersByTime(30_000);
+      // Hidden tab ⇒ browserVisible initialized from document.hidden.
+      httpMock.expectNone((r) => r.url === '/api/rooms/r-1/messages');
+      service.stopPolling();
+    } finally {
+      hiddenSpy.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
 });

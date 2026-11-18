@@ -11,11 +11,13 @@ hard-deleted-caller narrowing, and the W-11 anchored-superset invariant.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.engine import Engine
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 import daemon.repositories.event.models  # noqa: F401
 import daemon.repositories.instance.models  # noqa: F401
@@ -31,6 +33,10 @@ from tests.helpers.room_harness import (
     resolve_tree_root_id,
     seed_instance,
     seed_raw_room,
+)
+
+ROOMS_ROUTER_SRC = (
+    Path(__file__).resolve().parents[3] / "daemon" / "routers" / "rooms.py"
 )
 
 
@@ -95,16 +101,18 @@ class _Manager:
             return row.to_dict() if hasattr(row, "to_dict") else {"instance_id": instance_id}
 
     def get_tree_ids_permanent(self, caller_instance_id: str) -> list[str]:
-        # caller-inclusive downward walk (mirrors repository shape).
-        out = [caller_instance_id]
-        # one level of children
+        # caller-inclusive downward walk (mirrors the real facade shape —
+        # including its root-existence guard: a missing root ⇒ []).
         with Session(self._engine) as s:
-            rows = s.exec(
-                __import__("sqlmodel").select(Instance).where(
+            if s.get(Instance, caller_instance_id) is None:
+                return []
+            out = [caller_instance_id]
+            children = s.exec(
+                select(Instance).where(
                     Instance.parent_id == caller_instance_id
                 )
             ).all()
-            for r in rows:
+            for r in children:
                 out.append(r.instance_id)
         return out
 
@@ -133,6 +141,45 @@ def _make_room(engine, svc, tree, owner, name="alpha", state="active"):
             r.state = "closed"
             s.commit()
     return rid
+
+
+def _stamp_created_at(engine, rid: str, seq: int) -> None:
+    """Pin a room's ``created_at`` — the ordering key is deterministic."""
+    with Session(engine) as s:
+        row = s.get(ChatRoom, rid)
+        stamp = f"2026-11-16T00:00:00.{seq:06d}+00:00"
+        row.created_at = stamp
+        row.updated_at = stamp
+        s.commit()
+
+
+def _seed_raw_rooms_bulk(
+    engine, count: int, *, tree_root: str, owner: str
+) -> list[str]:
+    """Insert ``count`` rooms in ONE session with strictly increasing
+    ``created_at`` — the bound legs need scale without N commits."""
+    ids: list[str] = []
+    with Session(engine) as s:
+        for i in range(count):
+            rid = f"bulk-{i:05d}"
+            stamp = f"2026-11-16T00:00:00.{i:06d}+00:00"
+            s.add(
+                ChatRoom(
+                    room_id=rid,
+                    name=f"r{i}",
+                    tree_root_id=tree_root,
+                    owner_instance_id=owner,
+                    state="active",
+                    closed_at=None,
+                    last_post_at=None,
+                    message_count=0,
+                    created_at=stamp,
+                    updated_at=stamp,
+                )
+            )
+            ids.append(rid)
+        s.commit()
+    return ids
 
 
 # ── exact field set ────────────────────────────────────────────────────
@@ -213,6 +260,10 @@ def test_bad_anchor_404(client, engine, svc):
     resp = client.get("/api/rooms?instance_id=nope")
     assert resp.status_code == 404
     assert resp.json()["detail"]["error"] == "instance_not_found"
+    # A-3 / D7 — the message is FIXED and INPUT-FREE: no echo of the
+    # caller's input, and identical to the knob-OFF refusal below.
+    assert resp.json()["detail"]["message"] == "Instance not found"
+    assert "nope" not in resp.json()["detail"]["message"]
 
 
 def test_faulted_service_503(client, engine, svc):
@@ -273,6 +324,48 @@ def test_truncated_flag(client, engine, svc):
     assert len(resp.json()["rooms"]) == 3
     resp = client.get("/api/rooms?limit=10")
     assert resp.json()["truncated"] is False
+    # The limit+1 PROBE pin: at the exact boundary the probe's extra row
+    # is what decides the flag — 5 rows with limit=5 is NOT truncated,
+    # with limit=4 it is (no "≥" off-by-one, no len-based shortcut).
+    resp = client.get("/api/rooms?limit=5")
+    assert len(resp.json()["rooms"]) == 5
+    assert resp.json()["truncated"] is False
+    resp = client.get("/api/rooms?limit=4")
+    assert len(resp.json()["rooms"]) == 4
+    assert resp.json()["truncated"] is True
+
+
+def test_bound_clamp_at_scale_and_default(client, engine, svc):
+    """Criterion 20 — the clamp is honoured at EVERY pinned boundary.
+
+    505 rows: enough to exercise 500 (the hard max) and 9999 (clamped).
+    """
+    manager = client.manager
+    _seed_tree(engine, manager, "owner-1")
+    total = 505
+    _seed_raw_rooms_bulk(engine, total, tree_root="owner-1", owner="owner-1")
+
+    # The DEFAULT limit leg: no ``limit`` param ⇒ 200 (D1.1-a).
+    resp = client.get("/api/rooms")
+    assert resp.status_code == 200
+    assert len(resp.json()["rooms"]) == 200
+    assert resp.json()["truncated"] is True
+
+    for limit, expected in [
+        (0, 1),  # clamped up to 1
+        (1, 1),
+        (100, 100),
+        (101, 101),  # NO inheritance of the MAX_PAGE_LIMIT=100 constant
+        (200, 200),
+        (201, 201),
+        (500, 500),  # the hard max is INCLUSIVE
+        (9999, 500),  # clamped down to the hard max
+    ]:
+        resp = client.get(f"/api/rooms?limit={limit}")
+        assert resp.status_code == 200, limit
+        body = resp.json()
+        assert len(body["rooms"]) == expected, (limit, len(body["rooms"]))
+        assert body["truncated"] is True, limit
 
 
 # ── knob-OFF refusal (serial) ──────────────────────────────────────────
@@ -335,42 +428,152 @@ def test_stub_not_called(client, engine, svc):
     assert manager.get_instance_called == [], "manager.get_instance must not be called on anchored path"
 
 
-# ── AM-10 hard-deleted caller narrowing ────────────────────────────────
+# ── AM-10 hard-deleted caller narrowing (W-3 re-aim) ───────────────────
 
-def test_am10_hard_deleted_caller(client, engine, svc):
+def test_am10_hard_deleted_caller_list_denies_shipped_admits(
+    client, engine, svc
+):
+    """AM-10 / W-3 — the ONE narrowing edge, both halves pinned.
+
+    Subject = ``ghost-parent``: its instance ROW is hard-deleted, but its
+    id is still referenced by ``child-1.parent_id``. The room is owned by
+    ``child-1``.
+
+    * LIST path (descendant closure): the closure is computed through
+      ``get_tree_ids_permanent``, which returns ``[]`` when the anchor's
+      own row is gone ⇒ closure empty ⇒ membership-only ⇒ DENIED.
+    * SHIPPED per-room path (``_require_room_access``): the up-walk adds
+      each ``parent_id`` it reads from the CURRENT row WITHOUT verifying
+      that the parent's row still exists ⇒ ``ghost-parent`` lands in the
+      chain ⇒ ADMITTED.
+
+    Direction is fail-closed (never wider) and unreachable over HTTP (the
+    router 404s a missing anchor), hence the repository-level form.
+    """
     manager = client.manager
-    # subject id referenced by a child's parent_id, but subject row hard-deleted
     seed_instance(engine, "child-1", "ghost-parent", "idle")
-    manager._known.add("child-1")
-    # create a room owned by ghost-parent (but owner row missing)
-    rid = _make_room(engine, svc, "child-1", "ghost-parent", name="r")
-    # remove the owner row (hard-delete) — but room remains
+    rid = _make_room(engine, svc, "child-1", "child-1", name="r")
+    # No ghost-parent row is ever created — but make the deletion explicit
+    # if a helper seeded one.
     with Session(engine) as s:
         inst = s.get(Instance, "ghost-parent")
         if inst is not None:
             s.delete(inst)
             s.commit()
 
-    # shipped per-room path admits (up-walk reads child's parent_id); 
-    # list path denies (closure empty). We only test list path here:
-    resp = client.get("/api/rooms?instance_id=child-1")
-    # child-1 is not a member of the room (owner ghost-parent), and ghost-parent
-    # is not in child-1's descendant closure => denied
-    ids = [r["room_id"] for r in resp.json()["rooms"]]
-    assert rid not in ids
+    repo = svc._repo
+
+    # The closure the router would pass in: the REAL facade shape — a
+    # missing root row yields [].
+    from daemon.repositories.instance.repository import (
+        SQLModelInstanceRepository,
+    )
+
+    descendant_ids = SQLModelInstanceRepository(
+        engine
+    ).get_tree_ids_permanent("ghost-parent")
+    assert descendant_ids == []
+
+    # 1) LIST path DENIES (membership-only; ghost-parent has no row).
+    readable, truncated = repo.list_readable_rooms_for_caller(
+        "ghost-parent", descendant_ids=set(descendant_ids), limit=200
+    )
+    assert [r["room_id"] for r in readable] == []
+    assert truncated is False
+
+    # 2) SHIPPED per-room path ADMITS (the up-walk trusts child-1's
+    #    parent_id without verifying the parent row exists).
+    payload = repo._require_room_access(rid, "ghost-parent")
+    assert payload["room_id"] == rid
 
 
-# ── W-11 anchored superset ─────────────────────────────────────────────
+# ── criterion 21 — anchored filter-then-clamp (anti-corruption) ────────
 
-def test_w11_anchored_superset(client, engine, svc):
+def test_criterion21_anchored_filter_then_clamp(client, engine, svc):
+    """A joined room PAST the page boundary survives the clamp.
+
+    The scan is ordered ``(created_at, room_id)``. Non-readable rooms fill
+    the HEAD of the scan; the anchor's joined rooms are created LAST. A
+    clamp-then-filter implementation would clamp to the (non-readable)
+    head and return an empty page — filter-then-clamp returns the joined
+    room and reports the readable omission.
+    """
     manager = client.manager
     seed_instance(engine, "owner-1", None, "idle")
     seed_instance(engine, "child-1", "owner-1", "idle")
-    manager._known.update({"owner-1", "child-1"})
-    rid = _make_room(engine, svc, "owner-1", "owner-1")
-    join_member(engine, rid, "child-1", "worker")
+    seed_instance(engine, "stranger-1", None, "idle")
+    manager._known.update({"owner-1", "child-1", "stranger-1"})
+
+    # N+1 NON-readable rooms (owned by a stranger, outside child-1's
+    # membership and its owner-ancestry) at the HEAD of the scan.
+    for i in range(3):
+        head = _make_room(engine, svc, "stranger-1", "stranger-1", name=f"head-{i}")
+        _stamp_created_at(engine, head, i)
+
+    # The anchor's joined rooms — created LAST (past a limit=1 boundary).
+    j1 = _make_room(engine, svc, "owner-1", "owner-1", name="joined-1")
+    join_member(engine, j1, "child-1", "worker")
+    _stamp_created_at(engine, j1, 10)
+    j2 = _make_room(engine, svc, "owner-1", "owner-1", name="joined-2")
+    join_member(engine, j2, "child-1", "worker")
+    _stamp_created_at(engine, j2, 11)
+
+    resp = client.get("/api/rooms?instance_id=child-1&limit=1")
+    assert resp.status_code == 200
+    body = resp.json()
+    ids = [r["room_id"] for r in body["rooms"]]
+    # clamp-then-filter would have returned [] here (the head rows are
+    # not readable); filter-then-clamp returns the first joined room.
+    assert ids == [j1]
+    assert body["truncated"] is True  # one readable room was omitted
+
+
+# ── AM-12 single-branch grep pin ───────────────────────────────────────
+
+def test_am12_single_branch_knob_grep_pin():
+    """The knob is consulted in EXACTLY ONE branch (criterion 6)."""
+    src = ROOMS_ROUTER_SRC.read_text(encoding="utf-8")
+    # ONE negated gate — no second anchor-less path can fail open.
+    assert src.count("if not _ALLOW_ANCHORLESS_GLOBAL_LIST") == 1
+    gate_lines = [
+        line.strip()
+        for line in src.splitlines()
+        if "_ALLOW_ANCHORLESS_GLOBAL_LIST" in line and line.strip().startswith("if ")
+    ]
+    assert gate_lines == ["if not _ALLOW_ANCHORLESS_GLOBAL_LIST:"]
+    # The knob is DEFINED once, module-level.
+    assert src.count("_ALLOW_ANCHORLESS_GLOBAL_LIST: bool = True") == 1
+    # The ONLY unanchored fetch sits AFTER the gate (fail-open guard).
+    assert src.count("room_service.list_all_rooms(") == 1
+    assert src.index("if not _ALLOW_ANCHORLESS_GLOBAL_LIST:") < src.index(
+        "room_service.list_all_rooms("
+    )
+
+
+# ── W-11 anchored superset (SET equality) ──────────────────────────────
+
+def test_w11_anchored_superset(client, engine, svc):
+    """An instance with N active memberships sees EVERY joined room — and
+    nothing else (exact set, not a subset match)."""
+    manager = client.manager
+    seed_instance(engine, "owner-1", None, "idle")
+    seed_instance(engine, "child-1", "owner-1", "idle")
+    seed_instance(engine, "stranger-1", None, "idle")
+    manager._known.update({"owner-1", "child-1", "stranger-1"})
+
+    joined: list[str] = []
+    for i in range(3):
+        rid = _make_room(engine, svc, "owner-1", "owner-1", name=f"joined-{i}")
+        join_member(engine, rid, "child-1", f"worker-{i}")
+        _stamp_created_at(engine, rid, i)
+        joined.append(rid)
+
+    # A room child-1 neither joined nor owns (owner is a stranger ⇒ not in
+    # child-1's descendant closure) — must NOT appear.
+    outsider = _make_room(engine, svc, "stranger-1", "stranger-1", name="outside")
+    _stamp_created_at(engine, outsider, 9)
 
     resp = client.get("/api/rooms?instance_id=child-1")
     assert resp.status_code == 200
-    ids = [r["room_id"] for r in resp.json()["rooms"]]
-    assert rid in ids  # joined room present in anchored list
+    ids = {r["room_id"] for r in resp.json()["rooms"]}
+    assert ids == set(joined)

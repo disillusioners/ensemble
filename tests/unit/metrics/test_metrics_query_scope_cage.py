@@ -5,7 +5,7 @@ three-way form (a two-way form was the defect class the fold ledger
 recorded):
 
 * the **declared-route** census (the scope-decorated routes) reads
-  **119** — the three query routes joined the family, the
+  **120** — the three query routes joined the family, the
   nest-anomaly-report lane's ``/api/nest-reports`` DOMAIN route added
   TWO scope-decorated routes (the family + the cluster detail), and the
   capture-lane read site added ONE (``GET /api/metrics/capture-lane``,
@@ -16,7 +16,9 @@ recorded):
   (``GET /api/instances/{instance_id}/rooms`` joining the EXISTING
   instances family + ``GET /api/rooms/{room_id}/messages`` opening the
   NEW ``/api/rooms`` family, declared ``instances:read`` — scope
-  REUSE, no new scope minted);
+  REUSE, no new scope minted) — and gc-fe-surfaces P1 added the THIRD
+  room read route (``GET /api/rooms``, the nest-wide browser list,
+  riding the SAME ``instances:read`` scope on the SAME mount);
 * the **mount** census reads **40** — the group-chat room mount
   (``/api/rooms/*`` + ``/api/instances/{id}/rooms``, A-P6-9) is the one
   new mount over the memoir-v2 phase-5's 39 pin;
@@ -29,7 +31,7 @@ Plus the family's scope: the query routes carry the family's EXISTING
 
 This pack is D1 (HEAD-only): it asserts the three-way form at once, so
 a cage that drifted in ANY direction reds.
-(The counts moved 113 -> 117, 38 -> 39, 34 -> 35 across the memoir-v2 phase-5 mount and the capture-lane read site, on the merged tree; then 117 -> 119, 39 -> 40, 35 -> 36 across the group-chat room read surface, A-P6-9.)
+(The counts moved 113 -> 117, 38 -> 39, 34 -> 35 across the memoir-v2 phase-5 mount and the capture-lane read site, on the merged tree; then 117 -> 119, 39 -> 40, 35 -> 36 across the group-chat room read surface, A-P6-9; then 119 -> 120 declared across the gc-fe-surfaces P1 nest-wide list route — same family, same mount, so only the declared count moved.)
 """
 
 from __future__ import annotations
@@ -48,7 +50,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 API_PY = REPO_ROOT / "daemon" / "api.py"
 
 #: The three-way cage form (declared-route · mount · class manifest).
-#: Re-pinned for the memoir-v2 phase-5 mount (2128cf7d2, +3/+1/+1 over base 113/38/34, union the capture-lane read site +1 declared), then again for the group-chat room read surface (A-P6-9: +2 declared/+1 mount/+1 family -> 119/40/36); the sibling pins are test_router_scope_manifest.py (119/40) + test_router_class_manifest.py (36) — this file carries its OWN copy of the three counts, keep all three sites in step.
+#: Re-pinned for the memoir-v2 phase-5 mount (2128cf7d2, +3/+1/+1 over base 113/38/34, union the capture-lane read site +1 declared), then again for the group-chat room read surface (A-P6-9: +2 declared/+1 mount/+1 family -> 119/40/36), then 119 -> 120 declared for the gc-fe-surfaces P1 nest-wide list route (``GET /api/rooms`` — same family/mount, declared count only); the sibling pins are test_router_scope_manifest.py (120/40) + test_router_class_manifest.py (36) — this file carries its OWN copy of the three counts, keep all three sites in step.
 DECLARED_ROUTE_CENSUS = 120
 MOUNT_CENSUS = 40
 CLASS_MANIFEST_FAMILIES = 36

@@ -781,8 +781,16 @@ class RoomRepository:
                 member is not None
                 and member.state == RoomMemberState.ACTIVE.value
             )
-            chain = self._owner_ancestry_chain(session, room)
-            owner_ancestry_ok = caller_instance_id in chain
+            # The ancestry walk is the EXPENSIVE half of the predicate
+            # (up to ``_ANCESTRY_WALK_DEPTH`` row gets). The decision is
+            # an OR, so an active member already satisfies it — walk only
+            # when the membership branch missed (the shipped 10 s-poll
+            # perf shape). Behaviour is identical: the walk could only
+            # ever flip a False to True, and False OR x == x.
+            owner_ancestry_ok = False
+            if not is_active_member:
+                chain = self._owner_ancestry_chain(session, room)
+                owner_ancestry_ok = caller_instance_id in chain
             if _room_readable(
                 is_active_member=is_active_member,
                 owner_ancestry_ok=owner_ancestry_ok,
@@ -1395,8 +1403,6 @@ class RoomRepository:
             room_ids = [r.room_id for r in rooms]
             member_counts = self._active_member_counts(session, room_ids)
             last_seqs = self._last_message_seqs(session, room_ids)
-            # stash rows + extras for assembly after the roster session
-            row_data = [(r, member_counts, last_seqs) for r in rooms]
         # roster session (separate)
         roster = self.list_active_member_instance_ids(
             [r.room_id for r in rooms]
@@ -1424,6 +1430,14 @@ class RoomRepository:
         uses the shared ``_room_readable`` decision. Returns
         ``(rows, truncated)`` where ``truncated`` counts readable
         omissions.
+
+        Ordering (C-1(a)): the FULL ``(created_at, room_id)`` scan is
+        predicate-checked first, and only THEN clamped — clamp-then-
+        filter would silently drop a joined room past the page boundary
+        and report an instance as room-less. The heavy batched extras
+        (``member_count`` / ``last_message_seq``) are computed only for
+        the CLAMPED readable rows: a row the clamp dropped must not pay
+        for aggregates it never returns.
         """
         if descendant_ids is None:
             descendant_ids = set()
@@ -1437,10 +1451,8 @@ class RoomRepository:
             if not all_rooms:
                 return [], False
             room_ids = [r.room_id for r in all_rooms]
-            member_counts = self._active_member_counts(session, room_ids)
-            last_seqs = self._last_message_seqs(session, room_ids)
-        roster = self.list_active_member_instance_ids(room_ids)
-        readable: list[dict[str, Any]] = []
+            roster = self._active_member_instance_ids(session, room_ids)
+        readable: list[ChatRoom] = []
         for room in all_rooms:
             active_members = set(roster.get(room.room_id, []))
             is_active_member = caller_instance_id in active_members
@@ -1453,15 +1465,25 @@ class RoomRepository:
                 owner_ancestry_ok=owner_ancestry_ok,
             ):
                 continue
+            readable.append(room)
+        truncated = len(readable) > effective
+        returned = readable[:effective]
+        if not returned:
+            return [], truncated
+        returned_ids = [r.room_id for r in returned]
+        with Session(self._engine) as session:
+            member_counts = self._active_member_counts(session, returned_ids)
+            last_seqs = self._last_message_seqs(session, returned_ids)
+        out: list[dict[str, Any]] = []
+        for room in returned:
             payload = room_payload(room)
             payload["member_count"] = member_counts.get(room.room_id, 0)
             payload["last_message_seq"] = last_seqs.get(room.room_id)
             payload["member_instance_ids"] = list(
                 roster.get(room.room_id, [])
             )
-            readable.append(payload)
-        truncated = len(readable) > effective
-        return readable[:effective], truncated
+            out.append(payload)
+        return out, truncated
 
     def get_instance_records(
         self, instance_ids: list[str]
