@@ -352,9 +352,13 @@ def test_bad_anchor_404(client, engine, svc):
 def test_faulted_service_503(client, engine, svc):
     manager = client.manager
     _seed_tree(engine, manager, "owner-1")
-    # fault the service
+    # fault the service (async-correct: the method is a coroutine fn)
     import unittest.mock as m
-    with m.patch.object(svc, "list_all_rooms", side_effect=RuntimeError("boom")):
+
+    async def _boom(*a, **k):
+        raise RuntimeError("boom")
+
+    with m.patch.object(svc, "list_all_rooms", side_effect=_boom):
         resp = client.get("/api/rooms")
     assert resp.status_code == 503
     assert resp.json()["detail"]["error"] == "room_service_unavailable"
