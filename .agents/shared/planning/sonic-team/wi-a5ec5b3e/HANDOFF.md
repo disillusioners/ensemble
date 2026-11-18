@@ -149,3 +149,9 @@ guard — deliberately not weakened).
 Tag v0.31.5 at THIS commit = branch tip; push HEAD:latest + integration-2 branch + tag; stage
 releases/v0.31.5 (fresh build, FE pre-built this time). NO promote. Fourth-occurrence surface open until
 the ceremony flips live past the OLD guard (live still runs v0.31.2).
+
+## POSTSCRIPT v3 addendum — pre-tag drift absorb (second occurrence)
+origin/latest moved pre-push again (04b3d50ac -> 2f1d78d76: three tester docs commits — stranded
+compact-note gate canon + QUARANTINE rows + LESSONS, all under .agents/tester/, zero overlap). Absorbed
+via merge --no-ff; pack re-run 173/173 green (/tmp/wia5ec5b3e-int3/pack-final.log); local-only tag
+v0.31.5 re-pointed to the final tip below (never pushed at the earlier position).
