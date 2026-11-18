@@ -763,6 +763,87 @@ class TestABTest:
         assert response.status_code == 404
 
 
+class TestSanctionedResolveRefusals:
+    """GAP-6: the surfaced sanctioned-resolution refusals (REST 400).
+
+    Both refusals are non-member ids driven through the REAL router →
+    REAL ``SkillStaleDeactivator`` path with mocked repositories:
+    the HTTP surface must never resolve a pair on a variant that is
+    not one of its two members.
+    """
+
+    @staticmethod
+    def _wire(env: dict[str, Any]) -> MagicMock:
+        evolution = env["evolution"]
+        evolution.get_skill_metrics = AsyncMock(
+            return_value={
+                "skill_id": "skill-a",
+                "found": True,
+                "skill": _skill_dict("skill-a"),
+                "stats": {},
+                "usage_recent_count": 0,
+                "ab_test": {"ab_test_group": "group-sanctioned"},
+            }
+        )
+        test_row = SimpleNamespace(
+            skill_id_old="skill-a",
+            skill_id_new="skill-b",
+            resolved_at=None,
+        )
+        evolution._ab_test_repo = MagicMock()
+        evolution._ab_test_repo.get_by_group = MagicMock(
+            return_value=test_row
+        )
+        evolution._skill_repo = MagicMock()
+        return evolution
+
+    def test_sanctioned_winner_not_a_variant_returns_400(
+        self, skill_app_with_mock_services
+    ):
+        """A winner id OUTSIDE the pair ⇒ ``PairResolutionRefused(
+        "skipped_winner_not_a_variant")`` surfaced as HTTP 400.
+
+        Mutation bar: remove the deactivator's variant guard ⇒ the
+        pair resolves (200) ⇒ RED.
+        """
+        client = skill_app_with_mock_services["client"]
+        self._wire(skill_app_with_mock_services)
+        response = client.post(
+            "/api/skills/skill-a/ab-test/resolve",
+            params={
+                "sanctioned": "true",
+                "winner_id": "skill-outsider",
+                "reason": "operator decision",
+            },
+        )
+        assert response.status_code == 400
+        error = response.json()["detail"]["error"]
+        assert "skipped_winner_not_a_variant" in error
+
+    def test_sanctioned_defective_arm_not_a_variant_returns_400(
+        self, skill_app_with_mock_services
+    ):
+        """A ``defective_arm_id`` OUTSIDE the pair ⇒ HTTP 400 with the
+        explicit router message.
+
+        Mutation bar: remove the router's defective-arm variant guard
+        ⇒ the OTHER variant is crowned (200) ⇒ RED.
+        """
+        client = skill_app_with_mock_services["client"]
+        self._wire(skill_app_with_mock_services)
+        response = client.post(
+            "/api/skills/skill-a/ab-test/resolve",
+            params={
+                "sanctioned": "true",
+                "defective_arm_id": "skill-outsider",
+                "reason": "operator decision",
+            },
+        )
+        assert response.status_code == 400
+        error = response.json()["detail"]["error"]
+        assert "defective_arm_id is not a variant" in error
+
+
 class TestShare:
     def test_share_clears_project_id(self, skill_app_with_mock_services):
         client = skill_app_with_mock_services["client"]

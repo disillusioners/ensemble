@@ -47,6 +47,41 @@ class TestSweepRegistration:
         assert '"skill_metric_scan"' in source
         assert '"skill_orphan_sweep"' in source
 
+    def test_manager_registers_the_sweep_call_shape(self):
+        """GAP-5: bind the REGISTRATION CALL, not just the literal.
+
+        The bare-literal pin above survives when the
+        ``_maintenance_service.register(...)`` call is deleted — the
+        sweep name still appears in the decision comment and in the
+        wrapper body (``actor="skill_ab_inactivity_sweep"``). This pin
+        anchors the actual call: ``register(`` → the sweep name → the
+        interval expression → the wrapper callback must appear as ONE
+        statement. Deleting the register call (mutA) ⇒ RED.
+        """
+        import re
+
+        source = MANAGER_SOURCE.read_text(encoding="utf-8")
+        pattern = re.compile(
+            r"\.register\(\s*"
+            r"[\"']skill_ab_inactivity_sweep[\"']\s*,\s*"
+            r"[^,]+,\s*"
+            r"self\._run_skill_ab_inactivity_sweep\s*,?\s*\)",
+            re.DOTALL,
+        )
+        match = pattern.search(source)
+        assert match is not None, (
+            "the sweep must be registered via an actual "
+            "`_maintenance_service.register(\"skill_ab_inactivity_sweep\", "
+            "<interval>, self._run_skill_ab_inactivity_sweep)` call — the "
+            "bare literal surviving in a comment/actor tag is not evidence "
+            "of registration"
+        )
+        # The registration lives in the skill-evolution init block
+        # beside its two sibling sweeps (bounded proximity).
+        window = source[max(0, match.start() - 4000):match.end()]
+        assert '"skill_metric_scan"' in window
+        assert '"skill_orphan_sweep"' in window
+
     def test_the_sweep_wrapper_exists(self):
         source = MANAGER_SOURCE.read_text(encoding="utf-8")
         assert "async def _run_skill_ab_inactivity_sweep" in source

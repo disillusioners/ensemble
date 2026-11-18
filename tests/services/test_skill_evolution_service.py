@@ -4240,6 +4240,188 @@ class TestSanctionedResolution:
         assert pair.winner_skill_id == new.id
         assert pair.resolved_at
 
+    def _age_pair(self, ab_test_repo, group, *, age_days=10.0):
+        """Age the pair row past the stall timeout (explicit timestamp)."""
+        from sqlmodel import Session, select
+
+        from daemon.repositories.skill.models import SkillABTest
+
+        with Session(ab_test_repo.engine) as session:
+            pair = session.exec(
+                select(SkillABTest).where(
+                    SkillABTest.ab_test_group == group
+                )
+            ).first()
+            pair.created_at = _iso_days_ago(age_days)
+            session.add(pair)
+            session.commit()
+
+    def _make_inverted_pair(
+        self, skill_repo, ab_test_repo, project_id
+    ):
+        """A pair whose GENERATION order is OPPOSED to ``created_at``.
+
+        GAP-1/2 fixture: the EARLIER-created row carries the HIGHER
+        generation number. Both ``created_at`` values are set
+        EXPLICITLY — insert order is never trusted. A ``created_at``
+        comparison crowns the later-created (lower-generation) row; an
+        older-generation rule crowns it too. Only E-6 (higher
+        GENERATION wins) crowns ``old``.
+        """
+        import uuid as _uuid
+
+        from sqlmodel import Session, select
+
+        from daemon.repositories.skill.models import Skill, SkillABTest
+
+        tag = _uuid.uuid4().hex[:8]
+        old = _make_skill(
+            skill_repo, project_id, f"inv-old-{tag}", generation=7,
+        )
+        new = _make_skill(
+            skill_repo, project_id, f"inv-new-{tag}", generation=2,
+        )
+        with Session(skill_repo.engine) as session:
+            for row, created in (
+                (old, "2026-01-01T00:00:00+00:00"),
+                (new, "2026-02-01T00:00:00+00:00"),
+            ):
+                obj = session.exec(
+                    select(Skill).where(Skill.id == row.id)
+                ).first()
+                obj.created_at = created
+                session.add(obj)
+            session.commit()
+        group = str(_uuid.uuid4())
+        for row in (old, new):
+            skill_repo.update(
+                row.id, ab_test_group=group, status="ab_testing"
+            )
+        ab_test_repo.create_ab_test(group, old.id, new.id)
+        self._age_pair(ab_test_repo, group)
+        return group, old, new
+
+    @pytest.mark.asyncio
+    async def test_e6_inversion_earlier_created_higher_generation_wins(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        """GAP-1/2: E-6 decides by GENERATION NUMBER, never timestamps.
+
+        The pair's generation order is OPPOSED to its ``created_at``
+        order (the earlier-created row carries the higher generation).
+        Both candidate defects must RED on this fixture:
+
+        * ``_e6_winner`` switched to a ``created_at`` comparison ⇒ the
+          later-created (generation 2) row wins ⇒ RED;
+        * an older-generation-wins rule ⇒ generation 2 wins ⇒ RED.
+
+        Only the pinned E-6 rule crowns ``old`` (generation 7).
+        """
+        group, old, new = self._make_inverted_pair(
+            skill_repo, ab_test_repo, project_id
+        )
+        result = await evolution_service.resolve_ab_test_sanctioned(
+            group, basis="stalled", reason="sweep: E-6 inversion fixture",
+        )
+        assert result["resolved"] is True
+        # HIGHER GENERATION wins — NOT the later-created row.
+        assert result["winner_id"] == old.id
+        assert result["loser_id"] == new.id
+        loser = skill_repo.get(new.id)
+        assert loser.status == "inactive"
+        assert loser.is_active is False
+        assert loser.ab_test_group == group
+        winner = skill_repo.get(old.id)
+        assert winner.status == "active"
+        assert winner.ab_test_group is None
+        pair = ab_test_repo.get_by_group(group)
+        assert pair.winner_skill_id == old.id
+        assert pair.resolved_at
+
+    @pytest.mark.asyncio
+    async def test_missing_variant_row_parks_untouched(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        """GAP-3: a variant row MISSING ⇒ PARK under the DISTINCT reason
+        ``stalled_variant_row_missing`` — never a guessed winner, never
+        a mutation of the surviving row.
+
+        Mutation bar: delete the missing-row park branch (so the
+        ``getattr(None, "generation", 0)`` fallback silently resolves
+        to the survivor, or the call crashes) ⇒ RED.
+        """
+        import uuid as _uuid
+
+        tag = _uuid.uuid4().hex[:8]
+        survivor = _make_skill(
+            skill_repo, project_id, f"survivor-{tag}", generation=4,
+        )
+        doomed = _make_skill(
+            skill_repo, project_id, f"doomed-{tag}", generation=9,
+        )
+        group = str(_uuid.uuid4())
+        for row in (survivor, doomed):
+            skill_repo.update(
+                row.id, ab_test_group=group, status="ab_testing"
+            )
+        ab_test_repo.create_ab_test(group, survivor.id, doomed.id)
+        # Delete the variant ROW while leaving the pair row intact —
+        # PRAGMA foreign_keys is OFF for this one raw delete so the
+        # ON DELETE CASCADE does not reap the pair row (the shape a
+        # desynced/manually-repaired DB produces).
+        with skill_repo.engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            conn.exec_driver_sql(
+                "DELETE FROM skills WHERE id = :sid",
+                {"sid": doomed.id},
+            )
+            conn.commit()
+            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+        assert skill_repo.get(doomed.id) is None
+        assert ab_test_repo.get_by_group(group) is not None
+        self._age_pair(ab_test_repo, group)
+
+        result = await evolution_service.resolve_ab_test_sanctioned(
+            group, basis="stalled", reason="sweep: missing variant row",
+        )
+        assert result["resolved"] is False
+        assert result["parked"] is True
+        assert result["reason"] == "stalled_variant_row_missing"
+        # ZERO mutation — the surviving row stays a live pair member.
+        row = skill_repo.get(survivor.id)
+        assert row.status == "ab_testing"
+        assert row.is_active is True
+        assert row.ab_test_group == group
+        assert ab_test_repo.get_by_group(group).resolved_at is None
+
+    @pytest.mark.asyncio
+    async def test_service_refuses_already_resolved_pair(
+        self, evolution_service, skill_repo, ab_test_repo, project_id
+    ):
+        """GAP-4: the SERVICE-level sanctioned resolver refuses an
+        already-resolved pair (the ``resolved_at`` guard in
+        ``resolve_ab_test_sanctioned``) — a second resolution would
+        silently INVERT the first explicit decision.
+
+        Mutation bar: delete that guard ⇒ the second call re-resolves
+        and returns ``resolved=True`` ⇒ RED.
+        """
+        group, old, new = self._make_stalled_pair(
+            skill_repo, ab_test_repo, project_id
+        )
+        first = await evolution_service.resolve_ab_test_sanctioned(
+            group, basis="stalled", reason="first decision",
+        )
+        assert first["resolved"] is True
+        with pytest.raises(ValueError, match="already resolved"):
+            await evolution_service.resolve_ab_test_sanctioned(
+                group, basis="stalled", reason="second decision",
+            )
+        # The FIRST decision stands untouched.
+        pair = ab_test_repo.get_by_group(group)
+        assert pair.winner_skill_id == new.id
+        assert skill_repo.get(old.id).status == "inactive"
+
     @pytest.mark.asyncio
     async def test_stalled_generation_tie_parks(
         self, evolution_service, skill_repo, ab_test_repo, project_id

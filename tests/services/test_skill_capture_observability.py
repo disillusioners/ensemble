@@ -595,6 +595,70 @@ async def test_m2_pin_refused_admission_records_carry_a_run_id(tmp_path):
     ), "the metrics-lane seam refusal must be in the sink"
 
 
+async def test_m2_pin_active_execution_refusal_record_carries_a_run_id(
+    tmp_path,
+):
+    """M-m2 / C3 site #6 (GAP-7) — the ACTIVE-branch execution refusal.
+
+    ``_terminally_refuse_active_skill_evolution_job`` (the
+    ``complete_job`` path, reachable from the queued-branch fallback)
+    writes its sink record with a minted run id — the refused
+    execution is an attempt and must be correlatable.
+
+    Named mutation: delete the ``run_id=observability.new_run_id()``
+    write inside that ACTIVE branch ⇒ this pin goes RED (the record
+    carries ``run_id: null``).
+    """
+    from daemon.services.job_processor import JobProcessor
+    from daemon.services.job_queue_service import DemandState
+
+    class _StubQueueService:
+        """``complete_job`` returns a non-None row (the ACTIVE edge)."""
+
+        @staticmethod
+        async def complete_job(job_id, *, demand_state=None, error=None):
+            assert demand_state == DemandState.FAILED
+            return SimpleNamespace(job_id=job_id)
+
+    processor = JobProcessor.__new__(JobProcessor)
+    processor._queue_service = _StubQueueService()
+    assert (
+        await processor._terminally_refuse_active_skill_evolution_job(
+            SimpleNamespace(job_id="job-m2-active"), "lane off",
+        )
+        is True
+    )
+    assert observability.counters().execution_refusals.get(
+        "lane_disabled"
+    ) == 1
+
+    sink_files = list(
+        (tmp_path / observability.SINK_DIR_NAME).glob("*.jsonl")
+    )
+    assert sink_files
+    records = [
+        json.loads(line)
+        for line in "".join(p.read_text() for p in sink_files)
+        .strip()
+        .splitlines()
+    ]
+    refusals = [
+        r
+        for r in records
+        if r.get("outcome") == "refused"
+        and r.get("prompt_source") == "job_processor"
+        and r.get("job_id") == "job-m2-active"
+    ]
+    assert len(refusals) == 1, (
+        f"expected exactly one ACTIVE-branch refusal record, got "
+        f"{len(refusals)}"
+    )
+    assert refusals[0].get("run_id"), (
+        "the ACTIVE-branch execution refusal must carry a run id — "
+        "C3 site #6 mints it like the queued branch does"
+    )
+
+
 # ── M-m3 — a dedup hit must NOT move the admission gauge ──────────────
 
 
