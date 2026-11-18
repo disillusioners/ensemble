@@ -85,6 +85,17 @@
         <p class="empty-text">No instances in this project</p>
       </div>
     } @else {
+      @if (roomMapError(); as roomMapErr) {
+        <div class="room-map-error" role="alert">
+          <span class="room-map-error__msg">{{ roomMapErr }}</span>
+          <button class="room-map-error__retry" (click)="onRetryRoomMap()">Retry</button>
+        </div>
+      }
+      @if (roomMapTruncated()) {
+        <div class="room-map-truncated" role="status">
+          chatroom list was truncated; some joined rooms may not be shown
+        </div>
+      }
       <div class="instances">
         @for (node of instanceTree(); track node.instance.instance_id) {
           <ng-container [ngTemplateOutlet]="instanceNode" [ngTemplateOutletContext]="{ $implicit: node, depth: 0 }"></ng-container>
@@ -126,6 +137,7 @@
     [class.active]="isActive"
     [class.has-children]="hasChildren"
     [class.pinned]="isPinned(instance)"
+    [class.child-row]="depth > 0"
     [style.padding-left.px]="16 + depth * 16"
   >
     <div class="instance-content">
@@ -208,6 +220,23 @@
         </span>
       </div>
     </div>
+
+    <!-- gc-fe-surfaces P3: chatrooms this instance joined. Membership-gated:
+         rendered only when the anchor-less mount-time room map says the
+         instance has >=1 joined room. The gate and the click handler read
+         the SAME hasJoinedRooms() signal (fix-G). stopPropagation keeps the
+         row's routerLink from firing (nested-button house pattern). Appears
+         in both hosts (chat sidebar + /instances page) — R13, intended. -->
+    @if (hasJoinedRooms(instance.instance_id)) {
+      <button
+        class="rooms-btn"
+        (click)="onOpenJoinedRooms(instance, $event)"
+        title="Chatrooms this instance joined"
+        [attr.aria-label]="'Chatrooms joined by ' + (instance.instance_name || instance.instance_id)"
+      >
+        <mat-icon>forum</mat-icon>
+      </button>
+    }
 
     <!-- Pin toggle. Hidden until row hover (opacity 0 in SCSS),
          stays visible when this row is pinned so the pinned state

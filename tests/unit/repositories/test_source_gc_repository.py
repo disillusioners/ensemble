@@ -787,6 +787,12 @@ class TestP11BootNoBehaviorChange:
         "frontend/src/app/components/room-dialog/room-dialog.component.scss",
         "frontend/src/app/components/room-dialog/room-dialog.component.spec.ts",
         "frontend/src/app/components/room-dialog/room-dialog.component.ts",
+        # gc-fe-surfaces P3 (surfaces (b)+(c)): instance-list row button +
+        # conditional visibility — three modified + the new spec (AM-7/W-2).
+        "frontend/src/app/components/instance-list/instance-list.component.ts",
+        "frontend/src/app/components/instance-list/instance-list.html",
+        "frontend/src/app/components/instance-list/instance-list.scss",
+        "frontend/src/app/components/instance-list/instance-list.rooms-btn.spec.ts",
         "frontend/src/app/models/index.ts",
         "frontend/src/app/models/room.model.ts",
         # P6 tidier T1 created this suite (the chatrooms describe moved
