@@ -159,7 +159,7 @@ From `scripts/upgrade/promote.sh` (origin/latest):
 
 - Prompt-artifact write refusal — §1c (the only *production write* gate found).
 - Loop breaker: `LOOP_BREAKER_DEFAULT_THRESHOLD = 3`, `LOOP_BREAKER_SUMMARIZATION_TIMEOUT_SECONDS = 30`, `LOOP_BREAKER_REPAIR_PREFIX = "repair-"` (`daemon/graph.py:188-199`; header says "Phase 1 — detection only" but the middleware replaces looping history with a repair summary per blueprint).
-- RAM guard: `RAM_GUARD_ENV_SWITCH = "ENSEMBLE_RAM_GUARD"` (`daemon/tools/bash.py:829`) — tree-kill above ceiling; code in origin/latest; STAGED v0.29.21 per project notes (promote is the Emperor's).
+- RAM guard: `RAM_GUARD_ENV_SWITCH = "ENSEMBLE_RAM_GUARD"` (`daemon/tools/bash.py:829`) — tree-kill above ceiling; code in origin/latest; STAGED v0.29.21 per project notes (promote is the user's).
 - Compaction budgets: runtime token-threshold logic in `daemon/compaction.py` (not a gate).
 - **Secret scan**: the blueprint's "FAIL-CLOSED secret scan (needle `sk-(proj|ant)-`)" is **NOT machine-enforced in this repo** — needle-shaped patterns appear only in `.env*` files (values — not read), test mocks, and planning docs; `agents/tester/workflow.md:907` carries "No hardcoded secrets" as a review convention. Marked PARTIAL/unverified; the tester's evidence-pack scan is practice-level.
 

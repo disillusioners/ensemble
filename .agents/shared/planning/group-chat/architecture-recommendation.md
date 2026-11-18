@@ -1,7 +1,7 @@
 # Agent Group Chat — Phase-1 ARCHITECTURE RECOMMENDATION
 
-**Doc-set Rev 7 — Phase-2 amendment (2026-11-15):** Emperor RATIFIED all 7 open-question items AS RECOMMENDED and issued TWO binding refinements + ONE P6 UI direction — folded here (canonical wording: shared_meta_kv keys `gc_phase2_go` + `gc_ui_refinement_p6`, quoted verbatim in §4.4/§13.1 and decisions.md D-S10..D-S13). Implementation follows per the phased plan. **Status:** COMPLETE (design; planning-only — no code, no git ops per D-S7).
-**Date:** 2026-11-15 · **Commission:** Emperor directive via Ari.
+**Doc-set Rev 7 — Phase-2 amendment (2026-11-15):** user RATIFIED all 7 open-question items AS RECOMMENDED and issued TWO binding refinements + ONE P6 UI direction — folded here (canonical wording: shared_meta_kv keys `gc_phase2_go` + `gc_ui_refinement_p6`, quoted verbatim in §4.4/§13.1 and decisions.md D-S10..D-S13). Implementation follows per the phased plan. **Status:** COMPLETE (design; planning-only — no code, no git ops per D-S7).
+**Date:** 2026-11-15 · **Commission:** user directive via Ari.
 **Method:** Architect controller → 🏛️ substrate council (2/2, `agentic`+`coding`, UNANIMOUS, governor `0e8f6375`) + 4 parallel dimension analysts; architect aggregated and writes this file.
 **Evidence base:** substrate-map.md §A–§J (tip `bf4bfde6e`) + in-worktree verification. **Verified anchors (each read at pin before stamping):** 10-state enum `models.py:20-35` (`waiting` = "Active but no in-flight work"); `task_context` stamp `instance_messaging.py:5157-5162`; language-check :4758/:4770/:4807-4812; DEFECT-A guard `instance.py:4792-4816`; F-1 predicate SQL `message_queue/repository.py:1312-1322`; post-graph chain def `manager.py:11703` (+ facade :11717; call sites :8368/:11880/:15746; internal `services/child_reports.py:1019`); END-chain region graph.py:13378-13415; wrapper quartet :4942-4952 / :4984-4986 / :4995 / :5040, cap :4933; `TurnRepairLatch` :13159; todo reminder-return todo_manager.py:403-461 + `_compute_reminder` :1198-1276; context kinds = 14; `ALIVE_INSTANCE_STATUSES` constants.py:1066-1072; `MISSION_RECEIPT_SCAN_CAP` daemon/services/midflight_qa.py:194; `QA_WATCHER_ROW_CAP` daemon/services/work_notifier.py:1339 (def :1583); hoisting compaction.py:337/:425/:3233 (budget :1404, threshold :1589, caps :1650); `CHECKPOINT_TTL_HOURS` constants.py:170; `daemon/loader.py:972/:1356`; `services/skill_meta_parser.py:94`; TitleGenerationService class :17.
 **⚠️ DEGRADED — skill bank miss (design-skill family):** design skills absent from the project bank (known gap); manual discipline prompts used; flag stands.
@@ -71,7 +71,7 @@ Cost line: ≤3.0s spawn latency on the naming tier-2 minority success path (dom
 
 **Creation & admission:** parent via `room_create` (creator non-terminal; binds `tree_root_id`; records `owner_instance_id`; seeds the owner row; fails closed at `ROOM_MAX_ACTIVE_ROOMS_PER_TREE=8`). **`_validate_room_join(joiner, room_id)`:** room exists ∧ state=active ∧ `get_tree_root_id(joiner) == room.tree_root_id` ∧ active membership rows (owner included) < `ROOM_MAX_MEMBERS` (LEFT rows free) ∧ active-rooms-per-tree < cap; typed fail-closed spawn errors. Grant scope: privileged category + per-agent `tools.allow` + in-body fail-closed gate.
 
-### 2.1 THE PUBLISHED CAPABILITY ROW (the ONE definition of `closed` and `purged` — cited verbatim from §3, §5, §10, decisions D-O1/D-S12, emperor item #4)
+### 2.1 THE PUBLISHED CAPABILITY ROW (the ONE definition of `closed` and `purged` — cited verbatim from §3, §5, §10, decisions D-O1/D-S12, user item #4)
 
 | Capability | `active` | `closed` | `purged` (R2 — terminal transition) |
 |---|---|---|---|
@@ -90,7 +90,7 @@ Cost line: ≤3.0s spawn latency on the naming tier-2 minority success path (dom
 - **GC — PURGE, not archive (R2):** one `MaintenanceService.register()` job (`services/maintenance.py:141`; call sites `manager.py:4735/:4752`), 6h min-interval, repo-fenced + dry-run first. Triggers unchanged:
   - **P-close:** `state=closed AND closed_at < now−14d` → **purge**.
   - **P-idle:** `state=active AND last_post_at < now−72h AND zero non-terminal instances among {members(state=active) ∪ owner ∪ owner-ancestry chain}` — non-terminal = {idle, running, waiting, paused, queued, waiting_children} (`waiting` IS alive) → **purge** (counts as close).
-  - **Purge mechanics:** ONE transaction per room: insert the content-free `room_purged` event → DELETE `room_messages` rows → DELETE `chatroom_members` rows → DELETE the `chatrooms` row (event + deletes commit or roll back atomically). **NO archive tables** — the Emperor's "cleanup from db" makes retention tables moot; the design simplifies (RK-11 win; the formerly deferred `*_archive` migration is dropped entirely).
+  - **Purge mechanics:** ONE transaction per room: insert the content-free `room_purged` event → DELETE `room_messages` rows → DELETE `chatroom_members` rows → DELETE the `chatrooms` row (event + deletes commit or roll back atomically). **NO archive tables** — the user's "cleanup from db" makes retention tables moot; the design simplifies (RK-11 win; the formerly deferred `*_archive` migration is dropped entirely).
   - Cursor guard: permitted on P-idle only (skip rooms holding undelivered TAGGED rows above any participant's delivered cursor); P-close = whole-room purge with the accepted-loss column above.
   - Non-terminal set = ONE shared constant (GC + boot regen); enum-totality pin.
 - **Membership: HYBRID** — table = roster truth + cursor substrate (owner row seeded at create); `instance_metadata["join_room"]` = spawn hook + restore re-read. `instance_hierarchy` REJECTED.
@@ -259,7 +259,7 @@ Counting convention: one row per coined/extended artifact; 3 tables = three rows
 
 ---
 
-## 13. Phase-2 shape (ratified — KV `gc_phase2_go`: "implement per phased plan P1 substrate/persistence+boot → P2 membership/spawn/naming → P3 delivery → P4 nudges ∥ P5 tool+guidelines → P6 UI/audit+GC; full house gates per phase; prompt-artifact discipline; staged release lane when ready; live promote ceremony = Emperor's")
+## 13. Phase-2 shape (ratified — KV `gc_phase2_go`: "implement per phased plan P1 substrate/persistence+boot → P2 membership/spawn/naming → P3 delivery → P4 nudges ∥ P5 tool+guidelines → P6 UI/audit+GC; full house gates per phase; prompt-artifact discipline; staged release lane when ready; live promote ceremony = the user's")
 
 | Phase | Content |
 |---|---|
@@ -282,4 +282,4 @@ Counting convention: one row per coined/extended artifact; 3 tables = three rows
 
 - **HIGH:** substrate (ratified); capability row incl. purge (R2); join predicate; total 10-state lane map; addressing mechanics (R1, pinned); owner-cursor substrate; one-hop rule; pinned boot pair; two-conjunct restore; post-graph chain; nudge seams.
 - **MEDIUM:** cost constants (env-tunable).
-- **Ratified items are no longer flips:** #1–#7 settled by the Emperor's ratification (banner in emperor-open-questions.md). Remaining design-level contingencies: cross-tree rooms (join + read predicates re-scope) and a future multi-writer topology (RK-13 hardening path).
+- **Ratified items are no longer flips:** #1–#7 settled by the user's ratification (banner in emperor-open-questions.md). Remaining design-level contingencies: cross-tree rooms (join + read predicates re-scope) and a future multi-writer topology (RK-13 hardening path).

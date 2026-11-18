@@ -1,10 +1,10 @@
 # Doctrine — prompt-assent Phase 1.5 (designated channels)
 
-> The Emperor's Word, relayed. The working path is conversation; the FE-UI is a deeper view.
+> The user's Word, relayed. The working path is conversation; the FE-UI is a deeper view.
 
 **This extension inherits the parent lane's doctrine verbatim** —
 [`.agents/shared/planning/prompt-assent/doctrine.md`](../prompt-assent/doctrine.md)
-(*"FE-UI is a deeper view; the working path is conversation. The Emperor's word, relayed by C2
+(*"FE-UI is a deeper view; the working path is conversation. The user's word, relayed by C2
 with provenance, is a first-class approval lane."*). Nothing in Phase 1.5 weakens it: the FE
 approval lane stays byte-identical, the conversational path stays the primary path, and every
 approval keeps its reconstructable provenance chain.
@@ -28,7 +28,7 @@ this is channel, i often use channel to split tasks category in my mind, we cons
 
 ## Context (recorded, not part of the quote)
 
-The Emperor's real working surfaces are **Discord server channels** — one channel per task
+The user's real working surfaces are **Discord server channels** — one channel per task
 category, deliberately used to split tasks in his mind. His ruling extends the assent lane's
 privacy premise from *"only a 1:1 DM counts"* to *"a channel the operator designates counts as a
 private/dm surface"* — **provided the designated channel is pinned to a specific human approver**.
@@ -64,9 +64,9 @@ disagree, the doctrine wins and the plan must be revised. Four consequences are 
 throughout this set:
 
 1. **"i often use channel to split tasks category in my mind"** ⇒ the designated channel is a
-   **working surface**, not a test fixture. The acceptance test is *the Emperor minting in his
+   **working surface**, not a test fixture. The acceptance test is *the user minting in his
    real working channel*, not a synthetic guild channel. This is why the live probe
-   (`phase4-plan.md` §4) names the Emperor's actual channel rather than a throwaway one.
+   (`phase4-plan.md` §4) names the user's actual channel rather than a throwaway one.
 2. **"we consider channel is private/dm for now"** ⇒ the privacy factor (AR-1 leg 2 — the parent's
    `../prompt-assent/architecture-recommendation.md:63`; **amended by this lane** — **D-13**) is
    satisfied by **either** a proven 1:1 DM **or** a designated channel. "For now" marks the
@@ -90,7 +90,7 @@ throughout this set:
 - It does **not** waive the three conjunctive factors, the single-use TTL'd token, the
   `render_sha256` binding, the append-only provenance, or the default-OFF kill-switch. Every
   one of them is **unchanged** (`decisions.md` **D-7**).
-- It does **not** arm the lane. Arming stays a **separate, post-promote, Emperor decision**,
+- It does **not** arm the lane. Arming stays a **separate, post-promote, user decision**,
   gated on the **adapted** live K-3 probe (`decisions.md` **D-11**).
 - It does **not** name a channel id, a guild, or a user id. The designation map is **operator
   configuration**, never an argument, never an agent act, never a tracked constant

@@ -1,6 +1,6 @@
 # Group-Chat Staged-Release Lane — Vehicle, Staging, and Ceremony Brief
 
-**Status:** PLAN (vehicle + staging only — the live promote is the Emperor's ceremony)
+**Status:** PLAN (vehicle + staging only — the live promote is the user's ceremony)
 **Author:** architect (planning lane)
 **Date:** 2026-11-17
 **Target tree:** `origin/latest = 56a5f4a00818a624f01a04d16bedbaca7bd344cd`
@@ -226,7 +226,7 @@ Current state: `releases/` = `v0.30.9` (journal `previous` — **pinned**), `v0.
 
 `ari` · `leader` · `sonic-leader` · `worker` · `video-capturer` · `video-editor` · `video-producer` · `video-verifier` — each gained `"room"` in its `tools.allow` array in the feature range.
 
-This is a **ratified-phase contract**, not a lane accident (decisions.md A-P5-2 / A-P5-17b): the grant census is EIGHT agent types — the four warm-lane agents plus the video-team pilot quartet, the Emperor's designated FIRST pilot (KV `gc_pilot_video_team`). The `room` audience is **not** a fixed privileged panel — the authority is the **membership gate in the tool bodies** (a granted agent that is not an ACTIVE member gets nothing, fail-closed, before any write). Membership is granted **at spawn** (`join_room` spawn parameter), so the membership row exists before the child's tools are built.
+This is a **ratified-phase contract**, not a lane accident (decisions.md A-P5-2 / A-P5-17b): the grant census is EIGHT agent types — the four warm-lane agents plus the video-team pilot quartet, the user's designated FIRST pilot (KV `gc_pilot_video_team`). The `room` audience is **not** a fixed privileged panel — the authority is the **membership gate in the tool bodies** (a granted agent that is not an ACTIVE member gets nothing, fail-closed, before any write). Membership is granted **at spawn** (`join_room` spawn parameter), so the membership row exists before the child's tools are built.
 
 **Release implication:** `agents/` is a staged payload tree (§2.1), so the 8 grants ship automatically. The release lane must nonetheless **assert** that all eight carry `"room"` at the release tag — the two re-pinned `ari` tail assertions (POK grant pack 6→7 tail entries; nest-anomaly-report pack 12→15 entries) are the pins that must stay green.
 
@@ -407,7 +407,7 @@ The parked branch **`feature/video-mock-prompts`** carries commit **`e559b4b80`*
 
 It is **not an ancestor of HEAD nor of v0.30.12** ⇒ outside today's range, and S1d is unaffected **today**. **But if that branch merges into the release line before the v0.31.0 tag is cut**, §4.3 check #2 flips non-empty and check #3 becomes a **legitimate re-pin**.
 
-⇒ **S1d is a PRE-CUT check that must be RE-RUN AT THE TAG.** The Emperor's 2026-11-15 directive parks the video-team lane until *after* group-chat promotion, and the video-team pilot runs post-promote — so the merge order matters. (Filed as anomaly `c2a34dcb`.)
+⇒ **S1d is a PRE-CUT check that must be RE-RUN AT THE TAG.** The user's 2026-11-15 directive parks the video-team lane until *after* group-chat promotion, and the video-team pilot runs post-promote — so the merge order matters. (Filed as anomaly `c2a34dcb`.)
 
 **Scope trap:** use the **plain** (no `--all`) form of `git log`. `git log v0.30.12..HEAD --all -- agents/.prompt-artifacts.sha256` returns `e559b4b80` — a commit on the **parked** branch, not an ancestor of HEAD or v0.30.12.
 
@@ -477,7 +477,7 @@ That worktree is at `bf4bfde6e`, which **does not contain `1aa0065e`** as an anc
 
 **The alternative — the release-staged path.** Per runbook §10.1 the release-staged promote is the **default**, and it needs no pinned checkout: the payload carries the whole executor family and its own `daemon/plugin_subsystem/` slice, and `stage.sh` fail-closes at stage time if the payload's own staleness predicate cannot execute. **The non-git payload path is safe from the floor gate by design** — `scripts_dir_provenance_verdict` on a **non-git** dir is **WARNING-ONLY**: *"a stamp arms, no stamp warns; NO refusal is reachable from that branch (AC11)"*. The payload's `lib.sh` carries the stamp `1aa0065e`, so a payload-driven promote **arms**.
 
-⇒ **Recommendation: do BOTH.** Advance the pin (so the *tool-lane* arm can succeed) **and** run the promote from inside the payload (the §10.1 default). If the Emperor prefers the operator lane only (no tool-lane arm), the payload path alone is sufficient — but then the ceremony has **no nonce and no 3-factor attestation**, and the journal shape differs (no `nonce_consumed` row). See §6.
+⇒ **Recommendation: do BOTH.** Advance the pin (so the *tool-lane* arm can succeed) **and** run the promote from inside the payload (the §10.1 default). If the user prefers the operator lane only (no tool-lane arm), the payload path alone is sufficient — but then the ceremony has **no nonce and no 3-factor attestation**, and the journal shape differs (no `nonce_consumed` row). See §6.
 
 **Floor re-pin — recommended but not blocking.** The group-chat feature introduced **zero** changes to `scripts/upgrade/` or `daemon/tools/upgrade_tools.py` (verified per-branch: p1, p2, p3, p4, p4-followups, p5, p6 all show **no** delta in those paths). The floor was last re-pinned by `f8dc874f7` (`fix(floor): ENSEMBLE-32 repair lane — PIPELINE_SCRIPTS_FLOOR_COMMIT re-pin covering config_compat_* family`), with two later scripts commits (`9d92b9f65` D-5 wrapper argv shift, `4ee4c44a1` D-6 contract resolution) landing **after** it. The floor therefore does not *name* the newest shipped script semantics — but the enforced predicate is ancestry-only, so it **passes**. 🟡 **Recommendation:** re-pin both channels to the v0.31.0 release commit (they travel together per §9.1) so the floor names the family actually shipped. **This is optional; it is hygiene, not a gate.** If re-pinned, re-stage afterwards (the manifest carries `pipeline_scripts_floor_commit`).
 
@@ -764,9 +764,9 @@ sweep:                 pending_op run_id=… closed by reconcile: terminal event
 
 ---
 
-## 6. THE EMPEROR'S PROMOTE CEREMONY (his, not this lane's)
+## 6. THE USER'S PROMOTE CEREMONY (his, not this lane's)
 
-### 6.1 The two lanes — and which one the Emperor is being handed
+### 6.1 The two lanes — and which one the user is being handed
 
 | | **Tool lane (armed)** | **Operator lane (direct)** |
 |---|---|---|
@@ -778,7 +778,7 @@ sweep:                 pending_op run_id=… closed by reconcile: terminal event
 
 The last two live promotes (v0.30.12, v0.30.9) used the **tool lane** with the pin. **Recommendation: run the tool lane** (it carries the attestation the brief asks for) **against an advanced pin**, and have the executor run the payload's scripts.
 
-### 6.2 What the leader hands the Emperor — the ceremony brief
+### 6.2 What the leader hands the user — the ceremony brief
 
 **Step 0 — the operator preconditions (before the ceremony; all four must be TRUE and stated):**
 
@@ -791,13 +791,13 @@ The last two live promotes (v0.30.12, v0.30.9) used the **tool lane** with the p
 | P5 | Install `config.yaml` is **key-shape compatible** with the v0.31.0 model contract (`promote.sh` entry check `_config_compat_check` ⇒ exit 78 `config-incompatible`) | `config.yaml` is **unchanged** between v0.30.12 and `origin/latest` ✓ ⇒ contract unchanged | ✅ **expected pass** — verify at stage time |
 | P6 | Stage complete: `releases/v0.31.0/` present, `manifest.json` signed, `contains_contract_phase=true`, `rollback_safe=true` | — | pending stage |
 
-**Step 1 — the Emperor's inputs:**
+**Step 1 — the user's inputs:**
 1. The **target**: `v0.31.0`.
-2. The **user confirmation** — a message from the Emperor on a channel the daemon classifies as user-origin (`api`, or a registry `source_type` in `{telegram, slack, discord, whatsapp}`). The tool lane stamps a **per-turn origin window**; internal/agent relays **clear** it. A leader-relayed execution **refuses `user-confirmation-missing` BEFORE the nonce burns** — so the Emperor's own turn must carry it.
+2. The **user confirmation** — a message from the user on a channel the daemon classifies as user-origin (`api`, or a registry `source_type` in `{telegram, slack, discord, whatsapp}`). The tool lane stamps a **per-turn origin window**; internal/agent relays **clear** it. A leader-relayed execution **refuses `user-confirmation-missing` BEFORE the nonce burns** — so the user's own turn must carry it.
 3. The **nonce echo** — the nonce minted for `(target=v0.31.0, kind=upgrade, env=live, instance)` in `state.json.pending_actions`, echoed back to the arming instance. `nonce_normalize` strips dashes and case. **TTL: `NONCE_TTL_S = 3600`** (mint → confirm, absolute).
 4. The **3-factor attestation**: (i) `user_confirmed = true`; (ii) a valid per-turn user-origin window (`manager.stamp_user_origin_window` + `upgrade_journal.classify_user_origin` — exact `"api"` or the four registry source types, fail-closed elsewhere); (iii) the nonce present in `pending_actions`, bound to (target, kind, env, instance), consumed at arm via `consume_pending_action`.
 
-**Step 2 — the command handed to the Emperor / operator:**
+**Step 2 — the command handed to the user / operator:**
 
 ```bash
 # PRIMARY (runbook §10.1 default): promote from INSIDE the staged payload.
@@ -858,7 +858,7 @@ Both live guards are mandatory and independent: `require_live_guard` (`ENSEMBLE_
 |---|---|---|
 | **R1** | The **stale scripts pin** refuses the arm (`stale-scripts`, pre-nonce) | 🟡 **OPEN — remediable.** The `.env` pin advance (§5.1) resolves it. The refusal burns **no** nonce, so nothing is damaged and the ceremony can be retried. |
 | **R2** | **PG schema proof absent as a test** (the release could be green on SQLite and missing on PG) | ✅ **CLOSED.** PG parity **HOLDS** on a real scratch PG (16.15, `ensemble_dev_scratch`, private schema `gc_pg_probe`): both UNIQUE constraints live in `pg_constraint`; `_ensure_postgres_columns` 10→14 cols and **idempotent**; seq monotonic; cursor predicate correct; **cross-room leakage 0**; non-member read denied; purge empties all three tables + **exactly one** content-free `room_purged`; control room untouched. Evidence §3.2.1. |
-| **R3** | **Icon placement** ambiguity (§13.1's instances-row reading vs the built chat-page header) | 🔴 **OPEN — the Emperor adjudicates before the cut** (§7.1). A list-row choice is a **follow-up FE change BEFORE promote**. |
+| **R3** | **Icon placement** ambiguity (§13.1's instances-row reading vs the built chat-page header) | 🔴 **OPEN — the user adjudicates before the cut** (§7.1). A list-row choice is a **follow-up FE change BEFORE promote**. |
 | **R4** | The **boot smoke touching prod** (schema drift under the old binary + daemon collision + the carve-out open) | ✅ **CLOSED** — §5.4 is rewritten: scratch payload **copy** + scratch DB + scratch `HOME`/`DATA_DIR` + scratch port + `ENSEMBLE_SELF_ENV=sandbox`, with a no-trace abort path (§5.4.3). |
 | **R5** | The **five-variable scrub leaving `POSTGRES_URL` live** (bypasses the prod fence entirely) | ✅ **CLOSED** — the scrub is now the full per-variable list including `POSTGRES_URL`, with the `persistence.py:233-235` short-circuit and the `resolved_postgres_db_name` bypass cited (§5.4.1). |
 | **R6** | The **prompt-artifact seal moving** under the release | 🟡 **WATCH — sealed and frozen.** Seal blob `cb51a277…` byte-identical at `v0.30.12` and at the tip; zero `agents/*.md` changed; the binary embeds the **set constant** (byte-identical source) while artifacts+seal ship as a **payload directory** whose re-hash is **post-stage and automated** (`prompt_artifact_drift_leg`, reported-not-gating). **S1d must be re-run AT THE TAG** (§4.3.2, WATCH-1 / `feature/video-mock-prompts` @ `e559b4b80`). |
@@ -869,17 +869,17 @@ Both live guards are mandatory and independent: `require_live_guard` (`ENSEMBLE_
 | **R11** | **S3 verified by a DRY-RUN only**; **S1d (at the tag), S4 and S5 remain unverified** | 🟡 **OPEN** — the FE leg is proven; the remaining legs must be run before the ceremony (§5.3 leg status). |
 | **R12** | The S3 **verification trap** — esbuild mangles `RoomDialogComponent` / `ROOM_DIALOG_SIZE` (0 hits) and the room chunk is **not** a `modulepreload` ⇒ a naive grep or `index.html` check **false-negatives** | ✅ **CLOSED** — the S3 assertion now anchors on four proven string-literal / CSS-class markers (§3.5.3). |
 
-### 7.1 🔴 ICON PLACEMENT — **the Emperor adjudicates before promote**
+### 7.1 🔴 ICON PLACEMENT — **the user adjudicates before promote**
 
 The chatrooms icon is implemented in the **per-instance chat-page header**, next to WATCHOVER, wrapped in `@if (renderedInstance())` (`frontend/src/app/pages/chat/chat.html:89`) so it is **hidden when no instance is selected** (A-P6-36). The binding direction (`gc_ui_refinement_p6`) reads *"CHATROOM ICON next to the WATCHOVER button on the frontend instances surface"*, and the pinned architecture §13.1 reads *"chatroom icon adjacent to WATCHOVER on the instances surface"*, while the same ruling also says *"from the instance row the user already looks at"*.
 
 **The tension:** the implementation is on the **chat page** (the per-instance view). §13.1's literal *"instances surface / instance row"* reading would place it on the **instances list**. **Adjacency is preserved; SURFACE is not.**
 
-⇒ **The Emperor adjudicates at release/promote.** If he wants the list row, that is a **follow-up FE change BEFORE promote** (the modal is tree-scoped and instance-scoped alike, so the work is placement-only). **Resolve this before the stage is cut** — a post-promote FE change would require another release.
+⇒ **The user adjudicates at release/promote.** If he wants the list row, that is a **follow-up FE change BEFORE promote** (the modal is tree-scoped and instance-scoped alike, so the work is placement-only). **Resolve this before the stage is cut** — a post-promote FE change would require another release.
 
 ### 7.2 🟡 The video-team pilot runs POST-promote
 
-The Emperor's directive (2026-11-15) is explicit: the parked video-team lane resumes **only AFTER group chat is PROMOTED** (the Emperor's ceremony) — not merely landed. The video team is the **designated FIRST pilot**: producer / capturer / editor / verifier coordinate through a chatroom as **named members** instead of pure parent-routing.
+The user's directive (2026-11-15) is explicit: the parked video-team lane resumes **only AFTER group chat is PROMOTED** (the user's ceremony) — not merely landed. The video team is the **designated FIRST pilot**: producer / capturer / editor / verifier coordinate through a chatroom as **named members** instead of pure parent-routing.
 
 **Its scenario file is the gate:** `test/scenarios/group_chat_video_team_pilot_scenario.py` — nine checks (C1 four named members on one room · C2 parallel lane posts, monotonic log · C3 per-shot tasking **through the parent** · C4 milestone reports ride the digest · C5 a tag across lanes delivers (durable cursor + one content-free audit row) · C6 the unread→nudge path fires once per turn with the **real** unread count · C7 Ruling A — a completed member is never revived, the tag becomes a parent-routed proposal · C8 the §9 cost cap (4 posts OK, 5th typed-refused) · C9 the §13-P6 backend exit criteria incl. a purged room rendering as not-found). **Measured 9/9 PASS, mutation-proven.**
 
@@ -933,8 +933,8 @@ The registered `gc_p6_room_family` history carried **three disagreeing compositi
 | **R2 — Release cut** | **giter** | Create the release branch from `origin/latest`; add the plan doc + `docs/changelog-pending/group-chat.md`; edit `CHANGELOG.md` (`[Unreleased]` → `[0.31.0] — 2026-11-17`, paste the §3.6 block); run `python scripts/bump_version.py minor`; commit `chore(release): bump version to 0.31.0`; **annotated tag** `Release v0.31.0` | `git describe --tags --exact-match HEAD` == `v0.31.0`; the 4 version sites agree |
 | **R3 — Build + stage** | **giter** | Build the binary + FE with provenance sidecars — **in the ordered sequence of §2.5.1: the FE is REBUILT at the bumped HEAD (sidecar re-stamped) BEFORE `stage.sh` runs**; `ENSEMBLE_UPGRADE_LIVE=1 ENSEMBLE_ROLLBACK_SAFE=1 VERSION=v0.31.0 bash scripts/upgrade/stage.sh live` | `releases/v0.31.0/` complete; `manifest.json` signed; `rollback_safe=true`; `contains_contract_phase=true`; `pipeline_scripts_floor_commit == pipeline_scripts_rev` |
 | **R4 — Verify S1–S5** | **giter + tester** | Run the five legs (§5.3), including S1d (prompt seal) and the **PG half of S2** | All legs green; every count delta explained |
-| **R5 — Ceremony brief** | **architect → leader** | Hand the Emperor the §6.2 brief: preconditions, inputs, command, pre-checklist, post-verify, abort path, and the §7 disclosures | The Emperor has the brief and the §7.1 icon question is resolved |
-| **R6 — Ceremony** | **the Emperor** | The promote itself | `commit` row; `current == v0.31.0`; §6.2 V1–V10 green |
+| **R5 — Ceremony brief** | **architect → leader** | Hand the user the §6.2 brief: preconditions, inputs, command, pre-checklist, post-verify, abort path, and the §7 disclosures | The user has the brief and the §7.1 icon question is resolved |
+| **R6 — Ceremony** | **the user** | The promote itself | `commit` row; `current == v0.31.0`; §6.2 V1–V10 green |
 | **R7 — Post-promote** | **leader + pilot lane** | FE-visible verification (V8); resume the **video-team pilot**; the pilot scenario is the gate | Pilot scenario 9/9; no open txn; `in_flight == null` |
 
 ### 8.2 Rollback / undo path if the ceremony aborts
@@ -943,7 +943,7 @@ Per §6.3 — **the abort ladder**: no-flip refusals are free (nonce intact); a 
 
 ### 8.3 What this lane does NOT do
 
-- It does **not** perform the promote (the Emperor's).
+- It does **not** perform the promote (the user's).
 - It does **not** touch the local-latest ref (the ari-stop-int lane's).
 - It does **not** re-pin the `room` tool-category artifact or bump `VOCABULARY_VERSION` (frozen by design).
 - It does **not** bump the prompt-artifact baseline (nothing changed).
@@ -962,12 +962,12 @@ Per §6.3 — **the abort ladder**: no-flip refusals are free (nonce intact); a 
 
 **Also noted, not actioned:** the tester's LEG 3a worker quoted its fenced command inline, including the **raw dev-role `POSTGRES_PASSWORD`** — exposure was **transcript-only** (0 git hits; the committed `PACKS.md` row carries `<redacted>`). Root cause: a **dispatch-template omission** (the redaction rule was in the LEG 3b brief but not the LEG 3a brief). **Not rotated unilaterally** — the dev PG password is shared by in-flight lanes and rotation is a live-op outside the tester's mandate; surfaced as a rotation candidate. *This lane did not rotate it either; the standing deferred-rotation item covers it.*
 
-## 9. OPEN QUESTIONS FOR THE EMPEROR
+## 9. OPEN QUESTIONS FOR THE USER
 
 1. **§7.1 — icon placement.** Per-instance chat-page header (as built) vs the instances-list row (§13.1's literal reading). **If the list row, this is a FE change BEFORE the release cut** — not after.
 2. **§6.1 — which lane.** Tool lane (nonce + 3-factor attestation, needs the R1 pin advance) or operator lane (no nonce, run from inside the payload). The brief asked for the attestation; the tool lane is recommended, which makes R1 mandatory.
 
-*(Both are decidable by the Emperor before the stage is cut; neither blocks R0–R2.)*
+*(Both are decidable by the user before the stage is cut; neither blocks R0–R2.)*
 
 ---
 

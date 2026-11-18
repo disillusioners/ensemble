@@ -1,6 +1,6 @@
 # Rogue-Process Containment — Plan Overview
 
-**Lane:** rogue-containment (commission, Emperor-approved 2026-11-11; incident wi-2454ede3)
+**Lane:** rogue-containment (commission, user-approved 2026-11-11; incident wi-2454ede3)
 **Date:** 2026-11-12 (planner dispatch: planner[v2]; components by plan-creation workers A/B/C)
 **Worktree:** `/home/nea/ensemble-src-wt-rogue-containment` — branch `feature/rogue-containment`, base tip `cace21473` (parent `e87f987a8` = origin/latest)
 **Authority chain:** the READ-FIRST analysis GOVERNS — `.agents/shared/planning/bind-race/rogue-port-containment-analysis.md` (FINAL rev 2, sha256 `78e25565…`). Where the analysis contradicts the commission scope, the analysis wins and the conflict is disclosed (§ Contradictions below). Where the analysis's line anchors drifted at tip, the verified current-tip anchor map (research pass 2026-11-12) supersedes; each component file cites tip anchors.
@@ -39,11 +39,11 @@ Analysis-faithfulness summary (receipts in the component files): the chosen set 
 
 ## Sequencing (summary — full sequence in component-E)
 
-developer (code + tests, components A/B in one release train) → house gates → reviewer → tester (mutation-proof + gates) → stage cut (giter; version slot from LIVE census at stage time, refs floor v0.29.19) → staged verification proving E-i/ii/iii legs FROM the staged artifact (4-way sha + sidecar witness, CArchive census full-prefix `uniq -d`, PROMPT-BASELINE both trees, measured interpreter cpython-3.14). **NO promote — the ceremony is the Emperor's.**
+developer (code + tests, components A/B in one release train) → house gates → reviewer → tester (mutation-proof + gates) → stage cut (giter; version slot from LIVE census at stage time, refs floor v0.29.19) → staged verification proving E-i/ii/iii legs FROM the staged artifact (4-way sha + sidecar witness, CArchive census full-prefix `uniq -d`, PROMPT-BASELINE both trees, measured interpreter cpython-3.14). **NO promote — the ceremony is the user's.**
 
 ## Component C reservation
 
-`rogue-write-forensics.md` is reserved for the parallel READ-ONLY forensics lane (maintenancer; ensemble_prod; no repo write path). Its content arrives as recommendations-only; any destructive remediation is a SEPARATE Emperor-gated lane. See the stub header in this directory.
+`rogue-write-forensics.md` is reserved for the parallel READ-ONLY forensics lane (maintenancer; ensemble_prod; no repo write path). Its content arrives as recommendations-only; any destructive remediation is a SEPARATE user-gated lane. See the stub header in this directory.
 
 ## Anchor-drift note
 

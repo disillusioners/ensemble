@@ -10,11 +10,11 @@
 
 ## 0. What changed, in one paragraph
 
-The Emperor ruled the compaction **mechanism** (verbatim): *"our compaction feature will use this append method, and it a lot simple than heuristic, decision usage... Simple always better."* The append method is: the daemon appends a **user message** to the agent's own message list; the agent's **own model** writes the compaction on its next turn; the daemon swaps the compacted history for the model's output wrapped in the house doc format and splices the last K messages verbatim. **T0/T1/T2 are DEAD** — the model sees everything and does the selection. The decision-module seam, the heuristic pre-filter, the ranked shortlist, the comparative spike: all gone. **The keyword params are withdrawn** (ruling (C) moot): the tool surface is `prompt_reload(compact=True, compact_note="…")` and nothing else. The words were always enough; the parameter was not.
+The user ruled the compaction **mechanism** (verbatim): *"our compaction feature will use this append method, and it a lot simple than heuristic, decision usage... Simple always better."* The append method is: the daemon appends a **user message** to the agent's own message list; the agent's **own model** writes the compaction on its next turn; the daemon swaps the compacted history for the model's output wrapped in the house doc format and splices the last K messages verbatim. **T0/T1/T2 are DEAD** — the model sees everything and does the selection. The decision-module seam, the heuristic pre-filter, the ranked shortlist, the comparative spike: all gone. **The keyword params are withdrawn** (ruling (C) moot): the tool surface is `prompt_reload(compact=True, compact_note="…")` and nothing else. The words were always enough; the parameter was not.
 
 Two things do **not** change: the **house engine** stays, unchanged, as the engine of the AUTO path (the 95% pre-call hook, the CLE reactive handler) — this feature does not touch it; and the **note path is ONE path** with no fallback (Ruling 2, as corrected by the leader: a note-guided compaction is requested *from a running turn*, so the context is inside the agent's window by construction; an append that cannot run must **refuse with a typed reason**, never silently degrade to a different mechanism).
 
-**Pending ruling withdrawn, on the record:** the "narrow keyword ruling" (keyword acceptance form, bounds, refusal codes, request text) is **WITHDRAWN by the Emperor**, not forgotten — see §8.4.
+**Pending ruling withdrawn, on the record:** the "narrow keyword ruling" (keyword acceptance form, bounds, refusal codes, request text) is **WITHDRAWN by the user**, not forgotten — see §8.4.
 
 ---
 
@@ -101,7 +101,7 @@ The house already has the right mechanism, and it already documents the constrai
 - **M1 (the append)** rides the tool-bearing node's return: `[…, ToolMessage(receipt), HumanMessage(request)]`. One atomic channel write.
 - **M2 (the swap)** rides the node that observes the model's compaction reply: it returns the sentinel-first channel value `[sentinel, *post_compaction_channel]`, exactly as the house's compaction path does — the mechanism the auto path already proves.
 
-**So the swap IS mid-turn, and that is now explicitly permitted.** The commission's original "never mid-turn" wording belonged to the engine-shaped design and is superseded by the Emperor's mechanism. The house's own compensation for mid-turn writes is the **node-return commit** (the in-flight task's return IS the commit) — that is why the swap uses it and not `aupdate_state`.
+**So the swap IS mid-turn, and that is now explicitly permitted.** The commission's original "never mid-turn" wording belonged to the engine-shaped design and is superseded by the user's mechanism. The house's own compensation for mid-turn writes is the **node-return commit** (the in-flight task's return IS the commit) — that is why the swap uses it and not `aupdate_state`.
 
 **Torn-write exposure (between M1 and M2).** Two node returns means two commits, so a crash between them can leave the request appended and the history un-swapped. The house's answer is the same one it uses for compaction: the swap is **idempotent and keyed** (the doc id is `compaction-global-{instance_id}-{seq}`, and the seq is derived from the prior docs — `daemon/compaction.py:190` `_next_compaction_seq`), and the arm's settle record (`settle_compact_note_arm`) is written only **after** the swap lands. A crash before the settle leaves the arm ARMED, so the request re-appends and the swap re-runs — at-least-once, never a false "applied". The receipt must therefore be written **after** the swap, and must never report `compacted` before it.
 
@@ -190,7 +190,7 @@ Re-adjudicated against the append path, not inherited. "Reachability" is the tes
 | P4.5 | `classify_compact_note_outcome` (an **engine-outcome** classifier) | `daemon/services/prompt_refresh.py:528` | **REMOVED** | its inputs are engine outcome kinds; the append path's outcome is not one |
 | P4.6 | `settle_compact_note_arm` | `daemon/services/prompt_refresh.py:552` | **SURVIVES (re-purposed)** | it records the arm's consumption; it must now record the **append** outcome (and only after the swap lands) |
 | P4.7 | the docstring/comment corrections to the executor's force semantics | `daemon/services/compact_executor.py:12-16` | **REMOVED with P4.4** | they document the removed hook |
-| P5.1 | `daemon/_compact_note_prefilter.py` (331 lines, NEW) | Phase 5 | **REMOVED** | no consumer. Its entire input surface was the keywords; with the params withdrawn it has none. It is exactly the "dormant-but-present capability" the Emperor cut |
+| P5.1 | `daemon/_compact_note_prefilter.py` (331 lines, NEW) | Phase 5 | **REMOVED** | no consumer. Its entire input surface was the keywords; with the params withdrawn it has none. It is exactly the "dormant-but-present capability" the user cut |
 | P5.2 | the pre-filter stage integration (126 lines across 8 hunks) | `daemon/compaction.py:3569-3616` + 7 more (Phase 5) | **REMOVED** | same |
 | P5.3 | `tests/unit/tools/test_compaction_note_prefilter.py` (422 lines, NEW) | Phase 5 | **REMOVED** | tests a removed component |
 | P5.4 | `test/packs/compaction_note_prefilter_unit.sh` (68 lines, NEW) | `e728dd032` | **REMOVED** | same |
@@ -219,7 +219,7 @@ Re-adjudicated against the append path, not inherited. "Reachability" is the tes
 
 **What the diff will show:** one deleted module, one deleted test module, one deleted pack script, one deleted PACKS.md row, and a net **negative** delta in `daemon/compaction.py` (the note plumbing out exceeds the append path's in) — plus the new append path. **The pre-filter must not survive as a dormant file.** If a reviewer finds `daemon/_compact_note_prefilter.py` still present, the addendum was not implemented.
 
-**Is any of it worth keeping as a "fallback-path cost reducer"?** **No** — and the test is the Emperor's own: the use that was CUT was exactly "heuristic pre-selection". With the keywords gone the marker matcher has no input, no consumer, and no author (the note is free text now, and the model does the selection). It does not survive the test; it does not ship.
+**Is any of it worth keeping as a "fallback-path cost reducer"?** **No** — and the test is the user's own: the use that was CUT was exactly "heuristic pre-selection". With the keywords gone the marker matcher has no input, no consumer, and no author (the note is free text now, and the model does the selection). It does not survive the test; it does not ship.
 
 ---
 
@@ -281,7 +281,7 @@ Re-adjudicated against the append path, not inherited. "Reachability" is the tes
 
 ---
 
-## 8. What the Emperor must be told
+## 8. What the user must be told
 
 ### 8.1 The directive, as satisfied
 
@@ -294,7 +294,7 @@ Re-adjudicated against the append path, not inherited. "Reachability" is the tes
 1. **The compaction must be produced by a call that includes the agent's own recent messages** — which it does, because the request is appended to the agent's message list and the same turn's invoke carries the whole list. ✔
 2. **A provider that does not cache, or a proxy that strips the prefix, breaks the cost argument** — but the mechanism still works (it is a correctness-neutral cost assumption, not a correctness assumption). The receipt therefore records the effective model so the affinity assumption is **auditable after the fact**, exactly as the leader asked.
 
-Also: **the note-as-request adds a turn.** The agent's turn now contains the appended request and its answer — the compaction itself is part of the conversation the agent carries forward. The cost picture the Emperor accepted ("cache hit ≈ half the prefill of a miss") is consistent with this, but the receipt must not imply that the compaction is free: it is one extra invoke on a warmed prefix.
+Also: **the note-as-request adds a turn.** The agent's turn now contains the appended request and its answer — the compaction itself is part of the conversation the agent carries forward. The cost picture the user accepted ("cache hit ≈ half the prefill of a miss") is consistent with this, but the receipt must not imply that the compaction is free: it is one extra invoke on a warmed prefix.
 
 ### 8.3 The refusal vocabulary — recounted
 
@@ -307,9 +307,9 @@ Also: **the note-as-request adds a turn.** The agent's turn now contains the app
 
 ### 8.4 The withdrawn ruling, on the record
 
-The **narrow keyword ruling** — keyword acceptance form, keyword bounds, keyword refusal codes, the keyword request text — is **WITHDRAWN by the Emperor** ("you don't need to think the 'compact_removal_keyword' as the tool now not need it. it just need compaction note"). It was never delivered (the keyword scope addition was refused by the busy-guard and never landed on this branch), so **no code is orphaned by the withdrawal**; the withdrawal removes a *plan*, not a *shipped capability*. The lesson for the guideline: **the words were always enough; the parameter was not.**
+The **narrow keyword ruling** — keyword acceptance form, keyword bounds, keyword refusal codes, the keyword request text — is **WITHDRAWN by the user** ("you don't need to think the 'compact_removal_keyword' as the tool now not need it. it just need compaction note"). It was never delivered (the keyword scope addition was refused by the busy-guard and never landed on this branch), so **no code is orphaned by the withdrawal**; the withdrawal removes a *plan*, not a *shipped capability*. The lesson for the guideline: **the words were always enough; the parameter was not.**
 
-### 8.5 The one thing the leader must decide (not the Emperor)
+### 8.5 The one thing the leader must decide (not the user)
 
 **The size instruction in the appended request (§2c)** and the **honest-truncation parameter** (§2e) are architectural additions this addendum rules in, not surface the leader listed. Both are one-line-ish and both prevent a specific dishonesty (a truncated compaction whose marker claims completeness, or an over-budget doc). If the leader prefers zero additions, the fallback is: no size instruction (the model may overshoot) and the doc's truncation marker as-is — which I do **not** recommend, because the marker would lie about SECTION DETAIL that does not exist on this path.
 

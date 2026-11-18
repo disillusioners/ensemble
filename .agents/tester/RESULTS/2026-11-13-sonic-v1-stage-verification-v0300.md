@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-13T04:42–04:46Z · reads-only · no boots · logs `/tmp/stageverify-v0300/` (12 files)
 - **Release:** `/home/nea/agents-ensemble/releases/v0.30.0` · tag `v0.30.0` (object `3a2444804…`, peeled `bb4daa59…` == `origin/latest`) · staged_at 2026-11-13T04:35:03Z (manifest)
-- **VERDICT: ✅ PASS on all legs — promote-ready; promote is the Emperor's ceremony.**
+- **VERDICT: ✅ PASS on all legs — promote-ready; promote is the user's ceremony.**
 
 | Leg | Result |
 |---|---|

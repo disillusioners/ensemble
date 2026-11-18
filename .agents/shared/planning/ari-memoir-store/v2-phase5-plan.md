@@ -49,7 +49,7 @@ Deliver the JEV-gated Persona Evolution subsystem, activating the dormant v1 per
 
 ### 3.1 Classification Taxonomy
 The JEV classifier categorizes candidate belief deltas against the current approved persona:
-1. `conflict` (Highest priority): Directly contradicts an existing persona rule or behavioral directive (e.g. Ari previously believed X was forbidden, but Emperor explicitly commanded X). **-> FORCES REGENERATION.**
+1. `conflict` (Highest priority): Directly contradicts an existing persona rule or behavioral directive (e.g. Ari previously believed X was forbidden, but user explicitly commanded X). **-> FORCES REGENERATION.**
 2. `boundary_change`: Expands or restricts Ari's operational domain, autonomy boundaries, or relationship stance (e.g. Ari is granted new decision-making authority over a subsystem). **-> FORCES REGENERATION.**
 3. `new_rule`: Introduces a novel, enduring behavioral principle not previously covered in the persona document. **-> FORCES REGENERATION.**
 4. `reinforcement`: Re-asserts or validates an existing persona rule without altering its boundaries or meaning. **-> SUPPRESSED (No proposal).**

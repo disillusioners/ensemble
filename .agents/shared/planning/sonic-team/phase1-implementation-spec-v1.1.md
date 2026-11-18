@@ -3,7 +3,7 @@
 **Status:** AUTHORITATIVE for the combined rework lane. This file SUPERSEDES the
 superseded v1/v1.1 wording listed in §11 — the older `phase1-implementation-spec.md`
 stands as the v1 historical record and is NOT rewritten.
-**Ruling:** Emperor, 2026-11-13 — v1.2 is MERGED INTO v1.1: one release, one ceremony.
+**Ruling:** the user, 2026-11-13 — v1.2 is MERGED INTO v1.1: one release, one ceremony.
 **Worktree:** `/home/nea/ensemble-src-wt-sonic-v11` · **Branch:** `feature/sonic-team-v1-1`
 **Base:** `ee2b46d3b` (4 landed v1.1 commits: 7971799f4 feat / ad23f0c2f test /
 2666dccc5 docs / 5e22bc61e fix — partially superseded by this spec, edited FORWARD,
@@ -15,7 +15,7 @@ inspection) as a CORE, EXPECTED part of module work; the ONLY exclusion is the R
 
 ---
 
-## AMENDMENT 2026-11-14 — sonic routing (Emperor's four rulings; v0.30.5)
+## AMENDMENT 2026-11-14 — sonic routing (the user's four rulings; v0.30.5)
 
 *This block SUPERSEDES the blast-radius predicate content below (former §3.5 and the
 `blast:` module-report field in §3.4, the `## Complexity self-assessment`
@@ -438,7 +438,7 @@ verdict (report-only — shared `kb-writer` untouched).
 **Status:** POINTER-STYLE SUPERSESSION NOTES ONLY — this section amends the combined
 spec above without rewriting it (history stands). Authoritative decision rows:
 `decisions.md` §"v0.30.2 roster & support-parity amendment" (R16–R20). Lane:
-`feature/sonic-team-v0302`, base `c1d81593e`, Emperor ruling 2026-11-13.
+`feature/sonic-team-v0302`, base `c1d81593e`, user ruling 2026-11-13.
 
 What changed vs the body of this spec (the body's wording stands as the v0.30.1 record):
 

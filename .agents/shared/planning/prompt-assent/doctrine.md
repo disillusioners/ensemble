@@ -1,8 +1,8 @@
 # Doctrine — prompt-assent
 
-> The Emperor's Word, relayed. The working path is conversation; the FE-UI is a deeper view.
+> The user's Word, relayed. The working path is conversation; the FE-UI is a deeper view.
 
-**FE-UI is a deeper view; the working path is conversation. The Emperor's word, relayed by C2 with provenance, is a first-class approval lane.**
+**FE-UI is a deeper view; the working path is conversation. The user's word, relayed by C2 with provenance, is a first-class approval lane.**
 
 ---
 
@@ -11,7 +11,7 @@
 | Field | Value |
 |---|---|
 | Status | **Ratified** (commission input, carried verbatim) |
-| Commission | `prompt-assent` — the conversational approval lane (*The Emperor's Word / Assent*) |
+| Commission | `prompt-assent` — the conversational approval lane (*The user's Word / Assent*) |
 | Date | 2026-11-10 (UTC) |
 | Worktree | `/home/nea/ensemble-src-wt-prompt-assent` (branch `feature/prompt-assent`, base `0efdf106f`) |
 | Referenced by | `plan-overview.md`, `decisions.md`, `risks.md`, `phase1-plan.md` … `phase4-plan.md` |
@@ -27,7 +27,7 @@ throughout this planning set:
    capability that also exists as conversation. This is why the plan treats the FE routes as
    **unchanged** and adds the conversational path **alongside** them (see `decisions.md` D-7 and
    the inline decision "router unchanged — acceptance at service/repo level in-process").
-2. **"the working path is conversation"** — the *primary* way the Emperor approves is a chat
+2. **"the working path is conversation"** — the *primary* way the user approves is a chat
    turn. A design that works only when the FE is open is a violation of the doctrine even if it
    is functionally correct.
 3. **"with provenance"** — an approval is not a boolean flip. It is a decision whose evidence

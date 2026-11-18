@@ -21,7 +21,7 @@ Anchor rule: every `file:line` was opened in the worktree at the base sha; drift
 
 **Why.** The brake is *broad* — it carries all parallel-queue traffic for the project, not just skill jobs. Engaging it inside a plan-authoring lane would be an unrequested live-behavior change. It is also **not currently engaged** (DS-16), so "arming" would be a new action, not a restoration of a prior state.
 
-**What would reverse it.** An explicit Emperor instruction that the brake be armed as part of this commission — it is a single UPDATE and the plan already contains the exact command.
+**What would reverse it.** An explicit user instruction that the brake be armed as part of this commission — it is a single UPDATE and the plan already contains the exact command.
 
 ---
 
@@ -189,11 +189,11 @@ Option (b)/(e) are over-broad (they would refuse capture whenever any skill was 
 **Ruling.** (c) — and the plan states the true status of each piece before any proposal.
 
 **Why.**
-- **`filesystem_scope`** → build the **opt-in, default-OFF** slice (DS-15): the deferral's blocker was the *fleet-wide default* semantics and the backward-compat policy. An opt-in slice with **no other agent's behavior changed** has no backward-compat exposure, so the deferral's reason is not re-opened — it is narrowed. The fleet-wide default stays deferred with the Emperor's Phase-2 go/no-go.
-- **Master switch** → **still deferred** (DS-13). Its one load-bearing behavior — gating the inline mutation path — is delivered at the lane gate where it belongs (DS-14); the switch's *UX* (one lever for three lanes) remains an Emperor decision.
+- **`filesystem_scope`** → build the **opt-in, default-OFF** slice (DS-15): the deferral's blocker was the *fleet-wide default* semantics and the backward-compat policy. An opt-in slice with **no other agent's behavior changed** has no backward-compat exposure, so the deferral's reason is not re-opened — it is narrowed. The fleet-wide default stays deferred with the user's Phase-2 go/no-go.
+- **Master switch** → **still deferred** (DS-13). Its one load-bearing behavior — gating the inline mutation path — is delivered at the lane gate where it belongs (DS-14); the switch's *UX* (one lever for three lanes) remains a user decision.
 - **Direction quarantine** → **still deferred**; D6's reason stands and is not overturned. A regex content-scan would be a false-safety half-measure, and the approval authority does not exist. The *observable* half ships under D.
 
-**What would reverse it.** An Emperor ruling that Phase 1 must build the master switch or the quarantine's approval surface (both are design commissions, not Phase-1 work).
+**What would reverse it.** A user ruling that Phase 1 must build the master switch or the quarantine's approval surface (both are design commissions, not Phase-1 work).
 
 ---
 
@@ -239,7 +239,7 @@ Scope (P5, RE-ADJUDICATED — the shipped truth): **B3's scope covers ALL FOUR r
 
 **Anchors (re-verified; the plan's earlier walk-tool cites were WRONG — they pointed inside `write_file` (def `:1107`) and `edit_file` (def `:1510`) — and are DELETED).** **SHIPPED read-side anchors — all FOUR read tools carry the scope** (`daemon/tools/filesystem.py` unless noted): the `.env`-family deny constant `_SCOPE_DENIED_BASENAMES` (`:352`) with its matcher `_is_scope_denied_basename` (`:355`); the trusted anchor `_trusted_scope_anchor` (`:371`); the ONE scope resolver `_resolve_within_scope` (`:389-462`) — relative-only, trusted anchor, strict containment, `.env` deny; the scope hook inside `_resolve_within_workdir` (`:485`, scope branch `:505-511`) used by `read_file` (`:1007`) and `list_directory` (`:925`); the walk-root twin `_resolve_search_root` (`:555`, scope branch `:595-599`) used by `glob_files` (`:1104`) and `grep_files` (`:1670`); the walk-result NAME filter `_scope_filter_candidates` (`:465-482`, called at `:1119` and `:1698`); the `list_directory` entry filter for denied basenames (D-N7, `:942`); and the `CATEGORY_DOC` contract (D-N8, `:93`, scoped-agent rules `:97-106`). Pre-B3 walk-tool anchors, retained as HISTORY ONLY (they do not mean “already fenced”): `glob_files` def `:754` -> `_resolve_search_root` call `:764`; `grep_files` def `:1309` -> `_resolve_search_root` call `:1322`. The factory binding is `_make_read_scope_aware` (`daemon/tools/instance.py:2466`), wired onto all four read tools at `:6513-6533`, with the agent-supplied-`workdir` refusal in `_scope_refusal` (`:2516`). **Write-path scope — EXPLICITLY OUT OF SCOPE** (the keeper holds no write-capable tool; a write-path fence would defend a surface the agent cannot reach). The refusal-text cite is `daemon/tools/skill_tools.py:1306-1313` (the *"NO skill-keeper job was created"* envelope, message text `:1308-1312`) — the range drifted +11 lines with the E3 display-hygiene commit `90eeefa22`; at the plan-time tree `ae5bbafed` the same block sat at `:1295-1302`, and the old `1290-1300` cite was an approximate range over it. **Do not re-fix it back** — lint the cite against the CODE. The plan's earlier `:1233-1242` cite is an outcome COMMENT and is DELETED.
 
-**What would reverse it.** A house decision to make the scope default-ON fleet-wide (which would then require the full default-semantics design D8 res.9 lists) — that is the Emperor's Phase-2 decision, recorded as open item E-3.
+**What would reverse it.** A house decision to make the scope default-ON fleet-wide (which would then require the full default-semantics design D8 res.9 lists) — that is the user's Phase-2 decision, recorded as open item E-3.
 
 **AMENDED (fix rounds 1 + 2, authorised §17 amendment).** Two corrections to the paragraphs above, both mirrored in `phase1-plan.md` §6 B3 + §17 #28/#33/#34:
 
@@ -400,7 +400,7 @@ The human-visible signal reuses the **same** daemon-side anomaly mechanism as D 
 
 **Why.** (a) is a behavioral change with a blast radius that only materialises when Phase 2 flips the capture switch — flipping it in Phase 1 would make the roster change invisible at the moment it matters and untestable. (b) keeps the roster change **co-located with the switch that activates it**, and the per-axis manifest (*capture-enabled* vs *injection-enabled*) surfaces the semantic confusion the commission's one-line premise hides.
 
-**What would reverse it.** An Emperor ruling to arm specific agents in Phase 1 (the manifest already names them, so the change is a one-line edit).
+**What would reverse it.** A user ruling to arm specific agents in Phase 1 (the manifest already names them, so the change is a one-line edit).
 
 ---
 
@@ -566,9 +566,9 @@ viable) — that is a product decision on a public endpoint, not an implementati
 
 **Ruling.** (b).
 
-**Why.** Dispositioning 27 A/B groups is an **operational** act (each needs a winner determination against real comparison data) and most of them have no data at all (`comparisons=0`) — they can only be **closed or discarded**, which is a decision with product consequences that belongs to the Emperor, not to a code lane. Phase 1 touches exactly one instance (the `regression-ab-partition-run` pair, E4's R1 rule), and the plan makes the rest an explicit, named Phase-2 precondition in the runbook (§15.7).
+**Why.** Dispositioning 27 A/B groups is an **operational** act (each needs a winner determination against real comparison data) and most of them have no data at all (`comparisons=0`) — they can only be **closed or discarded**, which is a decision with product consequences that belongs to the user, not to a code lane. Phase 1 touches exactly one instance (the `regression-ab-partition-run` pair, E4's R1 rule), and the plan makes the rest an explicit, named Phase-2 precondition in the runbook (§15.7).
 
-**What would reverse it.** An Emperor instruction to disposition the backlog in Phase 1 — the machinery (the forced-resolve guard at `skill_evolution_service.py:1381-1388`, already live) is in place for it.
+**What would reverse it.** A user instruction to disposition the backlog in Phase 1 — the machinery (the forced-resolve guard at `skill_evolution_service.py:1381-1388`, already live) is in place for it.
 
 ---
 
@@ -1090,12 +1090,12 @@ never as a duplicate.
    remains the design of record; the runbook is its 3am form.
 2. **THE SCOPE BOUNDARY IS THE SWITCH FLIP ONLY.** The runbook **ASSUMES THE RELEASE IS ALREADY LIVE** and contains
    **no promote command**, no nonce, no arm and no rollback-to-previous-release. The promote remains a **SEPARATE,
-   Emperor-owned 3-factor nonce ceremony** run from the **scripts-pin worktree** (`phase1-plan.md` §14.3; DS-28) — CWD
+   user-owned 3-factor nonce ceremony** run from the **scripts-pin worktree** (`phase1-plan.md` §14.3; DS-28) — CWD
    selects the executing script, so the promote must not be run from the feature worktree or from the canonical dir. The
    runbook names the pre-promote lever (revert + re-promote) **only** to complete the rollback ladder, and says so.
 3. **THE RUNBOOK IS A MEASUREMENT DOCUMENT, NOT A NEW DECISION.** It states the switches and the brake that the code
    already implements, and it derives the operator's go/no-go from what D, A3/A4 and E1/E4 actually shipped. It
-   **declares no winner** for the 27 stranded A/B pairs (that is the Emperor's E-6 decision, and the mechanism's refusal
+   **declares no winner** for the 27 stranded A/B pairs (that is the user's E-6 decision, and the mechanism's refusal
    is the feature — DS-44), **adds no CLI flag** to `scripts/audit/skill_stale_deactivate.py` (the override is a
    Python-API keyword only; a CLI escape would contradict the pinned "no winner declared by any shipped call site"
    property), and **flips no agent's `skill_injection`** (one bit serves both the capture and the injection gate, so

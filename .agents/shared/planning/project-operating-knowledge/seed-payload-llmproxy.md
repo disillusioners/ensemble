@@ -1,6 +1,6 @@
 # POK Phase-3 — llmproxy seed payload: table + insert receipts (dev)
 
-**Status:** dev-proven on `ensemble_dev` — **LIVE-GATED** (Phase-1.5 live replay is leader-owned, Emperor promote gate; the re-runnable script is `scripts/pok/seed_llmproxy_payload.py` + `scripts/pok/payload_llmproxy.py`, commit `739edbe9a`).
+**Status:** dev-proven on `ensemble_dev` — **LIVE-GATED** (Phase-1.5 live replay is leader-owned, user promote gate; the re-runnable script is `scripts/pok/seed_llmproxy_payload.py` + `scripts/pok/payload_llmproxy.py`, commit `739edbe9a`).
 **Write path:** the REAL `pok_upsert` path — `POKService.upsert` → `POKRepository` from the worktree tree against `ensemble_dev` (fence, escape-aware budget, attribution, append-with-supersede all live). NOT SQL backfill.
 **Attribution:** `agent_id='leader'` (plan §4.5 "leader-curated"; also enables the `pok_curate` pin). `provenance='observed'` on every entry.
 **Run discipline:** per-variable `env -u POSTGRES_*` scrub (ambient shell carries PROD vars — anomaly 101a02e4), worktree venv, `current_database()`/`current_user()` asserted == `ensemble_dev_app@ensemble_dev` BEFORE any write (caught clean both runs).

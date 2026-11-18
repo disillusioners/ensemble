@@ -10,8 +10,8 @@
 | Field | Value |
 |---|---|
 | Date | 2026-11-11 (UTC) |
-| **Ruling cite** | **The Emperor, Discord, 2026-11-11 — *"this is channel, i often use channel to split tasks category in my mind, we consider channel is private/dm for now"*** (carried verbatim; full record + context in [`doctrine.md`](doctrine.md)). **This set is the FIRST tracked record of that ruling.** |
-| **Parent ruling cite** | the parent lane's doctrine — *"FE-UI is a deeper view; the working path is conversation. The Emperor's word, relayed by C2 with provenance, is a first-class approval lane."* (`../prompt-assent/doctrine.md:5`, status row `:13`) |
+| **Ruling cite** | **The user, Discord, 2026-11-11 — *"this is channel, i often use channel to split tasks category in my mind, we consider channel is private/dm for now"*** (carried verbatim; full record + context in [`doctrine.md`](doctrine.md)). **This set is the FIRST tracked record of that ruling.** |
+| **Parent ruling cite** | the parent lane's doctrine — *"FE-UI is a deeper view; the working path is conversation. The user's word, relayed by C2 with provenance, is a first-class approval lane."* (`../prompt-assent/doctrine.md:5`, status row `:13`) |
 | Worktree | `/home/nea/ensemble-src-wt-assent-p15-channels` (branch `feature/assent-designated-channels`, base `efa8aaae28153b8e9c49b86abe19e92be5458ebe`) |
 | Sources | [`research-findings.md`](research-findings.md) (explorer passes A + B, re-verified line by line in the worktree) |
 | Companion | [`risks.md`](risks.md) · [`plan-overview.md`](plan-overview.md) · [`refusal-cell-matrix.md`](refusal-cell-matrix.md) |
@@ -22,12 +22,12 @@
 
 | Status | Meaning |
 |---|---|
-| `BLESSED` | Fixed by the commission. Implementation must match. Changing it needs the Emperor, not the architect. |
+| `BLESSED` | Fixed by the commission. Implementation must match. Changing it needs the user, not the architect. |
 | `DECIDED` | Fixed by the technical analysis (the question was closed *in* the analysis, not open). Binding on implementation. |
 | `RECOMMENDED-PENDING-ARCHITECT` | The analysis closed the question with a recommendation; the architect must ratify before the developer lane lands it. |
 | `OPEN-JUDGEMENT` | The analysis explicitly flagged its own proposal as a judgement call to be overruled if the architect disagrees. |
 | `RULED` | **Decided by the architect.** Binding on implementation. Supersedes the prior status of the same entry. |
-| `LEADER-RULED` | **Decided by the leader/dispatcher** (the Emperor's ruling relayed, or a leader amendment). Binding on implementation. Used for the three **leader rulings** (NT-1, NT-2, NT-9) and for any decision the architect explicitly leaves to the Emperor. |
+| `LEADER-RULED` | **Decided by the leader/dispatcher** (the user's ruling relayed, or a leader amendment). Binding on implementation. Used for the three **leader rulings** (NT-1, NT-2, NT-9) and for any decision the architect explicitly leaves to the user. |
 
 > **Post-ruling state for THIS set (actual, 2026-11-11).** The architect pass is **DONE**
 > (`architecture-recommendation.md`, BUILD verdict, 5 dispatched verification passes); the council
@@ -48,7 +48,7 @@
 ### BLESSED-1 — Channel designation: operator-configured channel id → pinned approver user id
 
 **Status:** `BLESSED` (commission) · surface + validation semantics: **D-3**, **D-4**
-**Decision.** Exactly **ONE** pinned approver per designated channel (the Emperor). The mapping is
+**Decision.** Exactly **ONE** pinned approver per designated channel (the user). The mapping is
 **operator-configured**; designation is an **operator act**, never an agent-settable act. Invalid
 values **fail loud** (refuse, never silently drop).
 
@@ -104,7 +104,7 @@ kill-switch are all unchanged.
 ### BLESSED-4 — Live probe plan adapted
 
 **Status:** `BLESSED` (commission) · wording: **D-11**
-**Decision.** The K-3 probe becomes **mint-in-designated-channel** (real Discord, the Emperor's
+**Decision.** The K-3 probe becomes **mint-in-designated-channel** (real Discord, the user's
 actual working channel) **plus** refusal legs: non-designated channel, non-pinned user, group DM.
 
 ---
@@ -112,7 +112,7 @@ actual working channel) **plus** refusal legs: non-designated channel, non-pinne
 ### BLESSED-5 — Acceptance test: the real workflow
 
 **Status:** `BLESSED` (commission) · plan: **D-12**
-**Decision.** A mint in the Emperor's designated channel, approved by his echoed word, with full
+**Decision.** A mint in the user's designated channel, approved by his echoed word, with full
 provenance. The owed T3.5 re-stamp remains the first beneficiary once armed (arming is still a
 separate post-promote decision).
 
@@ -273,7 +273,7 @@ DM path is **unaffected**.
 | 3 | **Duplicate keys are refused** (not silently last-wins) | Python's `json.loads` keeps the **last** duplicate silently — that is a textbook "silently drop". The parser must use `object_pairs_hook` and refuse |
 | 4 | **Empty map `{}`** = valid, means *no designated channels* | Distinct from *unset*, **behaviourally identical**, **diagnostically distinct**. **⚠ AMENDED @ the architect's §3.6(b): the promised diagnostic had NO specified log line** — the **map-parse log line** (empty / unset / invalid / N entries) is now **specified and mandatory** (Phase 1 task **T1.3**, Phase 4 probe evidence) |
 | 5 | **Unset** (env var absent) = valid, means *no designated channels* | The default posture: with no map, the lane is **exactly** the DM-only lane of v0.29.18 |
-| 6 | **Same approver on many channels** = **ALLOWED** | The Emperor uses one channel per task category; one human owning many categories is the normal case, not an error |
+| 6 | **Same approver on many channels** = **ALLOWED** | The user uses one channel per task category; one human owning many categories is the normal case, not an error |
 | 7 | **Same channel pinned twice** = structurally impossible (JSON object) — and if it appears in the raw text, rule 3 refuses it | The map shape carries exactly one approver per channel — **BLESSED-1** |
 | 8 | **At most 64 designations** | A bound on the operator's error surface and on the parse; beyond it ⇒ invalid (loud) |
 | 9 | A designation naming a **non-existent** channel/user is **not** validated offline | The daemon holds no Discord channel registry; validation would require a live Discord API call. **Fail at use-time**: the entry simply never matches, and if a turn does arrive in it with a wrong user ⇒ `approver-not-pinned` |
@@ -441,7 +441,7 @@ is retired.**
 
 **The map is NOT a second kill-switch.** It cannot enable the lane; it can only *narrow* where a
 mint may happen. Conversely, the kill-switch cannot be narrowed by the map: an **empty map does
-not arm** anything. **Arming remains one env var, decided by the Emperor, after the adapted K-3
+not arm** anything. **Arming remains one env var, decided by the user, after the adapted K-3
 probe** (`../prompt-assent/ceremony-notes.md:308-309`).
 
 **The "kill channel" is still env-based** — this lane does **not** move the kill-switch to the
@@ -478,7 +478,7 @@ fail-closed by design (`decisions.md` **D-6**).
 > approve-side outcome is the operator-fault case") was **false** against this table, matrix §1.2
 > and the A-9/A-10 cells. **D-6 has been amended to match this table** — the ledger follows the
 > body. The **4f split** (`refusal-cell-matrix.md` §1.3) is the binding companion: without it,
-> five approve-side new-code refusals **revoke the Emperor's live token**.
+> five approve-side new-code refusals **revoke the user's live token**.
 
 **Side-specific detail text (architect §6.4 — the side ambiguity, resolved at zero taxonomy
 cost).** The INFO line already carries `action=mint|approve`
@@ -492,7 +492,7 @@ approver"*. **The existing `mint-requires-private-channel` detail string stays b
 (`daemon/tools/prompt_assent.py:277-326`). A mint-side refusal presents **no token**, so there
 is nothing to guess — and burning the budget there would be a **DoS primitive**: a stranger who
 simply typed in the designated channel would exhaust the relay instance's hourly budget and lock
-out the **legitimate** Emperor with `mismatch-budget-exceeded`. Both new codes are therefore
+out the **legitimate** user with `mismatch-budget-exceeded`. Both new codes are therefore
 **outside `MISMATCH_CODES`** and outside the placed-codes set that consumes the budget.
 
 **Why `mint-requires-private-channel` is NOT renamed and NOT split.** Splitting it (e.g. adding
@@ -532,7 +532,7 @@ about sub-conversations inside them.
 
 **Operational note (recorded, not a defect).** Threads are ephemeral; a designation that names a
 thread id is short-lived by nature. The runbook therefore advises designating the **parent
-channel** and having the Emperor type **in the channel** (not in a thread) for mint/approve turns.
+channel** and having the user type **in the channel** (not in a thread) for mint/approve turns.
 
 ---
 
@@ -558,7 +558,7 @@ properties, and the combination decides it:
 
 1. **Its content is already an ancestor of the new base** — so there is nothing to preserve *by
    disposal*; disposal would only delete the release dir and the local tag.
-2. **It is ceremony-ready** — if the Emperor prefers the DM-only lane (or the designated-channel
+2. **It is ceremony-ready** — if the user prefers the DM-only lane (or the designated-channel
    work slips), **v0.29.18 remains promotable as it stands**. Disposing it destroys that option
    for no gain.
 3. **The house combo-practice** — *content rides the next version; the release dir becomes an
@@ -612,8 +612,8 @@ armed states, second-account, triage table)")
 > than by editing the architect's file. Every "five outcomes"/"5-leg" reference in this set has
 > been swept to "six"/"6-leg".
 **Decision.** The K-3 gate becomes a **two-phase** probe with **three armed states**, and the
-arming wording changes from *"armed by the Emperor, after the K-3 live DM probe"* to *"armed by
-the Emperor, after the K-3 live designated-channel probe"* — superseded from the new side by
+arming wording changes from *"armed by the user, after the K-3 live DM probe"* to *"armed by
+the user, after the K-3 live designated-channel probe"* — superseded from the new side by
 this directory's `ceremony-notes.md` (file **F-13**); the parent's DM-only text
 (`../prompt-assent/ceremony-notes.md:236-244`, `:308-309`) stays frozen as history.
 
@@ -630,16 +630,16 @@ Only the A/B pair on the **same channel id** isolates the variable.
 **Three armed states, not one bit (architect §8.2).** `ARMED-TENTATIVE`
 (`ENSEMBLE_PROMPT_ASSENT_ENABLED=1` + restart — the probe's precondition; a mint alone grants
 nothing; the exposure is the room disclosure, **D-14**) → `ARMED-OPERATIONAL` (all six outcomes
-recorded + the Emperor declares reliance) → `DISARMED` (unset + restart ⇒ `lane-disabled`). The
+recorded + the user declares reliance) → `DISARMED` (unset + restart ⇒ `lane-disabled`). The
 probe runs **inside ARMED-TENTATIVE** and **ends with an explicit disarm-or-ratify step**. The
 notes must say: *"**the lane must not be RELIED UPON until the six outcomes are recorded**"* —
 "arming blocked until the probe" is **circular** as written (the probe requires arming).
 
 **The second human must be a second ACCOUNT (architect §8.4).** A second *device* shares the
-`user_id` and degenerates leg 5 into leg 3; **the Emperor's own alt account is the strongest
+`user_id` and degenerates leg 5 into leg 3; **the user's own alt account is the strongest
 choice** — it proves the pin binds the **account**, not the person.
 
-**An unrun leg 2/5 is NOT a pass.** The gap is recorded as an **explicit Emperor acceptance**;
+**An unrun leg 2/5 is NOT a pass.** The gap is recorded as an **explicit user acceptance**;
 the multi-occupant discriminator then stays **unit-proven only** — exactly the class K-3 exists
 for.
 
@@ -661,7 +661,7 @@ key); `mint-live-token-exists` ⇒ **cleanup**, not probe failure.
 
 **Preconditions the plan originally omitted (architect §8.4) — now binding.**
 
-- **≥ 2 pending CORE `prompt_versions`** (Emperor-created — the artifact path is human-session-only)
+- **≥ 2 pending CORE `prompt_versions`** (user-created — the artifact path is human-session-only)
   and a **different subject item per minting leg** (a live token blocks re-mint,
   `daemon/tools/prompt_assent.py:1700-1705`; `force=true` supersedes).
 - Operator **READ** access to `prompt_assent_tokens` and to the message rows'
@@ -678,9 +678,9 @@ consume or TTL-expire a token before reuse; **never** paste a live token into a 
 **NT-5 — the last-speaker-wins rule.** A guild channel is **one instance for all humans**
 (`daemon/sources/adapters/discord/adapter.py:909-915` (the bot-skip gate), `:218-220` (the skip default)), and the window is re-armed on
 every non-silent dispatch (`daemon/manager.py:6126`, `:11530`) — so a **bystander's reply
-between the Emperor's turn and the tool call re-points the window**, and the Emperor's own
+between the user's turn and the tool call re-points the window**, and the user's own
 attempt then refuses `approver-not-pinned`. Fail-closed, but a cheap continuous DoS on the lane.
-**Rule:** the Emperor must be the **last speaker**; a bystander's reply within the 600 s
+**Rule:** the user must be the **last speaker**; a bystander's reply within the 600 s
 freshness bound invalidates the attempt — **re-run, do not adjudicate**. (Future hardening —
 a per-user window, or a "the window row must be the pinned approver's" guard — is **out of this
 lane's scope**; see `risks.md` Part 5, NT-5.)
@@ -696,7 +696,7 @@ the effective-map line is emitted on every resolution; the `first_resolution=` /
 ### D-12 — The acceptance test is the **real** workflow, and the T3.5 re-stamp stays a **subject**
 
 **Status:** `DECIDED`
-**Decision.** The acceptance subject is: **a mint in the Emperor's designated channel, approved by
+**Decision.** The acceptance subject is: **a mint in the user's designated channel, approved by
 his echoed word, with full provenance** — the ledger reconstructs *who* (the pinned approver),
 *from where* (the designated channel), *in which message*, *on which item*, *at what time*, and
 *which relay agent*.
@@ -720,7 +720,7 @@ recorded **here** (the parent set stays frozen — **D-1**).
 |---|---|---|---|
 | **1** | The **AR-1 mint-context binding** — *"Token bound to mint `(source_id, channel_id, 1:1-DM, user_id)`"* | `../prompt-assent/architecture-recommendation.md:63` | The **`1:1-DM`** element becomes **`1:1-DM` OR a designated channel whose pinned approver is the turning human**. The channel **and** user binding is **unchanged**; only the set of surfaces that can satisfy the privacy element grows — and only under an operator designation. The parent's AR-1 legs 1 and 3 (same source+channel, same daemon-derived `user_id`) are **untouched** and remain the approve-side binding |
 | **2** | The parent's **§3 refusal taxonomy** (27 codes, "verbatim") | `../prompt-assent/architecture-recommendation.md` §3 | **Amended by this lane: +2 codes** (`approver-not-pinned`, `designation-config-invalid`) → **29**. The census's `ARCHITECT_REFUSAL_TAXONOMY` docstring must be **re-worded** from *"the COMPLETE architect §3 refusal taxonomy (verbatim)"* to *"the architect §3 refusal taxonomy **as amended by the prompt-assent Phase-1.5 lane** (+2 codes)"* — **T2.6** owns the re-wording |
-| **3** | The parent's **§8.2 item 2** — *"Guild-channel approval. Phase 1 is 1:1-DM-only (AR-1). If the Emperor intends to approve from guild channels, the pinned-approver design must be commissioned BEFORE Phase 1 ships."* | `../prompt-assent/architecture-recommendation.md:546-548` | **The hook this lane satisfies.** The Emperor's 2026-11-11 ruling commissions the pinned-approver design; **this lane IS that design**, staged as **v0.29.20** on top of the parent's Phase-1 release (**v0.29.18**). The parent's Phase 1 shipped as v0.29.18; the guild-channel surface ships as its successor, **not** as a rewrite of it |
+| **3** | The parent's **§8.2 item 2** — *"Guild-channel approval. Phase 1 is 1:1-DM-only (AR-1). If the user intends to approve from guild channels, the pinned-approver design must be commissioned BEFORE Phase 1 ships."* | `../prompt-assent/architecture-recommendation.md:546-548` | **The hook this lane satisfies.** The user's 2026-11-11 ruling commissions the pinned-approver design; **this lane IS that design**, staged as **v0.29.20** on top of the parent's Phase-1 release (**v0.29.18**). The parent's Phase 1 shipped as v0.29.18; the guild-channel surface ships as its successor, **not** as a rewrite of it |
 
 **Why this row exists (architect §10 NT-10).** Without it, this lane would silently amend the
 parent's frozen rulings — the exact "ledger must follow the body" failure in its other form
@@ -732,9 +732,9 @@ here, in the ledger that governs it.**
 ### D-14 — **LEADER RULING 1** (NT-1): the in-room token/diff delivery posture is **ACCEPT-AND-RECORD**
 
 **Status:** **`LEADER-RULED`** (leader/dispatcher, 2026-11-11) — the architect explicitly left
-this to the Emperor (§13.1); the leader ruled it on the Emperor's behalf.
+this to the user (§13.1); the leader ruled it on the user's behalf.
 **Decision.** The **delivery mode** for a designated-channel mint is an **EXPLICIT, overridable
-default of *accept-and-record*** — **not** a hidden assumption. The Emperor's own ruling
+default of *accept-and-record*** — **not** a hidden assumption. The user's own ruling
 ("we consider channel is private/dm for now") makes in-room delivery the **channel-analog of the
 DM behaviour**.
 
@@ -751,22 +751,22 @@ posts it **into the channel**. Under accept-and-record that is **accepted**, and
 2. **A bystander who relays the token is holding the REAL token.** A "garbage token" attempt
    from a bystander is a genuine mismatch ⇒ the durable counter climbs to the revoke threshold
    of 5 (`daemon/tools/prompt_assent.py:252`) and the K-9 budget to the lockout at 10/hour
-   (`:274-326`) ⇒ a **lockout DoS on the legitimate Emperor**. This is why the probe's hygiene
+   (`:274-326`) ⇒ a **lockout DoS on the legitimate user**. This is why the probe's hygiene
    rules matter (**D-11**): single-occupant channel for leg 3, consume/TTL-expire before reuse,
    never paste a live token into a second channel.
 
 **Overridable at arming time — the flip is explicit, in the ceremony notes.** The ceremony note
 (this directory's `ceremony-notes.md`, file **F-13**) must carry a **flagged, named** delivery
-mode with the two alternatives, so the Emperor can flip it **at arming time** without a code
+mode with the two alternatives, so the user can flip it **at arming time** without a code
 change:
 
 | Mode | What it does | Cost |
 |---|---|---|
 | **`accept-and-record` (the DEFAULT, this ruling)** | the token + the canonical render are posted in the channel, exactly as in a DM | the two hygiene notes above |
-| **`dm-deliver`** | the token + the diff are delivered to the Emperor's DM instead of the room | requires a DM-delivery path the lane does not have today — a **new** surface, out of this lane's scope |
+| **`dm-deliver`** | the token + the diff are delivered to the user's DM instead of the room | requires a DM-delivery path the lane does not have today — a **new** surface, out of this lane's scope |
 | **`redact-render`** | the room receives the token without the canonical render (the diff is fetched separately) | a second delivery surface — out of this lane's scope |
 
-**The two alternatives are recorded, not built.** If the Emperor chooses one at arming time, it is
+**The two alternatives are recorded, not built.** If the user chooses one at arming time, it is
 a **follow-up commission**; this lane ships the default and the flag.
 
 ---
@@ -774,7 +774,7 @@ a **follow-up commission**; this lane ships the default and the flag.
 ### D-15 — **LEADER RULING 2** (NT-2): the agent-reachable map path is **ACCEPTED WITH CONTROLS**
 
 **Status:** **`LEADER-RULED`** (leader/dispatcher, 2026-11-11) — the architect's §13.2 left the
-acceptance to the Emperor; the leader ruled it.
+acceptance to the user; the leader ruled it.
 **Decision.** The **ENV surface stands** (**D-3**), and the residual — an agent-authored `.env`
 edit becoming effective at an agent-triggerable restart — is **accepted with three controls**.
 
@@ -827,7 +827,7 @@ expands *where* a mint may happen; it never supplies the *who*.
 **Parked successor — OUTSIDE this lane's scope.** A **root-owned** map file (ownership, not mode,
 excludes the agents' uid) would close the bash path entirely. It is **named here as a follow-up
 option** and is **not** built by this lane: under root-ownership its risk rises and it contends
-with ENV (architect §3.5 (iii)). If the Emperor ever withdraws this acceptance, that is the
+with ENV (architect §3.5 (iii)). If the user ever withdraws this acceptance, that is the
 design to commission.
 
 ---
@@ -849,7 +849,7 @@ against the **message author** (`daemon/tools/prompt_assent.py:674-702`, `:621-6
 against a configuration value the reader supplies. A reader who learns the map still cannot mint,
 still cannot approve, and still cannot forge the nested `metadata["discord"]["user_id"]` anchor
 (the HTTP path carries **no** metadata — `daemon/models/message.py:78-103`). **The policy
-(the Emperor's private-channel convention) is the sensitive thing; the ids are quasi-public.**
+(the user's private-channel convention) is the sensitive thing; the ids are quasi-public.**
 Redacting the variable would create a false impression of secrecy while providing **no** security
 benefit.
 

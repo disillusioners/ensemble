@@ -3,9 +3,9 @@
 **Companion artifact to:** `architecture-recommendation.md` **v3.4** in this directory — this record derives from it and cites it.
 **Tree:** canon authored @ 7426e0d8a; this amendment on `feature/project-operating-knowledge-ruling` @ 5672f055c. Fenced dev; markdown-only; the giter finalizes.
 **Status: DESIGN ONLY — implementation is NOT authorized.** Pending: **D1 (implementation go — split/audience model DECIDED by ER-1)**, D3–D5 + P-1 + Phase 1.5; **D2 DECIDED** (allowlist, A-36).
-**Revision note:** round-1 (v2); round-2 (v3); C1+W5 (v3.1); F1+F3 (v3.2); leader disposition B1–B8 (v3.3); **Emperor-ruling fold (v3.4 — ER-1)**. See `discharge-round-1.md` / `discharge-round-2.md` + appendices B/C/D.
+**Revision note:** round-1 (v2); round-2 (v3); C1+W5 (v3.1); F1+F3 (v3.2); leader disposition B1–B8 (v3.3); **user-ruling fold (v3.4 — ER-1)**. See `discharge-round-1.md` / `discharge-round-2.md` + appendices B/C/D.
 
-**ID conventions:** `A-n` = decided-so-far. `ER-n` = EMPEROR RULING (decided by the Emperor; highest authority in this record). `D1–D5` = decision status. `P-1` = implementation precondition. `C-n` = boundaries. "D7" = the standing proxy `coding`-alias DEFECT id.
+**ID conventions:** `A-n` = decided-so-far. `ER-n` = USER RULING (decided by the user; highest authority in this record). `D1–D5` = decision status. `P-1` = implementation precondition. `C-n` = boundaries. "D7" = the standing proxy `coding`-alias DEFECT id.
 
 ---
 
@@ -57,7 +57,7 @@
 
 ### Sizing constants
 
-**A-13 — SINGLE SOURCE OF TRUTH for the live sizing constant set.** body 240 (escaped) · slug ≤44 · entry ≤332 · active 512 (POK_ACTIVE_CAP_PER_PROJECT, per project) `[active cap 512 — commission 2026-11-17, no Emperor directive cited]` · pin 2 (per project) · family-max 3 · **block 2,900 full-render PER-VIEW** / 8 · threshold = selector-configured, non-pinned only · window 30d. **This row is the ONE authoritative restatement of the set** — every other site in the artifact set MUST reference A-13 instead of re-typing the ACTIVE-CAP value (`512`), or (where a file genuinely must carry that value) use the house marker form `[active cap 512 — commission 2026-11-17, no Emperor directive cited]`; the 256-era form `[active cap 256 — Emperor directive 2026-11-10]` persists ONLY on historical lines (the ER-2 ruling and at-time markers). **Provenance honesty (2026-11-17 pok-cap lane):** the 512 raise rode commission `pok-cap-curator-20261117` (cap-constant commit `6832fd49c`); NO Emperor directive was cited for 512 — the marker states the commission instead of inventing a directive date. No bare, unmarked cap value outside this row; the per-view block/entry budget constants are derived closed-form values restated in place and are NOT single-sourced. The prior "identical across all 4 files" duplication invariant is RETIRED (it re-armed a four-site numeric fragility that ER-2 broke).
+**A-13 — SINGLE SOURCE OF TRUTH for the live sizing constant set.** body 240 (escaped) · slug ≤44 · entry ≤332 · active 512 (POK_ACTIVE_CAP_PER_PROJECT, per project) `[active cap 512 — commission 2026-11-17, no user directive cited]` · pin 2 (per project) · family-max 3 · **block 2,900 full-render PER-VIEW** / 8 · threshold = selector-configured, non-pinned only · window 30d. **This row is the ONE authoritative restatement of the set** — every other site in the artifact set MUST reference A-13 instead of re-typing the ACTIVE-CAP value (`512`), or (where a file genuinely must carry that value) use the house marker form `[active cap 512 — commission 2026-11-17, no user directive cited]`; the 256-era form `[active cap 256 — user directive 2026-11-10]` persists ONLY on historical lines (the ER-2 ruling and at-time markers). **Provenance honesty (2026-11-17 pok-cap lane):** the 512 raise rode commission `pok-cap-curator-20261117` (cap-constant commit `6832fd49c`); NO user directive was cited for 512 — the marker states the commission instead of inventing a directive date. No bare, unmarked cap value outside this row; the per-view block/entry budget constants are derived closed-form values restated in place and are NOT single-sourced. The prior "identical across all 4 files" duplication invariant is RETIRED (it re-armed a four-site numeric fragility that ER-2 broke).
 
 ### REQUIRED same-lane companion
 
@@ -65,7 +65,7 @@
 
 ### Rejected carriers
 
-**A-15 —** (§6; ten stores + non-carriers; sixteen map rows) — file-canon; critical-notes; blueprint; skill-loader tiers; metadata-JSONB; memoir; board; shared_meta_kv (true grounds); infra_assets; prompt-memory. Plus two DECISION-declined injection-model alternatives: C1-(C) family-scoped pins; **unified single-audience block (declined by the Emperor — ER-1)**.
+**A-15 —** (§6; ten stores + non-carriers; sixteen map rows) — file-canon; critical-notes; blueprint; skill-loader tiers; metadata-JSONB; memoir; board; shared_meta_kv (true grounds); infra_assets; prompt-memory. Plus two DECISION-declined injection-model alternatives: C1-(C) family-scoped pins; **unified single-audience block (declined by the user — ER-1)**.
 
 ### Reuse verdict
 
@@ -77,7 +77,7 @@
 
 ### Leader adjudications
 
-**A-18 —** v2 stand; v3 ordering/fence/archive; v3.1 drag bound; v3.2 char keystone + F3; v3.3 leader disposition; **v3.4 Emperor ruling folded (ER-1) — delivery audience-scoped; ari seam; universal read.**
+**A-18 —** v2 stand; v3 ordering/fence/archive; v3.1 drag bound; v3.2 char keystone + F3; v3.3 leader disposition; **v3.4 user ruling folded (ER-1) — delivery audience-scoped; ari seam; universal read.**
 
 ### Migration
 
@@ -109,22 +109,22 @@
 
 ---
 
-## (ER) EMPEROR RULINGS
+## (ER) USER RULINGS
 
-**ER-1 — Injection model: SPLIT + AUDIENCE + ARI SEAM + UNIVERSAL READ.** *(Emperor ruling, 2026-11-07, source: Discord — verbatim intent: "we should split [operating knowledge vs project record]. Ari you need know operation one (to control the leader, aegis,… teams), also agent like devops need know. The dev team actually need know the implementation major, and operation is also need (not all the case). It's for active injection — if agent want read them they can read any.")*
-1. **SPLIT CONFIRMED** — the two-surface structure (POK vs the Related-Project record) stands. **A unified-block alternative was offered and DECLINED — considered-and-declined, decider: the Emperor.**
+**ER-1 — Injection model: SPLIT + AUDIENCE + ARI SEAM + UNIVERSAL READ.** *(user ruling, 2026-11-07, source: Discord — verbatim intent: "we should split [operating knowledge vs project record]. Ari you need know operation one (to control the leader, aegis,… teams), also agent like devops need know. The dev team actually need know the implementation major, and operation is also need (not all the case). It's for active injection — if agent want read them they can read any.")*
+1. **SPLIT CONFIRMED** — the two-surface structure (POK vs the Related-Project record) stands. **A unified-block alternative was offered and DECLINED — considered-and-declined, decider: the user.**
 2. **Audience dimension** — entry field `operation` | `implementation` | `both`; default ACTIVE-injection audiences: operation → {ari, leader, devops} (**leader included — it runs the ops lanes**); implementation → {leader, developer}; both → every agent on the project. Curator narrowing via `audience_agents`. **Per-agent block budget (8 / 2,900) is a PER-AUDIENCE effective slice; admission = audience filter FIRST, then the existing semantics within the visible set; every bound holds per-view.** Audience mapping by factory-captured agent_id.
 3. **Ari delivery seam** — Ari holds the OPERATION slice at dispatch time (today Ari receives no project injection); the seam sits where Ari's dispatch/work context is assembled for a target project; gates: non-default project, operation audience, same budget/fence/family semantics; per-dispatch fresh read.
 4. **Universal read (invariant)** — `pok_query` returns ALL entries to ANY agent on the project, regardless of audience tags. Injection is curated; reading is free.
 Landed: arch §4.1/§4.2/§4.3/§4.5/§4.5.1/§4.6/§11/§13/§14; decisions A-2/A-4/A-5/A-6/A-9/A-11/A-12/A-19 + this row; plan §2/§4.1/§4.5/AC22–AC24/§9; Appendix D.
 
-**ER-2 — Active-entry cap 64 → 256.** `[active cap 256 — Emperor directive 2026-11-10]` *(Emperor directive, 2026-11-10, source: Discord.)* Amends A-6/A-13: `POK_ACTIVE_CAP_PER_PROJECT` raised 64 → 256 (per PROJECT, not per audience); refuse-never-evict now fires at the raised cap `[active cap 256 — Emperor directive 2026-11-10]` active entries. ER-1 audience/per-view bounds unaffected. *(Numbers live in A-13 — this row records the ruling, not a second restatement of the constant set.)*
+**ER-2 — Active-entry cap 64 → 256.** `[active cap 256 — user directive 2026-11-10]` *(user directive, 2026-11-10, source: Discord.)* Amends A-6/A-13: `POK_ACTIVE_CAP_PER_PROJECT` raised 64 → 256 (per PROJECT, not per audience); refuse-never-evict now fires at the raised cap `[active cap 256 — user directive 2026-11-10]` active entries. ER-1 audience/per-view bounds unaffected. *(Numbers live in A-13 — this row records the ruling, not a second restatement of the constant set.)*
 
 ---
 
 ## (B) DECISIONS — status
 
-**D1 — AMENDED: the split/audience model is DECIDED by ER-1; D1's remaining open content is the IMPLEMENTATION GO.** *(Emperor ruling, 2026-11-07, source: Discord.)*
+**D1 — AMENDED: the split/audience model is DECIDED by ER-1; D1's remaining open content is the IMPLEMENTATION GO.** *(user ruling, 2026-11-07, source: Discord.)*
 **D2 — DECIDED (leader, v3.3): v1 = ALLOWLIST variant** (A-14/A-36).
 **D3 — PENDING** (guidelines un-park; wi-d2abe4f7). **D4 — PENDING** (corroboration post-D7). **D5 — PENDING** (notes hygiene lane).
 **P-1 — precondition:** dev llmproxy project row (Phase 1). **Phase 1.5** = live row + live seeding incl. the ari-dispatch verification (leader/devops-owned, gated on the next promote carrying the schema).

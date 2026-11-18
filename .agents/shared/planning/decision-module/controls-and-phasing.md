@@ -1,6 +1,6 @@
 # Controls & Phasing — Observability, Kill Switches, Rollout
 
-> **Status:** **RATIFIED P1 SHADOW-ONLY — Emperor ratification 2026-11-09: "yeah, look good, go ahead, shadow only for now".** Design of record. P1 implementation authorised (client + registry + shadow instrumentation); seams 2/3/4 unregistered; S4 shadow-only. (The leader's giter commits at finalize.)
+> **Status:** **RATIFIED P1 SHADOW-ONLY — user ratification 2026-11-09: "yeah, look good, go ahead, shadow only for now".** Design of record. P1 implementation authorised (client + registry + shadow instrumentation); seams 2/3/4 unregistered; S4 shadow-only. (The leader's giter commits at finalize.)
 > **Scope items:** 4 (observability) + 5 (kill switches) + 6 (phasing). **Normative source:** `scope-and-doctrine.md` — cited by §id, never re-quoted.
 > **Base:** `docs/decision-module` @ `5da1021f2`
 
@@ -227,7 +227,7 @@ The switches must cover **every** path that could reach the proxy — including 
 3. **Confirm** the decisions are byte-identical: run the seam's regression check against the pre-overlay baseline.
 4. **Record** the trip in the change journal with the metric snapshot that triggered it.
 5. Decide: fix and restart in **shadow** (never straight back to `deciding`), or leave the seam deferred.
-6. A trip on a `deciding` seam returns it to `shadow`, not to `deciding`. The `deciding` stage is re-earned through the Emperor gate (§4, P3).
+6. A trip on a `deciding` seam returns it to `shadow`, not to `deciding`. The `deciding` stage is re-earned through the user gate (§4, P3).
 
 ### §3.5 The throttle — breaker, rate and concurrency budgets (B2)
 
@@ -285,11 +285,11 @@ Each phase is a gate, not a task. **No phase assumes the next one's outcome.**
 
 - Run S1 in **C1** for an agreed window with real traffic (2 outbound calls per search: 1 chat + 1 detached overlay).
 - Measure: **agreement rate** (seam × question), **overlay latency p95** against the 5 s budget, **cost per decision**, and **zero dispatch-blocking incidents** (T1).
-- Exit criteria: agreement rate acceptable to the Emperor; p95 inside budget; cost/decision inside the ceiling; no T1/T6 events.
+- Exit criteria: agreement rate acceptable to the user; p95 inside budget; cost/decision inside the ceiling; no T1/T6 events.
 
-### P3 — **EMPEROR GATE** → S1 deciding
+### P3 — **USER GATE** → S1 deciding
 
-- **The Emperor ratifies the transition of S1 from `shadow` to `deciding`.** No seam may enter `deciding` without this gate (D3).
+- **The user ratifies the transition of S1 from `shadow` to `deciding`.** No seam may enter `deciding` without this gate (D3).
 - On ratification, S1's stage flips to `deciding` for that seam only and the configuration flips **C1 → C2**: the overlay becomes the deciding call **on the deciding path** (subject to the confidence floor, the candidate-set intersection, and fail-open to the deterministic floor). **The baseline chat selection is retained as the kill target** — the build requirement in `seam-registry.md` §5.1.1. P3's exit criteria must compare **O2** (the C2 fail-open floor) against the C0 baseline, **not only O1** — O2 is a lexical ranking, materially different from the chat LLM's selection (`seam-registry.md` §5.1.1).
 
 ### P4 — One seam at a time, each with its own shadow cycle
@@ -311,7 +311,7 @@ Each phase is a gate, not a task. **No phase assumes the next one's outcome.**
 
 The overlay costs money per call. The ceiling and auto-trip are **ratified**, not open.
 
-- **Binding ceiling: USD 50 per month, GLOBAL (owner: the Emperor).** A single global monthly ceiling across all seams — not per-seam, not operator-set-without-trip.
+- **Binding ceiling: USD 50 per month, GLOBAL (owner: the user).** A single global monthly ceiling across all seams — not per-seam, not operator-set-without-trip.
 - **Auto-trip (§3.4):** cumulative month-to-date spend across all seams (from the cost the proxy reports) compared against 50 USD, evaluated on every consult; trips the module to shadow-off (both keys per seam — `decision_seam_<id>_stage := 'shadow'` AND `decision_seam_<id>_enabled := 0` — plus the GLOBAL master OFF) when crossed. No scheduler; a consult is the only moment spend accrues.
 - **Per-seam share retained as the guard** that stops one seam consuming the whole global budget — the design's default position, now ratified (FLAG1). The global ceiling is the backstop; the per-seam share is the allocation guard; the breaker/rate/concurrency budgets (§3.5) are the throttle.
 - **Operator notification (L9 — board sink settled):** on trip — a daemon-side board item (`board_items`/`board_notes`) via `BoardService.create_item` (sync, safe from a background thread) plus a daemon-log WARNING plus a dedicated counter (`ensemble_decision_overlay_cost_ceiling_tripped_total`). `notify_user` MUST NOT be used; NO outbound webhook/email; chat/push stays a named future, not a P1 claim. The FLAG4 "fallback if the board sink is not reusable" is upgraded to this settled ruling.

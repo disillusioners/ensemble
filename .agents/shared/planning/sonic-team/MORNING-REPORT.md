@@ -2,7 +2,7 @@
 
 > **Status: STAGED v0.29.23 · promote-ready · NOT promoted · live untouched (v0.29.20) · one bounded dry-run PASSED · nothing else pending.**
 
-Prepared 2026-11-13 (UTC) for the Emperor's morning read. Overnight lane ran 2026-11-12; the promote ceremony is yours and only yours.
+Prepared 2026-11-13 (UTC) for the user's morning read. Overnight lane ran 2026-11-12; the promote ceremony is yours and only yours.
 
 **In one paragraph:** Sonic Team v1 adds 4 new agents (content-only — zero migrations, zero daemon code) that run small/medium low-coupling commissions in a single fan-out wave with a fixed-schema handoff, a blast-radius escalation gate, and zero kb-writer/experience() spawn mass. The release is staged as v0.29.23 with 4-way sha identity, all gates green, one fenced end-to-end dry-run passed in 16m26s. Nothing else is pending on this lane.
 
@@ -144,7 +144,7 @@ Single bounded fenced run (the one permitted; no retry used) · **22:29:00Z → 
 
 ---
 
-## 5. Promote command (the Emperor's ceremony — NOT executed)
+## 5. Promote command (the user's ceremony — NOT executed)
 
 ```bash
 cd /home/nea/ensemble-src-wt-scripts-pin && ENSEMBLE_UPGRADE_LIVE=1 VERSION=v0.29.23 bash scripts/upgrade/promote.sh live --f2-verified-closed
@@ -175,7 +175,7 @@ cd /home/nea/ensemble-src-wt-scripts-pin && ENSEMBLE_UPGRADE_LIVE=1 VERSION=v0.2
 
 ---
 
-## 7. Open decisions for the Emperor
+## 7. Open decisions for the user
 
 | # | Decision | v1 default | Recommendation |
 |---|---|---|---|
