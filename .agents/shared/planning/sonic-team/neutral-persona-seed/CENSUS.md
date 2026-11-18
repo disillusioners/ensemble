@@ -24,9 +24,13 @@ Pre-sweep (leader baseline, emperor|empress|empyrea): shared 111 files / 654 hit
 True pre-sweep scope incl. alias-example tokens: 707 lines / 130 files (shared 113/674, tester 13/27, approver 4/6).
 The +20 lines / +2 files delta vs the leader's 687/128 = `constella` (21) and `my dear` (5) occurrences.
 
-Post-sweep: shared 15 files / 19 hits · tester 1 / 1 · approver 0 / 0 — total 20, all carve-outs:
-- 19 lines: actor-claim ENUM literals (pinned_by / PIN_ACTORS / Literal[...] / CHECK) in 15 ari-memoir-store docs.
+Post-sweep: shared 11 files / 19 hits · tester 1 / 1 · approver 0 / 0 — total 20, all carve-outs:
+- 19 lines: actor-claim ENUM literals (pinned_by / PIN_ACTORS / Literal[...] / CHECK) in 11 ari-memoir-store docs.
 - 1 line: .agents/tester/RESULTS/2026-11-05-memoir-g2-pg-corpus.md:98 (documents the lowercase enum + the refused uppercase form).
+- Identifier-embedded residue (INVISIBLE to the `-w` grep — word-boundary matching cannot see a token inside an identifier):
+  - `.agents/shared/planning/group-chat/decisions.md:15` — live KV key `gc_emperor_rulings_20261115` (PRESERVED BY RULING, byte-identical; a live daemon KV row — renaming it is a live data change, out of scope).
+  - `.agents/shared/planning/group-chat-release/release-plan.md:980` — the same live KV key cited again.
+  - `.agents/shared/planning/ari-memoir-store/flag-dispositions.md:54` — `memoir_pin_as_emperor`, a DOC-ONLY plan-layer tool name (no live code/DB hit: `git grep memoir_pin_as_emperor -- daemon/ tests/` is empty); preserved — renaming a historical plan identifier rewrites plan history and it is not a live surface.
 The former plan-file PATH reference class was REMOVED by the neutral filename rename: those lines now cite
 `open-questions.md` and carry no persona token (see the rename commit on this branch).
 Citation heuristic on the pre-sweep corpus: 193 lines carry a date/ruling/board/sha marker, 494 do not.
@@ -34,7 +38,7 @@ Citation heuristic on the pre-sweep corpus: 193 lines carry a date/ruling/board/
 ## 3. Out-of-scope residue (report-only, untouched)
 
 - plugins/opendesign/** (5): vendored third-party artwork/character names + the HASHES.sha256 manifest row — leader ruling: KEEP.
-- .agents/** (31): carve-outs above.
+- .agents/** (20): carve-outs above.
 - Out-of-map persona-adjacent prose left by ruling (not gate-caught): "the sovereign ruled on many matters" (2 lines in
   tests/unit/test_memoir_constellation.py), "The Court" / "hello the court" (Discord-guild fixture names).
 

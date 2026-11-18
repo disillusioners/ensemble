@@ -69,7 +69,7 @@ identical across the 4 gap-fixed doc files; markdown pipe/backtick/bold counts i
   brief-mandated negative-guard asserts). These lowercase values ARE the wire contract (PIN_ACTORS is validated
   at daemon/repositories/memoir/repository.py:1731 and daemon/tools/memoir.py:863/:972).
 - agents (1): agents/ari/tools_note.md:941 (actor-claim doctrine text).
-- .agents/** (20): 19 actor-claim enum literals in 15 ari-memoir-store docs;
+- .agents/** (20): 19 actor-claim enum literals in 11 ari-memoir-store docs;
   tester/RESULTS/2026-11-05-memoir-g2-pg-corpus.md:98 (documents the lowercase enum + the refused uppercase
   form). The former plan-file PATH reference class was REMOVED by the neutral filename rename — those lines now
   cite `open-questions.md` and carry no persona token.
