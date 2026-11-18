@@ -478,7 +478,9 @@ def _make_test_dependency_bus():
 
     # Sync helpers used inside DB sync threads
     bus.count_pending_for_target_sync = MagicMock(return_value=0)
+    bus.count_fulfillable_pending_for_target_sync = MagicMock(return_value=0)
     bus.count_pending_for_target = AsyncMock(return_value=0)
+    bus.count_fulfillable_pending_for_target = AsyncMock(return_value=0)
 
     # Parent-error override consulted by ``_resolve_finalize_status``
     bus.had_parent_error = MagicMock(return_value=False)

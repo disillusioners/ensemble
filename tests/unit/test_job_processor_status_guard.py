@@ -104,6 +104,7 @@ def _wire_dependency_bus():
     """
     bus_mock = MagicMock()
     bus_mock.count_pending_for_target = AsyncMock(return_value=0)
+    bus_mock.count_fulfillable_pending_for_target = AsyncMock(return_value=0)
     set_dependency_bus(bus_mock)
     yield
     set_dependency_bus(None)

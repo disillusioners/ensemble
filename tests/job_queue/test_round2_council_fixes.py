@@ -1009,7 +1009,9 @@ class TestMessageJobDeferral:
         # The instance is in WAITING_CHILDREN after the first message;
         # the bus sees 1 pending child (the event row above).
         dependency_bus.count_pending_for_target = AsyncMock(return_value=1)
+        dependency_bus.count_fulfillable_pending_for_target = AsyncMock(return_value=1)
         dependency_bus.count_pending_for_target_sync = MagicMock(return_value=1)
+        dependency_bus.count_fulfillable_pending_for_target_sync = MagicMock(return_value=1)
 
         # Fire the lifecycle event with the instance in WAITING_CHILDREN.
         # The observer must defer (NOT complete_job inline) because
@@ -1034,7 +1036,9 @@ class TestMessageJobDeferral:
         # Children resolved: bus_pending drops to 0. Fire a fresh
         # lifecycle event to drive the deferred finalize.
         dependency_bus.count_pending_for_target = AsyncMock(return_value=0)
+        dependency_bus.count_fulfillable_pending_for_target = AsyncMock(return_value=0)
         dependency_bus.count_pending_for_target_sync = MagicMock(return_value=0)
+        dependency_bus.count_fulfillable_pending_for_target_sync = MagicMock(return_value=0)
 
         with patch.object(
             job_queue_service, "complete_job", new=AsyncMock()

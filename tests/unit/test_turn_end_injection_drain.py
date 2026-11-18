@@ -441,6 +441,7 @@ class TestPipelineEndOfTurnDrain:
         pipeline = _make_pipeline(manager)
         bus = MagicMock(name="DependencyBus")
         bus.count_pending_for_target = AsyncMock(return_value=1)
+        bus.count_fulfillable_pending_for_target = AsyncMock(return_value=1)
 
         with patch(
             "daemon.services.message_processing_pipeline.get_dependency_bus",
@@ -463,6 +464,7 @@ class TestPipelineEndOfTurnDrain:
         pipeline = _make_pipeline(manager)
         bus = MagicMock(name="DependencyBus")
         bus.count_pending_for_target = AsyncMock(return_value=0)
+        bus.count_fulfillable_pending_for_target = AsyncMock(return_value=0)
 
         with patch(
             "daemon.services.message_processing_pipeline.get_dependency_bus",
@@ -482,6 +484,7 @@ class TestPipelineEndOfTurnDrain:
         pipeline = _make_pipeline(manager)
         bus = MagicMock(name="DependencyBus")
         bus.count_pending_for_target = AsyncMock(return_value=0)
+        bus.count_fulfillable_pending_for_target = AsyncMock(return_value=0)
 
         with patch(
             "daemon.services.message_processing_pipeline.get_dependency_bus",
@@ -506,6 +509,7 @@ class TestPipelineEndOfTurnDrain:
         pipeline = _make_pipeline(manager)
         bus = MagicMock(name="DependencyBus")
         bus.count_pending_for_target = AsyncMock(return_value=0)
+        bus.count_fulfillable_pending_for_target = AsyncMock(return_value=0)
 
         with patch(
             "daemon.services.message_processing_pipeline.get_dependency_bus",
@@ -529,6 +533,7 @@ class TestPipelineEndOfTurnDrain:
         pipeline = _make_pipeline(manager)
         bus = MagicMock(name="DependencyBus")
         bus.count_pending_for_target = AsyncMock(return_value=0)
+        bus.count_fulfillable_pending_for_target = AsyncMock(return_value=0)
 
         with patch(
             "daemon.services.message_processing_pipeline.get_dependency_bus",
@@ -686,6 +691,7 @@ class TestHardTerminalReviveGuard:
         pipeline = _make_pipeline(manager)
         bus = MagicMock(name="DependencyBus")
         bus.count_pending_for_target = AsyncMock(return_value=0)
+        bus.count_fulfillable_pending_for_target = AsyncMock(return_value=0)
 
         with patch(
             "daemon.services.message_processing_pipeline.get_dependency_bus",
@@ -711,6 +717,7 @@ class TestHardTerminalReviveGuard:
         pipeline = _make_pipeline(manager)
         bus = MagicMock(name="DependencyBus")
         bus.count_pending_for_target = AsyncMock(return_value=1)
+        bus.count_fulfillable_pending_for_target = AsyncMock(return_value=1)
 
         with patch(
             "daemon.services.message_processing_pipeline.get_dependency_bus",

@@ -181,7 +181,9 @@ def _build_observer_for_hot_path(
     # ── Bus singleton — no-op mock with the right surface ──
     bus_mock = MagicMock()
     bus_mock.count_pending_for_target = AsyncMock(return_value=0)
+    bus_mock.count_fulfillable_pending_for_target = AsyncMock(return_value=0)
     bus_mock.count_pending_for_target_sync = lambda iid: 0
+    bus_mock.count_fulfillable_pending_for_target_sync = lambda iid, **kw: 0
     bus_mock.had_parent_error = MagicMock(return_value=False)
     # ``_finalize_job`` acquires ``bus._get_parent_lock(parent_id)``
     # via ``async with await bus._get_parent_lock(parent_id):`` — a

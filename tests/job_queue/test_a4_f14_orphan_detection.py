@@ -334,7 +334,9 @@ def _drive_finalize_with_orphan_shape(
 
     bus_mock = MagicMock()
     bus_mock.count_pending_for_target_sync = MagicMock(return_value=0)
+    bus_mock.count_fulfillable_pending_for_target_sync = MagicMock(return_value=0)
     bus_mock.count_pending_for_target = AsyncMock(return_value=0)
+    bus_mock.count_fulfillable_pending_for_target = AsyncMock(return_value=0)
     bus_mock.had_parent_error = MagicMock(return_value=False)
     set_dependency_bus(bus_mock)
     try:
