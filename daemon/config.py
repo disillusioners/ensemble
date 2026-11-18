@@ -6477,6 +6477,17 @@ class SkillEvolutionConfig(EmbeddingConfig):
     ab_min_difference: float = Field(default=0.15)  # Loser must be at least 15% worse
     max_extensions: int = Field(default=3)
 
+    # ── D2/C2 (2026-11-17): stalled-pair inactivity timeout ──────────
+    # A pair with ``comparisons == 0`` (zero genuine injections — the
+    # counter bumps ONLY on real variant routing) older than this many
+    # days is STALLED: it can never reach ``ab_sample_size`` and never
+    # self-resolves (``check_ab_test_resolution`` returns
+    # ``needs_more_data`` before the extension bump). The sanctioned
+    # resolver (E-6 rule) may close such pairs; the age gate is the
+    # TRIGGER condition only — winner selection is by GENERATION
+    # NUMBER, never timestamps (Emperor ruling E-6, 2026-11-17).
+    ab_stall_timeout_days: float = Field(default=7.0)
+
     # ── Multi-metric composite scoring (Milestone 2 Phase 3) ──
     # Weights for the 5-metric composite A/B winner score.
     # All weights should sum to 1.0.

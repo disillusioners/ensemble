@@ -645,6 +645,74 @@ class TestServicesAvailable:
         assert not result.lstrip().startswith(ERROR_PREFIX)
 
     @pytest.mark.asyncio
+    async def test_skill_view_renders_real_lineage_keys(self):
+        """D7 (anomaly c24f4d39): the lineage section renders the keys
+        ``SkillLineage.to_dict()`` actually emits.
+
+        The renderer used to read ``from_skill_id`` / ``to_skill_id`` /
+        ``relation_type`` — keys that exist on NO lineage dict — so a
+        fresh generation (exactly one parent edge) rendered a "##
+        Lineage" section whose every line was blank. The pin asserts
+        the REAL keys (``parent_skill_id`` / ``skill_id`` /
+        ``change_summary``) appear non-empty for both parents and
+        children.
+        """
+        from daemon.tools.skill_tools import create_skill_tools
+
+        service = MagicMock()
+        service.view_skill = AsyncMock(return_value={
+            "skill": {
+                "id": "sk-gen1",
+                "name": "Demo Skill",
+                "description": "...",
+                "category": "workflow",
+                "status": "active",
+                "content": "# Hello",
+                "project_id": "test-proj",
+                "created_at": "2026-07-11",
+                "updated_at": "2026-07-11",
+            },
+            "lineage": {
+                "parents": [
+                    {
+                        "skill_id": "sk-gen1",
+                        "parent_skill_id": "sk-gen0",
+                        "change_summary": "FIX: tighten fallback",
+                        "content_diff": "--- …",
+                        "created_at": "2026-11-17",
+                    }
+                ],
+                "children": [
+                    {
+                        "skill_id": "sk-gen2",
+                        "parent_skill_id": "sk-gen1",
+                        "change_summary": "FIX: scope note",
+                        "content_diff": "--- …",
+                        "created_at": "2026-11-17",
+                    }
+                ],
+            },
+        })
+        manager = MagicMock()
+        manager._skill_store_service = service
+        manager._instance_repository = None
+        tools = {t.name: t for t in create_skill_tools(manager, "inst-1")}
+
+        result = await tools["skill_view"].ainvoke({"skill_id": "sk-gen1"})
+
+        assert "## Lineage" in result
+        # Parent edge renders the REAL keys, non-empty.
+        assert "parent_skill_id=sk-gen0" in result
+        assert "change_summary=FIX: tighten fallback" in result
+        # Child edge renders the REAL keys, non-empty.
+        assert "skill_id=sk-gen2" in result
+        assert "change_summary=FIX: scope note" in result
+        # The phantom keys are gone.
+        assert "from_skill_id=" not in result
+        assert "to_skill_id=" not in result
+        assert "relation_type=" not in result
+
+    @pytest.mark.asyncio
     async def test_skill_view_returns_error_when_skill_not_found(self):
         """When ``view_skill`` returns ``None``, ``skill_view``
         surfaces an ``ERROR: ...`` string that includes the

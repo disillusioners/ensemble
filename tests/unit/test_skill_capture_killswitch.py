@@ -1119,3 +1119,206 @@ def _sink_sandbox(tmp_path, request):
         observability.reset_counters()
         observability.set_anomaly_reporter(None)
         lane_test_end(request.node.nodeid, before)
+
+
+# =============================================================================
+# Group 7 — C3 (2026-11-17): every refused-admission record carries a run id
+# =============================================================================
+#
+# The minted-before-the-gate contract (``build_run_record`` docstring):
+# a REFUSED admission is still an ATTEMPT and must be correlatable with
+# its refusal record. Four producer sites used to violate it (metrics
+# seam, tools seam, burst-cap error site, fix-dispatch-fault site) —
+# this group pins the fix at each site. Named mutation: revert any one
+# minting (pass ``run_id=None`` / omit it) → the matching pin goes RED.
+
+
+def _read_sink_records(sink_dir):
+    import json as _json
+
+    files = list((sink_dir / observability.SINK_DIR_NAME).glob("*.jsonl"))
+    records = []
+    for path in files:
+        for line in path.read_text().strip().splitlines():
+            if line:
+                records.append(_json.loads(line))
+    return records
+
+
+class TestC3RefusedAdmissionRunIdPin:
+    """``stage="admission"`` refused records never carry ``run_id: null``."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(SKILL_CAPTURE_KILL_SWITCH_ENV, raising=False)
+
+    @pytest.mark.asyncio
+    async def test_metrics_seam_refusal_carries_run_id(
+        self, ks_metrics_service, ks_instance_repo, tmp_path
+    ):
+        """Gate-0 refusal via the production metrics lane mints the run
+        id BEFORE the gate and threads it into the sink record."""
+        inst = SimpleNamespace(
+            instance_id="inst-c3-a",
+            instance_metadata={INJECTED_SKILLS_METADATA_KEY: ["skill-x"]},
+        )
+        ks_instance_repo.get = MagicMock(return_value=inst)
+
+        result = await ks_metrics_service._check_capture_eligibility(
+            instance_id="inst-c3-a",
+            agent_id="agent-c3",
+            project_id="p-c3",
+            task_message="do a complex thing",
+            task_succeeded=True,
+            iterations=10,
+            duration_seconds=120,
+        )
+        assert result is None  # lane OFF → refused
+
+        records = [
+            r
+            for r in _read_sink_records(tmp_path)
+            if r.get("stage") == "admission"
+            and r.get("refusal_reason") == "capture_lane_off"
+            and r.get("prompt_source") == "skill_metrics_service"
+        ]
+        assert records, "metrics-seam capture_lane_off record missing from sink"
+        assert records[-1].get("run_id"), (
+            "C3: the metrics-seam refused-admission record must carry a "
+            "non-null run_id (minted before the gate)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_metrics_seam_run_ids_are_distinct_across_attempts(
+        self, ks_metrics_service, ks_instance_repo, tmp_path
+    ):
+        """Two consecutive refusals mint two DIFFERENT run ids — each
+        attempt is individually correlatable."""
+        inst = SimpleNamespace(
+            instance_id="inst-c3-b",
+            instance_metadata={INJECTED_SKILLS_METADATA_KEY: ["skill-x"]},
+        )
+        ks_instance_repo.get = MagicMock(return_value=inst)
+        for _ in range(2):
+            await ks_metrics_service._check_capture_eligibility(
+                instance_id="inst-c3-b",
+                agent_id="agent-c3",
+                project_id="p-c3",
+                task_message="do a complex thing",
+                task_succeeded=True,
+                iterations=10,
+                duration_seconds=120,
+            )
+        records = [
+            r
+            for r in _read_sink_records(tmp_path)
+            if r.get("stage") == "admission"
+            and r.get("refusal_reason") == "capture_lane_off"
+            and r.get("prompt_source") == "skill_metrics_service"
+        ]
+        assert len(records) >= 2
+        run_ids = [r.get("run_id") for r in records[-2:]]
+        assert all(run_ids), "every record carries a run id"
+        assert run_ids[0] != run_ids[1], "run ids must be per-attempt"
+
+    @pytest.mark.asyncio
+    async def test_tools_seam_refusal_carries_run_id(
+        self, ks_manager_with_service, tmp_path
+    ):
+        """The ``skill_execute_capture`` tool's lane-off refusal record
+        (tools seam) carries a minted run id."""
+        from daemon.tools.skill_evolution_tools import (
+            create_skill_evolution_tools,
+        )
+
+        manager, _service = ks_manager_with_service
+        # Concrete instance row: the refusal record embeds the row's
+        # ``agent_id`` — a MagicMock attr would be JSON-unserializable
+        # and the sink write would (by design) fail silently.
+        manager._instance_repository = SimpleNamespace(
+            get=lambda instance_id: SimpleNamespace(
+                instance_id=instance_id, agent_id="agent-c3-tools"
+            )
+        )
+        tools = {t.name: t for t in create_skill_evolution_tools(manager, "inst-c3")}
+        result = await tools["skill_execute_capture"].ainvoke(
+            {
+                "instance_id": "inst-c3",
+                "task_message": "complex task",
+                "iterations": 10,
+                "duration_seconds": 120,
+                "task_succeeded": True,
+            }
+        )
+        assert '"skipped": true' in result
+
+        records = [
+            r
+            for r in _read_sink_records(tmp_path)
+            if r.get("stage") == "admission"
+            and r.get("refusal_reason") == "capture_lane_off"
+            and r.get("prompt_source") == "skill_execute_capture"
+        ]
+        assert records, "tools-seam capture_lane_off record missing from sink"
+        assert records[-1].get("run_id"), (
+            "C3: the tools-seam refused-admission record must carry a "
+            "non-null run_id"
+        )
+
+    @pytest.mark.asyncio
+    async def test_burst_cap_error_record_carries_run_id(
+        self, ks_dispatcher, tmp_path
+    ):
+        """The burst-cap count-error admission record (dispatcher) threads
+        the attempt's run id — it is minted mid-attempt, never null."""
+
+        class _RaisingLedger:
+            def count_fix_admissions_since(self, skill_id, since):
+                raise RuntimeError("db down")
+
+        ks_dispatcher._job_service.repository = SimpleNamespace(
+            count_fix_admissions_since=(
+                _RaisingLedger().count_fix_admissions_since
+            ),
+        )
+        result = await ks_dispatcher._check_fix_burst_cap(
+            "skill-c3", run_id="run-c3-explicit"
+        )
+        assert result is None  # fail-open toward counting
+
+        records = [
+            r
+            for r in _read_sink_records(tmp_path)
+            if r.get("outcome") == "cap_check_error"
+        ]
+        assert records, "cap_check_error record missing from sink"
+        assert records[-1].get("run_id") == "run-c3-explicit", (
+            "C3: the cap_check_error admission record must carry the "
+            "attempt's run id, not null"
+        )
+
+    @pytest.mark.asyncio
+    async def test_fix_dispatch_fault_record_carries_run_id(self, tmp_path):
+        """The skill_fix dispatch-fault admission record (dropped or
+        recorded-after-fault) mints a run id — never null."""
+        from daemon.tools import skill_tools as skill_tools_mod
+
+        await skill_tools_mod._announce_fix_dispatch_fault(
+            MagicMock(),
+            skill_id="skill-c3-fault",
+            error="RuntimeError: boom",
+            outcome=skill_tools_mod.FIX_OUTCOME_NOT_RECORDED,
+            job_id=None,
+        )
+        records = [
+            r
+            for r in _read_sink_records(tmp_path)
+            if r.get("stage") == "admission"
+            and r.get("refusal_reason")
+            == skill_tools_mod.FIX_DISPATCH_FAULT_REASON
+        ]
+        assert records, "fix-dispatch-fault record missing from sink"
+        assert records[-1].get("run_id"), (
+            "C3: the fix-dispatch-fault admission record must carry a "
+            "non-null run_id"
+        )

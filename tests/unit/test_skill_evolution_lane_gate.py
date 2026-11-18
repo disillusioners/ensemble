@@ -1798,7 +1798,8 @@ class TestInlineEvolveLaneGate:
         result = await self._call_evolve(self._tools(manager))
 
         service.evolve_skill.assert_awaited_once_with(
-            "skill-under-test", "FIX", "tighten error handling"
+            "skill-under-test", "FIX", "tighten error handling",
+            corrective=False,
         )
         assert "NO skill-keeper job was created" not in result
         assert "new_skill_id" in result

@@ -284,7 +284,8 @@ class TestStubWhenServiceAvailable:
         })
 
         service.evolve_skill.assert_awaited_once_with(
-            "skill-keeper", "FIX", "tighten error handling"
+            "skill-keeper", "FIX", "tighten error handling",
+            corrective=False,
         )
         decoded = json.loads(result)
         assert decoded["new_skill_id"] == "skill-new"
@@ -454,7 +455,7 @@ class TestPhase5Dispatch:
         })
 
         service.evolve_skill.assert_awaited_once_with(
-            "s-old", "FIX", "d"
+            "s-old", "FIX", "d", corrective=False
         )
 
     @pytest.mark.asyncio

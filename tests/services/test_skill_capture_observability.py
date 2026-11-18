@@ -508,6 +508,66 @@ async def test_m2_pin_refused_admission_records_carry_a_run_id(tmp_path):
         "proj-d", "skill-dddd4444", EVOLUTION_TYPE_FIX, "fix it"
     ) is None
 
+    # (c) the METRICS-lane seam (C3, DECIDED Q3): the production
+    # capture-off refusal path — used to mint run_id: null on every
+    # gate-0 refusal.
+    from daemon.services.skill_metrics_service import SkillMetricsService
+    from types import SimpleNamespace as _NS
+
+    metrics_svc = SkillMetricsService(
+        usage_repo=_NS(
+            has_genuinely_evolved_for_instance=lambda iid: False
+        ),
+        skill_repo=_NS(),
+        trigger_repo=_NS(),
+        ab_test_repo=_NS(),
+        config=_NS(
+            capture_min_iterations=5,
+            capture_min_duration_seconds=60,
+        ),
+        instance_repo=_NS(get=lambda iid: _NS(instance_metadata={})),
+        evolution_service=_NS(),
+        agent_id_resolver=lambda aid, instance_id=None: _NS(
+            skill_injection=True
+        ),
+    )
+    assert (
+        await metrics_svc._check_capture_eligibility(
+            instance_id="inst-m2",
+            agent_id="agent-m2",
+            project_id="p",
+            task_message="t",
+            task_succeeded=True,
+            iterations=9,
+            duration_seconds=61,
+        )
+        is None
+    )
+
+    # (d) the EXECUTION refusal (C3, DECIDED Q3): job_processor's
+    # terminal refusal records used to carry run_id: null too.
+    from daemon.repositories.job_queue.models import AdmissionState
+    from daemon.services.job_processor import JobProcessor
+
+    class _StubRepository:
+        @staticmethod
+        def atomic_transition(*args, **kwargs):
+            return 1
+
+    class _StubQueueService:
+        _repository = _StubRepository()
+
+    processor = JobProcessor.__new__(JobProcessor)
+    processor._queue_service = _StubQueueService()
+    assert (
+        await processor._terminally_refuse_skill_evolution_job(
+            SimpleNamespace(job_id="job-m2-exec"),
+            admission_state=AdmissionState.QUEUED.value,
+            probe_reason="lane off",
+        )
+        is True
+    )
+
     sink_files = list((tmp_path / observability.SINK_DIR_NAME).glob("*.jsonl"))
     assert sink_files
     records = [
@@ -517,14 +577,86 @@ async def test_m2_pin_refused_admission_records_carry_a_run_id(tmp_path):
         .splitlines()
     ]
     refusals = [r for r in records if r.get("outcome") == "refused"]
-    assert len(refusals) == 2, (
-        f"expected the two refusals in the sink, got {len(refusals)}"
+    assert len(refusals) == 4, (
+        f"expected the four refusals in the sink, got {len(refusals)}"
     )
     for record in refusals:
         assert record.get("run_id"), (
             "a refused admission must carry a run id — the run id is "
             "minted BEFORE the gate, so a refusal is still correlatable"
         )
+    run_ids = [r["run_id"] for r in refusals]
+    assert len(set(run_ids)) == len(run_ids), (
+        "each refusal mints its OWN run id (per-attempt correlation)"
+    )
+    # The metrics-seam record is identifiable by its prompt_source.
+    assert any(
+        r.get("prompt_source") == "skill_metrics_service" for r in refusals
+    ), "the metrics-lane seam refusal must be in the sink"
+
+
+async def test_m2_pin_active_execution_refusal_record_carries_a_run_id(
+    tmp_path,
+):
+    """M-m2 / C3 site #6 (GAP-7) — the ACTIVE-branch execution refusal.
+
+    ``_terminally_refuse_active_skill_evolution_job`` (the
+    ``complete_job`` path, reachable from the queued-branch fallback)
+    writes its sink record with a minted run id — the refused
+    execution is an attempt and must be correlatable.
+
+    Named mutation: delete the ``run_id=observability.new_run_id()``
+    write inside that ACTIVE branch ⇒ this pin goes RED (the record
+    carries ``run_id: null``).
+    """
+    from daemon.services.job_processor import JobProcessor
+    from daemon.services.job_queue_service import DemandState
+
+    class _StubQueueService:
+        """``complete_job`` returns a non-None row (the ACTIVE edge)."""
+
+        @staticmethod
+        async def complete_job(job_id, *, demand_state=None, error=None):
+            assert demand_state == DemandState.FAILED
+            return SimpleNamespace(job_id=job_id)
+
+    processor = JobProcessor.__new__(JobProcessor)
+    processor._queue_service = _StubQueueService()
+    assert (
+        await processor._terminally_refuse_active_skill_evolution_job(
+            SimpleNamespace(job_id="job-m2-active"), "lane off",
+        )
+        is True
+    )
+    assert observability.counters().execution_refusals.get(
+        "lane_disabled"
+    ) == 1
+
+    sink_files = list(
+        (tmp_path / observability.SINK_DIR_NAME).glob("*.jsonl")
+    )
+    assert sink_files
+    records = [
+        json.loads(line)
+        for line in "".join(p.read_text() for p in sink_files)
+        .strip()
+        .splitlines()
+    ]
+    refusals = [
+        r
+        for r in records
+        if r.get("outcome") == "refused"
+        and r.get("prompt_source") == "job_processor"
+        and r.get("job_id") == "job-m2-active"
+    ]
+    assert len(refusals) == 1, (
+        f"expected exactly one ACTIVE-branch refusal record, got "
+        f"{len(refusals)}"
+    )
+    assert refusals[0].get("run_id"), (
+        "the ACTIVE-branch execution refusal must carry a run id — "
+        "C3 site #6 mints it like the queued branch does"
+    )
 
 
 # ── M-m3 — a dedup hit must NOT move the admission gauge ──────────────
