@@ -641,16 +641,14 @@ class TestAc3Ac23UniversalRead:
 class TestCountActiveInFamilyBoundary:
     """Item 7 (council micro-fold): count_active_in_family regex verdict.
 
-    VERDICT: CORRECT for the family-key semantics. Family keys come
-    from ``_slug_family`` = regex group 1 = ``[a-z][a-z0-9]*`` (no
-    hyphens), and ``count_active_in_family`` matches
-    ``slug.startswith(f"{family}-")``. A hyphenated tail cannot create
-    a false family match because the family itself never contains a
-    hyphen; a family that is a string-prefix of another (e.g. "dep"
-    vs "deploy") cannot collide because both are followed by "-" and
-    "dep-" != "deploy-". Non-matching slugs (no NN ordinal) are
-    excluded upstream (``_slug_family`` returns None). Cases below
-    pin this.
+    VERDICT: CORRECTED for the multi-token family-key semantics. Family
+    keys now come from ``_slug_family`` = regex group 1 = a (possibly
+    hyphenated) run of letter-led tokens (``[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*``),
+    and ``count_active_in_family`` still matches
+    ``slug.startswith(f"{family}-")``. A hyphenated family head (e.g.
+    ``prompt-assent``) is now a real family key, not collapsed to its
+    first token. Non-matching slugs (no NN ordinal) are excluded
+    upstream (``_slug_family`` returns None). Cases below pin this.
     """
 
     def test_hyphenated_tails_counted_in_same_family(self, svc: POKService) -> None:
@@ -692,6 +690,68 @@ class TestCountActiveInFamilyBoundary:
         assert normalize_body("A\nB") == "a b"
         assert content_hash("x") == content_hash("x")
         assert content_hash("x") != content_hash("y")
+
+
+# ── Multi-token family key (corrected pattern) ────────────────────────────
+
+
+class TestMultiTokenFamilyKey:
+    def test_multi_token_gate_refuses_fourth_member(self, svc: POKService) -> None:
+        from daemon.services.pok_service import POK_FAMILY_MAX
+
+        for i in range(POK_FAMILY_MAX):
+            svc.upsert(
+                project_id="pm1",
+                slug=f"prompt-assent-{i + 1:02d}-x",
+                body=f"member {i}",
+                agent_id="developer",
+            )
+        with pytest.raises(POKError) as ei:
+            svc.upsert(
+                project_id="pm1",
+                slug="prompt-assent-04-y",
+                body="the 4th member",
+                agent_id="developer",
+            )
+        assert ei.value.code == "pok_family_full"
+        msg = str(ei.value)
+        assert "prompt-assent" in msg
+        assert "3" in msg
+        for i in range(POK_FAMILY_MAX):
+            assert f"prompt-assent-{i + 1:02d}-x" in msg
+
+    def test_unnumbered_prefix_counting(self, svc: POKService) -> None:
+        svc.upsert(project_id="pu", slug="verify-03-a", body="a", agent_id="d")
+        svc.upsert(
+            project_id="pu", slug="verify-something-unnumbered", body="b", agent_id="d"
+        )
+        assert svc._repo.count_active_in_family("pu", "verify") == 2
+
+    def test_unnumbered_prefix_pushes_over_cap(self, svc: POKService) -> None:
+        svc.upsert(project_id="pu2", slug="verify-01-a", body="a", agent_id="d")
+        svc.upsert(project_id="pu2", slug="verify-02-b", body="b", agent_id="d")
+        svc.upsert(
+            project_id="pu2", slug="verify-something-unnumbered", body="c", agent_id="d"
+        )
+        with pytest.raises(POKError) as ei:
+            svc.upsert(project_id="pu2", slug="verify-03-d", body="d", agent_id="d")
+        assert ei.value.code == "pok_family_full"
+
+    def test_supersede_exemption_multi_token(self, svc: POKService) -> None:
+        for i in range(3):
+            svc.upsert(
+                project_id="ps",
+                slug=f"prompt-assent-{i + 1:02d}-m",
+                body=f"member {i}",
+                agent_id="developer",
+            )
+        swapped = svc.upsert(
+            project_id="ps",
+            slug="prompt-assent-01-m",
+            body="member 0 v2",
+            agent_id="developer",
+        )
+        assert swapped.action == "superseded"
 
 
 # ── TASK-2: the slug→row resolver — curation must reach the OWNER ───────

@@ -126,9 +126,10 @@ POK_DEFAULT_STATUS = "active"
 POK_DEFAULT_SOURCE_TIER = "agent"
 
 #: Slug-family ordering regex (§4.5): ``<family>-<NN>-<slug>`` —
-#: lowercase head, two-digit ordinal, free tail. Single source for
+#: lowercase family head (possibly multi-token, e.g. ``prompt-assent`` or
+#: ``snapshot-l3``), two-digit ordinal, free tail. Single source for
 #: tools, injection, and tests.
-POK_FAMILY_SLUG_PATTERN = r"^([a-z][a-z0-9]*)-(\d{2})-(.+)$"
+POK_FAMILY_SLUG_PATTERN = r"^([a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*)-(\d{2})-(.+)$"
 
 
 class ProjectOperatingKnowledge(SQLModel, table=True):

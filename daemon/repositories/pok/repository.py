@@ -219,7 +219,19 @@ class POKRepository:
             return len(list(session.exec(stmt).all()))
 
     def count_active_in_family(self, project_id: str, family: str) -> int:
-        """Active rows whose slug starts ``<family>-`` (§4.5 family key)."""
+        """Active rows whose slug starts ``<family>-`` (§4.5 family key).
+
+        DELIBERATE SUPERSET (documented, not a bug): the ``startswith``
+        prefix count deliberately includes (i) unnumbered active rows that
+        merely share the ``<family>-`` prefix and (ii) rows that belong to
+        a LONGER family whose name begins with ``family`` (e.g. an
+        ``skill-e6-01-x`` row counts toward both ``skill-e6`` and
+        ``skill``). Quantified in the Phase-1 census artifact
+        ``.agents/shared/planning/pok-sweep/dual-key-census-2026-11-18.md``
+        §3d (9 cross-family rows, 72 unnumbered). The refusal gate
+        (``pok_family_full``) is therefore conservative: a family can
+        trip its bound on prefix-shared rows it does not "own".
+        """
         stmt = select(ProjectOperatingKnowledge).where(
             ProjectOperatingKnowledge.project_id == project_id,
             ProjectOperatingKnowledge.status == "active",

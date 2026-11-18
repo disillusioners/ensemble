@@ -472,13 +472,21 @@ class POKService:
         if family is not None:
             family_active = self._repo.count_active_in_family(project_id, family)
             if family_active >= POK_FAMILY_MAX:
+                members = sorted(
+                    r.slug
+                    for r in self._repo.list_entries(project_id, statuses=("active",))
+                    if r.slug.startswith(f"{family}-")
+                )
                 raise POKError(
                     "pok_family_full",
                     f"family {family!r} already holds {family_active} "
                     f"active entries — the bound is {POK_FAMILY_MAX} "
-                    "(POK_FAMILY_MAX); supersede an existing member or "
-                    "archive one via pok_curate",
+                    "(POK_FAMILY_MAX); active members: "
+                    f"{', '.join(members)}; cure: supersede one via "
+                    "same-slug upsert, or archive one via pok_curate",
                     family=family,
+                    active_count=family_active,
+                    members=members,
                 )
         entry = ProjectOperatingKnowledge(
             project_id=project_id,
