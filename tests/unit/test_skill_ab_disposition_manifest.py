@@ -442,17 +442,63 @@ def test_no_daemon_module_imports_the_manifest():
 
 def test_no_daemon_module_dynamically_imports_the_manifest():
     """A dynamic import (``importlib`` / ``__import__``) is an import
-    too."""
+    too.
+
+    Two detection layers, both LITERAL-STRING only:
+
+    1. A text regex covering the common spellings
+       (``importlib.import_module`` / ``__import__``) where the module
+       name appears as a quoted string — including dotted paths such as
+       ``"daemon.services.skill_ab_disposition_manifest"``.
+
+    2. An AST fallback that flags ANY ``ast.Call`` whose argument
+       (positional or keyword) is a string constant containing the
+       manifest module name — this also catches other callee spellings
+       such as ``getattr(importlib, "import_module")(...)``.
+
+    KNOWN LIMIT (honesty): a fully-indirect dynamic import whose module
+    path is assembled at runtime from a variable / concatenation /
+    ``getattr``-resolved callable with a non-literal argument CANNOT be
+    caught statically. This guard covers literal-string dynamic imports
+    only; it is not a sandbox. Do not read it as stronger than that.
+    """
+    manifest_module = "skill_ab_disposition_manifest"
+    # 1. Broadened regex — any quoted string CONTAINING the module
+    #    name (covers dotted paths; the old bare-name-only form missed
+    #    ``"daemon.services.skill_ab_disposition_manifest"``).
     pattern = re.compile(
         r"(importlib\.import_module|__import__)\s*\(\s*"
-        r"['\"]skill_ab_disposition_manifest['\"]"
+        r"['\"][^'\"]*skill_ab_disposition_manifest[^'\"]*['\"]"
     )
-    offenders = []
-    for path in sorted((REPO_ROOT / "daemon").rglob("*.py")):
-        if path == MANIFEST_SOURCE:
-            continue
-        if pattern.search(path.read_text(encoding="utf-8")):
-            offenders.append(path)
+
+    def _path_is_offender(path):
+        text = path.read_text(encoding="utf-8")
+        if pattern.search(text):
+            return True
+        # 2. AST fallback — any call arg that is a str constant
+        #    containing the module name (catches other callee spellings).
+        try:
+            tree = ast.parse(text)
+        except (OSError, SyntaxError):  # pragma: no cover — unreadable
+            return False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            args = list(node.args) + [kw.value for kw in node.keywords]
+            for arg in args:
+                if (
+                    isinstance(arg, ast.Constant)
+                    and isinstance(arg.value, str)
+                    and manifest_module in arg.value
+                ):
+                    return True
+        return False
+
+    offenders = [
+        path
+        for path in sorted((REPO_ROOT / "daemon").rglob("*.py"))
+        if path != MANIFEST_SOURCE and _path_is_offender(path)
+    ]
     assert not offenders, (
         "a daemon module dynamically imports the disposition manifest: "
         + ", ".join(str(p.relative_to(REPO_ROOT)) for p in offenders)
