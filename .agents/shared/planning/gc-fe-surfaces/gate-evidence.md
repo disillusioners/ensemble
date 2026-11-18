@@ -350,3 +350,15 @@ untouched (frozen).
 Line references: the `## Deviations` section is still at `:63` and the Revivals'
 5xx-copy FINDING is still at `:167` — this addendum is APPENDED, so the
 council's verbatim F-E text cites the same lines it cited at review time.
+
+### W2(c) counter-mutation — PUBLISHED (council condition 2) — 2026-11-18, BE close-out lane; recorded in this ledger
+
+| Mutation | Result |
+|---|---|
+| delete the `or owner in descendant_set` disjunct (`daemon/repositories/room/repository.py`) | `test_w2_grandparent_anchor_sees_grandchilds_room` **REDDENS** (1 failed / 40) at the exact-set assert (`set() == {rid}`); the other 39 stay green |
+| complement — restore the BASE stub (caller + direct children) in place of the real-facade delegation | the SAME leg **REDDENS** again → the delegation is load-bearing too (neither the stub change nor the leg alone suffices) |
+| restore proof | `daemon/repositories/room/repository.py` byte-identical post-run — `git diff` 0 lines; not present in the BE close-out commit |
+
+Attribution: the BE close-out lane's run, cross-checked by the independent fix-cycle reviewer's in-memory reproduction (same RED result, reached without touching tracked files).
+
+**Disclosure (council-scoped residual, NOT a W1 breach — recorded for the Emperor's awareness, deliberately NOT fixed here):** a body-less 4xx still renders Angular's transport string, including the chatroom URL. That is the council's own W1 scoping — the raw-message fallback is restricted to <500 and the <500 copies are pinned UNCHANGED. Optional one-line fix if ever wanted: on the <500 path consult `raw.error` only and drop `extractErrorDetail(raw.message)`.

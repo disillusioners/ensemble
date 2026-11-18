@@ -407,14 +407,14 @@ test.describe('group-chat rooms gate', () => {
 
     // (4) A body-less 5xx: the fail-closed STRUCTURE still holds (typed
     //     error state + Retry + zero rows) and no server-internal fault
-    //     internals surface. NOTE (finding, not a weakened assertion):
-    //     the FE's generic copy ("Failed to load chatrooms.") is
-    //     UNREACHABLE in a browser for this shape — describeHttpError
-    //     falls through to Angular's transport message. The observed
-    //     text is recorded in the annotation + gate-evidence.md; pinning
-    //     a different string here would either bake the leak in as
-    //     required behaviour or require a PRODUCT-code change, which is
-    //     outside this lane's test-artifact mandate.
+    //     internals surface. NOTE (post-W1): on >=500 and unknown statuses
+    //     describeHttpError NEVER consults the raw transport message — the
+    //     rooms pane renders the FIXED subject-specific constant for this
+    //     lane ("The server could not load the chatroom list — try again.",
+    //     recorded in the run annotation + gate-evidence.md; the exact copy
+    //     is pinned at the unit level in room.service.spec.ts). A body-less
+    //     4xx keeps the scoped <500 raw-message fallback (council W1
+    //     scoping) and is outside this leg's assertions.
     state.roomsStatus = 500;
     await paneError.locator('.pane-retry-btn').click();
     const paneError500 = page.locator('.rooms-pane .pane-state-error');
