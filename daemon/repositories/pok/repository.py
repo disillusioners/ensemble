@@ -231,6 +231,18 @@ class POKRepository:
         §3d (9 cross-family rows, 72 unnumbered). The refusal gate
         (``pok_family_full``) is therefore conservative: a family can
         trip its bound on prefix-shared rows it does not "own".
+
+        MULTI-TOKEN REACH (fix iteration 2): the family key is now the
+        maximal run of letter-led tokens before the leftmost ``-NN-``
+        ordinal, so the superset reaches shapes the single-token key
+        could not express. An admission of ``skill-01-z`` (family
+        ``skill``) prefix-counts the ``skill-e6-*`` rows (family
+        ``skill-e6``) — a LONGER family inflates the count of a SHORTER
+        prefix. The inverse does NOT hold: ``skill-e6`` never counts
+        ``skill-*`` rows (its prefix is hyphen-terminated). The leak is
+        ONE-DIRECTIONAL (long → short); the count stays
+        pattern-independent (a ``startswith`` query, never a
+        family-membership test).
         """
         stmt = select(ProjectOperatingKnowledge).where(
             ProjectOperatingKnowledge.project_id == project_id,

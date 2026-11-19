@@ -472,24 +472,62 @@ class POKService:
         if family is not None:
             family_active = self._repo.count_active_in_family(project_id, family)
             if family_active >= POK_FAMILY_MAX:
+                # The count is a PREFIX superset (a ``startswith`` count)
+                # — the rows listed below are the PREFIX-SHARING rows,
+                # which may include rows of a LONGER family sharing the
+                # prefix (e.g. ``skill-e6-*`` under family ``skill``).
                 members = sorted(
                     r.slug
                     for r in self._repo.list_entries(project_id, statuses=("active",))
                     if r.slug.startswith(f"{family}-")
                 )
+                # COUNT-AWARE CURE (fix iteration 2, CRITICAL 1): the
+                # archive count is DERIVED from the LIVE count, never
+                # echoed from the bound. Archiving ONE member frees a
+                # slot ONLY when the family is exactly AT the bound —
+                # when the family is OVER the bound, archiving one
+                # still leaves it at/over the bound and the retry is
+                # STILL refused, so the cure must name the real count.
+                archive_needed = family_active - POK_FAMILY_MAX + 1
+                over_by = family_active - POK_FAMILY_MAX
+                if over_by > 0:
+                    head = (
+                        f"family {family!r} is over the bound by {over_by} "
+                        f"— it holds {family_active} active entries "
+                        f"against the bound of {POK_FAMILY_MAX} "
+                        "(POK_FAMILY_MAX)"
+                    )
+                    cure = (
+                        f"cure: archive (at least) {archive_needed} "
+                        "members via pok_curate to free slots (archiving "
+                        f"one alone would still leave {family_active - 1} "
+                        f"active entries — still at the bound of "
+                        f"{POK_FAMILY_MAX}, so the retry would still be "
+                        "refused), or supersede one via same-slug upsert "
+                        "to fold the new fact into it (family size "
+                        "UNCHANGED — it does NOT free a slot)"
+                    )
+                else:
+                    head = (
+                        f"family {family!r} already holds {family_active} "
+                        f"active entries — the bound is {POK_FAMILY_MAX} "
+                        "(POK_FAMILY_MAX)"
+                    )
+                    cure = (
+                        "cure: archive one via pok_curate to free a slot "
+                        f"for a new row (archive count: {archive_needed}), "
+                        "or supersede one via same-slug upsert to fold the "
+                        "new fact into it (family size UNCHANGED — it does "
+                        "NOT free a slot)"
+                    )
                 raise POKError(
                     "pok_family_full",
-                    f"family {family!r} already holds {family_active} "
-                    f"active entries — the bound is {POK_FAMILY_MAX} "
-                    "(POK_FAMILY_MAX); active members: "
-                    f"{', '.join(members)}; cure: supersede one via "
-                    "same-slug upsert to fold the new fact into it "
-                    "(family size UNCHANGED — it does NOT free a slot), "
-                    "or archive one via pok_curate to free a slot for a "
-                    "new row",
+                    f"{head}; prefix-sharing active rows: "
+                    f"{', '.join(members)}; {cure}",
                     family=family,
                     active_count=family_active,
                     members=members,
+                    archive_needed=archive_needed,
                 )
         entry = ProjectOperatingKnowledge(
             project_id=project_id,
