@@ -34,6 +34,12 @@ Design highlights
 * **FIX guard.** ``_evolve_fix`` refuses to mutate a skill already
   in active A/B testing (``status='ab_testing'``) — creating nested
   A/B tests would corrupt the per-group resolution bookkeeping.
+
+Size rationale (3815 lines, PRE-EXISTING at 3749 lines before this
+range): the service exceeds the 3000-line band, but the seams are
+separable for a future refactor — Tier-2/Tier-3 analysis vs the
+CAPTURED flow vs A/B resolution. Flagged for refactor; no code
+movement this pass.
 """
 
 from __future__ import annotations
@@ -2393,18 +2399,84 @@ class SkillEvolutionService:
         # (SkillRepository.deactivate does exactly this); winner:
         # group cleared + status='active'; pair row: winner_skill_id
         # + resolved_at.
-        await asyncio.gather(
-            asyncio.to_thread(self._skill_repo.deactivate, resolved_loser),
-            asyncio.to_thread(
-                self._ab_test_repo.resolve, ab_test_group, resolved_winner
-            ),
-            asyncio.to_thread(
-                self._skill_repo.update,
+        #
+        # ── ATOMIC + CAS (2026-11-18, wi-4d1fa093) ─────────────────
+        # The three mutations above used to run as three independent
+        # ``asyncio.gather`` transactions (no lock, no CAS): a
+        # mid-flight failure left the pair HALF resolved — the pair
+        # row written while the winner stayed bound to the group, or
+        # the loser deactivated while the winner was never re-activated
+        # — and two concurrent resolvers could interleave their
+        # mutations.
+        #
+        # They now run inside ONE transaction behind a compare-and-set
+        # claim on the pair row:
+        #
+        # * CAS predicate: ``resolved_at IS NULL`` ALWAYS, plus
+        #   ``comparisons = 0`` on the ``stalled`` basis (the
+        #   zero-traffic guard — a pair whose counter moved since it
+        #   was read loses the CAS and is never resolved on traffic).
+        #   The ``defective_arm`` basis is an OPERATOR-named retirement
+        #   of a possibly traffic-bearing pair, so it keeps the
+        #   ``resolved_at IS NULL`` predicate alone; forcing
+        #   ``comparisons = 0`` there would make the C1 retirement a
+        #   permanent no-op.
+        # * CAS loser: NOTHING is mutated (the transaction is rolled
+        #   back) — exactly-once resolution.
+        # * Mid-transaction failure: the session context manager rolls
+        #   back — ZERO partial mutations.
+        try:
+            cas_won = await asyncio.to_thread(
+                self._ab_test_repo.resolve_atomic,
+                ab_test_group,
                 resolved_winner,
-                ab_test_group=None,
-                status="active",
-            ),
-        )
+                resolved_loser,
+                require_zero_comparisons=(basis == "stalled"),
+            )
+        except Exception as resolve_exc:  # noqa: BLE001 — fail-soft, no partial state
+            logger.error(
+                "[SkillEvolution] Atomic A/B resolve FAILED for %s: "
+                "%s: %s — transaction rolled back, no mutation performed",
+                ab_test_group,
+                type(resolve_exc).__name__,
+                resolve_exc,
+            )
+            _announce(
+                "resolve_failed",
+                {
+                    "winner_id": resolved_winner,
+                    "loser_id": resolved_loser,
+                    "error": type(resolve_exc).__name__,
+                },
+            )
+            return {
+                "resolved": False,
+                "winner_id": None,
+                "loser_id": None,
+                "reason": "resolve_failed",
+                "basis": basis,
+                "parked": False,
+            }
+
+        if not cas_won:
+            logger.warning(
+                "[SkillEvolution] Atomic A/B resolve CAS LOST for %s "
+                "(pair already resolved, or its comparisons counter "
+                "moved) — no mutation performed",
+                ab_test_group,
+            )
+            _announce(
+                "cas_lost",
+                {"winner_id": resolved_winner, "loser_id": resolved_loser},
+            )
+            return {
+                "resolved": False,
+                "winner_id": None,
+                "loser_id": None,
+                "reason": "cas_lost",
+                "basis": basis,
+                "parked": False,
+            }
 
         _announce(
             outcome_reason,
