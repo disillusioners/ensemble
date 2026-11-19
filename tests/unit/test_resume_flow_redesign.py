@@ -587,6 +587,7 @@ def observer_with_bus_quiet(mock_job):
     """
     bus_mock = MagicMock()
     bus_mock.count_pending_for_target = AsyncMock(return_value=0)
+    bus_mock.count_fulfillable_pending_for_target = AsyncMock(return_value=0)
     set_dependency_bus(bus_mock)
 
     mock_jqs = MagicMock()
@@ -705,6 +706,7 @@ async def test_process_resume_finalize_emits_in_progress_when_bus_pending(
     """
     observer, bus_mock, _mocks = observer_with_bus_quiet
     bus_mock.count_pending_for_target = AsyncMock(return_value=3)
+    bus_mock.count_fulfillable_pending_for_target = AsyncMock(return_value=3)
 
     emit_spy = AsyncMock(return_value=None)
     observer._emit_in_progress = emit_spy

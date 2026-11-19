@@ -1,0 +1,18 @@
+=== PER-ROW DISPOSITION (synthetic) ===
++-------+------------+----------+-------------+--------------------+------------------------------------------------+
+| label | kind       | id       | state       | disposition        | reason/note                                    |
++-------+------------+----------+-------------+--------------------+------------------------------------------------+
+| W1    | watcher    | 8a1f60d7 | PENDING     | in_scope_stale     |                                                |
+| W2    | watcher    | 999efa71 | PENDING     | in_scope_stale     |                                                |
+| W3    | watcher    | 5602e91d | PENDING     | in_scope_stale     |                                                |
+| W4    | watcher    | c83e12a2 | PENDING     | in_scope_stale     |                                                |
+| M1    | commission | 0cdc0b31 | outstanding | in_scope_stale     | worker_terminal_no_report / worker completed   |
+| M2    | commission | 90493206 | abandoned   | naturally_resolved | ttl_expired_not_live / worker waiting_children |
+| M3    | commission | 06001f88 | outstanding | in_scope_stale     | ttl_expired_not_live / worker waiting_children |
+| M4    | commission | a1561f19 | outstanding | in_scope_stale     | ttl_expired_not_live / worker waiting_children |
++-------+------------+----------+-------------+--------------------+------------------------------------------------+
+
+SELFTEST artifacts written (7 blocks, 1 naturally-resolved row(s) excluded, 0 backfill block(s)):
+  /home/nea/ensemble-src-wt-wake-path-carrier-fix/.agents/shared/planning/wake-path-carrier-fix/repair/selftest/live_wedge_repair_request__SELFTEST__20261118T005753Z.sql  sha256=b85a2cb0551e946681a072caa9063e025dc31028cb7e71c2e46d869ed63e1535
+  /home/nea/ensemble-src-wt-wake-path-carrier-fix/.agents/shared/planning/wake-path-carrier-fix/repair/selftest/live_wedge_repair_request__SELFTEST__20261118T005753Z.receipt.md  sha256=3e62160088063ad33414988a6e27fef078802d5b87c9264c88dd5d45017477cf
+SYNTHETIC FIXTURE — NOT A LIVE REQUEST. Nothing in emitted/ was touched.

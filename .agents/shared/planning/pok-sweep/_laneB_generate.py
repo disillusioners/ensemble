@@ -410,6 +410,17 @@ assert not missing, "un-adjudicated keyword hits: %s" % missing
 unknown = [i for i in SCAN if i not in BY]
 assert not unknown, "SCAN ids not in listing: %s" % unknown
 
+# ── STALE / SUPERSEDED (fix iteration 2, W3) ─────────────────────────────
+# This family derivation is the PRE-LANDING single-token approximation:
+# `^(.*?)-(\d{2})-(.+)$` collapses a multi-token head to its first token
+# (e.g. `prompt-assent-01-x` → `prompt`) and the fallback splits on the
+# first hyphen. It is HISTORICAL — it produced the census numbers, NOT the
+# live gate. The CANONICAL family key is POK_FAMILY_SLUG_PATTERN
+# (`daemon/repositories/pok/models.py::POK_FAMILY_SLUG_PATTERN`), consumed
+# by `daemon/services/pok_service.py::POK_FAMILY_RE`:
+#     ^([a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*)-(\d{2})-(.+)$
+# The logic below is NOT rewritten here — it is a point-in-time artifact.
+# ─────────────────────────────────────────────────────────────────────────
 def family(slug):
     m = re.match(r"^(.*?)-(\d{2})-(.+)$", slug)
     if m:

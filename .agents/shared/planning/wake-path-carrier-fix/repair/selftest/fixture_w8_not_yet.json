@@ -1,0 +1,236 @@
+{
+  "_comment": "SYNTHETIC FIXTURE (8-row widened shape). Every identifier is FAKE (deadbeef/feedface) so the emitted SQL matches no row anywhere. All 8 targets stale => 8 repair blocks.",
+  "generated_at": "2026-11-18T00:00:00+00:00",
+  "database": "SYNTHETIC-FIXTURE-NOT-A-DATABASE",
+  "parent_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+  "classification": "not_yet",
+  "divergences": [],
+  "assertions": [],
+  "rows": {
+    "parent": {
+      "instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+      "agent_id": "ari",
+      "agent_name": "ari",
+      "status": "waiting_children",
+      "parent_id": null,
+      "created_at": "2026-11-14T21:54:59+00:00",
+      "updated_at": "2026-11-18T00:04:47+00:00",
+      "version": 98
+    },
+    "pending_count": 4,
+    "watcher_a": [
+      {
+        "watch_id": "deadbeef-0000-4000-8000-000000000001",
+        "source_task_id": "39320",
+        "target_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "state": "PENDING",
+        "created_at": "2026-11-17T18:06:08+00:00",
+        "fired_at": null,
+        "enqueued_at": null,
+        "child_id": "542b49a6-8334-4703-96a8-6628dfb2ab06",
+        "kind": "nudge_complete",
+        "message_id": null,
+        "payload_mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0"
+      }
+    ],
+    "watcher_b": [
+      {
+        "watch_id": "deadbeef-0000-4000-8000-000000000002",
+        "source_task_id": "39424",
+        "target_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "state": "PENDING",
+        "created_at": "2026-11-17T18:06:08+00:00",
+        "fired_at": null,
+        "enqueued_at": null,
+        "child_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "kind": "nudge_complete",
+        "message_id": null,
+        "payload_mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0"
+      }
+    ],
+    "watcher_c": [
+      {
+        "watch_id": "deadbeef-0000-4000-8000-000000000005",
+        "source_task_id": "39564",
+        "target_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "state": "PENDING",
+        "created_at": "2026-11-17T18:06:08+00:00",
+        "fired_at": null,
+        "enqueued_at": null,
+        "child_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+        "kind": "nudge_complete",
+        "message_id": null,
+        "payload_mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0"
+      }
+    ],
+    "watcher_d": [
+      {
+        "watch_id": "deadbeef-0000-4000-8000-000000000006",
+        "source_task_id": "39564",
+        "target_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "state": "PENDING",
+        "created_at": "2026-11-17T18:06:08+00:00",
+        "fired_at": null,
+        "enqueued_at": null,
+        "child_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+        "kind": "nudge_complete",
+        "message_id": null,
+        "payload_mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0"
+      }
+    ],
+    "commission_a": [
+      {
+        "commission_id": "feedface-0000-4000-8000-000000000003",
+        "mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0",
+        "commissioner_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "worker_instance_id": "542b49a6-8334-4703-96a8-6628dfb2ab06",
+        "work_id": null,
+        "lane": "instance_nudge",
+        "state": "outstanding",
+        "created_at": "2026-11-17T18:06:08+00:00",
+        "resolved_at": null,
+        "satisfied_at": null,
+        "abandon_reason": null,
+        "advisory_backfill": false
+      }
+    ],
+    "commission_b": [
+      {
+        "commission_id": "feedface-0000-4000-8000-000000000004",
+        "mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0",
+        "commissioner_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "worker_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "work_id": null,
+        "lane": "instance_nudge",
+        "state": "outstanding",
+        "created_at": "2026-11-17T18:06:08+00:00",
+        "resolved_at": null,
+        "satisfied_at": null,
+        "abandon_reason": null,
+        "advisory_backfill": false
+      }
+    ],
+    "commission_c": [
+      {
+        "commission_id": "feedface-0000-4000-8000-000000000007",
+        "mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0",
+        "commissioner_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "worker_instance_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+        "work_id": null,
+        "lane": "instance_nudge",
+        "state": "outstanding",
+        "created_at": "2026-11-17T18:06:08+00:00",
+        "resolved_at": null,
+        "satisfied_at": null,
+        "abandon_reason": null,
+        "advisory_backfill": false
+      }
+    ],
+    "commission_d": [
+      {
+        "commission_id": "feedface-0000-4000-8000-000000000008",
+        "mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0",
+        "commissioner_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "worker_instance_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+        "work_id": null,
+        "lane": "instance_nudge",
+        "state": "outstanding",
+        "created_at": "2026-11-17T18:06:08+00:00",
+        "resolved_at": null,
+        "satisfied_at": null,
+        "abandon_reason": null,
+        "advisory_backfill": false
+      }
+    ],
+    "workers": {
+      "17efd2ef-9f98-46d4-b41b-60e3e32b2d13": {
+        "instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "agent_id": "ari",
+        "agent_name": "ari",
+        "status": "waiting_children",
+        "parent_id": null,
+        "created_at": "2026-11-14T21:54:59+00:00",
+        "updated_at": "2026-11-18T00:04:47+00:00",
+        "version": 98
+      },
+      "542b49a6-8334-4703-96a8-6628dfb2ab06": {
+        "instance_id": "542b49a6-8334-4703-96a8-6628dfb2ab06",
+        "agent_id": "sonic-leader",
+        "agent_name": "sonic-leader",
+        "status": "completed",
+        "parent_id": null,
+        "created_at": "2026-11-14T21:54:59+00:00",
+        "updated_at": "2026-11-18T00:04:47+00:00",
+        "version": 41
+      },
+      "82551f59-4603-4b88-bbce-c9bccfa6fcd5": {
+        "instance_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+        "agent_id": "leader",
+        "agent_name": "leader",
+        "status": "waiting_children",
+        "parent_id": null,
+        "created_at": "2026-11-14T21:54:59+00:00",
+        "updated_at": "2026-11-18T00:04:47+00:00",
+        "version": 77
+      }
+    },
+    "tasks": {
+      "39320": {
+        "id": 39320,
+        "instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "status": "completed",
+        "task_type": "process_message",
+        "created_at": "2026-11-17T18:06:07",
+        "completed_at": "2026-11-17T18:08:26"
+      },
+      "39424": {
+        "id": 39424,
+        "instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "status": "completed",
+        "task_type": "process_message",
+        "created_at": "2026-11-17T20:30:46",
+        "completed_at": "2026-11-17T20:31:27"
+      },
+      "39564": {
+        "id": 39564,
+        "instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "status": "completed",
+        "task_type": "process_message",
+        "created_at": "2026-11-17T22:51:59",
+        "completed_at": "2026-11-17T23:03:54"
+      }
+    }
+  },
+  "extended_census": {
+    "pending_watchers_for_parent": [],
+    "anchor_outstanding_commissions": [],
+    "outstanding_commission_count": 4,
+    "extra_pending_watchers": [],
+    "extra_outstanding_commissions": []
+  },
+  "out_of_scope": [],
+  "inventory": {
+    "parent_scoped_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "parent_scoped_rows": {
+      "00000000-0000-4000-8000-0000000000aa": "watch_id=fixture-unrelated state=FIRED"
+    },
+    "parent_scoped_counts": {
+      "watchers": 1,
+      "commissions": 0
+    },
+    "global_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "global_counts": {
+      "watchers": 0,
+      "commissions": 0
+    },
+    "parent_keys": {
+      "instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+      "agent_id": "ari",
+      "status": "waiting_children",
+      "parent_id": null,
+      "created_at": "2026-11-14T21:54:59+00:00",
+      "updated_at": "2026-11-18T00:04:47+00:00",
+      "version": 98
+    }
+  }
+}

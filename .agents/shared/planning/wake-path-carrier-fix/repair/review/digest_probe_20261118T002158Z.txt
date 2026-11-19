@@ -1,0 +1,10 @@
+=== parent-scoped row comparison (coder 23:57:48 receipt vs live now) ===
+  rows: pre=4 now=4
+  digest(pre_rows, dict()) = 09ea774c54d24fdf50d2f1d8c8405094
+  digest(now_rows, dict()) = 09ea774c54d24fdf50d2f1d8c8405094
+  ROW-ONLY DIGEST STABLE = True
+  digest(pre_rows, pre_keys) = d79ccfce2b78988cae74081593378445   (receipt's recorded parent_scoped_sha256 = d79ccfce2b78988cae74081593378445)
+  digest(now_rows, now_keys) = 2cf0274e4cfd8257bb11d0c4e62507c9
+  parent_keys pre  = {"agent_id": "ari", "created_at": "2026-11-14T21:54:59.848480+00:00", "instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13", "parent_id": null, "status": "running", "updated_at": "2026-11-17T23:30:03.666775+00:00", "version": 98}
+  parent_keys now  = {"agent_id": "ari", "created_at": "2026-11-14T21:54:59.848480+00:00", "instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13", "parent_id": null, "status": "waiting_children", "updated_at": "2026-11-18T00:04:47.736390+00:00", "version": 98}
+  ==> the sha256 difference is carried by parent_keys (status/updated_at/version), NOT by the rows.

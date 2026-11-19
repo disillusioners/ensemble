@@ -137,6 +137,7 @@ async def _send_error_report_and_get_message(
 
     stub_bus = MagicMock(name="DependencyBus")
     stub_bus.count_pending_for_target_sync = MagicMock(return_value=0)
+    stub_bus.count_fulfillable_pending_for_target_sync = MagicMock(return_value=0)
 
     with patch(
         "daemon.services.dependency_bus.get_dependency_bus",

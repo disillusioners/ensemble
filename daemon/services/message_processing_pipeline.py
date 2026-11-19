@@ -1,5 +1,7 @@
 """Path-agnostic pipeline for message processing.
 
+Module-size rationale (band 1000-3000): cohesive single module; not split.
+
 Phase 5 of the CorrelationManager migration. The daemon has two physical
 dispatchers that both process user/internal messages against an
 instance's langgraph thread:
@@ -1326,7 +1328,13 @@ class MessageProcessingPipeline:
             bus = get_dependency_bus()
             if bus is None:
                 return False
-            pending = await bus.count_pending_for_target(instance_id)
+            # S3 (wake-path-carrier-fix): the QUALIFIED park count —
+            # PARK(parent) counts only FULFILLABLE PENDING watchers
+            # (an unfulfillable backlog — child already terminal, or
+            # self-referential — must NOT hold the park).
+            pending = await bus.count_fulfillable_pending_for_target(
+                instance_id
+            )
             if pending <= 0:
                 return False
             repo = getattr(self._manager, "_instance_repository", None)

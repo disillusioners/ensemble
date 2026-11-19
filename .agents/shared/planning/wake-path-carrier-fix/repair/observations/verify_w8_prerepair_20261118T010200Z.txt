@@ -1,0 +1,27 @@
+[identity] current_database() = ensemble_prod   current_user = ensemble
+receipt: /home/nea/ensemble-src-wt-wake-path-carrier-fix/.agents/shared/planning/wake-path-carrier-fix/repair/emitted/live_wedge_repair_request__20261118T010144Z.receipt.json
+
+=== VERIFY CHECKS ===
+[FAIL] 0 PENDING watchers remain for the parent (mirrored count_pending_for_target)
+        observed=4
+[FAIL] 0 outstanding commissions remain for the parent (mirrored count_outstanding_commissions_for_anchor)
+        observed=4
+[PASS] parent row untouched BY THE REPAIR (no identity/creation field moved)
+        unchanged
+[PASS] recomputed PARENT-SCOPED inventory sha256 matches the receipt (no other parent-scoped row moved)
+        digest f457bcb339f7f860… over 0 rows
+[PASS] recomputed GLOBAL inventory sha256 matches the receipt (quiesced-system check — informational here)
+        identical
+
+FAIL — the state does not match the receipt. Do NOT re-run the request blindly; re-run --inspect and diff against the receipt.
+
+=== WHAT THE DAEMON DOES NEXT ===
+The parent leaves WAITING_CHILDREN at its NEXT TURN-END, because the park
+predicate (message_processing_pipeline.py:1329, mirrored at
+repository.py:506-515) then reads 0 and the mission leg
+(child_reports.py:2691-2695) reads 0 as well.
+
+HONEST NOTE: a turn must actually occur. The repair forces nothing — it
+removes the two blockers so the next turn-end's evaluation passes. Nothing
+in this repair wakes the parent; a real dispatch (or the instance's own
+next inbound message) supplies the turn.

@@ -99,6 +99,7 @@ _BUS_PENDING = [0]
 def _wire_bus_mock():
     bus_mock = MagicMock()
     bus_mock.count_pending_for_target_sync = lambda iid: _BUS_PENDING[0]
+    bus_mock.count_fulfillable_pending_for_target_sync = lambda iid, **kw: _BUS_PENDING[0]
     # Phase 5: ``_finalize_job`` does ``async with await bus._get_parent_lock(iid)``.
     # MagicMock default returns a non-awaitable MagicMock → TypeError. Use an
     # AsyncMock that returns a real asyncio.Lock so the ``async with`` works.
@@ -504,6 +505,7 @@ class TestH15C1Abort:
         # avoid TypeError on the lock and spurious post-commit re-arms.
         bus = MagicMock()
         bus.count_pending_for_target_sync = MagicMock(return_value=1)  # 1 pending → abort
+        bus.count_fulfillable_pending_for_target_sync = MagicMock(return_value=1)  # 1 pending → abort
         bus._get_parent_lock = AsyncMock(side_effect=lambda parent_id: asyncio.Lock())
         bus.get_generation = MagicMock(return_value=0)
 

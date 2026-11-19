@@ -417,6 +417,7 @@ class TestObserverSkipsNoJob:
         # mocks is enough.
         bus_mock = MagicMock()
         bus_mock.count_pending_for_target = AsyncMock(return_value=0)
+        bus_mock.count_fulfillable_pending_for_target = AsyncMock(return_value=0)
         # ``_resolve_finalize_status`` consults
         # ``bus.had_parent_error(instance_id)`` — a MagicMock
         # default would be truthy and override the default
@@ -537,6 +538,7 @@ class TestObserverSkipsNonProcessingJob:
         # the count mock is enough.
         bus_mock = MagicMock()
         bus_mock.count_pending_for_target = AsyncMock(return_value=0)
+        bus_mock.count_fulfillable_pending_for_target = AsyncMock(return_value=0)
         set_dependency_bus(bus_mock)
 
         # The JobItem exists but is in a non-PROCESSING terminal
@@ -923,6 +925,7 @@ class TestObserverEdgeCases:
         # before any further bus work.
         bus_mock = MagicMock()
         bus_mock.count_pending_for_target = AsyncMock(return_value=0)
+        bus_mock.count_fulfillable_pending_for_target = AsyncMock(return_value=0)
         # The lock acquisition in ``_finalize_job`` must return
         # an async context manager. An ``AsyncMock`` instance
         # doubles as one when used via ``async with``.

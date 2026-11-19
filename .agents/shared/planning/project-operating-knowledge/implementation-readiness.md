@@ -1,5 +1,7 @@
 # POK — Implementation-Readiness Note (planner-light)
 
+[SUPERSEDED by A-26a] — the slug-regex premise of this paragraph is superseded: the family key was widened to the multi-token pattern (`^([a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*)-(\d{2})-(.+)$`), under which `model-catalogs-19-vs-22-not-drift` DOES parse (family `model-catalogs`, ordinal `19` — a MODEL COUNT, not a step ordinal). The original paragraph is kept verbatim below.
+
 **Pass:** planner-light verification @ `feature/project-operating-knowledge` 6b571771d (the user GO 2026-11-07). Method: all 5 design docs read in full (plan-overview v3.4, architecture-recommendation v3.4, decisions v3.4, discharge-round-1/2); the 3 user carries verified at the cited lines (ER-1.2 = decisions.md:116; ari seam = arch §4.5.1:124; universal read = arch §4.6:130); design code-anchors spot-re-verified at THIS tree; slug regex independently reproduced (8/8 parse as §11 claims: `pipeline`×3 + `deploy`×2 families, 3 unordered incl. `model-catalogs-19-vs-22-not-drift` correctly NOT matching; all ≤44c). **The design IS the plan — verify, not redesign.**
 
 ## 1. Verdicts
