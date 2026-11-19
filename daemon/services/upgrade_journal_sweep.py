@@ -78,6 +78,7 @@ from daemon.tools.upgrade_journal import (
     SERVING_GREEN_COMMIT_EVENT,
     SWEEP_NO_USER_ORIGIN_WAKE_SOURCE,
 )
+from daemon.services import rollback_target_chain as rtc
 
 
 def _outcome_labels() -> dict[str, str]:
@@ -2605,7 +2606,39 @@ class UpgradeJournalSweepService:
                 return result
             fresh_in_flight = fresh.get("in_flight")
             if not isinstance(fresh_in_flight, dict):
-                result["reason"] = "txn_closed_under_lock"
+                # D5/MINOR-10 (self-service-promote Wave 3): a second
+                # commit arriving on an ALREADY-CLOSED txn is a journaled
+                # `already_closed` no-op (write-once per (target, run_id)
+                # — the closer ticks every 90s) — never a second
+                # bookkeeping pass, never a rollback of a committed
+                # release.
+                result["action"] = "none"
+                result["reason"] = "already_closed"
+                try:
+                    already = uj.journal_history_has_event(
+                        install_dir, "already_closed", target, run_id
+                    )
+                    if not already:
+                        uj.journal_history_append(
+                            install_dir,
+                            "already_closed",
+                            f"closer: commit arrived on a CLOSED txn (target={target}, "
+                            f"run_id={run_id}) — journaled no-op, no second "
+                            f"bookkeeping pass (MINOR-10)",
+                        )
+                except (uj.JournalTorn, OSError, KeyError):
+                    logger.debug(
+                        "UpgradeJournalSweepService: already_closed row "
+                        "unwritable for run_id=%s (advisory)",
+                        run_id,
+                    )
+                logger.info(
+                    "UpgradeJournalSweepService: serving-green closer — the "
+                    "txn is ALREADY CLOSED (target=%s, run_id=%s) — "
+                    "already_closed no-op (MINOR-10)",
+                    target,
+                    run_id,
+                )
                 return result
             if str(fresh_in_flight.get("target") or "") != target:
                 result["reason"] = "txn_changed_under_lock"
@@ -2628,7 +2661,17 @@ class UpgradeJournalSweepService:
                     "the lock)", target,
                 )
                 return result
-            displaced = fresh_in_flight.get("displaced_version")
+            # D5 (AC-D5-11, self-service-promote Wave 3): `previous` is
+            # republished from the FLIP-PREP CAPTURE
+            # (in_flight.captured_previous — LD-5's transactional source of
+            # truth), NOT displaced_version. The displaced field remains
+            # the OLD-FORMAT fallback (pre-Wave-3 journals), so the
+            # no-displaced_version halt fires only when BOTH are absent —
+            # byte-unchanged for old-format txns.
+            displaced = fresh_in_flight.get("captured_previous")
+            if not isinstance(displaced, str) or not displaced \
+                    or displaced == "null":
+                displaced = fresh_in_flight.get("displaced_version")
             if not isinstance(displaced, str) or not displaced \
                     or displaced == "null":
                 # Old-format / ambiguous txn — HALT-FOR-HUMAN (the
@@ -2810,6 +2853,21 @@ class UpgradeJournalSweepService:
                 request_already = uj.journal_history_has_event(
                     install_dir, ROLLBACK_REQUESTED_EVENT, target, run_id
                 )
+                # D5 (self-service-promote Wave 3, AC-D5-6): the REQUEST's
+                # detail carries the resolved DESTINATION and its rung —
+                # `to <DEST> to_source <rung>`. The daemon resolves ONLY
+                # from the capture (§2.5 daemon payload: a valid
+                # captured_previous ⇒ to <capture> to_source captured;
+                # anything else ⇒ to none to_source none — the daemon
+                # never invents a destination and never rolls back by
+                # itself). The LAUNCHER consumes the to= as the chain's
+                # R1 and cross-checks it against its own resolution (a
+                # valid disagreement halts rollback_target_ambiguous).
+                to_res = rtc.resolve_from_journal(install_dir, fresh)
+                if to_res.kind == "resolve":
+                    to_dest, to_source = to_res.value, to_res.source
+                else:
+                    to_dest, to_source = "none", "none"
                 if not verdict_already:
                     uj.journal_history_append(
                         install_dir,
@@ -2823,7 +2881,8 @@ class UpgradeJournalSweepService:
                     uj.journal_history_append(
                         install_dir,
                         ROLLBACK_REQUESTED_EVENT,
-                        f"target {target} run_id {run_id} reason {reason}",
+                        f"target {target} run_id {run_id} reason {reason} "
+                        f"to {to_dest} to_source {to_source}",
                     )
             except (uj.JournalTorn, OSError, KeyError) as write_err:
                 result["action"] = "deferred"

@@ -1,0 +1,43 @@
+# tests/fixtures/rollback_target_chain_cases.tsv — the D5 rollback-target
+# chain parity table (AC-D5-12, self-service-promote Wave 3).
+# TAB-separated; `#` lines are comments; `-` = ABSENT (JSON null / field
+# not written). Columns:
+#   name <TAB> target <TAB> live <TAB> capture <TAB> to <TAB> current <TAB> displaced <TAB> previous <TAB> expect_kind <TAB> expect_value <TAB> expect_source
+# expect_kind: resolve|halt; expect_value = the version or the halt reason;
+# expect_source = the resolving rung (resolve rows only).
+# Resolved IDENTICALLY by lib.sh (_rollback_target_resolve), launcher.sh
+# (_js_rollback_target_resolve), and the Python resolver
+# (daemon/services/rollback_target_chain.py) — the pack
+# tests/packs/rollback_target_chain_parity_test.sh drives all three.
+# Fixture releases present: vA vB vC vD vE vT. NOT present: vZ.
+# r0-wins-over-all: a VALID capture (R0) resolves OVER every conflicting
+# lower rung (clarification (i) — short-circuit; R2/R3/R4 disagreement is
+# a resolved-over stale-field difference, never a halt).
+r0-wins-over-all	vT	vT	vD	-	vC	vB	vA	resolve	vD	captured
+# lost-capture / new-format-absent: no capture ⇒ the documented fall-
+# through disposition — R2==R3 agree ⇒ resolved at the current rung.
+lost-capture-fall-through	vT	vT	-	-	vB	vB	vB	resolve	vB	current
+# AC-D5-4: no capture + current ≠ displaced (both valid) ⇒ halt, never a
+# wrong rollback; the txn stays OPEN.
+no-capture-conflict-halt	vT	vT	-	-	vC	vB	vA	halt	rollback_target_ambiguous	-
+# F3: present-but-invalid R0 ⇒ HALT capture_invalid — NEVER fall through.
+present-invalid-r0-eq-target	vT	vT	vT	-	vC	vB	vA	halt	capture_invalid	-
+present-invalid-r0-missing-dir	vT	vT	vZ	-	vC	vB	vA	halt	capture_invalid	-
+present-invalid-r0-eq-live-link	vT	vB	vB	-	vC	vB	vA	halt	capture_invalid	-
+# AC-D5-7 (first half): a VALID to= disagreeing with a VALID R0 ⇒ halt.
+r1-valid-conflicts-r0	vT	vT	vD	vA	vC	vB	vA	halt	rollback_target_ambiguous	-
+# AC-D5-7 (second half): a to= failing VALID (== target / missing dir) is
+# treated as ABSENT — never a candidate, never a halt (F5).
+r1-eq-target-treated-absent	vT	vT	vD	vT	vC	vB	vA	resolve	vD	captured
+r1-missing-dir-treated-absent	vT	vT	vD	vZ	vC	vB	vA	resolve	vD	captured
+# R1 resolves when R0 is absent (the daemon's request nominates a valid
+# destination; the launcher never invents one).
+r1-resolves-when-r0-absent	vT	vT	-	vE	vC	vB	vA	resolve	vE	requested
+# R2 == target (the stale post-flip current) ⇒ INVALID ⇒ falls to R3.
+stale-current-eq-target-falls-to-r3	vT	vT	-	-	vT	vB	vA	resolve	vB	displaced
+# R4 (journal.previous, G1) is the last rung.
+only-previous-remains	vT	vT	-	-	-	-	vA	resolve	vA	previous
+# R4 null ⇒ the mapped EXISTING halt ("journal has no previous release").
+no-candidate-no-previous	vT	vT	-	-	-	-	-	halt	no_previous_release	-
+# R4 == target ⇒ the same halt (never roll back onto the failed target).
+r4-eq-target-halts	vT	vT	-	-	-	-	vT	halt	no_previous_release	-

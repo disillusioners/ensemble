@@ -2060,6 +2060,220 @@ journal_mark_f2_verified() {
     journal_update "in_flight" "$new_inf"
 }
 
+# journal_mark_captured_previous <ver|''> — D5 (self-service-promote
+# Wave 3): stamp the FLIP-PREP FILESYSTEM CAPTURE into the open in_flight
+# txn as the additive field `captured_previous` — the transactional source
+# of truth for the rollback-target chain (LD-5: R0). '' (no current
+# symlink — fresh install) persists JSON null = the documented ABSENT
+# capture (old-format-equivalent fall-through downstream). CHECKED write:
+# a failure returns nonzero and the CALLER must halt with NO flip (the
+# capture is the hard precondition — 8b without it resolves from stale
+# journal fields, the C-4 wrong-rollback class).
+# ADDITIVE field only (D4 splice discipline — same shape as
+# journal_mark_f2_verified); existing readers parse named fields and
+# ignore extras. The field rides the txn's whole life (journal_mark_flipped
+# and journal_heartbeat splice in place, never rewrite the object).
+journal_mark_captured_previous() {
+    local ver="${1:-}"
+    local json inf new_inf raw
+    json="$(journal_read)" || return 1
+    inf="$(_json_sub "$json" "in_flight")"
+    case "$inf" in
+        '{'*) ;;
+        *)
+            _warn "journal_mark_captured_previous: no in_flight txn object (in_flight null/absent/malformed) — refusing to stamp (journal untouched)"
+            return 1
+            ;;
+    esac
+    case "$ver" in
+        ''|null) raw="null" ;;
+        *)       raw="\"$(_json_escape "$ver")\"" ;;
+    esac
+    new_inf="${inf%\}}"
+    new_inf="${new_inf},\"captured_previous\":$raw}"
+    journal_update "in_flight" "$new_inf"
+}
+
+# ── D5 (self-service-promote Wave 3): the rollback-target chain ─────────────
+# The 5-rung resolution R0 > R1 > R2 > R3 > R4 (§2.5 of
+# .agents/shared/planning/self-service-promote/architecture-recommendation.md
+# — the BINDING table). THREE implementations exist by necessity (lib.sh
+# for the ceremony scripts, launcher.sh's _js_ twin because the launcher
+# is staged standalone and never sources lib.sh, and the Python resolver
+# daemon/services/rollback_target_chain.py for the daemon closer) —
+# AC-D5-12's parity pack pins all three resolve IDENTICALLY
+# (tests/fixtures/rollback_target_chain_cases.tsv).
+#
+# VALID (a G0 candidate: capture / displaced):
+#   non-empty ∧ ≠ txn target ∧ ≠ live symlink target ∧ releases/<v> exists
+# VALID_to (the R1 `to=` field — F5): non-empty ∧ ≠ target ∧ releases/<v>
+#   exists (the live-link conjunct is a G0-candidate rule; the request's
+#   to= is gated exactly as the spec's F5 words it).
+# R0 capture: ABSENT (field null/empty — the flip-prep persist writes null
+#   when there is no symlink) ⇒ fall through; present ∧ VALID ⇒ candidate
+#   `captured`; present ∧ INVALID ⇒ HALT capture_invalid — NEVER fall
+#   through (F3: a present-but-bogus capture is evidence of a corrupted
+#   txn, not of an absent field).
+# R1 to=: absent/none ⇒ fall; VALID-fail ⇒ treated ABSENT (never a
+#   candidate — F5); VALID ∧ R0-candidate exists ∧ ≠ R0 ⇒ HALT
+#   rollback_target_ambiguous; VALID ∧ no R0 ⇒ candidate `requested`.
+# R2 journal.current: null ⇒ fall; == target ⇒ INVALID ⇒ fall; VALID ⇒
+#   candidate `current`.
+# R3 displaced: null ⇒ fall; present ∧ ≠ R2-value while R2 is a VALID
+#   candidate ⇒ HALT rollback_target_ambiguous; else VALID ⇒ candidate
+#   `displaced` (when R2 == R3 the R2 candidate stands, source=current).
+# R4 journal.previous (G1): null ⇒ HALT no_previous_release (the caller
+#   maps it to the EXISTING "journal has no previous release" halt,
+#   VERBATIM); == target ⇒ same halt; VALID ⇒ candidate `previous`;
+#   present-but-otherwise-invalid ⇒ the same halt (never resolve past the
+#   last rung onto a bogus value).
+# Resolution SHORT-CIRCUITS at the highest VALID rung (clarification (i)):
+#   a VALID R0 resolves OVER any stale-field disagreement between
+#   R2/R3/R4 — those rungs are never evaluated once R0 resolves.
+_rollback_target_valid() {
+    # <releases_dir> <ver> <target> <live_link>
+    local rel="$1" ver="$2" target="$3" live="$4"
+    [ -n "$ver" ] || return 1
+    [ "$ver" != "$target" ] || return 1
+    [ "$ver" != "$live" ] || return 1
+    [ -d "$rel/$ver" ] || return 1
+    return 0
+}
+
+_rollback_target_resolve() {
+    # <releases_dir> <target> <live_link> <capture> <r1_to> <r2_current>
+    # <r3_displaced> <r4_previous>
+    # stdout: "resolve <ver> <source>" (rc 0) | "halt <reason>" (rc 1)
+    local rel="$1" target="$2" live="$3" cap="$4" r1to="$5"
+    local r2="$6" r3="$7" r4="$8"
+    local cand="" src=""
+    # ── R0: the filesystem capture ──
+    case "$cap" in
+        ''|null)
+            ;; # ABSENT (old-format txn / fresh-install null persist) — fall
+        *)
+            if _rollback_target_valid "$rel" "$cap" "$target" "$live"; then
+                cand="$cap"; src="captured"
+            else
+                printf 'halt capture_invalid'
+                return 1
+            fi
+            ;;
+    esac
+    # ── R1: the rollback_requested row's to= ──
+    case "$r1to" in
+        ''|null|none)
+            ;; # absent/none — a disposition request only; fall
+        *)
+            if [ -n "$r1to" ] && [ "$r1to" != "$target" ] && [ -d "$rel/$r1to" ]; then
+                if [ -n "$cand" ] && [ "$r1to" != "$cand" ]; then
+                    printf 'halt rollback_target_ambiguous'
+                    return 1
+                fi
+                [ -n "$cand" ] || { cand="$r1to"; src="requested"; }
+            fi
+            # a to= failing VALID (== target / missing dir) is treated as
+            # ABSENT — never a candidate, never a halt (F5)
+            ;;
+    esac
+    # SHORT-CIRCUIT (clarification (i)): resolution stops at the highest
+    # VALID rung — once R0 or R1 resolved, any R2/R3/R4 stale-field
+    # disagreement is RESOLVED-OVER, never an ambiguity halt (those fire
+    # only when the conflict is reached with no higher rung resolved).
+    if [ -n "$cand" ]; then
+        printf 'resolve %s %s' "$cand" "$src"
+        return 0
+    fi
+    # ── R2: journal.current at resolution time ──
+    local r2_cand=""
+    case "$r2" in
+        ''|null)
+            ;;
+        *)
+            if [ "$r2" != "$target" ] && [ "$r2" != "$live" ] && [ -d "$rel/$r2" ]; then
+                r2_cand="$r2"
+                [ -n "$cand" ] || { cand="$r2"; src="current"; }
+            fi
+            # == target ⇒ INVALID ⇒ fall; missing dir ⇒ not a candidate ⇒ fall
+            ;;
+    esac
+    # ── R3: in_flight.displaced_version (legacy G0 stamp) ──
+    case "$r3" in
+        ''|null)
+            ;;
+        *)
+            if [ -n "$r2_cand" ] && [ "$r3" != "$r2_cand" ]; then
+                # present ∧ ≠ a VALID R2 ⇒ ambiguity — never a wrong rollback
+                printf 'halt rollback_target_ambiguous'
+                return 1
+            fi
+            if [ -z "$cand" ] && _rollback_target_valid "$rel" "$r3" "$target" "$live"; then
+                cand="$r3"; src="displaced"
+            fi
+            ;;
+    esac
+    # ── R4: journal.previous (G1 — the last rung) ──
+    if [ -z "$cand" ]; then
+        case "$r4" in
+            ''|null)
+                printf 'halt no_previous_release'
+                return 1
+                ;;
+        esac
+        if [ "$r4" != "$target" ] && [ "$r4" != "$live" ] && [ -d "$rel/$r4" ]; then
+            cand="$r4"; src="previous"
+        else
+            printf 'halt no_previous_release'
+            return 1
+        fi
+    fi
+    printf 'resolve %s %s' "$cand" "$src"
+    return 0
+}
+
+# _rollback_request_to <target> <run_id> — the R1 reader: extract the
+# `to <DEST>` token from the rollback_requested history row for this
+# (target, run_id). Delimiter-anchored on the PAIR `to <v> to_source <s>`
+# (the Wave-3 writer always emits both; a pre-Wave-3 row carries no to=
+# ⇒ absent). rc 0 + the value on stdout (may be "none"); rc 1 = no row
+# for this (target, run_id) / journal unreadable (the caller treats both
+# as R1-absent — an unreadable request row can never nominate a
+# destination, and the chain's own halt rules still guard the resolution).
+_rollback_request_to() {
+    local target="$1" run_id="$2"
+    local json hist entry to_tok
+    [ -n "$target" ] || return 1
+    [ -n "$run_id" ] || return 1
+    json="$(journal_read 2>/dev/null)" || return 1
+    hist="$(_json_sub "$json" "history" 2>/dev/null)" || return 1
+    case "$hist" in ''|null|'[]') return 1 ;; esac
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        case "$entry" in
+            *"\"event\":\"rollback_requested\""*|*"\"event\": \"rollback_requested\""*) ;;
+            *) continue ;;
+        esac
+        case "$entry" in
+            *"target $target "*|*"target $target\"") ;;
+            *) continue ;;
+        esac
+        case "$entry" in
+            *"run_id $run_id "*|*"run_id $run_id\"") ;;
+            *) continue ;;
+        esac
+        to_tok="$(printf '%s' "$entry" | grep -oE ' to [^ ]+ to_source' | head -1)"
+        case "$to_tok" in
+            ' to none to_source') printf 'none'; return 0 ;;
+            ' to '*)
+                to_tok="${to_tok# to }"
+                to_tok="${to_tok% to_source}"
+                printf '%s' "$to_tok"; return 0 ;;
+            *) return 0 ;;   # the row exists but predates the to= payload ⇒ absent (empty)
+        esac
+    done < <(_journal_history_entries "$hist")
+    return 1
+}
+
 # journal_close_txn — in_flight = null.
 journal_close_txn() {
     journal_update "in_flight" "null"
@@ -9374,7 +9588,16 @@ adopt_stale_txn() {
         if [ "$_sp_green" = "1" ] && journal_history_has_intent_flip "$target"; then
             # ALL conjuncts hold — commit-close (history-before-close) and
             # let the promote continue.
-            _sp_displaced="$(_json_field "$inf" "displaced_version" 2>/dev/null)" || _sp_displaced=""
+            # D5 (AC-D5-11): `previous` is republished from the CAPTURE
+            # (in_flight.captured_previous) when present — displaced_version
+            # is the OLD-FORMAT fallback; the halt fires only when BOTH
+            # are absent (byte-unchanged for old-format txns).
+            _sp_displaced="$(_json_field "$inf" "captured_previous" 2>/dev/null)" || _sp_displaced=""
+            case "$_sp_displaced" in
+                ''|null)
+                    _sp_displaced="$(_json_field "$inf" "displaced_version" 2>/dev/null)" || _sp_displaced=""
+                    ;;
+            esac
             case "$_sp_displaced" in
                 ''|null)
                     journal_history_append halt "adopt: stale flipped $kind txn (target=$target) is SERVING GREEN but has no in_flight.displaced_version (old-format txn) — halt-for-human, txn left in place"
@@ -9406,19 +9629,51 @@ adopt_stale_txn() {
             return 0
         fi
         # ── stale flipped → adopt via the sweep-rollback recovery ──────────
-        # Manifest gate on previous FIRST (halt-for-human, NO repoint, txn
-        # left in place — mirrors the sweep's no-previous / missing-dir /
-        # rollback_safe halts; D-FA4.5 schema-drift guard, enforced by
-        # every rollback path in this pipeline INCLUDING the launcher
-        # sweep).
-        local prev prev_safe newcnt
-        prev="$(_json_field "$json" previous)"
-        case "$prev" in ''|null)
-            journal_history_append halt "adopt: stale flipped $kind txn (target=$target) but journal has no previous release — halt-for-human, NO repoint, txn left in place"
-            _warn "HALT-FOR-HUMAN: stale flipped txn (target=$target) with NO previous release — cannot adopt-rollback; txn left for the sweep/human"
-            exit 78
-            ;;
-        esac
+        # D5 (self-service-promote Wave 3): the rollback target is resolved
+        # by the 5-rung CHAIN (_rollback_target_resolve — R0
+        # in_flight.captured_previous > R1 to= > R2 current > R3 displaced >
+        # R4 previous), NOT the bare journal.previous read (the C-4
+        # stale-field class). Manifest gates on the RESOLVED target follow,
+        # order unchanged (null → QUARANTINED → missing dir → rollback_safe).
+        local prev prev_safe newcnt _adp_live _adp_cap _adp_r1 _adp_r2 _adp_r3 _adp_res _adp_src
+        _adp_live="$(readlink "$INSTALL_DIR/current" 2>/dev/null)" || _adp_live=""
+        case "$_adp_live" in releases/*) _adp_live="${_adp_live#releases/}" ;; esac
+        _adp_cap="$(_json_field "$inf" "captured_previous" 2>/dev/null)" || _adp_cap=""
+        [ "$_adp_cap" = "null" ] && _adp_cap=""
+        _adp_r1=""
+        if _rollback_request_to "$target" "$(_journal_txn_identity "$inf" "$target")" >/dev/null 2>&1; then
+            _adp_r1="$(_rollback_request_to "$target" "$(_journal_txn_identity "$inf" "$target")")"
+        fi
+        _adp_res="$(_rollback_target_resolve "$INSTALL_DIR/releases" "$target" "$_adp_live" "$_adp_cap" "$_adp_r1" \
+            "$(_json_field "$json" current)" "$(_json_field "$inf" displaced_version)" "$(_json_field "$json" previous)")"
+        if [ "$?" -ne 0 ]; then
+            case "$_adp_res" in
+                'halt no_previous_release')
+                    journal_history_append halt "adopt: stale flipped $kind txn (target=$target) but journal has no previous release — halt-for-human, NO repoint, txn left in place"
+                    _warn "HALT-FOR-HUMAN: stale flipped txn (target=$target) with NO previous release — cannot adopt-rollback; txn left for the sweep/human"
+                    exit 78
+                    ;;
+                'halt capture_invalid')
+                    journal_history_append halt "adopt: stale flipped $kind txn (target=$target) capture_invalid (captured_previous='$_adp_cap' fails VALID — F3: never fall through) — halt-for-human, NO repoint, txn left in place"
+                    _warn "HALT-FOR-HUMAN: captured_previous='$_adp_cap' is present-but-INVALID (corrupted txn evidence) — refusing to adopt-rollback; txn left for the sweep/human"
+                    exit 78
+                    ;;
+                'halt rollback_target_ambiguous')
+                    journal_history_append halt "adopt: stale flipped $kind txn (target=$target) rollback_target_ambiguous (capture='$_adp_cap' to='$_adp_r1' current='$(_json_field "$json" current)' displaced='$(_json_field "$inf" displaced_version)' previous='$(_json_field "$json" previous)') — halt-for-human, NO repoint, txn left in place"
+                    _warn "HALT-FOR-HUMAN: CONFLICTING valid rollback-target candidates — never a wrong rollback; txn left for the sweep/human"
+                    exit 78
+                    ;;
+                *)
+                    journal_history_append halt "adopt: rollback-target resolution unrecognized ('$_adp_res') — fail-closed, NO repoint, txn left in place"
+                    _warn "HALT-FOR-HUMAN: rollback-target resolution unrecognized ('$_adp_res') — fail-closed; txn left for the sweep/human"
+                    exit 78
+                    ;;
+            esac
+        fi
+        prev="${_adp_res#resolve }"
+        _adp_src="${prev##* }"
+        prev="${prev% *}"
+        _log "adopt: rollback target resolved -> $prev (source=$_adp_src)"
         # M4: a QUARANTINED previous is a known-bad release (it failed a
         # gate before) — never adopt-rollback onto it. Same halt shape as
         # promote's auto-rollback gate and the launcher sweep's: halt event,
@@ -9472,6 +9727,19 @@ adopt_stale_txn() {
             _warn "adopt: journal_set_current $prev FAILED after the repoint — txn LEFT OPEN, never closed over a failed state write (the sweep retries idempotently); promote refusing (W3)"
             exit 78
         }
+        # D5 — normalize `previous` for the new current (leave unchanged iff
+        # VALID: non-null ∧ ≠ the new current ∧ the release dir exists; else
+        # null + a previous_invalidated row).
+        local _adp_prev_now
+        _adp_prev_now="$(_json_field "$(journal_read 2>/dev/null)" previous 2>/dev/null)" || _adp_prev_now=""
+        [ "$_adp_prev_now" = "null" ] && _adp_prev_now=""
+        if [ -n "$_adp_prev_now" ] && [ "$_adp_prev_now" != "$prev" ] \
+           && [ -d "$INSTALL_DIR/releases/$_adp_prev_now" ]; then
+            : # VALID for the new current — left unchanged (the G1 record)
+        else
+            journal_set_previous "null" || _warn "adopt: previous normalization write FAILED (journal diverged)"
+            journal_history_append previous_invalidated "adopt: journal previous='${_adp_prev_now:-none}' was not VALID for the new current=$prev — set null" || true
+        fi
         newcnt="$(journal_count_rollback 1)" || newcnt=""
         if [ -z "$newcnt" ]; then
             # M5: the recovery's repoint/quarantine already landed — do not
@@ -9481,7 +9749,7 @@ adopt_stale_txn() {
             # the only safe drift here).
             _warn "adopt: rollback counter/cooldown write FAILED after the repoint — journal diverged; anti-flapping count may be lost (repair the journal)"
         fi
-        journal_history_append sweep_rollback "adopt: orphaned flipped $kind txn (target=$target, owner pid ${owner:-?}, age ${age}s) rolled back to $prev at promote preflight; counted as auto-rollback (ADR-024)"
+        journal_history_append sweep_rollback "adopt: orphaned flipped $kind txn (target=$target, owner pid ${owner:-?}, age ${age}s) rolled back to $prev (source=$_adp_src) at promote preflight; counted as auto-rollback (ADR-024)"
         journal_close_txn || {
             _warn "adopt: txn close FAILED after the sweep-rollback recovery — txn LEFT OPEN for the sweep to retry idempotently at the next launcher start; promote refusing (W3)"
             exit 78

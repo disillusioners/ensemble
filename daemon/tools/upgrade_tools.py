@@ -899,6 +899,96 @@ def _current_symlink(install_dir: Path | None) -> tuple[str | None, str]:
         return None, "current symlink unreadable"
 
 
+def _armtime_rollback_target_invariant(
+    install_dir: Path | None,
+) -> tuple[str, str, str]:
+    """LD-3 / AC-D5-14 (self-service-promote Wave 3): the arm-time
+    rollback-target invariant.
+
+    The would-be rollback target (the ``current`` symlink's release) must
+    be **present ∧ not quarantined ∧ rollback_safe** — else the ARM
+    refuses PRE-NONCE with a named reason (never a mid-ceremony
+    halt-for-human for this class).
+
+    Returns ``("pass", "", "")`` / ``("note", "", why)`` (no invariant to
+    check — e.g. a fresh install with no ``current`` symlink: the
+    ceremony's own no-previous halt covers that shape; the invariant does
+    not retro-block first-install promotes) / ``("refuse", <reason>, <message>)``.
+
+    Refusal reasons (additive, LD-7 — no existing token renamed):
+      * ``rollback-target-missing`` — the symlink names a release whose
+        dir is absent (dangling / manually deleted);
+      * ``rollback-target-quarantined`` — the would-be target is in the
+        journal's ``quarantined[]`` (M4: rolling back onto a known-bad
+        release is what quarantine exists to prevent);
+      * ``rollback-target-not-rollback-safe`` — the target's manifest does
+        not declare ``rollback_safe:true`` (ADR-005 M5 schema-drift guard).
+    """
+    if install_dir is None:
+        return ("note", "", "no install dir — no rollback-target invariant to check")
+    target, note = _current_symlink(install_dir)
+    if note:
+        # unreadable / dangling — _current_symlink already distinguishes:
+        # a DANGLING symlink names a missing release dir ⇒ refuse.
+        if target:
+            return (
+                "refuse",
+                "rollback-target-missing",
+                f"the would-be rollback target (current -> {target}) has no "
+                f"release dir ({note}) — a ceremony that could not roll "
+                f"back safely never starts (LD-3)",
+            )
+        return (
+            "refuse",
+            "rollback-target-unprobeable",
+            f"the current symlink could not be read ({note or 'unreadable'}) "
+            f"— the would-be rollback target is UNKNOWN; fail-closed",
+        )
+    if target is None:
+        return (
+            "note",
+            "",
+            "no current symlink (fresh install / pre-first-promote) — no "
+            "rollback-target invariant to check; the ceremony's own "
+            "no-previous halt covers the shape",
+        )
+    name = target.rsplit("/", 1)[-1]
+    try:
+        journal = uj.journal_read(install_dir)
+    except Exception:  # noqa: BLE001 — no journal ⇒ nothing quarantined yet
+        journal = None
+    if isinstance(journal, dict):
+        quarantined = journal.get("quarantined")
+        if isinstance(quarantined, list) and name in quarantined:
+            return (
+                "refuse",
+                "rollback-target-quarantined",
+                f"the would-be rollback target (current -> {name}) is "
+                f"QUARANTINED (known-bad — M4): an auto-rollback onto it is "
+                f"impossible, so the ceremony would strand the env "
+                f"halt-for-human (LD-3)",
+            )
+    manifest = install_dir / "releases" / name / "manifest.json"
+    safe: str | None = None
+    try:
+        raw = json.loads(manifest.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            safe = raw.get("rollback_safe")
+    except (OSError, ValueError):
+        safe = None
+    if safe is not True:
+        return (
+            "refuse",
+            "rollback-target-not-rollback-safe",
+            f"the would-be rollback target (current -> {name}) is not "
+            f"rollback_safe (manifest says {safe!r}; ADR-005 M5 schema-drift "
+            f"guard) — an auto-rollback into schema drift is refused by "
+            f"design, so the ceremony would strand the env halt-for-human "
+            f"(LD-3)",
+        )
+    return ("pass", "", "")
+
+
 def _lock_state(install_dir: Path | None) -> str:
     """Pipeline lock display — status.sh parity. READ-ONLY (no mkdir/mv/rm)."""
     if install_dir is None:
@@ -4099,6 +4189,40 @@ never decides go/rollback).
                     type(exc).__name__,
                     exc,
                     jc_verdict,
+                )
+            # ── Step 0d — the ARM-TIME ROLLBACK-TARGET INVARIANT (LD-3 / ────
+            # AC-D5-14, self-service-promote Wave 3) ───────────────────────
+            # At ARM, pre-nonce: the would-be rollback target (the current
+            # symlink's release) must be present ∧ not quarantined ∧
+            # rollback_safe — else REFUSE with a named reason. This
+            # converts the most common mid-ceremony halt-for-human class
+            # (the M4/M5/missing-dir 8b halt arms) into an arm-time
+            # refusal: a ceremony that could not roll back safely never
+            # starts. The nonce is NOT burned (the refusal precedes
+            # consume_pending_action).
+            try:
+                inv = _armtime_rollback_target_invariant(install_dir)
+            except Exception as inv_err:  # noqa: BLE001 — fail-closed below
+                inv = (
+                    "refuse",
+                    "rollback-target-unprobeable",
+                    f"the rollback-target invariant could not be evaluated "
+                    f"({type(inv_err).__name__}: {inv_err}) — fail-closed: "
+                    f"the arm refuses rather than start a ceremony whose "
+                    f"recovery path is unknown",
+                )
+            if inv[0] == "refuse":
+                journal_lock_release(install_dir)
+                return _refusal(
+                    label,
+                    inv[1],
+                    f"arm preflight: {inv[2]} — nonce NOT burned (the arm "
+                    f"simply did not happen; nothing consumed)",
+                )
+            if inv[0] == "note":
+                logger.info(
+                    "upgrade_tools: arm-time rollback-target invariant: %s",
+                    inv[2],
                 )
             try:
                 if confirmed_action is not None:

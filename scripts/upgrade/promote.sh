@@ -599,6 +599,84 @@ journal_mark_supervision || _warn "supervision txn stamp failed (advisory — co
 PROMOTE_START="$(_now_epoch)"
 _log "txn open: promote target=$VERSION pid=$$ (outer window $((SWEEP_STALE_S))s from txn start)"
 
+# ═══════════ 2.1d FILESYSTEM CAPTURE (D5 — self-service-promote Wave 3) ════
+# The HARD PRECONDITION for every rollback-target resolution downstream
+# (§2.5 write-ordering): `readlink "$INSTALL_DIR/current"` HERE — after
+# txn-open, BEFORE the stop/flip — persisted as in_flight.captured_previous
+# (the additive field; LD-5's transactional source of truth, rung R0).
+# This closes the C-4 wrong-rollback class: journal.current lags the
+# symlink across the whole open-txn window (the 13-writer census — none
+# at flip time), so OLD_CUR/PREV/8b derived from journal fields are the
+# STALE class; the capture is the filesystem truth.
+#
+# FLIP-PREP-FRAME NOTE (disclosed divergence, Wave 3): the published R0
+# predicate's conjuncts `≠ txn target` and `≠ the live symlink target`
+# are RESOLUTION-time predicates — evaluated by _rollback_target_resolve
+# at 8b/sweep/adopt time where the symlink points at the flipped target.
+# At flip-prep the capture IS the live symlink target BY CONSTRUCTION
+# (and the F6 re-read below REQUIRES that identity), so evaluating them
+# here would halt every promote. Flip-prep validates the STRUCTURAL
+# conjuncts (non-empty when a symlink exists ∧ releases/<v> exists) and
+# re-runs the M4/M5 guards on the captured target (MINOR-7).
+CAPTURED_PREVIOUS="$(readlink "$INSTALL_DIR/current" 2>/dev/null)" || CAPTURED_PREVIOUS=""
+case "$CAPTURED_PREVIOUS" in releases/*) CAPTURED_PREVIOUS="${CAPTURED_PREVIOUS#releases/}" ;; esac
+if [ -n "$CAPTURED_PREVIOUS" ]; then
+    # structural validation — each conjunct failing LOUD (halt, NO flip,
+    # exit 78, txn OPEN: the sweep clears the stale pre-flip txn)
+    if [ ! -d "$REL/$CAPTURED_PREVIOUS" ]; then
+        _warn "capture_invalid: readlink current -> '$CAPTURED_PREVIOUS' but releases/$CAPTURED_PREVIOUS does not exist — halting BEFORE any stop/flip (txn left open for the sweep's pre-flip clear)"
+        journal_history_append halt "promote refused pre-flip: captured_previous '$CAPTURED_PREVIOUS' has no releases/ dir (capture_invalid — structural) — no stop, no flip, txn left open" || true
+        lock_release
+        exit 78
+    fi
+    # MINOR-7 — the in-ceremony twin of the arm-time rollback-target
+    # invariant (LD-3): re-run the M4 quarantine + ADR-005 M5
+    # rollback_safe guards ON THE CAPTURED TARGET, in the family order
+    # (M4 quarantine → dir exists (above) → M5 rollback_safe).
+    if journal_is_quarantined "$CAPTURED_PREVIOUS"; then
+        _warn "capture_invalid: captured_previous '$CAPTURED_PREVIOUS' is QUARANTINED (known-bad — M4) — a ceremony that could only roll back onto a known-bad release never starts; halting BEFORE any stop/flip (txn left open)"
+        journal_history_append halt "promote refused pre-flip: captured_previous '$CAPTURED_PREVIOUS' is QUARANTINED (M4) — no stop, no flip, txn left open" || true
+        lock_release
+        exit 78
+    fi
+    CAPTURED_SAFE="$(manifest_field "$CAPTURED_PREVIOUS" rollback_safe 2>/dev/null)"
+    if [ "$CAPTURED_SAFE" != "true" ]; then
+        _warn "capture_invalid: captured_previous '$CAPTURED_PREVIOUS' is NOT rollback_safe (${CAPTURED_SAFE:-missing manifest}) — the would-be rollback target fails ADR-005 M5 (LD-3: a ceremony that could not roll back safely never starts); halting BEFORE any stop/flip (txn left open)"
+        journal_history_append halt "promote refused pre-flip: captured_previous '$CAPTURED_PREVIOUS' rollback_safe=${CAPTURED_SAFE:-missing} (D-FA4.5/LD-3) — no stop, no flip, txn left open" || true
+        lock_release
+        exit 78
+    fi
+    # cross-check vs journal.current (adjudicated §2.5: divergence is the
+    # NORMAL post-halt state — JOURNALED, CONTINUE; the symlink is truth,
+    # the capture is validated strictly; a valid capture RESOLVES over the
+    # stale-field disagreement downstream)
+    if [ -n "$CUR" ] && [ "$CUR" != "$CAPTURED_PREVIOUS" ]; then
+        journal_history_append capture_divergence "flip-prep: journal.current='$CUR' ≠ filesystem capture='$CAPTURED_PREVIOUS' (journal lags the symlink — the normal post-halt state); the symlink is truth, continuing" || true
+        _log "capture divergence: journal.current='$CUR' ≠ capture='$CAPTURED_PREVIOUS' (journaled; the symlink is truth)"
+    fi
+fi
+# persist (CHECKED — failure ⇒ halt, NO flip, exit 78, txn OPEN). '' (no
+# current symlink — fresh install) persists JSON null = the documented
+# ABSENT capture (old-format-equivalent fall-through downstream).
+if ! journal_mark_captured_previous "$CAPTURED_PREVIOUS"; then
+    _warn "cannot persist in_flight.captured_previous — halting BEFORE any stop/flip (txn left open for the sweep's pre-flip clear)"
+    journal_history_append halt "promote refused pre-flip: captured_previous persist FAILED (checked write) — no stop, no flip, txn left open" || true
+    lock_release
+    exit 78
+fi
+# F6 integrity — re-read the symlink: it must not have moved between the
+# capture and the persist (the pipeline lock makes this near-impossible;
+# the re-read makes it IMPOSSIBLE to miss).
+CAPTURED_RECHECK="$(readlink "$INSTALL_DIR/current" 2>/dev/null)" || CAPTURED_RECHECK=""
+case "$CAPTURED_RECHECK" in releases/*) CAPTURED_RECHECK="${CAPTURED_RECHECK#releases/}" ;; esac
+if [ "$CAPTURED_RECHECK" != "$CAPTURED_PREVIOUS" ]; then
+    _warn "capture_invalid: the current symlink MOVED between capture ('$CAPTURED_PREVIOUS') and persist ('$CAPTURED_RECHECK') — halting BEFORE any stop/flip (txn left open)"
+    journal_history_append halt "promote refused pre-flip: the current symlink moved between capture ('$CAPTURED_PREVIOUS') and persist ('$CAPTURED_RECHECK') (F6 integrity) — no stop, no flip, txn left open" || true
+    lock_release
+    exit 78
+fi
+_log "flip-prep capture: captured_previous='${CAPTURED_PREVIOUS:-<none>}' (journal.current='${CUR:-<none>}'; OLD_CUR='${OLD_CUR:-<unset>}')"
+
 # ═══════════════════════════ 2. STOP (D6) ══════════════════════════════════
 # P2 (ownership-mode commission 2026-09-29): stop_via_stop_script now
 # re-runs the DUAL_FIGHT check pre-stop (refuses exit 78 before any stop
@@ -669,6 +747,22 @@ _enforce_deadline "$promote_deadline" flip
 # ═══════════════════════════ 5. FLIPPED MARKER ═════════════════════════════
 journal_mark_flipped || { _warn "cannot mark flipped — halting for human (sweep will find the txn)"; exit 1; }
 lock_heartbeat
+
+# ── D5/G (self-service-promote Wave 3): the LD-1 PENDING-VERDICT row ───────
+# VERDICT semantics (§7.1(a), BINDING): the flip itself NEVER fires the 8a
+# bookkeeping — no journal_set_current / set_previous / close_txn before a
+# GREEN disposition. The row states the disposition is PENDING and the
+# async window's BOUND (launcher-restart cadence + SWEEP_DEFER_CEILING);
+# the async rollback trigger stays the closer's bar (version + readyz
+# composite + soak — AC-D6-12's bar, never weaker); a slow-but-green boot
+# consumes NO credit; a post-8a rollback is MANUAL (rollback.sh --to).
+# §7.1(f): the Emperor-facing verdict NEVER reads "committed" before
+# green — this row reads "flipped — disposition pending", never
+# "committed". §7.1(e) kill-switch: the async disposition's switch is the
+# EXISTING SWEEP_SERVING_GREEN_ENABLED family (add-only, untouched).
+journal_history_append flip_pending_verdict \
+    "flipped — disposition pending (target $VERSION; captured_previous=${CAPTURED_PREVIOUS:-none}; async window bounded by launcher-restart cadence + SWEEP_DEFER_CEILING=${SWEEP_DEFER_CEILING:-3}; disposition = in-ceremony gates first, then the closer's bar: version + readyz composite + soak; credits: slow-green = none, async-discovered bad flip = tierB, post-8a rollback = MANUAL)" \
+    || _warn "flip_pending_verdict journal append FAILED (best-effort; the closer path remains reachable via the open flipped txn)"
 
 # ═════════════ 6. RESTART — supervision-aware hand-back (P3) ═════════════════
 # The executor's P1 classification — consumed from the stop-site globals
@@ -882,6 +976,29 @@ fi
 # so a halt routes to the sweep-rollback path on the next launcher
 # start (the existing B4 leave-txn-open contract).
 _enforce_deadline "$promote_deadline" commit
+# ── D5/MINOR-10 (self-service-promote Wave 3): the closer-vs-executor
+# commit-race guard — a second commit arriving on an ALREADY-CLOSED txn
+# is a journaled `already_closed` no-op, never a second bookkeeping
+# pass. Reachable when the daemon-side closer commit-closed a halted
+# txn (B4 left it OPEN; the closer is the ONLY mechanism that has ever
+# completed a real flip rescue — C-2) and this shell was later revived.
+COMMIT_JSON="$(journal_read 2>/dev/null)" || COMMIT_JSON=""
+COMMIT_INF="$(_json_sub "$COMMIT_JSON" in_flight 2>/dev/null)" || COMMIT_INF=""
+case "$COMMIT_INF" in
+    ''|null)
+        journal_history_append already_closed "commit fork: in_flight is already null (the daemon-side closer completed the bookkeeping) — executor no-op, no second bookkeeping pass" || true
+        _log "COMMIT FORK: txn already closed (closer won the race) — no-op, exiting clean"
+        lock_release
+        exit 0
+        ;;
+esac
+COMMIT_INF_TARGET="$(_json_field "$COMMIT_INF" target 2>/dev/null)" || COMMIT_INF_TARGET=""
+if [ -n "$COMMIT_INF_TARGET" ] && [ "$COMMIT_INF_TARGET" != "$VERSION" ]; then
+    journal_history_append already_closed "commit fork: in_flight.target='$COMMIT_INF_TARGET' ≠ this run's '$VERSION' (a foreign txn owns the journal) — executor no-op" || true
+    _warn "COMMIT FORK: a foreign txn (target=$COMMIT_INF_TARGET) owns the journal — no-op"
+    lock_release
+    exit 78
+fi
 if [ -z "$gate_fail_reason" ]; then
     # commit — M5: every journal write is checked; a failed write must
     # never let the promote exit 0 with the symlink/journal diverged (see
@@ -919,21 +1036,21 @@ if [ -z "$gate_fail_reason" ]; then
         _warn "immediacy breach at commit: journal current=$current_now ≠ $VERSION — halting (exit 78); txn left open for sweep recovery"
         exit 78
     fi
-    journal_set_previous "${OLD_CUR:-null}" || journal_fail_loud "commit: journal_set_previous ${OLD_CUR:-null}"
+    journal_set_previous "${CAPTURED_PREVIOUS:-null}" || journal_fail_loud "commit: journal_set_previous ${CAPTURED_PREVIOUS:-null}"
     journal_close_txn                     || journal_fail_loud "commit: journal_close_txn"
     # D6-v (self-service-promote Wave 2): stamp the measured boot-to-green
     # verify elapsed as an additive token on the executor's own commit row —
     # the journal sample the hand-back's measured-ceiling reader consumes
     # (lib.sh _handback_measured_verify_ceiling_s; mechanism only, no
     # inflation — a missing token simply leaves the default 300s ceiling).
-    _COMMIT_DETAIL="promote $VERSION committed (gate+soak green; previous=${OLD_CUR:-none}"
+    _COMMIT_DETAIL="promote $VERSION committed (gate+soak green; previous=${CAPTURED_PREVIOUS:-none}"
     if [ -n "${HANDBACK_VERIFY_ELAPSED_S:-}" ]; then
         _COMMIT_DETAIL="${_COMMIT_DETAIL}; verify_elapsed_s=${HANDBACK_VERIFY_ELAPSED_S}s"
     fi
     _COMMIT_DETAIL="${_COMMIT_DETAIL})"
     journal_history_append commit "$_COMMIT_DETAIL" \
                                           || journal_fail_loud "commit: history append"
-    _log "COMMITTED: current=$VERSION previous=${OLD_CUR:-<none>}"
+    _log "COMMITTED: current=$VERSION previous=${CAPTURED_PREVIOUS:-<none>}"
     retention_evict
     # D3-10/T3.11 (R8): per-run log retention — owner = THIS shell, still
     # UNDER the pipeline lock (this seat). <=20 kept + 14 d age cap, five
@@ -956,9 +1073,63 @@ _log "GATE FAILED: $gate_fail_reason — auto-rollback initiating (ADR-005)"
 # PREV_JSON read below is kept for the immediacy-correctness check
 # (the gate below still consults `journal.previous` as a defense-in-
 # depth sanity read; the real target remains $OLD_CUR).
+# D5 (self-service-promote Wave 3) — SUPERSEDED SELECTION: the target is
+# resolved by _rollback_target_resolve, the 5-rung chain (R0
+# captured_previous > R1 to= > R2 current > R3 displaced > R4 previous).
+# $OLD_CUR (the journal-derived pre-flip current) remains only as the
+# cross-check narrative; the CAPTURE is the source of truth (C-4: every
+# journal-derived selector is the stale class).
 PREV_JSON="$(journal_read)"
-PREV="$OLD_CUR"
-[ "$PREV" = "null" ] && PREV=""
+PREV_INF="$(_json_sub "$PREV_JSON" in_flight 2>/dev/null)" || PREV_INF=""
+PREV_LIVE="$(readlink "$INSTALL_DIR/current" 2>/dev/null)" || PREV_LIVE=""
+case "$PREV_LIVE" in releases/*) PREV_LIVE="${PREV_LIVE#releases/}" ;; esac
+PREV_R2="$(_json_field_quoted "$PREV_JSON" '"current":' 2>/dev/null)" || PREV_R2=""
+[ "$PREV_R2" = "null" ] && PREV_R2=""
+PREV_R3="$(_json_field "$PREV_INF" displaced_version 2>/dev/null)" || PREV_R3=""
+[ "$PREV_R3" = "null" ] && PREV_R3=""
+PREV_R4="$(_json_field_quoted "$PREV_JSON" '"previous":' 2>/dev/null)" || PREV_R4=""
+[ "$PREV_R4" = "null" ] && PREV_R4=""
+PREV_R1=""
+if _rollback_request_to "$VERSION" "$(_journal_txn_identity "$PREV_INF" "$VERSION")" >/dev/null 2>&1; then
+    PREV_R1="$(_rollback_request_to "$VERSION" "$(_journal_txn_identity "$PREV_INF" "$VERSION")")"
+fi
+PREV_LINE="$(_rollback_target_resolve "$REL" "$VERSION" "$PREV_LIVE" "${CAPTURED_PREVIOUS:-}" "$PREV_R1" "$PREV_R2" "$PREV_R3" "$PREV_R4")"
+if [ "$?" -ne 0 ]; then
+    case "$PREV_LINE" in
+        'halt no_previous_release')
+            PREV=""   # the EXISTING no-previous halt arm below fires (verbatim)
+            ;;
+        'halt capture_invalid')
+            # a present-but-INVALID capture is evidence of a corrupted txn
+            # (F3) — never fall through, never flip onto a guess. The txn
+            # is left OPEN (evidence preserved; the sweep re-evaluates and
+            # re-halts — halt rows are bounded by launcher boots).
+            _warn "HALT-FOR-HUMAN: capture_invalid — captured_previous='${CAPTURED_PREVIOUS:-}' fails VALID at 8b (corrupted txn evidence, F3) — NO repoint; txn left open; daemon rests on $VERSION"
+            journal_history_append halt "8b capture_invalid: captured_previous='${CAPTURED_PREVIOUS:-}' fails VALID (string ∧ non-empty ∧ ≠ target ∧ ≠ live symlink ∧ releases/<v> exists) — no repoint, txn left in place (F3: never fall through)" || true
+            _promote_disarm_launchd "supervisor-disarmed-capture-invalid" || true
+            lock_release
+            exit 78
+            ;;
+        'halt rollback_target_ambiguous')
+            _warn "HALT-FOR-HUMAN: rollback_target_ambiguous — two VALID candidates disagree (chain: capture='${CAPTURED_PREVIOUS:-}' to='${PREV_R1:-}' current='$PREV_R2' displaced='$PREV_R3' previous='$PREV_R4') — never a wrong rollback; NO repoint; txn left open; daemon rests on $VERSION"
+            journal_history_append halt "8b rollback_target_ambiguous: capture='${CAPTURED_PREVIOUS:-}' to='${PREV_R1:-}' current='$PREV_R2' displaced='$PREV_R3' previous='$PREV_R4' — two VALID candidates disagree; no repoint, txn left in place" || true
+            _promote_disarm_launchd "supervisor-disarmed-target-ambiguous" || true
+            lock_release
+            exit 78
+            ;;
+        *)
+            _warn "HALT-FOR-HUMAN: rollback-target resolver returned an unrecognized verdict ('$PREV_LINE') — fail-closed; NO repoint; txn left open"
+            journal_history_append halt "8b rollback-target resolution unrecognized ('$PREV_LINE') — fail-closed, no repoint, txn left in place" || true
+            lock_release
+            exit 78
+            ;;
+    esac
+else
+    PREV="${PREV_LINE#resolve }"
+    PREV_SRC="${PREV##* }"
+    PREV="${PREV% *}"
+    _log "8b rollback target resolved -> $PREV (source=$PREV_SRC; chain: capture='${CAPTURED_PREVIOUS:-}' to='${PREV_R1:-}' current='$PREV_R2' displaced='$PREV_R3' previous='$PREV_R4')"
+fi
 
 # ── D2a 8b DISARM helper (2026-11-11) ──────────────────────────────────────
 # The 8b manifest gate runs BEFORE the rollback stop, so on a launchd-managed
@@ -1094,23 +1265,29 @@ if [ -z "$REGATE_FAIL" ] && [ -n "$PREV_BIN_VERSION" ]; then
 fi
 
 # journal: rollback bookkeeping (counts toward cap — ADR-005; cooldown armed).
-# Restore the pre-promote pairing: current=PREV, previous=old current (the
-# release we were serving before this promote began).
-# M4 no-strand guard: when the promote WAS a same-version re-promote
-# (CUR == VERSION), the "old current" IS the version being quarantined
-# below — recording it as previous would strand previous==quarantined
-# and arm a later auto-rollback onto a known-bad release. In that case leave
-# previous at its pre-promote value (== the release just rolled back onto;
-# degenerate previous==current, but never quarantined — a later failed
-# promote still finds a valid, distinct rollback target once current moves).
-if [ "$CUR" != "$VERSION" ] || [ -z "$CUR" ]; then
-    journal_set_previous "${CUR:-null}"    || journal_fail_loud "rollback bookkeeping: set_previous ${CUR:-null}"
-fi
-journal_set_current "$PREV"                || journal_fail_loud "rollback bookkeeping: set_current $PREV"
-NEW_COUNT="$(journal_count_rollback 1)" || journal_fail_loud "rollback bookkeeping: counter/cooldown (cooldown NOT armed — treat as active until verified)"
-journal_history_append rollback "auto-rollback $VERSION → $PREV (gate fail: $gate_fail_reason; re-gate ${REGATE_FAIL:-green})" \
-                                            || true
+# D5 (self-service-promote Wave 3) — the §2.5 rollback ordering: quarantine
+# the failed target → set current=PREV → NORMALIZE previous (leave
+# unchanged iff VALID for the new current — non-null ∧ ≠ the new current ∧
+# the release dir exists — else null + a `previous_invalidated` history
+# row) → credit → history → clear. The OLD "restore the pre-promote
+# pairing" write (previous=$CUR) was the C-4 stale-field class (CUR is the
+# journal's lagging current, not the filesystem truth); the capture- aware
+# chain resolved $PREV, and the journal's existing `previous` is the G1
+# record for the new current when it is still VALID.
 journal_quarantine "$VERSION"              || journal_fail_loud "rollback bookkeeping: quarantine $VERSION (it stays promotable — operator must quarantine manually or re-stage)"
+journal_set_current "$PREV"                || journal_fail_loud "rollback bookkeeping: set_current $PREV"
+RB_JSON="$(journal_read 2>/dev/null)" || RB_JSON=""
+RB_PREV_NOW="$(_json_field_quoted "$RB_JSON" '"previous":' 2>/dev/null)" || RB_PREV_NOW=""
+[ "$RB_PREV_NOW" = "null" ] && RB_PREV_NOW=""
+if [ -n "$RB_PREV_NOW" ] && [ "$RB_PREV_NOW" != "$PREV" ] && [ -d "$REL/$RB_PREV_NOW" ]; then
+    : # VALID for the new current — left unchanged (the G1 record)
+else
+    journal_set_previous "null"            || journal_fail_loud "rollback bookkeeping: previous normalization (null)"
+    journal_history_append previous_invalidated "rollback bookkeeping: journal previous='${RB_PREV_NOW:-none}' was not VALID for the new current=$PREV — set null (the old pairing no longer describes the release order)" || true
+fi
+NEW_COUNT="$(journal_count_rollback 1)" || journal_fail_loud "rollback bookkeeping: counter/cooldown (cooldown NOT armed — treat as active until verified)"
+journal_history_append rollback "auto-rollback $VERSION → $PREV (source=${PREV_SRC:-chain}; gate fail: $gate_fail_reason; re-gate ${REGATE_FAIL:-green})" \
+                                            || true
 journal_history_append quarantine "$VERSION quarantined after gate failure (skipped by future promotes)"
 
 if [ -n "$REGATE_FAIL" ]; then

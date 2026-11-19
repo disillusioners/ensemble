@@ -281,7 +281,15 @@ EOF
     }
 
     ################################################################################
-    section "G4-BASE-1 — the BASE-arm: a SERVING-GREEN stale flipped txn is WRONGLY rolled back"
+    section "G4-BASE-1 — the BASE arm can NO LONGER wrongfully roll back a serving-green txn (D5 Wave 3)"
+    # self-service-promote Wave 3 UPDATE: the BASE arm's documented defect
+    # (a serving-green stale flipped txn WRONGLY rolled back under
+    # SWEEP_SERVING_GREEN_ENABLED=0) is CLOSED by the chain head's
+    # verify-before-rollback block (V1/V2) — the kill-switch still disables
+    # the LADDER's green commit-close arm, but the CHAIN itself refuses to
+    # execute a rollback of a serving-green release. The BASE expectation
+    # flips from "wrongly rolled back" to "protected: committed via the
+    # chain-head green path" (AC-D5-8's protection holds on EVERY path).
     seed
     BPORT="$(free_port)"
     start_green_listener "$BPORT" "${TARGET#v}"
@@ -289,30 +297,20 @@ EOF
     BJ="$(cat "$INSTALL_DIR/releases/state.json")"
     stop_listener
     printf '%s\n' "$BOUT" | tail -4
-    assert_contains "G4-BASE-1 the wrongful rollback FIRED (sweep_rollback row)" '"event":"sweep_rollback"' "$BJ"
-    assert_contains "G4-BASE-1 the disposition names the serving-green-disabled arm" "disposition=serving_green_disabled" "$BJ"
-    assert_re    "G4-BASE-1 the target is QUARANTINED" "\"quarantined\": ?\[\"$TARGET\"\]" "$BJ"
-    assert_re    "G4-BASE-1 the current was REPOINTED to prev" "\"current\": ?\"$PREV\"" "$BJ"
-    assert_eq    "G4-BASE-1 the 24h rollback counter was INCREMENTED" '"24h": 1' "$(printf '%s' "$BJ" | grep -oE '"24h": ?[0-9]+' | head -1)"
+    assert_not_contains "G4-BASE-1 NO wrongful rollback (the chain head protects serving-green)" '"event":"sweep_rollback"' "$BJ"
+    assert_contains "G4-BASE-1 the chain-head GREEN PATH committed the txn" '"event":"serving_green_commit"' "$BJ"
+    assert_not_re "G4-BASE-1 the target is NOT QUARANTINED" "\"quarantined\": ?\[\"$TARGET\"\]" "$BJ"
+    assert_re    "G4-BASE-1 the current STAYS at the target" "\"current\": ?\"$TARGET\"" "$BJ"
+    assert_eq    "G4-BASE-1 the 24h rollback counter was NOT incremented" '"24h":0' "$(printf '%s' "$BJ" | grep -oE '"24h": ?[0-9]+' | head -1)"
     assert_re    "G4-BASE-1 the txn was CLOSED" '"in_flight": ?null' "$BJ"
-    assert_not_contains "G4-BASE-1 the quarantine is SILENT (no 'quarantine' history row)" '"event":"quarantine"' "$BJ"
+    assert_not_contains "G4-BASE-1 no quarantine history row" '"event":"quarantine"' "$BJ"
 
-    section "G4-BASE-2 — the re-promote is REFUSED at the REAL gate (cooldown still armed)"
+    section "G4-BASE-2 — the re-promote is ACCEPTED (no cooldown, no quarantine — the punishment never fired)"
     G="$(drive_gate "$TARGET")"; RC="$(printf '%s' "$G" | sed -n 's/^__RC__=//p')"; OUT="$(printf '%s' "$G" | grep -v '^__RC__=')"
     printf '%s\n' "$OUT" | tail -3
-    assert_eq "G4-BASE-2 the gate REFUSES (rc=78)" "78" "$RC"
-    assert_contains "G4-BASE-2 the FIRST refusal is the armed cooldown (gate ordering)" "rollback cooldown active" "$OUT"
-
-    section "G4-BASE-3 — the re-promote is REFUSED with the VERBATIM quarantine message (cooldown elapsed)"
-    python3 - "$INSTALL_DIR/releases/state.json" <<'PY'
-import json,sys
-p=sys.argv[1]; d=json.load(open(p)); d["cooldown_until"]=None
-json.dump(d, open(p,"w"), separators=(",",":"))
-PY
-    G="$(drive_gate "$TARGET")"; RC="$(printf '%s' "$G" | sed -n 's/^__RC__=//p')"; OUT="$(printf '%s' "$G" | grep -v '^__RC__=')"
-    printf '%s\n' "$OUT" | tail -3
-    assert_eq "G4-BASE-3 the gate REFUSES (rc=78)" "78" "$RC"
-    assert_contains "G4-BASE-3 the refusal is the VERBATIM quarantine message" "promote refused: version '$TARGET' is QUARANTINED (prior gate failure) — quarantine is cleared only by re-staging the version" "$OUT"
+    assert_eq "G4-BASE-2 the gate ACCEPTS (rc=0 — nothing was armed against the promote)" "0" "$RC"
+    assert_not_contains "G4-BASE-2 NO cooldown refusal" "rollback cooldown active" "$OUT"
+    assert_not_contains "G4-BASE-2 NO quarantine refusal" "is QUARANTINED (prior gate failure)" "$OUT"
 
     ################################################################################
     section "G4-HEAD-1 — the HEAD-arm: the SAME serving-green txn is COMMITTED, not punished"
@@ -718,7 +716,7 @@ LEG_LOGDIR="$(mktemp -d /tmp/phh-gate-legs-logs.XXXXXX)"
 trap 'rm -rf "$LEG_LOGDIR"' EXIT
 
 EXPECTED_ASSERTS_G2=10
-EXPECTED_ASSERTS_G4=20
+EXPECTED_ASSERTS_G4=19
 # G5: the verbatim fold carries 20 asserts + 1 ADDED fixture-guard assert
 # (the absent-probe port is never a reserved service port) = 21.
 EXPECTED_ASSERTS_G5=21
