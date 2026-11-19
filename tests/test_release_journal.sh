@@ -1904,10 +1904,17 @@ M4A_OUT="$(b4_run_promote "$SBX_V1")"; M4A_RC=$?
 # is v1 itself (nothing was displaced; staying on it is the honest
 # outcome). The M4 no-strand bookkeeping is UNCHANGED: previous keeps
 # its pre-promote value. OLD_CUR is NOT in the run env (unfed).
-assert_eq "12a same-version gate-fail halts at re-gate (78)" "78" "$M4A_RC"
-assert_eq "12a previous NOT the quarantined same-version (M4 no-strand)" "$SBX_V2" "$(m4_field previous)"
-assert_eq "12a current stays on the same-version (OLD_CUR==VERSION; nothing displaced)" "$SBX_V1" "$(m4_field current)"
-assert_contains "12a failed version quarantined" "\"$SBX_V1\"" "$(b4_inf '_json_sub "$(journal_read)" quarantined')"
+# D5 (self-service-promote Wave 3) SEMANTICS UPDATE: the same-version
+# gate-fail now halts at the CHAIN — the capture (== the txn target for a
+# same-version re-promote) fails the R0 VALID rule ⇒ capture_invalid, a
+# NEVER-fall-through halt (F3). No rollback bookkeeping runs: no
+# quarantine burn on the only good copy, no credit, no repoint — the txn
+# is LEFT OPEN (evidence preserved; the sweep re-halts identically).
+assert_eq "12a same-version gate-fail halts at the chain (78)" "78" "$M4A_RC"
+assert_eq "12a previous NOT the quarantined same-version (untouched — no bookkeeping ran)" "$SBX_V2" "$(m4_field previous)"
+assert_eq "12a current stays on the same-version (nothing displaced; no repoint executed)" "$SBX_V1" "$(m4_field current)"
+assert_contains "12a the halt names capture_invalid (R0 == target never falls through)" "capture_invalid" "$(cat "$JB")"
+assert_not_contains "12a NO quarantine burn on the same-version (the only copy stays promotable)" "\"$SBX_V1\"" "$(b4_inf '_json_sub "$(journal_read)" quarantined')"
 assert_eq "12a repoint is the no-op same-version flip" "releases/$SBX_V1" "$(readlink "$SBX/current")"
 
 # 12b. M4 consumption gate: a (drifted/hand-edited) journal whose previous
@@ -1922,9 +1929,15 @@ M4B_OUT="$(b4_run_promote "$SBX_V3")"; M4B_RC=$?
 # OLD_CUR = the displaced v1 — NOT quarantined — so the auto-rollback
 # repoints to v1 and the M4 quarantine gate does not fire. The run must
 # still halt at the dead-port re-gate (78) with a clean journal.
+# D5 (Wave 3): the rollback target is the CAPTURE (v1, source=captured);
+# `previous` is NORMALIZED — the seeded v2 is QUARANTINED (the M4
+# no-strand rule), so it is invalidated to null + a previous_invalidated
+# row, never re-paired.
 assert_eq "12b gate-fail auto-rollback halts at re-gate (78)" "78" "$M4B_RC"
-assert_eq "12b repointed to OLD_CUR (the displaced v1)" "releases/$SBX_V1" "$(readlink "$SBX/current")"
-assert_eq "12b previous = the displaced version (C3 OLD_CUR pairing)" "$SBX_V1" "$(m4_field previous)"
+assert_eq "12b repointed to the CAPTURE (the displaced v1, source=captured)" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+assert_contains "12b the rollback row names source=captured" "source=captured" "$(cat "$JB")"
+assert_eq "12b previous normalized to null (the quarantined v2 is not a valid pairing)" "null" "$(m4_field previous)"
+assert_contains "12b the previous_invalidated row names the reason" "previous_invalidated" "$(cat "$JB")"
 assert_contains "12b halt event recorded (re-gate halt)" '"event":"halt"' "$(cat "$JB")"
 assert_eq "12b journal current = the repointed OLD_CUR" "$SBX_V1" "$(m4_field current)"
 assert_eq "12b txn closed by the halt" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
@@ -2028,8 +2041,11 @@ else
     _pass
 fi
 assert_contains "12f halt executed (halt-for-human on re-gate)" "HALT-FOR-HUMAN" "$M4F_OUT"
-assert_eq "12f REPOINT executed — current = OLD_CUR (the displaced v1)" "releases/$SBX_V1" "$(readlink "$SBX/current")"
-assert_eq "12f previous = the displaced version (8b pairing)" "$SBX_V1" "$(m4_field previous)"
+assert_eq "12f REPOINT executed — current = the CAPTURE (the displaced v1)" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+# D5 (Wave 3): `previous` is NORMALIZED, not re-paired — the seeded v2 is
+# a VALID, non-quarantined G1 for the restored current v1, so it is LEFT
+# UNCHANGED (the honest pairing: before v1 the env served v2).
+assert_eq "12f previous = the VALID pre-promote G1 (normalize leaves v2 — the honest pairing)" "$SBX_V2" "$(m4_field previous)"
 assert_contains "12f halt event journaled" '"event":"halt"' "$(cat "$JB")"
 assert_eq "12f txn closed by the halt" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
 
@@ -3169,6 +3185,128 @@ fi
 # present (its text is the assertion). Faked PASS would be a real failure
 # of the gate; SKIP-with-reason is the honest signal.
 _pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# D5 (self-service-promote Wave 3) — the flip-prep filesystem capture, the
+# checked stamp, the 8a capture-previous ordering, and the LD-1
+# pending-verdict envelope (AC-D5-1 / AC-D5-2 / AC-D5-11 / AC-LD1-1).
+# ═══════════════════════════════════════════════════════════════════════════
+assert_re_d5() {
+    # local regex assert (this file predates the pack family's assert_re)
+    local name="$1" pattern="$2" actual="$3"
+    if printf '%s' "$actual" | grep -Eq -- "$pattern"; then _pass; else _fail "$name" "$pattern" "$actual"; fi
+}
+assert_not_re_d5() {
+    local name="$1" pattern="$2" actual="$3"
+    if printf '%s' "$actual" | grep -Eq -- "$pattern"; then _fail "$name" "(no match expected) $pattern" "$actual"; else _pass; fi
+}
+
+section "D5-1 — stale journal.current=vX + symlink→vY ⇒ captured_previous=vY wins (AC-D5-1)"
+
+D5RJ_FIX="$(mktemp -d -t d5rj.XXXXXX)"
+mkdir -p "$D5RJ_FIX/releases/v9.9.9-rj-staleX" "$D5RJ_FIX/releases/v9.9.9-rj-fsY" "$D5RJ_FIX/releases/v9.9.9-rj-target" "$D5RJ_FIX/data"
+ln -sfn "releases/v9.9.9-rj-target" "$D5RJ_FIX/current"
+PROMOTE_SH_TXT="$(cat "$UPGRADE_DIR/promote.sh")"
+LIBSH_TXT="$(cat "$UPGRADE_DIR/lib.sh")"
+
+# drive the REAL lib.sh helpers against the fixture (journal_init →
+# open_txn → mark_captured_previous), then resolve at the 8b seam.
+INSTALL_DIR="$D5RJ_FIX" bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    journal_init
+    journal_update "current" "\"v9.9.9-rj-staleX\""
+    journal_open_txn "promote" "v9.9.9-rj-target"
+    journal_mark_captured_previous "v9.9.9-rj-fsY" || { echo "STAMP-RC=$?"; exit 1; }
+    j="$(journal_read)"
+    case "$j" in *""captured_previous":"v9.9.9-rj-fsY""*) echo "FIELD-OK" ;; *) echo "FIELD-MISSING: $j" ;; esac
+    out="$(_rollback_target_resolve "'"$D5RJ_FIX"'/releases" "v9.9.9-rj-target" "v9.9.9-rj-target" "v9.9.9-rj-fsY" "" "v9.9.9-rj-staleX" "v9.9.9-rj-staleX" "v9.9.9-rj-staleX")"
+    rc=$?
+    echo "RESOLVE-RC=$rc RESOLVE-OUT=$out"
+' > "$D5RJ_FIX/out.txt" 2>&1
+D5RJ_OUT="$(cat "$D5RJ_FIX/out.txt")"
+printf '%s\n' "$D5RJ_OUT" | tail -3
+assert_contains "D5-1 the txn carries captured_previous=vY (the checked stamp)" "FIELD-OK" "$D5RJ_OUT"
+assert_contains "D5-1 the chain resolves the FILESYSTEM capture vY over the stale vX" \
+    "RESOLVE-RC=0 RESOLVE-OUT=resolve v9.9.9-rj-fsY captured" "$D5RJ_OUT"
+
+section "D5-2 — the checked stamp + the promote.sh flip-prep ordering (AC-D5-2)"
+
+# (a) the CHECKED write: an unwritable journal ⇒ the stamp REFUSES (rc≠0)
+D5RJ_FIX2="$(mktemp -d -t d5rj2.XXXXXX)"
+mkdir -p "$D5RJ_FIX2/releases"
+printf '{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}' \
+    > "$D5RJ_FIX2/releases/state.json"
+chmod 444 "$D5RJ_FIX2/releases/state.json"
+D5RJ_STAMP_RC="$(INSTALL_DIR="$D5RJ_FIX2" bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    journal_open_txn "promote" "vX" 2>/dev/null
+    journal_mark_captured_previous "vY" >/dev/null 2>&1
+    echo $?' 2>/dev/null)"
+chmod 644 "$D5RJ_FIX2/releases/state.json"
+assert_eq "D5-2a the checked stamp REFUSES on an unwritable journal (rc≠0)" "1" "$D5RJ_STAMP_RC"
+
+# (b) static ordering pins on promote.sh — the capture block sits AFTER
+# journal_open_txn and BEFORE the stop; every capture-halt arm exits 78;
+# the F6 re-read is present; the persist is the checked journal_mark call.
+D5RJ_OPEN_LN="$(printf '%s' "$PROMOTE_SH_TXT" | grep -n 'journal_open_txn "promote"' | head -1 | cut -d: -f1)"
+D5RJ_CAP_LN="$(printf '%s' "$PROMOTE_SH_TXT" | grep -n 'FILESYSTEM CAPTURE (D5' | head -1 | cut -d: -f1)"
+D5RJ_STOP_LN="$(printf '%s' "$PROMOTE_SH_TXT" | grep -n 'stop_via_stop_script$' | head -1 | cut -d: -f1)"
+[ -n "$D5RJ_OPEN_LN" ] && [ -n "$D5RJ_CAP_LN" ] && [ "$D5RJ_OPEN_LN" -lt "$D5RJ_CAP_LN" ] && _pass || _fail "D5-2b the capture block is AFTER journal_open_txn (open@$D5RJ_OPEN_LN capture@$D5RJ_CAP_LN)"
+[ -n "$D5RJ_CAP_LN" ] && [ -n "$D5RJ_STOP_LN" ] && [ "$D5RJ_CAP_LN" -lt "$D5RJ_STOP_LN" ] && _pass || _fail "D5-2c the capture block is BEFORE the stop (capture@$D5RJ_CAP_LN stop@$D5RJ_STOP_LN) — no flip on capture failure"
+D5RJ_CAP_BLOCK="$(printf '%s' "$PROMOTE_SH_TXT" | sed -n "${D5RJ_CAP_LN},$((D5RJ_CAP_LN + 95))p")"
+D5RJ_CAP_EXITS="$(printf '%s' "$D5RJ_CAP_BLOCK" | grep -c 'exit 78')"
+[ "$D5RJ_CAP_EXITS" -ge 4 ] && _pass || _fail "D5-2d every capture-halt arm exits 78 (found $D5RJ_CAP_EXITS)"
+assert_contains "D5-2e the block persists via the CHECKED journal_mark_captured_previous" "journal_mark_captured_previous" "$D5RJ_CAP_BLOCK"
+assert_contains "D5-2f the F6 re-read (moved-between-capture-and-persist ⇒ halt)" "CAPTURED_RECHECK" "$D5RJ_CAP_BLOCK"
+
+section "D5-11 — the 8a commit writes current then previous=<capture> (AC-D5-11)"
+
+D5RJ_8A_CUR_LN="$(printf '%s' "$PROMOTE_SH_TXT" | grep -n 'journal_set_current "\$VERSION"' | head -1 | cut -d: -f1)"
+D5RJ_8A_PREV_LN="$(printf '%s' "$PROMOTE_SH_TXT" | grep -n 'journal_set_previous "\${CAPTURED_PREVIOUS' | head -1 | cut -d: -f1)"
+[ -n "$D5RJ_8A_CUR_LN" ] && [ -n "$D5RJ_8A_PREV_LN" ] && [ "$D5RJ_8A_CUR_LN" -lt "$D5RJ_8A_PREV_LN" ] && _pass || _fail "D5-11a set_current(target) precedes set_previous(captured_previous) (cur@$D5RJ_8A_CUR_LN prev@$D5RJ_8A_PREV_LN)"
+assert_re_d5 "D5-11b the previous write carries the CAPTURE (not OLD_CUR / displaced)" \
+    'journal_set_previous "\$\{CAPTURED_PREVIOUS:-null\}"' "$PROMOTE_SH_TXT"
+
+section "LD-1 — the pending-verdict envelope (AC-LD1-1, BINDING §7.1)"
+
+# (a) STATIC anti-8a-on-flip pin: between journal_mark_flipped and the
+# first gate, promote.sh performs NO 8a bookkeeping (no set_current /
+# set_previous / close_txn) and appends the pending-verdict row reading
+# "flipped — disposition pending" (never "committed" — §7.1(f)).
+D5RJ_FLIP_LN="$(printf '%s' "$PROMOTE_SH_TXT" | grep -n '^journal_mark_flipped' | head -1 | cut -d: -f1)"
+D5RJ_GATES_LN="$(printf '%s' "$PROMOTE_SH_TXT" | grep -n 'gate_livez\|GATE' | awk -F: -v f="$D5RJ_FLIP_LN" '$1 > f {print $1; exit}')"
+D5RJ_FLIP_BLOCK="$(printf '%s' "$PROMOTE_SH_TXT" | sed -n "${D5RJ_FLIP_LN},$((D5RJ_FLIP_LN + 40))p")"
+assert_not_re_d5 "LD-1a no journal_set_current between the flip and the gates" 'journal_set_current' "$D5RJ_FLIP_BLOCK"
+assert_not_re_d5 "LD-1b no journal_set_previous between the flip and the gates" 'journal_set_previous' "$D5RJ_FLIP_BLOCK"
+assert_not_re_d5 "LD-1c no journal_close_txn between the flip and the gates" 'journal_close_txn' "$D5RJ_FLIP_BLOCK"
+assert_contains "LD-1d the flip appends the pending-verdict row" "flip_pending_verdict" "$D5RJ_FLIP_BLOCK"
+assert_contains "LD-1e the row reads 'flipped — disposition pending'" "flipped — disposition pending" "$D5RJ_FLIP_BLOCK"
+D5RJ_PV_ROW="$(printf '%s' "$PROMOTE_SH_TXT" | grep -A2 'flip_pending_verdict \\' | head -3)"
+assert_not_re_d5 "LD-1f the pending row NEVER reads 'committed' (§7.1(f))" 'committed' "$D5RJ_PV_ROW"
+
+# (b) FUNCTIONAL closer-reachability pin: a flipped txn pending async
+# disposition (halted hand-back, B4) — one launcher sweep tick with an
+# absent-class probe DEFERS (no 8a writes, no rollback; the txn stays
+# OPEN and the closer path remains reachable).
+D5RJ_FIX3="$(mktemp -d -t d5rj3.XXXXXX)"
+D5RJ_T3="v9.9.9-ld1-target"; D5RJ_P3="v9.9.9-ld1-prev"
+mkdir -p "$D5RJ_FIX3/releases/$D5RJ_T3" "$D5RJ_FIX3/releases/$D5RJ_P3" "$D5RJ_FIX3/data"
+printf '{"manifest_version":"1.0.0","binary_version":"%s","rollback_safe":true}\n' "$D5RJ_T3" > "$D5RJ_FIX3/releases/$D5RJ_T3/manifest.json"
+printf '{"manifest_version":"1.0.0","binary_version":"%s","rollback_safe":true}\n' "$D5RJ_P3" > "$D5RJ_FIX3/releases/$D5RJ_P3/manifest.json"
+ln -sfn "releases/$D5RJ_T3" "$D5RJ_FIX3/current"
+cat > "$D5RJ_FIX3/releases/state.json" <<EOF
+{"current":"$D5RJ_P3","previous":"$D5RJ_P3","in_flight":{"kind":"promote","target":"$D5RJ_T3","started_at":"2026-10-07T09:00:00Z","flipped":true,"owner_pid":99999,"last_heartbeat":1728000000,"displaced_version":"$D5RJ_P3","captured_previous":"$D5RJ_P3"},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-10-07T09:00:00Z","event":"open_txn","detail":"ld1 seeded"},{"ts":"2026-10-07T09:05:00Z","event":"flip_pending_verdict","detail":"flipped — disposition pending (target $D5RJ_T3; captured_previous=$D5RJ_P3; async window bounded by launcher-restart cadence + SWEEP_DEFER_CEILING=3)"},{"ts":"2026-10-07T10:00:00Z","event":"intent_flip","detail":"preflight: intentional promote target $D5RJ_T3 — integrity verified; operator-initiated"}]}
+EOF
+D5RJ_SWEEP_OUT="$(INSTALL_DIR="$D5RJ_FIX3" PORT=19999 SWEEP_DEFER_CEILING=9 \
+    SWEEP_STALE_S=0 HEARTBEAT_STALE_S=0 LOCK_HEARTBEAT_S=30 LOCK_STALE_S=300 \
+    bash -c '. "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1; _journal_sweep "$INSTALL_DIR"; echo "sweep-rc=$?"' 2>&1)"
+D5RJ_SWEEP_J="$(cat "$D5RJ_FIX3/releases/state.json")"
+printf '%s\n' "$D5RJ_SWEEP_OUT" | tail -2
+assert_contains "LD-1g the pending-verdict row is present in the journal" '"event":"flip_pending_verdict"' "$D5RJ_SWEEP_J"
+assert_not_re_d5 "LD-1h in_flight remains OPEN (no close before a green disposition)" '"in_flight": ?null' "$D5RJ_SWEEP_J"
+assert_not_re_d5 "LD-1i NO 8a writes this tick (current stays at the pre-flip value)" "\"current\": ?\"$D5RJ_T3\"" "$D5RJ_SWEEP_J"
+assert_not_contains "LD-1j no sweep_rollback (the closer's bar — not a weaker absent-class trigger)" '"event":"sweep_rollback"' "$D5RJ_SWEEP_J"
+assert_contains "LD-1k the closer path remains reachable (the defer is the reachable state)" '"event":"sweep_deferred"' "$D5RJ_SWEEP_J"
 
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n== summary: %d passed, %d failed ==\n' "$PASS" "$FAIL"

@@ -270,6 +270,155 @@ def test_p6_unhealthy_writes_a_verdict_and_a_request_only(tmp_path: Path) -> Non
     assert "sweep_rollback" not in _events(install)
 
 
+def test_d5_6_request_carries_to_and_to_source_captured(tmp_path: Path) -> None:
+    """AC-D5-6 (self-service-promote Wave 3): the rollback_requested
+    detail carries ``to <ver> to_source captured`` — the daemon resolves
+    ONLY from the capture (a valid in_flight.captured_previous), never
+    invents a destination, never rolls back by itself."""
+    import time
+
+    install = tmp_path / "install"
+    # the capture's release dir must exist for the daemon-side VALID check
+    cap = "v0.0.2-d5-capture"
+    (install / "releases" / cap).mkdir(parents=True)
+    state = _write_journal(
+        install,
+        in_flight={
+            "kind": "promote",
+            "target": TARGET,
+            "started_at": STALE_STARTED_AT,
+            "flipped": True,
+            "owner_pid": 99999,
+            "last_heartbeat": 1728000000,
+            "displaced_version": PREV,
+            "captured_previous": cap,
+        },
+    )
+    _seed_history(
+        state,
+        "intent_flip",
+        f"preflight: intentional promote target {TARGET} — integrity verified",
+    )
+    svc = _service(install, composite=_composite(ready=False, grace_active=False))
+    first = _run(svc)
+    assert first["action"] == "deferred", first
+    time.sleep(1.2)
+    result = _run(svc)
+    assert result["action"] == "unhealthy", result
+    details = _details_for(install, "rollback_requested")
+    assert details, "the rollback_requested row must exist"
+    assert f"to {cap} to_source captured" in details[0], details[0]
+    # the daemon STILL never rolls back by itself
+    data = _journal(install)
+    assert data["in_flight"] is not None
+    assert "sweep_rollback" not in _events(install)
+
+
+def test_d5_6_request_without_capture_says_to_none(tmp_path: Path) -> None:
+    """AC-D5-6 (second half): without a capture the request reads
+    ``to none to_source none`` — the destination comes from the launcher's
+    chain, never from the daemon."""
+    import time
+
+    install = tmp_path / "install"
+    state = _write_journal(install)
+    _seed_history(
+        state,
+        "intent_flip",
+        f"preflight: intentional promote target {TARGET} — integrity verified",
+    )
+    svc = _service(install, composite=_composite(ready=False, grace_active=False))
+    first = _run(svc)
+    assert first["action"] == "deferred", first
+    time.sleep(1.2)
+    result = _run(svc)
+    assert result["action"] == "unhealthy", result
+    details = _details_for(install, "rollback_requested")
+    assert details, "the rollback_requested row must exist"
+    assert "to none to_source none" in details[0], details[0]
+
+
+def test_d5_11_commit_writes_previous_from_the_capture(tmp_path: Path) -> None:
+    """AC-D5-11 (closer half): the green commit-close writes
+    ``previous = <capture>`` — NOT displaced_version (LD-5: the capture is
+    the transactional source of truth; previous is republished from it)."""
+    install = tmp_path / "install"
+    cap = "v0.0.3-d5-capture"
+    displaced = "v0.0.4-d5-displaced"
+    (install / "releases" / cap).mkdir(parents=True)
+    state = _write_journal(
+        install,
+        in_flight={
+            "kind": "promote",
+            "target": TARGET,
+            "started_at": STALE_STARTED_AT,
+            "flipped": True,
+            "owner_pid": 99999,
+            "last_heartbeat": 1728000000,
+            "displaced_version": displaced,
+            "captured_previous": cap,
+        },
+    )
+    _seed_history(
+        state,
+        "intent_flip",
+        f"preflight: intentional promote target {TARGET} — integrity verified",
+    )
+    svc = _service(install, composite=_composite(ready=True))
+    result = _run(svc)
+    assert result["action"] == "committed", result
+    data = _journal(install)
+    assert data["current"] == TARGET
+    assert data["previous"] == cap, (
+        f"previous must be the CAPTURE ({cap}), not displaced ({displaced})"
+    )
+
+
+def test_minor_10_commit_on_closed_txn_is_already_closed_noop(
+    tmp_path: Path,
+) -> None:
+    """MINOR-10: a commit arriving on an ALREADY-CLOSED txn journals a
+    write-once ``already_closed`` row and takes no second bookkeeping
+    pass (never a rollback of a committed release).
+
+    The race window is the UNDER-LOCK re-read: the closer's tick-level
+    P3 pre-check bails with ``no_in_flight`` on an idle journal (no row
+    needed — that is the common idle case), so this leg drives
+    ``_closer_commit_green`` DIRECTLY with a closed journal — exactly the
+    shape where the executor's 8a landed between the closer's pre-read
+    and its under-lock re-read."""
+    install = tmp_path / "install"
+    state = _write_journal(install)
+    _seed_history(
+        state,
+        "intent_flip",
+        f"preflight: intentional promote target {TARGET} — integrity verified",
+    )
+    svc = _service(install, composite=_composite(ready=True))
+    # close the txn (the executor's 8a won the race) BEFORE the closer's
+    # under-lock re-read
+    uj.journal_update_field(install, "in_flight", None)
+    run_id = f"{TARGET}@{STALE_STARTED_AT}"
+    result = asyncio.run(
+        svc._closer_commit_close_target(
+            TARGET, run_id, 3600, f"v{DAEMON_VERSION}"
+        )
+        if hasattr(svc, "_closer_commit_close_target")
+        else svc._closer_commit_green(TARGET, run_id, 3600, f"v{DAEMON_VERSION}")
+    )
+    assert result["action"] == "none", result
+    assert result.get("reason") == "already_closed", result
+    assert "already_closed" in _events(install)
+    # write-once: a second arrival adds no second row
+    asyncio.run(
+        svc._closer_commit_green(TARGET, run_id, 3600, f"v{DAEMON_VERSION}")
+    )
+    assert _events(install).count("already_closed") == 1
+    # the committed release was NEVER re-dispositioned
+    assert "sweep_rollback" not in _events(install)
+    assert _journal(install)["current"] == PREV
+
+
 def test_p6_fresh_txn_is_untouched(tmp_path: Path) -> None:
     """A txn younger than the staleness gate ⇒ no action."""
     install = tmp_path / "install"

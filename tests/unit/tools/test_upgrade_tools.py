@@ -4650,6 +4650,65 @@ async def _arm_demo_promote(tools, version: str = "1.2.3") -> str:
     )
 
 
+class TestArmtimeRollbackTargetInvariant:
+    """AC-D5-14 (self-service-promote Wave 3, LD-3): at ARM, pre-nonce,
+    the would-be rollback target (the current symlink's release) must be
+    present ∧ not quarantined ∧ rollback_safe — else a NAMED refusal
+    (never a mid-ceremony halt-for-human for this class). The nonce is
+    NOT burned, the lock is released, nothing is armed."""
+
+    async def test_d5_14_not_rollback_safe_refuses_pre_nonce(
+        self, harness
+    ) -> None:
+        tools, markers, install = harness
+        # the would-be rollback target (current -> 1.2.2) declares
+        # rollback_safe:false — the ceremony could never auto-recover
+        _write_manifest(install, "1.2.2", rollback_safe=False)
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) == "rollback-target-not-rollback-safe", out
+        assert "1.2.2" in out, out
+        # pre-nonce: nothing armed, no pending_op, lock released
+        assert markers == []
+        assert uj.journal_read(install).get("pending_op") is None
+        assert not uj.lock_dir(install).exists()
+
+    async def test_d5_14_quarantined_refuses_pre_nonce(
+        self, harness
+    ) -> None:
+        tools, markers, install = harness
+        uj.journal_update_field(install, "quarantined", ["1.2.2"])
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) == "rollback-target-quarantined", out
+        assert markers == []
+        assert uj.journal_read(install).get("pending_op") is None
+        assert not uj.lock_dir(install).exists()
+
+    async def test_d5_14_missing_release_dir_refuses_pre_nonce(
+        self, harness, tmp_path: Path
+    ) -> None:
+        tools, markers, install = harness
+        # a DANGLING current symlink (the release dir is gone)
+        import shutil
+
+        shutil.rmtree(install / "releases" / "1.2.2")
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) == "rollback-target-missing", out
+        assert markers == []
+        assert uj.journal_read(install).get("pending_op") is None
+        assert not uj.lock_dir(install).exists()
+
+    async def test_d5_14_safe_target_still_arms(
+        self, harness, no_spawn
+    ) -> None:
+        """The control: a present, unquarantined, rollback_safe would-be
+        target does NOT trip the invariant (the arm proceeds — the
+        existing armed legs rely on this and stay green)."""
+        tools, markers, install = harness
+        out = await _arm_demo_promote(tools)
+        assert "UPGRADE ARMED" in out
+        assert markers, "the arm must have proceeded"
+
+
 class TestScriptsDirProvenanceArmPath:
     """The four executed legs the verifier found missing (W-1/W-3)."""
 

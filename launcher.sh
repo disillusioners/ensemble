@@ -3225,13 +3225,19 @@ _js_sweep_rollback_chain() {
         || { _log "WARN: journal sweep: journal current update failed"; rc=1; }
     # D5 — normalize `previous` for the new current: leave unchanged iff
     # VALID for the new current (non-null ∧ ≠ the new current ∧ the
-    # release dir exists), else null + a `previous_invalidated` history
+    # release dir exists ∧ NOT quarantined — the M4 no-strand rule: a
+    # quarantined previous is exactly the stranded pairing the old guard
+    # existed to prevent), else null + a `previous_invalidated` history
     # row. Stops the compounding (the old path never touched previous —
     # launcher's rollback wrote current only).
-    local jnow prev_now prev_ok=0
+    local jnow prev_now prev_ok=0 prev_q2
     jnow="$(_js_journal_read "$journal" 2>/dev/null)" || jnow=""
     prev_now="$(_js_json_field "$jnow" "previous" 2>/dev/null)" || prev_now=""
     case "$prev_now" in ''|null) prev_ok=1 ;; esac
+    prev_q2="$(_js_json_sub "$jnow" "quarantined" 2>/dev/null)" || prev_q2=""
+    case "$prev_q2" in
+        *"\"$prev_now\""*) [ -n "$prev_now" ] && prev_ok=1 ;;
+    esac
     if [ "$prev_ok" -eq 0 ] && [ "$prev_now" != "$prev" ] \
        && [ -d "$install_dir/releases/$prev_now" ]; then
         : # VALID for the new current — left unchanged (the G1 record)

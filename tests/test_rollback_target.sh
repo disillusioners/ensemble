@@ -426,11 +426,18 @@ rm -rf "$C6_FIX"
 # ===========================================================================
 section "C7 — T-AC5b site pins (grep-asserts)"
 
-# promote.sh commit block writes previous=${OLD_CUR:-...}
+# promote.sh commit block writes previous=${CAPTURED_PREVIOUS:-...} — D5
+# (self-service-promote Wave 3, AC-D5-11): `previous` is republished from
+# the FLIP-PREP CAPTURE (LD-5's transactional source of truth), superseding
+# the C3-era OLD_CUR journal-current pairing (the C-4 stale-field class).
 C7_PROMOTE_COMMIT="$(grep -n 'journal_set_previous' "$UPGRADE_DIR/promote.sh" || true)"
 case "$C7_PROMOTE_COMMIT" in
-    *'OLD_CUR'*) _pass "C7 promote.sh: journal_set_previous references OLD_CUR" ;;
-    *) _fail "C7 promote.sh: journal_set_previous references OLD_CUR" "OLD_CUR" "${C7_PROMOTE_COMMIT:-absent}" ;;
+    *'CAPTURED_PREVIOUS'*) _pass "C7 promote.sh: journal_set_previous references CAPTURED_PREVIOUS (D5/AC-D5-11)" ;;
+    *) _fail "C7 promote.sh: journal_set_previous references CAPTURED_PREVIOUS (D5/AC-D5-11)" "CAPTURED_PREVIOUS" "${C7_PROMOTE_COMMIT:-absent}" ;;
+esac
+case "$C7_PROMOTE_COMMIT" in
+    *'journal_set_previous "${OLD_CUR'*) _fail "C7 promote.sh: the 8a previous write still rides the stale OLD_CUR (C-4 class)" "capture-sourced" "OLD_CUR-sourced" ;;
+    *) _pass "C7 promote.sh: no set_previous call sources OLD_CUR" ;;
 esac
 
 # promote.sh auto-rollback uses PREV=$OLD_CUR (NOT the journal.previous
@@ -439,8 +446,13 @@ esac
 # hardcoded `480,495p` ranges that drifted when P2/P3 added lines —
 # the C-7 fragility, not a regression): extract a window around the
 # auto-rollback header at line ~559.
-C7_PROMOTE_ROLLBACK="$(sed -n '555,600p' "$UPGRADE_DIR/promote.sh")"
-assert_contains "C7 promote.sh auto-rollback uses PREV=\"\$OLD_CUR\"" 'PREV="$OLD_CUR"' "$C7_PROMOTE_ROLLBACK"
+# D5 (Wave 3): the 8b target is resolved by the 5-rung CHAIN
+# (_rollback_target_resolve: R0 capture > R1 to= > R2 current > R3
+# displaced > R4 previous) — the bare PREV="$OLD_CUR" selector (and the
+# journal.previous read it replaced) are BOTH superseded.
+C7_PROMOTE_ROLLBACK="$(sed -n '555,680p' "$UPGRADE_DIR/promote.sh")"
+assert_contains "C7 promote.sh 8b resolves via the chain (D5 — _rollback_target_resolve)" '_rollback_target_resolve' "$C7_PROMOTE_ROLLBACK"
+assert_not_contains "C7 promote.sh 8b no longer selects PREV="\$OLD_CUR" (superseded by the chain)" 'PREV="$OLD_CUR"' "$C7_PROMOTE_ROLLBACK"
 assert_not_contains "C7 promote.sh auto-rollback no longer reads _json_field on previous" '_json_field "$PREV_JSON" previous' "$C7_PROMOTE_ROLLBACK"
 
 # promote.sh immediacy assertion is present.

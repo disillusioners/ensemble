@@ -65,6 +65,15 @@ assert_eq() {
     if [ "$expected" = "$actual" ]; then _pass; else _fail "$name" "$expected" "$actual"; fi
 }
 section() { printf '\n== %s ==\n' "$1"; }
+# D5 (Wave 3): regex asserts — the pack family's shapes, defined locally
+assert_re() {
+    local name="$1" pattern="$2" actual="$3"
+    if printf '%s' "$actual" | grep -Eq -- "$pattern"; then _pass; else _fail "$name" "$pattern" "$actual"; fi
+}
+assert_not_re() {
+    local name="$1" pattern="$2" actual="$3"
+    if printf '%s' "$actual" | grep -Eq -- "$pattern"; then _fail "$name" "(no match for) $pattern" "$actual"; else _pass; fi
+}
 
 # Helper: build a fixture install dir with a release + manifest + journal
 make_install_fixture() {
@@ -681,6 +690,134 @@ case "$W6B_JOURNAL" in
             "$(printf '%s' "$W6B_JOURNAL" | grep -oE '"event":"[a-z_]*"' | tr '\n' ' ')OUT=$W6B_OUT" ;;
 esac
 rm -rf "$W6B_FIX"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# D5 (self-service-promote Wave 3) — the rollback-target CHAIN at the sweep:
+# the 4-distinct fixture (P-2's blind pin CLOSED), the ambiguity halt, the
+# fall-through disposition, the to= consumption (AC-D5-7), and the
+# absent-class Tier-B ceiling under a REQUEST (AC-D5-9).
+# ═══════════════════════════════════════════════════════════════════════════
+
+# seed_chain — a stale flipped promote txn whose rollback-target sources are
+# INDEPENDENTLY controllable: previous/displaced/current/captured (the
+# 4-distinct shape makes a wrong-target rollback VISIBLE — every legacy
+# fixture seeded them equal, which is why the C-4 defect was invisible).
+# args: <fix> <previous> <displaced> <current> <captured|-> [extra-history-json]
+seed_chain() {
+    local fix="$1" prev="$2" displaced="$3" current="$4" captured="$5" extra="${6:-}"
+    local capfield=""
+    [ "$captured" != "-" ] && capfield=",\"captured_previous\":\"$captured\""
+    rm -rf "$fix"; mkdir -p "$fix/releases/$TARGET" "$fix/releases/$prev" "$fix/data"
+    local v
+    local _all_v="$TARGET $prev $displaced $current"
+    [ "$captured" != "-" ] && _all_v="$_all_v $captured"
+    for v in $_all_v; do
+        mkdir -p "$fix/releases/$v"
+        printf '{"manifest_version":"1.0.0","binary_version":"%s","rollback_safe":true}\n' "$v" \
+            > "$fix/releases/$v/manifest.json"
+    done
+    ln -sfn "releases/$TARGET" "$fix/current"
+    cat > "$fix/releases/state.json" <<EOF
+{"current":"$current","previous":"$prev","in_flight":{"kind":"promote","target":"$TARGET","started_at":"2026-10-07T09:00:00Z","flipped":true,"owner_pid":99999,"last_heartbeat":1728000000,"displaced_version":"$displaced"$capfield},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-10-07T09:00:00Z","event":"open_txn","detail":"d5 seeded"},{"ts":"2026-10-07T10:00:00Z","event":"intent_flip","detail":"preflight: intentional promote target $TARGET — integrity verified; operator-initiated"}$extra]}
+EOF
+}
+
+# run_chain_sweep — one disposition tick with the absent-ceiling set to 1
+# (a single qualifying absent observation fires the Tier-B chain — the
+# default ceiling 3 would need three ticks).
+run_chain_sweep() {
+    local fix="$1" port="${2:-19999}"
+    INSTALL_DIR="$fix" PORT="$port" SWEEP_DEFER_CEILING=1 \
+    SWEEP_STALE_S=0 HEARTBEAT_STALE_S=0 LOCK_HEARTBEAT_S=30 LOCK_STALE_S=300 \
+    bash -c '
+        . "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1
+        _journal_sweep "$INSTALL_DIR"
+        echo "sweep-rc=$?"
+    ' 2>&1
+}
+
+D5_TARGET="v9.9.9-d5-target"
+
+section "D5-3 — 4 DISTINCT sources ⇒ repoint to the CAPTURE (vD), source=captured (AC-D5-3)"
+D5A_FIX="$(mktemp -d -t d5a.XXXXXX)"; _register_fixture "$D5A_FIX"
+TARGET="$D5_TARGET" seed_chain "$D5A_FIX" v9.9.9-d5-prevA v9.9.9-d5-dispB v9.9.9-d5-curC v9.9.9-d5-capD
+D5A_OUT="$(run_chain_sweep "$D5A_FIX")"; D5A_J="$(cat "$D5A_FIX/releases/state.json")"
+printf '%s\n' "$D5A_OUT" | tail -3
+assert_eq "D5-3 the repoint went to the CAPTURE vD (not previous/displaced/current)" \
+    "releases/v9.9.9-d5-capD" "$(readlink "$D5A_FIX/current")"
+assert_contains "D5-3 the sweep_rollback row names source=captured" "rolled back to v9.9.9-d5-capD source=captured" "$D5A_J"
+assert_contains "D5-3 the sweep_rollback row carries the Tier-B evidence tag" "evidence=tierB" "$D5A_J"
+assert_re "D5-3 journal current = the capture" '"current": ?"v9.9.9-d5-capD"' "$D5A_J"
+assert_re "D5-3 the txn was CLOSED" '"in_flight": ?null' "$D5A_J"
+assert_eq "D5-3 the 24h counter consumed ONE credit (the executed repoint)" '"24h": 1' "$(printf '%s' "$D5A_J" | grep -oE '"24h": ?[0-9]+' | head -1)"
+
+section "D5-4 — NO capture + current ≠ displaced (both valid) ⇒ halt rollback_target_ambiguous, txn OPEN (AC-D5-4)"
+D5B_FIX="$(mktemp -d -t d5b.XXXXXX)"; _register_fixture "$D5B_FIX"
+TARGET="$D5_TARGET" seed_chain "$D5B_FIX" v9.9.9-d5-prevA v9.9.9-d5-dispB v9.9.9-d5-curC -
+D5B_OUT="$(run_chain_sweep "$D5B_FIX")"; D5B_J="$(cat "$D5B_FIX/releases/state.json")"
+printf '%s\n' "$D5B_OUT" | tail -3
+assert_not_contains "D5-4 NO sweep_rollback executed" '"event":"sweep_rollback"' "$D5B_J"
+assert_contains "D5-4 the halt row names rollback_target_ambiguous" "rollback_target_ambiguous" "$D5B_J"
+assert_not_re "D5-4 the txn stays OPEN (never a wrong rollback)" '"in_flight": ?null' "$D5B_J"
+assert_eq "D5-4 NO repoint (current untouched)" "releases/$D5_TARGET" "$(readlink "$D5B_FIX/current")"
+assert_eq "D5-4 NO credit consumed" '"24h":0' "$(printf '%s' "$D5B_J" | grep -oE '"24h": ?[0-9]+' | head -1)"
+
+section "D5-5 — NO capture + current == displaced ⇒ resolved to that value (AC-D5-5)"
+D5C_FIX="$(mktemp -d -t d5c.XXXXXX)"; _register_fixture "$D5C_FIX"
+TARGET="$D5_TARGET" seed_chain "$D5C_FIX" v9.9.9-d5-prevA v9.9.9-d5-agreeB v9.9.9-d5-agreeB -
+D5C_OUT="$(run_chain_sweep "$D5C_FIX")"; D5C_J="$(cat "$D5C_FIX/releases/state.json")"
+printf '%s\n' "$D5C_OUT" | tail -3
+assert_eq "D5-5 the R2==R3 agreement resolves to that value" \
+    "releases/v9.9.9-d5-agreeB" "$(readlink "$D5C_FIX/current")"
+assert_contains "D5-5 the row names source=current (the highest valid rung)" "source=current" "$D5C_J"
+assert_re "D5-5 the txn was CLOSED" '"in_flight": ?null' "$D5C_J"
+
+section "D5-7 — the rollback_requested to= at the sweep (AC-D5-7)"
+# (a) a VALID to= disagreeing with the VALID capture ⇒ halt (never a wrong rollback)
+D5D_FIX="$(mktemp -d -t d5d.XXXXXX)"; _register_fixture "$D5D_FIX"
+D5_RQ_CONFLICT=',{"ts":"2026-10-07T10:30:00Z","event":"rollback_requested","detail":"target v9.9.9-d5-target run_id v9.9.9-d5-target@2026-10-07T09:00:00Z reason not-ready to v9.9.9-d5-prevA to_source captured"}'
+TARGET="$D5_TARGET" seed_chain "$D5D_FIX" v9.9.9-d5-prevA v9.9.9-d5-dispB v9.9.9-d5-curC v9.9.9-d5-capD "$D5_RQ_CONFLICT"
+D5D_OUT="$(run_chain_sweep "$D5D_FIX")"; D5D_J="$(cat "$D5D_FIX/releases/state.json")"
+printf '%s\n' "$D5D_OUT" | tail -3
+assert_not_contains "D5-7a NO repoint on the valid disagreement" '"event":"sweep_rollback"' "$D5D_J"
+assert_contains "D5-7a the halt names rollback_target_ambiguous" "rollback_target_ambiguous" "$D5D_J"
+assert_not_re "D5-7a txn OPEN" '"in_flight": ?null' "$D5D_J"
+# (b) a to= naming the TARGET itself FAILS VALID ⇒ treated absent ⇒ the capture resolves
+D5E_FIX="$(mktemp -d -t d5e.XXXXXX)"; _register_fixture "$D5E_FIX"
+D5_RQ_SELF=',{"ts":"2026-10-07T10:30:00Z","event":"rollback_requested","detail":"target v9.9.9-d5-target run_id v9.9.9-d5-target@2026-10-07T09:00:00Z reason not-ready to v9.9.9-d5-target to_source captured"}'
+TARGET="$D5_TARGET" seed_chain "$D5E_FIX" v9.9.9-d5-prevA v9.9.9-d5-dispB v9.9.9-d5-curC v9.9.9-d5-capD "$D5_RQ_SELF"
+D5E_OUT="$(run_chain_sweep "$D5E_FIX")"; D5E_J="$(cat "$D5E_FIX/releases/state.json")"
+printf '%s\n' "$D5E_OUT" | tail -3
+assert_contains "D5-7b the to= failing VALID is treated absent — the capture resolves" \
+    "rolled back to v9.9.9-d5-capD source=captured" "$D5E_J"
+
+section "D5-9 — absent under a REQUEST ⇒ defer + ceiling counting (no immediate chain); unprobeable ⇒ defer (AC-D5-9)"
+# (a) absent probe under a request: ONE tick DEFERS and COUNTS — no execution
+D5F_FIX="$(mktemp -d -t d5f.XXXXXX)"; _register_fixture "$D5F_FIX"
+D5_RQ_PLAIN=',{"ts":"2026-10-07T10:30:00Z","event":"rollback_requested","detail":"target v9.9.9-d5-target run_id v9.9.9-d5-target@2026-10-07T09:00:00Z reason not-ready to none to_source none"}'
+TARGET="$D5_TARGET" seed_chain "$D5F_FIX" v9.9.9-d5-prevA v9.9.9-d5-prevA v9.9.9-d5-prevA - "$D5_RQ_PLAIN"
+# ceiling DEFAULT (3): a single absent observation must NOT fire
+D5F_OUT="$(INSTALL_DIR="$D5F_FIX" PORT=19999 SWEEP_DEFER_CEILING=3 \
+    SWEEP_STALE_S=0 HEARTBEAT_STALE_S=0 LOCK_HEARTBEAT_S=30 LOCK_STALE_S=300 \
+    bash -c '. "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1; _journal_sweep "$INSTALL_DIR"; echo "sweep-rc=$?"' 2>&1)"
+D5F_J="$(cat "$D5F_FIX/releases/state.json")"
+printf '%s\n' "$D5F_OUT" | tail -3
+assert_not_contains "D5-9a NO immediate chain (one absent observation under a request)" '"event":"sweep_rollback"' "$D5F_J"
+assert_contains "D5-9a the request deferred with ceiling counting" "request-absent" "$D5F_J"
+assert_not_re "D5-9a txn OPEN" '"in_flight": ?null' "$D5F_J"
+assert_eq "D5-9a the defer counter recorded the absent observation" "absent=1" \
+    "$(grep -oE 'absent=[0-9]+' "$D5F_FIX/.sweep-defer-v9.9.9-d5-target_2026-10-07T09"* 2>/dev/null | head -1)"
+# (b) unprobeable under a request ⇒ defer (the existing F3 arm preserved)
+D5G_FIX="$(mktemp -d -t d5g.XXXXXX)"; _register_fixture "$D5G_FIX"
+TARGET="$D5_TARGET" seed_chain "$D5G_FIX" v9.9.9-d5-prevA v9.9.9-d5-prevA v9.9.9-d5-prevA - "$D5_RQ_PLAIN"
+D5G_OUT="$(INSTALL_DIR="$D5G_FIX" PORT= SWEEP_DEFER_CEILING=1 \
+    SWEEP_STALE_S=0 HEARTBEAT_STALE_S=0 LOCK_HEARTBEAT_S=30 LOCK_STALE_S=300 \
+    bash -c '. "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1; _journal_sweep "$INSTALL_DIR"; echo "sweep-rc=$?"' 2>&1)"
+D5G_J="$(cat "$D5G_FIX/releases/state.json")"
+printf '%s\n' "$D5G_OUT" | tail -3
+assert_not_contains "D5-9b NO execution on an unprobeable probe" '"event":"sweep_rollback"' "$D5G_J"
+assert_contains "D5-9b the request deferred (unprobeable)" "request-probe-unprobeable" "$D5G_J"
+assert_not_re "D5-9b txn OPEN" '"in_flight": ?null' "$D5G_J"
 
 section "Final — summary"
 

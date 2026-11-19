@@ -2622,9 +2622,9 @@ class UpgradeJournalSweepService:
                         uj.journal_history_append(
                             install_dir,
                             "already_closed",
-                            f"closer: commit arrived on a CLOSED txn (target={target}, "
-                            f"run_id={run_id}) — journaled no-op, no second "
-                            f"bookkeeping pass (MINOR-10)",
+                            f"target {target} run_id {run_id} — the commit "
+                            f"arrived on a CLOSED txn: journaled no-op, no "
+                            f"second bookkeeping pass (MINOR-10)",
                         )
                 except (uj.JournalTorn, OSError, KeyError):
                     logger.debug(

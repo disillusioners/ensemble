@@ -9734,7 +9734,8 @@ adopt_stale_txn() {
         _adp_prev_now="$(_json_field "$(journal_read 2>/dev/null)" previous 2>/dev/null)" || _adp_prev_now=""
         [ "$_adp_prev_now" = "null" ] && _adp_prev_now=""
         if [ -n "$_adp_prev_now" ] && [ "$_adp_prev_now" != "$prev" ] \
-           && [ -d "$INSTALL_DIR/releases/$_adp_prev_now" ]; then
+           && [ -d "$INSTALL_DIR/releases/$_adp_prev_now" ] \
+           && ! journal_is_quarantined "$_adp_prev_now"; then
             : # VALID for the new current — left unchanged (the G1 record)
         else
             journal_set_previous "null" || _warn "adopt: previous normalization write FAILED (journal diverged)"

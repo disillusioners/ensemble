@@ -704,6 +704,118 @@ JSON
     exit $?
     fi
 
+    # ---------------------------------------------------------------------------
+    if [ "$LEG" = "d5" ]; then
+    # ===========================================================================
+    # LEG D5 (self-service-promote Wave 3) — the 4-DISTINCT pack seed variant
+    # (P-2's second half, AC-D5-3) + the resolved-target assertions + the
+    # credits (AC-D5-10) + the green-evidence protection (AC-D5-8).
+    # ===========================================================================
+    leg_sandbox d5
+    TARGET="v9.9.9-d5p-target"
+    VA="v9.9.9-d5p-prevA"     # journal.previous    (R4)
+    VB="v9.9.9-d5p-dispB"     # displaced_version  (R3)
+    VC="v9.9.9-d5p-curC"      # journal.current    (R2)
+    VD="v9.9.9-d5p-capD"      # captured_previous  (R0) — MUST win
+
+    # seed4 — the FOUR-DISTINCT variant: every rollback-target source is a
+    # DIFFERENT release, so a wrong-target rollback is VISIBLE (every
+    # legacy pack seed set previous == displaced == current, which is why
+    # the C-4 wrong-rollback defect was invisible — blind pin P-2).
+    seed4() {
+      mkdir -p "$INSTALL_DIR/releases/$TARGET" "$INSTALL_DIR/releases/$VA" \
+               "$INSTALL_DIR/releases/$VB" "$INSTALL_DIR/releases/$VC" \
+               "$INSTALL_DIR/releases/$VD" "$INSTALL_DIR/data"
+      local v
+      for v in "$TARGET" "$VA" "$VB" "$VC" "$VD"; do
+        printf '{"manifest_version":"1.0.0","binary_version":"%s","rollback_safe":true}\n' "$v" \
+          > "$INSTALL_DIR/releases/$v/manifest.json"
+      done
+      ln -sfn "releases/$TARGET" "$INSTALL_DIR/current"
+      cat > "$INSTALL_DIR/releases/state.json" <<EOF
+{"current":"$VC","previous":"$VA","in_flight":{"kind":"promote","target":"$TARGET","started_at":"2026-10-07T09:00:00Z","flipped":true,"owner_pid":99999,"last_heartbeat":1728000000,"displaced_version":"$VB","captured_previous":"$VD"},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-10-07T09:00:00Z","event":"open_txn","detail":"d5p seeded"},{"ts":"2026-10-07T10:00:00Z","event":"intent_flip","detail":"preflight: intentional promote target $TARGET — integrity verified; operator-initiated"}]}
+EOF
+    }
+
+    run_sweep4() {   # <install> <port> [ceiling]
+      local fix="$1" port="$2" ceil="${3:-1}"
+      INSTALL_DIR="$fix" PORT="$port" SWEEP_DEFER_CEILING="$ceil" \
+      SWEEP_STALE_S=0 HEARTBEAT_STALE_S=0 LOCK_HEARTBEAT_S=30 LOCK_STALE_S=300 \
+      SWEEP_SERVING_GREEN_ENABLED="${SWEEP_SERVING_GREEN_ENABLED:-1}" \
+      bash -c '
+        . "'"$LAUNCHER"'" >/dev/null 2>&1
+        _journal_sweep "$INSTALL_DIR"
+        echo "sweep-rc=$?"
+      ' 2>&1
+    }
+
+    section "D5-A — 4 DISTINCT sources ⇒ repoint to the CAPTURE (vD), source=captured (AC-D5-3, P-2)"
+    seed4
+    AOUT="$(run_sweep4 "$INSTALL_DIR" 19999 1)"
+    AJ="$(cat "$INSTALL_DIR/releases/state.json")"
+    printf '%s\n' "$AOUT" | tail -3
+    assert_eq "D5-A the repoint went to the CAPTURE vD — NOT previous/displaced/current" \
+        "releases/$VD" "$(readlink "$INSTALL_DIR/current")"
+    assert_contains "D5-A the sweep_rollback detail names the resolved target + source=captured" \
+        "rolled back to $VD source=captured" "$AJ"
+    assert_eq "D5-A journal current = the capture (not vA/vB/vC)" "$VD" \
+        "$(printf '%s' "$AJ" | grep -oE '"current": ?"[^"]+"' | head -1 | sed 's/.*"current": *"//;s/"//')"
+    assert_re "D5-A the txn was CLOSED" '"in_flight": ?null' "$AJ"
+    assert_eq "D5-A the 24h counter = 1 (ONE credit for the executed repoint — AC-D5-10 Tier-B)" \
+        '"24h": 1' "$(printf '%s' "$AJ" | grep -oE '"24h": ?[0-9]+' | head -1)"
+    assert_contains "D5-A the evidence tier is journaled distinctly (tierB — ceiling-executed)" \
+        "evidence=tierB" "$AJ"
+    assert_not_contains "D5-A the FAILED target is quarantined only, never the capture" \
+        "\"quarantined\": ?\[\"$VD\"" "$AJ"
+    assert_re "D5-A the failed target IS quarantined" "\"quarantined\": ?\[.*\"$TARGET\"" "$AJ"
+
+    section "D5-B — halt / resolution-failure ⇒ rollback_window_count stays 0 (AC-D5-10)"
+    seed4
+    # force the AMBIGUITY halt: drop the capture, leave current ≠ displaced
+    python3 - "$INSTALL_DIR/releases/state.json" <<'PY'
+import json,sys
+p=sys.argv[1]; d=json.load(open(p))
+d["in_flight"].pop("captured_previous", None)
+json.dump(d, open(p,"w"), separators=(",",":"))
+PY
+    BOUT="$(run_sweep4 "$INSTALL_DIR" 19999 1)"
+    BJ="$(cat "$INSTALL_DIR/releases/state.json")"
+    printf '%s\n' "$BOUT" | tail -3
+    assert_contains "D5-B the ambiguity halt fired (no capture + current≠displaced)" "rollback_target_ambiguous" "$BJ"
+    assert_eq "D5-B rollback_window_count == 0 (a halt consumes NO credit)" \
+        '"24h":0' "$(printf '%s' "$BJ" | grep -oE '"24h": ?[0-9]+' | head -1)"
+    assert_not_re "D5-B txn OPEN" '"in_flight": ?null' "$BJ"
+
+    section "D5-C — green-evidence + a rollback_requested ⇒ the GREEN PATH (AC-D5-8)"
+    seed4
+    # a serving_green_commit row for the target + a rollback_requested row:
+    # V1 must take the green path — no sweep_rollback, no quarantine entry,
+    # no counter increment.
+    python3 - "$INSTALL_DIR/releases/state.json" "$TARGET" <<'PY'
+import json,sys
+p=sys.argv[1]; t=sys.argv[2]; d=json.load(open(p))
+d["history"].append({"ts":"2026-10-07T11:00:00Z","event":"serving_green_commit",
+    "detail":f"target {t} run_id {t}@2026-10-07T09:00:00Z prev v9.9.9-x — serving green"})
+d["history"].append({"ts":"2026-10-07T11:01:00Z","event":"rollback_requested",
+    "detail":f"target {t} run_id {t}@2026-10-07T09:00:00Z reason not-ready to none to_source none"})
+json.dump(d, open(p,"w"), separators=(",",":"))
+PY
+    CPORT="$(free_port)"
+    start_green_listener "$CPORT" "${TARGET#v}"
+    COUT="$(run_sweep4 "$INSTALL_DIR" "$CPORT" 1)"
+    CJ="$(cat "$INSTALL_DIR/releases/state.json")"
+    stop_listener
+    printf '%s\n' "$COUT" | tail -3
+    assert_not_contains "D5-C NO sweep_rollback (the green path is taken)" '"event":"sweep_rollback"' "$CJ"
+    assert_not_re "D5-C NO quarantine entry (the target was never punished)" "\"quarantined\": ?\[.*\"$TARGET\"" "$CJ"
+    assert_eq "D5-C the counter NOT incremented" '"24h":0' "$(printf '%s' "$CJ" | grep -oE '"24h": ?[0-9]+' | head -1)"
+    assert_re "D5-C the txn was COMMIT-CLOSED (the green disposition)" '"in_flight": ?null' "$CJ"
+    assert_re "D5-C the current stays at the target" "\"current\": ?\"$TARGET\"" "$CJ"
+
+    leg_summary
+    exit $?
+    fi
+
     printf 'unknown leg: %s\n' "$LEG" >&2
     exit 64
 fi
@@ -720,6 +832,11 @@ EXPECTED_ASSERTS_G4=19
 # G5: the verbatim fold carries 20 asserts + 1 ADDED fixture-guard assert
 # (the absent-probe port is never a reserved service port) = 21.
 EXPECTED_ASSERTS_G5=21
+# D5 (self-service-promote Wave 3): 17 asserts — D5-A (8: the 4-distinct
+# seed repoints to the CAPTURE with source=captured + tierB credit), D5-B
+# (3: the ambiguity halt consumes NO credit), D5-C (5: green evidence +
+# a request take the green path).
+EXPECTED_ASSERTS_D5=16
 # D6 (self-service-promote Wave 1): 15 asserts — D6-A (5: the rc=3 answer
 # is not a timeout, the state word is journaled), D6-B (6: the halt row
 # carries the verifier-path reason and never reads "none captured"), D6-C
@@ -767,6 +884,7 @@ run_one_leg() {
 run_one_leg g2 "$EXPECTED_ASSERTS_G2" || true
 run_one_leg g4 "$EXPECTED_ASSERTS_G4" || true
 run_one_leg g5 "$EXPECTED_ASSERTS_G5" || true
+run_one_leg d5 "$EXPECTED_ASSERTS_D5" || true
 run_one_leg d6 "$EXPECTED_ASSERTS_D6" || true
 
 RESULT_RC=0
@@ -777,8 +895,8 @@ elif [ "$LEGS_FAILED" -gt 0 ]; then
 fi
 
 printf '\n'
-printf 'RESULT pack=promote_handback_halt_gate_legs_test legs=4 legs_failed=%s timed_out=%s asserts=%s asserts_failed=%s expected_asserts=%s rc=%s\n' \
+printf 'RESULT pack=promote_handback_halt_gate_legs_test legs=5 legs_failed=%s timed_out=%s asserts=%s asserts_failed=%s expected_asserts=%s rc=%s\n' \
     "$LEGS_FAILED" "$TIMED_OUT" "$TOTAL_ASSERTS" "$TOTAL_FAILED_ASSERTS" \
-    "$((EXPECTED_ASSERTS_G2 + EXPECTED_ASSERTS_G4 + EXPECTED_ASSERTS_G5 + EXPECTED_ASSERTS_D6))" "$RESULT_RC"
+    "$((EXPECTED_ASSERTS_G2 + EXPECTED_ASSERTS_G4 + EXPECTED_ASSERTS_G5 + EXPECTED_ASSERTS_D5 + EXPECTED_ASSERTS_D6))" "$RESULT_RC"
 printf 'logs: %s\n' "$LEG_LOGDIR"
 exit "$RESULT_RC"

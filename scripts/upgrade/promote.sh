@@ -1279,7 +1279,8 @@ journal_set_current "$PREV"                || journal_fail_loud "rollback bookke
 RB_JSON="$(journal_read 2>/dev/null)" || RB_JSON=""
 RB_PREV_NOW="$(_json_field_quoted "$RB_JSON" '"previous":' 2>/dev/null)" || RB_PREV_NOW=""
 [ "$RB_PREV_NOW" = "null" ] && RB_PREV_NOW=""
-if [ -n "$RB_PREV_NOW" ] && [ "$RB_PREV_NOW" != "$PREV" ] && [ -d "$REL/$RB_PREV_NOW" ]; then
+if [ -n "$RB_PREV_NOW" ] && [ "$RB_PREV_NOW" != "$PREV" ] && [ -d "$REL/$RB_PREV_NOW" ] \
+   && ! journal_is_quarantined "$RB_PREV_NOW"; then
     : # VALID for the new current — left unchanged (the G1 record)
 else
     journal_set_previous "null"            || journal_fail_loud "rollback bookkeeping: previous normalization (null)"
