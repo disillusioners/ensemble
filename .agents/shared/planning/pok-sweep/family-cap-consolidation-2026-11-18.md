@@ -26,6 +26,8 @@ Point-in-time record of the family-cap consolidation wave executed in the live P
 
 Tightest faithful union = 250 chars. A union under a NEW `git-NN` slug is mechanically impossible: the new-slug admission path is family-gated at 4 — only same-slug supersede is exempt. git is the ONLY one of the three families with a REAL live `pok_family_full` refusal (anomaly `463b2b7c`).
 
+> **[LANDED 2026-11-18 — fix/pok-family-key]** The branch makes the INVERSE true: multi-token families ARE live-gated now — `prompt-assent` (prefix count 6) and `snapshot-l3` (prefix count 3) DO refuse with `pok_family_full`; phase-4's "would refuse" inference was REAL, not a census-regex artifact. §3's "git is the ONLY one of the three families with a REAL live `pok_family_full` refusal" and §4's "only git's refusal is real" are therefore SUPERSEDED. §5's PENDING-USER is RESOLVED (Ari's ruling: option (b) — fix the family key), NOT "widen the cap". §4's source anchors and pattern literal describe the PRE-landing state — the landed pattern is `^([a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*)-(\d{2})-(.+)$` (`daemon/repositories/pok/models.py:132`).
+
 ## 4. Gate mechanics — verified from source (read-only)
 - `daemon/repositories/pok/models.py:131` — `POK_FAMILY_SLUG_PATTERN = ^([a-z][a-z0-9]*)-(\d{2})-(.+)$` (single-token family only — multi-token families like `prompt-assent-NN` / `snapshot-l3-NN` are NOT live-gated).
 - `daemon/repositories/pok/repository.py:114-122` — `count_active_in_family` uses `slug.startswith(family-)` so unnumbered rows count.

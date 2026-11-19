@@ -219,7 +219,31 @@ class POKRepository:
             return len(list(session.exec(stmt).all()))
 
     def count_active_in_family(self, project_id: str, family: str) -> int:
-        """Active rows whose slug starts ``<family>-`` (§4.5 family key)."""
+        """Active rows whose slug starts ``<family>-`` (§4.5 family key).
+
+        DELIBERATE SUPERSET (documented, not a bug): the ``startswith``
+        prefix count deliberately includes (i) unnumbered active rows that
+        merely share the ``<family>-`` prefix and (ii) rows that belong to
+        a LONGER family whose name begins with ``family`` (e.g. an
+        ``skill-e6-01-x`` row counts toward both ``skill-e6`` and
+        ``skill``). Quantified in the Phase-1 census artifact
+        ``.agents/shared/planning/pok-sweep/dual-key-census-2026-11-18.md``
+        §3d (9 cross-family rows, 72 unnumbered). The refusal gate
+        (``pok_family_full``) is therefore conservative: a family can
+        trip its bound on prefix-shared rows it does not "own".
+
+        MULTI-TOKEN REACH (fix iteration 2): the family key is now the
+        maximal run of letter-led tokens before the leftmost ``-NN-``
+        ordinal, so the superset reaches shapes the single-token key
+        could not express. An admission of ``skill-01-z`` (family
+        ``skill``) prefix-counts the ``skill-e6-*`` rows (family
+        ``skill-e6``) — a LONGER family inflates the count of a SHORTER
+        prefix. The inverse does NOT hold: ``skill-e6`` never counts
+        ``skill-*`` rows (its prefix is hyphen-terminated). The leak is
+        ONE-DIRECTIONAL (long → short); the count stays
+        pattern-independent (a ``startswith`` query, never a
+        family-membership test).
+        """
         stmt = select(ProjectOperatingKnowledge).where(
             ProjectOperatingKnowledge.project_id == project_id,
             ProjectOperatingKnowledge.status == "active",

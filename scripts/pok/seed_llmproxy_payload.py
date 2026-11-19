@@ -71,6 +71,7 @@ from daemon.services.pok_service import (  # noqa: E402
     POK_ACTIVE_CAP_PER_PROJECT,
     POK_BODY_MAX_CHARS,
     POK_FAMILY_MAX,
+    POK_FAMILY_RE,
     POK_SLUG_MAX_CHARS,
     POKError,
     POKService,
@@ -281,9 +282,11 @@ def _validate_payload() -> None:
             raise SystemExit(f"REFUSED (domain) {entry.slug}: {entry.domain}")
         if entry.audience not in ("operation", "implementation", "both"):
             raise SystemExit(f"REFUSED (audience) {entry.slug}: {entry.audience}")
-        parts = entry.slug.split("-")
-        if len(parts) >= 3 and parts[-2].isdigit() and len(parts[-2]) == 2:
-            family_counts[parts[0]] += 1
+        # Realign to the canonical family derivation (multi-token head
+        # before the leftmost -NN- ordinal) — single source: POK_FAMILY_RE.
+        m = POK_FAMILY_RE.match(entry.slug)
+        if m is not None:
+            family_counts[m.group(1)] += 1
     oversized = [f for f, n in family_counts.items() if n > POK_FAMILY_MAX]
     if oversized:
         raise SystemExit(f"REFUSED (family cap): {oversized}")

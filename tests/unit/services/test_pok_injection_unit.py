@@ -359,16 +359,49 @@ class TestAc18Ordering:
         assert slugs == [("mixa-02-both", "ranked")]  # no pinned drag
 
     def test_tightened_regex_unordered_slugs_stay_unordered(self) -> None:
-        """Slugs that do NOT match ^([a-z][a-z0-9]*)-(\\d{2})-(.+)$ are
-        singletons — they keep their ranked (here: slug) relative
-        order and never merge into a family block."""
+        """Family membership under the CORRECTED multi-token key.
+
+        PREMISE CORRECTION (fix iteration 1, F4): the old docstring
+        claimed non-matching slugs are singletons under the OLD
+        single-token pattern, and used
+        ``model-catalogs-19-vs-22-not-drift`` as the UNORDERED
+        exemplar. Under the corrected key that slug IS a family member
+        — family ``model-catalogs``, ordinal 19 — so the old assertion
+        was green only because a ONE-member family block is
+        order-stable (a vacuous pass for that row).
+
+        The unordered claim now rides the slugs that genuinely have NO
+        family (no ``-NN-`` ordinal): ``artifact-is-container-image``
+        and ``healthz-in-cluster-only``. The family row's ordering is
+        asserted EXPLICITLY below — never assumed."""
+        from daemon.services.pok_injection import _slug_family
+
+        # the exemplar that LEFT the unordered set …
+        assert _slug_family("model-catalogs-19-vs-22-not-drift") == "model-catalogs"
+        # … and the genuinely family-less pair
+        assert _slug_family("artifact-is-container-image") is None
+        assert _slug_family("healthz-in-cluster-only") is None
+
         rows = [
             _row("model-catalogs-19-vs-22-not-drift", audience="both"),
+            _row("model-catalogs-20-other-fact", audience="both"),
             _row("artifact-is-container-image", audience="both"),
             _row("healthz-in-cluster-only", audience="both"),
         ]
         result = admit_view(rows, agent_id="worker", now=NOW)
         slugs = [v.row.slug for v in result.entries]
+        # the family-less pair keeps its ranked (here: slug) relative
+        # order and never merges into a family block
+        assert [s for s in slugs if not s.startswith("model-catalogs-")] == [
+            "artifact-is-container-image",
+            "healthz-in-cluster-only",
+        ]
+        # the family renders as ONE CONTIGUOUS block, slug-ordered
+        # inside — asserted, not assumed (a ONE-member block would pass
+        # vacuously, hence the second member).
+        fam_idx = [i for i, s in enumerate(slugs) if s.startswith("model-catalogs-")]
+        assert fam_idx == list(range(fam_idx[0], fam_idx[0] + len(fam_idx)))
+        assert [slugs[i] for i in fam_idx] == sorted(slugs[i] for i in fam_idx)
         assert slugs == sorted(slugs)  # slug order = rank order fallback
 
     def test_family_never_splits_under_entry_pressure(self) -> None:
