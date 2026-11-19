@@ -4257,17 +4257,34 @@ _verify_tip_identity() {
                 "override: staging tree at $HEAD_SHA but integration tip is at $tip"
             return 0
         fi
+        # DATA-NOT-CODE (refusal-message quoting): every literal fragment of
+        # this operator-facing text is SINGLE-QUOTED, so bash performs NO
+        # expansion on it — the documented commands below (`git fetch origin`,
+        # `git push origin <branch>:latest`) are LITERAL TEXT and can never be
+        # parsed as shell code. The previous double-quoted form made bash
+        # EXECUTE both commands while assembling the message: the backticked
+        # regions were command substitutions, `git fetch origin` actually
+        # fetched, and `git push origin <branch>:latest` was re-parsed by the
+        # inner shell as `git push origin < branch > :latest` (an input
+        # redirection from a file named `branch` plus a stdout redirection
+        # that CREATED a file named `:latest` in the operator's CWD) — and the
+        # command text VANISHED from the message the operator was shown.
+        # Only the SHA fragment stays double-quoted: it interpolates
+        # ${HEAD_SHA:0:12} / ${tip:0:12} (git object names). Bash never
+        # re-scans an expansion result for substitutions, redirections or
+        # globs, so that fragment is data by language guarantee, not by
+        # convention. Keep every OTHER fragment single-quoted.
         _freshness_refuse non-tip-tree \
-            "stale-artifact stage refused: staging tree is NOT at the integration tip " \
+            'stale-artifact stage refused: staging tree is NOT at the integration tip ' \
             "(HEAD=${HEAD_SHA:0:12} tip=${tip:0:12}). " \
-            "The tag at HEAD does not include fixes that landed on the tip after the tag was placed. " \
-            "This catches the v0.16.13 payload case: a tag placed on a non-tip commit, with the actual " \
-            "fixes landing later on the tip. Remedies, in order: " \
-            "  1) merge your work into the integration branch and re-tag at the tip, then re-run stage — " \
-            "or, if the local branch is ahead of origin: `git fetch origin` (a stale " \
-            "refs/remotes/origin/latest with fixes still landing there would be refreshed), " \
-            "or `git push origin <branch>:latest` first so the remote-tracking tip catches up, then re-check " \
-            "  2) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)"
+            'The tag at HEAD does not include fixes that landed on the tip after the tag was placed. ' \
+            'This catches the v0.16.13 payload case: a tag placed on a non-tip commit, with the actual ' \
+            'fixes landing later on the tip. Remedies, in order: ' \
+            '  1) merge your work into the integration branch and re-tag at the tip, then re-run stage — ' \
+            'or, if the local branch is ahead of origin: `git fetch origin` (a stale ' \
+            'refs/remotes/origin/latest with fixes still landing there would be refreshed), ' \
+            'or `git push origin <branch>:latest` first so the remote-tracking tip catches up, then re-check ' \
+            '  2) pass --allow-stale-stage to override (JOURNALED on the install dir; unsafe on real rungs)'
     fi
     return 0
 }
