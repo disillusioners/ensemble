@@ -4,6 +4,7 @@
 - **Branch:** `feature/maintenance-idle-starvation` (base `origin/latest` @ `c36c3e07c`)
 - **Diagnosis (binding, not re-derived):** job `9c2b0126`, 2026-11-18
 - **Implemented:** 2026-11-19, worktree `/home/nea/ensemble-src-wt-maint-starve`
+- **Commits:** 9 (range `c36c3e07c..9cfb40202`)
 
 ## The fault (one paragraph)
 
@@ -88,9 +89,10 @@ and the in-memory value is only its cache. A job that succeeded 1h ago
 (with a 24h interval) is NOT due after a restart; a job whose last
 success is 30h old IS due and runs even on a busy system.
 
-The staleness reference clock is `last_success_ts` → `last_run` →
-the process-start anchor (so a fresh install gets its guarantee
-measured from boot instead of firing heavy work instantly under load).
+The staleness reference clock is `last_attempt_ts` → `last_success_ts` →
+`last_run` → the process-start anchor (so a fresh install gets its
+guarantee measured from boot instead of firing heavy work instantly
+under load).
 
 ## (CAS) The atomic A/B resolve
 
@@ -199,6 +201,11 @@ for a future settings/API consumer.
 | `c5a4b95c0` | `fix(maintenance): starvation composite — per-job idle policy, persisted staleness guarantee, skip telemetry` |
 | `a517779bd` | `test(maintenance): make the idle-policy mutation red on the behavioural assertion` |
 | `b4a4bb89a` | `fix(maintenance): gate the staleness escape hatch on the last ATTEMPT — a failing job must not be force-run every tick` |
+| `1fa86ea97` | `docs(maintenance): idle-policy classification table + invariants + mutation proof` |
+| `d20f01eae` | `docs(maintenance): refresh mutation-proof sha256s + attempt-clock note + test count` |
+| `765db609a` | `fix(maintenance): AM-9 kind filter on the persisted last-success (dry-run must not hydrate) + honest override-write return + idle-gated doc drift` |
+| `18f4b9419` | `fix(maintenance): truthful busy-override log + structural gated-guarantee guard` |
+| `9cfb40202` | `docs(maintenance): scope & wiring disclosures + re-verified counts + cycle-1 record` |
 
 Parts (A), (B) and (D) share one file and are interdependent (the
 gate consults the staleness override), so they landed as ONE commit
@@ -370,7 +377,7 @@ about persistence. New pins:
 
 ### Rider #3 — stale idle-gated doc drift (LANDED, comments/docstrings only)
 
-Reworded every remaining claim that a now-`UN_GATED` job is idle-gated:
+Reworded the claims enumerated below (a now-`UN_GATED` job claimed idle-gated):
 
 | site | job |
 |------|-----|
@@ -386,6 +393,8 @@ Reworded every remaining claim that a now-`UN_GATED` job is idle-gated:
 | `manager.py` `_run_skill_orphan_sweep` docstring | `skill_orphan_sweep` |
 | `manager.py` `_run_skill_metric_scan` docstring | `skill_metric_scan` |
 | `manager.py` `_run_skill_ab_inactivity_sweep` comment | `skill_ab_inactivity_sweep` |
+| `manager.py:7792` `_run_projectskill_gc` docstring | `project_skill_gc` |
+| `manager.py:4810` skill_ab_inactivity_sweep registration comment | `skill_ab_inactivity_sweep` |
 
 Zero behavior change (comments/docstrings only); `daemon.manager` still
 imports.
