@@ -536,8 +536,16 @@ async def list_instances(
     # ``IN (?, ?, ...)`` over the current page's IDs; rows the user
     # has never touched are simply absent from the dict (the merge
     # falls back to ``None``).
+    #
+    # The batch read runs OFF the event loop (``db_offload`` seam) —
+    # the repository is synchronous, so an on-loop call blocked the
+    # whole loop for the duration of the SELECT. SECOND offload call
+    # on purpose: folding the read into ``manager.list_instances``
+    # would widen the change into ``daemon/manager.py`` for no gain.
     instance_ids = [inst["instance_id"] for inst in instances_data]
-    prefs_map = manager._instance_ui_prefs_repo.get_all(instance_ids)
+    prefs_map = await _offload(
+        manager._instance_ui_prefs_repo.get_all, instance_ids
+    )
 
     instances = []
     for inst in instances_data:
