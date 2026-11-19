@@ -248,7 +248,9 @@ def make_bus_mock(pending: list | None = None) -> MagicMock:
     bus = MagicMock()
     bus.pending_watchers = AsyncMock(return_value=list(pending or []))
     bus.count_pending_for_target = AsyncMock(return_value=0)
+    bus.count_fulfillable_pending_for_target = AsyncMock(return_value=0)
     bus.count_pending_for_target_sync = MagicMock(return_value=0)
+    bus.count_fulfillable_pending_for_target_sync = MagicMock(return_value=0)
     return bus
 
 

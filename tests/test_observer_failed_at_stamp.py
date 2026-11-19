@@ -77,6 +77,7 @@ _BUS_PENDING = [0]
 def _wire_bus_mock():
     bus_mock = MagicMock()
     bus_mock.count_pending_for_target_sync = lambda iid: _BUS_PENDING[0]
+    bus_mock.count_fulfillable_pending_for_target_sync = lambda iid, **kw: _BUS_PENDING[0]
     bus_mock._get_parent_lock = AsyncMock(side_effect=lambda parent_id: asyncio.Lock())
     bus_mock.get_generation = MagicMock(return_value=0)
     set_dependency_bus(bus_mock)

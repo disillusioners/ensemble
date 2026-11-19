@@ -14,6 +14,9 @@ import { InstanceService } from '../../services/instance.service';
 import { InstancePrefsService, COLOR_OPTIONS, ICON_OPTIONS } from '../../services/instance-prefs.service';
 import { TabStateService } from '../../services/tab-state.service';
 import { InstanceDeleteDialogComponent, InstanceDeleteDialogData } from '../instance-delete-dialog/instance-delete-dialog.component';
+import { RoomDialogComponent, ROOM_DIALOG_SIZE } from '../room-dialog/room-dialog.component';
+import { RoomService } from '../../services/room.service';
+import { buildMembershipMap, normalizeGlobalRoomListResponse } from '../../models/room.model';
 import { InstanceIdCopyComponent } from '../instance-id-copy/instance-id-copy.component';
 
 export interface InstanceTreeNode {
@@ -76,6 +79,7 @@ export class InstanceListComponent implements OnInit, AfterViewInit, OnDestroy {
   private readonly tabStateService = inject(TabStateService);
   private readonly api = inject(ApiService);
   private readonly dialog = inject(MatDialog);
+  protected readonly roomService = inject(RoomService);
 
   // Signal inputs
   readonly agents = input<Agent[]>([]);
@@ -100,6 +104,11 @@ export class InstanceListComponent implements OnInit, AfterViewInit, OnDestroy {
 
   // Track expanded/collapsed state per instance
   readonly expandedInstances = signal<Set<string>>(new Set());
+
+  // gc-fe-surfaces P3: anchor-less membership map (instance_id -> has >=1 joined room).
+  private readonly membershipMap = signal<Map<string, boolean>>(new Map());
+  protected readonly roomMapError = signal<string | null>(null);
+  protected readonly roomMapTruncated = signal<boolean>(false);
 
   // Manual refresh state
   readonly isRefreshing = signal(false);
@@ -215,6 +224,64 @@ export class InstanceListComponent implements OnInit, AfterViewInit, OnDestroy {
         next: (response) => this.defaultAgentVersions.set(response.default_versions ?? {}),
         error: () => {},
       });
+
+    // gc-fe-surfaces P3 (W-10): ONE anchor-less mount-time fetch of the
+    // nest-wide room list, deriving the membership gate map. NEW traffic
+    // (one GET /api/rooms per list mount). Not routed through the shared
+    // loadGlobalRooms lanes so the gate never shares mutable state with
+    // an open dialog. Fail-closed: a failed fetch leaves the map empty.
+    this.loadRoomMap();
+  }
+
+  private roomMapRequestId = 0;
+
+  private loadRoomMap(): void {
+    const reqId = ++this.roomMapRequestId;
+    this.roomMapError.set(null);
+    this.roomMapTruncated.set(false);
+    this.roomService
+      .fetchAllRooms(null)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (resp) => {
+          if (this.roomMapRequestId !== reqId) return; // stale — dropped
+          const normalized = normalizeGlobalRoomListResponse(resp);
+          this.membershipMap.set(buildMembershipMap(normalized.rooms));
+          this.roomMapTruncated.set(normalized.truncated === true);
+        },
+        error: () => {
+          if (this.roomMapRequestId !== reqId) return; // stale — dropped
+          this.membershipMap.set(new Map());
+          this.roomMapError.set('Could not load chatroom membership.');
+          this.roomMapTruncated.set(false);
+        },
+      });
+  }
+
+  protected onRetryRoomMap(): void {
+    this.loadRoomMap();
+  }
+
+  protected hasJoinedRooms(instanceId: string): boolean {
+    return this.membershipMap().get(instanceId) === true;
+  }
+
+  protected onOpenJoinedRooms(instance: InstanceInfo, event: Event): void {
+    event.preventDefault();
+    event.stopPropagation();
+    // Gate re-check: the click handler reads the SAME signal as the
+    // template @if (fix-G). A stale/empty map makes this a no-op.
+    if (!this.hasJoinedRooms(instance.instance_id)) return;
+    this.dialog.open(RoomDialogComponent, {
+      data: {
+        mode: 'joined',
+        instanceId: instance.instance_id,
+        instanceName: instance.instance_name ?? instance.title ?? null,
+      },
+      ...ROOM_DIALOG_SIZE,
+      panelClass: 'room-dialog-panel',
+      backdropClass: 'room-dialog-backdrop',
+    });
   }
 
   ngAfterViewInit(): void {

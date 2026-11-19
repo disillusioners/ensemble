@@ -165,6 +165,7 @@ def _make_stub_bus() -> MagicMock:
     """Stub DependencyBus — only the two emit primitives C1 uses."""
     bus = MagicMock(name="DependencyBus")
     bus.count_pending_for_target_sync = MagicMock(return_value=0)
+    bus.count_fulfillable_pending_for_target_sync = MagicMock(return_value=0)
     bus.emit_terminal = AsyncMock(return_value=[])
     bus.emit_terminal_for_child_instance = AsyncMock(return_value=[])
     return bus

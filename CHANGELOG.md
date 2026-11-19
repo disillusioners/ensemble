@@ -5,6 +5,57 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.8] — 2026-11-19
+
+### Fixed — agent tool-lane systemctl/bash guard-inversion closing fixes (`fix/systemctl-guard-pipe-shapes`, board `wi-a5ec5b3e`)
+
+- Fixed: the shared systemctl intent guard (bash + proc tool lanes) analyses a piped payload as a WHOLE TEXT — a mutating verb anywhere in the text is caught, not only at the leading command position
+- Fixed: per-tool option arity — ONE shared option analyser (bundled `--opt=v`, attached `--opt v`, value-option forms) now covers ALL scanners, an UNKNOWN option fails CLOSED, and the sudo/env/stdbuf value options are peeled correctly
+- Fixed: heredoc bodies are analysed as bodies — a heredoc handed to a pipe-fed executor is scanned, and a heredoc delivered to a bare `ssh` host is recognised as REMOTE stdin execution and refused
+- Fixed: the xargs recursion is analysed WHOLE-TAIL (the operand set, not just the command word) and the resolved payload is scanned; the mutating-verb set is ONE derived source of truth (no per-scanner drift) and `ssh` arity fails CLOSED when the remote command cannot be resolved
+- Changed: 7 over-block shapes removed — the READ-ONLY verbs pass through every runner, and a property name colliding with a mutating verb no longer refuses in a DIRECT context
+- No schema migration — this release carries ZERO `daemon/migrations/versions/*.sql` changes
+- Gates: tester re-gate PASS-WITH-NOTES (`eb520859f` / `33c54d5f6`), implementation review NEEDS-REVISION → closed, tidier CLEANUP-REQUIRED → closed; mutation harness 21/21 legs (89 reds, EXPECTED red-count equality, byte-identical restore, post-restore green re-run); pack 257/257 file + 296/296 pack, net-new reds 0
+
+## [0.31.7] — 2026-11-19
+
+### Fixed — POK multi-token family key + count-aware family-full cure (`fix/pok-family-key`)
+
+- Fixed: the POK family gate now derives a MULTI-TOKEN family key (`<a>-<b>`, e.g. `snapshot-l3`) instead of single-token prefix matching; a `pok_family_full` refusal now names the active family members it counted
+- Fixed: the family-full cure is count-aware — an over-cap family receives an exact `archive_needed` count (archive arithmetic proven: archiving 1 of 4 still refused; archiving 2 of 4 admits) instead of the imprecise "archive one" wording
+
+### Docs — dual-key census blast-radius map + A-26a decision-ledger supersession (`fix/pok-family-key`)
+
+- Dual-key family census blast-radius map (2026-11-18): per-family active-member counts under the corrected key derivation
+- A-26a decision-ledger supersession recorded in the POK planning set
+
+## [0.31.6] — 2026-11-19
+
+### Fixed — wake-path carrier fix: parked parents wake at terminal (`wi-8f60e6f1`)
+
+- Fixed: watcher fire-at-terminal (a nudge-armed watcher whose target is not the child's structural parent now fires on COMPLETED/TERMINATED, closing the can-never-fire RCA class) + nudge self-surgery guard (a nudger can no longer nudge itself — the live-wedge shape) + park-predicate qualification + wedge-notice truthfulness (notices now report honestly). The D-2 delivery contract is made honest: at-least-once with a bounded duplicate window, not at-most-once. Shapes S1–S4 landed; zero migrations.
+- Operational: the wedged live parent (ari root `17efd2ef`) was repaired 2026-11-18 under Emperor attestation (5/5 blocks, server-verified byte identity, notices ceased); this release carries the durable code fix. Gates: tester pack 115 = 47+68, watchdog 51, reconciler 47, PG null-delta; implementation review CLEARED.
+
+## [0.31.5] — 2026-11-18
+
+### Fixed — agent tool-lane unit-control guard laundering closure (`wi-a5ec5b3e`)
+
+- Fixed: agent tool-lane unit-control guard laundering closure — pipe-into-shell and xargs-stdin shapes, unpeeled runners (su/runuser/systemd-run/watch/ssh), and scheduler handoff (at/batch/crontab) now refused with read-only inspection still allowed (reviewer finding on wi-a5ec5b3e, 12 bypass class); pins + counter-mutations extended
+
+## [0.31.4] — 2026-11-18
+
+### Fixed — agent tool-lane systemctl guard intent-match inversion (`wi-a5ec5b3e`)
+
+- Fixed: agent tool-lane unit-control guard intent-match inversion fix + unit-stop wrapper closure + proc lane, board wi-a5ec5b3e, 2026-11-18 triple-outage
+
+## [0.31.3] — 2026-11-18
+
+### Added — group-chat FE fast-follow surfaces (`feature/gc-fe-surfaces`)
+
+- Global room browser in the app header (RoomDialog global/joined modes + header control) and a per-instance joined-rooms row button with conditional visibility — room-less instances render no button
+- Read-only `GET /api/rooms` room-list surface (bounded, shared membership predicate) backing the FE global-lane service layer
+- Contracts pinned by specs: polling freshness, 422/404 taxonomy, truncated render at limit, anchor visibility; e2e rooms-gate suites (playwright, dedicated-port fence) + FE-UI drift-guard sanctions
+
 ## [0.31.2] — 2026-11-18
 
 ### Fixed — skill-system defect fixes C1/C2/C3 + skill-keeper verification (`feature/skill-system-defects`)

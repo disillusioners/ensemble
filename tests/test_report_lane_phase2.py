@@ -254,6 +254,7 @@ class TestIndependentTurn:
                 target_instance_id=parent_id,
                 message="child completed",
                 source="test",
+                metadata={"child_id": child_id},
             ),
         )
 
@@ -313,11 +314,11 @@ class TestIndependentTurn:
 
         await bus.watch(
             str(child1_task_id),
-            FollowUp(target_instance_id=parent_id, message="child1 done", source="test"),
+            FollowUp(target_instance_id=parent_id, message="child1 done", source="test", metadata={"child_id": child1_id}),
         )
         await bus.watch(
             str(child2_task_id),
-            FollowUp(target_instance_id=parent_id, message="child2 done", source="test"),
+            FollowUp(target_instance_id=parent_id, message="child2 done", source="test", metadata={"child_id": child2_id}),
         )
 
         # Before any completion: 2 pending watchers.
@@ -385,8 +386,8 @@ class TestIndependentTurn:
         child1_task_id = _seed_child_task(engine, child_instance_id=child1_id)
         child2_task_id = _seed_child_task(engine, child_instance_id=child2_id)
 
-        await bus.watch(str(child1_task_id), FollowUp(target_instance_id=parent_id, message="c1", source="t"))
-        await bus.watch(str(child2_task_id), FollowUp(target_instance_id=parent_id, message="c2", source="t"))
+        await bus.watch(str(child1_task_id), FollowUp(target_instance_id=parent_id, message="c1", source="t", metadata={"child_id": child1_id}))
+        await bus.watch(str(child2_task_id), FollowUp(target_instance_id=parent_id, message="c2", source="t", metadata={"child_id": child2_id}))
 
         await bus.emit_terminal(str(child1_task_id), Outcome(status="completed"))
         await bus.emit_terminal(str(child2_task_id), Outcome(status="completed"))
@@ -1319,7 +1320,7 @@ class TestErrorPropagation:
 
         await bus.watch(
             str(child_task_id),
-            FollowUp(target_instance_id=parent_id, message="child error", source="test"),
+            FollowUp(target_instance_id=parent_id, message="child error", source="test", metadata={"child_id": child_id}),
         )
 
         # Emit error status for the child.
@@ -1342,8 +1343,8 @@ class TestErrorPropagation:
         child1_task_id = _seed_child_task(engine, child_instance_id=child1_id)
         child2_task_id = _seed_child_task(engine, child_instance_id=child2_id)
 
-        await bus.watch(str(child1_task_id), FollowUp(target_instance_id=parent_id, message="c1", source="t"))
-        await bus.watch(str(child2_task_id), FollowUp(target_instance_id=parent_id, message="c2", source="t"))
+        await bus.watch(str(child1_task_id), FollowUp(target_instance_id=parent_id, message="c1", source="t", metadata={"child_id": child1_id}))
+        await bus.watch(str(child2_task_id), FollowUp(target_instance_id=parent_id, message="c2", source="t", metadata={"child_id": child2_id}))
 
         # Child 1 errors.
         await bus.emit_terminal(str(child1_task_id), Outcome(status="error", error="c1 error"))
@@ -1368,8 +1369,8 @@ class TestErrorPropagation:
         child1_task_id = _seed_child_task(engine, child_instance_id=child1_id)
         child2_task_id = _seed_child_task(engine, child_instance_id=child2_id)
 
-        await bus.watch(str(child1_task_id), FollowUp(target_instance_id=parent_id, message="c1", source="t"))
-        await bus.watch(str(child2_task_id), FollowUp(target_instance_id=parent_id, message="c2", source="t"))
+        await bus.watch(str(child1_task_id), FollowUp(target_instance_id=parent_id, message="c1", source="t", metadata={"child_id": child1_id}))
+        await bus.watch(str(child2_task_id), FollowUp(target_instance_id=parent_id, message="c2", source="t", metadata={"child_id": child2_id}))
 
         await bus.emit_terminal(str(child1_task_id), Outcome(status="completed"))
         await bus.emit_terminal(str(child2_task_id), Outcome(status="completed"))
@@ -1387,7 +1388,7 @@ class TestErrorPropagation:
         child_id = _seed_instance(engine, parent_id=parent_id)
         child_task_id = _seed_child_task(engine, child_instance_id=child_id)
 
-        await bus.watch(str(child_task_id), FollowUp(target_instance_id=parent_id, message="c", source="t"))
+        await bus.watch(str(child_task_id), FollowUp(target_instance_id=parent_id, message="c", source="t", metadata={"child_id": child_id}))
         await bus.emit_terminal(str(child_task_id), Outcome(status="error", error="child error"))
 
         # Pre-condition: error flag is set.
@@ -1437,7 +1438,7 @@ class TestErrorPropagation:
         child_id = _seed_instance(engine, parent_id=parent_id)
         child_task_id = _seed_child_task(engine, child_instance_id=child_id)
 
-        await bus.watch(str(child_task_id), FollowUp(target_instance_id=parent_id, message="c", source="t"))
+        await bus.watch(str(child_task_id), FollowUp(target_instance_id=parent_id, message="c", source="t", metadata={"child_id": child_id}))
         await bus.emit_terminal(str(child_task_id), Outcome(status="error", error="oops"))
 
         # Default would be COMPLETED (parent's own turn ended cleanly).
@@ -1493,7 +1494,7 @@ class TestErrorPropagation:
 
         await bus.watch(
             str(child_task_id),
-            FollowUp(target_instance_id=parent_id, message="c", source="t"),
+            FollowUp(target_instance_id=parent_id, message="c", source="t", metadata={"child_id": child_id}),
         )
         # status="error" with error=None — the F-1 truthy-error
         # gate refuses to flip the parent flag (the None-capable
@@ -1547,7 +1548,7 @@ class TestErrorPropagation:
 
         await bus.watch(
             str(child_task_id),
-            FollowUp(target_instance_id=parent_id, message="c", source="t"),
+            FollowUp(target_instance_id=parent_id, message="c", source="t", metadata={"child_id": child_id}),
         )
         # Post-F-1: status="error" with a TRUTHY error flips the
         # parent flag (the gate requires both — see

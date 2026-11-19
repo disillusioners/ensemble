@@ -1,0 +1,62 @@
+[identity] current_database() = ensemble_prod   current_user = ensemble
+
+=== PENDING WATCHERS TARGETING THE PARENT (extended census) ===
++------------+----------+-------------+----------------+-------------+---------------+
+| kind       | id       | task/worker | child/lane     | state       | scope         |
++------------+----------+-------------+----------------+-------------+---------------+
+| commission | 06001f88 | 82551f59    | instance_nudge | outstanding | in_target_set |
+| commission | a1561f19 | 82551f59    | instance_nudge | outstanding | in_target_set |
++------------+----------+-------------+----------------+-------------+---------------+
+
+=== PER-ROW DISPOSITION (8-row target set) ===
++-------+------------+----------+-------------+--------------------+------------------------------------------------+
+| label | kind       | id       | state       | disposition        | reason/note                                    |
++-------+------------+----------+-------------+--------------------+------------------------------------------------+
+| W1    | watcher    | 8a1f60d7 | CANCELLED   | naturally_resolved |                                                |
+| W2    | watcher    | 999efa71 | CANCELLED   | naturally_resolved | needs enqueued_at backfill                     |
+| W3    | watcher    | 5602e91d | CANCELLED   | naturally_resolved | needs enqueued_at backfill                     |
+| W4    | watcher    | c83e12a2 | CANCELLED   | naturally_resolved | needs enqueued_at backfill                     |
+| M1    | commission | 0cdc0b31 | abandoned   | naturally_resolved | worker_terminal_no_report / worker completed   |
+| M2    | commission | 90493206 | abandoned   | naturally_resolved | ttl_expired_not_live / worker waiting_children |
+| M3    | commission | 06001f88 | outstanding | in_scope_stale     | ttl_expired_not_live / worker waiting_children |
+| M4    | commission | a1561f19 | outstanding | in_scope_stale     | ttl_expired_not_live / worker waiting_children |
++-------+------------+----------+-------------+--------------------+------------------------------------------------+
+
+=== ASSERTIONS A1-A14 ===
++-----+------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------+---------+
+| id  | assertion                                                              | observed                                                                                   | expected                                           | verdict |
++-----+------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------+---------+
+| A1  | parent exists AND status in {waiting_children, running} (amendment: tr | exists=True, first=waiting_children, re_read=None, final=waiting_children, mid_turn=False  | exists=True, status in {waiting_children, running} | PASS    |
+| A2  | watcher 8a1f60d7 resolves uniquely; target==parent; source_task==39320 | matches=1, state=CANCELLED, disposition=naturally_resolved, target=17efd2ef-9f98-46d4-b41b | matches=1, identity matches, state=PENDING|resolve | PASS    |
+| A3  | task 39320 exists and is terminal (or GC'd after resolution for a reso | watcher resolved; source_task=MISSING (GCed, expected)                                     | exists=True & terminal, OR resolved watcher with G | PASS    |
+| A4  | watched worker 542b49a6 exists and is terminal                         | exists=True, status=completed, updated_at=2026-11-17T19:04:27.795218+00:00                 | exists=True, status in {completed,terminated,error | PASS    |
+| A5  | watcher 999efa71 unique; target==parent; source_task==39424; child_id= | matches=1, state=CANCELLED, disposition=naturally_resolved, target=17efd2ef-9f98-46d4-b41b | matches=1, identity matches, state=PENDING|resolve | PASS    |
+| A6  | task 39424 exists and is terminal (or GC'd after resolution for a reso | watcher resolved; source_task=MISSING (GC'd, expected)                                     | exists=True & terminal, OR resolved watcher with G | PASS    |
+| A7  | all 4 commissions resolve uniquely; commissioner==parent; worker bindi | M1=abandoned/naturally_resolved; M2=abandoned/naturally_resolved; M3=outstanding/in_scope_ | 4/4 identity matches, state outstanding|resolved   | PASS    |
+| A8  | DRIFT GUARD: every PENDING watcher / outstanding commission of the par | pending_for_parent=0 (unknown=0), outstanding_for_parent=2 (unknown=0)                     | unknown=0 and unknown=0                            | PASS    |
+| A9  | parent status in {waiting_children, running} (transient self-resolving | status=waiting_children, mid_turn=False, first=waiting_children, re_read=None              | status in {waiting_children, running}              | PASS    |
+| A10 | watcher 5602e91d resolves uniquely; target==parent; source_task==39564 | matches=1, state=CANCELLED, disposition=naturally_resolved, target=17efd2ef-9f98-46d4-b41b | matches=1, identity matches, state=PENDING|resolve | PASS    |
+| A11 | watcher c83e12a2 resolves uniquely; target==parent; source_task==39564 | matches=1, state=CANCELLED, disposition=naturally_resolved, target=17efd2ef-9f98-46d4-b41b | matches=1, identity matches, state=PENDING|resolve | PASS    |
+| A12 | commission 06001f88 resolves uniquely; commissioner==parent; worker==8 | matches=1, state=outstanding, disposition=in_scope_stale, commissioner=17efd2ef-9f98-46d4- | matches=1, identity matches, state=outstanding|res | PASS    |
+| A13 | commission a1561f19 resolves uniquely; commissioner==parent; worker==8 | matches=1, state=outstanding, disposition=in_scope_stale, commissioner=17efd2ef-9f98-46d4- | matches=1, identity matches, state=outstanding|res | PASS    |
+| A14 | task 39564 (source of W3/W4) exists and is terminal (or GC'd after res | watchers resolved; source_task=MISSING (GC'd, expected)                                    | exists=True & terminal, OR resolved watchers with  | PASS    |
++-----+------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------+---------+
+
+classification = partial
+parent_mid_turn (amendment) = False  (first=waiting_children, re_read=None)
+drift-guard expected population (derived): PENDING watchers=0, outstanding commissions=2
+
+count_pending_for_target(parent)        = 0
+count_outstanding_commissions(parent)   = 2
+inventory parent_scoped_sha256          = 8f773cf687fbce38be96bb7e1cdc92e6040667aabf6f4477d583896f39efb85b
+  (0 other parent watchers, 3 other parent commissions)
+inventory global_sha256                 = d4d4dd75a79ea8ca622671c3519c3c6dfac39a46d4419b032bd0ec5d2378302e
+  (12373 watcher rows, 4979 commission rows)
+
+=== OUT-OF-SCOPE (observational only — NEVER in a repair statement) ===
+  9c2094ac commissioner=4e261d34 worker=804085bf lane=instance_nudge state=satisfied created=2026-11-11T13:55:08.579001+00:00
+  98d963c9 commissioner=4e261d34 worker=a16dc01c lane=instance_nudge state=abandoned created=2026-11-11T15:05:26.492063+00:00
+  b081856e commissioner=4e261d34 worker=a16dc01c lane=instance_nudge state=abandoned created=2026-11-11T23:31:55.727034+00:00
+  f4abf712 commissioner=4e261d34 worker=a16dc01c lane=instance_nudge state=outstanding created=2026-11-12T06:57:50.935273+00:00
+  2fc563f9 commissioner=4e261d34 worker=a16dc01c lane=instance_nudge state=outstanding created=2026-11-12T06:57:50.986032+00:00
+  6f529835 commissioner=4e261d34 worker=804085bf lane=instance_nudge state=outstanding created=2026-11-12T07:43:17.995909+00:00

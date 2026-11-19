@@ -97,6 +97,25 @@
                 <mat-icon>forum</mat-icon>
               </button>
             }
+            <!-- All chatrooms (gc-fe-surfaces item (a)) — the NEST-WIDE
+                 room browser: every chatroom in this nest, with the
+                 selected room's conversation in the detail pane.
+
+                 NOT gated on a selected instance: the browser spans the
+                 whole nest, so it stays actionable with nothing selected
+                 (visible ≡ actionable). It lands AFTER the shipped room
+                 icon so the shipped adjacency pin (watchover → room-btn)
+                 keeps holding, and it carries a DISTINCT class so the
+                 shipped spec's `.room-btn` helper keeps working. -->
+            <button
+              (click)="onOpenRoomsBrowser()"
+              class="toggle-btn rooms-browser-btn"
+              title="All chatrooms (this nest)"
+              aria-label="All chatrooms"
+              matTooltip="All chatrooms — every chatroom in this nest"
+            >
+              <mat-icon>view_list</mat-icon>
+            </button>
             <button
               (click)="onToggleThinking()"
               [class.active]="showThinking()"

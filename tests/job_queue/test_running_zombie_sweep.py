@@ -1001,11 +1001,13 @@ class TestRunningZombiePredicate:
         _seed_zombie_tree(zombie_harness.engine)
         bus = get_dependency_bus()
         bus.count_pending_for_target_sync = MagicMock(return_value=3)
+        bus.count_fulfillable_pending_for_target_sync = MagicMock(return_value=3)
         try:
             healer = _make_healer(zombie_harness)
             outcome = await healer.heal_running_zombie(ROOT)
         finally:
             bus.count_pending_for_target_sync = MagicMock(return_value=0)
+            bus.count_fulfillable_pending_for_target_sync = MagicMock(return_value=0)
         assert outcome["healed"] is False
         assert outcome["skip_class"] == "bus-pending"
 

@@ -86,6 +86,10 @@ def engine() -> Engine:
 def _bus_singleton():
     bus = MagicMock()
     bus.count_pending_for_target_sync.return_value = 1
+    # F-1: the QUALIFIED (S3) name is stamped too — the
+    # production paths read the qualified count; a mock that
+    # only answers the old name would answer a MagicMock.
+    bus.count_fulfillable_pending_for_target_sync.return_value = 1
     set_dependency_bus(bus)
     yield
     set_dependency_bus(None)

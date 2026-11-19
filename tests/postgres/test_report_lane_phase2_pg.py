@@ -401,7 +401,12 @@ class TestErrorPropagationPG:
 
         await bus.watch(
             child_task_id,
-            FollowUp(target_instance_id=parent_id, message="pg err", source="test"),
+            FollowUp(
+                target_instance_id=parent_id,
+                message="pg err",
+                source="test",
+                metadata={"child_id": f"pg-child-{child_task_id}"},
+            ),
         )
         await bus.emit_terminal(
             child_task_id,
@@ -418,8 +423,8 @@ class TestErrorPropagationPG:
         c1 = str(uuid.uuid4())
         c2 = str(uuid.uuid4())
 
-        await bus.watch(c1, FollowUp(target_instance_id=parent_id, message="c1", source="t"))
-        await bus.watch(c2, FollowUp(target_instance_id=parent_id, message="c2", source="t"))
+        await bus.watch(c1, FollowUp(target_instance_id=parent_id, message="c1", source="t", metadata={"child_id": f"pg-child-{c1}"}))
+        await bus.watch(c2, FollowUp(target_instance_id=parent_id, message="c2", source="t", metadata={"child_id": f"pg-child-{c2}"}))
 
         await bus.emit_terminal(c1, Outcome(status="completed"))
         await bus.emit_terminal(c2, Outcome(status="completed"))
@@ -433,7 +438,7 @@ class TestErrorPropagationPG:
         parent_id = f"parent-pg-{uuid.uuid4().hex[:8]}"
         c1 = str(uuid.uuid4())
 
-        await bus.watch(c1, FollowUp(target_instance_id=parent_id, message="c1", source="t"))
+        await bus.watch(c1, FollowUp(target_instance_id=parent_id, message="c1", source="t", metadata={"child_id": f"pg-child-{c1}"}))
         await bus.emit_terminal(c1, Outcome(status="error", error="oops"))
 
         assert bus.had_parent_error(parent_id) is True
@@ -459,8 +464,8 @@ class TestIndependentTurnPG:
         c1 = str(uuid.uuid4())
         c2 = str(uuid.uuid4())
 
-        await bus.watch(c1, FollowUp(target_instance_id=parent_id, message="c1", source="t"))
-        await bus.watch(c2, FollowUp(target_instance_id=parent_id, message="c2", source="t"))
+        await bus.watch(c1, FollowUp(target_instance_id=parent_id, message="c1", source="t", metadata={"child_id": f"pg-child-{c1}"}))
+        await bus.watch(c2, FollowUp(target_instance_id=parent_id, message="c2", source="t", metadata={"child_id": f"pg-child-{c2}"}))
 
         assert await bus.count_pending_for_target(parent_id) == 2
 

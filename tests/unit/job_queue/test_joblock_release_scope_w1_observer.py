@@ -98,6 +98,7 @@ def _wire_bus_mock():
     ``test_observer_finalize_no_job.py::_wire_bus_mock``)."""
     bus_mock = MagicMock()
     bus_mock.count_pending_for_target_sync = lambda _iid: 0
+    bus_mock.count_fulfillable_pending_for_target_sync = lambda _iid, **kw: 0
     set_dependency_bus(bus_mock)
     yield bus_mock
     set_dependency_bus(None)

@@ -58,6 +58,9 @@ def dependency_bus() -> MagicMock:
     """Install a zero-pending-child bus for the root completion path."""
     bus = MagicMock(name="DependencyBus")
     bus.count_pending_for_target_sync.return_value = 0
+    # F-1: the QUALIFIED (S3) name is stamped too — the production
+    # paths read the qualified count.
+    bus.count_fulfillable_pending_for_target_sync.return_value = 0
     set_dependency_bus(bus)
     try:
         yield bus
@@ -129,6 +132,9 @@ class TestQuestionPauseCompletionGuard:
         # idempotency_skip — that branch is COMPLETED/ERROR only).
         assert result.outcome == "deferred_pause"
         dependency_bus.count_pending_for_target_sync.assert_not_called()
+        # F-1: the qualified (S3) leg is the one production reads —
+        # it must not have been consulted either.
+        dependency_bus.count_fulfillable_pending_for_target_sync.assert_not_called()
         with Session(engine) as session:
             instance = session.get(Instance, instance_id)
             assert instance is not None

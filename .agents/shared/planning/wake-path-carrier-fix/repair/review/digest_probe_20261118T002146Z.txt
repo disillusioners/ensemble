@@ -1,0 +1,4 @@
+  File "/home/nea/ensemble-src-wt-wake-path-carrier-fix/.agents/shared/planning/wake-path-carrier-fix/repair/review/digest_probe.py", line 95
+    print(f"  digest(pre_rows, {}) = {digest(pre_rows, {})[:32]}")
+                                ^
+SyntaxError: f-string: valid expression required before '}'

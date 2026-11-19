@@ -670,6 +670,37 @@ class ErrorReportingService:
                                 f"(parent={parent_id[:8]}..., "
                                 f"child={instance_id[:8]}...): {hook_err}"
                             )
+                        # ─── S1 (wake-path-carrier-fix): the target-
+                        # agnostic child-keyed fire, on the ERROR lane.
+                        # The two emits above are keyed on the child's
+                        # FINAL task and on the (structural parent,
+                        # child) PAIR — a watcher armed by a NUDGER
+                        # (or any waiter that is not the child's
+                        # structural parent) is matched by NEITHER, so
+                        # it stayed PENDING forever and the mission
+                        # HOLD guards (`report_delivery_recovery`)
+                        # blocked every commission abandonment —
+                        # strictly worse than the completion wedge.
+                        # This supplementary fire is exactly-once by
+                        # the bus's guarded ``transition_state``
+                        # UPDATE (rowcount == 0 when the pair emit
+                        # above already fired the row), and its
+                        # delivery is per-row filtered by
+                        # ``DELIVER(w)`` inside the helper.
+                        # Cross-module call into ChildReportsService._fire_terminal_child_and_deliver
+                        # (S1 fire + delivery); kept as a private seam by design.
+                        try:
+                            await _child_reports_svc._fire_terminal_child_and_deliver(
+                                instance_id,
+                                "error",
+                            )
+                        except Exception as s1_err:
+                            logger.warning(
+                                f"bus hook (error): S1 "
+                                f"_fire_terminal_child_and_deliver failed "
+                                f"(non-fatal; child={instance_id[:8]}...): "
+                                f"{s1_err}"
+                            )
                     else:
                         # Defensive fallback: ``child_reports``
                         # service is not wired (unit tests with a

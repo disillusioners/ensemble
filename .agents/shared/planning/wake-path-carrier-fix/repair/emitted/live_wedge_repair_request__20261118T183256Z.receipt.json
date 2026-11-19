@@ -1,0 +1,450 @@
+{
+  "assertions": [
+    {
+      "expected": "exists=True, status in {waiting_children, running}",
+      "id": "A1",
+      "name": "parent exists AND status in {waiting_children, running} (amendment: transient self-resolving)",
+      "note": "amendment 2026-11-18: mid-turn `running` is recorded, not refused",
+      "observed": "exists=True, first=waiting_children, re_read=None, final=waiting_children, mid_turn=False",
+      "ok": true
+    },
+    {
+      "expected": "matches=1, identity matches, state=PENDING|resolved",
+      "id": "A2",
+      "name": "watcher 8a1f60d7 resolves uniquely; target==parent; source_task==39320; child==542b49a6",
+      "note": "",
+      "observed": "matches=1, state=CANCELLED, disposition=naturally_resolved, target=17efd2ef-9f98-46d4-b41b-60e3e32b2d13, source_task=39320, child=542b49a6-8334-4703-96a8-6628dfb2ab06",
+      "ok": true
+    },
+    {
+      "expected": "exists=True & terminal, OR resolved watcher with GC'd source task",
+      "id": "A3",
+      "name": "task 39320 exists and is terminal (or GC'd after resolution for a resolved watcher)",
+      "note": "source_task GC'd after resolution - EXPECTED for a resolved watcher (row can no longer fire)",
+      "observed": "watcher resolved; source_task=MISSING (GCed, expected)",
+      "ok": true
+    },
+    {
+      "expected": "exists=True, status in {completed,terminated,error,failed}",
+      "id": "A4",
+      "name": "watched worker 542b49a6 exists and is terminal",
+      "note": "",
+      "observed": "exists=True, status=completed, updated_at=2026-11-17T19:04:27.795218+00:00",
+      "ok": true
+    },
+    {
+      "expected": "matches=1, identity matches, state=PENDING|resolved",
+      "id": "A5",
+      "name": "watcher 999efa71 unique; target==parent; source_task==39424; child_id==parent",
+      "note": "self-referential shape (commissioner == worker == target)",
+      "observed": "matches=1, state=CANCELLED, disposition=naturally_resolved, target=17efd2ef-9f98-46d4-b41b-60e3e32b2d13, source_task=39424, child=17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+      "ok": true
+    },
+    {
+      "expected": "exists=True & terminal, OR resolved watcher with GC'd source task",
+      "id": "A6",
+      "name": "task 39424 exists and is terminal (or GC'd after resolution for a resolved watcher)",
+      "note": "source_task GC'd after resolution - EXPECTED for a resolved watcher",
+      "observed": "watcher resolved; source_task=MISSING (GC'd, expected)",
+      "ok": true
+    },
+    {
+      "expected": "4/4 identity matches, state outstanding|resolved",
+      "id": "A7",
+      "name": "all 4 commissions resolve uniquely; commissioner==parent; worker bindings as pinned; state outstanding|resolved",
+      "note": "",
+      "observed": "M1=abandoned/naturally_resolved; M2=abandoned/naturally_resolved; M3=outstanding/in_scope_stale; M4=outstanding/in_scope_stale",
+      "ok": true
+    },
+    {
+      "expected": "unknown=0 and unknown=0",
+      "id": "A8",
+      "name": "DRIFT GUARD: every PENDING watcher / outstanding commission of the parent is INSIDE the 8-row target set",
+      "note": "re-specced 2026-11-18 by leader ruling; an UNKNOWN extra row refuses and is listed \u2014 scope is never auto-extended",
+      "observed": "pending_for_parent=0 (unknown=0), outstanding_for_parent=2 (unknown=0)",
+      "ok": true
+    },
+    {
+      "expected": "status in {waiting_children, running}",
+      "id": "A9",
+      "name": "parent status in {waiting_children, running} (transient self-resolving; refuses any other status)",
+      "note": "",
+      "observed": "status=waiting_children, mid_turn=False, first=waiting_children, re_read=None",
+      "ok": true
+    },
+    {
+      "expected": "matches=1, identity matches, state=PENDING|resolved",
+      "id": "A10",
+      "name": "watcher 5602e91d resolves uniquely; target==parent; source_task==39564; child==82551f59",
+      "note": "",
+      "observed": "matches=1, state=CANCELLED, disposition=naturally_resolved, target=17efd2ef-9f98-46d4-b41b-60e3e32b2d13, source_task=39564, child=82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+      "ok": true
+    },
+    {
+      "expected": "matches=1, identity matches, state=PENDING|resolved",
+      "id": "A11",
+      "name": "watcher c83e12a2 resolves uniquely; target==parent; source_task==39564; child==82551f59",
+      "note": "",
+      "observed": "matches=1, state=CANCELLED, disposition=naturally_resolved, target=17efd2ef-9f98-46d4-b41b-60e3e32b2d13, source_task=39564, child=82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+      "ok": true
+    },
+    {
+      "expected": "matches=1, identity matches, state=outstanding|resolved",
+      "id": "A12",
+      "name": "commission 06001f88 resolves uniquely; commissioner==parent; worker==82551f59",
+      "note": "",
+      "observed": "matches=1, state=outstanding, disposition=in_scope_stale, commissioner=17efd2ef-9f98-46d4-b41b-60e3e32b2d13, worker=82551f59-4603-4b88-bbce-c9bccfa6fcd5, worker_status=waiting_children",
+      "ok": true
+    },
+    {
+      "expected": "matches=1, identity matches, state=outstanding|resolved",
+      "id": "A13",
+      "name": "commission a1561f19 resolves uniquely; commissioner==parent; worker==82551f59",
+      "note": "",
+      "observed": "matches=1, state=outstanding, disposition=in_scope_stale, commissioner=17efd2ef-9f98-46d4-b41b-60e3e32b2d13, worker=82551f59-4603-4b88-bbce-c9bccfa6fcd5, worker_status=waiting_children",
+      "ok": true
+    },
+    {
+      "expected": "exists=True & terminal, OR resolved watchers with GC'd source task",
+      "id": "A14",
+      "name": "task 39564 (source of W3/W4) exists and is terminal (or GC'd after resolution)",
+      "note": "source_task GC'd after resolution - EXPECTED for resolved watchers",
+      "observed": "watchers resolved; source_task=MISSING (GC'd, expected)",
+      "ok": true
+    }
+  ],
+  "banner": "NOT EXECUTED \u2014 proposal only; execution is the daemon's gated repair path (3-factor), not this script",
+  "classification": "partial",
+  "database": "ensemble_prod",
+  "expected_outstanding_commissions": 2,
+  "expected_pending_watchers": 0,
+  "extended_census": {
+    "anchor_outstanding_commissions": [
+      {
+        "commission_id": "06001f88-9e00-4720-8e59-88959d8faa75",
+        "commissioner_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "created_at": "2026-11-17T22:51:59.855255+00:00",
+        "lane": "instance_nudge",
+        "mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0",
+        "scope": "in_target_set",
+        "state": "outstanding",
+        "worker_instance_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5"
+      },
+      {
+        "commission_id": "a1561f19-2338-4053-9b7d-ea85c9d92613",
+        "commissioner_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+        "created_at": "2026-11-17T22:53:05.912797+00:00",
+        "lane": "instance_nudge",
+        "mission_id": "cb904c16-a982-41d4-9d33-2a04c7c2d6c0",
+        "scope": "in_target_set",
+        "state": "outstanding",
+        "worker_instance_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5"
+      }
+    ],
+    "expected_outstanding_commissions": 2,
+    "expected_pending_watchers": 0,
+    "extra_outstanding_commissions": [],
+    "extra_pending_watchers": [],
+    "outstanding_commission_count": 2,
+    "pending_watchers_for_parent": []
+  },
+  "gate_flag": "wake-path-carrier-fix/live-wedge/17efd2ef/w8",
+  "generated_at": "2026-11-18T18:32:56.277416+00:00",
+  "inventory": {
+    "global_counts": {
+      "commissions": 4979,
+      "watchers": 12373
+    },
+    "global_sha256": "d4d4dd75a79ea8ca622671c3519c3c6dfac39a46d4419b032bd0ec5d2378302e",
+    "parent_keys": {
+      "agent_id": "ari",
+      "created_at": "2026-11-14T21:54:59.848480+00:00",
+      "instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+      "parent_id": null,
+      "status": "waiting_children",
+      "updated_at": "2026-11-18T18:32:06.391418+00:00",
+      "version": 511
+    },
+    "parent_scoped_counts": {
+      "commissions": 3,
+      "watchers": 0
+    },
+    "parent_scoped_rows": {
+      "c:03ff6858-b67b-52e8-a51c-97db43a098e5": "commission_id='03ff6858-b67b-52e8-a51c-97db43a098e5'\tmission_id='cb904c16-a982-41d4-9d33-2a04c7c2d6c0'\tcommissioner_instance_id='17efd2ef-9f98-46d4-b41b-60e3e32b2d13'\tworker_instance_id='17efd2ef-9f98-46d4-b41b-60e3e32b2d13'\tlane='instance_nudge'\tstate='outstanding'\tcreated_at='2026-11-18T04:11:04.854913+00:00'\tsatisfied_at=None\tabandon_reason=None\tresolved_at=None\tadvisory='true'",
+      "c:487f36d0-d846-5e45-bec5-2131187dbd71": "commission_id='487f36d0-d846-5e45-bec5-2131187dbd71'\tmission_id='cb904c16-a982-41d4-9d33-2a04c7c2d6c0'\tcommissioner_instance_id='17efd2ef-9f98-46d4-b41b-60e3e32b2d13'\tworker_instance_id='82551f59-4603-4b88-bbce-c9bccfa6fcd5'\tlane='instance_nudge'\tstate='outstanding'\tcreated_at='2026-11-18T04:11:04.947950+00:00'\tsatisfied_at=None\tabandon_reason=None\tresolved_at=None\tadvisory='true'",
+      "c:eaceb2d3-928d-5b85-8bde-ae358d5ad352": "commission_id='eaceb2d3-928d-5b85-8bde-ae358d5ad352'\tmission_id='cb904c16-a982-41d4-9d33-2a04c7c2d6c0'\tcommissioner_instance_id='17efd2ef-9f98-46d4-b41b-60e3e32b2d13'\tworker_instance_id='82551f59-4603-4b88-bbce-c9bccfa6fcd5'\tlane='instance_nudge'\tstate='outstanding'\tcreated_at='2026-11-18T04:11:04.904968+00:00'\tsatisfied_at=None\tabandon_reason=None\tresolved_at=None\tadvisory='true'"
+    },
+    "parent_scoped_sha256": "8f773cf687fbce38be96bb7e1cdc92e6040667aabf6f4477d583896f39efb85b"
+  },
+  "out_of_scope": [
+    {
+      "commission_id": "9c2094ac-cb74-4c4d-a432-69b51b4a5fe8",
+      "commissioner_instance_id": "4e261d34-b350-4315-a8bb-1ae96205ab3a",
+      "created_at": "2026-11-11T13:55:08.579001+00:00",
+      "lane": "instance_nudge",
+      "mission_id": "e6c3abee-3192-4f85-937b-3a2ebd482a83",
+      "scope": "OUT-OF-SCOPE (terminated Maintenancer commissioner; never in a repair statement)",
+      "state": "satisfied",
+      "worker_instance_id": "804085bf-8b43-4475-8c05-0b5b63df4e3f"
+    },
+    {
+      "commission_id": "98d963c9-843f-4b6b-82e1-3786b194eaca",
+      "commissioner_instance_id": "4e261d34-b350-4315-a8bb-1ae96205ab3a",
+      "created_at": "2026-11-11T15:05:26.492063+00:00",
+      "lane": "instance_nudge",
+      "mission_id": "e6c3abee-3192-4f85-937b-3a2ebd482a83",
+      "scope": "OUT-OF-SCOPE (terminated Maintenancer commissioner; never in a repair statement)",
+      "state": "abandoned",
+      "worker_instance_id": "a16dc01c-3b43-477c-a08b-15a08b7d8921"
+    },
+    {
+      "commission_id": "b081856e-6d28-4e90-857e-e177f6333d12",
+      "commissioner_instance_id": "4e261d34-b350-4315-a8bb-1ae96205ab3a",
+      "created_at": "2026-11-11T23:31:55.727034+00:00",
+      "lane": "instance_nudge",
+      "mission_id": "e6c3abee-3192-4f85-937b-3a2ebd482a83",
+      "scope": "OUT-OF-SCOPE (terminated Maintenancer commissioner; never in a repair statement)",
+      "state": "abandoned",
+      "worker_instance_id": "a16dc01c-3b43-477c-a08b-15a08b7d8921"
+    },
+    {
+      "commission_id": "f4abf712-92a9-5037-936f-558b57f5f9b8",
+      "commissioner_instance_id": "4e261d34-b350-4315-a8bb-1ae96205ab3a",
+      "created_at": "2026-11-12T06:57:50.935273+00:00",
+      "lane": "instance_nudge",
+      "mission_id": "e6c3abee-3192-4f85-937b-3a2ebd482a83",
+      "scope": "OUT-OF-SCOPE (terminated Maintenancer commissioner; never in a repair statement)",
+      "state": "outstanding",
+      "worker_instance_id": "a16dc01c-3b43-477c-a08b-15a08b7d8921"
+    },
+    {
+      "commission_id": "2fc563f9-eb69-59e8-8218-23733966d7c3",
+      "commissioner_instance_id": "4e261d34-b350-4315-a8bb-1ae96205ab3a",
+      "created_at": "2026-11-12T06:57:50.986032+00:00",
+      "lane": "instance_nudge",
+      "mission_id": "e6c3abee-3192-4f85-937b-3a2ebd482a83",
+      "scope": "OUT-OF-SCOPE (terminated Maintenancer commissioner; never in a repair statement)",
+      "state": "outstanding",
+      "worker_instance_id": "a16dc01c-3b43-477c-a08b-15a08b7d8921"
+    },
+    {
+      "commission_id": "6f529835-77c4-5315-a82d-fdc16b334267",
+      "commissioner_instance_id": "4e261d34-b350-4315-a8bb-1ae96205ab3a",
+      "created_at": "2026-11-12T07:43:17.995909+00:00",
+      "lane": "instance_nudge",
+      "mission_id": "e6c3abee-3192-4f85-937b-3a2ebd482a83",
+      "scope": "OUT-OF-SCOPE (terminated Maintenancer commissioner; never in a repair statement)",
+      "state": "outstanding",
+      "worker_instance_id": "804085bf-8b43-4475-8c05-0b5b63df4e3f"
+    }
+  ],
+  "parent_first_status": "waiting_children",
+  "parent_instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+  "parent_mid_turn": false,
+  "parent_re_read_status": null,
+  "pre_check_json_sha256": "709c5417769328b8be58c41e5596a672349487b9ac594bb4d25c23fdbec0b4e6",
+  "receipt_note": "the wedge's BUS GATE was ALREADY OPEN (watchers cancelled by the boot sweep) before this repair; the remaining hold was the mission leg's two commissions. The Emperor's authorization is recorded on board item wi-8f60e6f1.",
+  "sql_file": "live_wedge_repair_request__20261118T183256Z.sql",
+  "statements": [
+    {
+      "block_kind": "backfill",
+      "current_state": "CANCELLED",
+      "effect": "stamp enqueued_at on a row this repair did NOT cancel (a pre-ceremony boot sweep got there first). Same end state the repair's own cancel writes; closes the pause+resume re-arm hole (repository.py:797-843). Does not touch state/fired_at.",
+      "expected_rowcount": 1,
+      "label": "W2-backfill",
+      "n": 1,
+      "pk": "999efa71-8ce3-4fd5-b19e-1627e0018205",
+      "table": "dependency_watchers",
+      "target_state": "CANCELLED (enqueued_at stamped)",
+      "why": "the boot sweep cancels with state='CANCELLED', fired_at=now only \u2014 enqueued_at stays NULL, so the row is re-arm eligible. This is a DISCLOSED extension of the ruling's own safety argument, not a widening of its row scope."
+    },
+    {
+      "block_kind": "backfill",
+      "current_state": "CANCELLED",
+      "effect": "stamp enqueued_at on a row this repair did NOT cancel (a pre-ceremony boot sweep got there first). Same end state the repair's own cancel writes; closes the pause+resume re-arm hole (repository.py:797-843). Does not touch state/fired_at.",
+      "expected_rowcount": 1,
+      "label": "W3-backfill",
+      "n": 2,
+      "pk": "5602e91d-5d4c-4fb6-9e2b-8f351d203f52",
+      "table": "dependency_watchers",
+      "target_state": "CANCELLED (enqueued_at stamped)",
+      "why": "the boot sweep cancels with state='CANCELLED', fired_at=now only \u2014 enqueued_at stays NULL, so the row is re-arm eligible. This is a DISCLOSED extension of the ruling's own safety argument, not a widening of its row scope."
+    },
+    {
+      "block_kind": "backfill",
+      "current_state": "CANCELLED",
+      "effect": "stamp enqueued_at on a row this repair did NOT cancel (a pre-ceremony boot sweep got there first). Same end state the repair's own cancel writes; closes the pause+resume re-arm hole (repository.py:797-843). Does not touch state/fired_at.",
+      "expected_rowcount": 1,
+      "label": "W4-backfill",
+      "n": 3,
+      "pk": "c83e12a2-83b8-46ce-9213-f5a24a5060f6",
+      "table": "dependency_watchers",
+      "target_state": "CANCELLED (enqueued_at stamped)",
+      "why": "the boot sweep cancels with state='CANCELLED', fired_at=now only \u2014 enqueued_at stays NULL, so the row is re-arm eligible. This is a DISCLOSED extension of the ruling's own safety argument, not a widening of its row scope."
+    },
+    {
+      "block_kind": "repair",
+      "current_state": "outstanding",
+      "effect": "leave `outstanding` so the mission leg of _root_completion_gate (child_reports.py:2691-2695) stops counting it. Mirrors MissionRecordRepository.transition_commission_state (repository.py:726-766): satisfied_at stays NULL, resolved_at is stamped, reason from the frozen vocabulary.",
+      "expected_rowcount": 1,
+      "label": "M3",
+      "n": 4,
+      "pk": "06001f88-9e00-4720-8e59-88959d8faa75",
+      "reason": "ttl_expired_not_live",
+      "table": "mission_commissions",
+      "target_state": "abandoned",
+      "why": "minted by the parent's recurring self-nudge; worker 82551f59 (leader) is NON-terminal, so lane 7's R1 leg does not apply and its R2b TTL backstop is the only source-sanctioned abandon (TTL \u2248 04:52Z). DECLARED DIVERGENCE: acts BEFORE the TTL; the end state is identical to lane 7's own write, only the timing differs. NOTE: this closes the ledger entry for a lane that is still working; the lane's report routes through the session lane, not the mission ledger, so it is unaffected.",
+      "worker_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+      "worker_status": "waiting_children"
+    },
+    {
+      "block_kind": "repair",
+      "current_state": "outstanding",
+      "effect": "leave `outstanding` so the mission leg of _root_completion_gate (child_reports.py:2691-2695) stops counting it. Mirrors MissionRecordRepository.transition_commission_state (repository.py:726-766): satisfied_at stays NULL, resolved_at is stamped, reason from the frozen vocabulary.",
+      "expected_rowcount": 1,
+      "label": "M4",
+      "n": 5,
+      "pk": "a1561f19-2338-4053-9b7d-ea85c9d92613",
+      "reason": "ttl_expired_not_live",
+      "table": "mission_commissions",
+      "target_state": "abandoned",
+      "why": "same shape as M3 (worker 82551f59 non-terminal, TTL \u2248 04:53Z); same declared before-TTL divergence and the same disclosure that the in-flight lane's report is not blocked by this ledger close.",
+      "worker_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+      "worker_status": "waiting_children"
+    }
+  ],
+  "targets": [
+    {
+      "child_id": "542b49a6-8334-4703-96a8-6628dfb2ab06",
+      "disposition": "naturally_resolved",
+      "effect": "release the nudge-armed watcher from the park count. Base end state mirrors the bus's own cancel transition (CANCELLED + fired_at \u2014 repository.py:717-762; boot sweep dependency_bus.py:2653-2666). DELIBERATE ADDITION: enqueued_at is stamped as well, which excludes the row from the ONLY resurrection path in the codebase (find_cancelled_unenqueued_for_target requires enqueued_at IS NULL \u2014 repository.py:797-843; re-armed by instance_lifecycle.py:4125-4260 on a later pause+resume) so an Emperor-authorised retirement cannot be undone by a pause.",
+      "expected_child_id": "542b49a6-8334-4703-96a8-6628dfb2ab06",
+      "expected_source_task": "39320",
+      "identity_ok": true,
+      "kind": "watcher",
+      "label": "W1",
+      "needs_backfill": false,
+      "pk": "8a1f60d7-c164-4b6a-8901-271152d4001b",
+      "prefix": "8a1f60d7",
+      "slot": "watcher_a",
+      "source_task": "39320",
+      "state": "CANCELLED",
+      "why": "watched child 542b49a6 completed 19:04:27 but the COMPLETED lane has no target-agnostic child-keyed fire, so this watcher can never fire; CANCELLED is inert for every fire primitive (all three match state='PENDING' only)."
+    },
+    {
+      "child_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+      "disposition": "naturally_resolved",
+      "effect": "release the nudge-armed watcher from the park count. Base end state mirrors the bus's own cancel transition (CANCELLED + fired_at \u2014 repository.py:717-762; boot sweep dependency_bus.py:2653-2666). DELIBERATE ADDITION: enqueued_at is stamped as well, which excludes the row from the ONLY resurrection path in the codebase (find_cancelled_unenqueued_for_target requires enqueued_at IS NULL \u2014 repository.py:797-843; re-armed by instance_lifecycle.py:4125-4260 on a later pause+resume) so an Emperor-authorised retirement cannot be undone by a pause. The enqueued_at stamp is LOAD-BEARING on THIS row: its child_id is the parent itself, which is NON-terminal, so without the stamp a later pause+resume of the parent would pass the re-arm guard at instance_lifecycle.py:4230-4239 and rebuild this exact self-watcher.",
+      "expected_child_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+      "expected_source_task": "39424",
+      "identity_ok": true,
+      "kind": "watcher",
+      "label": "W2",
+      "needs_backfill": true,
+      "pk": "999efa71-8ce3-4fd5-b19e-1627e0018205",
+      "prefix": "999efa71",
+      "slot": "watcher_b",
+      "source_task": "39424",
+      "state": "CANCELLED",
+      "why": "structurally unfulfillable: child_id == target_instance_id == commissioner, so no terminal event can ever fire it. It also holds RDRS lane 7's bus-watcher probe for commission 90493206 (report_delivery_recovery.py:2841-2859) \u2014 cancelling it unblocks that commission's own reconciliation."
+    },
+    {
+      "child_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+      "disposition": "naturally_resolved",
+      "effect": "release the nudge-armed watcher from the park count. Base end state mirrors the bus's own cancel transition (CANCELLED + fired_at \u2014 repository.py:717-762; boot sweep dependency_bus.py:2653-2666). DELIBERATE ADDITION: enqueued_at is stamped as well, which excludes the row from the ONLY resurrection path in the codebase (find_cancelled_unenqueued_for_target requires enqueued_at IS NULL \u2014 repository.py:797-843; re-armed by instance_lifecycle.py:4125-4260 on a later pause+resume) so an Emperor-authorised retirement cannot be undone by a pause. The enqueued_at stamp is LOAD-BEARING on THIS row too: child 82551f59 (leader) is NON-terminal, so without the stamp a later pause+resume would re-arm it (instance_lifecycle.py:4230-4241).",
+      "expected_child_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+      "expected_source_task": "39564",
+      "identity_ok": true,
+      "kind": "watcher",
+      "label": "W3",
+      "needs_backfill": true,
+      "pk": "5602e91d-5d4c-4fb6-9e2b-8f351d203f52",
+      "prefix": "5602e91d",
+      "slot": "watcher_c",
+      "source_task": "39564",
+      "state": "CANCELLED",
+      "why": "source task 39564 is completed (23:03:54) and 82551f59 is not a structural child of the parent, so none of the three fire primitives can match \u2014 the same defect class as W1/W2, past the point of no return. It is the mutual-deadlock partner of M3 (lane 7's bus-watcher probe holds the commission while the watcher is PENDING)."
+    },
+    {
+      "child_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+      "disposition": "naturally_resolved",
+      "effect": "release the nudge-armed watcher from the park count. Base end state mirrors the bus's own cancel transition (CANCELLED + fired_at \u2014 repository.py:717-762; boot sweep dependency_bus.py:2653-2666). DELIBERATE ADDITION: enqueued_at is stamped as well, which excludes the row from the ONLY resurrection path in the codebase (find_cancelled_unenqueued_for_target requires enqueued_at IS NULL \u2014 repository.py:797-843; re-armed by instance_lifecycle.py:4125-4260 on a later pause+resume) so an Emperor-authorised retirement cannot be undone by a pause. The enqueued_at stamp is LOAD-BEARING on THIS row too: child 82551f59 (leader) is NON-terminal, so without the stamp a later pause+resume would re-arm it (instance_lifecycle.py:4230-4241).",
+      "expected_child_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+      "expected_source_task": "39564",
+      "identity_ok": true,
+      "kind": "watcher",
+      "label": "W4",
+      "needs_backfill": true,
+      "pk": "c83e12a2-83b8-46ce-9213-f5a24a5060f6",
+      "prefix": "c83e12a2",
+      "slot": "watcher_d",
+      "source_task": "39564",
+      "state": "CANCELLED",
+      "why": "same shape as W3 (source task 39564 completed; child 82551f59 non-structural and non-terminal) and the mutual-deadlock partner of M4."
+    },
+    {
+      "disposition": "naturally_resolved",
+      "effect": "leave `outstanding` so the mission leg of _root_completion_gate (child_reports.py:2691-2695) stops counting it. Mirrors MissionRecordRepository.transition_commission_state (repository.py:726-766): satisfied_at stays NULL, resolved_at is stamped, reason from the frozen vocabulary.",
+      "expected_worker_id": "542b49a6-8334-4703-96a8-6628dfb2ab06",
+      "identity_ok": true,
+      "kind": "commission",
+      "label": "M1",
+      "pk": "0cdc0b31-8c80-4cf7-8c39-40c1ff508956",
+      "prefix": "0cdc0b31",
+      "reason": "worker_terminal_no_report",
+      "slot": "commission_a",
+      "state": "abandoned",
+      "why": "the commissioned worker (sonic-leader) is terminal and no report was ever delivered \u2014 this is EXACTLY RDRS lane 7's worker_terminal_no_report abandonment (report_delivery_recovery.py:2929-2937), which currently cannot run only because the PENDING watcher holds its probe at :2841-2859.",
+      "worker_id": "542b49a6-8334-4703-96a8-6628dfb2ab06",
+      "worker_status": "completed"
+    },
+    {
+      "disposition": "naturally_resolved",
+      "effect": "leave `outstanding` so the mission leg of _root_completion_gate (child_reports.py:2691-2695) stops counting it. Mirrors MissionRecordRepository.transition_commission_state (repository.py:726-766): satisfied_at stays NULL, resolved_at is stamped, reason from the frozen vocabulary.",
+      "expected_worker_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+      "identity_ok": true,
+      "kind": "commission",
+      "label": "M2",
+      "pk": "90493206-7e82-4602-aa4c-70964e50d51c",
+      "prefix": "90493206",
+      "reason": "ttl_expired_not_live",
+      "slot": "commission_b",
+      "state": "abandoned",
+      "why": "self-nudge: commissioner == worker == target. The worker is the parent itself (not terminal), so the sweep's R1 leg does not apply; its R2b TTL backstop is the only source-sanctioned abandon, and it lands at created_at + 21600s (report_delivery_recovery.py:2941-2947, config.py:2400-2421 TTL default 6h). DECLARED DIVERGENCE: this statement acts BEFORE the TTL elapses. The END STATE is identical to what lane 7 will write at TTL; only the timing differs. If the Emperor prefers zero guesswork, DROP this block and let lane 7 abandon 90493206 at its TTL (~02:30Z).",
+      "worker_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+      "worker_status": "waiting_children"
+    },
+    {
+      "disposition": "in_scope_stale",
+      "effect": "leave `outstanding` so the mission leg of _root_completion_gate (child_reports.py:2691-2695) stops counting it. Mirrors MissionRecordRepository.transition_commission_state (repository.py:726-766): satisfied_at stays NULL, resolved_at is stamped, reason from the frozen vocabulary.",
+      "expected_worker_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+      "identity_ok": true,
+      "kind": "commission",
+      "label": "M3",
+      "pk": "06001f88-9e00-4720-8e59-88959d8faa75",
+      "prefix": "06001f88",
+      "reason": "ttl_expired_not_live",
+      "slot": "commission_c",
+      "state": "outstanding",
+      "why": "minted by the parent's recurring self-nudge; worker 82551f59 (leader) is NON-terminal, so lane 7's R1 leg does not apply and its R2b TTL backstop is the only source-sanctioned abandon (TTL \u2248 04:52Z). DECLARED DIVERGENCE: acts BEFORE the TTL; the end state is identical to lane 7's own write, only the timing differs. NOTE: this closes the ledger entry for a lane that is still working; the lane's report routes through the session lane, not the mission ledger, so it is unaffected.",
+      "worker_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+      "worker_status": "waiting_children"
+    },
+    {
+      "disposition": "in_scope_stale",
+      "effect": "leave `outstanding` so the mission leg of _root_completion_gate (child_reports.py:2691-2695) stops counting it. Mirrors MissionRecordRepository.transition_commission_state (repository.py:726-766): satisfied_at stays NULL, resolved_at is stamped, reason from the frozen vocabulary.",
+      "expected_worker_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+      "identity_ok": true,
+      "kind": "commission",
+      "label": "M4",
+      "pk": "a1561f19-2338-4053-9b7d-ea85c9d92613",
+      "prefix": "a1561f19",
+      "reason": "ttl_expired_not_live",
+      "slot": "commission_d",
+      "state": "outstanding",
+      "why": "same shape as M3 (worker 82551f59 non-terminal, TTL \u2248 04:53Z); same declared before-TTL divergence and the same disclosure that the in-flight lane's report is not blocked by this ledger close.",
+      "worker_id": "82551f59-4603-4b88-bbce-c9bccfa6fcd5",
+      "worker_status": "waiting_children"
+    }
+  ]
+}

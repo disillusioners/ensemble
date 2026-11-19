@@ -1,0 +1,28 @@
+=== CONTAMINATION SNAPSHOT 2026-11-17T09:43:31Z ===
+branch tip: e387d2297f404072b29a598b25a2e0f7d95e1f1c
+worktree HEAD: e387d2297f404072b29a598b25a2e0f7d95e1f1c
+
+--- git status --porcelain ---
+ M daemon/graph.py
+ M daemon/services/prompt_refresh.py
+ M test/packs/prompt_reload_compact_note_unit.sh
+ M tests/unit/services/test_prompt_refresh_primitive.py
+ M tests/unit/tools/test_compact_note_graph_wiring.py
+ M tests/unit/tools/test_prompt_reload_compact_note.py
+
+--- git diff --stat ---
+ daemon/graph.py                                    | 328 +++++++++++++++++----
+ daemon/services/prompt_refresh.py                  | 217 ++++++++++++--
+ test/packs/prompt_reload_compact_note_unit.sh      |  31 +-
+ .../unit/services/test_prompt_refresh_primitive.py |   8 +-
+ tests/unit/tools/test_compact_note_graph_wiring.py |  11 +
+ .../unit/tools/test_prompt_reload_compact_note.py  |   8 +
+ 6 files changed, 518 insertions(+), 85 deletions(-)
+
+--- mtimes of mutated files ---
+2026-11-17 09:42:44.582992176 +0000  daemon/graph.py
+2026-11-17 09:40:55.295847167 +0000  daemon/services/prompt_refresh.py
+2026-11-17 09:33:56.978460595 +0000  test/packs/prompt_reload_compact_note_unit.sh
+2026-11-17 09:33:38.473266347 +0000  tests/unit/services/test_prompt_refresh_primitive.py
+2026-11-17 09:41:28.871198970 +0000  tests/unit/tools/test_compact_note_graph_wiring.py
+2026-11-17 09:41:28.942199714 +0000  tests/unit/tools/test_prompt_reload_compact_note.py

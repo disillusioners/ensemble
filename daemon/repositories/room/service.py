@@ -48,6 +48,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
+from collections.abc import Collection
 from typing import Any
 
 from sqlalchemy.engine import Engine
@@ -494,6 +495,30 @@ class RoomChatService:
         """Every room in the tree scope (off-loop) — P6 FE modal."""
         return await asyncio.to_thread(
             self._repo.list_rooms_for_tree, tree_root_id
+        )
+
+    # ── Phase 1 read surface (gc-fe-surfaces) ────────────────────────
+
+    async def list_all_rooms(
+        self, limit: int = 200
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Nest-wide room list (off-loop) — returns (rows, truncated)."""
+        return await asyncio.to_thread(
+            self._repo.list_all_rooms_with_extras, limit
+        )
+
+    async def list_readable_rooms(
+        self,
+        caller_instance_id: str,
+        limit: int = 200,
+        descendant_ids: Collection[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Caller-scoped room list (off-loop) — returns (rows, truncated)."""
+        return await asyncio.to_thread(
+            self._repo.list_readable_rooms_for_caller,
+            caller_instance_id,
+            descendant_ids=descendant_ids,
+            limit=limit,
         )
 
     # ── P6 GC scans (off-loop wrappers over the repository) ───────────

@@ -209,8 +209,9 @@ def create_pok_tools(
         Use tool_help() for details. Behavior:
         - ``slug``: kebab-case [a-z0-9-], <=44 chars. Family-ordered
           slugs follow ``<family>-<NN>-<tail>`` (e.g.
-          ``pipeline-01-merge-master``); members of a family render
-          adjacently.
+          ``pipeline-01-merge-master`` or ``prompt-assent-01-x``); the
+          family head may be multi-token (e.g. ``prompt-assent``); members
+          of a family render adjacently.
         - ``body``: ONE paragraph, <=240 chars measured AFTER
           escaping. Newlines, leading '#', '[SYSTEM CONTEXT:' and
           triple-backticks are REFUSED at write (the content fence).
