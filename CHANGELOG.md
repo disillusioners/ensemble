@@ -5,6 +5,18 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.8] — 2026-11-19
+
+### Fixed — agent tool-lane systemctl/bash guard-inversion closing fixes (`fix/systemctl-guard-pipe-shapes`, board `wi-a5ec5b3e`)
+
+- Fixed: the shared systemctl intent guard (bash + proc tool lanes) analyses a piped payload as a WHOLE TEXT — a mutating verb anywhere in the text is caught, not only at the leading command position
+- Fixed: per-tool option arity — ONE shared option analyser (bundled `--opt=v`, attached `--opt v`, value-option forms) now covers ALL scanners, an UNKNOWN option fails CLOSED, and the sudo/env/stdbuf value options are peeled correctly
+- Fixed: heredoc bodies are analysed as bodies — a heredoc handed to a pipe-fed executor is scanned, and a heredoc delivered to a bare `ssh` host is recognised as REMOTE stdin execution and refused
+- Fixed: the xargs recursion is analysed WHOLE-TAIL (the operand set, not just the command word) and the resolved payload is scanned; the mutating-verb set is ONE derived source of truth (no per-scanner drift) and `ssh` arity fails CLOSED when the remote command cannot be resolved
+- Changed: 7 over-block shapes removed — the READ-ONLY verbs pass through every runner, and a property name colliding with a mutating verb no longer refuses in a DIRECT context
+- No schema migration — this release carries ZERO `daemon/migrations/versions/*.sql` changes
+- Gates: tester re-gate PASS-WITH-NOTES (`eb520859f` / `33c54d5f6`), implementation review NEEDS-REVISION → closed, tidier CLEANUP-REQUIRED → closed; mutation harness 21/21 legs (89 reds, EXPECTED red-count equality, byte-identical restore, post-restore green re-run); pack 257/257 file + 296/296 pack, net-new reds 0
+
 ## [0.31.7] — 2026-11-19
 
 ### Fixed — POK multi-token family key + count-aware family-full cure (`fix/pok-family-key`)
