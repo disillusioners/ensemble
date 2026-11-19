@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.13] — 2026-11-19
+
 ### Changed — instances-list Option D (off-loop + no-revalidation) + FE home poll cadence (`sonic/instances-optd-fe-poll`; ANALYSIS §8 row D; Emperor directives 2026-11-19)
 
 - Changed (daemon): GET /api/instances list handler — (1) ui-prefs batch read moved off the event loop onto the db-offload executor (second route-local `await _offload(...)`, `daemon/routers/instances.py:545-548`); (2) FastAPI response_model re-validation pass skipped (hand-built `JSONResponse` via `resp.model_dump(mode="json", exclude=…)` reproducing the Option-A key-ABSENT exclusion byte-for-byte; decorator + OpenAPI unchanged). Response bytes IDENTICAL pre/post — proven by the golden byte-parity pack `tests/api/test_instances_list_response_bytes.py` (git-archive fd61c0ba2 baseline, `daemon.__file__` assert, raw-bytes equality + key-absence). Expected ~−180 ms/req of loop occupancy (~80 ms DB + ~100 ms serialization); should damp the 3.7–4× badge-load inflation of instances legs (ANALYSIS §6 H3)
