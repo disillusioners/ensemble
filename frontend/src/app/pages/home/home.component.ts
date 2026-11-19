@@ -107,7 +107,7 @@ export class HomeComponent implements OnInit, OnDestroy {
   private startPolling(): void {
     this.pollInterval = setInterval(() => {
       this.loadInstances();
-    }, 10000);
+    }, 120000);
   }
 
   private stopPolling(): void {
