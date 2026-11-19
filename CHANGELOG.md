@@ -5,6 +5,13 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.6] — 2026-11-19
+
+### Fixed — wake-path carrier fix: parked parents wake at terminal (`wi-8f60e6f1`)
+
+- Fixed: watcher fire-at-terminal (a nudge-armed watcher whose target is not the child's structural parent now fires on COMPLETED/TERMINATED, closing the can-never-fire RCA class) + nudge self-surgery guard (a nudger can no longer nudge itself — the live-wedge shape) + park-predicate qualification + wedge-notice truthfulness (notices now report honestly). The D-2 delivery contract is made honest: at-least-once with a bounded duplicate window, not at-most-once. Shapes S1–S4 landed; zero migrations.
+- Operational: the wedged live parent (ari root `17efd2ef`) was repaired 2026-11-18 under Emperor attestation (5/5 blocks, server-verified byte identity, notices ceased); this release carries the durable code fix. Gates: tester pack 115 = 47+68, watchdog 51, reconciler 47, PG null-delta; implementation review CLEARED.
+
 ## [0.31.5] — 2026-11-18
 
 ### Fixed — agent tool-lane unit-control guard laundering closure (`wi-a5ec5b3e`)
