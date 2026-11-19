@@ -39,6 +39,7 @@ from daemon.services.maintenance import (
     JOB_IDLE_POLICIES,
     JOB_MAX_STALENESS_HOURS,
     MaintenanceService,
+    _parse_iso_utc,
     utcnow,
 )
 
@@ -434,6 +435,151 @@ class TestDbStateStore:
         # A job with no audit trail hydrates to None.
         assert store.load_last_success("malloc_trim") is None
         engine.dispose()
+
+    @staticmethod
+    def _seed_runs(tmp_path, rows):
+        """Create a fresh SQLite ``maintenance_runs`` table + seed rows.
+
+        ``rows`` = list of ``(run_id, section, kind, completed_at,
+        status)`` tuples.
+        """
+        from daemon.repositories.maintenance_runs.models import MaintenanceRun
+
+        engine = create_engine(f"sqlite:///{tmp_path / 'kind.db'}")
+        SQLModel.metadata.create_all(engine)
+        with Session(engine) as session:
+            for run_id, section, kind, completed_at, status in rows:
+                session.add(
+                    MaintenanceRun(
+                        run_id=run_id,
+                        section=section,
+                        kind=kind,
+                        started_at=completed_at,
+                        completed_at=completed_at,
+                        status=status,
+                        triggered_by=(
+                            "system" if kind == "auto" else "user"
+                        ),
+                    )
+                )
+            session.commit()
+        return engine
+
+    def test_load_last_success_ignores_a_newer_manual_dry_run_row(
+        self, tmp_path
+    ):
+        """AM-9: ``manual_dry_run`` NEVER surfaces.
+
+        A dry run mutates nothing, so a NEWER dry-run ``succeeded``
+        row must not hydrate as last-success — otherwise it would push
+        the real last-success forward and delay the next auto reclaim
+        by up to ``max_staleness_hours``.
+        """
+        auto_completed = "2026-11-14T12:44:30+00:00"
+        dry_run_completed = "2026-11-18T09:00:00+00:00"   # NEWER
+        engine = self._seed_runs(
+            tmp_path,
+            [
+                ("auto-1", "checkpoint-cleanup", "auto",
+                 auto_completed, "succeeded"),
+                ("dry-1", "checkpoint-cleanup", "manual_dry_run",
+                 dry_run_completed, "succeeded"),
+            ],
+        )
+        store = DbMaintenanceStateStore(engine=engine)
+
+        loaded = store.load_last_success("checkpoint_cleanup")
+
+        assert loaded == _parse_iso_utc(auto_completed)
+        assert loaded != _parse_iso_utc(dry_run_completed)
+        engine.dispose()
+
+    def test_load_last_success_counts_a_manual_execute_row(self, tmp_path):
+        """A REAL manual execute is a genuine run — it counts alongside
+        ``auto`` (the repository convention's ``{auto, manual_execute}``
+        kind set)."""
+        auto_completed = "2026-11-14T12:44:30+00:00"
+        manual_completed = "2026-11-18T09:00:00+00:00"     # NEWER
+        engine = self._seed_runs(
+            tmp_path,
+            [
+                ("auto-1", "checkpoint-cleanup", "auto",
+                 auto_completed, "succeeded"),
+                ("exec-1", "checkpoint-cleanup", "manual_execute",
+                 manual_completed, "succeeded"),
+            ],
+        )
+        store = DbMaintenanceStateStore(engine=engine)
+
+        loaded = store.load_last_success("checkpoint_cleanup")
+
+        assert loaded == _parse_iso_utc(manual_completed)
+        engine.dispose()
+
+    def test_a_dry_run_only_section_has_no_last_success(self, tmp_path):
+        """A section whose ONLY ``succeeded`` row is a dry run hydrates
+        to ``None`` (no real run has ever completed)."""
+        engine = self._seed_runs(
+            tmp_path,
+            [
+                ("dry-1", "checkpoint-cleanup", "manual_dry_run",
+                 "2026-11-18T09:00:00+00:00", "succeeded"),
+            ],
+        )
+        store = DbMaintenanceStateStore(engine=engine)
+
+        assert store.load_last_success("checkpoint_cleanup") is None
+        engine.dispose()
+
+    async def test_set_max_staleness_hours_is_false_when_the_write_noops(self):
+        """An override that was NOT persisted must not be reported as
+        persisted (rider #2 — the honest return)."""
+
+        class _AbsentProjectRepo:
+            """``set_metadata`` returns None — the system project row is
+            absent, so the write is a silent no-op."""
+
+            def get_metadata(self, project_id, key):
+                return None
+
+            def set_metadata(self, project_id, key, value):
+                return None
+
+        store = DbMaintenanceStateStore(
+            engine=None,
+            project_repository=_AbsentProjectRepo(),
+            system_project_id="missing-project",
+        )
+        service = MaintenanceService()
+        service.set_state_store(store)
+        service.register(
+            "checkpoint_cleanup", min_interval_hours=24.0,
+            execute_fn=AsyncMock(),
+        )
+
+        assert (
+            await service.set_max_staleness_hours("checkpoint_cleanup", 3.0)
+            is False
+        )
+        # The in-memory value was NOT applied either — no lie anywhere.
+        assert service._jobs[0].max_staleness_hours == 24.0
+
+    async def test_set_max_staleness_hours_is_false_without_a_repository(self):
+        """No project repository wired ⇒ the override cannot persist,
+        so the call reports ``False`` instead of pretending."""
+        store = DbMaintenanceStateStore(engine=None, project_repository=None)
+        service = MaintenanceService()
+        service.set_state_store(store)
+        service.register(
+            "checkpoint_cleanup", min_interval_hours=24.0,
+            execute_fn=AsyncMock(),
+        )
+
+        assert (
+            await service.set_max_staleness_hours("checkpoint_cleanup", 3.0)
+            is False
+        )
+        assert service._jobs[0].max_staleness_hours == 24.0
 
     def test_kv_override_round_trip(self):
         class _FakeProjectRepo:

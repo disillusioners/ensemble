@@ -66,7 +66,7 @@ guarantee for that job.
 
 | what | where | why |
 |------|-------|-----|
-| last-success | `maintenance_runs` (the Section-1 audit table; migration `20260927_000001_create_maintenance_runs_table.sql`) — `status='succeeded'`, `ORDER BY completed_at DESC LIMIT 1`, per `section` (`checkpoint-cleanup` / `vacuum-maintenance`) | the audit table already records every reclaim run's outcome |
+| last-success | `maintenance_runs` (the Section-1 audit table; migration `20260927_000001_create_maintenance_runs_table.sql`) — `status='succeeded'` **AND `kind IN ('auto','manual_execute')`** (AM-9: `manual_dry_run` NEVER surfaces — it mutates nothing), `ORDER BY completed_at DESC LIMIT 1`, per `section` (`checkpoint-cleanup` / `vacuum-maintenance`). Same kind vocabulary as `MaintenanceRunsRepository.latest_completed_for_section`. | the audit table already records every reclaim run's outcome |
 | `max_staleness_hours` override | the project-metadata KV (`maintenance.job_state` key on the system-default project `71931ae0-0f25-5fbf-853b-2a78cc978d7e`) | the SAME existing KV the blueprint daily scan uses for its persisted last-run (`blueprint_scan_last_run`) |
 
 The seam is `MaintenanceStateStore` (3 sync methods) + the
@@ -253,3 +253,78 @@ A second mutation (the static pin) also reds:
   release directory was touched.
 - **No push / merge / worktree removal** — giter + leader own the
   finalize.
+
+## Verification cycle 1 follow-up (advisory closure)
+
+Independent verification returned 4/4 parts PASS. One moderate advisory
+was empirically proven and is now closed; two cheap riders landed.
+
+### Advisory #1 — dry-run contamination of the persisted last-success (FIXED)
+
+`DbMaintenanceStateStore.load_last_success` selected the latest
+`status='succeeded'` row of a section **regardless of `kind`**, so a
+`manual_dry_run` "succeeded" row (created at
+`maintenance_api_service.py:362`, marked succeeded `:473`) could hydrate
+as last-success and delay the next auto reclaim by up to
+`max_staleness_hours`.
+
+**Fix:** the query now carries `AND kind IN ('auto','manual_execute')` —
+the module's own AM-9 convention
+(`MaintenanceRunsRepository.latest_completed_for_section`: "`manual_dry_run`
+NEVER surfaces"). Both kind values were confirmed from the repository
+source and from the two writers (`kind="manual_dry_run"` /
+`kind="manual_execute"`), not guessed.
+
+**Mutation-verified:** removing the kind clause reproduces the
+verifier's exact finding (`datetime(2026-11-18, 9, 0)` — the DRY-RUN
+timestamp — returned where the AUTO timestamp was expected) and both
+new pins go RED; byte-identical restore verified
+(`0609aaf3281263376651a03e026d3d469a743f05b8a3f9129837a6a2969e9018`
+before and after).
+
+New pins (`TestDbStateStore`):
+- `test_load_last_success_ignores_a_newer_manual_dry_run_row` — newer
+  dry-run + older auto success ⇒ the AUTO timestamp.
+- `test_load_last_success_counts_a_manual_execute_row` — newer manual
+  execute ⇒ the MANUAL EXECUTE timestamp (a real execute IS a run).
+- `test_a_dry_run_only_section_has_no_last_success` — a section whose
+  only success is a dry run hydrates to `None`.
+
+### Rider #2 — honest return from `set_max_staleness_hours` (LANDED)
+
+`DbMaintenanceStateStore.save_max_staleness_hours` now raises when the
+write did NOT apply (no project repository wired, or `set_metadata`
+returned `None` because the system-default project row is absent — a
+silent no-op). The caller's existing guard turns that into an honest
+`False` **and leaves the in-memory value untouched**, so nothing lies
+about persistence. New pins:
+`test_set_max_staleness_hours_is_false_when_the_write_noops`,
+`test_set_max_staleness_hours_is_false_without_a_repository`.
+
+### Rider #3 — stale idle-gated doc drift (LANDED, comments/docstrings only)
+
+Reworded every remaining claim that a now-`UN_GATED` job is idle-gated:
+
+| site | job |
+|------|-----|
+| `maintenance.py` class docstring | the global "Jobs only run when the system is idle" claim |
+| `manager.py:322` (`PROJECT_SKILL_GC_INTERVAL_HOURS` comment) | `project_skill_gc` |
+| `manager.py` room-GC registration comment | `room_gc_sweep` |
+| `manager.py` project-skill registration comment | `project_skill_gc` |
+| `manager.py` malloc_trim registration comment | `malloc_trim` |
+| `manager.py` dependency-bus registration comment | `dependency_bus_lock_reap` |
+| `manager.py` anomaly-retention registration comment (quotes the old disclosure, then marks it RESOLVED) | `anomaly_retention` |
+| `manager.py` `_run_malloc_trim` docstring | `malloc_trim` |
+| `manager.py` `_run_dependency_bus_lock_reap` docstring | `dependency_bus_lock_reap` |
+| `manager.py` `_run_skill_orphan_sweep` docstring | `skill_orphan_sweep` |
+| `manager.py` `_run_skill_metric_scan` docstring | `skill_metric_scan` |
+| `manager.py` `_run_skill_ab_inactivity_sweep` comment | `skill_ab_inactivity_sweep` |
+
+Zero behavior change (comments/docstrings only); `daemon.manager` still
+imports.
+
+### Skipped (recorded, not worth churn)
+
+- Advisory #4 (duplicate import), #5 (test docstring says "StaticPool"
+  where the file-backed fixture now applies), #6 (fix-notes count nit).
+- The capture-observability sink hermeticity nit — recorded only.

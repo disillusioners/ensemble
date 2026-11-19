@@ -255,8 +255,12 @@ class MaintenanceService:
     """Generic background service for running periodic maintenance tasks.
 
     The service runs in a background loop, checking if registered jobs are due
-    based on their minimum interval. Jobs only run when the system is idle
-    (no active jobs AND no active LLM requests).
+    based on their minimum interval. Whether a DUE job then waits for system
+    idleness is PER JOB (:class:`IdlePolicy`): bounded/idempotent jobs run
+    un-gated, and only the two jobs whose work contends with live traffic
+    (the checkpoint reclaim and the VACUUM) consult the idle probe (no active
+    jobs AND no active LLM requests) — and both carry a persisted
+    ``max_staleness_hours`` escape hatch so they cannot starve forever.
 
     Usage:
         service = MaintenanceService(check_interval_minutes=15)
@@ -660,8 +664,15 @@ class MaintenanceService:
 
         ``hours=None`` clears the override (the built-in default
         applies again); ``hours=0`` disables the guarantee for that
-        job. Returns ``True`` when the job exists and the value was
-        applied (and persisted, when a store is wired).
+        job.
+
+        Returns ``True`` only when the job exists AND the value was
+        genuinely applied: with a store wired, the persisted override
+        must have actually been written — a store-side raise (or a
+        ``set_metadata`` that silently no-ops because the system
+        project is absent) returns ``False`` and leaves the in-memory
+        value untouched, rather than reporting a persistence that did
+        not happen.
         """
         job = next((j for j in self._jobs if j.name == job_name), None)
         if job is None:
@@ -911,6 +922,22 @@ class DbMaintenanceStateStore:
     # ── last-success (maintenance_runs) ───────────────────────────
 
     def load_last_success(self, job_name: str) -> datetime | None:
+        """The persisted last SUCCESSFUL run of ``job_name``.
+
+        ``None`` when the job has never succeeded (or has no persisted
+        audit trail).
+
+        AM-9 kind semantics (the module convention —
+        ``MaintenanceRunsRepository.latest_completed_for_section``):
+        ``last_run`` is the latest ``succeeded`` row of a kind in
+        ``{auto, manual_execute}``; **``manual_dry_run`` NEVER
+        surfaces**. A dry run mutates nothing, so its ``succeeded``
+        row must not hydrate as a success — otherwise a newer dry-run
+        row would push the real last-success forward and delay the
+        next auto reclaim by up to ``max_staleness_hours``. A real
+        ``manual_execute`` IS a genuine run and counts alongside
+        ``auto``.
+        """
         section = JOB_MAINTENANCE_SECTIONS.get(job_name)
         if section is None or self._engine is None:
             return None
@@ -921,6 +948,9 @@ class DbMaintenanceStateStore:
                         "SELECT completed_at FROM maintenance_runs "
                         "WHERE section = :section "
                         "AND status = 'succeeded' "
+                        # AM-9: manual_dry_run NEVER surfaces (it
+                        # mutates nothing — it is not a run).
+                        "AND kind IN ('auto', 'manual_execute') "
                         "AND completed_at IS NOT NULL "
                         "ORDER BY completed_at DESC LIMIT 1"
                     ),
@@ -972,8 +1002,20 @@ class DbMaintenanceStateStore:
     def save_max_staleness_hours(
         self, job_name: str, hours: float | None
     ) -> None:
+        """Persist (or clear) the ``max_staleness_hours`` override.
+
+        Raises when the write did NOT apply — a missing project
+        repository, or a ``set_metadata`` that returned ``None`` (the
+        system-default project row is absent, so nothing was written).
+        The caller (:meth:`MaintenanceService.set_max_staleness_hours`)
+        turns the raise into an honest ``False`` — a silently dropped
+        override must never be reported as persisted.
+        """
         if self._project_repository is None:
-            return
+            raise RuntimeError(
+                "no project repository wired — max_staleness_hours "
+                "override not persisted"
+            )
         blob = self._read_state_blob()
         entry = blob.get(job_name)
         if not isinstance(entry, dict):
@@ -984,13 +1026,22 @@ class DbMaintenanceStateStore:
             entry["max_staleness_hours"] = float(hours)
         blob[job_name] = entry
         try:
-            self._project_repository.set_metadata(
+            result = self._project_repository.set_metadata(
                 self._system_project_id, self.KV_KEY, blob
             )
         except Exception as e:  # noqa: BLE001 — a failed write is not fatal
             logger.warning(
                 f"maintenance job-state KV write failed for "
                 f"{job_name}: {e}"
+            )
+            raise
+        if result is None:
+            # ``set_metadata`` returns None when the system-default
+            # project row is absent — the write was a silent no-op.
+            raise RuntimeError(
+                f"set_metadata returned None (system project "
+                f"{self._system_project_id!r} absent) — override not "
+                f"persisted"
             )
 
 

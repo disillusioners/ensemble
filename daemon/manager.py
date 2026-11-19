@@ -319,7 +319,8 @@ INSTANCE_CACHE_MAX_ENTRIES = 64
 # Hours between ``ProjectSkillSourceService.gc_sweep()`` runs. The purge is
 # one idempotent statement pair (``project_skill_files`` rows whose project
 # no longer exists + the embeddings orphaned by it), so daily is ample; the
-# job is idle-gated by ``MaintenanceService`` and advisory-grade (a failure
+# job is UN_GATED by ``MaintenanceService`` (wi-4d1fa093: bounded idempotent
+# bookkeeping — no live-traffic contention) and advisory-grade (a failure
 # is WARN-logged and retried next cycle, never raised).
 PROJECT_SKILL_GC_INTERVAL_HOURS: float = 24.0
 
@@ -4703,8 +4704,10 @@ class InstanceManager:
         # owner ∪ owner-ancestry}) → a LITERAL DB purge (one
         # transaction per room: the content-free ``room_purged`` event
         # + the three deletes). Registered on the SAME maintenance
-        # service as the checkpoint sweep (idle-gated, advisory,
-        # never-raising). The FIRST sweep of a deployment is a DRY RUN
+        # service as the checkpoint sweep (UN_GATED — its dormancy
+        # predicate keeps its write set off the rows live traffic
+        # touches; advisory, never-raising). The FIRST sweep of a
+        # deployment is a DRY RUN
         # (§2.2 "dry-run first"); the flag is durable, so a restart
         # does not silently re-arm it forever.
         self._maintenance_service.register(
@@ -4817,7 +4820,8 @@ class InstanceManager:
         # production caller, so the A17 claim ("the durable view stays
         # convergent after project deletion") was doc-only and orphaned
         # index rows accumulated. Registered on the SAME maintenance
-        # service as the sweeps above (idle-gated, advisory): on the next
+        # service as the sweeps above (UN_GATED — bounded idempotent
+        # bookkeeping; advisory): on the next
         # tick a deleted project's ``project_skill_files`` rows and their
         # embedding rows are purged. Deliberately OUTSIDE the
         # ``skill_evolution`` gate — the file source is ON-class (A18)
@@ -4880,8 +4884,9 @@ class InstanceManager:
 
         # ── Idle-time glibc heap trim (resource-cost-control O1) ─────
         # Hourly piggyback on the EXISTING MaintenanceService loop —
-        # no new thread, no new asyncio task (O1 brief). The ``_is_idle``
-        # gate keeps it off in-flight work; the callback is the
+        # no new thread, no new asyncio task (O1 brief). It runs
+        # UN_GATED (wi-4d1fa093: an in-process heap trim — no DB
+        # contention with live work); the callback is the
         # never-raises ctypes wrapper in daemon/services/malloc_tuner.py,
         # so a non-glibc platform collapses to a debug-logged no-op.
         # Returns whole free heap pages to the OS after per-turn
@@ -4896,8 +4901,9 @@ class InstanceManager:
         # ── DependencyBus lock-map reap (resource-cost-control) ──────
         # Hourly piggyback on the EXISTING MaintenanceService loop —
         # no new thread, no new asyncio task (same pattern as the O1
-        # malloc_trim registration above; the ``_is_idle`` gate keeps
-        # it off in-flight work). Reaps the bus's terminal-owner UNHELD
+        # malloc_trim registration above; it runs UN_GATED — wi-4d1fa093:
+        # an in-memory lock-map reap, no DB contention). Reaps the bus's
+        # terminal-owner UNHELD
         # lock-map entries (``_locks`` / ``_parent_locks`` are tiny but
         # monotonic over daemon lifetime); held or recently-touched
         # locks are never reaped — see
@@ -4917,9 +4923,11 @@ class InstanceManager:
         # per-tree trim (both via the SHARED shed_members helper), the
         # AM-5b orphan terminalization and the AM-7 board done
         # transitions. Best-effort (an exception logs WARNING inside
-        # the job and never kills this loop). AM-15/NR-7 disclosure:
-        # the idle-gated cadence can starve on a continuously busy
-        # nest — routed to the maintenance lane, not fixed here.
+        # the job and never kills this loop). The former AM-15/NR-7
+        # disclosure — "the idle-gated cadence can starve on a
+        # continuously busy nest" — is RESOLVED by wi-4d1fa093: this
+        # job is UN_GATED (bounded batched age DELETEs; no live-traffic
+        # contention).
         self._maintenance_service.register(
             "anomaly_retention",
             min_interval_hours=24,
@@ -7721,8 +7729,9 @@ class InstanceManager:
     async def _run_malloc_trim(self) -> None:
         """Idle-time glibc heap trim (resource-cost-control O1).
 
-        Registered hourly with :class:`MaintenanceService`; the
-        ``_is_idle`` gate keeps it away from in-flight work.
+        Registered hourly with :class:`MaintenanceService`; it runs
+        UN_GATED (wi-4d1fa093: an in-process heap trim — no DB
+        contention with in-flight work).
         ``trim_malloc_heap`` (daemon/services/malloc_tuner.py) carries a
         never-raises contract of its own; the belt-and-braces ``except``
         below keeps the host maintenance loop unkillable even if that
@@ -7746,8 +7755,9 @@ class InstanceManager:
         """Idle-time DependencyBus lock-map reap (resource-cost-control).
 
         Registered hourly with :class:`MaintenanceService` (same
-        cadence pattern as the O1 ``malloc_trim`` registration); the
-        ``_is_idle`` gate keeps it away from in-flight work. The bus
+        cadence pattern as the O1 ``malloc_trim`` registration); it
+        runs UN_GATED (wi-4d1fa093: an in-memory lock-map reap — no
+        DB contention with in-flight work). The bus
         singleton may legitimately be absent (``set_dependency_bus``
         never called in a stripped-down test manager) — that is a
         DEBUG-logged no-op. The belt-and-braces ``except`` keeps the
@@ -7827,9 +7837,9 @@ class InstanceManager:
         edge case (partial-init during early boot or in tests that
         don't wire the metrics service).
 
-        Registered with :class:`MaintenanceService` so the
-        ``_is_idle`` gate keeps it from running while there's
-        in-flight work. ``max_age_hours=24`` matches the orphan
+        Registered with :class:`MaintenanceService`; it runs UN_GATED
+        (wi-4d1fa093: a bounded delete of stale pending usage rows — no
+        live-traffic contention). ``max_age_hours=24`` matches the orphan
         threshold used by the metrics service internally — anything
         older than 24h and still pending is, by definition, an
         artifact.
@@ -7858,8 +7868,8 @@ class InstanceManager:
     # [decision] D2/C2 (2026-11-17): stalled A/B-pair inactivity
     # sweep — the periodic leg of the ONE sanctioned resolution
     # mechanism (user ruling E-6 + orchestrator Q1). House pattern:
-    # interval-gated by the maintenance service, idle-gated, and
-    # never-raising.
+    # interval-gated by the maintenance service, UN_GATED (wi-4d1fa093:
+    # its resolve path is atomic + CAS-guarded), and never-raising.
     async def _run_skill_ab_inactivity_sweep(self) -> None:
         """Resolve/park stalled A/B pairs (zero traffic, aged out).
 
@@ -7947,10 +7957,10 @@ class InstanceManager:
     async def _run_skill_metric_scan(self) -> None:
         """Periodic Phase 4 trigger scan — enqueues analysis jobs.
 
-        Registered with :class:`MaintenanceService` so the
-        ``_is_idle`` gate keeps it from running while there's
-        in-flight work. Each registered project is processed
-        independently so a misconfigured project can't poison the
+        Registered with :class:`MaintenanceService`; it runs UN_GATED
+        (wi-4d1fa093: bounded metric aggregation over the skill usage
+        records — no live-traffic contention). Each registered project
+        is processed independently so a misconfigured project can't poison the
         others; failures are isolated per-project and logged at
         WARNING.
 
