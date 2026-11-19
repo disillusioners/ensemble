@@ -47,12 +47,50 @@ if ! psql -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d "$SMOKE_DB" -c '\q' >/dev/
   SMOKE_DB="ensemble_dev_boot_smoke_$$"
 fi
 
-# ── temp dirs ────────────────────────────────────────────────────────────────
+# ── temp dirs + trap installed IMMEDIATELY after mktemp (D7) ────────────────
 TMP_ROOT="$(mktemp -d /tmp/ens-boot-smoke-XXXXXX)"
+cleanup() {
+  local rc=$?
+  if [[ -n "${SMOKE_PID:-}" ]] && kill -0 "$SMOKE_PID" 2>/dev/null; then
+    kill -TERM "$SMOKE_PID" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+      kill -0 "$SMOKE_PID" 2>/dev/null || break
+      sleep 1
+    done
+    kill -KILL "$SMOKE_PID" 2>/dev/null || true
+    wait "$SMOKE_PID" 2>/dev/null || true
+  fi
+  # capture child exit code for assertion (D2)
+  if [[ -n "${SMOKE_PID:-}" ]]; then
+    wait "$SMOKE_PID" 2>/dev/null && SMOKE_EXIT=0 || SMOKE_EXIT=$?
+  fi
+  # restore pre-existing rows for the 3 seeded keys (D8): delete then re-insert
+  psql -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d "$SMOKE_DB" \
+    -c "DELETE FROM app_settings WHERE key IN ('limits.worker_pool_size','wedge_notice_emission_enabled','smoke_unknown_legacy_key');" \
+    >/dev/null 2>&1 || true
+  if [[ -s "${BACKUP_SQL:-}" ]]; then
+    psql -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d "$SMOKE_DB" \
+      -f "$BACKUP_SQL" >/dev/null 2>&1 || true
+  fi
+  if [[ "${USE_FRESH:-0}" == "1" ]]; then
+    psql -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d postgres \
+      -c "DROP DATABASE IF EXISTS $SMOKE_DB;" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$TMP_ROOT"
+  # propagate child exit code if it was a crash (D2)
+  if [[ "${SMOKE_EXIT:-0}" == "3" ]]; then
+    echo "ERROR: child exited with code 3 (startup crash)" >&2
+    exit 1
+  fi
+  exit $rc
+}
+trap cleanup EXIT INT TERM
+
 CONFIG_DIR="$TMP_ROOT/config"
 DATA_DIR="$TMP_ROOT/data"
 mkdir -p "$CONFIG_DIR" "$DATA_DIR"
 LOG_FILE="$TMP_ROOT/boot.log"
+BACKUP_SQL="$TMP_ROOT/backup.sql"
 
 # ── free port (python socket bind check) ─────────────────────────────────────
 PORT="$(python3 - <<'PY'
@@ -64,31 +102,15 @@ s.close()
 PY
 )"
 
-# ── cleanup trap ─────────────────────────────────────────────────────────────
-SMOKE_PID=""
-cleanup() {
-  if [[ -n "$SMOKE_PID" ]] && kill -0 "$SMOKE_PID" 2>/dev/null; then
-    kill -TERM "$SMOKE_PID" 2>/dev/null || true
-    for _ in 1 2 3 4 5; do
-      kill -0 "$SMOKE_PID" 2>/dev/null || break
-      sleep 1
-    done
-    kill -KILL "$SMOKE_PID" 2>/dev/null || true
-    wait "$SMOKE_PID" 2>/dev/null || true
-  fi
-  psql -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d "$SMOKE_DB" \
-    -c "DELETE FROM app_settings WHERE key IN ('limits.worker_pool_size','wedge_notice_emission_enabled','smoke_unknown_legacy_key');" \
-    >/dev/null 2>&1 || true
-  if [[ "$USE_FRESH" == "1" ]]; then
-    psql -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d postgres \
-      -c "DROP DATABASE IF EXISTS $SMOKE_DB;" >/dev/null 2>&1 || true
-  fi
-  rm -rf "$TMP_ROOT"
-}
-trap cleanup EXIT INT TERM
-
-# ── create fresh DB + apply migration if needed ──────────────────────────────
+# ── fresh-DB privilege preflight (D6) ────────────────────────────────────────
 if [[ "$USE_FRESH" == "1" ]]; then
+  CREATEDB="$(psql -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d postgres -tAc \
+    "SELECT rolcreatedb FROM pg_roles WHERE rolname=current_user;" 2>/dev/null | tr -d '[:space:]')"
+  if [[ "$CREATEDB" != "t" ]]; then
+    echo "ERROR: fresh-DB fallback requires CREATEDB privilege, but user '$PGUSER' has rolcreatedb=$CREATEDB." >&2
+    echo "       Use the existing ensemble_dev_scratch path instead (it exists and authenticates)." >&2
+    exit 1
+  fi
   psql -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d postgres \
     -c "CREATE DATABASE $SMOKE_DB;" >/dev/null 2>&1 || {
       echo "ERROR: cannot create scratch DB $SMOKE_DB" >&2; exit 1; }
@@ -98,6 +120,15 @@ if [[ "$USE_FRESH" == "1" ]]; then
       -f "$MIG_SQL" >/dev/null 2>&1 || true
   fi
 fi
+
+# ── snapshot pre-existing rows for the 3 seeded keys (D8) ────────────────────
+psql -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d "$SMOKE_DB" -tA <<SQL >"$BACKUP_SQL" 2>/dev/null || true
+SELECT format('INSERT INTO app_settings (key,value_json,value_type,updated_by,updated_at) VALUES (%L,%L,%L,%L,%L) ON CONFLICT (key) DO NOTHING;',
+  key, value_json, value_type, updated_by, updated_at)
+FROM app_settings WHERE key IN ('limits.worker_pool_size','wedge_notice_emission_enabled','smoke_unknown_legacy_key');
+SQL
+# remove blank lines
+sed -i '/^$/d' "$BACKUP_SQL" 2>/dev/null || true
 
 # ── seed live-shaped rows ────────────────────────────────────────────────────
 psql -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d "$SMOKE_DB" \
@@ -120,6 +151,7 @@ ENV_ARGS=(
   "ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0"
   "DAEMON_PORT=$PORT"
   "PORT=$PORT"
+  "ENSEMBLE_DATA_DIR=$DATA_DIR"
   "POSTGRES_HOST=$PG_HOST"
   "POSTGRES_PORT=$PG_PORT"
   "POSTGRES_DB=$SMOKE_DB"
@@ -131,8 +163,8 @@ for v in $(env | sed -n 's/^\(ENSEMBLE_AUTH_[A-Za-z0-9_]*\)=.*/\1/p'); do
   UNSET_ARGS+=("-u" "$v")
 done
 
-# ── boot ─────────────────────────────────────────────────────────────────────
-echo "booting $BINARY on port $PORT (db=$SMOKE_DB)..."
+# ── boot (cwd kept at repo root so config.yaml resolves; data isolated) ──────
+echo "booting $BINARY on port $PORT (db=$SMOKE_DB, data=$DATA_DIR)..."
 env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT \
   "${UNSET_ARGS[@]}" \
   "${ENV_ARGS[@]}" \
@@ -160,20 +192,25 @@ if ! curl -fsS "http://127.0.0.1:$PORT/livez" >/dev/null 2>&1; then
   exit 1
 fi
 
-# ── verify applied + no crash ────────────────────────────────────────────────
+# ── verify applied + no crash (D2) ───────────────────────────────────────────
+FAIL=0
 if grep -q "Application startup failed" "$LOG_FILE"; then
   echo "ERROR: 'Application startup failed' in log" >&2
-  tail -40 "$LOG_FILE" >&2
-  exit 1
+  FAIL=1
 fi
 if grep -q "cannot parse.*as bool" "$LOG_FILE"; then
   echo "ERROR: bogus yaml dict-parse warning present" >&2
-  grep "cannot parse" "$LOG_FILE" >&2
+  FAIL=1
+fi
+if ! grep -q "limits.worker_pool_size:.*db tier wins" "$LOG_FILE"; then
+  echo "ERROR: worker_pool_size db-tier-wins apply line missing from log" >&2
+  FAIL=1
+fi
+if [[ "$FAIL" -ne 0 ]]; then
+  echo "--- log tail ---" >&2
+  tail -40 "$LOG_FILE" >&2
   exit 1
 fi
 
 echo "PASS: boot smoke OK (port=$PORT, db=$SMOKE_DB)"
 exit 0
-SH
-chmod +x scripts/upgrade/boot_smoke.sh
-echo "written"

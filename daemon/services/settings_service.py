@@ -1397,10 +1397,13 @@ def apply_db_settings_overrides(
     applied_count = 0
     resolutions: dict[str, dict[str, Any]] = {}
     for key, spec in MANAGED_KEYS.items():
-        resolution = resolve(key, snapshot, db_overrides=db_overrides)
-        resolutions[key] = resolution
-        db_won = resolution["source"] == "db"
+        resolution = None
+        db_won = False
         try:
+            resolution = resolve(key, snapshot, db_overrides=db_overrides)
+            resolutions[key] = resolution
+            db_won = resolution["source"] == "db"
+
             if spec.config_path:
                 current = _get_config_value(config, spec.config_path)
                 # A config_path that resolves to a non-scalar (a section
@@ -1438,6 +1441,7 @@ def apply_db_settings_overrides(
             if db_won:
                 applied_count += 1
         except (AttributeError, TypeError, KeyError, ValueError) as exc:
+            resolutions[key] = resolution
             logger.warning(
                 "[Settings] %s: boot apply skipped — %s: %s — lower tiers "
                 "stay active; key not marked applied (config_path=%r)",
@@ -1448,6 +1452,7 @@ def apply_db_settings_overrides(
             )
             applied_value = None
         except Exception as exc:  # noqa: BLE001 — per-key fail-soft (last resort)
+            resolutions[key] = resolution
             logger.warning(
                 "[Settings] %s: boot apply skipped — %s: %s — lower tiers "
                 "stay active; key not marked applied (config_path=%r)",

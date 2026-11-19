@@ -673,6 +673,7 @@ class TestManagedKeysConsistency:
     (DB/ENV-only) entries declare config_path=None explicitly."""
 
     def test_every_entry_is_consistent(self):
+        assert len(MANAGED_KEYS) == 19
         config = Config()
         for key, spec in MANAGED_KEYS.items():
             if spec.config_path is None:
@@ -758,7 +759,7 @@ class TestFailSoftBootApply:
         with caplog.at_level(logging.WARNING, logger="daemon.services.settings_service"):
             returned, snapshot, config = self._boot(tmp_path, monkeypatch, rows)
         assert config.limits.worker_pool_size == 7
-        assert "smoke_unknown_legacy_key" not in snapshot or True
+        assert "smoke_unknown_legacy_key" not in snapshot
         assert any("unregistered app_settings row" in r.getMessage() for r in caplog.records)
 
     def test_wrong_path_nonexistent_attr_skipped(self, tmp_path, monkeypatch, caplog):
@@ -776,11 +777,9 @@ class TestFailSoftBootApply:
             returned, snapshot, config = self._boot(
                 tmp_path, monkeypatch, rows, extra_specs={"bad.nonexistent": bad}
             )
-            # seed a row for the bad key too
-        # Re-run with the bad row present is covered by section-root case;
-        # here just assert no crash + valid override applied.
         assert config.limits.worker_pool_size == 7
         assert snapshot["bad.nonexistent"]["applied_value"] is None
+        assert any("boot apply skipped" in r.getMessage() for r in caplog.records)
 
     def test_wrong_path_section_root_skipped(self, tmp_path, monkeypatch, caplog):
         import logging
@@ -816,6 +815,7 @@ class TestFailSoftBootApply:
         assert config.limits.worker_pool_size == 5
         res = get_last_applied_resolution()
         assert res["limits.worker_pool_size"]["source"] != "db"
+        assert any("failed parse" in r.getMessage() for r in caplog.records)
 
     def test_wedge_key_db_row_present_false(self, tmp_path, monkeypatch, caplog):
         import logging
