@@ -5,6 +5,15 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.12] — 2026-11-19
+
+### Changed — instances-list Option A: drop `mcp_tool_names` from GET /api/instances list rows (`feature/instances-list-mcp-tool-names`; analysis `.agents/shared/planning/sonic-team/instances-list-latency/ANALYSIS.md` §8)
+
+- Changed: the GET /api/instances LIST response no longer carries the `mcp_tool_names` key on any row (key-ABSENT, not null — route-level `response_model_exclude` + list-path kwarg removal). Public REST field drop, Emperor-approved with the knowledge that out-of-repo consumers are unknown; zero in-repo consumers (frontend grep 0 hits across 4 spellings; the agent tool layer reads `manager.list_instances` directly, not the route)
+- Unchanged: GET /api/instances/{id} and POST /api/instances still serve the field populated; the OpenAPI schema still advertises it on the shared InstanceInfo model (documented schema-vs-runtime gap, disclosed follow-up)
+- Effect (projection per ANALYSIS §8, not re-measured): ~57% payload cut per list call (FE_A 6.06 MB → ~2.6 MB; p50 824 → ~650 ms); zero migrations; additive-only delta
+- Registered: mutation-proven pack `tests/api/test_instances_list_mcp_tool_names.py` (key-absence + detail-presence pins) + independent tester wire-shape gate `instances_list_mcp_tool_names_wire_shape_unit_test` in the shared PACKS registry
+
 ## [0.31.11] — 2026-11-19
 
 ### Fixed — maintenance starvation composite fix (`wi-4d1fa093`)
