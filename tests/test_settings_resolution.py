@@ -851,6 +851,8 @@ class TestFailSoftBootApply:
              "updated_at": "2026-01-01T00:00:00+00:00"},
             {"key": "limits.llm_concurrency", "value_json": "5", "value_type": "int",
              "updated_at": "2026-01-01T00:00:00+00:00"},
+            {"key": "limits.chat_worker_pool_size", "value_json": "3", "value_type": "int",
+             "updated_at": "2026-01-01T00:00:00+00:00"},
         ]
         with caplog.at_level(logging.INFO, logger="daemon.services.settings_service"):
             returned, snapshot, config = self._boot(tmp_path, monkeypatch, rows)
@@ -859,8 +861,11 @@ class TestFailSoftBootApply:
         assert returned is config
         # 2. the failed key is skipped
         assert snapshot["limits.worker_pool_size"]["applied_value"] is None
-        # 3. the OTHER valid override still applied
+        # 3. the OTHER valid override still applied (key BEFORE the failing one)
         assert config.limits.llm_concurrency == 5
+        # S2: a key ordered AFTER the failing key must also be processed -
+        # proves loop continuation directly.
+        assert config.limits.chat_worker_pool_size == 3
         # 4. a WARNING carrying the key name was logged
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert any("limits.worker_pool_size" in m and "boot apply skipped" in m
@@ -869,12 +874,13 @@ class TestFailSoftBootApply:
         summary = [m for m in warnings if "db override(s)" in m]
         infos = [r.getMessage() for r in caplog.records
                  if r.levelno == logging.INFO and "db override(s)" in r.getMessage()]
-        assert any("applied 1 db override(s)" in m for m in infos), infos
+        assert any("applied 2 db override(s)" in m for m in infos), infos
         # 6. the published resolution record holds a DICT, never None
         res = get_last_applied_resolution()
         assert res is not None
         assert isinstance(res["limits.worker_pool_size"], dict)
-        assert res["limits.worker_pool_size"] == {}
+        # F10: the failed key carries applied=False (never a truthy record)
+        assert res["limits.worker_pool_size"].get("applied") is False
 
     def test_wedge_key_db_row_present_false(self, tmp_path, monkeypatch, caplog):
         import logging

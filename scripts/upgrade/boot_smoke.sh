@@ -59,6 +59,8 @@ CONFIG_SRC=""
 AGENTS_DIR=""
 POLL_TIMEOUT=45
 ALLOW_SHARED_CGROUP=0
+PG_USER_ARG=""
+PG_PASS_ARG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --binary) BINARY="$2"; shift 2 ;;
@@ -70,6 +72,10 @@ while [[ $# -gt 0 ]]; do
     --timeout) POLL_TIMEOUT="$2"; shift 2 ;;
     --timeout=*) POLL_TIMEOUT="${1#--timeout=}"; shift ;;
     --allow-shared-cgroup) ALLOW_SHARED_CGROUP=1; shift ;;
+    --pg-user) PG_USER_ARG="$2"; shift 2 ;;
+    --pg-user=*) PG_USER_ARG="${1#--pg-user=}"; shift ;;
+    --pg-password) PG_PASS_ARG="$2"; shift 2 ;;
+    --pg-password=*) PG_PASS_ARG="${1#--pg-password=}"; shift ;;
     -h|--help) sed -n '2,55p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -107,24 +113,38 @@ SMOKE_EXIT=0
 UNIT=""
 USE_SYSTEMD=0
 TORN_DOWN=0
+CLEANUP_FAILED=0
 cleanup() {
   local rc=$?
   if [[ "$TORN_DOWN" -eq 0 ]]; then
     teardown_smoke || true
   fi
-  # restore pre-existing rows for the 3 seeded keys (delete-then-restore)
+  # restore pre-existing rows for the 3 seeded keys (delete-then-restore).
+  # Credentialed (psql_pw) - bare psql has no .pgpass on this host and
+  # would silently leak the 3 seeded rows into the shared scratch DB.
+  CLEANUP_FAILED=0
   if [[ -n "${SMOKE_DB:-}" ]]; then
-    psql -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d "$SMOKE_DB" \
-      -c "DELETE FROM app_settings WHERE key IN ('limits.worker_pool_size','wedge_notice_emission_enabled','smoke_unknown_legacy_key');" \
-      >/dev/null 2>&1 || true
+    if ! psql_pw -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d "$SMOKE_DB" \
+         -c "DELETE FROM app_settings WHERE key IN ('limits.worker_pool_size','wedge_notice_emission_enabled','smoke_unknown_legacy_key');" \
+         >/dev/null 2>&1; then
+      echo "WARN: cleanup DELETE failed - seeded rows may remain in $SMOKE_DB" >&2
+      CLEANUP_FAILED=1
+    fi
     if [[ -s "${BACKUP_SQL:-}" ]]; then
-      psql -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d "$SMOKE_DB" \
-        -f "$BACKUP_SQL" >/dev/null 2>&1 || true
+      if ! psql_pw -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d "$SMOKE_DB" \
+           -f "$BACKUP_SQL" >/dev/null 2>&1; then
+        echo "WARN: cleanup RESTORE failed - pre-existing rows may be missing" >&2
+        CLEANUP_FAILED=1
+      fi
     fi
     if [[ "${USE_FRESH:-0}" == "1" ]]; then
-      psql -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d postgres \
-        -c "DROP DATABASE IF EXISTS $SMOKE_DB;" >/dev/null 2>&1 || true
+      psql_pw -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d postgres \
+        -c "DROP DATABASE IF EXISTS $SMOKE_DB;" >/dev/null 2>&1 || {
+          echo "WARN: cleanup DROP DATABASE failed" >&2; CLEANUP_FAILED=1; }
     fi
+  fi
+  if [[ "$CLEANUP_FAILED" == "1" ]]; then
+    echo "ERROR: cleanup incomplete - inspect $SMOKE_DB manually" >&2
   fi
   safe_rm "$TMP_ROOT"
   safe_rm "$FAKE_HOME"
@@ -202,12 +222,32 @@ PG_HOST="127.0.0.1"
 PG_PORT="5432"
 SMOKE_DB="ensemble_dev_scratch"
 USE_FRESH=0
-PGUSER="${POSTGRES_USER:-ensemble_dev_app}"
-PGPASS="${POSTGRES_PASSWORD:-}"
+PGUSER="${PG_USER_ARG:-${POSTGRES_USER:-ensemble_dev_app}}"
+PGPASS="${PG_PASS_ARG:-${POSTGRES_PASSWORD:-}}"
 psql_pw() { PGPASSWORD="$PGPASS" psql "$@"; }
+LOCKFILE="/tmp/ens-boot-smoke-scratch.lock"
+exec 9>"$LOCKFILE"
+echo "acquiring shared-scratch lock ($LOCKFILE) ..."
+flock -x 9
+echo "lock acquired."
+
 if ! psql_pw -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d "$SMOKE_DB" -c '\q' >/dev/null 2>&1; then
   USE_FRESH=1
   SMOKE_DB="ensemble_dev_boot_smoke_$$"
+fi
+
+# ── auth preflight: distinguish auth vs DB-absent vs no-CREATEDB ────────────
+AUTH_PROBE="$(psql_pw -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d "$SMOKE_DB" -tAc "SELECT 1;" 2>&1)" || true
+if [[ "$AUTH_PROBE" != "1" ]]; then
+  if echo "$AUTH_PROBE" | grep -qi "password authentication failed\|fe_sendauth"; then
+    echo "ERROR: AUTH FAILURE - password authentication failed for user '$PGUSER'." >&2
+    echo "       probe: ${AUTH_PROBE:-<empty>}" >&2
+    exit 2
+  elif echo "$AUTH_PROBE" | grep -qi "does not exist"; then
+    echo "ERROR: DB ABSENT - database '$SMOKE_DB' does not exist." >&2
+    echo "       probe: ${AUTH_PROBE:-<empty>}" >&2
+    exit 3
+  fi
 fi
 
 # ── fresh-DB privilege preflight (fail FAST with a readable message) ────────
@@ -227,11 +267,16 @@ if [[ "$USE_FRESH" == "1" ]]; then
   psql_pw -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d postgres \
     -c "CREATE DATABASE $SMOKE_DB;" >/dev/null 2>&1 || {
       echo "ERROR: cannot create scratch DB $SMOKE_DB" >&2; exit 1; }
-  MIG_SQL="$REPO_ROOT/daemon/migrations/versions/20261018_000002_create_app_settings.sql"
-  if [[ -f "$MIG_SQL" ]]; then
-    psql_pw -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d "$SMOKE_DB" \
-      -f "$MIG_SQL" >/dev/null 2>&1 || true
-  fi
+  psql_pw -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d "$SMOKE_DB" \
+    -v ON_ERROR_STOP=1 <<SQL >/dev/null 2>&1 || true
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        TEXT NOT NULL PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    value_type TEXT NOT NULL,
+    updated_by TEXT,
+    updated_at TEXT NOT NULL
+);
+SQL
 fi
 
 # ── snapshot pre-existing rows for the 3 seeded keys (NULL-safe restore) ────
@@ -241,6 +286,19 @@ SELECT format('INSERT INTO app_settings (key,value_json,value_type,updated_by,up
 FROM app_settings WHERE key IN ('limits.worker_pool_size','wedge_notice_emission_enabled','smoke_unknown_legacy_key');
 SQL
 sed -i '/^$/d' "$BACKUP_SQL" 2>/dev/null || true
+
+# ── ensure app_settings exists on BOTH paths (idempotent; the migration's
+#     -- DOWN section is NEVER executed here) ────────────────────────────────
+psql_pw -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d "$SMOKE_DB" \
+  -v ON_ERROR_STOP=1 <<SQL >/dev/null 2>&1 || { echo "ERROR: cannot ensure app_settings table" >&2; exit 1; }
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        TEXT NOT NULL PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    value_type TEXT NOT NULL,
+    updated_by TEXT,
+    updated_at TEXT NOT NULL
+);
+SQL
 
 # ── seed live-shaped rows ────────────────────────────────────────────────────
 psql_pw -h "$PG_HOST" -p "$PG_PORT" -U "$PGUSER" -d "$SMOKE_DB" \
@@ -495,8 +553,26 @@ if grep -q "cannot parse.*as bool" "$LOG_FILE"; then
   echo "ERROR: bogus yaml dict-parse warning present" >&2
   FAIL=1
 fi
-if ! grep -q "limits.worker_pool_size:.*db tier wins" "$LOG_FILE"; then
-  echo "ERROR: worker_pool_size db-tier-wins apply line missing from boot log" >&2
+# G1: post-apply truth - the apply line emitted BEFORE _set_config_value is
+# not enough; assert the post-apply confirmation line (emitted only after
+# the mutation landed) AND the absence of the fail-soft skip marker for
+# this key.
+if ! grep -q "limits.worker_pool_size: applied to config - field now" "$LOG_FILE"; then
+  echo "ERROR: worker_pool_size post-apply confirmation line missing from boot log" >&2
+  FAIL=1
+fi
+if grep -q "limits.worker_pool_size:.*boot apply skipped" "$LOG_FILE"; then
+  echo "ERROR: worker_pool_size was skipped (fail-soft) instead of applied" >&2
+  FAIL=1
+fi
+# G4: the seeded unknown-key row must produce the unregistered-row WARNING
+# (proves the fail-soft path ran, not just that boot survived).
+if ! grep -q "ignoring unregistered app_settings row" "$LOG_FILE"; then
+  echo "ERROR: unregistered-row warning missing - fail-soft path did not run" >&2
+  FAIL=1
+fi
+if ! grep -q "smoke_unknown_legacy_key" "$LOG_FILE"; then
+  echo "ERROR: unknown-key row name missing from the unregistered-row warning" >&2
   FAIL=1
 fi
 if ! grep -q "\[fence\]" "$LOG_FILE"; then

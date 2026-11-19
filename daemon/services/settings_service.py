@@ -1349,7 +1349,13 @@ def apply_db_settings_overrides(
     FAIL-OPEN EVERYWHERE (Ruling 3): any read error (dead DB, corrupt
     row, parse/range failure) logs ERROR with the failure class and
     continues boot on the lower tiers — worst case is "the feature is
-    inert", never "the daemon does not start".
+    inert", never "the daemon does not start". The Step-3/4 PER-KEY
+    apply (missing Config attribute, wrong type, non-scalar section root,
+    conversion failure) logs a WARNING (not ERROR) and leaves the key
+    UNAPPLIED (lower tier / existing Config intact) - never aborts boot.
+    The resolution record carries applied=False for an unapplied key so
+    downstream restart-audit consumers never render a failed apply as
+    'applied'.
 
     Returns ``(config, snapshot)`` — the same Config object, mutated
     in place, plus the completed snapshot.
@@ -1436,11 +1442,35 @@ def apply_db_settings_overrides(
                     )
                     _set_config_value(config, spec.config_path, resolution["value"])
                 applied_value = _get_config_value(config, spec.config_path)
+            # G1: post-apply confirmation (only for DB-tier wins) so a smoke
+            # can assert the apply actually landed, not just that the tier won
+            # before mutation.
+            if resolution["source"] == "db" and spec.config_path:
+                logger.info(
+                    "[Settings] %s: applied to config - field now %r (post-apply)",
+                    key,
+                    applied_value,
+                )
             else:
                 # DB/ENV-ONLY key (config_path is None): no Config field to
                 # mutate — the resolved winner is the applied value. The
                 # consumer reads it via get_overrides() / env, not Config.
+                # G2: this path was previously silent - emit an INFO so the
+                # exact knob this fix repairs is auditable at runtime.
+                logger.info(
+                    "[Settings] %s: %s tier wins - DB/env-only key (no Config "
+                    "field) - resolved value %r (applies on this boot; "
+                    "restart-required semantics: %s)",
+                    key,
+                    resolution["source"],
+                    resolution["value"],
+                    "restart-required" if spec.requires_restart else "takes effect per tick",
+                )
                 applied_value = resolution["value"]
+            # F10: publish an explicit applied flag so the restart-audit
+            # sweep cannot render a failed apply as 'applied'.
+            if isinstance(resolution, dict):
+                resolution["applied"] = True
             if db_won:
                 applied_count += 1
         except (AttributeError, TypeError, KeyError, ValueError) as exc:
@@ -1448,7 +1478,9 @@ def apply_db_settings_overrides(
             # does ``dict(v)`` per entry — a None value would raise
             # TypeError and ABORT boot (the very crash class this boundary
             # exists to prevent). A failed resolve publishes an empty record.
-            resolutions[key] = resolution or {}
+            _rec = resolution if isinstance(resolution, dict) else {}
+            _rec["applied"] = False
+            resolutions[key] = _rec
             logger.warning(
                 "[Settings] %s: boot apply skipped — %s: %s — lower tiers "
                 "stay active; key not marked applied (config_path=%r)",
@@ -1460,7 +1492,9 @@ def apply_db_settings_overrides(
             applied_value = None
         except Exception as exc:  # noqa: BLE001 — per-key fail-soft (last resort)
             # Same rule as the targeted arm above — never a None value.
-            resolutions[key] = resolution or {}
+            _rec = resolution if isinstance(resolution, dict) else {}
+            _rec["applied"] = False
+            resolutions[key] = _rec
             logger.warning(
                 "[Settings] %s: boot apply skipped — %s: %s — lower tiers "
                 "stay active; key not marked applied (config_path=%r)",
