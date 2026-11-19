@@ -1028,6 +1028,27 @@ def _line_end(text: str, pos: int) -> int:
     return len(text) if nl < 0 else nl
 
 
+def _ssh_has_remote_command(
+    words: _Segment, k: int, env: dict[str, str]
+) -> bool:
+    """Does this ``ssh`` segment carry a REMOTE COMMAND beyond the host?
+
+    ``ssh host`` with NO remote command starts a remote login shell and
+    FORWARDS the client's stdin — the body is executed remotely. With a
+    remote command the body is that command's stdin (DATA). An option
+    ssh does not have leaves the remote command unlocatable, so the
+    caller treats the body as executed (the conservative answer).
+    """
+    remote = _ssh_remote_words(words, k, env)
+    if remote is None:
+        return False
+    for word in remote:
+        if _word_literal_prefix(word).startswith("<<"):
+            continue        # a heredoc OPERATOR, not a command word
+        return True
+    return False
+
+
 def _is_shell_stdin_line(line_text: str, env: dict[str, str]) -> bool:
     """Is the heredoc attached to a reader that EXECUTES its stdin?
 
@@ -1047,7 +1068,16 @@ def _is_shell_stdin_line(line_text: str, env: dict[str, str]) -> bool:
     if not ok:
         return False
     base = text.rsplit("/", 1)[-1].lower()
-    return base in _SHELLS or base in _SCHEDULERS
+    if base in _SHELLS or base in _SCHEDULERS:
+        return True
+    if base == "ssh":
+        # A bare ``ssh <host>`` (NO remote command) starts a remote login
+        # shell and FORWARDS the client's stdin: a heredoc body delivered
+        # to it is EXECUTED remotely — the same mechanism as the pipe
+        # form. With a remote command the body is that command's stdin
+        # (DATA) and the remote-command path handles it.
+        return not _ssh_has_remote_command(words, k, env)
+    return False
 
 
 def _strip_heredocs(

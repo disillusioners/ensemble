@@ -128,11 +128,11 @@ M6L_NEW = """    # MUTATION M6l: the env split-string recursion removed.
 """
 
 # M6m - the scheduler heredoc.
-M6M_OLD = """    base = text.rsplit("/", 1)[-1].lower()
-    return base in _SHELLS or base in _SCHEDULERS
+M6M_OLD = """    if base in _SHELLS or base in _SCHEDULERS:
+        return True
 """
-M6M_NEW = """    base = text.rsplit("/", 1)[-1].lower()
-    return base in _SHELLS
+M6M_NEW = """    if base in _SHELLS:
+        return True
 """
 
 # M6n - timeout's signal value options.
@@ -299,6 +299,19 @@ M7G_OLD = """            resolved = []
 """
 M7G_NEW = ""
 
+# M7i - the stdin-execution extension for a BARE ssh host (the fix under
+# proof): a heredoc body delivered to `ssh host` (no remote command) is
+# EXECUTED remotely, because ssh forwards the client's stdin.
+M7I_OLD = """    if base == "ssh":
+        # A bare ``ssh <host>`` (NO remote command) starts a remote login
+        # shell and FORWARDS the client's stdin: a heredoc body delivered
+        # to it is EXECUTED remotely — the same mechanism as the pipe
+        # form. With a remote command the body is that command's stdin
+        # (DATA) and the remote-command path handles it.
+        return not _ssh_has_remote_command(words, k, env)
+"""
+M7I_NEW = ""
+
 # M7h - the ssh unknown-option fail-closed.
 M7H_OLD = """        if cmd_words is None:
             return UNRESOLVED_UNIT_TOKEN
@@ -326,6 +339,7 @@ LEGS = {
     "M7f": [(M7F_OLD, M7F_NEW)],
     "M7g": [(M7G_OLD, M7G_NEW)],
     "M7h": [(M7H_OLD, M7H_NEW)],
+    "M7i": [(M7I_OLD, M7I_NEW)],
 }
 
 #: The documented red count of every leg. A run that does not match
@@ -334,7 +348,7 @@ EXPECTED = {
     "M6g": 11, "M6h": 2, "M6i": 12, "M6j": 9, "M6k": 1, "M6l": 9,
     "M6m": 2, "M6n": 1, "M6o": 2, "M6p": 1, "M6q": 5, "M6r": 3,
     "M6s": 2, "M7a": 5, "M7b": 4, "M7d": 7, "M7e": 3, "M7f": 6,
-    "M7g": 1, "M7h": 2,
+    "M7g": 1, "M7h": 2, "M7i": 1,
 }
 
 

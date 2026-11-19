@@ -568,6 +568,10 @@ _PIPE_LAUNDER_SHAPES = [
     # pipe: the whole-text rule tests the raw text, the adjacency backstop
     # is single-stage — the RESOLVED payloads are shape-tested too
     "A=ensemble; echo \"systemctl restart ${A}-main\" | cat | bash",
+    # a heredoc body delivered to a BARE ssh host is EXECUTED remotely
+    # (ssh forwards the client's stdin to a remote login shell) - the
+    # same mechanism as the pipe form
+    "ssh host <<'EOF'\nsystemctl restart ensemble-main\nEOF",
 ]
 
 
@@ -775,6 +779,8 @@ _LAUNDER_ALLOW = [
     "su -c'systemctl status ensemble-main'",
     "echo 'systemctl status ensemble-main' | ssh host",
     "cat > cron.txt <<'EOF'\nrun systemctl restart ensemble-main to recover\nEOF",
+    # a read-only body to the same shape stays allowed
+    "ssh host <<'EOF'\nsystemctl status ensemble-main\nEOF",
     # attached / bundled / =-forms of KNOWN options are self-contained:
     # they were misread as unknown and refused
     "watch -n1 systemctl status ensemble-main",
