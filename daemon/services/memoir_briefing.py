@@ -126,6 +126,36 @@ MEMOIR_PERSONA_MISSING_PREFIX = (
     "[persona unavailable — no approved persona version]"
 )
 
+#: The TWO approval-queue lines (m1). Each renders inside its OWN zone —
+#: the persona line in ``## Persona``, the proposal line in the
+#: proposals zone — and ONLY when its queue is NON-EMPTY: at zero the
+#: rendering is the empty string, so every existing briefing pin stays
+#: byte-identical (zero token tax on an empty queue).
+#:
+#: EACH LINE NAMES THE SURFACE THE AGENT ACTS WITH, and the two surfaces
+#: differ:
+#:
+#: * the PERSONA queue is acted on with the ``memoir_persona_ratify``
+#:   verb (the 8th memoir verb — its existence is THAT verb module's
+#:   pin, not this line's; the name is carried as a STRING here). The
+#:   verb is the agent-side surface and it RELAYS the human-lane
+#:   refusal verbatim when the gate refuses the caller — so this line
+#:   deliberately does NOT claim whether the call will succeed ("an
+#:   operator session approves …" would go stale the moment a persona
+#:   self-ratify exemption lands); the refusal itself carries that
+#:   detail.
+#: * the PROPOSAL queue is the ``memoir_review`` tool (the 7th memoir
+#:   verb) — the SAME name the registry ships.
+MEMOIR_PERSONA_PENDING_LINE = (
+    "- {count} persona version{s} pending approval — act with "
+    "memoir_persona_ratify(version_id)."
+)
+
+MEMOIR_PROPOSAL_PENDING_LINE = (
+    "- {count} keepsake proposal{s} pending review — act with "
+    "memoir_review(title, decision, actor)."
+)
+
 # ── budgets (D5.7 — flag #3 / DR-1's model) ──────────────────────────────
 
 #: Stable-zone admission bounds. These are WRITE-TIME promises (the
@@ -238,23 +268,58 @@ def render_dynamic_line(episode: Any) -> str:
     return f"- [{_fmt_event_at(getattr(episode, 'event_at', None))}] {title}: {body}"
 
 
+def render_queue_count_line(template: str, count: Any) -> str:
+    """Render ONE queue-count line from its template, or ``""`` at zero.
+
+    ALWAYS-PRESENT-BUT-SILENT-WHEN-ZERO: the queues are visible in the
+    briefing whenever they carry work, and cost nothing when they do not
+    (the block must not grow a "0 pending" line an agent would have to
+    read on every turn). A non-integer / negative count is treated as
+    zero — a count is an annotation, never a reason to fail the build.
+    """
+    try:
+        value = int(count)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    return template.format(
+        count=value,
+        s="" if value == 1 else "s",
+    )
+
+
 def _render_stable_text(
     *,
     persona_body: str | None,
     keepsakes: Sequence[Any],
     provenance_class: str,
+    persona_pending_count: int = 0,
 ) -> str:
     """Render the STABLE zone — persona + ALL keepsakes, never truncated.
 
     ``persona_body is None`` is the persona-missing path (D5.9): the
     zone renders keepsakes-only under the pinned prefix. A missing
     persona must not suppress the keepsakes that ARE available.
+
+    The persona-queue line (m1) rides INSIDE this zone so the stable
+    chars — and therefore the 24,000-char disclosure and the 48,000-char
+    withhold measurements — account for the bytes it ships. It renders
+    under the missing-persona prefix too: pending persona versions are
+    exactly the actionable fact on that path.
     """
     parts: list[str] = []
+    pending_line = render_queue_count_line(
+        MEMOIR_PERSONA_PENDING_LINE, persona_pending_count
+    )
     if persona_body is None:
         parts.append(MEMOIR_PERSONA_MISSING_PREFIX)
+        if pending_line:
+            parts.append(pending_line)
     else:
         parts.extend([_PERSONA_HEADER, str(persona_body)])
+        if pending_line:
+            parts.append(pending_line)
     if keepsakes:
         parts.append("")
         parts.append(_KEEPSAKES_HEADER)
@@ -310,6 +375,7 @@ def admit_proposal_lines(
     *,
     char_budget: int = MEMOIR_PROPOSALS_ZONE_CHAR_BUDGET,
     max_lines: int = MEMOIR_PROPOSALS_ZONE_MAX,
+    prefix: str | None = None,
 ) -> list[str]:
     """The ``[PROPOSALS]`` zone admission — its OWN measured section.
 
@@ -326,16 +392,34 @@ def admit_proposal_lines(
     (``PROPOSALS_ZONE_HEADER`` + its newline) is INCLUDED in the
     measurement, because those bytes ship too.
 
+    ``prefix`` (m1) is the OPTIONAL count line — ZONE OVERHEAD, not a
+    proposal. It is measured FIRST, so a long prefix can push proposal
+    lines out of the bound; and it is returned as element 0 of the
+    admitted list, so the zone renders it even when NO proposal line
+    fits. ``max_lines`` bounds the PROPOSAL lines only; a prefix that
+    cannot fit beside the header wrapper at all is refused together with
+    the zone (the bound is the bound — nothing is truncated).
+
     Weakest-first dropping is the CALLER's rung (``render_briefing_body``
     applies the total-based trim per the V2-D 6.5 ladder); this function
     only enforces the STRUCTURAL admission: at most ``max_lines`` lines
     and at most ``char_budget`` characters of shipped zone text.
     """
-    if not lines:
-        return []
-    escaped = [_escape_for_context_block(line) for line in lines]
-    kept: list[str] = []
+    # The header wrapper is overhead in every arm — the prefix joins it
+    # BEFORE any proposal line is considered (measured first).
     overhead = len(PROPOSALS_ZONE_HEADER) + 1  # the header line + its newline
+    kept: list[str] = []
+    if prefix:
+        escaped_prefix = _escape_for_context_block(prefix)
+        with_prefix = overhead + len(escaped_prefix) + 1
+        if with_prefix > char_budget:
+            return []
+        kept.append(escaped_prefix)
+        overhead = with_prefix
+
+    if not lines:
+        return kept
+    escaped = [_escape_for_context_block(line) for line in lines]
     total = overhead
     for line in escaped[: max(0, int(max_lines))]:
         candidate = total + len(line) + 1  # + the line's own newline
@@ -393,6 +477,8 @@ def render_briefing_body(
     episodes: Sequence[Any],
     provenance_class: str = "",
     proposal_lines: Sequence[str] | None = None,
+    persona_pending_count: int = 0,
+    proposal_pending_count: int = 0,
 ) -> str | None:
     """Render the briefing body — the zones + the backstop (D5.7/D5.8/T6.2).
 
@@ -423,11 +509,22 @@ def render_briefing_body(
     the proposals zone's own bound (≤ 1,000 chars) of the 24,000-char
     ceiling — the reachability analysis recorded in V2-D 6.5, pinned by
     ``tests/unit/test_memoir_keepsake_proposals.py``.
+
+    THE TWO QUEUE-COUNT LINES (m1) are OPTIONAL parameters that default
+    to 0, so every existing call path keeps rendering byte-identical
+    bytes at an empty queue. The persona line renders inside the stable
+    zone (it is measured by the same backstop arithmetic as the rest of
+    that zone); the proposal line rides the proposals zone as its
+    measured PREFIX (inside the zone's own bound, not appended outside
+    it) and is the LAST thing the proposals trim rung drops — after
+    every proposal line, because a count with nothing to review is still
+    the actionable fact.
     """
     stable_raw = _render_stable_text(
         persona_body=persona_body,
         keepsakes=keepsakes,
         provenance_class=provenance_class,
+        persona_pending_count=persona_pending_count,
     )
     stable = _escape_for_context_block(stable_raw)
     stable_chars = len(stable)
@@ -462,8 +559,19 @@ def render_briefing_body(
     )
     # The proposals zone's OWN structural admission (≤ 1,000 chars
     # including the header wrapper, at most 3 lines) — measured on the
-    # shipped bytes, W-1.
-    admitted_proposals = admit_proposal_lines(proposal_lines)
+    # shipped bytes, W-1. The count line (m1) is measured FIRST as zone
+    # overhead, so it can never be appended outside the budget.
+    proposal_prefix = render_queue_count_line(
+        MEMOIR_PROPOSAL_PENDING_LINE, proposal_pending_count
+    )
+    admitted_proposals = admit_proposal_lines(
+        proposal_lines, prefix=proposal_prefix or None
+    )
+    # Was the prefix admitted (element 0)? Compare on the SAME escaped
+    # bytes the admission measured.
+    prefix_shipped = bool(proposal_prefix) and bool(admitted_proposals) and (
+        admitted_proposals[0] == _escape_for_context_block(proposal_prefix)
+    )
 
     body = _compose_briefing_body(
         stable=stable,
@@ -479,9 +587,21 @@ def render_briefing_body(
             proposal_lines=admitted_proposals,
         )
     # ── TRIM PROPOSALS (drop weakest first) ──────────────────────────
-    # The selection is strongest-first, so the tail IS the weakest.
-    while len(body) > MEMOIR_SECTION_CHAR_CEILING and admitted_proposals:
+    # The selection is strongest-first, so the tail IS the weakest. The
+    # count prefix (element 0, when admitted) is ZONE OVERHEAD, not a
+    # proposal: it holds the floor until every proposal line is gone, and
+    # is dropped as the absolute last resort so the 24,000-char ceiling
+    # still binds.
+    floor = 1 if prefix_shipped else 0
+    while len(body) > MEMOIR_SECTION_CHAR_CEILING and len(admitted_proposals) > floor:
         admitted_proposals = admitted_proposals[:-1]
+        body = _compose_briefing_body(
+            stable=stable,
+            dynamic_lines=dynamic_lines,
+            proposal_lines=admitted_proposals,
+        )
+    if prefix_shipped and len(body) > MEMOIR_SECTION_CHAR_CEILING:
+        admitted_proposals = admitted_proposals[1:]
         body = _compose_briefing_body(
             stable=stable,
             dynamic_lines=dynamic_lines,
@@ -591,6 +711,37 @@ def _read_proposal_lines(engine: Any, agent_id: str) -> list[str]:
     return service.zone_lines(limit=MEMOIR_PROPOSALS_ZONE_MAX, agent_id=agent_id)
 
 
+def _read_persona_pending_count(engine: Any, agent_id: str) -> int:
+    """The persona queue's OPEN count — one sync COUNT (off-loop by caller).
+
+    CHEAP BY CONSTRUCTION: the read is a ``SELECT COUNT(*)`` — the
+    briefing must never materialize the lineage to answer "is anything
+    awaiting approval?". It goes through the repository module's
+    ``count_pending_persona`` (the count's ONE home is the persona
+    repository), so the briefing widens neither the episode surface's
+    closed D2.1 set nor the persona repository's pinned caller census.
+    """
+    from daemon.repositories.memoir.repository import count_pending_persona
+
+    return count_pending_persona(engine, agent_id)
+
+
+def _read_proposal_pending_count(engine: Any, agent_id: str) -> int:
+    """The proposal queue's OPEN count — one sync COUNT (off-loop).
+
+    Delegates to the proposal service's ``count_pending_reviews``, whose
+    predicates are the SAME ones the zone renders with (undecided + open
+    delivery status), so the count and the zone can never disagree about
+    what "pending" means.
+    """
+    from daemon.services.memoir_keepsake_proposal_service import (
+        MemoirKeepsakeProposalService,
+    )
+
+    service = MemoirKeepsakeProposalService(engine, agent_id=agent_id)
+    return service.count_pending_reviews(agent_id=agent_id)
+
+
 async def _render_briefing_body_for(
     agent_id: str,
     instance_id: str,
@@ -656,12 +807,33 @@ async def _render_briefing_body_for(
         default=[],
     )
 
+    # ── The TWO approval-queue counts (m1) ────────────────────────────
+    # ONE guarded COUNT per queue, each its OWN failure domain: a failed
+    # count degrades to "no line", never aborts the build (and never
+    # blanks the zone it annotates). COUNT only — never a row read.
+    persona_pending = await _guarded_read(
+        "persona_pending",
+        _read_persona_pending_count,
+        engine,
+        agent_id,
+        default=0,
+    )
+    proposal_pending = await _guarded_read(
+        "proposal_pending",
+        _read_proposal_pending_count,
+        engine,
+        agent_id,
+        default=0,
+    )
+
     return render_briefing_body(
         persona_body=(persona.body if persona is not None else None),
         keepsakes=keepsakes or [],
         episodes=episodes or [],
         provenance_class=provenance_class,
         proposal_lines=proposal_lines or [],
+        persona_pending_count=persona_pending or 0,
+        proposal_pending_count=proposal_pending or 0,
     )
 
 
@@ -705,6 +877,8 @@ __all__ = [
     "MEMOIR_STABLE_OVERAGE_DISCLOSURE",
     "MEMOIR_WITHHOLD_WARNING",
     "MEMOIR_PERSONA_MISSING_PREFIX",
+    "MEMOIR_PERSONA_PENDING_LINE",
+    "MEMOIR_PROPOSAL_PENDING_LINE",
     "MEMOIR_PERSONA_TOKEN_BUDGET",
     "MEMOIR_KEEPSAKE_ZONE_TOKEN_BUDGET",
     "MEMOIR_DYNAMIC_TOKEN_BUDGET",
@@ -715,12 +889,15 @@ __all__ = [
     "MEMOIR_BUILD_BUDGET_S",
     "render_keepsake_line",
     "render_dynamic_line",
+    "render_queue_count_line",
     "render_briefing_body",
     "admit_proposal_lines",
     "escape_for_context_block",
     "memoir_block_present",
     "knob_allows",
     "_read_proposal_lines",
+    "_read_persona_pending_count",
+    "_read_proposal_pending_count",
     "_render_briefing_body_for",
     "_build_memoir_briefing_message",
 ]

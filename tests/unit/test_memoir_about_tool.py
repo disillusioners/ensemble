@@ -423,8 +423,8 @@ class TestTheFrozenVocabulary:
 
 
 class TestRegistration:
-    def test_the_tool_name_set_holds_six_tools(self):
-        assert len(MEMOIR_TOOL_NAMES) == 6
+    def test_the_tool_name_set_holds_eight_tools(self):
+        assert len(MEMOIR_TOOL_NAMES) == 8
         assert "memoir_about" in MEMOIR_TOOL_NAMES
 
     def test_source_discovery_includes_memoir_about(self):

@@ -170,6 +170,33 @@ class MemoirPersonaRepository:
             stmt = stmt.order_by(MemoirPersonaVersion.version.asc())
             return list(session.exec(stmt).all())
 
+    def count_pending(self, agent_id: str | None = None) -> int:
+        """How many persona versions await approval (the CHEAP count).
+
+        The SAME predicate :meth:`list_pending` selects with, computed in
+        the database: ``SELECT COUNT(*)`` — one integer back, no row
+        materialized. The briefing's persona-queue line exists to answer
+        "is there anything for the operator to approve?", and
+        materializing the lineage to answer that would be the expensive
+        shape (the same doctrine as the proposal ledger's
+        ``count_pending_reviews``).
+
+        ``agent_id=None`` counts across every agent (mirrors
+        :meth:`list_pending`).
+        """
+        # Local import: this is the module's only ``func`` consumer (the
+        # episode statements are pre-built ``text()`` constants).
+        from sqlalchemy import func
+
+        with Session(self.engine) as session:
+            stmt = select(func.count()).select_from(MemoirPersonaVersion).where(
+                MemoirPersonaVersion.status == "pending_approval"
+            )
+            if agent_id:
+                stmt = stmt.where(MemoirPersonaVersion.agent_id == agent_id)
+            total = session.execute(stmt).scalar()
+        return int(total or 0)
+
     # ── writes ────────────────────────────────────────────────────────────
 
     def create_draft(
@@ -337,6 +364,30 @@ class MemoirPersonaRepository:
             session.commit()
             session.refresh(version)
             return version
+
+
+# ── the persona queue COUNT (the briefing's read) ─────────────────────────
+#
+# A MODULE-LEVEL function, not a method on either repository class, on
+# purpose: the briefing needs the count and nothing else, and it must
+# widen NEITHER surface — ``MemoirRepository``'s D2.1 set is CLOSED
+# (pinned by tests/unit/test_memoir_write_purity_unit.py) and
+# ``MemoirPersonaRepository``'s allowed-CALLER census is pinned by
+# tests/unit/test_memoir_persona_lane.py. The predicate itself has ONE
+# home (``MemoirPersonaRepository.count_pending``); this is a caller.
+
+
+def count_pending_persona(engine: "Engine", agent_id: str | None = None) -> int:
+    """How many persona versions await approval — the CHEAP count.
+
+    DELEGATES to :meth:`MemoirPersonaRepository.count_pending` — the same
+    ``status == 'pending_approval'`` predicate ``list_pending`` selects
+    with, computed as ``SELECT COUNT(*)`` in the database. The briefing's
+    queue line exists to answer "is there anything for an operator to
+    approve?", and materializing the lineage to answer that would be the
+    expensive shape.
+    """
+    return MemoirPersonaRepository(engine).count_pending(agent_id)
 
 
 # ── the episode surface (phase 2) ──────────────────────────────────────────
