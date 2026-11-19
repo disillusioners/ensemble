@@ -44,7 +44,7 @@ set -o pipefail
 timeout 120s bash tests/test_upgrade_refusal_message_safety.sh 2>&1 | tee "$OUT"
 RC=$?
 
-SUMMARY="$(grep -E '^[0-9]+ (passed|failed)' "$OUT" | tr '\n' ' ')"
+SUMMARY="$(grep -E '^(passed|failed): [0-9]+' "$OUT" | tr '\n' ' ')"
 rm -f "$OUT"
 
 echo
