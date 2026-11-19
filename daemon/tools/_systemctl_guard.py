@@ -209,13 +209,21 @@ SYSTEMCTL_MUTATING: frozenset[str] = frozenset({
     "isolate",
 })
 
-#: The mutating verbs the TAIL scan treats as mutating: the contract's set
-#: plus the v255 verbs the structural matcher refuses on its own. A tail
-#: verb only matters when an ensemble unit FOLLOWS it.
+#: The FULL mutating-verb set — ONE source of truth. Every verb below is a
+#: real mutating ``systemctl`` verb on this host (verified against
+#: ``systemctl --help``, systemd 255, 2026-11-19). ``add``/``remove`` are
+#: kept from the pre-inversion text guard so the shape test is never weaker
+#: than it was. The structural tail scan uses this set directly; the shape
+#: REGEX is DERIVED from it at import so the two can never diverge again —
+#: they diverged by six verbs once and a piped shape was weaker than the
+#: direct form, which is the one contract this module must never break.
 _SYSTEMCTL_TAIL_MUTATING: frozenset[str] = SYSTEMCTL_MUTATING | frozenset({
     "clean", "freeze", "thaw", "preset", "preset-all", "revert", "link",
     "edit", "import", "set-property", "unset-property", "add", "remove",
     "reload-or-restart", "try-reload-or-restart", "reenable",
+    # verified on this host's systemd 255 (2026-11-19)
+    "unmask", "reset-failed", "daemon-reexec", "set-environment",
+    "unset-environment", "add-wants", "add-requires",
 })
 
 #: Returned when an operand/verb could not be resolved statically. Any
@@ -244,6 +252,94 @@ SUPERVISION_MANAGED_PREFIX = "UNIT_MANAGED:"
 #: Refusal token for rule 2 (env-primed script invocation).
 SUPERVISION_PRIMED_TOKEN = "supervision-primed-script"
 
+# ===========================================================================
+# OPTION GRAMMARS — one analyser, one table per tool
+# ===========================================================================
+# MAP (every option table in this module, its tool, and its failure mode):
+#   _OPTIONS_WITH_VALUE + _SYSTEMCTL_FLAG_OPTIONS   systemctl   skip-unknown*
+#   _SYSTEMD_RUN_VALUE_OPTIONS + _FLAGS             systemd-run FAIL-CLOSED
+#   _WATCH_VALUE_OPTIONS + _FLAGS                   watch       FAIL-CLOSED
+#   _XARGS_VALUE_OPTIONS + _FLAGS + attached        xargs       FAIL-CLOSED
+#   _ENV_VALUE_OPTIONS + _FLAGS                     env         skip-unknown*
+#   _SUDO_VALUE_OPTIONS + _FLAGS                    sudo/doas   skip-unknown*
+#   _WRAPPER_ARG_GRAMMARS (timeout/nice/ionice/stdbuf)          skip-unknown*
+#   _SSH_VALUE_OPTIONS + _FLAGS                     ssh         FAIL-CLOSED
+#   _ARGV_RUNNER_VALUE_PREFIXES (+ _VALUE_FLAGS)    systemd-run timer options
+# (* skip-unknown = an option in NEITHER set is skipped one word; the class
+#   is closed elsewhere — for systemctl by the non-terminal read-only parse
+#   plus the operand scan; for the wrappers by the residual disclosed in
+#   PACKS. FAIL-CLOSED = the command is REFUSED, the arity being unknown.)
+# Every table is verified against its tool's own ``--help`` ON THIS HOST and
+# records the tool version and the date in its own comment.
+
+
+def _short_letters(options: frozenset[str]) -> frozenset[str]:
+    """The single-letter shorts of an option set (``-H`` becomes ``H``)."""
+    return frozenset(
+        o[1] for o in options
+        if o.startswith("-") and not o.startswith("--") and len(o) == 2
+    )
+
+
+def _option_token(
+    text: str,
+    value_options: frozenset[str],
+    flag_options: frozenset[str],
+    attached_shorts: frozenset[str] = frozenset(),
+    long_prefixes: tuple[str, ...] = (),
+    long_prefix_flags: frozenset[str] = frozenset(),
+) -> tuple[bool, bool, str | None]:
+    """Normalise ONE option token of the tool whose tables are given.
+
+    Returns ``(known, consumes_next, attached_value)``.
+
+    * a LONG option: known when its name (up to any ``=``) is in either
+      table; it consumes the next word only when it is a VALUE option in
+      its space form (``--opt value``) — the ``--opt=value`` form is a
+      single self-contained token;
+    * a SHORT BUNDLE: ``-aP`` is ``-a`` followed by the value-taking ``-P``,
+      so the bundle consumes the NEXT word; ``-S<value>``, ``-n1`` and
+      ``-I{}`` carry the value INSIDE the token (a value-taking letter that
+      is not last takes the rest of the token as its value);
+    * an ATTACHED-ONLY short (``xargs -i/-l/-e``) never consumes the next
+      word: its optional value rides inside the token;
+    * a lone ``-`` (env's stdin marker) consumes nothing;
+    * any letter in NEITHER table is UNKNOWN — the caller fails closed
+      where that tool's scanner is fail-closed.
+    """
+    if not text.startswith("-"):
+        return False, False, None
+    if text.startswith("--"):
+        name = text.split("=", 1)[0]
+        if name in value_options:
+            return True, "=" not in text, None
+        if name in flag_options:
+            return True, False, None
+        if long_prefixes and name.startswith(long_prefixes):
+            return True, ("=" not in text and name not in long_prefix_flags), None
+        return False, False, None
+    body = text[1:]
+    if not body:
+        return True, False, None
+    value_shorts = _short_letters(value_options)
+    flag_shorts = _short_letters(flag_options)
+    for i, ch in enumerate(body):
+        rest = body[i + 1:]
+        if ch in value_shorts:
+            if rest:
+                return True, False, rest
+            return True, True, None
+        if ch in flag_shorts:
+            if rest:
+                continue
+            return True, False, None
+        if ch in attached_shorts:
+            if rest:
+                return True, False, rest
+            return True, False, None
+        return False, False, None
+
+
 #: ``systemctl`` options that consume the following token as a value, so the
 #: option's argument is not mistaken for the verb (``systemctl -t service
 #: restart <unit>``).
@@ -257,6 +353,23 @@ _OPTIONS_WITH_VALUE: frozenset[str] = frozenset({
     # the parser lands on the option's VALUE and the real verb behind it is
     # never analysed (``systemctl -P cat stop <unit>``).
     "--image-policy", "--boot-loader-menu", "--boot-loader-entry",
+    # ``--legend=BOOL`` takes a MANDATORY value on this host (the help shows
+    # no ``[...]``): without it ``systemctl --legend yes status <unit>`` was
+    # refused — a read-only command.
+    "--legend",
+})
+
+#: The BOOLEAN (value-less) ``systemctl`` options, verified against
+#: ``systemctl --help`` on this host (systemd 255, 2026-11-19). Back-pointer:
+#: see the OPTION GRAMMARS map above — systemctl is a SKIP-UNKNOWN scanner.
+_SYSTEMCTL_FLAG_OPTIONS: frozenset[str] = frozenset({
+    "-a", "--all", "-f", "--force", "-h", "--help", "-i", "-l", "--full",
+    "-q", "--quiet", "-r", "--recursive", "-T", "--show-transaction",
+    "--dry-run", "--failed", "--firmware-setup", "--global", "--marked",
+    "--mkdir", "--no-ask-password", "--no-block", "--no-pager", "--no-reload",
+    "--no-wall", "--no-warn", "--now", "--plain", "--read-only", "--reverse",
+    "--runtime", "--show-types", "--system", "--user", "--value", "--version",
+    "--wait", "--with-dependencies",
 })
 
 #: Shell reserved words that can precede a command on the same line
@@ -304,10 +417,15 @@ _XARGS_VALUE_OPTIONS: frozenset[str] = frozenset({
 #: options (``--eof[=END]``, ``--replace[=R]``) and the attached ``-l`` are
 #: here: their ``=``-form is one token and their space form takes nothing.
 _XARGS_FLAG_OPTIONS: frozenset[str] = frozenset({
-    "-0", "--null", "-e", "--eof", "-i", "--replace", "-l", "-o", "--open-tty",
+    "-0", "--null", "--eof", "--replace", "-o", "--open-tty",
     "-p", "--interactive", "-r", "--no-run-if-empty", "-t", "--verbose",
     "-x", "--exit", "--show-limits", "--help", "--version",
 })
+
+#: ``xargs`` shorts whose OPTIONAL value rides inside the token (GNU xargs
+#: ``-i/--replace[=R]``, ``-l[MAX-LINES]``, ``-e/--eof[=END]``): ``-i{}``
+#: and ``-l3`` take no following word.
+_XARGS_ATTACHED_SHORTS: frozenset[str] = frozenset({"e", "i", "l"})
 
 #: Schedulers that EXECUTE a command handed to them on stdin (``at now``,
 #: ``batch``, ``crontab -``): the piped payload is a command that will run.
@@ -340,6 +458,73 @@ _SYSTEMD_RUN_VALUE_OPTIONS: frozenset[str] = frozenset({
     "--description", "--slice", "--expand-environment", "--service-type",
     "--uid", "--gid", "--nice", "--working-directory", "-E", "--setenv",
     "--path-property", "--socket-property",
+})
+
+#: ``env`` options that consume the following word as a value (GNU coreutils
+#: ``env --help``, 2026-11-19). ONE table for both scanning sites (the
+#: command-word peel and the split-string scanner). The ``--*-signal[=SIG]``
+#: family takes an OPTIONAL value (the ``=`` form only) so it consumes
+#: nothing and sits in the flag table. Back-pointer: env is a SKIP-UNKNOWN
+#: scanner — see the OPTION GRAMMARS map.
+_ENV_VALUE_OPTIONS: frozenset[str] = frozenset({
+    "-u", "--unset", "-C", "--chdir", "-S", "--split-string",
+})
+_ENV_FLAG_OPTIONS: frozenset[str] = frozenset({
+    "-i", "--ignore-environment", "-0", "--null", "-v", "--debug",
+    "--help", "--version", "--list-signal-handling", "--block-signal",
+    "--default-signal", "--ignore-signal",
+})
+
+#: ``sudo``/``doas`` options that consume the following word as a value
+#: (``sudo --help``, sudo 1.9.x, 2026-11-19). ``-r``/``--role`` and
+#: ``-t``/``--type`` were MISSING: ``sudo --role <value> systemctl restart
+#: <unit>`` anchored the command word on the VALUE and NOPASSWD made the
+#: bypass directly exploitable. ``--preserve-env`` takes a value only in its
+#: ``=list`` form (one token). Back-pointer: SKIP-UNKNOWN scanner.
+_SUDO_VALUE_OPTIONS: frozenset[str] = frozenset({
+    "-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
+    "-C", "--close-from", "-T", "--command-timeout", "-R", "--chroot",
+    "-D", "--chdir", "-U", "--other-user", "-r", "--role", "-t", "--type",
+})
+_SUDO_FLAG_OPTIONS: frozenset[str] = frozenset({
+    "-A", "--askpass", "-b", "--background", "-B", "--bell",
+    "-E", "--preserve-env", "-e", "--edit", "-H", "--set-home", "-i",
+    "--login", "-K", "--remove-timestamp", "-k", "--reset-timestamp",
+    "-l", "--list", "-n", "--non-interactive", "-P", "--preserve-groups",
+    "-S", "--stdin", "-s", "--shell", "-V", "--version", "--help",
+})
+
+#: The four ``_WRAPPER_ARG_WORDS`` tools have FOUR different grammars — one
+#: table each (``timeout``/``nice``/``ionice``/``stdbuf`` ``--help``, GNU
+#: coreutils + util-linux, 2026-11-19). ``stdbuf -e <MODE>`` was the bypass:
+#: the shared tuple knew ``-i``/``-o`` but not ``-e``. Back-pointer:
+#: SKIP-UNKNOWN scanners.
+_TIMEOUT_VALUE_OPTIONS: frozenset[str] = frozenset({"-k", "--kill-after", "-s", "--signal"})
+_TIMEOUT_FLAG_OPTIONS: frozenset[str] = frozenset({"--preserve-status", "--foreground", "-v", "--verbose", "--help", "--version"})
+_NICE_VALUE_OPTIONS: frozenset[str] = frozenset({"-n", "--adjustment"})
+_NICE_FLAG_OPTIONS: frozenset[str] = frozenset({"--help", "--version"})
+_IONICE_VALUE_OPTIONS: frozenset[str] = frozenset({"-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid", "-u", "--uid"})
+_IONICE_FLAG_OPTIONS: frozenset[str] = frozenset({"-t", "--ignore", "-h", "--help", "-V", "--version"})
+_STDBUF_VALUE_OPTIONS: frozenset[str] = frozenset({"-i", "--input", "-o", "--output", "-e", "--error"})
+_STDBUF_FLAG_OPTIONS: frozenset[str] = frozenset({"--help", "--version"})
+_WRAPPER_ARG_GRAMMARS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "timeout": (_TIMEOUT_VALUE_OPTIONS, _TIMEOUT_FLAG_OPTIONS),
+    "nice": (_NICE_VALUE_OPTIONS, _NICE_FLAG_OPTIONS),
+    "ionice": (_IONICE_VALUE_OPTIONS, _IONICE_FLAG_OPTIONS),
+    "stdbuf": (_STDBUF_VALUE_OPTIONS, _STDBUF_FLAG_OPTIONS),
+}
+
+#: ``ssh`` options that consume the following word as a value, and ssh's
+#: BOOLEAN options (OpenSSH ``ssh --help`` usage line, 2026-11-19: the
+#: boolean bundle is ``[-46AaCfGgKkMNnqsTtVvXxYy]``). ``-B`` and ``-P`` were
+#: missing from the value table. Back-pointer: ssh is a FAIL-CLOSED scanner.
+_SSH_VALUE_OPTIONS: frozenset[str] = frozenset({
+    "-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l",
+    "-m", "-O", "-o", "-P", "-p", "-Q", "-R", "-S", "-W", "-w",
+})
+_SSH_FLAG_OPTIONS: frozenset[str] = frozenset({
+    "-4", "-6", "-A", "-a", "-C", "-f", "-G", "-g", "-K", "-k", "-M", "-N",
+    "-n", "-q", "-s", "-T", "-t", "-V", "-v", "-X", "-x", "-Y", "-y",
 })
 
 #: Options of util-linux ``watch`` that consume the following word as a
@@ -387,54 +572,58 @@ _ARGV_RUNNER_VALUE_FLAGS: frozenset[str] = frozenset({
 })
 
 
-def _argv_runner_option_name(text: str) -> str:
-    """The option NAME (the token up to an ``=value``)."""
-    return text.split("=", 1)[0]
+def _argv_runner_option_grammar(
+    base: str,
+) -> tuple[frozenset[str], frozenset[str], tuple[str, ...], frozenset[str]]:
+    """The (value, flag, prefix, prefix-flag) tables of this argv runner."""
+    if base == "watch":
+        return _WATCH_VALUE_OPTIONS, _WATCH_FLAG_OPTIONS, (), frozenset()
+    return (
+        _SYSTEMD_RUN_VALUE_OPTIONS, _SYSTEMD_RUN_FLAG_OPTIONS,
+        _ARGV_RUNNER_VALUE_PREFIXES, _ARGV_RUNNER_VALUE_FLAGS,
+    )
 
 
 def _argv_runner_option_is_known(text: str, base: str) -> bool:
     """Is this an option the runner actually HAS?
 
-    An option that is in NEITHER the value set nor the boolean set has an
-    unknown arity: the tail analysis could anchor on its value and miss
-    the command behind it ⇒ the caller fails closed.
+    An option in NEITHER table has an unknown arity: the tail analysis
+    could anchor on its value and miss the command behind it ⇒ the caller
+    fails closed.
     """
-    name = _argv_runner_option_name(text)
-    if base == "watch":
-        return name in _WATCH_VALUE_OPTIONS or name in _WATCH_FLAG_OPTIONS
-    if name in _SYSTEMD_RUN_VALUE_OPTIONS or name in _SYSTEMD_RUN_FLAG_OPTIONS:
-        return True
-    return name.startswith(_ARGV_RUNNER_VALUE_PREFIXES)
+    value, flag, prefixes, prefix_flags = _argv_runner_option_grammar(base)
+    return _option_token(
+        text, value, flag, long_prefixes=prefixes, long_prefix_flags=prefix_flags
+    )[0]
 
 
 def _argv_runner_option_consumes_value(text: str, base: str) -> bool:
     """Does this argv-runner option consume the NEXT word as its value?
 
-    ``--opt=value`` is a single self-contained token: it never consumes
-    the following word, so the ``=``-forms keep working untouched.
+    ``--opt=value`` and the attached/bundled short forms (``-Hhost``,
+    ``-n1``) are self-contained: they never consume the following word.
     """
-    if "=" in text:
-        return False
-    name = _argv_runner_option_name(text)
-    if base == "watch":
-        return name in _WATCH_VALUE_OPTIONS
-    if name in _SYSTEMD_RUN_VALUE_OPTIONS:
-        return True
-    if name.startswith(_ARGV_RUNNER_VALUE_PREFIXES):
-        return name not in _ARGV_RUNNER_VALUE_FLAGS
-    return False
+    value, flag, prefixes, prefix_flags = _argv_runner_option_grammar(base)
+    return _option_token(
+        text, value, flag, long_prefixes=prefixes, long_prefix_flags=prefix_flags
+    )[1]
 
 
-#: The mutating-verb set of the pre-2026-11-18 TEXT guard, PLUS the verbs
-#: the STRUCTURAL matcher refuses on its own (unknown verbs FAIL CLOSED
-#: against an ensemble unit). The shape test must never be weaker than
-#: either: a NEW systemctl verb (``freeze``, ``preset``, ``revert``,
-#: ``link``, ``edit``, ``import``, ``set-property``) piped through an
-#: executor is refused exactly like the verbs the old guard knew.
+#: DERIVED from ``_SYSTEMCTL_TAIL_MUTATING`` — do not hand-edit. The
+#: boundaries use lookarounds instead of ``\b`` so that ``preset`` and
+#: ``preset-all`` stay DISTINCT verbs (``\b`` matched ``preset`` inside
+#: ``preset-all`` by accident; the derivation must not keep the accident).
+_VERB_BOUNDARY_BEFORE = r"(?<![a-z0-9-])"
+_VERB_BOUNDARY_AFTER = r"(?![a-z0-9-])"
 _MUTATING_VERB_RE = re.compile(
-    r"\b(?:stop|restart|kill|disable|mask|reload|daemon-reload|enable|start"
-    r"|try-restart|isolate|freeze|preset|revert|link|edit|import"
-    r"|set-property|unset-property|add|remove)\b"
+    _VERB_BOUNDARY_BEFORE
+    + "(?:"
+    + "|".join(
+        re.escape(verb)
+        for verb in sorted(_SYSTEMCTL_TAIL_MUTATING, key=len, reverse=True)
+    )
+    + ")"
+    + _VERB_BOUNDARY_AFTER
 )
 
 #: The ensemble family token set of the pre-2026-11-18 TEXT guard (substring
@@ -1049,21 +1238,18 @@ def _command_word_index(words: _Segment, env: dict[str, str]) -> int | None:
         k += 1
         # peel the wrapper's own option / value arguments
         if base in _WRAPPER_ARG_WORDS:
+            # one grammar per tool — the four wrappers do not share one
+            value_options, flag_options = _WRAPPER_ARG_GRAMMARS[base]
             while k < n:
                 arg, arg_ok = _resolve_word(words[k], env, 0)
                 if arg_ok and arg.startswith("-"):
-                    if arg in (
-                        "-n", "--adjustment", "-c", "-i", "-o",
-                        # ``timeout``'s own value options: the SIGNAL is a
-                        # WORD, so the numeric-duration rule below does not
-                        # skip it and the command behind it is never
-                        # analysed (``timeout -s TERM 5 systemctl ...``).
-                        "-s", "--signal", "-k", "--kill-after",
-                    ):
-                        k += 2
-                        continue
-                    k += 1
+                    _known, consumes, _attached = _option_token(
+                        arg, value_options, flag_options
+                    )
+                    k += 2 if consumes else 1
                     continue
+
+
                 if arg_ok and re.fullmatch(r"[0-9]+(\.[0-9]+)?[smhd]?", arg):
                     k += 1
                     continue
@@ -1077,15 +1263,10 @@ def _command_word_index(words: _Segment, env: dict[str, str]) -> int | None:
                 if not arg_ok:
                     break
                 if arg.startswith("-"):
-                    if arg in (
-                        "-u", "--user", "-g", "--group", "-h", "--host",
-                        "-p", "--prompt", "-C", "--close-from",
-                        "-T", "--command-timeout", "-R", "--chroot",
-                        "-D", "--chdir", "-U", "--other-user",
-                    ):
-                        k += 2
-                    else:
-                        k += 1
+                    _known, consumes, _attached = _option_token(
+                        arg, _SUDO_VALUE_OPTIONS, _SUDO_FLAG_OPTIONS
+                    )
+                    k += 2 if consumes else 1
                     continue
                 break
         if base == "env":
@@ -1094,10 +1275,10 @@ def _command_word_index(words: _Segment, env: dict[str, str]) -> int | None:
                 if not arg_ok:
                     break
                 if arg.startswith("-"):
-                    if arg in ("-u", "--unset", "-C", "--chdir"):
-                        k += 2
-                    else:
-                        k += 1
+                    _known, consumes, _attached = _option_token(
+                        arg, _ENV_VALUE_OPTIONS, _ENV_FLAG_OPTIONS
+                    )
+                    k += 2 if consumes else 1
                     continue
                 if _ASSIGN_RE.match(arg):
                     k += 1
@@ -1377,62 +1558,86 @@ def _join_command_words(
     return " ".join(p for p in parts if p)
 
 
-def _env_split_string_payload(words: _Segment, env: dict[str, str]) -> str | None:
+def _env_split_string_payload(
+    words: _Segment, env: dict[str, str]
+) -> tuple[str, str | None]:
     """The COMMAND STRING carried by ``env -S`` / ``env --split-string``.
 
     ``env -S 'systemctl restart <unit>'`` SPLITS the string and RUNS it, so
     the string is an EXECUTED command — not an opaque value. The effective
-    command string is the option's own value plus the words that follow it:
-    the unquoted ``--split-string=cmd arg ...`` form puts the rest of the
-    command line behind the option.
+    command string is the option's own value plus the words that follow it
+    (the unquoted ``--split-string=cmd arg ...`` form carries only the
+    first word of the command line). Bundled forms are normalised by the
+    shared analyser: ``-iS`` takes the NEXT word, ``-iS<value>`` carries
+    the value inside the token.
+
+    Returns ``("none", None)`` when the segment is not an ``env -S``
+    invocation, ``("payload", text)`` when it is, and ``("unresolved",
+    None)`` when the split operand cannot be resolved statically — the
+    caller FAILS CLOSED on that.
     """
-    i = 0
     n = len(words)
-    while i < n:
-        text, ok = _resolve_word(words[i], env, 0)
-        if ok and _ASSIGN_RE.match(text):
-            i += 1
-            continue
-        break
-    if i >= n:
-        return None
-    head, head_ok = _resolve_word(words[i], env, 0)
-    if not head_ok or _basename(head) != "env":
-        return None
-    j = i + 1
+    # ``env`` may sit behind shell keywords and wrappers (``if env -S …``,
+    # ``sudo env -S …``, ``timeout 5 env -S …``): walk up to the command
+    # word the peeler resolves to and take the first ``env`` on the way.
+    limit = _command_word_index(words, env)
+    limit = n - 1 if limit is None else limit
+    start = None
+    for j in range(min(limit, n - 1) + 1):
+        text, ok = _resolve_word(words[j], env, 0)
+        if ok and _basename(text) == "env":
+            start = j
+            break
+    if start is None:
+        return "none", None
+    j = start + 1
     while j < n:
         text, ok = _resolve_word(words[j], env, 0)
         if not ok:
-            return None
+            return "none", None
         if _ASSIGN_RE.match(text):
             j += 1
             continue
         if text.startswith("--split-string="):
-            return _join_command_words(text[len("--split-string="):], words, j + 1, env)
+            return "payload", _join_command_words(
+                text[len("--split-string="):], words, j + 1, env
+            )
         if text == "--split-string":
             if j + 1 >= n:
-                return None
+                return "none", None
             value, value_ok = _resolve_word(words[j + 1], env, 0)
             if not value_ok:
-                return None
-            return _join_command_words(value, words, j + 2, env)
-        if text.startswith("-S") and len(text) > 2:
-            return _join_command_words(text[2:], words, j + 1, env)
-        if text == "-S":
-            if j + 1 >= n:
-                return None
-            value, value_ok = _resolve_word(words[j + 1], env, 0)
-            if not value_ok:
-                return None
-            return _join_command_words(value, words, j + 2, env)
+                return "unresolved", None
+            return "payload", _join_command_words(value, words, j + 2, env)
+        if text.startswith("-") and not text.startswith("--") and "S" in text[1:]:
+            known, consumes, attached = _option_token(
+                text, _ENV_VALUE_OPTIONS, _ENV_FLAG_OPTIONS
+            )
+            if not known:
+                return "none", None
+            if attached is not None:
+                return "payload", _join_command_words(
+                    attached, words, j + 1, env
+                )
+            if consumes:
+                if j + 1 >= n:
+                    return "none", None
+                value, value_ok = _resolve_word(words[j + 1], env, 0)
+                if not value_ok:
+                    return "unresolved", None
+                return "payload", _join_command_words(value, words, j + 2, env)
+            # ``-S`` at the very end of a bundle with no value behind it
+            return "none", None
         if text.startswith("-"):
-            if text in ("-u", "--unset", "-C", "--chdir"):
-                j += 2
-            else:
-                j += 1
+            known, consumes, attached = _option_token(
+                text, _ENV_VALUE_OPTIONS, _ENV_FLAG_OPTIONS
+            )
+            if not known:
+                return "none", None        # env is a skip-unknown scanner
+            j += 2 if (consumes or attached is not None) else 1
             continue
         break
-    return None
+    return "none", None
 
 
 def _shell_has_c_payload(words: _Segment, env: dict[str, str]) -> bool:
@@ -1452,8 +1657,11 @@ def _shell_has_c_payload(words: _Segment, env: dict[str, str]) -> bool:
 
 def _ssh_remote_words(
     words: _Segment, k: int, env: dict[str, str]
-) -> list[_Word]:
+) -> list[_Word] | None:
     """The words of the REMOTE command of an ``ssh`` segment (may be empty).
+
+    ``None`` means an option ``ssh`` does not have was seen — the caller
+    fails closed (the remote command cannot be located).
 
     ``ssh [options] host [command...]`` — the command (if any) is a COMMAND
     STRING run on the far side, and stdin is forwarded to it.
@@ -1465,7 +1673,14 @@ def _ssh_remote_words(
         if not ok:
             return []
         if text.startswith("-"):
-            j += 2 if text in _SSH_VALUE_OPTIONS else 1
+            known, consumes, _attached = _option_token(
+                text, _SSH_VALUE_OPTIONS, _SSH_FLAG_OPTIONS
+            )
+            if not known:
+                # an option ssh does NOT have: its arity is unknown, so the
+                # remote command cannot be located ⇒ the caller FAILS CLOSED
+                return None
+            j += 2 if consumes else 1
             continue
         break
     return list(words[j + 1:])
@@ -1551,8 +1766,8 @@ def _pipeline_laundering_violation(
     seps: Sequence[str],
     env: dict[str, str],
     data_bodies: Sequence[tuple[str, str]],
-    code: str = "",
-    saw_pipe: bool = False,
+    code: str,
+    saw_pipe: bool,
 ) -> str | None:
     """A payload with the mutating-ensemble SHAPE handed to an EXECUTOR.
 
@@ -1577,10 +1792,35 @@ def _pipeline_laundering_violation(
     segment whose ``_executor_kind`` is not None. A pipe with NO executor
     stays DATA (the read-only/prose ALLOW legs depend on it).
     """
-    if saw_pipe and code and _text_has_mutating_ensemble_shape(code):
+    if saw_pipe:
         for words in segments:
-            if _executor_kind(words, env) is not None:
+            if _executor_kind(words, env) is None:
+                continue
+            if code and _text_has_mutating_ensemble_shape(code):
                 return LAUNDERED_TOKEN
+            # The raw text is not the whole story: a payload assembled from
+            # ENVIRONMENT SUBSTITUTIONS (``A=ens; echo "systemctl restart
+            # ${A}-main" | cat | bash``) carries the ensemble token only
+            # after resolution, and the adjacency backstop is single-stage
+            # (a multi-stage pipe moves the producer away from the
+            # executor). Shape-test the RESOLVED payloads too.
+            resolved = []
+            for seg_words in segments:
+                seg_payload = _segment_payload_text(seg_words, env, data_bodies)
+                if seg_payload:
+                    resolved.append(seg_payload)
+            if resolved and _text_has_mutating_ensemble_shape(" ".join(resolved)):
+                return LAUNDERED_TOKEN
+            # A heredoc body is REMOVED from the code text by
+            # ``_strip_heredocs``, so the whole-text test cannot see it —
+            # but a body handed to a pipe-fed executor IS executed
+            # (``cat <<'EOF' | cat | bash``). Shape-test the bodies too.
+            # A body that only lands in a FILE (no pipe, no executor) stays
+            # DATA: the disclosed prose over-block class stays dropped.
+            for _delim, body in data_bodies:
+                if _text_has_mutating_ensemble_shape(body):
+                    return LAUNDERED_TOKEN
+            break
     for i, words in enumerate(segments):
         sep = seps[i] if i < len(seps) else ""
         if sep != "|":
@@ -1619,10 +1859,12 @@ def _systemctl_segment_violation(
     while idx < len(words):
         text, ok = _resolve_word(words[idx], env, 0)
         if ok and text.startswith("-"):
-            if text in _OPTIONS_WITH_VALUE:
-                idx += 2
-                continue
-            idx += 1
+            # a short BUNDLE (``-aP``) or an ATTACHED value (``-pRestart``)
+            # is normalised by the shared analyser
+            _known, consumes, _attached = _option_token(
+                text, _OPTIONS_WITH_VALUE, _SYSTEMCTL_FLAG_OPTIONS
+            )
+            idx += 2 if consumes else 1
             continue
         if verb is None:
             if not ok:
@@ -1654,6 +1896,10 @@ def _systemctl_segment_violation(
             for later, later_ok in operands[i + 1:]:
                 if later_ok and _unit_is_ensemble(later):
                     return _unit_base(later)
+                if not later_ok or any(g in later for g in _GLOB_CHARS):
+                    # a mutating verb followed by an operand that cannot be
+                    # resolved statically (or is globbed) ⇒ FAIL CLOSED
+                    return UNRESOLVED_UNIT_TOKEN
         return None
     if not operands:
         if require_operand:
@@ -1727,9 +1973,12 @@ def _segment_violation(
                     return nested
 
     # ``env -S '<cmd string>'`` / ``env --split-string=<cmd string>`` RUN the
-    # string: it is an EXECUTED command, not an opaque option value.
-    env_payload = _env_split_string_payload(words, env)
-    if env_payload is not None:
+    # string: it is an EXECUTED command, not an opaque option value. An
+    # UNRESOLVABLE split operand FAILS CLOSED.
+    env_status, env_payload = _env_split_string_payload(words, env)
+    if env_status == "unresolved":
+        return UNRESOLVED_UNIT_TOKEN
+    if env_status == "payload" and env_payload is not None:
         nested = _command_text_violation(env_payload, depth + 1, marker, True)
         if nested is not None:
             return nested
@@ -1803,6 +2052,8 @@ def _segment_violation(
         # ``ssh [options] host [command...]`` — the remote command is a
         # COMMAND STRING.
         cmd_words = _ssh_remote_words(words, k, env)
+        if cmd_words is None:
+            return UNRESOLVED_UNIT_TOKEN
         if not cmd_words:
             return None
         payload_parts: list[str] = []
@@ -1847,15 +2098,16 @@ def _segment_violation(
         while j < len(words):
             text, ok = _resolve_word(words[j], env, 0)
             if ok and text.startswith("-"):
-                if text in _XARGS_VALUE_OPTIONS:
-                    j += 2
-                    continue
-                if text.split("=", 1)[0] not in _XARGS_FLAG_OPTIONS:
+                known, consumes, _attached = _option_token(
+                    text, _XARGS_VALUE_OPTIONS, _XARGS_FLAG_OPTIONS,
+                    _XARGS_ATTACHED_SHORTS,
+                )
+                if not known:
                     # An option xargs does NOT have: its arity is unknown,
                     # so the tail could anchor on the option's VALUE and
                     # never analyse the command behind it ⇒ FAIL CLOSED.
                     return UNRESOLVED_UNIT_TOKEN
-                j += 1
+                j += 2 if consumes else 1
                 continue
             break
         if j >= len(words):
@@ -1868,15 +2120,17 @@ def _segment_violation(
         )
         if sub_violation is not None:
             return sub_violation
-        # The tail's command word is found by peeling the WRAPPER prefixes
-        # (``xargs env bash -c '...'``) — its FIRST word is not necessarily
-        # the command.
+        # The tail is a COMMAND LINE: analyse it as one, whatever it starts
+        # with — a runner (``systemd-run``/``su``), a wrapper, ``env -S``,
+        # a script, or another ``xargs``. Reading only its first word let
+        # ``xargs systemd-run systemctl restart <unit>`` and
+        # ``xargs su -c '...'`` through. The recursion is depth-bounded
+        # (``_MAX_DEPTH``).
         tail = words[j:]
-        ck = _command_word_index(tail, env)
-        if ck is not None and ck < len(tail):
-            sub_cmd, sub_ok = _resolve_word(tail[ck], env, 0)
-            if sub_ok and _basename(sub_cmd) in _SHELLS:
-                return _segment_violation(tail, env, depth + 1, marker, executed)
+        if tail:
+            violation = _segment_violation(tail, env, depth + 1, marker, executed)
+            if violation is not None:
+                return violation
         return None
 
     return None

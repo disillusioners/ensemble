@@ -200,6 +200,14 @@ _READONLY_COMMANDS = [
     "systemctl show -P Restart ensemble-main",
     "systemctl -P cat status ensemble-main",
     "systemctl --boot-loader-entry cat status ensemble-main",
+    # --legend takes a MANDATORY value on this host: without it in the
+    # table the read-only verb behind the value was refused
+    "systemctl --legend yes status ensemble-main",
+    # the three v255 value options besides -P, each with a property
+    # NAME as the value (the property-name over-block stays dropped)
+    "systemctl show --boot-loader-entry Restart ensemble-main",
+    "systemctl show --image-policy Restart ensemble-main",
+    "systemctl show --boot-loader-menu Restart ensemble-main",
 ]
 
 
@@ -544,6 +552,15 @@ _PIPE_LAUNDER_SHAPES = [
     "echo 'systemctl restart ensemble-main' | cat | tee /tmp/x.log | bash",
     # the executor need not be a shell
     "echo 'systemctl restart ensemble-main' | cat | at now",
+    # A heredoc body REMOVED from the code text is still handed to the
+    # executor through the pipe — the bodies are shape-tested too
+    "cat <<'EOF' | cat | bash\nsystemctl restart ensemble-main\nEOF",
+    "cat <<'EOF' | tee /tmp/x.log | bash\nsystemctl restart ensemble-main\nEOF",
+    "cat <<'EOF' | cat | at now\nsystemctl restart ensemble-main\nEOF",
+    # a payload assembled from ENV SUBSTITUTIONS through a multi-stage
+    # pipe: the whole-text rule tests the raw text, the adjacency backstop
+    # is single-stage — the RESOLVED payloads are shape-tested too
+    "A=ensemble; echo \"systemctl restart ${A}-main\" | cat | bash",
 ]
 
 
@@ -633,6 +650,29 @@ _RUNNER_SHAPES = [
     "watch --not-an-option systemctl status ensemble-main",
     "xargs --not-an-option bash -c 'systemctl status ensemble-main'",
     "systemd-run --not-an-option systemctl restart ensemble-main",
+    # sudo's value options (-r/--role, -t/--type) were MISSING: the
+    # command word anchored on the option's VALUE (NOPASSWD-exploitable)
+    "sudo --role scratchvalue systemctl restart ensemble-main",
+    "sudo -r scratchvalue systemctl restart ensemble-main",
+    "sudo -t scratchvalue systemctl restart ensemble-main",
+    # bundled / attached env split-string forms, and env behind a
+    # wrapper or a shell keyword
+    "env -iS 'systemctl restart ensemble-main'",
+    "env -iSsystemctl restart ensemble-main",
+    "sudo env -S 'systemctl restart ensemble-main'",
+    "nohup env -S 'systemctl restart ensemble-main'",
+    "timeout 5 env -S 'systemctl restart ensemble-main'",
+    "if env -S 'systemctl restart ensemble-main'; then true; fi",
+    # the xargs tail is analysed as a whole command line
+    "xargs systemd-run systemctl restart ensemble-main",
+    "xargs su -c 'systemctl restart ensemble-main'",
+    "xargs ./stop-ensemble.sh",
+    "xargs xargs systemctl restart ensemble-main",
+    # stdbuf's value options (-e/-o/-i) were not in the shared tuple
+    "stdbuf -e L systemctl restart ensemble-main",
+    "stdbuf -o 0 systemctl restart ensemble-main",
+    # an option ssh does NOT have fails closed (its arity is unknown)
+    "ssh --not-an-option host 'systemctl restart ensemble-main'",
 ]
 
 
@@ -727,6 +767,16 @@ _LAUNDER_ALLOW = [
     "su -c'systemctl status ensemble-main'",
     "echo 'systemctl status ensemble-main' | ssh host",
     "cat > cron.txt <<'EOF'\nrun systemctl restart ensemble-main to recover\nEOF",
+    # attached / bundled / =-forms of KNOWN options are self-contained:
+    # they were misread as unknown and refused
+    "watch -n1 systemctl status ensemble-main",
+    "xargs -I{} systemctl status ensemble-main",
+    "xargs --max-args=1 systemctl status ensemble-main",
+    "systemd-run -Hhost true",
+    "env -iS 'systemctl status ensemble-main'",
+    "stdbuf -i0 systemctl status ensemble-main",
+    "sudo -n systemctl status ensemble-main",
+    "sudo -u root systemctl status ensemble-main",
 ]
 
 
@@ -839,3 +889,66 @@ def test_property_name_colliding_with_a_mutating_verb():
         "echo 'systemctl show ensemble-main -p Restart' | bash",
     ):
         assert guard.systemctl_violation(command) is not None, command
+
+
+# ===========================================================================
+# wave-5 (2026-11-19, revision iteration 2) — the tail scan and the verb set
+#
+# Counter-mutations:
+#   * neutralise the NON-TERMINAL READ-ONLY parse alone ⇒ the tail-scan
+#     pin REDS (this pin is ISOLATING: the option-arity fix does not cover
+#     it, because the verb slot holds a read-only word that is NOT an
+#     option value);
+#   * break the VERB-SET DERIVATION ⇒ the six re-diverged verbs RED.
+# ===========================================================================
+
+#: Shapes whose ONLY defence is the non-terminal read-only parse: a
+#: read-only word in VERB position ahead of ``stop <unit>``. The option
+#: tables are irrelevant here — there is no option at all.
+_READONLY_TAIL_SHAPES = [
+    "systemctl cat stop ensemble-main",
+    "systemctl help stop ensemble-main",
+    "systemctl status stop ensemble-main",
+]
+
+
+@pytest.mark.parametrize("command", _READONLY_TAIL_SHAPES)
+def test_readonly_verb_position_is_not_terminal(command):
+    """A read-only verb does not END the analysis: a mutating verb found
+    later, followed by an ensemble unit, is refused."""
+    assert guard.systemctl_violation(command) is not None
+
+
+#: The verb set is ONE source of truth: these six verbs were in the tail
+#: set but NOT in the shape regex, so a piped shape was WEAKER than the
+#: direct form. Plus the newly verified verbs and the fail-closed
+#: unresolved/glob operands behind a tail mutating verb.
+_MUTATING_VERB_SHAPES = [
+    # the six verbs that used to diverge (piped — the weak side)
+    "echo 'systemctl clean ensemble-main' | bash",
+    "echo 'systemctl preset-all ensemble-main' | bash",
+    "echo 'systemctl reenable ensemble-main' | bash",
+    "echo 'systemctl reload-or-restart ensemble-main' | bash",
+    "echo 'systemctl thaw ensemble-main' | bash",
+    "echo 'systemctl try-reload-or-restart ensemble-main' | bash",
+    # newly verified verbs, direct (the UNITLESS ones — daemon-reexec,
+    # set-environment — are allowed, consistent with daemon-reload, which
+    # is pinned as allowed in test_non_ensemble_mutation_allowed)
+    "systemctl unmask ensemble-main",
+    "systemctl reset-failed ensemble-main",
+    "systemctl add-wants multi-user.target ensemble-main",
+    # preset and preset-all are DISTINCT verbs (the old \b regex matched
+    # ``preset`` inside ``preset-all`` by accident)
+    "systemctl preset-all ensemble-main",
+    # an unresolved / globbed operand behind a tail mutating verb fails
+    # closed
+    "systemctl cat stop '*'",
+    "systemctl cat stop \"$AMBIENT_UNIT\"",
+]
+
+
+@pytest.mark.parametrize("command", _MUTATING_VERB_SHAPES)
+def test_mutating_verb_set_is_one_source_of_truth(command):
+    """The shape regex is DERIVED from the tail set: no verb may be weaker
+    in a piped shape than in the direct form."""
+    assert guard.systemctl_violation(command) is not None
