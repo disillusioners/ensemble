@@ -153,11 +153,14 @@ class TestIdlePolicyTiering:
         ``IdlePolicy.IDLE_GATED`` and this test goes RED.
         """
         service, execute_fn = _busy_service("skill_orphan_sweep")
-        assert service._jobs[0].idle_policy == IdlePolicy.UN_GATED
 
         await service._run_pending_jobs()
 
+        # The BEHAVIOURAL assertion comes first on purpose: the
+        # mutation must red on the guarantee itself, not on a
+        # bookkeeping assertion about the policy table.
         assert execute_fn.await_count == 1
+        assert service._jobs[0].idle_policy == IdlePolicy.UN_GATED
 
     async def test_idle_gated_job_does_not_run_when_the_system_is_busy(self):
         service, execute_fn = _busy_service("checkpoint_cleanup")
