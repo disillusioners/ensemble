@@ -158,7 +158,7 @@ character-for-character transplant (`is_kill_like` / `kill_leg_violation`), so t
 |---|---|---|
 | 1 | all 5 review shapes (plus the general family) REFUSE | PASS — 7 new pipe pins, all green |
 | 2 | all 4 systemd-run value-option shapes REFUSE; the `=`-forms still work | PASS — 6 value forms + the `=`-form pinned |
-| 3 | the 18 `_LAUNDER_ALLOW` legs and the 45-node both-direction selection stay GREEN | PASS — unchanged and green (+9 new ALLOW legs) |
+| 3 | the 18 `_LAUNDER_ALLOW` legs and the 45-node both-direction selection stay GREEN | PASS — unchanged and green (+8 new ALLOW legs) |
 | 4 | the full pack GREEN from the worktree root with the worktree venv | PASS — 214/214, exit 0 |
 | 5 | net-new reds vs base = 0 | PASS — 0 (0 vs 0) |
 | 6 | M6g and M6h each RED under their own plant, byte-identical restore | PASS — M6g 7 red, M6h 7 red, M6i 12 red, all byte-identical |

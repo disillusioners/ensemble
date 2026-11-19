@@ -148,7 +148,7 @@ refused — old-text-guard strength, kept on purpose.
 |---|---|---|
 | 1 | all 5 review shapes (plus the general family) REFUSE | PASS — 7 pipe pins |
 | 2 | all 4 systemd-run value-option shapes REFUSE; the `=`-forms still work | PASS — 19 runner pins |
-| 3 | the 18 `_LAUNDER_ALLOW` legs and the both-direction selection stay GREEN | PASS — the ALLOW family 26→32 legs, all green (the read-only list 15→19) |
+| 3 | the 18 `_LAUNDER_ALLOW` legs and the both-direction selection stay GREEN | PASS — the ALLOW family 18→32 legs, all green (the read-only list 15→19) |
 | 4 | the full pack GREEN from the worktree root with the worktree venv | PASS — 246/246, exit 0 |
 | 5 | net-new reds vs base = 0 | PASS — 0 (0 vs 0) |
 | 6 | M6g and M6h each RED under their own plant, byte-identical restore | PASS — 13 legs, 41 reds, all byte-identical |
