@@ -5,6 +5,14 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.9] — 2026-11-19
+
+### Fixed — upgrade-script refusal quoting (`fix/upgrade-script-refusal-quoting`)
+
+- Fixed: upgrade-script refusal messages no longer execute their own backticked commands — lib.sh quoting fix + class scanner + pins
+- Registered: tester safety pack `upgrade_refusal_message_safety` + class scanner `tests/upgrade_refusal_scan.py` in the gate surface
+- Migrations: this release authors ZERO `daemon/migrations/versions/*.sql`; the one migration it carries (20261119_000001 decision-axis columns) is drift-inherited from latest@28ec14338, additive `ADD COLUMN` only
+
 ## [0.31.8] — 2026-11-19
 
 ### Fixed — agent tool-lane systemctl/bash guard-inversion closing fixes (`fix/systemctl-guard-pipe-shapes`, board `wi-a5ec5b3e`)
