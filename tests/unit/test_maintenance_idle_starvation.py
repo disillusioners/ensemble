@@ -769,10 +769,14 @@ class TestSkipStreakTelemetry:
             if r.levelno == logging.WARNING
             and "checkpoint_cleanup" in r.getMessage()
         ]
+        # Require "skipped": the job name alone also matches ambient lifecycle
+        # records (e.g. "Registered maintenance job: checkpoint_cleanup ..."),
+        # which surface only when daemon.services.maintenance sits at DEBUG.
         debugs = [
             r for r in caplog.records
             if r.levelno == logging.DEBUG
             and "checkpoint_cleanup" in r.getMessage()
+            and "skipped" in r.getMessage()
         ]
         assert len(warnings) == 1
         assert len(debugs) == 2
