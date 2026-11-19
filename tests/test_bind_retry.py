@@ -22,6 +22,7 @@ The port is always an OS-assigned ephemeral port — never 9797 / 9798 /
 import asyncio
 import errno
 import http.client
+import os
 import socket
 import threading
 import time
@@ -495,6 +496,16 @@ def test_prebound_socket_matches_installed_uvicorn_socket_options():
 
     The comparison below is made against the INSTALLED uvicorn, not a
     paraphrase of it.
+
+    P-1 (self-service-promote Wave 2, 2026-11-19) — the INHERITABLE
+    conjunct is deliberately INVERTED, not dropped: the old pin asserted
+    ``ours.get_inheritable() == theirs.get_inheritable()`` with no
+    rationale beyond fidelity — the blind pin that enshrined the fd leak
+    as "intentional" (D1 root cause (a)). We deliberately differ from
+    uvicorn: our LISTEN fd must not cross an exec (B1). See
+    ``test_bound_listen_fd_is_not_inheritable`` (AC-D1-3) and
+    ``test_spawned_child_does_not_hold_the_daemon_listen_inode``
+    (AC-D1-2, real-exec).
     """
     import uvicorn
 
@@ -507,10 +518,89 @@ def test_prebound_socket_matches_installed_uvicorn_socket_options():
         assert ours.getsockopt(
             socket.SOL_SOCKET, socket.SO_REUSEADDR
         ) == theirs.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR)
-        assert ours.get_inheritable() == theirs.get_inheritable()
+        # We deliberately differ from uvicorn: our LISTEN fd must not
+        # cross an exec (B1 / AC-D1-3). uvicorn's is True; ours MUST be
+        # False — the inverted conjunct, with the rationale recorded.
+        assert ours.get_inheritable() is False
+        assert theirs.get_inheritable() is True
     finally:
         ours.close()
         theirs.close()
+
+
+def test_bound_listen_fd_is_not_inheritable():
+    """AC-D1-3 / P-2 (self-service-promote Wave 2): the pre-bound LISTEN
+    fd is NOT inheritable after ``bind_socket_with_retry``.
+
+    The socket is handed to uvicorn IN-PROCESS (``Server.run(sockets=
+    [sock])``); nothing in the daemon tree execs with the fd held. The
+    explicit ``set_inheritable(False)`` (bind_retry.py, B1) means a
+    future Python default change cannot silently re-open the leak that
+    made the promote pipeline's serving-attribution gate false-refuse a
+    healthy ceremony (13:31:24Z class — port holders "NOT in the
+    supervision-owned pid set").
+    """
+    from daemon.services import bind_retry
+
+    sock = bind_retry.bind_socket_with_retry("127.0.0.1", 0)
+    try:
+        assert sock.get_inheritable() is False
+    finally:
+        sock.close()
+
+
+def test_spawned_child_does_not_hold_the_daemon_listen_inode():
+    """AC-D1-2 (self-service-promote Wave 2, D1 root cause (a)): after
+    ``bind_socket_with_retry``, a spawned child does NOT hold the
+    daemon's LISTEN inode — REAL-EXEC, not mocked.
+
+    The leak shape being pinned (the 13:31:24Z incident): the daemon's
+    LISTEN fd appeared in EVERY spawned child's /proc/<pid>/fd table,
+    so the promote pipeline's port census listed long-lived offenders
+    that were "NOT in the supervision-owned pid set".
+
+    NON-VACUITY: the child is spawned with ``close_fds=False`` — the
+    leaking shape (an exec that does NOT sanitize fds). Whether the
+    child holds the socket therefore depends ONLY on the fd's
+    inheritable flag: with the old ``set_inheritable(True)`` the child
+    HOLDS the inode (RED); with B1's explicit ``False`` the kernel's
+    CLOEXEC close removes it during exec even though the spawn asked to
+    keep fds (GREEN). A default ``close_fds=True`` spawn would pass
+    vacuously and is deliberately NOT used.
+    """
+    import subprocess
+
+    from daemon.services import bind_retry
+
+    sock = bind_retry.bind_socket_with_retry("127.0.0.1", 0)
+    # Make it a real LISTEN socket so the inode is exactly the kind a
+    # port census attributes (this mirrors what uvicorn's create_server
+    # does with the pre-bound socket; it does not change inheritability).
+    sock.listen(1)
+    listen_inode = os.fstat(sock.fileno()).st_ino
+    child = subprocess.Popen(
+        ["/bin/sleep", "30"],
+        close_fds=False,  # the leaking shape: exec keeps fds unless CLOEXEC
+    )
+    try:
+        assert child.poll() is None, "child must be alive for /proc inspection"
+        child_inodes = set()
+        for fd_name in os.listdir(f"/proc/{child.pid}/fd"):
+            try:
+                target = os.readlink(f"/proc/{child.pid}/fd/{fd_name}")
+            except OSError:
+                continue  # fd closed between listdir and readlink — skip
+            if target.startswith("socket:[") and target.endswith("]"):
+                child_inodes.add(int(target[len("socket:[") : -1]))
+        assert listen_inode not in child_inodes, (
+            "the daemon's LISTEN inode leaked into a spawned child "
+            f"(inode {listen_inode} present in child fd table: "
+            f"{sorted(child_inodes)})"
+        )
+    finally:
+        child.kill()
+        child.wait()
+        sock.close()
 
 
 def test_bound_socket_is_handed_to_uvicorn_which_serves_on_it(caplog):
