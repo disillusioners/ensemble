@@ -978,6 +978,15 @@ def _upgrade_log_tail(
     aggregate ``data/upgrade.log`` (unchanged behaviour for callers that
     pass no run_id). Bounded: at most the last 256KB is read, then the
     last ``lines`` lines.
+
+    AC-OBS-2 (2026-11-19): the run narrative ALSO surfaces the run's
+    PAYLOAD log — the executor unit's stdio
+    (``<run_id>.payload.log``), which is a DIFFERENT file from the
+    narrative (the shell's ``ENSEMBLE_UPGRADE_LOG_FILE`` sink). The
+    verify-phase diagnostics reach the payload log only via the shell's
+    unbuffered stderr (F16), so a reader that reads the narrative alone
+    sees a truncated post-mortem. Both tails are returned, each labelled
+    with the file it came from.
     """
     if install_dir is None:
         return "upgrade.log: none (no install dir)"
@@ -996,9 +1005,58 @@ def _upgrade_log_tail(
         if not tail_lines:
             return f"upgrade.log: empty at {lp}"
         body = "\n".join(f"  {ln}" for ln in tail_lines)
-        return f"upgrade.log tail (last {len(tail_lines)} lines, {lp}):\n{body}"
+        out = f"upgrade.log tail (last {len(tail_lines)} lines, {lp}):\n{body}"
     except OSError as exc:
         return f"upgrade.log: unreadable at {lp} ({exc})"
+    payload = _upgrade_payload_log_tail(install_dir, run_id, lines)
+    if payload:
+        out = f"{out}\n{payload}"
+    return out
+
+
+def _upgrade_payload_log_tail(
+    install_dir: Path | None,
+    run_id: str | None,
+    lines: int = _UPGRADE_LOG_TAIL_LINES,
+) -> str:
+    """Bounded tail of the run's PAYLOAD log (AC-OBS-2).
+
+    The payload log is the executor unit's stdio
+    (``StandardOutput/StandardError=append:<run_id>.payload.log``) — NOT
+    the narrative file the shell writes through
+    ``ENSEMBLE_UPGRADE_LOG_FILE``. It is the surface that carries the
+    verify-phase diagnostics (the shell's unbuffered stderr), so it is
+    the executor's own view of the run.
+
+    Empty string when there is no run_id, no payload file, or the file is
+    unreadable/empty — the caller appends it to the narrative tail and
+    an absent payload log must not render as an error (the file is
+    created by the executor unit, which may never have started).
+    """
+    if install_dir is None or not run_id:
+        return ""
+    pp = uj.per_run_payload_log_path(install_dir, run_id)
+    if pp is None:
+        return ""
+    try:
+        if not pp.is_file():
+            return ""
+        size = pp.stat().st_size
+        with pp.open("rb") as fh:
+            if size > _UPGRADE_LOG_TAIL_CHARS:
+                fh.seek(size - _UPGRADE_LOG_TAIL_CHARS)
+            chunk = fh.read()
+        text = chunk.decode("utf-8", errors="replace")
+        tail_lines = text.splitlines()[-lines:] if lines > 0 else []
+        if not tail_lines:
+            return ""
+        body = "\n".join(f"  {ln}" for ln in tail_lines)
+        return (
+            f"payload.log tail (last {len(tail_lines)} lines, {pp} — the "
+            f"executor unit's stdio):\n{body}"
+        )
+    except OSError:
+        return ""
 
 
 def _self_port(manager: "InstanceManager") -> int | None:
@@ -1315,6 +1373,14 @@ _OUTCOME_LABELS: dict[str, str] = {
     # outside the terminal filter.
     "intent_flip": "flip intent recorded",
     "subprocess_wait_timeout": "bounded wait timed out",
+    # D6-(iii) / AC-D6-1 / AC-D6-2 (2026-11-19): the hand-back's is-active
+    # probe ANSWERED (rc≠124) — the observed state word + the rc, NOT a
+    # timeout. Informational (NOT in ``uj._TERMINAL_EVENTS``): it closes
+    # nothing; the hand-back continues into the start attempt.
+    "handback_is_active_state": "unit state observed (not a timeout)",
+    # AC-OBS-1 (2026-11-19): the arm-time journalctl capture's verdict
+    # (captured / unavailable+reason). Informational.
+    "arm-journal-capture": "arm-time journalctl capture verdict",
 }
 
 
@@ -3987,6 +4053,52 @@ never decides go/rollback).
                     "stale-scripts-dir",
                     f"arm preflight: {prov_detail} — nonce NOT burned "
                     "(the arm simply did not happen; nothing consumed)",
+                )
+            # ── Step 0c — arm-time journalctl capture (AC-OBS-1 / C-7) ────
+            # The daemon app log rotates at 10 MB (~15-20 min) and the
+            # AGENT lanes cannot reach journalctl or /var/log at all ⇒ the
+            # incident window is gone by the time a human reads it. The TOOL
+            # lane can: this captures a bounded excerpt of the relevant
+            # units into the RUN NARRATIVE before the ceremony starts.
+            #
+            # BEST-EFFORT + a JOURNALED VERDICT (captured /
+            # unavailable+reason) and NEVER ARM-BLOCKING (the journal-read
+            # privilege of the service user is unverified — Appendix B #7).
+            # It is an OBSERVABILITY step, never a gate: the capture sits
+            # AFTER the provenance guard (a refusal never wastes it) and
+            # BEFORE the nonce burn.
+            try:
+                jc_verdict = uj.arm_journalctl_capture(
+                    install_dir, run_id, uj._ceremony_env_scope([self_env])
+                )
+            except Exception as exc:  # noqa: BLE001 — never blocks the arm
+                jc_verdict = (
+                    f"unavailable reason=capture-error({type(exc).__name__})"
+                )
+            try:
+                uj.journal_history_append(
+                    install_dir, "arm-journal-capture", jc_verdict
+                )
+            except uj.JournalTorn:
+                # virgin install (no nonce flow journaled yet): init the
+                # skeleton ONCE and retry — the row is journal-always.
+                try:
+                    uj.journal_init(install_dir)
+                    uj.journal_history_append(
+                        install_dir, "arm-journal-capture", jc_verdict
+                    )
+                except (uj.JournalTorn, OSError):
+                    logger.warning(
+                        "arm-journal-capture row lost (journal unavailable) "
+                        "— verdict=%s",
+                        jc_verdict,
+                    )
+            except OSError as exc:
+                logger.warning(
+                    "arm-journal-capture row failed (%s: %s) — verdict=%s",
+                    type(exc).__name__,
+                    exc,
+                    jc_verdict,
                 )
             try:
                 if confirmed_action is not None:

@@ -3199,6 +3199,161 @@ def per_run_narrative_path(install_dir: Path, run_id: str | None) -> Path | None
     return None
 
 
+def per_run_payload_log_path(
+    install_dir: Path, run_id: str | None
+) -> Path | None:
+    """Resolve a run's per-run PAYLOAD log by its ``run_id`` — the twin of
+    :func:`per_run_narrative_path` (same directory, same naming family:
+    ``executor_run_log_paths`` writes ``<run_id>.log`` and
+    ``<run_id>.payload.log`` side by side).
+
+    WHY A SECOND RESOLVER (and why the payload log is a DIFFERENT file):
+    the payload log is the EXECUTOR UNIT's stdio
+    (``StandardOutput/StandardError=append:<payload>`` —
+    ``build_service_argv``); the narrative file is the shell's own
+    ``ENSEMBLE_UPGRADE_LOG_FILE`` sink. The two are separate files, so the
+    verify-phase narrative only reaches the payload log when the shell
+    writes it to STDERR (F16 — both surviving runs ended at the verify
+    budget line, the ONE verify-phase line emitted with an explicit
+    ``printf >&2``). A reader that wants the executor's own view of a run
+    must read BOTH (AC-OBS-2).
+
+    Same run_id validation as the narrative resolver (the id is
+    interpolated into a path); returns None when the file is absent
+    (retention, or a pre-D3 run).
+    """
+    if not run_id or not _RUN_ID_RE.fullmatch(run_id):
+        return None
+    base = install_dir / "data" / "upgrade"
+    for env_dir in base.glob("*"):
+        cand = env_dir / f"{run_id}.payload.log"
+        if cand.is_file():
+            return cand
+    return None
+
+
+# ── arm-time journalctl capture (AC-OBS-1 / C-7, 2026-11-19) ───────────────
+#
+# WHY (C-7): the daemon app log rotates at 10 MB (~15-20 min, keep-6) and
+# the AGENT lanes cannot reach journalctl or /var/log at all ⇒ the incident
+# window (tonight's 04:00-08:00Z arc) is GONE by the time anybody reads
+# it. The TOOL lane is the only surface that can reach the journal — so the
+# capture happens HERE, at arm time, BEFORE the ceremony starts.
+#
+# WHAT: a bounded excerpt of the relevant units (the daemon unit the
+# ceremony stops/starts + the host watchdog's service/timer — the incident
+# class C-7 targets: kill signals and timer fires) written into the RUN
+# NARRATIVE, plus a bounded system-wide tail (the unit names are HOST-MADE
+# — lib.sh says so itself — so a per-unit-only capture would silently
+# yield nothing on a host whose unit is named differently).
+#
+# SHAPE (binding): BEST-EFFORT with a JOURNALED VERDICT (captured /
+# unavailable+reason) and NEVER ARM-BLOCKING — the journal-read privilege
+# of the service user is UNVERIFIED (architecture-recommendation.md
+# Appendix B #7), so a capture failure degrades to a journaled
+# "unavailable" verdict and the arm proceeds. An OBSERVABILITY step, never
+# a gate.
+#
+# HOME: this module owns the run-log paths (``executor_run_log_paths`` /
+# ``per_run_narrative_path``) AND is the only module allowed to spawn —
+# the tools module carries a static no-direct-spawn pin
+# (tests/unit/tools/test_upgrade_tools.py::
+# test_static_no_direct_process_spawn_in_tools_module).
+_JOURNALCTL_CAPTURE_UNITS: tuple[str, ...] = (
+    "ensemble-main.service",
+    "ensemble-keepalive.service",
+    "ensemble-keepalive.timer",
+)
+_JOURNALCTL_CAPTURE_UNIT_LINES = 60
+_JOURNALCTL_CAPTURE_SYSTEM_LINES = 40
+_JOURNALCTL_CAPTURE_TIMEOUT_S = 15.0
+
+
+def _journalctl_excerpt(unit: str | None, lines: int) -> tuple[str, str] | None:
+    """One bounded journalctl excerpt — ``(label, text)`` or None when
+    journalctl is unavailable, fails, or the selection is empty. Never
+    raises (the capture is best-effort by contract)."""
+    exe = shutil.which("journalctl")
+    if exe is None:
+        return None
+    argv = [exe, "--no-pager", "--output=short-iso", "-n", str(lines)]
+    label = "system-wide tail"
+    if unit:
+        argv += ["-u", unit]
+        label = f"unit {unit}"
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=_JOURNALCTL_CAPTURE_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    out = (proc.stdout or "").strip()
+    if not out or out.startswith("-- No entries --"):
+        return None
+    return label, out
+
+
+def arm_journalctl_capture(
+    install_dir: Path | None, run_id: str, env_scope: str
+) -> str:
+    """AC-OBS-1 — the arm-time journalctl capture.
+
+    Writes a bounded excerpt of the relevant units into the run narrative
+    and returns the JOURNALED VERDICT (``captured ...`` /
+    ``unavailable reason=...``). BEST-EFFORT: never raises, never blocks
+    the arm (Appendix B #7 — the journal-read privilege of the service
+    user is unverified).
+
+    The narrative file is APPENDED to (``_log_tsl`` appends, and the
+    executor's own narrative lines land after this excerpt) — the capture
+    never truncates the executor's view.
+    """
+    if install_dir is None or not run_id:
+        return "unavailable reason=no-install-dir-or-run-id"
+    if shutil.which("journalctl") is None:
+        return "unavailable reason=journalctl-not-found"
+    try:
+        sections: list[str] = []
+        captured_units = 0
+        for unit in _JOURNALCTL_CAPTURE_UNITS:
+            got = _journalctl_excerpt(unit, _JOURNALCTL_CAPTURE_UNIT_LINES)
+            if got is None:
+                continue
+            captured_units += 1
+            sections.append(f"--- {got[0]} ---\n{got[1]}")
+        got = _journalctl_excerpt(None, _JOURNALCTL_CAPTURE_SYSTEM_LINES)
+        if got is not None:
+            sections.append(f"--- {got[0]} ---\n{got[1]}")
+        if not sections:
+            return (
+                "unavailable reason=no-journal-entries (journalctl present, "
+                "nothing to show)"
+            )
+        narrative, _payload = executor_run_log_paths(install_dir, run_id, env_scope)
+        narrative.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        body = (
+            f"{stamp} arm-journal-capture: journalctl excerpt captured "
+            f"(units={captured_units}) — appended to the run narrative\n"
+            + "\n".join(sections)
+            + "\n"
+        )
+        with narrative.open("a", encoding="utf-8", errors="replace") as fh:
+            fh.write(body)
+        return (
+            f"captured units={captured_units} "
+            f"lines={len(body.splitlines())} narrative={narrative}"
+        )
+    except (OSError, ValueError) as exc:
+        return f"unavailable reason=capture-failed({type(exc).__name__})"
+
+
 def _append_pointer_line(
     aggregate: Path, run_id: str, narrative: Path, payload: Path
 ) -> None:

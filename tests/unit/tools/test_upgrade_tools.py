@@ -4891,3 +4891,158 @@ class TestStaleTxnReclaimArmLane:
         )
         assert _refusal_reason(out) == "pipeline-busy", out
         assert uj.journal_read(install).get("in_flight") == txn
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AC-OBS-1 — the arm-time journalctl capture (C-7): the tool lane is the
+# ONLY surface that can reach the journal at arm time (the agent lanes
+# cannot, and the daemon app log rotates at 10 MB / ~15-20 min ⇒ the
+# incident window is gone by the time a human reads it).
+#
+# The binding shape: BEST-EFFORT + a JOURNALED VERDICT (captured /
+# unavailable+reason) and NEVER ARM-BLOCKING (the journal-read privilege
+# of the service user is unverified — Appendix B #7).
+# ═══════════════════════════════════════════════════════════════════════════
+class TestArmJournalctlCapture:
+    """AC-OBS-1 — the capture's verdict, its best-effort shape, and its
+    never-blocking contract."""
+
+    @staticmethod
+    def _rows(install: Path) -> list[dict]:
+        history = uj.journal_read(install).get("history") or []
+        return [r for r in history if r.get("event") == "arm-journal-capture"]
+
+    async def test_capture_verdict_is_journaled_and_the_arm_proceeds(
+        self, harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The happy shape: the capture ran, its verdict is journaled, and
+        the arm is NOT blocked by it."""
+        tools, markers, install = harness
+        monkeypatch.setattr(
+            uj,
+            "arm_journalctl_capture",
+            lambda install_dir, run_id, env_scope: (
+                f"captured units=2 lines=42 narrative={install_dir}/x.log"
+            ),
+        )
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) is None, out
+        assert "UPGRADE ARMED" in out, out
+        rows = self._rows(install)
+        assert rows, "the arm-journal-capture verdict row is missing"
+        assert rows[-1]["detail"].startswith("captured units=2"), rows[-1]
+
+    async def test_capture_failure_never_blocks_the_arm(
+        self, harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A capture that RAISES degrades to a journaled "unavailable"
+        verdict — the arm still happens. (The capture is an OBSERVABILITY
+        step, never a gate.)"""
+        tools, markers, install = harness
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("journalctl exploded")
+
+        monkeypatch.setattr(uj, "arm_journalctl_capture", _boom)
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) is None, out
+        assert "UPGRADE ARMED" in out, out
+        rows = self._rows(install)
+        assert rows, "the arm-journal-capture verdict row is missing"
+        assert "unavailable reason=capture-error(RuntimeError)" in rows[-1][
+            "detail"
+        ], rows[-1]
+
+    def test_capture_without_journalctl_is_unavailable_not_fatal(
+        self, install: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """journalctl absent (or unreadable) ⇒ the verdict says so; nothing
+        raises, nothing is written."""
+        monkeypatch.setattr(uj.shutil, "which", lambda _n: None)
+        verdict = uj.arm_journalctl_capture(install, "r-test-1", "demo")
+        assert verdict == "unavailable reason=journalctl-not-found", verdict
+
+    def test_capture_writes_the_excerpt_into_the_run_narrative(
+        self, install: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A successful capture APPENDS its excerpt to the run narrative —
+        the file the run's own reader surfaces."""
+        monkeypatch.setattr(
+            uj.shutil, "which", lambda _n: "/usr/bin/journalctl"
+        )
+
+        def _fake_excerpt(unit, lines):
+            if unit is None:
+                return ("system-wide tail", "sysd-1: something happened")
+            return (f"unit {unit}", f"{unit}: killed by watchdog")
+
+        monkeypatch.setattr(uj, "_journalctl_excerpt", _fake_excerpt)
+        verdict = uj.arm_journalctl_capture(install, "r-test-2", "demo")
+        assert verdict.startswith("captured units="), verdict
+        narrative, _payload = uj.executor_run_log_paths(
+            install, "r-test-2", "demo"
+        )
+        assert narrative.is_file(), narrative
+        text = narrative.read_text(encoding="utf-8")
+        assert "arm-journal-capture" in text, text
+        assert "killed by watchdog" in text, text
+        assert "sysd-1: something happened" in text, text
+
+    def test_capture_with_no_entries_is_unavailable_with_a_reason(
+        self, install: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """journalctl present but nothing to show ⇒ an explicit
+        "unavailable + reason" verdict (never a silent success)."""
+        monkeypatch.setattr(uj.shutil, "which", lambda _n: "/usr/bin/journalctl")
+        monkeypatch.setattr(uj, "_journalctl_excerpt", lambda unit, lines: None)
+        verdict = uj.arm_journalctl_capture(install, "r-test-3", "demo")
+        assert verdict.startswith("unavailable reason="), verdict
+        assert "no-journal-entries" in verdict, verdict
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AC-OBS-2 — the run narrative surfaces the PAYLOAD log (the executor
+# unit's stdio), not only the shell's narrative file. They are different
+# files; the verify-phase diagnostics reach the payload log only through
+# the shell's unbuffered stderr (F16).
+# ═══════════════════════════════════════════════════════════════════════════
+class TestPayloadLogTail:
+    """AC-OBS-2 — the payload tail is surfaced next to the narrative tail."""
+
+    def test_payload_tail_is_surfaced_beside_the_narrative(
+        self, install: Path
+    ) -> None:
+        narrative, payload = uj.executor_run_log_paths(
+            install, "r-obs-2", "demo"
+        )
+        narrative.parent.mkdir(parents=True, exist_ok=True)
+        narrative.write_text("narrative line\n", encoding="utf-8")
+        payload.write_text(
+            "hand-back verify: budget effective=300s\n"
+            "hand-back verify: /livez reports version=0.0.0\n",
+            encoding="utf-8",
+        )
+        out = ut._upgrade_log_tail(install, run_id="r-obs-2")
+        assert "upgrade.log tail" in out, out
+        assert "narrative line" in out, out
+        assert "payload.log tail" in out, out
+        assert "hand-back verify: budget effective=300s" in out, out
+        assert "version=0.0.0" in out, out
+
+    def test_absent_payload_log_is_not_an_error(self, install: Path) -> None:
+        """No payload file (the executor unit never started) ⇒ the tail is
+        simply absent — never a rendered error."""
+        narrative, _payload = uj.executor_run_log_paths(
+            install, "r-obs-2b", "demo"
+        )
+        narrative.parent.mkdir(parents=True, exist_ok=True)
+        narrative.write_text("narrative line\n", encoding="utf-8")
+        out = ut._upgrade_log_tail(install, run_id="r-obs-2b")
+        assert "narrative line" in out, out
+        assert "payload.log tail" not in out, out
+
+    def test_no_run_id_surfaces_no_payload_tail(self, install: Path) -> None:
+        """Without a run_id there is no per-run pair to resolve — the
+        aggregate-only behaviour is unchanged."""
+        out = ut._upgrade_log_tail(install)
+        assert "payload.log tail" not in out, out
