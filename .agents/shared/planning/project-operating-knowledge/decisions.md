@@ -93,6 +93,8 @@
 
 **A-26 — Ordering: slug families + atomic adjacent rendering** (regex `^([a-z][a-z0-9]*)-(\d{2})-(.+)$`, tightened per B3). **A-27 — Archive verb in v1.** **A-28 — `pok_query` pinned-BYPASS.** **A-29 — Content fence: two layers.** **A-30 — KV true grounds + layer rows.** **A-31 — Once-flag on success only.** **A-32 — Precision corrections.**
 
+**A-26a — Ordering intent UNCHANGED; the family-key PATTERN is WIDENED to multi-token** (fix iteration 2, branch `fix/pok-family-key`, landed 2026-11-18): `^([a-z][a-z0-9]*)-(\d{2})-(.+)$` → `^([a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*)-(\d{2})-(.+)$` — the family head is the maximal run of letter-led tokens before the leftmost `-NN-` ordinal. A-26's ORDERING INTENT STANDS (families render atomically in slug order; a pinned member carries its family to the pinned position); only the KEY changed. Consequences: (i) a hyphenated family head (`prompt-assent`, `snapshot-l3`, `skill-e6`) is now a REAL family key, not collapsed to its first token; (ii) in `model-catalogs-19-vs-22-not-drift` the `19` is a MODEL COUNT, not a step ordinal — the slug parses as family `model-catalogs`, ordinal `19`, tail `vs-22-not-drift`; (iii) AUTHORING RULE — a future `model-catalogs-NN-…` write DOES join that family as a lexicographically ordered family, so writers MUST NOT read `NN` as a semantic step counter; (iv) the family COUNT is a `startswith` PREFIX superset — a longer family's rows inflate a shorter family's count (long → short, one way), so the refusal gate is conservative by construction.
+
 ### FINAL FOLD (council round 3) — C1 + W5
 
 **A-33 — C1 option (A) family-carries-to-pin; W5 escaped-body budget; advisories (i)–(iii) adopted.**

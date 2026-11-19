@@ -9,6 +9,8 @@ Sibling artifacts in this directory (`family-cap-consolidation-2026-11-18.md`,
 `census-active-2026-11-18.md` / `.json`, `phase4-recensus-2026-11-18.md`,
 `cluster-proposals-2026-11-18.md`) were read for convention and were NOT modified.
 
+> **LANDED-STATE SOURCE ANCHORS (fix iteration 2).** The source anchors quoted in §0.1 / §3 / §4 of this artifact were read BEFORE the fix landed (they cite the single-token pattern at `models.py:131`). The canonical POST-landing anchors are: `daemon/repositories/pok/models.py:132` (`POK_FAMILY_SLUG_PATTERN` — multi-token); `daemon/services/pok_service.py:470-531` (the family-admission block + the count-aware `pok_family_full` refusal — the quoted `470-493` is that block's PRE-cure range); `daemon/repositories/pok/repository.py:221-253` (`count_active_in_family` — the quoted `235-241` is the statement body INSIDE that method, shifted by the docstring extension); and the render side `daemon/services/pok_injection.py:564-583` (`render_pok_block` — the quoted `repository.py:570-578` does NOT resolve: `repository.py` is 487 lines; `:570-578` is the render function in `pok_injection.py`).
+
 ## 0. Provenance & method
 
 - **generated_at (UTC):** 2026-11-18T21:12:38Z
@@ -42,6 +44,8 @@ Bound + gate semantics (read from source, unchanged by this lane):
 `numbered n` (how many rows the view actually GATES) and in the family SET itself.
 A family that is multi-token has `numbered n = 0` under CURRENT — it is not gated at
 all today, so no admission ever consults its prefix count.
+
+**CAUTION — near-collision under the OLD key.** `prompt-assent` and `prompt-assist` are DIFFERENT families under the corrected key, but under the OLD single-token key both collapse into the `prompt-` prefix — whose combined prefix count is **9 ACTIVE rows** (4 `prompt-assent-NN-*` + 2 unnumbered `prompt-assent-*` + 2 `prompt-assist-NN-*` + 1 unnumbered `prompt-assist-*`). Any merge plan that treats the `prompt-` prefix as ONE family is therefore hazardous: it merges two distinct families and over-counts by the other family's members.
 
 ## 1. Per-project totals (reconciliation)
 
@@ -620,6 +624,103 @@ because they mean different things to the gate:
   while owning fewer than 3 rows of its own. Both quantities are listed for every
   family in §2 and §3a.
 
+## 3e. All newly-refusing families (complete)
+
+**Recomputed from the RAW census JSON** (`/tmp/pok_census_raw_20261118.json`, sha256 `d8a6e80b…`, 506 ACTIVE rows across 3 projects) by a python3-stdlib script (no DB access, no network) — **the caller's partial list was NOT copied; every row below is machine-derived.**
+
+**Definition.** A corrected-view family `F` is *newly-refusing* iff `prefix_count(F) >= POK_FAMILY_MAX (3)` AND `F` was **NOT gated under the OLD (single-token) key** — i.e. `F` is multi-token, so the old key parsed NO family for its rows (or its old-view family differs). `prefix_count(F)` = ACTIVE rows whose slug `startswith(F + "-")` (view-independent: a `startswith` count, never a family-membership test); `numbered n` = ACTIVE rows whose CORRECTED family is exactly `F`.
+
+**Result: 15 families — 12 OVER the prefix cap + 3 AT the prefix cap.** §3b above lists 10 of them under a narrower definition (corrected *numbered* n >= 3 AND a member whose CURRENT-view family differs); §3e is the complete set under the PREFIX-COUNT definition the live gate actually uses.
+
+| project | family | numbered n | prefix n | member ids | member slugs |
+|---|---|---|---|---|---|
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `credential-groups` | 1 | 8 | `1a60ee8b-4845-4eb0-8d64-3ccac69ade20` | `credential-groups-01-e1-neg-cache-absent` |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `fe-gate` | 6 | 8 | `bb073724-acb1-4bbd-a3b6-6504c67708bd`; `2961d9f6-ffc5-4eee-8f65-bae50f6d8e27`; `2ef21e76-6d87-4a24-87f3-96adf7c5d0c1`; `37ce9c2a-ee17-418e-b426-2fc881575e38`; `931ce826-7264-4cbf-8ca3-cf3d23e1684e`; `c94f080a-6322-46de-baf7-3cde7c51b0ea` | `fe-gate-02-vite-zero-mod-proof`; `fe-gate-03-vitest-econnrefused-noise`; `fe-gate-04-vitest-run-cwd`; `fe-gate-05-token-census-grep`; `fe-gate-06-src-only-commit-not-failure`; `fe-gate-07-e8-token-exists-48-not-47` |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `cred-groups` | 1 | 7 | `d383c4d8-6966-4b19-80d2-6d4234227ade` | `cred-groups-04-kind-gate-chat-only` |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `model-copy` | 7 | 7 | `d34d254c-8b16-45fe-b9b2-b663287cb732`; `eabfeb3e-d747-41c1-acac-2a407a8532e2`; `7f6563d7-724f-450e-a9bf-12f4454a6f73`; `05653c3b-de4b-42fc-bc40-5706934b0589`; `16a11904-4a33-4f06-b1f8-c69740113d93`; `e85d8876-33ab-479e-ae13-e167b9ec1be5`; `c5a81e88-9758-489a-8d4a-3b57d4bda766` | `model-copy-01-semantics`; `model-copy-02-route-mux`; `model-copy-02-routing`; `model-copy-03-atomicity`; `model-copy-03-direct-id-resolution`; `model-copy-04-copy-dialog-close`; `model-copy-05-copy-dialog-reentrancy` |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `prompt-assent` | 4 | 6 | `f91f7c0b-0fef-4a8b-8cc0-e2a117731c5d`; `6b58af57-7a84-4125-ac6d-e3bd55ea8c9e`; `03a6ad0a-3e07-43f2-914e-2b5c17a68d20`; `537b950c-79e0-44bd-960e-9e235a66d3e7` | `prompt-assent-01-gate-owner-and-evidence`; `prompt-assent-02-category-registration-seam`; `prompt-assent-03-paths-use-assent-not-assist`; `prompt-assent-04-dm-shield-tool-gate` |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `copy-model` | 2 | 5 | `24709d86-2f97-4895-970a-373f4f31181a`; `ef3daedd-4442-4049-be8b-ce8c0e134e88` | `copy-model-01-marker-false-positive`; `copy-model-02-ship-image-v189` |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `gc-p4` | 3 | 5 | `ff138b47-ed4b-4fe8-aebb-b1f48ff72700`; `8820fcd6-9851-45dc-8cd8-4885a55080db`; `96c3c897-abb0-4e43-b6dd-f25c3fb5c847` | `gc-p4-01-nudge-gate-executed-graph-green`; `gc-p4-02-executed-graph-probe-recipe`; `gc-p4-03-note-drop-turn-end-reminder` |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `quota-mint-scope` | 2 | 5 | `963b52da-9115-4740-86f6-856efeca6daf`; `4f2e76c3-b87d-4ec7-83f9-1219f4aebf84` | `quota-mint-scope-01-model-layer-empty`; `quota-mint-scope-02-account-body-layers` |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `skill-evo` | 5 | 5 | `5a94310b-ce83-4177-b6c4-35225382a8d1`; `45ba3e0d-ee6c-490a-8698-92265af8c8c1`; `3a77e49d-3d24-429d-8842-303c2309cdec`; `ce3a2820-6eb1-4b44-b774-56ec9608295d`; `688b9bcc-25a4-47b7-88bc-c6ac25f21d26` | `skill-evo-01-testpack-exitcode-gate`; `skill-evo-02-testpack-addonly-patch-rule`; `skill-evo-03-testpack-ab-deadlock`; `skill-evo-04-keeper-missing-deactivate-tool`; `skill-evo-05-testpack-canonical-patch-spec` |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `binding-ttl` | 4 | 4 | `7b21cd68-48d2-4492-be58-95acfb71d187`; `a155efab-9839-4189-a814-0d4fd54f6800`; `c8128475-895e-4bcc-bfc6-bc48c47d097d`; `043bc856-1c09-4053-8cea-23f8b0791cc5` | `binding-ttl-01-no-clamp-below-floor`; `binding-ttl-02-zero-ttl-normalized`; `binding-ttl-03-config-dep-edge-preexisting`; `binding-ttl-03-grouplb-test-determinism` |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `gc-gate` | 3 | 4 | `5ddf201c-4879-478b-a759-5e6d909237f3`; `0a6870dc-77ba-4822-a86c-f03e7925acec`; `c1346dd6-5078-48cd-94a1-d16ee0c49a01` | `gc-gate-01-fence-family-exclusions`; `gc-gate-02-floor-scope-composition-flakes`; `gc-gate-03-filter-side-pin` |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `group-chat` | 3 | 4 | `7e439bcf-1202-4084-855a-ea678e073e37`; `e71966f5-75fa-49f6-ba95-01768d3afaba`; `68246f52-81a1-4cb6-8577-b6a1c18a973a` | `group-chat-01-design-landed`; `group-chat-02-p1-committed-docs-stale`; `group-chat-03-p2-typed-collision-fix` |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `prompt-assist` | 2 | 3 | `6cdf61f7-a340-4624-8db8-9342c6a377dc`; `170d495f-fb72-4100-a9c0-f23f641e08fa` | `prompt-assist-01-discord-first-mint`; `prompt-assist-04-freshness-leg-second-race` |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `skill-e6` | 3 | 3 | `944483d7-0678-434c-a2c6-f6a0f09e003d`; `d5fde27d-8a2f-477e-b400-4faf1edb6216`; `0df359fe-4a6b-4c93-9cae-816798a97ee5` | `skill-e6-02-sweep-crowns-newer-gen`; `skill-e6-03-promote-did-not-resolve-backlog`; `skill-e6-04-a4-gauge-grew-not-collapsed` |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `snapshot-l3` | 3 | 3 | `08580dbd-f343-4a1b-b329-c5f0d24f243b`; `d31fa038-69b7-4690-aa17-5a4817c007d6`; `81447a12-7a29-463e-a0c2-514d9039c1fd` | `snapshot-l3-01-malformed-json-empty-collapse`; `snapshot-l3-02-base-red-set-one`; `snapshot-l3-04-drift-pin-identity-hazard` |
+
+**Reconciliation vs the caller's partial list (12 names).** credential-groups 1/8, fe-gate 6/8, cred-groups 1/7, model-copy 7/7, prompt-assent 4/6, skill-evo 5/5, copy-model 2/5, quota-mint-scope 2/5, gc-p4 3/5, binding-ttl 4/4, gc-gate 3/4, group-chat 3/4 — **all 12 reproduce EXACTLY** (same family, same numbered n, same prefix n): **no divergence in the over-cap set.** The caller's list did not name the 3 at-cap refusers; §3e adds exactly those three — `prompt-assist` 2/3 (named by the reviewer), `skill-e6` 3/3 and `snapshot-l3` 3/3. No family in the caller's list is absent from §3e.
+
+### 3e.1 First-numbered-admission class
+
+**Definition.** Families whose PREFIX count is already `>= POK_FAMILY_MAX` while their own NUMBERED count is `< 3` — the family has not filled its own ordinal slots, but the prefix superset already trips the gate, so the FIRST (or next) numbered admission into it is refused. Example: `gc-p3` — prefix count 3 (three unnumbered `gc-p3-*` rows), numbered n = 0 today → the first `gc-p3-01-*` write now refuses.
+
+**Exact counts (machine-derived).**
+
+- **n = 0** (no numbered member yet — the FIRST numbered admission refuses): **29 families**.
+- **n = 1..2** (one or two numbered members — the NEXT numbered admission refuses): **18 families**.
+- Total under the literal `numbered n < 3` wording: **47**.
+
+The caller's "~29 expected" matches the **n = 0 sub-class exactly (29)**; the n = 1..2 sub-class (18) is the same effect one or two ordinals later. Both sub-classes are listed below.
+
+**n = 0 — the FIRST numbered admission refuses (29 families):**
+
+| project | family | numbered n | prefix n |
+|---|---|---|---|
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `agenticfix` | 0 | 3 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `binding` | 0 | 4 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `copy` | 0 | 6 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `cred` | 0 | 7 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `credential` | 0 | 8 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `decision` | 0 | 6 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `decision-groups` | 0 | 3 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `fe` | 0 | 21 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `llmproxy` | 0 | 8 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `model` | 0 | 8 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `models` | 0 | 3 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `modelscache` | 0 | 3 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `quota` | 0 | 5 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `quota-mint` | 0 | 5 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `skill` | 0 | 6 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `smoke` | 0 | 3 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `decision` | 0 | 4 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `fe` | 0 | 5 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `fe-bundle` | 0 | 3 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `gate` | 0 | 5 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `gc` | 0 | 17 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `gc-p3` | 0 | 3 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `gc-p5` | 0 | 3 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `group` | 0 | 4 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `plan` | 0 | 4 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `prompt` | 0 | 9 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `proxy` | 0 | 3 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `snapshot` | 0 | 3 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `views` | 0 | 5 |
+
+**n = 1..2 — the NEXT numbered admission refuses (18 families):**
+
+| project | family | numbered n | prefix n |
+|---|---|---|---|
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `cachelayer` | 1 | 7 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `copy-model` | 2 | 5 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `cred-groups` | 1 | 7 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `credential-groups` | 1 | 8 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `quota-mint-scope` | 2 | 5 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `ship` | 2 | 5 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `testpack` | 2 | 3 |
+| `54debc61-f61c-4a59-bc02-2310e560a3a9` | `verify` | 2 | 4 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `bind` | 2 | 3 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `git` | 2 | 4 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `launcher` | 2 | 3 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `packs` | 1 | 4 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `promote` | 2 | 3 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `prompt-assist` | 2 | 3 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `rogue` | 1 | 5 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `sonic` | 2 | 4 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `stage` | 2 | 7 |
+| `83da04de-a410-4fb5-9e92-251a99d28a52` | `verify` | 2 | 4 |
+
 ## 4. Next consolidation wave starting map
 
 This section is the PM's next-wave map: every family that is AT or OVER the bound
@@ -808,6 +909,19 @@ rows of its own, and it would refuse on the `>= 3` prefix test even though only
 its own 3 rows are gated. The corrected key does not change this (the count is a
 `startswith` count under both keys); it changes WHICH rows are gated members, so it
 is the numbered count that decides how much of the pressure is real.
+
+**Render cost — why WIDE families are the wave's first target.** The `model-copy` family
+holds **7** ACTIVE members (project `54debc61…`) and that project holds **1** pinned row
+(`pipeline-03-deploy-order-daoduc-backup-first`) against the 2-per-project pin cap
+(`POK_PIN_CAP_PER_PROJECT = 2`) — the caller's shorthand is that `admit_view` therefore
+admits **~2 of ~11 candidate rows**. Machine-checked structural facts from the raw
+census: `model-copy` is 7 rows with 0 of its own pinned; the pin cap is 2 PER PROJECT;
+and under the CORRECTED key `model-copy` becomes ONE ATOMIC family unit (`admit_view`
+admits a family whole, against an 8-entry / 2,900-char block budget) — so a wide family
+is not merely many rows, it is one indivisible unit that can consume most of the block.
+The caller's exact admitted/omitted split is NOT re-derived here (`admit_view` is
+audience- and rank-dependent); the 2/11 figure is quoted WITH attribution. Wave
+priority: shrink the wide families first.
 
 ---
 *Generated 2026-11-18T21:12:38Z by the dual-key census generator (python3 stdlib) from the read-only

@@ -29,12 +29,17 @@ Per-entry family/audience table (§11 verbatim):
 5      deploy-01-daoduc-backup                         deploy-01    environment  operation
 6      deploy-02-ensem-dev-primary                     deploy-02    environment  operation
 7      healthz-in-cluster-only                         (unordered)  verify    both
-8      model-catalogs-19-vs-22-not-drift               (unordered)  catalog   operation
+8      model-catalogs-19-vs-22-not-drift               (1-member)    catalog   operation
 =====  ==============================================  ===========  ========  ======
 
 Families (§4.5 regex ``<family>-<NN>-<tail>``): ``pipeline`` (01→02→03,
 ordered spine) and ``deploy`` (01/02, the ordered atomic CONTRAST pair:
-backup Helm vs primary plain-kubectl). Entries 1, 7, 8 are unordered.
+backup Helm vs primary plain-kubectl), plus the 1-member family
+``model-catalogs`` (entry 8). Entries 1 and 7 are unordered (no ``-NN-``
+ordinal at all); entry 8 is NOT unordered under the CORRECTED multi-token
+key (``^([a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*)-(\\d{2})-(.+)$``) — it parses
+as family ``model-catalogs``, ordinal ``19``, and that ``19`` is a MODEL
+COUNT, not a step ordinal (decisions.md A-26a).
 Resulting views (ER-1): ari/leader/devops (operation ∪ both) → all 8;
 developer (implementation ∪ both) → 3 (entries 1, 2, 7).
 
