@@ -395,6 +395,7 @@ Reworded the claims enumerated below (a now-`UN_GATED` job claimed idle-gated):
 | `manager.py` `_run_skill_ab_inactivity_sweep` comment | `skill_ab_inactivity_sweep` |
 | `manager.py:7792` `_run_projectskill_gc` docstring | `project_skill_gc` |
 | `manager.py:4810` skill_ab_inactivity_sweep registration comment | `skill_ab_inactivity_sweep` |
+| `maintenance.py:476` `_run_pending_jobs` docstring summary line | the global idle-gate claim (now per-job policy) |
 
 Zero behavior change (comments/docstrings only); `daemon.manager` still
 imports.
@@ -404,6 +405,8 @@ imports.
 - Advisory #4 (duplicate import), #5 (test docstring says "StaticPool"
   where the file-backed fixture now applies), #6 (fix-notes count nit).
 - The capture-observability sink hermeticity nit — recorded only.
+- **Pre-existing residual (NOT lane work):** `daemon/services/malloc_tuner.py:10` — module docstring calls the `MaintenanceService` loop "hourly, idle-gated" for `malloc_trim`; that job is `UN_GATED` (`JOB_IDLE_POLICIES` in `daemon/services/maintenance.py`). The claim predates this lane (present at base `c36c3e07c`); the file is outside this lane's changed-file surface. The paired `daemon/manager.py:7729` `_run_malloc_trim` docstring WAS corrected in this lane, so this module docstring is an orphan of that sweep. Routed to a follow-up lane; not fixed here.
+- **Pre-existing residual (NOT lane work):** `daemon/services/blueprint_scan_service.py:3` — module docstring says "Runs when the system is idle AND auto_rebuild_enabled is True."; `blueprint_daily_scan` is `UN_GATED` (`JOB_IDLE_POLICIES` in `daemon/services/maintenance.py`) and that file contains no internal idle gate, so the claim is definitively stale. The claim predates this lane (present at base `c36c3e07c`); the file is outside this lane's changed-file surface. Routed to a follow-up lane; not fixed here.
 
 ## Review fix cycle 1 (council b442854d, 2026-11-19T02:08Z)
 
