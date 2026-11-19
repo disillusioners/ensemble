@@ -192,7 +192,7 @@ WEDGE_SOURCE: str = "system:watchdog:wedge"
 #: become re-eligible) is served by the S4/B2 episode-end evaluation
 #: instead. The constant is kept ONLY as an import-compatible symbol
 #: (no runtime path and — since the S4 TTL test was rewritten — no
-#: test in this tree references it); it MUST NOT be reintroduced as a
+#: test in this tree imports it); it MUST NOT be reintroduced as a
 #: suppression window.
 WEDGE_REARM_COOLDOWN_SECONDS: float = 30 * 60
 
@@ -1873,6 +1873,18 @@ class WaitingChildrenWatchdog:
             # open episode's codes can be re-evaluated even after the
             # parent has LEFT the WC scan set (its own notice flipped
             # WC→RUNNING).
+            # F8: the subjects declarations are hoisted ABOVE the
+            # candidates computation (the first raiser): if the
+            # ``sorted(set(...) | set(...))`` ever raises, the outer
+            # per-tick handler jumps straight to the episode-end
+            # evaluation, which reads both names — unbound names there
+            # would be a latent NameError.
+            subjects: dict[str, tuple[int, list["DependencyWatcher"]]] = {}
+            # R1(1): the subject read's failure is RECORDED, not
+            # silently absorbed — every consumer below must fail
+            # CLOSED on it (a fabricated "no watchers" would admit
+            # healthy parents to the classic-wedge arm).
+            subjects_read_failed = False
             _subject_candidates = sorted(
                 set(parent_ids) | set(self._wedge_notified)
             )
@@ -1916,12 +1928,6 @@ class WaitingChildrenWatchdog:
             # enqueue flips WC→RUNNING, so a membership-based end
             # would end its own episode and restore the hourly
             # re-notification loop).
-            subjects: dict[str, tuple[int, list["DependencyWatcher"]]] = {}
-            # R1(1): the subject read's failure is RECORDED, not
-            # silently absorbed — every consumer below must fail
-            # CLOSED on it (a fabricated "no watchers" would admit
-            # healthy parents to the classic-wedge arm).
-            subjects_read_failed = False
             try:
                 subjects = self._fetch_wedge_subjects(
                     _subject_candidates

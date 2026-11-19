@@ -2949,7 +2949,23 @@ class TestS3BlipPaths:
 
     House rule r2: observable ROW STATE (the notice rows) + the
     episode map — never a string grep.
+
+    SELF-GUARDING (the closing-commit doctrine): mutation-proven is
+    NOT self-guarding — an inert monkeypatch leaves a leg green. Every
+    injected failure in this class carries a CALL-COUNTER control that
+    asserts the injection actually FIRED (was consulted and raised).
     """
+
+    @staticmethod
+    def _counting_boom(message: str):
+        """A raising double that RECORDS its calls (the self-guard)."""
+        calls: list[str] = []
+
+        def _boom(*args, **kwargs):
+            calls.append(args[0] if args else "?")
+            raise RuntimeError(message)
+
+        return _boom, calls
 
     async def test_r3a_subject_read_failure_leaves_the_episode_untouched(
         self, engine, s1_bus, s1_manager, monkeypatch
@@ -2961,15 +2977,14 @@ class TestS3BlipPaths:
             engine, "s4-blip-subject", parent_id=None,
             status="waiting_children",
         )
+        # LOAD-BEARING SEED (F7 note): the watched child's row MUST
+        # exist (a MISSING child row counts as fulfillable), so
+        # without this terminal child the subject would be EMPTY and
+        # the stamped codes would not include ``pending_watchers``.
         _s1_seed_instance(
             engine, "s4-blip-subject-dead", parent_id=None,
             status="completed",
         )
-        # The parent ALSO carries an UNFULFILLABLE watcher (its watched
-        # child is already terminal) ⇒ the stamped codes include
-        # ``pending_watchers`` — the code whose read is about to fail.
-        # (Without it the episode's stamped codes would not touch the
-        # subject read at all and the case would not discriminate.)
         _s3_seed_watcher(
             engine, target_instance_id=parent,
             child_id="s4-blip-subject-dead",
@@ -2987,16 +3002,20 @@ class TestS3BlipPaths:
             f"subject-read leg (got {stamped!r})"
         )
 
-        # The subject read now FAILS.
-        def _boom(*args, **kwargs):
-            raise RuntimeError("subject read exploded")
-
+        # The subject read now FAILS — with a CALL-COUNTER control.
+        _boom, _calls = self._counting_boom("subject read exploded")
         monkeypatch.setattr(
             s1_bus, "fetch_pending_subject_for_targets_sync", _boom
         )
 
         await w.run_once()
 
+        # SELF-GUARD (F1): the injection must have actually FIRED —
+        # an inert patch would leave this leg green for nothing.
+        assert _calls, (
+            "R3(a) SELF-GUARD: the subject-read injection never fired "
+            "(an inert monkeypatch is not evidence)"
+        )
         assert len(_s4_notice_rows(engine)) == 1, (
             "R3(a): a subject-read failure must emit ZERO new notices"
         )
@@ -3016,22 +3035,22 @@ class TestS3BlipPaths:
             engine, "s4-blip-classic", parent_id=None,
             status="waiting_children",
         )
-        _s1_seed_instance(
-            engine, "s4-blip-classic-dead", parent_id=None,
-            status="completed",
-        )
+        # (F7: the old inert ``s4-blip-classic-dead`` seed — an
+        # instance with parent_id=None that this parent never sees —
+        # was DELETED; the parent is childless by construction.)
         s1_manager._queue_repository = _s4_queue_repo(engine)
         w = _s4_watchdog(s1_manager)
 
-        def _boom(*args, **kwargs):
-            raise RuntimeError("subject read exploded")
-
+        _boom, _calls = self._counting_boom("subject read exploded")
         monkeypatch.setattr(
             s1_bus, "fetch_pending_subject_for_targets_sync", _boom
         )
 
         await w.run_once()
 
+        assert _calls, (
+            "R3(b) SELF-GUARD: the subject-read injection never fired"
+        )
         assert _s4_notice_rows(engine) == [], (
             "R3(b): a failed subject read must NOT admit the classic-"
             "wedge arm (no false wedge notice on a DB hiccup)"
@@ -3040,39 +3059,214 @@ class TestS3BlipPaths:
     async def test_r3c_carrier_read_exception_completes_the_tick(
         self, engine, s1_bus, s1_manager, monkeypatch
     ):
-        """R3(c) — a carrier-read EXCEPTION ⇒ the tick COMPLETES (no
-        crash) and the episode is UNCHANGED (no notice, no drop)."""
+        """R3(c), HARDENED (RV-1) — a carrier-read EXCEPTION on ONE
+        parent while a SECOND parent's reads succeed in the SAME tick:
+
+        * the tick COMPLETES (the sibling's notice lands — the blip
+          does not kill the tick), and
+        * the blipped parent emits NO new notice and its episode is
+          UNCHANGED.
+
+        FINGERPRINT-CHANGING (RV-1): a queued completion_report row is
+        seeded AFTER the first notice, so the blipped parent's code set
+        WOULD differ on this tick — under a pre-R1 carrier arm (an
+        UNKNOWN carrier read as "no carrier") the recomputed
+        fingerprint would differ from the stamped one and a SECOND
+        notice would fire. The assertion "still exactly ONE row" is
+        therefore discriminating against that reversion.
+        """
         parent = _s1_seed_instance(
             engine, "s4-blip-carrier", parent_id=None,
             status="waiting_children",
         )
-        _s1_seed_instance(
-            engine, "s4-blip-carrier-dead", parent_id=None,
-            status="completed",
+        sibling = _s1_seed_instance(
+            engine, "s4-blip-carrier-sibling", parent_id=None,
+            status="waiting_children",
         )
-        s1_manager._queue_repository = _s4_queue_repo(engine)
+        # (F7: the old inert ``s4-blip-carrier-dead`` seed was DELETED
+        # — both parents are childless by construction.)
+        queue_repo = _s4_queue_repo(engine)
+        s1_manager._queue_repository = queue_repo
         w = _s4_watchdog(s1_manager)
 
+        # Tick 1 — both parents notice (two episodes open).
         await w.run_once()
-        assert len(_s4_notice_rows(engine)) == 1
+        assert len(_s4_notice_rows(engine)) == 2
         stamped = w._wedge_notified.get(parent)
         assert stamped
 
-        def _carrier_boom(*args, **kwargs):
-            raise RuntimeError("carrier probe exploded")
+        # The FINGERPRINT-CHANGING event: a queued completion_report
+        # row appears for the blipped parent (its code set on this
+        # tick would now include ``queued_report``).
+        queue_repo.enqueue(
+            instance_id=parent,
+            content="child completion report",
+            source="internal_report:child",
+            message_metadata={"type": "completion_report"},
+        )
+        with SQLModelSessionLib(engine) as s:
+            for _row in s.exec(
+                sqlmodel_select(MessageQueue).where(
+                    MessageQueue.instance_id == parent
+                )
+            ):
+                if _row.source == "internal_report:child":
+                    _row.type = "completion_report"
+                    s.add(_row)
+            s.commit()
+
+        # The carrier probe now RAISES for the blipped parent ONLY —
+        # the sibling's reads succeed (the multi-parent control).
+        _boom, _calls = self._counting_boom("carrier probe exploded")
+
+        def _selective_carrier(instance_id):
+            if instance_id == parent:
+                return _boom(instance_id)
+            return []
 
         monkeypatch.setattr(
             s1_manager._task_repo,
             "list_live_process_report_carriers_for_instance",
-            _carrier_boom,
+            _selective_carrier,
         )
 
         await w.run_once()  # the tick must COMPLETE
 
-        assert len(_s4_notice_rows(engine)) == 1, (
-            "R3(c): a carrier-read failure must emit ZERO new notices"
+        assert _calls and all(c == parent for c in _calls), (
+            "R3(c) SELF-GUARD: the carrier injection must have fired "
+            f"for the blipped parent and NEVER for the sibling "
+            f"(calls={_calls!r})"
+        )
+        rows_for_parent = [
+            row
+            for row in _s4_notice_rows(engine)
+            if row.instance_id == parent
+        ]
+        assert len(rows_for_parent) == 1, (
+            "R3(c): an unknown carrier state must emit ZERO new "
+            "notices for the blipped parent — and (RV-1) the "
+            "fingerprint-changing queue row means a pre-R1 carrier "
+            "arm WOULD have re-notified here"
         )
         assert w._wedge_notified.get(parent) == stamped, (
             "R3(c): a carrier-read failure must leave the episode map "
             f"UNCHANGED (got {w._wedge_notified.get(parent)!r})"
+        )
+        # The sibling's notice landed ⇒ the tick COMPLETED.
+        rows_for_sibling = [
+            row
+            for row in _s4_notice_rows(engine)
+            if row.instance_id == sibling
+        ]
+        assert len(rows_for_sibling) == 1, (
+            "R3(c): the sibling parent's reads succeeded — its notice "
+            "must land (the blip must not kill the tick)"
+        )
+
+    async def test_r3d_fresh_episode_unknown_carrier_emits_no_notice(
+        self, engine, s1_bus, s1_manager, monkeypatch
+    ):
+        """R3(d) (F4) — a FRESH episode (no prior notice) with an
+        UNKNOWN carrier state (the probe raises) ⇒ NO notice is
+        emitted, with the boom-called control.
+
+        This pins the IN-LOOP carrier-None guard: on a fresh episode,
+        deleting that guard admits the parent with ``carrier=None``
+        (falsy ⇒ read as "no carrier") and mints a FALSE WEDGE NOTICE
+        on an unknown state — this lane's own harm class."""
+        _s1_seed_instance(
+            engine, "s4-blip-fresh", parent_id=None,
+            status="waiting_children",
+        )
+        s1_manager._queue_repository = _s4_queue_repo(engine)
+        w = _s4_watchdog(s1_manager)
+
+        _boom, _calls = self._counting_boom("carrier probe exploded")
+        monkeypatch.setattr(
+            s1_manager._task_repo,
+            "list_live_process_report_carriers_for_instance",
+            _boom,
+        )
+
+        await w.run_once()
+
+        assert _calls, (
+            "R3(d) SELF-GUARD: the carrier injection never fired"
+        )
+        assert _s4_notice_rows(engine) == [], (
+            "R3(d): an UNKNOWN carrier state on a fresh episode must "
+            "emit NO notice (a false wedge notice is the harm)"
+        )
+
+    async def test_f5_queued_report_read_failure_leaves_episode_untouched(
+        self, engine, s1_bus, s1_manager, monkeypatch
+    ):
+        """F5 — an episode stamped with ``queued_report`` + an injected
+        QUEUE-READ failure ⇒ the episode is UNCHANGED and ZERO new
+        notices (the tri-state in ``_queued_completion_report_id``:
+        a swallowed error is distinguishable from "no queued report",
+        so the code's episode cannot end on a queue-read blip)."""
+        parent = _s1_seed_instance(
+            engine, "s4-blip-queue", parent_id=None,
+            status="waiting_children",
+        )
+        queue_repo = _s4_queue_repo(engine)
+        s1_manager._queue_repository = queue_repo
+        # The queued completion_report row — the reason the episode is
+        # stamped with the ``queued_report`` code.
+        queue_repo.enqueue(
+            instance_id=parent,
+            content="child completion report",
+            source="internal_report:child",
+            message_metadata={"type": "completion_report"},
+        )
+        with SQLModelSessionLib(engine) as s:
+            for _row in s.exec(
+                sqlmodel_select(MessageQueue).where(
+                    MessageQueue.instance_id == parent
+                )
+            ):
+                if _row.source == "internal_report:child":
+                    _row.type = "completion_report"
+                    s.add(_row)
+            s.commit()
+        w = _s4_watchdog(s1_manager)
+
+        # Tick 1 — the notice stamps the queued_report code.
+        await w.run_once()
+        assert len(_s4_notice_rows(engine)) == 1
+        stamped = w._wedge_notified.get(parent)
+        assert stamped and "queued_report" in stamped, (
+            f"F5 harness: the episode must be stamped with the "
+            f"queued_report code (got {stamped!r})"
+        )
+
+        # The parent leaves the WC scan set — the production posture
+        # (the notice's own enqueue flips WC→RUNNING), so tick 2
+        # exercises the END-EVALUATION consumer of the tri-state (the
+        # ``_wedge_code_still_holds`` queued_report leg).
+        with SQLModelSessionLib(engine) as s:
+            row = s.get(Instance, parent)
+            row.status = "running"
+            s.add(row)
+            s.commit()
+
+        # The queue read now FAILS — with the call-counter control.
+        _boom, _calls = self._counting_boom("queue read exploded")
+        monkeypatch.setattr(
+            s1_manager._queue_repository, "get_by_instance", _boom
+        )
+
+        await w.run_once()
+
+        assert _calls, (
+            "F5 SELF-GUARD: the queue-read injection never fired"
+        )
+        assert len(_s4_notice_rows(engine)) == 1, (
+            "F5: a queue-read failure must emit ZERO new notices"
+        )
+        assert w._wedge_notified.get(parent) == stamped, (
+            "F5: a queue-read failure must leave the episode map "
+            f"UNCHANGED (got {w._wedge_notified.get(parent)!r}, "
+            f"expected {stamped!r})"
         )
