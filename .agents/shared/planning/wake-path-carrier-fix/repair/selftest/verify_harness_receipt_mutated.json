@@ -1,0 +1,30 @@
+{
+  "banner": "VERIFY-HARNESS RECEIPT \u2014 MUTATED (simulates ONE parent-scoped row moving) \u2014 NOT a repair request.",
+  "inventory": {
+    "parent_scoped_sha256": "d79ccfce2b78988cae740815933784453e56c9e01b1018fee12128c263ebfa19",
+    "parent_scoped_rows": {
+      "5602e91d-5d4c-4fb6-9e2b-8f351d203f52": "watch_id='5602e91d-5d4c-4fb6-9e2b-8f351d203f52'\tsource_task_id='39564'\ttarget_instance_id='17efd2ef-9f98-46d4-b41b-60e3e32b2d13'\tstate='CANCELLED'\tcreated_at='2026-11-17T22:51:59.886304+00:00'\tfired_at=None\tenqueued_at=None",
+      "c83e12a2-83b8-46ce-9213-f5a24a5060f6": "watch_id='c83e12a2-83b8-46ce-9213-f5a24a5060f6'\tsource_task_id='39564'\ttarget_instance_id='17efd2ef-9f98-46d4-b41b-60e3e32b2d13'\tstate='PENDING'\tcreated_at='2026-11-17T22:53:05.940442+00:00'\tfired_at=None\tenqueued_at=None",
+      "c:06001f88-9e00-4720-8e59-88959d8faa75": "commission_id='06001f88-9e00-4720-8e59-88959d8faa75'\tmission_id='cb904c16-a982-41d4-9d33-2a04c7c2d6c0'\tcommissioner_instance_id='17efd2ef-9f98-46d4-b41b-60e3e32b2d13'\tworker_instance_id='82551f59-4603-4b88-bbce-c9bccfa6fcd5'\tlane='instance_nudge'\tstate='outstanding'\tcreated_at='2026-11-17T22:51:59.855255+00:00'\tsatisfied_at=None\tabandon_reason=None\tresolved_at=None\tadvisory='false'",
+      "c:a1561f19-2338-4053-9b7d-ea85c9d92613": "commission_id='a1561f19-2338-4053-9b7d-ea85c9d92613'\tmission_id='cb904c16-a982-41d4-9d33-2a04c7c2d6c0'\tcommissioner_instance_id='17efd2ef-9f98-46d4-b41b-60e3e32b2d13'\tworker_instance_id='82551f59-4603-4b88-bbce-c9bccfa6fcd5'\tlane='instance_nudge'\tstate='outstanding'\tcreated_at='2026-11-17T22:53:05.912797+00:00'\tsatisfied_at=None\tabandon_reason=None\tresolved_at=None\tadvisory='false'"
+    },
+    "parent_scoped_counts": {
+      "watchers": 2,
+      "commissions": 2
+    },
+    "global_sha256": "9743fdc8979b894c8dfbacabaa9ef9054c16723aed82d13857f3773e1d6b1a75",
+    "global_counts": {
+      "watchers": 12152,
+      "commissions": 4755
+    },
+    "parent_keys": {
+      "instance_id": "17efd2ef-9f98-46d4-b41b-60e3e32b2d13",
+      "agent_id": "ari",
+      "status": "running",
+      "parent_id": null,
+      "created_at": "2026-11-14T21:54:59.848480+00:00",
+      "updated_at": "2026-11-17T23:30:03.666775+00:00",
+      "version": 98
+    }
+  }
+}

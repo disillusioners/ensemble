@@ -1,0 +1,202 @@
+--- .agents/shared/planning/wake-path-carrier-fix/repair/reviewpacket/before-docfix/PACKET.md	2026-11-18 20:15:00.236212935 +0000
++++ .agents/shared/planning/wake-path-carrier-fix/repair/reviewpacket/PACKET.md	2026-11-18 20:18:04.365670818 +0000
+@@ -33,7 +33,7 @@
+ 
+ | assertion | what changed | why it is NOT an unknown world |
+ |---|---|---|
+-| A1 / A9 (parent status) | acceptable set `{waiting_children}` → `{waiting_children, running}`; a `running` observation is recorded and the instance is re-read ONCE (bound: exactly one re-read, no loop); any OTHER status or a missing parent still refuses | the parent alternates `running ⇄ waiting_children` on its hourly turn cycle (Appendix B measured a 17-minute `running` window). Mid-turn is a documented, self-resolving posture, not a defect. Refusing it would make the gate un-runnable while the Emperor works. |
++| A1 / A9 (parent status) | **INSPECTION tolerates `running`** (recorded; exactly ONE re-read, no loop; any OTHER status or a missing parent refuses). **EMISSION intentionally requires a settled `waiting_children` window** — the classifier's `parent_ok` is still `status == "waiting_children"` (`live_wedge_repair.py:1109-1113`), so a mid-turn `running` observation PASSES the assertion but REFUSES the emit (fail-closed by design, council-affirmed). | the parent alternates `running ⇄ waiting_children` on its hourly turn cycle (Appendix B measured a 17-minute `running` window). Mid-turn is a documented, self-resolving posture for INSPECTION; emission deliberately waits for a settled dock so the proposal is built against a stable world. |
+ | A3 (task 39320) | for a watcher still `PENDING`: missing source task → refuse. For an already-resolved (`CANCELLED`/`FIRED`) watcher: missing source task → PASS, annotated `source_task GC'd after resolution` | a resolved watcher's terminal state is recorded in the row itself; a resolved row can no longer fire (all three fire primitives match `state='PENDING'` only). The source task is no longer needed to prove anything; its GC is housekeeping. |
+ | A6 (task 39424) | same as A3 | same |
+ | A14 (task 39564) | same as A3, gated on BOTH W3 and W4 being resolved | same |
+@@ -44,8 +44,8 @@
+ ## (iii) Per-row backfill verdict (with code cites)
+ 
+ Re-arm candidate predicate (`find_cancelled_unenqueued_for_target`,
+-`repository.py:873-918`): `state='CANCELLED' AND enqueued_at IS NULL`.
+-Re-arm skip (`instance_lifecycle.py:4125-4260`, ~`4229-4239`):
++`repository.py:797-843`): `state='CANCELLED' AND enqueued_at IS NULL`.
++Re-arm skip (`instance_lifecycle.py:4214-4246`):
+ `if child.status in TERMINAL_STATUSES: continue`, where
+ `TERMINAL_STATUSES = {terminated, completed, error, failed}`
+ (`job_queue_service.py:126-131`); a missing child row is also skipped
+@@ -135,15 +135,16 @@
+   semantics flip the reason to `worker_terminal_no_report`; the emitter
+   re-derives the reason at emit from the live worker status and discloses the
+   flip. Not silently flipped.
+-- **New rows:** A8 drift guard refuses and names them; scope never auto-extended.
+-- **Parent posture at ceremony:** tolerant of `running` or `waiting_children`;
+-  any other status refuses.
++- **New rows:** A8 drift guard **IGNORES advisory rows** (`advisory_backfill=true`) — it refuses ONLY on NON-advisory unknowns (a PENDING watcher / outstanding non-advisory commission outside the 8-row set). So a new advisory row is tolerated by design and does NOT block the emit; a new non-advisory row refuses and is named. Scope is never auto-extended.
++- **Parent posture at ceremony:** INSPECTION tolerates `running` or `waiting_children`; EMISSION requires a settled `waiting_children` window (strict, `live_wedge_repair.py:1109-1113`, fail-closed by design and council-affirmed). Any other status refuses either way.
+ - **Lane 7 TTL backstop did NOT fire ~11 h past the 04:52/04:53Z expiry** for
+   M3/M4. Possibly the same wiring inertness as the periodic sweep
+   (`dependency_bus` constructed before `set_dependency_bus`, `api.py:1919-1920` vs
+   `:5710`). Note only — not investigated, not part of this repair.
+-- **`verify` check 4 baseline is empty by construction** (all 8 targets excluded;
+-  no other parent-scoped rows). Meaning: "no NEW parent-scoped row appeared."
++- **`verify` check 4 baseline is NOT empty:** the 3 advisory rows remain in the
++  parent-scoped baseline and check 4 PASSES by sha256 match (the 8 targets are
++  excluded; the advisory rows are not). Meaning: "no parent-scoped row moved
++  outside the target set."
+ - **Cosmetic residuals intentionally untouched** (minimality): old 4-row fixture
+   comment wording, `--verify` check-4 name, archived evidence capture.
+ 
+@@ -156,25 +157,46 @@
+ 
+ Emperor attestation: "Repair", 2026-11-18, Discord; board item wi-8f60e6f1.
+ 
+-## (viii) Execution preview (for the maintainer, not executed here)
++**Receipt context — causal precondition:** the mission leg holds the park only under `ENSEMBLE_MISSION_RECORDS=enforce` (`daemon/manager.py:13931-13935` @ `eca98397d`; confirmed enabled in live `.env:117`). With the feature OFF the mission-leg read returns a real 0 and only the bus gate would matter.
+ 
+-Per-block, in order, one dry-run + one confirm each, as `maintenancer`
+-(sole holder of the `ens-db` category), with `ENSEMBLE_REPAIR_ENABLED` on and
+-a single-use nonce minted by each dry run:
+-
+-1. `ens_db_repair_execute(sql=<block 1>, target_label="wake-path-carrier-fix/live-wedge/17efd2ef/w8#block1", dry_run=True)` → projected rowcount 1 + nonce
+-2. same with `confirm=True, dry_run=False, nonce=<nonce>` → commit
+-3. repeat for blocks 2..5 in file order
+-4. run `live_wedge_repair.py --verify --env-file /home/nea/agents-ensemble/.env`
+-   (expects: 0 PENDING, 0 outstanding, parent untouched, parent-scoped row diff
+-   empty)
+-
+-Every block is `WHERE <full PK> AND state='CANCELLED'|'outstanding'`-guarded and
+-idempotent (0 rows ⇒ NOTICE no-op, never an error), so a partial application is
+-safe to resume. Blocks 1–3 stamp `enqueued_at` only; blocks 4–5 abandon M3/M4
+-with `ttl_expired_not_live`. `repair_log` carries `sql_class='DDL'` (no row image)
+-for these blocks — the compensating control is the inventory `sha256` /
+-parent-scoped row diff re-checked by `--verify`.
++## (viii) Execution handoff — council-corrected 2026-11-18
++
++> **This handoff replaces the earlier "Execution preview". The emitted request
++> (`…T183256Z.*`) is unchanged and sound; only this handoff text was wrong.**
++
++**A. The corrected procedure (VERBATIM):**
++
++1. Run EXCLUSIVELY as maintenancer with ENSEMBLE_REPAIR_ENABLED enabled; confirm parent 17efd2ef is not mid-crisis and worker 82551f59 is still non-terminal (if terminal, HALT and RE-EMIT, never edit SQL).
++2. For each block N = 1..5 in file order from live_wedge_repair_request__20261118T183256Z.sql, paste ONLY the single `DO $$ ... $$;` block body (never a .sql filename):
++   - `ens_db_repair_execute(sql=<block N body>, target_label="wake-path-carrier-fix/live-wedge/17efd2ef/w8#blockN", dry_run=True)` → expect sql_class='OTHER', preview skipped (NO projected rowcount), and a minted nonce valid for 300 seconds.
++   - Within 300s: `ens_db_repair_execute(sql=<block N body>, target_label="wake-path-carrier-fix/live-wedge/17efd2ef/w8#blockN", dry_run=False, confirm=True, nonce=<nonce>)` → commit (repair_log.sql_class='OTHER'). If interrupted mid-sequence, safely resume from the next unapplied block.
++3. Run `live_wedge_repair.py --verify --env-file /home/nea/agents-ensemble/.env` → checks 1-4 must PASS (check 5 global churn failure is informational).
++
++**B. The factual corrections this handoff encodes (blocking amendments 1-4):**
++
++| # | correction | citation |
++|---|---|---|
++| 1 | At `eca98397d`, `DO $$ ... $$;` classifies as **OTHER**, not DDL (`_classify_sql` first-word heuristic: the head token is `DO`, not in the DDL set). So `_dry_run_sqlite_safe` takes the **preview-skipped** branch: the dry run MINTS the nonce and returns **NO "projected rowcount 1"**; the first SQL parse/execution happens on `confirm=True`; `repair_log.sql_class` records **`'OTHER'`**. | `daemon/tools/ens_db_tools.py:267-293` (`_classify_sql`), `:1548-1552` (preview-skipped branch) |
++| 2 | Nonce TTL = **300 s** (`REPAIR_NONCE_TTL_S`): each dry-run → confirm pair must complete within **5 minutes**. | `ens_db_tools.py:177`, `:557-561` |
++| 3 | Executor session identity: run **strictly as `maintenancer`** (sole holder of `ens-db`). `dependency_watchers` / `mission_commissions` are NOT in `_SELF_SURGERY_TABLES`, so `_refuse_self_surgery` should not fire on blocks ④/⑤ — but councilors disagreed, so state it plainly: **EITHER WAY `maintenancer` is mandatory and safe; treat any self-surgery refusal as a WRONG-SESSION signal, not a repair failure.** | `_SELF_SURGERY_TABLES` `ens_db_tools.py:253-261`; `_refuse_self_surgery` `:461-468` |
++| 4 | Input rules: pass ONLY the raw `DO $$ ... $$;` block BODY in `sql` (never a `*.sql` path — rejected by the migration-runner trap). One block per call is CALLER-ENFORCED (the tool runs one `sql` string per call). | `_SQL_FILENAME_RE` `ens_db_tools.py:222` |
++
++> **Emitter docstring overstatement (deferred):** `_do_block`'s docstring still claims the
++> executor classifies the block as DDL. That is the same overstatement — deferred to the
++> NEXT emitter touch. **Do NOT edit the emitter now.**
++
++**C. Pre/post ceremony guardrails (amendment 6):**
++
++- **Pre-execution:** if worker `82551f59` goes terminal, or an unexpected **NON-advisory** commission appears, before execution → **RE-EMIT in a settled window — never hand-edit the SQL.** (The emitted file is immutable evidence.)
++- **Post-execution:** `--verify` checks **1-4** must PASS. Check 5 (global inventory churn) failing is **informational only** and does not block.
++
++**D. Advisory items recorded (no action now):**
++
++- **Classifier-flag ruling:** the emission gate is an INTENTIONAL fail-closed design (strict settled-window requirement); this packet had overstated it (corrected in §(ii) and §(vi)). **No code change this ceremony.** A 1-line fix exists (drop `parent_mid_turn` from the classifier refusal) but is **NOT recommended**; on the parent's ~1 h cycle (~17-min `running` window) settled-window availability is ~1 h → re-emission refusal risk LOW.
++- **FUTURE re-emission gap (blocking ONLY if ever re-emitting):** the classifier never reads `a["ok"]` (`live_wedge_repair.py:1422`, `:1776`) — wire `all(a["ok"] for a in assertions)` into the emission gate before ANY future re-emit, and refresh the selftest fixture run (latest transcript predates the amendment). **Not done now — pre-re-emission checklist item.**
++- **Causal precondition:** the mission leg holds the park only under `ENSEMBLE_MISSION_RECORDS=enforce` (`daemon/manager.py:13931-13935` @ `eca98397d`; confirmed enabled in live `.env:117`).
++- **Lane-7 wiring hypothesis** (`api.py:1919-1920` vs `:5710`): a **SEPARATE bug investigation OUTSIDE this repair** — recorded, not investigated.
++- **Anchor corrections applied:** `find_cancelled_unenqueued_for_target` = `repository.py:797-843` (not `:873-918`); re-arm skip = `instance_lifecycle.py:4214-4246`; `transition_commission_state` = `mission_record/repository.py:724-771`.
+ 
+ ---
+ 
+--- .agents/shared/planning/wake-path-carrier-fix/repair/reviewpacket/before-docfix/RUNBOOK.md	2026-11-18 20:15:00.242212985 +0000
++++ .agents/shared/planning/wake-path-carrier-fix/repair/RUNBOOK.md	2026-11-18 20:18:04.365670818 +0000
+@@ -140,7 +140,7 @@
+ |---|---|
+ | Tool: `ens_db_repair_execute(sql, confirm, nonce, target_label, dry_run)` — "three independent gates ALL must clear before commit" | `daemon/tools/ens_db_tools.py:939-1180` |
+ | Gate 0 — kill-switch `ENSEMBLE_REPAIR_ENABLED` (default ON; flag-OFF = byte-identical no-op) | `daemon/tools/ens_db_tools.py:137-190` (`_resolve_repair_enabled`), gate site `:996-1002` |
+-| Gate 1 — input validation: migration-runner trap, idempotency (DDL must carry `DO $$` etc.; DML must avoid `now()`/`current_timestamp`/`random()`…), self-surgery refusal (calling instance id literal / audit-sensitive tables `instances`, `messages`, `message_queue`, `tasks`, `events`, `schema_migrations`) | `daemon/tools/ens_db_tools.py:401-445` (`_is_idempotent`), `:257` (`_SELF_SURGERY_TABLES`), `:447-500` (`_refuse_self_surgery`) |
++| Gate 1 — input validation: migration-runner trap, idempotency (`DO $$` blocks classify as **OTHER** and pass the idempotency gate's fall-through; DML must avoid `now()`/`current_timestamp`/`random()`…), self-surgery refusal (calling instance id literal / audit-sensitive tables `instances`, `messages`, `message_queue`, `tasks`, `events`, `schema_migrations`) | `daemon/tools/ens_db_tools.py:401-445` (`_is_idempotent`), `:253-261` (`_SELF_SURGERY_TABLES`), `:461-468` (`_refuse_self_surgery`) |
+ | Gate 2 — single-use confirm nonce, 5-minute TTL, action-bound to `target=<target_label>`; **the DRY RUN mints it, the confirm call consumes it** | `daemon/tools/ens_db_tools.py:498+` (`_RepairNonceStore`), gate site `:1023-1040` |
+ | Audit — every dry-run and every commit writes `repair_log` in the SAME transaction, fail-closed | `daemon/tools/ens_db_tools.py` (module docstring §"Audit contract"), `daemon/repositories/ens_db/models.py:45` |
+ | Who can call it: the privileged `ens-db` category, allow-listed on **`maintenancer` only** | `agents/maintenancer/meta.json` → `tools.allow` contains `"ens-db"` |
+@@ -150,14 +150,16 @@
+ **Operator path under Emperor authorisation (the only one):**
+ 
+ 1. Emperor reads `…__<ts>.receipt.md` and authorises (the `user_confirmed` factor).
+-2. The authorised agent (a `maintenancer` instance) submits **block 1** with `dry_run=True`, `target_label="wake-path-carrier-fix/live-wedge/17efd2ef/w8#block1"` ⇒ reads the projected row count from the dry-run preview (must be 1) and receives the nonce.
+-3. Same block with `confirm=True`, `dry_run=False`, `nonce=<from step 2>` ⇒ commits.
+-4. Repeat for blocks 2..N in the file's order.
+-5. Run §6 `--verify`.
++2. The authorised agent (a `maintenancer` instance — **mandatory**; sole holder of `ens-db`) submits **block 1** with `dry_run=True`, `target_label="wake-path-carrier-fix/live-wedge/17efd2ef/w8#block1"` and the **raw `DO $$ … $$;` block body** (never a `*.sql` path — rejected by the migration-runner trap). Expect `sql_class='OTHER'`, **preview skipped (NO projected rowcount)**, and a minted nonce **valid for 300 s**.
++3. **Within 300 s:** same block with `confirm=True`, `dry_run=False`, `nonce=<from step 2>` ⇒ commits (`repair_log.sql_class='OTHER'`). The first SQL parse/execution happens HERE, on confirm.
++4. Repeat for blocks 2..N in the file's order (one block per call — caller-enforced).
++5. Run §6 `--verify`. If interrupted mid-sequence, safely resume from the next unapplied block.
++
++**Wrong-session signal:** `dependency_watchers` / `mission_commissions` are NOT in `_SELF_SURGERY_TABLES`, so `_refuse_self_surgery` should not fire on blocks ④/⑤ — but councilors disagreed, so treat any self-surgery refusal as a **WRONG-SESSION signal, not a repair failure** (re-check the identity is `maintenancer`).
+ 
+ Every block is `WHERE <full PK> AND <current state>`-guarded and idempotent: a block that has already landed yields **0 rows** and raises nothing, so an interrupted sequence is safe to resume.
+ 
+-**Why every block is a `DO $$` block instead of a bare `UPDATE`:** the executor's idempotency gate rejects DML containing `now()` (`_NON_IDEMPOTENT_TOKENS`, `ens_db_tools.py:229-241`) — and these stamps must be evaluated at **execution** time, not emit time. A `DO $$` block is classified DDL and accepted via the `DO $$` marker, keeps the guarded `WHERE`, keeps `now()` at execution time, and reports rowcount via `GET DIAGNOSTICS` (0 ⇒ `NOTICE: no-op`, 1 ⇒ repaired, >1 ⇒ `EXCEPTION` which rolls the transaction back). **Declared trade-off:** `repair_log` therefore carries `sql_class='DDL'` and no before/after row image for these blocks; the compensating control is the inventory `sha256` in the receipt, which `--verify` recomputes (§6, check 4) and which proves nothing outside the eight target rows moved.
++**Why every block is a `DO $$` block instead of a bare `UPDATE`:** the executor's idempotency gate rejects DML containing `now()` (`_NON_IDEMPOTENT_TOKENS`, `ens_db_tools.py:229-241`) — and these stamps must be evaluated at **execution** time, not emit time. At `eca98397d`, `DO $$ … $$;` is classified **OTHER**, not DDL (`_classify_sql` first-word heuristic, `ens_db_tools.py:267-293`), which has two consequences: (a) the **dry run takes the preview-skipped branch** (`:1548-1552`) — it mints the nonce but returns **no projected rowcount**, and the first SQL parse/execution is on `confirm=True`; (b) `repair_log.sql_class` records **`'OTHER'`**. The block still keeps the guarded `WHERE`, keeps `now()` at execution time, reports rowcount via `GET DIAGNOSTICS` (0 ⇒ `NOTICE: no-op`, 1 ⇒ repaired, >1 ⇒ `EXCEPTION` which rolls the transaction back), and passes the idempotency gate via the OTHER-class fall-through. **Declared trade-off:** `repair_log` carries `sql_class='OTHER'` and no before/after row image; the compensating control is the inventory `sha256` / parent-scoped row diff, re-checked by `--verify` (§6, check 4). *(The emitter's `_do_block` docstring still says "classified DDL" — same overstatement, deferred to the next emitter touch; the emitter is NOT edited here.)*
+ 
+ ---
+ 
+@@ -349,7 +351,7 @@
+ 
+ | assertion | what changed | why it is NOT an unknown world |
+ |---|---|---|
+-| **A1 / A9** (parent status) | acceptable set widened from `{waiting_children}` to `{waiting_children, running}`; a `running` (mid-turn) observation is recorded and the instance is re-read ONCE (bound: exactly one re-read, no loop); any OTHER status or a missing parent still refuses | the parent alternates `running ⇄ waiting_children` on its hourly turn cycle (Appendix B: 17-minute `running` window). Mid-turn is a documented, self-resolving posture, not a defect. Refusing it would make the gate un-runnable while the Emperor works. |
++| **A1 / A9** (parent status) | **INSPECTION tolerates `running`** (recorded; exactly ONE re-read, no loop; any OTHER status or a missing parent refuses). **EMISSION intentionally requires a settled `waiting_children` window** — the classifier still refuses a mid-turn parent (`live_wedge_repair.py:1109-1113`), fail-closed by design, council-affirmed. | the parent alternates `running ⇄ waiting_children` on its hourly turn cycle (Appendix B: 17-minute `running` window). Mid-turn is a documented, self-resolving posture FOR INSPECTION; emission deliberately waits for a settled dock so the proposal is built against a stable world. |
+ | **A3 / A6 / A14** (source-task existence) | for a watcher still `PENDING` (would be changed by this request) a missing source task remains an UNKNOWN → refuse. For an already-resolved (`CANCELLED`/`FIRED`) watcher a missing source task is an EXPECTED GC artifact → pass, annotated `source_task GC'd after resolution` | a resolved watcher's terminal state is recorded in the row itself and a resolved row can no longer fire (all three fire primitives match `state='PENDING'` only). The source task is no longer needed to prove anything; its GC is housekeeping, not a world change. |
+ 
+ ### Kept exactly as-is (rule (c))
+@@ -364,7 +366,7 @@
+ 
+ ### Backfill verdict (from the code, re-measured at `eca98397d`)
+ 
+-Re-arm candidate predicate (`find_cancelled_unenqueued_for_target`, `repository.py:873-918`): `state='CANCELLED' AND enqueued_at IS NULL`. Re-arm skip (`instance_lifecycle.py:4125-4260`, `~4229-4239`): `if child.status in TERMINAL_STATUSES: continue`, where `TERMINAL_STATUSES = {terminated, completed, error, failed}` (`job_queue_service.py:126-131`); a missing child row is also skipped (`child is None -> continue`).
++Re-arm candidate predicate (`find_cancelled_unenqueued_for_target`, `repository.py:797-843`): `state='CANCELLED' AND enqueued_at IS NULL`. Re-arm skip (`instance_lifecycle.py:4214-4246`): `if child.status in TERMINAL_STATUSES: continue`, where `TERMINAL_STATUSES = {terminated, completed, error, failed}` (`job_queue_service.py:126-131`); a missing child row is also skipped (`child is None -> continue`).
+ 
+ | watcher | child | child status | verdict |
+ |---|---|---|---|
+@@ -382,9 +384,29 @@
+ ### Residual analysis (what could still move before ceremony)
+ 
+ - `82551f59` terminality: M3/M4's reason is `ttl_expired_not_live` only while the worker stays non-terminal. If it goes terminal, lane-7 semantics flip the reason to `worker_terminal_no_report` and the emitter must disclose the flip (the reason is re-derived at emit from the live worker status, never flipped silently).
+-- Possible new rows: the A8 drift guard refuses and names them; scope is never auto-extended.
+-- Parent posture at ceremony: tolerant of `running`; any other status refuses.
+-- **Observation (note only):** lane 7's TTL backstop did NOT fire ~11 h past the 04:52/04:53Z expiry for M3/M4. Possibly the same wiring inertness as the periodic sweep (`dependency_bus` wired after the sweep is constructed, `api.py:1919-1920` vs `:5710`); not investigated, not part of this repair.
++- Possible new rows: the A8 drift guard **IGNORES advisory rows** (`advisory_backfill=true`) and refuses ONLY on NON-advisory unknowns (naming them). Scope is never auto-extended.
++- Parent posture at ceremony: INSPECTION tolerates `running`; EMISSION requires a settled `waiting_children` window (strict, `live_wedge_repair.py:1109-1113`); any other status refuses.
++- **Causal precondition:** the mission leg holds the park only under `ENSEMBLE_MISSION_RECORDS=enforce` (`daemon/manager.py:13931-13935` @ `eca98397d`; confirmed enabled in live `.env:117`).
++- **Observation (note only):** lane 7's TTL backstop did NOT fire ~11 h past the 04:52/04:53Z expiry for M3/M4. Recorded as a **SEPARATE bug investigation OUTSIDE this repair** (hypothesis: `dependency_bus` wired after the sweep is constructed, `api.py:1919-1920` vs `:5710`); not investigated here.
++- **`--verify` check 4 baseline is NOT empty:** the 3 advisory rows remain in the parent-scoped baseline and check 4 passes by sha256 match; check 5 (global churn) is informational only.
++
++### Execution handoff — council-corrected 2026-11-18
++
++> Replaces the earlier preview text. The emitted request (`…T183256Z.*`) is unchanged and sound; only the handoff text was wrong.
++
++**Corrected procedure (VERBATIM):**
++
++1. Run EXCLUSIVELY as maintenancer with ENSEMBLE_REPAIR_ENABLED enabled; confirm parent 17efd2ef is not mid-crisis and worker 82551f59 is still non-terminal (if terminal, HALT and RE-EMIT, never edit SQL).
++2. For each block N = 1..5 in file order from live_wedge_repair_request__20261118T183256Z.sql, paste ONLY the single `DO $$ ... $$;` block body (never a .sql filename):
++   - `ens_db_repair_execute(sql=<block N body>, target_label="wake-path-carrier-fix/live-wedge/17efd2ef/w8#blockN", dry_run=True)` → expect sql_class='OTHER', preview skipped (NO projected rowcount), and a minted nonce valid for 300 seconds.
++   - Within 300s: `ens_db_repair_execute(sql=<block N body>, target_label="wake-path-carrier-fix/live-wedge/17efd2ef/w8#blockN", dry_run=False, confirm=True, nonce=<nonce>)` → commit (repair_log.sql_class='OTHER'). If interrupted mid-sequence, safely resume from the next unapplied block.
++3. Run `live_wedge_repair.py --verify --env-file /home/nea/agents-ensemble/.env` → checks 1-4 must PASS (check 5 global churn failure is informational).
++
++**Factual corrections encoded:** (1) `DO $$` = sql_class **OTHER** → preview skipped, no projected rowcount, nonce still minted, first parse on confirm (`ens_db_tools.py:267-293`, `:1548-1552`); (2) nonce TTL **300 s** (`:177`, `:557-561`); (3) **maintenancer mandatory** — any self-surgery refusal is a WRONG-SESSION signal, not a repair failure (`_SELF_SURGERY_TABLES` `:253-261`, `_refuse_self_surgery` `:461-468`); (4) pass ONLY the raw block body, never a `.sql` path (`:222`), one block per call (caller-enforced). The emitter's `_do_block` docstring carries the same DDL overstatement — deferred to the next emitter touch, NOT edited here.
++
++**Guardrails:** pre-execution — if worker 82551f59 goes terminal or an unexpected NON-advisory commission appears → **RE-EMIT in a settled window, never hand-edit the SQL**. Post-execution — `--verify` checks 1-4 must PASS (check 5 informational).
++
++**Advisories (no action now):** the emission gate is an INTENTIONAL fail-closed design (no code change this ceremony; the 1-line classifier relaxation is NOT recommended; settled-window availability ~1 h, refusal risk LOW). **FUTURE re-emission gap:** the classifier never reads `a["ok"]` (`live_wedge_repair.py:1422`, `:1776`) — wire `all(a["ok"] for a in assertions)` into the emission gate before ANY future re-emit and refresh the selftest fixture run; NOT done now. Anchor corrections applied: `find_cancelled_unenqueued_for_target` = `repository.py:797-843`; re-arm skip = `instance_lifecycle.py:4214-4246`; `transition_commission_state` = `mission_record/repository.py:724-771`.
+ 
+ 
+ ---
+@@ -396,7 +418,7 @@
+ | **S1** | **Park predicate** = bus-count-only. `_maybe_transition_to_waiting_children` reads `bus.count_pending_for_target(instance_id)`; `pending <= 0` returns False; otherwise an atomic `transition_status_if(RUNNING → WAITING_CHILDREN)`. The count itself is `WHERE target_instance_id = :t AND state = 'PENDING'` — it never looks at the watched work. A second park site (root-lane completion defer) uses the same count via `count_pending_for_target_sync`. | `daemon/services/message_processing_pipeline.py:1279`, `:1329`, `:1330`, `:1335-1340`; `daemon/services/child_reports.py:3511`; `daemon/repositories/dependency_bus/repository.py:471-515` (`:506-515`) |
+ | **S2** | **Boot sweep: source-task-status-based, 30s age grace, no waiting-children grace, boot-only, cancel-only (never re-homes/wakes).** A restart **would** cancel both target rows (both source tasks terminal, both rows far older than 30s) and **would not** release the parent (extras survive; §10/§11.2). The periodic companion is **permanently inert** on the live build (wiring order). | `daemon/services/dependency_bus.py:2501`, `:2653-2666`, `:1753`; `daemon/api.py:5371`, `:1919-1920` vs `:5710`/`:2972`; `daemon/services/orphan_watcher_sweep.py:82`, `:200-280`; live log ticks 228–232 |
+ | **S3** | **Watcher target state = `CANCELLED`** (the only terminal non-`FIRED` state; enum `PENDING/FIRED/CANCELLED`, no `RETIRED`). Proof it is **inert**: every fire primitive matches `state='PENDING'` only — `fetch_pending_for_source` (`repository.py:149-174`, `:173`), `fetch_pending_for_target_and_child` (`:239`, child_id filter `:388-396`), `fetch_pending_for_child_instance` (`:343-395`), and the sweep's own `state = 'PENDING'` predicate. Proof it **cannot re-arm** once `enqueued_at` is stamped: the resurrection candidate predicate requires `enqueued_at IS NULL` (`repository.py:797-843`) and is driven only from the resume hook (`instance_lifecycle.py:4125-4260`). Proof it **releases the park count**: it leaves the `state='PENDING'` filter at `repository.py:513`. Reads of `watcher_metadata` (the JSONB column): **none** — no read site inspects it (`grep -rn watcher_metadata` → model/repository docstrings only), so a marker string there would be write-only and is deliberately not used. |
+-| **S4** | **Commission target state = `abandoned`** (terminal NON-success). `CommissionState = outstanding → satisfied | abandoned | superseded`; every transition is a guarded `UPDATE … WHERE state='outstanding'` that also stamps `resolved_at`, and `satisfied_at` is written **only** on `satisfied` — so `abandoned` cannot masquerade as delivery. Reason tokens are a **frozen vocabulary** (`worker_terminal_no_report` / `ttl_expired_not_live` / `worker_row_missing`); anything else raises in the service. It does not "move the problem": every reader keys on `state='outstanding'` (routing, census, quiet, L3 hold), so `abandoned` is invisible to all of them. | `daemon/repositories/mission_record/models.py:153-173`, `:380-500`; `daemon/repositories/mission_record/repository.py:724-766`; `daemon/constants.py:715`, `:721-726`; `daemon/services/mission_record_service.py:1046-1063`; readers `repository.py:159/192/214/240/396/443`, `mission_record_reads.py:239-289`, `child_reports.py:2691-2695` |
++| **S4** | **Commission target state = `abandoned`** (terminal NON-success). `CommissionState = outstanding → satisfied | abandoned | superseded`; every transition is a guarded `UPDATE … WHERE state='outstanding'` that also stamps `resolved_at`, and `satisfied_at` is written **only** on `satisfied` — so `abandoned` cannot masquerade as delivery. Reason tokens are a **frozen vocabulary** (`worker_terminal_no_report` / `ttl_expired_not_live` / `worker_row_missing`); anything else raises in the service. It does not "move the problem": every reader keys on `state='outstanding'` (routing, census, quiet, L3 hold), so `abandoned` is invisible to all of them. | `daemon/repositories/mission_record/models.py:153-173`, `:380-500`; `daemon/repositories/mission_record/repository.py:724-771`; `daemon/constants.py:715`, `:721-726`; `daemon/services/mission_record_service.py:1046-1063`; readers `repository.py:159/192/214/240/396/443`, `mission_record_reads.py:239-289`, `child_reports.py:2691-2695` |
+ | **S4b** | **Which reason per row.** `0cdc0b31` → `worker_terminal_no_report` — identical to what RDRS lane 7 writes for a terminal worker with no delivery evidence. `90493206` → `ttl_expired_not_live` — the only source-sanctioned abandon for a **non-terminal** worker; **declared divergence:** the repair acts *before* the 6h TTL (created 20:30:46 ⇒ TTL ≈ 02:30Z). End state identical, timing differs. Alternative (zero guesswork): drop block 4 and let lane 7 abandon it at TTL. | `report_delivery_recovery.py:2929-2937` (worker_terminal), `:2941-2947` (TTL), `:2841-2859` (watcher HOLD); `daemon/config.py:2401-2421`; `daemon/constants.py:715` |
+ | **S5** | **A gated repair execution path EXISTS** — `ens_db_repair_execute` with 3 gates + same-transaction `repair_log`. **No tool executes a request file**; execution is one dry-run+confirm per statement, by a `maintenancer` instance (the only agent allow-listing `ens-db`). | `daemon/tools/ens_db_tools.py:939-1180`, `:137-190`, `:401-445`, `:447-500`, `:498+`; `daemon/repositories/ens_db/models.py:45`; `agents/maintenancer/meta.json` |
+ | **S6** | **Cancelling the watchers does not deliver the lost sonic-leader report.** Every delivery lane requires a durable obligation row or an inbound message: `report_injections` is the admission substrate for lanes 1/3/4/5 (and the parent has **0** such rows), Lane 2's no-row backstop admits *completed children of a non-terminal parent* (the parent has **0** children), and the agent-node drain only delivers rows that exist. `emit_terminal`/`fire_for_terminated_target` move watcher **state**; they enqueue nothing (the bus is a state machine — `child_reports.py:412-417`). ⇒ **CANCEL ≠ FIRE.** | `daemon/services/report_delivery_recovery.py:1088-1160` (window→lane map), `:1201-1272` (lanes 1/5 predicates), `:2138-2200` (Lane 2 admission); `daemon/services/child_reports.py:4140-4160`, `:4651-4800` (obligation mint on actual completion only); measured live: `report_injections` for the parent = 0, child instances = 0, pending/ready messages for report traffic = 0 |
