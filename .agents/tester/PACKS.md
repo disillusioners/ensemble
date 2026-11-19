@@ -1,3 +1,11 @@
+<!-- sonic-ilnames-wire-shape-pack-registration-begin -->
+## SONIC INSTANCES-LIST OPTION A — WIRE-SHAPE GATE (2026-11-19; lane `feature/instances-list-mcp-tool-names` @ `fd2212fa6`, base `43e8d8db6`; owner: sonic-tester verification wave)
+
+| Pack / leg | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `instances_list_mcp_tool_names_wire_shape_unit_test` (NEW 2026-11-19) | `cd $WT && timeout 600 bash test/packs/instances_list_mcp_tool_names_wire_shape_unit_test.sh $WT` — script byte-identical (sha256 `e76ae61c69171f368d094aad038ff5cdfd2df85122d5189d4af047e59cbdedcb`) in the canonical tree `test/packs/` AND in the feature worktree `/home/nea/ensemble-src-wt-ilnames/test/packs/`; runnable against any tree: `bash /home/nea/ensemble-src/test/packs/instances_list_mcp_tool_names_wire_shape_unit_test.sh /tmp/<tree>` | Independent wire-shape gate for Option A — GET `/api/instances` LIST rows carry NO `mcp_tool_names` key (**key-ABSENT, not null**); GET `/api/instances/{id}` DETAIL keeps it populated. 5 nodes on a DELIBERATELY DIFFERENT transport (`fastapi.testclient.TestClient`, sync) than the deliverable's pack (`httpx` ASGITransport) so a harness bug in one cannot mask the other; asserts the RAW response BYTES carry no key anywhere; envelope intact; tree identity asserted inside the pack. Hermetic: in-memory SQLite only, `daemon.services.db_offload` seam inlined (execution-detail wrapper, no wire effect), zero PG / zero network / zero live-install contact | 2026-11-19 @ `fd2212fa6` | ✅ PASS **5/5** on the merged tree; detection power proven: **1F/4P** vs base `43e8d8db6` (key present with values) and **1F/4P** vs Mutation A (route-level `response_model_exclude` reverted → key returns as `null`); **5/5 green** vs Mutation B (source-layer-only change; the wire is unaffected by design — the deliverable's pack carries the source pin) |
+<!-- sonic-ilnames-wire-shape-pack-registration-end -->
+
 <!-- maintenance-idle-starvation-20261119-begin -->
 ## MAINTENANCE-IDLE-STARVATION — TESTER GATE REGISTRATION (2026-11-19; lane `feature/maintenance-idle-starvation` @ `d38fc1093`, base `c36c3e07c`)
 
