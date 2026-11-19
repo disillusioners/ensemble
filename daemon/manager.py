@@ -199,7 +199,11 @@ from .services.snapshot_search_service import SnapshotSearchService
 from .repositories.snapshot.repository import SnapshotRepository
 from .services.skill_seed_service import SkillSeedService
 from .services.skill_clone_service import SkillCloneService
-from .services.maintenance import MaintenanceService, CheckpointCleanupJob
+from .services.maintenance import (
+    MAINTENANCE_SYSTEM_PROJECT_ID,
+    CheckpointCleanupJob,
+    MaintenanceService,
+)
 from .services.todo_manager import TodoManager
 from .services.question_manager import QuestionManager
 from .cancellation import (
@@ -4631,6 +4635,33 @@ class InstanceManager:
 
         self._maintenance_runs_repo = MaintenanceRunsRepository(self._engine)
 
+        # wi-4d1fa093 (2026-11-18) — the persisted maintenance job state
+        # (THE RESTART-CLOCK INVARIANT). ``last_run`` used to live ONLY
+        # in the in-memory job dict, so every daemon restart reset the
+        # clock and the re-registered job looked "never run" (the live
+        # 2026-11-14 artifact). The persisted last-success (the
+        # ``maintenance_runs`` audit rows) is now the source of truth,
+        # and the per-job ``max_staleness_hours`` guarantee — the
+        # escape hatch that gives the two reclaim jobs their GUARANTEED
+        # eventual execution on a permanently busy nest — is persisted
+        # too (operator-tunable).
+        #
+        # Backing surfaces are EXISTING ones only: the ``maintenance_runs``
+        # audit table + the project-metadata KV (the same KV the
+        # blueprint daily scan uses). ZERO new migrations.
+        from .services.maintenance import (
+            MAINTENANCE_SYSTEM_PROJECT_ID,
+            DbMaintenanceStateStore,
+        )
+
+        self._maintenance_service.set_state_store(
+            DbMaintenanceStateStore(
+                engine=self._engine,
+                project_repository=self._project_repository,
+                system_project_id=MAINTENANCE_SYSTEM_PROJECT_ID,
+            )
+        )
+
         # Register checkpoint cleanup job
         checkpoint_cleanup = CheckpointCleanupJob(
             config=self.config.persistence,
@@ -7863,6 +7894,12 @@ class InstanceManager:
                 return
             resolved = 0
             parked = 0
+            # wi-4d1fa093 (2026-11-18): the sanctioned resolve is now
+            # atomic + CAS-guarded, so a concurrent resolver loses the
+            # CAS and applies NOTHING. The loss is counted (not
+            # silently dropped) — a non-zero ``cas_lost`` means
+            # another writer got there first.
+            cas_lost = 0
             for entry in stalled:
                 group = entry.get("ab_test_group")
                 if not group:
@@ -7882,6 +7919,8 @@ class InstanceManager:
                         resolved += 1
                     elif outcome.get("parked"):
                         parked += 1
+                    elif outcome.get("reason") == "cas_lost":
+                        cas_lost += 1
                 except Exception as item_exc:  # noqa: BLE001 — per-item isolation
                     logger.warning(
                         "_run_skill_ab_inactivity_sweep: group %s "
@@ -7892,10 +7931,11 @@ class InstanceManager:
                     )
             logger.info(
                 "_run_skill_ab_inactivity_sweep: %d stalled pair(s) "
-                "— resolved=%d parked=%d",
+                "— resolved=%d parked=%d cas_lost=%d",
                 len(stalled),
                 resolved,
                 parked,
+                cas_lost,
             )
         except Exception as exc:
             # Soft-fail: a broken sweep must never break the

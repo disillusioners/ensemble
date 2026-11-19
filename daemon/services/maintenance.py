@@ -42,6 +42,15 @@ an import cycle; the Section-1 additions (run-lock gate, audit rows,
 dual entry points) deliberately landed IN this file so the auto and
 manual paths stay textually adjacent for the INV-1/INV-9 AST pins.
 Revisit only if a third cleanup section arrives.
+
+Starvation composite (wi-4d1fa093, 2026-11-18): the per-job
+``IdlePolicy`` tiering, the persisted ``max_staleness_hours``
+guarantee, the restart-clock hydration seam and the skip-streak
+telemetry all live in this file because they are properties of the
+SCHEDULER (not of any one job) — the Section-0b state store is the
+narrow persistence seam they share (EXISTING storage surfaces only:
+the ``maintenance_runs`` audit table + the project-metadata KV; ZERO
+new migrations).
 """
 
 import asyncio
@@ -50,7 +59,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from typing import Any, Callable, Coroutine, NamedTuple
+from typing import Any, Callable, Coroutine, NamedTuple, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -89,6 +98,129 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class IdlePolicy:
+    """Per-job idle-gate policy (2026-11-18, wi-4d1fa093).
+
+    ``IDLE_GATED``
+        The job only runs when the system-wide idle probe reports no
+        in-flight work (the pre-2026-11-18 behaviour of EVERY job).
+    ``UN_GATED``
+        The job runs on its own cadence regardless of system
+        busyness.
+
+    WHY the tiering exists
+    ----------------------
+    The global idle gate was never satisfiable on a continuously busy
+    nest (live evidence 2026-11-14 → 2026-11-18: 25/25 hourly buckets
+    non-idle, zero ``maintenance_runs`` rows for 4d10h). One
+    never-satisfiable gate therefore starved ALL eleven registered
+    jobs — including the bounded, idempotent ones whose work does not
+    compete with live traffic for the DB resources in-flight work
+    holds.
+
+    The gate is now kept ONLY where the contention is real — the two
+    reclaim jobs (the checkpoint reclaim, the VACUUM) — and BOTH of
+    those carry a persisted ``max_staleness_hours`` override, so they
+    keep their guaranteed eventual execution even on a permanently
+    busy nest (see :meth:`MaintenanceService._is_stale`).
+
+    The table below is the SINGLE source of the classification; a job
+    name that is absent from it is treated as ``IDLE_GATED`` (the
+    conservative default — an unknown job never runs unattended).
+    """
+
+    IDLE_GATED = "idle_gated"
+    UN_GATED = "un_gated"
+
+
+#: The per-job idle-gate policy for every registered maintenance job.
+#:
+#: The classification principle: **the idle gate is retained only for
+#: work that genuinely contends for the resources live traffic holds**
+#: — the DB write path / WAL / IO bandwidth that an in-flight agent
+#: turn needs. Bounded, idempotent bookkeeping (metric aggregation,
+#: orphan reaping, usage-counter sweeps), in-process work (heap trim,
+#: lock-map reap) and dispatch-only work (the scans that enqueue into
+#: the normal worker queue) do NOT contend with live traffic and are
+#: therefore un-gated.
+#:
+#: ``skill_ab_inactivity_sweep`` may only be un-gated in the same
+#: change set as the A/B resolve CAS — the CAS landed FIRST (commit
+#: ``fix(skill-evolution): atomic CAS resolve for the sanctioned A/B
+#: path``), so the sweep can never resolve the same pair twice.
+JOB_IDLE_POLICIES: dict[str, str] = {
+    # ── the two reclaim jobs — the contention is real ─────────────
+    # The checkpoint reclaim deletes from the checkpoint tables (28 GB
+    # / 137k rows in the live incident) and runs ANALYZE: it competes
+    # for exactly the write path live checkpointing needs. It ALSO
+    # carries the persisted ``max_staleness_hours`` guarantee below.
+    "checkpoint_cleanup": IdlePolicy.IDLE_GATED,
+    # Plain VACUUM's entire contract is "do not run under load" — the
+    # whole point of the threshold gate is that it never fights live
+    # traffic for the table. It ALSO carries the persisted
+    # ``max_staleness_hours`` guarantee below.
+    "vacuum_maintenance": IdlePolicy.IDLE_GATED,
+    # ── bounded, idempotent bookkeeping — no real contention ─────
+    # The room purge's selection predicate is DORMANCY-based (closed
+    # > 14d, idle > 72h, zero living participants) — its write set is
+    # disjoint from the rows live traffic touches, and each room is
+    # purged in its own transaction.
+    "room_gc_sweep": IdlePolicy.UN_GATED,
+    # Bounded metric aggregation over the skill usage records.
+    "skill_metric_scan": IdlePolicy.UN_GATED,
+    # Bounded delete of usage records that escaped finalization.
+    "skill_orphan_sweep": IdlePolicy.UN_GATED,
+    # The A/B inactivity sweep (the ONE sanctioned resolution
+    # mechanism's periodic leg). Un-gated ONLY because the resolve
+    # path is now atomic + CAS-guarded (the sweep can no longer
+    # double-resolve a pair).
+    "skill_ab_inactivity_sweep": IdlePolicy.UN_GATED,
+    # Bounded purge of a deleted project's skill files + embeddings.
+    "project_skill_gc": IdlePolicy.UN_GATED,
+    # Dispatch-only: it enqueues rebuild work into the NORMAL worker
+    # queue (the same path a user-dispatched job takes).
+    "blueprint_daily_scan": IdlePolicy.UN_GATED,
+    # ── in-process only — no DB, no contention ───────────────────
+    # glibc heap trim (returns free pages to the OS).
+    "malloc_trim": IdlePolicy.UN_GATED,
+    # DependencyBus lock-map reap (in-memory map, no DB).
+    "dependency_bus_lock_reap": IdlePolicy.UN_GATED,
+    # Bounded batched age DELETEs over the anomaly tables.
+    "anomaly_retention": IdlePolicy.UN_GATED,
+}
+
+#: The built-in ``max_staleness_hours`` guarantee per job (hours).
+#:
+#: The guarantee is the anti-starvation escape hatch: a job that has
+#: not succeeded for longer than this many hours runs EVEN when the
+#: system is busy. It is set ONLY for the two jobs that keep the idle
+#: gate — without it they could starve forever on a permanently busy
+#: nest (the live incident: 4d10h with zero runs).
+#:
+#: The value is PERSISTED (see
+#: :class:`DbMaintenanceStateStore`) so an operator can tune it; the
+#: persisted override WINS over this default. A persisted ``0``
+#: explicitly disables the guarantee for that job.
+JOB_MAX_STALENESS_HOURS: dict[str, float] = {
+    "checkpoint_cleanup": 24.0,
+    "vacuum_maintenance": 24.0,
+}
+
+#: ``maintenance_runs.section`` per job name — the persisted
+#: last-success source. Only the jobs that write Section-1 audit rows
+#: have an entry; every other job falls back to the process-start
+#: anchor.
+JOB_MAINTENANCE_SECTIONS: dict[str, str] = {
+    "checkpoint_cleanup": "checkpoint-cleanup",
+    "vacuum_maintenance": "vacuum-maintenance",
+}
+
+#: The system-default project id — the bookkeeping home of the
+#: persisted maintenance job state (the same KV the blueprint daily
+#: scan uses for its persisted last-run).
+MAINTENANCE_SYSTEM_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+
+
 @dataclass
 class MaintenanceJob:
     """Represents a registered maintenance job."""
@@ -97,6 +229,20 @@ class MaintenanceJob:
     min_interval_hours: float
     last_run: datetime | None
     execute_fn: Callable[[], Coroutine[Any, Any, None]]
+    # ── wi-4d1fa093 (2026-11-18) — the starvation composite ───────
+    #: Per-job idle-gate policy (``IdlePolicy.IDLE_GATED`` /
+    #: ``IdlePolicy.UN_GATED``). Resolved at registration time from
+    #: :data:`JOB_IDLE_POLICIES` unless the caller passes one
+    #: explicitly.
+    idle_policy: str = IdlePolicy.IDLE_GATED
+    #: The anti-starvation guarantee, in hours. ``None`` ⇒ no
+    #: guarantee; ``<= 0`` ⇒ the guarantee is explicitly disabled.
+    max_staleness_hours: float | None = None
+    #: The persisted last SUCCESSFUL run (hydrated from storage at
+    #: boot). ``None`` until a success is observed.
+    last_success_ts: datetime | None = None
+    #: The current idle-gate skip streak — reset on every success.
+    consecutive_skips: int = 0
 
 
 class MaintenanceService:
@@ -124,6 +270,17 @@ class MaintenanceService:
         self._check_interval = check_interval_minutes * 60
         self._task: asyncio.Task | None = None
         self._running = False
+        # wi-4d1fa093 (2026-11-18): the process-start anchor. The
+        # staleness guarantee falls back to it when a job has neither a
+        # persisted last-success nor an in-memory ``last_run`` — so a
+        # fresh install still gets its guaranteed eventual execution
+        # (measured from boot), and never fires heavy work instantly.
+        self._started_at = utcnow()
+        # wi-4d1fa093: the persisted-state seam (last-success clock +
+        # the per-job ``max_staleness_hours`` override). ``None`` means
+        # no persistence — the service then behaves exactly as before
+        # (in-memory clock only).
+        self._state_store: "MaintenanceStateStore | None" = None
 
         # References for idle check
         self._job_queue_service: Any = None
@@ -144,6 +301,8 @@ class MaintenanceService:
         min_interval_hours: float,
         execute_fn: Callable[[], Coroutine[Any, Any, None]],
         last_run: datetime | None = None,
+        idle_policy: str | None = None,
+        max_staleness_hours: float | None = None,
     ) -> None:
         """Register a maintenance job.
 
@@ -157,15 +316,48 @@ class MaintenanceService:
                 execution does not fire immediately on restart. Defaults
                 to ``None`` (job is due on first check, which matches
                 the original "fresh-process" semantics).
+            idle_policy: Optional explicit idle-gate policy
+                (``IdlePolicy.IDLE_GATED`` / ``IdlePolicy.UN_GATED``).
+                ``None`` (the default) resolves the policy from
+                :data:`JOB_IDLE_POLICIES` by job name; a job name that
+                is absent from that table is treated as
+                ``IdlePolicy.IDLE_GATED`` (the conservative default).
+            max_staleness_hours: Optional explicit anti-starvation
+                guarantee (hours). ``None`` (the default) resolves the
+                value from :data:`JOB_MAX_STALENESS_HOURS` by job name.
         """
         job = MaintenanceJob(
             name=name,
             min_interval_hours=min_interval_hours,
             last_run=last_run,
             execute_fn=execute_fn,
+            idle_policy=(
+                idle_policy
+                if idle_policy is not None
+                else JOB_IDLE_POLICIES.get(name, IdlePolicy.IDLE_GATED)
+            ),
+            max_staleness_hours=(
+                max_staleness_hours
+                if max_staleness_hours is not None
+                else JOB_MAX_STALENESS_HOURS.get(name)
+            ),
         )
         self._jobs.append(job)
         logger.debug(f"Registered maintenance job: {name} (interval={min_interval_hours}h)")
+
+    def set_state_store(self, store: "MaintenanceStateStore | None") -> None:
+        """Wire the persisted-state seam (the restart-clock invariant).
+
+        The store supplies the persisted last-success (hydrated at
+        boot, so a daemon restart never resets the interval clock) and
+        reads/writes the per-job ``max_staleness_hours`` override.
+
+        Args:
+            store: A :class:`MaintenanceStateStore` implementation, or
+                ``None`` to disable persistence (in-memory clock only —
+                the pre-2026-11-18 behaviour).
+        """
+        self._state_store = store
 
     def set_job_queue_service(self, service: Any) -> None:
         """Set the JobQueueService reference for idle checking.
@@ -212,6 +404,20 @@ class MaintenanceService:
             return
 
         self._running = True
+        # wi-4d1fa093 (2026-11-18) — hydrate the persisted clock BEFORE
+        # the first tick. THE RESTART-CLOCK INVARIANT: ``last_run``
+        # used to live ONLY in the in-memory job dict, so every daemon
+        # restart reset the clock (the freshly re-registered job looked
+        # "never run" and its 24h interval restarted from zero — the
+        # live 2026-11-14 artifact). The persisted last-success is now
+        # the source of truth; the in-memory value is only its cache.
+        #
+        # Fail-soft: a hydration problem must never stop the service.
+        try:
+            await self.hydrate_persisted_state()
+        except Exception as e:  # noqa: BLE001 — hydration MUST NOT break boot
+            logger.warning(f"Maintenance state hydration failed: {e}")
+
         self._task = asyncio.create_task(self._loop())
         logger.info("Maintenance service started")
 
@@ -252,25 +458,211 @@ class MaintenanceService:
             await asyncio.sleep(self._check_interval)
 
     async def _run_pending_jobs(self) -> None:
-        """Check each job and run those that are due and system is idle."""
+        """Check each job and run those that are due and system is idle.
+
+        The idle gate is now PER JOB (see :class:`IdlePolicy`):
+
+        * an ``UN_GATED`` job runs on its own cadence — no idle probe
+          at all (the pre-2026-11-18 behaviour starved EVERY job on a
+          continuously busy nest);
+        * an ``IDLE_GATED`` job keeps the idle probe, UNLESS its
+          ``max_staleness_hours`` guarantee has been exceeded — the
+          escape hatch that restores the guaranteed eventual execution
+          for the two reclaim jobs (the checkpoint reclaim and the
+          VACUUM), whose contention with live traffic is real.
+        """
         for job in self._jobs:
             if not self._is_due(job):
                 continue
 
-            # ``_is_idle`` is async because it wraps a sync ``list_all_pending``
-            # DB call in ``asyncio.to_thread`` to keep the event loop responsive
-            # under SQLite WAL write contention.
-            if not await self._is_idle():
-                logger.info(f"Skipping {job.name}: system not idle")
-                continue
+            forced = self._is_stale(job)
+            if job.idle_policy == IdlePolicy.IDLE_GATED and not forced:
+                # ``_is_idle`` is async because it wraps a sync ``list_all_pending``
+                # DB call in ``asyncio.to_thread`` to keep the event loop responsive
+                # under SQLite WAL write contention.
+                if not await self._is_idle():
+                    self._record_skip(job, "system not idle")
+                    continue
+            elif forced:
+                logger.warning(
+                    "Maintenance job '%s' running despite a busy system: "
+                    "max_staleness_hours=%s exceeded (last_success_ts=%s) "
+                    "— the guaranteed-execution override fired",
+                    job.name,
+                    job.max_staleness_hours,
+                    (
+                        job.last_success_ts.isoformat()
+                        if job.last_success_ts is not None
+                        else "never"
+                    ),
+                )
 
             try:
                 await job.execute_fn()
                 job.last_run = utcnow()
+                job.last_success_ts = job.last_run
+                job.consecutive_skips = 0
                 logger.info(f"Maintenance job '{job.name}' completed successfully")
             except Exception as e:
                 logger.error(f"Maintenance job '{job.name}' failed: {e}")
                 # Don't update last_run — will retry next cycle
+
+    def _is_stale(self, job: MaintenanceJob) -> bool:
+        """Has this job exceeded its ``max_staleness_hours`` guarantee?
+
+        The guarantee is the anti-starvation escape hatch: a job that
+        has not succeeded for longer than ``max_staleness_hours`` runs
+        EVEN when the system is busy. The reference clock is the
+        persisted last-success, then the in-memory ``last_run``, then
+        the process-start anchor (so a fresh install gets its
+        guaranteed execution measured from boot instead of firing
+        heavy work instantly under load).
+
+        ``max_staleness_hours`` of ``None`` means "no guarantee"
+        (⇒ never stale); a value ``<= 0`` disables the guarantee
+        explicitly (the persisted override can set 0 to switch the
+        escape hatch off for one job).
+        """
+        if job.max_staleness_hours is None or job.max_staleness_hours <= 0:
+            return False
+        reference = job.last_success_ts or job.last_run or self._started_at
+        elapsed_hours = (utcnow() - reference).total_seconds() / 3600
+        return elapsed_hours >= job.max_staleness_hours
+
+    def _record_skip(self, job: MaintenanceJob, reason: str) -> None:
+        """Record one idle-gate skip (the skip-streak telemetry).
+
+        The FIRST skip of a streak logs at WARNING (carrying the
+        consecutive-skip count and the last-success timestamp); every
+        LATER skip of the same streak logs at DEBUG — the streak itself
+        is the signal, and an hour of identical WARNING lines would
+        only dilute it. The counter resets on the next success.
+        """
+        job.consecutive_skips += 1
+        last_success = (
+            job.last_success_ts.isoformat()
+            if job.last_success_ts is not None
+            else "never"
+        )
+        if job.consecutive_skips == 1:
+            logger.warning(
+                "Maintenance job '%s' skipped (%s): consecutive_skips=1 "
+                "last_success_ts=%s",
+                job.name,
+                reason,
+                last_success,
+            )
+        else:
+            logger.debug(
+                "Maintenance job '%s' skipped (%s): consecutive_skips=%d "
+                "last_success_ts=%s",
+                job.name,
+                reason,
+                job.consecutive_skips,
+                last_success,
+            )
+
+    def job_metrics(self) -> dict[str, dict[str, Any]]:
+        """One metric block per registered job.
+
+        ``last_success_ts`` (ISO-8601 UTC; ``None`` when the job has
+        never succeeded) + ``consecutive_skips`` (the current idle-gate
+        skip streak). This is the standing observability surface for
+        the starvation class: a job whose ``consecutive_skips`` keeps
+        climbing while ``last_success_ts`` stays old is starving.
+        """
+        return {
+            job.name: {
+                "last_success_ts": (
+                    job.last_success_ts.isoformat()
+                    if job.last_success_ts is not None
+                    else None
+                ),
+                "consecutive_skips": job.consecutive_skips,
+            }
+            for job in self._jobs
+        }
+
+    async def hydrate_persisted_state(self) -> None:
+        """Hydrate the per-job clock + staleness override from storage.
+
+        THE RESTART-CLOCK INVARIANT (wi-4d1fa093): ``last_run`` lived
+        ONLY in the in-memory job dict, so a daemon restart reset the
+        clock — the re-registered job looked "never run" and its
+        interval restarted from zero. The persisted last-success (the
+        ``maintenance_runs`` audit rows) is now the source of truth.
+
+        The persisted ``max_staleness_hours`` override WINS over the
+        built-in default (:data:`JOB_MAX_STALENESS_HOURS`).
+
+        Fail-soft per job: a storage problem leaves that job's
+        in-memory state untouched (it then behaves exactly as before
+        this change).
+        """
+        store = self._state_store
+        if store is None:
+            return
+        for job in self._jobs:
+            try:
+                last_success = await asyncio.to_thread(
+                    store.load_last_success, job.name
+                )
+            except Exception as e:  # noqa: BLE001 — hydration MUST NOT break boot
+                logger.warning(
+                    f"Maintenance state hydration failed for "
+                    f"{job.name} (last_success): {e}"
+                )
+                last_success = None
+            if last_success is not None:
+                job.last_success_ts = last_success
+                # An explicitly seeded ``last_run`` (register(last_run=))
+                # wins — it is a more specific signal than the audit row.
+                if job.last_run is None:
+                    job.last_run = last_success
+            try:
+                persisted = await asyncio.to_thread(
+                    store.load_max_staleness_hours, job.name
+                )
+            except Exception as e:  # noqa: BLE001 — hydration MUST NOT break boot
+                logger.warning(
+                    f"Maintenance state hydration failed for "
+                    f"{job.name} (max_staleness_hours): {e}"
+                )
+                persisted = None
+            if persisted is not None:
+                job.max_staleness_hours = persisted
+
+    async def set_max_staleness_hours(
+        self, job_name: str, hours: float | None
+    ) -> bool:
+        """Persist a ``max_staleness_hours`` override for one job.
+
+        ``hours=None`` clears the override (the built-in default
+        applies again); ``hours=0`` disables the guarantee for that
+        job. Returns ``True`` when the job exists and the value was
+        applied (and persisted, when a store is wired).
+        """
+        job = next((j for j in self._jobs if j.name == job_name), None)
+        if job is None:
+            return False
+        store = self._state_store
+        if store is not None:
+            try:
+                await asyncio.to_thread(
+                    store.save_max_staleness_hours, job_name, hours
+                )
+            except Exception as e:  # noqa: BLE001 — a failed write MUST NOT lie
+                logger.warning(
+                    f"Failed to persist max_staleness_hours for "
+                    f"{job_name}: {e}"
+                )
+                return False
+        job.max_staleness_hours = (
+            hours
+            if hours is not None
+            else JOB_MAX_STALENESS_HOURS.get(job_name)
+        )
+        return True
 
     async def is_idle(self) -> bool:
         """Public idle probe — thin wrapper over :meth:`_is_idle`.
@@ -421,6 +813,182 @@ class MaintenanceService:
                 return False
 
         return True
+
+
+# ── Section 0b: persisted maintenance job state (wi-4d1fa093) ─────────
+#
+# The restart-clock invariant needs a persistence seam: the per-job
+# last-success (hydrated from storage at boot) and the per-job
+# ``max_staleness_hours`` override. The seam is deliberately narrow
+# (three methods) so the unit pack can drive it with a fake, and the
+# production implementation is backed by EXISTING storage surfaces
+# only — ZERO new migrations.
+
+
+class MaintenanceStateStore(Protocol):
+    """Persistence seam for the per-job maintenance state.
+
+    All methods are SYNCHRONOUS — the service calls them through
+    ``asyncio.to_thread`` (the project-wide pattern for the sync
+    SQLAlchemy repositories).
+    """
+
+    def load_last_success(self, job_name: str) -> datetime | None:
+        """The persisted last SUCCESSFUL run of ``job_name``.
+
+        ``None`` when the job has never succeeded (or has no persisted
+        audit trail).
+        """
+        ...
+
+    def load_max_staleness_hours(self, job_name: str) -> float | None:
+        """The persisted ``max_staleness_hours`` override, or ``None``."""
+        ...
+
+    def save_max_staleness_hours(
+        self, job_name: str, hours: float | None
+    ) -> None:
+        """Persist (or clear) the ``max_staleness_hours`` override."""
+        ...
+
+
+class DbMaintenanceStateStore:
+    """The production state store — EXISTING storage surfaces only.
+
+    * **last-success** → the ``maintenance_runs`` audit table (the
+      Section-1 table; migration
+      ``20260927_000001_create_maintenance_runs_table.sql``). Only the
+      jobs that write Section-1 audit rows have a persisted
+      last-success (:data:`JOB_MAINTENANCE_SECTIONS`); every other
+      job falls back to the process-start anchor.
+    * **max_staleness_hours** → the project-metadata KV
+      (``maintenance.job_state`` on the system default project) — the
+      SAME existing KV surface the blueprint daily scan uses for its
+      persisted last-run (``blueprint_scan_last_run``).
+
+    Both surfaces already exist: this class adds NO table, NO column
+    and NO migration.
+
+    Every method is fail-soft: a missing table, an absent project or
+    a corrupt value degrades to "no persisted state" (never raises
+    into the maintenance loop).
+    """
+
+    #: The project-metadata KV key holding the per-job state blob.
+    KV_KEY = "maintenance.job_state"
+
+    def __init__(
+        self,
+        engine: Engine | None = None,
+        project_repository: Any = None,
+        system_project_id: str | None = None,
+    ) -> None:
+        self._engine = engine
+        self._project_repository = project_repository
+        self._system_project_id = system_project_id or MAINTENANCE_SYSTEM_PROJECT_ID
+
+    # ── last-success (maintenance_runs) ───────────────────────────
+
+    def load_last_success(self, job_name: str) -> datetime | None:
+        section = JOB_MAINTENANCE_SECTIONS.get(job_name)
+        if section is None or self._engine is None:
+            return None
+        try:
+            with self._engine.connect() as conn:
+                row = conn.execute(
+                    text(
+                        "SELECT completed_at FROM maintenance_runs "
+                        "WHERE section = :section "
+                        "AND status = 'succeeded' "
+                        "AND completed_at IS NOT NULL "
+                        "ORDER BY completed_at DESC LIMIT 1"
+                    ),
+                    {"section": section},
+                ).first()
+        except Exception as e:  # noqa: BLE001 — a missing table is not fatal
+            logger.warning(
+                f"maintenance last-success lookup failed for "
+                f"{job_name} (section={section}): {e}"
+            )
+            return None
+        if row is None:
+            return None
+        return _parse_iso_utc(row[0])
+
+    # ── max_staleness_hours override (project metadata KV) ────────
+
+    def _read_state_blob(self) -> dict:
+        if self._project_repository is None:
+            return {}
+        try:
+            blob = self._project_repository.get_metadata(
+                self._system_project_id, self.KV_KEY
+            )
+        except Exception as e:  # noqa: BLE001 — degrade to "no state"
+            logger.warning(
+                f"maintenance job-state KV read failed: {e}"
+            )
+            return {}
+        return blob if isinstance(blob, dict) else {}
+
+    def load_max_staleness_hours(self, job_name: str) -> float | None:
+        blob = self._read_state_blob()
+        entry = blob.get(job_name)
+        if not isinstance(entry, dict):
+            return None
+        raw = entry.get("max_staleness_hours")
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"maintenance job-state KV holds a non-numeric "
+                f"max_staleness_hours for {job_name}: {raw!r}"
+            )
+            return None
+
+    def save_max_staleness_hours(
+        self, job_name: str, hours: float | None
+    ) -> None:
+        if self._project_repository is None:
+            return
+        blob = self._read_state_blob()
+        entry = blob.get(job_name)
+        if not isinstance(entry, dict):
+            entry = {}
+        if hours is None:
+            entry.pop("max_staleness_hours", None)
+        else:
+            entry["max_staleness_hours"] = float(hours)
+        blob[job_name] = entry
+        try:
+            self._project_repository.set_metadata(
+                self._system_project_id, self.KV_KEY, blob
+            )
+        except Exception as e:  # noqa: BLE001 — a failed write is not fatal
+            logger.warning(
+                f"maintenance job-state KV write failed for "
+                f"{job_name}: {e}"
+            )
+
+
+def _parse_iso_utc(raw: Any) -> datetime | None:
+    """Parse an ISO-8601 timestamp into an aware UTC datetime.
+
+    Text ISO timestamps sort lexicographically (the repository
+    convention), so a naive value is assumed to be UTC. An unparsable
+    value degrades to ``None`` (never raises).
+    """
+    if raw is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 # ── Section 1: CheckpointCleanup summary shape ──────────────────────────────────
