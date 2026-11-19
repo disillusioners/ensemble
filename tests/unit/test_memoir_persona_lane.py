@@ -224,3 +224,101 @@ def test_submit_is_a_seam_without_a_v1_caller():
 def test_get_current_is_none_without_a_persona(repo):
     assert repo.get_current("ari") is None
     assert repo.get_current("nobody") is None
+
+
+# ── DD-9 amendment: agent-scoped self-ratify exemption ───────────────────
+
+
+class _SelfActor:
+    """An actor carrying both the lane discriminator and an agent id."""
+
+    def __init__(self, auth_method: str, agent_id: str | None = None) -> None:
+        self.auth_method = auth_method
+        self.agent_id = agent_id
+
+
+def test_self_ratify_exempt_ari_internal_self(repo):
+    """(i) exempt 'ari' + daemon-internal self actor -> approved + pointer moves."""
+    draft = repo.create_draft("ari", "# A new self")
+    pending = repo.submit(draft.id, actor=_Actor("bearer"))
+    approved = repo.approve(pending.id, actor=_SelfActor("internal", "ari"))
+    assert approved.status == "approved"
+
+    current = repo.get_current("ari")
+    assert current is not None
+    assert current.id == approved.id
+
+
+def test_self_ratify_non_exempt_leader_internal_raises(repo):
+    """(ii) non-exempt 'leader' + non-session actor -> HumanLaneRequiredError."""
+    draft = repo.create_draft("leader", "# A new self")
+    pending = repo.submit(draft.id, actor=_Actor("bearer"))
+    with pytest.raises(HumanLaneRequiredError):
+        repo.approve(pending.id, actor=_SelfActor("internal", "leader"))
+
+
+def test_self_ratify_leader_session_succeeds(repo):
+    """(iii) non-exempt 'leader' + session actor -> approved."""
+    draft = repo.create_draft("leader", "# A new self")
+    pending = repo.submit(draft.id, actor=_Actor("bearer"))
+    approved = repo.approve(pending.id, actor=_Actor("session"))
+    assert approved.status == "approved"
+
+
+def test_self_ratify_draft_to_approved_refused_for_both(repo):
+    """(iv) draft->approved direct refused for 'ari' (self) and 'leader'."""
+    for agent in ("ari", "leader"):
+        draft = repo.create_draft(agent, "# A new self")
+        actor = _SelfActor("internal", "ari") if agent == "ari" else _Actor("session")
+        with pytest.raises(MemoirTransitionError):
+            repo.approve(draft.id, actor=actor)
+
+
+def test_self_ratify_reject_still_requires_human_lane_for_ari(repo):
+    """(v) reject() still requires the human lane for 'ari' (self actor too)."""
+    draft = repo.create_draft("ari", "# A new self")
+    pending = repo.submit(draft.id, actor=_Actor("bearer"))
+    with pytest.raises(HumanLaneRequiredError):
+        repo.reject(pending.id, actor=_SelfActor("internal", "ari"))
+
+
+def test_self_ratify_ari_bearer_raises(repo):
+    """(vi) 'ari' + bearer actor -> HumanLaneRequiredError."""
+    draft = repo.create_draft("ari", "# A new self")
+    pending = repo.submit(draft.id, actor=_Actor("bearer"))
+    with pytest.raises(HumanLaneRequiredError):
+        repo.approve(pending.id, actor=_SelfActor("bearer", "ari"))
+
+
+def test_self_ratify_ari_internal_not_ari_raises(repo):
+    """(vii) 'ari' + internal actor whose agent_id is NOT 'ari' -> raises."""
+    draft = repo.create_draft("ari", "# A new self")
+    pending = repo.submit(draft.id, actor=_Actor("bearer"))
+    with pytest.raises(HumanLaneRequiredError):
+        repo.approve(pending.id, actor=_SelfActor("internal", "leader"))
+
+
+def test_self_ratify_nonexistent_version_raises_human_lane(repo):
+    """(viii) non-human actor + nonexistent version id -> HumanLaneRequiredError."""
+    with pytest.raises(HumanLaneRequiredError):
+        repo.approve("does-not-exist", actor=_Actor("bearer"))
+
+
+def test_self_ratify_internal_self_actor_missing_version_raises_human_lane(repo):
+    """MUTATION-SENSITIVE: the internal lane on a missing row is a LANE refusal.
+
+    The self-ratify exemption's lookup must never turn a refusal into a
+    not-found error: a nonexistent version id cannot satisfy the
+    exemption's preconditions (there is no row whose agent could match
+    the actor), so the call fails the human lane — with the house lane
+    error class, not a plain ``ValueError``.
+    """
+    with pytest.raises(HumanLaneRequiredError) as excinfo:
+        repo.approve("does-not-exist", actor=_SelfActor("internal", "ari"))
+    # The CLASS is pinned exactly: HumanLaneRequiredError subclasses
+    # ValueError, so a plain ValueError would satisfy a bare
+    # ``pytest.raises(ValueError)`` — the class pin is what kills the
+    # not-found mutant.
+    assert type(excinfo.value) is HumanLaneRequiredError
+    assert excinfo.value.version_id == "does-not-exist"
+    assert "not found" not in str(excinfo.value)
