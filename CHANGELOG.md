@@ -5,6 +5,12 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.11] — 2026-11-19
+
+### Fixed — maintenance starvation composite fix (`wi-4d1fa093`)
+
+- Fixed: maintenance starvation composite — A idle_policy tiering, B persisted max_staleness (restart-proof), CAS atomic resolve, D skip-streak telemetry + tests
+
 ## [0.31.9] — 2026-11-19
 
 ### Fixed — upgrade-script refusal quoting (`fix/upgrade-script-refusal-quoting`)
