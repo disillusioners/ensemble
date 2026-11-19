@@ -893,8 +893,11 @@ def set_last_applied_resolution(
     tests may reset it to ``None`` to simulate a pre-boot process.
     """
     global _last_applied_resolution
+    # Robust to a None VALUE (a failed per-key resolve publishes an empty
+    # record; a defensive ``dict(v or {})`` keeps this tail call from ever
+    # raising — the boot-apply must not abort on bookkeeping).
     _last_applied_resolution = (
-        {k: dict(v) for k, v in resolution.items()} if resolution else None
+        {k: dict(v or {}) for k, v in resolution.items()} if resolution else None
     )
 
 
@@ -1441,7 +1444,11 @@ def apply_db_settings_overrides(
             if db_won:
                 applied_count += 1
         except (AttributeError, TypeError, KeyError, ValueError) as exc:
-            resolutions[key] = resolution
+            # NEVER store None here: the tail call set_last_applied_resolution
+            # does ``dict(v)`` per entry — a None value would raise
+            # TypeError and ABORT boot (the very crash class this boundary
+            # exists to prevent). A failed resolve publishes an empty record.
+            resolutions[key] = resolution or {}
             logger.warning(
                 "[Settings] %s: boot apply skipped — %s: %s — lower tiers "
                 "stay active; key not marked applied (config_path=%r)",
@@ -1452,7 +1459,8 @@ def apply_db_settings_overrides(
             )
             applied_value = None
         except Exception as exc:  # noqa: BLE001 — per-key fail-soft (last resort)
-            resolutions[key] = resolution
+            # Same rule as the targeted arm above — never a None value.
+            resolutions[key] = resolution or {}
             logger.warning(
                 "[Settings] %s: boot apply skipped — %s: %s — lower tiers "
                 "stay active; key not marked applied (config_path=%r)",

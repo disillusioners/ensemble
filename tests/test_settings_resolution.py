@@ -817,6 +817,65 @@ class TestFailSoftBootApply:
         assert res["limits.worker_pool_size"]["source"] != "db"
         assert any("failed parse" in r.getMessage() for r in caplog.records)
 
+    def test_resolver_failure_isolated_per_key_boot_never_aborts(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """NEW-1 regression: a RAISING resolver for one key must NOT abort
+        boot.
+
+        The D12 closure stored ``resolutions[key] = None`` when resolve()
+        raised; the tail call ``set_last_applied_resolution(resolutions)``
+        does ``dict(v)`` per entry -> TypeError -> the boot-crash class
+        RETURNS. This test forces resolve() to raise for exactly one key
+        and asserts:
+          * apply_db_settings_overrides does NOT raise,
+          * the failed key is skipped (applied_value None, NOT counted as
+            applied in the "applied N db override(s)" summary),
+          * a WARNING was logged carrying the key name,
+          * the OTHER valid override still applied,
+          * the published resolution record holds a DICT (never None).
+        """
+        import logging
+
+        real_resolve = settings_service.resolve
+
+        def _boom(key, *args, **kwargs):
+            if key == "limits.worker_pool_size":
+                raise RuntimeError("synthetic resolver failure")
+            return real_resolve(key, *args, **kwargs)
+
+        monkeypatch.setattr(settings_service, "resolve", _boom)
+
+        rows = [
+            {"key": "limits.worker_pool_size", "value_json": "7", "value_type": "int",
+             "updated_at": "2026-01-01T00:00:00+00:00"},
+            {"key": "limits.llm_concurrency", "value_json": "5", "value_type": "int",
+             "updated_at": "2026-01-01T00:00:00+00:00"},
+        ]
+        with caplog.at_level(logging.INFO, logger="daemon.services.settings_service"):
+            returned, snapshot, config = self._boot(tmp_path, monkeypatch, rows)
+
+        # 1. no raise (the call above returned normally)
+        assert returned is config
+        # 2. the failed key is skipped
+        assert snapshot["limits.worker_pool_size"]["applied_value"] is None
+        # 3. the OTHER valid override still applied
+        assert config.limits.llm_concurrency == 5
+        # 4. a WARNING carrying the key name was logged
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("limits.worker_pool_size" in m and "boot apply skipped" in m
+                   for m in warnings), warnings
+        # 5. the failed key is NOT counted as applied (only llm_concurrency)
+        summary = [m for m in warnings if "db override(s)" in m]
+        infos = [r.getMessage() for r in caplog.records
+                 if r.levelno == logging.INFO and "db override(s)" in r.getMessage()]
+        assert any("applied 1 db override(s)" in m for m in infos), infos
+        # 6. the published resolution record holds a DICT, never None
+        res = get_last_applied_resolution()
+        assert res is not None
+        assert isinstance(res["limits.worker_pool_size"], dict)
+        assert res["limits.worker_pool_size"] == {}
+
     def test_wedge_key_db_row_present_false(self, tmp_path, monkeypatch, caplog):
         import logging
 
