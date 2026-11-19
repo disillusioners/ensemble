@@ -23,9 +23,9 @@ Covered here:
   path that calls it, including the concurrent duplicate-resolve case
   (exactly-once).
 
-The tests run against an in-memory SQLite database (StaticPool + FK
-pragma) — the same pattern as ``tests/repositories/conftest.py``. No
-live DB contact, no production writes.
+The tests run against a FILE-backed SQLite database (one connection
+per thread) — see the ``engine`` fixture below. No live DB contact,
+no production writes.
 """
 
 from __future__ import annotations
@@ -37,7 +37,6 @@ from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import event
-from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session, create_engine, select
 
 from daemon.repositories.skill.models import (
@@ -55,7 +54,18 @@ from daemon.repositories.skill.repository import (
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Fixtures — in-memory SQLite (mirrors tests/repositories/conftest.py)
+# Fixtures — file-backed SQLite (one connection per thread)
+
+@pytest.fixture(autouse=True)
+def _fence_data_dir(monkeypatch, tmp_path):
+    """Hermeticity fence: keep the capture-observability sink under tmp_path.
+
+    resolve_data_dir is env-first with a CWD-relative "./data" fallback;
+    without this, the pack appends records to data/skill-capture-observability/.
+    Non-behavioral: no assertion in this pack touches the sink and sink
+    append failures are swallowed.
+    """
+    monkeypatch.setenv("ENSEMBLE_DATA_DIR", str(tmp_path))
 # ─────────────────────────────────────────────────────────────────────
 
 

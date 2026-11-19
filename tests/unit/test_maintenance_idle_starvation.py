@@ -30,7 +30,6 @@ import logging
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
-import pytest
 from sqlmodel import SQLModel, Session, create_engine
 
 from daemon.services.maintenance import (
@@ -78,8 +77,6 @@ class FakeStateStore:
 
 def _busy_service(job_name="skill_orphan_sweep", interval=1.0):
     """A service whose system is BUSY (the idle probe says "not idle")."""
-    from unittest.mock import AsyncMock
-
     service = MaintenanceService()
     execute_fn = AsyncMock()
     service.register(job_name, min_interval_hours=interval, execute_fn=execute_fn)
