@@ -372,7 +372,36 @@ async def create_instance(
 
 
 # 2. GET /instances - List instances
-@router.get("", response_model=InstanceListResponse, dependencies=[scope_required("instances:read")])
+#
+# Option A (instances-list-latency ANALYSIS.md §8): the LIST wire shape
+# MUST NOT carry the ``mcp_tool_names`` key AT ALL — key-ABSENT, not
+# ``null``. On live pages that field was ~2.26 KB/row (58 % of every
+# row) and the frontend never read it (0 hits in ``frontend/``); the
+# detail route still serves it.
+#
+# Two halves, both required:
+#   1. ``response_model_exclude`` — ``InstanceInfo.mcp_tool_names`` is
+#      ``Field(default=None)``, so merely dropping the constructor kwarg
+#      would serialize as ``"mcp_tool_names": null`` and VIOLATE the
+#      key-absent contract. The nested-exclude form must be
+#      ``{"instances": {"__all__": {"mcp_tool_names"}}}``: in pydantic v2
+#      a plain ``{"instances": {"mcp_tool_names"}}`` is read as an
+#      INDEX mapping for the sequence and silently excludes NOTHING
+#      (verified: the key survived), whereas ``__all__`` applies the
+#      sub-schema to every item of the list.
+#   2. the constructor kwarg below is deleted — the list route no
+#      longer sources the field at all.
+#
+# NOTE (disclosed): the OpenAPI schema still advertises
+# ``mcp_tool_names`` on ``InstanceInfo`` (no schema surgery — the
+# detail route serves the same model). The runtime shape is narrower
+# than the documented shape; that gap is disclosed in the handoff.
+@router.get(
+    "",
+    response_model=InstanceListResponse,
+    response_model_exclude={"instances": {"__all__": {"mcp_tool_names"}}},
+    dependencies=[scope_required("instances:read")],
+)
 async def list_instances(
     request: Request,
     limit: int = DEFAULT_PAGE_LIMIT,
@@ -523,7 +552,10 @@ async def list_instances(
             title=inst.get("title"),
             initiative_message=inst.get("initiative_message"),
             children=inst.get("children", []),
-            mcp_tool_names=inst.get("metadata", {}).get("mcp_tool_names"),
+            # ``mcp_tool_names`` is NOT sourced here: the list wire shape
+            # omits the key entirely (see the route decorator's
+            # ``response_model_exclude`` block above). The detail route
+            # (GET /instances/{id}) still serves it.
             model=inst.get("metadata", {}).get("model_override"),
             watchover_enabled=bool(inst.get("metadata", {}).get("watchover_enabled", False)),
             watchover_context=inst.get("metadata", {}).get("watchover_context"),
