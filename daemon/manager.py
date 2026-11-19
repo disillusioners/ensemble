@@ -200,7 +200,6 @@ from .repositories.snapshot.repository import SnapshotRepository
 from .services.skill_seed_service import SkillSeedService
 from .services.skill_clone_service import SkillCloneService
 from .services.maintenance import (
-    MAINTENANCE_SYSTEM_PROJECT_ID,
     CheckpointCleanupJob,
     MaintenanceService,
 )
@@ -4807,8 +4806,9 @@ class InstanceManager:
             # (check_ab_test_resolution returns needs_more_data
             # before the extension bump), resolves the E-6-unambiguous
             # ones (newer GENERATION NUMBER wins, never timestamps),
-            # and parks + surfaces the rest. Idle-gated +
-            # never-raising like its siblings above.
+            # and parks + surfaces the rest. UN_GATED (wi-4d1fa093:
+            # the resolve path is atomic + CAS-guarded) + never-raising
+            # like its siblings above.
             self._maintenance_service.register(
                 "skill_ab_inactivity_sweep",
                 self.config.skill_evolution.metric_scan_interval_hours,
@@ -7789,8 +7789,9 @@ class InstanceManager:
     async def _run_projectskill_gc(self) -> None:
         """Periodic A17 orphan purge (project-skill-loader, code-review W3).
 
-        Registered with :class:`MaintenanceService` so the ``_is_idle``
-        gate keeps it off a busy system. The sweep itself is on
+        Registered with :class:`MaintenanceService` as UN_GATED
+        (wi-4d1fa093: bounded idempotent purge — no live-traffic
+        contention). The sweep itself is on
         :meth:`ProjectSkillSourceService.gc_sweep` (two idempotent
         one-statement passes: ``project_skill_files`` rows whose project
         was deleted, then the embeddings orphaned by that deletion).

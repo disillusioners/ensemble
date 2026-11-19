@@ -32,16 +32,20 @@ Error Handling:
 - A failure in one operation does NOT prevent subsequent operations from running.
 - job.last_run is only updated when the entire execute() completes successfully.
 
-Size rationale (tidier fix pass 2026-09-27, ~1.8k lines): this module
-predates the Maintenance Console and hosts TWO concerns by design —
-the generic ``MaintenanceService`` scheduler and the
+Size rationale (tidier fix pass 2026-09-27, 3451 lines post-range): this
+module predates the Maintenance Console and hosts TWO concerns by
+design — the generic ``MaintenanceService`` scheduler and the
 ``CheckpointCleanupJob`` Op A–E engine whose three instance-sweep ops
 (A/B/C) share ``_cleanup_instance`` + the pinned-subtree protection
 set. Splitting the job out would fork those shared helpers or force
 an import cycle; the Section-1 additions (run-lock gate, audit rows,
 dual entry points) deliberately landed IN this file so the auto and
 manual paths stay textually adjacent for the INV-1/INV-9 AST pins.
-Revisit only if a third cleanup section arrives.
+The third cleanup section has now landed (the starvation composite
+below), so this module is FLAGGED FOR REFACTOR: extract
+``DbMaintenanceStateStore`` + ``IdlePolicy`` + skip-streak telemetry
+into a dedicated ``daemon/services/maintenance_state.py`` (text-only
+flag; no code movement this pass).
 
 Starvation composite (wi-4d1fa093, 2026-11-18): the per-job
 ``IdlePolicy`` tiering, the persisted ``max_staleness_hours``
@@ -192,10 +196,11 @@ JOB_IDLE_POLICIES: dict[str, str] = {
 #: The built-in ``max_staleness_hours`` guarantee per job (hours).
 #:
 #: The guarantee is the anti-starvation escape hatch: a job that has
-#: not succeeded for longer than this many hours runs EVEN when the
-#: system is busy. It is set ONLY for the two jobs that keep the idle
-#: gate — without it they could starve forever on a permanently busy
-#: nest (the live incident: 4d10h with zero runs).
+#: not even ATTEMPTED for longer than this many hours runs EVEN when
+#: the system is busy (the attempt clock — see ``_is_stale``). It is
+#: set ONLY for the two jobs that keep the idle gate — without it
+#: they could starve forever on a permanently busy nest (the live
+#: incident: 4d10h with zero runs).
 #:
 #: The value is PERSISTED (see
 #: :class:`DbMaintenanceStateStore`) so an operator can tune it; the
@@ -468,7 +473,7 @@ class MaintenanceService:
             await asyncio.sleep(self._check_interval)
 
     async def _run_pending_jobs(self) -> None:
-        """Check each job and run those that are due and system is idle.
+        """Check each job and run those that are due, subject to the job's own idle policy.
 
         The idle gate is now PER JOB (see :class:`IdlePolicy`):
 
@@ -968,7 +973,7 @@ class DbMaintenanceStateStore:
 
         AM-9 kind semantics (the module convention —
         ``MaintenanceRunsRepository.latest_completed_for_section``):
-        ``last_run`` is the latest ``succeeded`` row of a kind in
+        the persisted LAST SUCCESS is the latest ``succeeded`` row of a kind in
         ``{auto, manual_execute}``; **``manual_dry_run`` NEVER
         surfaces**. A dry run mutates nothing, so its ``succeeded``
         row must not hydrate as a success — otherwise a newer dry-run

@@ -34,6 +34,12 @@ Design highlights
 * **FIX guard.** ``_evolve_fix`` refuses to mutate a skill already
   in active A/B testing (``status='ab_testing'``) — creating nested
   A/B tests would corrupt the per-group resolution bookkeeping.
+
+Size rationale (3815 lines, PRE-EXISTING at 3749 lines before this
+range): the service exceeds the 3000-line band, but the seams are
+separable for a future refactor — Tier-2/Tier-3 analysis vs the
+CAPTURED flow vs A/B resolution. Flagged for refactor; no code
+movement this pass.
 """
 
 from __future__ import annotations

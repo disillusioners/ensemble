@@ -39,6 +39,13 @@ Design highlights
   schema works on both SQLite and PostgreSQL. Embeddings are
   stored as plain JSON arrays of floats (NOT BYTEA, NOT pickle,
   NOT numpy) — the project standard for JSON-shaped columns.
+
+Size rationale (2470 lines): six repositories share one table module
+and the raw-SQL hot paths (atomic counters, BM25 full-text search,
+bulk embedding lookup) live alongside the CRUD, so the file sits in
+the 1000-3000 band honestly. Splitting per repository would scatter
+the shared engine/JSONB conventions and the whitelisted-column
+counter helpers; keep together unless a seventh repository arrives.
 """
 
 from __future__ import annotations
