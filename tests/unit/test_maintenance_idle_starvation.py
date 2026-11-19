@@ -306,6 +306,45 @@ class TestPersistedStalenessGuarantee:
         assert job.max_staleness_hours == 0.0
         assert service._is_stale(job) is False
 
+    async def test_a_persistently_failing_job_is_not_force_run_every_tick(self):
+        """The ATTEMPT clock keeps the escape hatch from turning a
+        persistently failing job into an every-tick runner.
+
+        Without it, a job that has never succeeded would be "stale"
+        forever and the guarantee would force it on EVERY tick once
+        the window is exceeded — even on a busy system, and even
+        though it is already attempting as often as it can.
+        """
+        persisted = utcnow() - timedelta(hours=30)   # never succeeded since
+        store = FakeStateStore(last_success={"checkpoint_cleanup": persisted})
+        service = MaintenanceService()
+        service.set_state_store(store)
+
+        async def _always_fails():
+            raise RuntimeError("boom")
+
+        service.register(
+            "checkpoint_cleanup", min_interval_hours=24.0,
+            execute_fn=_always_fails,
+        )
+        await service.hydrate_persisted_state()
+
+        job = service._jobs[0]
+        # Before the first attempt there is no attempt clock ⇒ the
+        # persisted last-success decides ⇒ stale (30h > 24h).
+        assert service._is_stale(job) is True
+        hydrated_last_run = job.last_run
+
+        service.set_request_registry({"inflight-request": object()})  # busy
+        await service._run_pending_jobs()
+        # The attempt happened (and failed) ⇒ the attempt clock is now
+        # fresh ⇒ NOT stale ⇒ no forced re-run on the next tick.
+        assert job.last_attempt_ts is not None
+        # The failure did not stamp ``last_run`` (the pre-existing
+        # contract: a failed job retries on the next cycle).
+        assert job.last_run == hydrated_last_run
+        assert service._is_stale(job) is False
+
     async def test_no_store_leaves_the_behaviour_unchanged(self):
         """Without a store the service keeps the pre-fix in-memory
         behaviour (no hydration, no crash)."""

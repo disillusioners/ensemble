@@ -241,6 +241,12 @@ class MaintenanceJob:
     #: The persisted last SUCCESSFUL run (hydrated from storage at
     #: boot). ``None`` until a success is observed.
     last_success_ts: datetime | None = None
+    #: The last ATTEMPT (successful or not) — in memory only. It is
+    #: the starvation reference: a job that keeps ATTEMPTING (even
+    #: failing) is not starved, so the ``max_staleness_hours`` escape
+    #: hatch must not turn a persistently failing job into an
+    #: every-tick runner on a busy system.
+    last_attempt_ts: datetime | None = None
     #: The current idle-gate skip streak — reset on every success.
     consecutive_skips: int = 0
 
@@ -498,6 +504,11 @@ class MaintenanceService:
                 )
 
             try:
+                # Stamp the ATTEMPT before the call: a job that keeps
+                # attempting (even failing) is not starved, so the
+                # staleness escape hatch must not turn a persistently
+                # failing job into an every-tick runner.
+                job.last_attempt_ts = utcnow()
                 await job.execute_fn()
                 job.last_run = utcnow()
                 job.last_success_ts = job.last_run
@@ -511,12 +522,17 @@ class MaintenanceService:
         """Has this job exceeded its ``max_staleness_hours`` guarantee?
 
         The guarantee is the anti-starvation escape hatch: a job that
-        has not succeeded for longer than ``max_staleness_hours`` runs
-        EVEN when the system is busy. The reference clock is the
-        persisted last-success, then the in-memory ``last_run``, then
-        the process-start anchor (so a fresh install gets its
-        guaranteed execution measured from boot instead of firing
-        heavy work instantly under load).
+        has not even ATTEMPTED for longer than ``max_staleness_hours``
+        runs EVEN when the system is busy. The reference clock is the
+        last attempt (in memory), then the persisted last-success,
+        then the in-memory ``last_run``, then the process-start anchor
+        (so a fresh install gets its guaranteed execution measured
+        from boot instead of firing heavy work instantly under load).
+
+        The ATTEMPT clock comes first on purpose: a job that keeps
+        attempting (even failing) is not starved, and the escape hatch
+        must not turn a persistently failing job into an every-tick
+        runner on a busy system.
 
         ``max_staleness_hours`` of ``None`` means "no guarantee"
         (⇒ never stale); a value ``<= 0`` disables the guarantee
@@ -525,7 +541,12 @@ class MaintenanceService:
         """
         if job.max_staleness_hours is None or job.max_staleness_hours <= 0:
             return False
-        reference = job.last_success_ts or job.last_run or self._started_at
+        reference = (
+            job.last_attempt_ts
+            or job.last_success_ts
+            or job.last_run
+            or self._started_at
+        )
         elapsed_hours = (utcnow() - reference).total_seconds() / 3600
         return elapsed_hours >= job.max_staleness_hours
 
