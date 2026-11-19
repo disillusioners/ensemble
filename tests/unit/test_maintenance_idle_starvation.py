@@ -115,6 +115,53 @@ class TestIdlePolicyTiering:
     def test_policy_table_covers_every_registered_job(self):
         assert set(JOB_IDLE_POLICIES) == self.REGISTERED_JOBS
 
+    def test_every_idle_gated_job_carries_a_staleness_guarantee(self):
+        """STRUCTURAL GUARD (review cycle 1, item 1).
+
+        Derived from the POLICY TABLE, not from a name literal: every
+        IDLE_GATED job must have a non-``None`` ``max_staleness_hours``.
+        A future 12th job registered WITHOUT a policy entry silently
+        defaults to ``IDLE_GATED`` (the unknown-name default) and, with
+        no ``JOB_MAX_STALENESS_HOURS`` entry, would starve forever on a
+        busy nest — exactly the defect this composite fixes. This pin
+        REDDENS on that registration instead.
+        """
+        missing = {
+            name
+            for name, policy in JOB_IDLE_POLICIES.items()
+            if policy == IdlePolicy.IDLE_GATED
+            and JOB_MAX_STALENESS_HOURS.get(name) is None
+        }
+        assert missing == set()
+
+    def test_a_gated_job_registered_without_a_policy_entry_is_caught(self):
+        """The structural guard also covers the UNKNOWN-NAME default.
+
+        A job name absent from ``JOB_IDLE_POLICIES`` resolves to
+        ``IDLE_GATED`` at registration — the guard above only sees the
+        table, so this pin covers the registration side: any job the
+        service actually holds as IDLE_GATED must carry a guarantee.
+        """
+
+        service = MaintenanceService()
+        service.register(
+            "some_future_reclaim_job", min_interval_hours=1.0,
+            execute_fn=AsyncMock(),
+        )
+        gated_without_guarantee = [
+            job.name
+            for job in service._jobs
+            if job.idle_policy == IdlePolicy.IDLE_GATED
+            and job.max_staleness_hours is None
+        ]
+        # The defect shape IS representable today (a new gated job with
+        # no guarantee) — the guard exists so it is SEEN, never silent.
+        assert gated_without_guarantee == ["some_future_reclaim_job"]
+        # And for the eleven REAL registrations the invariant holds:
+        for name, policy in JOB_IDLE_POLICIES.items():
+            if policy == IdlePolicy.IDLE_GATED:
+                assert JOB_MAX_STALENESS_HOURS.get(name) is not None, name
+
     def test_reclaim_jobs_keep_the_idle_gate(self):
         for name in self.RECLAIM_JOBS:
             assert JOB_IDLE_POLICIES[name] == IdlePolicy.IDLE_GATED, name
@@ -345,6 +392,84 @@ class TestPersistedStalenessGuarantee:
         # contract: a failed job retries on the next cycle).
         assert job.last_run == hydrated_last_run
         assert service._is_stale(job) is False
+
+    async def test_an_un_gated_job_never_logs_the_busy_override_line(
+        self, caplog
+    ):
+        """ITEM 2 (review cycle 1): the "running despite a busy system"
+        WARNING must never fire for an UN_GATED job.
+
+        An un-gated job never waits on the gate, so reporting that it
+        ran "despite a busy system" is FALSE. Two independent
+        defences are pinned here:
+
+        * ``set_max_staleness_hours`` REFUSES an override on an
+          un-gated job (nothing persisted, nothing applied);
+        * even if an override attribute survived on an un-gated job
+          (e.g. a future re-classification order), the policy
+          conjunction in ``_run_pending_jobs`` keeps ``forced`` False.
+        """
+        service, execute_fn = _busy_service("skill_orphan_sweep")
+
+        # Defence 1: the setter refuses an un-gated target.
+        assert (
+            await service.set_max_staleness_hours("skill_orphan_sweep", 1.0)
+            is False
+        )
+        assert service._jobs[0].max_staleness_hours is None
+
+        # Defence 2: plant an override + an ancient attempt clock, i.e.
+        # the exact shape that used to trip the faulty ``elif forced:``.
+        service._jobs[0].max_staleness_hours = 24.0
+        service._jobs[0].last_attempt_ts = utcnow() - timedelta(hours=48)
+
+        with caplog.at_level(logging.DEBUG, logger="daemon.services.maintenance"):
+            await service._run_pending_jobs()
+
+        assert execute_fn.await_count == 1          # un-gated ⇒ it runs
+        busy_lines = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "despite a busy system" in r.getMessage()
+        ]
+        assert busy_lines == []
+
+    async def test_a_gated_job_still_logs_the_busy_override_line(
+        self, caplog
+    ):
+        """The truthful counterpart: a genuinely starved IDLE_GATED job
+        DOES log the override line (the D-signal stays informative)."""
+        service, execute_fn = _busy_service("checkpoint_cleanup")
+        # 48h since the last attempt ⇒ past the 24h guarantee.
+        service._jobs[0].last_attempt_ts = utcnow() - timedelta(hours=48)
+        service._jobs[0].last_success_ts = utcnow() - timedelta(hours=48)
+
+        with caplog.at_level(logging.DEBUG, logger="daemon.services.maintenance"):
+            await service._run_pending_jobs()
+
+        assert execute_fn.await_count == 1
+        busy_lines = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "despite a busy system" in r.getMessage()
+        ]
+        assert len(busy_lines) == 1
+
+    async def test_hydration_ignores_an_override_for_an_un_gated_job(self):
+        """A stale persisted override on an un-gated job is ignored at
+        hydration (inert by design) — it can never arm the busy line."""
+        store = FakeStateStore(overrides={"skill_orphan_sweep": 6.0})
+        service = MaintenanceService()
+        service.set_state_store(store)
+        service.register(
+            "skill_orphan_sweep", min_interval_hours=1.0,
+            execute_fn=AsyncMock(),
+        )
+
+        await service.hydrate_persisted_state()
+
+        assert service._jobs[0].idle_policy == IdlePolicy.UN_GATED
+        assert service._jobs[0].max_staleness_hours is None
 
     async def test_no_store_leaves_the_behaviour_unchanged(self):
         """Without a store the service keeps the pre-fix in-memory

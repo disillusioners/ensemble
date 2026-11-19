@@ -485,8 +485,16 @@ class MaintenanceService:
             if not self._is_due(job):
                 continue
 
-            forced = self._is_stale(job)
-            if job.idle_policy == IdlePolicy.IDLE_GATED and not forced:
+            # ITEM 2 (review cycle 1): ``forced`` is computed ONLY for
+            # idle-gated jobs. An override on an UN_GATED job is inert
+            # (set_max_staleness_hours refuses it, and hydration skips
+            # it) — but even if a stale attribute ever survived, the
+            # policy conjunction below keeps the "despite a busy
+            # system" line TRUTHFUL: it must never print for a job
+            # that was never waiting on the gate.
+            gated = job.idle_policy == IdlePolicy.IDLE_GATED
+            forced = gated and self._is_stale(job)
+            if gated and not forced:
                 # ``_is_idle`` is async because it wraps a sync ``list_all_pending``
                 # DB call in ``asyncio.to_thread`` to keep the event loop responsive
                 # under SQLite WAL write contention.
@@ -655,7 +663,23 @@ class MaintenanceService:
                 )
                 persisted = None
             if persisted is not None:
-                job.max_staleness_hours = persisted
+                # ITEM 2 (review cycle 1): the staleness guarantee is
+                # meaningful ONLY for an idle-gated job (it is the
+                # escape hatch from a gate the job actually waits on).
+                # Applying it to an UN_GATED job would be inert at
+                # best — and, before the policy conjunction in
+                # ``_run_pending_jobs``, could emit a false "despite a
+                # busy system" line. The policy is therefore part of
+                # the application predicate, not merely of the log.
+                if job.idle_policy == IdlePolicy.IDLE_GATED:
+                    job.max_staleness_hours = persisted
+                else:
+                    logger.debug(
+                        "maintenance state hydration: ignoring a "
+                        "persisted max_staleness_hours override for "
+                        "un-gated job '%s' (inert by design)",
+                        job.name,
+                    )
 
     async def set_max_staleness_hours(
         self, job_name: str, hours: float | None
@@ -673,9 +697,24 @@ class MaintenanceService:
         project is absent) returns ``False`` and leaves the in-memory
         value untouched, rather than reporting a persistence that did
         not happen.
+
+        The staleness guarantee is the escape hatch from the IDLE
+        gate, so it is meaningful only for an ``IDLE_GATED`` job: an
+        override targeting an ``UN_GATED`` job is refused (``False``,
+        nothing persisted, nothing applied) rather than accepted as
+        inert configuration that would later invite a false
+        "running despite a busy system" log line.
         """
         job = next((j for j in self._jobs if j.name == job_name), None)
         if job is None:
+            return False
+        if job.idle_policy != IdlePolicy.IDLE_GATED:
+            logger.warning(
+                "Refusing max_staleness_hours override for '%s': the "
+                "job is UN_GATED, so the staleness escape hatch is "
+                "inert (nothing persisted, nothing applied)",
+                job_name,
+            )
             return False
         store = self._state_store
         if store is not None:
