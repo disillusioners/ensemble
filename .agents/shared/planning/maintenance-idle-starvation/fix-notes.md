@@ -48,7 +48,11 @@ and run un-gated.
 
 **Census:** 11 registered jobs — **9 UN_GATED**, **2 IDLE_GATED** —
 and the two that keep the gate are exactly the two that carry the
-persisted `max_staleness_hours` guarantee.
+persisted `max_staleness_hours` guarantee. That invariant is now
+STRUCTURALLY pinned (review cycle 1, item 1): a test derives "every
+`IDLE_GATED` job must have a non-`None` guarantee" from the policy
+table, so a future 12th job that defaults to `IDLE_GATED` without a
+guarantee REDDENS instead of starving silently.
 
 **Ordering constraint honoured:** the CAS (`292f5f13c`) landed BEFORE
 the un-gating of `skill_ab_inactivity_sweep` (`c5a4b95c0`).
@@ -56,11 +60,14 @@ the un-gating of `skill_ab_inactivity_sweep` (`c5a4b95c0`).
 ## (B) The persisted guarantee + the restart-clock invariant
 
 **Persisted `max_staleness_hours`** — the anti-starvation escape
-hatch: a job that has not succeeded for longer than
+hatch: a job that has not even ATTEMPTED for longer than
 `max_staleness_hours` runs EVEN when the system is busy. Defaults
 (24.0h, the two reclaim jobs) live in `JOB_MAX_STALENESS_HOURS`; the
 PERSISTED value wins over the default; a persisted `0` disables the
-guarantee for that job.
+guarantee for that job. An override is accepted ONLY for an
+`IDLE_GATED` job (see the (D) accuracy note and disclosure (c)) — the
+guarantee is the escape hatch from a gate the job actually waits on,
+so it is refused for any `UN_GATED` job.
 
 **Storage surfaces — EXISTING ONLY, ZERO new migrations:**
 
@@ -123,6 +130,56 @@ semantics were touched.
 - One metric block per job: `MaintenanceService.job_metrics()` →
   `{job_name: {"last_success_ts": <ISO-8601|None>, "consecutive_skips": <int>}}`.
 
+### (D) Accuracy note — review cycle 1 (item 2)
+
+The "running despite a busy system" WARNING is the message that tells
+an operator `max_staleness_hours` just overrode a real gate. It is now
+emitted **only for an `IDLE_GATED` job**: `forced` is computed as
+`gated and self._is_stale(job)`, and `set_max_staleness_hours` REFUSES
+an override targeting an `UN_GATED` job (nothing persisted, nothing
+applied) while hydration ignores a stale persisted override on one.
+Before the fix an `UN_GATED` job carrying an override emitted the
+false line on every tick. Pins:
+`test_an_un_gated_job_never_logs_the_busy_override_line` (both
+defences), `test_a_gated_job_still_logs_the_busy_override_line` (the
+truthful counterpart), `test_hydration_ignores_an_override_for_an_un_gated_job`.
+
+## Scope & wiring disclosures
+
+Three deliverable claims are deliberately scoped below — the SURFACE
+exists in each case, the WIRING is deferred (never overclaim):
+
+**(a) CAS coverage is the SANCTIONED A/B path ONLY.** Four non-CAS
+`resolve()` call sites remain, all on paths disjoint from the
+sanctioned resolver:
+
+| site | path |
+|------|------|
+| `daemon/services/skill_deactivation.py:1657` | the deactivation lane |
+| `daemon/services/skill_evolution_service.py:1952` | `check_ab_test_resolution` — forced-winner (Path 0) |
+| `daemon/services/skill_evolution_service.py:2016` | `check_ab_test_resolution` — threshold met (Path 2) |
+| `daemon/services/skill_evolution_service.py:2055` | `check_ab_test_resolution` — max_extensions force-resolve (Path 3) |
+
+Routing the deactivation lane through `resolve_atomic` (and folding
+the three `check_ab_test_resolution` paths) is a **NAMED follow-up**,
+not part of this lane: those paths carry their own already-resolved
+guards and their predicates differ (see "Deliberately NOT done"). The
+resident residual risk is upstream, not discovered by this lane.
+
+**(b) `job_metrics()` exists but has NO production consumer yet.** The
+surface is implemented and pinned; wiring it into a metrics scrape /
+Maintenance Console view is deferred. Relatedly, `last_success_ts`
+hydrates only for the TWO gated jobs today — they are the only jobs
+that write Section-1 audit rows, so the other nine have no persisted
+last-success to read.
+
+**(c) `set_max_staleness_hours` is SERVICE-API-ONLY.** There is no
+route and no agent tool calling it, so no operator can change the
+value at runtime today; the **effective value is the built-in 24.0h**
+for both gated jobs. The persisted-override path is proven end-to-end
+(store round-trip + hydration + refusal semantics) and stands ready
+for a future settings/API consumer.
+
 ## Files changed
 
 | file | what |
@@ -131,8 +188,8 @@ semantics were touched.
 | `daemon/services/skill_evolution_service.py` | the sanctioned resolve path now rides `resolve_atomic` (CAS + one transaction) |
 | `daemon/repositories/skill/repository.py` | the new `SkillABTestRepository.resolve_atomic` (the `resolve` method is UNCHANGED) |
 | `daemon/manager.py` | the state-store wiring; the sweep's `cas_lost` counter |
-| `tests/unit/test_maintenance_idle_starvation.py` | the new unit pack (24 tests) |
-| `tests/unit/test_skill_evolution_resolve_atomic.py` | the new CAS pack (9 tests) |
+| `tests/unit/test_maintenance_idle_starvation.py` | the new unit pack (**35 tests** at tip — 30 after the advisory-1 cycle, +5 in review cycle 1) |
+| `tests/unit/test_skill_evolution_resolve_atomic.py` | the new CAS pack (**9 tests**) |
 
 ## Commits
 
@@ -172,7 +229,7 @@ env POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 POSTGRES_DB=ensemble_dev \
 
 | batch | result |
 |-------|--------|
-| the two new packs | **34 passed** (25 + 9) |
+| the two new packs (maintenance + CAS) | **44 passed** (35 + 9) — re-run at review-cycle-1 tip |
 | the maintenance surface (`tests/test_maintenance.py`, `tests/unit/test_anomaly_retention.py`, `tests/unit/services/test_maintenance_run_lock_and_capture.py`, `tests/unit/test_checkpoint_retention_config_probes.py`, `tests/unit/services/test_malloc_tuner.py`, `tests/integration/test_maintenance_checkpoint_cleanup_api.py`, `tests/integration/test_vacuum_maintenance_job_no_full.py`) | **134 passed**, 47 deselected |
 | the skill-evolution surface (9 files, incl. `tests/repositories/test_skill_repository.py`, `tests/unit/test_skill_evolution_lane_gate.py`, `tests/unit/test_composite_scoring.py`, `tests/unit/test_skill_stale_deactivation.py`, `tests/unit/routers/test_skills.py`, `tests/tools/test_skill_evolution_tools.py`) | **427 passed**, 1 skipped |
 
@@ -194,16 +251,23 @@ Mutation applied to `daemon/services/maintenance.py`:
 FAILED tests/unit/test_maintenance_idle_starvation.py::TestIdlePolicyTiering::test_un_gated_job_runs_even_when_the_system_is_busy
     assert execute_fn.await_count == 1
 E   AssertionError: assert 0 == 1
-    +  where 0 = <AsyncMock id='132335044951552'>.await_count
+    +  where 0 = <AsyncMock id='125412570610192'>.await_count
 ------------------------------ Captured log call -------------------------------
-WARNING  daemon.services.maintenance:maintenance.py:569 Maintenance job 'skill_orphan_sweep' skipped (system not idle): consecutive_skips=1 last_success_ts=never
+WARNING  daemon.services.maintenance:maintenance.py:581 Maintenance job 'skill_orphan_sweep' skipped (system not idle): consecutive_skips=1 last_success_ts=never
 
-FAILED tests/unit/test_maintenance_idle_starvation.py::TestIdlePolicyTiering::test_bounded_jobs_are_un_gated
-E   AssertionError: assert {'anomaly_ret...c_sweep', ...} == {'anomaly_ret...c_sweep', ...}
-E     Extra items in the right set:
+FAILED tests/unit/test_maintenance_idle_starvation.py::TestIdlePolicyTiering::test_every_idle_gated_job_carries_a_staleness_guarantee
+E   AssertionError: assert {'skill_orphan_sweep'} == set()
+E     Extra items in the left set:
 E     'skill_orphan_sweep'
-2 failed, 1 warning in 0.63s
+
+FAILED ...::test_a_gated_job_registered_without_a_policy_entry_is_caught
+FAILED ...::test_bounded_jobs_are_un_gated
+4 failed, 7 passed, 1 warning in 0.41s
 ```
+
+(Re-run at review-cycle-1 tip, 2026-11-19: the mutation now reds FOUR
+pins — the behavioural target plus the three classification pins,
+including the new STRUCTURAL guarantee pin from item 1.)
 
 Restore (byte-identical, verified by sha256 of the whole file; the
 restore was done from a FILE COPY, not `git checkout --` — see the
@@ -211,11 +275,14 @@ note below):
 
 | | sha256 of `daemon/services/maintenance.py` |
 |---|---|
-| before the mutation | `80598b4c4cbfc4b5c8efa24b41bc3b7773bbde79b8de73b0d56906dee8979c50` |
-| after the mutation | `637e6997d097af6eb64b17ad5032129a1ccbcb90a092eea0a1b2f0ca8ba1515b` |
-| after the restore | `80598b4c4cbfc4b5c8efa24b41bc3b7773bbde79b8de73b0d56906dee8979c50` — **IDENTICAL to before** |
+| before the mutation (review-cycle-1 tip) | `5ec2fe7cf78d7e919d0c442ac7afea1e5dd325bfc92a6fc66a5bf652efee3611` |
+| after the mutation | `5b020b2cae2dfcbd737def7564354ed42f069c1dcb8e0870e65353dad523e050` |
+| after the restore | `5ec2fe7cf78d7e919d0c442ac7afea1e5dd325bfc92a6fc66a5bf652efee3611` — **IDENTICAL to before** |
+
+Restored from a saved file copy; tree clean at the restore point.
 
 A second mutation (the static pin) also reds:
+A second mutation (the static classification pin) also reds:
 `test_bounded_jobs_are_un_gated` →
 `Extra items in the right set: 'skill_orphan_sweep'`.
 
@@ -328,3 +395,68 @@ imports.
 - Advisory #4 (duplicate import), #5 (test docstring says "StaticPool"
   where the file-backed fixture now applies), #6 (fix-notes count nit).
 - The capture-observability sink hermeticity nit — recorded only.
+
+## Review fix cycle 1 (council b442854d, 2026-11-19T02:08Z)
+
+Verdict APPROVE-WITH-ADVISORIES (2/2 quorum), zero blocking; the AM-9
+fix and the classification were upheld. Four items landed.
+
+### Item 1 — the classification guard is STRUCTURAL now
+
+`test_policy_table_covers_every_registered_job` still pins the eleven
+names, but the real recurrence guard is new and DERIVED:
+`test_every_idle_gated_job_carries_a_staleness_guarantee` asserts that
+every `IDLE_GATED` entry in `JOB_IDLE_POLICIES` has a non-`None`
+`JOB_MAX_STALENESS_HOURS` value. A future 12th job that (a) is
+registered without a policy entry — so the unknown-name default makes
+it `IDLE_GATED` — and (b) has no guarantee entry now REDDENS a test
+instead of starving forever. `test_a_gated_job_registered_without_a_policy_entry_is_caught`
+covers the registration side of the same shape.
+
+The mutation-red property is INTACT and expanded: flipping
+`skill_orphan_sweep` to `IDLE_GATED` now reds FOUR pins (the
+behavioural target + the bounded-set pin + both structural pins).
+
+### Item 2 — the busy-override log is truthful
+
+Chosen fix shape: **gate the log on the job's idle policy AND refuse
+the override at the setter** (belt-and-braces, rather than one or the
+other). One line on why: the log must be truthful even if an override
+attribute ever survives on an un-gated job (e.g. a future
+re-classification order), while the setter/hydration refusals stop
+such an override from existing in the first place — the log fix alone
+would leave inert-but-armed configuration on the object.
+
+- `_run_pending_jobs`: `gated = policy is IDLE_GATED; forced = gated and self._is_stale(job)`.
+- `set_max_staleness_hours`: refuses (`False`, nothing persisted,
+  nothing applied) when the target job is `UN_GATED`.
+- `hydrate_persisted_state`: ignores a persisted override on an
+  `UN_GATED` job (DEBUG line — inert by design).
+
+### Item 3 — every count in this document re-verified by RUNNING
+
+| command | actual output (review-cycle-1 tip) |
+|---------|-------------------------------------|
+| `pytest tests/unit/test_maintenance_idle_starvation.py` | **35 passed** |
+| `pytest tests/unit/test_skill_evolution_resolve_atomic.py` | **9 passed** |
+| both packs together | **44 passed** |
+| the maintenance surface (7 files) | **134 passed**, 47 deselected |
+| the skill-evolution surface (9 files) | **427 passed**, 1 skipped |
+
+### Item 4 — disclosures
+
+See "Scope & wiring disclosures" above ((a) CAS coverage is the
+sanctioned path only, 4 non-CAS `resolve()` sites remain with the
+deactivation lane as a NAMED follow-up; (b) `job_metrics()` has no
+production consumer and `last_success_ts` hydrates only the 2 gated
+jobs; (c) `set_max_staleness_hours` is service-API-only, effective
+value = built-in 24.0).
+
+### Leader-deferred (NOT in this cycle, do not fold in)
+
+- Advisory #6 — the `rowcount != 1` conflation branch (fail-closed
+  safe today).
+- Advisory #7 — the KV blob read-modify-write window.
+
+Both ride upstream as residual risks and were deliberately left
+untouched.
