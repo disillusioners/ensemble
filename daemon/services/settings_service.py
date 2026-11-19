@@ -145,7 +145,6 @@ class ManagedKeySpec:
     """
 
     key: str
-    config_path: str
     env_var: str
     value_type: str  # "int" | "float" | "bool" | "str"
     default: Any
@@ -188,6 +187,10 @@ class ManagedKeySpec:
     # never a boot/wire failure — the settings service must never break
     # because the decision module changed).
     raw_yaml_section: Callable[[], Any] | None = None
+    # config_path is None => DB/ENV-ONLY key (no backing Config field):
+    # skips the yaml tier + boot-time Config mutation. Opt-out is
+    # EXPLICIT via None - never implicit by accident.
+    config_path: str | None = None
 
     def constraint_desc(self) -> str:
         """Human-readable constraint for log lines / 422 details
@@ -220,7 +223,7 @@ class ManagedKeySpec:
 #: ``limits.manager_pool_size`` (devops incident fix item #7), the
 #: SEVEN metrics-collection knobs (metrics-collection P0, 2026-10-29)
 #: and the THREE decision-module switches (decision-module P1,
-#: 2026-11-09) — the registry now carries EIGHTEEN entries (rogue-containment rider (d) retired limits.metrics_listener_port). Adding keys
+#: 2026-11-09) — the registry now carries NINETEEN entries (rogue-containment rider (d) retired limits.metrics_listener_port; the wedge-notice emission kill-switch (wake-path S4) is the 19th and is DB/ENV-ONLY — config_path is None, no backing Config field). Adding keys
 #: later is a registry entry + nothing else (the ladder, CRUD, API and
 #: FE render generically off the registry); ``len(MANAGED_KEYS)`` is
 #: the authoritative census.
@@ -709,7 +712,7 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
     # effect with NO restart.
     "wedge_notice_emission_enabled": ManagedKeySpec(
         key="wedge_notice_emission_enabled",
-        config_path="wedge_notice_emission_enabled",
+        config_path=None,  # DB/ENV-ONLY — no backing Config field (consumed per-tick via get_overrides())
         env_var="WEDGE_NOTICE_EMISSION_ENABLED",
         value_type="bool",
         default=True,
@@ -1259,6 +1262,8 @@ def _raw_yaml_leaf(raw_yaml_limits: Any, spec: ManagedKeySpec) -> Any:
     log carries the failure CLASS only.
     """
     try:
+        if not spec.config_path:
+            return None
         if spec.raw_yaml_section is not None:
             node: Any = spec.raw_yaml_section()
         else:
@@ -1280,14 +1285,18 @@ def _raw_yaml_leaf(raw_yaml_limits: Any, spec: ManagedKeySpec) -> Any:
         return None
 
 
-def _get_config_value(config: Any, config_path: str) -> Any:
+def _get_config_value(config: Any, config_path: str | None) -> Any:
+    if not config_path:
+        return None
     obj = config
     for part in config_path.split("."):
         obj = getattr(obj, part)
     return obj
 
 
-def _set_config_value(config: Any, config_path: str, value: Any) -> None:
+def _set_config_value(config: Any, config_path: str | None, value: Any) -> None:
+    if not config_path:
+        return
     parts = config_path.split(".")
     obj = config
     for part in parts[:-1]:
@@ -1378,30 +1387,77 @@ def apply_db_settings_overrides(
                 )
 
     # Step 3+4 — resolve, mutate in place, capture applied_value.
+    # PER-KEY FAIL-SOFT: one bad/unknown/missing-path/wrong-type key or
+    # row logs a clear WARNING and continues (lower tier / existing
+    # Config intact, never marked applied) — NEVER aborts boot. The
+    # targeted catches cover the known failure classes (missing attr,
+    # type mismatch, missing dict key, non-scalar section root); the
+    # broad safety catch is the last resort so a single misbehaving key
+    # can never take down lifespan.
     applied_count = 0
     resolutions: dict[str, dict[str, Any]] = {}
     for key, spec in MANAGED_KEYS.items():
         resolution = resolve(key, snapshot, db_overrides=db_overrides)
         resolutions[key] = resolution
-        if resolution["source"] == "db":
-            applied_count += 1
-        current = _get_config_value(config, spec.config_path)
-        if resolution["value"] != current:
-            # Sensitive-key tripwire: BOTH %r args redacted (same
-            # posture as the router PUT audit line) — a future
-            # secret-bearing key must never leak through this line.
-            logged_current = "<redacted>" if spec.sensitive else current
-            logged_value = "<redacted>" if spec.sensitive else resolution["value"]
-            logger.info(
-                "[Settings] %s: %s tier wins — config field %r -> %r "
-                "(applies on this boot; restart-required semantics)",
+        db_won = resolution["source"] == "db"
+        try:
+            if spec.config_path:
+                current = _get_config_value(config, spec.config_path)
+                # A config_path that resolves to a non-scalar (a section
+                # root / BaseModel / dict) is a misconfigured entry, NOT
+                # a leaf — refuse to mutate it and fail-soft.
+                if not isinstance(
+                    current, (int, float, bool, str, type(None))
+                ):
+                    raise ValueError(
+                        f"config_path {spec.config_path!r} resolves to a "
+                        f"non-scalar section root ({type(current).__name__}), "
+                        f"not a managed leaf"
+                    )
+                if resolution["value"] != current:
+                    # Sensitive-key tripwire: BOTH %r args redacted (same
+                    # posture as the router PUT audit line) — a future
+                    # secret-bearing key must never leak through this line.
+                    logged_current = "<redacted>" if spec.sensitive else current
+                    logged_value = "<redacted>" if spec.sensitive else resolution["value"]
+                    logger.info(
+                        "[Settings] %s: %s tier wins — config field %r -> %r "
+                        "(applies on this boot; restart-required semantics)",
+                        key,
+                        resolution["source"],
+                        logged_current,
+                        logged_value,
+                    )
+                    _set_config_value(config, spec.config_path, resolution["value"])
+                applied_value = _get_config_value(config, spec.config_path)
+            else:
+                # DB/ENV-ONLY key (config_path is None): no Config field to
+                # mutate — the resolved winner is the applied value. The
+                # consumer reads it via get_overrides() / env, not Config.
+                applied_value = resolution["value"]
+            if db_won:
+                applied_count += 1
+        except (AttributeError, TypeError, KeyError, ValueError) as exc:
+            logger.warning(
+                "[Settings] %s: boot apply skipped — %s: %s — lower tiers "
+                "stay active; key not marked applied (config_path=%r)",
                 key,
-                resolution["source"],
-                logged_current,
-                logged_value,
+                type(exc).__name__,
+                exc,
+                spec.config_path,
             )
-            _set_config_value(config, spec.config_path, resolution["value"])
-        snapshot[key]["applied_value"] = _get_config_value(config, spec.config_path)
+            applied_value = None
+        except Exception as exc:  # noqa: BLE001 — per-key fail-soft (last resort)
+            logger.warning(
+                "[Settings] %s: boot apply skipped — %s: %s — lower tiers "
+                "stay active; key not marked applied (config_path=%r)",
+                key,
+                type(exc).__name__,
+                exc,
+                spec.config_path,
+            )
+            applied_value = None
+        snapshot[key]["applied_value"] = applied_value
 
     # ONE summary INFO per invocation on ALL exit paths (council
     # follow-up) — every apply_db_settings_overrides exit is uniformly
