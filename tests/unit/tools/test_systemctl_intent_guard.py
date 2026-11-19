@@ -1,5 +1,12 @@
 """Intent-match pins for the shared systemctl/kill guard (2026-11-18 outage).
 
+SIZE RATIONALE
+==============
+255 nodes in ONE file, on purpose: the guard is a single pure module and
+its pin file is the one place a reviewer can see every shape beside every
+counter-mutation. Splitting it by family would scatter the both-direction
+selection (a DENY family and its ALLOW counterpart must be read together).
+
 WHAT THESE PINS DEFEND
 ======================
 The pre-2026-11-18 guard classified ``systemctl`` verbs correctly but tested
@@ -195,6 +202,19 @@ _READONLY_COMMANDS = [
     "systemctl show ensemble-main --property=Restart",
     "systemctl status ensemble-main -n 20 | grep -i restart",
     "journalctl -u ensemble-main -n 20 | grep -i enable",
+    # the value options are consumed, so the verb is still read-only
+    "systemctl show ensemble-main -P Restart",
+    "systemctl show -P Restart ensemble-main",
+    "systemctl -P cat status ensemble-main",
+    "systemctl --boot-loader-entry cat status ensemble-main",
+    # --legend takes a MANDATORY value on this host: without it in the
+    # table the read-only verb behind the value was refused
+    "systemctl --legend yes status ensemble-main",
+    # the three v255 value options besides -P, each with a property
+    # NAME as the value (the property-name over-block stays dropped)
+    "systemctl show --boot-loader-entry Restart ensemble-main",
+    "systemctl show --image-policy Restart ensemble-main",
+    "systemctl show --boot-loader-menu Restart ensemble-main",
 ]
 
 
@@ -526,6 +546,32 @@ _PIPE_LAUNDER_SHAPES = [
     "echo 'systemctl stop ensemble-prod' | dash",
     "echo 'systemctl kill ensemble-main' | ssh host 'sh'",
     "echo 'systemctl restart ensemble-main' | bash -c 'cat'",
+    # The segment that PRODUCES a pipe-fed payload is not always the
+    # segment that CARRIES it: a subshell, a brace group and every
+    # intermediate forwarding stage move the payload away from the
+    # executor's neighbour, so the SHAPE test is applied to the WHOLE
+    # stripped text of a command that pipes into an executor.
+    "(echo 'systemctl restart ensemble-main') | bash",
+    "{ echo 'systemctl restart ensemble-main'; } | bash",
+    "echo 'systemctl restart ensemble-main' | cat | bash",
+    "echo 'systemctl restart ensemble-main' | tee /tmp/x.log | bash",
+    "echo 'systemctl restart ensemble-main' | grep ensemble-main | bash",
+    "echo 'systemctl restart ensemble-main' | cat | tee /tmp/x.log | bash",
+    # the executor need not be a shell
+    "echo 'systemctl restart ensemble-main' | cat | at now",
+    # A heredoc body REMOVED from the code text is still handed to the
+    # executor through the pipe — the bodies are shape-tested too
+    "cat <<'EOF' | cat | bash\nsystemctl restart ensemble-main\nEOF",
+    "cat <<'EOF' | tee /tmp/x.log | bash\nsystemctl restart ensemble-main\nEOF",
+    "cat <<'EOF' | cat | at now\nsystemctl restart ensemble-main\nEOF",
+    # a payload assembled from ENV SUBSTITUTIONS through a multi-stage
+    # pipe: the whole-text rule tests the raw text, the adjacency backstop
+    # is single-stage — the RESOLVED payloads are shape-tested too
+    "A=ensemble; echo \"systemctl restart ${A}-main\" | cat | bash",
+    # a heredoc body delivered to a BARE ssh host is EXECUTED remotely
+    # (ssh forwards the client's stdin to a remote login shell) - the
+    # same mechanism as the pipe form
+    "ssh host <<'EOF'\nsystemctl restart ensemble-main\nEOF",
 ]
 
 
@@ -551,6 +597,7 @@ def test_xargs_stdin_operands_fail_closed(command):
 
 
 _RUNNER_SHAPES = [
+    # --- su / runuser command strings ---------------------------------
     "su -c 'systemctl restart ensemble-main'",
     "su root -c 'systemctl restart ensemble-main'",
     'runuser -u root -c "systemctl restart ensemble-main"',
@@ -561,6 +608,83 @@ _RUNNER_SHAPES = [
     "ssh localhost 'systemctl restart ensemble-main'",
     "ssh -p 2222 localhost 'systemctl restart ensemble-main'",
     "bash -c \"$(echo 'systemctl restart ensemble-main')\"",
+    # A runner option that CONSUMES the next word (the systemd-run
+    # timer options) must not hide the tail: the value is skipped and
+    # the command behind it is analysed.
+    'systemd-run --on-calendar "12:00" systemctl restart ensemble-main',
+    "systemd-run --on-boot 60 systemctl restart ensemble-main",
+    "systemd-run --on-startup 30 systemctl restart ensemble-main",
+    "systemd-run --on-unit-active 30 systemctl restart ensemble-main",
+    "systemd-run --on-unit-inactive 30 systemctl restart ensemble-main",
+    "systemd-run --timer-property AccuracySec=1s systemctl restart ensemble-main",
+    # the `=`-forms are one self-contained token and keep working
+    "systemd-run --on-calendar=12:00 systemctl restart ensemble-main",
+    # an option that takes NO value must not swallow the command
+    "systemd-run --on-clock-change systemctl restart ensemble-main",
+    "systemd-run --on-timezone-change systemctl restart ensemble-main",
+    "systemd-run -P systemctl restart ensemble-main",
+    "systemd-run -t systemctl restart ensemble-main",
+    "watch -p systemctl restart ensemble-main",
+    "watch -t systemctl restart ensemble-main",
+    "watch -q 5 systemctl restart ensemble-main",
+    # the timer-option value must not be able to swallow the command
+    # that FOLLOWS it either (a second option after the value used to
+    # anchor the tail analysis on the option, not on the command)
+    'systemd-run --on-calendar "12:00" --unit foo systemctl restart ensemble-main',
+    "systemd-run --timer-property AccuracySec=1s --unit foo systemctl restart ensemble-main",
+    # the plain value options of the runner are consumed as well
+    "systemd-run --description plain systemctl restart ensemble-main",
+    "systemd-run --working-directory /tmp systemctl restart ensemble-main",
+    "systemd-run --uid root systemctl restart ensemble-main",
+    # ``env -S`` / ``env --split-string`` SPLIT the string and RUN it
+    "env -S 'systemctl restart ensemble-main'",
+    "env --split-string=systemctl restart ensemble-main",
+    "env --split-string 'systemctl restart ensemble-main'",
+    # ``timeout``'s SIGNAL is a WORD: the numeric-duration rule does
+    # not skip it, so the command behind it was never analysed
+    "timeout -s TERM 5 systemctl restart ensemble-main",
+    "timeout --signal=TERM 5 systemctl restart ensemble-main",
+    # the xargs long options that consume a value
+    "xargs --arg-file /dev/null bash -c 'systemctl restart ensemble-main'",
+    "xargs --delimiter : bash -c 'systemctl restart ensemble-main'",
+    "xargs --max-args 1 bash -c 'systemctl restart ensemble-main'",
+    # ``su``/``runuser`` accept the ATTACHED command-string form
+    "su -c'systemctl restart ensemble-main'",
+    "su --command=systemctl restart ensemble-main",
+    # ``ssh host`` with NO remote command still forwards stdin
+    "echo 'systemctl restart ensemble-main' | ssh host",
+    # the xargs tail's command word is found by peeling the wrappers
+    "xargs env bash -c 'systemctl restart ensemble-main'",
+    # an option the tool does NOT have has an unknown arity ⇒ FAIL
+    # CLOSED (the tail could anchor on the option's VALUE and miss the
+    # command behind it) — including for a read-only tail
+    "systemd-run --not-an-option systemctl status ensemble-main",
+    "watch --not-an-option systemctl status ensemble-main",
+    "xargs --not-an-option bash -c 'systemctl status ensemble-main'",
+    "systemd-run --not-an-option systemctl restart ensemble-main",
+    # sudo's value options (-r/--role, -t/--type) were MISSING: the
+    # command word anchored on the option's VALUE (NOPASSWD-exploitable)
+    "sudo --role scratchvalue systemctl restart ensemble-main",
+    "sudo -r scratchvalue systemctl restart ensemble-main",
+    "sudo -t scratchvalue systemctl restart ensemble-main",
+    # bundled / attached env split-string forms, and env behind a
+    # wrapper or a shell keyword
+    "env -iS 'systemctl restart ensemble-main'",
+    "env -iSsystemctl restart ensemble-main",
+    "sudo env -S 'systemctl restart ensemble-main'",
+    "nohup env -S 'systemctl restart ensemble-main'",
+    "timeout 5 env -S 'systemctl restart ensemble-main'",
+    "if env -S 'systemctl restart ensemble-main'; then true; fi",
+    # the xargs tail is analysed as a whole command line
+    "xargs systemd-run systemctl restart ensemble-main",
+    "xargs su -c 'systemctl restart ensemble-main'",
+    "xargs ./stop-ensemble.sh",
+    "xargs xargs systemctl restart ensemble-main",
+    # stdbuf's value options (-e/-o/-i) were not in the shared tuple
+    "stdbuf -e L systemctl restart ensemble-main",
+    "stdbuf -o 0 systemctl restart ensemble-main",
+    # an option ssh does NOT have fails closed (its arity is unknown)
+    "ssh --not-an-option host 'systemctl restart ensemble-main'",
 ]
 
 
@@ -575,6 +699,10 @@ _SCHEDULER_SHAPES = [
     "echo 'systemctl restart ensemble-main' | at now",
     "echo 'systemctl restart ensemble-main' | batch",
     "echo '0 5 * * * systemctl restart ensemble-main' | crontab -",
+    # the schedulers RUN their stdin too (``crontab -`` installs the
+    # body as a crontab; ``at``/``batch`` run the lines they are handed)
+    "crontab <<'EOF'\nsystemctl restart ensemble-main\nEOF",
+    "at now <<'EOF'\nsystemctl restart ensemble-main\nEOF",
 ]
 
 
@@ -634,6 +762,35 @@ _LAUNDER_ALLOW = [
     "cat > notes.md <<'EOF'\nrun systemctl restart ensemble-main to recover\nEOF",
     "journalctl -u ensemble-main -n 20 | grep -i enable",
     "systemctl status ensemble-main | grep ensemble",
+    # read-only through a runner option that CONSUMES the next word
+    'systemd-run --on-calendar "12:00" systemctl status ensemble-main',
+    "systemd-run --on-calendar=12:00 systemctl status ensemble-main",
+    "systemd-run --on-boot 60 systemctl status ensemble-main",
+    "systemd-run --on-unit-inactive 30 systemctl status ensemble-main",
+    "systemd-run --timer-property AccuracySec=1s systemctl status ensemble-main",
+    "systemd-run --description plain systemctl status ensemble-main",
+    "watch -n 5 systemctl status ensemble-main",
+    "watch -q 5 systemctl status ensemble-main",
+    # read-only through the same runners, and the PROSE heredoc stays
+    # data (only a shell/scheduler reader EXECUTES its stdin)
+    "env -S 'systemctl status ensemble-main'",
+    "timeout -s TERM 5 systemctl status ensemble-main",
+    "xargs --arg-file /dev/null bash -c 'systemctl status ensemble-main'",
+    "su -c'systemctl status ensemble-main'",
+    "echo 'systemctl status ensemble-main' | ssh host",
+    "cat > cron.txt <<'EOF'\nrun systemctl restart ensemble-main to recover\nEOF",
+    # a read-only body to the same shape stays allowed
+    "ssh host <<'EOF'\nsystemctl status ensemble-main\nEOF",
+    # attached / bundled / =-forms of KNOWN options are self-contained:
+    # they were misread as unknown and refused
+    "watch -n1 systemctl status ensemble-main",
+    "xargs -I{} systemctl status ensemble-main",
+    "xargs --max-args=1 systemctl status ensemble-main",
+    "systemd-run -Hhost true",
+    "env -iS 'systemctl status ensemble-main'",
+    "stdbuf -i0 systemctl status ensemble-main",
+    "sudo -n systemctl status ensemble-main",
+    "sudo -u root systemctl status ensemble-main",
 ]
 
 
@@ -675,3 +832,157 @@ async def test_proc_lane_allows_readonly_through_runner():
         text = await pr.coroutine(command=command, timeout=-1)
         assert "timeout must be >= 0" in text, (command, text)
         assert "refused by the rogue-containment" not in text, (command, text)
+
+
+# ===========================================================================
+# wave-3 (2026-11-19) — the guard-inversion CLOSING fixes
+#
+#   * the pipe/executor laundering rule applies the SHAPE test to the WHOLE
+#     stripped text: the segment that PRODUCES a pipe-fed payload is not
+#     always the segment that CARRIES it (a subshell, a brace group, an
+#     intermediate forwarding stage), so an adjacency-scoped test left real
+#     laundering shapes ALLOWED;
+#   * a runner option that CONSUMES the next word (the systemd-run timer
+#     options) no longer hides the tail behind the option's value;
+#   * a systemctl option that takes NO value no longer eats the verb.
+#
+# Counter-mutations:
+#   * M6g — revert the whole-text pipe rule to adjacency-scoped payload
+#     analysis ⇒ the pipe-shape deny pins RED;
+#   * M6h — drop the runner option value-consumption ⇒ the runner-shape
+#     deny pins RED.
+# ===========================================================================
+
+_SYSTEMCTL_OPTION_ANCHOR_SHAPES = [
+    # ``--mkdir`` takes NO value (it is a flag): treating it as
+    # value-consuming made the tail analysis anchor on the VALUE, so the
+    # VERB was eaten and the unit became the verb. The command was
+    # ALLOWED although ``systemctl --mkdir restart <unit>`` really does
+    # restart the unit.
+    "systemctl --mkdir restart ensemble-main",
+    "systemctl --mkdir stop ensemble-main",
+    # the value-consuming options still consume their value, so the verb
+    # is found and the ensemble unit is refused
+    "systemctl --host myhost restart ensemble-main",
+    "systemctl --machine mycontainer restart ensemble-main",
+    "systemctl --root /mnt restart ensemble-main",
+    "systemctl --job-mode replace restart ensemble-main",
+    # the v255 value options that were MISSING from the table: with them
+    # absent the parser lands on the option's VALUE and the real verb
+    # behind it is never analysed
+    "systemctl -P cat stop ensemble-main",
+    "systemctl --boot-loader-entry cat stop ensemble-main",
+    "systemctl --image-policy plain stop ensemble-main",
+    "systemctl --boot-loader-menu 12:00 stop ensemble-main",
+]
+
+
+@pytest.mark.parametrize("command", _SYSTEMCTL_OPTION_ANCHOR_SHAPES)
+def test_systemctl_option_anchor_shapes_refused(command):
+    """A ``systemctl`` option must not be able to eat the verb."""
+    assert guard.systemctl_violation(command) is not None
+
+
+def test_property_name_colliding_with_a_mutating_verb():
+    """The disclosed SHAPE residual — the EXECUTED context.
+
+    A property name that COLLIDES with a mutating verb (``-p Restart``)
+    is REFUSED once the command is EXECUTED: the shape test sees the
+    verb. The DIRECT context stays ALLOWED — that over-block is the one
+    this guard deliberately dropped, and it is pinned as allowed here so
+    the two contexts cannot drift apart silently.
+    """
+    assert guard.systemctl_violation("systemctl show ensemble-main -p Restart") is None
+    assert guard.systemctl_violation(
+        "systemctl show ensemble-main --property=Restart"
+    ) is None
+    for command in (
+        "ssh localhost 'systemctl show ensemble-main -p Restart'",
+        "su -c 'systemctl show ensemble-main -p Restart'",
+        'bash -c "systemctl show ensemble-main -p Restart"',
+        "echo 'systemctl show ensemble-main -p Restart' | bash",
+    ):
+        assert guard.systemctl_violation(command) is not None, command
+
+
+# ===========================================================================
+# wave-5 (2026-11-19, revision iteration 2) — the tail scan and the verb set
+#
+# Counter-mutations:
+#   * neutralise the NON-TERMINAL READ-ONLY parse alone ⇒ the tail-scan
+#     pin REDS (this pin is ISOLATING: the option-arity fix does not cover
+#     it, because the verb slot holds a read-only word that is NOT an
+#     option value);
+#   * break the VERB-SET DERIVATION ⇒ the six re-diverged verbs RED.
+# ===========================================================================
+
+#: Shapes whose ONLY defence is the non-terminal read-only parse: a
+#: read-only word in VERB position ahead of ``stop <unit>``. The option
+#: tables are irrelevant here — there is no option at all.
+_READONLY_TAIL_SHAPES = [
+    "systemctl cat stop ensemble-main",
+    "systemctl help stop ensemble-main",
+    "systemctl status stop ensemble-main",
+]
+
+
+@pytest.mark.parametrize("command", _READONLY_TAIL_SHAPES)
+def test_readonly_verb_position_is_not_terminal(command):
+    """A read-only verb does not END the analysis: a mutating verb found
+    later, followed by an ensemble unit, is refused."""
+    assert guard.systemctl_violation(command) is not None
+
+
+#: The verb set is ONE source of truth: these six verbs were in the tail
+#: set but NOT in the shape regex, so a piped shape was WEAKER than the
+#: direct form. Plus the newly verified verbs and the fail-closed
+#: unresolved/glob operands behind a tail mutating verb.
+_MUTATING_VERB_SHAPES = [
+    # the six verbs that used to diverge (piped — the weak side)
+    "echo 'systemctl clean ensemble-main' | bash",
+    "echo 'systemctl preset-all ensemble-main' | bash",
+    "echo 'systemctl reenable ensemble-main' | bash",
+    "echo 'systemctl reload-or-restart ensemble-main' | bash",
+    "echo 'systemctl thaw ensemble-main' | bash",
+    "echo 'systemctl try-reload-or-restart ensemble-main' | bash",
+    # newly verified verbs, direct (the UNITLESS ones — daemon-reexec,
+    # set-environment — are allowed, consistent with daemon-reload, which
+    # is pinned as allowed in test_non_ensemble_mutation_allowed)
+    "systemctl unmask ensemble-main",
+    "systemctl reset-failed ensemble-main",
+    "systemctl add-wants multi-user.target ensemble-main",
+    # preset and preset-all are DISTINCT verbs (the old \b regex matched
+    # ``preset`` inside ``preset-all`` by accident)
+    "systemctl preset-all ensemble-main",
+    # an unresolved / globbed operand behind a tail mutating verb fails
+    # closed
+    "systemctl cat stop '*'",
+    "systemctl cat stop \"$AMBIENT_UNIT\"",
+]
+
+
+@pytest.mark.parametrize("command", _MUTATING_VERB_SHAPES)
+def test_mutating_verb_set_is_one_source_of_truth(command):
+    """The shape regex is DERIVED from the tail set: no verb may be weaker
+    in a piped shape than in the direct form."""
+    assert guard.systemctl_violation(command) is not None
+
+def test_fail_closed_shapes_return_the_exact_token():
+    """T15: the fail-closed legs are pinned to their EXACT refusal token, not
+    merely to "some refusal" -- a bare ``is not None`` cannot tell a
+    fail-closed refusal apart from a structural one."""
+    unit = "ensemble-main"
+    for command in (
+        "systemd-run --not-an-option systemctl status " + unit,
+        "watch --not-an-option systemctl status " + unit,
+        "xargs --not-an-option bash -c 'systemctl status " + unit + "'",
+        "ssh --not-an-option host 'systemctl status " + unit + "'",
+        "systemctl cat stop '*'",
+        'systemctl cat stop "$AMBIENT_UNIT"',
+    ):
+        assert guard.systemctl_violation(command) == guard.UNRESOLVED_UNIT_TOKEN, command
+    # the structural refusals keep their own token
+    assert guard.systemctl_violation("systemctl -P cat stop " + unit) == unit
+    assert guard.systemctl_violation(
+        "echo 'systemctl restart " + unit + "' | bash"
+    ) == guard.LAUNDERED_TOKEN
