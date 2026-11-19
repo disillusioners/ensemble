@@ -30,11 +30,18 @@ Intent is decided over **execution positions**, not over raw text:
 2. Same-string variable assignments (``NAME=value``) are collected and
    resolved statically, including quoted composition (``"$A"-main``),
    ``${A}-main`` and trivial substitutions (``$(echo ensemble-main)``).
-3. For a ``systemctl`` segment: read-only verbs are ALLOWED against any unit.
-   Any other verb (mutating, or unknown => fail-closed) whose unit operand
-   resolves into the ensemble's own unit family is REFUSED. An operand that
-   cannot be resolved statically (indirected from the environment, globbed,
-   produced by a non-trivial substitution) is REFUSED (fail-closed).
+3. For a ``systemctl`` segment: read-only verbs are ALLOWED against any unit
+   **unless a mutating verb appears LATER in the same command, followed by
+   an ensemble unit or by an operand that cannot be resolved statically** —
+   a read-only verb does not end the analysis, because a mis-parsed option
+   arity can leave the option's VALUE in the verb slot with the real
+   command still in the tail (``systemctl -P cat stop <unit>``, and the
+   option-free spelling ``systemctl cat stop <unit>``). The unit operand of
+   the read-only verb itself stays allowed. Any other verb (mutating, or
+   unknown => fail-closed) whose unit operand resolves into the ensemble's
+   own unit family is REFUSED. An operand that cannot be resolved
+   statically (indirected from the environment, globbed, produced by a
+   non-trivial substitution) is REFUSED (fail-closed).
 4. ``pkill`` / ``killall`` / ``fuser`` / ``kill`` / ``xargs kill`` keep the
    original text-scoped semantics unchanged (defence in depth; a quoted
    target such as ``pkill -f 'ensemble-prod'`` must stay refused).
@@ -48,6 +55,43 @@ Intent is decided over **execution positions**, not over raw text:
    ``ENSEMBLE_SUPERVISION_RESULT``, so the agent's command text
    (``bash scripts/stop-ensemble.sh``) carries neither a ``systemctl`` token
    nor a live-unit token and the structural matcher above never sees it.
+
+CONTRACT NOTES (the rules above as the code actually enforces them)
+------------------------------------------------------------------
+* TAIL SCAN (rule 3) is POSITIONAL: a mutating verb followed by an ensemble
+  unit, or by an unresolvable / globbed operand. ``systemctl help <unit>
+  stop`` is therefore ALLOWED while ``systemctl cat stop <unit>`` is
+  REFUSED — the unit must FOLLOW the mutating verb. That asymmetry is
+  disclosed, not a defect: dropping the positional requirement would
+  blanket-scan every remaining token and re-open the property-name
+  over-block.
+* FAIL-CLOSED ON UNKNOWN OPTIONS, PER TOOL. The argv runners
+  (``systemd-run``, ``watch``), ``xargs`` and ``ssh`` carry an explicit
+  BOOLEAN set beside their VALUE set (see the OPTION GRAMMARS map); an
+  option in NEITHER is one the tool does not have, its arity is unknown,
+  and the command is REFUSED. ``systemctl``, ``env``, ``sudo``/``doas``
+  and the four wrapper-arg tools skip an unknown option one word: for
+  ``systemctl`` the class is closed by the tail scan plus the operand scan;
+  for the wrappers it is the residual disclosed in PACKS.
+* EXECUTED-CONTEXT SHAPE OVER-BLOCK. A command string a nested interpreter
+  will RUN (``bash -c``, ``eval``, ``su -c``, ``ssh '<remote>'``,
+  ``env -S``, a shell's or scheduler's heredoc stdin) is refused whenever
+  its TEXT carries the mutating-ensemble shape — even when part of that
+  text is only data to an inner ``echo``. That is the old text guard's
+  strength, kept deliberately for executed contexts.
+* BARE ``ssh host`` IS AN EXECUTOR. With no remote command ssh starts a
+  remote login shell and FORWARDS the client's stdin, so a piped payload
+  is delivered.
+* SHELL ATTACHED ``-c`` NARROWING (disclosed). ``bash -c'payload'`` (no
+  space) is ALLOWED: no shell installed on this host executes the attached
+  form — bash/sh/zsh reject it (fish/ksh/mksh are not installed and are
+  unverifiable). The OLD text guard refused it by text scan. It is not a
+  bypass here; it is disclosed rather than closed. ``su``/``runuser`` DO
+  accept the attached form and are analysed.
+* TWO CLASSES THE OLD GUARD REFUSED ARE DELIBERATELY ALLOWED: the PROSE
+  over-block (a heredoc, ``grep`` or ``printf`` that merely documents a
+  mutating command, with no pipe into an executor) and the DIRECT-context
+  property-name over-block (``systemctl show <unit> -p Restart``).
 
 UNIT-STOP WRAPPER (2026-11-18 follow-up — the ACTUAL kill mechanism)
 --------------------------------------------------------------------
