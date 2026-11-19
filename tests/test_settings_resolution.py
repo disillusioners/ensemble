@@ -882,6 +882,32 @@ class TestFailSoftBootApply:
         # F10: the failed key carries applied=False (never a truthy record)
         assert res["limits.worker_pool_size"].get("applied") is False
 
+    def test_config_backed_env_winner_no_false_dbenvonly_line(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """G2-REG: a config-backed key whose winning tier is env must NOT
+        emit the 'DB/env-only key (no Config field)' line (that line is
+        reserved for opted-out, config_path=None keys like wedge). The
+        correct tier-wins line must appear instead."""
+        import logging
+        import os
+
+        monkeypatch.setenv("LIMITS_WORKER_POOL_SIZE", "9")
+        rows = []  # no DB row -> env tier wins
+        with caplog.at_level(logging.INFO, logger="daemon.services.settings_service"):
+            returned, snapshot, config = self._boot(tmp_path, monkeypatch, rows)
+        msgs = [r.getMessage() for r in caplog.records]
+        # no false DB/env-only line for the config-backed key
+        assert not any(
+            "limits.worker_pool_size" in m and "DB/env-only key (no Config field)" in m
+            for m in msgs
+        ), msgs
+        # the correct tier-wins line does appear
+        assert any(
+            "limits.worker_pool_size" in m and "env tier wins" in m for m in msgs
+        ), msgs
+        assert config.limits.worker_pool_size == 9
+
     def test_wedge_key_db_row_present_false(self, tmp_path, monkeypatch, caplog):
         import logging
 

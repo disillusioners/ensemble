@@ -243,7 +243,7 @@ if [[ "$AUTH_PROBE" != "1" ]]; then
     echo "ERROR: AUTH FAILURE - password authentication failed for user '$PGUSER'." >&2
     echo "       probe: ${AUTH_PROBE:-<empty>}" >&2
     exit 2
-  elif echo "$AUTH_PROBE" | grep -qi "does not exist"; then
+  elif [[ "$USE_FRESH" == "0" ]] && echo "$AUTH_PROBE" | grep -qi "does not exist"; then
     echo "ERROR: DB ABSENT - database '$SMOKE_DB' does not exist." >&2
     echo "       probe: ${AUTH_PROBE:-<empty>}" >&2
     exit 3

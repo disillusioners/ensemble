@@ -1442,15 +1442,13 @@ def apply_db_settings_overrides(
                     )
                     _set_config_value(config, spec.config_path, resolution["value"])
                 applied_value = _get_config_value(config, spec.config_path)
-            # G1: post-apply confirmation (only for DB-tier wins) so a smoke
-            # can assert the apply actually landed, not just that the tier won
-            # before mutation.
-            if resolution["source"] == "db" and spec.config_path:
-                logger.info(
-                    "[Settings] %s: applied to config - field now %r (post-apply)",
-                    key,
-                    applied_value,
-                )
+                # G1: post-apply confirmation (DB-tier wins only).
+                if resolution["source"] == "db":
+                    logger.info(
+                        "[Settings] %s: applied to config - field now %r (post-apply)",
+                        key,
+                        applied_value,
+                    )
             else:
                 # DB/ENV-ONLY key (config_path is None): no Config field to
                 # mutate — the resolved winner is the applied value. The
