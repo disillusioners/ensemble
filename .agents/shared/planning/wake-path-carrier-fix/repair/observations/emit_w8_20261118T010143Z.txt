@@ -1,0 +1,44 @@
+[identity] current_database() = ensemble_prod   current_user = ensemble
+=== ASSERTIONS A1-A14 ===
++-----+------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------+---------+
+| id  | assertion                                                              | observed                                                                                   | expected                                           | verdict |
++-----+------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------+---------+
+| A1  | parent exists AND status == waiting_children                           | exists=True, status=waiting_children                                                       | exists=True, status=waiting_children               | PASS    |
+| A2  | watcher 8a1f60d7 resolves uniquely; target==parent; source_task==39320 | matches=1, state=PENDING, disposition=in_scope_stale, target=17efd2ef-9f98-46d4-b41b-60e3e | matches=1, identity matches, state=PENDING|resolve | PASS    |
+| A3  | task 39320 exists and is in a terminal status                          | exists=True, status=completed, completed_at=2026-11-17 18:08:26.230850                     | exists=True, status in {completed,failed,cancelled | PASS    |
+| A4  | watched worker 542b49a6 exists and is terminal                         | exists=True, status=completed, updated_at=2026-11-17T19:04:27.795218+00:00                 | exists=True, status in {completed,terminated,error | PASS    |
+| A5  | watcher 999efa71 unique; target==parent; source_task==39424; child_id= | matches=1, state=PENDING, disposition=in_scope_stale, target=17efd2ef-9f98-46d4-b41b-60e3e | matches=1, identity matches, state=PENDING|resolve | PASS    |
+| A6  | task 39424 exists and is terminal                                      | exists=True, status=completed                                                              | exists=True, status in {completed,failed,cancelled | PASS    |
+| A7  | all 4 commissions resolve uniquely; commissioner==parent; worker bindi | M1=outstanding/in_scope_stale; M2=outstanding/in_scope_stale; M3=outstanding/in_scope_stal | 4/4 identity matches, state outstanding|resolved   | PASS    |
+| A8  | DRIFT GUARD: every PENDING watcher / outstanding commission of the par | pending_for_parent=4 (unknown=0), outstanding_for_parent=4 (unknown=0)                     | unknown=0 and unknown=0                            | PASS    |
+| A9  | parent status IS waiting_children (a re-run never clobbers an unknown  | status=waiting_children                                                                    | status=waiting_children                            | PASS    |
+| A10 | watcher 5602e91d resolves uniquely; target==parent; source_task==39564 | matches=1, state=PENDING, disposition=in_scope_stale, target=17efd2ef-9f98-46d4-b41b-60e3e | matches=1, identity matches, state=PENDING|resolve | PASS    |
+| A11 | watcher c83e12a2 resolves uniquely; target==parent; source_task==39564 | matches=1, state=PENDING, disposition=in_scope_stale, target=17efd2ef-9f98-46d4-b41b-60e3e | matches=1, identity matches, state=PENDING|resolve | PASS    |
+| A12 | commission 06001f88 resolves uniquely; commissioner==parent; worker==8 | matches=1, state=outstanding, disposition=in_scope_stale, commissioner=17efd2ef-9f98-46d4- | matches=1, identity matches, state=outstanding|res | PASS    |
+| A13 | commission a1561f19 resolves uniquely; commissioner==parent; worker==8 | matches=1, state=outstanding, disposition=in_scope_stale, commissioner=17efd2ef-9f98-46d4- | matches=1, identity matches, state=outstanding|res | PASS    |
+| A14 | task 39564 (source of W3/W4) exists and is terminal                    | exists=True, status=completed                                                              | exists=True, status in {completed,failed,cancelled | PASS    |
++-----+------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------+---------+
+
+=== PER-ROW DISPOSITION (8-row target set) ===
++-------+------------+----------+-------------+----------------+------------------------------------------------+
+| label | kind       | id       | state       | disposition    | reason/note                                    |
++-------+------------+----------+-------------+----------------+------------------------------------------------+
+| W1    | watcher    | 8a1f60d7 | PENDING     | in_scope_stale |                                                |
+| W2    | watcher    | 999efa71 | PENDING     | in_scope_stale |                                                |
+| W3    | watcher    | 5602e91d | PENDING     | in_scope_stale |                                                |
+| W4    | watcher    | c83e12a2 | PENDING     | in_scope_stale |                                                |
+| M1    | commission | 0cdc0b31 | outstanding | in_scope_stale | worker_terminal_no_report / worker completed   |
+| M2    | commission | 90493206 | outstanding | in_scope_stale | ttl_expired_not_live / worker waiting_children |
+| M3    | commission | 06001f88 | outstanding | in_scope_stale | ttl_expired_not_live / worker waiting_children |
+| M4    | commission | a1561f19 | outstanding | in_scope_stale | ttl_expired_not_live / worker waiting_children |
++-------+------------+----------+-------------+----------------+------------------------------------------------+
+
+classification = not_yet
+
+
+REQUEST WRITTEN (8 statement blocks) — NOT EXECUTED
+  /home/nea/ensemble-src-wt-wake-path-carrier-fix/.agents/shared/planning/wake-path-carrier-fix/repair/emitted/live_wedge_repair_request__20261118T010144Z.sql  sha256=1172e8eea726237099e2c3cd6a39f3bd131e40852dcbbd82285942bdc9990c58
+  /home/nea/ensemble-src-wt-wake-path-carrier-fix/.agents/shared/planning/wake-path-carrier-fix/repair/emitted/live_wedge_repair_request__20261118T010144Z.receipt.md  sha256=5e6f62a3115cf0b18807b3659381eae7a6059cae31daa0754d6b976492379c68
+  /home/nea/ensemble-src-wt-wake-path-carrier-fix/.agents/shared/planning/wake-path-carrier-fix/repair/emitted/live_wedge_repair_request__20261118T010144Z.receipt.json  sha256=9ef7a8d2c5e6b4d7564a33c27647c4a37e570583d0a77e40703198142bf45e8c
+
+Execution is the daemon's gated repair path (3-factor: user attestation + audit stamp + dry-run), not this script.

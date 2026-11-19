@@ -81,7 +81,17 @@ def make_fu(
         target_instance_id=target_id,
         message=message,
         source=source,
-        metadata=metadata or {},
+        # S1 (wake-path-carrier-fix, task 1b): the bus REFUSES an arm
+        # whose payload carries no ``metadata.child_id`` — the
+        # target-agnostic child-keyed fire
+        # (``DependencyBus.fire_for_terminal_child``) matches on that
+        # key and cannot match a row without it, so a durable watcher
+        # that carries no child id could never be fired by that path.
+        # Both PRODUCTION arm lanes stamp the key (the spawn /
+        # ``send_message`` lane and the nudge lane); this default
+        # keeps the synthetic arms of this suite valid under the same
+        # contract.
+        metadata=metadata or {"child_id": f"bus-test-child-{uuid.uuid4().hex[:8]}"},
     )
 
 
@@ -812,7 +822,11 @@ class TestCrashRecoveryEnqueuedAt:
 
         bus1 = DependencyBus(bus_repo)
         await bus1.start()
-        fu = FollowUp(target_instance_id="parent-crash", message="done")
+        fu = FollowUp(
+            target_instance_id="parent-crash",
+            message="done",
+            metadata={"child_id": f"bus-test-child-{uuid.uuid4().hex[:8]}"},
+        )
         await bus1.watch("task-crash", fu)
         # Simulate terminal event — watcher transitions to FIRED
         fired = await bus1.emit_terminal("task-crash", Outcome(status="completed"))
@@ -836,7 +850,11 @@ class TestCrashRecoveryEnqueuedAt:
 
         bus1 = DependencyBus(bus_repo)
         await bus1.start()
-        fu = FollowUp(target_instance_id="parent-dedup", message="done")
+        fu = FollowUp(
+            target_instance_id="parent-dedup",
+            message="done",
+            metadata={"child_id": f"bus-test-child-{uuid.uuid4().hex[:8]}"},
+        )
         await bus1.watch("task-dedup", fu)
         fired = await bus1.emit_terminal("task-dedup", Outcome(status="completed"))
         assert len(fired) == 1
@@ -864,8 +882,16 @@ class TestCrashRecoveryEnqueuedAt:
 
         bus1 = DependencyBus(bus_repo)
         await bus1.start()
-        fu1 = FollowUp(target_instance_id="parent-1", message="done-1")
-        fu2 = FollowUp(target_instance_id="parent-2", message="done-2")
+        fu1 = FollowUp(
+            target_instance_id="parent-1",
+            message="done-1",
+            metadata={"child_id": f"bus-test-child-{uuid.uuid4().hex[:8]}"},
+        )
+        fu2 = FollowUp(
+            target_instance_id="parent-2",
+            message="done-2",
+            metadata={"child_id": f"bus-test-child-{uuid.uuid4().hex[:8]}"},
+        )
         await bus1.watch("task-multi", fu1)
         await bus1.watch("task-multi", fu2)
         fired = await bus1.emit_terminal("task-multi", Outcome(status="completed"))

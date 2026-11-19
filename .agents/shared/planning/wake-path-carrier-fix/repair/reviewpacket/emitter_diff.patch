@@ -1,0 +1,308 @@
+--- .agents/shared/planning/wake-path-carrier-fix/repair/amendment/before/live_wedge_repair.py	2026-11-18 18:30:03.430172348 +0000
++++ .agents/shared/planning/wake-path-carrier-fix/repair/live_wedge_repair.py	2026-11-18 18:32:13.561889180 +0000
+@@ -306,6 +306,15 @@
+ GATE_FLAG = "wake-path-carrier-fix/live-wedge/17efd2ef/w8"
+ DEFAULT_REQUIRED_DB = "ensemble_prod"
+ 
++#: VERBATIM receipt note mandated by the amendment (2026-11-18). Carried in
++#: the emitted receipt md + json. Do not paraphrase.
++RECEIPT_NOTE = (
++    "the wedge's BUS GATE was ALREADY OPEN (watchers cancelled by the boot "
++    "sweep) before this repair; the remaining hold was the mission leg's two "
++    "commissions. The Emperor's authorization is recorded on board item "
++    "wi-8f60e6f1."
++)
++
+ # ---------------------------------------------------------------------------
+ # TARGET STATE CONSTANTS — each mirrors a source-defined end state, never guess
+ # ---------------------------------------------------------------------------
+@@ -655,6 +664,12 @@
+     for spec in WATCHER_TARGETS:
+         rows_list = rows.get(spec["slot"]) or []
+         row = rows_list[0] if len(rows_list) == 1 else None
++        # Backfill eligibility mirrors the re-arm path's terminal-child skip
++        # (instance_lifecycle.py:4229-4239; TERMINAL_STATUSES from
++        # job_queue_service.py:126-131). Computed here, outside the dict literal.
++        _child_status = ((workers.get(spec["child_id"]) or {}).get("status")
++                         if workers else None)
++        _child_terminal = _child_status in WORKER_TERMINAL_STATUSES
+         out.append({
+             "kind": "watcher",
+             "label": spec["label"],
+@@ -675,14 +690,18 @@
+                 and str(row["source_task_id"]) == spec["source_task"]
+                 and row.get("child_id") == spec["child_id"]
+             ),
+-            # Only the pre-ceremony BOOT SWEEP can leave a CANCELLED row with a
+-            # NULL enqueued_at (dependency_bus.py:2653-2666 stamps fired_at only).
+-            # That row is re-arm eligible (repository.py:797-843), so the
+-            # ruling's own safety argument requires the stamp.
++            # Backfill eligibility mirrors the re-arm path's terminal-child skip
++            # (instance_lifecycle.py:4229-4239; TERMINAL_STATUSES from
++            # job_queue_service.py:126-131): a CANCELLED watcher whose child is
++            # TERMINAL is skip-protected (no backfill); one whose child is
++            # NON-TERMINAL is re-arm eligible and MUST be stamped. A missing
++            # child row is also skipped (re-arm's `child is None -> continue`).
+             "needs_backfill": bool(
+                 row is not None
+                 and row["state"] == "CANCELLED"
+                 and row.get("enqueued_at") is None
++                and _child_status is not None
++                and not _child_terminal
+             ),
+         })
+ 
+@@ -747,13 +766,37 @@
+ 
+     # ---- parent instance --------------------------------------------------
+     parent = (_q(conn, INSTANCE_ROW_SQL, (PARENT_INSTANCE_ID,)) or [None])[0]
++    # AMENDMENT 2026-11-18 (post-natural-resolution):
++    # A1/A9 are TRANSIENT SELF-RESOLVING. The parent alternates
++    # running ⇄ waiting_children on its hourly turn cycle (Appendix B
++    # measured a 17-minute `running` window). A mid-turn (`running`)
++    # observation is NOT an unknown world: record it and re-read ONCE
++    # (bound: exactly one re-read, no loop). Any OTHER status or a missing
++    # parent (error/failed/terminated/paused/…) IS an unknown world and
++    # refuses. Tolerance + bound documented here and in the receipt.
++    _ACCEPTABLE_PARENT = ("waiting_children", "running")
++    first_status = parent["status"] if parent else None
++    parent_mid_turn = False
++    re_read_status = None
++    if (parent is not None and first_status == "running"):
++        parent_mid_turn = True
++        re_read = (_q(conn, INSTANCE_ROW_SQL, (PARENT_INSTANCE_ID,)) or [None])[0]
++        re_read_status = re_read["status"] if re_read else None
++        if re_read is not None:
++            parent = re_read
+     obs["rows"]["parent"] = parent
++    obs["rows"]["parent_first_status"] = first_status
++    obs["rows"]["parent_re_read_status"] = re_read_status
++    obs["parent_mid_turn"] = parent_mid_turn
++    final_status = parent["status"] if parent else None
++    a1_ok = parent is not None and final_status in _ACCEPTABLE_PARENT
+     add(
+-        "A1", "parent exists AND status == waiting_children",
+-        f"exists={parent is not None}, status={parent['status'] if parent else None}",
+-        "exists=True, status=waiting_children",
+-        parent is not None and parent["status"] == "waiting_children",
+-        parent["status"] if parent else "row missing",
++        "A1", "parent exists AND status in {waiting_children, running} (amendment: transient self-resolving)",
++        f"exists={parent is not None}, first={first_status}, re_read={re_read_status}, "
++        f"final={final_status}, mid_turn={parent_mid_turn}",
++        "exists=True, status in {waiting_children, running}",
++        a1_ok,
++        "amendment 2026-11-18: mid-turn `running` is recorded, not refused",
+     )
+ 
+     # ---- resolve every target row by prefix (uniqueness is an assertion) --
+@@ -821,12 +864,30 @@
+     )
+ 
+     task_a = tasks.get("39320")
++    # AMENDMENT 2026-11-18: source-task existence is CONDITIONAL on disposition.
++    #   * watcher still PENDING (would be changed by this request): a missing
++    #     source task is an UNKNOWN world -> refuse (identity/unknown).
++    #   * watcher already resolved (CANCELLED/FIRED): the source task may have
++    #     been GC'd after resolution - that is an EXPECTED artifact, not an
++    #     unknown world, because the row's terminal state is recorded in the row
++    #     itself and a resolved row can no longer fire. Pass, annotated.
++    w1_resolved = by_label["W1"]["disposition"] == DISPOSITION_RESOLVED
++    if w1_resolved:
++        a3_ok = True
++        a3_note = ("source_task GC'd after resolution - EXPECTED for a resolved "
++                   "watcher (row can no longer fire)")
++        a3_obs = (f"watcher resolved; source_task={'MISSING (GCed, expected)' if task_a is None else 'present'}")
++    else:
++        a3_ok = task_a is not None and task_a["status"] in ("completed", "failed", "cancelled")
++        a3_note = ""
++        a3_obs = (f"exists={task_a is not None}, status={task_a['status'] if task_a else None}, "
++                  f"completed_at={task_a['completed_at'] if task_a else None}")
+     add(
+-        "A3", "task 39320 exists and is in a terminal status",
+-        f"exists={task_a is not None}, status={task_a['status'] if task_a else None}, "
+-        f"completed_at={task_a['completed_at'] if task_a else None}",
+-        "exists=True, status in {completed,failed,cancelled}",
+-        task_a is not None and task_a["status"] in ("completed", "failed", "cancelled"),
++        "A3", "task 39320 exists and is terminal (or GC'd after resolution for a resolved watcher)",
++        a3_obs,
++        "exists=True & terminal, OR resolved watcher with GC'd source task",
++        a3_ok,
++        a3_note,
+     )
+ 
+     worker_a = workers.get(SONIC_LEADER_ID)
+@@ -848,11 +909,21 @@
+     )
+ 
+     task_b = tasks.get("39424")
++    w2_resolved = by_label["W2"]["disposition"] == DISPOSITION_RESOLVED
++    if w2_resolved:
++        a6_ok = True
++        a6_note = "source_task GC'd after resolution - EXPECTED for a resolved watcher"
++        a6_obs = f"watcher resolved; source_task={'MISSING (GC\'d, expected)' if task_b is None else 'present'}"
++    else:
++        a6_ok = task_b is not None and task_b["status"] in ("completed", "failed", "cancelled")
++        a6_note = ""
++        a6_obs = f"exists={task_b is not None}, status={task_b['status'] if task_b else None}"
+     add(
+-        "A6", "task 39424 exists and is terminal",
+-        f"exists={task_b is not None}, status={task_b['status'] if task_b else None}",
+-        "exists=True, status in {completed,failed,cancelled}",
+-        task_b is not None and task_b["status"] in ("completed", "failed", "cancelled"),
++        "A6", "task 39424 exists and is terminal (or GC'd after resolution for a resolved watcher)",
++        a6_obs,
++        "exists=True & terminal, OR resolved watcher with GC'd source task",
++        a6_ok,
++        a6_note,
+     )
+ 
+     # ---- A7 (widened): all four commissions ------------------------------
+@@ -890,11 +961,13 @@
+     )
+ 
+     # ---- A9 is the refusal-of-unknown-world clause; it is A1 negated -----
++    final_status2 = parent["status"] if parent else None
+     add(
+-        "A9", "parent status IS waiting_children (a re-run never clobbers an unknown world)",
+-        f"status={parent['status'] if parent else None}",
+-        "status=waiting_children",
+-        parent is not None and parent["status"] == "waiting_children",
++        "A9", "parent status in {waiting_children, running} (transient self-resolving; refuses any other status)",
++        f"status={final_status2}, mid_turn={parent_mid_turn}, "
++        f"first={first_status}, re_read={re_read_status}",
++        "status in {waiting_children, running}",
++        parent is not None and final_status2 in _ACCEPTABLE_PARENT,
+     )
+ 
+     # ---- A10-A13: the four EXTRA rows (leader ruling widening) -----------
+@@ -923,11 +996,22 @@
+         commission_ok("M4"),
+     )
+     task_c = tasks.get("39564")
++    w34_resolved = (by_label["W3"]["disposition"] == DISPOSITION_RESOLVED
++                    and by_label["W4"]["disposition"] == DISPOSITION_RESOLVED)
++    if w34_resolved:
++        a14_ok = True
++        a14_note = "source_task GC'd after resolution - EXPECTED for resolved watchers"
++        a14_obs = f"watchers resolved; source_task={'MISSING (GC\'d, expected)' if task_c is None else 'present'}"
++    else:
++        a14_ok = task_c is not None and task_c["status"] in ("completed", "failed", "cancelled")
++        a14_note = ""
++        a14_obs = f"exists={task_c is not None}, status={task_c['status'] if task_c else None}"
+     add(
+-        "A14", "task 39564 (source of W3/W4) exists and is terminal",
+-        f"exists={task_c is not None}, status={task_c['status'] if task_c else None}",
+-        "exists=True, status in {completed,failed,cancelled}",
+-        task_c is not None and task_c["status"] in ("completed", "failed", "cancelled"),
++        "A14", "task 39564 (source of W3/W4) exists and is terminal (or GC'd after resolution)",
++        a14_obs,
++        "exists=True & terminal, OR resolved watchers with GC'd source task",
++        a14_ok,
++        a14_note,
+     )
+ 
+     # ---- the park predicates --------------------------------------------
+@@ -935,6 +1019,20 @@
+     obs["rows"]["pending_count"] = pending_n
+     outstanding_n = _q(conn, COUNT_OUTSTANDING_COMMISSIONS_SQL, (PARENT_INSTANCE_ID,))[0]["n"]
+ 
++    # AMENDMENT 2026-11-18: the drift guard's EXPECTED population is DERIVED from
++    # the target set's current dispositions (not hardcoded): a target watcher that
++    # is still PENDING is "in scope"; one already resolved is "resolved". The
++    # guard's semantics are unchanged (unknown = PENDING watcher / outstanding
++    # commission of the parent OUTSIDE the 8-row target set).
++    expected_pending = sum(1 for t in targets
++                           if t["kind"] == "watcher"
++                           and t["disposition"] == DISPOSITION_STALE)
++    expected_outstanding = sum(1 for t in targets
++                               if t["kind"] == "commission"
++                               and t["disposition"] == DISPOSITION_STALE)
++    obs["extended_census"]["expected_pending_watchers"] = expected_pending
++    obs["extended_census"]["expected_outstanding_commissions"] = expected_outstanding
++
+     # ---- EXTENDED CENSUS (never a gate; the A8 detail lives here) --------
+     census_w: list[dict[str, Any]] = []
+     for r in pending_rows:
+@@ -1390,6 +1488,7 @@
+         )
+ 
+     lines = [banner]
++    lines.append("> **RECEIPT NOTE (verbatim, amendment 2026-11-18):** " + RECEIPT_NOTE + "\n")
+     lines.append(f"**Generated:** {obs['generated_at']}  ")
+     lines.append(f"**Database observed:** `{obs['database']}`  ")
+     lines.append(f"**Parent instance:** `{PARENT_INSTANCE_ID}` (agent `{PARENT_AGENT_ID}`)  ")
+@@ -1498,7 +1597,27 @@
+     lines.append("```\n")
+     lines.append(f"**Parent row keys at emit time:** `{json.dumps(inv['parent_keys'], sort_keys=True)}`\n")
+ 
+-    lines.append("## 6. Authority statement\n")
++    lines.append("## 6. Amendment 2026-11-18 (post-natural-resolution)\n")
++    lines.append(
++        "**Parent posture at emit:** `first=`" + str(obs["rows"].get("parent_first_status"))
++        + "`, re_read=`" + str(obs["rows"].get("parent_re_read_status"))
++        + "`, final=`" + str((obs["rows"].get("parent") or {}).get("status"))
++        + "`, mid_turn=" + str(obs.get("parent_mid_turn")) + ".\n\n"
++        "**Drift-guard expected population (derived from the target set's "
++        "dispositions):** PENDING watchers = "
++        + str(obs["extended_census"].get("expected_pending_watchers"))
++        + ", outstanding commissions = "
++        + str(obs["extended_census"].get("expected_outstanding_commissions"))
++        + ".\n\n"
++        "**Backfill eligibility** mirrors the re-arm path's terminal-child skip "
++        "(instance_lifecycle.py:4229-4239; TERMINAL_STATUSES from "
++        "job_queue_service.py:126-131 = {terminated, completed, error, failed}): "
++        "a CANCELLED watcher whose child is TERMINAL is skip-protected (no "
++        "backfill); one whose child is NON-TERMINAL is re-arm eligible and is "
++        "stamped. Missing child row -> skipped.\n\n"
++        "**Receipt note (verbatim):** " + RECEIPT_NOTE + "\n"
++    )
++    lines.append("## 7. Authority statement\n")
+     lines.append(
+         "**Execution is the daemon's gated repair path (3-factor: user "
+         "attestation + audit stamp + dry-run), not this script.** "
+@@ -1528,6 +1647,7 @@
+         f"-- Parent instance: {PARENT_INSTANCE_ID}",
+         f"-- Pre-check JSON sha256: {pre_json_sha}",
+         f"-- Gate flag: {GATE_FLAG}",
++        "-- RECEIPT NOTE (verbatim, amendment 2026-11-18): " + RECEIPT_NOTE,
+         "--",
+         "-- THIS FILE CONTAINS PROPOSED STATEMENTS ONLY. NOTHING HAS BEEN RUN.",
+         "-- The generating script has no --apply and holds read-only DB sessions.",
+@@ -1578,6 +1698,12 @@
+     _p(_assertion_table(obs))
+     _p("")
+     _p(f"classification = {obs['classification']}")
++    _p(f"parent_mid_turn (amendment) = {obs.get('parent_mid_turn')}  "
++       f"(first={obs['rows'].get('parent_first_status')}, "
++       f"re_read={obs['rows'].get('parent_re_read_status')})")
++    _p(f"drift-guard expected population (derived): "
++       f"PENDING watchers={obs['extended_census'].get('expected_pending_watchers')}, "
++       f"outstanding commissions={obs['extended_census'].get('expected_outstanding_commissions')}")
+     if obs["divergences"]:
+         _p("divergences:")
+         for d in obs["divergences"]:
+@@ -1629,6 +1755,9 @@
+     _p(_disposition_table(obs))
+     _p("")
+     _p(f"classification = {obs['classification']}")
++    _p(f"parent_mid_turn = {obs.get('parent_mid_turn')} "
++       f"(first={obs['rows'].get('parent_first_status')}, "
++       f"re_read={obs['rows'].get('parent_re_read_status')})")
+ 
+     if obs["classification"] == "already_repaired":
+         _p("")
+@@ -1683,8 +1812,14 @@
+         "parent_instance_id": PARENT_INSTANCE_ID,
+         "classification": obs["classification"],
+         "gate_flag": GATE_FLAG,
++        "receipt_note": RECEIPT_NOTE,
+         "pre_check_json_sha256": pre_json_sha,
+         "assertions": obs["assertions"],
++        "parent_mid_turn": obs.get("parent_mid_turn"),
++        "parent_first_status": obs["rows"].get("parent_first_status"),
++        "parent_re_read_status": obs["rows"].get("parent_re_read_status"),
++        "expected_pending_watchers": obs["extended_census"].get("expected_pending_watchers"),
++        "expected_outstanding_commissions": obs["extended_census"].get("expected_outstanding_commissions"),
+         "targets": [
+             {k: v for k, v in t.items() if k != "row"} for t in obs["targets"]
+         ],

@@ -501,6 +501,10 @@ def test_phase2_post_reconcile_refire_resolves_orphan_via_guard(
     # a clean natural completion.
     mock_bus = MagicMock()
     mock_bus.count_pending_for_target_sync.return_value = 0
+    # F-1: the QUALIFIED (S3) name is stamped too — the
+    # production paths read the qualified count; a mock that
+    # only answers the old name would answer a MagicMock.
+    mock_bus.count_fulfillable_pending_for_target_sync.return_value = 0
     monkeypatch.setattr(
         "daemon.services.dependency_bus._dependency_bus",
         mock_bus,

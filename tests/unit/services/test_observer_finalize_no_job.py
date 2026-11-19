@@ -106,6 +106,7 @@ def _wire_bus_mock():
     """Mock ``DependencyBus`` so ``_finalize_job_db_sync``'s A9 gate passes."""
     bus_mock = MagicMock()
     bus_mock.count_pending_for_target_sync = lambda _iid: 0
+    bus_mock.count_fulfillable_pending_for_target_sync = lambda _iid, **kw: 0
     set_dependency_bus(bus_mock)
     yield bus_mock
     set_dependency_bus(None)
