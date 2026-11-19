@@ -690,11 +690,23 @@ if ! restart_via_launcher; then
     # the resolver runs inside the caller's $() — a bare variable read
     # degraded to "none captured" on the exact incident path).
     HB_ERR="$(_handback_last_error_text)"
+    # D6-(iv) / AC-D6-6 (2026-11-19): the VERIFIER-PATH reason — the
+    # attribution refusal detail, the observed /livez version, or the
+    # house-classifier class — rides its OWN channel. HB_ERR stays the
+    # LAUNCHD RESOLVER's diagnosis and is left byte-unchanged (the
+    # systemd path never writes it — C-9: its "none captured" is an
+    # UNWRITTEN channel, not a missing capture). The verifier reason is
+    # the SAME information the launchd channel would have carried on
+    # Darwin; the halt row below takes it when the launchd channel is
+    # empty ⇒ on the systemd path the row NEVER reads "none captured".
+    HB_VERIFY_REASON="$(_handback_verify_reason_text)"
     # Warning #1 (review round 3): consume-then-clear — the diagnosis is
     # now in HB_ERR; the $$-keyed side channel must not outlive this
     # halt (rm-after-read, never a cross-pid delete; the name embeds
     # this process id by construction).
     rm -f "${HANDBACK_ERROR_FILE:-}" 2>/dev/null || true
+    rm -f "${HANDBACK_VERIFY_REASON_FILE:-}" 2>/dev/null || true
+    HB_ERR="${HB_ERR:-$HB_VERIFY_REASON}"
     journal_history_append halt "promote aborted post-flip: unit hand-back failed for $VERSION — halt-for-human, txn left open for sweep recovery (declared=${SUPERVISION_MODE:-?} verified=${SUPERVISION_STATE:-?} unit=${SUPERVISION_UNIT:-?}; no nohup fallback — Amendment #1; hand-back error: ${HB_ERR:-none captured})" \
                               || true   # history is advisory; the open txn IS the B4 contract
     exit 1

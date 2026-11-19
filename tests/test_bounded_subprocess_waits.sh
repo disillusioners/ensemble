@@ -11,6 +11,12 @@
 #   2. scripts/stop-ensemble.sh:530  systemctl stop (incident ④ culprit)
 #   3. lib.sh:2880  _supervision_handback_unit reset-failed
 #   4. lib.sh:2894  _supervision_handback_unit is-active
+#      4b.  the is-active probe ANSWERED rc=3 (inactive) — NOT a timeout:
+#           the observed STATE WORD is journaled and NO
+#           subprocess_wait_timeout row exists (P-3 / AC-D6-1 / AC-D6-2,
+#           2026-11-19 — the stub gained the injectable SC_IS_ACTIVE_RC)
+#      4c.  the is-active probe ANSWERED rc=1 (failed) — the same
+#           absence assertion, beyond the rc=0-only path it used to cover
 #   5. lib.sh:2918  _supervision_handback_unit start (the §9 culprit)
 #   6. lib.sh:3179  restart_via_launcher scope-arm is-active
 #   7. lib.sh:3195  restart_via_launcher scope-arm start
@@ -97,7 +103,14 @@ case "$sub" in
         if [ "${SC_HANG:-0}" = "1" ] && [ "${SC_HANG_SUB:-is-active}" = "is-active" ]; then
             exec sleep 999
         fi
-        echo "${SC_IS_ACTIVE:-inactive}"; exit 0 ;;
+        # P-3 (2026-11-19): the rc is INJECTABLE (SC_IS_ACTIVE_RC) — the
+        # stub used to answer rc=0 for `is-active` ALWAYS, so the whole
+        # "non-zero-but-not-timeout rc" classification space was UNPINNED
+        # and the rc=3 mislabelling (a non-timeout recorded as a timeout)
+        # survived the suite. The state word is printed on stdout (as
+        # real systemctl does) — the caller records it.
+        echo "${SC_IS_ACTIVE:-inactive}"
+        exit "${SC_IS_ACTIVE_RC:-0}" ;;
     show)
         prop=""; unit=""
         while [ $# -gt 0 ]; do
@@ -341,6 +354,50 @@ C
     # bounded is-active timeout, then continues.
     assert_eq "S4 is-active hang: rc 1 (continue; treat as not-active, start fails verify)" "hb-rc=1" "$(hb_rc "$S4_OUT")"
     assert_contains "S4 is-active hang: subprocess_wait_timeout event" "handback_is_active" "$(cat "$CFIX/releases/state.json")"
+
+    # ── Site 4b — is-active ANSWERS rc=3 ("not active") — NOT a timeout ────
+    # P-3 / AC-D6-1 / AC-D6-2 (2026-11-19). The unit is deliberately STOPPED
+    # pre-flip, so rc=3 (inactive) is the EXPECTED answer — the old shape
+    # journalled it as a `subprocess_wait_timeout` (a lie: _run_bounded maps
+    # ONLY 137|143 → 124, so rc=3 is systemctl's own answer, not a bounded
+    # wait). The journal must now record the OBSERVED STATE WORD, and NO
+    # timeout row may exist.
+    reset_stub_state "$CFIX/sc.log"
+    cat > "$CFIX/releases/state.json" <<'JSON'
+{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+JSON
+    SC_HANG=0; export SC_HANG
+    SC_IS_ACTIVE=inactive SC_IS_ACTIVE_RC=3; export SC_IS_ACTIVE SC_IS_ACTIVE_RC
+    S4B_OUT="$(run_handback "$CFIX" '
+        SYSTEMCTL_PROBE_BUDGET_S=2
+        SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+    ')"
+    unset SC_IS_ACTIVE_RC
+    assert_eq "S4b is-active rc=3: rc 1 (continue into the start attempt)" "hb-rc=1" "$(hb_rc "$S4B_OUT")"
+    assert_eq "S4b is-active rc=3: NO subprocess_wait_timeout row (rc=3 is NOT a timeout)" "0" \
+        "$(grep -F 'subprocess_wait_timeout' "$CFIX/releases/state.json" 2>/dev/null | grep -c 'site=handback_is_active' || true)"
+    assert_contains "S4b is-active rc=3: the OBSERVED state word is journaled" "state=inactive" "$(cat "$CFIX/releases/state.json")"
+    assert_contains "S4b is-active rc=3: the row is the STATE kind (not the timeout kind)" "handback_is_active_state" "$(cat "$CFIX/releases/state.json")"
+    assert_contains "S4b is-active rc=3: the observed rc is journaled" "rc=3" "$(cat "$CFIX/releases/state.json")"
+
+    # ── Site 4c — is-active ANSWERS rc=1 (failed/unknown) — NOT a timeout ──
+    # The second non-timeout rc cell (P-3 names rc=3 AND rc=1): the absence
+    # assertion must hold BEYOND the rc=0-only path it used to cover.
+    reset_stub_state "$CFIX/sc.log"
+    cat > "$CFIX/releases/state.json" <<'JSON'
+{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+JSON
+    SC_IS_ACTIVE=failed SC_IS_ACTIVE_RC=1; export SC_IS_ACTIVE SC_IS_ACTIVE_RC
+    S4C_OUT="$(run_handback "$CFIX" '
+        SYSTEMCTL_PROBE_BUDGET_S=2
+        SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+    ')"
+    unset SC_IS_ACTIVE_RC SC_IS_ACTIVE
+    assert_eq "S4c is-active rc=1: rc 1 (continue into the start attempt)" "hb-rc=1" "$(hb_rc "$S4C_OUT")"
+    assert_eq "S4c is-active rc=1: NO subprocess_wait_timeout row (rc=1 is NOT a timeout)" "0" \
+        "$(grep -F 'subprocess_wait_timeout' "$CFIX/releases/state.json" 2>/dev/null | grep -c 'site=handback_is_active' || true)"
+    assert_contains "S4c is-active rc=1: the OBSERVED state word is journaled" "state=failed" "$(cat "$CFIX/releases/state.json")"
+    assert_contains "S4c is-active rc=1: the observed rc is journaled" "rc=1" "$(cat "$CFIX/releases/state.json")"
 
     # ── Site 5 — start hang (§9 culprit)
     reset_stub_state "$CFIX/sc.log"

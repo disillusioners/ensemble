@@ -5630,6 +5630,56 @@ _handback_last_error_text() {
     fi
     return 0
 }
+
+# ── HANDBACK VERIFIER-REASON channel (D6-(iv) / AC-D6-6, 2026-11-19) ───────
+# WHY A SEPARATE CHANNEL (and NOT "HB_ERR is broken"):
+#   HB_ERR / HANDBACK_LAST_ERROR is the LAUNCHD RESOLVER's diagnosis channel.
+#   Every write of it sits inside a launchd block (lib.sh:5651 launchctl
+#   bootstrap, :5737 plist resolution) and the systemd hand-back touches
+#   the channel NOWHERE — so on Linux the halt row's "hand-back error:
+#   none captured" is an UNWRITTEN channel, not a missing capture (C-9).
+#   Its presence therefore positively indicates a VERIFIER-PATH failure
+#   (attribution / version / hard-red), not a resolver failure.
+#   ⇒ The fix is NOT "populate HB_ERR on the systemd path" (that would blur
+#   two unrelated vocabularies and touch a launchd-only channel); it is to
+#   BYPASS it: the verifier-path reason travels on its OWN additive channel
+#   and the halt row renders it. The launchd channel is left byte-unchanged.
+#
+# SUB-SHELL-PROOF (the MAJOR #1 precedent, one screen up): the reason is
+# produced INSIDE $() — _supervision_unit_serving is consumed as
+# `newpid="$(_supervision_unit_serving ...)"` — so a bare variable would
+# die at the subshell boundary. That is exactly the defect that made the
+# launchd resolver's diagnosis degrade to "none captured" on the incident
+# path. Hence the $$-keyed file (out-of-band), read back by the caller in
+# the parent shell. `$$` is the PARENT shell's pid inside a bash subshell,
+# so the path is stable across the boundary.
+HANDBACK_VERIFY_REASON=""
+HANDBACK_VERIFY_REASON_FILE="${TMPDIR:-/tmp}/ensemble-hbk-verify.$$"
+# _handback_verify_reason_write <text> — best-effort; a tmp failure must
+# never break the failure path itself. Bounded to 400 chars (the journal
+# detail is a single-line quoted string).
+_handback_verify_reason_write() {
+    printf '%s' "$(printf '%s' "${1:-}" | tr '\n' ';' | tr -s ' ' | cut -c1-400)" \
+        > "${HANDBACK_VERIFY_REASON_FILE:-/tmp/ensemble-hbk-verify.$$}" 2>/dev/null || true
+}
+_handback_verify_reason_clear() {
+    rm -f "${HANDBACK_VERIFY_REASON_FILE:-/tmp/ensemble-hbk-verify.$$}" 2>/dev/null || true
+}
+# _handback_verify_reason_text — THE reader for every consumer (the hand-back
+# WARN lines + the three halt templates). Variable first (survives a plain
+# call), file second (survives the $() subshell). Empty output = nothing
+# captured.
+_handback_verify_reason_text() {
+    if [ -n "${HANDBACK_VERIFY_REASON:-}" ]; then
+        printf '%s' "$HANDBACK_VERIFY_REASON"
+        return 0
+    fi
+    local _f="${HANDBACK_VERIFY_REASON_FILE:-/tmp/ensemble-hbk-verify.$$}"
+    if [ -s "$_f" ]; then
+        printf '%s' "$(head -c 400 "$_f" 2>/dev/null | tr '\n' ';' | tr -s ' ')"
+    fi
+    return 0
+}
 _supervision_launchd_bootstrap() {
     local plist="${1:-}" domain
     [ -n "$plist" ] || return 1
@@ -6083,6 +6133,37 @@ _pipeline_self_excluded() {
     done
 }
 
+# _hb_verify_diag <message> — VERIFY-PHASE DIAGNOSTIC EMITTER (F16 /
+# AC-OBS-3, 2026-11-19). DUAL SINK, BY CONSTRUCTION:
+#   1. _warn            → the per-run NARRATIVE file (ENSEMBLE_UPGRADE_LOG_FILE)
+#                         when that sink is set, else stderr — the
+#                         operator-facing line (unchanged shape).
+#   2. printf ... >&2  → the executor unit's STDERR, UNBUFFERED, ALWAYS.
+#
+# WHY THE SECOND SINK (F16 / C-8 — the mechanism, not the symptom):
+#   _warn routes to the narrative sink whenever it is set — and the ceremony
+#   ALWAYS sets it (spawn_executor threads ENSEMBLE_UPGRADE_LOG_FILE into
+#   the transient unit). The executor unit's stdio is owned by systemd
+#   (StandardOutput/StandardError=append:<run_id>.payload.log —
+#   daemon/tools/upgrade_journal.py build_service_argv), so the narrative
+#   file and the PAYLOAD log are DIFFERENT files. The verify-phase
+#   diagnostics therefore never reached the payload log: both surviving
+#   runs (r-20261119-043446-c8da, r-20261119-132823-3a3c) end at the verify
+#   budget line — the ONE verify-phase line emitted with an explicit
+#   `printf >&2` (lib.sh's budget banner).
+#   `printf >&2` is UNBUFFERED (a direct write(2) on the fd) ⇒ the flush
+#   requirement of AC-OBS-3 ("unbuffered stderr + an explicit _warn before
+#   EACH fail-fast arm") holds by construction, with no dependence on the
+#   shell's stdio buffering.
+#
+# [7b SUBSTRING TRAP] — the banned systemctl-start literal must never
+# appear in a log line; the messages below carry none.
+_hb_verify_diag() {
+    local msg="$1"
+    _warn "$msg"
+    printf '%s[%s]: WARN: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$msg" >&2 2>/dev/null
+}
+
 # _handback_serving_probe — the hand-back's SERVING conjunct
 # (D-P1-4/D-P1-5, promote-handback-halt Phase 1). Called ONLY when PORT
 # is set and curl is available; assumes the port-listener fast condition
@@ -6118,17 +6199,25 @@ _handback_serving_probe() {
             # no amount of polling fixes a foreign answerer — the incident's
             # nohup-serves-while-launchd-crash-loops shape).
             if ! _gate_serving_attribution "hand-back verify"; then
-                _warn "hand-back verify: serving-process attribution REFUSED${GATE_ATTRIBUTION_DETAIL:+ — $GATE_ATTRIBUTION_DETAIL} (probe-level fail-fast, Fix #2); NOT success"
+                # D6-(iv) / AC-D6-6: the REFUSAL DETAIL is the reason the
+                # halt must carry — it is captured on the dedicated
+                # verifier-reason channel (the launchd HB_ERR channel is
+                # untouched) and emitted to BOTH sinks (the payload log
+                # included — F16).
+                _handback_verify_reason_write "attribution-refused: ${GATE_ATTRIBUTION_DETAIL:-<no attribution detail captured>}"
+                _hb_verify_diag "hand-back verify: serving-process attribution REFUSED${GATE_ATTRIBUTION_DETAIL:+ — $GATE_ATTRIBUTION_DETAIL} (probe-level fail-fast, Fix #2); NOT success"
                 return 1
             fi
             if [ -n "${PROMOTE_EXPECTED_VERSION:-}" ]; then
                 running="$(_json_field "${_PROBE_BODY:-}" version 2>/dev/null)" || running=""
                 if [ -z "$running" ]; then
-                    _warn "hand-back verify: /livez answered 2xx but the version field is absent/unparseable while the expected version is known (${PROMOTE_EXPECTED_VERSION}) — definitively unverifiable as the right release (probe-level fail-fast); NOT success"
+                    _handback_verify_reason_write "livez-version-absent: observed=<absent/unparseable> expected=${PROMOTE_EXPECTED_VERSION} — the /livez answer carried no parsable version while the expected version is known"
+                    _hb_verify_diag "hand-back verify: /livez answered 2xx but the version field is absent/unparseable while the expected version is known (${PROMOTE_EXPECTED_VERSION}) — definitively unverifiable as the right release (probe-level fail-fast); NOT success"
                     return 1
                 fi
                 if [ "$running" != "$PROMOTE_EXPECTED_VERSION" ]; then
-                    _warn "hand-back verify: /livez reports version=${running} but the flipped release is ${PROMOTE_EXPECTED_VERSION} — the daemon on :${PORT:-?} is NOT serving the right release (probe-level fail-fast: no amount of waiting fixes a wrong version); NOT success"
+                    _handback_verify_reason_write "livez-version-mismatch: observed=${running} expected=${PROMOTE_EXPECTED_VERSION} — the daemon on :${PORT:-?} is NOT serving the right release"
+                    _hb_verify_diag "hand-back verify: /livez reports version=${running} but the flipped release is ${PROMOTE_EXPECTED_VERSION} — the daemon on :${PORT:-?} is NOT serving the right release (probe-level fail-fast: no amount of waiting fixes a wrong version); NOT success"
                     return 1
                 fi
             fi
@@ -6138,7 +6227,8 @@ _handback_serving_probe() {
             # house-classifier RED (non-2xx outside the 503/7/28 transient
             # classes — the daemon answers HTTP but wrongly). Probe-level
             # fail-fast, mirroring _probe's hard-red handling.
-            _warn "hand-back verify: /livez hard fail (red — non-transient HTTP error, class=${_PROBE_STATUS:-red} code=${_PROBE_CODE:-?}) on :${PORT:-?} (probe-level fail-fast, house classifier); NOT success"
+            _handback_verify_reason_write "livez-hard-red: class=${_PROBE_STATUS:-red} code=${_PROBE_CODE:-?} on :${PORT:-?} — non-transient HTTP error (house classifier)"
+            _hb_verify_diag "hand-back verify: /livez hard fail (red — non-transient HTTP error, class=${_PROBE_STATUS:-red} code=${_PROBE_CODE:-?}) on :${PORT:-?} (probe-level fail-fast, house classifier); NOT success"
             return 1
             ;;
         *)
@@ -6233,7 +6323,8 @@ _supervision_unit_serving() {
             ''|0) ;;  # not up yet — keep polling
             *)
                 if [ -n "$prestop" ] && [ "$mp" = "$prestop" ]; then
-                    _warn "hand-back verify: unit $unit MainPID=$mp EQUALS the pre-stop pid — the old daemon never left (start no-op'd on an active unit, or the stop false-succeeded); NOT success"
+                    _handback_verify_reason_write "mainpid-unchanged: unit $unit MainPID=$mp EQUALS the pre-stop pid — the old daemon never left (start no-op'd on an active unit, or the stop false-succeeded)"
+                    _hb_verify_diag "hand-back verify: unit $unit MainPID=$mp EQUALS the pre-stop pid — the old daemon never left (start no-op'd on an active unit, or the stop false-succeeded); NOT success"
                     return 1
                 fi
                 if [ -n "${PORT:-}" ] && command -v lsof >/dev/null 2>&1; then
@@ -6303,14 +6394,17 @@ _supervision_unit_serving() {
     # post-mortem must be able to tell this apart from an unhealthy daemon
     # (the ordinary wording would blame a healthy-but-slow release).
     if [ "$floor_band" = "3" ]; then
-        _warn "hand-back verify: ceremony time exhausted — the ceremony clock had ${entry_remaining}s left (< floor ${HANDBACK_VERIFY_FLOOR_S}s): the hand-back cannot succeed inside the ceremony budget no matter how healthy the daemon is; deliberate bounded overshoot $(( HANDBACK_VERIFY_FLOOR_S - entry_remaining ))s (FLOOR − remaining), grace 0; unit $unit not confirmed within ${effective}s (effective hand-back budget; source ${budget_source})"
+        _handback_verify_reason_write "ceremony-time-exhausted: the ceremony clock had ${entry_remaining}s left (< floor ${HANDBACK_VERIFY_FLOOR_S}s) — the hand-back cannot succeed inside the ceremony budget no matter how healthy the daemon is; unit $unit not confirmed within ${effective}s (effective hand-back budget; source ${budget_source})"
+        _hb_verify_diag "hand-back verify: ceremony time exhausted — the ceremony clock had ${entry_remaining}s left (< floor ${HANDBACK_VERIFY_FLOOR_S}s): the hand-back cannot succeed inside the ceremony budget no matter how healthy the daemon is; deliberate bounded overshoot $(( HANDBACK_VERIFY_FLOOR_S - entry_remaining ))s (FLOOR − remaining), grace 0; unit $unit not confirmed within ${effective}s (effective hand-back budget; source ${budget_source})"
         return 1
     fi
     if [ "$floor_band" = "2" ]; then
-        _warn "hand-back verify: ceremony time exhausted — the ceremony clock had ${entry_remaining}s left (< floor ${HANDBACK_VERIFY_FLOOR_S}s + tail reserve ${HANDBACK_TAIL_RESERVE_S}s): the tail reserve was unavailable so the floor pinned the budget at ${effective}s and the grace was clamped to ${grace}s (total ${total}s ≤ remaining); unit $unit not confirmed within ${effective}s (effective hand-back budget; source ${budget_source})"
+        _handback_verify_reason_write "ceremony-time-exhausted: the ceremony clock had ${entry_remaining}s left (< floor ${HANDBACK_VERIFY_FLOOR_S}s + tail reserve ${HANDBACK_TAIL_RESERVE_S}s) — the tail reserve was unavailable so the floor pinned the budget at ${effective}s; unit $unit not confirmed within ${effective}s (effective hand-back budget; source ${budget_source})"
+        _hb_verify_diag "hand-back verify: ceremony time exhausted — the ceremony clock had ${entry_remaining}s left (< floor ${HANDBACK_VERIFY_FLOOR_S}s + tail reserve ${HANDBACK_TAIL_RESERVE_S}s): the tail reserve was unavailable so the floor pinned the budget at ${effective}s and the grace was clamped to ${grace}s (total ${total}s ≤ remaining); unit $unit not confirmed within ${effective}s (effective hand-back budget; source ${budget_source})"
         return 1
     fi
-    _warn "hand-back verify: unit $unit not confirmed (new MainPID ≠ ${prestop:-<none>} + port ${PORT:-?} serving + /livez answering) within ${effective}s (HANDBACK_VERIFY_BUDGET_S effective budget; grace ${grace}s $( [ "$extended" = "1" ] && printf consumed || printf unused ))"
+    _handback_verify_reason_write "verify-not-confirmed: unit $unit not confirmed (new MainPID ≠ ${prestop:-<none>} + port ${PORT:-?} serving + /livez answering) within ${effective}s (effective hand-back budget; source ${budget_source}; grace ${grace}s $( [ "$extended" = "1" ] && printf consumed || printf unused ))"
+    _hb_verify_diag "hand-back verify: unit $unit not confirmed (new MainPID ≠ ${prestop:-<none>} + port ${PORT:-?} serving + /livez answering) within ${effective}s (HANDBACK_VERIFY_BUDGET_S effective budget; grace ${grace}s $( [ "$extended" = "1" ] && printf consumed || printf unused ))"
     return 1
 }
 
@@ -6367,14 +6461,44 @@ _supervision_handback_unit() {
     # assignment — `|| true` would mask the rc 124 and the IF would
     # always take the THEN branch (skipping the journal event). Capture
     # via a temp var + explicit rc-test.
-    local isact_rc=0
+    #
+    # D6-(iii) / AC-D6-1 / AC-D6-2 (2026-11-19): ONLY rc=124 is a genuine
+    # bounded-wait timeout — _run_bounded collapses 137|143 → 124 and passes
+    # every other rc through UNCHANGED. The old shape journalled a
+    # `subprocess_wait_timeout` row for ANY non-zero rc, so systemctl's own
+    # answer rc=3 ("not active" — the EXPECTED pre-start value: the unit is
+    # deliberately stopped pre-flip) was recorded as a TIMEOUT. That lie
+    # misdirected triage for ~10h. The state word is ON STDOUT and was
+    # discarded; it is now captured and journaled, so "inactive" /
+    # "activating" / "failed" are distinguishable in the journal.
+    # VERDICT UNCHANGED: this site never decides — it journals and
+    # continues into the start attempt (the MainPID/port verify owns the
+    # verdict). The PENDING/ACTIVE/FAILED state machine is Wave 2's seam
+    # (D6-(i)/(ii)) and is NOT built here.
+    local isact_rc=0 isact_state=""
     isact="$(_run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" is-active "$unit" 2>/dev/null)"
     isact_rc=$?
+    # The observed state word (stdout) — flattened to one line, trimmed.
+    isact_state="$(printf '%s' "${isact:-}" | tr '\n' ' ' | tr -s ' ' | sed 's/[[:space:]]*$//')"
     if [ "$isact_rc" -ne 0 ]; then
-        _warn "is-active probe exceeded budget (${SYSTEMCTL_PROBE_BUDGET_S}s) for $unit — treating as NOT-active; continuing into the start attempt (the MainPID/port verify owns the verdict)"
-        journal_history_append subprocess_wait_timeout \
-            "site=handback_is_active kind=budget reason=$(printf 'child: timeout(SYSTEMCTL_PROBE_BUDGET_S=%s)' "$SYSTEMCTL_PROBE_BUDGET_S") unit=$unit rc=$isact_rc — treating as not-active, continuing" \
-            || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+        if [ "$isact_rc" = "124" ]; then
+            _warn "is-active probe exceeded budget (${SYSTEMCTL_PROBE_BUDGET_S}s) for $unit — treating as NOT-active; continuing into the start attempt (the MainPID/port verify owns the verdict)"
+            journal_history_append subprocess_wait_timeout \
+                "site=handback_is_active kind=budget reason=$(printf 'child: timeout(SYSTEMCTL_PROBE_BUDGET_S=%s)' "$SYSTEMCTL_PROBE_BUDGET_S") unit=$unit rc=$isact_rc — treating as not-active, continuing" \
+                || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+        else
+            # NOT a timeout: systemctl ANSWERED with a non-zero rc (rc=3 =
+            # not active — the expected pre-start value; rc=1 = failed /
+            # unknown; ...). The answer + the observed state word are
+            # journaled on their OWN event kind (additive; NOT a terminal
+            # kind, NOT in _TERMINAL_EVENTS) — the timeout row is reserved
+            # for rc=124 alone. VERDICT UNCHANGED: still treat as
+            # NOT-active and continue into the start attempt.
+            _warn "is-active probe answered rc=$isact_rc for $unit (state=${isact_state:-<none>}) — NOT a timeout (rc≠124): treating as NOT-active; continuing into the start attempt (the MainPID/port verify owns the verdict)"
+            journal_history_append handback_is_active_state \
+                "site=handback_is_active kind=state unit=$unit rc=$isact_rc state=${isact_state:-<none>} — systemctl answered (not a timeout; rc≠124); treating as not-active, continuing" \
+                || _warn "handback_is_active_state journal event append FAILED (best-effort)"
+        fi
         isact=""
     fi
     [ "$isact" = "active" ] \
@@ -6402,17 +6526,32 @@ _supervision_handback_unit() {
             journal_history_append subprocess_wait_timeout \
                 "site=handback_start kind=budget reason=$(printf 'child: timeout(HANDBACK_START_BUDGET_S=%s)' "$HANDBACK_START_BUDGET_S") unit=$unit rc=124 — SIGTERM→SIGKILL, halting for caller's B4 policy" \
                 || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
+            _handback_verify_reason_write "unit-start-budget-exceeded: the unit start exceeded HANDBACK_START_BUDGET_S=${HANDBACK_START_BUDGET_S}s (child SIGTERM→SIGKILL'd); unit=$unit"
         else
             _warn "unit hand-back FAILED: unit $unit did not come up (${first:-no stderr}) — NO nohup fallback (Amendment #1: a fallback re-creates the survivor lineage and abandons Restart=/journald ownership) — halting for the caller's B4 policy"
+            _handback_verify_reason_write "unit-start-failed: unit $unit did not come up (rc=${sbrc}; ${first:-no stderr})"
         fi
         return 1
     fi
     rm -f "$errfile"
     # 4. verify NEW MainPID (differs from pre-stop) + port serving.
     if ! newpid="$(_supervision_unit_serving "$unit" "$prestop")"; then
-        _warn "unit hand-back FAILED verification for $unit — NO nohup fallback (Amendment #1) — halting for the caller's B4 policy"
+        # D6-(iv) / AC-D6-6: the VERIFIER-PATH reason was produced INSIDE
+        # the $() subshell (the attribution detail / the observed /livez
+        # version / the classifier class) ⇒ read it back out-of-band into
+        # THIS shell, where the caller (restart_via_launcher → the ceremony
+        # script) composes the halt row. The launchd HB_ERR channel is
+        # untouched (it is a different vocabulary, and it is empty on the
+        # systemd path by construction — C-9).
+        HANDBACK_VERIFY_REASON="$(_handback_verify_reason_text)"
+        _warn "unit hand-back FAILED verification for $unit — NO nohup fallback (Amendment #1) — halting for the caller's B4 policy${HANDBACK_VERIFY_REASON:+ — verify reason: $HANDBACK_VERIFY_REASON}"
         return 1
     fi
+    # Success hygiene (the launchd channel's precedent): a SUCCESSFUL
+    # hand-back must never leave a stale verifier reason behind for a
+    # LATER halt in the same run.
+    HANDBACK_VERIFY_REASON=""
+    _handback_verify_reason_clear
     outcome="$(supervision_map_outcome "${SUPERVISION_MODE:-}" "${SUPERVISION_STATE:-unknown}" "${SUPERVISION_UNIT:-}")"
     outcome="${outcome%%|*}"
     if [ "$scope_heal" = "1" ]; then

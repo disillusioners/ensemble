@@ -463,6 +463,240 @@ EOF
     exit $?
     fi
 
+    if [ "$LEG" = "d6" ]; then
+    # ===========================================================================
+    # LEG D6 — TRUTH & OBSERVABILITY (self-service-promote Wave 1; changes NO
+    # verdict). Three ACs in one leg, because they share ONE fixture (the
+    # real unit hand-back with stubbed systemctl/lsof/curl):
+    #
+    #   AC-D6-1 / AC-D6-2  the is-active probe ANSWERED rc=3 ("not active" —
+    #       the EXPECTED pre-start value: the unit is deliberately stopped
+    #       pre-flip) ⇒ NO `subprocess_wait_timeout` row with
+    #       `site=handback_is_active`, and the OBSERVED STATE WORD is
+    #       journaled. The old shape journalled rc=3 as a TIMEOUT (a lie:
+    #       _run_bounded maps ONLY 137|143 → 124), which misdirected triage
+    #       for ~10h.
+    #   AC-D6-6  the halt row carries the VERIFIER-PATH reason — the
+    #       attribution refusal detail (attribution arm) or the observed
+    #       /livez version (version arms). The launchd HB_ERR channel stays
+    #       launchd-only (C-9: the systemd path never writes it) — the
+    #       reason rides its OWN channel. "none captured" can never recur
+    #       on the systemd path.
+    #   AC-OBS-3 / P-6  the VERIFY-PHASE narrative reaches the executor's
+    #       PAYLOAD log (the unit's stdio) — not only the shell's narrative
+    #       file. F16/C-8: both surviving runs ended at the verify budget
+    #       line, because `_warn` routes to the narrative sink while the
+    #       payload log is a DIFFERENT file (the unit's stderr). The flush
+    #       MECHANISM is asserted (unbuffered stderr + an explicit _warn
+    #       before EACH fail-fast arm), not "exactly N lines".
+    #
+    # The halt row is composed by promote.sh's OWN template — the leg
+    # EXTRACTS that template from the shipped script and EXECUTES it
+    # against the channel the real hand-back left behind (no grep, no
+    # re-implementation: removing the substitution turns the leg RED).
+    # ===========================================================================
+    leg_sandbox d6
+
+    # The journal SPLICE helper refuses a journal path under
+    # "$HOME/agents-ensemble" (the live-install guard —
+    # journal_splice.py _is_under_live) unless the pipeline lock is held.
+    # leg_sandbox's HOME fence makes that path exactly the sandbox's own
+    # install root ⇒ the shell-side journal writer would refuse EVERY row
+    # (the g2/g4/g5 legs are unaffected: they drive the LAUNCHER's writer).
+    # The sandbox install root therefore takes a different name under the
+    # SAME FAKE_HOME — the pack's escape guard (INSTALL_DIR under
+    # FAKE_HOME, FAKE_HOME not the live install path) still holds.
+    INSTALL_DIR="$FAKE_HOME/installs/agents-ensemble"
+    mkdir -p "$INSTALL_DIR/releases"
+    D6STUB="$(mktemp -d "/home/nea/.phh-d6-stub.XXXXXX")"
+    chmod 700 "$D6STUB"
+    trap 'rm -rf "$FAKE_HOME" "$D6STUB"; [ -n "$LISTENER_PID" ] && kill "$LISTENER_PID" 2>/dev/null' EXIT
+
+    # The systemctl stub — `is-active` answers with an INJECTABLE rc (P-3:
+    # the stub used to answer rc=0 ALWAYS, so the whole non-timeout rc
+    # space was unpinned) and prints the STATE WORD on stdout (as real
+    # systemctl does).
+    cat > "$D6STUB/systemctl" <<'D6STUBEOF'
+#!/bin/bash
+echo "$*" >> "${SC_LOG:-/dev/null}"
+sub="$1"; shift
+case "$sub" in
+    is-active)
+        echo "${SC_IS_ACTIVE:-inactive}"
+        exit "${SC_IS_ACTIVE_RC:-0}" ;;
+    show)
+        prop=""
+        while [ $# -gt 0 ]; do
+            case "$1" in -p) prop="$2"; shift 2 ;; --value) shift ;; *) shift ;; esac
+        done
+        case "$prop" in
+            MainPID) echo "${SC_MAINPID:-0}" ;;
+            *) echo "" ;;
+        esac
+        exit 0 ;;
+    start) exit "${SC_START_RC:-0}" ;;
+    *) exit 0 ;;
+esac
+D6STUBEOF
+    chmod +x "$D6STUB/systemctl"
+
+    # The lsof stub — the LISTEN holder of the probe port. Two modes:
+    # OWNED (424242 — the fixture IS the daemon) and FOREIGN (999999 — the
+    # attribution-refusal cell).
+    cat > "$D6STUB/lsof" <<'D6STUBEOF'
+#!/bin/bash
+printf '%s\n' "${D6_HOLDER:-424242}"
+exit 0
+D6STUBEOF
+    chmod +x "$D6STUB/lsof"
+
+    # The curl stub — /livez answers 2xx with a VERSION.
+    cat > "$D6STUB/curl" <<'D6STUBEOF'
+#!/bin/bash
+out=""
+while [ $# -gt 0 ]; do
+    case "$1" in -o) out="$2"; shift 2 ;; -w) shift ;; --max-time) shift ;; -sS|-s|-S) shift ;; *) shift ;; esac
+done
+[ -n "$out" ] && printf '{"status":"alive","version":"%s"}\n' "${D6_VERSION:-0.28.5}" > "$out"
+printf '200'
+D6STUBEOF
+    chmod +x "$D6STUB/curl"
+
+    DPATH="$D6STUB:$PATH"
+    DPORT="$(absent_port)"
+    SC_LOG="$INSTALL_DIR/sc.log"
+
+    # seed_journal — the sandbox journal (the shape the splice helper edits).
+    d6_seed() {
+        cat > "$INSTALL_DIR/releases/state.json" <<'JSON'
+{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+JSON
+    }
+    d6_seed
+
+    # d6_run <extra-shell-setup> — the REAL unit hand-back (the same call
+    # the ceremony makes: restart_via_launcher) in a scrubbed shell.
+    d6_run() {
+        PATH="$DPATH" INSTALL_DIR="$INSTALL_DIR" SYSTEMCTL_BIN="$D6STUB/systemctl" \
+        SC_LOG="$SC_LOG" PORT="$DPORT" \
+        PROMOTE_EXPECTED_VERSION=0.28.5 HANDBACK_VERIFY_BUDGET_S=4 \
+        D6_HOLDER="${D6_HOLDER:-424242}" D6_VERSION="${D6_VERSION:-0.28.5}" \
+        bash -c '
+            unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
+            . "'"$LIBSH"'" >/dev/null 2>&1
+            _supervision_owned_pids() { printf "%s\n" 424242; }
+            SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+            SUPERVISION_UNIT=ensemble-d6.service; SUPERVISION_PRESTOP_MAINPID=777
+            '"$1"'
+            restart_via_launcher
+            echo "rvl-rc=$?"
+            echo "REASON=[$(_handback_verify_reason_text)]"
+        ' 2>&1
+    }
+
+    # ── D6-A — the is-active probe ANSWERED rc=3 (AC-D6-1 / AC-D6-2) ─────
+    section "D6-A — the is-active answer rc=3 is NOT a timeout (AC-D6-1 / AC-D6-2)"
+    d6_seed
+    D6A_OUT="$(d6_run 'export SC_IS_ACTIVE=inactive SC_IS_ACTIVE_RC=3')"
+    D6A_J="$(cat "$INSTALL_DIR/releases/state.json")"
+    assert_eq "D6-A1 the hand-back continues into the start attempt (rc=1: the verify, not the probe, decides)" \
+        "rvl-rc=1" "$(printf '%s' "$D6A_OUT" | grep -o 'rvl-rc=[0-9]*' | head -1)"
+    assert_eq "D6-A2 NO subprocess_wait_timeout row with site=handback_is_active (rc=3 is not a timeout)" \
+        "0" "$(printf '%s' "$D6A_J" | grep -F 'subprocess_wait_timeout' | grep -c 'site=handback_is_active' || true)"
+    assert_contains "D6-A3 the OBSERVED state word is journaled" "state=inactive" "$D6A_J"
+    assert_contains "D6-A4 the row is the STATE kind (a new, additive, non-terminal kind)" "handback_is_active_state" "$D6A_J"
+    assert_contains "D6-A5 the observed rc is journaled" "rc=3" "$D6A_J"
+
+    # ── D6-B — the halt row carries the verifier-path reason (AC-D6-6) ────
+    section "D6-B — the halt row carries the reason (AC-D6-6, version arm)"
+    # The REAL promote.sh halt template — extracted verbatim and EXECUTED.
+    # The extraction takes the FIRST `if ! restart_via_launcher; then` block
+    # only (promote.sh has a SECOND one in its rollback section — the
+    # awk stops at the first `fi` so the body is exactly the promote
+    # halt block, with no stray `fi` left to break the shell parse).
+    D6_HALT_BODY="$(awk '
+        /^if ! restart_via_launcher; then$/ && !seen { inblock=1; seen=1; next }
+        inblock && /^fi$/ { exit }
+        inblock { print }
+    ' "$REPO_ROOT/scripts/upgrade/promote.sh")"
+    if [ -z "$D6_HALT_BODY" ]; then
+        _fail "D6-B0 the promote.sh halt template is extractable" "non-empty" "empty"
+    else
+        _pass "D6-B0 the promote.sh halt template is extractable"
+    fi
+    d6_seed
+    # The hand-back MUST reach the SERVING probe for the version arm to
+    # fire: the stub reports a NEW MainPID (≠ the pre-stop pid) so the
+    # verify proceeds to the /livez conjunct (MainPID=0 would only ever
+    # produce the "not confirmed" verdict).
+    D6B_OUT="$(PATH="$DPATH" INSTALL_DIR="$INSTALL_DIR" SYSTEMCTL_BIN="$D6STUB/systemctl" \
+        SC_LOG="$SC_LOG" PORT="$DPORT" PROMOTE_EXPECTED_VERSION=0.28.5 \
+        HANDBACK_VERIFY_BUDGET_S=4 D6_HOLDER=424242 D6_VERSION=0.0.0 SC_MAINPID=9999 \
+        bash -c '
+            unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
+            . "'"$LIBSH"'" >/dev/null 2>&1
+            _supervision_owned_pids() { printf "%s\n" 424242; }
+            SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+            SUPERVISION_UNIT=ensemble-d6.service; SUPERVISION_PRESTOP_MAINPID=777
+            VERSION=v9.9.9-d6
+            restart_via_launcher >/dev/null; echo "rvl-rc=$?"
+            '"$D6_HALT_BODY"'
+        ' 2>&1)"
+    D6B_J="$(cat "$INSTALL_DIR/releases/state.json")"
+    assert_contains "D6-B1 the hand-back FAILED (the version-mismatch fail-fast)" "rvl-rc=1" "$D6B_OUT"
+    assert_contains "D6-B2 the halt row carries the OBSERVED /livez version" "observed=0.0.0" "$D6B_J"
+    assert_contains "D6-B3 the halt row names the EXPECTED version too" "expected=0.28.5" "$D6B_J"
+    assert_not_contains "D6-B4 the halt row NEVER reads 'none captured' on the systemd path" \
+        "none captured" "$D6B_J"
+    assert_contains "D6-B5 the halt row is still a halt-for-human (the vocabulary is unchanged)" \
+        "halt-for-human, txn left open" "$D6B_J"
+
+    # ── D6-C — the verify-phase narrative reaches the PAYLOAD log ─────────
+    # (AC-OBS-3 / P-6). The executor unit's stdio is
+    # StandardOutput/StandardError=append:<run_id>.payload.log — emulated
+    # here by redirecting the shell's stderr into the payload file, with
+    # the narrative sink set exactly as spawn_executor threads it
+    # (ENSEMBLE_UPGRADE_LOG_FILE). The two files are DIFFERENT sinks; the
+    # bug (F16) was that the verify-phase diagnostics only ever reached the
+    # narrative one, so the payload log ended at the budget line.
+    section "D6-C — the verify-phase narrative reaches the payload log (AC-OBS-3 / P-6)"
+    d6_seed
+    D6NARR="$INSTALL_DIR/data/upgrade/demo/d6.log"
+    D6PAY="$INSTALL_DIR/data/upgrade/demo/d6.payload.log"
+    mkdir -p "$(dirname "$D6NARR")"
+    PATH="$DPATH" INSTALL_DIR="$INSTALL_DIR" SYSTEMCTL_BIN="$D6STUB/systemctl" \
+    SC_LOG="$SC_LOG" PORT="$DPORT" PROMOTE_EXPECTED_VERSION=0.28.5 \
+    HANDBACK_VERIFY_BUDGET_S=4 D6_HOLDER=424242 D6_VERSION=0.0.0 \
+    ENSEMBLE_UPGRADE_LOG_FILE="$D6NARR" \
+    bash -c '
+        unset ENSEMBLE_SUPERVISION ENSEMBLE_RESTART_UNIT 2>/dev/null || true
+        . "'"$LIBSH"'" >/dev/null 2>&1
+        _supervision_owned_pids() { printf "%s\n" 424242; }
+        SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+        SUPERVISION_UNIT=ensemble-d6.service; SUPERVISION_PRESTOP_MAINPID=777
+        restart_via_launcher >/dev/null || true
+    ' >"$D6PAY" 2>&1
+    assert_contains "D6-C1 the payload log carries the verify BUDGET line" \
+        "hand-back verify: budget effective=" "$(cat "$D6PAY")"
+    assert_contains "D6-C2 the payload log carries a verify-phase DIAGNOSTIC (the F16 flush mechanism)" \
+        "WARN: hand-back verify:" "$(cat "$D6PAY")"
+    # The truncation repro (C-8): the payload log used to END at the budget
+    # line. The diagnostic must come AFTER it.
+    D6_BUDGET_LINE="$(grep -n 'hand-back verify: budget effective=' "$D6PAY" | head -1 | cut -d: -f1)"
+    D6_DIAG_LINE="$(grep -n 'WARN: hand-back verify:' "$D6PAY" | head -1 | cut -d: -f1)"
+    if [ -n "$D6_BUDGET_LINE" ] && [ -n "$D6_DIAG_LINE" ] && [ "$D6_DIAG_LINE" -gt "$D6_BUDGET_LINE" ]; then
+        _pass "D6-C3 the payload log does NOT truncate at the budget line (the diagnostic follows it)"
+    else
+        _fail "D6-C3 the payload log does NOT truncate at the budget line (the diagnostic follows it)" \
+            "diag line > budget line" "budget=${D6_BUDGET_LINE:-none} diag=${D6_DIAG_LINE:-none}"
+    fi
+    assert_contains "D6-C4 the narrative sink still carries the same diagnostic (the _warn twin)" \
+        "WARN: hand-back verify:" "$(cat "$D6NARR")"
+
+    leg_summary
+    exit $?
+    fi
+
     printf 'unknown leg: %s\n' "$LEG" >&2
     exit 64
 fi
@@ -479,6 +713,11 @@ EXPECTED_ASSERTS_G4=20
 # G5: the verbatim fold carries 20 asserts + 1 ADDED fixture-guard assert
 # (the absent-probe port is never a reserved service port) = 21.
 EXPECTED_ASSERTS_G5=21
+# D6 (self-service-promote Wave 1): 15 asserts — D6-A (5: the rc=3 answer
+# is not a timeout, the state word is journaled), D6-B (6: the halt row
+# carries the verifier-path reason and never reads "none captured"), D6-C
+# (4: the verify-phase narrative reaches the payload log).
+EXPECTED_ASSERTS_D6=15
 
 FENCE=(env -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_USER -u POSTGRES_PASSWORD
        -u DATABASE_URL -u PGHOST -u PGPORT -u PGDATABASE -u PGUSER -u PGPASSWORD)
@@ -521,6 +760,7 @@ run_one_leg() {
 run_one_leg g2 "$EXPECTED_ASSERTS_G2" || true
 run_one_leg g4 "$EXPECTED_ASSERTS_G4" || true
 run_one_leg g5 "$EXPECTED_ASSERTS_G5" || true
+run_one_leg d6 "$EXPECTED_ASSERTS_D6" || true
 
 RESULT_RC=0
 if [ "$TIMED_OUT" -gt 0 ]; then
@@ -530,8 +770,8 @@ elif [ "$LEGS_FAILED" -gt 0 ]; then
 fi
 
 printf '\n'
-printf 'RESULT pack=promote_handback_halt_gate_legs_test legs=3 legs_failed=%s timed_out=%s asserts=%s asserts_failed=%s expected_asserts=%s rc=%s\n' \
+printf 'RESULT pack=promote_handback_halt_gate_legs_test legs=4 legs_failed=%s timed_out=%s asserts=%s asserts_failed=%s expected_asserts=%s rc=%s\n' \
     "$LEGS_FAILED" "$TIMED_OUT" "$TOTAL_ASSERTS" "$TOTAL_FAILED_ASSERTS" \
-    "$((EXPECTED_ASSERTS_G2 + EXPECTED_ASSERTS_G4 + EXPECTED_ASSERTS_G5))" "$RESULT_RC"
+    "$((EXPECTED_ASSERTS_G2 + EXPECTED_ASSERTS_G4 + EXPECTED_ASSERTS_G5 + EXPECTED_ASSERTS_D6))" "$RESULT_RC"
 printf 'logs: %s\n' "$LEG_LOGDIR"
 exit "$RESULT_RC"
