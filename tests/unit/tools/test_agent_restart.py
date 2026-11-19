@@ -870,6 +870,39 @@ class TestCase5NotifyContents:
         # restore the module-global (other tests read it)
         ss.set_last_applied_resolution(None)
 
+    def test_render_applied_overrides_applied_false_renders_skipped(
+        self, tmp_path: Path
+    ):
+        """F10: a resolution record carrying ``applied=False`` (a failed
+        boot apply) must render as 'not-applied (boot apply skipped)'."""
+        from daemon.services import settings_service as ss
+        from daemon.services.upgrade_journal_sweep import (
+            UpgradeJournalSweepService,
+        )
+
+        svc = UpgradeJournalSweepService(tmp_path, manager=_manager())
+        wake = uj.PendingWake(
+            run_id="r-applied-false", kind="restart", env="live",
+            arming_instance_id=INSTANCE_ID,
+        )
+        audit = {
+            "overrides": [
+                {"key": "limits.worker_pool_size", "live_before": 5,
+                 "db_value": 7, "status": "pending"}
+            ]
+        }
+        ss.set_last_applied_resolution(
+            {"limits.worker_pool_size": {
+                "source": "db", "value": 7, "default": 5,
+                "env_value": None, "yaml_value": None, "db_override": 7,
+                "applied": False,
+            }}
+        )
+        body = svc._render_applied_overrides(wake, audit)
+        assert "not-applied (boot apply skipped)" in body, body
+        assert "(applied)" not in body, body
+        ss.set_last_applied_resolution(None)
+
     def test_outcome_labels_x4(self) -> None:
         for key in (
             "restart_gate", "restart_abandoned", "stop_forced_kill",

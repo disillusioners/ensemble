@@ -1023,6 +1023,8 @@ class UpgradeJournalSweepService:
                 rec = resolution.get(key)
                 if not isinstance(rec, dict):
                     status = "not-applied (no resolution record)"
+                elif rec.get("applied") is False:
+                    status = "not-applied (boot apply skipped)"
                 elif rec.get("source") != "db":
                     status = f"not-applied — resolved tier={rec.get('source')}"
                 elif rec.get("value") == db_value:
@@ -1108,6 +1110,8 @@ class UpgradeJournalSweepService:
                         rec = resolution.get(key)
                         if not isinstance(rec, dict):
                             o["status"] = "not-applied (no resolution record)"
+                        elif rec.get("applied") is False:
+                            o["status"] = "not-applied (boot apply skipped)"
                         elif rec.get("source") != "db":
                             o["status"] = f"not-applied — resolved tier={rec.get('source')}"
                         elif rec.get("value") == o.get("db_value"):
