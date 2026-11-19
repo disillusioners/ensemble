@@ -73,14 +73,37 @@ TARGET="v9.9.9-test-target"
 PREV="v9.9.9-test-prev"
 LISTENER_PIDS=""
 
+# LISTENER PID REGISTRY FILE (self-service-promote Wave-1 verify, 2026-11-19):
+# start_listener is invoked inside `$( )` command substitutions at nearly
+# every call site (`P_PORT="$(start_listener green 0.28.5)"`), and a variable
+# update CANNOT cross the subshell boundary — the parent shell's
+# LISTENER_PIDS never learned those pids and `cleanup_listeners` left every
+# command-substitution listener RUNNING (19 leaked fixtures observed on a
+# single GREEN 140/0 run; their never-answer handler threads sleep 3600s).
+# A file survives the boundary, and `$$` inside a bash subshell is still
+# the PACK shell's pid, so the name is stable for every start_listener
+# call in this run and unique across concurrent runs.
+LISTENER_PID_FILE="/tmp/ens-serving-probe-pids-$$.list"
+: > "$LISTENER_PID_FILE" 2>/dev/null || true
+
 cleanup_listeners() {
     local pid
-    for pid in $LISTENER_PIDS; do
+    # `$()`-free kill loop: word-split both sources (the variable covers
+    # same-shell starts, the file covers the command-substitution starts).
+    for pid in $LISTENER_PIDS $(cat "$LISTENER_PID_FILE" 2>/dev/null); do
         kill "$pid" 2>/dev/null || true
     done
     LISTENER_PIDS=""
+    : > "$LISTENER_PID_FILE" 2>/dev/null || true
 }
-trap 'cleanup_listeners; _cleanup_fixtures' EXIT
+trap 'cleanup_listeners; _cleanup_fixtures; rm -f "$LISTENER_PID_FILE"' EXIT
+# TERM/INT (the registered invocation wraps this pack in `timeout 600`):
+# an UNtrapped SIGTERM kills bash WITHOUT running the EXIT trap — the
+# leaked-fixture state the 2026-11-19 prior run left behind. Trap them,
+# clean up, then exit; the EXIT trap re-runs cleanup_listeners
+# (idempotent — dead pids are `kill ... || true`).
+trap 'cleanup_listeners; _cleanup_fixtures; rm -f "$LISTENER_PID_FILE"; exit 143' TERM
+trap 'cleanup_listeners; _cleanup_fixtures; rm -f "$LISTENER_PID_FILE"; exit 130' INT
 
 # ── fixture helpers ────────────────────────────────────────────────────────
 
@@ -187,6 +210,10 @@ start_listener() {
         --port "$port" --mode "$mode" --version "$version" \
         --log "$TMP_LISTENER_LOG" >/dev/null 2>&1 &
     LISTENER_PIDS="$LISTENER_PIDS $!"
+    # The registry append crosses the $( ) boundary where the variable
+    # update above cannot (see LISTENER_PID_FILE) — this line is what
+    # makes a command-substitution start_listener killable at cleanup.
+    printf '%s\n' "$!" >>"$LISTENER_PID_FILE" 2>/dev/null || true
     TMP_LISTENER_LOG="/tmp/ens-serving-probe-$$.jsonl"
     : > "$TMP_LISTENER_LOG"
     local waited=0
