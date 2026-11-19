@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from daemon.auth.decorators import scope_required
@@ -582,13 +583,23 @@ async def list_instances(
     
     has_more = (offset + limit) < total
 
-    return InstanceListResponse(
+    resp = InstanceListResponse(
         instances=instances,
         total=total,
         limit=limit,
         offset=offset,
         has_more=has_more,
         truncated=truncated,
+    )
+    # Skip FastAPI's response_model validation + jsonable-encode pass on
+    # the event loop: hand-build the body (reproducing the decorator's
+    # response_model_exclude so mcp_tool_names stays key-ABSENT) and
+    # return a Response so FastAPI bypasses response_model handling.
+    return JSONResponse(
+        content=resp.model_dump(
+            mode="json",
+            exclude={"instances": {"__all__": {"mcp_tool_names"}}},
+        )
     )
 
 
