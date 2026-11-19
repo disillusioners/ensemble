@@ -73,19 +73,19 @@ weaker guard.
 Counts base → this tip: DENY — pipe 6→17, xargs-stdin 4→4, runner 10→61, scheduler 3→5,
 systemctl option-anchor 0→10, **read-only-tail 0→3 (NEW family — the ISOLATING pin B1/AG-5/F-02)**,
 **mutating-verb 0→12 (NEW family)**. ALLOW — `_LAUNDER_ALLOW` 18→40, `_READONLY_COMMANDS`
-15→23. The file is **254 nodes** (base 134); the pack **293** (base 173).
+15→23. The file is **255 nodes** (base 134); the pack **294** (base 173).
 
 B1's isolating pin is `systemctl cat stop <unit>` (and `help`/`status` spellings): a
 read-only word in VERB position with **no option at all**, so the option-arity fix cannot
-cover it — neutralising the non-terminal parse ALONE reddens it (M7f → 5 reds). The three
+cover it — neutralising the non-terminal parse ALONE reddens it (M7f → 6 reds). The three
 per-option ALLOW pins (`--boot-loader-entry Restart`, `--image-policy Restart`,
 `--boot-loader-menu Restart`) are added beside `-P`'s.
 
-## 4. THE MUTATION LEGS — 20 legs, 74 reds, EXPECTED-count equality
+## 4. THE MUTATION LEGS — 20 legs, 79 reds, EXPECTED-count equality
 
-`M6g` 11 · `M6h` 2 · `M6i` 12 · `M6j` 8 · `M6k` 1 · `M6l` 9 · `M6m` 2 · `M6n` 1 · `M6o` 2 ·
-`M6p` 1 · `M6q` 5 · `M6r` 2 · `M6s` 1 · `M7a` 5 · `M7b` 4 · `M7d` 7 · `M7e` 3 · `M7f` 5 ·
-`M7g` 1 · `M7h` 1. Every leg: byte-identical restore, tree clean, and a POST-RESTORE GREEN
+`M6g` 11 · `M6h` 2 · `M6i` 12 · `M6j` 9 · `M6k` 1 · `M6l` 9 · `M6m` 2 · `M6n` 1 · `M6o` 2 ·
+`M6p` 1 · `M6q` 5 · `M6r` 3 · `M6s` 2 · `M7a` 5 · `M7b` 4 · `M7d` 7 · `M7e` 3 · `M7f` 6 ·
+`M7g` 1 · `M7h` 2. Every leg: byte-identical restore, tree clean, and a POST-RESTORE GREEN
 re-run. `EXPECTED` pins each leg's documented count, so a leg silently losing pins is loud.
 
 New legs: **M7a** the bundle/attached normalisation · **M7b** the heredoc-body + resolved-payload
@@ -102,7 +102,7 @@ refused), so those plants now keep the options KNOWN while making them value-les
 | side | result | reds (`grep '^FAILED'` only) |
 |---|---|---|
 | base `c36c3e07c` | 173 passed, exit 0 | 0 |
-| tip | **293 passed**, exit 0 | 0 |
+| tip | **294 passed**, exit 0 | 0 |
 | **net-new reds** | — | **0** |
 
 Run from the worktree root with the worktree `.venv`, per-variable `POSTGRES_*` pins, the

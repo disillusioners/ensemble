@@ -607,11 +607,13 @@ _WATCH_FLAG_OPTIONS: frozenset[str] = frozenset({
 #: ``--timer-property``.
 _ARGV_RUNNER_VALUE_PREFIXES: tuple[str, ...] = ("--on-", "--timer-")
 
-#: The ``systemd-run`` options in the prefixes above that take NO value
+#: The ``systemd-run`` TIMER options (see the prefixes above) that take
+#: NO value — they are FLAGS. (The earlier name, _ARGV_RUNNER_VALUE_FLAGS,
+#: was wrong: these options take none.)
 #: (they are FLAGS). A prefix rule must not swallow the word after them:
 #: the tail analysis would anchor one word late and a dangerous tail
 #: would slip through.
-_ARGV_RUNNER_VALUE_FLAGS: frozenset[str] = frozenset({
+_SYSTEMD_RUN_TIMER_NO_VALUE: frozenset[str] = frozenset({
     "--on-timezone-change", "--on-clock-change",
 })
 
@@ -624,7 +626,7 @@ def _argv_runner_option_grammar(
         return _WATCH_VALUE_OPTIONS, _WATCH_FLAG_OPTIONS, (), frozenset()
     return (
         _SYSTEMD_RUN_VALUE_OPTIONS, _SYSTEMD_RUN_FLAG_OPTIONS,
-        _ARGV_RUNNER_VALUE_PREFIXES, _ARGV_RUNNER_VALUE_FLAGS,
+        _ARGV_RUNNER_VALUE_PREFIXES, _SYSTEMD_RUN_TIMER_NO_VALUE,
     )
 
 
@@ -1885,7 +1887,7 @@ def _pipeline_laundering_violation(
 def _systemctl_segment_violation(
     words: _Segment,
     env: dict[str, str],
-    depth: int,
+    depth: int,          # unread: kept for call-site uniformity
     require_operand: bool = False,
 ) -> str | None:
     k = _command_word_index(words, env)

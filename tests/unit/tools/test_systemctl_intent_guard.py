@@ -1,5 +1,12 @@
 """Intent-match pins for the shared systemctl/kill guard (2026-11-18 outage).
 
+SIZE RATIONALE
+==============
+255 nodes in ONE file, on purpose: the guard is a single pure module and
+its pin file is the one place a reviewer can see every shape beside every
+counter-mutation. Splitting it by family would scatter the both-direction
+selection (a DENY family and its ALLOW counterpart must be read together).
+
 WHAT THESE PINS DEFEND
 ======================
 The pre-2026-11-18 guard classified ``systemctl`` verbs correctly but tested
@@ -586,6 +593,7 @@ def test_xargs_stdin_operands_fail_closed(command):
 
 
 _RUNNER_SHAPES = [
+    # --- su / runuser command strings ---------------------------------
     "su -c 'systemctl restart ensemble-main'",
     "su root -c 'systemctl restart ensemble-main'",
     'runuser -u root -c "systemctl restart ensemble-main"',
@@ -952,3 +960,23 @@ def test_mutating_verb_set_is_one_source_of_truth(command):
     """The shape regex is DERIVED from the tail set: no verb may be weaker
     in a piped shape than in the direct form."""
     assert guard.systemctl_violation(command) is not None
+
+def test_fail_closed_shapes_return_the_exact_token():
+    """T15: the fail-closed legs are pinned to their EXACT refusal token, not
+    merely to "some refusal" -- a bare ``is not None`` cannot tell a
+    fail-closed refusal apart from a structural one."""
+    unit = "ensemble-main"
+    for command in (
+        "systemd-run --not-an-option systemctl status " + unit,
+        "watch --not-an-option systemctl status " + unit,
+        "xargs --not-an-option bash -c 'systemctl status " + unit + "'",
+        "ssh --not-an-option host 'systemctl status " + unit + "'",
+        "systemctl cat stop '*'",
+        'systemctl cat stop "$AMBIENT_UNIT"',
+    ):
+        assert guard.systemctl_violation(command) == guard.UNRESOLVED_UNIT_TOKEN, command
+    # the structural refusals keep their own token
+    assert guard.systemctl_violation("systemctl -P cat stop " + unit) == unit
+    assert guard.systemctl_violation(
+        "echo 'systemctl restart " + unit + "' | bash"
+    ) == guard.LAUNDERED_TOKEN

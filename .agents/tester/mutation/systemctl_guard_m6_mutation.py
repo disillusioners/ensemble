@@ -71,7 +71,7 @@ M6G_NEW = """    if False and saw_pipe:
 # --on-* / --timer-* option a KNOWN FLAG (skip 1), so the tail analysis
 # anchors on the option's VALUE - the bypass the rule prevents.
 M6H_OLD = """        _SYSTEMD_RUN_VALUE_OPTIONS, _SYSTEMD_RUN_FLAG_OPTIONS,
-        _ARGV_RUNNER_VALUE_PREFIXES, _ARGV_RUNNER_VALUE_FLAGS,
+        _ARGV_RUNNER_VALUE_PREFIXES, _SYSTEMD_RUN_TIMER_NO_VALUE,
     )
 """
 M6H_NEW = """        _SYSTEMD_RUN_VALUE_OPTIONS, _SYSTEMD_RUN_FLAG_OPTIONS,
@@ -331,10 +331,10 @@ LEGS = {
 #: The documented red count of every leg. A run that does not match
 #: EXACTLY is a failure - a leg silently losing pins must be loud.
 EXPECTED = {
-    "M6g": 11, "M6h": 2, "M6i": 12, "M6j": 8, "M6k": 1, "M6l": 9,
-    "M6m": 2, "M6n": 1, "M6o": 2, "M6p": 1, "M6q": 5, "M6r": 2,
-    "M6s": 1, "M7a": 5, "M7b": 4, "M7d": 7, "M7e": 3, "M7f": 5,
-    "M7g": 1, "M7h": 1,
+    "M6g": 11, "M6h": 2, "M6i": 12, "M6j": 9, "M6k": 1, "M6l": 9,
+    "M6m": 2, "M6n": 1, "M6o": 2, "M6p": 1, "M6q": 5, "M6r": 3,
+    "M6s": 2, "M7a": 5, "M7b": 4, "M7d": 7, "M7e": 3, "M7f": 6,
+    "M7g": 1, "M7h": 2,
 }
 
 
@@ -343,6 +343,7 @@ def sha256(data):
 
 
 def git_clean(worktree, path):
+    """-> (is_clean, output); a FAILED git reads as NOT clean."""
     proc = subprocess.run(
         ["git", "-C", worktree, "status", "--porcelain",
          "--untracked-files=all", "--", path],
@@ -353,6 +354,7 @@ def git_clean(worktree, path):
 
 
 def child_env():
+    """-> a copy of os.environ with the ambient DB vars removed."""
     """The child pytest environment, with the ambient DB vars scrubbed."""
     env = dict(os.environ)
     for key in _SCRUB_ENV:
@@ -361,6 +363,7 @@ def child_env():
 
 
 def run_pins(worktree, python, test_file):
+    """Run the scoped pin file; -> (returncode, sorted FAILED lines)."""
     proc = subprocess.run(
         [python, "-m", "pytest", "-q", "-p", "no:randomly", "--timeout=120",
          "--tb=no", test_file],
