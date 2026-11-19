@@ -10,34 +10,48 @@
   `.agents/tester/RESULTS/2026-11-19-systemctl-guard-closing-verification.md`
   (sha256 `41d3fb5e8c7337e63812a725f80265f03217356e20240377233b3a80b54fc844`).
 
-## 1. THE MEASURED DELTA (acceptance 9) — probed base vs tip, not asserted
+## 1. THE MEASURED DELTA (acceptance 9) - the tester's 102-shape corpus, not asserted
 
-**23 shapes ALLOW → REFUSE** (the closed bypasses):
+The tester re-measured the verdict of 102 shapes at three points: the BASE
+(`c36c3e07c`), the PRE-REVISION TIP (`4d2c54487`) and the re-gate tip.
+
+| window | ALLOW -> REFUSE | REFUSE -> ALLOW | identical |
+|---|---|---|---|
+| pre-revision tip `4d2c54487` -> tip | **25** | **7** | 70 |
+| base `c36c3e07c` -> tip | **45** | **2** | - |
+
+**NO shape changed its verdict that is in NEITHER list below** - the
+tester's corpus found none. That is the strongest statement in the evidence
+set: every behaviour change of this revision is enumerated.
+
+### The 25 ALLOW -> REFUSE (the closed bypasses)
 
 | shape | the finding |
 |---|---|
-| `sudo --role <V> systemctl restart <unit>` · `sudo -r <V> …` · `sudo -t <V> …` | F-01/F-05 (NOPASSWD-exploitable) |
-| `env -iS '<mutating>'` · `env -iS<mutating>` | AG-1 (bundled short options) |
-| `sudo env -S '…'` · `nohup env -S '…'` · `timeout 5 env -S '…'` · `if env -S '…'; then …` | AG-1 (env behind wrappers/keywords) |
+| `sudo --role <V> systemctl restart <unit>` - `sudo -r <V> ...` - `sudo --type <V> ...` (`-t`) | F-01/F-05 (NOPASSWD-exploitable) |
+| `doas --role <V> systemctl restart <unit>` | F-05 (the `doas` branch shares the sudo table) |
+| `env -iS '<mutating>'` - `env -iS<mutating>` | AG-1 (bundled short options) |
+| `sudo env -S '...'` - `nohup env -S '...'` - `timeout 5 env -S '...'` - `if env -S '...'; then ...` | AG-1 (env behind wrappers/keywords) |
 | `systemctl -aP cat stop <unit>` | AG-1/CO-1 (a bundle ending in a value flag) |
-| `cat <<EOF \| cat \| bash` · `\| tee /tmp/x \| bash` · `\| cat \| at now` (mutating body) | AG-2 (heredoc bodies through a pipe) |
-| `xargs systemd-run systemctl restart <unit>` · `xargs su -c '…'` · `xargs xargs …` | AG-3 (the xargs first-word gate) |
-| `echo 'systemctl clean <unit>' \| bash` · `reenable` · `thaw` | AG-6 (verbs that diverged between the two tables) |
+| `cat <<EOF \| cat \| bash` - `\| tee /tmp/x \| bash` - `\| cat \| at now` (mutating body) | AG-2 (heredoc bodies through a pipe) |
+| `ssh host <<EOF` (mutating body) | N-03 (a bare ssh host executes the body it is fed) |
+| `xargs systemd-run systemctl restart <unit>` - `xargs su -c '...'` - `xargs ./scripts/stop-...sh` - `xargs xargs ...` | AG-3 (the xargs first-word gate) |
+| `echo 'systemctl clean <unit>' \| bash` - `reenable` - `thaw` | AG-6 (verbs that diverged between the two tables) |
 | `stdbuf -e L systemctl restart <unit>` | T7 (stdbuf's `-e` missing from a shared tuple) |
 | `A=ensemble; echo "systemctl restart ${A}-main" \| cat \| bash` | Deferred#3 (env substitution through a multi-stage pipe) |
-| `systemctl cat stop '*'` · `systemctl cat stop "$AMBIENT_UNIT"` | AG-6 (fail-close behind a tail mutating verb) |
+| `systemctl cat stop '*'` - `systemctl cat stop "$AMBIENT_UNIT"` | AG-6 (fail-close behind a tail mutating verb) |
 
-**1 shape REFUSE → ALLOW** (an over-block removed):
+### The 7 REFUSE -> ALLOW (the over-block removals - behaviour changes too)
 
 | shape | the finding |
 |---|---|
 | `systemctl --legend yes status <unit>` | AG-4(i)/T8 (`--legend` takes a MANDATORY value on systemd 255) |
+| `systemctl show -aP Restart <unit>` | AG-1/AG-4(i) (the `-aP` bundle consumed the property name; the property-name class stays dropped) |
+| `xargs --max-args=1 echo hi` - `xargs -I{} echo {}` - `xargs -n1 echo` | AG-4(ii)/CO-1/T6 (the `=`/attached forms were misread as unknown and refused) |
+| `watch -n1 echo hi` - `systemd-run -Hhost true` | AG-4(ii)/CO-1/T6 (the attached short forms were misread as unknown and refused) |
 
-**No verdict change, verified no-regression** (they were ALLOWED at base and stay ALLOWED —
-the over-block class AG-4(ii)/CO-1/T6 was introduced by wave 4's fail-closed and is now
-correctly handled WITHOUT re-opening it): `watch -n1 systemctl status <unit>`,
-`xargs -I{} systemctl status <unit>`, `xargs --max-args=1 systemctl status <unit>`,
-`systemd-run -Hhost true`, `env -iS 'systemctl status <unit>'`, `stdbuf -i0 systemctl status <unit>`.
+Net vs BASE the over-block removals cancel some of the denials (45 / 2);
+the pre-revision-tip -> tip window is the honest measure of THIS revision.
 
 ## 2. WHAT LANDED
 
@@ -64,7 +78,11 @@ tuple lifted to one module frozenset (both sites), with the optional-value `--*-
 family verified and filed as non-consuming flags. **A9/T7** the four wrapper-arg tools split
 into per-tool grammars; stdbuf's `-i/-o/-e` added. **A10/Deferred#3** CLOSED — the whole-text
 rule also tests the RESOLVED segment payloads. **A11** ssh carries a boolean set + a value
-set (both from the host's usage line) and fails closed on an unknown option. **A12/T24**
+set (both from the host's usage line) and fails closed on an unknown option. **N-03** a heredoc body delivered to a BARE `ssh <host>` (no remote
+command) is EXECUTED remotely - ssh forwards the client's stdin to a remote
+login shell - so the stdin-execution predicate now covers ssh exactly as it
+covers the schedulers. With a remote command the body is that command's
+stdin (DATA) and the remote-command path is unchanged. **A12/T24**
 `_pipeline_laundering_violation`'s `code`/`saw_pipe` params are REQUIRED — no default to the
 weaker guard.
 
@@ -73,7 +91,7 @@ weaker guard.
 Counts base → this tip: DENY — pipe 6→17, xargs-stdin 4→4, runner 10→61, scheduler 3→5,
 systemctl option-anchor 0→10, **read-only-tail 0→3 (NEW family — the ISOLATING pin B1/AG-5/F-02)**,
 **mutating-verb 0→12 (NEW family)**. ALLOW — `_LAUNDER_ALLOW` 18→40, `_READONLY_COMMANDS`
-15→23. The file is **255 nodes** (base 134); the pack **294** (base 173).
+15→23. The file is **257 nodes** (base 134); the pack **296** (base 173).
 
 B1's isolating pin is `systemctl cat stop <unit>` (and `help`/`status` spellings): a
 read-only word in VERB position with **no option at all**, so the option-arity fix cannot
@@ -81,11 +99,15 @@ cover it — neutralising the non-terminal parse ALONE reddens it (M7f → 6 red
 per-option ALLOW pins (`--boot-loader-entry Restart`, `--image-policy Restart`,
 `--boot-loader-menu Restart`) are added beside `-P`'s.
 
-## 4. THE MUTATION LEGS — 20 legs, 79 reds, EXPECTED-count equality
+## 4. THE MUTATION LEGS - 21 legs, 89 reds, EXPECTED-count equality
 
-`M6g` 11 · `M6h` 2 · `M6i` 12 · `M6j` 9 · `M6k` 1 · `M6l` 9 · `M6m` 2 · `M6n` 1 · `M6o` 2 ·
-`M6p` 1 · `M6q` 5 · `M6r` 3 · `M6s` 2 · `M7a` 5 · `M7b` 4 · `M7d` 7 · `M7e` 3 · `M7f` 6 ·
-`M7g` 1 · `M7h` 2. Every leg: byte-identical restore, tree clean, and a POST-RESTORE GREEN
+`M6g` 11 - `M6h` 2 - `M6i` 12 - `M6j` 9 - `M6k` 1 - `M6l` 9 - `M6m` 2 - `M6n` 1 - `M6o` 2 -
+`M6p` 1 - `M6q` 5 - `M6r` 3 - `M6s` 2 - `M7a` 5 - `M7b` 4 - `M7d` 7 - `M7e` 3 - `M7f` 6 -
+`M7g` 1 - `M7h` 2 - `M7i` 1. **The total (89) is COMPUTED from the harness's own
+`EXPECTED` dict** (88 for the 20 legs the re-gate reproduced + 1 for M7i), not
+hand-written - the two documents cannot drift. Every leg: byte-identical
+restore, tree clean, and a POST-RESTORE GREEN re-run; `EXPECTED` pins each
+leg's documented count, so a leg silently losing pins is loud.
 re-run. `EXPECTED` pins each leg's documented count, so a leg silently losing pins is loud.
 
 New legs: **M7a** the bundle/attached normalisation · **M7b** the heredoc-body + resolved-payload
@@ -102,7 +124,7 @@ refused), so those plants now keep the options KNOWN while making them value-les
 | side | result | reds (`grep '^FAILED'` only) |
 |---|---|---|
 | base `c36c3e07c` | 173 passed, exit 0 | 0 |
-| tip | **294 passed**, exit 0 | 0 |
+| tip | **296 passed**, exit 0 | 0 |
 | **net-new reds** | — | **0** |
 
 Run from the worktree root with the worktree `.venv`, per-variable `POSTGRES_*` pins, the
