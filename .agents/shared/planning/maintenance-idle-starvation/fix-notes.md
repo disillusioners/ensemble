@@ -141,10 +141,22 @@ semantics were touched.
 | `292f5f13c` | `fix(skill-evolution): atomic CAS resolve for the sanctioned A/B path` |
 | `c5a4b95c0` | `fix(maintenance): starvation composite — per-job idle policy, persisted staleness guarantee, skip telemetry` |
 | `a517779bd` | `test(maintenance): make the idle-policy mutation red on the behavioural assertion` |
+| `b4a4bb89a` | `fix(maintenance): gate the staleness escape hatch on the last ATTEMPT — a failing job must not be force-run every tick` |
 
 Parts (A), (B) and (D) share one file and are interdependent (the
 gate consults the staleness override), so they landed as ONE commit
 rather than as three artificially-split ones.
+
+### The ATTEMPT clock (`b4a4bb89a`)
+
+The staleness escape hatch references the last ATTEMPT (in memory)
+first, then the persisted last-success, then `last_run`, then the
+process-start anchor. **Why:** a job that keeps ATTEMPTING (even
+failing) is not starved — without the attempt clock, a persistently
+failing reclaim job would become "stale forever" and the guarantee
+would force it on EVERY 15-minute tick on a busy system (a real
+operational risk this composite must not introduce). Pinned by
+`test_a_persistently_failing_job_is_not_force_run_every_tick`.
 
 ## Verification
 
@@ -160,7 +172,7 @@ env POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 POSTGRES_DB=ensemble_dev \
 
 | batch | result |
 |-------|--------|
-| the two new packs | **33 passed** (24 + 9) |
+| the two new packs | **34 passed** (25 + 9) |
 | the maintenance surface (`tests/test_maintenance.py`, `tests/unit/test_anomaly_retention.py`, `tests/unit/services/test_maintenance_run_lock_and_capture.py`, `tests/unit/test_checkpoint_retention_config_probes.py`, `tests/unit/services/test_malloc_tuner.py`, `tests/integration/test_maintenance_checkpoint_cleanup_api.py`, `tests/integration/test_vacuum_maintenance_job_no_full.py`) | **134 passed**, 47 deselected |
 | the skill-evolution surface (9 files, incl. `tests/repositories/test_skill_repository.py`, `tests/unit/test_skill_evolution_lane_gate.py`, `tests/unit/test_composite_scoring.py`, `tests/unit/test_skill_stale_deactivation.py`, `tests/unit/routers/test_skills.py`, `tests/tools/test_skill_evolution_tools.py`) | **427 passed**, 1 skipped |
 
@@ -182,22 +194,38 @@ Mutation applied to `daemon/services/maintenance.py`:
 FAILED tests/unit/test_maintenance_idle_starvation.py::TestIdlePolicyTiering::test_un_gated_job_runs_even_when_the_system_is_busy
     assert execute_fn.await_count == 1
 E   AssertionError: assert 0 == 1
+    +  where 0 = <AsyncMock id='132335044951552'>.await_count
 ------------------------------ Captured log call -------------------------------
-WARNING  daemon.services.maintenance:maintenance.py:548 Maintenance job 'skill_orphan_sweep' skipped (system not idle): consecutive_skips=1 last_success_ts=never
-1 failed, 1 warning in 0.54s
+WARNING  daemon.services.maintenance:maintenance.py:569 Maintenance job 'skill_orphan_sweep' skipped (system not idle): consecutive_skips=1 last_success_ts=never
+
+FAILED tests/unit/test_maintenance_idle_starvation.py::TestIdlePolicyTiering::test_bounded_jobs_are_un_gated
+E   AssertionError: assert {'anomaly_ret...c_sweep', ...} == {'anomaly_ret...c_sweep', ...}
+E     Extra items in the right set:
+E     'skill_orphan_sweep'
+2 failed, 1 warning in 0.63s
 ```
 
-Restore (byte-identical, verified by sha256 of the whole file):
+Restore (byte-identical, verified by sha256 of the whole file; the
+restore was done from a FILE COPY, not `git checkout --` — see the
+note below):
 
 | | sha256 of `daemon/services/maintenance.py` |
 |---|---|
-| before the mutation | `d0f9ef5f8baad434f269137b14babbcc536e8afc5f293aba25858ffc2ab58893` |
-| after the mutation | `3343eec5f431a9c6953ef457080af986f337d577d50e2297f2a7d3f9b2abc02f` |
-| after the restore | `d0f9ef5f8baad434f269137b14babbcc536e8afc5f293aba25858ffc2ab58893` — **IDENTICAL to before** |
+| before the mutation | `80598b4c4cbfc4b5c8efa24b41bc3b7773bbde79b8de73b0d56906dee8979c50` |
+| after the mutation | `637e6997d097af6eb64b17ad5032129a1ccbcb90a092eea0a1b2f0ca8ba1515b` |
+| after the restore | `80598b4c4cbfc4b5c8efa24b41bc3b7773bbde79b8de73b0d56906dee8979c50` — **IDENTICAL to before** |
 
 A second mutation (the static pin) also reds:
 `test_bounded_jobs_are_un_gated` →
 `Extra items in the right set: 'skill_orphan_sweep'`.
+
+> **Process note (worth carrying forward):** `git checkout -- <file>`
+> restores the file to HEAD and therefore discards **ALL** uncommitted
+> work in it — during this lane it silently reverted an uncommitted
+> refinement (the attempt clock) that had nothing to do with the
+> mutation. The correct restore for a mutation is a saved COPY of the
+> pre-mutation bytes, or a reverse edit; `git checkout --` is only
+> safe on a file that is otherwise clean.
 
 ## Deliberately NOT done
 
