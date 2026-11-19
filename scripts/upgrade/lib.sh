@@ -234,6 +234,15 @@ export HANDBACK_VERIFY_BUDGET_S
 HANDBACK_VERIFY_FLOOR_S="$(_numeric_knob HANDBACK_VERIFY_FLOOR_S "${HANDBACK_VERIFY_FLOOR_S:-}" 180)"
 HANDBACK_VERIFY_GRACE_S="$(_numeric_knob HANDBACK_VERIFY_GRACE_S "${HANDBACK_VERIFY_GRACE_S:-}" 60)"
 HANDBACK_TAIL_RESERVE_S="$(_numeric_knob HANDBACK_TAIL_RESERVE_S "${HANDBACK_TAIL_RESERVE_S:-}" 120)"
+# D6-v (self-service-promote Wave 2, 2026-11-19) — MEASURED-CEILING cap
+# for the verify budget's journal-sample mechanism. MECHANISM ONLY: the
+# DEFAULT ceiling stays HANDBACK_VERIFY_BUDGET_S=300; when the journal
+# history carries a serving_green_commit/commit row with a
+# verify_elapsed_s sample, the ceiling becomes
+# min(clamp(sample, FLOOR, MEASURED_CEILING), 780) — the inflation
+# itself waits for the wedge commission (design §7: "no budget
+# inflation"; §1.2: no in-ceremony budget covers a 9.5–11 min boot).
+HANDBACK_VERIFY_MEASURED_CEILING_S="$(_numeric_knob HANDBACK_VERIFY_MEASURED_CEILING_S "${HANDBACK_VERIFY_MEASURED_CEILING_S:-}" 600)"
 SYSTEMCTL_PROBE_BUDGET_S="$(_numeric_knob SYSTEMCTL_PROBE_BUDGET_S "${SYSTEMCTL_PROBE_BUDGET_S:-}" 5)"  # reset-failed / is-active probes
 SCOPE_START_BUDGET_S="$(_numeric_knob SCOPE_START_BUDGET_S "${SCOPE_START_BUDGET_S:-}" 10)"      # scope-arm/opt-in launcher start
 # D1 (promote-preflight-hang) — per-tree cap for the stage manifest checksum
@@ -5680,6 +5689,98 @@ _handback_verify_reason_text() {
     fi
     return 0
 }
+
+# ── HANDBACK VERIFY-ELAPSED channel (D6-v mechanism, self-service-promote ──
+# Wave 2, 2026-11-19) — the SAME $$-keyed out-of-band shape as the reason
+# channel above (the verifier runs inside $() — `newpid="$(…)"` — so a bare
+# variable dies at the subshell boundary). On SUCCESS the verifier writes
+# its own elapsed boot-to-green latency here; the caller reads it into
+# HANDBACK_VERIFY_ELAPSED_S (global, same-shell) and promote.sh's commit
+# row stamps `verify_elapsed_s=<n>` — the journal sample the D6-v ceiling
+# reader below consumes. Design §2.1 option (v): MECHANISM ONLY — no
+# inflation; with no sample the ceiling stays HANDBACK_VERIFY_BUDGET_S=300.
+HANDBACK_VERIFY_ELAPSED_S=""
+HANDBACK_VERIFY_ELAPSED_FILE="${TMPDIR:-/tmp}/ensemble-hbk-velapsed.$$"
+_handback_verify_elapsed_write() {
+    printf '%s' "${1:-}" > "${HANDBACK_VERIFY_ELAPSED_FILE:-/tmp/ensemble-hbk-velapsed.$$}" 2>/dev/null || true
+}
+_handback_verify_elapsed_clear() {
+    rm -f "${HANDBACK_VERIFY_ELAPSED_FILE:-/tmp/ensemble-hbk-velapsed.$$}" 2>/dev/null || true
+}
+_handback_verify_elapsed_text() {
+    local _f="${HANDBACK_VERIFY_ELAPSED_FILE:-/tmp/ensemble-hbk-velapsed.$$}"
+    if [ -s "$_f" ]; then head -c 16 "$_f" 2>/dev/null; fi
+    return 0
+}
+
+# _handback_unit_state <unit> — the D6-(ii) BOUNDED STATE PROBE: ONE
+# `systemctl show <unit> -p ActiveState -p SubState -p MainPID` call
+# (assignment output — each field self-names, so one probe yields all
+# three). Replaces the verifier's bare unbounded MainPID poll AND
+# provides the PENDING/FAILED discriminator the rc alone cannot express
+# (an is-active rc=3 is "not active" AND "failed"'s neighbour — the
+# STATE STRING is the only honest key; design §2.1: "keyed on the state
+# string, never the rc").
+# Sets the globals _HB_STATE_ACTIVE / _HB_STATE_SUB / _HB_STATE_MAINPID
+# / _HB_STATE_RC. rc 0 = systemctl ANSWERED (a field may still be empty
+# — the CALLER classifies); 124 = bounded-wait timeout (the only
+# genuine timeout; _run_bounded collapses 137|143 → 124); any other
+# nonzero = probe tool failure (classify UNKNOWN — never evidence).
+# stdout of the probe itself is consumed here; nothing leaks to the
+# caller's captured output.
+_handback_unit_state() {
+    local unit="$1" out=""
+    _HB_STATE_ACTIVE=""; _HB_STATE_SUB=""; _HB_STATE_MAINPID=""; _HB_STATE_RC=""
+    out="$(_run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" show "$unit" \
+            -p ActiveState -p SubState -p MainPID 2>/dev/null)"
+    _HB_STATE_RC=$?
+    _HB_STATE_ACTIVE="$(printf '%s\n' "$out" | sed -n 's/^ActiveState=//p' | head -1)"
+    _HB_STATE_SUB="$(printf '%s\n' "$out" | sed -n 's/^SubState=//p' | head -1)"
+    _HB_STATE_MAINPID="$(printf '%s\n' "$out" | sed -n 's/^MainPID=//p' | head -1)"
+    return 0
+}
+
+# _handback_measured_verify_ceiling_s — the D6-v ceiling reader
+# (MECHANISM ONLY). Scans the journal history[] for the MOST RECENT
+# `serving_green_commit` row — or the executor's own `commit` row —
+# carrying the additive `verify_elapsed_s=<n>` sample (writers: the
+# executor's commit row, promote.sh 8a; future writers may join), takes
+# that ONE most-recent sample, and prints
+#   min( clamp(sample, HANDBACK_VERIFY_FLOOR_S, MEASURED_CEILING), 780 )
+# The 780 cap = EXECUTOR_STALENESS_WINDOW_S (900,
+# daemon/services/upgrade_journal_sweep.py:117) − 120: the verify may
+# never extend past the sweep's owner-staleness window (design §2.1
+# interaction constraint). Returns 1 (no output) when no sample exists
+# — the caller then stays at the HANDBACK_VERIFY_BUDGET_S default (NO
+# inflation). Deliberately does NOT read anything but the journal: the
+# sample is only ever a JOURNAL-recorded observation.
+_handback_measured_verify_ceiling_s() {
+    local json hist entry sample="" tok v
+    json="$(journal_read 2>/dev/null)" || return 1
+    hist="$(_json_sub "$json" "history" 2>/dev/null)" || return 1
+    case "$hist" in ''|null|'[]') return 1 ;; esac
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        case "$entry" in
+            *"\"event\":\"serving_green_commit\""*|*"\"event\": \"serving_green_commit\""*|\
+            *"\"event\":\"commit\""*|*"\"event\": \"commit\""*) ;;
+            *) continue ;;
+        esac
+        tok="$(printf '%s' "$entry" | grep -o 'verify_elapsed_s=[0-9][0-9]*' | head -1 | cut -d= -f2)"
+        [ -n "$tok" ] && sample="$tok"
+    done < <(_journal_history_entries "$hist")
+    [ -n "$sample" ] || return 1
+    case "$sample" in *[!0-9]*) return 1 ;; esac
+    v="$sample"
+    [ "$v" -lt "$HANDBACK_VERIFY_FLOOR_S" ] && v="$HANDBACK_VERIFY_FLOOR_S"
+    [ "$v" -gt "$HANDBACK_VERIFY_MEASURED_CEILING_S" ] && v="$HANDBACK_VERIFY_MEASURED_CEILING_S"
+    # 780 = EXECUTOR_STALENESS_WINDOW_S(900) − 120 (defensive: subsumed
+    # by the 600 ceiling while it stands, but pins the staleness bound
+    # independently of the ceiling knob).
+    [ "$v" -gt 780 ] && v=780
+    printf '%s' "$v"
+    return 0
+}
 _supervision_launchd_bootstrap() {
     local plist="${1:-}" domain
     [ -n "$plist" ] || return 1
@@ -6278,16 +6379,35 @@ _supervision_unit_serving() {
     local unit="$1" prestop="$2"
     local deadline now mp entry_remaining effective grace total
     local clock_known=0 floor_band=0 budget_source extended=0 progress=0
+    local verify_ceiling hb_t0 hb_elapsed=0 hb_last_word="unknown" hb_last_class="UNKNOWN"
     entry_remaining=0
     if [ -n "${PROMOTE_CEREMONY_DEADLINE_EPOCH:-}" ] \
        && case "${PROMOTE_CEREMONY_DEADLINE_EPOCH:-}" in *[!0-9]*) false ;; *) true ;; esac; then
         clock_known=1
         entry_remaining="$(_effective_ceremony_remaining_s "$PROMOTE_CEREMONY_DEADLINE_EPOCH")"
     fi
+    # D6-v (self-service-promote Wave 2) — the MEASURED-CEILING mechanism
+    # (MECHANISM ONLY, no inflation): with a journal sample the ceiling
+    # may follow the last observed boot-to-green latency; with NO sample
+    # the ceiling is exactly HANDBACK_VERIFY_BUDGET_S (the default —
+    # unchanged). The measured value can only RAISE the ceiling, never
+    # shrink it (monotone-safe, the FLOOR's own shape: a fast last boot
+    # must not cut the next boot's wait). Clamp [FLOOR,
+    # HANDBACK_VERIFY_MEASURED_CEILING_S=600] and hard-cap 780 =
+    # EXECUTOR_STALENESS_WINDOW_S(900) − 120 (never extend past the
+    # sweep's owner-staleness window — §2.1 interaction constraint).
+    # The ceremony clock clamp below still applies ON TOP (the verify
+    # never lengthens past PROMOTE_TOTAL_DEADLINE_S).
+    verify_ceiling="$HANDBACK_VERIFY_BUDGET_S"
+    local _hb_measured=""
+    _hb_measured="$(_handback_measured_verify_ceiling_s 2>/dev/null)" || _hb_measured=""
+    if [ -n "$_hb_measured" ] && [ "$_hb_measured" -gt "$verify_ceiling" ]; then
+        verify_ceiling="$_hb_measured"
+    fi
     if [ "$clock_known" = "1" ]; then
         effective=$(( entry_remaining - HANDBACK_TAIL_RESERVE_S ))
         [ "$effective" -lt "$HANDBACK_VERIFY_FLOOR_S" ] && effective="$HANDBACK_VERIFY_FLOOR_S"
-        [ "$effective" -gt "$HANDBACK_VERIFY_BUDGET_S" ] && effective="$HANDBACK_VERIFY_BUDGET_S"
+        [ "$effective" -gt "$verify_ceiling" ] && effective="$verify_ceiling"
         # grace (AM-P1-5 ruled form): min(GRACE, max(0, remaining − effective))
         grace=$(( entry_remaining - effective ))
         [ "$grace" -lt 0 ] && grace=0
@@ -6303,10 +6423,15 @@ _supervision_unit_serving() {
             budget_source="ceremony-clamped"
         fi
     else
-        effective="$HANDBACK_VERIFY_BUDGET_S"
+        effective="$verify_ceiling"
         grace="$HANDBACK_VERIFY_GRACE_S"
         budget_source="handback-ceiling(no-ceremony-clock)"
     fi
+    # D6-v: surface the measured sample in the budget line's source when
+    # it raised the ceiling (the L2/L8a source strings stay byte-identical
+    # when NO sample exists — the no-inflation default).
+    [ -n "$_hb_measured" ] && [ "$_hb_measured" -gt "$HANDBACK_VERIFY_BUDGET_S" ] \
+        && budget_source="${budget_source}+measured(${_hb_measured}s)"
     total=$(( effective + grace ))
     deadline=$(( $(_now_epoch) + effective ))
     # Truthful budget line (T-P1-8): names the EFFECTIVE budget, its
@@ -6315,18 +6440,62 @@ _supervision_unit_serving() {
     # (`newpid="$(_supervision_unit_serving ...)"`) — the pid must be the
     # ONLY thing on stdout (_warn's stderr shape, INFO semantics).
     printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "hand-back verify: budget effective=${effective}s source=${budget_source} grace=${grace}s total=${total}s$( [ "$clock_known" = "1" ] && printf ' ceremony-remaining=%ss' "$entry_remaining" ) (knobs: HANDBACK_VERIFY_BUDGET_S=${HANDBACK_VERIFY_BUDGET_S} FLOOR=${HANDBACK_VERIFY_FLOOR_S} TAIL=${HANDBACK_TAIL_RESERVE_S} GRACE=${HANDBACK_VERIFY_GRACE_S})" >&2 2>/dev/null
+    # ── D6-(i)/(ii) PENDING state machine (self-service-promote Wave 2,
+    # 2026-11-19) ─────────────────────────────────────────────────────────
+    # The poll rides the bounded 3-field state probe (_handback_unit_state)
+    # — replacing the bare unbounded MainPID poll — and classifies EVERY
+    # observation before acting (design §2.1 table; KEYED ON THE STATE
+    # STRING, NEVER THE RC):
+    #   failed                       → TERMINAL FAILED (halt now; a genuine
+    #                                 `failed` is NEVER softened, AC-D6-3)
+    #   activating/deactivating/
+    #   reloading                    → PENDING (not terminal; keep polling)
+    #   active                       → the serving conjunct decides (the
+    #                                 pre-existing logic below)
+    #   anything else / probe failed → UNKNOWN (never success, never
+    #                                 failure; the deadline owns the verdict)
+    # The budget line above bounds the whole machine; the terminal
+    # budget-expiry verdict carries the DISTINCT `handback-budget-exhausted`
+    # token naming the LAST observed state + elapsed (AC-D6-4/-5).
+    hb_t0="$(_now_epoch)"
     while :; do
         lock_heartbeat
-        mp="$("$SYSTEMCTL_BIN" show "$unit" -p MainPID --value 2>/dev/null || true)"
+        _handback_unit_state "$unit"
+        case "${_HB_STATE_ACTIVE:-}" in
+            failed)
+                hb_elapsed=$(( $(_now_epoch) - hb_t0 ))
+                _handback_verify_reason_write "unit-state-failed: unit $unit entered ActiveState=failed (SubState=${_HB_STATE_SUB:-unknown} MainPID=${_HB_STATE_MAINPID:-0}) ${hb_elapsed}s into the hand-back verify — systemd's terminal failure state (AC-D6-3: immediate FAILED, never softened, never PENDING)"
+                _hb_verify_diag "hand-back verify: unit $unit FAILED (ActiveState=failed, SubState=${_HB_STATE_SUB:-unknown}, MainPID=${_HB_STATE_MAINPID:-0}) at ${hb_elapsed}s into the verify — a terminal state, NOT PENDING and NOT budget exhaustion; halting for the caller's B4 policy"
+                return 1
+                ;;
+            activating|deactivating|reloading)
+                hb_last_word="${_HB_STATE_ACTIVE}"
+                hb_last_class="PENDING"
+                ;;
+            active)
+                hb_last_word="active"
+                ;;
+            *)
+                # probe unavailable (rc≠0/124), empty field, or an
+                # unexpected state word — UNKNOWN by the §2.1 table.
+                hb_last_word="${_HB_STATE_ACTIVE:-unprobeable}"
+                hb_last_class="UNKNOWN"
+                ;;
+        esac
+        mp="${_HB_STATE_MAINPID:-}"
         progress=0
         case "$mp" in
-            ''|0) ;;  # not up yet — keep polling
+            ''|0) ;;  # not up yet — keep polling (PENDING — §2.1: MainPID=0/port unbound is a STATE, not a verdict)
             *)
                 if [ -n "$prestop" ] && [ "$mp" = "$prestop" ]; then
                     _handback_verify_reason_write "mainpid-unchanged: unit $unit MainPID=$mp EQUALS the pre-stop pid — the old daemon never left (start no-op'd on an active unit, or the stop false-succeeded)"
                     _hb_verify_diag "hand-back verify: unit $unit MainPID=$mp EQUALS the pre-stop pid — the old daemon never left (start no-op'd on an active unit, or the stop false-succeeded); NOT success"
                     return 1
                 fi
+                # D6: a NEW MainPID with the serving conjunct unsatisfied is
+                # the §2.1 ACTIVE state — not terminal; the budget line owns
+                # the verdict.
+                hb_last_class="ACTIVE"
                 if [ -n "${PORT:-}" ] && command -v lsof >/dev/null 2>&1; then
                     if lsof -ti:"$PORT" >/dev/null 2>&1; then
                         # Port bound (necessary fast condition — it proves
@@ -6336,6 +6505,7 @@ _supervision_unit_serving() {
                             _handback_serving_probe || hsp_rc=$?
                             case "$hsp_rc" in
                                 0)
+                                    _handback_verify_elapsed_write "$(( $(_now_epoch) - hb_t0 ))"
                                     printf '%s\n' "$mp"
                                     return 0
                                     ;;
@@ -6345,6 +6515,7 @@ _supervision_unit_serving() {
                         else
                             # lsof present, curl absent: today's verdict
                             # (MainPID + port-listener), unchanged (AM-P1-1).
+                            _handback_verify_elapsed_write "$(( $(_now_epoch) - hb_t0 ))"
                             printf '%s\n' "$mp"
                             return 0
                         fi
@@ -6358,6 +6529,7 @@ _supervision_unit_serving() {
                     _handback_serving_probe || hsp_rc=$?
                     case "$hsp_rc" in
                         0)
+                            _handback_verify_elapsed_write "$(( $(_now_epoch) - hb_t0 ))"
                             printf '%s\n' "$mp"
                             return 0
                             ;;
@@ -6368,6 +6540,7 @@ _supervision_unit_serving() {
                 else
                     # PORT unset, or lsof+curl both absent: MainPID alone
                     # decides (degenerate branch, unchanged).
+                    _handback_verify_elapsed_write "$(( $(_now_epoch) - hb_t0 ))"
                     printf '%s\n' "$mp"
                     return 0
                 fi
@@ -6403,15 +6576,29 @@ _supervision_unit_serving() {
         _hb_verify_diag "hand-back verify: ceremony time exhausted — the ceremony clock had ${entry_remaining}s left (< floor ${HANDBACK_VERIFY_FLOOR_S}s + tail reserve ${HANDBACK_TAIL_RESERVE_S}s): the tail reserve was unavailable so the floor pinned the budget at ${effective}s and the grace was clamped to ${grace}s (total ${total}s ≤ remaining); unit $unit not confirmed within ${effective}s (effective hand-back budget; source ${budget_source})"
         return 1
     fi
-    _handback_verify_reason_write "verify-not-confirmed: unit $unit not confirmed (new MainPID ≠ ${prestop:-<none>} + port ${PORT:-?} serving + /livez answering) within ${effective}s (effective hand-back budget; source ${budget_source}; grace ${grace}s $( [ "$extended" = "1" ] && printf consumed || printf unused ))"
-    _hb_verify_diag "hand-back verify: unit $unit not confirmed (new MainPID ≠ ${prestop:-<none>} + port ${PORT:-?} serving + /livez answering) within ${effective}s (HANDBACK_VERIFY_BUDGET_S effective budget; grace ${grace}s $( [ "$extended" = "1" ] && printf consumed || printf unused ))"
+    # D6 (self-service-promote Wave 2): the ORDINARY budget-expiry verdict
+    # now carries the DISTINCT `handback-budget-exhausted` token naming the
+    # LAST observed state + elapsed (AC-D6-4/-5: BUDGET-EXHAUSTED is
+    # terminal — txn left OPEN by the caller's B4 policy — and its reason=
+    # is DISTINCT from every FAILED reason: unit-state-failed /
+    # livez-version-* / attribution-refused / mainpid-unchanged /
+    # unit-start-failed). The two floor-band verdicts above keep their own
+    # DISTINCT ceremony-arithmetic wording (T-P1-12, AC-D6-10 unchanged).
+    hb_elapsed=$(( $(_now_epoch) - hb_t0 ))
+    _handback_verify_reason_write "handback-budget-exhausted: unit $unit not confirmed (new MainPID ≠ ${prestop:-<none>} + port ${PORT:-?} serving + /livez answering) within ${effective}s (effective hand-back budget; source ${budget_source}; grace ${grace}s $( [ "$extended" = "1" ] && printf consumed || printf unused )) — last-state=${hb_last_word:-unknown} (${hb_last_class:-UNKNOWN}) after ${hb_elapsed}s of verify: the BUDGET expired, not a daemon-health verdict"
+    _hb_verify_diag "hand-back verify: unit $unit not confirmed (new MainPID ≠ ${prestop:-<none>} + port ${PORT:-?} serving + /livez answering) within ${effective}s (HANDBACK_VERIFY_BUDGET_S effective budget; grace ${grace}s $( [ "$extended" = "1" ] && printf consumed || printf unused )) — handback-budget-exhausted (last-state=${hb_last_word:-unknown}, elapsed=${hb_elapsed}s): the budget expired while ${hb_last_class:-UNKNOWN}; NOT a FAILED verdict"
     return 1
 }
 
 # _supervision_handback_unit <unit> <prestop_pid> <scope_heal 0|1> <logfile>
 # — the unit hand-back (P3 design items 2+3). Sequence:
-#   reset-failed → is-active preflight → unit start → verify NEW MainPID
-#   (≠ pre-stop) + port serving.
+#   reset-failed → is-active preflight (truthful journal rows, Wave 1) →
+#   D6 PRE-START TAXONOMY (PENDING/PROCEED/FAILED/UNKNOWN, keyed on the
+#   state string — self-service-promote Wave 2) → unit start (a budget
+#   overrun is NOT terminal: the verify continues — AC-D6-4) → verify
+#   NEW MainPID (≠ pre-stop) + port serving on the D6 state machine
+#   (activating ⇒ PENDING; failed ⇒ immediate terminal FAILED; budget
+#   expiry ⇒ the DISTINCT handback-budget-exhausted token).
 # NO NOHUP FALLBACK — ABSOLUTE (Amendment #1): falling back would
 # re-create the survivor lineage; service-mode Restart=/journald
 # ownership must remain INTACT through the upgrade — systemd brings up
@@ -6428,6 +6615,10 @@ _supervision_unit_serving() {
 _supervision_handback_unit() {
     local unit="$1" prestop="$2" scope_heal="$3" log="$4"
     local isact errfile first newpid outcome
+    # D6 hygiene: a stale elapsed sample from an earlier hand-back in this
+    # same shell must never reach a later commit row.
+    HANDBACK_VERIFY_ELAPSED_S=""
+    _handback_verify_elapsed_clear
     # 1. reset-failed — clear any stale failed state so neither the
     #    is-active preflight nor the start is poisoned by it
     #    (best-effort: a reset-failed failure is not itself fatal —
@@ -6473,8 +6664,10 @@ _supervision_handback_unit() {
     # "activating" / "failed" are distinguishable in the journal.
     # VERDICT UNCHANGED: this site never decides — it journals and
     # continues into the start attempt (the MainPID/port verify owns the
-    # verdict). The PENDING/ACTIVE/FAILED state machine is Wave 2's seam
-    # (D6-(i)/(ii)) and is NOT built here.
+    # verdict). The D6-(i)/(ii) PENDING state machine (self-service-
+    # promote Wave 2) now consumes the observed state word BELOW (the
+    # pre-start taxonomy) and inside the verify loop's bounded 3-field
+    # state probe; this journal site stays the rc≠124 truth-teller.
     local isact_rc=0 isact_state=""
     isact="$(_run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" is-active "$unit" 2>/dev/null)"
     isact_rc=$?
@@ -6503,6 +6696,44 @@ _supervision_handback_unit() {
     fi
     [ "$isact" = "active" ] \
         && _warn "unit $unit ALREADY ACTIVE at hand-back — a unit start on an active unit no-ops (exit 0); the MainPID/port verification decides, not the start rc"
+    # ── D6-(i)/(ii) PRE-START TAXONOMY (self-service-promote Wave 2,
+    # 2026-11-19) — keyed on the OBSERVED STATE STRING (the is-active
+    # stdout word IS ActiveState), never on the rc. This block REPLACES
+    # the old "any non-green observation collapses into one verdict"
+    # shape: PENDING and PROCEED are now first-class (§2.1), a genuine
+    # `failed` is an IMMEDIATE terminal (AC-D6-3 — never softened; the
+    # reset-failed above already cleared stale failure state, so a
+    # failed reading NOW is real: the stop half of this ceremony ended
+    # in systemd's terminal failure state), and everything unclassifiable
+    # proceeds — the verify loop owns the verdict.
+    case "$isact_state" in
+        failed)
+            _handback_verify_reason_write "unit-state-failed: unit $unit is ActiveState=failed BEFORE the start (rc=$isact_rc, after reset-failed) — the stop half of the ceremony left systemd's terminal failure state; refusing to start over it (AC-D6-3: immediate FAILED, never softened)"
+            _hb_verify_diag "unit hand-back: unit $unit FAILED PRE-START (ActiveState=failed after reset-failed) — a terminal state, NOT PENDING; halting for the caller's B4 policy (NO nohup fallback — Amendment #1)"
+            return 1
+            ;;
+        activating|deactivating|reloading)
+            # PENDING — a state, not a verdict (AC-D6-3: activating ⇒
+            # PENDING, never FAILED). systemd is mid-transition; the
+            # start below joins/queues the transition.
+            _hb_verify_diag "unit hand-back: unit $unit is $isact_state PRE-START — PENDING (a state, not a verdict); issuing the start and letting the verify budget own the outcome"
+            ;;
+        inactive)
+            # PROCEED — the expected pre-start value (the unit was
+            # deliberately stopped pre-flip). No log line: this is the
+            # healthy path and the budget line below already speaks.
+            ;;
+        active)
+            # Already classified above (the ALREADY-ACTIVE no-op warning);
+            # the verify below decides. No further action.
+            ;;
+        *)
+            # rc=124 (no state word), probe failure, or an unexpected
+            # word — UNKNOWN: never success, never failure (§2.1);
+            # proceed into the start; the verify owns the verdict.
+            _hb_verify_diag "unit hand-back: pre-start state for $unit unclassifiable (rc=$isact_rc state=${isact_state:-<none>}) — UNKNOWN; proceeding into the start attempt (the verify budget owns the verdict)"
+            ;;
+    esac
     # 3. the start itself (pure command invocation — see the substring-
     #    trap guard at the top of this function).
     #
@@ -6510,11 +6741,19 @@ _supervision_handback_unit() {
     # §9-culprit site: manual-push reproduction froze POST-flip here
     # with the parent wedged in pipe_read 10+ min while the child
     # subshell spun in the unit hand-back. On timeout: journal +
-    # SIGTERM→SIGKILL the child (done by _run_bounded), then take
-    # the EXISTING failure path (return 1, caller journals halt +
-    # B4 leave-txn-open) — but now the ceremony PROGRESSES instead
-    # of hanging in pipe_read forever.
+    # SIGTERM→SIGKILL the child (done by _run_bounded).
+    #
+    # D6 / AC-D6-4 (self-service-promote Wave 2, 2026-11-19): a start
+    # exceeding the budget is NOT TERMINAL. _run_bounded kills the
+    # systemctl CLIENT, not the start job — systemd keeps processing it
+    # server-side, so the unit may still come up. The old shape treated
+    # rc=124 as a terminal halt (the "second false-negative generator",
+    # design §1.1) — the verify now CONTINUES to its own budget and, on
+    # expiry, issues the DISTINCT `handback-budget-exhausted` token.
+    # ONLY a real start failure (rc≠0 ∧ ≠124) is a terminal FAILED here
+    # (§2.1: "start rc ≠ 0 ∧ ≠ 124").
     errfile="$(mktemp /tmp/.ensemble-hb-sc.XXXXXX)"
+    local start_hung=0
     if _run_bounded "$HANDBACK_START_BUDGET_S" -- "$SYSTEMCTL_BIN" start "$unit" 2>"$errfile"; then
         :
     else
@@ -6522,16 +6761,16 @@ _supervision_handback_unit() {
         first="$(head -n1 "$errfile" 2>/dev/null || true)"
         rm -f "$errfile"
         if [ "$sbrc" = "124" ]; then
-            _warn "unit start exceeded budget — under-budget child (HANDBACK_START_BUDGET_S=${HANDBACK_START_BUDGET_S}s) was SIGTERM→SIGKILL'd; unit=$unit — halting for the caller's B4 policy (NO nohup fallback — Amendment #1)"
+            start_hung=1
+            _warn "unit start exceeded budget — under-budget child (HANDBACK_START_BUDGET_S=${HANDBACK_START_BUDGET_S}s) was SIGTERM→SIGKILL'd; unit=$unit — NOT terminal (D6 AC-D6-4: systemd keeps processing the start job); continuing into the bounded verify"
             journal_history_append subprocess_wait_timeout \
-                "site=handback_start kind=budget reason=$(printf 'child: timeout(HANDBACK_START_BUDGET_S=%s)' "$HANDBACK_START_BUDGET_S") unit=$unit rc=124 — SIGTERM→SIGKILL, halting for caller's B4 policy" \
+                "site=handback_start kind=budget reason=$(printf 'child: timeout(HANDBACK_START_BUDGET_S=%s)' "$HANDBACK_START_BUDGET_S") unit=$unit rc=124 — SIGTERM→SIGKILL of the CLIENT; NOT terminal (D6): continuing into the bounded verify (the start job continues server-side)" \
                 || _warn "subprocess_wait_timeout journal event append FAILED (best-effort)"
-            _handback_verify_reason_write "unit-start-budget-exceeded: the unit start exceeded HANDBACK_START_BUDGET_S=${HANDBACK_START_BUDGET_S}s (child SIGTERM→SIGKILL'd); unit=$unit"
         else
             _warn "unit hand-back FAILED: unit $unit did not come up (${first:-no stderr}) — NO nohup fallback (Amendment #1: a fallback re-creates the survivor lineage and abandons Restart=/journald ownership) — halting for the caller's B4 policy"
             _handback_verify_reason_write "unit-start-failed: unit $unit did not come up (rc=${sbrc}; ${first:-no stderr})"
+            return 1
         fi
-        return 1
     fi
     rm -f "$errfile"
     # 4. verify NEW MainPID (differs from pre-stop) + port serving.
@@ -6544,6 +6783,7 @@ _supervision_handback_unit() {
         # untouched (it is a different vocabulary, and it is empty on the
         # systemd path by construction — C-9).
         HANDBACK_VERIFY_REASON="$(_handback_verify_reason_text)"
+        _handback_verify_reason_clear
         _warn "unit hand-back FAILED verification for $unit — NO nohup fallback (Amendment #1) — halting for the caller's B4 policy${HANDBACK_VERIFY_REASON:+ — verify reason: $HANDBACK_VERIFY_REASON}"
         return 1
     fi
@@ -6552,6 +6792,18 @@ _supervision_handback_unit() {
     # LATER halt in the same run.
     HANDBACK_VERIFY_REASON=""
     _handback_verify_reason_clear
+    # D6-v: read the boot-to-green elapsed out-of-band into this shell —
+    # promote.sh's 8a commit row stamps it as the journal's
+    # verify_elapsed_s sample (the ceiling reader's input).
+    HANDBACK_VERIFY_ELAPSED_S="$(_handback_verify_elapsed_text)"
+    _handback_verify_elapsed_clear
+    if [ "$start_hung" = "1" ]; then
+        # The start-budget timeout was a FALSE ALARM (AC-D6-4's positive
+        # direction): the client died, the start job finished server-side,
+        # and the verify confirmed green. Say so — the journal's
+        # subprocess_wait_timeout row would otherwise read as a fault.
+        _log "unit hand-back: the earlier start-budget timeout was a false alarm — the start job completed server-side and the verify confirmed green in ${HANDBACK_VERIFY_ELAPSED_S:-?}s (new MainPID $newpid)"
+    fi
     outcome="$(supervision_map_outcome "${SUPERVISION_MODE:-}" "${SUPERVISION_STATE:-unknown}" "${SUPERVISION_UNIT:-}")"
     outcome="${outcome%%|*}"
     if [ "$scope_heal" = "1" ]; then
@@ -7786,19 +8038,22 @@ supervision_map_outcome() {
 # ControlGroup. The unit's KillMode=mixed (scripts/systemd/ensemble-
 # daemon.service:85) TERMs only the launcher (the cgroup root) — cgroup
 # siblings/nested children outlive a stop until SIGKILL escalation.
-# That is precisely why a cgroup-substring containment check is the
-# canonical lineage signal here: PPID-walking breaks on double-forked
-# daemons (the launcher's child renames itself to the daemon pid), so
-# we consult /proc/<pid>/cgroup instead.
-# Containment test note: the `case "$pcg" in *"$cg"*` match is an
-# UNANCHORED substring test; sibling or nested cgroups that share a
-# prefix with $cg (e.g. a transient scope nested under the unit's
-# slice) may over-include. Deliberately conservative — diagnostic-
-# only — the FAULT arm only fires when reality disagrees.
-# Linux+systemd Check A/B unchanged; Fix #2-i (ENSEMBLE-32 repair
-# lane, incident 2026-11-14 §3.1) adds the MISSING LAUNCHD ARM for
-# Darwin launchd-declared hosts (SUPERVISION_MODE=launchd): Check B
-# grammar on the launchd pid lineage (_df_launchd_check_b) — the old
+# That is precisely why a cgroup-containment check is the canonical
+# lineage signal here: PPID-walking breaks on double-forked daemons
+# (the launcher's child renames itself to the daemon pid), so we
+# consult /proc/<pid>/cgroup instead.
+# Containment test (B4, self-service-promote Wave 2, 2026-11-19): the
+# match is ANCHORED — the holder's cgroup must BE the unit's cgroup
+# (`"$cg"`) or a real DESCENDANT (`"$cg"/*`). The pre-B4 form was the
+# UNANCHORED substring `*"$cg"*`, which admitted any cgroup path
+# merely CONTAINING the unit's path string (a sibling scope like
+# `/system.slice/ensemble-x.service-extra`) — a guard-weakening
+# over-include. The anchored form tightens the fault arm ONLY (a
+# genuine descendant still passes; a string-cousin now faults).
+# Linux+systemd Check A/B unchanged in shape; Fix #2-i (ENSEMBLE-32
+# repair lane, incident 2026-11-14 §3.1) adds the MISSING LAUNCHD ARM
+# for Darwin launchd-declared hosts (SUPERVISION_MODE=launchd): Check
+# B grammar on the launchd pid lineage (_df_launchd_check_b) — the old
 # guard returned 0 immediately on Darwin, so a launchd host ran NO
 # dual-fight detection at all (the gap the v0.30.3 dual-supervisor
 # commit lived through). Other shapes still return 0.
@@ -7956,7 +8211,11 @@ supervision_dualfight_check() {
             pcg="${pcg##*:}"
         fi
         case "$pcg" in
-            *"$cg"*) ;;
+            # B4 anchored lineage match (see the header): the owned pid's
+            # cgroup must BE the unit's cgroup or a real descendant — the
+            # old unanchored `*"$cg"*` admitted any path merely containing
+            # the unit's string.
+            "$cg"|"$cg"/*) ;;
             *)
                 _warn "supervision DUAL_FIGHT: owned pid $pid cgroup '${pcg:-<unreadable>}' is OUTSIDE unit $unit cgroup $cg — two masters"
                 echo "__DUALFIGHT_FAULT__"
@@ -7968,19 +8227,57 @@ supervision_dualfight_check() {
     fi
     rm -f "$df_tmp" 2>/dev/null
     # Check B: the port-holder must be the unit's MainPID or inside its
-    # cgroup (report-only port lookup, stop-ensemble.sh precedent — lsof
-    # absent → skip the check, never fault on a missing tool).
-    if [ -z "$fault" ] && [ -n "${PORT:-}" ] && command -v lsof >/dev/null 2>&1; then
-        for hpid in $(lsof -ti:"$PORT" 2>/dev/null); do
+    # cgroup. CENSUS SCOPE (B4, self-service-promote Wave 2, D1 root
+    # cause (b), 2026-11-19): the LISTEN-scoped canonical shared reader
+    # `_supervision_port_holders` — NEVER a bare `lsof -ti:$PORT` (the
+    # old inline census also listed every pid holding an ESTABLISHED
+    # client connection — an uptime monitor, a transient curl — and a
+    # holder that vanished between census and cgroup read then read as
+    # a FAULT: the 05:42:58Z false-refusal class; the reader's own
+    # header at its definition documents why broad is wrong).
+    # rc handling mirrors the launchd arm (_df_launchd_check_b)
+    # verbatim: rc 1 = no listener ⇒ nothing to fight over; rc 2 =
+    # census unprobeable ⇒ SKIP the check — a failing lsof reads as
+    # PROBE-FAILED (rc 2), never as "nothing to fight over" (the old
+    # `2>/dev/null` shape discarded the rc into the for word-split and
+    # silently equated the two), and never as fault evidence
+    # (no-missing-tool-fault rule, stop-ensemble.sh precedent).
+    # ⚠ CENSUS-SCOPING RULE (design §2.2 — do not "unify" wrongly): the
+    # census stays LISTEN-scoped, NOT inode-scoped — a true second
+    # master holds a DIFFERENT inode on the same port and must stay
+    # visible to the census (F8); inode identity belongs in an
+    # admission predicate, never here.
+    if [ -z "$fault" ]; then
+        holders="$(_supervision_port_holders)"
+        case "$?" in
+            0) ;;
+            *) holders="" ;;   # rc1 no-listener / rc2 unprobeable — Check B has nothing to say
+        esac
+        for hpid in $holders; do
             [ -n "$hpid" ] || continue
             [ "$hpid" = "$main_pid" ] && continue
+            # Vanished-holder semantics (§1.3(b)): a holder that EXITED
+            # between the census and this cgroup read (/proc/<pid> GONE —
+            # the 05:42:58Z detail read cgroup='<unreadable>' for exactly
+            # this race) is not evidence — the fight is over; skip it. A
+            # LIVE holder whose cgroup is still unreadable stays
+            # FAIL-CLOSED (the fault arm below) — we cannot prove it
+            # inside the unit, and two masters must never meet a flip.
+            if [ ! -e "/proc/$hpid" ]; then
+                _warn "supervision DUAL_FIGHT: port $PORT holder $hpid vanished between census and cgroup read (exited transient — not evidence); skipping"
+                continue
+            fi
             pcg=""
             if [ -r "/proc/$hpid/cgroup" ]; then
                 pcg="$(tail -n 1 "/proc/$hpid/cgroup" 2>/dev/null)"
                 pcg="${pcg##*:}"
             fi
+            # B4 anchored lineage match (see the header): the holder's
+            # cgroup must BE the unit's cgroup or a real descendant —
+            # the old unanchored `*"$cg"*` admitted any path merely
+            # containing the unit's string.
             case "$pcg" in
-                *"$cg"*) ;;
+                "$cg"|"$cg"/*) ;;
                 *)
                     _warn "supervision DUAL_FIGHT: port $PORT holder $hpid is outside unit $unit lineage (MainPID=${main_pid:-?} cgroup='${pcg:-<unreadable>}') — two masters"
                     fault="port-holder-outside-unit-lineage"

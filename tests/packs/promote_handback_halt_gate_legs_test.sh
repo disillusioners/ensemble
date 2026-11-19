@@ -525,10 +525,19 @@ case "$sub" in
         echo "${SC_IS_ACTIVE:-inactive}"
         exit "${SC_IS_ACTIVE_RC:-0}" ;;
     show)
-        prop=""
+        prop=""; props=""
         while [ $# -gt 0 ]; do
-            case "$1" in -p) prop="$2"; shift 2 ;; --value) shift ;; *) shift ;; esac
+            case "$1" in -p) prop="$2"; props="${props} $2"; shift 2 ;; --value) shift ;; *) shift ;; esac
         done
+        # D6 (self-service-promote Wave 2): the verify's bounded 3-field
+        # state probe answers in the ASSIGNMENT form.
+        case "$props" in
+            *" ActiveState "*)
+                echo "ActiveState=${SC_ACTIVESTATE:-active}"
+                echo "SubState=${SC_SUBSTATE:-running}"
+                echo "MainPID=${SC_MAINPID:-0}"
+                exit 0 ;;
+        esac
         case "$prop" in
             MainPID) echo "${SC_MAINPID:-0}" ;;
             *) echo "" ;;

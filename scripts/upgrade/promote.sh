@@ -921,7 +921,17 @@ if [ -z "$gate_fail_reason" ]; then
     fi
     journal_set_previous "${OLD_CUR:-null}" || journal_fail_loud "commit: journal_set_previous ${OLD_CUR:-null}"
     journal_close_txn                     || journal_fail_loud "commit: journal_close_txn"
-    journal_history_append commit "promote $VERSION committed (gate+soak green; previous=${OLD_CUR:-none})" \
+    # D6-v (self-service-promote Wave 2): stamp the measured boot-to-green
+    # verify elapsed as an additive token on the executor's own commit row —
+    # the journal sample the hand-back's measured-ceiling reader consumes
+    # (lib.sh _handback_measured_verify_ceiling_s; mechanism only, no
+    # inflation — a missing token simply leaves the default 300s ceiling).
+    _COMMIT_DETAIL="promote $VERSION committed (gate+soak green; previous=${OLD_CUR:-none}"
+    if [ -n "${HANDBACK_VERIFY_ELAPSED_S:-}" ]; then
+        _COMMIT_DETAIL="${_COMMIT_DETAIL}; verify_elapsed_s=${HANDBACK_VERIFY_ELAPSED_S}s"
+    fi
+    _COMMIT_DETAIL="${_COMMIT_DETAIL})"
+    journal_history_append commit "$_COMMIT_DETAIL" \
                                           || journal_fail_loud "commit: history append"
     _log "COMMITTED: current=$VERSION previous=${OLD_CUR:-<none>}"
     retention_evict

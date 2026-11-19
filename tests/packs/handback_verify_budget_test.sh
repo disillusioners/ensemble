@@ -217,14 +217,44 @@ case "$sub" in
         fi
         echo "${SC_IS_ACTIVE:-inactive}"; exit 0 ;;
     show)
-        prop=""; unit=""
+        prop=""; props=""; unit=""
         while [ $# -gt 0 ]; do
             case "$1" in
-                -p) prop="$2"; shift 2 ;;
+                -p) prop="$2"; props="${props} $2"; shift 2 ;;
                 --value) shift ;;
                 *) unit="$1"; shift ;;
             esac
         done
+        # D6 (self-service-promote Wave 2): the hand-back verify's bounded
+        # 3-field state probe `show -p ActiveState -p SubState -p MainPID`
+        # (assignment form). SC_ACTIVESTATE/SC_SUBSTATE injectable; the
+        # state probe ALSO rides the MainPID counter (sc.log.mp.n) — the
+        # fail-fast "exactly ONE poll" legs count STATE probes.
+        case "$props" in
+            *" ActiveState "*)
+                if [ -f "${SC_LOG}.killed" ]; then
+                    echo "ActiveState=inactive"; echo "SubState=dead"; echo "MainPID=0"
+                    exit 0
+                fi
+                n="$(cat "${SC_LOG}.mp.n" 2>/dev/null || echo 0)"
+                n=$((n + 1)); printf '%s' "$n" > "${SC_LOG}.mp.n"
+                sn="$(cat "${SC_LOG}.state.n" 2>/dev/null || echo 0)"
+                sn=$((sn + 1)); printf '%s' "$sn" > "${SC_LOG}.state.n"
+                if [ -n "${SC_MAINPID_N:-}" ] && [ "$n" -gt "${SC_MAINPID_N}" ] \
+                   && [ -n "${SC_MAINPID2:-}" ]; then
+                    echo "MainPID=${SC_MAINPID2}"
+                else
+                    echo "MainPID=${SC_MAINPID:-0}"
+                fi
+                if [ -n "${SC_ACTIVESTATE_N:-}" ] && [ "$n" -gt "${SC_ACTIVESTATE_N}" ] \
+                   && [ -n "${SC_ACTIVESTATE2:-}" ]; then
+                    echo "ActiveState=${SC_ACTIVESTATE2}"
+                else
+                    echo "ActiveState=${SC_ACTIVESTATE:-active}"
+                fi
+                echo "SubState=${SC_SUBSTATE:-running}"
+                exit 0 ;;
+        esac
         case "$prop" in
             MainPID)
                 if [ -f "${SC_LOG}.killed" ]; then echo 0; exit 0; fi
@@ -470,6 +500,8 @@ if [ "$HOST_HAS_SYSTEMD" = "1" ]; then
 
     # L4 — budget expiry (fail direction): the daemon never serves; the
     # timeout warn names the EFFECTIVE budget, never LIVEZ_BUDGET_S.
+    # D6 (Wave 2 addendum): the verdict now carries the DISTINCT
+    # handback-budget-exhausted token naming the last state + elapsed.
     reset_stub_state "$HBFIX/sc.log"
     export HANDBACK_VERIFY_BUDGET_S=4 HANDBACK_VERIFY_GRACE_S=2 CURL_MODE=unreachable
     L4_OUT="$(run_hb "$LIBSH" "$LSOF_OK:$CURL_DIR" "$UNIT_SETUP")"
@@ -478,6 +510,9 @@ if [ "$HOST_HAS_SYSTEMD" = "1" ]; then
     assert_contains "L4 timeout warn present" "hand-back verify: unit ensemble-hb.service not confirmed" "$L4_OUT"
     assert_contains "L4 warn names the effective budget" "within 4s" "$L4_OUT"
     assert_not_contains "L4 never names the borrowed knob" "LIVEZ_BUDGET_S" "$L4_OUT"
+    assert_contains "L4/D6 the DISTINCT budget-exhaustion token" "handback-budget-exhausted" "$L4_OUT"
+    assert_contains "L4/D6 the token names the last observed state" "last-state=" "$L4_OUT"
+    assert_contains "L4/D6 the token names the elapsed" "elapsed=" "$L4_OUT"
 
     # L6a — port up but NOT serving → NOT a success (the incident's shape:
     # a bound socket that answers nothing is not serving).
@@ -488,6 +523,7 @@ if [ "$HOST_HAS_SYSTEMD" = "1" ]; then
     assert_eq "L6a port-up-but-not-serving: rc=1 at the deadline" "rvl-rc=1" "$(rvl_rc "$L6A_OUT")"
     assert_contains "L6a not confirmed (lsof alone insufficient)" "not confirmed" "$L6A_OUT"
     assert_not_contains "L6a never a false COMPLETE" "hand-back COMPLETE" "$L6A_OUT"
+    assert_contains "L6a/D6 the budget-exhaustion token (last-state=active — the §2.1 ACTIVE class)" "last-state=active" "$L6A_OUT"
 
     # L6b — serving but WRONG version → fail FAST (one poll, no retry loop).
     reset_stub_state "$HBFIX/sc.log"
@@ -498,7 +534,14 @@ if [ "$HOST_HAS_SYSTEMD" = "1" ]; then
     assert_eq "L6b wrong version: rc=1 (fail-fast)" "rvl-rc=1" "$(rvl_rc "$L6B_OUT")"
     assert_contains "L6b names the observed wrong version" "version=0.0.0" "$L6B_OUT"
     assert_contains "L6b probe-level rationale (no disposition language)" "NOT serving the right release" "$L6B_OUT"
-    assert_eq "L6b fail-fast: exactly ONE MainPID poll" "1" "$(cat "$HBFIX/sc.log.mp.n" 2>/dev/null || echo 0)"
+    # D6 (self-service-promote Wave 2): the verify poll is now the bounded
+    # 3-field STATE probe (_handback_unit_state) with its OWN counter
+    # (sc.log.state.n). The fail-fast runs exactly ONE state probe. The
+    # old mp.n counter double-counted the attribution Layer-2 lineage
+    # probe (a single-prop `show -p MainPID` inside
+    # _gate_attr_unit_lineage) — the "exactly ONE MainPID poll" assert
+    # was red at base on exactly that seam (BASE-attributed; disclosed).
+    assert_eq "L6b fail-fast: exactly ONE state probe" "1" "$(cat "$HBFIX/sc.log.state.n" 2>/dev/null || echo 0)"
 
     # L6b′ — 2xx with the version field ABSENT while the expected version is
     # KNOWN → fail-fast (AM-P1-1's unenumerated cell, the L6b extension).
@@ -701,6 +744,127 @@ if [ "$HOST_HAS_SYSTEMD" = "1" ]; then
     else
         _fail "L15 total ≤ remaining" "total<=remaining" "total=${L15_TOT}s remaining=${L15_REM}s"
     fi
+
+    # ── D6 legs (self-service-promote Wave 2, 2026-11-19) ──────────────────
+
+    # L16 — AC-D6-3 (activating ⇒ PENDING, never FAILED): the unit reads
+    # `activating` for the first polls, then transitions to active with a
+    # new MainPID + serving green ⇒ the hand-back COMPLETES — an
+    # `activating` observation was never a verdict.
+    reset_stub_state "$HBFIX/sc.log"
+    SC_ACTIVESTATE=activating SC_ACTIVESTATE_N=2 SC_ACTIVESTATE2=active
+    SC_MAINPID=9999 SC_START_RC=0
+    export SC_ACTIVESTATE SC_ACTIVESTATE_N SC_ACTIVESTATE2 SC_MAINPID SC_START_RC
+    export HANDBACK_VERIFY_BUDGET_S=30 CURL_MODE=ok
+    L16_OUT="$(run_hb "$LIBSH" "$LSOF_OK:$CURL_DIR" "$UNIT_SETUP")"
+    unset HANDBACK_VERIFY_BUDGET_S CURL_MODE SC_ACTIVESTATE SC_ACTIVESTATE_N SC_ACTIVESTATE2
+    assert_eq "L16 activating⇒PENDING: completes green after the transition" "rvl-rc=0" "$(rvl_rc "$L16_OUT")"
+    assert_contains "L16 the hand-back completes (activating was never FAILED)" "unit hand-back COMPLETE" "$L16_OUT"
+    assert_not_contains "L16 no unit-state-failed verdict" "unit-state-failed" "$L16_OUT"
+
+    # L17 — AC-D6-3 (failed ⇒ IMMEDIATE FAILED, never softened): the unit
+    # reads `failed` on the first state probe ⇒ terminal rc 1 in SECONDS
+    # (a budget run at 30s would take 30s+ — the wall bound below proves
+    # the immediacy), carrying the unit-state-failed reason, and NOT the
+    # budget-exhaustion token.
+    reset_stub_state "$HBFIX/sc.log"
+    SC_ACTIVESTATE=failed SC_MAINPID=9999 SC_START_RC=0
+    export SC_ACTIVESTATE SC_MAINPID SC_START_RC
+    export HANDBACK_VERIFY_BUDGET_S=30 CURL_MODE=ok
+    L17_T0="$(date +%s)"
+    L17_OUT="$(run_hb "$LIBSH" "$LSOF_OK:$CURL_DIR" "$UNIT_SETUP")"
+    L17_T1="$(date +%s)"
+    unset HANDBACK_VERIFY_BUDGET_S CURL_MODE SC_ACTIVESTATE
+    assert_eq "L17 failed⇒IMMEDIATE FAILED: rc 1" "rvl-rc=1" "$(rvl_rc "$L17_OUT")"
+    assert_contains "L17 the FAILED reason names the state" "unit-state-failed" "$L17_OUT"
+    assert_contains "L17 the FAILED reason names ActiveState=failed" "ActiveState=failed" "$L17_OUT"
+    assert_not_contains "L17 NOT the budget-exhaustion token (distinct reasons)" "handback-budget-exhausted" "$L17_OUT"
+    if [ "$(( L17_T1 - L17_T0 ))" -lt 12 ]; then
+        _pass "L17 IMMEDIATE: halted in $(( L17_T1 - L17_T0 ))s (< the 30s budget an exhaustion would take)"
+    else
+        _fail "L17 IMMEDIATE: halted in $(( L17_T1 - L17_T0 ))s" "<12s" "$(( L17_T1 - L17_T0 ))s"
+    fi
+    SC_MAINPID=9999; export SC_MAINPID
+
+    # L18 — AC-D6-5 (FAILED vs BUDGET-EXHAUSTED carry DIFFERENT reason
+    # values), cross-checked on the two saved runs: the budget run
+    # (L4, above) carries ONLY the exhaustion token; the failed run
+    # (L17) carries ONLY the failed token.
+    assert_contains "L18 the budget run carries the exhaustion token" "handback-budget-exhausted" "$L4_OUT"
+    assert_not_contains "L18 the budget run carries NO failed-family token" "unit-state-failed" "$L4_OUT"
+    assert_not_contains "L18 the failed run carries NO exhaustion token" "handback-budget-exhausted" "$L17_OUT"
+    assert_contains "L18 the failed run carries the failed token" "unit-state-failed" "$L17_OUT"
+
+    # L19 — AC-D6-9 (≤1 journal row per hand-back; F9 discipline): a full
+    # budget-exhaustion hand-back journals ZERO rows from the verify/state
+    # machine — the single terminal row is the CALLER's halt (this
+    # harness runs restart_via_launcher, which halts via rc, not a row;
+    # the is-active probe answered rc=0 here so even the Wave-1 state row
+    # is absent). A per-poll journaling implementation would trip this.
+    reset_stub_state "$HBFIX/sc.log"
+    export HANDBACK_VERIFY_BUDGET_S=3 HANDBACK_VERIFY_GRACE_S=0 CURL_MODE=unreachable SC_IS_ACTIVE=inactive
+    L19_OUT="$(run_hb "$LIBSH" "$LSOF_OK:$CURL_DIR" "$UNIT_SETUP")"
+    unset HANDBACK_VERIFY_BUDGET_S HANDBACK_VERIFY_GRACE_S CURL_MODE SC_IS_ACTIVE
+    assert_eq "L19 budget exhaustion: rc 1" "rvl-rc=1" "$(rvl_rc "$L19_OUT")"
+    L19_EVENTS="$(printf '%s' "$(cat "$HBFIX/releases/state.json")" | grep -o '"event"' | wc -l | tr -d ' ')"
+    assert_eq "L19/AC-D6-9: the state machine journals ZERO rows (no per-poll rows; the halt row is the caller's)" "0" "$L19_EVENTS"
+
+    # L20 — AC-D6-12 (hand-back SUCCESS is NOT the commit bar): a GREEN
+    # hand-back neither commits nor closes — no commit/serving_green
+    # event, in_flight untouched; the ceremony's serving conjunct stays
+    # livez+version+attribution (NO readyz — WEAKER than the closer's
+    # _js_serving_probe composite by design; the gates own the commit).
+    reset_stub_state "$HBFIX/sc.log"
+    export HANDBACK_VERIFY_BUDGET_S=8 CURL_MODE=ok
+    L20_OUT="$(run_hb "$LIBSH" "$LSOF_OK:$CURL_DIR" "$UNIT_SETUP")"
+    unset HANDBACK_VERIFY_BUDGET_S CURL_MODE
+    assert_eq "L20 green hand-back: rc 0" "rvl-rc=0" "$(rvl_rc "$L20_OUT")"
+    L20_J="$(cat "$HBFIX/releases/state.json")"
+    case "$L20_J" in
+        *'"event":"commit"'*|*'"event": "commit"'*|*serving_green_commit*)
+            _fail "L20/AC-D6-12 a green hand-back must NOT commit" "no commit event" "commit present" ;;
+        *) _pass "L20/AC-D6-12 a green hand-back commits NOTHING (the gates own the bar)" ;;
+    esac
+    case "$L20_J" in
+        *'"in_flight":null'*) _pass "L20/AC-D6-12 the txn stays closed/untouched by the hand-back" ;;
+        *) _fail "L20/AC-D6-12 in_flight not null after a green hand-back" "null" "$L20_J" ;;
+    esac
+    L20_VERIFIER_BODY="$(sed -n '/^_supervision_unit_serving()/,/^}/p' "$LIBSH")"
+    assert_eq "L20/AC-D6-12 structural: the ceremony verify references NO readyz (weaker conjunct by design)" "0" "$(printf '%s' "$L20_VERIFIER_BODY" | grep -c 'readyz')"
+
+    # L21 — D6-v (MECHANISM ONLY): the journal's verify_elapsed_s sample
+    # raises the ceiling (clamped [FLOOR, 600], never shrinking the
+    # default; no sample ⇒ 300 — L2 above is that control).
+    # (a) sample 420 → ceiling 420 (> the 300 default — the raise is
+    #     observable in the budget line's effective + source);
+    hb_seed_sample() {  # hb_seed_sample <elapsed>
+        cat > "$HBFIX/releases/state.json" <<J
+{"current":"v1","previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-11-19T00:00:00Z","event":"serving_green_commit","detail":"target v9 run_id r-20261119-000000-abc prev v8 verify_elapsed_s=$1s — serving green (in-process health read); committed and continued"}]}
+J
+    }
+    reset_stub_state "$HBFIX/sc.log"
+    hb_seed_sample 420
+    export CURL_MODE=ok
+    L21A_OUT="$(run_hb "$LIBSH" "$LSOF_OK:$CURL_DIR" "$UNIT_SETUP")"
+    assert_contains "L21a sample 420 raises the ceiling (effective=420s)" "effective=420s" "$L21A_OUT"
+    assert_contains "L21a the source names the measured origin" "+measured(420s)" "$L21A_OUT"
+    # (b) sample 900 → CLAMPED to the 600 measured ceiling;
+    reset_stub_state "$HBFIX/sc.log"
+    hb_seed_sample 900
+    L21B_OUT="$(run_hb "$LIBSH" "$LSOF_OK:$CURL_DIR" "$UNIT_SETUP")"
+    assert_contains "L21b sample 900 clamped to 600 (the ceiling knob)" "effective=600s" "$L21B_OUT"
+    # (c) sample 40 → below the default ⇒ the ceiling STAYS 300 (the
+    # measured value can only RAISE, never shrink — monotone-safe).
+    reset_stub_state "$HBFIX/sc.log"
+    hb_seed_sample 40
+    L21C_OUT="$(run_hb "$LIBSH" "$LSOF_OK:$CURL_DIR" "$UNIT_SETUP")"
+    assert_contains "L21c sample 40 never shrinks the ceiling (stays 300)" "effective=300s" "$L21C_OUT"
+    assert_not_contains "L21c no measured marker on an under-default sample" "+measured(" "$L21C_OUT"
+    unset CURL_MODE
+    # journal restored to the seedless shape for the mutation lane below
+    cat > "$HBFIX/releases/state.json" <<'JOURNAL'
+{"current":"v1","previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+JOURNAL
 
     # L3 — static pins (the declared defaults + the structural no-borrow
     # rule). Complement to L1/L2 per the plan's declared caveat.
@@ -917,6 +1081,67 @@ if [ "$HOST_HAS_SYSTEMD" = "1" ]; then
         "$M13" "$LSOF_OK:$CURL_DIR" "$CLOCK5_SETUP" "ceremony time exhausted"
     unset HANDBACK_VERIFY_BUDGET_S HANDBACK_VERIFY_FLOOR_S \
           HANDBACK_TAIL_RESERVE_S HANDBACK_VERIFY_GRACE_S CURL_MODE
+
+    # ── D6 mutations (self-service-promote Wave 2) ─────────────────────────
+
+    # P1-M14 — a `failed` state softened (the loop's `failed)` terminal arm
+    # renamed away ⇒ `failed` falls into UNKNOWN/PENDING and the run goes
+    # green) ⇒ L17 red (the rc flips to 0: the softened run reaches the
+    # green serving conjunct).
+    M14="$(make_mut m14 's@            failed)$@            failedx)@')"
+    mut_ok "P1-M14" "$M14" || M14="/nonexistent"
+    reset_stub_state "$HBFIX/sc.log"
+    SC_ACTIVESTATE=failed SC_MAINPID=9999 SC_START_RC=0
+    export SC_ACTIVESTATE SC_MAINPID SC_START_RC
+    export HANDBACK_VERIFY_BUDGET_S=30 CURL_MODE=ok
+    M14_OUT="$(run_hb "$M14" "$LSOF_OK:$CURL_DIR" "$UNIT_SETUP")"
+    unset HANDBACK_VERIFY_BUDGET_S CURL_MODE SC_ACTIVESTATE
+    if [ "$(rvl_rc "$M14_OUT")" = "rvl-rc=1" ]; then
+        _fail "P1-M14⇒L17 red (a softened failed would pass green)" "rc!=1" "$(rvl_rc "$M14_OUT")"
+    else
+        _pass "P1-M14⇒L17 red (failed softened to PENDING: the run went green)"
+    fi
+
+    # P1-M15 — the budget-exhaustion token dropped EVERYWHERE (reason
+    # channel AND the warn surface — the /g is load-bearing: the leg's
+    # assert reads the output stream) ⇒ L4 red.
+    M15="$(make_mut m15 's@handback-budget-exhausted@budget-expired@g')"
+    mut_ok "P1-M15" "$M15" || M15="/nonexistent"
+    export HANDBACK_VERIFY_BUDGET_S=4 HANDBACK_VERIFY_GRACE_S=2 CURL_MODE=unreachable
+    mut_run_fail_contains "P1-M15⇒L4 red (the DISTINCT token vanishes)" \
+        "$M15" "$LSOF_OK:$CURL_DIR" "$UNIT_SETUP" "handback-budget-exhausted"
+    unset HANDBACK_VERIFY_BUDGET_S HANDBACK_VERIFY_GRACE_S CURL_MODE
+
+    # P1-M16 — the D6-v measured clamp removed ⇒ L21b red (sample 900
+    # would flow through unclamped: effective=900s).
+    M16="$(make_mut m16 's|\[ "\$v" -gt "\$HANDBACK_VERIFY_MEASURED_CEILING_S" \] \&\& v="\$HANDBACK_VERIFY_MEASURED_CEILING_S"|true|')"
+    mut_ok "P1-M16" "$M16" || M16="/nonexistent"
+    reset_stub_state "$HBFIX/sc.log"
+    cat > "$HBFIX/releases/state.json" <<'J'
+{"current":"v1","previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-11-19T00:00:00Z","event":"serving_green_commit","detail":"target v9 run_id r-20261119-000000-abc prev v8 verify_elapsed_s=900s — serving green (in-process health read); committed and continued"}]}
+J
+    export CURL_MODE=ok
+    M16_OUT="$(run_hb "$M16" "$LSOF_OK:$CURL_DIR" "$UNIT_SETUP")"
+    unset CURL_MODE
+    case "$M16_OUT" in
+        *effective=600s*) _fail "P1-M16⇒L21b red (the clamp still holds under the mutation)" "effective=900s" "effective=600s" ;;
+        *) _pass "P1-M16⇒L21b red (an unclamped sample escapes the ceiling)" ;;
+    esac
+    cat > "$HBFIX/releases/state.json" <<'JOURNAL'
+{"current":"v1","previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+JOURNAL
+
+    # P1-M17 — the start-budget overrun made terminal again (rc=124 → the
+    # FAILED arm) ⇒ the AC-D6-4 continuation is lost. Pinned here at the
+    # seam level (the bounded_waits S5/S5b legs carry the behavioural
+    # proof): the mutation collapses the 124 arm into the failure arm.
+    M17="$(make_mut m17 's|if \[ "\$sbrc" = "124" \]; then|if false; then|')"
+    mut_ok "P1-M17" "$M17" || M17="/nonexistent"
+    if [ -f "$M17" ] && grep -q 'if \[ "$sbrc" = "124" \]; then' "$M17"; then
+        _fail "P1-M17 (the 124 arm survived the mutation — vacuous)" "mutated" "unchanged"
+    else
+        _pass "P1-M17 the 124 non-terminal arm is mutation-reachable (behaviour pinned by S5/S5b)"
+    fi
 
 else
     printf 'SKIP: mutation matrix requires /run/systemd/system on this host (named fence)\n' >&2

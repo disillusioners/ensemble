@@ -112,10 +112,34 @@ case "$sub" in
         echo "${SC_IS_ACTIVE:-inactive}"
         exit "${SC_IS_ACTIVE_RC:-0}" ;;
     show)
-        prop=""; unit=""
+        prop=""; props=""; unit=""
         while [ $# -gt 0 ]; do
-            case "$1" in -p) prop="$2"; shift 2 ;; --value) shift ;; *) unit="$1"; shift ;; esac
+            case "$1" in
+                -p) prop="$2"; props="${props} $2"; shift 2 ;;
+                --value) shift ;;
+                *) unit="$1"; shift ;;
+            esac
         done
+        # D6 (self-service-promote Wave 2): the hand-back verify's bounded
+        # 3-field state probe `show -p ActiveState -p SubState -p MainPID`
+        # (assignment form — each field self-names). SC_ACTIVESTATE /
+        # SC_SUBSTATE are injectable (activating/failed legs); the state
+        # probe ALSO increments the MainPID counter (sc.log.mp.n) so the
+        # fail-fast "exactly ONE poll" legs keep counting the probe.
+        case "$props" in
+            *" ActiveState "*)
+                n="$(cat "${SC_LOG}.mp.n" 2>/dev/null || echo 0)"
+                n=$((n + 1)); printf '%s' "$n" > "${SC_LOG}.mp.n"
+                if [ -n "${SC_ACTIVESTATE_N:-}" ] && [ "$n" -gt "${SC_ACTIVESTATE_N}" ] \
+                   && [ -n "${SC_ACTIVESTATE2:-}" ]; then
+                    echo "ActiveState=${SC_ACTIVESTATE2}"
+                else
+                    echo "ActiveState=${SC_ACTIVESTATE:-active}"
+                fi
+                echo "SubState=${SC_SUBSTATE:-running}"
+                echo "MainPID=${SC_MAINPID:-0}"
+                exit 0 ;;
+        esac
         case "$prop" in
             MainPID) echo "${SC_MAINPID:-0}" ;;
             ControlGroup) echo "${SC_CONTROLGROUP:-}" ;;
@@ -400,8 +424,18 @@ JSON
     assert_contains "S4c is-active rc=1: the observed rc is journaled" "rc=1" "$(cat "$CFIX/releases/state.json")"
 
     # ── Site 5 — start hang (§9 culprit)
+    # D6 / AC-D6-4 (self-service-promote Wave 2): a `systemctl start`
+    # exceeding HANDBACK_START_BUDGET_S is NOT TERMINAL — _run_bounded
+    # kills the CLIENT, systemd keeps processing the start job, and the
+    # verify continues to its own budget. The stub never brings the unit
+    # up (SC_MAINPID=0 ⇒ PENDING the whole way) ⇒ the run now ends at
+    # BUDGET-EXHAUSTED with the DISTINCT `handback-budget-exhausted`
+    # token (the OLD shape halted at the start timeout itself).
     reset_stub_state "$CFIX/sc.log"
-    SC_HANG=1 SC_HANG_SUB=start; export SC_HANG SC_HANG_SUB
+    cat > "$CFIX/releases/state.json" <<'JSON'
+{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+JSON
+    SC_HANG=1 SC_HANG_SUB=start SC_MAINPID=0; export SC_HANG SC_HANG_SUB SC_MAINPID
     START=$(date +%s)
     S5_OUT="$(run_handback "$CFIX" '
         HANDBACK_START_BUDGET_S=2
@@ -409,13 +443,57 @@ JSON
     ')"
     END=$(date +%s)
     ELAPSED=$((END - START))
-    unset SC_HANG SC_HANG_SUB
-    assert_eq "S5 start hang (§9): rc 1 (halt, NO nohup fallback)" "hb-rc=1" "$(hb_rc "$S5_OUT")"
-    [ "$ELAPSED" -le 10 ] && _pass "S5 start hang: elapsed within budget + grace (got ${ELAPSED}s, ≤10)" \
-        || _fail "S5 start hang: bounded" "≤10s" "${ELAPSED}s"
+    unset SC_HANG SC_HANG_SUB SC_MAINPID
+    assert_eq "S5 start hang (§9): rc 1 (halt at BUDGET-EXHAUSTED, NO nohup fallback)" "hb-rc=1" "$(hb_rc "$S5_OUT")"
+    [ "$ELAPSED" -le 12 ] && _pass "S5 start hang: elapsed within start budget + verify budget (got ${ELAPSED}s, ≤12)" \
+        || _fail "S5 start hang: bounded" "≤12s" "${ELAPSED}s"
     assert_contains "S5 start hang: subprocess_wait_timeout event with site=handback_start" "handback_start" "$(cat "$CFIX/releases/state.json")"
+    assert_contains "S5/AC-D6-4: the start overrun is declared NOT terminal" "NOT terminal" "$S5_OUT"
+    assert_contains "S5/AC-D6-4: the run continued into the bounded verify" "continuing into the bounded verify" "$S5_OUT"
+    assert_contains "S5/AC-D6-4: the DISTINCT budget-exhaustion token fires" "handback-budget-exhausted" "$S5_OUT"
+    assert_contains "S5/AC-D6-4: the exhaustion names the LAST observed state" "last-state=" "$S5_OUT"
     assert_contains "S5 start hang: warns NO nohup fallback (Amendment #1)" "NO nohup fallback" "$S5_OUT"
     assert_not_contains "S5 start hang: launcher started (nohup) NEVER fires" "launcher started (nohup)" "$S5_OUT"
+    # AC-D6-5 companion (same run): a FAILED-family reason token must NOT
+    # be present — budget exhaustion is not a daemon-health verdict.
+    assert_not_contains "S5/AC-D6-5: no unit-state-failed token on a budget exhaustion" "unit-state-failed" "$S5_OUT"
+
+    # ── Site 5b — start hang, unit comes up ANYWAY (AC-D6-4 positive
+    # direction): the start client was killed at the budget but the
+    # start job completes server-side (SC_MAINPID=9999, ActiveState
+    # active) ⇒ the verify confirms green ⇒ rc 0, the start-timeout is
+    # declared a FALSE ALARM, and the timeout journal row stands as the
+    # honest record of the client kill.
+    # (Fixture note: the shared LSOF_OK stub prints NO listener pid, so
+    # the attribution conjunct would refuse every green answer — the R
+    # leg's known BASE failure on this host. This leg uses the pack's
+    # owned-set seam + a pid-printing lsof so the green path is
+    # attributable: 424242 is "the owned daemon" by construction.)
+    S5B_LSOF="$(mktemp -d -t bswaits-lsofpid.XXXXXX)"
+    printf '#!/bin/bash\nprintf "424242\\n"\nexit 0\n' > "$S5B_LSOF/lsof"
+    cp "$LSOF_OK/curl" "$S5B_LSOF/curl" 2>/dev/null || true
+    chmod +x "$S5B_LSOF/lsof" "$S5B_LSOF/curl"
+    reset_stub_state "$CFIX/sc.log"
+    cat > "$CFIX/releases/state.json" <<'JSON'
+{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+JSON
+    # (run_handback hardcodes prestop=9999 — the new MainPID is 8888.)
+    SC_HANG=1 SC_HANG_SUB=start SC_MAINPID=8888 SC_ACTIVESTATE=active
+    export SC_HANG SC_HANG_SUB SC_MAINPID SC_ACTIVESTATE
+    S5B_LSOF_SAVE="$LSOF_OK"; LSOF_OK="$S5B_LSOF"; export LSOF_OK
+    S5B_OUT="$(run_handback "$CFIX" '
+        HANDBACK_START_BUDGET_S=2
+        HANDBACK_VERIFY_BUDGET_S=8
+        SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+        _supervision_owned_pids() { printf "%s\n" 424242; }
+    ')"
+    LSOF_OK="$S5B_LSOF_SAVE"; export LSOF_OK
+    unset SC_HANG SC_HANG_SUB SC_MAINPID SC_ACTIVESTATE
+    rm -rf "$S5B_LSOF"
+    assert_eq "S5b start overrun + green boot: rc 0 (NOT terminal — the verify recovered)" "hb-rc=0" "$(hb_rc "$S5B_OUT")"
+    assert_contains "S5b the false-alarm note fires (the timeout was not a fault)" "false alarm" "$S5B_OUT"
+    assert_contains "S5b the hand-back completes" "hand-back COMPLETE" "$S5B_OUT"
+    assert_contains "S5b the timeout row stands as the honest record" "site=handback_start" "$(cat "$CFIX/releases/state.json")"
 
     # ── Regression — happy path no timeout events (start succeeds)
     reset_stub_state "$CFIX/sc.log"
