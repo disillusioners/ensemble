@@ -2161,6 +2161,27 @@ _rollback_target_valid() {
     return 0
 }
 
+# CYCLE-2 MAJOR-1 (2026-11-20): the shell seam's mirror of the Python
+# resolver's _clean fold. The JSON field extraction (_json_field / the
+# launcher's _js_json_field twin) strips quotes, so a JSON NUMBER 123 and
+# a JSON string "123" arrive here as the SAME token — the seam cannot
+# distinguish, and parity (documented in rollback_target_chain.py's
+# _clean) treats such tokens as ABSENT. This predicate folds EXACTLY the
+# set _clean folds: the empty string, the JSON-null text forms
+# (null/none — none is ALSO the R1 to= sentinel the daemon closer
+# writes), the JSON booleans, and every token matching the strict
+# JSON-number grammar (int/float/exponent forms; a multi-dot version
+# like 0.31.10 is NOT a number and stays a PRESENT candidate). Applied
+# to every rung input at resolve() entry — one vocabulary, folded once,
+# matching the Python resolver's own entry fold.
+_rollback_rung_absent() {
+    # rc 0 = the token folds to ABSENT; rc 1 = a present candidate token
+    case "$1" in
+        ''|null|none|true|false) return 0 ;;
+    esac
+    printf '%s' "$1" | grep -Eq '^-?(0|[1-9][0-9]*)([.][0-9]+)?([eE][+-]?[0-9]+)?$'
+}
+
 _rollback_target_resolve() {
     # <releases_dir> <target> <live_link> <capture> <r1_to> <r2_current>
     # <r3_displaced> <r4_previous>
@@ -2168,6 +2189,16 @@ _rollback_target_resolve() {
     local rel="$1" target="$2" live="$3" cap="$4" r1to="$5"
     local r2="$6" r3="$7" r4="$8"
     local cand="" src=""
+    # MAJOR-1: entry fold — mirrors resolve()'s _clean on every rung
+    # input (a numeric capture like 123 folds ABSENT here exactly as the
+    # non-string fold does daemon-side; a present-but-INVALID string
+    # capture still halts capture_invalid below, F3 unchanged).
+    _rollback_rung_absent "$live" && live=""
+    _rollback_rung_absent "$cap" && cap=""
+    _rollback_rung_absent "$r1to" && r1to=""
+    _rollback_rung_absent "$r2" && r2=""
+    _rollback_rung_absent "$r3" && r3=""
+    _rollback_rung_absent "$r4" && r4=""
     # ── R0: the filesystem capture ──
     case "$cap" in
         ''|null)

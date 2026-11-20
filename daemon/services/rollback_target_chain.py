@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -217,6 +218,41 @@ def resolve_from_journal(
     return Resolution("halt", reason=HALT_NO_PREVIOUS)
 
 
+# CYCLE-2 MAJOR-1 (2026-11-20): the strict JSON-number grammar — the SAME
+# regex the shell twins' absent-fold uses (lib.sh
+# ``_rollback_rung_absent`` / launcher.sh ``_js_rollback_rung_absent``),
+# so a numeric fragment folds IDENTICALLY at every seam.
+_JSON_NUMBER_RE = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
+
+
+def _argv_token_to_json_value(token: str) -> object:
+    """Type one argv token the way the REAL seam delivers it (MAJOR-1).
+
+    Production callers pass PARSED JSON: a capture of ``123`` arrives as
+    an int (a non-string — ``_clean`` folds it ABSENT), ``null`` as None,
+    a boolean as bool. argv is always TEXT, so before this fix the parity
+    CLI turned every token into a STRING and a numeric capture reached
+    ``resolve()`` PRESENT — the pack could never express the R0
+    python-vs-shell divergence the delta review measured. The CLI now
+    maps the BARE JSON literals to their JSON types (the seam simulation)
+    and leaves every other token a string — including the R1 ``none``
+    sentinel, which is a real JSON *string* folded by ``_clean``'s T6
+    rule, not by this coercion.
+    """
+    if token == "null":
+        return None
+    if token == "true":
+        return True
+    if token == "false":
+        return False
+    if _JSON_NUMBER_RE.fullmatch(token):
+        try:
+            return int(token)
+        except ValueError:
+            return float(token)
+    return token
+
+
 def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="The D5 rollback-target chain resolver (parity harness)"
@@ -249,12 +285,12 @@ def _main(argv: list[str] | None = None) -> int:
         spec = json.loads(args.json_spec)
     else:
         spec = {
-            "live_link": args.live_link,
-            "capture": args.capture,
-            "to": args.to,
-            "current": args.current,
-            "displaced": args.displaced,
-            "previous": args.previous,
+            "live_link": _argv_token_to_json_value(args.live_link),
+            "capture": _argv_token_to_json_value(args.capture),
+            "to": _argv_token_to_json_value(args.to),
+            "current": _argv_token_to_json_value(args.current),
+            "displaced": _argv_token_to_json_value(args.displaced),
+            "previous": _argv_token_to_json_value(args.previous),
         }
 
     res = resolve(

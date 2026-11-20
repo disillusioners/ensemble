@@ -2469,6 +2469,21 @@ _js_rollback_target_valid() {
     return 0
 }
 
+# CYCLE-2 MAJOR-1 (2026-11-20): the launcher twin of lib.sh's
+# _rollback_rung_absent — the shell seam's mirror of the Python
+# resolver's _clean fold (the _js_json_field extraction strips quotes, so
+# a JSON number and its stringified form arrive identically; parity
+# treats such tokens as ABSENT — documented in rollback_target_chain.py).
+# Folds: '' / null / none (the R1 sentinel) / the JSON booleans / every
+# strict JSON-number grammar token (see lib.sh's twin for the rationale).
+_js_rollback_rung_absent() {
+    # rc 0 = the token folds to ABSENT; rc 1 = a present candidate token
+    case "$1" in
+        ''|null|none|true|false) return 0 ;;
+    esac
+    printf '%s' "$1" | grep -Eq '^-?(0|[1-9][0-9]*)([.][0-9]+)?([eE][+-]?[0-9]+)?$'
+}
+
 _js_rollback_target_resolve() {
     # <releases_dir> <target> <live_link> <capture> <r1_to> <r2_current>
     # <r3_displaced> <r4_previous>
@@ -2476,6 +2491,16 @@ _js_rollback_target_resolve() {
     local rel="$1" target="$2" live="$3" cap="$4" r1to="$5"
     local r2="$6" r3="$7" r4="$8"
     local cand="" src=""
+    # MAJOR-1: entry fold — mirrors the Python resolver's _clean on every
+    # rung input (a numeric/none capture folds ABSENT; a present-but-
+    # INVALID string capture still halts capture_invalid below, F3
+    # unchanged).
+    _js_rollback_rung_absent "$live" && live=""
+    _js_rollback_rung_absent "$cap" && cap=""
+    _js_rollback_rung_absent "$r1to" && r1to=""
+    _js_rollback_rung_absent "$r2" && r2=""
+    _js_rollback_rung_absent "$r3" && r3=""
+    _js_rollback_rung_absent "$r4" && r4=""
     case "$cap" in
         ''|null)
             ;;

@@ -233,12 +233,21 @@ printf '%s\t%s\n' "$REPO_ROOT/daemon/services/rollback_target_chain.py" "$FIX/ro
 # M-PY (AC-D5-7): the R1-vs-R0 halt is removed
 sed -i "s|if cand and r1to != cand:|if False and cand and r1to != cand:|" "$REPO_ROOT/daemon/services/rollback_target_chain.py"
 if grep -q "if False and cand" "$REPO_ROOT/daemon/services/rollback_target_chain.py"; then
-    M_PY_OUT="$(run_python)"
-    # row 7 = r1-valid-conflicts-r0: the mutation turns its halt into a
-    # resolve (R0 wins silently) — the parity pin catches the flip.
-    m_row7="$(printf '%s\n' "$M_PY_OUT" | sed -n '7p')"
-    assert_eq "M-PY: row 7 (r1-conflict) FLIPS halt->resolve under the mutation (discriminating)" \
-        "0	resolve vD captured" "$m_row7"
+    # CYCLE-2 MAJOR-1: row selection is NAME-ANCHORED (the numeric/none
+    # fold rows were inserted mid-table and shifted every later position —
+    # a hardcoded 7p broke; anchor on the TSV's case name, never the
+    # positional index).
+    R1_CONFLICT_ROW="$(awk -F'\t' '/^#/ {next} NF>=8 {n++; if ($1=="r1-valid-conflicts-r0") {print n; exit}}' "$TSV")"
+    if [ -n "$R1_CONFLICT_ROW" ]; then
+        M_PY_OUT="$(run_python)"
+        # the r1-valid-conflicts-r0 row: the mutation turns its halt into
+        # a resolve (R0 wins silently) — the parity pin catches the flip.
+        m_row="$(printf '%s\n' "$M_PY_OUT" | sed -n "${R1_CONFLICT_ROW}p")"
+        assert_eq "M-PY: the r1-conflict row FLIPS halt->resolve under the mutation (discriminating)" \
+            "0	resolve vD captured" "$m_row"
+    else
+        _fail "M-PY: the r1-valid-conflicts-r0 row is missing from the TSV"
+    fi
 else
     _fail "M-PY: the mutation did not plant"
 fi

@@ -24,6 +24,17 @@ no-capture-conflict-halt	vT	vT	-	-	vC	vB	vA	halt	rollback_target_ambiguous	-
 present-invalid-r0-eq-target	vT	vT	vT	-	vC	vB	vA	halt	capture_invalid	-
 present-invalid-r0-missing-dir	vT	vT	vZ	-	vC	vB	vA	halt	capture_invalid	-
 present-invalid-r0-eq-live-link	vT	vB	vB	-	vC	vB	vA	halt	capture_invalid	-
+# CYCLE-2 MAJOR-1 (2026-11-20): a NUMERIC or `none` capture token folds
+# ABSENT at ALL THREE resolvers (the ruling's "treated ABSENT by all
+# three" premise — the python _clean non-string fold; the shell seams
+# receive the stringified fragment and fold the identical token set,
+# _rollback_rung_absent / _js_rollback_rung_absent). The pack was blind
+# to this class (all-text fixtures) while the pre-fix shells HALTED
+# capture_invalid — these rows pin the fold: resolution falls through to
+# the R2 current rung exactly as the python resolver does.
+r0-numeric-capture-folded-absent	vT	vT	123	-	vB	vB	vB	resolve	vB	current
+r0-exponent-capture-folded-absent	vT	vT	1.5e-3	-	vB	vB	vB	resolve	vB	current
+r0-none-capture-folded-absent	vT	vT	none	-	vB	vB	vB	resolve	vB	current
 # AC-D5-7 (first half): a VALID to= disagreeing with a VALID R0 ⇒ halt.
 r1-valid-conflicts-r0	vT	vT	vD	vA	vC	vB	vA	halt	rollback_target_ambiguous	-
 # AC-D5-7 (second half): a to= failing VALID (== target / missing dir) is
