@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.15] — 2026-11-20
+
+### Changed — `/api/jobs` badge polling: bounded badge-leg fetch, batched route N+1s, FE visibility gates (`sonic/jobs-badge-loop-hog`; Emperor ruling 2026-11-19)
+
+- Changed (daemon): the badge leg's resolver fetch is now BOUNDED — `WorkResolverService.list_work` pushes an EXPLICIT client limit into SQL (`_query_jobs`: `.limit(limit + len(ensure_job_ids or ()) + TIE_PAD)`, `TIE_PAD=8`), so the batched lookups (`_batch_instances` / `_batch_mission_fields` / task-timing) and the row-conversion loop run over a bounded set instead of hydrating EVERY matching terminal job; the Python stable sort + slice stays authoritative (wire order unchanged: `created_at` desc, append-order tie-break); D-29/D-69 page-completeness preserved ALWAYS via ONE targeted IN re-query for ensured ids below the cut. The NO-LIMIT path is deliberately untouched — D-68 leader ruling (Q1-ii): "no server-side default cap"
+- Changed (daemon): the `GET /api/jobs` route's per-row N+1s are batched — per-QUEUED-job `_get_queue_position` → ONE batched pending-list fetch (project-global positions, values byte-identical to the old per-row call) and per-dead_letter-row sync `get_dlq_by_job_id` → ONE IN query (`DeadLetterService.get_dlq_by_job_ids`)
+- Changed (daemon): the three unbounded `get_all_active_watches()` reads (`job_queue_service.py:556` / `:711` / `:844`) are bridged off the event loop (`asyncio.to_thread`, house bridge precedent at `:1841`) and read through the new bounded `watcher_repository.get_active_watches()`
+- Changed (frontend): tab-visibility gates on the 6 ungated always-on pollers — 8 s 5-leg badge indicator, home instances (120 s), metrics resources-live (8 s), instance.service (60 s), mcps-gateway (10 s), command-state (5 s): hidden tabs stop polling, a refocus triggers ONE debounced refresh, a supersede token guards out-of-order async writes, listeners are torn down on destroy. ALL interval literals unchanged — the 8 s badge cadence STAYS and visible tabs keep full cadence (Emperor ruling 2026-11-19); the badge's per-leg `catchError` + retain-last-good-count rule is untouched
+- Registered (gates): engine-bound pins — fetched-row budget, per-row-lookup reddens pin, SELECT-count flatness, page-completeness, order compatibility (`tests/unit/services/test_work_resolver_badge_pushdown.py`, `tests/unit/routers/test_jobs_list_badge_batch.py`) + FE contract pins (`frontend/src/app/poll-visibility.bindings.pins.spec.ts`: 6 interval pins + 12 gate pins)
+- Added (measurement): badge-cost harness `.agents/tester/harness/jobs-badge-cost/` (base/head modes, 5-leg badge composite ×8 rounds, statement census) with the BEFORE baseline and the AFTER raw on the merged tree
+- Effect (structural, measured at fixture scale): the badge leg's unbounded hydration is bounded, the route's per-row queries are batched, and the watch reads leave the event loop; the fleet-scale 3.7–4× felt-inflation / loop-lag re-measurement is NOT lane-verified (the harness is in-process, SQLite-scale, with no LoopLagProbe) — disclosed in the HANDOFF; at-scale verification belongs to the ceremony
+- Zero migrations; additive-only delta
+
 ## [0.31.13] — 2026-11-19
 
 ### Changed — instances-list Option D (off-loop + no-revalidation) + FE home poll cadence (`sonic/instances-optd-fe-poll`; ANALYSIS §8 row D; Emperor directives 2026-11-19)
