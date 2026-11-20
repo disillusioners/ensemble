@@ -1319,6 +1319,82 @@ def _build_dispatch_chain(
     }
 
 
+# --------------------------------------------------------------------------
+# Module-level input models — HOISTED from the factory body.
+#
+# WHY (c2r-hoist-a): a ``class X(BaseModel)`` statement INSIDE a tool
+# factory executes on EVERY factory call, so every graph assembly
+# rebuilt this pydantic class from scratch. The process-level schema
+# registry (``daemon/tools/_schema_registry.py``) memoises the
+# DECORATOR's schema but CANNOT prevent the factory-local class
+# statement — that class is the CALLER-supplied ``args_schema``, not a
+# decorator-inferred one. At module level the class is built ONCE at
+# import, the registry then serves it from cache on every assembly,
+# and the agent-visible schema is byte-identical (pinned against the
+# BASE fixture ``tests/unit/tools/fixtures/module_level_inputs_a_base.json``
+# by ``tests/unit/tools/test_module_level_inputs_a.py``).
+# --------------------------------------------------------------------------
+
+class JobCreateInput(BaseModel):
+    """Input schema for job_create tool."""
+    agent_id: Annotated[str, Field(description="Agent ID to run the job (e.g., 'developer', 'leader')")]
+    message: Annotated[str, Field(description="The instruction/message for the agent")]
+    project_id: Annotated[str | None, Field(default=None, description="Project ID for isolation and routing")]
+    priority: Annotated[int, Field(default=5, ge=1, le=10, description="Job priority 1-10 (1=lowest, 10=highest)")]
+    queue_id: Annotated[str | None, Field(default=None, description="Queue to submit to: a queue ID or a system-queue alias (system_fifo_queue|fifo, system_parallel_queue|parallel, system_background_queue|background, system_defer_queue|defer, system_kb_fifo_queue|kb_fifo; case-insensitive). Omit to use your agent default (ari/jober: system_parallel_queue) or the service default (FIFO).")]
+    idempotency_key: Annotated[str | None, Field(default=None, description="Deduplication key")]
+    metadata: Annotated[dict[str, Any] | None, Field(default=None, description="Custom key-value metadata")]
+    source: Annotated[str, Field(default="api", description="DEPRECATED and IGNORED (NIT-7, P2.3 review cycle 1): the server derives source UNCONDITIONALLY since B3.5 (agent:<caller> for agent callers, internal_agent:unknown otherwise) — any value passed here has no effect. Param retained purely for schema compat; removal deferred.")]
+    watch: Annotated[bool, Field(default=True, description="Watch the job for lifecycle events. Default: True (FP4-PP2 2026-10-03 user-approved flip — agent-lane auto-watches so completions are never lost). Explicit watch=False still wins.")]
+
+
+class JobContinueInput(BaseModel):
+    """Input schema for job_continue tool."""
+    old_job_id: Annotated[str, Field(description="Job ID of a terminal job to continue from")]
+    message: Annotated[str, Field(description="New message/instruction to send to the instance")]
+
+
+class JobAnswerInput(BaseModel):
+    """Input schema for job_answer tool."""
+
+    work_id: Annotated[
+        str,
+        Field(
+            description=(
+                "The work_id whose instance asked the question "
+                "(matches the work_id on the "
+                "``[JOB_EVENT] Job ... question requested ❓`` line "
+                "that the watcher received — the question event is "
+                "mission-scoped, so this may be any receipt of the "
+                "asking mission; resolution to the asker is "
+                "watcher-independent)."
+            )
+        ),
+    ]
+    answers: Annotated[
+        dict[str, str],
+        Field(
+            description=(
+                "User-supplied answers. Key by question id (the id "
+                "carried in the pending pack payload) — text-keyed "
+                "fallbacks are also accepted by the helper."
+            )
+        ),
+    ]
+    question_pack_id: Annotated[
+        str,
+        Field(
+            description=(
+                "The pack id from the pending question payload "
+                "(``question_pack.id`` echoed in the "
+                "``[JOB_EVENT]`` body). Mandatory for the T1″ "
+                "stale-answers hijack guard; a mismatch is "
+                "rejected with ``QUESTION_PACK_MISMATCH``."
+            )
+        ),
+    ]
+
+
 def create_job_tools(
     job_service: "JobQueueService",
     queue_mgmt_service: "JobQueueMgmtService",
@@ -1383,18 +1459,6 @@ def create_job_tools(
                 caller_agent_id,
                 e,
             )
-
-    class JobCreateInput(BaseModel):
-        """Input schema for job_create tool."""
-        agent_id: Annotated[str, Field(description="Agent ID to run the job (e.g., 'developer', 'leader')")]
-        message: Annotated[str, Field(description="The instruction/message for the agent")]
-        project_id: Annotated[str | None, Field(default=None, description="Project ID for isolation and routing")]
-        priority: Annotated[int, Field(default=5, ge=1, le=10, description="Job priority 1-10 (1=lowest, 10=highest)")]
-        queue_id: Annotated[str | None, Field(default=None, description="Queue to submit to: a queue ID or a system-queue alias (system_fifo_queue|fifo, system_parallel_queue|parallel, system_background_queue|background, system_defer_queue|defer, system_kb_fifo_queue|kb_fifo; case-insensitive). Omit to use your agent default (ari/jober: system_parallel_queue) or the service default (FIFO).")]
-        idempotency_key: Annotated[str | None, Field(default=None, description="Deduplication key")]
-        metadata: Annotated[dict[str, Any] | None, Field(default=None, description="Custom key-value metadata")]
-        source: Annotated[str, Field(default="api", description="DEPRECATED and IGNORED (NIT-7, P2.3 review cycle 1): the server derives source UNCONDITIONALLY since B3.5 (agent:<caller> for agent callers, internal_agent:unknown otherwise) — any value passed here has no effect. Param retained purely for schema compat; removal deferred.")]
-        watch: Annotated[bool, Field(default=True, description="Watch the job for lifecycle events. Default: True (FP4-PP2 2026-10-03 user-approved flip — agent-lane auto-watches so completions are never lost). Explicit watch=False still wins.")]
 
     @register_tool_category("job")
     @tool(args_schema=JobCreateInput)
@@ -1975,11 +2039,6 @@ def create_job_tools(
         except Exception as e:
             return f"ERROR: Failed to restore job {job_id}: {str(e)}"
     job_restore._full_doc_ = _FULL_DOCS["job_restore"]
-
-    class JobContinueInput(BaseModel):
-        """Input schema for job_continue tool."""
-        old_job_id: Annotated[str, Field(description="Job ID of a terminal job to continue from")]
-        message: Annotated[str, Field(description="New message/instruction to send to the instance")]
 
     @register_tool_category("job")
     @tool(args_schema=JobContinueInput)
@@ -3575,46 +3634,6 @@ def create_job_tools(
 
     job_inject._full_doc_ = _FULL_DOCS["job_inject"]
 
-    class JobAnswerInput(BaseModel):
-        """Input schema for job_answer tool."""
-
-        work_id: Annotated[
-            str,
-            Field(
-                description=(
-                    "The work_id whose instance asked the question "
-                    "(matches the work_id on the "
-                    "``[JOB_EVENT] Job ... question requested ❓`` line "
-                    "that the watcher received — the question event is "
-                    "mission-scoped, so this may be any receipt of the "
-                    "asking mission; resolution to the asker is "
-                    "watcher-independent)."
-                )
-            ),
-        ]
-        answers: Annotated[
-            dict[str, str],
-            Field(
-                description=(
-                    "User-supplied answers. Key by question id (the id "
-                    "carried in the pending pack payload) — text-keyed "
-                    "fallbacks are also accepted by the helper."
-                )
-            ),
-        ]
-        question_pack_id: Annotated[
-            str,
-            Field(
-                description=(
-                    "The pack id from the pending question payload "
-                    "(``question_pack.id`` echoed in the "
-                    "``[JOB_EVENT]`` body). Mandatory for the T1″ "
-                    "stale-answers hijack guard; a mismatch is "
-                    "rejected with ``QUESTION_PACK_MISMATCH``."
-                )
-            ),
-        ]
-
     @register_tool_category("job")
     @tool(args_schema=JobAnswerInput)
     # Descriptions live ONLY in ``JobAnswerInput`` (the args_schema) —
@@ -4156,6 +4175,43 @@ def create_job_tools(
     ]
 
 
+# --------------------------------------------------------------------------
+# Module-level input models — HOISTED from the factory body.
+#
+# WHY (c2r-hoist-a): a ``class X(BaseModel)`` statement INSIDE a tool
+# factory executes on EVERY factory call, so every graph assembly
+# rebuilt this pydantic class from scratch. The process-level schema
+# registry (``daemon/tools/_schema_registry.py``) memoises the
+# DECORATOR's schema but CANNOT prevent the factory-local class
+# statement — that class is the CALLER-supplied ``args_schema``, not a
+# decorator-inferred one. At module level the class is built ONCE at
+# import, the registry then serves it from cache on every assembly,
+# and the agent-visible schema is byte-identical (pinned against the
+# BASE fixture ``tests/unit/tools/fixtures/module_level_inputs_a_base.json``
+# by ``tests/unit/tools/test_module_level_inputs_a.py``).
+# --------------------------------------------------------------------------
+
+class WatchMissionInput(BaseModel):
+    """Input schema for watch_mission tool."""
+    target: Annotated[str, Field(
+        description=(
+            "What to watch: a mission_id (= instance_id) OR a job "
+            "reference — the job_id receipt returned by job_create / "
+            "job_continue. The receipt form works even before the "
+            "mission is dispatched."
+        )
+    )]
+    events: Annotated[list[str] | None, Field(
+        default=None,
+        description=(
+            "Watch events. Default (recommended): ['mission_terminal'] "
+            "— the watch fires ONLY when admission AND mission "
+            "liveness are both terminal (HOLD semantics). Explicit "
+            "transport event names are accepted for advanced use."
+        ),
+    )] = None
+
+
 def create_mission_watch_tools(
     job_service: "JobQueueService",
     mission_resolver: "MissionResolver",
@@ -4233,26 +4289,6 @@ def create_mission_watch_tools(
     Returns:
         A list with the single ``watch_mission`` tool callable.
     """
-
-    class WatchMissionInput(BaseModel):
-        """Input schema for watch_mission tool."""
-        target: Annotated[str, Field(
-            description=(
-                "What to watch: a mission_id (= instance_id) OR a job "
-                "reference — the job_id receipt returned by job_create / "
-                "job_continue. The receipt form works even before the "
-                "mission is dispatched."
-            )
-        )]
-        events: Annotated[list[str] | None, Field(
-            default=None,
-            description=(
-                "Watch events. Default (recommended): ['mission_terminal'] "
-                "— the watch fires ONLY when admission AND mission "
-                "liveness are both terminal (HOLD semantics). Explicit "
-                "transport event names are accepted for advanced use."
-            ),
-        )] = None
 
     @register_tool_category("mission")
     @tool(args_schema=WatchMissionInput)

@@ -190,6 +190,64 @@ def _compose_list_payload(result: dict, *, requested_limit: int) -> dict:
     }
 
 
+# --------------------------------------------------------------------------
+# Module-level input models — HOISTED from the factory body.
+#
+# WHY (c2r-hoist-a): a ``class X(BaseModel)`` statement INSIDE a tool
+# factory executes on EVERY factory call, so every graph assembly
+# rebuilt this pydantic class from scratch. The process-level schema
+# registry (``daemon/tools/_schema_registry.py``) memoises the
+# DECORATOR's schema but CANNOT prevent the factory-local class
+# statement — that class is the CALLER-supplied ``args_schema``, not a
+# decorator-inferred one. At module level the class is built ONCE at
+# import, the registry then serves it from cache on every assembly,
+# and the agent-visible schema is byte-identical (pinned against the
+# BASE fixture ``tests/unit/tools/fixtures/module_level_inputs_a_base.json``
+# by ``tests/unit/tools/test_module_level_inputs_a.py``).
+# --------------------------------------------------------------------------
+
+class BoardCreateInput(BaseModel):
+    """Input schema for board_create."""
+
+    title: Annotated[str, Field(description="Short human title (1-512 chars)")]
+    body: Annotated[str, Field(default="", description="Markdown body. Stored as body_md.")]
+    project_id: Annotated[str | None, Field(default=None, description="Optional project id (nullable FK)")]
+    tags: Annotated[list[str] | None, Field(default=None, description="Tags, e.g. ['telegram','deploy']")]
+    due_at: Annotated[str | None, Field(default=None, description="tz-aware ISO-8601 deadline, e.g. '2026-10-21T09:00:00+07:00'")]
+    priority: Annotated[int | None, Field(default=None, description="1 (lowest) .. 5 (highest); omit for unset")]
+
+
+class BoardUpdateInput(BaseModel):
+    """Input schema for board_update."""
+
+    id: Annotated[str, Field(description="Board item id, e.g. 'wi-1a2b3c4d'")]
+    status: Annotated[str | None, Field(default=None, description="todo | in_progress | blocked | done")]
+    note: Annotated[str | None, Field(default=None, description="Append a note to the timeline. Notes are append-only.")]
+    add_job_id: Annotated[str | None, Field(default=None, description="Link a job id to this item")]
+    body: Annotated[str | None, Field(default=None, description="Replace the markdown body")]
+    due_at: Annotated[str | None, Field(default=None, description="Replace the deadline (tz-aware ISO-8601)")]
+    # NO `tags` field — and no `title` / `project_id` / `priority`
+    # either: those four are CREATE-ONLY. `tags` is IMMUTABLE
+    # post-create (the junction writes happen only at create), so
+    # the update shape can neither add nor remove a tag.
+
+
+class BoardListInput(BaseModel):
+    """Input schema for board_list."""
+
+    status: Annotated[str | None, Field(default=None, description="todo | in_progress | blocked | done | 'open' (= todo|in_progress|blocked) | omit for all")]
+    project_id: Annotated[str | None, Field(default=None, description="Filter by project id")]
+    tag: Annotated[str | None, Field(default=None, description="Filter by a single tag")]
+    due_before: Annotated[str | None, Field(default=None, description="Only items due strictly before this tz-aware ISO-8601 instant. Any UTC offset is accepted; the service normalises it to UTC before the comparison — a raw string never reaches the query.")]
+    limit: Annotated[int, Field(default=50, description="Max items to return (1-200)")]
+
+
+class BoardGetInput(BaseModel):
+    """Input schema for board_get."""
+
+    id: Annotated[str, Field(description="Board item id")]
+
+
 def create_board_tools(
     board_service: Any,
     *,
@@ -220,44 +278,6 @@ def create_board_tools(
     """
     caller_instance_id = current_instance_id or ""
     caller_agent_id = agent_id or ""
-
-    class BoardCreateInput(BaseModel):
-        """Input schema for board_create."""
-
-        title: Annotated[str, Field(description="Short human title (1-512 chars)")]
-        body: Annotated[str, Field(default="", description="Markdown body. Stored as body_md.")]
-        project_id: Annotated[str | None, Field(default=None, description="Optional project id (nullable FK)")]
-        tags: Annotated[list[str] | None, Field(default=None, description="Tags, e.g. ['telegram','deploy']")]
-        due_at: Annotated[str | None, Field(default=None, description="tz-aware ISO-8601 deadline, e.g. '2026-10-21T09:00:00+07:00'")]
-        priority: Annotated[int | None, Field(default=None, description="1 (lowest) .. 5 (highest); omit for unset")]
-
-    class BoardUpdateInput(BaseModel):
-        """Input schema for board_update."""
-
-        id: Annotated[str, Field(description="Board item id, e.g. 'wi-1a2b3c4d'")]
-        status: Annotated[str | None, Field(default=None, description="todo | in_progress | blocked | done")]
-        note: Annotated[str | None, Field(default=None, description="Append a note to the timeline. Notes are append-only.")]
-        add_job_id: Annotated[str | None, Field(default=None, description="Link a job id to this item")]
-        body: Annotated[str | None, Field(default=None, description="Replace the markdown body")]
-        due_at: Annotated[str | None, Field(default=None, description="Replace the deadline (tz-aware ISO-8601)")]
-        # NO `tags` field — and no `title` / `project_id` / `priority`
-        # either: those four are CREATE-ONLY. `tags` is IMMUTABLE
-        # post-create (the junction writes happen only at create), so
-        # the update shape can neither add nor remove a tag.
-
-    class BoardListInput(BaseModel):
-        """Input schema for board_list."""
-
-        status: Annotated[str | None, Field(default=None, description="todo | in_progress | blocked | done | 'open' (= todo|in_progress|blocked) | omit for all")]
-        project_id: Annotated[str | None, Field(default=None, description="Filter by project id")]
-        tag: Annotated[str | None, Field(default=None, description="Filter by a single tag")]
-        due_before: Annotated[str | None, Field(default=None, description="Only items due strictly before this tz-aware ISO-8601 instant. Any UTC offset is accepted; the service normalises it to UTC before the comparison — a raw string never reaches the query.")]
-        limit: Annotated[int, Field(default=50, description="Max items to return (1-200)")]
-
-    class BoardGetInput(BaseModel):
-        """Input schema for board_get."""
-
-        id: Annotated[str, Field(description="Board item id")]
 
     @register_tool_category("board")
     @tool(args_schema=BoardCreateInput)
