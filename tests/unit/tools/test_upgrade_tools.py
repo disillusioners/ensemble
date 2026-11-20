@@ -5319,7 +5319,14 @@ class TestScriptsPinSelfAdvance:
         (verdict + link-claim + retire + mkdir-CAS) is single-winner BY
         CONSTRUCTION: this pin races N REAL concurrent stealers (threads
         behind a barrier — os.link/os.rename/os.mkdir release the GIL)
-        against one planted stale lock and asserts EXACTLY ONE winner."""
+        against one planted stale lock and asserts EXACTLY ONE winner.
+
+        The assertions are PROTOCOL PROPERTIES (exactly one winner, zero
+        CAS debris, every loser reasoned, the winner holds the lock) —
+        the owner file is NEVER read: the lock fast path legitimately
+        stamps no owner, so an ownerless winning lock dir is
+        protocol-legal (leader decision: pin-side fix, no fast-path
+        owner stamp)."""
         import threading
 
         dead = subprocess.Popen(["true"])
@@ -5358,12 +5365,25 @@ class TestScriptsPinSelfAdvance:
         assert len(losers) == n - 1
         for _held, why in losers:
             assert why, "losers must carry a refusal reason"
-        # the winner's lock names this process and no CAS debris remains
-        assert (lock_dir / "owner").read_text(
-            encoding="utf-8").strip() == str(os.getpid())
-        strays = [p.name for p in tmp_path.iterdir()
-                  if p.name != lock_dir.name]
-        assert not strays, f"CAS debris left behind: {strays}"
+        # PROTOCOL PROPERTIES (the owner file is NEVER read): the lock
+        # FAST PATH (os.mkdir -> held) legitimately stamps NO owner, so a
+        # winner that owns an EMPTY lock dir is protocol-legal — reading
+        # the owner file made THIS pin flaky (19P/1F over 20 runs; ~10%
+        # of the races, 30/300, had the fast path win the freed path).
+        #   (P1) the winner HOLDS the lock and refuses nothing
+        assert winners[0][0] is True
+        assert winners[0][1] == "", (
+            f"the winner must carry no refusal reason: {winners[0]!r}")
+        #   (P2) the winner's lock sits AT the lock path
+        assert lock_dir.exists(), "the winner must hold the lock dir"
+        #   (P3) ZERO CAS debris survives — the §7e shape of the bash pin
+        #   (the steal-won / steal-claim / retired siblings of the lock
+        #   dir), asserted STRICTLY: no sibling may survive the race
+        debris = sorted(p.name for p in tmp_path.iterdir()
+                        if p.name != lock_dir.name)
+        assert not debris, (
+            f"CAS debris left behind (steal-won/steal-claim/retired "
+            f"siblings): {debris}")
         shutil.rmtree(lock_dir)
 
     def test_a2_cas_rejects_when_lock_dir_replaced_under_verdict(
