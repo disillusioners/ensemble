@@ -5190,6 +5190,60 @@ class TestScriptsPinSelfAdvance:
         lock_dir = pin_root.parent / f"{pin_root.name}.scripts-advance.lock.d"
         assert not lock_dir.exists(), "the advance lock must be released"
 
+    def test_ac_d4_4_manifest_disagreement_refuses_and_advanced_tree_matches_scripts_manifest(
+        self, tmp_path
+    ):
+        """AC-D4-4 (cycle-3 E4 — previously UNPINNED; the gate: 'the
+        advanced-tree gate is existence-only; no sha comparison vs
+        scripts_manifest'). BOTH directions pinned: a payload manifest
+        whose scripts_manifest entry DISAGREES with the target tree
+        refuses with status 'drift' (HEAD never moves), and after a
+        green advance every family file's WORKING-TREE bytes hash to the
+        manifest's recorded sha256 — the advanced tree IS the shipped
+        family, byte-for-byte, not merely present."""
+        import hashlib
+
+        fx = _build_pin_fixture(tmp_path)
+        # (a) the drift refusal: ONE tampered manifest entry
+        bad = dict(fx["manifest"])
+        sm = dict(bad["scripts_manifest"])
+        victim_key = next(iter(sm))
+        sm[victim_key] = "f" * 64
+        bad["scripts_manifest"] = sm
+        head_before = _git("rev-parse", "HEAD", cwd=fx["pin"])
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=bad,
+        )
+        assert status == "drift", (status, detail)
+        assert "scripts-pin-drift" in detail, detail
+        assert _git("rev-parse", "HEAD", cwd=fx["pin"]) == head_before, (
+            "a drift refusal must never move HEAD"
+        )
+        # (b) the green advance: the working tree == the manifest maps
+        status2, detail2 = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status2 == "advanced", (status2, detail2)
+        assert _git("rev-parse", "HEAD", cwd=fx["pin"]) == fx["target"]
+        pin_root = fx["pin"].parents[1]  # fx["pin"] IS the scripts dir
+        for rel in uj.EXECUTOR_FAMILY_PATHS:
+            if rel.startswith("scripts/"):
+                key = rel[len("scripts/"):]
+                entry = fx["manifest"]["scripts_manifest"]
+            else:
+                key = rel
+                entry = fx["manifest"]["daemon_slice_manifest"]
+            want = entry[key]
+            got = hashlib.sha256(
+                (pin_root / rel).read_bytes()).hexdigest()
+            assert got == want, (
+                f"{rel}: working-tree {got[:12]}… != manifest "
+                f"{want[:12]}… — the advanced tree diverged from the "
+                "shipped family"
+            )
+
     def test_manifest_without_source_commit_is_unavailable(self, tmp_path):
         fx = _build_pin_fixture(tmp_path)
         status, detail = ut.scripts_pin_self_advance(

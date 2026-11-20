@@ -43,6 +43,7 @@ UJ = "daemon/tools/upgrade_journal.py"
 MGR = "daemon/manager.py"
 CFG = "daemon/config.py"
 UTOOLS = "daemon/tools/upgrade_tools.py"
+LAUNCHER = "launcher.sh"
 
 # ── the plants ──────────────────────────────────────────────────────────────
 # leg -> {"file": <repo-relative>, "mode": executable|deferred,
@@ -496,6 +497,21 @@ PLANTS: dict[str, dict] = {
         "pairs": [(
             '                            "scripts-advance-unavailable",',
             '                            "stale-scripts-dir",  # PLANT M47: the advance-unavailable class lost its token',
+        )],
+    },
+    # ── cycle-3 E1 (2026-11-20, gate RR2): the FIRST plant targeting
+    # launcher.sh — the wrongful-rollback race leg (test_launcher 8w/8w-2)
+    # was pinned but NOT mutation-reachable (0 of the 47 plants target
+    # launcher.sh; the gate's scratch mutation of this exact site flipped
+    # 3 assertions RED). The plant disables the credit-time green-evidence
+    # recheck: a wrongful rollback is then charged to the flapping cap
+    # like a genuine one — the AC-D5-10 contract breaks loudly.
+    "M48": {
+        "file": LAUNCHER, "mode": "executable",
+        "why": "the wrongful-rollback residue check never fires — a green-evidence rollback is charged to the flapping cap (AC-D5-10 broken; the 8w leg reddens)",
+        "pairs": [(
+            '    new_cnt=""\n    if [ "$grc2" -eq 0 ]; then',
+            '    new_cnt=""\n    if false; then  # PLANT M48: the credit-time green-evidence recheck is dead',
         )],
     },
 }
