@@ -1,4 +1,4 @@
-import { Component, DestroyRef, OnInit, inject } from '@angular/core';
+import { Component, DestroyRef, OnDestroy, OnInit, inject } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
@@ -7,6 +7,13 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { timer } from 'rxjs';
 import { McpsGatewayService } from './mcps-gateway.service';
+
+/**
+ * The refocus debounce (ms) — rapid tab switches collapse into ONE
+ * immediate refresh (the jobs-page exemplar's discipline). A hidden tab
+ * stops ISSUING polls; a refocus produces exactly ONE catch-up read.
+ */
+const REFOCUS_DEBOUNCE_MS = 2000;
 
 /**
  * Remote Hands / MCP Gateway — the READ-ONLY operator page (Phase C).
@@ -54,9 +61,23 @@ import { McpsGatewayService } from './mcps-gateway.service';
   templateUrl: './mcps-gateway.component.html',
   styleUrl: './mcps-gateway.component.scss',
 })
-export class McpsGatewayComponent implements OnInit {
+export class McpsGatewayComponent implements OnInit, OnDestroy {
   private readonly service = inject(McpsGatewayService);
   private readonly destroyRef = inject(DestroyRef);
+
+  /**
+   * The browser tab's visibility — the POLL GATE. A hidden tab stops
+   * ISSUING the 10 s gateway poll (the cadence is unchanged for VISIBLE
+   * tabs).
+   */
+  private browserVisible = true;
+
+  /**
+   * The refocus debounce handle — rapid tab switches collapse into ONE
+   * immediate refresh (the timer id is kept so a second focus cancels and
+   * re-arms it instead of queueing a second refresh).
+   */
+  private refocusTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── The service's signals, exposed for the template ──────────────────
   // (the component reads them; it never writes them — the service owns
@@ -80,13 +101,64 @@ export class McpsGatewayComponent implements OnInit {
   ngOnInit(): void {
     // The first paint is a real read, not an empty shell.
     this.service.refreshAll();
+    // Seed the gate from the document state at mount — a page opened in a
+    // hidden browser tab never issues a poll tick until it is shown.
+    this.browserVisible = document.visibilityState !== 'hidden';
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
     // The poll — every POLL_INTERVAL_MS (10 s), until the component dies.
     timer(
       McpsGatewayService.POLL_INTERVAL_MS,
       McpsGatewayService.POLL_INTERVAL_MS,
     )
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(() => this.service.refreshAll());
+      .subscribe(() => {
+        // The VISIBILITY GATE — a hidden browser tab issues NO request.
+        // The cadence itself is unchanged (the 10 s budget is the same for
+        // a VISIBLE tab); a suppressed tick simply spends nothing. The
+        // service's own overlap guard keeps a suppressed-and-then-refocused
+        // cycle from piling up requests.
+        if (!this.browserVisible) {
+          return;
+        }
+        this.service.refreshAll();
+      });
+  }
+
+  ngOnDestroy(): void {
+    // The visibility listener is detached (no leak) and a pending refocus
+    // refresh is dropped (a destroyed component must not fire a request).
+    // The rxjs subscription is already torn down by ``takeUntilDestroyed``.
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+      this.refocusTimer = null;
+    }
+  }
+
+  /**
+   * The visibility gate — a hidden browser tab stops the gateway poll,
+   * and a refocus produces EXACTLY ONE immediate refresh (debounced by
+   * ``REFOCUS_DEBOUNCE_MS`` so a rapid tab-switch storm cannot issue a
+   * burst of reads). No catch-up burst is ever queued: the single refocus
+   * refresh IS the catch-up.
+   */
+  private readonly onVisibilityChange = (): void => {
+    const visible = document.visibilityState !== 'hidden';
+    const wasHidden = !this.browserVisible;
+    this.browserVisible = visible;
+    if (!visible || !wasHidden) {
+      return;
+    }
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+    }
+    this.refocusTimer = setTimeout(() => {
+      this.refocusTimer = null;
+      if (!this.browserVisible) {
+        return;
+      }
+      this.service.refreshAll();
+    }, REFOCUS_DEBOUNCE_MS);
   }
 
   // ── Actions ──────────────────────────────────────────────────────────

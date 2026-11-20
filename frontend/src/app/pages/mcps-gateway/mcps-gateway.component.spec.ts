@@ -455,3 +455,137 @@ describe('McpsGatewayComponent', () => {
     expect(serviceSrc).not.toMatch(/\.(post|put|delete|patch)\(/);
   });
 });
+
+// ── The visibility gate (hidden tab stops polling) ─────────────────────
+//
+// The house gate (jobs page #3 / nest-reports #7 / room #12): a HIDDEN
+// browser tab issues NO request, a REFOCUS produces EXACTLY ONE immediate
+// refresh (debounced 2 s — never a catch-up burst), and the teardown
+// detaches the listener.
+//
+// jsdom's ``document.visibilityState`` is a prototype getter — the test
+// shadows it with an own property so the production code reads the
+// simulated value.
+function setVisibility(state: 'visible' | 'hidden'): void {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    get: () => state,
+  });
+}
+
+function fireVisibilityChange(): void {
+  document.dispatchEvent(new Event('visibilitychange'));
+}
+
+describe('McpsGatewayComponent — the visibility gate (hidden tab stops polling)', () => {
+  let fixture: ComponentFixture<McpsGatewayComponent>;
+  let mock: MockMcpsGatewayService;
+
+  beforeEach(() => {
+    setVisibility('visible');
+  });
+
+  afterEach(() => {
+    setVisibility('visible');
+    jest.useRealTimers();
+  });
+
+  /** Build the page against a fresh mock service (the poll is armed). */
+  async function build(): Promise<MockMcpsGatewayService> {
+    const mockService = new MockMcpsGatewayService();
+    await TestBed.configureTestingModule({
+      imports: [McpsGatewayComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: McpsGatewayService, useValue: mockService },
+      ],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(McpsGatewayComponent);
+    fixture.detectChanges();
+    mock = mockService;
+    return mockService;
+  }
+
+  it('a HIDDEN tab issues NO request — the poll tick is gated', async () => {
+    jest.useFakeTimers();
+    await build();
+    expect(mock.refreshAll).toHaveBeenCalledTimes(1); // the first paint
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+
+    jest.advanceTimersByTime(10_000);
+    expect(mock.refreshAll).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(10_000);
+    expect(mock.refreshAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('a REFOCUS issues EXACTLY ONE refresh (no catch-up burst)', async () => {
+    jest.useFakeTimers();
+    await build();
+    expect(mock.refreshAll).toHaveBeenCalledTimes(1);
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+    jest.advanceTimersByTime(10_000);
+    expect(mock.refreshAll).toHaveBeenCalledTimes(1);
+
+    setVisibility('visible');
+    fireVisibilityChange();
+    // The refresh is DEBOUNCED (2 s) — before the window elapses, none.
+    jest.advanceTimersByTime(1999);
+    expect(mock.refreshAll).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(1);
+    expect(mock.refreshAll).toHaveBeenCalledTimes(2);
+  });
+
+  it('a rapid hide/show storm collapses into ONE refresh', async () => {
+    jest.useFakeTimers();
+    await build();
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+
+    jest.advanceTimersByTime(2000);
+    expect(mock.refreshAll).toHaveBeenCalledTimes(2); // first paint + ONE refocus
+  });
+
+  it('destroy detaches the visibility listener and stops the poll', async () => {
+    jest.useFakeTimers();
+    await build();
+    expect(mock.refreshAll).toHaveBeenCalledTimes(1);
+
+    const removeSpy = jest.spyOn(document, 'removeEventListener');
+    fixture.destroy();
+    expect(removeSpy).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+    removeSpy.mockRestore();
+
+    jest.advanceTimersByTime(100_000);
+    expect(mock.refreshAll).toHaveBeenCalledTimes(1);
+
+    // A visibilitychange after the teardown issues NO request either.
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+    jest.advanceTimersByTime(2000);
+    expect(mock.refreshAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('the 10 s cadence is UNCHANGED — the gate suppresses ticks, it does not slow them', async () => {
+    jest.useFakeTimers();
+    await build();
+
+    jest.advanceTimersByTime(10_000);
+    expect(mock.refreshAll).toHaveBeenCalledTimes(2);
+    jest.advanceTimersByTime(10_000);
+    expect(mock.refreshAll).toHaveBeenCalledTimes(3);
+  });
+});

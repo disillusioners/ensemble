@@ -10,6 +10,13 @@ import type { Agent, AgentCreate, InstanceInfo } from '../../models';
 
 const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
 
+/**
+ * The refocus debounce (ms) — rapid tab switches collapse into ONE
+ * immediate refresh (the jobs-page exemplar's discipline). A hidden tab
+ * stops ISSUING polls; a refocus produces exactly ONE catch-up read.
+ */
+const REFOCUS_DEBOUNCE_MS = 2000;
+
 @Component({
   selector: 'app-home',
   standalone: true,
@@ -23,6 +30,27 @@ export class HomeComponent implements OnInit, OnDestroy {
   private readonly sseService = inject(SseService);
   private readonly tabStateService = inject(TabStateService);
   private pollInterval: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * The browser tab's visibility — the POLL GATE. A hidden tab stops
+   * ISSUING the instances-list poll (the 120 s cadence is unchanged for
+   * VISIBLE tabs).
+   */
+  private browserVisible = true;
+
+  /**
+   * The refocus debounce handle — rapid tab switches collapse into ONE
+   * immediate refresh (the timer id is kept so a second focus cancels and
+   * re-arms it instead of queueing a second refresh).
+   */
+  private refocusTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * The supersede token — ONE per instances read. Two overlapping reads
+   * (a tick racing the refocus refresh) can land OUT OF ORDER; the older
+   * answer must never overwrite the newer one.
+   */
+  private loadSeq = 0;
 
   /**
    * Get the current project context for navigation.
@@ -59,11 +87,22 @@ export class HomeComponent implements OnInit, OnDestroy {
       error: () => {}
     });
     this.loadInitialData();
+    // Seed the gate from the document state at mount — a page opened in a
+    // hidden tab never issues a poll tick until it is shown.
+    this.browserVisible = document.visibilityState !== 'hidden';
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
     this.startPolling();
   }
 
   ngOnDestroy(): void {
     this.stopPolling();
+    // The visibility listener is detached (no leak) and a pending refocus
+    // refresh is dropped (a destroyed component must not fire a request).
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+      this.refocusTimer = null;
+    }
   }
 
   private loadInitialData(): void {
@@ -92,12 +131,22 @@ export class HomeComponent implements OnInit, OnDestroy {
   }
 
   private loadInstances(): void {
+    // The supersede token — a newer read wins over an older one whose
+    // answer lands later (completion order can invert when a tick races
+    // the refocus refresh).
+    const token = ++this.loadSeq;
     this.api.listInstances().subscribe({
       next: (response) => {
+        if (token !== this.loadSeq) {
+          return; // superseded — a stale answer never lands
+        }
         this.instances.set(response.instances);
         this.isLoading.set(false);
       },
       error: (err) => {
+        if (token !== this.loadSeq) {
+          return; // superseded — a stale failure never lands
+        }
         console.error('Failed to load instances:', err);
         this.isLoading.set(false);
       }
@@ -106,6 +155,12 @@ export class HomeComponent implements OnInit, OnDestroy {
 
   private startPolling(): void {
     this.pollInterval = setInterval(() => {
+      // The VISIBILITY GATE — a hidden browser tab issues NO request.
+      // The cadence itself is unchanged (the 120 s budget is the same for
+      // a VISIBLE tab); a suppressed tick simply spends nothing.
+      if (!this.browserVisible) {
+        return;
+      }
       this.loadInstances();
     }, 120000);
   }
@@ -116,6 +171,32 @@ export class HomeComponent implements OnInit, OnDestroy {
       this.pollInterval = null;
     }
   }
+
+  /**
+   * The visibility gate — a hidden browser tab stops the instances-list
+   * poll, and a refocus produces EXACTLY ONE immediate refresh (debounced
+   * by ``REFOCUS_DEBOUNCE_MS`` so a rapid tab-switch storm cannot issue a
+   * burst of reads). No catch-up burst is ever queued: the single refocus
+   * refresh IS the catch-up.
+   */
+  private readonly onVisibilityChange = (): void => {
+    const visible = document.visibilityState !== 'hidden';
+    const wasHidden = !this.browserVisible;
+    this.browserVisible = visible;
+    if (!visible || !wasHidden) {
+      return;
+    }
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+    }
+    this.refocusTimer = setTimeout(() => {
+      this.refocusTimer = null;
+      if (!this.browserVisible) {
+        return;
+      }
+      this.loadInstances();
+    }, REFOCUS_DEBOUNCE_MS);
+  };
 
   protected onSelectAgent(agent: Agent): void {
     this.selectedAgent.set(agent);

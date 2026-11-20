@@ -29,6 +29,15 @@ import { forkJoin, catchError, of, map } from 'rxjs';
 import { JobQueuePanelComponent } from '../job-queue-panel/job-queue-panel.component';
 
 /**
+ * The refocus debounce (ms) — the window a rapid tab-switch storm is
+ * collapsed into ONE immediate refresh. Mirrors the jobs page's
+ * ``REFOCUS_DEBOUNCE_MS`` discipline (jobs-page exemplar): a hidden tab
+ * stops ISSUING polls, and a refocus produces exactly ONE catch-up read
+ * (never a burst).
+ */
+const REFOCUS_DEBOUNCE_MS = 2000;
+
+/**
  * Header status indicator that surfaces the live job queue as a
  * SEGMENTED status pill: jobs (running/non-terminal) on the left,
  * live missions (count + pulse dot) on the right, defer-gate warning
@@ -128,6 +137,28 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
 
   /** Poll interval, in milliseconds. */
   private readonly POLL_INTERVAL_MS = 8000;
+
+  /**
+   * The browser tab's visibility — the POLL GATE. A hidden tab stops
+   * ISSUING the 8 s badge poll (this is the heaviest poller in the app:
+   * five legs per tick). The badge RETAINS its last good counts across
+   * hidden periods — the gate never zeroes anything.
+   */
+  private browserVisible = true;
+
+  /**
+   * The refocus debounce handle — rapid tab switches collapse into ONE
+   * immediate refresh (the timer id is kept so a second focus cancels and
+   * re-arms it instead of queueing a second refresh).
+   */
+  private refocusTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * The supersede token — ONE per fetch. Two overlapping fetches (a tick
+   * racing the refocus refresh) can land OUT OF ORDER; the older answer
+   * must never overwrite the newer one. The newer fetch wins, always.
+   */
+  private fetchSeq = 0;
 
   /** Raw active jobs (running + paused + pending) returned by listActiveJobs.
    *  Public surface: the panel input (``[activeJobs]``) reads the full
@@ -573,8 +604,12 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.loadProjectNames();
+    // Seed the gate from the document state at mount — a page opened in a
+    // hidden tab never issues a poll tick until it is shown.
+    this.browserVisible = document.visibilityState !== 'hidden';
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
     this.fetchBadgeSignals();
-    this.pollHandle = setInterval(() => this.fetchBadgeSignals(), this.POLL_INTERVAL_MS);
+    this.pollHandle = setInterval(() => this.tick(), this.POLL_INTERVAL_MS);
   }
 
   ngOnDestroy(): void {
@@ -582,7 +617,57 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
       clearInterval(this.pollHandle);
       this.pollHandle = null;
     }
+    // The visibility listener is detached (no leak) and a pending refocus
+    // refresh is dropped (a destroyed component must not fire a request).
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+      this.refocusTimer = null;
+    }
   }
+
+  /**
+   * The poll tick — the VISIBILITY GATE. A hidden browser tab issues NO
+   * request: the timer keeps firing (the cadence is unchanged — the
+   * EMPEROR ruling keeps the 8 s badge cadence for VISIBLE tabs) and the
+   * gate decides whether a tick spends anything.
+   *
+   * The badge RETAINS its last good counts while hidden — a suppressed
+   * tick never writes a bare 0/0 (the per-leg ``catchError`` retention
+   * rule is untouched).
+   */
+  private tick(): void {
+    if (!this.browserVisible) {
+      return;
+    }
+    this.fetchBadgeSignals();
+  }
+
+  /**
+   * The visibility gate — a hidden browser tab stops the badge poll, and
+   * a refocus produces EXACTLY ONE immediate refresh (debounced by
+   * ``REFOCUS_DEBOUNCE_MS`` so a rapid tab-switch storm cannot issue a
+   * burst of five-leg forkJoins). No catch-up burst is ever queued:
+   * the single refocus refresh IS the catch-up.
+   */
+  private readonly onVisibilityChange = (): void => {
+    const visible = document.visibilityState !== 'hidden';
+    const wasHidden = !this.browserVisible;
+    this.browserVisible = visible;
+    if (!visible || !wasHidden) {
+      return;
+    }
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+    }
+    this.refocusTimer = setTimeout(() => {
+      this.refocusTimer = null;
+      if (!this.browserVisible) {
+        return;
+      }
+      this.fetchBadgeSignals();
+    }, REFOCUS_DEBOUNCE_MS);
+  };
 
   /**
    * Fetch the project list once on init so we can map project_id →
@@ -673,6 +758,10 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
    * honestly.
    */
   private fetchBadgeSignals(): void {
+    // The supersede token — a newer fetch wins over an older one whose
+    // answer lands later (completion order can invert when a tick races
+    // the refocus refresh).
+    const token = ++this.fetchSeq;
     forkJoin({
       active: this.jobService.listActiveJobs().pipe(
         catchError((err) => {
@@ -731,13 +820,20 @@ export class JobQueueIndicatorComponent implements OnInit, OnDestroy {
     })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
-        next: ({ active, recent, liveMissions, instances, deferBlocked }) =>
-          this.applyFetchResults(active, recent, liveMissions, instances, deferBlocked),
+        next: ({ active, recent, liveMissions, instances, deferBlocked }) => {
+          if (token !== this.fetchSeq) {
+            return; // superseded — a stale answer never lands
+          }
+          this.applyFetchResults(active, recent, liveMissions, instances, deferBlocked);
+        },
         // Safety net only — per-leg catchError above means this
         // path is unreachable for routine HTTP failures. It still
         // exists for synchronous throws from operator pipes that
         // escaped isolation.
         error: (err) => {
+          if (token !== this.fetchSeq) {
+            return; // superseded — a stale crash never degrades a newer tick
+          }
           console.error('[JobQueueIndicator] Forkjoin crashed:', err);
           this.recordLegError('forkjoin', err);
         }

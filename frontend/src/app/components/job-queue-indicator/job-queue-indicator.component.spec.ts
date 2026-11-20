@@ -1,10 +1,19 @@
 import { signal, computed } from '@angular/core';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { Router } from '@angular/router';
+import { MatSnackBar } from '@angular/material/snack-bar';
+import { JobService } from '../../services/job.service';
+import { MissionService } from '../../services/mission.service';
+import { ProjectService } from '../../services/project.service';
+import { TabStateService } from '../../services/tab-state.service';
+import { InstanceService } from '../../services/instance.service';
+import { JobQueueIndicatorComponent } from './job-queue-indicator.component';
 import { Job, JobStatus, MissionLiveness, isTerminalStatus } from '../../models/job.model';
 import { buildInstanceNodes, buildInstanceTree, InstanceRow, InstanceNode, filterIdleInstanceRows } from '../../models/instance-node.model';
 import { MissionListResponse, MissionSummary, missionCountFromListResponse } from '../../models/mission.model';
 import { DeferBlockedStatus, DeferBlockIndicator, deferBlockIndicator } from '../../models/defer-blocked.model';
 import { createMockJob, createMockJobWithStatus } from '../../testing/job-test-helpers';
-import { firstValueFrom, forkJoin, of, throwError, catchError } from 'rxjs';
+import { firstValueFrom, forkJoin, of, throwError, catchError, Subject } from 'rxjs';
 
 /**
  * Logic-mirror of JobQueueIndicatorComponent.
@@ -1599,14 +1608,23 @@ describe('JobQueueIndicatorComponent Logic', () => {
 
   describe('recentJobs (public computed)', () => {
     it('should filter out pending, processing, and paused jobs (terminal only via isTerminalStatus)', () => {
+      // The tie premise is EXPLICIT: every row carries the SAME
+      // ``created_at`` (and no ``completed_at``), so the desc sort is a
+      // genuine tie and the stable sort keeps insertion order. The
+      // implicit version of this fixture (``createMockJob``'s default
+      // ``created_at = new Date().toISOString()``) put the premise at
+      // the mercy of the CLOCK: when the eight rows straddled a
+      // millisecond boundary the tie broke and the order flipped —
+      // a load-sensitive flake, not a behaviour signal.
+      const TIE = '2026-01-01T00:00:00.000Z';
       component.setRecentJobs([
-        createMockJob({ job_id: 'c1', status: 'completed' }),
-        createMockJob({ job_id: 'p1', status: 'pending' }),
-        createMockJob({ job_id: 'f1', status: 'failed' }),
-        createMockJob({ job_id: 'r1', status: 'processing' }),
-        createMockJobWithStatus('paused', { job_id: 'pa' }),
-        createMockJob({ job_id: 'd1', status: 'dead_letter' }),
-        createMockJob({ job_id: 'x1', status: 'cancelled' }),
+        createMockJob({ job_id: 'c1', status: 'completed', created_at: TIE }),
+        createMockJob({ job_id: 'p1', status: 'pending', created_at: TIE }),
+        createMockJob({ job_id: 'f1', status: 'failed', created_at: TIE }),
+        createMockJob({ job_id: 'r1', status: 'processing', created_at: TIE }),
+        createMockJobWithStatus('paused', { job_id: 'pa', created_at: TIE }),
+        createMockJob({ job_id: 'd1', status: 'dead_letter', created_at: TIE }),
+        createMockJob({ job_id: 'x1', status: 'cancelled', created_at: TIE }),
         // M3 mirror-receipt terminal: ``settled`` must be treated as
         // terminal via the CANONICAL ``isTerminalStatus`` import (the
         // deleted module-local copy misclassified it as non-terminal).
@@ -1615,6 +1633,7 @@ describe('JobQueueIndicatorComponent Logic', () => {
           status: 'settled',
           job_type: 'message',
           mission_liveness: 'processing',
+          created_at: TIE,
         }),
       ]);
       const ids = component.recentJobs().map((j) => j.job_id);
@@ -3160,5 +3179,178 @@ describe('JobQueueIndicatorComponent Logic', () => {
         ).toBe(false);
       });
     });
+  });
+});
+
+// ── The visibility gate (hidden tab stops polling) ─────────────────────
+//
+// The house gate (jobs page #3 / nest-reports #7 / room #12): a HIDDEN
+// browser tab issues NO request, a REFOCUS produces EXACTLY ONE immediate
+// refresh (debounced 2 s — never a catch-up burst), and the teardown
+// detaches the listener.
+//
+// These specs drive the PRODUCTION component (the mirror above covers the
+// signal/derivation logic; the gate lives in the production class).
+//
+// jsdom's ``document.visibilityState`` is a prototype getter — the test
+// shadows it with an own property so the production code reads the
+// simulated value.
+function setVisibility(state: 'visible' | 'hidden'): void {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    get: () => state,
+  });
+}
+
+function fireVisibilityChange(): void {
+  document.dispatchEvent(new Event('visibilitychange'));
+}
+
+describe('JobQueueIndicatorComponent — the visibility gate (hidden tab stops polling)', () => {
+  let fixture: ComponentFixture<JobQueueIndicatorComponent>;
+  const jobMock = {
+    listActiveJobs: jest.fn(() => of([])),
+    listRecentJobs: jest.fn(() => of([])),
+    listDeferBlocked: jest.fn(() => of(null)),
+  };
+  const missionMock = {
+    listMissions: jest.fn(() => of({ missions: [], total: 0 })),
+  };
+  const projectMock = {
+    listProjects: jest.fn(() => of({ projects: [] })),
+  };
+  const instanceMock = {
+    listInstanceTree: jest.fn(() => of({ instances: [] })),
+  };
+
+  beforeEach(async () => {
+    jest.useFakeTimers();
+    setVisibility('visible');
+    jobMock.listActiveJobs.mockClear();
+    await TestBed.configureTestingModule({
+      imports: [JobQueueIndicatorComponent],
+      providers: [
+        { provide: JobService, useValue: jobMock },
+        { provide: MissionService, useValue: missionMock },
+        { provide: ProjectService, useValue: projectMock },
+        { provide: TabStateService, useValue: { activeProjectId: signal(null) } },
+        { provide: InstanceService, useValue: instanceMock },
+        { provide: Router, useValue: { navigate: jest.fn() } },
+        { provide: MatSnackBar, useValue: { open: jest.fn() } },
+      ],
+    })
+      // The template is replaced — the gate is a lifecycle concern, not a
+      // rendering one (the embedded panel is not needed here).
+      .overrideComponent(JobQueueIndicatorComponent, { set: { template: '' } })
+      .compileComponents();
+    fixture = TestBed.createComponent(JobQueueIndicatorComponent);
+  });
+
+  afterEach(() => {
+    setVisibility('visible');
+    jest.useRealTimers();
+  });
+
+  it('a HIDDEN tab issues NO request — the poll tick is gated', () => {
+    fixture.detectChanges(); // ngOnInit → the first fetch
+    expect(jobMock.listActiveJobs).toHaveBeenCalledTimes(1);
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+
+    jest.advanceTimersByTime(8000);
+    expect(jobMock.listActiveJobs).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(8000);
+    expect(jobMock.listActiveJobs).toHaveBeenCalledTimes(1);
+  });
+
+  it('a REFOCUS issues EXACTLY ONE refresh (no catch-up burst)', () => {
+    fixture.detectChanges();
+    expect(jobMock.listActiveJobs).toHaveBeenCalledTimes(1);
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+    jest.advanceTimersByTime(8000);
+    expect(jobMock.listActiveJobs).toHaveBeenCalledTimes(1);
+
+    setVisibility('visible');
+    fireVisibilityChange();
+    // The refresh is DEBOUNCED (2 s) — before the window elapses, none.
+    jest.advanceTimersByTime(1999);
+    expect(jobMock.listActiveJobs).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(1);
+    expect(jobMock.listActiveJobs).toHaveBeenCalledTimes(2);
+  });
+
+  it('a rapid hide/show storm collapses into ONE refresh', () => {
+    fixture.detectChanges();
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+
+    jest.advanceTimersByTime(2000);
+    expect(jobMock.listActiveJobs).toHaveBeenCalledTimes(2); // init + ONE refocus
+  });
+
+  it('destroy detaches the visibility listener and clears the interval', () => {
+    fixture.detectChanges();
+    expect(jobMock.listActiveJobs).toHaveBeenCalledTimes(1);
+
+    const removeSpy = jest.spyOn(document, 'removeEventListener');
+    fixture.destroy();
+    expect(removeSpy).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+    removeSpy.mockRestore();
+
+    jest.advanceTimersByTime(80_000);
+    expect(jobMock.listActiveJobs).toHaveBeenCalledTimes(1);
+
+    // A visibilitychange after the teardown issues NO request either.
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+    jest.advanceTimersByTime(2000);
+    expect(jobMock.listActiveJobs).toHaveBeenCalledTimes(1);
+  });
+
+  it('the 8 s cadence is UNCHANGED — the gate suppresses ticks, it does not slow them', () => {
+    fixture.detectChanges();
+    expect(jobMock.listActiveJobs).toHaveBeenCalledTimes(1);
+
+    jest.advanceTimersByTime(8000);
+    expect(jobMock.listActiveJobs).toHaveBeenCalledTimes(2);
+    jest.advanceTimersByTime(8000);
+    expect(jobMock.listActiveJobs).toHaveBeenCalledTimes(3);
+  });
+
+  it('a SUPERSEDED answer never lands — a newer fetch always wins', () => {
+    fixture.detectChanges();
+    expect(jobMock.listActiveJobs).toHaveBeenCalledTimes(1);
+
+    // Two overlapping fetches: the older one answers LAST.
+    const older = new Subject<Job[]>();
+    const newer = new Subject<Job[]>();
+    jobMock.listActiveJobs.mockReturnValueOnce(older.asObservable());
+    jobMock.listActiveJobs.mockReturnValueOnce(newer.asObservable());
+    jobMock.listRecentJobs.mockReturnValue(of([]));
+    missionMock.listMissions.mockReturnValue(of({ missions: [], total: 0 }));
+    instanceMock.listInstanceTree.mockReturnValue(of({ instances: [] }));
+
+    fixture.componentInstance['fetchBadgeSignals']();
+    fixture.componentInstance['fetchBadgeSignals']();
+
+    newer.next([]);
+    newer.complete();
+    older.next([createMockJob({ status: 'running' })]);
+    older.complete();
+
+    // The OLDER answer landed last — the badge must NOT show its job.
+    expect(fixture.componentInstance.activeJobs().length).toBe(0);
   });
 });
