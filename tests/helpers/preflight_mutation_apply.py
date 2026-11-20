@@ -486,6 +486,18 @@ PLANTS: dict[str, dict] = {
             '    trap \'exit 143\' TERM INT HUP  # PLANT M46: no forwarding TERM to the worker (A1)',
         )],
     },
+    # ── self-service-promote Wave 5 (2026-11-20): M47 pins the D4-b arm-time
+    # advance-unavailable refusal token (§2.6 / AC-D4-2 — the behind-floor
+    # pin that cannot self-advance must refuse PRE-NONCE with the NEW
+    # additive token, not the legacy stale-scripts-dir class).
+    "M47": {
+        "file": UTOOLS, "mode": "executable",
+        "why": "the scripts-pin advance-unavailable refusal loses its token (falls back to the legacy stale-scripts-dir class — the operator gets no hand command, AC-D4-2 broken)",
+        "pairs": [(
+            '                            "scripts-advance-unavailable",',
+            '                            "stale-scripts-dir",  # PLANT M47: the advance-unavailable class lost its token',
+        )],
+    },
 }
 
 # ── Pack I legs (phase 6 / wave 4): previously deferred, now EXECUTABLE in

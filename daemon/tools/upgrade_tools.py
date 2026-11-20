@@ -1471,6 +1471,24 @@ _OUTCOME_LABELS: dict[str, str] = {
     # AC-OBS-1 (2026-11-19): the arm-time journalctl capture's verdict
     # (captured / unavailable+reason). Informational.
     "arm-journal-capture": "arm-time journalctl capture verdict",
+    # D2 residue (Wave 4, cosmetic): the watchdog-containment kinds are
+    # NON-TERMINAL observability (test_watchdog_hold_event_kinds pins the
+    # non-terminal property); listed so direct-render surfaces get a human
+    # string instead of the raw key (the .get fallback).
+    "watchdog_probe": "host watchdog probed (state read at runtime)",
+    "watchdog_hold": "watchdog timer held (stop, never disable)",
+    "watchdog_restore": "watchdog timer re-armed (restored)",
+    "watchdog_hold_unavailable": "watchdog hold unavailable (degraded to containment)",
+    "watchdog_hold_deferred": "watchdog restore deferred (RT re-armed itself)",
+    "resume_from_state": "ceremony resume decision (fresh/busy/gates-only/flip-prep)",
+    # D3/D4 (self-service-promote Wave 5): the executor-unit classifier +
+    # scripts-pin advance kinds. ALL NON-TERMINAL (an executor_client_exit
+    # row must not close a pending_op; the halt-for-human token closes
+    # nothing by itself — pinned in test_executor_reaper_classifier.py).
+    "executor_client_exit": "client exited while the ceremony unit is LIVE (op pending)",
+    "executor_liveness_unverifiable": "executor liveness unverifiable (halt-for-human; arm open)",
+    "arm-scripts-advance": "scripts pin self-advanced at arm time (T_old→T_new)",
+    "stage-scripts-advance": "scripts pin advanced/recorded at stage time",
 }
 
 

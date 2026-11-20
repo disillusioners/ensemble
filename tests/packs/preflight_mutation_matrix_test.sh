@@ -9,7 +9,8 @@
 #
 # The matrix covers M1–M32 (the plan-frozen span) PLUS M33–M40 (the
 # verifier-fix wave) PLUS M41–M46 (the 2026-10-30 fix cycle 2: code-council
-# warnings W1/W2/W3 and advisories A1/A2/A5)
+# warnings W1/W2/W3 and advisories A1/A2/A5) PLUS M47 (self-service-promote
+# Wave 5: the D4-b scripts-advance-unavailable token)
 # (implementation-decisions.md §10 — the plan set's own span claim is left
 # untouched: it is a frozen approval artefact). Each row states its
 # verification mode:
@@ -224,6 +225,7 @@ M43|pack:preflight_watchdog_test.sh|D13a a txn-busy refusal row was appended|
 M44|pack:preflight_logging_test.sh|E10b fence LOST: run-a2keep.client.log|
 M45|pack:preflight_watchdog_test.sh|FAIL D14 sourcing died on a garbage knob|
 M46|pack:preflight_shasum_batch_parity_test.sh|A1 leaked temp files|
+M47|pytest:tests/unit/tools/test_upgrade_tools.py::TestScriptsPinSelfAdvanceArmPath::test_ac_d4_2_arm_refuses_scripts_advance_unavailable|test_ac_d4_2_arm_refuses_scripts_advance_unavailable|
 "
 
 deferred_row() { # deferred_row <id> <symptom>
@@ -351,5 +353,5 @@ if [ "$DRY" = "1" ]; then
     printf 'MUTATION MATRIX: DRY-RUN (nothing planted)\n'
     exit 0
 fi
-printf 'MUTATION MATRIX: PASS (span M1–M46 complete — M33–M40 verifier-fix wave, M41–M46 fix cycle 2; deferred rows recorded)\n'
+printf 'MUTATION MATRIX: PASS (span M1–M47 complete — M33–M40 verifier-fix wave, M41–M46 fix cycle 2, M47 Wave-5 D4 token; deferred rows recorded)\n'
 exit 0
