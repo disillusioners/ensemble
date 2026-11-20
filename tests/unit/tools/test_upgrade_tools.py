@@ -5028,6 +5028,66 @@ class TestScriptsPinSelfAdvance:
         # the pin was NOT moved (the drift refusal precedes the checkout)
         assert _git("rev-parse", "HEAD", cwd=fx["pin"]) != fx["target"]
 
+    def test_m4_lock_namespace_is_the_shell_mkdir_dir(
+        self, tmp_path
+    ):
+        """Review-fix m4 (2026-11-20): the arm-time advance takes the SAME
+        lock namespace as the stage lane (executor_family.sh) — the mkdir
+        DIR `<pin_root>.scripts-advance.lock.d`, NOT a private fcntl file
+        (the shell lane cannot flock — lib.sh's Bash-3.2/BSD constraint —
+        so the dir IS the shared protocol). A HELD dir ⇒ unavailable; a
+        successful advance releases it; the OLD `.scripts-advance.lock`
+        file namespace is GONE."""
+        fx = _build_pin_fixture(tmp_path)
+        pin_root = fx["pin"].parents[1]
+        lock_dir = pin_root.parent / f"{pin_root.name}.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text("999999\n", encoding="utf-8")
+        os.utime(lock_dir)  # fresh ⇒ NOT stale-breakable
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "unavailable", (status, detail)
+        assert "advance lock HELD" in detail, detail
+        assert lock_dir.exists(), "a foreign-held lock dir must survive"
+        # remove the holder → the advance proceeds and RELEASES the lock
+        import shutil
+
+        shutil.rmtree(lock_dir)
+        status2, detail2 = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status2 == "advanced", (status2, detail2)
+        assert not lock_dir.exists(), "lock dir must be released after use"
+        assert not (pin_root.parent / f"{pin_root.name}.scripts-advance.lock"
+                    ).exists(), "the old fcntl file namespace must be gone"
+
+    def test_d11_dirty_pin_tree_is_refused_never_moved(
+        self, tmp_path
+    ):
+        """Review-fix d11 (2026-11-20): §2.6(b) fail-closed — a DIRTY
+        operator-owned pin worktree is REFUSED (checkout --detach only on
+        a clean tree); the lock is still released; HEAD does not move."""
+        fx = _build_pin_fixture(tmp_path)
+        pin_root = fx["pin"].parents[1]
+        (fx["pin"] / "lib.sh").write_text(
+            "# operator's local edit\n", encoding="utf-8",
+        )
+        head_before = _git("rev-parse", "HEAD", cwd=fx["pin"])
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "unavailable", (status, detail)
+        assert "DIRTY" in detail, detail
+        assert _git("rev-parse", "HEAD", cwd=fx["pin"]) == head_before
+        assert (fx["pin"] / "lib.sh").read_text(
+            encoding="utf-8") == "# operator's local edit\n"
+        lock_dir = pin_root.parent / f"{pin_root.name}.scripts-advance.lock.d"
+        assert not lock_dir.exists(), "the advance lock must be released"
+
     def test_manifest_without_source_commit_is_unavailable(self, tmp_path):
         fx = _build_pin_fixture(tmp_path)
         status, detail = ut.scripts_pin_self_advance(

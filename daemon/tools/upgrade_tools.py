@@ -87,7 +87,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -4914,27 +4916,100 @@ def scripts_pin_self_advance(
                     "be byte-identical to the shipped family; refusing "
                     "(the staged tree diverged from its own source commit)"
                 )
-    # ── MINOR-11: flock beside the pin worktree, then the HEAD move ────
-    lock_path = Path(f"{pin_root}.scripts-advance.lock")
+    # ── MINOR-11 / review-fix m4 (2026-11-20): ONE lock namespace with the
+    # stage lane. The shell advance (executor_family.sh) takes a MKDIR
+    # DIR LOCK at `<pin_root>.scripts-advance.lock.d` (lib.sh's Bash-3.2/
+    # BSD no-flock(1) constraint — the shell lane CANNOT flock); this
+    # reader previously took an fcntl FILE lock at `.scripts-advance.lock`
+    # — a DIFFERENT namespace: the two lanes did NOT exclude each other
+    # and could interleave HEAD moves. The python side now acquires the
+    # SAME dir lock with the SAME protocol the shell lane uses (mkdir ⇒
+    # holder; on EEXIST, an mtime age > 300s ⇒ stale-break steal; owner/
+    # heartbeat files; release = rm -rf ONLY when the owner file carries
+    # OUR pid — a foreign holder is never touched).
+    lock_dir = Path(f"{pin_root}.scripts-advance.lock.d")
+    lock_taken = False
     try:
-        lock_fh = lock_path.open("a+b")
+        os.mkdir(lock_dir)
+        lock_taken = True
+    except FileExistsError:
+        try:
+            age = time.time() - lock_dir.stat().st_mtime
+        except OSError:
+            age = float("inf")
+        if age > 300.0:
+            # stale-break (mirrors the shell's >300s steal)
+            try:
+                shutil.rmtree(lock_dir)
+            except OSError:
+                pass
+            try:
+                os.mkdir(lock_dir)
+                lock_taken = True
+            except OSError as exc:
+                return "unavailable", (
+                    f"advance lock re-acquire FAILED ({lock_dir}, was "
+                    f"{age:.0f}s stale; {type(exc).__name__}: {exc}) — "
+                    "concurrent arms could interleave HEAD moves; "
+                    + _advance_remedy(pin_root, t, "lock")
+                )
+        else:
+            return "unavailable", (
+                f"advance lock HELD ({lock_dir}, {age:.0f}s old) — a "
+                "concurrent stage or arm is advancing the same pin; "
+                "retry; " + _advance_remedy(pin_root, t, "lock")
+            )
     except OSError as exc:
         return "unavailable", (
-            f"cannot open the advance lockfile {lock_path} "
+            f"cannot create the advance lock dir {lock_dir} "
             f"({type(exc).__name__}: {exc}) — concurrent arms could "
             "interleave HEAD moves; " + _advance_remedy(pin_root, t, "lock")
         )
-    try:
-        import fcntl  # POSIX only — the daemon is Linux-first
+    if lock_taken:
+        try:
+            (lock_dir / "owner").write_text(f"{os.getpid()}\n",
+                                            encoding="utf-8")
+            (lock_dir / "heartbeat").write_text(
+                f"{int(time.time())}\n", encoding="utf-8")
+        except OSError:
+            # owner files are advisory (the dir itself is the lock)
+            pass
 
-        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
-    except (ImportError, OSError) as exc:
-        lock_fh.close()
-        return "unavailable", (
-            f"cannot flock {lock_path} ({type(exc).__name__}: {exc}); "
-            + _advance_remedy(pin_root, t, "lock")
-        )
+    def _release_advance_lock() -> None:
+        # release discipline mirrors lib.sh lock_release / the shell
+        # advance: rm -rf ONLY when this process owns the lock dir (the
+        # owner file carries our pid); a foreign holder is never touched.
+        try:
+            if (lock_dir / "owner").read_text(
+                    encoding="utf-8").strip() == str(os.getpid()):
+                shutil.rmtree(lock_dir)
+        except OSError:
+            pass
+
     try:
+        # ── review-fix d11 (2026-11-20): fail-closed DIRTY-TREE guard —
+        # `checkout --detach` only ever moves a CLEAN, operator-owned pin
+        # worktree (§2.6(b)); a dirty tree would fold local edits into
+        # the advanced HEAD or lose them. Refuse (never move); the
+        # operator advances by hand.
+        dirty_rc, dirty_out, _ = uj.bounded_git_probe(
+            scripts_dir, "status", "--porcelain",
+        )
+        if dirty_rc != 0:
+            return "unavailable", (
+                "pin worktree cleanliness UNVERIFIABLE "
+                f"(git status rc={dirty_rc}) — fail-closed per §2.6(b); "
+                + _advance_remedy(pin_root, t, "cleanliness unprovable")
+            )
+        if dirty_out.strip():
+            return "unavailable", (
+                "the pin worktree is DIRTY "
+                f"({len(dirty_out.strip().splitlines())} status entries) — "
+                "the daemon never moves the HEAD of an operator-owned "
+                "tree with local changes (§2.6(b) fail-closed; clean or "
+                "commit the tree by hand, then re-arm); "
+                + _advance_remedy(pin_root, t, "dirty tree")
+            )
         ok, note = uj.bounded_git_checkout_detach(scripts_dir, t)
         if not ok:
             return "unavailable", (
@@ -4944,12 +5019,9 @@ def scripts_pin_self_advance(
         return "advanced", (
             f"T_old={t_old[:12]} T_new={t[:12]} floor={floor_commit[:12]} "
             f"coverage=empty({len(uj.EXECUTOR_FAMILY_PATHS)} paths) "
-            "parity=byte-identical lock=held-through-checkout"
+            "parity=byte-identical lock=held-through-checkout "
+            f"(shared mkdir namespace {lock_dir.name})"
         )
     finally:
-        try:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
-        except OSError:
-            pass
-        lock_fh.close()
+        _release_advance_lock()
 
