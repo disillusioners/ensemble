@@ -109,6 +109,12 @@ printf '{ path=/usr/local/bin/ensemble-keepalive.sh ; argv[]=/usr/local/bin/ense
 : > "$STATE/$DAEMON_UNIT.active"
 
 STUBBIN="$(mktemp -d -t wd-stub.XXXXXX)"; _register_fixture "$STUBBIN"
+# T10 (tidier fold, 2026-11-20): the --watchdog-restore legs' scratch logs
+# used FIXED /tmp names (`/tmp/wd_rt*_$$.log`) — a kill between the write
+# and the inline rm left them behind (the /tmp leak class). ONE registered
+# scratch dir (per-process-unique mktemp); the fixture-registry EXIT trap
+# owns the cleanup now.
+RTLOGDIR="$(mktemp -d -t wd-rtlog.XXXXXX.$$)"; _register_fixture "$RTLOGDIR"
 cat > "$STUBBIN/systemctl" <<'STUB'
 #!/bin/bash
 # The D2 pack's systemctl stub — a STATE DIR stands in for the host's unit
@@ -332,8 +338,8 @@ SC_LOG="$SC_LOG" SC_STATE="$STATE" SC_TIMERS="$TIMER enabled" \
 WATCHDOG_RT_RUN_ID="run-wd3" WATCHDOG_RT_ITERATION=1 \
 WATCHDOG_HOLD_RT_TTL_S=5 WATCHDOG_HOLD_MAX_ITERATIONS=3 \
 _LIB_WATCHDOG_RT_ENTRY=1 \
-timeout 60 bash "$LIBSH" --watchdog-restore >/tmp/wd_rt_$$.log 2>&1 || RT_RC=$?
-WD3_RT="$(cat /tmp/wd_rt_$$.log 2>/dev/null)"; rm -f /tmp/wd_rt_$$.log
+timeout 60 bash "$LIBSH" --watchdog-restore >"$RTLOGDIR/wd_rt.log" 2>&1 || RT_RC=$?
+WD3_RT="$(cat "$RTLOGDIR/wd_rt.log" 2>/dev/null)"
 assert_eq "AC-D2-3 the restore transient's entry point runs clean" "0" "$RT_RC"
 if [ -f "$STATE/$TIMER.active" ]; then
     _pass "AC-D2-3 the RT re-arms the timer (the executor is gone; the daemon is down)"
@@ -367,8 +373,8 @@ SC_LOG="$SC_LOG" SC_STATE="$STATE" SC_TIMERS="$TIMER enabled" \
 WATCHDOG_RT_RUN_ID="run-wd10" WATCHDOG_RT_ITERATION=1 \
 WATCHDOG_HOLD_RT_TTL_S=5 WATCHDOG_HOLD_MAX_ITERATIONS=3 \
 _LIB_WATCHDOG_RT_ENTRY=1 \
-timeout 60 bash "$LIBSH" --watchdog-restore >/tmp/wd_rt10_$$.log 2>&1 || RT_RC=$?
-WD10_RT="$(cat /tmp/wd_rt10_$$.log 2>/dev/null)"; rm -f /tmp/wd_rt10_$$.log
+timeout 60 bash "$LIBSH" --watchdog-restore >"$RTLOGDIR/wd_rt10.log" 2>&1 || RT_RC=$?
+WD10_RT="$(cat "$RTLOGDIR/wd_rt10.log" 2>/dev/null)"
 assert_eq "AC-D2-10 the deferral path runs clean" "0" "$RT_RC"
 if [ -f "$STATE/$TIMER.active" ]; then
     _fail "AC-D2-10 a live ceremony keeps the hold (the timer stays stopped)" \
@@ -400,8 +406,8 @@ SC_LOG="$SC_LOG" SC_STATE="$STATE" SC_TIMERS="$TIMER enabled" \
 WATCHDOG_RT_RUN_ID="run-wd10b" WATCHDOG_RT_ITERATION=3 \
 WATCHDOG_HOLD_RT_TTL_S=5 WATCHDOG_HOLD_MAX_ITERATIONS=3 \
 _LIB_WATCHDOG_RT_ENTRY=1 \
-timeout 60 bash "$LIBSH" --watchdog-restore >/tmp/wd_rt10b_$$.log 2>&1 || RT_RC=$?
-WD10B_RT="$(cat /tmp/wd_rt10b_$$.log 2>/dev/null)"; rm -f /tmp/wd_rt10b_$$.log
+timeout 60 bash "$LIBSH" --watchdog-restore >"$RTLOGDIR/wd_rt10b.log" 2>&1 || RT_RC=$?
+WD10B_RT="$(cat "$RTLOGDIR/wd_rt10b.log" 2>/dev/null)"
 assert_eq "AC-D2-10 the bounded restore runs clean" "0" "$RT_RC"
 if [ -f "$STATE/$TIMER.active" ]; then
     _pass "AC-D2-10 the iteration bound restores the timer (≤3 — never the old 20)"

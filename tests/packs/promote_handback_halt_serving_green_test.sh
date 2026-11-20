@@ -96,14 +96,18 @@ cleanup_listeners() {
     LISTENER_PIDS=""
     : > "$LISTENER_PID_FILE" 2>/dev/null || true
 }
-trap 'cleanup_listeners; _cleanup_fixtures; rm -f "$LISTENER_PID_FILE"' EXIT
+trap 'cleanup_listeners; _cleanup_fixtures; rm -f "$LISTENER_PID_FILE" "${TMP_LISTENER_LOG:-}"' EXIT
 # TERM/INT (the registered invocation wraps this pack in `timeout 600`):
 # an UNtrapped SIGTERM kills bash WITHOUT running the EXIT trap — the
 # leaked-fixture state the 2026-11-19 prior run left behind. Trap them,
 # clean up, then exit; the EXIT trap re-runs cleanup_listeners
 # (idempotent — dead pids are `kill ... || true`).
-trap 'cleanup_listeners; _cleanup_fixtures; rm -f "$LISTENER_PID_FILE"; exit 143' TERM
-trap 'cleanup_listeners; _cleanup_fixtures; rm -f "$LISTENER_PID_FILE"; exit 130' INT
+# T11 (tidier fold, 2026-11-20): the traps now also remove the listener
+# log (TMP_LISTENER_LOG, a $$-keyed /tmp file previously NEVER removed —
+# the /tmp leak class); `:-`-guarded because the assignment sits below
+# the trap block (an early kill fires the trap pre-assignment).
+trap 'cleanup_listeners; _cleanup_fixtures; rm -f "$LISTENER_PID_FILE" "${TMP_LISTENER_LOG:-}"; exit 143' TERM
+trap 'cleanup_listeners; _cleanup_fixtures; rm -f "$LISTENER_PID_FILE" "${TMP_LISTENER_LOG:-}"; exit 130' INT
 
 # ── fixture helpers ────────────────────────────────────────────────────────
 

@@ -44,7 +44,31 @@ section() { printf '\n== %s ==\n' "$1"; }
 
 # ── the fixture: a releases dir with every version the TSV names ──────────
 FIX="$(mktemp -d -t d5parity.XXXXXX.$$)"
-trap 'rm -rf "$FIX"' EXIT INT TERM
+# T9 (tidier fold, 2026-11-20): the old trap was `rm -rf "$FIX"` alone — a
+# SIGKILL/tool-timeout landing between a sed-plant and its restore left a
+# planted defect in TRACKED sources AND destroyed the only backup (the
+# exact class that poisoned the mid-wave verify run). Mirrors
+# preflight_mutation_matrix_test.sh's restore_inflight: an EXIT/INT/TERM
+# trap with a PLANTED_LIST-scoped reclaim — nothing planted ⇒ nothing
+# touched (a refusing pre-run check fires the trap harmlessly).
+PLANTED_LIST="$FIX/planted.list"
+: > "$PLANTED_LIST"
+restore_plants() {
+    [ -s "$PLANTED_LIST" ] || return 0
+    local f bak
+    while IFS="$(printf "\t")" read -r f bak; do
+        [ -n "$f" ] || continue
+        if [ -f "$bak" ]; then
+            cp "$bak" "$f" && printf 'trap: restored plant %s\n' "$f" >&2
+        fi
+    done < "$PLANTED_LIST"
+    : > "$PLANTED_LIST"
+}
+pack_cleanup() {
+    restore_plants
+    rm -rf "$FIX"
+}
+trap pack_cleanup EXIT INT TERM
 for v in vA vB vC vD vE vT; do
     mkdir -p "$FIX/releases/$v"
     printf '{"manifest_version":"1.0.0","binary_version":"%s","rollback_safe":true}\n' "$v" \
@@ -169,6 +193,7 @@ restore_file() {
 
 mut_lib_sha="$(sha256sum "$LIBSH" | cut -d' ' -f1)"
 cp "$LIBSH" "$FIX/lib.sh.mutation-backup"
+printf '%s\t%s\n' "$LIBSH" "$FIX/lib.sh.mutation-backup" >> "$PLANTED_LIST"
 # M-LIB (F3): the invalid-R0 halt collapses to a fall-through
 sed -i "s|printf 'halt capture_invalid'|: # MUTATION|" "$LIBSH"
 if grep -q "MUTATION" "$LIBSH"; then
@@ -189,6 +214,7 @@ restore_file "$LIBSH" "$mut_lib_sha" "$FIX/lib.sh.mutation-backup"
 
 mut_lau_sha="$(sha256sum "$LAUNCHER" | cut -d' ' -f1)"
 cp "$LAUNCHER" "$FIX/launcher.sh.mutation-backup"
+printf '%s\t%s\n' "$LAUNCHER" "$FIX/launcher.sh.mutation-backup" >> "$PLANTED_LIST"
 # M-LAU (rung order): R0 wins → demoted to "current wins" (drop the
 # short-circuit by making R0 never set the candidate)
 sed -i "s|cand=\"\$cap\"; src=\"captured\"|: # MUTATION|" "$LAUNCHER"
@@ -203,6 +229,7 @@ restore_file "$LAUNCHER" "$mut_lau_sha" "$FIX/launcher.sh.mutation-backup"
 
 mut_py_sha="$(sha256sum "$REPO_ROOT/daemon/services/rollback_target_chain.py" | cut -d' ' -f1)"
 cp "$REPO_ROOT/daemon/services/rollback_target_chain.py" "$FIX/rollback_target_chain.py.mutation-backup"
+printf '%s\t%s\n' "$REPO_ROOT/daemon/services/rollback_target_chain.py" "$FIX/rollback_target_chain.py.mutation-backup" >> "$PLANTED_LIST"
 # M-PY (AC-D5-7): the R1-vs-R0 halt is removed
 sed -i "s|if cand and r1to != cand:|if False and cand and r1to != cand:|" "$REPO_ROOT/daemon/services/rollback_target_chain.py"
 if grep -q "if False and cand" "$REPO_ROOT/daemon/services/rollback_target_chain.py"; then
