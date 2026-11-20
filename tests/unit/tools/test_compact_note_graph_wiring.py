@@ -275,10 +275,10 @@ async def test_swap_armed_produces_sentinel_doc_preserved():
     assert isinstance(out, dict)
     channel = out["messages"]
     assert isinstance(channel[0], RemoveMessage)
-    note = channel[1]
-    assert isinstance(note, HumanMessage)
-    doc = next(m for m in channel if isinstance(m, SystemMessage))
+    doc = channel[1]
     assert isinstance(doc, SystemMessage)
+    note = channel[2]
+    assert isinstance(note, HumanMessage)
     body = doc.content if isinstance(doc.content, str) else str(doc.content)
     assert "THE COMPACTED OUTPUT" in body
     assert "SECTION DETAIL below remains complete" not in body
@@ -653,7 +653,7 @@ async def test_c1_the_exchange_is_consumed_four_legs():
         for tc in (getattr(m, "tool_calls", None) or []):
             assert NOTE not in str(tc)
     # The doc carries the reply, NOT the note.
-    doc = next(m for m in channel if isinstance(m, SystemMessage))
+    doc = channel[1]
     body = doc.content if isinstance(doc.content, str) else str(doc.content)
     assert "THE COMPACTED SUMMARY" in body
     assert NOTE not in body

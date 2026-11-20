@@ -14110,6 +14110,7 @@ def create_compact_note_agent_node(
                     mid_turn=True,
                     abort_policy="fail_open",
                     graph=graph,
+                    hoist_injected=False,
                 )
             except Exception as exc:
                 logger.warning(
@@ -14142,7 +14143,7 @@ def create_compact_note_agent_node(
             rebuild_ok = True
             try:
                 from daemon.compaction import build_sentinel_replacement
-                channel = build_sentinel_replacement(result_obj, state_msgs, compacted_ids=result_obj.compacted_ids)
+                channel = build_sentinel_replacement(result_obj, state_msgs, compacted_ids=result_obj.compacted_ids, hoist_injected=False)
             except Exception as exc:
                 rebuild_ok = False
                 logger.warning(
