@@ -83,7 +83,7 @@ No shape is worse after the fix; the two breaching synthetic shapes land at 0.00
 ## How to verify
 
 ```bash
-# 1. the lane packs + the regression guard (merged tree @ ce2a55952)
+# 1. the lane packs + the regression guard (merged tree @ the branch tip — `git rev-parse HEAD`)
 cd /home/nea/ensemble-src-wt-row2-int && set -a && . ./.env && set +a
 bash test/packs/compaction_tier_a_byte_identity_unit_test.sh     # expect 158 passed, RESULT: PASS
 bash test/packs/tier_b_token_drift_bound_unit_test.sh             # expect RESULT: PASS (38 nodes + 13 shapes x 4 sizes)
