@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.19] — 2026-11-20
+
+### Changed — sonic-leader roster gains maintenancer (nest-maintenance/repair escape hatch): meta v1.1.2 + census pin + sonic_agent_defs pack update; sonic-leader prompt artifacts enumerate the new seat + prompt-artifact seal re-pin; version bump 0.31.18 -> 0.31.19. Zero migrations, zero daemon-code changes.
+
 ## [0.31.18] — 2026-11-20
 
 ### Changed — self-service promote choreography (wi-aa89581b family): zero-operator ceremony seam fixes D1-D6
