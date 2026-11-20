@@ -1,0 +1,1486 @@
+{
+  "meta": {
+    "purpose": "c2r-hoist-a BASE fixture — agent-visible OpenAI tool payloads of the six cohort-A factories, captured PRE-HOIST from the SECOND (warm) build of each factory.",
+    "invariant": "After hoisting the factory-local input models to module level, the warm-build payloads MUST be byte-identical to these entries (json.dumps equality, exact key order, no sort_keys).",
+    "captured_utc": "2026-11-20T08:08:40.819476+00:00",
+    "python": "3.14.7",
+    "pydantic": "2.12.5",
+    "langchain_core": "1.2.16",
+    "base_commit": "3506a326d",
+    "entry_shape": "[tool_name, convert_to_openai_tool(tool)]"
+  },
+  "factories": {
+    "create_job_tools": [
+      [
+        "job_create",
+        {
+          "type": "function",
+          "function": {
+            "name": "job_create",
+            "description": "Submit a new job to the queue. Use tool_help(\"job_create\") for details.\n\nqueue_id accepts a queue ID or a system-queue alias (e.g. \"parallel\"\n= system_parallel_queue; case-insensitive). When omitted: ari/jober\ntarget system_parallel_queue by default; other agents get the\nservice default (FIFO for task jobs).",
+            "parameters": {
+              "properties": {
+                "agent_id": {
+                  "description": "Agent ID to run the job (e.g., 'developer', 'leader')",
+                  "type": "string"
+                },
+                "message": {
+                  "description": "The instruction/message for the agent",
+                  "type": "string"
+                },
+                "project_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Project ID for isolation and routing"
+                },
+                "priority": {
+                  "default": 5,
+                  "description": "Job priority 1-10 (1=lowest, 10=highest)",
+                  "maximum": 10,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "queue_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Queue to submit to: a queue ID or a system-queue alias (system_fifo_queue|fifo, system_parallel_queue|parallel, system_background_queue|background, system_defer_queue|defer, system_kb_fifo_queue|kb_fifo; case-insensitive). Omit to use your agent default (ari/jober: system_parallel_queue) or the service default (FIFO)."
+                },
+                "idempotency_key": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Deduplication key"
+                },
+                "metadata": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Custom key-value metadata"
+                },
+                "source": {
+                  "default": "api",
+                  "description": "DEPRECATED and IGNORED (NIT-7, P2.3 review cycle 1): the server derives source UNCONDITIONALLY since B3.5 (agent:<caller> for agent callers, internal_agent:unknown otherwise) — any value passed here has no effect. Param retained purely for schema compat; removal deferred.",
+                  "type": "string"
+                },
+                "watch": {
+                  "default": true,
+                  "description": "Watch the job for lifecycle events. Default: True (FP4-PP2 2026-10-03 user-approved flip — agent-lane auto-watches so completions are never lost). Explicit watch=False still wins.",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "agent_id",
+                "message"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "job_get",
+        {
+          "type": "function",
+          "function": {
+            "name": "job_get",
+            "description": "Get job details by ID. Use tool_help(\"job_get\") for details.",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "job_list",
+        {
+          "type": "function",
+          "function": {
+            "name": "job_list",
+            "description": "List jobs with optional filters. Use tool_help(\"job_list\") for details.\n\n``status`` answers the transport question (\"was my submission\nhandled?\"). For the outcome question (\"is the work done?\"),\nuse the mission tools (``get_mission`` / ``await_mission``).\nThe ``mission_ref`` cross-reference on every terminal job\npayload ties the two layers together in a single read.",
+            "parameters": {
+              "properties": {
+                "project_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Filter by project ID"
+                },
+                "statuses": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Filter by job status. Valid values: pending, processing, completed, failed, cancelled, dead_letter. Aliases accepted: running (=processing), done (=completed), error (=failed), waiting (=pending). Case-insensitive."
+                },
+                "queue_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Filter by queue ID"
+                },
+                "offset": {
+                  "default": 0,
+                  "description": "Number of jobs to skip",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "limit": {
+                  "default": 50,
+                  "description": "Maximum jobs to return",
+                  "maximum": 100,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "include_deleted": {
+                  "default": false,
+                  "description": "Include soft-deleted jobs",
+                  "type": "boolean"
+                },
+                "job_types": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "M2 (mission-class, 2026-09-02): optional JobItem.job_type filter — accepted values are ``task`` and ``message``. Default: BOTH kinds. Additive vs the legacy ``statuses`` filter, which is RETAINED through the M3 window (contract draft §4). On the resolver path the filter is applied client-side (the resolver's ``list_work`` does not narrow by job_type today)."
+                }
+              },
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "job_cancel",
+        {
+          "type": "function",
+          "function": {
+            "name": "job_cancel",
+            "description": "Cancel a pending or processing job. Use tool_help(\"job_cancel\") for details.",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "job_retry",
+        {
+          "type": "function",
+          "function": {
+            "name": "job_retry",
+            "description": "Retry a failed job. Use tool_help(\"job_retry\") for details.",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "job_delete",
+        {
+          "type": "function",
+          "function": {
+            "name": "job_delete",
+            "description": "Soft delete a job. Use tool_help(\"job_delete\") for details.",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "job_restore",
+        {
+          "type": "function",
+          "function": {
+            "name": "job_restore",
+            "description": "Restore a soft-deleted job. Use tool_help(\"job_restore\") for details.",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "queue_list",
+        {
+          "type": "function",
+          "function": {
+            "name": "queue_list",
+            "description": "List all queues for a project. Use tool_help(\"queue_list\") for details.",
+            "parameters": {
+              "properties": {
+                "project_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "project_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "queue_create",
+        {
+          "type": "function",
+          "function": {
+            "name": "queue_create",
+            "description": "Create a new queue for a project. Use tool_help(\"queue_create\") for details.",
+            "parameters": {
+              "properties": {
+                "project_id": {
+                  "description": "The project ID",
+                  "type": "string"
+                },
+                "queue_name": {
+                  "description": "Unique queue name within the project",
+                  "type": "string"
+                },
+                "queue_type": {
+                  "default": "fifo",
+                  "description": "Queue type: 'fifo' or 'parallel'",
+                  "type": "string"
+                },
+                "concurrency_limit": {
+                  "default": 1,
+                  "description": "Max concurrent jobs",
+                  "maximum": 20,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "description": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Queue description"
+                }
+              },
+              "required": [
+                "project_id",
+                "queue_name"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "queue_update",
+        {
+          "type": "function",
+          "function": {
+            "name": "queue_update",
+            "description": "Update queue settings. Use tool_help(\"queue_update\") for details.",
+            "parameters": {
+              "properties": {
+                "queue_id": {
+                  "description": "The queue ID to update",
+                  "type": "string"
+                },
+                "project_id": {
+                  "description": "The project ID (for ownership validation)",
+                  "type": "string"
+                },
+                "queue_name": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "New queue name"
+                },
+                "concurrency_limit": {
+                  "anyOf": [
+                    {
+                      "maximum": 20,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "New concurrency limit"
+                },
+                "is_paused": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Pause or resume the queue"
+                }
+              },
+              "required": [
+                "queue_id",
+                "project_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "dlq_list",
+        {
+          "type": "function",
+          "function": {
+            "name": "dlq_list",
+            "description": "List dead letter queue items. Use tool_help(\"dlq_list\") for details.",
+            "parameters": {
+              "properties": {
+                "project_id": {
+                  "description": "Filter by project ID",
+                  "type": "string"
+                },
+                "queue_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Filter by queue ID"
+                },
+                "limit": {
+                  "default": 50,
+                  "description": "Maximum items to return",
+                  "maximum": 100,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "project_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "dlq_replay",
+        {
+          "type": "function",
+          "function": {
+            "name": "dlq_replay",
+            "description": "Replay a job from the dead letter queue. Use tool_help(\"dlq_replay\") for details.",
+            "parameters": {
+              "properties": {
+                "dlq_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "dlq_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "job_continue",
+        {
+          "type": "function",
+          "function": {
+            "name": "job_continue",
+            "description": "Continue a completed job by sending a new message to its instance.\n\nUse tool_help(\"job_continue\") for details.",
+            "parameters": {
+              "properties": {
+                "old_job_id": {
+                  "description": "Job ID of a terminal job to continue from",
+                  "type": "string"
+                },
+                "message": {
+                  "description": "New message/instruction to send to the instance",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "old_job_id",
+                "message"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "job_messages",
+        {
+          "type": "function",
+          "function": {
+            "name": "job_messages",
+            "description": "Get conversation messages for a job's instance tree.\n\nCollects messages from the root instance and all descendants.\nUse tool_help(\"job_messages\") for details.",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "description": "Job ID to inspect",
+                  "type": "string"
+                },
+                "limit": {
+                  "default": 50,
+                  "description": "Max messages to return",
+                  "maximum": 200,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "offset": {
+                  "default": 0,
+                  "description": "Pagination offset",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "job_tree",
+        {
+          "type": "function",
+          "function": {
+            "name": "job_tree",
+            "description": "Get the instance hierarchy tree for a job.\n\nShows all instances spawned by the job in a tree structure.\nUse tool_help(\"job_tree\") for details.",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "description": "Job ID to inspect",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "job_progress",
+        {
+          "type": "function",
+          "function": {
+            "name": "job_progress",
+            "description": "Get a progress snapshot for a running job.\n\nUse tool_help(\"job_progress\") for details.",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "description": "Job ID to check progress for",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "job_inject",
+        {
+          "type": "function",
+          "function": {
+            "name": "job_inject",
+            "description": "Inject a message into a RUNNING job's instance mid-execution.\n\nUse tool_help(\"job_inject\") for details.",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "description": "Job ID whose instance will receive the injection",
+                  "type": "string"
+                },
+                "message": {
+                  "description": "Text to inject into the live turn",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id",
+                "message"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "watch_job",
+        {
+          "type": "function",
+          "function": {
+            "name": "watch_job",
+            "description": "Watch a job for lifecycle events. If the job is already in a terminal state, immediate notification is attempted (the reply reflects the held/delivered split — see F-2 fixback).\n\nUse tool_help(\"watch_job\") for details.",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "description": "The job ID to watch",
+                  "type": "string"
+                },
+                "events": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Specific events to watch for (default: all terminal states + in_progress). M2 (mission-class): the value ``mission_terminal`` is OPT-IN — when included, the watcher fires ONLY when admission AND mission liveness are BOTH terminal (contract draft §3.5). Default watchers (without ``mission_terminal``) keep transport-only semantics — back-compat preserved."
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "unwatch_job",
+        {
+          "type": "function",
+          "function": {
+            "name": "unwatch_job",
+            "description": "Stop watching a job for lifecycle events.\n\nThe handle is tolerant (toolset reshape 2026-09-19, design §7):\nit may be a receipt job_id OR a mission_id — a mission handle\nresolves to every watched receipt of that mission and removes\nthem all.\n\nUse tool_help(\"unwatch_job\") for details.",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "description": "The job ID to stop watching",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "list_watched_jobs",
+        {
+          "type": "function",
+          "function": {
+            "name": "list_watched_jobs",
+            "description": "List all jobs the current instance is watching.\n\nRows are labeled by resolving their handles (toolset reshape\n2026-09-19, design §7): ``mission handle`` (the row keys on a\nmission id), ``receipt of mission <id>`` (a receipt-keyed row\nand the mission it belongs to), or unlabeled (unresolvable\nreceipt).\n\nUse tool_help(\"list_watched_jobs\") for details.",
+            "parameters": {
+              "properties": {},
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "watch_jobs",
+        {
+          "type": "function",
+          "function": {
+            "name": "watch_jobs",
+            "description": "Watch multiple jobs for lifecycle events. Bulk version of watch_job.\n\nUse tool_help(\"watch_jobs\") for details.",
+            "parameters": {
+              "properties": {
+                "job_ids": {
+                  "description": "List of job IDs to watch",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "events": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Specific events to watch for (default: all terminal states + in_progress). M2 (mission-class): the value ``mission_terminal`` is OPT-IN — same semantics as ``watch_job`` (contract draft §3.5)."
+                }
+              },
+              "required": [
+                "job_ids"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "job_answer",
+        {
+          "type": "function",
+          "function": {
+            "name": "job_answer",
+            "description": "Submit the orchestrator's answer to a pending question pack on a watched job.\n\nUse tool_help(\"job_answer\") for details.",
+            "parameters": {
+              "properties": {
+                "work_id": {
+                  "description": "The work_id whose instance asked the question (matches the work_id on the ``[JOB_EVENT] Job ... question requested ❓`` line that the watcher received — the question event is mission-scoped, so this may be any receipt of the asking mission; resolution to the asker is watcher-independent).",
+                  "type": "string"
+                },
+                "answers": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "User-supplied answers. Key by question id (the id carried in the pending pack payload) — text-keyed fallbacks are also accepted by the helper.",
+                  "type": "object"
+                },
+                "question_pack_id": {
+                  "description": "The pack id from the pending question payload (``question_pack.id`` echoed in the ``[JOB_EVENT]`` body). Mandatory for the T1″ stale-answers hijack guard; a mismatch is rejected with ``QUESTION_PACK_MISMATCH``.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "work_id",
+                "answers",
+                "question_pack_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "job_pause",
+        {
+          "type": "function",
+          "function": {
+            "name": "job_pause",
+            "description": "Pause the instance behind an ACTIVE job and cascade to its lineage. Use tool_help(\"job_pause\") for details.",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "description": "The work_id of an ACTIVE (non-terminal, instance-bearing) job to pause. Its whole instance lineage pauses with it.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "job_resume",
+        {
+          "type": "function",
+          "function": {
+            "name": "job_resume",
+            "description": "Resume the instance behind a PAUSED job and cascade to its lineage. Use tool_help(\"job_resume\") for details.",
+            "parameters": {
+              "properties": {
+                "job_id": {
+                  "description": "The work_id of an ACTIVE job whose instance is paused. Its whole instance lineage resumes with it.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "job_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ]
+    ],
+    "create_mission_watch_tools": [
+      [
+        "watch_mission",
+        {
+          "type": "function",
+          "function": {
+            "name": "watch_mission",
+            "description": "Watch a MISSION (not a receipt) and be revived at mission-terminal.\n\nAccepts a mission_id or the job_id receipt returned by\njob_create / job_continue, and arms one watcher row per\ncurrently-live receipt (already-settled receipts are skipped —\nno replay of historical receipts). Mid-flight QA events\n(``question requested ❓`` / ``stuck awaiting answer ⏳`` /\nescalation) are MISSION-SCOPED at emission time and\nevents-filter-exempt: armed rows receive them even\n``mission_terminal``-only — but TERMINAL coverage stays\nper-receipt delta-arm (receipts minted after this call need a\nre-call).\n\nUse tool_help(\"watch_mission\") for details.",
+            "parameters": {
+              "properties": {
+                "target": {
+                  "description": "What to watch: a mission_id (= instance_id) OR a job reference — the job_id receipt returned by job_create / job_continue. The receipt form works even before the mission is dispatched.",
+                  "type": "string"
+                },
+                "events": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Watch events. Default (recommended): ['mission_terminal'] — the watch fires ONLY when admission AND mission liveness are both terminal (HOLD semantics). Explicit transport event names are accepted for advanced use."
+                }
+              },
+              "required": [
+                "target"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ]
+    ],
+    "create_board_tools": [
+      [
+        "board_create",
+        {
+          "type": "function",
+          "function": {
+            "name": "board_create",
+            "description": "Create a durable work item on the global board. Use tool_help(\"board_create\") for details.",
+            "parameters": {
+              "properties": {
+                "title": {
+                  "description": "Short human title (1-512 chars)",
+                  "type": "string"
+                },
+                "body": {
+                  "default": "",
+                  "description": "Markdown body. Stored as body_md.",
+                  "type": "string"
+                },
+                "project_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional project id (nullable FK)"
+                },
+                "tags": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Tags, e.g. ['telegram','deploy']"
+                },
+                "due_at": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "tz-aware ISO-8601 deadline, e.g. '2026-10-21T09:00:00+07:00'"
+                },
+                "priority": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "1 (lowest) .. 5 (highest); omit for unset"
+                }
+              },
+              "required": [
+                "title"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "board_update",
+        {
+          "type": "function",
+          "function": {
+            "name": "board_update",
+            "description": "Update a board item and/or append a note. Use tool_help(\"board_update\") for details.",
+            "parameters": {
+              "properties": {
+                "id": {
+                  "description": "Board item id, e.g. 'wi-1a2b3c4d'",
+                  "type": "string"
+                },
+                "status": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "todo | in_progress | blocked | done"
+                },
+                "note": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Append a note to the timeline. Notes are append-only."
+                },
+                "add_job_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Link a job id to this item"
+                },
+                "body": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Replace the markdown body"
+                },
+                "due_at": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Replace the deadline (tz-aware ISO-8601)"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "board_list",
+        {
+          "type": "function",
+          "function": {
+            "name": "board_list",
+            "description": "List board items, most recently updated first. Use tool_help(\"board_list\") for details.",
+            "parameters": {
+              "properties": {
+                "status": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "todo | in_progress | blocked | done | 'open' (= todo|in_progress|blocked) | omit for all"
+                },
+                "project_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Filter by project id"
+                },
+                "tag": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Filter by a single tag"
+                },
+                "due_before": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Only items due strictly before this tz-aware ISO-8601 instant. Any UTC offset is accepted; the service normalises it to UTC before the comparison — a raw string never reaches the query."
+                },
+                "limit": {
+                  "default": 50,
+                  "description": "Max items to return (1-200)",
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "board_get",
+        {
+          "type": "function",
+          "function": {
+            "name": "board_get",
+            "description": "Fetch one board item with its full note timeline. Use tool_help(\"board_get\") for details.",
+            "parameters": {
+              "properties": {
+                "id": {
+                  "description": "Board item id",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ]
+    ],
+    "create_board_link_tools": [
+      [
+        "board_link",
+        {
+          "type": "function",
+          "function": {
+            "name": "board_link",
+            "description": "Mint (or regenerate) the passcode-gated public link for the board.\n\nThe board at ``/views/public/board/index.html`` is rendered FRESH\nFROM THE DATABASE on every request — it always shows the current\nrows, never a stale snapshot. This tool mints the ONE passcode\nrow that authorises reading it.\n\nArgs:\n    refresh: Issue a NEW passcode. The generation is bumped, every\n        outstanding grant cookie is revoked, and a lockout is\n        cleared. This is the only recovery path after 10 wrong\n        attempts. The default (``False``) is IDEMPOTENT — the same\n        passcode and generation come back.\n\nReturns:\n    The five-line labeled shape::\n\n        Public URL: /views/public/board/index.html\n        Passcode: 7KQ2ZM\n        Authenticated URL: /views/board/index.html\n        Generation: 1\n        Locked: no\n\n    The ``Authenticated URL`` line is INFORMATIONAL — the direct\n    lane 404s by design (the board is a DB-rendered public\n    surface). On any rejection, a typed ``\"Error: ...\"`` string.",
+            "parameters": {
+              "properties": {
+                "refresh": {
+                  "default": false,
+                  "description": "Issue a NEW passcode: bump the generation (revoking every outstanding grant cookie) and clear a lockout. This is the only recovery path after 10 wrong attempts.",
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            }
+          }
+        }
+      ]
+    ],
+    "create_scheduling_tools": [
+      [
+        "task_schedule",
+        {
+          "type": "function",
+          "function": {
+            "name": "task_schedule",
+            "description": "Create a scheduled task. Use tool_help(\"task_schedule\") for details.",
+            "parameters": {
+              "properties": {
+                "label": {
+                  "description": "Unique human-readable name for the schedule (1-128 chars)",
+                  "type": "string"
+                },
+                "message": {
+                  "description": "The message sent to the agent when the schedule fires",
+                  "type": "string"
+                },
+                "when": {
+                  "description": "User-stated local time: ISO 8601 ('2026-10-15 06:00' or '2026-10-15T06:00:00+07:00') for recurrence=once; 'HH:MM' for daily/weekly",
+                  "type": "string"
+                },
+                "recurrence": {
+                  "description": "once | daily | weekly | cron",
+                  "type": "string"
+                },
+                "timezone": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "IANA timezone for `when` (e.g. 'Asia/Ho_Chi_Minh'); omit for the tz chain (user timezone setting -> default -> host-local -> UTC with a warning)"
+                },
+                "weekday": {
+                  "anyOf": [
+                    {
+                      "maximum": 6,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Day of week for recurrence=weekly: 0=Sunday..6=Saturday"
+                },
+                "cron_expression": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Raw cron expression; required when recurrence='cron'"
+                },
+                "agent_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Agent to invoke when the schedule fires; omit for yourself (the calling agent)"
+                },
+                "project_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Project ID for job routing and list filtering"
+                },
+                "priority": {
+                  "default": 5,
+                  "description": "Job priority 1-10 (1=lowest, 10=highest)",
+                  "maximum": 10,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "instance_mode": {
+                  "default": "new_instance",
+                  "description": "new_instance (default) | reuse_instance",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "label",
+                "message",
+                "when",
+                "recurrence"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "task_schedule_list",
+        {
+          "type": "function",
+          "function": {
+            "name": "task_schedule_list",
+            "description": "List scheduled tasks (cancelled hidden by default). Use tool_help(\"task_schedule_list\") for details.",
+            "parameters": {
+              "properties": {
+                "status": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Filter by status: running | stopped | cancelled"
+                },
+                "project_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Filter by project ID"
+                },
+                "include_cancelled": {
+                  "default": false,
+                  "description": "Include cancelled schedules (hidden by default)",
+                  "type": "boolean"
+                },
+                "agent_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Filter by invoked agent; omit for yourself (the calling agent)"
+                }
+              },
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "task_schedule_cancel",
+        {
+          "type": "function",
+          "function": {
+            "name": "task_schedule_cancel",
+            "description": "Cancel a scheduled task (TERMINAL — history is preserved). Use tool_help(\"task_schedule_cancel\") for details.",
+            "parameters": {
+              "properties": {
+                "source_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Schedule ID (from task_schedule / task_schedule_list)"
+                },
+                "label": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Schedule label — alternative to source_id (exact match; first match wins on collision)"
+                }
+              },
+              "type": "object"
+            }
+          }
+        }
+      ],
+      [
+        "task_schedule_update",
+        {
+          "type": "function",
+          "function": {
+            "name": "task_schedule_update",
+            "description": "Update a scheduled task (reschedule / re-message / pause / resume). Use tool_help(\"task_schedule_update\") for details.",
+            "parameters": {
+              "properties": {
+                "source_id": {
+                  "description": "Schedule ID to update",
+                  "type": "string"
+                },
+                "label": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Rename the schedule (must stay unique)"
+                },
+                "message": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Replace the fired message"
+                },
+                "when": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "New trigger time (ISO 8601 for once; 'HH:MM' for daily/weekly)"
+                },
+                "timezone": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "IANA timezone; re-interprets wall-clock times in this timezone"
+                },
+                "paused": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "true = pause (resumable; a schedule left paused past the configured retention window (default 14d) is garbage-collected — history archived, config removed; resume before then is untouched. To protect a paused schedule, raise SERVICES_SOURCES_GC_TERMINAL_RETENTION_DAYS; recovery after a reap is manual, from the archive.); false = resume"
+                },
+                "priority": {
+                  "anyOf": [
+                    {
+                      "maximum": 10,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Job priority 1-10"
+                }
+              },
+              "required": [
+                "source_id"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ]
+    ],
+    "create_view_write_tools": [
+      [
+        "view_write",
+        {
+          "type": "function",
+          "function": {
+            "name": "view_write",
+            "description": "Publish an HTML page as a passcode-gated public link.\n\nWrites ONE HTML document under the daemon-global ``reports``\nroot and returns the PUBLIC URL + the 6-char passcode in a\nsingle call. The customer opens the public URL, enters the\npasscode, and sees the page.\n\nArgs:\n    path: Relative path under the ``reports`` root. ``.html`` is\n        appended when the path carries no extension; any other\n        extension is refused.\n    html: The full HTML document. Served byte-for-byte — the\n        tool never wraps, mutates or sanitises it.\n    title: Human label (1-200 chars). Echoed only.\n    overwrite: Replace an existing page. Without it, an\n        existing path is an error and the original bytes stay.\n    refresh: Bump the passcode generation — new code, outstanding\n        grants revoked. The lockout-recovery path.\n\nReturns:\n    A stable labeled-line string: ``Public URL`` / ``Passcode``\n    / ``Authenticated URL`` / ``Generation`` / ``Locked`` (the\n    five ``view_link``-compatible lines) followed by ``Title`` /\n    ``Bytes`` / ``Overwrote``. On any rejection, a typed\n    ``\"Error: ...\"`` string — never a partial URL, never a\n    crash.",
+            "parameters": {
+              "properties": {
+                "path": {
+                  "description": "Relative path under the reports root, e.g. '2026-10-19/board.html'. '.html' is appended when the path carries no extension. No leading '/', no '..' segments, no backslashes, no control characters.",
+                  "type": "string"
+                },
+                "html": {
+                  "description": "The full HTML document (UTF-8). Served byte-for-byte; never mutated, never wrapped.",
+                  "type": "string"
+                },
+                "title": {
+                  "description": "Human label (1-200 chars). Echoed in the result; NOT persisted and NOT injected into the HTML.",
+                  "type": "string"
+                },
+                "overwrite": {
+                  "default": false,
+                  "description": "Replace an existing page. Without it, an existing path is an error. An overwrite does NOT change the passcode or the URL.",
+                  "type": "boolean"
+                },
+                "refresh": {
+                  "default": false,
+                  "description": "Bump the passcode generation (new code, revokes outstanding grants). This is the lockout-recovery path.",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "path",
+                "html",
+                "title"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ]
+    ]
+  }
+}
