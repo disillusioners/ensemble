@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.22] — 2026-11-20
+
 ### Fixed — prompt_reload compact-note wake-up: the post-compaction history swap is now a FRESH message list
 
 - The post-compaction message list is EXACTLY `[compaction doc ("Compacted context"), a new [SYSTEM CONTEXT: Compacted Context] note]` + one natural model ack — ZERO pre-compaction messages survive (the verbatim tail splice is removed; Emperor ruling 2026-11-20).
