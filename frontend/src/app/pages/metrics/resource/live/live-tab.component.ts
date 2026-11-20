@@ -22,6 +22,13 @@ import {
 import { ResourcesService } from '../../../../services/resources.service';
 
 /**
+ * The refocus debounce (ms) — rapid tab switches collapse into ONE
+ * immediate refresh (the jobs-page exemplar's discipline). A hidden tab
+ * stops ISSUING polls; a refocus produces exactly ONE catch-up read.
+ */
+const REFOCUS_DEBOUNCE_MS = 2000;
+
+/**
  * Live tab — gated 8 s poll of `/api/resources/live` + `/self-cost`.
  *
  * Semantics (D6 / D7, proven by `live-tab.component.spec.ts`):
@@ -37,6 +44,9 @@ import { ResourcesService } from '../../../../services/resources.service';
  *    (no flicker); a failed-first fetch (no data) keeps the branch up.
  *  - A tick whose predecessor is still in flight is SKIPPED, never
  *    queued (R4 — a slow/hung endpoint cannot pile up ticks).
+ *  - A hidden browser tab issues NO tick (the VISIBILITY GATE — the
+ *    cadence is unchanged for a VISIBLE tab); a refocus produces
+ *    exactly ONE immediate refresh (debounced 2 s).
  *  - The tick lives in a Material-lazy-mounted tab body, so leaving
  *    the tab destroys the component and `ngOnDestroy` clears the
  *    interval — no polling while the tab is inactive.
@@ -81,7 +91,25 @@ export class LiveTabComponent implements OnInit, OnDestroy {
 
   private pollHandle: ReturnType<typeof setInterval> | null = null;
 
+  /**
+   * The browser tab's visibility — the POLL GATE. A hidden tab stops
+   * ISSUING the 8 s live-resources poll (the cadence is unchanged for
+   * VISIBLE tabs).
+   */
+  private browserVisible = true;
+
+  /**
+   * The refocus debounce handle — rapid tab switches collapse into ONE
+   * immediate refresh (the timer id is kept so a second focus cancels and
+   * re-arms it instead of queueing a second refresh).
+   */
+  private refocusTimer: ReturnType<typeof setTimeout> | null = null;
+
   ngOnInit(): void {
+    // Seed the gate from the document state at mount — a tab opened in a
+    // hidden browser tab never issues a poll tick until it is shown.
+    this.browserVisible = document.visibilityState !== 'hidden';
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
     this.fetchTick();
     this.pollHandle = setInterval(() => this.fetchTick(), this.POLL_INTERVAL_MS);
   }
@@ -91,14 +119,56 @@ export class LiveTabComponent implements OnInit, OnDestroy {
       clearInterval(this.pollHandle);
       this.pollHandle = null;
     }
+    // The visibility listener is detached (no leak) and a pending refocus
+    // refresh is dropped (a destroyed component must not fire a request).
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+      this.refocusTimer = null;
+    }
   }
 
-  /** Retry CTA — re-kicks the tick immediately, not at the next interval. */
+  /** Retry CTA — re-kicks the tick immediately, not at the next interval.
+   *  A USER-INITIATED refresh always fires (the gate applies to the
+   *  poll, not to the operator's click). */
   onRetry(): void {
-    this.fetchTick();
+    this.fetchTick(true);
   }
 
-  private fetchTick(): void {
+  /**
+   * The visibility gate — a hidden browser tab stops the live-resources
+   * poll, and a refocus produces EXACTLY ONE immediate refresh (debounced
+   * by ``REFOCUS_DEBOUNCE_MS`` so a rapid tab-switch storm cannot issue a
+   * burst of reads). No catch-up burst is ever queued: the single refocus
+   * refresh IS the catch-up.
+   */
+  private readonly onVisibilityChange = (): void => {
+    const visible = document.visibilityState !== 'hidden';
+    const wasHidden = !this.browserVisible;
+    this.browserVisible = visible;
+    if (!visible || !wasHidden) {
+      return;
+    }
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+    }
+    this.refocusTimer = setTimeout(() => {
+      this.refocusTimer = null;
+      if (!this.browserVisible) {
+        return;
+      }
+      this.fetchTick();
+    }, REFOCUS_DEBOUNCE_MS);
+  }
+
+  private fetchTick(force = false): void {
+    // The VISIBILITY GATE — a hidden browser tab issues NO request. The
+    // cadence itself is unchanged (the 8 s budget is the same for a VISIBLE
+    // tab); a suppressed tick simply spends nothing. The last-good
+    // snapshot is RETAINED (a suppressed tick never blanks the page).
+    if (!force && !this.browserVisible) {
+      return;
+    }
     if (this.fetchInFlight()) {
       return;
     }
