@@ -87,6 +87,12 @@ up — no re-dispatch loop of your own.
 - Run the relevant quick checks between merges; long merges and big syncs go to
   `proc`, not a blocking bash call.
 
+## 5.1 Release cycle — push, tag, stage
+
+`stage.sh live` runs WITHOUT `--allow-stale-stage` once the tip and the tag are pushed: the L1 tip-identity guard then validates the tree against the pushed tip (`HEAD == origin/latest` and the exact tag at `HEAD`). The override flag is for the stale case only — it is never the normal path.
+
+The stage happens from an isolated clean worktree detached at the tag, with `dist/` and `frontend/dist/` removed first, so the staged artifact's provenance sidecar binds to the pushed tip.
+
 ## 6. HANDOFF-v2 authorship
 
 Author `HANDOFF.md` in the shared planning dir at the task worktree —

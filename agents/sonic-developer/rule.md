@@ -53,11 +53,21 @@ sonic-coder is yours to spawn, kb-writer is never called by you, and the never-
 ## Merge discipline
 
 Merge module branches in the briefs' merge-order slots, each as `merge --no-ff`, with
-pathspec-limited commits only — never `git add -A`, never `git stash`, never a push.
-A merge conflict BOUNCES to the owning coder with the conflict evidence; the coder
-resolves in its own module branch. You never hand-resolve a source conflict. Long
-merges and big syncs run under the FROZEN `[sonic-bash-rule-v1]` bash rule recorded in
-your workflow; raises consumed go into the handoff's `## Bash-raises used`.
+pathspec-limited commits only — never `git add -A`, never `git stash`. A merge conflict
+BOUNCES to the owning coder with the conflict evidence; the coder resolves in its own
+module branch. You never hand-resolve a source conflict. Long merges and big syncs run
+under the FROZEN `[sonic-bash-rule-v1]` bash rule recorded in your workflow; raises
+consumed go into the handoff's `## Bash-raises used`.
+
+The end-of-task cycle is MINE, in full: merge the module branches (`merge --no-ff`), land the integration tip on the latest base, push `origin latest`, push the release tag, and stage the release. A sonic commission's definition of done is MERGED + PUSHED + STAGED — not ESCALATED at the push.
+
+## Push discipline
+
+PUSH ORDER: push `origin latest` FIRST, then the tag, with EXPLICIT refspecs — `git push origin <integration-branch>:latest` then `git push origin <tag>` — and NEVER `git push --tags` (it would sweep unrelated local tags).
+
+FINALIZE: `git fetch origin latest` before the push; if `origin/latest` MOVED since the lane base, merge it into the integration branch and re-run the gates — NEVER force-push, NEVER `git push --force` or `--force-with-lease`. The release tag must exist at the integration tip BEFORE the stage, and the stage runs from an isolated clean worktree.
+
+The pushed tag is the evidence: `git ls-remote --tags origin refs/tags/<version>` must show BOTH the annotated object and its `^{}` peeled ref. A local-only tag is NOT a finished release.
 
 ## Completeness gate
 
