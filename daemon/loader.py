@@ -1084,18 +1084,131 @@ def compose_system_prompt(
     return "\n\n---\n\n".join(sections)
 
 
+# ---------------------------------------------------------------------------
+# Tier B — policy-gated O(n) chunked token counting (row2-agent-turn-cpu 2C)
+# ---------------------------------------------------------------------------
+# Emperor ruling (2026-11-19, verbatim): "Counting only for reference low
+# drift allowed" — token counting in this system is REFERENCE-ONLY; drift up
+# to the audited bound (<= 0.1%) is acceptable. Deep-dive ROW2 §2.1.4: cl100k
+# encode is O(n^2) on unbounded single-piece runs (one long word / letter /
+# symbol / whitespace run): T(L) ~= c*L^2, c ~= 6.4-7.2e-10 s/char^2 (a 200 KB
+# unbroken run costs ~27 s on the event-loop thread). Chunked counting stops
+# handing the tokenizer one unbounded piece: split at whitespace/newline
+# boundaries into chunks <= CHUNK chars, sum per-chunk counts. BPE merges
+# cannot cross a chunk boundary, so the chunked sum is an OVER-count by at
+# most ~one token per boundary (<= n/CHUNK tokens ~= 0.1% @ 200 KB / 4 KB) —
+# the SAFE direction for budget gates (compact marginally early, never late).
+#
+# Policy gate: default ON; kill-switch ENSEMBLE_TOKEN_COUNT_EXACT=1 restores
+# the exact path EVERYWHERE. Threshold/chunk are overridable via env, read at
+# CALL TIME (no config.py refactor — minimal seam for tests).
+#
+# Fidelity contract:
+#   * text <= THRESHOLD chars: TODAY'S EXACT encode, byte-identical — every
+#     caller (memoir, snapshot, compaction, prompt-cache) is unchanged.
+#   * text > THRESHOLD: chunked sum, over-count <= n/CHUNK tokens (~0.1%),
+#     NEVER smaller than exact, monotone, non-negative, synchronous (no new
+#     await — the counting stays on the same thread it runs on today).
+#   * Known edge (disclosed, reference-only): tiktoken's encode() raises
+#     ValueError when the text contains a disallowed special token (e.g.
+#     "<|endoftext|>"); a special token SPLIT across a chunk boundary above
+#     the threshold is counted instead of raised. Below the threshold the
+#     raise behavior is byte-identical to today.
+_TOKEN_CHUNK_THRESHOLD_DEFAULT = 16 * 1024
+_TOKEN_CHUNK_SIZE_DEFAULT = 4 * 1024
+
+_EXACT_ENV = "ENSEMBLE_TOKEN_COUNT_EXACT"
+_THRESHOLD_ENV = "ENSEMBLE_TOKEN_COUNT_THRESHOLD"
+_CHUNK_ENV = "ENSEMBLE_TOKEN_COUNT_CHUNK"
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _token_count_exact_requested() -> bool:
+    """Kill-switch read: ENSEMBLE_TOKEN_COUNT_EXACT truthy => exact path everywhere."""
+    import os
+
+    return os.environ.get(_EXACT_ENV, "").strip().lower() in _TRUTHY
+
+
+def _token_count_env_int(env_name: str, default: int) -> int:
+    """Read a positive-int knob from env at call time; garbage/absent => default."""
+    import os
+
+    raw = os.environ.get(env_name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _iter_count_chunks(text: str, chunk_size: int):
+    """Yield chunks of ``text``, each <= ``chunk_size`` chars.
+
+    Split preference: the LAST whitespace/newline boundary inside the window,
+    with the boundary character carried INTO THE NEXT CHUNK (``"wordA wordB"``
+    splits as ``"wordA"`` | ``" wordB"``) — cl100k tokenizes ``" wordB"`` as a
+    single piece, so the boundary token shape survives the cut and the
+    over-count shrinks toward zero. When a window holds no whitespace
+    (the pathological unbounded single-piece run), the split is hard at
+    ``chunk_size`` — that hard split is exactly what bounds the O(n^2) encode
+    to O(n). Progress is guaranteed (every chunk carries >= 1 char).
+    """
+    n = len(text)
+    start = 0
+    while start < n:
+        end = min(start + chunk_size, n)
+        if end < n:
+            cut = -1
+            for j in range(end - 1, start, -1):
+                if text[j].isspace():
+                    cut = j
+                    break
+            if cut > start:
+                end = cut
+        yield text[start:end]
+        start = end
+
+
 def estimate_tokens(text: str) -> int:
     """Estimate token count using tiktoken with cl100k_base encoding.
-    
+
+    Tier B (row2-agent-turn-cpu 2C): strings at or below the chunking
+    threshold (default 16K chars) use TODAY'S exact encode — byte-identical
+    for every caller. Above the threshold the text is split at
+    whitespace/newline boundaries into chunks (default 4K chars) and the
+    per-chunk counts are summed — O(n) instead of O(n^2) on pathological
+    unbounded single-piece runs, with an over-count of at most ~n/CHUNK
+    tokens (~0.1% @ 200 KB / 4 KB) and never smaller than the exact count
+    (reference-only counting; Emperor ruling 2026-11-19: "Counting only for
+    reference low drift allowed").
+
+    Env knobs (read at call time):
+      * ENSEMBLE_TOKEN_COUNT_EXACT=1    kill-switch — exact path everywhere.
+      * ENSEMBLE_TOKEN_COUNT_THRESHOLD  chunking threshold (default 16384).
+      * ENSEMBLE_TOKEN_COUNT_CHUNK      chunk size (default 4096).
+
     Args:
         text: Text to count tokens for.
-        
+
     Returns:
         Estimated token count.
     """
     import tiktoken
-    
+
     encoder = tiktoken.get_encoding("cl100k_base")
+
+    if not _token_count_exact_requested():
+        threshold = _token_count_env_int(_THRESHOLD_ENV, _TOKEN_CHUNK_THRESHOLD_DEFAULT)
+        if len(text) > threshold:
+            chunk_size = _token_count_env_int(_CHUNK_ENV, _TOKEN_CHUNK_SIZE_DEFAULT)
+            return sum(
+                len(encoder.encode(chunk))
+                for chunk in _iter_count_chunks(text, chunk_size)
+            )
+
     return len(encoder.encode(text))
 
 
