@@ -394,6 +394,105 @@ assert_contains "stage.sh records the daemon-slice per-file map" '"daemon_slice_
 assert_contains "stage.sh re-hashes the daemon slice post-stage" \
     'post-stage daemon-slice tree hash MISMATCH' "$STAGE_SRC"
 
+# ─── 7. D4 (self-service-promote Wave 5, §2.6): the STAGE-TIME pin advance
+# and the manifest's source_commit / scripts_pin_commit (AC-D4-5/-7) ────────
+section "D4 stage-time scripts-pin advance + manifest fields"
+
+# 7a. AC-D4-5 (wiring half): the manifest carries BOTH new fields.
+assert_contains "stage.sh records the release source commit" '"source_commit"' "$STAGE_SRC"
+assert_contains "stage.sh records the advanced pin commit" '"scripts_pin_commit"' "$STAGE_SRC"
+assert_contains "stage.sh resolves the pin via the shared helper" 'scripts_pin_from_env' "$STAGE_SRC"
+assert_contains "stage.sh refuses (78) when a configured pin cannot advance" 'REFUSING TO STAGE: scripts-pin advance impossible' "$STAGE_SRC"
+assert_contains "stage.sh journals the ownership transfer" 'stage-scripts-advance' "$STAGE_SRC"
+
+# 7b. the PYTHON family mirror (daemon/tools/upgrade_journal.py
+#     EXECUTOR_FAMILY_PATHS) must equal the shell list BYTE FOR BYTE —
+#     the daemon-side coverage + parity gates consume the mirror.
+D4_PY=""
+for _cand in "$REPO_ROOT/.venv/bin/python" \
+             "$REPO_ROOT/../ensemble-src/.venv/bin/python" \
+             "$(command -v python3 || true)"; do
+    [ -n "$_cand" ] && [ -x "$_cand" ] || continue
+    if ( cd "$REPO_ROOT" && "$_cand" -c 'from daemon.tools.upgrade_journal import EXECUTOR_FAMILY_PATHS' ) >/dev/null 2>&1; then
+        D4_PY="$_cand"
+        break
+    fi
+done
+if [ -n "$D4_PY" ]; then
+    PY_FAMILY="$( cd "$REPO_ROOT" && "$D4_PY" -c 'from daemon.tools.upgrade_journal import EXECUTOR_FAMILY_PATHS; print("\n".join(EXECUTOR_FAMILY_PATHS))' 2>/dev/null )"
+    assert_eq "the python family mirror equals the shell list" \
+        "$(executor_family_paths)" "$PY_FAMILY"
+else
+    _fail "7b no interpreter can import the daemon family mirror (EXECUTOR_FAMILY_PATHS)"
+fi
+
+# 7c. FUNCTIONAL: the guarded advance against a synthetic pin repo shaped
+#     like the real one — an OLDER family copy on HEAD (behind the floor)
+#     and the floor→target line on an orphan branch.
+d4_repo="$FIXTURE/d4-pin-repo"
+d4_populate() { # <root> <stamp>
+    local root="$1" stamp="$2" p
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        mkdir -p "$root/$(dirname "$p")"
+        if [ "$p" = "scripts/upgrade/lib.sh" ]; then
+            printf '#!/usr/bin/env bash\nPIPELINE_SCRIPTS_REV=%s\n' "$stamp" > "$root/$p"
+        else
+            printf '#!/usr/bin/env bash\n# d4 fixture %s\n' "$p" > "$root/$p"
+        fi
+        chmod +x "$root/$p"
+    done <<EOF
+$(executor_family_paths)
+EOF
+}
+d4_gc() { ( cd "$1" && git -c user.email=d4@t -c user.name=d4 "${@:2}" ) >/dev/null 2>&1; }
+mkdir -p "$d4_repo"
+d4_populate "$d4_repo" "0000000000000000000000000000000000000000"
+d4_gc "$d4_repo" init -q -b main
+d4_gc "$d4_repo" add -A
+d4_gc "$d4_repo" commit -q -m "stale base (older family copy)"
+d4_gc "$d4_repo" checkout -q --orphan lane
+d4_populate "$d4_repo" "1111111111111111111111111111111111111111"
+d4_gc "$d4_repo" add -A
+d4_gc "$d4_repo" commit -q -m "floor"
+D4_FLOOR="$(git -C "$d4_repo" rev-parse HEAD)"
+printf '#!/usr/bin/env bash\n# d4 fixture target change\n' > "$d4_repo/scripts/upgrade/promote.sh"
+d4_gc "$d4_repo" add -A
+d4_gc "$d4_repo" commit -q -m "target"
+D4_TARGET="$(git -C "$d4_repo" rev-parse HEAD)"
+d4_gc "$d4_repo" checkout -q main
+
+# 7c-pos: behind + local ⇒ advance, HEAD == T, T_old/T_new named
+ADV_OUT="$(stage_scripts_pin_advance "$d4_repo/scripts/upgrade" "$D4_TARGET" "$D4_FLOOR" "$FIXTURE/definitely-not-the-pin" 2>&1)"
+ADV_RC=$?
+assert_eq "7c the advance succeeds on a behind pin with a local target" "0" "$ADV_RC"
+assert_contains "7c the advance names T_old and T_new" "T_old=" "$ADV_OUT"
+assert_eq "7c pin HEAD moved to the target" "$D4_TARGET" "$(git -C "$d4_repo" rev-parse HEAD)"
+if [ ! -e "${d4_repo}.scripts-advance.lock.d" ]; then _pass; else _fail "7c the advance left the lock dir behind"; fi
+
+# 7c-neg1: target absent locally ⇒ refusal names the exact hand command
+ADV_OUT2="$(stage_scripts_pin_advance "$d4_repo/scripts/upgrade" "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" "$D4_FLOOR" "$FIXTURE/nope" 2>&1)"
+ADV_RC2=$?
+assert_eq "7c an absent target refuses (rc 1)" "1" "$ADV_RC2"
+assert_contains "7c the refusal names the fetch+checkout hand command" "fetch origin" "$ADV_OUT2"
+
+# 7c-neg2 (AC-D4-7): a target missing a family path ⇒ coverage refusal
+d4_gc "$d4_repo" checkout -q lane
+d4_gc "$d4_repo" rm -q scripts/upgrade/status.sh
+d4_gc "$d4_repo" commit -q -m "drop a member"
+D4_HOLED="$(git -C "$d4_repo" rev-parse HEAD)"
+d4_gc "$d4_repo" checkout -q main
+ADV_OUT3="$(stage_scripts_pin_advance "$d4_repo/scripts/upgrade" "$D4_HOLED" "$D4_FLOOR" "$FIXTURE/nope" 2>&1)"
+ADV_RC3=$?
+assert_eq "7c a target with a family hole refuses (rc 1)" "1" "$ADV_RC3"
+assert_contains "7c the refusal names the missing family path" "scripts/upgrade/status.sh" "$ADV_OUT3"
+
+# 7c-neg3: the self-guard — the pin must not BE the staging tree
+ADV_OUT4="$(stage_scripts_pin_advance "$d4_repo/scripts/upgrade" "$D4_TARGET" "$D4_FLOOR" "$d4_repo" 2>&1)"
+ADV_RC4=$?
+assert_eq "7c advancing the staging tree itself refuses (rc 1)" "1" "$ADV_RC4"
+assert_contains "7c the self-guard refusal is named" "staging tree itself" "$ADV_OUT4"
+
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n========================================\n'
 printf 'executor family payload tests: %d passed, %d failed\n' "$PASS" "$FAIL"

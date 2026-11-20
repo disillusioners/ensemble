@@ -330,6 +330,110 @@ EOF
     return "$missing"
 }
 
+# ── D4 (self-service-promote Wave 5, §2.6): the STAGE-TIME scripts-pin
+# advance — the release-lane WRITER. The arm-time READER lives daemon-side
+# (daemon/tools/upgrade_tools.py scripts_pin_self_advance); both move the
+# SAME shared pin worktree with a worktree-local `git checkout --detach`
+# (NEVER a fetch — worktrees share the object store with the main repo, so
+# the staged release's HEAD commit is present by construction).
+#
+# scripts_pin_from_env [install_dir]
+#   Resolve the scripts pin for the stage lane: the ambient explicit
+#   ENSEMBLE_UPGRADE_SCRIPTS_DIR first, then the INSTALL .env pin (the live
+#   daemon's pin lives there — the stage lane runs outside the daemon env).
+#   Prints the dir (possibly empty) — a DIRECTORY TEST is the caller's job.
+scripts_pin_from_env() {
+    local install_dir="${1:-}" raw
+    raw="${ENSEMBLE_UPGRADE_SCRIPTS_DIR:-}"
+    if [ -z "$raw" ] && [ -n "$install_dir" ] && [ -f "$install_dir/.env" ]; then
+        raw="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}ENSEMBLE_UPGRADE_SCRIPTS_DIR[[:space:]]*=[[:space:]]*//p' "$install_dir/.env" 2>/dev/null | head -1)"
+        raw="${raw%$'\r'}"
+        case "$raw" in
+            \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
+            \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
+        esac
+    fi
+    printf '%s\n' "$raw"
+}
+
+# stage_scripts_pin_advance <pin_scripts_upgrade_dir> <source_commit> <floor_commit> <staging_repo_root>
+#   The guarded advance: `git -C <pin_root> checkout --detach T` after
+#   verifying (1) T present locally, (2) floor ⊆ T, (3) the 17-path
+#   executor-family stamp coverage at T EMPTY, (4) the pin is NOT the
+#   staging tree itself, (5) the mkdir lock acquired. On SUCCESS prints
+#   "T_old=<short> T_new=<full>" and returns 0 with pin HEAD == T. On
+#   FAILURE prints the exact refusal reason and returns 1 — NEVER touches
+#   the staging tree (the caller owns rm -rf "$STAGE_TMP"; exit 78).
+#   Lock: a portable mkdir lock beside the worktree (lib.sh's header bans
+#   flock(1) — "Bash 3.2 / BSD tools only"); same-install stage-vs-arm
+#   races are already serialized by the install's pipeline lock — this
+#   covers the cross-install case (two envs, one shared pin), MINOR-11.
+stage_scripts_pin_advance() {
+    local pin_scripts="$1" t="$2" floor="$3" repo_root="$4"
+    local pin_root t_old lock_dir_path cov now age
+    pin_root="$(cd "$pin_scripts/../.." 2>/dev/null && pwd -P)" || {
+        printf 'the configured scripts pin %s has no worktree root' "$pin_scripts"
+        return 1
+    }
+    if [ "$pin_root" = "$(cd "$repo_root" && pwd -P)" ]; then
+        printf 'the configured scripts pin IS the staging tree itself (%s) — the release lane must not move its own HEAD mid-stage' "$pin_root"
+        return 1
+    fi
+    t_old="$(git -C "$pin_root" rev-parse --short HEAD 2>/dev/null || echo '?')"
+    if ! git -C "$pin_root" cat-file -e "${t}^{commit}" 2>/dev/null; then
+        printf 'target %s is NOT present in the pin worktree object store (%s) — worktrees share objects, so this pin is a foreign clone; run by hand: git -C %s fetch origin && git -C %s checkout --detach %s' \
+            "$t" "$pin_root" "$pin_root" "$pin_root" "$t"
+        return 1
+    fi
+    if ! git -C "$pin_root" merge-base --is-ancestor "$floor" "$t" 2>/dev/null; then
+        printf 'floor %s is NOT an ancestor of target %s in the pin worktree (the pin history diverges from the release line)' "$floor" "$t"
+        return 1
+    fi
+    cov="$(executor_family_verify_stamp_coverage "$pin_root" "$t")"
+    if [ -n "$cov" ]; then
+        printf 'executor-family stamp coverage at target %s is NON-EMPTY:\n%s' "$t" "$cov"
+        return 1
+    fi
+    lock_dir_path="${pin_root}.scripts-advance.lock.d"
+    now="$(date +%s)"
+    if ! mkdir "$lock_dir_path" 2>/dev/null; then
+        age=$(( now - $(stat -f %m "$lock_dir_path" 2>/dev/null || stat -c %Y "$lock_dir_path" 2>/dev/null || echo 0) ))
+        if [ "$age" -gt 300 ]; then
+            rm -rf "$lock_dir_path"
+            mkdir "$lock_dir_path" 2>/dev/null || {
+                printf 'advance lock re-acquire FAILED (%s, was %ss stale)' "$lock_dir_path" "$age"
+                return 1
+            }
+        else
+            printf 'advance lock HELD (%s, %ss old) — a concurrent stage is advancing the same pin; retry' "$lock_dir_path" "$age"
+            return 1
+        fi
+    fi
+    printf '%s\n' "$$" > "$lock_dir_path/owner"
+    printf '%s\n' "$now" > "$lock_dir_path/heartbeat"
+    # release discipline mirrors lib.sh lock_release: rm -rf ONLY when this
+    # process owns the lock dir (owner file == $$); a foreign holder is
+    # never touched.
+    _adv_release() {
+        if [ -d "$lock_dir_path" ] && [ "$(cat "$lock_dir_path/owner" 2>/dev/null)" = "$$" ]; then
+            rm -rf "$lock_dir_path"
+        fi
+    }
+    if ! git -C "$pin_root" checkout --detach "$t" >/dev/null 2>&1; then
+        _adv_release
+        printf 'the worktree-local HEAD move FAILED (git checkout --detach %s in %s)' "$t" "$pin_root"
+        return 1
+    fi
+    if [ "$(git -C "$pin_root" rev-parse HEAD 2>/dev/null)" != "$t" ]; then
+        _adv_release
+        printf 'checkout returned 0 but pin HEAD != target (%s)' "$t"
+        return 1
+    fi
+    _adv_release
+    printf 'T_old=%s T_new=%s' "$t_old" "$t"
+    return 0
+}
+
 # ── CLI mode (only when executed, never when sourced) ───────────────────────
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     _cmd="${1:-}"
