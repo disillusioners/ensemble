@@ -587,6 +587,17 @@ _js_now_iso() {
     date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
+# _js_now — UTC epoch seconds (the wrongful-window arithmetic twin of
+# _js_now_iso; `_js_now_iso_minus` consumes it). Plain `date -u +%s` is
+# portable across GNU/BSD. REVIEW-FIX M3 (2026-11-20): this helper was
+# MISSING — `_js_now_iso_minus` called an undefined `_js_now`, bash's
+# command-substitution-inside-$(( )) coerced the empty output to 0, and
+# the cutoff collapsed to epoch-minus-86400 (1969-12-31) on every host:
+# the 24h wrongful window never bounded anything.
+_js_now() {
+    date -u +%s
+}
+
 # _js_iso_to_epoch <iso-ts> — parse journal ISO timestamps; nonzero on
 # garbage (callers fail CLOSED: the sweep never fires on an unparseable
 # started_at — it might be a fresh txn we cannot age).
@@ -3272,7 +3283,15 @@ _js_sweep_rollback_chain() {
                     *"\"event\":\"wrongful_rollback\""*|*"\"event\": \"wrongful_rollback\""*) ;;
                     *) continue ;;
                 esac
-                wts="$(printf '%s' "$wrow" | grep -oE '"ts":"[^"]+"' | head -1 | cut -d'"' -f4)"
+                # REVIEW-FIX M3 (2026-11-20): `_js_history_entries_split`
+                # yields rows whose `{"ts":` MARKER (key included) was the
+                # split boundary — the row begins with the quoted ISO
+                # VALUE, so the old `'"ts":"…"'` grep NEVER matched, the
+                # extraction came back empty, every row was skipped, and
+                # the count was structurally 0 (the tighter second-offense
+                # halt could never arm). Extract the LEADING quoted ISO
+                # stamp of the split row instead.
+                wts="$(printf '%s' "$wrow" | grep -oE '^"[0-9]{4}-[0-9]{2}-[0-9]{2}T[^"]+"' | head -1 | tr -d '"')"
                 [ -n "$wts" ] || continue
                 if [ "$wts" \> "$wcutoff" ] 2>/dev/null || [ "$wts" = "$wcutoff" ]; then
                     wcnt=$(( wcnt + 1 ))

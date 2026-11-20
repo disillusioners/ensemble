@@ -830,6 +830,54 @@ assert_eq "8l current repointed after stale-break" "releases/v0.10.5" "$(readlin
 ls "$JS_L/releases" | grep -q 'rollback\.lock\.d\.stale\.' && _pass \
     || _fail "8l stale lock moved to .stale.*" "present" "$(ls "$JS_L/releases" | tr '\n' ' ')"
 
+# 8w. M3 (review-fix 2026-11-20): the AC-D5-10 WRONGFUL-rollback clause
+#     (launcher.sh:3251-3296) — deterministic race harness; repo-wide grep
+#     found ZERO functional coverage of this clause before these legs
+#     (comments only). The race being modeled: the journal carries
+#     serving-green evidence for the flipped target (the V1 chain-head
+#     read, grc2=0 — the green row seeded PRE-probe, i.e. committed by the
+#     closer lane before the sweep observed) while the fresh probe says
+#     `broken` (the V2 disagreement — the daemon died after a green
+#     commit). The rollback still executes (broken ⇒ tierA) but at CREDIT
+#     TIME the V1 paranoid double-check detects the green evidence: the
+#     residue is journaled `wrongful_rollback`, NOT charged to the flapping
+#     cap, counted separately; a SECOND within 24h arms the TIGHTER halt.
+#     Determinism: `_js_serving_probe` is SHADOWED after the source — it
+#     returns `broken` unconditionally (no listener, no timing window).
+JS_W="$JS_TEST_DIR/w"; _js_fixture "$JS_W"
+JS_W_GREEN_TS="$(_ts_off -60)"
+printf '{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"promote","target":"v0.10.6","started_at":"%s","flipped":true,"owner_pid":999999},"rollback_window_count":{"24h":0,"window_start":"%s"},"cooldown_until":null,"quarantined":[],"history":[{"ts":"%s","event":"serving_green_commit","detail":"commit-close observed serving green for target v0.10.6 run_id r-x (closer lane)"}]}\n' \
+    "$STALE_TS" "$STALE_TS" "$JS_W_GREEN_TS" > "$JS_W/releases/state.json"
+JS_W_LOG="$( . "$LAUNCHER"; _js_serving_probe() { printf 'broken race-harness-stub-livez-500'; return 1; }; INSTALL_DIR="$JS_W" _journal_sweep 2>&1 >/dev/null )"; JS_W_RC=$?
+assert_eq "8w first wrongful leg: rc 0 (boot proceeds)" "0" "$JS_W_RC"
+assert_contains "8w the wrongful row lands (AC-D5-10)" '"event":"wrongful_rollback"' "$(_js_journal "$JS_W")"
+assert_eq "8w flapping cap NOT charged (24h stays 0)" "0" "$(_js_count "$JS_W")"
+assert_contains "8w the separate wrongful_rollback_count=1 is reported" 'wrongful_rollback_count=1' "$JS_W_LOG"
+if printf '%s' "$(_js_journal "$JS_W")" | grep -q '"event":"halt"'; then
+    _fail "8w FIRST offense arms NO halt" "absent" "present"
+else
+    _pass
+fi
+assert_contains "8w the rollback itself executed (sweep_rollback row)" '"event":"sweep_rollback"' "$(_js_journal "$JS_W")"
+assert_eq "8w current repointed (wrongful rollback ran to completion)" "releases/v0.10.5" "$(readlink "$JS_W/current")"
+
+# 8w-2. The SECOND seeded offense (a prior wrongful_rollback within 24h)
+#       ⇒ wcnt=2 ⇒ the TIGHTER halt arms: halt row + the
+#       sweep-halt-wrongful-repeat notify; STILL not charged to the cap.
+JS_W2="$JS_TEST_DIR/w2"; _js_fixture "$JS_W2"
+JS_W2_PRIOR_TS="$(_ts_off -120)"
+JS_W2_GREEN_TS="$(_ts_off -60)"
+printf '{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"promote","target":"v0.10.6","started_at":"%s","flipped":true,"owner_pid":999999},"rollback_window_count":{"24h":0,"window_start":"%s"},"cooldown_until":null,"quarantined":[],"history":[{"ts":"%s","event":"wrongful_rollback","detail":"sweep: WRONGFUL rollback residue — target v0.10.6 (prior offense)"},{"ts":"%s","event":"serving_green_commit","detail":"commit-close observed serving green for target v0.10.6 run_id r-y (closer lane)"}]}\n' \
+    "$STALE_TS" "$STALE_TS" "$JS_W2_PRIOR_TS" "$JS_W2_GREEN_TS" > "$JS_W2/releases/state.json"
+JS_W2_LOG="$( . "$LAUNCHER"; _js_serving_probe() { printf 'broken race-harness-stub-livez-500'; return 1; }; INSTALL_DIR="$JS_W2" _journal_sweep 2>&1 >/dev/null )"; JS_W2_RC=$?
+assert_eq "8w-2 second wrongful leg: rc 0 (boot proceeds)" "0" "$JS_W2_RC"
+assert_contains "8w-2 the SECOND wrongful row lands" '"event":"wrongful_rollback"' "$(_js_journal "$JS_W2")"
+assert_contains "8w-2 count=2 reported" 'wrongful_rollback_count=2' "$JS_W2_LOG"
+assert_contains "8w-2 the TIGHTER halt arms" 'TIGHTER HALT' "$(_js_journal "$JS_W2")"
+assert_contains "8w-2 halt-for-human row" '"event":"halt"' "$(_js_journal "$JS_W2")"
+assert_contains "8w-2 sweep-halt-wrongful-repeat notified" 'NOTIFY[sweep-halt-wrongful-repeat]' "$JS_W2_LOG"
+assert_eq "8w-2 flapping cap still NOT charged" "0" "$(_js_count "$JS_W2")"
+
 # 8m. structural pin: the sweep runs BEFORE binary resolution in main() —
 # the orphaned-flip recovery must not boot the broken release first.
 MAIN_BODY="$(sed -n '/^main()/,/^}/p' "$LAUNCHER")"
