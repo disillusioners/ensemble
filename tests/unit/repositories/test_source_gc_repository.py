@@ -864,7 +864,24 @@ class TestP11BootNoBehaviorChange:
     COMPACT_NOTE_LANE_SANCTIONED_PATH = "daemon/constants.py"
     COMPACT_NOTE_LANE_MARKER = "compact-note"
 
-    SANCTIONED_LANE_MARKERS = ("decision", "memoir", "group chat", "compact-note")
+    SANCTIONED_LANE_MARKERS = (
+        "decision",
+        "memoir",
+        "group chat",
+        "compact-note",
+        # cycle-3 (2026-11-20): the SELF-SERVICE-PROMOTE lane's sanctioned
+        # changes to daemon/manager.py — the executor unit-identity stamper
+        # (D3-E3), the spawn-mode-derived reaper unit (M2), and the legacy
+        # owner_pid_kind fixup, commits 068cad67a / 2c2df283f / 4cb69120b
+        # (+92 lines over the span). Mirrors the decision-lane precedent
+        # (c81dd0dea, "scoped source-gc sanction") and the memoir /
+        # group-chat blocks above. Every hunk of that drift now carries
+        # "self-service-promote" (hunk 1 natively — the D3-E3 wiring
+        # comment; the three others via a minimal non-behavioral marker
+        # comment added in the same change). The token is disjoint from
+        # the other markers over the span.
+        "self-service-promote",
+    )
 
     # The EXACT added lines of the leader-sanctioned None guard (content
     # pin, indentation preserved; diff '+' prefixes stripped). The file

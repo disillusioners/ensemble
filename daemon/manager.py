@@ -6815,6 +6815,8 @@ class InstanceManager:
                     else _uj.UNIT_NAME_PREFIX
                 ),
                 unit_properties=_promote_unit_props,
+                # (self-service-promote lane marker — scoped source-gc
+                # sanction, cycle-3; see test_source_gc_repository)
                 identity_stamper=_stamp_executor_identity,
             )
             # Option D (Stage-2.2a): log the ACTUAL spawn mode — the
@@ -6840,6 +6842,8 @@ class InstanceManager:
             # pending_op remains the durable fallback.
             sweep = getattr(self, "_upgrade_journal_sweep", None)
             if sweep is not None:
+                # (self-service-promote lane marker — scoped source-gc
+                # sanction, cycle-3; see test_source_gc_repository)
                 # Review-fix M2 (2026-11-20): the reaper's unit identity
                 # is derived from the ACTUAL spawn outcome, never from
                 # `kind` alone. On a LEGACY spawn (non-systemd/launchd
@@ -6901,6 +6905,8 @@ class InstanceManager:
                     op.owner_pid = child_pid
                     op.owner_kind = "executor"
                     op.trigger = "post-turn-callback"
+                    # (self-service-promote lane marker — scoped source-gc
+                    # sanction, cycle-3; see test_source_gc_repository)
                     # D3-E3: on the LEGACY branch (no unit identity — the
                     # stamper never fired) owner_pid IS the payload shell.
                     if not op.owner_pid_kind:
