@@ -34,6 +34,7 @@ present-invalid-r0-eq-live-link	vT	vB	vB	-	vC	vB	vA	halt	capture_invalid	-
 # the R2 current rung exactly as the python resolver does.
 r0-numeric-capture-folded-absent	vT	vT	123	-	vB	vB	vB	resolve	vB	current
 r0-exponent-capture-folded-absent	vT	vT	1.5e-3	-	vB	vB	vB	resolve	vB	current
+r0-boolean-capture-folded-absent	vT	vT	true	-	vB	vB	vB	resolve	vB	current
 r0-none-capture-folded-absent	vT	vT	none	-	vB	vB	vB	resolve	vB	current
 # AC-D5-7 (first half): a VALID to= disagreeing with a VALID R0 ⇒ halt.
 r1-valid-conflicts-r0	vT	vT	vD	vA	vC	vB	vA	halt	rollback_target_ambiguous	-

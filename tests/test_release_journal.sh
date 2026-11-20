@@ -3273,17 +3273,20 @@ D5RJ_GUARD_RC="$(INSTALL_DIR="$D5RJ_GUARD" bash -c '
     . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
     journal_open_txn "promote" "vX" 2>/dev/null
     rc=0
-    # cycle-2 MAJOR-2: the exponent forms (1e5 / 1.5e-3 / 2E+10) extend
-    # the bad list — the old accept arm laundered each into a JSON
-    # string; the version-shaped accept arm must refuse them.
-    for bad in true false 123 1.2.3 "-45" "{oops}" "[1]" "\"q\"" 1e5 1.5e-3 2E+10; do
+    # cycle-2 MAJOR-2 + FINAL POLISH: the exponent forms (1e5 / 1.5e-3 / 2E+10)
+    # and junk forms (abc / v123 / v1e5) extend the bad list — the accept arm
+    # is version-shaped only and refuses them; prerelease-shaped versions
+    # (v1.2.3-rc1 / v0.32.0-beta.1) STAMP alongside stable versions.
+    for bad in true false 123 1.2.3 "-45" "{oops}" "[1]" "\"q\"" 1e5 1.5e-3 2E+10 abc v123 v1e5; do
         if journal_mark_captured_previous "$bad" >/dev/null 2>&1; then
             echo "LAUNDERED:$bad"; rc=1
         fi
     done
-    # control: a real version string still stamps
-    journal_mark_captured_previous "v0.31.2" >/dev/null 2>&1 || { echo "CONTROL-REFUSED"; rc=1; }
-    grep -q "\"captured_previous\":\"v0.31.2\"" "'"$D5RJ_GUARD"'/releases/state.json" || { echo "CONTROL-ABSENT"; rc=1; }
+    # control: real version and prerelease strings still stamp
+    for good in "v0.31.2" "v1.2.3-rc1" "v0.32.0-beta.1"; do
+        journal_mark_captured_previous "$good" >/dev/null 2>&1 || { echo "CONTROL-REFUSED:$good"; rc=1; }
+        grep -q "\"captured_previous\":\"$good\"" "'"$D5RJ_GUARD"'/releases/state.json" || { echo "CONTROL-ABSENT:$good"; rc=1; }
+    done
     echo "GUARD-RC=$rc"' 2>/dev/null)"
 assert_contains "D5-2g non-string captures are REJECTED (never laundered into JSON strings)" "GUARD-RC=0" "$D5RJ_GUARD_RC"
 assert_not_contains "D5-2g no laundered value landed" "LAUNDERED:" "$D5RJ_GUARD_RC"

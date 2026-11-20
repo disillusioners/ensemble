@@ -5198,6 +5198,52 @@ class TestScriptsPinSelfAdvance:
         assert status == "unavailable", (status, detail)
         assert "no sha-shaped source_commit" in detail
 
+    @pytest.mark.parametrize("bad_owner", ["²", "0", "", "-5", "abc", "12a"])
+    def test_owner_parsing_hardened_refuses_invalid_pids(self, tmp_path, bad_owner):
+        """Item 5 polish: owner parsing requires isascii() and isdigit() and >0.
+        Unicode digits ('²'), '0', '', negatives all refuse cleanly without ValueError."""
+        fx = _build_pin_fixture(tmp_path)
+        pin_root = fx["pin"].parents[1]
+        lock_dir = pin_root.parent / f"{pin_root.name}.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text(f"{bad_owner}\n", encoding="utf-8")
+        stale = time.time() - 400
+        os.utime(lock_dir, (stale, stale))
+        may_steal, reason = ut._advance_lock_steal_verdict(lock_dir)
+        assert not may_steal
+        assert "holder cannot be attributed" in reason or "owner file is missing/unreadable" in reason
+
+    def test_concurrent_steal_rename_aside_second_stealer_fails_cleanly(self, tmp_path, monkeypatch):
+        """Item 2 polish: atomic rename-aside ensures concurrent stealers cannot
+        interleave. When a concurrent stealer moves the dir away first, the loser
+        refuses with a clean 'dead-owner stale-break rename-aside' failure."""
+        import subprocess
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        fx = _build_pin_fixture(tmp_path)
+        pin_root = fx["pin"].parents[1]
+        lock_dir = pin_root.parent / f"{pin_root.name}.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text(f"{dead.pid}\n", encoding="utf-8")
+        (lock_dir / "heartbeat").write_text("0\n", encoding="utf-8")
+        stale = time.time() - 400
+        os.utime(lock_dir / "heartbeat", (stale, stale))
+        os.utime(lock_dir, (stale, stale))
+
+        real_rename = os.rename
+        def failing_rename(src, dst):
+            if str(src) == str(lock_dir):
+                raise FileNotFoundError("Directory renamed by concurrent winner")
+            return real_rename(src, dst)
+
+        monkeypatch.setattr(os, "rename", failing_rename)
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "unavailable", (status, detail)
+        assert "dead-owner stale-break rename-aside" in detail, detail
+
 
 class TestScriptsPinSelfAdvanceArmPath:
     """The D4-b reader THROUGH the arm (Check-4 integration): the advance

@@ -2116,7 +2116,7 @@ journal_mark_captured_previous() {
             return 1
             ;;
         v[0-9]*.[0-9]*)
-            if printf '%s' "$ver" | grep -Eq '^v[0-9]+([.][0-9]+)+$'; then
+            if printf '%s' "$ver" | grep -Eq '^v[0-9]+([.][0-9]+)+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$'; then
                 raw="\"$(_json_escape "$ver")\""
             else
                 _warn "journal_mark_captured_previous: captured_previous value is NOT version-shaped (v + digits.dots, at least one dot, no exponent markers — cycle-2 MAJOR-2): '$ver' — refusing to stamp (journal untouched)"

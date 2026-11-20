@@ -4827,13 +4827,26 @@ def _advance_lock_steal_verdict(lock_dir: Path) -> tuple[bool, str]:
             "attributed; a live holder is never stolen from (clear the "
             f"lock by hand: {lock_dir})"
         )
-    if not owner_raw.isdigit():
+    if not (owner_raw.isascii() and owner_raw.isdigit()):
         return False, (
             f"the owner file does not name a pid ({owner_raw!r}) — the "
             "holder cannot be attributed; a live holder is never stolen "
             f"from (clear the lock by hand: {lock_dir})"
         )
-    owner_pid = int(owner_raw)
+    try:
+        owner_pid = int(owner_raw)
+    except ValueError:
+        return False, (
+            f"the owner file does not name a pid ({owner_raw!r}) — the "
+            "holder cannot be attributed; a live holder is never stolen "
+            f"from (clear the lock by hand: {lock_dir})"
+        )
+    if owner_pid <= 0:
+        return False, (
+            f"the owner file does not name a pid ({owner_raw!r}) — the "
+            "holder cannot be attributed; a live holder is never stolen "
+            f"from (clear the lock by hand: {lock_dir})"
+        )
     try:
         hb_age = now - (lock_dir / "heartbeat").stat().st_mtime
     except OSError:
@@ -5016,9 +5029,21 @@ def scripts_pin_self_advance(
                 + _advance_remedy(pin_root, t, "lock")
             )
         # stale-break (mirrors the shell's liveness-gated steal): the
-        # owner is DEAD and both clocks are >300s stale
+        # owner is DEAD and both clocks are >300s stale. Take over via
+        # an atomic rename-aside so two concurrent stealers cannot
+        # interleave into a split state.
+        stale_aside = Path(f"{lock_dir}.stale.{os.getpid()}")
         try:
-            shutil.rmtree(lock_dir)
+            os.rename(lock_dir, stale_aside)
+        except OSError as exc:
+            return "unavailable", (
+                f"advance lock re-acquire FAILED ({lock_dir}; dead-owner "
+                f"stale-break rename-aside; {type(exc).__name__}: {exc}) — "
+                "concurrent arms could interleave HEAD moves; "
+                + _advance_remedy(pin_root, t, "lock")
+            )
+        try:
+            shutil.rmtree(stale_aside)
         except OSError:
             pass
         try:

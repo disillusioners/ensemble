@@ -462,8 +462,8 @@ stage_scripts_pin_advance() {
         # Mirrors _advance_lock_steal_verdict daemon-side (same protocol).
         adv_owner="$(cat "$lock_dir_path/owner" 2>/dev/null || true)"
         case "$adv_owner" in
-            '')
-                printf 'advance lock HELD (%s) with NO owner file — the holder cannot be attributed; never stolen from (clear the lock by hand)' "$lock_dir_path"
+            ''|0)
+                printf 'advance lock HELD (%s) with NO valid owner pid (%s) — the holder cannot be attributed; never stolen from (clear the lock by hand)' "$lock_dir_path" "$adv_owner"
                 return 1
                 ;;
             *[!0-9]*)
@@ -483,7 +483,12 @@ stage_scripts_pin_advance() {
             return 1
         fi
         if [ "$adv_dir_age" -gt 300 ] && [ "$adv_hb_age" -gt 300 ]; then
-            rm -rf "$lock_dir_path"
+            adv_aside="${lock_dir_path}.stale.${BASHPID:-$$}"
+            if ! mv "$lock_dir_path" "$adv_aside" 2>/dev/null; then
+                printf 'advance lock re-acquire FAILED (%s, dead-owner stale-break rename-aside) — concurrent arms could interleave HEAD moves' "$lock_dir_path"
+                return 1
+            fi
+            rm -rf "$adv_aside" 2>/dev/null || true
             mkdir "$lock_dir_path" 2>/dev/null || {
                 printf 'advance lock re-acquire FAILED (%s, was %ss stale, owner pid %s dead)' "$lock_dir_path" "$adv_dir_age" "$adv_owner"
                 return 1
@@ -494,14 +499,15 @@ stage_scripts_pin_advance() {
             return 1
         fi
     fi
-    printf '%s\n' "$$" > "$lock_dir_path/owner"
+    adv_holder="${BASHPID:-$$}"
+    printf '%s\n' "$adv_holder" > "$lock_dir_path/owner"
     printf '%s\n' "$now" > "$lock_dir_path/heartbeat"
     # MAJOR-4: keep the heartbeat fresh across the (possibly long)
-    # checkout — the refresher dies with this holder (kill -0 $$ guard).
-    _adv_heartbeat_refresher "$lock_dir_path" "$$" &
+    # checkout — the refresher dies with this holder (kill -0 $adv_holder guard).
+    _adv_heartbeat_refresher "$lock_dir_path" "$adv_holder" &
     _adv_hb_pid=$!
     # release discipline mirrors lib.sh lock_release: rm -rf ONLY when this
-    # process owns the lock dir (owner file == $$); a foreign holder is
+    # process owns the lock dir (owner file == adv_holder); a foreign holder is
     # never touched. The refresher is stopped FIRST (a straggler write
     # after rm -rf would recreate the heartbeat file in a deleted dir's
     # place — and a surviving refresher must never outlive the hold).
@@ -510,7 +516,7 @@ stage_scripts_pin_advance() {
             kill "$_adv_hb_pid" 2>/dev/null
             wait "$_adv_hb_pid" 2>/dev/null
         fi
-        if [ -d "$lock_dir_path" ] && [ "$(cat "$lock_dir_path/owner" 2>/dev/null)" = "$$" ]; then
+        if [ -d "$lock_dir_path" ] && [ "$(cat "$lock_dir_path/owner" 2>/dev/null)" = "$adv_holder" ]; then
             rm -rf "$lock_dir_path"
         fi
     }
