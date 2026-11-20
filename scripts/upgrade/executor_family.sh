@@ -366,7 +366,9 @@ _stage_marker_reclaimable() {
     local m_raw m_pid m_ts m_now
     m_now="$2"
     m_raw="$(cat "$1" 2>/dev/null || true)"
+    set -f                      # no glob expansion on a tampered marker
     set -- $m_raw
+    set +f
     [ $# -ge 2 ] || return 1
     m_pid="$1"; m_ts="$2"
     case "$m_pid$m_ts" in
