@@ -156,6 +156,9 @@ assert_contains "P3-PIN-13 stage.sh calls the stamp verdict" "_pipeline_scripts_
 
 # ════════════════════════════════════════════════════════════════════════════
 section "P3-T08 — the two-sided requirement IN THIS TREE"
+# [AC-D6-11 — T-POLISH-A marker, 2026-11-20: PIPELINE_SCRIPTS_REV ==
+#  PIPELINE_SCRIPTS_FLOOR_COMMIT (this gate) and, at Wave-6 stamp time,
+#  names this lane's merge commit]
 
 assert_eq "P3-T08 the daemon floor and the scripts stamp carry the SAME sha" "$FLOOR_COMMIT" "$STAMP_REV"
 printf '%s' "$FLOOR_COMMIT" | grep -Eq '^[0-9a-f]{40}$' && _pass || _fail "P3-T08 the shared sha is 40-hex" "40-hex" "$FLOOR_COMMIT"
@@ -177,6 +180,9 @@ assert_eq "P3-T08 a half-applied bump (stamp != floor) is REFUSED" "1" "$RC"
 
 # ════════════════════════════════════════════════════════════════════════════
 section "D4-6 — the single-writer pair bumper (scripts/bump-pipeline-floor.sh)"
+# [AC-D4-9 — T-POLISH-A marker, 2026-11-20: the bump-before-stage obligation
+#  is pinned HERE (beside AC-D6-11's gate) — the pair is re-stamped via this
+#  single-writer mechanism before stage; stage.sh refuses otherwise (P3-PIN-14)]
 
 # AC-D4-6: ONE command writes BOTH constants in ONE commit and re-verifies
 # (floor sha-shaped ∧ ancestor; REV 40-hex ∧ resolvable ∧ == floor; 17-path

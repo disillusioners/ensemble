@@ -543,6 +543,9 @@ if [ "$HOST_HAS_SYSTEMD" = "1" ]; then
     assert_contains "L6a/D6 the budget-exhaustion token (last-state=active — the §2.1 ACTIVE class)" "last-state=active" "$L6A_OUT"
 
     # L6b — serving but WRONG version → fail FAST (one poll, no retry loop).
+    # [AC-D6-7 — T-POLISH-A marker, 2026-11-20: green-with-wrong-version
+    #  (this leg) and green-with-absent-version (L6b′ below) still fail
+    #  fast — the regression pair]
     reset_stub_state "$HBFIX/sc.log"
     export HANDBACK_VERIFY_BUDGET_S=30 HANDBACK_VERIFY_GRACE_S=5 CURL_MODE=wrongver
     L6B_OUT="$(run_hb "$LIBSH" "$LSOF_OK:$CURL_DIR" "$UNIT_SETUP
@@ -590,6 +593,8 @@ if [ "$HOST_HAS_SYSTEMD" = "1" ]; then
 
     # L6b′ — 2xx with the version field ABSENT while the expected version is
     # KNOWN → fail-fast (AM-P1-1's unenumerated cell, the L6b extension).
+    # [AC-D6-7/AC-D6-8 — T-POLISH-A marker, 2026-11-20: the absent-version
+    #  arm of the AC-D6-7 pair; the fail-fast is NEVER reclassified PENDING]
     reset_stub_state "$HBFIX/sc.log"
     export HANDBACK_VERIFY_BUDGET_S=30 CURL_MODE=noversion
     L6B2_OUT="$(run_hb "$LIBSH" "$LSOF_OK:$CURL_DIR" "$UNIT_SETUP

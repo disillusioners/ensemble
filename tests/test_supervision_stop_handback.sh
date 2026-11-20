@@ -1929,6 +1929,8 @@ m_attr() {  # m_attr "VAR=value"... — export the legs' knobs, probe once
 
 # M1 — foreign holder (owned set says 424242, the port is held by 999999):
 # the gate REFUSES and the detail names the holder + the owned set.
+# [AC-D1-4 — T-POLISH-A marker, 2026-11-20: the refusal detail still
+#  contains "NOT in the supervision-owned pid set" byte-for-byte]
 M1_OUT="$(m_attr "ATTR_LSOF_PIDS=999999")"
 assert_contains "M1 foreign holder: attribution refuses" "attr-rc=1" "$M1_OUT"
 assert_contains "M1 detail names the foreign holder" "999999 NOT in the supervision-owned pid set" "$M1_OUT"

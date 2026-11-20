@@ -31,10 +31,13 @@
 #      family paths exist at the sha);
 #   5. both target constants parse EXACTLY ONCE from their files (a drifted
 #      anchor refuses instead of silently writing nothing);
-#   6. neither target file is dirty (this commit sweeps ONLY its own two
-#      paths — the house concurrent-commit rule);
-#   7. (idempotence) if both constants ALREADY equal the sha: exit 0 with
-#      NO commit.
+#   6. (idempotence) if both constants ALREADY equal the sha: exit 0 with
+#      NO commit — runs BEFORE the dirty check by LEADER RULING (T-POLISH-C,
+#      tidier fold 2026-11-20): an idempotent early-exit makes re-runs safe
+#      on a tree whose target files may be mid-flight elsewhere (no write,
+#      no commit, no dirty-check false refusal for a no-op);
+#   7. neither target file is dirty (this commit sweeps ONLY its own two
+#      paths — the house concurrent-commit rule).
 #
 # NO fetch, ever (ADR-009 D3 — builds come from the local checkout).
 #
@@ -91,14 +94,14 @@ FLOOR_MATCHES="$(grep -cE '^PIPELINE_SCRIPTS_FLOOR_COMMIT = "' "$UTOOLS")"
 CUR_FLOOR="$(sed -n 's/^PIPELINE_SCRIPTS_FLOOR_COMMIT = "\([0-9a-f]\{6,40\}\)"$/\1/p' "$UTOOLS" | head -1)"
 [ -n "$CUR_FLOOR" ] || die "PIPELINE_SCRIPTS_FLOOR_COMMIT's current value does not parse as a hex sha from $UTOOLS (the anchor drifted — refusing BEFORE any write so the pair can never half-apply)"
 
-# 7. idempotence
+# 6. idempotence (T-POLISH-C: renumbered to match execution order)
 if [ "$CUR_REV" = "$SHA" ] \
    && [ "$(sed -n 's/^PIPELINE_SCRIPTS_FLOOR_COMMIT = "\([0-9a-f]*\)"$/\1/p' "$UTOOLS" | head -1)" = "$SHA" ]; then
     log "both constants already equal $SHA — nothing to do (no commit)"
     exit 0
 fi
 
-# 6. neither target file dirty (the commit sweeps ONLY its two paths)
+# 7. neither target file dirty (the commit sweeps ONLY its two paths)
 git -C "$REPO_ROOT" diff --quiet -- scripts/upgrade/lib.sh 2>/dev/null \
     || die "scripts/upgrade/lib.sh has uncommitted changes — commit or revert them first (this bumper never sweeps foreign work)"
 git -C "$REPO_ROOT" diff --quiet -- daemon/tools/upgrade_tools.py 2>/dev/null \
