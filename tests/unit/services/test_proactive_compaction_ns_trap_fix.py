@@ -340,8 +340,8 @@ class TestNsTrapCLETargeting:
     # 9910 / 10072 before the compact-note lane's graph.py growth
     # above the CLE block). The PINNED CODE is byte-identical
     # base-vs-head — only the line anchors drifted.
-    _CLE_GUARD_LINE = 9926
-    _CLE_REPLACEMENT_LINE = 10088
+    _CLE_GUARD_LINE = 9946
+    _CLE_REPLACEMENT_LINE = 10108
 
     @staticmethod
     def _if_node_with_body_constant(substring: str):

@@ -77,6 +77,7 @@ async def persist_compaction_result(
     mid_turn: bool = False,
     abort_policy: AbortPolicy = "raise",
     graph: Any = None,
+    hoist_injected: bool = True,
 ) -> bool:
     """Persist a :class:`CompactionResult` to the LangGraph checkpoint.
 
@@ -222,7 +223,8 @@ async def persist_compaction_result(
                 f"site={sorted(site_compacted_ids)!r})"
             )
         replacement: list[BaseMessage] = build_sentinel_replacement(
-            result, pre_messages, compacted_ids=compacted_ids
+            result, pre_messages, compacted_ids=compacted_ids,
+            hoist_injected=hoist_injected,
         )
     except CompactionAborted as abort_exc:
         # W1 mitigation: pre-write guard refused the write. The

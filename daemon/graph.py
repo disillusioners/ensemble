@@ -4287,6 +4287,22 @@ class SessionState(MessagesState):
     attestation_fresh_episode_consumed_id: str = ""
 
 
+def _fresh_compact_context_continuation(messages) -> bool:
+    """Fresh-swap router (compact-fresh-swap)."""
+    if not messages:
+        return False
+    i = len(messages) - 1
+    while i >= 0 and isinstance(messages[i], HumanMessage):
+        i -= 1
+    trailing = messages[i + 1:]
+    return any(
+        isinstance(m, HumanMessage)
+        and (getattr(m, "additional_kwargs", {}) or {}).get("context_kind")
+        == "compacted_context"
+        for m in trailing
+    )
+
+
 def should_continue(state: MessagesState) -> str:
     """Determine if we should continue or end.
 
@@ -4302,6 +4318,10 @@ def should_continue(state: MessagesState) -> str:
     # Normal case: LLM made tool calls
     if getattr(last_message, 'tool_calls', None):
         return "tools"
+
+    # Fresh-swap continuation: one extra agent pass after a fresh swap.
+    if _fresh_compact_context_continuation(messages):
+        return "agent"
 
     # ── S5 degenerate re-invoke cap (empty-response-guard Phase 1) ──────
     # Rows 2-3 (reasoning-only / <think>-tag-only) re-invoked UNBOUNDED
@@ -13613,52 +13633,73 @@ def create_compact_note_tools_node(
             # ``len(state_msgs)`` announced #1–#51 while the swap compacted
             # #1–#50. Strip FIRST, then size the span from the stripped set.
             kept_msgs, _exchange = _compact_note_strip_exchange(state_msgs)
-            from daemon.compaction import identify_boundary_groups, select_compactable_groups
-            from daemon.loader import estimate_messages_tokens
 
-            groups = identify_boundary_groups(kept_msgs)
+            # FRESH-SWAP SPLIT: idx = index of the LAST exchange member in
+            # state_msgs (by id()); arrivals = messages strictly newer than
+            # the arm; pre_arm = pre-exchange messages minus exchange
+            # members. Defensive: exchange not found → arrivals=[], pre_arm=kept.
+            _exchange_ids = {id(m) for m in _exchange}
+            _idx = -1
+            for _i, _m in enumerate(state_msgs):
+                if id(_m) in _exchange_ids:
+                    _idx = _i
+            if _idx == -1:
+                arrivals = []
+                pre_arm = list(kept_msgs)
+            else:
+                arrivals = list(state_msgs[_idx + 1 :])
+                pre_arm = [
+                    _m for _m in state_msgs[: _idx + 1] if id(_m) not in _exchange_ids
+                ]
+
             cfg_obj = getattr(compactor, "config", None) if compactor is not None else None
-            recent_window = getattr(cfg_obj, "recent_message_window", _COMPACT_NOTE_DEFAULT_RECENT_WINDOW) if cfg_obj is not None else _COMPACT_NOTE_DEFAULT_RECENT_WINDOW
-            min_window = getattr(cfg_obj, "min_recent_window", _COMPACT_NOTE_DEFAULT_MIN_WINDOW) if cfg_obj is not None else _COMPACT_NOTE_DEFAULT_MIN_WINDOW
-            threshold = getattr(cfg_obj, "threshold", _COMPACT_NOTE_DEFAULT_THRESHOLD) if cfg_obj is not None else _COMPACT_NOTE_DEFAULT_THRESHOLD
-            system_prompt_tokens = _COMPACT_NOTE_SYSTEM_PROMPT_TOKENS
             agent_model_name = _compact_note_effective_model(
                 state_msgs, llm_config, llm_standard
             )
+
             context_window = 0
             try:
                 from daemon.compaction import get_model_context_limit
                 context_window = get_model_context_limit(agent_model_name, cfg_obj)
-            except Exception as exc:
-                logger.warning(
-                    "[CompactNote] context-window read failed instance=%s "
-                    "error_class=%s — falling back to the unconfigured "
-                    "window",
-                    str(instance_id)[:8],
-                    type(exc).__name__,
-                )
+            except Exception:
                 context_window = 0
             if not context_window or context_window <= 0:
-                from daemon.compaction import get_model_context_limit
-                context_window = get_model_context_limit(agent_model_name, None)
+                try:
+                    from daemon.compaction import get_model_context_limit
+                    context_window = get_model_context_limit(agent_model_name, None)
+                except Exception:
+                    context_window = 0
             if context_window <= 0:
                 context_window = _COMPACT_NOTE_FALLBACK_CONTEXT_WINDOW
 
-            compactable, _preserved, _window = select_compactable_groups(
-                groups,
-                recent_window=recent_window,
-                min_window=min_window,
-                context_window=context_window,
-                system_prompt_tokens=system_prompt_tokens,
-                estimate_fn=estimate_messages_tokens,
-                config_threshold=threshold,
-            )
-            if compactable:
-                span_start = compactable[0].start_idx + 1
-                span_end = compactable[-1].end_idx + 1
-            else:
-                span_start = 1
-                span_end = len(kept_msgs) if kept_msgs else 1
+            # GATE: if pre_arm empty → settle DEFERRED, do NOT append request.
+            if not pre_arm:
+                from daemon.services.prompt_refresh import (
+                    APPEND_OUTCOME_DEFERRED,
+                    read_compact_note_state,
+                    settle_compact_note_arm,
+                )
+                _arm = read_compact_note_state(repo, instance_id) if instance_id else None
+                if _arm is not None and getattr(_arm, "armed", False):
+                    _log_compact_note_settle(
+                        instance_id,
+                        APPEND_OUTCOME_DEFERRED,
+                        settle_compact_note_arm(
+                            repo,
+                            instance_id,
+                            note_sha12=getattr(_arm, "sha256_12", "") or "",
+                            outcome=APPEND_OUTCOME_DEFERRED,
+                            persisted=False,
+                            agent_model=agent_model_name,
+                            note_chars=len(getattr(_arm, "note", "") or ""),
+                            agent_id=getattr(_arm, "agent_id", "") or "",
+                            arrivals_preserved=len(arrivals),
+                        ),
+                    )
+                return result
+
+            span_start = 1
+            span_end = max(1, len(pre_arm))
 
             from daemon.compaction import GLOBAL_OVERVIEW_TOKEN_CAP, build_compact_note_request
             request_text = build_compact_note_request(
@@ -13917,15 +13958,28 @@ def create_compact_note_agent_node(
             # yet — it is kept for the consumed-count audit log and for
             # the tests that pin the strip's behaviour.
             kept_msgs, exchange_msgs = _compact_note_strip_exchange(pre_request_msgs)
-            from daemon.compaction import identify_boundary_groups, select_compactable_groups
-            from daemon.loader import estimate_messages_tokens
 
-            groups = identify_boundary_groups(kept_msgs)
+            # FRESH-SWAP SPLIT (SWAP half): idx = index of the LAST exchange
+            # member in pre_request_msgs (by id()); arrivals = messages
+            # strictly newer than the arm; pre_arm = pre-exchange messages
+            # minus exchange members. Defensive: exchange not found ->
+            # arrivals=[], pre_arm=kept.
+            _exchange_ids = {id(m) for m in exchange_msgs}
+            _idx = -1
+            for _i, _m in enumerate(pre_request_msgs):
+                if id(_m) in _exchange_ids:
+                    _idx = _i
+            if _idx == -1:
+                arrivals = []
+                pre_arm = list(kept_msgs)
+            else:
+                arrivals = list(pre_request_msgs[_idx + 1 :])
+                pre_arm = [
+                    _m for _m in pre_request_msgs[: _idx + 1]
+                    if id(_m) not in _exchange_ids
+                ]
+
             cfg_obj = getattr(compactor, "config", None) if compactor is not None else None
-            # Read the override-configured value up front so every settle
-            # call site (including the persist-failure path, which returns
-            # early) can report it. A FAILED read is "unknown", never
-            # "not configured".
             override_configured = ""
             try:
                 override_configured = str(
@@ -13939,63 +13993,25 @@ def create_compact_note_agent_node(
                     type(exc).__name__,
                 )
                 override_configured = "unknown"
-            recent_window = getattr(cfg_obj, "recent_message_window", _COMPACT_NOTE_DEFAULT_RECENT_WINDOW) if cfg_obj is not None else _COMPACT_NOTE_DEFAULT_RECENT_WINDOW
-            min_window = getattr(cfg_obj, "min_recent_window", _COMPACT_NOTE_DEFAULT_MIN_WINDOW) if cfg_obj is not None else _COMPACT_NOTE_DEFAULT_MIN_WINDOW
-            threshold = getattr(cfg_obj, "threshold", _COMPACT_NOTE_DEFAULT_THRESHOLD) if cfg_obj is not None else _COMPACT_NOTE_DEFAULT_THRESHOLD
-            system_prompt_tokens = _COMPACT_NOTE_SYSTEM_PROMPT_TOKENS
-            # ITEM-8 (leader-ratified): the window MUST come from the
-            # SAME effective model the swap side uses (the vision switch
-            # included) — the announced span is read by the model in the
-            # very turn it answers, so a window sized for another model
-            # is the same receipt-truth class as the in-context lie.
             agent_model_name = _compact_note_effective_model(state_msgs, llm_config, llm_standard, reply_msg)
+
             context_window = 0
             try:
                 from daemon.compaction import get_model_context_limit
                 context_window = get_model_context_limit(agent_model_name, cfg_obj)
-            except Exception as exc:
-                # NEVER swallow silently: a failed window read would
-                # silently re-size the announced span (the fallback below
-                # is a different window), so it is surfaced.
-                logger.warning(
-                    "[CompactNote] context-window read failed instance=%s "
-                    "error_class=%s — falling back to the unconfigured "
-                    "window",
-                    str(instance_id)[:8],
-                    type(exc).__name__,
-                )
+            except Exception:
                 context_window = 0
             if not context_window or context_window <= 0:
-                from daemon.compaction import get_model_context_limit
-                context_window = get_model_context_limit(agent_model_name, None)
+                try:
+                    from daemon.compaction import get_model_context_limit
+                    context_window = get_model_context_limit(agent_model_name, None)
+                except Exception:
+                    context_window = 0
             if context_window <= 0:
                 context_window = _COMPACT_NOTE_FALLBACK_CONTEXT_WINDOW
 
-            compactable, preserved, _window = select_compactable_groups(
-                groups,
-                recent_window=recent_window,
-                min_window=min_window,
-                context_window=context_window,
-                system_prompt_tokens=system_prompt_tokens,
-                estimate_fn=estimate_messages_tokens,
-                config_threshold=threshold,
-            )
-
-            # #4 (BLOCKER): when NOTHING is compactable (every message is
-            # preserved — e.g. a note armed early in a SHORT conversation)
-            # the swap must NOT claim "summarized messages #1–N" while
-            # ALL N are preserved. The arm stays armed and the settle
-            # records a NO-OP outcome (the existing deferred/no-doc
-            # vocabulary).
-            if not compactable:
-                logger.info(
-                    "[CompactNote] no compaction needed instance=%s "
-                    "(len(groups)=%d <= recent_window=%d) — the arm "
-                    "stays armed",
-                    str(instance_id)[:8],
-                    len(groups),
-                    recent_window,
-                )
+            # GATE: if pre_arm empty -> settle DEFERRED, return unchanged.
+            if not pre_arm:
                 _log_compact_note_settle(
                     instance_id,
                     APPEND_OUTCOME_DEFERRED,
@@ -14009,22 +14025,14 @@ def create_compact_note_agent_node(
                         override_configured=override_configured,
                         note_chars=note_chars,
                         agent_id=agent_id,
+                        arrivals_preserved=len(arrivals),
                     ),
                 )
                 return result
 
-            preserved_msgs = []
-            for g in (preserved or []):
-                preserved_msgs.extend(getattr(g, "messages", []) or [])
-
-            # ``compactable`` is GUARANTEED non-empty here — the #4 no-op
-            # settle above returns early on the empty case. (The former
-            # ``else`` fallback was UNREACHABLE: F4.)
-            span_start = compactable[0].start_idx + 1
-            span_end = compactable[-1].end_idx + 1
-
-            from daemon.compaction import _next_compaction_seq, build_compaction_doc, make_remove_all_sentinel
+            from daemon.compaction import _next_compaction_seq, build_compaction_doc, make_remove_all_sentinel, build_compact_note_post_swap_note
             from daemon.compaction import CompactionResult
+            from daemon.loader import estimate_messages_tokens
             seq = _next_compaction_seq(kept_msgs, instance_id or "")
             from datetime import datetime, timezone
             compacted_at = datetime.now(timezone.utc).isoformat()
@@ -14036,9 +14044,9 @@ def create_compact_note_agent_node(
                 global_overview=reply_text,
                 sections=[],
                 total_sections=0,
-                summarized_start=span_start,
-                summarized_end=span_end,
-                preserved_count=len(preserved_msgs),
+                summarized_start=1,
+                summarized_end=len(pre_arm),
+                preserved_count=len(arrivals),
                 dropped_spans=[],
                 msg_timestamps=None,
                 context_window=context_window,
@@ -14046,24 +14054,19 @@ def create_compact_note_agent_node(
                 honest_truncation=True,
             )
             sentinel = make_remove_all_sentinel()
+            note = build_compact_note_post_swap_note()
 
-            # Build the CompactionResult for the seam.
-            kept_ids = {getattr(m, "id", None) for m in preserved_msgs}
+            replacement_keepables = [doc, note, *arrivals]
+
+            # dropped_ids = every state_msgs id not kept.
+            kept_ids = {getattr(m, "id", None) for m in replacement_keepables}
             kept_ids.discard(None)
-            replacement_keepables = [doc, *preserved_msgs]
-            # The dropped ids: every channel message that is NOT in the
-            # preserved tail — the compacted span AND the exchange (the
-            # tool call + its receipt) AND the request itself. They are
-            # removed by the sentinel (the exchange is CONSUMED).
             dropped_ids = set()
             for m in state_msgs:
                 mid = getattr(m, "id", None)
                 if mid is not None and mid not in kept_ids:
                     dropped_ids.add(mid)
 
-            # HONEST token counts (never zeros that read as measurements):
-            # the signed difference — on a tiny fixture the compaction can
-            # GROW the context, and a clamped "0 saved" would misreport it.
             tokens_before = estimate_messages_tokens(state_msgs)
             tokens_after = estimate_messages_tokens(replacement_keepables)
             result_obj = CompactionResult(
@@ -14083,7 +14086,7 @@ def create_compact_note_agent_node(
             )
             result_obj.compacted_ids = frozenset(dropped_ids)
 
-            # Persist via the seam (mid_turn, fail_open) — mirror graph.py:8408.
+            # Persist via the seam.
             graph = None
             if graph_ref is not None:
                 try:
@@ -14107,11 +14110,9 @@ def create_compact_note_agent_node(
                     mid_turn=True,
                     abort_policy="fail_open",
                     graph=graph,
+                    hoist_injected=False,
                 )
             except Exception as exc:
-                # The seam logs at WARNING only for a REFUSED write — an
-                # EXCEPTION here would otherwise vanish (the swap would
-                # look like a plain refusal to persist).
                 logger.warning(
                     "[CompactNote] persistence raised instance=%s "
                     "error_class=%s — the swap did NOT land",
@@ -14120,10 +14121,6 @@ def create_compact_note_agent_node(
                 )
                 persisted = False
 
-            # The compaction-model override: the append path NEVER applies
-            # it (the compaction is produced by the agent's own invoke, so
-            # there is no model call to override — architect v1.5 §2b).
-            # The CONFIGURED value is still reported so an operator can
             if not persisted:
                 _log_compact_note_settle(
                     instance_id,
@@ -14134,29 +14131,20 @@ def create_compact_note_agent_node(
                         outcome=APPEND_OUTCOME_APPEND_FAILED,
                         persisted=False,
                         agent_model=agent_model_name,
-                        # ALWAYS FALSE BY CONSTRUCTION (v1.5 §2b): the
-                        # append path makes no model call of its own.
                         override_applied=False,
                         override_configured=override_configured,
                         note_chars=note_chars,
                         agent_id=agent_id,
+                        arrivals_preserved=len(arrivals),
                     ),
                 )
                 return result
 
-            # Persisted — build the swapped channel and settle.
-            # Mirror the seam's sentinel-first replacement so the node
-            # return (the durable landing) matches what was persisted.
             rebuild_ok = True
             try:
                 from daemon.compaction import build_sentinel_replacement
-                channel = build_sentinel_replacement(result_obj, state_msgs, compacted_ids=result_obj.compacted_ids)
+                channel = build_sentinel_replacement(result_obj, state_msgs, compacted_ids=result_obj.compacted_ids, hoist_injected=False)
             except Exception as exc:
-                # The hand-built fallback does NOT carry the helper's
-                # injected-hoisting semantics — the durable state and the
-                # committed channel can disagree. That is DISCLOSED (a
-                # WARNING) and the settle records a DISTINCT outcome (never
-                # "compacted"), so the arm persists and the work re-runs.
                 rebuild_ok = False
                 logger.warning(
                     "[CompactNote] the compacted channel could not be "
@@ -14166,7 +14154,7 @@ def create_compact_note_agent_node(
                     str(instance_id)[:8],
                     type(exc).__name__,
                 )
-                channel = [sentinel, doc, *preserved_msgs]
+                channel = [sentinel, doc, note, *arrivals]
             settle_result = settle_compact_note_arm(
                 repo, instance_id,
                 note_sha12=note_sha12,
@@ -14177,13 +14165,9 @@ def create_compact_note_agent_node(
                 ),
                 persisted=True,
                 agent_model=agent_model_name,
-                # ALWAYS FALSE BY CONSTRUCTION (architect v1.5 §2b): the
-                # append path makes no model call of its own, so there is
-                # no override to apply — the configured value is reported
-                # above so an operator can see their pin did not apply.
                 override_applied=False,
                 override_configured=override_configured,
-                tail_spliced=len(preserved_msgs),
+                arrivals_preserved=len(arrivals),
                 doc_id=str(getattr(doc, "id", "") or ""),
                 note_chars=note_chars,
                 agent_id=agent_id,
@@ -14204,6 +14188,7 @@ def create_compact_note_agent_node(
                 result["compacted_at"] = compacted_at
                 return result
             return {"messages": channel, "compacted_at": compacted_at}
+
         except Exception as exc:
             # CONTENT-FREE: the class name only — an exception MESSAGE can
             # carry conversation content (the note is live in this scope),
@@ -14241,8 +14226,6 @@ def create_compact_note_agent_node(
                     "[CompactNote] SWAP failure settle failed for instance=%s",
                     str(instance_id)[:8],
                 )
-            return result
-
     return _node
 
 

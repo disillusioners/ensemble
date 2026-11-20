@@ -328,7 +328,7 @@ COMPACT_NOTE_LAST_DEFERRED_KEY = "compact_note_last_deferred"
 COMPACT_NOTE_LAST_AGENT_MODEL_KEY = "compact_note_last_agent_model"
 COMPACT_NOTE_LAST_OVERRIDE_APPLIED_KEY = "compact_note_last_override_applied"
 COMPACT_NOTE_LAST_OVERRIDE_CONFIGURED_KEY = "compact_note_last_override_configured"
-COMPACT_NOTE_LAST_TAIL_SPLICED_KEY = "compact_note_last_tail_spliced"
+COMPACT_NOTE_LAST_ARRIVALS_PRESERVED_KEY = "compact_note_last_arrivals_preserved"
 COMPACT_NOTE_LAST_DOC_ID_KEY = "compact_note_last_doc_id"
 
 
@@ -711,7 +711,7 @@ def settle_compact_note_arm(
     agent_model: str = "",
     override_applied: bool = False,
     override_configured: str = "",
-    tail_spliced: int = 0,
+    arrivals_preserved: int = 0,
     doc_id: str = "",
     note_chars: int = 0,
     agent_id: str = "",
@@ -748,7 +748,7 @@ def settle_compact_note_arm(
         COMPACT_NOTE_LAST_AGENT_MODEL_KEY: agent_model or "",
         COMPACT_NOTE_LAST_OVERRIDE_APPLIED_KEY: bool(override_applied),
         COMPACT_NOTE_LAST_OVERRIDE_CONFIGURED_KEY: override_configured or "",
-        COMPACT_NOTE_LAST_TAIL_SPLICED_KEY: int(tail_spliced or 0),
+        COMPACT_NOTE_LAST_ARRIVALS_PRESERVED_KEY: int(arrivals_preserved or 0),
         COMPACT_NOTE_LAST_DOC_ID_KEY: doc_id or "",
     }
     audit_ok = _write_instance_metadata(repository, instance_id, audit)
@@ -797,7 +797,7 @@ def settle_compact_note_arm(
                 agent_model=agent_model,
                 compaction_model_override_applied=override_applied,
                 compaction_model_override_configured=override_configured,
-                tail_spliced=tail_spliced,
+                arrivals_preserved=arrivals_preserved,
                 doc_id=doc_id,
             )
         )
@@ -1244,7 +1244,7 @@ def format_compact_note_append_line(
     agent_model: str = "",
     compaction_model_override_applied: bool = False,
     compaction_model_override_configured: str = "",
-    tail_spliced: int = 0,
+    arrivals_preserved: int = 0,
     doc_id: str = "",
 ) -> str:
     """The APPEND-PATH audit line — the receipt's honesty surface.
@@ -1267,7 +1267,7 @@ def format_compact_note_append_line(
         f"compaction_model_override_configured="
         f"{compaction_model_override_configured or '-'} "
         f"note_chars={note_chars} note_sha256={note_sha256_12} "
-        f"tail_spliced={int(tail_spliced or 0)} doc_id={doc_id or '-'}"
+        f"arrivals_preserved={int(arrivals_preserved or 0)} doc_id={doc_id or '-'}"
     )
 
 

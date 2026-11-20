@@ -90,6 +90,7 @@ env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_DB -u POSTGRES_USER \
     timeout 210s .venv/bin/python -m pytest \
     tests/unit/tools/test_prompt_reload_compact_note.py \
     tests/unit/tools/test_compact_note_graph_wiring.py \
+    tests/unit/tools/test_compact_fresh_swap_router.py \
     tests/unit/test_compaction_compact_note.py \
     tests/unit/services/test_prompt_refresh_primitive.py \
     tests/unit/tools/test_prompt_reload_refusals.py \

@@ -324,6 +324,7 @@ def build_sentinel_replacement(
     result: "CompactionResult",
     current_messages: list[BaseMessage],
     compacted_ids: set[str] | None = None,
+    hoist_injected: bool = True,
 ) -> list[BaseMessage]:
     """W1 fix: land the intended order verbatim via the REMOVE_ALL sentinel.
 
@@ -377,6 +378,12 @@ def build_sentinel_replacement(
             strictest mode). When provided, the guard excludes these
             ids from the "must survive" check. This is the production
             path — the engine knows exactly which ids it dropped.
+        hoist_injected: When False, NO hoist split is performed —
+            ``injected=[]`` and ``doc_and_tail`` keeps the keepables
+            verbatim (fresh-swap path, Emperor ruling 2026-11-20, lands
+            a spec-bound order). Default True preserves the
+            house-auto-compaction hoisting behaviour. The pre-write
+            guard is unchanged either way.
 
     Returns:
         The replacement list, with the ``REMOVE_ALL_MESSAGES`` sentinel
@@ -444,12 +451,19 @@ def build_sentinel_replacement(
         m for m in result.replacement_messages
         if not isinstance(m, RemoveMessage)
     ]
-    injected: list[BaseMessage] = [
-        m for m in keepables if _is_hoisted_injected(m, answered_note_ids)
-    ]
-    doc_and_tail: list[BaseMessage] = [
-        m for m in keepables if not _is_hoisted_injected(m, answered_note_ids)
-    ]
+    if hoist_injected:
+        injected: list[BaseMessage] = [
+            m for m in keepables if _is_hoisted_injected(m, answered_note_ids)
+        ]
+        doc_and_tail: list[BaseMessage] = [
+            m for m in keepables if not _is_hoisted_injected(m, answered_note_ids)
+        ]
+    else:
+        # Fresh-swap path (Emperor ruling 2026-11-20): spec-bound order,
+        # NO hoist. Hoisting is a house-auto-compaction concern, disabled
+        # for this path only. keepables order is preserved verbatim.
+        injected = []
+        doc_and_tail = list(keepables)
 
     # Step 2: PRE-WRITE GUARD — the sentinel recipe is
     # write-the-entire-new-channel-value. The load-bearing safety
@@ -1111,6 +1125,39 @@ def build_compact_note_request(
         f"(compacted span: messages #{compacted_span_start}–"
         f"#{compacted_span_end}; produce a compaction within "
         f"{token_cap} tokens)"
+    )
+
+
+# ── Compact-note post-swap note (fresh-swap contract) ──────────────────────
+# The post-compaction TAIL SPLICE is REPLACED by a FRESH message list:
+# steady-state post-swap channel = [RemoveMessage(REMOVE_ALL), doc, note,
+# *arrivals]. ``note`` is the NEW HumanMessage below — the agent's
+# "ready for the next task" ack prompt. ZERO pre-compaction messages
+# survive the swap except the post-exchange ``arrivals``.
+COMPACT_NOTE_POST_SWAP_NOTE_TEXT = (
+    "You just compacted the previous conversation into the 'Compacted "
+    "context' summary above. You are ready for the next task. Do not run "
+    "anything and do not call any tools. End your turn now and wait for "
+    "the next message from the user."
+)
+COMPACT_NOTE_POST_SWAP_CONTEXT_KIND = "compacted_context"
+COMPACT_NOTE_POST_SWAP_NOTE_ID_PREFIX = "compacted-context-note-"
+
+
+def build_compact_note_post_swap_note() -> "HumanMessage":
+    """Build the post-swap note HumanMessage (fresh-swap contract).
+
+    Content, id prefix and additional_kwargs are PINNED by the contract;
+    the id carries a fresh uuid4 hex so repeated swaps never collide.
+    """
+    return HumanMessage(
+        content="[SYSTEM CONTEXT: Compacted Context]\n"
+        + COMPACT_NOTE_POST_SWAP_NOTE_TEXT,
+        id=COMPACT_NOTE_POST_SWAP_NOTE_ID_PREFIX + uuid.uuid4().hex,
+        additional_kwargs={
+            "injected_message": True,
+            "context_kind": COMPACT_NOTE_POST_SWAP_CONTEXT_KIND,
+        },
     )
 
 
