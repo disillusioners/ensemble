@@ -4306,6 +4306,26 @@ def _refuse_systemd_unavailable(install_dir: Path, reason: str) -> NoReturn:
     raise ExecutorSystemdUnavailable(detail)
 
 
+def spawn_mode_note_is_service(note: str) -> bool:
+    """Review-fix M2 (2026-11-20): does a :func:`spawn_executor` mode note
+    describe the TRANSIENT-SERVICE branch?
+
+    The note is the spawn seam's CONTRACTED branch report — ``service=
+    <unit> (bus=…)`` for the systemd transient-service branch,
+    ``(daemonized, start_new_session)`` for the legacy setsid branch —
+    computed inside :func:`spawn_executor` from the SAME detection result
+    that chose the branch. This predicate is the single point of truth for
+    consumers that must branch on the ACTUAL spawn mode (the manager's
+    reaper enqueue: a LEGACY spawn has NO unit — an empty ``unit_name``
+    hands the sweep's classifier the legacy no-unit path so a non-systemd
+    host still reaches a TERMINAL ``executor_exit``; a derived unit name
+    on a legacy spawn would send the classifier probing a nonexistent unit
+    forever — the 2026-10-31 restart-arm livelock class). String-matching
+    the note's leading token lives HERE (pinned) so the coupling is not
+    re-derived per call site."""
+    return note.startswith("service=")
+
+
 def spawn_executor(
     argv: list[str],
     install_dir: Path,

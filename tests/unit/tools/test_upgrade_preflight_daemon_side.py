@@ -248,6 +248,16 @@ class _DrainHarness:
                 encoding="utf-8",
             )
         self.calls: list[dict[str, Any]] = []
+        # Review-fix M2 pin surface: the stub's CONTRACTED branch report
+        # (mode note) and identity-stamper firing are parametrizable so
+        # the reaper-identity legs can exercise the REAL spawn shapes —
+        # the defaults preserve the pre-M2 stub behavior byte-for-byte
+        # EXCEPT the note, which now reports the SERVICE branch the
+        # default stamper-firing implies (in the real seam the stamper
+        # fires ONLY on the service branch — a legacy note + a fired
+        # stamper is a shape the seam cannot produce).
+        self.spawn_mode_note = "service=(stubbed-unit) (bus=system)"
+        self.fire_stamper = True
 
     # Annotations copied VERBATIM from the real seam
     # (upgrade_journal.spawn_executor) so a signature change breaks visibly
@@ -279,9 +289,9 @@ class _DrainHarness:
         # D3-E3: fire the identity stamper EXACTLY as the real seam does
         # (immediately after the spawn, before returning) so the drain-path
         # identity pins exercise the real handoff shape.
-        if identity_stamper is not None:
+        if identity_stamper is not None and self.fire_stamper:
             identity_stamper(f"{unit_prefix}{run_id}", "system")
-        return self.EXECUTOR_PID, "(stubbed)"
+        return self.EXECUTOR_PID, self.spawn_mode_note
 
     def arm_and_drain(
         self,
@@ -429,6 +439,154 @@ class TestM1CollectModeRetentionValue:
         assert not any(
             t.endswith("CollectMode=inactive-or-failed") for t in argv
         ), argv
+
+
+# ── M2 (review-fix, 2026-11-20): reaper unit identity from the ACTUAL
+# spawn mode — the no-unit host class must reach a TERMINAL classification.
+
+
+class _RecordingSweep:
+    """Captures enqueue_reaper params at the drain seam (no real queue)."""
+
+    def __init__(self) -> None:
+        self.jobs: list[dict[str, Any]] = []
+
+    def enqueue_reaper(
+        self, pid, argv_summary, install_dir, run_id,
+        unit_name="", unit_bus="",
+    ) -> None:
+        self.jobs.append({
+            "pid": pid, "argv_summary": list(argv_summary),
+            "install_dir": Path(str(install_dir)), "run_id": run_id,
+            "unit_name": unit_name, "unit_bus": unit_bus,
+        })
+
+
+class TestM2ReaperUnitIdentityFromActualSpawnMode:
+    """Review-fix M2 (2026-11-20): pre-fix, the drain seam derived the
+    reaper's unit_name from ``kind`` — on a non-systemd/launchd host the
+    detector lands the LEGACY setsid branch (NO unit exists), yet the
+    reaper was handed ``ensemble-upgrade-<run_id>``: the classifier probed
+    a nonexistent unit until the poll cap and degraded to
+    ``executor_liveness_unverifiable`` — ``executor_exit`` never written,
+    the restart arm never closed (the 2026-10-31 livelock class, returned
+    on that host class).
+
+    What these legs would CATCH: (a) a regression to kind-derived unit
+    names on a legacy spawn (the first leg fails the moment unit_name is
+    non-empty); (b) the legacy job failing to reach a TERMINAL
+    executor_exit through the real worker (the second leg); (c) the unit
+    path degrading (stamper identity / prefix fallback / bus threading —
+    the remaining legs)."""
+
+    def test_legacy_spawn_enqueues_empty_unit_name(
+        self, drain: _DrainHarness
+    ) -> None:
+        from daemon.manager import InstanceManager
+
+        sweep = _RecordingSweep()
+        drain.mgr._upgrade_journal_sweep = sweep  # type: ignore[assignment]
+        drain.spawn_mode_note = "(daemonized, start_new_session)"
+        drain.fire_stamper = False  # the legacy branch never stamps a unit
+        assert drain.arm_and_drain("promote", "r-m2-legacy-1") is True
+        assert sweep.jobs, "the reaper was never enqueued"
+        job = sweep.jobs[-1]
+        assert job["unit_name"] == "", (
+            f"legacy spawn must enqueue unit_name='' — got {job['unit_name']!r}"
+        )
+        assert job["unit_bus"] == ""
+        # the kind-derived name is GONE on this host class (the M2 defect)
+        assert job["unit_name"] != "ensemble-upgrade-r-m2-legacy-1"
+
+    def test_legacy_job_reaches_terminal_executor_exit_through_the_worker(
+        self, drain: _DrainHarness, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The pin the M2 fix exists for: the no-unit host class reaches a
+        TERMINAL executor classification. Drives the REAL sweep worker with
+        the EXACT job the fixed seam enqueued (params recorded, not
+        hand-built) — pre-fix the same enqueue would have carried a unit
+        name and never emitted executor_exit."""
+        from daemon.services.upgrade_journal_sweep import (
+            ReaperJob, UpgradeJournalSweepService,
+        )
+
+        sweep = _RecordingSweep()
+        drain.mgr._upgrade_journal_sweep = sweep  # type: ignore[assignment]
+        drain.spawn_mode_note = "(daemonized, start_new_session)"
+        drain.fire_stamper = False
+        assert drain.arm_and_drain("restart", "r-m2-legacy-2") is True
+        rec = sweep.jobs[-1]
+        assert rec["unit_name"] == ""
+
+        monkeypatch.setenv("ENSEMBLE_EXECUTOR_UNIT_POLL_S", "1")
+        monkeypatch.setenv("ENSEMBLE_EXECUTOR_UNIT_REARM_MAX_POLLS", "0")
+        # a failing probe: if the job WRONGLY carried a unit name, the
+        # classifier would burn its re-arm budget and land on
+        # executor_liveness_unverifiable (halt-for-human) — no terminal row.
+        monkeypatch.setattr(
+            uj, "executor_unit_state_probe",
+            lambda unit, bus, **kw: (None, "probe must not be consulted "
+                                     "on the legacy path"),
+        )
+        worker = UpgradeJournalSweepService(
+            rec["install_dir"], reconcile_interval_seconds=86400,
+            reaper_timeout_seconds=60, manager=None,
+        )
+        job = ReaperJob(
+            pid=rec["pid"], argv_summary=tuple(rec["argv_summary"]),
+            install_dir=rec["install_dir"], run_id=rec["run_id"],
+            unit_name=rec["unit_name"], unit_bus=rec["unit_bus"],
+        )
+        asyncio.run(worker._classify_and_journal_exit(
+            job, client_exit_code=0, signal_name=None, signal_num=None,
+        ))
+        rows = [
+            e for e in (uj.journal_read(rec["install_dir"]).get("history")
+                        or [])
+            if e.get("event") == "executor_exit"
+        ]
+        assert rows, (
+            "the no-unit host class never reached a TERMINAL "
+            "executor_exit — the restart-arm livelock class (M2)"
+        )
+        assert "exit_code=0" in rows[-1]["detail"], rows[-1]["detail"]
+        assert uj.EXECUTOR_LIVENESS_UNVERIFIABLE_EVENT not in [
+            e.get("event")
+            for e in (uj.journal_read(rec["install_dir"]).get("history")
+                      or [])
+        ]
+
+    def test_service_spawn_keeps_the_stamped_unit_identity(
+        self, drain: _DrainHarness
+    ) -> None:
+        sweep = _RecordingSweep()
+        drain.mgr._upgrade_journal_sweep = sweep  # type: ignore[assignment]
+        drain.spawn_mode_note = (
+            "service=ensemble-upgrade-r-m2-svc-1 (bus=system) "
+            "(unit in flight; reaper observes unit exit via --wait client)"
+        )
+        drain.fire_stamper = True
+        assert drain.arm_and_drain("promote", "r-m2-svc-1") is True
+        job = sweep.jobs[-1]
+        assert job["unit_name"] == "ensemble-upgrade-r-m2-svc-1"
+        assert job["unit_bus"] == "system"
+
+    def test_service_spawn_with_failed_stamper_falls_back_to_prefix(
+        self, drain: _DrainHarness
+    ) -> None:
+        """The best-effort stamper raised: the sweep's run_id+prefix
+        derivation still applies (behavior preserved from pre-M2)."""
+        sweep = _RecordingSweep()
+        drain.mgr._upgrade_journal_sweep = sweep  # type: ignore[assignment]
+        drain.spawn_mode_note = (
+            "service=ensemble-restart-r-m2-svc-2 (bus=user) "
+            "(client exited rc=0 fast — outcome is journal-truth)"
+        )
+        drain.fire_stamper = False
+        assert drain.arm_and_drain("restart", "r-m2-svc-2") is True
+        job = sweep.jobs[-1]
+        assert job["unit_name"] == "ensemble-restart-r-m2-svc-2"
 
 
 # ── D3-E3 (self-service-promote Wave 5, §2.4 / AC-D3-5): the arm-lane

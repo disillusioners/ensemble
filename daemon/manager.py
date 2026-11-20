@@ -6824,6 +6824,34 @@ class InstanceManager:
             # pending_op remains the durable fallback.
             sweep = getattr(self, "_upgrade_journal_sweep", None)
             if sweep is not None:
+                # Review-fix M2 (2026-11-20): the reaper's unit identity
+                # is derived from the ACTUAL spawn outcome, never from
+                # `kind` alone. On a LEGACY spawn (non-systemd/launchd
+                # host — the detector refused the service branch) NO unit
+                # exists: unit_name stays EMPTY so the sweep classifier
+                # takes the legacy no-unit path (invariant (b)) and the
+                # host class still reaches a TERMINAL executor_exit —
+                # pre-fix, a kind-derived name made the classifier probe
+                # a nonexistent unit until the poll cap, degrading to
+                # executor_liveness_unverifiable and never closing the
+                # restart arm (the 2026-10-31 livelock class, returned on
+                # that host class). Service branch: the stamper's
+                # persisted identity wins; a failed best-effort stamper
+                # falls back to the kind-scoped prefix derivation (the
+                # run_id+prefix name the sweep already knows).
+                if _uj.spawn_mode_note_is_service(_spawn_mode_note):
+                    _reaper_unit = (
+                        op.executor_unit
+                        if op is not None and op.run_id == run_id
+                        and op.executor_unit
+                        else (
+                            f"{_uj.UNIT_NAME_PREFIX_RESTART}{run_id}"
+                            if kind == "restart"
+                            else f"{_uj.UNIT_NAME_PREFIX}{run_id}"
+                        )
+                    )
+                else:
+                    _reaper_unit = ""
                 try:
                     sweep.enqueue_reaper(
                         child_pid,
@@ -6835,14 +6863,11 @@ class InstanceManager:
                         # prefix the spawn used (the unit identity was
                         # already persisted to pending_op by the stamper
                         # above; this threads it to the in-memory job).
-                        unit_name=(
-                            f"{_uj.UNIT_NAME_PREFIX_RESTART}{run_id}"
-                            if kind == "restart"
-                            else f"{_uj.UNIT_NAME_PREFIX}{run_id}"
-                        ),
+                        unit_name=_reaper_unit,
                         unit_bus=(
                             op.executor_unit_bus
                             if op is not None and op.run_id == run_id
+                            and _reaper_unit
                             else ""
                         ),
                     )
