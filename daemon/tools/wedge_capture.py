@@ -146,6 +146,34 @@ def _resolve_root(manager: Any) -> Path:
     return Path(WedgeCaptureConfig.from_env().capture_dir)
 
 
+class WedgeCaptureListInput(BaseModel):
+    """Input schema for wedge_capture_list."""
+
+    limit: Annotated[
+        int,
+        Field(
+            default=DEFAULT_LIST_LIMIT,
+            description=(
+                f"Max rows to return (1-200, default {DEFAULT_LIST_LIMIT})."
+            ),
+        ),
+    ]
+
+
+class WedgeCaptureGetInput(BaseModel):
+    """Input schema for wedge_capture_get."""
+
+    capture_id: Annotated[
+        str,
+        Field(
+            description=(
+                "The capture id — the capture directory's name "
+                "(<UTC-ts>-<host>-<reason>-<uuid8>)."
+            ),
+        ),
+    ]
+
+
 def create_wedge_capture_tools(
     manager: Any,
     *,
@@ -172,18 +200,6 @@ def create_wedge_capture_tools(
     """
     caller_agent_id = agent_id or ""
 
-    class WedgeCaptureListInput(BaseModel):
-        """Input schema for wedge_capture_list."""
-
-        limit: Annotated[
-            int,
-            Field(
-                default=DEFAULT_LIST_LIMIT,
-                description=(
-                    f"Max rows to return (1-200, default {DEFAULT_LIST_LIMIT})."
-                ),
-            ),
-        ]
 
     @register_tool_category("wedge-capture")
     @tool(args_schema=WedgeCaptureListInput)
@@ -208,18 +224,6 @@ def create_wedge_capture_tools(
             logger.warning("wedge_capture_list failed: %s", exc)
             return _error(f"wedge_capture_list failed: {exc}")
 
-    class WedgeCaptureGetInput(BaseModel):
-        """Input schema for wedge_capture_get."""
-
-        capture_id: Annotated[
-            str,
-            Field(
-                description=(
-                    "The capture id — the capture directory's name "
-                    "(<UTC-ts>-<host>-<reason>-<uuid8>)."
-                ),
-            ),
-        ]
 
     @register_tool_category("wedge-capture")
     @tool(args_schema=WedgeCaptureGetInput)

@@ -757,6 +757,238 @@ async def _register_nudge_completion_watcher(
 # ═════════════════════════════════════════════════════════════════════
 # The factory — six act tools
 # ═════════════════════════════════════════════════════════════════════
+
+
+class InstanceTerminateInput(BaseModel):
+    """Input schema for instance_terminate."""
+
+    id: Annotated[
+        str,
+        Field(
+            description=(
+                "Target instance id (short form accepted). Required. "
+                "Acting on your own session is refused."
+            )
+        ),
+    ]
+    cascade: Annotated[
+        bool,
+        Field(
+            default=True,
+            description=(
+                "True (default) terminates the target AND its whole "
+                "cascade tree (the underlying service is total). "
+                "False means 'the target only, descendants stay "
+                "running' — that CREATES orphans, so it REFUSES with "
+                "reason=cascade-false-would-orphan-descendants unless "
+                "allow_orphan_descendants=True acknowledges it."
+            ),
+        ),
+    ]
+    reason: Annotated[
+        str,
+        Field(
+            description=(
+                "REQUIRED, free text, stored verbatim in the audit "
+                "ledger. The health report's evidence feeds this."
+            )
+        ),
+    ]
+    dry_run: Annotated[
+        bool,
+        Field(
+            default=True,
+            description=(
+                "True (default) — the preview lists the target, the "
+                "full cascade tree, the protected determination, the "
+                "confirmation requirement, the budget state and the "
+                "orphan list, and mutates NOTHING. False applies the "
+                "terminate (audited, Tier-1 same-transaction)."
+            ),
+        ),
+    ]
+    confirmed_target_id: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "The named-target confirmation for a PROTECTED target "
+                "(D-17): must equal `id` VERBATIM. Anything else is "
+                "refused. Attributable and audited — the ledger "
+                "records it next to the provenance fields."
+            ),
+        ),
+    ]
+    allow_orphan_descendants: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "Explicit acknowledgement for cascade=False on a "
+                "target with live descendants. When True the preview "
+                "AND the audit row NAME the descendants that will be "
+                "orphaned."
+            ),
+        ),
+    ]
+
+
+class InstanceReclaimInput(BaseModel):
+    """Input schema for instance_reclaim."""
+
+    id: Annotated[str, Field(description="Target instance id (short form accepted). Required.")]
+    message: Annotated[
+        str,
+        Field(
+            description=(
+                "REQUIRED — the revival message delivered to the "
+                "revived instance. The message itself IS the revival "
+                "record: it lands in the revived instance's checkpoint "
+                "and is the durable evidence of what was revived and why."
+            )
+        ),
+    ]
+    reason: Annotated[str, Field(description="REQUIRED free text; stored verbatim in the ledger.")]
+    dry_run: Annotated[
+        bool,
+        Field(
+            default=True,
+            description=(
+                "True (default) — the preview shows the target's "
+                "terminal status and the message; no mutation. False "
+                "revives the target by documented message (audited, "
+                "Tier-2 write-ahead)."
+            )
+        ),
+    ]
+
+
+class InstanceNudgeInput(BaseModel):
+    """Input schema for instance_nudge."""
+
+    id: Annotated[str, Field(description="Target instance id (short form accepted). Required.")]
+    message: Annotated[
+        str,
+        Field(
+            description=(
+                "REQUIRED — the message to inject. Delivered into the "
+                "target's live turn when one is running, otherwise "
+                "durably enqueued."
+            )
+        ),
+    ]
+    reason: Annotated[str, Field(description="REQUIRED free text; stored verbatim in the ledger.")]
+    dry_run: Annotated[
+        bool,
+        Field(
+            default=True,
+            description=(
+                "True (default) — preview only. Note: a nudge to a "
+                "TERMINAL instance REVIVES it (revive-on-send); the "
+                "preview names that when the target is terminal."
+            )
+        ),
+    ]
+
+
+class InstanceMarkInput(BaseModel):
+    """Input schema for instance_mark."""
+
+    id: Annotated[str, Field(description="Target instance id (short form accepted). Required.")]
+    marker: Annotated[
+        str,
+        Field(
+            description=(
+                "One of 'park' | 'protect' | 'suspect'. park writes the "
+                "deliberate-pause tombstone (the release path defers to "
+                "it); protect adds the dynamic protection layer "
+                "(idempotent refusal on a repeat); suspect is a "
+                "non-blocking annotation. Anything else is refused with "
+                "reason=invalid-marker. There is NO unprotect."
+            )
+        ),
+    ]
+    note: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Optional free-text annotation stored with the marker."
+        ),
+    ]
+    reason: Annotated[str, Field(description="REQUIRED free text; stored verbatim in the ledger.")]
+    dry_run: Annotated[
+        bool,
+        Field(
+            default=True,
+            description=(
+                "True (default) — preview only. False writes the marker "
+                "(audited: protect/suspect are Tier-1 same-transaction; "
+                "park is Tier-2 write-ahead)."
+            )
+        ),
+    ]
+
+
+class InstanceAnswerInput(BaseModel):
+    """Input schema for instance_answer."""
+
+    id: Annotated[str, Field(description="The ASKER instance id (short form accepted). Required.")]
+    answers: Annotated[
+        dict,
+        Field(
+            description=(
+                "The answer payload as a DICT (the route schema is "
+                "answers: dict — NOT a list). Passed verbatim to the "
+                "same implementation the HTTP route uses."
+            )
+        ),
+    ]
+    question_pack_id: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Optional pack id echo for correlation; a mismatch "
+                "refuses with reason=stale-question-pack."
+            )
+        ),
+    ]
+    resume_message: Annotated[
+        str | None,
+        Field(default=None, description="Optional extra resume message text.")
+    ]
+    reason: Annotated[str, Field(description="REQUIRED free text; stored verbatim in the ledger.")]
+    dry_run: Annotated[
+        bool,
+        Field(
+            default=True,
+            description=(
+                "True (default) — preview only. False submits the "
+                "answer and resumes the cascade (audited, Tier-2 "
+                "write-ahead)."
+            )
+        ),
+    ]
+
+
+class InstanceDismissInput(BaseModel):
+    """Input schema for instance_dismiss."""
+
+    id: Annotated[str, Field(description="The ASKER instance id (short form accepted). Required.")]
+    reason: Annotated[str, Field(description="REQUIRED free text; stored verbatim in the ledger.")]
+    dry_run: Annotated[
+        bool,
+        Field(
+            default=True,
+            description=(
+                "True (default) — preview only. False dismisses the "
+                "pack and resumes the cascade (audited, Tier-2 "
+                "write-ahead)."
+            )
+        ),
+    ]
+
+
 def create_instance_ops_tools(
     manager: Any,
     *,
@@ -781,78 +1013,6 @@ def create_instance_ops_tools(
     caller_agent_id = agent_id or ""
 
     # ── instance_terminate ───────────────────────────────────────────
-    class InstanceTerminateInput(BaseModel):
-        """Input schema for instance_terminate."""
-
-        id: Annotated[
-            str,
-            Field(
-                description=(
-                    "Target instance id (short form accepted). Required. "
-                    "Acting on your own session is refused."
-                )
-            ),
-        ]
-        cascade: Annotated[
-            bool,
-            Field(
-                default=True,
-                description=(
-                    "True (default) terminates the target AND its whole "
-                    "cascade tree (the underlying service is total). "
-                    "False means 'the target only, descendants stay "
-                    "running' — that CREATES orphans, so it REFUSES with "
-                    "reason=cascade-false-would-orphan-descendants unless "
-                    "allow_orphan_descendants=True acknowledges it."
-                ),
-            ),
-        ]
-        reason: Annotated[
-            str,
-            Field(
-                description=(
-                    "REQUIRED, free text, stored verbatim in the audit "
-                    "ledger. The health report's evidence feeds this."
-                )
-            ),
-        ]
-        dry_run: Annotated[
-            bool,
-            Field(
-                default=True,
-                description=(
-                    "True (default) — the preview lists the target, the "
-                    "full cascade tree, the protected determination, the "
-                    "confirmation requirement, the budget state and the "
-                    "orphan list, and mutates NOTHING. False applies the "
-                    "terminate (audited, Tier-1 same-transaction)."
-                ),
-            ),
-        ]
-        confirmed_target_id: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "The named-target confirmation for a PROTECTED target "
-                    "(D-17): must equal `id` VERBATIM. Anything else is "
-                    "refused. Attributable and audited — the ledger "
-                    "records it next to the provenance fields."
-                ),
-            ),
-        ]
-        allow_orphan_descendants: Annotated[
-            bool,
-            Field(
-                default=False,
-                description=(
-                    "Explicit acknowledgement for cascade=False on a "
-                    "target with live descendants. When True the preview "
-                    "AND the audit row NAME the descendants that will be "
-                    "orphaned."
-                ),
-            ),
-        ]
 
     @register_tool_category("instance_ops")
     @tool(args_schema=InstanceTerminateInput)
@@ -1281,34 +1441,6 @@ Examples:
         return child_info.get("status") not in terminal
 
     # ── instance_reclaim ─────────────────────────────────────────────
-    class InstanceReclaimInput(BaseModel):
-        """Input schema for instance_reclaim."""
-
-        id: Annotated[str, Field(description="Target instance id (short form accepted). Required.")]
-        message: Annotated[
-            str,
-            Field(
-                description=(
-                    "REQUIRED — the revival message delivered to the "
-                    "revived instance. The message itself IS the revival "
-                    "record: it lands in the revived instance's checkpoint "
-                    "and is the durable evidence of what was revived and why."
-                )
-            ),
-        ]
-        reason: Annotated[str, Field(description="REQUIRED free text; stored verbatim in the ledger.")]
-        dry_run: Annotated[
-            bool,
-            Field(
-                default=True,
-                description=(
-                    "True (default) — the preview shows the target's "
-                    "terminal status and the message; no mutation. False "
-                    "revives the target by documented message (audited, "
-                    "Tier-2 write-ahead)."
-                )
-            ),
-        ]
 
     @register_tool_category("instance_ops")
     @tool(args_schema=InstanceReclaimInput)
@@ -1465,32 +1597,6 @@ Examples:
 """
 
     # ── instance_nudge ───────────────────────────────────────────────
-    class InstanceNudgeInput(BaseModel):
-        """Input schema for instance_nudge."""
-
-        id: Annotated[str, Field(description="Target instance id (short form accepted). Required.")]
-        message: Annotated[
-            str,
-            Field(
-                description=(
-                    "REQUIRED — the message to inject. Delivered into the "
-                    "target's live turn when one is running, otherwise "
-                    "durably enqueued."
-                )
-            ),
-        ]
-        reason: Annotated[str, Field(description="REQUIRED free text; stored verbatim in the ledger.")]
-        dry_run: Annotated[
-            bool,
-            Field(
-                default=True,
-                description=(
-                    "True (default) — preview only. Note: a nudge to a "
-                    "TERMINAL instance REVIVES it (revive-on-send); the "
-                    "preview names that when the target is terminal."
-                )
-            ),
-        ]
 
     @register_tool_category("instance_ops")
     @tool(args_schema=InstanceNudgeInput)
@@ -1730,42 +1836,6 @@ Examples:
 """
 
     # ── instance_mark ────────────────────────────────────────────────
-    class InstanceMarkInput(BaseModel):
-        """Input schema for instance_mark."""
-
-        id: Annotated[str, Field(description="Target instance id (short form accepted). Required.")]
-        marker: Annotated[
-            str,
-            Field(
-                description=(
-                    "One of 'park' | 'protect' | 'suspect'. park writes the "
-                    "deliberate-pause tombstone (the release path defers to "
-                    "it); protect adds the dynamic protection layer "
-                    "(idempotent refusal on a repeat); suspect is a "
-                    "non-blocking annotation. Anything else is refused with "
-                    "reason=invalid-marker. There is NO unprotect."
-                )
-            ),
-        ]
-        note: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description="Optional free-text annotation stored with the marker."
-            ),
-        ]
-        reason: Annotated[str, Field(description="REQUIRED free text; stored verbatim in the ledger.")]
-        dry_run: Annotated[
-            bool,
-            Field(
-                default=True,
-                description=(
-                    "True (default) — preview only. False writes the marker "
-                    "(audited: protect/suspect are Tier-1 same-transaction; "
-                    "park is Tier-2 write-ahead)."
-                )
-            ),
-        ]
 
     @register_tool_category("instance_ops")
     @tool(args_schema=InstanceMarkInput)
@@ -2013,46 +2083,6 @@ Examples:
 """
 
     # ── instance_answer ──────────────────────────────────────────────
-    class InstanceAnswerInput(BaseModel):
-        """Input schema for instance_answer."""
-
-        id: Annotated[str, Field(description="The ASKER instance id (short form accepted). Required.")]
-        answers: Annotated[
-            dict,
-            Field(
-                description=(
-                    "The answer payload as a DICT (the route schema is "
-                    "answers: dict — NOT a list). Passed verbatim to the "
-                    "same implementation the HTTP route uses."
-                )
-            ),
-        ]
-        question_pack_id: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Optional pack id echo for correlation; a mismatch "
-                    "refuses with reason=stale-question-pack."
-                )
-            ),
-        ]
-        resume_message: Annotated[
-            str | None,
-            Field(default=None, description="Optional extra resume message text.")
-        ]
-        reason: Annotated[str, Field(description="REQUIRED free text; stored verbatim in the ledger.")]
-        dry_run: Annotated[
-            bool,
-            Field(
-                default=True,
-                description=(
-                    "True (default) — preview only. False submits the "
-                    "answer and resumes the cascade (audited, Tier-2 "
-                    "write-ahead)."
-                )
-            ),
-        ]
 
     @register_tool_category("instance_ops")
     @tool(args_schema=InstanceAnswerInput)
@@ -2192,22 +2222,6 @@ Examples:
 """
 
     # ── instance_dismiss ─────────────────────────────────────────────
-    class InstanceDismissInput(BaseModel):
-        """Input schema for instance_dismiss."""
-
-        id: Annotated[str, Field(description="The ASKER instance id (short form accepted). Required.")]
-        reason: Annotated[str, Field(description="REQUIRED free text; stored verbatim in the ledger.")]
-        dry_run: Annotated[
-            bool,
-            Field(
-                default=True,
-                description=(
-                    "True (default) — preview only. False dismisses the "
-                    "pack and resumes the cascade (audited, Tier-2 "
-                    "write-ahead)."
-                )
-            ),
-        ]
 
     @register_tool_category("instance_ops")
     @tool(args_schema=InstanceDismissInput)
