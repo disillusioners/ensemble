@@ -1358,7 +1358,15 @@ class InstanceMessagingService:
             )
             return None
         if fingerprint is not None:
-            cache[instance_id] = (count, fingerprint, tokens)
+            # F3 MIRROR (row2-fix2a residual): re-read the fingerprint
+            # AFTER the count. The pre-count fingerprint and the count
+            # describe DIFFERENT states when the history mutates inside
+            # the count window — caching that pair would let a later
+            # equal-fingerprint skip serve a count that does not belong
+            # to that fingerprint. On a mismatch the write is DISCARDED
+            # (the next cycle recomputes); the EMITTED value is unchanged.
+            if _usage_messages_fingerprint(msgs) == fingerprint:
+                cache[instance_id] = (count, fingerprint, tokens)
         return tokens
 
     async def _emit_context_usage(

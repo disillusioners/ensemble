@@ -371,3 +371,203 @@ class TestF3FingerprintBeforeCount:
             "F3 window OPEN on the fingerprint-mismatch miss path: the "
             "fingerprint was taken AFTER the count"
         )
+
+
+class TestF3MirroredWindow:
+    """F3 (row2-fix2a residual) — the MIRRORED fingerprint read.
+
+    The 2A-F3 fix reads the fingerprint BEFORE the count, so a mutation
+    in that (no-await) window can no longer pair a NEW fingerprint with
+    an OLD count. The residual it leaves: a mutation in the SAME window
+    can still pair a PRE-mutation fingerprint with a POST-mutation count
+    — and a later equal-fingerprint skip would then serve that
+    mismatched count.
+
+    The MIRRORED read re-reads the fingerprint AFTER the count and
+    DISCARDS the cache write when the two disagree (the next cycle
+    recomputes). The EMITTED value is untouched either way.
+
+    Pins:
+    * a mutation BETWEEN the pre-read and the end of the count ⇒ NO
+      cache write lands with the stale pair, and the stale count is
+      never served by a later equal-fingerprint skip,
+    * a STABLE history ⇒ the pair IS written, the later equal-
+      fingerprint skip still works, and the emitted value stays
+      byte-identical,
+    * the mirrored read really happens AFTER the count.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mutation", ["append", "replace_content"])
+    async def test_mutation_in_count_window_discards_cache_write(
+        self, monkeypatch, mutation,
+    ):
+        """A mutation inside the count window must not land a cache write.
+
+        The mutation lands BETWEEN the pre-count fingerprint read and the
+        end of the count, so the pre-read fingerprint describes the OLD
+        history while the count describes the NEW one. Caching that pair
+        would let a later equal-fingerprint skip serve a count that does
+        not belong to that fingerprint.
+        """
+        service = _make_service()
+        msgs = [HumanMessage(content="hello", id="m1")]
+        pre_fingerprint = messaging_module._usage_messages_fingerprint(msgs)
+
+        real_estimate = messaging_module.estimate_messages_tokens
+        state = {"mutated": False}
+
+        def _mutate(m):
+            if mutation == "append":
+                # The message COUNT changes inside the window.
+                m.append(HumanMessage(content="injected mid-count", id="m2"))
+            else:
+                # Same COUNT, different content (the replacement path).
+                m[0] = HumanMessage(content="hello (mutated)", id="m1")
+
+        def mutating_estimate(m):
+            if not state["mutated"]:
+                state["mutated"] = True
+                _mutate(m)
+            return real_estimate(m)
+
+        monkeypatch.setattr(
+            messaging_module, "estimate_messages_tokens", mutating_estimate,
+        )
+
+        tokens = service._usage_history_tokens("inst-1", msgs)
+
+        # The EMITTED value is unchanged by the mirror: it is the count
+        # of the list as it was at COUNT TIME (i.e. post-mutation here).
+        assert tokens == real_estimate(msgs)
+
+        cache = getattr(service, "_usage_history_cache", {})
+        stale = [entry for entry in cache.values() if entry[1] == pre_fingerprint]
+        assert not stale, (
+            "F3 window OPEN: the PRE-mutation fingerprint was cached "
+            "together with the POST-mutation count — a later "
+            "equal-fingerprint skip would serve a mismatched count "
+            f"(cached entries: {list(cache.values())!r})"
+        )
+
+    @pytest.mark.asyncio
+    async def test_stale_count_is_never_served_by_a_later_skip(self, monkeypatch):
+        """The residual, end to end: the stale count is never served.
+
+        Cycle 1 mutates inside the count window. Cycle 2 asks for an
+        EQUAL-fingerprint history (the pre-mutation state) — it must be
+        RECOMPUTED, not served from a mismatched cache entry.
+        """
+        service = _make_service()
+        msgs = [HumanMessage(content="hello", id="m1")]
+
+        real_estimate = messaging_module.estimate_messages_tokens
+        calls = {"n": 0}
+
+        def mutating_estimate(m):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                m.append(HumanMessage(content="injected mid-count", id="m2"))
+            return real_estimate(m)
+
+        monkeypatch.setattr(
+            messaging_module, "estimate_messages_tokens", mutating_estimate,
+        )
+
+        stale_tokens = service._usage_history_tokens("inst-1", msgs)
+        pre_state_tokens = real_estimate([HumanMessage(content="hello", id="m1")])
+
+        # A later call with an equal-fingerprint (pre-mutation) history.
+        later = service._usage_history_tokens(
+            "inst-1", [HumanMessage(content="hello", id="m1")],
+        )
+
+        assert calls["n"] == 2, (
+            "the equal-fingerprint history was served from the cache "
+            "instead of being recomputed — the mismatched count would "
+            "be served"
+        )
+        assert later == pre_state_tokens
+        assert later != stale_tokens, (
+            "the stale (post-mutation) count was served for a history it "
+            "does not describe"
+        )
+
+    @pytest.mark.asyncio
+    async def test_stable_history_writes_the_pair_and_the_skip_still_works(self, counted):
+        """A stable history ⇒ the pair IS cached and the skip still works.
+
+        The mirrored read must NOT discard a write on an unchanged
+        history — otherwise the tier-A de-dup silently degrades into a
+        full re-count on every emit.
+        """
+        service = _make_service()
+        msgs = [HumanMessage(content="hello", id="m1")]
+
+        tokens = service._usage_history_tokens("inst-1", msgs)
+        assert counted.calls == 1
+        # The emitted value stays byte-identical to the direct estimate.
+        assert tokens == estimate_messages_tokens(msgs)
+
+        cache = getattr(service, "_usage_history_cache", {})
+        assert "inst-1" in cache, (
+            "the stable pair was NOT cached — the mirror read must not "
+            "discard the write on an unchanged history"
+        )
+        entry = cache["inst-1"]
+        assert entry[0] == len(msgs)
+        assert entry[1] == messaging_module._usage_messages_fingerprint(msgs)
+        assert entry[2] == tokens
+
+        # A later equal-fingerprint history is served from the cache.
+        later = service._usage_history_tokens(
+            "inst-1", [HumanMessage(content="hello", id="m1")],
+        )
+        assert counted.calls == 1, (
+            "the later equal-fingerprint history was re-counted — the "
+            "cache write must survive a stable history "
+            f"(counted {counted.calls}×)"
+        )
+        assert later == tokens
+
+    @pytest.mark.asyncio
+    async def test_mirror_reads_the_fingerprint_after_the_count(self, monkeypatch):
+        """The mirrored read must come AFTER the count.
+
+        Without it the pre-count fingerprint is the only one read, and a
+        mutation inside the count window goes unnoticed.
+        """
+        service = _make_service()
+        order: list[tuple[str, int]] = []
+
+        real_estimate = messaging_module.estimate_messages_tokens
+        real_fingerprint = messaging_module._usage_messages_fingerprint
+
+        def tracked_estimate(msgs):
+            order.append(("count", id(msgs)))
+            return real_estimate(msgs)
+
+        def tracked_fingerprint(msgs):
+            order.append(("fingerprint", id(msgs)))
+            return real_fingerprint(msgs)
+
+        monkeypatch.setattr(
+            messaging_module, "estimate_messages_tokens", tracked_estimate,
+        )
+        monkeypatch.setattr(
+            messaging_module, "_usage_messages_fingerprint", tracked_fingerprint,
+        )
+
+        service._usage_history_tokens("inst-1", [HumanMessage(content="hello", id="m1")])
+
+        kinds = [kind for kind, _ in order]
+        assert kinds.count("fingerprint") >= 2, (
+            "F3 mirror MISSING: the fingerprint was not re-read after the "
+            f"count (read order: {kinds!r})"
+        )
+        count_idx = kinds.index("count")
+        last_fp_idx = max(i for i, (kind, _) in enumerate(order) if kind == "fingerprint")
+        assert last_fp_idx > count_idx, (
+            "F3 mirror MISSING: the fingerprint was not re-read AFTER the "
+            f"count (read order: {kinds!r})"
+        )
