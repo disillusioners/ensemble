@@ -5859,14 +5859,14 @@ _supervision_launchd_bootout() {
 # stash sites) can never surface instead of the diagnosis for the actual
 # hand-back failure.
 HANDBACK_LAST_ERROR=""
-HANDBACK_ERROR_FILE="${TMPDIR:-/tmp}/ensemble-hbk-err.$$"
+HANDBACK_ERROR_FILE="$(mktemp "${TMPDIR:-/tmp}/ensemble-hbk-err.$$.XXXXXX" 2>/dev/null || printf "%s" "${TMPDIR:-/tmp}/ensemble-hbk-err.$$")"
 _handback_err_file_write() {
     # $1 = diagnosis text; best-effort — a tmp failure must never break
     # the failure path itself.
-    printf '%s' "$1" > "${HANDBACK_ERROR_FILE:-/tmp/ensemble-hbk-err.$$}" 2>/dev/null || true
+    printf '%s' "$1" > "${HANDBACK_ERROR_FILE:-}" 2>/dev/null || true
 }
 _handback_err_file_clear() {
-    rm -f "${HANDBACK_ERROR_FILE:-/tmp/ensemble-hbk-err.$$}" 2>/dev/null || true
+    rm -f "${HANDBACK_ERROR_FILE:-}" 2>/dev/null || true
 }
 # _handback_last_error_text — THE reader for every consumer (WARN lines +
 # halt templates). Variable first (survives plain calls), file second
@@ -5876,7 +5876,7 @@ _handback_last_error_text() {
         printf '%s' "$HANDBACK_LAST_ERROR"
         return 0
     fi
-    local _f="${HANDBACK_ERROR_FILE:-/tmp/ensemble-hbk-err.$$}"
+    local _f="${HANDBACK_ERROR_FILE:-}"
     if [ -s "$_f" ]; then
         printf '%s' "$(head -c 400 "$_f" 2>/dev/null | tr '\n' ';' | tr -s ' ')"
     fi
@@ -5886,8 +5886,10 @@ _handback_last_error_text() {
 # ── HANDBACK VERIFIER-REASON channel (D6-(iv) / AC-D6-6, 2026-11-19) ───────
 # WHY A SEPARATE CHANNEL (and NOT "HB_ERR is broken"):
 #   HB_ERR / HANDBACK_LAST_ERROR is the LAUNCHD RESOLVER's diagnosis channel.
-#   Every write of it sits inside a launchd block (lib.sh:5651 launchctl
-#   bootstrap, :5737 plist resolution) and the systemd hand-back touches
+#   Every write of it sits inside a launchd block (_supervision_launchd_bootstrap
+#   / _supervision_launchd_plist_path — T8, tidier fold 2026-11-20:
+#   re-anchored from stale line numbers to function names) and the systemd
+#   hand-back touches
 #   the channel NOWHERE — so on Linux the halt row's "hand-back error:
 #   none captured" is an UNWRITTEN channel, not a missing capture (C-9).
 #   Its presence therefore positively indicates a VERIFIER-PATH failure
@@ -5906,16 +5908,23 @@ _handback_last_error_text() {
 # the parent shell. `$$` is the PARENT shell's pid inside a bash subshell,
 # so the path is stable across the boundary.
 HANDBACK_VERIFY_REASON=""
-HANDBACK_VERIFY_REASON_FILE="${TMPDIR:-/tmp}/ensemble-hbk-verify.$$"
+# m10 (review-fix, 2026-11-20): the side-channel files are MKTEMP-minted
+# (O_EXCL-safe, no fixed-name /tmp paths — the $$ suffix rides the TEMPLATE
+# so cross-referencing still works; mktemp CREATES the file, which the
+# `-s` reader below treats as empty = nothing-captured). The path must be
+# agreed BEFORE the $() subshell (a subshell assignment dies with the
+# subshell) — hence source time. Degradation: mktemp failure falls back to
+# the legacy $$-keyed literal (a write-time redirect, same as pre-m10).
+HANDBACK_VERIFY_REASON_FILE="$(mktemp "${TMPDIR:-/tmp}/ensemble-hbk-verify.$$.XXXXXX" 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/ensemble-hbk-verify.$$")"
 # _handback_verify_reason_write <text> — best-effort; a tmp failure must
 # never break the failure path itself. Bounded to 400 chars (the journal
 # detail is a single-line quoted string).
 _handback_verify_reason_write() {
     printf '%s' "$(printf '%s' "${1:-}" | tr '\n' ';' | tr -s ' ' | cut -c1-400)" \
-        > "${HANDBACK_VERIFY_REASON_FILE:-/tmp/ensemble-hbk-verify.$$}" 2>/dev/null || true
+        > "${HANDBACK_VERIFY_REASON_FILE:-}" 2>/dev/null || true
 }
 _handback_verify_reason_clear() {
-    rm -f "${HANDBACK_VERIFY_REASON_FILE:-/tmp/ensemble-hbk-verify.$$}" 2>/dev/null || true
+    rm -f "${HANDBACK_VERIFY_REASON_FILE:-}" 2>/dev/null || true
 }
 # _handback_verify_reason_text — THE reader for every consumer (the hand-back
 # WARN lines + the three halt templates). Variable first (survives a plain
@@ -5926,7 +5935,7 @@ _handback_verify_reason_text() {
         printf '%s' "$HANDBACK_VERIFY_REASON"
         return 0
     fi
-    local _f="${HANDBACK_VERIFY_REASON_FILE:-/tmp/ensemble-hbk-verify.$$}"
+    local _f="${HANDBACK_VERIFY_REASON_FILE:-}"
     if [ -s "$_f" ]; then
         printf '%s' "$(head -c 400 "$_f" 2>/dev/null | tr '\n' ';' | tr -s ' ')"
     fi
@@ -5943,15 +5952,15 @@ _handback_verify_reason_text() {
 # reader below consumes. Design §2.1 option (v): MECHANISM ONLY — no
 # inflation; with no sample the ceiling stays HANDBACK_VERIFY_BUDGET_S=300.
 HANDBACK_VERIFY_ELAPSED_S=""
-HANDBACK_VERIFY_ELAPSED_FILE="${TMPDIR:-/tmp}/ensemble-hbk-velapsed.$$"
+HANDBACK_VERIFY_ELAPSED_FILE="$(mktemp "${TMPDIR:-/tmp}/ensemble-hbk-velapsed.$$.XXXXXX" 2>/dev/null || printf "%s" "${TMPDIR:-/tmp}/ensemble-hbk-velapsed.$$")"
 _handback_verify_elapsed_write() {
-    printf '%s' "${1:-}" > "${HANDBACK_VERIFY_ELAPSED_FILE:-/tmp/ensemble-hbk-velapsed.$$}" 2>/dev/null || true
+    printf '%s' "${1:-}" > "${HANDBACK_VERIFY_ELAPSED_FILE:-}" 2>/dev/null || true
 }
 _handback_verify_elapsed_clear() {
-    rm -f "${HANDBACK_VERIFY_ELAPSED_FILE:-/tmp/ensemble-hbk-velapsed.$$}" 2>/dev/null || true
+    rm -f "${HANDBACK_VERIFY_ELAPSED_FILE:-}" 2>/dev/null || true
 }
 _handback_verify_elapsed_text() {
-    local _f="${HANDBACK_VERIFY_ELAPSED_FILE:-/tmp/ensemble-hbk-velapsed.$$}"
+    local _f="${HANDBACK_VERIFY_ELAPSED_FILE:-}"
     if [ -s "$_f" ]; then head -c 16 "$_f" 2>/dev/null; fi
     return 0
 }
@@ -5991,7 +6000,8 @@ _handback_unit_state() {
 # that ONE most-recent sample, and prints
 #   min( clamp(sample, HANDBACK_VERIFY_FLOOR_S, MEASURED_CEILING), 780 )
 # The 780 cap = EXECUTOR_STALENESS_WINDOW_S (900,
-# daemon/services/upgrade_journal_sweep.py:117) − 120: the verify may
+# daemon/services/upgrade_journal_sweep.py EXECUTOR_STALENESS_WINDOW_S —
+# T8: name-anchored, the old :117 cite was off by one) − 120: the verify may
 # never extend past the sweep's owner-staleness window (design §2.1
 # interaction constraint). Returns 1 (no output) when no sample exists
 # — the caller then stays at the HANDBACK_VERIFY_BUDGET_S default (NO
@@ -10279,6 +10289,21 @@ _watchdog_probe() {
             continue
         fi
         if [ "$probed" -ge "$WATCHDOG_PROBE_MAX_CANDIDATES" ]; then
+            # m6 (review-fix, 2026-11-20): the candidate cap must not
+            # SILENTLY skip the FREE verdict — the name-token arm of
+            # _watchdog_candidate_verdict needs NO timer open (no
+            # ExecStart read): emit it BEFORE counting the skip, so a
+            # family-named timer beyond the cap is still DISCLOSED as
+            # unknown-candidate (and held-eligible), never lost. The
+            # containment (c) backstop covers what prevention missed —
+            # never a silent skip.
+            verdict="$(_watchdog_candidate_verdict "$timer" "" 0 "$daemon_unit" "$configured")"
+            WATCHDOG_PROBE_VERDICTS="${WATCHDOG_PROBE_VERDICTS}${WATCHDOG_PROBE_VERDICTS:+ }$timer=$verdict"
+            case "$verdict" in
+                candidate|unknown-candidate)
+                    WATCHDOG_CANDIDATES="${WATCHDOG_CANDIDATES}${WATCHDOG_CANDIDATES:+ }$timer"
+                    ;;
+            esac
             unprobed=$(( unprobed + 1 ))
             continue
         fi
@@ -10395,6 +10420,16 @@ _watchdog_rt_arm() {
 # The marker records the held set + the prior state.
 _watchdog_hold_apply() {
     local run_id="$1" timer rc=0 held="" prior_active="" prior_enabled="" daemon_unit="${SUPERVISION_UNIT:-}"
+    # T-HOLD (tidier fold, 2026-11-20): per-timer prior state. The loop
+    # used to overwrite prior_active/prior_enabled per iteration, so a
+    # MULTI-timer hold recorded only the LAST candidate's prior state in
+    # the marker + journal row (diagnostic fields — the RESTORE path
+    # re-arms every held timer unconditionally and never reads them; this
+    # fixes the RECORD, not a restore path). The two *_list strings are
+    # SPACE-ALIGNED with $held (same order, one token per held timer); in
+    # the single-timer case — the normal shape — the marker fields are
+    # byte-identical to the pre-T-HOLD output.
+    local pa_list="" pe_list=""
     local marker
     marker="$(_watchdog_hold_marker_path)"
     if [ -z "$WATCHDOG_CANDIDATES" ]; then
@@ -10408,6 +10443,8 @@ _watchdog_hold_apply() {
         [ -n "$prior_enabled" ] || prior_enabled="unknown"
         if _run_bounded "$WATCHDOG_PROBE_READ_BUDGET_S" -- "$SYSTEMCTL_BIN" stop "$timer" >/dev/null 2>&1; then
             held="${held}${held:+ }$timer"
+            pa_list="${pa_list}${pa_list:+ }$prior_active"
+            pe_list="${pe_list}${pe_list:+ }$prior_enabled"
             _log "watchdog hold: timer $timer stopped for the ceremony window (enable state preserved: $prior_enabled — a stopped timer is re-armed by systemd at boot)"
         else
             _warn "watchdog hold: could NOT stop timer $timer — it may still fire inside the window (the version fast-fail + the bounded repair contain it)"
@@ -10417,14 +10454,14 @@ _watchdog_hold_apply() {
         _warn "watchdog hold: NO timer could be held — the ceremony continues WITHOUT a watchdog hold (containment (c) is the only defence left)"
         return 1
     fi
-    if ! _watchdog_marker_write "$run_id" "${WATCHDOG_RT_UNIT:-}" "$held" "$prior_active" "$prior_enabled" "$daemon_unit"; then
+    if ! _watchdog_marker_write "$run_id" "${WATCHDOG_RT_UNIT:-}" "$held" "$pa_list" "$pe_list" "$daemon_unit"; then
         _warn "watchdog hold: the hold marker could NOT be written (${marker}) — restoring the held timer(s) immediately (a hold without a record cannot be undone by the RT)"
         _watchdog_hold_restore
         return 1
     fi
     WATCHDOG_HELD_TIMERS="$held"
     WATCHDOG_HOLD_ARMED=1
-    journal_history_append watchdog_hold "watchdog hold applied: timers=[$held] prior_active=$prior_active prior_unit_file_state=$prior_enabled daemon_unit=${daemon_unit:-none} restore_transient=${WATCHDOG_RT_UNIT:-none} run_id=$run_id (stopped, never disabled — an enabled timer is re-armed by systemd at boot)" \
+    journal_history_append watchdog_hold "watchdog hold applied: timers=[$held] prior_active=$pa_list prior_unit_file_state=$pe_list daemon_unit=${daemon_unit:-none} restore_transient=${WATCHDOG_RT_UNIT:-none} run_id=$run_id (stopped, never disabled — an enabled timer is re-armed by systemd at boot)" \
         || _warn "watchdog_hold journal append FAILED (best-effort)"
     return 0
 }

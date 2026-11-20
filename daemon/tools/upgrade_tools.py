@@ -924,7 +924,10 @@ def _armtime_rollback_target_invariant(
         journal's ``quarantined[]`` (M4: rolling back onto a known-bad
         release is what quarantine exists to prevent);
       * ``rollback-target-not-rollback-safe`` — the target's manifest does
-        not declare ``rollback_safe:true`` (ADR-005 M5 schema-drift guard).
+        not declare ``rollback_safe:true`` (ADR-005 M5 schema-drift guard);
+      * ``rollback-target-unprobeable`` (T7, tidier fold 2026-11-20) —
+        the current symlink itself could not be read (UNKNOWN target —
+        fail-closed; emitted below and at the sweep-side reader).
     """
     if install_dir is None:
         return ("note", "", "no install dir — no rollback-target invariant to check")
