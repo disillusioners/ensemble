@@ -138,41 +138,57 @@ async def test_queue_position_value_equality(engine: Engine) -> None:
 
 
 @pytest.mark.asyncio
-async def test_dlq_batch_select_count(engine: Engine) -> None:
+async def test_dlq_batch_select_count_is_flat(engine: Engine) -> None:
+    """The DLQ batch read issues a CONSTANT number of SELECTs.
+
+    Mutation-meaningfulness: a per-row implementation
+    (``get_dlq_by_job_id`` once per dead_letter row) issues N SELECTs —
+    1 for N=1 and 4 for N=4. The batched implementation issues ONE
+    ``IN``-clause SELECT regardless of N, so the two counts are EQUAL
+    and equal to the measured constant (1).
+    """
     from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
     from daemon.services.dead_letter_service import DeadLetterService
 
     dlq_repo = DeadLetterRepository(engine)
-    job_repo = service_repo = _make_service(engine)._repository
+    job_repo = _make_service(engine)._repository
     dlq_svc = DeadLetterService(job_repo, dlq_repo)
 
     from daemon.repositories.job_queue.models import DeadLetterItem
 
-    for i in range(4):
-        dlq_repo.enqueue(
-            DeadLetterItem(
-                job_id=f"dead-{i}",
-                agent_id="a",
-                agent_dir="/",
-                message="m",
-                source="api",
-                project_id="p",
-                queue_id="q",
-                error_message="e",
-                failed_at="2020",
-                reason="MAX_RETRIES",
+    measured: dict[int, int] = {}
+    for n in (1, 4):
+        ids = [f"dead-{n}-{i}" for i in range(n)]
+        for jid in ids:
+            dlq_repo.enqueue(
+                DeadLetterItem(
+                    job_id=jid,
+                    agent_id="a",
+                    agent_dir="/",
+                    message="m",
+                    source="api",
+                    project_id="p",
+                    queue_id="q",
+                    error_message="e",
+                    failed_at="2020",
+                    reason="MAX_RETRIES",
+                )
             )
-        )
+        with _SelectSpy(engine) as spy:
+            res = dlq_svc.get_dlq_by_job_ids(ids)
+        measured[n] = spy.counts["total"]
+        assert len(res) == n, (n, len(res))
 
-    ids = [f"dead-{i}" for i in range(4)]
-    with _SelectSpy(engine) as spy:
-        res = dlq_svc.get_dlq_by_job_ids(ids)
-    assert spy.counts["total"] >= 1
-    # one SELECT (the IN clause) — flat regardless of N
-    assert len(res) == 4
+    # Flat across row counts — a per-row N+1 would scale with N.
+    assert measured[1] == measured[4], measured
+    # ... and equal to the true constant (measured: 1 IN-clause SELECT).
+    assert measured[1] == 1, measured
+
+    # Value parity with the per-row accessor (unchanged fields).
     for i in range(4):
-        single = dlq_svc.get_dlq_by_job_id(f"dead-{i}")
-        assert res[f"dead-{i}"].dlq_id == single.dlq_id
+        single = dlq_svc.get_dlq_by_job_id(f"dead-4-{i}")
+        batch = dlq_svc.get_dlq_by_job_ids([f"dead-4-{i}"])
+        assert batch[f"dead-4-{i}"].dlq_id == single.dlq_id
 
 
 # ─── (c) watch-bridge source pins ───────────────────────────────────────────
