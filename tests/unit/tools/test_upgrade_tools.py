@@ -4026,6 +4026,7 @@ class TestManagerDrainPendingExecution:
             argv, install_dir, extra_env=None, *, run_id=None,
             unit_prefix: str = "ensemble-upgrade-",
             unit_properties=None,
+            identity_stamper=None,
         ) -> tuple:
             inst = Path(str(install_dir))
             calls.append(
@@ -4045,6 +4046,10 @@ class TestManagerDrainPendingExecution:
                     "lock_held_at_spawn": uj.lock_dir(inst).exists(),
                 }
             )
+            # D3-E3 (Wave 5): the stub models the LEGACY branch (its note
+            # is the legacy note) — the identity stamper is accepted but
+            # deliberately NOT invoked, exactly as the legacy branch of
+            # the real seam does.
             return self.EXECUTOR_PID, "(daemonized, start_new_session)"
 
         monkeypatch.setattr(uj, "spawn_executor", _rec)
@@ -4516,6 +4521,7 @@ class TestManagerDrainPendingExecution:
             argv, install_dir, extra_env=None, *, run_id=None,
             unit_prefix: str = "ensemble-upgrade-",
             unit_properties=None,
+            identity_stamper=None,  # D3-E3: accepted, never reached (refusal raises first)
         ):
             from daemon.tools.upgrade_journal import ExecutorSystemdUnavailable
             detail = (

@@ -6756,6 +6756,36 @@ class InstanceManager:
                 _promote_unit_props = [
                     f"RuntimeMaxSec={_uj.derived_runtime_max_sec()}"
                 ]
+                # D3-D (Wave 5 §2.4, ``--collect`` caveat): optional
+                # terminal-status retention for FAILED transient units —
+                # version-gated (systemd ≥252) and degrade-safe; the
+                # reaper's journal-truth fallback works regardless.
+                _collect_mode = _uj.collect_mode_property_or_none()
+                if _collect_mode is not None:
+                    _promote_unit_props.append(_collect_mode)
+
+            # D3-E3 (self-service-promote Wave 5, §2.4): persist the
+            # arm-lane UNIT identity into the durable pending_op BEFORE
+            # the spawn seam returns. The stamper closure mutates the SAME
+            # in-memory op the post-spawn owner update below continues to
+            # build on (one object, two sequential writes — the identity
+            # fields survive the second write by construction), and is
+            # invoked INSIDE spawn_executor immediately after the client
+            # Popen succeeds — strictly before the function returns, so a
+            # daemon death during the fast-fail window still leaves the
+            # durable record (the reaper queue itself is in-memory only).
+            def _stamp_executor_identity(unit: str, bus: str) -> None:
+                if op is not None and op.run_id == run_id:
+                    op.executor_unit = unit
+                    op.executor_unit_bus = bus
+                    op.executor_started_at = _uj.now_iso()
+                    # owner_pid is the systemd-run --wait CLIENT (a cgroup
+                    # child of ensemble-main that dies with it) — NOT the
+                    # payload. The reaper watches the client but
+                    # classifies via the unit (§1.5 asymmetry).
+                    op.owner_pid_kind = "client"
+                    _uj.write_pending_op(install_dir, op)
+
             child_pid, _spawn_mode_note = _uj.spawn_executor(
                 argv, install_dir, extra_env, run_id=run_id,
                 # agent-restart §3.3 (V-7 / A-5): transient unit names are
@@ -6769,6 +6799,7 @@ class InstanceManager:
                     else _uj.UNIT_NAME_PREFIX
                 ),
                 unit_properties=_promote_unit_props,
+                identity_stamper=_stamp_executor_identity,
             )
             # Option D (Stage-2.2a): log the ACTUAL spawn mode — the
             # transient-service unit name when the service branch fired,
@@ -6799,6 +6830,21 @@ class InstanceManager:
                         [str(a) for a in argv],
                         install_dir,
                         run_id,
+                        # D3-E1/E2: the reaper classifies via the UNIT —
+                        # the name is derived from the SAME kind-scoped
+                        # prefix the spawn used (the unit identity was
+                        # already persisted to pending_op by the stamper
+                        # above; this threads it to the in-memory job).
+                        unit_name=(
+                            f"{_uj.UNIT_NAME_PREFIX_RESTART}{run_id}"
+                            if kind == "restart"
+                            else f"{_uj.UNIT_NAME_PREFIX}{run_id}"
+                        ),
+                        unit_bus=(
+                            op.executor_unit_bus
+                            if op is not None and op.run_id == run_id
+                            else ""
+                        ),
                     )
                 except Exception as exc:
                     logger.warning(
@@ -6814,6 +6860,10 @@ class InstanceManager:
                     op.owner_pid = child_pid
                     op.owner_kind = "executor"
                     op.trigger = "post-turn-callback"
+                    # D3-E3: on the LEGACY branch (no unit identity — the
+                    # stamper never fired) owner_pid IS the payload shell.
+                    if not op.owner_pid_kind:
+                        op.owner_pid_kind = "payload"
                     _uj.write_pending_op(install_dir, op)
             except Exception as exc:
                 logger.warning(

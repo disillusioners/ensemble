@@ -1596,6 +1596,32 @@ class PendingOp:
     confirmed_source: str | None = None
     flipped: bool = False
     expires_at: str = field(default_factory=now_iso)
+    # ── D3-E3 (self-service-promote Wave 5, §2.4): the arm-lane UNIT
+    # identity — persisted BEFORE the spawn seam returns so a daemon death
+    # right after the fire leaves the durable record the reaper classifier
+    # (and any post-reboot sweep) needs. The unit name is the PRIMARY
+    # liveness surface: `systemctl show <unit> -p ActiveState -p SubState
+    # -p Result -p ExecMainStatus` classifies a client waitpid into
+    # client-exit-alive / payload-terminal / journal-fallback (the reaper
+    # observation itself is in-memory only — a daemon death loses it).
+    # `executor_unit` = the transient unit name (``ensemble-upgrade-<run_id>``
+    # / ``ensemble-restart-<run_id>``); `executor_unit_bus` = "system" |
+    # "user"; `executor_started_at` = ISO-8601 stamp at spawn. Empty strings
+    # = the legacy/pre-Wave-5 shape (from_json drops unknown fields, so old
+    # journals load unchanged).
+    executor_unit: str = ""
+    executor_unit_bus: str = ""
+    executor_started_at: str = ""
+    # `owner_pid_kind` disambiguates WHAT `owner_pid` names: "client" = the
+    # systemd-run --wait CLIENT (a cgroup child of ensemble-main that dies
+    # with the daemon — its exit code is NOT the payload's); "payload" = the
+    # legacy setsid path where owner_pid IS the payload shell. The reaper
+    # watches the client pid but classifies via the UNIT (§1.5 asymmetry).
+    # `owner_payload_pid` mirrors `in_flight.owner_pid` (the payload's own
+    # $$ stamp) for post-mortem readers once observed; 0 until then (the
+    # shell lane MUST NOT write pending_op — D-P2.2).
+    owner_pid_kind: str = ""
+    owner_payload_pid: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -2906,6 +2932,233 @@ def close_stale_restart_arm(install_dir: Path) -> str | None:
     )
 
 
+# ── D3-E1/E2 (self-service-promote Wave 5, §2.4): the executor-exit
+# classifier — the reaper classifies via the UNIT, never the client pid ──────
+#
+# THE ASYMMETRY (design §1.5): the tool-lane executor is a systemd-run
+# transient SERVICE (a system.slice sibling that survives the daemon unit's
+# teardown by construction), while the ``--wait`` CLIENT is a cgroup child
+# of ensemble-main that dies WITH it. The journal's in_flight.owner_pid is
+# the PAYLOAD's shell; the reaper watches the CLIENT pid ⇒ a unit teardown
+# journals a false ``executor_exit`` (128+SIGTERM) for a LIVE ceremony.
+#
+# THE INVARIANT (§2.4, load-bearing): ``executor_exit`` may only be emitted
+# from (a) a payload-observed terminal state or (b) the legacy no-unit
+# path. A client death alone can NEVER produce it. A probe failure is
+# NEVER evidence of death — it classifies as outcome-unobserved.
+
+EXECUTOR_CLIENT_EXIT_EVENT: str = "executor_client_exit"
+"""D3-E1: the client died while the ceremony (the transient unit) is ALIVE.
+NON-TERMINAL (deliberately not in ``_TERMINAL_EVENTS``): it closes nothing —
+the op stays pending and the reaper re-arms (keeps observing)."""
+
+EXECUTOR_LIVENESS_UNVERIFIABLE_EVENT: str = "executor_liveness_unverifiable"
+"""D3-E2: the halt-for-human token when liveness is AMBIGUOUS (unit gone +
+stale heartbeat + no terminal ceremony row). NON-TERMINAL (deliberately not
+in ``_TERMINAL_EVENTS``): a ``halt`` row would let ``reconcile_pending_op``
+close the arm — the design forbids that (arm NOT closed, lock NOT released;
+a human dispositions). Bounded by the unit's RuntimeMaxSec (~1320s)."""
+
+# The unit-state probe budget (same class as SYSTEMCTL_PROBE_BUDGET_S on
+# the shell side; the reaper runs post-exit, never on a ceremony's clock).
+EXECUTOR_UNIT_PROBE_TIMEOUT_S = 5.0
+
+
+def executor_unit_state_probe(
+    unit: str,
+    bus_kind: str,
+    *,
+    env: dict[str, str] | None = None,
+    timeout_s: float = EXECUTOR_UNIT_PROBE_TIMEOUT_S,
+) -> tuple[dict[str, str] | None, str]:
+    """Bounded ``systemctl [--user] show <unit>`` liveness probe.
+
+    Reads exactly the properties the classifier table needs (§2.4 E1/E2):
+    ``LoadState`` (distinguishes a GC'd/unloaded unit — ``not-found`` —
+    from a LOADED terminal unit; ``ActiveState`` alone CANNOT: a GC'd
+    transient answers ``inactive`` too), ``ActiveState``, ``SubState``,
+    ``Result`` and ``ExecMainStatus`` (the PAYLOAD's own exit status — the
+    thing ``executor_exit`` must carry instead of the client's 143).
+
+    Returns ``(props, "")`` on a clean read — ``props`` maps property
+    names to string values. Returns ``(None, reason)`` when the probe
+    could not produce a trustworthy observation (nonzero rc, timeout,
+    OSError) — the caller MUST treat that as outcome-UNOBSERVED, never as
+    evidence of death (RC8: on any read failure the classifier degrades
+    to outcome-unobserved — never a death verdict).
+    """
+    argv = ["systemctl"]
+    if bus_kind == "user":
+        argv.append("--user")
+    argv += [
+        "show", unit,
+        "-p", "LoadState", "-p", "ActiveState", "-p", "SubState",
+        "-p", "Result", "-p", "ExecMainStatus",
+    ]
+    try:
+        r = subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_s,
+            env=(os.environ if env is None else env),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"probe timeout after {timeout_s}s"
+    except OSError as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    if r.returncode != 0:
+        tail = (r.stderr or b"").decode("utf-8", errors="replace")[-160:]
+        return None, f"systemctl show rc={r.returncode}: {tail.strip()}"
+    props: dict[str, str] = {}
+    for line in r.stdout.decode("utf-8", errors="replace").splitlines():
+        key, sep, val = line.partition("=")
+        if sep:
+            props[key.strip()] = val.strip()
+    if not props.get("ActiveState"):
+        return None, "probe returned no ActiveState (unparseable output)"
+    return props, ""
+
+
+class ExecutorExitClassification(NamedTuple):
+    """One row of the §2.4 classifier table.
+
+    ``kind`` is a CLOSED vocabulary:
+
+    * ``legacy_no_unit``    — the arm predates E3 (no unit identity); the
+      caller keeps the legacy waitpid-code behavior byte-identically.
+    * ``client_exit_alive`` — the unit is active/activating (or the unit
+      is gone but the journal heartbeat is FRESH): the client died, the
+      ceremony is ALIVE ⇒ ``executor_client_exit``; op stays pending;
+      the reaper re-arms (keeps observing, bounded).
+    * ``unit_terminal``     — a LOADED unit in ``inactive|failed``:
+      payload-observed terminal state ⇒ ``executor_exit`` carrying the
+      unit's ``ExecMainStatus`` (NOT the client's code).
+    * ``dead_terminal_row`` — the unit is gone, the heartbeat is stale,
+      and a TERMINAL ceremony row exists in the journal: DEAD, and the
+      row says how ⇒ ``executor_exit`` citing the row.
+    * ``ambiguous``         — the unit is gone, the heartbeat is stale,
+      no terminal row: liveness is UNVERIFIABLE ⇒ the halt-for-human
+      token ``executor_liveness_unverifiable``; arm NOT closed, lock
+      NOT released.
+    * ``unobserved``        — the probe itself failed: NEVER a death
+      verdict; the caller retries (bounded) and lands on
+      ``executor_liveness_unverifiable`` if observation never succeeds.
+    """
+
+    kind: str
+    exit_code: int | None = None
+    unit_detail: str = ""
+    terminal_event: str | None = None
+    note: str = ""
+
+
+def classify_executor_exit(
+    install_dir: Path,
+    run_id: str,
+    unit_name: str,
+    unit_bus: str = "",
+    *,
+    probe_fn=None,
+) -> ExecutorExitClassification:
+    """Classify an observed CLIENT exit via the UNIT + the journal's own
+    truth (§2.4 E1/E2). Pure decision function — journals NOTHING (the
+    reaper worker owns the writes). Never raises.
+
+    ``probe_fn`` is a test seam defaulting to
+    :func:`executor_unit_state_probe` (same injection pattern as
+    ``_service_detect_fn``).
+    """
+    if not unit_name:
+        return ExecutorExitClassification(
+            kind="legacy_no_unit",
+            note="arm predates D3-E3 — no unit identity recorded",
+        )
+    probe = probe_fn or executor_unit_state_probe
+    props, err = probe(unit_name, unit_bus or "system")
+    if props is None:
+        # A probe failure is NEVER evidence of death (§2.4 invariant).
+        return ExecutorExitClassification(
+            kind="unobserved",
+            unit_detail=f"unit={unit_name} probe FAILED: {err}",
+            note="probe failure classifies outcome-unobserved (never death)",
+        )
+    load = props.get("LoadState", "")
+    active = props.get("ActiveState", "")
+    sub = props.get("SubState", "")
+    detail = (
+        f"unit={unit_name} LoadState={load} ActiveState={active} "
+        f"SubState={sub} Result={props.get('Result', '')} "
+        f"ExecMainStatus={props.get('ExecMainStatus', '')}"
+    )
+    if load == "not-found":
+        # ``--collect`` GC'd the terminated transient (or it never loaded):
+        # the unit's terminal status is LOST — fall back to the JOURNAL's
+        # own truth (heartbeat freshness + terminal ceremony row).
+        try:
+            if journal_owner_heartbeat_fresh(install_dir):
+                return ExecutorExitClassification(
+                    kind="client_exit_alive",
+                    unit_detail=f"{detail} (unit gone; heartbeat FRESH)",
+                    note="journal heartbeat fresh ⇒ payload alive",
+                )
+        except Exception:  # noqa: BLE001 — never raise from classification
+            pass
+        try:
+            data = journal_read(install_dir)
+        except (JournalTorn, OSError):
+            data = None
+        terminal = None
+        if isinstance(data, dict):
+            op = PendingOp.from_json(data.get("pending_op"))
+            armed_at = op.armed_at if op is not None else ""
+            terminal = _terminal_event_after(data, armed_at) if armed_at else None
+        if terminal is not None:
+            return ExecutorExitClassification(
+                kind="dead_terminal_row",
+                unit_detail=detail,
+                terminal_event=terminal[0],
+                note=f"unit gone, heartbeat stale, terminal row "
+                f"'{terminal[0]}' says how the ceremony ended",
+            )
+        return ExecutorExitClassification(
+            kind="ambiguous",
+            unit_detail=detail,
+            note="unit gone, heartbeat stale, NO terminal ceremony row — "
+            "liveness unverifiable (halt-for-human; bounded by the unit's "
+            "RuntimeMaxSec)",
+        )
+    if active in ("active", "activating", "reloading", "deactivating"):
+        # Transitional/live states: the client died, the ceremony ALIVE.
+        # (``deactivating`` is deliberately ALIVE-side: a unit in teardown
+        # has not produced a terminal state yet — never a death verdict on
+        # a transitional word.)
+        return ExecutorExitClassification(
+            kind="client_exit_alive",
+            unit_detail=detail,
+            note="client exited while the unit is live — ceremony ALIVE",
+        )
+    if active in ("inactive", "failed"):
+        try:
+            status = int(props.get("ExecMainStatus", "") or 0)
+        except ValueError:
+            status = 0
+        return ExecutorExitClassification(
+            kind="unit_terminal",
+            exit_code=status,
+            unit_detail=detail,
+            note=f"payload-observed terminal state (Result="
+            f"{props.get('Result', '')}) — executor_exit carries the "
+            f"unit's ExecMainStatus, not the client's code",
+        )
+    return ExecutorExitClassification(
+        kind="unobserved",
+        unit_detail=detail,
+        note=f"unexpected ActiveState={active!r} — outcome-unobserved",
+    )
+
+
 def close_restart_arm_executor_exit(
     install_dir: Path,
     run_id: str,
@@ -3421,6 +3674,56 @@ def derived_runtime_max_sec(
     return max(RUNTIME_MAX_SEC_FLOOR, total_deadline_s + soak_s + RUNTIME_MAX_SEC_TAIL_S)
 
 
+# D3-D (self-service-promote Wave 5, §2.4 ``--collect`` caveat): a
+# terminated transient unit is UNLOADED, so ``systemctl show`` returns
+# not-found and the terminal status is LOST. The design's remedies are
+# continuous polling (the D3-E1/E2 reaper re-arm loop + the journal-truth
+# fallback — BOTH always on), ``CollectMode=inactive-or-failed`` (systemd
+# ≥252 — UNPROVEN on any given host), or dropping ``--collect`` (rejected:
+# it would change the argv for every arm). This probe gates the OPTIONAL
+# CollectMode property: when the host's systemd is ≥252 the property is
+# added to the promote unit (harmless when it matches --collect's implied
+# behavior, terminal-status-preserving if it retains failed units); below
+# 252 — or when the version is unreadable — the property is OMITTED
+# (degrade safely: current behavior; the classifier never DEPENDS on
+# catching the unit pre-GC). NEVER ``--scope`` (historically rejected —
+# it shares the caller's pgroup/cgroup; see the Option D history above).
+_COLLECT_MODE_MIN_SYSTEMD = 252
+_systemd_version_cache: int | None = None
+
+
+def systemd_version_cached() -> int | None:
+    """Host systemd major version via ``systemctl --version`` (cached,
+    best-effort — ``None`` on any failure: the caller omits the gated
+    property)."""
+    global _systemd_version_cache
+    if _systemd_version_cache is not None:
+        return _systemd_version_cache
+    try:
+        r = subprocess.run(
+            ["systemctl", "--version"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=5.0, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.match(rb"systemd (\d+)", r.stdout.splitlines()[0] if r.stdout else b"")
+    if not m:
+        return None
+    _systemd_version_cache = int(m.group(1))
+    return _systemd_version_cache
+
+
+def collect_mode_property_or_none() -> str | None:
+    """The promote unit's optional ``CollectMode=inactive-or-failed``
+    property when the host systemd supports it (≥252), else ``None``
+    (degrade safely — D3-D)."""
+    v = systemd_version_cached()
+    if v is None or v < _COLLECT_MODE_MIN_SYSTEMD:
+        return None
+    return "CollectMode=inactive-or-failed"
+
+
 # ── systemd transient SERVICE executor (Option D, Stage-2.2a) ────────────────
 #
 # HISTORY: r-f82e (2026-09-28, ensemble-vm LIVE) wrapped the executor in a
@@ -3902,6 +4205,7 @@ def spawn_executor(
     run_id: str | None = None,
     unit_prefix: str = UNIT_NAME_PREFIX,
     unit_properties: list[str] | None = None,
+    identity_stamper: "Callable[[str, str], None] | None" = None,
 ) -> tuple[int, str]:
     """Daemonize the executor payload. THREE BRANCHES (Option D):
 
@@ -3966,6 +4270,19 @@ def spawn_executor(
     is the CALLER's job (daemon/manager.py passes it for promote arms
     only — a shared property would bound the restart ceremony with the
     promote's budget).
+
+    ``identity_stamper`` (kw-only, D3-E3 — self-service-promote Wave 5):
+    optional ``(unit_name, bus_kind)`` callback invoked in the SERVICE
+    branch immediately AFTER the client Popen succeeds and BEFORE the
+    fast-fail window — i.e. strictly BEFORE this function returns. The
+    caller (the manager drain seam) uses it to persist the arm-lane unit
+    identity into the journal ``pending_op`` while the spawn is still in
+    flight, closing the would-be gap where a daemon death during the
+    fast-fail window loses the only durable record of WHICH unit is
+    running the ceremony (the reaper queue is in-memory only). Best-effort
+    by contract: an exception inside the stamper is logged and NEVER
+    fails the spawn (the ceremony outranks the stamp; the fallback is the
+    run_id+prefix derivation the sweep already knows).
 
     Raises:
         ExecutorSystemdUnavailable: branch 3 only (loud refusal).
@@ -4047,6 +4364,21 @@ def spawn_executor(
                 client_err_fh.close()  # the child owns its own fd now
             except OSError:
                 pass
+        # D3-E3 (Wave 5 §2.4): stamp the arm-lane UNIT identity BEFORE the
+        # fast-fail window (the window is up to SERVICE_CLIENT_FAST_FAIL_S
+        # of in-spawn waiting — stamping only after the return would leave
+        # that whole window without a durable unit record). Best-effort: a
+        # stamper failure is logged and NEVER fails the spawn.
+        if identity_stamper is not None:
+            try:
+                identity_stamper(f"{unit_prefix}{run_id}", bus_kind)
+            except Exception as exc:  # noqa: BLE001 — advisory stamp only
+                logger.warning(
+                    "upgrade_journal: executor identity stamp FAILED for "
+                    "unit=%s%s (best-effort — the spawn continues; "
+                    "classification falls back to run_id+prefix): %s: %s",
+                    unit_prefix, run_id, type(exc).__name__, exc,
+                )
         note = f"service={unit_prefix}{run_id} (bus={bus_kind})"
         try:
             rc = proc.wait(timeout=SERVICE_CLIENT_FAST_FAIL_S)

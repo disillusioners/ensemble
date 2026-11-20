@@ -221,12 +221,22 @@ class PerRunObservation(NamedTuple):
 
 @dataclass(frozen=True)
 class ReaperJob:
-    """One armed-executor observation (spawn-seam handoff, P1 Item 2)."""
+    """One armed-executor observation (spawn-seam handoff, P1 Item 2).
+
+    D3-E3 (self-service-promote Wave 5): ``unit_name``/``unit_bus`` carry
+    the transient unit identity from the drain seam so the reaper
+    classifies via the UNIT (``systemctl show``), never the client pid
+    alone. Empty ``unit_name`` = a legacy/pre-E3 arm ⇒ the worker keeps
+    the historical waitpid-code behavior byte-identically (invariant (b)
+    of §2.4: the legacy no-unit path may still emit ``executor_exit``).
+    """
 
     pid: int
     argv_summary: tuple[str, ...]  # bounded — truncated to 80 chars/item
     install_dir: Path
     run_id: str
+    unit_name: str = ""
+    unit_bus: str = ""
 
 
 class UpgradeJournalSweepService:
@@ -504,17 +514,29 @@ class UpgradeJournalSweepService:
     # ── reaper queue (spawn-seam entry point — P1 Item 2 calls this) ─────
 
     def enqueue_reaper(
-        self, pid: int, argv_summary: list[str], install_dir: Path, run_id: str
+        self,
+        pid: int,
+        argv_summary: list[str],
+        install_dir: Path,
+        run_id: str,
+        unit_name: str = "",
+        unit_bus: str = "",
     ) -> None:
         """Queue one armed executor for exit observation. Bounded
         argv_summary (≤ 80 chars/item); unbounded queue (one job per arm —
-        arms are rare and operator-gated)."""
+        arms are rare and operator-gated).
+
+        D3-E3: ``unit_name``/``unit_bus`` (from the drain seam's spawn)
+        switch the worker onto the UNIT classifier — an empty unit name
+        preserves the legacy waitpid-code behavior exactly."""
         self._reaper_queue.put_nowait(
             ReaperJob(
                 pid=pid,
                 argv_summary=tuple(s[:80] for s in argv_summary),
                 install_dir=install_dir,
                 run_id=run_id,
+                unit_name=unit_name,
+                unit_bus=unit_bus,
             )
         )
 
@@ -3244,18 +3266,21 @@ class UpgradeJournalSweepService:
                 continue
             except ChildProcessError:
                 # The child died (or was reaped) before we got to it — the
-                # exit code is unobservable; journal the gap loudly.
-                await self._journal_executor_exit(
-                    job, exit_code=-1, signal_name=None, signal_num=None
+                # CLIENT's exit code is unobservable. D3-E1/E2: when the arm
+                # carries a unit identity this is NOT evidence of anything
+                # about the PAYLOAD — classify via the unit.
+                await self._classify_and_journal_exit(
+                    job, client_exit_code=-1,
+                    signal_name=None, signal_num=None,
                 )
                 continue
             except Exception as exc:  # noqa: BLE001 — one bad job never
                 # kills the worker; journal + move on.
                 await self._journal_executor_error(job, exc)
                 continue
-            await self._journal_executor_exit(
+            await self._classify_and_journal_exit(
                 job,
-                exit_code=exit_code,
+                client_exit_code=exit_code,
                 signal_name=signal_info[0],
                 signal_num=signal_info[1],
             )
@@ -3269,6 +3294,194 @@ class UpgradeJournalSweepService:
         ``os.waitstatus_to_exitcode``."""
         _, status = os.waitpid(pid, 0)
         return status
+
+    # ── D3-E1/E2 (self-service-promote Wave 5, §2.4): unit-classified
+    # executor exits. The client waitpid is only the TRIGGER; the verdict
+    # comes from the transient unit (+ the journal's own truth when the
+    # unit was --collect GC'd). INVARIANT: ``executor_exit`` is emitted
+    # ONLY from a payload-observed terminal state (unit terminal / journal
+    # terminal row) or the legacy no-unit path — a client death alone can
+    # NEVER produce it, and a probe failure is NEVER evidence of death.
+
+    @staticmethod
+    def _unit_poll_interval_s() -> int:
+        """Re-arm poll cadence (default 30s — the journal heartbeat's own
+        cadence). Env knob ``ENSEMBLE_EXECUTOR_UNIT_POLL_S`` clamped to
+        [1, 300] (tests shrink it to seconds)."""
+        raw = os.environ.get("ENSEMBLE_EXECUTOR_UNIT_POLL_S", "")
+        try:
+            return max(1, min(int(raw), 300))
+        except ValueError:
+            return 30
+
+    def _unit_rearm_max_polls(self) -> int:
+        """Re-arm bound — the observation horizon is the unit's own
+        ``RuntimeMaxSec`` (``uj.derived_runtime_max_sec``, 1320s at the
+        defaults): RuntimeMaxSec guarantees the unit reaches a terminal
+        state by then, so polling past it observes nothing new. Env knob
+        ``ENSEMBLE_EXECUTOR_UNIT_REARM_MAX_POLLS`` overrides (tests)."""
+        raw = os.environ.get("ENSEMBLE_EXECUTOR_UNIT_REARM_MAX_POLLS", "")
+        if raw.strip():
+            try:
+                return max(0, int(raw))
+            except ValueError:
+                pass
+        interval = self._unit_poll_interval_s()
+        return uj.derived_runtime_max_sec() // interval + 2
+
+    async def _classify_and_journal_exit(
+        self,
+        job: ReaperJob,
+        *,
+        client_exit_code: int,
+        signal_name: str | None,
+        signal_num: int | None,
+    ) -> None:
+        """The D3 exit classifier. ``client_exit_code`` is the CLIENT's
+        waitpid code — used ONLY on the legacy no-unit path; on a unit arm
+        it never reaches an ``executor_exit`` row."""
+        if not job.unit_name:
+            # Invariant (b) — the legacy no-unit path, byte-identical.
+            await self._journal_executor_exit(
+                job, exit_code=client_exit_code,
+                signal_name=signal_name, signal_num=signal_num,
+            )
+            return
+        interval = self._unit_poll_interval_s()
+        max_polls = self._unit_rearm_max_polls()
+        polls = 0
+        announced_client_exit = False
+        while True:
+            cls = await asyncio.to_thread(
+                uj.classify_executor_exit,
+                job.install_dir, job.run_id, job.unit_name, job.unit_bus,
+            )
+            if cls.kind == "client_exit_alive":
+                if not announced_client_exit:
+                    # AC-D3-1: executor_client_exit (NOT executor_exit);
+                    # the op stays PENDING — no arm closure, no lock
+                    # release; the reaper re-arms (keeps observing).
+                    announced_client_exit = True
+                    await self._journal_executor_client_exit(job, cls)
+                if polls >= max_polls:
+                    # Still alive at the RuntimeMaxSec horizon (systemd
+                    # itself guarantees termination by then — still-live
+                    # here means the horizon was exceeded): benign-detach
+                    # (the EXISTING vocabulary); the sweep staleness
+                    # machinery owns the eventual disposition.
+                    await self._journal_executor_still_running(
+                        job, polls * interval
+                    )
+                    return
+                await asyncio.sleep(interval)
+                polls += 1
+                continue
+            if cls.kind == "unobserved":
+                # AC-D3-4: a probe failure is NEVER a death verdict —
+                # retry (bounded); if observation never succeeds, halt
+                # for a human WITHOUT a death row.
+                if polls >= max_polls:
+                    await self._journal_executor_liveness_unverifiable(
+                        job, cls,
+                        reason=(
+                            "probe never produced a trustworthy observation "
+                            f"in {polls * interval}s — outcome-unobserved, "
+                            "NEVER a death verdict"
+                        ),
+                    )
+                    return
+                await asyncio.sleep(interval)
+                polls += 1
+                continue
+            if cls.kind == "unit_terminal":
+                # AC-D3-2: the payload's OWN ExecMainStatus (never the
+                # client's 143).
+                await self._journal_executor_exit(
+                    job, exit_code=int(cls.exit_code or 0),
+                    signal_name=None, signal_num=None,
+                    source_detail=(
+                        f"D3 unit classifier ({cls.unit_detail})"
+                    ),
+                )
+                return
+            if cls.kind == "dead_terminal_row":
+                await self._journal_executor_exit(
+                    job, exit_code=0,
+                    signal_name=None, signal_num=None,
+                    source_detail=(
+                        f"D3 journal-truth classifier (unit gone, heartbeat "
+                        f"stale; terminal ceremony row '{cls.terminal_event}' "
+                        f"says how the ceremony ended; {cls.unit_detail})"
+                    ),
+                )
+                return
+            if cls.kind == "ambiguous":
+                # AC-D3-3: halt-for-human; arm NOT closed, lock NOT
+                # released (bounded by the unit's RuntimeMaxSec).
+                await self._journal_executor_liveness_unverifiable(
+                    job, cls, reason=(
+                        "unit gone (--collect GC'd), journal heartbeat "
+                        "stale, NO terminal ceremony row — liveness "
+                        "unverifiable; arm left open, lock left held; a "
+                        "human dispositions (bounded by the unit's "
+                        "RuntimeMaxSec)"
+                    ),
+                )
+                return
+            # Defensive: legacy_no_unit is guarded above; any unexpected
+            # kind degrades to the legacy row (never silent).
+            await self._journal_executor_exit(
+                job, exit_code=client_exit_code,
+                signal_name=signal_name, signal_num=signal_num,
+                source_detail=f"D3 classifier unexpected kind={cls.kind!r}",
+            )
+            return
+
+    async def _journal_executor_client_exit(
+        self, job: ReaperJob, cls: "uj.ExecutorExitClassification"
+    ) -> None:
+        """D3-E1: the client died while the ceremony is ALIVE. The event
+        kind is deliberately NON-TERMINAL (not in ``_TERMINAL_EVENTS``):
+        it closes nothing — the op stays pending, the reaper re-arms."""
+        try:
+            uj.journal_history_append(
+                job.install_dir,
+                uj.EXECUTOR_CLIENT_EXIT_EVENT,
+                f"run_id={job.run_id} pid={job.pid} unit={job.unit_name} "
+                f"client_exit_code=<untrusted-client-code> — the "
+                f"systemd-run --wait client died while the ceremony unit "
+                f"is LIVE ({cls.note}; {cls.unit_detail}); op stays "
+                "pending, reaper re-armed (D3-E1)",
+            )
+        except OSError as exc:
+            logger.warning(
+                "UpgradeJournalSweepService: journal_write failed for "
+                f"{uj.EXECUTOR_CLIENT_EXIT_EVENT} (run_id={job.run_id}): "
+                f"{exc!r} — no retry, continuing reaper loop"
+            )
+
+    async def _journal_executor_liveness_unverifiable(
+        self, job: ReaperJob, cls: "uj.ExecutorExitClassification",
+        *, reason: str,
+    ) -> None:
+        """D3-E2: the halt-for-human row for AMBIGUOUS liveness. The event
+        kind is deliberately NON-TERMINAL: a ``halt`` row would let
+        ``reconcile_pending_op`` close the arm — the design forbids that
+        (arm NOT closed, lock NOT released; a human dispositions)."""
+        try:
+            uj.journal_history_append(
+                job.install_dir,
+                uj.EXECUTOR_LIVENESS_UNVERIFIABLE_EVENT,
+                f"run_id={job.run_id} pid={job.pid} unit={job.unit_name} "
+                f"executor_liveness_unverifiable — {reason}; {cls.unit_detail}",
+            )
+        except OSError as exc:
+            logger.warning(
+                "UpgradeJournalSweepService: journal_write failed for "
+                f"{uj.EXECUTOR_LIVENESS_UNVERIFIABLE_EVENT} "
+                f"(run_id={job.run_id}): {exc!r} — no retry, continuing "
+                "reaper loop"
+            )
 
     # ── journal writers (R-M5-1: OSError → WARNING, NO retry, continue) ──
 
@@ -3371,6 +3584,7 @@ class UpgradeJournalSweepService:
         exit_code: int,
         signal_name: str | None = None,
         signal_num: int | None = None,
+        source_detail: str | None = None,
     ) -> None:
         tail = self._log_tail(job.install_dir, run_id=job.run_id)
         # comp5 (r-f82e): when the executor was killed by a signal,
@@ -3390,6 +3604,11 @@ class UpgradeJournalSweepService:
                 f"terminated by {signal_name} ({signal_num}) "
                 f"argv={list(job.argv_summary)} upgrade.log tail:\n{tail}"
             )
+        if source_detail:
+            # D3-E1/E2 (Wave 5): ADDITIVE provenance suffix naming the
+            # classification source (the unit probe / the journal terminal
+            # row) — the historical detail prefix above is byte-identical.
+            detail = f"{detail} source: {source_detail}"
         try:
             uj.journal_history_append(job.install_dir, "executor_exit", detail)
         except OSError as exc:
