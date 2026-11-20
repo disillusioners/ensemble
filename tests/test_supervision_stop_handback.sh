@@ -119,14 +119,41 @@ case "$sub" in
         fi
         echo "${SC_IS_ACTIVE:-inactive}"; exit 0 ;;
     show)
-        prop=""; unit=""
+        prop=""; props=""; unit=""
         while [ $# -gt 0 ]; do
             case "$1" in
-                -p) prop="$2"; shift 2 ;;
+                -p) prop="$2"; props="${props} $2"; shift 2 ;;
                 --value) shift ;;
                 *) unit="$1"; shift ;;
             esac
         done
+        # D6 (self-service-promote Wave 2): the hand-back verify's bounded
+        # 3-field state probe `show -p ActiveState -p SubState -p MainPID`
+        # (assignment form). SC_ACTIVESTATE/SC_SUBSTATE injectable; the
+        # state probe rides the MainPID counter (sc.log.mp.n).
+        case "$props" in
+            *" ActiveState "*)
+                if [ -f "${SC_LOG}.killed" ]; then
+                    echo "ActiveState=inactive"; echo "SubState=dead"; echo "MainPID=0"
+                    exit 0
+                fi
+                n="$(cat "${SC_LOG}.mp.n" 2>/dev/null || echo 0)"
+                n=$((n + 1)); printf '%s' "$n" > "${SC_LOG}.mp.n"
+                if [ -n "${SC_MAINPID_N:-}" ] && [ "$n" -gt "${SC_MAINPID_N}" ] \
+                   && [ -n "${SC_MAINPID2:-}" ]; then
+                    echo "MainPID=${SC_MAINPID2}"
+                else
+                    echo "MainPID=${SC_MAINPID:-0}"
+                fi
+                if [ -n "${SC_ACTIVESTATE_N:-}" ] && [ "$n" -gt "${SC_ACTIVESTATE_N}" ] \
+                   && [ -n "${SC_ACTIVESTATE2:-}" ]; then
+                    echo "ActiveState=${SC_ACTIVESTATE2}"
+                else
+                    echo "ActiveState=${SC_ACTIVESTATE:-active}"
+                fi
+                echo "SubState=${SC_SUBSTATE:-running}"
+                exit 0 ;;
+        esac
         case "$prop" in
             MainPID)
                 if [ -f "${SC_LOG}.killed" ]; then echo 0; exit 0; fi
@@ -704,6 +731,181 @@ JOURNAL
     assert_contains "B6 unobservable ControlGroup → diagnostic skip WARN" "ControlGroup unobservable — skipping DUAL_FIGHT pid checks" "$B6_OUT"
     assert_contains "B6 diagnostic-only skip: rc 0" "df-rc=0" "$B6_OUT"
 
+    # ── B7 — B4 census-scope + the three §1.3 signatures ────────────────────
+    # (self-service-promote Wave 2, 2026-11-19: AC-D1-1, AC-D1-5, AC-D1-6,
+    # P-4 — `port-holder-outside-unit-lineage` had ZERO coverage; the
+    # census-scope defect was unreachable by the suite).
+    #
+    # B7-static (AC-D1-1 / P-4): Check B contains NO bare `lsof -ti:$PORT` —
+    # only the LISTEN-scoped shared reader; the THREE boolean stop-path
+    # sites are the only bare users in the whole file.
+    B7_DFBODY="$(awk '/^supervision_dualfight_check\(\)/,/^}$/' "$UPGRADE_DIR/lib.sh")"
+    assert_eq "B7s/AC-D1-1: the DUAL_FIGHT body contains NO bare lsof -ti: EXECUTION site" "0" \
+        "$(printf '%s' "$B7_DFBODY" | grep 'lsof -ti:' | grep -cvE '^[[:space:]]*#')"
+    assert_contains "B7s/AC-D1-1: the census rides the canonical shared reader" "_supervision_port_holders" "$B7_DFBODY"
+    assert_contains "B7s: the census scoping is LISTEN (the §2.2 rule, on the reader call)" "-sTCP:LISTEN" \
+        "$(awk '/^_supervision_port_holders\(\)/,/^}$/' "$UPGRADE_DIR/lib.sh")"
+    # file-wide: exactly THREE bare execution sites remain (the boolean
+    # stop-path trio) — comment mentions and the LISTEN-scoped reader line
+    # are excluded from the count.
+    assert_eq "B7s/AC-D1-1: exactly THREE bare lsof -ti: sites file-wide (the boolean stop-path trio)" "3" \
+        "$(grep 'lsof -ti:' "$UPGRADE_DIR/lib.sh" | grep -v -- '-sTCP:LISTEN' | grep -cvE '^[[:space:]]*#')"
+
+    # B7a — §1.3 signature (a), the fd-leak holder: unit active+armed, the
+    # cg IS the test process's OWN real cgroup, and the LISTEN census
+    # reports a pid inside it (a leaked-but-cgroup-contained child) ⇒
+    # IMMUNE — no fault (the live 04:38 proof: 12 fd-leak holders, DUAL_FIGHT
+    # still `conforming`).
+    B7A_CG="$(tail -n 1 /proc/self/cgroup 2>/dev/null)"; B7A_CG="${B7A_CG##*:}"
+    reset_stub_state "$SC_LOG"; rm -f "$SC_LOG".*
+    SC_IS_ACTIVE=active SC_RESTART=on-failure SC_MAINPID=111 SC_CONTROLGROUP="$B7A_CG"
+    export SC_IS_ACTIVE SC_RESTART SC_MAINPID SC_CONTROLGROUP
+    B7A_OUT="$(
+        (
+            export INSTALL_DIR="$BFIX"
+            export SYSTEMCTL_BIN="$SC3"
+            export PORT=19993
+            . "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
+            _supervision_owned_pids() { printf '%s\n' $$; }
+            SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+            SUPERVISION_UNIT=ensemble-b7a.service
+            lsof() { echo $$; return 0; }
+            export -f lsof 2>/dev/null || true
+            ( supervision_dualfight_check )
+            echo "df-rc=$?"
+        ) 2>&1
+    )"
+    assert_contains "B7a fd-leak holder (cgroup-contained): no fault" "df-rc=0" "$B7A_OUT"
+
+    # B7b — §1.3 signature (b), the transient ESTABLISHED client: a client
+    # holding only an ESTABLISHED connection is INVISIBLE to the LISTEN
+    # census (the 05:42:58Z false-refusal class). The stub reports the
+    # foreign pid ONLY to a BROAD query; the LISTEN census must (i) ask
+    # with -sTCP:LISTEN and (ii) therefore see nothing ⇒ no fault. A
+    # broad-census regression turns this leg red (the holder WOULD fault).
+    reset_stub_state "$SC_LOG"; rm -f "$SC_LOG".*
+    SC_IS_ACTIVE=active SC_RESTART=on-failure SC_MAINPID=111 SC_CONTROLGROUP=/ensemble-b7b-cg
+    export SC_IS_ACTIVE SC_RESTART SC_MAINPID SC_CONTROLGROUP
+    B7B_OUT="$(
+        PATH="$BFIX:$PATH" bash -c '
+            export INSTALL_DIR="'"$BFIX"'"
+            export SYSTEMCTL_BIN="'"$SC3"'"
+            export PORT=19992
+            . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+            _supervision_owned_pids() { return 0; }
+            SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+            SUPERVISION_UNIT=ensemble-b7b.service
+            # discriminating census: LISTEN-scoped → SILENT (rc 0, no
+            # listener); broad → the foreign ESTABLISHED holder.
+            lsof() {
+                echo "lsof-stub $*" >> "'"$BFIX"'/lsof-b7b.log"
+                case " $* " in
+                    *"-sTCP:LISTEN"*) return 0 ;;
+                esac
+                echo $$; return 0
+            }
+            export -f lsof 2>/dev/null || true
+            ( supervision_dualfight_check )
+            echo "df-rc=$?"
+        ' 2>&1
+    )"
+    assert_contains "B7b transient ESTABLISHED client: no fault (LISTEN-invisible)" "df-rc=0" "$B7B_OUT"
+    assert_contains "B7b the census asked with the LISTEN scope" "-sTCP:LISTEN" "$(cat "$BFIX/lsof-b7b.log" 2>/dev/null || true)"
+    rm -f "$BFIX/lsof-b7b.log"
+
+    # B7c — §1.3 signature (c), the true foreign LISTEN holder: OUTSIDE the
+    # unit lineage ⇒ fault `port-holder-outside-unit-lineage` + exit 78 +
+    # the halt journal row (AC-D1-5 path 1 — DUAL_FIGHT; P-4's token, which
+    # had ZERO coverage before this wave).
+    reset_stub_state "$SC_LOG"; rm -f "$SC_LOG".*
+    SC_IS_ACTIVE=active SC_RESTART=on-failure SC_MAINPID=111 SC_CONTROLGROUP=/ensemble-b7c-cg
+    export SC_IS_ACTIVE SC_RESTART SC_MAINPID SC_CONTROLGROUP
+    B7C_OUT="$(
+        (
+            export INSTALL_DIR="$BFIX"
+            export SYSTEMCTL_BIN="$SC3"
+            export PORT=19991
+            . "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
+            _supervision_owned_pids() { return 0; }
+            SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+            SUPERVISION_UNIT=ensemble-b7c.service
+            lsof() { echo $$; return 0; }
+            export -f lsof 2>/dev/null || true
+            ( supervision_dualfight_check )
+            echo "df-rc=$?"
+        ) 2>&1
+    )"
+    case "$B7C_OUT" in
+        *df-rc=78*) _pass "B7c the foreign LISTEN holder halts the guard (exit 78)" ;;
+        *) _fail "B7c the foreign LISTEN holder halts the guard (exit 78)" "df-rc=78" "$(printf '%s' "$B7C_OUT" | grep -o 'df-rc=[0-9]*' || echo none)" ;;
+    esac
+    assert_contains "B7c halt journaled" '"event":"halt"' "$(cat "$BFIX/releases/state.json")"
+    assert_contains "B7c/AC-D1-5+P-4: the port-holder-outside-unit-lineage token (was ZERO-coverage)" "port-holder-outside-unit-lineage" "$(cat "$BFIX/releases/state.json")"
+    assert_contains "B7c halt cites DUAL_FIGHT" "supervision DUAL_FIGHT" "$(cat "$BFIX/releases/state.json")"
+
+    # B7d — AC-D1-5 path 2 (the serving-attribution gate): a foreign-unit
+    # LISTEN holder is refused by the GATE too — Layer 1 passes (the holder
+    # IS owned) but Layer 2 (unit lineage) refuses with the OUTSIDE-lineage
+    # detail (the lib.sh refusal literal, byte-unchanged).
+    reset_stub_state "$SC_LOG"; rm -f "$SC_LOG".*
+    SC_MAINPID=111 SC_CONTROLGROUP=/ensemble-b7d-cg
+    export SC_MAINPID SC_CONTROLGROUP
+    B7D_OUT="$(
+        (
+            export INSTALL_DIR="$BFIX"
+            export SYSTEMCTL_BIN="$SC3"
+            export PORT=19990
+            . "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
+            _supervision_owned_pids() { printf '%s\n' $$; }
+            SUPERVISION_MODE=unit; SUPERVISION_UNIT=ensemble-b7d.service
+            lsof() { echo $$; return 0; }
+            export -f lsof 2>/dev/null || true
+            if _gate_serving_attribution "b7d-leg"; then
+                echo "gate-rc=0"
+            else
+                echo "gate-rc=1"
+            fi
+            echo "detail=[${GATE_ATTRIBUTION_DETAIL:-}]"
+        ) 2>&1
+    )"
+    assert_contains "B7d/AC-D1-5: the gate REFUSES the foreign-unit LISTEN holder" "gate-rc=1" "$B7D_OUT"
+    assert_contains "B7d the Layer-2 refusal names the OUTSIDE-unit lineage" "OUTSIDE unit 'ensemble-b7d.service' lineage" "$B7D_OUT"
+    assert_contains "B7d the refusal names the holder" "a second supervisor is serving" "$B7D_OUT"
+
+    # B7e — §1.3(b) vanished-holder semantics: a census holder that EXITED
+    # between census and cgroup read (/proc/<pid> GONE) is NOT evidence —
+    # skipped with the vanished warn, no fault (BASE: unreadable cgroup ⇒
+    # hard fault — the 05:42:58Z ROLLBACK_SH_EXIT=78 shape).
+    reset_stub_state "$SC_LOG"; rm -f "$SC_LOG".*
+    SC_IS_ACTIVE=active SC_RESTART=on-failure SC_MAINPID=111 SC_CONTROLGROUP=/ensemble-b7e-cg
+    export SC_IS_ACTIVE SC_RESTART SC_MAINPID SC_CONTROLGROUP
+    B7E_GONE="$(mktemp -t supstop-gone.XXXXXX)"
+    B7E_OUT="$(
+        (
+            export INSTALL_DIR="$BFIX"
+            export SYSTEMCTL_BIN="$SC3"
+            export PORT=19989
+            . "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
+            _supervision_owned_pids() { return 0; }
+            SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+            SUPERVISION_UNIT=ensemble-b7e.service
+            # spawn a REAL short-lived holder, capture its pid, let it die,
+            # then report THAT pid from the census — /proc/<pid> is gone at
+            # cgroup-read time (the §1.3(b) race).
+            sleep 0.2 &
+            gone_pid=$!
+            wait "$gone_pid" 2>/dev/null
+            lsof() { echo "$gone_pid"; return 0; }
+            export -f lsof 2>/dev/null || true
+            export gone_pid
+            ( supervision_dualfight_check )
+            echo "df-rc=$?"
+        ) 2>&1
+    )"
+    assert_contains "B7e vanished holder: no fault (not evidence)" "df-rc=0" "$B7E_OUT"
+    assert_contains "B7e the vanished-holder skip is NAMED (diagnosable)" "vanished between census and cgroup read" "$B7E_OUT"
+    rm -f "$B7E_GONE"
+
     rm -rf "$BFIX" "$STUBBIN3"
 else
     _skip "B lib.sh stop-site pins — FENCE: no /run/systemd/system on this host"
@@ -1202,6 +1404,71 @@ STUB
     rm -rf "$C12B_STOP_STUB_BIN"
     rm -rf "$C12B_UNITS"
 
+    # ── P5 (self-service-promote Wave 4 — AC-D2-5): the version fast-fail
+    # is ARMED on the rollback/restart paths ───────────────────────────────
+    # The blind pin (design §2.3 "Blind pins found (D2)"): rollback.sh and
+    # restart.sh never set PROMOTE_EXPECTED_VERSION ⇒ the hand-back's
+    # version fast-fail was INACTIVE there — a WRONG-VERSION daemon was
+    # accepted as SUCCESS (the P-5 pin at the old :730 read "PROMOTE_
+    # EXPECTED_VERSION is unset in these contexts ... exactly the
+    # restart.sh/rollback.sh degraded contract" — that degraded contract is
+    # GONE as of this wave). The leg pins BOTH halves:
+    #   (a) the SOURCE half — both scripts set the expected version;
+    #   (b) the BEHAVIOUR half — with the expected version known, a
+    #       wrong-version answer is NOT a success.
+    P5_ROLLBACK_SRC="$(cat "$UPGRADE_DIR/rollback.sh")"
+    P5_RESTART_SRC="$(cat "$UPGRADE_DIR/restart.sh")"
+    case "$P5_ROLLBACK_SRC" in
+        *'PROMOTE_EXPECTED_VERSION='*) _pass "P5 rollback.sh sets PROMOTE_EXPECTED_VERSION (AC-D2-5)" ;;
+        *) _fail "P5 rollback.sh sets PROMOTE_EXPECTED_VERSION (AC-D2-5)" "an assignment" "none found" ;;
+    esac
+    case "$P5_RESTART_SRC" in
+        *'PROMOTE_EXPECTED_VERSION='*) _pass "P5 restart.sh sets PROMOTE_EXPECTED_VERSION (AC-D2-5)" ;;
+        *) _fail "P5 restart.sh sets PROMOTE_EXPECTED_VERSION (AC-D2-5)" "an assignment" "none found" ;;
+    esac
+    # (b) the behavioural half — the fast-fail fires when the expected
+    # version is known (the wrong version is NOT a success).
+    # The lsof stub MUST report a listener pid AND the owned-pid set must
+    # contain it: the attribution conjunct (Fix #2) refuses an
+    # unattributable answer BEFORE the version conjunct is reached (the
+    # pack's C-section lsof stub prints no pid — that is the known C-section
+    # debt, not this leg's subject).
+    P5_LSOF="$(mktemp -d -t suphb-lsofp.XXXXXX)"
+    cat > "$P5_LSOF/lsof" <<'STUB'
+#!/bin/bash
+echo "lsof $*" >> "${LSOF_LOG:-/dev/null}"
+printf '%s\n' 424242
+exit 0
+STUB
+    chmod +x "$P5_LSOF/lsof"
+    reset_stub_state "$CFIX/sc4.log"
+    SC_IS_ACTIVE=inactive SC_MAINPID=9999 SC_START_RC=0
+    export SC_IS_ACTIVE SC_MAINPID SC_START_RC
+    CURL_MODE=wrongver; export CURL_MODE
+    P5_OUT="$(run_rvl "$P5_LSOF" '
+        SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+        SUPERVISION_UNIT=ensemble-p5.service; SUPERVISION_PRESTOP_MAINPID=777
+        _supervision_owned_pids() { printf "%s\n" 424242; }
+        export SC_CONTROLGROUP=""
+        export PROMOTE_EXPECTED_VERSION=0.28.5
+    ')"
+    unset CURL_MODE
+    assert_eq "P5 with the expected version set, a wrong-version daemon is NOT a success" "rvl-rc=1" "$(rvl_rc "$P5_OUT")"
+    assert_contains "P5 the observed wrong version is named on the wire" "version=0.0.0" "$P5_OUT"
+    # and the degraded (unset) contract still degrades: with NO expected
+    # version the 2xx alone confirms serving (the documented posture).
+    reset_stub_state "$CFIX/sc4.log"
+    CURL_MODE=wrongver; export CURL_MODE
+    P5B_OUT="$(run_rvl "$P5_LSOF" '
+        SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+        SUPERVISION_UNIT=ensemble-p5b.service; SUPERVISION_PRESTOP_MAINPID=777
+        _supervision_owned_pids() { printf "%s\n" 424242; }
+        export SC_CONTROLGROUP=""
+    ')"
+    unset CURL_MODE
+    assert_eq "P5 with NO expected version the serving check degrades to 2xx (the documented posture)" "rvl-rc=0" "$(rvl_rc "$P5B_OUT")"
+    rm -rf "$P5_LSOF"
+
     rm -rf "$CFIX" "$STUBBIN4" "$LSOF_OK" "$LSOF_NO"
 else
     _skip "C hand-back matrix — FENCE: no /run/systemd/system on this host"
@@ -1662,6 +1929,8 @@ m_attr() {  # m_attr "VAR=value"... — export the legs' knobs, probe once
 
 # M1 — foreign holder (owned set says 424242, the port is held by 999999):
 # the gate REFUSES and the detail names the holder + the owned set.
+# [AC-D1-4 — T-POLISH-A marker, 2026-11-20: the refusal detail still
+#  contains "NOT in the supervision-owned pid set" byte-for-byte]
 M1_OUT="$(m_attr "ATTR_LSOF_PIDS=999999")"
 assert_contains "M1 foreign holder: attribution refuses" "attr-rc=1" "$M1_OUT"
 assert_contains "M1 detail names the foreign holder" "999999 NOT in the supervision-owned pid set" "$M1_OUT"

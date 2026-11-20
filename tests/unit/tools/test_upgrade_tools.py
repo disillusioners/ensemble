@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import errno
 import pathlib
@@ -4026,6 +4027,7 @@ class TestManagerDrainPendingExecution:
             argv, install_dir, extra_env=None, *, run_id=None,
             unit_prefix: str = "ensemble-upgrade-",
             unit_properties=None,
+            identity_stamper=None,
         ) -> tuple:
             inst = Path(str(install_dir))
             calls.append(
@@ -4045,6 +4047,10 @@ class TestManagerDrainPendingExecution:
                     "lock_held_at_spawn": uj.lock_dir(inst).exists(),
                 }
             )
+            # D3-E3 (Wave 5): the stub models the LEGACY branch (its note
+            # is the legacy note) — the identity stamper is accepted but
+            # deliberately NOT invoked, exactly as the legacy branch of
+            # the real seam does.
             return self.EXECUTOR_PID, "(daemonized, start_new_session)"
 
         monkeypatch.setattr(uj, "spawn_executor", _rec)
@@ -4516,6 +4522,7 @@ class TestManagerDrainPendingExecution:
             argv, install_dir, extra_env=None, *, run_id=None,
             unit_prefix: str = "ensemble-upgrade-",
             unit_properties=None,
+            identity_stamper=None,  # D3-E3: accepted, never reached (refusal raises first)
         ):
             from daemon.tools.upgrade_journal import ExecutorSystemdUnavailable
             detail = (
@@ -4650,6 +4657,65 @@ async def _arm_demo_promote(tools, version: str = "1.2.3") -> str:
     )
 
 
+class TestArmtimeRollbackTargetInvariant:
+    """AC-D5-14 (self-service-promote Wave 3, LD-3): at ARM, pre-nonce,
+    the would-be rollback target (the current symlink's release) must be
+    present ∧ not quarantined ∧ rollback_safe — else a NAMED refusal
+    (never a mid-ceremony halt-for-human for this class). The nonce is
+    NOT burned, the lock is released, nothing is armed."""
+
+    async def test_d5_14_not_rollback_safe_refuses_pre_nonce(
+        self, harness
+    ) -> None:
+        tools, markers, install = harness
+        # the would-be rollback target (current -> 1.2.2) declares
+        # rollback_safe:false — the ceremony could never auto-recover
+        _write_manifest(install, "1.2.2", rollback_safe=False)
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) == "rollback-target-not-rollback-safe", out
+        assert "1.2.2" in out, out
+        # pre-nonce: nothing armed, no pending_op, lock released
+        assert markers == []
+        assert uj.journal_read(install).get("pending_op") is None
+        assert not uj.lock_dir(install).exists()
+
+    async def test_d5_14_quarantined_refuses_pre_nonce(
+        self, harness
+    ) -> None:
+        tools, markers, install = harness
+        uj.journal_update_field(install, "quarantined", ["1.2.2"])
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) == "rollback-target-quarantined", out
+        assert markers == []
+        assert uj.journal_read(install).get("pending_op") is None
+        assert not uj.lock_dir(install).exists()
+
+    async def test_d5_14_missing_release_dir_refuses_pre_nonce(
+        self, harness, tmp_path: Path
+    ) -> None:
+        tools, markers, install = harness
+        # a DANGLING current symlink (the release dir is gone)
+        import shutil
+
+        shutil.rmtree(install / "releases" / "1.2.2")
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) == "rollback-target-missing", out
+        assert markers == []
+        assert uj.journal_read(install).get("pending_op") is None
+        assert not uj.lock_dir(install).exists()
+
+    async def test_d5_14_safe_target_still_arms(
+        self, harness, no_spawn
+    ) -> None:
+        """The control: a present, unquarantined, rollback_safe would-be
+        target does NOT trip the invariant (the arm proceeds — the
+        existing armed legs rely on this and stay green)."""
+        tools, markers, install = harness
+        out = await _arm_demo_promote(tools)
+        assert "UPGRADE ARMED" in out
+        assert markers, "the arm must have proceeded"
+
+
 class TestScriptsDirProvenanceArmPath:
     """The four executed legs the verifier found missing (W-1/W-3)."""
 
@@ -4772,6 +4838,747 @@ class TestScriptsDirProvenanceArmPath:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# D4-b (self-service-promote Wave 5, §2.6): the ARM-TIME READER — the
+# scripts-pin SELF-ADVANCE. AC-D4-1/-2/-3 + AC-D4-4/-7 (the coverage and
+# parity halves). Real git fixtures in tmp (the pin "worktree" is a plain
+# clone — the advance is a worktree-local HEAD move, never a fetch).
+# ══════════════════════════════════════════════════════════════════════════
+
+_FAMILY_CONTENTS = {
+    rel: f"#!/usr/bin/env bash\n# fixture family member {rel}\n"
+    for rel in uj.EXECUTOR_FAMILY_PATHS
+}
+_FAMILY_CONTENTS["scripts/upgrade/lib.sh"] = (
+    "#!/usr/bin/env bash\nPIPELINE_SCRIPTS_REV={rev}\n"
+)
+
+
+def _git(*args, cwd: Path) -> str:
+    r = subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    assert r.returncode == 0, (args, r.stderr.decode()[:300])
+    return r.stdout.decode().strip()
+
+
+def _build_pin_fixture(tmp_path: Path, *, stamp: str = "a" * 40) -> dict:
+    """A real git repo shaped like the scripts pin: a HEAD line carrying an
+    OLDER family copy (behind the floor by construction — no shared
+    history with the floor line) + a floor commit F + a target T (a
+    descendant of F, all 17 family paths present). Returns
+    ``{"pin": pin_scripts_dir, "floor": F, "target": T, "manifest": …}``
+    with a manifest whose maps hash the family content AT T."""
+    pin = tmp_path / "pin-repo"
+    pin.mkdir()
+    _git("init", "-q", "-b", "main", cwd=pin)
+    # the HEAD line: an OLDER family copy (the pin's current stale state —
+    # scripts/upgrade PRESENT with an old stamp, so the dir resolves and
+    # the guard's stamp parse works)
+    for rel in uj.EXECUTOR_FAMILY_PATHS:
+        p = pin / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            _FAMILY_CONTENTS[rel].format(rev="0" * 40), encoding="utf-8"
+        )
+        p.chmod(0o755)
+    _git("add", "-A", cwd=pin)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+         "-m", "stale base (older family copy)", cwd=pin)
+    # the floor→target line on an ORPHAN branch (no shared history with
+    # HEAD ⇒ HEAD does not contain the floor — the behind-floor class)
+    _git("checkout", "-q", "--orphan", "lane", cwd=pin)
+    for rel in uj.EXECUTOR_FAMILY_PATHS:
+        p = pin / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_FAMILY_CONTENTS[rel].format(rev=stamp), encoding="utf-8")
+        p.chmod(0o755)
+    _git("add", "-A", cwd=pin)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+         "-m", "floor: the family lands", cwd=pin)
+    floor = _git("rev-parse", "HEAD", cwd=pin)
+    # the target commit T: a descendant of F with one family file changed
+    changed = "scripts/upgrade/promote.sh"
+    (pin / changed).write_text(
+        _FAMILY_CONTENTS[changed].format(rev=stamp)
+        + "# target-commit change\n", encoding="utf-8",
+    )
+    _git("add", "-A", cwd=pin)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+         "-m", "target", cwd=pin)
+    target = _git("rev-parse", "HEAD", cwd=pin)
+    # back to the stale HEAD line (the pin sits BEHIND the floor)
+    _git("checkout", "-q", "main", cwd=pin)
+    # the payload manifest: sha256 maps over the family AT T
+    import hashlib
+
+    scripts_map: dict[str, str] = {}
+    slice_map: dict[str, str] = {}
+    for rel in uj.EXECUTOR_FAMILY_PATHS:
+        blob = subprocess.run(
+            ["git", "-C", str(pin), "show", f"{target}:{rel}"],
+            stdout=subprocess.PIPE, check=True,
+        ).stdout
+        sha = hashlib.sha256(blob).hexdigest()
+        if rel.startswith("scripts/"):
+            scripts_map[rel[len("scripts/"):]] = sha
+        else:
+            slice_map[rel] = sha
+    manifest = {
+        "source_commit": target,
+        "scripts_manifest": scripts_map,
+        "daemon_slice_manifest": slice_map,
+    }
+    return {
+        "pin": pin / "scripts" / "upgrade", "floor": floor,
+        "target": target, "manifest": manifest,
+    }
+
+
+class TestScriptsPinSelfAdvance:
+    """The D4-b reader, unit level (the guard itself is UNCHANGED — these
+    legs exercise ``scripts_pin_self_advance`` directly)."""
+
+    def test_ac_d4_1_behind_and_local_advances_to_target(self, tmp_path):
+        fx = _build_pin_fixture(tmp_path)
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "advanced", (status, detail)
+        assert "coverage=empty" in detail and "parity=byte-identical" in detail
+        head = _git("rev-parse", "HEAD", cwd=fx["pin"])
+        assert head == fx["target"], "pin HEAD did not move to T"
+        # the advance left a CLEAN tree (diff-index quiet)
+        r = subprocess.run(
+            ["git", "-C", str(fx["pin"]), "diff-index", "--quiet", "HEAD"],
+        )
+        assert r.returncode == 0
+
+    def test_ac_d4_2_target_absent_is_unavailable_with_exact_command(
+        self, tmp_path
+    ):
+        fx = _build_pin_fixture(tmp_path)
+        ghost = "e" * 40
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=ghost, manifest=None,
+        )
+        assert status == "unavailable", (status, detail)
+        assert "NOT present" in detail
+        assert f"git -C {fx['pin'].parents[1]} fetch origin" in detail, (
+            f"the exact hand command is missing: {detail}"
+        )
+        assert f"checkout --detach {ghost}" in detail
+
+    def test_ac_d4_3_non_git_pin_is_never_eligible(self, tmp_path):
+        plain = _pinned_scripts(tmp_path, stamp="deadbeef", git_shaped=False)
+        # the GUARD on a non-git dir: arm/warn, NEVER refuse (F12 intact)
+        verdict, _detail = ut.scripts_dir_provenance_verdict(
+            plain, floor_commit="f" * 40,
+        )
+        assert verdict == "arm"
+        # the ADVANCE on the same dir: not-eligible (HEAD unresolvable)
+        status, detail = ut.scripts_pin_self_advance(
+            plain, "f" * 40, target_commit="e" * 40, manifest=None,
+        )
+        assert status == "not-eligible", (status, detail)
+
+    def test_pin_at_or_after_floor_is_not_eligible(self, tmp_path):
+        fx = _build_pin_fixture(tmp_path)
+        # advance the pin ONCE, then attempt again: now at-or-after floor
+        status, _ = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "advanced"
+        status2, detail2 = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status2 == "not-eligible", (status2, detail2)
+
+    def test_ac_d4_7_target_missing_a_family_path_refuses(self, tmp_path):
+        fx = _build_pin_fixture(tmp_path)
+        pin = fx["pin"].parents[1]
+        # a target line where one family member was DELETED after the floor
+        _git("checkout", "-q", "lane", cwd=pin)
+        _git("rm", "-q", "scripts/upgrade/status.sh", cwd=pin)
+        _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+             "-m", "drop a family member", cwd=pin)
+        holed = _git("rev-parse", "HEAD", cwd=pin)
+        _git("checkout", "-q", "main", cwd=pin)
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"], target_commit=holed,
+            manifest={"source_commit": holed},
+        )
+        assert status == "unavailable", (status, detail)
+        assert "NON-EMPTY" in detail and "status.sh" in detail
+
+    def test_ac_d4_4_parity_mismatch_is_drift(self, tmp_path):
+        fx = _build_pin_fixture(tmp_path)
+        bad = dict(fx["manifest"])
+        bad["scripts_manifest"] = dict(fx["manifest"]["scripts_manifest"])
+        bad["scripts_manifest"]["upgrade/lib.sh"] = "0" * 64
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=bad,
+        )
+        assert status == "drift", (status, detail)
+        assert "scripts-pin-drift" in detail
+        # the pin was NOT moved (the drift refusal precedes the checkout)
+        assert _git("rev-parse", "HEAD", cwd=fx["pin"]) != fx["target"]
+
+    def test_m4_lock_namespace_is_the_shell_mkdir_dir(
+        self, tmp_path
+    ):
+        """Review-fix m4 (2026-11-20): the arm-time advance takes the SAME
+        lock namespace as the stage lane (executor_family.sh) — the mkdir
+        DIR `<pin_root>.scripts-advance.lock.d`, NOT a private fcntl file
+        (the shell lane cannot flock — lib.sh's Bash-3.2/BSD constraint —
+        so the dir IS the shared protocol). A HELD dir ⇒ unavailable; a
+        successful advance releases it; the OLD `.scripts-advance.lock`
+        file namespace is GONE."""
+        fx = _build_pin_fixture(tmp_path)
+        pin_root = fx["pin"].parents[1]
+        lock_dir = pin_root.parent / f"{pin_root.name}.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text("999999\n", encoding="utf-8")
+        os.utime(lock_dir)  # fresh ⇒ NOT stale-breakable
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "unavailable", (status, detail)
+        assert "advance lock HELD" in detail, detail
+        assert lock_dir.exists(), "a foreign-held lock dir must survive"
+        # remove the holder → the advance proceeds and RELEASES the lock
+        import shutil
+
+        shutil.rmtree(lock_dir)
+        status2, detail2 = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status2 == "advanced", (status2, detail2)
+        assert not lock_dir.exists(), "lock dir must be released after use"
+        assert not (pin_root.parent / f"{pin_root.name}.scripts-advance.lock"
+                    ).exists(), "the old fcntl file namespace must be gone"
+
+    def test_major4_stale_break_refuses_on_a_live_owner(
+        self, tmp_path
+    ):
+        """Cycle-2 MAJOR-4 (2026-11-20): the m4 stale-break gated on the
+        DIR MTIME ALONE (frozen since mkdir — no heartbeat refresh
+        existed), so a long LIVE checkout's lock crossed 300s and was
+        rmtree'd from under its holder (two lanes moved HEAD
+        concurrently). The steal is now LIVENESS-GATED: a lock whose
+        owner file names a LIVE pid is NEVER stolen — even with BOTH
+        clocks (dir mtime + heartbeat) forced >300s stale."""
+        import time as _time
+
+        fx = _build_pin_fixture(tmp_path)
+        pin_root = fx["pin"].parents[1]
+        lock_dir = pin_root.parent / f"{pin_root.name}.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text(f"{os.getpid()}\n", encoding="utf-8")
+        stale = _time.time() - 400
+        os.utime(lock_dir, (stale, stale))          # dir mtime >300s stale
+        (lock_dir / "heartbeat").write_text("0\n", encoding="utf-8")
+        os.utime(lock_dir / "heartbeat", (stale, stale))  # heartbeat stale
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "unavailable", (status, detail)
+        assert "advance lock HELD" in detail, detail
+        assert "LIVE owner" in detail, detail
+        assert lock_dir.exists(), "a LIVE owner's lock dir must survive"
+        assert (lock_dir / "owner").read_text(
+            encoding="utf-8").strip() == str(os.getpid()), (
+            "the live owner's lock dir must be UNTOUCHED"
+        )
+        assert _git("rev-parse", "HEAD", cwd=fx["pin"]) != fx["target"], (
+            "the pin must not move under a live owner's lock"
+        )
+
+    def test_major4_stale_break_steals_from_a_dead_owner(
+        self, tmp_path
+    ):
+        """MAJOR-4 direction 2: a DEAD owner with BOTH clocks >300s stale
+        IS still stale-breakable — the fix tightens the steal, it does
+        not disable it (a crashed holder's lock must not wedge the
+        advance forever)."""
+        import subprocess
+        import time as _time
+
+        dead = subprocess.Popen(["true"])   # exits immediately
+        dead.wait()
+        fx = _build_pin_fixture(tmp_path)
+        pin_root = fx["pin"].parents[1]
+        lock_dir = pin_root.parent / f"{pin_root.name}.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text(f"{dead.pid}\n", encoding="utf-8")
+        (lock_dir / "heartbeat").write_text("0\n", encoding="utf-8")
+        stale = _time.time() - 400
+        # stamp BOTH clocks stale — dir mtime LAST: creating a file inside
+        # the dir bumps the dir mtime, so the utime order matters
+        os.utime(lock_dir / "heartbeat", (stale, stale))
+        os.utime(lock_dir, (stale, stale))
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "advanced", (status, detail)
+        assert not lock_dir.exists(), "the stolen lock must be released"
+        assert _git("rev-parse", "HEAD", cwd=fx["pin"]) == fx["target"]
+
+    def test_major4_dead_owner_but_fresh_clock_refuses(
+        self, tmp_path
+    ):
+        """MAJOR-4 discrimination: a DEAD owner alone is NOT enough —
+        a fresh heartbeat (or fresh dir mtime) means the holder died a
+        moment ago and the lock is not yet stale-breakable; both clocks
+        must exceed 300s."""
+        import subprocess
+        import time as _time
+
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        fx = _build_pin_fixture(tmp_path)
+        pin_root = fx["pin"].parents[1]
+        lock_dir = pin_root.parent / f"{pin_root.name}.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text(f"{dead.pid}\n", encoding="utf-8")
+        (lock_dir / "heartbeat").write_text("0\n", encoding="utf-8")
+        stale = _time.time() - 400
+        # the heartbeat stays FRESH (a holder that was refreshing and just
+        # died — the refresher's last stamp); the dir mtime is stale —
+        # utime the dir LAST (heartbeat creation bumps the dir mtime)
+        os.utime(lock_dir / "heartbeat", (_time.time(), _time.time()))
+        os.utime(lock_dir, (stale, stale))
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "unavailable", (status, detail)
+        assert "advance lock HELD" in detail, detail
+        assert "not yet stale-breakable" in detail, detail
+        assert lock_dir.exists(), "a not-yet-stale lock must survive"
+
+    def test_d11_dirty_pin_tree_is_refused_never_moved(
+        self, tmp_path
+    ):
+        """Review-fix d11 (2026-11-20): §2.6(b) fail-closed — a DIRTY
+        operator-owned pin worktree is REFUSED (checkout --detach only on
+        a clean tree); the lock is still released; HEAD does not move."""
+        fx = _build_pin_fixture(tmp_path)
+        pin_root = fx["pin"].parents[1]
+        (fx["pin"] / "lib.sh").write_text(
+            "# operator's local edit\n", encoding="utf-8",
+        )
+        head_before = _git("rev-parse", "HEAD", cwd=fx["pin"])
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "unavailable", (status, detail)
+        assert "DIRTY" in detail, detail
+        assert _git("rev-parse", "HEAD", cwd=fx["pin"]) == head_before
+        assert (fx["pin"] / "lib.sh").read_text(
+            encoding="utf-8") == "# operator's local edit\n"
+        lock_dir = pin_root.parent / f"{pin_root.name}.scripts-advance.lock.d"
+        assert not lock_dir.exists(), "the advance lock must be released"
+
+    def test_ac_d4_4_manifest_disagreement_refuses_and_advanced_tree_matches_scripts_manifest(
+        self, tmp_path
+    ):
+        """AC-D4-4 (cycle-3 E4 — previously UNPINNED; the gate: 'the
+        advanced-tree gate is existence-only; no sha comparison vs
+        scripts_manifest'). BOTH directions pinned: a payload manifest
+        whose scripts_manifest entry DISAGREES with the target tree
+        refuses with status 'drift' (HEAD never moves), and after a
+        green advance every family file's WORKING-TREE bytes hash to the
+        manifest's recorded sha256 — the advanced tree IS the shipped
+        family, byte-for-byte, not merely present."""
+        import hashlib
+
+        fx = _build_pin_fixture(tmp_path)
+        # (a) the drift refusal: ONE tampered manifest entry
+        bad = dict(fx["manifest"])
+        sm = dict(bad["scripts_manifest"])
+        victim_key = next(iter(sm))
+        sm[victim_key] = "f" * 64
+        bad["scripts_manifest"] = sm
+        head_before = _git("rev-parse", "HEAD", cwd=fx["pin"])
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=bad,
+        )
+        assert status == "drift", (status, detail)
+        assert "scripts-pin-drift" in detail, detail
+        assert _git("rev-parse", "HEAD", cwd=fx["pin"]) == head_before, (
+            "a drift refusal must never move HEAD"
+        )
+        # (b) the green advance: the working tree == the manifest maps
+        status2, detail2 = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status2 == "advanced", (status2, detail2)
+        assert _git("rev-parse", "HEAD", cwd=fx["pin"]) == fx["target"]
+        pin_root = fx["pin"].parents[1]  # fx["pin"] IS the scripts dir
+        for rel in uj.EXECUTOR_FAMILY_PATHS:
+            if rel.startswith("scripts/"):
+                key = rel[len("scripts/"):]
+                entry = fx["manifest"]["scripts_manifest"]
+            else:
+                key = rel
+                entry = fx["manifest"]["daemon_slice_manifest"]
+            want = entry[key]
+            got = hashlib.sha256(
+                (pin_root / rel).read_bytes()).hexdigest()
+            assert got == want, (
+                f"{rel}: working-tree {got[:12]}… != manifest "
+                f"{want[:12]}… — the advanced tree diverged from the "
+                "shipped family"
+            )
+
+    def test_manifest_without_source_commit_is_unavailable(self, tmp_path):
+        fx = _build_pin_fixture(tmp_path)
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"], target_commit=None,
+            manifest={"version": "9.9.9"},
+        )
+        assert status == "unavailable", (status, detail)
+        assert "no sha-shaped source_commit" in detail
+
+    @pytest.mark.parametrize("bad_owner", ["²", "0", "", "-5", "abc", "12a"])
+    def test_owner_parsing_hardened_refuses_invalid_pids(self, tmp_path, bad_owner):
+        """Item 5 polish: owner parsing requires isascii() and isdigit() and >0.
+        Unicode digits ('²'), '0', '', negatives all refuse cleanly without ValueError."""
+        fx = _build_pin_fixture(tmp_path)
+        pin_root = fx["pin"].parents[1]
+        lock_dir = pin_root.parent / f"{pin_root.name}.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text(f"{bad_owner}\n", encoding="utf-8")
+        stale = time.time() - 400
+        os.utime(lock_dir, (stale, stale))
+        may_steal, reason, _owner = ut._advance_lock_steal_verdict(lock_dir)
+        assert not may_steal
+        assert "holder cannot be attributed" in reason or "owner file is missing/unreadable" in reason
+
+    @pytest.mark.parametrize("huge_owner", [
+        "99999999999999999999",   # 20 digits — the OverflowError class (R3)
+        "4194305",                # one ABOVE the 2^22 pid_max ceiling
+        "00004194305",            # zero-padded — still above after int()
+    ])
+    def test_a3_out_of_range_pid_owner_refuses_never_raises(
+        self, tmp_path, huge_owner,
+    ):
+        """Cycle-3 A3: an out-of-range pid can never name a real process
+        and os.kill raises OverflowError (not ProcessLookupError) for it —
+        the class that ESCAPED the never-raises contract (gate R3 item 4:
+        '99999999999999999999' crashed scripts_pin_self_advance). The
+        verdict now bounds the pid at the kernel pid_max ceiling
+        (2^22 = 4194304): refuse, unattributable, no exception — both at
+        the verdict level and through the full advance call."""
+        import subprocess as _sp
+
+        dead = _sp.Popen(["true"])
+        dead.wait()
+        fx = _build_pin_fixture(tmp_path)
+        pin_root = fx["pin"].parents[1]
+        lock_dir = pin_root.parent / f"{pin_root.name}.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text(f"{huge_owner}\n",
+                                        encoding="utf-8")
+        (lock_dir / "heartbeat").write_text("0\n", encoding="utf-8")
+        stale = time.time() - 400
+        os.utime(lock_dir / "heartbeat", (stale, stale))
+        os.utime(lock_dir, (stale, stale))
+        # verdict level: refuses, never raises
+        may_steal, reason, owner_seen = ut._advance_lock_steal_verdict(
+            lock_dir)
+        assert not may_steal
+        assert "cannot be attributed" in reason, reason
+        # full-function level: the huge-pid lock does NOT crash the
+        # advance (the never-raises contract holds end to end)
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "unavailable", (status, detail)
+        assert "cannot be attributed" in detail, detail
+        assert lock_dir.exists(), "the unattributable lock must survive"
+
+    def test_a2_concurrent_steal_race_single_winner(self, tmp_path):
+        """Cycle-3 A2 (gate R3 item 2 / RR3-SC4): the pre-A2
+        rename-aside steal yielded 2–3 CONCURRENT WINNERS under real
+        races (measured both lanes). The CAS acquisition
+        (verdict + link-claim + retire + mkdir-CAS) is single-winner BY
+        CONSTRUCTION: this pin races N REAL concurrent stealers (threads
+        behind a barrier — os.link/os.rename/os.mkdir release the GIL)
+        against one planted stale lock and asserts EXACTLY ONE winner.
+
+        The assertions are PROTOCOL PROPERTIES (exactly one winner, zero
+        CAS debris, every loser reasoned, the winner holds the lock) —
+        the owner file is NEVER read: the lock fast path legitimately
+        stamps no owner, so an ownerless winning lock dir is
+        protocol-legal (leader decision: pin-side fix, no fast-path
+        owner stamp)."""
+        import threading
+
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        lock_dir = tmp_path / "pin-root.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text(f"{dead.pid}\n", encoding="utf-8")
+        (lock_dir / "heartbeat").write_text("0\n", encoding="utf-8")
+        stale = time.time() - 400
+        os.utime(lock_dir / "heartbeat", (stale, stale))
+        os.utime(lock_dir, (stale, stale))
+
+        n = 8
+        barrier = threading.Barrier(n)
+        results: list[tuple[bool, str]] = []
+        results_lock = threading.Lock()
+
+        def stealer() -> None:
+            barrier.wait()
+            got = ut._advance_lock_acquire(lock_dir)
+            with results_lock:
+                results.append(got)
+
+        threads = [threading.Thread(target=stealer) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        assert len(results) == n, f"race lost threads: {n - len(results)}"
+        winners = [r for r in results if r[0]]
+        assert len(winners) == 1, (
+            f"EXACTLY ONE winner required, got {len(winners)} of {n}: "
+            f"{results!r}"
+        )
+        losers = [r for r in results if not r[0]]
+        assert len(losers) == n - 1
+        for _held, why in losers:
+            assert why, "losers must carry a refusal reason"
+        # PROTOCOL PROPERTIES (the owner file is NEVER read): the lock
+        # FAST PATH (os.mkdir -> held) legitimately stamps NO owner, so a
+        # winner that owns an EMPTY lock dir is protocol-legal — reading
+        # the owner file made THIS pin flaky (19P/1F over 20 runs; ~10%
+        # of the races, 30/300, had the fast path win the freed path).
+        #   (P1) the winner HOLDS the lock and refuses nothing
+        assert winners[0][0] is True
+        assert winners[0][1] == "", (
+            f"the winner must carry no refusal reason: {winners[0]!r}")
+        #   (P2) the winner's lock sits AT the lock path
+        assert lock_dir.exists(), "the winner must hold the lock dir"
+        #   (P3) ZERO CAS debris survives — the §7e shape of the bash pin
+        #   (the steal-won / steal-claim / retired siblings of the lock
+        #   dir), asserted STRICTLY: no sibling may survive the race
+        debris = sorted(p.name for p in tmp_path.iterdir()
+                        if p.name != lock_dir.name)
+        assert not debris, (
+            f"CAS debris left behind (steal-won/steal-claim/retired "
+            f"siblings): {debris}")
+        shutil.rmtree(lock_dir)
+
+    def test_a2_cas_rejects_when_lock_dir_replaced_under_verdict(
+        self, tmp_path, monkeypatch,
+    ):
+        """Cycle-3 A2 CAS re-check: when the dir at the lock path was
+        REPLACED after the verdict qualified the stale one (a human
+        clear + a fresh acquirer), the retire re-verification RESTORES
+        the replacement and refuses — never steals a live replacement."""
+        import subprocess as _sp
+
+        dead = _sp.Popen(["true"])
+        dead.wait()
+        lock_dir = tmp_path / "pin-root.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text(f"{dead.pid}\n", encoding="utf-8")
+        (lock_dir / "heartbeat").write_text("0\n", encoding="utf-8")
+        stale = time.time() - 400
+        os.utime(lock_dir / "heartbeat", (stale, stale))
+        os.utime(lock_dir, (stale, stale))
+
+        real_rename = os.rename
+        real_link = os.link
+
+        def replacing_link(src, dst):
+            r = real_link(src, dst)
+            # the claim link just won — the verdict already qualified the
+            # OLD stale dir; a human clear + a fresh acquirer REPLACES the
+            # dir at the path BEFORE this stealer's retire fires
+            shutil.rmtree(lock_dir)
+            real_rename(lock_dir.with_name("fresh.lock"), lock_dir)
+            (lock_dir / "owner").write_text("999999\n", encoding="utf-8")
+            (lock_dir / "heartbeat").write_text(
+                f"{int(time.time())}\n", encoding="utf-8")
+            return r
+
+        fresh = tmp_path / "fresh.lock"
+        fresh.mkdir()
+        monkeypatch.setattr(os, "link", replacing_link)
+        held, why = ut._advance_lock_acquire(lock_dir)
+        assert not held, "a replaced lock must never be stolen"
+        assert "REPLACED" in why, why
+        assert "restored" in why, why
+        monkeypatch.undo()  # restore real rename before asserting layout
+        assert (lock_dir / "owner").read_text(
+            encoding="utf-8").strip() == "999999", (
+            "the fresh replacement must sit at the lock path"
+        )
+        assert not (tmp_path / "pin-root.scripts-advance.lock.d.retired."
+                    f"{os.getpid()}").exists(), "no retired dir may remain"
+
+    def test_a2_marker_of_a_live_stealer_blocks_fail_closed(
+        self, tmp_path,
+    ):
+        """A steal-won marker naming a LIVE stealer (mid-transition)
+        blocks every other stealer fail-closed; a marker naming a DEAD
+        stealer is reclaimed once (crash recovery)."""
+        import threading
+        import subprocess as _sp
+
+        lock_dir = tmp_path / "pin-root.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text("424242\n", encoding="utf-8")
+        (lock_dir / "heartbeat").write_text("0\n", encoding="utf-8")
+        stale = time.time() - 400
+        os.utime(lock_dir / "heartbeat", (stale, stale))
+        os.utime(lock_dir, (stale, stale))
+        marker = tmp_path / "pin-root.scripts-advance.lock.d.steal-won"
+        # a LIVE pid + a fresh ts — reclaimable() must say NO
+        live = subprocess.Popen(["sleep", "60"])
+        try:
+            marker.write_text(
+                f"{live.pid} {int(time.time())}\n", encoding="utf-8")
+            held, why = ut._advance_lock_acquire(lock_dir)
+            assert not held
+            assert "another steal owns the transition" in why, why
+            assert lock_dir.exists(), "the stale lock must survive"
+            assert marker.exists(), "the live marker must survive"
+        finally:
+            live.kill()
+            live.wait()
+        # the marker names a now-DEAD stealer — reclaimed once, steal OK
+        held2, why2 = ut._advance_lock_acquire(lock_dir)
+        assert held2, why2
+        assert not marker.exists(), "the claimed marker is dropped"
+        assert (lock_dir / "owner").read_text(
+            encoding="utf-8").strip() == str(os.getpid())
+        shutil.rmtree(lock_dir)
+
+
+class TestScriptsPinSelfAdvanceArmPath:
+    """The D4-b reader THROUGH the arm (Check-4 integration): the advance
+    fires only on the behind-floor EXPLICIT-pin class; everything else is
+    byte-identical (AC-D4-8, pinned by the W legs above)."""
+
+    @staticmethod
+    def _rewrite_manifest(install: Path, version: str, **extra) -> None:
+        mp = install / "releases" / version / "manifest.json"
+        data = json.loads(mp.read_text(encoding="utf-8"))
+        data.update(extra)
+        mp.write_text(json.dumps(data), encoding="utf-8")
+
+    async def test_ac_d4_1_arm_self_advances_and_proceeds(
+        self, harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Behind floor + T local ⇒ the arm PROCEEDS (no stale-scripts-dir
+        refusal), the pin HEAD == T, and the journal carries the
+        arm-scripts-advance row naming T_old→T_new + coverage."""
+        tools, markers, install = harness
+        fx = _build_pin_fixture(tmp_path)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(fx["pin"]))
+        monkeypatch.setattr(
+            ut, "PIPELINE_SCRIPTS_FLOOR_COMMIT", fx["floor"]
+        )
+        self._rewrite_manifest(
+            install, "1.2.3",
+            source_commit=fx["target"],
+            scripts_manifest=fx["manifest"]["scripts_manifest"],
+            daemon_slice_manifest=fx["manifest"]["daemon_slice_manifest"],
+        )
+        out = await _arm_demo_promote(tools)
+        assert "UPGRADE ARMED" in out, out
+        assert _git("rev-parse", "HEAD", cwd=fx["pin"]) == fx["target"]
+        history = uj.journal_read(install).get("history") or []
+        adv = [e for e in history if e.get("event") == "arm-scripts-advance"]
+        assert adv, "the arm-scripts-advance row is missing"
+        assert "T_old=" in adv[-1]["detail"] and "coverage=empty" in (
+            adv[-1]["detail"]
+        )
+        assert markers, "the executor marker is missing on a successful arm"
+
+    async def test_ac_d4_2_arm_refuses_scripts_advance_unavailable(
+        self, harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T absent locally ⇒ refusal with the NEW token + the exact
+        command; nonce NOT burned; lock released; no pending_op."""
+        tools, markers, install = harness
+        fx = _build_pin_fixture(tmp_path)
+        ghost = "e" * 40
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(fx["pin"]))
+        monkeypatch.setattr(
+            ut, "PIPELINE_SCRIPTS_FLOOR_COMMIT", fx["floor"]
+        )
+        self._rewrite_manifest(install, "1.2.3", source_commit=ghost)
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) == "scripts-advance-unavailable", out
+        assert "fetch origin" in out and "checkout --detach" in out, out
+        assert not uj.lock_dir(install).exists(), "lock not released"
+        assert uj.journal_read(install).get("pending_op") is None
+        assert markers == []
+        # the pin did NOT move
+        assert _git("rev-parse", "HEAD", cwd=fx["pin"]) != ghost
+
+    async def test_ac_d4_4_arm_refuses_scripts_pin_drift(
+        self, harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Byte-parity mismatch ⇒ `scripts-pin-drift` refusal (the staged
+        tree diverged from its own source commit)."""
+        tools, markers, install = harness
+        fx = _build_pin_fixture(tmp_path)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(fx["pin"]))
+        monkeypatch.setattr(
+            ut, "PIPELINE_SCRIPTS_FLOOR_COMMIT", fx["floor"]
+        )
+        bad_map = dict(fx["manifest"]["scripts_manifest"])
+        bad_map["upgrade/lib.sh"] = "1" * 64
+        self._rewrite_manifest(
+            install, "1.2.3",
+            source_commit=fx["target"],
+            scripts_manifest=bad_map,
+            daemon_slice_manifest=fx["manifest"]["daemon_slice_manifest"],
+        )
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) == "scripts-pin-drift", out
+        assert not uj.lock_dir(install).exists()
+        assert markers == []
+
+    async def test_w3a_floor_unset_still_refuses_stale_scripts_dir(
+        self, harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC-D4-8 companion: the EXISTING refusal classes are untouched —
+        a floor-UNSET explicit pin still refuses `stale-scripts-dir` (the
+        advance is not-eligible; the W-3a vocabulary byte-identical)."""
+        tools, markers, install = harness
+        fx = _build_pin_fixture(tmp_path)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(fx["pin"]))
+        monkeypatch.setattr(ut, "PIPELINE_SCRIPTS_FLOOR_COMMIT", "")
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) == "stale-scripts-dir", out
+        assert "floor-unset" in out, out
+        assert not uj.lock_dir(install).exists()
+        assert markers == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # D1 (2026-11-11): the ARM lane's half of the ONE stale-txn reclaim
 # mechanism. The tool busy-check used to refuse FOREVER on a dead pre-flip
 # txn (the 2026-11-11 starvation) — now an ORPHANED txn (dead owner +
@@ -4891,3 +5698,158 @@ class TestStaleTxnReclaimArmLane:
         )
         assert _refusal_reason(out) == "pipeline-busy", out
         assert uj.journal_read(install).get("in_flight") == txn
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AC-OBS-1 — the arm-time journalctl capture (C-7): the tool lane is the
+# ONLY surface that can reach the journal at arm time (the agent lanes
+# cannot, and the daemon app log rotates at 10 MB / ~15-20 min ⇒ the
+# incident window is gone by the time a human reads it).
+#
+# The binding shape: BEST-EFFORT + a JOURNALED VERDICT (captured /
+# unavailable+reason) and NEVER ARM-BLOCKING (the journal-read privilege
+# of the service user is unverified — Appendix B #7).
+# ═══════════════════════════════════════════════════════════════════════════
+class TestArmJournalctlCapture:
+    """AC-OBS-1 — the capture's verdict, its best-effort shape, and its
+    never-blocking contract."""
+
+    @staticmethod
+    def _rows(install: Path) -> list[dict]:
+        history = uj.journal_read(install).get("history") or []
+        return [r for r in history if r.get("event") == "arm-journal-capture"]
+
+    async def test_capture_verdict_is_journaled_and_the_arm_proceeds(
+        self, harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The happy shape: the capture ran, its verdict is journaled, and
+        the arm is NOT blocked by it."""
+        tools, markers, install = harness
+        monkeypatch.setattr(
+            uj,
+            "arm_journalctl_capture",
+            lambda install_dir, run_id, env_scope: (
+                f"captured units=2 lines=42 narrative={install_dir}/x.log"
+            ),
+        )
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) is None, out
+        assert "UPGRADE ARMED" in out, out
+        rows = self._rows(install)
+        assert rows, "the arm-journal-capture verdict row is missing"
+        assert rows[-1]["detail"].startswith("captured units=2"), rows[-1]
+
+    async def test_capture_failure_never_blocks_the_arm(
+        self, harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A capture that RAISES degrades to a journaled "unavailable"
+        verdict — the arm still happens. (The capture is an OBSERVABILITY
+        step, never a gate.)"""
+        tools, markers, install = harness
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("journalctl exploded")
+
+        monkeypatch.setattr(uj, "arm_journalctl_capture", _boom)
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) is None, out
+        assert "UPGRADE ARMED" in out, out
+        rows = self._rows(install)
+        assert rows, "the arm-journal-capture verdict row is missing"
+        assert "unavailable reason=capture-error(RuntimeError)" in rows[-1][
+            "detail"
+        ], rows[-1]
+
+    def test_capture_without_journalctl_is_unavailable_not_fatal(
+        self, install: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """journalctl absent (or unreadable) ⇒ the verdict says so; nothing
+        raises, nothing is written."""
+        monkeypatch.setattr(uj.shutil, "which", lambda _n: None)
+        verdict = uj.arm_journalctl_capture(install, "r-test-1", "demo")
+        assert verdict == "unavailable reason=journalctl-not-found", verdict
+
+    def test_capture_writes_the_excerpt_into_the_run_narrative(
+        self, install: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A successful capture APPENDS its excerpt to the run narrative —
+        the file the run's own reader surfaces."""
+        monkeypatch.setattr(
+            uj.shutil, "which", lambda _n: "/usr/bin/journalctl"
+        )
+
+        def _fake_excerpt(unit, lines):
+            if unit is None:
+                return ("system-wide tail", "sysd-1: something happened")
+            return (f"unit {unit}", f"{unit}: killed by watchdog")
+
+        monkeypatch.setattr(uj, "_journalctl_excerpt", _fake_excerpt)
+        verdict = uj.arm_journalctl_capture(install, "r-test-2", "demo")
+        assert verdict.startswith("captured units="), verdict
+        narrative, _payload = uj.executor_run_log_paths(
+            install, "r-test-2", "demo"
+        )
+        assert narrative.is_file(), narrative
+        text = narrative.read_text(encoding="utf-8")
+        assert "arm-journal-capture" in text, text
+        assert "killed by watchdog" in text, text
+        assert "sysd-1: something happened" in text, text
+
+    def test_capture_with_no_entries_is_unavailable_with_a_reason(
+        self, install: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """journalctl present but nothing to show ⇒ an explicit
+        "unavailable + reason" verdict (never a silent success)."""
+        monkeypatch.setattr(uj.shutil, "which", lambda _n: "/usr/bin/journalctl")
+        monkeypatch.setattr(uj, "_journalctl_excerpt", lambda unit, lines: None)
+        verdict = uj.arm_journalctl_capture(install, "r-test-3", "demo")
+        assert verdict.startswith("unavailable reason="), verdict
+        assert "no-journal-entries" in verdict, verdict
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AC-OBS-2 — the run narrative surfaces the PAYLOAD log (the executor
+# unit's stdio), not only the shell's narrative file. They are different
+# files; the verify-phase diagnostics reach the payload log only through
+# the shell's unbuffered stderr (F16).
+# ═══════════════════════════════════════════════════════════════════════════
+class TestPayloadLogTail:
+    """AC-OBS-2 — the payload tail is surfaced next to the narrative tail."""
+
+    def test_payload_tail_is_surfaced_beside_the_narrative(
+        self, install: Path
+    ) -> None:
+        narrative, payload = uj.executor_run_log_paths(
+            install, "r-obs-2", "demo"
+        )
+        narrative.parent.mkdir(parents=True, exist_ok=True)
+        narrative.write_text("narrative line\n", encoding="utf-8")
+        payload.write_text(
+            "hand-back verify: budget effective=300s\n"
+            "hand-back verify: /livez reports version=0.0.0\n",
+            encoding="utf-8",
+        )
+        out = ut._upgrade_log_tail(install, run_id="r-obs-2")
+        assert "upgrade.log tail" in out, out
+        assert "narrative line" in out, out
+        assert "payload.log tail" in out, out
+        assert "hand-back verify: budget effective=300s" in out, out
+        assert "version=0.0.0" in out, out
+
+    def test_absent_payload_log_is_not_an_error(self, install: Path) -> None:
+        """No payload file (the executor unit never started) ⇒ the tail is
+        simply absent — never a rendered error."""
+        narrative, _payload = uj.executor_run_log_paths(
+            install, "r-obs-2b", "demo"
+        )
+        narrative.parent.mkdir(parents=True, exist_ok=True)
+        narrative.write_text("narrative line\n", encoding="utf-8")
+        out = ut._upgrade_log_tail(install, run_id="r-obs-2b")
+        assert "narrative line" in out, out
+        assert "payload.log tail" not in out, out
+
+    def test_no_run_id_surfaces_no_payload_tail(self, install: Path) -> None:
+        """Without a run_id there is no per-run pair to resolve — the
+        aggregate-only behaviour is unchanged."""
+        out = ut._upgrade_log_tail(install)
+        assert "payload.log tail" not in out, out

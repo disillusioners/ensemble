@@ -195,6 +195,80 @@ else
   - test_release_journal.sh (KNOWN ISSUE: pre-P2 BSD debt)"
 fi
 
+# ── R. RESUME-FROM-STATE (AC-CER-1 — self-service-promote Wave 4) ───────────
+# Design F2-i: a re-arm on a PARTIALLY-FLIPPED system must RESUME from the
+# journal's state, never re-flip. The leg pins the DECISION (behaviourally,
+# through the real lib.sh function) and the STRUCTURE (promote.sh guards
+# every mutation site with the resume predicate — no stop, no swap, no
+# flip, no restart-from-arm on a gates-only resume).
+#
+# The fixture is a THROWAWAY mktemp dir (the house fence: nothing here
+# resolves a live-shaped path; the journal is a plain fixture file).
+R_PASS=0; R_FAIL=0
+r_pass() { PASS=$((PASS + 1)); R_PASS=$((R_PASS + 1)); }
+r_fail() {
+    FAIL=$((FAIL + 1)); R_FAIL=$((R_FAIL + 1))
+    printf 'FAIL: %s\n' "$1" >&2
+    FAILED_PACKS="$FAILED_PACKS
+  ✗ $1"
+}
+r_assert_eq() {
+    if [ "$2" = "$3" ]; then r_pass; else r_fail "$1 (expected '$2', got '$3')"; fi
+}
+r_assert_contains() {
+    case "$3" in *"$2"*) r_pass ;; *) r_fail "$1 (wanted '$2')" ;; esac
+}
+R_FIX="$(mktemp -d -t resume-fix.XXXXXX)"; _register_fixture "$R_FIX"
+mkdir -p "$R_FIX/releases"
+seed_resume_journal() {   # <flipped:true|false> <owner_pid> <last_heartbeat>
+    cat > "$R_FIX/releases/state.json" <<JOURNAL
+{"current":"v2","previous":"v1","in_flight":{"kind":"promote","target":"v2","started_at":"2026-01-01T00:00:00Z","flipped":$1,"owner_pid":$2,"last_heartbeat":$3},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+JOURNAL
+}
+r_resume_decision() {     # → the mode (the journal is seeded by the caller)
+    INSTALL_DIR="$R_FIX" bash -c '. "'"$REPO_ROOT"'/scripts/upgrade/lib.sh" >/dev/null 2>&1; _promote_resume_decision v2' 2>/dev/null | tr -d '\n'
+}
+r_mutation_ok() {         # <mode> → "ok" | "blocked"
+    INSTALL_DIR="$R_FIX" bash -c '. "'"$REPO_ROOT"'/scripts/upgrade/lib.sh" >/dev/null 2>&1; PROMOTE_RESUME_MODE="'"$1"'"; if _promote_resume_mutation_ok; then echo ok; else echo blocked; fi' 2>/dev/null | tr -d '\n'
+}
+DEAD_PID=999999
+NOW_EPOCH="$(date +%s)"
+# (a) flipped=true + a DEAD owner ⇒ gates-only (gates/commit ONLY).
+seed_resume_journal true "$DEAD_PID" "$NOW_EPOCH"
+r_assert_eq "AC-CER-1 a re-arm on a FLIPPED txn resumes gates-only" \
+    "gates-only" "$(r_resume_decision)"
+# (b) flipped=false ⇒ flip-prep (the flip-prep continues, with idempotency guards).
+seed_resume_journal false "$DEAD_PID" "$NOW_EPOCH"
+r_assert_eq "AC-CER-1 a re-arm on a PRE-FLIP txn resumes the flip-prep" \
+    "flip-prep" "$(r_resume_decision)"
+# (c) a LIVE owner ⇒ busy (the resume never tramples a live executor).
+seed_resume_journal true "$$" "$NOW_EPOCH"
+r_assert_eq "AC-CER-1 a LIVE owner keeps the journal busy (no trampling)" \
+    "busy" "$(r_resume_decision)"
+# (d) no open txn ⇒ fresh (the normal path).
+cat > "$R_FIX/releases/state.json" <<'JOURNAL'
+{"current":"v2","previous":"v1","in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+JOURNAL
+r_assert_eq "AC-CER-1 no open txn ⇒ the fresh path" \
+    "fresh" "$(r_resume_decision)"
+# (e) the mutation predicate: gates-only blocks EVERY mutation; the other
+#     modes do not.
+r_assert_eq "AC-CER-1 the gates-only resume blocks the mutations" "blocked" "$(r_mutation_ok gates-only)"
+r_assert_eq "AC-CER-1 the flip-prep resume may mutate" "ok" "$(r_mutation_ok flip-prep)"
+r_assert_eq "AC-CER-1 the fresh path may mutate" "ok" "$(r_mutation_ok fresh)"
+# (f) the STRUCTURE: promote.sh guards every mutation site with the resume
+#     predicate — the stop, the launcher swap, the atomic flip, the flipped
+#     marker and the unit hand-back (five sites; NO restart-from-arm path).
+R_PROMOTE_GUARDS="$(grep -c '_promote_resume_mutation_ok' "$REPO_ROOT/scripts/upgrade/promote.sh" 2>/dev/null || echo 0)"
+if [ "$R_PROMOTE_GUARDS" -ge 5 ]; then
+    r_pass "AC-CER-1 promote.sh guards every mutation site with the resume predicate ($R_PROMOTE_GUARDS sites)"
+else
+    r_fail "AC-CER-1 promote.sh guards every mutation site with the resume predicate (expected >=5, got $R_PROMOTE_GUARDS)"
+fi
+R_PROMOTE_ATOMIC="$(grep -c 'atomic_flip "\$VERSION"' "$REPO_ROOT/scripts/upgrade/promote.sh" 2>/dev/null || echo 0)"
+r_assert_eq "AC-CER-1 there is exactly ONE forward atomic_flip site (the 8b rollback repoint is a different target — a second forward flip is unreachable on the resume path)" "1" "$R_PROMOTE_ATOMIC"
+printf 'R — resume-from-state (AC-CER-1): %d passed, %d failed\n' "$R_PASS" "$R_FAIL"
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 OVERALL_END=$(_now_epoch)
 OVERALL_DUR=$((OVERALL_END - OVERALL_START))

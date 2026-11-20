@@ -6756,6 +6756,52 @@ class InstanceManager:
                 _promote_unit_props = [
                     f"RuntimeMaxSec={_uj.derived_runtime_max_sec()}"
                 ]
+                # D3-D (Wave 5 §2.4, ``--collect`` caveat): optional
+                # terminal-status retention for FAILED transient units —
+                # version-gated (systemd ≥252) and degrade-safe; the
+                # reaper's journal-truth fallback works regardless.
+                _collect_mode = _uj.collect_mode_property_or_none()
+                if _collect_mode is not None:
+                    _promote_unit_props.append(_collect_mode)
+
+            # D3-E3 (self-service-promote Wave 5, §2.4): persist the
+            # arm-lane UNIT identity into the durable pending_op BEFORE
+            # the spawn seam returns. The stamper closure mutates the SAME
+            # in-memory op the post-spawn owner update below continues to
+            # build on (one object, two sequential writes — the identity
+            # fields survive the second write by construction), and is
+            # invoked INSIDE spawn_executor immediately after the client
+            # Popen succeeds — strictly before the function returns, so a
+            # daemon death during the fast-fail window still leaves the
+            # durable record (the reaper queue itself is in-memory only).
+            def _stamp_executor_identity(unit: str, bus: str) -> None:
+                if op is not None and op.run_id == run_id:
+                    op.executor_unit = unit
+                    op.executor_unit_bus = bus
+                    op.executor_started_at = _uj.now_iso()
+                    # owner_pid is the systemd-run --wait CLIENT (a cgroup
+                    # child of ensemble-main that dies with it) — NOT the
+                    # payload. The reaper watches the client but
+                    # classifies via the unit (§1.5 asymmetry).
+                    op.owner_pid_kind = "client"
+                    _uj.write_pending_op(install_dir, op)
+                else:
+                    # T5 (tidier fold, 2026-11-20): never silently drop —
+                    # a state seam that swallows a mismatch hides exactly
+                    # the corrupted-op shape tonight's arc began with.
+                    # The spawn continues (best-effort contract); the
+                    # sweep falls back to the run_id+prefix derivation.
+                    logger.warning(
+                        "[system-execution] executor identity stamp "
+                        "SKIPPED — pending_op no longer matches the run "
+                        "(run_id=%s; op=%s): unit=%s bus=%s NOT "
+                        "persisted; classification falls back to "
+                        "run_id+prefix",
+                        run_id,
+                        (f"run_id={op.run_id}" if op is not None else "None"),
+                        unit, bus,
+                    )
+
             child_pid, _spawn_mode_note = _uj.spawn_executor(
                 argv, install_dir, extra_env, run_id=run_id,
                 # agent-restart §3.3 (V-7 / A-5): transient unit names are
@@ -6769,6 +6815,9 @@ class InstanceManager:
                     else _uj.UNIT_NAME_PREFIX
                 ),
                 unit_properties=_promote_unit_props,
+                # (self-service-promote lane marker — scoped source-gc
+                # sanction, cycle-3; see test_source_gc_repository)
+                identity_stamper=_stamp_executor_identity,
             )
             # Option D (Stage-2.2a): log the ACTUAL spawn mode — the
             # transient-service unit name when the service branch fired,
@@ -6793,12 +6842,56 @@ class InstanceManager:
             # pending_op remains the durable fallback.
             sweep = getattr(self, "_upgrade_journal_sweep", None)
             if sweep is not None:
+                # (self-service-promote lane marker — scoped source-gc
+                # sanction, cycle-3; see test_source_gc_repository)
+                # Review-fix M2 (2026-11-20): the reaper's unit identity
+                # is derived from the ACTUAL spawn outcome, never from
+                # `kind` alone. On a LEGACY spawn (non-systemd/launchd
+                # host — the detector refused the service branch) NO unit
+                # exists: unit_name stays EMPTY so the sweep classifier
+                # takes the legacy no-unit path (invariant (b)) and the
+                # host class still reaches a TERMINAL executor_exit —
+                # pre-fix, a kind-derived name made the classifier probe
+                # a nonexistent unit until the poll cap, degrading to
+                # executor_liveness_unverifiable and never closing the
+                # restart arm (the 2026-10-31 livelock class, returned on
+                # that host class). Service branch: the stamper's
+                # persisted identity wins; a failed best-effort stamper
+                # falls back to the kind-scoped prefix derivation (the
+                # run_id+prefix name the sweep already knows).
+                if _uj.spawn_mode_note_is_service(_spawn_mode_note):
+                    _reaper_unit = (
+                        op.executor_unit
+                        if op is not None and op.run_id == run_id
+                        and op.executor_unit
+                        else (
+                            f"{_uj.UNIT_NAME_PREFIX_RESTART}{run_id}"
+                            if kind == "restart"
+                            else f"{_uj.UNIT_NAME_PREFIX}{run_id}"
+                        )
+                    )
+                else:
+                    _reaper_unit = ""
                 try:
                     sweep.enqueue_reaper(
                         child_pid,
                         [str(a) for a in argv],
                         install_dir,
                         run_id,
+                        # (self-service-promote lane marker — scoped
+                        # source-gc sanction, cycle-3)
+                        # D3-E1/E2: the reaper classifies via the UNIT —
+                        # the name is derived from the SAME kind-scoped
+                        # prefix the spawn used (the unit identity was
+                        # already persisted to pending_op by the stamper
+                        # above; this threads it to the in-memory job).
+                        unit_name=_reaper_unit,
+                        unit_bus=(
+                            op.executor_unit_bus
+                            if op is not None and op.run_id == run_id
+                            and _reaper_unit
+                            else ""
+                        ),
                     )
                 except Exception as exc:
                     logger.warning(
@@ -6814,6 +6907,12 @@ class InstanceManager:
                     op.owner_pid = child_pid
                     op.owner_kind = "executor"
                     op.trigger = "post-turn-callback"
+                    # (self-service-promote lane marker — scoped source-gc
+                    # sanction, cycle-3; see test_source_gc_repository)
+                    # D3-E3: on the LEGACY branch (no unit identity — the
+                    # stamper never fired) owner_pid IS the payload shell.
+                    if not op.owner_pid_kind:
+                        op.owner_pid_kind = "payload"
                     _uj.write_pending_op(install_dir, op)
             except Exception as exc:
                 logger.warning(

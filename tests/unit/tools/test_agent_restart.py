@@ -712,10 +712,16 @@ class TestT8Extras:
         calls: list[dict] = []
 
         def _rec(argv, install_dir, extra_env=None, *, run_id=None,
-                 unit_prefix="ensemble-upgrade-", unit_properties=None):
+                 unit_prefix="ensemble-upgrade-", unit_properties=None,
+                 identity_stamper=None):
+            # cycle-3 set D: the D3-E3 spawn seam now threads the
+            # executor-identity stamper kwarg (daemon/manager.py — the
+            # restart drain passes it on every kind); the old recorder
+            # signature predated it and TypeError'd the drain.
             calls.append(
                 {"argv": list(argv), "extra_env": dict(extra_env or {}),
-                 "unit_prefix": unit_prefix}
+                 "unit_prefix": unit_prefix,
+                 "identity_stamper": identity_stamper}
             )
             return 424242, "(daemonized)"
 
@@ -744,6 +750,9 @@ class TestT8Extras:
             )
             assert result is True
             assert calls[0]["unit_prefix"] == "ensemble-restart-"
+            # cycle-3 set D: the D3-E3 identity stamper rides the spawn
+            # call (persisted into pending_op before the seam returns)
+            assert calls[0]["identity_stamper"] is not None
             if provenance_ok:
                 assert calls[0]["extra_env"].get("ENSEMBLE_RESTART_LIVE") == "1"
             else:

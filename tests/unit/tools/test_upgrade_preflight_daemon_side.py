@@ -248,6 +248,16 @@ class _DrainHarness:
                 encoding="utf-8",
             )
         self.calls: list[dict[str, Any]] = []
+        # Review-fix M2 pin surface: the stub's CONTRACTED branch report
+        # (mode note) and identity-stamper firing are parametrizable so
+        # the reaper-identity legs can exercise the REAL spawn shapes —
+        # the defaults preserve the pre-M2 stub behavior byte-for-byte
+        # EXCEPT the note, which now reports the SERVICE branch the
+        # default stamper-firing implies (in the real seam the stamper
+        # fires ONLY on the service branch — a legacy note + a fired
+        # stamper is a shape the seam cannot produce).
+        self.spawn_mode_note = "service=(stubbed-unit) (bus=system)"
+        self.fire_stamper = True
 
     # Annotations copied VERBATIM from the real seam
     # (upgrade_journal.spawn_executor) so a signature change breaks visibly
@@ -262,6 +272,7 @@ class _DrainHarness:
         run_id: str | None = None,
         unit_prefix: str = "ensemble-upgrade-",
         unit_properties: list[str] | None = None,
+        identity_stamper=None,
     ) -> tuple[int, str]:
         self.calls.append(
             {
@@ -272,9 +283,15 @@ class _DrainHarness:
                 "unit_properties": (
                     list(unit_properties) if unit_properties is not None else None
                 ),
+                "run_id": run_id,
             }
         )
-        return self.EXECUTOR_PID, "(stubbed)"
+        # D3-E3: fire the identity stamper EXACTLY as the real seam does
+        # (immediately after the spawn, before returning) so the drain-path
+        # identity pins exercise the real handoff shape.
+        if identity_stamper is not None and self.fire_stamper:
+            identity_stamper(f"{unit_prefix}{run_id}", "system")
+        return self.EXECUTOR_PID, self.spawn_mode_note
 
     def arm_and_drain(
         self,
@@ -317,6 +334,10 @@ class TestKindScopedRuntimeMaxSec:
         self, drain: _DrainHarness, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _clear_derivation_env(monkeypatch)
+        # D3-D: pin the optional CollectMode property OFF so the exact-list
+        # assertion below stays host-independent (the append case has its
+        # own leg).
+        monkeypatch.setattr(uj, "collect_mode_property_or_none", lambda: None)
         assert drain.arm_and_drain("promote", "r-kind-promote-1") is True
         assert drain.calls, "the spawn seam was never reached"
         assert drain.calls[0]["unit_properties"] == ["RuntimeMaxSec=1320"]
@@ -325,6 +346,7 @@ class TestKindScopedRuntimeMaxSec:
         self, drain: _DrainHarness, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _clear_derivation_env(monkeypatch)
+        monkeypatch.setattr(uj, "collect_mode_property_or_none", lambda: None)
         assert drain.arm_and_drain("restart", "r-kind-restart-1") is True
         assert drain.calls, "the spawn seam was never reached"
         assert drain.calls[0]["unit_properties"] is None
@@ -334,12 +356,327 @@ class TestKindScopedRuntimeMaxSec:
     ) -> None:
         monkeypatch.setenv("ENSEMBLE_PROMOTE_SOAK_S", "600")
         monkeypatch.delenv("PROMOTE_TOTAL_DEADLINE_S", raising=False)
+        monkeypatch.setattr(uj, "collect_mode_property_or_none", lambda: None)
         assert drain.arm_and_drain("promote", "r-kind-promote-2") is True
         assert drain.calls[0]["unit_properties"] == ["RuntimeMaxSec=1620"]
 
+    def test_promote_arm_appends_collect_mode_when_supported(
+        self, drain: _DrainHarness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D3-D (Wave 5 §2.4 ``--collect`` caveat): on a systemd ≥252 host
+        the promote unit carries the OPTIONAL terminal-status-retention
+        property AFTER RuntimeMaxSec; the restart arm NEVER does (the
+        property is promote-scoped like the bound itself).
+
+        Review-fix M1 (2026-11-20): SEMANTIC, not tautological — the
+        collector is REAL; only the host-version gate
+        (``systemd_version_cached``) is stubbed, so the property VALUE
+        itself is pinned. A regression back to the FLUSHING mode
+        (``CollectMode=inactive-or-failed`` — per systemd.unit(5) exactly
+        ``--collect``'s implied value, which unloads the failed unit and
+        flushes ExecMainStatus, leaving the unit_terminal classifier branch
+        unreachable — verified on-host, systemd 255) FAILS this leg, as
+        does a broken ≥252 gate on either side."""
+        _clear_derivation_env(monkeypatch)
+        monkeypatch.setattr(uj, "systemd_version_cached", lambda: 252)
+        assert drain.arm_and_drain("promote", "r-kind-promote-3") is True
+        assert drain.calls[0]["unit_properties"] == [
+            "RuntimeMaxSec=1320", "CollectMode=inactive",
+        ]
+        assert drain.arm_and_drain("restart", "r-kind-restart-3") is True
+        assert drain.calls[-1]["unit_properties"] is None
+
+
+class TestM1CollectModeRetentionValue:
+    """Review-fix M1 (2026-11-20) — the CollectMode VALUE is the
+    terminal-status-RETAINING mode, pinned SEMANTICALLY (the collector is
+    REAL; only the host-version gate is stubbed — the old pin mocked the
+    collector to echo the asserted string, catching nothing).
+
+    What these legs would CATCH: (a) any regression back to
+    ``CollectMode=inactive-or-failed`` (the flushing mode — the M1 defect
+    itself, at the collector, at the drain composition, or on the built
+    argv); (b) a broken version gate (below-252 emission / ≥252 omission /
+    unreadable-version emission — the degrade-safety contract)."""
+
+    def test_supported_host_emits_the_retaining_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(uj, "systemd_version_cached", lambda: 255)
+        assert uj.collect_mode_property_or_none() == "CollectMode=inactive"
+
+    def test_boundary_252_emits_251_omits(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(uj, "systemd_version_cached", lambda: 252)
+        assert uj.collect_mode_property_or_none() == "CollectMode=inactive"
+        monkeypatch.setattr(uj, "systemd_version_cached", lambda: 251)
+        assert uj.collect_mode_property_or_none() is None
+
+    def test_unreadable_version_omits_the_property(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(uj, "systemd_version_cached", lambda: None)
+        assert uj.collect_mode_property_or_none() is None
+
+    def test_the_property_lands_on_the_built_service_argv(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The retention value must survive to the EXECUTED argv — the
+        classifier's unit_terminal branch reads what systemd actually
+        got, not what the composition list claims."""
+        _clear_derivation_env(monkeypatch)
+        monkeypatch.setattr(uj, "systemd_version_cached", lambda: 255)
+        props: list[str] = [f"RuntimeMaxSec={uj.derived_runtime_max_sec()}"]
+        collect_mode = uj.collect_mode_property_or_none()
+        assert collect_mode is not None
+        props.append(collect_mode)
+        argv = uj.build_service_argv(
+            ["bash", "promote.sh", "demo"], "r-m1-argv-1", "user", {},
+            Path("/i/data/upgrade.log"), unit_properties=props,
+        )
+        assert "--property=CollectMode=inactive" in argv, argv
+        assert not any(
+            t.endswith("CollectMode=inactive-or-failed") for t in argv
+        ), argv
+
+
+# ── M2 (review-fix, 2026-11-20): reaper unit identity from the ACTUAL
+# spawn mode — the no-unit host class must reach a TERMINAL classification.
+
+
+class _RecordingSweep:
+    """Captures enqueue_reaper params at the drain seam (no real queue)."""
+
+    def __init__(self) -> None:
+        self.jobs: list[dict[str, Any]] = []
+
+    def enqueue_reaper(
+        self, pid, argv_summary, install_dir, run_id,
+        unit_name="", unit_bus="",
+    ) -> None:
+        self.jobs.append({
+            "pid": pid, "argv_summary": list(argv_summary),
+            "install_dir": Path(str(install_dir)), "run_id": run_id,
+            "unit_name": unit_name, "unit_bus": unit_bus,
+        })
+
+
+class TestM2ReaperUnitIdentityFromActualSpawnMode:
+    """Review-fix M2 (2026-11-20): pre-fix, the drain seam derived the
+    reaper's unit_name from ``kind`` — on a non-systemd/launchd host the
+    detector lands the LEGACY setsid branch (NO unit exists), yet the
+    reaper was handed ``ensemble-upgrade-<run_id>``: the classifier probed
+    a nonexistent unit until the poll cap and degraded to
+    ``executor_liveness_unverifiable`` — ``executor_exit`` never written,
+    the restart arm never closed (the 2026-10-31 livelock class, returned
+    on that host class).
+
+    What these legs would CATCH: (a) a regression to kind-derived unit
+    names on a legacy spawn (the first leg fails the moment unit_name is
+    non-empty); (b) the legacy job failing to reach a TERMINAL
+    executor_exit through the real worker (the second leg); (c) the unit
+    path degrading (stamper identity / prefix fallback / bus threading —
+    the remaining legs)."""
+
+    def test_legacy_spawn_enqueues_empty_unit_name(
+        self, drain: _DrainHarness
+    ) -> None:
+        from daemon.manager import InstanceManager
+
+        sweep = _RecordingSweep()
+        drain.mgr._upgrade_journal_sweep = sweep  # type: ignore[assignment]
+        drain.spawn_mode_note = "(daemonized, start_new_session)"
+        drain.fire_stamper = False  # the legacy branch never stamps a unit
+        assert drain.arm_and_drain("promote", "r-m2-legacy-1") is True
+        assert sweep.jobs, "the reaper was never enqueued"
+        job = sweep.jobs[-1]
+        assert job["unit_name"] == "", (
+            f"legacy spawn must enqueue unit_name='' — got {job['unit_name']!r}"
+        )
+        assert job["unit_bus"] == ""
+        # the kind-derived name is GONE on this host class (the M2 defect)
+        assert job["unit_name"] != "ensemble-upgrade-r-m2-legacy-1"
+
+    def test_legacy_job_reaches_terminal_executor_exit_through_the_worker(
+        self, drain: _DrainHarness, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The pin the M2 fix exists for: the no-unit host class reaches a
+        TERMINAL executor classification. Drives the REAL sweep worker with
+        the EXACT job the fixed seam enqueued (params recorded, not
+        hand-built) — pre-fix the same enqueue would have carried a unit
+        name and never emitted executor_exit."""
+        from daemon.services.upgrade_journal_sweep import (
+            ReaperJob, UpgradeJournalSweepService,
+        )
+
+        sweep = _RecordingSweep()
+        drain.mgr._upgrade_journal_sweep = sweep  # type: ignore[assignment]
+        drain.spawn_mode_note = "(daemonized, start_new_session)"
+        drain.fire_stamper = False
+        assert drain.arm_and_drain("restart", "r-m2-legacy-2") is True
+        rec = sweep.jobs[-1]
+        assert rec["unit_name"] == ""
+
+        monkeypatch.setenv("ENSEMBLE_EXECUTOR_UNIT_POLL_S", "1")
+        monkeypatch.setenv("ENSEMBLE_EXECUTOR_UNIT_REARM_MAX_POLLS", "0")
+        # a failing probe: if the job WRONGLY carried a unit name, the
+        # classifier would burn its re-arm budget and land on
+        # executor_liveness_unverifiable (halt-for-human) — no terminal row.
+        monkeypatch.setattr(
+            uj, "executor_unit_state_probe",
+            lambda unit, bus, **kw: (None, "probe must not be consulted "
+                                     "on the legacy path"),
+        )
+        worker = UpgradeJournalSweepService(
+            rec["install_dir"], reconcile_interval_seconds=86400,
+            reaper_timeout_seconds=60, manager=None,
+        )
+        job = ReaperJob(
+            pid=rec["pid"], argv_summary=tuple(rec["argv_summary"]),
+            install_dir=rec["install_dir"], run_id=rec["run_id"],
+            unit_name=rec["unit_name"], unit_bus=rec["unit_bus"],
+        )
+        asyncio.run(worker._classify_and_journal_exit(
+            job, client_exit_code=0, signal_name=None, signal_num=None,
+        ))
+        rows = [
+            e for e in (uj.journal_read(rec["install_dir"]).get("history")
+                        or [])
+            if e.get("event") == "executor_exit"
+        ]
+        assert rows, (
+            "the no-unit host class never reached a TERMINAL "
+            "executor_exit — the restart-arm livelock class (M2)"
+        )
+        assert "exit_code=0" in rows[-1]["detail"], rows[-1]["detail"]
+        assert uj.EXECUTOR_LIVENESS_UNVERIFIABLE_EVENT not in [
+            e.get("event")
+            for e in (uj.journal_read(rec["install_dir"]).get("history")
+                      or [])
+        ]
+
+    def test_service_spawn_keeps_the_stamped_unit_identity(
+        self, drain: _DrainHarness
+    ) -> None:
+        sweep = _RecordingSweep()
+        drain.mgr._upgrade_journal_sweep = sweep  # type: ignore[assignment]
+        drain.spawn_mode_note = (
+            "service=ensemble-upgrade-r-m2-svc-1 (bus=system) "
+            "(unit in flight; reaper observes unit exit via --wait client)"
+        )
+        drain.fire_stamper = True
+        assert drain.arm_and_drain("promote", "r-m2-svc-1") is True
+        job = sweep.jobs[-1]
+        assert job["unit_name"] == "ensemble-upgrade-r-m2-svc-1"
+        assert job["unit_bus"] == "system"
+
+    def test_service_spawn_with_failed_stamper_falls_back_to_prefix(
+        self, drain: _DrainHarness
+    ) -> None:
+        """The best-effort stamper raised: the sweep's run_id+prefix
+        derivation still applies (behavior preserved from pre-M2)."""
+        sweep = _RecordingSweep()
+        drain.mgr._upgrade_journal_sweep = sweep  # type: ignore[assignment]
+        drain.spawn_mode_note = (
+            "service=ensemble-restart-r-m2-svc-2 (bus=user) "
+            "(client exited rc=0 fast — outcome is journal-truth)"
+        )
+        drain.fire_stamper = False
+        assert drain.arm_and_drain("restart", "r-m2-svc-2") is True
+        job = sweep.jobs[-1]
+        assert job["unit_name"] == "ensemble-restart-r-m2-svc-2"
+
+
+# ── D3-E3 (self-service-promote Wave 5, §2.4 / AC-D3-5): the arm-lane
+# executor UNIT identity — persisted to pending_op by the identity stamper
+# BEFORE the spawn seam returns, and threaded into the reaper job so the
+# worker classifies via the UNIT (never the client pid alone).
+
+
+class TestExecutorUnitIdentity:
+    def test_promote_arm_stamps_unit_identity_before_return(
+        self, drain: _DrainHarness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clear_derivation_env(monkeypatch)
+        monkeypatch.setattr(uj, "collect_mode_property_or_none", lambda: None)
+        assert drain.arm_and_drain("promote", "r-d3e3-promote-1") is True
+        op = uj.read_pending_op(drain.install)
+        assert op is not None and op.run_id == "r-d3e3-promote-1"
+        assert op.executor_unit == "ensemble-upgrade-r-d3e3-promote-1", (
+            f"executor_unit not stamped: {op.executor_unit!r}"
+        )
+        assert op.executor_unit_bus == "system"
+        assert op.executor_started_at, "executor_started_at not stamped"
+        # owner_pid disambiguation: the watched pid is the CLIENT
+        assert op.owner_pid_kind == "client"
+        assert op.owner_pid == _DrainHarness.EXECUTOR_PID
+        assert op.owner_kind == "executor"  # unchanged (sweep reads it)
+
+    def test_restart_arm_stamps_kind_scoped_unit(
+        self, drain: _DrainHarness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _clear_derivation_env(monkeypatch)
+        assert drain.arm_and_drain("restart", "r-d3e3-restart-1") is True
+        op = uj.read_pending_op(drain.install)
+        assert op is not None
+        assert op.executor_unit == "ensemble-restart-r-d3e3-restart-1", (
+            f"kind-scoped prefix not applied: {op.executor_unit!r}"
+        )
+        assert op.owner_pid_kind == "client"
+
+    def test_reaper_job_carries_the_unit_name(
+        self, drain: _DrainHarness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC-D3-5, second half: ``ReaperJob.unit_name`` matches the op's
+        ``executor_unit`` — the in-memory observation and the durable
+        record name the SAME unit."""
+        _clear_derivation_env(monkeypatch)
+        monkeypatch.setattr(uj, "collect_mode_property_or_none", lambda: None)
+        jobs: list[dict] = []
+
+        class _StubSweep:
+            def enqueue_reaper(self, pid, argv_summary, install_dir, run_id,
+                               unit_name="", unit_bus="") -> None:
+                jobs.append({
+                    "pid": pid, "run_id": run_id,
+                    "unit_name": unit_name, "unit_bus": unit_bus,
+                })
+
+        drain.mgr._upgrade_journal_sweep = _StubSweep()
+        assert drain.arm_and_drain("promote", "r-d3e3-promote-2") is True
+        assert jobs, "enqueue_reaper was never called"
+        job = jobs[0]
+        op = uj.read_pending_op(drain.install)
+        assert job["unit_name"] == op.executor_unit
+        assert job["unit_name"] == "ensemble-upgrade-r-d3e3-promote-2"
+        assert job["unit_bus"] == op.executor_unit_bus == "system"
+
+    def test_legacy_branch_stamps_payload_kind_not_client(
+        self, drain: _DrainHarness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On the LEGACY branch (no transient unit) the stamper never fires;
+        owner_pid IS the payload shell — the post-spawn owner update must
+        stamp ``payload``, never leave the field empty."""
+        _clear_derivation_env(monkeypatch)
+
+        def _legacy_spawn(argv, install_dir, extra_env=None, *, run_id=None,
+                          unit_prefix="ensemble-upgrade-",
+                          unit_properties=None, identity_stamper=None):
+            # legacy branch contract: the stamper is NEVER invoked
+            assert identity_stamper is not None  # threaded, but unused here
+            return _DrainHarness.EXECUTOR_PID, "(daemonized, start_new_session)"
+
+        monkeypatch.setattr(uj, "spawn_executor", _legacy_spawn)
+        assert drain.arm_and_drain("promote", "r-d3e3-legacy-1") is True
+        op = uj.read_pending_op(drain.install)
+        assert op is not None
+        assert op.owner_pid_kind == "payload"
+        assert op.executor_unit == ""  # no unit identity on the legacy path
+
 
 # ── D3-12/D3-15: the per-run two-file sink ──────────────────────────────────
-
 
 class TestPerRunLogTargets:
     def test_payload_append_targets_the_per_run_payload_file(
