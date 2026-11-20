@@ -11011,16 +11011,23 @@ def build_instance_llms(
 
     # S2 (ROW2-DEEP-DIVE §3.3, fix 2): compute the OpenAI tool payloads ONCE
     # and hand the SAME dicts to every binding below.  Before this change the
-    # tool list was bound at THREE sites (the vision branch + the two standard
-    # binds), and each ``bind_tools`` call re-derived the payload per tool —
-    # langchain's ``BaseTool.tool_call_schema`` is a plain ``@property`` that
-    # rebuilds a pydantic subset model on EVERY access, and
-    # ``convert_to_openai_tool`` touches it four times.  With a vision model
-    # configured the multiplier was 3 x N_tools per graph assembly.
+    # tool list was bound at THREE SOURCE sites (the vision branch + the two
+    # standard binds), and each ``bind_tools`` call re-derived the payload per
+    # tool — langchain's ``BaseTool.tool_call_schema`` is a plain
+    # ``@property`` that rebuilds a pydantic subset model on EVERY access,
+    # and ``convert_to_openai_tool`` touches it four times.
+    #
+    # RUNTIME MULTIPLIER: at most TWO of the three source sites execute per
+    # assembly.  The vision bind and the "standard-with-tools" bind are
+    # MUTUALLY EXCLUSIVE — the latter sits inside ``if llm_with_tools is
+    # None``, which the vision branch has already satisfied — so the pre-fix
+    # derivation count was 2 x N_tools per assembly (NOT 3 x N_tools),
+    # whether or not a vision model is configured.
     #
     # ``openai_tool_payloads`` memoises the payload per tool identity, so the
-    # SECOND assembly of the same surface derives NOTHING.  The payload the
-    # provider receives is byte-identical: the same
+    # payload is derived ONCE per tool and the SAME dicts are handed to every
+    # binding that runs, and the SECOND assembly of the same surface derives
+    # NOTHING.  The payload the provider receives is byte-identical: the same
     # ``convert_to_openai_tool`` output, in the same key order, for the same
     # name / description / parameters.
     #
