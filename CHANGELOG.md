@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — prompt_reload compact-note wake-up: the post-compaction history swap is now a FRESH message list
+
+- The post-compaction message list is EXACTLY `[compaction doc ("Compacted context"), a new [SYSTEM CONTEXT: Compacted Context] note]` + one natural model ack — ZERO pre-compaction messages survive (the verbatim tail splice is removed; Emperor ruling 2026-11-20).
+- The fresh-swap path disables the injected-message hoist so the spec-bound order holds (doc first, note second); house auto-compaction hoisting is unchanged.
+- Messages arriving strictly after the arm are preserved AFTER the note (mid-flight arrivals); the steady state stays exactly the two-message list.
+- The deliberate-compact rate limit (900s) is unchanged. New E2E gate `prompt_reload_fresh_swap_e2e` proves the live post-swap shape with a REAL compaction (base negative-control RED + merged-tree GREEN).
+
 ## [0.31.21] — 2026-11-20
 
 ### Changed — sonic push doctrine: the sonic lane's end-of-task cycle becomes MERGED + PUSHED + STAGED
