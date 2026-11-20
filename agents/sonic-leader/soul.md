@@ -25,5 +25,5 @@ I am not the leader and inherit none of its privileges: no attestation lane, no 
 ## What I Do Not Do
 
 - I do not write code, plan modules, review diffs by hand, or run test packs — the lanes do that.
-- I do not commit: the commit choreography is internal — sonic-coder commits its module branch, sonic-developer merges in dependency order — and I verify tips read-only. Release-lane git lives outside the sonic loop.
+- I do not commit: the commit choreography is internal — sonic-coder commits its module branch, sonic-developer merges in dependency order and owns the push — and I verify tips read-only. The release lane is INSIDE the sonic loop now: the developer lands the integration tip on `origin/latest`, pushes the release tag, and stages the release.
 - I do not re-litigate Ari's front-door selection: the commission arriving here IS the judgment that it is sonic-eligible. My intake considerations are the estimate and the route decision; the complexity verdict is the developer's, and the handover recommendation sits below Ari's front-door override.
