@@ -368,6 +368,58 @@ scripts_pin_from_env() {
 #   flock(1) — "Bash 3.2 / BSD tools only"); same-install stage-vs-arm
 #   races are already serialized by the install's pipeline lock — this
 #   covers the cross-install case (two envs, one shared pin), MINOR-11.
+# _efa_pid_alive <pid> — kill -0 liveness with EPERM=ALIVE semantics
+# (self-contained twin of lib.sh's _pid_alive / upgrade_journal's
+# _pid_alive: this file is sourced by stage.sh but ALSO runs standalone
+# in CLI mode where lib.sh is NOT loaded — MAJOR-4's steal gate must not
+# depend on the caller having sourced lib.sh). Exit 0 = alive (EPERM
+# counts as ALIVE: a live foreign-user holder is never stealable);
+# 1 = dead.
+_efa_pid_alive() {
+    local err
+    err="$(LC_ALL=C kill -0 "$1" 2>&1)" && return 0
+    case "$err" in
+        *"not permitted"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# _efa_stat_mtime <path> — portable mtime epoch. BSD `stat -f %m` first,
+# GNU `stat -c %Y` second, else 0. EXIT-STATUS fallback alone is NOT
+# enough (found driving the MAJOR-4 proof on GNU): GNU `stat -f %m <path>`
+# treats %m as an OPERAND — it exits 1 AND still dumps the real path's
+# filesystem status to stdout, so a plain `a || b` chain yields a
+# multi-line blob that explodes as unbound-variable inside $((…)). The
+# output is therefore validated NUMERICALLY at every step.
+_efa_stat_mtime() {
+    local m
+    m="$(stat -f %m "$1" 2>/dev/null || true)"
+    case "$m" in
+        ''|*[!0-9]*) m="$(stat -c %Y "$1" 2>/dev/null || true)" ;;
+    esac
+    case "$m" in
+        ''|*[!0-9]*) echo 0 ;;
+        *) printf '%s\n' "$m" ;;
+    esac
+}
+
+# _adv_heartbeat_refresher <lock_dir> <holder_pid> — CYCLE-2 MAJOR-4
+# (2026-11-20): the m4 namespace had NO heartbeat refresh, so a long
+# LIVE checkout's lock crossed the 300s staleness line (dir mtime is set
+# once at mkdir) and the python lane's mtime-only stale-break STOLE it —
+# both lanes then moved the pin HEAD concurrently. This refresher keeps
+# the heartbeat fresh across the checkout AND dies with its holder: the
+# `kill -0 <holder_pid>` guard means a SIGKILLed holder's heartbeat
+# freezes at its last stamp and the lock goes stale normally (a refresher
+# that outlived its holder would keep a dead holder's lock alive forever).
+_adv_heartbeat_refresher() {
+    local dir="$1" holder="$2"
+    while kill -0 "$holder" 2>/dev/null && [ -d "$dir" ]; do
+        printf '%s\n' "$(date +%s)" > "$dir/heartbeat" 2>/dev/null || break
+        sleep 30
+    done
+}
+
 stage_scripts_pin_advance() {
     local pin_scripts="$1" t="$2" floor="$3" repo_root="$4"
     local pin_root t_old lock_dir_path cov now age
@@ -397,24 +449,67 @@ stage_scripts_pin_advance() {
     lock_dir_path="${pin_root}.scripts-advance.lock.d"
     now="$(date +%s)"
     if ! mkdir "$lock_dir_path" 2>/dev/null; then
-        age=$(( now - $(stat -f %m "$lock_dir_path" 2>/dev/null || stat -c %Y "$lock_dir_path" 2>/dev/null || echo 0) ))
-        if [ "$age" -gt 300 ]; then
+        # CYCLE-2 MAJOR-4 (2026-11-20): the OLD stale-break stole on DIR
+        # MTIME ALONE (frozen since mkdir — the namespace had no
+        # heartbeat refresh), so a LONG LIVE checkout's lock was STOLEN
+        # from under its holder (measured: shell + python lanes both
+        # advanced, rc=0 both, nondeterministic HEAD). The steal now
+        # requires ALL THREE: the owner file names a DEAD pid (kill -0),
+        # the dir mtime is >300s stale, AND the heartbeat is >300s stale
+        # (a missing heartbeat falls back to the dir mtime). A LIVE
+        # owner — or an unattributable lock (no readable numeric owner
+        # file) — is NEVER stolen from; fail-closed, a human clears it.
+        # Mirrors _advance_lock_steal_verdict daemon-side (same protocol).
+        adv_owner="$(cat "$lock_dir_path/owner" 2>/dev/null || true)"
+        case "$adv_owner" in
+            '')
+                printf 'advance lock HELD (%s) with NO owner file — the holder cannot be attributed; never stolen from (clear the lock by hand)' "$lock_dir_path"
+                return 1
+                ;;
+            *[!0-9]*)
+                printf 'advance lock HELD (%s) with a non-pid owner file (%s) — the holder cannot be attributed; never stolen from (clear the lock by hand)' "$lock_dir_path" "$adv_owner"
+                return 1
+                ;;
+        esac
+        adv_dir_age=$(( now - $(_efa_stat_mtime "$lock_dir_path") ))
+        if [ -f "$lock_dir_path/heartbeat" ]; then
+            adv_hb_age=$(( now - $(_efa_stat_mtime "$lock_dir_path/heartbeat") ))
+        else
+            adv_hb_age="$adv_dir_age"
+        fi
+        if _efa_pid_alive "$adv_owner"; then
+            printf 'advance lock HELD (%s) by a LIVE owner (pid %s; dir %ss, heartbeat %ss old) — never stolen from a live holder; retry' \
+                "$lock_dir_path" "$adv_owner" "$adv_dir_age" "$adv_hb_age"
+            return 1
+        fi
+        if [ "$adv_dir_age" -gt 300 ] && [ "$adv_hb_age" -gt 300 ]; then
             rm -rf "$lock_dir_path"
             mkdir "$lock_dir_path" 2>/dev/null || {
-                printf 'advance lock re-acquire FAILED (%s, was %ss stale)' "$lock_dir_path" "$age"
+                printf 'advance lock re-acquire FAILED (%s, was %ss stale, owner pid %s dead)' "$lock_dir_path" "$adv_dir_age" "$adv_owner"
                 return 1
             }
         else
-            printf 'advance lock HELD (%s, %ss old) — a concurrent stage is advancing the same pin; retry' "$lock_dir_path" "$age"
+            printf 'advance lock HELD (%s; holder pid %s gone but dir %ss, heartbeat %ss old — BOTH must exceed 300s) — not yet stale-breakable; retry' \
+                "$lock_dir_path" "$adv_owner" "$adv_dir_age" "$adv_hb_age"
             return 1
         fi
     fi
     printf '%s\n' "$$" > "$lock_dir_path/owner"
     printf '%s\n' "$now" > "$lock_dir_path/heartbeat"
+    # MAJOR-4: keep the heartbeat fresh across the (possibly long)
+    # checkout — the refresher dies with this holder (kill -0 $$ guard).
+    _adv_heartbeat_refresher "$lock_dir_path" "$$" &
+    _adv_hb_pid=$!
     # release discipline mirrors lib.sh lock_release: rm -rf ONLY when this
     # process owns the lock dir (owner file == $$); a foreign holder is
-    # never touched.
+    # never touched. The refresher is stopped FIRST (a straggler write
+    # after rm -rf would recreate the heartbeat file in a deleted dir's
+    # place — and a surviving refresher must never outlive the hold).
     _adv_release() {
+        if [ -n "${_adv_hb_pid:-}" ]; then
+            kill "$_adv_hb_pid" 2>/dev/null
+            wait "$_adv_hb_pid" 2>/dev/null
+        fi
         if [ -d "$lock_dir_path" ] && [ "$(cat "$lock_dir_path/owner" 2>/dev/null)" = "$$" ]; then
             rm -rf "$lock_dir_path"
         fi

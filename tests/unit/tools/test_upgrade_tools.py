@@ -5064,6 +5064,107 @@ class TestScriptsPinSelfAdvance:
         assert not (pin_root.parent / f"{pin_root.name}.scripts-advance.lock"
                     ).exists(), "the old fcntl file namespace must be gone"
 
+    def test_major4_stale_break_refuses_on_a_live_owner(
+        self, tmp_path
+    ):
+        """Cycle-2 MAJOR-4 (2026-11-20): the m4 stale-break gated on the
+        DIR MTIME ALONE (frozen since mkdir — no heartbeat refresh
+        existed), so a long LIVE checkout's lock crossed 300s and was
+        rmtree'd from under its holder (two lanes moved HEAD
+        concurrently). The steal is now LIVENESS-GATED: a lock whose
+        owner file names a LIVE pid is NEVER stolen — even with BOTH
+        clocks (dir mtime + heartbeat) forced >300s stale."""
+        import time as _time
+
+        fx = _build_pin_fixture(tmp_path)
+        pin_root = fx["pin"].parents[1]
+        lock_dir = pin_root.parent / f"{pin_root.name}.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text(f"{os.getpid()}\n", encoding="utf-8")
+        stale = _time.time() - 400
+        os.utime(lock_dir, (stale, stale))          # dir mtime >300s stale
+        (lock_dir / "heartbeat").write_text("0\n", encoding="utf-8")
+        os.utime(lock_dir / "heartbeat", (stale, stale))  # heartbeat stale
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "unavailable", (status, detail)
+        assert "advance lock HELD" in detail, detail
+        assert "LIVE owner" in detail, detail
+        assert lock_dir.exists(), "a LIVE owner's lock dir must survive"
+        assert (lock_dir / "owner").read_text(
+            encoding="utf-8").strip() == str(os.getpid()), (
+            "the live owner's lock dir must be UNTOUCHED"
+        )
+        assert _git("rev-parse", "HEAD", cwd=fx["pin"]) != fx["target"], (
+            "the pin must not move under a live owner's lock"
+        )
+
+    def test_major4_stale_break_steals_from_a_dead_owner(
+        self, tmp_path
+    ):
+        """MAJOR-4 direction 2: a DEAD owner with BOTH clocks >300s stale
+        IS still stale-breakable — the fix tightens the steal, it does
+        not disable it (a crashed holder's lock must not wedge the
+        advance forever)."""
+        import subprocess
+        import time as _time
+
+        dead = subprocess.Popen(["true"])   # exits immediately
+        dead.wait()
+        fx = _build_pin_fixture(tmp_path)
+        pin_root = fx["pin"].parents[1]
+        lock_dir = pin_root.parent / f"{pin_root.name}.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text(f"{dead.pid}\n", encoding="utf-8")
+        (lock_dir / "heartbeat").write_text("0\n", encoding="utf-8")
+        stale = _time.time() - 400
+        # stamp BOTH clocks stale — dir mtime LAST: creating a file inside
+        # the dir bumps the dir mtime, so the utime order matters
+        os.utime(lock_dir / "heartbeat", (stale, stale))
+        os.utime(lock_dir, (stale, stale))
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "advanced", (status, detail)
+        assert not lock_dir.exists(), "the stolen lock must be released"
+        assert _git("rev-parse", "HEAD", cwd=fx["pin"]) == fx["target"]
+
+    def test_major4_dead_owner_but_fresh_clock_refuses(
+        self, tmp_path
+    ):
+        """MAJOR-4 discrimination: a DEAD owner alone is NOT enough —
+        a fresh heartbeat (or fresh dir mtime) means the holder died a
+        moment ago and the lock is not yet stale-breakable; both clocks
+        must exceed 300s."""
+        import subprocess
+        import time as _time
+
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        fx = _build_pin_fixture(tmp_path)
+        pin_root = fx["pin"].parents[1]
+        lock_dir = pin_root.parent / f"{pin_root.name}.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text(f"{dead.pid}\n", encoding="utf-8")
+        (lock_dir / "heartbeat").write_text("0\n", encoding="utf-8")
+        stale = _time.time() - 400
+        # the heartbeat stays FRESH (a holder that was refreshing and just
+        # died — the refresher's last stamp); the dir mtime is stale —
+        # utime the dir LAST (heartbeat creation bumps the dir mtime)
+        os.utime(lock_dir / "heartbeat", (_time.time(), _time.time()))
+        os.utime(lock_dir, (stale, stale))
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "unavailable", (status, detail)
+        assert "advance lock HELD" in detail, detail
+        assert "not yet stale-breakable" in detail, detail
+        assert lock_dir.exists(), "a not-yet-stale lock must survive"
+
     def test_d11_dirty_pin_tree_is_refused_never_moved(
         self, tmp_path
     ):

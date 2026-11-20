@@ -4793,6 +4793,66 @@ def _advance_remedy(pin_root: Path, target: str, why: str) -> str:
     )
 
 
+def _advance_lock_steal_verdict(lock_dir: Path) -> tuple[bool, str]:
+    """Cycle-2 MAJOR-4 (2026-11-20): may the stale-break STEAL this lock?
+
+    The m4 stale-break gated on the DIR MTIME alone — but the namespace
+    had no heartbeat refresh, so a long LIVE checkout's lock crossed the
+    300s line and was rmtree'd from under its live holder. The steal now
+    requires ALL of:
+
+    * the ``owner`` file names a DEAD pid (``uj._pid_alive`` — EPERM
+      counts as ALIVE, fail-closed; a missing/unreadable/non-numeric
+      owner file is UNATTRIBUTABLE and is never stolen — a human clears
+      it), and
+    * the dir mtime is >300s stale, and
+    * the ``heartbeat`` file is >300s stale (a missing heartbeat falls
+      back to the dir mtime — the holder never refreshed).
+
+    A LIVE owner is never stolen from regardless of clock age. Returns
+    ``(may_steal, refusal_reason)`` — ``refusal_reason`` is ``""`` when
+    the steal is sanctioned. The shell lane's steal gate
+    (executor_family.sh) implements the identical protocol.
+    """
+    now = time.time()
+    try:
+        dir_age = now - lock_dir.stat().st_mtime
+    except OSError:
+        dir_age = float("inf")
+    try:
+        owner_raw = (lock_dir / "owner").read_text(encoding="utf-8").strip()
+    except OSError:
+        return False, (
+            "the owner file is missing/unreadable — the holder cannot be "
+            "attributed; a live holder is never stolen from (clear the "
+            f"lock by hand: {lock_dir})"
+        )
+    if not owner_raw.isdigit():
+        return False, (
+            f"the owner file does not name a pid ({owner_raw!r}) — the "
+            "holder cannot be attributed; a live holder is never stolen "
+            f"from (clear the lock by hand: {lock_dir})"
+        )
+    owner_pid = int(owner_raw)
+    try:
+        hb_age = now - (lock_dir / "heartbeat").stat().st_mtime
+    except OSError:
+        hb_age = dir_age  # no heartbeat was ever written — the dir clock is it
+    if uj._pid_alive(owner_pid):
+        return False, (
+            f"a LIVE owner (pid {owner_pid}) holds the lock — never stolen "
+            f"from a live holder (dir {dir_age:.0f}s, heartbeat "
+            f"{hb_age:.0f}s old); retry"
+        )
+    if not (dir_age > 300.0 and hb_age > 300.0):
+        return False, (
+            f"the holder (pid {owner_pid}) is gone but the lock is not yet "
+            f"stale-breakable (dir {dir_age:.0f}s, heartbeat {hb_age:.0f}s "
+            "old; BOTH must exceed 300s); retry"
+        )
+    return True, ""
+
+
 def scripts_pin_self_advance(
     scripts_dir: Path,
     floor_commit: str | None,
@@ -4927,40 +4987,49 @@ def scripts_pin_self_advance(
     # — a DIFFERENT namespace: the two lanes did NOT exclude each other
     # and could interleave HEAD moves. The python side now acquires the
     # SAME dir lock with the SAME protocol the shell lane uses (mkdir ⇒
-    # holder; on EEXIST, an mtime age > 300s ⇒ stale-break steal; owner/
-    # heartbeat files; release = rm -rf ONLY when the owner file carries
-    # OUR pid — a foreign holder is never touched).
+    # holder; owner/heartbeat files; release = rm -rf ONLY when the owner
+    # file carries OUR pid — a foreign holder is never touched).
+    #
+    # CYCLE-2 MAJOR-4 (2026-11-20): the m4 stale-break gated on the DIR
+    # MTIME ALONE — but the namespace had NO heartbeat refresh at all,
+    # so a LONG LIVE checkout's lock crossed the 300s line and was
+    # rmtree'd from under its live holder (measured: the shell and python
+    # lanes both advanced concurrently, rc=0 both, nondeterministic pin
+    # HEAD). The steal is now LIVENESS-GATED (both lanes, same protocol):
+    # it fires ONLY when the owner file names a DEAD pid AND the dir
+    # mtime AND the heartbeat are BOTH >300s stale — see
+    # _advance_lock_steal_verdict; the shell holder refreshes its
+    # heartbeat across the checkout (executor_family.sh
+    # _adv_heartbeat_refresher), and this side re-stamps before its own
+    # checkout. With that gate, "a foreign holder is never touched" is
+    # true on EVERY path — release AND steal.
     lock_dir = Path(f"{pin_root}.scripts-advance.lock.d")
     lock_taken = False
     try:
         os.mkdir(lock_dir)
         lock_taken = True
     except FileExistsError:
-        try:
-            age = time.time() - lock_dir.stat().st_mtime
-        except OSError:
-            age = float("inf")
-        if age > 300.0:
-            # stale-break (mirrors the shell's >300s steal)
-            try:
-                shutil.rmtree(lock_dir)
-            except OSError:
-                pass
-            try:
-                os.mkdir(lock_dir)
-                lock_taken = True
-            except OSError as exc:
-                return "unavailable", (
-                    f"advance lock re-acquire FAILED ({lock_dir}, was "
-                    f"{age:.0f}s stale; {type(exc).__name__}: {exc}) — "
-                    "concurrent arms could interleave HEAD moves; "
-                    + _advance_remedy(pin_root, t, "lock")
-                )
-        else:
+        may_steal, why_not = _advance_lock_steal_verdict(lock_dir)
+        if not may_steal:
             return "unavailable", (
-                f"advance lock HELD ({lock_dir}, {age:.0f}s old) — a "
-                "concurrent stage or arm is advancing the same pin; "
-                "retry; " + _advance_remedy(pin_root, t, "lock")
+                f"advance lock HELD ({lock_dir}) — {why_not}; "
+                + _advance_remedy(pin_root, t, "lock")
+            )
+        # stale-break (mirrors the shell's liveness-gated steal): the
+        # owner is DEAD and both clocks are >300s stale
+        try:
+            shutil.rmtree(lock_dir)
+        except OSError:
+            pass
+        try:
+            os.mkdir(lock_dir)
+            lock_taken = True
+        except OSError as exc:
+            return "unavailable", (
+                f"advance lock re-acquire FAILED ({lock_dir}; dead-owner "
+                f"stale-break; {type(exc).__name__}: {exc}) — "
+                "concurrent arms could interleave HEAD moves; "
+                + _advance_remedy(pin_root, t, "lock")
             )
     except OSError as exc:
         return "unavailable", (
@@ -5013,6 +5082,15 @@ def scripts_pin_self_advance(
                 "commit the tree by hand, then re-arm); "
                 + _advance_remedy(pin_root, t, "dirty tree")
             )
+        # MAJOR-4: re-stamp the heartbeat immediately before this lane's
+        # own (possibly long) checkout — the shell steal gate reads
+        # heartbeat freshness; a freshly-dead holder's frozen stamp is
+        # what lets BOTH lanes distinguish stale-dead from live-slow.
+        try:
+            (lock_dir / "heartbeat").write_text(
+                f"{int(time.time())}\n", encoding="utf-8")
+        except OSError:
+            pass  # advisory: the dir itself is the lock; pid liveness gates
         ok, note = uj.bounded_git_checkout_detach(scripts_dir, t)
         if not ok:
             return "unavailable", (
