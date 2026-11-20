@@ -538,7 +538,27 @@ class DeadLetterService:
             DeadLetterItem if found, None otherwise.
         """
         return self._dlq_repo.get_by_job_id(job_id)
-    
+
+    def get_dlq_by_job_ids(self, job_ids: list[str]) -> dict[str, DeadLetterItem]:
+        """Batch fetch DLQ items for multiple job IDs (single IN SELECT).
+
+        Returns a dict keyed by original job_id. Missing jobs are
+        simply absent from the dict (mirrors ``get_dlq_by_job_id``
+        returning None).
+        """
+        result: dict[str, DeadLetterItem] = {}
+        if not job_ids:
+            return result
+        from sqlmodel import Session as SQLModelSession, select
+        with SQLModelSession(self._dlq_repo.engine) as session:
+            stmt = select(DeadLetterItem).where(
+                DeadLetterItem.job_id.in_(job_ids)
+            )
+            for item in session.exec(stmt).all():
+                if item.job_id not in result:
+                    result[item.job_id] = item
+        return result
+
     def delete_dlq(self, dlq_id: str) -> bool:
         """Delete a dead letter item by DLQ ID.
         
