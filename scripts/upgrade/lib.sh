@@ -2098,12 +2098,39 @@ journal_mark_captured_previous() {
         # real (present) capture. Reject — non-string never written; the
         # CALLER halts (checked write — the capture is the hard
         # precondition, no stop, no flip).
+        #
+        # CYCLE-2 MAJOR-2 (2026-11-20) — the accept arm is VERSION-SHAPED
+        # ONLY: the old `*[!0-9.-]*` accept arm took ANY token containing
+        # a character outside [0-9.-], which LAUNDERED the exponent forms
+        # (1e5 / 1.5e-3 / 2E+10 — JSON NUMBER fragments) into JSON
+        # STRINGS (measured rc=0, "captured_previous":"1e5"). The only
+        # accept class is now a v-prefixed digits-and-dots token with at
+        # least one dot (the shape promote.sh's own capture produces:
+        # readlink current → releases/vX.Y.Z → vX.Y.Z) — no exponent
+        # markers, no bare numbers (those keep the number-shaped
+        # rejection), no v-less words. Refusals are ADDITIVE: every token
+        # the old arm rejected is still rejected; previously-accepted
+        # non-version tokens now refuse loudly (journal untouched).
         true|false|*'{'*|*'['*|*'"'*)
             _warn "journal_mark_captured_previous: non-string captured_previous value rejected (writer-side type guard — leader ruling 2026-11-20 option (b)): '$ver' — refusing to stamp (journal untouched)"
             return 1
             ;;
+        v[0-9]*.[0-9]*)
+            if printf '%s' "$ver" | grep -Eq '^v[0-9]+([.][0-9]+)+$'; then
+                raw="\"$(_json_escape "$ver")\""
+            else
+                _warn "journal_mark_captured_previous: captured_previous value is NOT version-shaped (v + digits.dots, at least one dot, no exponent markers — cycle-2 MAJOR-2): '$ver' — refusing to stamp (journal untouched)"
+                return 1
+            fi
+            ;;
         *[!0-9.-]*)
-            raw="\"$(_json_escape "$ver")\"" ;;
+            # has characters outside the numeric charset but is NOT
+            # version-shaped — the exponent forms (1e5 / 1.5e-3 / 2E+10),
+            # bare words, anything v-less: MAJOR-2 refuses what the old
+            # arm silently accepted-and-quoted.
+            _warn "journal_mark_captured_previous: captured_previous value is NOT version-shaped (v + digits.dots, at least one dot, no exponent markers — cycle-2 MAJOR-2): '$ver' — refusing to stamp (journal untouched)"
+            return 1
+            ;;
         *)
             # only digits/dots/dash — a JSON NUMBER fragment
             _warn "journal_mark_captured_previous: number-shaped captured_previous value rejected (writer-side type guard — leader ruling 2026-11-20 option (b)): '$ver' — refusing to stamp (journal untouched)"
