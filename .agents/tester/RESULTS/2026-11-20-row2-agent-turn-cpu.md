@@ -217,7 +217,7 @@ The pre-fix measurement (41 failed / 6 passed on BOTH sides, empty sorted FAILED
 | `manifest.version` / `binary_version` / `rollback_safe` | `v0.31.16` / `0.31.16` / `true` | ✅ |
 | tag `v0.31.16` | annotated object `c7ef4d1f771ebaef11b669a0f32d8cd5e9987f4c` → `95dfe51a5da6948d092c376796391583e0b62ba4` | ✅ |
 | tag pushed? | **NO** — `git ls-remote --tags origin 'v0.31.*'` contains **no** `v0.31.16`; **0** remote refs carry either sha | ✅ LOCAL ONLY |
-| `origin/latest` | `026833336f7e0625d0b743656ae1ac5464ef4af2` — **unmoved** | ✅ |
+| `origin/latest` | `026833336f7e0625d0b743656ae1ac5464ef4af2` — **unmoved at the time of this check (06:44Z)**. **A FOREIGN lane fast-forwarded it to `6b4614daa` at 06:57:33Z, AFTER this check** (`reflog: update by push`; `026833336` is an ancestor of `6b4614daa` → fast-forward, the "cleanup optional" wave). **This lane pushed NOTHING**: `refs/heads/feature/agent-turn-cpu-row2` → 0 remote refs; `refs/tags/v0.31.16*` → 0 remote refs; no remote v0.31.16 tag collision. | ✅ at check time — ⚠️ **see §8.9 (material for the ceremony)** |
 | LIVE `current` | `releases/v0.31.10` | ✅ untouched |
 | LIVE `/livez` · `/readyz` | **200** · **200** | ✅ |
 | LIVE binary sha256 | `9f068a36adaaf8ae6c256708513f156447f10a94c580b22cb76c93a24934bb3d` | ✅ unchanged |
@@ -235,6 +235,7 @@ The pre-fix measurement (41 failed / 6 passed on BOTH sides, empty sorted FAILED
 5. **The pre-fix binary's boot smoke** was run by the earlier tester wave (`/tmp/sonic-row2-bootsmoke.log`, 05:58Z); this gate ran the **NEW** binary twice, green.
 6. Lane-declared untested items **2–12** of the handoff remain as declared (live LLM bind, boot-warm load test, 2A delta-maintained pre-call estimate, 2B residual 50 classes, the mirrored F3 staleness residual, the 41 quarantined reds).
 7. **PG usage:** real PostgreSQL was used — `ensemble_dev_scratch` (shared scratch, house-sanctioned) for the boot smoke, `ensemble_dev` via the worktree `.env` for the unit/pack legs. **No production database and no live install were contacted.**
+8. **`origin/latest` ADVANCED DURING THE GATE WINDOW (ceremony-relevant).** At the GATE-7 check (06:44Z) `origin/latest` was `026833336` — unmoved, as the dispatch expected. At **06:57:33Z** a **foreign lane** ("cleanup optional") fast-forwarded it to **`6b4614daa`** (`026833336` is an ancestor → fast-forward; 9 commits: cleanup C1/C2/C3/C4/C5). **This lane pushed nothing** — the branch and the `v0.31.16` tag both have **0** remote refs, and there is no remote `v0.31.16` tag collision. Consequences for the ceremony: (a) the L1 freshness baseline the payload was staged against (`origin/latest` = `026833336`) has moved further away, so a **re-stage** would still need the sanctioned `reason=non-tip-tree` override; (b) the **tag → branch-tip offset has grown** (tag `95dfe51a5` → tip `0845a1f14`, now 4 commits: the two doc-only corrections + the tester's results commit + the HANDOFF commit), all documentation-only, so the payload's `git_head` still matches the **tag** exactly; (c) the ceremony must still publish the lineage (`git push origin feature/agent-turn-cpu-row2:latest` + `git push origin v0.31.16`) — **that publish was deliberately NOT performed by this gate.**
 
 ---
 
