@@ -625,20 +625,26 @@ def _start_schema_registry_warm() -> None:
 
     WHY: the daemon's tool factories rebuild a pydantic schema per tool per
     graph assembly (ROW2-DEEP-DIVE §3).  ``daemon.tools._schema_registry``
-    memoises those schemas process-wide, so the ONLY cold cost is the first
-    assembly — and the first assembly happens on the event loop (the flagship
-    23.16 s stall).  Warming here moves that one-and-only cold cost off the
-    request path.
+    memoises those schemas process-wide, so the cold cost is paid once — and
+    the first assembly happens on the event loop (the flagship 23.16 s
+    stall).  Warming here moves that cold cost off the request path.
 
     SHAPE:
 
     * a BACKGROUND DAEMON thread, started BEFORE the listener is bound, so
-      the warm overlaps the boot sequence instead of delaying it;
+      the warm is off the event loop and off the request path (the first
+      user-visible restore pays ~0 schema-build cost).  It ADDS to boot
+      wall-clock rather than overlapping it: pydantic's core holds the GIL
+      while it generates a schema, so the warm competes with the boot
+      sequence for CPU;
     * an INERT manager (no live manager, no database, no instance state) —
       at this point in the boot the daemon does not even own a manager yet
       (it is created inside the uvicorn lifespan), so the warm provably
       cannot touch live manager or DB state;
     * BEST EFFORT — a warm failure is logged and the daemon boots anyway.
+      The warm is a FLOOR, not a guarantee: a factory that refuses to build
+      against the inert manager aborts it, and the schemas after that point
+      warm lazily, on their first real use.
 
     KNOB: ``ENSEMBLE_SCHEMA_REGISTRY_WARM=0`` (or ``false``/``no``/``off``)
     disables the warm for operators who want the CPU back; the registry
@@ -923,19 +929,31 @@ def main(run_preflight: bool = True):
     # graph assembly; that work is pure waste after the FIRST assembly, and
     # the FIRST assembly happens on the event loop (the flagship 23.16 s
     # stall).  The registry memoises the schemas process-wide, so the warm
-    # below moves the one-and-only cold cost OFF the request path.
+    # below moves the cold cost OFF the request path (best-effort — the
+    # FLOOR note below says what that means).
     #
     # Placement: a BACKGROUND THREAD started here — before the pre-bind and
-    # therefore before the listener can serve traffic — so the warm overlaps
-    # the (already long) boot sequence instead of adding to it.  The warm
-    # builds the tool surface against an INERT manager: no live manager, no
-    # database, no instance state (the daemon does not even own a manager
-    # yet at this point — it is created in the uvicorn lifespan).
+    # therefore before the listener can serve traffic — so the warm is off the
+    # event loop and off the request path: the first user-visible restore
+    # pays ~0 schema-build cost.  The warm builds the tool surface against an
+    # INERT manager: no live manager, no database, no instance state (the
+    # daemon does not even own a manager yet at this point — it is created in
+    # the uvicorn lifespan).
+    #
+    # It ADDS to boot wall-clock rather than overlapping it: under the
+    # deep-dive's own GIL premise (pydantic's core holds the GIL while it
+    # generates a schema) the background thread COMPETES with the boot
+    # sequence for CPU instead of running beside it for free.
     #
     # Cost disclosure: the warm burns the same CPU the first graph assembly
-    # used to burn (measured ~1.8 s on the dev box, ~16 s on the production
-    # box per the deep-dive's derivation), but it is spent on a background
+    # used to burn — measured ~2.3 s on the dev box (this tree: 255 registry
+    # entries memoised), and ~16 s on the production box by the deep-dive's
+    # derivation (NOT re-measured here) — but it is spent on a background
     # thread DURING boot, not on the event loop while serving traffic.
+    #
+    # BEST EFFORT — the warm is a FLOOR, not a guarantee: a factory that
+    # refuses to build against the inert manager aborts the warm (logged),
+    # and the schemas after that point warm lazily, on their first real use.
     _start_schema_registry_warm()
     uvicorn_config = uvicorn.Config(
         "daemon.api:app",

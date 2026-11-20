@@ -18,8 +18,10 @@ EVERY graph assembly.  Measured on this tree: ~640 model classes per
 There is a SECOND, larger cost the first fix must also cover: langchain's
 ``BaseTool.tool_call_schema`` is a plain ``@property`` (NOT a
 ``cached_property``) that rebuilds a subset model on EVERY access, and
-``convert_to_openai_tool`` touches it FOUR times per tool.  With three
-``bind_tools`` sites that is another ~12 model classes per tool per assembly.
+``convert_to_openai_tool`` touches it FOUR times per tool.  With the two
+``bind_tools`` calls that RUN per assembly — of the three source sites, the
+vision bind and the "standard-with-tools" bind are mutually exclusive — that
+is another ~8 model classes per tool per assembly.
 
 The schema is a PURE function of the function's signature and docstring — it
 does NOT depend on the closure (the ``manager`` / ``instance_id`` a tool
@@ -42,10 +44,15 @@ INVARIANTS (ROW2-DEEP-DIVE §3.4 — all six are load-bearing)
    per-instance; nothing mutates ``args_schema`` after construction, so the
    shared class cannot leak state across instances.
 4. **MCP tools stay dynamic.**  MCP tools are not decorated through this
-   module, and the OpenAI payload cache is keyed on the ``args_schema`` CLASS
-   OBJECT: a re-discovered MCP schema is a new class, hence a new cache key,
-   hence a freshly computed payload.  ``daemon/tools/infra.py``'
-   ``_invalidate_mcp_schema_cache`` semantics are untouched.
+   module, and they carry a DICT schema
+   (``daemon/mcp/tool_adapter.py:526`` —
+   ``args_schema=schema.get("input_schema", {})``).  ``_payload_key`` returns
+   ``None`` for a dict schema, so MCP payloads are NEVER memoised AT ALL:
+   every MCP payload is re-derived from the live schema on every assembly.
+   An MCP re-discovery therefore cannot serve a stale payload — the
+   guarantee is STRONGER than a cache-key argument would be.
+   ``daemon/tools/infra.py``'s ``_invalidate_mcp_schema_cache`` semantics are
+   untouched.
 5. **Tool-filter semantics are unchanged** — ``resolve_tool_filter`` still
    decides exposure; the registry only memoises schemas.
 6. **Factory side effects are NOT skipped.**  The factories still run on every
@@ -347,16 +354,21 @@ def _payload_key(tool_obj: Any) -> tuple | None:
     ``tool.tool_call_schema`` (a subset model of ``args_schema`` named after
     the tool and documented with the tool's description).
 
-    Keying on the ``args_schema`` CLASS OBJECT keeps the MCP lane dynamic: a
-    re-discovered MCP schema is a NEW class, hence a NEW key, hence a freshly
-    computed payload — no stale schema can survive an MCP invalidation.
+    A DICT schema yields NO key, hence NO memoisation: MCP tools (whose
+    ``args_schema`` is always a dict — ``daemon/mcp/tool_adapter.py:526``)
+    have their payload re-derived from the live schema on every assembly, so
+    an MCP re-discovery can never serve a stale payload.  For the daemon's
+    own tools the key is the ``args_schema`` CLASS OBJECT, so a schema
+    swapped for a different class is a different key, hence a freshly
+    computed payload.
     """
     name = getattr(tool_obj, "name", None)
     description = getattr(tool_obj, "description", None)
     schema = getattr(tool_obj, "args_schema", None)
     if schema is None or isinstance(schema, dict):
-        # A dict schema is unhashable and (in practice) MCP-provided; do not
-        # memoise it.
+        # A dict schema has no stable identity — and MCP tools ALWAYS carry
+        # one (``daemon/mcp/tool_adapter.py:526``) — so it yields no cache
+        # key and the payload is re-derived on every assembly.
         return None
     try:
         hash(schema)
@@ -515,7 +527,10 @@ class _InertManager:
     The boot warm runs BEFORE the daemon owns a manager (it starts in
     ``daemon/__main__.py``, ahead of the uvicorn lifespan), so the warm can
     never touch live manager or DB state: it gets this inert stand-in, builds
-    the tool surface once to memoise every schema, and throws the tools away.
+    the tool surface once to memoise the schemas it CAN, and throws the tools
+    away.  BEST EFFORT — a factory that refuses to build against the inert
+    manager aborts the warm; the schemas after that point then warm lazily,
+    on their first real use.
     """
 
     def __init__(self) -> None:
@@ -538,6 +553,11 @@ def warm_schema_registry() -> int:
     Returns the number of registry entries added by this call.  The call is
     BEST EFFORT: a factory that refuses to build against the inert manager
     aborts the warm, and whatever was memoised before that point is kept.
+
+    The returned count is therefore a FLOOR, NOT a guarantee: the warm
+    memoises as many schemas as the factories that tolerate the inert manager
+    produce, and the rest warm lazily, on their first real use.  A caller
+    must not read the number as "the surface is fully warm".
     """
     # Local import: ``daemon.tools.instance`` imports this module.
     from .instance import create_instance_tools
