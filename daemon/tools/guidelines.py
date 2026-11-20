@@ -306,6 +306,21 @@ def _list_guideline_files(directory: Path) -> list[Path]:
         return []
 
 
+class GuidelinesReadInput(BaseModel):
+    """Input schema for guideline_read."""
+
+    slug: Annotated[
+        str,
+        Field(
+            description=(
+                "The guideline slug (the filename stem, e.g. "
+                "'guideline-notify-user-bounds'). Use "
+                "guidelines_list first to see every valid slug."
+            )
+        ),
+    ]
+
+
 def create_guidelines_tools(
     manager,
     *,
@@ -334,20 +349,6 @@ def create_guidelines_tools(
     caller_agent_id = agent_id or ""
     caller_instance_id = current_instance_id or ""
     resolved_dir = _resolve_guidelines_dir(base_dir)
-
-    class GuidelinesReadInput(BaseModel):
-        """Input schema for guideline_read."""
-
-        slug: Annotated[
-            str,
-            Field(
-                description=(
-                    "The guideline slug (the filename stem, e.g. "
-                    "'guideline-notify-user-bounds'). Use "
-                    "guidelines_list first to see every valid slug."
-                )
-            ),
-        ]
 
     @register_tool_category(GUIDELINES_CATEGORY_KEY)
     @tool
