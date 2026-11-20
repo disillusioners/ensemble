@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.18] — 2026-11-20
+
+### Changed — self-service promote choreography (wi-aa89581b family): zero-operator ceremony seam fixes D1-D6
+
+D6 hand-back verdict machine (PENDING → ACTIVE → SUCCESS; FAILED only on affirmative evidence; BUDGET-EXHAUSTED a distinct verdict; rc=3 never labeled a timeout); D1 attribution fixes — the O_CLOEXEC LISTEN fd leak closed at `bind_retry.py` and the DUAL_FIGHT census-scope defect fixed to `-sTCP:LISTEN` (both refusal paths byte-preserved); D2 watchdog hold/restore failsafe (stop-never-disable + restore transient + version fast-fail on all three paths); D3 executor liveness classified via the transient unit + journal heartbeat (no more false `executor_exit` for a live ceremony); D5 rollback-target filesystem capture (`in_flight.captured_previous`, R0-first resolution chain, three-way parity resolver); D4 scripts-pin advance leg + single-writer floor/REV bumper (`scripts/bump-pipeline-floor.sh`). Code + tests + docs only, ZERO migrations; the promote ceremony itself is unchanged (the Emperor's ceremony owns the flip).
+
 ## [0.31.17] — 2026-11-20
 
 ### Changed — culprit-2 RESIDUAL pass: the 50 factory-local tool input models hoisted to module scope (warm-assembly pydantic rebuild 50 -> 0)
