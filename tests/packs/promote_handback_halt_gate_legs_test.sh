@@ -816,6 +816,55 @@ PY
     exit $?
     fi
 
+    if [ "$LEG" = "d7" ]; then
+    # ===========================================================================
+    # LEG D7 — AC-D2-5 (self-service-promote Wave 4): the version FAST-FAIL
+    # is ARMED on the rollback/restart paths. The blind pin (design §2.3
+    # "Blind pins found (D2)"): rollback.sh / restart.sh never set
+    # PROMOTE_EXPECTED_VERSION ⇒ the serving conjunct degraded to "2xx, no
+    # version comparison" ⇒ a WRONG-VERSION daemon was accepted as
+    # SUCCESS on both recovery paths.
+    #   D7-A (source):    both scripts set the expected version;
+    #   D7-B (behaviour): with the expected version KNOWN, a wrong-version
+    #                     answer is NOT success — the fast-fail fires.
+    # ===========================================================================
+    leg_sandbox d7
+    ROLLBACK_SRC="$(cat "$REPO_ROOT/scripts/upgrade/rollback.sh")"
+    RESTART_SRC="$(cat "$REPO_ROOT/scripts/upgrade/restart.sh")"
+    assert_re "D7-A rollback.sh sets PROMOTE_EXPECTED_VERSION" 'PROMOTE_EXPECTED_VERSION=' "$ROLLBACK_SRC"
+    assert_re "D7-A restart.sh sets PROMOTE_EXPECTED_VERSION" 'PROMOTE_EXPECTED_VERSION=' "$RESTART_SRC"
+    # D7-B — drive the REAL serving conjunct: a green answer carrying the
+    # wrong version must NOT be a success once the expected version is known.
+    D7_OUT="$(INSTALL_DIR="$INSTALL_DIR" bash -c '
+        . "'"$LIBSH"'" >/dev/null 2>&1
+        export PROMOTE_EXPECTED_VERSION=0.28.5
+        export PORT=19997
+        # the green answer with the WRONG version (the ATTRIBUTION conjunct
+        # is stubbed — it is a DIFFERENT gate, pinned by its own legs; this
+        # leg is about the VERSION conjunct)
+        _gate_serving_attribution() { return 0; }
+        _probe_once_classified() { _PROBE_BODY="{\"status\":\"alive\",\"version\":\"0.0.0\"}"; return 0; }
+        _handback_serving_probe
+        echo "probe-rc=$?"
+    ' 2>&1)"
+    assert_re "D7-B a wrong-version answer is NOT success (the fast-fail fires)" 'probe-rc=1' "$D7_OUT"
+    assert_re "D7-B the observed wrong version is named" 'version=0.0.0' "$D7_OUT"
+    # and the degraded posture is unchanged: with NO expected version the
+    # 2xx alone confirms serving (the documented pre-existing contract).
+    D7B_OUT="$(INSTALL_DIR="$INSTALL_DIR" bash -c '
+        . "'"$LIBSH"'" >/dev/null 2>&1
+        export PORT=19997
+        _gate_serving_attribution() { return 0; }
+        _probe_once_classified() { _PROBE_BODY="{\"status\":\"alive\",\"version\":\"0.0.0\"}"; return 0; }
+        _handback_serving_probe
+        echo "probe-rc=$?"
+    ' 2>&1)"
+    assert_re "D7-B with NO expected version the check degrades to 2xx (documented posture)" 'probe-rc=0' "$D7B_OUT"
+
+    leg_summary
+    exit $?
+    fi
+
     printf 'unknown leg: %s\n' "$LEG" >&2
     exit 64
 fi
@@ -842,6 +891,7 @@ EXPECTED_ASSERTS_D5=16
 # carries the verifier-path reason and never reads "none captured"), D6-C
 # (4: the verify-phase narrative reaches the payload log).
 EXPECTED_ASSERTS_D6=15
+EXPECTED_ASSERTS_D7=5
 
 FENCE=(env -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_USER -u POSTGRES_PASSWORD
        -u DATABASE_URL -u PGHOST -u PGPORT -u PGDATABASE -u PGUSER -u PGPASSWORD)
@@ -886,6 +936,7 @@ run_one_leg g4 "$EXPECTED_ASSERTS_G4" || true
 run_one_leg g5 "$EXPECTED_ASSERTS_G5" || true
 run_one_leg d5 "$EXPECTED_ASSERTS_D5" || true
 run_one_leg d6 "$EXPECTED_ASSERTS_D6" || true
+run_one_leg d7 "$EXPECTED_ASSERTS_D7" || true
 
 RESULT_RC=0
 if [ "$TIMED_OUT" -gt 0 ]; then
@@ -895,8 +946,8 @@ elif [ "$LEGS_FAILED" -gt 0 ]; then
 fi
 
 printf '\n'
-printf 'RESULT pack=promote_handback_halt_gate_legs_test legs=5 legs_failed=%s timed_out=%s asserts=%s asserts_failed=%s expected_asserts=%s rc=%s\n' \
+printf 'RESULT pack=promote_handback_halt_gate_legs_test legs=6 legs_failed=%s timed_out=%s asserts=%s asserts_failed=%s expected_asserts=%s rc=%s\n' \
     "$LEGS_FAILED" "$TIMED_OUT" "$TOTAL_ASSERTS" "$TOTAL_FAILED_ASSERTS" \
-    "$((EXPECTED_ASSERTS_G2 + EXPECTED_ASSERTS_G4 + EXPECTED_ASSERTS_G5 + EXPECTED_ASSERTS_D5 + EXPECTED_ASSERTS_D6))" "$RESULT_RC"
+    "$((EXPECTED_ASSERTS_G2 + EXPECTED_ASSERTS_G4 + EXPECTED_ASSERTS_G5 + EXPECTED_ASSERTS_D5 + EXPECTED_ASSERTS_D6 + EXPECTED_ASSERTS_D7))" "$RESULT_RC"
 printf 'logs: %s\n' "$LEG_LOGDIR"
 exit "$RESULT_RC"

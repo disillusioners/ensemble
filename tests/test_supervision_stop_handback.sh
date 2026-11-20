@@ -1404,6 +1404,71 @@ STUB
     rm -rf "$C12B_STOP_STUB_BIN"
     rm -rf "$C12B_UNITS"
 
+    # ── P5 (self-service-promote Wave 4 — AC-D2-5): the version fast-fail
+    # is ARMED on the rollback/restart paths ───────────────────────────────
+    # The blind pin (design §2.3 "Blind pins found (D2)"): rollback.sh and
+    # restart.sh never set PROMOTE_EXPECTED_VERSION ⇒ the hand-back's
+    # version fast-fail was INACTIVE there — a WRONG-VERSION daemon was
+    # accepted as SUCCESS (the P-5 pin at the old :730 read "PROMOTE_
+    # EXPECTED_VERSION is unset in these contexts ... exactly the
+    # restart.sh/rollback.sh degraded contract" — that degraded contract is
+    # GONE as of this wave). The leg pins BOTH halves:
+    #   (a) the SOURCE half — both scripts set the expected version;
+    #   (b) the BEHAVIOUR half — with the expected version known, a
+    #       wrong-version answer is NOT a success.
+    P5_ROLLBACK_SRC="$(cat "$UPGRADE_DIR/rollback.sh")"
+    P5_RESTART_SRC="$(cat "$UPGRADE_DIR/restart.sh")"
+    case "$P5_ROLLBACK_SRC" in
+        *'PROMOTE_EXPECTED_VERSION='*) _pass "P5 rollback.sh sets PROMOTE_EXPECTED_VERSION (AC-D2-5)" ;;
+        *) _fail "P5 rollback.sh sets PROMOTE_EXPECTED_VERSION (AC-D2-5)" "an assignment" "none found" ;;
+    esac
+    case "$P5_RESTART_SRC" in
+        *'PROMOTE_EXPECTED_VERSION='*) _pass "P5 restart.sh sets PROMOTE_EXPECTED_VERSION (AC-D2-5)" ;;
+        *) _fail "P5 restart.sh sets PROMOTE_EXPECTED_VERSION (AC-D2-5)" "an assignment" "none found" ;;
+    esac
+    # (b) the behavioural half — the fast-fail fires when the expected
+    # version is known (the wrong version is NOT a success).
+    # The lsof stub MUST report a listener pid AND the owned-pid set must
+    # contain it: the attribution conjunct (Fix #2) refuses an
+    # unattributable answer BEFORE the version conjunct is reached (the
+    # pack's C-section lsof stub prints no pid — that is the known C-section
+    # debt, not this leg's subject).
+    P5_LSOF="$(mktemp -d -t suphb-lsofp.XXXXXX)"
+    cat > "$P5_LSOF/lsof" <<'STUB'
+#!/bin/bash
+echo "lsof $*" >> "${LSOF_LOG:-/dev/null}"
+printf '%s\n' 424242
+exit 0
+STUB
+    chmod +x "$P5_LSOF/lsof"
+    reset_stub_state "$CFIX/sc4.log"
+    SC_IS_ACTIVE=inactive SC_MAINPID=9999 SC_START_RC=0
+    export SC_IS_ACTIVE SC_MAINPID SC_START_RC
+    CURL_MODE=wrongver; export CURL_MODE
+    P5_OUT="$(run_rvl "$P5_LSOF" '
+        SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+        SUPERVISION_UNIT=ensemble-p5.service; SUPERVISION_PRESTOP_MAINPID=777
+        _supervision_owned_pids() { printf "%s\n" 424242; }
+        export SC_CONTROLGROUP=""
+        export PROMOTE_EXPECTED_VERSION=0.28.5
+    ')"
+    unset CURL_MODE
+    assert_eq "P5 with the expected version set, a wrong-version daemon is NOT a success" "rvl-rc=1" "$(rvl_rc "$P5_OUT")"
+    assert_contains "P5 the observed wrong version is named on the wire" "version=0.0.0" "$P5_OUT"
+    # and the degraded (unset) contract still degrades: with NO expected
+    # version the 2xx alone confirms serving (the documented posture).
+    reset_stub_state "$CFIX/sc4.log"
+    CURL_MODE=wrongver; export CURL_MODE
+    P5B_OUT="$(run_rvl "$P5_LSOF" '
+        SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
+        SUPERVISION_UNIT=ensemble-p5b.service; SUPERVISION_PRESTOP_MAINPID=777
+        _supervision_owned_pids() { printf "%s\n" 424242; }
+        export SC_CONTROLGROUP=""
+    ')"
+    unset CURL_MODE
+    assert_eq "P5 with NO expected version the serving check degrades to 2xx (the documented posture)" "rvl-rc=0" "$(rvl_rc "$P5B_OUT")"
+    rm -rf "$P5_LSOF"
+
     rm -rf "$CFIX" "$STUBBIN4" "$LSOF_OK" "$LSOF_NO"
 else
     _skip "C hand-back matrix — FENCE: no /run/systemd/system on this host"
