@@ -3218,7 +3218,11 @@ INSTALL_DIR="$D5RJ_FIX" bash -c '
     journal_open_txn "promote" "v9.9.9-rj-target"
     journal_mark_captured_previous "v9.9.9-rj-fsY" || { echo "STAMP-RC=$?"; exit 1; }
     j="$(journal_read)"
-    case "$j" in *""captured_previous":"v9.9.9-rj-fsY""*) echo "FIELD-OK" ;; *) echo "FIELD-MISSING: $j" ;; esac
+    # cycle-3 D5-1: the old `case "$j" in *""captured_previous":"vY""*)`
+    # pattern collapsed under bash QUOTE REMOVAL (the `"` marks around
+    # the colon vanished) to `captured_previous:vY` — a shape no valid
+    # JSON can match. grep -q carries the literal quotes.
+    if printf '%s' "$j" | grep -q '"captured_previous":"v9.9.9-rj-fsY"'; then echo "FIELD-OK"; else echo "FIELD-MISSING: $j"; fi
     out="$(_rollback_target_resolve "'"$D5RJ_FIX"'/releases" "v9.9.9-rj-target" "v9.9.9-rj-target" "v9.9.9-rj-fsY" "" "v9.9.9-rj-staleX" "v9.9.9-rj-staleX" "v9.9.9-rj-staleX")"
     rc=$?
     echo "RESOLVE-RC=$rc RESOLVE-OUT=$out"
@@ -3250,7 +3254,12 @@ assert_eq "D5-2a the checked stamp REFUSES on an unwritable journal (rc≠0)" "1
 # the F6 re-read is present; the persist is the checked journal_mark call.
 D5RJ_OPEN_LN="$(printf '%s' "$PROMOTE_SH_TXT" | grep -n 'journal_open_txn "promote"' | head -1 | cut -d: -f1)"
 D5RJ_CAP_LN="$(printf '%s' "$PROMOTE_SH_TXT" | grep -n 'FILESYSTEM CAPTURE (D5' | head -1 | cut -d: -f1)"
-D5RJ_STOP_LN="$(printf '%s' "$PROMOTE_SH_TXT" | grep -n 'stop_via_stop_script$' | head -1 | cut -d: -f1)"
+# cycle-3 D5-2c: the anchor greps the REAL call shape — promote.sh has NO
+# end-of-line `stop_via_stop_script$` occurrence (the call sites read
+# `if ! stop_via_stop_script; then`, :828 and :1390); the old $-anchored
+# grep matched NOTHING ⇒ the ordering assert reddened on an empty stop
+# line number.
+D5RJ_STOP_LN="$(printf '%s' "$PROMOTE_SH_TXT" | grep -n 'if ! stop_via_stop_script; then' | head -1 | cut -d: -f1)"
 [ -n "$D5RJ_OPEN_LN" ] && [ -n "$D5RJ_CAP_LN" ] && [ "$D5RJ_OPEN_LN" -lt "$D5RJ_CAP_LN" ] && _pass || _fail "D5-2b the capture block is AFTER journal_open_txn (open@$D5RJ_OPEN_LN capture@$D5RJ_CAP_LN)"
 [ -n "$D5RJ_CAP_LN" ] && [ -n "$D5RJ_STOP_LN" ] && [ "$D5RJ_CAP_LN" -lt "$D5RJ_STOP_LN" ] && _pass || _fail "D5-2c the capture block is BEFORE the stop (capture@$D5RJ_CAP_LN stop@$D5RJ_STOP_LN) — no flip on capture failure"
 D5RJ_CAP_BLOCK="$(printf '%s' "$PROMOTE_SH_TXT" | sed -n "${D5RJ_CAP_LN},$((D5RJ_CAP_LN + 95))p")"
@@ -3312,12 +3321,22 @@ section "LD-1 — the pending-verdict envelope (AC-LD1-1, BINDING §7.1)"
 # first gate, promote.sh performs NO 8a bookkeeping (no set_current /
 # set_previous / close_txn) and appends the pending-verdict row reading
 # "flipped — disposition pending" (never "committed" — §7.1(f)).
-D5RJ_FLIP_LN="$(printf '%s' "$PROMOTE_SH_TXT" | grep -n '^journal_mark_flipped' | head -1 | cut -d: -f1)"
+# cycle-3 LD-1d/-1e: the anchor greps the flip call WITHOUT the column-0
+# `^` — the lane nested it inside `if _promote_resume_mutation_ok; then`
+# (indented at :908), so `^journal_mark_flipped` matched NOTHING ⇒ the
+# 40-line block was empty ⇒ LD-1d/-1e reddened on the empty block (and
+# LD-1a/-1b/-1c passed VACUOUSLY). Window widened to +45 so the
+# pending-verdict append (+15) always sits inside.
+D5RJ_FLIP_LN="$(printf '%s' "$PROMOTE_SH_TXT" | grep -n 'journal_mark_flipped' | head -1 | cut -d: -f1)"
 D5RJ_GATES_LN="$(printf '%s' "$PROMOTE_SH_TXT" | grep -n 'gate_livez\|GATE' | awk -F: -v f="$D5RJ_FLIP_LN" '$1 > f {print $1; exit}')"
-D5RJ_FLIP_BLOCK="$(printf '%s' "$PROMOTE_SH_TXT" | sed -n "${D5RJ_FLIP_LN},$((D5RJ_FLIP_LN + 40))p")"
-assert_not_re_d5 "LD-1a no journal_set_current between the flip and the gates" 'journal_set_current' "$D5RJ_FLIP_BLOCK"
-assert_not_re_d5 "LD-1b no journal_set_previous between the flip and the gates" 'journal_set_previous' "$D5RJ_FLIP_BLOCK"
-assert_not_re_d5 "LD-1c no journal_close_txn between the flip and the gates" 'journal_close_txn' "$D5RJ_FLIP_BLOCK"
+D5RJ_FLIP_BLOCK="$(printf '%s' "$PROMOTE_SH_TXT" | sed -n "${D5RJ_FLIP_LN},$((D5RJ_FLIP_LN + 45))p")"
+# cycle-3 LD-1a/-1b/-1c: CALL-shaped patterns — the block's own comment
+# ("no journal_set_current / set_previous / close_txn before a…")
+# legitimately NAMES the forbidden calls while banning them; a bare-token
+# regex would false-red on the documentation mention.
+assert_not_re_d5 "LD-1a no journal_set_current between the flip and the gates" '^[[:space:]]*journal_set_current' "$D5RJ_FLIP_BLOCK"
+assert_not_re_d5 "LD-1b no journal_set_previous between the flip and the gates" '^[[:space:]]*journal_set_previous' "$D5RJ_FLIP_BLOCK"
+assert_not_re_d5 "LD-1c no journal_close_txn between the flip and the gates" '^[[:space:]]*journal_close_txn' "$D5RJ_FLIP_BLOCK"
 assert_contains "LD-1d the flip appends the pending-verdict row" "flip_pending_verdict" "$D5RJ_FLIP_BLOCK"
 assert_contains "LD-1e the row reads 'flipped — disposition pending'" "flipped — disposition pending" "$D5RJ_FLIP_BLOCK"
 D5RJ_PV_ROW="$(printf '%s' "$PROMOTE_SH_TXT" | grep -A2 'flip_pending_verdict \\' | head -3)"

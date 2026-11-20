@@ -450,7 +450,13 @@ esac
 # (_rollback_target_resolve: R0 capture > R1 to= > R2 current > R3
 # displaced > R4 previous) — the bare PREV="$OLD_CUR" selector (and the
 # journal.previous read it replaced) are BOTH superseded.
-C7_PROMOTE_ROLLBACK="$(sed -n '555,680p' "$UPGRADE_DIR/promote.sh")"
+# CYCLE-3 C7: the old hard line-range window (555-680) went STALE when
+# the lane grew promote.sh (+426 lines — the resolver call moved to
+# :1266); anchored on the SYMBOL now (the resolver call site ±30), not
+# a line range.
+C7_RTR_LN="$(grep -n '_rollback_target_resolve "\$REL"' "$UPGRADE_DIR/promote.sh" | head -1 | cut -d: -f1)"
+if [ -n "$C7_RTR_LN" ]; then _pass "C7 the resolver call site is present in promote.sh"; else _fail "C7 the resolver call site is present in promote.sh" "line" "absent"; fi
+C7_PROMOTE_ROLLBACK="$(sed -n "$((C7_RTR_LN - 30)),$((C7_RTR_LN + 30))p" "$UPGRADE_DIR/promote.sh")"
 assert_contains "C7 promote.sh 8b resolves via the chain (D5 — _rollback_target_resolve)" '_rollback_target_resolve' "$C7_PROMOTE_ROLLBACK"
 assert_not_contains "C7 promote.sh 8b no longer selects PREV="\$OLD_CUR" (superseded by the chain)" 'PREV="$OLD_CUR"' "$C7_PROMOTE_ROLLBACK"
 assert_not_contains "C7 promote.sh auto-rollback no longer reads _json_field on previous" '_json_field "$PREV_JSON" previous' "$C7_PROMOTE_ROLLBACK"
