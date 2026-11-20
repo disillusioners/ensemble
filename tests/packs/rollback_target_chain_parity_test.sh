@@ -51,15 +51,38 @@ FIX="$(mktemp -d -t d5parity.XXXXXX.$$)"
 # preflight_mutation_matrix_test.sh's restore_inflight: an EXIT/INT/TERM
 # trap with a PLANTED_LIST-scoped reclaim — nothing planted ⇒ nothing
 # touched (a refusing pre-run check fires the trap harmlessly).
-PLANTED_LIST="$FIX/planted.list"
+#
+# CYCLE-2 MAJOR-3 (2026-11-20): the T9 fold was still WRONG in two ways
+# (delta review, proven in a /tmp SIGTERM replica): (1) PLANTED_LIST and
+# the backups lived INSIDE $FIX — the very tree pack_cleanup deletes, so
+# after cleanup there was NOTHING to restore from; (2) a trapped INT/TERM
+# handler that merely RETURNS does not stop the script — bash continues
+# after the handler, the next mutation leg planted into the deleted-$FIX
+# world, and the mutation landed in TRACKED source with the backup (and
+# the list) already gone — unrecoverable. Packs run under `timeout`
+# (SIGTERM), so TERM was the reachable case. FIX: state (PLANTED_LIST +
+# backups) lives in SB — a SEPARATE scratch tree the reclaim reads AFTER
+# $FIX is gone — and the terminal-signal handlers RESTORE-then-EXIT
+# (143 = 128+SIGTERM, 130 = 128+SIGINT), so no leg ever runs post-trap.
+SB="$(mktemp -d -t d5parity-state.XXXXXX.$$)"
+PLANTED_LIST="$SB/planted.list"
 : > "$PLANTED_LIST"
 restore_plants() {
+    # backup-first reclaim, git-based fallback — mirrors
+    # preflight_mutation_matrix_test.sh:129-138's PLANTED_THIS_RUN
+    # scoping: ONLY files this run planted are ever touched (the cp
+    # restores the byte-exact pre-plant state, preserving any unrelated
+    # uncommitted edits; the git checkout -- fallback fires only when
+    # the backup is gone AND the file differs from HEAD).
     [ -s "$PLANTED_LIST" ] || return 0
     local f bak
     while IFS="$(printf "\t")" read -r f bak; do
         [ -n "$f" ] || continue
         if [ -f "$bak" ]; then
             cp "$bak" "$f" && printf 'trap: restored plant %s\n' "$f" >&2
+        elif ! git -C "$REPO_ROOT" diff --quiet -- "$f" 2>/dev/null; then
+            printf 'PLANT-LEFTOVER: %s differed from HEAD — restoring the plant from git\n' "$f" >&2
+            git -C "$REPO_ROOT" checkout -- "$f"
         fi
     done < "$PLANTED_LIST"
     : > "$PLANTED_LIST"
@@ -67,8 +90,15 @@ restore_plants() {
 pack_cleanup() {
     restore_plants
     rm -rf "$FIX"
+    rm -rf "$SB"
 }
-trap pack_cleanup EXIT INT TERM
+# MAJOR-3: terminal signals restore-then-EXIT — the handler itself must
+# be terminal or bash resumes the script after it.
+on_term() { pack_cleanup; exit 143; }
+on_int()  { pack_cleanup; exit 130; }
+trap pack_cleanup EXIT
+trap on_term TERM
+trap on_int INT
 for v in vA vB vC vD vE vT; do
     mkdir -p "$FIX/releases/$v"
     printf '{"manifest_version":"1.0.0","binary_version":"%s","rollback_safe":true}\n' "$v" \
@@ -192,8 +222,8 @@ restore_file() {
 }
 
 mut_lib_sha="$(sha256sum "$LIBSH" | cut -d' ' -f1)"
-cp "$LIBSH" "$FIX/lib.sh.mutation-backup"
-printf '%s\t%s\n' "$LIBSH" "$FIX/lib.sh.mutation-backup" >> "$PLANTED_LIST"
+cp "$LIBSH" "$SB/lib.sh.mutation-backup"
+printf '%s\t%s\n' "$LIBSH" "$SB/lib.sh.mutation-backup" >> "$PLANTED_LIST"
 # M-LIB (F3): the invalid-R0 halt collapses to a fall-through
 sed -i "s|printf 'halt capture_invalid'|: # MUTATION|" "$LIBSH"
 if grep -q "MUTATION" "$LIBSH"; then
@@ -210,11 +240,11 @@ if grep -q "MUTATION" "$LIBSH"; then
 else
     _fail "M-LIB: the mutation did not plant"
 fi
-restore_file "$LIBSH" "$mut_lib_sha" "$FIX/lib.sh.mutation-backup"
+restore_file "$LIBSH" "$mut_lib_sha" "$SB/lib.sh.mutation-backup"
 
 mut_lau_sha="$(sha256sum "$LAUNCHER" | cut -d' ' -f1)"
-cp "$LAUNCHER" "$FIX/launcher.sh.mutation-backup"
-printf '%s\t%s\n' "$LAUNCHER" "$FIX/launcher.sh.mutation-backup" >> "$PLANTED_LIST"
+cp "$LAUNCHER" "$SB/launcher.sh.mutation-backup"
+printf '%s\t%s\n' "$LAUNCHER" "$SB/launcher.sh.mutation-backup" >> "$PLANTED_LIST"
 # M-LAU (rung order): R0 wins → demoted to "current wins" (drop the
 # short-circuit by making R0 never set the candidate)
 sed -i "s|cand=\"\$cap\"; src=\"captured\"|: # MUTATION|" "$LAUNCHER"
@@ -225,11 +255,11 @@ if grep -q "MUTATION" "$LAUNCHER"; then
 else
     _fail "M-LAU: the mutation did not plant"
 fi
-restore_file "$LAUNCHER" "$mut_lau_sha" "$FIX/launcher.sh.mutation-backup"
+restore_file "$LAUNCHER" "$mut_lau_sha" "$SB/launcher.sh.mutation-backup"
 
 mut_py_sha="$(sha256sum "$REPO_ROOT/daemon/services/rollback_target_chain.py" | cut -d' ' -f1)"
-cp "$REPO_ROOT/daemon/services/rollback_target_chain.py" "$FIX/rollback_target_chain.py.mutation-backup"
-printf '%s\t%s\n' "$REPO_ROOT/daemon/services/rollback_target_chain.py" "$FIX/rollback_target_chain.py.mutation-backup" >> "$PLANTED_LIST"
+cp "$REPO_ROOT/daemon/services/rollback_target_chain.py" "$SB/rollback_target_chain.py.mutation-backup"
+printf '%s\t%s\n' "$REPO_ROOT/daemon/services/rollback_target_chain.py" "$SB/rollback_target_chain.py.mutation-backup" >> "$PLANTED_LIST"
 # M-PY (AC-D5-7): the R1-vs-R0 halt is removed
 sed -i "s|if cand and r1to != cand:|if False and cand and r1to != cand:|" "$REPO_ROOT/daemon/services/rollback_target_chain.py"
 if grep -q "if False and cand" "$REPO_ROOT/daemon/services/rollback_target_chain.py"; then
@@ -251,7 +281,7 @@ if grep -q "if False and cand" "$REPO_ROOT/daemon/services/rollback_target_chain
 else
     _fail "M-PY: the mutation did not plant"
 fi
-restore_file "$REPO_ROOT/daemon/services/rollback_target_chain.py" "$mut_py_sha" "$FIX/rollback_target_chain.py.mutation-backup"
+restore_file "$REPO_ROOT/daemon/services/rollback_target_chain.py" "$mut_py_sha" "$SB/rollback_target_chain.py.mutation-backup"
 
 # ── summary ────────────────────────────────────────────────────────────────
 printf '\n== summary ==\n'
