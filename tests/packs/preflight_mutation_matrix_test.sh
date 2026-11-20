@@ -84,7 +84,17 @@ restore_inflight() {
     reclaim_leftover_plants
     case "$SB" in "${TMPDIR:-/tmp}"/pf-mutmatrix.*) rm -rf "$SB" ;; esac
 }
-trap restore_inflight EXIT INT TERM
+# CYCLE-3 SET F (gate VIII.2 — the timeout-defeat defect): the OLD trap was
+# `trap restore_inflight EXIT INT TERM` — a TERM from an outer `timeout`
+# ran the restore (including `rm -rf "$SB"`) but DID NOT EXIT, so the leg
+# loop CONTINUED over a deleted scratch dir and manufactured a false
+# 41-leg ERROR-plant cascade while the matrix bash stayed alive past the
+# cap (the deferred exit waits on the foreground child). The signal traps
+# now EXIT IMMEDIATELY after restoring: at most the in-flight leg's own
+# inner bound (`timeout -k 5 400`) can outlive the outer cap, the loop
+# never continues after a signal, and no cascade is possible.
+trap restore_inflight EXIT
+trap 'restore_inflight; exit 143' INT TERM
 
 PLANT_TARGETS="scripts/upgrade/lib.sh scripts/upgrade/journal_read.py scripts/upgrade/stage.sh scripts/upgrade/promote.sh launcher.sh daemon/tools/upgrade_journal.py daemon/tools/upgrade_tools.py daemon/manager.py daemon/config.py"
 
