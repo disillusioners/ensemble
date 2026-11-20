@@ -42,7 +42,13 @@ Union of every module's file list (per-module grouping preserved) + integration 
 - **Integration (sonic-developer)**: 4 × `merge --no-ff` commits (283b9ba73, 25cf7e52e, 26d5a0628,
   a44a3505c), the AFTER raw artifact commit (056bda4ad), planning copies (38410b7e0), PLAN.md
   (eb65b3049), and this HANDOFF.md.
-- Merged range (code only): **32 files, +5004 / −28**. `frontend/dist` is gitignored — the FE is
+- Range accounting (re-derived from git objects, cleanup wave): FULL range `213ea6c1e..026833336`
+  (== tag v0.31.15) = **39 files, +5528 / −32**; of that, code+tests (`-- daemon/ frontend/src
+  tests/`) = **22 files, +2137 / −30**, planning+harness (`.agents/`) = **14 files, +3376 / −0**,
+  release-cut remainder (CHANGELOG.md, pyproject.toml, uv.lock) = 3 files. (The prior line here
+  said "32 files, +5004 / −28, code only" — that stat reproduces only as the PRE-release-cut tip
+  `213ea6c1e..9204c8083` and was mislabeled "code only" because it includes the harness/planning
+  files; corrected per review. `frontend/dist` is gitignored — the FE is
   built by the stage pipeline (`scripts/upgrade/_build_frontend.sh`), never by a bare `npm run build`.
 
 ## What changed
@@ -135,6 +141,11 @@ page-completeness recovery re-query (see Known risks).
   `jobs_crud.py`, `job_queue_service.py`, `dead_letter_service.py` appear in no failed set).
   Reproduction: `pytest $(cat /tmp/jbh-failed-ids.txt | tr '\n' ' ') -p no:randomly -q` in the merged
   tree and in a base worktree at 213ea6c1e, then diff the FAILED sets.
+- **The FE provenance sidecar is NOT shipped inside the release dir** — `stage.sh` excludes it from
+  the payload — so the sidecar's `git_head=026833336f7e` claim is NOT verifiable from the staged
+  artifact alone; it was verified against the SOURCE tree at stage time (stage.sh's own L2 FE
+  provenance gate passed). The staged BINARY is 3-way identical (release dir == dist == manifest,
+  `3f600d177390d9810974c28fe0da2f933e6f1e47bfd77db5e07fcdc4e34d0223`). Disclosed per tester G5.
 - M1a's `TIE_PAD = 8` assumption (tie groups at the SQL cut ≤ 8) is exercised by a tie-heavy
   fixture but not fuzzed.
 
@@ -198,6 +209,17 @@ page-completeness recovery re-query (see Known risks).
   → EMPTY, and zero `DROP TABLE|DROP COLUMN` in that delta; this lane's diff touches **zero**
   migration files. Hence `ENSEMBLE_ROLLBACK_SAFE=1` (explicit), recorded in the manifest as
   `rollback_safe=true source=explicit`.
+- **Tie-group wire-order deviation at `work_resolver.py:1479`** (review INFO, disclosed): a row
+  recovered by the page-completeness IN re-query is APPENDED to the job block, so inside a
+  `created_at` tie group it sorts AFTER peers where the base path would have placed it in SQL order.
+  Narrow: requires an ensured id below the SQL cut inside a tie group (TIE_PAD=8 covers groups ≤ 8;
+  the route's ensured ids are normally inside the cut). Disclosed per the cleanup wave; no fix
+  shipped in this wave (behavior-neutral for the badge page, ordering-only inside ties).
+- **The MOUNT fetch is ungated on all 6 surfaces** (review INFO, disclosed): a page opened while
+  hidden still issues ONE initial 5-leg badge fetch at mount. What the visibility gates stop is the
+  polling CADENCE (setInterval ticks), so the literal Emperor contract — hidden tabs stop POLLING,
+  visible tabs keep full cadence — holds; the single mount fetch is by design (first paint needs
+  data even if the tab is revealed a moment later).
 - **Whole-tree jest**: 9 pre-existing failures (schedule-create-dialog / jobs-grouping / settings /
   jobs-filter-state families) + a metrics banner-geometry flake are baseline, not net-new; only the
   scoped suites were run green here.
