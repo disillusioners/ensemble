@@ -1,0 +1,126 @@
+{
+  "prompt_reload": [
+    [
+      "prompt_reload",
+      {
+        "type": "function",
+        "function": {
+          "name": "prompt_reload",
+          "description": "Refresh MY system prompt from the active agent definition; the new persona takes effect on my NEXT turn. Use tool_help(\"prompt_reload\") for details.",
+          "parameters": {
+            "properties": {
+              "force": {
+                "default": false,
+                "description": "Pop the cached graph even when nothing changed (the escape hatch for the shared-cache edge). Optional; default false.",
+                "type": "boolean"
+              },
+              "compact": {
+                "default": false,
+                "description": "Arm a compact note \u2014 your own distillation of this conversation. The note is REQUIRED when compact=true (compact=false with a note is refused \u2014 ignoring it would be dishonest). The tool ARMS the note; the daemon then appends it as a REQUEST and your own model writes the compaction on its next invoke (mid-turn \u2014 there is no quiet seam and no gate). Optional; default false.",
+                "type": "boolean"
+              },
+              "compact_note": {
+                "default": "",
+                "description": "Your own distillation of this conversation \u2014 it is the REQUEST your own model executes on its next invoke (it is NOT rendered into the compaction doc). Max the configured cap (default 12000 characters; over the cap is refused, never truncated). Optional; default empty.",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      }
+    ]
+  ],
+  "prompt_assent": [
+    [
+      "prompt_assent",
+      {
+        "type": "function",
+        "function": {
+          "name": "prompt_assent",
+          "description": "The conversational approval lane: list / mint / approve / reject a pending prompt version. Use tool_help(\"prompt_assent\") for details.",
+          "parameters": {
+            "properties": {
+              "action": {
+                "description": "One of exactly four verbs: list | mint | approve | reject. list \u2014 the pending CORE prompt versions (read only); mint \u2014 mint an assent token for one pending item (gated on a live user turn); approve / reject \u2014 relay the user's decision for a minted token. Any other verb is refused with invalid-arguments.",
+                "type": "string"
+              },
+              "version_id": {
+                "default": "",
+                "description": "The pending prompt-version row (mint / approve / reject). Ignored by list.",
+                "type": "string"
+              },
+              "token": {
+                "default": "",
+                "description": "The grouped assent token the user received at mint time (approve / reject only). It must also appear in the human message that triggered this turn.",
+                "type": "string"
+              },
+              "user_confirmed": {
+                "default": false,
+                "description": "The relay agent's explicit confirmation that the human confirmed the decision (approve / reject only). The three factors are always required.",
+                "type": "boolean"
+              },
+              "reject_reason": {
+                "default": "",
+                "description": "The rejection reason (reject only; required, <= 500 chars).",
+                "type": "string"
+              },
+              "limit": {
+                "default": 50,
+                "description": "The list bound (list only; default 50, max 200).",
+                "type": "integer"
+              },
+              "force": {
+                "default": false,
+                "description": "Mint only: explicitly supersede an existing live token for this item (M-4b). A re-mint re-shows the diff.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    ]
+  ],
+  "guidelines": [
+    [
+      "guidelines_list",
+      {
+        "type": "function",
+        "function": {
+          "name": "guidelines_list",
+          "description": "List the shipped guidelines with parsed summaries. Use tool_help(\"guidelines_list\") for details.",
+          "parameters": {
+            "properties": {},
+            "type": "object"
+          }
+        }
+      }
+    ],
+    [
+      "guideline_read",
+      {
+        "type": "function",
+        "function": {
+          "name": "guideline_read",
+          "description": "Read one shipped guideline's full verbatim content. Use tool_help(\"guideline_read\") for details.",
+          "parameters": {
+            "properties": {
+              "slug": {
+                "description": "The guideline slug (the filename stem, e.g. 'guideline-notify-user-bounds'). Use guidelines_list first to see every valid slug.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "slug"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    ]
+  ]
+}

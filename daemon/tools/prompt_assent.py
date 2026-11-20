@@ -1574,6 +1574,94 @@ def _render_mint_response(
     ])
 
 
+# ── The input model (module level — hoisted out of the factory body) ──────
+#
+# The class statement used to run INSIDE the factory body, so every
+# factory call rebuilt the pydantic model class. The schema is a pure
+# function of the field declarations (no closure dependency), so it
+# lives at MODULE level; the ``@tool(args_schema=...)`` reference below
+# is unchanged.
+
+
+class PromptAssentInput(BaseModel):
+    """Input schema for ``prompt_assent`` (AR-2's four verbs)."""
+
+    action: Annotated[
+        str,
+        Field(
+            description=(
+                "One of exactly four verbs: list | mint | approve | reject. "
+                "list — the pending CORE prompt versions (read "
+                "only); mint — mint an assent token for one pending item "
+                "(gated on a live user turn); approve / reject — relay "
+                "the user's decision for a minted token. Any other "
+                "verb is refused with invalid-arguments."
+            ),
+        ),
+    ]
+    version_id: Annotated[
+        str,
+        Field(
+            default="",
+            description=(
+                "The pending prompt-version row (mint / approve / "
+                "reject). Ignored by list."
+            ),
+        ),
+    ] = ""
+    token: Annotated[
+        str,
+        Field(
+            default="",
+            description=(
+                "The grouped assent token the user received at mint "
+                "time (approve / reject only). It must also appear in "
+                "the human message that triggered this turn."
+            ),
+        ),
+    ] = ""
+    user_confirmed: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "The relay agent's explicit confirmation that the human "
+                "confirmed the decision (approve / reject only). The "
+                "three factors are always required."
+            ),
+        ),
+    ] = False
+    reject_reason: Annotated[
+        str,
+        Field(
+            default="",
+            description=(
+                "The rejection reason (reject only; required, <= 500 "
+                "chars)."
+            ),
+        ),
+    ] = ""
+    limit: Annotated[
+        int,
+        Field(
+            default=PROMPT_ASSENT_LIST_LIMIT_DEFAULT,
+            description=(
+                "The list bound (list only; default 50, max 200)."
+            ),
+        ),
+    ] = PROMPT_ASSENT_LIST_LIMIT_DEFAULT
+    force: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "Mint only: explicitly supersede an existing live token "
+                "for this item (M-4b). A re-mint re-shows the diff."
+            ),
+        ),
+    ] = False
+
+
 # ── The factory ───────────────────────────────────────────────────────────
 
 
@@ -1594,84 +1682,6 @@ def create_prompt_assent_tools(
     """
     caller_agent_id = agent_id or ""
     caller_instance_id = current_instance_id or ""
-
-    class PromptAssentInput(BaseModel):
-        """Input schema for ``prompt_assent`` (AR-2's four verbs)."""
-
-        action: Annotated[
-            str,
-            Field(
-                description=(
-                    "One of exactly four verbs: list | mint | approve | reject. "
-                    "list — the pending CORE prompt versions (read "
-                    "only); mint — mint an assent token for one pending item "
-                    "(gated on a live user turn); approve / reject — relay "
-                    "the user's decision for a minted token. Any other "
-                    "verb is refused with invalid-arguments."
-                ),
-            ),
-        ]
-        version_id: Annotated[
-            str,
-            Field(
-                default="",
-                description=(
-                    "The pending prompt-version row (mint / approve / "
-                    "reject). Ignored by list."
-                ),
-            ),
-        ] = ""
-        token: Annotated[
-            str,
-            Field(
-                default="",
-                description=(
-                    "The grouped assent token the user received at mint "
-                    "time (approve / reject only). It must also appear in "
-                    "the human message that triggered this turn."
-                ),
-            ),
-        ] = ""
-        user_confirmed: Annotated[
-            bool,
-            Field(
-                default=False,
-                description=(
-                    "The relay agent's explicit confirmation that the human "
-                    "confirmed the decision (approve / reject only). The "
-                    "three factors are always required."
-                ),
-            ),
-        ] = False
-        reject_reason: Annotated[
-            str,
-            Field(
-                default="",
-                description=(
-                    "The rejection reason (reject only; required, <= 500 "
-                    "chars)."
-                ),
-            ),
-        ] = ""
-        limit: Annotated[
-            int,
-            Field(
-                default=PROMPT_ASSENT_LIST_LIMIT_DEFAULT,
-                description=(
-                    "The list bound (list only; default 50, max 200)."
-                ),
-            ),
-        ] = PROMPT_ASSENT_LIST_LIMIT_DEFAULT
-        force: Annotated[
-            bool,
-            Field(
-                default=False,
-                description=(
-                    "Mint only: explicitly supersede an existing live token "
-                    "for this item (M-4b). A re-mint re-shows the diff."
-                ),
-            ),
-        ] = False
 
     @register_tool_category(PROMPT_ASSENT_CATEGORY_KEY)
     @tool(args_schema=PromptAssentInput)
