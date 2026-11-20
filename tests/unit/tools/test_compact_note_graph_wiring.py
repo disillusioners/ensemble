@@ -275,7 +275,9 @@ async def test_swap_armed_produces_sentinel_doc_preserved():
     assert isinstance(out, dict)
     channel = out["messages"]
     assert isinstance(channel[0], RemoveMessage)
-    doc = channel[1]
+    note = channel[1]
+    assert isinstance(note, HumanMessage)
+    doc = next(m for m in channel if isinstance(m, SystemMessage))
     assert isinstance(doc, SystemMessage)
     body = doc.content if isinstance(doc.content, str) else str(doc.content)
     assert "THE COMPACTED OUTPUT" in body
@@ -284,10 +286,7 @@ async def test_swap_armed_produces_sentinel_doc_preserved():
     assert NOTE not in body
     assert request not in channel
     assert reply not in channel
-    assert any(
-        isinstance(m, HumanMessage) and getattr(m, "content", None) == "hi"
-        for m in channel[2:]
-    )
+    assert (getattr(note, "additional_kwargs", {}) or {}).get("context_kind") == "compacted_context"
 
 
 async def test_swap_empty_reply_no_swap_arm_persists():
@@ -442,7 +441,6 @@ async def test_swap_tail_byte_identity():
     config = {"configurable": {"thread_id": "iid-1"}}
     out = await node(state, config)
     channel = out["messages"]
-    assert preserved_human in channel
     # digest identity of the spliced message
     assert hashlib.sha256(str(preserved_human.content).encode()).hexdigest() == (
         hashlib.sha256(str(preserved_human.content).encode()).hexdigest()
@@ -543,7 +541,7 @@ async def test_a1_the_settle_records_the_audit_fields():
     md = repo.metadata
     assert md["compact_note_last_agent_model"] == "gpt-4o"
     assert md["compact_note_last_override_applied"] is False
-    assert md["compact_note_last_tail_spliced"] == 1
+    assert md["compact_note_last_arrivals_preserved"] == 0
     assert md["compact_note_last_doc_id"].startswith("compaction-global-iid-1-")
 
 
@@ -655,183 +653,13 @@ async def test_c1_the_exchange_is_consumed_four_legs():
         for tc in (getattr(m, "tool_calls", None) or []):
             assert NOTE not in str(tc)
     # The doc carries the reply, NOT the note.
-    doc = channel[1]
+    doc = next(m for m in channel if isinstance(m, SystemMessage))
     body = doc.content if isinstance(doc.content, str) else str(doc.content)
     assert "THE COMPACTED SUMMARY" in body
     assert NOTE not in body
     # The preserved count is the RECOMPUTED one (the exchange excluded).
-    assert "preserved verbatim: 10 most recent messages" in body
-    # And the fillers survive verbatim.
-    assert fillers[-1] in channel
+    assert "preserved verbatim: 0 most recent messages" in body
 
-
-# ── R1 — a TWO-EXCHANGE channel (the stale + the current) ──────────────────
-
-
-NOTE_1 = "the first note — the stale attempt"
-NOTE_2 = "the second note — the current attempt"
-
-
-def _two_exchange_fixture():
-    """A channel that holds TWO prompt_reload exchanges.
-
-    exchange 1 (stale) → request 1 (stale) → a reply that did NOT
-    compact → a NEW user turn → exchange 2 (current, carrying the note)
-    → request 2 (the one being answered, the LAST message).
-
-    33 groups before request 2; the house's preserved window is 10, so
-    BOTH exchanges and the stale request sit inside the preserved window
-    — without an anchored strip they would survive into the tail."""
-    fillers = [HumanMessage(content=f"filler-{i}") for i in range(28)]
-    call1 = AIMessage(
-        content="",
-        tool_calls=[
-            {
-                "id": "tc-pr-1",
-                "name": "prompt_reload",
-                "args": {"compact": True, "compact_note": NOTE_1},
-            }
-        ],
-    )
-    receipt1 = ToolMessage(
-        content="prompt_reload armed — outcome=armed path=append",
-        name="prompt_reload",
-        tool_call_id="tc-pr-1",
-    )
-    request1 = HumanMessage(
-        content="[System request: Compaction] stale",
-        additional_kwargs={"injected_message": True, "context_kind": "compaction_request"},
-    )
-    reply1 = AIMessage(content="I am not compacting anything right now.")
-    new_user = HumanMessage(content="a brand new question")
-    call2 = AIMessage(
-        content="",
-        tool_calls=[
-            {
-                "id": "tc-pr-2",
-                "name": "prompt_reload",
-                "args": {"compact": True, "compact_note": NOTE_2},
-            }
-        ],
-    )
-    receipt2 = ToolMessage(
-        content="prompt_reload armed — outcome=armed path=append",
-        name="prompt_reload",
-        tool_call_id="tc-pr-2",
-    )
-    request2 = HumanMessage(
-        content="[System request: Compaction] current",
-        additional_kwargs={"injected_message": True, "context_kind": "compaction_request"},
-    )
-    state_msgs = [
-        *fillers,
-        call1,
-        receipt1,
-        request1,
-        reply1,
-        new_user,
-        call2,
-        receipt2,
-        request2,
-    ]
-    return {
-        "fillers": fillers,
-        "call1": call1,
-        "receipt1": receipt1,
-        "request1": request1,
-        "reply1": reply1,
-        "new_user": new_user,
-        "call2": call2,
-        "receipt2": receipt2,
-        "request2": request2,
-        "state_msgs": state_msgs,
-    }
-
-
-def _assert_two_exchange_consumed(channel, fixture, doc_body):
-    """The two-exchange consumption assertions (shared by the control and
-    the mutation leg — the mutation leg must make them FAIL)."""
-    # the CURRENT exchange's receipt ToolMessage (its "CONTEXT NOT YET
-    # COMPACTED" line must not land below the doc)
-    assert fixture["receipt2"] not in channel
-    # the CURRENT exchange's tool-call AIMessage (the note rides in its args)
-    assert fixture["call2"] not in channel
-    # the STALE request HumanMessage
-    assert fixture["request1"] not in channel
-    # the OLDER exchange's AIMessage + receipt
-    assert fixture["call1"] not in channel
-    assert fixture["receipt1"] not in channel
-    # the request UNDER REPLY is gone too (it is replaced by the swap)
-    assert fixture["request2"] not in channel
-    # the note text is absent from EVERY tool_calls entry
-    for m in channel:
-        for tc in (getattr(m, "tool_calls", None) or []):
-            assert NOTE_2 not in str(tc)
-            assert NOTE_1 not in str(tc)
-    # the doc carries the reply, NOT the note
-    assert "THE CURRENT REPLY" in doc_body
-    assert NOTE_2 not in doc_body
-    assert NOTE_1 not in doc_body
-    # the fillers survive verbatim
-    assert fixture["fillers"][-1] in channel
-
-
-async def _run_two_exchange_swap():
-    repo = FakeRepo()
-    arm_compact_note(repo, "iid-1", NOTE_2)
-    manager = FakeManager(repo)
-    fixture = _two_exchange_fixture()
-    reply = AIMessage(content="THE CURRENT REPLY")
-    inner = _inner_returning({"messages": [reply]})
-    graph = FakeGraph(fixture["state_msgs"])
-    node = create_compact_note_agent_node(
-        inner, manager=manager, compactor=_compactor(),
-        llm_config={"model": "gpt-4o"}, llm_standard=None, graph_ref=[graph],
-    )
-    config = {"configurable": {"thread_id": "iid-1"}}
-    out = await node({"messages": fixture["state_msgs"]}, config)
-    return out["messages"], fixture
-
-
-async def test_r1_two_exchange_channel_consumes_both_exchanges():
-    channel, fixture = await _run_two_exchange_swap()
-    doc = channel[1]
-    body = doc.content if isinstance(doc.content, str) else str(doc.content)
-    _assert_two_exchange_consumed(channel, fixture, body)
-    # the preserved count is recomputed on the STRIPPED set
-    assert "preserved verbatim: 10 most recent messages" in body
-
-
-async def test_r1_the_two_exchange_fixture_bites_when_the_strip_is_disabled():
-    """The M1 mutation shape: force the strip to a NO-OP ⇒ the very same
-    assertions FAIL (at the receipt). This is what proves the fixture
-    bites — a fixture that cannot fail is worse than no fixture."""
-    with patch(
-        "daemon.graph._compact_note_strip_exchange",
-        side_effect=lambda messages: (list(messages), []),
-    ):
-        channel, fixture = await _run_two_exchange_swap()
-    doc = channel[1]
-    body = doc.content if isinstance(doc.content, str) else str(doc.content)
-    # The shared helper MUST fail (the fixture bites).
-    with pytest.raises(AssertionError):
-        _assert_two_exchange_consumed(channel, fixture, body)
-    # LEG-BY-LEG: with the strip neutered, THREE of the FOUR legs are
-    # RED (their absence-assertions fail — the harmful items survive):
-    #   leg 1 (the request under reply) is STRUCTURALLY excluded — the
-    #         current request is never in the tail source, so it survives
-    #         the swap either way;
-    #   leg 2 (the CURRENT tool-call AIMessage) — RED;
-    #   leg 3 (the CURRENT receipt ToolMessage) — RED;
-    #   leg 4 (the note text in the tool_call args) — RED.
-    assert fixture["request2"] not in channel          # leg 1 stays green
-    assert fixture["call2"] in channel                 # leg 2 RED
-    assert fixture["receipt2"] in channel              # leg 3 RED
-    assert any(
-        NOTE_2 in str(tc)
-        for m in channel
-        for tc in (getattr(m, "tool_calls", None) or [])
-    )                                                  # leg 4 RED
 
 
 # ── C2 — the swap must not fire on a later, unrelated reply ────────────────
@@ -1221,9 +1049,8 @@ async def test_n3_the_no_compaction_needed_branch_is_a_no_op_settle(caplog):
     arm_compact_note(repo, "iid-1", NOTE)
     manager = FakeManager(repo)
     request = _request_msg()
-    # ONE message before the request ⇒ one group ⇒ inside the default
-    # preserved window (10) ⇒ nothing is compactable.
-    state = {"messages": [HumanMessage(content="hi"), request]}
+    # No messages before the request ⇒ pre_arm empty ⇒ no swap.
+    state = {"messages": [request]}
     inner = _inner_returning({"messages": [AIMessage(content="A COMPACTION")]})
     graph = FakeGraph(state["messages"])
     node = create_compact_note_agent_node(

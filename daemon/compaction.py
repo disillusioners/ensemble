@@ -1114,6 +1114,39 @@ def build_compact_note_request(
     )
 
 
+# ── Compact-note post-swap note (fresh-swap contract) ──────────────────────
+# The post-compaction TAIL SPLICE is REPLACED by a FRESH message list:
+# steady-state post-swap channel = [RemoveMessage(REMOVE_ALL), doc, note,
+# *arrivals]. ``note`` is the NEW HumanMessage below — the agent's
+# "ready for the next task" ack prompt. ZERO pre-compaction messages
+# survive the swap except the post-exchange ``arrivals``.
+COMPACT_NOTE_POST_SWAP_NOTE_TEXT = (
+    "You just compacted the previous conversation into the 'Compacted "
+    "context' summary above. You are ready for the next task. Do not run "
+    "anything and do not call any tools. End your turn now and wait for "
+    "the next message from the user."
+)
+COMPACT_NOTE_POST_SWAP_CONTEXT_KIND = "compacted_context"
+COMPACT_NOTE_POST_SWAP_NOTE_ID_PREFIX = "compacted-context-note-"
+
+
+def build_compact_note_post_swap_note() -> "HumanMessage":
+    """Build the post-swap note HumanMessage (fresh-swap contract).
+
+    Content, id prefix and additional_kwargs are PINNED by the contract;
+    the id carries a fresh uuid4 hex so repeated swaps never collide.
+    """
+    return HumanMessage(
+        content="[SYSTEM CONTEXT: Compacted Context]\n"
+        + COMPACT_NOTE_POST_SWAP_NOTE_TEXT,
+        id=COMPACT_NOTE_POST_SWAP_NOTE_ID_PREFIX + uuid.uuid4().hex,
+        additional_kwargs={
+            "injected_message": True,
+            "context_kind": COMPACT_NOTE_POST_SWAP_CONTEXT_KIND,
+        },
+    )
+
+
 # Phase 1 / WS-3.1: shared adaptive-timeout formula for the three LLM
 # call origins (single-batch :900, merge :939, condense :971 —
 # pre-feature the inline expression was duplicated three times; the
