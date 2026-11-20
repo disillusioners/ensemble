@@ -8642,6 +8642,65 @@ supervision_dualfight_check() {
 # 'conforming' — DUAL_FIGHT's named surface is the halt event itself.
 # The reason half of supervision_map_outcome is human prose and is
 # deliberately NOT machine-surfaced.
+# ── D3-E4 (self-service-promote Wave 5, §2.4): the executor cgroup
+# self-check — PREVENTION for the 2026-11-18 double-outage shape.
+#
+# THE SHAPE IT CONVERTS TO A NO-OP: an agent (or a mis-spawned executor)
+# ran a ceremony script from INSIDE the supervision unit's cgroup —
+# `systemctl stop` on the unit killed the CALLER with its own cgroup
+# before the start half ran (`Restart=on-failure` skipped after an
+# explicit stop) ⇒ down 67 min, then 4h32m. The sanctioned executor runs
+# in its OWN transient unit (a system.slice sibling — outside the
+# supervision cgroup by construction); this check is the fail-closed
+# backstop for every OTHER invocation path.
+#
+# REFUSE-ONLY (deliberate design choice, §2.4 E4's "or" — the re-exec
+# relocation variant is NOT implemented): refusing converts the outage
+# shape into a clean exit-78 with zero relocation risk (a re-exec under
+# systemd-run with the same lib.sh would need provenance-stamp
+# preservation + a recursion guard; the refuse path needs neither and
+# loses nothing — the arm was never a legitimate ceremony).
+#
+# Probe-failure posture (the DUAL_FIGHT ControlGroup-unobservable
+# precedent, lib.sh's own diagnostic-only skip): a self-cgroup read
+# failure or an unprobeable unit ControlGroup is NOT evidence of being
+# inside — warn once and CONTINUE. Only a POSITIVE containment match
+# (self path == unit path, or self path under "<unit-path>/") refuses.
+supervision_executor_cgroup_selfcheck() {
+    # Not applicable without a resolved supervision unit (script mode /
+    # launchd hosts) — the check is systemd-specific.
+    [ -n "${SUPERVISION_UNIT:-}" ] || return 0
+    local self_line self_cg unit_cg
+    if [ ! -r /proc/self/cgroup ]; then
+        _supervision_warn_once "cgroup self-check: /proc/self/cgroup unreadable — skipping (diagnostic only; not evidence of containment)"
+        return 0
+    fi
+    # Same idiom as _supervision_pid_cgroup_leaf: tail -n 1 (the unified
+    # hierarchy's `0::/path` line), strip the controller prefix.
+    self_line="$(tail -n 1 /proc/self/cgroup 2>/dev/null)" || self_line=""
+    self_cg="${self_line##*:}"
+    case "$self_cg" in
+        /*) ;;
+        *)
+            _supervision_warn_once "cgroup self-check: self cgroup unparseable ('$self_line') — skipping (diagnostic only)"
+            return 0
+            ;;
+    esac
+    unit_cg="$(_run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" show "$SUPERVISION_UNIT" -p ControlGroup --value 2>/dev/null)" || unit_cg=""
+    case "$unit_cg" in
+        /*) ;;
+        *)
+            _supervision_warn_once "cgroup self-check: unit '$SUPERVISION_UNIT' ControlGroup unobservable — skipping the containment match (diagnostic only; the DUAL_FIGHT precedent)"
+            return 0
+            ;;
+    esac
+    if [ "$self_cg" = "$unit_cg" ] || case "$self_cg" in "$unit_cg"/*) true ;; *) false ;; esac; then
+        _refuse executor-inside-supervision-cgroup "preflight refused: this ceremony process runs INSIDE the supervision unit's cgroup (self=${self_cg} unit=${SUPERVISION_UNIT} ControlGroup=${unit_cg}) — a stop of the unit would kill the caller mid-ceremony (the 2026-11-18 double-outage shape: stop half ran, caller died with its cgroup, start half never ran). Run the ceremony from the sanctioned executor transient unit (systemd-run sibling), never from a process inside the supervised unit's cgroup"
+    fi
+    _log "cgroup self-check: outside the supervision cgroup (self=${self_cg} unit_cgroup=${unit_cg})"
+    return 0
+}
+
 supervision_preflight() {
     if ! supervision_classify; then
         case "${SUPERVISION_REFUSE_REASON:-}" in
@@ -8675,6 +8734,11 @@ supervision_preflight() {
                 ;;
         esac
     fi
+    # D3-E4 (Wave 5 §2.4): the cgroup self-check — BEFORE DUAL_FIGHT and
+    # before any mutation: a process inside the supervision cgroup must
+    # never run the stop half of a ceremony. Refuse-only, fail-closed,
+    # positive-match-only (probe failures are diagnostic skips).
+    supervision_executor_cgroup_selfcheck
     supervision_dualfight_check
     # D2a: the declared×verified OUTCOME map stays host-blind (its launchd
     # cells are D2b) — skip the OUTCOME line for a launchd host so a verified
