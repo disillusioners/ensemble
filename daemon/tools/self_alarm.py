@@ -415,6 +415,53 @@ def _same_instant(left: datetime, right: datetime, tolerance_seconds: float = 1.
     return abs((left - right).total_seconds()) <= tolerance_seconds
 
 
+class SelfAlarmInput(BaseModel):
+    """Input schema for self_alarm."""
+
+    label: Annotated[
+        str,
+        Field(
+            description=(
+                "Short human name for the alarm (1-115 chars). Stored as "
+                "'self-alarm:<label>' — do NOT include the prefix."
+            )
+        ),
+    ]
+    when_or_every: Annotated[
+        str,
+        Field(
+            description=(
+                "When the alarm fires: an absolute ISO-8601 instant "
+                "('2026-10-20T09:00:00+07:00'), a relative duration "
+                "('45m', 'in 2h', '1d30m'), 'daily 06:30', "
+                "'weekly 1 06:30' (0=Sunday..6=Saturday) or a raw cron "
+                "expression ('cron 0 9 * * *'). At least 30 minutes out."
+            )
+        ),
+    ]
+    message_to_self: Annotated[
+        str,
+        Field(
+            description=(
+                "What YOU should do when the alarm fires (it fires into this "
+                "same session). Appended verbatim as the message's "
+                "Action line."
+            )
+        ),
+    ]
+    link_board_item: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Optional board item id ('wi-1a2b3c4d') to link — when the "
+                "alarm fires into THIS session you are told to board_get it "
+                "before acting."
+            ),
+        ),
+    ]
+
+
 def create_self_alarm_tools(
     service: Any,
     *,
@@ -451,51 +498,6 @@ def create_self_alarm_tools(
     caller_agent_id = agent_id or ""
     caller_instance_id = current_instance_id or ""
 
-    class SelfAlarmInput(BaseModel):
-        """Input schema for self_alarm."""
-
-        label: Annotated[
-            str,
-            Field(
-                description=(
-                    "Short human name for the alarm (1-115 chars). Stored as "
-                    "'self-alarm:<label>' — do NOT include the prefix."
-                )
-            ),
-        ]
-        when_or_every: Annotated[
-            str,
-            Field(
-                description=(
-                    "When the alarm fires: an absolute ISO-8601 instant "
-                    "('2026-10-20T09:00:00+07:00'), a relative duration "
-                    "('45m', 'in 2h', '1d30m'), 'daily 06:30', "
-                    "'weekly 1 06:30' (0=Sunday..6=Saturday) or a raw cron "
-                    "expression ('cron 0 9 * * *'). At least 30 minutes out."
-                )
-            ),
-        ]
-        message_to_self: Annotated[
-            str,
-            Field(
-                description=(
-                    "What YOU should do when the alarm fires (it fires into this "
-                    "same session). Appended verbatim as the message's "
-                    "Action line."
-                )
-            ),
-        ]
-        link_board_item: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Optional board item id ('wi-1a2b3c4d') to link — when the "
-                    "alarm fires into THIS session you are told to board_get it "
-                    "before acting."
-                ),
-            ),
-        ]
 
     @register_tool_category("self-alarm")
     @tool(args_schema=SelfAlarmInput)

@@ -524,6 +524,83 @@ def _census_row(
     }
 
 
+class InstanceListInput(BaseModel):
+    """Input schema for instance_list."""
+
+    status: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Exact instance status to filter on, applied in SQL: "
+                "idle | running | waiting | paused | completed | error | "
+                "terminated | queued | waiting_children | failed. Omit for "
+                "all statuses. Any other value is refused with "
+                "reason=unknown-status-value."
+            ),
+        ),
+    ]
+    limit: Annotated[
+        int,
+        Field(
+            default=DEFAULT_LIST_LIMIT,
+            description=(
+                f"Max rows to return (1-{MAX_LIST_LIMIT}, default "
+                f"{DEFAULT_LIST_LIMIT}). Out-of-range values are refused "
+                "with reason=invalid-limit."
+            ),
+        ),
+    ]
+    offset: Annotated[
+        int,
+        Field(
+            default=0,
+            description=(
+                "Rows to skip (SQL offset). A negative value is clamped to "
+                "0 and the clamp is reported in filters_applied."
+            ),
+        ),
+    ]
+
+
+class InstanceGetInput(BaseModel):
+    """Input schema for instance_get."""
+
+    id: Annotated[
+        str,
+        Field(
+            description=(
+                "Instance id (short form accepted — typos are resolved by "
+                "fuzzy match). Required."
+            )
+        ),
+    ]
+
+
+class InstanceHealthInput(BaseModel):
+    """Input schema for instance_health."""
+
+    stale_minutes: Annotated[
+        int,
+        Field(
+            default=DEFAULT_STALE_MINUTES,
+            description=(
+                "Staleness threshold in minutes (>= 1, default 30). A "
+                "non-positive value is refused with "
+                "reason=invalid-stale-minutes."
+            ),
+        ),
+    ]
+
+
+class FleetCapacitySummaryInput(BaseModel):
+    """Input schema for fleet_capacity_summary (no arguments)."""
+
+
+class InstanceFleetSummaryInput(BaseModel):
+    """Input schema for instance_fleet_summary (no arguments)."""
+
+
 def create_instance_read_tools(
     manager: Any,
     *,
@@ -552,43 +629,6 @@ def create_instance_read_tools(
     caller_agent_id = agent_id or ""
 
     # ── instance_list ────────────────────────────────────────────────
-    class InstanceListInput(BaseModel):
-        """Input schema for instance_list."""
-
-        status: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Exact instance status to filter on, applied in SQL: "
-                    "idle | running | waiting | paused | completed | error | "
-                    "terminated | queued | waiting_children | failed. Omit for "
-                    "all statuses. Any other value is refused with "
-                    "reason=unknown-status-value."
-                ),
-            ),
-        ]
-        limit: Annotated[
-            int,
-            Field(
-                default=DEFAULT_LIST_LIMIT,
-                description=(
-                    f"Max rows to return (1-{MAX_LIST_LIMIT}, default "
-                    f"{DEFAULT_LIST_LIMIT}). Out-of-range values are refused "
-                    "with reason=invalid-limit."
-                ),
-            ),
-        ]
-        offset: Annotated[
-            int,
-            Field(
-                default=0,
-                description=(
-                    "Rows to skip (SQL offset). A negative value is clamped to "
-                    "0 and the clamp is reported in filters_applied."
-                ),
-            ),
-        ]
 
     @register_tool_category("instance_read")
     @tool(args_schema=InstanceListInput)
@@ -773,18 +813,6 @@ Examples:
 """
 
     # ── instance_get ─────────────────────────────────────────────────
-    class InstanceGetInput(BaseModel):
-        """Input schema for instance_get."""
-
-        id: Annotated[
-            str,
-            Field(
-                description=(
-                    "Instance id (short form accepted — typos are resolved by "
-                    "fuzzy match). Required."
-                )
-            ),
-        ]
 
     @register_tool_category("instance_read")
     @tool(args_schema=InstanceGetInput)
@@ -1017,20 +1045,6 @@ Examples:
 """
 
     # ── instance_health ──────────────────────────────────────────────
-    class InstanceHealthInput(BaseModel):
-        """Input schema for instance_health."""
-
-        stale_minutes: Annotated[
-            int,
-            Field(
-                default=DEFAULT_STALE_MINUTES,
-                description=(
-                    "Staleness threshold in minutes (>= 1, default 30). A "
-                    "non-positive value is refused with "
-                    "reason=invalid-stale-minutes."
-                ),
-            ),
-        ]
 
     @register_tool_category("instance_read")
     @tool(args_schema=InstanceHealthInput)
@@ -1149,8 +1163,6 @@ Examples:
 """
 
     # ── fleet_capacity_summary ───────────────────────────────────────
-    class FleetCapacitySummaryInput(BaseModel):
-        """Input schema for fleet_capacity_summary (no arguments)."""
 
     @register_tool_category("instance_read")
     @tool(args_schema=FleetCapacitySummaryInput)
@@ -1237,8 +1249,6 @@ Examples:
     # ``_full_doc_`` is mandatory: full docs are keyed by the tool
     # NAME, so without one the alias would show up in ``tool_help``
     # with an empty body.
-    class InstanceFleetSummaryInput(BaseModel):
-        """Input schema for instance_fleet_summary (no arguments)."""
 
     @register_tool_category("instance_read")
     @tool(args_schema=InstanceFleetSummaryInput)
