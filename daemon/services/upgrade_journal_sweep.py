@@ -3278,12 +3278,22 @@ class UpgradeJournalSweepService:
                 # kills the worker; journal + move on.
                 await self._journal_executor_error(job, exc)
                 continue
-            await self._classify_and_journal_exit(
-                job,
-                client_exit_code=exit_code,
-                signal_name=signal_info[0],
-                signal_num=signal_info[1],
-            )
+            # T4 (tidier fold, 2026-11-20): the classify/journal call for
+            # the OBSERVED exit sits INSIDE the per-job try — a JournalTorn
+            # (or any unexpected classification-path error) on ONE job
+            # must degrade to the executor_error row + continue, never
+            # kill the worker loop (the loop serves every armed executor).
+            try:
+                await self._classify_and_journal_exit(
+                    job,
+                    client_exit_code=exit_code,
+                    signal_name=signal_info[0],
+                    signal_num=signal_info[1],
+                )
+            except Exception as exc:  # noqa: BLE001 — one bad job never
+                # kills the worker; journal + move on.
+                await self._journal_executor_error(job, exc)
+                continue
 
     @staticmethod
     def _waitpid_blocking(pid: int) -> int:
@@ -3453,7 +3463,11 @@ class UpgradeJournalSweepService:
                 f"is LIVE ({cls.note}; {cls.unit_detail}); op stays "
                 "pending, reaper re-armed (D3-E1)",
             )
-        except OSError as exc:
+        # T4 (tidier fold, 2026-11-20): journal_history_append raises
+        # JournalTorn (and KeyError on malformed rows) — the OSError-only
+        # catch let one torn journal KILL the worker loop. Match the
+        # sibling writer's vocabulary (see the already_closed writer).
+        except (uj.JournalTorn, OSError, KeyError) as exc:
             logger.warning(
                 "UpgradeJournalSweepService: journal_write failed for "
                 f"{uj.EXECUTOR_CLIENT_EXIT_EVENT} (run_id={job.run_id}): "
@@ -3475,7 +3489,10 @@ class UpgradeJournalSweepService:
                 f"run_id={job.run_id} pid={job.pid} unit={job.unit_name} "
                 f"executor_liveness_unverifiable — {reason}; {cls.unit_detail}",
             )
-        except OSError as exc:
+        # T4 (tidier fold, 2026-11-20): same widening as the E1 writer —
+        # JournalTorn/KeyError must degrade to a WARNING, never kill the
+        # worker loop.
+        except (uj.JournalTorn, OSError, KeyError) as exc:
             logger.warning(
                 "UpgradeJournalSweepService: journal_write failed for "
                 f"{uj.EXECUTOR_LIVENESS_UNVERIFIABLE_EVENT} "
@@ -3694,7 +3711,11 @@ class UpgradeJournalSweepService:
                 f"run_id={job.run_id} pid={job.pid} reaper error "
                 f"{type(exc).__name__}: {exc}",
             )
-        except OSError as write_exc:
+        # T4 (tidier fold, 2026-11-20): widened with the other writers —
+        # this is the ERROR-PATH writer (reachable from the classify
+        # except-handlers); a torn journal here would raise INSIDE the
+        # handler and kill the worker anyway.
+        except (uj.JournalTorn, OSError, KeyError) as write_exc:
             logger.warning(
                 "UpgradeJournalSweepService: journal_write failed for "
                 f"executor_error (run_id={job.run_id} pid={job.pid} "
