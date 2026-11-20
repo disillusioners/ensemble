@@ -4456,50 +4456,54 @@ class JobQueueService:
         
         return len(pending) + 1
 
-    async def _get_queue_positions(self, jobs) -> dict:
+    async def _get_queue_positions(self, jobs, queue_id=None) -> dict:
         """Batch-compute queue positions for a page of jobs.
 
-        Fetches the pending list ONCE per distinct scope (project-wide
-        when the job carries no queue_id, queue-scoped when it does) and
-        computes every queued job's 1-based position with identical
-        semantics to ``_get_queue_position`` (priority desc, created_at
-        asc; "position after all pending" when absent).
+        By default positions are PROJECT-GLOBAL (mirroring the old
+        ``_get_queue_position(job_id, project_id)`` call site on the
+        badge path, which never passed a queue_id). Pass ``queue_id``
+        to scope every job in ``jobs`` to that single queue instead
+        (mirroring ``_get_queue_position(job_id, project_id, queue_id=...)``).
+
+        Fetches the pending list ONCE per distinct project (or once for
+        the supplied queue) and computes every job's 1-based position
+        with identical semantics (priority desc, created_at asc;
+        "position after all pending" when absent).
         """
         result: dict = {}
         if not jobs:
             return result
 
-        # Group jobs by scope so we issue one pending-list fetch per
-        # distinct scope instead of one per row.
-        scopes: dict = {}
-        for job in jobs:
-            queue_id = getattr(job, "queue_id", None)
-            project_id = getattr(job, "project_id", None)
-            key = (project_id, queue_id)
-            scopes.setdefault(key, []).append(job)
-
-        for (project_id, queue_id), scoped_jobs in scopes.items():
-            if queue_id:
-                pending = await asyncio.to_thread(
-                    self._repository.list_pending_by_queue, queue_id
-                )
-            else:
-                pending = await asyncio.to_thread(
-                    self._repository.list_pending_by_project, project_id
-                )
-
-            # Build a job_id -> position map from the pending list.
+        if queue_id is not None:
+            pending = await asyncio.to_thread(
+                self._repository.list_pending_by_queue, queue_id
+            )
             position_by_id: dict = {}
             for i, pjob in enumerate(pending, start=1):
                 position_by_id[pjob.job_id] = i
             pending_count = len(pending)
+            for job in jobs:
+                job_id = getattr(job, "job_id", None)
+                result[job_id] = position_by_id.get(job_id, pending_count + 1)
+            return result
 
+        # Project-global: group jobs by project_id so we issue one
+        # pending-list fetch per distinct project instead of per row.
+        by_project: dict = {}
+        for job in jobs:
+            by_project.setdefault(getattr(job, "project_id", None), []).append(job)
+
+        for project_id, scoped_jobs in by_project.items():
+            pending = await asyncio.to_thread(
+                self._repository.list_pending_by_project, project_id
+            )
+            position_by_id = {}
+            for i, pjob in enumerate(pending, start=1):
+                position_by_id[pjob.job_id] = i
+            pending_count = len(pending)
             for job in scoped_jobs:
                 job_id = getattr(job, "job_id", None)
-                if job_id in position_by_id:
-                    result[job_id] = position_by_id[job_id]
-                else:
-                    result[job_id] = pending_count + 1
+                result[job_id] = position_by_id.get(job_id, pending_count + 1)
 
         return result
 
