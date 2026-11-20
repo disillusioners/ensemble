@@ -176,6 +176,176 @@ RC=$?
 assert_eq "P3-T08 a half-applied bump (stamp != floor) is REFUSED" "1" "$RC"
 
 # ════════════════════════════════════════════════════════════════════════════
+section "D4-6 — the single-writer pair bumper (scripts/bump-pipeline-floor.sh)"
+
+# AC-D4-6: ONE command writes BOTH constants in ONE commit and re-verifies
+# (floor sha-shaped ∧ ancestor; REV 40-hex ∧ resolvable ∧ == floor; 17-path
+# stamp coverage empty); a half-applied pair is IMPOSSIBLE. The bumper is
+# deliberately OUTSIDE scripts/upgrade/ so the family list does not widen.
+# Wave 5 builds the MECHANISM only — these legs run it against FIXTURE
+# CLONES in mktemp, never against this tree's live pair (which the final
+# leg asserts is byte-untouched).
+
+BUMPER="$REPO_ROOT/scripts/bump-pipeline-floor.sh"
+assert_contains "D4-6a the bumper exists OUTSIDE scripts/upgrade/" "scripts/bump-pipeline-floor.sh" "$BUMPER"
+if [ -e "$REPO_ROOT/scripts/upgrade/bump-pipeline-floor.sh" ]; then
+    _fail "D4-6a no copy may live inside scripts/upgrade/ (the family list must not widen)" "absent" "present"
+else
+    _pass
+fi
+if bash -n "$BUMPER" 2>/dev/null; then _pass; else _fail "D4-6a the bumper passes bash -n"; fi
+
+# The fixture: a MINI repo with both constants + the family + the bumper.
+BUMP_FIX="$(mktemp -d "${TMPDIR:-/tmp}/bump-floor-fixture.XXXXXX.$$")" || exit 2
+_bump_fixture() { # <root> <floor_line_in_utools>
+    local root="$1" utools_line="$2" p
+    mkdir -p "$root/scripts/upgrade" "$root/daemon/tools"
+    cp "$REPO_ROOT/scripts/upgrade/executor_family.sh" "$root/scripts/upgrade/executor_family.sh"
+    cp "$BUMPER" "$root/scripts/bump-pipeline-floor.sh"
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        # never clobber the REAL family library copy made above (it IS a
+        # family member — the loop must not stub it out)
+        [ "$p" = "scripts/upgrade/executor_family.sh" ] && continue
+        mkdir -p "$root/$(dirname "$p")"
+        printf '#!/usr/bin/env bash\n# bump fixture\n' > "$root/$p"
+    done <<EOF
+$(_ef_paths)
+EOF
+    printf '#!/usr/bin/env bash\nPIPELINE_SCRIPTS_REV=%s\n' \
+        "2222222222222222222222222222222222222222" > "$root/scripts/upgrade/lib.sh"
+    printf 'UTOOLS = 1\nPIPELINE_SCRIPTS_FLOOR_COMMIT = "%s"\n' \
+        "$utools_line" > "$root/daemon/tools/upgrade_tools.py"
+    (
+        cd "$root" || exit 1
+        git init -q -b main . >/dev/null 2>&1
+        git config user.email b@t; git config user.name b
+        git add -A >/dev/null 2>&1
+        git commit -q -m base >/dev/null 2>&1
+    ) >/dev/null 2>&1
+}
+# the family list via the fixture's own executor_family.sh copy
+_ef_paths() { bash "$BUMP_FIX/scripts/upgrade/executor_family.sh" --paths 2>/dev/null; }
+
+# bootstrap the fixture root once for _ef_paths, then build the real one
+mkdir -p "$BUMP_FIX/scripts/upgrade"
+cp "$REPO_ROOT/scripts/upgrade/executor_family.sh" "$BUMP_FIX/scripts/upgrade/executor_family.sh"
+
+OLD_FLOOR="3333333333333333333333333333333333333333"
+_bump_fixture "$BUMP_FIX/repo" "$OLD_FLOOR"
+BREPO="$BUMP_FIX/repo"
+# the lane-merge commit T (ancestor of HEAD; family fully present)
+(
+    cd "$BREPO" || exit 1
+    printf '#!/usr/bin/env bash\n# lane change\nPIPELINE_SCRIPTS_REV=%s\n' \
+        "4444444444444444444444444444444444444444" > scripts/upgrade/lib.sh
+    git add -A >/dev/null 2>&1
+    git commit -q -m "lane merge" >/dev/null 2>&1
+    printf '# post-merge touch\n' >> daemon/tools/upgrade_tools.py
+    git add -A >/dev/null 2>&1
+    git commit -q -m "post-merge" >/dev/null 2>&1
+) >/dev/null 2>&1
+BUMP_T="$(git -C "$BREPO" rev-parse HEAD~1 2>/dev/null || true)"
+BUMP_HEAD_BEFORE="$(git -C "$BREPO" rev-parse HEAD 2>/dev/null || true)"
+
+# D4-6b: the happy path — rc 0, BOTH constants == T, ONE commit, exactly
+# the two paths, and the post-commit re-verifies passed.
+BUMP_OUT="$(bash "$BREPO/scripts/bump-pipeline-floor.sh" "$BUMP_T" 2>&1)"
+BUMP_RC=$?
+assert_eq "D4-6b the bumper succeeds on a valid ancestor" "0" "$BUMP_RC"
+assert_contains "D4-6b the success line names the pair" "cannot half-apply" "$BUMP_OUT"
+assert_eq "D4-6b lib.sh REV == T" "PIPELINE_SCRIPTS_REV=$BUMP_T" \
+    "$(grep '^PIPELINE_SCRIPTS_REV=' "$BREPO/scripts/upgrade/lib.sh")"
+assert_eq "D4-6b upgrade_tools FLOOR == T" "PIPELINE_SCRIPTS_FLOOR_COMMIT = \"$BUMP_T\"" \
+    "$(grep '^PIPELINE_SCRIPTS_FLOOR_COMMIT' "$BREPO/daemon/tools/upgrade_tools.py")"
+BUMP_HEAD_AFTER="$(git -C "$BREPO" rev-parse HEAD 2>/dev/null || true)"
+[ "$BUMP_HEAD_AFTER" != "$BUMP_HEAD_BEFORE" ] && _pass || _fail "D4-6b a new commit exists"
+BUMP_COMMIT_FILES="$(git -C "$BREPO" show --name-only --pretty=format: HEAD 2>/dev/null | sed '/^$/d' | sort | tr '\n' ' ')"
+assert_eq "D4-6b the ONE commit touches exactly the two constants" \
+    "daemon/tools/upgrade_tools.py scripts/upgrade/lib.sh " "$BUMP_COMMIT_FILES"
+
+# D4-6c: idempotence — re-running the SAME sha is a no-op (no new commit)
+BUMP_OUT2="$(bash "$BREPO/scripts/bump-pipeline-floor.sh" "$BUMP_T" 2>&1)"
+BUMP_RC2=$?
+assert_eq "D4-6c the re-run exits 0" "0" "$BUMP_RC2"
+assert_contains "D4-6c the re-run says nothing to do" "nothing to do" "$BUMP_OUT2"
+assert_eq "D4-6c no second commit" "$BUMP_HEAD_AFTER" "$(git -C "$BREPO" rev-parse HEAD)"
+
+# D4-6d: a non-sha refuses BEFORE any write (nothing modified, no commit)
+BAD_OUT="$(bash "$BREPO/scripts/bump-pipeline-floor.sh" "not-a-sha" 2>&1)"
+BAD_RC=$?
+assert_eq "D4-6d a non-sha refuses (rc 1)" "1" "$BAD_RC"
+assert_eq "D4-6d no commit appeared" "$BUMP_HEAD_AFTER" "$(git -C "$BREPO" rev-parse HEAD)"
+
+# D4-6e: a NON-ancestor refuses (T6.15 — the floor names a commit the
+# release contains)
+(
+    cd "$BREPO" || exit 1
+    git checkout -q --orphan divergent >/dev/null 2>&1
+    printf 'x\n' > orphan.txt
+    git add -A >/dev/null 2>&1
+    git commit -q -m orphan-root >/dev/null 2>&1
+    git checkout -q main >/dev/null 2>&1
+) >/dev/null 2>&1
+ORPHAN_T="$(git -C "$BREPO" rev-parse divergent 2>/dev/null || true)"
+NA_OUT="$(bash "$BREPO/scripts/bump-pipeline-floor.sh" "$ORPHAN_T" 2>&1)"
+NA_RC=$?
+assert_eq "D4-6e a non-ancestor refuses (rc 1)" "1" "$NA_RC"
+assert_contains "D4-6e the refusal names the ancestry rule" "NOT an ancestor" "$NA_OUT"
+assert_eq "D4-6e lib.sh UNTOUCHED by the refusal" "PIPELINE_SCRIPTS_REV=$BUMP_T" \
+    "$(grep '^PIPELINE_SCRIPTS_REV=' "$BREPO/scripts/upgrade/lib.sh")"
+
+# D4-6f: HALF-APPLY IMPOSSIBILITY — a drifted anchor in upgrade_tools.py
+# refuses BEFORE any write (lib.sh stays untouched: no partial pair).
+HALF_FIX="$BUMP_FIX/half"
+_bump_fixture "$HALF_FIX" "drifted-constant"
+(
+    cd "$HALF_FIX" || exit 1
+    git add -A >/dev/null 2>&1
+    git commit -q -m drift >/dev/null 2>&1
+) >/dev/null 2>&1
+HALF_T="$(git -C "$HALF_FIX" rev-parse HEAD~0 2>/dev/null || true)"
+HALF_OUT="$(bash "$HALF_FIX/scripts/bump-pipeline-floor.sh" "$HALF_T" 2>&1)"
+HALF_RC=$?
+assert_eq "D4-6f a drifted FLOOR anchor refuses (rc 1)" "1" "$HALF_RC"
+assert_contains "D4-6f the refusal names the drifted anchor" "anchor drifted" "$HALF_OUT"
+assert_eq "D4-6f lib.sh NOT half-written" "PIPELINE_SCRIPTS_REV=2222222222222222222222222222222222222222" \
+    "$(grep '^PIPELINE_SCRIPTS_REV=' "$HALF_FIX/scripts/upgrade/lib.sh")"
+
+# D4-6g: coverage hole — a T missing a family path refuses
+HOLE_FIX="$BUMP_FIX/hole"
+_bump_fixture "$HOLE_FIX" "$OLD_FLOOR"
+(
+    cd "$HOLE_FIX" || exit 1
+    git rm -q scripts/upgrade/status.sh >/dev/null 2>&1
+    git commit -q -m hole >/dev/null 2>&1
+    printf 'y\n' >> daemon/tools/upgrade_tools.py
+    git add -A >/dev/null 2>&1
+    git commit -q -m after-hole >/dev/null 2>&1
+) >/dev/null 2>&1
+HOLE_T="$(git -C "$HOLE_FIX" rev-parse HEAD~1 2>/dev/null || true)"
+HOLE_OUT="$(bash "$HOLE_FIX/scripts/bump-pipeline-floor.sh" "$HOLE_T" 2>&1)"
+HOLE_RC=$?
+assert_eq "D4-6g a family hole at T refuses (rc 1)" "1" "$HOLE_RC"
+assert_contains "D4-6g the refusal names the missing path" "scripts/upgrade/status.sh" "$HOLE_OUT"
+
+# D4-6h: dirty-target refusal (the bumper never sweeps foreign work)
+printf '# dirty edit\n' >> "$BREPO/scripts/upgrade/lib.sh"
+DIRTY_OUT="$(bash "$BREPO/scripts/bump-pipeline-floor.sh" "$BUMP_HEAD_AFTER" 2>&1)"
+DIRTY_RC=$?
+assert_eq "D4-6h a dirty target file refuses (rc 1)" "1" "$DIRTY_RC"
+assert_contains "D4-6h the refusal names the dirty file" "uncommitted changes" "$DIRTY_OUT"
+git -C "$BREPO" checkout -- scripts/upgrade/lib.sh 2>/dev/null || true
+
+# D4-6i (BUILD-ONLY guarantee): THIS tree's live pair is byte-UNTOUCHED —
+# the bumper ran only inside fixture clones; Wave 6 owns the real stamp.
+assert_eq "D4-6i the live tree's stamp is unchanged" "$STAMP_REV" \
+    "$(sed -n 's/^PIPELINE_SCRIPTS_REV="\{0,1\}\([0-9A-Za-z._/-]*\)"\{0,1\}[[:space:]]*$/\1/p' "$LIBSH" | head -1)"
+assert_eq "D4-6i the live tree's floor is unchanged" "$FLOOR_COMMIT" \
+    "$(sed -n 's/^PIPELINE_SCRIPTS_FLOOR_COMMIT = "\([0-9a-f][0-9a-f]\{6,39\}\)"$/\1/p' "$UPGRADE_TOOLS" | head -1)"
+rm -rf "$BUMP_FIX"
+
+# ════════════════════════════════════════════════════════════════════════════
 section "summary"
 
 printf 'floor=%s\nstamp=%s\nhead=%s\n' "$FLOOR_COMMIT" "$STAMP_REV" "$HEAD_SHA"
