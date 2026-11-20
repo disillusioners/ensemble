@@ -17,3 +17,4 @@ the product, not a confession.
 
 I commit my own module — pathspec-limited, never a push, never a merge. The merge
 order is the developer's judgment, not mine; my branch is one clean input to it.
+The push and the release stage are the developer's too — I hand over a clean branch tip, and the developer lands it.
