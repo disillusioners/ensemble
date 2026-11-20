@@ -38,6 +38,13 @@ v0.30.5 sonic-routing amendment (user ruling 2026-11-14, four rulings):
 The former A7 (blast globs) and A10 (blast escalation line) legs are gone;
 their replacements pin the complexity-handover protocol + interop.
 
+Maintenance roster amendment (commission 2026-11-20): the EXISTING
+``maintenancer`` agent joins sonic-leader's roster — leader = its SEVEN
+team members (4 sonic + giter + devops + maintenancer); the agent's
+``meta.json`` version goes 1.1.1 -> 1.1.2.  The tool grants are
+UNCHANGED (a roster member is not a tool grant) and the maintenancer's
+own roster (explorer/worker/coder) is untouched.
+
 Three layers:
 
   --static      stdlib-only contract checks against the real tree.
@@ -120,7 +127,7 @@ SONIC_AGENTS = (
 # ----
 FROZEN_TEAMS = {
     "sonic-leader": ["sonic-developer", "sonic-coder", "sonic-reviewer",
-                     "sonic-tester", "giter", "devops"],
+                     "sonic-tester", "giter", "devops", "maintenancer"],
     "sonic-developer": ["sonic-coder", "giter"],
     "sonic-coder": [],
     "sonic-reviewer": [],
@@ -161,16 +168,17 @@ FROZEN_TOOLS = {
 }
 # ---- END FROZEN [sonic-tools-v2] ----
 
-# Effective spawn sets (combined spec §9 + v0.30.2 amendment): leader = its six
-# team members (4 sonic + giter + devops) PLUS the two knowledge-lane support
+# Effective spawn sets (combined spec §9 + v0.30.2 amendment + the 2026-11-20
+# maintenance-roster amendment): leader = its seven team members (4 sonic +
+# giter + devops + maintenancer) PLUS the two knowledge-lane support
 # agents (TOOL_REQUIRED_AGENTS maps "knowledge" -> ["explorer", "kb-writer"])
 # PLUS image-reader (TOOL_REQUIRED_AGENTS maps "image" -> ["image-reader"]);
 # developer = sonic-coder + giter PLUS the same three implicit members; coder/
 # reviewer = image-reader ONLY; tester = EMPTY.
 EXPECTED_EFFECTIVE = {
     "sonic-leader": {"sonic-developer", "sonic-coder", "sonic-reviewer",
-                     "sonic-tester", "giter", "devops", "explorer", "kb-writer",
-                     "image-reader"},
+                     "sonic-tester", "giter", "devops", "maintenancer",
+                     "explorer", "kb-writer", "image-reader"},
     "sonic-developer": {"sonic-coder", "giter", "explorer", "kb-writer",
                         "image-reader"},
     "sonic-coder": {"image-reader"},
@@ -964,7 +972,7 @@ def a23_pok_audience(fx: Fixture) -> None:
 
 ASSERTIONS = (
     ("A1", a1_meta_parse, "meta.json parse + id==dirname x5"),
-    ("A2", a2_team_members, "team_members exact sets (leader=4 sonic + giter + devops; developer=[coder, giter])"),
+    ("A2", a2_team_members, "team_members exact sets (leader=4 sonic + giter + devops + maintenancer; developer=[coder, giter])"),
     ("A3", a3_allow_deny, "frozen allow/deny arrays + effective spawn sets"),
     ("A4", a4_llm_model, "llm_model pin map + both in default set"),
     ("A5", a5_recursion, "multiplier 7 coder-only"),
@@ -1241,6 +1249,10 @@ def _mutation_legs():
         _mutate_meta(fixture, "sonic-leader",
                      lambda m: m["team_members"].append("sonic-planner"))
 
+    def a2_leader_drop_maintenancer(fixture):
+        _mutate_meta(fixture, "sonic-leader",
+                     lambda m: m["team_members"].remove("maintenancer"))
+
     def a2_coder_add_worker(fixture):
         _mutate_meta(fixture, "sonic-coder",
                      lambda m: m.__setitem__("team_members", ["worker"]))
@@ -1287,6 +1299,10 @@ def _mutation_legs():
     def a3_leader_drop_devops(fixture):
         _mutate_meta(fixture, "sonic-leader",
                      lambda m: m["team_members"].remove("devops"))
+
+    def a3_leader_drop_maintenancer(fixture):
+        _mutate_meta(fixture, "sonic-leader",
+                     lambda m: m["team_members"].remove("maintenancer"))
 
     def a3_developer_drop_giter(fixture):
         _mutate_meta(fixture, "sonic-developer",
@@ -1485,6 +1501,7 @@ def _mutation_legs():
         ("A1-drop-id", a1_drop_id),
         ("A1-trailing-comma", a1_trailing_comma),
         ("A2-leader-add-planner", a2_leader_add_planner),
+        ("A2-leader-drop-maintenancer", a2_leader_drop_maintenancer),
         ("A2-coder-add-worker", a2_coder_add_worker),
         ("A2-developer-add-reviewer", a2_developer_add_reviewer),
         ("A3-leader-drop-knowledge", a3_leader_drop_knowledge),
@@ -1497,6 +1514,7 @@ def _mutation_legs():
         ("A3-reviewer-deny-drop-editfile", a3_reviewer_deny_drop_editfile),
         ("A3-leader-drop-giter", a3_leader_drop_giter),
         ("A3-leader-drop-devops", a3_leader_drop_devops),
+        ("A3-leader-drop-maintenancer", a3_leader_drop_maintenancer),
         ("A3-developer-drop-giter", a3_developer_drop_giter),
         ("A3-leader-drop-image", a3_leader_drop_image),
         ("A3-developer-drop-image", a3_developer_drop_image),
@@ -1636,10 +1654,11 @@ def run_real() -> bool:
             print("FAIL A2-real sonic-coder spawned worker (deny-by-default broken)", file=sys.stderr)
             ok = False
     if ok:
-        print("PASS A2-real (discovery + leader spawns its 4 + developer spawns coder + coder deny-by-default)")
+        print("PASS A2-real (discovery + leader spawns its 7 + developer spawns coder + coder deny-by-default)")
     negatives = {
         "sonic-leader": ["leader", "developer", "planner", "worker"],
-        "sonic-developer": ["worker", "sonic-reviewer", "sonic-leader"],
+        "sonic-developer": ["worker", "sonic-reviewer", "sonic-leader",
+                            "maintenancer"],
         "sonic-coder": ["worker"],
         "sonic-reviewer": ["worker", "sonic-coder"],
         "sonic-tester": ["worker"],
