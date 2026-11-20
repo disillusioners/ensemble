@@ -150,10 +150,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from langchain_core.tools import tool
 
 from daemon._redact import redact_exc_str
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from daemon.repositories.anomaly.models import OUTCOME_UNCLUSTERED
 from daemon.services.anomaly_service import (

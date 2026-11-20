@@ -5,8 +5,8 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.tools import tool
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from daemon.rag.client import AsyncLightRAGClient
 from daemon.rag.config import is_rag_enabled

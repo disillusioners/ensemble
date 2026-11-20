@@ -73,9 +73,9 @@ import time
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from ._schema_registry import tool
 from ..chunking import chunked
 from ..constants import INSTANCE_LIST_INTERNAL_INCLUDE_DESCENDANTS_DEFAULT
 from ..repositories.instance.models import InstanceStatus

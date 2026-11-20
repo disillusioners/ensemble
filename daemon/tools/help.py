@@ -9,8 +9,8 @@ The help output is filtered based on the agent's tool configuration.
 """
 
 import logging
-from langchain_core.tools import tool
 
+from ._schema_registry import tool
 from ._tool_registry import (
     get_full_doc,
     get_tool_categories,

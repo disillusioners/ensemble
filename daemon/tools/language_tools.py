@@ -1,6 +1,6 @@
 """Language-related tools for the agent."""
 import logging
-from langchain_core.tools import tool
+from ._schema_registry import tool
 from ._tool_registry import register_tool
 
 logger = logging.getLogger(__name__)

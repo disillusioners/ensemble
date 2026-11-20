@@ -33,8 +33,8 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from langchain_core.tools import tool
 
+from ._schema_registry import tool
 from ..constants import PLANE_SYNC_COOLDOWN_S
 from ..services.plane_sync_service import PlaneSyncService
 from ._tool_registry import register_tool_category

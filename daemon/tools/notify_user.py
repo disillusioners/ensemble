@@ -129,9 +129,9 @@ import weakref
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field, ValidationError
 
+from ._schema_registry import tool
 from ..config import NotifyUserConfig
 from ..repositories.notify_audit.models import (
     OUTCOME_DELIVERY_FAILED,

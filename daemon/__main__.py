@@ -620,6 +620,63 @@ def _serve_with_bind_retry(uvicorn_config, max_wait_s: float | None = None) -> N
         sys.exit(STARTUP_FAILURE)
 
 
+def _start_schema_registry_warm() -> None:
+    """Start the process-level tool-schema registry warm on a background thread.
+
+    WHY: the daemon's tool factories rebuild a pydantic schema per tool per
+    graph assembly (ROW2-DEEP-DIVE §3).  ``daemon.tools._schema_registry``
+    memoises those schemas process-wide, so the ONLY cold cost is the first
+    assembly — and the first assembly happens on the event loop (the flagship
+    23.16 s stall).  Warming here moves that one-and-only cold cost off the
+    request path.
+
+    SHAPE:
+
+    * a BACKGROUND DAEMON thread, started BEFORE the listener is bound, so
+      the warm overlaps the boot sequence instead of delaying it;
+    * an INERT manager (no live manager, no database, no instance state) —
+      at this point in the boot the daemon does not even own a manager yet
+      (it is created inside the uvicorn lifespan), so the warm provably
+      cannot touch live manager or DB state;
+    * BEST EFFORT — a warm failure is logged and the daemon boots anyway.
+
+    KNOB: ``ENSEMBLE_SCHEMA_REGISTRY_WARM=0`` (or ``false``/``no``/``off``)
+    disables the warm for operators who want the CPU back; the registry
+    then warms lazily on the first graph assembly.
+    """
+    raw = (os.environ.get("ENSEMBLE_SCHEMA_REGISTRY_WARM") or "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        logger.info("[schema-registry] boot warm disabled by ENSEMBLE_SCHEMA_REGISTRY_WARM")
+        return
+
+    import threading
+
+    def _warm() -> None:
+        try:
+            from daemon.tools._schema_registry import warm_schema_registry
+
+            warm_schema_registry()
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "[schema-registry] boot warm failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+
+    try:
+        threading.Thread(
+            target=_warm,
+            name="schema-registry-warm",
+            daemon=True,
+        ).start()
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning(
+            "[schema-registry] boot warm thread could not start: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+
+
 def main(run_preflight: bool = True):
     """Main entry point.
 
@@ -860,6 +917,26 @@ def main(run_preflight: bool = True):
     # throws all of it away because the port was already gone. With the
     # pre-bind BEFORE the startup, a daemon that cannot get the port
     # performs ZERO lifespan startup steps and ZERO teardown steps.
+    #
+    # ── Schema-registry boot warm (ROW2-DEEP-DIVE §3.3, fix 3) ──────────
+    # The daemon's tool factories rebuild a pydantic schema per tool per
+    # graph assembly; that work is pure waste after the FIRST assembly, and
+    # the FIRST assembly happens on the event loop (the flagship 23.16 s
+    # stall).  The registry memoises the schemas process-wide, so the warm
+    # below moves the one-and-only cold cost OFF the request path.
+    #
+    # Placement: a BACKGROUND THREAD started here — before the pre-bind and
+    # therefore before the listener can serve traffic — so the warm overlaps
+    # the (already long) boot sequence instead of adding to it.  The warm
+    # builds the tool surface against an INERT manager: no live manager, no
+    # database, no instance state (the daemon does not even own a manager
+    # yet at this point — it is created in the uvicorn lifespan).
+    #
+    # Cost disclosure: the warm burns the same CPU the first graph assembly
+    # used to burn (measured ~1.8 s on the dev box, ~16 s on the production
+    # box per the deep-dive's derivation), but it is spent on a background
+    # thread DURING boot, not on the event loop while serving traffic.
+    _start_schema_registry_warm()
     uvicorn_config = uvicorn.Config(
         "daemon.api:app",
         host=config.daemon.host,

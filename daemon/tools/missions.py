@@ -86,9 +86,10 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Annotated, Any
 
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 
 # 7d4a3bd9 false-completion fix (2026-09-26) — Fix 1 unverified surface.

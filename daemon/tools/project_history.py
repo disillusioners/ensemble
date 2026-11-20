@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import logging
 
-from langchain_core.tools import tool
 
+from ._schema_registry import tool
 from ..repositories.project.models import HistoryEntryType
 from daemon.constants import BLUEPRINT_ACTIVE_METADATA_KEY, SYSTEM_DEFAULT_PROJECT_NAME
 from ._tool_registry import register_tool_category

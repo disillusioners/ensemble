@@ -41,9 +41,9 @@ from __future__ import annotations
 import logging
 from typing import Annotated, Any
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from ._schema_registry import tool
 from ..services.mcps_gateway.protocol import (
     CODE_INTERNAL,
     GatewayProtocolError,

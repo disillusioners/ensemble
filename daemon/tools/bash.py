@@ -22,9 +22,9 @@ from uuid import uuid4
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Sequence
 
-from langchain_core.tools import tool
 from pydantic import BaseModel
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 # Shared pure intent guard (2026-11-18 triple outage). The matcher lives in
 # ``_systemctl_guard`` so the bash lane AND the proc lane (proc_run reaches

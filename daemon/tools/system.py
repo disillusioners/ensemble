@@ -43,8 +43,8 @@ import sys
 import urllib.parse
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.tools import tool
 
+from ._schema_registry import tool
 from ..config import Config
 from ._tool_registry import register_tool_category
 

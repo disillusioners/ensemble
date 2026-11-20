@@ -24,8 +24,8 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import httpx
-from langchain_core.tools import tool
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from daemon.utils import invoke_agent_and_wait
 

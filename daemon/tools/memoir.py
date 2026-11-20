@@ -103,9 +103,9 @@ import logging
 from datetime import datetime
 from typing import Annotated, Any
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from ._schema_registry import tool
 from ..config import MEMOIR_ENABLED_ENV_VAR
 from ..repositories.memoir.constellation_repository import (
     MemoirConstellationRepository,

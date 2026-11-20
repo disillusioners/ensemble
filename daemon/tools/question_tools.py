@@ -54,9 +54,9 @@ Answers flow back through the Phase 2 answer API
 import logging
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, field_validator
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from daemon.services.question_manager import pack_to_dict
 

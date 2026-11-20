@@ -46,7 +46,6 @@ import logging
 from pathlib import Path
 from typing import Annotated, Any
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from daemon.services.wedge_capture.writer import (
@@ -57,6 +56,7 @@ from daemon.services.wedge_capture.writer import (
     degraded_list_row,
 )
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 
 logger = logging.getLogger(__name__)
