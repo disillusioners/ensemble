@@ -1,3 +1,13 @@
+<!-- tester-ac-d5-13-census-20261120-begin -->
+## AC-D5-13 — REFUSAL/HALT VOCABULARY CENSUS PIN (tester adjudication, 2026-11-20; branch `tester/self-service-promote-gate` @ `ce9b45525`)
+
+> **Verdict: ✅ PASS** — census 23 tokens, all present in designated production sources (spec-line provenance verified); shape scanner `tests/upgrade_refusal_scan.py` rc=0 (0 double-quoted backticks, 0 mutating embedded `$()`, 0 mutating unquoted heredocs over 10 shell files). Non-vacuity proof: renaming `handback-budget-exhausted` → `handback-budget-gone` in `scripts/upgrade/lib.sh` makes `test_refusal_vocabulary_present` RED (`[('handback-budget-exhausted', 347, ['scripts/upgrade/lib.sh'])]`); restore → 3/3 GREEN. The pre-existing scanner `tests/upgrade_refusal_scan.py` was ALREADY registered (row below, 2026-11-19 gate) — no duplicate row added.
+
+| Pack | Location / Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `upgrade_refusal_vocabulary_census` (NEW 2026-11-20) | `cd $WT && timeout 300 bash tests/packs/upgrade_refusal_vocabulary_census_test.sh` | `tests/test_upgrade_refusal_vocabulary_census.py` — 23-token census, each entry carries `spec_line` provenance into `.agents/shared/planning/self-service-promote/architecture-recommendation.md` (token present on the named line); asserts each token is present (substring) in at least one designated production source file; plus `tests/upgrade_refusal_scan.py` rc=0 over `scripts/upgrade/*.sh`. Non-vacuity: rename one token in one production file ⇒ RED; restore ⇒ GREEN. Spec-derived (never derived from HEAD). | 2026-11-20 @ `ce9b45525` | ✅ PASS (3/3 pytest nodes + scanner rc=0) |
+<!-- tester-ac-d5-13-census-20261120-end -->
+
 <!-- maintenance-idle-starvation-20261119-begin -->
 ## MAINTENANCE-IDLE-STARVATION — TESTER GATE REGISTRATION (2026-11-19; lane `feature/maintenance-idle-starvation` @ `d38fc1093`, base `c36c3e07c`)
 
