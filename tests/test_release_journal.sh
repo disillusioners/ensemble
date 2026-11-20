@@ -28,6 +28,14 @@
 # ============================================================================
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# cycle-3 (2026-11-20): scrub the ambient scripts-pin override GLOBALLY —
+# the pack's fixtures resolve their pins via INSTALL_DIR/.env (the
+# fixture-owned path); an ambient ENSEMBLE_UPGRADE_SCRIPTS_DIR (a host
+# lane's leftover) leaks into every §9/§11/§12 stage call that does not
+# self-scrub, points them at the REAL host pin, and refuses the whole
+# suite in a cascade ("scripts-pin advance impossible — foreign clone").
+# Measured: 107F under an ambient pin vs the expected base set without.
+unset ENSEMBLE_UPGRADE_SCRIPTS_DIR
 
 # M4: shared helpers (assertions, M1 fixture registry, F1 fake-HOME fence)
 . "$REPO_ROOT/tests/upgrade_test_lib.sh"
