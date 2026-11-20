@@ -220,14 +220,14 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
     (
         "MT-10-cursor-member-added",
         "daemon/tools/metrics_read.py",
-        """        compare: Annotated[
-            bool,""",
-        """        cursor: Annotated[
-            str | None,
-            Field(default=None, description="MUTATION: a cursor member"),
-        ]
-        compare: Annotated[
-            bool,""",
+        """    compare: Annotated[
+        bool,""",
+        """    cursor: Annotated[
+        str | None,
+        Field(default=None, description="MUTATION: a cursor member"),
+    ]
+    compare: Annotated[
+        bool,""",
         TOOLS_PACK,
         "test_no_cursor_is_accepted_or_returned",
     ),

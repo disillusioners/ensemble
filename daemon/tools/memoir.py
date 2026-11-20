@@ -585,6 +585,252 @@ def _render_synthesis_block(synthesis: dict[str, Any]) -> str:
     """
     return render_synthesis(synthesis)
 
+# ── the input schemas — MODULE LEVEL (c2r-hoist-c) ────────────
+# A class statement inside a factory body re-runs on EVERY factory
+# call (one fresh pydantic model per assembly). At module level each
+# class is built ONCE at import and the schema registry then serves
+# every later assembly from cache. VERBATIM move: the fields,
+# annotations, defaults and descriptions are unchanged.
+
+class MemoirWriteInput(BaseModel):
+    """Input schema for memoir_write."""
+
+    text: Annotated[
+        str,
+        Field(
+            description=(
+                "The memory itself — FIRST-PERSON narrative about me "
+                "and the user (what happened, what I learned, what "
+                "matters). Not project state, task progress or code."
+            )
+        ),
+    ]
+    title: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Optional short title (<=200 chars) — the first line "
+                "of the keepsake zone rendering."
+            ),
+        ),
+    ]
+    importance: Annotated[
+        int,
+        Field(
+            default=5,
+            description=(
+                "1-10 (default 5). 9-10 = shaped who we are; 1-2 = "
+                "noise. Affects recall ranking."
+            ),
+        ),
+    ]
+    event_at: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Optional ISO-8601 timestamp of WHEN the event "
+                "happened (defaults to now). Naive digits are read "
+                "as UTC; the house timezone is Asia/Ho_Chi_Minh "
+                "(+07:00) — carry the offset or pre-convert."
+            ),
+        ),
+    ]
+    stars: Annotated[
+        list[str] | None,
+        Field(
+            default=None,
+            description=(
+                "Optional flat list of mention strings (@people, "
+                "#projects) — self-declared, verbatim, <=16 entries."
+            ),
+        ),
+    ]
+    keepsake: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "True = pin as a keepsake (the always-injected zone). "
+                "Requires BOTH reason and actor; refused at the cap "
+                "(nothing is ever evicted)."
+            ),
+        ),
+    ]
+    reason: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Required when keepsake=true — why this memory must "
+                "always be in context."
+            ),
+        ),
+    ]
+    actor: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Required when keepsake=true — WHO decided: exactly "
+                "'empress' or 'emperor'. A CLAIM, never derived; a "
+                "wrong claim is detectable (the result carries the "
+                "turn's provenance class beside it)."
+            ),
+        ),
+    ]
+
+class MemoirPinInput(BaseModel):
+    """Input schema for memoir_pin."""
+
+    id: Annotated[
+        str,
+        Field(description="The episode id to pin as a keepsake."),
+    ]
+    reason: Annotated[
+        str,
+        Field(
+            description=(
+                "Why this memory must always be in context — part of "
+                "the pin's meaning, never optional."
+            ),
+        ),
+    ]
+    actor: Annotated[
+        str,
+        Field(
+            description=(
+                "WHO decided: exactly 'empress' or 'emperor'. A CLAIM, "
+                "never derived."
+            ),
+        ),
+    ]
+
+class MemoirUnpinInput(BaseModel):
+    """Input schema for memoir_unpin."""
+
+    id: Annotated[
+        str,
+        Field(
+            description=(
+                "The episode id to unpin. The episode itself is kept; "
+                "only the pin (and its claim) is cleared. Idempotent."
+            ),
+        ),
+    ]
+
+class MemoirRecallInput(BaseModel):
+    """Input schema for memoir_recall."""
+
+    query: Annotated[
+        str,
+        Field(
+            description=(
+                "What to remember — free text matched against my own "
+                "episodes (lexical always; semantic when indexed)."
+            ),
+        ),
+    ]
+    k: Annotated[
+        int,
+        Field(
+            default=5,
+            description=(
+                "How many episodes (default 5, hard max 20). An "
+                "out-of-range k is REFUSED, never silently clamped."
+            ),
+        ),
+    ]
+
+class MemoirTimelineInput(BaseModel):
+    """Input schema for memoir_timeline."""
+
+    since: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Inclusive lower bound on event_at (ISO-8601; naive "
+                "digits read as UTC)."
+            ),
+        ),
+    ]
+    until: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Inclusive upper bound on event_at (ISO-8601; naive "
+                "digits read as UTC)."
+            ),
+        ),
+    ]
+    q: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Optional lexical narrowing term inside the window."
+            ),
+        ),
+    ]
+
+class MemoirAboutInput(BaseModel):
+    """Input schema for memoir_about."""
+
+    star: Annotated[
+        str,
+        Field(
+            description=(
+                "The star (entity) name to retrieve a dossier for "
+                "(<=100 chars)."
+            ),
+        ),
+    ]
+
+class MemoirReviewInput(BaseModel):
+    """Input schema for memoir_review."""
+
+    title: Annotated[
+        str,
+        Field(
+            description=(
+                "The proposal's title exactly as shown in the "
+                "briefing's proposals zone."
+            ),
+        ),
+    ]
+    decision: Annotated[
+        str,
+        Field(
+            description=(
+                "The review decision: 'accepted' or 'declined'."
+            ),
+        ),
+    ]
+    actor: Annotated[
+        str,
+        Field(
+            description=(
+                "WHO decided — the actor claim. Validated against the "
+                "allowed set."
+            ),
+        ),
+    ]
+
+class MemoirPersonaRatifyInput(BaseModel):
+    """Input schema for memoir_persona_ratify."""
+
+    version_id: Annotated[
+        str,
+        Field(
+            description=(
+                "The pending persona version id to ratify."
+            ),
+        ),
+    ]
+
 
 def create_memoir_tools(
     manager: Any,
@@ -616,245 +862,6 @@ def create_memoir_tools(
     """
     caller_agent_id = agent_id or ""
     caller_instance_id = current_instance_id or ""
-
-    class MemoirWriteInput(BaseModel):
-        """Input schema for memoir_write."""
-
-        text: Annotated[
-            str,
-            Field(
-                description=(
-                    "The memory itself — FIRST-PERSON narrative about me "
-                    "and the user (what happened, what I learned, what "
-                    "matters). Not project state, task progress or code."
-                )
-            ),
-        ]
-        title: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Optional short title (<=200 chars) — the first line "
-                    "of the keepsake zone rendering."
-                ),
-            ),
-        ]
-        importance: Annotated[
-            int,
-            Field(
-                default=5,
-                description=(
-                    "1-10 (default 5). 9-10 = shaped who we are; 1-2 = "
-                    "noise. Affects recall ranking."
-                ),
-            ),
-        ]
-        event_at: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Optional ISO-8601 timestamp of WHEN the event "
-                    "happened (defaults to now). Naive digits are read "
-                    "as UTC; the house timezone is Asia/Ho_Chi_Minh "
-                    "(+07:00) — carry the offset or pre-convert."
-                ),
-            ),
-        ]
-        stars: Annotated[
-            list[str] | None,
-            Field(
-                default=None,
-                description=(
-                    "Optional flat list of mention strings (@people, "
-                    "#projects) — self-declared, verbatim, <=16 entries."
-                ),
-            ),
-        ]
-        keepsake: Annotated[
-            bool,
-            Field(
-                default=False,
-                description=(
-                    "True = pin as a keepsake (the always-injected zone). "
-                    "Requires BOTH reason and actor; refused at the cap "
-                    "(nothing is ever evicted)."
-                ),
-            ),
-        ]
-        reason: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Required when keepsake=true — why this memory must "
-                    "always be in context."
-                ),
-            ),
-        ]
-        actor: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Required when keepsake=true — WHO decided: exactly "
-                    "'empress' or 'emperor'. A CLAIM, never derived; a "
-                    "wrong claim is detectable (the result carries the "
-                    "turn's provenance class beside it)."
-                ),
-            ),
-        ]
-
-    class MemoirPinInput(BaseModel):
-        """Input schema for memoir_pin."""
-
-        id: Annotated[
-            str,
-            Field(description="The episode id to pin as a keepsake."),
-        ]
-        reason: Annotated[
-            str,
-            Field(
-                description=(
-                    "Why this memory must always be in context — part of "
-                    "the pin's meaning, never optional."
-                ),
-            ),
-        ]
-        actor: Annotated[
-            str,
-            Field(
-                description=(
-                    "WHO decided: exactly 'empress' or 'emperor'. A CLAIM, "
-                    "never derived."
-                ),
-            ),
-        ]
-
-    class MemoirUnpinInput(BaseModel):
-        """Input schema for memoir_unpin."""
-
-        id: Annotated[
-            str,
-            Field(
-                description=(
-                    "The episode id to unpin. The episode itself is kept; "
-                    "only the pin (and its claim) is cleared. Idempotent."
-                ),
-            ),
-        ]
-
-    class MemoirRecallInput(BaseModel):
-        """Input schema for memoir_recall."""
-
-        query: Annotated[
-            str,
-            Field(
-                description=(
-                    "What to remember — free text matched against my own "
-                    "episodes (lexical always; semantic when indexed)."
-                ),
-            ),
-        ]
-        k: Annotated[
-            int,
-            Field(
-                default=5,
-                description=(
-                    "How many episodes (default 5, hard max 20). An "
-                    "out-of-range k is REFUSED, never silently clamped."
-                ),
-            ),
-        ]
-
-    class MemoirTimelineInput(BaseModel):
-        """Input schema for memoir_timeline."""
-
-        since: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Inclusive lower bound on event_at (ISO-8601; naive "
-                    "digits read as UTC)."
-                ),
-            ),
-        ]
-        until: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Inclusive upper bound on event_at (ISO-8601; naive "
-                    "digits read as UTC)."
-                ),
-            ),
-        ]
-        q: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Optional lexical narrowing term inside the window."
-                ),
-            ),
-        ]
-
-    class MemoirAboutInput(BaseModel):
-        """Input schema for memoir_about."""
-
-        star: Annotated[
-            str,
-            Field(
-                description=(
-                    "The star (entity) name to retrieve a dossier for "
-                    "(<=100 chars)."
-                ),
-            ),
-        ]
-
-    class MemoirReviewInput(BaseModel):
-        """Input schema for memoir_review."""
-
-        title: Annotated[
-            str,
-            Field(
-                description=(
-                    "The proposal's title exactly as shown in the "
-                    "briefing's proposals zone."
-                ),
-            ),
-        ]
-        decision: Annotated[
-            str,
-            Field(
-                description=(
-                    "The review decision: 'accepted' or 'declined'."
-                ),
-            ),
-        ]
-        actor: Annotated[
-            str,
-            Field(
-                description=(
-                    "WHO decided — the actor claim. Validated against the "
-                    "allowed set."
-                ),
-            ),
-        ]
-
-    class MemoirPersonaRatifyInput(BaseModel):
-        """Input schema for memoir_persona_ratify."""
-
-        version_id: Annotated[
-            str,
-            Field(
-                description=(
-                    "The pending persona version id to ratify."
-                ),
-            ),
-        ]
 
     @register_tool_category(MEMOIR_CATEGORY_KEY)
     @tool(args_schema=MemoirWriteInput)

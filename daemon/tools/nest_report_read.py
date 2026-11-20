@@ -337,6 +337,90 @@ async def _offload(fn: Any, *args: Any, **kwargs: Any) -> Any:
 
     return await _off(fn, *args, **kwargs)
 
+# ── the input schemas — MODULE LEVEL (c2r-hoist-c) ────────────
+# A class statement inside a factory body re-runs on EVERY factory
+# call (one fresh pydantic model per assembly). At module level each
+# class is built ONCE at import and the schema registry then serves
+# every later assembly from cache. VERBATIM move: the fields,
+# annotations, defaults and descriptions are unchanged.
+
+class AnomalyClustersInput(BaseModel):
+    """Input schema for anomaly_clusters."""
+
+    window_s: Annotated[
+        int | None,
+        Field(
+            default=None,
+            description=(
+                "Lookback window in seconds: only clusters whose last "
+                "report is within the window. Default 3600; clamped to "
+                f"at most {MAX_WINDOW_S}."
+            ),
+        ),
+    ]
+    severity: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Filter by the cluster's PEAK severity: minor | major | "
+                "critical."
+            ),
+        ),
+    ]
+    category: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Filter by canonical category (one of the closed "
+                "vocabulary, e.g. 'tool-failure', 'llm-provider')."
+            ),
+        ),
+    ]
+    limit: Annotated[
+        int | None,
+        Field(
+            default=None,
+            description=(
+                f"Maximum groups returned (default 20, at most {MAX_TOP_N})."
+            ),
+        ),
+    ]
+
+class AnomalyReportDetailInput(BaseModel):
+    """Input schema for anomaly_report_detail."""
+
+    cluster_id: Annotated[
+        str,
+        Field(
+            description=(
+                "The cluster identity (anomaly_clusters.id — the uuid "
+                "the grouped list's cluster_ids carry)."
+            ),
+        ),
+    ]
+    limit: Annotated[
+        int | None,
+        Field(
+            default=None,
+            description=(
+                f"Maximum member reports returned (default 20, at most {MAX_TOP_N})."
+            ),
+        ),
+    ]
+    include_excerpt: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "Include each member's stored, bounded, scrubbed excerpt. "
+                "Default false — the excerpt is the heaviest field and "
+                "is opt-in (AM-12b)."
+            ),
+        ),
+    ]
+
 
 def create_nest_report_read_tools(
     manager: Any,
@@ -363,50 +447,6 @@ def create_nest_report_read_tools(
         A list of the two ``@tool``-decorated callables.
     """
     caller_agent_id = agent_id or ""
-
-    class AnomalyClustersInput(BaseModel):
-        """Input schema for anomaly_clusters."""
-
-        window_s: Annotated[
-            int | None,
-            Field(
-                default=None,
-                description=(
-                    "Lookback window in seconds: only clusters whose last "
-                    "report is within the window. Default 3600; clamped to "
-                    f"at most {MAX_WINDOW_S}."
-                ),
-            ),
-        ]
-        severity: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Filter by the cluster's PEAK severity: minor | major | "
-                    "critical."
-                ),
-            ),
-        ]
-        category: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Filter by canonical category (one of the closed "
-                    "vocabulary, e.g. 'tool-failure', 'llm-provider')."
-                ),
-            ),
-        ]
-        limit: Annotated[
-            int | None,
-            Field(
-                default=None,
-                description=(
-                    f"Maximum groups returned (default 20, at most {MAX_TOP_N})."
-                ),
-            ),
-        ]
 
     @register_tool_category(NEST_REPORT_READ_CATEGORY_KEY)
     @tool(args_schema=AnomalyClustersInput)
@@ -484,39 +524,6 @@ def create_nest_report_read_tools(
                 "anomaly_clusters failed: %s", redact_exc_str(exc, limit=200)
             )
             return _error(f"anomaly_clusters failed: {exc}")
-
-    class AnomalyReportDetailInput(BaseModel):
-        """Input schema for anomaly_report_detail."""
-
-        cluster_id: Annotated[
-            str,
-            Field(
-                description=(
-                    "The cluster identity (anomaly_clusters.id — the uuid "
-                    "the grouped list's cluster_ids carry)."
-                ),
-            ),
-        ]
-        limit: Annotated[
-            int | None,
-            Field(
-                default=None,
-                description=(
-                    f"Maximum member reports returned (default 20, at most {MAX_TOP_N})."
-                ),
-            ),
-        ]
-        include_excerpt: Annotated[
-            bool,
-            Field(
-                default=False,
-                description=(
-                    "Include each member's stored, bounded, scrubbed excerpt. "
-                    "Default false — the excerpt is the heaviest field and "
-                    "is opt-in (AM-12b)."
-                ),
-            ),
-        ]
 
     @register_tool_category(NEST_REPORT_READ_CATEGORY_KEY)
     @tool(args_schema=AnomalyReportDetailInput)

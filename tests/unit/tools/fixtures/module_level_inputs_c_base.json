@@ -1,0 +1,754 @@
+{
+  "memoir": [
+    [
+      "memoir_write",
+      {
+        "type": "function",
+        "function": {
+          "name": "memoir_write",
+          "description": "Append one episodic memory to my memoir store. Use tool_help(\"memoir_write\") for details.",
+          "parameters": {
+            "properties": {
+              "text": {
+                "description": "The memory itself \u2014 FIRST-PERSON narrative about me and the user (what happened, what I learned, what matters). Not project state, task progress or code.",
+                "type": "string"
+              },
+              "title": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional short title (<=200 chars) \u2014 the first line of the keepsake zone rendering."
+              },
+              "importance": {
+                "default": 5,
+                "description": "1-10 (default 5). 9-10 = shaped who we are; 1-2 = noise. Affects recall ranking.",
+                "type": "integer"
+              },
+              "event_at": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional ISO-8601 timestamp of WHEN the event happened (defaults to now). Naive digits are read as UTC; the house timezone is Asia/Ho_Chi_Minh (+07:00) \u2014 carry the offset or pre-convert."
+              },
+              "stars": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional flat list of mention strings (@people, #projects) \u2014 self-declared, verbatim, <=16 entries."
+              },
+              "keepsake": {
+                "default": false,
+                "description": "True = pin as a keepsake (the always-injected zone). Requires BOTH reason and actor; refused at the cap (nothing is ever evicted).",
+                "type": "boolean"
+              },
+              "reason": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Required when keepsake=true \u2014 why this memory must always be in context."
+              },
+              "actor": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Required when keepsake=true \u2014 WHO decided: exactly 'empress' or 'emperor'. A CLAIM, never derived; a wrong claim is detectable (the result carries the turn's provenance class beside it)."
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    ],
+    [
+      "memoir_pin",
+      {
+        "type": "function",
+        "function": {
+          "name": "memoir_pin",
+          "description": "Pin an existing episode as a keepsake (cap-refused, never evicted). Use tool_help(\"memoir_pin\") for details.",
+          "parameters": {
+            "properties": {
+              "id": {
+                "description": "The episode id to pin as a keepsake.",
+                "type": "string"
+              },
+              "reason": {
+                "description": "Why this memory must always be in context \u2014 part of the pin's meaning, never optional.",
+                "type": "string"
+              },
+              "actor": {
+                "description": "WHO decided: exactly 'empress' or 'emperor'. A CLAIM, never derived.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "reason",
+              "actor"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    ],
+    [
+      "memoir_unpin",
+      {
+        "type": "function",
+        "function": {
+          "name": "memoir_unpin",
+          "description": "Unpin a keepsake \u2014 the episode itself is kept, only the pin is cleared. Use tool_help(\"memoir_unpin\") for details.",
+          "parameters": {
+            "properties": {
+              "id": {
+                "description": "The episode id to unpin. The episode itself is kept; only the pin (and its claim) is cleared. Idempotent.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    ],
+    [
+      "memoir_recall",
+      {
+        "type": "function",
+        "function": {
+          "name": "memoir_recall",
+          "description": "Recall my own episodes by relevance (budgeted hybrid retrieval). Use tool_help(\"memoir_recall\") for details.",
+          "parameters": {
+            "properties": {
+              "query": {
+                "description": "What to remember \u2014 free text matched against my own episodes (lexical always; semantic when indexed).",
+                "type": "string"
+              },
+              "k": {
+                "default": 5,
+                "description": "How many episodes (default 5, hard max 20). An out-of-range k is REFUSED, never silently clamped.",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    ],
+    [
+      "memoir_timeline",
+      {
+        "type": "function",
+        "function": {
+          "name": "memoir_timeline",
+          "description": "Time-travel over my episodes by event time (writes no stats). Use tool_help(\"memoir_timeline\") for details.",
+          "parameters": {
+            "properties": {
+              "since": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Inclusive lower bound on event_at (ISO-8601; naive digits read as UTC)."
+              },
+              "until": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Inclusive upper bound on event_at (ISO-8601; naive digits read as UTC)."
+              },
+              "q": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional lexical narrowing term inside the window."
+              }
+            },
+            "type": "object"
+          }
+        }
+      }
+    ],
+    [
+      "memoir_about",
+      {
+        "type": "function",
+        "function": {
+          "name": "memoir_about",
+          "description": "Retrieve an entity dossier from the Constellation graph. Use tool_help(\"memoir_about\") for details.",
+          "parameters": {
+            "properties": {
+              "star": {
+                "description": "The star (entity) name to retrieve a dossier for (<=100 chars).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "star"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    ],
+    [
+      "memoir_review",
+      {
+        "type": "function",
+        "function": {
+          "name": "memoir_review",
+          "description": "Record a keepsake-proposal review decision (accepted or declined). Use tool_help(\"memoir_review\") for details.",
+          "parameters": {
+            "properties": {
+              "title": {
+                "description": "The proposal's title exactly as shown in the briefing's proposals zone.",
+                "type": "string"
+              },
+              "decision": {
+                "description": "The review decision: 'accepted' or 'declined'.",
+                "type": "string"
+              },
+              "actor": {
+                "description": "WHO decided \u2014 the actor claim. Validated against the allowed set.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "title",
+              "decision",
+              "actor"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    ],
+    [
+      "memoir_persona_ratify",
+      {
+        "type": "function",
+        "function": {
+          "name": "memoir_persona_ratify",
+          "description": "Ratify a pending persona version through the human lane. Use tool_help(\"memoir_persona_ratify\") for details.",
+          "parameters": {
+            "properties": {
+              "version_id": {
+                "description": "The pending persona version id to ratify.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "version_id"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    ]
+  ],
+  "room": [
+    [
+      "room_create",
+      {
+        "type": "function",
+        "function": {
+          "name": "room_create",
+          "description": "Open a chat-room for your team. Use tool_help(\"room_create\") for details.",
+          "parameters": {
+            "properties": {
+              "name": {
+                "description": "Human-readable room name (what the team calls it, e.g. 'scene-3 build'). Bounded: at most 64 characters of letters, digits, spaces, dots, dashes or underscores, starting with a letter or a digit \u2014 a longer or exotic name is REFUSED (reason=invalid-room-name).",
+                "type": "string"
+              },
+              "member_name": {
+                "default": "",
+                "description": "Your purpose name in this room (e.g. 'producer'). Omit to use your agent id. Teammates address you by this name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    ],
+    [
+      "room_post",
+      {
+        "type": "function",
+        "function": {
+          "name": "room_post",
+          "description": "Post a milestone message to a chat-room. Use tool_help(\"room_post\") for details.",
+          "parameters": {
+            "properties": {
+              "room_id": {
+                "description": "The chatroom UUID you are a member of.",
+                "type": "string"
+              },
+              "text": {
+                "description": "The message body \u2014 a MILESTONE report, not a stream of consciousness.",
+                "type": "string"
+              },
+              "tagged": {
+                "default": [],
+                "description": "Member names to INTERRUPT (``@name`` semantics) \u2014 use sparingly; an interrupt stops their current work.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "addressed_to": {
+                "default": [],
+                "description": "Member names to ROUTE to (``to: name`` semantics) \u2014 they see it in their next digest; it never interrupts them.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "room_id",
+              "text"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    ],
+    [
+      "room_read",
+      {
+        "type": "function",
+        "function": {
+          "name": "room_read",
+          "description": "Read a chat-room's messages. Use tool_help(\"room_read\") for details.",
+          "parameters": {
+            "properties": {
+              "room_id": {
+                "description": "The chatroom UUID you are a member of.",
+                "type": "string"
+              },
+              "after_seq": {
+                "default": 0,
+                "description": "Return messages with seq > this (0 = from the start). Use the last seq you saw as the cursor.",
+                "type": "integer"
+              },
+              "limit": {
+                "default": 50,
+                "description": "How many messages to return (max 200).",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "room_id"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    ],
+    [
+      "room_task_decision",
+      {
+        "type": "function",
+        "function": {
+          "name": "room_task_decision",
+          "description": "Record your decision on a task proposal in a chat-room. Use tool_help(\"room_task_decision\") for details.",
+          "parameters": {
+            "properties": {
+              "room_id": {
+                "description": "The chatroom UUID.",
+                "type": "string"
+              },
+              "proposal_seq": {
+                "description": "The seq of the task_proposal message you are answering (the seq from the notice).",
+                "type": "integer"
+              },
+              "decision": {
+                "description": "Your decision, e.g. 'revive', 'reroute', 'answer-in-room', 'defer'.",
+                "type": "string"
+              },
+              "note": {
+                "default": "",
+                "description": "Optional one-line rationale.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "room_id",
+              "proposal_seq",
+              "decision"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    ],
+    [
+      "room_close",
+      {
+        "type": "function",
+        "function": {
+          "name": "room_close",
+          "description": "Close a chat-room you own. Use tool_help(\"room_close\") for details.",
+          "parameters": {
+            "properties": {
+              "room_id": {
+                "description": "The chatroom UUID you own.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "room_id"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    ]
+  ],
+  "metrics": [
+    [
+      "metrics_families",
+      {
+        "type": "function",
+        "function": {
+          "name": "metrics_families",
+          "description": "The metrics family catalog \u2014 what metrics exist and their shape. Use tool_help(\"metrics_families\") for details.",
+          "parameters": {
+            "properties": {
+              "family": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Exact family id to read (e.g. 'F9' for readiness, 'F1' for event-loop lag, 'F10' for the job queue, 'F6' for the PG census). Omit for the whole catalog."
+              },
+              "details": {
+                "default": false,
+                "description": "When true, each metric name also carries its declared label space, buckets, monotonicity, chart_role and help text. Default false = names + kind + cardinality_class only (the catalog stays small).",
+                "type": "boolean"
+              },
+              "only_with_data": {
+                "default": false,
+                "description": "When true, keep only families that currently publish at least one live series (live_series_count > 0). Note this is NOT the same as availability.state == 'live' \u2014 a family can report dark and still be publishing (see dark_with_live_series).",
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          }
+        }
+      }
+    ],
+    [
+      "metrics_snapshot",
+      {
+        "type": "function",
+        "function": {
+          "name": "metrics_snapshot",
+          "description": "The CURRENT published metric values. Use tool_help(\"metrics_snapshot\") for details.",
+          "parameters": {
+            "properties": {
+              "family": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Exact family id (e.g. 'F10'). Omit for all families."
+              },
+              "families": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Several family ids at once (e.g. ['F10','F13']). The rows are filtered tool-side over ONE provider read, so a multi-family snapshot costs one round trip instead of one per family."
+              },
+              "name_prefix": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Metric-name prefix filter (e.g. 'ensemble_loop_lag_' \u2192 every loop-lag metric). An EXACT metric name is a valid prefix (a name is a prefix of itself)."
+              },
+              "top_n": {
+                "default": 20,
+                "description": "Max series rows to return (1-50, default 20). Order is ascending by (family, name, label key) \u2014 deterministic, so the same query always returns the same rows.",
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          }
+        }
+      }
+    ],
+    [
+      "metrics_history",
+      {
+        "type": "function",
+        "function": {
+          "name": "metrics_history",
+          "description": "The windowed metric TREND, with a comparable-window delta. Use tool_help(\"metrics_history\") for details.",
+          "parameters": {
+            "properties": {
+              "family": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Exact family id; the tool resolves it to that family's metric names from the catalog (a convenience over the provider's name-level selector)."
+              },
+              "series": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Label-aware series selectors, the contract's canonical form: '<name>{k=v,k2=v2}' \u2014 e.g. 'ensemble_loop_lag_seconds{stat=p95}'. Comma-separated k=v pairs. A bare '<name>' matches every label variant. Max 50 selectors in total."
+              },
+              "names": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Name-level selectors (every label variant of the named metrics). Max 50 selectors in total. Prefer 'series' when you know the label values."
+              },
+              "end_offset_s": {
+                "default": 0,
+                "description": "Shift the window END back from now (seconds). The anchor stays RELATIVE (no cursor): the window is always 'the last N seconds as of now minus this offset'.",
+                "type": "integer"
+              },
+              "window_s": {
+                "default": 900,
+                "description": "Window length in seconds (60-7200, default 900 = 15 min). The ring holds 2 h; longer windows are clamped.",
+                "type": "integer"
+              },
+              "max_points": {
+                "default": 120,
+                "description": "Max points per series (2-240, default 120). Server-side bucket-max downsample \u2014 peaks are preserved, never every-kth. The daemon clamps this further so the returned leg stays within its own total-point budget; the effective value is echoed back.",
+                "type": "integer"
+              },
+              "top_n": {
+                "default": 10,
+                "description": "Max series to return (1-50, default 10). The provider is asked for top_n+1 internally so the tool can detect that more exist.",
+                "type": "integer"
+              },
+              "compare": {
+                "default": true,
+                "description": "When true (default), also read the immediately preceding equal-length window and report delta vs that comparable window. Set false to halve the work.",
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          }
+        }
+      }
+    ]
+  ],
+  "nest_report_read": [
+    [
+      "anomaly_clusters",
+      {
+        "type": "function",
+        "function": {
+          "name": "anomaly_clusters",
+          "description": "The decision-ready anomaly GROUPS \u2014 one entry per (tree root, category) with the peak severity, occurrence badge and derived open flag. Use tool_help(\"anomaly_clusters\") for details.",
+          "parameters": {
+            "properties": {
+              "window_s": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Lookback window in seconds: only clusters whose last report is within the window. Default 3600; clamped to at most 7200."
+              },
+              "severity": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Filter by the cluster's PEAK severity: minor | major | critical."
+              },
+              "category": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Filter by canonical category (one of the closed vocabulary, e.g. 'tool-failure', 'llm-provider')."
+              },
+              "limit": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Maximum groups returned (default 20, at most 50)."
+              }
+            },
+            "type": "object"
+          }
+        }
+      }
+    ],
+    [
+      "anomaly_report_detail",
+      {
+        "type": "function",
+        "function": {
+          "name": "anomaly_report_detail",
+          "description": "One anomaly cluster's member reports, freshest first (excerpt only with include_excerpt=true). Use tool_help(\"anomaly_report_detail\") for details.",
+          "parameters": {
+            "properties": {
+              "cluster_id": {
+                "description": "The cluster identity (anomaly_clusters.id \u2014 the uuid the grouped list's cluster_ids carry).",
+                "type": "string"
+              },
+              "limit": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Maximum member reports returned (default 20, at most 50)."
+              },
+              "include_excerpt": {
+                "default": false,
+                "description": "Include each member's stored, bounded, scrubbed excerpt. Default false \u2014 the excerpt is the heaviest field and is opt-in (AM-12b).",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "cluster_id"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    ]
+  ]
+}
