@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.31.20] — 2026-11-20
+## [0.31.21] — 2026-11-20
 
 ### Changed — sonic push doctrine: the sonic lane's end-of-task cycle becomes MERGED + PUSHED + STAGED
 
