@@ -4137,13 +4137,118 @@ never decides go/rollback).
                     prov_verdict,
                 )
             if prov_verdict == "refuse":
-                journal_lock_release(install_dir)
-                return _refusal(
-                    label,
-                    "stale-scripts-dir",
-                    f"arm preflight: {prov_detail} — nonce NOT burned "
-                    "(the arm simply did not happen; nothing consumed)",
-                )
+                # ── D4-b (self-service-promote Wave 5, §2.6): the ARM-TIME
+                # READER — the scripts-pin SELF-ADVANCE. At this point a
+                # refusal on a FALLBACK dir has already been downgraded to
+                # a warning above, so a surviving refusal is an EXPLICITLY
+                # PINNED dir (F12 carve-out untouched: non-git dirs never
+                # reach a refusal). When the class is BEHIND-FLOOR, the pin
+                # is advanced to the target release's own source_commit
+                # (worktree-local HEAD move — NEVER fetch), journaled as
+                # `arm-scripts-advance`, and the guard re-judged (it must
+                # now arm). When the advance is IMPOSSIBLE the arm refuses
+                # PRE-NONCE with the NEW additive token
+                # `scripts-advance-unavailable` + the exact hand command
+                # (nonce NOT burned — the burn is further down); byte
+                # PARITY failures refuse with `scripts-pin-drift`. Every
+                # OTHER refusal class falls through to the EXISTING
+                # stale-scripts-dir refusal UNCHANGED (W-1/W-3 legs).
+                if os.environ.get(
+                    "ENSEMBLE_UPGRADE_SCRIPTS_DIR", ""
+                ).strip():
+                    adv_status, adv_detail = scripts_pin_self_advance(
+                        scripts_dir,
+                        floor_commit=(PIPELINE_SCRIPTS_FLOOR_COMMIT or None),
+                        target_commit=None,
+                        manifest=manifest,
+                    )
+                    if adv_status == "advanced":
+                        try:
+                            uj.journal_history_append(
+                                install_dir,
+                                "arm-scripts-advance",
+                                f"scripts pin self-advanced: {adv_detail} "
+                                f"scripts_dir={scripts_dir} "
+                                "ownership=release-lane-written "
+                                "(stage-time writer; arm-time reader "
+                                "recovered a missed stage advance)",
+                            )
+                        except (uj.JournalTorn, OSError) as exc:
+                            logger.warning(
+                                "arm-scripts-advance row failed (%s) — "
+                                "the advance itself stands", exc,
+                            )
+                        prov_verdict, prov_detail = (
+                            scripts_dir_provenance_verdict(
+                                scripts_dir,
+                                floor_commit=(
+                                    PIPELINE_SCRIPTS_FLOOR_COMMIT or None
+                                ),
+                                env=os.environ,
+                            )
+                        )
+                        if prov_verdict != "refuse":
+                            try:
+                                uj.journal_history_append(
+                                    install_dir,
+                                    "arm-scripts-provenance",
+                                    f"verdict={prov_verdict} {prov_detail} "
+                                    "(re-judged after arm-scripts-advance)",
+                                )
+                            except (uj.JournalTorn, OSError):
+                                pass
+                        # a still-refusing re-judgement falls through to
+                        # the existing refusal below with the FRESH detail
+                    elif adv_status == "unavailable":
+                        try:
+                            uj.journal_history_append(
+                                install_dir,
+                                "arm-scripts-advance",
+                                f"advance UNAVAILABLE: {adv_detail}",
+                            )
+                        except (uj.JournalTorn, OSError):
+                            pass
+                        journal_lock_release(install_dir)
+                        return _refusal(
+                            label,
+                            "scripts-advance-unavailable",
+                            f"arm preflight: the pinned scripts dir is "
+                            f"behind the floor and cannot self-advance — "
+                            f"{adv_detail} — nonce NOT burned (the arm "
+                            "simply did not happen; nothing consumed)",
+                        )
+                    elif adv_status == "drift":
+                        try:
+                            uj.journal_history_append(
+                                install_dir,
+                                "arm-scripts-advance",
+                                f"advance REFUSED: {adv_detail}",
+                            )
+                        except (uj.JournalTorn, OSError):
+                            pass
+                        journal_lock_release(install_dir)
+                        return _refusal(
+                            label,
+                            "scripts-pin-drift",
+                            f"arm preflight: {adv_detail} — nonce NOT "
+                            "burned (the arm simply did not happen; "
+                            "nothing consumed)",
+                        )
+                    # "not-eligible" ⇒ fall through, unchanged
+                # D4-b: a SUCCESSFUL advance re-judged the guard to a
+                # non-refuse verdict above (prov_verdict reassigned) —
+                # the arm proceeds and this refusal is SKIPPED. Any other
+                # path leaves prov_verdict == "refuse" and the EXISTING
+                # refusal fires with its original (or fresh re-judged)
+                # detail — byte-identical to the pre-Wave-5 behavior.
+                if prov_verdict == "refuse":
+                    journal_lock_release(install_dir)
+                    return _refusal(
+                        label,
+                        "stale-scripts-dir",
+                        f"arm preflight: {prov_detail} — nonce NOT burned "
+                        "(the arm simply did not happen; nothing consumed)",
+                    )
             # ── Step 0c — arm-time journalctl capture (AC-OBS-1 / C-7) ────
             # The daemon app log rotates at 10 MB (~15-20 min) and the
             # AGENT lanes cannot reach journalctl or /var/log at all ⇒ the
@@ -4624,3 +4729,209 @@ def scripts_dir_provenance_verdict(
         f"non-git-no-stamp: WARNING only, never a refusal (Q2/D6-11); "
         f"{provenance}",
     )
+
+
+# ── D4-b (self-service-promote Wave 5, §2.6): the ARM-TIME READER — the
+# scripts-pin SELF-ADVANCE. Called ONLY after the provenance guard
+# refused an EXPLICITLY PINNED dir in the BEHIND-FLOOR class; the guard's
+# own git-ancestry predicate is BYTE-UNCHANGED (this is a separate step,
+# not a guard edit). The advance is a WORKTREE-LOCAL HEAD move — NEVER a
+# fetch (the daemon has no SSH path in the systemd env).
+#
+# Statuses (closed vocabulary):
+#   "not-eligible" — the refusal is not the behind-floor class (probe
+#       error / floor-unset / stamp-absent / unusable dir / the pin is
+#       already at-or-after the floor): the caller falls through to the
+#       EXISTING refusal unchanged (byte-identical W-1/W-3 behavior).
+#   "advanced"     — pin HEAD == T now; detail names T_old→T_new +
+#       coverage + parity (the caller journals `arm-scripts-advance` and
+#       re-judges the guard, which must now return arm).
+#   "unavailable"  — the advance is IMPOSSIBLE (no source_commit in the
+#       target manifest / T not sha-shaped / T absent locally / floor not
+#       contained in T / a family path missing at T / the flock or the
+#       checkout failed): the caller refuses PRE-NONCE with the NEW
+#       additive token `scripts-advance-unavailable` + the exact command
+#       to run by hand (nonce NOT burned, lock released, no pending_op).
+#   "drift"        — the byte-parity gate failed (the tree at T does not
+#       match the payload manifest's scripts_manifest sha256): the caller
+#       refuses with the NEW additive token `scripts-pin-drift`.
+
+_SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _advance_remedy(pin_root: Path, target: str, why: str) -> str:
+    """The EXACT hand command for a scripts-advance-unavailable refusal
+    (AC-D4-2) — class-specific, copy-pasteable."""
+    return (
+        f"Remedy ({why}): run by hand — "
+        f"git -C {pin_root} fetch origin && "
+        f"git -C {pin_root} checkout --detach {target} "
+        "(the daemon never fetches: no SSH path in the systemd env)"
+    )
+
+
+def scripts_pin_self_advance(
+    scripts_dir: Path,
+    floor_commit: str | None,
+    target_commit: str | None = None,
+    manifest: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Attempt the D4-b self-advance of an explicitly-pinned scripts
+    worktree. Returns ``(status, detail)`` — see the status vocabulary
+    above. NEVER fetches; journals NOTHING (the caller owns the journal
+    rows); never raises.
+
+    ``target_commit``: the staged release's ``manifest.source_commit``
+    (passed explicitly or derived from ``manifest``).
+    """
+    pin_root = Path(scripts_dir).parents[1] if len(
+        Path(scripts_dir).parents
+    ) >= 2 else Path(scripts_dir)
+    # ── eligibility: is the refusal the BEHIND-FLOOR class? ────────────
+    if not floor_commit:
+        return "not-eligible", "floor unset — not the behind-floor class"
+    rev_rc, rev_out, _ = uj.bounded_git_probe(
+        scripts_dir, "rev-parse", "--verify", "HEAD"
+    )
+    if rev_rc != 0:
+        return "not-eligible", f"HEAD unresolvable (rc={rev_rc})"
+    t_old = rev_out.strip()
+    if not t_old:
+        return "not-eligible", "HEAD empty"
+    anc_rc, _, _ = uj.bounded_git_probe(
+        scripts_dir, "merge-base", "--is-ancestor", floor_commit, "HEAD"
+    )
+    if anc_rc == 0:
+        return "not-eligible", (
+            f"HEAD {t_old[:12]} already contains the floor — the refusal "
+            "is not the behind-floor class"
+        )
+    if anc_rc != 1:
+        return "not-eligible", (
+            f"floor ancestry probe rc={anc_rc} — unverifiable, not the "
+            "behind-floor class"
+        )
+    # ── the target commit ──────────────────────────────────────────────
+    t = target_commit
+    if t is None and isinstance(manifest, dict):
+        raw = manifest.get("source_commit")
+        if isinstance(raw, str):
+            t = raw.strip()
+    if not t or not _SHA40_RE.match(t):
+        return "unavailable", (
+            "the target release's manifest carries no sha-shaped "
+            "source_commit (staged by a pre-Wave-5 stage lane) — the pin "
+            "cannot be self-advanced to the release's own source commit; "
+            + _advance_remedy(pin_root, "<the-release-source-commit>",
+                              "no source_commit")
+        )
+    # ── T present locally (NEVER fetch) ────────────────────────────────
+    cf_rc, _, cf_err = uj.bounded_git_probe(
+        scripts_dir, "cat-file", "-e", f"{t}^{{commit}}"
+    )
+    if cf_rc != 0:
+        return "unavailable", (
+            f"target commit {t} is NOT present in the pin worktree's "
+            f"object store (git cat-file rc={cf_rc}: "
+            f"{(cf_err or '').strip()[:120] or 'absent'}) — "
+            "the daemon never fetches; "
+            + _advance_remedy(pin_root, t, "target absent locally")
+        )
+    # ── floor ⊆ T ──────────────────────────────────────────────────────
+    ft_rc, _, _ = uj.bounded_git_probe(
+        scripts_dir, "merge-base", "--is-ancestor", floor_commit, t
+    )
+    if ft_rc != 0:
+        return "unavailable", (
+            f"floor {floor_commit[:12]} is NOT an ancestor of the target "
+            f"{t[:12]} — the staged release predates the floor the daemon "
+            "enforces; re-stage a release whose source contains the floor; "
+            + _advance_remedy(pin_root, t, "floor not contained")
+        )
+    # ── 17-path coverage at T (AC-D4-7) ────────────────────────────────
+    missing: list[str] = []
+    for rel in uj.EXECUTOR_FAMILY_PATHS:
+        m_rc, _, _ = uj.bounded_git_probe(
+            scripts_dir, "cat-file", "-e", f"{t}:{rel}"
+        )
+        if m_rc != 0:
+            missing.append(rel)
+    if missing:
+        return "unavailable", (
+            f"executor-family stamp coverage at target {t[:12]} is "
+            f"NON-EMPTY ({len(missing)} missing: "
+            f"{', '.join(missing[:4])}{'…' if len(missing) > 4 else ''}) — "
+            "the target commit does not contain the whole shipped family; "
+            + _advance_remedy(pin_root, t, "coverage non-empty")
+        )
+    # ── byte parity vs the payload manifest (AC-D4-4) ──────────────────
+    if isinstance(manifest, dict):
+        scripts_map = manifest.get("scripts_manifest")
+        slice_map = manifest.get("daemon_slice_manifest")
+        if not isinstance(scripts_map, dict) or not isinstance(slice_map, dict):
+            return "unavailable", (
+                "the target release's manifest carries no "
+                "scripts_manifest/daemon_slice_manifest maps (pre-Wave-5 "
+                "payload) — byte parity is unverifiable; "
+                + _advance_remedy(pin_root, t, "manifest maps absent")
+            )
+        for rel in uj.EXECUTOR_FAMILY_PATHS:
+            if rel.startswith("scripts/"):
+                key, entry = rel[len("scripts/"):], scripts_map
+            else:
+                key, entry = rel, slice_map
+            want = entry.get(key)
+            if not isinstance(want, str):
+                return "drift", (
+                    f"scripts-pin-drift: family path {rel} is ABSENT from "
+                    f"the payload manifest at key {key!r} — the payload and "
+                    f"the pin tree at {t[:12]} disagree"
+                )
+            got = uj.bounded_git_blob_sha256(scripts_dir, t, rel)
+            if got is None or got != want:
+                return "drift", (
+                    f"scripts-pin-drift: {rel} at target {t[:12]} hashes "
+                    f"to {got or '<unprobeable>'} but the payload manifest "
+                    f"records {want[:12]}… — the executing tree would NOT "
+                    "be byte-identical to the shipped family; refusing "
+                    "(the staged tree diverged from its own source commit)"
+                )
+    # ── MINOR-11: flock beside the pin worktree, then the HEAD move ────
+    lock_path = Path(f"{pin_root}.scripts-advance.lock")
+    try:
+        lock_fh = lock_path.open("a+b")
+    except OSError as exc:
+        return "unavailable", (
+            f"cannot open the advance lockfile {lock_path} "
+            f"({type(exc).__name__}: {exc}) — concurrent arms could "
+            "interleave HEAD moves; " + _advance_remedy(pin_root, t, "lock")
+        )
+    try:
+        import fcntl  # POSIX only — the daemon is Linux-first
+
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+    except (ImportError, OSError) as exc:
+        lock_fh.close()
+        return "unavailable", (
+            f"cannot flock {lock_path} ({type(exc).__name__}: {exc}); "
+            + _advance_remedy(pin_root, t, "lock")
+        )
+    try:
+        ok, note = uj.bounded_git_checkout_detach(scripts_dir, t)
+        if not ok:
+            return "unavailable", (
+                f"the worktree-local HEAD move FAILED ({note}); "
+                + _advance_remedy(pin_root, t, "checkout failed")
+            )
+        return "advanced", (
+            f"T_old={t_old[:12]} T_new={t[:12]} floor={floor_commit[:12]} "
+            f"coverage=empty({len(uj.EXECUTOR_FAMILY_PATHS)} paths) "
+            "parity=byte-identical lock=held-through-checkout"
+        )
+    finally:
+        try:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        lock_fh.close()
+

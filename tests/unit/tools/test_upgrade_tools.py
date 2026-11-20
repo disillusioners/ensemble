@@ -4837,6 +4837,312 @@ class TestScriptsDirProvenanceArmPath:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# D4-b (self-service-promote Wave 5, §2.6): the ARM-TIME READER — the
+# scripts-pin SELF-ADVANCE. AC-D4-1/-2/-3 + AC-D4-4/-7 (the coverage and
+# parity halves). Real git fixtures in tmp (the pin "worktree" is a plain
+# clone — the advance is a worktree-local HEAD move, never a fetch).
+# ══════════════════════════════════════════════════════════════════════════
+
+_FAMILY_CONTENTS = {
+    rel: f"#!/usr/bin/env bash\n# fixture family member {rel}\n"
+    for rel in uj.EXECUTOR_FAMILY_PATHS
+}
+_FAMILY_CONTENTS["scripts/upgrade/lib.sh"] = (
+    "#!/usr/bin/env bash\nPIPELINE_SCRIPTS_REV={rev}\n"
+)
+
+
+def _git(*args, cwd: Path) -> str:
+    r = subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    assert r.returncode == 0, (args, r.stderr.decode()[:300])
+    return r.stdout.decode().strip()
+
+
+def _build_pin_fixture(tmp_path: Path, *, stamp: str = "a" * 40) -> dict:
+    """A real git repo shaped like the scripts pin: a HEAD line carrying an
+    OLDER family copy (behind the floor by construction — no shared
+    history with the floor line) + a floor commit F + a target T (a
+    descendant of F, all 17 family paths present). Returns
+    ``{"pin": pin_scripts_dir, "floor": F, "target": T, "manifest": …}``
+    with a manifest whose maps hash the family content AT T."""
+    pin = tmp_path / "pin-repo"
+    pin.mkdir()
+    _git("init", "-q", "-b", "main", cwd=pin)
+    # the HEAD line: an OLDER family copy (the pin's current stale state —
+    # scripts/upgrade PRESENT with an old stamp, so the dir resolves and
+    # the guard's stamp parse works)
+    for rel in uj.EXECUTOR_FAMILY_PATHS:
+        p = pin / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            _FAMILY_CONTENTS[rel].format(rev="0" * 40), encoding="utf-8"
+        )
+        p.chmod(0o755)
+    _git("add", "-A", cwd=pin)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+         "-m", "stale base (older family copy)", cwd=pin)
+    # the floor→target line on an ORPHAN branch (no shared history with
+    # HEAD ⇒ HEAD does not contain the floor — the behind-floor class)
+    _git("checkout", "-q", "--orphan", "lane", cwd=pin)
+    for rel in uj.EXECUTOR_FAMILY_PATHS:
+        p = pin / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_FAMILY_CONTENTS[rel].format(rev=stamp), encoding="utf-8")
+        p.chmod(0o755)
+    _git("add", "-A", cwd=pin)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+         "-m", "floor: the family lands", cwd=pin)
+    floor = _git("rev-parse", "HEAD", cwd=pin)
+    # the target commit T: a descendant of F with one family file changed
+    changed = "scripts/upgrade/promote.sh"
+    (pin / changed).write_text(
+        _FAMILY_CONTENTS[changed].format(rev=stamp)
+        + "# target-commit change\n", encoding="utf-8",
+    )
+    _git("add", "-A", cwd=pin)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+         "-m", "target", cwd=pin)
+    target = _git("rev-parse", "HEAD", cwd=pin)
+    # back to the stale HEAD line (the pin sits BEHIND the floor)
+    _git("checkout", "-q", "main", cwd=pin)
+    # the payload manifest: sha256 maps over the family AT T
+    import hashlib
+
+    scripts_map: dict[str, str] = {}
+    slice_map: dict[str, str] = {}
+    for rel in uj.EXECUTOR_FAMILY_PATHS:
+        blob = subprocess.run(
+            ["git", "-C", str(pin), "show", f"{target}:{rel}"],
+            stdout=subprocess.PIPE, check=True,
+        ).stdout
+        sha = hashlib.sha256(blob).hexdigest()
+        if rel.startswith("scripts/"):
+            scripts_map[rel[len("scripts/"):]] = sha
+        else:
+            slice_map[rel] = sha
+    manifest = {
+        "source_commit": target,
+        "scripts_manifest": scripts_map,
+        "daemon_slice_manifest": slice_map,
+    }
+    return {
+        "pin": pin / "scripts" / "upgrade", "floor": floor,
+        "target": target, "manifest": manifest,
+    }
+
+
+class TestScriptsPinSelfAdvance:
+    """The D4-b reader, unit level (the guard itself is UNCHANGED — these
+    legs exercise ``scripts_pin_self_advance`` directly)."""
+
+    def test_ac_d4_1_behind_and_local_advances_to_target(self, tmp_path):
+        fx = _build_pin_fixture(tmp_path)
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "advanced", (status, detail)
+        assert "coverage=empty" in detail and "parity=byte-identical" in detail
+        head = _git("rev-parse", "HEAD", cwd=fx["pin"])
+        assert head == fx["target"], "pin HEAD did not move to T"
+        # the advance left a CLEAN tree (diff-index quiet)
+        r = subprocess.run(
+            ["git", "-C", str(fx["pin"]), "diff-index", "--quiet", "HEAD"],
+        )
+        assert r.returncode == 0
+
+    def test_ac_d4_2_target_absent_is_unavailable_with_exact_command(
+        self, tmp_path
+    ):
+        fx = _build_pin_fixture(tmp_path)
+        ghost = "e" * 40
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=ghost, manifest=None,
+        )
+        assert status == "unavailable", (status, detail)
+        assert "NOT present" in detail
+        assert f"git -C {fx['pin'].parents[1]} fetch origin" in detail, (
+            f"the exact hand command is missing: {detail}"
+        )
+        assert f"checkout --detach {ghost}" in detail
+
+    def test_ac_d4_3_non_git_pin_is_never_eligible(self, tmp_path):
+        plain = _pinned_scripts(tmp_path, stamp="deadbeef", git_shaped=False)
+        # the GUARD on a non-git dir: arm/warn, NEVER refuse (F12 intact)
+        verdict, _detail = ut.scripts_dir_provenance_verdict(
+            plain, floor_commit="f" * 40,
+        )
+        assert verdict == "arm"
+        # the ADVANCE on the same dir: not-eligible (HEAD unresolvable)
+        status, detail = ut.scripts_pin_self_advance(
+            plain, "f" * 40, target_commit="e" * 40, manifest=None,
+        )
+        assert status == "not-eligible", (status, detail)
+
+    def test_pin_at_or_after_floor_is_not_eligible(self, tmp_path):
+        fx = _build_pin_fixture(tmp_path)
+        # advance the pin ONCE, then attempt again: now at-or-after floor
+        status, _ = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "advanced"
+        status2, detail2 = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status2 == "not-eligible", (status2, detail2)
+
+    def test_ac_d4_7_target_missing_a_family_path_refuses(self, tmp_path):
+        fx = _build_pin_fixture(tmp_path)
+        pin = fx["pin"].parents[1]
+        # a target line where one family member was DELETED after the floor
+        _git("checkout", "-q", "lane", cwd=pin)
+        _git("rm", "-q", "scripts/upgrade/status.sh", cwd=pin)
+        _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+             "-m", "drop a family member", cwd=pin)
+        holed = _git("rev-parse", "HEAD", cwd=pin)
+        _git("checkout", "-q", "main", cwd=pin)
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"], target_commit=holed,
+            manifest={"source_commit": holed},
+        )
+        assert status == "unavailable", (status, detail)
+        assert "NON-EMPTY" in detail and "status.sh" in detail
+
+    def test_ac_d4_4_parity_mismatch_is_drift(self, tmp_path):
+        fx = _build_pin_fixture(tmp_path)
+        bad = dict(fx["manifest"])
+        bad["scripts_manifest"] = dict(fx["manifest"]["scripts_manifest"])
+        bad["scripts_manifest"]["upgrade/lib.sh"] = "0" * 64
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=bad,
+        )
+        assert status == "drift", (status, detail)
+        assert "scripts-pin-drift" in detail
+        # the pin was NOT moved (the drift refusal precedes the checkout)
+        assert _git("rev-parse", "HEAD", cwd=fx["pin"]) != fx["target"]
+
+    def test_manifest_without_source_commit_is_unavailable(self, tmp_path):
+        fx = _build_pin_fixture(tmp_path)
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"], target_commit=None,
+            manifest={"version": "9.9.9"},
+        )
+        assert status == "unavailable", (status, detail)
+        assert "no sha-shaped source_commit" in detail
+
+
+class TestScriptsPinSelfAdvanceArmPath:
+    """The D4-b reader THROUGH the arm (Check-4 integration): the advance
+    fires only on the behind-floor EXPLICIT-pin class; everything else is
+    byte-identical (AC-D4-8, pinned by the W legs above)."""
+
+    @staticmethod
+    def _rewrite_manifest(install: Path, version: str, **extra) -> None:
+        mp = install / "releases" / version / "manifest.json"
+        data = json.loads(mp.read_text(encoding="utf-8"))
+        data.update(extra)
+        mp.write_text(json.dumps(data), encoding="utf-8")
+
+    async def test_ac_d4_1_arm_self_advances_and_proceeds(
+        self, harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Behind floor + T local ⇒ the arm PROCEEDS (no stale-scripts-dir
+        refusal), the pin HEAD == T, and the journal carries the
+        arm-scripts-advance row naming T_old→T_new + coverage."""
+        tools, markers, install = harness
+        fx = _build_pin_fixture(tmp_path)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(fx["pin"]))
+        monkeypatch.setattr(
+            ut, "PIPELINE_SCRIPTS_FLOOR_COMMIT", fx["floor"]
+        )
+        self._rewrite_manifest(
+            install, "1.2.3",
+            source_commit=fx["target"],
+            scripts_manifest=fx["manifest"]["scripts_manifest"],
+            daemon_slice_manifest=fx["manifest"]["daemon_slice_manifest"],
+        )
+        out = await _arm_demo_promote(tools)
+        assert "UPGRADE ARMED" in out, out
+        assert _git("rev-parse", "HEAD", cwd=fx["pin"]) == fx["target"]
+        history = uj.journal_read(install).get("history") or []
+        adv = [e for e in history if e.get("event") == "arm-scripts-advance"]
+        assert adv, "the arm-scripts-advance row is missing"
+        assert "T_old=" in adv[-1]["detail"] and "coverage=empty" in (
+            adv[-1]["detail"]
+        )
+        assert markers, "the executor marker is missing on a successful arm"
+
+    async def test_ac_d4_2_arm_refuses_scripts_advance_unavailable(
+        self, harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T absent locally ⇒ refusal with the NEW token + the exact
+        command; nonce NOT burned; lock released; no pending_op."""
+        tools, markers, install = harness
+        fx = _build_pin_fixture(tmp_path)
+        ghost = "e" * 40
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(fx["pin"]))
+        monkeypatch.setattr(
+            ut, "PIPELINE_SCRIPTS_FLOOR_COMMIT", fx["floor"]
+        )
+        self._rewrite_manifest(install, "1.2.3", source_commit=ghost)
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) == "scripts-advance-unavailable", out
+        assert "fetch origin" in out and "checkout --detach" in out, out
+        assert not uj.lock_dir(install).exists(), "lock not released"
+        assert uj.journal_read(install).get("pending_op") is None
+        assert markers == []
+        # the pin did NOT move
+        assert _git("rev-parse", "HEAD", cwd=fx["pin"]) != ghost
+
+    async def test_ac_d4_4_arm_refuses_scripts_pin_drift(
+        self, harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Byte-parity mismatch ⇒ `scripts-pin-drift` refusal (the staged
+        tree diverged from its own source commit)."""
+        tools, markers, install = harness
+        fx = _build_pin_fixture(tmp_path)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(fx["pin"]))
+        monkeypatch.setattr(
+            ut, "PIPELINE_SCRIPTS_FLOOR_COMMIT", fx["floor"]
+        )
+        bad_map = dict(fx["manifest"]["scripts_manifest"])
+        bad_map["upgrade/lib.sh"] = "1" * 64
+        self._rewrite_manifest(
+            install, "1.2.3",
+            source_commit=fx["target"],
+            scripts_manifest=bad_map,
+            daemon_slice_manifest=fx["manifest"]["daemon_slice_manifest"],
+        )
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) == "scripts-pin-drift", out
+        assert not uj.lock_dir(install).exists()
+        assert markers == []
+
+    async def test_w3a_floor_unset_still_refuses_stale_scripts_dir(
+        self, harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC-D4-8 companion: the EXISTING refusal classes are untouched —
+        a floor-UNSET explicit pin still refuses `stale-scripts-dir` (the
+        advance is not-eligible; the W-3a vocabulary byte-identical)."""
+        tools, markers, install = harness
+        fx = _build_pin_fixture(tmp_path)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(fx["pin"]))
+        monkeypatch.setattr(ut, "PIPELINE_SCRIPTS_FLOOR_COMMIT", "")
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) == "stale-scripts-dir", out
+        assert "floor-unset" in out, out
+        assert not uj.lock_dir(install).exists()
+        assert markers == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # D1 (2026-11-11): the ARM lane's half of the ONE stale-txn reclaim
 # mechanism. The tool busy-check used to refuse FOREVER on a dead pre-flip
 # txn (the 2026-11-11 starvation) — now an ORPHANED txn (dead owner +

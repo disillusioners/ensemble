@@ -107,6 +107,7 @@ tool surface would force every contract change to touch two modules.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -3369,6 +3370,103 @@ def bounded_git_probe(cwd: Path, *args: str) -> tuple[int, str, str]:
     except (OSError, subprocess.SubprocessError) as exc:
         return GIT_PROBE_ERROR_RC, "", f"{type(exc).__name__}: {exc}"
     return proc.returncode, proc.stdout, proc.stderr
+
+
+# ── D4-b (self-service-promote Wave 5, §2.6): the scripts-pin self-advance
+# plumbing. The READ-side probes stay judge-only (bounded_git_probe, above);
+# these are the ONE deliberately-MUTATING git op (the worktree-local HEAD
+# move — ``git checkout --detach <T>``) plus the blob-hash reader the
+# byte-parity gate needs. They live HERE (not in upgrade_tools) because the
+# tools module carries a no-direct-process-spawn discipline
+# (test_static_no_direct_process_spawn_in_tools_module) — the guard
+# delegates rather than spawning, and so does the advance.
+GIT_CHECKOUT_TIMEOUT_S = 30.0
+
+# The canonical executor family list (scripts/upgrade/executor_family.sh
+# `executor_family_paths` — 17 payload-relative paths). PYTHON MIRROR:
+# the shell file is the single definition for STAGING; this tuple is the
+# daemon-side copy the advance's coverage + parity gates consume. The
+# mirror is pinned to the shell list by test_executor_family_payload.sh
+# (byte-parity leg) — extend BOTH together, never one.
+EXECUTOR_FAMILY_PATHS: tuple[str, ...] = (
+    "scripts/upgrade/_build_frontend.sh",
+    "scripts/upgrade/adopt-unit.sh",
+    "scripts/upgrade/executor_family.sh",
+    "scripts/upgrade/journal_read.py",
+    "scripts/upgrade/journal_splice.py",
+    "scripts/upgrade/ledger_check.py",
+    "scripts/upgrade/lib.sh",
+    "scripts/upgrade/promote.sh",
+    "scripts/upgrade/restart.sh",
+    "scripts/upgrade/rollback.sh",
+    "scripts/upgrade/stage.sh",
+    "scripts/upgrade/status.sh",
+    "scripts/stop-ensemble.sh",
+    "scripts/install-dir-guard.sh",
+    "daemon/plugin_subsystem/promote_staleness.py",
+    "daemon/plugin_subsystem/config_compat_check.py",
+    "daemon/plugin_subsystem/config_compat_contract.py",
+)
+
+
+def bounded_git_checkout_detach(
+    cwd: Path, commit: str
+) -> tuple[bool, str]:
+    """``git -C <cwd> checkout --detach <commit>`` — the ONE mutating git
+    op of the scripts-pin self-advance (D4-b): a WORKTREE-LOCAL HEAD move,
+    bounded, and NEVER a fetch (the daemon has no SSH path in the systemd
+    env — §2.6 option (b)). Returns ``(True, new_head)`` on success,
+    ``(False, error)`` otherwise. Raises nothing."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "checkout", "--detach", commit],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=GIT_CHECKOUT_TIMEOUT_S,
+            check=False,
+            env={
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": os.environ.get("HOME", "/"),
+                "GIT_CONFIG_NOSYSTEM": "1",
+            },
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    if proc.returncode != 0:
+        tail = (proc.stderr or b"").decode("utf-8", errors="replace")[-240:]
+        return False, f"git checkout rc={proc.returncode}: {tail.strip()}"
+    rc, out, _err = bounded_git_probe(cwd, "rev-parse", "--verify", "HEAD")
+    if rc != 0:
+        return False, "checkout returned 0 but HEAD is unresolvable after"
+    return True, out.strip()
+
+
+def bounded_git_blob_sha256(
+    cwd: Path, commit: str, rel_path: str
+) -> str | None:
+    """sha256 of the BLOB ``<commit>:<rel_path>`` (read-only,
+    ``git show``), or ``None`` when the object does not exist / the probe
+    failed. Used by the advance's byte-parity gate to compare the pinned
+    tree AT the target commit against the payload manifest WITHOUT
+    touching the working tree."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "show", f"{commit}:{rel_path}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=GIT_CHECKOUT_TIMEOUT_S,
+            check=False,
+            env={
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": os.environ.get("HOME", "/"),
+                "GIT_CONFIG_NOSYSTEM": "1",
+            },
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return hashlib.sha256(proc.stdout).hexdigest()
 
 
 def executor_log_path(install_dir: Path) -> Path:
