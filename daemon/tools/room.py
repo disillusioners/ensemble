@@ -343,6 +343,142 @@ def _member_dict(member: dict[str, Any]) -> dict[str, Any]:
         "agent_id": member.get("agent_id"),
     }
 
+# ── the input schemas — MODULE LEVEL (c2r-hoist-c) ────────────
+# A class statement inside a factory body re-runs on EVERY factory
+# call (one fresh pydantic model per assembly). At module level each
+# class is built ONCE at import and the schema registry then serves
+# every later assembly from cache. VERBATIM move: the fields,
+# annotations, defaults and descriptions are unchanged.
+
+class RoomCreateInput(BaseModel):
+    """Input schema for room_create."""
+
+    name: Annotated[
+        str,
+        Field(
+            description=(
+                "Human-readable room name (what the team calls it, "
+                "e.g. 'scene-3 build'). Bounded: at most 64 "
+                "characters of letters, digits, spaces, dots, "
+                "dashes or underscores, starting with a letter or "
+                "a digit — a longer or exotic name is REFUSED "
+                "(reason=invalid-room-name)."
+            )
+        ),
+    ]
+    member_name: Annotated[
+        str,
+        Field(
+            default="",
+            description=(
+                "Your purpose name in this room (e.g. 'producer'). "
+                "Omit to use your agent id. Teammates address you by "
+                "this name."
+            ),
+        ),
+    ]
+
+class RoomPostInput(BaseModel):
+    """Input schema for room_post."""
+
+    room_id: Annotated[
+        str,
+        Field(description="The chatroom UUID you are a member of."),
+    ]
+    text: Annotated[
+        str,
+        Field(
+            description=(
+                "The message body — a MILESTONE report, not a "
+                "stream of consciousness."
+            )
+        ),
+    ]
+    tagged: Annotated[
+        list[str],
+        Field(
+            default=[],
+            description=(
+                "Member names to INTERRUPT (``@name`` semantics) — "
+                "use sparingly; an interrupt stops their current work."
+            ),
+        ),
+    ]
+    addressed_to: Annotated[
+        list[str],
+        Field(
+            default=[],
+            description=(
+                "Member names to ROUTE to (``to: name`` semantics) — "
+                "they see it in their next digest; it never "
+                "interrupts them."
+            ),
+        ),
+    ]
+
+class RoomReadInput(BaseModel):
+    """Input schema for room_read."""
+
+    room_id: Annotated[
+        str,
+        Field(description="The chatroom UUID you are a member of."),
+    ]
+    after_seq: Annotated[
+        int,
+        Field(
+            default=0,
+            description=(
+                "Return messages with seq > this (0 = from the "
+                "start). Use the last seq you saw as the cursor."
+            ),
+        ),
+    ]
+    limit: Annotated[
+        int,
+        Field(
+            default=ROOM_READ_DEFAULT_LIMIT,
+            description=f"How many messages to return (max {ROOM_READ_MAX_LIMIT}).",
+        ),
+    ]
+
+class RoomTaskDecisionInput(BaseModel):
+    """Input schema for room_task_decision."""
+
+    room_id: Annotated[
+        str,
+        Field(description="The chatroom UUID."),
+    ]
+    proposal_seq: Annotated[
+        int,
+        Field(
+            description=(
+                "The seq of the task_proposal message you are "
+                "answering (the seq from the notice)."
+            )
+        ),
+    ]
+    decision: Annotated[
+        str,
+        Field(
+            description=(
+                "Your decision, e.g. 'revive', 'reroute', "
+                "'answer-in-room', 'defer'."
+            )
+        ),
+    ]
+    note: Annotated[
+        str,
+        Field(default="", description="Optional one-line rationale."),
+    ]
+
+class RoomCloseInput(BaseModel):
+    """Input schema for room_close."""
+
+    room_id: Annotated[
+        str,
+        Field(description="The chatroom UUID you own."),
+    ]
+
 
 def create_room_tools(
     manager,
@@ -367,135 +503,6 @@ def create_room_tools(
     """
     caller_instance_id = current_instance_id or ""
     caller_agent_id = agent_id or ""
-
-    class RoomCreateInput(BaseModel):
-        """Input schema for room_create."""
-
-        name: Annotated[
-            str,
-            Field(
-                description=(
-                    "Human-readable room name (what the team calls it, "
-                    "e.g. 'scene-3 build'). Bounded: at most 64 "
-                    "characters of letters, digits, spaces, dots, "
-                    "dashes or underscores, starting with a letter or "
-                    "a digit — a longer or exotic name is REFUSED "
-                    "(reason=invalid-room-name)."
-                )
-            ),
-        ]
-        member_name: Annotated[
-            str,
-            Field(
-                default="",
-                description=(
-                    "Your purpose name in this room (e.g. 'producer'). "
-                    "Omit to use your agent id. Teammates address you by "
-                    "this name."
-                ),
-            ),
-        ]
-
-    class RoomPostInput(BaseModel):
-        """Input schema for room_post."""
-
-        room_id: Annotated[
-            str,
-            Field(description="The chatroom UUID you are a member of."),
-        ]
-        text: Annotated[
-            str,
-            Field(
-                description=(
-                    "The message body — a MILESTONE report, not a "
-                    "stream of consciousness."
-                )
-            ),
-        ]
-        tagged: Annotated[
-            list[str],
-            Field(
-                default=[],
-                description=(
-                    "Member names to INTERRUPT (``@name`` semantics) — "
-                    "use sparingly; an interrupt stops their current work."
-                ),
-            ),
-        ]
-        addressed_to: Annotated[
-            list[str],
-            Field(
-                default=[],
-                description=(
-                    "Member names to ROUTE to (``to: name`` semantics) — "
-                    "they see it in their next digest; it never "
-                    "interrupts them."
-                ),
-            ),
-        ]
-
-    class RoomReadInput(BaseModel):
-        """Input schema for room_read."""
-
-        room_id: Annotated[
-            str,
-            Field(description="The chatroom UUID you are a member of."),
-        ]
-        after_seq: Annotated[
-            int,
-            Field(
-                default=0,
-                description=(
-                    "Return messages with seq > this (0 = from the "
-                    "start). Use the last seq you saw as the cursor."
-                ),
-            ),
-        ]
-        limit: Annotated[
-            int,
-            Field(
-                default=ROOM_READ_DEFAULT_LIMIT,
-                description=f"How many messages to return (max {ROOM_READ_MAX_LIMIT}).",
-            ),
-        ]
-
-    class RoomTaskDecisionInput(BaseModel):
-        """Input schema for room_task_decision."""
-
-        room_id: Annotated[
-            str,
-            Field(description="The chatroom UUID."),
-        ]
-        proposal_seq: Annotated[
-            int,
-            Field(
-                description=(
-                    "The seq of the task_proposal message you are "
-                    "answering (the seq from the notice)."
-                )
-            ),
-        ]
-        decision: Annotated[
-            str,
-            Field(
-                description=(
-                    "Your decision, e.g. 'revive', 'reroute', "
-                    "'answer-in-room', 'defer'."
-                )
-            ),
-        ]
-        note: Annotated[
-            str,
-            Field(default="", description="Optional one-line rationale."),
-        ]
-
-    class RoomCloseInput(BaseModel):
-        """Input schema for room_close."""
-
-        room_id: Annotated[
-            str,
-            Field(description="The chatroom UUID you own."),
-        ]
 
     @register_tool_category(ROOM_CATEGORY_KEY)
     @tool(args_schema=RoomCreateInput)

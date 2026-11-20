@@ -147,6 +147,16 @@ ALLOWED: dict[str, dict[str, str]] = {
         _LORE_EMPRESS: "tool-surface fixtures for the enumerated actor claim (required)",
         _LORE_EMPEROR: "tool-surface fixtures for the enumerated actor claim (required)",
     },
+    "tests/unit/tools/fixtures/module_level_inputs_c_base.json": {
+        _LORE_EMPRESS: (
+            "the byte-identity BASE fixture — the captured memoir actor-field "
+            "schema contract text, mirrored verbatim from daemon/tools/memoir.py"
+        ),
+        _LORE_EMPEROR: (
+            "the byte-identity BASE fixture — the captured memoir actor-field "
+            "schema contract text, mirrored verbatim from daemon/tools/memoir.py"
+        ),
+    },
     "tests/unit/test_memoir_v2_schema.py": {
         _LORE_EMPRESS: "pinned_by CHECK text asserted against the v2 schema (mirror)",
         _LORE_EMPEROR: "pinned_by CHECK text asserted against the v2 schema (mirror)",

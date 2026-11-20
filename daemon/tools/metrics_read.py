@@ -1328,6 +1328,196 @@ async def _offload(fn: Any, *args: Any, **kwargs: Any) -> Any:
 
     return await _offload(fn, *args, **kwargs)
 
+# ── the input schemas — MODULE LEVEL (c2r-hoist-c) ────────────
+# A class statement inside a factory body re-runs on EVERY factory
+# call (one fresh pydantic model per assembly). At module level each
+# class is built ONCE at import and the schema registry then serves
+# every later assembly from cache. VERBATIM move: the fields,
+# annotations, defaults and descriptions are unchanged.
+
+class MetricsFamiliesInput(BaseModel):
+    """Input schema for metrics_families."""
+
+    family: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Exact family id to read (e.g. 'F9' for readiness, 'F1' "
+                "for event-loop lag, 'F10' for the job queue, 'F6' for "
+                "the PG census). Omit for the whole catalog."
+            ),
+        ),
+    ]
+    details: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "When true, each metric name also carries its declared "
+                "label space, buckets, monotonicity, chart_role and "
+                "help text. Default false = names + kind + "
+                "cardinality_class only (the catalog stays small)."
+            ),
+        ),
+    ]
+    only_with_data: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "When true, keep only families that currently publish at "
+                "least one live series (live_series_count > 0). Note "
+                "this is NOT the same as availability.state == 'live' — "
+                "a family can report dark and still be publishing (see "
+                "dark_with_live_series)."
+            ),
+        ),
+    ]
+
+class MetricsSnapshotInput(BaseModel):
+    """Input schema for metrics_snapshot."""
+
+    family: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=("Exact family id (e.g. 'F10'). Omit for all families."),
+        ),
+    ]
+    families: Annotated[
+        list[str] | None,
+        Field(
+            default=None,
+            description=(
+                "Several family ids at once (e.g. ['F10','F13']). The "
+                "rows are filtered tool-side over ONE provider read, so "
+                "a multi-family snapshot costs one round trip instead of "
+                "one per family."
+            ),
+        ),
+    ]
+    name_prefix: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Metric-name prefix filter (e.g. 'ensemble_loop_lag_' → "
+                "every loop-lag metric). An EXACT metric name is a valid "
+                "prefix (a name is a prefix of itself)."
+            ),
+        ),
+    ]
+    top_n: Annotated[
+        int,
+        Field(
+            default=DEFAULT_TOP_N,
+            description=(
+                f"Max series rows to return (1-{MAX_TOP_N}, default "
+                f"{DEFAULT_TOP_N}). Order is ascending by (family, name, "
+                "label key) — deterministic, so the same query always "
+                "returns the same rows."
+            ),
+        ),
+    ]
+
+class MetricsHistoryInput(BaseModel):
+    """Input schema for metrics_history."""
+
+    family: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Exact family id; the tool resolves it to that family's "
+                "metric names from the catalog (a convenience over the "
+                "provider's name-level selector)."
+            ),
+        ),
+    ]
+    series: Annotated[
+        list[str] | None,
+        Field(
+            default=None,
+            description=(
+                "Label-aware series selectors, the contract's canonical "
+                "form: '<name>{k=v,k2=v2}' — e.g. "
+                "'ensemble_loop_lag_seconds{stat=p95}'. Comma-separated "
+                "k=v pairs. A bare '<name>' matches every label variant. "
+                f"Max {MAX_NAMES} selectors in total."
+            ),
+        ),
+    ]
+    names: Annotated[
+        list[str] | None,
+        Field(
+            default=None,
+            description=(
+                "Name-level selectors (every label variant of the named "
+                f"metrics). Max {MAX_NAMES} selectors in total. Prefer "
+                "'series' when you know the label values."
+            ),
+        ),
+    ]
+    end_offset_s: Annotated[
+        int,
+        Field(
+            default=0,
+            description=(
+                "Shift the window END back from now (seconds). The "
+                "anchor stays RELATIVE (no cursor): the window is always "
+                "'the last N seconds as of now minus this offset'."
+            ),
+        ),
+    ]
+    window_s: Annotated[
+        int,
+        Field(
+            default=DEFAULT_WINDOW_S,
+            description=(
+                f"Window length in seconds ({MIN_WINDOW_S}-{MAX_WINDOW_S}, "
+                f"default {DEFAULT_WINDOW_S} = 15 min). The ring holds 2 h; "
+                "longer windows are clamped."
+            ),
+        ),
+    ]
+    max_points: Annotated[
+        int,
+        Field(
+            default=DEFAULT_MAX_POINTS,
+            description=(
+                f"Max points per series ({MIN_MAX_POINTS}-{MAX_MAX_POINTS}, "
+                f"default {DEFAULT_MAX_POINTS}). Server-side bucket-max "
+                "downsample — peaks are preserved, never every-kth. The "
+                "daemon clamps this further so the returned leg stays "
+                "within its own total-point budget; the effective value "
+                "is echoed back."
+            ),
+        ),
+    ]
+    top_n: Annotated[
+        int,
+        Field(
+            default=10,
+            description=(
+                f"Max series to return (1-{MAX_TOP_N}, default 10). The "
+                "provider is asked for top_n+1 internally so the tool can "
+                "detect that more exist."
+            ),
+        ),
+    ]
+    compare: Annotated[
+        bool,
+        Field(
+            default=True,
+            description=(
+                "When true (default), also read the immediately preceding "
+                "equal-length window and report delta vs that comparable "
+                "window. Set false to halve the work."
+            ),
+        ),
+    ]
+
 
 def create_metrics_read_tools(
     manager: Any,
@@ -1352,46 +1542,6 @@ def create_metrics_read_tools(
         A list of the three ``@tool``-decorated callables.
     """
     caller_agent_id = agent_id or ""
-
-    class MetricsFamiliesInput(BaseModel):
-        """Input schema for metrics_families."""
-
-        family: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Exact family id to read (e.g. 'F9' for readiness, 'F1' "
-                    "for event-loop lag, 'F10' for the job queue, 'F6' for "
-                    "the PG census). Omit for the whole catalog."
-                ),
-            ),
-        ]
-        details: Annotated[
-            bool,
-            Field(
-                default=False,
-                description=(
-                    "When true, each metric name also carries its declared "
-                    "label space, buckets, monotonicity, chart_role and "
-                    "help text. Default false = names + kind + "
-                    "cardinality_class only (the catalog stays small)."
-                ),
-            ),
-        ]
-        only_with_data: Annotated[
-            bool,
-            Field(
-                default=False,
-                description=(
-                    "When true, keep only families that currently publish at "
-                    "least one live series (live_series_count > 0). Note "
-                    "this is NOT the same as availability.state == 'live' — "
-                    "a family can report dark and still be publishing (see "
-                    "dark_with_live_series)."
-                ),
-            ),
-        ]
 
     @register_tool_category(METRICS_CATEGORY_KEY)
     @tool(args_schema=MetricsFamiliesInput)
@@ -1434,52 +1584,6 @@ def create_metrics_read_tools(
         except Exception as exc:  # noqa: BLE001 — tools never raise
             logger.warning("metrics_families failed: %s", exc)
             return _error(f"metrics_families failed: {exc}")
-
-    class MetricsSnapshotInput(BaseModel):
-        """Input schema for metrics_snapshot."""
-
-        family: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=("Exact family id (e.g. 'F10'). Omit for all families."),
-            ),
-        ]
-        families: Annotated[
-            list[str] | None,
-            Field(
-                default=None,
-                description=(
-                    "Several family ids at once (e.g. ['F10','F13']). The "
-                    "rows are filtered tool-side over ONE provider read, so "
-                    "a multi-family snapshot costs one round trip instead of "
-                    "one per family."
-                ),
-            ),
-        ]
-        name_prefix: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Metric-name prefix filter (e.g. 'ensemble_loop_lag_' → "
-                    "every loop-lag metric). An EXACT metric name is a valid "
-                    "prefix (a name is a prefix of itself)."
-                ),
-            ),
-        ]
-        top_n: Annotated[
-            int,
-            Field(
-                default=DEFAULT_TOP_N,
-                description=(
-                    f"Max series rows to return (1-{MAX_TOP_N}, default "
-                    f"{DEFAULT_TOP_N}). Order is ascending by (family, name, "
-                    "label key) — deterministic, so the same query always "
-                    "returns the same rows."
-                ),
-            ),
-        ]
 
     @register_tool_category(METRICS_CATEGORY_KEY)
     @tool(args_schema=MetricsSnapshotInput)
@@ -1524,103 +1628,6 @@ def create_metrics_read_tools(
         except Exception as exc:  # noqa: BLE001 — tools never raise
             logger.warning("metrics_snapshot failed: %s", exc)
             return _error(f"metrics_snapshot failed: {exc}")
-
-    class MetricsHistoryInput(BaseModel):
-        """Input schema for metrics_history."""
-
-        family: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Exact family id; the tool resolves it to that family's "
-                    "metric names from the catalog (a convenience over the "
-                    "provider's name-level selector)."
-                ),
-            ),
-        ]
-        series: Annotated[
-            list[str] | None,
-            Field(
-                default=None,
-                description=(
-                    "Label-aware series selectors, the contract's canonical "
-                    "form: '<name>{k=v,k2=v2}' — e.g. "
-                    "'ensemble_loop_lag_seconds{stat=p95}'. Comma-separated "
-                    "k=v pairs. A bare '<name>' matches every label variant. "
-                    f"Max {MAX_NAMES} selectors in total."
-                ),
-            ),
-        ]
-        names: Annotated[
-            list[str] | None,
-            Field(
-                default=None,
-                description=(
-                    "Name-level selectors (every label variant of the named "
-                    f"metrics). Max {MAX_NAMES} selectors in total. Prefer "
-                    "'series' when you know the label values."
-                ),
-            ),
-        ]
-        end_offset_s: Annotated[
-            int,
-            Field(
-                default=0,
-                description=(
-                    "Shift the window END back from now (seconds). The "
-                    "anchor stays RELATIVE (no cursor): the window is always "
-                    "'the last N seconds as of now minus this offset'."
-                ),
-            ),
-        ]
-        window_s: Annotated[
-            int,
-            Field(
-                default=DEFAULT_WINDOW_S,
-                description=(
-                    f"Window length in seconds ({MIN_WINDOW_S}-{MAX_WINDOW_S}, "
-                    f"default {DEFAULT_WINDOW_S} = 15 min). The ring holds 2 h; "
-                    "longer windows are clamped."
-                ),
-            ),
-        ]
-        max_points: Annotated[
-            int,
-            Field(
-                default=DEFAULT_MAX_POINTS,
-                description=(
-                    f"Max points per series ({MIN_MAX_POINTS}-{MAX_MAX_POINTS}, "
-                    f"default {DEFAULT_MAX_POINTS}). Server-side bucket-max "
-                    "downsample — peaks are preserved, never every-kth. The "
-                    "daemon clamps this further so the returned leg stays "
-                    "within its own total-point budget; the effective value "
-                    "is echoed back."
-                ),
-            ),
-        ]
-        top_n: Annotated[
-            int,
-            Field(
-                default=10,
-                description=(
-                    f"Max series to return (1-{MAX_TOP_N}, default 10). The "
-                    "provider is asked for top_n+1 internally so the tool can "
-                    "detect that more exist."
-                ),
-            ),
-        ]
-        compare: Annotated[
-            bool,
-            Field(
-                default=True,
-                description=(
-                    "When true (default), also read the immediately preceding "
-                    "equal-length window and report delta vs that comparable "
-                    "window. Set false to halve the work."
-                ),
-            ),
-        ]
 
     @register_tool_category(METRICS_CATEGORY_KEY)
     @tool(args_schema=MetricsHistoryInput)
