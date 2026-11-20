@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.20] — 2026-11-20
+
+### Changed — sonic push doctrine: the sonic lane's end-of-task cycle becomes MERGED + PUSHED + STAGED
+
+- The sonic lane's end-of-task cycle is now MERGED + PUSHED + STAGED (previously the lane stopped at a committed module branch on the local worktree)
+- sonic-developer owns the release chain: merge -> push `origin latest` -> push the release tag -> `stage.sh live` WITHOUT `--allow-stale-stage`
+- sonic-leader verifies the pushed tip + the pushed tag READ-ONLY (no merge, no push, no tag cut)
+- sonic-coder's never-push / never-merge bound is UNCHANGED — the module executor still commits its own branch and never touches the release chain
+- Zero migrations, zero daemon-code changes (release bookkeeping only)
+
 ## [0.31.19] — 2026-11-20
 
 ### Changed — sonic-leader roster gains maintenancer (nest-maintenance/repair escape hatch): meta v1.1.2 + census pin + sonic_agent_defs pack update; sonic-leader prompt artifacts enumerate the new seat + prompt-artifact seal re-pin; version bump 0.31.18 -> 0.31.19. Zero migrations, zero daemon-code changes.
