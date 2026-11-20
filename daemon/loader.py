@@ -1098,6 +1098,10 @@ def compose_system_prompt(
 # cannot cross a chunk boundary, so the chunked sum is an OVER-count by at
 # most ~one token per boundary (<= n/CHUNK tokens ~= 0.1% @ 200 KB / 4 KB) —
 # the SAFE direction for budget gates (compact marginally early, never late).
+# The split is SHAPE-AWARE: a whitespace run of >= 16 identical chars is kept
+# whole at the cut, which holds the over-count at ~1 token per boundary
+# instead of ~2 (the pre-fix plain cut misaligned every boundary against
+# cl100k's whitespace merge tokens — 32 LFs / 128 spaces per token).
 #
 # Policy gate: default ON; kill-switch ENSEMBLE_TOKEN_COUNT_EXACT=1 restores
 # the exact path EVERYWHERE. Threshold/chunk are overridable via env, read at
@@ -1144,6 +1148,13 @@ def _token_count_env_int(env_name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+# A whitespace RUN of >= this many IDENTICAL chars is treated as a merge
+# token run by cl100k (up to 32 consecutive LFs, up to 128 consecutive
+# spaces per token); cutting INSIDE such a run misaligns every subsequent
+# boundary against the merge grid and costs ~2 tokens per boundary.
+_WHITESPACE_RUN_MIN = 16
+
+
 def _iter_count_chunks(text: str, chunk_size: int):
     """Yield chunks of ``text``, each <= ``chunk_size`` chars.
 
@@ -1151,10 +1162,28 @@ def _iter_count_chunks(text: str, chunk_size: int):
     with the boundary character carried INTO THE NEXT CHUNK (``"wordA wordB"``
     splits as ``"wordA"`` | ``" wordB"``) — cl100k tokenizes ``" wordB"`` as a
     single piece, so the boundary token shape survives the cut and the
-    over-count shrinks toward zero. When a window holds no whitespace
-    (the pathological unbounded single-piece run), the split is hard at
-    ``chunk_size`` — that hard split is exactly what bounds the O(n^2) encode
-    to O(n). Progress is guaranteed (every chunk carries >= 1 char).
+    over-count shrinks toward zero.
+
+    SHAPE-AWARE EXCEPTION (row2 fix pass, front-door ruling ADOPTED): when
+    the boundary character TERMINATES a whitespace run of >= 16 IDENTICAL
+    chars, the cut is taken AFTER that character instead (the run's last char
+    stays in the current chunk). Reason: cl100k merges up to 32 consecutive
+    LFs into ONE token and up to 128 consecutive spaces into one, so a
+    carry-into-next-chunk cut drops one char from the window (4095 instead of
+    4096) and misaligns EVERY subsequent boundary against the merge grid —
+    measured ~2 extra tokens per boundary on a pure-LF corpus (200 KB:
+    exact 6250 -> chunked 6348, +98 over 48 boundaries). Keeping the run's
+    last char in the chunk preserves the merge grid (4096 = 128x32 = 32x128),
+    and the run then encodes identically to the exact path (drift 0.000%).
+    The back-scan is bounded by the window (one bounded scan per cut), so
+    the O(n) cost model is unchanged. Short whitespace runs (< 16 identical
+    chars) keep the plain carry-into-next-chunk rule — that is what keeps
+    prose / JSON / base64 drift at 0.000%.
+
+    When a window holds no whitespace (the pathological unbounded
+    single-piece run), the split is hard at ``chunk_size`` — that hard split
+    is exactly what bounds the O(n^2) encode to O(n). Progress is guaranteed
+    (every chunk carries >= 1 char).
     """
     n = len(text)
     start = 0
@@ -1167,7 +1196,14 @@ def _iter_count_chunks(text: str, chunk_size: int):
                     cut = j
                     break
             if cut > start:
-                end = cut
+                # shape-aware: does the boundary char terminate a long run
+                # of IDENTICAL whitespace chars? (bounded back-scan)
+                run = 1
+                k = cut - 1
+                while k > start and text[k] == text[cut]:
+                    run += 1
+                    k -= 1
+                end = cut + 1 if run >= _WHITESPACE_RUN_MIN else cut
         yield text[start:end]
         start = end
 
@@ -1180,10 +1216,16 @@ def estimate_tokens(text: str) -> int:
     for every caller. Above the threshold the text is split at
     whitespace/newline boundaries into chunks (default 4K chars) and the
     per-chunk counts are summed — O(n) instead of O(n^2) on pathological
-    unbounded single-piece runs, with an over-count of at most ~n/CHUNK
-    tokens (~0.1% @ 200 KB / 4 KB) and never smaller than the exact count
+    unbounded single-piece runs. The chunked sum is an OVER-count of at most
+    ~1 token per boundary, i.e. <= n/CHUNK tokens in total (<= ~0.1% at
+    200 KB / 4 KB), and is never smaller than the exact count
     (reference-only counting; Emperor ruling 2026-11-19: "Counting only for
-    reference low drift allowed").
+    reference low drift allowed"). The split is SHAPE-AWARE: a whitespace run
+    of >= 16 identical chars is kept whole at the cut (see
+    :func:`_iter_count_chunks`), which keeps the chunk grid aligned with
+    cl100k's whitespace merge tokens (32 LFs / 128 spaces per token) and
+    holds the over-count at the ~1-token-per-boundary bound instead of
+    ~2 tokens per boundary.
 
     Env knobs (read at call time):
       * ENSEMBLE_TOKEN_COUNT_EXACT=1    kill-switch — exact path everywhere.

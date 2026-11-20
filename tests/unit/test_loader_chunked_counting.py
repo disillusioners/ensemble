@@ -1,26 +1,39 @@
 """Tier B — policy-gated O(n) chunked token counting (row2-agent-turn-cpu 2C).
 
-Gates proven here (commission row2-2c):
+Fix pass: SHAPE-AWARE CUT (front-door ruling ADOPTED).
+
+Gates proven here (commission row2-2c + fix-pass acceptance):
   (a) EXACT equality below the chunking threshold, default knobs, across
       corpora — byte-identical for EVERY caller (the branch lives inside the
       ``daemon.loader.estimate_tokens`` primitive; memoir / snapshot /
       compaction / prompt-cache all inherit it).
-  (b) drift <= 0.1% above threshold on representative corpora (prose, dense
-      JSON, base64-ish) at 4/16/64/200 KB with default knobs, and on
-      pathological unbounded single-piece shapes (letters / symbols /
-      whitespace) at 64 KB — the size where an exact reference is still
-      affordable inside the 30s per-test pytest-timeout budget. The FULL-SIZE
-      200 KB pathological drift legs live in the pack
-      (test/packs/tier_b_token_drift_bound_unit_test.sh) and in
-      scripts/bench_tier_b_token_drift.py output (decisions doc).
+  (b) drift <= 0.1% above threshold on SYNTHETIC corpora (LF-run, spaces-run,
+      letters-run, symbols-run), REALISTIC corpora (LF-code, CRLF-code,
+      lone-CR-code, markdown, prose, minified), dense JSON, base64 and
+      digits — at 4/16/64/200 KB with default knobs (200 KB legs in the
+      pack; the 64 KB legs here keep the exact reference inside the 30s
+      per-test pytest-timeout budget).
   (c) direction: chunked >= exact ALWAYS, never smaller; monotone
       non-negative by construction (sum of non-negative per-chunk counts).
+  (d) TIMING (200 KB unbroken < 1 s; exact today 27.05 s) — the strict gate
+      lives in the pack; this file carries a < 2 s guard so a heavily loaded
+      runner cannot flake the unit suite.
   (e) kill-switch ENSEMBLE_TOKEN_COUNT_EXACT=1 restores the exact path
       everywhere (both shapes, above threshold).
 
-Gate (d) — TIMING (200 KB unbroken < 1s; exact today 27.05s) — runs in the
-pack with the strict <1s bound; this file carries a looser <2s guard so a
-heavily loaded runner cannot flake the unit suite.
+MUTATION-MEANINGFUL PINS (the fix pass replaced the old masking pin):
+  * ``test_absolute_over_count_bound`` — the DEEP-DIVE-SANCTIONED bound:
+    the over-count is <= n/CHUNK tokens (<= ~1 token per boundary). The
+    pre-fix lane pin (``boundaries * 3 + 2``) was NOT deep-dive-sanctioned
+    and MASKED the LF-run breach — it is gone.
+  * ``test_synthetic_shape_ceilings`` — per-shape drift ceilings (LF-run /
+    spaces-run <= 0.1%) RED when the cut rule regresses to the plain
+    carry-into-next-chunk (the LF-run/spaces-run shapes drift 1.5%/3.1%
+    under that rule).
+  * ``test_primitive_encodes_each_character_at_most_once`` — STRUCTURAL:
+    the primitive encodes each character of the payload AT MOST ONCE (a
+    whole-list re-encode inside the chunk loop REDs it immediately, without
+    depending on a wall-clock timeout).
 
  Emperor ruling (2026-11-19, verbatim): "Counting only for reference low
  drift allowed" — reference-only counting; drift up to the audited bound
@@ -35,6 +48,7 @@ import tiktoken
 from daemon.loader import (
     _TOKEN_CHUNK_SIZE_DEFAULT,
     _TOKEN_CHUNK_THRESHOLD_DEFAULT,
+    _WHITESPACE_RUN_MIN,
     _iter_count_chunks,
     estimate_messages_tokens,
     estimate_tokens,
@@ -74,11 +88,33 @@ def _clean_policy_env(monkeypatch):
 _SENTENCE = "The quick brown fox jumps over the lazy dog. "
 _JSON_TPL = '{"name":"agent_%d","status":"active","tokens":%d,"score":0.98,"meta":{"k":"v","n":%d}}'
 _B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+_MINIFIED = "function h(a,b){return a+b}var x=h(1,2),y=h(3,4);"
+_CODE_LINE = (
+    "def handler_{n}(request, context):\n"
+    "    payload = request.json()\n"
+    "    return {{'ok': True, 'id': {n}, 'items': [1, 2, 3]}}\n"
+)
 
 
 def _prose(n: int) -> str:
     s = _SENTENCE * (n // len(_SENTENCE) + 1)
     return s[:n]
+
+
+def _markdown(n: int) -> str:
+    s, i = "", 0
+    while len(s) < n:
+        s += (
+            f"## Section {i}\n\n- item {i} with `code` and **bold**\n"
+            f"- item {i+1} with a [link](https://example.invalid/{i})\n\n"
+            "```python\ndef f():\n    return 1\n```\n\n"
+        )
+        i += 1
+    return s[:n]
+
+
+def _minified(n: int) -> str:
+    return (_MINIFIED * (n // len(_MINIFIED) + 1))[:n]
 
 
 def _dense_json(n: int) -> str:
@@ -93,6 +129,54 @@ def _dense_json(n: int) -> str:
 
 def _base64ish(n: int) -> str:
     return (_B64 * (n // len(_B64) + 1))[:n]
+
+
+def _digits(n: int) -> str:
+    return "".join(str(i % 10) for i in range(n))
+
+
+def _code(n: int, nl: str = "\n") -> str:
+    body = _CODE_LINE.replace("\n", nl)
+    s, i = "", 0
+    while len(s) < n:
+        s += body.replace("{n}", str(i))
+        i += 1
+    return s[:n]
+
+
+# SYNTHETIC shapes (the ones the fix pass targets)
+_SYNTHETIC = {
+    "lf_run": lambda n: "\n" * n,
+    "spaces_run": lambda n: " " * n,
+    "letters_run": lambda n: "q" * n,
+    "symbols_run": lambda n: "!" * n,
+}
+
+# REALISTIC shapes
+_REALISTIC = {
+    "prose": _prose,
+    "markdown": _markdown,
+    "minified": _minified,
+    "lf_code": lambda n: _code(n, "\n"),
+    "crlf_code": lambda n: _code(n, "\r\n"),
+    "lone_cr_code": lambda n: _code(n, "\r"),
+}
+
+_DENSE = {
+    "dense_json": _dense_json,
+    "base64": _base64ish,
+    "digits": _digits,
+}
+
+
+def _corpus(shape: str, n: int) -> str:
+    if shape in _SYNTHETIC:
+        return _SYNTHETIC[shape](n)
+    if shape in _REALISTIC:
+        return _REALISTIC[shape](n)
+    if shape in _DENSE:
+        return _DENSE[shape](n)
+    raise ValueError(shape)
 
 
 # ---------------------------------------------------------------------------
@@ -123,16 +207,6 @@ class TestGateAExactBelowThreshold:
         assert len(text) <= _TOKEN_CHUNK_THRESHOLD_DEFAULT or label == "prose-16k-boundary"
         assert estimate_tokens(text) == _exact_count(text), label
 
-    def test_special_token_raise_behavior_preserved_below_threshold(self):
-        """Today's behavior preserved byte-for-byte BELOW the threshold:
-        encode() raises on a disallowed special token — both through the
-        primitive and straight off the encoder (same failure, same input)."""
-        text = "hello <|endoftext|> world"
-        with pytest.raises(ValueError):
-            estimate_tokens(text)
-        with pytest.raises(ValueError):
-            _exact_count(text)
-
     def test_threshold_boundary_below_is_exact_above_is_chunked(self):
         """len == THRESHOLD stays exact; len == THRESHOLD+1 enters the chunked
         branch (over-count >= 0, within one boundary's worth of drift)."""
@@ -147,96 +221,91 @@ class TestGateAExactBelowThreshold:
         assert got >= _exact_count(above)  # never smaller (gate c)
         assert got - _exact_count(above) <= 2  # one boundary, at most ~1-2 tokens
 
-    def test_special_token_still_raises_below_threshold(self):
-        """Today's behavior preserved byte-for-byte: encode() raises on a
-        disallowed special token below the threshold."""
-        with pytest.raises(Exception):
-            estimate_tokens("<|endoftext|>" + _prose(1_000))
+    def test_special_token_raise_behavior_preserved_below_threshold(self):
+        """Today's behavior preserved byte-for-byte BELOW the threshold:
+        encode() raises on a disallowed special token — both through the
+        primitive and straight off the encoder (same failure, same input)."""
+        text = "hello <|endoftext|> world"
+        with pytest.raises(ValueError):
+            estimate_tokens(text)
+        with pytest.raises(ValueError):
+            _exact_count(text)
 
 
 # ---------------------------------------------------------------------------
-# Gate (b): drift <= 0.1% above threshold
+# Gate (b): drift <= 0.1% above threshold — EVERY shape
 # ---------------------------------------------------------------------------
 
 
 class TestGateBDriftBound:
-    def test_fast_shapes_full_matrix_default_knobs(self):
-        """Representative corpora at 4/16/64/200 KB, default knobs.
-        Below threshold: exact equality; above: drift <= 0.1%, direction OK.
-        Fast shapes keep the exact reference affordable (linear ~11 MB/s)."""
-        for shape_fn in (_prose, _dense_json, _base64ish):
+    def test_dense_and_realistic_full_matrix_default_knobs(self):
+        """Dense (JSON/base64/digits) + realistic (prose/markdown/minified/
+        LF-code/CRLF-code/lone-CR-code) corpora at 4/16/64/200 KB, default
+        knobs. Below threshold: exact equality; above: drift <= 0.1%."""
+        for shape in list(_DENSE) + list(_REALISTIC):
             for size in (4_096, 16_384, 65_536, 200_000):
-                text = shape_fn(size)
+                text = _corpus(shape, size)
                 exact = _exact_count(text)
                 got = estimate_tokens(text)
-                assert got >= exact, (shape_fn.__name__, size)
+                assert got >= exact, (shape, size)
                 if size <= _TOKEN_CHUNK_THRESHOLD_DEFAULT:
-                    assert got == exact, (shape_fn.__name__, size)
+                    assert got == exact, (shape, size)
                 else:
                     drift_pct = 100.0 * (got - exact) / exact
-                    assert drift_pct <= 0.1, (
-                        shape_fn.__name__, size, got, exact, drift_pct
-                    )
+                    assert drift_pct <= 0.1, (shape, size, got, exact, drift_pct)
 
-    @pytest.mark.parametrize("shape", ["letters", "symbols"])
-    def test_pathological_unbroken_shapes_at_64k(self, shape):
-        """Unbounded single-piece letter/symbol runs at 64 KB with DEFAULT
-        knobs — the largest size whose exact reference fits the per-test
-        timeout. (4/16 KB legs + the full 200 KB legs live in the pack.)
-        These classes tokenize DENSELY ENOUGH (~0.5-1 char/token) that the
-        ~1-token-per-boundary over-count stays under the 0.1% audited bound."""
-        fill = {"letters": "q", "symbols": "!"}[shape]
-        text = fill * 65_536
-        exact = _exact_count(text)  # the O(n^2) leg: ~3 s at 64 KB
+    @pytest.mark.parametrize("shape", list(_SYNTHETIC))
+    def test_synthetic_shape_ceilings(self, shape):
+        """SYNTHETIC shapes at 64 KB with DEFAULT knobs — the largest size
+        whose exact reference fits the per-test timeout. The ceiling is the
+        COMMISSION bound (0.1%), not a widened lane-local number: under the
+        pre-fix plain cut these shapes drifted 1.51% (LF-run) / 3.32%
+        (spaces-run) and RED here.
+
+        The 200 KB legs live in the pack (tier_b_token_drift_bound_unit_test.sh).
+        """
+        text = _corpus(shape, 65_536)
+        exact = _exact_count(text)
         got = estimate_tokens(text)
         assert got >= exact, shape
         drift_pct = 100.0 * (got - exact) / exact
         assert drift_pct <= 0.1, (shape, got, exact, drift_pct)
 
-    @pytest.mark.parametrize(
-        "shape,fill,measured_ceiling",
-        [
-            # measured 2026-11-20 @ 64 KB / default knobs (see decisions-2c):
-            #   whitespace: chunked=529 vs exact=512 -> 3.32%
-            #   newlines:   chunked=2082 vs exact=2051 -> 1.51%
-            ("whitespace", " ", 4.0),
-            ("newlines", "\n", 2.0),
-        ],
-    )
-    def test_whitespace_class_measured_bound_and_disclosure(
-        self, shape, fill, measured_ceiling
-    ):
-        """DISCLOSED BREACH of the commission's 0.1% premise for pure
-        whitespace-class runs (whitespace / newline runs).
+    def test_absolute_over_count_bound(self):
+        """THE DEEP-DIVE-SANCTIONED BOUND: the over-count is <= n/CHUNK tokens
+        (<= ~1 token per boundary) on every shape — synthetic AND realistic.
 
-        WHY: these runs tokenize DENSELY (cl100k has long whitespace-run
-        merges: ~128 chars/token for spaces, ~32 chars/token for newlines),
-        so 64 KB of spaces is only ~512 tokens; the chunked path pays ~1-2
-        extra tokens per boundary (16 boundaries -> +17 spaces / +33
-        newlines). The ABSOLUTE bound (<= ~3 tokens per boundary, <=
-        3*n/CHUNK total) HOLDS as designed; the RATIO bound (<=0.1%) does
-        NOT — the deep-dive's 0.1% arithmetic assumed a ~50K-token
-        denominator (prose density ~4 chars/token), which whitespace runs
-        violate by ~8-100x. Direction is still SAFE (over-count: budget
-        gates compact marginally early, never late). Pinned at the measured
-        ceiling+margin so the disclosed reality cannot silently regress;
-        full-size legs in the pack. Emperor ruling context: "Counting only
-        for reference low drift allowed".
+        This replaces the pre-fix lane pin (``boundaries * 3 + 2``), which was
+        NOT deep-dive-sanctioned and masked the LF-run breach (the plain cut
+        pays ~2 tokens per boundary on a whitespace-run corpus).
         """
-        text = fill * 65_536
-        exact = _exact_count(text)
-        got = estimate_tokens(text)
-        assert got >= exact
-        boundaries = -(-len(text) // _TOKEN_CHUNK_SIZE_DEFAULT)
-        assert got - exact <= boundaries * 3 + 2, (shape, got, exact, boundaries)
-        drift_pct = 100.0 * (got - exact) / exact
-        assert drift_pct <= measured_ceiling, (shape, got, exact, drift_pct)
+        cases = [
+            ("lf_run", "\n" * 32_768),
+            ("spaces_run", " " * 32_768),
+            ("letters_run", "q" * 32_768),
+            ("symbols_run", "!" * 32_768),
+            ("prose", _prose(32_768)),
+            ("dense_json", _dense_json(32_768)),
+            ("base64", _base64ish(32_768)),
+            ("minified", _minified(32_768)),
+            ("lf_code", _code(32_768, "\n")),
+            ("crlf_code", _code(32_768, "\r\n")),
+            ("lone_cr_code", _code(32_768, "\r")),
+        ]
+        for shape, text in cases:
+            exact = _exact_count(text)
+            got = estimate_tokens(text)
+            boundaries = -(-len(text) // _TOKEN_CHUNK_SIZE_DEFAULT)
+            assert got >= exact, shape
+            assert got - exact <= boundaries, (
+                shape, got, exact, got - exact, boundaries
+            )
 
     def test_boundary_semantics_shrink_drift_to_zero_for_word_text(self):
         """The 'skip the boundary char into the next chunk' rule: for
         space-separated words the chunk boundaries reproduce the exact
-        piece shape, so word text with a chunk-sized word cadence can drift
-        by at most ~1 token per boundary (proportionally tiny)."""
+        piece shape, so word text drifts by at most ~1 token per boundary
+        (proportionally tiny)."""
         text = " ".join(f"word{i:04d}" for i in range(6_000))
         assert len(text) > _TOKEN_CHUNK_THRESHOLD_DEFAULT
         got = estimate_tokens(text)
@@ -256,7 +325,7 @@ class TestGateCDirectionAndChunker:
         """Deterministic mixed corpus, tiny knobs (threshold=64, chunk=16):
         chunked >= exact on every member, including shapes engineered to
         straddle boundaries (word cadence, code, blank lines, unicode)."""
-        monkey_corpora = [
+        mixed = [
             "",
             "a",
             "word word word word word word word word",
@@ -269,7 +338,7 @@ class TestGateCDirectionAndChunker:
             "x" * 1_000,
             _prose(500),
         ]
-        for text in monkey_corpora:
+        for text in mixed:
             got = estimate_tokens(text)
             exact = _exact_count(text)
             assert got >= exact, (text[:40], got, exact)
@@ -277,9 +346,15 @@ class TestGateCDirectionAndChunker:
 
     def test_chunker_invariants(self):
         """Each chunk <= chunk_size; concatenation == original; every split
-        position is either a whitespace boundary char (leading the NEXT
-        chunk) or a hard split of a full chunk_size window; progress
-        guaranteed (terminates)."""
+        position follows ONE of the three sanctioned rules:
+          (1) plain carry-into-next-chunk — the next chunk starts ON the
+              boundary whitespace char;
+          (2) SHAPE-AWARE cut — the next chunk starts right AFTER a
+              whitespace run of >= 16 identical chars (the run's last char
+              stays in the closed chunk);
+          (3) hard split — the closed chunk was a full window (an unbounded
+              single-piece run has no whitespace to cut at).
+        """
         text = _prose(10_000)
         chunks = list(_iter_count_chunks(text, 512))
         assert all(len(c) <= 512 for c in chunks)
@@ -287,9 +362,14 @@ class TestGateCDirectionAndChunker:
         pos = 0
         for cur, nxt in zip(chunks, chunks[1:]):
             pos += len(cur)
-            boundary_at_p = text[pos].isspace()
-            hard_split = len(cur) == 512
-            assert boundary_at_p or hard_split, (pos, cur[-20:], nxt[:20])
+            plain = text[pos].isspace()
+            hard = len(cur) == 512
+            shape_aware = (
+                pos > 0
+                and text[pos - 1].isspace()
+                and _run_len_at(text, pos - 1, start=pos - len(cur)) >= _WHITESPACE_RUN_MIN
+            )
+            assert plain or hard or shape_aware, (pos, cur[-20:], nxt[:20])
 
         unbroken = "q" * 2_000
         uchunks = list(_iter_count_chunks(unbroken, 512))
@@ -303,6 +383,26 @@ class TestGateCDirectionAndChunker:
         assert list(_iter_count_chunks("x", 512)) == ["x"]
         assert "".join(_iter_count_chunks("a b\nc  \n\nd", 2)) == "a b\nc  \n\nd"
 
+    def test_shape_aware_cut_keeps_long_whitespace_runs_whole(self):
+        """The shape-aware rule itself: when the boundary char TERMINATES a
+        run of >= 16 IDENTICAL whitespace chars, the run's last char stays
+        in the closed chunk (the run is NOT split); a SHORT run keeps the
+        plain carry-into-next-chunk rule (the boundary char leads the next
+        chunk)."""
+        # long run (64 spaces) terminating at the window's last whitespace
+        text = "b" * 100 + " " * 64 + "a" * 5_000
+        chunks = list(_iter_count_chunks(text, 4096))
+        assert "".join(chunks) == text
+        assert chunks[0].endswith(" " * 64)  # the long run stays whole
+        assert not chunks[1].startswith(" ")  # rule (2), not rule (1)
+
+        # short run (4 spaces) -> plain carry-into-next-chunk rule
+        text = "b" * 100 + " " * 4 + "a" * 5_000
+        chunks = list(_iter_count_chunks(text, 4096))
+        assert "".join(chunks) == text
+        assert chunks[0].endswith(" " * 3)  # the boundary char was carried on
+        assert chunks[1].startswith(" ")  # into the NEXT chunk
+
     def test_chunk_size_and_threshold_knobs_respected(self, monkeypatch):
         """Env knobs are read at call time: tiny threshold sends SHORT text
         down the chunked branch; tiny chunk changes the sum accordingly."""
@@ -310,7 +410,6 @@ class TestGateCDirectionAndChunker:
         monkeypatch.setenv("ENSEMBLE_TOKEN_COUNT_THRESHOLD", "64")
         monkeypatch.setenv("ENSEMBLE_TOKEN_COUNT_CHUNK", "128")
         assert estimate_tokens(text) == _chunked_reference(text, 128)
-        # exact equality is impossible here in general; direction must hold
         assert estimate_tokens(text) >= _exact_count(text)
 
     def test_knob_garbage_falls_back_to_defaults(self, monkeypatch):
@@ -323,6 +422,17 @@ class TestGateCDirectionAndChunker:
             assert estimate_tokens(text) == _exact_count(text), garbage
 
 
+def _run_len_at(text: str, idx: int, start: int) -> int:
+    """Length of the run of IDENTICAL chars ending at ``idx`` (bounded by
+    ``start``) — mirrors the bounded back-scan in ``_iter_count_chunks``."""
+    run = 1
+    k = idx - 1
+    while k > start and text[k] == text[idx]:
+        run += 1
+        k -= 1
+    return run
+
+
 # ---------------------------------------------------------------------------
 # Gate (d): timing (loose unit guard; the strict <1s gate lives in the pack)
 # ---------------------------------------------------------------------------
@@ -333,7 +443,7 @@ class TestGateDTiming:
         """200 KB unbroken letter run through the DEFAULT policy path.
         Exact today: ~27.05 s (tester re-run, off-loop audit). Chunked with
         C=4 KB: model predicts ~0.55 s. Strict <1s gate lives in the pack;
-        this guard carries 2x headroom for loaded runners."""
+        this guard carries headroom for loaded runners."""
         text = "q" * 200_000
         t0 = time.perf_counter()
         got = estimate_tokens(text)
@@ -362,6 +472,43 @@ class TestGateEKillSwitch:
         got = estimate_tokens(text)
         assert got == _chunked_reference(text, _TOKEN_CHUNK_SIZE_DEFAULT)
         assert got >= _exact_count(text)
+
+
+# ---------------------------------------------------------------------------
+# STRUCTURAL pin: the primitive encodes each character AT MOST ONCE
+# ---------------------------------------------------------------------------
+
+
+class _SpyEncoder:
+    """Wraps a real encoder and records every encode() call."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.calls = 0
+        self.chars = 0
+
+    def encode(self, text, *args, **kwargs):
+        self.calls += 1
+        self.chars += len(text)
+        return self._inner.encode(text, *args, **kwargs)
+
+
+class TestStructuralNoReEncode:
+    def test_primitive_encodes_each_character_at_most_once(self, monkeypatch):
+        """STRUCTURAL mutation pin: the chunked path must encode each
+        character of the payload AT MOST ONCE (sum of chunk lengths == len
+        text). Re-adding a whole-list encode INSIDE the chunk loop REDs
+        this immediately — no wall-clock timeout involved."""
+        spy = _SpyEncoder(_ENCODER)
+        monkeypatch.setattr(tiktoken, "get_encoding", lambda name: spy)
+        for shape in ("lf_run", "spaces_run", "prose", "dense_json"):
+            text = _corpus(shape, 20_000)
+            spy.calls = 0
+            spy.chars = 0
+            estimate_tokens(text)
+            assert spy.chars == len(text), (shape, spy.chars, len(text))
+            expected_calls = len(list(_iter_count_chunks(text, _TOKEN_CHUNK_SIZE_DEFAULT)))
+            assert spy.calls == expected_calls, (shape, spy.calls, expected_calls)
 
 
 # ---------------------------------------------------------------------------
