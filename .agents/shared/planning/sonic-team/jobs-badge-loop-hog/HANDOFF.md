@@ -42,7 +42,13 @@ Union of every module's file list (per-module grouping preserved) + integration 
 - **Integration (sonic-developer)**: 4 × `merge --no-ff` commits (283b9ba73, 25cf7e52e, 26d5a0628,
   a44a3505c), the AFTER raw artifact commit (056bda4ad), planning copies (38410b7e0), PLAN.md
   (eb65b3049), and this HANDOFF.md.
-- Merged range (code only): **32 files, +5004 / −28**. `frontend/dist` is gitignored — the FE is
+- Range accounting (re-derived from git objects, cleanup wave): FULL range `213ea6c1e..026833336`
+  (== tag v0.31.15) = **39 files, +5528 / −32**; of that, code+tests (`-- daemon/ frontend/src
+  tests/`) = **22 files, +2137 / −30**, planning+harness (`.agents/`) = **14 files, +3376 / −0**,
+  release-cut remainder (CHANGELOG.md, pyproject.toml, uv.lock) = 3 files. (The prior line here
+  said "32 files, +5004 / −28, code only" — that stat reproduces only as the PRE-release-cut tip
+  `213ea6c1e..9204c8083` and was mislabeled "code only" because it includes the harness/planning
+  files; corrected per review. `frontend/dist` is gitignored — the FE is
   built by the stage pipeline (`scripts/upgrade/_build_frontend.sh`), never by a bare `npm run build`.
 
 ## What changed
@@ -126,7 +132,20 @@ page-completeness recovery re-query (see Known risks).
   bridge are covered by the EXISTING watcher suites (50 tests) — no new end-to-end bridge test.
 - Mixed-fixture SELECT counts when queue scopes DIFFER (per-scope pending fetches) are not asserted.
 - The full-suite pytest regression was NOT run (scoped packs only — the reviewer/tester wave owns
-  the wide gate). The wide `tests/unit/services/` pack result is reported in Known risks.
+  the wide gate). A wide `tests/unit/services/` run WAS executed as supplementary assurance:
+  **28 failed / 4176 passed** (851 s). Those 28 were then re-run (a) on the merged tree in isolation
+  and (b) at BASE 213ea6c1e in isolation (separate detached worktree, same commands): **20 failed /
+  8 passed on BOTH trees, with byte-identical FAILED sets (zero diff)** — so the 28 are pre-existing
+  at base plus 8 order/load-induced reds that only appear in the wide session (the house's known
+  order/load pattern). **No failure touches a file this lane changed** (`work_resolver.py`,
+  `jobs_crud.py`, `job_queue_service.py`, `dead_letter_service.py` appear in no failed set).
+  Reproduction: `pytest $(cat /tmp/jbh-failed-ids.txt | tr '\n' ' ') -p no:randomly -q` in the merged
+  tree and in a base worktree at 213ea6c1e, then diff the FAILED sets.
+- **The FE provenance sidecar is NOT shipped inside the release dir** — `stage.sh` excludes it from
+  the payload — so the sidecar's `git_head=026833336f7e` claim is NOT verifiable from the staged
+  artifact alone; it was verified against the SOURCE tree at stage time (stage.sh's own L2 FE
+  provenance gate passed). The staged BINARY is 3-way identical (release dir == dist == manifest,
+  `3f600d177390d9810974c28fe0da2f933e6f1e47bfd77db5e07fcdc4e34d0223`). Disclosed per tester G5.
 - M1a's `TIE_PAD = 8` assumption (tie groups at the SQL cut ≤ 8) is exercised by a tie-heavy
   fixture but not fuzzed.
 
@@ -170,6 +189,37 @@ page-completeness recovery re-query (see Known risks).
   lane's release cut — surfaces are VERIFIED DISJOINT, so this lane's staged release does not
   contain row-2 work, and their lane stages its own release. See the report line for the exact
   origin/latest sha at cut time.
+- **Release-slot derivation + sibling-lane ordering (disclosed):** the slot was derived LIVE per W9 —
+  tags ≤ v0.31.13, release dirs ≤ v0.31.13, `current` → v0.31.10 — and **v0.31.14 was deliberately
+  left FREE for the agent-turn-CPU lane** (the leader's "the two lanes MUST NOT claim the same
+  version"), so this lane cut **v0.31.15** (the slot-skip is the untagged intermediate bump commit
+  `184bc754d` "! New version 0.31.14"; only `026833336` "! New version 0.31.15" is tagged/pushed).
+  The CPU lane's merge had NOT landed on origin/latest at this lane's cut (their integration branch
+  `feature/agent-turn-cpu-row2` had all three row-2 modules merged but was unlanded; origin/latest was
+  still 213ea6c1e when this lane pushed). **This staged release therefore does NOT contain the row-2
+  agent-turn-CPU work**, and the CPU lane will need to merge this lane's release lineage before its
+  own cut. Surfaces are VERIFIED DISJOINT (compaction.py / tools/** / graph.py / loader.py vs
+  routers / services / repositories / FE), so no file conflict is expected — but the ORDERING
+  disclosure is on the record.
+- **Rollback-safety adjudication (disclosed):** the stage refused to derive `rollback_safe` silently
+  because a destructive-DDL grep (`DROP TABLE|DROP COLUMN`) matches PRE-EXISTING migration files
+  (e.g. `20260627_000002_drop_job_watchers_fk.sql`, `20260514_000001_add_project_id_to_instances.sql`,
+  `20261105_102821_create_memoir_tables.sql`). The gate's own instruction was followed after
+  PROVING the migration delta is empty: `git diff --name-only v0.31.13..v0.31.15 -- daemon/migrations/`
+  → EMPTY, and zero `DROP TABLE|DROP COLUMN` in that delta; this lane's diff touches **zero**
+  migration files. Hence `ENSEMBLE_ROLLBACK_SAFE=1` (explicit), recorded in the manifest as
+  `rollback_safe=true source=explicit`.
+- **Tie-group wire-order deviation at `work_resolver.py:1479`** (review INFO, disclosed): a row
+  recovered by the page-completeness IN re-query is APPENDED to the job block, so inside a
+  `created_at` tie group it sorts AFTER peers where the base path would have placed it in SQL order.
+  Narrow: requires an ensured id below the SQL cut inside a tie group (TIE_PAD=8 covers groups ≤ 8;
+  the route's ensured ids are normally inside the cut). Disclosed per the cleanup wave; no fix
+  shipped in this wave (behavior-neutral for the badge page, ordering-only inside ties).
+- **The MOUNT fetch is ungated on all 6 surfaces** (review INFO, disclosed): a page opened while
+  hidden still issues ONE initial 5-leg badge fetch at mount. What the visibility gates stop is the
+  polling CADENCE (setInterval ticks), so the literal Emperor contract — hidden tabs stop POLLING,
+  visible tabs keep full cadence — holds; the single mount fetch is by design (first paint needs
+  data even if the tab is revealed a moment later).
 - **Whole-tree jest**: 9 pre-existing failures (schedule-create-dialog / jobs-grouping / settings /
   jobs-filter-state families) + a metrics banner-geometry flake are baseline, not net-new; only the
   scoped suites were run green here.
@@ -190,6 +240,23 @@ Commands for a verifier, run ON THE MERGED TREE.
   `./node_modules/.bin/jest <the 6 surface specs> --maxWorkers=8` → **363/363 passed, 6 suites**.
 - Measurement: `env -u POSTGRES_* -u ENSEMBLE_SELF_ENV .venv/bin/python .agents/tester/harness/jobs-badge-cost/main.py --mode base|head --out .agents/tester/harness/jobs-badge-cost/raw` → compare `raw/BASELINE.badge_cost.base.json` (committed) vs `raw/BASELINE.badge_cost.head.json`
   (committed) — leg latency/statements/rows + reconcile medians. Interpret per "What is UNTESTED".
+- **Staged release (as built, 2026-11-20T05:07:59Z)**: `/home/nea/agents-ensemble/releases/v0.31.15`
+  — manifest `version=v0.31.15`, `binary_version=0.31.15`, `rollback_safe=true` (source=explicit),
+  `contains_contract_phase=true`, `known_schema_gen=20261119_000001_add_proposal_decision_columns.sql`,
+  `pipeline_scripts_floor_commit=70a0960e54c8ba479cdd110ec0b6b52de0a1403c`; binary sha256
+  **3f600d177390d9810974c28fe0da2f933e6f1e47bfd77db5e07fcdc4e34d0223** (release dir == dist ==
+  manifest — 3-way IDENTICAL); FE tree sha256 `0a958800d3a903869c97345d06eddb6bcde3214da2f086f353469ed20476e0e5`
+  with the FE provenance sidecar `git_head=026833336f7e dirty=false artifact_sha256=6b194edd81bff0333089922b0fea331985d20b5f26a40e6b8fba9e1fbb5b09d0`;
+  prompt-artifact baseline clean (217 versioned artifacts); stamp coverage validated
+  (`PIPELINE_SCRIPTS_REV=70a0960e5…` contains every shipped executor-family path); plugin-staleness
+  entry-check PASS. **LIVE UNTOUCHED**: `releases/current` → v0.31.10, no flip performed (promote.sh
+  owns `current`; the Emperor's 3-factor ceremony owns the flip). Banner probe (sanctioned non-boot
+  smoke, mktmp ENSEMBLE_DATA_DIR + per-var PG scrub + `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0`
+  pinned) → `daemon.api - INFO - Starting Ensemble v0.31.15`; no stray process left behind
+  (nothing on :8088; only the pre-existing live v0.31.10 + demo v0.16.3 daemons).
+- Tag: annotated `v0.31.15` → commit `026833336f7e0625d0b743656ae1ac5464ef4af2`; origin/latest ==
+  `026833336` (fast-forward from 213ea6c1e); feature branch `sonic/jobs-badge-loop-hog-release` and
+  `sonic/jobs-badge-loop-hog` pushed; task branch carries the release lineage via merge `f7729a720`.
 - Staged release: `status.sh` shows the staged version, live `current` unchanged (no promote);
   4-way binary sha identical (release dir == dist == manifest == sidecar); banner probe (sanctioned
   non-boot smoke) prints `Starting Ensemble v<version>`.

@@ -25,7 +25,7 @@ Two badge shapes are measured deliberately:
 | reconcile_terminal_watches() | 872.68 | 476.41 | 941.49 | 121 (60 job_queue_items + 60 task) |
 | reconcile_held_watches_for_instance(None) | 1756.93 | 1589.63 | 1907.28 | 121 (60 job_queue_items + 60 task) |
 
-The watch-read component: get_all_active_watches() issues an unbounded SELECT with no active-state WHERE (full-table read); callers filter in Python. M1b adds the active-state WHERE and bridges via asyncio.to_thread. Single-shot numbers are noisy; repeats expose the range.
+The watch-read component: get_all_active_watches() issues an unbounded SELECT with no active-state WHERE (full-table read); callers filter in Python. CORRECTED (cleanup wave, per review): M1b bridges the read off the event loop via asyncio.to_thread ONLY — the read remains a FULL-TABLE read (job_watchers has NO persisted active-state column), so the census-suggested "bridge+bound" is HALF delivered: bridged, not bounded. See HANDOFF.md Known risks. Single-shot numbers are noisy; repeats expose the range.
 
 ## Loop-lag raw
 
@@ -35,7 +35,7 @@ Not capturable in this in-process harness (no daemon LoopLagProbe running). Reco
 
 - **Enrichment-count (M1a)**: `jobs_terminal_page` (limit-explicit) bounds the row set to 10 via SQL LIMIT (margin + ensure_job_ids fallback). `jobs_active_badge` (no-limit) stays 435 rows — intentionally untouched (D-68/Q1-ii).
 - **Router-per-row (M1b)**: per-QUEUED-job `await service._get_queue_position` N+1 in the row loop + per-dead_letter-row `dlq_service.get_dlq_by_job_id` SYNC on-loop. Batched in M1b.
-- **Watch-read (M1b)**: `defer_blocked_watch_read` = 1 SELECT over 60 rows (unbounded full-table read); reconcile leg median 873ms / 1757ms over 60 watch rows. M1b adds active-state WHERE + to_thread bridge.
+- **Watch-read (M1b)**: `defer_blocked_watch_read` = 1 SELECT over 60 rows (unbounded full-table read); reconcile leg median 873ms / 1757ms over 60 watch rows. M1b adds the to_thread bridge ONLY — the read stays a full-table read (no persisted active-state column; bridged, not bounded — HANDOFF supersedes this doc where they disagree).
 - **Pool-queueing**: NOT visible in this in-process harness (no connection-pool contention / queueing under single-threaded SQLite). Stated honestly. Requires a multi-process or threaded load with a real pool; out of scope for this harness.
 
 ## How to verify
