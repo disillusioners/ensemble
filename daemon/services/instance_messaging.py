@@ -986,6 +986,65 @@ class CancellationCallbackHandler(BaseCallbackHandler):
         self._check_cancellation()
 
 
+# ── TIER-A DE-DUP (row2-2a) — usage-path change detection ─────────────
+#
+# The context-usage snapshot counts the WHOLE history through tiktoken
+# (``estimate_messages_tokens``) on every emit. The count may only be
+# SKIPPED when it is PROVABLY unchanged, so the skip decision needs a
+# cheap comparison of the estimator's INPUTS.
+#
+# ``estimate_messages_tokens`` (daemon/loader.py) reads exactly four
+# fields per message — ``content``, ``tool_calls``, ``name`` and
+# ``additional_kwargs`` — plus a fixed per-message overhead. Two message
+# lists whose fingerprints are equal therefore cost the SAME number of
+# tokens, so the recomputation can be skipped without changing the
+# emitted value.
+#
+# The fingerprint snapshots mutable containers (lists / dicts) into
+# immutable tuples: storing a live reference would hide an in-place
+# mutation and let a stale count survive.
+
+
+def _usage_fingerprint_value(value: Any, _depth: int = 0) -> Any:
+    """Snapshot one estimator input into an immutable, comparable form."""
+    if _depth > 6:
+        return repr(value)
+    if isinstance(value, dict):
+        return (
+            "d",
+            tuple(
+                (k, _usage_fingerprint_value(v, _depth + 1))
+                for k, v in value.items()
+            ),
+        )
+    if isinstance(value, (list, tuple)):
+        return (
+            "l",
+            tuple(_usage_fingerprint_value(v, _depth + 1) for v in value),
+        )
+    if isinstance(value, (str, bytes, int, float, bool, type(None))):
+        return value
+    return repr(value)
+
+
+def _usage_message_fingerprint(msg: Any) -> tuple:
+    """Fingerprint of every field the token estimator reads for ``msg``."""
+    return (
+        _usage_fingerprint_value(getattr(msg, "content", "")),
+        _usage_fingerprint_value(getattr(msg, "tool_calls", None)),
+        getattr(msg, "name", None),
+        _usage_fingerprint_value(getattr(msg, "additional_kwargs", None)),
+    )
+
+
+def _usage_messages_fingerprint(messages: list) -> tuple | None:
+    """Fingerprint a whole message list (``None`` when it cannot be built)."""
+    try:
+        return tuple(_usage_message_fingerprint(m) for m in messages)
+    except Exception:
+        return None
+
+
 class InstanceMessagingService:
     """Service for sending and processing messages to/from instances.
     
@@ -1039,6 +1098,16 @@ class InstanceMessagingService:
         # Track the LAST SEEN message count for the "context keeps
         # growing" check. RAM cache; reset on successful compaction.
         self._last_seen_message_count: dict[str, int] = {}
+        # ── TIER-A DE-DUP (row2-2a) — usage-path history-token cache ──
+        # ``instance_id -> (message_count, fingerprint, history_tokens)``.
+        # The fingerprint covers every field the token estimator reads,
+        # so an EQUAL fingerprint proves the history token count is
+        # unchanged and the (expensive) whole-history count can be
+        # skipped. The emitted value is unchanged — only the
+        # recomputation of an unchanged value is skipped. RAM cache,
+        # one entry per instance (mirrors the manager's
+        # ``_last_context_usage`` lifetime).
+        self._usage_history_cache: dict[str, tuple[int, tuple, int]] = {}
 
     @property
     def _config(self) -> "Config":
@@ -1204,6 +1273,7 @@ class InstanceMessagingService:
         self,
         instance_id: str,
         messages: list,
+        history_tokens: int | None = None,
     ) -> tuple[int, int, str] | None:
         """Compute the current context usage snapshot for an instance.
 
@@ -1220,16 +1290,71 @@ class InstanceMessagingService:
             instance_id: The instance to compute usage for.
             messages: The current message list (LangChain BaseMessage objects
                 or dicts). Empty/None is fine — we still return a snapshot.
+            history_tokens: Pre-computed history token count. When
+                provided, the (expensive) whole-history count is SKIPPED —
+                the caller guarantees the value is the count of
+                ``messages`` (TIER-A de-dup cache). ``None`` (the
+                default) ⇒ the count is computed here.
         """
         try:
             model_name = self._config.llm.model or ""
             context_window = get_model_context_limit(model_name, self._config.compaction)
-            history_tokens = estimate_messages_tokens(messages or [])
+            if history_tokens is None:
+                history_tokens = estimate_messages_tokens(messages or [])
             system_prompt_tokens = await self._get_system_prompt_tokens(instance_id)
             return history_tokens + system_prompt_tokens, context_window, model_name
         except Exception as e:
             logger.debug(f"Failed to compute context usage for {instance_id[:8]}...: {e}")
             return None
+
+    def _usage_history_tokens(self, instance_id: str, messages: list) -> int | None:
+        """History token count, with a cheap "did anything change?" gate.
+
+        TIER-A DE-DUP (row2-2a) — the whole-history count is the
+        expensive part of the usage path, and it is recomputed on EVERY
+        emit (every node update of a turn, and every SSE connect). It may
+        only be skipped when it is PROVABLY unchanged, so the skip
+        decision uses a cheap comparison of the estimator's inputs:
+
+        1. the MESSAGE COUNT (the same cheap proxy the pre-call
+           estimator-refresh gate uses) — a differing count means the
+           history changed, so the count is taken;
+        2. the FINGERPRINT of every field the estimator reads — an equal
+           fingerprint proves the inputs are equal, hence the count is
+           equal, hence the emitted value is unchanged.
+
+        Returns ``None`` when the count itself fails (mirrors the
+        ``_compute_context_usage`` failure path: no snapshot, no emit).
+        """
+        # Normalize to a list WITHOUT copying a list (the hot path hands
+        # over the very same list object every time).
+        msgs = messages if isinstance(messages, list) else list(messages or [])
+        count = len(msgs)
+        # Defensive: the cache lives on the service instance, but some
+        # callers (and the unit tests) build the service without running
+        # ``__init__`` — initialize it lazily instead of failing.
+        cache = getattr(self, "_usage_history_cache", None)
+        if cache is None:
+            cache = {}
+            self._usage_history_cache = cache
+        cached = cache.get(instance_id)
+        fingerprint = None
+        if cached is not None and cached[0] == count:
+            fingerprint = _usage_messages_fingerprint(msgs)
+            if fingerprint is not None and fingerprint == cached[1]:
+                return cached[2]
+        try:
+            tokens = estimate_messages_tokens(msgs)
+        except Exception as e:
+            logger.debug(
+                f"Failed to compute context usage for {instance_id[:8]}...: {e}"
+            )
+            return None
+        if fingerprint is None:
+            fingerprint = _usage_messages_fingerprint(msgs)
+        if fingerprint is not None:
+            cache[instance_id] = (count, fingerprint, tokens)
+        return tokens
 
     async def _emit_context_usage(
         self,
@@ -1255,7 +1380,20 @@ class InstanceMessagingService:
             messages: The current message list.
             force: If True, skip the dedup check and always broadcast.
         """
-        snapshot = await self._compute_context_usage(instance_id, messages)
+        # TIER-A DE-DUP (row2-2a) — the cheap "did the history change?"
+        # comparison runs BEFORE the whole-history token count, so an
+        # unchanged history skips the count entirely (both the per-node
+        # emit and the force=True SSE-connect path). The EMITTED value
+        # is unchanged — only the recomputation of an unchanged value is
+        # skipped.
+        history_tokens = self._usage_history_tokens(instance_id, messages)
+        if history_tokens is None:
+            return
+        snapshot = await self._compute_context_usage(
+            instance_id,
+            messages,
+            history_tokens=history_tokens,
+        )
         if snapshot is None:
             return
         tokens, context_window, model_name = snapshot
