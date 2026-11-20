@@ -2087,7 +2087,28 @@ journal_mark_captured_previous() {
     esac
     case "$ver" in
         ''|null) raw="null" ;;
-        *)       raw="\"$(_json_escape "$ver")\"" ;;
+        # WRITER-SIDE TYPE GUARD (leader ruling 2026-11-20, option (b) —
+        # Finding 5): a non-string captured_previous is treated ABSENT by
+        # ALL THREE resolvers (the typing-seam limit); this writer must
+        # never LAUNDER one into a JSON string. The resume path
+        # (promote.sh re-reads `_json_field … captured_previous` from a
+        # prior txn) is the only in-tree path that could: a number /
+        # boolean / object fragment comes back raw, and re-stamping it
+        # quoted would mint a STRING the R0 predicate then treats as a
+        # real (present) capture. Reject — non-string never written; the
+        # CALLER halts (checked write — the capture is the hard
+        # precondition, no stop, no flip).
+        true|false|*'{'*|*'['*|*'"'*)
+            _warn "journal_mark_captured_previous: non-string captured_previous value rejected (writer-side type guard — leader ruling 2026-11-20 option (b)): '$ver' — refusing to stamp (journal untouched)"
+            return 1
+            ;;
+        *[!0-9.-]*)
+            raw="\"$(_json_escape "$ver")\"" ;;
+        *)
+            # only digits/dots/dash — a JSON NUMBER fragment
+            _warn "journal_mark_captured_previous: number-shaped captured_previous value rejected (writer-side type guard — leader ruling 2026-11-20 option (b)): '$ver' — refusing to stamp (journal untouched)"
+            return 1
+            ;;
     esac
     new_inf="${inf%\}}"
     new_inf="${new_inf},\"captured_previous\":$raw}"

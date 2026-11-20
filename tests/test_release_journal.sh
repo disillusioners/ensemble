@@ -3259,6 +3259,34 @@ D5RJ_CAP_EXITS="$(printf '%s' "$D5RJ_CAP_BLOCK" | grep -c 'exit 78')"
 assert_contains "D5-2e the block persists via the CHECKED journal_mark_captured_previous" "journal_mark_captured_previous" "$D5RJ_CAP_BLOCK"
 assert_contains "D5-2f the F6 re-read (moved-between-capture-and-persist ⇒ halt)" "CAPTURED_RECHECK" "$D5RJ_CAP_BLOCK"
 
+# (g) the WRITER-SIDE TYPE GUARD (leader ruling 2026-11-20, option (b) —
+#     Finding 5): a non-string captured_previous is treated ABSENT by all
+#     three resolvers (the typing-seam limit); the stamp site must REJECT
+#     such values (never launder one into a JSON string — the resume
+#     re-stamp of a corrupted txn is the only in-tree path that could).
+#     Rejected classes: booleans, number-shaped fragments, containers.
+D5RJ_GUARD="$(mktemp -d -t d5rjg.XXXXXX)"
+mkdir -p "$D5RJ_GUARD/releases"
+printf '{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}' \
+    > "$D5RJ_GUARD/releases/state.json"
+D5RJ_GUARD_RC="$(INSTALL_DIR="$D5RJ_GUARD" bash -c '
+    . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
+    journal_open_txn "promote" "vX" 2>/dev/null
+    rc=0
+    for bad in true false 123 1.2.3 "-45" "{oops}" "[1]" "\"q\""; do
+        if journal_mark_captured_previous "$bad" >/dev/null 2>&1; then
+            echo "LAUNDERED:$bad"; rc=1
+        fi
+    done
+    # control: a real version string still stamps
+    journal_mark_captured_previous "v0.31.2" >/dev/null 2>&1 || { echo "CONTROL-REFUSED"; rc=1; }
+    grep -q "\"captured_previous\":\"v0.31.2\"" "'"$D5RJ_GUARD"'/releases/state.json" || { echo "CONTROL-ABSENT"; rc=1; }
+    echo "GUARD-RC=$rc"' 2>/dev/null)"
+assert_contains "D5-2g non-string captures are REJECTED (never laundered into JSON strings)" "GUARD-RC=0" "$D5RJ_GUARD_RC"
+assert_not_contains "D5-2g no laundered value landed" "LAUNDERED:" "$D5RJ_GUARD_RC"
+assert_not_contains "D5-2g the control (a real version) still stamps" "CONTROL" "$D5RJ_GUARD_RC"
+rm -rf "$D5RJ_GUARD"
+
 section "D5-11 — the 8a commit writes current then previous=<capture> (AC-D5-11)"
 
 D5RJ_8A_CUR_LN="$(printf '%s' "$PROMOTE_SH_TXT" | grep -n 'journal_set_current "\$VERSION"' | head -1 | cut -d: -f1)"
