@@ -78,7 +78,6 @@ import json
 import logging
 from typing import Annotated, Any
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from daemon._redact import redact_exc_str
@@ -87,6 +86,7 @@ from daemon.services.metrics_query.constants import (
     WINDOW_SECONDS,
 )
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 
 logger = logging.getLogger(__name__)

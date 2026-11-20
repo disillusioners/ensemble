@@ -11009,6 +11009,29 @@ def build_instance_llms(
     llm_with_tools = None
     llm_vision_chat = None
 
+    # S2 (ROW2-DEEP-DIVE §3.3, fix 2): compute the OpenAI tool payloads ONCE
+    # and hand the SAME dicts to every binding below.  Before this change the
+    # tool list was bound at THREE sites (the vision branch + the two standard
+    # binds), and each ``bind_tools`` call re-derived the payload per tool —
+    # langchain's ``BaseTool.tool_call_schema`` is a plain ``@property`` that
+    # rebuilds a pydantic subset model on EVERY access, and
+    # ``convert_to_openai_tool`` touches it four times.  With a vision model
+    # configured the multiplier was 3 x N_tools per graph assembly.
+    #
+    # ``openai_tool_payloads`` memoises the payload per tool identity, so the
+    # SECOND assembly of the same surface derives NOTHING.  The payload the
+    # provider receives is byte-identical: the same
+    # ``convert_to_openai_tool`` output, in the same key order, for the same
+    # name / description / parameters.
+    #
+    # Lazy import: a module-level ``from daemon.tools...`` would close the
+    # ``daemon.tools`` → ``daemon.services.instance_lifecycle`` →
+    # ``daemon.graph`` import cycle (the same reason the neighbouring
+    # ``.services.language_utils`` import is lazy).
+    from daemon.tools._schema_registry import openai_tool_payloads
+
+    formatted_tools = openai_tool_payloads(tools)
+
     if model_vision:
         # log-noise-hygiene: once per DISTINCT vision-model value (the
         # line re-fires on every instance graph build; see the latch
@@ -11028,7 +11051,7 @@ def build_instance_llms(
         # failover controller can mutate its underlying openai client
         # (W3: vision gets its OWN controller, see retry wiring below).
         llm_vision_chat = ThinkingChatOpenAI(**vision_config)
-        llm_with_tools = llm_vision_chat.bind_tools(tools)
+        llm_with_tools = llm_vision_chat.bind_tools(formatted_tools)
     else:
         # log-noise-hygiene: same once-per-process latch as the vision
         # line above (this is the COMMON branch — it re-fired on every
@@ -11046,8 +11069,8 @@ def build_instance_llms(
 
     # Always bind tools to llm_standard, regardless of vision configuration
     if llm_with_tools is None:
-        llm_with_tools = llm_standard_chat.bind_tools(tools)
-    llm_standard = llm_standard_chat.bind_tools(tools)
+        llm_with_tools = llm_standard_chat.bind_tools(formatted_tools)
+    llm_standard = llm_standard_chat.bind_tools(formatted_tools)
 
     # CRITICAL — classify errors BEFORE any retry/cooldown layer so
     # the agent_node W2 catch (the primary ``except ToolPairingInvalidError``

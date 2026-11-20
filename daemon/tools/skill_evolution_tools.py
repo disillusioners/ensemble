@@ -46,7 +46,6 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from langchain_core.tools import tool
 
 from daemon.services.project_skill_source.model import is_pf_address
 import daemon.services.skill_capture_observability as observability
@@ -55,6 +54,7 @@ from daemon.services.skill_job_dispatcher import (
     _resolve_capture_enabled,
 )
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 
 if TYPE_CHECKING:

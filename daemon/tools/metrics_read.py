@@ -108,7 +108,6 @@ import logging
 import time
 from typing import Annotated, Any, Sequence
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from daemon.services.metrics_query.constants import (
@@ -129,6 +128,7 @@ from daemon.services.metrics_query.selectors import (
     parse_series_selector,
 )
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 
 logger = logging.getLogger(__name__)

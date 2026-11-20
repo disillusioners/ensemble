@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal
 
-from langchain_core.tools import tool, BaseTool
+from langchain_core.tools import BaseTool
 
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session
@@ -248,6 +248,7 @@ def expand_allow_for_innate_skills(
         return allow
     return [*allow, *extra]
 
+from ._schema_registry import tool
 from .bash import bash
 from .filesystem import (
     list_directory,

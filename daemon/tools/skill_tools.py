@@ -39,7 +39,6 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.tools import tool
 
 from daemon.repositories.project_skill_file.models import (
     ProjectSkillUsageRecord,
@@ -58,6 +57,7 @@ from daemon.services.project_skill_source.service import (
 )
 from daemon.services.skill_job_dispatcher import SkillFixBurstCapRefused
 from daemon.services.skill_search_service import _bm25_rank
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 
 if TYPE_CHECKING:

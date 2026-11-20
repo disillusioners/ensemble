@@ -86,11 +86,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.tools import tool
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from .db_tools import _validate_select_only
 from .upgrade_journal import iso_plus, mint_nonce, now_iso, parse_iso_utc

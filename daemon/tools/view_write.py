@@ -51,9 +51,9 @@ import os
 import tempfile
 from typing import TYPE_CHECKING, Annotated
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from .views_auth import VIEW_WRITE_AGENTS, _is_views_authorized
 

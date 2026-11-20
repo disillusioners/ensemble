@@ -114,7 +114,6 @@ import os
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from daemon.services.mission_record_service import (
@@ -123,6 +122,7 @@ from daemon.services.mission_record_service import (
     resolve_or_mint_fail_open,
 )
 
+from ._schema_registry import tool
 from .provenance import ProvenanceVerdict, restart_provenance
 from ._tool_registry import register_tool_category
 

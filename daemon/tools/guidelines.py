@@ -78,9 +78,9 @@ import sys
 from pathlib import Path
 from typing import Annotated
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 
 logger = logging.getLogger(__name__)

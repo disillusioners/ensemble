@@ -51,8 +51,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from langchain_core.tools import tool
 
+from ._schema_registry import tool
 from ..services.pok_service import (
     POKError,
     POK_ACTIVE_CAP_PER_PROJECT,

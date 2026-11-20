@@ -89,9 +89,9 @@ import logging
 import re
 from typing import TYPE_CHECKING, Annotated, Any
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from daemon.repositories.room.models import (
     ROOM_READ_DEFAULT_LIMIT,

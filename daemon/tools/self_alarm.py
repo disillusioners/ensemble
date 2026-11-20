@@ -66,9 +66,9 @@ from datetime import datetime, timezone as _stdlib_timezone
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from ._schema_registry import tool
 from ..services.self_alarm_service import (
     FAMILY_CRON,
     FAMILY_ONCE,

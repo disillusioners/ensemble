@@ -57,9 +57,9 @@ from datetime import datetime, UTC
 from typing import Annotated, Any, Optional, TYPE_CHECKING
 
 from fastapi import HTTPException
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_dict_result
 from daemon import constants

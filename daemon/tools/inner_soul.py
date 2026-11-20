@@ -85,7 +85,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from langchain_core.tools import tool
 from typing import TYPE_CHECKING, Literal
 import asyncio
 import re
@@ -97,6 +96,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 from .memoir_knob import memoir_enabled
 from ..rag.config import is_rag_enabled

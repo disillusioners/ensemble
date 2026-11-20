@@ -13,10 +13,10 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
-from langchain_core.tools import tool
 
 logger = logging.getLogger(__name__)
 
+from ._schema_registry import tool
 from ..repositories.project.repository import SQLModelProjectRepository
 from ..repositories.project.models import ProjectStatus, ProjectType
 from ._tool_registry import register_tool_category

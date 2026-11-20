@@ -145,9 +145,9 @@ import time
 from datetime import datetime, timezone
 from typing import Annotated, Any, Optional
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field, ValidationError
 
+from ._schema_registry import tool
 from ..config import (
     PROMPT_ASSENT_DEFAULT_ENABLED,
     PROMPT_ASSENT_DEFAULT_HOURLY_MISMATCH_BUDGET,

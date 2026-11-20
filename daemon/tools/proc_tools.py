@@ -78,8 +78,8 @@ from datetime import datetime, timezone
 from secrets import token_hex
 from typing import Any, List, Optional, Union
 
-from langchain_core.tools import tool
 
+from ._schema_registry import tool
 from ._tool_registry import register_tool_category
 # agent-secrets P2 (design §1b) — resolver vocabulary is IMPORTED
 # (never redefined; commission hard constraint). No import cycle:

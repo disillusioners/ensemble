@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import logging
 
-from langchain_core.tools import tool
 
+from ._schema_registry import tool
 from ..repositories.project.repository import ConcurrentWishlistUpdate
 from ._tool_registry import register_tool_category
 
