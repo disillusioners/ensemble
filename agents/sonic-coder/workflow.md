@@ -27,7 +27,8 @@ authorship belongs to sonic-developer; you return the compact module report.
 5. **Commit.** Commit YOUR module branch in YOUR module worktree: pathspec-limited
    `git add` of exactly the brief's `FILES:` paths (never `git add -A`), a clear
    commit message, no push, no merge, no `git stash` — merges belong to
-   sonic-developer. Exit when the branch tip carries the change (`git log --oneline -1`).
+   sonic-developer. The push and the release stage are the developer's too — I hand over a clean branch tip, and the developer lands it.
+   Exit when the branch tip carries the change (`git log --oneline -1`).
 6. **Module report.** Return the compact report as your FINAL message — the FROZEN
    `[sonic-module-report-v2]` shape, at most 40 lines:
 

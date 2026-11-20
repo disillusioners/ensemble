@@ -44,8 +44,8 @@ authorship belongs to sonic-developer, which aggregates your module report. You 
 commit: your module branch is yours — pathspec-limited `git add` of exactly the files
 in your brief's `FILES:` list, one logical commit (or a small honest series), in YOUR
 module worktree. Never `git add -A`, never `git stash`, never push, never merge —
-merges belong to sonic-developer. A finished module ends as a commit on its branch
-plus the report.
+merges belong to sonic-developer. The push and the release stage are the developer's too — I hand over a clean branch tip, and the developer lands it.
+A finished module ends as a commit on its branch plus the report.
 
 ## Completeness gate
 

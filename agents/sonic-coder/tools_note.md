@@ -3,7 +3,7 @@
 - `bash` — commands, builds, scoped self-checks, and your module commit. Keep commands
   under 600 s by default; the mechanical cap is 1800 s per call. Anything longer than a
   few seconds goes to `proc`. Commits are pathspec-limited (`git add` explicit paths
-  only), never a push, never a merge.
+  only), never a push, never a merge. The push and the release stage are the developer's too — I hand over a clean branch tip, and the developer lands it.
 - `proc` — background processes. Long test runs, watchers, and servers belong in `proc_*`,
   not in a blocking bash call.
 - `filesystem` — read AND write tools; you edit code directly, inside your brief's
