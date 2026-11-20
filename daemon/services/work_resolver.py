@@ -87,6 +87,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Tie-break padding for the SQL pushdown on the badge leg (jbh-m1a). When ``list_work`` is called with an explicit ``limit``, the JobItem SELECT is capped at ``limit + len(ensure_job_ids or ()) + TIE_PAD`` so the batch lookups and row loop run over a bounded set; the Python stable sort + slice at list_work stays authoritative. TIE_PAD covers append-order ties that the SQL ORDER BY (created_at desc only) cannot preserve, plus a small safety margin.
+TIE_PAD = 8
+BADGE_TIE_PAD = TIE_PAD
+_TIE_PAD = TIE_PAD
+_BADGE_TIE_PAD = TIE_PAD
+
 
 # ── Admission-state → representative status map ───────────────────────────
 # Phase 4: the ``status`` column is frozen at the INSERT default. When
@@ -1435,7 +1441,43 @@ class WorkResolverService:
         child_job_instance_ids: set[str] = set()
 
         if query_jobs_table:
-            jobs = self._query_jobs(project_id, instance_id, job_status_filters)
+            # SQL pushdown (jbh-m1a): when ``limit`` is explicit (not
+            # None), cap the JobItem fetch so the batch lookups and row
+            # loop run over a bounded set. D-68 LEADER RULING
+            # (wi-3f5bea95): "no server-side default cap" — when
+            # ``limit`` is None we issue NO SQL limit and NO default
+            # cap; every matching row is returned. The Python stable
+            # sort + slice at the bottom of list_work stays
+            # AUTHORITATIVE (wire order = created_at desc, append-order
+            # tie-break — unchanged).
+            if limit is not None and limit >= 0:
+                _sql_limit = limit + len(ensure_job_ids or ()) + TIE_PAD
+            else:
+                _sql_limit = None
+            jobs = self._query_jobs(
+                project_id,
+                instance_id,
+                job_status_filters,
+                limit=_sql_limit,
+            )
+            # Page-completeness fallback (D-29/D-69): ensured ids draw
+            # from the fetched list. After bounding, any ensure_job_ids
+            # id MISSING from the bounded page is recovered by ONE
+            # targeted IN re-query so ensured rows ALWAYS appear. Runs
+            # before the batch lookups so the recovered rows' instance /
+            # mission / timing data is resolved in the same batched
+            # passes (no extra per-row SELECTs).
+            if ensure_job_ids:
+                _present = {j.job_id for j in (jobs or [])}
+                _missing = [jid for jid in ensure_job_ids if jid not in _present]
+                if _missing:
+                    _recovered = self._query_jobs(
+                        project_id,
+                        instance_id,
+                        job_status_filters,
+                        job_ids=set(_missing),
+                    )
+                    jobs = list(jobs or []) + list(_recovered or [])
             if jobs:
                 instance_ids = {
                     j.instance_id for j in jobs if j.instance_id is not None
@@ -2295,6 +2337,8 @@ class WorkResolverService:
         project_id: str | None,
         instance_id: str | None,
         status_filters: list[JobStatusFilter] | None,
+        limit: int | None = None,
+        job_ids: set[str] | None = None,
     ) -> list[JobItem]:
         """Run the JobItem SELECT for ``list_work`` and return the rows.
 
@@ -2338,6 +2382,8 @@ class WorkResolverService:
                 stmt = stmt.where(JobItem.project_id == project_id)
             if instance_id is not None:
                 stmt = stmt.where(JobItem.instance_id == instance_id)
+            if job_ids:
+                stmt = stmt.where(JobItem.job_id.in_(job_ids))
             if status_filters:
                 # Build the OR-of-ANDs predicate. Each filter row is
                 # one branch of the outer OR; the row's clauses are
@@ -2382,6 +2428,8 @@ class WorkResolverService:
                 if branches:
                     stmt = stmt.where(or_(*branches))
             stmt = stmt.order_by(col(JobItem.created_at).desc())
+            if limit is not None:
+                stmt = stmt.limit(limit)
             return list(session.exec(stmt))
 
     def _batch_child_instance_ids(self, instance_ids: set[str]) -> set[str]:
