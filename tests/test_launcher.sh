@@ -1115,9 +1115,12 @@ assert_eq "8v sweep rolled back after the owner died" "releases/v0.10.5" "$(read
 ls "$JS_V/releases" | grep -q 'rollback\.lock\.d\.stale\.' && _pass \
     || _fail "8v dead-owner break moved the lock aside" "present" "$(ls "$JS_V/releases" | tr '\n' ' ')"
 
-# 8w. W1 unit seam: _js_lock_acquire itself — stale heartbeat + LIVE owner
-#     → rc 1 (busy at wait=0, never delays boot), lock intact; the lib.sh
-#     mirror (lock_acquire) is proven in the release-journal pack (7c).
+# 8v2. W1 unit seam: _js_lock_acquire itself — stale heartbeat + LIVE owner
+#      → rc 1 (busy at wait=0, never delays boot), lock intact; the lib.sh
+#      mirror (lock_acquire) is proven in the release-journal pack (7c).
+#      (MINOR-①, cycle-2 2026-11-20: this leg was born `8w`, colliding with
+#      the M3 wrongful-rollback harness at :833 — renumbered to follow its
+#      8v integration twin, mirroring the 8u/8u2 pair.)
 JS_W="$JS_TEST_DIR/w"; mkdir -p "$JS_W/releases"
 sleep 30 & JS_W_OWNER=$!
 mkdir -p "$JS_W/releases/rollback.lock.d"
@@ -1125,11 +1128,11 @@ printf '%s\n' "$JS_W_OWNER" > "$JS_W/releases/rollback.lock.d/owner"
 printf '%s\n' "run-w1-$JS_W_OWNER" > "$JS_W/releases/rollback.lock.d/run_id"
 printf '%s\n' "$(( $(date +%s) - 400 ))" > "$JS_W/releases/rollback.lock.d/heartbeat"
 ( . "$LAUNCHER"; _js_lock_acquire "$JS_W" 0 >/dev/null 2>&1 )
-assert_eq "8w _js_lock_acquire: stale-hb + live owner → busy (1)" "1" "$?"
-assert_eq "8w lock dir intact" "present" "$([ -d "$JS_W/releases/rollback.lock.d" ] && echo present)"
+assert_eq "8v2 _js_lock_acquire: stale-hb + live owner → busy (1)" "1" "$?"
+assert_eq "8v2 lock dir intact" "present" "$([ -d "$JS_W/releases/rollback.lock.d" ] && echo present)"
 kill "$JS_W_OWNER" 2>/dev/null; wait "$JS_W_OWNER" 2>/dev/null
 ( . "$LAUNCHER"; _js_lock_acquire "$JS_W" 0 >/dev/null 2>&1 )
-assert_eq "8w dead owner → acquire succeeds via stale-break (0)" "0" "$?"
+assert_eq "8v2 dead owner → acquire succeeds via stale-break (0)" "0" "$?"
 ( . "$LAUNCHER"; _js_lock_release "$JS_W" >/dev/null 2>&1 )
 
 
