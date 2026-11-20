@@ -2,28 +2,30 @@
 
 Base tree: 213ea6c1e (origin/latest). Mode: base. Raw: `.agents/tester/harness/jobs-badge-cost/raw/BASELINE.badge_cost.base.json`.
 
-Seed population: 30 linked instances, 420 terminal JobItems (dead_letter 8), 10 queued, 5 active, 5 orphan instance_ids, 20 Task timing rows, 60 JobWatcher rows (mixed). Replayed 8 rounds per leg.
+Seed population: 30 linked instances, 420 terminal JobItems (dead_letter 8), 10 queued, 5 active, 5 orphan instance_ids, 20 Task timing rows, 60 JobWatcher rows (mixed). Replayed 8 rounds per leg. Reconcile repeated 5 times (median reported).
 
 ## Per-leg badge composite (p50 / max latency, statements per round, rows)
 
-| Leg | latency p50 (ms) | latency max (ms) | statements/round | rows/round |
+| Leg | shape | latency p50 (ms) | latency max (ms) | statements/round | rows/round |
+|---|---|---:|---:|---:|---:|
+| jobs_active_badge | no-limit (queued,active) — M1a UNTOUCHED | 29.07 | 85.23 | 5 | 435 |
+| jobs_terminal_page | limit=10 + ensure_job_ids (route shape) — M1a bounded | 25.39 | 29.48 | 5 | 10 |
+| missions | limit=20 (liveness=processing,pending,paused) | 10.05 | 11.68 | 3 | 20 |
+| instances | limit=10, include_descendants=false, order=activity | 5.20 | 7.90 | 2 | 10 |
+| defer-blocked watch read | get_all_active_watches (unbounded) | 3.69 | 5.10 | 1 | 60 |
+
+Two badge shapes are measured deliberately:
+- **No-limit badge shape** (`jobs_active_badge`): exercises the no-LIMIT path, which M1a deliberately does NOT touch (D-68 / Q1-ii "no server-side default cap"). Its router-side N+1s (per-QUEUED-job `_get_queue_position`, per-dead_letter-row DLQ lookup) are what M1b changes there. Statement count stays 5; row count 435.
+- **Limit-explicit terminal page** (`jobs_terminal_page`): mirrors the route's actual call (limit=10 + ensure_job_ids, jobs_crud.py:917-922). This is the shape M1a's SQL LIMIT pushdown bounds: 10 rows returned instead of the full set, same 5 SELECTs.
+
+## Watch-reconcile leg (median of 5 repeats)
+
+| Method | median (ms) | min (ms) | max (ms) | statements |
 |---|---:|---:|---:|---:|
-| jobs_active_badge (queued,active, no limit) | 44.71 | 98.20 | 5 | 435 |
-| jobs_terminal_page (completed,...,dead_letter, limit=10) | 36.29 | 38.94 | 5 | 420 |
-| missions (liveness=processing,pending,paused, limit=20) | 9.15 | 13.58 | 3 | 20 |
-| instances (limit=10, include_descendants=false, order=activity) | 5.58 | 7.43 | 2 | 10 |
-| defer-blocked watch read (get_all_active_watches) | 3.91 | 4.67 | 1 | 60 |
+| reconcile_terminal_watches() | 872.68 | 476.41 | 941.49 | 121 (60 job_queue_items + 60 task) |
+| reconcile_held_watches_for_instance(None) | 1756.93 | 1589.63 | 1907.28 | 121 (60 job_queue_items + 60 task) |
 
-Load-bearing pre-fix number: the no-LIMIT fetch on `jobs_active_badge` returns 435 rows per round with 5 SELECTs (2 JobItem + 2 Instance + 1 Task) — the unbounded row set is the cost driver, not the round-trip count.
-
-## Watch-reconcile leg
-
-| Method | time (ms) | statements |
-|---|---:|---:|
-| reconcile_terminal_watches() | 716.15 | 121 (60 job_queue_items + 60 task) |
-| reconcile_held_watches_for_instance(None) | 1926.28 | 121 (60 job_queue_items + 60 task) |
-
-The watch-read component: get_all_active_watches() issues an unbounded SELECT with no active-state WHERE (full-table read); callers filter in Python. M1b adds the active-state WHERE and bridges via asyncio.to_thread.
+The watch-read component: get_all_active_watches() issues an unbounded SELECT with no active-state WHERE (full-table read); callers filter in Python. M1b adds the active-state WHERE and bridges via asyncio.to_thread. Single-shot numbers are noisy; repeats expose the range.
 
 ## Loop-lag raw
 
@@ -31,9 +33,9 @@ Not capturable in this in-process harness (no daemon LoopLagProbe running). Reco
 
 ## Causal-split hooks
 
-- **Enrichment-count (M1a)**: `jobs_active_badge` statements/round = 5 SELECTs but 435 rows fetched (no-LIMIT). The no-LIMIT fetch + per-row _parse_iso_datetime + batch lookups over ALL matching rows is the enrichment-count driver. M1a pushes SQL LIMIT (margin = limit + len(ensure_job_ids) + tie pad) with guaranteed fallback re-query for ensured ids; no-limit path untouched (Q1-ii).
-- **Router-per-row (M1b)**: per-QUEUED-job `await service._get_queue_position` N+1 in the row loop + per-dead_letter-row `dlq_service.get_dlq_by_job_id` SYNC on-loop. Batched in M1b (one pending-list fetch → all positions; one IN-query DLQ enrichment).
-- **Watch-read (M1b)**: `defer_blocked_watch_read` = 1 SELECT over 60 rows (unbounded full-table read); reconcile leg = 121 SELECTs over 60 watch rows. M1b adds active-state WHERE + to_thread bridge.
+- **Enrichment-count (M1a)**: `jobs_terminal_page` (limit-explicit) bounds the row set to 10 via SQL LIMIT (margin + ensure_job_ids fallback). `jobs_active_badge` (no-limit) stays 435 rows — intentionally untouched (D-68/Q1-ii).
+- **Router-per-row (M1b)**: per-QUEUED-job `await service._get_queue_position` N+1 in the row loop + per-dead_letter-row `dlq_service.get_dlq_by_job_id` SYNC on-loop. Batched in M1b.
+- **Watch-read (M1b)**: `defer_blocked_watch_read` = 1 SELECT over 60 rows (unbounded full-table read); reconcile leg median 873ms / 1757ms over 60 watch rows. M1b adds active-state WHERE + to_thread bridge.
 - **Pool-queueing**: NOT visible in this in-process harness (no connection-pool contention / queueing under single-threaded SQLite). Stated honestly. Requires a multi-process or threaded load with a real pool; out of scope for this harness.
 
 ## How to verify
