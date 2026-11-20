@@ -356,18 +356,79 @@ class TestKindScopedRuntimeMaxSec:
         """D3-D (Wave 5 §2.4 ``--collect`` caveat): on a systemd ≥252 host
         the promote unit carries the OPTIONAL terminal-status-retention
         property AFTER RuntimeMaxSec; the restart arm NEVER does (the
-        property is promote-scoped like the bound itself)."""
+        property is promote-scoped like the bound itself).
+
+        Review-fix M1 (2026-11-20): SEMANTIC, not tautological — the
+        collector is REAL; only the host-version gate
+        (``systemd_version_cached``) is stubbed, so the property VALUE
+        itself is pinned. A regression back to the FLUSHING mode
+        (``CollectMode=inactive-or-failed`` — per systemd.unit(5) exactly
+        ``--collect``'s implied value, which unloads the failed unit and
+        flushes ExecMainStatus, leaving the unit_terminal classifier branch
+        unreachable — verified on-host, systemd 255) FAILS this leg, as
+        does a broken ≥252 gate on either side."""
         _clear_derivation_env(monkeypatch)
-        monkeypatch.setattr(
-            uj, "collect_mode_property_or_none",
-            lambda: "CollectMode=inactive-or-failed",
-        )
+        monkeypatch.setattr(uj, "systemd_version_cached", lambda: 252)
         assert drain.arm_and_drain("promote", "r-kind-promote-3") is True
         assert drain.calls[0]["unit_properties"] == [
-            "RuntimeMaxSec=1320", "CollectMode=inactive-or-failed",
+            "RuntimeMaxSec=1320", "CollectMode=inactive",
         ]
         assert drain.arm_and_drain("restart", "r-kind-restart-3") is True
         assert drain.calls[-1]["unit_properties"] is None
+
+
+class TestM1CollectModeRetentionValue:
+    """Review-fix M1 (2026-11-20) — the CollectMode VALUE is the
+    terminal-status-RETAINING mode, pinned SEMANTICALLY (the collector is
+    REAL; only the host-version gate is stubbed — the old pin mocked the
+    collector to echo the asserted string, catching nothing).
+
+    What these legs would CATCH: (a) any regression back to
+    ``CollectMode=inactive-or-failed`` (the flushing mode — the M1 defect
+    itself, at the collector, at the drain composition, or on the built
+    argv); (b) a broken version gate (below-252 emission / ≥252 omission /
+    unreadable-version emission — the degrade-safety contract)."""
+
+    def test_supported_host_emits_the_retaining_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(uj, "systemd_version_cached", lambda: 255)
+        assert uj.collect_mode_property_or_none() == "CollectMode=inactive"
+
+    def test_boundary_252_emits_251_omits(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(uj, "systemd_version_cached", lambda: 252)
+        assert uj.collect_mode_property_or_none() == "CollectMode=inactive"
+        monkeypatch.setattr(uj, "systemd_version_cached", lambda: 251)
+        assert uj.collect_mode_property_or_none() is None
+
+    def test_unreadable_version_omits_the_property(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(uj, "systemd_version_cached", lambda: None)
+        assert uj.collect_mode_property_or_none() is None
+
+    def test_the_property_lands_on_the_built_service_argv(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The retention value must survive to the EXECUTED argv — the
+        classifier's unit_terminal branch reads what systemd actually
+        got, not what the composition list claims."""
+        _clear_derivation_env(monkeypatch)
+        monkeypatch.setattr(uj, "systemd_version_cached", lambda: 255)
+        props: list[str] = [f"RuntimeMaxSec={uj.derived_runtime_max_sec()}"]
+        collect_mode = uj.collect_mode_property_or_none()
+        assert collect_mode is not None
+        props.append(collect_mode)
+        argv = uj.build_service_argv(
+            ["bash", "promote.sh", "demo"], "r-m1-argv-1", "user", {},
+            Path("/i/data/upgrade.log"), unit_properties=props,
+        )
+        assert "--property=CollectMode=inactive" in argv, argv
+        assert not any(
+            t.endswith("CollectMode=inactive-or-failed") for t in argv
+        ), argv
 
 
 # ── D3-E3 (self-service-promote Wave 5, §2.4 / AC-D3-5): the arm-lane

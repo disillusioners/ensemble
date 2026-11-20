@@ -3776,16 +3776,24 @@ def derived_runtime_max_sec(
 # terminated transient unit is UNLOADED, so ``systemctl show`` returns
 # not-found and the terminal status is LOST. The design's remedies are
 # continuous polling (the D3-E1/E2 reaper re-arm loop + the journal-truth
-# fallback — BOTH always on), ``CollectMode=inactive-or-failed`` (systemd
-# ≥252 — UNPROVEN on any given host), or dropping ``--collect`` (rejected:
-# it would change the argv for every arm). This probe gates the OPTIONAL
-# CollectMode property: when the host's systemd is ≥252 the property is
-# added to the promote unit (harmless when it matches --collect's implied
-# behavior, terminal-status-preserving if it retains failed units); below
-# 252 — or when the version is unreadable — the property is OMITTED
-# (degrade safely: current behavior; the classifier never DEPENDS on
-# catching the unit pre-GC). NEVER ``--scope`` (historically rejected —
-# it shares the caller's pgroup/cgroup; see the Option D history above).
+# fallback — BOTH always on) and ``CollectMode=inactive`` (review fix M1,
+# 2026-11-20: the RETAINING mode — a FAILED unit stays LOADED with its
+# ExecMainStatus queryable until reset-failed; NOT ``inactive-or-failed``,
+# which is exactly ``--collect``'s implied value per systemd.unit(5) and
+# therefore flushes the status it was meant to preserve, leaving the
+# unit_terminal classifier branch (:3146-3160, AC-D3-2) unreachable). The
+# explicit ``--property=`` OVERRIDES ``--collect``'s implication — VERIFIED
+# ON-HOST (systemd 255.4-1ubuntu8.18, 2026-11-20, bounded transient-unit
+# probe A vs control B: explicit property ⇒ LoadState=loaded /
+# ActiveState=failed / ExecMainStatus=7 retained; ``--collect`` alone ⇒
+# LoadState=not-found / ExecMainStatus flushed to 0). Dropping ``--collect``
+# was therefore NOT needed (the argv stays byte-stable). This probe gates
+# the OPTIONAL CollectMode property: when the host's systemd is ≥252 the
+# property is added to the promote unit; below 252 — or when the version is
+# unreadable — the property is OMITTED (degrade safely: current behavior;
+# the classifier never DEPENDS on catching the unit pre-GC). NEVER
+# ``--scope`` (historically rejected — it shares the caller's
+# pgroup/cgroup; see the Option D history above).
 _COLLECT_MODE_MIN_SYSTEMD = 252
 _systemd_version_cache: int | None = None
 
@@ -3813,13 +3821,16 @@ def systemd_version_cached() -> int | None:
 
 
 def collect_mode_property_or_none() -> str | None:
-    """The promote unit's optional ``CollectMode=inactive-or-failed``
-    property when the host systemd supports it (≥252), else ``None``
-    (degrade safely — D3-D)."""
+    """The promote unit's optional ``CollectMode=inactive`` property when
+    the host systemd supports it (≥252), else ``None`` (degrade safely —
+    D3-D; review fix M1: ``inactive`` is the terminal-status-RETAINING
+    mode — ``inactive-or-failed`` equals ``--collect``'s implied value and
+    would flush ExecMainStatus, defeating the retention the property
+    exists to provide)."""
     v = systemd_version_cached()
     if v is None or v < _COLLECT_MODE_MIN_SYSTEMD:
         return None
-    return "CollectMode=inactive-or-failed"
+    return "CollectMode=inactive"
 
 
 # ── systemd transient SERVICE executor (Option D, Stage-2.2a) ────────────────
