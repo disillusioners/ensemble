@@ -931,23 +931,46 @@ async def list_jobs(
                 continue
             work_records_by_id[record.work_id] = record
 
+    # Batch-compute queue positions for the queued jobs on this page
+    # (single pending-list fetch instead of one per row).
+    queued_jobs = [
+        j for j in jobs
+        if j.admission_state == AdmissionState.QUEUED.value and j.project_id
+    ]
+    positions_by_id: dict = {}
+    if queued_jobs:
+        try:
+            positions_by_id = await service._get_queue_positions(queued_jobs)
+        except Exception:
+            positions_by_id = {}
+
+    # Batch-fetch DLQ enrichment for the dead_letter rows on this page
+    # (single IN SELECT instead of one per row).
+    dead_job_ids = [
+        j.job_id for j in jobs
+        if j.admission_state == AdmissionState.DEAD.value
+    ]
+    dlq_by_id: dict = {}
+    if dead_job_ids:
+        try:
+            dlq_by_id = dlq_service.get_dlq_by_job_ids(dead_job_ids)
+        except Exception:
+            dlq_by_id = {}
+
     # Convert to response format
     job_responses = []
     for job in jobs:
         # Get position if pending
         position = None
         if job.admission_state == AdmissionState.QUEUED.value and job.project_id:
-            try:
-                position = await service._get_queue_position(job.job_id, job.project_id)
-            except Exception:
-                pass
+            position = positions_by_id.get(job.job_id)
 
         # Get DLQ info if job is in dead_letter state
         dlq_reason = None
         retry_count = None
         moved_to_dlq_at = None
         if job.admission_state == AdmissionState.DEAD.value:
-            dlq_item = dlq_service.get_dlq_by_job_id(job.job_id)
+            dlq_item = dlq_by_id.get(job.job_id)
             if dlq_item:
                 dlq_reason = dlq_item.reason
                 retry_count = dlq_item.retry_count

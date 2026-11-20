@@ -553,7 +553,7 @@ class JobQueueService:
         # New resolver-based path: walk every active watch, resolve
         # through the resolver (Task OR JobItem), notify if the resolved
         # record is terminal.
-        all_watches = self._watcher_repo.get_all_active_watches()
+        all_watches = await asyncio.to_thread(self._watcher_repo.get_active_watches)
         reconciled = 0
 
         for watch in all_watches:
@@ -708,7 +708,7 @@ class JobQueueService:
         """
         terminal_admission = {AdmissionState.DONE.value, AdmissionState.DEAD.value}
 
-        all_watches = self._watcher_repo.get_all_active_watches()
+        all_watches = await asyncio.to_thread(self._watcher_repo.get_active_watches)
         reconciled = 0
 
         for watch in all_watches:
@@ -841,11 +841,11 @@ class JobQueueService:
 
         work_resolver = getattr(self, "_work_resolver", None)
         try:
-            all_watches = self._watcher_repo.get_all_active_watches()
+            all_watches = await asyncio.to_thread(self._watcher_repo.get_active_watches)
         except Exception as fetch_err:
             logger.warning(
                 "reconcile_held_watches_for_instance: "
-                "get_all_active_watches failed "
+                "get_active_watches failed "
                 "(instance_id=%s): %s — sweep tick continues, "
                 "no rows touched this tick",
                 (instance_id[:8] + "...") if instance_id else "<global>",
@@ -4455,6 +4455,57 @@ class JobQueueService:
                 return i
         
         return len(pending) + 1
+
+    async def _get_queue_positions(self, jobs, queue_id=None) -> dict:
+        """Batch-compute queue positions for a page of jobs.
+
+        By default positions are PROJECT-GLOBAL (mirroring the old
+        ``_get_queue_position(job_id, project_id)`` call site on the
+        badge path, which never passed a queue_id). Pass ``queue_id``
+        to scope every job in ``jobs`` to that single queue instead
+        (mirroring ``_get_queue_position(job_id, project_id, queue_id=...)``).
+
+        Fetches the pending list ONCE per distinct project (or once for
+        the supplied queue) and computes every job's 1-based position
+        with identical semantics (priority desc, created_at asc;
+        "position after all pending" when absent).
+        """
+        result: dict = {}
+        if not jobs:
+            return result
+
+        if queue_id is not None:
+            pending = await asyncio.to_thread(
+                self._repository.list_pending_by_queue, queue_id
+            )
+            position_by_id: dict = {}
+            for i, pjob in enumerate(pending, start=1):
+                position_by_id[pjob.job_id] = i
+            pending_count = len(pending)
+            for job in jobs:
+                job_id = getattr(job, "job_id", None)
+                result[job_id] = position_by_id.get(job_id, pending_count + 1)
+            return result
+
+        # Project-global: group jobs by project_id so we issue one
+        # pending-list fetch per distinct project instead of per row.
+        by_project: dict = {}
+        for job in jobs:
+            by_project.setdefault(getattr(job, "project_id", None), []).append(job)
+
+        for project_id, scoped_jobs in by_project.items():
+            pending = await asyncio.to_thread(
+                self._repository.list_pending_by_project, project_id
+            )
+            position_by_id = {}
+            for i, pjob in enumerate(pending, start=1):
+                position_by_id[pjob.job_id] = i
+            pending_count = len(pending)
+            for job in scoped_jobs:
+                job_id = getattr(job, "job_id", None)
+                result[job_id] = position_by_id.get(job_id, pending_count + 1)
+
+        return result
 
     # ========== JobProcessor Helper Methods ==========
     

@@ -1,6 +1,10 @@
 import { signal } from '@angular/core';
+import { TestBed } from '@angular/core/testing';
 import { Observable, of, throwError, firstValueFrom } from 'rxjs';
 import { InstanceInfo, InstanceStatus } from '../models';
+import { ApiService } from './api.service';
+import { SseService } from './sse.service';
+import { InstanceService } from './instance.service';
 
 const PAGE_SIZE = 10;
 
@@ -1286,3 +1290,139 @@ describe('InstanceService', () => {
 function flushPromises(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+// ── The visibility gate (hidden tab stops polling) ─────────────────────
+//
+// The house gate (jobs page #3 / nest-reports #7 / room #12): a HIDDEN
+// browser tab issues NO request, a REFOCUS produces EXACTLY ONE immediate
+// refresh (debounced 2 s — never a catch-up burst), and the teardown
+// detaches the listener.
+//
+// These specs drive the PRODUCTION service (the mirror above covers the
+// pagination/merge logic; the gate lives in the production class).
+//
+// jsdom's ``document.visibilityState`` is a prototype getter — the test
+// shadows it with an own property so the production code reads the
+// simulated value.
+function setVisibility(state: 'visible' | 'hidden'): void {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    get: () => state,
+  });
+}
+
+function fireVisibilityChange(): void {
+  document.dispatchEvent(new Event('visibilitychange'));
+}
+
+describe('InstanceService — the visibility gate (hidden tab stops polling)', () => {
+  const gateApiMock = {
+    listInstances: jest.fn(
+      (): Observable<{ instances: InstanceInfo[]; total: number; has_more: boolean }> =>
+        of({ instances: [], total: 0, has_more: false }),
+    ),
+    getInstance: jest.fn(() => throwError(() => ({ status: 404 }))),
+  };
+  const gateSseMock = {
+    statusChange: signal<{ instance_id: string; status: string; agent_id?: string } | null>(null),
+    instanceCreatedQueue: signal<InstanceInfo[]>([]),
+  };
+  let service: InstanceService;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    gateApiMock.listInstances.mockClear();
+    setVisibility('visible');
+    TestBed.configureTestingModule({
+      providers: [
+        { provide: ApiService, useValue: gateApiMock },
+        { provide: SseService, useValue: gateSseMock },
+      ],
+    });
+    service = TestBed.inject(InstanceService);
+  });
+
+  afterEach(() => {
+    service.stopPolling();
+    setVisibility('visible');
+    jest.useRealTimers();
+  });
+
+  it('a HIDDEN tab issues NO request — the poll tick is gated', () => {
+    service.startPolling();
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1); // the immediate load
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+
+    jest.advanceTimersByTime(60_000);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(60_000);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+  });
+
+  it('a REFOCUS issues EXACTLY ONE refresh (no catch-up burst)', () => {
+    service.startPolling();
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+    jest.advanceTimersByTime(60_000);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+
+    setVisibility('visible');
+    fireVisibilityChange();
+    // The refresh is DEBOUNCED (2 s) — before the window elapses, none.
+    jest.advanceTimersByTime(1999);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(1);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(2);
+  });
+
+  it('a rapid hide/show storm collapses into ONE refresh', () => {
+    service.startPolling();
+
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+
+    jest.advanceTimersByTime(2000);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(2); // immediate load + ONE refocus
+  });
+
+  it('stopPolling detaches the visibility listener and clears the interval', () => {
+    service.startPolling();
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+
+    const removeSpy = jest.spyOn(document, 'removeEventListener');
+    service.stopPolling();
+    expect(removeSpy).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+    removeSpy.mockRestore();
+
+    jest.advanceTimersByTime(120_000);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+
+    // A visibilitychange after the teardown issues NO request either.
+    setVisibility('hidden');
+    fireVisibilityChange();
+    setVisibility('visible');
+    fireVisibilityChange();
+    jest.advanceTimersByTime(2000);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+  });
+
+  it('the 60 s cadence is UNCHANGED — the gate suppresses ticks, it does not slow them', () => {
+    service.startPolling();
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(1);
+
+    jest.advanceTimersByTime(60_000);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(2);
+    jest.advanceTimersByTime(60_000);
+    expect(gateApiMock.listInstances).toHaveBeenCalledTimes(3);
+  });
+});

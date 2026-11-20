@@ -86,6 +86,12 @@ const LEGAL_TRANSITIONS: Record<string, CommandPhase[]> = {
 export const TERMINAL_DISPLAY_MS = 8000;
 /** REST fallback poll cadence while the card is active AND SSE is dead. */
 export const POLL_INTERVAL_MS = 5000;
+/**
+ * The refocus debounce (ms) — rapid tab switches collapse into ONE
+ * immediate poll (the jobs-page exemplar's discipline). A hidden tab stops
+ * ISSUING polls; a refocus produces exactly ONE catch-up read.
+ */
+const REFOCUS_DEBOUNCE_MS = 2000;
 
 @Injectable({
   providedIn: 'root',
@@ -115,6 +121,26 @@ export class CommandStateService {
   private pollInstanceId: string | null = null;
   private lastSyncedInstanceId: string | null = null;
   private lastSyncedSseAlive = true;
+
+  /**
+   * The browser tab's visibility — the POLL GATE. A hidden tab stops
+   * ISSUING the 5 s REST fallback poll (the cadence is unchanged for
+   * VISIBLE tabs).
+   */
+  private browserVisible = true;
+
+  /**
+   * The refocus debounce handle — rapid tab switches collapse into ONE
+   * immediate poll (the timer id is kept so a second focus cancels and
+   * re-arms it instead of queueing a second poll).
+   */
+  private refocusTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * The visibility listener — attached while the poll runs, detached when
+   * the poll stops (no leak).
+   */
+  private visibilityListener: (() => void) | null = null;
 
   /** Per-instance reconcile sequence — a stale GET response for an
    *  instance that was re-reconciled (or switched away) must not win. */
@@ -495,6 +521,14 @@ export class CommandStateService {
 
     if (shouldPoll && this.pollTimer === null) {
       this.pollInstanceId = this.lastSyncedInstanceId;
+      // The VISIBILITY GATE — seed the flag from the document state and
+      // attach the listener while the poll runs.
+      this.browserVisible =
+        typeof document !== 'undefined' ? document.visibilityState !== 'hidden' : true;
+      if (typeof document !== 'undefined') {
+        this.visibilityListener = () => this.onVisibilityChange();
+        document.addEventListener('visibilitychange', this.visibilityListener);
+      }
       this.pollTimer = setInterval(() => this.pollOnce(), POLL_INTERVAL_MS);
     } else if (!shouldPoll && this.pollTimer !== null) {
       this.stopPollTimer();
@@ -507,9 +541,54 @@ export class CommandStateService {
       this.pollTimer = null;
     }
     this.pollInstanceId = null;
+    // The visibility listener is detached (no leak) and a pending refocus
+    // poll is dropped (a stopped poll must not fire a request).
+    if (this.visibilityListener && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.visibilityListener);
+      this.visibilityListener = null;
+    }
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+      this.refocusTimer = null;
+    }
+  }
+
+  /**
+   * The visibility gate — a hidden browser tab stops the REST fallback
+   * poll, and a refocus produces EXACTLY ONE immediate poll (debounced by
+   * ``REFOCUS_DEBOUNCE_MS`` so a rapid tab-switch storm cannot issue a
+   * burst of reads). No catch-up burst is ever queued: the single refocus
+   * poll IS the catch-up.
+   */
+  private onVisibilityChange(): void {
+    if (typeof document === 'undefined') {
+      return;
+    }
+    const visible = document.visibilityState !== 'hidden';
+    const wasHidden = !this.browserVisible;
+    this.browserVisible = visible;
+    if (!visible || !wasHidden) {
+      return;
+    }
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+    }
+    this.refocusTimer = setTimeout(() => {
+      this.refocusTimer = null;
+      if (!this.browserVisible) {
+        return;
+      }
+      this.pollOnce();
+    }, REFOCUS_DEBOUNCE_MS);
   }
 
   private pollOnce(): void {
+    // The VISIBILITY GATE — a hidden browser tab issues NO request. The
+    // cadence itself is unchanged (the 5 s budget is the same for a VISIBLE
+    // tab); a suppressed poll simply spends nothing.
+    if (!this.browserVisible) {
+      return;
+    }
     const instanceId = this.pollInstanceId;
     if (!instanceId || !this.fetchActive) return;
     // reconcileFromServerResult handles all three outcomes:

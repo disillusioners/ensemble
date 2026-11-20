@@ -7,6 +7,13 @@ import type { InstanceInfo, InstanceListResponse, InstanceStatus } from '../mode
 
 const PAGE_SIZE = 10;
 
+/**
+ * The refocus debounce (ms) — rapid tab switches collapse into ONE
+ * immediate refresh (the jobs-page exemplar's discipline). A hidden tab
+ * stops ISSUING polls; a refocus produces exactly ONE catch-up read.
+ */
+const REFOCUS_DEBOUNCE_MS = 2000;
+
 // Keep in sync with backend: daemon/repositories/instance/repository.py (KB_AGENT_IDS)
 
 // KB agent IDs to filter when showKb is false
@@ -30,6 +37,26 @@ export class InstanceService {
   // Polling interval: 60 seconds
   private readonly POLLING_INTERVAL = 60_000;
   private pollingIntervalId: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * The browser tab's visibility — the POLL GATE. A hidden tab stops
+   * ISSUING the 60 s instance-list poll (the cadence is unchanged for
+   * VISIBLE tabs).
+   */
+  private browserVisible = true;
+
+  /**
+   * The refocus debounce handle — rapid tab switches collapse into ONE
+   * immediate refresh (the timer id is kept so a second focus cancels and
+   * re-arms it instead of queueing a second refresh).
+   */
+  private refocusTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * The visibility listener — attached while the poll runs, detached on
+   * ``stopPolling`` (no leak).
+   */
+  private visibilityListener: (() => void) | null = null;
   private _currentProjectId: string | null = null;
   /**
    * Source-type filter threading. ``undefined`` = no filter (default);
@@ -414,8 +441,22 @@ export class InstanceService {
     // Immediate load
     this.loadInstances(projectId, false, source);
 
+    // The VISIBILITY GATE — seed the flag from the document state and
+    // attach the listener while the poll runs.
+    this.browserVisible =
+      typeof document !== 'undefined' ? document.visibilityState !== 'hidden' : true;
+    if (typeof document !== 'undefined') {
+      this.visibilityListener = () => this.onVisibilityChange();
+      document.addEventListener('visibilitychange', this.visibilityListener);
+    }
+
     // Start polling interval (loadInstances reads searchQuery() each tick, so the active filter is reapplied automatically).
     this.pollingIntervalId = setInterval(() => {
+      // A hidden browser tab issues NO request — the cadence itself is
+      // unchanged (the 60 s budget is the same for a VISIBLE tab).
+      if (!this.browserVisible) {
+        return;
+      }
       this.loadInstances(projectId);
     }, this.POLLING_INTERVAL);
   }
@@ -428,6 +469,45 @@ export class InstanceService {
       clearInterval(this.pollingIntervalId);
       this.pollingIntervalId = null;
     }
+    // The visibility listener is detached (no leak) and a pending refocus
+    // refresh is dropped (a stopped poll must not fire a request).
+    if (this.visibilityListener && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.visibilityListener);
+      this.visibilityListener = null;
+    }
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+      this.refocusTimer = null;
+    }
+  }
+
+  /**
+   * The visibility gate — a hidden browser tab stops the instance-list
+   * poll, and a refocus produces EXACTLY ONE immediate refresh (debounced
+   * by ``REFOCUS_DEBOUNCE_MS`` so a rapid tab-switch storm cannot issue a
+   * burst of reads). No catch-up burst is ever queued: the single refocus
+   * refresh IS the catch-up.
+   */
+  private onVisibilityChange(): void {
+    if (typeof document === 'undefined') {
+      return;
+    }
+    const visible = document.visibilityState !== 'hidden';
+    const wasHidden = !this.browserVisible;
+    this.browserVisible = visible;
+    if (!visible || !wasHidden) {
+      return;
+    }
+    if (this.refocusTimer !== null) {
+      clearTimeout(this.refocusTimer);
+    }
+    this.refocusTimer = setTimeout(() => {
+      this.refocusTimer = null;
+      if (!this.browserVisible) {
+        return;
+      }
+      this.loadInstances(this._currentProjectId ?? undefined);
+    }, REFOCUS_DEBOUNCE_MS);
   }
 
   /**
