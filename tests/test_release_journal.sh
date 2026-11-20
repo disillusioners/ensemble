@@ -3222,7 +3222,7 @@ INSTALL_DIR="$D5RJ_FIX" bash -c '
     # pattern collapsed under bash QUOTE REMOVAL (the `"` marks around
     # the colon vanished) to `captured_previous:vY` — a shape no valid
     # JSON can match. grep -q carries the literal quotes.
-    if printf '%s' "$j" | grep -q '"captured_previous":"v9.9.9-rj-fsY"'; then echo "FIELD-OK"; else echo "FIELD-MISSING: $j"; fi
+    if printf '%s' "$j" | grep -q "\"captured_previous\":\"v9.9.9-rj-fsY\""; then echo "FIELD-OK"; else echo "FIELD-MISSING: $j"; fi
     out="$(_rollback_target_resolve "'"$D5RJ_FIX"'/releases" "v9.9.9-rj-target" "v9.9.9-rj-target" "v9.9.9-rj-fsY" "" "v9.9.9-rj-staleX" "v9.9.9-rj-staleX" "v9.9.9-rj-staleX")"
     rc=$?
     echo "RESOLVE-RC=$rc RESOLVE-OUT=$out"
