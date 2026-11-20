@@ -176,45 +176,91 @@ def test_row_budget(engine, resolver):
 
 
 def test_flat_select_count(engine, resolver):
-    """total SELECT count FLAT as page doubles 5→10→20."""
-    totals = []
-    base = 0
-    for n in (5, 10, 20):
-        # seed n more
-        for i in range(base, base + n):
-            iid = f"flat-inst-{i}"
-            _seed_instance(engine, instance_id=iid)
-            _seed_job(engine, instance_id=iid, jid=f"flat-job-{i}")
-        base += n
+    """The total SELECT count for a ``list_work`` call is CONSTANT as the
+    page size grows (5 → 10 → 20 over the SAME population).
 
-        # count selects
+    Mirrors the house pin in
+    ``tests/unit/services/test_work_resolver_query_budget.py``
+    (``test_select_count_flat_as_page_doubles``): any growth with the
+    page size is the per-row N+1 regression — a returning
+    per-row ``_lookup_instance`` storm breaks flatness.
+
+    The population is seeded ONCE (40 rows) so only the page size
+    varies between the three measurements — growing the population as
+    well would confound the property under test.
+
+    Measured on the current implementation: 5 SELECTs per call
+    (2 × job_queue_items, 2 × instances, 1 × task) at every page size,
+    including the unbounded (``limit=None``) call.
+    """
+    for i in range(40):
+        iid = f"fp-inst-{i}"
+        _seed_instance(engine, instance_id=iid)
+        _seed_job(engine, instance_id=iid, jid=f"fp-job-{i}")
+
+    def count_selects(limit):
         class Spy:
             def __init__(self):
                 self.n = 0
+                self.per_leg = {"job_queue_items": 0, "instances": 0, "task": 0}
+
             def before(self, conn, cursor, stmt, params, context, executemany):
                 s = stmt.strip().upper()
                 if s.startswith("SELECT"):
                     self.n += 1
+                    if "JOB_QUEUE_ITEMS" in s:
+                        self.per_leg["job_queue_items"] += 1
+                    if "FROM INSTANCES" in s:
+                        self.per_leg["instances"] += 1
+                    if "FROM TASK" in s or "FROM TASK," in s:
+                        self.per_leg["task"] += 1
+
             def __enter__(self):
                 event.listen(engine, "before_cursor_execute", self.before)
                 return self
+
             def __exit__(self, *a):
                 event.remove(engine, "before_cursor_execute", self.before)
 
         with Spy() as sp:
-            resolver.list_work(kind="job")
-        totals.append(sp.n)
+            recs = resolver.list_work(kind="job", limit=limit)
+        assert len(recs) == (40 if limit is None else limit), (
+            f"page size {limit} must return {limit} records; got "
+            f"{len(recs)}"
+        )
+        return sp.n, sp.per_leg
 
-    # We seeded cumulatively; counts may grow with data size? SELECT count
-    # should be flat w.r.t. page size but data size grows. The pin in
-    # query_budget compares separate pages of different sizes on the SAME
-    # population. Replicate: single population, different limits.
-    # Redo properly below.
-    # (this test is a smoke; the real flatness pin is test_flatness_proper)
-    assert True
+    c5, leg5 = count_selects(5)
+    c10, leg10 = count_selects(10)
+    c20, leg20 = count_selects(20)
+    c_none, leg_none = count_selects(None)
+
+    assert c5 == c10 == c20, (
+        f"SELECT count must be FLAT as the page grows (n=5 → {c5}, "
+        f"n=10 → {c10}, n=20 → {c20}); growth with page size is the "
+        f"per-row lookup regression."
+    )
+    assert c_none == c5, (
+        f"the unbounded call must cost the SAME number of SELECTs as a "
+        f"capped one (unbounded → {c_none}, capped → {c5}); a per-row "
+        f"leg that scales with the population breaks flatness."
+    )
+    assert leg5 == leg10 == leg20 == leg_none, (
+        f"per-leg SELECT counts must be flat too: {leg5} / {leg10} / "
+        f"{leg20} / {leg_none}"
+    )
+    # Measured absolute budget (the house per-leg shape: page query +
+    # batched mission-fields, batched instances + child-instance lookup,
+    # batched task-timing) — a per-row regression moves these numbers.
+    assert c5 == 5, (
+        f"SELECT count per list_work call must stay at 5 "
+        f"(2 job_queue_items + 2 instances + 1 task); got {c5} "
+        f"({leg5})."
+    )
 
 
 def test_flatness_proper(engine, resolver):
+    """Unchanged house-shaped flatness pin (kept from the original file)."""
     # seed a fixed 40-row population once
     for i in range(40):
         iid = f"fp-inst-{i}"
