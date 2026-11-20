@@ -211,3 +211,163 @@ class TestUsagePathDedup:
         monkeypatch.setattr(messaging_module, "estimate_messages_tokens", boom)
         await service._emit_context_usage("inst-1", [HumanMessage(content="hi")])
         service._manager._live_hub.stream_context_usage.assert_not_awaited()
+
+
+class TestF3FingerprintBeforeCount:
+    """F3 (row2-fix2a) — the miss-path window is closed.
+
+    On the cache-MISS path the fingerprint must be taken BEFORE the count,
+    so a mutation in the window cannot pair a NEW fingerprint with an OLD
+    count (and a later equal-fingerprint skip could never serve a stale
+    count). This pin REDDENS if someone reorders the reads back to the
+    buggy shape (fingerprint after the count).
+    """
+
+    @pytest.mark.asyncio
+    async def test_f3_fingerprint_precedes_count_on_miss_path(self, monkeypatch):
+        """On a cache miss, the fingerprint is read BEFORE the count."""
+        service = _make_service()
+        # Force a cache miss: no cached entry for this instance.
+        assert getattr(service, "_usage_history_cache", {}).get("inst-1") is None
+
+        order: list[tuple[str, int]] = []
+
+        real_estimate = messaging_module.estimate_messages_tokens
+        real_fingerprint = messaging_module._usage_messages_fingerprint
+
+        def tracked_estimate(msgs):
+            order.append(("count", id(msgs)))
+            return real_estimate(msgs)
+
+        def tracked_fingerprint(msgs):
+            order.append(("fingerprint", id(msgs)))
+            return real_fingerprint(msgs)
+
+        monkeypatch.setattr(
+            messaging_module, "estimate_messages_tokens", tracked_estimate,
+        )
+        monkeypatch.setattr(
+            messaging_module, "_usage_messages_fingerprint", tracked_fingerprint,
+        )
+
+        service._usage_history_tokens(
+            "inst-1", [HumanMessage(content="hello", id="m1")],
+        )
+
+        fp_idx = next(
+            i for i, (kind, _) in enumerate(order) if kind == "fingerprint"
+        )
+        count_idx = next(
+            i for i, (kind, _) in enumerate(order) if kind == "count"
+        )
+        assert fp_idx < count_idx, (
+            "F3 window OPEN: the fingerprint was taken AFTER the count on "
+            "the cache-miss path — a mutation in that window could pair a "
+            "NEW fingerprint with an OLD count, and a later "
+            "equal-fingerprint skip would serve a stale count"
+        )
+
+    @pytest.mark.asyncio
+    async def test_f3_fingerprint_precedes_count_on_count_mismatch_miss(self, monkeypatch):
+        """Even when the message COUNT differs (cached entry present but
+        stale), the fingerprint is still taken before the count.
+        """
+        service = _make_service()
+        # Seed a cached entry with a DIFFERENT count so the miss path
+        # takes the "count differs" branch.
+        cache = getattr(service, "_usage_history_cache", None)
+        if cache is None:
+            cache = {}
+            service._usage_history_cache = cache
+        cache["inst-1"] = (
+            999,  # a count that cannot match a 1-message list
+            ("stale", "fingerprint"),
+            12345,
+        )
+
+        order: list[tuple[str, int]] = []
+
+        real_estimate = messaging_module.estimate_messages_tokens
+        real_fingerprint = messaging_module._usage_messages_fingerprint
+
+        def tracked_estimate(msgs):
+            order.append(("count", id(msgs)))
+            return real_estimate(msgs)
+
+        def tracked_fingerprint(msgs):
+            order.append(("fingerprint", id(msgs)))
+            return real_fingerprint(msgs)
+
+        monkeypatch.setattr(
+            messaging_module, "estimate_messages_tokens", tracked_estimate,
+        )
+        monkeypatch.setattr(
+            messaging_module, "_usage_messages_fingerprint", tracked_fingerprint,
+        )
+
+        service._usage_history_tokens(
+            "inst-1", [HumanMessage(content="hello", id="m1")],
+        )
+
+        fp_idx = next(
+            i for i, (kind, _) in enumerate(order) if kind == "fingerprint"
+        )
+        count_idx = next(
+            i for i, (kind, _) in enumerate(order) if kind == "count"
+        )
+        assert fp_idx < count_idx, (
+            "F3 window OPEN on the count-mismatch miss path: the "
+            "fingerprint was taken AFTER the count"
+        )
+
+    @pytest.mark.asyncio
+    async def test_f3_fingerprint_precedes_count_on_fingerprint_mismatch_miss(self, monkeypatch):
+        """Even when the count matches but the fingerprint differs (a
+        content change), the fingerprint is still taken before the count.
+        """
+        service = _make_service()
+        msgs = [HumanMessage(content="hello", id="m1")]
+        # Seed a cached entry whose count matches but whose fingerprint
+        # differs (simulating a content change).
+        cache = getattr(service, "_usage_history_cache", None)
+        if cache is None:
+            cache = {}
+            service._usage_history_cache = cache
+        cache["inst-1"] = (
+            len(msgs),
+            ("a", "different", "fingerprint"),
+            99999,
+        )
+
+        order: list[tuple[str, int]] = []
+
+        real_estimate = messaging_module.estimate_messages_tokens
+        real_fingerprint = messaging_module._usage_messages_fingerprint
+
+        def tracked_estimate(msgs):
+            order.append(("count", id(msgs)))
+            return real_estimate(msgs)
+
+        def tracked_fingerprint(msgs):
+            order.append(("fingerprint", id(msgs)))
+            return real_fingerprint(msgs)
+
+        monkeypatch.setattr(
+            messaging_module, "estimate_messages_tokens", tracked_estimate,
+        )
+        monkeypatch.setattr(
+            messaging_module, "_usage_messages_fingerprint", tracked_fingerprint,
+        )
+
+        service._usage_history_tokens("inst-1", msgs)
+
+        fp_idx = next(
+            i for i, (kind, _) in enumerate(order) if kind == "fingerprint"
+        )
+        count_idx = next(
+            i for i, (kind, _) in enumerate(order) if kind == "count"
+        )
+        assert fp_idx < count_idx, (
+            "F3 window OPEN on the fingerprint-mismatch miss path: the "
+            "fingerprint was taken AFTER the count"
+        )
