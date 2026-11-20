@@ -1338,9 +1338,16 @@ class InstanceMessagingService:
             cache = {}
             self._usage_history_cache = cache
         cached = cache.get(instance_id)
-        fingerprint = None
+        # F3 FIX (row2-fix2a): take the fingerprint BEFORE the count on
+        # every path (including the cache-miss path). Previously the
+        # fingerprint was taken AFTER the count on the miss path — a
+        # mutation in that window paired a NEW fingerprint with an OLD
+        # count, and a later equal-fingerprint skip could serve the stale
+        # count. Hoisting the read closes the window: the returned count
+        # is always the count of the list as it was AT COUNT TIME, and a
+        # changed list can never be served from the cache.
+        fingerprint = _usage_messages_fingerprint(msgs)
         if cached is not None and cached[0] == count:
-            fingerprint = _usage_messages_fingerprint(msgs)
             if fingerprint is not None and fingerprint == cached[1]:
                 return cached[2]
         try:
@@ -1350,8 +1357,6 @@ class InstanceMessagingService:
                 f"Failed to compute context usage for {instance_id[:8]}...: {e}"
             )
             return None
-        if fingerprint is None:
-            fingerprint = _usage_messages_fingerprint(msgs)
         if fingerprint is not None:
             cache[instance_id] = (count, fingerprint, tokens)
         return tokens
