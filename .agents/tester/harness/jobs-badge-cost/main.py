@@ -179,6 +179,12 @@ def main():
     jq_service.set_watcher_repo(watcher_repo)
     jq_service.set_work_resolver(work_resolver)
 
+    # Top-10 terminal job ids by created_at desc (mirrors the route's
+    # list_jobs page that feeds ensure_job_ids in jobs_crud.py:917-922).
+    terminal_jobs = job_repo.list(statuses=["done", "dead"], project_id="badge-cost-project", limit=1000)[0]
+    terminal_jobs_sorted = sorted(terminal_jobs, key=lambda j: j.created_at or "", reverse=True)
+    ensure_ids = {j.job_id for j in terminal_jobs_sorted[:10]}
+
     # seed JobQueue rows? queue_repo needs a queue for some paths; create one
     try:
         queue_repo.create(project_id="badge-cost-project", queue_name="system_fifo_queue",
@@ -201,10 +207,17 @@ def main():
         return work_resolver.list_work(kind="job")
     results["legs"]["jobs_active_badge"] = run_leg("jobs_active_badge", leg1, engine)
 
-    # Leg 2: completed/settled/failed/cancelled/dead_letter limit=10
+    # Leg 2: limit-explicit terminal page (mirrors the ROUTE's actual call
+    # shape in jobs_crud.py:917-922 — limit=10 + ensure_job_ids). This is
+    # the shape M1a's SQL LIMIT pushdown actually bounds.
     def leg2():
-        # WorkResolver doesn't filter by multi-status string easily; call list_work with status
-        return work_resolver.list_work(kind="job", status="completed,settled,failed,cancelled,dead_letter")
+        return work_resolver.list_work(
+            kind="job",
+            status="completed,settled,failed,cancelled,dead_letter",
+            limit=10,
+            ensure_job_ids=ensure_ids,
+            project_id="badge-cost-project",
+        )
     results["legs"]["jobs_terminal_page"] = run_leg("jobs_terminal_page", leg2, engine)
 
     # Leg 3: missions liveness processing,pending,paused limit=20
@@ -223,27 +236,73 @@ def main():
         return watcher_repo.get_all_active_watches()
     results["legs"]["defer_blocked_watch_read"] = run_leg("defer_blocked", leg5, engine)
 
-    # Watch-reconcile leg
-    # seed extra watch rows already done (60). Time reconcile methods.
-    async def _reconcile():
+    RECONCILE_REPEATS = 5
+
+    def _reseed_watches():
+        from sqlmodel import Session as _S
+        from daemon.repositories.job_queue.watcher_models import JobWatcher
+        from sqlalchemy import delete as _del
+        with _S(engine) as sess:
+            sess.exec(_del(JobWatcher))
+            sess.commit()
+        now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+        with _S(engine) as sess:
+            for i in range(60):
+                from uuid import uuid4
+                sess.add(JobWatcher(
+                    watch_id=str(uuid4()),
+                    job_id=f"watched-job-{i}",
+                    instance_id=f"inst-{i % 30}",
+                    watch_events=["completed", "failed"],
+                    created_at=now,
+                ))
+            sess.commit()
+
+    term_times = []
+    term_stmts = []
+    held_times = []
+    held_stmts = []
+    for _ in range(RECONCILE_REPEATS):
+        _reseed_watches()
+        # terminal
         t0 = time.perf_counter()
         with SelectSpy(engine) as spy:
-            await jq_service.reconcile_terminal_watches()
+            loop.run_until_complete(jq_service.reconcile_terminal_watches())
             dt1 = (time.perf_counter() - t0) * 1000.0
             s1 = dict(spy.counts)
+        term_times.append(dt1)
+        term_stmts.append(s1)
+        # held
+        _reseed_watches()
         t0 = time.perf_counter()
         with SelectSpy(engine) as spy:
-            await jq_service.reconcile_held_watches_for_instance(instance_id=None)
+            loop.run_until_complete(jq_service.reconcile_held_watches_for_instance(instance_id=None))
             dt2 = (time.perf_counter() - t0) * 1000.0
             s2 = dict(spy.counts)
-        return dt1, s1, dt2, s2
+        held_times.append(dt2)
+        held_stmts.append(s2)
 
-    dt1, s1, dt2, s2 = loop.run_until_complete(_reconcile())
+    def _median(xs):
+        xs = sorted(xs)
+        n = len(xs)
+        return xs[n//2] if n % 2 else (xs[n//2-1]+xs[n//2])/2
+
     results["watch_reconcile"] = {
-        "reconcile_terminal_watches_ms": dt1,
-        "reconcile_terminal_watches_statements": s1,
-        "reconcile_held_watches_for_instance_ms": dt2,
-        "reconcile_held_watches_for_instance_statements": s2,
+        "repeats": RECONCILE_REPEATS,
+        "reconcile_terminal_watches_ms": {
+            "median": _median(term_times),
+            "min": min(term_times),
+            "max": max(term_times),
+            "samples": term_times,
+        },
+        "reconcile_terminal_watches_statements": term_stmts[-1],
+        "reconcile_held_watches_for_instance_ms": {
+            "median": _median(held_times),
+            "min": min(held_times),
+            "max": max(held_times),
+            "samples": held_times,
+        },
+        "reconcile_held_watches_for_instance_statements": held_stmts[-1],
     }
 
     # loop-lag raw: not capturable in-process without daemon probe
