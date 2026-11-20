@@ -5248,9 +5248,17 @@ The flagship 23.16 s event-loop stall: every graph assembly rebuilt ~640 pydanti
 <!-- schema-registry-bind-once-pack-registration-end -->
 
 <!-- compaction-tier-a-byte-identity-pack-registration-begin -->
+## ROW2-2A — tier-A byte-identical token de-dup (ROW2-DEEP-DIVE §2.3.1; lane `sonic/row2-cpu/2a-tier-a`, base `213ea6c1e`)
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
 | `compaction_tier_a_byte_identity_unit_test` (NEW 2026-11-20, lane `sonic/row2-cpu/2a-tier-a`, base `213ea6c1e`) | `cd $WT && timeout 300 bash test/packs/compaction_tier_a_byte_identity_unit_test.sh` | `tests/unit/test_compaction.py` (Tier-A equivalence sweep, class `TestTierAByteIdentity` — normal multi-message + pathological single-char-class runs: letters/whitespace/symbols, old-vs-new byte-identity + reference-recount token values) + `tests/unit/test_compaction_tier_a_callcount_pin.py` (counting-work mutation pin: whole-list re-encode stays ≤ 3 in both loops of `emergency_truncate` and ≤ S+2 in `_apply_ceiling_rule`) + `tests/unit/test_usage_path_tier_a_dedup.py` (A4 usage-path cheap pre-filter — now 10 nodes: the 7 original A4 guarantees + 3 new F3 window pins, "the fingerprint is read BEFORE the count on the cache-miss path"); ALSO the cross-leg 2A-integrity proof against the shape-aware chunker (158/158 unchanged on the merged tree); runtime <60s | 2026-11-20 @ `ee66cc434` | ✅ PASS 158/158 (53.8s) |
 <!-- compaction-tier-a-byte-identity-pack-registration-end -->
 
 <!-- tier-b-token-drift-bound-pack-registration-begin -->
+## ROW2-2C — tier-B policy-gated chunked counting (ROW2-DEEP-DIVE §2.3.2 + the front-door shape-aware ruling of 2026-11-20; lane `sonic/row2-cpu/2c-tier-b`, base `213ea6c1e`)
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
 | `tier_b_token_drift_bound_unit_test` (NEW 2026-11-20, lane `sonic/row2-cpu/2c-tier-b`, base `213ea6c1e`) | `cd $WT && timeout 600 bash test/packs/tier_b_token_drift_bound_unit_test.sh` | Tier-B chunked-counting gate (row2-2C): `tests/unit/test_loader_chunked_counting.py` (38 nodes — exact-equality below threshold, over-count direction, kill-switch + env knobs, consumer inheritance, 64KB pathological drift) + full-size 4/16/64/200KB drift+timing table over the commission shape set (base64 / dense JSON / minified long unbroken runs) — the cut is SHAPE-AWARE: the boundary char is carried into the next chunk EXCEPT when it terminates a whitespace run of >= 16 IDENTICAL chars, in which case the cut is taken AFTER it; the earlier breach was a SYNTHETIC-CORPUS ARTIFACT (pure LF-run / spaces-run) while realistic corpora already met the bound; the shape-aware cut closed the rest — LF-run 1.5680% -> 0.0000% and spaces-run 3.1350% -> 0.0000% at 200 KB, every shape at or below the audited 0.1% bound, over-count <= ~1 token per boundary (<= n/CHUNK tokens); NO RULING EXTENSION REQUESTED; runtime <600s | 2026-11-20 @ `76f0f410d` | ✅ PASS (38/38 file; pack 2-run tables reproduced) on the merged tree — the self-gating benchmark `scripts/bench_tier_b_token_drift.py` exits 0 with ZERO violations (GATE-D 200 KB chunked timing 0.3247 s; lf_run 200 KB exact 6250 -> chunked 6250 = 0.0000 %; spaces_run 200 KB exact 1563 -> chunked 1563 = 0.0000 %; letters_run / symbols_run 0.0000 %) |
 <!-- tier-b-token-drift-bound-pack-registration-end -->
