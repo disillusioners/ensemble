@@ -6785,6 +6785,22 @@ class InstanceManager:
                     # classifies via the unit (§1.5 asymmetry).
                     op.owner_pid_kind = "client"
                     _uj.write_pending_op(install_dir, op)
+                else:
+                    # T5 (tidier fold, 2026-11-20): never silently drop —
+                    # a state seam that swallows a mismatch hides exactly
+                    # the corrupted-op shape tonight's arc began with.
+                    # The spawn continues (best-effort contract); the
+                    # sweep falls back to the run_id+prefix derivation.
+                    logger.warning(
+                        "[system-execution] executor identity stamp "
+                        "SKIPPED — pending_op no longer matches the run "
+                        "(run_id=%s; op=%s): unit=%s bus=%s NOT "
+                        "persisted; classification falls back to "
+                        "run_id+prefix",
+                        run_id,
+                        (f"run_id={op.run_id}" if op is not None else "None"),
+                        unit, bus,
+                    )
 
             child_pid, _spawn_mode_note = _uj.spawn_executor(
                 argv, install_dir, extra_env, run_id=run_id,
