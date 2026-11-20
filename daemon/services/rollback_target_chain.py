@@ -75,7 +75,14 @@ class Resolution:
 
 
 def _clean(value: object) -> str:
-    """Normalize a rung input: JSON null / empty / non-string ⇒ '' (ABSENT)."""
+    """Normalize a rung input: JSON null / empty / non-string ⇒ '' (ABSENT).
+
+    The literal strings ``"null"`` and ``"none"`` are ALSO folded to ''
+    (T6, tidier fold 2026-11-20): the R1 ``to=none`` sentinel the daemon
+    closer writes and the JSON-null text form both mean ABSENT at every
+    rung — one vocabulary, folded once HERE (the old ``if r1to == "none"``
+    special case in :func:`resolve` was unreachable dead code for exactly
+    this reason)."""
     if value is None:
         return ""
     if not isinstance(value, str):
@@ -124,8 +131,6 @@ def resolve(
     live = _clean(live_link)
     cap = _clean(capture)
     r1to = _clean(r1_to)
-    if r1to == "none":
-        r1to = ""
     r2 = _clean(r2_current)
     r3 = _clean(r3_displaced)
     r4 = _clean(r4_previous)
