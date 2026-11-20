@@ -493,6 +493,92 @@ ADV_RC4=$?
 assert_eq "7c advancing the staging tree itself refuses (rc 1)" "1" "$ADV_RC4"
 assert_contains "7c the self-guard refusal is named" "staging tree itself" "$ADV_OUT4"
 
+# 7d. CYCLE-3 E2 (2026-11-20): the STAGE-TIME dirty guard — the arm-time
+#     python twin (upgrade_tools.py review-fix d11) refused a dirty pin
+#     worktree but this lane did NOT (RR2's asymmetry gap): a dirty tree
+#     would fold local edits into the advanced HEAD or lose them.
+#     §2.6(b) fail-closed: refuse, never move, release the lock.
+D7D_HEAD_BEFORE="$(git -C "$d4_repo" rev-parse HEAD)"
+printf '\n# operator local edit\n' >> "$d4_repo/scripts/upgrade/lib.sh"
+ADV_OUT5="$(stage_scripts_pin_advance "$d4_repo/scripts/upgrade" "$D4_TARGET" "$D4_FLOOR" "$FIXTURE/definitely-not-the-pin" 2>&1)"
+ADV_RC5=$?
+assert_eq "7d a DIRTY pin worktree refuses (rc 1)" "1" "$ADV_RC5"
+assert_contains "7d the refusal names the DIRTY tree" "DIRTY" "$ADV_OUT5"
+assert_eq "7d the dirty refusal leaves HEAD unmoved" "$D7D_HEAD_BEFORE" "$(git -C "$d4_repo" rev-parse HEAD)"
+if [ ! -e "${d4_repo}.scripts-advance.lock.d" ]; then _pass; else _fail "7d the dirty refusal released the advance lock"; fi
+git -C "$d4_repo" checkout -q -- scripts/upgrade/lib.sh
+
+# 7e. CYCLE-3 A2 (2026-11-20): the TRUE-CAS concurrent steal — the
+#     pre-A2 rename-aside measured 2–3 CONCURRENT WINNERS (both lanes;
+#     RR3-SC4 additionally proved the bash steal path had NO pin at
+#     all). Race N REAL concurrent stealers (subshells behind a go-file
+#     barrier) against one planted stale lock: EXACTLY ONE winner, the
+#     losers refuse with a reason, no CAS debris survives.
+E7_LOCK="${d4_repo}.scripts-advance.lock.d"
+E7_DEAD="$(bash -c 'echo $$; exec true')"   # a pid that is gone by construction
+mkdir "$E7_LOCK"
+printf '%s\n' "$E7_DEAD" > "$E7_LOCK/owner"
+printf '0\n' > "$E7_LOCK/heartbeat"
+touch -d '400 seconds ago' "$E7_LOCK/owner" "$E7_LOCK/heartbeat" "$E7_LOCK"
+E7_N=8
+E7_GO="$FIXTURE/e7-go.$$"
+rm -f "$E7_GO"
+for _i in $(seq 1 $E7_N); do
+    (
+        while [ ! -e "$E7_GO" ]; do :; done
+        if _stage_advance_lock_acquire "$E7_LOCK" > "$FIXTURE/e7-out.$$.${_i}" 2>&1; then
+            echo WIN > "$FIXTURE/e7-res.$$.${_i}"
+        else
+            echo LOSE > "$FIXTURE/e7-res.$$.${_i}"
+        fi
+    ) &
+done
+: > "$E7_GO"
+wait
+E7_WIN=0; E7_LOSE=0
+for _i in $(seq 1 $E7_N); do
+    if [ "$(cat "$FIXTURE/e7-res.$$.${_i}" 2>/dev/null)" = "WIN" ]; then
+        E7_WIN=$((E7_WIN + 1))
+    else
+        E7_LOSE=$((E7_LOSE + 1))
+    fi
+done
+assert_eq "7e N-stealer race: EXACTLY ONE winner" "1" "$E7_WIN"
+assert_eq "7e N-stealer race: the other stealers refused" "$((E7_N - 1))" "$E7_LOSE"
+E7_LOSER_SILENT=0
+for _i in $(seq 1 $E7_N); do
+    if [ "$(cat "$FIXTURE/e7-res.$$.${_i}" 2>/dev/null)" = "LOSE" ] && [ ! -s "$FIXTURE/e7-out.$$.${_i}" ]; then
+        E7_LOSER_SILENT=$((E7_LOSER_SILENT + 1))
+    fi
+done
+assert_eq "7e every loser carries a refusal reason" "0" "$E7_LOSER_SILENT"
+case "$(cat "$E7_LOCK/owner" 2>/dev/null)" in
+    ''|*[!0-9]*|????????*) _fail "7e the winner wrote a valid in-range owner pid" "numeric<=7digits" "$(cat "$E7_LOCK/owner" 2>/dev/null)" ;;
+    *) _pass ;;
+esac
+E7_STRAYS="$(find "$(dirname "$E7_LOCK")" -maxdepth 1 -name 'd4-pin-repo.scripts-advance.lock.d.*' | head -5)"
+assert_eq "7e no CAS debris (claim/marker/retired) survives" "" "$E7_STRAYS"
+rm -rf "$E7_LOCK" "$E7_GO" "$FIXTURE"/e7-out.$$.* "$FIXTURE"/e7-res.$$.*
+
+# 7f. CYCLE-3 A3 (2026-11-20): an OUT-OF-RANGE owner pid is
+#     unattributable — kill -0 misreports a 20-digit pid as dead (bash
+#     kill errors without "not permitted"), which without the bound
+#     made a nonsense lock stale-breakable. Bounded at the kernel
+#     pid_max ceiling (2^22): refuse, never steal.
+for E7_BAD_PID in 99999999999999999999 4194305 0004194305; do
+    E7_LOCK="$FIXTURE/a3-pinroot.scripts-advance.lock.d"
+    rm -rf "$E7_LOCK"
+    mkdir "$E7_LOCK"
+    printf '%s\n' "$E7_BAD_PID" > "$E7_LOCK/owner"
+    printf '0\n' > "$E7_LOCK/heartbeat"
+    touch -d '400 seconds ago' "$E7_LOCK/heartbeat" "$E7_LOCK"
+    E7_OUT="$(_stage_advance_lock_acquire "$E7_LOCK" 2>&1)"; E7_RC=$?
+    assert_eq "7f out-of-range pid ($E7_BAD_PID) refuses (rc 1)" "1" "$E7_RC"
+    assert_contains "7f the refusal names the out-of-range pid ($E7_BAD_PID)" "out-of-range owner pid" "$E7_OUT"
+    if [ -d "$E7_LOCK" ]; then _pass; else _fail "7f the unattributable lock ($E7_BAD_PID) survives"; fi
+done
+rm -rf "$FIXTURE/a3-pinroot.scripts-advance.lock.d"
+
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n========================================\n'
 printf 'executor family payload tests: %d passed, %d failed\n' "$PASS" "$FAIL"

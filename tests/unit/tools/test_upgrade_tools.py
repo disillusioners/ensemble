@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import errno
 import pathlib
@@ -5209,20 +5210,120 @@ class TestScriptsPinSelfAdvance:
         (lock_dir / "owner").write_text(f"{bad_owner}\n", encoding="utf-8")
         stale = time.time() - 400
         os.utime(lock_dir, (stale, stale))
-        may_steal, reason = ut._advance_lock_steal_verdict(lock_dir)
+        may_steal, reason, _owner = ut._advance_lock_steal_verdict(lock_dir)
         assert not may_steal
         assert "holder cannot be attributed" in reason or "owner file is missing/unreadable" in reason
 
-    def test_concurrent_steal_rename_aside_second_stealer_fails_cleanly(self, tmp_path, monkeypatch):
-        """Item 2 polish: atomic rename-aside ensures concurrent stealers cannot
-        interleave. When a concurrent stealer moves the dir away first, the loser
-        refuses with a clean 'dead-owner stale-break rename-aside' failure."""
-        import subprocess
-        dead = subprocess.Popen(["true"])
+    @pytest.mark.parametrize("huge_owner", [
+        "99999999999999999999",   # 20 digits — the OverflowError class (R3)
+        "4194305",                # one ABOVE the 2^22 pid_max ceiling
+        "00004194305",            # zero-padded — still above after int()
+    ])
+    def test_a3_out_of_range_pid_owner_refuses_never_raises(
+        self, tmp_path, huge_owner,
+    ):
+        """Cycle-3 A3: an out-of-range pid can never name a real process
+        and os.kill raises OverflowError (not ProcessLookupError) for it —
+        the class that ESCAPED the never-raises contract (gate R3 item 4:
+        '99999999999999999999' crashed scripts_pin_self_advance). The
+        verdict now bounds the pid at the kernel pid_max ceiling
+        (2^22 = 4194304): refuse, unattributable, no exception — both at
+        the verdict level and through the full advance call."""
+        import subprocess as _sp
+
+        dead = _sp.Popen(["true"])
         dead.wait()
         fx = _build_pin_fixture(tmp_path)
         pin_root = fx["pin"].parents[1]
         lock_dir = pin_root.parent / f"{pin_root.name}.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text(f"{huge_owner}\n",
+                                        encoding="utf-8")
+        (lock_dir / "heartbeat").write_text("0\n", encoding="utf-8")
+        stale = time.time() - 400
+        os.utime(lock_dir / "heartbeat", (stale, stale))
+        os.utime(lock_dir, (stale, stale))
+        # verdict level: refuses, never raises
+        may_steal, reason, owner_seen = ut._advance_lock_steal_verdict(
+            lock_dir)
+        assert not may_steal
+        assert "cannot be attributed" in reason, reason
+        # full-function level: the huge-pid lock does NOT crash the
+        # advance (the never-raises contract holds end to end)
+        status, detail = ut.scripts_pin_self_advance(
+            fx["pin"], fx["floor"],
+            target_commit=fx["target"], manifest=fx["manifest"],
+        )
+        assert status == "unavailable", (status, detail)
+        assert "cannot be attributed" in detail, detail
+        assert lock_dir.exists(), "the unattributable lock must survive"
+
+    def test_a2_concurrent_steal_race_single_winner(self, tmp_path):
+        """Cycle-3 A2 (gate R3 item 2 / RR3-SC4): the pre-A2
+        rename-aside steal yielded 2–3 CONCURRENT WINNERS under real
+        races (measured both lanes). The CAS acquisition
+        (verdict + link-claim + retire + mkdir-CAS) is single-winner BY
+        CONSTRUCTION: this pin races N REAL concurrent stealers (threads
+        behind a barrier — os.link/os.rename/os.mkdir release the GIL)
+        against one planted stale lock and asserts EXACTLY ONE winner."""
+        import threading
+
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        lock_dir = tmp_path / "pin-root.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text(f"{dead.pid}\n", encoding="utf-8")
+        (lock_dir / "heartbeat").write_text("0\n", encoding="utf-8")
+        stale = time.time() - 400
+        os.utime(lock_dir / "heartbeat", (stale, stale))
+        os.utime(lock_dir, (stale, stale))
+
+        n = 8
+        barrier = threading.Barrier(n)
+        results: list[tuple[bool, str]] = []
+        results_lock = threading.Lock()
+
+        def stealer() -> None:
+            barrier.wait()
+            got = ut._advance_lock_acquire(lock_dir)
+            with results_lock:
+                results.append(got)
+
+        threads = [threading.Thread(target=stealer) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        assert len(results) == n, f"race lost threads: {n - len(results)}"
+        winners = [r for r in results if r[0]]
+        assert len(winners) == 1, (
+            f"EXACTLY ONE winner required, got {len(winners)} of {n}: "
+            f"{results!r}"
+        )
+        losers = [r for r in results if not r[0]]
+        assert len(losers) == n - 1
+        for _held, why in losers:
+            assert why, "losers must carry a refusal reason"
+        # the winner's lock names this process and no CAS debris remains
+        assert (lock_dir / "owner").read_text(
+            encoding="utf-8").strip() == str(os.getpid())
+        strays = [p.name for p in tmp_path.iterdir()
+                  if p.name != lock_dir.name]
+        assert not strays, f"CAS debris left behind: {strays}"
+        shutil.rmtree(lock_dir)
+
+    def test_a2_cas_rejects_when_lock_dir_replaced_under_verdict(
+        self, tmp_path, monkeypatch,
+    ):
+        """Cycle-3 A2 CAS re-check: when the dir at the lock path was
+        REPLACED after the verdict qualified the stale one (a human
+        clear + a fresh acquirer), the retire re-verification RESTORES
+        the replacement and refuses — never steals a live replacement."""
+        import subprocess as _sp
+
+        dead = _sp.Popen(["true"])
+        dead.wait()
+        lock_dir = tmp_path / "pin-root.scripts-advance.lock.d"
         lock_dir.mkdir()
         (lock_dir / "owner").write_text(f"{dead.pid}\n", encoding="utf-8")
         (lock_dir / "heartbeat").write_text("0\n", encoding="utf-8")
@@ -5231,18 +5332,72 @@ class TestScriptsPinSelfAdvance:
         os.utime(lock_dir, (stale, stale))
 
         real_rename = os.rename
-        def failing_rename(src, dst):
-            if str(src) == str(lock_dir):
-                raise FileNotFoundError("Directory renamed by concurrent winner")
-            return real_rename(src, dst)
+        real_link = os.link
 
-        monkeypatch.setattr(os, "rename", failing_rename)
-        status, detail = ut.scripts_pin_self_advance(
-            fx["pin"], fx["floor"],
-            target_commit=fx["target"], manifest=fx["manifest"],
+        def replacing_link(src, dst):
+            r = real_link(src, dst)
+            # the claim link just won — the verdict already qualified the
+            # OLD stale dir; a human clear + a fresh acquirer REPLACES the
+            # dir at the path BEFORE this stealer's retire fires
+            shutil.rmtree(lock_dir)
+            real_rename(lock_dir.with_name("fresh.lock"), lock_dir)
+            (lock_dir / "owner").write_text("999999\n", encoding="utf-8")
+            (lock_dir / "heartbeat").write_text(
+                f"{int(time.time())}\n", encoding="utf-8")
+            return r
+
+        fresh = tmp_path / "fresh.lock"
+        fresh.mkdir()
+        monkeypatch.setattr(os, "link", replacing_link)
+        held, why = ut._advance_lock_acquire(lock_dir)
+        assert not held, "a replaced lock must never be stolen"
+        assert "REPLACED" in why, why
+        assert "restored" in why, why
+        monkeypatch.undo()  # restore real rename before asserting layout
+        assert (lock_dir / "owner").read_text(
+            encoding="utf-8").strip() == "999999", (
+            "the fresh replacement must sit at the lock path"
         )
-        assert status == "unavailable", (status, detail)
-        assert "dead-owner stale-break rename-aside" in detail, detail
+        assert not (tmp_path / "pin-root.scripts-advance.lock.d.retired."
+                    f"{os.getpid()}").exists(), "no retired dir may remain"
+
+    def test_a2_marker_of_a_live_stealer_blocks_fail_closed(
+        self, tmp_path,
+    ):
+        """A steal-won marker naming a LIVE stealer (mid-transition)
+        blocks every other stealer fail-closed; a marker naming a DEAD
+        stealer is reclaimed once (crash recovery)."""
+        import threading
+        import subprocess as _sp
+
+        lock_dir = tmp_path / "pin-root.scripts-advance.lock.d"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text("424242\n", encoding="utf-8")
+        (lock_dir / "heartbeat").write_text("0\n", encoding="utf-8")
+        stale = time.time() - 400
+        os.utime(lock_dir / "heartbeat", (stale, stale))
+        os.utime(lock_dir, (stale, stale))
+        marker = tmp_path / "pin-root.scripts-advance.lock.d.steal-won"
+        # a LIVE pid + a fresh ts — reclaimable() must say NO
+        live = subprocess.Popen(["sleep", "60"])
+        try:
+            marker.write_text(
+                f"{live.pid} {int(time.time())}\n", encoding="utf-8")
+            held, why = ut._advance_lock_acquire(lock_dir)
+            assert not held
+            assert "another steal owns the transition" in why, why
+            assert lock_dir.exists(), "the stale lock must survive"
+            assert marker.exists(), "the live marker must survive"
+        finally:
+            live.kill()
+            live.wait()
+        # the marker names a now-DEAD stealer — reclaimed once, steal OK
+        held2, why2 = ut._advance_lock_acquire(lock_dir)
+        assert held2, why2
+        assert not marker.exists(), "the claimed marker is dropped"
+        assert (lock_dir / "owner").read_text(
+            encoding="utf-8").strip() == str(os.getpid())
+        shutil.rmtree(lock_dir)
 
 
 class TestScriptsPinSelfAdvanceArmPath:

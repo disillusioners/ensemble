@@ -4793,8 +4793,25 @@ def _advance_remedy(pin_root: Path, target: str, why: str) -> str:
     )
 
 
-def _advance_lock_steal_verdict(lock_dir: Path) -> tuple[bool, str]:
-    """Cycle-2 MAJOR-4 (2026-11-20): may the stale-break STEAL this lock?
+_PID_MAX_BOUND = 4_194_304  # 2^22 — the kernel's pid_max hard ceiling on
+# 64-bit Linux; an owner file naming a pid ABOVE this can never name a
+# real process (and os.kill would raise OverflowError, not
+# ProcessLookupError) — unattributable, never stolen from.
+
+
+def _advance_lock_steal_verdict(
+    lock_dir: Path,
+) -> tuple[bool, str, str | None]:
+    """Cycle-2 MAJOR-4 + cycle-3 A3: may the stale-break STEAL this lock?
+
+    Returns ``(may_steal, refusal_reason, owner_raw)`` — the refusal
+    reason is ``""`` when the steal is sanctioned, and ``owner_raw``
+    carries the owner-file bytes the verdict QUALIFIED on (the CAS
+    re-check retires only the dir that still answers to those bytes).
+    NEVER RAISES (cycle-3 A3 — the escaped OverflowError class): any
+    unexpected failure computing the verdict folds to
+    ``(False, reason, None)``; a verdict that cannot be computed never
+    sanctions a steal.
 
     The m4 stale-break gated on the DIR MTIME alone — but the namespace
     had no heartbeat refresh, so a long LIVE checkout's lock crossed the
@@ -4809,11 +4826,24 @@ def _advance_lock_steal_verdict(lock_dir: Path) -> tuple[bool, str]:
     * the ``heartbeat`` file is >300s stale (a missing heartbeat falls
       back to the dir mtime — the holder never refreshed).
 
-    A LIVE owner is never stolen from regardless of clock age. Returns
-    ``(may_steal, refusal_reason)`` — ``refusal_reason`` is ``""`` when
-    the steal is sanctioned. The shell lane's steal gate
-    (executor_family.sh) implements the identical protocol.
+    A LIVE owner is never stolen from regardless of clock age. The shell
+    lane's steal gate (executor_family.sh) implements the identical
+    protocol.
     """
+    try:
+        return _advance_lock_steal_verdict_impl(lock_dir)
+    except Exception as exc:  # pragma: no cover — the never-raises net
+        return False, (
+            f"the steal verdict could not be computed "
+            f"({type(exc).__name__}: {str(exc)[:120]}) — an unverifiable "
+            "verdict never sanctions a steal (clear the lock by hand: "
+            f"{lock_dir})"
+        ), None
+
+
+def _advance_lock_steal_verdict_impl(
+    lock_dir: Path,
+) -> tuple[bool, str, str | None]:
     now = time.time()
     try:
         dir_age = now - lock_dir.stat().st_mtime
@@ -4826,13 +4856,13 @@ def _advance_lock_steal_verdict(lock_dir: Path) -> tuple[bool, str]:
             "the owner file is missing/unreadable — the holder cannot be "
             "attributed; a live holder is never stolen from (clear the "
             f"lock by hand: {lock_dir})"
-        )
+        ), None
     if not (owner_raw.isascii() and owner_raw.isdigit()):
         return False, (
             f"the owner file does not name a pid ({owner_raw!r}) — the "
             "holder cannot be attributed; a live holder is never stolen "
             f"from (clear the lock by hand: {lock_dir})"
-        )
+        ), None
     try:
         owner_pid = int(owner_raw)
     except ValueError:
@@ -4840,13 +4870,24 @@ def _advance_lock_steal_verdict(lock_dir: Path) -> tuple[bool, str]:
             f"the owner file does not name a pid ({owner_raw!r}) — the "
             "holder cannot be attributed; a live holder is never stolen "
             f"from (clear the lock by hand: {lock_dir})"
-        )
+        ), None
     if owner_pid <= 0:
         return False, (
             f"the owner file does not name a pid ({owner_raw!r}) — the "
             "holder cannot be attributed; a live holder is never stolen "
             f"from (clear the lock by hand: {lock_dir})"
-        )
+        ), None
+    if owner_pid > _PID_MAX_BOUND:
+        # cycle-3 A3: an out-of-range pid can never name a real process
+        # and os.kill would raise OverflowError (not ProcessLookupError)
+        # — the class that escaped the never-raises contract. Bounded
+        # here, unattributable, never stolen from.
+        return False, (
+            f"the owner file does not name a pid ({owner_raw!r} exceeds "
+            f"the kernel pid_max ceiling {_PID_MAX_BOUND}) — the holder "
+            "cannot be attributed; a live holder is never stolen from "
+            f"(clear the lock by hand: {lock_dir})"
+        ), None
     try:
         hb_age = now - (lock_dir / "heartbeat").stat().st_mtime
     except OSError:
@@ -4856,13 +4897,181 @@ def _advance_lock_steal_verdict(lock_dir: Path) -> tuple[bool, str]:
             f"a LIVE owner (pid {owner_pid}) holds the lock — never stolen "
             f"from a live holder (dir {dir_age:.0f}s, heartbeat "
             f"{hb_age:.0f}s old); retry"
-        )
+        ), None
     if not (dir_age > 300.0 and hb_age > 300.0):
         return False, (
             f"the holder (pid {owner_pid}) is gone but the lock is not yet "
             f"stale-breakable (dir {dir_age:.0f}s, heartbeat {hb_age:.0f}s "
             "old; BOTH must exceed 300s); retry"
+        ), None
+    return True, "", owner_raw
+
+
+def _advance_marker_drop(marker: Path) -> None:
+    try:
+        marker.unlink()
+    except OSError:
+        pass
+
+
+def _advance_marker_reclaimable(marker: Path) -> bool:
+    """Is a blocking steal-won marker reclaimable? It is when it names a
+    DEAD stealer (crashed mid-transition — the marker outlived it), an
+    impossible pid (no live stealer can own it), or is ancient (>3600s —
+    pid-reuse doubt cannot keep a transition wedged forever). A marker
+    naming a LIVE pid inside the window is NOT reclaimable — that
+    transition is in flight; fail-closed refuse."""
+    try:
+        parts = marker.read_text(encoding="utf-8").split()
+        pid, ts = int(parts[0]), int(parts[1])
+    except (OSError, ValueError, IndexError, OverflowError):
+        return False  # unreadable/malformed — a human clears it
+    if pid <= 0 or pid > _PID_MAX_BOUND:
+        return True  # impossible pid — no live stealer can own it
+    if uj._pid_alive(pid) and (time.time() - ts) < 3600.0:
+        return False
+    return True
+
+
+def _advance_lock_acquire(lock_dir: Path) -> tuple[bool, str]:
+    """Acquire the advance lock (ONE namespace with the shell lane's
+    ``_stage_advance_lock_acquire``). Returns ``(held, reason)`` — the
+    reason is ``""`` when held. NEVER RAISES.
+
+    Fast path: the atomic ``mkdir`` (EEXIST ⇒ held elsewhere).
+
+    Held path — the CYCLE-3 A2 TRUE-CAS steal, single winner by
+    construction (the pre-A2 rename-aside let 2–3 stealers interleave:
+    each qualified independently, then each renamed *whatever sat at
+    the path* aside and mkdir'd — a second stealer's rename succeeded
+    against the first stealer's freshly-installed LIVE lock; measured:
+    both lanes advanced, nondeterministic HEAD):
+
+    1. ``_advance_lock_steal_verdict`` qualifies the holder (dead pid,
+       both clocks >300s) — unchanged, and it now returns the owner
+       bytes it qualified on.
+    2. EXCLUSIVE CLAIM: hard-link a claim file to
+       ``<lock>.steal-won``. link(2) is EEXIST-atomic — exactly ONE
+       stealer wins (rename/mkdir cannot do this conditionally: rename
+       silently REPLACES an empty dir). A marker naming a
+       dead/impossible/ancient stealer is reclaimed once (crash
+       recovery); one naming a live stealer blocks fail-closed.
+    3. RETIRE the stale dir (uncontested — every other stealer lost
+       the link) and RE-VERIFY the retired dir still answers to the
+       verdict's owner bytes; a mismatch (the dir was replaced between
+       verdict and retire) is restored best-effort and refused.
+    4. ``mkdir`` the freed path — EEXIST means a concurrent
+       NON-stealing acquirer won it; the stealer LOSES and refuses.
+
+    Every loser exits without touching the winner's lock; the marker is
+    dropped on every exit of the claim winner.
+    """
+    try:
+        os.mkdir(lock_dir)
+        return True, ""
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        return False, (
+            f"cannot create the advance lock dir {lock_dir} "
+            f"({type(exc).__name__}: {exc}) — concurrent arms could "
+            "interleave HEAD moves"
         )
+    may_steal, why_not, owner_qualified = _advance_lock_steal_verdict(
+        lock_dir)
+    if not may_steal:
+        return False, why_not
+    marker = lock_dir.with_name(lock_dir.name + ".steal-won")
+    claim = lock_dir.with_name(
+        f"{lock_dir.name}.steal-claim.{os.getpid()}")
+    claimed = False
+    for attempt in (0, 1):
+        try:
+            claim.write_text(
+                f"{os.getpid()} {int(time.time())}\n", encoding="utf-8")
+        except OSError as exc:
+            return False, (
+                f"the steal claim could not be staged "
+                f"({type(exc).__name__}: {exc}) — the steal never started"
+            )
+        try:
+            os.link(claim, marker)
+            claimed = True
+            break
+        except FileExistsError:
+            if attempt == 0 and _advance_marker_reclaimable(marker):
+                try:
+                    marker.unlink()
+                except OSError:
+                    pass
+                continue
+            return False, (
+                "another steal owns the transition (the steal-won marker "
+                f"at {marker} names a live stealer) — single-winner CAS; "
+                "retry"
+            )
+        except OSError as exc:
+            return False, (
+                f"the steal claim link failed ({type(exc).__name__}: "
+                f"{exc}) — the steal never started"
+            )
+        finally:
+            try:
+                claim.unlink()
+            except OSError:
+                pass
+    if not claimed:
+        return False, "the steal claim could not be won"
+    retired = lock_dir.with_name(
+        f"{lock_dir.name}.retired.{os.getpid()}")
+    try:
+        os.rename(lock_dir, retired)
+    except OSError as exc:
+        _advance_marker_drop(marker)
+        return False, (
+            f"the steal retire failed ({type(exc).__name__}: {exc}) — "
+            "the lock path changed under the steal; retry"
+        )
+    try:
+        retired_owner = (retired / "owner").read_text(
+            encoding="utf-8").strip()
+    except OSError:
+        retired_owner = None
+    if retired_owner != owner_qualified:
+        # the dir at the path was REPLACED between the verdict and the
+        # retire (a human clear + a fresh acquirer) — restore the live
+        # replacement best-effort and refuse; never steal it.
+        restored = False
+        try:
+            os.rename(retired, lock_dir)
+            restored = True
+        except OSError:
+            pass
+        _advance_marker_drop(marker)
+        return False, (
+            "the lock dir at the path was REPLACED after the verdict — "
+            + ("the replacement is restored" if restored else
+               f"the replacement is parked at {retired} (clear by hand)")
+            + "; never stolen (fail-closed)"
+        )
+    try:
+        os.mkdir(lock_dir)
+    except OSError:
+        shutil.rmtree(retired, ignore_errors=True)
+        _advance_marker_drop(marker)
+        return False, (
+            "the steal lost the free path to a concurrent acquirer — "
+            "single-winner CAS; retry"
+        )
+    try:
+        (lock_dir / "owner").write_text(
+            f"{os.getpid()}\n", encoding="utf-8")
+        (lock_dir / "heartbeat").write_text(
+            f"{int(time.time())}\n", encoding="utf-8")
+    except OSError:
+        pass  # advisory: the dir itself is the lock
+    shutil.rmtree(retired, ignore_errors=True)
+    _advance_marker_drop(marker)
     return True, ""
 
 
@@ -5017,60 +5226,26 @@ def scripts_pin_self_advance(
     # checkout. With that gate, "a foreign holder is never touched" is
     # true on EVERY path — release AND steal.
     lock_dir = Path(f"{pin_root}.scripts-advance.lock.d")
-    lock_taken = False
-    try:
-        os.mkdir(lock_dir)
-        lock_taken = True
-    except FileExistsError:
-        may_steal, why_not = _advance_lock_steal_verdict(lock_dir)
-        if not may_steal:
-            return "unavailable", (
-                f"advance lock HELD ({lock_dir}) — {why_not}; "
-                + _advance_remedy(pin_root, t, "lock")
-            )
-        # stale-break (mirrors the shell's liveness-gated steal): the
-        # owner is DEAD and both clocks are >300s stale. Take over via
-        # an atomic rename-aside so two concurrent stealers cannot
-        # interleave into a split state.
-        stale_aside = Path(f"{lock_dir}.stale.{os.getpid()}")
-        try:
-            os.rename(lock_dir, stale_aside)
-        except OSError as exc:
-            return "unavailable", (
-                f"advance lock re-acquire FAILED ({lock_dir}; dead-owner "
-                f"stale-break rename-aside; {type(exc).__name__}: {exc}) — "
-                "concurrent arms could interleave HEAD moves; "
-                + _advance_remedy(pin_root, t, "lock")
-            )
-        try:
-            shutil.rmtree(stale_aside)
-        except OSError:
-            pass
-        try:
-            os.mkdir(lock_dir)
-            lock_taken = True
-        except OSError as exc:
-            return "unavailable", (
-                f"advance lock re-acquire FAILED ({lock_dir}; dead-owner "
-                f"stale-break; {type(exc).__name__}: {exc}) — "
-                "concurrent arms could interleave HEAD moves; "
-                + _advance_remedy(pin_root, t, "lock")
-            )
-    except OSError as exc:
+    # CYCLE-3 A2 (2026-11-20): the acquisition is now the TRUE-CAS
+    # protocol (verdict + link-claim + retire + mkdir-CAS — see
+    # _advance_lock_acquire): under N concurrent stealers EXACTLY ONE
+    # wins, both lanes (the pre-A2 rename-aside measured 2–3 concurrent
+    # winners — each rename succeeded against whatever sat at the path,
+    # including another stealer's freshly-installed LIVE lock).
+    lock_taken, lock_why = _advance_lock_acquire(lock_dir)
+    if not lock_taken:
         return "unavailable", (
-            f"cannot create the advance lock dir {lock_dir} "
-            f"({type(exc).__name__}: {exc}) — concurrent arms could "
-            "interleave HEAD moves; " + _advance_remedy(pin_root, t, "lock")
+            f"advance lock HELD ({lock_dir}) — {lock_why}; "
+            + _advance_remedy(pin_root, t, "lock")
         )
-    if lock_taken:
-        try:
-            (lock_dir / "owner").write_text(f"{os.getpid()}\n",
-                                            encoding="utf-8")
-            (lock_dir / "heartbeat").write_text(
-                f"{int(time.time())}\n", encoding="utf-8")
-        except OSError:
-            # owner files are advisory (the dir itself is the lock)
-            pass
+    try:
+        (lock_dir / "owner").write_text(f"{os.getpid()}\n",
+                                        encoding="utf-8")
+        (lock_dir / "heartbeat").write_text(
+            f"{int(time.time())}\n", encoding="utf-8")
+    except OSError:
+        # owner files are advisory (the dir itself is the lock)
+        pass
 
     def _release_advance_lock() -> None:
         # release discipline mirrors lib.sh lock_release / the shell

@@ -3273,17 +3273,22 @@ D5RJ_GUARD_RC="$(INSTALL_DIR="$D5RJ_GUARD" bash -c '
     . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
     journal_open_txn "promote" "vX" 2>/dev/null
     rc=0
-    # cycle-2 MAJOR-2 + FINAL POLISH: the exponent forms (1e5 / 1.5e-3 / 2E+10)
-    # and junk forms (abc / v123 / v1e5) extend the bad list — the accept arm
-    # is version-shaped only and refuses them; prerelease-shaped versions
-    # (v1.2.3-rc1 / v0.32.0-beta.1) STAMP alongside stable versions.
-    for bad in true false 123 1.2.3 "-45" "{oops}" "[1]" "\"q\"" 1e5 1.5e-3 2E+10 abc v123 v1e5; do
+    # cycle-2 MAJOR-2 + FINAL POLISH + CYCLE-3 A1: the exponent forms
+    # (1e5 / 1.5e-3 / 2E+10) and junk forms (abc / v123 / v1e5) extend
+    # the bad list — the accept arm is version-shaped only and refuses
+    # them; the SUFFIX-BACKTRACK forms (v1.2.3e10 — letters glued to
+    # digits with no separator; v1.2.3..4 — an empty dot-run) REFUSE
+    # under the cycle-3 strengthened grammar (the ruling's literal
+    # regex matched BOTH via core-backtrack `.3e10`/`.3..4` suffixes);
+    # prerelease-shaped versions (v1.2.3-rc1 / v0.32.0-beta.1 /
+    # v1.2.3-alpha) STAMP alongside stable versions.
+    for bad in true false 123 1.2.3 "-45" "{oops}" "[1]" "\"q\"" 1e5 1.5e-3 2E+10 abc v123 v1e5 v1.2.3e10 v1.2.3..4; do
         if journal_mark_captured_previous "$bad" >/dev/null 2>&1; then
             echo "LAUNDERED:$bad"; rc=1
         fi
     done
     # control: real version and prerelease strings still stamp
-    for good in "v0.31.2" "v1.2.3-rc1" "v0.32.0-beta.1"; do
+    for good in "v0.31.2" "v1.2.3-rc1" "v0.32.0-beta.1" "v1.2.3-alpha"; do
         journal_mark_captured_previous "$good" >/dev/null 2>&1 || { echo "CONTROL-REFUSED:$good"; rc=1; }
         grep -q "\"captured_previous\":\"$good\"" "'"$D5RJ_GUARD"'/releases/state.json" || { echo "CONTROL-ABSENT:$good"; rc=1; }
     done

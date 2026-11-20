@@ -2104,19 +2104,38 @@ journal_mark_captured_previous() {
         # a character outside [0-9.-], which LAUNDERED the exponent forms
         # (1e5 / 1.5e-3 / 2E+10 — JSON NUMBER fragments) into JSON
         # STRINGS (measured rc=0, "captured_previous":"1e5"). The only
-        # accept class is now a v-prefixed digits-and-dots token with at
-        # least one dot (the shape promote.sh's own capture produces:
-        # readlink current → releases/vX.Y.Z → vX.Y.Z) — no exponent
-        # markers, no bare numbers (those keep the number-shaped
-        # rejection), no v-less words. Refusals are ADDITIVE: every token
-        # the old arm rejected is still rejected; previously-accepted
-        # non-version tokens now refuse loudly (journal untouched).
+        # accept class is now a v-prefixed digits-and-dots core (at
+        # least one dot) plus an OPTIONAL separator-suffix that starts
+        # with a LETTER (the shape promote.sh's own capture produces:
+        # readlink current → releases/vX.Y.Z → vX.Y.Z; prerelease
+        # suffixes -rc1 / -beta.1 / .alpha shape) — no exponent markers
+        # glued to digits (v1.2.3e10 REFUSES), no empty dot-runs
+        # (v1.2.3..4 REFUSES), no bare numbers (those keep the
+        # number-shaped rejection), no v-less words. Refusals are
+        # ADDITIVE: every token the old arm rejected is still rejected;
+        # previously-accepted non-version tokens now refuse loudly
+        # (journal untouched).
         true|false|*'{'*|*'['*|*'"'*)
             _warn "journal_mark_captured_previous: non-string captured_previous value rejected (writer-side type guard — leader ruling 2026-11-20 option (b)): '$ver' — refusing to stamp (journal untouched)"
             return 1
             ;;
+        # CYCLE-3 A1 (2026-11-20) — the ruling's literal shape
+        # `^v[0-9]+([.][0-9]+)+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$` is
+        # BYTE-IDENTICAL to what shipped at the polish commit, yet it
+        # still ACCEPTS v1.2.3e10 and v1.2.3..4: the regex engine
+        # BACKTRACKS the numeric core to `v1.2` and hands `.3e10` /
+        # `.3..4` to the suffix group (separator `.` + alnum + a star
+        # class that re-admits bare letters and empty dot-runs). The
+        # ruling's INTENT (both forms refuse) is delivered by the
+        # minimal strengthening below — same structure, two changes:
+        # the suffix's FIRST char must be a LETTER (numeric
+        # continuations belong to the core's dot-groups), and dots
+        # inside the suffix must be followed by a NON-EMPTY run (no
+        # `..`, no trailing dot). Every previously-accepted good shape
+        # (v1.2 / v1.2.3 / v1.2.3.4 / v1.2.3-rc1 / v0.32.0-beta.1 /
+        # v1.2.3.alpha) still stamps; refusals remain ADDITIVE.
         v[0-9]*.[0-9]*)
-            if printf '%s' "$ver" | grep -Eq '^v[0-9]+([.][0-9]+)+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$'; then
+            if printf '%s' "$ver" | grep -Eq '^v[0-9]+([.][0-9]+)+([.-][A-Za-z][0-9A-Za-z-]*([.][0-9A-Za-z-]+)*)?$'; then
                 raw="\"$(_json_escape "$ver")\""
             else
                 _warn "journal_mark_captured_previous: captured_previous value is NOT version-shaped (v + digits.dots, at least one dot, no exponent markers — cycle-2 MAJOR-2): '$ver' — refusing to stamp (journal untouched)"
