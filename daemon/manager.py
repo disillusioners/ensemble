@@ -6878,6 +6878,8 @@ class InstanceManager:
                         [str(a) for a in argv],
                         install_dir,
                         run_id,
+                        # (self-service-promote lane marker — scoped
+                        # source-gc sanction, cycle-3)
                         # D3-E1/E2: the reaper classifies via the UNIT —
                         # the name is derived from the SAME kind-scoped
                         # prefix the spawn used (the unit identity was
