@@ -223,6 +223,34 @@ journal_update "in_flight" \
 journal_mark_supervision || _warn "supervision txn stamp failed (advisory — continuing)"
 
 # ═══════════════════════════ 1. GRACE WAIT ══════════════════════════════════
+# D2 containment (c) / AC-D2-5 / the P-5 blind pin: the hand-back's version
+# FAST-FAIL was INACTIVE on the restart path — PROMOTE_EXPECTED_VERSION was
+# never set here, so the serving conjunct degraded to "2xx, no version
+# comparison" and a WRONG-VERSION daemon was accepted as SUCCESS (the same
+# defect the rollback path carried). The expected version is the CURRENT
+# release's manifest binary_version (ADR-027 — a restart does not change the
+# release; the gate below compares against the SAME source).
+#
+# It is resolved HERE — BEFORE the stop — because after the stop the
+# `current` symlink is still the same release (the restart never flips),
+# but resolving it up-front keeps the value available to the hand-back even
+# if the symlink is unreadable at that moment.
+if [ -L "$INSTALL_DIR/current" ]; then
+    _RESTART_CUR_NAME="$(readlink "$INSTALL_DIR/current")"
+    _RESTART_CUR_NAME="${_RESTART_CUR_NAME##*/}"
+    _RESTART_WANT_VER="$(manifest_field "$_RESTART_CUR_NAME" binary_version 2>/dev/null)"
+    if [ -n "$_RESTART_WANT_VER" ]; then
+        PROMOTE_EXPECTED_VERSION="$_RESTART_WANT_VER"
+        _log "restart: the hand-back version fast-fail is ARMED (expected=$PROMOTE_EXPECTED_VERSION) — a wrong-version daemon can no longer be accepted as success"
+    else
+        PROMOTE_EXPECTED_VERSION=""
+        _warn "restart: no binary_version in the current release $_RESTART_CUR_NAME manifest — the hand-back version fast-fail stays INACTIVE (degraded-but-known); the gate's version comparison remains the defence"
+    fi
+else
+    PROMOTE_EXPECTED_VERSION=""
+    _warn "restart: no current symlink — the hand-back version fast-fail stays INACTIVE (degraded-but-known); the gate's version comparison remains the defence"
+fi
+
 # The PRIMARY trigger (post-turn callback) fires this script at exact
 # turn-end — the turn's final DB writes may still be flushing, and
 # SINGLE-TERM's graceful drain (up to CHILD_STOP_WAIT_S) gives them their

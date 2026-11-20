@@ -330,6 +330,23 @@ case "$mode" in
         [ -n "$out" ] && printf '{"status":"alive","version":"0.0.0"}\n' > "$out"
         printf '200'
         exit 0 ;;
+    wrongver-then-ok)
+        # D2 containment (c) / AC-D2-4 (self-service-promote Wave 4): the
+        # WRONG version is served UNTIL the bounded repair has stopped AND
+        # re-started the unit (the real shape: a watchdog slipped in and
+        # started the OLD release inside the ceremony window; the repair
+        # re-starts the unit, which now boots `current` — the flipped
+        # release). The systemctl stub logs every call to $SC_LOG, so the
+        # ORDER (a stop AFTER the last start) is what marks the repair.
+        _ls_start="$(grep -n '^start ' "${SC_LOG:-/dev/null}" 2>/dev/null | head -1 | cut -d: -f1)"
+        _ls_stop="$(grep -n '^stop ' "${SC_LOG:-/dev/null}" 2>/dev/null | tail -1 | cut -d: -f1)"
+        if [ -n "$_ls_start" ] && [ -n "$_ls_stop" ] && [ "$_ls_stop" -gt "$_ls_start" ]; then
+            [ -n "$out" ] && printf '{"status":"alive","version":"%s"}\n' "${CURL_VERSION:-0.28.5}" > "$out"
+        else
+            [ -n "$out" ] && printf '{"status":"alive","version":"0.0.0"}\n' > "$out"
+        fi
+        printf '200'
+        exit 0 ;;
     noversion)
         [ -n "$out" ] && printf '{"status":"alive"}\n' > "$out"
         printf '200'
@@ -541,7 +558,35 @@ if [ "$HOST_HAS_SYSTEMD" = "1" ]; then
     # probe (a single-prop `show -p MainPID` inside
     # _gate_attr_unit_lineage) — the "exactly ONE MainPID poll" assert
     # was red at base on exactly that seam (BASE-attributed; disclosed).
-    assert_eq "L6b fail-fast: exactly ONE state probe" "1" "$(cat "$HBFIX/sc.log.state.n" 2>/dev/null || echo 0)"
+    #
+    # D2 / AC-D2-4 (self-service-promote Wave 4): the wrong-version answer
+    # is NO LONGER an instant fail — the BOUNDED REPAIR (dual-fight
+    # re-check → stop → start → re-verify, INSIDE the existing budget)
+    # runs ONCE, and the re-verify is the SECOND state probe. The
+    # fail-fast verdict itself is unchanged when the repair does not fix
+    # the version (rc 1, same wording) — the repair is bounded to ONE
+    # attempt, never a retry loop.
+    assert_eq "L6b fail-fast: exactly TWO state probes (the original + the post-repair re-verify)" "2" "$(cat "$HBFIX/sc.log.state.n" 2>/dev/null || echo 0)"
+    assert_contains "L6b the bounded repair is announced" "bounded repair re-starts the unit" "$L6B_OUT"
+
+    # L6r (D2 / AC-D2-4 — self-service-promote Wave 4): the bounded repair
+    # RE-CREATES the wrong-version daemon. The stub serves the wrong
+    # version until the repair has stopped AND re-started the unit; the
+    # verify must then SUCCEED — a watchdog start inside the window can
+    # NEVER be a wrong-version success (the version fast-fail rejects it
+    # and the repair makes it right).
+    reset_stub_state "$HBFIX/sc.log"
+    export HANDBACK_VERIFY_BUDGET_S=30 HANDBACK_VERIFY_GRACE_S=5 CURL_MODE=wrongver-then-ok
+    L6R_OUT="$(run_hb "$LIBSH" "$LSOF_OK:$CURL_DIR" "$UNIT_SETUP
+        export PROMOTE_EXPECTED_VERSION=0.28.5")"
+    unset HANDBACK_VERIFY_BUDGET_S HANDBACK_VERIFY_GRACE_S CURL_MODE
+    assert_eq "L6r the bounded repair re-starts the unit and the verify SUCCEEDS" "rvl-rc=0" "$(rvl_rc "$L6R_OUT")"
+    assert_contains "L6r the repair diagnostic is on the wire" "bounded repair re-starts the unit" "$L6R_OUT"
+    assert_eq "L6r exactly TWO state probes (the original + the post-repair re-verify)" "2" "$(cat "$HBFIX/sc.log.state.n" 2>/dev/null || echo 0)"
+    L6R_LOG="$(cat "$HBFIX/sc.log" 2>/dev/null)"
+    assert_contains "L6r the repair STOPPED the unit" "stop " "$L6R_LOG"
+    assert_contains "L6r the repair re-STARTED the unit" "start " "$L6R_LOG"
+    assert_not_contains "L6r the unit is never DISABLED (a stop-never-disable hold)" "disable " "$L6R_LOG"
 
     # L6b′ — 2xx with the version field ABSENT while the expected version is
     # KNOWN → fail-fast (AM-P1-1's unenumerated cell, the L6b extension).

@@ -3287,6 +3287,14 @@ _LOCK_RELEASED=0
 # already released the lock). When the script exits normally (no signal),
 # the guard stays 0 → the original lock_release fires.
 _trap_safe_exit() {
+    # D2 (self-service-promote Wave 4): the WATCHDOG HOLD is released on
+    # EVERY exit path — the belt that covers the three named terminal paths
+    # (P4 commit / P5 abort-pre-flip / P6 halt) AND the paths nobody
+    # enumerated. The release is IDEMPOTENT (the process-local flag gates
+    # it; the marker file is the durable record; the restore removes it).
+    # It runs BEFORE the lock-release early return: the hold must be
+    # released even when the lock was already released by the path itself.
+    _watchdog_hold_release_if_armed >/dev/null 2>&1 || true
     if [ "${_LOCK_RELEASED:-0}" = "1" ]; then
         return 0
     fi
@@ -6554,6 +6562,85 @@ _handback_serving_probe() {
     esac
 }
 
+# _handback_repair_dualfight_probe <unit> — the REPAIR-SCOPED dual-fight
+# re-check (design §2.3 option (c) / AC-D2-4, step 1 of the bounded repair).
+# READ-ONLY and NEVER exits: the repair runs INSIDE the hand-back's
+# `$( ... )` subshell, where supervision_dualfight_check's exit 78 would be
+# swallowed (its own header forbids the subshell form) — so the repair uses
+# this probe instead. Same evidence as Check B: the LISTEN-scoped shared
+# reader + the ANCHORED lineage match against the unit's ControlGroup.
+# rc 0 = no fault; rc 1 = a fault (the fault token on stdout).
+# A probe that cannot see (no ControlGroup, no listener, unprobeable
+# census) is NO EVIDENCE — never a fault (the DUAL_FIGHT precedent).
+_handback_repair_dualfight_probe() {
+    local unit="$1" cg hpid pcg holders rc=0
+    [ -n "$unit" ] || return 0
+    [ -n "${PORT:-}" ] || return 0
+    command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1 || return 0
+    cg="$(_run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" show "$unit" -p ControlGroup --value 2>/dev/null)" || cg=""
+    [ -n "$cg" ] || return 0
+    holders="$(_supervision_port_holders)" || rc=$?
+    [ "$rc" -eq 0 ] || return 0
+    for hpid in $holders; do
+        [ -e "/proc/$hpid" ] || continue
+        pcg=""
+        if [ -r "/proc/$hpid/cgroup" ]; then
+            pcg="$(tail -n 1 "/proc/$hpid/cgroup" 2>/dev/null)"
+            pcg="${pcg##*:}"
+        fi
+        case "$pcg" in
+            "$cg"|"$cg"/*) ;;
+            *)
+                printf 'port-holder-outside-unit-lineage'
+                return 1
+                ;;
+        esac
+    done
+    return 0
+}
+
+# _handback_wrong_version_repair <unit> — the BOUNDED REPAIR (design §2.3
+# option (c) / AC-D2-4): a watchdog that slipped in started the daemon on
+# the WRONG release inside the ceremony's stop→verified window (the unit
+# was already up when the ceremony's own start ran — a start on an ACTIVE
+# unit is a no-op, so the OLD release kept serving). The repair:
+#   1. the dual-fight re-check (fail-closed — a second master ⇒ NO repair:
+#      stopping the unit would be collateral);
+#   2. stop the wrong-version daemon (the unit);
+#   3. start it again — the unit now boots `current`, the FLIPPED release;
+#   4. the caller RE-VERIFIES inside the EXISTING budget (the loop's
+#      deadline is untouched: the repair SPENDS the budget, it never
+#      extends it).
+# rc 0 = the repair ran (the caller keeps polling); rc 1 = no repair (the
+# terminal verdict stands).
+_handback_wrong_version_repair() {
+    local unit="$1" reason fault
+    reason="$(_handback_verify_reason_text)"
+    case "$reason" in
+        livez-version-mismatch*) ;;
+        *) return 1 ;;   # only a WRONG-VERSION answer is repairable
+    esac
+    fault="$(_handback_repair_dualfight_probe "$unit")" || fault="port-holder-outside-unit-lineage"
+    if [ -n "$fault" ]; then
+        _handback_verify_reason_write "version-repair-refused: the dual-fight re-check faulted ($fault) — the wrong-version daemon is NOT stopped (a second master would be collateral); the wrong-version verdict stands"
+        _hb_verify_diag "hand-back verify: the bounded repair is REFUSED (dual-fight re-check faulted: $fault) — the wrong-version daemon is left alone; NOT success"
+        return 1
+    fi
+    _handback_verify_reason_write "version-repair: the daemon on :${PORT:-?} serves the WRONG release (a watchdog that slipped in started it inside the ceremony window) — the bounded repair re-starts the unit (dual-fight re-check clean; the re-verify rides the existing budget)"
+    _hb_verify_diag "hand-back verify: wrong-version daemon detected — the bounded repair re-starts the unit (dual-fight re-check clean; the re-verify rides the existing budget)"
+    if ! _run_bounded "$HANDBACK_START_BUDGET_S" -- "$SYSTEMCTL_BIN" stop "$unit" >/dev/null 2>&1; then
+        _handback_verify_reason_write "version-repair-failed: the unit stop failed — the wrong-version verdict stands"
+        _hb_verify_diag "hand-back verify: the bounded repair could NOT stop the unit — the wrong-version verdict stands; NOT success"
+        return 1
+    fi
+    if ! _run_bounded "$HANDBACK_START_BUDGET_S" -- "$SYSTEMCTL_BIN" start "$unit" >/dev/null 2>&1; then
+        _handback_verify_reason_write "version-repair-failed: the unit start failed — the wrong-version verdict stands"
+        _hb_verify_diag "hand-back verify: the bounded repair could NOT start the unit — the wrong-version verdict stands; NOT success"
+        return 1
+    fi
+    return 0
+}
+
 # _supervision_unit_serving <unit> <prestop_pid> — hand-back VERIFIER.
 # Polls (deadline-bounded, lock-heartbeat every iteration — the _probe
 # precedent) until the unit's MainPID is a NEW nonzero pid — ≠
@@ -6593,6 +6680,11 @@ _supervision_unit_serving() {
     local unit="$1" prestop="$2"
     local deadline now mp entry_remaining effective grace total
     local clock_known=0 floor_band=0 budget_source extended=0 progress=0
+    # D2 containment (c) / AC-D2-4: the bounded wrong-version repair is
+    # attempted AT MOST ONCE per hand-back (the repair re-starts the unit;
+    # a second wrong-version answer after the repair is the terminal
+    # verdict — never a repair loop).
+    local repair_tried=0
     local verify_ceiling hb_t0 hb_elapsed=0 hb_last_word="unknown" hb_last_class="UNKNOWN"
     entry_remaining=0
     if [ -n "${PROMOTE_CEREMONY_DEADLINE_EPOCH:-}" ] \
@@ -6723,7 +6815,19 @@ _supervision_unit_serving() {
                                     printf '%s\n' "$mp"
                                     return 0
                                     ;;
-                                1) return 1 ;;   # probe-level fail-fast
+                                1)
+                                    # D2 (c) / AC-D2-4: a WRONG-VERSION answer
+                                    # is repairable ONCE — the bounded repair
+                                    # re-starts the unit and the loop
+                                    # re-verifies inside the SAME budget.
+                                    if [ "$repair_tried" = "0" ] \
+                                       && _handback_wrong_version_repair "$unit"; then
+                                        repair_tried=1
+                                        sleep 2
+                                        continue
+                                    fi
+                                    return 1   # probe-level fail-fast
+                                    ;;
                                 *) ;;             # transient — poll to the deadline
                             esac
                         else
@@ -6747,7 +6851,17 @@ _supervision_unit_serving() {
                             printf '%s\n' "$mp"
                             return 0
                             ;;
-                        1) return 1 ;;
+                        1)
+                            # D2 (c) / AC-D2-4 — the degraded (lsof absent)
+                            # arm carries the SAME bounded repair.
+                            if [ "$repair_tried" = "0" ] \
+                               && _handback_wrong_version_repair "$unit"; then
+                                repair_tried=1
+                                sleep 2
+                                continue
+                            fi
+                            return 1
+                            ;;
                         *) ;;
                     esac
                     progress=1   # new MainPID; port uncheckable ⇒ not held against it
@@ -9772,3 +9886,605 @@ adopt_stale_txn() {
     fi
     return 0
 }
+
+# ═══════════════════════════════════════════════════════════════════════════
+# D2 — WATCHDOG CONTAINMENT (self-service-promote Wave 4, 2026-11-19)
+#
+# THE SUBJECT: the host's keepalive/watchdog TIMER (e.g. ensemble-keepalive.timer)
+# can fire INSIDE the ceremony's stop→verified window and bring the daemon up
+# on the WRONG release (design §1.4: the keepalive observed `failed` and
+# issued a start ~5min after the flip; "no human was involved"). Two
+# defences, complementary (design §2.3 option (e) = (a) + (c)):
+#   (a) PREVENTION — HOLD the candidate timer(s) for the whole window: mint
+#       the restore transient FIRST (P0.5), then `systemctl stop` the timer
+#       (P1 — NEVER `disable`: an ENABLED timer is re-armed by systemd at
+#       boot, so the reboot path stays covered), and RESTORE on EVERY
+#       terminal path (P4 commit / P5 abort-pre-flip / P6 halt).
+#   (c) CONTAINMENT — the version fast-fail on EVERY path that lacked it
+#       (rollback.sh / restart.sh — the P-5 blind pin) + a bounded repair
+#       (dual-fight re-check → stop → start → re-verify INSIDE the existing
+#       budget) so a slipped watcher's start can NEVER be a success.
+#
+# THE CONTRACT (design §2.3 "Host-probe contract — probe, don't assume"):
+#   * every read is BOUNDED (_run_bounded) and the whole probe is bounded
+#     (WATCHDOG_PROBE_TOTAL_BUDGET_S ≤ 20s, charged to the 300s preflight);
+#   * the probe NEVER assumes a unit name — the daemon unit is the
+#     CLASSIFIED one (SUPERVISION_UNIT), never a hardcoded 'ensemble-main';
+#   * on a SYSTEMD host the probe UNUSABLE ⇒ HALT BEFORE ANY STOP (the new
+#     reason `watchdog_probe_unreadable`, inside the existing halt + exit-78
+#     class). On a host WITHOUT systemd there is no systemd watchdog to
+#     probe ⇒ the probe is NOT-APPLICABLE (never a false halt — the launchd
+#     lane keeps working);
+#   * a candidate's ExecStart unreadable ⇒ HOLD THAT TIMER ONLY (the
+#     unknown-candidate arm — fail-closed, never a silent skip);
+#   * the restore transient cannot be armed ⇒ DO NOT HOLD (loud
+#     `watchdog_hold_unavailable` — degrade to containment (c); disclosed,
+#     never silent).
+#
+# EVENT KINDS (ADDITIVE, and ALL NON-TERMINAL — they never close a
+# pending_op; see daemon/tools/upgrade_journal.py `_TERMINAL_EVENTS`):
+#   watchdog_probe · watchdog_hold · watchdog_restore ·
+#   watchdog_hold_unavailable · watchdog_hold_deferred
+# The HALT reason (`watchdog_probe_unreadable`) rides the EXISTING `halt`
+# kind — it is a refusal REASON, not a new event kind.
+#
+# GUARD SCOPE (design §2.3 adjudication, SETTLED): the EXECUTOR lane is
+# sanctioned to stop the keepalive timer — `stop-ensemble.sh` already stops
+# an ensemble-family unit every ceremony, ungated by design. The AGENT lane
+# stays refused: daemon/tools/_systemctl_guard.py is UNTOUCHED by this work.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── D2 knobs ─────────────────────────────────────────────────────────────────
+# WATCHDOG_HOLD_ENABLED — the kill-switch (default ON). 0 ⇒ the hold is NOT
+# performed and the ceremony degrades to containment (c); the degradation is
+# JOURNALED (watchdog_hold_unavailable), never silent.
+WATCHDOG_HOLD_ENABLED="${WATCHDOG_HOLD_ENABLED:-1}"
+# Per-READ bound for the candidate/daemon-unit probes (the census uses
+# SYSTEMCTL_PROBE_BUDGET_S — the house probe budget).
+WATCHDOG_PROBE_READ_BUDGET_S="$(_numeric_knob WATCHDOG_PROBE_READ_BUDGET_S "${WATCHDOG_PROBE_READ_BUDGET_S:-}" 2)"
+# TOTAL probe bound (design §2.3: ≤20s, charged to the 300s preflight).
+WATCHDOG_PROBE_TOTAL_BUDGET_S="$(_numeric_knob WATCHDOG_PROBE_TOTAL_BUDGET_S "${WATCHDOG_PROBE_TOTAL_BUDGET_S:-}" 20)"
+# How many timers the probe may open an ExecStart read for (the census is
+# unbounded in principle; the probe is not — the cap keeps the total bound).
+WATCHDOG_PROBE_MAX_CANDIDATES="$(_numeric_knob WATCHDOG_PROBE_MAX_CANDIDATES "${WATCHDOG_PROBE_MAX_CANDIDATES:-}" 4)"
+# The restore transient's TTL (default 30min). The AC-D2-3 leg scales it to
+# 5s so the RT's re-arm/restore cycle is observable inside a test.
+WATCHDOG_HOLD_RT_TTL_S="$(_numeric_knob WATCHDOG_HOLD_RT_TTL_S "${WATCHDOG_HOLD_RT_TTL_S:-}" 1800)"
+# The hold's iteration bound (design F13/AC-D2-10: ≤3 — the OLD 20-iteration
+# loop IS the named defect: ~10h of darkness on executor death).
+WATCHDOG_HOLD_MAX_ITERATIONS="$(_numeric_knob WATCHDOG_HOLD_MAX_ITERATIONS "${WATCHDOG_HOLD_MAX_ITERATIONS:-}" 3)"
+# An operator-declared timer name (the "configured timer" predicate arm).
+WATCHDOG_TIMER_NAME="${WATCHDOG_TIMER_NAME:-}"
+# The systemd-run binary (the restore transient's minter).
+SYSTEMD_RUN_BIN="${SYSTEMD_RUN_BIN:-systemd-run}"
+
+# ── D2 state (populated by the probe; consumed by the hold/restore) ─────────
+WATCHDOG_PROBE_STATUS=""          # ok | unreadable | not-applicable
+WATCHDOG_PROBE_DETAIL=""
+WATCHDOG_PROBE_TIMERS=""          # the census (space separated timer names)
+WATCHDOG_PROBE_VERDICTS=""        # the per-timer verdicts (name=verdict ...)
+WATCHDOG_CANDIDATES=""            # the held set (space separated timer names)
+WATCHDOG_DAEMON_STATE=""          # the classified daemon unit's ActiveState
+WATCHDOG_DAEMON_SUBSTATE=""
+WATCHDOG_DAEMON_FAILED=""         # the is-failed answer (the §2.3 blind pin)
+WATCHDOG_DAEMON_UNITFILE_STATE="" # the F14 enable-state discriminator
+WATCHDOG_RT_UNIT=""               # the restore transient's unit name
+WATCHDOG_HOLD_ARMED=0             # 1 once the hold is applied (the EXIT trap's gate)
+WATCHDOG_HOLDED_TIMERS=""         # the applied hold set
+WATCHDOG_RESTORE_DETAIL=""
+
+# journal_resume_txn — RE-STAKE an EXISTING open txn (resume-from-state,
+# design F2-i / AC-CER-1): the owner_pid and the last_heartbeat are
+# rewritten to THIS shell; EVERY other field (kind/target/started_at/
+# flipped/captured_previous/displaced_version) is PRESERVED byte-for-byte —
+# the capture is load-bearing for the rollback chain (the Wave-3 R0 rung)
+# and a resume NEVER drops it.
+journal_resume_txn() {
+    local json inf new_inf now
+    json="$(journal_read)" || return 1
+    inf="$(_json_sub "$json" in_flight)"
+    case "$inf" in
+        '{'*) ;;
+        *) _warn "journal_resume_txn: no open in_flight txn (in_flight null/malformed) — refusing to re-stake"; return 1 ;;
+    esac
+    now="$(_now_epoch)"
+    new_inf="$(printf '%s' "$inf" | sed -e 's/"owner_pid": *[0-9][0-9]*/"owner_pid":'"$$"'/' -e 's/"last_heartbeat": *[0-9][0-9]*/"last_heartbeat":'"$now"'/')"
+    [ "$new_inf" != "$inf" ] || { _warn "journal_resume_txn: the owner/heartbeat fields were not found in the txn — refusing (never a silent no-op)"; return 1; }
+    journal_update "in_flight" "$new_inf"
+}
+
+# _promote_resume_decision <version> — the RESUME-FROM-STATE decision
+# (design F2-i / AC-CER-1): a re-arm on a partially-flipped system MUST
+# resume from the STATE, never re-flip:
+#   gates-only : the open txn is flipped=true ⇒ the ceremony runs the
+#                GATES/COMMIT ONLY — no stop, no swap, no flip (a second
+#                atomic_flip would be the double-flip the design forbids);
+#   flip-prep  : the open txn is flipped=false ⇒ the ceremony continues the
+#                flip-prep with idempotency guards;
+#   busy       : the open txn's owner is ALIVE ⇒ another executor owns the
+#                journal ⇒ refuse (pipeline-busy — never trample a live
+#                executor);
+#   fresh      : no open txn for THIS target ⇒ the normal path.
+#
+# There is NO restart-from-arm path: the decision vocabulary is exactly
+# {gates-only, flip-prep, busy, fresh} — "restart" is not one of them.
+_promote_resume_decision() {
+    local version="$1" json inf kind target flipped owner
+    json="$(journal_read 2>/dev/null)" || json=""
+    inf="$(_json_sub "$json" in_flight 2>/dev/null)" || inf=""
+    case "$inf" in ''|null) printf 'fresh\n'; return 0 ;; esac
+    kind="$(_json_field "$inf" kind 2>/dev/null)" || kind=""
+    target="$(_json_field "$inf" target 2>/dev/null)" || target=""
+    flipped="$(_json_field "$inf" flipped 2>/dev/null)" || flipped=""
+    owner="$(_json_field "$inf" owner_pid 2>/dev/null)" || owner=""
+    [ "$kind" = "promote" ] || { printf 'fresh\n'; return 0; }
+    [ "$target" = "$version" ] || { printf 'fresh\n'; return 0; }
+    if [ -n "$owner" ] && _pid_alive "$owner"; then
+        printf 'busy\n'
+        return 0
+    fi
+    case "$flipped" in
+        true) printf 'gates-only\n' ;;
+        *) printf 'flip-prep\n' ;;
+    esac
+    return 0
+}
+
+# _promote_resume_mutation_ok — 0 when the ceremony may MUTATE (the stop /
+# the launcher swap / the atomic flip); 1 when the resume state forbids it
+# (the gates-only resume). The ONLY mutation-free mode is gates-only.
+_promote_resume_mutation_ok() {
+    [ "${PROMOTE_RESUME_MODE:-fresh}" = "gates-only" ] && return 1
+    return 0
+}
+
+# _watchdog_hold_dir — the marker's directory: <install>/data/upgrade/<env>/
+# (the SAME env-scoped home the per-run narrative + payload logs use).
+_watchdog_hold_dir() {
+    printf '%s/data/upgrade/%s\n' "${INSTALL_DIR:-}" "${UP_TARGET:-demo}"
+}
+
+# _watchdog_hold_marker_path — the marker FILE. Root-written by the executor
+# (it runs on the system bus as root) and daemon-readable (mode 0644 — the
+# RC8 privilege boundary: the daemon side reads the hold state; the RT
+# re-arms BY TIMER NAME and never rewrites the marker).
+_watchdog_hold_marker_path() {
+    printf '%s/watchdog.hold.json\n' "$(_watchdog_hold_dir)"
+}
+
+# _watchdog_candidate_verdict <timer> <execstart> <family> <daemon_unit> <configured>
+#   → prints ONE of: candidate | unknown-candidate | not
+#
+# THE PREDICATE (design §2.3, published so no implementer invents a weaker
+# one — the arms are evaluated IN THIS ORDER):
+#   1. the CONFIGURED timer name (operator-declared) ⇒ candidate;
+#   2. an UNREADABLE / unresolvable ExecStart ⇒ unknown-candidate WHEN the
+#      timer carries the family token (keepalive|watchdog) — treated as a
+#      watchdog (fail-closed) — else not;
+#   3. an ExecStart that references the RESOLVED daemon unit WITH a start
+#      verb ⇒ candidate;
+#   4. an ExecStart whose path carries a keepalive/watchdog token ⇒ candidate;
+#   5. anything else ⇒ not (an unrelated timer is never held).
+#
+# PURE: no I/O, no globals — the AC-D2-9 leg drives it directly.
+_watchdog_candidate_verdict() {
+    local timer="$1" execstart="$2" family="${3:-0}" daemon_unit="${4:-}" configured="${5:-}"
+    local fam=0
+    case "$timer" in *keepalive*|*watchdog*|*Keepalive*|*Watchdog*) fam=1 ;; esac
+    [ "$family" = "1" ] && fam=1
+    # arm 1 — the configured timer name
+    if [ -n "$configured" ] && [ "$timer" = "$configured" ]; then
+        printf 'candidate\n'
+        return 0
+    fi
+    # arm 2 — an unreadable ExecStart
+    if [ -z "$execstart" ]; then
+        if [ "$fam" = "1" ]; then printf 'unknown-candidate\n'; else printf 'not\n'; fi
+        return 0
+    fi
+    # arm 3 — the ExecStart references the RESOLVED daemon unit with a start verb
+    if [ -n "$daemon_unit" ]; then
+        case "$execstart" in
+            *start*|*Start*)
+                case "$execstart" in
+                    *"$daemon_unit"*) printf 'candidate\n'; return 0 ;;
+                esac
+                ;;
+        esac
+    fi
+    # arm 4 — a keepalive/watchdog path
+    case "$execstart" in
+        *keepalive*|*watchdog*|*Keepalive*|*Watchdog*) printf 'candidate\n'; return 0 ;;
+    esac
+    # arm 5 — unrelated
+    printf 'not\n'
+    return 0
+}
+
+# _watchdog_probe_read <budget> -- <systemctl args...> — a BOUNDED read,
+# clamped by the probe's TOTAL budget (the deadline is set by _watchdog_probe).
+_watchdog_probe_read() {
+    local budget="$1"; shift
+    [ "${1:-}" = "--" ] && shift
+    if [ -n "${_WATCHDOG_PROBE_DEADLINE:-}" ]; then
+        local remaining=$(( _WATCHDOG_PROBE_DEADLINE - $(_now_epoch) ))
+        [ "$remaining" -lt 1 ] && remaining=1
+        [ "$remaining" -lt "$budget" ] && budget="$remaining"
+    fi
+    _run_bounded "$budget" -- "$SYSTEMCTL_BIN" "$@"
+}
+
+# _watchdog_unit_state <unit> — the unit's ActiveState (bounded). Empty when
+# the unit is unknown or the probe failed.
+_watchdog_unit_state() {
+    local unit="${1:-}" out=""
+    [ -n "$unit" ] || return 1
+    out="$(_watchdog_probe_read "$WATCHDOG_PROBE_READ_BUDGET_S" -- show "$unit" -p ActiveState --value 2>/dev/null)" || return 1
+    printf '%s' "$out"
+}
+
+# _watchdog_probe — THE HOST PROBE (P0).
+# Sets WATCHDOG_PROBE_STATUS / _DETAIL / _TIMERS / _VERDICTS / _CANDIDATES
+# and the daemon-unit observations.
+# rc 0 = the probe ran (status ok | not-applicable)
+# rc 1 = the probe is UNREADABLE on a systemd host ⇒ the caller HALTS
+#        BEFORE any stop (fail-closed — the `watchdog_probe_unreadable`
+#        reason rides the existing halt + exit-78 class).
+_watchdog_probe() {
+    local daemon_unit="${SUPERVISION_UNIT:-}"
+    local configured="${WATCHDOG_TIMER_NAME:-}"
+    local census="" rc=0 line timer service execstart verdict enabled active state
+    local probed=0 unprobed=0
+
+    WATCHDOG_PROBE_STATUS="unreadable"
+    WATCHDOG_PROBE_DETAIL=""
+    WATCHDOG_PROBE_TIMERS=""
+    WATCHDOG_PROBE_VERDICTS=""
+    WATCHDOG_CANDIDATES=""
+    WATCHDOG_DAEMON_STATE=""
+    WATCHDOG_DAEMON_SUBSTATE=""
+    WATCHDOG_DAEMON_FAILED=""
+    WATCHDOG_DAEMON_UNITFILE_STATE=""
+
+    # NOT-APPLICABLE: a host without systemd has no systemd watchdog timer to
+    # probe (the launchd lane is a different animal). Never a false halt.
+    if ! _supervision_host_allows_unit || ! command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
+        WATCHDOG_PROBE_STATUS="not-applicable"
+        WATCHDOG_PROBE_DETAIL="this host has no systemd unit supervision — there is no systemd watchdog timer to probe (the launchd lane is unaffected)"
+        return 0
+    fi
+
+    _WATCHDOG_PROBE_DEADLINE=$(( $(_now_epoch) + WATCHDOG_PROBE_TOTAL_BUDGET_S ))
+
+    # READ 1 — the timer census (the ONLY enumeration; no name is assumed).
+    census="$(_watchdog_probe_read "$SYSTEMCTL_PROBE_BUDGET_S" -- list-unit-files --type=timer --no-legend --no-pager 2>/dev/null)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        WATCHDOG_PROBE_DETAIL="the timer census probe failed (rc=$rc) — the watchdog state is UNREADABLE on this systemd host"
+        return 1
+    fi
+
+    # READS 2-4 — the CLASSIFIED daemon unit (never a hardcoded name): its
+    # state, its enable state (the F14 discriminator) and the is-failed
+    # answer (design §2.3's 🟡 blind pin — the pipeline never probed
+    # is-failed before this wave).
+    if [ -n "$daemon_unit" ]; then
+        state="$(_watchdog_probe_read "$WATCHDOG_PROBE_READ_BUDGET_S" -- show "$daemon_unit" -p ActiveState -p SubState -p UnitFileState 2>/dev/null)" || state=""
+        if [ -n "$state" ]; then
+            WATCHDOG_DAEMON_STATE="$(printf '%s\n' "$state" | sed -n 's/^ActiveState=//p' | head -1)"
+            WATCHDOG_DAEMON_SUBSTATE="$(printf '%s\n' "$state" | sed -n 's/^SubState=//p' | head -1)"
+            WATCHDOG_DAEMON_UNITFILE_STATE="$(printf '%s\n' "$state" | sed -n 's/^UnitFileState=//p' | head -1)"
+        fi
+        WATCHDOG_DAEMON_FAILED="$(_watchdog_probe_read "$WATCHDOG_PROBE_READ_BUDGET_S" -- is-failed "$daemon_unit" 2>/dev/null || printf 'unknown')"
+        [ -n "$WATCHDOG_DAEMON_FAILED" ] || WATCHDOG_DAEMON_FAILED="unknown"
+    fi
+
+    # The census → the candidate verdicts. A timer is OPENED (its ExecStart
+    # read) only while the probe's budget and its candidate cap allow; an
+    # unopened timer is DISCLOSED in the probe row (the containment (c)
+    # backstop covers what the prevention missed — never a silent skip).
+    for line in $census; do
+        timer="${line%% *}"
+        [ -n "$timer" ] || continue
+        case "$timer" in *.timer) ;; *) continue ;; esac
+        WATCHDOG_PROBE_TIMERS="${WATCHDOG_PROBE_TIMERS}${WATCHDOG_PROBE_TIMERS:+ }$timer"
+        # the configured timer is a candidate WITHOUT opening it
+        if [ -n "$configured" ] && [ "$timer" = "$configured" ]; then
+            WATCHDOG_PROBE_VERDICTS="${WATCHDOG_PROBE_VERDICTS}${WATCHDOG_PROBE_VERDICTS:+ }$timer=candidate"
+            WATCHDOG_CANDIDATES="${WATCHDOG_CANDIDATES}${WATCHDOG_CANDIDATES:+ }$timer"
+            continue
+        fi
+        if [ "$probed" -ge "$WATCHDOG_PROBE_MAX_CANDIDATES" ]; then
+            unprobed=$(( unprobed + 1 ))
+            continue
+        fi
+        probed=$(( probed + 1 ))
+        # the timer's own enable state + active state (the prior state the
+        # marker records; the F14 enable-state discriminator)
+        enabled="$(_watchdog_probe_read "$WATCHDOG_PROBE_READ_BUDGET_S" -- show "$timer" -p UnitFileState -p ActiveState 2>/dev/null)" || enabled=""
+        # the PAIRED service's ExecStart (the timer → service pairing is the
+        # systemd convention: foo.timer ⇒ foo.service)
+        service="${timer%.timer}.service"
+        execstart="$(_watchdog_probe_read "$WATCHDOG_PROBE_READ_BUDGET_S" -- show "$service" -p ExecStart 2>/dev/null)" || execstart=""
+        verdict="$(_watchdog_candidate_verdict "$timer" "$execstart" 0 "$daemon_unit" "$configured")"
+        WATCHDOG_PROBE_VERDICTS="${WATCHDOG_PROBE_VERDICTS}${WATCHDOG_PROBE_VERDICTS:+ }$timer=$verdict"
+        case "$verdict" in
+            candidate|unknown-candidate)
+                WATCHDOG_CANDIDATES="${WATCHDOG_CANDIDATES}${WATCHDOG_CANDIDATES:+ }$timer"
+                ;;
+        esac
+    done
+
+    WATCHDOG_PROBE_STATUS="ok"
+    WATCHDOG_PROBE_DETAIL="daemon_unit=${daemon_unit:-none} daemon_state=${WATCHDOG_DAEMON_STATE:-unknown} daemon_substate=${WATCHDOG_DAEMON_SUBSTATE:-unknown} daemon_is_failed=${WATCHDOG_DAEMON_FAILED:-unknown} daemon_unit_file_state=${WATCHDOG_DAEMON_UNITFILE_STATE:-unknown} timers=$(printf '%s' "$WATCHDOG_PROBE_TIMERS" | wc -w | tr -d ' ') opened=$probed unopened=$unprobed candidates=${WATCHDOG_CANDIDATES:-none}"
+    return 0
+}
+
+# _watchdog_marker_field <marker-path> <field> — read ONE flat field from the
+# marker (the marker is a FLAT, shell-readable record: the RT parses it with
+# the same helpers the journal uses — no nested JSON parsing).
+_watchdog_marker_field() {
+    local marker="$1" field="$2" json="" out="" key=""
+    [ -f "$marker" ] || return 1
+    json="$(cat "$marker" 2>/dev/null)" || return 1
+    # The QUOTED-key form (the house `_json_field_quoted` contract — the
+    # bare-substring form would match a longer key first). The key is
+    # BUILT with printf (an embedded escaped-quote literal would unbalance
+    # the shell-quote scanners the tree gates on).
+    key="$(printf '"%s":' "$field")"
+    out="$(_json_field_quoted "$json" "$key" 2>/dev/null)" || out=""
+    [ "$out" = "null" ] && out=""
+    printf '%s' "$out"
+}
+
+# _watchdog_marker_write <run_id> <rt-unit> <timers> <prior-active> <prior-enabled> <daemon-unit>
+# — write the marker (root-written; mode 0644 so the daemon can READ it).
+# The record is flat on purpose (the RT re-arms BY TIMER NAME and never
+# rewrites the marker — the RC8 privilege boundary).
+_watchdog_marker_write() {
+    local run_id="$1" rt_unit="$2" timers="$3" prior_active="$4" prior_enabled="$5" daemon_unit="$6"
+    local dir marker tmp
+    dir="$(_watchdog_hold_dir)"
+    marker="$(_watchdog_hold_marker_path)"
+    mkdir -p "$dir" 2>/dev/null || return 1
+    tmp="$dir/.watchdog.hold.json.$$"
+    {
+        printf '{'
+        printf '"run_id":"%s",' "$run_id"
+        printf '"env":"%s",' "${UP_TARGET:-demo}"
+        printf '"held_at":"%s",' "$(_now_iso)"
+        printf '"rt_unit":"%s",' "$rt_unit"
+        printf '"daemon_unit":"%s",' "$daemon_unit"
+        printf '"timers":"%s",' "$timers"
+        printf '"prior_active":"%s",' "$prior_active"
+        printf '"prior_unit_file_state":"%s"' "$prior_enabled"
+        printf '}\n'
+    } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+    chmod 0644 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$marker" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+    return 0
+}
+
+# _watchdog_rt_arm <run_id> — P0.5: mint the RESTORE TRANSIENT.
+# It MUST be armed BEFORE any hold: a hold without a restore path is the
+# "watchdog permanently disabled" failure class (design §2.3 option (a),
+# "the restore cannot be armed ⇒ DO NOT HOLD").
+# rc 0 = armed (WATCHDOG_RT_UNIT set); rc 1 = NOT armed (the caller must
+#        NOT hold — loud `watchdog_hold_unavailable`).
+_watchdog_rt_arm() {
+    local run_id="$1"
+    local unit="ensemble-keepdog-restore-$run_id"
+    local libpath ttl out rc=0
+    WATCHDOG_RT_UNIT=""
+    [ -n "$run_id" ] || return 1
+    if ! command -v "$SYSTEMD_RUN_BIN" >/dev/null 2>&1; then
+        _warn "watchdog hold: the restore transient cannot be armed ($SYSTEMD_RUN_BIN is not available) — NO watchdog timer will be held (degrading to containment (c))"
+        return 1
+    fi
+    libpath="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/$(basename "${BASH_SOURCE[0]:-$0}")"
+    [ -f "$libpath" ] || libpath="${BASH_SOURCE[0]:-$0}"
+    ttl="$WATCHDOG_HOLD_RT_TTL_S"
+    out="$(_run_bounded "$WATCHDOG_PROBE_READ_BUDGET_S" -- "$SYSTEMD_RUN_BIN" \
+        --on-active="$ttl" \
+        --unit="$unit" \
+        --description="ensemble watchdog restore transient (run $run_id)" \
+        --setenv=_LIB_WATCHDOG_RT_ENTRY=1 \
+        --setenv=INSTALL_DIR="${INSTALL_DIR:-}" \
+        --setenv=UP_TARGET="${UP_TARGET:-demo}" \
+        --setenv=WATCHDOG_RT_RUN_ID="$run_id" \
+        --setenv=WATCHDOG_RT_ITERATION=1 \
+        --setenv=WATCHDOG_HOLD_RT_TTL_S="$ttl" \
+        --setenv=WATCHDOG_HOLD_MAX_ITERATIONS="$WATCHDOG_HOLD_MAX_ITERATIONS" \
+        -- bash "$libpath" --watchdog-restore 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        _warn "watchdog hold: the restore transient could NOT be minted (rc=$rc) — NO watchdog timer will be held (degrading to containment (c))"
+        return 1
+    fi
+    WATCHDOG_RT_UNIT="$unit"
+    _log "watchdog hold: restore transient armed (unit=$unit ttl=${ttl}s run=$run_id)"
+    return 0
+}
+
+# _watchdog_hold_apply <run_id> — P1: HOLD the candidate timer(s).
+# `systemctl stop` ONLY — NEVER `disable` (an enabled timer is re-armed by
+# systemd at boot ⇒ the reboot path stays covered; design §2.3 P8).
+# The marker records the held set + the prior state.
+_watchdog_hold_apply() {
+    local run_id="$1" timer rc=0 held="" prior_active="" prior_enabled="" daemon_unit="${SUPERVISION_UNIT:-}"
+    local marker
+    marker="$(_watchdog_hold_marker_path)"
+    if [ -z "$WATCHDOG_CANDIDATES" ]; then
+        _log "watchdog hold: no candidate timer — nothing to hold (the probe found no watchdog-shaped timer)"
+        return 0
+    fi
+    for timer in $WATCHDOG_CANDIDATES; do
+        prior_active="$(_watchdog_probe_read "$WATCHDOG_PROBE_READ_BUDGET_S" -- is-active "$timer" 2>/dev/null || printf 'unknown')"
+        prior_enabled="$(_watchdog_probe_read "$WATCHDOG_PROBE_READ_BUDGET_S" -- show "$timer" -p UnitFileState --value 2>/dev/null || printf 'unknown')"
+        [ -n "$prior_active" ] || prior_active="unknown"
+        [ -n "$prior_enabled" ] || prior_enabled="unknown"
+        if _run_bounded "$WATCHDOG_PROBE_READ_BUDGET_S" -- "$SYSTEMCTL_BIN" stop "$timer" >/dev/null 2>&1; then
+            held="${held}${held:+ }$timer"
+            _log "watchdog hold: timer $timer stopped for the ceremony window (enable state preserved: $prior_enabled — a stopped timer is re-armed by systemd at boot)"
+        else
+            _warn "watchdog hold: could NOT stop timer $timer — it may still fire inside the window (the version fast-fail + the bounded repair contain it)"
+        fi
+    done
+    if [ -z "$held" ]; then
+        _warn "watchdog hold: NO timer could be held — the ceremony continues WITHOUT a watchdog hold (containment (c) is the only defence left)"
+        return 1
+    fi
+    if ! _watchdog_marker_write "$run_id" "${WATCHDOG_RT_UNIT:-}" "$held" "$prior_active" "$prior_enabled" "$daemon_unit"; then
+        _warn "watchdog hold: the hold marker could NOT be written (${marker}) — restoring the held timer(s) immediately (a hold without a record cannot be undone by the RT)"
+        _watchdog_hold_restore
+        return 1
+    fi
+    WATCHDOG_HELD_TIMERS="$held"
+    WATCHDOG_HOLD_ARMED=1
+    journal_history_append watchdog_hold "watchdog hold applied: timers=[$held] prior_active=$prior_active prior_unit_file_state=$prior_enabled daemon_unit=${daemon_unit:-none} restore_transient=${WATCHDOG_RT_UNIT:-none} run_id=$run_id (stopped, never disabled — an enabled timer is re-armed by systemd at boot)" \
+        || _warn "watchdog_hold journal append FAILED (best-effort)"
+    return 0
+}
+
+# _watchdog_hold_restore — RESTORE the held timer(s) + cancel the restore
+# transient. IDEMPOTENT: a missing marker ⇒ already restored (no-op, rc 0).
+# Called on EVERY terminal path (P4 commit / P5 abort-pre-flip / P6 halt)
+# and by the EXIT trap (the belt that covers the paths nobody enumerated).
+_watchdog_hold_restore() {
+    local marker timers rt_unit timer rc=0 restored=""
+    marker="$(_watchdog_hold_marker_path)"
+    WATCHDOG_RESTORE_DETAIL=""
+    if [ ! -f "$marker" ]; then
+        WATCHDOG_RESTORE_DETAIL="no hold marker — nothing to restore"
+        return 0
+    fi
+    timers="$(_watchdog_marker_field "$marker" timers)" || timers=""
+    rt_unit="$(_watchdog_marker_field "$marker" rt_unit)" || rt_unit=""
+    for timer in $timers; do
+        if _run_bounded "$WATCHDOG_PROBE_READ_BUDGET_S" -- "$SYSTEMCTL_BIN" start "$timer" >/dev/null 2>&1; then
+            restored="${restored}${restored:+ }$timer"
+        else
+            rc=1
+            _warn "watchdog restore: could NOT re-arm timer $timer — the watchdog stays down until an operator re-arms it (loud, never silent)"
+        fi
+    done
+    # cancel the restore transient (it has nothing left to restore)
+    if [ -n "$rt_unit" ]; then
+        _run_bounded "$WATCHDOG_PROBE_READ_BUDGET_S" -- "$SYSTEMCTL_BIN" stop "$rt_unit.timer" >/dev/null 2>&1 || true
+    fi
+    rm -f "$marker" 2>/dev/null || true
+    WATCHDOG_HOLD_ARMED=0
+    WATCHDOG_RESTORE_DETAIL="restored=[${restored:-none}] rt_cancelled=${rt_unit:-none}"
+    journal_history_append watchdog_restore "watchdog restore: timers=[${restored:-none}] restore_transient_cancelled=${rt_unit:-none} (the held timer(s) are re-armed; the marker is cleared)" \
+        || _warn "watchdog_restore journal append FAILED (best-effort)"
+    return "$rc"
+}
+
+# _watchdog_hold_release_if_armed — the EXIT-trap belt: release the hold on
+# ANY exit path (including the ones nobody enumerated). No-op when no hold
+# was applied (the flag is process-local — the hold state is the flag, not
+# the marker).
+_watchdog_hold_release_if_armed() {
+    [ "${WATCHDOG_HOLD_ARMED:-0}" = "1" ] || return 0
+    WATCHDOG_HOLD_ARMED=0
+    _watchdog_hold_restore >/dev/null 2>&1 || true
+}
+
+# _watchdog_rt_rearm <run_id> <iteration> — the RT's DEFER path: re-arm
+# itself (bounded by WATCHDOG_HOLD_MAX_ITERATIONS — design F13).
+_watchdog_rt_rearm() {
+    local run_id="$1" iteration="$2"
+    local next=$(( iteration + 1 ))
+    local unit="ensemble-keepdog-restore-$run_id-$next"
+    local libpath ttl
+    libpath="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/$(basename "${BASH_SOURCE[0]:-$0}")"
+    [ -f "$libpath" ] || libpath="${BASH_SOURCE[0]:-$0}"
+    ttl="$WATCHDOG_HOLD_RT_TTL_S"
+    if ! command -v "$SYSTEMD_RUN_BIN" >/dev/null 2>&1; then
+        return 1
+    fi
+    _run_bounded "$WATCHDOG_PROBE_READ_BUDGET_S" -- "$SYSTEMD_RUN_BIN" \
+        --on-active="$ttl" \
+        --unit="$unit" \
+        --description="ensemble watchdog restore transient (run $run_id, iteration $next)" \
+        --setenv=_LIB_WATCHDOG_RT_ENTRY=1 \
+        --setenv=INSTALL_DIR="${INSTALL_DIR:-}" \
+        --setenv=UP_TARGET="${UP_TARGET:-demo}" \
+        --setenv=WATCHDOG_RT_RUN_ID="$run_id" \
+        --setenv=WATCHDOG_RT_ITERATION="$next" \
+        --setenv=WATCHDOG_HOLD_RT_TTL_S="$ttl" \
+        --setenv=WATCHDOG_HOLD_MAX_ITERATIONS="$WATCHDOG_HOLD_MAX_ITERATIONS" \
+        -- bash "$libpath" --watchdog-restore >/dev/null 2>&1
+}
+
+# _watchdog_rt_main — the restore transient's ENTRY POINT (design §2.3 P7):
+# the executor died ⇒ the RT fires at its TTL ⇒ re-read the journal:
+#   * an OPEN in_flight ⇒ the ceremony may still be running ⇒ re-arm the RT
+#     (bounded ≤ WATCHDOG_HOLD_MAX_ITERATIONS) UNLESS the daemon is down
+#     and no fresh executor heartbeat proves the executor alive (the F13
+#     darkness bound: restore as soon as the unit is inactive|failed ∧ no
+#     fresh executor heartbeat);
+#   * no open txn ⇒ RESTORE.
+_watchdog_rt_main() {
+    local iteration="${WATCHDOG_RT_ITERATION:-1}"
+    local run_id="${WATCHDOG_RT_RUN_ID:-}"
+    local marker timers daemon_unit inf="" open=0 hb_stale unit_state
+    marker="$(_watchdog_hold_marker_path)"
+    if [ ! -f "$marker" ]; then
+        _warn "watchdog restore transient: no hold marker — nothing to restore (the ceremony already restored the timer(s))"
+        return 0
+    fi
+    timers="$(_watchdog_marker_field "$marker" timers)" || timers=""
+    daemon_unit="$(_watchdog_marker_field "$marker" daemon_unit)" || daemon_unit=""
+    inf="$(_json_sub "$(journal_read 2>/dev/null || printf '{}')" in_flight 2>/dev/null)" || inf=""
+    case "$inf" in ''|null) open=0 ;; *) open=1 ;; esac
+    if [ "$open" = "1" ]; then
+        hb_stale="$(_txn_heartbeat_stale "$inf" "$(_now_epoch)")"
+        unit_state=""
+        if [ -n "$daemon_unit" ]; then
+            unit_state="$(_watchdog_unit_state "$daemon_unit")" || unit_state=""
+        fi
+        if [ "$iteration" -ge "$WATCHDOG_HOLD_MAX_ITERATIONS" ]; then
+            _warn "watchdog restore transient: iteration $iteration reached the bound ($WATCHDOG_HOLD_MAX_ITERATIONS) — restoring the held timer(s) now (the hold is bounded; a longer hold is the F13 darkness defect)"
+            _watchdog_hold_restore
+            return 0
+        fi
+        case "$unit_state" in
+            inactive|failed)
+                if [ "$hb_stale" = "1" ]; then
+                    _warn "watchdog restore transient: the daemon unit is $unit_state and no fresh executor heartbeat proves the ceremony alive — restoring the held timer(s) now (the hold is bounded by daemon liveness)"
+                    _watchdog_hold_restore
+                    return 0
+                fi
+                ;;
+            '')
+                if [ "$hb_stale" = "1" ]; then
+                    _warn "watchdog restore transient: the daemon unit state is unprobeable and no fresh executor heartbeat proves the ceremony alive — restoring the held timer(s) now (the hold is bounded by daemon liveness)"
+                    _watchdog_hold_restore
+                    return 0
+                fi
+                ;;
+        esac
+        # still open + the daemon is alive (or the executor heartbeat is fresh)
+        # ⇒ DEFER: re-arm ourselves, bounded.
+        journal_history_append watchdog_hold_deferred "watchdog hold deferred: iteration=$iteration of $WATCHDOG_HOLD_MAX_ITERATIONS; the txn is still open (unit=${daemon_unit:-none} state=${unit_state:-unknown} heartbeat_stale=$hb_stale) — the restore transient re-arms itself (the hold stays bounded by daemon liveness)" \
+            || _warn "watchdog_hold_deferred journal append FAILED (best-effort)"
+        if ! _watchdog_rt_rearm "$run_id" "$iteration"; then
+            _warn "watchdog restore transient: could NOT re-arm itself — restoring the held timer(s) now (never leave the hold unbounded)"
+            _watchdog_hold_restore
+            return 0
+        fi
+        return 0
+    fi
+    # no open txn ⇒ the ceremony is over ⇒ restore
+    _watchdog_hold_restore
+    return 0
+}
+
+# ── D2 RT entry point (the LAST statement of this file) ─────────────────────
+# The restore transient runs `bash <lib.sh> --watchdog-restore` with
+# _LIB_WATCHDOG_RT_ENTRY=1 — the guard below is the ONLY path that reaches
+# the RT's decision logic. Every other consumer SOURCES this file, and the
+# guard is inert without the env var.
+if [ "${_LIB_WATCHDOG_RT_ENTRY:-0}" = "1" ]; then
+    _watchdog_rt_main "$@"
+    exit $?
+fi

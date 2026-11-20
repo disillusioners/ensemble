@@ -191,6 +191,26 @@ fi
 
 TO_BIN_VERSION="$(manifest_field "$TO_VERSION" binary_version 2>/dev/null)"
 
+# D2 containment (c) / AC-D2-5 / the P-5 blind pin: the hand-back's version
+# FAST-FAIL was INACTIVE on the rollback path — PROMOTE_EXPECTED_VERSION was
+# never set here, so the serving conjunct degraded to "2xx, no version
+# comparison" and a WRONG-VERSION daemon was accepted as SUCCESS. The
+# expected version is the TARGET's manifest binary_version (the same value
+# the re-gate compares below) — thread it through the SAME plain-variable
+# channel promote.sh uses (never exported; the child scripts must not
+# inherit it).
+#
+# An unresolvable manifest field ⇒ the fast-fail stays INACTIVE for this
+# run (the degraded-but-known posture of the pre-existing contract) — the
+# re-gate's own version comparison below is the second line of defence.
+if [ -n "$TO_BIN_VERSION" ]; then
+    PROMOTE_EXPECTED_VERSION="$TO_BIN_VERSION"
+    _log "rollback: the hand-back version fast-fail is ARMED (expected=$PROMOTE_EXPECTED_VERSION) — a wrong-version daemon can no longer be accepted as success"
+else
+    PROMOTE_EXPECTED_VERSION=""
+    _warn "rollback: no binary_version in the target manifest — the hand-back version fast-fail stays INACTIVE (degraded-but-known); the re-gate's version comparison remains the defence"
+fi
+
 # ── Transaction (D4) ────────────────────────────────────────────────────────
 if ! journal_open_txn "rollback" "$TO_VERSION"; then
     _warn "an in_flight txn is open — pipeline-busy (resolve it or wait for the sweep)"

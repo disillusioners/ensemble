@@ -421,6 +421,37 @@ _splice_journal append-history python_floor_probe \
     "interpreter=$(command -v python3 2>/dev/null || echo MISSING) version=$(python3 -c 'import sys;print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo MISSING)" \
     || { _warn "could not journal probe-OK event — refusing"; lock_release 2>/dev/null || true; exit 78; }
 
+# 1c-bis. RESUME-FROM-STATE (design F2-i / AC-CER-1 — self-service-promote
+# Wave 4): a re-arm on a PARTIALLY-FLIPPED system must RESUME from the
+# journal's state, never re-flip. The decision is taken BEFORE the adopt
+# step on purpose: the adopt path would CLEAR a stale pre-flip txn and
+# SWEEP-ROLL-BACK a stale flipped txn — both are the WRONG outcome for a
+# re-arm onto the same target (the first would throw the flip-prep away,
+# the second would undo the flip).
+#
+# The decision vocabulary is exactly {gates-only, flip-prep, busy, fresh} —
+# there is NO restart-from-arm path (the design forbids it: a re-arm never
+# re-runs the stop/start pair on a flipped system).
+PROMOTE_RESUME_MODE="$(_promote_resume_decision "$VERSION")"
+case "$PROMOTE_RESUME_MODE" in
+    busy)
+        _warn "promote refused: an open promote txn for $VERSION has a LIVE owner — another executor owns the journal (pipeline-busy; the resume path never tramples a live executor)"
+        journal_history_append refusal "promote refused: an open promote txn for $VERSION has a live owner (pipeline-busy) — the resume-from-state path refuses to trample a live executor" || true
+        exit 78
+        ;;
+    gates-only)
+        _log "resume: the open txn for $VERSION is already FLIPPED — gates/commit ONLY (no stop, no swap, no flip — a second atomic_flip would be a double-flip)"
+        journal_history_append resume_from_state "resume-from-state: the open txn for $VERSION is flipped=true — the ceremony runs the gates/commit ONLY (no stop, no swap, no flip; no restart-from-arm path; F2-i)" || true
+        ;;
+    flip-prep)
+        _log "resume: the open txn for $VERSION is NOT flipped — continuing the flip-prep with idempotency guards (no second capture, no second flip)"
+        journal_history_append resume_from_state "resume-from-state: the open txn for $VERSION is flipped=false — the ceremony continues the flip-prep with idempotency guards (the recorded capture is re-read, never re-captured; F2-i)" || true
+        ;;
+    *)
+        PROMOTE_RESUME_MODE="fresh"
+        ;;
+esac
+
 # 1c. adopt-or-refuse an existing in_flight (sweep-mirroring, D-FA4.3)
 _log_phase_marker "journal-read"
 lock_heartbeat
@@ -433,7 +464,14 @@ lock_heartbeat
 # token for the warn-only classes either (kind=restart / unparseable
 # started_at / FRESH txn write no row of their own by design). A genuine
 # non-78 failure (the wrapper's own no-return class) still refuses here.
-_run_bounded_step adopt-txn adopt_stale_txn || { _arc=$?; [ "$_arc" -eq 78 ] && exit 78; _refuse txn-busy "promote refused: unresolved in_flight txn (see the adopt diagnostics above — pipeline-busy)"; }
+# RESUME (F2-i): in a resume mode the open txn is MINE to continue — the
+# adopt path is SKIPPED (it would clear the pre-flip txn or sweep-roll-back
+# the flipped one). The adopt path is untouched in the fresh mode.
+if [ "$PROMOTE_RESUME_MODE" = "fresh" ]; then
+    _run_bounded_step adopt-txn adopt_stale_txn || { _arc=$?; [ "$_arc" -eq 78 ] && exit 78; _refuse txn-busy "promote refused: unresolved in_flight txn (see the adopt diagnostics above — pipeline-busy)"; }
+else
+    _log "resume: the adopt step is SKIPPED (the open txn for $VERSION is resumed, not adopted — the adopt path would clear it or sweep-roll-back the flip)"
+fi
 
 # D2 L1 checkpoint (phase budget belt) + T2.6 heartbeat cadence: the
 # checkpoints bound the phase BETWEEN steps (the per-step wraps bound
@@ -458,6 +496,33 @@ _enforce_deadline "$preflight_deadline" preflight "budget=PREFLIGHT_PHASE_BUDGET
 # explicit-unit exit-78 refusal + the §6 DUAL_FIGHT fault check — PRE-TXN
 # (before 1f opens the journal txn; before any stop/flip mutation).
 supervision_preflight
+
+# 1d-sup2. WATCHDOG PROBE — P0 of the D2 ordering (design §2.3 "Host-probe
+# contract — probe, don't assume"). The probe runs HERE (in the preflight,
+# charged to the 300s preflight budget; ≤20s total) because it must know
+# the CLASSIFIED daemon unit (supervision_preflight just resolved it) and
+# because its verdict gates everything downstream.
+#
+# FAIL-CLOSED: on a systemd host an UNUSABLE probe ⇒ HALT BEFORE ANY STOP
+# (the new reason `watchdog_probe_unreadable`, inside the existing halt +
+# exit-78 class). A host WITHOUT systemd ⇒ not-applicable (no halt — the
+# launchd lane is unaffected).
+#
+# The probe row is the POSITIVE artifact (AC-D2-8): the ceremony READS the
+# watchdog's state at runtime and journals it. The repo's comment about
+# scripts/watchdog-watcher.sh (true of THAT artifact) is left intact — the
+# probe, not a rewritten comment, is what this wave asserts.
+lock_heartbeat
+_log_phase_marker "watchdog-probe"
+if ! _watchdog_probe; then
+    _warn "watchdog probe UNREADABLE on this systemd host — halting BEFORE any stop (reason=watchdog_probe_unreadable; the ceremony never stops a daemon while a watchdog timer might still be armed)"
+    journal_history_append halt "promote refused: watchdog_probe_unreadable — the host watchdog probe could not be read (${WATCHDOG_PROBE_DETAIL:-no detail}); no stop, no flip — the ceremony refuses to run a window it cannot make safe" || true
+    lock_release 2>/dev/null || true
+    exit 78
+fi
+journal_history_append watchdog_probe "watchdog probe: status=${WATCHDOG_PROBE_STATUS} detail=[${WATCHDOG_PROBE_DETAIL:-none}] verdicts=[${WATCHDOG_PROBE_VERDICTS:-none}] candidates=[${WATCHDOG_CANDIDATES:-none}]" \
+    || _warn "watchdog_probe journal append FAILED (best-effort)"
+_log "watchdog probe: status=${WATCHDOG_PROBE_STATUS} candidates=[${WATCHDOG_CANDIDATES:-none}]"
 
 # 1d-ter. Plugin-staleness predicate (REC comp 13, slice ⑥ — default
 # FLIPPED 2026-10-07 to observe-and-proceed). Predicate output:
@@ -571,16 +636,39 @@ PROMOTE_EXPECTED_VERSION="$BIN_VERSION"
 # ALERT_KIND_BY_EVENT map is dev1's file; additive shell events
 # degrade as unknown-kind observability on the Python side, which is
 # safe).
-journal_history_append intent_flip \
-    "preflight: intentional promote target $VERSION — integrity verified (CURRENT drift-check + TARGET manifest match); operator-initiated" \
-    || _warn "intent_flip journal event append FAILED (best-effort; boot-sweep commit-and-continue path will see no evidence and fall to the conservative halt gates)"
+# RESUME (F2-i): the intent_flip row is the boot-sweep's positive proof of
+# an intentional flip. In a resume mode the FIRST run already wrote it (the
+# intent_flip row precedes the txn-open by construction) — a second row
+# would be a duplicate of that proof, so it is skipped.
+if [ "$PROMOTE_RESUME_MODE" = "fresh" ]; then
+    journal_history_append intent_flip \
+        "preflight: intentional promote target $VERSION — integrity verified (CURRENT drift-check + TARGET manifest match); operator-initiated" \
+        || _warn "intent_flip journal event append FAILED (best-effort; boot-sweep commit-and-continue path will see no evidence and fall to the conservative halt gates)"
+else
+    _log "resume: the intent_flip row is NOT re-written (the first run already recorded the intentional flip — the boot-sweep's positive proof stands)"
+fi
 
 # 1f. open the transaction (D4)
 _log_phase_marker "txn-open"
 lock_heartbeat
-if ! journal_open_txn "promote" "$VERSION"; then
-    _warn "cannot open journal txn (an in_flight survived adoption?) — pipeline-busy"
-    exit 78
+if [ "$PROMOTE_RESUME_MODE" = "fresh" ]; then
+    if ! journal_open_txn "promote" "$VERSION"; then
+        _warn "cannot open journal txn (an in_flight survived adoption?) — pipeline-busy"
+        exit 78
+    fi
+else
+    # RESUME (F2-i): re-stake the EXISTING txn — the owner + the heartbeat
+    # move to THIS shell; every other field (including the Wave-3 capture)
+    # is preserved byte-for-byte. A re-stake failure is a hard stop: a
+    # resumed ceremony MUST own the txn it resumes (otherwise the sweep
+    # could reclaim it under the resumed ceremony's feet).
+    if ! journal_resume_txn; then
+        _warn "cannot re-stake the open txn for the resume — halting (the resumed ceremony must own the txn it resumes)"
+        journal_history_append halt "promote refused: the resume could not re-stake the open txn for $VERSION (journal_resume_txn failed) — no stop, no flip" || true
+        lock_release 2>/dev/null || true
+        exit 78
+    fi
+    _log "resume: the open txn for $VERSION is re-staked by this executor (owner + heartbeat refreshed; the recorded capture is preserved)"
 fi
 # MINOR-4b: on the live lane, stamp the operator's F2 attestation ON the
 # open txn (f2_verified_closed:true + timestamp + optional operator note
@@ -599,6 +687,22 @@ journal_mark_supervision || _warn "supervision txn stamp failed (advisory — co
 PROMOTE_START="$(_now_epoch)"
 _log "txn open: promote target=$VERSION pid=$$ (outer window $((SWEEP_STALE_S))s from txn start)"
 
+# RESUME (F2-i / AC-CER-1): the capture is taken ONCE per txn. In the
+# gates-only resume the flip ALREADY happened — re-capturing would read
+# the symlink's NEW target and corrupt the rollback chain's R0 rung (the
+# capture would equal the txn target ⇒ capture_invalid downstream). The
+# RECORDED capture is re-read instead; in the flip-prep resume the capture
+# is re-taken (the symlink still points at the pre-flip release ⇒ the value
+# is identical ⇒ the write is idempotent).
+PROMOTE_CAPTURE_MODE="take"
+if [ "$PROMOTE_RESUME_MODE" = "gates-only" ]; then
+    PROMOTE_CAPTURE_MODE="skip"
+    _RESUME_INF="$(_json_sub "$(journal_read 2>/dev/null || printf '{}')" in_flight 2>/dev/null)" || _RESUME_INF=""
+    CAPTURED_PREVIOUS="$(_json_field "$_RESUME_INF" captured_previous 2>/dev/null)" || CAPTURED_PREVIOUS=""
+    [ "$CAPTURED_PREVIOUS" = "null" ] && CAPTURED_PREVIOUS=""
+    _log "resume (gates-only): the RECORDED capture is re-read (captured_previous='${CAPTURED_PREVIOUS:-none}') — the symlink is NOT re-captured (the flip already happened)"
+fi
+if [ "$PROMOTE_CAPTURE_MODE" = "take" ]; then
 # ═══════════ 2.1d FILESYSTEM CAPTURE (D5 — self-service-promote Wave 3) ════
 # The HARD PRECONDITION for every rollback-target resolution downstream
 # (§2.5 write-ordering): `readlink "$INSTALL_DIR/current"` HERE — after
@@ -676,6 +780,39 @@ if [ "$CAPTURED_RECHECK" != "$CAPTURED_PREVIOUS" ]; then
     exit 78
 fi
 _log "flip-prep capture: captured_previous='${CAPTURED_PREVIOUS:-<none>}' (journal.current='${CUR:-<none>}'; OLD_CUR='${OLD_CUR:-<unset>}')"
+fi   # end PROMOTE_CAPTURE_MODE=take (the gates-only resume skips the capture)
+
+# ═══════════ 1.9d WATCHDOG HOLD — P0.5 + P1 (D2, design §2.3) ════════════
+# P0.5: mint the RESTORE TRANSIENT FIRST (a hold without a restore path is
+# the "watchdog permanently disabled" failure class — a mint failure means
+# NO hold, never a hold-without-a-way-back).
+# P1: HOLD the candidate timer(s) — `systemctl stop`, NEVER `disable` (an
+# ENABLED timer is re-armed by systemd at boot ⇒ the reboot path stays
+# covered). The hold is taken AFTER the dual-fight check (the preflight's
+# supervision_preflight + the stop site's own re-check) and BEFORE the
+# stop: the window the watchdog must not fire into is exactly the
+# stop→verified window.
+#
+# The restore path cannot be armed ⇒ NO HOLD + a LOUD `watchdog_hold_unavailable`
+# (the ceremony degrades to containment (c) — the version fast-fail + the
+# bounded repair — disclosed, never silent).
+lock_heartbeat
+_log_phase_marker "watchdog-hold"
+if [ "$PROMOTE_RESUME_MODE" = "gates-only" ]; then
+    _log "resume (gates-only): NO watchdog hold — the ceremony stops nothing (the daemon is already up; there is no stop→verified window to protect)"
+elif [ "${WATCHDOG_HOLD_ENABLED:-1}" != "1" ]; then
+    _warn "watchdog hold DISABLED (WATCHDOG_HOLD_ENABLED=0) — the ceremony runs WITHOUT the watchdog prevention; containment (c) is the only defence (disclosed, never silent)"
+    journal_history_append watchdog_hold_unavailable "watchdog hold unavailable: the hold is disabled by configuration (WATCHDOG_HOLD_ENABLED=0) — no timer is held; containment (c) is the only defence" || true
+elif [ -z "${WATCHDOG_CANDIDATES:-}" ]; then
+    _log "watchdog hold: no candidate timer — nothing to hold"
+elif ! _watchdog_rt_arm "${lock_run_id:-run-$$}"; then
+    _warn "watchdog hold UNAVAILABLE — the restore transient could not be armed, so NO timer is held (degrading to containment (c): the version fast-fail + the bounded repair)"
+    journal_history_append watchdog_hold_unavailable "watchdog hold unavailable: the restore transient could not be armed — NO timer is held (a hold without a restore path is the permanently-disabled-watchdog class); containment (c) is the only defence" || true
+elif ! _watchdog_hold_apply "${lock_run_id:-run-$$}"; then
+    _warn "watchdog hold could not be applied — the ceremony continues without the prevention (containment (c) is the only defence)"
+else
+    _log "watchdog hold: [${WATCHDOG_HELD_TIMERS}] held for the stop→verified window (the restore transient ${WATCHDOG_RT_UNIT} is armed)"
+fi
 
 # ═══════════════════════════ 2. STOP (D6) ══════════════════════════════════
 # P2 (ownership-mode commission 2026-09-29): stop_via_stop_script now
@@ -684,7 +821,10 @@ _log "flip-prep capture: captured_previous='${CAPTURED_PREVIOUS:-<none>}' (journ
 # resolvable unit, routes the stop through `systemctl stop <unit>` +
 # UNIT-STATE polling (b″ fix) — see stop_via_stop_script in lib.sh.
 # Script/scope-survivor shapes keep the SIGTERM-bounded path unchanged.
+# RESUME (F2-i / AC-CER-1): the gates-only resume NEVER stops the daemon
+# (no stop, no swap, no flip — and NO restart-from-arm path).
 lock_heartbeat
+if _promote_resume_mutation_ok; then
 if ! stop_via_stop_script; then
     # B4 policy (leave-txn-open, applied at all four abort sites): the txn
     # stays OPEN so the sweep self-recovers. `current` still points at the
@@ -701,10 +841,16 @@ if ! stop_via_stop_script; then
     journal_history_append halt "promote aborted pre-flip: stop failed for $VERSION — txn left open for sweep recovery (current untouched at LKG)"
     exit 1
 fi
+else
+    _log "resume (gates-only): the daemon stop is SKIPPED (the flip already happened; the gates run against the running daemon)"
+fi
 # P3 / decision (d) — phase boundary (post-stop, pre-launcher-swap)
 _enforce_deadline "$promote_deadline" stop
 
 # ═══════════════════ 3. LAUNCHER SWAP (stopped window) ═════════════════════
+# RESUME (F2-i / AC-CER-1): the gates-only resume never swaps the launcher
+# (the swap is part of the flip-prep, which the resume does NOT re-run).
+if _promote_resume_mutation_ok; then
 launcher_swap "$VERSION" || {
     # B4 leave-txn-open: env is DARK here (stop succeeded) and current is
     # untouched at LKG — the next launcher start boots LKG; the sweep then
@@ -715,6 +861,9 @@ launcher_swap "$VERSION" || {
     journal_history_append halt "promote aborted pre-flip: launcher swap failed for $VERSION — txn left open for sweep recovery"
     exit 1
 }
+else
+    _log "resume (gates-only): the launcher swap is SKIPPED (the flip already happened)"
+fi
 # P3 / decision (d) — phase boundary (post-launcher-swap, pre-flip)
 _enforce_deadline "$promote_deadline" launcher_swap
 
@@ -729,6 +878,9 @@ _enforce_deadline "$promote_deadline" launcher_swap
 OLD_CUR="$CUR"
 
 # ═══════════════════════════ 4. ATOMIC FLIP ════════════════════════════════
+# RESUME (F2-i / AC-CER-1): the gates-only resume NEVER flips again — a
+# second atomic_flip would be the double-flip the design forbids.
+if _promote_resume_mutation_ok; then
 if ! atomic_flip "$VERSION"; then
     # B4 leave-txn-open (same policy): current untouched at LKG; the next
     # launcher start boots it and the sweep DISPOSITIONS this stale
@@ -740,29 +892,40 @@ if ! atomic_flip "$VERSION"; then
     journal_history_append halt "promote aborted: flip failed for $VERSION (current untouched) — txn left open for sweep disposition"
     exit 1
 fi
+else
+    _log "resume (gates-only): the atomic flip is SKIPPED (the txn is already flipped — a second flip would be a double-flip)"
+fi
 # P3 / decision (d) — phase boundary (post-flip, pre-restart). Daemon is
 # now DOWN; breach here leaves daemon-state=stopped (C-10b).
 _enforce_deadline "$promote_deadline" flip
 
 # ═══════════════════════════ 5. FLIPPED MARKER ═════════════════════════════
-journal_mark_flipped || { _warn "cannot mark flipped — halting for human (sweep will find the txn)"; exit 1; }
-lock_heartbeat
+# RESUME (F2-i / AC-CER-1): the gates-only resume does NOT re-mark the flip
+# (the txn is already flipped=true) and does NOT re-write the pending
+# verdict row (the first run wrote it — the disposition is still pending
+# until the gates pass, and the ceremony is about to decide it).
+if _promote_resume_mutation_ok; then
+    journal_mark_flipped || { _warn "cannot mark flipped — halting for human (sweep will find the txn)"; exit 1; }
+    lock_heartbeat
 
-# ── D5/G (self-service-promote Wave 3): the LD-1 PENDING-VERDICT row ───────
-# VERDICT semantics (§7.1(a), BINDING): the flip itself NEVER fires the 8a
-# bookkeeping — no journal_set_current / set_previous / close_txn before a
-# GREEN disposition. The row states the disposition is PENDING and the
-# async window's BOUND (launcher-restart cadence + SWEEP_DEFER_CEILING);
-# the async rollback trigger stays the closer's bar (version + readyz
-# composite + soak — AC-D6-12's bar, never weaker); a slow-but-green boot
-# consumes NO credit; a post-8a rollback is MANUAL (rollback.sh --to).
-# §7.1(f): the Emperor-facing verdict NEVER reads "committed" before
-# green — this row reads "flipped — disposition pending", never
-# "committed". §7.1(e) kill-switch: the async disposition's switch is the
-# EXISTING SWEEP_SERVING_GREEN_ENABLED family (add-only, untouched).
-journal_history_append flip_pending_verdict \
-    "flipped — disposition pending (target $VERSION; captured_previous=${CAPTURED_PREVIOUS:-none}; async window bounded by launcher-restart cadence + SWEEP_DEFER_CEILING=${SWEEP_DEFER_CEILING:-3}; disposition = in-ceremony gates first, then the closer's bar: version + readyz composite + soak; credits: slow-green = none, async-discovered bad flip = tierB, post-8a rollback = MANUAL)" \
-    || _warn "flip_pending_verdict journal append FAILED (best-effort; the closer path remains reachable via the open flipped txn)"
+    # ── D5/G (self-service-promote Wave 3): the LD-1 PENDING-VERDICT row ───
+    # VERDICT semantics (§7.1(a), BINDING): the flip itself NEVER fires the 8a
+    # bookkeeping — no journal_set_current / set_previous / close_txn before a
+    # GREEN disposition. The row states the disposition is PENDING and the
+    # async window's BOUND (launcher-restart cadence + SWEEP_DEFER_CEILING);
+    # the async rollback trigger stays the closer's bar (version + readyz
+    # composite + soak — AC-D6-12's bar, never weaker); a slow-but-green boot
+    # consumes NO credit; a post-8a rollback is MANUAL (rollback.sh --to).
+    # §7.1(f): the Emperor-facing verdict NEVER reads "committed" before
+    # green — this row reads "flipped — disposition pending", never
+    # "committed". §7.1(e) kill-switch: the async disposition's switch is the
+    # EXISTING SWEEP_SERVING_GREEN_ENABLED family (add-only, untouched).
+    journal_history_append flip_pending_verdict \
+        "flipped — disposition pending (target $VERSION; captured_previous=${CAPTURED_PREVIOUS:-none}; async window bounded by launcher-restart cadence + SWEEP_DEFER_CEILING=${SWEEP_DEFER_CEILING:-3}; disposition = in-ceremony gates first, then the closer's bar: version + readyz composite + soak; credits: slow-green = none, async-discovered bad flip = tierB, post-8a rollback = MANUAL)" \
+        || _warn "flip_pending_verdict journal append FAILED (best-effort; the closer path remains reachable via the open flipped txn)"
+else
+    _log "resume (gates-only): the flipped marker + the pending-verdict row are NOT re-written (the first run owns them)"
+fi
 
 # ═════════════ 6. RESTART — supervision-aware hand-back (P3) ═════════════════
 # The executor's P1 classification — consumed from the stop-site globals
@@ -775,6 +938,10 @@ journal_history_append flip_pending_verdict \
 # is NEVER a false success: halt journal event + B4 leave-txn-open (the
 # txn is flipped:true here — the next launcher start sweep-ROLLS-BACK to
 # previous; the halt event alerts the human).
+# RESUME (F2-i / AC-CER-1): the gates-only resume performs NO hand-back —
+# there is NO restart-from-arm path (the daemon is already up; the gates
+# run against it).
+if _promote_resume_mutation_ok; then
 if ! restart_via_launcher; then
     _warn "unit hand-back FAILED — halting promote (txn left open for sweep recovery; NO nohup fallback, never a false success)"
     # Fix #4 (ENSEMBLE-32 repair lane; incident §5.2): the halt detail
@@ -804,6 +971,9 @@ if ! restart_via_launcher; then
     journal_history_append halt "promote aborted post-flip: unit hand-back failed for $VERSION — halt-for-human, txn left open for sweep recovery (declared=${SUPERVISION_MODE:-?} verified=${SUPERVISION_STATE:-?} unit=${SUPERVISION_UNIT:-?}; no nohup fallback — Amendment #1; hand-back error: ${HB_ERR:-none captured})" \
                               || true   # history is advisory; the open txn IS the B4 contract
     exit 1
+fi
+else
+    _log "resume (gates-only): the unit hand-back is SKIPPED (no restart-from-arm path — the daemon stays up and the gates run against it)"
 fi
 # P3 / decision (d) — phase boundary (post-restart, pre-gate). Daemon is
 # now up (per restart_via_launcher success); breach here leaves
