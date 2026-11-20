@@ -3287,8 +3287,8 @@ D5RJ_GUARD_RC="$(INSTALL_DIR="$D5RJ_GUARD" bash -c '
     # the bad list — the accept arm is version-shaped only and refuses
     # them; the SUFFIX-BACKTRACK forms (v1.2.3e10 — letters glued to
     # digits with no separator; v1.2.3..4 — an empty dot-run) REFUSE
-    # under the cycle-3 strengthened grammar (the ruling's literal
-    # regex matched BOTH via core-backtrack `.3e10`/`.3..4` suffixes);
+    # under the cycle-3 strengthened grammar (the literal ruling shape
+    # matched BOTH via core-backtrack `.3e10`/`.3..4` suffixes);
     # prerelease-shaped versions (v1.2.3-rc1 / v0.32.0-beta.1 /
     # v1.2.3-alpha) STAMP alongside stable versions.
     for bad in true false 123 1.2.3 "-45" "{oops}" "[1]" "\"q\"" 1e5 1.5e-3 2E+10 abc v123 v1e5 v1.2.3e10 v1.2.3..4; do
