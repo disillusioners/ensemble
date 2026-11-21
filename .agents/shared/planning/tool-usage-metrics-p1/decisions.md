@@ -296,6 +296,26 @@ Approver cap reached at iteration 003; B1 applied by leader-directed amendment w
 
 ---
 
+### D24 — LR3: B4b bound re-baseline (188,500)
+
+B4b lazy-only fetch-set bound re-baselined 185,000 → 188,000 (LR1) → 188,500 (LR3 — measured mechanism cost: the dynamic-import boundary extracts a shared chunk into the fetch set; heavy body verified 100% dynamic; 3 trim rounds recovered 293 B; remaining surface contract-frozen). Lazy tab body remains primary.
+
+---
+
+### D25 — LR4: B1 frozen initial-total re-baseline
+
+B1 frozen initial-total re-baselined 5,909,018 → 5,911,220 (the pristine-tree measurement at ec0154f49; the prior frozen value was already RED by 154 B on pristine, predating accumulated FE folds; same re-baseline class as IMPL-24). Lane-attributable delta +592 B (plan-mandated A5 ProjectService import), within the ±2,048 B band.
+
+---
+
+### D26 — LR5: phase-4 gate-7 allowed diff classes
+
+Phase-4 gate-7 allowed diff classes extended: (a) bundle-baseline.json — threshold_B4b_route_fetch_set_lazy_only_bytes field (value per LR3) AND the frozen initial-total field (value per LR4); (b) metrics.bundle-guard.spec.ts — the corresponding pins; (c) the lane's own new files pixels/tool-usage-auth-off-evidence.json and frontend/e2e/tool-usage-metrics-gate.spec.ts. All other baseline fields remain REJECT-grade frozen.
+
+Disclosure (2026-11-21, FE implementation gate; leader-recorded): e2e/metrics-gate.spec.ts carries 4 pre-existing failing legs proven pristine-identical (missing /api/auth/me stub → login bounce; tab-count stale at 7 since nest-anomaly's 8th tab) — OUTSIDE this lane's grant; the tester lane diffs vs true base and must NOT attribute them to this commission; a small FE-e2e-cleanup follow-up is recorded by the leader separately.
+
+---
+
 ## Corrections (dispatcher adjudicated, from the explorer passes)
 
 These correct prior recon notes. They are recorded as facts, not decisions.
@@ -363,20 +383,34 @@ These correct prior recon notes. They are recorded as facts, not decisions.
 
 Canonical predicates copied char-for-character from the phase bodies where they live. Containment verified by whitespace-normalized substring check (`re.sub(r"\s+", " ", ...)`) — line-based grep is invalid for wrapped strings.
 
-**Scope (approver fix N-B1-note, iteration-001):** this ledger carries the 7 DRIFT-RISK strings only — rulings that live verbatim in 2+ files — NOT an exhaustive gate census; body gates live in their phase files.
+**Scope (approver fix N-B1-note, iteration-001; extended 2026-11-21 by LR3/LR4/LR5):** this ledger carries the 9 DRIFT-RISK strings only — rulings that live verbatim in 2+ files — NOT an exhaustive gate census; body gates live in their phase files.
 
 | # | Canonical predicate (verbatim) | Source body location |
 |---|---|---|
 | 1 | sentinel `"__none__"` for un-attributable calls | phase1-plan.md §3.1 (D16) |
 | 2 | NEVER drop counters (overflow means flush, not discard) | phase1-plan.md §5 AC4 (:381) — re-pinned from §3.3 (the §3.3 carrier wraps the phrase in `**` emphasis, breaking char-for-char); plain occurrence verified at AC4 (approver fix B2-note, iteration-001) |
-| 3 | ≤ 188 000 B (RE-BASELINED by leader ruling LR1 — decisions D12; ownership grant decisions D22; was ≤ 185 000 B) | phase4-plan.md §4.2 (B4b row) / Task 6 (LR1) — re-pinned to body truth (approver fix B1-note, iteration-001) |
+| 3 (SUPERSEDED 2026-11-21 by LR3/D24) | ~~≤ 188 000 B (RE-BASELINED by leader ruling LR1 — decisions D12; ownership grant decisions D22; was ≤ 185 000 B)~~ — superseded 2026-11-21 by LR3/D24 (measured 188,230 vs 188,000; mechanism cost contract-frozen) | phase4-plan.md §4.2 (B4b row) / Task 6 (LR1) — re-pinned to body truth (approver fix B1-note, iteration-001) |
+| 3 | ≤ 188 500 B (RE-BASELINED by leader ruling LR3 — decisions D24; measured mechanism cost; was ≤ 188 000 B (LR1) / ≤ 185 000 B) | phase4-plan.md §4.2 (B4b row) / Task 6 (LR3) |
 | 4 | schedule:'0 8 * * *' | phase3-plan.md §3.8 (seeded-row config, D-3) |
 | 5 | complete previous UTC day (`D−1`); "cumulative-week" := `[D−7, D−1]` complete UTC days | phase3-plan.md §3 (D-7) |
 | 6 | VOCABULARY_VERSION==11 | phase2-plan.md §3 / T6 |
 | 7 | counting contract — byte-identical blockquote in D15 + phase1-plan.md §3.3.1 + architecture-recommendation.md §3 | D15 / phase1 §3.3.1 / architecture-recommendation.md §3 |
+| 8 | B1 frozen initial-total 5,911,220 (LR4/D25 — pristine re-baseline at ec0154f49; lane delta +592 B within ±2,048 B) | phase4-plan.md §6 bundle discipline / Task 6 area (B1 initial-total gate site) |
+| 9 | Phase-4 gate-7 allowed diff classes extended: (a) bundle-baseline.json — threshold_B4b_route_fetch_set_lazy_only_bytes field (value per LR3) AND the frozen initial-total field (value per LR4); (b) metrics.bundle-guard.spec.ts — the corresponding pins; (c) the lane's own new files pixels/tool-usage-auth-off-evidence.json and frontend/e2e/tool-usage-metrics-gate.spec.ts. All other baseline fields remain REJECT-grade frozen. | decisions.md D26; phase4-plan.md §8 gate 7; phase5-plan.md §4 G4/G7 |
 
-## CLOSING ATTESTATION (review fix U11)
+## CLOSING ATTESTATION (LR3/LR4/LR5 fold, 2026-11-21)
 
-This is the approver iteration-001 fix pass on the decisions.md ledger. What changed in THIS pass: B1 (PREDICATE LEDGER row 3 re-pinned to the body's current attribution string — "LR1 — decisions D12; ownership grant decisions D22"), B2 (this attestation rewritten to true results + row 2's source cell re-pinned from §3.3 to its verified plain site §5 AC4), B3 (D3 append-only supersession marker: sentinel is `"__none__"` everywhere; D3's `""` historical), B4 (D16 x-ref repointed from the empty §3.4 to §3.1:76 + §4 T8), B5 (D18 reverted to 491/625 as THE claim + appended architect-style correction entry disclosing the full arc — also discharges carried note B8), B6 (D7 contradictory clause replaced with the adjudicated absent-vs-malformed semantics, byte-identical to phase1:207). Carried notes folded: N-B1 (ledger scope declaration), N-B2 (D12 SUPERSEDES D9 pointer at D9), N-B5 (D6 two-edits form), N-B6 (D8 full-path citation), N-B9 (sink-registration symbol `register_sink` frozen at D3). B7 (phase5 SHA) is a body-file fix outside this worker's decisions.md-only scope and was NOT touched here. Edit scope: decisions.md (this worker); body fixes landed by parallel workers, verified by containment, not by authorship.
+This is the surgical append-only fold of leader rulings LR3 (B4b bound re-baseline to 188,500), LR4 (B1 frozen initial-total re-baseline to 5,911,220), and LR5 (phase-4 gate-7 allowed diff classes), plus the leader-recorded disclosure paragraph. What changed in THIS pass: (1) decisions.md — appended D24/D25/D26 verbatim + disclosure paragraph (after D23, before ## Corrections); (2) §PREDICATE LEDGER — scope line updated to 9 DRIFT-RISK strings; row 3 superseded (struck) with lineage note + new row-3 canonical "≤ 188 500 B (RE-BASELINED by leader ruling LR3 — decisions D24; measured mechanism cost; was ≤ 188 000 B (LR1) / ≤ 185 000 B)"; rows 8 and 9 added (B1 initial-total; phase-4 gate-7 allowed diff classes); (3) phase4-plan.md §4.2 — B4b bound site carries the new row-3 canonical + D24 ruling text appended at the mechanism/measurement arc; §8 gate 5 bound 188,500; §8 gate 7 allowed diff classes = D26 text verbatim; §6 bundle discipline B1 site 5,909,018 → 5,911,220 + row-8 canonical; (4) phase5-plan.md G4 pass criterion ≤ 188,500 (LR3/D24); §3.3 consumed-contracts B4b row 188,500 (LR3/D24); §14/G-gate references updated per D26; (5) old-bound sweep (188,000/188000/188 000 gate-value occurrences → 188,500/188500/188 500) applied to phase4 + phase5, with historical LR1 quoted strings ("185,000 → 188,000") retained unaltered + pointer appended at each propagation site. Edit scope: decisions.md + phase4-plan.md + phase5-plan.md (per dispatch); plan-overview.md untouched (planner's).
 
-Verification method: Python `re.sub(r"\s+", " ", text)` whitespace-normalized CONTAINMENT of each PREDICATE LEDGER row's canonical string against its cited CURRENT body file (line-based grep is invalid for wrapped strings); row 7 verified by direct byte comparison of the blockquote across its three carriers. TRUE per-row results after this pass: row 1 PASS — phase1-plan.md §3.1 (:65); row 2 PASS — phase1-plan.md §5 AC4 (:381), the plain occurrence (the former §3.3 carrier wraps the phrase in `**` emphasis and FAILS char-for-char); row 3 PASS — phase4-plan.md §4.2 B4b row (:313); row 4 PASS — phase3-plan.md §3.8 (:68); row 5 PASS — phase3-plan.md §3 D-7 (:82); row 6 PASS — phase2-plan.md §3/T6 (:82/:96/:136/:143); row 7 PASS — counting-contract blockquote byte-identical across D15 + phase1-plan.md §3.3.1 + architecture-recommendation.md §3. All 7 rows PASS; no residual drift in this file. This supersedes the prior attestation's false "entries 1–6 PASS / No drift found" claim.
+Verification method: Python `re.sub(r"\s+", " ", text)` whitespace-normalized CONTAINMENT of each PREDICATE LEDGER row's canonical string against its cited CURRENT body file; historical LR1 quoted strings verified byte-identical (not edited). TRUE per-row results after this pass:
+- row 1 PASS — phase1-plan.md §3.1 (D16) — sentinel `"__none__"`.
+- row 2 PASS — phase1-plan.md §5 AC4 (:381) — NEVER drop counters.
+- row 3 PASS — phase4-plan.md §4.2 B4b row — new canonical "≤ 188 500 B (RE-BASELINED by leader ruling LR3 — decisions D24; measured mechanism cost; was ≤ 188 000 B (LR1) / ≤ 185 000 B)" (old row 3 retained STRUCK with lineage note "superseded 2026-11-21 by LR3/D24 (measured 188,230 vs 188,000; mechanism cost contract-frozen)").
+- row 4 PASS — phase3-plan.md §3.8 — schedule:'0 8 * * *'.
+- row 5 PASS — phase3-plan.md §3 (D-7) — complete previous UTC day.
+- row 6 PASS — phase2-plan.md §3 / T6 — VOCABULARY_VERSION==11.
+- row 7 PASS — counting contract blockquote byte-identical across D15 + phase1 §3.3.1 + architecture-recommendation.md §3.
+- row 8 PASS — phase4-plan.md §6 bundle discipline (B1 initial-total gate site) — "B1 frozen initial-total 5,911,220 (LR4/D25 — pristine re-baseline at ec0154f49; lane delta +592 B within ±2,048 B)".
+- row 9 PASS — decisions.md D26 + phase4-plan.md §8 gate 7 + phase5-plan.md §4 gates — D26 ruling text verbatim.
+
+All 9 rows PASS. Disclosure paragraph (2026-11-21, FE implementation gate) recorded in decisions.md after D26. No residual drift in this file.

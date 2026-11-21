@@ -3,7 +3,7 @@
 **Commission:** ENSEMBLE-37 (TokenEconomizer adoption) — Phase 1 measurement slice, Emperor-approved 2026-11-21.
 **Lane:** plan-only (planner → architect enrichment → reviewer → approver). Zero implementation in this lane.
 **Worktree:** `/home/nea/ensemble-src-wt-tool-metrics-p1` @ branch `feature/tool-usage-metrics-p1`, base `0b5624dc9`.
-**Status:** COMPLETE — 5 phase plans + decision ledger, architect pass folded (`fd254b335`), both leader rulings applied (LR1/LR2), and the **review fix pass U1–U16 folded** (council-backed APPROVED-WITH-NOTES-CONDITIONAL conditions discharged; §PREDICATE LEDGER + §CLOSING ATTESTATION appended to `decisions.md`). Approver iteration-001 blockers B1–B7 + carried notes FIXED (attestation re-run honest, 7/7 rows PASS); iteration-002 C1 + iteration-003 B1 (leader-directed, census 2 custom / 7 central) applied — attestation 7/7 PASS.
+**Status:** COMPLETE — 5 phase plans + decision ledger, architect pass folded (`fd254b335`), both leader rulings applied (LR1/LR2), and the **review fix pass U1–U16 folded** (council-backed APPROVED-WITH-NOTES-CONDITIONAL conditions discharged; §PREDICATE LEDGER + §CLOSING ATTESTATION appended to `decisions.md`). Approver iteration-001 blockers B1–B7 + carried notes FIXED (attestation re-run honest, 7/7 rows PASS); iteration-002 C1 + iteration-003 B1 + LR3/LR4/LR5 (FE-gate rulings; predicate rows now 9) applied — attestation 9/9 PASS.
 **Prior evidence salvaged in-branch:** `tokeneconomizer-study/` (5 files incl. `writing-block-tiering.md`) + `.agents/shared/writing-block.md` — commit `0dbf8d180`.
 
 ---
@@ -19,8 +19,8 @@ Build the measurement slice that, after ~7 days of operation, lets the data alon
 | 1 — BE ledger + tap + door | `phase1-plan.md` (42,588 B) | `tool_usage_daily` (sentinel `__none__`), tools-node observation wrapper (amended placement + A-1…A-4), counter-map flusher (A-5*), additive migration, `/api/tool-usage/*` door with replication pin | VALIDATE w/ amendments A-1…A-7 | §7 |
 | 2 — Metrics family | `phase2-plan.md` (21,216 B) | F24 `ensemble_tool_usage_calls_total{tool_category, result}` via `w5.py`; **measured total 625 ≤ 2000** (convention corrected; U16b +1 reverted per approver B5); `metrics_gate.py` citation | VALIDATE w/ 2 corrections | §11 |
 | 3 — Digest + delivery | `phase3-plan.md` (29,367 B) | Deterministic SQL digest (windows D−1 / [D−7,D−1]; canonical root), uuid5-hardened startable seeder (adapter `schedule=` shape; opt-out key) | **AMEND MATERIALLY** — D-1…D-9 folded (as written it would never fire) | §12 |
-| 4 — FE tab | `phase4-plan.md` (46,649 B) | 9th tab `slot:'custom'`; **LAZY host pattern frozen (feasible, HIGH)**; B4b re-baselined **185,000 → 188,000 by leader ruling LR1**; phase 4 owns the threshold-artifact amendment | VALIDATE + leader decision RULED | §8 |
-| 5 — Release tail | `phase5-plan.md` (38,591 B) | Gates G1–G7 (updated lists), I1 re-specified as the 5-step gate-time proof, staged release via house `stage.sh live` (LR2 CONFIRMED), hard STOP — no flip | VALIDATE, I1 reframed, OQ1 resolved | §12 |
+| 4 — FE tab | `phase4-plan.md` (47,859 B) | 9th tab `slot:'custom'`; **LAZY host pattern frozen (feasible, HIGH)**; B4b re-baselined **185,000 → 188,000 by leader ruling LR1**; phase 4 owns the threshold-artifact amendment | VALIDATE + leader decision RULED | §8 |
+| 5 — Release tail | `phase5-plan.md` (39,201 B) | Gates G1–G7 (updated lists), I1 re-specified as the 5-step gate-time proof, staged release via house `stage.sh live` (LR2 CONFIRMED), hard STOP — no flip | VALIDATE, I1 reframed, OQ1 resolved | §12 |
 
 Ledger: `decisions.md` (41,203 B) — D1–D11 original + **D12–D22 appended** (append-only; D11 superseded by D16). Architect source: `architecture-recommendation.md` (35,533 B, stands as written).
 
@@ -28,6 +28,10 @@ Ledger: `decisions.md` (41,203 B) — D1–D11 original + **D12–D22 appended**
 
 - **LR1** (in `decisions.md` D12 + `phase4-plan.md` §3): "R-08 B4b re-baseline: RULED YES — threshold_B4b_route_fetch_set_lazy_only_bytes 185,000 → 188,000. Lazy tab body REMAINS PRIMARY (minimizes incremental fetch-set growth); the re-baseline covers the architect-proven ~1.0–1.3 kB static residue with ~2.2 kB margin. Static fallback REJECTED." The amendment lands in-branch as a phase-4 task (bundle-baseline.json + `metrics.bundle-guard.spec.ts` pin + tester re-measure instruction); expected measured B4b ≈ 185,800–186,200 B.
 - **LR2** (in `decisions.md` D13 + `phase5-plan.md` §3.4): "OQ1 stage.sh reading: CONFIRMED — staging uses house stage.sh; ENSEMBLE_UPGRADE_LIVE=1 there is the live-dir write guard, not a flip; promote.sh never invoked; phase5 no-flip invariants (state.json untouched, livez uptime continuous, no service restart) stay as gates."
+- **LR3** (D24): B4b bound re-baselined 188,000 → **188,500** — measured mechanism cost (dynamic-import boundary extracts a shared chunk into the fetch set; 3 trim rounds recovered 293 B; remaining surface contract-frozen). Predicate row 3 superseded accordingly.
+- **LR4** (D25): B1 frozen initial-total re-baselined 5,909,018 → **5,911,220** (pristine-tree measurement at ec0154f49; lane delta +592 B within ±2,048 B band). New predicate row 8.
+- **LR5** (D26): phase-4 gate-7 allowed diff classes extended (threshold + initial-total baseline fields, corresponding spec pins, the two lane evidence/e2e files; all else REJECT-grade frozen). New predicate row 9.
+- **Disclosure** (FE gate): 4 pre-existing failing e2e legs are pristine-identical and OUTSIDE this lane's grant (tester must not attribute); FE-e2e-cleanup follow-up recorded by the leader separately.
 
 ## Decision rulings (A–F → D1–D22, post-architect state)
 
@@ -72,7 +76,7 @@ Phases 1 → {2, 3} → 4 → 5; gates G1–G7 (`phase5-plan.md` §4); staging �
 
 ## File index (post-amendment)
 
-`plan-overview.md` (this file) · `decisions.md` 41,477 B (incl. §PREDICATE LEDGER + §CLOSING ATTESTATION + D23) · `phase1-plan.md` 42,588 B · `phase2-plan.md` 21,216 B · `phase3-plan.md` 29,367 B · `phase4-plan.md` 46,649 B · `phase5-plan.md` 38,591 B · `architecture-recommendation.md` 35,895 B (architect-owned; 2 leader-directed bracketed census corrections iter-003 B1). Set total ≈ 266 KB.
+`plan-overview.md` (this file) · `decisions.md` 45,117 B (D1–D26 + §PREDICATE LEDGER 9 rows + §CLOSING ATTESTATION) · `phase1-plan.md` 42,588 B · `phase2-plan.md` 21,216 B · `phase3-plan.md` 29,367 B · `phase4-plan.md` 47,859 B · `phase5-plan.md` 39,201 B · `architecture-recommendation.md` 35,895 B (architect-owned; 2 leader-directed bracketed census corrections iter-003 B1). Set total ≈ 270 KB.
 
 *Synthesized by the planner. Workers own phase content; the architect doc governs amendments; this overview cites and links both.*
 
