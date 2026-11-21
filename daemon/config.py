@@ -841,6 +841,20 @@ class LimitsConfig(BaseSettings):
             "restart needed. Env LIMITS_METRICS_ENABLED."
         ),
     )
+    # tool-usage P1 (A-7 option (a)): backing field for the collection
+    # key's dotted config_path (limits.tool_usage_collection_enabled).
+    # Mirrors metrics_enabled's Field+path lockstep — a dotted path with
+    # no field is the v0.31.8 absent-config crash class. Default ON: this
+    # phase IS the measurement slice. Env LIMITS_TOOL_USAGE_COLLECTION_ENABLED.
+    tool_usage_collection_enabled: bool = Field(
+        default=True,
+        description=(
+            "Tool-usage collection kill-switch (managed tier). Opt-OUT "
+            "knob; default ON. Absent ⇒ code default (ON); present-but-"
+            "unparseable ⇒ FAIL-CLOSED OFF. Env "
+            "LIMITS_TOOL_USAGE_COLLECTION_ENABLED."
+        ),
+    )
     metrics_listener_port: int = Field(
         default=9798,
         ge=1024,

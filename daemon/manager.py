@@ -1068,6 +1068,15 @@ class InstanceManager:
             ChatRoomMember,
             RoomMessage,
         )
+        # tool-usage P1 (decision-support metrics): register the aggregated
+        # ledger table BEFORE create_all so the PG boot path lands it on
+        # existing databases (SQLModel.metadata.create_all is the PG
+        # source-of-truth precedent). Brand-new table ⇒ NO
+        # ``_ensure_postgres_columns`` mirror; the SQLite path is
+        # 20261121_020000_create_tool_usage_daily.sql. (decision-support)
+        from .repositories.tool_usage.models import (  # noqa: F401  # tool-usage P1: register before create_all
+            ToolUsageDaily,
+        )
 
         SQLModel.metadata.create_all(self._engine)
 
@@ -1140,6 +1149,33 @@ class InstanceManager:
             # database; the production readers are out of scope for
             # this batch.
             self._ensure_postgres_drop_admission_legacy()
+
+        # ── tool-usage P1 (decision-support metrics): off-loop flusher ────
+        # The observation tap fans out into the flusher's counter map; the
+        # flusher drains via asyncio.to_thread on its OWN supervisor task
+        # (NOT manager._background_tasks — A-5c cancel-without-drain). The
+        # api.py lifespan drains it explicitly BEFORE dispose_db_pools.
+        # Every failure here is contained — a measurement substrate never
+        # aborts boot. (decision-support: layer-2 candidacy data)
+        try:
+            from .repositories.tool_usage.repository import ToolUsageRepository
+            from .services.tool_usage_observation import (
+                ToolUsageFlusher,
+                is_collection_enabled,
+                register_sink,
+            )
+
+            self._tool_usage_repository = ToolUsageRepository(self._engine)
+            self._tool_usage_flusher = ToolUsageFlusher(self._tool_usage_repository)
+            register_sink(self._tool_usage_flusher.ledger_sink)
+            self._tool_usage_flusher.start()
+            logger.info(
+                "[ToolUsage] collection %s (decision-support metrics substrate)",
+                "ON" if is_collection_enabled() else "OFF",
+            )
+        except Exception as exc:  # noqa: BLE001 — substrate never aborts boot
+            logger.warning("[ToolUsage] flusher startup failed: %s", exc)
+            self._tool_usage_flusher = None
 
         # ── Memoir Store v1 (memoir P1) — the persona seed ────────────────
         # Boot order (AM-11): (1) model registration → (2) create_all →

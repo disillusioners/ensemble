@@ -168,6 +168,12 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
     # sibling route (GET /api/instances/{instance_id}/rooms) joins the
     # EXISTING /api/instances family.
     "/api/rooms": frozenset({"pd"}),
+    # tool-usage-metrics-p1 (2026-11-21, ENSEMBLE-37 Phase 1): the
+    # read-only ledger door. No route carries an explicit class tag ⇒
+    # protected-default ("pd"), the metrics/nest-reports precedent. The
+    # SCOPE declaration lives in the scope cage; the auth-OFF 503
+    # fail-closed gate lives in the route.
+    "/api/tool-usage": frozenset({"pd"}),
     "/api/webhooks": frozenset({"module_lane"}),  # FR-40 module lane
     "/api/work": frozenset({"pd"}),
     "/api/workspace": frozenset({"pd"}),
@@ -408,4 +414,6 @@ class TestRouterClassManifest:
         # Phase 5 / Memoir Store v2 persona gate added the
         # /api/memoir family — the api_families count grew from 34
         # to 35.
-        assert len(api_families) == 36, sorted(api_families)
+        # tool-usage-metrics-p1 added the /api/tool-usage family — the
+        # api_families count grew from 36 to 37.
+        assert len(api_families) == 37, sorted(api_families)
