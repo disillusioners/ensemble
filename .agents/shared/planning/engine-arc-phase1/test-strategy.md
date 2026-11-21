@@ -25,7 +25,7 @@ Import paths adjust to wherever the implementation lands the engine module (`dae
 | T9 | `tests/unit/services/test_engine_event_registry.py` | Event registry = registration + observability ONLY: kind catalog, structured emission carrying ids, per-kind metrics (firing counts, consumers, lag where measurable); NO fan-out unification, NO queue-depth triggers (negative pins) | 6–10 |
 | T10 | `tests/unit/services/test_engine_watchdog.py` | Engine-independent watchdog: stall + tick-task-death detection within interval+grace; WARNING+ logging; engine-INDEPENDENT recovery path; watchdog self-observability (heartbeat per `job_feedback_observer.py:384` pattern) | 6–9 |
 
-**Total ≈ 61–107 nodes.**
+**Total ≈ 71–107 nodes.**
 
 ### 1.2 Pack scripts (`tests/packs/`)
 
@@ -77,7 +77,7 @@ The sibling `phaseN-plan.md` owns final numbering; this table states the BINDING
 | Leg(s) | Pin (GREEN assertion) | Mutation planted (must turn it RED) | RED signal |
 |---|---|---|---|
 | M-01a/b | Every terminal transition (`SUCCEEDED`, `SKIPPED_*`, `FAILED_BACKOFF`, `TIMED_OUT`) stamps `last_run_at`+`last_outcome` (+`last_skip_reason` on skips) | Drop the stamp on ONE terminal branch (a: success path; b: skip/timeout path) | stamp-missing pin fires |
-| M-02 | Stamp-on-skip: a skipped tick still advances `last_run_at` so due-state cannot strand | Skip path `continue`s BEFORE the stamp (the historical `maintenance.py:260-269` trap shape) | stranded-due pin: job due forever after a skip |
+| M-02 | Stamp-on-skip: a skipped tick still advances `last_run_at` so due-state cannot strand | Skip path `continue`s BEFORE the stamp (the historical `maintenance.py:260-269` trap shape — [citation SUPERSEDED — approver iteration-001: those lines no longer exist at this tree; the landed v0.31.11 shape is stamp-on-attempt `:524-528` + stamp-on-success `:530-532` + `_record_skip` `:568-601`]) | stranded-due pin: job due forever after a skip |
 | M-03a/b | due ⇔ `now − last_run_at ≥ interval` — BOTH sides: (a) exactly-at-interval IS due; (b) just-below is NOT due | `≥` → `>` (a red), or threshold shifted by epsilon (b red) | boundary pin fires |
 | M-04 | Overlap → `SKIPPED_OVERLAP` counted, never queued; second dispatch cannot run while first in flight | Remove lock acquire (or release before completion) | concurrent-second-execution pin |
 | M-05a/b | Backoff progression on consecutive idle-skips (base/cap formula), (b) reset on success | (a) break cap/formula; (b) skip the reset | backoff-sequence pin |
@@ -136,7 +136,7 @@ Final line `GATE: PASS`/`GATE: FAIL`; exit code matches.
 ## 5. BOOT-SLO ACCEPTANCE GATE
 
 - **Contract (Emperor, 2026-11-21):** boot_epoch → readyz-green **≤ 120s** WITH the engine registered-dormant. "Boot wall clock is 2 minutes."
-- **Measurement method (anchors verified at this tree):** start = the boot-epoch stamp log line `daemon/services/boot_epoch.py:132` (`logger.info("Boot epoch captured (DB clock): %s", …)`); end = `/readyz` green (`daemon/api.py:6598`, cached composite; refresher first tick t=0 `:5215-5217`). **No dedicated boot-duration telemetry exists today** — the gate wires its own timed probe (parse the epoch line from the captured boot `.txt`, poll `/readyz` until green, record the wall clock) OR reuses the deferred-task pattern (`api.py:1082-1093`: a created task that fires on readyz-green and logs the delta). The pack records the measurement in its evidence file.
+- **Measurement method (AMD-6 — applied approver iteration-001, 2026-11-21; anchors verified at this tree):** start = the **harness-owned HOST-frame start anchor** — unit `ActiveEnterTimestamp` (`systemctl show -p ActiveEnterTimestamp`) for systemd-managed boots, or the launcher `starting: <binary>` line write time (`data/launcher.log:3` shape) for the bare-restart class (the gate pack captures `ActiveEnterTimestamp` in its evidence for that class); end = `/readyz` green (`daemon/api.py:6598`, cached composite; refresher first tick t=0 `:5215-5217`) — poll until `status == "ready"`; delta = `readyz_green − boot_start`, **both anchors host clock — ONE frame, never a mixed-clock subtraction** (boot-slo-measurement.md §2 + §5(a) hard prohibition). The gate wires its own timed probe (parse the host-frame start anchor from the captured boot evidence, poll `/readyz` until green, record the wall clock). `boot_epoch` → first-ready DB stamp = **TELEMETRY ONLY — never a gate input** (the ~4.0–4.7 s DB/host skew makes any mixed subtraction an inflated false-fail; the literal-`boot_epoch` gate stays the routed follow-up, decisions.md Part D item 3). **No dedicated boot-duration telemetry exists today** — the daemon-side readyz-green emit (`api.py:1082-1093` deferred-task pattern) stays the NAMED FALLBACK (ruling (d)) if promote-lane capture proves brittle or the host is non-systemd. The pack records the measurement in its evidence file. **[SUPERSEDED — AMD-6, approver iteration-001, 2026-11-21:** the earlier construction here ("start = the boot-epoch stamp log line `daemon/services/boot_epoch.py:132` (`logger.info(\"Boot epoch captured (DB clock): %s\", …)`); … parse the epoch line from the captured boot `.txt`, poll `/readyz` until green") was the MIXED-FRAME probe — a DB-clock start subtracted from a host-clock end, the exact subtraction D-2 forbids; retained as research history.**]**
 - **Must-not-regress:** current baseline ≈10–30s typical per dispersed evidence; the FORMAL baseline lives in the sibling doc **`boot-slo-measurement.md`** (cited by name; not duplicated or re-derived here). Gate = ≤120s hard AND within the noise band that doc establishes; any engine-attributable delta is measured, not assumed.
 - **Adjacent pin that must not be perturbed:** the boot-epoch→readyz queue-freshness amnesty contract, `tests/e2e/test_promote_stop_frozen_amnesty_e2e.py:11/:158` — the engine's boot phase must not alter amnesty semantics (that file is also the 120s breach-point precedent).
 
@@ -179,7 +179,7 @@ Boundary: engine CODE (including the watchdog implementation and any boot-teleme
 
 | Component | Low | High |
 |---|---|---|
-| Unit pin suites (T1–T10, ~61–107 nodes) | 7h | 12h |
+| Unit pin suites (T1–T10, ~71–107 nodes) | 7h | 12h |
 | Mutation matrix harness + 23 legs (plant → RED proof → restore-GREEN proof, per leg) | 7h | 12h |
 | Dormant boot smoke pack (disposable PG + 3 boots + single-executor assertions) | 4h | 7h |
 | Watchdog drill pack (procedure + evidence + content assertions) | 3h | 5h |

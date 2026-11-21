@@ -77,9 +77,9 @@ flowchart TD
 | P6 | Observability shape-readiness: query substrate + convergence + gated census | 9 | 15 | ≈12 |
 | P7 | Test pack buildout, registration, cross-cutting gates | 13 | 23 | ≈18 |
 | P8 | Staged release (no promote) | 5 | 10 | ≈7 |
-| | **TOTAL** | **137** | **222** | **≈180** |
+| | **TOTAL** | **137** | **222** | **≈177** |
 
-**Band check.** The commission's anchor is ≈162h with a 118-222h band. The sum lands at **137-222 (≈180 mid)** — inside the band, ~10% above the anchor. The excess is attributable to three things the brief's component table did not price separately: (a) the `SERVICES_*` continuity table + dead-knob cleanup (P1, ≈5h — the brief folded it into "config continuity" without the **28 repo-wide dead-knob site edits** the dead-knob deletes require (review fold F-2: the earlier 26 was a tests/-scoped count that missed 2 registered pack sites)); (b) the engine-independent watchdog **drill** plus its evidence artifact (P4, ≈4h — the brief priced the watchdog build, not the "built AND drilled" acceptance); (c) the diff-census record the metrics pack will require (P6, ≈1h — measured, ~27 frozenset entries). P7's pack REGISTRATION is separate from the per-phase pack AUTHORING (each phase's last task), which is where the brief's component-10 hours sit.
+**Band check.** The commission's anchor is ≈162h with a 118-222h band. The sum lands at **137-222 (≈177 mid)** — inside the band, ~10% above the anchor. The excess is attributable to three things the brief's component table did not price separately: (a) the `SERVICES_*` continuity table + dead-knob cleanup (P1, ≈5h — the brief folded it into "config continuity" without the **28 repo-wide dead-knob site edits** the dead-knob deletes require (review fold F-2: the earlier 26 was a tests/-scoped count that missed 2 registered pack sites)); (b) the engine-independent watchdog **drill** plus its evidence artifact (P4, ≈4h — the brief priced the watchdog build, not the "built AND drilled" acceptance); (c) the diff-census record the metrics pack will require (P6, ≈1h — measured, ~27 frozenset entries). P7's pack REGISTRATION is separate from the per-phase pack AUTHORING (each phase's last task), which is where the brief's component-10 hours sit.
 
 
 ### 0.3 Ownership map (single-ownership invariant — REJECT-grade)
@@ -117,7 +117,7 @@ Every file edit below is claimed by **exactly one** phase. Duplicate claiming is
 
 | Fact | Measured now | Note |
 |---|---|---|
-| `.sql` migrations in `daemon/migrations/versions/` | **134** | `research-anchors.md` says 127 — **STALE**; newest = `20261119_000001_add_proposal_decision_columns.sql`. Always assert the **delta**, never an absolute. |
+| `.sql` migrations in `daemon/migrations/versions/` | **134** | `research-anchors.md`'s earlier "127" corrected to 134 at approver iteration-001 (N-6; FA-2 census); newest = `20261119_000001_add_proposal_decision_columns.sql`. Always assert the **delta**, never an absolute. |
 | `ServicesConfig` fields | **70** | `daemon/config.py:2143`, `env_prefix="SERVICES_"` :2146 |
 | `MANAGED_KEYS` live entries | **19** (AST literal count == runtime len) | `daemon/services/settings_service.py:253`; last = `wedge_notice_emission_enabled`; **pinned** `tests/test_settings_resolution.py:676` (`== 19`) + duplicate-literal AST guard `tests/test_daemon_settings_api.py:713-760` |
 | `EventKind` members | **24** | `daemon/repositories/event/models.py`; SQLite `event.kind` CHECK lists only **8** (`20260412_000002_create_event_table.sql:14-19`) — already stale, do not rely on the CHECK |
@@ -248,7 +248,7 @@ Indexes: `idx_engine_runs_job_started (job_id, started_at)` (DESC where the dial
 | `EngineConfig` + yaml + pass-through (T1.6) | 3 | 5 | `SchedulingConfig` shape + the `load_config` section pattern |
 | `spec.py` + `registry.py` + validation (T1.7-T1.8, T1.10) | 5 | 8 | frozen §B.2 contract + addendum fields; 9 validation rules; version-bump upsert |
 | `SERVICES_*` continuity table (T1.11) | 2 | 3 | 12 rows of data + a drift test |
-| Dead-knob cleanup + re-labels (T1.12, T1.13) | 3 | 6 | 3 field deletes, 23 kwarg call sites (21 tests/ + 2 registered pack files — F-2 repo-wide census), 5 attribute assignments, 2 docstring fixes |
+| Dead-knob cleanup + re-labels (T1.12, T1.13) | 3 | 6 | 3 field deletes, **28 dead-knob site edits — the FULL CS-8 set** (21 pydantic `PersistenceConfig(checkpoint_interval=…)` kwargs + 5 `worker_poll_interval` SET files + 2 pack kwarg sites — F-2 repo-wide census; the earlier "23 kwarg call sites" named only the kwarg half), 2 docstring fixes |
 | P1 unit pack authored (T1.9) | 2 | 2 | authored here, REGISTERED by P7 |
 | **Phase total** | **22** | **35** | ~**28 mid** |
 

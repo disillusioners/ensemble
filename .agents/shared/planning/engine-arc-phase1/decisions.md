@@ -29,6 +29,7 @@ Copied exactly as delivered. Do not paraphrase, do not fix typos. Source for all
 - **Study committed:** `@ aed3eabce` (Phase-0 census/design study artifacts; = base + study docs; current planning HEAD).
 - **Two parallel worktree lanes from the same base** (`b71742fe3`): `feature/engine-arc-phase1` (this plan — engine B + event registry) and `fix/phase1-live-defects` (OrphanWatcher born-dead fix via late-bind getter; bash-reaper retention/stall fix). File overlap between lanes is `daemon/api.py` only, textually disjoint.
 - **Pipeline:** planner (this stage) → architect → reviewer → approver. All planner workers: planning only — zero code, zero test runs, zero git mutations; this decisions lane performs the single in-branch commit of the planning directory.
+- **Reconciliation — the commission's "migrations deferred" wording (approver iteration-001, 2026-11-21):** "deferred" covers MODULE migrations only (the estate-wide per-module `.sql` tail — Part D item 6, one-by-one gated commissions); the engine's OWN two additive `.sql` files (`engine_jobs.sql`, `engine_runs.sql`) land IN P1 per decision-report §B.2 (D1.6/D1.7; research-anchors §1 two-separate-files house rule). No tension — different migration populations.
 
 ---
 
@@ -45,7 +46,7 @@ Each entry: ID · decision · rationale · owner · alternatives rejected. Prove
 **D-2 — Boot-SLO gate frame.**
 - *Decision:* host-frame gate — start anchor owned by whatever launches the boot (test harness / promote lane; `boot_smoke.sh:496-524` already polls, raise `POLL_TIMEOUT` 45→≥120s) → poll `/readyz` `status=="ready"` → delta ≤120s. Because unit-start precedes the `boot_epoch` stamp, a host-frame pass implies the Emperor's `boot_epoch`-frame SLO **a fortiori**. Literal-`boot_epoch` binding = routed follow-up (add `first_ready_db_clock` to the boot record, `boot_record.py:269`).
 - *Rationale:* `capture_boot_epoch` is stamped at `daemon/api.py:969-971` — after `manager.initialize()` — so the boot_epoch-frame silently excludes interpreter start, imports and `manager.initialize()` (the largest boot segments), and it mixes a DB clock with a host clock (~4–4.7 s measured offset, unstable across pod moves). The host frame is the honest, complete wall clock; with ~5× headroom (live max 23.2 s) neither frame false-fires on any recorded boot class except the DB-outage class (fails closed by design).
-- *Owner:* dispatcher ruling; Phase 4 wires SLO-1/2/3 so EITHER frame is computable from the same evidence; test-strategy §5's timed-probe carrier is already (b)-shaped.
+- *Owner:* dispatcher ruling; Phase 4 wires SLO-1/2/3 so EITHER frame is computable from the same evidence. **[CORRECTED — approver iteration-001, 2026-11-21:** the closing clause here ("test-strategy §5's timed-probe carrier is already (b)-shaped") was FALSE (architecture-recommendation.md §1(d) "Record corrected") — §5's probe was MIXED-FRAME (DB-clock start → host-clock end) until this fold applied AMD-6 (fold item B-1); §5 now presents the host-frame anchor.**]**
 - *Alternatives rejected:* (c) `boot_epoch`-frame timed probe as the primary gate — retained only as durable telemetry, not the gate; mixing DB/host clocks in one subtraction — rejected (clock-frame trap inflates ~4 s, false-fails near the bar).
 
 **D-3 — `ENSEMBLE_ENGINE_ENABLED` polarity.**
@@ -91,7 +92,7 @@ Each entry: ID · decision · rationale · owner · alternatives rejected. Prove
 - *Alternatives rejected:* bolting the record on at release — rejected (must be paid by the touching phase, not discovered late).
 
 **D-10 — Phase decomposition + band.**
-- *Decision:* P1..P8, 137/222 h (≈180 mid), inside the 118–222 h band; excess vs the 162 h anchor priced: dead-knob cleanup 5 h, watchdog drill 4 h, diff-census record 1 h.
+- *Decision:* P1..P8, 137/222 h (≈177 mid), inside the 118–222 h band; excess vs the 162 h anchor priced: dead-knob cleanup 5 h, watchdog drill 4 h, diff-census record 1 h.
 - *Rationale:* band check — sum lands ~11% above the 162 h anchor; the excess is exactly the three items the brief's component table did not price separately. Test estimate cross-check reconciles test-strategy's 28/48 h against P7's 13/23 h + per-phase AC test effort (P7 = pack assembly; component tests ride each phase).
 - *Owner:* planner (synthesis).
 - *Alternatives rejected:* compressing the estimate to the 162 h anchor — rejected (would drop the three priced carry costs).
@@ -114,6 +115,10 @@ Each entry: ID · decision · rationale · owner · alternatives rejected. Prove
 5. **Queue-depth triggers** — GAP-14 (no plumbing exists); seam named only.
 6. **Migration tail** — ~20 eligible modules, one-by-one gated commissions (one-by-one rule).
 7. **Wakeup churn** — §B.4 (worker-pool claim path, 4.6%/3.3%); separate commission.
+8. **[OPEN-UNTIL-APPLIED — AMD-7 (architect); recorded approver iteration-001, 2026-11-21]** `engine_jobs.service_tag` UNIQUE index absent from the P1 DDL (the P1 `.sql`/model plan carries no `UNIQUE` on `service_tag`), and the PK-wording contradiction is live at `phase1-plan.md:305` (the risk-table row still asserts "`service_tag` is the ops identity and the PK" while D1.4 rules `engine_jobs.id` = stable slug TEXT PK). *Must land:* P1 DDL + model `__table_args__` UNIQUE on `service_tag`; resolve the `:305` row wording to the D1.4 ruling (rename = re-registration, documented in `spec.py`'s contract note). *Status:* OPEN-UNTIL-APPLIED (implementation lane).
+9. **[OPEN-UNTIL-APPLIED — AMD-8 (architect); recorded approver iteration-001, 2026-11-21]** absent-vs-malformed env split missing from the acceptance wording — P1 AC4 and P3 T3.2 do not distinguish an ABSENT env var (registry default wins) from a MALFORMED value (validation-error path). *Must land:* `phase1-plan.md` AC4 + `phase3-plan.md` T3.2 acceptance cells. *Status:* OPEN-UNTIL-APPLIED (implementation lane).
+10. **[OPEN-UNTIL-APPLIED — AMD-10 (architect); recorded approver iteration-001, 2026-11-21]** two ordered follow-ups absent from this Part D list: (i) estate boot-pass deadlines → adopter commissions; (ii) skip-enum extension record. *Must land:* THIS Part D list as proper routed follow-ups at implementation-lane intake. *Status:* OPEN-UNTIL-APPLIED (implementation lane).
+11. **[OPEN-UNTIL-APPLIED — AMD-11 (architect); recorded approver iteration-001, 2026-11-21]** absolute counts / false literals in plan bodies: the "70-field class" absolute count at `phase1-plan.md:165` (D1.8 — rots on every `ServicesConfig` edit; D8.5's delta-only discipline applies; the brief's second pointer `phase1-plan.md:80` carries no "70 fields" instance — the effort TOTAL row lives there instead), and `phase8-plan.md:33` D8.3's "zero hits across `daemon/` and `tests/`" literally false vs `tests/unit/test_sqlite_guards.py:84/:138` (engine-adjacent guard-test sites already exist). *Must land:* reword `phase1-plan.md:165` to a non-absolute form; correct D8.3's zero-hits claim to name the two guard-test sites. *Status:* OPEN-UNTIL-APPLIED (implementation lane).
 
 ---
 

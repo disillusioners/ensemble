@@ -15,7 +15,7 @@ Activation shape (per decision-report §B.2 / §C.3): `SERVICES_ORPHAN_WATCHER_U
 
 ## 2. Evidence basis
 
-**Census (`census-periodic.md`):** row #4 `OrphanWatcherSweepService`, `orphan_watcher_sweep.py:85 / :272-296`, trigger FTI (but see depth row A1), cadence 90 s (`orphan_watcher_sweep_interval_seconds`, config.py:2633), grace 30 s (`:82`), fail L&C (`:280-290`), kill switch **NONE** (api.py:1906-1911), topology AL (main asyncio loop). Depth row A1: **`dependency_bus` permanently None in prod** — the born-dead wiring trap.
+**Census (`census-periodic.md`):** row #4 `OrphanWatcherSweepService`, `orphan_watcher_sweep.py:85 / :272-296`, trigger FTI (but see depth row A1), cadence 90 s (`orphan_watcher_sweep_interval_seconds`, config.py:2695), grace 30 s (`:82`), fail L&C (`:280-290`), kill switch **NONE** (api.py:1906-1911), topology AL (main asyncio loop). Depth row A1: **`dependency_bus` permanently None in prod** — the born-dead wiring trap.
 
 **Liveness evidence (`liveness-evidence.md` row 3):** **DORMANT-TRAPPED** 🔴 — 07:17:58/07:19:28/07:20:58 ticks 215–217, every tick: "dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep"; counter 216 counts no-op ticks; live orphan+husk `9c985fc7` unhandled. The only would-be inter-boot watcher-orphan coverage is dead.
 
@@ -121,5 +121,5 @@ All must hold before the flip. None is satisfied by Phase-1 code alone — they 
 - `research-bootslo-raw.md` + `boot-slo-measurement.md` (this directory) — boot-SLO baseline + gate wiring (greenlight criterion 6).
 - `test-strategy.md` (this directory) — Phase-1 acceptance packs (dormant boot smoke, watchdog drill, mutation pins) that the greenlight criteria reference.
 - Shared meta kv: `wt.active.fix/phase1-live-defects.engine-arc-p1` (fast-lane branch, active, base `b71742fe3`).
-- Code anchors: `daemon/orphan_watcher_sweep.py:85, :131-138, :272-296, :82 (grace)`; `daemon/api.py:1906-1911 (kill switch NONE), :1910-1931 (construct), :2974 (init_dependency_bus), :5712 (set_dependency_bus)`; `daemon/config.py:2633 (orphan_watcher_sweep_interval_seconds)`.
+- Code anchors: `daemon/services/orphan_watcher_sweep.py:85, :131-138, :272-296, :82 (grace)`; `daemon/api.py:1906-1911 (kill switch NONE), :1910-1931 (construct), :2974 (init_dependency_bus), :5712 (set_dependency_bus)`; `daemon/config.py:2695 (orphan_watcher_sweep_interval_seconds)`.
 - Liveness row 3 evidence: ticks 215–217, "dependency_bus is not wired … relying on the startup sweep", counter 216 no-op ticks, orphan+husk `9c985fc7` unhandled.

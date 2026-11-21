@@ -3,7 +3,7 @@
 **Commission:** Central Polling/Event-Management Engine — BUILD (Emperor overruled gate-hold; scores gate 3.80 vs build 2.65, both recorded on ledger ENSEMBLE-38, Discord 2026-11-21).
 **Pipeline stage:** 1 of 4 (planner → **architect** → reviewer → approver). This directory is the planner-stage deliverable set.
 **Worktree / base:** `/home/nea/ensemble-src-wt-engine-arc-p1` · branch `feature/engine-arc-phase1` · HEAD `aed3eabce` = base `b71742fe3` (v0.31.23) + Phase-0 study docs.
-**Binding design:** `../central-polling-engine-study/decision-report.md` §B.2 (frozen engine design — ALL 10 components), §B.1 primitives as engine internals, §B.3 event catalog. Census anchors taken @ `bf4bfde6e`; ALL code anchors in this plan re-verified at `b71742fe3` (18 drifted — see `research-anchors.md` §Q9).
+**Binding design:** `../central-polling-engine-study/decision-report.md` §B.2 (frozen engine design — ALL 10 components), §B.1 primitives as engine internals, §B.3 event catalog. Census anchors taken @ `bf4bfde6e`; ALL code anchors in this plan re-verified at `b71742fe3` (18 drifted — see `research-anchors.md` §9).
 **Date:** 2026-11-21. **Rulings verbatim:** recorded in `decisions.md` Part A.
 
 ---
@@ -34,9 +34,9 @@ Build the central engine (frozen §B.2, all 10 components) **plus** the Emperor-
 | P6 | Observability shape-readiness | `/api/engine/*` read substrate (3 GETs), read-time union with `job_metrics()`, GATED metrics-family ceremony (default deferred) | 9/15 | P2,P3,P5 |
 | P7 | Test pack buildout | 10 pack registrations, mutation matrix, dormant/diff-audit/fence-sweep legs | 13/23 | P1–P6 |
 | P8 | Staged release | Slot derived live at stage time (W9), delta-only rollback adjudication, dormant disclosure, NO promote | 5/10 | P7 |
-| **Total** | | | **137/222 (≈180 mid)** | |
+| **Total** | | | **137/222 (≈177 mid)** | |
 
-**Band verdict: INSIDE 118–222.** ≈11% above the 162h anchor; excess priced in `phase1-plan.md` §0.2a: 28-site repo-wide dead-knob cleanup (≈5h; review fold F-2 — the earlier 26 was tests/-scoped), watchdog drill (≈4h), diff-census record (≈1h) — carrying costs the anchor folded in. Test estimate cross-check: `test-strategy.md` 28/48h vs P7 13/23h + per-phase AC test effort (reconciled: P7 is pack assembly; component tests ride each phase).
+**Band verdict: INSIDE 118–222.** ≈9% above the 162h anchor; excess priced in `phase1-plan.md` §0.2a: 28-site repo-wide dead-knob cleanup (≈5h; review fold F-2 — the earlier 26 was tests/-scoped), watchdog drill (≈4h), diff-census record (≈1h) — carrying costs the anchor folded in. Test estimate cross-check: `test-strategy.md` 28/48h vs P7 13/23h + per-phase AC test effort (reconciled: P7 is pack assembly; component tests ride each phase).
 
 ## 4. Dependency & Parallelism
 
@@ -60,7 +60,7 @@ Parallel lanes: **P4 ∥ P5** after P3/P1 respectively; P6 fans in. With the fas
 
 Key findings that shaped the plan (full: `research-anchors.md`, `research-bootslo-raw.md`):
 - **Anchor drift is real:** 18 census anchors moved bf4bfde6e→b71742fe3 (all old→new listed); event-surface anchors unchanged; both live traps (OrphanWatcher born-dead ctor-capture `orphan_watcher_sweep.py:131-138`; JobLockSweep Template-B PEXIT `:241-250`) verified INTACT.
-- **Migrations:** 127 .sql files (blueprint's "119" stale); IF NOT EXISTS mandatory (create_all runs first — bare CREATE silently no-ops); `engine_jobs`+`engine_runs` get separate files.
+- **Migrations:** 134 .sql files (blueprint's "119" stale; the study-note 127 was itself stale — architect FA-2 census); IF NOT EXISTS mandatory (create_all runs first — bare CREATE silently no-ops); `engine_jobs`+`engine_runs` get separate files.
 - **Awaited boot passes: 29** (+7 create_task +1 thread cluster), enumerated per-line in phase4 §4.1 — the census "~11" was a subset. `MANAGED_KEYS` = 19 live (AST-counted, pinned) → engine switches stay env/config tier in Phase 1. RDRS interval read site corrected: `pool_orchestrator.py:370` (no `worker_pool/` package).
 - **Fences (30 surveyed; 5 material — see §7 Risks):** zero existing fences on `engine_jobs`/`engine_runs`/`ENSEMBLE_ENGINE`/`job_metrics` (names unclaimed); closed metrics census forces zero-family registration with a gated ceremony; `job_metrics()` byte-shape pin forces read-time union, never edit.
 - **Boot telemetry:** no dedicated duration field exists; gate `READYZ_BUDGET_S=120` clocks a DIFFERENT window (post-handback); never subtract `boot_epoch` (DB clock) from `detail.checked_at` (host clock) — ~4s offset.
@@ -184,3 +184,21 @@ origin/latest MOVED during review — `b71742fe3` → `01ec292da` (~20 commits, 
 18. `plan-overview.md` §12 items 2–4 + `phase2-pilot-recommendation.md` L110 (round-2 residue, final) — marked RESOLVED-BY-RULING (b)/(c)/(d); the "healthy-vs-PEXIT / either is defensible" and "architect review may veto" pre-ruling framings now visibly resolved.
 19. D-3 veto caveat (`decisions.md` D-3 entry; `plan-overview.md` §8 D-3 line) + `boot-slo-measurement.md` open questions 1–2 (round-2 residue closeout) — marked RESOLVED-BY-RULING (c)/(d); veto-cost note discharged per ruling (c), start-anchor and (b)-vs-(c) reconcile resolved per ruling (d)/AMD-6. Historical text retained verbatim.
 Plus this ledger: DELETION RECORD gains the three withdrawn strings (A-1/A-2/R-1); ATTESTATION gains this Round-2 subsection.
+
+**Approver iteration-001 fold (2026-11-21)** — AMD-6 application + notes reconciliation (final cycle, all items landed; every changed row of THIS pass):
+20. `test-strategy.md` §5 Measurement-method bullet (B-1) — AMD-6 applied: probe re-pointed to the harness-owned HOST-frame start anchor (unit `ActiveEnterTimestamp` / launcher `starting:` line) → poll `/readyz` until `status=="ready"` → delta ≤120s, ONE frame; `boot_epoch`→first-ready DB stamp demoted to TELEMETRY ONLY (never a gate input); daemon-side readyz-green emit = NAMED FALLBACK; old mixed-frame construction retained inside a [SUPERSEDED — AMD-6, approver iteration-001] bracket.
+21. `decisions.md` D-2 Owner line (B-2) — the "already (b)-shaped" clause marked FALSE/corrected per architecture-recommendation.md §1(d); §5 was mixed-frame until fold B-1.
+22. `boot-slo-measurement.md` §7 open question 2 bracket (B-3) — amended: the §5 rewrite LANDED at approver iteration-001 (B-1), not round-1; §5 Coordination note gained an [APPLIED — approver iteration-001] bracket (same reconciliation family).
+23. `plan-overview.md` §PREDICATE LEDGER (B-4) — this Approver iteration-001 subsection itself.
+24. `phase4-plan.md` §4.3 (B-5) — Gate line probe-frame clarifier (host-frame probe, a-fortiori per ruling (d)); start-anchor table row re-pointed to the host-frame anchor (`boot_epoch` = telemetry only); [SUPERSEDED — AMD-6] bracket on the old DB-clock start row; SLO-3 rehearsal row recomputed on the host-frame delta (the `first readyz composite → boot_epoch` mixed subtraction withdrawn). Self-sweep (a) catches, same family: §4.1 must-not-regress bucket window marked boot_epoch-frame TELEMETRY (gate probe host-frame per §4.3/AMD-6); T4.7 acceptance cell re-pointed to the HOST-FRAME delta `readyz_green − boot_start` with `boot_epoch` observability as TELEMETRY (the old mixed-frame compute target bracketed SUPERSEDED).
+25. `plan-overview.md` §5 (N-6) — migration census 127 → 134 (FA-2; study-note 127 marked stale).
+26. `research-anchors.md` §1 (N-6) — count 127 → 134 (tree-verified); 3-NEWEST enumeration corrected to the real newest three (`20261119_000001_add_proposal_decision_columns.sql` / `20261116_083000_add_room_resolution_warnings.sql` / `20261115_120000_add_room_proposal_dedup_columns.sql`) + max-number line updated; §9 drift-table row 127 → 134; `phase1-plan.md` T1-census cell's "research-anchors says 127 — STALE" note co-corrected (the accusation is stale once the target is fixed).
+27. `decisions.md` Part D (N-7) — items 8–11 appended: OPEN-UNTIL-APPLIED records for AMD-7 (service_tag UNIQUE + :305 PK-wording), AMD-8 (absent-vs-malformed env split → P1 AC4 + P3 T3.2), AMD-10 (two ordered follow-ups → Part D), AMD-11 (:165 "70-field" absolute + phase8-plan.md:33 D8.3 "zero hits" false vs test_sqlite_guards.py:84/:138). Plan bodies NOT edited (recording route per approver).
+28. `decisions.md` Part B (N-8) — reconciliation line: commission "migrations deferred" = MODULE migrations only; the engine's OWN two additive .sql files (`engine_jobs.sql`, `engine_runs.sql`) land in P1 per §B.2 — no tension.
+29. `phase2-pilot-recommendation.md` (N-9) — :18 census line + :124 code-anchors line: `config.py:2633` → `:2695`; `daemon/orphan_watcher_sweep.py` → `daemon/services/orphan_watcher_sweep.py`.
+30. `phase5-plan.md` :34 (N-9) — dead `event_bus.py:60-72` queue anchor → `:251/:289-303`.
+31. `test-strategy.md` M-02 row (N-9) — dead `maintenance.py:260-269` citation marked [citation SUPERSEDED — approver iteration-001]; landed v0.31.11 shape cited (`:524-528`/`:530-532`/`:568-601`).
+32. `plan-overview.md` :6 (N-9) — "`research-anchors.md` §Q9" → "§9".
+33. `plan-overview.md` §3 (N-10) — total mid ≈180 → ≈177 (floor-mid sum-accurate); band verdict ≈11% → ≈9% (derived co-correction); sibling instances co-corrected to the same figure: `phase1-plan.md` (:80 TOTAL row + :82 band check) and `decisions.md` D-entry echo (:95 "137/222 h (≈177 mid)").
+34. `phase1-plan.md` §6 effort row (N-10) — "23 kwarg call sites" reworded to the FULL 28-site CS-8 set (21 pydantic kwargs + 5 SET + 2 pack).
+35. `test-strategy.md` node totals (N-10) — "≈61–107" → "71–107" (§2 total line + §8 effort row).
