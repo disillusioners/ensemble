@@ -105,9 +105,9 @@ Migration tail (~20 eligible modules, ≈4–10h/module, each its own gated comm
 ## 12. Open Questions Carried Upward (architect stage; none Emperor-blocking)
 
 1. **Shadow duration before pilot flip** — ~~≥2 release cycles (conservative)~~ vs early flip on OrphanWatcher's own health? (`phase2-pilot-recommendation.md` presents both.) **[WITHDRAWN option — round-2 fold sweep, 2026-11-21:** the ceremony-gated "≥2 release cycles" option is withdrawn by architect ruling (a) / AMD-1(c); the re-baselined criterion is CS-2 (verbatim in `phase2-pilot-recommendation.md` §5). Question retained as the record of what was carried upward.**]
-2. **Second migrant ordering** — healthy-sweep (parity proof) vs PEXIT-class (JobLock/SourcesGc)? Phase-2+ concern; registry evidence will inform.
-3. **D-3 polarity ratification** — dispatcher ruled enabled+shadow; architect review may veto.
-4. **Start-anchor build-side emit** — confirm the harness/promote-lane owns it (dispatcher ruling) or route a daemon-side emit (deferred-task seam `api.py:1082-1093`) if promote-lane capture proves brittle.
+2. **Second migrant ordering** — healthy-sweep (parity proof) vs PEXIT-class (JobLock/SourcesGc)? Phase-2+ concern; registry evidence will inform. [RESOLVED-BY-RULING (b): JobLockSweepService second — primitive-proven-second framing]
+3. **D-3 polarity ratification** — dispatcher ruled enabled+shadow; architect review may veto. [RESOLVED-BY-RULING (c): ADOPT, no veto — ships enabled=true + shadow_mode=true]
+4. **Start-anchor build-side emit** — confirm the harness/promote-lane owns it (dispatcher ruling) or route a daemon-side emit (deferred-task seam `api.py:1082-1093`) if promote-lane capture proves brittle. [RESOLVED-BY-RULING (d): D-2 RATIFIED — harness/promote-lane owns the anchor; daemon-side emit = named fallback]
 
 ## 13. Provenance
 
@@ -181,4 +181,5 @@ origin/latest MOVED during review — `b71742fe3` → `01ec292da` (~20 commits, 
 15. `phase4-plan.md` SLO-1 must-not-regress table (sweep-driven, L119) — a SECOND "0-2 fixture registrations" premise → "N observer specs registered, zero executables — CS-1 posture"; ≤250ms bound unchanged.
 16. `plan-overview.md` §12 open question 1 (sweep-driven, L107) — the "≥2 release cycles (conservative)" option struck + bracket-WITHDRAWN (ruling (a)/AMD-1(c); re-baselined criterion CS-2). Question retained as the carried-upward record.
 17. `decisions.md` Part E items 1–4 (round-2 residue follow-up) — each marked RESOLVED-BY-RULING (a)/(b)/(c)/(d); historical question text retained verbatim, bracket-appended per the package's visible-mark convention.
+18. `plan-overview.md` §12 items 2–4 + `phase2-pilot-recommendation.md` L110 (round-2 residue, final) — marked RESOLVED-BY-RULING (b)/(c)/(d); the "healthy-vs-PEXIT / either is defensible" and "architect review may veto" pre-ruling framings now visibly resolved.
 Plus this ledger: DELETION RECORD gains the three withdrawn strings (A-1/A-2/R-1); ATTESTATION gains this Round-2 subsection.
