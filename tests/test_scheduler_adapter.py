@@ -3193,3 +3193,61 @@ class TestEnqueueMessageJobDedupRealPath:
             result1.message_id,
             result2.message_id,
         }
+
+
+class TestScheduleFireNotifySeam:
+    """Direct-dispatch hook: the adapter always invokes the never-raise
+    entrypoint with the whole config/metadata; the identity gate itself is
+    proven in the helper matrix, not at this thin seam."""
+
+    @pytest.mark.asyncio
+    async def test_direct_notify_called_when_creator_present(self, mock_on_message):
+        from daemon.sources.adapters import scheduler as sched_mod
+        config = make_config("sf-direct", {
+            "schedule": "0 9 * * *",
+            "agent": "./agents/developer",
+            "message": "hi",
+            "creator_instance_id": "creator-1",
+        })
+        adapter = SchedulerAdapter(config, mock_on_message)
+        manager = MagicMock()
+        mapper_repo = MagicMock()
+        mapper_repo.get_instance_mapping = MagicMock(return_value=None)
+        manager.spawn_instance_with_mcp = AsyncMock(return_value="inst-1")
+        async def _enqueue(**kwargs):
+            r = MagicMock(job_id="job-1", message_id="msg-1", instance_id="inst-1", status="queued")
+            return r
+        manager.enqueue_message_job = AsyncMock(side_effect=_enqueue)
+        adapter._manager = manager
+        adapter._source_repo = mapper_repo
+        with patch.object(sched_mod._schedule_fire_notify_mod, "notify_schedule_fire", new=AsyncMock()) as mock_notify:
+            await adapter._route_via_job_queue("exec-1", "scheduled message", {"agent": "./agents/developer"})
+            assert mock_notify.await_count == 1
+            kw = mock_notify.await_args.kwargs
+            assert kw["schedule_config"].get("creator_instance_id") == "creator-1"
+
+    @pytest.mark.asyncio
+    async def test_direct_notify_hook_invoked_without_creator(self, mock_on_message):
+        from daemon.sources.adapters import scheduler as sched_mod
+        config = make_config("sf-none", {
+            "schedule": "0 9 * * *",
+            "agent": "./agents/developer",
+            "message": "hi",
+        })
+        adapter = SchedulerAdapter(config, mock_on_message)
+        manager = MagicMock()
+        mapper_repo = MagicMock()
+        mapper_repo.get_instance_mapping = MagicMock(return_value=None)
+        manager.spawn_instance_with_mcp = AsyncMock(return_value="inst-1")
+        async def _enqueue(**kwargs):
+            return MagicMock(job_id="job-1", message_id="msg-1", instance_id="inst-1", status="queued")
+        manager.enqueue_message_job = AsyncMock(side_effect=_enqueue)
+        adapter._manager = manager
+        adapter._source_repo = mapper_repo
+        with patch.object(sched_mod._schedule_fire_notify_mod, "notify_schedule_fire", new=AsyncMock()) as mock_notify:
+            await adapter._route_via_job_queue("exec-1", "scheduled message", {"agent": "./agents/developer"})
+            # The seam ALWAYS invokes the entrypoint; the absent-key gate lives
+            # inside the never-raise module (asserted in the helper matrix).
+            assert mock_notify.await_count == 1
+            kw = mock_notify.await_args.kwargs
+            assert "creator_instance_id" not in (kw["schedule_config"] or {})

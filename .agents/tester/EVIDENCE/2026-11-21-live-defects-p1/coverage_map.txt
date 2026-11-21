@@ -1,0 +1,38 @@
+COVERAGE MAP — BashSpawnRetentionSweepService (worktree HEAD c8db252e8)
+
+Aspect                                          | Covered by existing file? | Verified by scratch? | Verdict
+(a) per-tick prune fires                        | YES (TestPeriodicPrune x2) | (prune every tick)    | PASS
+(b) terminal stall sweep via sweep_instance      | YES (test_terminal_owner_open_rows_swept) | YES (spy + sweep_rows route) | PASS
+(c) 200-lookup bound                            | NO (GAP) | YES (test_200_lookup_bound: get_calls==200) | PASS (bound holds)
+(d) 25-sweep bound                              | NO (GAP) | YES (test_25_sweep_bound: calls==25) | PASS (bound holds)
+(e) 60s deadline                                | NO (GAP) | YES (patched const 0.1 + slow sweep -> TimeoutError logged, swept==0) | PASS (deadline enforced; no injectable clock seam — documented)
+(f) env-knob clamp low/high                     | YES (test_floor_60s, test_ceiling_86400s) | YES (1->60, 999999999->86400) | PASS
+(g) inf/1e400 parse hardening                   | YES (test_inf_and_overflow_fall_back_to_default_no_raise) | YES | PASS
+(h) PAUSED excluded                             | YES (test_paused_owner_rows_untouched) | YES (spy: paused not in ids) | PASS
+(i) missing-instance rows skipped               | YES (test_unknown_instance_rows_untouched) | YES (spy: ghost not in ids) | PASS
+(j) master switch before repo touch             | Partial (zero repo touches + NO-OP log) | YES (ordering list == ["switch"]) | PASS
+(k) no-op paths counted + rate-limited logs     | Partial (first occurrence) | YES (first + every 50th: 2 lines for 51 calls) | PASS
+
+GAPS / findings for Phase-2:
+- No injectable clock/mono seam for the 60s deadline; enforced via asyncio.wait_for(LANE_SWEEP_DEADLINE_SECONDS=60.0). Verified by patching the module constant to 0.1 + a slow fake sweep_instance. A future seam (injectable deadline/clock) would make this testable without monkeypatching a module global.
+- Rate-limit cadence is module-global process-lifetime state (_NOOP_SKIP_COUNTS) keyed by surface string; tests must reset it (existing autouse fixture does). Not a defect, but worth noting for cross-test isolation.
+- The 200-lookup / 25-sweep bounds are hard-coded module constants, not constructor params — cannot be tuned per-instance; acceptable for v1.
+
+Code anchors (file:line):
+  daemon/services/bash_spawn_reaper.py:229 retention_interval_seconds_from_env (parse+clamp+inf/1e400 hardening)
+  daemon/services/bash_spawn_reaper.py:236 _NOOP_LOG_EVERY = 50
+  daemon/services/bash_spawn_reaper.py:266 _log_noop_skip (count + rate-limited log)
+  daemon/services/bash_spawn_reaper.py:140 LANE_SWEEP_DEADLINE_SECONDS = 60.0
+  daemon/services/bash_spawn_reaper.py:1410 sweep_instance (routes through sweep_rows @1443)
+  daemon/services/bash_spawn_reaper.py:2098 _RETENTION_MAX_INSTANCE_LOOKUPS = 200
+  daemon/services/bash_spawn_reaper.py:2099 _RETENTION_MAX_INSTANCE_SWEEPS = 25
+  daemon/services/bash_spawn_reaper.py:2102 BashSpawnRetentionSweepService
+  daemon/services/bash_spawn_reaper.py:2210 sweep_once (master switch @2220 before repo touch @2234+)
+  daemon/services/bash_spawn_reaper.py:2332 _sweep_terminal_instances (bounds @2349/@2370, deadline @2379)
+  daemon/services/bash_spawn_reaper.py:2364 status in TERMINAL_INSTANCE_STATUSES (PAUSED excluded)
+  daemon/repositories/bash_spawn/repository.py:94 list_open_instance_ids
+  daemon/repositories/bash_spawn/repository.py:183 prune_reaped_older_than
+
+Existing test file: tests/unit/services/test_bash_spawn_retention_sweep.py (21 tests, all PASS)
+Scratch tests: /tmp/scratchpad/scratch_bounds_2016301.py (13 tests, all PASS)
+Evidence dir: /home/nea/ensemble-src-wt-live-defects-p1/.agents/tester/EVIDENCE/2026-11-21-live-defects-p1/

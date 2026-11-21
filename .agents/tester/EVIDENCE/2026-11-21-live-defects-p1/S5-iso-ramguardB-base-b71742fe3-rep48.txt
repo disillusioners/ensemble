@@ -1,0 +1,10 @@
+F                                                                        [100%]
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /tmp/live-defects-base-b71742fe3/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/tools/test_bash_ram_guard.py::TestRealBallooningTree::test_the_leaderless_tree_is_still_watched_and_killed
+1 failed, 1 warning in 20.92s

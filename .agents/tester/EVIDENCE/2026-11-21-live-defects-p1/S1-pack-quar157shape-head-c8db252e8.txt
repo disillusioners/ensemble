@@ -1,0 +1,53 @@
+=== Test Pack: bash_spawn_reaper_feature_test ===
+Repo:    /home/nea/ensemble-src-wt-live-defects-p1
+Started: 2026-11-21T14:22:03Z
+  - tests/repositories/test_bash_spawn_repository.py
+  - tests/unit/services/test_bash_spawn_reaper.py
+  - tests/unit/services/test_bash_spawn_reaper_boot.py
+  - tests/tools/test_bash_spawn_stamp.py
+........................................................................ [ 39%]
+....F..........................F.............F.......................... [ 79%]
+...................F.................                                    [100%]
+=================================== FAILURES ===================================
+____________ TestHardGuards.test_ladder_fires_for_gate_passing_row _____________
+tests/unit/services/test_bash_spawn_reaper.py:308: in test_ladder_fires_for_gate_passing_row
+    assert status == "reaped"
+E   AssertionError: assert 'refused' == 'reaped'
+E     
+E     - reaped
+E     + refused
+_____________ TestSweepRows.test_killed_row_closed_with_lane_label _____________
+tests/unit/services/test_bash_spawn_reaper.py:973: in test_killed_row_closed_with_lane_label
+    assert repo._mark_calls == [(11, f"terminal-tier@{os.getpid()}", None)]
+E   AssertionError: assert [(11, 'termin...t-time-gate')] == [(11, 'termin...39775', None)]
+E     
+E     At index 0 diff: (11, 'terminal-tier@2039775', 'refused:start-time-gate') != (11, 'terminal-tier@2039775', None)
+E     Use -v to get more diff
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.bash_spawn_reaper:bash_spawn_reaper.py:1309 bash reaper: refused row 11 (writer daemon_pid=2039775) — refused:start-time-gate (swept by daemon pid 2039775)
+_______ TestShutdownSweepService.test_self_owned_current_boot_row_swept ________
+tests/unit/services/test_bash_spawn_reaper.py:1187: in test_self_owned_current_boot_row_swept
+    assert repo._mark_calls == [
+E   AssertionError: assert [(23, 'shutdo...t-time-gate')] == [(23, 'shutdo...39775', None)]
+E     
+E     At index 0 diff: (23, 'shutdown@2039775', 'refused:start-time-gate') != (23, 'shutdown@2039775', None)
+E     Use -v to get more diff
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.bash_spawn_reaper:bash_spawn_reaper.py:1309 bash reaper: refused row 23 (writer daemon_pid=2039775) — refused:start-time-gate (swept by daemon pid 2039775)
+___________ TestBootReconcileLeg.test_m5_previous_boot_burner_killed ___________
+tests/unit/services/test_bash_spawn_reaper_boot.py:245: in test_m5_previous_boot_burner_killed
+    assert proc.poll() is not None
+E   AssertionError: assert None is not None
+E    +  where None = poll()
+E    +    where poll = <Popen: returncode: None args: ['sleep', '60']>.poll
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.bash_spawn_reaper:bash_spawn_reaper.py:595 env verify: ENSEMBLE_BASH_TRACKING_ID not found in env of PID 2040078 (PID may have been recycled). Aborting.
+WARNING  daemon.services.bash_spawn_reaper:bash_spawn_reaper.py:1309 bash reaper: refused row 1 (writer daemon_pid=999999) — refused:env-mismatch (swept by daemon pid 2039775)
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-live-defects-p1/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+4 failed, 177 passed, 1 warning in 21.46s
+RESULT: FAIL (rc=1, 177 passed before failure)

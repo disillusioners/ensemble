@@ -41,7 +41,12 @@ describe('the bundle guard — the named baseline artifact (B8)', () => {
 
   it('the artifact carries the frozen initial-total baseline + its threshold', () => {
     const baseline = JSON.parse(readFileSync(baselinePath, 'utf-8'));
-    expect(baseline.guards.B1_initial_total_delta.baseline_bytes).toBe(5909018);
+    // LR4 (2026-11-21): PRISTINE RE-FREEZE — the prior 5909018 (the
+    // lane-base measurement) had drifted +2202 B stale vs this branch's
+    // FE tree; the pristine @ ec0154f49 measurement 5911220 is the new
+    // frozen reference (the FE lane's delta vs it is +592, within the
+    // unchanged ±2048 bound).
+    expect(baseline.guards.B1_initial_total_delta.baseline_bytes).toBe(5911220);
     expect(baseline.guards.B1_initial_total_delta.threshold).toContain('2048');
   });
 
@@ -130,7 +135,18 @@ describe('the bundle guard — the nest-anomaly lane extension (phase 4)', () =>
   it('the artifact carries the B4b threshold + the frozen route-fetch-set baseline', () => {
     const baseline = JSON.parse(readFileSync(baselinePath, 'utf-8'));
     const b4 = baseline.guards.B4_new_chart_chunk_size;
-    expect(b4.threshold_B4b_route_fetch_set_lazy_only_bytes).toBe(185000);
+    // The THRESHOLD is the leader-ruled re-baseline chain: LR1
+    // (decisions D12, ownership grant D22) 185,000 → 188,000, then
+    // LR3 188,000 → 188,500 on the FE lane's measured evidence — the
+    // dynamic-import boundary extracts a ~27 kB shared chunk into the
+    // route fetch set (~+2.7 kB structural split overhead beyond the
+    // new source bytes), the heavy body is verified 100% dynamic
+    // (15,470 B chunk reached only via await import), and source trims
+    // were exhausted against the contract-frozen host surface. LR3/LR5
+    // supersede LR1's one-field grant for this artifact + this pin.
+    expect(b4.threshold_B4b_route_fetch_set_lazy_only_bytes).toBe(188500);
+    // The MEASUREMENT baseline stays FROZEN — a re-measure compares
+    // against it and never overwrites it.
     expect(b4.baseline_metrics_route_fetch_set_lazy_only_bytes).toBe(165185);
     expect(b4.threshold_B4a_chart_chunk_min_gz_bytes).toBe(82000);
   });

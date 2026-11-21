@@ -1,0 +1,32 @@
+F.F......                                                                [100%]
+=================================== FAILURES ===================================
+E   AssertionError: assert {'BLUEPRINT_E...ASE_URL', ...} == {'BLUEPRINT_E...ASE_URL', ...}
+      
+      Extra items in the right set:
+      'POSTGRES_PASSWORD'
+      'POSTGRES_USER'
+      'POSTGRES_DB'
+      'POSTGRES_PORT'
+      'POSTGRES_HOST'
+      Use -v to get more diff
+/tmp/live-defects-base-b71742fe3/tests/tools/test_bash_spawn_stamp.py:124: AssertionError: assert {'BLUEPRINT_E...ASE_URL', ...} == {'BLUEPRINT_E...ASE_URL', ...}
+E   AssertionError: assert {'BLUEPRINT_E...ASE_URL', ...} == {'BLUEPRINT_E...ASE_URL', ...}
+      
+      Extra items in the right set:
+      'POSTGRES_PASSWORD'
+      'POSTGRES_USER'
+      'POSTGRES_DB'
+      'POSTGRES_PORT'
+      'POSTGRES_HOST'
+      Use -v to get more diff
+/tmp/live-defects-base-b71742fe3/tests/tools/test_bash_spawn_stamp.py:167: AssertionError: assert {'BLUEPRINT_E...ASE_URL', ...} == {'BLUEPRINT_E...ASE_URL', ...}
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /tmp/live-defects-base-b71742fe3/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/tools/test_bash_spawn_stamp.py::TestStampContract::test_stamp_present_in_child_env_when_on
+FAILED tests/tools/test_bash_spawn_stamp.py::TestStampContract::test_env_none_materializes_inherit_copy_plus_one
+2 failed, 7 passed, 1 warning in 9.74s

@@ -90,3 +90,7 @@ e2e-shots/
 # Demo env (auto-generated from .env.prod with PORT/POSTGRES_DB overridden —
 # real keys, never commit; scripts/deploy.sh generates it on demand)
 .env.prod.demo
+
+# Tool-usage digest output (dev default location; council C5 dev corollary).
+# Tight leaf only — do NOT broaden to .agents/ (would hide planning artifacts).
+.agents/shared/planning/tool-usage-metrics-p1/digests/

@@ -91,6 +91,24 @@ class BashSpawnRepository:
             )
             return list(session.exec(stmt).all())
 
+    def list_open_instance_ids(self) -> list[str]:
+        """DISTINCT instance_ids over the OPEN subset (retention lane).
+
+        Feeds the periodic retention sweep's stall leg: the service
+        resolves each id's instance status and sweeps only the
+        TERMINAL owners (their bash groups should be dead — any open
+        row left behind by a missed/no-op'd terminalization close is
+        swept here). Read-only projection; the D8 live-sibling guard
+        and every kill decision remain service-level (unchanged).
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(BashSpawnRecord.instance_id)
+                .where(BashSpawnRecord.reaped_at.is_(None))
+                .distinct()
+            )
+            return [r for r in session.exec(stmt).all() if r]
+
     def list_open_previous_boot(
         self, current_boot_id: str | None, my_pid: int | None = None
     ) -> list[BashSpawnRecord]:

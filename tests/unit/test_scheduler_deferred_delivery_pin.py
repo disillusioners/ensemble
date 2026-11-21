@@ -3972,3 +3972,153 @@ class TestPausedCaller:
             f"PIN 13 RED: expected the one-shot consumed on the direct "
             f"delivery (status={row.status!r}, enabled={row.enabled})"
         )
+
+
+# ===========================================================================
+# schedule-fire-notify — deferred-site identity-gate legs (sanctioned dev.)
+#
+# The plan named tests/test_scheduler_adapter.py, but the deferred harness
+# lives HERE; these legs are additive and reuse the existing fixtures only.
+# ===========================================================================
+
+
+def _sfn_notices(eng: Engine, instance_id: str) -> list:
+    """Notice MessageQueue rows for one instance (schedule-fire-notify)."""
+    return [
+        m for m in _mq_for(eng, instance_id)
+        if m.source == "system:schedule_fire_notify"
+    ]
+
+
+def _sfn_leg(
+    pin_manager,
+    pin_engine: Engine,
+    *,
+    tag: str,
+    recipient_id: str,
+    creator_id: str,
+    interval_seconds: int | None = None,
+):
+    """Common deferred-leg setup: seed rows + mapping + adapter + creator key.
+
+    Returns ``(adapter, source_id, run_at)``. The recipient is the busy
+    target; the creator is seeded separately only when distinct (the
+    creator==recipient leg is the self-alarm shape, seeded once).
+    """
+    source_id = f"{PIN_TAG}-sfn-{tag}-{uuid.uuid4().hex[:8]}"
+    run_at = datetime.now(timezone.utc) + timedelta(seconds=1.2)
+    _seed_instance(pin_engine, instance_id=recipient_id)  # busy recipient
+    if creator_id != recipient_id:
+        _seed_instance(pin_engine, instance_id=creator_id)
+    extras = {"interval_seconds": interval_seconds} if interval_seconds else {}
+    _seed_source_and_mapping(
+        pin_engine, source_id=source_id, instance_id=recipient_id,
+        run_at=run_at, **extras,
+    )
+    adapter, _events, _completions = _build_pin_adapter(
+        pin_manager, pin_engine, source_id=source_id, run_at=run_at, **extras,
+    )
+    adapter.config.config["creator_instance_id"] = creator_id
+    return adapter, source_id, run_at
+
+
+class TestScheduleFireNotifyDeferred:
+    """Deferred-site identity gate: stranger notify, creator skip,
+    taskless no-notify (F1), coalesce no-second-notice (N8)."""
+
+    async def test_deferred_stranger_recipient_gets_one_creator_notice(
+        self, pin_manager, pin_engine: Engine
+    ):
+        recipient_id = str(uuid.uuid4())
+        creator_id = str(uuid.uuid4())
+        adapter, _source_id, _run_at = _sfn_leg(
+            pin_manager, pin_engine, tag="str",
+            recipient_id=recipient_id, creator_id=creator_id,
+        )
+
+        await _fire_once(adapter, timeout_s=8.0)
+        await asyncio.sleep(0.6)  # let the off-path notify task run
+
+        notice_creator = _sfn_notices(pin_engine, creator_id)
+        assert len(notice_creator) == 1, (
+            "deferred-stranger: expected exactly ONE creator notice, got "
+            f"{[(m.source, m.status) for m in _mq_for(pin_engine, creator_id)]}"
+        )
+        notice_recipient = _sfn_notices(pin_engine, recipient_id)
+        assert notice_recipient == [], (
+            "deferred-stranger: the recipient must NOT receive a notice"
+        )
+
+    async def test_deferred_creator_recipient_gets_zero_notices(
+        self, pin_manager, pin_engine: Engine
+    ):
+        creator_id = str(uuid.uuid4())
+        adapter, _source_id, _run_at = _sfn_leg(
+            pin_manager, pin_engine, tag="cre",
+            recipient_id=creator_id, creator_id=creator_id,
+        )
+
+        await _fire_once(adapter, timeout_s=8.0)
+        await asyncio.sleep(0.6)
+
+        notices = _sfn_notices(pin_engine, creator_id)
+        assert notices == [], (
+            "deferred-creator: recipient==creator must mint ZERO notices, got "
+            f"{[(m.source, m.status) for m in notices]}"
+        )
+
+    async def test_taskless_enqueue_mints_no_notice(
+        self, pin_manager, pin_engine: Engine
+    ):
+        instance_id = str(uuid.uuid4())
+        creator_id = str(uuid.uuid4())
+        adapter, _source_id, _run_at = _sfn_leg(
+            pin_manager, pin_engine, tag="tsk",
+            recipient_id=instance_id, creator_id=creator_id,
+        )
+
+        marker_set = getattr(pin_manager, "_deferred_question_pause")
+        marker_set.add(instance_id)
+        try:
+            await _fire_once(adapter, timeout_s=8.0)
+        finally:
+            marker_set.discard(instance_id)
+        await asyncio.sleep(0.6)
+
+        notices = _sfn_notices(pin_engine, creator_id)
+        assert notices == [], (
+            "F1 taskless: a stranded/taskless enqueue must mint NO notice "
+            f"(void handle), got {[(m.source, m.status) for m in notices]}"
+        )
+
+    async def test_coalesced_fire_mints_no_second_notice(
+        self, pin_manager, pin_engine: Engine
+    ):
+        recipient_id = str(uuid.uuid4())
+        creator_id = str(uuid.uuid4())
+        adapter, _source_id, _run_at = _sfn_leg(
+            pin_manager, pin_engine, tag="coa",
+            recipient_id=recipient_id, creator_id=creator_id,
+            interval_seconds=1,
+        )
+
+        # FIRST fire -> deferred durable -> exactly one notice.
+        await _fire_emit(adapter)
+        await asyncio.sleep(0.6)
+        first = _sfn_notices(pin_engine, creator_id)
+        assert len(first) == 1, (
+            "N8 coalesce: the FIRST (deferred-durable) fire must mint exactly "
+            f"one notice, got {len(first)} — otherwise the no-second-notice "
+            "assertion is vacuous"
+        )
+        # SECOND fire -> coalesce (live delivery) -> NO second notice.
+        await _fire_emit(adapter)
+        await asyncio.sleep(0.6)
+        second = _sfn_notices(pin_engine, creator_id)
+        assert len(second) == len(first), (
+            "N8 coalesce: a coalesced fire must mint NO second notice, got "
+            f"first={len(first)} second={len(second)}"
+        )
+        assert len(second) <= 1, (
+            f"N8 coalesce: at most one notice per delivery, got {len(second)}"
+        )

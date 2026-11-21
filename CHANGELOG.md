@@ -5,6 +5,34 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [v0.31.26] — 2026-11-21
+
+### Added — Release A (defects-first): orphan-watcher born-dead fix; bash-spawn retention/stall fix + env-redaction rider; tester PACKS/QUARANTINE bookkeeping
+
+- Orphan-watcher born-dead fix: a watcher created in the same transaction as its target instance now arms correctly instead of being born dead (no orphaned un-armed rows).
+- Bash-spawn retention/stall fix: retained bash-spawned children no longer stall the parent turn; spawn lifecycle reconciles on completion/failure.
+- Bash-spawn stamp env-redaction rider: bash-spawn stamp output redacts ambient env values (no secret leakage in stamps).
+- Tester PACKS/QUARANTINE bookkeeping: PACKS.md and QUARANTINE.md reconciled with current test inventory (tester lane evidence).
+
+### Added — Riding drift (staged as-is per plan D8.6/AMD-4; 59 drift commits landed during the engine-arc lane)
+
+- AGPL-3.0-only relicense.
+- Tool-usage metrics Phase 1 (ENSEMBLE-37): ledger + tap + F24 + FE tab.
+- schedule-fire-notify: the creating instance is notified when a scheduled task fires.
+- v0.31.24 and v0.31.25 version bumps (drift commits, no separate CHANGELOG sections).
+
+## [0.31.24] — 2026-11-21
+
+### Added — schedule-fire-notify: the creating instance is notified when a scheduled task fires
+
+- New fire-notice seam `daemon/services/schedule_fire_notify.py` (+ `schedule_fire_notify_metrics.py` counters): when a scheduled task transitions to running, the instance that created it receives a notice carrying the work handle. Router (`daemon/routers/schedules.py`), scheduling service, and scheduler adapter carry the identity through.
+- Identity gate at BOTH dispatch sites (architect amendment DEC-9): only the structural creator is notified; the planner's blanket deferred-site skip was amended out as unsafe.
+- Creator identity persists via a config-JSON creator key — additive, ZERO SQL migrations (no `.sql` file this release).
+- Acceptance pack `tests/packs/scheduler_fire_notify_acceptance.sh` self-fences with `ENSEMBLE_AUTH_ENABLED=false` inside the pack (W1: ambient-auth environments are fenced by the pack itself, not the host).
+- Composition: v0.31.24 = v0.31.23 content (cpu-arc2 + cpu-l1 performance lanes) + schedule-fire-notify; zero file overlap, blob-check 12/12, merged-tree gate 181/48/31/4 green. Tester evidence: `.agents/tester/RESULTS/2026-11-21-schedule-fire-notify-test-lane.md`.
+
 ## [0.31.23] — 2026-11-21
 
 ### Changed — ram-guard poll cadence 200 ms → 1000 ms (M1, cpu-l1-cheap-overhead)

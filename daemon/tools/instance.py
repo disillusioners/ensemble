@@ -265,6 +265,12 @@ from .agent_mother import create_mother_tools
 from .project import create_project_tools
 from .job_queue import create_job_tools, create_mission_watch_tools
 from .scheduling import create_scheduling_tools
+try:
+    from .tool_usage import create_tool_usage_tools_if_available
+except Exception as exc:  # pragma: no cover
+    logger.warning("tool_usage tools unavailable: %s", exc)
+    def create_tool_usage_tools_if_available(*a, **k):
+        return []
 from .missions import create_mission_tools
 from .help import create_help_tool
 from .knowledge_tools import create_knowledge_tools
@@ -7041,6 +7047,16 @@ Returns:
         manager, current_instance_id, agent_id, agent_tag=version_tag
     )
     tools.extend(scheduling_tool_list)
+
+    # ── Tool-usage digest tool (tool-usage-metrics-p1 Phase 3) ──────────
+    # Read-only digest over the tool-usage ledger; writes a durable markdown
+    # file to the canonical root. Three-step registration seam (decorator +
+    # CATEGORY_MODULES entry + construction). Reuses the "scheduling"
+    # category so no new category value / vocab bump.
+    tool_usage_tool_list = create_tool_usage_tools_if_available(
+        manager, current_instance_id, agent_id, agent_tag=version_tag
+    )
+    tools.extend(tool_usage_tool_list)
 
     # ── Board tools (ari-tools Phase 1 — the Workbook) ───────────────────
     # The global, DB-backed work board. Same critical list-append pattern
