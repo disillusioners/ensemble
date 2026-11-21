@@ -32,6 +32,7 @@ from . import emit
 from .catalog import (
     BRIDGE_PENDING,
     CATALOG,
+    DECLARED_SILENT_KINDS,
     KIND_INDEX,
     FailurePosture,
 )
@@ -162,6 +163,7 @@ def snapshot(bus: Any = None) -> dict[str, Any]:
                 "lag_reason": lag_reason,
                 "lag_measurable": measurable,
                 "bridge_pending": BRIDGE_PENDING.get(spec.kind_id),
+                "declared_silent": spec.kind_id in DECLARED_SILENT_KINDS,
                 "deferred_v2": bool(spec.metadata.get("deferred_v2")),
             }
         return {

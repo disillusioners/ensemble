@@ -31,6 +31,7 @@ substrate IS the existing ``event`` table + the state tables it observes.
 from .catalog import (
     BRIDGE_PENDING,
     CATALOG,
+    DECLARED_SILENT_KINDS,
     DEFERRED_V2_KINDS,
     KIND_INDEX,
     SEAM_DEPTH_TRIGGERS,
@@ -60,6 +61,7 @@ from .metrics import (
 __all__ = [
     "BRIDGE_PENDING",
     "CATALOG",
+    "DECLARED_SILENT_KINDS",
     "DEFERRED_V2_KINDS",
     "KIND_INDEX",
     "RING_CAP",

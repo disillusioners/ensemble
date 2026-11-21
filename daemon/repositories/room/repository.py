@@ -93,6 +93,7 @@ from daemon.repositories.room.models import (
     RoomState,
 )
 from daemon.repositories.infra.types import JSONBType
+from daemon.services.event_registry import record as _event_registry_record
 
 __all__ = [
     "RoomError",
@@ -1121,6 +1122,10 @@ class RoomRepository:
                     raise RoomNotFoundError(
                         f"room={room_id} not found (absent or already purged)"
                     )
+                # Captured BEFORE the commit: expire_on_commit expires the
+                # row attrs, and the L-10 bridge below runs after the
+                # session closes (no detached-attribute access allowed).
+                _purge_owner_instance_id = room.owner_instance_id
                 message_count = int(
                     session.execute(
                         sql_text(
@@ -1169,6 +1174,11 @@ class RoomRepository:
                     ).bindparams(r=room_id)
                 )
                 session.commit()
+            # Phase 5 event registry — class-2 bridge (T5.4/L-10): the
+            # committed purge (the durable room_purged row went with it).
+            _event_registry_record("event_bus:room_purged",
+                                   instance_id=_purge_owner_instance_id,
+                                   room_id=room_id)
         except IntegrityError as exc:
             raise_typed_purge_integrity(exc, room_id)
         logger.info(

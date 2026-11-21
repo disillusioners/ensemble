@@ -65,6 +65,7 @@ from daemon.repositories.room.models import (
     RoomMemberState,
     RoomState,
 )
+from daemon.services.event_registry import record as _event_registry_record
 
 logger = logging.getLogger(__name__)
 
@@ -395,6 +396,17 @@ def join_room_in_session(
             created_at=datetime.now(timezone.utc),
         )
     )
+    # Phase 5 event registry — class-2 bridge (T5.4/L-10): observe the
+    # durable room_join row this transaction stages. NOTE the caller-
+    # commits contract (docstring above): the commit lands in the spawn
+    # txn or repository.join_room; a CALLER-transaction rollback
+    # (name-collision backstop) can over-count this observation by one —
+    # accepted + documented: the alternative (bridging at each commit
+    # site) reaches files outside the L-10 ruling's set, and the spawn
+    # path (the MAIN producer) must be covered.
+    _event_registry_record("event_bus:room_join",
+                           instance_id=instance_id,
+                           room_id=room_id)
     return row
 
 
@@ -514,6 +526,11 @@ def leave_room(
                 )
             )
             session.commit()
+            # Phase 5 event registry — class-2 bridge (T5.4/L-10): observe
+            # the durable room_leave row AFTER the committing transaction.
+            _event_registry_record("event_bus:room_leave",
+                                   instance_id=instance_id,
+                                   room_id=room_id)
     payload = dict(payload)
     payload["state"] = RoomMemberState.LEFT.value
     return payload

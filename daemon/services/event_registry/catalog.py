@@ -421,30 +421,30 @@ DEFERRED_V2_KINDS: frozenset[str] = frozenset(
     if spec.metadata.get("deferred_v2")
 )
 
-# Kinds with NO bridge yet — every entry carries its precise reason. The
-# register has TWO classes, both evidence-backed:
+# Kinds with NO bridge — every entry carries its precise reason. After
+# leader rulings L-10 (bridge the producer-outside-map kinds) and L-11
+# (the zero-producer kinds stay DECLARED-SILENT), the register holds
+# exactly ONE class:
 #
-#  (1) ZERO-PRODUCER enum members — declared in EventKind but nothing at
-#      this tree writes an event row of that kind. The registry cannot
-#      bridge a site that does not exist; a synthetic emission would
-#      fabricate telemetry (the same honesty discipline as D5.12's lag
-#      rule).
-#  (2) PRODUCER-OUTSIDE-LIST — a live durable write exists, but its
-#      file/site is outside the L-9 authorized bridge list (10 sites / 7
-#      files). Bridging these needs one more line-item map amendment;
-#      the exact site is recorded here so the amendment is mechanical.
+#  (1) ZERO-PRODUCER enum members (L-11) — declared in EventKind but
+#      nothing at this tree writes an event row of that kind. The
+#      registry cannot bridge a site that does not exist; a synthetic
+#      emission would fabricate telemetry (the same honesty discipline
+#      as D5.12's lag rule). Enum retirement is a SEPARATE future
+#      commission — not P5's.
 #
 # The AC2 census leg asserts: every bridged kind is NOT in this register,
-# and every catalog kind is either bridged or present here with a reason
-# from the pinned vocabulary.
+# and every catalog kind is either bridged or present here with the
+# L-11-cited reason (LOCKSTEP both ways — a bridge for a declared-silent
+# kind REDs).
 _ZERO_PRODUCER_REASON = (
-    "enum-only: no daemon emission site exists at this tree (the "
-    "EventKind member is declared but nothing writes it); a synthetic "
-    "emission would fabricate telemetry"
+    "L-11 declared-silent: no daemon emission site exists at this tree "
+    "(the EventKind member is declared but nothing writes it); a "
+    "synthetic emission would fabricate telemetry (enum retirement is a "
+    "separate future commission)"
 )
 
 BRIDGE_PENDING: dict[str, str] = {
-    # (1) zero-producer enum members
     "event_bus:processing_started": _ZERO_PRODUCER_REASON,
     "event_bus:processing_completed": _ZERO_PRODUCER_REASON,
     "event_bus:processing_failed": _ZERO_PRODUCER_REASON,
@@ -459,56 +459,17 @@ BRIDGE_PENDING: dict[str, str] = {
         + " (room posts ride room_tag_delivery / room_proposal rows; "
         "ROOM_POST has no row producer)"
     ),
-    # (2) live producer outside the L-9 authorized site list
-    "event_bus:message_received": (
-        "producer-outside-list: direct Event row at "
-        "daemon/services/instance_messaging.py:2881 (durable enqueue) — "
-        "not in the L-9 10-site list; needs a map amendment"
-    ),
-    "event_bus:error": (
-        "producer-outside-list: "
-        "daemon/services/message_processing_errors.py:272 "
-        "(create_error_event) + :288 (repo fallback) — not in the L-9 "
-        "10-site list; needs a map amendment"
-    ),
-    "event_bus:room_join": (
-        "producer-outside-list: "
-        "daemon/repositories/room/membership.py:385 "
-        "(join_room_in_session) — not in the L-9 10-site list; needs a "
-        "map amendment"
-    ),
-    "event_bus:room_leave": (
-        "producer-outside-list: daemon/repositories/room/membership.py:502 "
-        "— not in the L-9 10-site list; needs a map amendment"
-    ),
-    "event_bus:room_purged": (
-        "producer-outside-list: daemon/repositories/room/repository.py:1140 "
-        "(purge_room) — not in the L-9 10-site list; needs a map "
-        "amendment"
-    ),
-    "event_bus:room_tag_delivery": (
-        "producer-outside-list: daemon/services/room_delivery.py "
-        "(:873/:896/:1077 via emit_room_event + the shared "
-        "_emit_delivery_event helper :1185) — not in the L-9 10-site "
-        "list; needs a map amendment"
-    ),
-    "event_bus:room_proposal": (
-        "producer-outside-list: daemon/services/room_delivery.py "
-        "(:902/:1007) — not in the L-9 10-site list; needs a map "
-        "amendment"
-    ),
-    "event_bus:room_decision": (
-        "producer-outside-list: daemon/services/room_delivery.py:1165 — "
-        "not in the L-9 10-site list; needs a map amendment"
-    ),
 }
 
-# The zero-producer subset of the register (class (1)); the census leg
-# pins the class-(2) reasons to the producer-outside-list prefix.
-ZERO_PRODUCER_KINDS: frozenset[str] = frozenset(
+# The declared-silent subset of the register (L-11). Kept as a distinct
+# class so the census and snapshot() can label it.
+DECLARED_SILENT_KINDS: frozenset[str] = frozenset(
     kind for kind, reason in BRIDGE_PENDING.items()
-    if reason.startswith("enum-only:")
+    if reason.startswith("L-11 declared-silent:")
 )
+
+# Back-compat alias (the pre-L-11 name; same set).
+ZERO_PRODUCER_KINDS: frozenset[str] = DECLARED_SILENT_KINDS
 
 
 assert_catalog()
