@@ -6156,6 +6156,9 @@ def create_attestation_gate_node(
         safe_reset,
         safe_set_escalated_and_reset,
     )
+    # Phase 5 event registry — class-4 bridge (T5.6): observation-only
+    # import; the ledger's own fail-open posture is labeled, not changed.
+    from .services.event_registry import record as _event_registry_record
     # FIX-3 (2026-09-16, incident 6a0d60c9) — stable nudge id mint.
     from .services.context_messages import _stable_id_for
 
@@ -7137,6 +7140,13 @@ def create_attestation_gate_node(
                     # the nudge kwargs remain checkpoint-serializable.
                     if isinstance(increment_result, int):
                         counted_denied_count = increment_result
+                    # Phase 5 event registry — class-4 bridge (T5.6): the
+                    # committed deny epoch, observed AFTER the guard.
+                    _event_registry_record("attestation_epoch",
+                        instance_id=effective_instance_id,
+                        epoch_action="deny_increment",
+                        path="leader_completion_gate",
+                        denied_count=increment_result if isinstance(increment_result, int) else None)
                 elif decision.decision is Decision.TERMINAL_AFTER_BOUND:
                     terminal_result = safe_set_escalated_and_reset(
                         ledger,
@@ -7148,6 +7158,12 @@ def create_attestation_gate_node(
                     )
                     if terminal_result is False or terminal_result is None:
                         return {"attestation_route": None}
+                    # Phase 5 event registry — class-4 bridge (T5.6): the
+                    # committed escalation epoch.
+                    _event_registry_record("attestation_epoch",
+                        instance_id=effective_instance_id,
+                        epoch_action="escalated_and_reset",
+                        path="leader_completion_gate")
                 elif decision.decision is Decision.ALLOWED:
                     # Attested allow only — R2 un-attested allow arrives
                     # as ALLOWED_LEGITIMATE_PENDING_WAKEUP, which is its
@@ -7164,6 +7180,12 @@ def create_attestation_gate_node(
                                 "decision": decision.decision.value,
                             },
                         )
+                        # Phase 5 event registry — class-4 bridge (T5.6):
+                        # the attested-allow reset epoch.
+                        _event_registry_record("attestation_epoch",
+                            instance_id=effective_instance_id,
+                            epoch_action="reset",
+                            path="leader_completion_gate")
                 # else: ALLOWED_LEGITIMATE_PENDING_WAKEUP, DRY_LOG,
                 # ALLOWED (meta-condition bypass) — NO ledger write.
             except Exception:  # noqa: BLE001 — defense-in-depth
