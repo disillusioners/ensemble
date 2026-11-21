@@ -22,6 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
 from daemon.repositories.tool_usage.models import ToolUsageDaily
@@ -71,7 +72,8 @@ def _load_json_artifact(name: str) -> Any:
     try:
         with path.open("r", encoding="utf-8") as fh:
             return json.load(fh)
-    except (OSError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.debug("tool_usage_digest: could not load artifact %s: %s", name, exc)
         return {}
 
 
@@ -111,8 +113,8 @@ def _parse_run_date(run_date: str | None) -> date:
     if run_date:
         try:
             return date.fromisoformat(run_date)
-        except ValueError:
-            pass
+        except ValueError as exc:
+            logger.debug("tool_usage_digest: invalid run_date %r: %s", run_date, exc)
     return datetime.now(timezone.utc).date()
 
 
@@ -127,26 +129,27 @@ def _day_str(d: date) -> str:
     return d.isoformat()
 
 
-def rollup(engine, run_date: str | None = None) -> dict[str, Any]:
+def rollup(engine: Engine, run_date: str | None = None) -> dict[str, Any]:
     """Build the structured rollup for a run date.
 
     Returns a dict with keys: run_date, last24_day, week_days, projects.
     projects: list of {project_id, tools: [{tool_name, weight, calls_24h,
     calls_7d, agents: [{agent_id, calls_24h, calls_7d, allow_listed}]}]}.
+    zero_near_zero: list of {tool_name, calls_7d, allowed_agents} for allow-listed tools with <= NEAR_ZERO_CALLS_7D calls in 7d.
+    tool_allowed_agents: dict mapping tool_name -> sorted list of agents that allow it.
     """
-    rd = _parse_run_date(run_date)
+    rd: date = _parse_run_date(run_date)
     last24_day, week_days = _window_days(rd)
-    week_strs = {_day_str(d) for d in week_days}
-    last24_str = _day_str(last24_day)
+    week_strs: set[str] = {_day_str(d) for d in week_days}
+    last24_str: str = _day_str(last24_day)
 
     # Collect raw rows for the week window + last24.
-    all_days = week_strs | {last24_str}
-    # last24 is already in week (D-1 is the last of D-7..D-1), so all_days == week_strs.
+    # last24 is already in week (D-1 is the last of D-7..D-1), so week_strs covers it.
 
     # Query: rows where day in week_strs.
     with Session(engine) as session:
         stmt = select(ToolUsageDaily).where(ToolUsageDaily.day.in_(sorted(week_strs)))
-        rows = list(session.exec(stmt))
+        rows: list[ToolUsageDaily] = list(session.exec(stmt))
 
     # Aggregate.
     # project -> tool -> {calls_24h, calls_7d, agents: agent -> {24h,7d}}
@@ -167,30 +170,29 @@ def rollup(engine, run_date: str | None = None) -> dict[str, Any]:
             a["calls_24h"] += cnt
 
     # Build structured output.
-    wl = tool_weights()
-    al = allowlists()
+    wl: dict[str, int] = tool_weights()
+    al: dict[str, list[str]] = allowlists()
     # Invert allowlists: tool -> set of agents that allow it.
     tool_allowed_agents: dict[str, set[str]] = {}
     for agent, tools in al.items():
         for t in tools:
             tool_allowed_agents.setdefault(t, set()).add(agent)
 
-    project_list = []
+    project_list: list[dict[str, Any]] = []
     for proj in sorted(projects.keys()):
         p = projects[proj]
-        tool_list = []
+        tool_list: list[dict[str, Any]] = []
         for tool in sorted(p["tools"].keys()):
             t = p["tools"][tool]
             weight = _weight_for(tool)
             score = weight * t["calls_7d"]
-            agents_out = []
+            agents_out: list[dict[str, Any]] = []
             for agent in sorted(t["agents"].keys()):
                 a = t["agents"][agent]
                 agents_out.append({
                     "agent_id": agent,
                     "calls_24h": a["calls_24h"],
                     "calls_7d": a["calls_7d"],
-                    "allow_listed": agent in al.get(agent, []) and tool in al.get(agent, []),
                 })
             # allow_listed per agent: tool in that agent's allow list
             for ao in agents_out:
@@ -211,16 +213,16 @@ def rollup(engine, run_date: str | None = None) -> dict[str, Any]:
 
     # Zero/near-zero: allow-listed tools with 0 calls in window.
     # Collect set of all allow-listed tools.
-    all_allowed_tools = set()
+    all_allowed_tools: set[str] = set()
     for agent, tools in al.items():
         for t in tools:
             all_allowed_tools.add(t)
 
-    zero_near_zero = []
+    zero_near_zero: list[dict[str, Any]] = []
     for tool in sorted(all_allowed_tools):
         # Find if it appears in any project's tool list with calls_7d==0 or <=NEAR_ZERO
         # A tool may not appear at all (0 calls) -> zero.
-        present_calls = {}
+        present_calls: dict[str, int] = {}
         for p in project_list:
             for t in p["tools"]:
                 if t["tool_name"] == tool:
@@ -289,13 +291,13 @@ def render_markdown(rollup_data: dict[str, Any], generated_at: str | None = None
 
 
 def digest_path(run_date: str | None = None) -> Path:
-    rd = _parse_run_date(run_date)
+    rd: date = _parse_run_date(run_date)
     root = digest_root()
     root.mkdir(parents=True, exist_ok=True)
     return root / f"{rd.isoformat()}.md"
 
 
-def write_digest(engine, run_date: str | None = None) -> tuple[str, Path]:
+def write_digest(engine: Engine, run_date: str | None = None) -> tuple[str, Path]:
     """Render + write the digest. Returns (markdown, path)."""
     data = rollup(engine, run_date)
     md = render_markdown(data)

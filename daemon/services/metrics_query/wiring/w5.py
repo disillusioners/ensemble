@@ -1,4 +1,4 @@
-"""The W5 CLUSTER — F24, the tool-usage family.
+"""The W6 CLUSTER (w5.py slot) — F24, the tool-usage family.
 
 ONE family, ONE metric, ONE write-time sink.  The family records tool
 calls by the CLOSED ``tool_category`` × ``result`` label space — enough
@@ -83,7 +83,6 @@ package ``__init__`` calls it beside the w1–w4 registrations).
 from __future__ import annotations
 
 import os
-from typing import Optional
 
 from daemon.checkpoint_metrics import RESERVED_LABEL_VALUE
 from daemon.services import metrics_gate
@@ -161,7 +160,7 @@ tool_usage_calls_total = register_family_metric(
 # ── the family gate (fail-closed, stacked under the global gates) ─────────
 
 
-def _family_env_explicit_enabled() -> Optional[bool]:
+def _family_env_explicit_enabled() -> bool | None:
     """The family env tier's decision (the metrics_gate polarity).
 
     Returns ``True`` (explicitly truthy), ``False`` (explicitly set to
@@ -213,7 +212,7 @@ def family_gate_enabled() -> bool:
 
 def on_tool_usage_event(
     tool_name: str,
-    tool_category: Optional[str],
+    tool_category: str | None,
     agent_id: str,
     project_id: str,
     ok: bool,

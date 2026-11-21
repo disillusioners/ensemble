@@ -22,18 +22,14 @@ import json
 import logging
 import os
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from sqlalchemy.engine import Engine
 from sqlmodel import Session
 
 from daemon.models.app_settings import AppSetting
 from daemon.repositories.source.models import SourceStatus
-from daemon.repositories.source.repository import SQLModelSourceRepository
 from daemon.repositories.factory import create_project_repository, create_source_repository
-
-if TYPE_CHECKING:  # pragma: no cover
-    pass
 
 logger = logging.getLogger(__name__)
 

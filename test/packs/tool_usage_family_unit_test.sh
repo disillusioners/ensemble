@@ -103,7 +103,8 @@ fi
 for f in \
   tests/unit/metrics/test_metrics_family_adjudication.py \
   tests/unit/metrics/test_metrics_vocabulary_amendment.py \
-  tests/unit/tools/test_tool_category_artifact.py
+  tests/unit/tools/test_tool_category_artifact.py \
+  tests/unit/migrations/test_tool_usage_migration.py
 do
   if [ ! -f "$f" ]; then
     echo "FATAL: required test file missing: $f" >&2
@@ -138,7 +139,7 @@ PROBE='import os,sys; sys.exit(0 if os.environ.get("OPENAI_API_KEY") is None els
 
 export OPENAI_API_KEY="$SENTINEL"
 
-if env "${SCRUB[@]}" python3 -c "$PROBE"; then
+if env "${SCRUB[@]}" "$PROJECT_DIR/.venv/bin/python" -c "$PROBE"; then
   echo "fence self-test: SCRUBBED child sees no OPENAI_API_KEY  [OK]"
   SCRUB_LEG="OK"
 else
@@ -147,7 +148,7 @@ else
 fi
 
 # THE CONTROL — the same child WITHOUT the scrub MUST see the sentinel.
-if python3 -c "$PROBE"; then
+if "$PROJECT_DIR/.venv/bin/python" -c "$PROBE"; then
   echo "fence self-test: CONTROL child (no scrub) does NOT see the sentinel  [FAIL]"
   SCRUB_LEG="FAIL"
 else
@@ -183,7 +184,8 @@ timeout 280 env \
     "${KARGS[@]}" \
     tests/unit/metrics/test_metrics_family_adjudication.py \
     tests/unit/metrics/test_metrics_vocabulary_amendment.py \
-    tests/unit/tools/test_tool_category_artifact.py 2>&1 | tee "$OUT"
+    tests/unit/tools/test_tool_category_artifact.py \
+    tests/unit/migrations/test_tool_usage_migration.py 2>&1 | tee "$OUT"
 PYTEST_EXIT="${PIPESTATUS[0]}"
 
 # ── the VACUOUS-VERDICT GUARD ───────────────────────────────────────────

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import inspect
 import warnings
-from typing import Any
 
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient

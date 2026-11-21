@@ -125,7 +125,7 @@ class ToolUsageRepository:
                 },
             )
             result = conn.execute(stmt)
-            return result.rowcount or 0
+            return 0 if result.rowcount is None or result.rowcount == 0 else result.rowcount
 
     # ------------------------------------------------------------------
     # read path (door)

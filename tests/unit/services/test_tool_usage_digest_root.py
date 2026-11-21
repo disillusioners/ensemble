@@ -8,11 +8,9 @@ Pins:
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
-import pytest
 
 from daemon.services import tool_usage_digest as tud
 

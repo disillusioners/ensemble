@@ -132,7 +132,7 @@ class TestUpsert:
         cardinality_violation precondition), proving the guarantee is
         dialect-independent without needing a live PG.
         """
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
 
         captured = {}
 

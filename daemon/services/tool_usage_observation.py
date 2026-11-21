@@ -76,12 +76,15 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 # ── Frozen sink signature ──────────────────────────────────────────────────
 # positional: (tool_name, tool_category, agent_id, project_id, ok)
-ToolUsageSink = Callable[[str, Optional[str], str, str, bool], None]
+ToolUsageSink = Callable[[str, str | None, str, str, bool], None]
 
 
 @dataclass(frozen=True)
 class ToolUsageEvent:
-    """A single observation event (value type; ``day`` set at enqueue)."""
+    """A single observation event (value type; ``day`` set at enqueue).
+
+    Reserved for Phase 2.
+    """
 
     tool_name: str
     tool_category: str | None
@@ -545,7 +548,6 @@ def _ok_map_from_result(result: Any) -> dict[str, bool]:
 
 __all__ = [
     "ToolUsageSink",
-    "ToolUsageEvent",
     "ToolUsageFlusher",
     "wrap_tools_node",
     "register_sink",

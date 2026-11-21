@@ -12,7 +12,6 @@ import re
 from pathlib import Path
 
 from sqlalchemy import create_engine, inspect
-from sqlmodel import SQLModel
 
 from daemon.repositories.tool_usage.models import ToolUsageDaily
 
