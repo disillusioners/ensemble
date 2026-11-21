@@ -311,6 +311,26 @@ PRE_EXISTING_DAEMON_OFFENDERS = frozenset(
         "daemon/tools/todo_tools.py",
         "daemon/tools/upgrade_journal.py",
         "daemon/tools/upgrade_tools.py",
+        # ── Tool-usage-metrics P1 lane (2026-11-21) — council C3 ─────
+        # THE RECORD IS MAINTAINED BY THE CHANGING LANE (rule above):
+        # these NINE paths are this lane's own daemon surfaces, each
+        # attributed to the phase commit that OWNS it, so the offender
+        # stays NAMED and attributable instead of surfacing as a new
+        # offender in a later lane's red.
+        #
+        # phase 1 — the daily ledger, the observation tap, the flusher,
+        # the migration and the API door (owning commit 49f5e9c1d):
+        "daemon/migrations/versions/20261121_020000_create_tool_usage_daily.sql",
+        "daemon/repositories/tool_usage/__init__.py",
+        "daemon/repositories/tool_usage/models.py",
+        "daemon/repositories/tool_usage/repository.py",
+        "daemon/routers/tool_usage.py",
+        "daemon/services/tool_usage_observation.py",
+        # phase 3 — the deterministic digest and the boot-time seeder
+        # (owning commit 71273d7e3):
+        "daemon/repositories/source/seed.py",
+        "daemon/services/tool_usage_digest.py",
+        "daemon/tools/tool_usage.py",
     }
 )
 
