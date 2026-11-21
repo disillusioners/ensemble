@@ -144,9 +144,15 @@ class EngineRepository:
         """
         stamp = last_run_at or now_utc_iso()
         values: dict[str, Any] = {
-            "last_skip_reason": last_skip_reason,
             "updated_at": stamp,
         }
+        if last_skip_reason is not None:
+            values["last_skip_reason"] = last_skip_reason
+        elif last_outcome is not None and not str(last_outcome).startswith("SKIPPED_"):
+            # A terminal non-skip outcome clears any previously stored skip
+            # reason (F5: None alone must not clobber, but a real terminal
+            # outcome resets the skip surface).
+            values["last_skip_reason"] = None
         if last_outcome is not None:
             values["last_outcome"] = last_outcome
             values["last_run_at"] = stamp
@@ -166,6 +172,24 @@ class EngineRepository:
             if int(result.rowcount or 0) == 0:
                 return None
             return session.get(EngineJob, job_id)
+
+    def revive_job(self, job_id: str) -> EngineJob | None:
+        """F4 echo-revival: targeted ``dead=0`` update.
+
+        Used by the registry's identical-content echo path for a previously
+        dead job: re-registration is revival intent.  This touches ONLY the
+        ``dead`` column — ``version`` and ``updated_at`` are left untouched so
+        the row remains a true echo.  The repository stays the only writer.
+        """
+        with Session(self.engine) as session:
+            existing = session.get(EngineJob, job_id)
+            if existing is None:
+                return None
+            existing.dead = 0
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
+            return existing
 
     # ── reads ──────────────────────────────────────────────────────────
 

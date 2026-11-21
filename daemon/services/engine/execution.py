@@ -30,6 +30,7 @@ from daemon.services.engine.state import (
 )
 from daemon.services.engine import dispatch as D
 from daemon.services.engine.guardrails import (
+    DEP_MISSING_DEAD_FACTOR,
     ExtendWedgeTracker,
     resolve_at_due,
 )

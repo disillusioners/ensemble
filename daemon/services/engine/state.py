@@ -44,6 +44,10 @@ SKIP_REASONS: frozenset[str] = frozenset(
     }
 )
 
+# §B.2 fold note (D2.6): the outcome LABEL is "SKIPPED_REREGISTERED" while
+# the skip REASON token is "REREGISTERED" (the outcome carries the SKIPPED_
+# prefix per the closed outcome vocabulary, the reason token does not).
+
 # Idle-gate backoff (D2.9). Only IDLE_GATED / DEP_MISSING skips count
 # toward the consecutive-skip streak that doubles the effective interval.
 IDLE_GATE_SKIP_REASONS: frozenset[str] = frozenset({"IDLE_GATED", "DEP_MISSING"})

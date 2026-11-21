@@ -140,6 +140,14 @@ async def run_with_timeout(
         except asyncio.TimeoutError:
             if not task.done():
                 task.cancel()
+            # F6: bounded await for the cancelled dispatch to settle before
+            # the retry re-dispatch (residual thread-escape window: a
+            # to_thread payload past cancellation cannot be force-killed —
+            # the gather bounds the AWAIT, not the thread).
+            try:
+                await asyncio.gather(task, return_exceptions=True)
+            except Exception:  # noqa: BLE001
+                pass
             return _TPE_OUTCOME, asyncio.TimeoutError()
         except BaseException as exc:  # noqa: BLE001
             if isinstance(exc, asyncio.CancelledError):

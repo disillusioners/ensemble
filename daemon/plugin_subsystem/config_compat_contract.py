@@ -48,7 +48,15 @@ CONTRACT_DEPTH = 3
 # set in lockstep with the pops in daemon/config.py load_config.
 try:
     from daemon.config import RETIRED_CONFIG_KEYS as _TOLERATED_RETIRED_KEYS  # noqa: E402
-except Exception:  # noqa: BLE001 — stage-time safety
+except Exception as exc:  # noqa: BLE001 — stage-time safety
+    import sys as _sys
+
+    print(
+        "config_compat_contract: RETIRED_CONFIG_KEYS import FAILED "
+        f"({exc!r}) — falling back to a HARDCODED set; this hides drift "
+        "between load_config's pop set and the tolerated set. FIX NOW.",
+        file=_sys.stderr,
+    )
     _TOLERATED_RETIRED_KEYS: dict[str, tuple[str, ...]] = {
         "persistence": ("checkpointer_db_path", "checkpoint_interval"),
         "services": ("worker_poll_interval", "lease_heartbeat_interval_seconds"),

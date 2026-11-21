@@ -269,11 +269,34 @@ class EngineService:
         return list(self._dependency_refs.get(job_id, []))
 
     def _cancel_inflight_tick(self, job_id: str) -> None:
-        """P3 T3.5: mark the in-flight dispatch for cancellation/audit."""
+        """P3 T3.5: mark the in-flight dispatch for cancellation/audit.
+
+        F2 re-arm: refresh ``spec`` and ``persisted_dead`` from the registry
+        so later ticks use the NEW spec without a restart.
+        F3: clear the ``pending_event`` latch through the ENGINE cache (the
+        live latch lives in ``EngineService._cache``); the registry never
+        owns it.
+        """
         cache = self._cache.get(job_id)
         if cache is not None:
             cache["cancel_requested"] = True
             cache["reregistered"] = True
+            cache["pending_event"] = False
+            # F2 re-arm: refresh spec from the registry.
+            if self.registry is not None:
+                try:
+                    new_spec = self.registry.cached_spec(job_id)
+                    if new_spec is not None:
+                        cache["spec"] = new_spec
+                except Exception:  # noqa: BLE001
+                    pass
+            # F2 re-arm: refresh persisted_dead from the DB row.
+            try:
+                row = self.repository.get_job(job_id)
+                if row is not None:
+                    cache["persisted_dead"] = bool(getattr(row, "dead", 0))
+            except Exception:  # noqa: BLE001
+                pass
 
 
 __all__ = ["EngineService"]

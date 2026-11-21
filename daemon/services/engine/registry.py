@@ -238,8 +238,16 @@ class EngineRegistry:
             existing, row_kwargs
         ):
             version = int(existing.version)
-            # Refresh the RAM cache for hot reads; NO DB write, so version
-            # and updated_at are left exactly as stored.
+            # F4 echo-revival: re-registration of a dead job is revival intent.
+            # Perform a targeted dead=0 update (version/updated_at UNTOUCHED
+            # — still an echo) via the repository.  D3.4 body stands.
+            if getattr(existing, "dead", 0):
+                try:
+                    self._repository.revive_job(spec.id)
+                except Exception:  # noqa: BLE001
+                    logger.exception("echo-revival failed for %s", spec.id)
+            # Refresh the RAM cache for hot reads; NO DB write otherwise, so
+            # version and updated_at are left exactly as stored.
             self._cache[spec.id] = {
                 "version": version,
                 "fingerprint": fingerprint,
@@ -281,15 +289,12 @@ class EngineRegistry:
             "version": stored_version,
             "fingerprint": fingerprint,
             "spec": spec,
-            "cancel_requested": False,
         }
         # P3 T3.5: dynamic re-registration of a live (in-flight) job.
         if changed:
-            cache_entry = self._cache.get(spec.id)
-            if cache_entry is not None:
-                cache_entry["pending_event"] = False
-            # unregister pending event latch on the engine cache (best effort)
-            # invoke cancel hook so the in-flight tick is cancelled + audited
+            # pending_event latch clear is routed through the ENGINE cache by
+            # EngineService._cancel_inflight_tick (F3) — the registry never
+            # owns the live latch.  Invoke the cancel hook to drive it.
             cb = self._cancel_callback
             if cb is not None:
                 try:

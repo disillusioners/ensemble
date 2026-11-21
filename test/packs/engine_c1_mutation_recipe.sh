@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # Mutation recipe for C-1 (extend-policy late failure). Provenance evidence.
 # Reverts the C-1 fix, runs the pin (must be RED), restores, re-runs (must be GREEN).
+#
+# ⚠️  CEREMONY-RUN DISCIPLINE (F8): this recipe MUTATES the working tree
+#     IN PLACE. Ceremony runs MUST NOT mutate the live worktree. Run
+#     against a git-archive clone in /tmp:
+#       git archive --format=tar HEAD | tar -x -C /tmp/c1-clone
+#       cd /tmp/c1-clone && bash /path/to/engine_c1_mutation_recipe.sh
+#     In-place invocation is for local dev only. NEVER run against a
+#     worktree carrying uncommitted P4/P6 work.
 set -u
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJECT_DIR" || exit 1
