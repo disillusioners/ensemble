@@ -1,14 +1,18 @@
 """Engine observability read model (Engine Arc Phase 6 — T6.1/T6.2).
 
-PURE FUNCTIONS over INJECTED sources. Nothing here executes, mutates, or
-reaches for a runtime singleton: the router injects the rows, the engine
-snapshot, the convergence mapping, the resolved switch states and the
-bounded runs tail. This module exists so a future ``/metrics`` UI tab or
-the ``maintenancer`` tool has a STABLE, FLAT, SORTED shape to bind to
-(Emperor addendum, 2026-11-21: "the register function should include like
-service tag name, category, module information (use for metric,
-management,..debug easier) … Later we may even have tool for maintenancer
-agent to use or even a table chart on metrics tabs").
+PURE FUNCTIONS over INJECTED sources: the router injects the rows, the
+engine snapshot, the convergence mapping, the resolved switch states and
+the bounded runs tail. Observation-only contract: **no engine-state
+mutation; the catalog fold drains its own metrics ring** (``event_view``
+composes the P5 registry's ``snapshot()``, whose CONSUMING READ contract
+folds the hot ring into per-kind totals and drains it — P5 rider-5; the
+engine-tick-side periodic flush is P4's half). This module exists so a
+future ``/metrics`` UI tab or the ``maintenancer`` tool has a STABLE,
+FLAT, SORTED shape to bind to (Emperor addendum, 2026-11-21: "the
+register function should include like service tag name, category, module
+information (use for metric, management,..debug easier) … Later we may
+even have tool for maintenancer agent to use or even a table chart on
+metrics tabs").
 
 Views
 -----
