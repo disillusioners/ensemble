@@ -175,6 +175,63 @@ class TestSpecValidation:
     def test_jitter_boundary_zero_is_accepted(self):
         validate_spec(_spec(trigger=IntervalTrigger(seconds=90, jitter_seconds=0)))
 
+    # ── FOLD-1: non-finite numbers are rejected on EVERY numeric rule ──
+    #
+    # NaN is False against EVERY comparison, so a bare ``x < 1`` admits it;
+    # +Inf passes any ``> 0``. These pins exist because the guards are
+    # negated finite predicates, not because the ranges changed.
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_interval_seconds_rejects_non_finite(self, bad):
+        with pytest.raises(EngineSpecError) as ei:
+            validate_spec(_spec(trigger=IntervalTrigger(seconds=bad)))
+        assert ei.value.code == "SPEC_INTERVAL"
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_jitter_seconds_rejects_non_finite(self, bad):
+        with pytest.raises(EngineSpecError) as ei:
+            validate_spec(
+                _spec(trigger=IntervalTrigger(seconds=90, jitter_seconds=bad))
+            )
+        assert ei.value.code == "SPEC_JITTER"
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_first_tick_offset_seconds_rejects_non_finite(self, bad):
+        with pytest.raises(EngineSpecError) as ei:
+            validate_spec(
+                _spec(
+                    trigger=IntervalTrigger(
+                        seconds=90, first_tick_offset_seconds=bad
+                    )
+                )
+            )
+        assert ei.value.code == "SPEC_INTERVAL"
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_max_runtime_rejects_non_finite(self, bad):
+        with pytest.raises(EngineSpecError) as ei:
+            validate_spec(_spec(max_runtime_s=bad))
+        assert ei.value.code == "SPEC_MAX_RUNTIME"
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    @pytest.mark.parametrize(
+        "field", ["retry_backoff_base_s", "retry_backoff_cap_s"]
+    )
+    def test_retry_backoff_rejects_non_finite(self, field, bad):
+        """A non-finite backoff hangs ``run_with_retry``'s sleep forever."""
+        with pytest.raises(EngineSpecError) as ei:
+            validate_spec(_spec(**{field: bad}))
+        assert ei.value.code == "SPEC_RETRY"
+
+    def test_finite_backoff_values_are_accepted(self):
+        validate_spec(_spec(retry_backoff_base_s=0.0, retry_backoff_cap_s=5.0))
+        validate_spec(_spec(retry_backoff_base_s=None, retry_backoff_cap_s=None))
+
+    def test_negative_backoff_is_rejected(self):
+        with pytest.raises(EngineSpecError) as ei:
+            validate_spec(_spec(retry_backoff_base_s=-1.0))
+        assert ei.value.code == "SPEC_RETRY"
+
     def test_first_tick_kind_restricted(self):
         with pytest.raises(EngineSpecError) as ei:
             validate_spec(
@@ -214,13 +271,20 @@ class TestSpecValidation:
         assert ei.value.job_id == "orphan-watcher"
         assert ei.value.code in str(ei.value)
 
-    def test_all_nine_codes_are_distinct(self):
+    def test_all_typed_codes_are_distinct(self):
         """The production error-code literals in spec.py are the documented set.
 
         This reads the REAL ``raise EngineSpecError("SPEC_...")`` literals out
         of spec.py so a forgotten/renamed/duplicated code REDs here — a
         literal set compared only against itself (the old shape) could never
         fail.
+
+        The set grew by ONE code in the stage-review pass: ``SPEC_RETRY``
+        (the finite-number guard for ``retry_backoff_base_s`` /
+        ``retry_backoff_cap_s``). D1.12 carried no code for the backoff
+        pair — the new code is reported, not smuggled in under an existing
+        one (a non-finite backoff hangs ``run_with_retry``'s sleep, which is
+        a different failure than a bad cadence or a bad runtime bound).
         """
         import re
 
@@ -238,6 +302,7 @@ class TestSpecValidation:
             "SPEC_EVENT",
             "SPEC_TIMEOUT_POLICY",
             "SPEC_CONCURRENCY",
+            "SPEC_RETRY",
         }
 
 

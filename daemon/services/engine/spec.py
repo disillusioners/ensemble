@@ -20,7 +20,8 @@ data-only:
   lines 110-131).
 * :class:`EngineSpecError` — the typed validation error; ONE code per
   rule so a rejected registration names its own rule.
-* :func:`validate_spec` — the 9 validation rules from D1.12.
+* :func:`validate_spec` — the D1.12 validation rules (plus the
+  ``SPEC_RETRY`` finite-number guard for the retry backoff pair).
 
 **T1.10 — the TriggerSpec seam (why this is frozen now).** P2 and P5 must
 be able to run in parallel on disjoint trees
@@ -55,6 +56,7 @@ outside their model module. Terminal state is expressed as
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -374,11 +376,34 @@ class JobSpec:
         )
 
 
-# ── validation (the 9 rules from D1.12) ─────────────────────────────────
+# ── validation (the D1.12 rules + the finite-number guards) ────────────
+
+
+def _is_finite_number(value: Any) -> bool:
+    """True when ``value`` is a real, FINITE number (``bool`` excluded).
+
+    The numeric rules below are written as comparisons (``x < 1``,
+    ``x > 0``). IEEE-754 comparison semantics make every one of them
+    silently ADMIT a non-finite value:
+
+    * ``NaN`` is False against EVERY comparison, so ``NaN < 1`` is False
+      and a NaN cadence/limit passes a ``<``-only guard untouched;
+    * ``+Inf`` passes any ``> 0`` guard, and an infinite retry backoff
+      turns the dispatch retry sleep into a never-returning wait.
+
+    A float that is not a finite real number is not a cadence, a limit or
+    a backoff, so every numeric rule first asks this predicate and maps a
+    failure to that rule's OWN typed code (``SPEC_RETRY`` for the retry
+    backoff pair — a rule the D1.12 list did not carry, added here because
+    a non-finite backoff is a live hang, not a cosmetic wart).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value)
 
 
 def validate_spec(spec: JobSpec) -> None:
-    """Validate a registration spec against the substrate's 9 rules.
+    """Validate a registration spec against the substrate's rules.
 
     Every rule raises :class:`EngineSpecError` with its OWN stable code so
     a rejected registration names exactly which rule it broke.
@@ -389,24 +414,32 @@ def validate_spec(spec: JobSpec) -> None:
     ``SPEC_ID``             ``id`` is a non-empty string with no whitespace
     ``SPEC_SERVICE_TAG``    ``service_tag`` is a non-empty string
     ``SPEC_CATEGORY``       ``category`` is a non-empty string
-    ``SPEC_INTERVAL``       interval trigger: ``seconds >= 1`` (R1)
-    ``SPEC_MAX_RUNTIME``    ``max_runtime_s > 0`` (R2)
+    ``SPEC_INTERVAL``       interval trigger: ``seconds`` finite and >= 1 (R1)
+    ``SPEC_MAX_RUNTIME``    ``max_runtime_s`` finite and > 0 (R2)
     ``SPEC_PRIORITY``       ``priority`` in 0..9 (R3)
-    ``SPEC_JITTER``         ``jitter_seconds is None or >= 0`` (R4)
+    ``SPEC_JITTER``         ``jitter_seconds`` None or finite and >= 0 (R4)
     ``SPEC_TRIGGER_COUNT``  exactly ONE trigger, of a known kind (R5)
     ``SPEC_TIMEOUT_POLICY`` ``timeout_policy`` in {cancel, extend} (R6)
     ``SPEC_CONCURRENCY``    ``concurrency_class`` in the 3 known classes (R7)
+    ``SPEC_RETRY``          ``retry_backoff_*`` None or finite and >= 0
 
-    Two further rules ride the trigger shape rather than a separate code:
+    Three further rules ride the trigger shape rather than a separate code:
 
     * an interval trigger's ``first_tick_kind``, when set, must be one of
       ``immediate`` / ``delayed`` → ``SPEC_INTERVAL``;
+    * an interval trigger's ``first_tick_offset_seconds``, when set, must
+      be finite and >= 0 → ``SPEC_INTERVAL``;
     * an event trigger's ``kind`` must be a non-empty string →
       ``SPEC_INTERVAL`` is NOT reused for this: see ``SPEC_EVENT``.
 
     ============  ====================================================
     ``SPEC_EVENT``          event trigger: ``kind`` is a non-empty string
     ============  ====================================================
+
+    NON-FINITE NUMBERS (``NaN`` / ``+Inf`` / ``-Inf``) are rejected by
+    EVERY numeric rule. The guards are written as negated predicates
+    (``not (finite and in-range)``) precisely because a bare comparison
+    admits NaN (all comparisons false) and +Inf (passes ``> 0``).
 
     Args:
         spec: The candidate registration.
@@ -449,18 +482,24 @@ def validate_spec(spec: JobSpec) -> None:
             job_id,
         )
 
-    # R1 / R4 + first-tick shape.
+    # R1 / R4 + first-tick shape. EVERY numeric guard is a NEGATED
+    # predicate over ``math.isfinite`` so NaN (False against every
+    # comparison) and +Inf cannot slip through a bare ``<``/``>``.
     if isinstance(trigger, IntervalTrigger):
-        if trigger.seconds < 1:
+        if not (_is_finite_number(trigger.seconds) and trigger.seconds >= 1):
             raise EngineSpecError(
                 "SPEC_INTERVAL",
-                f"interval_seconds must be >= 1 (got {trigger.seconds!r})",
+                f"interval_seconds must be finite and >= 1 "
+                f"(got {trigger.seconds!r})",
                 job_id,
             )
-        if trigger.jitter_seconds is not None and trigger.jitter_seconds < 0:
+        if trigger.jitter_seconds is not None and not (
+            _is_finite_number(trigger.jitter_seconds) and trigger.jitter_seconds >= 0
+        ):
             raise EngineSpecError(
                 "SPEC_JITTER",
-                f"jitter_seconds must be >= 0 (got {trigger.jitter_seconds!r})",
+                f"jitter_seconds must be finite and >= 0 "
+                f"(got {trigger.jitter_seconds!r})",
                 job_id,
             )
         if (
@@ -474,13 +513,13 @@ def validate_spec(spec: JobSpec) -> None:
                 f"{trigger.first_tick_kind!r})",
                 job_id,
             )
-        if (
-            trigger.first_tick_offset_seconds is not None
-            and trigger.first_tick_offset_seconds < 0
+        if trigger.first_tick_offset_seconds is not None and not (
+            _is_finite_number(trigger.first_tick_offset_seconds)
+            and trigger.first_tick_offset_seconds >= 0
         ):
             raise EngineSpecError(
                 "SPEC_INTERVAL",
-                "first_tick_offset_seconds must be >= 0 (got "
+                "first_tick_offset_seconds must be finite and >= 0 (got "
                 f"{trigger.first_tick_offset_seconds!r})",
                 job_id,
             )
@@ -496,10 +535,10 @@ def validate_spec(spec: JobSpec) -> None:
         # express that through the union — no check needed.
 
     # R2.
-    if not (spec.max_runtime_s > 0):
+    if not (_is_finite_number(spec.max_runtime_s) and spec.max_runtime_s > 0):
         raise EngineSpecError(
             "SPEC_MAX_RUNTIME",
-            f"max_runtime_s must be > 0 (got {spec.max_runtime_s!r})",
+            f"max_runtime_s must be finite and > 0 (got {spec.max_runtime_s!r})",
             job_id,
         )
 
@@ -516,6 +555,23 @@ def validate_spec(spec: JobSpec) -> None:
             f"priority must be in 0..9 (got {spec.priority!r})",
             job_id,
         )
+
+    # R8 (SPEC_RETRY — the finite-number guard for the retry backoff pair).
+    # A non-finite backoff is not a cosmetic wart: ``run_with_retry``
+    # sleeps ``min(cap, base * 2**(attempt-1))``, so +Inf (or a NaN cap
+    # that makes ``min`` return the base) turns the retry lane into a hang
+    # the tick loop can never interrupt. D1.12 carried no code for the
+    # backoff pair, so this is the one NEW typed code in this pass.
+    for field_name, value in (
+        ("retry_backoff_base_s", spec.retry_backoff_base_s),
+        ("retry_backoff_cap_s", spec.retry_backoff_cap_s),
+    ):
+        if value is not None and not (_is_finite_number(value) and value >= 0):
+            raise EngineSpecError(
+                "SPEC_RETRY",
+                f"{field_name} must be finite and >= 0 (got {value!r})",
+                job_id,
+            )
 
     # R6.
     if spec.timeout_policy not in TIMEOUT_POLICIES:
