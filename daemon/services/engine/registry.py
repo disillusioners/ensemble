@@ -41,6 +41,7 @@ session itself.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -54,6 +55,77 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
 __all__ = ["EngineRegistry"]
 
 logger = logging.getLogger(__name__)
+
+#: The registration-CONTENT columns of an ``engine_jobs`` row — the fields
+#: that define WHAT is registered. The no-op echo compares exactly these
+#: (DB row vs the candidate shape ``JobSpec.to_row_dict()`` would persist).
+#: Deliberately EXCLUDED: ``version``, ``last_run_at``, ``last_outcome``,
+#: ``last_skip_reason``, ``consecutive_skips``, ``dead`` (runtime/last-outcome
+#: state) and ``registered_at`` / ``updated_at`` (timestamps). A change to
+#: any of those must NOT be read as "the registration content changed".
+_REGISTRATION_CONTENT_COLUMNS: tuple[str, ...] = (
+    "service_tag",
+    "service_name",
+    "category",
+    "module_info",
+    "description",
+    "job_metadata",  # JSON-backed (model attr for the ``metadata`` column)
+    "trigger_kind",
+    "interval_seconds",
+    "jitter_seconds",
+    "first_tick_kind",
+    "first_tick_offset_seconds",
+    "event_kind",
+    "event_filter",  # JSON-backed
+    "max_runtime_s",
+    "timeout_policy",
+    "retry_max",
+    "retry_backoff_base_s",
+    "retry_backoff_cap_s",
+    "priority",
+    "concurrency_class",
+    "kill_switch_key",
+    "enabled",
+)
+
+#: JSON-backed columns: compare parsed-equal, not string-equal, so a JSON
+#: key-order / serialization difference cannot fake a content change.
+_JSON_CONTENT_COLUMNS = frozenset({"job_metadata", "event_filter"})
+
+
+def _json_normalized(value: Any) -> Any:
+    """Parse a JSON-backed column value so serialization order cannot matter.
+
+    Depending on the backend a JSONB column reads back as a dict or as JSON
+    text. Parsing text first makes both shapes compare by VALUE. Floats and
+    scalars are left untouched ("compare as stored").
+    """
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (ValueError, TypeError):
+            return value
+    return value
+
+
+def _registration_content_matches(
+    existing: EngineJob, candidate: dict[str, Any]
+) -> bool:
+    """True when ``candidate`` would write no registration-content change.
+
+    Grounds the no-op echo on the DB row (D1.5 "answerable from the DB
+    alone"): a fresh registry with an empty RAM cache still echoes an
+    identical spec instead of turning ``version`` into a boot counter (D-2).
+    """
+    for column in _REGISTRATION_CONTENT_COLUMNS:
+        stored = getattr(existing, column)
+        proposed = candidate.get(column)
+        if column in _JSON_CONTENT_COLUMNS:
+            stored = _json_normalized(stored)
+            proposed = _json_normalized(proposed)
+        if stored != proposed:
+            return False
+    return True
 
 
 class EngineRegistry:
@@ -137,11 +209,38 @@ class EngineRegistry:
         fingerprint = spec.content_fingerprint()
         cached = self._cache.get(spec.id)
 
-        # Identical re-registration — no-op echo (AC5). No DB write.
+        # RAM-cache fast path (same-process echo). A cache hit means THIS
+        # process already wrote a row with this exact fingerprint, so —
+        # absent an out-of-band DB mutation — the DB row's registration
+        # content is identical and the DB compare below would return the
+        # SAME verdict. Echoing here (without a DB read) is therefore
+        # provably correct for the same-process case (AC5 semantics kept).
         if cached is not None and cached["fingerprint"] == fingerprint:
             return int(cached["version"])
 
         existing = self._repository.get_job(spec.id)
+        row_kwargs = spec.to_row_dict()
+
+        # DB-grounded no-op echo (D-2 / D1.5). After a restart the RAM cache
+        # is empty; the same spec must still echo the stored version when
+        # the persisted registration content matches, otherwise P4's
+        # boot-time registration of N observer specs turns ``version`` into
+        # a boot counter and moves ``updated_at`` on every boot. Compare
+        # ONLY the registration-content columns — run history and
+        # timestamps are not part of "same registration".
+        if existing is not None and _registration_content_matches(
+            existing, row_kwargs
+        ):
+            version = int(existing.version)
+            # Refresh the RAM cache for hot reads; NO DB write, so version
+            # and updated_at are left exactly as stored.
+            self._cache[spec.id] = {
+                "version": version,
+                "fingerprint": fingerprint,
+                "spec": spec,
+            }
+            return version
+
         if existing is None:
             version = 1
             registered_at = now_utc_iso()
@@ -150,7 +249,6 @@ class EngineRegistry:
             registered_at = existing.registered_at or now_utc_iso()
 
         now = now_utc_iso()
-        row_kwargs = spec.to_row_dict()
         row_kwargs.update(
             {
                 "version": version,

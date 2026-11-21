@@ -47,8 +47,10 @@
 -- ROLLBACK POSTURE: additive only. DOWN drops only this new table and
 -- its indexes -- fix-loss for run history, never an incompatibility.
 --
--- No semicolon inside any comment (the runner strips full-line comments
--- but not inline ones, and it splits statements on semicolons).
+-- No semicolon in any TRAILING (inline) comment: the runner strips
+-- full-line comments but not inline ones, and it splits statements on
+-- semicolons, so a ';' in a trailing comment would split a statement early.
+-- (A ';' inside a FULL-LINE comment is harmless -- those are stripped.)
 
 -- UP
 

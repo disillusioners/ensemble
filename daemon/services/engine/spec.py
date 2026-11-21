@@ -240,8 +240,11 @@ class EventTrigger:
         return "event"
 
 
-#: The trigger union. Both members are frozen dataclasses, so a
-#: ``JobSpec`` carrying one is hashable/immutable from registration time.
+#: The trigger union. Both members are frozen dataclasses (immutable field
+#: bindings), but that does NOT make every ``JobSpec`` hashable: an
+#: ``EventTrigger`` with a ``filter`` mapping holds a dict, which is
+#: unhashable. When a comparable identity is needed (e.g. the re-registration
+#: no-op check), use ``JobSpec.content_fingerprint()`` instead of hashing.
 TriggerSpec = IntervalTrigger | EventTrigger
 
 

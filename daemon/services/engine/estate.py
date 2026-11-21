@@ -68,7 +68,7 @@ CONTINUITY_JOBS: tuple[ContinuitySpec, ...] = (
     ContinuitySpec(
         job_id="watch-reconcile",
         services_attr="watch_reconcile_sweep_interval_seconds",
-        default_seconds=300,  # config.py:2920 (Field(default=300))
+        default_seconds=300,  # config.py:2915 (Field(default=300))
         category="reconciler",
         service_tag="watch-reconcile-sweep",
         module_info="daemon.services.watch_reconcile_sweep",
@@ -76,7 +76,7 @@ CONTINUITY_JOBS: tuple[ContinuitySpec, ...] = (
     ContinuitySpec(
         job_id="mission-strand-heal",
         services_attr="mission_strand_heal_interval_seconds",
-        default_seconds=300,  # config.py:2952 (Field(default=300))
+        default_seconds=300,  # config.py:2947 (Field(default=300))
         category="reconciler",
         service_tag="mission-strand-heal",
         module_info="daemon.services.mission_strand_healer",
@@ -84,7 +84,7 @@ CONTINUITY_JOBS: tuple[ContinuitySpec, ...] = (
     ContinuitySpec(
         job_id="report-delivery-recovery",
         services_attr="report_delivery_recovery_interval_seconds",
-        default_seconds=300,  # config.py:2281 (Field(default=300))
+        default_seconds=300,  # config.py:2276 (Field(default=300))
         category="recovery_sweep",
         service_tag="report-delivery-recovery",
         # Read site: daemon/services/pool_orchestrator.py:370 (inside the
@@ -94,7 +94,7 @@ CONTINUITY_JOBS: tuple[ContinuitySpec, ...] = (
     ContinuitySpec(
         job_id="sources-gc",
         services_attr="sources_gc_interval_seconds",
-        default_seconds=3600,  # config.py:3068 (Field(default=3600))
+        default_seconds=3600,  # config.py:3063 (Field(default=3600))
         category="housekeeping",
         service_tag="sources-gc",
         module_info="daemon.services.sources_gc_service",
@@ -102,7 +102,7 @@ CONTINUITY_JOBS: tuple[ContinuitySpec, ...] = (
     ContinuitySpec(
         job_id="eligible-pending",
         services_attr="eligible_pending_sweep_interval_seconds",
-        default_seconds=90,  # config.py:2678 (Field(default=90))
+        default_seconds=90,  # config.py:2673 (Field(default=90))
         category="recovery_sweep",
         service_tag="eligible-pending-sweep",
         module_info="daemon.services.eligible_pending_sweep",
@@ -110,7 +110,7 @@ CONTINUITY_JOBS: tuple[ContinuitySpec, ...] = (
     ContinuitySpec(
         job_id="orphan-watcher",
         services_attr="orphan_watcher_sweep_interval_seconds",
-        default_seconds=90,  # config.py:2709 (Field(default=90))
+        default_seconds=90,  # config.py:2704 (Field(default=90))
         category="reconciler",
         service_tag="orphan-watcher-sweep",
         module_info="daemon.services.orphan_watcher_sweep",
@@ -118,7 +118,7 @@ CONTINUITY_JOBS: tuple[ContinuitySpec, ...] = (
     ContinuitySpec(
         job_id="job-lock",
         services_attr="job_lock_sweep_interval_seconds",
-        default_seconds=90,  # config.py:2785 (Field(default=90))
+        default_seconds=90,  # config.py:2780 (Field(default=90))
         category="reconciler",
         service_tag="job-lock-sweep",
         module_info="daemon.services.job_lock_sweep",
@@ -126,7 +126,7 @@ CONTINUITY_JOBS: tuple[ContinuitySpec, ...] = (
     ContinuitySpec(
         job_id="tmp-image",
         services_attr="tmp_image_cleanup_interval_seconds",
-        default_seconds=3600,  # config.py:3155 (Field(default=3600))
+        default_seconds=3600,  # config.py:3150 (Field(default=3600))
         category="housekeeping",
         service_tag="tmp-image-cleanup",
         module_info="daemon.services.tmp_image_cleanup_service",
@@ -134,7 +134,7 @@ CONTINUITY_JOBS: tuple[ContinuitySpec, ...] = (
     ContinuitySpec(
         job_id="plane-sync-watchdog",
         services_attr="plane_sync_watchdog_interval_seconds",
-        default_seconds=300,  # config.py:2846 (Field(default=300))
+        default_seconds=300,  # config.py:2841 (Field(default=300))
         category="realtime_guard",
         service_tag="plane-sync-watchdog",
         module_info="daemon.services.plane_sync_watchdog_service",
@@ -142,7 +142,7 @@ CONTINUITY_JOBS: tuple[ContinuitySpec, ...] = (
     ContinuitySpec(
         job_id="stale-pause",
         services_attr="stale_pause_sweep_interval_seconds",
-        default_seconds=300,  # config.py:2448 (Field(default=300))
+        default_seconds=300,  # config.py:2443 (Field(default=300))
         category="recovery_sweep",
         service_tag="stale-pause-sweep",
         module_info="daemon.services.stale_pause_sweep",
@@ -150,7 +150,7 @@ CONTINUITY_JOBS: tuple[ContinuitySpec, ...] = (
     ContinuitySpec(
         job_id="waiting-children-watchdog",
         services_attr="waiting_children_watchdog_interval_seconds",
-        default_seconds=3600,  # config.py:2633 (Field(default=3600))
+        default_seconds=3600,  # config.py:2628 (Field(default=3600))
         category="realtime_guard",
         service_tag="waiting-children-watchdog",
         module_info="daemon.services.waiting_children_watchdog",
@@ -158,7 +158,7 @@ CONTINUITY_JOBS: tuple[ContinuitySpec, ...] = (
     ContinuitySpec(
         job_id="drift-reconcile",
         services_attr="drift_reconcile_interval_seconds",
-        default_seconds=300,  # config.py:2260 (Field(default=300))
+        default_seconds=300,  # config.py:2255 (Field(default=300))
         category="reconciler",
         service_tag="drift-reconcile",
         # The loop lives on the daemon module today (def

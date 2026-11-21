@@ -215,7 +215,18 @@ class TestSpecValidation:
         assert ei.value.code in str(ei.value)
 
     def test_all_nine_codes_are_distinct(self):
-        codes = {
+        """The production error-code literals in spec.py are the documented set.
+
+        This reads the REAL ``raise EngineSpecError("SPEC_...")`` literals out
+        of spec.py so a forgotten/renamed/duplicated code REDs here — a
+        literal set compared only against itself (the old shape) could never
+        fail.
+        """
+        import re
+
+        src = inspect.getsource(spec_mod)
+        production = set(re.findall(r'"(SPEC_[A-Z_]+)"', src))
+        assert production == {
             "SPEC_ID",
             "SPEC_SERVICE_TAG",
             "SPEC_CATEGORY",
@@ -228,7 +239,6 @@ class TestSpecValidation:
             "SPEC_TIMEOUT_POLICY",
             "SPEC_CONCURRENCY",
         }
-        assert len(codes) == 11  # 9 D1.12 rules + the 2 id/label rules
 
 
 # ── AC6: self-describing metadata ──────────────────────────────────────
@@ -352,6 +362,50 @@ class TestRegistrationContract:
         second = repo.get_job("orphan-watcher")
         assert second.version == 1
         assert second.updated_at == first.updated_at  # NO churn at all
+
+    def test_db_grounded_echo_across_registry_instances(self):
+        """D-2: a FRESH registry (empty RAM cache) must echo, not bump.
+
+        Simulates a restart: register via one instance, then register the
+        identical spec through a brand-new instance over the same DB. The
+        echo must be grounded on the DB row (D1.5), so version stays 1 and
+        updated_at does not move. A changed spec then still bumps to 2.
+        """
+        engine = _engine()
+        repo = EngineRepository(engine)
+        reg_a = EngineRegistry(repo)
+        spec = _spec()
+        assert reg_a.register(spec) == 1
+        first = repo.get_job("orphan-watcher")
+        first_updated = first.updated_at
+
+        reg_b = EngineRegistry(repo)  # fresh instance — empty cache
+        assert reg_b.cached_version("orphan-watcher") is None
+        assert reg_b.register(spec) == 1  # DB-grounded echo
+        second = repo.get_job("orphan-watcher")
+        assert second.version == 1
+        assert second.updated_at == first_updated  # no updated_at churn
+
+        # A genuinely changed spec still bumps through the fresh registry.
+        assert reg_b.register(_spec(trigger=IntervalTrigger(seconds=120))) == 2
+        third = repo.get_job("orphan-watcher")
+        assert third.version == 2
+
+    def test_db_grounded_echo_normalizes_json_key_order(self):
+        """D-2: JSON metadata/event_filter key order cannot fake a bump."""
+        engine = _engine()
+        repo = EngineRepository(engine)
+        reg_a = EngineRegistry(repo)
+        reg_a.register(
+            _spec(meta=_meta(metadata={"owner": "a", "docs": "b", "slo": "c"}))
+        )
+        # Same content, different insertion order, fresh registry (DB path).
+        reg_b = EngineRegistry(repo)
+        reordered = _spec(
+            meta=_meta(metadata={"slo": "c", "docs": "b", "owner": "a"})
+        )
+        assert reg_b.register(reordered) == 1
+        assert repo.get_job("orphan-watcher").version == 1
 
     def test_changed_spec_bumps_version_and_moves_updated_at(self):
         repo = EngineRepository(_engine())
