@@ -3540,11 +3540,15 @@ class EngineConfig(BaseSettings):
         description=(
             "Ceiling (seconds) for an extend-policy await before the "
             "dispatch is treated as a late failure (W-2). On breach the "
-            "existing TPE/dead escalation path takes over. A bounded "
-            "asyncio.gather cancels the awaited dispatch first, but a "
-            "to_thread payload already past cancellation cannot be force-"
-            "killed — the gather bounds the AWAIT, not the thread "
-            "(residual thread-escape window). "
+            "existing TPE/dead escalation path takes over. The await is "
+            "bounded by asyncio.wait_for(asyncio.shield(task), "
+            "timeout=ceiling); on breach the task is then cancelled "
+            "(task.cancel()) and a bounded asyncio.gather awaits only the "
+            "cancelled task's settle. The to_thread payloads at "
+            "daemon/services/engine/execution.py:148/:184/:293 are NOT "
+            "bounded by this await ceiling — a payload already past "
+            "cancellation cannot be force-killed (residual thread-escape "
+            "window). "
             "Env: ENSEMBLE_ENGINE_EXTEND_CEILING_SECONDS."
         ),
     )
