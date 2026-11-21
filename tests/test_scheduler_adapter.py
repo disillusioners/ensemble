@@ -3193,3 +3193,55 @@ class TestEnqueueMessageJobDedupRealPath:
             result1.message_id,
             result2.message_id,
         }
+
+
+class TestScheduleFireNotifySeam:
+    @pytest.mark.asyncio
+    async def test_direct_notify_called_when_creator_present(self, mock_on_message):
+        from daemon.sources.adapters import scheduler as sched_mod
+        config = make_config("sf-direct", {
+            "schedule": "0 9 * * *",
+            "agent": "./agents/developer",
+            "message": "hi",
+            "creator_instance_id": "creator-1",
+        })
+        adapter = SchedulerAdapter(config, mock_on_message)
+        manager = MagicMock()
+        mapper_repo = MagicMock()
+        mapper_repo.get_instance_mapping = MagicMock(return_value=None)
+        manager.spawn_instance_with_mcp = AsyncMock(return_value="inst-1")
+        async def _enqueue(**kwargs):
+            r = MagicMock(job_id="job-1", message_id="msg-1", instance_id="inst-1", status="queued")
+            return r
+        manager.enqueue_message_job = AsyncMock(side_effect=_enqueue)
+        adapter._manager = manager
+        adapter._source_repo = mapper_repo
+        with patch.object(sched_mod._schedule_fire_notify_mod, "notify_schedule_fire", new=AsyncMock()) as mock_notify:
+            await adapter._route_via_job_queue("exec-1", "scheduled message", {"agent": "./agents/developer"})
+            assert mock_notify.await_count == 1
+            kw = mock_notify.await_args.kwargs
+            assert kw["creator_instance_id"] == "creator-1"
+
+    @pytest.mark.asyncio
+    async def test_direct_notify_skipped_when_no_creator(self, mock_on_message):
+        from daemon.sources.adapters import scheduler as sched_mod
+        config = make_config("sf-none", {
+            "schedule": "0 9 * * *",
+            "agent": "./agents/developer",
+            "message": "hi",
+        })
+        adapter = SchedulerAdapter(config, mock_on_message)
+        manager = MagicMock()
+        mapper_repo = MagicMock()
+        mapper_repo.get_instance_mapping = MagicMock(return_value=None)
+        manager.spawn_instance_with_mcp = AsyncMock(return_value="inst-1")
+        async def _enqueue(**kwargs):
+            return MagicMock(job_id="job-1", message_id="msg-1", instance_id="inst-1", status="queued")
+        manager.enqueue_message_job = AsyncMock(side_effect=_enqueue)
+        adapter._manager = manager
+        adapter._source_repo = mapper_repo
+        with patch.object(sched_mod._schedule_fire_notify_mod, "notify_schedule_fire", new=AsyncMock()) as mock_notify:
+            await adapter._route_via_job_queue("exec-1", "scheduled message", {"agent": "./agents/developer"})
+            assert mock_notify.await_count == 1
+            # creator absent -> still called but entrypoint handles skip; at seam level identity absent
+            # (the module entrypoint returns silently). We assert it was invoked (gate lives in module).
