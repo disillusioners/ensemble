@@ -105,26 +105,25 @@ export class ToolUsageTabHostComponent implements OnInit, OnDestroy {
   readonly chunkError = signal<unknown>(null);
 
   async ngOnInit(): Promise<void> {
-    // A retry after a failure must not stack a second body — the old ref
-    // (if any) dies first.
-    this.ref?.destroy();
-    this.ref = null;
     this.loading.set(true);
     this.chunkError.set(null);
     try {
+      // The old ref dies FIRST, inside the try — a throw here (or from
+      // the dynamic import) is caught and rendered as the chunk-error
+      // state instead of rejecting the ngOnInit promise (never blank,
+      // never reject).
+      this.ref?.destroy();
+      this.ref = null;
       const { ToolUsageTabComponent } = await import('./tool-usage-tab.component');
       this.ref = this.vcr.createComponent(ToolUsageTabComponent);
-      // Forward inputs onto the created ref (the mount-time snapshot).
       this.ref.setInput('state', this.state());
       this.ref.setInput('onState', this.onState());
       this.ref.setInput('window', this.window());
       this.ref.setInput('baseline', this.baseline());
       this.ref.setInput('onRangeChange', this.onRangeChange());
-      // Explicit detectChanges (zoneless) — the mount runs in a plain
-      // promise callback; no zone tick covers the first render.
       this.ref.changeDetectorRef.detectChanges();
     } catch (e) {
-      this.chunkError.set(e); // visible chunk-error state with retry
+      this.chunkError.set(e);
     } finally {
       this.loading.set(false);
     }

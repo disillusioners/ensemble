@@ -20,7 +20,6 @@
 
 import {
   ToolUsageDailySeries,
-  ToolUsageErrorCode,
   ToolUsageDomainErrorCode,
   ToolUsageReusableErrorCode,
   ToolUsageRow,

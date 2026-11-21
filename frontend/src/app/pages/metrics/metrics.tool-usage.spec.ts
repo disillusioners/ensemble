@@ -455,6 +455,16 @@ describe('ToolUsageTabComponent — the summary source', () => {
     // R4 — the 7d column never says "current".
     expect((fixture.nativeElement.querySelector('[data-test="tool-usage-table"]').textContent ?? '')).not.toContain('current');
   });
+
+  it('the heading carries the SERVER\u2019s instant (never the client clock) — M17', () => {
+    // The generatedAt signal is seeded from payload.generated_at, so the
+    // heading proves the timestamp is the daemon\u2019s, not the client\u2019s.
+    answerSummary([row()]);
+    const stamp = fixture.nativeElement.querySelector('[data-test="tool-usage-generated-at"]');
+    expect(stamp).not.toBeNull();
+    expect((stamp.textContent ?? '')).toContain('2026-11-21T01:00:00+00:00');
+    expect((stamp.textContent ?? '')).toContain('server clock');
+  });
 });
 
 describe('the tool-usage tab — the template-safety + lazy-mechanism pins', () => {

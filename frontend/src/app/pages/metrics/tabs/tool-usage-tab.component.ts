@@ -20,12 +20,11 @@ import {
   MetricsTabState,
   MetricsTabStateReporter,
 } from '../metrics-state';
-import {
-  MetricsRangeOption,
-} from '../metrics-range';
+import { MetricsRangeOption } from '../metrics-range';
 import { metricsTabById } from '../tabs.manifest';
 import { ProjectService } from '../../../services/project.service';
 import { Project } from '../../../models/project.model';
+import { ResourcesWindow } from '../../../models/resources.models';
 import { ToolUsageService } from '../../../services/tool-usage.service';
 import {
   ToolUsageBanner,
@@ -40,7 +39,6 @@ import {
 import { HouseSvgRendererComponent } from '../../../components/charts/house-svg-renderer/house-svg-renderer.component';
 import { ChartSeries } from '../../../components/charts/house-svg-renderer/house-svg-renderer';
 import { chartSeriesColor } from '../../../components/charts/chart-theme';
-import { ResourcesWindow } from '../../../models/resources.models';
 
 /**
  * The TOOL-USAGE tab body (the tool-usage-metrics-p1 lane, phase 4 —
@@ -128,6 +126,11 @@ import { ResourcesWindow } from '../../../models/resources.models';
         <span class="tab-hint">
           the layer-2 measurement surface — high-frequency vs zero/near-zero per tool
         </span>
+        @if (generatedAt(); as instant) {
+          <span class="tab-hint" data-test="tool-usage-generated-at">
+            as of {{ instant }} (server clock — never the client clock)
+          </span>
+        }
       </h3>
 
       <div class="tool-usage-controls">
@@ -624,8 +627,17 @@ export class ToolUsageTabComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
-    this.projectService.listProjects().subscribe((payload) => {
-      this.projects.set(payload.projects);
+    this.projectService.listProjects().subscribe({
+      next: (payload) => {
+        this.projects.set(payload.projects);
+      },
+      error: (err: unknown) => {
+        console.error('[tool-usage] project list failed:', err);
+        // No dedicated project-error signal exists (the component's
+        // existing error path is the summary banner); surface the failure
+        // there rather than inventing a new state shape.
+        this.summaryError.set(decodeToolUsageError(err));
+      },
     });
     document.addEventListener('visibilitychange', this.onVisibilityChange);
     this.pollHandle = setInterval(() => this.tick(), ToolUsageTabComponent.POLL_INTERVAL_MS);
@@ -666,7 +678,7 @@ export class ToolUsageTabComponent implements OnInit, OnDestroy {
 
   /** The project select — `''` means All projects (the param is omitted). */
   onProjectChange(value: string): void {
-    this.projectId.set(value ?? '');
+    this.projectId.set(value);
   }
 
   /** The window select — the tab-local ladder only. */
@@ -769,7 +781,7 @@ export class ToolUsageTabComponent implements OnInit, OnDestroy {
 
   /** The domain-local copy of a domain-only outcome. */
   domainCopy(code: ToolUsageDomainErrorCode) {
-    return TOOL_USAGE_DOMAIN_COPY[code as keyof typeof TOOL_USAGE_DOMAIN_COPY];
+    return TOOL_USAGE_DOMAIN_COPY[code];
   }
 
   /**
