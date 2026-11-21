@@ -34,11 +34,13 @@ import {
   METRICS_TABS,
   MetricsCentralTab,
   MetricsModuleEntry,
+  MetricsTabEntry,
   isMetricsTabId,
   metricsCopyVariantFor,
   metricsCustomTab,
   metricsTabById,
 } from './tabs.manifest';
+import { resolveWindowOnTabChange } from './metrics-range';
 import { METRICS_DOOR_ERROR_COPY } from '../../models/metrics.model';
 
 const metricsDir = join(__dirname);
@@ -66,9 +68,9 @@ function frozenResourcesWindows(): string[] {
 const CENTRAL_TABS = METRICS_CENTRAL_ENTRIES;
 const CUSTOM_TABS = METRICS_CUSTOM_ENTRIES;
 
-describe('the tab manifest — the 8 module tabs (2.1 / 2.2 + the nest-anomaly lane)', () => {
-  it('carries exactly 8 tabs', () => {
-    expect(METRICS_TABS).toHaveLength(8);
+describe('the tab manifest — the 9 module tabs (2.1 / 2.2 + the nest-anomaly + tool-usage lanes)', () => {
+  it('carries exactly 9 tabs', () => {
+    expect(METRICS_TABS).toHaveLength(9);
   });
 
   it('the tab ids are unique and stable', () => {
@@ -83,6 +85,7 @@ describe('the tab manifest — the 8 module tabs (2.1 / 2.2 + the nest-anomaly l
       'checkpoint',
       'mcp',
       'nest-reports',
+      'tool-usage',
     ]);
   });
 
@@ -92,7 +95,7 @@ describe('the tab manifest — the 8 module tabs (2.1 / 2.2 + the nest-anomaly l
     expect(METRICS_TABS[0].slot).toBe('custom');
   });
 
-  it('the labels match the plan-overview §4.1 table + the nest-reports ruling', () => {
+  it('the labels match the plan-overview §4.1 table + the nest-reports and tool-usage rulings', () => {
     expect(METRICS_TABS.map((tab) => tab.label)).toEqual([
       'Resources',
       'Runtime',
@@ -102,12 +105,25 @@ describe('the tab manifest — the 8 module tabs (2.1 / 2.2 + the nest-anomaly l
       'Checkpoint',
       'MCP',
       'Nest Reports',
+      'Tool Usage',
     ]);
   });
 
-  it('exactly ONE tab is the custom slot — the other seven are central', () => {
-    expect(CUSTOM_TABS).toHaveLength(1);
+  it('exactly TWO tabs are the custom slot — the other seven are central', () => {
+    expect(CUSTOM_TABS).toHaveLength(2);
     expect(CENTRAL_TABS).toHaveLength(7);
+  });
+
+  it('the custom roster is [resource, tool-usage] — METRICS_TABS declaration order, NOT id-alphabetical', () => {
+    // The two-custom-tab return shape is pinned EXPLICITLY (approver fix
+    // A4): count == 2 AND this exact sequence. The resource entry
+    // predates the appended tool-usage entry, so declaration order —
+    // not the id sort — decides.
+    expect(CUSTOM_TABS.map((tab) => tab.id)).toEqual(['resource', 'tool-usage']);
+    expect(CUSTOM_TABS.map((tab) => tab.label)).toEqual(['Resources', 'Tool Usage']);
+    // And the singular helper keeps returning the FIRST custom tab —
+    // the resource tab — in declaration order.
+    expect(metricsCustomTab().id).toBe('resource');
   });
 
   it('binds the EXACT family roster per tab (plan-overview §4.1 + F23)', () => {
@@ -123,6 +139,47 @@ describe('the tab manifest — the 8 module tabs (2.1 / 2.2 + the nest-anomaly l
       mcp: ['F17'],
       'nest-reports': ['F23'],
     });
+  });
+
+  it('the tool-usage entry carries the RULED custom shape (no familyIds, no copyVariant)', () => {
+    const entry = metricsTabById('tool-usage');
+    expect(entry).not.toBeNull();
+    expect(entry?.slot).toBe('custom');
+    expect(entry?.label).toBe('Tool Usage');
+    // A custom tab binds NO family — that is WHY it is custom:
+    // MetricsCentralTab requires familyIds and tool-usage is not a
+    // metrics family. There is no empty-array sentinel.
+    expect('familyIds' in (entry as object)).toBe(false);
+    expect('copyVariant' in (entry as object)).toBe(false);
+    // The ruled ladder + default (the measurement window).
+    expect([...(entry as { allowedWindows: readonly string[] }).allowedWindows]).toEqual([
+      '24h',
+      '7d',
+    ]);
+    expect((entry as { defaultWindowS: string }).defaultWindowS).toBe('7d');
+    // The entry is APPENDED (the 9th position — order is user-visible).
+    expect(METRICS_TABS[8]?.id).toBe('tool-usage');
+  });
+
+  it('the metrics-range SNAP — entering tool-usage from a 15m / 1h frame snaps to 7d', () => {
+    // The measurement window is the snap target: the tab's ladder cannot
+    // serve the central-only frames, so the frame snaps to the entry's
+    // defaultWindowS (3.2 — a snap is announced, never silent).
+    const entry = metricsTabById('tool-usage');
+    expect(entry).not.toBeNull();
+    const from15m = resolveWindowOnTabChange('15m', entry as MetricsTabEntry);
+    expect(from15m.window).toBe('7d');
+    expect(from15m.snapped).toBe(true);
+    const from1h = resolveWindowOnTabChange('1h', entry as MetricsTabEntry);
+    expect(from1h.window).toBe('7d');
+    expect(from1h.snapped).toBe(true);
+    // A frame the ladder CAN serve is kept, never snapped.
+    const from24h = resolveWindowOnTabChange('24h', entry as MetricsTabEntry);
+    expect(from24h.window).toBe('24h');
+    expect(from24h.snapped).toBe(false);
+    const from7d = resolveWindowOnTabChange('7d', entry as MetricsTabEntry);
+    expect(from7d.window).toBe('7d');
+    expect(from7d.snapped).toBe(false);
   });
 
   it('binds the BRACKETED planned families NOW (R-ii / R-i land with ZERO FE change)', () => {

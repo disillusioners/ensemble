@@ -154,9 +154,9 @@ class StubRoute {
 }
 
 describe('MetricsComponent — the manifest-driven tab list', () => {
-  it('carries exactly the eight tabs, in the manifest order', () => {
+  it('carries exactly the nine tabs, in the manifest order', () => {
     const shell = new MetricsShellMirror();
-    expect(shell.tabs).toHaveLength(8);
+    expect(shell.tabs).toHaveLength(9);
     expect(shell.tabs.map((tab) => tab.id)).toEqual([
       'resource',
       'runtime',
@@ -166,6 +166,7 @@ describe('MetricsComponent — the manifest-driven tab list', () => {
       'checkpoint',
       'mcp',
       'nest-reports',
+      'tool-usage',
     ]);
     expect(shell.tabs.map((tab) => tab.label)).toEqual([
       'Resources',
@@ -176,6 +177,7 @@ describe('MetricsComponent — the manifest-driven tab list', () => {
       'Checkpoint',
       'MCP',
       'Nest Reports',
+      'Tool Usage',
     ]);
   });
 
@@ -410,7 +412,7 @@ describe('MetricsComponent — the runtime render', () => {
     const labels = fixture.debugElement
       .queryAll(By.css('[role="tab"]'))
       .map((tab) => (tab.nativeElement.textContent ?? '').trim());
-    expect(labels.length).toBe(8);
+    expect(labels.length).toBe(9);
     for (const tab of METRICS_TABS) {
       expect(labels.some((label) => label.includes(tab.label))).toBe(true);
     }

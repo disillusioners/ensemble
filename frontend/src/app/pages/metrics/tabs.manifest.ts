@@ -228,8 +228,11 @@ export type MetricsModuleEntry =
   | MetricsDroppedModule;
 
 /**
- * The 8 MODULE TABS (plan-overview §4.1 + the nest-anomaly lane's
- * phase 4), in tab order.
+ * The 9 MODULE TABS (plan-overview §4.1 + the nest-anomaly lane's
+ * phase 4 + the tool-usage-metrics-p1 lane's phase 4), in tab order.
+ * The 9th entry (`tool-usage`, slot `custom`) is APPENDED — the tab
+ * order is user-visible (`?tab=` deep link + tab strip), never
+ * inserted. The census: 2 custom + 7 central.
  *
  * The BRACKETED planned families are BOUND and gated by availability
  * (ADJ-vi). Both blocking defects are now FIXED, so they appear with
@@ -362,6 +365,17 @@ export const METRICS_TABS = [
     // the frame owned it (the hardcoded 1 h).
     defaultWindowS: '1h',
     copyVariant: 'auth_not_configured',
+  },
+  {
+    disposition: 'bound',
+    slot: 'custom',
+    id: 'tool-usage',
+    label: 'Tool Usage',
+    // The custom module's OWN ladder — a subset of the frozen
+    // `ResourcesWindow` union. 7d is the measurement window the
+    // BE default (`days=7`) and the writing-block ranking use.
+    allowedWindows: ['24h', '7d'],
+    defaultWindowS: '7d',
   },
 ] as const satisfies readonly MetricsTabEntry[];
 
@@ -542,8 +556,17 @@ export function metricsCentralTab(id: MetricsCentralTabId): MetricsCentralTab {
 }
 
 /**
- * The manifest entry of the CUSTOM tab — the module's own source (there
- * is exactly one; the resource module is it).
+ * The manifest entry of the FIRST custom tab — the module's own source.
+ *
+ * There are now TWO custom tabs (the resource module and the appended
+ * `tool-usage` module — a second custom tab is type-legal; the
+ * "exactly one custom tab" constraint is prose/spec-count only). This
+ * helper keeps its singular contract and returns the FIRST custom tab
+ * in METRICS_TABS declaration order — the resource tab (it predates the
+ * appended entry; the ordering is declaration order, NOT
+ * id-alphabetical). The full custom roster is `METRICS_CUSTOM_ENTRIES`;
+ * its two-entry shape (`[resource, tool-usage]`) is pinned in
+ * `tabs.manifest.spec.ts`.
  */
 export function metricsCustomTab(): MetricsCustomTab {
   const found = METRICS_TABS.find((tab) => tab.slot === 'custom');

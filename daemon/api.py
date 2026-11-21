@@ -119,6 +119,7 @@ from daemon.routers import (
     metrics_router,         # /api/metrics (checkpoint read instrumentation surface)
     nest_reports_router,    # /api/nest-reports (nest-anomaly-report lane: the anomaly domain route)
     rooms_router,           # /api/rooms/* + /api/instances/{id}/rooms (P6 group-chat observability modal)
+    tool_usage_router,      # /api/tool-usage (tool-usage-metrics-p1: ledger read door)
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
@@ -4616,6 +4617,18 @@ async def lifespan(app: FastAPI):
     except Exception as _dbo_exc:
         logger.warning("db_offload shutdown failed: %s", _dbo_exc)
 
+    # tool-usage P1 (A-5c): bounded 10 s drain of the counter flusher BEFORE
+    # dispose_db_pools (which runs inside manager.shutdown() below). The
+    # flusher is an independent task — it does NOT ride
+    # manager._background_tasks (cancel-without-drain would truncate the
+    # day counters). A drain failure is contained; shutdown continues.
+    try:
+        _tu_flusher = getattr(manager, "_tool_usage_flusher", None)
+        if _tu_flusher is not None:
+            await _tu_flusher.drain()
+    except Exception as _tu_exc:  # noqa: BLE001 — shutdown must never fail
+        logger.warning("tool-usage flusher drain failed: %s", _tu_exc)
+
     # Call manager shutdown for graceful shutdown
     await manager.shutdown()
 
@@ -6421,6 +6434,12 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # Mounted HERE (inside api_router, BEFORE the SPA catch-all) — the
     # same placement precedent as the nest-reports door above.
     api_router.include_router(rooms_router)             # /api/rooms/*
+    # tool-usage-metrics-p1 (ENSEMBLE-37 Phase 1): the read-only ledger
+    # door (GET /api/tool-usage/summary + /daily). Mounted HERE inside
+    # api_router, BEFORE the SPA catch-all — the metrics/nest-reports
+    # domain-route placement precedent. Fail-closed auth posture + the
+    # any-of read scope set replicate the metrics door verbatim.
+    api_router.include_router(tool_usage_router)        # /api/tool-usage
     # Phase 3 / plane-integration-revival — POST /api/plane/sync/{project_id}.
     # The router is mounted BEFORE the SPA catch-all (the catch-all
     # only fires for unmatched paths; the prefix /api/plane is owned
