@@ -1201,6 +1201,21 @@ class InstanceManager:
 
         seed_persona_if_absent(self._engine)
 
+        # ── tool-usage P3 (decision-support metrics): daily digest seeder ─
+        # Boot-time idempotent seeder (D-10) — creates the daily 08:00
+        # Asia/Ho_Chi_Minh digest schedule row before lifespan start_all()
+        # (manager.py ~16945) so it registers + starts automatically at
+        # promote. Builds its own repos from self._engine (D-1); never
+        # reads self._project_repository (not yet assigned at this site).
+        # Every failure is contained — a measurement substrate never
+        # aborts boot. (decision-support: layer-2 candidacy data)
+        try:
+            from .repositories.source.seed import seed_tool_usage_digest_schedule
+
+            seed_tool_usage_digest_schedule(self._engine)
+        except Exception as exc:  # noqa: BLE001 — substrate never aborts boot
+            logger.warning("[ToolUsageDigest] seeder startup failed: %s", exc)
+
         # ── The memoir kill-switch line (once per boot) ───────────────────
         # The knob's resolved state is emitted ONCE at boot so the
         # "unset ⇒ ENABLED by default" default is never silent (D0.7 /

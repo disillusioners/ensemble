@@ -1312,7 +1312,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # Non-privileged by design (grants via per-agent tools.allow;
     # PRIVILEGED_TOOL_CATEGORIES untouched). Placed near "job" —
     # scheduling is job-adjacent (the adapter fires JobItems).
-    "scheduling": "daemon.tools.scheduling",
+    "scheduling": ["daemon.tools.scheduling", "daemon.tools.tool_usage"],
     # ari-tools Phase 1 (the Workbook) — the global, DB-backed work
     # board. PRIVILEGED category (entry #8 of
     # PRIVILEGED_TOOL_CATEGORIES): the board is global and shared, so
