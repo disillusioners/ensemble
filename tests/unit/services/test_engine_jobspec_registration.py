@@ -720,15 +720,130 @@ agents:
         assert "enabled:" in text
 
 
-# ── AC7: ZERO EXECUTION in the P1 tree ─────────────────────────────────
+# ── AC7: ZERO EXECUTION in the P1 SUBSTRATE ────────────────────────────
+
+
+#: The four P1 substrate modules. Phase 2 legitimately added execution
+#: modules to the same package, so an engine-DIRECTORY-wide scan would be
+#: structurally RED now — the invariant is re-scoped to the substrate that
+#: must stay execution-free FOREVER, not to the directory.
+SUBSTRATE_MODULES = ("__init__.py", "spec.py", "registry.py", "estate.py")
+
+#: Machine-readable execution tokens (prose that NAMES the forbidden thing
+#: while documenting the dormancy gate is not a call path — docstrings are
+#: stripped before the scan so the fence pin does not forbid the word while
+#: prohibiting the mechanism).
+FORBIDDEN_EXECUTION_TOKENS = (
+    "execute_fn",          # the executable slot does not exist in P1
+    "run_with_timeout",    # P2's timeout wrapper
+    "asyncio.sleep",       # a tick loop's cadence sleep
+    "create_task",         # a background loop
+    "run_forever",
+    "dispatch_due",
+    "_stopping",           # the loop sentinel (P2's Templates)
+)
+
+
+def _tracked_substrate_paths() -> list[Path]:
+    """The substrate four, resolved through TRACKED files only.
+
+    Enumerated via ``git ls-files`` so an UNTRACKED file dropped into the
+    engine directory (another lane's WIP, a scratch module) can never
+    affect this scan and can never make the pin unreproducible outside
+    this particular working tree. Sorted for determinism.
+    """
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[3]
+    proc = subprocess.run(
+        ["git", "ls-files", "--", "daemon/services/engine"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, (
+        f"git ls-files failed ({proc.returncode}) — the tracked-scoped "
+        f"substrate scan cannot be reproduced: {proc.stderr.strip()}"
+    )
+    tracked_names = {
+        line.rsplit("/", 1)[-1]
+        for line in proc.stdout.splitlines()
+        if line.strip().endswith(".py")
+    }
+    missing = [name for name in SUBSTRATE_MODULES if name not in tracked_names]
+    assert not missing, (
+        f"the P1 substrate modules are not all TRACKED in git: {missing} "
+        f"(tracked .py under daemon/services/engine: "
+        f"{sorted(tracked_names)})"
+    )
+    return [ENGINE_DIR / name for name in SUBSTRATE_MODULES]
+
+
+def _code_only(src: str) -> str:
+    """Strip docstrings so prose naming a forbidden token stays legal."""
+    import ast
+
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if isinstance(body, list) and body:
+            first = body[0]
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                first.value.value = ""
+    return ast.unparse(tree)
 
 
 class TestZeroExecution:
-    # NOTE (P2): the two P1 zero-execution pins (no execution symbols /
-    # no dispatch module) are superseded by Phase 2, which legitimately
-    # adds daemon/services/engine/{state,locks,dispatch,execution,engine,metrics}.py.
-    # They are removed here; the dormancy gate now lives in the shadow-mode
-    # posture (D2.13) and the observer-spec carve-out (CS-9).
+    """AC7 — the P1 substrate is execution-free, FOREVER.
+
+    Structural ruling (stage review, FOLD-2): the two P1 pins removed by
+    P2 (``test_no_execution_symbols_in_the_engine_tree`` /
+    ``test_no_tick_loop_or_dispatch_module_exists``) are RESTORED,
+    re-scoped — the universe is exactly the four substrate modules,
+    resolved through TRACKED files only. P2's execution modules are
+    sanctioned and neither test says anything about them.
+    """
+
+    def test_no_execution_symbols_in_the_substrate_modules(self):
+        """No ``execute_fn`` / dispatch / tick-loop token in the substrate.
+
+        Scanned set = :data:`SUBSTRATE_MODULES` only, tracked-file
+        enumerated (:func:`_tracked_substrate_paths`). Docstrings are
+        stripped first, so the module prose that DOCUMENTS the dormancy
+        gate does not trip the pin.
+        """
+        for path in _tracked_substrate_paths():
+            code = _code_only(path.read_text())
+            for token in FORBIDDEN_EXECUTION_TOKENS:
+                assert token not in code, (
+                    f"{path.name} carries execution token {token}"
+                )
+
+    def test_substrate_modules_are_data_and_contract_modules_only(self):
+        """The substrate four exist and none is a tick/dispatch module.
+
+        Deliberately asserts NOTHING about any other file in the engine
+        directory — P2's execution core lives there by design. What it
+        pins is that the substrate itself never grows a second job: the
+        four tracked modules are present and none of them carries an
+        execution token.
+        """
+        paths = _tracked_substrate_paths()
+        assert {p.name for p in paths} == set(SUBSTRATE_MODULES)
+        for path in paths:
+            assert path.is_file(), f"substrate module missing: {path}"
+            code = _code_only(path.read_text())
+            carried = [t for t in FORBIDDEN_EXECUTION_TOKENS if t in code]
+            assert not carried, (
+                f"{path.name} is a substrate module yet carries {carried} — "
+                f"the substrate stays execution-free"
+            )
+
     def test_api_py_is_untouched_by_this_phase(self):
         """AC7: ``daemon/api.py`` is UNCHANGED by Phase 1 (P4 owns the wiring).
 
