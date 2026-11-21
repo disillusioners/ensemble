@@ -20,6 +20,7 @@ import asyncio
 import logging
 from typing import Any
 
+from daemon.constants import TERMINAL_INSTANCE_STATUSES
 from daemon.services import schedule_fire_notify_metrics as _metrics
 
 logger = logging.getLogger(__name__)
@@ -27,11 +28,6 @@ logger = logging.getLogger(__name__)
 SOURCE: str = "system:schedule_fire_notify"
 
 _TASKS: set[asyncio.Task] = set()
-
-_TERMINAL_STATUSES: frozenset[str] = frozenset(
-    {"completed", "terminated", "error", "failed"}
-)
-
 
 def _normalize_status(value: Any) -> str:
     if value is None:
@@ -99,7 +95,19 @@ async def _worker(
 ) -> None:
     try:
         # DEC-1 creator-status pre-check (inside the off-path task).
-        row = await _get_creator_row_async(manager, creator_instance_id)
+        try:
+            row = await _get_creator_row_async(manager, creator_instance_id)
+        except Exception as exc:  # noqa: BLE001 — infra read failure, not absence
+            logger.warning(
+                "schedule_fire_notify: creator lookup failed for %s: %s",
+                (creator_instance_id or "-")[:8],
+                exc,
+            )
+            _metrics.record_dropped(
+                instance_id=creator_instance_id,
+                reason=f"creator_lookup_error:{type(exc).__name__}",
+            )
+            return
         status_str = (
             _normalize_status(getattr(row, "status", None)) if row is not None else ""
         )
@@ -113,7 +121,7 @@ async def _worker(
                 (creator_instance_id or "-")[:8],
             )
             return
-        if status_str in _TERMINAL_STATUSES:
+        if status_str in TERMINAL_INSTANCE_STATUSES:
             _metrics.record_dropped(
                 instance_id=creator_instance_id,
                 reason=f"creator_terminal:{status_str}",
@@ -184,6 +192,8 @@ async def notify_schedule_fire(
     creator_instance_id: Any = None
     try:
         creator_instance_id = _as_dict(schedule_config).get("creator_instance_id")
+        if creator_instance_id is not None:
+            creator_instance_id = str(creator_instance_id)
 
         sched_meta = _as_dict(_as_dict(metadata).get("scheduler"))
         fired_at = sched_meta.get("trigger_time")
@@ -202,20 +212,26 @@ async def notify_schedule_fire(
         ):
             return
 
-        task = asyncio.create_task(
-            _worker(
-                manager,
-                creator_instance_id=creator_instance_id,
-                label=label,
-                fired_at=fired_at,
-                target_agent=target_agent,
-                instance_mode=instance_mode,
-                recurrence=recurrence,
-                job_id=job_id,
-                message_id=message_id,
-                target_instance_id=target_instance_id,
-            )
+        coro = _worker(
+            manager,
+            creator_instance_id=creator_instance_id,
+            label=label,
+            fired_at=fired_at,
+            target_agent=target_agent,
+            instance_mode=instance_mode,
+            recurrence=recurrence,
+            job_id=job_id,
+            message_id=message_id,
+            target_instance_id=target_instance_id,
         )
+        try:
+            task = asyncio.create_task(coro)
+        except Exception:
+            # GREEN #1: a create_task failure would otherwise leave the
+            # built coroutine un-awaited ("never awaited" warning + GC
+            # leak). Close it explicitly before the drop-counter/log.
+            coro.close()
+            raise
         _TASKS.add(task)
         task.add_done_callback(_TASKS.discard)
     except Exception as exc:  # noqa: BLE001 — gate-time absorption

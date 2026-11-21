@@ -102,12 +102,16 @@ async def test_paused_creator_queues_not_dropped():
 @pytest.mark.asyncio
 async def test_gate_time_exception_absorbed():
     orig = asyncio.create_task
+
     def boom(*a, **k):
         raise RuntimeError("gate boom")
+
     asyncio.create_task = boom
     manager = _make_manager()
-    await _notify(manager)
-    asyncio.create_task = orig
+    try:
+        await _notify(manager)
+    finally:
+        asyncio.create_task = orig
     await asyncio.sleep(0.1)
     assert m.get_dropped_total() == 1
 

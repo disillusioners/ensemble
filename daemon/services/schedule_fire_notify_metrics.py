@@ -24,10 +24,6 @@ logger = logging.getLogger(__name__)
 SCHEDULE_FIRE_NOTIFY_SENT_TOTAL: str = "schedule_fire_notify_sent_total"
 SCHEDULE_FIRE_NOTIFY_DROPPED_TOTAL: str = "schedule_fire_notify_dropped_total"
 
-# Back-compat aliases for the bare string names used in the plan.
-SENT_TOTAL: str = SCHEDULE_FIRE_NOTIFY_SENT_TOTAL
-DROPPED_TOTAL: str = SCHEDULE_FIRE_NOTIFY_DROPPED_TOTAL
-
 _total_sent: int = 0
 _total_dropped: int = 0
 _lock = threading.Lock()
@@ -133,14 +129,3 @@ def reset_dropped_total() -> None:
         _total_dropped = 0
 
 
-# Aliases for plausible hidden-test names.
-record_schedule_fire_notify_sent = record_sent
-record_schedule_fire_notify_dropped = record_dropped
-get_schedule_fire_notify_sent_total = get_sent_total
-get_schedule_fire_notify_dropped_total = get_dropped_total
-reset_schedule_fire_notify_sent_total = reset_sent_total
-reset_schedule_fire_notify_dropped_total = reset_dropped_total
-
-# Constant aliases.
-schedule_fire_notify_sent_total = SCHEDULE_FIRE_NOTIFY_SENT_TOTAL
-schedule_fire_notify_dropped_total = SCHEDULE_FIRE_NOTIFY_DROPPED_TOTAL

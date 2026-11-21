@@ -157,3 +157,5 @@ These are **architect ruling items**. Each is framed with code-anchored options 
 | DEC-8 skip rule | ADOPT identity rule (creator == recipient → skip) at BOTH sites; rationale CORRECTED (A4) |
 | DEC-9 deferred site | AMENDED: identity gate at BOTH enqueue sites; blanket SKIP `:2109` UNSAFE (A1) |
 | A9 notice dedup | recorded, NOT adopted: no idempotency key in v1; named opt-in `schedule_fire_notify:{execution_id}` |
+
+DEC-10 (post-implementation note, 2026-11-21): TOCTOU revive window — the DEC-1 creator-status pre-check narrows but CANNOT eliminate the window between the status read and the `enqueue_message_job` write; the enqueue lane auto-revives terminal targets by construction, so a creator dying inside that window still gets revived. Accepted residual under DEC-1 mechanics (best-effort informational notice; the alternative — a transactional status re-check inside the enqueue — is a lane-level change this feature does not own).
