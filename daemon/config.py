@@ -9101,6 +9101,11 @@ def load_config(config_path: str | None = None) -> Config:
     # ``checkpointer_db_path`` was removed (see PersistenceConfig above).
     # Silently drop it from the YAML dict so old configs keep loading.
     persistence_config.pop("checkpointer_db_path", None)
+    # ``checkpoint_interval`` was retired by the engine-arc dead-knob sweep
+    # (T1.12). PersistenceConfig runs extra="forbid", so a deployed config
+    # still carrying it would fail validation at boot — drop it so old
+    # configs keep loading (same precedent as checkpointer_db_path above).
+    persistence_config.pop("checkpoint_interval", None)
     config_dict["persistence"] = persistence_config
 
     # compaction.model precedence (env COMPACTION_MODEL > yaml
@@ -9295,6 +9300,12 @@ def load_config(config_path: str | None = None) -> Config:
             if isinstance(processed_config["services"], dict) else {}
     else:
         services_config = {}
+    # The engine-arc dead-knob sweep (T1.12) retired these two ServicesConfig
+    # fields. ServicesConfig runs extra="forbid", so a deployed config still
+    # carrying either would fail validation at boot — drop them so old
+    # configs keep loading (same precedent as the persistence pop above).
+    services_config.pop("worker_poll_interval", None)
+    services_config.pop("lease_heartbeat_interval_seconds", None)
     # Extract the yaml-side values (nested ``service_tool:`` block for
     # enabled/max_concurrent; the flat A8-named interval field).
     _st_yaml_block = services_config.get("service_tool")

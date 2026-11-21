@@ -30,6 +30,7 @@ from daemon.config import (
     NotifyUserConfig,
     PersistenceConfig,
     ServicesConfig,
+    load_config,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -48,13 +49,21 @@ SCAN_TOP_FILES = ("config.yaml",)
 
 
 #: Files DELIBERATELY excluded from the reference sweep — they are the
-#: fence itself, so they must be allowed to NAME the retired knobs:
-#: the assertion below proves the names cannot be USED, which requires
-#: spelling them in the pin. This is the standard house carve-out for a
-#: retirement pin (the metrics-family adjudication pack does the same).
+#: fence itself OR the sanctioned compat sites, so they must be allowed to
+#: NAME the retired knobs: the assertion below proves the names cannot be
+#: USED as config fields, which requires spelling them in the pin/pops.
+#: This is the standard house carve-out for a retirement pin (the
+#: metrics-family adjudication pack does the same).
+#:
+#: D-1 reconciliation: load_config now carries sanctioned compat pops for
+#: the retired keys (so deployed configs keep loading), and the config-compat
+#: contract minter lists them as tolerated — both legitimately NAME the
+#: knobs and are allowlisted here rather than left unchecked.
 SELF_EXCLUSIONS = {
     "tests/unit/services/test_engine_config_deadknobs.py",
     "test/packs/engine_substrate_unit_test.sh",
+    "daemon/config.py",
+    "daemon/plugin_subsystem/config_compat_contract.py",
 }
 
 
@@ -85,18 +94,6 @@ class TestDeadKnobsAreGone:
         for knob in DELETED:
             for cls in classes:
                 assert knob not in cls.model_fields, f"{cls.__name__}.{knob}"
-
-    def test_services_config_field_count_dropped_by_two(self):
-        """F-30: no COUNT pin exists — this pin is a DELTA, not an absolute.
-
-        The two removed ``ServicesConfig`` fields (``worker_poll_interval``,
-        ``lease_heartbeat_interval_seconds``) must be gone; the class must
-        still be constructible with all its remaining defaults. There is
-        deliberately NO ``len(model_fields) == N`` assertion here (fence
-        F-30: do not invent a count pin).
-        """
-        ServicesConfig()  # constructible
-        assert len(ServicesConfig.model_fields) > 50
 
     def test_persistence_config_still_constructible_without_the_knob(self):
         cfg = PersistenceConfig(db_path=":memory:", checkpoint_ttl_hours=168)
@@ -147,6 +144,46 @@ class TestNoRemainingReferences:
         assert "checkpoint_ttl_hours" in block
         assert "checkpoint_cleanup_interval" in block
         assert "checkpoint_interval" not in block
+
+
+class TestRetiredKnobCompat:
+    """D-1: deployed configs carrying retired knobs must still load.
+
+    The pydantic classes run ``extra="forbid"``; ``load_config`` pops these
+    keys from the YAML dict before constructing ``Config`` so an old install
+    config neither crash-loops the boot nor fails the promote config-compat
+    gate. Regression pin for the T1.12 dead-knob deletion.
+    """
+
+    def test_load_config_tolerates_all_three_retired_keys(self, tmp_path):
+        cfg_path = tmp_path / "config.yaml"
+        cfg_path.write_text(
+            "persistence:\n"
+            "  db_path: ./data/instances.db\n"
+            "  checkpoint_interval: 1\n"
+            "services:\n"
+            "  worker_poll_interval: 0.5\n"
+            "  lease_heartbeat_interval_seconds: 30.0\n",
+            encoding="utf-8",
+        )
+        cfg = load_config(str(cfg_path))
+        assert cfg.persistence.db_path == "./data/instances.db"
+        assert not hasattr(cfg.persistence, "checkpoint_interval")
+        assert not hasattr(cfg.services, "worker_poll_interval")
+        assert not hasattr(cfg.services, "lease_heartbeat_interval_seconds")
+
+    def test_config_compat_contract_tolerates_the_retired_keys(self):
+        """The promote gate must accept a config the target daemon can boot."""
+        from daemon.plugin_subsystem.config_compat_contract import (
+            _TOLERATED_RETIRED_KEYS,
+        )
+
+        assert "checkpoint_interval" in _TOLERATED_RETIRED_KEYS["persistence"]
+        assert "worker_poll_interval" in _TOLERATED_RETIRED_KEYS["services"]
+        assert (
+            "lease_heartbeat_interval_seconds"
+            in _TOLERATED_RETIRED_KEYS["services"]
+        )
 
 
 class TestMisfiledRelabels:

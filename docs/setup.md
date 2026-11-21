@@ -467,7 +467,6 @@ limits:
 ```yaml
 persistence:
   db_path: ./data/instances.db
-  checkpoint_interval: 1
   checkpoint_ttl_hours: 168
   checkpoint_cleanup_interval: 24
   checkpoint_max_count: 1000
@@ -476,7 +475,6 @@ persistence:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `persistence.db_path` | string | `./data/instances.db` | Path to main SQLite database |
-| `persistence.checkpoint_interval` | integer | `1` | Create checkpoint every N state updates |
 | `persistence.checkpoint_ttl_hours` | integer | `168` | Delete checkpoints older than this (1 week) |
 | `persistence.checkpoint_cleanup_interval` | integer | `24` | Run cleanup every N hours |
 | `persistence.checkpoint_max_count` | integer | `1000` | Maximum checkpoints per instance before cleanup |
