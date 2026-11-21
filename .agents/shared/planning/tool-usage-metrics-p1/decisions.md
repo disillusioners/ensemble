@@ -167,6 +167,122 @@ No argument payload is possible by construction — the signature has no args sl
 
 ---
 
+### D12 — Leader ruling LR1: R-08 B4b re-baseline RULED YES (Phase 4)
+
+**Ruling (ruled by lane leader — verbatim).** "R-08 B4b re-baseline: RULED YES — threshold_B4b_route_fetch_set_lazy_only_bytes 185,000 → 188,000. Lazy tab body REMAINS PRIMARY (minimizes incremental fetch-set growth); the re-baseline covers the architect-proven ~1.0–1.3 kB static residue with ~2.2 kB margin. Static fallback REJECTED."
+
+**Ruled by:** lane leader (Emperor-designated decision authority for this lane's R-08 escalation).
+
+**Residue arithmetic (architect pass @ fd254b335, W3 `13438c29`):** manifest entry ≈ 125 B + map line/import ≈ 60 B + host ≈ 0.8–1.1 kB min ≈ ~1.0–1.3 kB, versus 134 B headroom; even a zero-byte host breaches (≈ 185 B minimum). Expected measured B4b under lazy ≈ 185,800–186,200 B.
+
+**Phase file(s) where the same ruling text appears:** decisions.md (this entry) only — phase4-plan.md / phase5-plan.md are untouched by this amendment's write scope (phase 4 owns its own execution; see D22).
+
+---
+
+### D13 — Leader ruling LR2: OQ1 stage.sh reading CONFIRMED (Phase 5)
+
+**Ruling (ruled by lane leader — verbatim).** "OQ1 stage.sh reading: CONFIRMED — staging uses house stage.sh; ENSEMBLE_UPGRADE_LIVE=1 there is the live-dir write guard, not a flip; promote.sh never invoked; phase5 no-flip invariants (state.json untouched, livez uptime continuous, no service restart) stay as gates."
+
+**Ruled by:** lane leader (Emperor-designated decision authority for this lane's OQ1 escalation).
+
+**Phase file(s) where the same ruling text appears:** decisions.md (this entry) only — phase5-plan.md is untouched by this amendment's write scope.
+
+---
+
+### D14 — Tap amendments A-1…A-4: placement, scope fix, per-batch identity, 256-char choke, coverage disclosure (Phase 1; amends D2)
+
+**Ruling text.** Final chain shape = `create_compact_note_tools_node(observation_wrapper(wrapped_tools_node(...)), ...)` — the observation wrapper sits BETWEEN `compact_note` (outermost) and `wrapped_tools_node`; it must see the ToolNode **result** to set `ok` (via `ToolMessage.status != "error"`, default `True` on ambiguity). A-1 (🔴 plan fix): only `manager` is in scope in `build_instance_graph` — the implementer uses `manager._instance_repository` (same as `create_compact_note_tools_node`, graph.py:13606), NOT a bare `instance_repository`. A-2: identity resolution is PER NODE INVOCATION (per batch), never per tool call — one `asyncio.to_thread(repo.get)` per turn's batch; pin "sinks fire only from the async wrapper on the main event loop" as contract (cross-loop emit hazard guard, W2-③). A-3 (hygiene): single choke at the tap — truncate `tool_name` / `agent_id` / `project_id` to 256 chars before enqueue, overflow counter + throttled WARNING. A-4: coverage disclosure — the only unobserved path is the direct `ainvoke` at `instance_messaging.py:1055` (zero production callers, acceptable). Three-seam verdict: factory wrapper REJECTED (undercounts MCP/plugin/dynamic-skill tools — silent undercount corrupts the ranking); ToolNode subclass REJECTED (version-fragile). ToolThrottleSlot is NOT in this chain (runs in `agent_node` pre-LLM) — no ordering interaction.
+
+**Ruled by:** architect pass @ fd254b335 (W1 `98d904e1`, structural-design).
+
+**Phase file(s) where the same ruling text appears:** phase1-plan.md §3.2, §4 T4, §4 T5.
+
+---
+
+### D15 — Flusher re-spec A-5/A-5a–d + A-6 batch-coalescing must-fix + counting contract frozen verbatim (Phase 1; supersedes D4 details, core contract unchanged)
+
+**Ruling text.** A-5 (shape): `dict[(day, project_id, tool_name, agent_id)] → int` + dirty-key set; no hard cap; emergency flush at ≥10,000 dirty keys; NEVER drop counters (overflow means flush, not discard); evict CLEAN keys with `day < today−2` only. A-5a (cadence): flush every 30 s (if dirty) or ≥500 dirty keys (5 s was overkill at ranking grade). A-5b (kill-switch semantics): the tap gates at enqueue (keep); the FLUSHER IS SWITCH-BLIND — toggling OFF performs one final tail flush, then idles; drain-and-discard REJECTED (truncates day counters mid-day → digest reports a false usage collapse). A-5c (shutdown): explicit bounded 10 s drain in the ordered shutdown sequence BEFORE `dispose_db_pools` (beside the db_offload drain slot, api.py:4611–4615); the flusher must NOT ride `manager._background_tasks` (cancel-without-drain). A-5d (watchdog): flusher loop wrapped in respawn-on-death outer task; `flush_error_counter` + pressure counters as canaries; WARNING throttled 1/5 min; DB failure leaves keys dirty (coalesced retry), never drop, never fail a tool call. A-6 (🔴 must-fix): upsert batches must contain AT MOST ONE ROW PER PK — PG raises `cardinality_violation` on duplicate PKs in one multi-row `VALUES` while SQLite silently accumulates (latent prod-only divergence); the map design satisfies this by construction; pin with a dual-dialect repository test ("two deltas same PK in one batch → one row, summed").
+
+**Counting contract (FROZEN — verbatim, character-for-character):**
+
+> Tool-usage counters are counted **AT-LEAST-ONCE, per EXECUTED tool_call**, at the tools node, on the main event loop. Retries and checkpoint resumes may re-execute an interrupted tools node and re-increment its counters; duplicates are **accepted, not deduplicated**: the frozen NAMES-ONLY contract carries no `tool_call_id`, and dedupe would require an in-memory LRU of `(thread_id, tool_call_id)` pairs purely to suppress recount events that are rare, bounded (≤ the tool_calls of one node batch per incident), and directionally harmless — duplicates inflate activity but never invent usage of an unused tool, so zero/near-zero — the layer-2 candidacy signal — is unaffected. Deliberate re-invocations are genuine executions and MUST count. The ledger records executions, not unique invocations.
+
+**Ruled by:** architect pass @ fd254b335 (W2 `14461184`, W4 `eb7fd799`).
+
+**Phase file(s) where the same ruling text appears:** phase1-plan.md §3.3, §3.3.1, §4 T4, §4 T6.
+
+---
+
+### D16 — Project sentinel renamed `""` → `"__none__"` (Phase 1; SUPERSEDES D11)
+
+**Ruling text.** Project sentinel is `"__none__"` EVERYWHERE in the ledger and the door — the empty string is ambiguous with the door's omitted = all-projects param semantics and fragile in query-string handling. `"__none__"` is self-documenting, unambiguous vs UUIDs, and matches the house reserved-name idiom (`uuid5(..., "__system_default__")`). Door semantics: `project_id` omitted = all rows INCLUDING the `__none__` bucket (total truth); explicit `project_id=__none__` filters the un-attributable bucket. Upsert exact contract (both dialects): `INSERT … VALUES (…), … ON CONFLICT (day, project_id, tool_name, agent_id) DO UPDATE SET call_count = tool_usage_daily.call_count + EXCLUDED.call_count, updated_at = EXCLUDED.updated_at` — use `EXCLUDED.updated_at` (flush time), never `now()` (PG-only + wrong clock). Agent sentinel stays `'unknown'` (validated, D1 unchanged). This entry SUPERSEDES D11 (D11 stands as history; not edited in place); resolves the former assumption A1 and OQ3.
+
+**Ruled by:** architect pass @ fd254b335 (W4/W6 evidence).
+
+**Phase file(s) where the same ruling text appears:** phase1-plan.md §3.1, §3.2, §3.4, §6 R4, §8 A1, §9 OQ3.
+
+---
+
+### D17 — Managed keys: A-7 option (a) + dual registration placed in phase 1 (Phase 1)
+
+**Ruling text.** A-7 (🟡): the collection key's `config_path="limits.tool_usage_collection_enabled"` has NO backing `LimitsConfig` field — do NOT ship a dotted path with no field. Fix = option (a): ADD `LimitsConfig.tool_usage_collection_enabled` to `daemon/config.py` + dotted `config_path` + a registration-shape regression pin (mirrors `metrics_enabled`, which has both; costs one `daemon/config.py` edit — added to phase 1's file ownership). ALSO register the SECOND managed key `limits.metrics_tool_usage_enabled` (the F24 family key) in phase 1's `MANAGED_KEYS` edit with `config_path=None` (DB/ENV-ONLY, `wedge_notice_emission_enabled` shape). Architect placement ruling: BOTH keys land in phase 1's `settings_service.py` edit; phase 2's zero-edit stance on that file is preserved.
+
+**Ruled by:** architect pass @ fd254b335 (W6 `3c653166`; §8 Ruling 7).
+
+**Phase file(s) where the same ruling text appears:** phase1-plan.md §2, §3.6, §4 T7.
+
+---
+
+### D18 — F24 family corrections (Phase 2)
+
+**Ruling text.** (1) Measured closed-space total 625 ≤ 2000 is THE claim (491 today + 134); the plan's "≈1095 ≪ 2000" is a band-sum (Σ bands 846 + F24's 160 + baseline 89) — may be cited separately, never as the headline; mixing conventions misleads future cardinality gates. (2) Citation corrected: the gate pattern is `metrics_gate.py` (env TRUTHY polarity + `live_managed_value`), NOT `kill.py:105/:128-131` (that is the decision-module kill store). (3) Gauge ("distinct tools observed") REJECTED for Phase 1 — second series family + near-zero decision value; scope-creep. (4) Operator writability: family key registered per D17 placement.
+
+**Ruled by:** architect pass @ fd254b335 (W6 `3c653166`; §5 Ruling 4).
+
+**Phase file(s) where the same ruling text appears:** phase2-plan.md (untouched by this amendment's write scope; recorded here as the governing correction).
+
+---
+
+### D19 — Seeder + digest material amendments D-1…D-9 (Phase 3)
+
+**Ruling text (summary).** D-1 (🔴 seeder repo-readiness — build own repos from `self._engine` or move hunk ≥ :2113); D-2 (🔴 STOPPED rows not started by `start_all` — seed startable/registered state or invoke the create-path compensation `scheduling_service.py:822-829`); D-3 (🔴 adapter config shape — persist `schedule` cron, not `when`); D-4 (🟡 uuid5 deterministic source_id idempotency); D-5 (🔴 disable-lifecycle — managed key `limits.tool_usage_digest_seeding_enabled` + no-op on existing row in ANY state); D-6 (🟡 explicit canonical root, no `manager.workdir` phantom fallback); D-7 (🟡 frozen window semantics D−1 / [D−7,D−1] complete UTC days); D-8 (🟡 holder set/jober benign; disclose); D-9 (🟡 rollback disclosure text frozen). Determinism tests extend to the file-write path. Full text: architecture-recommendation.md §7.
+
+**Ruled by:** architect pass @ fd254b335 (W5 `c3271c17`).
+
+**Phase file(s) where the same ruling text appears:** phase3-plan.md (untouched here); architecture-recommendation.md §7 is the authoritative text.
+
+---
+
+### D20 — I1 proof re-specified on corrected premise (Phase 5; supersedes the collision premise)
+
+**Ruling text.** Premise correction — `feature/skill-system-defects` (`868c6c616f`) is ALREADY MERGED (ancestor of base via `17e100532`) and NEVER touched `manager.py` (only `skill_evolution_service.py` + its test); branch-span `manager.py` hunks sit at ~4815–4828 / ~7986–8067 — zero overlap with the plan's three hunks (h1 ~1006–1020, h2 ~1145–1148, h3 ~1166+). NEVER cite that census at gate time. The I1 proof is re-specified against gate-time drift: enumerate our `manager.py` hunks exactly (three hunks + `@@` ranges); internal disjointness; gate-time drift re-check (every branch merged into `origin/latest` after base touching `manager.py` — no overlap); file-set sweep (`graph.py`, `settings_service.py`, `config.py`, `routers/__init__.py`, `tools/instance.py`, `tools/_tool_registry.py`); upstream freshness (base == origin/latest at merge time).
+
+**Ruled by:** architect pass @ fd254b335 (W4 git-verified; §9 Ruling 8).
+
+**Phase file(s) where the same ruling text appears:** phase5-plan.md (untouched here; freeze the spec there at execution planning).
+
+---
+
+### D21 — Cross-cutting pins (Phase 1 / 4)
+
+**Ruling text.** (1) Auth replication invariant — the new router's `_require_auth_on` executable body must byte-match the metrics door's (copy-paste across 5 routers, no shared helper; helper extraction out of phase-1 scope); DB errors ⇒ typed 503 `tool_usage_unavailable` with redacted server-side logging (`_redact.redact_exc_str`), never raw exception text. (2) Scoping rule frozen: "`project_id` is a filter, not a boundary" under the explicit single-operator / single-tenant threat model — any `maintenance:read|metrics:read` holder sees all projects. (3) Abuse bounds: no pagination for v1; 1 MB response-size test frozen; nested agents capped at top-50 per tool. (4) B4b 188,000 re-baseline confirmed (LR1, D12) — residue arithmetic per D12.
+
+**Ruled by:** architect pass @ fd254b335 (W6 `3c653166` §10; LR1 leader ruling for the B4b number).
+
+**Phase file(s) where the same ruling text appears:** phase1-plan.md §3.4, §4 T8 (pins 1–3); D12 (pin 4).
+
+---
+
+### D22 — Phase-4 ownership grant (leader ruling LR1 executed)
+
+**Ruling text.** `bundle-baseline.json` (`threshold_B4b_route_fetch_set_lazy_only_bytes` 185,000 → 188,000) and the spec-pin threshold update are now OWNED BY PHASE 4 by leader ruling LR1 — phase 4 may edit the baseline artifact + its pin as part of its own lane; no other lane touches them.
+
+**Ruled by:** lane leader (LR1); recorded by this ledger at the architect pass fold.
+
+**Phase file(s) where the same ruling text appears:** phase4-plan.md (untouched here — ownership granted, execution in phase 4's lane).
+
+---
+
 ## Corrections (dispatcher adjudicated, from the explorer passes)
 
 These correct prior recon notes. They are recorded as facts, not decisions.

@@ -22,7 +22,7 @@ Framing: `.agents/shared/planning/tokeneconomizer-study/writing-block-tiering.md
 | `daemon/tools/instance.py` | import + construction hunk near `:7040-7043` |
 | `daemon/services/tool_usage_digest.py` (**NEW**) | deterministic SQL rollup + markdown rendering |
 | `daemon/repositories/source/seed.py` (**NEW**) | idempotent schedule seeder (memoir-seed layout) |
-| `daemon/manager.py` | ONE hunk: import + seeder call immediately after `manager.py:1166` (a THIRD hunk, disjoint from Phase 1's two) |
+| `daemon/manager.py` | ONE hunk: import + seeder call. Seeder builds its own repos from `self._engine` (D-1) OR the hunk moves to ≥ `:2113`; boot-ordering (seed before lifespan `start_all()` at `:16929-16945`) stays correct. Disjoint from Phase 1's two hunks. |
 | `tests/**` for phase 3 (digest unit + determinism + tool-registration + seed idempotency + GC-safety) | NEW/owned |
 
 **Owns ZERO edits to:** `daemon/graph.py`, the ledger repo, the routers, `daemon/checkpoint_metrics.py`, `frontend/**`, any Phase-1 file, `agents/*/meta.json` (holder set is inherited — see §3.6).
@@ -58,13 +58,33 @@ After ~7 days of ledger data, the question "which tools go to layer 2 per projec
 2. **Digest content (frozen shape).** Per project: last-24h + cumulative-week per-tool counts. Primary sort = `schema_token_weight × frequency DESC`. A ZERO/NEAR-ZERO section = tools present in agent allow-lists but 0 calls in window (strongest layer-2 candidates). A per-agent breakdown (allow-list intersection visibility).
 3. **Weight join + fallback (see §10 A1 — correction).** `fc9_baselines.json` carries ONLY aggregate averages (`51218/223 ≈ 230` tok/tool pre-narrowing at `:125`/`:139`; `19933/74 ≈ 269` post-narrowing at `:167`/`:169`) — it has **no per-tool weight table**. Ruling: build a committed per-tool weight artifact from the fc9 measurement point (`convert_to_openai_tool` + `estimate_tokens`, sort_keys+compact form, `fc9_baselines.json:formula`/`serialization_form_note`); join `tool_name → weight` from it; **fallback for tools absent from the baseline = the 230-average** (documented, deterministic). Never compute weights at digest time from a live registry (that would break determinism).
 4. **Determinism invariant.** Same ledger fixture + same date → byte-identical output modulo the generated-at header. Pin a determinism unit test. No clock/random/live-registry reads in the rollup body.
-5. **Destination (runtime-canonical).** `<project_workdir>/.agents/shared/planning/tool-usage-metrics-p1/digests/YYYY-MM-DD.md`, where `project_workdir` resolves from the calling instance's `project.main_directory` (house pattern `_get_project_workdir`, `instance.py:1531-1548`; fallback `manager.workdir`, `doc_write.py:245-262`). The runtime tree is the LIVE checkout (`/home/nea/agents-ensemble` per project metadata), **NOT this worktree**. Optional board-note pointer alongside the durable file.
+5. **Destination (runtime-canonical) — D-6 amended.** Pin an EXPLICIT canonical root (config/env constant) — `manager.workdir` fallback is a phantom (never assigned) and the system-default project carries no `main_directory`, so `_get_project_workdir` returns None for the seeded schedule. Digest path: `<root>/.agents/shared/planning/tool-usage-metrics-p1/digests/YYYY-MM-DD.md`; same-day re-run OVERWRITES (idempotent). This removes the cross-project write hazard for on-demand jober/leader calls. Live tree has no `.git` → daily files are not git pollution; ~365 small files/year is fine. Optional board-note pointer alongside the durable file.
+
+*Amended by architect pass @ fd254b335 — D-6 (destination).*
 6. **Tool registration seam (three steps).** (a) `@tool` + `@register_tool_category("scheduling")` decorator in `daemon/tools/tool_usage.py`; (b) registry entry — add `"daemon.tools.tool_usage"` to `CATEGORY_MODULES["scheduling"]` (currently a single string at `_tool_registry.py:1315`; the scanner accepts a list, `:1085`); (c) construction — factory import + `tools.extend(...)` in `daemon/tools/instance.py` near `:7040-7043` (the scheduling construction site, `scheduling.py:132-163` factory captures caller ids at factory time). Pattern per `instance.py:7035-7043`: decorator-only registration is SILENTLY INVISIBLE — the extend is load-bearing.
-7. **Holder set (recommend ari+leader, rationale).** Reuse the EXISTING `"scheduling"` category — held by `ari`, `leader`, `jober` (`agents/ari/meta.json:34`, `agents/leader/meta.json:38`, `agents/jober/meta.json:11`). Rationale: (a) the seeded schedule invokes `agent='ari'`, so the tool MUST be in a category ari holds; (b) reusing an existing category adds NO new tool-category value → NO `VOCABULARY_VERSION` bump / artifact regen (keeps Phase 2's no-vocab-bump invariant); (c) `leader` gets it for oversight/manual invocation; `jober` inherits it benignly. Intended callers = ari + leader. If the architect wants EXACTLY ari+leader, that requires a new category + `meta.json` edits (out of scope) — see §9 open question.
-8. **Seeded row (frozen config).** `source_type='scheduler'` (`scheduling_service.py:105`); `config`: `agent='ari'`, `message` = the minimal deterministic digest instruction, `timezone='Asia/Ho_Chi_Minh'`, `recurrence='daily'`, `when='08:00'` → service builds cron `"0 8 * * *"` (`scheduling_service.py:787-790`), `instance_mode='new_instance'` (`:117/:165-168/:798-802`), `project_id` = system default project (§3.9), `priority` default 5; `enabled=True`, `autostart=True` (`scheduling_service.py:818-819`); `status` initialized `STOPPED` (`source/repository.py:165`).
-9. **project_id resolution (sequencing correction — §10 A2).** `constants.SYSTEM_DEFAULT_PROJECT_ID` is set at `api.py:2979` (lifespan), AFTER the manager-boot seed site (`manager.py:1166`). Seeder must call `manager._project_repository.ensure_system_default_project()` itself (idempotent get-or-create; deterministic `uuid5(NAMESPACE_DNS, "__system_default__")`, `project/repository.py:292/:304`) to obtain the id — do NOT read the not-yet-set constant. This id enables durable job-queue routing (`scheduler.py:305-315`, `:423/:429`).
-10. **Boot activation + GC-safety.** Seeder runs during manager init (`manager.py:1166`), so the enabled+autostart row exists when `source_registry.start_all()` runs in the lifespan (`manager.py:16945`) → registered+started with NO restart. (The create-path `_rebuild_register_start` compensation at `scheduling_service.py:822-829` is bypassed by the direct repo insert, but `start_all` covers boot.) GC-safe: `gc_find_candidates` predicate requires `enabled == False` (`source/repository.py:735-765`, `sources_gc_service.py:11-13`) — an ENABLED row is never collectable.
+7. **Holder set — D-8 amended (accept `scheduling` category, disclose jober).** Reuse the EXISTING `"scheduling"` category — held by `ari`, `leader`, `jober` (`agents/ari/meta.json:34`, `agents/leader/meta.json:38`, `agents/jober/meta.json:11`). Jober inheritance is BENIGN: the digest tool is SQL read + one deterministic file write, no LLM call, ~zero tokens, overwrite-idempotent, and with D-6 the destination no longer depends on the caller. Disclose; exact-holder-set (new category + `meta.json` edits) stays out of scope. Rationale: (a) seeded schedule invokes `agent='ari'`, so the tool MUST be in a category ari holds; (b) reusing an existing category adds NO new tool-category value → NO `VOCABULARY_VERSION` bump / artifact regen (keeps Phase 2's no-vocab-bump invariant); (c) `leader` gets it for oversight/manual invocation. `instance_mode='new_instance'` is the house default (all 14 existing scheduler rows); ~365 COMPLETED instance rows/year is normal house behavior, not sprawl. Intended callers = ari + leader.
+
+*Amended by architect pass @ fd254b335 — D-8 (holder set).*
+8. **Seeded row (frozen config) — D-3 amended (adapter shape).** `source_type='scheduler'` (`scheduling_service.py:105`); adapter reads `config["schedule"]` (cron) — NOT `when`. Persist the ADAPTER shape: `config = {agent:'ari', message:<minimal deterministic digest instruction>, timezone:'Asia/Ho_Chi_Minh', recurrence:'daily', local_time:'08:00', schedule:'0 8 * * *', instance_mode:'new_instance', project_id:<system default project (§3.9)>}`; `priority` default 5; `enabled=True`, `autostart=True` (`scheduling_service.py:818-819`). Status seeded in the state the compensated create-path produces (startable/registered — not STOPPED) so `start_all()` registers+starts it (D-2); see §3.10.
+
+Idempotency (D-4): deterministic `source_id = uuid5(NAMESPACE_DNS, "tool-usage-daily-digest")` — PK collision makes the second INSERT a no-op (mirrors `ensure_system_default_project`); `name` is a logical key only (no unique constraint).
+
+*Amended by architect pass @ fd254b335 — D-3 (adapter config shape) + D-2 (startable status) + D-4 (idempotency hardening).*
+9. **project_id resolution + repo-readiness — D-1 amended.** `constants.SYSTEM_DEFAULT_PROJECT_ID` is set at `api.py:2979` (lifespan), AFTER the manager-boot seed site (`manager.py:1166`); `self._project_repository` does not exist until `:2113` (source repo not until `:1779`). Seeder must NOT take `self._project_repository`. Fix: like the memoir seed, the seeder BUILDS ITS OWN REPOS from `self._engine` (`create_project_repository` / `create_source_repository`, `create_tables=False`), or the hunk moves to ≥ `:2113`. It then calls `ensure_system_default_project()` itself (idempotent get-or-create; deterministic `uuid5(NAMESPACE_DNS, "__system_default__")`, `project/repository.py:292/:304`) to obtain the id — do NOT read the not-yet-set constant. This id enables durable job-queue routing (`scheduler.py:305-315`, `:423/:429`). Boot-ordering claim (seed before lifespan `start_all()`, `manager.py:16929-16945`) remains correct.
+
+*Amended by architect pass @ fd254b335 — D-1 (seeder repo-readiness).*
+10. **Boot activation + GC-safety — D-2 + D-5 amended.** Seeder runs during manager init (site per D-1), so the enabled+autostart row exists when `source_registry.start_all()` runs in the lifespan (`manager.py:16945`) → registered+started with NO restart. D-2: `start_all()` SKIPS stopped/cancelled rows — the create-path compensation the plan bypasses (`scheduling_service.py:822-829`) is exactly what makes a fresh row startable. Fix: seed the row in the state the compensated create-path produces (startable/registered), or invoke the compensation. GC predicate (verified): collectable = scheduler ∧ `enabled==False` ∧ status ∈ {stopped, cancelled} ∧ age > 14 d — an **enabled row is never collectable**, so the core GC-safety claim holds once the row actually starts (status → running). D-5 opt-out: managed key `limits.tool_usage_digest_seeding_enabled` (default ON; registered in phase 1's settings edit per the placement ruling — one `MANAGED_KEYS` row, `config_path=None`); seeder NO-OPS when OFF. Additionally the seeder must NO-OP on an EXISTING row in ANY state (get-by-id-or-name first), narrowing re-seed to the post-GC window only — so an operator's disable survives re-seed.
+
+*Amended by architect pass @ fd254b335 — D-2 (start_all vs STOPPED) + D-5 (disable-lifecycle).*
 11. **Seed failure tolerance.** Like `memoir/seed.py:12-28/:80-83`: failures log WARNING and NEVER propagate; content failure must not become an availability failure. Idempotent get-or-create keyed on stable identity (name `"tool-usage-daily-digest"` + `source_type='scheduler'`).
+
+**Window semantics (D-7) — frozen.** `D` = UTC date of the fire (08:00 ICT = 01:00 UTC; ICT has no DST; cron evaluated in the row's timezone). "last-24h" := complete previous UTC day (`D−1`); "cumulative-week" := `[D−7, D−1]` complete UTC days. Deterministic given (fixture, run-date); matches the day-granular ledger; avoids the non-deterministic partial-day. Disclose the deliberate divergence from the door's `calls_24h = today+` (different surface, vaguer by design).
+
+*Amended by architect pass @ fd254b335 — D-7 (window semantics).*
+
+**Rollback disclosure (D-9) — frozen text.** The seeded row persists after rollback; the old binary starts it and each 08:00 fire degrades to an ari error turn (tool missing — no crash, no data loss). Operators may disable the row pre-rollback; GC reaps disabled rows at 14 d and re-upgrade re-seeds (unless D-5's flag is OFF). This keeps `rollback_safe=true` honest: fix-loss-only refers to code/data, plus this disclosed noise channel.
+
+*Amended by architect pass @ fd254b335 — D-9 (rollback disclosure).*
 
 ---
 
@@ -72,13 +92,13 @@ After ~7 days of ledger data, the question "which tools go to layer 2 per projec
 
 | # | Task | Owns | Depends On | Acceptance / verification |
 |---|---|---|---|---|
-| T1 | Build `daemon/services/tool_usage_digest.py`: `SELECT` last-24h + cumulative-week per `(project_id, tool_name)` from `tool_usage_daily`; join per-tool weight (§3.3); compute `weight × frequency` sort; build zero/near-zero (allow-list intersection) + per-agent sections; render deterministic markdown (generated-at header isolated). | `daemon/services/tool_usage_digest.py` | none (consumes frozen ledger) | Unit test with fixed fixture + date → expected markdown; determinism test byte-identical modulo header. |
+| T1 | Build `daemon/services/tool_usage_digest.py`: `SELECT` last-24h + cumulative-week per `(project_id, tool_name)` from `tool_usage_daily`; join per-tool weight (§3.3); compute `weight × frequency` sort; build zero/near-zero (allow-list intersection) + per-agent sections; render deterministic markdown (generated-at header isolated). Windows frozen: last-24h = complete previous UTC day (D−1); cumulative-week = [D−7, D−1] complete UTC days (D-7). | `daemon/services/tool_usage_digest.py` | none (consumes frozen ledger) | Unit test with fixed fixture + date → expected markdown; determinism test byte-identical modulo header (incl. windows). |
 | T2 | Build the committed per-tool weight artifact from the fc9 measurement point; document the join + 230-average fallback (§3.3, §10 A1). | artifact under `.agents/shared/planning/tool-usage-metrics-p1/` (or module constant) | T1 | Every ledger `tool_name` resolves to a weight; absent tools use 230; no live-registry read in rollup. |
 | T3 | Build `daemon/tools/tool_usage.py`: `tool_usage_digest` @tool + `create_tool_usage_tools_if_available(...)` factory; calls T1's rollup, writes to the §3.5 path, returns a short status string. | `daemon/tools/tool_usage.py` | T1 | Tool callable; writes exactly one `YYYY-MM-DD.md`; no prompt-driven rollup. |
 | T4 | Three-step registration: (a) decorators in T3's module; (b) `CATEGORY_MODULES["scheduling"]` → list incl. `"daemon.tools.tool_usage"`; (c) factory import + `tools.extend(...)` in `instance.py` near `:7040-7043`. | `_tool_registry.py`, `instance.py` | T3 | Tool discovered by name (AST scan) AND constructed for ari/leader/jober; frozen-name drift test GREEN. |
-| T5 | Build `daemon/repositories/source/seed.py`: `seed_tool_usage_digest_schedule(engine, project_repo)` — get-or-create by `(source_type, name)`, build §3.8 config, `enabled=True/autostart=True`, failures never propagate, idempotent. | `daemon/repositories/source/seed.py` | none | Seed twice → exactly one row (memoir-test precedent `test_memoir_persona_seed.py:107-111`); failure → WARNING, no raise. |
-| T6 | Add the THIRD `manager.py` hunk: import + call immediately after `manager.py:1166`, passing `self._engine` and `self._project_repository`; require line-disjointness from Phase 1's two hunks (§9). | `daemon/manager.py` (one hunk) | T5 | Seed runs at boot; row present before `start_all()` (`manager.py:16945`); no Phase-1 hunk overlap. |
-| T7 | Tests: digest unit + determinism (T1), weight join/fallback (T2), tool-registration (T4), seed idempotency + failure (T5), GC-safety (enabled row not collectable, `repository.py:765`), boot ordering (T6). | `tests/**` | T1–T6 | All GREEN in worktree, dev-fenced env, zero live contact. |
+| T5 | Build `daemon/repositories/source/seed.py`: `seed_tool_usage_digest_schedule(engine)` (seeder builds its own repos from `self._engine`, D-1) — get-or-create by deterministic `source_id = uuid5(NAMESPACE_DNS, "tool-usage-daily-digest")` (PK collision → second INSERT no-op, D-4); build §3.8 adapter config; `enabled=True/autostart=True`; no-op when managed key `limits.tool_usage_digest_seeding_enabled` is OFF (D-5); no-op on an EXISTING row in ANY state (get-by-id-or-name first); failures never propagate, idempotent. | `daemon/repositories/source/seed.py` | none | Seed twice → exactly one row (uuid5 idempotency); opt-out flag no-op; failure → WARNING, no raise. |
+| T6 | Add the `manager.py` hunk: import + call, passing `self._engine` (seeder builds its own repos, D-1 — do NOT pass `self._project_repository`, which does not exist at `:1166`); site may move to ≥ `:2113` if the giter prefers. Require line-disjointness from Phase 1's two hunks (§9 / architect I1 enumeration). | `daemon/manager.py` (one hunk) | T5 | Seed runs at boot; row present + startable before `start_all()` (`manager.py:16945`); no Phase-1 hunk overlap. |
+| T7 | Tests: digest unit + determinism (T1) — extend to the T3 FILE-WRITE path (byte-identical modulo the generated-at header), not just the rollup; weight join/fallback (T2); tool-registration (T4); seed idempotency (uuid5, seed twice → one row) + failure (T5); opt-out flag no-op; startable status; adapter config shape carries `schedule=`; GC-safety (enabled row not collectable, `repository.py:765`); boot ordering (T6); windows D−1 / [D−7,D−1]. | `tests/**` | T1–T6 | All GREEN in worktree, dev-fenced env, zero live contact. |
 | T8 | Appendix: document the one-line post-promote arm fallback (`task_schedule` / `POST /api/schedules`) in the plan for the architect-override case (§11). | plan doc only | none | Both activation options executable. |
 
 **Ordering:** T1→T2→T3→T4 (chain); T5 independent → T6 → T7 (fan-in); T8 parallel.
@@ -99,11 +119,11 @@ After ~7 days of ledger data, the question "which tools go to layer 2 per projec
 | # | Risk | Impact | Likelihood | Mitigation |
 |---|---|---|---|---|
 | R1 | fc9 has no per-tool weights → ranking key ill-defined; assuming uniform weight hides layer-2 signal. | High | HIGH (confirmed) | §3.3 committed per-tool weight artifact + documented 230 fallback; flag to architect (§9). |
-| R2 | Seeder reads `SYSTEM_DEFAULT_PROJECT_ID` before it is set (None) → wrong/absent project_id → non-durable routing. | High | Medium | §3.9: call `ensure_system_default_project()` directly; idempotent + deterministic uuid5. |
-| R3 | Seeded row not started (bypassed `_rebuild_register_start`) → no 08:00 fire. | High | Low | §3.10: boot `start_all()` registers+starts enabled/autostart rows; test boot ordering. |
+| R2 | Seeder runs before `self._project_repository` exists (D-1) → AttributeError; or reads unset constant → wrong project_id. | High | Medium | D-1: seeder builds its own repos from `self._engine` (or hunk moves to ≥ `:2113`); calls `ensure_system_default_project()` directly; idempotent + deterministic uuid5. |
+| R3 | Seeded row not started (D-2): `start_all()` skips stopped/cancelled rows; the bypassed compensation is what makes a fresh row startable. | High | Low | D-2: seed in startable/registered state (or invoke compensation); test boot ordering + started status. |
 | R4 | New tool category would trigger vocab bump (conflicts Phase 2). | Medium | Medium | §3.7 reuse `"scheduling"`; zero new category value; zero meta.json edits. |
 | R5 | Digest non-determinism (live weights/clock/random) → byte-diff test fails. | Medium | Low | §3.4: committed weights, no live reads, generated-at header isolated; pin determinism test. |
-| R6 | Runtime path resolves to the WRONG checkout (worktree vs live install). | Medium | Medium | §3.5: resolve via `project.main_directory` (house pattern); document canonical live path; test path resolution. |
+| R6 | Digest destination resolves to wrong checkout (D-6): `manager.workdir` is a phantom; system-default project has no `main_directory`. | Medium | Medium | D-6: pin explicit canonical root (config/env constant); path `<root>/.../digests/YYYY-MM-DD.md`; same-day overwrite; test path resolution. |
 | R7 | manager.py hunk collides with Phase 1's two hunks. | Medium | Low | §0 enumerate my single hunk at `:1166`; require integration-time line-disjointness check (§9). |
 
 ---
@@ -112,7 +132,7 @@ After ~7 days of ledger data, the question "which tools go to layer 2 per projec
 
 | # | Criterion | How to measure | Threshold |
 |---|---|---|---|
-| S1 | Deterministic digest | fixed fixture + date, two runs | byte-identical modulo header |
+| S1 | Deterministic digest | fixed fixture + date, two runs | byte-identical modulo header; windows D−1 / [D−7,D−1] |
 | S2 | Content shape | per-project 24h+week counts, weight×freq sort, zero/near-zero + per-agent sections | all present |
 | S3 | Weight join/fallback | every tool has weight; absent → 230 | exact |
 | S4 | Tool registration | discovered by name AND constructed for ari/leader | pass, drift test GREEN |
@@ -120,6 +140,11 @@ After ~7 days of ledger data, the question "which tools go to layer 2 per projec
 | S6 | GC-safety | run GC sweep with seeded enabled row | row survives (not collectable) |
 | S7 | Boot activation | seed at init → row started by `start_all` | enabled+autostart, started |
 | S8 | Zero live contact | test run | no prod/env writes, no restart |
+| S9 | uuid5 idempotency | seed twice | exactly one row (PK collision) |
+| S10 | Adapter config shape | seeded row config | carries `schedule=` cron |
+| S11 | Startable status | seeded row | registered/started by `start_all` |
+| S12 | Opt-out flag | flag OFF | seeder no-op |
+| S13 | Digest determinism windows | fixed fixture + date | byte-identical modulo header; D−1 / [D−7,D−1] |
 
 ---
 
@@ -136,10 +161,18 @@ After ~7 days of ledger data, the question "which tools go to layer 2 per projec
 
 ## 9. Cross-phase interface notes / open questions (for the architect)
 
-1. **Per-tool weights (R1).** `fc9_baselines.json` has NO per-tool weights — only ~230/~269 averages. The plan rules a committed per-tool weight artifact + 230 fallback. If the architect wants true per-tool weights, a separate measurement lane must produce that artifact (out of scope). **Open question:** accept committed-artifact + 230 fallback, or commission a per-tool weight measurement?
-2. **Holder set exactness (§3.7).** Reusing `"scheduling"` grants the tool to ari+leader+jober. **Open question:** is jober's inherited access acceptable, or must the holder set be exactly ari+leader (requiring a new category + `meta.json` edits + a vocab amendment, out of scope)?
-3. **manager.py hunk disjointness (R7).** Phase 1 owns two `manager.py` hunks (ledger tap wiring); this phase adds a third at `:1166`. **Open question:** confirm the two sets of hunks are line-disjoint at integration (planner sweeps).
-4. **Digest destination confirmation (§3.5).** Canonical target is the LIVE checkout's planning dir (`/home/nea/agents-ensemble/...`), resolved via `project.main_directory`. **Open question:** confirm the seeded schedule's project (system default) has `main_directory` set to the live checkout; if not, the fallback `manager.workdir` applies — document which.
+Resolved by architect pass @ fd254b335:
+
+1. **Per-tool weights (R1).** RESOLVED — committed per-tool weight artifact + 230-average fallback validated as the determinism mechanism; keep. No per-tool measurement lane needed for v1.
+2. **Holder set exactness (§3.7).** RESOLVED — accept `scheduling` category (ari+leader+jober); jober inheritance benign and disclosed (D-8); exact-holder-set stays out of scope.
+3. **D-6 canonical root.** RESOLVED — pin an explicit canonical root (config/env constant); no open question (D-6).
+4. **D-7 window semantics.** RESOLVED — frozen: last-24h = D−1 complete UTC day; cumulative-week = [D−7, D−1] (D-7).
+5. **D-9 rollback disclosure.** RESOLVED — frozen text recorded in §3 (D-9).
+
+Still open:
+
+6. **manager.py hunk disjointness (R7).** Confirm the hunk sets are line-disjoint at integration (planner sweeps; architect I1 enumeration at gate time). D-1 may move the hunk to ≥ `:2113`.
+7. **Digest destination confirmation (§3.5).** Confirm the seeded schedule's canonical root constant is set to the live checkout; document which. (D-6.)
 
 ---
 
@@ -150,6 +183,8 @@ After ~7 days of ledger data, the question "which tools go to layer 2 per projec
 - **A3 (start_all covers boot start).** `start_all()` loads all enabled adapters from DB and schedules autostart (`sources/registry.py:287-321`); called at `manager.py:16945` during `start_sources`.
 - **A4 (scheduling category holders).** `ari`/`leader`/`jober` all have `"scheduling"` in tools.allow (meta.json lines 34/38/11). Reusing it grants the tool to all three; no new category value → no vocab bump.
 - **A5 (cron build).** `recurrence='daily'` + `when='08:00'` → `"0 8 * * *"` at `scheduling_service.py:787-790`; DST-safe next-fire via `compute_next_cron_fire` (`util/tz.py:529`).
+- **A6 (canonical root, D-6).** The digest destination pins an explicit canonical root (config/env constant); `manager.workdir` is a phantom and the system-default project has no `main_directory`. Document which constant is used and its value.
+- **A7 (window semantics, D-7).** `D` = UTC date of the fire (08:00 ICT = 01:00 UTC); "last-24h" = complete previous UTC day (D−1); "cumulative-week" = [D−7, D−1] complete UTC days. Frozen.
 
 ---
 
@@ -160,8 +195,9 @@ Primary delivery = boot-time seeder (automatic at promote, per commission). If t
 ```
 POST /api/schedules  { "label":"tool-usage-daily-digest", "agent":"ari",
   "message":"Call tool_usage_digest for the previous day and write the durable digest.",
-  "timezone":"Asia/Ho_Chi_Minh", "recurrence":"daily", "when":"08:00",
-  "instance_mode":"new_instance", "project_id":<system default project id> }
+  "timezone":"Asia/Ho_Chi_Minh", "recurrence":"daily", "local_time":"08:00",
+  "schedule":"0 8 * * *", "instance_mode":"new_instance",
+  "project_id":<system default project id> }
 ```
 
 (or the `task_schedule` tool held by ari/leader/jober, `daemon/tools/scheduling.py`). Both options are executable; the plan defaults to the seeder.

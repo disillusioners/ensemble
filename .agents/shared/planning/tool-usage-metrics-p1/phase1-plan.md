@@ -2,7 +2,7 @@
 
 Lane: **tool-usage-metrics-p1** (commission ENSEMBLE-37 / TokenEconomizer adoption — Phase 1 measurement slice)
 Phase owner: plan-worker (BE phase)
-Status: Draft for the planner's review
+Status: Draft for the planner's review — amended in place by the architect pass @ fd254b335 (see architecture-recommendation.md; governing ledger entries D12–D22 in decisions.md)
 Depends on: **none** (this is the foundational BE phase; Phase 2 metrics family, Phase 3 digest/seeder, Phase 4 FE tab all CONSUME it).
 Worktree (READ-ONLY source of truth for every anchor below): `/home/nea/ensemble-src-wt-tool-metrics-p1` @ `0b5624dc9` (branch `feature/tool-usage-metrics-p1`).
 
@@ -34,10 +34,12 @@ Ship the **measurement substrate** for tool-usage frequency so layer-2 Tool-Arch
 - `daemon/repositories/tool_usage/` (NEW: `models.py`, `repository.py`) — the SQLModel table + sync dialect-aware upsert repository.
 - `daemon/services/tool_usage_observation.py` (NEW) — the tools-node observation wrapper (the tap), the bounded queue + batch flusher, the sink registry, the kill-switch gate.
 - `daemon/graph.py` — **ONE hunk region only**: the tools-node observation wrapper wiring in the `add_node("tools", ...)` chain (~14464–14483). No other graph.py edits.
-- `daemon/manager.py` — **TWO hunks**: (1) model registration before `create_all` (~1006–1020 region); (2) flusher/queue startup + collection kill-switch wiring in the boot sequence (~1145–1148 region). Phase 3 will add a THIRD disjoint hunk (seeder near 1144–1166) — enumerate ours precisely so the cross-writer sweep proves disjointness.
+- `daemon/manager.py` — **TWO hunks**: (1) model registration before `create_all` (~1006–1020 region); (2) flusher/queue startup + collection kill-switch wiring in the boot sequence (~1145–1148 region). **Amended by architect pass @ fd254b335 — D15 (A-5c): hunk 2 starts the flusher via a respawn-on-death outer task and does NOT ride `manager._background_tasks` (cancel-without-drain).** Phase 3 will add a THIRD disjoint hunk (seeder near 1144–1166) — enumerate ours precisely so the cross-writer sweep proves disjointness.
 - `daemon/migrations/versions/<new>.sql` (NEW) — SQLite-executable, idempotent, additive-only.
 - `daemon/routers/tool_usage.py` (NEW) — the domain door + the one registration line in `daemon/routers/__init__.py`.
-- `daemon/services/settings_service.py` — ONE entry in `MANAGED_KEYS` for the collection kill-switch (additive; no edit to existing keys).
+- `daemon/services/settings_service.py` — **TWO entries in `MANAGED_KEYS`** (amended by architect pass @ fd254b335 — D17 (A-7)): (1) the collection kill-switch `limits.tool_usage_collection_enabled`; (2) the F24 family key `limits.metrics_tool_usage_enabled` (`config_path=None`, DB/ENV-ONLY). Additive; no edit to existing keys.
+- `daemon/config.py` — **ONE additive field** `LimitsConfig.tool_usage_collection_enabled` so the collection key's dotted `config_path` has a backing field (A-7 option (a), mirrors `metrics_enabled`). Added to scope by architect pass @ fd254b335 — D17.
+- `daemon/api.py` — **ONE hunk**: the flusher's bounded 10 s shutdown drain beside the db_offload drain slot (~4611–4615), BEFORE `dispose_db_pools` (A-5c). Added to scope by architect pass @ fd254b335 — D15.
 - `tests/unit/...` — repo, tap wrapper, flusher, kill-switch, router, migration.
 
 ### Out of scope (REJECT-grade if touched)
@@ -60,7 +62,7 @@ Table `tool_usage_daily`:
 | Column | Type | Null | Notes |
 |---|---|---|---|
 | `day` | TEXT (ISO date `YYYY-MM-DD`, UTC) | NOT NULL | PK part |
-| `project_id` | TEXT | NOT NULL | PK part; sentinel `""` (empty string) for un-attributable calls |
+| `project_id` | TEXT | NOT NULL | PK part; sentinel `"__none__"` for un-attributable calls (amended by architect pass @ fd254b335 — D16, superseding D11) |
 | `tool_name` | TEXT | NOT NULL | PK part; NAMES ONLY |
 | `agent_id` | TEXT | NOT NULL | PK part; sentinel `'unknown'` for un-attributable calls |
 | `call_count` | BIGINT (INTEGER on SQLite) | NOT NULL, default 0 | aggregated counter |
@@ -70,7 +72,10 @@ Table `tool_usage_daily`:
 - **NAMES ONLY is a FROZEN invariant**: no `args`, `argv`, `content`, `tool_call_id`, `instance_id`, or `session_id` column, ever. The signature itself (§3.2) is the guarantee.
 - **Aggregated counters only** — per-call rows are REJECTED (volume + content exposure).
 - **`agent_id` is NOT NULL** with sentinel `'unknown'` for un-attributable calls (house-consistent with `instance_id` fallback at graph.py:8871).
-- **Project attribution**: `project_id` may be `None` at run time (late binding). For the ledger, un-attributable project ⇒ sentinel `""` (empty string) — unambiguous against real project ids (UUIDs), sorts first, and is filterable as `project_id=` on the door. **Flagged as assumption A1** (phase1-plan.md §8); the architect pass may rename to a named sentinel (single-point change, recorded as a superseding decision entry). See decisions.md D11.
+- **Project attribution**: `project_id` may be `None` at run time (late binding). For the ledger, un-attributable project ⇒ sentinel `"__none__"` (amended by architect pass @ fd254b335 — D16, superseding D11 and resolving the former assumption A1). Self-documenting, unambiguous against real project ids (UUIDs), and matches the house reserved-name idiom (`uuid5(..., "__system_default__")`).
+- **Door semantics (sentinel)** (D16): `project_id` omitted on the door = all rows INCLUDING the `__none__` bucket (total truth); explicit `project_id=__none__` filters the un-attributable bucket.
+- **Upsert exact contract (both dialects)** (D16/D15-A-6): `INSERT … VALUES (…), … ON CONFLICT (day, project_id, tool_name, agent_id) DO UPDATE SET call_count = tool_usage_daily.call_count + EXCLUDED.call_count, updated_at = EXCLUDED.updated_at` — use `EXCLUDED.updated_at` (flush time), never `now()` (PG-only + wrong clock). Multi-row `VALUES` with the A-6 coalescing precondition.
+- **A-6 (🔴 MUST-FIX pin)** (D15): upsert batches must contain **AT MOST ONE ROW PER PK** — PG raises `cardinality_violation` on duplicate PKs in one multi-row `VALUES` while SQLite silently accumulates (latent prod-only divergence). The counter map satisfies this **by construction**; pin it with the dual-dialect repository test ("two deltas same PK in one batch → one row, summed" on PG + SQLite).
 - **`call_count` is BIGINT** — PG `BIGINT`, SQLite `INTEGER` (SQLite has no BIGINT affinity but stores as int64).
 - **`updated_at`** is optional (last flush timestamp), ISO-8601 UTC.
 
@@ -97,19 +102,38 @@ SinkCallable = Callable[
 - **`tool_name`**: the executed tool's name (from the AI message's `tool_calls[].name`). NAMES ONLY.
 - **`tool_category`**: resolved by the tap at emission time from a tool-name → category lookup (the house "existing closed vocabulary" — see §3.5). Sinks do NOT resolve category. **Rationale**: centralizing resolution in the tap guarantees no sink can accidentally receive or re-derive argument data; the tap is the single point that touches tool identity.
 - **`agent_id`**: resolved from the instance row (`instance.agent_id`), sentinel `'unknown'` on lookup failure / no instance.
-- **`project_id`**: resolved via the ContextSlot pattern (`instance_metadata["project_id"]`), sentinel `""` on failure / no project.
+- **`project_id`**: resolved via the ContextSlot pattern (`instance_metadata["project_id"]`), sentinel `"__none__"` on failure / no project (amended by architect pass @ fd254b335 — D16).
 - **`ok`**: best-effort success flag — `True` unless the corresponding returned ToolMessage carries an error indicator. Default `True` on ambiguity. The tap inspects the ToolNode result to set it.
 - **No argument payload is possible by construction** — the signature has no args slot. This is the NAMES-ONLY guarantee at the type level.
 
 Sinks are registered at process startup (the flusher registers the ledger sink; Phase 2 registers the family counter). Registration is idempotent and thread-safe. A sink that raises is isolated (logged, never propagates) — the tap is non-load-bearing.
 
+**Amended by architect pass @ fd254b335 — Ruling 1 / D14 (A-1…A-4):**
+- **Chain placement (frozen)**: final shape `create_compact_note_tools_node(observation_wrapper(wrapped_tools_node(...)), ...)` — the observation wrapper sits **BETWEEN** `compact_note` (outermost) and `wrapped_tools_node`. It must see the ToolNode **result** to set `ok` (via `ToolMessage.status != "error"`, default `True` on ambiguity) → it sits outside the bare ToolNode; it sits below `compact_note` so post-processing append stays outermost.
+- **A-1 (🔴 plan fix)**: only `manager` is in scope in `build_instance_graph` — the wrapper takes `manager._instance_repository` (same as `create_compact_note_tools_node`, graph.py:13606), NOT a bare `instance_repository`.
+- **A-2**: identity resolution is PER NODE INVOCATION (per batch), never per tool call — one `asyncio.to_thread(repo.get)` per turn's batch. **Contract pin**: sinks fire only from the async wrapper on the main event loop (guards the cross-loop emit hazard, W2-③).
+- **A-3 (hygiene)**: single choke at the tap — truncate `tool_name` / `agent_id` / `project_id` to 256 chars before enqueue, with an overflow counter + throttled WARNING. Keeps NAMES-ONLY total bounded.
+- **A-4 (coverage disclosure)**: the only unobserved path is the direct `ainvoke` at `instance_messaging.py:1055` (zero production callers) — acceptable.
+- **Three-seam verdict (comparison folded)**: tools-node observation wrapper ADOPTED; tool-FACTORY wrapper REJECTED (incomplete coverage — MCP/plugin/dynamic-skill tools are constructed elsewhere → silent undercount corrupts the ranking); ToolNode SUBCLASS REJECTED (couples to LangGraph internals — version-fragile).
+- **Throttle note**: `ToolThrottleSlot` is NOT in this chain (runs in `agent_node` pre-LLM, graph.py:9567–9580) — no ordering interaction, and throttled-out calls never execute so they are never counted.
+
 ### 3.3 Off-loop write contract (FROZEN)
 
-- The tap's hot path does **no** DB I/O. It resolves identity (instance_repository.get — already sync; wrap in `asyncio.to_thread`? The tap runs inside the async tools node; instance_repository is sync. Use `asyncio.to_thread` for the get, OR rely on the sync call being fast. Plan: wrap in `asyncio.to_thread` to honor the off-loop rule) and enqueues an event into a **bounded** `asyncio.Queue` (capacity: configurable, default 10 000; overflow drops the event, increments a drop counter, logs at WARNING, never blocks).
-- A single background **batch flusher** task drains the queue: batches by **size** (default 500 events) OR **interval** (default 5 s), whichever comes first. Each batch is one upsert transaction (`INSERT ... ON CONFLICT ... DO UPDATE SET call_count = call_count + excluded delta`). The flusher runs on the event loop but DB work is dispatched via `asyncio.to_thread(repo.upsert_batch, ...)`.
-- **Graceful shutdown drain**: on daemon shutdown, the flusher drains remaining events (best-effort, bounded by a timeout, default 10 s) before exit. Undrained events are dropped with a WARNING log + metric.
-- **Failure tolerance**: a ledger/DB failure NEVER fails a tool call or a turn. The flusher logs and continues; the queue keeps accepting. The tap swallows all exceptions (non-load-bearing, like message_tap_slot).
-- **Kill-switch**: `limits.tool_usage_collection_enabled` (managed key, default ON). When OFF: tap does not enqueue, flusher idles, queue is drained-and-discarded. Evaluated at call time (not cached) — D0.5/AM-27 precedent. Fail-closed: key absent/misconfigured ⇒ collection OFF.
+**Amended by architect pass @ fd254b335 — Ruling 2 / D15 (A-5, A-5a–d):** the off-loop contract is KEPT; the event-queue buffer shape is REPLACED by a counter map + dirty-key set. These amendments supersede D4 details (core contract unchanged).
+
+- The tap's hot path does **no** DB I/O and never blocks. It resolves identity (A-2: one `asyncio.to_thread(repo.get)` per batch) and increments `dict[(day, project_id, tool_name, agent_id)] → int` + adds the key to the dirty set (~ns, no allocation).
+- **A-5 (buffer shape)**: counter map + dirty-key set; **no hard cap**; **emergency flush at ≥10,000 dirty keys**; **NEVER drop counters** (overflow means flush, not discard); evict **CLEAN** keys with `day < today−2` only.
+- **A-5a (cadence)**: flush every **30 s** (if dirty) or at **≥500 dirty keys** (5 s was overkill at ranking grade — 17,280 vs 2,880 txns/day for a crash window that does not matter).
+- **A-5b (kill-switch semantics)**: the tap gates at enqueue (call-time eval — keep, D0.5/AM-27 precedent; fail-closed: key absent/misconfigured ⇒ collection OFF). **The FLUSHER IS SWITCH-BLIND**: toggling OFF performs one final tail flush, then idles. Drain-and-discard is REJECTED — it would truncate day counters mid-day and the digest would faithfully report the cliff as a usage collapse (a false signal in the very artifact this slice exists to produce).
+- **A-5c (shutdown)**: explicit **bounded 10 s drain in the ordered shutdown sequence BEFORE `dispose_db_pools`** (beside the db_offload drain slot, api.py:4611–4615). The flusher must **NOT ride `manager._background_tasks`** (cancel-without-drain). 10 s fits the 90 s systemd budget with 80 s headroom; SIGKILL loses ≤1 interval — accepted.
+- **A-5d (watchdog)**: the flusher loop is wrapped in a **respawn-on-death outer task**; `flush_error_counter` + dirty-set pressure counters serve as canaries; WARNING throttled to 1/5 min during outages. **DB failure leaves keys dirty** (coalesced retry) — never drop, never fail a tool call.
+- Each flush builds ONE multi-row upsert transaction via `asyncio.to_thread(repo.upsert_batch, deltas)`; the map guarantees **at most one row per PK per batch by construction** (A-6, §3.1).
+
+### 3.3.1 Counting contract (FROZEN — verbatim from the architect pass)
+
+**Amended by architect pass @ fd254b335 — Ruling 2 (§3), frozen character-for-character:**
+
+> Tool-usage counters are counted **AT-LEAST-ONCE, per EXECUTED tool_call**, at the tools node, on the main event loop. Retries and checkpoint resumes may re-execute an interrupted tools node and re-increment its counters; duplicates are **accepted, not deduplicated**: the frozen NAMES-ONLY contract carries no `tool_call_id`, and dedupe would require an in-memory LRU of `(thread_id, tool_call_id)` pairs purely to suppress recount events that are rare, bounded (≤ the tool_calls of one node batch per incident), and directionally harmless — duplicates inflate activity but never invent usage of an unused tool, so zero/near-zero — the layer-2 candidacy signal — is unaffected. Deliberate re-invocations are genuine executions and MUST count. The ledger records executions, not unique invocations.
 
 ### 3.4 Door contract (FROZEN — Phase 4 consumes)
 
@@ -132,25 +156,42 @@ Auth posture: **replicates `_require_auth_on` verbatim** (nest_reports.py:94–1
 
 Error vocabulary (closed): `AUTH_NOT_CONFIGURED` (503), `SCOPE_INSUFFICIENT` (403), `bad_request` (400), `unknown_tool` (404), `tool_usage_unavailable` (503, transient substrate failure).
 
+**Amended by architect pass @ fd254b335 — Ruling 9 / D21 (door pins):**
+- **Replication invariant**: the new router's `_require_auth_on` **executable body must byte-match** the metrics door's (copy-paste across 5 routers, no shared helper; helper extraction stays out of phase-1 scope). DB errors ⇒ typed 503 `tool_usage_unavailable` with **redacted server-side logging** (`_redact.redact_exc_str`), never raw exception text.
+- **Scoping rule frozen (filter-not-boundary)**: "`project_id` is a filter, not a boundary" under the explicit single-operator / single-tenant threat model — any `maintenance:read|metrics:read` holder sees all projects. If multi-tenant ever arrives, add project-membership filtering then.
+- **Abuse bounds**: no pagination for v1; freeze a **1 MB response-size test** as the guard + **cap nested agents at top-50 per tool**; revisit at >1,000 tools. Auth-OFF ⇒ 503 bounds unauthenticated volume.
+
 ### 3.5 Tool category vocabulary (house rule)
 
 The tap resolves `tool_category` from the tool name using the **existing closed vocabulary** reused as-is (no `VOCABULARY_VERSION` bump unless a new value is needed — and none is). The lookup is a static map `TOOL_NAME → category` populated from the tool registry's declared category (the same source the FE/agent tool catalog uses). If a tool name is not in the map, category = `None` (null in JSON). Phase 2's F24 family labels use `tool_category` from this same vocabulary (no new values ⇒ no version bump, per correction #1: `VOCABULARY_VERSION` is 11 at `daemon/checkpoint_metrics.py:290`).
 
 ### 3.6 Managed key (collection kill-switch)
 
+**Amended by architect pass @ fd254b335 — D17 (A-7):** the collection key's `config_path="limits.tool_usage_collection_enabled"` MUST have a backing `LimitsConfig` field (option (a) — do NOT ship a dotted path with no field). Add `daemon/config.py` to this phase's file ownership (one additive field, mirroring `metrics_enabled`), plus a registration-shape regression pin. Additionally, the **second** managed key `limits.metrics_tool_usage_enabled` (the F24 family key) is registered here with `config_path=None` (DB/ENV-ONLY) — both keys land in this phase's `settings_service.py` edit; phase 2 keeps its zero-edit stance on that file.
+
 Add to `MANAGED_KEYS` in `daemon/services/settings_service.py`:
 
 ```
 "limits.tool_usage_collection_enabled": ManagedKeySpec(
     key="limits.tool_usage_collection_enabled",
-    config_path="limits.tool_usage_collection_enabled",
+    config_path="limits.tool_usage_collection_enabled",   # backed by LimitsConfig field per A-7
     env_var="LIMITS_TOOL_USAGE_COLLECTION_ENABLED",
     value_type="bool",
     default=True,                       # this phase IS the measurement slice
     requires_restart=False,
     sensitive=False,
     description="Tool-usage collection kill-switch ...",
-)
+),
+"limits.metrics_tool_usage_enabled": ManagedKeySpec(
+    key="limits.metrics_tool_usage_enabled",
+    config_path=None,                    # DB/ENV-ONLY (wedge_notice shape)
+    env_var="LIMITS_METRICS_TOOL_USAGE_ENABLED",
+    value_type="bool",
+    default=True,
+    requires_restart=False,
+    sensitive=False,
+    description="Tool-usage metrics family kill-switch (Phase 2 stacks under this) ...",
+),
 ```
 
 Default ON. Fail-closed: key absent/misconfigured ⇒ collection OFF. Independent from `limits.metrics_enabled` / `ENSEMBLE_METRICS_ENABLED` (Phase 2 stacks under those).
@@ -169,7 +210,7 @@ Each task lists file-level claims + per-task verification. Single-ownership inva
 - `repository.py`: `ToolUsageRepository(engine)` sync, with `upsert_batch(deltas: list[ToolUsageDelta])` (dialect-aware `INSERT ... ON CONFLICT (day, project_id, tool_name, agent_id) DO UPDATE SET call_count = call_count + excluded.call_count, updated_at = excluded.updated_at`), `query_summary(project_id, days)`, `query_daily(project_id, tool_name, days)`. Empty input short-circuits to 0.
 - `__init__.py`: export `ToolUsageDaily`, `ToolUsageRepository`, `ToolUsageDelta`.
 
-**Verification**: unit tests `tests/unit/repositories/test_tool_usage_repository.py` — upsert aggregation (two increments on the same PK sum), PK conflict paths (re-upsert keeps first `day`/identity, increments count), sentinel-agent handling (`agent_id='unknown'` round-trips), empty-batch no-op, SQLite + PG dialect branches.
+**Verification**: unit tests `tests/unit/repositories/test_tool_usage_repository.py` — upsert aggregation (two increments on the same PK sum), PK conflict paths (re-upsert keeps first `day`/identity, increments count), sentinel-agent handling (`agent_id='unknown'` round-trips), empty-batch no-op, SQLite + PG dialect branches. **Amended by architect pass @ fd254b335 — D15 (A-6):** dual-dialect repository test pin — "two deltas same PK in one batch → one row, summed" on PG + SQLite (cardinality_violation guard); exact upsert contract `call_count = tool_usage_daily.call_count + EXCLUDED.call_count, updated_at = EXCLUDED.updated_at`; `__none__` project sentinel round-trips.
 
 ### T2 — Migration `.sql` (NEW file)
 
@@ -204,36 +245,25 @@ Components:
 - `ToolUsageSink` type alias = `Callable[[str, str | None, str, str, bool], None]`.
 - `ToolUsageTap` (or `ToolUsageObserver`): wraps an inner node callable. In `__call__(state, config)`:
   1. Extract `instance_id` from `config.configurable.thread_id`.
-  2. Resolve `project_id` + `agent_id` via `instance_repository` (ContextSlot pattern), with sentinels.
+  2. Resolve `project_id` + `agent_id` via `manager._instance_repository` (A-1) — **per node invocation (per batch), never per tool call** (A-2): one `asyncio.to_thread(repo.get)` per turn's batch. **Contract pin**: sinks fire only from the async wrapper on the main event loop.
   3. Inspect `state["messages"]` for the last AI message with `tool_calls`; for each `tc`, resolve category via the static map.
   4. Delegate to `inner(state, config)`; capture result.
   5. Determine `ok` per tool_call from the result's ToolMessages.
-  6. If collection kill-switch ON: enqueue one event per tool_call (best-effort, `put_nowait`, drop on full).
+  6. If collection kill-switch ON: increment the counter map + dirty set (A-5), with the A-3 256-char choke before enqueue (truncate `tool_name`/`agent_id`/`project_id` to 256, overflow counter + throttled WARNING).
   7. Fan out to registered sinks (isolated, never raises).
   8. Return inner's result unchanged.
   - All exceptions swallowed (non-load-bearing).
-- `ToolUsageQueue`: bounded `asyncio.Queue`, `enqueue(event)` (sync, `put_nowait`, overflow drop + counter), `drain()` async.
-- `ToolUsageFlusher`: background task; batches by size/interval; calls `asyncio.to_thread(repo.upsert_batch, batch)`; graceful shutdown drain with timeout; exposes drop counter + flush error counter.
+- `ToolUsageFlusher`: background task wrapped in a **respawn-on-death outer task** (A-5d); batches by size (≥500 dirty) OR interval (30 s) (A-5a); builds ONE multi-row upsert via `asyncio.to_thread(repo.upsert_batch, deltas)`; kill-switch **switch-blind** (A-5b — final tail flush then idle); explicit bounded 10 s drain at shutdown per A-5c (NOT via `manager._background_tasks`); `flush_error_counter` + pressure canaries; WARNING throttled 1/5 min; DB failure leaves keys dirty (never drop, never fail a tool call).
 - `register_sink(sink)`, `unregister_sink(sink)` — module-level registry, thread-safe.
 - `is_collection_enabled()` — reads the managed key at call time; fail-closed.
 
-**Verification**: tap wrapper tests assert (a) tool name + identity captured, (b) the sink signature carries NO argument payload (NAMES-ONLY pin — the test inspects the call args), (c) tap swallows exceptions, (d) queue never awaits DB (the enqueue path is sync). Flusher tests: batching, drain-on-shutdown, drop-counter, off-loop semantics.
+**Amended by architect pass @ fd254b335 — D14/D15 (A-1..A-5d).** Chain placement (T5): `create_compact_note_tools_node(observation_wrapper(wrapped_tools_node(...)), ...)`.
+
+**Verification**: tap wrapper tests assert (a) tool name + identity captured, (b) the sink signature carries NO argument payload (NAMES-ONLY pin — the test inspects the call args), (c) tap swallows exceptions, (d) the enqueue path is sync (~ns counter-map increment, no DB call). Flusher tests: batching (30 s/500), tail-flush-on-kill-switch, drain-before-dispose ordering, emergency-flush at ≥10,000 dirty, respawn-on-death, never-drop, throttled WARNING.
 
 ### T5 — Graph wiring (hunk 1, only hunk)
 
-**File**: `daemon/graph.py`, ~14464–14483 region. Change:
-
-```python
-graph.add_node(
-    "tools",
-    create_compact_note_tools_node(
-        wrapped_tools_node(tools, registry=LONG_TOOL_REGISTRY),
-        ...
-    ),
-)
-```
-
-to wrap the inner with the observation wrapper:
+**File**: `daemon/graph.py`, ~14464–14483 region. Change (amended by architect pass @ fd254b335 — D14, A-1, A-2, A-4):
 
 ```python
 from daemon.services.tool_usage_observation import wrap_tools_node  # or factory
@@ -243,7 +273,7 @@ graph.add_node(
     create_compact_note_tools_node(
         wrap_tools_node(
             wrapped_tools_node(tools, registry=LONG_TOOL_REGISTRY),
-            instance_repository=instance_repository,  # already in scope
+            instance_repository=manager._instance_repository,  # A-1: manager._instance_repository (graph.py:13606)
             ...
         ),
         ...
@@ -251,33 +281,48 @@ graph.add_node(
 )
 ```
 
-The exact factory signature is pinned in §3.2/§4 T4; the implementer threads `instance_repository` and the queue/flusher handle the same way `manager` is threaded at 14446/14476. **No other graph.py edits.**
+Final chain shape (frozen, A-1/A-2): `create_compact_note_tools_node(observation_wrapper(wrapped_tools_node(...)), ...)`. The observation wrapper sits **BETWEEN** `compact_note` (outermost) and `wrapped_tools_node`: it must see the ToolNode **result** to set `ok` (via `ToolMessage.status != "error"`, default `True` on ambiguity), and sit below `compact_note` so post-processing append stays outermost. Only `manager` is in scope in `build_instance_graph` (A-1). Identity resolution is per node invocation (A-2), never per tool call. **Three-seam verdict folded**: factory wrapper REJECTED (undercounts MCP/plugin/dynamic-skill tools — silent undercount corrupts the ranking); ToolNode subclass REJECTED (version-fragile). `ToolThrottleSlot` is NOT in this chain (runs in `agent_node` pre-LLM, graph.py:9567–9580) — no ordering interaction; throttled-out calls never execute and are never counted. Coverage disclosure (A-4): the only unobserved path is the direct `ainvoke` at `instance_messaging.py:1055` (zero production callers) — acceptable.
+
+The exact factory signature is pinned in §3.2/§4 T4; the implementer threads `manager._instance_repository` and the queue/flusher handle the same way `manager` is threaded at 14446/14476. **No other graph.py edits.**
 
 **Verification**: AST/grep gate — only the `add_node("tools", ...)` line changes; the diff hunk is confined to ~14464–14483.
 
-### T6 — Manager flusher startup (hunk 2)
+### T6 — Manager flusher startup (hunk 2) + api.py shutdown drain (A-5c)
 
-**File**: `daemon/manager.py`, boot sequence ~1145–1148 region (after the memoir persona seed at 1164–1166? No — the flusher should start alongside other background tasks). Pick the site: immediately after `SQLModel.metadata.create_all` + migration runner + `_ensure_postgres_columns`, and before the boot returns, start the flusher task and register the ledger sink. Also wire the collection kill-switch read at startup (log its resolved state once, D0.7/AM-26 precedent).
+**File**: `daemon/manager.py`, boot sequence ~1145–1148 region. `daemon/api.py` (~4611–4615) gets one hunk for the shutdown drain.
+
+- **Manager hunk 2**: after `SQLModel.metadata.create_all` + migration runner + `_ensure_postgres_columns`, start the flusher via a **respawn-on-death outer task** (A-5d) and register the ledger sink. Wire the collection kill-switch read at startup (log its resolved state once, D0.7/AM-26 precedent). **Do NOT ride `manager._background_tasks`** (A-5c — cancel-without-drain); the flusher is an independent task that is drained explicitly at shutdown.
+- **api.py hunk (A-5c)**: add the flusher's **bounded 10 s drain** in the ordered shutdown sequence **BEFORE `dispose_db_pools`**, beside the db_offload drain slot (~4611–4615). `manager.shutdown()` cancels `_background_tasks` first; the flusher drain runs after that, before pool disposal. 10 s fits the 90 s systemd budget with 80 s headroom; SIGKILL loses ≤1 interval — accepted.
 
 Enumerate the hunk precisely:
 - Hunk 1 (T3): model import before `create_all` (~1006–1020).
 - Hunk 2 (T6): flusher startup + sink registration + kill-switch boot log, in the block after `_ensure_postgres_columns` (~1145–1148 region, before the memoir persona seed at 1164–1166). **Phase 3's seeder hunk will land at 1164–1166** — ours is disjoint and precedes it.
+- Hunk 3 (T6/api): flusher drain beside the db_offload drain slot, ~4611–4615, before `dispose_db_pools`.
 
-**Verification**: boot smoke starts the flusher; shutdown drains; kill-switch OFF ⇒ flusher idles.
+**Amended by architect pass @ fd254b335 — D15 (A-5c, A-5d).**
 
-### T7 — Collection kill-switch managed key
+**Verification**: boot smoke starts the flusher; shutdown drains within 10 s; kill-switch OFF ⇒ flusher idles.
 
-**File**: `daemon/services/settings_service.py`, `MANAGED_KEYS` dict — add the entry per §3.6. Also update the managed-key count comment if present (house rule: keep the count honest).
+### T7 — Collection kill-switch managed key(s) + LimitsConfig field (A-7)
 
-**Verification**: settings tests include the new key; fail-closed resolution test.
+**Files**: `daemon/services/settings_service.py` (`MANAGED_KEYS` — TWO entries: collection key + family key) and `daemon/config.py` (ONE additive field `LimitsConfig.tool_usage_collection_enabled`).
+
+- `settings_service.py`: add both entries per §3.6 (collection key with dotted config_path; family key with `config_path=None`).
+- `config.py`: add `tool_usage_collection_enabled: bool = ...` to `LimitsConfig` (A-7 option (a)) so the collection key's dotted `config_path` resolves; mirrors `metrics_enabled`. Registration-shape regression pin (mirrors `metrics_enabled`).
+
+**Amended by architect pass @ fd254b335 — D17 (A-7).**
+
+**Verification**: settings tests include BOTH new keys; fail-closed resolution test; `MANAGED_KEYS` registration-shape pin; LimitsConfig field present.
 
 ### T8 — Domain door (NEW file + registration line)
 
 **File**: `daemon/routers/tool_usage.py` (NEW) + one line in `daemon/routers/__init__.py`.
 
-- Router, endpoints, auth posture per §3.4.
+- Router, endpoints, auth posture per §3.4 (as amended: replication-invariant `_require_auth_on` body byte-match vs metrics door; DB errors ⇒ typed 503 `tool_usage_unavailable` with `_redact.redact_exc_str` server-side logging; filter-not-boundary scoping rule; abuse bounds — no pagination v1, 1 MB response-size test, nested agents capped top-50 per tool).
 - Repository access via `request.app.state` manager (nest_reports precedent).
 - Error vocabulary per §3.4.
+
+**Amended by architect pass @ fd254b335 — D21.**
 
 **Registration line** in `__init__.py`:
 ```python
@@ -293,6 +338,24 @@ and append `"tool_usage_router"` to `__all__`.
 - `tests/unit/services/test_tool_usage_observation.py` (tap wrapper + queue + flusher + kill-switch)
 - `tests/unit/routers/test_tool_usage_router.py`
 - `tests/unit/migrations/test_tool_usage_migration.py` (parse + apply + additive-only + index lockstep)
+
+**Amended by architect pass @ fd254b335 — Ruling 9 §10.5 / D21 (mutation-pinned vs behavior-tested split for everything phase 1 owns):**
+
+Mutation-pinned (regression pins — the contract fences):
+- NAMES-ONLY schema (no `args`/`argv`/`content`/`tool_call_id`/`instance`/`session` column can be added without a pin trip) + no-args sink signature.
+- Upsert coalescing dual-dialect (two same-PK deltas → one row summed, PG + SQLite) — A-6.
+- `MANAGED_KEYS` registration shape (field + dotted path per A-7) — both keys.
+- Auth replication invariant (body-equality vs metrics door).
+- 256-char tap choke (overflow counter + throttled WARNING).
+- Door shapes / clamps [1,90] / `__none__` filter / typed error vocabulary / 503 under auth-OFF.
+- Flusher: drain-before-dispose ordering; tail-flush on kill-switch; emergency-flush at bound; never-drop.
+- Counting contract: replay re-counts (at-least-once accepted) — document-as-test.
+
+Behavior-tested (the semantics):
+- Tap observation-only: sink raise → tool call unaffected; ok-flag from `ToolMessage.status`.
+- Flusher: drain ordering; tail-flush; emergency-flush at bound.
+- Door: shapes, clamps, `__none__` filter, typed errors, 503 under auth-OFF.
+- Digest determinism (Phase 3 scope) — not phase 1.
 
 All under `tests/unit/...` (no live contact).
 
@@ -319,8 +382,9 @@ All under `tests/unit/...` (no live contact).
 |---|---|---|---|
 | R1 | `instance_repository.get` on the hot path adds latency | Medium | Wrap in `asyncio.to_thread`; cache nothing (late binding); failures swallowed. |
 | R2 | Ok-determination from ToolNode results is heuristic | Medium | Default True on ambiguity; Phase 2's family counter treats `ok` as best-effort; document the rule. |
-| R3 | Bounded queue overflow under burst drops real counts | Medium | Capacity default 10 000; drop counter + WARNING log; size/interval triggers keep pace under normal load. |
-| R4 | Composite PK sentinel collisions (empty project id) | Low | Project ids are UUIDs; `""` is unambiguous. Flagged as A1 for architect override. |
+| R3 | Bounded queue overflow under burst drops real counts | Medium | **Amended by architect pass @ fd254b335 (D15, A-5):** the counter map NEVER drops counters — overflow means an emergency flush at ≥10,000 dirty keys, not discard. |
+| R4 | Composite PK sentinel collisions (empty project id) | Low | **Amended by architect pass @ fd254b335 (D16):** sentinel is `"__none__"` (not `""`); project ids are UUIDs; unambiguous. |
+| R7 | Cross-loop emit hazard (sink emits from worker thread) | High | **Mitigated by A-2 (D14):** sinks fire only from the async wrapper on the main event loop — pinned as contract. |
 | R5 | Cross-writer hunk collision with Phase 3 seeder | High | Hunk 2 precedes the 1164–1166 seed block; enumerate both precisely in the cross-writer sweep. |
 | R6 | Tool category map staleness when new tools ship | Low | Map sourced from the tool registry's declared category at startup; unmapped ⇒ `None`, never a crash. |
 
@@ -330,19 +394,20 @@ All under `tests/unit/...` (no live contact).
 
 - All T9 tests GREEN.
 - Boot smoke (SQLite + PG) materializes `tool_usage_daily` with the composite PK + two secondary indexes.
-- `git diff --stat` shows ONLY files under `daemon/repositories/tool_usage/`, `daemon/services/tool_usage_observation.py`, `daemon/graph.py` (one hunk), `daemon/manager.py` (two hunks), `daemon/migrations/versions/<new>.sql`, `daemon/routers/tool_usage.py`, `daemon/routers/__init__.py`, `daemon/services/settings_service.py`, `tests/unit/...` (tool-usage packs). No frontend, no metrics-wiring, no scheduler/seeder.
+- `git diff --stat` shows ONLY files under `daemon/repositories/tool_usage/`, `daemon/services/tool_usage_observation.py`, `daemon/graph.py` (one hunk), `daemon/manager.py` (two hunks), `daemon/migrations/versions/<new>.sql`, `daemon/routers/tool_usage.py`, `daemon/routers/__init__.py`, `daemon/services/settings_service.py`, `daemon/config.py` (one additive field), `daemon/api.py` (one hunk, A-5c drain), `tests/unit/...` (tool-usage packs). No frontend, no metrics-wiring, no scheduler/seeder.
 - Zero live contact before staging (house rule).
 
 ---
 
 ## 8. Assumptions (explicit)
 
-- A1: Un-attributable `project_id` ⇒ sentinel `""` (empty string). Architect pass may rename to a named sentinel.
+- A1: Un-attributable `project_id` ⇒ sentinel `"__none__"` (amended by architect pass @ fd254b335 — D16, superseding D11; the architect exercised the rename). RESOLVED.
 - A2: `ok` default `True` on ambiguity; Phase 2 treats it as best-effort.
 - A3: Tool category resolved by the tap from a static map sourced from the tool registry; unmapped ⇒ `None`.
 - A4: F24 is the next family number (Phase 2 verifies against the registrar).
 - A5: The flusher's DB handle is the shared sync engine from `daemon/repositories/factory.py` (same as message_metadata).
 - A6: `days` clamping [1, 90] on both endpoints.
+- A7 (added by architect pass @ fd254b335 — D17): the collection key's `config_path` is backed by `LimitsConfig.tool_usage_collection_enabled` (option (a)); the family key uses `config_path=None` (DB/ENV-ONLY).
 
 ---
 
@@ -350,7 +415,7 @@ All under `tests/unit/...` (no live contact).
 
 - OQ1: If the architect pass changes the sink signature (e.g. adds a timestamp), Phase 2's family counter must be updated in lockstep — flag as a contract-break.
 - OQ2: If the tap's `instance_repository.get` proves too slow on the hot path, the fallback is to read `agent_id`/`project_id` from a closure-captured cache populated at instance creation — but that misses late binding (ContextSlot precedent warns against it). Escalate before changing.
-- OQ3: If a named sentinel for un-attributable project is preferred over `""`, rename in one place (§3.1) before implementation.
+- OQ3: Resolved by architect pass @ fd254b335 (D16) — named sentinel `"__none__"` adopted; no further rename.
 
 ---
 

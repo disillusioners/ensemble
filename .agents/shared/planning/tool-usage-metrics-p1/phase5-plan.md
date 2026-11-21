@@ -44,7 +44,7 @@ Give the giter ONE ordered, self-contained release checklist that (a) consolidat
 
 - **Any product file** — all implementation is owned by Phases 1–4 and executed by the giter.
 - **The promote flip** — `promote.sh`, the nonce ceremony, `current` symlink, `state.json` promote fields, live daemon restart. Emperor-owned (§3.2).
-- **Re-baselining the FE threshold** — `bundle-baseline.json` (B4b 185 000 B) is INVARIANT; a breach is escalated (phase4-plan.md §4.2, R-08).
+- **Re-baselining the FE threshold** — `bundle-baseline.json` (B4b) is **re-baselined to 188 000 B by the leader ruling R-08 (architect §6.2 / LEADER RULING)**, landed as a phase-4 task (bundle-baseline.json + metrics.bundle-guard.spec.ts pin + tester re-measure); no further re-baseline is permitted beyond the ruled value; a breach beyond 188,000 is escalated (phase4-plan.md §4.2, R-08).
 - **Re-cutting a sibling phase plan** — gaps are FLAGGED (§5.4), not silently patched.
 - **Any live DB / live daemon operation** before staging (§7).
 
@@ -70,15 +70,17 @@ The order in §4 is an invariant: unit suites → family/adjudication packs → 
 | Sink signature `(tool_name, tool_category?, agent_id, project_id, ok: bool)` — no args slot | phase1-plan.md §3.2; D3 | Phase 2 F24, Phase 5 I3 |
 | Door `/api/tool-usage/{summary,daily}` shapes + auth posture (503/403/404/400 vocabulary) | phase1-plan.md §3.4; D6 | Phase 4 tab, Phase 5 I3 |
 | F24 family: registrar-only, closed labels, band 134≤160, `VOCABULARY_VERSION==11` | phase2-plan.md §3; D8 | Phase 5 G2/G6 |
-| B4b lazy-only fetch set ≤ 185 000 B; `bundle-baseline.json` INVARIANT | phase4-plan.md §4.2; D9 | Phase 5 G4 |
+| B4b lazy-only fetch set ≤ **188,000 B (re-baselined by leader ruling R-08 — architect §6.2 / LEADER RULING; was ≤ 185,000 B)**; `bundle-baseline.json` INVARIANT | phase4-plan.md §4.2; D9 | Phase 5 G4 |
 
 **Any drift in these between the sibling plan and the shipped bytes = contract-break flag (§5.4), never a silent adapt.**
+  Amended by architect pass @ fd254b335 — consumed-contracts B4b re-baselined (LEADER RULING R-08) + I1 re-spec (§9) + GAP-4 three-row update
 
-### 3.4 ⚠ Gap flag — `ENSEMBLE_UPGRADE_LIVE=1` semantic split (needs lane-leader adjudication)
+### 3.4 ✅ RESOLVED — OQ1 stage.sh reading: CONFIRMED (leader ruling, architect §12 / LEADER RULING LR2)
 
-The commission says "NO live flip, NO `ENSEMBLE_UPGRADE_LIVE=1`". The house `stage.sh live` recipe (aegis-security-family/phase6-plan.md:41/:141, skill-system-revival/phase1-plan.md:893) binds `ENSEMBLE_UPGRADE_LIVE=1` **at stage time as the guard for the live-dir `releases/` write — NOT a flip** (stage.sh:190 `require_live_guard`; stage.sh:78 "NO FLIP: staging never touches `current` (that is promote.sh)"). The flip guard is on `promote.sh` (promote.sh:43-44: live requires `ENSEMBLE_UPGRADE_LIVE=1` **AND** `--f2-verified-closed`).
+**Resolution (leader ruling, recorded verbatim):** "OQ1 stage.sh reading: CONFIRMED — staging uses house stage.sh; ENSEMBLE_UPGRADE_LIVE=1 there is the live-dir write guard, not a flip; promote.sh never invoked; phase5 no-flip invariants (state.json untouched, livez uptime continuous, no service restart) stay as gates."
 
-**Resolution presented, not silently chosen:** the commission's "NO `ENSEMBLE_UPGRADE_LIVE=1`" is read as "do not bind it to `promote.sh`" (no flip). The §6 primary recipe uses the house `stage.sh live` form (which binds it as a dir-write guard). **Open question OQ1 (§12): confirm the lane leader accepts the house stage-time guard, OR stage to `sandbox`/`demo` to avoid the guard entirely** (diverges from the "staged release into live `releases/`" precedent and needs its own slot/fence handling). Default = house `stage.sh live` form; the flip boundary in §3.2 holds under either choice.
+The commission's "NO `ENSEMBLE_UPGRADE_LIVE=1`" is read as "do not bind it to `promote.sh`" (no flip). The §6 primary recipe uses the house `stage.sh live` form (which binds it as a dir-write guard). The flip boundary in §3.2 holds. A1 assumption note updated accordingly (no longer "pending OQ1").
+  Amended by architect pass @ fd254b335 — OQ1 resolved (§12 / LEADER RULING LR2)
 
 ---
 
@@ -88,10 +90,10 @@ Run in this order. Each gate cites its sibling source; **no gate is invented**, 
 
 | # | Gate | Exact check / command (dev-fenced worktree) | Source | Pass criterion |
 |---|---|---|---|---|
-| G1 | **Unit suites, per phase** | Phase 1: `tests/unit/repositories/test_tool_usage_repository.py`, `tests/unit/services/test_tool_usage_observation.py`, `tests/unit/routers/test_tool_usage_router.py`, `tests/unit/migrations/test_tool_usage_migration.py`. Phase 2: `tests/unit/metrics/test_metrics_family_adjudication.py`. Phase 3: digest unit + determinism + tool-registration + seed idempotency + GC-safety tests. Phase 4: `tabs.manifest.spec.ts`, `metrics.tool-usage.spec.ts`, `tool-usage.service.spec.ts`, `tool-usage.models.spec.ts`, `metrics.bundle-guard.spec.ts`. | phase1 §4 T9/§7; phase2 §7 S5/§8; phase3 §4 T7/§7; phase4 §8 gates 1–3 | All GREEN; `POSTGRES_*` scrubbed per variable; zero live contact |
+| G1 | **Unit suites, per phase** | Phase 1: `tests/unit/repositories/test_tool_usage_repository.py`, `tests/unit/services/test_tool_usage_observation.py`, `tests/unit/routers/test_tool_usage_router.py`, `tests/unit/migrations/test_tool_usage_migration.py`. **Phase-1 list grows (architect §10.5 mutation-pinned pins):** dual-dialect upsert pin (two same-PK deltas → one row summed, PG + SQLite — A-6); `MANAGED_KEYS` registration-shape pin (field + dotted path per A-7 option (a): `LimitsConfig.tool_usage_collection_enabled` + dotted `config_path`); auth replication-invariant pin (new router's `_require_auth_on` executable body byte-matches the metrics door's, or shared helper); **1 MB response-size guard** (`/summary`); **top-50 agents cap** per tool. Phase 2: `tests/unit/metrics/test_metrics_family_adjudication.py`. Phase 3: digest unit + determinism + tool-registration + seed idempotency + GC-safety tests. **Phase-3 list grows (architect §10.5):** uuid5 idempotency (seed twice → one row); adapter config shape carries `schedule=`; startable status (compensated create-path); opt-out no-op (D-5 flag OFF); digest file-write determinism with windows D−1 / [D−7,D−1] (byte-identical modulo generated-at header). Phase 4: `tabs.manifest.spec.ts`, `metrics.tool-usage.spec.ts`, `tool-usage.service.spec.ts`, `tool-usage.models.spec.ts`, `metrics.bundle-guard.spec.ts`. | phase1 §4 T9/§7; phase2 §7 S5/§8; phase3 §4 T7/§7; phase4 §8 gates 1–3 | All GREEN; `POSTGRES_*` scrubbed per variable; zero live contact |
 | G2 | **Family pack + adjudication counts** | `test/packs/tool_usage_family_unit_test.sh` (registered in `.agents/tester/PACKS.md`) + the F24 assertions in `test_metrics_family_adjudication.py`. | phase2 §4 T5–T7/§7 S1–S7 | `len(verdicts)==29`; binding subset 19-of-29; F24 band 134≤160; global ≤2000; `VOCABULARY_VERSION==11`; AM-2/AM-3 mutations RED; pack GREEN |
 | G3 | **Migration additive-only** | (a) throwaway SQLite: parse + apply the new `<YYYYMMDD_HHMMSS>_create_tool_usage_daily.sql`, assert no DROP/ALTER on existing tables, 3-site index-name/column lockstep vs model `__table_args__`; (b) PG path: grep the model import lands before `SQLModel.metadata.create_all` (manager.py:1006-1020 vs :1072), confirm `runner.py` SQLite-only early-return (:837-842), confirm NO `_ensure_postgres_columns` mirror for the brand-new table. | phase1 §4 T2/T3, §5 AC1/AC7; D5; phase3-plan.md source-gc precedent | Table materializes on SQLite (migration) + PG (create_all); zero DROP/mutate; rollback-safe = old binary refs no new table |
-| G4 | **FE production build + bundle re-measure + guard + AOT** | Exact sequence (nest-anomaly-report/phase4-plan.md:262-268): `cd frontend && npm ci` (if node_modules absent) → `cd frontend && ./node_modules/.bin/ng build --configuration production` → `node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js dist/frontend/browser` → `node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-guard.js <the dist dir>`. Then AOT discipline: `cd frontend && ./node_modules/.bin/ng build --configuration development`. | phase4 §Task 6 (re-measure), §8 gates 4–5; D9 | B4b ≤ 185 000 B (`bundle-baseline.json:43`, `metrics.bundle-guard.spec.ts:133`); measured numbers recorded AGAINST the frozen baseline, never overwrite; guard exit 0; AOT pass; `package.json` untouched; component-style warning SET unchanged (9 entries) |
+| G4 | **FE production build + bundle re-measure + guard + AOT** | Exact sequence (nest-anomaly-report/phase4-plan.md:262-268): `cd frontend && npm ci` (if node_modules absent) → `cd frontend && ./node_modules/.bin/ng build --configuration production` → `node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js dist/frontend/browser` → `node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-guard.js <the dist dir>`. Then AOT discipline: `cd frontend && ./node_modules/.bin/ng build --configuration development`. **ORDERING NOTE (architect):** the phase-4 B4b baseline amendment (bundle-baseline.json 185,000 → 188,000 + metrics.bundle-guard.spec.ts pin + tester re-measure) MUST land before G4 runs — it is a phase-4 task owned by the leader ruling R-08. | phase4 §Task 6 (re-measure), §8 gates 4–5; D9 | B4b ≤ 188 000 B (re-baselined by LR1, architect §6.2 / LEADER RULING; expected measured 185,800–186,200 B); measured numbers recorded AGAINST the re-baselined baseline, never overwrite; guard exit 0; AOT pass; `package.json` untouched; component-style warning SET unchanged (9 entries) |
 | G5 | **Digest determinism + seeder idempotency** | Fixed ledger fixture + date → two digest runs byte-identical modulo generated-at header; seed twice → exactly one `source_configs` row; enabled/autostart/GC-safe; boot ordering (seed before `start_all()`); weight join + 230 fallback. | phase3 §4 T1/T5/T7, §7 S1/S5–S7 | All GREEN; no live-registry/clock/random read in rollup; dev-fenced |
 | G6 | **Full-worktree test sweep** | `pytest -q` over the explicit unit file/dir lists for all four phases (pass explicit paths, never a raw dir that falls back to `testpaths`); deselect integration/postgres/slow/conformance per house addopts; isolate known shard polluter (`test_migration_e2e_comprehensive.py`) in its own process. | house `[PYTEST]`/blueprint; phase1–4 test strategies | Zero RED across the merged worktree; no new failure vs true base; live-shaped DB fence stays dev |
 | G7 | **Commit set** | Giter sweeps + commits (this phase writes no code): plan files under `docs(<scope>):` / `docs(planning):`; code under house types (`feat`/`fix`/`chore`). Verify `git diff --stat` scope per phase (phase1 §7, phase2 §11, phase3 §12, phase4 §8 gate 7) BEFORE each phase commit. | phase1 §7; phase2 §11; phase3 §12; phase4 §8-7; `[MERGE]` | Each commit's file set matches its phase's declared ownership; no cross-phase sweep of foreign files |
@@ -102,17 +104,24 @@ Run in this order. Each gate cites its sibling source; **no gate is invented**, 
 
 ## 5. Integration sweep tasks (plan-level, not code)
 
-### 5.1 I1 — manager.py THREE-hunk disjointness (giter shows textually before commit)
+### 5.1 I1 — manager.py collision-proof spec (RE-SPEC on corrected evidence; 5-step proof)
 
-`daemon/manager.py` is written by TWO phases; require the giter to display all three hunks and prove they are line-disjoint:
+**Premise correction (W4, git-verified) — FIRST, before any collision claim:** `feature/skill-system-defects` is **NOT unmerged** — `868c6c616f` is an ancestor of base (merged via `17e1100532`); it touches only `skill_evolution_service.py` + its test, **not manager.py**. Its branch-span manager.py hunks (`f3ac558d0..1834f5c11`) sit at ~4815–4828 and ~7986–8067 — **zero overlap** with the three planned hunks (h1 ~1006–1020, h2 ~1145–1148, h3 ~1166+). No file-level collision with the plan's set either (graph.py, settings_service.py, routers/__init__.py, tools/instance.py: zero). **NEVER cite the old census as the proof — it rots.**
 
-| Hunk | Owner | Site (verified in this worktree) | Change |
-|---|---|---|---|
-| 1 | Phase 1 (T3) | late-import block before `SQLModel.metadata.create_all` — model registration region `manager.py:1006-1020` (memoir precedent at :1013-1018); `create_all` at :1072 | `from .repositories.tool_usage.models import ToolUsageDaily  # noqa: F401` |
-| 2 | Phase 1 (T6) | boot block after `_ensure_postgres_columns`, before the memoir persona seed — `manager.py:1143-1150` region | flusher task start + ledger sink registration + kill-switch boot log |
-| 3 | Phase 3 (T6) | immediately after the memoir persona seed call — `manager.py:1164-1166` (`seed_persona_if_absent(self._engine)` confirmed at :1164-1166) | import + `seed_tool_usage_digest_schedule(...)` call |
+The three planned hunks (for the enumeration, not line numbers):
+- h1 — Phase 1 (T3): model registration before `create_all` — `from .repositories.tool_usage.models import ToolUsageDaily  # noqa: F401` (manager.py ~1006–1020; create_all at :1072).
+- h2 — Phase 1 (T6): flusher startup + kill-switch wiring (manager.py ~1145–1148 region, after `_ensure_postgres_columns`, before the memoir persona seed).
+- h3 — Phase 3 (T6): seeder call — import + `seed_tool_usage_digest_schedule(...)` (manager.py ~1164–1166, immediately after `seed_persona_if_absent(self._engine)`); h3 may land ≥ :2113 per the architect's D-1 ordering fix (the ENUMERATION, not the line number, is the claim).
 
-**Acceptance:** `git diff daemon/manager.py` shows three hunks whose line ranges do not overlap; hunk 2 precedes hunk 3; no hunk edits another's lines. **Flag as contract-break** if any hunk overlaps (phase1 R5, phase3 R7 both request this check but neither owns it — Phase 5 I1 owns it).
+**The I1 proof owed at gate time (freeze into phase 5 — 5 steps):**
+1. **Enumerate our hunks exactly:** `git diff <base>..HEAD -- daemon/manager.py` → assert EXACTLY three hunks with their `@@` ranges, mapped to h1/h2/h3 (h1 model registration before create_all; h2 flusher startup + kill-switch wiring; h3 seeder call — h3 may land ≥ :2113 per D-1).
+2. **Internal disjointness:** assert the three hunks are mutually disjoint (region enumeration — trivial but explicit).
+3. **Gate-time drift re-check (the real risk):** list every branch merged into `origin/latest` AFTER base that touches `daemon/manager.py`; for each, diff its hunk ranges against ours — assert no overlap. Re-run at execution time; never cite this document's census (anchors drift).
+4. **File-set sweep:** repeat for the plan's other shared files — `daemon/graph.py`, `daemon/services/settings_service.py`, `daemon/config.py`, `daemon/routers/__init__.py`, `daemon/tools/instance.py`, `daemon/tools/_tool_registry.py` — assert zero foreign overlap or disclose.
+5. **Upstream freshness:** verify base == origin/latest at merge time (house FINALIZE rule: moved ⇒ STOP).
+
+**Acceptance:** all five steps pass; `git diff daemon/manager.py` shows three hunks whose line ranges do not overlap; no hunk edits another's lines. **Flag as contract-break** if any hunk overlaps or any foreign overlap is found (phase1 R5, phase3 R7 both request this check but neither owns it — Phase 5 I1 owns it). Use the architect doc's wording for the I1/D-rule sentences so ledger and body match character-for-character.
+  Amended by architect pass @ fd254b335 — I1 re-spec (§9) + file-set sweep expansion (config.py, _tool_registry.py)
 
 ### 5.2 I2 — `daemon/routers/__init__.py` single-line registration
 
@@ -127,9 +136,9 @@ Re-read phase4-plan.md §4.1 against phase1-plan.md §3.4 field-by-field: `summa
 | # | Gap | Evidence | Disposition |
 |---|---|---|---|
 | GAP-1 | **Phase 4 has no section literally titled "Phase exit gate"** — it has §7 Success criteria + §8 Verification gates. Phases 1–3 do have explicit exit-gate sections (phase1 §7, phase2 §11, phase3 §12). | phase4-plan.md §7/§8 vs phase1 §7 / phase2 §11 / phase3 §12 | Use phase4 §8 as its functional exit gate for G1/G4; flag to planner that the sibling set is inconsistent. Do NOT edit phase4-plan.md. |
-| GAP-2 | `ENSEMBLE_UPGRADE_LIVE=1` stage-vs-flip semantic split | §3.4 | OQ1 to lane leader; default house stage form |
+| GAP-2 | `ENSEMBLE_UPGRADE_LIVE=1` stage-vs-flip semantic split | §3.4 | **RESOLVED** (leader ruling, §3.4): house `stage.sh live` form accepted; `ENSEMBLE_UPGRADE_LIVE=1` is the live-dir write guard, not a flip; promote.sh never runs. No longer an open question. |
 | GAP-3 | `VOCABULARY_VERSION` must stay 11 — Phase 2 T2 has a conditional bump exception; Phase 3 §3.7 reuses `"scheduling"` so no new category is expected. | phase2 §3.4/T2; phase3 §3.7 | G2/G6 assert ==11; a bump is a contract-break flag |
-| GAP-4 | `settings_service.py` MANAGED_KEYS — Phase 1 T7 adds `limits.tool_usage_collection_enabled`; Phase 2 R2 deliberately does NOT add `limits.metrics_tool_usage_enabled` (env-only v1). | phase1 §3.6/T7; phase2 §9 note 2 | Confirm no collision; Phase 2's key stays env-only |
+| GAP-4 | `settings_service.py` MANAGED_KEYS — Phase 1 T7 adds `limits.tool_usage_collection_enabled` **WITH a backing `LimitsConfig` field per A-7 option (a)** (costs one `daemon/config.py` edit — add it to phase 1's file ownership); Phase 2 R2 deliberately does NOT add `limits.metrics_tool_usage_enabled` (env-only v1, `config_path=None`). **PLUS the D-5 key `limits.tool_usage_digest_seeding_enabled` (`config_path=None`)** lands in phase 1's settings edit. THREE rows total: (1) `limits.tool_usage_collection_enabled` with `LimitsConfig.tool_usage_collection_enabled` + dotted `config_path` (A-7 option (a)); (2) `limits.metrics_tool_usage_enabled` with `config_path=None` (env-only); (3) `limits.tool_usage_digest_seeding_enabled` with `config_path=None` (opt-out that survives re-seed). Confirm NO collision across the three rows in the gate (G1 MANAGED_KEYS registration-shape pin). | phase1 §3.6/T7 + A-7; phase2 §9 note 2; phase3 D-5 | Confirm no collision; Phase 2's key stays env-only; all three rows land in phase 1's settings edit |
 
 ---
 
@@ -254,7 +263,7 @@ The giter verifies AFTER staging (no promote, no live daemon contact):
 | S1 | Consolidated sequence complete | G1–G7 checklist | All GREEN, in order |
 | S2 | Integration invariants hold | I1 disjoint hunks; I2 single registration; I3 door re-check | Exact / byte-for-byte |
 | S3 | Migration additive-only | G3 throwaway SQLite + PG register-before-create_all | Zero DROP/mutate; table on both drivers |
-| S4 | FE bundle within bound | G4 re-measure + guard | B4b ≤ 185 000 B; AOT pass |
+| S4 | FE bundle within bound | G4 re-measure + guard | B4b ≤ 188 000 B (re-baselined by LR1, architect §6.2); AOT pass |
 | S5 | Digest + seeder deterministic | G5 | Byte-identical modulo header; seed twice → one row |
 | S6 | Staged release verified | §6.3 4-way sha + §9 content proof | 4-way match; family/door/seeder in staged binary |
 | S7 | Live untouched | §9-4 fence | Byte-identical state.json/symlink/promote fields; no flip |
@@ -263,19 +272,18 @@ The giter verifies AFTER staging (no promote, no live daemon contact):
 
 ---
 
-## 12. Phase exit gate
+## 12. Phase exit gate & open questions
 
-Phase 5 is DONE when: (1) G1–G7 all GREEN in order; (2) I1–I3 integration checks pass and I4 gaps are flagged to the planner; (3) the release is staged via §6 with a 4-way sha match + `rollback_safe=true source=explicit`; (4) §9 post-stage verification passes with the live fence byte-identical; (5) the promote-time disclosure (§8) is delivered and the promote command is recorded, NOT run; (6) ZERO product-file edits and ZERO sibling-plan edits — this phase wrote ONLY `phase5-plan.md`; (7) OQ1 adjudicated by the lane leader. **No commit, no promote, no live flip — the planner sweeps + commits; the Emperor's ceremony owns the flip.**
+Phase 5 is DONE when: (1) G1–G7 all GREEN in order; (2) I1–I3 integration checks pass and I4 gaps are flagged to the planner; (3) the release is staged via §6 with a 4-way sha match + `rollback_safe=true source=explicit`; (4) §9 post-stage verification passes with the live fence byte-identical; (5) the promote-time disclosure (§8) is delivered and the promote command is recorded, NOT run; (6) ZERO product-file edits and ZERO sibling-plan edits — this phase wrote ONLY `phase5-plan.md`; (7) OQ1 adjudicated by the lane leader (RESOLVED — see §3.4: house `stage.sh live` form accepted, `ENSEMBLE_UPGRADE_LIVE=1` is the live-dir write guard, not a flip).
 
-## Open questions for the orchestrator
-
-- **OQ1 (§3.4, blocking the exact stage argv):** accept the house `stage.sh live` form (binds `ENSEMBLE_UPGRADE_LIVE=1` as the live-dir WRITE guard, NOT a flip — default), or stage to `sandbox`/`demo` to avoid the guard entirely? If sandbox/demo, I need the lane leader's target + slot/fence handling; the flip boundary (§3.2) holds either way.
+**Open questions:** none remaining — OQ1 resolved (§3.4, leader ruling). (Previously OQ1 was the only open question; it is now recorded as a resolved leader ruling, not an open question.)
+  Amended by architect pass @ fd254b335 — OQ1 resolved (§3.4 / LEADER RULING LR2)
 
 ---
 
 ## 13. Assumptions (explicit)
 
-- A1: "NO `ENSEMBLE_UPGRADE_LIVE=1`" in the commission means "do not bind it to `promote.sh`"; the house stage-time dir-write guard is acceptable pending OQ1.
+- A1: "NO `ENSEMBLE_UPGRADE_LIVE=1`" in the commission means "do not bind it to `promote.sh`"; the house stage-time dir-write guard is **CONFIRMED** by the leader ruling (§3.4, OQ1 resolved) — `ENSEMBLE_UPGRADE_LIVE=1` at stage time is the live-dir write guard, not a flip; promote.sh never runs. No longer pending.
 - A2: Version slot is free at stage time (re-verified per §6.1); no number hard-pinned in this plan.
 - A3: The lane's dev fence (`ensemble_dev @127.0.0.1:5432`, DAEMON_PORT 8079) is intact in the worktree `.env` (claim KV confirms mode 600 at creation).
 - A4: The staged artifact is built from a detached worktree AT the tag (a stage from the lane worktree fails 3 exit-78 guards — aegis phase6 B3).

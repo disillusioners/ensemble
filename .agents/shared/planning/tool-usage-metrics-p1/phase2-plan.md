@@ -58,11 +58,31 @@ Publish ONE aggregate-only central metric family that records tool calls by **cl
 2. **Name rule.** `^ensemble_[a-z0-9_]+$` (`checkpoint_metrics.py:110`); family id `F24` is free-form and stays `F24`.
 3. **Closed label spaces.** `tool_category` = the frozen set from `tool_category_vocabulary()` (`checkpoint_metrics.py:439`), which returns the committed artifact's 66 categories + reserved `other` = **67 values** (`.agents/shared/metrics/tool-categories.json`, `count:66`, `reserved:"other"`, `vocabulary_version:11`; `checkpoint_metrics.py:418`, `:450-463`). `result` = exactly `{"ok","error"}`. The sink maps the observer's `ok: bool` → `"ok"`/`"error"`.
 4. **No new tool-category values.** The observer's `tool_category?` comes from the same closed registry vocabulary; any out-of-set value folds to reserved `other` (`checkpoint_metrics.py:439-463`, catalog §8.6). Therefore **NO `VOCABULARY_VERSION` bump** (stays 11, `checkpoint_metrics.py:290`), **NO artifact regen**, **NO amendment test run** — UNLESS task T2's verification finds a genuinely new category value, in which case run the FULL procedure: bump 11→12 + regenerate `.agents/shared/metrics/tool-categories.json` + run both `tests/unit/tools/test_tool_category_artifact.py` and `tests/unit/metrics/test_metrics_vocabulary_amendment.py`, AND edit `checkpoint_metrics.py` (the ONE conditional exception to Phase 2's zero-edits list).
-5. **Cardinality bound.** Closed space of the single counter = 67 × 2 = **134 series**. Declared band `FAMILY_SERIES_BANDS["F24"] = 160` = 134 + **26 explicit headroom** (= 13 new categories × 2 results; the vocabulary has grown ~7 times historically, `checkpoint_metrics.py:279-289`). Never zero-headroom (F23's 67 and `decision_overlay`'s 411 are zero-headroom BY DESIGN and must not be copied — `adjudication.py:175-212`). Global cumulative: `BASELINE_SERIES=89` (`adjudication.py:215`) + Σ measured ≤ `GLOBAL_SERIES_CAP=2000` (`adjudication.py:253`); adding F24's 134 keeps the total ≈1 095 ≪ 2000.
-6. **Kill-switch stacking.** Family collects IFF (global metrics gate ON) AND (family gate ON). Global gates: env `ENSEMBLE_METRICS_ENABLED` (fail-closed: explicitly set + not truthy = OFF, `metrics_gate.py:104/:111/:104-114`) + managed `limits.metrics_enabled` (`metrics_gate.py:111`). Family gate = env `ENSEMBLE_METRICS_TOOL_USAGE_ENABLED` (same fail-closed polarity) THEN managed `limits.metrics_tool_usage_enabled` read via `metrics_gate.live_managed_value(key, default)` (`metrics_gate.py:~240`, PURE cached read — no DB on request path). Derivation chain: `kill.py:105` `GLOBAL_ENABLED_KEY`, `kill.py:128-131` `seam_enabled_key` per-entity pattern, `metrics_gate.py:104/:111` namespace. The family can be OFF while the ledger runs and vice versa (Phase 1 owns its own collection key).
+5. **Cardinality bound.** Closed space of the single counter = 67 × 2 = **134 series**. Declared band `FAMILY_SERIES_BANDS["F24"] = 160` = 134 + **26 explicit headroom** (= 13 new categories × 2 results; the vocabulary has grown ~7 times historically, `checkpoint_metrics.py:279-289`). Never zero-headroom (F23's 67 and `decision_overlay`'s 411 are zero-headroom BY DESIGN and must not be copied — `adjudication.py:175-212`). Global cumulative: `BASELINE_SERIES=89` (`adjudication.py:215`) + Σ measured ≤ `GLOBAL_SERIES_CAP=2000` (`adjudication.py:253`); the MEASURED closed-space total is 491 today, +134 = **625 ≤ 2000** (this is THE claim). The band-sum (Σ bands 846 + F24's 160 + baseline 89 ≈ 1 095) may be cited separately but must be labeled as a band-sum — mixing conventions misleads future cardinality gates.
+
+*Amended by architect pass @ fd254b335 — Correction 1 (global total convention).*
+6. **Kill-switch stacking.** Family collects IFF (global metrics gate ON) AND (family gate ON). Global gates: env `ENSEMBLE_METRICS_ENABLED` (fail-closed: explicitly set + not truthy = OFF, `metrics_gate.py:104/:111/:104-114`) + managed `limits.metrics_enabled` (`metrics_gate.py:111`). Family gate = env `ENSEMBLE_METRICS_TOOL_USAGE_ENABLED` (same fail-closed polarity) THEN managed `limits.metrics_tool_usage_enabled` read via `metrics_gate.live_managed_value(key, default)` (`metrics_gate.py:~240`, PURE cached read — no DB on request path). Derivation chain: gate pattern lives in `metrics_gate.py` (env TRUTHY polarity + `live_managed_value` read) — `metrics_gate.py:104/:111` (global gates) and `metrics_gate.py:~240` (cached managed read, no DB on request path); `kill.py` is the decision-module kill store and is NOT the metrics gate. The family can be OFF while the ledger runs and vice versa (Phase 1 owns its own collection key).
+
+Managed-key placement (architect ruling): registration of `limits.metrics_tool_usage_enabled` MOVES to Phase 1's `MANAGED_KEYS` edit in `settings_service.py` (Phase 2 keeps its ZERO-edit stance on that file). `config_path=None` (DB/ENV-ONLY), default ON. Phase 2 remains the semantic owner of the key's READ path (`live_managed_value`). The env var `ENSEMBLE_METRICS_TOOL_USAGE_ENABLED` stays a complete fail-closed off-switch on its own.
+
+*Amended by architect pass @ fd254b335 — Correction 2 (citation) + managed-key placement ruling.*
 7. **Observer interface consumed, not edited.** Phase 1 exposes in-process sinks receiving `(tool_name, tool_category?, agent_id, project_id, ok: bool)` with NO argument payload by construction. F24 registers one sink; it uses only `tool_category` and `ok`, discarding the rest (aggregate-only).
 
+## 3.7 Architect-verified anchors (folded in as positive evidence)
+
+*Amended by architect pass @ fd254b335 — confirm-and-keep verifications + Gauge rejection.*
+
+- Vocabulary: 66 committed categories + reserved `other` = **67 values, version 11** (`tool-categories.json`, `checkpoint_metrics.py:439-463`); no vocab bump needed (§3.4).
+- Band: 134 ≤ 160 with **26 explicit headroom**; never zero-headroom (F23/decision_overlay are zero-headroom by design and must not be copied).
+- Name rule `^ensemble_[a-z0-9_]+$` (`checkpoint_metrics.py:110`).
+- AM-2 enforcement: every declared label key has non-empty `allowed_values` (`registry.py:102-114`).
+- Gate polarity: env explicit-not-truthy = OFF; managed read via `metrics_gate.live_managed_value` (`metrics_gate.py`).
+- **Gauge (distinct-tools-observed): REJECTED for Phase 1** — scope-creep (second series family, another vocabulary surface, near-zero decision value; the ledger answers distinctness exactly). Do NOT add a gauge series in this phase.
+
+Test additions (architect §10.5 phase-2 rows): band pin 134≤160; `VOCABULARY_VERSION==11`; measured-total 625 ≤ 2000 as the pin convention. These fold into T6/§8.
+
 ---
+
 
 ## 4. Tasks (file-level claims + per-task verification)
 
@@ -73,7 +93,7 @@ Publish ONE aggregate-only central metric family that records tool calls by **cl
 | T3 | Wire the family gate: env-explicit fail-closed check + `metrics_gate.live_managed_value("limits.metrics_tool_usage_enabled", True)`; AND-combine with global gates; sink increments only when ON. | `wiring/w5.py` | T1 | Unit test: family OFF with env explicitly `0`; family ON when env unset + managed default; global OFF suppresses regardless of family key; no DB touched on the read path. |
 | T4 | Add import + `register_w5_adapters()` to `wiring/__init__.py` beside the existing W1–W4 registrations (the "module import IS registration" contract, `__init__.py:23/:58-61`). | `wiring/__init__.py` | T1 | Importing `daemon.services.metrics_query.wiring` registers F24; door discovers it from AM-3 metadata with no door edit. |
 | T5 | Amend `adjudication.py`: add `"F24": ("IN", <w5.py anchor>)` to `CATALOG_FAMILY_VERDICTS` (`:59-99`), append `"F24"` to `REGISTERED_FAMILIES` (`:104-123`), add `"F24": 160` to `FAMILY_SERIES_BANDS` (`:175-212`), update the "12 full + 6 partial = 18 of 28" docstring (`:48`) to "13 + 6 = 19 of 29". | `adjudication.py` | T1 | `len(verdicts)==29`; binding subset 19-of-29; every registered family carries a band. |
-| T6 | Amend `test_metrics_family_adjudication.py`: `len(verdicts)` 28→29 (`:417`); expected set `range(1,24)`→`range(1,25)` (`:418-422`); rename `test_the_binding_subset_is_eighteen_of_twenty_eight`→`..._nineteen_of_twenty_nine`, `len(full)` 12→13 (`:428-434`); add F24 assertions (name rule, both `allowed_values`, source_idiom/durability/cardinality_weight, band 134≤160, global cap). Confirm `VOCABULARY_VERSION==11` pin (`:870`) unchanged. | `tests/unit/metrics/test_metrics_family_adjudication.py` | T5 | Full pack GREEN; daemon-diff pin stay GREEN (w5.py under `WIRING_ROOT` is excluded). |
+| T6 | Amend `test_metrics_family_adjudication.py`: `len(verdicts)` 28→29 (`:417`); expected set `range(1,24)`→`range(1,25)` (`:418-422`); rename `test_the_binding_subset_is_eighteen_of_twenty_eight`→`..._nineteen_of_twenty_nine`, `len(full)` 12→13 (`:428-434`); add F24 assertions (name rule, both `allowed_values`, source_idiom/durability/cardinality_weight, band 134≤160, global cap, measured-total 625 ≤ 2000 pin convention). Confirm `VOCABULARY_VERSION==11` pin (`:870`) unchanged. | `tests/unit/metrics/test_metrics_family_adjudication.py` | T5 | Full pack GREEN; daemon-diff pin stay GREEN (w5.py under `WIRING_ROOT` is excluded). |
 | T7 | Add family pack `test/packs/tool_usage_family_unit_test.sh` (pattern: `decision_module_p1_unit_test.sh`) covering T1/T3/T6, and register it in `.agents/tester/PACKS.md`. | pack script + PACKS.md | T1–T6 | Pack runs GREEN in the worktree; PACKS.md row records base SHA + date. |
 | T8 | Amend catalog §1 (F24 family row), §8 (result 2-set + tool_category reuse ref), §11 (one C-series correction row for the new family), §14 (family roster count 28→29 + series totals). Keep `BASELINE_SERIES=89` semantics: F24 is a MEASURED family, not baseline. | `metric-catalog.md` | T5 | One canonical number everywhere (§1/§7/§14 cross-check); body matches ledger per POK `plan-predicate-ledger-01-attestation`. |
 
@@ -95,7 +115,9 @@ Publish ONE aggregate-only central metric family that records tool calls by **cl
 | # | Risk | Impact | Likelihood | Mitigation |
 |---|---|---|---|---|
 | R1 | A genuinely new tool-category value appears → family label space grows past the band, or VOCABULARY_VERSION drift REDs the pack. | High | Low | T2 verification gate + full amendment procedure (§3.4); band carries 26-series headroom. |
-| R2 | Per-family managed key read via `live_managed_value` is not operator-writable because it lacks a `MANAGED_KEYS` entry (B-4: `config_path` must be a real Config attribute or operator write crashes). | Medium | Medium | §9 cross-phase note: v1 ships env-explicit fail-closed + cached managed read (default ON); a later lane registers the key in `settings_service.py` + `config.py`. Env var is a complete off-switch on its own. |
+| R2 | Per-family managed key read via `live_managed_value` operator-writability depends on the `MANAGED_KEYS` row. | Medium | Medium | Per the architect placement ruling, registration MOVES to Phase 1's `MANAGED_KEYS` edit (`config_path=None`, DB/ENV-ONLY, default ON) — Phase 2 keeps its zero-edit stance; Phase 2 remains semantic owner of the READ path. Env var is a complete off-switch on its own. |
+
+*Amended by architect pass @ fd254b335 — managed-key placement ruling.*
 | R3 | `register_family_metric` call omits an AM-3 kwarg or an `allowed_values` leg → registration raises. | Medium | Low | Copy the `decision/metrics.py:219-228` `_counter` helper shape verbatim; AM-2/AM-3 mutations stay RED. |
 | R4 | Catalog §14 interlocking totals (582/653/89) amended inconsistently. | Medium | Medium | T8 cross-check + POK `plan-predicate-ledger-01-attestation`; keep `BASELINE_SERIES=89` untouched. |
 | R5 | Cluster label collision with `decision_overlay`'s `CLUSTER="W5"` (`decision/metrics.py:131`). | Low | Medium | Use `CLUSTER="W6"` — the FILE slot is `w5.py` (free), the CLUSTER label is W6 (W5 taken). Cluster is metadata-only, not uniqueness-enforced, but keep labels distinct. |
@@ -108,7 +130,7 @@ Publish ONE aggregate-only central metric family that records tool calls by **cl
 |---|---|---|---|
 | S1 | F24 registered via WIRING registrar only | `registered_families()` contains `F24`; no raw `cm.register_*` in w5.py | exact |
 | S2 | AM-2/AM-3 structural | pack mutation tests RED; registration carries all four kwargs + both `allowed_values` | exact |
-| S3 | Cardinality bounded | `_closed_label_space(F24 metrics)` ≤ band; global total ≤ cap | 134 ≤ 160; ≤ 2000 |
+| S3 | Cardinality bounded | `_closed_label_space(F24 metrics)` ≤ band; global total ≤ cap | 134 ≤ 160; measured total 625 ≤ 2000 |
 | S4 | Kill-switch independent + fail-closed | unit matrix (T3) | 4/4 cases pass |
 | S5 | Adjudication pack GREEN | `pytest tests/unit/metrics/test_metrics_family_adjudication.py` | all pass |
 | S6 | Vocabulary unchanged | `VOCABULARY_VERSION==11`, artifact drift test GREEN | exact (unless T2 exception) |
@@ -118,7 +140,7 @@ Publish ONE aggregate-only central metric family that records tool calls by **cl
 
 ## 8. Test strategy
 
-- **Unit:** `test_metrics_family_adjudication.py` (amended) — census, verdicts, bands, global cap, AM-2/AM-3, daemon-diff (w5.py excluded via `WIRING_ROOT`).
+- **Unit:** `test_metrics_family_adjudication.py` (amended) — census, verdicts, bands, global cap, measured-total 625 ≤ 2000 pin (convention per Correction 1), `VOCABULARY_VERSION==11`, AM-2/AM-3, daemon-diff (w5.py excluded via `WIRING_ROOT`).
 - **Gate matrix (T3):** env explicit OFF / env unset+managed default / global OFF / family OFF-while-ledger-runs.
 - **Mutation:** AM-2 drop `allowed_values` leg → registration `ValueError`; AM-3 drop kwarg → `TypeError`; wrong name → name-rule RED.
 - **Pack:** `test/packs/tool_usage_family_unit_test.sh` — single entry point for the family's tests, registered in PACKS.md.
@@ -129,7 +151,9 @@ Publish ONE aggregate-only central metric family that records tool calls by **cl
 ## 9. Cross-phase interface notes (for the architect — do NOT plan edits into these files)
 
 1. **Observer sink registration symbol (Phase 1).** Phase 1 must expose a module-level `register_tool_usage_sink(sink)` (or equivalent) that w5.py imports. The sink signature is frozen: `(tool_name, tool_category?, agent_id, project_id, ok: bool)`. If Phase 1's registration is construction-time only (not a module-level registry), the architect must rule the hook site; Phase 2's w5.py consumes whatever Phase 1 exports with ZERO Phase-1 edits.
-2. **Managed-key writability (settings/config).** `limits.metrics_tool_usage_enabled` is read via the cached managed-values mapping (no registration needed for READS). Making it operator-writable via `PUT /api/settings/daemon/{key}` requires a `MANAGED_KEYS` entry (`settings_service.py:253`) + a real `LimitsConfig` attribute (`config.py`; B-4 — `decisions.md:58` B-4 row / `settings_service.py:1101-1105`). These files are OUT of Phase 2 ownership. Ruling requested: (a) grant a follow-up lane those two files, or (b) accept v1 env-only control (the env var is a complete fail-closed off-switch). Default plan: (b), with the managed read already in place so (a) is a two-line future edit.
+2. **Managed-key writability (settings/config).** `limits.metrics_tool_usage_enabled` is read via the cached managed-values mapping (no registration needed for READS). Per the architect placement ruling, REGISTRATION of this key MOVES to Phase 1's `MANAGED_KEYS` edit in `settings_service.py` (`config_path=None`, DB/ENV-ONLY, default ON) — Phase 2 keeps its ZERO-edit stance on that file. Phase 2 remains the semantic owner of the key's READ path (`live_managed_value`). Making it operator-writable via `PUT /api/settings/daemon/{key}` therefore needs only the `MANAGED_KEYS` row (landed by Phase 1) — no `LimitsConfig` attribute and no `config.py` edit for the family key (A-7 style: `config_path=None`). The env var `ENSEMBLE_METRICS_TOOL_USAGE_ENABLED` stays a complete fail-closed off-switch on its own. `limits.tool_usage_collection_enabled` (Phase 1's own key) is registered in the same edit; its `config_path` shape follows A-7 (add the field or use `config_path=None` — do not ship a dotted path with no field).
+
+*Amended by architect pass @ fd254b335 — managed-key placement ruling (§5).*
 3. **`tool_category` value set (Phase 1).** If Phase 1's tap can emit a category outside the committed 67-value set, that is a new value → §3.4 full amendment. T2 verifies; the architect is notified only on a positive finding.
 
 ---

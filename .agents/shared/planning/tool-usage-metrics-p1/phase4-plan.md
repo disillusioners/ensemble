@@ -42,7 +42,8 @@ Outcome test: with auth ON, `?tab=tool-usage` renders a project selector, a tool
 ### Out of scope (REJECT-grade if touched)
 
 - **Any daemon file** — phase 1 owns `/api/tool-usage/*`. This phase makes ZERO daemon edits.
-- **`bundle-baseline.json`** — the threshold is INVARIANT in this phase (R-08: a breach is escalated, never silently re-baselined).
+- **`bundle-baseline.json`** + **`metrics.bundle-guard.spec.ts` threshold pin** — OWNED by this phase **only as of the leader ruling R-08 (architect §6.2 / LEADER RULING)**: `threshold_B4b_route_fetch_set_lazy_only_bytes` 185,000 → 188,000, plus the spec-pin update and the tester gate re-measure instruction. Previously this file was INVARIANT (R-08: a breach was escalated, never silently re-baselined) — **that invariant is superseded BY THIS LEADER RULING ONLY**. No other bundle-baseline.json edits are permitted; the re-baseline covers the architect-proven ~1.0–1.3 kB static residue with ~2.2 kB margin. Static fallback REJECTED; defer-phase-4 remains the honest fallback only if the leader had refused (moot — ruled YES).
+  Amended by architect pass @ fd254b335 — LEADER RULING R-08 (§6.2)
 - **Other tabs' components** — no edits.
 - **`metrics.service.ts`** (the central door) — untouched; the data door is a NEW domain service.
 - **`package.json`** — zero new npm deps.
@@ -57,7 +58,7 @@ The lane's ruling SSOT is the dispatcher's pre-rulings (recorded in the dispatch
 |---|---|
 | **Pre-ruling 1 — 9th manifest entry; slot choice is MINE** | Ruled **`slot: 'custom'`** (see §4 Ruling A). The tab binds NO central F-family (data comes from the domain door), so it cannot be a `MetricsCentralTab` (which requires `familyIds: NonEmpty<MetricsRegisteredFamilyId>`). Evidence: `tabs.manifest.ts` `MetricsCustomTab` (`:133-160`) carries no `familyIds` member and types `allowedWindows` as `NonEmpty<ResourcesWindow>`; `MetricsCentralTab` (`:120-132`) requires `familyIds: NonEmpty<MetricsRegisteredFamilyId>`. The type system forces `custom`. |
 | **Pre-ruling 2 — data door = NEW domain route** | A NEW FE service `ToolUsageService` targeting `/api/tool-usage/*` (the `nest-reports.service.ts` pattern). `metrics.service.ts` (the central door) stays untouched. |
-| **Pre-ruling 3 — B4b strategy: tab body ships LAZY** | First dynamically-imported tab in the map. Exact-cover compile guarantee (the `Record<MetricsTabId, Type<unknown>>` contract) stays INTACT — the map value is a thin static host; the heavy body is fetched on selection via the `app.ts:391` VCR dynamic-import precedent. Fallback (only if lazy is proven infeasible — must argue from evidence, not preference): explicit leader re-baseline ruling per R-08; NEVER a silent threshold edit. |
+| **Pre-ruling 3 — B4b strategy: tab body ships LAZY** | First dynamically-imported tab in the map. Exact-cover compile guarantee (the `Record<MetricsTabId, Type<unknown>>` contract) stays INTACT — the map value is a thin static host; the heavy body is fetched on selection via the `app.ts:391` VCR dynamic-import precedent. "R-08 B4b re-baseline: RULED YES — threshold_B4b_route_fetch_set_lazy_only_bytes 185,000 → 188,000. Lazy tab body REMAINS PRIMARY (minimizes incremental fetch-set growth); the re-baseline covers the architect-proven ~1.0–1.3 kB static residue with ~2.2 kB margin. Static fallback REJECTED." Defer-phase-4 remains the honest fallback only if the leader had refused any re-baseline (moot — ruled YES). Fallback (only if lazy is proven infeasible — must argue from evidence, not preference): explicit leader re-baseline ruling per R-08; NEVER a silent threshold edit. |
 | **Pre-ruling 4 — house SVG only** | `app-house-svg-renderer` with `variant="trend"` for the daily series; counters step-rendered; `chart-theme.ts` palette; ZERO new npm deps; zero new EventSource streams. |
 | **Pre-ruling 5 — door-state reuse** | Reuse `MetricsDoorStateComponent` (the nest-reports tab pattern) for the auth-off 503 and the six reusable door classes; domain-local copy only for the two domain-only outcomes. |
 
@@ -92,7 +93,8 @@ Slug `tool-usage`, label `Tool Usage`. The slug matches the label (no internal i
 
 - **Exact-cover compile guarantee**: `METRICS_TAB_COMPONENTS: Readonly<Record<MetricsTabId, Type<unknown>>>` (`tabs/tabs.components.ts:13-26`) — one entry per tab, no extra, no missing; a missing/extra key is a **compile error**. The lazy mechanism preserves this: the map value is a thin static host `Type`, not a loader function. The host is the compile-time witness; the heavy body is runtime-loaded.
 - **Manifest registration-only contract** (W4): a new tab costs one manifest entry + one map line + one body. No other typed-table edits unless a new metric NAME is introduced (none here — tool-usage is not a metrics family).
-- **`bundle-baseline.json` threshold** (`threshold_B4b_route_fetch_set_lazy_only_bytes = 185000`) — INVARIANT. Current measured B4b = 184,866 (134 B headroom) per the nest-anomaly functional gate. A breach is escalated, never silently re-baselined.
+- **`bundle-baseline.json` threshold** (`threshold_B4b_route_fetch_set_lazy_only_bytes = 185000`) — **PREMISE CORRECTION (🔴 arithmetic, architect §6.2)**: "lazy keeps B4b within the frozen bound" is FALSE. Static residue into the route chunk = manifest entry ≈125 B + map line/import ≈60 B + host ≈0.8–1.1 kB min ≈ ~1.0–1.3 kB, versus 134 B headroom; ANY 9th-tab variant breaches 185,000 (even a zero-byte host breaches at ~185 B minimum); expected measured B4b under lazy ≈ 185,800–186,200 B. The lazy mechanism itself is FEASIBLE (confidence HIGH — B4b exclusion is BY CONSTRUCTION, proven from bundle-baseline.measure.js's own static-import-regex logic; dynamic targets never enter the fetch set; corroborated by the 206,857 B chart.js vendor chunk being absent from the 184,866 B B4b number; the heavy body ≈18–24 kB contributes ZERO B4b bytes). **The threshold is therefore re-baselined 185,000 → 188,000 by the leader ruling R-08 (architect §6.2 / LEADER RULING)** — this is a phase-4 task (bundle-baseline.json + metrics.bundle-guard.spec.ts pin + tester re-measure), not a silent edit. The static-only fallback (≈205–210 kB) is REJECTED.
+  Amended by architect pass @ fd254b335 — §6.2 B4b arithmetic + LEADER RULING R-08
 - **Zero new npm deps** (`package.json` untouched).
 - **House SVG only** (`app-house-svg-renderer`, `chart-theme.ts` palette, `viewBox 900×260`, COUNTER-HONESTY step-never-diagonal, UTC-never-local via `toISOString`).
 - **Zero new EventSource streams** (five sites hold streams; nothing calls `disconnect()`; we add none).
@@ -139,6 +141,10 @@ Slug `tool-usage`, label `Tool Usage`. The slug matches the label (no internal i
    - `:96-100` `it('exactly ONE tab is the custom slot …')` → **2 custom / 8 central** (Ruling A adds a second custom tab).
    - `:102-116` the family-roster map → **unchanged** (tool-usage is custom, carries no family; the map is over `CENTRAL_TABS` only).
    - `:117-125` any custom-slot count assertions → update to 2.
+    - **`metricsCustomTab()` "exactly one custom" prose is now FALSE** — amend the docstring and pin that it returns the resource tab first (the second custom tab is type-legal; the constraint is prose/spec-count only). Add a pin asserting the returns-resource-first ordering.
+    - **Pin the `metrics-range` snap**: entering `tool-usage` from a `15m`/`1h` frame snaps to `7d` (the measurement window); add an assertion for the snap.
+    - One AOT dev-build pass after template edits (NG8002/NG0303 invisible to tsc/jest).
+  Amended by architect pass @ fd254b335 — §6.1 spec amendments
 
 ### Task 2 — The tab body (host + heavy)
 
@@ -148,24 +154,46 @@ The host's only job is to be the statically-imported `Type` that satisfies the e
 
 ```ts
 // host component (sketch — the plan pins the contract, not the bytes)
+// FROZEN host pattern (architect §6.1): standalone, OnPush, statically imported,
+// declares ALL FIVE shell inputs (the shell passes the same 5 to every tab;
+// undeclared inputs THROW in dev / silently drop in prod).
 export class ToolUsageTabHostComponent implements OnInit, OnDestroy {
   private readonly vcr = inject(ViewContainerRef);
   private ref: ComponentRef<unknown> | null = null;
-  // inputs mirrored from the shell's tabInputs() for this tab id
-  readonly projectId = input<string | null>(null);
+  // ALL FIVE shell inputs — forwarded onto the created heavy ref.
+  readonly state = input<unknown>(null);
+  readonly onState = input<unknown>(null);
   readonly window = input<string>('7d');
-  // ...
+  readonly baseline = input<unknown>(null);
+  readonly onRangeChange = input<unknown>(null);
+  // loading placeholder + visible chunk-error state with retry (never-blank).
+  readonly loading = signal(true);
+  readonly chunkError = signal<unknown>(null);
   async ngOnInit() {
-    const { ToolUsageTabComponent } = await import('./tool-usage-tab.component');
-    this.ref = this.vcr.createComponent(ToolUsageTabComponent);
-    // forward inputs onto the created ref
-    this.ref.setInput('projectId', this.projectId());
-    // ...
-    this.ref.changeDetectorRef.detectChanges();
+    this.loading.set(true);
+    this.chunkError.set(null);
+    try {
+      const { ToolUsageTabComponent } = await import('./tool-usage-tab.component');
+      this.ref = this.vcr.createComponent(ToolUsageTabComponent);
+      // forward inputs onto the created ref
+      this.ref.setInput('state', this.state());
+      this.ref.setInput('onState', this.onState());
+      this.ref.setInput('window', this.window());
+      this.ref.setInput('baseline', this.baseline());
+      this.ref.setInput('onRangeChange', this.onRangeChange());
+      this.ref.changeDetectorRef.detectChanges();   // explicit detectChanges (zoneless)
+    } catch (e) {
+      this.chunkError.set(e);   // visible chunk-error state with retry
+    } finally {
+      this.loading.set(false);
+    }
   }
+  retry() { void this.ngOnInit(); }   // re-selection / retry re-runs init; module cache makes remount near-instant
   ngOnDestroy() { this.ref?.destroy(); }
 }
 ```
+The host template carries a loading placeholder + a visible chunk-error state with a Retry button (re-selection re-runs init; `mat-tab` destroys deselected bodies, so polling stops — desired). The auth-off banner lives in the HEAVY body via `MetricsDoorStateComponent` (already in the route chunk via nest-reports — zero new vendor bytes); a host-side banner is impossible because auth posture is a per-request outcome.
+  Amended by architect pass @ fd254b335 — §6.1 host pattern (five inputs + chunk-error retry)
 
 The host's template is a single anchor `<ng-container #anchor></ng-container>` (or the VCR is the host itself). **No heavy import at module-evaluation time** — the `import(...)` is the only reference to `tool-usage-tab.component`, so the compiler emits it as a separate chunk. The bundle guard's vendor-static-edge invariant + B4b confirm it stays out of the route fetch set.
 
@@ -279,7 +307,7 @@ No other change. The `METRICS_TAB_BINDINGS` derivation (`.map`) stays untouched.
 | B2 chart.js marker in initial set | 0 | 0 hits | **ZERO** — no chart.js import in the new code |
 | B3 static `from 'chart.js'` sites | 0 | 0 static sites | **ZERO** — the new body imports no chart library; charts ride the shared house renderer |
 | B4a chart chunk | 206 857 B min / 71 054 B gz | ≤ 82 000 B gz | **ZERO** — no new dynamic chart import (house SVG is already in the route chunk) |
-| **B4b the `/metrics` route fetch set, lazy-only** | **165 185 B** (frozen) / **184 866 B** (measured post nest-anomaly, 134 B headroom) | **≤ 185 000 B** | **THE BINDING ONE.** The lazy mechanism keeps the heavy body + service + models OUT of the route fetch set; only the thin host (~0.5 kB) + the manifest delta land in it. If the measured add breaches, the lane trims (shrink the host, drop manifest comment verbosity) — it may NOT raise the threshold. |
+| **B4b the `/metrics` route fetch set, lazy-only** | **165 185 B** (frozen) / **184 866 B** (measured post nest-anomaly, 134 B headroom) | **≤ 188 000 B (RE-BASELINED by leader ruling R-08 — architect §6.2 / LEADER RULING; was ≤ 185 000 B)** | **THE BINDING ONE.** PREMISE CORRECTION (🔴 arithmetic): "lazy keeps B4b within the frozen bound" is FALSE — static residue ≈1.0–1.3 kB vs 134 B headroom; expected measured B4b under lazy ≈ 185,800–186,200 B. The lazy mechanism keeps the heavy body + service + models OUT of the route fetch set; only the thin host (~0.5 kB) + the manifest delta land in it. The re-baseline covers the architect-proven residue with ~2.2 kB margin; static fallback (≈205–210 kB) REJECTED. If the measured add breaches 188,000, the lane trims — it may NOT raise the threshold beyond the ruled value. |
 | B4 vendor-static-edge invariant | 0 | 0 | **ZERO** (load-bearing catch) |
 | component-style warning SET | 9 entries | SET DIFFERENCE (0 added, 0 removed) | the new body uses **inline styles** (the house pattern — `central-tab.component.ts` uses `styles: [\`…\`]`), so it adds **no** `.scss` warning entry |
 
@@ -311,7 +339,7 @@ The measured numbers are recorded **against the FROZEN baseline** (the artifact'
 
 | # | Risk | Impact | Likelihood | Mitigation |
 |---|---|---|---|---|
-| R1 | The B4b headroom (134 B post nest-anomaly) is exceeded by the manifest delta + thin host | High | Medium | The lazy mechanism keeps the heavy bytes out; the host is ~0.5 kB; if the measured add breaches, trim (drop manifest comments, shrink the host) — never raise the threshold. Re-measure is mandatory. |
+| R1 | The B4b headroom (134 B post nest-anomaly) is exceeded by the manifest delta + thin host — PREMISE CORRECTION (🔴 arithmetic, architect §6.2): "lazy keeps B4b within the frozen bound" is FALSE; static residue ≈1.0–1.3 kB vs 134 B headroom; expected measured B4b ≈185,800–186,200 B. | High | Medium | The lazy mechanism keeps the heavy bytes out; the host is ~0.5 kB; the leader ruled R-08 YES — re-baseline 185,000 → 188,000 (covers residue with ~2.2 kB margin). Static fallback (≈205–210 kB) REJECTED; defer-phase-4 is the only fallback and is moot. Re-measure is mandatory; expected 185,800–186,200 B must be recorded against the re-baselined 188,000 bound. |
 | R2 | The lazy host fails to mount the heavy body (VCR + zoneless CD) and the tab renders blank | High | Low | Mirror `app.ts:391` exactly (createComponent + setInput + detectChanges + catch on chunk failure with retry flag). The tab pack covers the mount. |
 | R3 | The `days`/window mapping disagrees with the BE default (7) and the chart shows an empty series | Medium | Low | `defaultWindowS: '7d'` matches `days=7`; the service forwards `days` from the window; the models spec asserts the mapping. |
 | R4 | The per-agent breakdown reads as "current severity" when it is a 7-day aggregate | Medium | Low | Copy discipline: the column header says "calls (7d)" and never "current". |
@@ -327,7 +355,8 @@ The measured numbers are recorded **against the FROZEN baseline** (the artifact'
 - With auth OFF, the tab renders exactly ONE fail-closed banner (no Retry, runbook pointer) and never blanks or storms requests.
 - `tabs.manifest.spec.ts` carries 9 tabs, 2 custom / 8 central, and the ids/labels arrays include `tool-usage` / `Tool Usage`.
 - `metrics.tool-usage.spec.ts`, `tool-usage.service.spec.ts`, `tool-usage.models.spec.ts` are GREEN.
-- The bundle guard exits 0 with the re-measured B4b recorded against the frozen 185 000 B threshold; `package.json` is untouched; the component-style warning SET is unchanged (9 entries).
+- The bundle guard exits 0 with the re-measured B4b recorded against the **re-baselined 188 000 B** threshold (leader ruling R-08, architect §6.2; expected measured 185,800–186,200 B); `package.json` is untouched; the component-style warning SET is unchanged (9 entries).
+  Amended by architect pass @ fd254b335 — LEADER RULING R-08 (§6.2)
 - The lazy-mechanism spec proves the heavy body is not in the static import closure of `tabs.components.ts`.
 - `ng build --configuration development` passes after template changes.
 - No daemon file, no `bundle-baseline.json`, and no other tab's component is touched.
@@ -340,7 +369,8 @@ The measured numbers are recorded **against the FROZEN baseline** (the artifact'
 2. `cd frontend && npx jest --config jest.config.js src/app/pages/metrics/metrics.tool-usage.spec.ts src/app/services/tool-usage.service.spec.ts src/app/models/tool-usage.models.spec.ts` — green.
 3. `cd frontend && npx jest --config jest.config.js src/app/pages/metrics/metrics.bundle-guard.spec.ts` — green (vendor-static-edge invariant holds).
 4. `cd frontend && ./node_modules/.bin/ng build --configuration development` — green (AOT gap closure).
-5. The bundle re-measure sequence (§Task 6) — guard exits 0; measured B4b recorded.
+5. The bundle re-measure sequence (§Task 6) — guard exits 0; measured B4b recorded against the re-baselined 188 000 B bound (leader ruling R-08, architect §6.2; expected 185,800–186,200 B).
+  Amended by architect pass @ fd254b335 — LEADER RULING R-08 (§6.2)
 6. `cd frontend && npx playwright test --config playwright.metrics-gate.config.ts` (the one pixel item) — green.
 7. `git diff --stat` (worktree) shows ONLY files under `frontend/src/app/pages/metrics/`, `frontend/src/app/services/tool-usage.service*`, `frontend/src/app/models/tool-usage.models*` — no daemon, no baseline, no other tab.
 
@@ -353,14 +383,16 @@ The measured numbers are recorded **against the FROZEN baseline** (the artifact'
 - A3: The trend chart shows ONE series for the SELECTED tool (not all tools overlaid) to keep the chart legible; the project selector + tool selector drive the daily fetch.
 - A4: The 7-day window (`days=7`) is the measurement window the commission's ~7-day readout uses; `24h` is a secondary short-horizon view.
 - A5: `ProjectService.listProjects()` is the source of the project selector's options (existing service; no new service needed).
-- A6: The `generated_at` timestamp is rendered as the freshness line using the server's value (never the client clock) — the house rule (`central-tab.component.ts:864-870`).
+- A7: The B4b re-baseline to 188,000 B is the leader ruling R-08 (architect §6.2 / LEADER RULING) — it covers the architect-proven ~1.0–1.3 kB static residue with ~2.2 kB margin; static fallback (≈205–210 kB) is REJECTED; defer-phase-4 is the only fallback and is moot (ruled YES). No other bundle-baseline.json edits are permitted.
+  Amended by architect pass @ fd254b335 — LEADER RULING R-08 (§6.2)
 
 ---
 
 ## 10. Open questions for the orchestrator
 
 - OQ1: If the architect pass changes the summary payload shape (e.g. drops `calls_7d` in favour of a different window), the ranking + sort + near-zero affordance must be re-derived — flag as a contract-break, not a silent adapt.
-- OQ2: If lazy loading proves infeasible in this worktree (e.g. the VCR mount races with `mat-tab`'s deferred rendering), the fallback is an explicit leader re-baseline ruling per R-08 — NEVER a silent threshold edit. The plan argues feasibility from the `app.ts:391` precedent, which mounts a chat root inside a zoneless app via the same VCR + `detectChanges()` discipline.
+- OQ2 (RESOLVED by leader ruling R-08, architect §6.2 / LEADER RULING): The re-baseline is required for the residue (~1.0–1.3 kB static residue), NOT because lazy failed. Static-only fallback (≈205–210 kB) REJECTED. Defer-phase-4 remains the honest fallback only if the leader had refused any re-baseline (moot — ruled YES). Lazy remains PRIMARY. No silent threshold edit ever occurred — the re-baseline landed as a phase-4 task (bundle-baseline.json + spec pin + tester re-measure) per the ruling.
+  Amended by architect pass @ fd254b335 — OQ2 resolved (§6.2 / LEADER RULING R-08)
 - OQ3: The near-zero threshold (A1) and the "layer-2 candidate" marker copy are UI affordances; if the Emperor wants them data-driven (e.g. bottom-quartile by frequency), that is a Phase-2 concern, not Phase 1.
 
 ---
@@ -374,7 +406,7 @@ The measured numbers are recorded **against the FROZEN baseline** (the artifact'
 - `services/nest-reports.service.ts:34` domain-door precedent (prefix, auth posture); `daemon/routers/nest_reports.py:57` (prefix registration, `routers/__init__.py:36`).
 - `services/metrics.service.ts:38-40` central door constants (no project param).
 - `components/charts/house-svg-renderer/house-svg-renderer.component.ts:85` selector; `:68` variants; `:422/425/428/431/439/442` inputs; `:59/:61` viewBox 900×260.
-- `bundle-baseline.json:43` threshold_B4b = 185000; measured 184866 (134 B headroom) per `.agents/tester/RESULTS/2026-11-05-nest-anomaly-report-functional-gate.md:59/:125`.
+- `bundle-baseline.json:43` threshold_B4b = 185000 → **re-baselined to 188000** by leader ruling R-08 (architect §6.2 / LEADER RULING); measured 184866 (134 B headroom) per `.agents/tester/RESULTS/2026-11-05-nest-anomaly-report-functional-gate.md:59/:125`; expected measured under lazy ≈ 185,800–186,200 B.
 - `nest-anomaly-report/phase4-plan.md:86-115` (4-line integration precedent); `:265-268` (re-measure command sequence); `:306` (R-08 breach rule).
 - `tabs.manifest.spec.ts:70-72` (8-tabs length), `:77-86` (ids array), `:90-96` (labels), `:96-100` (custom count), `:102-116` (family roster map), `:117-125` (custom-slot assertions).
 - `nest-reports-tab.component.ts:28` import MetricsDoorStateComponent; `:106` imports array; `:159-164` door-state usage.
