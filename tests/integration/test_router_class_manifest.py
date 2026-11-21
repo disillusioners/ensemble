@@ -174,6 +174,12 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
     # SCOPE declaration lives in the scope cage; the auth-OFF 503
     # fail-closed gate lives in the route.
     "/api/tool-usage": frozenset({"pd"}),
+    # Engine Arc Phase 6 (2026-11-21, P6-prepared, landed by P4): the
+    # observability door. Three GETs, no mutating verb (D6.8). No route
+    # carries an explicit class tag ⇒ protected-default ("pd"), the
+    # metrics/nest-reports precedent. The scope declaration lives in the
+    # scope cage (maintenance:read|metrics:read).
+    "/api/engine": frozenset({"pd"}),
     "/api/webhooks": frozenset({"module_lane"}),  # FR-40 module lane
     "/api/work": frozenset({"pd"}),
     "/api/workspace": frozenset({"pd"}),
@@ -416,4 +422,4 @@ class TestRouterClassManifest:
         # to 35.
         # tool-usage-metrics-p1 added the /api/tool-usage family — the
         # api_families count grew from 36 to 37.
-        assert len(api_families) == 37, sorted(api_families)
+        assert len(api_families) == 38, sorted(api_families)

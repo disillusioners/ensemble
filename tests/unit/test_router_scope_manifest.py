@@ -187,6 +187,11 @@ PINNED_SCOPE_MANIFEST: dict[str, frozenset[str] | str] = {
     # route's lone ``maintenance:read`` is NOT our model; the three
     # QUERY routes' any-of set IS.
     "/api/nest-reports": "maintenance:read|metrics:read",
+    # Engine Arc Phase 6 (2026-11-21, P6-prepared, landed by P4): the
+    # observability door. The SAME any-of spelling as the /api/metrics and
+    # /api/nest-reports rows above (D6.3 — the metrics query door's set,
+    # reused; no new taxonomy).
+    "/api/engine": "maintenance:read|metrics:read",
     # agent group chat P6 (2026-11-16) — the ROOM READ surface the
     # observability modal rides (GET /api/rooms/{room_id}/messages).
     # The family carries the EXISTING ``instances:read`` scope — the
@@ -342,9 +347,9 @@ class TestSourceMatchTarget:
         """
         source = API_PY.read_text()
         matches = re.findall(r"api_router\.include_router\(", source)
-        assert len(matches) == 41, (
+        assert len(matches) == 42, (
             f"api_router.include_router( census drifted: {len(matches)} "
-            "(pinned 41 = 38 unconditional + 2 auth-ON-gated + 1 "
+            "(pinned 42 = 39 unconditional + 2 auth-ON-gated + 1 "
             "gateway-flag-gated (WS)). New mount? "
             "Declare its family in PINNED_SCOPE_MANIFEST above."
         )
@@ -477,8 +482,8 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 122, (
-            f"declared-route census drifted: {len(declared)} (pinned 122)"
+        assert len(declared) == 125, (
+            f"declared-route census drifted: {len(declared)} (pinned 125)"
         )
 
     def test_manifest_entries_valid(self):

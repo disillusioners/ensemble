@@ -443,3 +443,44 @@ async def test_extend_then_raise_records_failed_backoff():
     assert len(tpe_rows) == 1
     assert len(failed_rows) == 1
     assert failed_rows[-1].error_class == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_extend_wedge_escalates_to_dead(caplog):
+    """F1 engine-level escalation pin (extend-wedge): a held TPE dispatch past
+    2x max_runtime_s escalates to dead=1 and logs exactly ONE WARNING. Driven
+    through the ENGINE dispatch path."""
+    import logging
+
+    eng = _engine()
+    repo = EngineRepository(eng)
+    reg = EngineRegistry(repo)
+    svc, loop, release, task = await _start_extended_dispatch(repo, reg)
+
+    # Age the hold past 2 x max_runtime_s (0.05s * 2 = 0.1s).
+    await asyncio.sleep(0.25)
+
+    import daemon.services.engine.guardrails as _g
+    orig = _g.escalate_dead_log_once
+    calls = []
+    def _spy(job_id, esc_set, *, level="error", message=""):
+        calls.append((job_id, level, message))
+        return orig(job_id, esc_set, level=level, message=message)
+    _g.escalate_dead_log_once = _spy
+    try:
+        await asyncio.wait_for(loop._tick(), timeout=10)
+    finally:
+        _g.escalate_dead_log_once = orig
+
+    cache = svc._cache["orphan-watcher"]
+    assert cache.get("persisted_dead") is True
+    job = repo.get_job("orphan-watcher")
+    assert getattr(job, "dead", 0) == 1
+    assert len(calls) == 1, f"expected one WARNING escalation, got {len(calls)}"
+    assert calls[0][1] == "warning"
+
+    release.set()
+    try:
+        await asyncio.wait_for(task, timeout=10)
+    except Exception:  # noqa: BLE001
+        pass
