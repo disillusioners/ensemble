@@ -196,6 +196,12 @@ PINNED_SCOPE_MANIFEST: dict[str, frozenset[str] | str] = {
     # (GET /api/instances/{instance_id}/rooms) joins the EXISTING
     # /api/instances family and declares the same scope.
     "/api/rooms": "instances:read",
+    # tool-usage-metrics-p1 (2026-11-21, ENSEMBLE-37 Phase 1): the
+    # read-only ledger door. The SAME any-of spelling as the /api/metrics
+    # and /api/nest-reports rows above — the two routes (GET /summary,
+    # GET /daily) carry the metrics door's any-of scope set and NOTHING
+    # broader; the auth-OFF 503 fail-closed gate lives in the route.
+    "/api/tool-usage": "maintenance:read|metrics:read",
 }
 
 #: The wildcard sentinel as stored in the manifest.
@@ -336,9 +342,9 @@ class TestSourceMatchTarget:
         """
         source = API_PY.read_text()
         matches = re.findall(r"api_router\.include_router\(", source)
-        assert len(matches) == 40, (
+        assert len(matches) == 41, (
             f"api_router.include_router( census drifted: {len(matches)} "
-            "(pinned 40 = 37 unconditional + 2 auth-ON-gated + 1 "
+            "(pinned 41 = 38 unconditional + 2 auth-ON-gated + 1 "
             "gateway-flag-gated (WS)). New mount? "
             "Declare its family in PINNED_SCOPE_MANIFEST above."
         )
@@ -471,8 +477,8 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 120, (
-            f"declared-route census drifted: {len(declared)} (pinned 120)"
+        assert len(declared) == 122, (
+            f"declared-route census drifted: {len(declared)} (pinned 122)"
         )
 
     def test_manifest_entries_valid(self):

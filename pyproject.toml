@@ -1,7 +1,8 @@
 [project]
 name = "ensemble"
-version = "0.31.23"
+version = "0.31.25"
 description = "Agents Ensemble - Multi-Agent AI Daemon"
+license = "AGPL-3.0-only"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

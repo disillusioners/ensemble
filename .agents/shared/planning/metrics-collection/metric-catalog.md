@@ -239,6 +239,7 @@ dependency is off emits **no series** (absent ≠ zero) unless its contract says
 | F20 | `ensemble_turn_events_total`, `ensemble_turn_duration_seconds`, `ensemble_tool_calls_total` | counter/hist/counter | P1c | reuse `message_tap.py:234` | 75 |
 | F21 | `ensemble_journal_file_bytes`, `ensemble_journal_history_entries`, `ensemble_journal_op_seconds`, `ensemble_journal_ops_total`, `ensemble_upgrade_phase_seconds`, `ensemble_upgrade_phase_total`, `ensemble_upgrade_release_current`, `ensemble_upgrade_journal_events_total` | gauge×3/hist/counter×3/gauge | P1c | reuse `tools/upgrade_journal.py` | 65 |
 | F22 | `ensemble_process_cpu_seconds` + `ensemble_textfile_last_write_timestamp_seconds` + host/PG exporter series | gauge | P2 | greenfield (textfile + off-the-shelf) | 4 shell / ~67 exporter |
+| F24 | `ensemble_tool_usage_calls_total` | counter | post-catalog (tool-usage-metrics-p1 P2, 2026-11-21 — §11 **C100**) | greenfield (the phase-1 observation tap's write-time sink, `daemon/services/metrics_query/wiring/w5.py`) | 134 (closed space 67 × 2 — the §8.14 measured convention) |
 
 **Daemon-origin total: 582** (F0.1→F21 + F7b + F7c) + **4 shell-origin** series (F22) — the
 **daemon-budget total**. The certified **grand total on the Prometheus server** is **≈653**: it
@@ -249,6 +250,24 @@ the daemon-origin budget (catalog §14.1 → *Grand total on Prometheus server*)
 *Reconciliation basis:* §7 counts the §1 row values, with the one range cell (**F7**
 `21→31`) taken at its **today** value **21** — the bytes histogram's +10 arrives with the P1b
 byte wiring (catalog G-5). Row sums: P0 28 + P1a 63 + P1b 265 + P1c 226 = 582.
+
+*Post-catalog families and the measured convention (§11 **C100**, 2026-11-21).* **F24 is NOT
+folded into the 582** — the plan-time ledger above is the catalog's **live-estimate**
+convention, while F24 (like **F23** and **decision_overlay**, both of which post-date this
+catalog's plan-time census and are catalogued in the wiring adjudication module, not §1) is
+counted under the **measured closed-space** convention the shipped pack enforces. The measured
+ledger stands on its own and is the ONE canonical home for its numbers:
+**BASELINE_SERIES 89 (F7c-inclusive, unchanged — F24 is a measured family, not baseline) +
+402 (the wiring families' closed space before F24) + 134 (F24: 67 tool-category values
+[the committed artifact's 66 + reserved `other`] × 2 result values) = 625 ≤ 2 000** — THE
+claim (decisions.md D18; the plan's ≈1095 is a band-sum — Σ bands 846 + F24's 160 + baseline
+89 — and is cited only as a band-sum, never as the headline). The enforced cumulative (the
+same measured helper over EVERYTHING registered, including decision_overlay's 411) reads
+**89 + 813 + 134 = 1 036 ≤ 2 000**. The F24 series band is **160 = 134 + 26 explicit
+headroom** (13 new categories × 2 results — never zero-headroom; the F23 and decision_overlay
+bands are zero-headroom BY DESIGN and must not be copied). No `ensemble_metrics_vocabulary_
+version` bump — F24 REUSES the frozen tool-category artifact's set (§8.6, version **11**
+stands).
 
 *Delta trail (the basis of the 582).* Every delta is stated against the **§1 summary table** —
 the table is what summed to the **prior, retired daemon-origin total (538)**, so a delta quoted
@@ -1436,6 +1455,21 @@ the producer is **split** (A3) across two sites:
 - **Not to be conflated** — the **semantic** consumer of the related fresh-episode flag is
   `daemon/graph.py:7319` `_detect_fresh_episode_reset`.
 
+**8.14 The tool-usage family vocabularies (F24 — §11 C100).** **`result` (2)**: `ok`, `error` —
+the closed 2-set the sink maps the observer's `ok: bool` into (`daemon/services/metrics_query/
+wiring/w5.py::on_tool_usage_event`; the same ok/error shape as §8.3's wedge write outcome).
+**`tool_category` (67)**: REUSED AS-IS from the frozen V-4 artifact's set (§8.6 — the 66
+committed categories + reserved `other`), read at registration time through
+`daemon/checkpoint_metrics.py` `tool_category_vocabulary()`; the wiring vocabulary surface is
+`daemon/services/metrics_query/wiring/vocab.py` (`tool_usage_categories()` +
+`TOOL_USAGE_RESULTS`). **NO `ensemble_metrics_vocabulary_version` bump** (version **11**
+stands): verified 2026-11-21 that every category the tool registry emits folds into the
+closed 67-value set. Fold rule (§8.6's, unchanged): an out-of-set `str` is passed RAW to the
+registry and folds to reserved `other` WITH the
+`ensemble_metrics_invalid_label_total{metric,label}` count (the AM-2d drift signal); a `None`
+(unmapped tool — steady state, not drift) is folded by the sink to `other` WITHOUT a drift
+count. Closed label space: 67 × 2 = **134 series**; band **160** (26 explicit headroom).
+
 ---
 
 ## 9. Census discipline annex (MA-13)
@@ -1665,6 +1699,7 @@ a reset-on-restart counter is restated:
 | **C97** | The **F7 checkpoint `op` vocabulary** was quoted as **4** (`aget`, `aput`, `adelete`, `alist` — §8.9, §14.4) while the runtime registry declared a **5-value** set (`{aget, aput, adelete, alist, other}` at `daemon/checkpoint_metrics.py:1011` at the pre-lane rev). The catalog's hand-list was already off by one, and the lane's Stage-A **observable-set fold** narrowed the declared set to the **2-value** `{aget, other}` (`daemon/checkpoint_metrics.py:1245` — `CHECKPOINT_OP_VOCABULARY`; `aget` is the only observed saver op, `other` is the reserved fold target) | **fixed:** §8.9's checkpoint-op entry → **2** (`aget`, `other`) with the pre-lane 5-value set named for the record; §14.4's `F7 checkpoint op` and `Checkpoint op` rows → **2**, flagged **CHANGED**; the §8 annex gains the explicit **freeze marker** statement (`ensemble_metrics_vocabulary_version` = **2**, the pre-lane value was 1). Per A24 the bump carries a stated compatibility rule: the removed ops (`aput`/`adelete`/`alist`) are migration-only ops with **no shipped alert** consuming them, so the bump is not a breaking alert change | catalog §8 (freeze marker + §8.9) / §14.4 · `daemon/checkpoint_metrics.py:1245` |
 | **C98** | The **F18 gateway audit outcome** vocabulary was quoted as **2** (`ok`, `error` — §8.10, §14.4) with the explicit note that the audit table's wider constants (`denied`, `timeout`) "are **not** part of the F18 label set and fold to the reserved `other` residual … so the family's series count is unchanged". The lane's D5 row **amends** the set to `{ok, error, timeout}` — `timeout` becomes an IN-VALUE, so the label product (and therefore the family's series count) moves | **fixed:** §8.10's gateway-audit-outcome entry → **3** (`ok`, `error`, `timeout`) with the `denied`-only fold to `other` stated explicitly; §14.4's `Gateway audit outcome` row → **3**, flagged **CHANGED**. The §8 freeze marker names this amendment as the second carrier of the 1→2 bump | catalog §8 (freeze marker + §8.10) / §14.4 · `daemon/services/mcps_gateway/audit.py:53-56` |
 | **C99** | The **§14 ledger rows were stale-by-2** against §1: §1's canonical summary table carried an explicit **F7c row (2 series)** and its own delta trail summed to **582** (including the `+2 (F7c)` term; §1's phase row-sum was P0 28 + P1a 63 + P1b **265** + P1c 226 = 582), while §14.1's total row enumerated "F0.1–F21 + F7b" (**F7c absent**), §14.2's P1b row read **263** (= 265 − 2) and its trail omitted the `+2 (F7c)` term, §14.3 had **no F7c row**, and §7's roll-up + delta trail carried the same stale 580/263. The cause: the F7b retro-cataloguing (C95) carried F7b's 46 but never carried F7c's 2 | **fixed — 582 WINS** (the §1 canonical name registry and its own arithmetic both include F7c; 580 was the F7b-era carry-forward). Amended: §14.1 total → **582** with the family enumeration "F0.1–F21 + F7b + F7c"; §14.2 P1b **263 → 265** (derivation `…+46+2`) and the daemon total → **582**; §14.3 gains the **F7c row (2)**; §7's roll-up + delta trail + bound → **582 / 265 / ≈1 162**; §14.1's dependent rows → grand total **≈653**, headroom **1 418**, daemon-origin families **26 → 27** (28 = 27 + F22), the bound cross-check's three quantities → **≈1 162 / 824 / 1 147** (headroom 1 176 and 853); §14.5's "places each total appears" list → 582 / 265 / ≈653; §7.1 gains the **F7c task/owner row** and its "no §4 task row" note now names **F7b AND F7c**. **Both baseline denominators are pinned: 89 (F7c-inclusive) / 87 (ledger-rows basis)** | catalog §1/§7/§7.1/§14.1/§14.2/§14.3/§14.5 |
+| **C100** | The **tool-usage-metrics-p1 lane (ENSEMBLE-37, Phase 2, 2026-11-21)** registered a **new daemon-origin family F24** (`ensemble_tool_usage_calls_total{tool_category, result}` — the phase-1 observation tap's aggregate-only write-time sink, `daemon/services/metrics_query/wiring/w5.py`) that this catalog had no row, vocabulary or count for; the family's **134-series closed space** also spans a DIFFERENT counting convention (the measured closed label space the shipped pack enforces) than the plan-time live-estimate ledger this section sums, so folding it into **582** would mix conventions (decisions.md **D18** forbids exactly that) | **fixed:** §1 gains the **F24 row** (134, closed space 67 × 2 — §8.14 convention) and an explicit **post-catalog-families note** stating F24 is NOT folded into the 582 and carrying the measured ledger in full: **89 (BASELINE_SERIES, F7c-inclusive, unchanged — F24 is measured, not baseline) + 402 + 134 = 625 ≤ 2 000** (THE claim, D18 / approver fix B5) + the enforced cumulative **89 + 813 + 134 = 1 036 ≤ 2 000** + the band **160 = 134 + 26 headroom**; §8 gains **8.14** (the `result` 2-set + the `tool_category` reuse ref — **NO vocabulary bump, version 11 stands**, verified: every emitted category folds into the 67-value set); §14.1 gains the **measured-convention rows** (families 28 → **29** in the adjudication census; measured totals 491 → **625**; baseline **89** unchanged) and §14.3 gains the **F24 row (134)** | catalog §1/§8.14/§14.1/§14.3 · `daemon/services/metrics_query/wiring/w5.py` · decisions.md **D18** |
 
 ---
 
@@ -1812,7 +1847,9 @@ The `Scope` column says which document owns the artifact the count describes.
 | promtool fixture files | **17** | plan | 11 × 1 + 3 × 2 (the V-1 defect/repro pairs) — plan §10 |
 | Alert-rule baselines | **14** | plan | one per rule — plan §8 Baseline column |
 | Risk rows carrying a BACK-OUT | **17** | plan | P0 3 + P1a 2 + P1b 5 + P1c 3 + P2 4 — plan §4 |
-| **Bound cross-check row** — the fully-wired series bound (three DIFFERENT quantities; do not conflate) | catalogued **≈1 162** (the **provenance-disclosed adjusted bound** — **not** re-derived) · **derived catalogued-ceiling 824** (first-principles) · **conservative expanded-label ceiling 1 147** (first-principles) | catalog | **Derivation status — the three are not interchangeable.** (i) The **≈1 162** figure quoted in §7 is the **adjusted** bound: it is the v5 bound moved by the same per-family deltas, and **its own derivation was never written down** (§11 **C79**) ⇒ it is **not reproducible by rule** and is labelled *adjusted* everywhere it appears. (ii) The **derived catalogued-ceiling 824** is **first-principles**: for each of the 27 daemon-origin families (F0.1–F0.4 + F1–F21 + F7b + F7c), each metric's **full label product** over the label sets that metric actually carries (§8, §14.4), times the histogram bucket-series count where §8.11 states one, summed. It reproduces the family ceilings the catalog states explicitly (F7 121, F12 117) and exceeds the catalogued estimate exactly where that estimate assumed a subset (F0.2, F4, F5, F21). (iii) The **conservative expanded-label ceiling 1 147** is the same first-principles sum with every **documented expanded form** substituted (F21's op-partitioned journal histogram — §11 **C81**; F7's fully-wired `/op` form; F12's full lane × outcome product) — the worst case the catalog's own documented variants allow. **Cross-check result:** the derived expanded ceiling and the adjusted bound agree to within **15 series (≈1.3 %)**, so the adjusted bound is **corroborated in magnitude** but remains **not re-derivable** — that residual is the evidence for keeping it labelled *adjusted*. **All three are inside the ≤2 000 budget rule** (headroom 1 176 and 853 against the two derived ceilings); the **certified daemon-origin total in the first row of this table is unchanged**. |
+| **Measured closed-space total (the wiring families, §11 C100's convention)** | **625** | catalog (§1 post-catalog note + §8.14) | BASELINE_SERIES **89** (F7c-inclusive, unchanged — F24 is a measured family, not baseline) + **536** measured (402 pre-F24 + F24's 134) ≤ **2 000** — THE claim (decisions.md D18 / approver fix B5; was **491** before F24). The enforced cumulative over EVERYTHING registered (incl. decision_overlay's 411) reads **1 036 ≤ 2 000** |
+| **Adjudication family census** | **29** | catalog (the wiring adjudication module) | the REGISTERED + catalogued families: 28 verdicts (F0.1–F23 + decision_overlay) → **29** with F24 (§11 **C100**); binding subset 13 full + 6 partial = **19 of 29** |
+| **Bound cross-check row** — the fully-wired series bound (three DIFFERENT quantities; do not conflate) | catalogued**≈1 162** (the **provenance-disclosed adjusted bound** — **not** re-derived) · **derived catalogued-ceiling 824** (first-principles) · **conservative expanded-label ceiling 1 147** (first-principles) | catalog | **Derivation status — the three are not interchangeable.** (i) The **≈1 162** figure quoted in §7 is the **adjusted** bound: it is the v5 bound moved by the same per-family deltas, and **its own derivation was never written down** (§11 **C79**) ⇒ it is **not reproducible by rule** and is labelled *adjusted* everywhere it appears. (ii) The **derived catalogued-ceiling 824** is **first-principles**: for each of the 27 daemon-origin families (F0.1–F0.4 + F1–F21 + F7b + F7c), each metric's **full label product** over the label sets that metric actually carries (§8, §14.4), times the histogram bucket-series count where §8.11 states one, summed. It reproduces the family ceilings the catalog states explicitly (F7 121, F12 117) and exceeds the catalogued estimate exactly where that estimate assumed a subset (F0.2, F4, F5, F21). (iii) The **conservative expanded-label ceiling 1 147** is the same first-principles sum with every **documented expanded form** substituted (F21's op-partitioned journal histogram — §11 **C81**; F7's fully-wired `/op` form; F12's full lane × outcome product) — the worst case the catalog's own documented variants allow. **Cross-check result:** the derived expanded ceiling and the adjusted bound agree to within **15 series (≈1.3 %)**, so the adjusted bound is **corroborated in magnitude** but remains **not re-derivable** — that residual is the evidence for keeping it labelled *adjusted*. **All three are inside the ≤2 000 budget rule** (headroom 1 176 and 853 against the two derived ceilings); the **certified daemon-origin total in the first row of this table is unchanged**. |
 
 **Reading the bound cross-check row.** The row exists because the fully-wired bound was
 previously quoted in more than one sense with no statement of which sense it was. It is now
@@ -1909,6 +1946,7 @@ moved onto the F7c-inclusive basis (Step 3), so **89** is the current one.
 | F20 | 75 | unchanged |
 | F21 | **65** | was 66 (B-13) |
 | F22 | 4 shell | 3 process names + 1 freshness gauge (NB-8, B-02(b)) |
+| F24 | **134** | **NEW** (§11 **C100**, 2026-11-21) — the tool-usage family's MEASURED closed space (67 tool-category values × 2 result values); NOT part of the plan-time 582 ledger (different convention — see §1's post-catalog note). Band 160 (26 explicit headroom) |
 
 ### 14.4 Vocabulary sizes (single canonical value per set)
 

@@ -14482,6 +14482,12 @@ def build_instance_graph(
         LONG_TOOL_REGISTRY,
         wrapped_tools_node,
     )
+    # tool-usage P1 (D14): the observation wrapper sits BETWEEN compact_note
+    # (outermost) and wrapped_tools_node — it sees the ToolNode result to
+    # set the ok flag, and stays below compact_note's post-processing append.
+    from daemon.services.tool_usage_observation import (  # noqa: E402
+        wrap_tools_node,
+    )
     graph.add_node(
         "tools",
         create_compact_note_tools_node(
@@ -14493,7 +14499,13 @@ def build_instance_graph(
             # clears in ``finally`` (pause-cancel + task-cap included)
             # with the per-completion ``[LongToolNudge] TOOL_COMPLETED``
             # log line and the AD-9 healthy-gated episode close.
-            wrapped_tools_node(tools, registry=LONG_TOOL_REGISTRY),
+            wrap_tools_node(
+                wrapped_tools_node(tools, registry=LONG_TOOL_REGISTRY),
+                # A-1: manager._instance_repository (same handle compact_note
+                # uses at :13606) — NOT a bare instance_repository in scope.
+                instance_repository=getattr(manager, "_instance_repository", None),
+                flusher=getattr(manager, "_tool_usage_flusher", None),
+            ),
             manager=manager,
             compactor=compactor,
             llm_config=llm_config_with_headers,

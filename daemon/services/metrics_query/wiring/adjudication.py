@@ -43,14 +43,22 @@ F22        OUT           the commission's OUT (an out-of-process writer)
 F23        IN            the nest-anomaly family (the anomaly tables)
 decision_overlay
            IN            the P1 decision overlay (daemon/services/decision/metrics.py)
+F24        IN            the tool-usage family (the phase-1 observation
+                         tap's write-time sink; daemon/services/
+                         metrics_query/wiring/w5.py)
 =========  ===========  =================================================
 
-**12 full + 6 partial = 18 of 28** — the plan's binding subset.
+**13 full + 6 partial = 19 of 29** — the plan's binding subset.
 
 The ``decision_overlay`` family joined the census on 2026-11-09 (the
 Decision Module P1 lane): it is registered through the WIRING registrar
 like every other family here, so its label vocabularies carry the
 AM-2 enforcement and its metadata carries the AM-3 kwargs.
+
+The ``F24`` family joined the census on 2026-11-21 (the
+tool-usage-metrics-p1 lane, Phase 2): registered through the WIRING
+registrar like every other family here (the catalog §11 C100 row
+carries the correction entry).
 """
 
 from __future__ import annotations
@@ -96,6 +104,14 @@ CATALOG_FAMILY_VERDICTS: dict[str, tuple[str, str]] = {
         "daemon/services/decision/metrics.py (the P1 decision overlay's "
         "in-process families)",
     ),
+    # The tool-usage-metrics-p1 lane's own family (2026-11-21, Phase 2)
+    # — the phase-1 observation tap's aggregate-only write-time counter,
+    # registered through the WIRING registrar (wiring/w5.py).
+    "F24": (
+        "IN",
+        "daemon/services/metrics_query/wiring/w5.py::on_tool_usage_event "
+        "(the phase-1 observation tap's write-time sink)",
+    ),
 }
 
 #: The verdicts the table may carry.
@@ -122,6 +138,8 @@ REGISTERED_FAMILIES: tuple[str, ...] = (
     "F23",
     # The Decision Module P1 lane's own family (2026-11-09).
     "decision_overlay",
+    # The tool-usage-metrics-p1 lane's own family (2026-11-21, Phase 2).
+    "F24",
 )
 
 #: The canonical names of every metric that must be ABSENT from the
@@ -209,6 +227,17 @@ FAMILY_SERIES_BANDS: dict[str, int] = {
     # failure class) MUST re-declare this band in the SAME change as
     # the vocabulary edit.
     "decision_overlay": 411,
+    # F24 — the tool-usage family (the tool-usage-metrics-p1 lane,
+    # Phase 2, 2026-11-21).  Closed space 67 (tool_category) × 2
+    # (result) = 134; the band carries **26 explicit headroom** (= 13
+    # new categories × 2 results — the vocabulary has grown ~7 times
+    # historically).  NEVER zero-headroom: the F23 and decision_overlay
+    # bands above are zero-headroom BY DESIGN and must not be copied.
+    # The MEASURED closed-space total is 491 + 134 = 625 ≤ 2000 — THE
+    # claim (decisions.md D18); the band-sum (Σ bands 846 + 160 + the
+    # 89 baseline ≈ 1095) may be cited separately, never as the
+    # headline.
+    "F24": 160,
 }
 
 #: The registered baseline (the catalog convention, F7c-inclusive).

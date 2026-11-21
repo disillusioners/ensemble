@@ -37,10 +37,12 @@ from typing import Any
 import pytest
 
 from daemon import checkpoint_metrics as cm
+from daemon.services import metrics_gate
 from daemon.services.metrics_query.wiring import adjudication
 from daemon.services.metrics_query.wiring import registry
 from daemon.services.metrics_query.wiring import sources as wiring_sources
 from daemon.services.metrics_query.wiring import vocab
+from daemon.services.metrics_query.wiring import w5
 from daemon.services.metrics_query.wiring import ws_a
 
 # The Decision Module P1 lane's family (``decision_overlay``) is
@@ -51,11 +53,25 @@ from daemon.services.metrics_query.wiring import ws_a
 # census would (correctly) report a mismatch.
 from daemon.services.decision import metrics as decision_metrics  # noqa: F401
 
-#: The P4 STAGE's base commit — the diff-review pin's anchor.  It is
-#: the tree the P4 stage started from (the P3 stage's tip: the query
-#: door + the lifespan wiring).  The pin is about THIS stage's diff —
-#: the P3 stage legitimately touched daemon/api.py.
-LANE_BASE = "644c2bfaaa48514ec7de79f7f4bcd078a700cdbe"
+#: THIS LANE's TRUE base commit — the diff-review pin's anchor.
+#:
+#: RE-POINTED (tester gate, 2026-11-21) from the metrics-query lane's
+#: P4-stage base ``644c2bfaa`` (the anchor this file was authored
+#: against) to the commit the tool-usage-metrics-p1 branch was actually
+#: cut from. The old anchor predates EVERY other lane's landings, so
+#: ``git diff 644c2bfaa --name-only`` returned 308 changed daemon paths
+#: — 295 of them pin-visible and NONE of them this lane's — and the pin
+#: could never discriminate: it reddened on 157 inherited foreign
+#: paths and stayed red no matter what this lane did. Against the true
+#: base the same query returns 21 daemon paths (17 pin-visible, 4 under
+#: ``WIRING_ROOT``), EVERY ONE of them this lane's own surface, so the
+#: allowlist below is exactly this lane's daemon footprint and a single
+#: foreign path reddens the pin.
+#:
+#: Measured (script, not hand-typed — see ``PRE_EXISTING_DAEMON_OFFENDERS``):
+#:   old base 644c2bfaa: changed=308  pin-visible=295  offenders=157
+#:   true base 0b5624dc9: changed=21  pin-visible=17   offenders=0
+LANE_BASE = "0b5624dc9d57fe1c8ec49415382cacb2cbd55f25"
 
 #: The DECISION LANE's own daemon files — BYTE-FROZEN, EXPLICIT.
 #:
@@ -78,6 +94,11 @@ LANE_BASE = "644c2bfaaa48514ec7de79f7f4bcd078a700cdbe"
 LANE_OWNED_DAEMON = frozenset(
     {
         "daemon/config.py",
+        # tool-usage-metrics-p1 lane (49f5e9c1d): the observation-wrapper
+        # CALL SITE — a lane surface, so it is owned here as well as
+        # allowlisted below (direction 2 treats a new ALLOWED entry that
+        # is not lane-owned as a SILENT WIDENING).
+        "daemon/graph.py",
         "daemon/manager.py",
         "daemon/services/decision/__init__.py",
         "daemon/services/decision/client.py",
@@ -134,6 +155,14 @@ ALLOWED_DAEMON_DIFF = (
     # exactly as they do to every other family. Listed EXPLICITLY: this
     # list is NOT derived from LANE_OWNED_DAEMON, so the pin can fail.
     "daemon/config.py",
+    # ── Tool-usage-metrics P1 lane (2026-11-21) — council C3 follow-up ──
+    # daemon/graph.py: the observation-wrapper CALL SITE in
+    # build_instance_graph (lane commit 49f5e9c1d) — it wraps
+    # wrapped_tools_node between compact_note and the ToolNode so the tap
+    # sees the result to set the ok flag. A CALL-SITE surface only: no
+    # observe/inc call is added here (the pin's protection target is the
+    # producers, and every producer path stays outside this list).
+    "daemon/graph.py",
     "daemon/manager.py",
     "daemon/services/decision/__init__.py",
     "daemon/services/decision/client.py",
@@ -174,141 +203,62 @@ PRIOR_ALLOWLIST_ENTRIES = frozenset(
 )
 
 
-#: The daemon paths that were ALREADY offenders when this lane's base
-#: (``LANE_BASE``) was cut — other lanes' committed work, recorded
-#: EXPLICITLY so a NEW offender is distinguishable from the inherited
-#: set. The pin names the whole set in its failure message; it never
-#: silently absorbs an unknown path.
+#: The daemon paths that are RECORDED as known non-allowlisted — i.e.
+#: the residual set the pin names instead of failing on. Historically
+#: this literal meant "paths that were ALREADY offenders when the base
+#: was cut (other lanes' committed work)"; after the re-point below it
+#: holds THIS lane's residual tail and NO foreign rows. The pin names
+#: the whole set in its failure message; it never silently absorbs an
+#: unknown path.
 #:
 #: **THE RECORD IS MAINTAINED BY THE CHANGING LANE.** A lane that
 #: changes daemon files records them here in its own change, so the
 #: offender stays NAMED and attributable instead of showing up as a
-#: new offender in a later lane's red. The prompt-assent lane
-#: (2026-11-10, Phase 1 + Phase 2) added the rows below.
+#: new offender in a later lane's red.
+#:
+#: RE-POINTED + REGENERATED (tester gate, 2026-11-21). The original
+#: literal accumulated one row per lane since the metrics-query P4 base
+#: (108 rows; it could not distinguish "inherited" from "ours"). Now
+#: that ``LANE_BASE`` is this lane's TRUE base, the inherited set is
+#: EMPTY — nothing but this lane's own work landed in the span — so the
+#: set below is the MECHANICALLY GENERATED complement of the lane's own
+#: footprint: every daemon path the lane changed (``git diff --name-only
+#: <LANE_BASE>..HEAD -- daemon/``) that is neither in
+#: ``ALLOWED_DAEMON_DIFF`` nor under ``WIRING_ROOT``. There are NO
+#: foreign rows left: the residual rows are this lane's OWN unallowlisted
+#: surfaces, and they are recorded here rather than "cured" (the pin's
+#: design intent — every lane's tail is named and attributable, never
+#: silently absorbed).
+#:
+#: READ THIS BEFORE TRUSTING THE ZERO. Because the rows and the diff come
+#: from the SAME generator, "zero offenders against LANE_BASE" is true BY
+#: CONSTRUCTION for these 12 paths — the set is a RECORD of this lane's
+#: tail, not evidence of clean history. The pin's teeth are on the OTHER
+#: direction: a daemon path that enters the diff after this recording (a
+#: later lane's file, a stray edit) is in neither literal and REDs. That
+#: is the discrimination the old 108-row literal destroyed (it carried
+#: five lanes of foreign rows, so everything reddened and nothing
+#: distinguished).
+#:
+#: Generator (committed command; rows are never hand-typed):
+#:   python3 scripts/gen_tool_usage_daemon_allowlist.py \
+#:       --base 0b5624dc9d57fe1c8ec49415382cacb2cbd55f25 \
+#:       --test-file tests/unit/metrics/test_metrics_family_adjudication.py \
+#:       --wiring-root daemon/services/metrics_query/wiring
 PRE_EXISTING_DAEMON_OFFENDERS = frozenset(
     {
-        "daemon/__init__.py",
-        # prompt-assent lane (2026-11-10, Phase 1 + Phase 2): the
-        # conversational approval lane's daemon surfaces.
-        "daemon/repositories/prompt_assent/__init__.py",
-        "daemon/repositories/prompt_assent/consume_hook.py",
-        "daemon/repositories/prompt_assent/mint_context.py",
-        "daemon/repositories/prompt_assent/models.py",
-        "daemon/repositories/prompt_assent/repository.py",
-        "daemon/repositories/prompt_version/assent_attestation.py",
-        "daemon/repositories/prompt_version/repository.py",
-        "daemon/repositories/factory.py",
-        "daemon/migrations/versions/20261110_221500_create_prompt_assent_tokens.sql",
-        "daemon/services/prompt_version_diff.py",
-        "daemon/services/prompt_version_service.py",
-        "daemon/sources/adapters/discord/adapter.py",
-        "daemon/tools/prompt_assent.py",
-        "daemon/_redact.py",
-        "daemon/auth/scopes.py",
-        "daemon/checkpoint_metrics.py",
-        "daemon/clients/plane_http_client.py",
-        "daemon/constants.py",
-        "daemon/loader.py",
-        "daemon/mcp/builtin_servers/base.py",
-        "daemon/mcp/builtin_servers/plane.py",
-        "daemon/migrations/versions/20261105_020500_create_anomaly_reports.sql",
-        "daemon/migrations/versions/20261105_020501_create_anomaly_clusters.sql",
-        "daemon/migrations/versions/20261105_102821_create_memoir_tables.sql",
-        "daemon/migrations/versions/20261107_110001_create_project_operating_knowledge.sql",
-        "daemon/migrations/versions/20261107_110002_create_project_operating_knowledge_embeddings.sql",
-        "daemon/migrations/versions/20261107_110003_add_pok_source_tier.sql",
-        "daemon/migrations/versions/20261107_122648_create_source_gc_archive_tables.sql",
-        "daemon/models/source.py",
-        "daemon/plane_workspace.py",
-        "daemon/registry.py",
-        "daemon/repositories/anomaly/__init__.py",
-        "daemon/repositories/anomaly/models.py",
-        "daemon/repositories/anomaly/repository.py",
-        "daemon/repositories/memoir/__init__.py",
-        "daemon/repositories/memoir/models.py",
-        "daemon/repositories/memoir/repository.py",
-        "daemon/repositories/memoir/seed.py",
-        "daemon/repositories/pok/__init__.py",
-        "daemon/repositories/pok/models.py",
-        "daemon/repositories/pok/repository.py",
-        "daemon/repositories/source/models.py",
-        "daemon/repositories/source/repository.py",
-        "daemon/routers/__init__.py",
-        "daemon/routers/live_views.py",
-        # agent group chat P6 lane (2026-11-16): the SSE room-resolution
-        # pre-branch rode the events route (the daemon path this lane
-        # changed).
-        "daemon/routers/messages.py",
-        "daemon/routers/mcp_servers.py",
-        "daemon/routers/nest_reports.py",
-        "daemon/routers/schedules.py",
-        "daemon/routers/sources.py",
-        "daemon/services/anomaly_service.py",
-        "daemon/services/context_block.py",
-        "daemon/services/context_messages.py",
-        "daemon/services/instance_messaging.py",
-        # agent group chat P6 lane (2026-11-16): the H2 extraction's two
-        # new modules (the shared block primitives + the joined-room
-        # block) and the hub's room-resolution alias registration.
-        "daemon/services/joined_room_context.py",
-        "daemon/services/live_event_hub.py",
-        "daemon/services/live_views.py",
-        "daemon/services/memoir_briefing.py",
-        "daemon/services/memoir_embedding_worker.py",
-        "daemon/services/memoir_retrieval.py",
-        "daemon/services/metrics_query/protocol.py",
-        "daemon/services/metrics_query/roster.py",
-        "daemon/services/plane_sync_service.py",
-        "daemon/services/pok_ari_seam.py",
-        "daemon/services/pok_injection.py",
-        "daemon/services/pok_service.py",
-        "daemon/services/project_skill_source/model.py",
-        "daemon/services/prompt_refresh.py",
-        "daemon/services/release_manifest.py",
-        # agent group chat P4 lane (2026-11-15/16): the nudge
-        # coordinator. Registered per the P4 tester gate's RED-4
-        # disposition (2026-11-16, "add daemon/services/room_nudge.py +
-        # daemon/tools/todo_tools.py to PRE_EXISTING_DAEMON_OFFENDERS") —
-        # the offender stays NAMED and attributable instead of surfacing
-        # as a new offender in a later lane's red.
-        "daemon/services/room_nudge.py",
-        "daemon/services/scheduling_service.py",
-        "daemon/services/skill_injection_service.py",
-        "daemon/services/skill_search_service.py",
-        "daemon/services/sources_gc_service.py",
-        "daemon/services/upgrade_journal_sweep.py",
-        "daemon/services/view_passcode_pages.py",
-        "daemon/sources/registry.py",
-        "daemon/tools/_tool_registry.py",
-        # guideline-read-tool lane (2026-11-13): the lane's NEW file —
-        # the guidelines privileged-read tool module — recorded per the
-        # rule above (THE RECORD IS MAINTAINED BY THE CHANGING LANE).
-        "daemon/tools/guidelines.py",
-        "daemon/tools/inner_soul.py",
-        "daemon/tools/instance.py",
-        "daemon/tools/job_queue.py",
-        "daemon/tools/mcp_tools.py",
-        "daemon/tools/memoir.py",
-        "daemon/tools/memoir_knob.py",
-        "daemon/tools/metrics_read.py",
-        "daemon/tools/nest_report.py",
-        "daemon/tools/nest_report_read.py",
-        "daemon/tools/plane_tools.py",
-        "daemon/tools/pok.py",
-        "daemon/tools/prompt_reload.py",
-        "daemon/tools/provenance.py",
-        # agent group chat P6 lane (2026-11-16): the room tool surface
-        # (the H1 gate extraction + the P6 backlog fixes).
-        "daemon/tools/room.py",
-        "daemon/tools/scheduling.py",
-        "daemon/tools/skill_tools.py",
-        # agent group chat P4 lane (2026-11-15/16): the todo-tool
-        # reminder carriers (the P4 nudge carriers ride the reminder
-        # return). Registered with the P4 nudge coordinator above —
-        # the P4 tester gate's RED-4 disposition (2026-11-16).
-        "daemon/tools/todo_tools.py",
-        "daemon/tools/upgrade_journal.py",
-        "daemon/tools/upgrade_tools.py",
+        "daemon/migrations/versions/20261121_020000_create_tool_usage_daily.sql",  # 49f5e9c1d
+        "daemon/repositories/source/seed.py",  # 0b02931b7
+        "daemon/repositories/tool_usage/__init__.py",  # 49f5e9c1d
+        "daemon/repositories/tool_usage/models.py",  # 49f5e9c1d
+        "daemon/repositories/tool_usage/repository.py",  # 1aa360051
+        "daemon/routers/__init__.py",  # 49f5e9c1d
+        "daemon/routers/tool_usage.py",  # 0b02931b7
+        "daemon/services/tool_usage_digest.py",  # 1aa360051
+        "daemon/services/tool_usage_observation.py",  # 0b02931b7
+        "daemon/tools/_tool_registry.py",  # 8b8df3ead
+        "daemon/tools/instance.py",  # 0b02931b7
+        "daemon/tools/tool_usage.py",  # 1aa360051
     }
 )
 
@@ -414,10 +364,10 @@ def _closed_label_space(metrics: list[cm.Metric]) -> int:
 class TestTheAdjudicationTable:
     def test_every_catalog_family_carries_exactly_one_verdict(self) -> None:
         verdicts = adjudication.CATALOG_FAMILY_VERDICTS
-        assert len(verdicts) == 28
+        assert len(verdicts) == 29
         expected = (
             {"F0.1", "F0.2", "F0.3", "F0.4"}
-            | {f"F{n}" for n in range(1, 24)}
+            | {f"F{n}" for n in range(1, 25)}
             | {"decision_overlay"}
         )
         assert set(verdicts) == expected
@@ -425,11 +375,11 @@ class TestTheAdjudicationTable:
             assert verdict in adjudication.VALID_VERDICTS, family
             assert seam and seam.strip(), family
 
-    def test_the_binding_subset_is_eighteen_of_twenty_eight(self) -> None:
+    def test_the_binding_subset_is_nineteen_of_twenty_nine(self) -> None:
         verdicts = adjudication.CATALOG_FAMILY_VERDICTS
         full = [f for f, (v, _s) in verdicts.items() if v == "IN"]
         partial = [f for f, (v, _s) in verdicts.items() if v == "PARTIAL"]
-        assert len(full) == 12
+        assert len(full) == 13
         assert len(partial) == 6
         assert tuple(sorted(full + partial)) == tuple(sorted(adjudication.REGISTERED_FAMILIES))
 
@@ -527,6 +477,48 @@ class TestRegistrationStructure:
 
 
 class TestNoProducerInstrumentation:
+    #: THE FOOTPRINT ARITHMETIC — what each count means for the pin.
+    #:
+    #: Two counts read the same diff and answer DIFFERENT questions, and
+    #: conflating them is how the anchor drift went unnoticed for five
+    #: lanes (a "58-hunks" figure was carried around beside a "13-paths"
+    #: figure as if they described one surface):
+    #:
+    #:   * PATHS (``git diff --name-only``) — the allowlist's unit. The
+    #:     pin is a PATH-level gate: a path is allowlisted, recorded, or
+    #:     an offender. Adding lines to an allowlisted file does not
+    #:     change the verdict; a NEW path does.
+    #:   * HUNKS (``git diff -U0 | grep -c '^@@'``) — the review's unit.
+    #:     A hunk count says how much churn a path carries; it never
+    #:     enters the assertion. Marker completeness (the source-gc
+    #:     guard in tests/unit/repositories/test_source_gc_repository.py)
+    #:     is the mechanism that judges hunks — and only for
+    #:     daemon/manager.py + daemon/constants.py, not for this pin.
+    #:
+    #: MEASURED at HEAD 0b02931b7 against LANE_BASE 0b5624dc9
+    #: (``-U0``; the default ``-U3`` merges some adjacent hunks and
+    #: yields 35 / 25):
+    #:   whole lane, ``daemon/``:        39 hunks across 21 paths
+    #:   pin-visible (not WIRING_ROOT):  25 hunks across 17 paths
+    #:   under WIRING_ROOT (excluded):   14 hunks across  4 paths
+    #:   recorded in PRE_EXISTING_...:  the lane's own 12 residual paths
+    #: (Those 12 paths ARE pin-visible work — the set records them as
+    #: the lane's own complement because they are not in
+    #: ALLOWED_DAEMON_DIFF; see its docstring. The remaining 5
+    #: pin-visible paths are the allowlisted-and-lane-owned five:
+    #: api.py, config.py, graph.py, manager.py, settings_service.py.)
+    #:
+    #: ON THE REVIEW'S "58 HUNKS / 13 PATHS": those are NOT this pin's
+    #: daemon numbers (daemon measures 39 hunks across 21 paths here).
+    #: They match the lane's FRONTEND surface exactly — 13 = the lane's
+    #: FE paths (the tool-usage block of
+    #: FRONTEND_UI_LANE_SANCTIONED_FILES in
+    #: tests/unit/repositories/test_source_gc_repository.py), 58 = the
+    #: FE hunks that surface's tree-level compensator counts as
+    #: OFFENDING against its fixed base 858a85e31 (122 FE hunks total, 64
+    #: of them inside the allowlist). Neither number enters THIS pin; if
+    #: the review meant the daemon footprint, its figures are stale and
+    #: the measured column above is the correction.
     def test_the_daemon_diff_is_confined_to_the_allowed_files(self) -> None:
         """P4-M2 — a new increment at a producer site must go RED.
 
@@ -979,3 +971,296 @@ class TestThePlanningProjectionIsNeverEnforced:
         """The release-version label is bounded by the retention set."""
         assert len(vocab.RELEASE_VERSIONS) <= 32
         assert vocab.RESERVED in vocab.RELEASE_VERSIONS
+
+
+class TestTheF24Family:
+    """The tool-usage family (the tool-usage-metrics-p1 lane, Phase 2).
+
+    T1/T5/T6 acceptance — the family's registration structure, its
+    closed label space, its band, and the measured-total convention pin
+    (decisions.md D18 / approver fix B5: 491 + 134 = 625 ≤ 2000 is THE
+    claim, measured convention; the plan's ≈1095 is a band-sum and is
+    never asserted here).
+    """
+
+    def test_f24_is_registered_with_its_spec(self) -> None:
+        spec = registry.registered_families()["F24"]
+        assert spec.cluster == "W6"
+        assert spec.verdict == "IN"
+        assert spec.metrics == ("ensemble_tool_usage_calls_total",)
+        verdict, seam = adjudication.CATALOG_FAMILY_VERDICTS["F24"]
+        assert verdict == "IN"
+        assert "w5.py" in seam and seam.strip()
+
+    def test_the_f24_metric_declares_the_closed_label_space(self) -> None:
+        metric = next(
+            m
+            for m in registry.registered_family_metrics()
+            if m.name == "ensemble_tool_usage_calls_total"
+        )
+        assert metric.family == "F24"
+        assert metric.kind == "counter"
+        assert metric.label_keys == ("tool_category", "result")
+        assert set(metric.allowed_values["tool_category"]) == set(
+            cm.tool_category_vocabulary()
+        )
+        # 66 committed categories + the reserved `other` = 67.
+        assert len(metric.allowed_values["tool_category"]) == 67
+        assert metric.allowed_values["result"] == frozenset({"ok", "error"})
+
+    def test_the_f24_registration_is_am3_complete(self) -> None:
+        metric = next(
+            m
+            for m in registry.registered_family_metrics()
+            if m.name == "ensemble_tool_usage_calls_total"
+        )
+        assert metric.source_idiom == "registry"
+        assert metric.durability == "process"
+        assert isinstance(metric.cardinality_weight, int)
+
+    def test_the_f24_name_matches_the_name_rule(self) -> None:
+        """`^ensemble_[a-z0-9_]+$` (checkpoint_metrics.py:110)."""
+        import re
+
+        assert re.fullmatch(r"ensemble_[a-z0-9_]+", "ensemble_tool_usage_calls_total")
+
+    def test_f24_is_distinct_from_the_f20_out_name(self) -> None:
+        """F20's OUT `ensemble_tool_calls_total` stays absent; F24's name is its own."""
+        names = {m.name for m in cm.registered_metrics()}
+        assert "ensemble_tool_usage_calls_total" in names
+        assert "ensemble_tool_calls_total" not in names
+
+    def test_the_f24_band_is_134_plus_26_headroom(self) -> None:
+        assert adjudication.FAMILY_SERIES_BANDS["F24"] == 160
+        family_metrics = [
+            m
+            for m in registry.registered_family_metrics()
+            if m.family == "F24"
+        ]
+        measured = _closed_label_space(family_metrics)
+        assert measured == 134
+        assert measured <= adjudication.FAMILY_SERIES_BANDS["F24"]
+
+    #: THE FROZEN RELEASE-VERSION SNAPSHOT the total is measured against.
+    #:
+    #: ``vocab.RELEASE_VERSIONS`` is HOST-COUPLED BY DESIGN (vocab.py
+    #: ``_release_versions`` scans ``~/agents-ensemble{,-demo}/releases/*``
+    #: at import time), so every release dir staged or evicted moves the
+    #: ``version`` label's cardinality by one and shifts ``measured`` by
+    #: the same amount — measured 535↔536, total 624↔625 (observed
+    #: 2026-11-21: 624 before v0.31.24 was staged, 625 after). That is a
+    #: HOST-STATE signal, not a family-count regression, and this pin is
+    #: about the family count (D18: 89 + 536 = 625 ≤ 2000). So the
+    #: ``version`` label's VALUE SET is frozen here to the 10 names the
+    #: claim was measured against (``other`` + 9 scanned dir names, one of
+    #: which is a stray non-release directory — kept verbatim below).
+    #: The host's REAL cardinality stays bounded by
+    #: ``test_the_f21_release_vocabulary_is_bounded`` (≤ 32) and must
+    #: contain ``RESERVED`` — that pair is what keeps this freeze honest:
+    #: the label is still a closed set with a fold target, only its host
+    #: size stops entering the arithmetic.
+    FROZEN_RELEASE_VERSIONS = frozenset(
+        {
+            "other",
+            "v0.16.0",
+            "v0.16.2-demo-e2e",
+            "v0.16.3",
+            "v0.28.15",
+            "v0.31.21",
+            "v0.31.22",
+            "v0.31.23",
+            "v0.31.24",
+            # The install's stray non-release dir that the scan picks up
+            # (``releases/rollback.lock.d.stale.swept-635423``) — kept
+            # VERBATIM so the snapshot is the OBSERVED set, not an
+            # idealized one. It is what the 625 was measured against.
+            "rollback.lock.d.stale.swept-635423",
+        }
+    )
+
+    def test_the_measured_total_is_625_under_the_cap(self, monkeypatch) -> None:
+        """THE claim (D18 / B5) — 89 baseline + 536 measured = 625 ≤ 2000.
+
+        THE CONVENTION IS EXPLICIT (D18's correction arc): the claim's
+        helper measures the WIRING-registered families — the decision
+        overlay's own family is NOT in the set (it is registered by
+        ``daemon/services/decision/metrics.py`` and rides the pack's
+        enforced cumulative instead: 89 + 813 + 134 = 1036 ≤ 2000,
+        covered by ``test_the_cumulative_count_stays_inside_the_global_
+        cap``). 491 today (89 + 402) + 134 (F24) = 625.  The == pin is
+        the convention pin: a future family that moves the wiring
+        closed space must consciously re-pin this number (the
+        predicate-ledger discipline) — a silent drift REDs here.
+
+        HOST-INDEPENDENCE (tester gate 2026-11-21): the one host-coupled
+        label — F21's ``version``, whose value set is the install's
+        release-dir scan — is frozen to ``FROZEN_RELEASE_VERSIONS`` for
+        the duration of the measurement, so the total depends on the
+        FAMILY SHAPE and not on which releases this host happens to have
+        staged. Without the freeze this tree measured 624 on 2026-11-20
+        and 625 on 2026-11-21 (v0.31.24 was staged in between), and under
+        a synthetic HOME holding ONE release dir the UNFROZEN pin reads
+        618 on the SAME tree — the pin was a host clock, not a
+        regression gate. Under the freeze all three read 625.
+        """
+        version_metric = next(
+            m for m in registry.registered_family_metrics() if "version" in m.label_keys
+        )
+        # The freeze targets ONE metric: if a second version-labelled
+        # metric ever registers, this pin must be re-read (the "first
+        # match" would silently freeze the wrong one).
+        assert [
+            m.name for m in registry.registered_family_metrics() if "version" in m.label_keys
+        ] == [version_metric.name]
+        # Same object, same dict: only the value SET is swapped, so the
+        # label key, the metric identity and the counting convention are
+        # untouched (monkeypatch restores the dict entry afterwards).
+        monkeypatch.setitem(
+            version_metric.allowed_values, "version", self.FROZEN_RELEASE_VERSIONS
+        )
+        wiring_metrics = [
+            m
+            for m in registry.registered_family_metrics()
+            if m.family != "decision_overlay"
+        ]
+        measured = _closed_label_space(wiring_metrics)
+        total = adjudication.BASELINE_SERIES + measured
+        assert total == 625
+        assert total <= adjudication.GLOBAL_SERIES_CAP
+        # The freeze is cardinality-faithful: F21's release label still
+        # contributes exactly the 10 series the claim counted.
+        assert len(self.FROZEN_RELEASE_VERSIONS) == 10
+
+
+class TestTheF24FamilyGate:
+    """T3 — the kill-switch matrix (fail-closed, stacked, independent).
+
+    The gate is PURE on the read path: no DB round trip ever happens
+    (the managed tiers are the cached live values; a provider installed
+    here RAISES if consulted, so a hidden read turns the matrix RED).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _gate_state(self, monkeypatch):
+        monkeypatch.delenv(w5.FAMILY_ENV_VAR, raising=False)
+        monkeypatch.delenv(metrics_gate.ENV_VAR, raising=False)
+        metrics_gate.reset_for_tests()
+
+        def _no_db_read() -> dict[str, str]:
+            raise AssertionError("the gate read path touched the DB tier")
+
+        metrics_gate.set_managed_metrics_provider(_no_db_read)
+        yield
+        metrics_gate.reset_for_tests()
+
+    def test_env_explicit_zero_is_off_even_with_the_global_gate_on(self, monkeypatch) -> None:
+        metrics_gate.set_managed_metrics_enabled(True)  # global ON (boot tier)
+        monkeypatch.setenv(w5.FAMILY_ENV_VAR, "0")
+        assert w5.family_gate_enabled() is False
+
+    def test_env_explicit_garbage_fails_closed(self, monkeypatch) -> None:
+        metrics_gate.set_managed_metrics_enabled(True)
+        monkeypatch.setenv(w5.FAMILY_ENV_VAR, "off")  # NOT in {1,true,yes}
+        assert w5.family_gate_enabled() is False
+
+    def test_env_unset_with_the_managed_default_is_on_when_global_is_on(self) -> None:
+        metrics_gate.set_managed_metrics_enabled(True)
+        assert w5.family_gate_enabled() is True
+
+    def test_the_global_gate_off_suppresses_regardless_of_the_family_key(self, monkeypatch) -> None:
+        metrics_gate.set_managed_metrics_enabled(False)  # global managed OFF
+        monkeypatch.delenv(w5.FAMILY_ENV_VAR, raising=False)
+        assert w5.family_gate_enabled() is False
+        monkeypatch.setenv(w5.FAMILY_ENV_VAR, "1")  # family explicitly ON
+        assert w5.family_gate_enabled() is False
+
+    def test_the_global_env_off_suppresses_regardless_of_the_family_key(self, monkeypatch) -> None:
+        metrics_gate.set_managed_metrics_enabled(True)
+        monkeypatch.setenv(metrics_gate.ENV_VAR, "0")  # the GLOBAL env off-switch
+        monkeypatch.setenv(w5.FAMILY_ENV_VAR, "1")
+        assert w5.family_gate_enabled() is False
+
+    def test_the_gate_never_touches_the_db_tier(self) -> None:
+        """live_managed_value + metrics_enabled are PURE cached reads."""
+        metrics_gate.set_managed_metrics_enabled(True)
+        # The provider (installed by the fixture) raises on ANY call.
+        assert w5.family_gate_enabled() is True
+
+    def test_the_family_gate_is_independent_of_the_ledger_switch(self, monkeypatch) -> None:
+        """Family OFF (env) while the phase-1 ledger switch stays untouched."""
+        from daemon.services.tool_usage_observation import is_collection_enabled
+
+        monkeypatch.setenv(w5.FAMILY_ENV_VAR, "0")
+        assert w5.family_gate_enabled() is False
+        # The ledger's own kill-switch (D7) is a DIFFERENT key + env var.
+        monkeypatch.delenv("LIMITS_TOOL_USAGE_COLLECTION_ENABLED", raising=False)
+        assert is_collection_enabled() is True
+
+
+class TestTheF24Sink:
+    """T1/T3 — the write-time sink's behavior against the frozen surface."""
+
+    @pytest.fixture(autouse=True)
+    def _sink_state(self, monkeypatch):
+        monkeypatch.delenv(w5.FAMILY_ENV_VAR, raising=False)
+        monkeypatch.delenv(metrics_gate.ENV_VAR, raising=False)
+        metrics_gate.reset_for_tests()
+        metrics_gate.set_managed_metrics_enabled(True)  # global ON
+        w5.tool_usage_calls_total.reset()
+        yield
+        w5.tool_usage_calls_total.reset()
+        metrics_gate.reset_for_tests()
+
+    def _metric(self) -> cm.Metric:
+        return next(
+            m
+            for m in registry.registered_family_metrics()
+            if m.name == "ensemble_tool_usage_calls_total"
+        )
+
+    def test_the_sink_is_registered_against_the_observer(self) -> None:
+        from daemon.services.tool_usage_observation import _snapshot_sinks
+
+        assert w5.on_tool_usage_event in _snapshot_sinks()
+
+    def test_the_sink_does_not_increment_while_the_family_gate_is_off(self, monkeypatch) -> None:
+        monkeypatch.setenv(w5.FAMILY_ENV_VAR, "0")
+        w5.on_tool_usage_event("bash", "bash", "agent", "proj", True)
+        assert (
+            self._metric().get(labels={"tool_category": "bash", "result": "ok"}) == 0
+        )
+
+    def test_the_sink_increments_when_the_stack_is_on(self) -> None:
+        w5.on_tool_usage_event("bash", "bash", "agent", "proj", True)
+        w5.on_tool_usage_event("bash", "bash", "agent", "proj", False)
+        metric = self._metric()
+        assert metric.get(labels={"tool_category": "bash", "result": "ok"}) == 1
+        assert metric.get(labels={"tool_category": "bash", "result": "error"}) == 1
+
+    def test_the_sink_folds_none_to_other_without_counting_drift(self) -> None:
+        """The unmapped case is steady state: `other`, NOT an invalid label."""
+        metric = self._metric()
+        before = metric.get(labels={"tool_category": "other", "result": "ok"})
+        w5.on_tool_usage_event("mystery_tool", None, "agent", "proj", True)
+        assert (
+            metric.get(labels={"tool_category": "other", "result": "ok"}) == before + 1
+        )
+
+    def test_the_sink_passes_out_of_set_values_raw_for_the_drift_signal(self) -> None:
+        """AM-2d — the REGISTRY folds a disallowed value and COUNTS it."""
+        metric = self._metric()
+        w5.on_tool_usage_event("x", "not-a-category", "agent", "proj", True)
+        assert (
+            metric.get(labels={"tool_category": "other", "result": "ok"}) == 1
+        )
+        invalid = cm._invalid_metric
+        assert invalid is not None
+        assert (
+            invalid.get(
+                labels={
+                    "metric": "ensemble_tool_usage_calls_total",
+                    "label": "tool_category",
+                }
+            )
+            >= 1
+        )

@@ -533,6 +533,57 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
             "Takes effect WITHOUT a restart."
         ),
     ),
+    # ── tool-usage P1 (D17 + review fix U3): THREE managed keys ──────────
+    # All three land in THIS phase's edit so phases 2 and 3 keep their
+    # zero-edit stance on this file. (1) collection kill-switch — dotted
+    # config_path backed by LimitsConfig.tool_usage_collection_enabled
+    # (A-7 option (a)). (2) F24 family key — config_path=None (DB/ENV-only).
+    # (3) D-5 seeder opt-out — config_path=None (DB/ENV-only).
+    "limits.tool_usage_collection_enabled": ManagedKeySpec(
+        key="limits.tool_usage_collection_enabled",
+        config_path="limits.tool_usage_collection_enabled",  # backed by LimitsConfig field (A-7)
+        env_var="LIMITS_TOOL_USAGE_COLLECTION_ENABLED",
+        value_type="bool",
+        default=True,  # this phase IS the measurement slice
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "Tool-usage collection kill-switch (opt-OUT; default ON). "
+            "Absent ⇒ code default ON (never crash — v0.31.8 absent-config "
+            "class); present-but-unparseable ⇒ FAIL-CLOSED OFF. DB override "
+            "> env LIMITS_TOOL_USAGE_COLLECTION_ENABLED > config.yaml > "
+            "default. Takes effect WITHOUT a restart."
+        ),
+    ),
+    "limits.metrics_tool_usage_enabled": ManagedKeySpec(
+        key="limits.metrics_tool_usage_enabled",
+        config_path=None,  # DB/ENV-ONLY (wedge_notice shape)
+        env_var="ENSEMBLE_METRICS_TOOL_USAGE_ENABLED",
+        value_type="bool",
+        default=True,
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "Tool-usage metrics family kill-switch (Phase 2 stacks under "
+            "the global metrics gates; mirrors the authoritative "
+            "per-request env var ENSEMBLE_METRICS_TOOL_USAGE_ENABLED "
+            "— fail-closed off-switch; this managed key is the "
+            "operator-writable tier). DB/ENV-only."
+        ),
+    ),
+    "limits.tool_usage_digest_seeding_enabled": ManagedKeySpec(
+        key="limits.tool_usage_digest_seeding_enabled",
+        config_path=None,  # DB/ENV-ONLY (D-5 opt-out; survives re-seed)
+        env_var="LIMITS_TOOL_USAGE_DIGEST_SEEDING_ENABLED",
+        value_type="bool",
+        default=True,  # seeder enabled by default; OFF ⇒ no-op
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "Tool-usage digest seeder opt-out (Phase 3 consumes; no-op "
+            "when OFF — survives GC + re-seed). DB/ENV-only."
+        ),
+    ),
     # (limits.metrics_listener_port retired by rogue-containment rider (d):
     #  metrics port is now derived = resolved main port + 1, with
     #  LIMITS_METRICS_LISTENER_PORT as the env escape hatch. The DB
