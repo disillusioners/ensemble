@@ -436,6 +436,10 @@ async def test_extend_then_raise_records_failed_backoff():
     rows = _count_runs(repo, "orphan-watcher")
     tpe_rows = [r for r in rows if r.outcome == "TIMEOUT_PENDING_EXTEND"]
     failed_rows = [r for r in rows if r.outcome == "FAILED_BACKOFF"]
+    # Strict row-SET pin (🟢b): exact sequence [TPE fire row, FAILED_BACKOFF].
+    assert [r.outcome for r in rows] == ["TIMEOUT_PENDING_EXTEND", "FAILED_BACKOFF"], [
+        r.outcome for r in rows
+    ]
     assert len(tpe_rows) == 1
-    assert len(failed_rows) >= 1
+    assert len(failed_rows) == 1
     assert failed_rows[-1].error_class == "RuntimeError"

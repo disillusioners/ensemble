@@ -185,6 +185,17 @@ class TestRetiredKnobCompat:
             in _TOLERATED_RETIRED_KEYS["services"]
         )
 
+    def test_retired_config_keys_equality_pin(self):
+        """F7: the tolerated set == the load_config pop set (single source of
+        truth). Drift between the two would silently reintroduce the
+        config-compat regression."""
+        from daemon.config import RETIRED_CONFIG_KEYS
+        from daemon.plugin_subsystem.config_compat_contract import (
+            _TOLERATED_RETIRED_KEYS,
+        )
+
+        assert _TOLERATED_RETIRED_KEYS == RETIRED_CONFIG_KEYS
+
 
 class TestMisfiledRelabels:
     def test_observer_health_check_keeps_its_class_and_env_var(self):
