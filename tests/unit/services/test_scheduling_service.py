@@ -711,11 +711,11 @@ class TestUserTimezoneRung:
         _wire_user_tz(monkeypatch, "Asia/Bangkok")
 
         result = await _create_daily(
-            repo, recurrence="once", when="2026-10-05T06:00:00"
+            repo, recurrence="once", when="2030-06-05T06:00:00"
         )
         assert repo.rows["tz-rung"].config["timezone"] == "Asia/Bangkok"
         # 06:00 Bangkok = 23:00Z the previous day.
-        assert result.next_run_at_utc == "2026-10-04T23:00:00+00:00"
+        assert result.next_run_at_utc == "2030-06-04T23:00:00+00:00"
         assert result.tz_warning == ""
 
     @pytest.mark.asyncio
