@@ -17,7 +17,7 @@
 # registry is import-standalone; pytest still needs the dev env fence to
 # pass — run with the worktree .env pinned, ENSEMBLE_SELF_ENV=dev).
 #
-# Expected test count: ~34 (4 files)
+# Expected test count: 61 (4 files)
 # Timeout: 2 minutes (120s, unit class)
 set -euo pipefail
 

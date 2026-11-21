@@ -168,9 +168,11 @@ def make_ram_breach_emitter(
         fut.add_done_callback(_log_ram_event_future_exception)
         # Phase 5 event registry — class-2 bridge (T5.4): observe the
         # SCHEDULED durable emission (delivery outcome rides the done
-        # callback; the create_event coroutine is already in flight).
+        # callback; the create_event coroutine is already in flight) —
+        # the phase dim distinguishes scheduled-from-committed.
         _event_registry_record("event_bus:ram_limit_exceeded",
-                               instance_id=instance_id)
+                               instance_id=instance_id,
+                               phase="scheduled")
         return True
 
     return _emit

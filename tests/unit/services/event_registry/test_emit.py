@@ -124,6 +124,23 @@ def test_snapshot_works_without_any_flush_caller():
     assert snap["kinds"]["mission_commission_transition"]["fired_total"] == 1
 
 
+def test_snapshot_consuming_contract_is_documented_and_pinned():
+    # Rider-5 shape (b) — the CONSUMING READ contract, pinned exactly as
+    # snapshot()'s docstring states it: (1) raw entries are visible via
+    # recent() until a snapshot; (2) the snapshot's fold DRAINS the ring;
+    # (3) totals are cumulative — a re-snapshot never double-counts.
+    record("instance_terminalized", instance_id="i1")
+    assert len(recent(kind_id="instance_terminalized")) == 1
+    snap1 = snapshot()
+    assert snap1["kinds"]["instance_terminalized"]["fired_total"] == 1
+    assert recent() == [], "the snapshot's fold must drain the ring"
+    record("instance_terminalized", instance_id="i2")
+    snap2 = snapshot()
+    assert (
+        snap2["kinds"]["instance_terminalized"]["fired_total"] == 2
+    ), "totals are cumulative across snapshots (no double-count)"
+
+
 # ── Mutation leg: unregistered kind ⇒ RED ───────────────────────────────
 
 

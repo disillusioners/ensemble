@@ -103,7 +103,19 @@ def _consumers_live(
 
 
 def snapshot(bus: Any = None) -> dict[str, Any]:
-    """The per-kind observability projection (D5.5) — read-only.
+    """The per-kind observability projection (D5.5).
+
+    **CONSUMING READ CONTRACT (rider-5, stage review):** this is NOT a
+    pure read — it FOLDS the hot ring into the per-kind totals and the
+    fold drains the ring (``emit.flush()``). Consequences, both pinned
+    by the unit pack:
+
+    * totals are cumulative across calls (an entry is folded exactly
+      once — a second ``snapshot()`` never double-counts);
+    * the raw ring is EMPTY after a snapshot, so ``recent()`` must be
+      called BEFORE ``snapshot()`` if raw per-entry dims are wanted
+      (the durable substrates — event rows, state tables, the ledger —
+      remain the system's truth; the ring is a bounded debug buffer).
 
     Args:
         bus: the live ``EventBus`` (duck-typed) for consumer-liveness

@@ -7172,7 +7172,7 @@ def create_attestation_gate_node(
                     # is True ONLY for the attested path (the deny path
                     # sets it False via scanner diagnostics).
                     if decision.attestation_present:
-                        safe_reset(
+                        reset_result = safe_reset(
                             ledger,
                             effective_instance_id,
                             log_context={
@@ -7181,11 +7181,15 @@ def create_attestation_gate_node(
                             },
                         )
                         # Phase 5 event registry — class-4 bridge (T5.6):
-                        # the attested-allow reset epoch.
-                        _event_registry_record("attestation_epoch",
-                            instance_id=effective_instance_id,
-                            epoch_action="reset",
-                            path="leader_completion_gate")
+                        # the attested-allow reset epoch — commit-guarded
+                        # like its siblings (observe only when the ledger
+                        # write actually landed; False = row missing,
+                        # None = DB error/fail-open ⇒ no epoch moved).
+                        if reset_result is True:
+                            _event_registry_record("attestation_epoch",
+                                instance_id=effective_instance_id,
+                                epoch_action="reset",
+                                path="leader_completion_gate")
                 # else: ALLOWED_LEGITIMATE_PENDING_WAKEUP, DRY_LOG,
                 # ALLOWED (meta-condition bypass) — NO ledger write.
             except Exception:  # noqa: BLE001 — defense-in-depth
