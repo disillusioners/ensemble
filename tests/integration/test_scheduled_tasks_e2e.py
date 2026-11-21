@@ -566,11 +566,14 @@ async def test_d9_scheduling_tool_factory_wires_four_tools(tmp_path):
 
 
 async def test_schedule_fire_notify_notice_row(tmp_path):
-    """A fired schedule with a creator instance produces at most one
-    system:schedule_fire_notify MessageQueue row (best-effort)."""
+    """A fired schedule with a creator instance produces EXACTLY ONE
+    system:schedule_fire_notify MessageQueue row (A7-iv) and leaves no
+    new source_configs row / dependency-watcher row."""
     import asyncio
     from sqlmodel import Session, select
     from daemon.repositories.message_queue.models import MessageQueue
+    from daemon.repositories.source.models import SourceConfig as SourceConfigRow
+    from daemon.repositories.dependency_bus.models import DependencyWatcher
 
     engine = build_chat_source_engine(str(tmp_path / "e2e-notify.db"))
     with wire_manager_only(engine) as manager:
@@ -583,6 +586,10 @@ async def test_schedule_fire_notify_notice_row(tmp_path):
         seeded_instance = f"inst-{uuid.uuid4().hex[:12]}"
         _seed_instance(engine, seeded_instance, "ari", system_project_id)
         manager.spawn_instance_with_mcp = AsyncMock(return_value=seeded_instance)
+
+        def _count(model):
+            with Session(engine) as s:
+                return len(s.exec(select(model)).all())
 
         svc = manager.scheduling_service
         created = await svc.create_schedule(
@@ -601,6 +608,10 @@ async def test_schedule_fire_notify_notice_row(tmp_path):
             caller_agent_id="tester",
         )
 
+        # baseline AFTER the create row exists; the FIRE must add none.
+        src_before = _count(SourceConfigRow)
+        watch_before = _count(DependencyWatcher)
+
         try:
             await _await_until(
                 lambda: (
@@ -611,7 +622,6 @@ async def test_schedule_fire_notify_notice_row(tmp_path):
             )
             adapter = manager.source_registry.get(created.source_id)
             assert adapter is not None
-            # ensure creator captured
             assert (adapter.config.config or {}).get("creator_instance_id") == creator_id
 
             await adapter._emit_scheduled_message()
@@ -619,7 +629,6 @@ async def test_schedule_fire_notify_notice_row(tmp_path):
                 lambda: len(_scheduler_jobitems(job_repo)) > 0,
                 timeout=10,
             )
-            # let the off-path notify task run
             await asyncio.sleep(0.5)
 
             with Session(engine) as s:
@@ -628,7 +637,103 @@ async def test_schedule_fire_notify_notice_row(tmp_path):
                         MessageQueue.source == "system:schedule_fire_notify"
                     )
                 ).all()
-            # best-effort: at most one notice row
-            assert len(rows) <= 1
+            assert len(rows) == 1, (
+                f"A7-iv: expected EXACTLY ONE notice row, got {len(rows)}"
+            )
+            notice = rows[0]
+            assert notice.type == "system"
+            assert notice.instance_id == creator_id
+            body = notice.content
+            for token in (
+                "label=int-notify-1",
+                "target_agent=ari",
+                "instance_mode=new_instance",
+                "recurrence=one_time",
+                "job_id=",
+                "message_id=",
+                "target_instance_id=",
+            ):
+                assert token in body, f"missing field token {token!r} in {body!r}"
+
+            src_after = _count(SourceConfigRow)
+            watch_after = _count(DependencyWatcher)
+            assert src_after == src_before, (
+                f"no extra source_configs row expected: {src_before}->{src_after}"
+            )
+            assert watch_after == watch_before, (
+                f"zero dependency-watcher rows expected: {watch_before}->{watch_after}"
+            )
+        finally:
+            await manager.source_registry.stop_all()
+
+
+async def test_schedule_fire_notify_paused_creator_queues(tmp_path):
+    """F3 real-lane: a PAUSED creator receives a PENDING Task row for the
+    notice and its status is NOT flipped."""
+    import asyncio
+    from sqlmodel import Session, select
+    from daemon.repositories.instance.models import Instance
+    from daemon.repositories.task.models import Task, TaskStatus
+
+    engine = build_chat_source_engine(str(tmp_path / "e2e-notify-paused.db"))
+    with wire_manager_only(engine) as manager:
+        job_repo, queue_repo, mgmt, system_project_id = _wire_job_stack(engine, manager)
+        await _provision_queues(mgmt, system_project_id)
+
+        creator_id = f"inst-{uuid.uuid4().hex[:12]}"
+        _seed_instance(engine, creator_id, "ari", system_project_id)
+        with Session(engine) as s:
+            inst = s.get(Instance, creator_id)
+            inst.status = "paused"
+            s.add(inst); s.commit()
+
+        seeded_instance = f"inst-{uuid.uuid4().hex[:12]}"
+        _seed_instance(engine, seeded_instance, "ari", system_project_id)
+        manager.spawn_instance_with_mcp = AsyncMock(return_value=seeded_instance)
+
+        svc = manager.scheduling_service
+        created = await svc.create_schedule(
+            {
+                "label": "int-notify-paused",
+                "agent": "ari",
+                "message": "fire",
+                "project_id": system_project_id,
+                "when": FUTURE_RUN_AT,
+                "timezone": "UTC",
+                "recurrence": "once",
+                "priority": 5,
+                "instance_mode": "new_instance",
+            },
+            caller_instance_id=creator_id,
+            caller_agent_id="tester",
+        )
+        try:
+            await _await_until(
+                lambda: (
+                    (a := manager.source_registry.get(created.source_id)) is not None
+                    and a._execution_semaphore is not None
+                ),
+                timeout=10,
+            )
+            adapter = manager.source_registry.get(created.source_id)
+            await adapter._emit_scheduled_message()
+            await _await_until(
+                lambda: len(_scheduler_jobitems(job_repo)) > 0,
+                timeout=10,
+            )
+            await asyncio.sleep(0.5)
+
+            with Session(engine) as s:
+                pending = s.exec(
+                    select(Task).where(
+                        Task.instance_id == creator_id,
+                        Task.status == TaskStatus.PENDING.value,
+                    )
+                ).all()
+                inst = s.get(Instance, creator_id)
+            assert len(pending) >= 1, "PAUSED creator must receive a PENDING Task"
+            assert inst.status == "paused", (
+                f"PAUSED creator status must NOT be flipped, got {inst.status!r}"
+            )
         finally:
             await manager.source_registry.stop_all()
