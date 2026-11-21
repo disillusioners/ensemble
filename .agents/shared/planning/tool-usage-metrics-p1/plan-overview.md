@@ -3,7 +3,7 @@
 **Commission:** ENSEMBLE-37 (TokenEconomizer adoption) — Phase 1 measurement slice, Emperor-approved 2026-11-21.
 **Lane:** plan-only (planner → architect enrichment → reviewer → approver). Zero implementation in this lane.
 **Worktree:** `/home/nea/ensemble-src-wt-tool-metrics-p1` @ branch `feature/tool-usage-metrics-p1`, base `0b5624dc9`.
-**Status:** COMPLETE — 5 phase plans + decision ledger, architect pass folded (`fd254b335`), both leader rulings applied (LR1/LR2), and the **review fix pass U1–U16 folded** (council-backed APPROVED-WITH-NOTES-CONDITIONAL conditions discharged; §PREDICATE LEDGER + §CLOSING ATTESTATION appended to `decisions.md`). Approver pass next.
+**Status:** COMPLETE — 5 phase plans + decision ledger, architect pass folded (`fd254b335`), both leader rulings applied (LR1/LR2), and the **review fix pass U1–U16 folded** (council-backed APPROVED-WITH-NOTES-CONDITIONAL conditions discharged; §PREDICATE LEDGER + §CLOSING ATTESTATION appended to `decisions.md`). Approver iteration-001 blockers B1–B7 + carried notes FIXED (attestation re-run honest, 7/7 rows PASS); ready for iteration-002.
 **Prior evidence salvaged in-branch:** `tokeneconomizer-study/` (5 files incl. `writing-block-tiering.md`) + `.agents/shared/writing-block.md` — commit `0dbf8d180`.
 
 ---
@@ -16,11 +16,11 @@ Build the measurement slice that, after ~7 days of operation, lets the data alon
 
 | Phase | File | Objective | Architect verdict | Exit gate |
 |---|---|---|---|---|
-| 1 — BE ledger + tap + door | `phase1-plan.md` (40,790 B) | `tool_usage_daily` (sentinel `__none__`), tools-node observation wrapper (amended placement + A-1…A-4), counter-map flusher (A-5*), additive migration, `/api/tool-usage/*` door with replication pin | VALIDATE w/ amendments A-1…A-7 | §7 |
-| 2 — Metrics family | `phase2-plan.md` (21,017 B) | F24 `ensemble_tool_usage_calls_total{tool_category, result}` via `w5.py`; **measured total 626 ≤ 2000** (convention corrected; U16b off-by-one fix); `metrics_gate.py` citation | VALIDATE w/ 2 corrections | §11 |
-| 3 — Digest + delivery | `phase3-plan.md` (29,673 B) | Deterministic SQL digest (windows D−1 / [D−7,D−1]; canonical root), uuid5-hardened startable seeder (adapter `schedule=` shape; opt-out key) | **AMEND MATERIALLY** — D-1…D-9 folded (as written it would never fire) | §12 |
-| 4 — FE tab | `phase4-plan.md` (45,539 B) | 9th tab `slot:'custom'`; **LAZY host pattern frozen (feasible, HIGH)**; B4b re-baselined **185,000 → 188,000 by leader ruling LR1**; phase 4 owns the threshold-artifact amendment | VALIDATE + leader decision RULED | §8 |
-| 5 — Release tail | `phase5-plan.md` (37,720 B) | Gates G1–G7 (updated lists), I1 re-specified as the 5-step gate-time proof, staged release via house `stage.sh live` (LR2 CONFIRMED), hard STOP — no flip | VALIDATE, I1 reframed, OQ1 resolved | §12 |
+| 1 — BE ledger + tap + door | `phase1-plan.md` (42,431 B) | `tool_usage_daily` (sentinel `__none__`), tools-node observation wrapper (amended placement + A-1…A-4), counter-map flusher (A-5*), additive migration, `/api/tool-usage/*` door with replication pin | VALIDATE w/ amendments A-1…A-7 | §7 |
+| 2 — Metrics family | `phase2-plan.md` (21,216 B) | F24 `ensemble_tool_usage_calls_total{tool_category, result}` via `w5.py`; **measured total 625 ≤ 2000** (convention corrected; U16b +1 reverted per approver B5); `metrics_gate.py` citation | VALIDATE w/ 2 corrections | §11 |
+| 3 — Digest + delivery | `phase3-plan.md` (29,969 B) | Deterministic SQL digest (windows D−1 / [D−7,D−1]; canonical root), uuid5-hardened startable seeder (adapter `schedule=` shape; opt-out key) | **AMEND MATERIALLY** — D-1…D-9 folded (as written it would never fire) | §12 |
+| 4 — FE tab | `phase4-plan.md` (46,238 B) | 9th tab `slot:'custom'`; **LAZY host pattern frozen (feasible, HIGH)**; B4b re-baselined **185,000 → 188,000 by leader ruling LR1**; phase 4 owns the threshold-artifact amendment | VALIDATE + leader decision RULED | §8 |
+| 5 — Release tail | `phase5-plan.md` (38,408 B) | Gates G1–G7 (updated lists), I1 re-specified as the 5-step gate-time proof, staged release via house `stage.sh live` (LR2 CONFIRMED), hard STOP — no flip | VALIDATE, I1 reframed, OQ1 resolved | §12 |
 
 Ledger: `decisions.md` (34,005 B) — D1–D11 original + **D12–D22 appended** (append-only; D11 superseded by D16). Architect source: `architecture-recommendation.md` (35,533 B, stands as written).
 
@@ -35,7 +35,7 @@ Ledger: `decisions.md` (34,005 B) — D1–D11 original + **D12–D22 appended**
 |---|---|---|
 | A Ledger | Aggregated counters; PK `(day, project_id, tool_name, agent_id)`; agent `'unknown'`; **project `"__none__"` (D16 supersedes D11)**; NAMES ONLY frozen | D1, D11→D16 |
 | B Tap | Tools-node observation wrapper **between compact_note and wrapped_tools_node**; `manager._instance_repository` (A-1); per-batch identity (A-2); 256-char choke (A-3); factory/subclass alternatives REJECTED | D2→D14 |
-| C Family | F24 aggregate-only; labels `tool_category` (v11, no bump) + `result`; **measured 626 ≤ 2000 is THE claim** (D18, U16b); gauge REJECTED; family key registration rides phase 1's settings edit | D8→D18 |
+| C Family | F24 aggregate-only; labels `tool_category` (v11, no bump) + `result`; **measured 625 ≤ 2000 is THE claim** (D18; U16b +1 reverted per approver B5); gauge REJECTED; family key registration rides phase 1's settings edit | D8→D18 |
 | D FE | 9th tab `custom`; LAZY host (5-input pattern frozen); **B4b ≤ 188,000 via LR1**; static fallback REJECTED; phase 4 owns the threshold-artifact amendment (D22) | D9→D12/D22 |
 | E Digest | Deterministic SQL rollup; **canonical root (phantom `manager.workdir` removed, D-6)**; windows D−1 / [D−7,D−1] (D-7); uuid5 idempotent startable seeder with adapter `schedule=` shape (D-1..D-4); opt-out key (D-5); rollback disclosure (D-9) | D10→D19 |
 | F Migration | Additive register-before-`create_all` + own `.sql`; rollback-safe holds; A-7: LimitsConfig field backs the collection key (v0.31.8 crash-class guard) | D5 |
@@ -72,6 +72,11 @@ Phases 1 → {2, 3} → 4 → 5; gates G1–G7 (`phase5-plan.md` §4); staging �
 
 ## File index (post-amendment)
 
-`plan-overview.md` (this file) · `decisions.md` 36,419 B (incl. §PREDICATE LEDGER + §CLOSING ATTESTATION) · `phase1-plan.md` 39,495 B · `phase2-plan.md` 21,017 B · `phase3-plan.md` 25,118 B · `phase4-plan.md` 41,162 B · `phase5-plan.md` 34,989 B · `architecture-recommendation.md` 35,533 B (architect-owned, unamended). Set total ≈ 256 KB.
+`plan-overview.md` (this file) · `decisions.md` 41,203 B (incl. §PREDICATE LEDGER + §CLOSING ATTESTATION, iteration-001 corrected) · `phase1-plan.md` 42,431 B · `phase2-plan.md` 21,216 B · `phase3-plan.md` 29,969 B · `phase4-plan.md` 46,238 B · `phase5-plan.md` 38,408 B · `architecture-recommendation.md` 35,533 B (architect-owned, unamended). Set total ≈ 265 KB.
 
 *Synthesized by the planner. Workers own phase content; the architect doc governs amendments; this overview cites and links both.*
+
+## Approver iteration-001 fold (dispatcher notes)
+- **A1 canonical statement:** the per-phase "§0 Dispatch mode" sections across phase1–5 record each file's authoring history (sanctioned parallel-writer variance); THIS overview is the canonical dispatch record: bodies by worker instances, ledger by worker instances, rulings LR1/LR2 lane-leader-owned, architect doc architect-owned and unamended.
+- **A6 commission disclosure:** the F24 family ships **wired-but-gated** — the global `limits.metrics_enabled` defaults False in the target deployment, so central-metrics emission starts only when an operator enables it at/after promote. The ledger, door, digest, and FE tab are NOT gated by that key (collection key `limits.tool_usage_collection_enabled` defaults ON).
+- **B5 final state:** measured closed-space total **491 today + 134 = 625 ≤ 2000** (architect §5 stands as written; the U16b +1 renumbering was proven derivable-by-no-convention and reverted; full arc in `decisions.md` D18 + correction entry).
