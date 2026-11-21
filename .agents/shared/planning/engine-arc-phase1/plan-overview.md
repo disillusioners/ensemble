@@ -104,7 +104,7 @@ Migration tail (~20 eligible modules, ≈4–10h/module, each its own gated comm
 
 ## 12. Open Questions Carried Upward (architect stage; none Emperor-blocking)
 
-1. **Shadow duration before pilot flip** — ≥2 release cycles (conservative) vs early flip on OrphanWatcher's own health? (`phase2-pilot-recommendation.md` presents both.)
+1. **Shadow duration before pilot flip** — ~~≥2 release cycles (conservative)~~ vs early flip on OrphanWatcher's own health? (`phase2-pilot-recommendation.md` presents both.) **[WITHDRAWN option — round-2 fold sweep, 2026-11-21:** the ceremony-gated "≥2 release cycles" option is withdrawn by architect ruling (a) / AMD-1(c); the re-baselined criterion is CS-2 (verbatim in `phase2-pilot-recommendation.md` §5). Question retained as the record of what was carried upward.**]
 2. **Second migrant ordering** — healthy-sweep (parity proof) vs PEXIT-class (JobLock/SourcesGc)? Phase-2+ concern; registry evidence will inform.
 3. **D-3 polarity ratification** — dispatcher ruled enabled+shadow; architect review may veto.
 4. **Start-anchor build-side emit** — confirm the harness/promote-lane owns it (dispatcher ruling) or route a daemon-side emit (deferred-task seam `api.py:1082-1093`) if promote-lane capture proves brittle.
@@ -150,6 +150,9 @@ Added by the review-fold reconciliation pass (findings F-1..F-10). **Body wins, 
 | "≥2 release cycles" (ceremony-gated criterion-1 framing) | `phase2-pilot-recommendation.md` §5 criterion 1; `plan-overview.md` §10 summary | CS-2 (ruling (a) verbatim) |
 | "converged `job_metrics` family" (criterion-1 family dependency; D-6 explicitly rejects families) | `phase2-pilot-recommendation.md` §5 criterion 1 | engine's own in-process snapshot (D2.14) |
 | "The engine is built only if the gate fires" (pre-ruling remnant — not the registration family; recorded for completeness) | `phase2-pilot-recommendation.md` §6 (marked SUPERSEDED, retained as the migration-escalation criteria it actually governs) + §5 falsification item (iii) (bracket note) | F-7 note: the §E.3 gate governs MIGRATION ESCALATION only, never the build (build unconditional per Emperor ruling #1) |
+| "Phase 1 is dormant with **zero** registrations, so the blast radius at ship time is nil" (risk-table mitigation premise; A-1) | `phase2-plan.md` §9 Risks (first-row Mitigation cell, L112) | CS-5 posture: ships `enabled=true` + `shadow_mode=true` with N observer specs registered, zero executables, `USE_ENGINE` all unset — blast radius nil BECAUSE nothing executes (dispatch structurally impossible) |
+| "≥2 release cycles of dormant shadow evidence" (SECOND instance — cross-ref restatement; A-2) | `phase1-plan.md` §12.3 cross-ref bullet, L356 | CS-2 + CS-3 (criterion framing cited by id; bolded consequence clause survives) |
+| "registration of 0-2 fixture jobs" (D4.9 cost-bound premise correction; R-1) | `phase4-plan.md` D4.9, L40 | "registration of N observer specs, zero executables — CS-1 posture, no execution" (≤250ms bound unchanged) |
 
 **Ruling-record note:** literal `registrations=0` occurrences REMAIN inside `architecture-recommendation.md` (§1(c) correction, findings register #1, AMD-1). These are the ruling text itself quoting the withdrawn string AS the thing withdrawn ("Amend D4.11 from `registrations=0` to `registrations=N observer specs`") — visibly self-marking it superseded, retained per F-10's single-edit restriction on that file. They are ruling record, not live predicates.
 
@@ -169,3 +172,12 @@ origin/latest MOVED during review — `b71742fe3` → `01ec292da` (~20 commits, 
 8. `test-strategy.md` — §1.1 T8 (CS-5, AMD-3(c)); §3.1 (CS-5 char-for-char + D2.13 shadow-row cadence + AMD-8 unset semantics); §3.2 leg 1 (CS-1 + SKIPPED_SHADOW-rows-only).
 9. `research-anchors.md` — §2 "Engine-independent watchdog" insertion-point line (F-3: asyncio research shape marked SUPERSEDED; BUILT daemon-thread shape per AMD-2/D4.6; research history retained).
 10. `architecture-recommendation.md` — §4 AMD-5 block ONLY (F-10 one-line supersession note: FA-6 "P4 declares the registry Out" vs set_event_sink-in-T4.4 safe under D4.10's guarded-block posture). No other line in this file touched.
+
+**Round-2 fold (2026-11-21)** — four surviving same-family instances the round-1 sweep missed (risk tables / cross-refs / rationale cells — the round-2 lesson). Zero design change; reconciliation only:
+11. `phase2-plan.md` §9 Risks first-row Mitigation cell (A-1, L112) — dormant "**zero** registrations" premise → CS-5 posture (ships `enabled=true` + `shadow_mode=true` + N observer specs, zero executables, `USE_ENGINE` all unset; blast radius nil BECAUSE nothing executes).
+12. `phase1-plan.md` §12.3 cross-ref bullet (A-2, L356) — "≥2 release cycles of dormant shadow evidence" restatement (a SECOND instance of the withdrawn string, in a cross-ref section) → CS-2 + CS-3 cited by id; bolded consequence clause preserved.
+13. `test-strategy.md` §4 design-constraints paragraph (R-2, L124) — asyncio-loop research shape marked SUPERSEDED with the research-anchors.md:86 bracket convention; BUILT daemon-thread shape per AMD-2/D4.6 (shared-atomic state channel, engine-independent recovery).
+14. `phase4-plan.md` D4.9 (R-1, L40) — "registration of 0-2 fixture jobs" premise → "registration of N observer specs, zero executables — CS-1 posture, no execution"; ≤250ms bound unchanged.
+15. `phase4-plan.md` SLO-1 must-not-regress table (sweep-driven, L119) — a SECOND "0-2 fixture registrations" premise → "N observer specs registered, zero executables — CS-1 posture"; ≤250ms bound unchanged.
+16. `plan-overview.md` §12 open question 1 (sweep-driven, L107) — the "≥2 release cycles (conservative)" option struck + bracket-WITHDRAWN (ruling (a)/AMD-1(c); re-baselined criterion CS-2). Question retained as the carried-upward record.
+Plus this ledger: DELETION RECORD gains the three withdrawn strings (A-1/A-2/R-1); ATTESTATION gains this Round-2 subsection.

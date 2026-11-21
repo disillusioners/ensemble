@@ -353,7 +353,7 @@ That document's §5 recommends gate wiring **(b) host-frame** (`unit ActiveEnter
 
 Its recommendation — `OrphanWatcherSweepService` post-fix, `MAIN_LOOP` class, `SERVICES_ORPHAN_WATCHER_USE_ENGINE` — is **compatible with this plan's harness and adds no Phase-1 work**:
 - The harness flag shape (`SERVICES_<MODULE>_USE_ENGINE`, default OFF) matches P3 D3.7/D3.8 exactly.
-- Its "greenlight criteria" require ≥2 release cycles of dormant shadow evidence and zero false-dead flags — i.e. **it consumes P2's `dead` computation and P6's projection**, both of which exist after this program.
+- Its greenlight criteria (per the review-fold re-baselining) are CS-2 (≥2 independent boots of shadow evidence on the priority targets (one of which is the staged-release boot smoke), AND long-cadence maturity: every registered target has been shadow-evaluated through ≥2× its interval, AND a ≥48h live soak post-promote before the pilot flip.) and CS-3 (Zero false shadow-dead on healthy mechanisms) — i.e. **it consumes P2's `dead` computation and P6's projection**, both of which exist after this program.
 - Its stated prerequisite (the fast-lane late-bind fix landing first) is the same coupling fact recorded in phase3 §6.1.
 - **No conflict.** Phase 1 ships the flag family and no module registrations; the pilot is a later activation.
 

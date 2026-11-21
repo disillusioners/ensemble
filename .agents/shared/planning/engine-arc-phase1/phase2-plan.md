@@ -109,7 +109,7 @@ Make the engine an **honest scheduler that runs nothing by default**: one lifesp
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| The tick loop becomes a new single point of failure | every registered job stalls at once — the "who watches the watchman" objection (§D.1.2) | P4's engine-independent watchdog is a **hard** part of the program (not optional), and P2's loop must never `return` silently (F-7). Phase 1 is dormant with **zero** registrations, so the blast radius at ship time is nil |
+| The tick loop becomes a new single point of failure | every registered job stalls at once — the "who watches the watchman" objection (§D.1.2) | P4's engine-independent watchdog is a **hard** part of the program (not optional), and P2's loop must never `return` silently (F-7). Phase 1 ships `enabled=true` + `shadow_mode=true` with N observer specs registered, zero executables (`execute_fn` withheld), `USE_ENGINE` all unset — so the blast radius at ship time is nil BECAUSE nothing executes (dispatch is structurally impossible). |
 | `extend` timeout policy leaks the single-flight claim forever | a job silently never runs again | `extend` stamps `TIMEOUT_PENDING_EXTEND` every tick it is still running (visible in `skips_by_reason` and `dead`), and the P3 guardrail escalates a `2 × max_runtime_s` hold to `dead=true` |
 | RAM cache leads the DB after a failed write | the projection claims a run that the audit does not have | D2.12 ordering: cache updates **after** the write lands; a failed write leaves the cache stale and logs ERROR (the tick continues) |
 | Skip rows grow unbounded on a gated job | audit table bloat | D2.9 backoff (interval × up to 8) + the `(job_id, started_at)` index; a 30d prune is the routed follow-up (P1 §5 note) |
