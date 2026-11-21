@@ -3220,10 +3220,10 @@ class TestScheduleFireNotifySeam:
             await adapter._route_via_job_queue("exec-1", "scheduled message", {"agent": "./agents/developer"})
             assert mock_notify.await_count == 1
             kw = mock_notify.await_args.kwargs
-            assert kw["creator_instance_id"] == "creator-1"
+            assert kw["schedule_config"].get("creator_instance_id") == "creator-1"
 
     @pytest.mark.asyncio
-    async def test_direct_notify_skipped_when_no_creator(self, mock_on_message):
+    async def test_direct_notify_hook_invoked_without_creator(self, mock_on_message):
         from daemon.sources.adapters import scheduler as sched_mod
         config = make_config("sf-none", {
             "schedule": "0 9 * * *",
@@ -3242,6 +3242,8 @@ class TestScheduleFireNotifySeam:
         adapter._source_repo = mapper_repo
         with patch.object(sched_mod._schedule_fire_notify_mod, "notify_schedule_fire", new=AsyncMock()) as mock_notify:
             await adapter._route_via_job_queue("exec-1", "scheduled message", {"agent": "./agents/developer"})
+            # The seam ALWAYS invokes the entrypoint; the absent-key gate lives
+            # inside the never-raise module (asserted in the helper matrix).
             assert mock_notify.await_count == 1
-            # creator absent -> still called but entrypoint handles skip; at seam level identity absent
-            # (the module entrypoint returns silently). We assert it was invoked (gate lives in module).
+            kw = mock_notify.await_args.kwargs
+            assert "creator_instance_id" not in (kw["schedule_config"] or {})

@@ -646,6 +646,7 @@ async def test_schedule_fire_notify_notice_row(tmp_path):
             body = notice.content
             for token in (
                 "label=int-notify-1",
+                "fired_at=",
                 "target_agent=ari",
                 "instance_mode=new_instance",
                 "recurrence=one_time",

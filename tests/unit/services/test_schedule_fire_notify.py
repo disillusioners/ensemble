@@ -34,22 +34,28 @@ def _make_manager(*, status="running", enqueue_side_effect=None):
     return manager
 
 
-@pytest.mark.asyncio
-async def test_message_shape_source_and_no_spawn():
-    manager = _make_manager()
-    await sfn.notify_schedule_fire(
-        manager,
-        creator_instance_id="creator",
-        recipient_instance_id="recipient",
+async def _notify(manager, creator="creator", recipient="recipient", **extra):
+    cfg = {"creator_instance_id": creator} if creator is not None else {}
+    kwargs = dict(
+        schedule_config=cfg,
+        metadata={"scheduler": {"trigger_time": "2026-01-01T00:00:00"}},
+        recipient_instance_id=recipient,
         label="lbl",
-        fired_at="2026-01-01T00:00:00",
         target_agent="ari",
         instance_mode="new_instance",
         recurrence="once",
         job_id="job-1",
         message_id="msg-1",
-        target_instance_id="recipient",
+        target_instance_id=recipient,
     )
+    kwargs.update(extra)
+    await sfn.notify_schedule_fire(manager, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_message_shape_source_and_no_spawn():
+    manager = _make_manager()
+    await _notify(manager)
     await asyncio.sleep(0.1)
     assert manager.enqueue_message_job.call_count == 1
     kwargs = manager.enqueue_message_job.call_args.kwargs
@@ -67,10 +73,7 @@ async def test_message_shape_source_and_no_spawn():
 @pytest.mark.asyncio
 async def test_terminal_creator_no_revive_dropped():
     manager = _make_manager(status="completed")
-    await sfn.notify_schedule_fire(
-        manager, creator_instance_id="creator", recipient_instance_id="recipient",
-        label="lbl",
-    )
+    await _notify(manager)
     await asyncio.sleep(0.1)
     assert manager.enqueue_message_job.call_count == 0
     assert m.get_dropped_total() == 1
@@ -80,10 +83,7 @@ async def test_terminal_creator_no_revive_dropped():
 @pytest.mark.asyncio
 async def test_absent_creator_dropped():
     manager = _make_manager(status=None)
-    await sfn.notify_schedule_fire(
-        manager, creator_instance_id="creator", recipient_instance_id="recipient",
-        label="lbl",
-    )
+    await _notify(manager)
     await asyncio.sleep(0.1)
     assert manager.enqueue_message_job.call_count == 0
     assert m.get_dropped_total() == 1
@@ -92,10 +92,7 @@ async def test_absent_creator_dropped():
 @pytest.mark.asyncio
 async def test_paused_creator_queues_not_dropped():
     manager = _make_manager(status="paused")
-    await sfn.notify_schedule_fire(
-        manager, creator_instance_id="creator", recipient_instance_id="recipient",
-        label="lbl",
-    )
+    await _notify(manager)
     await asyncio.sleep(0.1)
     assert manager.enqueue_message_job.call_count == 1
     assert m.get_dropped_total() == 0
@@ -109,10 +106,7 @@ async def test_gate_time_exception_absorbed():
         raise RuntimeError("gate boom")
     asyncio.create_task = boom
     manager = _make_manager()
-    await sfn.notify_schedule_fire(
-        manager, creator_instance_id="creator", recipient_instance_id="recipient",
-        label="lbl",
-    )
+    await _notify(manager)
     asyncio.create_task = orig
     await asyncio.sleep(0.1)
     assert m.get_dropped_total() == 1
@@ -121,10 +115,7 @@ async def test_gate_time_exception_absorbed():
 @pytest.mark.asyncio
 async def test_coroutine_time_exception_absorbed():
     manager = _make_manager(enqueue_side_effect=RuntimeError("boom"))
-    await sfn.notify_schedule_fire(
-        manager, creator_instance_id="creator", recipient_instance_id="recipient",
-        label="lbl",
-    )
+    await _notify(manager)
     await asyncio.sleep(0.1)
     assert manager.enqueue_message_job.call_count == 1
     assert m.get_dropped_total() == 1
@@ -134,10 +125,7 @@ async def test_coroutine_time_exception_absorbed():
 @pytest.mark.asyncio
 async def test_identity_skip_no_drop():
     manager = _make_manager()
-    await sfn.notify_schedule_fire(
-        manager, creator_instance_id="same", recipient_instance_id="same",
-        label="lbl",
-    )
+    await _notify(manager, creator="same", recipient="same")
     await asyncio.sleep(0.1)
     assert manager.enqueue_message_job.call_count == 0
     assert m.get_dropped_total() == 0
@@ -146,10 +134,22 @@ async def test_identity_skip_no_drop():
 @pytest.mark.asyncio
 async def test_absent_creator_key_no_drop():
     manager = _make_manager()
-    await sfn.notify_schedule_fire(
-        manager, creator_instance_id=None, recipient_instance_id="recipient",
-        label="lbl",
-    )
+    await _notify(manager, creator=None)
     await asyncio.sleep(0.1)
     assert manager.enqueue_message_job.call_count == 0
     assert m.get_dropped_total() == 0
+
+
+@pytest.mark.asyncio
+async def test_non_dict_metadata_does_not_raise():
+    """F2: a non-dict metadata/config value must be absorbed, never raise."""
+    manager = _make_manager()
+    await sfn.notify_schedule_fire(
+        manager,
+        schedule_config={"creator_instance_id": "creator"},
+        metadata="not-a-dict",
+        recipient_instance_id="recipient",
+        label="lbl",
+    )
+    await asyncio.sleep(0.1)
+    assert manager.enqueue_message_job.call_count == 1

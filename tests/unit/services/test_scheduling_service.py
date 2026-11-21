@@ -748,3 +748,38 @@ class TestUserTimezoneRung:
         await svc.update_schedule("u1", {"message": "new text"})
         assert repo.rows["u1"].config["timezone"] == "UTC"
         project_repo.get_metadata_record.assert_not_called()
+
+
+class TestCreatorCaptureUpdatePreservation:
+    """Success criterion 5: creator_instance_id survives the REAL
+    ``update_schedule`` copy-then-mutate config path (NOT a stubbed seam)."""
+
+    @pytest.mark.asyncio
+    async def test_update_preserves_creator_instance_id(self, service_env):
+        repo, _registry = service_env
+        repo.rows["u1"] = _row(
+            "u1",
+            config={
+                "recurrence": "daily",
+                "local_time": "06:00",
+                "schedule": "0 6 * * *",
+                "creator_instance_id": "creator-xyz",
+            },
+        )
+        await svc.update_schedule(
+            "u1", {"message": "edited", "timezone": "UTC"}
+        )
+        persisted = repo.rows["u1"].config
+        assert persisted["creator_instance_id"] == "creator-xyz"
+        assert persisted["message"] == "edited"
+
+    @pytest.mark.asyncio
+    async def test_update_does_not_add_creator_key_when_absent(self, service_env):
+        repo, _registry = service_env
+        repo.rows["u1"] = _row(
+            "u1",
+            config={"recurrence": "daily", "local_time": "06:00",
+                    "schedule": "0 6 * * *"},
+        )
+        await svc.update_schedule("u1", {"message": "edited"})
+        assert "creator_instance_id" not in repo.rows["u1"].config

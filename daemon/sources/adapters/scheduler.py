@@ -2236,17 +2236,15 @@ Original scheduled task:
         )
         self._fire_outcome = self.FIRE_OUTCOME_DEFERRED_DURABLE
 
-        # schedule-fire-notify (T4): identity-gated best-effort notify at
-        # the deferred durable finalization (after durable-evidence check).
-        creator_instance_id = (getattr(self.config, "config", None) or {}).get(
-            "creator_instance_id"
-        )
+        # schedule-fire-notify (T4): single never-raise call at the deferred
+        # durable finalization; ALL extraction happens inside the entrypoint
+        # (F2: nothing in the wedge region may raise).
         await _schedule_fire_notify_mod.notify_schedule_fire(
             self._manager,
-            creator_instance_id=creator_instance_id,
+            schedule_config=getattr(self.config, "config", None),
+            metadata=metadata,
             recipient_instance_id=instance_id,
             label=getattr(self.config, "name", None),
-            fired_at=(metadata or {}).get("scheduler", {}).get("trigger_time"),
             target_agent=self._agent,
             instance_mode=self._instance_mode,
             recurrence=self._schedule_type,
@@ -2757,17 +2755,15 @@ Original scheduled task:
                 f"job_id={result.job_id}, message_id={result.message_id[:8] if result.message_id else None}"
             )
 
-            # schedule-fire-notify (T4): identity-gated best-effort notify
-            # at the direct dispatch site. Never raises (module contract).
-            creator_instance_id = (getattr(self.config, "config", None) or {}).get(
-                "creator_instance_id"
-            )
+            # schedule-fire-notify (T4): single never-raise call at the
+            # direct dispatch site; ALL extraction happens inside the
+            # entrypoint (F2: nothing in the wedge region may raise).
             await _schedule_fire_notify_mod.notify_schedule_fire(
                 self._manager,
-                creator_instance_id=creator_instance_id,
+                schedule_config=getattr(self.config, "config", None),
+                metadata=metadata,
                 recipient_instance_id=instance_id,
                 label=getattr(self.config, "name", None),
-                fired_at=(metadata or {}).get("scheduler", {}).get("trigger_time"),
                 target_agent=self._agent,
                 instance_mode=self._instance_mode,
                 recurrence=self._schedule_type,

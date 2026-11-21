@@ -4113,6 +4113,11 @@ class TestScheduleFireNotifyDeferred:
             m for m in _mq_for(pin_engine, creator_id)
             if m.source == "system:schedule_fire_notify"
         ]
+        assert len(first) == 1, (
+            "N8 coalesce: the FIRST (deferred-durable) fire must mint exactly "
+            f"one notice, got {len(first)} — otherwise the no-second-notice "
+            "assertion is vacuous"
+        )
         # SECOND fire -> coalesce (live delivery) -> NO second notice.
         await _fire_emit(adapter)
         await asyncio.sleep(0.6)
