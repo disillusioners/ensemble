@@ -69,7 +69,7 @@ Each entry: ID · decision · rationale · owner · alternatives rejected. Prove
 
 **D-6 — Metrics-family.**
 - *Decision:* the engine registers ZERO families in Phase 1. `/api/engine/*` read substrate + read-time union with `job_metrics()` instead; family ceremony GATED, default deferred (P6 T6.3), unfencing path written out.
-- *Rationale:* the metrics-family census is a closed fence (`tests/unit/metrics/test_metrics_family_adjudication.py:415-453/:873-906`; 28 verdicts / 18 registered / 13 chart-primary); the `job_metrics()` byte-shape pin forces read-time union, never an edit (F-2). The addendum is satisfied by a labelled, attributed inventory (D6.4) without a family; a dormant empty engine would make a chart of nothing dead surface. Unfencing path (recorded): one change carrying verdict row + registry member + band + allowlist record + the `28 → 29` pin edits, mutation-verified.
+- *Rationale:* the metrics-family census is a closed fence (`tests/unit/metrics/test_metrics_family_adjudication.py:415-453/:873-906`; 28 verdicts / 18 registered / 13 chart-primary **[TREE-TRUTH RECONCILE — 2026-11-21 (P6 review #3): 28 → 29 verdicts / 18 → 19 registered; chart-primary 13 STANDS (verified at tree 2f36e8aed94c); planning-time figures predate the landed family extension (F24)]**); the `job_metrics()` byte-shape pin forces read-time union, never an edit (F-2). The addendum is satisfied by a labelled, attributed inventory (D6.4) without a family; a dormant empty engine would make a chart of nothing dead surface. Unfencing path (recorded): one change carrying verdict row + registry member + band + allowlist record + the `28 → 29` pin edits, mutation-verified. **[TREE-TRUTH RECONCILE — 2026-11-21 (P6 review #3): transition consumed — census already 29 (verified at tree 2f36e8aed94c); a future registration bumps 29 → 30]**
 - *Owner:* P6 T6.3 (census ceremony + diff-census record).
 - *Alternatives rejected:* registering a chart-primary family as "obviously needed" work — rejected (widens a closed census silently, the exact defect class the pack catches); editing `job_metrics()` — forbidden by F-2; never deciding — rejected (deferral must be recorded so the next lane does not re-litigate).
 
@@ -109,7 +109,7 @@ Each entry: ID · decision · rationale · owner · alternatives rejected. Prove
 ## Part D — Routed follow-ups (explicitly NOT in Phase 1)
 
 1. **DB-tier engine kill switch** — `MANAGED_KEYS` 19→20 bump + pin/guard update.
-2. **Metrics-family registration ceremony / unfencing** — verdict row + registry member + band + allowlist + `28 → 29` pin edits (P6 T6.3 default: deferred).
+2. **Metrics-family registration ceremony / unfencing** — verdict row + registry member + band + allowlist + `28 → 29` pin edits **[TREE-TRUTH RECONCILE — 2026-11-21 (P6 review #3): transition consumed — census already 29 (verified at tree 2f36e8aed94c); a future registration bumps 29 → 30]** (P6 T6.3 default: deferred).
 3. **`first_ready_db_clock` boot-record field** — literal `boot_epoch`-frame telemetry (`boot_record.py:269`).
 4. **Fan-out unification** — GAP-15 (six incompatible primitives); Phase 5 names the seam only.
 5. **Queue-depth triggers** — GAP-14 (no plumbing exists); seam named only.
