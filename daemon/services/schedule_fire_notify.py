@@ -40,20 +40,15 @@ def _normalize_status(value: Any) -> str:
 async def _get_creator_row_async(manager: Any, creator_id: str) -> Any:
     repo = getattr(manager, "_instance_repository", None)
     if repo is None:
-        repo = getattr(manager, "instance_repository", None)
-    if repo is None:
         return None
     get_fn = getattr(repo, "get", None)
     if get_fn is None:
         return None
-    try:
-        import inspect
+    import inspect
 
-        if inspect.iscoroutinefunction(get_fn):
-            return await get_fn(creator_id)
-        return await asyncio.to_thread(get_fn, creator_id)
-    except Exception:  # noqa: BLE001
-        return None
+    if inspect.iscoroutinefunction(get_fn):
+        return await get_fn(creator_id)
+    return await asyncio.to_thread(get_fn, creator_id)
 
 
 def _build_message(
@@ -146,7 +141,16 @@ async def _worker(
 
         enqueue_fn = getattr(manager, "enqueue_message_job", None)
         if enqueue_fn is None:
-            raise RuntimeError("manager has no enqueue_message_job")
+            _metrics.record_dropped(
+                instance_id=creator_instance_id,
+                reason="enqueue_hook_absent",
+            )
+            logger.warning(
+                "schedule_fire_notify: manager has no enqueue_message_job "
+                "hook for creator %s -> dropped",
+                (creator_instance_id or "-")[:8],
+            )
+            return
         await enqueue_fn(
             instance_id=creator_instance_id,
             message=message,
