@@ -139,6 +139,20 @@ async def get_tool_usage_summary(request: Request) -> Any:
         import asyncio
 
         rows = await asyncio.to_thread(repo.query_summary, project_id, days)
+        # tool_category is resolved from the frozen registry vocabulary at
+        # door time (the ledger stores NAMES ONLY).
+        from daemon.services.tool_usage_observation import resolve_tool_category
+
+        for row in rows:
+            row["tool_category"] = resolve_tool_category(row.get("tool_name", ""))
+        return _size_guard(
+            {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "rows": rows,
+            }
+        )
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001 — the door never 500s
         logger.warning(
             "tool-usage summary failed: %s", redact_exc_str(exc, limit=200)
@@ -148,18 +162,6 @@ async def get_tool_usage_summary(request: Request) -> Any:
             _ERR_UNAVAILABLE,
             "the tool-usage ledger could not be read",
         ) from exc
-    # tool_category is resolved from the frozen registry vocabulary at
-    # door time (the ledger stores NAMES ONLY).
-    from daemon.services.tool_usage_observation import resolve_tool_category
-
-    for row in rows:
-        row["tool_category"] = resolve_tool_category(row.get("tool_name", ""))
-    return _size_guard(
-        {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "rows": rows,
-        }
-    )
 
 
 @router.get(
@@ -187,6 +189,7 @@ async def get_tool_usage_daily(request: Request) -> Any:
     tool_name = request.query_params.get("tool_name")
     if not tool_name or not tool_name.strip():
         raise _err(400, _ERR_BAD_REQUEST, "tool_name is required")
+    tool_name = tool_name.strip()
     days = _bounded_int(request, "days", 30, low=1, high=90)
     project_id = request.query_params.get("project_id") or None
     try:
@@ -197,6 +200,7 @@ async def get_tool_usage_daily(request: Request) -> Any:
         series = await asyncio.to_thread(
             repo.query_daily, project_id, tool_name, days
         )
+        return _size_guard({"series": series})
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 — the door never 500s
@@ -208,7 +212,6 @@ async def get_tool_usage_daily(request: Request) -> Any:
             _ERR_UNAVAILABLE,
             "the tool-usage ledger could not be read",
         ) from exc
-    return _size_guard({"series": series})
 
 
 __all__ = ["router", "MAX_RESPONSE_BYTES"]

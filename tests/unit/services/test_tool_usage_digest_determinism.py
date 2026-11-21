@@ -52,7 +52,7 @@ from sqlmodel import SQLModel, Session
 
 from daemon.repositories.tool_usage.models import ToolUsageDaily
 from daemon.services import tool_usage_digest as tud
-from tests.unit.tool_usage_t7_pg_fence import pg_throwaway_schema_engine
+from tests.helpers.tool_usage_t7_pg_fence import pg_throwaway_schema_engine
 
 #: The run date (D). 08:00 ICT == 01:00 UTC of the same UTC date.
 RUN_DATE = "2026-11-21"

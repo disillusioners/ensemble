@@ -177,8 +177,8 @@ def seed_tool_usage_digest_schedule(engine: "Engine") -> Any:
         # stopped/cancelled rows. Promote to RUNNING so start_all picks it up.
         try:
             source_repo.update_source_status(row.source_id, SourceStatus.RUNNING.value)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ToolUsageDigest] update_source_status failed: %s", exc)
         logger.info("[ToolUsageDigest] seeded schedule %s", row.source_id)
         return row
     except Exception as exc:  # noqa: BLE001

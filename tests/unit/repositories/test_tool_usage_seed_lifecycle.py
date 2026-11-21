@@ -67,7 +67,7 @@ from daemon.repositories.source.seed import (
     seed_tool_usage_digest_schedule,
 )
 from daemon.services import metrics_gate
-from tests.unit.tool_usage_t7_pg_fence import pg_throwaway_schema_engine
+from tests.helpers.tool_usage_t7_pg_fence import pg_throwaway_schema_engine
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ENV_VAR = "LIMITS_TOOL_USAGE_DIGEST_SEEDING_ENABLED"

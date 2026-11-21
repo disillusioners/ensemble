@@ -64,8 +64,12 @@ def _derive_commit(repo_root: Path, agents_dir: Path, override: str | None) -> s
 def build_payload(agents_dir: Path, commit_override: str | None) -> dict:
     agents: dict[str, list[str]] = {}
     for meta_path in sorted(agents_dir.glob("*/meta.json")):
-        with meta_path.open("r", encoding="utf-8") as fh:
-            meta = json.load(fh)
+        try:
+            with meta_path.open("r", encoding="utf-8") as fh:
+                meta = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"error: failed to read {meta_path}: {exc}", file=sys.stderr)
+            raise ValueError(f"failed to read {meta_path}: {exc}") from exc
         tools = meta.get("tools")
         allow: list[str] = []
         if isinstance(tools, dict):

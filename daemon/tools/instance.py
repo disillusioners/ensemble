@@ -267,7 +267,8 @@ from .job_queue import create_job_tools, create_mission_watch_tools
 from .scheduling import create_scheduling_tools
 try:
     from .tool_usage import create_tool_usage_tools_if_available
-except Exception:  # pragma: no cover
+except Exception as exc:  # pragma: no cover
+    logger.warning("tool_usage tools unavailable: %s", exc)
     def create_tool_usage_tools_if_available(*a, **k):
         return []
 from .missions import create_mission_tools

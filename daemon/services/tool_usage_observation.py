@@ -156,9 +156,9 @@ def resolve_tool_category(tool_name: str) -> str | None:
                         category = meta.get("category")
                         if category:
                             built[str(name)] = str(category)
+                    _category_map = built
                 except Exception:  # pragma: no cover - defensive degradation
-                    built = {}
-                _category_map = built
+                    pass  # leave _category_map None so the next call retries
     return _category_map.get(tool_name)
 
 
@@ -479,8 +479,8 @@ def wrap_tools_node(
                     agent_id = getattr(inst, "agent_id", None) or UNKNOWN_AGENT
                     metadata = getattr(inst, "instance_metadata", None) or {}
                     project_id = metadata.get("project_id") or NONE_PROJECT
-        except Exception:  # pragma: no cover - observation never breaks the call
-            pass
+        except Exception as exc:  # pragma: no cover - observation never breaks the call
+            logger.debug("[ToolUsage] identity resolution failed: %s", exc)
 
         # --- the actual tool call: result / exceptions pass through ---
         result = await inner_node(state, config)
@@ -508,8 +508,12 @@ def wrap_tools_node(
                                 "[ToolUsage] a sink raised (%s); isolated",
                                 exc,
                             )
-        except Exception:  # pragma: no cover - observation never breaks the call
-            pass
+        except Exception as exc:  # pragma: no cover - observation never breaks the call
+            _throttled_warning(
+                "observation:post_fanout",
+                "[ToolUsage] post-fan-out observation failed: %s",
+                exc,
+            )
         return result
 
     return node
