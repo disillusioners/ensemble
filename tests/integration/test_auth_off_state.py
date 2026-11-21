@@ -38,10 +38,12 @@ class TestOffStateGraph:
         assert names == [
             "HostCaptureMiddleware",
             "SelectiveAccessLogMiddleware",
+            "ResponseGzipMiddleware",
             "CORSMiddleware",
         ][::-1][: len(names)] or set(names) == {
             "HostCaptureMiddleware",
             "SelectiveAccessLogMiddleware",
+            "ResponseGzipMiddleware",
             "CORSMiddleware",
         }
 
