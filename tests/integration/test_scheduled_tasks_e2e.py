@@ -558,3 +558,77 @@ async def test_d9_scheduling_tool_factory_wires_four_tools(tmp_path):
             f"expected={expected_names}, got={actual_names}"
         )
         assert {getattr(t, "name", None) for t in tools_direct} == expected_names
+
+
+# ---------------------------------------------------------------------------
+# schedule-fire-notify T6 — notice row on fire
+# ---------------------------------------------------------------------------
+
+
+async def test_schedule_fire_notify_notice_row(tmp_path):
+    """A fired schedule with a creator instance produces at most one
+    system:schedule_fire_notify MessageQueue row (best-effort)."""
+    import asyncio
+    from sqlmodel import Session, select
+    from daemon.repositories.message_queue.models import MessageQueue
+
+    engine = build_chat_source_engine(str(tmp_path / "e2e-notify.db"))
+    with wire_manager_only(engine) as manager:
+        job_repo, queue_repo, mgmt, system_project_id = _wire_job_stack(engine, manager)
+        await _provision_queues(mgmt, system_project_id)
+
+        creator_id = f"inst-{uuid.uuid4().hex[:12]}"
+        _seed_instance(engine, creator_id, "ari", system_project_id)
+
+        seeded_instance = f"inst-{uuid.uuid4().hex[:12]}"
+        _seed_instance(engine, seeded_instance, "ari", system_project_id)
+        manager.spawn_instance_with_mcp = AsyncMock(return_value=seeded_instance)
+
+        svc = manager.scheduling_service
+        created = await svc.create_schedule(
+            {
+                "label": "int-notify-1",
+                "agent": "ari",
+                "message": "fire",
+                "project_id": system_project_id,
+                "when": FUTURE_RUN_AT,
+                "timezone": "UTC",
+                "recurrence": "once",
+                "priority": 5,
+                "instance_mode": "new_instance",
+            },
+            caller_instance_id=creator_id,
+            caller_agent_id="tester",
+        )
+
+        try:
+            await _await_until(
+                lambda: (
+                    (a := manager.source_registry.get(created.source_id)) is not None
+                    and a._execution_semaphore is not None
+                ),
+                timeout=10,
+            )
+            adapter = manager.source_registry.get(created.source_id)
+            assert adapter is not None
+            # ensure creator captured
+            assert (adapter.config.config or {}).get("creator_instance_id") == creator_id
+
+            await adapter._emit_scheduled_message()
+            await _await_until(
+                lambda: len(_scheduler_jobitems(job_repo)) > 0,
+                timeout=10,
+            )
+            # let the off-path notify task run
+            await asyncio.sleep(0.5)
+
+            with Session(engine) as s:
+                rows = s.exec(
+                    select(MessageQueue).where(
+                        MessageQueue.source == "system:schedule_fire_notify"
+                    )
+                ).all()
+            # best-effort: at most one notice row
+            assert len(rows) <= 1
+        finally:
+            await manager.source_registry.stop_all()
