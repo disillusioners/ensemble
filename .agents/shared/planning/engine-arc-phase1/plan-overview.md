@@ -180,4 +180,5 @@ origin/latest MOVED during review — `b71742fe3` → `01ec292da` (~20 commits, 
 14. `phase4-plan.md` D4.9 (R-1, L40) — "registration of 0-2 fixture jobs" premise → "registration of N observer specs, zero executables — CS-1 posture, no execution"; ≤250ms bound unchanged.
 15. `phase4-plan.md` SLO-1 must-not-regress table (sweep-driven, L119) — a SECOND "0-2 fixture registrations" premise → "N observer specs registered, zero executables — CS-1 posture"; ≤250ms bound unchanged.
 16. `plan-overview.md` §12 open question 1 (sweep-driven, L107) — the "≥2 release cycles (conservative)" option struck + bracket-WITHDRAWN (ruling (a)/AMD-1(c); re-baselined criterion CS-2). Question retained as the carried-upward record.
+17. `decisions.md` Part E items 1–4 (round-2 residue follow-up) — each marked RESOLVED-BY-RULING (a)/(b)/(c)/(d); historical question text retained verbatim, bracket-appended per the package's visible-mark convention.
 Plus this ledger: DELETION RECORD gains the three withdrawn strings (A-1/A-2/R-1); ATTESTATION gains this Round-2 subsection.
