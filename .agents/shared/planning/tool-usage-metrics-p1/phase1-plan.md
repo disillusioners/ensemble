@@ -37,7 +37,7 @@ Ship the **measurement substrate** for tool-usage frequency so layer-2 Tool-Arch
 - `daemon/manager.py` — **TWO hunks**: (1) model registration before `create_all` (~1006–1020 region); (2) flusher/queue startup + collection kill-switch wiring in the boot sequence (~1145–1148 region). **Amended by architect pass @ fd254b335 — D15 (A-5c): hunk 2 starts the flusher via a respawn-on-death outer task and does NOT ride `manager._background_tasks` (cancel-without-drain).** Phase 3 will add a THIRD disjoint hunk (seeder near 1144–1166) — enumerate ours precisely so the cross-writer sweep proves disjointness.
 - `daemon/migrations/versions/<new>.sql` (NEW) — SQLite-executable, idempotent, additive-only.
 - `daemon/routers/tool_usage.py` (NEW) — the domain door + the one registration line in `daemon/routers/__init__.py`.
-- `daemon/services/settings_service.py` — **TWO entries in `MANAGED_KEYS`** (amended by architect pass @ fd254b335 — D17 (A-7)): (1) the collection kill-switch `limits.tool_usage_collection_enabled`; (2) the F24 family key `limits.metrics_tool_usage_enabled` (`config_path=None`, DB/ENV-ONLY). Additive; no edit to existing keys.
+- `daemon/services/settings_service.py` — **THREE entries in `MANAGED_KEYS`** (amended by architect pass @ fd254b335 — D17 (A-7), extended by review fix U3): (1) the collection kill-switch `limits.tool_usage_collection_enabled`; (2) the F24 family key `limits.metrics_tool_usage_enabled` (`config_path=None`, DB/ENV-ONLY); (3) the D-5 seeder opt-out key `limits.tool_usage_digest_seeding_enabled` (`config_path=None`, DB/ENV-ONLY, default ON). Additive; no edit to existing keys.
 - `daemon/config.py` — **ONE additive field** `LimitsConfig.tool_usage_collection_enabled` so the collection key's dotted `config_path` has a backing field (A-7 option (a), mirrors `metrics_enabled`). Added to scope by architect pass @ fd254b335 — D17.
 - `daemon/api.py` — **ONE hunk**: the flusher's bounded 10 s shutdown drain beside the db_offload drain slot (~4611–4615), BEFORE `dispose_db_pools` (A-5c). Added to scope by architect pass @ fd254b335 — D15.
 - `tests/unit/...` — repo, tap wrapper, flusher, kill-switch, router, migration.
@@ -165,9 +165,9 @@ Error vocabulary (closed): `AUTH_NOT_CONFIGURED` (503), `SCOPE_INSUFFICIENT` (40
 
 The tap resolves `tool_category` from the tool name using the **existing closed vocabulary** reused as-is (no `VOCABULARY_VERSION` bump unless a new value is needed — and none is). The lookup is a static map `TOOL_NAME → category` populated from the tool registry's declared category (the same source the FE/agent tool catalog uses). If a tool name is not in the map, category = `None` (null in JSON). Phase 2's F24 family labels use `tool_category` from this same vocabulary (no new values ⇒ no version bump, per correction #1: `VOCABULARY_VERSION` is 11 at `daemon/checkpoint_metrics.py:290`).
 
-### 3.6 Managed key (collection kill-switch)
+### 3.6 Managed keys (collection kill-switch + family key + D-5 seeder opt-out) (review fix U3)
 
-**Amended by architect pass @ fd254b335 — D17 (A-7):** the collection key's `config_path="limits.tool_usage_collection_enabled"` MUST have a backing `LimitsConfig` field (option (a) — do NOT ship a dotted path with no field). Add `daemon/config.py` to this phase's file ownership (one additive field, mirroring `metrics_enabled`), plus a registration-shape regression pin. Additionally, the **second** managed key `limits.metrics_tool_usage_enabled` (the F24 family key) is registered here with `config_path=None` (DB/ENV-ONLY) — both keys land in this phase's `settings_service.py` edit; phase 2 keeps its zero-edit stance on that file.
+**Amended by architect pass @ fd254b335 — D17 (A-7), extended by review fix U3:** the collection key's `config_path="limits.tool_usage_collection_enabled"` MUST have a backing `LimitsConfig` field (option (a) — do NOT ship a dotted path with no field). Add `daemon/config.py` to this phase's file ownership (one additive field, mirroring `metrics_enabled`), plus a registration-shape regression pin. Additionally, the **second** managed key `limits.metrics_tool_usage_enabled` (the F24 family key) and the **third** managed key `limits.tool_usage_digest_seeding_enabled` (the D-5 seeder opt-out key) are registered here with `config_path=None` (DB/ENV-ONLY) — all three keys land in this phase's `settings_service.py` edit; phase 2 and phase 3 keep their zero-edit stance on that file (phase 3 consumes the third key as its opt-out gate: drain/seeder no-ops when OFF).
 
 Add to `MANAGED_KEYS` in `daemon/services/settings_service.py`:
 
@@ -191,6 +191,16 @@ Add to `MANAGED_KEYS` in `daemon/services/settings_service.py`:
     requires_restart=False,
     sensitive=False,
     description="Tool-usage metrics family kill-switch (Phase 2 stacks under this) ...",
+),
+"limits.tool_usage_digest_seeding_enabled": ManagedKeySpec(
+    key="limits.tool_usage_digest_seeding_enabled",
+    config_path=None,                    # DB/ENV-ONLY (D-5 opt-out; survives re-seed)
+    env_var="LIMITS_TOOL_USAGE_DIGEST_SEEDING_ENABLED",
+    value_type="bool",
+    default=True,                       # seeder enabled by default; OFF => no-op
+    requires_restart=False,
+    sensitive=False,
+    description="Tool-usage digest seeder opt-out (Phase 3 consumes; no-op when OFF) ...",
 ),
 ```
 
@@ -303,16 +313,16 @@ Enumerate the hunk precisely:
 
 **Verification**: boot smoke starts the flusher; shutdown drains within 10 s; kill-switch OFF ⇒ flusher idles.
 
-### T7 — Collection kill-switch managed key(s) + LimitsConfig field (A-7)
+### T7 — Collection kill-switch managed key(s) + LimitsConfig field (A-7) (review fix U3)
 
-**Files**: `daemon/services/settings_service.py` (`MANAGED_KEYS` — TWO entries: collection key + family key) and `daemon/config.py` (ONE additive field `LimitsConfig.tool_usage_collection_enabled`).
+**Files**: `daemon/services/settings_service.py` (`MANAGED_KEYS` — THREE entries: collection key + family key + D-5 seeder opt-out key) and `daemon/config.py` (ONE additive field `LimitsConfig.tool_usage_collection_enabled`).
 
-- `settings_service.py`: add both entries per §3.6 (collection key with dotted config_path; family key with `config_path=None`).
+- `settings_service.py`: add all three entries per §3.6 (collection key with dotted config_path; family key and D-5 seeder opt-out key with `config_path=None`).
 - `config.py`: add `tool_usage_collection_enabled: bool = ...` to `LimitsConfig` (A-7 option (a)) so the collection key's dotted `config_path` resolves; mirrors `metrics_enabled`. Registration-shape regression pin (mirrors `metrics_enabled`).
 
-**Amended by architect pass @ fd254b335 — D17 (A-7).**
+**Amended by architect pass @ fd254b335 — D17 (A-7). Extended by review fix U3 (third key).**
 
-**Verification**: settings tests include BOTH new keys; fail-closed resolution test; `MANAGED_KEYS` registration-shape pin; LimitsConfig field present.
+**Verification**: settings tests include ALL THREE new keys; fail-closed resolution test; `MANAGED_KEYS` registration-shape pin (three keys); LimitsConfig field present.
 
 ### T8 — Domain door (NEW file + registration line)
 
@@ -344,7 +354,7 @@ and append `"tool_usage_router"` to `__all__`.
 Mutation-pinned (regression pins — the contract fences):
 - NAMES-ONLY schema (no `args`/`argv`/`content`/`tool_call_id`/`instance`/`session` column can be added without a pin trip) + no-args sink signature.
 - Upsert coalescing dual-dialect (two same-PK deltas → one row summed, PG + SQLite) — A-6.
-- `MANAGED_KEYS` registration shape (field + dotted path per A-7) — both keys.
+- `MANAGED_KEYS` registration shape (field + dotted path per A-7) — all three keys (collection + family + D-5 seeder opt-out) (review fix U3).
 - Auth replication invariant (body-equality vs metrics door).
 - 256-char tap choke (overflow counter + throttled WARNING).
 - Door shapes / clamps [1,90] / `__none__` filter / typed error vocabulary / 503 under auth-OFF.
@@ -368,7 +378,7 @@ All under `tests/unit/...` (no live contact).
 | AC1 | `tool_usage_daily` table materializes on SQLite boot (migration applies) and on PG boot (create_all). |
 | AC2 | Two increments on the same `(day, project, tool, agent)` PK sum into `call_count` (upsert aggregation). |
 | AC3 | The tap captures tool NAME + instance identity per executed tool_call; the sink signature carries NO argument payload (NAMES-ONLY pin, asserted by test). |
-| AC4 | The enqueue path never awaits DB (off-loop); flusher batches + drains on shutdown; overflow increments drop counter. |
+| AC4 | The enqueue path never awaits DB (off-loop); flusher batches + drains on shutdown; overflow triggers an emergency flush (>=10,000 dirty keys) — NEVER drop counters (overflow means flush, not discard); drop/pressure counters are canaries only, not a discard path. (review fix U5) |
 | AC5 | Kill-switch ON/OFF/fail-closed behave per §3.3. |
 | AC6 | Door returns the frozen shapes; auth posture matches nest_reports verbatim; 404 on unknown tool. |
 | AC7 | Migration is additive-only (no DROP/ALTER on existing tables). |

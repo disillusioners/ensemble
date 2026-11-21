@@ -3,7 +3,7 @@
 Lane: **tool-usage-metrics-p1** (commission ENSEMBLE-37 / TokenEconomizer adoption — Phase 1 measurement slice)
 Phase owner: plan-worker (release/verification-tail phase)
 Status: Draft for the planner's review
-Depends on: **Phases 1–4** — this phase CONSOLIDATES their exit gates and adds the staging tail; it consumes all four sibling plans + `decisions.md` (D1–D11), and owns ZERO product edits.
+Depends on: **Phases 1–4** — this phase CONSOLIDATES their exit gates and adds the staging tail; it consumes all four sibling plans + `decisions.md` (D1–D22; D12–D22 are the append-only architect/leader fold), and owns ZERO product edits.  *(review fix U15)*
 Worktree (READ-ONLY source of truth for every anchor below): `/home/nea/ensemble-src-wt-tool-metrics-p1` @ `0b5624dc9` (branch `feature/tool-usage-metrics-p1`).
 NEVER touch `/home/nea/ensemble-src` (canonical detached checkout) or `/home/nea/agents-ensemble` (live install) except the read-only live fence + the house `stage.sh` releases-dir write described in §6.
 
@@ -19,7 +19,7 @@ NEVER touch `/home/nea/ensemble-src` (canonical detached checkout) or `/home/nea
 |---|---|
 | `.agents/shared/planning/tool-usage-metrics-p1/phase5-plan.md` | NEW — this file |
 
-**Owns ZERO edits to:** every product file (`daemon/**`, `frontend/**`, `tests/**`, `test/**`, `agents/**`), `bundle-baseline.json`, `.agents/tester/PACKS.md`, all four sibling `phaseN-plan.md` files, and `decisions.md`. This phase is PLAN-ONLY. The giter executes the gates and the staging sequence; the planner sweeps + commits. **No git mutation is performed by this phase** (no commit, tag, push, merge, worktree add/remove — those are the giter's, sequenced in §6).
+**Owns ZERO edits to:** every product file (`daemon/**`, `frontend/**`, `tests/**`, `test/**`, `agents/**`), `bundle-baseline.json`, `.agents/tester/PACKS.md`, all four sibling `phaseN-plan.md` files, and `decisions.md`. This phase is PLAN-ONLY — the ZERO-edits list above binds PHASE 5 only; **phase 4's own declared diff scope legitimately includes the two LR1/D22 ruled artifacts** (`bundle-baseline.json` threshold field + the `metrics.bundle-guard.spec.ts` threshold pin), so their appearance in the commit set is expected, not a foreign sweep *(review fix U1, U15)*. The giter executes the gates and the staging sequence; the planner sweeps + commits. **No git mutation is performed by this phase** (no commit, tag, push, merge, worktree add/remove — those are the giter's, sequenced in §6).
 
 ---
 
@@ -44,7 +44,7 @@ Give the giter ONE ordered, self-contained release checklist that (a) consolidat
 
 - **Any product file** — all implementation is owned by Phases 1–4 and executed by the giter.
 - **The promote flip** — `promote.sh`, the nonce ceremony, `current` symlink, `state.json` promote fields, live daemon restart. Emperor-owned (§3.2).
-- **Re-baselining the FE threshold** — `bundle-baseline.json` (B4b) is **re-baselined to 188 000 B by the leader ruling R-08 (architect §6.2 / LEADER RULING)**, landed as a phase-4 task (bundle-baseline.json + metrics.bundle-guard.spec.ts pin + tester re-measure); no further re-baseline is permitted beyond the ruled value; a breach beyond 188,000 is escalated (phase4-plan.md §4.2, R-08).
+- **Re-baselining the FE threshold** — `bundle-baseline.json` (B4b) is **re-baselined to 188 000 B by leader ruling LR1 (decisions D12), with the phase-4 ownership grant at decisions D22**; landed as a phase-4 task and limited to EXACTLY two artifacts — the `threshold_B4b_route_fetch_set_lazy_only_bytes` field and the spec THRESHOLD pin (`bundle-baseline.json` is frozen except those two, per LR1/D22); no further re-baseline is permitted beyond the ruled value; a breach beyond 188,000 is escalated (phase4-plan.md §2/§4.2/§7/§8 gate 7).  *(review fix U1, U15)*
 - **Re-cutting a sibling phase plan** — gaps are FLAGGED (§5.4), not silently patched.
 - **Any live DB / live daemon operation** before staging (§7).
 
@@ -66,11 +66,11 @@ The order in §4 is an invariant: unit suites → family/adjudication packs → 
 
 | Contract | Source | Consumed by |
 |---|---|---|
-| Ledger `tool_usage_daily` — PK `(day, project_id, tool_name, agent_id)`, NAMES ONLY, `agent_id='unknown'`, `call_count BIGINT`, project sentinel `""` | phase1-plan.md §3.1; D1/D11 | Phase 3 rollup, Phase 5 I3 |
+| Ledger `tool_usage_daily` — PK `(day, project_id, tool_name, agent_id)`, NAMES ONLY, `agent_id='unknown'`, `call_count BIGINT`, project sentinel `"__none__"` (D16 SUPERSEDES D11's `""`) | phase1-plan.md §3.1; D1/D16 | Phase 3 rollup, Phase 5 I3 |
 | Sink signature `(tool_name, tool_category?, agent_id, project_id, ok: bool)` — no args slot | phase1-plan.md §3.2; D3 | Phase 2 F24, Phase 5 I3 |
 | Door `/api/tool-usage/{summary,daily}` shapes + auth posture (503/403/404/400 vocabulary) | phase1-plan.md §3.4; D6 | Phase 4 tab, Phase 5 I3 |
 | F24 family: registrar-only, closed labels, band 134≤160, `VOCABULARY_VERSION==11` | phase2-plan.md §3; D8 | Phase 5 G2/G6 |
-| B4b lazy-only fetch set ≤ **188,000 B (re-baselined by leader ruling R-08 — architect §6.2 / LEADER RULING; was ≤ 185,000 B)**; `bundle-baseline.json` INVARIANT | phase4-plan.md §4.2; D9 | Phase 5 G4 |
+| B4b lazy-only fetch set ≤ **188,000 B (re-baselined by leader ruling LR1 — decisions D12; was ≤ 185,000 B)**; `bundle-baseline.json` is **frozen except the two ruled artifacts per LR1/D22** (the `threshold_B4b_route_fetch_set_lazy_only_bytes` field + the spec threshold pin — nothing else) | phase4-plan.md §4.2; D12 (LR1) + D22 (ownership grant) | Phase 5 G4 *(review fix U1, U15)* |
 
 **Any drift in these between the sibling plan and the shipped bytes = contract-break flag (§5.4), never a silent adapt.**
   Amended by architect pass @ fd254b335 — consumed-contracts B4b re-baselined (LEADER RULING R-08) + I1 re-spec (§9) + GAP-4 three-row update
@@ -93,10 +93,10 @@ Run in this order. Each gate cites its sibling source; **no gate is invented**, 
 | G1 | **Unit suites, per phase** | Phase 1: `tests/unit/repositories/test_tool_usage_repository.py`, `tests/unit/services/test_tool_usage_observation.py`, `tests/unit/routers/test_tool_usage_router.py`, `tests/unit/migrations/test_tool_usage_migration.py`. **Phase-1 list grows (architect §10.5 mutation-pinned pins):** dual-dialect upsert pin (two same-PK deltas → one row summed, PG + SQLite — A-6); `MANAGED_KEYS` registration-shape pin (field + dotted path per A-7 option (a): `LimitsConfig.tool_usage_collection_enabled` + dotted `config_path`); auth replication-invariant pin (new router's `_require_auth_on` executable body byte-matches the metrics door's, or shared helper); **1 MB response-size guard** (`/summary`); **top-50 agents cap** per tool. Phase 2: `tests/unit/metrics/test_metrics_family_adjudication.py`. Phase 3: digest unit + determinism + tool-registration + seed idempotency + GC-safety tests. **Phase-3 list grows (architect §10.5):** uuid5 idempotency (seed twice → one row); adapter config shape carries `schedule=`; startable status (compensated create-path); opt-out no-op (D-5 flag OFF); digest file-write determinism with windows D−1 / [D−7,D−1] (byte-identical modulo generated-at header). Phase 4: `tabs.manifest.spec.ts`, `metrics.tool-usage.spec.ts`, `tool-usage.service.spec.ts`, `tool-usage.models.spec.ts`, `metrics.bundle-guard.spec.ts`. | phase1 §4 T9/§7; phase2 §7 S5/§8; phase3 §4 T7/§7; phase4 §8 gates 1–3 | All GREEN; `POSTGRES_*` scrubbed per variable; zero live contact |
 | G2 | **Family pack + adjudication counts** | `test/packs/tool_usage_family_unit_test.sh` (registered in `.agents/tester/PACKS.md`) + the F24 assertions in `test_metrics_family_adjudication.py`. | phase2 §4 T5–T7/§7 S1–S7 | `len(verdicts)==29`; binding subset 19-of-29; F24 band 134≤160; global ≤2000; `VOCABULARY_VERSION==11`; AM-2/AM-3 mutations RED; pack GREEN |
 | G3 | **Migration additive-only** | (a) throwaway SQLite: parse + apply the new `<YYYYMMDD_HHMMSS>_create_tool_usage_daily.sql`, assert no DROP/ALTER on existing tables, 3-site index-name/column lockstep vs model `__table_args__`; (b) PG path: grep the model import lands before `SQLModel.metadata.create_all` (manager.py:1006-1020 vs :1072), confirm `runner.py` SQLite-only early-return (:837-842), confirm NO `_ensure_postgres_columns` mirror for the brand-new table. | phase1 §4 T2/T3, §5 AC1/AC7; D5; phase3-plan.md source-gc precedent | Table materializes on SQLite (migration) + PG (create_all); zero DROP/mutate; rollback-safe = old binary refs no new table |
-| G4 | **FE production build + bundle re-measure + guard + AOT** | Exact sequence (nest-anomaly-report/phase4-plan.md:262-268): `cd frontend && npm ci` (if node_modules absent) → `cd frontend && ./node_modules/.bin/ng build --configuration production` → `node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js dist/frontend/browser` → `node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-guard.js <the dist dir>`. Then AOT discipline: `cd frontend && ./node_modules/.bin/ng build --configuration development`. **ORDERING NOTE (architect):** the phase-4 B4b baseline amendment (bundle-baseline.json 185,000 → 188,000 + metrics.bundle-guard.spec.ts pin + tester re-measure) MUST land before G4 runs — it is a phase-4 task owned by the leader ruling R-08. | phase4 §Task 6 (re-measure), §8 gates 4–5; D9 | B4b ≤ 188 000 B (re-baselined by LR1, architect §6.2 / LEADER RULING; expected measured 185,800–186,200 B); measured numbers recorded AGAINST the re-baselined baseline, never overwrite; guard exit 0; AOT pass; `package.json` untouched; component-style warning SET unchanged (9 entries) |
+| G4 | **FE production build + bundle re-measure + guard + AOT** | Exact sequence (nest-anomaly-report/phase4-plan.md:262-268): `cd frontend && npm ci` (if node_modules absent) → `cd frontend && ./node_modules/.bin/ng build --configuration production` → `node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.measure.js dist/frontend/browser` → `node ../.agents/shared/planning/metrics-unification/fe-t1-build/bundle-guard.js <the dist dir>`. Then AOT discipline: `cd frontend && ./node_modules/.bin/ng build --configuration development`. **ORDERING NOTE (architect):** the phase-4 B4b threshold amendment (bundle-baseline.json 185,000 → 188,000 + the `metrics.bundle-guard.spec.ts` THRESHOLD pin + tester re-measure) MUST land before G4 runs — it is a phase-4 task owned by leader ruling LR1 (decisions D12) with the ownership grant at decisions D22. Only those two ruled artifacts move; every other baseline field stays frozen (U1/U15). | phase4 §Task 6 (re-measure), §8 gates 4–5; D12 (LR1) + D22 (ownership grant) | B4b ≤ 188 000 B (re-baselined by LR1 — decisions D12; ownership grant decisions D22; expected measured 185,800–186,200 B); measured numbers recorded against the frozen MEASUREMENT baseline (165,185 B) and verified against the re-baselined THRESHOLD, never overwriting either; guard exit 0; AOT pass; `package.json` untouched; component-style warning SET unchanged (9 entries) |
 | G5 | **Digest determinism + seeder idempotency** | Fixed ledger fixture + date → two digest runs byte-identical modulo generated-at header; seed twice → exactly one `source_configs` row; enabled/autostart/GC-safe; boot ordering (seed before `start_all()`); weight join + 230 fallback. | phase3 §4 T1/T5/T7, §7 S1/S5–S7 | All GREEN; no live-registry/clock/random read in rollup; dev-fenced |
 | G6 | **Full-worktree test sweep** | `pytest -q` over the explicit unit file/dir lists for all four phases (pass explicit paths, never a raw dir that falls back to `testpaths`); deselect integration/postgres/slow/conformance per house addopts; isolate known shard polluter (`test_migration_e2e_comprehensive.py`) in its own process. | house `[PYTEST]`/blueprint; phase1–4 test strategies | Zero RED across the merged worktree; no new failure vs true base; live-shaped DB fence stays dev |
-| G7 | **Commit set** | Giter sweeps + commits (this phase writes no code): plan files under `docs(<scope>):` / `docs(planning):`; code under house types (`feat`/`fix`/`chore`). Verify `git diff --stat` scope per phase (phase1 §7, phase2 §11, phase3 §12, phase4 §8 gate 7) BEFORE each phase commit. | phase1 §7; phase2 §11; phase3 §12; phase4 §8-7; `[MERGE]` | Each commit's file set matches its phase's declared ownership; no cross-phase sweep of foreign files |
+| G7 | **Commit set** | Giter sweeps + commits (this phase writes no code): plan files under `docs(<scope>):` / `docs(planning):`; code under house types (`feat`/`fix`/`chore`). Verify `git diff --stat` scope per phase (phase1 §7, phase2 §11, phase3 §12, phase4 §8 gate 7) BEFORE each phase commit. | phase1 §7; phase2 §11; phase3 §12; phase4 §8-7; `[MERGE]` | Each commit's file set matches its phase's declared ownership — note phase 4's declared set INCLUDES exactly the two LR1/D22 ruled artifacts (`bundle-baseline.json` threshold field + the spec threshold pin), so their presence is expected, not a sweep *(review fix U1, U15)*; no cross-phase sweep of foreign files |
 
 **Ordering / coupling:** G3 must precede G6 (a migration defect surfaced in a full sweep is harder to attribute); G4 is independent of G1–G3/G5 (FE-only) but must precede G7 (bundle evidence committed); G2's count pins are a precondition of G6's clean sweep. **Exit of G7 = all gates GREEN and the lane fully committed** → proceed to §5 integration sweep, then §6 staging.
 
@@ -173,9 +173,10 @@ git tag -a vX.Y.Z -m "<rollback adjudication + NO-PROMOTE disclosure>" \
 #     fails 3 exit-78 guards: exact-tag stage.sh:204-205, tip-identity, git_head)
 git worktree add --detach /home/nea/ensemble-src-wt-stage-<slug> vX.Y.Z
 
-# (5) FE build in the staging worktree (stage.sh:354 refuses a UI-less release)
-cd /home/nea/ensemble-src-wt-stage-<slug> && npm ci \
-  && bash scripts/upgrade/_build_frontend.sh
+# (5) FE build in the staging worktree (stage.sh:354 refuses a UI-less release).
+#     npm ci runs in frontend/ — the REPO ROOT has NO package.json.
+cd /home/nea/ensemble-src-wt-stage-<slug>/frontend && npm ci \
+  && cd .. && bash scripts/upgrade/_build_frontend.sh
 
 # (6) live fence SNAPSHOT before stage (read-only): state.json whole-file sha,
 #     current symlink, promote fields, .env sha, livez projection, PID — to files
@@ -223,7 +224,7 @@ Verify before drafting: the FE tab ships in the release bytes and activates at p
 
 **Exact disclosure sentence for the lane leader's report:**
 
-> "Both activation surfaces are automatic at promote: the `tool-usage` FE tab ships in the release bytes and renders as soon as the new frontend is served; the daily 08:00 Asia/Ho_Chi_Minh digest schedule is created and started by the Phase-3 boot-time idempotent seeder on the first boot of the promoted binary (no manual arm step). If the architect overrides to a manual arm, the one-line equivalent is `POST /api/schedules` with `{label:'tool-usage-daily-digest', agent:'ari', timezone:'Asia/Ho_Chi_Minh', recurrence:'daily', when:'08:00', instance_mode:'new_instance', project_id:<system default>}` (phase3-plan.md §11)."
+> "Both activation surfaces are automatic at promote: the `tool-usage` FE tab ships in the release bytes and renders as soon as the new frontend is served; the daily 08:00 Asia/Ho_Chi_Minh digest schedule is created and started by the Phase-3 boot-time idempotent seeder on the first boot of the promoted binary (no manual arm step). If the architect overrides to a manual arm, the one-line equivalent is the arm step in **phase3-plan.md §11 Appendix, verbatim** — reproduced here in that exact shape: `POST /api/schedules` with `{ "label":"tool-usage-daily-digest", "agent":"ari", "message":"Call tool_usage_digest for the previous day and write the durable digest.", "timezone":"Asia/Ho_Chi_Minh", "recurrence":"daily", "local_time":"08:00", "schedule":"0 8 * * *", "instance_mode":"new_instance", "project_id":<system default project id> }` (or the `task_schedule` tool). The `schedule` cron field is load-bearing: the scheduler adapter routes on `config["schedule"]` (D-3 / D19), so a payload carrying only `when` never fires."  *(review fix U4)*
 
 ---
 
@@ -263,7 +264,7 @@ The giter verifies AFTER staging (no promote, no live daemon contact):
 | S1 | Consolidated sequence complete | G1–G7 checklist | All GREEN, in order |
 | S2 | Integration invariants hold | I1 disjoint hunks; I2 single registration; I3 door re-check | Exact / byte-for-byte |
 | S3 | Migration additive-only | G3 throwaway SQLite + PG register-before-create_all | Zero DROP/mutate; table on both drivers |
-| S4 | FE bundle within bound | G4 re-measure + guard | B4b ≤ 188 000 B (re-baselined by LR1, architect §6.2); AOT pass |
+| S4 | FE bundle within bound | G4 re-measure + guard | B4b ≤ 188 000 B (re-baselined by LR1 — decisions D12; ownership grant D22); AOT pass *(review fix U1, U15)* |
 | S5 | Digest + seeder deterministic | G5 | Byte-identical modulo header; seed twice → one row |
 | S6 | Staged release verified | §6.3 4-way sha + §9 content proof | 4-way match; family/door/seeder in staged binary |
 | S7 | Live untouched | §9-4 fence | Byte-identical state.json/symlink/promote fields; no flip |
@@ -293,6 +294,8 @@ Phase 5 is DONE when: (1) G1–G7 all GREEN in order; (2) I1–I3 integration ch
 
 ## 14. Evidence citations (file:line, re-grepped in this worktree 2026-11-21)
 
+*(review fix U13)* These anchors are **re-grepped at execution time** everywhere the plan tells the giter to verify (already specified above) — and when re-pinning a drifted anchor, prefer a **SYMBOL anchor over a line number** (lines drift, symbols don't). No anchor is re-pinned by this fold.
+
 - `scripts/upgrade/promote.sh:40-44/:89/:132-143` — live flip requires `ENSEMBLE_UPGRADE_LIVE=1` AND `--f2-verified-closed`.
 - `scripts/upgrade/stage.sh:78` (NO FLIP), `:80-89/:199-205` (VERSION discipline/exact-tag), `:106-110` (rollback_safe derive), `:133` (bare→demo), `:190` (require_live_guard), `:204-205` (exact-tag guard), `:336-346` (DDL grep), `:354` (UI-less refuse), `:437` (manifest sha from copy), `:458-459` (releases dir), `:492-498` (FE sidecar stripped).
 - `daemon/migrations/runner.py:837-842` — SQLite-only early return (PG = `_ensure_postgres_columns`).
@@ -300,8 +303,8 @@ Phase 5 is DONE when: (1) G1–G7 all GREEN in order; (2) I1–I3 integration ch
 - `daemon/routers/__init__.py:36` (nest_reports registration precedent), `:73` (`__all__`).
 - `daemon/services/settings_service.py:253` (MANAGED_KEYS), `:518` (metrics kill-switch precedent).
 - `.agents/shared/planning/nest-anomaly-report/phase4-plan.md:262-268` — FE re-measure command sequence.
-- `.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.json:43` — `threshold_B4b_route_fetch_set_lazy_only_bytes = 185000`.
-- `frontend/src/app/pages/metrics/metrics.bundle-guard.spec.ts:130-134` — `toBe(185000)` / `toBe(165185)` pins.
+- `.agents/shared/planning/metrics-unification/fe-t1-build/bundle-baseline.json:43` — `threshold_B4b_route_fetch_set_lazy_only_bytes = 185000` (**PRE-AMENDMENT / gate-verified STARTING point**, re-verified in this worktree at the lane base; phase 4's ruled task moves this ONE field to 188,000 per LR1 / decisions D12 + D22, and `baseline_metrics_route_fetch_set_lazy_only_bytes` = 165,185 at `:48` stays frozen).  *(review fix U1)*
+- `frontend/src/app/pages/metrics/metrics.bundle-guard.spec.ts:130-134` — `toBe(185000)` / `toBe(165185)` pins (**PRE-AMENDMENT** as verified; phase 4's ruled task moves the THRESHOLD pin only — `toBe(185000)` → `toBe(188000)` — leaving `toBe(165185)` untouched). **G4 therefore verifies `≤ 188,000` POST-amendment**, not the 185,000 pre-amendment value.  *(review fix U1)*
 - `agents/giter/workflow.md:82-94` — worktree env fence (POSTGRES_DB=ensemble_dev at :88, DAEMON_PORT=8079 at :91).
-- Sibling plans: `phase1-plan.md` §3.1/§3.2/§3.4/§4 T2-T3/T6/T8/§7; `phase2-plan.md` §3/§4 T5-T7/§7/§11; `phase3-plan.md` §3.10/§4 T6/§11 Appendix/§12; `phase4-plan.md` §4.1/§4.2/§Task 6/§7/§8; `decisions.md` D1–D11.
+- Sibling plans: `phase1-plan.md` §3.1/§3.2/§3.4/§4 T2-T3/T6/T8/§7; `phase2-plan.md` §3/§4 T5-T7/§7/§11; `phase3-plan.md` §3.10/§4 T6/§11 Appendix/§12; `phase4-plan.md` §4.1/§4.2/§Task 6/§7/§8; `decisions.md` D1–D22.  *(review fix U15)*
 - Staging precedents: `.agents/shared/planning/aegis-security-family/phase6-plan.md:41/:43/:90-145`; `.agents/shared/planning/skill-system-revival/phase1-plan.md:893-896` (F-20 4-way independence); `.agents/shared/planning/prompt-assent-channels/ceremony-notes.md:198-199` (slot/tag traps); `.agents/shared/planning/self-service-promote/architecture-recommendation.md:464` (design-only contrast: no stage/promote).

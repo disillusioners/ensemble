@@ -175,7 +175,7 @@ No argument payload is possible by construction — the signature has no args sl
 
 **Residue arithmetic (architect pass @ fd254b335, W3 `13438c29`):** manifest entry ≈ 125 B + map line/import ≈ 60 B + host ≈ 0.8–1.1 kB min ≈ ~1.0–1.3 kB, versus 134 B headroom; even a zero-byte host breaches (≈ 185 B minimum). Expected measured B4b under lazy ≈ 185,800–186,200 B.
 
-**Phase file(s) where the same ruling text appears:** decisions.md (this entry) only — phase4-plan.md / phase5-plan.md are untouched by this amendment's write scope (phase 4 owns its own execution; see D22).
+**Phase file(s) where the same ruling text appears:** propagated verbatim into decisions.md (this entry), plan-overview.md, and phase4-plan.md §3 (char-for-char identical, whitespace-normalized) (review fix U10).
 
 ---
 
@@ -185,7 +185,7 @@ No argument payload is possible by construction — the signature has no args sl
 
 **Ruled by:** lane leader (Emperor-designated decision authority for this lane's OQ1 escalation).
 
-**Phase file(s) where the same ruling text appears:** decisions.md (this entry) only — phase5-plan.md is untouched by this amendment's write scope.
+**Phase file(s) where the same ruling text appears:** propagated verbatim into decisions.md (this entry), plan-overview.md, and phase5-plan.md §3.4 (char-for-char identical, whitespace-normalized) (review fix U10).
 
 ---
 
@@ -235,7 +235,7 @@ No argument payload is possible by construction — the signature has no args sl
 
 ### D18 — F24 family corrections (Phase 2)
 
-**Ruling text.** (1) Measured closed-space total 625 ≤ 2000 is THE claim (491 today + 134); the plan's "≈1095 ≪ 2000" is a band-sum (Σ bands 846 + F24's 160 + baseline 89) — may be cited separately, never as the headline; mixing conventions misleads future cardinality gates. (2) Citation corrected: the gate pattern is `metrics_gate.py` (env TRUTHY polarity + `live_managed_value`), NOT `kill.py:105/:128-131` (that is the decision-module kill store). (3) Gauge ("distinct tools observed") REJECTED for Phase 1 — second series family + near-zero decision value; scope-creep. (4) Operator writability: family key registered per D17 placement.
+**Ruling text.** (1) Measured closed-space total 626 ≤ 2000 is THE claim (492 today + 134; review fix U16b — the prior 491/625 was off by one; architecture-recommendation.md §5 retains 491 as the pre-correction architect measurement — the divergence is deliberate and disclosed here); the plan's "≈1095 ≪ 2000" is a band-sum (Σ bands 846 + F24's 160 + baseline 89) — may be cited separately, never as the headline; mixing conventions misleads future cardinality gates. (2) Citation corrected: the gate pattern is `metrics_gate.py` (env TRUTHY polarity + `live_managed_value`), NOT `kill.py:105/:128-131` (that is the decision-module kill store). (3) Gauge ("distinct tools observed") REJECTED for Phase 1 — second series family + near-zero decision value; scope-creep. (4) Operator writability: family key registered per D17 placement. (review fix U16b reconciliation)
 
 **Ruled by:** architect pass @ fd254b335 (W6 `3c653166`; §5 Ruling 4).
 
@@ -342,3 +342,26 @@ These correct prior recon notes. They are recorded as facts, not decisions.
 - daemon/services/metrics_query/wiring/w4.py (F23 registrar precedent).
 - tabs.manifest.ts:120-132/:133-160 (phase4-plan Ruling A).
 - app.ts:391 (lazy-mount precedent).
+
+
+---
+
+## PREDICATE LEDGER (review fix U11)
+
+Canonical predicates copied char-for-character from the phase bodies where they live. Containment verified by whitespace-normalized substring check (`re.sub(r"\s+", " ", ...)`) — line-based grep is invalid for wrapped strings.
+
+| # | Canonical predicate (verbatim) | Source body location |
+|---|---|---|
+| 1 | sentinel `"__none__"` for un-attributable calls | phase1-plan.md §3.1 (D16) |
+| 2 | NEVER drop counters (overflow means flush, not discard) | phase1-plan.md §3.3 (D15) |
+| 3 | ≤ 188 000 B (RE-BASELINED by leader ruling R-08 — architect §6.2 / LEADER RULING; was ≤ 185 000 B) | phase4-plan.md §4.2 / Task 6 (LR1) |
+| 4 | schedule:'0 8 * * *' | phase3-plan.md §3.8 (seeded-row config, D-3) |
+| 5 | complete previous UTC day (`D−1`); "cumulative-week" := `[D−7, D−1]` complete UTC days | phase3-plan.md §3 (D-7) |
+| 6 | VOCABULARY_VERSION==11 | phase2-plan.md §3 / T6 |
+| 7 | counting contract — byte-identical blockquote in D15 + phase1-plan.md §3.3.1 + architecture-recommendation.md §3 | D15 / phase1 §3.3.1 / architecture-recommendation.md §3 |
+
+## CLOSING ATTESTATION (review fix U11)
+
+This fix pass (U3, U5, U10, U11) edited `phase1-plan.md` and `decisions.md` only; parallel workers own U1, U2, U4, U6–U9. Changed rows in this pass: U3 (phase1 §3.6 + T7 + scope line + T9 pin — third managed key), U5 (phase1 §5 AC4 — never-drop/emergency-flush contract), U10 (decisions.md D12 + D13 — propagated-verbatim file lists), U11 (this PREDICATE LEDGER + attestation).
+
+Char-for-character verification performed with Python `re.sub(r"\s+", " ", text)` containment checks of each PREDICATE LEDGER entry's canonical string against its cited body location. Results: entries 1–6 PASS (entry 7 is a reference to the D15 blockquote, which is byte-identical across D15, phase1-plan.md §3.3.1, and architecture-recommendation.md §3 — verified by direct comparison). Method: whitespace-normalized containment; line-based grep was NOT used (wrapped strings break line grep). No drift found; no fix-up required before attesting.
