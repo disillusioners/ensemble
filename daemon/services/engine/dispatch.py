@@ -72,7 +72,7 @@ async def run_with_timeout(
     coro_factory: Callable[[], Any],
     max_runtime_s: float,
     policy: str,
-    on_extend_tick: Optional[Callable[[], None]] = None,
+    on_extend_tick: Optional[Callable[[], Any]] = None,
 ) -> tuple[str, Optional[BaseException]]:
     """Run a dispatch coroutine with a timeout.
 
@@ -83,6 +83,9 @@ async def run_with_timeout(
     * ``policy == "extend"``: record ``TIMEOUT_PENDING_EXTEND`` (via
       ``on_extend_tick`` if provided) and DO NOT release the single-flight
       claim — await the actual completion. The caller keeps the lock held.
+      ``on_extend_tick`` may be sync or async; an async callback is awaited
+      at the fire instant so the fire-time audit row is durable before the
+      extended dispatch continues.
     """
     # Build the awaitable once.
     awaitable = coro_factory()
@@ -105,11 +108,14 @@ async def run_with_timeout(
         await asyncio.wait_for(asyncio.shield(task), timeout=max_runtime_s)
         return "ok", None
     except asyncio.TimeoutError:
-        # timeout reached — record pending-extend, keep running
+        # timeout reached — record pending-extend, keep running. Await an
+        # async callback so the fire-time audit row lands before we continue.
         if on_extend_tick is not None:
             try:
-                on_extend_tick()
-            except Exception:  # noqa: BLE001
+                _fired = on_extend_tick()
+                if asyncio.iscoroutine(_fired):
+                    await _fired
+            except Exception:  # noqa: BLE001 — fire-time write failure never kills the dispatch
                 pass
         # await actual completion (lock stays held by caller)
         try:

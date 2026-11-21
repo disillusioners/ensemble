@@ -64,10 +64,21 @@ class EngineMetrics:
 
     def _compute_dead(self, job_id, cache, spec, now, interval):
         is_observer = job_id not in self._executors
-        shadow_count = int((cache.get("skips_by_reason", {}) or {}).get("SHADOW", 0) or 0)
         if is_observer:
-            # CS-9: dead <=> zero SKIPPED_SHADOW rows in 2x interval
-            return shadow_count == 0
+            # CS-9/L-8 carve-out: dead <=> ZERO SKIPPED_SHADOW rows within
+            # 2x effective_interval. Count only timestamped shadow evidence
+            # inside the window — a single stale row must not keep an
+            # observer alive forever. RAM-only (no per-tick DB reads).
+            window = 2.0 * interval
+            evidence = cache.get("shadow_evidence_ts") or []
+            fresh = 0
+            for ts in evidence:
+                stamped = parse_iso(ts) if ts else None
+                if stamped is None:
+                    continue
+                if (now - stamped).total_seconds() <= window:
+                    fresh += 1
+            return fresh == 0
         last_run_at = cache.get("last_run_at")
         if not last_run_at:
             return True

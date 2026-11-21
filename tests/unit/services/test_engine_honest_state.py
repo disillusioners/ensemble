@@ -271,6 +271,58 @@ def test_allowed_transitions_table():
     assert "RUNNING" in ALLOWED_TRANSITIONS
 
 
+@pytest.mark.asyncio
+async def test_failed_write_logs_dedicated_error(caplog):
+    """MINOR-3: a failed DB terminal-write logs ERROR naming job_id + the
+    write class (engine_runs append vs engine_jobs stamp), then re-raises.
+    """
+    import logging
+
+    eng = _engine()
+    repo = EngineRepository(eng)
+    reg = EngineRegistry(repo)
+    await reg.aregister(_spec())
+    stamp = TerminalStamp(
+        job_id="orphan-watcher",
+        service_tag="orphan-watcher-sweep",
+        started_at=now_iso(),
+        finished_at=now_iso(),
+        outcome="SUCCEEDED",
+        consecutive_skips=0,
+    )
+
+    class FailingRepo:
+        def __init__(self, fail_append: bool) -> None:
+            self.fail_append = fail_append
+
+        def append_run(self, run):
+            if self.fail_append:
+                raise RuntimeError("append boom")
+            return run
+
+        def stamp_job_outcome(self, *a, **kw):
+            if not self.fail_append:
+                raise RuntimeError("stamp boom")
+            return None
+
+    with caplog.at_level(logging.ERROR, logger="daemon.services.engine.state"):
+        with pytest.raises(RuntimeError):
+            await asyncio.to_thread(stamp_terminal, FailingRepo(True), stamp)
+    assert any(
+        "orphan-watcher" in r.getMessage() and "engine_runs_append" in r.getMessage()
+        for r in caplog.records
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="daemon.services.engine.state"):
+        with pytest.raises(RuntimeError):
+            await asyncio.to_thread(stamp_terminal, FailingRepo(False), stamp)
+    assert any(
+        "orphan-watcher" in r.getMessage() and "engine_jobs_stamp" in r.getMessage()
+        for r in caplog.records
+    )
+
+
 def test_idempotent_skip_reason_normalization():
     assert skip_outcome("shadow") == "SKIPPED_SHADOW"
     assert skip_outcome("OVERLAP") == "SKIPPED_OVERLAP"

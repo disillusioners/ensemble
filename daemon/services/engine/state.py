@@ -12,6 +12,7 @@ Owner: T2.1 of ``.agents/shared/planning/engine-arc-phase1/phase2-plan.md``.
 from __future__ import annotations
 
 import dataclasses
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -24,6 +25,8 @@ from daemon.repositories.engine.models import (
     OUTCOME_TIMED_OUT,
 )
 from daemon.repositories.engine.repository import EngineRepository
+
+logger = logging.getLogger(__name__)
 
 # Closed skip-reason vocabulary (D2.6). A free-text reason folds to a
 # declared member — never an unbounded label.
@@ -134,14 +137,35 @@ def stamp_terminal(repository: EngineRepository, stamp: TerminalStamp) -> Option
         boot_id=stamp.boot_id,
         host_pid=stamp.host_pid,
     )
-    repository.append_run(run)
-    return repository.stamp_job_outcome(
-        stamp.job_id,
-        last_outcome=stamp.outcome,
-        last_skip_reason=stamp.skip_reason,
-        consecutive_skips=stamp.consecutive_skips,
-        last_run_at=stamp.finished_at,
-    )
+    # D2.12: each write is independently diagnosed. A failure logs a
+    # dedicated ERROR naming the job and the write class, then re-raises so
+    # the caller's per-job handler still converts the tick to FAILED_BACKOFF.
+    try:
+        repository.append_run(run)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "engine terminal-write FAILED: job_id=%s write_class=engine_runs_append error=%s: %s",
+            stamp.job_id,
+            type(exc).__name__,
+            exc,
+        )
+        raise
+    try:
+        return repository.stamp_job_outcome(
+            stamp.job_id,
+            last_outcome=stamp.outcome,
+            last_skip_reason=stamp.skip_reason,
+            consecutive_skips=stamp.consecutive_skips,
+            last_run_at=stamp.finished_at,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "engine terminal-write FAILED: job_id=%s write_class=engine_jobs_stamp error=%s: %s",
+            stamp.job_id,
+            type(exc).__name__,
+            exc,
+        )
+        raise
 
 
 def effective_interval_seconds(cache: dict, spec: Any) -> float:

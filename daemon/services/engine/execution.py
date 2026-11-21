@@ -161,12 +161,19 @@ class EngineExecutionLoop:
         # single-flight
         acquired = await self.locks.try_acquire(job_id)
         if not acquired:
-            # SKIPPED_OVERLAP
+            # D2.7: while an extended dispatch still holds the lock the
+            # per-tick overlap is the SPECIFIC TPE member, not generic OVERLAP.
+            extended = self.locks.is_extended(job_id)
+            reason = "TIMEOUT_PENDING_EXTEND" if extended else "OVERLAP"
+            # An overlap is not a real run: preserve the in-flight job's due
+            # clock so it stays reachable by each subsequent tick.
+            prev_last_run_at = cache.get("last_run_at")
             await self._stamp(
-                job_id, cache, spec, started_iso, "SKIPPED_OVERLAP", "OVERLAP",
+                job_id, cache, spec, started_iso, skip_outcome(reason), reason,
                 started_dt, None, 0, None,
             )
-            cache["skips_by_reason"]["OVERLAP"] = cache["skips_by_reason"].get("OVERLAP", 0) + 1
+            cache["last_run_at"] = prev_last_run_at
+            cache["skips_by_reason"][reason] = cache["skips_by_reason"].get(reason, 0) + 1
             return
 
         cache["running"] = True
@@ -202,18 +209,23 @@ class EngineExecutionLoop:
                         return await D.run_db_offload(executor)
                     else:
                         return await D.run_dedicated_executor(dedicated, executor)
+
+                async def on_extend_fire():
+                    # D2.7 fire-time event: one TPE run row + counter + job
+                    # stamp, and mark the held dispatch as extended so later
+                    # ticks stamp TPE rather than OVERLAP.
+                    await self._stamp_extend_fire(job_id, cache, spec, started_iso)
+
                 outcome, exc = await D.run_with_timeout(
                     lambda: _dispatch(),
                     max_runtime,
                     policy,
+                    on_extend_tick=on_extend_fire,
                 )
                 if outcome == "TIMED_OUT":
                     raise TimeoutError("engine job timed out")
-                if outcome == "TIMEOUT_PENDING_EXTEND":
-                    # record pending extend skip-reason but continue; final stamp below
-                    cache["skips_by_reason"]["TIMEOUT_PENDING_EXTEND"] = (
-                        cache["skips_by_reason"].get("TIMEOUT_PENDING_EXTEND", 0) + 1
-                    )
+                # TPE counter/stamp is written by on_extend_fire; the terminal
+                # stamp below stays truthful (SUCCEEDED / FAILED_BACKOFF).
                 if outcome not in ("ok", "TIMEOUT_PENDING_EXTEND"):
                     raise RuntimeError(f"dispatch outcome {outcome}")
                 return outcome
@@ -254,6 +266,31 @@ class EngineExecutionLoop:
             self.locks.release(job_id)
             # clear pending event latch for event triggers
             cache["pending_event"] = False
+
+    async def _stamp_extend_fire(self, job_id, cache, spec, started_iso) -> None:
+        """D2.7 fire-time observable event — NOT the terminal outcome.
+
+        Called once by ``run_with_timeout`` when the extend-policy wait_for
+        fires. Writes one TPE row through the one-write path, bumps the TPE
+        counter, sets the job's last_skip_reason to TPE, and marks the held
+        lock as extended so subsequent ticks stamp TPE (not OVERLAP). The
+        eventual completion still stamps the truthful terminal row.
+        """
+        fire_dt = datetime.now(timezone.utc)
+        # The fire event is NOT a terminal run: preserve the due clock so the
+        # still-running job stays due and later ticks reach the lock-held
+        # branch (which stamps TPE while extended). The eventual terminal
+        # stamp is the one that advances last_run_at / next-due.
+        prev_last_run_at = cache.get("last_run_at")
+        await self._stamp(
+            job_id, cache, spec, started_iso, "TIMEOUT_PENDING_EXTEND",
+            "TIMEOUT_PENDING_EXTEND", fire_dt, None, 1, None,
+        )
+        cache["last_run_at"] = prev_last_run_at
+        cache["skips_by_reason"]["TIMEOUT_PENDING_EXTEND"] = (
+            cache["skips_by_reason"].get("TIMEOUT_PENDING_EXTEND", 0) + 1
+        )
+        self.locks.mark_extended(job_id, True)
 
     async def _stamp(
         self,
@@ -305,6 +342,10 @@ class EngineExecutionLoop:
         # cache follows DB
         cache["last_outcome"] = outcome
         cache["last_skip_reason"] = skip_reason
+        # D2.15/CS-9: timestamped shadow evidence for the observer-dead window.
+        # Kept in RAM like the rest of D2.11/D2.15 — no per-tick DB reads.
+        if reason == "SHADOW" or outcome == "SKIPPED_SHADOW":
+            cache.setdefault("shadow_evidence_ts", []).append(stamp_finished)
 
     def _update_consecutive_skips(self, cache, reason, is_skip, is_run):
         # already handled in _stamp; kept for compat

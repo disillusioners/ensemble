@@ -171,6 +171,14 @@ class EngineService:
             "last_duration_seconds": None,
             "running": False,
             "skips_by_reason": {},
+            # CS-9: seed shadow evidence from the row hydration already has.
+            # last_outcome/last_run_at describe the latest audit row, so when
+            # that row is a SKIPPED_SHADOW its timestamp is the freshest proof.
+            "shadow_evidence_ts": (
+                [job.last_run_at]
+                if job.last_outcome == "SKIPPED_SHADOW" and job.last_run_at
+                else []
+            ),
             "would_fire": False,
             "pending_event": False,
             "registered_at": job.registered_at,
@@ -204,6 +212,7 @@ class EngineService:
             "last_duration_seconds": None,
             "running": False,
             "skips_by_reason": {},
+            "shadow_evidence_ts": [],
             "would_fire": False,
             "pending_event": False,
             "registered_at": None,

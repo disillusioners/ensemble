@@ -124,20 +124,61 @@ async def test_metrics_snapshot_key_set():
 
 @pytest.mark.asyncio
 async def test_dead_observer_carveout():
-    """CS-9: observer spec dead ⇔ zero SHADOW rows."""
+    """CS-9/L-8: observer dead ⇔ zero SHADOW rows in 2x interval (windowed)."""
     eng = _engine()
     repo = EngineRepository(eng)
     reg = EngineRegistry(repo)
     await reg.aregister(_spec())
     svc = EngineService(repo, reg, None, shadow_mode=True)
     await svc._hydrate()
-    # no shadow rows yet -> dead True (observer)
+    # no shadow evidence yet -> dead True (observer)
     snap = svc.metrics.snapshot()
     assert snap["orphan-watcher"]["dead"] is True
-    # simulate a shadow row
-    svc._cache["orphan-watcher"]["skips_by_reason"]["SHADOW"] = 1
+    # a FRESH shadow timestamp -> dead False
+    svc._cache["orphan-watcher"]["shadow_evidence_ts"] = [now_iso()]
     snap = svc.metrics.snapshot()
     assert snap["orphan-watcher"]["dead"] is False
+
+
+@pytest.mark.asyncio
+async def test_dead_observer_stale_evidence_outside_window():
+    """MINOR-1 mutation pin: shadow evidence older than 2x interval is STALE
+    and must NOT keep the observer alive. Removing the window check REDs.
+    """
+    eng = _engine()
+    repo = EngineRepository(eng)
+    reg = EngineRegistry(repo)
+    await reg.aregister(_spec())  # interval 10s -> window 20s
+    svc = EngineService(repo, reg, None, shadow_mode=True)
+    await svc._hydrate()
+
+    stale = (__import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+             - __import__("datetime").timedelta(seconds=25)).isoformat()
+    # old count-only logic would read this as "has shadow" -> dead False;
+    # windowed logic sees zero fresh evidence -> dead True.
+    svc._cache["orphan-watcher"]["skips_by_reason"]["SHADOW"] = 1
+    svc._cache["orphan-watcher"]["shadow_evidence_ts"] = [stale]
+    assert svc.metrics.snapshot()["orphan-watcher"]["dead"] is True
+
+    # fresh evidence inside the window -> alive
+    svc._cache["orphan-watcher"]["shadow_evidence_ts"].append(now_iso())
+    assert svc.metrics.snapshot()["orphan-watcher"]["dead"] is False
+
+
+@pytest.mark.asyncio
+async def test_shadow_stamp_records_timestamped_evidence():
+    """The shadow skip path appends a timestamp to the RAM shadow evidence."""
+    eng = _engine()
+    repo = EngineRepository(eng)
+    reg = EngineRegistry(repo)
+    await reg.aregister(_spec())
+    svc = EngineService(repo, reg, None, shadow_mode=True)
+    await svc._hydrate()
+    cache = svc._cache["orphan-watcher"]
+    assert cache["shadow_evidence_ts"] == []
+    await svc._execution_loop._tick()
+    assert len(cache["shadow_evidence_ts"]) == 1
+    assert parse_iso(cache["shadow_evidence_ts"][0]) is not None
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,10 @@ class JobLockTable:
 
     def __init__(self) -> None:
         self._locks: dict[str, asyncio.Lock] = {}
+        # D2.7: an in-flight dispatch that has hit the extend-timeout fires
+        # marks itself here so subsequent ticks stamp the SPECIFIC
+        # TIMEOUT_PENDING_EXTEND member instead of the generic OVERLAP.
+        self._extended: dict[str, bool] = {}
 
     def _lock_for(self, job_id: str) -> asyncio.Lock:
         lock = self._locks.get(job_id)
@@ -35,10 +39,23 @@ class JobLockTable:
         return True
 
     def release(self, job_id: str) -> None:
-        """Release the lock for ``job_id`` (idempotent)."""
+        """Release the lock for ``job_id`` (idempotent).
+
+        Clears the extend flag on every release so the next dispatch starts
+        from a clean state (a leaked TPE flag would mislabel future overlaps).
+        """
         lock = self._locks.get(job_id)
         if lock is not None and lock.locked():
             lock.release()
+        self._extended.pop(job_id, None)
+
+    def mark_extended(self, job_id: str, extended: bool) -> None:
+        """Mark the held dispatch for ``job_id`` as extend-timeout pending."""
+        self._extended[job_id] = bool(extended)
+
+    def is_extended(self, job_id: str) -> bool:
+        """Whether the in-flight dispatch for ``job_id`` is in extended state."""
+        return bool(self._extended.get(job_id, False))
 
     def locked(self, job_id: str) -> bool:
         lock = self._locks.get(job_id)
@@ -59,6 +76,7 @@ class JobLockTable:
 
     def clear(self) -> None:
         self._locks.clear()
+        self._extended.clear()
 
 
 __all__ = ["JobLockTable"]
