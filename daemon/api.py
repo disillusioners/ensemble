@@ -51,11 +51,13 @@ import sys
 import logging
 import threading
 import asyncio
+import gzip
 import json
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from fastapi import FastAPI, Request, APIRouter
+from starlette.datastructures import Headers, MutableHeaders
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from types import SimpleNamespace
@@ -5815,6 +5817,260 @@ def _tag_route_classes(app: FastAPI) -> None:
     logger.info("[Auth] route classes tagged (public/module-lane/protected)")
 
 
+# ── Response compression (cpu-throughput-arc2 L1 row #2b) ─────────────
+#
+# WHY NOT THE STOCK ``starlette.middleware.gzip.GZipMiddleware``
+# (VERIFIED against the SHIPPED starlette 0.52.1, read in the worktree
+# venv, not from docs):
+#
+#   * 0.52.1 DOES exclude ``text/event-stream`` by default
+#     (``DEFAULT_EXCLUDED_CONTENT_TYPES``), so the SSE lane survives —
+#     but its exclusion list is exactly that ONE entry. It compresses
+#     every other content type above ``minimum_size``, including
+#     ``application/octet-stream``, ``image/*``, ``video/*`` (the
+#     ``/views`` media + mermaid-asset lanes and the vscode proxy's
+#     byte-faithful pass-through) — the opposite of this module's
+#     fence, and a live CPU regression on exactly the media lanes.
+#   * its default ``compresslevel=9``. Measured on a 2.6 MB instances
+#     payload: level 9 = 98.4 ms / 46.2x, level 1 = 6.2 ms / 31.1x —
+#     the same ~31-46x ratio class for 1/16th of the on-loop CPU. On a
+#     CPU-reduction commission, level 9 would be a regression.
+#   * it compresses STREAMING bodies chunk-by-chunk through a shared
+#     ``gzip.GzipFile``, whose internal zlib buffer holds sub-64 KB
+#     chunks — i.e. an unbounded-buffering hazard for any
+#     ``StreamingResponse`` whose content type is not
+#     ``text/event-stream`` (e.g. the vscode byte-faithful pass-through
+#     and SPA asset streaming, both ``more_body=True``).
+#
+# So this module ships a FILTERED equivalent: stock's responder pattern
+# (hold ``http.response.start`` until the first body message, decide
+# then) plus an ALLOWLIST and a streaming guard. Everything it declines
+# to touch is forwarded byte-identically: no header mutation, no
+# buffering, no added latency.
+#
+# Contract pinned by ``tests/unit/test_gzip_middleware.py``:
+#   * compressed ONLY when: client accepts gzip AND the method is not
+#     HEAD AND content type is ``application/json`` /
+#     ``application/<x>+json`` / ``text/*`` (minus ``text/event-stream``)
+#     AND no ``Content-Encoding`` is already present AND no ``ETag`` is
+#     present AND the response is single-shot (``more_body``
+#     absent/False) AND the body is >= ``minimum_size`` AND gzip
+#     actually shrinks it.
+#   * identity (wire bytes untouched) for: small bodies, streaming /
+#     chunked responses, SSE, binary/media, already-encoded responses,
+#     ETag-bearing responses, HEAD, and clients that did not offer gzip.
+#   * ``Vary: Accept-Encoding`` is added only when we compress
+#     (mirrors the stock behaviour; keeps the identity wire shape of
+#     every existing pin identical).
+#
+# ``minimum_size`` is MEASURED, not the stock 500: at level 1 the gzip
+# cost is ~0.1-0.2 ms of on-loop CPU for a 2-8 KB body while the ratio
+# only becomes interesting above ~8 KB (measured 19x at 8 KB, 28x at
+# 14 KB, 66x at 109 KB, 87x at 436 KB, 105x at 1.7 MB). Below 8 KB the
+# absolute wire saving is < 8 KB — noise next to HTTP framing — so
+# small poll/heartbeat JSON stays byte-identical and costs zero extra
+# CPU. The routes this row targets are 60-320x above the threshold
+# (``/api/instances`` ~2.6 MB, ``/openapi.json`` ~513 KB, ``/metrics``).
+GZIP_RESPONSE_MINIMUM_SIZE = 8192
+GZIP_RESPONSE_COMPRESS_LEVEL = 1
+# Content types we are willing to compress. Prefix match; the
+# ``text/event-stream`` exclusion is applied first so SSE always wins.
+_GZIP_COMPRESSIBLE_PREFIXES: tuple[str, ...] = (
+    "application/json",
+    "text/",
+)
+_GZIP_COMPRESSIBLE_SUFFIXES: tuple[str, ...] = ("+json",)
+_GZIP_EXCLUDED_PREFIXES: tuple[str, ...] = ("text/event-stream",)
+
+
+class ResponseGzipMiddleware:
+    """Allowlisted response gzip (see the module comment above).
+
+    ASGI middleware. Per-request state lives in a fresh responder
+    object, never on ``self`` — a middleware instance is shared by every
+    concurrent request.
+    """
+
+    def __init__(
+        self,
+        app,
+        minimum_size: int = GZIP_RESPONSE_MINIMUM_SIZE,
+        compresslevel: int = GZIP_RESPONSE_COMPRESS_LEVEL,
+    ):
+        self.app = app
+        self.minimum_size = minimum_size
+        self.compresslevel = compresslevel
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            # websocket / lifespan: never touched.
+            await self.app(scope, receive, send)
+            return
+
+        # HEAD keeps the identity header shape: RFC 9110 lets a HEAD
+        # response carry the GET headers, but every HEAD pin in this
+        # repo pairs ``Content-Length`` with the IDENTITY body size
+        # (e.g. ``tests/unit/routers/test_live_views_media.py``) — a
+        # compressed Content-Length on a bodiless response is a trap
+        # worth one line to avoid.
+        accepts_gzip = scope.get("method", "").upper() != "HEAD" and (
+            _accepts_gzip(Headers(scope=scope).get("accept-encoding", ""))
+        )
+        responder = _ResponseGzipResponder(
+            self.app,
+            minimum_size=self.minimum_size,
+            compresslevel=self.compresslevel,
+            accepts_gzip=accepts_gzip,
+        )
+        await responder(scope, receive, send)
+
+
+def _accepts_gzip(value: str) -> bool:
+    """Does ``Accept-Encoding`` actually permit gzip?
+
+    Stricter than stock starlette 0.52.1 (which does a bare
+    ``"gzip" in value`` substring test): an explicit ``gzip;q=0`` is a
+    REFUSAL and must be honoured, and a bare ``*`` covers gzip. An
+    unparsable ``q`` degrades to ``q=1`` for that token.
+    """
+    lowered = (value or "").lower()
+    if not lowered:
+        return False
+    wildcard_ok: bool | None = None
+    for part in lowered.split(","):
+        token, _, params = part.partition(";")
+        token = token.strip()
+        q = 1.0
+        for param in params.split(";"):
+            name, _, raw = param.partition("=")
+            if name.strip() == "q":
+                try:
+                    q = float(raw.strip())
+                except ValueError:
+                    q = 1.0
+        if token == "gzip":
+            return q > 0
+        if token == "*":
+            wildcard_ok = q > 0
+    return bool(wildcard_ok)
+
+
+class _ResponseGzipResponder:
+    """One request's decision state."""
+
+    def __init__(self, app, *, minimum_size: int, compresslevel: int, accepts_gzip: bool):
+        self.app = app
+        self.minimum_size = minimum_size
+        self.compresslevel = compresslevel
+        self.accepts_gzip = accepts_gzip
+        self.send = None
+        # ``start`` is held only while the body's size is still unknown
+        # (compressible content type + gzip offered).
+        self.start_message: dict | None = None
+        self.decided = False
+
+    async def __call__(self, scope, receive, send):
+        self.send = send
+        await self.app(scope, receive, self._send)
+
+    # -- helpers -----------------------------------------------------
+    @staticmethod
+    def _content_type(headers) -> str:
+        return headers.get("content-type", "").split(";")[0].strip().lower()
+
+    def _is_compressible_type(self, content_type: str) -> bool:
+        if not content_type:
+            return False
+        if content_type.startswith(_GZIP_EXCLUDED_PREFIXES):
+            return False
+        if content_type.startswith(_GZIP_COMPRESSIBLE_PREFIXES):
+            return True
+        return content_type.endswith(_GZIP_COMPRESSIBLE_SUFFIXES)
+
+    def _should_consider(self, message: dict) -> bool:
+        """Should the start message be held to inspect the first body?"""
+        if not self.accepts_gzip:
+            return False
+        headers = Headers(raw=message["headers"])
+        if "content-encoding" in headers:
+            # Already encoded upstream (e.g. the vscode proxy's
+            # pass-through) — never double-compress.
+            return False
+        if "etag" in headers:
+            # VALIDATOR SAFETY (RFC 9110 §8.8.3.2): a strong ETag must
+            # identify ONE representation's bytes. Serving a gzip and an
+            # identity body under the same strong ETag is a validator
+            # lie; the nginx-style cure is to weaken or drop the tag, and
+            # the zero-risk cure here is to leave cached/conditional
+            # surfaces alone. That means the live-view text/html wrapper
+            # pages and the mermaid asset, plus EVERY ``FileResponse``
+            # (starlette sets ``etag``/``last-modified`` unconditionally,
+            # so SPA asset serving is excluded too — and it is streaming
+            # anyway). The CPU targets of this row (/api/instances,
+            # /openapi.json, /api/metrics) carry no validator.
+            return False
+        return self._is_compressible_type(self._content_type(headers))
+
+    # -- ASGI send interception --------------------------------------
+    async def _send(self, message):
+        message_type = message["type"]
+
+        if message_type == "http.response.start":
+            if not self._should_consider(message):
+                # Not a candidate: forward the headers NOW so streaming
+                # responses (SSE included) never gain a header delay.
+                await self.send(message)
+                self.decided = True
+                return
+            # Candidate: hold the headers until we see the first body
+            # chunk — its size and ``more_body`` decide the outcome.
+            self.start_message = message
+            return
+
+        if (
+            message_type == "http.response.body"
+            and not self.decided
+            and self.start_message is not None
+        ):
+            self.decided = True
+            body = message.get("body", b"")
+            more_body = message.get("more_body", False)
+            if more_body or len(body) < self.minimum_size:
+                # Streaming or small: byte-identical identity.
+                await self.send(self.start_message)
+                await self.send(message)
+                return
+
+            compressed = gzip.compress(
+                body, self.compresslevel, mtime=0
+            )
+            if len(compressed) >= len(body):
+                # Incompressible: sending the identity bytes is smaller
+                # (and avoids a pointless Content-Encoding).
+                await self.send(self.start_message)
+                await self.send(message)
+                return
+
+            headers = MutableHeaders(raw=self.start_message["headers"])
+            headers["Content-Encoding"] = "gzip"
+            headers["Content-Length"] = str(len(compressed))
+            headers.add_vary_header("Accept-Encoding")
+            message["body"] = compressed
+            await self.send(self.start_message)
+            await self.send(message)
+            return
+
+        # Any other message type (pathsend / a start that was already
+        # forwarded) passes through untouched. If a held start is still
+        # pending — a response that never sent a body message — flush it
+        # so the client is not left hanging.
+        if self.start_message is not None and not self.decided:
+            self.decided = True
+            await self.send(self.start_message)
+            self.start_message = None
+        await self.send(message)
+
+
 def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -5980,6 +6236,21 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+    )
+
+    # cpu-throughput-arc2 L1 #2b — response compression, registered
+    # immediately AFTER CORS so LIFO execution order is
+    # route → CORS → ResponseGzip: compression sits INSIDE the CORS
+    # decoration, so the CORS headers are already on the response when
+    # gzip decides (they are untouched; gzip only adds
+    # Content-Encoding/Content-Length/Vary) and an OPTIONS preflight
+    # (which CORS answers itself, tiny body) is never compressed.
+    # Filtered allowlist + streaming guard — see the class/comment
+    # block above for the measured 0.52.1 findings.
+    app.add_middleware(
+        ResponseGzipMiddleware,
+        minimum_size=GZIP_RESPONSE_MINIMUM_SIZE,
+        compresslevel=GZIP_RESPONSE_COMPRESS_LEVEL,
     )
 
     # Add selective access log middleware
