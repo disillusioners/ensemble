@@ -73,15 +73,23 @@ def test_catalog_is_a_frozen_tuple_of_frozen_specs():
 
 def test_event_bus_family_is_kind_parameterized_and_derived():
     # One registry kind per EventKind member, auto-derived (F-17: the
-    # catalog — not the stale SQLite CHECK — is the identity).
-    family = [k for k in CATALOG if k.kind_id.startswith("event_bus:")]
-    assert len(family) == len(EventKind)
+    # catalog — not the stale SQLite CHECK — is the identity), PLUS the
+    # one non-enum repo-direct durable family member (task_recovery).
+    enum_family = [
+        k for k in CATALOG
+        if k.kind_id.startswith("event_bus:")
+        and not k.metadata.get("non_enum")
+    ]
+    assert len(enum_family) == len(EventKind)
     expected = {f"event_bus:{ek.value}" for ek in EventKind}
-    got = {k.kind_id for k in family}
+    got = {k.kind_id for k in enum_family}
     assert got == expected
-    for spec in family:
+    for spec in enum_family:
         assert spec.klass is EventClass.DURABLE_BUS
         assert spec.service_tag == "event_bus"
+    non_enum = [k for k in CATALOG if k.metadata.get("non_enum")]
+    assert [k.kind_id for k in non_enum] == ["event_bus:task_recovery"]
+    assert non_enum[0].klass is EventClass.DURABLE_BUS
 
 
 # ── Mutation leg: duplicate kind_id ⇒ RED ───────────────────────────────
@@ -175,12 +183,28 @@ def test_seam_depth_triggers_note_names_gap14_and_ev24():
     assert "instance_messaging" in SEAM_DEPTH_TRIGGERS
 
 
-def test_no_bridge_pending_beyond_the_documented_family():
-    # BRIDGE_PENDING may only cover the event_bus kind-parameterized
-    # family (the T5.4 open question) — every OTHER catalog kind must
-    # have a real bridge (the census leg in test_bridges.py enforces
-    # that direction).
-    assert set(BRIDGE_PENDING) == {"event_bus:*"}
-    for kind_id in KIND_INDEX:
-        if not kind_id.startswith("event_bus:"):
-            assert kind_id not in BRIDGE_PENDING
+def test_no_bridge_pending_kind_is_actually_bridged():
+    # BRIDGE_PENDING may only hold kinds with a pinned reason (zero-
+    # producer enum member, or a live producer outside the L-9 site
+    # list). A kind that IS in the census must never sit in the register
+    # (lockstep both ways is enforced in test_bridges.py; this leg pins
+    # the reason vocabulary).
+    from daemon.services.event_registry import ZERO_PRODUCER_KINDS
+
+    for kind_id, reason in BRIDGE_PENDING.items():
+        assert kind_id in KIND_INDEX, kind_id
+        assert reason.startswith(("enum-only:", "producer-outside-list:")), (
+            kind_id, reason
+        )
+    assert ZERO_PRODUCER_KINDS == {
+        k for k, r in BRIDGE_PENDING.items() if r.startswith("enum-only:")
+    }
+    # The zero-producer set is exactly the pinned six.
+    assert ZERO_PRODUCER_KINDS == {
+        "event_bus:processing_started",
+        "event_bus:processing_completed",
+        "event_bus:processing_failed",
+        "event_bus:child_failed",
+        "event_bus:message_completed",
+        "event_bus:room_post",
+    }

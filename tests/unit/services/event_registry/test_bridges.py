@@ -81,37 +81,111 @@ def test_every_bridged_kind_is_a_registered_v1_kind():
         )
 
 
-def test_every_catalog_kind_has_a_bridge_or_a_documented_reason():
-    # Direction 2 of the census: every catalog kind except the
-    # deferred_v2 entry has ≥1 bridge, OR sits in the documented
-    # BRIDGE_PENDING register (the event_bus family — the T5.4 open
-    # question: all 10 emission sites are outside the P5 ownership map).
+def test_every_catalog_kind_has_a_bridge_or_a_pinned_pending_reason():
+    # AC2, leader ruling L-9 end state: every catalog kind except the
+    # deferred_v2 entry is either BRIDGED (a literal record() site in the
+    # daemon tree) or present in BRIDGE_PENDING with a pinned reason
+    # (zero-producer enum member, or a producer outside the L-9 site
+    # list). The LOCKSTEP both ways: no bridged kind may sit in
+    # BRIDGE_PENDING, and no pending kind may have a bridge.
     recorded = set(_recorded_literal_kinds())
-    missing = []
+    from daemon.services.event_registry import BRIDGE_PENDING
+
+    bridged = set()
     for spec in CATALOG:
         if spec.metadata.get("deferred_v2"):
             continue  # the class-5 pointer never fires in v1 (F-18)
-        if spec.metadata.get("kind_parameterized"):
-            assert spec.kind_id.startswith("event_bus:")
-            continue  # covered by the BRIDGE_PENDING register (open question)
-        if spec.kind_id not in recorded:
-            missing.append(spec.kind_id)
-    assert not missing, f"catalog kinds without any bridge: {missing}"
-    # The pending register covers exactly the parameterized family and
-    # nothing else.
-    assert set(BRIDGE_PENDING) == {"event_bus:*"}
+        if spec.kind_id in recorded:
+            bridged.add(spec.kind_id)
+            assert spec.kind_id not in BRIDGE_PENDING, (
+                f"{spec.kind_id} is bridged AND pending — lockstep violated"
+            )
+        else:
+            assert spec.kind_id in BRIDGE_PENDING, (
+                f"{spec.kind_id} has no bridge and no pinned pending "
+                f"reason — AC2 violated"
+            )
+    # Every BRIDGE_PENDING entry is a real catalog kind (no stale rows).
+    for kind_id in BRIDGE_PENDING:
+        assert kind_id in KIND_INDEX, kind_id
+    # The T5.4 bridge sites: 10 L-9 sites / 7 files PLUS the two
+    # in-map completion-row kinds (child_reports is a P5-owned file).
+    expected_bridged_durable = {
+        "event_bus:question_answered",
+        "event_bus:job_completed",
+        "event_bus:instance_lifecycle",
+        "event_bus:question_requested",
+        "event_bus:midflight_report",
+        "event_bus:stuck_awaiting_answer",
+        "event_bus:child_question_still_pending",
+        "event_bus:ram_limit_exceeded",
+        "event_bus:task_recovery",
+        "event_bus:instance_completed",
+        "event_bus:child_completed",
+    }
+    assert expected_bridged_durable <= bridged
+    # Zero-producer kinds carry the pinned enum-only reason.
+    from daemon.services.event_registry import ZERO_PRODUCER_KINDS
+
+    for kind_id in ZERO_PRODUCER_KINDS:
+        assert "enum-only:" in BRIDGE_PENDING[kind_id]
 
 
-def test_no_literal_event_bus_kind_is_ever_recorded():
-    # event_bus kinds are kind-PARAMETERIZED (one per EventKind value);
-    # a literal "event_bus:<x>" first-arg would be a hardcoded member of
-    # a family that must track the enum.
+def test_no_literal_event_bus_kind_is_ever_recorded_with_drift():
+    # event_bus kinds must be recorded as literals whose value is a
+    # REAL EventKind member value (or the pinned non-enum task_recovery
+    # family) — a typo'd literal would silently never match a producer.
     recorded = _recorded_literal_kinds()
-    literals = [k for k in recorded if k.startswith("event_bus:")]
-    assert not literals, (
-        f"event_bus kinds must be recorded via the parameterized family "
-        f"helper, never as a literal: {literals}"
+    from daemon.repositories.event.models import EventKind
+
+    enum_values = {ek.value for ek in EventKind}
+    for kind in recorded:
+        if not kind.startswith("event_bus:"):
+            continue
+        suffix = kind[len("event_bus:"):]
+        assert suffix in enum_values or suffix == "task_recovery", kind
+
+
+def test_class2_bridges_cover_the_l9_ten_site_census():
+    # Leader ruling L-9: 10 durable-kind emission sites across 7 files.
+    # Each site's file must carry at least one class-2 record() call.
+    expected_files = {
+        "daemon/routers/answer_helper.py": "event_bus:question_answered",
+        "daemon/services/job_recovery_service.py": "event_bus:job_completed",
+        "daemon/services/event_publisher.py": "event_bus:instance_lifecycle",
+        "daemon/services/midflight_qa.py": None,  # 4 sites
+        "daemon/services/job_feedback_observer.py": "event_bus:job_completed",
+        "daemon/services/ram_guard_events.py": "event_bus:ram_limit_exceeded",
+        "daemon/services/stale_task_recovery.py": "event_bus:task_recovery",
+    }
+    for rel_path, expected_kind in expected_files.items():
+        src = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+        kinds = _RECORD_CALL_RE.findall(src)
+        assert kinds, f"no record() bridge in {rel_path}"
+        if expected_kind is not None:
+            assert expected_kind in kinds, (rel_path, kinds)
+    # midflight_qa carries the four QA sites.
+    qa_kinds = set(
+        _RECORD_CALL_RE.findall(
+            (REPO_ROOT / "daemon/services/midflight_qa.py").read_text(
+                encoding="utf-8"
+            )
+        )
     )
+    assert qa_kinds == {
+        "event_bus:question_requested",
+        "event_bus:midflight_report",
+        "event_bus:stuck_awaiting_answer",
+        "event_bus:child_question_still_pending",
+    }, qa_kinds
+
+
+def test_create_event_itself_carries_no_bridge():
+    # L-9 option (b) REJECTED: create_event is the GAP-15 fan-out
+    # primitive this phase is fenced from touching — the file must not
+    # import or call the registry.
+    src = (DAEMON_ROOT / "services" / "event_bus.py").read_text(encoding="utf-8")
+    assert "event_registry" not in src
 
 
 def test_the_deferred_kind_has_no_bridge_anywhere():
@@ -292,6 +366,14 @@ def test_no_forbidden_dim_names_in_the_registry_or_bridges():
         "services/child_reports.py",
         "services/report_delivery_recovery.py",
         "graph.py",
+        # T5.4 class-2 bridge files (L-9)
+        "routers/answer_helper.py",
+        "services/job_recovery_service.py",
+        "services/event_publisher.py",
+        "services/midflight_qa.py",
+        "services/job_feedback_observer.py",
+        "services/ram_guard_events.py",
+        "services/stale_task_recovery.py",
     ):
         scan_files.append(DAEMON_ROOT / name)
     for path in scan_files:

@@ -160,14 +160,26 @@ def test_deferred_kind_snapshot_entry_is_labeled():
     assert entry["fired_total"] == 0
 
 
-def test_bridge_pending_disclosed_only_for_the_event_bus_family():
+def test_bridge_pending_disclosed_only_for_registered_pending_kinds():
+    from daemon.services.event_registry import BRIDGE_PENDING
+
     snap = snapshot()
     for kind_id, entry in snap["kinds"].items():
-        if kind_id.startswith("event_bus:"):
-            assert entry["bridge_pending"], kind_id
-            assert "ownership map" in entry["bridge_pending"]
+        if kind_id in BRIDGE_PENDING:
+            assert entry["bridge_pending"] == BRIDGE_PENDING[kind_id], kind_id
         else:
             assert entry["bridge_pending"] is None, kind_id
+    # Every bridged kind reports no pending marker.
+    for bridged in (
+        "instance_terminalized",
+        "report_injection_obligation",
+        "mission_commission_transition",
+        "attestation_epoch",
+        "event_bus:job_completed",
+        "event_bus:question_answered",
+        "event_bus:task_recovery",
+    ):
+        assert snap["kinds"][bridged]["bridge_pending"] is None, bridged
 
 
 # ── Snapshot never raises ────────────────────────────────────────────────
