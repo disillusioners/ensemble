@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,13 @@ DIGEST_ROOT_ENV = "ENSEMBLE_TOOL_USAGE_DIGEST_ROOT"
 
 
 def _code_root() -> Path:
-    # daemon/services/tool_usage_digest.py -> parents[2] == install root
+    # Frozen-aware: under PyInstaller, __file__ resolves inside the
+    # ephemeral _MEIPASS archive (no .agents/ subdir, wiped at exit);
+    # use sys.executable's parent (the install dir) instead, mirroring
+    # daemon/graph.py frozen-aware agents base + daemon/manager.py.
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    # daemon/services/tool_usage_digest.py -> parents[2] == repo/install root
     return Path(__file__).resolve().parents[2]
 
 
