@@ -74,6 +74,17 @@ Persistence: table name = DB row; `RAM` = in-memory only. KS = kill switch.
 
 † EV-55 bundles five small single-consumer mechanisms (each detailed in card 10).
 
+### [L-10 ADDENDUM — 2026-11-21: class-2 durable-EventBus emission-site re-derivation (final bridge increment)]
+
+> [ADDITIVE BRACKET — the census rows above are UNCHANGED. This block records the L-10 re-derived class-2 emission-site tally for the Phase-5 bridge work; it never rewrites any EV-xx row. See `engine-arc-phase1/decisions.md` §Leader rulings L-10 + `phase1-plan.md` §0.3.]
+
+The L-9 record pre-flagged that the class-2 count would be re-derived once the producer-outside-map kinds were enumerated. Final re-derivation (arithmetic shown):
+
+- **10** — original L-9 class-2 durable-bus sites, 7 files: `answer_helper:419`, `job_recovery_service:4509`, `event_publisher:78`, `midflight_qa:505`/`:579`/`:766`/`:853`, `job_feedback_observer:2400`, `ram_guard_events:142`, `stale_task_recovery:945` (census EV-30 / EV-19 / EV-17 / EV-54 / §N + witness rows).
+- **+ 2** — in-map `child_reports` producers (class-1 bridge callers `child_reports.py:2505`/`:2644`).
+- **+ 13** — the 8 L-10 producer-outside-map kinds' landed sites, incl. the previously-excluded `error` `event_repo` fallback: `instance_messaging:2893` (1) + `message_processing_errors:277`/`:299` (2, `:299` = `event_repo` fallback) + `room/membership:407`/`:531` (2) + `room/repository:1179` (1) + `room_delivery:879`/`:907`/`:918`/`:1033`/`:1105`/`:1203`/`:1241` (7) = **13**.
+- **= 25** final bridged-or-pinned emission sites. Terminal-state contract: every catalog kind bridged-or-pinned; the T5.9 bidirectional census leg pins drift; further map extension structurally impossible. (Zero-producer kinds — processing_started/completed/failed, child_failed, message_completed, room_post — stay DECLARED-SILENT per L-11; they contribute 0 sites.)
+
 ---
 
 ## DETAIL CARDS (by commission target)
