@@ -118,10 +118,11 @@ class EngineRepository:
         self,
         job_id: str,
         *,
-        last_outcome: str,
+        last_outcome: str | None = None,
         last_skip_reason: str | None = None,
         consecutive_skips: int | None = None,
         last_run_at: str | None = None,
+        dead: int | None = None,
     ) -> EngineJob | None:
         """Stamp the terminal-outcome columns on one job row.
 
@@ -143,13 +144,16 @@ class EngineRepository:
         """
         stamp = last_run_at or now_utc_iso()
         values: dict[str, Any] = {
-            "last_outcome": last_outcome,
             "last_skip_reason": last_skip_reason,
-            "last_run_at": stamp,
             "updated_at": stamp,
         }
+        if last_outcome is not None:
+            values["last_outcome"] = last_outcome
+            values["last_run_at"] = stamp
         if consecutive_skips is not None:
             values["consecutive_skips"] = consecutive_skips
+        if dead is not None:
+            values["dead"] = dead
 
         with Session(self.engine) as session:
             stmt = (

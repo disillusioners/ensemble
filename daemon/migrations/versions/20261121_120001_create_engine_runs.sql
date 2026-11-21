@@ -1,3 +1,12 @@
+-- HEADER (P3 fold): engine_runs.job_id carries NO foreign key. The run
+-- audit is append-only and must survive engine_jobs row lifecycle and
+-- re-registration semantics; a re-registration never orphans history.
+--
+-- HEADER (P3 fold): server DEFAULTs in this .sql and Python-side defaults
+-- in daemon/repositories/engine/models.py are deliberately parallel
+-- expressions (SQLite path vs create_all path). The parity test pins
+-- names/types/nullability, not default expressions.
+
 -- Migration: create engine_runs
 --           (Engine Arc Phase 1 — central polling/event engine: the
 --           APPEND-ONLY run audit)

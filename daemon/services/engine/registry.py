@@ -142,6 +142,9 @@ class EngineRegistry:
         # RAM cache — the hot-read half of the DB-source-of-truth contract.
         # job_id -> {"version": int, "fingerprint": tuple, "spec": JobSpec}
         self._cache: dict[str, dict[str, Any]] = {}
+        # P3 T3.5: optional cancel hook invoked on a changed-content
+        # re-registration of a live (in-flight) job. Set by EngineService.
+        self._cancel_callback: Any = None
 
     # ── introspection ──────────────────────────────────────────────────
 
@@ -159,6 +162,14 @@ class EngineRegistry:
         """The cached spec for ``job_id``, or ``None``."""
         entry = self._cache.get(job_id)
         return None if entry is None else entry["spec"]
+
+    # ── re-registration cancel hook (P3 T3.5) ──────────────────────────
+    @property
+    def cancel_callback(self) -> Any:
+        return self._cancel_callback
+
+    def set_cancel_callback(self, cb: Any) -> None:
+        self._cancel_callback = cb
 
     # ── async registration (native — the call site P2/P4 uses) ─────────
 
@@ -207,17 +218,12 @@ class EngineRegistry:
     def _register_sync(self, spec: JobSpec) -> int:
         """Persist a validated spec: version arithmetic + cache insert."""
         fingerprint = spec.content_fingerprint()
-        cached = self._cache.get(spec.id)
 
-        # RAM-cache fast path (same-process echo). A cache hit means THIS
-        # process already wrote a row with this exact fingerprint, so —
-        # absent an out-of-band DB mutation — the DB row's registration
-        # content is identical and the DB compare below would return the
-        # SAME verdict. Echoing here (without a DB read) is therefore
-        # provably correct for the same-process case (AC5 semantics kept).
-        if cached is not None and cached["fingerprint"] == fingerprint:
-            return int(cached["version"])
-
+        # Ground the echo comparison on the DB row ALWAYS (P3 fold #4):
+        # registrations are rare; correctness > cache. An out-of-band row
+        # mutation followed by a same-spec register() in the SAME process
+        # must BUMP (not echo) — the RAM fast path is removed so a stale
+        # cached verdict can never mask a DB-side change.
         existing = self._repository.get_job(spec.id)
         row_kwargs = spec.to_row_dict()
 
@@ -264,17 +270,32 @@ class EngineRegistry:
                 "consecutive_skips": (
                     0 if existing is None else existing.consecutive_skips
                 ),
-                "dead": 0 if existing is None else existing.dead,
+                "dead": 0 if existing is None else 0,
             }
         )
 
+        changed = existing is not None
         stored = self._repository.upsert_job(EngineJob(**row_kwargs))
         stored_version = int(stored.version)
         self._cache[spec.id] = {
             "version": stored_version,
             "fingerprint": fingerprint,
             "spec": spec,
+            "cancel_requested": False,
         }
+        # P3 T3.5: dynamic re-registration of a live (in-flight) job.
+        if changed:
+            cache_entry = self._cache.get(spec.id)
+            if cache_entry is not None:
+                cache_entry["pending_event"] = False
+            # unregister pending event latch on the engine cache (best effort)
+            # invoke cancel hook so the in-flight tick is cancelled + audited
+            cb = self._cancel_callback
+            if cb is not None:
+                try:
+                    cb(spec.id)
+                except Exception:  # noqa: BLE001
+                    logger.exception("re-registration cancel hook failed for %s", spec.id)
         logger.info(
             "engine job registered: id=%s service_tag=%s category=%s version=%d",
             spec.id,

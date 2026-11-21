@@ -1,3 +1,8 @@
+-- HEADER (P3 fold): server DEFAULTs in this .sql and Python-side defaults
+-- in daemon/repositories/engine/models.py are deliberately parallel
+-- expressions (SQLite path vs create_all path). The parity test pins
+-- names/types/nullability, not default expressions.
+
 -- Migration: create engine_jobs
 --           (Engine Arc Phase 1 — central polling/event engine: the
 --           mutable registration + last-outcome substrate)

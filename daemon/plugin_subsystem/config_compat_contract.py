@@ -46,10 +46,13 @@ CONTRACT_DEPTH = 3
 # the gate refuses a config the daemon can load: the exact regression the
 # engine-arc dead-knob sweep (T1.12) surfaced (RC=3 vs base RC=0). Keep this
 # set in lockstep with the pops in daemon/config.py load_config.
-_TOLERATED_RETIRED_KEYS: dict[str, tuple[str, ...]] = {
-    "persistence": ("checkpointer_db_path", "checkpoint_interval"),
-    "services": ("worker_poll_interval", "lease_heartbeat_interval_seconds"),
-}
+try:
+    from daemon.config import RETIRED_CONFIG_KEYS as _TOLERATED_RETIRED_KEYS  # noqa: E402
+except Exception:  # noqa: BLE001 — stage-time safety
+    _TOLERATED_RETIRED_KEYS: dict[str, tuple[str, ...]] = {
+        "persistence": ("checkpointer_db_path", "checkpoint_interval"),
+        "services": ("worker_poll_interval", "lease_heartbeat_interval_seconds"),
+    }
 
 
 def _is_model(annotation: Any) -> bool:

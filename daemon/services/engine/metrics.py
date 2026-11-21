@@ -63,6 +63,9 @@ class EngineMetrics:
         return out
 
     def _compute_dead(self, job_id, cache, spec, now, interval):
+        # Persisted dead (D3.4) takes precedence: if the row says dead, it's dead.
+        if bool((cache or {}).get("persisted_dead", False)):
+            return True
         is_observer = job_id not in self._executors
         if is_observer:
             # CS-9/L-8 carve-out: dead <=> ZERO SKIPPED_SHADOW rows within

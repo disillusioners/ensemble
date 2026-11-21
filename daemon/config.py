@@ -3408,6 +3408,15 @@ class SchedulingConfig(BaseSettings):
     )
 
 
+#: Retired config keys (engine-arc dead-knob sweep). Single source of truth
+#: shared by ``load_config`` (pops) and ``config_compat_contract`` (tolerated
+#: set). Adding a key here surfaces in BOTH the pop behavior and the contract.
+RETIRED_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
+    "persistence": ("checkpointer_db_path", "checkpoint_interval"),
+    "services": ("worker_poll_interval", "lease_heartbeat_interval_seconds"),
+}
+
+
 class EngineConfig(BaseSettings):
     """Configuration for the central polling/event engine (Engine Arc P1).
 
@@ -3522,6 +3531,25 @@ class EngineConfig(BaseSettings):
             "best-effort). Env: ENSEMBLE_ENGINE_BOOT_PASS_DEADLINE_SECONDS."
         ),
     )
+    extend_ceiling_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Ceiling (seconds) for an extend-policy await before the "
+            "dispatch is treated as a late failure (W-2). On breach the "
+            "existing TPE/dead escalation path takes over. "
+            "Env: ENSEMBLE_ENGINE_EXTEND_CEILING_SECONDS."
+        ),
+    )
+    retry_backoff_cap_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Cap (seconds) on a single retry backoff sleep so a long "
+            "backoff cannot stall the whole tick loop (W-2). "
+            "Env: ENSEMBLE_ENGINE_RETRY_BACKOFF_CAP_SECONDS."
+        ),
+    )
     run_retention_days: int = Field(
         default=30,
         ge=1,
@@ -3533,6 +3561,71 @@ class EngineConfig(BaseSettings):
             "Env: ENSEMBLE_ENGINE_RUN_RETENTION_DAYS."
         ),
     )
+
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_engine_enabled_empty_to_safe(cls, value: Any) -> Any:
+        """AMD-8: absent => pydantic default; empty/malformed => safe (False).
+
+        Fail-to-legacy: an unreadable engine switch must never make the
+        engine own execution. A non-boolean, non-str, non-int value (e.g. a
+        list/dict) is NOT a kill switch and keeps fail-fast ValidationError.
+        """
+        if value is None:
+            return False
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            if value == 0:
+                return False
+            if value == 1:
+                return True
+            raise ValueError(
+                f"enabled must be a boolean-like value (got {value!r})"
+            )
+        if isinstance(value, str):
+            s = value.strip().lower()
+            if s == "":
+                return False
+            if s in ("0", "false", "no", "off"):
+                return False
+            if s in ("1", "true", "yes", "on"):
+                return True
+            return False
+        raise ValueError(f"enabled must be a boolean-like value (got {value!r})")
+
+    @field_validator("shadow_mode", mode="before")
+    @classmethod
+    def _coerce_engine_shadow_mode_empty_to_safe(cls, value: Any) -> Any:
+        """AMD-8: absent => default (True); empty/malformed => safe (True).
+
+        Safe shadow value is True (never invoke execute_fn).
+        """
+        if value is None:
+            return True
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            if value == 0:
+                return False
+            if value == 1:
+                return True
+            raise ValueError(
+                f"shadow_mode must be a boolean-like value (got {value!r})"
+            )
+        if isinstance(value, str):
+            s = value.strip().lower()
+            if s == "":
+                return True
+            if s in ("0", "false", "no", "off"):
+                return False
+            if s in ("1", "true", "yes", "on"):
+                return True
+            return True
+        raise ValueError(
+            f"shadow_mode must be a boolean-like value (got {value!r})"
+        )
 
 
 class NotifyUserConfig(BaseSettings):
@@ -9100,12 +9193,8 @@ def load_config(config_path: str | None = None) -> Config:
         persistence_config.setdefault("db_path", "./data/instances.db")
     # ``checkpointer_db_path`` was removed (see PersistenceConfig above).
     # Silently drop it from the YAML dict so old configs keep loading.
-    persistence_config.pop("checkpointer_db_path", None)
-    # ``checkpoint_interval`` was retired by the engine-arc dead-knob sweep
-    # (T1.12). PersistenceConfig runs extra="forbid", so a deployed config
-    # still carrying it would fail validation at boot — drop it so old
-    # configs keep loading (same precedent as checkpointer_db_path above).
-    persistence_config.pop("checkpoint_interval", None)
+    for _rk in RETIRED_CONFIG_KEYS.get("persistence", ()):
+        persistence_config.pop(_rk, None)
     config_dict["persistence"] = persistence_config
 
     # compaction.model precedence (env COMPACTION_MODEL > yaml
@@ -9304,8 +9393,8 @@ def load_config(config_path: str | None = None) -> Config:
     # fields. ServicesConfig runs extra="forbid", so a deployed config still
     # carrying either would fail validation at boot — drop them so old
     # configs keep loading (same precedent as the persistence pop above).
-    services_config.pop("worker_poll_interval", None)
-    services_config.pop("lease_heartbeat_interval_seconds", None)
+    for _rk in RETIRED_CONFIG_KEYS.get("services", ()):
+        services_config.pop(_rk, None)
     # Extract the yaml-side values (nested ``service_tool:`` block for
     # enabled/max_concurrent; the flat A8-named interval field).
     _st_yaml_block = services_config.get("service_tool")

@@ -180,6 +180,7 @@ async def test_every_terminal_outcome_appends_exactly_one_run():
 def test_skip_reasons_closed_vocabulary():
     assert "SHADOW" in SKIP_REASONS
     assert "OVERLAP" in SKIP_REASONS
+    assert "REREGISTERED" in SKIP_REASONS
     # free-text folds to a member
     assert skip_outcome("totally unknown free text") == "SKIPPED_ERROR_BACKOFF" or skip_outcome(
         "totally unknown free text"

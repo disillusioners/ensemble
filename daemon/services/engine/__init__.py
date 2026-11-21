@@ -23,6 +23,16 @@ from daemon.services.engine.engine import EngineService
 from daemon.services.engine.locks import JobLockTable
 from daemon.services.engine.metrics import EngineMetrics, project_merged
 from daemon.services.engine.state import TerminalStamp, stamp_terminal
+from daemon.services.engine.guardrails import (
+    DepMissingTracker,
+    DependencyRef,
+    ExtendWedgeTracker,
+    WiringReport,
+    assert_dependencies_resolvable,
+    resolve_at_due,
+)
+from daemon.services.engine.killswitch import EngineSwitchResolver
+from daemon.services.engine.dualpath import use_engine_enabled, EngineOwnership
 
 __all__ = [
     "EngineMetrics",
