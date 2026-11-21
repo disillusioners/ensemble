@@ -1,0 +1,31 @@
+{
+  "capture": "auth-off tab state (phase4-plan Task 7 — the one pixel item)",
+  "lane": "tool-usage-metrics-p1 (ENSEMBLE-37 P1 measurement slice)",
+  "date": "2026-11-21",
+  "spec": "frontend/e2e/tool-usage-metrics-gate.spec.ts (UNCOMMITTED — outside gate-7's diff-scope classes; flagged for adjudication)",
+  "config": "playwright.metrics-gate.config.ts (testMatch matches the file name; the spec runs under the house metrics gate)",
+  "fixture": {
+    "posture": "ONLY the tool-usage source is auth-off",
+    "summary_and_daily": "503 application/json {\"detail\":{\"error\":\"AUTH_NOT_CONFIGURED\"}}",
+    "note": "the body is the daemon's FastAPI error shape (detail.error) — the HttpErrorResponse envelope (err.error = body) is what decodeToolUsageError reads; the dispatch's fixture notation '503 {error: {detail: ...}}' describes the envelope, not the body",
+    "session_probe": "/api/auth/me stubbed with a SessionUser-shaped body (SessionService treats a 200 with a non-shaped body as an auth redirect)",
+    "central_door": "200 (the central posture is NOT the fixture)"
+  },
+  "journey": "page.goto('/metrics?tab=tool-usage')",
+  "assertions": {
+    "1_door_state_panel_visible_non_degenerate": {
+      "pass": true,
+      "bbox": { "x": 20, "y": 435.890625, "width": 1240, "height": 105.609375 }
+    },
+    "2_retry_button_absent": { "pass": true, "retry_present": 0 },
+    "3_zero_table_rows_no_fake_data": {
+      "pass": true,
+      "table_present": 0,
+      "table_rows": 0,
+      "empty_hint_present": 0
+    },
+    "exactly_one_banner": { "pass": true, "data-error-class auth_not_configured count": 1, "trend_error count": 0 }
+  },
+  "result": "1 passed (28.0s)",
+  "geometry_not_screenshots": true
+}
