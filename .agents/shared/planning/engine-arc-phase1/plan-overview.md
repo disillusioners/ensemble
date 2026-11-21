@@ -36,7 +36,7 @@ Build the central engine (frozen §B.2, all 10 components) **plus** the Emperor-
 | P8 | Staged release | Slot derived live at stage time (W9), delta-only rollback adjudication, dormant disclosure, NO promote | 5/10 | P7 |
 | **Total** | | | **137/222 (≈180 mid)** | |
 
-**Band verdict: INSIDE 118–222.** ≈11% above the 162h anchor; excess priced in `phase1-plan.md` §0.2a: 26-site dead-knob cleanup (≈5h), watchdog drill (≈4h), diff-census record (≈1h) — carrying costs the anchor folded in. Test estimate cross-check: `test-strategy.md` 28/48h vs P7 13/23h + per-phase AC test effort (reconciled: P7 is pack assembly; component tests ride each phase).
+**Band verdict: INSIDE 118–222.** ≈11% above the 162h anchor; excess priced in `phase1-plan.md` §0.2a: 28-site repo-wide dead-knob cleanup (≈5h; review fold F-2 — the earlier 26 was tests/-scoped), watchdog drill (≈4h), diff-census record (≈1h) — carrying costs the anchor folded in. Test estimate cross-check: `test-strategy.md` 28/48h vs P7 13/23h + per-phase AC test effort (reconciled: P7 is pack assembly; component tests ride each phase).
 
 ## 4. Dependency & Parallelism
 
@@ -74,7 +74,7 @@ Key findings that shaped the plan (full: `research-anchors.md`, `research-bootsl
 ## 7. Top Risks (full registers in phase docs)
 
 1. **F-23 diff-census record (~27 entries, release-blocking)** — `git diff --name-only` vs fixed LANE_BASE with enumerated allowlists; the record is maintained by the changing lane. Single biggest hidden cost the fence check surfaced; owned by P6.
-2. **F-29 MagicMock(spec=ServicesConfig) fixture** (`tests/conftest.py:535`) — dead-knob deletion explodes at fixture construction unless all 26 call sites are cleaned atomically (P1 T1.12 = ONE task, not two).
+2. **F-29 dead-knob deletion fence** (`tests/conftest.py:535`) — dead-knob deletion explodes unless **all 28 repo-wide sites are cleaned atomically** (review fold F-2: 21 pydantic kwargs + 5 worker_poll_interval SET files + 2 registered pack sites; AMD-9 mechanism: spec= allows SET — the real vectors are the pydantic kwargs + GET-on-spec-mock). P1 T1.12 = ONE task, not two; census re-derived at merge-base-confirm time (review fold F-9 gate).
 3. **`daemon/api.py` shared file with the fast lane** — textually disjoint today, but both lanes land in one file; explicit-pathspec commits + merge-order check at finalize (house concurrent-commit rules).
 4. **Clock-frame trap in boot measurement** — any future gate that mixes DB/host clocks inflates by ~4s and can false-fail near the bar; the a-fortiori host-frame design eliminates the dependency.
 5. **Shadow-evidence dependency of the pilot greenlight** — if the engine ships default-OFF (not observing), `would_fire`/`dead`/shadow evidence never accumulates and the Phase-2 greenlight criteria become unsatisfiable (see adjudication D-3).
@@ -96,7 +96,7 @@ Coupling facts: file overlap `daemon/api.py` only, textually disjoint (auto-merg
 
 ## 10. Phase-2 Pilot Recommendation (detail: `phase2-pilot-recommendation.md`)
 
-**OrphanWatcherSweepService, post-fix** — reconcilers family, MAIN_LOOP class, 90s cadence. Strongest reasons: (1) exact motivating specimen for the getter-at-first-tick primitive (ctor-capture born-dead verified intact at this tree; 216 no-op ticks live); (2) smallest single-topology blast radius, and the fast-lane fix isolates engine behavior from defect; (3) gains a kill switch it never had, with a dormant-shadow before/after baseline. Greenlight criteria are measurable (≥2 release cycles shadow with zero false-dead; fix landed+verified; boot-SLO gate green dormant; watchdog drill evidence; mutation pins in PACKS.md). Alternatives assessed and rejected-as-first with reasoning.
+**OrphanWatcherSweepService, post-fix** — reconcilers family, MAIN_LOOP class, 90s cadence. Strongest reasons: (1) exact motivating specimen for the getter-at-first-tick primitive (ctor-capture born-dead verified intact at this tree; 216 no-op ticks live); (2) smallest single-topology blast radius, and the fast-lane fix isolates engine behavior from defect; (3) gains a kill switch it never had, with a dormant-shadow before/after baseline. Greenlight criteria are measurable and RE-BASELINED per architect ruling (a) / AMD-1(c) (canonical strings CS-2..CS-4 live in `phase2-pilot-recommendation.md` §5 — see the §PREDICATE LEDGER below; the ceremony-gated "≥2 release cycles" framing and the `job_metrics`-family dependency are withdrawn): shadow-evidence maturity per ruling (a); zero false shadow-dead on healthy mechanisms; fix landed+verified legacy-side (runs_total>0 under engine execution is post-flip acceptance); boot-SLO gate green dormant; watchdog drill evidence; mutation pins in PACKS.md. Alternatives assessed and rejected-as-first with reasoning.
 
 ## 11. Out of Scope (explicit)
 
@@ -112,3 +112,60 @@ Migration tail (~20 eligible modules, ≈4–10h/module, each its own gated comm
 ## 13. Provenance
 
 Produced by the planner-stage dispatch: 2 explorers (`research-anchors.md` — anchors/fences/hook points; `research-bootslo-raw.md` — live read-only boot telemetry) + 3 workers (phases w/ `grep-fence-check-before-design-substrate` skill applied — 30 fences surveyed; tests; slo+pilot) + this synthesis (planner, aggregator boundary). All workers planning-only: zero code, zero test runs, zero git mutations; commit lands via the decisions lane. Census anchor caveat: re-grep at use time — 18 anchors already drifted one base-version apart.
+
+---
+
+## §PREDICATE LEDGER (review-fold reconciliation, 2026-11-21)
+
+Added by the review-fold reconciliation pass (findings F-1..F-10). **Body wins, ledger mirrors** — every canonical string below appears VERBATIM in the body site(s) it governs; a body/ledger divergence is resolved in the body's favor and the ledger corrected in the same change.
+
+### (i) Canonical strings (one per re-baselined predicate)
+
+| ID | Predicate | Canonical string (verbatim in body) | Governing body site(s) |
+|---|---|---|---|
+| CS-1 | Dormant-boot posture — observer-spec semantics (AMD-1) | `N observer specs registered, zero executables (`execute_fn` withheld), shadow rows present` | `phase4-plan.md` D4.11 · AC4 · AC8 · `phase7-plan.md` Leg D · `test-strategy.md` §3.2 leg 1 · `phase8-plan.md` D8.4(a) |
+| CS-2 | Greenlight criterion 1 — ruling (a) rewording, verbatim | `≥2 independent boots of shadow evidence on the priority targets (one of which is the staged-release boot smoke), AND long-cadence maturity: every registered target has been shadow-evaluated through ≥2× its interval, AND a ≥48h live soak post-promote before the pilot flip.` | `phase2-pilot-recommendation.md` §5 criterion 1 |
+| CS-3 | Greenlight criterion 2 (AMD-1(c) shadow-dead semantics) | `Zero false shadow-dead on healthy mechanisms` | `phase2-pilot-recommendation.md` §5 criterion 2 |
+| CS-4 | Greenlight criterion 5 split (AMD-1(c)) | `fix-landed verification stays legacy-side (the fast-lane lane's own evidence); "runs_total>0 for OrphanWatcher **under engine execution**" moves to the pilot's post-flip acceptance evidence` | `phase2-pilot-recommendation.md` §5 criterion 5 |
+| CS-5 | D-3 adopt / dormant-default semantics (AMD-3(c)) | `ships `enabled=true` + `shadow_mode=true`; dormant-default = registered observer specs, zero executables, shadow rows accumulating; per-job `USE_ENGINE` all unset.` | `test-strategy.md` §1.1 T8 · §3.1 |
+| CS-6 | Shadow-row cadence (AMD-1 + D2.13) | `shadow rows are BY DESIGN one `SKIPPED_SHADOW` row per due job per interval` | `phase2-plan.md` AC9 |
+| CS-7 | Shadow-row retention bound (AMD-1(e)) | `P2 specifies a retention bound for shadow rows (house TTL/sweep pattern; bounded append-only growth)` | `phase1-plan.md` §5 retention note |
+| CS-8 | Dead-knob site census — repo-wide, 28 sites (review fold F-2; AMD-9 mechanism) | `the FULL 28-site set: 21 pydantic `PersistenceConfig(checkpoint_interval=…)` kwargs + 5 `worker_poll_interval` SET files + 2 pack sites` | `phase1-plan.md` T1.12 · §7 F-29 |
+
+### (ii) DELETION RECORD (withdrawn predicate strings — the `registrations=0` / zero-engine_runs / writes-no-rows / "registers nothing" family)
+
+| Withdrawn string | Removed from | Replaced by |
+|---|---|---|
+| `registrations=0` (posture INFO pin) | `phase4-plan.md` AC4 | `registrations=N observer specs` + CS-1 |
+| `registrations=0` (release-blocking boot assertion) | `phase7-plan.md` Leg D | CS-1 |
+| "with zero registrations" (leg phrasing) | `phase7-plan.md` T7.4 | "N observer specs registered (zero executables — the D4.11 posture)" |
+| "registers nothing" (zero-estate-contact AC) | `phase4-plan.md` AC8 | CS-1 |
+| "with zero estate registrations" (default-posture tail of the dormancy truth table) | `phase1-plan.md` D1.9 | "N observer specs registered at boot per AMD-1 (registration-for-observation is NOT migration; zero `USE_ENGINE` estate migrations)" |
+| "writes no rows" (dormant AC) | `phase2-plan.md` AC9 | CS-6 |
+| "zero `engine_runs` rows" + "zero `engine_jobs` rows created by the engine itself" (boot assertions) | `phase7-plan.md` Leg D | "`engine_runs` carries ONLY `outcome=SKIPPED_SHADOW` rows (one per due job per interval)" |
+| "ships dormant with zero registrations" (ceremony disclosure (a)) | `phase8-plan.md` D8.4(a) | "observer-spec posture — CS-1" |
+| `SELECT count(*) FROM engine_runs == 0` (dormant-boot proof) | `test-strategy.md` §3.2 leg 1 | CS-1 + SKIPPED_SHADOW-rows-only assertion |
+| "`ENSEMBLE_ENGINE_ENABLED` default OFF semantics" (T8 authoring pin) | `test-strategy.md` §1.1 T8 | CS-5 (D-3 adopt) |
+| "`ENSEMBLE_ENGINE_ENABLED` unset/OFF ⇒ … executes NOTHING" (unset-implies-off semantics) | `test-strategy.md` §3.1 first bullet | CS-5 + explicit-OFF-only bullet (unset resolves to the shipped `enabled=true` default per AMD-8) |
+| "≥2 release cycles" (ceremony-gated criterion-1 framing) | `phase2-pilot-recommendation.md` §5 criterion 1; `plan-overview.md` §10 summary | CS-2 (ruling (a) verbatim) |
+| "converged `job_metrics` family" (criterion-1 family dependency; D-6 explicitly rejects families) | `phase2-pilot-recommendation.md` §5 criterion 1 | engine's own in-process snapshot (D2.14) |
+| "The engine is built only if the gate fires" (pre-ruling remnant — not the registration family; recorded for completeness) | `phase2-pilot-recommendation.md` §6 (marked SUPERSEDED, retained as the migration-escalation criteria it actually governs) + §5 falsification item (iii) (bracket note) | F-7 note: the §E.3 gate governs MIGRATION ESCALATION only, never the build (build unconditional per Emperor ruling #1) |
+
+**Ruling-record note:** literal `registrations=0` occurrences REMAIN inside `architecture-recommendation.md` (§1(c) correction, findings register #1, AMD-1). These are the ruling text itself quoting the withdrawn string AS the thing withdrawn ("Amend D4.11 from `registrations=0` to `registrations=N observer specs`") — visibly self-marking it superseded, retained per F-10's single-edit restriction on that file. They are ruling record, not live predicates.
+
+### Re-derivation gate disclosure (review fold F-9)
+
+origin/latest MOVED during review — `b71742fe3` → `01ec292da` (~20 commits, 29 code files, incl. a dead-knob site) — and will move again before this ~180h build merges. Dispatcher ruling: wire an EXPLICIT RE-DERIVATION GATE rather than re-deriving at-pass. Wired: (1) the dead-knob census is re-derived at merge-base-confirm time, immediately before execution (`phase1-plan.md` T1.12); (2) P4's anchor set (the 29-pass inventory + api.py region anchors) is re-grepped at execution start (`phase4-plan.md` §4.1).
+
+### (iii) Closing ATTESTATION — every changed row in this pass
+
+1. `plan-overview.md` — §3 Band verdict row (26→28-site census echo, F-2); §7 Risk 2 (F-29 row restated: 28 repo-wide sites, AMD-9 mechanism, F-9 gate); §10 pilot summary (criteria re-baselined per ruling (a)/AMD-1(c), CS-2..CS-4 pointers); NEW §PREDICATE LEDGER section (this section).
+2. `phase1-plan.md` — §0.2a Band check (a)-clause (28 repo-wide dead-knob sites, F-2); D1.9 default-posture tail (withdrawn "zero estate registrations", AMD-1 observer-spec posture); T1.12 row (F-2 census CS-8 + AMD-9 mechanism + F-9 re-derivation gate; pack sites added to anchors cell); §5 retention note (AMD-1(e), CS-7); §6 Effort dead-knob row (23 kwarg call sites = 21 tests/ + 2 pack files); §7 F-29 fence (AMD-9 mechanism correction + CS-8 + F-9 gate).
+3. `phase2-plan.md` — AC9 (withdrawn "zero estate registrations"/"writes no rows"; CS-6).
+4. `phase2-pilot-recommendation.md` — §5 criterion 1 (CS-2 verbatim, F-1 site 7 + F-6); §5 criterion 2 (CS-3, AMD-1(c)); §5 criterion 5 (CS-4, AMD-1(c) split); §5 Falsification item (iii) (corroboration bracket); §6 heading note + "B (subset engine)" bullet (F-7 SUPERSEDED marking).
+5. `phase4-plan.md` — D4.11 (AMD-1: `registrations=0` → N observer specs, execute_fn withheld, T1.11 cadences; withdrawn string named as WITHDRAWN in Rejected cell); §4.1 Consequence paragraph (F-9 anchor-freshness gate); T4.4 (AMD-5: `set_event_sink(...)` composition line named; canary `register()` site + `SERVICES_<CANARY>_USE_ENGINE` fixture one-owner sentence); AC4 (CS-1); AC8 (CS-1).
+6. `phase7-plan.md` — T7.4 (withdrawn "with zero registrations"); Leg D (CS-1, RELEASE-BLOCKING re-baseline).
+7. `phase8-plan.md` — §4 Release-scoping note over T8.1–T8.9 (AMD-4 two-invocation machinery + F-5 ownership sentence + rationale); D8.4(a) (CS-1 observer-spec disclosure); D8.6 (AMD-4 two-release staging + ownership); T8.1 (release B/A split marker); T8.4 (per-release adjudication marker).
+8. `test-strategy.md` — §1.1 T8 (CS-5, AMD-3(c)); §3.1 (CS-5 char-for-char + D2.13 shadow-row cadence + AMD-8 unset semantics); §3.2 leg 1 (CS-1 + SKIPPED_SHADOW-rows-only).
+9. `research-anchors.md` — §2 "Engine-independent watchdog" insertion-point line (F-3: asyncio research shape marked SUPERSEDED; BUILT daemon-thread shape per AMD-2/D4.6; research history retained).
+10. `architecture-recommendation.md` — §4 AMD-5 block ONLY (F-10 one-line supersession note: FA-6 "P4 declares the registry Out" vs set_event_sink-in-T4.4 safe under D4.10's guarded-block posture). No other line in this file touched.

@@ -142,6 +142,7 @@ Amend phase8 D8.6: enumerate TWO stage invocations — release A = `fix/phase1-l
 
 **AMD-5 — Claim the unclaimed edits (fixes 🟡-9).**
 Ownership map additions: `set_event_sink(...)` composition line → P4 T4.4 (named in task text); synthetic canary `register()` call site + `SERVICES_<CANARY>_USE_ENGINE` fixture → P4 (or P7 pack, one owner). Two lines; prevents a REJECT-grade invariant catch at implementation.
+> Supersession note (review fold F-10, 2026-11-21): FA-6's "P4 declares the registry Out" and this amendment's `set_event_sink` composition line in T4.4 are not in conflict — the sink install is a guarded composition inside D4.10's try/except wiring block (logs + continues, never aborts boot), not a P4→P5 structural dependency; the P4∥P5 "no shared new symbol" claim holds with the sink install as the named exception.
 
 **AMD-6 — Clock-frame + anchor record (fixes 🟡-7, 🟡-14).**
 Rewrite test-strategy §5's timed probe to a harness-owned host-frame start anchor (unit `ActiveEnterTimestamp` / launcher line); `boot_epoch`→first-ready DB stamp = telemetry only; correct decisions.md D-2's "(b)-shaped already" claim; gate pack captures `ActiveEnterTimestamp` for the bare-restart class; daemon-side readyz-green emit stays named fallback.
