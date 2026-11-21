@@ -85,7 +85,7 @@ class TestB9AssertionShapes:
         yaml_file = _write_yaml(tmp_path)
         config = load_config(str(yaml_file))
         assert config.ram_guard.ceiling_mib is None  # unset => dynamic
-        assert config.ram_guard.poll_interval_ms == 200
+        assert config.ram_guard.poll_interval_ms == 1000
         assert config.ram_guard.grace_ms == 250
         assert config.ram_guard.pss_confirm_deadline_ms == 250
         # The switch defaults ON when absent (B2/T2).
@@ -126,7 +126,7 @@ class TestB9AssertionShapes:
         config = load_config(str(yaml_file))  # OFF => NO ABORT (§17.4)
         assert config.ram_guard_derived_switch is False
         assert config.ram_guard.ceiling_mib is None  # the construct default
-        assert config.ram_guard.poll_interval_ms == 200
+        assert config.ram_guard.poll_interval_ms == 1000
         assert config.ram_guard.grace_ms == 250
         assert config.ram_guard.pss_confirm_deadline_ms == 250
 
@@ -148,7 +148,7 @@ class TestKnobBounds:
         assert ceiling.default is None
         assert _bounds(ceiling) == (64, 65536)
         poll = fields["poll_interval_ms"]
-        assert poll.default == 200
+        assert poll.default == 1000
         assert _bounds(poll) == (50, 2000)
         grace = fields["grace_ms"]
         assert grace.default == 250
@@ -209,7 +209,7 @@ class TestEmptyStringEnvIsUnset:
         ("env_name", "field", "expected"),
         [
             ("RAM_GUARD_CEILING_MIB", "ceiling_mib", None),
-            ("RAM_GUARD_POLL_INTERVAL_MS", "poll_interval_ms", 200),
+            ("RAM_GUARD_POLL_INTERVAL_MS", "poll_interval_ms", 1000),
             ("RAM_GUARD_GRACE_MS", "grace_ms", 250),
             ("RAM_GUARD_PSS_CONFIRM_DEADLINE_MS", "pss_confirm_deadline_ms", 250),
         ],
@@ -245,7 +245,7 @@ class TestYamlTrap:
         monkeypatch.setenv("RAM_GUARD_CEILING_MIB", "64")
         config = load_config(str(yaml_file))
         assert config.ram_guard.ceiling_mib == 64  # env wins
-        assert config.ram_guard.poll_interval_ms == 200  # the literal is ignored
+        assert config.ram_guard.poll_interval_ms == 1000  # the literal is ignored
 
     def test_a_yaml_literal_alone_does_not_apply(self, tmp_path):
         yaml_file = _write_yaml(
@@ -338,7 +338,7 @@ class TestFieldSet:
             monkeypatch.delenv(name, raising=False)
         config = RamGuardConfig()
         assert config.ceiling_mib is None
-        assert config.poll_interval_ms == 200
+        assert config.poll_interval_ms == 1000
         assert config.grace_ms == 250
         assert config.pss_confirm_deadline_ms == 250
 
@@ -466,3 +466,21 @@ class TestNotInProbes:
     def test_probe_response_models_carry_no_guard_field(self):
         assert "ram_guard" not in LivezResponse.model_fields
         assert "ram_guard" not in ReadyzResponse.model_fields
+
+
+# ── M1 (cpu-l1-m1-ramguard) mutation-meaningful pins for the new default ────
+
+
+class TestM1PollDefaultPins:
+    def test_default_is_1000(self):
+        assert RamGuardConfig().poll_interval_ms == 1000
+
+    def test_env_override_honored(self, tmp_path, monkeypatch):
+        yaml_file = _write_yaml(tmp_path)
+        monkeypatch.setenv("RAM_GUARD_POLL_INTERVAL_MS", "333")
+        config = load_config(str(yaml_file))
+        assert config.ram_guard.poll_interval_ms == 333
+
+    def test_empty_string_env_is_default_1000(self, monkeypatch):
+        monkeypatch.setenv("RAM_GUARD_POLL_INTERVAL_MS", "")
+        assert RamGuardConfig().poll_interval_ms == 1000

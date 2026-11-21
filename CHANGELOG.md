@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — ram-guard poll cadence 200 ms → 1000 ms (M1, cpu-l1-cheap-overhead)
+
+- `RamGuardConfig.poll_interval_ms` default (and ctor default) moved from 200 to 1000 ms (`RAM_GUARD_POLL_INTERVAL_MS` mechanism unchanged; bounds (50, 2000) unchanged). ~5× reduction in ram-guard-tick frequency: per-tick `scan_proc` cost stays ~11.3 ms, so steady-state CPU share of the scan path falls from the live-measured ~17.9% to ~3.6% of one core by frequency arithmetic (live re-measure post-promote).
+- Trade-off: breach-detection latency rises from ≤200 ms to ≤1 s; on the pathological balloon path (1–3 GiB/s) up to ~1–3 GB more growth before kill. Emperor accepted this for the CPU saving. Confirm window (250 ms one-shot PSS confirm, fail-open ⇒ kill) and TERM→KILL grace (250 ms) are unchanged.
+- Scoping of `/proc` scan to watched pgids is deliberately NOT included (behavior-changing on the kill-decision surface, no measurement-first evidence) — see DECISIONS-l1.md.
+
 ## [0.31.22] — 2026-11-20
 
 ### Fixed — prompt_reload compact-note wake-up: the post-compaction history swap is now a FRESH message list
