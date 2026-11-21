@@ -65,6 +65,7 @@ SinkCallable = Callable[[str, str | None, str, str, bool], None]
 - `tool_category`: resolved by the tap at emission time from a static tool-name → category map (existing closed vocabulary). Sinks do NOT resolve category.
 - `agent_id`: resolved from the instance row (`instance.agent_id`), sentinel `'unknown'` on failure.
 - `project_id`: resolved via the ContextSlot pattern (`instance_metadata["project_id"]`), sentinel `""` on failure.
+  - (approver fix B3-note, iteration-001) SUPERSEDED by D16 — the sentinel is `"__none__"` everywhere; D3's `""` above is historical. D16 rules the live value and supersedes D11 by name; this marker extends that same supersession to D3's carried `""` clause without rewriting D3's history.
 - `ok`: best-effort success flag; default `True` on ambiguity.
 
 No argument payload is possible by construction — the signature has no args slot. This is the NAMES-ONLY guarantee at the type level.
@@ -72,6 +73,8 @@ No argument payload is possible by construction — the signature has no args sl
 **Rationale.** Centralizing category resolution in the tap guarantees no sink can accidentally receive or re-derive argument data; the tap is the single point that touches tool identity. Freezing the signature lets Phase 2 (metrics family counter) consume it with ZERO Phase-1 edits.
 
 **Evidence.** Dispatcher pre-ruling C-observer; phase1-plan.md §3.2.
+
+**Sink-registration symbol FROZEN (approver fix N-B9-note, iteration-001).** The sink-registration symbol is frozen as `register_sink` (paired `unregister_sink`), exposed at module level by `daemon/services/tool_usage_observation.py` (phase1-plan.md §4 T4, :267). Phase 2 codes against THIS symbol and module path; renaming it is a contract-break. This closes the one cross-phase coupling phase2 §9:153 left open (that note guessed `register_tool_usage_sink` "(or equivalent)" — the phase1 body's actual `register_sink` governs). D3 freezes the signature; this line freezes the registration symbol alongside it.
 
 ---
 
@@ -103,7 +106,7 @@ No argument payload is possible by construction — the signature has no args sl
 
 ### D6 — Domain door: `/api/tool-usage/*` read-only, auth posture replicated (Phase 1)
 
-**Decision (ruled by dispatcher; architect pass may override with rationale).** New `daemon/routers/tool_usage.py`, `APIRouter(prefix="/tool-usage")`, one registration line in `daemon/routers/__init__.py`. Endpoints per the frozen contract (phase1-plan.md §3.4). Auth posture replicates `_require_auth_on` verbatim (nest_reports.py:94-114): 503 `AUTH_NOT_CONFIGURED` when auth off; scopes `maintenance:read | metrics:read`; 403 `SCOPE_INSUFFICIENT`. Read-only — no writes through this door.
+**Decision (ruled by dispatcher; architect pass may override with rationale).** New `daemon/routers/tool_usage.py`, `APIRouter(prefix="/tool-usage")`, one import line + one `__all__` entry (two edits; `routers/__init__.py:36`/`:73` precedent) in `daemon/routers/__init__.py` (approver fix N-B5-note, iteration-001 — corrects the earlier "one registration line" understatement). Endpoints per the frozen contract (phase1-plan.md §3.4). Auth posture replicates `_require_auth_on` verbatim (nest_reports.py:94-114): 503 `AUTH_NOT_CONFIGURED` when auth off; scopes `maintenance:read | metrics:read`; 403 `SCOPE_INSUFFICIENT`. Read-only — no writes through this door.
 
 **Rationale.** The door is the FE's data source (Phase 4) and the digest's read surface (Phase 3). Replicating the nest-reports posture keeps the deployed default (auth-OFF on 0.0.0.0 with permissive CORS) fail-closed: an open route would publish usage rows to anyone who can reach the port. The closed error vocabulary keeps the FE's door-state mapping exhaustive.
 
@@ -113,7 +116,7 @@ No argument payload is possible by construction — the signature has no args sl
 
 ### D7 — Collection kill-switch: managed key, default ON, fail-closed (Phase 1)
 
-**Decision.** Add `limits.tool_usage_collection_enabled` to `MANAGED_KEYS` (daemon/services/settings_service.py), bool, default True (this phase IS the measurement slice), `requires_restart=False`, fail-closed (key absent/misconfigured ⇒ collection OFF). Independent from `limits.metrics_enabled` / `ENSEMBLE_METRICS_ENABLED` (Phase 2 stacks under those).
+**Decision.** Add `limits.tool_usage_collection_enabled` to `MANAGED_KEYS` (daemon/services/settings_service.py), bool, default True (this phase IS the measurement slice), `requires_restart=False`. Kill-switch semantics (absent vs malformed): key ABSENT from settings ⇒ code default applies (collection ON — the knob is opt-OUT, and absence must never crash: the v0.31.8 absent-config crash class is the motivation); key PRESENT with a parseable boolean ⇒ honored; key PRESENT but unparseable/unknown value ⇒ FAIL-CLOSED: collection OFF + throttled boot WARNING (never a crash, never a silent default). (approver fix B6-note, iteration-001 — this sentence is byte-identical to phase1-plan.md:207; it replaces the contradictory 'default True + absent ⇒ OFF' clause.) Independent from `limits.metrics_enabled` / `ENSEMBLE_METRICS_ENABLED` (Phase 2 stacks under those).
 
 **Rationale.** The managed-key pattern (settings_service.py:518-530 metrics precedent) gives a DB-overridable, env-backed, no-restart kill-switch. Default ON because Phase 1's entire purpose is measurement; default OFF would ship a measurement slice that measures nothing. Fail-closed protects against a misconfigured key silently enabling collection in an unsafe posture. Independence from the metrics global gates lets the Emperor turn off collection without turning off metrics (and vice versa).
 
@@ -123,11 +126,11 @@ No argument payload is possible by construction — the signature has no args sl
 
 ### D8 — Metrics family: aggregate-only, F24, new wiring/w5.py (Phase 2 — ruled by dispatcher)
 
-**Decision (ruled by dispatcher; architect pass may override with rationale).** Phase 2 wires one new metrics family (next F-number — likely F24, phase 2 verifies against the registrar) via a NEW `wiring/w5.py`. Aggregate-only: labels `tool_category` (existing closed vocabulary reused as-is — NO `VOCABULARY_VERSION` bump if no new values) + `result ∈ {ok,error}`. NO per-project/per-agent/tool-name labels (decision-module B-2, decisions.md:58). Registrar-only. Band with explicit headroom. Adjudication-pack + catalog §1/§8/§11/§14 + family-pack amendments. Independent per-family kill-switch key stacking under `ENSEMBLE_METRICS_ENABLED + limits.metrics_enabled`.
+**Decision (ruled by dispatcher; architect pass may override with rationale).** Phase 2 wires one new metrics family (next F-number — likely F24, phase 2 verifies against the registrar) via a NEW `wiring/w5.py`. Aggregate-only: labels `tool_category` (existing closed vocabulary reused as-is — NO `VOCABULARY_VERSION` bump if no new values) + `result ∈ {ok,error}`. NO per-project/per-agent/tool-name labels (decision-module B-2, `.agents/shared/planning/decision-module/decisions.md:58` — full-path form per approver fix N-B6-note, iteration-001). Registrar-only. Band with explicit headroom. Adjudication-pack + catalog §1/§8/§11/§14 + family-pack amendments. Independent per-family kill-switch key stacking under `ENSEMBLE_METRICS_ENABLED + limits.metrics_enabled`.
 
 **Rationale.** The metrics family exposes tool-usage frequency as a Prometheus-style aggregate without cardinality explosion (per-tool/per-agent labels would blow up the series count). Reusing the closed vocabulary avoids a version bump. The independent kill-switch lets collection and metrics be toggled separately.
 
-**Evidence.** Dispatcher pre-ruling C; w4.py (F23 registrar precedent); checkpoint_metrics.py:290 (VOCABULARY_VERSION = 11); decision-module B-2 (decisions.md:58).
+**Evidence.** Dispatcher pre-ruling C; w4.py (F23 registrar precedent); checkpoint_metrics.py:290 (VOCABULARY_VERSION = 11); decision-module B-2 (`.agents/shared/planning/decision-module/decisions.md:58` — full-path form per approver fix N-B6-note, iteration-001).
 
 **Sensitivity.** Phase 2 verifies the F-number and the band; architect pass may adjust labels.
 
@@ -140,6 +143,8 @@ No argument payload is possible by construction — the signature has no args sl
 **Rationale.** The type system forces `custom` (phase4-plan.md Ruling A). Lazy loading keeps the heavy body out of the `/metrics` route fetch set, preserving the 134 B headroom. House SVG avoids chart.js (B2/B3/B4a invariants).
 
 **Evidence.** phase4-plan.md §3 Ruling A, §4, §Task 4; tabs.manifest.ts:120-132/:133-160; app.ts:391.
+
+**Supersession pointer (approver fix N-B2-note, iteration-001).** D12 SUPERSEDES D9 on the B4b bound (185,000 INVARIANT → 185,000→188,000 ruled re-baseline; D9's fallback clause rescued it but the pointer makes the supersession explicit). D9 stands as history; D12 owns the live bound.
 
 ---
 
@@ -219,7 +224,7 @@ No argument payload is possible by construction — the signature has no args sl
 
 **Ruled by:** architect pass @ fd254b335 (W4/W6 evidence).
 
-**Phase file(s) where the same ruling text appears:** phase1-plan.md §3.1, §3.2, §3.4, §6 R4, §8 A1, §9 OQ3.
+**Phase file(s) where the same ruling text appears:** phase1-plan.md §3.1 (:76, sentinel semantics), §3.2, §4 T8 (door-filter carrier), §6 R4, §8 A1, §9 OQ3. (approver fix B4-note, iteration-001) — the former §3.4 pointer is withdrawn: §3.4 has zero `__none__` occurrences; the sentinel ruling lives at §3.1:76 and the door-filter carrier at §4 T8 (landed by the parallel body fix).
 
 ---
 
@@ -235,11 +240,13 @@ No argument payload is possible by construction — the signature has no args sl
 
 ### D18 — F24 family corrections (Phase 2)
 
-**Ruling text.** (1) Measured closed-space total 626 ≤ 2000 is THE claim (492 today + 134; review fix U16b — the prior 491/625 was off by one; architecture-recommendation.md §5 retains 491 as the pre-correction architect measurement — the divergence is deliberate and disclosed here); the plan's "≈1095 ≪ 2000" is a band-sum (Σ bands 846 + F24's 160 + baseline 89) — may be cited separately, never as the headline; mixing conventions misleads future cardinality gates. (2) Citation corrected: the gate pattern is `metrics_gate.py` (env TRUTHY polarity + `live_managed_value`), NOT `kill.py:105/:128-131` (that is the decision-module kill store). (3) Gauge ("distinct tools observed") REJECTED for Phase 1 — second series family + near-zero decision value; scope-creep. (4) Operator writability: family key registered per D17 placement. (review fix U16b reconciliation)
+**Ruling text.** (1) Measured closed-space total 625 ≤ 2000 is THE claim (491 today + 134; the U16b +1 renumbering to 492/626 was wrong and is REVERTED — see the appended architect-style correction below; architecture-recommendation.md §5 stands as written at 491/625); the plan's "≈1095 ≪ 2000" is a band-sum (Σ bands 846 + F24's 160 + baseline 89) — may be cited separately, never as the headline; mixing conventions misleads future cardinality gates. (2) Citation corrected: the gate pattern is `metrics_gate.py` (env TRUTHY polarity + `live_managed_value`), NOT `kill.py:105/:128-131` (that is the decision-module kill store). (3) Gauge ("distinct tools observed") REJECTED for Phase 1 — second series family + near-zero decision value; scope-creep. (4) Operator writability: family key registered per D17 placement. (review fix U16b reconciliation)
 
 **Ruled by:** architect pass @ fd254b335 (W6 `3c653166`; §5 Ruling 4).
 
 **Phase file(s) where the same ruling text appears:** phase2-plan.md (untouched by this amendment's write scope; recorded here as the governing correction).
+
+**Correction (appended; approver fix B5-note, iteration-001; architect-owned style).** (approver iteration-001 B5 correction: the U16b +1 renumbering (491->492/625->626) was wrong — 492 derivable by no convention (pack helper 402+89=491; enforced cumulative 89+813=902); reverted to the architect's measured 491/625 which stands as written in architecture-recommendation.md §5. phase2-plan.md carries 491/625 at :61/:82/:96/:133/:143.) This appended entry discloses the full arc and discharges carried note B8; the ruling text above is reverted in place to the architect's measurement, which is the governing value.
 
 ---
 
@@ -350,11 +357,13 @@ These correct prior recon notes. They are recorded as facts, not decisions.
 
 Canonical predicates copied char-for-character from the phase bodies where they live. Containment verified by whitespace-normalized substring check (`re.sub(r"\s+", " ", ...)`) — line-based grep is invalid for wrapped strings.
 
+**Scope (approver fix N-B1-note, iteration-001):** this ledger carries the 7 DRIFT-RISK strings only — rulings that live verbatim in 2+ files — NOT an exhaustive gate census; body gates live in their phase files.
+
 | # | Canonical predicate (verbatim) | Source body location |
 |---|---|---|
 | 1 | sentinel `"__none__"` for un-attributable calls | phase1-plan.md §3.1 (D16) |
-| 2 | NEVER drop counters (overflow means flush, not discard) | phase1-plan.md §3.3 (D15) |
-| 3 | ≤ 188 000 B (RE-BASELINED by leader ruling R-08 — architect §6.2 / LEADER RULING; was ≤ 185 000 B) | phase4-plan.md §4.2 / Task 6 (LR1) |
+| 2 | NEVER drop counters (overflow means flush, not discard) | phase1-plan.md §5 AC4 (:382) — re-pinned from §3.3 (the §3.3 carrier wraps the phrase in `**` emphasis, breaking char-for-char); plain occurrence verified at AC4 (approver fix B2-note, iteration-001) |
+| 3 | ≤ 188 000 B (RE-BASELINED by leader ruling LR1 — decisions D12; ownership grant decisions D22; was ≤ 185 000 B) | phase4-plan.md §4.2 (B4b row) / Task 6 (LR1) — re-pinned to body truth (approver fix B1-note, iteration-001) |
 | 4 | schedule:'0 8 * * *' | phase3-plan.md §3.8 (seeded-row config, D-3) |
 | 5 | complete previous UTC day (`D−1`); "cumulative-week" := `[D−7, D−1]` complete UTC days | phase3-plan.md §3 (D-7) |
 | 6 | VOCABULARY_VERSION==11 | phase2-plan.md §3 / T6 |
@@ -362,6 +371,6 @@ Canonical predicates copied char-for-character from the phase bodies where they 
 
 ## CLOSING ATTESTATION (review fix U11)
 
-This fix pass (U3, U5, U10, U11) edited `phase1-plan.md` and `decisions.md` only; parallel workers own U1, U2, U4, U6–U9. Changed rows in this pass: U3 (phase1 §3.6 + T7 + scope line + T9 pin — third managed key), U5 (phase1 §5 AC4 — never-drop/emergency-flush contract), U10 (decisions.md D12 + D13 — propagated-verbatim file lists), U11 (this PREDICATE LEDGER + attestation).
+This is the approver iteration-001 fix pass on the decisions.md ledger. What changed in THIS pass: B1 (PREDICATE LEDGER row 3 re-pinned to the body's current attribution string — "LR1 — decisions D12; ownership grant decisions D22"), B2 (this attestation rewritten to true results + row 2's source cell re-pinned from §3.3 to its verified plain site §5 AC4), B3 (D3 append-only supersession marker: sentinel is `"__none__"` everywhere; D3's `""` historical), B4 (D16 x-ref repointed from the empty §3.4 to §3.1:76 + §4 T8), B5 (D18 reverted to 491/625 as THE claim + appended architect-style correction entry disclosing the full arc — also discharges carried note B8), B6 (D7 contradictory clause replaced with the adjudicated absent-vs-malformed semantics, byte-identical to phase1:207). Carried notes folded: N-B1 (ledger scope declaration), N-B2 (D12 SUPERSEDES D9 pointer at D9), N-B5 (D6 two-edits form), N-B6 (D8 full-path citation), N-B9 (sink-registration symbol `register_sink` frozen at D3). B7 (phase5 SHA) is a body-file fix outside this worker's decisions.md-only scope and was NOT touched here. Edit scope: decisions.md (this worker); body fixes landed by parallel workers, verified by containment, not by authorship.
 
-Char-for-character verification performed with Python `re.sub(r"\s+", " ", text)` containment checks of each PREDICATE LEDGER entry's canonical string against its cited body location. Results: entries 1–6 PASS (entry 7 is a reference to the D15 blockquote, which is byte-identical across D15, phase1-plan.md §3.3.1, and architecture-recommendation.md §3 — verified by direct comparison). Method: whitespace-normalized containment; line-based grep was NOT used (wrapped strings break line grep). No drift found; no fix-up required before attesting.
+Verification method: Python `re.sub(r"\s+", " ", text)` whitespace-normalized CONTAINMENT of each PREDICATE LEDGER row's canonical string against its cited CURRENT body file (line-based grep is invalid for wrapped strings); row 7 verified by direct byte comparison of the blockquote across its three carriers. TRUE per-row results after this pass: row 1 PASS — phase1-plan.md §3.1 (:65); row 2 PASS — phase1-plan.md §5 AC4 (:382), the plain occurrence (the former §3.3 carrier wraps the phrase in `**` emphasis and FAILS char-for-char); row 3 PASS — phase4-plan.md §4.2 B4b row (:313); row 4 PASS — phase3-plan.md §3.8 (:68); row 5 PASS — phase3-plan.md §3 D-7 (:82); row 6 PASS — phase2-plan.md §3/T6 (:82/:96/:136/:143); row 7 PASS — counting-contract blockquote byte-identical across D15 + phase1-plan.md §3.3.1 + architecture-recommendation.md §3. All 7 rows PASS; no residual drift in this file. This supersedes the prior attestation's false "entries 1–6 PASS / No drift found" claim.

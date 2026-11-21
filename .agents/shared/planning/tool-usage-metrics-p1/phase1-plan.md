@@ -36,7 +36,7 @@ Ship the **measurement substrate** for tool-usage frequency so layer-2 Tool-Arch
 - `daemon/graph.py` — **ONE hunk region only**: the tools-node observation wrapper wiring in the `add_node("tools", ...)` chain (~14464–14483). No other graph.py edits.
 - `daemon/manager.py` — **TWO hunks**: (1) model registration before `create_all` (~1006–1020 region); (2) flusher/queue startup + collection kill-switch wiring in the boot sequence (~1145–1148 region). **Amended by architect pass @ fd254b335 — D15 (A-5c): hunk 2 starts the flusher via a respawn-on-death outer task and does NOT ride `manager._background_tasks` (cancel-without-drain).** Phase 3 will add a THIRD disjoint hunk (seeder near 1144–1166) — enumerate ours precisely so the cross-writer sweep proves disjointness.
 - `daemon/migrations/versions/<new>.sql` (NEW) — SQLite-executable, idempotent, additive-only.
-- `daemon/routers/tool_usage.py` (NEW) — the domain door + the one registration line in `daemon/routers/__init__.py`.
+- `daemon/routers/tool_usage.py` (NEW) — the domain door + the router registration edits in `daemon/routers/__init__.py` (one import line + one `__all__` entry — two edits; `routers/__init__.py:36`/`:73` precedent). (approver fix B5-note, iteration-001)
 - `daemon/services/settings_service.py` — **THREE entries in `MANAGED_KEYS`** (amended by architect pass @ fd254b335 — D17 (A-7), extended by review fix U3): (1) the collection kill-switch `limits.tool_usage_collection_enabled`; (2) the F24 family key `limits.metrics_tool_usage_enabled` (`config_path=None`, DB/ENV-ONLY); (3) the D-5 seeder opt-out key `limits.tool_usage_digest_seeding_enabled` (`config_path=None`, DB/ENV-ONLY, default ON). Additive; no edit to existing keys.
 - `daemon/config.py` — **ONE additive field** `LimitsConfig.tool_usage_collection_enabled` so the collection key's dotted `config_path` has a backing field (A-7 option (a), mirrors `metrics_enabled`). Added to scope by architect pass @ fd254b335 — D17.
 - `daemon/api.py` — **ONE hunk**: the flusher's bounded 10 s shutdown drain beside the db_offload drain slot (~4611–4615), BEFORE `dispose_db_pools` (A-5c). Added to scope by architect pass @ fd254b335 — D15.
@@ -124,7 +124,7 @@ Sinks are registered at process startup (the flusher registers the ledger sink; 
 - The tap's hot path does **no** DB I/O and never blocks. It resolves identity (A-2: one `asyncio.to_thread(repo.get)` per batch) and increments `dict[(day, project_id, tool_name, agent_id)] → int` + adds the key to the dirty set (~ns, no allocation).
 - **A-5 (buffer shape)**: counter map + dirty-key set; **no hard cap**; **emergency flush at ≥10,000 dirty keys**; **NEVER drop counters** (overflow means flush, not discard); evict **CLEAN** keys with `day < today−2` only.
 - **A-5a (cadence)**: flush every **30 s** (if dirty) or at **≥500 dirty keys** (5 s was overkill at ranking grade — 17,280 vs 2,880 txns/day for a crash window that does not matter).
-- **A-5b (kill-switch semantics)**: the tap gates at enqueue (call-time eval — keep, D0.5/AM-27 precedent; fail-closed: key absent/misconfigured ⇒ collection OFF). **The FLUSHER IS SWITCH-BLIND**: toggling OFF performs one final tail flush, then idles. Drain-and-discard is REJECTED — it would truncate day counters mid-day and the digest would faithfully report the cliff as a usage collapse (a false signal in the very artifact this slice exists to produce).
+- **A-5b (kill-switch semantics)**: the tap gates at enqueue (call-time eval — keep, D0.5/AM-27 precedent; fail-closed: absent ⇒ code default (ON per D7); present-but-unparseable ⇒ collection OFF (approver fix B6, iteration-001)). **The FLUSHER IS SWITCH-BLIND**: toggling OFF performs one final tail flush, then idles. Drain-and-discard is REJECTED — it would truncate day counters mid-day and the digest would faithfully report the cliff as a usage collapse (a false signal in the very artifact this slice exists to produce).
 - **A-5c (shutdown)**: explicit **bounded 10 s drain in the ordered shutdown sequence BEFORE `dispose_db_pools`** (beside the db_offload drain slot, api.py:4611–4615). The flusher must **NOT ride `manager._background_tasks`** (cancel-without-drain). 10 s fits the 90 s systemd budget with 80 s headroom; SIGKILL loses ≤1 interval — accepted.
 - **A-5d (watchdog)**: the flusher loop is wrapped in a **respawn-on-death outer task**; `flush_error_counter` + dirty-set pressure counters serve as canaries; WARNING throttled to 1/5 min during outages. **DB failure leaves keys dirty** (coalesced retry) — never drop, never fail a tool call.
 - Each flush builds ONE multi-row upsert transaction via `asyncio.to_thread(repo.upsert_batch, deltas)`; the map guarantees **at most one row per PK per batch by construction** (A-6, §3.1).
@@ -137,7 +137,7 @@ Sinks are registered at process startup (the flusher registers the ledger sink; 
 
 ### 3.4 Door contract (FROZEN — Phase 4 consumes)
 
-New router `daemon/routers/tool_usage.py`, `APIRouter(prefix="/tool-usage", tags=["tool-usage"])`, registered in `daemon/routers/__init__.py` with one line.
+New router `daemon/routers/tool_usage.py`, `APIRouter(prefix="/tool-usage", tags=["tool-usage"])`, registered in `daemon/routers/__init__.py` with one import line + one `__all__` entry (two edits; `routers/__init__.py:36`/`:73` precedent). (approver fix B5-note, iteration-001)
 
 Endpoints:
 
@@ -204,7 +204,7 @@ Add to `MANAGED_KEYS` in `daemon/services/settings_service.py`:
 ),
 ```
 
-Default ON. Fail-closed: key absent/misconfigured ⇒ collection OFF. Independent from `limits.metrics_enabled` / `ENSEMBLE_METRICS_ENABLED` (Phase 2 stacks under those).
+Default ON. Kill-switch semantics (absent vs malformed): key ABSENT from settings ⇒ code default applies (collection ON — the knob is opt-OUT, and absence must never crash: the v0.31.8 absent-config crash class is the motivation); key PRESENT with a parseable boolean ⇒ honored; key PRESENT but unparseable/unknown value ⇒ FAIL-CLOSED: collection OFF + throttled boot WARNING (never a crash, never a silent default). Independent from `limits.metrics_enabled` / `ENSEMBLE_METRICS_ENABLED` (Phase 2 stacks under those). (approver fix B6, iteration-001: replaces the contradictory 'default ON + absent ⇒ OFF' wording; the Kill-switch-semantics sentence above is mirrored verbatim in decisions.md D7.)
 
 ---
 
@@ -324,17 +324,18 @@ Enumerate the hunk precisely:
 
 **Verification**: settings tests include ALL THREE new keys; fail-closed resolution test; `MANAGED_KEYS` registration-shape pin (three keys); LimitsConfig field present.
 
-### T8 — Domain door (NEW file + registration line)
+### T8 — Domain door (NEW file + registration edits)
 
-**File**: `daemon/routers/tool_usage.py` (NEW) + one line in `daemon/routers/__init__.py`.
+**File**: `daemon/routers/tool_usage.py` (NEW) + the registration edits in `daemon/routers/__init__.py` — one import line + one `__all__` entry (two edits; `routers/__init__.py:36`/`:73` precedent). (approver fix B5-note, iteration-001: the 'one line' wording understated the two-edit form; the registration block below shows both edits.)
 
 - Router, endpoints, auth posture per §3.4 (as amended: replication-invariant `_require_auth_on` body byte-match vs metrics door; DB errors ⇒ typed 503 `tool_usage_unavailable` with `_redact.redact_exc_str` server-side logging; filter-not-boundary scoping rule; abuse bounds — no pagination v1, 1 MB response-size test, nested agents capped top-50 per tool).
 - Repository access via `request.app.state` manager (nest_reports precedent).
 - Error vocabulary per §3.4.
+- **Door filter semantics (`project_id`)** (approver fix B4, iteration-001 — the D16 carrier T8 lacked; semantics source §3.1, wording kept consistent with §3.1): the `project_id` query param OMITTED = all rows INCLUDING the `__none__` bucket (total truth); `project_id=__none__` explicitly = filters to the un-attributable bucket; any other value = that project's rows (D16 sentinel).
 
 **Amended by architect pass @ fd254b335 — D21.**
 
-**Registration line** in `__init__.py`:
+**Registration edits** in `__init__.py` (two edits — one import line + one `__all__` entry; `routers/__init__.py:36`/`:73` precedent) (approver fix B5-note, iteration-001):
 ```python
 from .tool_usage import router as tool_usage_router  # /api/tool-usage (tool-usage-metrics-p1: ledger read door)
 ```

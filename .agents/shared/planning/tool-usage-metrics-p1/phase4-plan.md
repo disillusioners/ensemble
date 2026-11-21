@@ -142,7 +142,7 @@ Slug `tool-usage`, label `Tool Usage`. The slug matches the label (no internal i
    - `:96-100` `it('exactly ONE tab is the custom slot …')` → **2 custom / 8 central** (Ruling A adds a second custom tab).
    - `:102-116` the family-roster map → **unchanged** (tool-usage is custom, carries no family; the map is over `CENTRAL_TABS` only).
    - `:117-125` any custom-slot count assertions → update to 2.
-    - **`metricsCustomTab()` "exactly one custom" prose is now FALSE** — amend the docstring and pin that it returns the resource tab first (the second custom tab is type-legal; the constraint is prose/spec-count only). Add a pin asserting the returns-resource-first ordering.
+    - **`metricsCustomTab()` "exactly one custom" prose is now FALSE** — amend the docstring and pin that it returns the resource tab first (the second custom tab is type-legal; the constraint is prose/spec-count only). Add a pin asserting the returns-resource-first ordering. Pin the two-custom-tab return shape EXPLICITLY (approver fix A4, iteration-001): with tool-usage appended, `metricsCustomTab()` returns **two** tabs in manifest-declaration order — the resource tab first, then tool-usage (`[resource, tool-usage]`); the ordering rule is METRICS_TABS declaration order (the resource entry predates the appended tool-usage entry), NOT id-alphabetical — the spec pin asserts count == 2 AND this exact sequence; never left to the implementer.
     - **Pin the `metrics-range` snap**: entering `tool-usage` from a `15m`/`1h` frame snaps to `7d` (the measurement window); add an assertion for the snap.
     - One AOT dev-build pass after template edits (NG8002/NG0303 invisible to tsc/jest).
   Amended by architect pass @ fd254b335 — §6.1 spec amendments
@@ -212,6 +212,7 @@ The host's template is a single anchor `<ng-container #anchor></ng-container>` (
 
 **Section B — the tool-usage table (the layer-2 candidacy surface):**
 - Columns: tool name · category · calls 24h · calls 7d · calls total · agents (count) · "layer-2 candidate" affordance.
+- calls_24h on the door is a today+ rolling surface (vaguer by design); the daily digest's D−1 complete-UTC-day window is the precise surface — do not conflate the two (D-7 disclosure). (approver fix A3, iteration-001)
 - **Sorted by `calls_7d` DESCENDING client-side** (the ranking input; the BE returns unsorted rows per the contract). Ties broken by `tool_name` asc (deterministic). Zero/near-zero rows (`calls_7d <= threshold`) are visually distinct (a CSS class on the row + a badge "≈0 calls/7d" + a "candidate" marker) so the layer-2 candidates jump out.
 - The "near-zero" threshold is a **LOCAL constant** in the component (`NEAR_ZERO_CALLS_7D = 3` — a UI affordance, NOT a BE contract). Marked as an assumption (§9).
 - **Ranking caveat:** the FE `calls_7d` sort is a **frequency-only PROXY** for layer-2 candidacy — the **AUTHORITATIVE** ranking surface is the Phase-3 daily digest (schema-token weight × frequency + zero/near-zero + the allow-list intersection).  *(review fix U14)*
