@@ -98,6 +98,8 @@ class EngineService:
     async def _hydrate(self) -> None:
         jobs = await asyncio.to_thread(self.repository.list_jobs)
         for job in jobs:
+            if job.id in self._cache:
+                continue
             spec = self._resolve_spec(job)
             entry = self._make_cache_entry(job, spec)
             self._cache[job.id] = entry
