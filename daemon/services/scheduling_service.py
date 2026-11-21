@@ -104,6 +104,13 @@ logger = logging.getLogger(__name__)
 # schedules).
 SCHEDULER_SOURCE_TYPE = "scheduler"
 
+# Audit-only sentinel passed as ``caller_instance_id`` by the REST create
+# route (it has no calling instance). Creator capture SUPPRESSES it — a
+# REST-created schedule must never persist a ``creator_instance_id`` key.
+# Import this in the router instead of re-typing the literal so a rename
+# there cannot silently re-enable REST creator capture (the B1 defect class).
+REST_CALLER_ID = "rest-api"
+
 # Human-facing recurrence keys stored in config_json. The adapter itself
 # keys off run_at / schedule / interval_seconds; the recurrence key is a
 # human-intent echo so list/get surfaces can say "daily 06:30 UTC" without
@@ -809,6 +816,12 @@ async def create_schedule(
         cron_expression=cron_expression,
         local_time=local_time,
     )
+    # Creator capture (schedule-fire-notify T1): persist the creating
+    # instance id as a config-JSON key. REST passes the audit-only
+    # REST_CALLER_ID sentinel, which is SUPPRESSED here so REST-created
+    # rows carry NO creator_instance_id key (B1).
+    if caller_instance_id and caller_instance_id != REST_CALLER_ID:
+        config_json["creator_instance_id"] = caller_instance_id
     row = await asyncio.to_thread(
         repo.create_source_config,
         SCHEDULER_SOURCE_TYPE,

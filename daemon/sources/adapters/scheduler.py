@@ -91,6 +91,7 @@ from daemon.services.mission_record_service import (
     resolve_or_mint_fail_open,
     scheduler_mint_extension_enabled,
 )
+from daemon.services import schedule_fire_notify as _schedule_fire_notify_mod
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -1948,6 +1949,35 @@ Original scheduled task:
         )
         return _COALESCE_COALESCED
 
+    async def _notify_fire_notice(
+        self,
+        *,
+        metadata: dict,
+        recipient_instance_id: str,
+        job_id: str | None,
+        message_id: str | None,
+    ) -> None:
+        """Best-effort creator notice at a successful dispatch site.
+
+        Single never-raise call into the notify module — ALL field
+        extraction happens inside its guarded body (F2: nothing in the
+        wedge regions may raise). Both dispatch sites (direct + deferred
+        durable finalization) funnel through here so the two cannot drift.
+        """
+        await _schedule_fire_notify_mod.notify_schedule_fire(
+            self._manager,
+            schedule_config=getattr(self.config, "config", None),
+            metadata=metadata,
+            recipient_instance_id=recipient_instance_id,
+            label=getattr(self.config, "name", None),
+            target_agent=self._agent,
+            instance_mode=self._instance_mode,
+            recurrence=self._schedule_type,
+            job_id=job_id,
+            message_id=message_id,
+            target_instance_id=recipient_instance_id,
+        )
+
     async def _defer_delivery(
         self,
         execution_id: str,
@@ -2234,6 +2264,16 @@ Original scheduled task:
             reason,
         )
         self._fire_outcome = self.FIRE_OUTCOME_DEFERRED_DURABLE
+
+        # schedule-fire-notify (T4): single never-raise call at the deferred
+        # durable finalization (after the durable-evidence check).
+        await self._notify_fire_notice(
+            metadata=metadata,
+            recipient_instance_id=instance_id,
+            job_id=getattr(result, "job_id", None),
+            message_id=message_id,
+        )
+
         return self._fire_outcome
 
     async def _open_episode(self) -> bool:
@@ -2734,6 +2774,15 @@ Original scheduled task:
                 f"Scheduled job enqueued (inline): source={self.source_id}, "
                 f"execution_id={execution_id}, instance_id={instance_id[:8]}..., "
                 f"job_id={result.job_id}, message_id={result.message_id[:8] if result.message_id else None}"
+            )
+
+            # schedule-fire-notify (T4): single never-raise call at the
+            # direct dispatch site (F2: nothing in the wedge region raises).
+            await self._notify_fire_notice(
+                metadata=metadata,
+                recipient_instance_id=instance_id,
+                job_id=getattr(result, "job_id", None),
+                message_id=getattr(result, "message_id", None),
             )
 
             if self._execution_callback:

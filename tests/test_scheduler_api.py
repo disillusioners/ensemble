@@ -383,7 +383,151 @@ class TestPutSentinelRoundTrip:
         assert response.json()["config"]["webhook_secret"] == "********"
 
 
+class TestPutCreatorPreservation:
+    """N6/A6: the creator_instance_id captured at create time is immutable
+    via the REST PUT merge — it survives partial updates and cannot be
+    injected or overwritten by a client."""
+
+    @pytest.mark.asyncio
+    async def test_put_preserves_creator_instance_id(self, client, mock_manager):
+        stored_creator = "creator-abc"
+        base_config = {
+            "schedule": "0 9 * * *",
+            "agent": "./agents/developer",
+            "message": "Report",
+            "creator_instance_id": stored_creator,
+        }
+        scheduler_source = create_scheduler_source(
+            "scheduler-creator", "Creator Schedule", dict(base_config),
+        )
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+        updated_source = create_scheduler_source(
+            "scheduler-creator", "Creator Schedule", dict(base_config),
+        )
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated_source)
+        mock_registry = Mock()
+        mock_registry.get = Mock(return_value=None)
+        mock_manager.source_registry = mock_registry
+
+        response = await client.put(
+            "/schedules/scheduler-creator",
+            json={"config": {"message": "Updated"}},
+        )
+        assert response.status_code == 200
+        persisted = mock_manager._source_repository.update_source_config.call_args.kwargs["config"]
+        assert persisted.get("creator_instance_id") == stored_creator
+
+    @pytest.mark.asyncio
+    async def test_put_cannot_inject_creator_instance_id(self, client, mock_manager):
+        base_config = {
+            "schedule": "0 9 * * *",
+            "agent": "./agents/developer",
+            "message": "Report",
+        }
+        scheduler_source = create_scheduler_source(
+            "scheduler-inject", "Inject Schedule", dict(base_config),
+        )
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+        updated_source = create_scheduler_source(
+            "scheduler-inject", "Inject Schedule", dict(base_config),
+        )
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated_source)
+        mock_registry = Mock()
+        mock_registry.get = Mock(return_value=None)
+        mock_manager.source_registry = mock_registry
+
+        response = await client.put(
+            "/schedules/scheduler-inject",
+            json={"config": {"message": "Updated", "creator_instance_id": "evil-creator"}},
+        )
+        assert response.status_code == 200
+        persisted = mock_manager._source_repository.update_source_config.call_args.kwargs["config"]
+        assert "creator_instance_id" not in persisted
+
+
 # ==================== POST /schedules/{id}/trigger Tests ====================
+
+
+class TestCreatorCaptureRest:
+    """B1: REST create carries the audit sentinel (no creator key), and a
+    REST-created fire skips the identity gate silently — no repo read, no
+    dropped-counter increment (the only pin distinguishing absent-key skip
+    from a wrong absent-row drop)."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_counters(self):
+        from daemon.services import schedule_fire_notify_metrics as metrics
+
+        metrics.reset_sent_total()
+        metrics.reset_dropped_total()
+        yield
+        metrics.reset_sent_total()
+        metrics.reset_dropped_total()
+
+    @pytest.mark.asyncio
+    async def test_rest_created_row_has_no_creator_key(self):
+        import daemon.services.scheduling_service as ss
+        repo = Mock()
+        row = Mock()
+        row.source_id = "src-1"
+        row.name = "lbl"
+        row.status = "running"
+        row.config = None
+        row.enabled = True
+        repo.get_source_config_by_name = Mock(return_value=None)
+        repo.create_source_config = Mock(return_value=row)
+        repo.get_source_config = Mock(return_value=row)
+        orig = ss._require_repo
+        ss._require_repo = lambda: repo
+        try:
+            await ss.create_schedule(
+                {
+                    "label": "lbl",
+                    "message": "hi",
+                    "when": "06:00",
+                    "recurrence": "daily",
+                    "agent": "developer",
+                    "instance_mode": "new_instance",
+                },
+                caller_instance_id="rest-api",
+                caller_agent_id="",
+            )
+        finally:
+            ss._require_repo = orig
+        call = repo.create_source_config.call_args
+        config = call.args[2] if len(call.args) >= 3 else call.kwargs.get("config")
+        assert isinstance(config, dict)
+        assert "creator_instance_id" not in config
+
+    @pytest.mark.asyncio
+    async def test_rest_fire_does_not_increment_dropped_total(self):
+        """B1(b): absent creator key -> skip silently (no repo read, no drop)."""
+        import asyncio
+        from daemon.services import schedule_fire_notify as sfn
+        from daemon.services import schedule_fire_notify_metrics as metrics
+
+        metrics.reset_dropped_total()
+        manager = Mock()
+        manager._instance_repository = Mock()
+        manager.enqueue_message_job = Mock()
+
+        await sfn.notify_schedule_fire(
+            manager,
+            schedule_config={"agent": "developer", "message": "hi"},
+            metadata={"scheduler": {"trigger_time": "2026-01-01T00:00:00"}},
+            recipient_instance_id="some-recipient",
+            label="rest-lbl",
+            target_agent="developer",
+            instance_mode="new_instance",
+            recurrence="daily",
+            job_id="j",
+            message_id="m",
+            target_instance_id="some-recipient",
+        )
+        await asyncio.sleep(0.1)
+        assert metrics.get_dropped_total() == 0
+        assert manager._instance_repository.get.call_count == 0
+        assert manager.enqueue_message_job.call_count == 0
 
 
 class TestTriggerSchedule:

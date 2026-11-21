@@ -27,7 +27,7 @@ from daemon.models import (
     SourceActionResponse,
     SourceStatus,
 )
-from daemon.services.scheduling_service import ScheduleCreatePayload
+from daemon.services.scheduling_service import REST_CALLER_ID, ScheduleCreatePayload
 from daemon.utils import parse_utc_datetime, validate_instance_mode
 from daemon.routers.sources import WEBHOOK_SECRET_MASK, _mask_source_config
 
@@ -202,7 +202,7 @@ async def create_schedule(req: ScheduleCreate, request: Request):
     try:
         created = await manager.scheduling_service.create_schedule(
             payload,
-            caller_instance_id="rest-api",
+            caller_instance_id=REST_CALLER_ID,
             caller_agent_id="",
         )
     except ValueError as e:
@@ -382,9 +382,19 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
 
     # Handle partial config update (merge with existing config)
     if schedule_update.config is not None and existing.config:
-        # Merge partial config with existing config
         merged_config = {**existing.config, **schedule_update.config}
         updated_config = merged_config
+
+    # schedule-fire-notify (N6): creator_instance_id is captured at create
+    # time and is IMMUTABLE via PUT — a client cannot inject, overwrite, or
+    # erase it. The pin below is the single enforcement point (it also
+    # covers the case where no partial-config merge ran at all), so no
+    # earlier pop is needed.
+    if isinstance(updated_config, dict):
+        if isinstance(existing.config, dict) and "creator_instance_id" in existing.config:
+            updated_config["creator_instance_id"] = existing.config["creator_instance_id"]
+        else:
+            updated_config.pop("creator_instance_id", None)
 
     # ML-3 round-trip guard (M-2 rider, 2026-10-11): the GET echo masks
     # webhook_secret with the sentinel — an incoming config that still

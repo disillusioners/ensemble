@@ -637,6 +637,8 @@ are unique — a duplicate label is rejected at create time. Omitting `timezone`
 on an update keeps that schedule's existing timezone; the user's timezone
 setting never silently re-zones stored schedules.
 
+When I receive a `system:schedule_fire_notify` notice, the scheduled task has just begun running — I may watch the work handle it carries or ignore it.
+
 ---
 
 ## Image Generation — `generate_image`
