@@ -3422,7 +3422,10 @@ class EngineConfig(BaseSettings):
 
     Env prefix ``ENSEMBLE_ENGINE_`` (the commission names it explicitly —
     NOT ``SERVICES_ENGINE_*``; engine knobs are a different subsystem's
-    knobs and must not pollute the 70-field ``ServicesConfig`` — plan D1.8).
+    knobs and must not pollute the flat ``ServicesConfig`` — plan D1.8).
+    [Non-absolute wording — AMD-11: the former "70-field" count rotted
+    (tree truth 68 after the T1.12 dead-knob cleanup); this class is
+    large enough that a literal count is a lie in waiting.]
 
     **DORMANCY TRUTH TABLE (D1.9 / CS-5 — three INDEPENDENT axes).** P1
     freezes the NAMES only; P3/P4 implement the reads.
@@ -3537,7 +3540,11 @@ class EngineConfig(BaseSettings):
         description=(
             "Ceiling (seconds) for an extend-policy await before the "
             "dispatch is treated as a late failure (W-2). On breach the "
-            "existing TPE/dead escalation path takes over. "
+            "existing TPE/dead escalation path takes over. A bounded "
+            "asyncio.gather cancels the awaited dispatch first, but a "
+            "to_thread payload already past cancellation cannot be force-"
+            "killed — the gather bounds the AWAIT, not the thread "
+            "(residual thread-escape window). "
             "Env: ENSEMBLE_ENGINE_EXTEND_CEILING_SECONDS."
         ),
     )

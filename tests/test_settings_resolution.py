@@ -673,7 +673,16 @@ class TestManagedKeysConsistency:
     (DB/ENV-only) entries declare config_path=None explicitly."""
 
     def test_every_entry_is_consistent(self):
-        assert len(MANAGED_KEYS) == 19
+        # RE-BASELINED 19 → 22 (Engine Arc P6, T6.3 census ceremony — tree
+        # truth at d46798327). Drift citation: the tool-usage-metrics P1
+        # lane (commit 49f5e9c1d, ancestor of this pin's base) added THREE
+        # managed keys — limits.tool_usage_collection_enabled,
+        # limits.metrics_tool_usage_enabled and
+        # limits.tool_usage_digest_seeding_enabled — and the pin was never
+        # advanced (base literal 17 + 2 decision-module entries = the old
+        # 19; tree literal 20 + the same 2 = 22). ``len(MANAGED_KEYS)`` is
+        # the authoritative census; this pin now tracks it.
+        assert len(MANAGED_KEYS) == 22
         config = Config()
         for key, spec in MANAGED_KEYS.items():
             if spec.config_path is None:

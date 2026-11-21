@@ -259,6 +259,75 @@ PRE_EXISTING_DAEMON_OFFENDERS = frozenset(
         "daemon/tools/_tool_registry.py",  # 8b8df3ead
         "daemon/tools/instance.py",  # 0b02931b7
         "daemon/tools/tool_usage.py",  # 1aa360051
+        # ── THE ENGINE-ARC P1-P6 PROGRAM — T6.3 census ceremony union (2026-11-21) ──
+        # MECHANICALLY GENERATED: `git diff --name-only <LANE_BASE>` daemon paths
+        # not in ALLOWED_DAEMON_DIFF / this set, plus this commit's own two
+        # new files. THE RECORD IS MAINTAINED BY THE CHANGING LANE — the
+        # engine-arc program is that lane for every row below.
+        #
+        # P7 INTAKE (one lookup; DO NOT implement here):
+        #  * QUARANTINE ledger corrections — the kwarg-drift family attribution
+        #    (test_child_report_next_turn_execution family + the queue_routing
+        #    red) and a metrics-confinement offender-list enlargement row.
+        #  * A function-scoped create_event pin (the P5 event-registry surface).
+        #  * Per-site census pins for the multi-site kinds (room_delivery x7,
+        #    midflight_qa x4, job_completed x2, error x2).
+        #  * Two regex tightenings: the census alias form + the D5.11
+        #    from-import form.
+        #  * The D5.4 SECOND live source (beyond EventBus._global_subscribers).
+        "daemon/__init__.py",
+        "daemon/migrations/versions/20261121_120000_create_engine_jobs.sql",
+        "daemon/migrations/versions/20261121_120001_create_engine_runs.sql",
+        "daemon/plugin_subsystem/config_compat_contract.py",
+        "daemon/repositories/bash_spawn/models.py",
+        "daemon/repositories/bash_spawn/repository.py",
+        "daemon/repositories/engine/__init__.py",
+        "daemon/repositories/engine/models.py",
+        "daemon/repositories/engine/repository.py",
+        "daemon/repositories/room/membership.py",
+        "daemon/repositories/room/repository.py",
+        "daemon/routers/answer_helper.py",
+        "daemon/routers/engine.py",
+        "daemon/routers/instances.py",
+        "daemon/routers/schedules.py",
+        "daemon/services/bash_spawn_reaper.py",
+        "daemon/services/child_reports.py",
+        "daemon/services/engine/__init__.py",
+        "daemon/services/engine/dispatch.py",
+        "daemon/services/engine/dualpath.py",
+        "daemon/services/engine/engine.py",
+        "daemon/services/engine/estate.py",
+        "daemon/services/engine/execution.py",
+        "daemon/services/engine/guardrails.py",
+        "daemon/services/engine/killswitch.py",
+        "daemon/services/engine/locks.py",
+        "daemon/services/engine/metrics.py",
+        "daemon/services/engine/projection.py",
+        "daemon/services/engine/boot.py",  # P4 (924820dc0)
+        "daemon/services/engine/watchdog.py",  # P4 (924820dc0)
+        "daemon/services/engine/registry.py",
+        "daemon/services/engine/spec.py",
+        "daemon/services/engine/state.py",
+        "daemon/services/event_publisher.py",
+        "daemon/services/event_registry/__init__.py",
+        "daemon/services/event_registry/catalog.py",
+        "daemon/services/event_registry/emit.py",
+        "daemon/services/event_registry/metrics.py",
+        "daemon/services/instance_messaging.py",
+        "daemon/services/job_feedback_observer.py",
+        "daemon/services/job_recovery_service.py",
+        "daemon/services/message_processing_errors.py",
+        "daemon/services/midflight_qa.py",
+        "daemon/services/orphan_watcher_sweep.py",
+        "daemon/services/ram_guard/guard.py",
+        "daemon/services/ram_guard_events.py",
+        "daemon/services/report_delivery_recovery.py",
+        "daemon/services/room_delivery.py",
+        "daemon/services/schedule_fire_notify.py",
+        "daemon/services/schedule_fire_notify_metrics.py",
+        "daemon/services/scheduling_service.py",
+        "daemon/services/stale_task_recovery.py",
+        "daemon/sources/adapters/scheduler.py",
     }
 )
 
