@@ -1226,6 +1226,50 @@ async def lifespan(app: FastAPI):
             f"{type(bash_reconcile_err).__name__}: {bash_reconcile_err}"
         )
 
+    # ─────────────────────────────────────────────────────────────
+    # bash-spawn registry retention sweep (census A2 fix,
+    # 2026-11-21) — PERIODIC companion lane. The five piggyback
+    # lanes left closed-row retention boot-only (prune ran solely
+    # inside the one-shot reconcile) and reaping cadence ==
+    # instance-terminalization cadence (stall mode), so the
+    # registry grew unbounded between boots. This lane ticks
+    # every ENSEMBLE_BASH_REAPER_RETENTION_INTERVAL_SECONDS
+    # (default 900s): prunes REAPED rows past the 30d window and
+    # sweeps OPEN rows whose owning instance is TERMINAL through
+    # the existing ``sweep_instance`` machinery (all D8/D9 guards
+    # inherited). Honors the master switch
+    # (ENSEMBLE_BASH_ORPHAN_REAPER) BEFORE any repository touch —
+    # OFF ⇒ counted + rate-limited-logged no-op, never silent.
+    # ALWAYS-ON wiring (enabled hardcoded True — the constructor
+    # kwarg is an internal test seam, same shape as the
+    # tmp-image sweep). First tick runs IMMEDIATELY inside the
+    # loop, so the boot-time state gets its first prune without a
+    # separate synchronous pre-tick.
+    # ─────────────────────────────────────────────────────────────
+    try:
+        from daemon.services.bash_spawn_reaper import (
+            BashSpawnRetentionSweepService,
+        )
+
+        bash_spawn_retention = BashSpawnRetentionSweepService(
+            repo=bash_spawn_repo,
+            instance_repo=SQLModelInstanceRepository(
+                engine=manager.engine
+            ),
+        )
+        bash_spawn_retention.start()
+        app.state.bash_spawn_retention = bash_spawn_retention
+        daemon_logger.info(
+            "[Startup] bash spawn retention sweep started "
+            f"(interval="
+            f"{bash_spawn_retention._interval_seconds}s)"
+        )
+    except Exception as bash_retention_err:  # noqa: BLE001
+        daemon_logger.warning(
+            "[Startup] bash spawn retention sweep wiring failed "
+            f"(non-fatal): {type(bash_retention_err).__name__}: "
+            f"{bash_retention_err}"
+        )
 
     # Create queue repository for job queue management
     queue_repo = JobQueueRepository(engine=manager.engine)
@@ -4487,6 +4531,21 @@ async def lifespan(app: FastAPI):
                 f"OrphanWatcherSweepService shutdown error: {e}"
             )
         app.state.orphan_watcher_sweep = None
+
+    # bash-spawn registry retention sweep (census A2 fix, 2026-11-21)
+    # — stop the periodic lane BEFORE the durable shutdown sweep, so
+    # the two reaper surfaces never race each other on the way down.
+    bash_spawn_retention = getattr(
+        app.state, "bash_spawn_retention", None
+    )
+    if bash_spawn_retention is not None:
+        try:
+            await bash_spawn_retention.stop()
+        except Exception as e:
+            logger.warning(
+                f"BashSpawnRetentionSweepService shutdown error: {e}"
+            )
+        app.state.bash_spawn_retention = None
 
     # --- TmpImageCleanupService shutdown (clipboard-image-chat phase 3) ---
     # Stop the retention sweep BEFORE the JobLockSweepService
