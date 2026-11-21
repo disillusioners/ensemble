@@ -133,4 +133,3 @@ def test_supervisor_boundary_never_returns_on_exception():
     from daemon.services.engine.execution import EngineExecutionLoop
     src = inspect.getsource(EngineExecutionLoop.run)
     assert "continue" in src
-    assert "return" not in src.split("except asyncio.CancelledError")[0] or True

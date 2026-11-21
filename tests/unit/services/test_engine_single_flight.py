@@ -311,6 +311,18 @@ async def test_off_loop_thread_discipline_db_offload():
 
 
 @pytest.mark.asyncio
+async def test_db_offload_refuses_coroutine_function():
+    """W-4: DB_OFFLOAD exists to keep blocking work off the loop; handing it
+    a coroutine function is a registration-class discipline violation and is
+    REFUSED (TypeError) rather than silently awaited inline."""
+    async def coro_fn():
+        return "ok"
+
+    with pytest.raises(TypeError, match="DB_OFFLOAD refuses coroutine"):
+        await D.run_db_offload(coro_fn)
+
+
+@pytest.mark.asyncio
 async def test_off_loop_thread_discipline_dedicated_executor():
     loop_thread = threading.get_ident()
     observed = {"name": None, "ident": None}

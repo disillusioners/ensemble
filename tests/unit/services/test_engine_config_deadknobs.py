@@ -225,3 +225,29 @@ class TestMisfiledRelabels:
     def test_config_still_mounts_both_sections(self):
         assert Config.model_fields["job_system"].default_factory is JobSystemConfig
         assert Config.model_fields["notify_user"].default_factory is NotifyUserConfig
+
+
+class TestEngineConfigAMD8Validators:
+    """AMD-8 fail-safe coercion on EngineConfig (daemon/config.py).
+
+    Empty/malformed engine switch VALUES fail safe; a non-coercible type
+    keeps fail-fast ValidationError.
+    """
+
+    def test_empty_enabled_fails_safe_to_false(self):
+        from daemon.config import EngineConfig
+
+        assert EngineConfig(enabled="").enabled is False
+
+    def test_garbage_shadow_mode_fails_safe_to_true(self):
+        from daemon.config import EngineConfig
+
+        assert EngineConfig(shadow_mode="garbage").shadow_mode is True
+
+    def test_non_boolean_enabled_type_keeps_fail_fast(self):
+        from pydantic import ValidationError
+
+        from daemon.config import EngineConfig
+
+        with pytest.raises(ValidationError):
+            EngineConfig(enabled=[])

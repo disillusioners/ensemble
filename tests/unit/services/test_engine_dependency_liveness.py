@@ -127,3 +127,69 @@ def test_extend_wedge_tracker_clears_on_release():
 def test_factors():
     assert DEP_MISSING_DEAD_FACTOR == 2
     assert EXTEND_WEDGE_FACTOR == 2
+
+
+@pytest.mark.asyncio
+async def test_engine_due_evaluation_stamps_dep_missing():
+    """Engine integration (P3 T3.1): set_dependencies feeds the ENGINE's due
+    evaluation — a due tick with a missing dependency stamps
+    SKIPPED_DEP_MISSING (engine_runs row + skips counter) and never invokes
+    the executor. Not a tracker-in-isolation pin."""
+    from sqlalchemy import create_engine
+    from sqlmodel import SQLModel, Session, select
+    from sqlmodel.pool import StaticPool
+
+    from daemon.repositories.engine.models import EngineRun
+    from daemon.repositories.engine.repository import EngineRepository
+    from daemon.services.engine.engine import EngineService
+    from daemon.services.engine.registry import EngineRegistry
+    from daemon.services.engine.spec import IntervalTrigger, JobSpec, ServiceMeta
+
+    engine = create_engine(
+        "sqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(engine)
+    repo = EngineRepository(engine)
+    reg = EngineRegistry(repo)
+    spec = JobSpec(
+        id="orphan-watcher",
+        meta=ServiceMeta(
+            service_tag="orphan-watcher-sweep",
+            category="reconciler",
+            service_name="Orphan Watcher Sweep",
+            module_info="daemon.services.orphan_watcher_sweep",
+            description="x",
+        ),
+        trigger=IntervalTrigger(seconds=10),
+        max_runtime_s=60.0,
+        timeout_policy="cancel",
+        concurrency_class="DB_OFFLOAD",
+        priority=5,
+    )
+    await reg.aregister(spec)
+    svc = EngineService(repo, reg, None, shadow_mode=False)
+    await svc._hydrate()
+    svc.set_dependencies(
+        "orphan-watcher",
+        [DependencyRef(label="bus", getter=lambda: None)],
+    )
+    calls = {"n": 0}
+
+    def executor():
+        calls["n"] += 1
+
+    svc.set_executor("orphan-watcher", executor)
+    loop = svc._execution_loop
+    await loop._tick()
+
+    with Session(repo.engine) as s:
+        rows = list(
+            s.exec(select(EngineRun).where(EngineRun.job_id == "orphan-watcher")).all()
+        )
+    stamped = [r for r in rows if r.outcome == "SKIPPED_DEP_MISSING"]
+    assert len(stamped) == 1 and stamped[0].skip_reason == "DEP_MISSING"
+    cache = svc._cache["orphan-watcher"]
+    assert cache["skips_by_reason"]["DEP_MISSING"] == 1
+    assert calls["n"] == 0  # skip path, not a run

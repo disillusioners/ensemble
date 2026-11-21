@@ -10,6 +10,9 @@ Resolution is read at TICK TIME through a ladder (D3.6): per-job
 
 Reads are PURE functions over an injected resolver (D3.12): tests never
 touch ``os.environ``.
+
+Wiring owner: P4 — T4.4 constructs EngineService with the killswitch
+resolver; until then (D4.11 dormancy) this switch surface is INERT, not live.
 """
 
 from __future__ import annotations

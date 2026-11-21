@@ -324,6 +324,60 @@ async def test_failed_write_logs_dedicated_error(caplog):
     )
 
 
+@pytest.mark.asyncio
+async def test_failing_repo_stamp_leaves_loop_alive_w7():
+    """W-7: when the best-effort guarded outcome stamp itself fails (repo
+    down), the tick loop stays alive and the degradation stays observable in
+    the honest in-memory state; the guard still ATTEMPTS the stamp every
+    tick (best-effort, swallow-on-fail)."""
+    eng = _engine()
+    real = EngineRepository(eng)
+
+    class RaisingStampRepo:
+        """Everything delegates to the real repo; the outcome stamp raises."""
+
+        def __init__(self) -> None:
+            self.stamp_attempts = 0
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def stamp_job_outcome(self, *a, **kw):
+            self.stamp_attempts += 1
+            raise RuntimeError("stamp path down")
+
+    repo = RaisingStampRepo()
+    reg = EngineRegistry(real)
+    await reg.aregister(_spec(retry_max=0))
+    svc = EngineService(repo, reg, None, shadow_mode=False)
+    await svc._hydrate()
+
+    def executor():
+        raise RuntimeError("boom")
+
+    svc.set_executor("orphan-watcher", executor)
+    loop = svc._execution_loop
+
+    async def force_due():
+        # _stamp advances last_run_at before the DB write, so re-arm
+        # due-ness directly (test_due_boundary idiom) instead of sleeping
+        # out the 90s interval.
+        svc._cache["orphan-watcher"]["last_run_at"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=3600)
+        ).isoformat()
+
+    await loop._tick()
+    await force_due()
+    await loop._tick()
+
+    cache = svc._cache["orphan-watcher"]
+    assert cache["last_outcome"] == "FAILED_BACKOFF"
+    assert cache["running"] is False
+    # 2 attempts per tick (terminal stamp + guarded W-7 re-attempt) x 2
+    # ticks: the guarded path fired every tick AND the loop kept dispatching.
+    assert repo.stamp_attempts == 4
+
+
 def test_idempotent_skip_reason_normalization():
     assert skip_outcome("shadow") == "SKIPPED_SHADOW"
     assert skip_outcome("OVERLAP") == "SKIPPED_OVERLAP"

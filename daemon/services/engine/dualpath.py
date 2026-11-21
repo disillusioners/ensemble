@@ -7,6 +7,9 @@ it. Both code paths stay compiled (D3.7/D3.8); rollback is one flag.
 
 No ``ServicesConfig`` edit (F-9) — flags are read from the environment via
 ``use_engine_enabled``.
+
+Wiring owner: P4 — T4.4 wires the dual-path flags through EngineService;
+until then (D4.11 dormancy) both paths stay legacy-default, not live.
 """
 
 from __future__ import annotations
