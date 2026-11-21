@@ -80,6 +80,11 @@ LANE_BASE = "644c2bfaaa48514ec7de79f7f4bcd078a700cdbe"
 LANE_OWNED_DAEMON = frozenset(
     {
         "daemon/config.py",
+        # tool-usage-metrics-p1 lane (49f5e9c1d): the observation-wrapper
+        # CALL SITE — a lane surface, so it is owned here as well as
+        # allowlisted below (direction 2 treats a new ALLOWED entry that
+        # is not lane-owned as a SILENT WIDENING).
+        "daemon/graph.py",
         "daemon/manager.py",
         "daemon/services/decision/__init__.py",
         "daemon/services/decision/client.py",
@@ -136,6 +141,14 @@ ALLOWED_DAEMON_DIFF = (
     # exactly as they do to every other family. Listed EXPLICITLY: this
     # list is NOT derived from LANE_OWNED_DAEMON, so the pin can fail.
     "daemon/config.py",
+    # ── Tool-usage-metrics P1 lane (2026-11-21) — council C3 follow-up ──
+    # daemon/graph.py: the observation-wrapper CALL SITE in
+    # build_instance_graph (lane commit 49f5e9c1d) — it wraps
+    # wrapped_tools_node between compact_note and the ToolNode so the tap
+    # sees the result to set the ok flag. A CALL-SITE surface only: no
+    # observe/inc call is added here (the pin's protection target is the
+    # producers, and every producer path stays outside this list).
+    "daemon/graph.py",
     "daemon/manager.py",
     "daemon/services/decision/__init__.py",
     "daemon/services/decision/client.py",
