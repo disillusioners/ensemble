@@ -1,6 +1,7 @@
 """Instance management API endpoints."""
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -8,8 +9,10 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
+
+import orjson
 
 from daemon.auth.decorators import scope_required
 from daemon.constants import (
@@ -309,6 +312,81 @@ def _get_manager(request: Request) -> Any:
     return request.app.state.manager
 
 
+#: orjson render options for the WIRE body of this router.
+#:
+#: ``OPT_NON_STR_KEYS`` — the stdlib renderer this body replaced coerced
+#: a non-``str`` mapping key to its JSON spelling (``1`` → ``"1"``);
+#: without this option orjson RAISES on such a key.  With it the two
+#: renderers agree (the parity pack pins int/bool/float keys).
+#: ``OPT_UTC_Z`` — the stdlib path emitted ``+00:00`` for an aware-UTC
+#: datetime only because ``model_dump(mode="json")`` had already
+#: stringified every datetime; the option keeps that class of value
+#: byte-identical (``Z``) if a future field ever reaches the renderer as
+#: a live ``datetime``.
+_WIRE_ORJSON_OPTIONS = orjson.OPT_NON_STR_KEYS | orjson.OPT_UTC_Z
+
+
+def _stdlib_wire_render(payload: Any) -> bytes:
+    """The PRE-SWAP renderer, kept verbatim as the parity reference.
+
+    Byte-for-byte what :meth:`starlette.responses.JSONResponse.render`
+    produced for this route (``ensure_ascii=False``, ``allow_nan=False``,
+    compact separators).  It is both the fallback and the oracle the
+    parity pack compares against.
+    """
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        indent=None,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _encode_list_body(payload: Any) -> bytes:
+    """Encode the ``GET /api/instances`` body with orjson (≥100 KB path).
+
+    WHY THIS SITE: the instance list is the daemon's fattest JSON route
+    (a full-tree poll renders hundreds of rows; the payload is measured
+    in the 150 KB - 2.6 MB range), and it is rendered on the event loop
+    on every poll.  The kernel is 3-9x faster than the stdlib renderer at
+    this size, so the whole win lands on the loop.
+
+    PARITY: ``orjson`` emits ``0.000072`` where ``json`` emits
+    ``7.2e-05`` for the same float — a byte delta that only exists for
+    NON-INTEGRAL floats.  :class:`~daemon.models.instance.InstanceInfo`
+    carries NO float field at all (ids, agent ids, dirs, status, titles,
+    child-id lists, timestamps-as-``str``), and every ``int`` on the row
+    is a count/denial counter — so the delta is UNREACHABLE on this
+    payload.  The parity pack proves byte equality on production-shaped
+    fixtures rather than trusting that argument.
+
+    FALLBACK: a payload the fast path cannot express (an out-of-64-bit
+    integer, an unhashable-by-orjson key type) is rendered by
+    :func:`_stdlib_wire_render` — the pre-swap renderer — so the wire
+    bytes can never REGRESS to an error the route did not already have.
+    """
+    try:
+        return orjson.dumps(payload, option=_WIRE_ORJSON_OPTIONS)
+    except (TypeError, ValueError):  # pragma: no cover — defensive
+        return _stdlib_wire_render(payload)
+
+
+def _render_list_body(payload: Any) -> Response:
+    """The list route's wire response — orjson bytes, FastAPI bypassed.
+
+    Returning a ``Response`` is what makes FastAPI skip the
+    ``response_model`` validation + encode pass (the D2 contract this
+    route already relied on); the handler's ``-> InstanceListResponse``
+    annotation is kept because it is the OpenAPI schema source, and a
+    returned ``Response`` simply bypasses it (the committed byte-identity
+    golden pins both the headers and the body).
+    """
+    return Response(
+        content=_encode_list_body(payload), media_type="application/json"
+    )
+
+
 # 1. POST /instances - Spawn instance
 @router.post("", response_model=InstanceInfo, status_code=201, dependencies=[scope_required("instances:write")])
 async def create_instance(
@@ -595,8 +673,8 @@ async def list_instances(
     # the event loop: hand-build the body (reproducing the decorator's
     # response_model_exclude so mcp_tool_names stays key-ABSENT) and
     # return a Response so FastAPI bypasses response_model handling.
-    return JSONResponse(
-        content=resp.model_dump(
+    return _render_list_body(
+        resp.model_dump(
             mode="json",
             exclude={"instances": {"__all__": {"mcp_tool_names"}}},
         )

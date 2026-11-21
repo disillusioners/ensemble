@@ -59,6 +59,15 @@ dependencies = [
     # library to a transitive-path change. The [crypto] extra pulls
     # `cryptography` for RS256 verification of ID-tokens.
     "pyjwt[crypto]>=2.8.0",
+    # cpu-l1-m2-orjson: orjson was transitive only (langgraph-checkpoint-
+    # postgres / langgraph-sdk / langsmith) yet it is now IMPORTED directly
+    # by the two fat JSON routes (``daemon/routers/instances.py`` list body,
+    # ``daemon/routers/metrics.py`` query door). Declare it explicitly —
+    # same jsonschema/pyjwt-promotion precedent — so a silent upgrade or
+    # removal of a transitive path cannot strip the renderer out from under
+    # a route. Version floor 3.11: the bundled PyInstaller PYZ carries
+    # 3.11.7 and the parity pack pins that kernel.
+    "orjson>=3.11",
 ]
 
 [project.scripts]
