@@ -1964,7 +1964,14 @@ async def lifespan(app: FastAPI):
         config.services.orphan_watcher_sweep_grace_seconds
     )
     orphan_watcher_sweep = OrphanWatcherSweepService(
-        dependency_bus=get_dependency_bus(),
+        # D-9 (review hardening, 2026-11-21): explicit ``None``, NOT
+        # ``get_dependency_bus()``. This constructor runs BEFORE
+        # ``init_dependency_bus`` registers the singleton, so a
+        # construction-time read froze ``None`` forever (the born-dead
+        # trap pattern). The service late-binds — it re-reads the
+        # singleton per tick — so None here documents the intent
+        # instead of simulating a capture that never succeeds.
+        dependency_bus=None,
         interval_seconds=orphan_sweep_interval,
         min_watcher_age_seconds=orphan_sweep_grace,
     )
@@ -4141,6 +4148,28 @@ async def lifespan(app: FastAPI):
     if hasattr(app.state, '_job_feedback_observer'):
         await app.state._job_feedback_observer.stop()
 
+    # Batch C — C2 (2026-09-11) orphan-watcher sweep — stop it HERE,
+    # BEFORE ``shutdown_dependency_bus`` (D-10, review hardening
+    # 2026-11-21). Same lifecycle as the eligible-pending sweep (the
+    # ``stop()`` method cancels + awaits the asyncio task). The hoist
+    # is REQUIRED by the late-bind fix: the lane re-reads the bus
+    # singleton on EVERY tick, so leaving the stop in its old slot
+    # (after ``shutdown_dependency_bus`` cleared the singleton) left a
+    # window in which a tick could only resolve ``None`` and no-op.
+    # ``stop()`` depends on nothing but its own task, so ordering it
+    # first is dependency-free.
+    orphan_sweep = getattr(
+        app.state, "orphan_watcher_sweep", None
+    )
+    if orphan_sweep is not None:
+        try:
+            await orphan_sweep.stop()
+        except Exception as e:
+            logger.warning(
+                f"OrphanWatcherSweepService shutdown error: {e}"
+            )
+        app.state.orphan_watcher_sweep = None
+
     # Stop the DependencyBus. The bus is flag-agnostic (always wired),
     # so this stops it whenever it was started. Safe to call when the
     # bus was never started (the helper is a no-op in that case).
@@ -4515,22 +4544,6 @@ async def lifespan(app: FastAPI):
                 f"EligiblePendingSweepService shutdown error: {e}"
             )
         app.state.eligible_pending_sweep = None
-
-    # Batch C — C2 (2026-09-11): stop the orphan-watcher sweep.
-    # Same lifecycle as the eligible-pending sweep above; the
-    # ``stop()`` method cancels + awaits the asyncio task so the
-    # shutdown branch stays compact.
-    orphan_sweep = getattr(
-        app.state, "orphan_watcher_sweep", None
-    )
-    if orphan_sweep is not None:
-        try:
-            await orphan_sweep.stop()
-        except Exception as e:
-            logger.warning(
-                f"OrphanWatcherSweepService shutdown error: {e}"
-            )
-        app.state.orphan_watcher_sweep = None
 
     # bash-spawn registry retention sweep (census A2 fix, 2026-11-21)
     # — stop the periodic lane BEFORE the durable shutdown sweep, so

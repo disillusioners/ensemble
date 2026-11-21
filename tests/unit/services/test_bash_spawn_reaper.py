@@ -1109,6 +1109,33 @@ class TestShutdownSweepService:
         assert repo._open_all_calls == 0  # zero DB queries (m3)
 
     @pytest.mark.asyncio
+    async def test_master_off_is_counted_noop_skip(
+        self, monkeypatch, caplog
+    ) -> None:
+        """D-7 (review hardening, 2026-11-21): the shutdown lane's
+        switch-OFF exit used to be a plain ``logger.info`` — invisible
+        to the no-op counter, unlike its repo-None sibling directly
+        below it. Both no-op classes now route through
+        ``_log_noop_skip``, so the counter increments symmetrically."""
+        monkeypatch.setenv(ENV_KILL_SWITCH, "0")
+        surface = "shutdown durable sweep"
+        # Fresh counter map for THIS surface: the module-global counters
+        # are process-lifetime observability state, so earlier tests in
+        # this file would otherwise push the rate-limiter past its
+        # first-occurrence log (mirrors the retention pack's autouse
+        # ``_fresh_noop_counters`` fixture).
+        monkeypatch.setattr(reaper, "_NOOP_SKIP_COUNTS", {})
+        repo = _SpyRepo()
+        with caplog.at_level(logging.WARNING, logger=reaper.__name__):
+            actions = await sweep_open_rows_for_shutdown(repo)
+        assert actions == 0
+        assert repo._open_all_calls == 0  # still zero DB queries (m3)
+        assert reaper._NOOP_SKIP_COUNTS.get(surface, 0) == 1
+        assert any(
+            "NO-OP" in r.getMessage() for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
     async def test_live_sibling_row_skipped(
         self, monkeypatch, kill_fence
     ) -> None:

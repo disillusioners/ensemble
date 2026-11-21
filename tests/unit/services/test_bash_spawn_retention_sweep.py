@@ -430,6 +430,21 @@ class TestIntervalKnob:
             {ENV_RETENTION_INTERVAL: "abc"}
         ) == 900
 
+    def test_inf_and_overflow_fall_back_to_default_no_raise(self):
+        """D-1 (review hardening, 2026-11-21): ``int(float("inf"))`` and
+        ``int(float("1e400"))`` raise OverflowError, which pre-fix
+        escaped every non-fatal try/except at the wiring site — the
+        retention lane then silently never started, recreating the
+        unbounded-registry growth this lane exists to prevent.
+        Both must yield the default 900 with NO raise (mirrors the
+        ``upgrade_journal_sweep.py`` precedent)."""
+        assert retention_interval_seconds_from_env(
+            {ENV_RETENTION_INTERVAL: "inf"}
+        ) == DEFAULT_RETENTION_INTERVAL_SECONDS
+        assert retention_interval_seconds_from_env(
+            {ENV_RETENTION_INTERVAL: "1e400"}
+        ) == DEFAULT_RETENTION_INTERVAL_SECONDS
+
     def test_service_resolves_env_when_interval_none(self, monkeypatch):
         monkeypatch.setenv(ENV_RETENTION_INTERVAL, "120")
         svc = BashSpawnRetentionSweepService(

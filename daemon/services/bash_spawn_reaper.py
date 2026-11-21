@@ -58,6 +58,12 @@ runtime key):
   exists for). Default 21600 s (6 h), clamped to [60, 86400]. The
   pgid-only attribution path keeps the 10 s
   ``..._START_TOLERANCE_SECONDS`` gate everywhere.
+* ``ENSEMBLE_BASH_REAPER_RETENTION_INTERVAL_SECONDS`` — cadence of the
+  periodic retention lane (``BashSpawnRetentionSweepService``: reaped-row
+  prune + terminal-instance stall sweep). Default 900 s (15 min), clamped
+  to [60, 86400]; absent or unparseable (including ``inf`` / overflow
+  values) ⇒ default. A CADENCE, not a latency bound — see the service
+  docstring for the worst-case tick wall-clock.
 
 Restart-lane exclusion is STRUCTURAL (plan D1): the bash seam is the
 ONLY writer of ``bash_spawn_registry``; ``spawn_executor`` deliberately
@@ -232,7 +238,15 @@ def retention_interval_seconds_from_env(environ: dict | None = None) -> int:
         return DEFAULT_RETENTION_INTERVAL_SECONDS
     try:
         value = int(float(raw))
-    except ValueError:
+    except (ValueError, OverflowError):
+        # D-1 (review hardening, 2026-11-21): OverflowError joins the
+        # catch — ``int(float("inf"))`` / ``int(float("1e400"))``
+        # raises OverflowError (``nan`` is already a ValueError). Pre-fix
+        # it escaped every non-fatal try/except at the wiring site, so
+        # the retention lane silently NEVER STARTED — recreating the
+        # unbounded-registry growth this lane exists to prevent. Same
+        # adjudication as ``daemon/services/upgrade_journal_sweep.py``
+        # (M2: a poisoned env value must never raise past this parse).
         return DEFAULT_RETENTION_INTERVAL_SECONDS
     return max(
         MIN_RETENTION_INTERVAL_SECONDS,
@@ -1469,9 +1483,10 @@ async def sweep_open_rows_for_shutdown(
     Returns the number of rows closed.
     """
     if not kill_switch_from_env():
-        logger.info(
-            "bash reaper: master switch OFF — shutdown durable sweep "
-            "is a no-op (no repository access)"
+        _log_noop_skip(
+            "shutdown durable sweep",
+            f"master switch {ENV_KILL_SWITCH} resolves OFF "
+            "(no repository access)",
         )
         return 0
     if repo is None:
@@ -2104,6 +2119,14 @@ class BashSpawnRetentionSweepService:
         enabled: ALWAYS True in production (hardcoded at the wiring
             site); ``False`` is an internal test seam only — it skips
             the sweep body and ticks idle. Never a production toggle.
+
+    NOTE (D-4, review hardening 2026-11-21): ``interval_seconds`` is a
+    CADENCE, not a latency guarantee. The worst-case tick wall-clock is
+    ``_RETENTION_MAX_INSTANCE_SWEEPS`` (25) × ``LANE_SWEEP_DEADLINE_SECONDS``
+    (60s) = 1500s, which EXCEEDS the nominal 900s default interval — a
+    pathological registry can therefore make consecutive ticks overlap
+    in wall-clock terms (the loop still runs them strictly serially, so
+    the effective cadence simply stretches).
 
     Lifecycle: ``start()`` spawns the asyncio task (idempotent);
     ``stop()`` cancels + awaits it (safe when never started).
