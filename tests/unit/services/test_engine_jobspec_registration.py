@@ -659,51 +659,11 @@ agents:
 
 
 class TestZeroExecution:
-    def test_no_execution_symbols_in_the_engine_tree(self):
-        """AC7 — no tick loop, no dispatch, no execute_fn CALL PATH.
-
-        Machine-readable tokens only (prose that NAMES the forbidden
-        thing while documenting the dormancy gate is not a call path).
-        Docstrings are stripped before the scan so the fence pin does not
-        forbid the word while prohibiting the mechanism.
-        """
-        import ast
-
-        forbidden = (
-            "execute_fn",          # the executable slot does not exist in P1
-            "run_with_timeout",    # P2's timeout wrapper
-            "asyncio.sleep",       # a tick loop's cadence sleep
-            "create_task",         # a background loop
-            "run_forever",
-            "dispatch_due",
-            "_stopping",           # the loop sentinel (P2's Templates)
-        )
-
-        def _code_only(src: str) -> str:
-            tree = ast.parse(src)
-            for node in ast.walk(tree):
-                body = getattr(node, "body", None)
-                if isinstance(body, list) and body:
-                    first = body[0]
-                    if (
-                        isinstance(first, ast.Expr)
-                        and isinstance(first.value, ast.Constant)
-                        and isinstance(first.value.value, str)
-                    ):
-                        first.value.value = ""
-            return ast.unparse(tree)
-
-        for path in sorted(ENGINE_DIR.glob("*.py")):
-            code = _code_only(path.read_text())
-            for token in forbidden:
-                assert token not in code, (
-                    f"{path.name} carries execution token {token}"
-                )
-
-    def test_no_tick_loop_or_dispatch_module_exists(self):
-        names = {p.name for p in ENGINE_DIR.glob("*.py")}
-        assert names == {"__init__.py", "spec.py", "registry.py", "estate.py"}
-
+    # NOTE (P2): the two P1 zero-execution pins (no execution symbols /
+    # no dispatch module) are superseded by Phase 2, which legitimately
+    # adds daemon/services/engine/{state,locks,dispatch,execution,engine,metrics}.py.
+    # They are removed here; the dormancy gate now lives in the shadow-mode
+    # posture (D2.13) and the observer-spec carve-out (CS-9).
     def test_api_py_is_untouched_by_this_phase(self):
         """AC7: ``daemon/api.py`` is UNCHANGED by Phase 1 (P4 owns the wiring).
 
