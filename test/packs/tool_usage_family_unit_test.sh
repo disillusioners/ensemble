@@ -52,36 +52,31 @@
 # DISCRIMINATING PAIR — the same child run WITH the scrub (the sentinel
 # must be ABSENT) and WITHOUT it (the sentinel must be PRESENT).
 #
-# THE PRE-EXISTING RED DISCLOSURE (2026-11-21; refreshed by the council
-# C3 follow-up): the pack DESELECTS exactly one node —
-#   TestNoProducerInstrumentation::test_the_daemon_diff_is_confined_to_the_allowed_files
-# That pin diffs the whole tree against the metrics-query lane's base
-# (644c2bfaa) and REDS on 158 daemon paths that predate this lane
-# entirely (every lane landed since that recorded nothing).
+# THE CONFINEMENT PIN NOW RUNS (tester gate, 2026-11-21 — the deselect
+# is RETIRED). Two changes made the node green and discriminating:
 #
-# THIS LANE'S OWN SURFACES ARE NOW RECORDED — the claim this block used
-# to carry ("the lane's files are unrecorded") is STALE and is replaced
-# here. The NINE lane daemon files are registered in
-# PRE_EXISTING_DAEMON_OFFENDERS with their owning commits attributed
-# (six to 49f5e9c1d, three to 71273d7e3) by commit aa98bce37, so this
-# lane's MARGINAL offender contribution is ZERO: the offender set at
-# HEAD is byte-identical to the set inherited at the branch base
-# (0b5624dc9 — 158 offenders), which was ALREADY RED before phase 1
-# landed. The lane's tenth pin-visible surface, daemon/graph.py (the
-# observation-wrapper CALL SITE — no observe/inc added), is recorded by
-# the same fix set in ALLOWED_DAEMON_DIFF with its lane attribution
-# (49f5e9c1d) and in LANE_OWNED_DAEMON, which is what the both-directions
-# pin requires of an allowlisted lane surface (direction 2 reads a new
-# ALLOWED entry that is not lane-owned as a SILENT WIDENING). Recording
-# it does not change this disclosure: the pin's red is the inherited set.
+#   1. LANE_BASE was RE-POINTED from the metrics-query lane's P4 base
+#      (644c2bfaa) to THIS lane's TRUE base (0b5624dc9). The old anchor
+#      predates every lane landed since, so `git diff 644c2bfaa` returned
+#      308 changed daemon paths (295 pin-visible, 13 under WIRING_ROOT)
+#      and the pin RED'd on 157 inherited FOREIGN pin-visible paths
+#      (170 counting the WIRING_ROOT-excluded ones) that no run of this
+#      lane could ever clear. Against the true base the
+#      same query returns 21 daemon paths (17 pin-visible, 4 under
+#      WIRING_ROOT) and the pin's offender count is ZERO.
+#   2. PRE_EXISTING_DAEMON_OFFENDERS was REGENERATED MECHANICALLY from
+#      git (scripts/gen_tool_usage_daemon_allowlist.py — the recorded
+#      command is in that file's docstring and in the constant's own
+#      comment). It no longer carries the 108 rows five other lanes
+#      accumulated; it now carries exactly this lane's 12 residual daemon
+#      paths (the ones neither allowlisted nor under WIRING_ROOT), each
+#      annotated with the commit that last touched it in the span.
 #
-# THE DESELECT REMAINS REQUIRED because the node still REDS on those 158
-# INHERITED FOREIGN offenders under the 644c2bfaa anchor — pre-existing
-# foreign debt, disclosed here and to be adjudicated at tester-gate time
-# (re-point the anchor to 0b5624dc9, or record the 158 lane-by-lane).
-# The phase-2 footprint stays confined to
-# daemon/services/metrics_query/wiring/ (the pin's WIRING_ROOT
-# exclusion). Everything else in the file runs and must be GREEN.
+# DISCRIMINATION (the property the old anchor destroyed): a foreign
+# daemon path added to the diff is a NEW offender and REDs the node —
+# proven by the in-file mutation test
+# (test_the_daemon_diff_pin_is_discriminating) plus a live tree-level
+# check run at this gate.
 #
 # Expected runtime: < 1 min (unit class).
 # =============================================================================
@@ -180,7 +175,6 @@ timeout 280 env \
     --color=no \
     --override-ini="addopts=" \
     --override-ini="timeout=280" \
-    --deselect "tests/unit/metrics/test_metrics_family_adjudication.py::TestNoProducerInstrumentation::test_the_daemon_diff_is_confined_to_the_allowed_files" \
     "${KARGS[@]}" \
     tests/unit/metrics/test_metrics_family_adjudication.py \
     tests/unit/metrics/test_metrics_vocabulary_amendment.py \

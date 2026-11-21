@@ -35,8 +35,6 @@ logger = logging.getLogger(__name__)
 
 SEED_NAME = "tool-usage-daily-digest"
 SEED_SOURCE_TYPE = "scheduler"
-SEED_SOURCE_ID = str(uuid.uuid5(uuid.uuid5.__class__.NAMESPACE_DNS if False else uuid.NAMESPACE_DNS, "tool-usage-daily-digest"))
-# above is just uuid5(NAMESPACE_DNS, ...); keep simple:
 SEED_SOURCE_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, "tool-usage-daily-digest"))
 
 DIGEST_MESSAGE = "Call tool_usage_digest for the previous day and write the durable digest."
@@ -101,6 +99,11 @@ def _db_tier_seeding_enabled(engine: "Engine") -> "bool | None":
 def _seeding_enabled(engine: "Engine | None" = None) -> bool:
     """Resolve the opt-out managed key (D-5), tiered.
 
+    TIER SEMANTICS: env → DB row → managed default; a malformed row (an
+    undecodable ``value_json`` or a decoded non-bool) ⇒ ``False``
+    (fail-closed — an unreadable row is not a statement of "on", and
+    suppressing the seed is what this gate exists to decide).
+
     Explicit env tier first (existing path), then the DB override row
     read DIRECTLY at seed time (council C6 — the managed-values
     provider wires only in the api lifespan, so the cache below can
@@ -134,6 +137,15 @@ def seed_tool_usage_digest_schedule(engine: "Engine") -> Any:
 
     Returns the seeded/existing SourceConfig or None on failure/no-op.
     Never raises.
+
+    RETURN-VALUE CAVEAT: on the create path the returned object is the
+    PRE-update in-memory row — the status promotion to ``RUNNING``
+    (below) is issued as a separate repository call and is NOT reflected
+    on the object this function hands back. The PERSISTED row is the
+    truth; a caller that needs the committed status must re-read it
+    (``source_repo.get_source_config(row.source_id)``) rather than trust
+    the return value. On the idempotent path the return is whatever the
+    repository's get produced, so the same caveat applies.
     """
     try:
         if not _seeding_enabled(engine):

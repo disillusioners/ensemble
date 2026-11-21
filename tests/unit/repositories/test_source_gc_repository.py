@@ -903,7 +903,42 @@ class TestP11BootNoBehaviorChange:
         # comment added in the same change). The token is disjoint from
         # the other markers over the span.
         "self-service-promote",
+        # ── TOOL-USAGE-METRICS-P1 lane (2026-11-21) — the single marker ──
+        # The lane's sanctioned daemon/manager.py drift: the aggregated
+        # ledger model registration before create_all + the off-loop
+        # flusher (phase 1, 49f5e9c1d) and the boot-time digest seeder
+        # (phase 3, 71273d7e3). Mirrors the decision / memoir /
+        # group-chat / self-service-promote blocks above.
+        #
+        # NORMALIZED TO ONE TOKEN — "tool-usage" (hyphen form). Measured
+        # at HEAD 0b02931b7 over 0b5624dc9..HEAD: the lane's manager.py
+        # drift is 3 hunks and 3/3 carry "tool-usage" in their added
+        # lines (the "tool-usage P1"/"tool-usage P3" section headers), so
+        # the marker is PER-HUNK-COMPLETE with no marker comment added.
+        # The lane's other spellings ("tool_usage" in identifiers,
+        # "toolusage" in log prefixes) are deliberately NOT markers: a
+        # token that matches every spelling stops discriminating.
+        #
+        # DISCLOSED, NOT CURED HERE: the same 3 hunks also carry
+        # "decision" (the plan's "(decision-support)" prose), so all four
+        # manager.py/constants.py pins above are satisfied on them by the
+        # DECISION token — a courtesy cross-mention, the exact shape the
+        # memoir block forbids. Registering "tool-usage" makes the hunks
+        # attributable to their OWNING lane; making a pin select the
+        # owning token instead of any-of is a mechanism change (the
+        # carve-out is a flat ANY-of set) and is left as a follow-up.
+        "tool-usage",
     )
+
+    # ── THE HUNK-MARKER CHECK'S BLIND SPOT (disclosed, not fixed) ────────
+    # This mechanism judges ONLY daemon/manager.py + daemon/constants.py.
+    # The tool-usage lane's other daemon surfaces — notably
+    # daemon/graph.py, where the observation wrapper is inserted between
+    # compact_note and wrapped_tools_node — are NOT covered: a markerless
+    # graph.py hunk passes every pin here. They are covered instead by a
+    # PATH-level allowlist (the metrics family pack's
+    # TestNoProducerInstrumentation), never per hunk. Extending this
+    # mechanism to graph.py is a named follow-up, not a silent gap.
 
     # The EXACT added lines of the leader-sanctioned None guard (content
     # pin, indentation preserved; diff '+' prefixes stripped). The file
