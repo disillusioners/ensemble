@@ -3408,6 +3408,133 @@ class SchedulingConfig(BaseSettings):
     )
 
 
+class EngineConfig(BaseSettings):
+    """Configuration for the central polling/event engine (Engine Arc P1).
+
+    Env prefix ``ENSEMBLE_ENGINE_`` (the commission names it explicitly —
+    NOT ``SERVICES_ENGINE_*``; engine knobs are a different subsystem's
+    knobs and must not pollute the 70-field ``ServicesConfig`` — plan D1.8).
+
+    **DORMANCY TRUTH TABLE (D1.9 / CS-5 — three INDEPENDENT axes).** P1
+    freezes the NAMES only; P3/P4 implement the reads.
+
+    1. ``enabled`` (``ENSEMBLE_ENGINE_ENABLED``) — does the tick loop run?
+       Defaults **True**.
+    2. ``shadow_mode`` (``ENSEMBLE_ENGINE_SHADOW_MODE``) — is due-ness
+       computed and ``would_fire`` recorded while ``execute_fn`` is NEVER
+       invoked? Defaults **True**.
+    3. ``SERVICES_<MODULE>_USE_ENGINE`` (a separate, later-phase family) —
+       per-module execution ownership; OFF means the module's legacy loop
+       keeps execution. Zero flags are set in Phase 1.
+
+    The shipped combination is ``enabled=True`` + ``shadow_mode=True`` +
+    zero ``USE_ENGINE`` flags: **registered, observing, executing nothing**.
+    ``enabled=False`` stays the one-flag full-off.
+
+    AMD-8 RESOLVER NOTE (read by P3's fail-to-legacy resolver): a
+    MALFORMED / missing VALUE means fail-to-legacy (``engine_enabled =
+    False``, fail-closed); an ABSENT environment variable means the
+    pydantic default above (``enabled=True`` — observing). Absent and
+    malformed are deliberately different outcomes so a zero-env boot can
+    never silently kill the observatory.
+
+    The yaml ``engine:`` section in ``config.yaml`` is passed through by
+    ``load_config`` ONLY when it is present (the ``job_system`` /
+    ``scheduling`` pattern), so the ``ENSEMBLE_ENGINE_*`` env source stays
+    the canonical resolver for absent keys.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_ENGINE_")
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Axis 1 of the dormancy truth table: does the tick loop run? "
+            "Default True. False = the one-flag full-off (the engine still "
+            "constructs and exposes its registration inventory). "
+            "Env: ENSEMBLE_ENGINE_ENABLED."
+        ),
+    )
+    shadow_mode: bool = Field(
+        default=True,
+        description=(
+            "Axis 2: compute due-ness and record would_fire/SKIPPED_SHADOW "
+            "evidence while execute_fn is NEVER invoked. Default True (the "
+            "shipped dormant posture — 'dormant' is not 'absent'). "
+            "Env: ENSEMBLE_ENGINE_SHADOW_MODE."
+        ),
+    )
+    tick_resolution_seconds: float = Field(
+        default=1.0,
+        ge=0.1,
+        description=(
+            "Tick-loop resolution (seconds). One engine task owns the loop "
+            "and sleeps this long between due-set computations — never a "
+            "per-job sleep loop (phase2 D2.1). "
+            "Env: ENSEMBLE_ENGINE_TICK_RESOLUTION_SECONDS."
+        ),
+    )
+    tick_workers: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Size of the engine's dedicated ThreadPoolExecutor used by the "
+            "DEDICATED_EXECUTOR concurrency class (CPU-bound work must not "
+            "steal the shared db_offload permits — phase2 D2.2). "
+            "Env: ENSEMBLE_ENGINE_TICK_WORKERS."
+        ),
+    )
+    watchdog_interval_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description=(
+            "Cadence (seconds) of the engine-independent daemon-thread "
+            "watchdog sampler (phase4 D4.8 — a config value, never a "
+            "literal). Env: ENSEMBLE_ENGINE_WATCHDOG_INTERVAL_SECONDS."
+        ),
+    )
+    boot_max_window_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        description=(
+            "The boot window the watchdog's stall threshold derives from: "
+            "stall when last-tick age > 3 x tick_resolution_seconds + "
+            "boot_max_window_seconds (phase4 D4.6). Default 120.0 = the "
+            "Emperor boot SLO (boot_epoch -> readyz-green <= 120s). "
+            "Env: ENSEMBLE_ENGINE_BOOT_MAX_WINDOW_SECONDS."
+        ),
+    )
+    boot_sweep_deadline_seconds: float = Field(
+        default=15.0,
+        gt=0,
+        description=(
+            "Per-pass deadline for an engine BOOT_SWEEP pass (awaited, "
+            "hard-deadlined; expiry logs ERROR and boot CONTINUES — boot "
+            "hygiene must never block boot). "
+            "Env: ENSEMBLE_ENGINE_BOOT_SWEEP_DEADLINE_SECONDS."
+        ),
+    )
+    boot_pass_deadline_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "Per-pass deadline for an engine BOOT_PASS pass (awaited, "
+            "best-effort). Env: ENSEMBLE_ENGINE_BOOT_PASS_DEADLINE_SECONDS."
+        ),
+    )
+    run_retention_days: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Retention window for engine_runs rows in days. P1 only fixes "
+            "the KNOB (config surface); the prune sweep itself rides the "
+            "module-migration tail (routed follow-up, phase1 section 5 "
+            "retention note / AMD-1(e)). "
+            "Env: ENSEMBLE_ENGINE_RUN_RETENTION_DAYS."
+        ),
+    )
+
+
 class NotifyUserConfig(BaseSettings):
     """Configuration for the ``notify_user`` tool (ari-voice, 2026-10-25).
 
@@ -7209,6 +7336,14 @@ class Config(BaseSettings):
     # NotifyUserConfig, env prefix ENSEMBLE_NOTIFY_USER_). Peers with
     # `scheduling:` — the yaml block mirrors the field names exactly.
     notify_user: NotifyUserConfig = Field(default_factory=NotifyUserConfig)
+    # engine-arc Phase 1 (Substrate, T1.6): the central polling/event
+    # engine knob section (class EngineConfig, env prefix
+    # ENSEMBLE_ENGINE_). Peers with `notify_user:` — the yaml block
+    # mirrors the field names exactly and load_config passes it through
+    # ONLY when present (the job_system / scheduling pattern), so env
+    # stays the canonical resolver for absent keys. Defaults ship the
+    # DORMANT posture: enabled=true + shadow_mode=true (D1.9 / CS-5).
+    engine: EngineConfig = Field(default_factory=EngineConfig)
     # prompt-assent (2026-11-10): the prompt_assent knob section
     # (architect D-2/H-11 — class PromptAssentConfig, env prefix
     # ENSEMBLE_PROMPT_ASSENT_): the DEFAULT-OFF fail-closed lane
@@ -9189,6 +9324,28 @@ def load_config(config_path: str | None = None) -> Config:
         # yaml carries the section so pydantic-settings' env source stays
         # the canonical resolver for absent keys.
         config_dict["scheduling"] = processed_config["scheduling"]
+    if "engine" in processed_config:
+        # engine-arc P1 (T1.6 / AC4): EngineConfig knobs default from env
+        # (ENSEMBLE_ENGINE_*). The section is passed through only when the
+        # yaml carries it (the job_system / scheduling shape) — BUT a
+        # plain passthrough would invert the documented precedence:
+        # pydantic-settings gives INIT KWARGS priority over env vars, so a
+        # yaml literal would shadow a live ENSEMBLE_ENGINE_* override
+        # (the "init-kwarg-beats-env" inversion trap the compaction /
+        # service_tool resolve sites were carved out to avoid). AC4
+        # requires "a yaml engine: section is honored AND an env value
+        # still wins on a present key", so any yaml key whose
+        # ENSEMBLE_ENGINE_<KEY> env var is SET is dropped here and left to
+        # the env source. Absent keys keep the yaml value; a wholly absent
+        # section keeps pydantic defaults.
+        _raw_engine = processed_config["engine"]
+        engine_config: Dict[str, Any] = (
+            dict(_raw_engine) if isinstance(_raw_engine, dict) else {}
+        )
+        for _engine_key in list(engine_config):
+            if f"ENSEMBLE_ENGINE_{_engine_key.upper()}" in os.environ:
+                engine_config.pop(_engine_key, None)
+        config_dict["engine"] = engine_config
     if "mcp_pool" in processed_config:
         config_dict["mcp_pool"] = processed_config["mcp_pool"]
     # Live-views max_media_bytes resolution (D2): env >

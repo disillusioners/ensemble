@@ -1077,6 +1077,23 @@ class InstanceManager:
         from .repositories.tool_usage.models import (  # noqa: F401  # tool-usage P1: register before create_all
             ToolUsageDaily,
         )
+        # engine-arc Phase 1 (Substrate, T1.5): register the 2 engine
+        # substrate tables BEFORE create_all so the PG boot path lands
+        # them on existing PG databases (SQLModel.metadata.create_all is
+        # the PG source-of-truth per the app_settings / resource_monitor /
+        # board / bash_spawn / PSL / memoir / POK / room precedent).
+        # Brand-new tables ⇒ NO ``_ensure_postgres_columns`` mirror;
+        # the SQLite path is the two Phase-1 .sql files
+        # (20261121_120000_create_engine_jobs.sql +
+        # 20261121_120001_create_engine_runs.sql).
+        #
+        # Dormancy: this block only MATERIALIZES the substrate. Nothing
+        # executes — no tick loop, no dispatch, no execute_fn call path
+        # exists in the Phase-1 tree (acceptance gate AC7).
+        from .repositories.engine.models import (  # noqa: F401  # engine-arc P1: register before create_all
+            EngineJob,
+            EngineRun,
+        )
 
         SQLModel.metadata.create_all(self._engine)
 
