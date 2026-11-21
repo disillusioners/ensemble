@@ -118,6 +118,3 @@ case "$PYTEST_EXIT" in
     exit 1
     ;;
 esac
-EOF
-chmod +x test/packs/engine_execution_unit_test.sh
-echo done

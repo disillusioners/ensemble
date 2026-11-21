@@ -382,3 +382,48 @@ async def test_engine_stop_bounded():
     await svc.start()
     await svc.stop(timeout=5.0)
     assert svc._task is None
+
+
+@pytest.mark.asyncio
+async def test_extend_then_raise_records_failed_backoff():
+    """C-1 pin: extend fire + late RuntimeError -> FAILED_BACKOFF with
+    error_class=RuntimeError; one TPE fire row; last_outcome FAILED_BACKOFF."""
+    eng = _engine()
+    repo = EngineRepository(eng)
+    reg = EngineRegistry(repo)
+    await reg.aregister(_spec(timeout_policy="extend", max_runtime_s=0.05,
+                              concurrency_class="DB_OFFLOAD"))
+    svc = EngineService(repo, reg, None, shadow_mode=False)
+    await svc._hydrate()
+    release = threading.Event()
+
+    def executor():
+        assert release.wait(timeout=10), "executor was never released"
+        raise RuntimeError("late boom")
+
+    svc.set_executor("orphan-watcher", executor)
+    loop = svc._execution_loop
+    fire_seen = asyncio.Event()
+    original_fire = loop._stamp_extend_fire
+
+    async def spy_fire(*a, **kw):
+        await original_fire(*a, **kw)
+        fire_seen.set()
+
+    loop._stamp_extend_fire = spy_fire
+    task = asyncio.create_task(
+        loop._dispatch_one("orphan-watcher", datetime.now(timezone.utc))
+    )
+    await asyncio.wait_for(fire_seen.wait(), timeout=10)
+
+    release.set()
+    await asyncio.wait_for(task, timeout=10)
+
+    job = repo.get_job("orphan-watcher")
+    assert job.last_outcome == "FAILED_BACKOFF"
+    rows = _count_runs(repo, "orphan-watcher")
+    tpe_rows = [r for r in rows if r.outcome == "TIMEOUT_PENDING_EXTEND"]
+    failed_rows = [r for r in rows if r.outcome == "FAILED_BACKOFF"]
+    assert len(tpe_rows) == 1
+    assert len(failed_rows) >= 1
+    assert failed_rows[-1].error_class == "RuntimeError"

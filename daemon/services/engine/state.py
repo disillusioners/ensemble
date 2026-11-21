@@ -40,6 +40,7 @@ SKIP_REASONS: frozenset[str] = frozenset(
         "TIMEOUT_PENDING_EXTEND",
         "ERROR_BACKOFF",
         "NOT_DUE",
+        "REREGISTERED",
     }
 )
 
@@ -49,9 +50,18 @@ IDLE_GATE_SKIP_REASONS: frozenset[str] = frozenset({"IDLE_GATED", "DEP_MISSING"}
 
 # Backoff policy constants (engine-owned; NOT an estate cadence — D2.16).
 SKIP_BACKOFF_CAP_FACTOR: int = 8
+
+# Named constants for the dual spelling (W-? fold): the skip REASON token and
+# the resulting outcome string. Today both spellings collapse to the same
+# token ("TIMEOUT_PENDING_EXTEND"); the constants keep the family in one place.
+REASON_TIMEOUT_PENDING_EXTEND: str = "TIMEOUT_PENDING_EXTEND"
+OUTCOME_TIMEOUT_PENDING_EXTEND: str = "TIMEOUT_PENDING_EXTEND"
 SKIP_BACKOFF_START_AFTER: int = 1
 
-# Allowed transitions. ``SKIPPED_<reason>`` is a family of terminal states.
+# Allowed transitions (INFORMATIONAL / non-enforcing — W-1). The table documents
+# the intended lifecycle; ``stamp_terminal`` does NOT gate on it (a hard
+# gate would risk stranding a job whose state drifted). ``is_allowed_transition``
+# is provided for callers/tests that want to assert.
 def _skipped_states() -> frozenset[str]:
     return frozenset(f"SKIPPED_{r}" for r in SKIP_REASONS)
 
@@ -114,6 +124,7 @@ class TerminalStamp:
     boot_id: Optional[str] = None
     host_pid: Optional[int] = None
     consecutive_skips: Optional[int] = None
+    dead: Optional[int] = None
 
 
 def stamp_terminal(repository: EngineRepository, stamp: TerminalStamp) -> Optional[EngineJob]:
@@ -157,6 +168,7 @@ def stamp_terminal(repository: EngineRepository, stamp: TerminalStamp) -> Option
             last_skip_reason=stamp.skip_reason,
             consecutive_skips=stamp.consecutive_skips,
             last_run_at=stamp.finished_at,
+            dead=stamp.dead,
         )
     except Exception as exc:  # noqa: BLE001
         logger.error(

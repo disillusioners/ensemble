@@ -102,7 +102,7 @@ def _spec(**overrides):
     return JobSpec(**base)
 
 
-# ── AC5: the 9 validation rules, one code per rule ─────────────────────
+# ── AC5: the 12 validation rules, one code per rule ────────────────────
 
 
 class TestSpecValidation:

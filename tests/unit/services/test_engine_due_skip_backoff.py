@@ -246,22 +246,38 @@ async def test_ingest_event_sets_pending_latch():
 
 @pytest.mark.asyncio
 async def test_loop_does_not_silently_return_on_unexpected_error():
-    """F-7: unexpected loop error re-raises, not silent return."""
+    """F-7 (re-baselined for P3 D3.9 supervisor): unexpected loop error is
+    supervised — the loop re-enters after a bounded backoff, never returns,
+    and the restart counter increments (P4 watchdog input)."""
     eng = _engine()
     repo = EngineRepository(eng)
     reg = EngineRegistry(repo)
     await reg.aregister(_spec())
     svc = EngineService(repo, reg, None, shadow_mode=True)
+    # fast resolution/backoff
+    if svc.config is None:
+        from types import SimpleNamespace
+        svc.config = SimpleNamespace(tick_resolution_seconds=0.05)
+    else:
+        svc.config.tick_resolution_seconds = 0.05
     await svc._hydrate()
 
-    # monkeypatch _tick to raise
     async def boom():
         raise ValueError("unexpected")
 
     svc._execution_loop._tick = boom
     svc._stopping = False
-    with pytest.raises(ValueError):
-        await svc._execution_loop.run()
+    task = asyncio.create_task(svc._execution_loop.run())
+    # give the supervised loop time to hit the error + backoff + re-enter
+    await asyncio.sleep(0.3)
+    assert getattr(svc, "_supervisor_restarts", 0) >= 1
+    assert not task.done()
+    svc._stopping = True
+    task.cancel()
+    try:
+        await asyncio.wait_for(task, timeout=2)
+    except (asyncio.CancelledError, Exception):
+        pass
 
 
 @pytest.mark.asyncio

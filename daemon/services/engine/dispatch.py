@@ -25,6 +25,7 @@ from daemon.repositories.engine.models import (
     CONCURRENCY_CLASS_DEDICATED_EXECUTOR,
     CONCURRENCY_CLASS_MAIN_LOOP,
 )
+from daemon.services.engine.state import OUTCOME_TIMEOUT_PENDING_EXTEND as _TPE_OUTCOME
 
 
 async def _call(fn: Callable, *args: Any, **kwargs: Any) -> Any:
@@ -48,7 +49,13 @@ async def run_db_offload(fn: Callable, *args: Any, **kwargs: Any) -> Any:
     a sync callable.
     """
     if asyncio.iscoroutinefunction(fn):
-        return await fn(*args, **kwargs)
+        # W-4: DB_OFFLOAD exists to keep blocking work off the loop. A coroutine
+        # fn passed here is a discipline violation — refuse rather than silently
+        # awaiting inline (which would defeat the class).
+        raise TypeError(
+            "DB_OFFLOAD refuses coroutine functions; pass a sync callable "
+            "(or use MAIN_LOOP for in-loop coroutines)."
+        )
     return await asyncio.to_thread(fn, *args, **kwargs)
 
 
@@ -73,6 +80,7 @@ async def run_with_timeout(
     max_runtime_s: float,
     policy: str,
     on_extend_tick: Optional[Callable[[], Any]] = None,
+    extend_ceiling_s: Optional[float] = None,
 ) -> tuple[str, Optional[BaseException]]:
     """Run a dispatch coroutine with a timeout.
 
@@ -91,7 +99,10 @@ async def run_with_timeout(
     awaitable = coro_factory()
     if not asyncio.iscoroutine(awaitable):
         # Allow a coroutine factory returning a plain value.
-        awaitable = asyncio.coroutine(lambda: awaitable)()  # type: ignore
+        async def _wrap_plain():
+            return awaitable
+
+        awaitable = _wrap_plain()
 
     if policy == "cancel":
         try:
@@ -100,6 +111,8 @@ async def run_with_timeout(
         except asyncio.TimeoutError:
             return "TIMED_OUT", asyncio.TimeoutError()
         except BaseException as exc:  # noqa: BLE001
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return "ERROR", exc
 
     # extend policy
@@ -117,13 +130,26 @@ async def run_with_timeout(
                     await _fired
             except Exception:  # noqa: BLE001 — fire-time write failure never kills the dispatch
                 pass
-        # await actual completion (lock stays held by caller)
+        # await actual completion (lock stays held by caller), but BOUNDED
+        # by extend_ceiling_s so a single wedged dispatch cannot stall every
+        # tick (W-2). On breach, treat as a late failure (C-1 propagation).
+        ceiling = extend_ceiling_s if extend_ceiling_s is not None else 30.0
         try:
-            await task
-            return "TIMEOUT_PENDING_EXTEND", None
+            await asyncio.wait_for(asyncio.shield(task), timeout=ceiling)
+            return _TPE_OUTCOME, None
+        except asyncio.TimeoutError:
+            if not task.done():
+                task.cancel()
+            return _TPE_OUTCOME, asyncio.TimeoutError()
         except BaseException as exc:  # noqa: BLE001
-            return "TIMEOUT_PENDING_EXTEND", exc
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return _TPE_OUTCOME, exc
     except BaseException as exc:  # noqa: BLE001
+        if isinstance(exc, asyncio.CancelledError):
+            if not task.done():
+                task.cancel()
+            raise
         if not task.done():
             task.cancel()
         return "ERROR", exc
@@ -135,6 +161,7 @@ async def run_with_retry(
     backoff_base_s: Optional[float],
     backoff_cap_s: Optional[float],
     sleep: Callable[[float], Any] = asyncio.sleep,
+    max_delay_s: Optional[float] = None,
 ) -> tuple[str, int, Optional[BaseException]]:
     """Retry loop (D2.8). Returns (outcome, attempts_used, last_exc).
 
@@ -155,10 +182,14 @@ async def run_with_retry(
             await attempt_fn(attempt)
             return "SUCCEEDED", attempts, None
         except BaseException as exc:  # noqa: BLE001
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             last_exc = exc
             if attempt >= total_attempts:
                 break
             delay = min(cap, base * (2 ** (attempt - 1)))
+            if max_delay_s is not None:
+                delay = min(delay, float(max_delay_s))
             if delay and delay > 0:
                 await sleep(delay)
     return "FAILED_BACKOFF", attempts, last_exc

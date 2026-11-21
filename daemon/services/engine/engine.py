@@ -20,6 +20,7 @@ from daemon.services.engine.locks import JobLockTable
 from daemon.services.engine.metrics import EngineMetrics
 from daemon.services.engine.state import now_iso, parse_iso
 from daemon.services.engine.execution import EngineExecutionLoop
+from daemon.services.engine.guardrails import DepMissingTracker, ExtendWedgeTracker
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +42,14 @@ class EngineService:
             else getattr(config, "shadow_mode", True)
         )
         tick_workers = getattr(config, "tick_workers", 2) if config is not None else 2
-        self._dedicated_executor = dedicated_executor or ThreadPoolExecutor(
-            max_workers=max(1, int(tick_workers)), thread_name_prefix="engine-dedicated"
-        )
+        if dedicated_executor is None:
+            self._dedicated_executor = ThreadPoolExecutor(
+                max_workers=max(1, int(tick_workers)), thread_name_prefix="engine-dedicated"
+            )
+            self._owns_dedicated_executor = True
+        else:
+            self._dedicated_executor = dedicated_executor
+            self._owns_dedicated_executor = False
         self._locks = JobLockTable()
         self._cache: dict[str, dict] = {}
         self._executors: dict[str, Callable] = {}
@@ -53,6 +59,12 @@ class EngineService:
         self._execution_loop = EngineExecutionLoop(self)
         self.metrics = EngineMetrics(self)
         self._started: bool = False
+        self._supervisor_restarts: int = 0
+        self._dependency_refs: dict[str, list] = {}
+        self._dep_missing_tracker = DepMissingTracker()
+        self._extend_wedge_tracker = ExtendWedgeTracker()
+        self._extend_escalated: set[str] = set()
+        self._dep_missing_escalated: set[str] = set()
 
     # ── introspection ────────────────────────────────────────────────
     @property
@@ -68,6 +80,8 @@ class EngineService:
         if self._task is not None and not self._task.done():
             return  # idempotent
         self._stopping = False
+        if self.registry is not None and hasattr(self.registry, "set_cancel_callback"):
+            self.registry.set_cancel_callback(self._cancel_inflight_tick)
         await self._hydrate()
         self._task = asyncio.create_task(
             self._execution_loop.run(), name="engine-tick"
@@ -83,16 +97,24 @@ class EngineService:
         self._stopping = True
         task = self._task
         if task is not None:
-            task.cancel()
+            # W-3: re-cancel and await bounded before abandoning.
+            if not task.done():
+                task.cancel()
             try:
                 await asyncio.wait_for(task, timeout=timeout)
             except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await asyncio.wait_for(task, timeout=1.0)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        pass
             self._task = None
-        try:
-            self._dedicated_executor.shutdown(wait=False)
-        except Exception:  # noqa: BLE001
-            pass
+        if getattr(self, "_owns_dedicated_executor", True):
+            try:
+                self._dedicated_executor.shutdown(wait=False)
+            except Exception:  # noqa: BLE001
+                pass
 
     # ── hydration (D2.12) ────────────────────────────────────────────
     async def _hydrate(self) -> None:
@@ -183,6 +205,7 @@ class EngineService:
             "pending_event": False,
             "registered_at": job.registered_at,
             "first_tick_anchor": job.registered_at,
+            "persisted_dead": bool(getattr(job, "dead", 0)),
         }
 
     # ── seams ────────────────────────────────────────────────────────
@@ -193,34 +216,22 @@ class EngineService:
     def set_executor(self, job_id: str, fn: Callable) -> None:
         self._executors[job_id] = fn
 
-    def add_job_spec(self, spec: Any, executor: Optional[Callable] = None) -> None:
-        """In-memory spec registration (tests). Persistence is the caller's job."""
-        entry = self._make_cache_entry_from_spec(spec)
-        self._cache[spec.id] = entry
-        if executor is not None:
-            self._executors[spec.id] = executor
-
-    def _make_cache_entry_from_spec(self, spec: Any) -> dict:
-        return {
-            "version": 1,
-            "fingerprint": None,
-            "spec": spec,
-            "last_run_at": None,
-            "consecutive_skips": 0,
-            "last_outcome": None,
-            "last_skip_reason": None,
-            "last_duration_seconds": None,
-            "running": False,
-            "skips_by_reason": {},
-            "shadow_evidence_ts": [],
-            "would_fire": False,
-            "pending_event": False,
-            "registered_at": None,
-            "first_tick_anchor": None,
-        }
-
     def set_executor_and_seed(self, job_id: str, fn: Callable) -> None:
         self._executors[job_id] = fn
+
+    # ── dependency wiring (P3 T3.1) ─────────────────────────────────────
+    def set_dependencies(self, job_id: str, refs: list) -> None:
+        self._dependency_refs[job_id] = list(refs or [])
+
+    def get_dependencies(self, job_id: str) -> list:
+        return list(self._dependency_refs.get(job_id, []))
+
+    def _cancel_inflight_tick(self, job_id: str) -> None:
+        """P3 T3.5: mark the in-flight dispatch for cancellation/audit."""
+        cache = self._cache.get(job_id)
+        if cache is not None:
+            cache["cancel_requested"] = True
+            cache["reregistered"] = True
 
 
 __all__ = ["EngineService"]
