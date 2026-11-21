@@ -1,0 +1,186 @@
+"""P5 pack — the kind catalog (T5.1, AC1 / AC5 / AC9 / F-17 / D5.9-D5.10).
+
+Mutation legs in this file (each asserts the INVARIANT whose violation is
+the named mutation, so flipping the code turns the leg RED):
+
+- ``test_validate_refuses_duplicate_kind_id`` — a duplicated kind_id is
+  flagged (mutation: remove the duplicate check ⇒ RED).
+- ``test_validate_refuses_missing_posture`` — a missing posture is
+  flagged (mutation: remove the posture check ⇒ RED).
+- ``test_posture_labels_are_exact`` (AC5) — the shipped posture map is
+  pinned field-by-field (mutation: flip one label in catalog.py ⇒ RED).
+- ``test_record_refuses_unregistered_kind`` (emit.py) — also here in
+  spirit; the emit-side legs live in test_emit.py.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+
+from daemon.repositories.event.models import EventKind
+from daemon.services.event_registry import (
+    BRIDGE_PENDING,
+    CATALOG,
+    DEFERRED_V2_KINDS,
+    KIND_INDEX,
+    SEAM_DEPTH_TRIGGERS,
+    EventClass,
+    FailurePosture,
+    KindSpec,
+    validate_catalog,
+)
+
+
+# ── AC1 — catalog completeness ──────────────────────────────────────────
+
+
+def test_shipped_catalog_is_valid():
+    assert validate_catalog() == []
+
+
+def test_every_v1_kind_carries_the_self_describing_fields():
+    # D5.9 addendum parity with JobSpec/ServiceMeta.
+    required = (
+        "kind_id",
+        "klass",
+        "service_tag",
+        "module_info",
+        "description",
+        "posture",
+        "consumers",
+        "metadata",
+    )
+    for spec in CATALOG:
+        for name in required:
+            assert getattr(spec, name) is not None, (spec.kind_id, name)
+        assert isinstance(spec.kind_id, str) and spec.kind_id
+        assert isinstance(spec.consumers, tuple)
+        assert isinstance(spec.metadata, dict)
+
+
+def test_catalog_is_a_frozen_tuple_of_frozen_specs():
+    assert isinstance(CATALOG, tuple)
+    for spec in CATALOG:
+        assert dataclasses.is_dataclass(spec)
+        # frozen dataclass: mutation must raise.
+        try:
+            spec.kind_id = "mutated"  # type: ignore[misc]
+        except dataclasses.FrozenInstanceError:
+            pass
+        else:
+            raise AssertionError(f"KindSpec is not frozen: {spec.kind_id}")
+
+
+def test_event_bus_family_is_kind_parameterized_and_derived():
+    # One registry kind per EventKind member, auto-derived (F-17: the
+    # catalog — not the stale SQLite CHECK — is the identity).
+    family = [k for k in CATALOG if k.kind_id.startswith("event_bus:")]
+    assert len(family) == len(EventKind)
+    expected = {f"event_bus:{ek.value}" for ek in EventKind}
+    got = {k.kind_id for k in family}
+    assert got == expected
+    for spec in family:
+        assert spec.klass is EventClass.DURABLE_BUS
+        assert spec.service_tag == "event_bus"
+
+
+# ── Mutation leg: duplicate kind_id ⇒ RED ───────────────────────────────
+
+
+def test_validate_refuses_duplicate_kind_id():
+    dup = dataclasses.replace(CATALOG[0])
+    bad_catalog = CATALOG + (dup,)
+    defects = validate_catalog(bad_catalog)
+    assert defects, "validate_catalog missed a duplicate kind_id"
+    assert any("duplicate kind_id" in d for d in defects)
+    assert any(CATALOG[0].kind_id in d for d in defects)
+
+
+# ── Mutation leg: missing posture ⇒ RED ─────────────────────────────────
+
+
+def test_validate_refuses_missing_posture():
+    broken = KindSpec(
+        kind_id="broken_kind",
+        klass=EventClass.TERMINALIZATION,
+        service_tag="s",
+        description="d",
+        posture=None,  # type: ignore[arg-type]
+    )
+    defects = validate_catalog((broken,))
+    assert defects, "validate_catalog missed a missing posture"
+    assert any("posture" in d for d in defects)
+
+
+def test_validate_refuses_class5_entry_without_deferred_marker():
+    broken = KindSpec(
+        kind_id="turn_transition_rogue",
+        klass=EventClass.TURN_TRANSITION,
+        service_tag="s",
+        description="d",
+        posture=FailurePosture.FAIL_MISS,
+        metadata={"lag": {"measurable": False}},
+    )
+    defects = validate_catalog((broken,))
+    assert any("deferred_v2" in d for d in defects)
+
+
+def test_every_kind_declares_the_lag_honesty_metadata():
+    for spec in CATALOG:
+        lag = spec.metadata.get("lag")
+        assert isinstance(lag, dict) and "measurable" in lag, spec.kind_id
+
+
+# ── AC5 — posture labels are exact (mutation: flip one ⇒ RED) ───────────
+
+
+def test_posture_labels_are_exact():
+    expected = {
+        "instance_terminalized": FailurePosture.FAIL_MISS,
+        "report_injection_obligation": FailurePosture.FAIL_MISS,
+        "mission_commission_transition": FailurePosture.FAIL_MISS,
+        "attestation_epoch": FailurePosture.FAIL_OPEN,
+    }
+    got = {
+        kind: KIND_INDEX[kind].posture
+        for kind in expected
+    }
+    assert got == expected
+    # The event_bus family: the DURABLE row is fail-miss truth; the
+    # in-proc fan-out facet is labeled drop-counted in metadata (AC5's
+    # "in-proc fan-out is DROP_COUNTED").
+    for spec in CATALOG:
+        if spec.kind_id.startswith("event_bus:"):
+            assert spec.posture is FailurePosture.FAIL_MISS
+            assert spec.metadata["fanout_posture"] == "DROP_COUNTED"
+
+
+# ── AC9 — the class-5 deferral is loud and honest ────────────────────────
+
+
+def test_class5_turn_transition_entry_is_deferred_v2():
+    spec = KIND_INDEX["turn_transition"]
+    assert spec.metadata["deferred_v2"] is True
+    assert spec.metadata["gap"] == "GAP-13"
+    anchors = " ".join(spec.metadata["anchors"])
+    assert "instance_lifecycle.py" in anchors
+    assert "turn_transition" in DEFERRED_V2_KINDS
+    assert spec.klass is EventClass.TURN_TRANSITION
+
+
+def test_seam_depth_triggers_note_names_gap14_and_ev24():
+    # D5.10: the queue-depth seam is NAMED, not built.
+    assert "GAP-14" in SEAM_DEPTH_TRIGGERS
+    assert "EV-24" in SEAM_DEPTH_TRIGGERS
+    assert "instance_messaging" in SEAM_DEPTH_TRIGGERS
+
+
+def test_no_bridge_pending_beyond_the_documented_family():
+    # BRIDGE_PENDING may only cover the event_bus kind-parameterized
+    # family (the T5.4 open question) — every OTHER catalog kind must
+    # have a real bridge (the census leg in test_bridges.py enforces
+    # that direction).
+    assert set(BRIDGE_PENDING) == {"event_bus:*"}
+    for kind_id in KIND_INDEX:
+        if not kind_id.startswith("event_bus:"):
+            assert kind_id not in BRIDGE_PENDING
