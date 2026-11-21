@@ -68,7 +68,7 @@ The lane's ruling SSOT is the dispatcher's pre-rulings (recorded in the dispatch
 **The tab's slot is `custom`.** Evidence:
 1. `MetricsCentralTab` requires `familyIds: NonEmpty<MetricsRegisteredFamilyId>` (`tabs.manifest.ts:124-126`) — a central tab MUST bind at least one registered family. Tool-usage binds **none** (it is not a metrics family; its data is the domain door). There is no "empty familyIds" sentinel (`NonEmpty` forbids it).
 2. `MetricsCustomTab` (`tabs.manifest.ts:133-160`) is the only slot shape with no `familyIds` member and its own window vocabulary (`ResourcesWindow`). The resource tab (`slot: 'custom'`, `id: 'resource'`) is the in-tree precedent.
-3. Consequence: the custom-tab count in `tabs.manifest.spec.ts` moves from 1 → 2 and the central count from 7 → 8. This is a **spec amendment**, recorded in Task 1.
+3. Consequence: the custom-tab count in `tabs.manifest.spec.ts` moves from 1 → 2; the central count stays **7 (unchanged)** — the new tab is `slot:'custom'` and binds no family (census 1 custom + 7 central → 2 custom + 7 central = 9). This is a **spec amendment**, recorded in Task 1. *(leader-directed amendment 2026-11-21, iter-003 B1)*
 
 ### Ruling B — label and id
 
@@ -139,7 +139,7 @@ Slug `tool-usage`, label `Tool Usage`. The slug matches the label (no internal i
    - `:70-72` `it('carries exactly 8 tabs')` → **9**.
    - `:77-86` the ids array → append `'tool-usage'`.
    - `:90-96` the labels array → append `'Tool Usage'`.
-   - `:96-100` `it('exactly ONE tab is the custom slot …')` → **2 custom / 8 central** (Ruling A adds a second custom tab).
+   - `:96-100` `it('exactly ONE tab is the custom slot …')` → **2 custom / 7 central** (Ruling A adds a second custom tab; central unchanged). *(leader-directed amendment 2026-11-21, iter-003 B1)*
    - `:102-116` the family-roster map → **unchanged** (tool-usage is custom, carries no family; the map is over `CENTRAL_TABS` only).
    - `:117-125` any custom-slot count assertions → update to 2.
     - **`metricsCustomTab()` "exactly one custom" prose is now FALSE** — amend the docstring and pin that it returns the resource tab first (the second custom tab is type-legal; the constraint is prose/spec-count only). Add a pin asserting the returns-resource-first ordering. Pin the two-custom-tab return shape EXPLICITLY (approver fix A4, iteration-001): with tool-usage appended, `metricsCustomTab()` returns **two** tabs in manifest-declaration order — the resource tab first, then tool-usage (`[resource, tool-usage]`); the ordering rule is METRICS_TABS declaration order (the resource entry predates the appended tool-usage entry), NOT id-alphabetical — the spec pin asserts count == 2 AND this exact sequence; never left to the implementer.
@@ -299,7 +299,7 @@ No other change. The `METRICS_TAB_BINDINGS` derivation (`.map`) stays untouched.
 | **tab pack** | `frontend/src/app/pages/metrics/metrics.tool-usage.spec.ts` (NEW) | the tab appears in the manifest with id `tool-usage` and label `Tool Usage`; the slot is `custom`; the request shapes (summary + daily); a 503 on the source ⇒ exactly ONE banner (single-banner discipline) and no Retry; the domain-only 404 ⇒ the domain-local copy; the empty state is DISTINCT from the error state; the empty state is HONEST (no fake data on 503); rows sorted by `calls_7d` desc; zero/near-zero rows visually distinct; per-agent breakdown expands on row click; stale response discarded (supersede token); tab-hidden polling stops; **template-safety pin**: NO `innerHTML` and NO `bypassSecurityTrust` in the new tab's template (AM-12d precedent); **lazy-mechanism pin**: the map value is the host, not the heavy component. |
 | service | `frontend/src/app/services/tool-usage.service.spec.ts` (NEW) | URL shapes; `Accept: application/json`; the 15 s deadline mapping to the typed timeout error; the supersede token discards a stale answer; `params` forwards only set values (incl. `project_id` omitted ⇒ all-projects). |
 | models | `frontend/src/app/models/tool-usage.models.spec.ts` (NEW) | the domain-local copy table is exhaustive over the domain-only outcomes (no silent fall-through). |
-| manifest | `frontend/src/app/pages/metrics/tabs.manifest.spec.ts` (EXTEND) | 9 tabs; the ids array; the labels array; 2 custom / 8 central; the family-roster map unchanged (tool-usage is custom). |
+| manifest | `frontend/src/app/pages/metrics/tabs.manifest.spec.ts` (EXTEND) | 9 tabs; the ids array; the labels array; 2 custom / 7 central; the family-roster map unchanged (tool-usage is custom). *(leader-directed amendment 2026-11-21, iter-003 B1)* |
 | bundle guard | `frontend/src/app/pages/metrics/metrics.bundle-guard.spec.ts` (EXTENDED, not bypassed) | the existing guard's contract pins stay green (the artifact is read, not copied) AND the new tab's vendor bytes in ANY static fetch set == 0; the chart.js-vendor invariant stays GREEN. |
 
 **The bundle discipline (frozen numbers, from `bundle-baseline.json`; the artifact is frozen except the ONE threshold field ruled by LR1 / decisions D12 under the phase-4 ownership grant D22 — `baseline_metrics_route_fetch_set_lazy_only_bytes` and every other baseline field stay frozen):**  *(review fix U1, U15)*
@@ -356,7 +356,7 @@ The measured numbers are recorded **against the frozen MEASUREMENT baseline** (1
 
 - The `/metrics?tab=tool-usage` route renders the project selector, the tool-usage table (freq-sorted, zero/near-zero visually distinct), the per-agent breakdown on row expansion, and the trend chart (house-svg-trend) — with auth ON.
 - With auth OFF, the tab renders exactly ONE fail-closed banner (no Retry, runbook pointer) and never blanks or storms requests.
-- `tabs.manifest.spec.ts` carries 9 tabs, 2 custom / 8 central, and the ids/labels arrays include `tool-usage` / `Tool Usage`.
+- `tabs.manifest.spec.ts` carries 9 tabs, 2 custom / 7 central, and the ids/labels arrays include `tool-usage` / `Tool Usage`. *(leader-directed amendment 2026-11-21, iter-003 B1)*
 - `metrics.tool-usage.spec.ts`, `tool-usage.service.spec.ts`, `tool-usage.models.spec.ts` are GREEN.
 - The bundle guard exits 0 with the re-measured B4b recorded against the **re-baselined 188 000 B** threshold (leader ruling LR1 — decisions D12; ownership grant decisions D22; R-08 / architect §6.2 escalation label; expected measured 185,800–186,200 B); `package.json` is untouched; the component-style warning SET is unchanged (9 entries).
   Amended by architect pass @ fd254b335 — LEADER RULING R-08 (§6.2)
@@ -370,7 +370,7 @@ The measured numbers are recorded **against the frozen MEASUREMENT baseline** (1
 
 *(review fix U16)* every Angular/CLI invocation below uses the `./node_modules/.bin/` idiom from inside `frontend/` — never a bare `npx`/`tsc` outside the local devDependency (2026-10-03 remote-fetch incident).
 
-1. `cd frontend && ./node_modules/.bin/jest --config jest.config.js src/app/pages/metrics/tabs.manifest.spec.ts` — green (9 tabs, 2 custom/8 central).
+1. `cd frontend && ./node_modules/.bin/jest --config jest.config.js src/app/pages/metrics/tabs.manifest.spec.ts` — green (9 tabs, 2 custom/7 central). *(leader-directed amendment 2026-11-21, iter-003 B1)*
 2. `cd frontend && ./node_modules/.bin/jest --config jest.config.js src/app/pages/metrics/metrics.tool-usage.spec.ts src/app/services/tool-usage.service.spec.ts src/app/models/tool-usage.models.spec.ts` — green.
 3. `cd frontend && ./node_modules/.bin/jest --config jest.config.js src/app/pages/metrics/metrics.bundle-guard.spec.ts` — green (vendor-static-edge invariant holds).
 4. `cd frontend && ./node_modules/.bin/ng build --configuration development` — green (AOT gap closure).

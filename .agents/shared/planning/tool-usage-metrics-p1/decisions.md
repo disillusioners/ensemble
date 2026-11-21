@@ -290,6 +290,12 @@ No argument payload is possible by construction — the signature has no args sl
 
 ---
 
+### D23 — Approver cap; leader-directed B1 amendment
+
+Approver cap reached at iteration 003; B1 applied by leader-directed amendment without a 4th approver pass; verification mechanical (arithmetic re-derivation + occurrence counts); disclosed to commission report.
+
+---
+
 ## Corrections (dispatcher adjudicated, from the explorer passes)
 
 These correct prior recon notes. They are recorded as facts, not decisions.
@@ -362,7 +368,7 @@ Canonical predicates copied char-for-character from the phase bodies where they 
 | # | Canonical predicate (verbatim) | Source body location |
 |---|---|---|
 | 1 | sentinel `"__none__"` for un-attributable calls | phase1-plan.md §3.1 (D16) |
-| 2 | NEVER drop counters (overflow means flush, not discard) | phase1-plan.md §5 AC4 (:382) — re-pinned from §3.3 (the §3.3 carrier wraps the phrase in `**` emphasis, breaking char-for-char); plain occurrence verified at AC4 (approver fix B2-note, iteration-001) |
+| 2 | NEVER drop counters (overflow means flush, not discard) | phase1-plan.md §5 AC4 (:381) — re-pinned from §3.3 (the §3.3 carrier wraps the phrase in `**` emphasis, breaking char-for-char); plain occurrence verified at AC4 (approver fix B2-note, iteration-001) |
 | 3 | ≤ 188 000 B (RE-BASELINED by leader ruling LR1 — decisions D12; ownership grant decisions D22; was ≤ 185 000 B) | phase4-plan.md §4.2 (B4b row) / Task 6 (LR1) — re-pinned to body truth (approver fix B1-note, iteration-001) |
 | 4 | schedule:'0 8 * * *' | phase3-plan.md §3.8 (seeded-row config, D-3) |
 | 5 | complete previous UTC day (`D−1`); "cumulative-week" := `[D−7, D−1]` complete UTC days | phase3-plan.md §3 (D-7) |
@@ -373,4 +379,4 @@ Canonical predicates copied char-for-character from the phase bodies where they 
 
 This is the approver iteration-001 fix pass on the decisions.md ledger. What changed in THIS pass: B1 (PREDICATE LEDGER row 3 re-pinned to the body's current attribution string — "LR1 — decisions D12; ownership grant decisions D22"), B2 (this attestation rewritten to true results + row 2's source cell re-pinned from §3.3 to its verified plain site §5 AC4), B3 (D3 append-only supersession marker: sentinel is `"__none__"` everywhere; D3's `""` historical), B4 (D16 x-ref repointed from the empty §3.4 to §3.1:76 + §4 T8), B5 (D18 reverted to 491/625 as THE claim + appended architect-style correction entry disclosing the full arc — also discharges carried note B8), B6 (D7 contradictory clause replaced with the adjudicated absent-vs-malformed semantics, byte-identical to phase1:207). Carried notes folded: N-B1 (ledger scope declaration), N-B2 (D12 SUPERSEDES D9 pointer at D9), N-B5 (D6 two-edits form), N-B6 (D8 full-path citation), N-B9 (sink-registration symbol `register_sink` frozen at D3). B7 (phase5 SHA) is a body-file fix outside this worker's decisions.md-only scope and was NOT touched here. Edit scope: decisions.md (this worker); body fixes landed by parallel workers, verified by containment, not by authorship.
 
-Verification method: Python `re.sub(r"\s+", " ", text)` whitespace-normalized CONTAINMENT of each PREDICATE LEDGER row's canonical string against its cited CURRENT body file (line-based grep is invalid for wrapped strings); row 7 verified by direct byte comparison of the blockquote across its three carriers. TRUE per-row results after this pass: row 1 PASS — phase1-plan.md §3.1 (:65); row 2 PASS — phase1-plan.md §5 AC4 (:382), the plain occurrence (the former §3.3 carrier wraps the phrase in `**` emphasis and FAILS char-for-char); row 3 PASS — phase4-plan.md §4.2 B4b row (:313); row 4 PASS — phase3-plan.md §3.8 (:68); row 5 PASS — phase3-plan.md §3 D-7 (:82); row 6 PASS — phase2-plan.md §3/T6 (:82/:96/:136/:143); row 7 PASS — counting-contract blockquote byte-identical across D15 + phase1-plan.md §3.3.1 + architecture-recommendation.md §3. All 7 rows PASS; no residual drift in this file. This supersedes the prior attestation's false "entries 1–6 PASS / No drift found" claim.
+Verification method: Python `re.sub(r"\s+", " ", text)` whitespace-normalized CONTAINMENT of each PREDICATE LEDGER row's canonical string against its cited CURRENT body file (line-based grep is invalid for wrapped strings); row 7 verified by direct byte comparison of the blockquote across its three carriers. TRUE per-row results after this pass: row 1 PASS — phase1-plan.md §3.1 (:65); row 2 PASS — phase1-plan.md §5 AC4 (:381), the plain occurrence (the former §3.3 carrier wraps the phrase in `**` emphasis and FAILS char-for-char); row 3 PASS — phase4-plan.md §4.2 B4b row (:313); row 4 PASS — phase3-plan.md §3.8 (:68); row 5 PASS — phase3-plan.md §3 D-7 (:82); row 6 PASS — phase2-plan.md §3/T6 (:82/:96/:136/:143); row 7 PASS — counting-contract blockquote byte-identical across D15 + phase1-plan.md §3.3.1 + architecture-recommendation.md §3. All 7 rows PASS; no residual drift in this file. This supersedes the prior attestation's false "entries 1–6 PASS / No drift found" claim.
