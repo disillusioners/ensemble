@@ -1,0 +1,10 @@
+# M2 benches: keep bench scripts + spike SOURCES in git, keep build artifacts OUT.
+dist/
+build/
+*.spec.bak
+spike-build/
+markers/
+*.jsonl
+__pycache__/
+*.pyc
+audit-out/
