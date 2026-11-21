@@ -3196,6 +3196,10 @@ class TestEnqueueMessageJobDedupRealPath:
 
 
 class TestScheduleFireNotifySeam:
+    """Direct-dispatch hook: the adapter always invokes the never-raise
+    entrypoint with the whole config/metadata; the identity gate itself is
+    proven in the helper matrix, not at this thin seam."""
+
     @pytest.mark.asyncio
     async def test_direct_notify_called_when_creator_present(self, mock_on_message):
         from daemon.sources.adapters import scheduler as sched_mod

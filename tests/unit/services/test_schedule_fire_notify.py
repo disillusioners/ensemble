@@ -68,6 +68,8 @@ async def test_message_shape_source_and_no_spawn():
         assert field in msg, field
     assert m.get_sent_total() == 1
     assert m.get_dropped_total() == 0
+    # no-spawn pin: the notice goes to an existing instance only.
+    manager.spawn_instance_with_mcp.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -157,3 +159,58 @@ async def test_non_dict_metadata_does_not_raise():
     )
     await asyncio.sleep(0.1)
     assert manager.enqueue_message_job.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_reason_taxonomy_is_live():
+    """N7: the reason discriminator distinguishes an infra lookup error
+    from a clean absent row, a terminal creator, and a missing enqueue
+    hook. All four drop paths must emit their distinct reason token."""
+    seen: list[dict] = []
+
+    def _sink(event: dict) -> None:
+        seen.append(dict(event))
+
+    m.attach_sink(_sink)
+    try:
+        # (1) repo read RAISES -> creator_lookup_error (not creator_absent).
+        err_manager = _make_manager(status="running")
+        err_manager._instance_repository.get = um.Mock(
+            side_effect=RuntimeError("db down")
+        )
+        await _notify(err_manager)
+        await asyncio.sleep(0.1)
+        lookup_reasons = [
+            e["reason"] for e in seen
+            if e["metric"] == m.SCHEDULE_FIRE_NOTIFY_DROPPED_TOTAL
+            and (e["reason"] or "").startswith("creator_lookup_error")
+        ]
+        assert lookup_reasons, "repo-raise must record creator_lookup_error:*"
+
+        # (2) row is None -> creator_absent.
+        seen.clear()
+        await _notify(_make_manager(status=None))
+        await asyncio.sleep(0.1)
+        assert any(e.get("reason") == "creator_absent" for e in seen), (
+            "missing row must record creator_absent"
+        )
+
+        # (3) terminal row -> creator_terminal:<status>.
+        seen.clear()
+        await _notify(_make_manager(status="completed"))
+        await asyncio.sleep(0.1)
+        assert any(
+            (e.get("reason") or "").startswith("creator_terminal:") for e in seen
+        ), "terminal row must record creator_terminal:<status>"
+
+        # (4) no enqueue hook -> enqueue_hook_absent.
+        seen.clear()
+        no_hook = _make_manager(status="running")
+        no_hook.enqueue_message_job = None
+        await _notify(no_hook)
+        await asyncio.sleep(0.1)
+        assert any(e.get("reason") == "enqueue_hook_absent" for e in seen), (
+            "missing enqueue_message_job must record enqueue_hook_absent"
+        )
+    finally:
+        m.attach_sink(None)

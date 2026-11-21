@@ -383,8 +383,10 @@ class TestPutSentinelRoundTrip:
         assert response.json()["config"]["webhook_secret"] == "********"
 
 
-# ==================== POST /schedules/{id}/trigger Tests ====================
-
+class TestPutCreatorPreservation:
+    """N6/A6: the creator_instance_id captured at create time is immutable
+    via the REST PUT merge — it survives partial updates and cannot be
+    injected or overwritten by a client."""
 
     @pytest.mark.asyncio
     async def test_put_preserves_creator_instance_id(self, client, mock_manager):
@@ -443,7 +445,25 @@ class TestPutSentinelRoundTrip:
         assert "creator_instance_id" not in persisted
 
 
+# ==================== POST /schedules/{id}/trigger Tests ====================
+
+
 class TestCreatorCaptureRest:
+    """B1: REST create carries the audit sentinel (no creator key), and a
+    REST-created fire skips the identity gate silently — no repo read, no
+    dropped-counter increment (the only pin distinguishing absent-key skip
+    from a wrong absent-row drop)."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_counters(self):
+        from daemon.services import schedule_fire_notify_metrics as metrics
+
+        metrics.reset_sent_total()
+        metrics.reset_dropped_total()
+        yield
+        metrics.reset_sent_total()
+        metrics.reset_dropped_total()
+
     @pytest.mark.asyncio
     async def test_rest_created_row_has_no_creator_key(self):
         import daemon.services.scheduling_service as ss
