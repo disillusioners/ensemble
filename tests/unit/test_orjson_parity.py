@@ -78,6 +78,24 @@ ORACLE = TypeAdapter(dict[str, Any])
 #: not assumed — the assertions below re-derive them).
 SUBNORMAL_FLOATS = (7.2e-05, 1.2e-05, 1e-07, 5e-08, 1e-06, 3.3e-09)
 
+#: The request headers every through-app wire-shape request in this pack
+#: carries.
+#:
+#: WHY ``identity``: this pack pins the RENDERER's bytes, not the
+#: transport's.  The daemon carries an allowlisted response-gzip
+#: middleware (``daemon/api.py``, sibling module m3-gzip) that compresses
+#: ``application/json`` bodies at or above 8192 B when the client offers
+#: gzip — and httpx offers ``gzip, deflate`` by DEFAULT.  Without this
+#: pin, a ≥8 KB body arrives deflated and every byte assertion here
+#: would be measuring the compressor instead of the renderer (it also
+#: desynchronises ``content-length`` from ``len(response.content)``).
+#:
+#: So the pin is deliberately TRANSPORT-AGNOSTIC: it asserts the identity
+#: bytes on a tree WITH the middleware and WITHOUT it.  The compression
+#: wire itself is owned by ``tests/unit/test_gzip_middleware.py`` — this
+#: file asserts nothing about it.
+IDENTITY_HEADERS = {"Accept-Encoding": "identity"}
+
 
 # ── fixtures ───────────────────────────────────────────────────────────────
 
@@ -361,10 +379,22 @@ class TestInstancesListRouteWireShape:
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
             # ``limit=100`` is the route's MAX_PAGE_LIMIT — the fattest
             # single page the daemon can ever serve for this route.
-            response = await ac.get("/api/instances?limit=100")
+            # ``IDENTITY_HEADERS``: the assertion below is about the
+            # RENDERER's bytes, so the transport must not deflate them
+            # (a >=8192 B JSON body is compressible by the daemon's
+            # allowlisted gzip middleware when the client offers gzip —
+            # httpx does by default).
+            response = await ac.get(
+                "/api/instances?limit=100", headers=IDENTITY_HEADERS
+            )
 
         assert response.status_code == 200, response.text
         assert response.headers["content-type"] == "application/json"
+        assert "content-encoding" not in response.headers, (
+            "the identity request must be served UNENCODED — a "
+            f"{response.headers.get('content-encoding')!r} body here means "
+            "the renderer's bytes were not what arrived"
+        )
         assert response.headers["content-length"] == str(len(response.content))
         body = response.content
         assert len(body) >= 100_000, "the response must be production-scale"
@@ -516,7 +546,12 @@ class TestProbeRenderLockstep:
                 RecordingProvider(snapshot=_big_snapshot_rows(count=60))
             )
             try:
-                response = client.get("/api/metrics/snapshot")
+                # IDENTITY_HEADERS: the body is >8192 B, so a
+                # compression-capable client would be deflated by the
+                # daemon's gzip middleware on an integrated tree.
+                response = client.get(
+                    "/api/metrics/snapshot", headers=IDENTITY_HEADERS
+                )
             finally:
                 client.__exit__(None, None, None)
         finally:
@@ -530,8 +565,17 @@ class TestProbeRenderLockstep:
         from daemon.services.metrics_query.constants import RESPONSE_BYTE_CEILING
 
         with query_client(RecordingProvider(snapshot=_big_snapshot_rows())) as client:
-            response = client.get("/api/metrics/snapshot?limit=500")
+            # IDENTITY_HEADERS: a 112 KB body is well over the gzip
+            # middleware's 8192 B threshold, and the assertions below are
+            # about the renderer's bytes, not the transport's.
+            response = client.get(
+                "/api/metrics/snapshot?limit=500", headers=IDENTITY_HEADERS
+            )
         assert response.status_code == 200, response.text
+        assert "content-encoding" not in response.headers, (
+            "the identity request must be served UNENCODED — the byte "
+            "assertions below measure the renderer, not a compressor"
+        )
         body = response.content
         assert len(body) <= RESPONSE_BYTE_CEILING
         # The served body IS the oracle render of the document it decodes to
@@ -562,11 +606,16 @@ class TestProbeRenderLockstep:
             for i in range(400)
         ]
         with query_client(RecordingProvider(snapshot=rows)) as client:
-            response = client.get("/api/metrics/snapshot")
+            # IDENTITY_HEADERS: the trimmed body lands just under the 1 MiB
+            # ceiling, i.e. far above the gzip middleware's 8192 B
+            # threshold — the ceiling assertion below must measure the
+            # RENDERED bytes, not a deflated transport.
+            response = client.get("/api/metrics/snapshot", headers=IDENTITY_HEADERS)
         assert response.status_code == 200
         body = response.json()
         assert body["truncated"] is True and body.get("next_cursor")
         assert calls, "the probe/render path must have run"
+        assert "content-encoding" not in response.headers
         assert len(response.content) <= 1_048_576
         assert response.content == ORACLE.dump_json(body)
 
