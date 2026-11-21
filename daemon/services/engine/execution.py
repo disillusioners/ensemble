@@ -184,6 +184,7 @@ class EngineExecutionLoop:
                         await asyncio.to_thread(
                             self.repository.stamp_job_outcome, job_id, dead=1
                         )
+                        cache["persisted_dead"] = True
                     except Exception:  # noqa: BLE001
                         pass
         except Exception:  # noqa: BLE001
@@ -293,6 +294,7 @@ class EngineExecutionLoop:
                             self.repository.stamp_job_outcome,
                             job_id, dead=dead_val,
                         )
+                        cache["persisted_dead"] = bool(dead_val)
                     except Exception:  # noqa: BLE001
                         pass
                 return

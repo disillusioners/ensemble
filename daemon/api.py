@@ -3891,6 +3891,21 @@ async def lifespan(app: FastAPI):
         app.state.engine_service = _engine_svc
         app.state.engine_watchdog = _engine_watchdog
 
+        # P6 mount (coordination addendum): assemble the observability adapter
+        # consumed by daemon/routers/engine.py. Read-only; no router change.
+        from types import SimpleNamespace as _SN
+
+        app.state.engine_observability = _SN(
+            repository=_engine_repo,
+            engine_service=_engine_svc,
+            maintenance_service=getattr(manager, "_maintenance_service", None),
+            switch_resolver=_engine_switch,
+            event_snapshot=__import__(
+                "daemon.services.event_registry.metrics", fromlist=["snapshot"]
+            ).snapshot,
+            runs_reader=None,  # router default (bounded tail via repository.engine)
+        )
+
         # Exactly ONE posture INFO line, with the block's perf_counter elapsed
         # (SLO-1). Dormant posture ⇒ this block is ≤250ms.
         _engine_boot_elapsed_ms = (time.perf_counter() - _engine_boot_t0) * 1000.0
@@ -6691,6 +6706,16 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # first-match-wins resolves /api/prompts/* to this router.
     api_router.include_router(prompts_router)         # /api/prompts (Phase B T5)
     api_router.include_router(memoir_router)          # /api/memoir/persona (Phase 5: JEV persona approval)
+
+    # Engine Arc Phase 6 (P6-prepared, landed by P4): observability door.
+    # Read-only /api/engine/* surface — three GETs, no mutating verb
+    # (D6.8). Mounted inside api_router BEFORE the SPA catch-all (F-15)
+    # so Starlette first-match-wins resolves /api/engine/* to this router.
+    # The adapter is assembled in the P4 lifespan wiring block
+    # (app.state.engine_observability). F-15 + F-5 anchors untouched.
+    from daemon.routers.engine import router as engine_router
+
+    api_router.include_router(engine_router)          # /api/engine/*
 
     # OAuth2 Phase 3 (T3.12 / FR-41): the MCP-KB key-management CRUD —
     # the ONE new OAuth2-human-lane family (§5.6: 30 legacy + 1 new).
