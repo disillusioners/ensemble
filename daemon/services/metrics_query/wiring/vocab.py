@@ -320,6 +320,31 @@ def _release_versions() -> tuple[str, ...]:
 RELEASE_VERSIONS: tuple[str, ...] = _release_versions()
 
 
+# ── F24 — the tool-usage family (the tool-usage-metrics-p1 lane) ──────────
+# Source: `daemon/checkpoint_metrics.py::tool_category_vocabulary` — the
+# frozen tool-category set (the committed V-4 artifact's categories +
+# the reserved ``other``), REUSED AS-IS: no new category value, NO
+# ``VOCABULARY_VERSION`` bump (phase2-plan.md §3.4; verified 2026-11-21:
+# every emitted category folds into the closed set). The function form
+# matches the lazily-resolved pattern below — the artifact read stays
+# out of this module's import graph until the family registers.
+TOOL_USAGE_RESULTS: tuple[str, ...] = ("ok", "error")
+
+
+def tool_usage_categories() -> tuple[str, ...]:
+    """The frozen tool-category set (the committed artifact + reserved).
+
+    The closed label space of F24's ``tool_category`` label — the SAME
+    set every other tool-category consumer folds against
+    (``checkpoint_metrics.tool_category_vocabulary()``), so a category
+    the artifact does not know folds to the reserved ``other`` residual
+    and ``ensemble_metrics_invalid_label_total`` counts it (§8.6).
+    """
+    from daemon.checkpoint_metrics import tool_category_vocabulary
+
+    return tuple(sorted(tool_category_vocabulary()))
+
+
 # The lazily-resolved vocabularies are exposed through FUNCTIONS (the
 # import-time evaluation of the enum-derived sets would drag the
 # repository models into every importer of this module).
@@ -357,10 +382,12 @@ __all__ = [
     "SPINE_TABLES",
     "SWEEP_LANES",
     "SWEEP_ROW_OUTCOMES",
+    "TOOL_USAGE_RESULTS",
     "WEDGE_REASONS",
     "WEDGE_WRITE_OUTCOMES",
     "WORKER_POOL_EVENTS",
     "WORKER_POOL_NAMES",
     "admission_states",
     "instance_statuses",
+    "tool_usage_categories",
 ]

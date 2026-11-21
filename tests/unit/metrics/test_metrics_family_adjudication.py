@@ -37,10 +37,12 @@ from typing import Any
 import pytest
 
 from daemon import checkpoint_metrics as cm
+from daemon.services import metrics_gate
 from daemon.services.metrics_query.wiring import adjudication
 from daemon.services.metrics_query.wiring import registry
 from daemon.services.metrics_query.wiring import sources as wiring_sources
 from daemon.services.metrics_query.wiring import vocab
+from daemon.services.metrics_query.wiring import w5
 from daemon.services.metrics_query.wiring import ws_a
 
 # The Decision Module P1 lane's family (``decision_overlay``) is
@@ -414,10 +416,10 @@ def _closed_label_space(metrics: list[cm.Metric]) -> int:
 class TestTheAdjudicationTable:
     def test_every_catalog_family_carries_exactly_one_verdict(self) -> None:
         verdicts = adjudication.CATALOG_FAMILY_VERDICTS
-        assert len(verdicts) == 28
+        assert len(verdicts) == 29
         expected = (
             {"F0.1", "F0.2", "F0.3", "F0.4"}
-            | {f"F{n}" for n in range(1, 24)}
+            | {f"F{n}" for n in range(1, 25)}
             | {"decision_overlay"}
         )
         assert set(verdicts) == expected
@@ -425,11 +427,11 @@ class TestTheAdjudicationTable:
             assert verdict in adjudication.VALID_VERDICTS, family
             assert seam and seam.strip(), family
 
-    def test_the_binding_subset_is_eighteen_of_twenty_eight(self) -> None:
+    def test_the_binding_subset_is_nineteen_of_twenty_nine(self) -> None:
         verdicts = adjudication.CATALOG_FAMILY_VERDICTS
         full = [f for f, (v, _s) in verdicts.items() if v == "IN"]
         partial = [f for f, (v, _s) in verdicts.items() if v == "PARTIAL"]
-        assert len(full) == 12
+        assert len(full) == 13
         assert len(partial) == 6
         assert tuple(sorted(full + partial)) == tuple(sorted(adjudication.REGISTERED_FAMILIES))
 
@@ -979,3 +981,230 @@ class TestThePlanningProjectionIsNeverEnforced:
         """The release-version label is bounded by the retention set."""
         assert len(vocab.RELEASE_VERSIONS) <= 32
         assert vocab.RESERVED in vocab.RELEASE_VERSIONS
+
+
+class TestTheF24Family:
+    """The tool-usage family (the tool-usage-metrics-p1 lane, Phase 2).
+
+    T1/T5/T6 acceptance — the family's registration structure, its
+    closed label space, its band, and the measured-total convention pin
+    (decisions.md D18 / approver fix B5: 491 + 134 = 625 ≤ 2000 is THE
+    claim, measured convention; the plan's ≈1095 is a band-sum and is
+    never asserted here).
+    """
+
+    def test_f24_is_registered_with_its_spec(self) -> None:
+        spec = registry.registered_families()["F24"]
+        assert spec.cluster == "W6"
+        assert spec.verdict == "IN"
+        assert spec.metrics == ("ensemble_tool_usage_calls_total",)
+        verdict, seam = adjudication.CATALOG_FAMILY_VERDICTS["F24"]
+        assert verdict == "IN"
+        assert "w5.py" in seam and seam.strip()
+
+    def test_the_f24_metric_declares_the_closed_label_space(self) -> None:
+        metric = next(
+            m
+            for m in registry.registered_family_metrics()
+            if m.name == "ensemble_tool_usage_calls_total"
+        )
+        assert metric.family == "F24"
+        assert metric.kind == "counter"
+        assert metric.label_keys == ("tool_category", "result")
+        assert set(metric.allowed_values["tool_category"]) == set(
+            cm.tool_category_vocabulary()
+        )
+        # 66 committed categories + the reserved `other` = 67.
+        assert len(metric.allowed_values["tool_category"]) == 67
+        assert metric.allowed_values["result"] == frozenset({"ok", "error"})
+
+    def test_the_f24_registration_is_am3_complete(self) -> None:
+        metric = next(
+            m
+            for m in registry.registered_family_metrics()
+            if m.name == "ensemble_tool_usage_calls_total"
+        )
+        assert metric.source_idiom == "registry"
+        assert metric.durability == "process"
+        assert isinstance(metric.cardinality_weight, int)
+
+    def test_the_f24_name_matches_the_name_rule(self) -> None:
+        """`^ensemble_[a-z0-9_]+$` (checkpoint_metrics.py:110)."""
+        import re
+
+        assert re.fullmatch(r"ensemble_[a-z0-9_]+", "ensemble_tool_usage_calls_total")
+
+    def test_f24_is_distinct_from_the_f20_out_name(self) -> None:
+        """F20's OUT `ensemble_tool_calls_total` stays absent; F24's name is its own."""
+        names = {m.name for m in cm.registered_metrics()}
+        assert "ensemble_tool_usage_calls_total" in names
+        assert "ensemble_tool_calls_total" not in names
+
+    def test_the_f24_band_is_134_plus_26_headroom(self) -> None:
+        assert adjudication.FAMILY_SERIES_BANDS["F24"] == 160
+        family_metrics = [
+            m
+            for m in registry.registered_family_metrics()
+            if m.family == "F24"
+        ]
+        measured = _closed_label_space(family_metrics)
+        assert measured == 134
+        assert measured <= adjudication.FAMILY_SERIES_BANDS["F24"]
+
+    def test_the_measured_total_is_625_under_the_cap(self) -> None:
+        """THE claim (D18 / B5) — 89 baseline + 536 measured = 625 ≤ 2000.
+
+        THE CONVENTION IS EXPLICIT (D18's correction arc): the claim's
+        helper measures the WIRING-registered families — the decision
+        overlay's own family is NOT in the set (it is registered by
+        ``daemon/services/decision/metrics.py`` and rides the pack's
+        enforced cumulative instead: 89 + 813 + 134 = 1036 ≤ 2000,
+        covered by ``test_the_cumulative_count_stays_inside_the_global_
+        cap``). 491 today (89 + 402) + 134 (F24) = 625.  The == pin is
+        the convention pin: a future family that moves the wiring
+        closed space must consciously re-pin this number (the
+        predicate-ledger discipline) — a silent drift REDs here.
+        """
+        wiring_metrics = [
+            m
+            for m in registry.registered_family_metrics()
+            if m.family != "decision_overlay"
+        ]
+        measured = _closed_label_space(wiring_metrics)
+        total = adjudication.BASELINE_SERIES + measured
+        assert total == 625
+        assert total <= adjudication.GLOBAL_SERIES_CAP
+
+
+class TestTheF24FamilyGate:
+    """T3 — the kill-switch matrix (fail-closed, stacked, independent).
+
+    The gate is PURE on the read path: no DB round trip ever happens
+    (the managed tiers are the cached live values; a provider installed
+    here RAISES if consulted, so a hidden read turns the matrix RED).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _gate_state(self, monkeypatch):
+        monkeypatch.delenv(w5.FAMILY_ENV_VAR, raising=False)
+        monkeypatch.delenv(metrics_gate.ENV_VAR, raising=False)
+        metrics_gate.reset_for_tests()
+
+        def _no_db_read() -> dict[str, str]:
+            raise AssertionError("the gate read path touched the DB tier")
+
+        metrics_gate.set_managed_metrics_provider(_no_db_read)
+        yield
+        metrics_gate.reset_for_tests()
+
+    def test_env_explicit_zero_is_off_even_with_the_global_gate_on(self, monkeypatch) -> None:
+        metrics_gate.set_managed_metrics_enabled(True)  # global ON (boot tier)
+        monkeypatch.setenv(w5.FAMILY_ENV_VAR, "0")
+        assert w5.family_gate_enabled() is False
+
+    def test_env_explicit_garbage_fails_closed(self, monkeypatch) -> None:
+        metrics_gate.set_managed_metrics_enabled(True)
+        monkeypatch.setenv(w5.FAMILY_ENV_VAR, "off")  # NOT in {1,true,yes}
+        assert w5.family_gate_enabled() is False
+
+    def test_env_unset_with_the_managed_default_is_on_when_global_is_on(self) -> None:
+        metrics_gate.set_managed_metrics_enabled(True)
+        assert w5.family_gate_enabled() is True
+
+    def test_the_global_gate_off_suppresses_regardless_of_the_family_key(self, monkeypatch) -> None:
+        metrics_gate.set_managed_metrics_enabled(False)  # global managed OFF
+        monkeypatch.delenv(w5.FAMILY_ENV_VAR, raising=False)
+        assert w5.family_gate_enabled() is False
+        monkeypatch.setenv(w5.FAMILY_ENV_VAR, "1")  # family explicitly ON
+        assert w5.family_gate_enabled() is False
+
+    def test_the_global_env_off_suppresses_regardless_of_the_family_key(self, monkeypatch) -> None:
+        metrics_gate.set_managed_metrics_enabled(True)
+        monkeypatch.setenv(metrics_gate.ENV_VAR, "0")  # the GLOBAL env off-switch
+        monkeypatch.setenv(w5.FAMILY_ENV_VAR, "1")
+        assert w5.family_gate_enabled() is False
+
+    def test_the_gate_never_touches_the_db_tier(self) -> None:
+        """live_managed_value + metrics_enabled are PURE cached reads."""
+        metrics_gate.set_managed_metrics_enabled(True)
+        # The provider (installed by the fixture) raises on ANY call.
+        assert w5.family_gate_enabled() is True
+
+    def test_the_family_gate_is_independent_of_the_ledger_switch(self, monkeypatch) -> None:
+        """Family OFF (env) while the phase-1 ledger switch stays untouched."""
+        from daemon.services.tool_usage_observation import is_collection_enabled
+
+        monkeypatch.setenv(w5.FAMILY_ENV_VAR, "0")
+        assert w5.family_gate_enabled() is False
+        # The ledger's own kill-switch (D7) is a DIFFERENT key + env var.
+        monkeypatch.delenv("LIMITS_TOOL_USAGE_COLLECTION_ENABLED", raising=False)
+        assert is_collection_enabled() is True
+
+
+class TestTheF24Sink:
+    """T1/T3 — the write-time sink's behavior against the frozen surface."""
+
+    @pytest.fixture(autouse=True)
+    def _sink_state(self, monkeypatch):
+        monkeypatch.delenv(w5.FAMILY_ENV_VAR, raising=False)
+        monkeypatch.delenv(metrics_gate.ENV_VAR, raising=False)
+        metrics_gate.reset_for_tests()
+        metrics_gate.set_managed_metrics_enabled(True)  # global ON
+        w5.tool_usage_calls_total.reset()
+        yield
+        w5.tool_usage_calls_total.reset()
+        metrics_gate.reset_for_tests()
+
+    def _metric(self) -> cm.Metric:
+        return next(
+            m
+            for m in registry.registered_family_metrics()
+            if m.name == "ensemble_tool_usage_calls_total"
+        )
+
+    def test_the_sink_is_registered_against_the_observer(self) -> None:
+        from daemon.services.tool_usage_observation import _snapshot_sinks
+
+        assert w5.on_tool_usage_event in _snapshot_sinks()
+
+    def test_the_sink_does_not_increment_while_the_family_gate_is_off(self, monkeypatch) -> None:
+        monkeypatch.setenv(w5.FAMILY_ENV_VAR, "0")
+        w5.on_tool_usage_event("bash", "bash", "agent", "proj", True)
+        assert (
+            self._metric().get(labels={"tool_category": "bash", "result": "ok"}) == 0
+        )
+
+    def test_the_sink_increments_when_the_stack_is_on(self) -> None:
+        w5.on_tool_usage_event("bash", "bash", "agent", "proj", True)
+        w5.on_tool_usage_event("bash", "bash", "agent", "proj", False)
+        metric = self._metric()
+        assert metric.get(labels={"tool_category": "bash", "result": "ok"}) == 1
+        assert metric.get(labels={"tool_category": "bash", "result": "error"}) == 1
+
+    def test_the_sink_folds_none_to_other_without_counting_drift(self) -> None:
+        """The unmapped case is steady state: `other`, NOT an invalid label."""
+        metric = self._metric()
+        before = metric.get(labels={"tool_category": "other", "result": "ok"})
+        w5.on_tool_usage_event("mystery_tool", None, "agent", "proj", True)
+        assert (
+            metric.get(labels={"tool_category": "other", "result": "ok"}) == before + 1
+        )
+
+    def test_the_sink_passes_out_of_set_values_raw_for_the_drift_signal(self) -> None:
+        """AM-2d — the REGISTRY folds a disallowed value and COUNTS it."""
+        metric = self._metric()
+        w5.on_tool_usage_event("x", "not-a-category", "agent", "proj", True)
+        assert (
+            metric.get(labels={"tool_category": "other", "result": "ok"}) == 1
+        )
+        invalid = cm._invalid_metric
+        assert invalid is not None
+        assert (
+            invalid.get(
+                labels={
+                    "metric": "ensemble_tool_usage_calls_total",
+                    "label": "tool_category",
+                }
+            )
+            >= 1
+        )
