@@ -24,6 +24,7 @@ tests run the real bash tool end-to-end against a real `echo` child.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import logging
 import os
@@ -117,9 +118,19 @@ class TestStampContract:
         out = await _run_echo()
         assert "EXIT CODE: 0" in out
         env = cap.env
-        assert isinstance(env, dict)
-        assert BASH_TRACKING_ENV_VAR in env
-        assert _re.fullmatch(r"[0-9a-f]{32}", env[BASH_TRACKING_ENV_VAR])
+        # Redaction: assert a pre-computed boolean so pytest's rewriting never
+        # renders the captured child-env (which holds live-shaped secret values).
+        env_is_dict = isinstance(env, dict)
+        assert env_is_dict, f"child env was {type(env).__name__}, expected dict"
+        has_stamp = BASH_TRACKING_ENV_VAR in env
+        assert has_stamp, (
+            f"{BASH_TRACKING_ENV_VAR} missing from child env "
+            f"keys: {sorted(env.keys())}"
+        )
+        stamp_shape_ok = (
+            _re.fullmatch(r"[0-9a-f]{32}", env[BASH_TRACKING_ENV_VAR]) is not None
+        )
+        assert stamp_shape_ok, f"{BASH_TRACKING_ENV_VAR} is not a 32-hex value"
         # inherit-copy +1 var: every ambient key present, plus the stamp
         assert set(env.keys()) == set(os.environ.keys()) | {BASH_TRACKING_ENV_VAR}
 
@@ -149,8 +160,16 @@ class TestStampContract:
         assert row.daemon_pid == os.getpid()
         assert row.reaped_at is None  # D4: tombstone-until-cleanup-point
         assert row.command_sanitized  # D14 sanitized value reused
-        # the stamp the child received IS the row's tracking id
-        assert cap.env[BASH_TRACKING_ENV_VAR] == row.tracking_id
+        # the stamp the child received IS the row's tracking id — compare
+        # sha256 digests and render only the truncated hex (never raw values).
+        stamp_digest = hashlib.sha256(
+            cap.env[BASH_TRACKING_ENV_VAR].encode()
+        ).hexdigest()[:12]
+        row_digest = hashlib.sha256(row.tracking_id.encode()).hexdigest()[:12]
+        assert stamp_digest == row_digest, (
+            f"child-env {BASH_TRACKING_ENV_VAR} digest {stamp_digest} != "
+            f"durable row tracking_id digest {row_digest}"
+        )
         eng.dispose()
 
     async def test_env_none_materializes_inherit_copy_plus_one(
@@ -163,7 +182,11 @@ class TestStampContract:
         )
         assert "EXIT CODE: 0" in out
         env = cap.env
-        assert BASH_TRACKING_ENV_VAR in env
+        has_stamp = BASH_TRACKING_ENV_VAR in env
+        assert has_stamp, (
+            f"{BASH_TRACKING_ENV_VAR} missing from child env "
+            f"keys: {sorted(env.keys())}"
+        )
         assert set(env.keys()) == set(os.environ.keys()) | {BASH_TRACKING_ENV_VAR}
 
     async def test_explicit_off_byte_identical_env_no_row(
@@ -182,7 +205,11 @@ class TestStampContract:
         finally:
             rows = repo.list_open_by_instance(INSTANCE)
         # OFF ⇒ complete no-op: no stamp, no row
-        assert cap.env is None or BASH_TRACKING_ENV_VAR not in (cap.env or {})
+        no_stamp = cap.env is None or BASH_TRACKING_ENV_VAR not in (cap.env or {})
+        assert no_stamp, (
+            f"kill-switch path must not inject {BASH_TRACKING_ENV_VAR} "
+            f"into child env keys: {sorted((cap.env or {}).keys())}"
+        )
         assert rows == []
         eng.dispose()
 
@@ -199,8 +226,13 @@ class TestStampContract:
             env={"MYVAR": "1"},
         )
         assert "EXIT CODE: 0" in out
-        assert cap.env.get("MYVAR") == "1"
-        assert BASH_TRACKING_ENV_VAR in cap.env
+        myvar_ok = cap.env.get("MYVAR") == "1"
+        assert myvar_ok, "MYVAR overlay value not passed through to child env"
+        has_stamp = BASH_TRACKING_ENV_VAR in cap.env
+        assert has_stamp, (
+            f"{BASH_TRACKING_ENV_VAR} missing from child env "
+            f"keys: {sorted((cap.env or {}).keys())}"
+        )
 
 
 class TestWriterUnsetOrdering:
@@ -242,7 +274,11 @@ class TestWriterUnsetOrdering:
         finally:
             rows = repo.list_open_by_instance(INSTANCE)
         assert rows == []
-        assert cap.env is None or BASH_TRACKING_ENV_VAR not in (cap.env or {})
+        no_stamp = cap.env is None or BASH_TRACKING_ENV_VAR not in (cap.env or {})
+        assert no_stamp, (
+            f"instance_id=None path must not inject {BASH_TRACKING_ENV_VAR} "
+            f"into child env keys: {sorted((cap.env or {}).keys())}"
+        )
         eng.dispose()
 
 
