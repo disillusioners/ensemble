@@ -988,10 +988,11 @@ class ContextSlot:
         try:
             inst = self._instance_repository.get(instance_id)
         except Exception as exc:  # pragma: no cover - defensive
-            logger.debug(
-                f"[ContextSlot] instance_repository.get({instance_id[:8]}...) "
-                f"failed during project_injected check: {exc}"
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    f"[ContextSlot] instance_repository.get({instance_id[:8]}...) "
+                    f"failed during project_injected check: {exc}"
+                )
             return False
         if inst is None:
             return False
@@ -1024,10 +1025,11 @@ class ContextSlot:
         try:
             inst = self._instance_repository.get(instance_id)
         except Exception as exc:  # pragma: no cover - defensive
-            logger.debug(
-                f"[ContextSlot] instance_repository.get({instance_id[:8]}...) "
-                f"failed during project_id resolution: {exc}"
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    f"[ContextSlot] instance_repository.get({instance_id[:8]}...) "
+                    f"failed during project_id resolution: {exc}"
+                )
             return None
         if inst is None:
             return None
@@ -3720,12 +3722,14 @@ class ThinkingChatOpenAI(ChatOpenAI):
                 # streaming path that may have already populated it).
                 if gen_message.additional_kwargs.get("reasoning_content") is None:
                     gen_message.additional_kwargs["reasoning_content"] = reasoning
-                    logger.debug(
-                        f"[LLM] Extracted reasoning_content from raw response: "
-                        f"{str(reasoning)[:100]}..."
-                    )
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            f"[LLM] Extracted reasoning_content from raw response: "
+                            f"{str(reasoning)[:100]}..."
+                        )
         except Exception as e:
-            logger.debug(f"[LLM] Could not extract reasoning_content in _create_chat_result: {e}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"[LLM] Could not extract reasoning_content in _create_chat_result: {e}")
 
         return result
 
@@ -3763,10 +3767,12 @@ class ThinkingChatOpenAI(ChatOpenAI):
                     if reasoning is not None and hasattr(gen_message, 'additional_kwargs') \
                             and gen_message.additional_kwargs.get('reasoning_content') is None:
                         gen_message.additional_kwargs['reasoning_content'] = reasoning
-                        logger.debug(f"[LLM] Extracted reasoning from metadata: {str(reasoning)[:100]}...")
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug(f"[LLM] Extracted reasoning from metadata: {str(reasoning)[:100]}...")
 
         except Exception as e:
-            logger.debug(f"[LLM] Could not extract reasoning_content: {e}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"[LLM] Could not extract reasoning_content: {e}")
 
         return result
 
@@ -3812,7 +3818,8 @@ class ThinkingChatOpenAI(ChatOpenAI):
         try:
             original_messages = self._convert_input(input_).to_messages()
         except Exception as e:
-            logger.debug(f"[LLM] Could not get original messages for reasoning_content injection: {e}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"[LLM] Could not get original messages for reasoning_content injection: {e}")
             return super()._get_request_payload(input_, stop=stop, **kwargs)
 
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
@@ -3834,7 +3841,8 @@ class ThinkingChatOpenAI(ChatOpenAI):
                     reasoning = original.additional_kwargs.get('reasoning_content')
                     if reasoning is not None:
                         msg["reasoning_content"] = reasoning
-                        logger.debug(f"[LLM] Injected reasoning_content for assistant message {assistant_idx}")
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug(f"[LLM] Injected reasoning_content for assistant message {assistant_idx}")
                     assistant_idx += 1
 
         return payload
@@ -3859,7 +3867,8 @@ class ThinkingChatOpenAI(ChatOpenAI):
         # If we found reasoning_content and the result is an AIMessageChunk, store it
         if reasoning_content is not None and isinstance(result, AIMessageChunk):
             result.additional_kwargs["reasoning_content"] = reasoning_content
-            logger.debug(f"[LLM] Stream extracted reasoning_content: {str(reasoning_content)[:50]}...")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"[LLM] Stream extracted reasoning_content: {str(reasoning_content)[:50]}...")
 
         return result
 
@@ -4379,7 +4388,8 @@ def should_continue(state: MessagesState) -> str:
         content = getattr(last_message, 'content', '') or ''
         has_tool_calls = bool(getattr(last_message, 'tool_calls', None))
         if reasoning and not content and not has_tool_calls and trailing_degenerate < EMPTY_DEGENERATE_REINVOKE_CAP:
-            logger.debug(f"[Graph] Thinking-only response, continuing...")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"[Graph] Thinking-only response, continuing...")
             return "agent"
 
     # Check for <think>-only content (models that embed reasoning in content string).
@@ -9082,11 +9092,12 @@ def create_agent_node(
                     + ephemeral_context_msgs
                     + list(messages)
                 )
-                logger.debug(
-                    f"[ContextSlot] Injected {len(ephemeral_context_msgs)} "
-                    f"ephemeral context message(s) for {instance_short} "
-                    f"before LLM call"
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        f"[ContextSlot] Injected {len(ephemeral_context_msgs)} "
+                        f"ephemeral context message(s) for {instance_short} "
+                        f"before LLM call"
+                    )
 
         # ── Phase 3 / C2: pull + clear ALL pending user-injections ─────────
         # Pull happens BEFORE the LLM call so the injected HumanMessages are
@@ -9556,7 +9567,8 @@ def create_agent_node(
         model_name = model_vision if use_vision_model else llm_config.get("model", "unknown") if llm_config else "unknown"
         vision_log = f", vision={model_vision}" if model_vision and has_images else ""
         call_type = "VISION" if use_vision_model else "STANDARD"
-        logger.debug(f'[LLM][{instance_short}] Invoking LLM ({call_type}) with {len(full_messages)} messages (model={model_name}, transient_attempts={transient}, timeout_attempts={timeout}{vision_log})')
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f'[LLM][{instance_short}] Invoking LLM ({call_type}) with {len(full_messages)} messages (model={model_name}, transient_attempts={transient}, timeout_attempts={timeout}{vision_log})')
         _llm_heartbeat(sums={"invocations": 1}, sets={"model": model_name})
 
         # ── get_instance_info throttling ─────────────────────────────────
@@ -9713,11 +9725,12 @@ def create_agent_node(
             full_messages = _reassemble_with_context(
                 full_messages, ephemeral_context_msgs, system_prompt
             )
-            logger.debug(
-                f"[ContextSlot] B1 re-append: {len(ephemeral_context_msgs)} "
-                f"ephemeral context message(s) re-injected after "
-                f"loop-breaker repair for {instance_short}"
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    f"[ContextSlot] B1 re-append: {len(ephemeral_context_msgs)} "
+                    f"ephemeral context message(s) re-injected after "
+                    f"loop-breaker repair for {instance_short}"
+                )
 
         try:
             # ── Ladder phase 1 / D-1: loud terminal short-circuit ──
@@ -9928,7 +9941,8 @@ def create_agent_node(
                 logger.warning('[LLM] Context length exceeded (no compactor available)')
                 raise
 
-            logger.debug(f'[LLM] Context length exceeded, attempting reactive compaction for {len(messages)} messages')
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f'[LLM] Context length exceeded, attempting reactive compaction for {len(messages)} messages')
 
             graph = graph_ref[0]
             # Namespace trap fix: resolve the REAL root-namespace
@@ -10140,7 +10154,8 @@ def create_agent_node(
                     mission_id=resolve_turn_mission_id(full_messages),
                 )
 
-            logger.debug(f'[LLM] Reactive compaction complete: {result.messages_before} -> {result.messages_after} messages, {result.tokens_saved} tokens saved ({result.compaction_type})')
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f'[LLM] Reactive compaction complete: {result.messages_before} -> {result.messages_after} messages, {result.tokens_saved} tokens saved ({result.compaction_type})')
 
             updated_state = await graph.aget_state(thread_config)
             compact_messages = [SystemMessage(content=system_prompt)] + updated_state.values.get('messages', [])
@@ -10174,11 +10189,12 @@ def create_agent_node(
             if injected_msgs:
                 for inj in injected_msgs:
                     compact_messages.append(inj)
-                logger.debug(
-                    f'[LLM] Reactive compaction: re-appended '
-                    f'{len(injected_msgs)} injected message(s) for '
-                    f'{instance_short}'
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        f'[LLM] Reactive compaction: re-appended '
+                        f'{len(injected_msgs)} injected message(s) for '
+                        f'{instance_short}'
+                    )
             # C3 for report-injection messages: same reason as the
             # user-injection re-append above — they live only in the
             # local closure and ``graph.aget_state`` reads from
@@ -10215,11 +10231,12 @@ def create_agent_node(
                 compact_messages = _reassemble_with_context(
                     compact_messages, ephemeral_context_msgs, system_prompt
                 )
-                logger.debug(
-                    f'[LLM] Reactive compaction: re-appended '
-                    f'{len(ephemeral_context_msgs)} ephemeral context '
-                    f'message(s) for {instance_short}'
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        f'[LLM] Reactive compaction: re-appended '
+                        f'{len(ephemeral_context_msgs)} ephemeral context '
+                        f'message(s) for {instance_short}'
+                    )
 
             # Use run_in_executor to avoid blocking the event loop after compaction
             # Continue with the same LLM that was being used (may be vision or standard)
@@ -10554,10 +10571,12 @@ def create_agent_node(
             first_tc = response.tool_calls[0]
             tc_args = first_tc.get('args', getattr(first_tc, 'args', {}))
             tc_args_str = str(tc_args)[:80] if tc_args else ''
-            logger.debug(f'[LLM] Tool call: {tool_names[0]} — {tc_args_str}..., tools: {tool_names}')
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f'[LLM] Tool call: {tool_names[0]} — {tc_args_str}..., tools: {tool_names}')
             _llm_heartbeat(sums={"tool_calls": 1})
         elif response.content:
-            logger.debug(f'[LLM] Response: {response.content[:80]}...')
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f'[LLM] Response: {response.content[:80]}...')
         else:
             logger.debug('[LLM] Response: empty')
 
@@ -11196,10 +11215,11 @@ def build_instance_llms(
                     f"backup gets full {transient_attempts}/{timeout_attempts})"
                 ),
             )
-        logger.debug(
-            f"LLM configured with {transient_attempts} transient retries, "
-            f"{timeout_attempts} timeout retries"
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                f"LLM configured with {transient_attempts} transient retries, "
+                f"{timeout_attempts} timeout retries"
+            )
 
     return llm_with_tools, llm_standard
 
@@ -13029,10 +13049,11 @@ def create_watchover_check_node(
                 if callable(set_md):
                     set_md(instance_id, "watchover_context_turn", context_turn)
         except Exception as turn_err:
-            logger.debug(
-                f"[watchover_check] turn counter write failed for "
-                f"{instance_id[:8]}...: {type(turn_err).__name__}: {turn_err}"
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    f"[watchover_check] turn counter write failed for "
+                    f"{instance_id[:8]}...: {type(turn_err).__name__}: {turn_err}"
+                )
 
         # Patch the instance_id on the evaluator (it was built before
         # we knew the instance). Safe because the evaluator is closed
