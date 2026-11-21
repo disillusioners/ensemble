@@ -91,6 +91,7 @@ from daemon.services.mission_record_service import (
     resolve_or_mint_fail_open,
     scheduler_mint_extension_enabled,
 )
+from daemon.services import schedule_fire_notify as _schedule_fire_notify_mod
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -2234,6 +2235,26 @@ Original scheduled task:
             reason,
         )
         self._fire_outcome = self.FIRE_OUTCOME_DEFERRED_DURABLE
+
+        # schedule-fire-notify (T4): identity-gated best-effort notify at
+        # the deferred durable finalization (after durable-evidence check).
+        creator_instance_id = (getattr(self.config, "config", None) or {}).get(
+            "creator_instance_id"
+        )
+        await _schedule_fire_notify_mod.notify_schedule_fire(
+            self._manager,
+            creator_instance_id=creator_instance_id,
+            recipient_instance_id=instance_id,
+            label=getattr(self.config, "name", None),
+            fired_at=(metadata or {}).get("scheduler", {}).get("trigger_time"),
+            target_agent=self._agent,
+            instance_mode=self._instance_mode,
+            recurrence=self._schedule_type,
+            job_id=getattr(result, "job_id", None),
+            message_id=message_id,
+            target_instance_id=instance_id,
+        )
+
         return self._fire_outcome
 
     async def _open_episode(self) -> bool:
@@ -2734,6 +2755,25 @@ Original scheduled task:
                 f"Scheduled job enqueued (inline): source={self.source_id}, "
                 f"execution_id={execution_id}, instance_id={instance_id[:8]}..., "
                 f"job_id={result.job_id}, message_id={result.message_id[:8] if result.message_id else None}"
+            )
+
+            # schedule-fire-notify (T4): identity-gated best-effort notify
+            # at the direct dispatch site. Never raises (module contract).
+            creator_instance_id = (getattr(self.config, "config", None) or {}).get(
+                "creator_instance_id"
+            )
+            await _schedule_fire_notify_mod.notify_schedule_fire(
+                self._manager,
+                creator_instance_id=creator_instance_id,
+                recipient_instance_id=instance_id,
+                label=getattr(self.config, "name", None),
+                fired_at=(metadata or {}).get("scheduler", {}).get("trigger_time"),
+                target_agent=self._agent,
+                instance_mode=self._instance_mode,
+                recurrence=self._schedule_type,
+                job_id=getattr(result, "job_id", None),
+                message_id=getattr(result, "message_id", None),
+                target_instance_id=instance_id,
             )
 
             if self._execution_callback:

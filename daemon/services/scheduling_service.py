@@ -809,6 +809,12 @@ async def create_schedule(
         cron_expression=cron_expression,
         local_time=local_time,
     )
+    # Creator capture (schedule-fire-notify T1): persist the creating
+    # instance id as a config-JSON key. REST passes the audit sentinel
+    # "rest-api" (routers/schedules.py:205) which is SUPPRESSED here so
+    # REST-created rows carry NO creator_instance_id key (B1).
+    if caller_instance_id and caller_instance_id != "rest-api":
+        config_json["creator_instance_id"] = caller_instance_id
     row = await asyncio.to_thread(
         repo.create_source_config,
         SCHEDULER_SOURCE_TYPE,

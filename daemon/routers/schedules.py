@@ -383,8 +383,20 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
     # Handle partial config update (merge with existing config)
     if schedule_update.config is not None and existing.config:
         # Merge partial config with existing config
-        merged_config = {**existing.config, **schedule_update.config}
+        incoming = dict(schedule_update.config)
+        # schedule-fire-notify (N6): creator_instance_id is captured at
+        # create time and must NOT be injectable/overwritable via PUT.
+        incoming.pop("creator_instance_id", None)
+        merged_config = {**existing.config, **incoming}
         updated_config = merged_config
+
+    # schedule-fire-notify (N6): pin the captured creator_instance_id so a
+    # PUT can never change or erase it.
+    if isinstance(updated_config, dict):
+        if isinstance(existing.config, dict) and "creator_instance_id" in existing.config:
+            updated_config["creator_instance_id"] = existing.config["creator_instance_id"]
+        else:
+            updated_config.pop("creator_instance_id", None)
 
     # ML-3 round-trip guard (M-2 rider, 2026-10-11): the GET echo masks
     # webhook_secret with the sentinel — an incoming config that still
