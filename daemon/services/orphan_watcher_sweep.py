@@ -61,6 +61,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from daemon.services.dependency_bus import get_dependency_bus
+
 if TYPE_CHECKING:
     from daemon.services.dependency_bus import DependencyBus
 
@@ -135,6 +137,17 @@ class OrphanWatcherSweepService:
         interval_seconds: int = DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS,
         min_watcher_age_seconds: int = DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS,
     ) -> None:
+        # NOTE (born-dead wiring fix, 2026-11-21): ``dependency_bus`` is
+        # an EXPLICIT injection point for legacy test fixtures only.
+        # The production lifespan (daemon/api.py) constructs this
+        # service BEFORE ``init_dependency_bus`` registers the module
+        # singleton, so capturing ``get_dependency_bus()`` HERE froze
+        # ``None`` for the daemon's entire lifetime — the periodic
+        # lane ticked forever on the bus-is-None branch ("born dead").
+        # The tick path now LATE-BINDS: an explicitly injected bus
+        # (fixture) wins; otherwise the module singleton is re-read on
+        # EVERY tick via ``get_dependency_bus()`` and is picked up as
+        # soon as ``init_dependency_bus`` wires it.
         self._dependency_bus = dependency_bus
         self._interval_seconds = max(1, int(interval_seconds))
         self._min_watcher_age_seconds = max(0, int(min_watcher_age_seconds))
@@ -145,6 +158,13 @@ class OrphanWatcherSweepService:
         self._ticks_total: int = 0
         self._cancelled_total: int = 0
         self._errors_total: int = 0
+        # Born-dead detection (2026-11-21): a tick where the bus was
+        # resolved and the sweep actually dispatched counts as an
+        # "effective run". Zero effective runs once the lane is past
+        # its first two ticks (= 2x interval on the loop cadence)
+        # means the lane has NEVER done its job — escalate loudly.
+        self._effective_runs_total: int = 0
+        self._dead_detection_fired: bool = False
 
     # --------------------------------------------------------
     # Public API
@@ -213,7 +233,15 @@ class OrphanWatcherSweepService:
         self._ticks_total += 1
         cancelled = 0
         try:
+            # Late-bind (born-dead wiring fix, 2026-11-21): an
+            # explicitly injected bus (legacy test fixture) wins;
+            # otherwise the module singleton is RE-READ at tick time —
+            # never captured at construction (the api.py lifespan
+            # constructs this service before ``init_dependency_bus``
+            # registers the singleton).
             bus = self._dependency_bus
+            if bus is None:
+                bus = get_dependency_bus()
             if bus is None:
                 # No bus wired — DEBUG log so the operator sees the
                 # lane is alive but unconnected. The bus's own
@@ -226,6 +254,7 @@ class OrphanWatcherSweepService:
                     f"not wired (legacy test fixture / pre-wiring "
                     f"lifespan) — relying on the startup sweep"
                 )
+                self._check_dead_detection()
             else:
                 cancelled = int(
                     await bus._sweep_orphan_watchers(
@@ -234,7 +263,17 @@ class OrphanWatcherSweepService:
                         ),
                     ) or 0
                 )
+                self._effective_runs_total += 1
                 self._cancelled_total += cancelled
+                if self._dead_detection_fired and (
+                    self._effective_runs_total == 1
+                ):
+                    logger.info(
+                        "OrphanWatcherSweepService: first effective "
+                        f"sweep on tick {self._ticks_total} — the "
+                        "lane recovered after dead-detection fired "
+                        "(the bus singleton is wired now)"
+                    )
                 if cancelled > 0:
                     logger.info(
                         f"OrphanWatcherSweepService: tick "
@@ -255,6 +294,7 @@ class OrphanWatcherSweepService:
             "errors": self._errors_total,
             "cumulative_cancelled": self._cancelled_total,
             "cumulative_errors": self._errors_total,
+            "effective_runs": self._effective_runs_total,
         }
 
     def counters(self) -> dict[str, int]:
@@ -263,7 +303,54 @@ class OrphanWatcherSweepService:
             "ticks": self._ticks_total,
             "cancelled_total": self._cancelled_total,
             "errors_total": self._errors_total,
+            "effective_runs_total": self._effective_runs_total,
         }
+
+    # --------------------------------------------------------
+    # Born-dead detection (2026-11-21)
+    # --------------------------------------------------------
+
+    def _check_dead_detection(self) -> None:
+        """Escalate LOUDLY when the lane has never done its job.
+
+        Born-dead wiring trap (census A1, 2026-11-21): a service
+        whose dependency is captured before the dependency exists
+        ticked forever on the bus-is-None branch while its own
+        health counters climbed — invisible at DEBUG level. This
+        check fires an ERROR once the lane has ticked past its
+        grace window with ZERO effective sweeps, then a WARNING
+        reminder every 10 subsequent no-op ticks (rate-limited,
+        never silent again).
+
+        Grace window = 2x the interval: tick 1 is immediate (t=0),
+        tick N lands at (N-1) x interval, so the check arms at tick
+        3 (t = 2 x interval). The lifespan's ``init_dependency_bus``
+        runs a few seconds after this service starts, so a healthy
+        boot registers the bus long before the window closes.
+        """
+        if self._effective_runs_total > 0:
+            return
+        if self._ticks_total < 3:
+            # Grace: < 2x interval elapsed since start — the wiring
+            # window is still legitimately open.
+            return
+        if not self._dead_detection_fired:
+            self._dead_detection_fired = True
+            logger.error(
+                "OrphanWatcherSweepService DEAD-DETECTION: "
+                f"{self._ticks_total} tick(s) with ZERO effective "
+                "sweeps — the dependency bus was NEVER resolved, so "
+                "the periodic orphan-watcher backstop has done "
+                "nothing since start(). Check the boot wiring "
+                "assertion + init_dependency_bus failure in the "
+                "startup log."
+            )
+        elif self._ticks_total % 10 == 0:
+            logger.warning(
+                "OrphanWatcherSweepService still dead: tick "
+                f"{self._ticks_total}, zero effective sweeps "
+                "(dependency bus never resolved)"
+            )
 
     # --------------------------------------------------------
     # Internal — the asyncio loop

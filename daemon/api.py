@@ -1226,6 +1226,7 @@ async def lifespan(app: FastAPI):
             f"{type(bash_reconcile_err).__name__}: {bash_reconcile_err}"
         )
 
+
     # Create queue repository for job queue management
     queue_repo = JobQueueRepository(engine=manager.engine)
 
@@ -2972,6 +2973,27 @@ async def lifespan(app: FastAPI):
     # it is the SOLE completion authority (CM was removed in Phase 5).
     # See ``daemon/services/dependency_bus.py`` for the bus API.
     await init_dependency_bus(app, manager)
+
+    # Boot wiring assertion (born-dead fix, 2026-11-21): this call is
+    # the ONLY site that registers the bus singleton
+    # (``set_dependency_bus``). Services constructed EARLIER in this
+    # lifespan — notably ``OrphanWatcherSweepService`` (the C2 wiring
+    # above) — used to capture the singleton at construction time and
+    # never re-read it, leaving the periodic lane permanently on its
+    # bus-is-None branch ("born dead"). The sweep now late-binds, but
+    # a bus that failed to start here must be LOUD at boot, not
+    # DEBUG-quiet forever: if the singleton is still None, every
+    # bus-dependent lane (completion authority included) is degraded
+    # this boot. Log ERROR and continue — the boot-without-bus
+    # continuation is init_dependency_bus's own design decision.
+    if get_dependency_bus() is None:
+        logger.error(
+            "BOOT WIRING ASSERTION FAILED: DependencyBus singleton is "
+            "None after init_dependency_bus — every bus-dependent "
+            "lane (orphan-watcher sweep, completion authority) is "
+            "non-functional this boot. See the init_dependency_bus "
+            "warning above for the underlying cause."
+        )
 
     # Bootstrap system default project (Phase 1 of system_default_project feature)
     # This ensures the system project exists and has its queues provisioned
