@@ -2099,6 +2099,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "todo_list_update",
     "todo_view",
     "tool_help",
+    "tool_usage_digest",
     "unwatch_job",
     "upgrade_status",
     "view_link",
