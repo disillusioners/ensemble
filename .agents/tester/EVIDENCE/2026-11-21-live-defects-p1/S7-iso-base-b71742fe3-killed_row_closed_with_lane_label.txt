@@ -1,0 +1,20 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________ TestSweepRows.test_killed_row_closed_with_lane_label _____________
+tests/unit/services/test_bash_spawn_reaper.py:973: in test_killed_row_closed_with_lane_label
+    assert repo._mark_calls == [(11, f"terminal-tier@{os.getpid()}", None)]
+E   AssertionError: assert [(11, 'termin...t-time-gate')] == [(11, 'termin...21667', None)]
+E     
+E     At index 0 diff: (11, 'terminal-tier@2021667', 'refused:start-time-gate') != (11, 'terminal-tier@2021667', None)
+E     Use -v to get more diff
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.bash_spawn_reaper:bash_spawn_reaper.py:1243 bash reaper: refused row 11 (writer daemon_pid=2021667) — refused:start-time-gate (swept by daemon pid 2021667)
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /tmp/live-defects-base-b71742fe3/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_bash_spawn_reaper.py::TestSweepRows::test_killed_row_closed_with_lane_label
+1 failed, 1 warning in 0.56s

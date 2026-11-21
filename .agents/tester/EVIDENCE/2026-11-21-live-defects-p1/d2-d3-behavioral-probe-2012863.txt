@@ -1,0 +1,75 @@
+=== RUN CONTEXT 2026-11-21T13:53:13Z ===
+worktree=/home/nea/ensemble-src-wt-live-defects-p1 head=c8db252e871ba758e705924656fc47827b960858
+ENV FENCE: ENSEMBLE_SELF_ENV=dev POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 POSTGRES_DB=ensemble_dev POSTGRES_USER=ensemble_dev_app POSTGRES_PASSWORD=<masked>
+SCRATCH_PROBE=/tmp/edge_probe_d2d3_2012863.py
+=== PROBE OUTPUT ===
+IMPORT_PROOF daemon.__file__=/home/nea/ensemble-src-wt-live-defects-p1/daemon/__init__.py
+--- D2_ALL_LOGS (5 records) ---
+[ERROR] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 1 failed: BOOM-sweep
+[ERROR] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 2 failed: BOOM-sweep
+[ERROR] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 3 failed: BOOM-sweep
+[ERROR] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 4 failed: BOOM-sweep
+[ERROR] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 5 failed: BOOM-sweep
+--- end D2_ALL_LOGS ---
+D2_COUNTERS {'ticks': 5, 'cancelled_total': 0, 'errors_total': 5, 'effective_runs_total': 0}
+D2_RESULTS [{'ticks': 1, 'cancelled': 0, 'errors': 1, 'cumulative_cancelled': 0, 'cumulative_errors': 1, 'effective_runs': 0}, {'ticks': 2, 'cancelled': 0, 'errors': 2, 'cumulative_cancelled': 0, 'cumulative_errors': 2, 'effective_runs': 0}, {'ticks': 3, 'cancelled': 0, 'errors': 3, 'cumulative_cancelled': 0, 'cumulative_errors': 3, 'effective_runs': 0}, {'ticks': 4, 'cancelled': 0, 'errors': 4, 'cumulative_cancelled': 0, 'cumulative_errors': 4, 'effective_runs': 0}, {'ticks': 5, 'cancelled': 0, 'errors': 5, 'cumulative_cancelled': 0, 'cumulative_errors': 5, 'effective_runs': 0}]
+D2_DEAD_FIRED False
+D2_BUS_AWAIT_COUNT 5
+D2_ERROR_COUNT 5
+D2_EFFECTIVE_RUNS 0
+D2_TICKS 5
+.D3_PHASE1_DEAD_FIRED True
+D3_PHASE1_DEAD_ERROR_COUNT 1
+D3_PHASE1_TOTAL_ERRORS 1
+D3_PHASE1_TOTAL_WARNINGS 1
+--- D3_PHASE1_LOGS (14 records) ---
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 1, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 2, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 3, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[ERROR] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService DEAD-DETECTION: 3 tick(s) with ZERO effective sweeps — the dependency bus was NEVER resolved, so the periodic orphan-watcher backstop has done nothing since start(). Check the boot wiring assertion + init_dependency_bus failure in the startup log.
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 4, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 5, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 6, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 7, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 8, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 9, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 10, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[WARNING] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService still dead: tick 10, zero effective sweeps (dependency bus never resolved)
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 11, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 12, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+--- end D3_PHASE1_LOGS ---
+D3_PHASE2_EFFECTIVE_AFTER_T1 1
+D3_PHASE2_EFFECTIVE_AFTER_T2 2
+--- D3_PHASE2_LOGS (3 records) ---
+[INFO] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: first effective sweep on tick 13 — the lane recovered after dead-detection fired (the bus singleton is wired now)
+[INFO] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 13 cancelled 1 orphan PENDING watcher(s)
+[INFO] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 14 cancelled 1 orphan PENDING watcher(s)
+--- end D3_PHASE2_LOGS ---
+D3_PHASE3_ERROR_COUNT 0
+D3_PHASE3_WARNING_COUNT 0
+D3_PHASE3_FINAL_DEAD_FIRED True
+D3_PHASE3_FINAL_EFFECTIVE 2
+D3_PHASE3_FINAL_TICKS 26
+--- D3_PHASE3_LOGS (12 records) ---
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 15, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 16, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 17, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 18, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 19, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 20, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 21, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 22, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 23, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 24, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 25, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+[DEBUG] daemon.services.orphan_watcher_sweep: OrphanWatcherSweepService: tick 26, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+--- end D3_PHASE3_LOGS ---
+.
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-live-defects-p1/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2 passed, 1 warning in 6.17s
+PYTEST_EXIT=0

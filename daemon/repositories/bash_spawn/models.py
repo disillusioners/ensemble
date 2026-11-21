@@ -174,7 +174,9 @@ class BashSpawnRecord(SQLModel, table=True):
             "churn, so the coarse label is SANCTIONED): "
             "``terminal-tier`` (terminal Tier-1/Tier-2, terminate and "
             "chart lanes all inherit this one label), ``shutdown``, "
-            "``boot-reconcile``, ``gc``."
+            "``boot-reconcile``, ``retention-sweep`` (the periodic "
+            "retention lane's terminal-instance stall sweep, "
+            "2026-11-21), ``gc``."
         ),
     )
     reap_reason: str | None = Field(

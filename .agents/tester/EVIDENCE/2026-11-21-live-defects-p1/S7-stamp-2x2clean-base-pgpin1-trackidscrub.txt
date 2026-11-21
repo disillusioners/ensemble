@@ -1,0 +1,11 @@
+F.F......                                                                [100%]
+=============================== warnings summary ===============================
+../../home/nea/ensemble-src-wt-live-defects-p1/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-live-defects-p1/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/tools/test_bash_spawn_stamp.py::TestStampContract::test_stamp_present_in_child_env_when_on
+FAILED tests/tools/test_bash_spawn_stamp.py::TestStampContract::test_env_none_materializes_inherit_copy_plus_one
+2 failed, 7 passed, 1 warning in 10.44s

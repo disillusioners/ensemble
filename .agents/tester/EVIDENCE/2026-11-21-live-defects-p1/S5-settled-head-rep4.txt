@@ -1,0 +1,10 @@
+F.                                                                       [100%]
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-live-defects-p1/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/tools/test_bash_ram_guard.py::TestStagedGrowerStrictUnderReport::test_the_under_report_bound_is_strictly_positive_on_a_staged_grower
+1 failed, 1 passed, 1 warning in 31.40s
