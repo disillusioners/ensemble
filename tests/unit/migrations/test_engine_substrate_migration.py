@@ -16,9 +16,12 @@ import re
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import Float, Integer, String, Text, create_engine, inspect
+from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.types import TypeDecorator
 
 from daemon.repositories.engine.models import EngineJob, EngineRun
+from daemon.repositories.infra.types import JSONBType
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 VERSIONS_DIR = REPO_ROOT / "daemon" / "migrations" / "versions"
@@ -66,6 +69,119 @@ def _apply(sql_path: Path, engine) -> None:
     with engine.begin() as conn:
         for stmt in _statements(_up_section(sql_path.read_text())):
             conn.exec_driver_sql(stmt)
+
+
+#: The 14 columns the stage review found rendering VARCHAR on BOTH dialects
+#: (SQLModel's untyped ``str | None`` Field default lowers to ``AutoString``
+#: → VARCHAR) while the ``.sql`` contracts say TEXT. Named explicitly so the
+#: review's finding stays auditable: the generic loop below covers them, and
+#: this tuple proves the named set did not silently shrink.
+ENGINE_JOB_TEXT_FIELDS = (
+    "service_name",
+    "module_info",
+    "description",
+    "first_tick_kind",
+    "event_kind",
+    "kill_switch_key",
+    "last_run_at",
+    "last_outcome",
+    "last_skip_reason",
+)
+ENGINE_RUN_TEXT_FIELDS = (
+    "service_tag",
+    "finished_at",
+    "skip_reason",
+    "error_class",
+    "boot_id",
+)
+
+#: The sanctioned DUAL-DRIVER pairings — the ONLY places a model type
+#: deliberately differs from the ``.sql`` token.
+#:
+#: * ``JSONBType`` is the house TypeDecorator that resolves to JSONB on
+#:   PostgreSQL and JSON on SQLite; the ``.sql`` file is SQLite-valid DDL,
+#:   so its token is TEXT. Pairing them is the design, not drift.
+#: * ``Float`` compiles to ``FLOAT`` on both SQLAlchemy dialects while the
+#:   SQLite-valid DDL spells the same storage class ``REAL``.
+#:
+#: Every OTHER model type must match the ``.sql`` token exactly.
+_SQL_TOKEN_BY_MODEL_KIND = {
+    "text": "TEXT",
+    "jsonb": "TEXT",
+    "integer": "INTEGER",
+    "float": "REAL",
+}
+
+
+def _sql_table_columns(sql_path: Path, table: str) -> dict[str, dict[str, object]]:
+    """Parse the ``.sql`` UP section's CREATE TABLE into a column contract.
+
+    Returns ``{name: {"type": token, "not_null": bool, "primary_key": bool}}``
+    for every column line of the table body.
+    """
+    up = _up_section(sql_path.read_text())
+    match = re.search(
+        rf"CREATE TABLE IF NOT EXISTS {re.escape(table)}\s*\((.*?)\)\s*;",
+        up,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert match, f"could not parse CREATE TABLE for {table} in {sql_path.name}"
+    columns: dict[str, dict[str, object]] = {}
+    for raw in match.group(1).splitlines():
+        line = raw.split("--", 1)[0].strip().rstrip(",")
+        if not line:
+            continue
+        tokens = line.split()
+        upper = line.upper()
+        columns[tokens[0]] = {
+            "type": tokens[1].upper(),
+            "not_null": "NOT NULL" in upper,
+            "primary_key": "PRIMARY KEY" in upper,
+        }
+    return columns
+
+
+def _model_kind(column) -> str:
+    """Classify a model column into one of the sanctioned kinds.
+
+    ``str | None`` fields WITHOUT an ``sa_column`` annotation lower to
+    SQLModel's ``AutoString`` — a ``TypeDecorator`` whose ``impl`` is
+    ``String``, rendering VARCHAR on BOTH dialects. It is classified as
+    ``varchar`` (deliberately NOT ``text``) so an untyped string field is
+    reported as the exact model↔``.sql`` type mismatch it is instead of
+    hiding behind the same kind as a correct ``Text`` column.
+    """
+    type_ = column.type
+    if isinstance(type_, JSONBType):
+        return "jsonb"
+    if isinstance(type_, Text):
+        return "text"
+    if isinstance(type_, Integer):
+        return "integer"
+    if isinstance(type_, Float):
+        return "float"
+    if isinstance(type_, TypeDecorator):
+        impl = type_.impl
+        if isinstance(impl, Text):
+            return "text"
+        if isinstance(impl, String):
+            return "varchar"
+        if isinstance(impl, Integer):
+            return "integer"
+        if isinstance(impl, Float):
+            return "float"
+    if isinstance(type_, String):
+        return "varchar"
+    raise AssertionError(
+        f"{column.name}: unmapped model column type {type_!r} — the parity "
+        f"contract knows only Text / JSONBType / Integer / Float, with "
+        f"TypeDecorator impls resolving to those same four (add a sanctioned "
+        f"pairing before landing a new column type)"
+    )
+
+
+def _compiled(column, dialect) -> str:
+    return column.type.compile(dialect=dialect).upper()
 
 
 # ── AC1: file shape ────────────────────────────────────────────────────
@@ -259,6 +375,189 @@ class TestIndexLockstep:
         body = body.split("\n    def ", 1)[0]
         assert "engine_jobs" not in body
         assert "engine_runs" not in body
+
+
+# ── AC2: COLUMN-LEVEL parity — name + type + nullability ───────────────
+
+
+class TestColumnTypeParity:
+    """Model ↔ ``.sql`` parity at the COLUMN level (name, type, nullability).
+
+    The name-only lockstep tests above are structurally blind to a type
+    divergence: SQLModel lowers an untyped ``str | None`` field to
+    ``AutoString`` (VARCHAR on BOTH dialects) while the ``.sql`` contract
+    says TEXT, and a VARCHAR container silently truncates/collates
+    differently from TEXT on PostgreSQL. This class closes that hole for
+    both tables:
+
+    * TYPE is asserted via the column's COMPILED type on the sqlite AND
+      postgresql dialects (not a string-match on one rendered DDL), so a
+      dialect-specific regression cannot hide behind the other dialect;
+    * the two sanctioned dual-driver pairings are asserted EXPLICITLY
+      rather than being false-RED: ``JSONBType`` columns pair with the
+      ``.sql`` file's TEXT token (the file must stay SQLite-valid), and
+      ``Float`` pairs with the SQLite-valid DDL's REAL token;
+    * NULLABILITY is compared per column, with a PRIMARY KEY counted as
+      NOT NULL (the ``engine_runs.id`` DDL omits the explicit keyword —
+      SQLite implies it, and the model must agree);
+    * ``engine_runs.id`` is pinned as the autoincrement INTEGER PK it is
+      (D1.6). Its ``sa_column`` exists because the SQLModel autoincrement
+      rendering artifact would otherwise report ``nullable=True``.
+    """
+
+    @pytest.mark.parametrize(
+        "model, sql_path, table, named_text_fields",
+        [
+            (
+                EngineJob,
+                ENGINE_JOBS_SQL,
+                "engine_jobs",
+                ENGINE_JOB_TEXT_FIELDS,
+            ),
+            (
+                EngineRun,
+                ENGINE_RUNS_SQL,
+                "engine_runs",
+                ENGINE_RUN_TEXT_FIELDS,
+            ),
+        ],
+    )
+    def test_column_names_match_the_migration(
+        self, model, sql_path, table, named_text_fields
+    ):
+        sql_columns = _sql_table_columns(sql_path, table)
+        model_columns = {c.name for c in model.__table__.columns}
+        assert model_columns == set(sql_columns), (
+            f"{table}: model columns {sorted(model_columns)} != "
+            f"migration columns {sorted(sql_columns)}"
+        )
+        # The stage-review's named findings must all be present (a silent
+        # shrink of that set would weaken every assertion below).
+        assert set(named_text_fields) <= model_columns
+
+    @pytest.mark.parametrize(
+        "model, sql_path, table, named_text_fields",
+        [
+            (EngineJob, ENGINE_JOBS_SQL, "engine_jobs", ENGINE_JOB_TEXT_FIELDS),
+            (EngineRun, ENGINE_RUNS_SQL, "engine_runs", ENGINE_RUN_TEXT_FIELDS),
+        ],
+    )
+    def test_column_types_match_the_migration(
+        self, model, sql_path, table, named_text_fields
+    ):
+        sql_columns = _sql_table_columns(sql_path, table)
+        for column in model.__table__.columns:
+            kind = _model_kind(column)
+            expected = _SQL_TOKEN_BY_MODEL_KIND.get(kind)
+            assert expected is not None, (
+                f"{table}.{column.name}: model kind {kind!r} has no sanctioned "
+                f"pairing with a `.sql` token"
+            )
+            assert sql_columns[column.name]["type"] == expected, (
+                f"{table}.{column.name}: model {kind} expects {expected} in the "
+                f"migration, found {sql_columns[column.name]['type']}"
+            )
+
+    @pytest.mark.parametrize(
+        "model, sql_path, table, named_text_fields",
+        [
+            (EngineJob, ENGINE_JOBS_SQL, "engine_jobs", ENGINE_JOB_TEXT_FIELDS),
+            (EngineRun, ENGINE_RUNS_SQL, "engine_runs", ENGINE_RUN_TEXT_FIELDS),
+        ],
+    )
+    def test_column_nullability_matches_the_migration(
+        self, model, sql_path, table, named_text_fields
+    ):
+        sql_columns = _sql_table_columns(sql_path, table)
+        for column in model.__table__.columns:
+            spec = sql_columns[column.name]
+            sql_not_null = bool(spec["not_null"]) or bool(spec["primary_key"])
+            assert column.nullable is (not sql_not_null), (
+                f"{table}.{column.name}: model nullable={column.nullable} but "
+                f"the migration says {'NOT NULL' if sql_not_null else 'NULL'}"
+            )
+
+    @pytest.mark.parametrize(
+        "model, named_text_fields, table",
+        [
+            (EngineJob, ENGINE_JOB_TEXT_FIELDS, "engine_jobs"),
+            (EngineRun, ENGINE_RUN_TEXT_FIELDS, "engine_runs"),
+        ],
+    )
+    def test_named_text_columns_compile_to_text_on_both_dialects(
+        self, model, named_text_fields, table
+    ):
+        """The stage review's 14 fields: Text on sqlite AND postgresql.
+
+        Compiled-type assertion (not a DDL string match): the column's
+        type must render TEXT under each dialect's own compiler, which is
+        what ``create_all`` would actually emit.
+        """
+        columns = model.__table__.columns
+        for name in named_text_fields:
+            column = columns[name]
+            assert _model_kind(column) == "text", (
+                f"{table}.{name}: expected a Text column, got "
+                f"{type(column.type)!r} (an untyped str field renders VARCHAR)"
+            )
+            assert _compiled(column, sqlite.dialect()) == "TEXT", (
+                f"{table}.{name}: compiles to "
+                f"{_compiled(column, sqlite.dialect())} on sqlite, not TEXT"
+            )
+            assert _compiled(column, postgresql.dialect()) == "TEXT", (
+                f"{table}.{name}: compiles to "
+                f"{_compiled(column, postgresql.dialect())} on postgresql, "
+                f"not TEXT"
+            )
+
+    def test_jsonb_columns_are_the_sanctioned_text_pairing(self):
+        """JSONBType ↔ ``.sql`` TEXT is the DESIGN, not drift.
+
+        The migration files must stay SQLite-valid, so the JSON payloads
+        are declared TEXT there while the model types them with the house
+        dual-driver decorator (JSONB on PostgreSQL, JSON on SQLite). This
+        pin asserts the pairing explicitly so a future "make the types
+        match" sweep cannot rewrite the ``.sql`` to JSONB (PG-only DDL)
+        without REDing here.
+        """
+        pairs = (
+            (EngineJob, ENGINE_JOBS_SQL, "engine_jobs", "job_metadata", "metadata"),
+            (EngineJob, ENGINE_JOBS_SQL, "engine_jobs", "event_filter", "event_filter"),
+            (EngineRun, ENGINE_RUNS_SQL, "engine_runs", "error_digest", "error_digest"),
+        )
+        for model, sql_path, table, attr, column_name in pairs:
+            column = model.__table__.columns[column_name]
+            assert isinstance(column.type, JSONBType), (
+                f"{table}.{column_name}: expected JSONBType, got {column.type!r}"
+            )
+            sql_columns = _sql_table_columns(sql_path, table)
+            assert sql_columns[column_name]["type"] == "TEXT", (
+                f"{table}.{column_name}: the SQLite-valid migration must spell "
+                f"the JSON payload TEXT, found "
+                f"{sql_columns[column_name]['type']}"
+            )
+            # And the decorator really is dual-driver.
+            assert _compiled(column, postgresql.dialect()) == "JSONB"
+            assert _compiled(column, sqlite.dialect()) == "JSON"
+
+    def test_engine_runs_id_is_the_autoincrement_integer_pk(self):
+        """D1.6: append-only audit keyed by an autoincrement INTEGER PK.
+
+        Pinned at the COLUMN level (not just the reflection-level DDL
+        tests) because the SQLModel autoincrement rendering artifact would
+        report ``nullable=True`` for a bare ``primary_key=True`` Field —
+        which the nullability leg above would false-RED.
+        """
+        column = EngineRun.__table__.columns["id"]
+        assert _model_kind(column) == "integer"
+        assert column.primary_key is True
+        assert column.autoincrement is True
+        assert column.nullable is False
+        assert _compiled(column, sqlite.dialect()) == "INTEGER"
+        assert _compiled(column, postgresql.dialect()) == "INTEGER"
+        sql_columns = _sql_table_columns(ENGINE_RUNS_SQL, "engine_runs")
+        assert sql_columns["id"]["type"] == "INTEGER"
+        assert sql_columns["id"]["primary_key"] is True
 
 
 # ── AC2: manager registration ordering ─────────────────────────────────

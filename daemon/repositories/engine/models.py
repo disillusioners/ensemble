@@ -69,7 +69,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Column, Float, Index, Text
+from sqlalchemy import Column, Float, Index, Integer, Text
 from sqlmodel import Field, SQLModel
 
 from daemon.repositories.infra.types import JSONBType
@@ -159,6 +159,7 @@ class EngineJob(SQLModel, table=True):
     )
     service_name: str | None = Field(
         default=None,
+        sa_column=Column("service_name", Text, nullable=True),
         description="Human-readable service name (optional).",
     )
     category: str = Field(
@@ -172,6 +173,7 @@ class EngineJob(SQLModel, table=True):
     )
     module_info: str | None = Field(
         default=None,
+        sa_column=Column("module_info", Text, nullable=True),
         description=(
             "Origin module path / package / component of the job's "
             "implementation (debug + management aid)."
@@ -179,6 +181,7 @@ class EngineJob(SQLModel, table=True):
     )
     description: str | None = Field(
         default=None,
+        sa_column=Column("description", Text, nullable=True),
         description="Free-form operator description of what the job does.",
     )
     job_metadata: dict[str, Any] | None = Field(
@@ -207,6 +210,7 @@ class EngineJob(SQLModel, table=True):
     )
     first_tick_kind: str | None = Field(
         default=None,
+        sa_column=Column("first_tick_kind", Text, nullable=True),
         description="``immediate`` | ``delayed`` | NULL (interval kind only).",
     )
     first_tick_offset_seconds: float | None = Field(
@@ -219,6 +223,7 @@ class EngineJob(SQLModel, table=True):
     )
     event_kind: str | None = Field(
         default=None,
+        sa_column=Column("event_kind", Text, nullable=True),
         description=(
             "Event-registry kind string (event kind only). NOT a FK or "
             "CHECK into ``event.kind`` — the SQLite CHECK lists only 8 of "
@@ -265,6 +270,7 @@ class EngineJob(SQLModel, table=True):
     )
     kill_switch_key: str | None = Field(
         default=None,
+        sa_column=Column("kill_switch_key", Text, nullable=True),
         description=(
             "Optional per-job kill-switch key (env/config tier). Absent = "
             "no per-job switch."
@@ -281,6 +287,7 @@ class EngineJob(SQLModel, table=True):
     # ── last outcome (the honest-stamp surface; F-3 forbids action_*) ───
     last_run_at: str | None = Field(
         default=None,
+        sa_column=Column("last_run_at", Text, nullable=True),
         description=(
             "Aware-UTC ISO of the last terminal transition. Stamped on "
             "EVERY terminal outcome including skips, so due-state cannot "
@@ -289,6 +296,7 @@ class EngineJob(SQLModel, table=True):
     )
     last_outcome: str | None = Field(
         default=None,
+        sa_column=Column("last_outcome", Text, nullable=True),
         description=(
             "``SUCCEEDED`` | ``SKIPPED_*`` | ``FAILED_BACKOFF`` | "
             "``TIMED_OUT``."
@@ -296,6 +304,7 @@ class EngineJob(SQLModel, table=True):
     )
     last_skip_reason: str | None = Field(
         default=None,
+        sa_column=Column("last_skip_reason", Text, nullable=True),
         description="Reason token for the last skip outcome (skips only).",
     )
     consecutive_skips: int = Field(
@@ -345,7 +354,9 @@ class EngineRun(SQLModel, table=True):
 
     id: int | None = Field(
         default=None,
-        primary_key=True,
+        sa_column=Column(
+            "id", Integer, primary_key=True, autoincrement=True, nullable=False
+        ),
         description="Autoincrement run-row id (history order on both drivers).",
     )
     job_id: str = Field(
@@ -354,6 +365,7 @@ class EngineRun(SQLModel, table=True):
     )
     service_tag: str | None = Field(
         default=None,
+        sa_column=Column("service_tag", Text, nullable=True),
         description=(
             "Denormalized service_tag at run time (the metrics label "
             "survives a later re-registration that changes it)."
@@ -365,6 +377,7 @@ class EngineRun(SQLModel, table=True):
     )
     finished_at: str | None = Field(
         default=None,
+        sa_column=Column("finished_at", Text, nullable=True),
         description="Aware-UTC ISO of the terminal transition (NULL while running).",
     )
     outcome: str = Field(
@@ -376,6 +389,7 @@ class EngineRun(SQLModel, table=True):
     )
     skip_reason: str | None = Field(
         default=None,
+        sa_column=Column("skip_reason", Text, nullable=True),
         description="Reason token when the outcome is a skip.",
     )
     duration_seconds: float | None = Field(
@@ -388,6 +402,7 @@ class EngineRun(SQLModel, table=True):
     )
     error_class: str | None = Field(
         default=None,
+        sa_column=Column("error_class", Text, nullable=True),
         description="Exception class name for a failed attempt (never the message).",
     )
     error_digest: dict[str, Any] | None = Field(
@@ -397,6 +412,7 @@ class EngineRun(SQLModel, table=True):
     )
     boot_id: str | None = Field(
         default=None,
+        sa_column=Column("boot_id", Text, nullable=True),
         description=(
             "uuid4 hex of the daemon process that produced the run "
             "(restart discriminator; the bash_spawn_registry precedent)."
