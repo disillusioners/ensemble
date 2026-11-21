@@ -22,7 +22,7 @@ Build the measurement slice that, after ~7 days of operation, lets the data alon
 | 4 — FE tab | `phase4-plan.md` (46,238 B) | 9th tab `slot:'custom'`; **LAZY host pattern frozen (feasible, HIGH)**; B4b re-baselined **185,000 → 188,000 by leader ruling LR1**; phase 4 owns the threshold-artifact amendment | VALIDATE + leader decision RULED | §8 |
 | 5 — Release tail | `phase5-plan.md` (38,408 B) | Gates G1–G7 (updated lists), I1 re-specified as the 5-step gate-time proof, staged release via house `stage.sh live` (LR2 CONFIRMED), hard STOP — no flip | VALIDATE, I1 reframed, OQ1 resolved | §12 |
 
-Ledger: `decisions.md` (34,005 B) — D1–D11 original + **D12–D22 appended** (append-only; D11 superseded by D16). Architect source: `architecture-recommendation.md` (35,533 B, stands as written).
+Ledger: `decisions.md` (41,203 B) — D1–D11 original + **D12–D22 appended** (append-only; D11 superseded by D16). Architect source: `architecture-recommendation.md` (35,533 B, stands as written).
 
 ## Leader rulings (verbatim, character-for-character in ledger + governing phase)
 

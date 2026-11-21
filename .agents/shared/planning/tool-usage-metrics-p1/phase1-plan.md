@@ -185,13 +185,12 @@ Add to `MANAGED_KEYS` in `daemon/services/settings_service.py`:
 "limits.metrics_tool_usage_enabled": ManagedKeySpec(
     key="limits.metrics_tool_usage_enabled",
     config_path=None,                    # DB/ENV-ONLY (wedge_notice shape)
-    env_var="LIMITS_METRICS_TOOL_USAGE_ENABLED",
+    env_var="ENSEMBLE_METRICS_TOOL_USAGE_ENABLED",
     value_type="bool",
     default=True,
     requires_restart=False,
     sensitive=False,
-    description="Tool-usage metrics family kill-switch (Phase 2 stacks under this) ...",
-),
+    description="Tool-usage metrics family kill-switch (Phase 2 stacks under this) ...; mirrors the authoritative per-request env var ENSEMBLE_METRICS_TOOL_USAGE_ENABLED (fail-closed off-switch; the managed key is the operator-writable tier).",),
 "limits.tool_usage_digest_seeding_enabled": ManagedKeySpec(
     key="limits.tool_usage_digest_seeding_enabled",
     config_path=None,                    # DB/ENV-ONLY (D-5 opt-out; survives re-seed)

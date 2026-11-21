@@ -183,7 +183,7 @@ cd /home/nea/ensemble-src-wt-stage-<slug>/frontend && npm ci \
 
 # (7) STAGE — env-first; `live` TARGET arg MANDATORY (bare resolves to demo,
 #     stage.sh:133); ENSEMBLE_ROLLBACK_SAFE=1 in argv (destructive-DDL grep
-#     stage.sh:336-346 matches 96/119 files ⇒ exit 78 without it).
+#     stage.sh:336-346 matches 134 files on disk ⇒ exit 78 without it — count re-verified at gate time (operational conclusion: bind ENSEMBLE_ROLLBACK_SAFE=1 — unchanged); destructive-DDL grep census drifts, gate-time re-verify owns the number).
 #     ENSEMBLE_UPGRADE_LIVE=1 here = live-dir WRITE guard, NOT a flip (§3.4).
 ENSEMBLE_UPGRADE_LIVE=1 ENSEMBLE_ROLLBACK_SAFE=1 \
   bash scripts/upgrade/stage.sh live --version vX.Y.Z

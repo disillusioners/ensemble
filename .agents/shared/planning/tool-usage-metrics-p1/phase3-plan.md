@@ -166,15 +166,12 @@ Resolved by architect pass @ fd254b335:
 
 1. **Per-tool weights (R1).** RESOLVED — committed per-tool weight artifact + 230-average fallback validated as the determinism mechanism; keep. No per-tool measurement lane needed for v1.
 2. **Holder set exactness (§3.7).** RESOLVED — accept `scheduling` category (ari+leader+jober); jober inheritance benign and disclosed (D-8); exact-holder-set stays out of scope.
-3. **D-6 canonical root.** RESOLVED — pin an explicit canonical root (config/env constant); no open question (D-6).
-4. **D-7 window semantics.** RESOLVED — frozen: last-24h = D−1 complete UTC day; cumulative-week = [D−7, D−1] (D-7).
-5. **D-9 rollback disclosure.** RESOLVED — frozen text recorded in §3 (D-9).
+3. **D-7 window semantics.** RESOLVED — frozen: last-24h = D−1 complete UTC day; cumulative-week = [D−7, D−1] (D-7).
+4. **D-9 rollback disclosure.** RESOLVED — frozen text recorded in §3 (D-9).
 
 Still open:
 
-6. **manager.py hunk disjointness (R7).** Confirm the hunk sets are line-disjoint at integration (planner sweeps; architect I1 enumeration at gate time). D-1 may move the hunk to ≥ `:2113`.
-
-RESOLVED (post-review, U8 — closed with the ruling): **Digest destination confirmation (§3.5, D-6).** The canonical root constant is named: env **`ENSEMBLE_TOOL_USAGE_DIGEST_ROOT`**, defaulting (when unset) to the daemon's canonical project-data root for this project — `<live install tree>/.agents/shared/planning/tool-usage-metrics-p1/digests` — with digest path `<root>/YYYY-MM-DD.md`, same-day overwrite. §3.5 and §10 A6 carry the full ruling; no open question remains.
+5. **manager.py hunk disjointness (R7).** Confirm the hunk sets are line-disjoint at integration (planner sweeps; architect I1 enumeration at gate time). D-1 may move the hunk to ≥ `:2113`.
 
 ---
 
