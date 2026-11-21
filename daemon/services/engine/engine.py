@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
@@ -21,6 +22,7 @@ from daemon.services.engine.metrics import EngineMetrics
 from daemon.services.engine.state import now_iso, parse_iso
 from daemon.services.engine.execution import EngineExecutionLoop
 from daemon.services.engine.guardrails import DepMissingTracker, ExtendWedgeTracker
+from daemon.services.engine.boot import FirstTickScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,17 @@ class EngineService:
         self._extend_wedge_tracker = ExtendWedgeTracker()
         self._extend_escalated: set[str] = set()
         self._dep_missing_escalated: set[str] = set()
+        # P4 — first-tick scheduling (boot-scoped, stable within one boot).
+        self._first_tick_scheduler = FirstTickScheduler(self._boot_id)
+        # P4 — liveness atomics sampled by the engine-independent watchdog
+        # (AMD-2: shared atomics, lock-free read by the thread; no engine API
+        # call from the watchdog).  The tick loop stamps _last_tick_monotonic
+        # and _tick_count; _supervisor_restarts is stamped by the loop's
+        # supervised-restart branch.
+        self._last_tick_monotonic: float = 0.0
+        self._tick_count: int = 0
+        self._watchdog_stall_count: int = 0
+        self._watchdog_last_stall_monotonic: float = 0.0
 
     # ── introspection ────────────────────────────────────────────────
     @property
@@ -74,6 +87,24 @@ class EngineService:
     @property
     def _cache_view(self):
         return self._cache
+
+    def watchdog_snapshot(self) -> dict:
+        """Liveness atomics for the engine-independent watchdog (AMD-2).
+
+        The watchdog samples this lock-free from its own daemon thread; no
+        engine method is invoked on the sampling path.  ``dead_jobs`` /
+        ``running_jobs`` are derived from the RAM cache without touching DB.
+        """
+        cache = self._cache or {}
+        return {
+            "last_tick_monotonic": float(self._last_tick_monotonic or 0.0),
+            "tick_count": int(self._tick_count or 0),
+            "restart_count": int(self._supervisor_restarts or 0),
+            "dead_jobs": sum(1 for c in cache.values() if c.get("persisted_dead")),
+            "running_jobs": sum(1 for c in cache.values() if c.get("running")),
+            "stall_count": int(self._watchdog_stall_count or 0),
+            "last_stall_monotonic": float(self._watchdog_last_stall_monotonic or 0.0),
+        }
 
     # ── lifecycle ────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -87,6 +118,9 @@ class EngineService:
             self._execution_loop.run(), name="engine-tick"
         )
         self._started = True
+        # P4: seed the liveness anchor at start so the watchdog never sees a
+        # false stall during the first-tick window (the loop stamps each tick).
+        self._last_tick_monotonic = time.monotonic()
         logger.info(
             "engine tick loop started: resolution=%s shadow_mode=%s",
             getattr(self.config, "tick_resolution_seconds", 1.0),
@@ -205,6 +239,14 @@ class EngineService:
             "pending_event": False,
             "registered_at": job.registered_at,
             "first_tick_anchor": job.registered_at,
+            # P4 — boot-scoped first-tick offset (delayed offset + deterministic
+            # jitter).  Consumed by _is_due on the first tick; stable for the
+            # whole boot via the engine's FirstTickScheduler.
+            "first_tick_due_offset_s": self._first_tick_scheduler.offset_for(
+                str(job.id), getattr(spec, "trigger", None)
+            )
+            if spec is not None
+            else 0.0,
             "persisted_dead": bool(getattr(job, "dead", 0)),
         }
 

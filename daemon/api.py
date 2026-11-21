@@ -3805,6 +3805,112 @@ async def lifespan(app: FastAPI):
     )
 
     # ─────────────────────────────────────────────────────────────
+    # P4 — central engine boot wiring (Engine Arc Phase 1 / T4.4–T4.6).
+    # ONE contiguous try/except-guarded block. DORMANT POSTURE (CS-1): N
+    # observer specs registered (execute_fn withheld), zero executables,
+    # shadow rows present, ALL SERVICES_*_USE_ENGINE unset — registration for
+    # observation is NOT migration. Off the readyz-green critical path (D4.3:
+    # after init_dependency_bus and the readiness refresher task creation).
+    # F-16: disjoint from the live-defects api.py regions. F-8/F-12/F-13/
+    # F-14/F-15 untouched. A failure logs WARNING and boot CONTINUES.
+    # ─────────────────────────────────────────────────────────────
+    _engine_boot_t0 = time.perf_counter()
+    try:
+        from daemon.services.engine.boot import build_observer_specs, run_boot_pass
+        from daemon.services.engine.engine import EngineService
+        from daemon.services.engine.guardrails import assert_dependencies_resolvable
+        from daemon.services.engine.killswitch import EngineSwitchResolver
+        from daemon.services.engine.registry import EngineRegistry
+        from daemon.services.engine.watchdog import (
+            EngineWatchdog,
+            make_direct_db_rearm,
+        )
+        from daemon.repositories.engine.repository import EngineRepository
+        from daemon.services.event_registry.emit import set_event_sink
+
+        _engine_cfg = config.engine
+        _engine_repo = EngineRepository(manager.engine)
+        _engine_registry = EngineRegistry(_engine_repo)
+        _engine_switch = EngineSwitchResolver(resolver=os.environ.get)
+        _engine_svc = EngineService(
+            _engine_repo,
+            _engine_registry,
+            _engine_cfg,
+            shadow_mode=_engine_cfg.shadow_mode,
+        )
+        # ARM the P3 killswitch surface (inert while dormant).
+        _engine_svc._switch_resolver = _engine_switch
+
+        # N dormant observer specs — execute_fn withheld by construction.
+        _observer_specs = build_observer_specs(config)
+
+        async def _engine_registration_pass():
+            for _spec in _observer_specs:
+                await _engine_registry.aregister(_spec)
+
+        # Deadlined registration pass (BOOT_PASS; expire ⇒ ERROR + CONTINUE).
+        await run_boot_pass(
+            _engine_registration_pass(),
+            float(_engine_cfg.boot_pass_deadline_seconds),
+            "engine_registration",
+        )
+
+        # T4.6 — boot wiring assertion immediately after the registration pass.
+        _engine_wiring_report = assert_dependencies_resolvable(
+            [
+                (_spec, _engine_svc.get_dependencies(_spec.id))
+                for _spec in _observer_specs
+            ]
+        )
+        if not _engine_wiring_report.ok:
+            for _jid, _labels in _engine_wiring_report.unresolved.items():
+                for _label in _labels:
+                    logger.error(
+                        "engine boot wiring: unresolved dependency %s -> %s",
+                        _jid,
+                        _label,
+                    )
+            logger.error(
+                "engine boot wiring summary: %s", _engine_wiring_report.summary()
+            )
+
+        # AMD-5 — the set_event_sink composition line (ONE owner: P4 T4.4).
+        set_event_sink(_engine_svc.ingest_event)
+
+        # Start the tick task and the engine-independent watchdog (AMD-2:
+        # watchdog start is OUTSIDE the construction try, owns this envelope).
+        await _engine_svc.start()
+        _engine_watchdog = EngineWatchdog(
+            _engine_svc,
+            _engine_cfg,
+            rearm=make_direct_db_rearm(_engine_repo),
+        )
+        _engine_watchdog.start()
+
+        # Store both handles on app.state (shutdown clears them).
+        app.state.engine_service = _engine_svc
+        app.state.engine_watchdog = _engine_watchdog
+
+        # Exactly ONE posture INFO line, with the block's perf_counter elapsed
+        # (SLO-1). Dormant posture ⇒ this block is ≤250ms.
+        _engine_boot_elapsed_ms = (time.perf_counter() - _engine_boot_t0) * 1000.0
+        logger.info(
+            "engine boot posture: enabled=%s shadow=%s registrations=%d observer "
+            "specs (execute_fn withheld, USE_ENGINE all unset); "
+            "block_elapsed_ms=%.3f",
+            _engine_cfg.enabled,
+            _engine_cfg.shadow_mode,
+            len(_observer_specs),
+            _engine_boot_elapsed_ms,
+        )
+    except Exception as _engine_boot_exc:  # noqa: BLE001 — never abort boot
+        app.state.engine_service = None
+        app.state.engine_watchdog = None
+        logger.warning(
+            "engine boot wiring failed (boot CONTINUES): %s", _engine_boot_exc
+        )
+
+    # ─────────────────────────────────────────────────────────────
     # service-tool Phase 1 (1.C.14) — ServiceReconciliationService.
     # D6 boot sweep + periodic PID-liveness / start-time-match
     # reconcile for the ``service_tracking`` table (mark dead or
@@ -4591,6 +4697,26 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"SourcesGcService shutdown error: {e}")
         app.state.sources_gc = None
+
+    # --- Central engine shutdown (Engine Arc P4 / T4.5) ---
+    # Stop the engine BEFORE the sweep cluster (no engine tick can touch a
+    # service the sweeps are stopping). Stop the watchdog first so it cannot
+    # fire on a stopping engine, then stop the tick task, then clear BOTH
+    # app.state handles. Both stops are idempotent (P2 T2.5).
+    _engine_watchdog = getattr(app.state, "engine_watchdog", None)
+    if _engine_watchdog is not None:
+        try:
+            _engine_watchdog.stop()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("EngineWatchdog shutdown error: %s", e)
+        app.state.engine_watchdog = None
+    _engine_service = getattr(app.state, "engine_service", None)
+    if _engine_service is not None:
+        try:
+            await _engine_service.stop()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("EngineService shutdown error: %s", e)
+        app.state.engine_service = None
 
     # --- PlaneSyncWatchdogService shutdown (Phase 3) ---
     # Stop the periodic re-drive sweep BEFORE the manager shuts down

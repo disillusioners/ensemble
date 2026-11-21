@@ -106,6 +106,11 @@ class EngineExecutionLoop:
             return
 
     async def _tick(self) -> None:
+        # P4 — liveness atomics for the engine-independent watchdog. Stamped
+        # at the top of EVERY tick so a stall inside a tick leaves this age
+        # growing (the watchdog samples it from outside the loop).
+        self.engine._last_tick_monotonic = time.monotonic()
+        self.engine._tick_count = int(getattr(self.engine, "_tick_count", 0) or 0) + 1
         now = datetime.now(timezone.utc)
         cache = self.cache
         # compute due set
@@ -197,15 +202,21 @@ class EngineExecutionLoop:
         # interval trigger
         last_run_at = cache.get("last_run_at")
         if last_run_at is None:
-            first_kind = getattr(trigger, "first_tick_kind", None)
-            if first_kind == "delayed":
-                offset = getattr(trigger, "first_tick_offset_seconds", None) or 0.0
-                # anchor: registered_at from DB row or now
-                anchor_iso = cache.get("registered_at") or cache.get("first_tick_anchor")
-                anchor = parse_iso(anchor_iso) if anchor_iso else now
-                return now >= (anchor + timedelta(seconds=offset))
-            # immediate or None → due on first tick
-            return True
+            # P4 — the boot-scoped first-tick offset (delayed offset + deterministic
+            # jitter) is projected at registration; fall back to the legacy
+            # delayed-only computation when a cache predates it.
+            first_offset = cache.get("first_tick_due_offset_s")
+            if first_offset is None:
+                first_kind = getattr(trigger, "first_tick_kind", None)
+                if first_kind == "delayed":
+                    first_offset = getattr(
+                        trigger, "first_tick_offset_seconds", None
+                    ) or 0.0
+                else:
+                    first_offset = 0.0
+            anchor_iso = cache.get("registered_at") or cache.get("first_tick_anchor")
+            anchor = parse_iso(anchor_iso) if anchor_iso else now
+            return now >= (anchor + timedelta(seconds=float(first_offset)))
         last_dt = parse_iso(last_run_at)
         if last_dt is None:
             return True
