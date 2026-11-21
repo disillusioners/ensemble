@@ -1219,7 +1219,7 @@ class RamGuardConfig(BaseSettings):
       out-of-range explicit value ⇒ ``ValidationError`` out of
       ``load_config`` ⇒ **BOOT ABORTS** (never clamped), unless the
       master switch is OFF, which beats validation (§15 B26).
-    * ``poll_interval_ms``         — the tick cadence (default 200).
+    * ``poll_interval_ms``         — the tick cadence (default 1000).
     * ``grace_ms``                 — the TERM→KILL grace (default 250).
     * ``pss_confirm_deadline_ms``  — the one-shot PSS confirm deadline
       (default 250).
@@ -1261,12 +1261,12 @@ class RamGuardConfig(BaseSettings):
         # Same empty-string rule: ``RAM_GUARD_GRACE_MS=`` binds the
         # field's DEFAULT, never a boot abort.
         if isinstance(v, str) and not v.strip():
-            return {"poll_interval_ms": 200, "grace_ms": 250,
+            return {"poll_interval_ms": 1000, "grace_ms": 250,
                     "pss_confirm_deadline_ms": 250}[info.field_name]
         return v
 
     poll_interval_ms: int = Field(
-        default=200,
+        default=1000,
         ge=50,
         le=2000,
         description=(
@@ -9349,7 +9349,7 @@ def load_config(config_path: str | None = None) -> Config:
     if not _ram_guard_switch:
         config_dict["ram_guard"] = RamGuardConfig.model_construct(
             ceiling_mib=None,
-            poll_interval_ms=200,
+            poll_interval_ms=1000,
             grace_ms=250,
             pss_confirm_deadline_ms=250,
         )
