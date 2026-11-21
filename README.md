@@ -375,4 +375,7 @@ For the one-page quick start and the full deployment guide — install, supervis
 
 ## License
 
-MIT
+Copyright (C) 2026 disillusioners
+
+This project is licensed under the GNU Affero General Public License v3.0 only (AGPL-3.0-only).
+See [LICENSE](LICENSE) for the full license text.
