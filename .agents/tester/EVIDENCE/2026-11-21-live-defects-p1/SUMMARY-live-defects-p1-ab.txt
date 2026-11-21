@@ -1,0 +1,173 @@
+================================================================================
+LIVE-DEFECTS-P1 — TRUE-BASE A/B GATE  (tester)
+  base = b71742fe33e25db177bd86761f5b5ef16da0f425  (/tmp/live-defects-base-b71742fe3, detached, removed after)
+  head = c8db252e871ba758e705924656fc47827b960858  (fix/phase1-live-defects)
+  both legs: uv sync --frozen from the SAME uv.lock (sha ad418aa6d2fe4ca3 both),
+             Python 3.14.7, 117 packages, pip-freeze diff EMPTY (byte-equal venvs)
+  fence (every primary run): ENSEMBLE_SELF_ENV=dev
+     POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 POSTGRES_DB=ensemble_dev
+     POSTGRES_USER=ensemble_dev_app POSTGRES_PASSWORD=****   (per-variable; never written)
+  NOTE: ambient shell also carries ENSEMBLE_BASH_TRACKING_ID (32 hex) and
+        ENSEMBLE_SELF_ENV=live; the fence overrides SELF_ENV, and the
+        TRACKING_ID was left as-is for the brief-exact runs (characterized below).
+================================================================================
+
+VERDICT
+  NET-NEW FAILURES (deterministic, lane-caused): 0
+  The 4 claimed pre-existing reaper reds: BYTE-IDENTICAL at both legs (node ids +
+  first error line), deterministic, every env shape tested. CONFIRMED PRE-EXISTING.
+  BUT the brief's premise "the S1 pack passes clean 177/177 under this fenced
+  invocation" is FALSE. It does not: the registered pack reports FAIL(rc=1) at
+  BOTH legs, 6 red nodes each (4 reaper + 2 stamp), 171P base / 175P head.
+  Running the same 4 modules directly with the full PG pin yields 8 reds each
+  (4 reaper + 4 stamp), 169P base / 173P head — the extra 2 are PG-pin-coupled.
+  Either way the node SET is identical base↔HEAD. Branch-only reds: ZERO.
+
+PER-SCOPE PER-LEG COUNTS
+  S1  pack bash_spawn_reaper_feature_test.sh   base 6F/171P  | head 6F/175P   (FAIL/FAIL, identical node set)
+      ^ WHY 6 AND NOT 8: the pack runs through scripts/run_tests_scrubbed.sh,
+        which EXPLICITLY unsets POSTGRES_* (see the wrapper, step 1). So the
+        pack can never carry the PG pin even when the caller exports it; the
+        pack's shape == the "PG pin OFF + tracking-id kept" cell = 4 reaper
+        + 2 stamp = 6 reds. The 8-red figure below is the PG-pinned cell.
+  S1' same 4 modules --tb=short (canonical ids) base 8F/169P | head 8F/173P   (identical node set)
+  S2  test_c2_orphan_watcher_sweep.py          base 17P 0F   | head 24P 0F    (PASS/PASS; +7 lane nodes)
+  S3  test_bash_spawn_retention_sweep.py       base N/A (file absent) | head 21P 0F  (PASS, HEAD-only)
+  S4  pack bash_spawn_repository_pg_test.sh    base 5P 0F    | head 5P 0F     (PASS/PASS)
+  S5  extra grep-derived scopes (12 files + 1 PG pair), both legs identical:
+        instance_ops_behaviour 58P/58P · terminate_downside_row_drain 4P/4P
+        nudge_completion_watcher_d2 19P/19P · dependency_bus 91P/91P
+        child_outcome_payload_surfacing 5P/5P · observer_hardening_f13_14_15 13P/13P
+        proc_ram_guard 60P/60P · ram_guard_tree_reader 17P/17P
+        ram_guard_interactions 5P/5P · metrics_query_provider 71P/71P
+        ram_guard_ladder 44P/44P · resource_pid_registry 53P/53P (no-PG shape; PG-pinned run HARD-ABORTs by design)
+        -- with reds, identical both legs:
+        job_feedback_observer   base 1F/50P | head 0F/51P   (base-red, head GREEN → FIXED, not net-new)
+        manager_shutdown        base 1F/11P | head 1F/11P   (identical node)
+        auto_kill_integration   base 3F/29P | head 3F/29P   (identical 3 nodes)
+        pg orphan siblings       base 1F/8P  | head 1F/8P    (identical node)
+        bash_ram_guard          base 1F/82P | head 1F/82P    (DIFFERENT node id each run — flake, see below)
+
+FAILED-LIST DIFF (canonical node ids, per scope)
+  head_node_set == base_node_set for every scope except:
+    + base-only: test_job_feedback_observer.py::...::test_tier1_sibling_owned_row_skipped
+    + base-only: test_bash_ram_guard.py::...::test_the_under_report_bound_is_strictly_positive_on_a_staged_grower
+    + head-only: test_bash_ram_guard.py::...::test_the_leaderless_tree_is_still_watched_and_killed
+  All three of those are host-timing flakes (evidence below), none is deterministic.
+  DETERMINISTIC NET-NEW = 0.
+
+THE 4 CLAIMED REDS — BYTE IDENTITY, WITH FIRST ERROR LINES (identical at both legs)
+  1) test_bash_spawn_reaper.py::TestSweepRows::test_killed_row_closed_with_lane_label
+     E   AssertionError: assert [(11, 'termin...t-time-gate')] == [(11, 'termin...<pid>', None)]
+     E     At index 0 diff: (11, 'terminal-tier@<pid>', 'refused:start-time-gate') != (11, 'terminal-tier@<pid>', None)
+  2) test_bash_spawn_reaper.py::TestHardGuards::test_ladder_fires_for_gate_passing_row
+     E   AssertionError: assert 'refused' == 'reaped'
+  3) test_bash_spawn_reaper.py::TestShutdownSweepService::test_self_owned_current_boot_row_swept
+     E   AssertionError: assert [(23, 'shutdo...t-time-gate')] == [(23, 'shutdo...<pid>', None)]
+     E     At index 0 diff: (23, 'shutdown@<pid>', 'refused:start-time-gate') != ...
+  4) test_bash_spawn_reaper_boot.py::TestBootReconcileLeg::test_m5_previous_boot_burner_killed
+     E   AssertionError: assert None is not None
+     E    +  where None = poll()
+     E    +    where poll = <Popen: returncode: None args: ['sleep', '60']>.poll
+  (<pid> differs per run — that is the only textual difference; the failure
+   MECHANISM and the reason token are identical.)
+
+MECHANISM (why these 4 are pre-existing, not lane-caused)
+  (1)(2)(3) D9 start-time gate: the row's synthetic start_time (e.g. 500) can never
+  match the REAL /proc/<pid>/stat jiffies of a live synthetic pid, so
+  jiffies_ok=False ⇒ gate_failed_direct ⇒ the kill ladder is never entered and the
+  row is closed 'refused:start-time-gate' instead of 'reaped'. Pure test-fixture vs
+  real-/proc interaction. sweep_rows_/_kill_ladder/_verify_member_env/verify_and_kill
+  are byte-identical base↔HEAD (function-level hash compare: SAME).
+  (4) env-stamp attribution: the child is a bare `sleep 60` with no
+  ENSEMBLE_BASH_TRACKING_ID stamped, so verify_member_env reads a mismatch
+  ('refused:env-mismatch') and nothing is signalled — even with the ambient
+  TRACKING_ID inherited the VALUE differs from the row's 'a'*32.
+  The ONLY base→HEAD test-file change in that file is one ADDED node
+  (TestShutdownSweepService::test_master_off_is_counted_noop_skip, D-7);
+  test_bash_spawn_reaper_boot.py is byte-IDENTICAL (sha256 9c7e..-class compare run).
+
+ENV-SHAPE CHARACTERIZATION (the brief asked for this explicitly)
+  The reds are NOT "ambient-dependent" in the sense of vanishing under a fenced run.
+  Measured 2x2 at BOTH legs (stamp file is the sharpest probe; 9 nodes):
+     PG pin=ON  + TRACKING_ID kept   → 4F/5P   (both legs)
+     PG pin=ON  + TRACKING_ID scrub  → 2F/7P   (both legs; stamp_present + env_none remain)
+     PG pin=OFF + TRACKING_ID kept   → 2F/7P   (both legs; explicit_off + instance_id_none remain)
+     PG pin=OFF + TRACKING_ID scrub  → 9P/0F   (both legs, 4/4 repeats)
+  S1 pack likewise: fenced = 6F, no-PG+scrub = 4F (the 4 reaper reds always survive).
+  ⇒ Under the brief's exact fence the pack does NOT pass; the 4 reaper reds appear
+    in EVERY shape (fenced-pack, isolated, fully-ambient). 4 extra stamp-file reds
+    are added by the PG pin / ambient TRACKING_ID, and they too are identical at
+    both legs. Zero of the 8 is lane-attributable.
+
+RAM-GUARD FLAKE (the only head-only node in any FAILED list)
+  Node: tests/tools/test_bash_ram_guard.py::TestRealBallooningTree::test_the_leaderless_tree_is_still_watched_and_killed
+  Signature: E AssertionError: grandchild <pid> survived (20s deadline)
+  test_bash_ram_guard.py, daemon/services/ram_guard/*, daemon/tools/bash.py are all
+  BYTE-IDENTICAL base↔HEAD (sha256 prefix compare) and ram_guard imports nothing
+  from the lane's modules (§7 AST freeze holds).
+  Isolated serial rep matrix (every cell measured, transcript per rep saved):
+    leaderless, straightforward order   base 1F/67  | head 6F/67  (head burst at reps 48-53)
+    leaderless, ORDER-SWAPPED head-first base 0F/8  | head 1F/8
+    leaderless, alternating order 71-82  base 0F/12 | head 0F/12
+    leaderless, settled (sleep 2 between legs, 10 reps) base 2F/10 | head 1F/10  ← BASE HIGHER
+    under_report_bound isolated          base 0F/12 | head 1F/12
+    whole-file test_bash_ram_guard.py    83P/83P BOTH legs x 7 consecutive reps (0 F)
+  ⇒ HOST-TIMING / LOAD-COUPLED FLAKE, red on BOTH legs. The un-ordered head
+    "burst" does not survive ordering control (head-first 1F/8, alternating
+    0F/12) and vanishes entirely in the whole-file leg. Declared base-flaky,
+    NOT net-new. NOT in QUARANTINE.md — recommend a documentary row.
+  Sibling under_report_bound is the same class (JSONDecodeError from a truncated
+  child payload; 0F base isolated, 1F head isolated, red at base in the first
+  whole-file observation).
+
+QUARANTINE.md COVERAGE OF THE 4 REDS: NO
+  grep for the 4 node names → 0 rows each. grep 'reaper' / 'bash_spawn' → only
+  unrelated rows (row 185: bash_spawn_reaper.py:522 'refused:env-mismatch' in
+  test_manager_shutdown / auto_kill_integration — a DIFFERENT defect class, and
+  both of those nodes DID reproduce identically base↔HEAD here, consistent with
+  row 185; row 157 mentions test_bash_spawn_stamp ×2 as ambient — its scrub
+  recommendation is directionally right but does NOT green the file alone).
+  Row 183 already registers test_06f500af ×1 (PG population) and row 185 the
+  manager_shutdown / auto_kill nodes. The 4 reaper reds need a NEW row.
+
+EVIDENCE FILES (all .txt, password masked; dir = .agents/tester/EVIDENCE/2026-11-21-live-defects-p1/)
+  base_FAILED.txt / head_FAILED.txt      canonical FAILED lists per scope per leg
+  S1-*-pack-*.txt                        registered pack, both legs (brief-exact + no-PG shapes)
+  S1-direct4files-*.txt                  same 4 modules, --tb=short (canonical node ids)
+  S1-collect-only-*.txt                  collection census (base 177 / head 181)
+  S2-c2-orphan-*.txt  S3-retention-head-only-*.txt  S4-pg-pack-*.txt
+  S5-test_*.txt                          grep-derived extra scopes, both legs
+  S5-iso-ramguard{A,B}-*.txt             isolated flake matrices
+  S5-order-swap-*.txt S5-settled-*.txt   ordering-controlled flake comparison
+  S5-bashramguard-wholefile-*.txt        whole-file 83P/83P both legs
+  S7-iso-{base,head}-*-<node>.txt        the 4 reds, isolated, both legs
+  S7-4reds-ambientshape-*.txt            the 4 reds, fully ambient (no fence)
+  S7-stamp-2x2clean-*.txt                PG-pin × TRACKING_ID 2x2 at both legs
+================================================================================
+
+CREDENTIAL EXPOSURE (self-reported, CONTAINED) — see EXPOSURE-NOTE-credential-in-evidence.txt
+  One live credential (BLUEPRINT_EMBEDDING_API_KEY, sha256_16=d65dc60c8437769a,
+  aliased EMBEDDING_API_KEY / SKILL_EVOLUTION_EMBEDDING_API_KEY) appeared in
+  cleartext in 4 transcripts (32 occurrences) because a failing assertion in
+  tests/tools/test_bash_spawn_stamp.py reprs the captured child env, which is an
+  inherit-copy of the ambient shell env. Window 13:57Z → 15:23:26Z (~86 min),
+  files mode 644 in a 755 dir. CONTAINED: all 32 occurrences replaced with
+  sk-proj-REDACTED(sha256_12=6929fff25068,len=85); every *.txt chmod 600, dir 700;
+  `git grep` over HEAD finds the value in NO tracked object; dir is untracked and
+  NOT gitignored. The same value was already resident in /home/nea/ensemble-src/.env
+  and /home/nea/agents-ensemble/.env (standing dev embedding credential, not new
+  material). The ensemble proxy key OPENAI_API_KEY (e33c34f5af4278a0) was NOT
+  exposed by this lane. Logged to the standing deferred-rotation ledger; no
+  rotation performed here.
+
+CLEANUP STATE (complete)
+  `git worktree remove --force /tmp/live-defects-base-b71742fe3` -> rc=0; the path
+  no longer exists and `git worktree list` no longer shows it. All base runs and
+  every transcript were saved BEFORE removal. Temp runner scripts and the three
+  junit XMLs under /tmp were deleted. Worktree HEAD-leg `git status --short` shows
+  exactly ONE untracked entry: .agents/tester/EVIDENCE/2026-11-21-live-defects-p1/
+  ZERO source/test edits, ZERO commits by this lane (rev-list b71742fe3..HEAD
+  still 3 — all three are the lane author's). /home/nea/ensemble-src untouched
+  (still bf4bfde6e detached); ports 8079/8088/9797 never contacted; no
+  ensemble_prod connection attempted (fence refuses any POSTGRES_DB != ensemble_dev).

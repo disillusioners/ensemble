@@ -1,0 +1,34 @@
+....                                                                     [100%]
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /tmp/live-defects-base-b71742fe3/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/unit/services/test_terminate_downside_row_drain.py::test_terminate_drains_up_and_down_side_rows
+  /tmp/live-defects-base-b71742fe3/tests/unit/services/test_terminate_downside_row_drain.py:207: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    await _cancel_bus_watchers_for(manager, terminated, "terminate_instance")
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_terminate_downside_row_drain.py::test_revive_after_terminate_mid_session_gate_clear
+  /tmp/live-defects-base-b71742fe3/tests/unit/services/test_terminate_downside_row_drain.py:310: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    await _cancel_bus_watchers_for(manager, terminated, "terminate_instance")
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_terminate_downside_row_drain.py::test_composition_is_exactly_once_safe
+  /tmp/live-defects-base-b71742fe3/tests/unit/services/test_terminate_downside_row_drain.py:405: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    await _cancel_bus_watchers_for(manager, terminated, "terminate_instance")
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== warnings summary (final) ===========================
+.venv/lib/python3.14/site-packages/_pytest/assertion/rewrite.py:402
+  /tmp/live-defects-base-b71742fe3/.venv/lib/python3.14/site-packages/_pytest/assertion/rewrite.py:402: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    co = marshal.load(fp)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+4 passed, 5 warnings in 1.01s

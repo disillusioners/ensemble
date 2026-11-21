@@ -1,0 +1,45 @@
+..........F.                                                             [100%]
+=================================== FAILURES ===================================
+_ TestManagerShutdownDurableBashSweep.test_durable_sweep_sibling_alive_skip_and_dead_writer_swept _
+tests/test_manager_shutdown.py:545: in test_durable_sweep_sibling_alive_skip_and_dead_writer_swept
+    assert r_sib.reaped_at is None, "live-sibling row must stay OPEN"
+E   AssertionError: live-sibling row must stay OPEN
+E   assert '2026-11-21T14:12:21.351306+00:00' is None
+E    +  where '2026-11-21T14:12:21.351306+00:00' = BashSpawnRecord(start_time=None, id=1, instance_id='sib-inst', boot_id='33da5820453d416f84afe64509b702ee', created_at=...tized='sleep 30', daemon_pid=2030241, reaped_at='2026-11-21T14:12:21.351306+00:00', reap_reason='refused:env-mismatch').reaped_at
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.repositories.message_queue.repository:repository.py:1320 JOURNAL: MessageQueueRepository.clear_all preserve_in_flight=True about to DELETE 0 message_queue row(s) (env-poison family audit). doomed_message_ids=[]
+WARNING  daemon.repositories.task.repository:repository.py:5011 JOURNAL: TaskRepository.clear_all preserve_in_flight=True about to DELETE 0 task row(s) (env-poison family audit). doomed_work_ids=[]
+WARNING  daemon.manager:manager.py:3529 Builtin 'plane' skipped — missing environment configuration: PLANE_MCP_API_KEY (see server definition docs); agents with mcp_full_access=['plane']: project-manager
+WARNING  daemon.manager:manager.py:3846 Agent capability gap: project-manager declare(s) mcp_full_access ['plane'] but no registered MCP server row exists for it (see the builtin skip WARNING above)
+WARNING  daemon.services.bash_spawn_reaper:bash_spawn_reaper.py:522 env verify: marker ENSEMBLE_BASH_TRACKING_ID present at PID 2030241 but value differs (PID likely recycled). Aborting.
+WARNING  daemon.services.bash_spawn_reaper:bash_spawn_reaper.py:1243 bash reaper: refused row 1 (writer daemon_pid=2030241) — refused:env-mismatch (swept by daemon pid 2030129)
+ERROR    daemon.manager:manager.py:17290 Error during shutdown step 'dispose_db_pools': 'MagicMock' object can't be awaited
+Traceback (most recent call last):
+  File "/tmp/live-defects-base-b71742fe3/daemon/manager.py", line 17288, in shutdown
+    await step_coro
+TypeError: 'MagicMock' object can't be awaited
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /tmp/live-defects-base-b71742fe3/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/test_manager_shutdown.py: 12 warnings
+  /tmp/live-defects-base-b71742fe3/daemon/services/decision/config.py:439: PydanticDeprecatedSince211: Accessing the 'model_computed_fields' attribute on the instance is deprecated. Instead, you should access this attribute from the model class. Deprecated in Pydantic V2.11 to be removed in V3.0.
+    value = getattr(source, name)
+
+tests/test_manager_shutdown.py: 12 warnings
+  /tmp/live-defects-base-b71742fe3/daemon/services/decision/config.py:439: PydanticDeprecatedSince211: Accessing the 'model_fields' attribute on the instance is deprecated. Instead, you should access this attribute from the model class. Deprecated in Pydantic V2.11 to be removed in V3.0.
+    value = getattr(source, name)
+
+tests/test_manager_shutdown.py::TestManagerShutdownBashCleanup::test_shutdown_invokes_bash_cleanup_all
+tests/test_manager_shutdown.py::TestManagerShutdownBashCleanup::test_shutdown_bash_cleanup_all_exception_does_not_propagate
+tests/test_manager_shutdown.py::TestManagerShutdownBashCleanup::test_shutdown_bash_cleanup_all_zero_count_logs_no_info
+  /tmp/live-defects-base-b71742fe3/daemon/manager.py:17251: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    logger.warning(
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_manager_shutdown.py::TestManagerShutdownDurableBashSweep::test_durable_sweep_sibling_alive_skip_and_dead_writer_swept
+1 failed, 11 passed, 28 warnings in 6.32s

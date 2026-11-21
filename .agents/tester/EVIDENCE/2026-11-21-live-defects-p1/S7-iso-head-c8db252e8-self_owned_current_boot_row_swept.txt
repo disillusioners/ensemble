@@ -1,0 +1,20 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______ TestShutdownSweepService.test_self_owned_current_boot_row_swept ________
+tests/unit/services/test_bash_spawn_reaper.py:1187: in test_self_owned_current_boot_row_swept
+    assert repo._mark_calls == [
+E   AssertionError: assert [(23, 'shutdo...t-time-gate')] == [(23, 'shutdo...22131', None)]
+E     
+E     At index 0 diff: (23, 'shutdown@2022131', 'refused:start-time-gate') != (23, 'shutdown@2022131', None)
+E     Use -v to get more diff
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.bash_spawn_reaper:bash_spawn_reaper.py:1309 bash reaper: refused row 23 (writer daemon_pid=2022131) — refused:start-time-gate (swept by daemon pid 2022131)
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-live-defects-p1/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_bash_spawn_reaper.py::TestShutdownSweepService::test_self_owned_current_boot_row_swept
+1 failed, 1 warning in 0.56s

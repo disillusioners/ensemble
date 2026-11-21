@@ -1,0 +1,28 @@
+=== BOOT SMOKE GREP EXCERPTS (head c8db252e8) ===
+
+--- wiring assertion (must be 0) ---
+(0 occurrences — PASS)
+
+--- dead-detection ERROR (must be 0) ---
+(0 occurrences — PASS)
+
+--- rate-limited WARNING 'still dead' (must be 0) ---
+(0 occurrences — PASS)
+
+--- recovery INFO (may be >=0) ---
+(0 occurrences)
+
+--- effective-run 'no orphan PENDING watchers found' (>=2) ---
+276:14:01:53 - daemon.services.dependency_bus - DEBUG - sweep_orphan_watchers: no orphan PENDING watchers found (after grace filter)
+446:14:03:23 - daemon.services.dependency_bus - DEBUG - sweep_orphan_watchers: no orphan PENDING watchers found (after grace filter)
+551:14:04:53 - daemon.services.dependency_bus - DEBUG - sweep_orphan_watchers: no orphan PENDING watchers found (after grace filter)
+
+--- bus-not-wired tick (expected 1, tick 1) ---
+269:14:01:53 - daemon.services.orphan_watcher_sweep - DEBUG - OrphanWatcherSweepService: tick 1, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+
+--- orphan sweep exceptions (must be 0) ---
+(0 occurrences — PASS)
+
+--- tracebacks (metrics F18, unrelated) ---
+44
+All tracebacks are from metrics_query/wiring/w3.py F18 roster/tombstone reads (pre-existing, unrelated to orphan sweep).
