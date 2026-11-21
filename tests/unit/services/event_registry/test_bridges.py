@@ -8,8 +8,11 @@ bidirectional contract:
 1. every literal kind passed to ``record()`` IS in the catalog
    (mutation: add a record with an unregistered kind ⇒ RED);
 2. every catalog kind except (a) the ``deferred_v2`` entry and (b) the
-   DOCUMENTED ``BRIDGE_PENDING`` family (the T5.4 open question) has ≥1
-   bridge (mutation: delete a bridge ⇒ RED);
+   L-11 DECLARED-SILENT register has ≥1 bridge — the TERMINAL-STATE
+   contract after the L-10 increment: 30 kinds = 23 bridged / 6
+   declared-silent / 1 deferred_v2 (mutations: delete a bridge ⇒ RED;
+   add a bridge for a declared-silent kind ⇒ RED — nothing may
+   silently bridge the L-11 six);
 3. the class-1 bridge adds no second fire / CAS / probe (F-19) and the
    class-3 bridge adds no write to either state machine;
 4. F-1 (the HARD leg): the metrics family census is UNCHANGED — the
@@ -82,12 +85,12 @@ def test_every_bridged_kind_is_a_registered_v1_kind():
 
 
 def test_every_catalog_kind_has_a_bridge_or_a_pinned_pending_reason():
-    # AC2, leader ruling L-9 end state: every catalog kind except the
-    # deferred_v2 entry is either BRIDGED (a literal record() site in the
-    # daemon tree) or present in BRIDGE_PENDING with a pinned reason
-    # (zero-producer enum member, or a producer outside the L-9 site
-    # list). The LOCKSTEP both ways: no bridged kind may sit in
-    # BRIDGE_PENDING, and no pending kind may have a bridge.
+    # AC2 terminal-state contract (L-9 + L-10 + L-11): every catalog
+    # kind except the deferred_v2 entry is either BRIDGED (a literal
+    # record() site in the daemon tree) or present in BRIDGE_PENDING
+    # with the L-11-cited declared-silent reason. LOCKSTEP both ways: no
+    # bridged kind may sit in BRIDGE_PENDING, and no declared-silent
+    # kind may have a bridge.
     recorded = set(_recorded_literal_kinds())
     from daemon.services.event_registry import BRIDGE_PENDING
 
@@ -124,11 +127,20 @@ def test_every_catalog_kind_has_a_bridge_or_a_pinned_pending_reason():
         "event_bus:child_completed",
     }
     assert expected_bridged_durable <= bridged
-    # Zero-producer kinds carry the pinned enum-only reason.
-    from daemon.services.event_registry import ZERO_PRODUCER_KINDS
+    # L-11 declared-silent kinds carry the L-11-cited reason.
+    from daemon.services.event_registry import DECLARED_SILENT_KINDS
 
-    for kind_id in ZERO_PRODUCER_KINDS:
-        assert "enum-only:" in BRIDGE_PENDING[kind_id]
+    for kind_id in DECLARED_SILENT_KINDS:
+        assert "L-11 declared-silent:" in BRIDGE_PENDING[kind_id]
+    # TERMINAL-STATE CONTRACT: 30 kinds = 23 bridged + 6 declared-silent
+    # + 1 deferred_v2; the bridged set and the register are DISJOINT and
+    # their union (plus deferred) covers the catalog exactly.
+    assert len(CATALOG) == 30
+    assert len(bridged) == 23, sorted(set(KIND_INDEX) - bridged - set(BRIDGE_PENDING) - set(DEFERRED_V2_KINDS))
+    assert len(BRIDGE_PENDING) == 6
+    assert len(DEFERRED_V2_KINDS) == 1
+    assert bridged & set(BRIDGE_PENDING) == set()
+    assert bridged | set(BRIDGE_PENDING) | set(DEFERRED_V2_KINDS) == set(KIND_INDEX)
 
 
 def test_no_literal_event_bus_kind_is_ever_recorded_with_drift():
@@ -157,6 +169,12 @@ def test_class2_bridges_cover_the_l9_ten_site_census():
         "daemon/services/job_feedback_observer.py": "event_bus:job_completed",
         "daemon/services/ram_guard_events.py": "event_bus:ram_limit_exceeded",
         "daemon/services/stale_task_recovery.py": "event_bus:task_recovery",
+        # L-10 producer-outside-map sites
+        "daemon/services/instance_messaging.py": "event_bus:message_received",
+        "daemon/services/message_processing_errors.py": "event_bus:error",
+        "daemon/repositories/room/membership.py": "event_bus:room_join",
+        "daemon/repositories/room/repository.py": "event_bus:room_purged",
+        "daemon/services/room_delivery.py": "event_bus:room_tag_delivery",
     }
     for rel_path, expected_kind in expected_files.items():
         src = (REPO_ROOT / rel_path).read_text(encoding="utf-8")

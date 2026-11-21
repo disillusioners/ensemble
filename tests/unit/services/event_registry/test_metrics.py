@@ -43,6 +43,7 @@ def test_snapshot_shape_carries_every_declared_dim():
             "lag_reason",
             "lag_measurable",
             "bridge_pending",
+            "declared_silent",
             "deferred_v2",
         }, (kind_id, set(entry))
         assert entry["class"] == KIND_INDEX[kind_id].klass.name

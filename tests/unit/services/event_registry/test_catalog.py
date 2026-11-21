@@ -184,23 +184,25 @@ def test_seam_depth_triggers_note_names_gap14_and_ev24():
 
 
 def test_no_bridge_pending_kind_is_actually_bridged():
-    # BRIDGE_PENDING may only hold kinds with a pinned reason (zero-
-    # producer enum member, or a live producer outside the L-9 site
-    # list). A kind that IS in the census must never sit in the register
-    # (lockstep both ways is enforced in test_bridges.py; this leg pins
-    # the reason vocabulary).
-    from daemon.services.event_registry import ZERO_PRODUCER_KINDS
+    # BRIDGE_PENDING may only hold kinds with a pinned L-11 reason
+    # (declared-silent). A kind that IS in the census must never sit in
+    # the register (lockstep both ways is enforced in test_bridges.py;
+    # this leg pins the reason vocabulary + the terminal-state counts).
+    from daemon.services.event_registry import DECLARED_SILENT_KINDS
 
     for kind_id, reason in BRIDGE_PENDING.items():
         assert kind_id in KIND_INDEX, kind_id
-        assert reason.startswith(("enum-only:", "producer-outside-list:")), (
-            kind_id, reason
-        )
-    assert ZERO_PRODUCER_KINDS == {
-        k for k, r in BRIDGE_PENDING.items() if r.startswith("enum-only:")
+        # L-11: the ONLY surviving register class is declared-silent;
+        # every reason cites the ruling.
+        assert reason.startswith("L-11 declared-silent:"), (kind_id, reason)
+    from daemon.services.event_registry import DECLARED_SILENT_KINDS
+
+    assert DECLARED_SILENT_KINDS == {
+        k for k, r in BRIDGE_PENDING.items()
+        if r.startswith("L-11 declared-silent:")
     }
-    # The zero-producer set is exactly the pinned six.
-    assert ZERO_PRODUCER_KINDS == {
+    # The declared-silent set is exactly the pinned six.
+    assert DECLARED_SILENT_KINDS == {
         "event_bus:processing_started",
         "event_bus:processing_completed",
         "event_bus:processing_failed",
@@ -208,3 +210,8 @@ def test_no_bridge_pending_kind_is_actually_bridged():
         "event_bus:message_completed",
         "event_bus:room_post",
     }
+    # Terminal-state contract: 30 kinds = 23 bridged + 6 declared-silent
+    # + 1 deferred_v2.
+    assert len(CATALOG) == 30
+    assert len(BRIDGE_PENDING) == 6
+    assert len(DEFERRED_V2_KINDS) == 1
