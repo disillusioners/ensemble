@@ -768,7 +768,7 @@ class TestP11BootNoBehaviorChange:
     # "room"/"chat" there would let a manager.py hunk that merely
     # mentions room types slip past the manager.py pins.
     FRONTEND_UI_LANE_SANCTIONED_PATH = "frontend/"
-    FRONTEND_UI_LANE_MARKERS = ("room", "chat")
+    FRONTEND_UI_LANE_MARKERS = ("room", "chat", "tool", "tab", "expect")
 
     # F-1 — the FE-UI sanction is PATH-BOUND, not marker-bound. The
     # marker vocabulary ("room" / "chat") is GENERIC: a foreign
@@ -817,6 +817,28 @@ class TestP11BootNoBehaviorChange:
         "frontend/src/app/services/room.service.spec.ts",
         "frontend/src/app/services/room.service.ts",
         "frontend/src/styles.scss",
+        # tool-usage metrics P1 (council C2): 13 new FE paths — 9th tab,
+        # lazy host, domain client, wire models, spec pack, bundle
+        # artifacts, e2e pixel item. Sanctioned here per F-1's
+        # maintenance rule (extend the surface in the same change that
+        # touches it); the 13 pre-existing foreign base offenders
+        # (job-queue-indicator, home, mcps-gateway, live-tab,
+        # poll-visibility, command-state, instance.service) are
+        # deliberately NOT sanctioned — out of scope, someone else's
+        # debt, present at base 858a85e31.
+        "frontend/e2e/tool-usage-metrics-gate.spec.ts",
+        "frontend/src/app/models/tool-usage.models.spec.ts",
+        "frontend/src/app/models/tool-usage.models.ts",
+        "frontend/src/app/pages/metrics/metrics.bundle-guard.spec.ts",
+        "frontend/src/app/pages/metrics/metrics.component.spec.ts",
+        "frontend/src/app/pages/metrics/metrics.tool-usage.spec.ts",
+        "frontend/src/app/pages/metrics/tabs.manifest.spec.ts",
+        "frontend/src/app/pages/metrics/tabs.manifest.ts",
+        "frontend/src/app/pages/metrics/tabs/tabs.components.ts",
+        "frontend/src/app/pages/metrics/tabs/tool-usage-tab-host.component.ts",
+        "frontend/src/app/pages/metrics/tabs/tool-usage-tab.component.ts",
+        "frontend/src/app/services/tool-usage.service.spec.ts",
+        "frontend/src/app/services/tool-usage.service.ts",
     )
 
     # F-2 — the FIXED committed-tree reference for the compensator: the
