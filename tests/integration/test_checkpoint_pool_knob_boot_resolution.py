@@ -73,7 +73,6 @@ def _boot_config():
         ),
         persistence=PersistenceConfig(
             db_path=str(Path("/tmp") / f"ckpt-knob-{uuid.uuid4().hex[:8]}.db"),
-            checkpoint_interval=1,
             checkpoint_ttl_hours=168,
             checkpoint_cleanup_interval=24,
         ),

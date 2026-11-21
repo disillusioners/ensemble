@@ -298,7 +298,6 @@ def mock_config():
     config.compaction.enabled = False
 
     config.services = MagicMock(spec=ServicesConfig)
-    config.services.worker_poll_interval = 0.5
     config.services.stale_task_recovery_interval = 60
     config.services.task_timeout_minutes = 60
     config.services.max_task_retries = 3

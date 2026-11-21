@@ -1320,7 +1320,6 @@ class PersistenceConfig(BaseSettings):
     # ``daemon/api.py`` resolves the data directory from ``ENSEMBLE_DATA_DIR``
     # (with a ``DATA_DIR`` fallback) before loading ``ensemble.json``, so
     # there is no longer a second config knob to keep in sync.
-    checkpoint_interval: int = Field(default=1)
     checkpoint_ttl_hours: int = Field(default=CHECKPOINT_TTL_HOURS)
     checkpoint_cleanup_interval: int = Field(default=CHECKPOINT_CLEANUP_INTERVAL_HOURS)
     maintenance_check_interval_minutes: int = Field(default=MAINTENANCE_CHECK_INTERVAL_MINUTES)
@@ -2159,10 +2158,6 @@ class ServicesConfig(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="SERVICES_")
 
-    worker_poll_interval: float = Field(
-        default=0.5,
-        description="How often workers poll for tasks (seconds). Lower = more responsive but more CPU/DB load."
-    )
     stale_task_recovery_interval: int = Field(
         default=60,
         description="How often to check for stale tasks and recover them (seconds)."
@@ -3231,18 +3226,6 @@ class ServicesConfig(BaseSettings):
             "field (A8 house naming)."
         ),
     )
-    lease_heartbeat_interval_seconds: float = Field(
-        default=30.0,
-        description=(
-            "How often the in-process Execution Gate heartbeat task "
-            "refreshes a lease's heartbeat_at column while a "
-            "graph.astream call is in flight. Defaults to match "
-            "task_heartbeat_interval_seconds. Keep this at least "
-            "5-10x smaller than DEFAULT_STALE_LEASE_SECONDS (300 s) "
-            "so a few missed beats don't false-positive flag a live "
-            "lease as stale."
-        ),
-    )
     readiness_refresh_interval_seconds: int = Field(
         default=10,
         description=(
@@ -3324,7 +3307,19 @@ class JobSystemConfig(BaseSettings):
     retry_backoff_multiplier: float = Field(default=2.0, description="Exponential multiplier for backoff (2^retry_count * multiplier)")
     dlq_enabled: bool = Field(default=True, description="Enable dead letter queue functionality")
     event_dispatch_enabled: bool = Field(default=True, description="Enable event-based job dispatch")
-    observer_health_check_interval_seconds: int = Field(default=300, description="Interval in seconds for observer health checks")
+    observer_health_check_interval_seconds: int = Field(
+        default=300,
+        description=(
+            "Interval (seconds) at which ``JobFeedbackObserver`` re-checks "
+            "its own health. OWNER: this field lives on ``JobSystemConfig`` "
+            "(env ``ENSEMBLE_JOB_SYSTEM_OBSERVER_HEALTH_CHECK_INTERVAL_"
+            "SECONDS``) and is ALIVE — its consumer is "
+            "``daemon/services/job_feedback_observer.py`` (the observer's "
+            "``_health_check_interval``). It is NOT a ``SERVICES_*`` knob "
+            "and must not be moved (a field move would change its env var "
+            "and silently disable a live knob — engine-arc P1 T1.13)."
+        ),
+    )
     idempotency_key_ttl_hours: int = Field(default=24, description="TTL in hours for idempotency key deduplication")
     job_retry_scheduler_enabled: bool | None = Field(default=None, description="Enable background retry scheduler. None/empty = disabled.")
 
@@ -3448,7 +3443,13 @@ class NotifyUserConfig(BaseSettings):
     min_interval_seconds: int = Field(
         default=60,
         ge=0,
-        description="The >=60s per-instance interval proxy for N=1/turn "
+        description="OWNER: this field lives on ``NotifyUserConfig`` "
+                    "(env ENSEMBLE_NOTIFY_USER_MIN_INTERVAL_SECONDS) — the "
+                    "``notify_user`` tool's rate limiter, NOT a SERVICES_* "
+                    "knob and NOT a periodic-engine interval. It must not be "
+                    "moved (a field move would change its env var and "
+                    "silently disable a live knob — engine-arc P1 T1.13). "
+                    "Value: the >=60s per-instance interval proxy for N=1/turn "
                     "(strict turn identity is not tool-visible; turns are "
                     "serialized per instance). Baseline = the instance's "
                     "last ACCEPTED-class ledger row (fold-able 4 pin) — "

@@ -285,7 +285,6 @@ async def probe_manager(probe_engine: Engine):
         ),
         persistence=PersistenceConfig(
             db_path="/tmp/probe-sched-def-unused.db",
-            checkpoint_interval=1,
             checkpoint_ttl_hours=168,
             checkpoint_cleanup_interval=24,
             max_instance_history=300,
