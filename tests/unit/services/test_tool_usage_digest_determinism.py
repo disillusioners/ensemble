@@ -566,3 +566,52 @@ class TestRollupContentShape:
         path = tud.digest_path(RUN_DATE)
         assert path == tmp_path / "root" / f"{RUN_DATE}.md"
         assert path.parent.is_dir()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# G5 pass criterion — the rollup body reads no clock / random / live registry
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestRollupBodyHasNoNondeterministicSource:
+    """The determinism invariant (§3.4) is structural, not incidental: the
+    rollup body must contain no wall-clock, no RNG and no live-registry
+    read. A source-level pin is what makes the byte-identical assertions
+    above non-accidental — a future edit that consults ``datetime.now()``
+    inside the rollup reds HERE even if the fixture happens to be stable."""
+
+    def _rollup_source(self) -> str:
+        import inspect
+
+        return inspect.getsource(tud.rollup)
+
+    def test_no_clock_read_inside_the_rollup(self):
+        source = self._rollup_source()
+        assert "datetime.now" not in source
+        assert "time.time" not in source
+        assert ".now(" not in source
+
+    def test_no_rng_inside_the_rollup(self):
+        source = self._rollup_source()
+        assert "random" not in source
+        assert "uuid" not in source
+
+    def test_no_live_env_or_registry_read_inside_the_rollup(self):
+        """Determinism requires the artifact readers be the ONLY external
+        inputs — an ``os.environ`` read or a live ``agents/`` scan would
+        let ambient state leak into the digest."""
+        source = self._rollup_source()
+        assert "os.environ" not in source
+        assert "getenv" not in source
+        assert "agents/" not in source
+        assert "tool_weights()" in source and "allowlists()" in source
+
+    def test_the_defaulted_header_is_the_only_wall_clock_surface(self):
+        """``render_markdown`` takes the stamp INJECTABLE and defaults it
+        to ``datetime.now`` — that isolation is what the determinism gate
+        relies on."""
+        import inspect
+
+        source = inspect.getsource(tud.render_markdown)
+        assert "generated_at" in source
+        assert "datetime.now" in source
