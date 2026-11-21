@@ -224,7 +224,7 @@ async def test_health_check(client):
     data = response.json()
     assert data["status"] == "healthy"
     assert "uptime_seconds" in data
-    assert data["version"] == "0.31.23"
+    assert data["version"] == "0.31.24"
 
 
 @pytest.mark.asyncio
