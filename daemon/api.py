@@ -3814,7 +3814,6 @@ async def lifespan(app: FastAPI):
     # F-16: disjoint from the live-defects api.py regions. F-8/F-12/F-13/
     # F-14/F-15 untouched. A failure logs WARNING and boot CONTINUES.
     # ─────────────────────────────────────────────────────────────
-    _engine_boot_t0 = time.perf_counter()
     try:
         from daemon.services.engine.boot import build_observer_specs, run_boot_pass
         from daemon.services.engine.engine import EngineService
@@ -3843,6 +3842,8 @@ async def lifespan(app: FastAPI):
 
         # N dormant observer specs — execute_fn withheld by construction.
         _observer_specs = build_observer_specs(config)
+
+        _engine_boot_t0 = time.perf_counter()
 
         async def _engine_registration_pass():
             for _spec in _observer_specs:
