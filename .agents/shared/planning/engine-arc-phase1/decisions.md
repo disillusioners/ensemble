@@ -80,10 +80,10 @@ Each entry: ID · decision · rationale · owner · alternatives rejected. Prove
 - *Alternatives rejected:* DB-tier switch in Phase 1 — rejected (pin churn, no Phase-1 consumer).
 
 **D-8 — Dead-knob cleanup atomicity.**
-- *Decision:* all 26 `MagicMock(spec=ServicesConfig)` call sites cleaned in ONE task (P1 T1.12), not two.
-- *Rationale:* F-29 — the fixture at `tests/conftest.py:535` explodes at construction unless all call sites are cleaned atomically; a partial cleanup leaves the spec mismatched.
+- *Decision:* all dead-knob call sites cleaned in ONE task (P1 T1.12), not two — the **FULL 28-site set** (CS-8: 21 pydantic `PersistenceConfig(checkpoint_interval=…)` kwargs + 5 `worker_poll_interval` SET files + 2 registered pack sites).
+- *Rationale:* atomicity stands — a partial cleanup fails at global-conftest collection ⇒ essentially all tests. **[CORRECTED — AMD-9 (architect), approver iteration-002, 2026-11-21:** the pre-AMD-9 entry here read "all 26 `MagicMock(spec=ServicesConfig)` call sites" with the rationale "the fixture at `tests/conftest.py:535` explodes at construction unless all call sites are cleaned atomically". BOTH the count and the mechanism are superseded: `MagicMock(spec=…)` **allows SET** (only `spec_set=` refuses), so the fixture does NOT explode at construction — the real cleanup vectors are the 21 pydantic constructor kwargs plus GET-on-a-spec-mock of the deleted field; and the census was tests/-scoped, missing 2 registered pack sites (review fold F-2). Architecture-recommendation.md FA-6: "D-8 atomic 26-site cleanup: STANDS, mechanism corrected" (AMD-9 at :156). An implementer scoping T1.12 from the pre-AMD-9 text under-counts the set and uses the wrong failure model — the corrected entry above governs.**]**
 - *Owner:* P1 T1.12.
-- *Alternatives rejected:* splitting the cleanup across two tasks/phases — rejected (fixture construction failure).
+- *Alternatives rejected:* splitting the cleanup across two tasks/phases — rejected (global-conftest collection failure under the corrected vectors — same atomicity logic, corrected mechanism).
 
 **D-9 — F-23 diff-census record.**
 - *Decision:* a ~27-entry enumerated record owned by P6, release-blocking.
@@ -92,14 +92,14 @@ Each entry: ID · decision · rationale · owner · alternatives rejected. Prove
 - *Alternatives rejected:* bolting the record on at release — rejected (must be paid by the touching phase, not discovered late).
 
 **D-10 — Phase decomposition + band.**
-- *Decision:* P1..P8, 137/222 h (≈177 mid), inside the 118–222 h band; excess vs the 162 h anchor priced: dead-knob cleanup 5 h, watchdog drill 4 h, diff-census record 1 h.
-- *Rationale:* band check — sum lands ~11% above the 162 h anchor; the excess is exactly the three items the brief's component table did not price separately. Test estimate cross-check reconciles test-strategy's 28/48 h against P7's 13/23 h + per-phase AC test effort (P7 = pack assembly; component tests ride each phase).
+- *Decision:* P1..P8, 136/222 h (≈176 mid), inside the 118–222 h band; excess vs the 162 h anchor priced: dead-knob cleanup 5 h, watchdog drill 4 h, diff-census record 1 h.
+- *Rationale:* band check — sum lands ≈9% above the 162 h anchor (176/162 = +8.6%; recomputed — approver iteration-002 fold M-3, supersedes the stale ~11% figure; the 137/≈177 totals likewise superseded — phase7's low bucket sums to 12, not 13, so the program low total is 136). The excess is exactly the three items the brief's component table did not price separately. Test estimate cross-check reconciles test-strategy's 28/48 h against P7's 12/23 h + per-phase AC test effort (P7 = pack assembly; component tests ride each phase).
 - *Owner:* planner (synthesis).
 - *Alternatives rejected:* compressing the estimate to the 162 h anchor — rejected (would drop the three priced carry costs).
 
 **D-11 — RELEASE CARRY RECOMMENDATION.**
 - *Decision:* **TWO staged releases — defects-first.** Recorded as the planner-stage recommendation for the architect (a recommendation, not an Emperor ruling). **NO live promote** (Emperor ceremony owns the flip).
-- *Rationale:* the two live-defect fixes (`fix/phase1-live-defects`: OrphanWatcher born-dead + 70 MB bash-reaper leak) are small, independently verifiable, and ready long before the 137–222 h engine build completes; holding them for one combined release delays live remediation for no coupling benefit. Coupling facts confirm no benefit: the `daemon/api.py` regions are disjoint (live-defects `:1226-1272`/`:3018-3041`/`:4532-4547` vs engine P4 lifespan ~`:3740` + shutdown <`:4600`, P6 `include_router` ~`:6359`), so either merge order auto-merges; no duplicate work (fast-lane late-bind fix = one service, engine `dead=true` contract = general detector — complementary); the Phase-2 pilot structurally needs the fix in `latest` but only by Phase-2 time, not by engine-merge time. Release slots derived LIVE at release-prep per W9.
+- *Rationale:* the two live-defect fixes (`fix/phase1-live-defects`: OrphanWatcher born-dead + 70 MB bash-reaper leak) are small, independently verifiable, and ready long before the 136–222 h engine build completes; holding them for one combined release delays live remediation for no coupling benefit. Coupling facts confirm no benefit: the `daemon/api.py` regions are disjoint (live-defects `:1226-1272`/`:3018-3041`/`:4532-4547` vs engine P4 lifespan ~`:3740` + shutdown <`:4600`, P6 `include_router` ~`:6359`), so either merge order auto-merges; no duplicate work (fast-lane late-bind fix = one service, engine `dead=true` contract = general detector — complementary); the Phase-2 pilot structurally needs the fix in `latest` but only by Phase-2 time, not by engine-merge time. Release slots derived LIVE at release-prep per W9.
 - *Owner:* dispatcher recommendation; recorded here for architect adoption/refinement.
 - *Alternatives rejected:* single combined release — rejected (delays live remediation with no coupling benefit).
 - *Position recorded:* this decisions lane **adopts** the defects-first recommendation — the coupling facts above support it; no disagreement to flag. Architect may still refine staging mechanics.
@@ -128,3 +128,21 @@ Each entry: ID · decision · rationale · owner · alternatives rejected. Prove
 2. **Second migrant ordering.** Question: healthy-sweep (parity proof) vs PEXIT-class (JobLock/SourcesGc)? — *Option the plan currently assumes:* a healthy sweep (TmpImage or JobLock) as second for parity proof per decision-report §C.2; registry evidence will inform; Phase-2+ concern. [RESOLVED-BY-RULING (b): second migrant = JobLockSweepService (PEXIT-class); framing corrected to primitive-proven-second, not healthy-vs-PEXIT]
 3. **D-3 polarity ratification.** Question: ratify `enabled=true` + `shadow_mode=true`, or architect veto to `enabled=false`? — *Option the plan currently assumes:* `enabled=true` + `shadow_mode=true` (D-3 above), stated in release notes so "dormant" is never confused with "absent". [RESOLVED-BY-RULING (c): ADOPT — ships enabled=true + shadow_mode=true; no veto]
 4. **Start-anchor build-side emit.** Question: harness/promote-lane owns the host-frame start anchor (dispatcher ruling) or route a daemon-side emit? — *Option the plan currently assumes:* harness/promote-lane owns it; a build-side readyz-green emit via the `api.py:1082-1093` deferred-task pattern is the fallback only if promote-lane capture proves brittle. [RESOLVED-BY-RULING (d): D-2 RATIFIED — harness/promote-lane owns the host-frame anchor; daemon-side emit stays named fallback]
+
+---
+
+## Leader rulings (approver iteration-002, 2026-11-21)
+
+Recorded VERBATIM as delivered by the leader at approver iteration-002. These two rulings adjudicate semantic defects in the iteration-002 package (pilot registration class; observer liveness semantics); the affected body sites are folded in the same pass and swept across the package (see `plan-overview.md` §PREDICATE LEDGER DELETION RECORD + ATTESTATION rows 36+).
+
+**L-7 — Pilot registration class.**
+
+> "RULING (leader, approver iteration-002): per-tick DB writes disqualify MAIN_LOOP under the P7 pin (phase2-plan.md:29/:116) — the pilot's recommended registration class is DB_OFFLOAD."
+
+Factual basis (verified at this tree): `daemon/services/dependency_bus.py:3230-3255` — `_sweep_orphan_watchers` executes an `UPDATE dependency_watchers ...` inside `await asyncio.to_thread(_sweep_atomic)`, entered per tick from `daemon/services/orphan_watcher_sweep.py:229-236` (`await bus._sweep_orphan_watchers(...)`). `phase2-pilot-recommendation.md:32`'s claim ("pure in-memory… no DB touch on the hot path") is FALSE. Folded: pilot §1/§3/§4 class-fit + blast-radius + proven/not-proven lists, plan-overview §10, phase1 §12.3 — all MAIN_LOOP claims about OrphanWatcher swept to the ruled DB_OFFLOAD registration class.
+
+**L-8 — CS-3 observer-liveness carve-out.**
+
+> "RULING (leader, approver iteration-002): D2.15 gains an observer carve-out — for specs with execute_fn withheld, dead ⇔ zero SKIPPED_SHADOW rows in 2× interval (the observable execution-substitute); D3.4 recovery is N/A for observers (no run exists to recover). Greenlight criterion 2 reads on that definition."
+
+Unsuperseded, criterion 2 (pilot:79, AMD-1(c)) was unsatisfiable: D2.15 (phase2-plan:42, dead = zero runs in 2×interval) + D3.4 (phase3-plan:36, recovery requires a successful RUN) made every observer spec dead=true forever. Folded: phase2-plan D2.15 + phase3-plan D3.4 + pilot criterion 2; the canonical carve-out string is ledgered as **CS-9** (supersession of CS-3's standalone predicate — see `plan-overview.md` §PREDICATE LEDGER).

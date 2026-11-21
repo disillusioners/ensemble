@@ -49,7 +49,7 @@ Turn six phases of authored packs into **one registered, mutation-verified, rele
 | **T7.3** | Author the mutation matrix harness | one entry per AC; each runs the smallest containing pack against a planted defect; GREEN-on-defect is a blocking finding | `tests/packs/engine_mutation_matrix.py`; style `tests/packs/ram_guard_phase6_mutation_matrix.py:27, :299` |
 | **T7.4** | Author Leg D (dormant posture) | spy-verified zero `execute_fn` invocation across ≥3 intervals with the boot block's N observer specs registered (zero executables — the D4.11 posture); mutation turns it RED | as §4.2 |
 | **T7.5** | Author Leg E (diff audit) | branch `daemon/` diff ⊆ the ownership map; self-proof that the assertion can fail | as §4.2; model `tests/unit/metrics/test_metrics_family_adjudication.py:373-387` |
-| **T7.6** | Author Leg G (fence sweep) | the 15 fence files run as ONE leg so a regression is attributable in one place | as §4.2 |
+| **T7.6** | Author Leg G (fence sweep) | the 16 fence files run as ONE leg so a regression is attributable in one place **[count recounted — approver iteration-002 (N-h): the Leg G enumeration below names 16 files — `test_daemon_settings_api.py` + `test_settings_resolution.py` are two files joined by "+" in one bullet; the earlier "15" miscounted the join]** | as §4.2 |
 | **T7.7** | Author Leg H (dual-driver materialization) | scratch SQLite + scratch PG; both tables; second boot no-op; zero live contact | as §4.2 |
 | **T7.8** | Run the matrix and record the RED/GREEN evidence per leg | every mutation RED; every restore sha256-identical; the evidence quoted into the PACKS.md Status cells | `.agents/tester/PACKS.md` + a results file |
 
@@ -71,7 +71,7 @@ Turn six phases of authored packs into **one registered, mutation-verified, rele
 ### 4.2 The cross-cutting legs (owned here)
 
 **Leg D — dormant posture (release-blocking).**
-A scratch boot with the shipped defaults must show: **N observer specs registered, zero executables (`execute_fn` withheld), shadow rows present** — `engine_jobs` carries the boot block's registered observer specs (D4.11/AMD-1); `engine_runs` carries ONLY `outcome=SKIPPED_SHADOW` rows (one per due job per interval, per D2.13); all `SERVICES_*_USE_ENGINE` unset; the ONE posture INFO line with `registrations=N observer specs`; and — the strong half — an **invocation spy** on the engine's dispatch proving `execute_fn` count == 0 across ≥3 tick intervals. Mutation: flip `ENSEMBLE_ENGINE_SHADOW_MODE` default to `false` **and** register a fixture job ⇒ the spy count becomes > 0 ⇒ RED (proof the leg can fail).
+A scratch boot with the shipped defaults must show: **N observer specs registered, zero executables (`execute_fn` withheld), shadow rows present** — `engine_jobs` carries the boot block's registered observer specs (D4.11/AMD-1); `engine_runs` carries ONLY `outcome=SKIPPED_SHADOW` rows (one per due job per interval, per D2.13); all `SERVICES_*_USE_ENGINE` unset; the ONE posture INFO line with `registrations=N observer specs`; and — the strong half — an **invocation spy** on the engine's dispatch proving `execute_fn` count == 0 across ≥3 tick intervals. Mutation: flip `ENSEMBLE_ENGINE_SHADOW_MODE` default to `false` **and** register a fixture job ⇒ the spy count becomes > 0 ⇒ RED (proof the leg can fail). **Non-vacuity disclosure (compound mutation — approver iteration-002, N-e):** the mutation is deliberately COMPOUND — each half alone is structurally inert, not a weaker test: flipping the shadow default alone leaves zero executables (dispatch is structurally impossible regardless of polarity — D4.11), so the spy stays 0; registering a fixture job alone leaves the shipped `shadow_mode=true` guard in place (D2.13), so the spy stays 0. Only the pair produces an observable violation, and the pair is ONE planted defect class (guard+registration wiring reverted to a pre-dormant shape), restored together with a single sha256 pair-check in the matrix record — this disclosure exists so the compound is read as required detection power, not as a vacuity gap.
 
 **Leg E — diff audit (release-blocking).**
 `git diff --name-only <base>..<HEAD>` filtered to `daemon/` must be a **subset** of the ownership map in phase1 §0.3. Any path outside it is RED, naming the path and the owning phase it should have belonged to. Self-proof: an in-memory mutation adds a path to the expected set and the assertion demonstrably fails (the "can it fail?" discipline, `tests/unit/metrics/test_metrics_family_adjudication.py:590+`).
@@ -99,9 +99,9 @@ Scratch SQLite boot (migrations apply, both tables exist, second boot no-op) + s
 | Leg F mutation matrix bookkeeping + the matrix RUN (T7.3, T7.8) | 3 | 6 | ~34 mutations × run/record/restore |
 | Leg G fence sweep wiring | 1 | 2 | |
 | Leg H dual-driver materialization | 1 | 2 | scratch PG is the expensive half |
-| **Phase total** | **13** | **23** | ~**18 mid** |
+| **Phase total** | **12** | **23** | ~**17 mid** |
 
-> Note: the **per-phase pack authoring** effort is carried in P1-P6 (each phase's last task), so this total is the buildout + cross-cutting half only — not a duplication.
+> Note: the **per-phase pack authoring** effort is carried in P1-P6 (each phase's last task), so this total is the buildout + cross-cutting half only — not a duplication. **[Low column recounted — approver iteration-002 (N-h): the buckets above sum to 2+2+2+1+3+1+1 = 12, not the previously-pinned 13; the package totals (phase1-plan §0.2, plan-overview §3, decisions D-10) are co-corrected to 136/222 (≈176 mid) on the same recount.]**
 
 ---
 
@@ -151,6 +151,6 @@ Twelve-plus lane blocks already exist; the file is edited by many lanes. **Const
 | AC3 | **Leg D** green: dormant posture proven with an invocation spy; the mutation (shadow-off + fixture job) turns it RED |
 | AC4 | **Leg E** green: `daemon/` diff ⊆ the ownership map; the self-proof mutation fails the assertion |
 | AC5 | **Leg F** complete: ≈34 mutations recorded; every one RED; zero GREEN-survivors; every restored file sha256-identical |
-| AC6 | **Leg G** green: all 15 fence files pass unchanged (except where this plan explicitly records a change — P6 T6.3) |
+| AC6 | **Leg G** green: all 16 fence files pass unchanged (except where this plan explicitly records a change — P6 T6.3) **[count recounted — approver iteration-002 (N-h): 16, per the Leg G enumeration]** |
 | AC7 | **Leg H** green: scratch SQLite + scratch PG materialize both tables; second boot no-op on both; zero live contact |
 | AC8 | **Migration census:** the release carries exactly **+2** `.sql` files (P1), **+0** from every other phase; prefix uniqueness asserted on the delta, never as an absolute count |
