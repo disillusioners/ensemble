@@ -161,11 +161,7 @@ def snapshot(bus: Any = None) -> dict[str, Any]:
                 "lag_seconds": lag_seconds,
                 "lag_reason": lag_reason,
                 "lag_measurable": measurable,
-                "bridge_pending": BRIDGE_PENDING.get(
-                    "event_bus:*"
-                )
-                if spec.metadata.get("kind_parameterized")
-                else None,
+                "bridge_pending": BRIDGE_PENDING.get(spec.kind_id),
                 "deferred_v2": bool(spec.metadata.get("deferred_v2")),
             }
         return {

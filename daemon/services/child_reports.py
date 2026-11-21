@@ -5694,6 +5694,17 @@ Provide a concise summary:"""
                     parent_agent_id = parent_for_event.agent_id
             
             session.commit()
+            # Phase 5 event registry — class-2 bridge (T5.4): observe the
+            # two durable completion rows AFTER the transaction commits
+            # (the row is the truth; the staged-rows helper twin
+            # ``_create_completion_events`` is a caller-commits surface
+            # with no in-daemon production caller — this inline block is
+            # the LIVE producer).
+            _event_registry_record("event_bus:instance_completed",
+                                   instance_id=instance_id)
+            _event_registry_record("event_bus:child_completed",
+                                   instance_id=instance.parent_id,
+                                   child_instance_id=instance_id)
             # Post-commit side effects are dispatched by the async caller.
             return _ChildCompletionDbResult(
                 outcome="regular_child_completed",

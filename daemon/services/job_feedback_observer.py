@@ -69,6 +69,7 @@ from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.repositories.task.models import TaskStatus, TaskType
 from daemon.repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
 from daemon.services.dependency_bus import get_dependency_bus
+from daemon.services.event_registry import record as _event_registry_record
 from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_state_machine import InvalidTransitionError
 from daemon.services.messaging_types import _assert_linkage_contract
@@ -2406,6 +2407,10 @@ class JobFeedbackObserver:
                                 "result_summary": result_summary,
                             },
                         )
+                        # Phase 5 event registry — class-2 bridge (T5.4).
+                        _event_registry_record("event_bus:job_completed",
+                                               instance_id=instance_id,
+                                               source="job_feedback_observer")
                         logger.debug(
                             f"Observer: published JOB_COMPLETED event "
                             f"for job {ctx.job_id[:8]}... (instance "

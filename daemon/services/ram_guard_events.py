@@ -70,6 +70,7 @@ import logging
 from typing import Any, Callable, Mapping
 
 from daemon.repositories.event.models import EventKind
+from daemon.services.event_registry import record as _event_registry_record
 from daemon.services.ram_guard.events import RamBreachEmitter
 
 logger = logging.getLogger(__name__)
@@ -165,6 +166,11 @@ def make_ram_breach_emitter(
         # NON-BLOCKING: schedule-and-forget. The callback logs a failed
         # delivery; nothing ever blocks the execution-lane thread here.
         fut.add_done_callback(_log_ram_event_future_exception)
+        # Phase 5 event registry — class-2 bridge (T5.4): observe the
+        # SCHEDULED durable emission (delivery outcome rides the done
+        # callback; the create_event coroutine is already in flight).
+        _event_registry_record("event_bus:ram_limit_exceeded",
+                               instance_id=instance_id)
         return True
 
     return _emit
