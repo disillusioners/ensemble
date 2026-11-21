@@ -353,6 +353,22 @@ def test_registry_package_declares_no_table():
         assert "migrations" not in src or path.name == "__init__.py", path
 
 
+def test_registry_package_has_no_engine_import():
+    # D5.11 one-way dependency: the registry must not import the engine
+    # (P2/P3/P4 compile and test without P5, and vice versa).
+    pkg = DAEMON_ROOT / "services" / "event_registry"
+    for path in pkg.rglob("*.py"):
+        src = path.read_text(encoding="utf-8")
+        assert "services.engine" not in src.replace(
+            "daemon/services/engine/", ""
+        ).replace("engine/spec.py", ""), path
+        assert not re.search(
+            r"^\s*(from|import)\s+\.{0,3}[\w.]*\.?services\.engine",
+            src,
+            re.MULTILINE,
+        ), path
+
+
 # ── F-3 / F-11 — the dim-name fence ──────────────────────────────────────
 
 
