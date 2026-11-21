@@ -130,7 +130,13 @@ describe('the bundle guard — the nest-anomaly lane extension (phase 4)', () =>
   it('the artifact carries the B4b threshold + the frozen route-fetch-set baseline', () => {
     const baseline = JSON.parse(readFileSync(baselinePath, 'utf-8'));
     const b4 = baseline.guards.B4_new_chart_chunk_size;
-    expect(b4.threshold_B4b_route_fetch_set_lazy_only_bytes).toBe(185000);
+    // The THRESHOLD is the leader-ruled re-baseline (LR1 — decisions
+    // D12; the phase-4 ownership grant D22; the R-08 escalation label):
+    // 185,000 → 188,000, covering the architect-proven ~1.0–1.3 kB
+    // static residue of the lazy tool-usage tab with ~2.2 kB margin.
+    expect(b4.threshold_B4b_route_fetch_set_lazy_only_bytes).toBe(188000);
+    // The MEASUREMENT baseline stays FROZEN — a re-measure compares
+    // against it and never overwrites it.
     expect(b4.baseline_metrics_route_fetch_set_lazy_only_bytes).toBe(165185);
     expect(b4.threshold_B4a_chart_chunk_min_gz_bytes).toBe(82000);
   });
