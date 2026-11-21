@@ -167,6 +167,21 @@ describe('the tool-usage wire types — the FROZEN phase1 §3.4 field names', ()
     expect(Object.keys(series.series[0]).sort()).toEqual(['calls', 'day'].sort());
   });
 
+  it('a row with tool_category: null is ACCEPTED by the types (I3 — the door emits null on category-resolution failure)', () => {
+    // The wire widening is type-level ONLY: null is legal on the wire and
+    // the FE accepts it (the template renders it verbatim as empty text).
+    const row: ToolUsageRow = {
+      tool_name: 'unmapped_tool',
+      tool_category: null,
+      calls_24h: 0,
+      calls_7d: 1,
+      calls_total: 1,
+      agents: [],
+    };
+    expect(row.tool_category).toBeNull();
+    expect(row.tool_name).toBe('unmapped_tool');
+  });
+
   it('the reusable door classes NEVER widen the frozen door union', () => {
     // The union is a SUBSET of the door's vocabulary — the frozen 10-class
     // door union is not widened by this lane.

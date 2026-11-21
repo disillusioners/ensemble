@@ -51,7 +51,8 @@ export interface ToolUsageAgent {
 /** ONE row of the summary — one tool's ledger totals. */
 export interface ToolUsageRow {
   readonly tool_name: string;
-  readonly tool_category: string;
+  /** `string | null` — the door may emit null when category resolution fails (tester I3). */
+  readonly tool_category: string | null;
   /** The rolling today+ surface (vaguer by design — the D-7 disclosure). */
   readonly calls_24h: number;
   /** The ranking input — the FE sorts by this, DESCENDING. */
