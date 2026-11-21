@@ -587,11 +587,12 @@ class TestRepositorySurface:
             "list_jobs",
             "append_run",
             "stamp_job_outcome",
+            "revive_job",  # F4 echo-revival (targeted dead=0, version/updated_at untouched)
         }
 
     def test_every_method_is_sync(self):
         for name in ("upsert_job", "get_job", "list_jobs", "append_run",
-                     "stamp_job_outcome"):
+                     "stamp_job_outcome", "revive_job"):
             assert not inspect.iscoroutinefunction(
                 getattr(EngineRepository, name)
             ), f"{name} must be sync (callers off-load)"
@@ -844,20 +845,19 @@ class TestZeroExecution:
                 f"the substrate stays execution-free"
             )
 
-    def test_api_py_is_untouched_by_this_phase(self):
-        """AC7: ``daemon/api.py`` is UNCHANGED by Phase 1 (P4 owns the wiring).
+    def test_api_py_carries_p4_wiring_block(self):
+        """P4 owns the api.py wiring (T4.4-T4.6 + the /api/engine mount).
 
-        Proven by source: no engine symbol is imported anywhere in api.py.
+        Inverted from the original P1-era pin: daemon/api.py now MUST reference
+        the engine (the P4 block + mount). The P1 invariant (substrate
+        execution-free) is unaffected — this only relaxes the api.py
+        no-touch claim, which P4 legitimately supersedes.
         """
         api_py = Path(__file__).resolve().parents[3] / "daemon" / "api.py"
         src = api_py.read_text()
-        for token in (
-            "services.engine",
-            "EngineRegistry",
-            "engine_jobs",
-            "engine_runs",
-        ):
-            assert token not in src, f"daemon/api.py must not reference {token}"
+        assert "engine boot posture: enabled=%s" in src
+        assert "app.state.engine_observability" in src
+        assert 'api_router.include_router(engine_router)' in src
 
 
 # ── AC9: the continuity table is DATA and matches the live knobs ───────
