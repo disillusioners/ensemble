@@ -317,10 +317,13 @@ def _arm_event_watch(
 def _arm_report_obligation(manager):
     """LEG 3 — an open report_injection obligation (mock repo response).
 
-    The gate consults ``manager._report_injection_repo``; a positive
-    count on ANY plausible read method means a wake source is present.
+    The gate consults ``manager._report_injection_repo`` and probes
+    ``has_open_obligation_for_parent(parent_id)`` (duck-checked to a real
+    bool).  Wire that exact seam plus the older count methods so the
+    helper stays robust to either read shape.
     """
     ri = MagicMock()
+    ri.has_open_obligation_for_parent = lambda pid: True
     ri.count_outstanding_for_subtree = lambda subtree_ids, **kw: 1
     ri.count_pending_for_parent = lambda pid: 1
     ri.find_deferred_for_parent = lambda pid: [SimpleNamespace(state="DEFERRED")]
@@ -502,6 +505,16 @@ class TestTriStateFailClosed:
             )
         elif leg == "report_obligation":
             ri = MagicMock()
+            # The landed gate probes has_open_obligation_for_parent(parent_id)
+            # (waiting_children_watchdog._leg_open_report_obligation), which
+            # duck-checks the result is a bool.  The side_effect MUST be on
+            # that exact seam: an un-raised auto-attr on the real probe
+            # returns a MagicMock (not bool) ⇒ classified UNWIRED ⇒ leg
+            # reads False ⇒ no suppression ⇒ false RED.  Wire the older
+            # count method too as belt-and-braces.
+            ri.has_open_obligation_for_parent = MagicMock(
+                side_effect=RuntimeError("leg3 down")
+            )
             ri.count_outstanding_for_subtree = MagicMock(
                 side_effect=RuntimeError("leg3 down")
             )
