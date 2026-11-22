@@ -31,6 +31,15 @@ set -u
 PF_PACK_NAME="preflight-census"
 . "$(cd "$(dirname "$0")/.." && pwd)/helpers/preflight_pack_common.sh"
 
+# ── hbk-err inode-churn containment (2026-11-22) ──────────────────────────
+# scripts/upgrade/lib.sh mints its hand-back side-channels into
+# ${TMPDIR:-/tmp}. This pack sources lib.sh 2 times; give the run a scratch
+# TMPDIR so the channels stay OUT of the shared /tmp root. It MUST be set
+# BEFORE pf_fence_init (where this pack calls it): the fence's cleanup
+# removes "$TMPDIR"/pf-sandbox.* and "$TMPDIR"/pf-home.*, so a TMPDIR
+# changed after the sandbox was created would leave the sandbox behind.
+export TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/hbk-scratch.XXXXXX")"
+
 PF_CHECK_ONLY=0
 for a in "$@"; do
     case "$a" in

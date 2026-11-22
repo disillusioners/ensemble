@@ -283,6 +283,10 @@ if ! restart_via_launcher; then
     # $$-keyed file, rm-after-read, never a cross-pid delete.
     rm -f "${HANDBACK_ERROR_FILE:-}" 2>/dev/null || true
     rm -f "${HANDBACK_VERIFY_REASON_FILE:-}" 2>/dev/null || true
+    # hbk-err inode-churn fix (2026-11-22): the ELAPSED channel had no rm in
+    # any ceremony script — same consume-then-clear discipline (the name
+    # embeds this process id).
+    rm -f "${HANDBACK_VERIFY_ELAPSED_FILE:-}" 2>/dev/null || true
     HB_ERR="${HB_ERR:-$HB_VERIFY_REASON}"
     journal_history_append halt "manual rollback to $TO_VERSION: unit hand-back failed — halt-for-human, txn left open for sweep recovery (no nohup fallback — Amendment #1; hand-back error: ${HB_ERR:-none captured})" \
                               || true   # history is advisory; the open txn IS the B4 contract

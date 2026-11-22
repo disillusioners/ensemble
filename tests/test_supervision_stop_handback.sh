@@ -47,6 +47,13 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UPGRADE_DIR="$REPO_ROOT/scripts/upgrade"
 STOP_SCRIPT="$REPO_ROOT/scripts/stop-ensemble.sh"
 
+# ── hbk-err inode-churn containment (2026-11-22) ──────────────────────────
+# scripts/upgrade/lib.sh mints its hand-back side-channels into
+# ${TMPDIR:-/tmp}. This suite sources lib.sh 49 times; give the run a
+# scratch TMPDIR so the channels (and every other fixture that honours
+# TMPDIR) stay OUT of the shared /tmp root.
+export TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/hbk-scratch.XXXXXX")"
+
 PASS=0
 FAIL=0
 SKIP=0

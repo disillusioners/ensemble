@@ -3393,6 +3393,14 @@ _trap_safe_exit() {
     # It runs BEFORE the lock-release early return: the hold must be
     # released even when the lock was already released by the path itself.
     _watchdog_hold_release_if_armed >/dev/null 2>&1 || true
+    # hbk-err inode-churn fix (2026-11-22): the hand-back side-channel files
+    # are removed on EVERY exit path. Hooked INTO the existing trap body —
+    # the trap itself is NOT replaced, so the ceremony scripts that install
+    # their own EXIT trap (promote/stage/stop/restart/rollback via
+    # _trap_install_signal_handlers) keep theirs AND get this cleanup. It
+    # runs BEFORE the lock-release early return so it also fires on the
+    # already-released path.
+    _handback_channels_cleanup >/dev/null 2>&1 || true
     if [ "${_LOCK_RELEASED:-0}" = "1" ]; then
         return 0
     fi
@@ -5936,11 +5944,51 @@ _supervision_launchd_bootout() {
 # stash sites) can never surface instead of the diagnosis for the actual
 # hand-back failure.
 HANDBACK_LAST_ERROR=""
-HANDBACK_ERROR_FILE="$(mktemp "${TMPDIR:-/tmp}/ensemble-hbk-err.$$.XXXXXX" 2>/dev/null || printf "%s" "${TMPDIR:-/tmp}/ensemble-hbk-err.$$")"
+# ── LAZY MINT (hbk-err inode-churn fix, 2026-11-22, anomaly 84be2e4e) ───────
+# The three hand-back side-channels are $$-keyed FILES that carry a payload
+# BETWEEN a writer that runs INSIDE a $() subshell and a reader that runs in
+# the PARENT shell (the MAJOR #1 subshell-proof bridge — a bare variable dies
+# at the subshell boundary). Two invariants follow, and the pre-fix code
+# broke the second one:
+#   1. the PATH must be agreed at SOURCE time (a subshell assignment would
+#      die with the subshell — the very defect the channel exists to avoid);
+#   2. the FILE must exist ONLY when it carries a payload.
+# The pre-fix shape called `mktemp` (which CREATES) at source time, so EVERY
+# shell that sourced lib.sh burned three zero-byte inodes — the /tmp inode
+# churn (the ensemble-hbk-* classes, ~10.9k files on the host). `mktemp -u`
+# agrees a UNIQUE name WITHOUT creating anything; the O_EXCL claim moves to
+# the writer (the payload-bearing moment).
+# THE READERS ARE UNCHANGED: all three gate on `[ -s "$_f" ]`, so an ABSENT
+# file and an EMPTY file read identically ("nothing captured") — the fix is
+# invisible to every consumer.
+HANDBACK_ERROR_FILE="$(mktemp -u "${TMPDIR:-/tmp}/ensemble-hbk-err.$$.XXXXXX" 2>/dev/null || printf "%s" "${TMPDIR:-/tmp}/ensemble-hbk-err.$$")"
+# _handback_channel_write <path> <text> — the ONE payload writer for all
+# three channels: the file is created ONLY NOW (the payload-bearing moment)
+# and the name is claimed O_EXCL (`set -C` noclobber) so the create is
+# atomic. A REPEAT write in the same shell (the reason channel is written up
+# to 15 times per verify) truncates-and-overwrites — the pre-fix
+# last-writer-wins semantics, preserved exactly. Best-effort throughout: a
+# tmp failure must never break the failure path itself.
+_handback_channel_write() {
+    local f="${1:-}" text="${2:-}"
+    [ -n "$f" ] || return 0
+    ( set -C; : > "$f" ) 2>/dev/null || true
+    printf '%s' "$text" > "$f" 2>/dev/null || true
+}
 _handback_err_file_write() {
     # $1 = diagnosis text; best-effort — a tmp failure must never break
     # the failure path itself.
-    printf '%s' "$1" > "${HANDBACK_ERROR_FILE:-}" 2>/dev/null || true
+    _handback_channel_write "${HANDBACK_ERROR_FILE:-}" "$1"
+    # LOGGING SYMMETRY (hbk-err fix, 2026-11-22): the err channel was the
+    # ONE hand-back side-channel whose writer had NO normal-logging
+    # sibling — its diagnosis reached the operator only at the READER
+    # site, two hops later (and on Linux the channel is never written at
+    # all, so the halt row's "none captured" there is an UNWRITTEN channel,
+    # not a missing capture). Emit it HERE, at the writer, so a hand-back
+    # error can never be swallowed. _hb_verify_diag is the DUAL-SINK
+    # emitter (the narrative file + unbuffered stderr) — the same seam
+    # every reason-channel writer already uses.
+    _hb_verify_diag "launchd hand-back: hand-back error captured (err side-channel): $1"
 }
 _handback_err_file_clear() {
     rm -f "${HANDBACK_ERROR_FILE:-}" 2>/dev/null || true
@@ -5987,18 +6035,24 @@ _handback_last_error_text() {
 HANDBACK_VERIFY_REASON=""
 # m10 (review-fix, 2026-11-20): the side-channel files are MKTEMP-minted
 # (O_EXCL-safe, no fixed-name /tmp paths — the $$ suffix rides the TEMPLATE
-# so cross-referencing still works; mktemp CREATES the file, which the
-# `-s` reader below treats as empty = nothing-captured). The path must be
-# agreed BEFORE the $() subshell (a subshell assignment dies with the
-# subshell) — hence source time. Degradation: mktemp failure falls back to
-# the legacy $$-keyed literal (a write-time redirect, same as pre-m10).
-HANDBACK_VERIFY_REASON_FILE="$(mktemp "${TMPDIR:-/tmp}/ensemble-hbk-verify.$$.XXXXXX" 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/ensemble-hbk-verify.$$")"
+# so cross-referencing still works). The path must be agreed BEFORE the $()
+# subshell (a subshell assignment dies with the subshell) — hence source
+# time. Degradation: mktemp failure falls back to the legacy $$-keyed literal
+# (a write-time redirect, same as pre-m10).
+# LAZY MINT (2026-11-22, anomaly 84be2e4e): `mktemp -u` agrees the name
+# WITHOUT creating the file — the O_EXCL claim moved to the writer, so the
+# file exists ONLY when it carries a payload. The `-s` reader below treats an
+# absent file exactly like an empty one (nothing captured), so no consumer
+# changes.
+HANDBACK_VERIFY_REASON_FILE="$(mktemp -u "${TMPDIR:-/tmp}/ensemble-hbk-verify.$$.XXXXXX" 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/ensemble-hbk-verify.$$")"
 # _handback_verify_reason_write <text> — best-effort; a tmp failure must
 # never break the failure path itself. Bounded to 400 chars (the journal
-# detail is a single-line quoted string).
+# detail is a single-line quoted string). The file is created ONLY here (the
+# payload-bearing moment — see the LAZY MINT note above); a repeat write
+# truncates-and-overwrites (last-writer-wins, as before).
 _handback_verify_reason_write() {
-    printf '%s' "$(printf '%s' "${1:-}" | tr '\n' ';' | tr -s ' ' | cut -c1-400)" \
-        > "${HANDBACK_VERIFY_REASON_FILE:-}" 2>/dev/null || true
+    _handback_channel_write "${HANDBACK_VERIFY_REASON_FILE:-}" \
+        "$(printf '%s' "${1:-}" | tr '\n' ';' | tr -s ' ' | cut -c1-400)"
 }
 _handback_verify_reason_clear() {
     rm -f "${HANDBACK_VERIFY_REASON_FILE:-}" 2>/dev/null || true
@@ -6029,9 +6083,18 @@ _handback_verify_reason_text() {
 # reader below consumes. Design §2.1 option (v): MECHANISM ONLY — no
 # inflation; with no sample the ceiling stays HANDBACK_VERIFY_BUDGET_S=300.
 HANDBACK_VERIFY_ELAPSED_S=""
-HANDBACK_VERIFY_ELAPSED_FILE="$(mktemp "${TMPDIR:-/tmp}/ensemble-hbk-velapsed.$$.XXXXXX" 2>/dev/null || printf "%s" "${TMPDIR:-/tmp}/ensemble-hbk-velapsed.$$")"
+HANDBACK_VERIFY_ELAPSED_FILE="$(mktemp -u "${TMPDIR:-/tmp}/ensemble-hbk-velapsed.$$.XXXXXX" 2>/dev/null || printf "%s" "${TMPDIR:-/tmp}/ensemble-hbk-velapsed.$$")"
 _handback_verify_elapsed_write() {
-    printf '%s' "${1:-}" > "${HANDBACK_VERIFY_ELAPSED_FILE:-}" 2>/dev/null || true
+    _handback_channel_write "${HANDBACK_VERIFY_ELAPSED_FILE:-}" "${1:-}"
+    # LOGGING SYMMETRY (hbk-err fix, 2026-11-22): the elapsed channel's
+    # payload is a MEASUREMENT (the D6-v journal sample), not a diagnosis —
+    # but it must still reach the operator's log, and the seam must NEVER be
+    # stdout: the verify runs inside a $() whose stdout IS the captured
+    # MainPID, so a stdout write here would corrupt the capture. The
+    # unbuffered stderr seam is the safe one (same idiom as _hb_verify_diag,
+    # minus the WARN tag — a latency sample is not a warning).
+    printf '%s[%s]: hand-back verify: boot-to-green elapsed=%ss (the D6-v journal sample)\n' \
+        "${LOG_TAG:-lib}" "${UP_TARGET:-lib}" "${1:-}" >&2 2>/dev/null || true
 }
 _handback_verify_elapsed_clear() {
     rm -f "${HANDBACK_VERIFY_ELAPSED_FILE:-}" 2>/dev/null || true
@@ -6039,6 +6102,19 @@ _handback_verify_elapsed_clear() {
 _handback_verify_elapsed_text() {
     local _f="${HANDBACK_VERIFY_ELAPSED_FILE:-}"
     if [ -s "$_f" ]; then head -c 16 "$_f" 2>/dev/null; fi
+    return 0
+}
+# _handback_channels_cleanup — remove ALL THREE hand-back side-channel files.
+# The pre-fix cleanup covered only the err + reason channels, and only in the
+# ceremony scripts' failure branch — the ELAPSED file was cleaned by NOBODY
+# outside lib.sh, so every ceremony that did not reach the hand-back leaked
+# it. With the LAZY MINT (2026-11-22) the file exists only when it carries a
+# payload, so removing all three here is the complete cleanup. Best-effort:
+# a tmp failure must never break the exit path.
+_handback_channels_cleanup() {
+    rm -f "${HANDBACK_ERROR_FILE:-}" 2>/dev/null || true
+    rm -f "${HANDBACK_VERIFY_REASON_FILE:-}" 2>/dev/null || true
+    rm -f "${HANDBACK_VERIFY_ELAPSED_FILE:-}" 2>/dev/null || true
     return 0
 }
 
@@ -7055,6 +7131,14 @@ _supervision_handback_unit() {
     # same shell must never reach a later commit row.
     HANDBACK_VERIFY_ELAPSED_S=""
     _handback_verify_elapsed_clear
+    # hbk-err inode-churn fix (2026-11-22): the SAME stale-read hole
+    # applies to the REASON channel — the reason file is minted ONCE per
+    # shell (the $$-keyed path), so a reason written by an EARLIER attempt
+    # that failed WITHOUT writing a reason of its own would be read back by
+    # a LATER attempt in the same shell and surfaced as that attempt's
+    # diagnosis. Clear it at entry: a hand-back starts with no verdict.
+    HANDBACK_VERIFY_REASON=""
+    _handback_verify_reason_clear
     # 1. reset-failed — clear any stale failed state so neither the
     #    is-active preflight nor the start is poisoned by it
     #    (best-effort: a reset-failed failure is not itself fatal —
