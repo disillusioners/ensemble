@@ -404,6 +404,12 @@ def test_one_flag_rollback_end_to_end():
     reg_at = API_SRC.index("if engine_owns_execution():")
     start_at = API_SRC.index("elif engine_owns_execution():")
     assert start_at < reg_at  # construct site (legacy) precedes boot block (engine)
+    # The flag-OFF `else:` branch still starts the legacy loop (byte-identical
+    # OFF behavior); the flag-ON `elif` branch does NOT (single executor).
+    else_at = API_SRC.index("    else:", start_at)
+    legacy_else = API_SRC[else_at : else_at + 400]
+    assert "orphan_watcher_sweep.start()" in legacy_else
+    assert "OrphanWatcherSweepService started: interval=" in legacy_else
 
 
 # ── 4. greenlight-evidence derivability ───────────────────────────────────
