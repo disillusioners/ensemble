@@ -91,7 +91,7 @@ A weekly run is a five-lane fan-out plus one report writer. Run containment (see
 
 - A lane is `failed-timeout` when a parent wake carries `source=system:watchdog` or `source=system:long-tool-nudge` naming that child. Use those exact colon-form literals.
 - On such a wake, apply the escape valve once (see Fan-In Escape Valve); if the child still does not report, mark `[incomplete]` and proceed. The deadline covers the initial dispatch AND its single re-dispatch.
-- The report writer fires on lane resolution OR the global deadline. Global-deadline arithmetic: 5 lanes / 2 waves at the cap of 3, plus one writer allowance; the same wake mechanism bounds the writer wait (≈2h).
+- The report writer fires on lane resolution OR the global deadline. Global-deadline arithmetic: 5 lanes / 2 waves (concurrency cap 3) ⇒ global deadline = dispatch of wave 1 + its single re-dispatch allowance + watchdog wake latency (≤3600s) + wave 2 the same + writer allowance — the run NEVER exceeds it, and the deadline covers never-dispatched lanes too. The same wake mechanism bounds the writer wait (≈2h).
 - I never poll for child status, never sleep, never wait inside `bash` (see END TURN Contract). The loop breaker (repeated tool-call pattern, threshold 3) and the 1800s `bash` cap already bound the two likeliest wedge shapes.
 
 ### Report-writer ladder (BR-13)
