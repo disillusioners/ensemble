@@ -367,6 +367,19 @@ PRE_EXISTING_DAEMON_OFFENDERS = frozenset(
         "daemon/services/schedule_fire_notify_metrics.py",  # foreign-lane b1b445754 schedule-fire-notify
         "daemon/services/scheduling_service.py",  # foreign-lane b1b445754 schedule-fire-notify
         "daemon/sources/adapters/scheduler.py",  # foreign-lane b1b445754 schedule-fire-notify
+        # ── STAGE-1 DRIFT-ARC ADDENDUM (2026-11-22) ──
+        # The 28-commit origin/latest drift merge (8894f86a -> 7fd7af010) into
+        # the P2-pilot lane carried 6 daemon paths that groups (A)-(D) did not
+        # cover. Each row cites its drift arc + first-in-range commit.
+        # NOTE: daemon/__init__.py is already recorded in group (D) above
+        # (b71742fe3 version bump); this row re-attributes its v0.31.28-31
+        # bump and is a deliberate frozenset dedupe (65 -> 71 rows, 70 unique).
+        "daemon/__init__.py",  # drift-arc release-bump 0da8aa619 (P2-pilot stage-1 census addendum 2026-11-22)
+        "daemon/repositories/project/repository.py",  # drift-arc projres 8a4ce6899 (P2-pilot stage-1 census addendum 2026-11-22)
+        "daemon/services/work_resolver.py",  # drift-arc work_resolver 96f21f1c5 (P2-pilot stage-1 census addendum 2026-11-22)
+        "daemon/tools/job_queue.py",  # drift-arc job-queue bd364876f (P2-pilot stage-1 census addendum 2026-11-22)
+        "daemon/tools/project.py",  # drift-arc projres 8a4ce6899 (P2-pilot stage-1 census addendum 2026-11-22)
+        "daemon/tools/upgrade_tools.py",  # drift-arc upgrade_tools PIPELINE_SCRIPTS re-pin 5aa5d01ae (P2-pilot stage-1 census addendum 2026-11-22)
     }
 )
 

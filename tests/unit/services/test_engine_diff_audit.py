@@ -60,8 +60,9 @@ from pathlib import Path
 BASE_SHA = "8894f86a853c5fcba2173ab29405f02c71c1f3ef"
 
 # The expected daemon/ path set — DATA, per D7.4. Grouped by ownership-map row.
-# 48 declared paths. At the re-anchored base the lane's committed daemon/ diff
-# is exactly 2 paths: `daemon/api.py` (ALREADY declared by the P4 lifespan row)
+# 54 declared paths (48 program rows + 6 P2-pilot stage-1 drift-arc addendum
+# rows). At the re-anchor the lane's committed daemon/ diff was exactly 2 paths:
+# `daemon/api.py` (ALREADY declared by the P4 lifespan row)
 # and `daemon/services/orphan_watcher_sweep.py` (ONE newly declared row, added
 # by this lane with its sanctioning comment below).
 EXPECTED_DAEMON_PATHS: frozenset[str] = frozenset({
@@ -140,6 +141,16 @@ EXPECTED_DAEMON_PATHS: frozenset[str] = frozenset({
     # charter: the pilot's execute_fn adapter lives in the service's OWN module
     # (build_engine_executor / engine_owns_execution), never in engine/**.
     "daemon/services/orphan_watcher_sweep.py",  # Phase-2 pilot — dual-path seam + late-bound engine executor
+    # --- P2-PILOT STAGE-1 DRIFT-MERGE ADDENDUM (2026-11-22) -----------------
+    # The 28-commit origin/latest drift merge (8894f86a -> 7fd7af010) carried
+    # these 6 daemon paths from sibling lanes. Each row cites its drift arc and
+    # first-in-range commit so the attribution is per-file, not per-count.
+    "daemon/__init__.py",  # drift-arc release-bump 0da8aa619 (P2-pilot stage-1 census addendum 2026-11-22)
+    "daemon/repositories/project/repository.py",  # drift-arc projres 8a4ce6899 (P2-pilot stage-1 census addendum 2026-11-22)
+    "daemon/services/work_resolver.py",  # drift-arc work_resolver 96f21f1c5 (P2-pilot stage-1 census addendum 2026-11-22)
+    "daemon/tools/job_queue.py",  # drift-arc job-queue bd364876f (P2-pilot stage-1 census addendum 2026-11-22)
+    "daemon/tools/project.py",  # drift-arc projres 8a4ce6899 (P2-pilot stage-1 census addendum 2026-11-22)
+    "daemon/tools/upgrade_tools.py",  # drift-arc upgrade_tools PIPELINE_SCRIPTS re-pin 5aa5d01ae (P2-pilot stage-1 census addendum 2026-11-22)
 })
 
 # Owner hints for the RED message — which phase SHOULD have owned an offending
