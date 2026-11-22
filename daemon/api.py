@@ -3814,6 +3814,7 @@ async def lifespan(app: FastAPI):
     # F-16: disjoint from the live-defects api.py regions. F-8/F-12/F-13/
     # F-14/F-15 untouched. A failure logs WARNING and boot CONTINUES.
     # ─────────────────────────────────────────────────────────────
+    _engine_block_entry_t0 = time.perf_counter()  # UNGATED whole-block telemetry (D4.9)
     try:
         from daemon.services.engine.boot import build_observer_specs, run_boot_pass
         from daemon.services.engine.engine import EngineService
@@ -3843,7 +3844,7 @@ async def lifespan(app: FastAPI):
         # N dormant observer specs — execute_fn withheld by construction.
         _observer_specs = build_observer_specs(config)
 
-        _engine_boot_t0 = time.perf_counter()
+        _engine_gated_t0 = time.perf_counter()
 
         async def _engine_registration_pass():
             for _spec in _observer_specs:
@@ -3907,17 +3908,23 @@ async def lifespan(app: FastAPI):
             runs_reader=None,  # router default (bounded tail via repository.engine)
         )
 
-        # Exactly ONE posture INFO line, with the block's perf_counter elapsed
-        # (SLO-1). Dormant posture ⇒ this block is ≤250ms.
-        _engine_boot_elapsed_ms = (time.perf_counter() - _engine_boot_t0) * 1000.0
+        # Exactly ONE posture INFO line. SLO-1 GATED number (registration pass +
+        # engine start + watchdog start) must be <=250ms. The UNGATED total
+        # (block entry incl. imports/construction/build_observer_specs through
+        # watchdog start) is reported as telemetry (D4.9 concern visibility).
+        _engine_gated_elapsed_ms = (time.perf_counter() - _engine_gated_t0) * 1000.0
+        _engine_block_total_elapsed_ms = (
+            time.perf_counter() - _engine_block_entry_t0
+        ) * 1000.0
         logger.info(
             "engine boot posture: enabled=%s shadow=%s registrations=%d observer "
             "specs (execute_fn withheld, USE_ENGINE all unset); "
-            "block_elapsed_ms=%.3f",
+            "block_elapsed_ms_gated=%.3f block_elapsed_ms_total=%.3f",
             _engine_cfg.enabled,
             _engine_cfg.shadow_mode,
             len(_observer_specs),
-            _engine_boot_elapsed_ms,
+            _engine_gated_elapsed_ms,
+            _engine_block_total_elapsed_ms,
         )
     except Exception as _engine_boot_exc:  # noqa: BLE001 — never abort boot
         app.state.engine_service = None

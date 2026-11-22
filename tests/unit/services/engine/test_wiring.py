@@ -82,7 +82,8 @@ def test_set_event_sink_composition_line_present():
 def test_single_posture_info_line():
     """AC4 — exactly ONE posture INFO with enabled/shadow/registrations + elapsed."""
     assert API_SRC.count('"engine boot posture: enabled=%s shadow=%s registrations=%d') == 1
-    assert "block_elapsed_ms=%.3f" in API_SRC
+    assert "block_elapsed_ms_gated=%.3f" in API_SRC
+    assert "block_elapsed_ms_total=%.3f" in API_SRC
     assert "specs (execute_fn withheld, USE_ENGINE all unset)" in API_SRC
 
 
@@ -178,7 +179,7 @@ async def test_second_stop_is_noop():
 def test_slo2_engine_block_after_readiness_task():
     """SLO-2 — the engine block anchor appears AFTER readiness_task creation."""
     ready = API_SRC.index("readiness_task = asyncio.create_task(")
-    engine = API_SRC.index("_engine_boot_t0 = time.perf_counter()")
+    engine = API_SRC.index("_engine_block_entry_t0 = time.perf_counter()")
     assert ready < engine
 
 
