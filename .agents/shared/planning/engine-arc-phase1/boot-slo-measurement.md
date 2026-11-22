@@ -253,6 +253,8 @@ All boots below are the dormant/observer posture (`enabled=True`, `execute_fn` w
 | Tester boot D | `21eb5bc3a` (flag-ON, **exec**) | cold fresh-PG cluster 19704 + fresh scratch DB, same load | **shadow=False**, registrations=12 | 302.418 | 334.125 | `.../pilot_gate_D_daemon_4036233.txt` |
 | HEAD confirmation A | `ad0175229` (F1 posture fix) | warm `ensemble_dev`, fresh port | dormant, `use_engine_flags=all unset (0/12)` | 131.880 | 153.781 | `.flipprep-transcripts/bootA-dormant.txt` |
 | HEAD confirmation B | `ad0175229` | warm `ensemble_dev`, fresh port | `use_engine_flags=SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE=1 (1/12)` | 115.066 | 137.435 | `.flipprep-transcripts/bootB-flagset.txt` |
+| F2-gate pack boot (pack-executed WARM leg) | `ad0175229` (the pack's own measurement leg) | warm `ensemble_dev`, fresh port | dormant, `use_engine_flags=all unset (0/12)` | **179.192** | 196.647 | `.f2gate-transcripts/warm-20261122T174907Z-380847.txt:268` |
+| F2-gate pack boot (lane baseline re-run) | `290000cbd` (this lane's TRUE base) | warm `ensemble_dev`, fresh port | dormant, `use_engine_flags=all unset (0/12)` | **191.188** | 208.734 | `.f2gate-transcripts/warm-20261122T182246Z-460476.txt:268` |
 
 ### 9.3 Corrected tester discrepancy (record the correction explicitly)
 
@@ -265,12 +267,12 @@ The correction does not change finding F2's substance (3/4 exceed the old bound)
 
 ### 9.4 Environmental attribution and variance note
 
-- **Warm-DB / normal host ⇒ 103–135 ms** (wave-1 max 134.938; HEAD confirmations 115–132; P4 rehearsal 172.217).
+- **Warm-DB / normal host ⇒ 103–191 ms** (wave-1 max 134.938; HEAD confirmations 115–132; P4 rehearsal 172.217; the F2-gate pack's own WARM legs 179.192 @ `ad0175229` and 191.188 @ `290000cbd`).
 - **Cold-PG / contended host ⇒ 238–308 ms** (tester A/B/C/D under cold fresh clusters + concurrent 9-shard load).
 - **Drift since Phase-1 adds ~0 measurable dormant-block cost.** The gated window `82aa36862 → HEAD` was diffed: the pilot branch is conditional/0-cost in dormant posture; the dep-bus binding is a trivial getter with the import made lazy. `registrations=12` unchanged across all sources (§9.1). The "drift added registrations" premise is disproved.
 - **Bimodal variance — a single pooled statistic is meaningless.** The pooled sample is a mixture of two environments (warm vs cold/contended); its between-environment spread dominates its within-environment spread. Wave-1 alone: n=6, min 103.310, median 111.302, max 134.938, mean 113.305, population σ 10.695 ms. Tester cold class alone: 237.982–307.878. Pooling these into one σ would describe the environment gap, not measurement noise. **Report per-class, never pooled.**
 
-### 9.5 Gated-block composition — what the 103–135 / 238–308 ms buys
+### 9.5 Gated-block composition — what the 103–191 / 238–308 ms buys
 
 The gated window is: registration pass of 12 observer specs (deadlined BOOT_PASS) + engine tick-loop start + watchdog start. It is **not** the whole boot (the UNGATED total includes imports/construction/`build_observer_specs` from `:3845` and runs ~18–34 ms longer in wave-1). SLO-1's ≤250 ms was written as a *cost bound on the new block* so the engine cannot consume the 120 s boot bar it must not regress (phase4-plan D4.9); it is not itself a boot-wall-clock bar. That is why the two-class proposal below keeps the number in the same `time.perf_counter` frame and does not mix in the §2 clock frames.
 
@@ -284,9 +286,10 @@ Fenced exactly as the gate leg now encodes: `set -a; . ./.env; set +a`; `PORT`/`
 
 Replace the single ambiguous SLO-1 number with two class-scoped bounds, each with explicit conditions:
 
-- **SLO-1-WARM ≤ 250 ms** — *unchanged number*. Conditions: dormant posture, `registrations=12`, warm long-lived PG, un-contended host. Derivation bracket: observed WARM max **134.938 ms** (wave-1) → **1.85× headroom** (250/134.938 = 1.8526). HEAD confirmations 115–132 ms corroborate.
+- **SLO-1-WARM ≤ 250 ms** — *unchanged number*. Conditions: dormant posture, `registrations=12`, warm long-lived PG, un-contended host. Derivation bracket: observed WARM max **191.188 ms** (this lane's F2-gate pack re-run at `290000cbd`; the pack-executed max before it was **179.192 ms** at `ad0175229`; **134.938 ms** remains the wave-1-only stat) → **1.31× headroom** (250/191.188 = 1.3074). The observed WARM range across ALL evidence is now **103.310–191.188 ms**, so the earlier **1.85×** figure (250/134.938) OVERSTATED the headroom — it quoted the wave-1-only max, not the all-evidence max. **The bound still holds**: every observed WARM datum (wave-1, P4 rehearsal, HEAD confirmations, both F2-gate pack runs) is ≤ 250 ms. HEAD confirmations 115–132 ms corroborate.
 - **SLO-1-COLD ≤ 360 ms** — *new class*. Conditions: cold/first-boot environment **OR** contended host. Derivation bracket: observed cold max **307.878 ms** (tester A) × 1.15 margin = 354.06 → rounded up to **360 ms**. Covers tester range 237.982–307.878.
 - **Flip-day bound = the COLD class.** The only empirical flip-posture datum (tester boot D, flag-ON exec, 302.418 ms) is cold-class; applying the 250 ms WARM bound to a cold flip boot would false-fire.
+- **Flip-day SWITCH semantics (not a bound-class statement).** **[flip-prep rider — 2026-11-22: a TRIP takes effect on the NEXT tick exactly; a RESTORE (un-trip) is INTERVAL-bound, not tick-bound — the KILL_SWITCHED skip stamps `last_run_at`, so an un-tripped engine resumes a job only when that job next comes DUE (≤ one full interval — an hour for a 3600 s job).]** **[flip-prep rider — 2026-11-22: the runtime fail-to-legacy polarity is ENGINE-scoped ("the engine does not own execution"); the PILOT's per-module legacy suppression is armed at BOOT (ownership conjuncts), so a runtime trip of the pilot's switch leaves that lane owned by NOBODY until a restart (restart-scoped), until the tail's runtime re-arm design lands.]** (Same sentences as the phase-2 pilot recommendation's activation-shape rows; there is NO dedicated flip-day runbook file in-tree — this section and `phase2-pilot-recommendation.md` are the flip-day guidance homes.)
 
 **Gate constant mirror** (the pack `test/packs/engine_boot_slo_gate.sh` pins its constants to these exact strings — divergence is RED):
 

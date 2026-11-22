@@ -2,8 +2,10 @@
 # =============================================================================
 # Test Pack: engine_boot_slo_gate  (P4 T4.7)  — F2 gate ownership
 # =============================================================================
-# LEG 1 (inherited, 21 nodes): method-wiring unit pins — behaviour unchanged
-#        from base 8a1045c02.
+# LEG 1 (inherited, 21 nodes — count re-verified 2026-11-22): method-wiring
+#        unit pins; the ONLY change since base 8a1045c02 is F1's posture-line
+#        expectation in test_wiring.py (ad0175229 — the static "USE_ENGINE all
+#        unset" claim became the dynamic use_engine_flags= field).
 # LEG 2 (F2): doc-equality constant pin — this pack's bound constants MUST match
 #        boot-slo-measurement.md §9.7 "gate constant mirror" (RED on divergence).
 # LEG 3 (F2): WARM-class fenced boot measurement — ONE boot; asserts
@@ -31,8 +33,13 @@ PYTEST_BIN="$PROJECT_DIR/.venv/bin/pytest"
 # Provenance (all values PROPOSAL / LEADER RULES, 2026-11-22):
 #   WARM 250 ms — unchanged SLO-1 dormant bound (phase4-plan.md D4.9/:40,
 #     SLO-1/:121); class = dormant posture, registrations=12, warm long-lived
-#     PG, un-contended host; observed WARM max 134.938 ms
-#     (.f2-transcripts/boot-06.txt:299) => 1.85x headroom.
+#     PG, un-contended host; observed WARM max 191.188 ms
+#     (.f2gate-transcripts/warm-20261122T182246Z-460476.txt:268) => 1.31x
+#     headroom (250/191.188 = 1.3074). The pack-executed max before it was
+#     179.192 ms and 134.938 ms is the wave-1-only stat — the earlier
+#     "134.938 ms => 1.85x headroom" bracket quoted the wave-1-only max and
+#     overstated the headroom. The bound still holds (every observed WARM
+#     datum is <= 250 ms).
 #   COLD 360 ms — class = cold/first-boot OR contended host; observed cold max
 #     307.878 ms (tester boot A) x 1.15 margin = 354.06 -> rounded 360;
 #     flip-day bound = COLD class (only empirical flip datum = tester D 302.418).

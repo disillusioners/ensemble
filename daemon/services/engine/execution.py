@@ -18,6 +18,7 @@ from typing import Any, Callable, Optional
 from daemon.services.engine.locks import JobLockTable
 from daemon.services.engine.state import (
     effective_interval_seconds,
+    normalize_skip_reason,
     now_iso,
     parse_iso,
     skip_outcome,
@@ -298,11 +299,19 @@ class EngineExecutionLoop:
 
         # ── D3.6 — the kill-switch ladder, read AT TICK TIME ──────────
         # The resolver is INJECTED (D3.12) and consulted on EVERY dispatch
-        # (never once at boot): a flip takes effect on the NEXT tick, with
-        # no restart. D3.5's fail-to-legacy polarity is preserved — a
-        # tripped switch means "the engine does not own execution"; the
-        # job is SKIPPED and COUNTED with the honest state machine's
-        # vocabulary, while the legacy path (a separate loop) keeps running.
+        # (never once at boot): a TRIP takes effect on the NEXT tick, with
+        # no restart. A RESTORE (un-trip) is INTERVAL-bound, not
+        # tick-bound — the skip stamps last_run_at, so the job must come
+        # DUE again (≤ one full interval) before the engine executes it.
+        # SCOPE (honest): the runtime fail-to-legacy polarity is
+        # ENGINE-scoped — a tripped switch means "the engine does not own
+        # execution"; the job is SKIPPED and COUNTED with the honest state
+        # machine's vocabulary, while the legacy path (a separate loop)
+        # keeps running. The PILOT's per-module legacy suppression is
+        # armed at BOOT (the ownership conjuncts), NOT at runtime: a
+        # runtime trip of the pilot's switch leaves that lane owned by
+        # NOBODY until a restart (restart-scoped), until the tail's
+        # runtime re-arm design lands.
         should_run, kill_reason = self._resolve_switch(spec)
         if not should_run:
             await self._stamp(
@@ -310,8 +319,11 @@ class EngineExecutionLoop:
                 skip_outcome(kill_reason), kill_reason,
                 started_dt, None, 0, None,
             )
-            cache["skips_by_reason"][kill_reason] = (
-                cache["skips_by_reason"].get(kill_reason, 0) + 1
+            # The counter's key is the CANONICAL D2.6 token (normalized),
+            # so the metrics family can never grow a free-text label.
+            reason_key = normalize_skip_reason(kill_reason or "KILL_SWITCHED")
+            cache["skips_by_reason"][reason_key] = (
+                cache["skips_by_reason"].get(reason_key, 0) + 1
             )
             return
 

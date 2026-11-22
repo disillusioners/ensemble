@@ -108,6 +108,33 @@ def test_value_is_collapsed_and_truncated():
     assert len(rendered) < len(key) + 60
 
 
+# ── the PRODUCTION seam: the default (NO injected environ) ──────────────
+
+def test_production_seam_reads_the_ambient_environment(monkeypatch):
+    """The PRODUCTION default seam must read ``os.environ`` — not a stub.
+
+    Every pin above injects ``environ=`` EXPLICITLY, so a mutation of the
+    default seam in ``daemon/services/engine/boot.py``
+    (``env = os.environ if environ is None else environ`` → a dead
+    ``env = {}``) would leave all of them GREEN while the real boot
+    posture line lied again — the exact defect class F1 closed. This pin
+    calls the function the way PRODUCTION calls it (NO ``environ``
+    argument) with the flag set in the AMBIENT environment.
+    """
+    key = "SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE"
+    assert key in _keys()
+    # Deterministic count: every OTHER flag of the family is absent.
+    for other in _keys():
+        monkeypatch.delenv(other, raising=False)
+    monkeypatch.setenv(key, "1")
+
+    rendered = describe_use_engine_flags(_specs())  # production default seam
+
+    assert key in rendered
+    assert rendered == f"{key}=1 (1/{len(_keys())})"
+    assert "all unset" not in rendered
+
+
 # ── the wiring: the boot line must USE the dynamic rendering ───────────
 
 def test_boot_posture_line_uses_the_dynamic_rendering():
