@@ -1945,8 +1945,11 @@ def create_job_tools(
                         f"ERROR: Could not cancel job {job_id}. "
                         "Task repository not available for task-kind cancellation."
                     )
+                # Key the Task re-lookup on ``record.work_id`` (the
+                # canonical id the resolver returned) so a pasted /
+                # decorated handle still finds the Task row.
                 task = await asyncio.to_thread(
-                    manager._task_repo.get_by_work_id, job_id
+                    manager._task_repo.get_by_work_id, record.work_id
                 )
                 if task is None:
                     return (
@@ -1967,8 +1970,11 @@ def create_job_tools(
                 )
 
             # JobItem branch — instant atomic cancel via the
-            # existing ``cancel_job`` path.
-            success = await job_service.cancel_job(job_id)
+            # existing ``cancel_job`` path. Key the mutation on
+            # ``record.work_id`` (the canonical id the resolver
+            # returned) so a pasted / decorated handle still cancels
+            # the right row.
+            success = await job_service.cancel_job(record.work_id)
             if success:
                 return f"Job {job_id} cancelled successfully."
             return f"ERROR: Could not cancel job {job_id}. Job may not be in a cancellable state."
@@ -1981,6 +1987,7 @@ def create_job_tools(
     @tool
     async def job_retry(job_id: str) -> str:
         """Retry a failed job. Use tool_help("job_retry") for details."""
+        job_id = _strip_id(job_id)
         try:
             # P-D (Phase 5, 2026-06-27): resolve the work_id FIRST so we
             # can return a precise error if the caller passed a task-type
@@ -1996,7 +2003,14 @@ def create_job_tools(
                     f"task-type work ({record.kind}), which has no retry path."
                 )
 
-            job_item = await job_service.retry_job(job_id)
+            # Key the retry on the CANONICAL id the resolver returned
+            # (``record.work_id``) so a pasted / decorated handle still
+            # retries the right row. ``record`` is None when the
+            # resolver is unwired or the work is unknown — fall back
+            # to the raw id so the legacy JobItem path still gets its
+            # chance (and reports its own "not retryable" verdict).
+            canonical_id = record.work_id if record is not None else job_id
+            job_item = await job_service.retry_job(canonical_id)
             if job_item is not None:
                 return f"Job {job_id} retry initiated successfully."
             return f"ERROR: Could not retry job {job_id}. Job may not be in a retryable state."
@@ -2009,6 +2023,7 @@ def create_job_tools(
     @tool
     async def job_delete(job_id: str) -> str:
         """Soft delete a job. Use tool_help("job_delete") for details."""
+        job_id = _strip_id(job_id)
         try:
             # P-D (Phase 5, 2026-06-27): precise error for task-type
             # work_ids — see ``job_retry`` comment for rationale.
@@ -2021,7 +2036,14 @@ def create_job_tools(
                     f"task-type work ({record.kind}), which has no delete path."
                 )
 
-            job_item = await job_service.soft_delete_job(job_id)
+            # Key the soft-delete on the CANONICAL id the resolver
+            # returned (``record.work_id``) so a pasted / decorated
+            # handle still deletes the right row. ``record`` is None
+            # when the resolver is unwired or the work is unknown —
+            # fall back to the raw id so the legacy JobItem path
+            # still gets its chance.
+            canonical_id = record.work_id if record is not None else job_id
+            job_item = await job_service.soft_delete_job(canonical_id)
             if job_item is not None:
                 return f"Job {job_id} deleted successfully."
             return f"ERROR: Could not delete job {job_id}. Job may not exist."
@@ -2034,6 +2056,7 @@ def create_job_tools(
     @tool
     async def job_restore(job_id: str) -> str:
         """Restore a soft-deleted job. Use tool_help("job_restore") for details."""
+        job_id = _strip_id(job_id)
         try:
             # P-D (Phase 5, 2026-06-27): precise error for task-type
             # work_ids — see ``job_retry`` comment for rationale.
@@ -2046,7 +2069,14 @@ def create_job_tools(
                     f"task-type work ({record.kind}), which has no restore path."
                 )
 
-            job_item = await job_service.restore_job(job_id)
+            # Key the restore on the CANONICAL id the resolver returned
+            # (``record.work_id``) so a pasted / decorated handle still
+            # restores the right row. ``record`` is None when the
+            # resolver is unwired or the work is unknown — fall back
+            # to the raw id so the legacy JobItem path still gets its
+            # chance.
+            canonical_id = record.work_id if record is not None else job_id
+            job_item = await job_service.restore_job(canonical_id)
             if job_item is not None:
                 return f"Job {job_id} restored successfully."
             return f"ERROR: Could not restore job {job_id}. Job may not exist or may not be deleted."
@@ -2111,7 +2141,17 @@ def create_job_tools(
                 # the row was deleted between the two calls.
                 # Reject as deleted rather than fall through to
                 # ``enqueue_message`` against a phantom work_id.
-                old_job = await job_service.get_job(old_job_id)
+                #
+                # Key this follow-up on ``record.work_id`` — the
+                # CANONICAL id the resolver returned — NOT on the raw
+                # ``old_job_id``. The resolver normalizes pasted
+                # handles (surrounding whitespace / quotes /
+                # backticks), so ``record.work_id`` IS the row's true
+                # primary key while ``old_job_id`` may still carry the
+                # pasted decoration. Re-querying with the raw value
+                # misses the row and surfaces a FALSE "has been
+                # deleted" verdict for a job that exists.
+                old_job = await job_service.get_job(record.work_id)
                 if old_job is None:
                     return {"error": f"Job {old_job_id} has been deleted and cannot be continued"}
                 if old_job.deleted_at is not None:
@@ -2677,6 +2717,7 @@ def create_job_tools(
         """Watch a job for lifecycle events. If the job is already in a terminal state, immediate notification is attempted (the reply reflects the held/delivered split — see F-2 fixback).
 
         Use tool_help("watch_job") for details."""
+        job_id = _strip_id(job_id)
         try:
             if watcher_repo is None:
                 return "Error: Watch functionality not available"
@@ -2733,7 +2774,11 @@ def create_job_tools(
                 # ``_enrich_terminal_record`` above.
                 record = await _enrich_terminal_record(record)
                 # Register watch first, then notify (notify_watchers sends + cleans up)
-                watcher_repo.add_watch(job_id, current_instance_id, events)
+                # Key the watch row on ``record.work_id`` (the canonical
+                # id the resolver returned) so a pasted / decorated
+                # handle registers against the same key the notifier
+                # later resolves.
+                watcher_repo.add_watch(record.work_id, current_instance_id, events)
                 # M2 — mission_terminal opt-in gating. When the
                 # watcher opts in via ``events=['mission_terminal']``
                 # (with or without other terminal events), fire ONLY
@@ -2780,7 +2825,7 @@ def create_job_tools(
                 # cannot tell whether the watch is live (waiting for
                 # the future terminal flip) or genuinely delivered.
                 notified_count = await job_service.notify_watchers(
-                    job_id,
+                    record.work_id,
                     record.status,
                     error=record.error,
                     result_summary=record.result_summary,
@@ -2817,7 +2862,11 @@ def create_job_tools(
                 )
 
             # Register watch
-            watcher_repo.add_watch(job_id, current_instance_id, events)
+            # Key the watch row on ``record.work_id`` (the canonical id
+            # the resolver returned) so a pasted / decorated handle
+            # registers against the same key the notifier later
+            # resolves.
+            watcher_repo.add_watch(record.work_id, current_instance_id, events)
             # Phase 5 (2026-06-23): the CorrelationManager
             # ``register_job_send`` helper is REMOVED. The DependencyBus
             # is keyed on ``source_task_id`` (Task.id, integer) but
@@ -2852,6 +2901,7 @@ def create_job_tools(
         them all.
 
         Use tool_help("unwatch_job") for details."""
+        job_id = _strip_id(job_id)
         try:
             if watcher_repo is None:
                 return "Error: Watch functionality not available"
@@ -2987,6 +3037,7 @@ def create_job_tools(
         """Watch multiple jobs for lifecycle events. Bulk version of watch_job.
 
         Use tool_help("watch_jobs") for details."""
+        job_ids = [_strip_id(jid) for jid in job_ids]
         try:
             if watcher_repo is None:
                 return "Error: Watch functionality not available"
@@ -3058,10 +3109,12 @@ def create_job_tools(
                     if fire_mission_terminal and not _record_mission_is_terminal(record):
                         # Mission is not yet terminal — keep the
                         # watch alive for the future terminal event.
-                        watcher_repo.add_watch(jid, current_instance_id, events)
+                        # Key the watch row on ``record.work_id`` (the
+                        # canonical id the resolver returned).
+                        watcher_repo.add_watch(record.work_id, current_instance_id, events)
                         held_for_mission.append(jid)
                         continue
-                    watcher_repo.add_watch(jid, current_instance_id, events)
+                    watcher_repo.add_watch(record.work_id, current_instance_id, events)
                     # F-2 (2026-09-25, ``fix/mission-terminal-watch-report-publish``):
                     # capture the return value so the bulk summary
                     # reflects the actual delivery state. Pre-F-2 the
@@ -3071,7 +3124,7 @@ def create_job_tools(
                     # OR CAS-claimed by a concurrent terminal caller).
                     # A "delivered" tag that returns 0 is misleading.
                     notified_count = await job_service.notify_watchers(
-                        jid,
+                        record.work_id,
                         record.status,
                         error=record.error,
                         result_summary=record.result_summary,
@@ -3089,7 +3142,7 @@ def create_job_tools(
                         # to delivery state.
                         held_for_delivery.append(jid)
                 else:
-                    watcher_repo.add_watch(jid, current_instance_id, events)
+                    watcher_repo.add_watch(record.work_id, current_instance_id, events)
                     watched.append(jid)
 
             parts = []
@@ -4345,6 +4398,7 @@ def create_mission_watch_tools(
         re-call).
 
         Use tool_help("watch_mission") for details."""
+        target = _strip_id(target)
         try:
             if watcher_repo is None:
                 return "Error: Watch functionality not available"
@@ -4400,7 +4454,13 @@ def create_mission_watch_tools(
                     # mission-not-born means not terminal, so the watch
                     # simply waits. A mission_id key would strand here
                     # (watcher rows resolve by job_id only).
-                    pre_dispatch_receipt = target
+                    #
+                    # Key the receipt on ``record.work_id`` (the
+                    # canonical id the resolver returned), NOT on the
+                    # raw ``target`` — a pasted / decorated target must
+                    # arm the watch against the same key the notifier
+                    # later resolves.
+                    pre_dispatch_receipt = record.work_id
 
             # ── Pre-mission registration ──────────────────────────────
             if pre_dispatch_receipt is not None:
