@@ -1,0 +1,98 @@
+# Central Maintenance System — Implementation Plan (Overview)
+
+**Board:** wi-73d81a32 · **PM ledger:** ENSEMBLE-35 · **Status:** PLANNED
+**Worktree:** `/home/nea/ensemble-src-wt-maintsys` · branch `feature/central-maintenance-system` · base `origin/latest @ 1b9797ab7` (staged v0.31.26 source tree)
+**Planned:** 2026-11-22 (planner lane; research: 3 explorers, planning: 2 workers, synthesis: planner)
+**Nominal release slot:** v0.31.27 (RE-CHECK at tag time — R7)
+
+---
+
+## 1. Objectives
+
+A weekly, self-starting, extensible maintenance system for the ensemble daemon:
+
+1. **Random-time trigger** — fires at a uniform-random minute inside a configurable ICT window (default 01:00–05:00 Asia/Ho_Chi_Minh), re-rolled every week; window/weekday/timezone are knobs, not constants. **No idle/busyness gating anywhere** on trigger or dispatch (the old tier's idle-starvation class is regression-pinned by test).
+2. **Maintenancer as orchestrator** — upgraded in-repo with per-lane worker children and per-lane skills; scheduler dispatch goes DIRECTLY to `maintenancer`, not via Ari.
+3. **Five lanes** — (1) disk cleanup incl. /tmp test-scratch and ALL `ensemble-hbk-*` classes (populated `-verify` = retention, never blind-delete), (2) POK compact/optimize/sweep (consuming the committed pok-sweep census artifacts), (3) skill-system evolution check, (4) abnormality/critical checks (anomaly clusters, wedges, stuck lanes, old-tier health), (5) metrics watch.
+4. **Report ALWAYS written** — file-based run report + receipt + index with per-lane status (ok/degraded/failed) and recommendations in three classes: auto-fix-now / needs-Emperor-word / route-to-lane. A failing lane never kills the report.
+5. **One canonical manual-trigger path** with a receipt whose `trigger_type=manual` is provable.
+6. **FE 'report' surface** wired per house precedent (evidence-based — see decisions.md PD-2).
+
+## 2. Architecture summary
+
+```mermaid
+flowchart TD
+    SEED["boot seeder + chain-break guard<br/>seed.py pattern · manager.py:1212-1217"] --> ROW[("source_configs chain row<br/>central-maintenance-weekly<br/>recurrence=once · agent=maintenancer<br/>config.chain = weekly-random knobs")]
+    ROW --> ADP["SchedulerAdapter loop<br/>fires at run_at (random minute, ICT)"]
+    ADP -->|"enqueue_message_job<br/>idempotency key scheduler:{sid}:{run_at}"| MNT["maintenancer (orchestrator)<br/>dispatches lane children"]
+    MNT --> L1["lane-disk-sweep worker"]
+    MNT --> L2["lane-pok-sweep worker"]
+    MNT --> L3["lane-skill-check worker"]
+    MNT --> L4["lane-abnormality-check worker"]
+    MNT --> L5["lane-metrics-watch worker"]
+    L1 & L2 & L3 & L4 & L5 --> RPT["run-report-writer worker<br/>.agents/maintenancer/RESULTS/<br/>run-<run_id>.md + receipt + INDEX"]
+    ADP -->|"re-arm at fire time<br/>new run_at ⇒ new key (independent of run success)"| ROW
+    RPT --> FE["FE /report view (gear menu)<br/>+ GET-only BE list route"]
+```
+
+- **Trigger chain (P1):** one `recurrence="once"` scheduler row whose `run_at` is rewritten at each fire (self-rescheduling one-shot — R1). Knobs are env-first, resolved at each arm/re-arm; the row's `config.chain` block records resolved values. A boot-time get-or-recreate guard keeps the chain alive across reboot, source-GC archiving, and crashes; a past-due `run_at` auto-fires at boot. The chain avoids the cron path entirely (no croniter DST exposure; ICT is fixed UTC+7).
+- **Orchestrator (P2):** `agents/maintenancer/meta.json` gains the `instance` + subtree-read categories (deny list unchanged — the seat stays non-mutating); rule/workflow extensions encode the weekly dispatch flow, failure isolation, and the report-ALWAYS contract; six new skills (`lane-disk-sweep`, `lane-pok-sweep`, `lane-skill-check`, `lane-abnormality-check`, `lane-metrics-watch`, `run-report-writer`) under `skills-template/` + `skill-set.yaml`. In-repo prompt changes stage via the release; **live DB prompt adoption is a post-promote operator step (out of lane scope)**.
+- **Lanes (P3):** common measure→act→report loop; each lane emits a structured result block consumed by the receipt. Lane 1 is governed by the salvaged baseline's deletion-fence recipe (never operate from canonical; mktemp-fenced dry-runs; never delete files held open by live processes; explicit-class pathspecs; measure bytes AND inodes) plus the hbk class rules and the protected set; worktrees are REPORT-ONLY (never deleted by the sweeper). All lanes are read-only against daemon bookkeeping tables.
+- **Report/receipt/manual/FE (P4):** artifacts at `.agents/maintenancer/RESULTS/` (`run-<run_id>.md`, `receipt-<run_id>.md`, `INDEX.md`), `run_id` single-sourced from `new_maintenance_run_id()`; manual trigger = `task_schedule` one-shot at now → `maintenancer` (same dispatch path as the weekly chain); FE wires the gear-menu 'Report' entry + lazy `/report` route + a GET-only BE list route (live_views has no list endpoint).
+- **Tests/verification/staging (P5):** mutation-proven R2 no-idle pin (behavioral + structural legs), picker/re-arm/guard/seed pins, P2–P4 acceptance→check map, mandatory test fencing, staging-only release per R7 (NO promote, NO ceremony — handoff to leader).
+
+## 3. Phase map — shared-context grouping & instance reuse
+
+| Phase | File | Objective | Context group | Parallelizable with |
+|---|---|---|---|---|
+| P1 | `phase1-plan.md` | Trigger chain, arming, re-arm guard | daemon-scheduler | P2, P3 (disjoint files/contracts; P1 fixes the row name/agent/chain-block shape) |
+| P2 | `phase2-plan.md` | Orchestrator upgrade + lane skills | agent-side | P1; P3 starts on its skeleton |
+| P3 | `phase3-plan.md` | Lanes 1–5 implementation | agent-side | P4 (report schema fixed by contract) |
+| P4 | `phase4-plan.md` | Report + receipt + manual trigger + FE surface | cross (agent + FE + trigger) | P3 |
+| P5 | `phase5-plan.md` | Tests, verification, staging | daemon-test + release | nothing — terminal gate |
+
+**Instance-reuse cut:** two implementation lanes cover the tree — a **daemon-side** instance (P1, then joins P5's trigger-test authoring) and an **agent-side** instance (P2 → P3 → P4). P5 runs last as the terminal verification/staging gate and owns the full test matrix. P1 and P2 are the natural parallel wave; P3/P4 follow on the agent side; the FE tasks inside P4 can run as a third, FE-context sub-lane if staffing allows (they touch only `frontend/` + one BE route).
+
+## 4. Decision index
+
+All rulings and decisions are recorded with evidence in **`decisions.md`** (same directory): LEADER-RULING rows (Emperor design changes 1–3, R1–R9 — fixed) and PLANNER-DECISION rows PD-1…PD-11 (phase cut, FE wire-vs-seam, manual path, report schema, DB-vs-files, report authorship, knobs home, chain identity/re-arm seam, run_id minting, open-question adjudications, hbk scope encoding).
+
+## 5. Risks (top set, deduplicated across phases — full tables in each phase file)
+
+| Risk | Sev | Mitigation |
+|---|---|---|
+| Idle/busy gate reintroduced on the trigger path (the killed failure class) | high | R2 two-legged mutation-proven pin (behavioral busy-fires-anyway + structural no-`JOB_IDLE_POLICIES`/`_is_idle` reference) — P5 T5.1 |
+| Source-GC archives the chain row ⇒ chain silently dies | high | Boot guard RECREATES (get-or-recreate, seed.py pattern); cancelled/paused = operator intent, respected; guard tests incl. post-GC (P1 T1.4, P5 T5.4) |
+| Report-writer child fails ⇒ "report ALWAYS written" broken | med | Report-ALWAYS contract incl. total-failure case; scoped-write fallback named in P2 (not chosen); INDEX dedup |
+| `schedule_executions` lacks an explicit manual-vs-scheduled marker | med | D-D provenance via creator/origin marker on the manual row; explicit marker specced as a small build item (P1/P4 cross-ref); P5 T5.6 proves the receipt |
+| POK merges hit the now-live family cap (`pok_family_full`) | med | Same-slug supersede only; cap-aware merge rules encoded in P3 lane 2 |
+| FE ordering-pin specs break on menu append | low | Spec updates listed as P4 tasks (gear-menu tail-append convention honored) |
+| Release-slot collision (sibling hbk lane stages first) / base drift | med | R7: re-check tags at tag time, next free slot, rebase onto staged source_commit; upstream `86e196576` deletes `test_scheduler_deferred_delivery_pin.py` — interaction noted in P5 |
+| Upstream test deletions vs our new scheduler tests | low | P5 rebase discipline + interaction note |
+
+## 6. Out of scope
+
+- **Live promote / release ceremony** — staging only; handoff note to leader (R7).
+- **Live DB prompt-artifact adoption** — in-repo prompt files stage via the release; DB adoption is the standard post-promote operator step (R3; flagged in P2 + P5).
+- **Worktree deletion** — lane 1 REPORTS worktree drift; removal policy owned by leader/giter lanes.
+- **Structural /tmp fixes** (full-repo extraction per gate run, pytest-of-nea retention, shakedown TTLs, journal .bak rotation) — emitted as route-to-lane recommendations; owner lanes fix producers.
+- **Crossing-midnight window definitions** — v1 requires `start < end` on the same day (flagged; knob validation).
+- **New DB tables / migrations** — none (decisions.md PD-5 justification).
+- **Stopping the hbk mint** — sibling fix lane owns the root cause; this lane sweeps accumulated + recurring stock.
+
+## 7. Deliverable inventory (this directory)
+
+| File | Author | Content |
+|---|---|---|
+| `disk-lane-baseline-2026-11-18.md` | salvaged (commit fd782b70d) | lane-1 design substrate: /tmp consumer classes, fences, worktree disposition |
+| `phase1-plan.md` | worker (plan-creation) | trigger chain + arming + re-arm guard + architecture diagram |
+| `phase2-plan.md` | worker (plan-creation) | orchestrator upgrade + lane skills |
+| `phase3-plan.md` | worker (plan-creation) | lanes 1–5 |
+| `phase4-plan.md` | worker (plan-creation) | report/receipt/manual trigger/FE |
+| `phase5-plan.md` | worker (plan-creation) | tests, verification map, staging |
+| `plan-overview.md` | planner (synthesis) | this file |
+| `decisions.md` | planner (adjudication log) | LEADER-RULING vs PLANNER-DECISION with evidence |
+
+## 8. Verification & staging
+
+P5 owns the terminal gate: full test matrix (fenced — temp DBs, dev env fence `POSTGRES_DB=ensemble_dev`/`DAEMON_PORT=8079`, `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0`, no live-shaped HOME paths), P2/P3/P4 acceptance→check map, manual-trigger receipt provenance (downstream tester gate), and the staging-only release per R7. Boot SLO context: Emperor-set boot wall-clock ≤ 120s applies to any boot-touching verification.
