@@ -1,0 +1,69 @@
+<section class="report-page">
+  <header class="report-header">
+    <h1>Report</h1>
+    <button mat-button (click)="service.loadRuns()" [disabled]="loading()">
+      <mat-icon>refresh</mat-icon>
+      Refresh
+    </button>
+  </header>
+
+  @if (loading()) {
+    <mat-spinner diameter="32"></mat-spinner>
+  }
+
+  @if (error()) {
+    <p class="report-error">{{ error() }}</p>
+  }
+
+  @if (!loading() && runs().length === 0 && !error()) {
+    <p class="report-empty">No maintenance runs to show yet.</p>
+  }
+
+  @if (runs().length > 0) {
+    <table class="report-runs">
+      <thead>
+        <tr>
+          <th>Run</th>
+          <th>Trigger</th>
+          <th>Started</th>
+          <th>Ended</th>
+          <th>Status</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (run of runs(); track trackByRunId($index, run)) {
+          <tr [class.selected]="selected()?.run_id === run.run_id">
+            <td>{{ run.run_id }}</td>
+            <td>{{ run.trigger_type }}</td>
+            <td>{{ run.started_at }}</td>
+            <td>{{ run.ended_at }}</td>
+            <td>{{ run.overall_status }}</td>
+            <td>
+              <button mat-button (click)="select(run)">View</button>
+            </td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  }
+
+  @if (selected(); as run) {
+    <section class="report-view">
+      <header class="report-view-header">
+        <h2>{{ run.run_id }}</h2>
+        <button mat-button (click)="clearSelection()">Close</button>
+      </header>
+      <iframe
+        class="report-frame"
+        [src]="run.report_view_url"
+        title="Maintenance report"
+      ></iframe>
+      <p class="report-links">
+        <a [href]="run.report_view_url" target="_blank" rel="noopener">Open report</a>
+        ·
+        <a [href]="run.receipt_view_url" target="_blank" rel="noopener">Open receipt</a>
+      </p>
+    </section>
+  }
+</section>

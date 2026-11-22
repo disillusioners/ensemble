@@ -1079,6 +1079,12 @@ export type * from './room.model';
 // `count` == page-length rule).
 export * from './mcps-gateway.model';
 
+// Report (Central Maintenance System Phase 4, D-E) — the READ-ONLY
+// operator surface: list of maintenance runs + view URLs into the
+// live_views `maintenance-reports` root. See report.model.ts for the
+// wire-contract notes.
+export * from './report.model';
+
 // Metrics query door (central-metrics-v1 Phase 5) — the VERBATIM mirror of
 // the FROZEN envelope + the three route payloads. The door is
 // `docs/architecture/metrics-query-contract.md`; the mirror is

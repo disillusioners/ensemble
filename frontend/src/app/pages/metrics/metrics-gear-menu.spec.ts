@@ -110,3 +110,23 @@ describe('Metrics — the lazy route', () => {
     expect(routeIdx).toBeLessThan(idRouteIdx);
   });
 });
+
+describe('Report — gear menu entry (Phase 4, BR-19)', () => {
+  it('places Report AFTER Metrics and BEFORE the conditional appends', () => {
+    const metricsIdx = appTs.indexOf("{ label: 'Metrics'");
+    const reportIdx = appTs.indexOf("{ label: 'Report'");
+    const dbUpdateIdx = appTs.indexOf('settingsMenuItems.update(items => [');
+
+    expect(metricsIdx).toBeGreaterThan(-1);
+    expect(reportIdx).toBeGreaterThan(-1);
+    expect(dbUpdateIdx).toBeGreaterThan(-1);
+
+    expect(metricsIdx).toBeLessThan(reportIdx);
+    expect(reportIdx).toBeLessThan(dbUpdateIdx);
+  });
+
+  it('does NOT add a top-level header link for /report', () => {
+    expect(appHtml.includes("'/report'")).toBe(false);
+    expect(appHtml.includes('"/report"')).toBe(false);
+  });
+});

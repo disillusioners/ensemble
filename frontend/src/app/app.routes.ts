@@ -222,5 +222,6 @@ export const routes: Routes = [
   // off the initial bundle. The page itself only READS: the gateway is
   // driven by the agent tools, never by the browser.
   { path: 'mcps-gateway', loadComponent: () => import('./pages/mcps-gateway/mcps-gateway.component').then(m => m.McpsGatewayComponent), title: 'MCP Gateway' },
+  { path: 'report', loadComponent: () => import('./pages/report/report.component').then(m => m.ReportComponent), title: 'Report' },
   { path: '**', redirectTo: '' }
 ];
