@@ -116,14 +116,13 @@ EXPECTED_DAEMON_PATHS: frozenset[str] = frozenset({
     # --- P6: projection + new router (phase1 §0.3) ------------------------
     "daemon/services/engine/projection.py",
     "daemon/routers/engine.py",
-    # --- UNSANCTIONED — REPORTED ------------------------------------------
-    # No ownership-map row anywhere in the planning package sanctions this
-    # path. It entered the diff via the engine-arc dead-knob / retired-key
-    # work (commits 36d736a17, c4bf2c3b7, 4664ee8e7) but was never claimed.
-    # Per the reconcile rule it is INCLUDED here (so the gate is not a false
-    # RED) yet FLAGGED for a human: add a reviewed one-line ownership-map row
-    # or revert the edit. Do NOT treat this inclusion as silent absorption.
-    "daemon/plugin_subsystem/config_compat_contract.py",  # UNSANCTIONED — REPORTED
+    # --- P1 — T1.12 D-1 compat-contract extension (NOW MAP-CITING) ----------
+    # Landed 6e97cdce2 (phase1-plan §0.3:103 + plan-overview attestation row 71;
+    # ADD-A-MAP-ROW adjudication — revert would restore RC=3 on the promote
+    # ENTRY gate, a functional regression). Replaces the former flagged carry:
+    # the file is now a claimed ownership-map row (owner P1), so the prior
+    # marker is obsolete and must stay gone.
+    "daemon/plugin_subsystem/config_compat_contract.py",  # P1 — T1.12 D-1 compat-contract extension (landed 6e97cdce2)
 })
 
 # Owner hints for the RED message — which phase SHOULD have owned an offending
@@ -151,7 +150,7 @@ _SPECIAL_OWNERS: dict[str, str] = {
     "daemon/repositories/report_injection/repository.py": "P5 (class-3 bridge, one-of)",
     "daemon/routers/engine.py": "P6 (new router)",
     "daemon/plugin_subsystem/config_compat_contract.py": (
-        "UNSANCTIONED — REPORTED (no ownership-map row; needs review)"
+        "P1 — T1.12 D-1 compat-contract extension (phase1-plan §0.3:103, landed 6e97cdce2; map-citing row)"
     ),
 }
 
