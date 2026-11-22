@@ -15,6 +15,7 @@ UNIT_FILES=(
   tests/unit/services/engine/test_boot.py
   tests/unit/services/engine/test_wiring.py
   tests/unit/services/engine/test_watchdog_drill.py
+  tests/unit/services/engine/test_boot_posture_truth.py
 )
 for f in "${UNIT_FILES[@]}"; do
   [ -f "$f" ] || { echo "FATAL: missing $f"; exit 1; }

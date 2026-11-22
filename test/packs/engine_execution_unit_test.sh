@@ -21,6 +21,13 @@
 #         backoff + metrics snapshot key set + dead (CS-9 carve-out) +
 #         project_merged purity + hydration + ingest_event seam + F-7
 #         (no silent return) + consecutive_skips survival.
+#   tests/unit/services/engine/test_kill_switch_exec_wiring.py
+#       — D3.6/D3.5/D3.9/D3.12 kill-switch EXECUTION-path wiring:
+#         the engine-wide switch is read at tick time through the resolution
+#         ladder (per-job kill_switch_key → ENSEMBLE_ENGINE_ENABLED →
+#         ENSEMBLE_ENGINE_SHADOW_MODE → spec); fail-to-legacy polarity;
+#         a tripped switch never kills the tick loop; resolver reads are pure
+#         functions over an injected resolver (ENV-FREE).
 #
 # CONTRACT
 #   - Dual-layer timeout: inner `timeout 280`; caller wraps with 300.
@@ -52,6 +59,7 @@ UNIT_FILES=(
   tests/unit/services/test_engine_honest_state.py
   tests/unit/services/test_engine_single_flight.py
   tests/unit/services/test_engine_due_skip_backoff.py
+  tests/unit/services/engine/test_kill_switch_exec_wiring.py
 )
 
 for f in "${UNIT_FILES[@]}"; do
