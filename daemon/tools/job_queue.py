@@ -97,6 +97,18 @@ Create, list, and manage jobs and job queues.
 
 TERMINAL_STATES = set(ALL_TERMINAL_STATES)
 
+
+def _strip_id(value: str) -> str:
+    """Strip surrounding whitespace from an agent-supplied work/job ID.
+
+    IDs copied out of markdown / JSON tool output frequently carry a
+    trailing newline or padding whitespace; a raw lookup then misses the
+    indexed column and surfaces a spurious "not found" even though the
+    work exists. Defensive on non-str input so a malformed handle never
+    raises at the tool boundary (the resolver degrades to not-found).
+    """
+    return value.strip() if isinstance(value, str) else value
+
 # Watch-cap ceiling shared by every watch-family tool (job_create,
 # watch_job, watch_jobs, watch_mission). Single source for both the
 # number and the error sentence so the per-tool wordings cannot drift
@@ -1692,6 +1704,7 @@ def create_job_tools(
     @tool
     async def job_get(job_id: str) -> dict:
         """Get job details by ID. Use tool_help("job_get") for details."""
+        job_id = _strip_id(job_id)
         try:
             # Phase 7: only the resolver path remains. ``service.get_work``
             # resolves either a Task row (worker-pool side) or a JobItem
@@ -1890,6 +1903,7 @@ def create_job_tools(
     @tool
     async def job_cancel(job_id: str) -> str:
         """Cancel a pending or processing job. Use tool_help("job_cancel") for details."""
+        job_id = _strip_id(job_id)
         try:
             # Phase 7: the work_id resolves to either a Task row
             # (worker-pool side, requires cooperative
@@ -2055,6 +2069,7 @@ def create_job_tools(
         # ``daemon.services.capability_resolver.parse_resume_message``.
         # This tool intentionally carries NO resume logic (documented
         # convention, not a code path).
+        old_job_id = _strip_id(old_job_id)
         try:
             # P-B (Phase 5, 2026-06-27): rewrite the LOOKUP half of
             # ``job_continue`` to be resolver-aware. The previous
@@ -2081,6 +2096,15 @@ def create_job_tools(
             #     report) we SKIP the check — tasks are not
             #     soft-deletable, so the check is meaningless and
             #     would also force a second lookup for nothing.
+            #
+            #     A completed JobItem-only row (resolver found the
+            #     JobItem PK with no paired Task) is the canonical
+            #     continue target: ``kind == "job"`` here, the row
+            #     is undeleted, and its terminal status passes 2
+            #     below. Initialize ``old_job`` to None so the M2
+            #     gate's JobItem-side fallback (below) is always safe
+            #     to evaluate regardless of which branch ran.
+            old_job = None
             if record.kind == "job":
                 # Reviewer W3 — race guard: if ``get_work`` resolved
                 # a job but the follow-up ``get_job`` returns None,
@@ -2105,7 +2129,8 @@ def create_job_tools(
                 return {
                     "error": (
                         f"Job {old_job_id} is not in a terminal state (current: {record.status}). "
-                        "Only completed/failed/cancelled/dead_letter jobs can be continued."
+                        "Only terminal jobs (completed/settled/failed/cancelled/"
+                        "dead_letter/orphaned_no_task) can be continued."
                     )
                 }
 
@@ -3120,6 +3145,7 @@ def create_job_tools(
 
         Collects messages from the root instance and all descendants.
         Use tool_help("job_messages") for details."""
+        job_id = _strip_id(job_id)
         try:
             record = await job_service.get_work(job_id)
             if record is None:
@@ -3239,6 +3265,7 @@ def create_job_tools(
 
         Shows all instances spawned by the job in a tree structure.
         Use tool_help("job_tree") for details."""
+        job_id = _strip_id(job_id)
         try:
             record = await job_service.get_work(job_id)
             if record is None:
@@ -3352,6 +3379,7 @@ def create_job_tools(
         """Get a progress snapshot for a running job.
 
         Use tool_help("job_progress") for details."""
+        job_id = _strip_id(job_id)
         try:
             record = await job_service.get_work(job_id)
             if record is None:
@@ -3468,6 +3496,7 @@ def create_job_tools(
         """Inject a message into a RUNNING job's instance mid-execution.
 
         Use tool_help("job_inject") for details."""
+        job_id = _strip_id(job_id)
         try:
             record = await job_service.get_work(job_id)
             if record is None:
@@ -3649,6 +3678,7 @@ def create_job_tools(
         """Submit the orchestrator's answer to a pending question pack on a watched job.
 
         Use tool_help("job_answer") for details."""
+        work_id = _strip_id(work_id)
         # The job_answer tool is the agent-facing counterpart of
         # ``POST /api/jobs/{work_id}/answer`` — both surfaces share the
         # SAME underlying helper ``answer_questions_via_instance``
@@ -3919,6 +3949,7 @@ def create_job_tools(
         job_id: Annotated[str, Field(description="The work_id of an ACTIVE (non-terminal, instance-bearing) job to pause. Its whole instance lineage pauses with it.")],
     ) -> dict:
         """Pause the instance behind an ACTIVE job and cascade to its lineage. Use tool_help("job_pause") for details."""
+        job_id = _strip_id(job_id)
         # Mirror the HTTP pause endpoint's write-paused migration gate
         # (routers/instances.py:660). Parity, not re-implementation —
         # the agent tool and the FE route refuse the same way.
@@ -4021,6 +4052,7 @@ def create_job_tools(
         job_id: Annotated[str, Field(description="The work_id of an ACTIVE job whose instance is paused. Its whole instance lineage resumes with it.")],
     ) -> dict:
         """Resume the instance behind a PAUSED job and cascade to its lineage. Use tool_help("job_resume") for details."""
+        job_id = _strip_id(job_id)
         if manager is None:
             return {"error": "Instance manager not available — job_resume requires manager access", "resumed": False}
         # Mirror the HTTP resume endpoint's write-paused migration gate
