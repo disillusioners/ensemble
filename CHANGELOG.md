@@ -5,6 +5,16 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.36] — 2026-11-22
+
+### Added — ENGINE-ARC FLIP-PREP: kill-switch execution wiring + truthful boot posture + SLO gate (flip-day surface complete)
+
+- **Kill-switch execution-path wiring (defect 91cd80d3 CLOSED)** — `EngineSwitchResolver.resolve_job` is now read at tick time through the resolution ladder (per-job `kill_switch_key` → `ENSEMBLE_ENGINE_ENABLED` → `ENSEMBLE_ENGINE_SHADOW_MODE` → spec), closing the engine-core inertness defect where the engine-wide mass-rollback lever was boot-scoped (restart-scoped) only. A tripped switch stamps `SKIPPED_KILL_SWITCHED` (reason token `KILL_SWITCHED`) on the observer specs; capability proven 12/12 on the merged-tip kill-switch boot evidence. Fail-to-legacy polarity and supervisor-boundary preservation pinned; a runtime trip takes effect on the next tick, no restart.
+- **Truthful boot posture line** — the single INFO `engine boot posture:` line now reports the real `USE_ENGINE` state (via `describe_use_engine_flags`) instead of a hardcoded value; the honest all-unset posture reads 0/12 engaged. New behavioral pin `tests/unit/services/engine/test_boot_posture_truth.py`.
+- **SLO gate classes** — formal bounds WARM ≤ 250 ms (dormant / un-contended host; observed band 103.310–191.188 ms) and COLD ≤ 360 ms (cold / contended host; observed band 237.982–307.878 ms); flip-day class = COLD. `test/packs/engine_boot_slo_gate.sh` owns the block-elapsed measurement (LEG 3 WARM measurement, LEG 4 COLD constant + provenance). The ACTIVE-shape gated number is recorded as an OBSERVATION only; the active ≤ 600 ms formalization is explicitly named as a §9 next-touch (PENDING — not shipped in this release).
+- **Flip-day surface completion** — with the above, the flip-prep surface is complete (kill-switch execution wiring, truthful posture, SLO gate ownership). The ceremony flip itself remains Emperor-owned; this release stages only.
+- **Drift disclosure (tag-to-tag honesty)** — the v0.31.35 → v0.31.36 delta is the flip-prep arc only. Riding arcs already carry their own dated sections above and are NOT duplicated here: the central-maintenance-system arc (v0.31.33–v0.31.35: maintenancer, scheduler source adapter, maintenance-reports door), the WC-watchdog wedge-notice false-positive cure (v0.31.33), and the v0.31.33/34/35 version bumps. ZERO migration files in the live-current-tag → slot-tag delta (v0.31.31 → v0.31.36).
+
 ## [v0.31.35] — 2026-11-22
 
 ### Fixed — Central Maintenance System live-proof cures (staged-boot v0.31.34 feedback)
