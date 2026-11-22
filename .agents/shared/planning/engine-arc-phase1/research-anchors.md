@@ -31,7 +31,7 @@
 - Same-state = implicit no-op, NOT enumerated (:13-21, `can_transition` :87-110). Creation = INSERT, never a transition (:22-27). `InvalidTransitionError(ValueError)` :65-81.
 
 ### Migrations — `daemon/migrations/versions/`
-- **134 .sql files** at this tree (blueprint's "119" is stale; the earlier "127" here was a stale study-note count — architect FA-2 census, tree-verified at approver iteration-001). Naming convention: `YYYYMMDD_HHMMSS_<snake_name>.sql`.
+- **134 .sql files** at this tree (blueprint's "119" is stale; the earlier "127" here was a stale study-note count — architect FA-2 census, tree-verified at approver iteration-001). Naming convention: `YYYYMMDD_HHMMSS_<snake_name>.sql`. **[release-B figure fold — 2026-11-21: 134 → 137 at tree (verified); the 134 was the iteration-001 correction, itself superseded by the lanes' subsequent migrations]**
 - **3 NEWEST:** `20261119_000001_add_proposal_decision_columns.sql`, `20261116_083000_add_room_resolution_warnings.sql`, `20261115_120000_add_room_proposal_dedup_columns.sql`. Current max number = `20261119_000001` → next free slot is any `20261121_HHMMSS_*` (date-prefix rules; FA-2 pins `20261121_120000/120001` free).
 - **Style model (pick):** `20261018_090003_create_resource_pid_map.sql` (93 lines) —
   - Header comment block with What-lives-here + **DUAL-DRIVER NOTES** :24-34 (SQLite: this file runs via the runner every startup; PostgreSQL: schema comes from `SQLModel.metadata.create_all` off the model + late-import block in `daemon/manager.py`; PG-side runner is a NO-OP) + **RUNTIME-SPLITTER NOTE** :40-43 (no inline `;` inside comments — runner strips only full-line `--`).
@@ -232,7 +232,7 @@ All in `daemon/services/maintenance.py`:
 | api.py:1647-1661 / :1650-1657 (RetryScheduler wiring / 60s poll) | **1662-1676** (poll_interval=60.0 :1669, start :1673) |
 | work_notifier.py:275-313 ([JOB_EVENT] builder) | builder **285-313** (header :300); `_job_event_source` :256-272; `notify_work_watchers` :316 |
 | eligible_pending_sweep.py:71 (class) | **72** (1-line shift) |
-| migration census era "119 files" (blueprint) | **134 files** (FA-2 census; the study-note 127 was itself stale) |
+| migration census era "119 files" (blueprint) | **134 files** (FA-2 census; the study-note 127 was itself stale) **[release-B figure fold — 2026-11-21: 134 → 137 at tree (verified); the 134 was the iteration-001 correction, itself superseded by the lanes' subsequent migrations]** |
 
 ### UNCHANGED (verified identical)
 dependency_bus.py:1921 (fire_for_terminal_child) · event_bus.py:155 (create_event) + :286 (subscribe_all) · child_reports.py:6444 / :6643 / :6945 (bus wiring call sites) · error_reporting.py:693 · instance_lifecycle.py:5976 / :6589 (DEBUG-only consumers) · job_lock_sweep.py:93 (class) + :241→:250 (Template-B catch→return) · watch_reconcile_sweep.py:91 · orphan_watcher_sweep.py:85 · sources_gc_service.py:96 (+ loop :250-252) · job_state_machine VALID_TRANSITIONS 8-entry set.
