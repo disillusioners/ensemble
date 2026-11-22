@@ -459,6 +459,105 @@ async def test_bridge_failure_stamps_failed_backoff_and_maps_to_legacy_errors(mo
 
 
 @pytest.mark.asyncio
+async def test_production_bridge_getter_raise_stamps_failed_backoff(monkeypatch):
+    """F-1: the PRODUCTION seam — a raising bus getter through the REAL adapter.
+
+    The R1 leg injects failure via ``svc.set_executor``, which BYPASSES
+    ``build_engine_executor``'s bridge — so a bridge that silently swallowed
+    its errors would leave that leg green. This leg drives the real adapter:
+    the bus getter raises inside the worker thread, the bridge lets it
+    propagate, and the engine's honest state machine stamps
+    ``OUTCOME_FAILED_BACKOFF`` + ``error_class``.
+
+    The legacy side is pinned symmetrically: the same getter-raise lands in
+    ``_errors_total`` (both paths FAIL OPEN; only the accounting differs).
+    """
+    cfg = _make_cfg(interval=1, shadow=False)
+
+    def _boom() -> Any:
+        raise RuntimeError("bus getter exploded")
+
+    monkeypatch.setattr(ows, "get_dependency_bus", _boom)
+
+    calls = {"n": 0}
+
+    def counting_executor() -> dict[str, Any]:
+        calls["n"] += 1
+        return build_engine_executor(30)()  # the REAL adapter — not a stub
+
+    db = _db_engine()
+    repo = EngineRepository(db)
+    svc = EngineService(repo, EngineRegistry(repo), cfg.engine, shadow_mode=False)
+    await EngineRegistry(repo).aregister(_orphan_spec(cfg))
+    svc.set_executor(ORPHAN_WATCHER_ENGINE_JOB_ID, counting_executor)
+    await svc.start()
+    try:
+        await asyncio.sleep(2.6)
+    finally:
+        await svc.stop()
+
+    with Session(db) as s:
+        runs = list(s.exec(select(EngineRun).where(EngineRun.job_id == ORPHAN_WATCHER_ENGINE_JOB_ID)).all())
+    assert len(runs) >= 1
+    assert calls["n"] >= 1, "the real adapter was never invoked"
+    assert {r.outcome for r in runs} == {OUTCOME_FAILED_BACKOFF}
+    assert {r.error_class for r in runs} == {"RuntimeError"}
+
+    # Legacy symmetry: the SAME getter-raise on the legacy path.
+    legacy = OrphanWatcherSweepService(
+        dependency_bus=None, min_watcher_age_seconds=30
+    )
+    legacy_result = await legacy.sweep_once()
+    assert legacy_result["errors"] == 1
+    assert legacy_result["cancelled"] == 0
+
+
+@pytest.mark.asyncio
+async def test_production_bridge_sweep_raise_stamps_failed_backoff(monkeypatch):
+    """F-1 (second bridge seam): a raising bus SWEEP through the real adapter.
+
+    The real bus never raises (it fails open internally), so this leg injects
+    a raising sweep method to exercise the ``asyncio.run`` boundary — the
+    other production seam where a bridge-level error can occur. If the
+    adapter swallowed that error and reported a no-op sweep, the engine would
+    stamp SUCCEEDED and this leg goes RED.
+    """
+    cfg = _make_cfg(interval=1, shadow=False)
+
+    class _RaisingBus:
+        async def _sweep_orphan_watchers(
+            self, min_watcher_age_seconds: int = 30
+        ) -> int:
+            raise RuntimeError("bus sweep exploded")
+
+    monkeypatch.setattr(ows, "get_dependency_bus", lambda: _RaisingBus())
+
+    calls = {"n": 0}
+
+    def counting_executor() -> dict[str, Any]:
+        calls["n"] += 1
+        return build_engine_executor(30)()
+
+    db = _db_engine()
+    repo = EngineRepository(db)
+    svc = EngineService(repo, EngineRegistry(repo), cfg.engine, shadow_mode=False)
+    await EngineRegistry(repo).aregister(_orphan_spec(cfg))
+    svc.set_executor(ORPHAN_WATCHER_ENGINE_JOB_ID, counting_executor)
+    await svc.start()
+    try:
+        await asyncio.sleep(2.6)
+    finally:
+        await svc.stop()
+
+    with Session(db) as s:
+        runs = list(s.exec(select(EngineRun).where(EngineRun.job_id == ORPHAN_WATCHER_ENGINE_JOB_ID)).all())
+    assert len(runs) >= 1
+    assert calls["n"] >= 1
+    assert {r.outcome for r in runs} == {OUTCOME_FAILED_BACKOFF}
+    assert {r.error_class for r in runs} == {"RuntimeError"}
+
+
+@pytest.mark.asyncio
 async def test_engine_due_ticks_equal_legacy_ticks(monkeypatch):
     """R4: over the SAME window the engine's due-ticks EQUAL the legacy ticks.
 
@@ -716,16 +815,30 @@ def test_boot_block_except_handler_calls_the_rearm():
     R2: the re-arm call site is itself guarded — the handler runs in the
     never-abort-boot path, so a raise there would abort the boot.
     R5: the executor drop is LOUD (an observable WARNING naming the job).
+    F-2: the drop uses the IMPORTED constant (a retyped literal would pop
+    nothing) and logs TRUTHFULLY — it distinguishes "dropped the executor"
+    from "no engine executor was registered (nothing to drop)".
     """
     handler_at = API_SRC.index("except Exception as _engine_boot_exc:")
-    window = API_SRC[handler_at : handler_at + 2600]
+    # The window is delimited by the NEXT section marker (not a fixed length,
+    # which drifts every time the handler grows).
+    tail_at = API_SRC.index("# service-tool Phase 1 (1.C.14)", handler_at)
+    window = API_SRC[handler_at:tail_at]
     assert "rearm_legacy_loop(" in window
     assert "FAIL-TO-LEGACY" in window or "orphan_watcher_sweep" in window
     # The partial executor is dropped first (a half-started engine must not
     # double-run the sweep beside the re-armed legacy loop).
     assert "_executors.pop(" in window
-    # R5 — the drop is observable in ops logs (job id + fail-to-legacy reason).
+    # F-2 — the IMPORTED constant, never the retyped literal.
+    assert "ORPHAN_WATCHER_ENGINE_JOB_ID, None" in window
+    assert '_executors.pop("orphan-watcher", None)' not in window
+    # F-2 — the drop's RESULT is captured and the log is truthful about it.
+    assert "dropped = _engine_svc._executors.pop(" in window
     assert "dropped the engine executor for job_id=" in window
+    assert "no engine executor was registered for job_id=" in window
+    # R5 — the drop is observable in ops logs (job id + fail-to-legacy reason).
+    # 🟢(c) — the last silent except now logs.
+    assert "dropping the engine executor for job_id=" in window
     # R2 — the call site is guarded so the handler can never abort the boot.
     assert "except Exception as _rearm_err:" in window
     assert "boot CONTINUES" in window

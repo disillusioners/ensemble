@@ -156,14 +156,14 @@ def rearm_legacy_loop(
     """
     if service is None:
         return False
-    task = getattr(service, "_task", None)
-    if task is not None:
-        # Defensive: this runs inside the boot block's exception handler —
-        # a probe that raises here would abort the boot we are trying to keep.
-        done = getattr(task, "done", None)
-        if callable(done) and not done():
-            return False  # already running — never start a second loop
     try:
+        task = getattr(service, "_task", None)
+        if task is not None:
+            # Defensive: this runs inside the boot block's exception handler —
+            # a probe that raises here would abort the boot we are trying to keep.
+            done = getattr(task, "done", None)
+            if callable(done) and not done():
+                return False  # already running — never start a second loop
         service.start()
     except Exception as start_err:  # noqa: BLE001 — never abort the boot
         logger.error(

@@ -4016,17 +4016,34 @@ async def lifespan(app: FastAPI):
         # double-run the sweep next to the re-armed legacy loop.
         if _engine_svc is not None:
             try:
-                _engine_svc._executors.pop("orphan-watcher", None)
-                # R5 — the drop is LOUD: an executor silently discarded here
-                # is the difference between "the engine owns the sweep" and
-                # "nobody owns the sweep", so it must be visible in ops logs.
-                logger.warning(
-                    "orphan-watcher pilot FAIL-TO-LEGACY: dropped the engine executor for job_id=%s (engine boot wiring failed: %s) — execution returns to the legacy path",
-                    ORPHAN_WATCHER_ENGINE_JOB_ID,
-                    _engine_boot_exc,
+                # F-2: the IMPORTED constant (never a retyped literal — a
+                # retyped key would silently pop nothing) and the drop's
+                # RESULT, so the log says what actually happened.
+                dropped = _engine_svc._executors.pop(
+                    ORPHAN_WATCHER_ENGINE_JOB_ID, None
                 )
-            except Exception:  # noqa: BLE001 — best effort
-                pass
+                if dropped is not None:
+                    # R5 — the drop is LOUD: an executor silently discarded
+                    # here is the difference between "the engine owns the
+                    # sweep" and "nobody owns the sweep".
+                    logger.warning(
+                        "orphan-watcher pilot FAIL-TO-LEGACY: dropped the engine executor for job_id=%s (engine boot wiring failed: %s) — execution returns to the legacy path",
+                        ORPHAN_WATCHER_ENGINE_JOB_ID,
+                        _engine_boot_exc,
+                    )
+                else:
+                    logger.warning(
+                        "orphan-watcher pilot FAIL-TO-LEGACY: no engine executor was registered for job_id=%s (nothing to drop; engine boot wiring failed: %s) — execution returns to the legacy path",
+                        ORPHAN_WATCHER_ENGINE_JOB_ID,
+                        _engine_boot_exc,
+                    )
+            except Exception as _pop_err:  # noqa: BLE001 — best effort
+                # 🟢(c) — the last silent except now says something.
+                logger.error(
+                    "orphan-watcher pilot FAIL-TO-LEGACY: dropping the engine executor for job_id=%s raised (%s); boot CONTINUES",
+                    ORPHAN_WATCHER_ENGINE_JOB_ID,
+                    _pop_err,
+                )
         if _orphan_legacy_suppressed:
             _orphan_legacy_suppressed = False
             app.state.orphan_watcher_sweep = orphan_watcher_sweep
