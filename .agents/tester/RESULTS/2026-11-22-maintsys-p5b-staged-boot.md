@@ -652,3 +652,159 @@ binary against the dev DB:
 **Carried:** F1 (runbook not shipped in the release), F3 (lane evidence-root split), F4 (list door 503 on
 auth-OFF), F5 (pok-sweep lane non-functional), F6 (metrics/skill lanes need orchestrator supplements),
 plus F2/F7/F8 (documentation-level).
+---
+
+# ADDENDUM — v0.31.35 targeted re-proof (2026-11-22)
+
+> Appended 2026-11-22 ~23:45Z. Same livesafety frame as the leg above. Scope: live verdicts on the
+> fix-wave claims (commit `cf4db3d20 fix(maintenance): live-proof cures — dispatch context, tool families,
+> evidence root, local weekday`), staged on `v0.31.35` (4-way sha `e32bd3d1…`, source_commit `b1833127e`).
+> Branch head at proof time: `cf4db3d20` (2 commits ahead of the leg-B commit `9db7f20fc`).
+
+## A0. Boot evidence (v0.31.35)
+
+| Item | Value |
+|---|---|
+| Binary | `/home/nea/agents-ensemble/releases/v0.31.35/ensemble-prod` (4-way sha verified `e32bd3d1…`) |
+| PID / port | **959147** (own session) / **8079** (pre-checked free) |
+| Banner | `22:36:19 - daemon.api - INFO - Starting Ensemble v0.31.35` (and `22:36:20`) |
+| livez | `200` `{"status":"alive","uptime_seconds":11.848…,"version":"0.31.35"}` |
+| readyz | `200` `{"status":"ready","components":{"database":true,"queue_freshness":true,"services":true,"checkpoint_saver":true},…}` |
+| **Wall time** | **30 s** (22:36:07Z → green 22:36:37Z) — inside the 120 s SLO (leg-B .34 boot was 26 s; comparable) |
+| Boot attempt 1 | none — tier-1 `ensemble.json` persisted before boot (mode 600, no password) → clean tier-1 pass, no exit-78 |
+| Orphan kills | none |
+
+## A1. Trigger + fire delta
+
+Byte-exact canonical string (unchanged runbook) → `POST /api/schedules` → 201, source_id `26d0c191-42bb-4055-8dc8-1752076ac44a`,
+label `central-maintenance-manual-20261122T223657Z`, run_at `22:36:57.080264Z`.
+Execution: triggered_at `22:36:57.244045Z` → **fire delta 0.163781 s ≈ 164 ms**, `status=triggered`, `_defer_count=0` → no idle gate ✅.
+
+## A2. Per-fix verdicts (LIVE)
+
+| # | Claim (fix wave `cf4db3d20`) | Verdict | Evidence |
+|---|---|---|---|
+| **F5** — pok lane runs with project context; no `__system_default__`, no AC10 refusal loop; completes with a PD-4a block | ✅ **PASS** | Receipt: `pok-sweep \| ok \| 2026-11-22T22:43:11Z \| — (read-only census; no supplement needed)`. Evidence `pok-census-llmproxy.md`: 8 active entries queried (`pok_query × 7`) under project `llmproxy (3f401aa9)` — no refusal, no incomplete, no escape-valve exhaustion. (`pok_query` now resolves against the lane's bound project instead of `pok_default_project`.) |
+| **F6** — `metrics-watch` + `skill-check` run on family-matched members without orchestrator supplements (zero supplement calls) | ✅ **PASS** | Receipt: `skill-check \| ok \| 22:44:28Z \| — (read-only census + read-only bash; no supplement needed)`. `metrics-watch \| degraded \| 22:45:45Z \| digest produced from **designed seat supplement** (22:39:58Z) + cross-run deltas; REST door fail-closed (503)` — the supplement used is the **designed** ens-db seat, not an orchestrator rescue (contrast leg-B `.34` where the orchestrator had to rescue metrics-watch + skill-check). No orchestrator-supplement calls for either lane. |
+| **F3** — ALL lane evidence lands under the PROMOTE-STABLE install root; no cwd-relative split | ❌ **FAIL** | Top-level triad (run/receipt/INDEX) landed in the **install root** ✅ (`/home/nea/agents-ensemble/.agents/maintenancer/RESULTS/`), but **every lane's evidence landed in the RELEASE-SCOPED root** `/home/nea/agents-ensemble/releases/v0.31.35/.agents/maintenancer/RESULTS/evidence/manual-20261122-223657/` (pok, metrics, skill-check, abnormality, disk-sweep + 22 raw dumps). The receipt itself records the release-scoped absolute paths and even carries a recommendation to "re-home this run's evidence before v0.31.35 eviction (F-2)". The promote-stable guarantee still holds only for the three top-level artifacts; lane evidence is evictable by keep-3. The `.34` leg had the SAME split (disk-sweep → source checkout); `.35` moved it to the release dir — a different split, not a fix. |
+| **F2** — weekday semantics (my leg-B mislabel corrected) | ✅ **PASS** (correction of record) | Live row: `run_at_utc = 2026-11-28T21:15:00+00:00` → **Saturday in UTC, Sunday 04:15 ICT**. The weekday knob `0` = Sunday and the local date IS Sunday. My leg-B report's "Monday 04:15 ICT" was a mislabel; the fix wave's operator note is correct. Single ownership: the fix wave owns the picker proof, this addendum owns the correction of record. |
+| **F1** — runbook shipped in the release (`docs/`) | ❌ **STILL OPEN** | `releases/v0.31.35/` has `agents/ daemon/ config.yaml frontend/ guidelines/ plugins/ scripts/ manifest.json launcher.sh` — **no `docs/`**. The canonical runbook was again read from the branch worktree copy. Runbook grew 4779 → 6840 B (the fix wave added the P5B operator notes — F4 fail-closed, tier-2 guard, weekday semantics — but did not move the file into the artifact). |
+
+## A3. RECEIPT (verbatim, full)
+
+```markdown
+# Run Receipt — ckpt-20261122_232904787597-628caab9
+
+## Header
+
+- run_id: `ckpt-20261122_232904787597-628caab9` (minted by report-writer, BR-14 primary rung — helper `daemon/services/maintenance_run_identity.py`)
+- run_token: `manual-20261122-223657` (envelope linkage; INDEX dedup survives re-mints)
+- trigger_type: `manual` (VERBATIM from envelope)
+- started_at: 2026-11-22T22:36:57Z
+- ended_at: 2026-11-22T23:29:14Z (report-writer write time)
+- overall_status: `degraded`
+- artifact root: `/home/nea/agents-ensemble/releases/v0.31.35/.agents/maintenancer/RESULTS/` (LIVE INSTALL v0.31.33, PostgreSQL)
+
+## Lane status roll-up
+
+| lane | status | measured_at | recovery |
+|---|---|---|---|
+| pok-sweep | ok | 2026-11-22T22:43:11Z | — (read-only census; no supplement needed) |
+| metrics-watch | degraded | 2026-11-22T22:45:45Z | digest produced from designed seat supplement (22:39:58Z) + cross-run deltas; REST door fail-closed (503 AUTH_NOT_CONFIGURED) |
+| skill-check | ok | 2026-11-22T22:44:28Z | — (read-only census + read-only bash; no supplement needed) |
+| abnormality-check | degraded | 2026-11-22T22:48:20Z | DB passes supplemented by maintenancer ens-db seat (SELECT-only, lexicographic TEXT cutoffs) |
+| disk-sweep | degraded | 2026-11-22T23:22:00Z | — (read-only census; 0 bytes / 0 inodes reclaimed by design) |
+
+Status tally: 2 ok, 3 degraded, 0 failed, 0 incomplete → overall `degraded`. All five lanes resolved before deadline; no watchdog/long-tool-nudge wake fired.
+
+## Anomaly filings
+
+- Child anomaly `4198843b` (metrics-watch, cluster `47ddf14c`) — REST door fail-closed / heartbeat lead.
+- Manager-churn anomaly `d6fe8a3d` (cluster `1cc9b52b`) — one send-refusal window, one completion wake lost and recovered via COMPLETED-revive re-delivery (metrics), one duplicate lane execution (F-12), pok row terminal-flip lag (c699eacf 'running' 42m post-report, health-clean).
+- Escape-valve re-dispatches: 0.
+- Fleet hygiene (operator, untouched per containment): 1 zombie-pending, 11 orphans, 22 never-dispatched husks.
+- Recorded not filed: skill bank drift watch (bank_clones without on-disk bodies), 2/83 requirement_json presence.
+
+## Recommendations (three classes, never collapsed)
+
+### auto_fix_now (2)
+
+- (metrics-watch) read-only re-read of F9/F13/F4/F5/F23 current values and heartbeat-age driver at next digest when the door is available (NOT executed this window: door closed).
+- (disk-sweep) empty-hbk 10,266 inodes → disk-sweep execution pass NEXT run (eligible, NOT executed).
+
+### needs_emperor_word (13)
+
+- (pok-sweep) F4 content-scope mismatch adjudication — 3/5 POK bodies use ensemble-platform vocabulary; ownership belongs to leader Phase-1.5 gate.
+- (pok-sweep) suggested captures — environment-domain entries, implementation-audience entries, a curated deploy-verification procedure.
+- (pok-sweep) verification debt — verify_count=0 / last_verified=null across all 5 active rows.
+- (metrics-watch) enable auth on the daemon metrics door with a dedicated metrics:read machine token (setting/policy change, out of lane).
+- (metrics-watch) decide priority for the recurring w3.py F18 wiring defect (F18 series_absent is DEFECT-driven, not benign).
+- (skill-check) provision skill_* reads on explorer surface or route skill-check to a capable agent (anomaly b80a615e).
+- (skill-check) confirm skill_bank=83 (seat) vs prior 16 discrepancy with seat owner.
+- (skill-check) decide whether bank-clones (install-opendesign v1.3.0, opendesign-verify v1.0.0) need on-disk body mirrors.
+- (abnormality-check) reportless-week residual — zero run artifacts from ANY prior fire on the release root; audit-policy decision (surfaced, not self-healed, not re-fired).
+- (disk-sweep) re-home this run's evidence before v0.31.35 eviction (F-2) — re-home is needs_emperor_word; top-level artifacts written to install root only.
+- (disk-sweep) .agents payload allowlist / manifest pin (F-3).
+- (disk-sweep) populated-hbk retention; pytest-of-nea keep policy; node-compile-cache wipe; base-extract retention; v0 sidecars.
+- (disk-sweep) worktree disposition (11 dirty of 38).
+
+### route_to_lane (18)
+
+- (metrics-watch) w3.py:234/240 F18 defect → code owner / abnormality lane.
+- (metrics-watch) heartbeat_age 1054s driver identification → queue/worker lane.
+- (metrics-watch) DB dead_letter_items=7 vs gauge=0 measure split → queue lane (lead only).
+- (skill-check) requirement_json presence verification (2/83) → seat owner.
+- (skill-check) usage-growth delta baseline capture → next run (first measured run).
+- (skill-check) orphan-sweep residue → seat owner.
+- (abnormality-check) w3.py TypeError fix → code owner (anomaly 34c37410).
+- (abnormality-check) guard-blocked eligible task → queue owner (anomaly 5cbdc0eb).
+- (abnormality-check) heartbeat_age 1054s driver identification → queue/worker lane.
+- (abnormality-check) DLQ table/gauge measure split → queue lane.
+- (disk-sweep) stale shakedown-fleet (534) → minting source.
+- (disk-sweep) stale skill-capture-sink (607) → minting source.
+- (disk-sweep) stale _MEI → giter.
+- (disk-sweep) mktemp trees → disk-sweep/giter.
+- (disk-sweep) base-extract → gate/verify lanes.
+- (disk-sweep) pytest roots (34/37) → test lane.
+- (disk-sweep) worktree drift → giter lane.
+- (disk-sweep) journal .bak → owning lane.
+
+Routing legend: `auto_fix_now` = safe, bounded, in-lane authoring already completed. `needs_emperor_word` = a decision the report surfaces but never makes. `route_to_lane` = a fix owned by a lane or by the operator.
+
+## Evidence (ABSOLUTE paths)
+
+- pok-sweep lane: `/home/nea/agents-ensemble/releases/v0.31.35/.agents/maintenancer/RESULTS/evidence/manual-20261122-223657/lane-pok-sweep/pok-census-manual-20261122-223657.md` + `pok-query-raw-manual-20261122-223657.json`
+- metrics-watch lane: `/home/nea/agents-ensemble/releases/v0.31.35/.agents/maintenancer/RESULTS/evidence/manual-20261122-223657/lane-metrics-watch/rest-door-probe.txt` + `metrics-digest.md`
+- skill-check lane: `/home/nea/agents-ensemble/releases/v0.31.35/.agents/maintenancer/RESULTS/evidence/manual-20261122-223657/lane-skill-check/01-census-skill-list.txt`, `02-set-equality-versions-autoload.txt`, `03-load-failures-and-db-seat-measures.txt`
+- abnormality-check lane: `/home/nea/agents-ensemble/releases/v0.31.35/.agents/maintenancer/RESULTS/evidence/manual-20261122-223657/lane-abnormality-check/anomaly-sweep-and-ledger-watch.md`
+- disk-sweep lane (1 report + 22 raw dumps): `/home/nea/agents-ensemble/releases/v0.31.35/.agents/maintenancer/RESULTS/evidence/manual-20261122-223657/lane-disk-sweep/disk-sweep.md` + `disk-sweep-raw/`
+
+Full lane detail (verbatim PD-4a blocks): `run-ckpt-20261122_232904787597-628caab9.md` (same directory).
+```
+
+## A4. List-door accumulation (AC8 live story)
+
+Install-root `INDEX.md` now carries **two rows** (append-only, dedup by run_id):
+
+```
+| ckpt-20261122_211850382091-68589da3 | run-manual-20261122T204859Z | manual | 2026-11-22T20:48:59Z | 2026-11-22T21:19:31Z | degraded | … | … |
+| ckpt-20261122_232904787597-628caab9 | manual-20261122-223657      | manual | 2026-11-22T22:36:57Z | 2026-11-22T23:29:14Z | degraded | … | … |
+```
+
+The new run appears alongside the leg-B proof run — the stable root accumulates. `GET /api/maintenance-reports` still returns **503 `AUTH_NOT_CONFIGURED`** (auth OFF — same posture as leg B). The FE-facing view URLs serve both runs' artifacts (`/views/maintenance-reports/run-ckpt-….md`, `receipt-ckpt-….md` → 200).
+
+## A5. Shutdown + after
+
+- SIGTERM PID 959147 → **gone in 12 s** (no SIGKILL), port 8079 free, no orphan processes; live daemon (PID 939102) untouched at 1 h 12 m uptime.
+- `/tmp` spot check: `ensemble-hbk-*` 13 459 / 51 310 B / **308 populated retained** (unchanged); `gate-hbk-base*` 357 808 776 B / 19 194 inodes (unchanged); zero deletions.
+- **state.json live-untouched:** promote fields `current=v0.31.33`, `previous=v0.31.31`, `in_flight=null`, `quarantined=[v0.28.5,v0.31.8]`, `pending_*/cooldown_until=null`. Occurrence counts for this run's identifiers (`26d0c191`, `3a267faf`, `959147`, `8079`, `manual-20261122-223657`) = **0 each**. sha256 `5daec83b…` (vs PRE `a5ade560…`) — the delta is the live daemon's own journal appends (a live promote to `v0.31.33` committed at 22:24:30Z, external to this leg; promote fields unchanged by *this* run).
+
+## A6. Addendum verdict
+
+- **F5 → PASS** (pok lane runs, 8-entry census, no AC10 refusal).
+- **F6 → PASS** (metrics-watch + skill-check run on family-matched members; zero orchestrator supplements — only the designed ens-db seat).
+- **F3 → FAIL** (lane evidence still NOT in the promote-stable root — it lands in `releases/v0.31.35/.agents/maintenancer/RESULTS/evidence/…`, release-scoped and evictable; top-level triad is in the install root. The receipt's own `artifact root` prose + a `needs_emperor_word` recommendation acknowledge the re-home debt.)
+- **F2 → PASS** (correction of record — my leg-B "Monday" mislabel; local date is Sunday).
+- **F1 → STILL OPEN** (`.35` ships no `docs/`).
+
+**Honest caveat:** the first re-proof attempt (boot 22:19:30Z, PID 934650) was **killed mid-run at 22:22:24Z by an external live promote** (v0.31.33 committed at 22:24:30Z — the promote's launcher sweep took out the staged daemon). No artifacts survived from that attempt; the verdicts above come from the second (clean) attempt. The fix wave's claims are judged on the .35 run that completed; the external interference is recorded, not blamed on the fix wave.
