@@ -1,0 +1,142 @@
+=== BOOT B GATE START 2026-11-22T13:00:12.872470386Z ===
+PID_SUFFIX=4028421  SCRATCH=/tmp/pilot_gate_B_4028421  DBNAME=pilot_gate_b_4028421
+DAEMON_LOG=/tmp/pilot_gate_B_daemon_4028421.txt  EVID=/tmp/pilot_gate_B_evidence_4028421.txt  REPORT=/tmp/pilot_gate_B_report_4028421.txt
+=== PREFLIGHT ===
+whoami=nea uid=1000
+PG_BIN initdb: OK (/usr/lib/postgresql/16/bin/initdb)
+PG_BIN pg_ctl: OK (/usr/lib/postgresql/16/bin/pg_ctl)
+PG_BIN psql: OK (/usr/lib/postgresql/16/bin/psql)
+PG_BIN createdb: OK (/usr/lib/postgresql/16/bin/createdb)
+worktree: OK -> /home/nea/ensemble-src-wt-pilot-orphanwatcher
+venv python: OK
+curl: /usr/bin/curl
+PORT_PRECHECK: 8092 FREE
+PORT_PRECHECK: 19702 FREE
+PORT_PRECHECK: 8091 FREE
+PORT_PRECHECK: 19701 FREE
+DBNAME_SAFETY: pilot_gate_b_4028421 not in {ensemble_prod,ensemble_dev,''} (PASS)
+AMBIENT ENSEMBLE_ENGINE_ENABLED=<unset> SHADOW=<unset> FLAG=<unset>
+=== SCRATCH SETUP 2026-11-22T13:00:13.151315040Z ===
+initdb: OK
+waiting for server to start.... done
+server started
+pg_ctl start: OK (port 19702, socket /tmp/pilot_gate_B_4028421/pg/sock)
+createdb: OK (pilot_gate_b_4028421)
+ALTER ROLE
+ALTER ROLE password: OK
+Tier-1 ensemble.json written:
+{
+  "database": "postgres",
+  "postgres": {
+    "host": "127.0.0.1",
+    "port": 19702,
+    "db": "pilot_gate_b_4028421",
+    "user": "nea",
+    "password": "pilot_gate_pw"
+  },
+  "sqlite": {
+    "instances_db": "./data/instances.db",
+    "checkpoints_db": "./data/checkpoints.db"
+  }
+}
+=== BOOT B 2026-11-22T13:00:15.085221223Z ===
+T0=1795352415.093544992
+DAEMON_PID=4028563 (timeout wrapper); flag SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE UNSET (via -u)
+LIVEZ: ok=1 at poll_iter=25
+READYZ: ok=1 strict_http_code=200  T_READY=1795352439.780444677
+SLO_DELTA: 24.687s vs 120s SLO -> PASS
+SLO_VERDICT: PASS
+=== PROVENANCE ===
+proc cwd (/proc/4028563/cwd): /home/nea/ensemble-src-wt-pilot-orphanwatcher
+python child pid: 4028567  cwd: /home/nea/ensemble-src-wt-pilot-orphanwatcher
+--- banner / posture / tick / legacy-start log lines (with timestamps) ---
+13:00:21 - daemon.api - INFO - Starting Ensemble v0.31.27
+13:00:22 - daemon.api - INFO - Starting Ensemble v0.31.27
+13:00:36 - daemon.services.orphan_watcher_sweep - INFO - OrphanWatcherSweepService started: interval=90s
+13:00:36 - daemon.api - INFO - OrphanWatcherSweepService started: interval=90s (default 90s), grace=30s (default 30s)
+13:00:39 - daemon.services.engine.engine - INFO - engine tick loop started: resolution=1.0 shadow_mode=True
+13:00:39 - daemon.api - INFO - engine boot posture: enabled=True shadow=True registrations=12 observer specs (execute_fn withheld, USE_ENGINE all unset); block_elapsed_ms_gated=237.982 block_elapsed_ms_total=262.883
+--- end banner block ---
+=== STRENGTHENER PLANT 2026-11-22T13:00:39.922436815Z ===
+INSERT 0 1
+PLANT_INSERT rc=0
+PLANT_STATE_BEFORE: PENDING
+=== OBSERVE START 2026-11-22T13:00:39.997710684Z (target >=190s post-readyz) ===
+=== OBSERVE END 2026-11-22T13:03:55.012414601Z ===
+=== EVIDENCE 2026-11-22T13:03:55.022350788Z ===
+--- (a) posture: engine_jobs ---
+            id             |        service_tag        |                kill_switch_key                | interval_seconds | dead | enabled 
+---------------------------+---------------------------+-----------------------------------------------+------------------+------+---------
+ drift-reconcile           | drift-reconcile           | SERVICES_DRIFT_RECONCILE_USE_ENGINE           |              300 |    0 |       1
+ eligible-pending          | eligible-pending-sweep    | SERVICES_ELIGIBLE_PENDING_SWEEP_USE_ENGINE    |               90 |    0 |       1
+ job-lock                  | job-lock-sweep            | SERVICES_JOB_LOCK_SWEEP_USE_ENGINE            |               90 |    0 |       1
+ mission-strand-heal       | mission-strand-heal       | SERVICES_MISSION_STRAND_HEAL_USE_ENGINE       |              300 |    0 |       1
+ orphan-watcher            | orphan-watcher-sweep      | SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE      |               90 |    0 |       1
+ plane-sync-watchdog       | plane-sync-watchdog       | SERVICES_PLANE_SYNC_WATCHDOG_USE_ENGINE       |              300 |    0 |       1
+ report-delivery-recovery  | report-delivery-recovery  | SERVICES_REPORT_DELIVERY_RECOVERY_USE_ENGINE  |              300 |    0 |       1
+ sources-gc                | sources-gc                | SERVICES_SOURCES_GC_USE_ENGINE                |             3600 |    0 |       1
+ stale-pause               | stale-pause-sweep         | SERVICES_STALE_PAUSE_SWEEP_USE_ENGINE         |              300 |    0 |       1
+ tmp-image                 | tmp-image-cleanup         | SERVICES_TMP_IMAGE_CLEANUP_USE_ENGINE         |             3600 |    0 |       1
+ waiting-children-watchdog | waiting-children-watchdog | SERVICES_WAITING_CHILDREN_WATCHDOG_USE_ENGINE |             3600 |    0 |       1
+ watch-reconcile           | watch-reconcile-sweep     | SERVICES_WATCH_RECONCILE_SWEEP_USE_ENGINE     |              300 |    0 |       1
+(12 rows)
+
+--- (b) shadow cadence: engine_runs job_id=orphan-watcher ---
+ id |            started_at            |    outcome     | skip_reason |             boot_id              
+----+----------------------------------+----------------+-------------+----------------------------------
+  5 | 2026-11-22T13:00:39.261682+00:00 | SKIPPED_SHADOW | SHADOW      | bff98250ffa346b1b3fc850b5602ec9a
+ 15 | 2026-11-22T13:02:09.496734+00:00 | SKIPPED_SHADOW | SHADOW      | bff98250ffa346b1b3fc850b5602ec9a
+ 18 | 2026-11-22T13:03:39.593057+00:00 | SKIPPED_SHADOW | SHADOW      | bff98250ffa346b1b3fc850b5602ec9a
+(3 rows)
+
+--- (c1) orphan-watcher non-SKIPPED_SHADOW/SHADOW count ---
+ orphan_non_shadow 
+-------------------
+                 0
+(1 row)
+
+--- (c2) any-job non-SKIPPED_* count ---
+ any_non_skipped 
+-----------------
+               0
+(1 row)
+
+--- (e) planted watcher final state ---
+          watch_id          |   state   |        created_at         |             fired_at             
+----------------------------+-----------+---------------------------+----------------------------------
+ pilot_gate_b_stale_4028421 | CANCELLED | 2020-01-01T00:00:00+00:00 | 2026-11-22T13:02:06.495919+00:00
+(1 row)
+
+JOB_ROWS=12 (expect 12)
+SHADOW_ROWS=3 (expect >=2)
+ORPHAN_NONSHADOW=0 (expect 0)
+ANY_NONSKIP=0 (expect 0)
+PLANT_STATE_AFTER=CANCELLED (expect CANCELLED)
+BOOT_B_ID=bff98250ffa346b1b3fc850b5602ec9a
+BOOT_A_ID=e9be04f94d1443758adc932c574cfdec
+BOOT_ID_INDEPENDENCE: PASS (B != A)
+=== GREP COUNTS on /tmp/pilot_gate_B_daemon_4028421.txt ===
+POS_legacy_started_interval=2 (expect >0)
+ABSENT_legacy_suppressed=0 (expect 0)
+ABSENT_engine_executor_registered=0 (expect 0)
+ABSENT_DEAD_DETECTION=0 (expect 0)
+ABSENT_still_dead=0 (expect 0)
+engine_tick_loop_started=1
+engine_boot_posture=1
+cancel_1_orphan_lines=2 (expect >0)
+--- quoted positive legacy-start line ---
+13:00:36 - daemon.services.orphan_watcher_sweep - INFO - OrphanWatcherSweepService started: interval=90s
+--- quoted cancel lines ---
+13:02:06 - daemon.services.dependency_bus - INFO - sweep_orphan_watchers: cancelled 1 orphan PENDING watcher(s) (source_task_id no longer corresponds to an active task; grace=30s)
+13:02:06 - daemon.services.orphan_watcher_sweep - INFO - OrphanWatcherSweepService: tick 2 cancelled 1 orphan PENDING watcher(s)
+--- end grep block ---
+=== TEARDOWN 2026-11-22T13:03:55.527483545Z ===
+DAEMON_TERM: clean exit on SIGTERM within 30s
+PORT_CHECK: 8092 FREE (PASS)
+PG_PORT_CHECK: 19702 STILL BUSY (FAIL)
+waiting for server to shut down.... done
+server stopped
+PG_STOP: pg_ctl -m fast -w rc=0
+SCRATCH_REMOVED: /tmp/pilot_gate_B_4028421
+KEPT_FILES: /tmp/pilot_gate_B_daemon_4028421.txt , /tmp/pilot_gate_B_evidence_4028421.txt , /tmp/pilot_gate_B_report_4028421.txt
+=== END 2026-11-22T13:03:57.090201969Z ===

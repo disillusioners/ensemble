@@ -1,0 +1,146 @@
+=== the whole-tree FAILED-set verdict (house canon) ===
+  BASE list: /tmp/pilot-gate/base-form1.txt
+  HEAD list: /tmp/pilot-gate/head-form1.txt
+  out dir:   /tmp/pilot-gate/verdict-form1
+  date(UTC): 2026-11-22T14:42:26Z
+  collation: LC_ALL=C (pinned on BOTH sort and comm)
+  BASE raw unique lines: 569   HEAD raw unique lines: 547
+
+--- FORM=grepfull ---
+  BASE unique ids: 569   HEAD unique ids: 547
+  base-only (FIXED at head): 39
+  head-only (NET-NEW reds):  17
+  in BOTH sets:               530
+  DIGEST base: 4b5225676f7b02aeb1e56b86db3345f8eba674348dc0e31e3070190c4e7b7550
+  DIGEST head: c7d6c460c86f47ce5b459bf7dd0bbd606f9a0805c93743e75cb1f90756be8fc1
+  -- grepfull base-only (FIXED at head) --
+    ERROR tests/integration/test_wc_wake_pure_hang.py::test_agent_tool_send_message_wakes_parked_wc_parent
+    ERROR tests/integration/test_wc_wake_pure_hang.py::test_http_post_messages_wakes_parked_wc_parent
+    ERROR tests/integration/test_wc_wake_pure_hang.py::test_job_inject_wakes_parked_wc_parent
+    FAILED tests/integration/test_critical_notes_embed_pipeline.py::TestRealMintPipeline::test_backfill_mints_rows_through_real_builder
+    FAILED tests/job_queue/test_job_feedback_observer.py::TestDispatchTwoTierBashCleanupDurableRows::test_tier1_sibling_owned_row_skipped
+    FAILED tests/test_chart_tools_reuse_integration.py::TestT5FanOutScoping::test_same_caller_charter_continuity_across_caller_revival
+    FAILED tests/test_dependency_bus.py::TestGenerationCounterBump::test_per_parent_lock_serializes_db_insert
+    FAILED tests/test_initiative_message.py::TestAPIDetailEndpoint::test_get_returns_initiative_message_even_without_title
+    FAILED tests/test_initiative_message.py::TestAPIDetailEndpoint::test_get_returns_initiative_message_when_set
+    FAILED tests/test_initiative_message.py::TestAPIDetailEndpoint::test_get_returns_null_when_absent
+    FAILED tests/test_initiative_message.py::TestAPIListEndpoint::test_list_includes_initiative_message_per_row
+    FAILED tests/test_injection_api.py::TestEmptyContentValidation::test_empty_or_whitespace_returns_400[   ]
+    FAILED tests/test_injection_api.py::TestEmptyContentValidation::test_empty_or_whitespace_returns_400[\n]
+    FAILED tests/test_injection_api.py::TestEmptyContentValidation::test_empty_or_whitespace_returns_400[\t\n  ]
+    FAILED tests/test_injection_api.py::TestEmptyContentValidation::test_empty_or_whitespace_returns_400[]
+    FAILED tests/test_injection_api.py::TestEnqueuePath::test_idle_does_not_set_injection
+    FAILED tests/test_injection_api.py::TestEnqueuePath::test_non_running_status_routes_to_enqueue_with_200[completed]
+    FAILED tests/test_injection_api.py::TestEnqueuePath::test_non_running_status_routes_to_enqueue_with_200[error]
+    FAILED tests/test_instance_search_api.py::TestSearchBackwardCompat::test_empty_search_returns_all
+    FAILED tests/test_instance_search_api.py::TestSearchBackwardCompat::test_no_search_param_returns_all
+    FAILED tests/test_instance_search_api.py::TestSearchCaseInsensitivity::test_lowercase_query_matches_uppercase_data
+    FAILED tests/test_instance_search_api.py::TestSearchCaseInsensitivity::test_mixed_case_query_matches_title
+    FAILED tests/test_instance_search_api.py::TestSearchCombined::test_search_includes_kb_when_exclude_kb_false
+    FAILED tests/test_instance_search_api.py::TestSearchCombined::test_search_no_match_returns_empty
+    FAILED tests/unit/routers/test_messages_router_ref_path.py::TestFailFastRealRoute::test_model_vision_set_and_image_refs_non_empty_passes_fail_fast
+    FAILED tests/unit/routers/test_messages_router_ref_path.py::TestFailFastRealRoute::test_model_vision_unset_and_image_refs_non_empty_returns_400
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_disabled_mode_treats_slash_as_plain_text
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_double_slash_escape_passes_through_as_plain_text
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_inflight_busy_rejects_with_reason
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_known_command_short_circuits_with_200_ack
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_pending_injections_guard_rejects_at_router
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_plain_text_passes_through_byte_identical
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_unknown_command_returns_400_with_available_list
+    FAILED tests/unit/services/test_engine_diff_audit.py::TestEngineDiffAudit::test_daemon_diff_is_confined_to_ownership_map
+    FAILED tests/unit/test_llm_allowed_models_precedence.py::TestLoadConfigAllowedModelsIntegration::test_neither_set_yields_documented_default
+    FAILED tests/unit/test_plane_sync.py::TestPlaneHttpClientHeaders::test_request_includes_authorization_header
+    FAILED tests/unit/test_plane_sync.py::TestPlaneHttpClientLoggingSafety::test_never_logs_api_key
+    FAILED tests/unit/test_prompt_assent_freshness.py::TestTheFreshnessBound::test_inside_the_bound_is_fresh
+    FAILED tests/unit/tools/test_frozen_tool_name_discovery.py::test_registry_validation_zero_warnings_for_project_manager_frozen_mode
+  -- grepfull head-only (NET-NEW reds) --
+    FAILED tests/message_queue_redesign/test_atomic_status_transitions.py::TestUpdateActivityAtomic::test_update_activity_concurrent_does_not_clobber_terminal_status
+    FAILED tests/perf/test_auth_middleware_latency.py::TestAuthMiddlewareLatency::test_module_lane_pass_through_latency
+    FAILED tests/test_injection_api.py::TestAppendListSemantics::test_first_injection_emits_only_pending_then_post_echo
+    FAILED tests/test_injection_api.py::TestAppendListSemantics::test_response_body_includes_pending_count
+    FAILED tests/test_injection_api.py::TestAppendListSemantics::test_second_injection_appends_no_cleared
+    FAILED tests/test_injection_api.py::TestEmptyContentValidation::test_empty_content_does_not_emit_sse
+    FAILED tests/test_post_restart_arm_notify_drill_smoke.py::test_drill_smoke - ...
+    FAILED tests/tools/test_bash_ram_guard.py::TestStagedGrowerStrictUnderReport::test_the_under_report_bound_is_strictly_positive_on_a_staged_grower
+    FAILED tests/unit/repositories/test_critical_note_embeddings.py::TestBackfillCommand::test_mints_legacy_rows_and_emits_summary_line
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestNonCommandTrafficByteIdentity::test_idle_passthrough_with_dispatcher_disabled
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestNonCommandTrafficByteIdentity::test_idle_passthrough_with_dispatcher_enabled
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestRunningAckOrdering::test_ack_returns_and_waiting_emits_while_pause_blocked
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_command_short_circuits_before_idle_enqueue
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_command_short_circuits_before_paused_auto_resume
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_command_short_circuits_before_running_injection
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_command_short_circuits_before_terminal_revival
+    FAILED tests/unit/routers/test_work_router.py::TestStatusFilter::test_status_filter_processing_returns_running_task
+  VERDICT [FORM=grepfull]: NET-NEW = 17 (NOT EMPTY — the sets differ)
+
+--- FORM=bareid ---
+  BASE unique ids: 559   HEAD unique ids: 537
+  base-only (FIXED at head): 39
+  head-only (NET-NEW reds):  17
+  in BOTH sets:               520
+  DIGEST base: 599cbdeddbc05b2875f6f23064797f66c8dc424c06ed02c54cc016d6a70ac371
+  DIGEST head: de0a560e65684848cd99b8c921bb13b1b0f8a17c42d02ad5c91cfd7829391b3d
+  -- bareid base-only (FIXED at head) --
+    ERROR tests/integration/test_wc_wake_pure_hang.py::test_agent_tool_send_message_wakes_parked_wc_parent
+    ERROR tests/integration/test_wc_wake_pure_hang.py::test_http_post_messages_wakes_parked_wc_parent
+    ERROR tests/integration/test_wc_wake_pure_hang.py::test_job_inject_wakes_parked_wc_parent
+    FAILED tests/integration/test_critical_notes_embed_pipeline.py::TestRealMintPipeline::test_backfill_mints_rows_through_real_builder
+    FAILED tests/job_queue/test_job_feedback_observer.py::TestDispatchTwoTierBashCleanupDurableRows::test_tier1_sibling_owned_row_skipped
+    FAILED tests/test_chart_tools_reuse_integration.py::TestT5FanOutScoping::test_same_caller_charter_continuity_across_caller_revival
+    FAILED tests/test_dependency_bus.py::TestGenerationCounterBump::test_per_parent_lock_serializes_db_insert
+    FAILED tests/test_initiative_message.py::TestAPIDetailEndpoint::test_get_returns_initiative_message_even_without_title
+    FAILED tests/test_initiative_message.py::TestAPIDetailEndpoint::test_get_returns_initiative_message_when_set
+    FAILED tests/test_initiative_message.py::TestAPIDetailEndpoint::test_get_returns_null_when_absent
+    FAILED tests/test_initiative_message.py::TestAPIListEndpoint::test_list_includes_initiative_message_per_row
+    FAILED tests/test_injection_api.py::TestEmptyContentValidation::test_empty_or_whitespace_returns_400[   ]
+    FAILED tests/test_injection_api.py::TestEmptyContentValidation::test_empty_or_whitespace_returns_400[\n]
+    FAILED tests/test_injection_api.py::TestEmptyContentValidation::test_empty_or_whitespace_returns_400[\t\n  ]
+    FAILED tests/test_injection_api.py::TestEmptyContentValidation::test_empty_or_whitespace_returns_400[]
+    FAILED tests/test_injection_api.py::TestEnqueuePath::test_idle_does_not_set_injection
+    FAILED tests/test_injection_api.py::TestEnqueuePath::test_non_running_status_routes_to_enqueue_with_200[completed]
+    FAILED tests/test_injection_api.py::TestEnqueuePath::test_non_running_status_routes_to_enqueue_with_200[error]
+    FAILED tests/test_instance_search_api.py::TestSearchBackwardCompat::test_empty_search_returns_all
+    FAILED tests/test_instance_search_api.py::TestSearchBackwardCompat::test_no_search_param_returns_all
+    FAILED tests/test_instance_search_api.py::TestSearchCaseInsensitivity::test_lowercase_query_matches_uppercase_data
+    FAILED tests/test_instance_search_api.py::TestSearchCaseInsensitivity::test_mixed_case_query_matches_title
+    FAILED tests/test_instance_search_api.py::TestSearchCombined::test_search_includes_kb_when_exclude_kb_false
+    FAILED tests/test_instance_search_api.py::TestSearchCombined::test_search_no_match_returns_empty
+    FAILED tests/unit/routers/test_messages_router_ref_path.py::TestFailFastRealRoute::test_model_vision_set_and_image_refs_non_empty_passes_fail_fast
+    FAILED tests/unit/routers/test_messages_router_ref_path.py::TestFailFastRealRoute::test_model_vision_unset_and_image_refs_non_empty_returns_400
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_disabled_mode_treats_slash_as_plain_text
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_double_slash_escape_passes_through_as_plain_text
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_inflight_busy_rejects_with_reason
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_known_command_short_circuits_with_200_ack
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_pending_injections_guard_rejects_at_router
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_plain_text_passes_through_byte_identical
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_unknown_command_returns_400_with_available_list
+    FAILED tests/unit/services/test_engine_diff_audit.py::TestEngineDiffAudit::test_daemon_diff_is_confined_to_ownership_map
+    FAILED tests/unit/test_llm_allowed_models_precedence.py::TestLoadConfigAllowedModelsIntegration::test_neither_set_yields_documented_default
+    FAILED tests/unit/test_plane_sync.py::TestPlaneHttpClientHeaders::test_request_includes_authorization_header
+    FAILED tests/unit/test_plane_sync.py::TestPlaneHttpClientLoggingSafety::test_never_logs_api_key
+    FAILED tests/unit/test_prompt_assent_freshness.py::TestTheFreshnessBound::test_inside_the_bound_is_fresh
+    FAILED tests/unit/tools/test_frozen_tool_name_discovery.py::test_registry_validation_zero_warnings_for_project_manager_frozen_mode
+  -- bareid head-only (NET-NEW reds) --
+    FAILED tests/message_queue_redesign/test_atomic_status_transitions.py::TestUpdateActivityAtomic::test_update_activity_concurrent_does_not_clobber_terminal_status
+    FAILED tests/perf/test_auth_middleware_latency.py::TestAuthMiddlewareLatency::test_module_lane_pass_through_latency
+    FAILED tests/test_injection_api.py::TestAppendListSemantics::test_first_injection_emits_only_pending_then_post_echo
+    FAILED tests/test_injection_api.py::TestAppendListSemantics::test_response_body_includes_pending_count
+    FAILED tests/test_injection_api.py::TestAppendListSemantics::test_second_injection_appends_no_cleared
+    FAILED tests/test_injection_api.py::TestEmptyContentValidation::test_empty_content_does_not_emit_sse
+    FAILED tests/test_post_restart_arm_notify_drill_smoke.py::test_drill_smoke - ...
+    FAILED tests/tools/test_bash_ram_guard.py::TestStagedGrowerStrictUnderReport::test_the_under_report_bound_is_strictly_positive_on_a_staged_grower
+    FAILED tests/unit/repositories/test_critical_note_embeddings.py::TestBackfillCommand::test_mints_legacy_rows_and_emits_summary_line
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestNonCommandTrafficByteIdentity::test_idle_passthrough_with_dispatcher_disabled
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestNonCommandTrafficByteIdentity::test_idle_passthrough_with_dispatcher_enabled
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestRunningAckOrdering::test_ack_returns_and_waiting_emits_while_pause_blocked
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_command_short_circuits_before_idle_enqueue
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_command_short_circuits_before_paused_auto_resume
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_command_short_circuits_before_running_injection
+    FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_command_short_circuits_before_terminal_revival
+    FAILED tests/unit/routers/test_work_router.py::TestStatusFilter::test_status_filter_processing_returns_running_task
+  VERDICT [FORM=bareid]: NET-NEW = 17 (NOT EMPTY — the sets differ)
+
+=== FINAL VERDICT ===
+NET-NEW is NOT EMPTY in at least one form — the whole-tree leg's net-new claim does NOT hold as stated.
+The per-id adjudication (each id in ISOLATION, 3 runs per side) is the next step.
+  the verdict log: /tmp/pilot-gate/verdict-form1/sweep_digest_verdict.log

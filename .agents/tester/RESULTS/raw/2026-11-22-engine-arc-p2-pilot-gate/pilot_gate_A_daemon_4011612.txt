@@ -1,0 +1,475 @@
+12:49:27 - daemon.config - INFO - [LiveViews] max_media_bytes=2147483648 (source=default)
+12:49:27 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+12:49:27 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+12:49:27 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+12:49:27 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+12:49:27 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+12:49:27 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+12:49:27 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+12:49:27 - daemon.api - INFO - Starting Ensemble v0.31.27
+12:49:28 - daemon.api - INFO - remote-hands gateway is DISABLED (MCPS_GATEWAY_ENABLED) — the route /api/mcps-gateway/ws is not registered
+12:49:28 - daemon.api - INFO - [Auth] route classes tagged (public/module-lane/protected)
+12:49:28 - daemon.config - INFO - [LiveViews] max_media_bytes=2147483648 (source=default)
+12:49:28 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+12:49:28 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+12:49:28 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+12:49:28 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+12:49:28 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+12:49:28 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+12:49:28 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+12:49:28 - daemon.api - INFO - Starting Ensemble v0.31.27
+12:49:29 - daemon.api - INFO - remote-hands gateway is DISABLED (MCPS_GATEWAY_ENABLED) — the route /api/mcps-gateway/ws is not registered
+12:49:29 - daemon.api - INFO - [Auth] route classes tagged (public/module-lane/protected)
+INFO:     Started server process [4012307]
+INFO:     Waiting for application startup.
+12:49:29 - daemon.ensemble_config - INFO - Loaded ensemble config: database=postgres
+12:49:29 - daemon.config - INFO - [LiveViews] max_media_bytes=2147483648 (source=default)
+12:49:29 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+12:49:29 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+12:49:29 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+12:49:29 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+12:49:29 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+12:49:29 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+12:49:29 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+12:49:29 - daemon.repositories.factory - INFO - Creating PostgreSQL engine: 127.0.0.1:19701/pilot_gate_a_4011612
+12:49:29 - daemon.repositories.factory - INFO - MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS DISABLED — no trustworthy Phase-0 measurement
+12:49:29 - daemon.repositories.factory - INFO - Manager engine pool sizing: pool_size=15 (limits.manager_pool_size; default tier 15, floor = default)
+12:49:30 - daemon.services.settings_service - INFO - [Settings] app_settings table absent (first boot or pre-migration) — no db overrides; lower tiers active
+12:49:30 - daemon.services.settings_service - INFO - [Settings] limits.checkpoint_pool_max_size: env tier wins — config field 10 -> 15 (applies on this boot; restart-required semantics)
+12:49:30 - daemon.services.settings_service - INFO - [Settings] limits.checkpoint_pool_timeout_s: env tier wins — config field 5.0 -> 20.0 (applies on this boot; restart-required semantics)
+12:49:30 - daemon.services.settings_service - INFO - [Settings] limits.metrics_tool_usage_enabled: default tier wins - DB/env-only key (no Config field) - resolved value True (applies on this boot; restart-required semantics: takes effect per tick)
+12:49:30 - daemon.services.settings_service - INFO - [Settings] limits.tool_usage_digest_seeding_enabled: default tier wins - DB/env-only key (no Config field) - resolved value True (applies on this boot; restart-required semantics: takes effect per tick)
+12:49:30 - daemon.services.settings_service - INFO - [Settings] wedge_notice_emission_enabled: default tier wins - DB/env-only key (no Config field) - resolved value True (applies on this boot; restart-required semantics: takes effect per tick)
+12:49:30 - daemon.services.settings_service - INFO - [Settings] applied 0 db override(s)
+12:49:30 - daemon - INFO - [TmpImages] ready: dir=/tmp/pilot_gate_A_4011612/data/tmp_images count=0 max_bytes=1073741824
+12:49:30 - daemon - INFO - [Config] reasoning_echo_disabled_models=[] (models matching these patterns will NOT echo reasoning_content; all others echo)
+12:49:30 - daemon - INFO - [Config] default_streaming=True (clean_llm_config injects streaming=True when callers don't pass an explicit flag; OPENAI_STREAMING env var controls it)
+12:49:30 - daemon - INFO - [Config] default_request_gzip=False (clean_llm_config attaches gzip httpx clients when True; OPENAI_REQUEST_GZIP env var controls it)
+12:49:30 - daemon - INFO - [Config] default_request_timeout=610s (clean_llm_config injects it when a site omits request_timeout — tightening ∞→610s; OPENAI_REQUEST_TIMEOUT controls it)
+12:49:30 - daemon - INFO - [Config] empty_degenerate_reinvoke_cap=3 (router stops re-invoking on reasoning-only/<think>-only empties at the cap)
+12:49:30 - daemon.rag.config - INFO - Running RAG auto-test...
+12:49:31 - daemon.rag.config - INFO - RAG auto-test passed: LightRAG is reachable
+12:49:31 - daemon.manager - INFO - Context compaction enabled: threshold=0.8, recent_window=10, min_window=3
+12:49:31 - daemon.manager - INFO - [InstanceCache] effective: ttl_hours=6 max_entries=64 (ttl source=default; restart-required)
+12:49:31 - daemon.repositories.factory - INFO - Creating PostgreSQL engine: 127.0.0.1:19701/pilot_gate_a_4011612
+12:49:31 - daemon.repositories.factory - INFO - MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS DISABLED — no trustworthy Phase-0 measurement
+12:49:31 - daemon.repositories.factory - INFO - Manager engine pool sizing: pool_size=15 (limits.manager_pool_size; default tier 15, floor = default)
+12:49:33 - daemon.migrations.runner - INFO - Skipping migrations for non-SQLite database (schema evolution handled by EnsembleManager._ensure_postgres_columns)
+12:49:33 - daemon.manager - INFO - _ensure_postgres_columns: drift_events index ensure complete (ix_drift_events_plugin, ix_drift_events_plugin_divergence, ix_drift_events_observed_at — CREATE INDEX IF NOT EXISTS is idempotent)
+12:49:33 - daemon.manager - INFO - _ensure_postgres_columns: resource_monitor boolean repair complete (applied=[], already_ok=['resource_instance_sample.estimated=boolean', 'resource_limit_policy.enabled=boolean', 'resource_limit_policy.user_gated=boolean'], unrecognised=[], missing=[])
+12:49:33 - daemon.manager - INFO - _ensure_postgres_columns: checkpoint trio autovacuum reloptions ensure complete (applied=0, already_set=0, table_missing=3)
+12:49:33 - daemon.manager - INFO - [ToolUsage] collection ON (decision-support metrics substrate)
+12:49:34 - daemon.repositories.source.repository - INFO - Created source config: source_id=3eae388f-f1c4-5196-8649-36cca91f409e, name=tool-usage-daily-digest
+12:49:34 - daemon.repositories.source.repository - INFO - Updated source status: source_id=3eae388f-f1c4-5196-8649-36cca91f409e, status=running
+12:49:34 - daemon.repositories.source.seed - INFO - [ToolUsageDigest] seeded schedule 3eae388f-f1c4-5196-8649-36cca91f409e
+12:49:34 - daemon.tools.memoir_knob - WARNING - [Memoir] ENSEMBLE_MEMOIR_ENABLED is unset — memoir surface ENABLED by default; set `ENSEMBLE_MEMOIR_ENABLED=false` to disable
+12:49:34 - daemon.manager - INFO - mission_records: mode resolved (mode=enforce)
+12:49:34 - daemon.services.mission_record_service - INFO - mission_records backfill: scanning 0 committed non-dry instance_nudge audit rows (dry_run=False)
+12:49:34 - daemon.services.mission_record_service - INFO - mission_records backfill: done scanned=0 minted_epochs=0 minted_commissions=0 skipped_terminal=0 skipped_no_actor=0 skipped_missing_instance_row=0 (dry_run=False)
+12:49:34 - daemon.services.boot_epoch - INFO - Boot epoch captured (DB clock): 2026-11-22T12:49:34.750495
+12:49:34 - daemon.repositories.message_queue.repository - WARNING - JOURNAL: MessageQueueRepository.clear_all preserve_in_flight=True about to DELETE 0 message_queue row(s) (env-poison family audit). doomed_message_ids=[]
+12:49:34 - daemon.manager - INFO - discard_on_startup: CAPTURE_PHASE complete — stashed 0 doomed id(s) for the deferred DELETE_PHASE (D-P3.9; DELETE moves off the boot critical path)
+12:49:34 - daemon.repositories.task.repository - WARNING - JOURNAL: TaskRepository.clear_all preserve_in_flight=True about to DELETE 0 task row(s) (env-poison family audit). doomed_work_ids=[]
+12:49:34 - daemon.manager - INFO - Cleared 0 backlog task(s) (discard_on_startup=backlog-clear; running/paused preserved)
+12:49:34 - daemon.repositories.instance.repository - INFO - Cascade lineage mode resolved: permanent (env ENSEMBLE_CASCADE_LINEAGE=<unset>); permanent enumeration uses instances.parent_id, hierarchy fallback uses instance_hierarchy. Restart required to flip.
+12:49:34 - daemon.repositories.instance.repository - INFO - Governor recursion guard resolved: enabled (env LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED=<unset>); refuses governor spawn when parent chain already contains ≥ K governors (K from LIMITS_MAX_GOVERNOR_ANCESTORS, default 1). Restart required to flip.
+12:49:34 - daemon.services.context_messages - INFO - Ambient KV freshness ENABLED (per-turn fresh)
+12:49:34 - daemon.services.report_integrity_guard - INFO - Report-integrity (b) terminal-waiting guard resolved: ENABLED (default — enforcement: one adjudication notice injected to the parent at the completion stamp; never blocks) (env leg only; explicit `report_integrity.b_terminal_waiting_guard_enabled: false` in config.yaml still vetoes) (env WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED=<unset>). Restart required to flip. See docs/setup.md (WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED).
+12:49:34 - daemon.config - INFO - [LiveViews] max_media_bytes=2147483648 (source=default)
+12:49:34 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+12:49:34 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+12:49:34 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+12:49:34 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+12:49:34 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+12:49:34 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+12:49:34 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+12:49:34 - daemon.services.attestation_resolver - INFO - Leader completion attestation resolved: mode=enforce window=3 deny_bound=3 attestation_enabled=true llm_judge_enabled=true llm_judge_model=quick llm_judge_timeout_s=180.0 N_le_min_recent_window=PASS (env ENSEMBLE_LEADER_ATTESTATION_MODE=<unset>, ENSEMBLE_LEADER_ATTESTATION_WINDOW=<unset>, ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=<unset>). Restart required to flip. See docs/setup.md (ENSEMBLE_LEADER_ATTESTATION_MODE).
+12:49:34 - daemon.sources.dispatcher - INFO - ResponseDispatcher initialized with subscriber_id=response_dispatcher
+12:49:34 - daemon.manager - INFO - G7: created partial unique index ux_blueprint_one_core (one core per project, active rows)
+12:49:34 - daemon.manager - INFO - [/compact] registered /compact command (availability predicate unpopulated — O-B6)
+12:49:34 - daemon.manager - INFO - Bootstrapping 3 built-in MCP servers...
+12:49:34 - daemon.manager - INFO - Built-in MCP server 'webfetch' disabled (MCP_DISABLE_BUILT_IN_WEBFETCH), skipping creation
+12:49:34 - daemon.repositories.mcp_server.repository - INFO - Created MCP server: id=de1e0af8-150d-4b67-b0fa-7afc966aec57, name=context7
+12:49:34 - daemon.manager - INFO - Created built-in MCP server: context7
+12:49:34 - daemon.mcp.builtin_servers.plane - INFO - Plane workspace resolution: env=dev source=explicit-marker slug=(account-default)
+12:49:35 - daemon.registry - WARNING - Tool config validation: Agent 'maintenancer': deny entry 'git_commit' is neither a known category nor a known tool
+12:49:35 - daemon.manager - WARNING - Builtin 'plane' skipped — workspace refused (POLICY): workspace 'nea' is production-only; this environment resolves to dev; agents with mcp_full_access=['plane']: project-manager
+12:49:35 - daemon.manager - WARNING - Agent capability gap: project-manager declare(s) mcp_full_access ['plane'] but no registered MCP server row exists for it (see the builtin skip WARNING above)
+12:49:35 - daemon.manager - INFO - Built-in MCP server bootstrap complete
+12:49:35 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=datacenter (description=updated, schema_doc=updated)
+12:49:35 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=server (description=updated, schema_doc=updated)
+12:49:35 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=rack (description=updated, schema_doc=updated)
+12:49:35 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=k8s_cluster (description=updated, schema_doc=updated)
+12:49:35 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=k8s_node (description=updated, schema_doc=updated)
+12:49:35 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=network (description=updated, schema_doc=updated)
+12:49:35 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=load_balancer (description=updated, schema_doc=updated)
+12:49:35 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=database (description=updated, schema_doc=updated)
+12:49:35 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=storage (description=updated, schema_doc=updated)
+12:49:35 - daemon.repositories.infra.repository - INFO - Bootstrapped infra asset types: 9 total, 9 new, 0 updated
+12:49:35 - daemon.manager - INFO - Seeded 9 new infra asset types (0 updated) on startup
+12:49:36 - daemon.manager - INFO - Plugin registry boot-scan: 1 plugin(s) (opendesign), 2 plugin-skill(s)
+12:49:36 - daemon.services.decision.registry - INFO - decision seam registered: seam_id=snapshot.l3.selection kind=choice direction=WITHIN_SET
+12:49:36 - daemon.manager - INFO - MCP server 'webfetch' disabled (env var), skipping warmup pool registration
+12:49:36 - daemon.manager - INFO - MCP warm-up pool initialized: 1 server(s) registered, warmup running in background
+12:49:36 - daemon.persistence - INFO - Creating PostgreSQL checkpointer for 127.0.0.1:19701/pilot_gate_a_4011612
+12:49:36 - daemon.persistence - INFO - Checkpoint pool sizing applied: max_size=15 timeout_s=20.0 (explicit kwargs; boot caller resolves limits.checkpoint_pool_max_size / limits.checkpoint_pool_timeout_s from the YAML Config; default tier 10/5.0)
+12:49:36 - daemon.persistence - INFO - PostgreSQL checkpointer adapter ready (saver=AsyncPostgresSaver(pool=AsyncConnectionPool), adapter_pool=asyncpg.Pool)
+12:49:36 - daemon.repositories.skill.repository - INFO - Created skill trigger: id=3bcf5310-1115-4443-b9d9-f0bd8b6f8fb9, name=low_completion_rate, project_id=None
+12:49:36 - daemon.repositories.skill.repository - INFO - Created skill trigger: id=144e0bac-86e4-430e-ae15-9a53dbedf14e, name=high_fallback_rate, project_id=None
+12:49:36 - daemon.repositories.skill.repository - INFO - Created skill trigger: id=308566c9-0bd7-4469-aeb7-7e7d19ba9168, name=consecutive_failures, project_id=None
+12:49:37 - daemon.repositories.skill.repository - INFO - Created skill trigger: id=c4f749c8-3d79-4fcd-9b31-30a45aa5af1c, name=periodic_scan, project_id=None
+12:49:37 - daemon.repositories.skill.repository - INFO - Created skill trigger: id=8bcff7b2-309f-44a9-8dd3-1dd5e7edd88c, name=task_count_scan, project_id=None
+12:49:37 - daemon.repositories.skill.repository - INFO - Created skill trigger: id=11718593-0245-4141-b6a7-3027b9181506, name=low_usefulness, project_id=None
+12:49:37 - daemon.repositories.skill.repository - INFO - Created skill trigger: id=9f263bfa-b585-4d29-98b9-13b5be1f8def, name=drift_event_observed, project_id=None
+12:49:37 - daemon.services.skill_trigger_seed - INFO - Seeded default skill triggers: project_id=None, inserted=7
+12:49:37 - daemon.manager - INFO - Skill trigger seed (Phase 4): 7 new default triggers inserted
+12:49:37 - daemon.services.maintenance_boot_sweep - INFO - maintenance boot sweep: 0 interrupted run(s) in section=checkpoint-cleanup
+12:49:37 - daemon.repositories.room.boot - INFO - room boot regen (P1 re-derivation): pending_tagged=0 rooms=0 members=0 (no routing at P1 — durable pending rows surfaced by the parent's next legitimate lane per the one-hop rule)
+12:49:37 - daemon.manager - INFO - room boot delivery: pending_tagged=0 delivered=0 deferred=0 filtered_not_targets=0 rooms=0 members=0
+12:49:37 - daemon.services.maintenance - INFO - Maintenance service started
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=84e481e2-cbb4-453f-a45a-c33f6fe1d124, name=aegis-strategy, project_id=None, agent_id=aegis, auto_load=True
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=8df8de5d-5e03-494b-ab3c-8465671eea3a, name=injection-screen, project_id=None, agent_id=aegis, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=5be50c30-6fc7-405d-84e3-d7691fb84642, name=approval-strategy, project_id=None, agent_id=approver, auto_load=True
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=f75a3653-2b09-4530-814a-ea3b41e0b894, name=plan-approval, project_id=None, agent_id=approver, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=31758ada-e238-4176-94c3-4b04c3c387fa, name=decision-approval, project_id=None, agent_id=approver, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=c631dd30-dd69-430d-894b-f283ccabf0f4, name=architecture-strategy, project_id=None, agent_id=architect, auto_load=True
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=8659b451-a862-4074-b7f7-e18a77bbd31c, name=structural-design, project_id=None, agent_id=architect, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=36b95c1e-45db-47a6-ba43-ad3338269cbc, name=data-flow-design, project_id=None, agent_id=architect, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=34779825-1209-4cf1-87a3-6fe7be7540cc, name=resilience-design, project_id=None, agent_id=architect, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=a81b51ac-d278-4a33-ad6d-509974c7005f, name=scalability-design, project_id=None, agent_id=architect, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=c82dfed2-4dfd-42a7-bfb6-1a8eb3a35a0f, name=security-design, project_id=None, agent_id=architect, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=662a84cc-6fdb-426a-8d96-e474d73f2362, name=trade-off-analysis, project_id=None, agent_id=architect, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=d390de5f-fcac-4a60-a073-e236f1b1350c, name=system-decomposition, project_id=None, agent_id=architect, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=cb40360c-5684-4f17-b130-fc119a434be5, name=explore-for-rebuild, project_id=None, agent_id=blueprinter, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=13b3237d-64b7-4cf9-bf26-c9efb3118ff0, name=explore-for-incremental, project_id=None, agent_id=blueprinter, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=2d397ef0-eebb-40e2-9ba4-41c544de1d05, name=explore-for-single, project_id=None, agent_id=blueprinter, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=8c51b14f-8bbe-42dd-b5df-7d53bb4d4b82, name=build-blueprint, project_id=None, agent_id=blueprinter, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=2b51541c-1bc3-4562-95a9-59b16d21cc4c, name=decide-changes, project_id=None, agent_id=blueprinter, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=ba1fd83a-ffbd-481a-861f-e2d04750a1e3, name=explore-doc-drift, project_id=None, agent_id=blueprinter, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=dbaa6eb8-dc09-4f7b-82c8-4c88de53f940, name=maintain-docs, project_id=None, agent_id=blueprinter, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=ae58f51c-d552-4e81-b82f-48659eba1ccd, name=injection-screen, project_id=None, agent_id=canary, auto_load=True
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=12ad68f3-fe47-455e-b720-3863c30b3a9d, name=work-partition, project_id=None, agent_id=coder, auto_load=True
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=dfaa8b9e-96b6-4c5a-8db8-952580a2f0a2, name=code-implementation, project_id=None, agent_id=coder, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=6de6f34e-6c46-4b4b-a8d7-50a43b8b03c8, name=code-fix, project_id=None, agent_id=coder, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=6686b273-75b6-4f5b-8759-a0a20a522389, name=code-refactor, project_id=None, agent_id=coder, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=b15b8116-908e-48fc-a929-133d8b044e37, name=git-commit, project_id=None, agent_id=coder, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=d0029ea5-574e-4bc9-b6e8-8367d7397b33, name=design-strategy, project_id=None, agent_id=designer, auto_load=True
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=c50601bc-817d-459d-8891-2083e09d0a7b, name=dev-strategy, project_id=None, agent_id=developer, auto_load=True
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=7bc9ea67-8d5d-479b-a3d9-3f0a500a27ce, name=kb-curator, project_id=None, agent_id=maintenancer, auto_load=True
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=4bc0858a-1cee-4009-8b70-d1f4dec3638b, name=log-forensics, project_id=None, agent_id=maintenancer, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=e208aaf1-e586-41f5-b9e8-a2f72ce2f328, name=job-mission-repair, project_id=None, agent_id=maintenancer, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=22951763-dc41-4635-a037-3eaebbdc6f6c, name=ens-db-repair, project_id=None, agent_id=maintenancer, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=a5d7f965-56f6-4886-9ec9-e6a47d082239, name=restart-upgrade-ops, project_id=None, agent_id=maintenancer, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=a1faf8e6-c358-4706-b622-e40a7de0321d, name=bug-advisory, project_id=None, agent_id=maintenancer, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=da14c647-ac6b-432a-820b-ff35534f2dfb, name=health-check, project_id=None, agent_id=maintenancer, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=e02477c7-b5da-49a5-81f6-ee3509020324, name=planning-strategy, project_id=None, agent_id=planner, auto_load=True
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=32977593-6402-435f-800d-0ba6f028f04b, name=plan-creation, project_id=None, agent_id=planner, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=703843e2-47cf-4a85-81b4-55c4f84d511b, name=roadmap-strategy, project_id=None, agent_id=planner, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=99c9e0e6-9deb-437b-9f2a-a7b398b7dd2c, name=requirements-analysis, project_id=None, agent_id=planner, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=fdbc7267-2a71-4b7a-863b-0d87533070f1, name=technical-analysis, project_id=None, agent_id=planner, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=e9f00b29-b91c-4407-9bcf-7ef67fcb1e3c, name=review-strategy, project_id=None, agent_id=reviewer, auto_load=True
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=0bc52864-294b-443e-ba80-3206a6faed74, name=code-review, project_id=None, agent_id=reviewer, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=0eacb5ed-8222-4358-acba-7826ada0dd46, name=plan-review, project_id=None, agent_id=reviewer, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=fb2b41c8-59f7-4068-8140-90e914bb7e8b, name=architecture-review, project_id=None, agent_id=reviewer, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=f07e6451-c56a-43d7-92d8-afd7c0bcb81e, name=security-review, project_id=None, agent_id=reviewer, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=9f322526-6f2c-4b82-a388-af7d3f9f5778, name=pr-review, project_id=None, agent_id=reviewer, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=6232db43-1b79-4292-878f-2852081e3443, name=business-logic-review, project_id=None, agent_id=reviewer, auto_load=False
+12:49:37 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=7af168a5-ac72-48da-b72d-70ff92eea293, name=opendesign.generate-pipeline, project_id=None, agent_id=sketcher, auto_load=True
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=c8ac9d4b-601b-4aa5-8de3-bb3135e86995, name=opendesign.list_systems, project_id=None, agent_id=sketcher, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=48591855-7072-4623-a159-2cf1551a154d, name=injection-screen, project_id=None, agent_id=sweeper, auto_load=True
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=e811453f-54d5-4184-bc7a-1468e9d72265, name=test-strategy, project_id=None, agent_id=tester, auto_load=True
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=16881f1d-ca49-4323-9684-3218223584d5, name=test-pack-execution, project_id=None, agent_id=tester, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=a4830855-e6ff-43c1-a7ee-56317fdb15ef, name=mock-test, project_id=None, agent_id=tester, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=e6378002-b8b0-4eac-b9d4-7a2cf3556553, name=unit-test, project_id=None, agent_id=tester, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=64a92467-060c-4846-84a9-a485f33baae4, name=integration-test, project_id=None, agent_id=tester, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=9297fed1-d154-42ee-87f5-fec4450984fd, name=e2e-test, project_id=None, agent_id=tester, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=80a33f6f-7fc9-4a44-9ddd-ffc0fb48c014, name=ensure-validation, project_id=None, agent_id=tester, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=3dee97ff-69a0-421d-a27a-3377f5c70747, name=flaky-test-management, project_id=None, agent_id=tester, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=a601288f-6a02-4786-80fb-ec96572e6188, name=quick-fix, project_id=None, agent_id=tester, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=543c86de-4d32-460d-9234-c222ddf9f9ea, name=tidier-strategy, project_id=None, agent_id=tidier, auto_load=True
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=76bab6ef-4421-49b6-aeca-466e5566e6af, name=tidier-readable-code, project_id=None, agent_id=tidier, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=ffe8fd0d-64b5-42bf-a347-0c5de53868c3, name=tidier-static-hygiene, project_id=None, agent_id=tidier, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=952d49d8-068d-4751-a915-98ec8e3fdff5, name=tidier-robustness, project_id=None, agent_id=tidier, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=45ca7567-e55c-4a2a-92e7-99bb4a5bdc79, name=video-capture-harness, project_id=None, agent_id=video-capturer, auto_load=True
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=16b9cb81-e6b5-4479-9140-b31b7efb1ea4, name=video-lab-ops, project_id=None, agent_id=video-capturer, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=4ce67763-59d7-485f-b060-3cb4b34e9119, name=video-exact-edit, project_id=None, agent_id=video-editor, auto_load=True
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=d0fa2dea-e60a-46e1-a0c5-695663621983, name=video-planning, project_id=None, agent_id=video-producer, auto_load=True
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=b516c67a-2c72-4e9e-9c75-4936aaaef83c, name=video-project-ops, project_id=None, agent_id=video-producer, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=daa50c60-5584-4ba9-b353-2482f712114a, name=video-gates, project_id=None, agent_id=video-verifier, auto_load=True
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=cdd0f979-e717-4360-ab49-0b84e2c1fa30, name=investigation-strategy, project_id=None, agent_id=wanderer, auto_load=True
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=7408b8dd-24f8-400e-ac5c-9217d5143579, name=codebase-mapping, project_id=None, agent_id=wanderer, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=5b96dfd1-36ca-4013-858d-436b356e106c, name=root-cause-analysis, project_id=None, agent_id=wanderer, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=19b46bf2-048b-44d0-ad4b-aa5d091b2839, name=library-research, project_id=None, agent_id=wanderer, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=96db1cf7-9ece-4660-b601-49bb9a178d3b, name=code-investigation, project_id=None, agent_id=wanderer, auto_load=False
+12:49:38 - daemon.repositories.skill.skill_bank_repository - INFO - Created skill bank item: id=60287c53-e72e-470d-b22e-388beeecf712, name=injection-screen, project_id=None, agent_id=worker, auto_load=False
+12:49:38 - daemon.services.skill_seed_service - INFO - Skill seeding complete: 75 new, 0 updated, 20 unchanged, 0 errors
+12:49:38 - daemon.manager - INFO - Skill bank seeding (Phase 3): {'new': 75, 'updated': 0, 'unchanged': 20, 'errors': 0}
+12:49:38 - daemon.manager - INFO - SessionManager initialized with PostgreSQL checkpointer (127.0.0.1:19701/pilot_gate_a_4011612)
+12:49:38 - daemon.services.message_queue_boot_recovery - INFO - [HardReboot] MQ boot pass: reset=0
+12:49:38 - daemon.config - INFO - [CriticalNotes:state] tiered=true projects_with_pins=0/1 total_pinned=0 (gating active when projects_with_pins>=1 per §4.2 #8; projects without pins fall back to render-all)
+12:49:38 - daemon.services.main_loop_bridge - INFO - MainLoopBridge: event loop set to <uvloop.Loop running=True closed=False debug=False>
+12:49:38 - daemon.services.stale_task_recovery - INFO - Running startup crash recovery (no grace period)...
+12:49:38 - daemon.services.stale_task_recovery - INFO - Startup recovery complete: 0 tasks recovered
+12:49:38 - daemon.services.stale_task_recovery - INFO - StaleTaskRecovery started: threshold=10min, interval=60s, grace=30s, max_retries=3
+12:49:38 - daemon.services.stale_pause_sweep - INFO - StalePauseSweepService started: interval=300s, age_bound=7200s, batch_cap=100
+12:49:38 - daemon.services.report_delivery_recovery - INFO - ReportDeliveryRecoveryService started: interval=300s, age_bound=10min, batch_cap=100, retry=1min, lanes=[deferred=True, no_row_backstop=True, pending_age=True, recovery_retry=True, orphan=True, stuck_wake=True, mission_reconciliation=True, wc_orphan_detector=True]
+12:49:38 - daemon.services.worker_pool - INFO - Starting WorkerPool with 5 workers...
+12:49:38 - daemon.services.worker_pool - INFO - Worker worker-0 started
+12:49:38 - daemon.services.worker_pool - INFO - Worker worker-1 started
+12:49:38 - daemon.services.worker_pool - INFO - Worker worker-2 started
+12:49:38 - daemon.services.worker_pool - INFO - Worker worker-3 started
+12:49:38 - daemon.services.worker_pool - INFO - Worker worker-4 started
+12:49:38 - daemon.services.worker_pool - INFO - WorkerPool started: 5 workers
+12:49:38 - daemon.services.worker_pool - INFO - Starting WorkerPool with 2 workers...
+12:49:38 - daemon.services.worker_pool - INFO - Worker chat-worker-0 started
+12:49:38 - daemon.services.worker_pool - INFO - Worker chat-worker-1 started
+12:49:38 - daemon.services.worker_pool - INFO - WorkerPool started: 2 workers
+12:49:38 - daemon.services.pool_orchestrator - INFO - ChatSourceWorkerPool started: workers=2, prefixes=telegram:,slack:,discord:
+12:49:38 - daemon - INFO - question-packs rehydrated: 0
+12:49:38 - daemon.api - INFO - P3/decision-f deferred DELETE_PHASE: no doomed ids (operator gate QUEUE_DISCARD_ON_STARTUP may be off, or no rows matched the doomed predicate; DELETE no-ops)
+12:49:38 - daemon.services.report_delivery_recovery - INFO - RDRS lane 7: mission_reconciliation admitted 0 outstanding commission(s) (mode=enforce, ttl=21600s, batch_cap=100)
+12:49:38 - daemon - INFO - [Startup] bash spawn durable registry wired (boot_id=763bc3e9)
+12:49:38 - daemon.services.bash_spawn_reaper - INFO - BashSpawnRetentionSweepService started: interval=900s
+12:49:38 - daemon - INFO - [Startup] bash spawn retention sweep started (interval=900s)
+12:49:38 - daemon.services.report_delivery_recovery - INFO - RDRS lane 7: mission_reconciliation admitted 0 outstanding commission(s) (mode=enforce, ttl=21600s, batch_cap=100)
+Context7 Documentation MCP Server v4.7.3 running on stdio
+12:49:40 - daemon.mcp.warmup_pool - INFO - Warmed up pool for 'context7' (1/1 connections)
+12:49:40 - daemon.mcp.warmup_pool - INFO - MCP warmup complete: 1 server(s) ready
+12:49:40 - daemon.manager - INFO - MCP warm-up pool ready: {'context7': {'available': 1, 'pool_size': 1, 'healthy': True}}
+12:49:40 - daemon.mcp.warmup_pool - INFO - Started MCP health check loop (interval=60s)
+12:49:40 - daemon.services.mcp_service - INFO - eager_warm_schemas: primed 1/1 MCP server schema(s) (context7: 2 tool(s))
+12:49:43 - daemon.api - INFO - [Startup] baseline auto-reset: seeded 228 row(s), drift hits=294
+12:49:43 - daemon.registry - INFO - AgentRegistry.discover_custom_agents: registered 0 custom agent(s)
+12:49:43 - daemon.api - INFO - [Startup] custom-agent discovery: registered 0
+12:49:43 - daemon.api - INFO - [Startup] Prompt-artifact baseline clean: 217 versioned artifact(s) match .prompt-artifacts.sha256
+12:49:43 - daemon.api - INFO - WorkResolverService constructed and wired to InstanceManager
+12:49:43 - daemon.api - INFO - Phase 2 Batch 2: watcher_repo + work_resolver wired to TaskProcessor / WorkerPool / StaleTaskRecovery
+12:49:43 - daemon.api - INFO - RetryScheduler disabled (job_retry_scheduler_enabled is not set)
+12:49:43 - daemon.manager - INFO - JobQueueService wired into SourceRegistry for scheduler routing
+12:49:43 - daemon.manager - INFO - SkillJobDispatcher wired to manager (evolution_lane_resolved=True [env-resolved-or-default], evolution_lane_config_default=False, fix_cooldown_seconds=1800, fix_burst_cap=3, fix_burst_window_seconds=86400)
+12:49:43 - daemon.manager - INFO - JobQueueService connected to SessionManager
+12:49:43 - daemon.manager - INFO - JobQueueMgmtService connected to SessionManager
+12:49:43 - daemon.services.job_recovery_service - INFO - Starting job recovery — checking PROCESSING jobs...
+12:49:43 - daemon.services.job_recovery_service - INFO - Job recovery complete: 0 recovered, 0 alive, 0 total
+12:49:43 - daemon.api - INFO - Job recovery: {'recovered': 0, 'alive': 0, 'total': 0}
+12:49:43 - daemon.services.job_recovery_service - INFO - Pattern-f1 orphan-ACTIVE-JobItem recovery ENABLED (default; set ENSEMBLE_ORPHAN_F1_ENABLED=0 to disable — restart required to flip)
+12:49:43 - daemon.api - INFO - Pattern (h) zombie-active close boot: enabled=True, age_bound=7200s, batch_cap=25 (SERVICES_DRIFT_RECONCILE_ZOMBIE_CLOSE_* to override)
+12:49:43 - daemon.services.job_recovery_service - INFO - Pattern-g defer-self-witness autopromote ENABLED (default; ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED unset or set to a truthy value) — matched deferred PENDING tasks in the self-witness blind-spot will be unstuck by flipping task.is_deferred=false on the drift cadence. Set ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=0 (or 00/-0/0./0x0/false/no/off) + restart to disable the bounded unstick
+12:49:43 - daemon.api - INFO - Drift reconciler started: interval=300s, min_pending_age=300s, min_orphan_age=900s, f1_tree_activity_max_age=900s, zombie_close_enabled=True, zombie_close_age_bound=7200s, zombie_close_batch_cap=25
+12:49:43 - daemon.services.eligible_pending_sweep - INFO - EligiblePendingSweepService started: interval=90s, min_pending_age=60s
+12:49:43 - daemon.api - INFO - EligiblePendingSweepService started: interval=90s (default 90s), min_pending_age=60s (default 60s)
+12:49:43 - daemon.services.orphan_watcher_sweep - INFO - OrphanWatcherSweepService started: interval=90s
+12:49:43 - daemon.api - INFO - OrphanWatcherSweepService started: interval=90s (default 90s), grace=30s (default 30s)
+12:49:43 - daemon.services.job_lock_sweep - INFO - JobLockSweepService started: interval=90s (default 90s)
+12:49:43 - daemon.api - INFO - JobLockSweepService started: interval=90s (default 90s)
+12:49:43 - daemon.services.watch_reconcile_sweep - INFO - WatchReconcileSweepService started: interval=300s (default 300s)
+12:49:43 - daemon.api - INFO - WatchReconcileSweepService started: interval=300s (default 300s)
+12:49:43 - daemon.api - INFO - MissionStrandHealer started: interval=300s (default 300s)
+12:49:43 - daemon.services.tmp_image_cleanup_service - INFO - TmpImageCleanupService started: interval=3600s retention=30d
+12:49:43 - daemon - INFO - [TmpImages] cleanup service started: interval=3600s retention=30d
+12:49:43 - daemon.services.sources_gc_service - INFO - [SourcesGC] started: enabled=True dry_run=False interval=3600s retention=14d batch_cap=25
+12:49:43 - daemon - INFO - [LiveViews] passcode substrate ready: strike_ceiling=10 grant_ttl=86400s rate_limit=5/5-per-min
+12:49:43 - daemon - INFO - [LiveViews] subsystem ready: enabled=True roots=['designer-artifact', 'planning', 'reports', 'tmp-images', 'video-artifact']
+12:49:43 - daemon.services.plane_sync_watchdog_service - INFO - PlaneSyncWatchdogService started: interval=300s backoff_base=60s backoff_max=1800s max_attempts=5
+12:49:43 - daemon - INFO - [PlaneSync] watchdog started: interval=300s backoff_base=60s backoff_max=1800s max_attempts=5
+12:49:43 - daemon.api - INFO - Waiting-children watchdog started: interval=3600s, hang_threshold=3600s
+12:49:43 - daemon.api - INFO - Long-tool-nudge scanner started: interval=60s, default_threshold=900s
+12:49:43 - daemon.services.llm_stream_watchdog - INFO - [StreamWatchdog] loop started: threshold=45s interval=1.0s registry=0 live stream(s)
+12:49:43 - daemon.api - INFO - [StreamWatchdog] started: threshold=45s
+12:49:43 - daemon.services.resource_monitor.facade - INFO - resource-monitor started: sample_s=30 flush_s=60 retention=(2880, 336, 180)
+12:49:43 - daemon.api - INFO - [ResourceMonitor] started
+12:49:43 - daemon.api - INFO - [RamGuard] started (ceiling=8773465702 bytes source=derived-meminfo poll_ms=1000 grace_ms=250 confirm_ms=250)
+12:49:43 - daemon.services.metrics_listener - INFO - [MetricsListener] started on 127.0.0.1:8092
+12:49:43 - daemon.services.metrics_census - INFO - [MetricsCensus] started: interval=15s application_name=ensemble-metrics-census
+12:49:43 - daemon.services.metrics_query.wiring.sources - INFO - [Metrics] runtime source bundle resolved: present=census,mcp_snapshot,readiness_composite,resource_monitor,sweeps absent=db_connect,dsn,install_dir,manager,mcps_gateway_service,wedge_watchdog
+12:49:43 - daemon.services.plane_sync_watchdog_service - INFO - PlaneSyncWatchdogService: Plane sync disabled by kill-switch (PLANE_SYNC_ENABLED=false) — watchdog no-op (no re-drives; projects in error/drift will recover on next activation)
+12:49:43 - daemon.services.waiting_children_watchdog - INFO - [Watchdog] Starting periodic loop: interval=3600s, hang_threshold=3600s
+12:49:43 - daemon.services.long_tool_nudge - INFO - [LongToolNudge] Starting periodic loop: interval=60s default_threshold=900s
+12:49:43 - daemon.manager - INFO - DeadLetterService connected to InstanceManager
+12:49:43 - daemon.services.job_feedback_observer - INFO - JobFeedbackObserver started
+12:49:43 - daemon.api - INFO - JobFeedbackObserver started
+12:49:43 - daemon.services.dependency_bus - INFO - bus start: warmed=0 pending watchers, recovered=0 fired-but-unsent watchers, swept=0 orphan pending watcher(s)
+12:49:43 - daemon.services.dependency_bus - INFO - DependencyBus registered
+12:49:43 - daemon.api - INFO - DependencyBus started (recovered=0 FIRED-but-unsent watchers)
+12:49:44 - daemon.api - INFO - System default project bootstrapped: 71931ae0-0f25-5fbf-853b-2a78cc978d7e
+12:49:44 - daemon.services.job_processor - INFO - JobProcessor started
+12:49:44 - daemon.api - INFO - JobProcessor started
+12:49:44 - daemon.services.job_processor - INFO - JobProcessor: JobFeedbackObserver wired (MESSAGE jobs route through observer — sole dispatch path post-Phase-D)
+12:49:44 - daemon.api - INFO - JobFeedbackObserver wired into JobProcessor
+12:49:44 - daemon.manager - INFO - JobFeedbackObserver wired into InstanceManager
+12:49:44 - daemon.api - INFO - JobFeedbackObserver wired into InstanceManager (report_lane=ON)
+12:49:44 - daemon.manager - INFO - NotificationBroadcaster connected to InstanceManager
+12:49:44 - daemon.api - INFO - Auto-provisioned system queues for 1 projects
+12:49:44 - daemon.sources.cleanup - INFO - SourceCleanup started (interval: 21600s)
+12:49:44 - daemon.sources.dispatcher - INFO - Starting ResponseDispatcher
+12:49:44 - daemon.sources.registry - INFO - Loading and scheduling auto-start for enabled adapters...
+12:49:44 - daemon.sources.registry - INFO - Creating adapter for: 3eae388f-f1c4-5196-8649-36cca91f409e
+12:49:44 - daemon.sources.registry - INFO - Creating adapter for 3eae388f-f1c4-5196-8649-36cca91f409e: config={'agent': 'ari', 'message': 'Call tool_usage_digest for the previous day and write the durable digest.', 'schedule': '0 8 * * *', 'timezone': 'Asia/Ho_Chi_Minh', 'local_time': '08:00', 'project_id': '71931ae0-0f25-5fbf-853b-2a78cc978d7e', 'recurrence': 'daily', 'instance_mode': 'new_instance'}
+12:49:46 - daemon.sources.adapters.scheduler - INFO - SchedulerAdapter queue routing enabled: project_id=71931ae0-0f25-5fbf-853b-2a78cc978d7e, priority=5
+12:49:46 - daemon.sources.adapters.scheduler - INFO - Valid cron expression: 0 8 * * *
+12:49:46 - daemon.sources.adapters.scheduler - INFO - SchedulerAdapter initialized: type=cron, source_id=3eae388f-f1c4-5196-8649-36cca91f409e, timezone=Asia/Ho_Chi_Minh, instance_mode=new_instance
+12:49:46 - daemon.sources.registry - INFO - SchedulerAdapter created: type=cron, agent=ari
+12:49:46 - daemon.sources.registry - INFO - Registered adapter: source_id=3eae388f-f1c4-5196-8649-36cca91f409e, type=scheduler
+12:49:46 - daemon.sources.registry - INFO - Registered adapter: 3eae388f-f1c4-5196-8649-36cca91f409e
+12:49:46 - daemon.sources.registry - INFO - Scheduled auto-start for 3eae388f-f1c4-5196-8649-36cca91f409e in 60.0s
+12:49:46 - daemon.sources.registry - INFO - Scheduled auto-start for 1 adapters (delayed 60.0s)
+12:49:46 - daemon.manager - INFO - Message sources system started
+12:49:46 - daemon - INFO - [Readiness] Refresher started: interval=10s, queue_freshness_threshold=120s
+12:49:46 - daemon - INFO - [MemoirEmbed] worker started: interval=60s batch=8 dims=1536
+12:49:46 - daemon.tools.memoir_knob - WARNING - [MemoirReflect] ENSEMBLE_MEMOIR_REFLECTION_ENABLED is unset — the reflection lane is ENABLED by default; set `ENSEMBLE_MEMOIR_REFLECTION_ENABLED=false` to disable it
+12:49:46 - daemon.tools.memoir_knob - WARNING - [MemoirReflect] the reflection budget knobs are unset and use their constitutional defaults: ENSEMBLE_MEMOIR_REFLECTION_CONSTELLATION_MAX_LLM_CALLS_PER_PASS, ENSEMBLE_MEMOIR_REFLECTION_MAX_CHARS_PER_SYNTHESIS, ENSEMBLE_MEMOIR_REFLECTION_MAX_LLM_CALLS_PER_PASS, ENSEMBLE_MEMOIR_REFLECTION_MAX_SYNTHESES_PER_PASS, ENSEMBLE_MEMOIR_REFLECTION_NIGHTLY_CAP, ENSEMBLE_MEMOIR_REFLECTION_TRIGGER_SUM (unset budget knobs are never silent; set them to tune the lane)
+12:49:46 - daemon - INFO - [MemoirReflect] worker started: interval=30s thread=memoir-reflect
+12:49:46 - daemon.tools.memoir_knob - WARNING - [MemoirPoignancy] ENSEMBLE_MEMOIR_POIGNANCY_ENABLED is unset — the scoring lane is ENABLED by default; set `ENSEMBLE_MEMOIR_POIGNANCY_ENABLED=false` to disable it
+12:49:46 - daemon - INFO - [MemoirPoignancy] worker started: interval=20s batch=10 backfill_max=0 thread=memoir-poignancy (resolution=default)
+12:49:46 - daemon - INFO - [KbKeys] module key store ready (active_keys=0)
+12:49:46 - daemon - WARNING - [KbKeys] key store EMPTY — /api/mcp/kb and /api/mcp/kb/sse are in bootstrap pass-through (requests NOT key-gated). Mint the first key via POST /api/mcp/kb/keys to activate the guard; probe posture via GET /api/mcp/kb/keys/guard-status.
+12:49:46 - daemon.api - INFO - AutoContinue boot pass: ContinueResult(candidates=0, scheduled=0, skipped_no_checkpoint=0, skipped_resume_refused=0, skipped_kill_switch=0, skipped_no_boot_epoch=0, skipped_multi_task_instance=0, errors=0, duration_seconds=0.04660056601278484, auto_continue_mode='on', auto_continue_raw_env='1', deferred_pipeline_busy=0, deferred_work_ids=[])
+12:49:46 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+12:49:46 - daemon.services.auto_continue_boot_pass - INFO - [BOOT_CONTINUE] orphan-sweep summary: candidates=0 scheduled=0 skipped_no_checkpoint=0 skipped_resume_refused=0 skipped_kill_switch=0 skipped_no_boot_epoch=0 errors=0 duration_s=0.037 boot_epoch=2026-11-22T12:49:34.750495 mode=on
+12:49:46 - daemon.api - INFO - Stale-pause boot sweep: {'candidates': 0, 'resumed': 0, 'skipped_protected': 0, 'errors': 0, 'instances': []}
+12:49:46 - daemon.services.upgrade_journal_sweep - INFO - UpgradeJournalSweepService started: interval=90s (default 90s), reaper_timeout=660s (default 660s), install_dir=<none — dev/unresolved>
+12:49:46 - daemon.wedge_capture.watchdog - INFO - Wedge-capture watchdog started: dir=/tmp/pilot_gate_A_4011612/data/wedge-captures interval=1.0s cpu>=95.0%/30.0s lag>=5.00s/15.0s concentration>=85.0%/30.0s cooldown=300.0s deadline=20.0s
+12:49:46 - daemon.api - INFO - UpgradeJournalSweepService started: interval=90s (default 90s), reaper_timeout=660s (default 660s), install_dir=<none — dev/unresolved>
+12:49:46 - daemon.services.memoir_embedding_worker - INFO - [MemoirEmbed] pending=0 embedded=0 errors=0 terminal=0 tick_ms=96 slow_mode=False
+12:49:46 - daemon.services.engine.registry - INFO - engine job registered: id=watch-reconcile service_tag=watch-reconcile-sweep category=reconciler version=1
+12:49:47 - daemon.services.engine.registry - INFO - engine job registered: id=mission-strand-heal service_tag=mission-strand-heal category=reconciler version=1
+12:49:47 - daemon.services.engine.registry - INFO - engine job registered: id=report-delivery-recovery service_tag=report-delivery-recovery category=recovery_sweep version=1
+12:49:47 - daemon.services.engine.registry - INFO - engine job registered: id=sources-gc service_tag=sources-gc category=housekeeping version=1
+12:49:47 - daemon.services.engine.registry - INFO - engine job registered: id=eligible-pending service_tag=eligible-pending-sweep category=recovery_sweep version=1
+12:49:47 - daemon.services.engine.registry - INFO - engine job registered: id=orphan-watcher service_tag=orphan-watcher-sweep category=reconciler version=1
+12:49:47 - daemon.services.engine.registry - INFO - engine job registered: id=job-lock service_tag=job-lock-sweep category=reconciler version=1
+12:49:47 - daemon.services.engine.registry - INFO - engine job registered: id=tmp-image service_tag=tmp-image-cleanup category=housekeeping version=1
+12:49:47 - daemon.services.engine.registry - INFO - engine job registered: id=plane-sync-watchdog service_tag=plane-sync-watchdog category=realtime_guard version=1
+12:49:47 - daemon.services.engine.registry - INFO - engine job registered: id=stale-pause service_tag=stale-pause-sweep category=recovery_sweep version=1
+12:49:47 - daemon.services.engine.registry - INFO - engine job registered: id=waiting-children-watchdog service_tag=waiting-children-watchdog category=realtime_guard version=1
+12:49:47 - daemon.services.engine.registry - INFO - engine job registered: id=drift-reconcile service_tag=drift-reconcile category=reconciler version=1
+12:49:47 - daemon.services.engine.engine - INFO - engine tick loop started: resolution=1.0 shadow_mode=True
+12:49:47 - daemon.api - INFO - engine boot posture: enabled=True shadow=True registrations=12 observer specs (execute_fn withheld, USE_ENGINE all unset); block_elapsed_ms_gated=307.878 block_elapsed_ms_total=335.494
+12:49:47 - daemon.api - INFO - [ServiceTool] reconcile_boot_sweep alive=0 reaped=0 errors=0
+12:49:47 - daemon.api - INFO - ServiceReconciliationService started: interval=90s
+12:49:47 - daemon.api - INFO - VS Code proxy mounted at /vscode
+12:49:47 - daemon.api - INFO - Skills router wired: store=True search=True metrics=True evolution=True triggers=True dispatcher=True usage_repo=True capture_dispatcher=True
+12:49:47 - mcp.server.streamable_http_manager - INFO - StreamableHTTP session manager started
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8091 (Press CTRL+C to quit)
+12:49:53 - daemon.services.metrics_query.wiring.sources - INFO - [Metrics] runtime source bundle resolved: present=census,dsn,manager,mcp_snapshot,mcps_gateway_service,readiness_composite,resource_monitor,sweeps,wedge_watchdog absent=db_connect,install_dir
+12:50:06 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+12:50:13 - daemon.services.job_recovery_service - INFO - reconcile_drift_states: complete — reconciled=0, details=0
+12:50:13 - daemon.services.job_recovery_service - INFO - reconcile_drift_states: complete — reconciled=0, details=0
+12:50:26 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+12:50:37 - daemon.services.maintenance - INFO - Starting checkpoint cleanup job
+12:50:37 - daemon.services.maintenance - INFO - pinned_subtree_terminal_count=0 (sum of terminal descendants under pinned roots; P1 polarity change now visible)
+12:50:37 - daemon.checkpoint_perf - INFO - [CheckpointPerf] op=prune threads=0 deleted=0 duration_ms=0 (no excess threads)
+12:50:37 - daemon.checkpoint_perf - INFO - [CheckpointPerf] op=prune-exit threads=0 deleted=0 duration_ms=8
+12:50:37 - daemon.services.maintenance - INFO - Checkpoint cleanup job completed
+12:50:37 - daemon.services.maintenance - INFO - [CheckpointPerf] op=version_census max_versions=0 excess_pairs=0 threshold=3 scanned_pairs=0 blob_rows=0 blob_bytes=0 channels=0
+12:50:37 - daemon.services.maintenance - INFO - Maintenance job 'checkpoint_cleanup' completed successfully
+12:50:37 - daemon.manager - INFO - room gc: DRY RUN complete — 0 candidate(s), 0 purged (dry run purges nothing); the next sweep executes the purge
+12:50:37 - daemon.services.maintenance - INFO - Maintenance job 'room_gc_sweep' completed successfully
+12:50:37 - daemon.services.vacuum_maintenance - INFO - vacuum_maintenance: no tables exceeded dead-tuple threshold (min=1000, scale=0.0500); cycle idle
+12:50:37 - daemon.services.vacuum_maintenance - INFO - vacuum_maintenance cycle complete: qualified=0 vacuumed=0 skipped=0 duration_ms=18
+12:50:37 - daemon.services.maintenance - INFO - Maintenance job 'vacuum_maintenance' completed successfully
+12:50:37 - daemon.services.maintenance - INFO - Maintenance job 'skill_metric_scan' completed successfully
+12:50:37 - daemon.services.maintenance - INFO - Maintenance job 'skill_orphan_sweep' completed successfully
+12:50:37 - daemon.services.maintenance - INFO - Maintenance job 'skill_ab_inactivity_sweep' completed successfully
+12:50:37 - daemon.services.maintenance - INFO - Maintenance job 'project_skill_gc' completed successfully
+12:50:37 - daemon.services.blueprint_scan_service - INFO - BlueprintScanService: skipping scan during peak hours (hour=19, peak=12-20, tz=GMT+7)
+12:50:37 - daemon.services.maintenance - INFO - Maintenance job 'blueprint_daily_scan' completed successfully
+12:50:37 - daemon.manager - INFO - malloc_trim: glibc heap trimmed — free pages returned to OS
+12:50:37 - daemon.services.maintenance - INFO - Maintenance job 'malloc_trim' completed successfully
+12:50:37 - daemon.services.maintenance - INFO - Maintenance job 'dependency_bus_lock_reap' completed successfully
+12:50:37 - daemon.services.maintenance - INFO - Maintenance job 'anomaly_retention' completed successfully
+12:50:46 - daemon.repositories.source.repository - INFO - Updated source status: source_id=3eae388f-f1c4-5196-8649-36cca91f409e, status=starting
+12:50:46 - daemon.sources.registry - INFO - Started adapter: 3eae388f-f1c4-5196-8649-36cca91f409e
+12:50:46 - daemon.sources.registry - INFO - Starting adapter: 3eae388f-f1c4-5196-8649-36cca91f409e
+12:50:46 - daemon.repositories.source.repository - INFO - Updated source status: source_id=3eae388f-f1c4-5196-8649-36cca91f409e, status=starting
+12:50:46 - daemon.sources.adapters.scheduler - INFO - Scheduler started: 3eae388f-f1c4-5196-8649-36cca91f409e, type=cron
+12:50:46 - daemon.sources.adapters.scheduler - INFO - Starting scheduler loop: 3eae388f-f1c4-5196-8649-36cca91f409e
+12:50:46 - daemon.repositories.source.repository - INFO - Updated source status: source_id=3eae388f-f1c4-5196-8649-36cca91f409e, status=running
+12:50:46 - daemon.sources.registry - INFO - Adapter running: 3eae388f-f1c4-5196-8649-36cca91f409e
+12:50:46 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+12:50:46 - daemon.services.memoir_embedding_worker - INFO - [MemoirEmbed] pending=0 embedded=0 errors=0 terminal=0 tick_ms=21 slow_mode=False
+12:51:06 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+12:51:13 - daemon.services.dependency_bus - INFO - sweep_orphan_watchers: cancelled 1 orphan PENDING watcher(s) (source_task_id no longer corresponds to an active task; grace=30s)
+12:51:13 - daemon.services.orphan_watcher_sweep - INFO - OrphanWatcherSweepService: tick 2 cancelled 1 orphan PENDING watcher(s)
+12:51:26 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+12:51:46 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+12:51:46 - daemon.services.memoir_embedding_worker - INFO - [MemoirEmbed] pending=0 embedded=0 errors=0 terminal=0 tick_ms=16 slow_mode=False
+12:52:06 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+12:52:26 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+12:52:46 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+12:52:46 - daemon.checkpoint_perf - INFO - [CheckpointPerf] read sumup 180s: ops=18 hits=0 misses=18 bytes_total=0 last_op=aget_tuple last_bytes=0 bucket=65536
+12:52:46 - daemon.services.memoir_embedding_worker - INFO - [MemoirEmbed] pending=0 embedded=0 errors=0 terminal=0 tick_ms=16 slow_mode=False
+12:53:06 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+12:53:26 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+12:53:46 - daemon.services.memoir_poignancy_worker - INFO - [MemoirPoignancy] pending=0 scored=0 failed=0 terminal=0 duration=0.0s slow_mode=False
+12:53:47 - daemon.services.memoir_embedding_worker - INFO - [MemoirEmbed] pending=0 embedded=0 errors=0 terminal=0 tick_ms=20 slow_mode=False
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+12:53:50 - mcp.server.streamable_http_manager - INFO - StreamableHTTP session manager shutting down
+12:53:50 - daemon.services.job_feedback_observer - INFO - JobFeedbackObserver stopped after processing 0 events
+12:53:50 - daemon.services.job_feedback_observer - INFO - JobFeedbackObserver stopped
+12:53:50 - daemon.services.orphan_watcher_sweep - INFO - OrphanWatcherSweepService stopped
+12:53:50 - daemon.services.dependency_bus - INFO - bus stop: cleared 0 cached watchers
+12:53:50 - daemon.services.dependency_bus - INFO - DependencyBus unregistered
+12:53:50 - daemon.services.job_processor - INFO - JobProcessor stopped
+12:53:50 - daemon.services.live_event_hub - INFO - LiveEventHub shutdown complete
+12:53:50 - daemon.services.notification_broadcaster - INFO - NotificationBroadcaster shutdown complete
+12:53:50 - daemon.services.llm_stream_watchdog - INFO - [StreamWatchdog] loop stopped
+12:53:50 - daemon.services.eligible_pending_sweep - INFO - EligiblePendingSweepService stopped
+12:53:50 - daemon.services.bash_spawn_reaper - INFO - BashSpawnRetentionSweepService stopped
+12:53:50 - daemon.services.tmp_image_cleanup_service - INFO - TmpImageCleanupService stopped
+12:53:50 - daemon.services.sources_gc_service - INFO - [SourcesGC] stopped
+12:53:50 - daemon.services.plane_sync_watchdog_service - INFO - PlaneSyncWatchdogService stopped
+12:53:50 - daemon.services.watch_reconcile_sweep - INFO - WatchReconcileSweepService stopped
+12:53:50 - daemon.services.mission_strand_healer - INFO - MissionStrandHealer: loop cancelled — shutting down
+12:53:50 - daemon.services.job_lock_sweep - INFO - JobLockSweepService stopped
+12:53:50 - daemon.services.upgrade_journal_sweep - INFO - UpgradeJournalSweepService stopped
+12:53:50 - daemon.api - INFO - ServiceReconciliationService stopped
+12:53:50 - daemon.manager - INFO - Starting graceful shutdown...
+12:53:50 - daemon.sources.dispatcher - INFO - Stopping ResponseDispatcher
+12:53:50 - daemon.sources.registry - INFO - Stopping all adapters...
+12:53:50 - daemon.sources.registry - INFO - Supervisor cancelled for adapter: 3eae388f-f1c4-5196-8649-36cca91f409e
+12:53:50 - daemon.sources.registry - INFO - Supervisor exiting for adapter: 3eae388f-f1c4-5196-8649-36cca91f409e
+12:53:50 - daemon.sources.adapters.scheduler - INFO - Stopping scheduler: 3eae388f-f1c4-5196-8649-36cca91f409e
+12:53:50 - daemon.sources.adapters.scheduler - INFO - Scheduler loop ended: 3eae388f-f1c4-5196-8649-36cca91f409e
+12:53:50 - daemon.sources.adapters.scheduler - INFO - Scheduler stopped: 3eae388f-f1c4-5196-8649-36cca91f409e
+12:53:50 - daemon.sources.registry - INFO - Stopped adapter: 3eae388f-f1c4-5196-8649-36cca91f409e
+12:53:50 - daemon.sources.registry - INFO - All adapters stopped
+12:53:50 - daemon.sources.cleanup - INFO - SourceCleanup stopped
+12:53:50 - daemon.manager - INFO - Message sources system stopped
+12:53:50 - daemon.services.worker_pool - INFO - Stopping WorkerPool (2 workers)...
+12:53:50 - daemon.services.worker_pool - WARNING - Worker chat-worker-0 did not stop within 0s
+12:53:50 - daemon.services.worker_pool - WARNING - Worker chat-worker-1 did not stop within 0s
+12:53:50 - daemon.services.worker_pool - INFO - Worker chat-worker-0 stopped: claimed=0, completed=0, failed=0
+12:53:50 - daemon.services.worker_pool - INFO - Worker chat-worker-1 stopped: claimed=0, completed=0, failed=0
+12:53:50 - daemon.services.worker_pool - INFO - WorkerPool stopped
+12:53:50 - daemon.services.pool_orchestrator - INFO - Chat worker pool stopped
+12:53:50 - daemon.services.worker_pool - INFO - Stopping WorkerPool (5 workers)...
+12:53:50 - daemon.services.worker_pool - WARNING - Worker worker-0 did not stop within 0s
+12:53:50 - daemon.services.worker_pool - WARNING - Worker worker-1 did not stop within 0s
+12:53:50 - daemon.services.worker_pool - WARNING - Worker worker-2 did not stop within 0s
+12:53:50 - daemon.services.worker_pool - WARNING - Worker worker-3 did not stop within 0s
+12:53:50 - daemon.services.worker_pool - WARNING - Worker worker-4 did not stop within 0s
+12:53:50 - daemon.services.worker_pool - INFO - Worker worker-1 stopped: claimed=0, completed=0, failed=0
+12:53:50 - daemon.services.worker_pool - INFO - Worker worker-0 stopped: claimed=0, completed=0, failed=0
+12:53:50 - daemon.services.worker_pool - INFO - Worker worker-3 stopped: claimed=0, completed=0, failed=0
+12:53:50 - daemon.services.worker_pool - INFO - Worker worker-4 stopped: claimed=0, completed=0, failed=0
+12:53:50 - daemon.services.worker_pool - INFO - Worker worker-2 stopped: claimed=0, completed=0, failed=0
+12:53:50 - daemon.services.worker_pool - INFO - WorkerPool stopped
+12:53:50 - daemon.services.pool_orchestrator - INFO - Worker pool stopped
+12:53:50 - daemon.services.stale_task_recovery - INFO - StaleTaskRecovery stopped
+12:53:50 - daemon.services.pool_orchestrator - INFO - Stale task recovery stopped
+12:53:50 - daemon.services.report_delivery_recovery - INFO - ReportDeliveryRecoveryService stopped
+12:53:50 - daemon.services.pool_orchestrator - INFO - Report delivery recovery stopped
+12:53:50 - daemon.services.pool_orchestrator - INFO - Stale-pause sweep stopped
+12:53:50 - daemon.services.event_bus - INFO - Shutting down EventBus
+12:53:50 - daemon.services.event_bus - INFO - EventBus shutdown complete
+12:53:50 - daemon.services.maintenance - INFO - Maintenance service stopped
+12:53:50 - daemon.manager - INFO - Checkpointer adapter closed
+12:53:51 - daemon.mcp.warmup_pool - INFO - MCP warm-up pool drained
+12:53:51 - daemon.manager - INFO - Cleaning up resources...
+12:53:51 - daemon.manager - INFO - Database engine disposed
+12:53:51 - daemon.manager - INFO - Graceful shutdown complete
+INFO:     Application shutdown complete.
+INFO:     Finished server process [4012307]
