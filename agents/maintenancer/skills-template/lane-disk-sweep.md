@@ -83,7 +83,7 @@ I sweep empty members whether or not the sibling fix that stops minting them has
 - No idle gating: this lane runs regardless of how busy the host is. The open-handle check is safety, not gating.
 - Failure isolation: `ok` means the lane ran clean, `degraded` means a sub-check failed but a result was produced, `failed` means I could not produce a result at all. A failing lane never blocks the weekly report — the report is written either way.
 - Three-class routing: every recommendation lands in exactly one class — `auto_fix_now` (already executed, in-lane), `needs_emperor_word` (surfaced, never acted on), `route_to_lane` (names the owning lane or team).
-- The result block carries `measured_at` as an ISO-8601 UTC stamp of my measure, `actions_taken` as idempotent action ids or `none`, and `evidence_paths` as ABSOLUTE paths under the run evidence convention `.agents/maintenancer/RESULTS/evidence/<run_id>/` — never inline artifacts.
+- The result block carries `measured_at` as an ISO-8601 UTC stamp of my measure, `actions_taken` as idempotent action ids or `none`, and `evidence_paths` as ABSOLUTE paths under the run's evidence directory — the ABSOLUTE `<install-root>/.agents/maintenancer/RESULTS/evidence/<run_token>/` the dispatch envelope carries (the install-root RESULTS tree, NEVER a cwd-relative resolution) — never inline artifacts.
 - The lane resolves under the event-driven deadline: a wake naming this child marks the lane `failed-timeout`, the fan-in valve is applied once, and the run proceeds.
 
 ## Idempotency and limits

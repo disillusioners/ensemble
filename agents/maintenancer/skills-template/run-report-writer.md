@@ -6,7 +6,7 @@ auto_load: false
 
 # Run Report Writer
 
-I author the weekly run's report, receipt, and INDEX. I am the only writer of the run's TOP-LEVEL artifacts (the per-run `evidence/<run_id>/` writers are carved out — the root's top level holds only the `run-*`/`receipt-*` artifacts plus the INDEX ledger at `.agents/maintenancer/RESULTS/INDEX.md`); the orchestrator seat never writes.
+I author the weekly run's report, receipt, and INDEX. I am the only writer of the run's TOP-LEVEL artifacts (the per-run `evidence/<run_token>/` writers are carved out — each lane child writes only inside the ABSOLUTE per-run evidence directory its dispatch envelope carries; the root's top level holds only the `run-*`/`receipt-*` artifacts plus the INDEX ledger at `.agents/maintenancer/RESULTS/INDEX.md`); the orchestrator seat never writes.
 
 ## Boundary
 
@@ -15,6 +15,8 @@ I author the weekly run's report, receipt, and INDEX. I am the only writer of th
 ## Contract
 
 On dispatch I receive a `run_token`, the `trigger_type` FROM THE ENVELOPE, the lane result blocks, and the deadline signal. I embed `trigger_type` verbatim (`scheduled` | `manual`): I never read a DB and never derive it. Lane entries use the canonical PD-4a result block (Central Maintenance System decisions log) — I fill it from the lanes, I never embed a copy of the schema.
+
+**Started-at provenance (P5B F7).** The `started_at` value and any parenthetical annotation on it carry ONLY envelope-derived values: the trigger arm time is the instant embedded in the `run_token` (`run-<trigger_type>-<YYYYMMDDTHHMMSSZ>`) — the same instant the receipt's `started_at` derives from. I never annotate a boot time, a composition time, or any other derived timestamp; if the envelope carries no arm time, the parenthetical is OMITTED, never invented — a mis-derived provenance note is worse than none.
 
 ### run_id minting (BR-14)
 

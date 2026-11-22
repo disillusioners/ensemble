@@ -523,3 +523,88 @@ class TestLeaderTeamMembership:
             f"+1 'designer', +1 'gaia', +1 'aegis', +4 video team: producer/"
             f"capturer/editor/verifier). Got: {len(team)}"
         )
+
+
+# =============================================================================
+# 7. P5B F5 — the lane spawn binds an explicit project_id (AC10 gate)
+# =============================================================================
+
+
+class TestP5bProjectContextDispatch:
+    """The staged-boot proof (P5B, 2026-11-22, finding F5): a bare lane
+    spawn AUTO-INHERITS the orchestrator's project binding, and the
+    maintenance run binds the SYSTEM-DEFAULT project — so every
+    ``pok_query`` on the child refuses with ``pok_default_project``
+    (AC10), the escape valve exhausts, and no orchestrator supplement is
+    possible. The cure is DISPATCH-LEVEL: the spawn carries an EXPLICIT
+    non-default ``project_id`` (the spawn tool supports it), with a
+    fail-closed pre-dispatch check that never spends the re-dispatch on
+    a scoping refusal.
+
+    Content pins (workflow.md + the pok lane body) in the established
+    prompt-pin style, plus the two unit-testable seams (the spawn tool's
+    ``project_id`` field; the AC10 default-project gate).
+    """
+
+    def test_spawn_tool_schema_exposes_project_id(self) -> None:
+        """The dispatch fix is expressible: spawn_instance carries a
+        ``project_id`` parameter (auto-inherits from the parent row when
+        omitted — which is exactly the failure shape P5B F5 documents)."""
+        from daemon.tools.instance import SpawnInstanceInput
+
+        assert "project_id" in SpawnInstanceInput.model_fields, (
+            "spawn_instance must expose project_id — the pok lane's "
+            "explicit project binding rides this field"
+        )
+
+    def test_pok_gate_refuses_the_system_default_project(self) -> None:
+        """The AC10 gate is a DEFAULT-PROJECT refusal (not merely a
+        missing-project one): the default project accepts NO pok calls,
+        so an inherited default binding can never succeed."""
+        from daemon.constants import SYSTEM_DEFAULT_PROJECT_ID
+        from daemon.services.pok_service import (
+            SYSTEM_DEFAULT_PROJECT_NAME,
+            is_default_project,
+        )
+
+        assert SYSTEM_DEFAULT_PROJECT_ID, "conftest pins the startup invariant"
+        assert is_default_project(SYSTEM_DEFAULT_PROJECT_ID, None)
+        assert is_default_project(None, SYSTEM_DEFAULT_PROJECT_NAME)
+        assert not is_default_project(
+            "00000000-0000-0000-0000-00000000000f", "a-real-project"
+        )
+
+    def test_workflow_mandates_explicit_project_id_never_bare_inherit(self) -> None:
+        """workflow.md carries the dispatch spec: EXPLICIT project_id on
+        every lane spawn, never bare-inherit (the staged-boot failure)."""
+        text = _read(WORKFLOW_PATH)
+        assert "Lane Spawn Project Context" in text, (
+            "workflow.md must carry the Lane Spawn Project Context clause "
+            "(P5B F5)"
+        )
+        assert "EXPLICIT `project_id`" in text
+        assert "never bare-inherit" in text
+
+    def test_workflow_names_the_ac10_default_project_refusal(self) -> None:
+        text = _read(WORKFLOW_PATH)
+        assert "AC10" in text
+        assert "pok_default_project" in text
+        assert "system-default project" in text
+
+    def test_workflow_fail_closed_pre_dispatch_valve_preservation(self) -> None:
+        """A scoping refusal is not transient: the pre-dispatch check
+        marks the lane [incomplete] instead of spending the re-dispatch."""
+        text = _read(WORKFLOW_PATH)
+        assert "Pre-dispatch check" in text
+        assert "[incomplete]" in text
+        assert "escape valve is NEVER spent" in text
+
+    def test_pok_lane_body_carries_the_ac10_project_contract(self) -> None:
+        """The pok lane body mirrors the contract child-side: operate on
+        the spawn-bound project; a default binding is reported
+        immediately, never re-dispatched."""
+        skill = _read(MM_AGENT_DIR / "skills-template" / "lane-pok-sweep.md")
+        assert "PROJECT-SCOPED" in skill
+        assert "pok_default_project" in skill
+        assert "[incomplete]" in skill
+        assert "not transient" in skill
