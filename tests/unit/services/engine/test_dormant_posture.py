@@ -197,7 +197,10 @@ def test_posture_line_present_in_boot_wiring():
     API = Path(__file__).resolve().parents[4] / "daemon" / "api.py"
     src = API.read_text(encoding="utf-8")
     assert src.count('"engine boot posture: enabled=%s shadow=%s registrations=%d') == 1
-    assert "specs (execute_fn withheld, USE_ENGINE all unset)" in src
+    # F1: the posture line reports the ACTUAL USE_ENGINE state. The static
+    # "all unset" claim is gone — it used to print while a flag was set.
+    assert "specs (execute_fn withheld); use_engine_flags=%s;" in src
+    assert "USE_ENGINE all unset" not in src
 
 
 def test_all_use_engine_flags_unset():

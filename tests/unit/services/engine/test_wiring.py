@@ -84,7 +84,10 @@ def test_single_posture_info_line():
     assert API_SRC.count('"engine boot posture: enabled=%s shadow=%s registrations=%d') == 1
     assert "block_elapsed_ms_gated=%.3f" in API_SRC
     assert "block_elapsed_ms_total=%.3f" in API_SRC
-    assert "specs (execute_fn withheld, USE_ENGINE all unset)" in API_SRC
+    # F1: the USE_ENGINE state is rendered DYNAMICALLY (the static
+    # "all unset" claim used to print even when a flag was set).
+    assert "specs (execute_fn withheld); use_engine_flags=%s;" in API_SRC
+    assert "USE_ENGINE all unset" not in API_SRC
 
 
 def test_wiring_guarded_failure_continues():

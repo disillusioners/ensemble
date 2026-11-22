@@ -208,3 +208,100 @@ The three candidate wirings (from explorer facts):
 - `../central-polling-engine-study/liveness-evidence.md`, `census-periodic.md` — liveness verdicts + mechanism inventory (pilot context).
 - Code anchors: `daemon/services/boot_epoch.py:91-133` (log at `:132`); `daemon/api.py:969-971` (capture call site), `:1012` (start_time), `:5190-5265` (readiness refresher, first tick t=0 at `:5215-5217`), `:6325`/`:6594` (livez/health uptime); `daemon/services/readiness.py:1377+`; `daemon/services/wedge_capture/boot_record.py:54,58,136-150,269`; `scripts/upgrade/lib.sh:9095-9096` (`gate_livez`/`gate_readyz`), `:146-147` (`LIVEZ_BUDGET_S=180`/`READYZ_BUDGET_S=120`); `scripts/upgrade/boot_smoke.sh:60,496-524` (poll, 45 s default timeout).
 - Artefacts: `data/upgrade.log` (613 lines), `data/upgrade/live/r-*.log`, `data/promote-v0296.log`, `data/wedge-captures/boot-records/*.json` (43 files, cap 50), `releases/state.json`, tester RESULTS, incident file.
+
+---
+
+## 9. F2 — `block_elapsed_ms_gated` measurement and the two-class bound proposal
+
+**Status: MEASUREMENT EVIDENCE + PROPOSAL — NOT RATIFIED.** The ruling on the bound is the LEADER's. Nothing in this section is presented as an approved SLO change.
+**Added:** 2026-11-22 (F2 gate-ownership lane). **Worktree:** `/home/nea/ensemble-src-wt-engine-flipprep`, branch `feature/engine-killswitch-exec`, HEAD `ad0175229` = base `8a1045c02` (v0.31.32 staged tip) + `688042646` (kill-switch exec wiring, D3.6/D3.12) + `ad0175229` (truthful posture line, F1). **Scope discipline:** this lane edited NO `daemon/**` file; `daemon` anchors below were re-grepped read-only at HEAD. The only boots executed by this lane are the WARM-class confirmation boots in §9.6 (fenced, `ensemble_dev`, fresh ports).
+
+**Finding F2 (inherited from the P2-pilot tester gate, `.agents/tester/RESULTS/2026-11-22-engine-arc-p2-pilot-tester-gate.md` §7):** `block_elapsed_ms_gated` was reported as "266–308 ms across ALL FOUR boots" against the documented SLO-1 dormant bound **≤ 250 ms** (`phase4-plan.md` D4.9 at `:40` and SLO-1 at `:121`), with no registered gate owning the number (`engine_boot_slo_gate` was method-wiring-only per its standing P7 disclosure). This section reproduces the evidence; §9.7 is the proposed two-class ruling; §9.8 is the open measurement question.
+
+### 9.1 What the gated number is (composition, anchors re-grepped at HEAD `ad0175229`)
+
+Both numbers are `time.perf_counter()` (host monotonic) measurements emitted in the single posture INFO line — a **different clock frame** from the `boot_epoch`/`readyz` frames of §2, and a **different quantity** (the engine block's own cost, not boot wall clock).
+
+| Segment | Anchor (re-grepped at HEAD) | In gated window? |
+|---|---|---|
+| UNGATED whole-block entry | `_engine_block_entry_t0 = time.perf_counter()` — `daemon/api.py:3845` | No (total telemetry only, D4.9) |
+| Build 12 dormant observer specs | `build_observer_specs(config)` — `daemon/api.py:3885`; builder `daemon/services/engine/boot.py:142`; source table `CONTINUITY_JOBS` `daemon/services/engine/estate.py:67-159` | No (before gated t0) |
+| **GATED window start** | `_engine_gated_t0 = time.perf_counter()` — `daemon/api.py:3887` | **Yes** |
+| Deadlined registration pass of the 12 specs (BOOT_PASS via `run_boot_pass`) + engine start + watchdog start | `_engine_registration_pass` / `run_boot_pass` — `daemon/api.py:3889-3896` | Yes |
+| **GATED window end** | `_engine_gated_elapsed_ms = (time.perf_counter() - _engine_gated_t0) * 1000.0` — `daemon/api.py:3999` | **Yes** |
+| UNGATED total end | `_engine_block_total_elapsed_ms = (time.perf_counter() - _engine_block_entry_t0) * 1000.0` — `daemon/api.py:4000-4002` | No (total telemetry only) |
+| Posture line emit | `logger.info("engine boot posture: enabled=%s shadow=%s registrations=%d ... use_engine_flags=%s; block_elapsed_ms_gated=%.3f block_elapsed_ms_total=%.3f", ...)` — `daemon/api.py:4004-4012` | n/a (the observation surface) |
+
+**The 12 spec names** (`CONTINUITY_JOBS` job_ids, `estate.py:69-159`, count re-grepped = 12): `watch-reconcile`, `mission-strand-heal`, `report-delivery-recovery`, `sources-gc`, `eligible-pending`, `orphan-watcher`, `job-lock`, `tmp-image`, `plane-sync-watchdog`, `stale-pause`, `waiting-children-watchdog`, `drift-reconcile`. **`registrations=12` in EVERY observed source** — P4 rehearsal, tester A/B/C/D, wave-1, and HEAD confirmation. The tester's "drift added registrations" premise is **FALSE**.
+
+### 9.2 Measurement inventory (all sources — numbers transcribed and grep-verified, not re-derived)
+
+All boots below are the dormant/observer posture (`enabled=True`, `execute_fn` withheld) unless noted. `gated` = `block_elapsed_ms_gated`, `total` = `block_elapsed_ms_total` (ms). Transcripts are untracked scratch dirs and may not persist — numbers are inline here by design.
+
+| Source | Tree / HEAD | DB topology / host | Posture | gated (ms) | total (ms) | Transcript pointer |
+|---|---|---|---|---|---|---|
+| Wave-1 boot 01 | base `8a1045c02` (pristine) | warm long-lived `ensemble_dev` @127.0.0.1:5432; un-contended | dormant, registrations=12, flags unset | 103.310 | 137.759 | `.f2-transcripts/boot-01.txt:297` |
+| Wave-1 boot 02 | base `8a1045c02` | same | same | 109.525 | 125.664 | `.f2-transcripts/boot-02.txt:299` |
+| Wave-1 boot 03 | base `8a1045c02` | same | same | 113.078 | 130.358 | `.f2-transcripts/boot-03.txt:297` |
+| Wave-1 boot 04 | base `8a1045c02` | same | same | 115.614 | 134.493 | `.f2-transcripts/boot-04.txt:297` |
+| Wave-1 boot 05 | base `8a1045c02` | same | same | 103.366 | 121.982 | `.f2-transcripts/boot-05.txt:297` |
+| Wave-1 boot 06 | base `8a1045c02` | same | same | 134.938 | 152.734 | `.f2-transcripts/boot-06.txt:299` |
+| P4 pre-drift rehearsal | `82aa36862` | warm `ensemble_dev` | dormant | 172.217 | — | `.agents/coder/RESULTS/p4-closure/boot_rehearsal_slo3.txt:251` |
+| Tester boot A | `e6f7d7169` (flag-unset) | **cold fresh-PG cluster 19701 + fresh scratch DB**, concurrent 9-shard regression load | dormant, registrations=12, flags unset | 307.878 | 335.494 | `.agents/tester/RESULTS/raw/2026-11-22-engine-arc-p2-pilot-gate/pilot_gate_A_daemon_4011612.txt` |
+| Tester boot B | `e6f7d7169` (flag-unset) | cold fresh-PG cluster 19702 + fresh scratch DB, same load | dormant, registrations=12, flags unset | **237.982** | 262.883 | `.../pilot_gate_B_daemon_4028421.txt` |
+| Tester boot C | `21eb5bc3a` (flag-ON, **shadow**) | cold fresh-PG cluster 19703 + fresh scratch DB, same load | shadow=True, registrations=12 | 266.091 | 294.539 | `.../pilot_gate_C_daemon_4037024.txt` |
+| Tester boot D | `21eb5bc3a` (flag-ON, **exec**) | cold fresh-PG cluster 19704 + fresh scratch DB, same load | **shadow=False**, registrations=12 | 302.418 | 334.125 | `.../pilot_gate_D_daemon_4036233.txt` |
+| HEAD confirmation A | `ad0175229` (F1 posture fix) | warm `ensemble_dev`, fresh port | dormant, `use_engine_flags=all unset (0/12)` | 131.880 | 153.781 | `.flipprep-transcripts/bootA-dormant.txt` |
+| HEAD confirmation B | `ad0175229` | warm `ensemble_dev`, fresh port | `use_engine_flags=SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE=1 (1/12)` | 115.066 | 137.435 | `.flipprep-transcripts/bootB-flagset.txt` |
+| F2-gate pack boot (pack-executed WARM leg) | `ad0175229` (the pack's own measurement leg) | warm `ensemble_dev`, fresh port | dormant, `use_engine_flags=all unset (0/12)` | **179.192** | 196.647 | `.f2gate-transcripts/warm-20261122T174907Z-380847.txt:268` |
+| F2-gate pack boot (lane baseline re-run) | `290000cbd` (this lane's TRUE base) | warm `ensemble_dev`, fresh port | dormant, `use_engine_flags=all unset (0/12)` | **191.188** | 208.734 | `.f2gate-transcripts/warm-20261122T182246Z-460476.txt:268` |
+
+### 9.3 Corrected tester discrepancy (record the correction explicitly)
+
+The tester summary (`.agents/tester/RESULTS/2026-11-22-engine-arc-p2-pilot-tester-gate.md:92`) asserts `block_elapsed_ms_gated` = **"266–308 ms across ALL FOUR boots"**. That is **false**:
+- The true range across the four boots is **237.982 – 307.878 ms** (boot B = 237.982, **below** 250).
+- The four boots are **not homogeneous**: A/B are flag-unset @ `e6f7d7169`; C is flag-ON shadow @ `21eb5bc3a`; D is flag-ON exec @ `21eb5bc3a` (and D's posture line reads `shadow=False`).
+- **3 of 4** tester boots exceed 250; boot B does not.
+
+The correction does not change finding F2's substance (3/4 exceed the old bound) but it invalidates the "across ALL FOUR" and "homogeneous" framings. Recorded here so the ruling uses the true range.
+
+### 9.4 Environmental attribution and variance note
+
+- **Warm-DB / normal host ⇒ 103–191 ms** (wave-1 max 134.938; HEAD confirmations 115–132; P4 rehearsal 172.217; the F2-gate pack's own WARM legs 179.192 @ `ad0175229` and 191.188 @ `290000cbd`).
+- **Cold-PG / contended host ⇒ 238–308 ms** (tester A/B/C/D under cold fresh clusters + concurrent 9-shard load).
+- **Drift since Phase-1 adds ~0 measurable dormant-block cost.** The gated window `82aa36862 → HEAD` was diffed: the pilot branch is conditional/0-cost in dormant posture; the dep-bus binding is a trivial getter with the import made lazy. `registrations=12` unchanged across all sources (§9.1). The "drift added registrations" premise is disproved.
+- **Bimodal variance — a single pooled statistic is meaningless.** The pooled sample is a mixture of two environments (warm vs cold/contended); its between-environment spread dominates its within-environment spread. Wave-1 alone: n=6, min 103.310, median 111.302, max 134.938, mean 113.305, population σ 10.695 ms. Tester cold class alone: 237.982–307.878. Pooling these into one σ would describe the environment gap, not measurement noise. **Report per-class, never pooled.**
+
+### 9.5 Gated-block composition — what the 103–191 / 238–308 ms buys
+
+The gated window is: registration pass of 12 observer specs (deadlined BOOT_PASS) + engine tick-loop start + watchdog start. It is **not** the whole boot (the UNGATED total includes imports/construction/`build_observer_specs` from `:3845` and runs ~18–34 ms longer in wave-1). SLO-1's ≤250 ms was written as a *cost bound on the new block* so the engine cannot consume the 120 s boot bar it must not regress (phase4-plan D4.9); it is not itself a boot-wall-clock bar. That is why the two-class proposal below keeps the number in the same `time.perf_counter` frame and does not mix in the §2 clock frames.
+
+### 9.6 WARM-class confirmation boots executed by this lane (HEAD `ad0175229`)
+
+Fenced exactly as the gate leg now encodes: `set -a; . ./.env; set +a`; `PORT`/`DAEMON_PORT` = fresh ports (never 8079/9797); `POSTGRES_DB=ensemble_dev` explicit (the `data_dev/ensemble.json` points at a non-existent `ensemble` DB, so env must win explicitly); `DATA_DIR=./data_dev ENSEMBLE_DATA_DIR=./data_dev PERSISTENCE_DB_PATH=./data_dev/instances.db`; `ENSEMBLE_DB_AMBIENT_ALLOW=1`; `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` pinned; entry `.venv/bin/python -m daemon`; livez→readyz 2 s poll; only the recorded PID signalled (TERM, dead, port listeners 0). Results: **131.880 ms** (dormant, flags unset) and **115.066 ms** (one flag set) — both inside the WARM class and inside the proposed 250 ms bound. Posture lines carry the new truthful `use_engine_flags=` field (F1 fix at HEAD).
+
+### 9.7 PROPOSAL — LEADER RULES: two class-scoped bounds (Option C)
+
+> **PROPOSAL ONLY — the LEADER owns the ruling. Not ratified by this lane.**
+
+Replace the single ambiguous SLO-1 number with two class-scoped bounds, each with explicit conditions:
+
+- **SLO-1-WARM ≤ 250 ms** — *unchanged number*. Conditions: dormant posture, `registrations=12`, warm long-lived PG, un-contended host. Derivation bracket: observed WARM max **191.188 ms** (this lane's F2-gate pack re-run at `290000cbd`; the pack-executed max before it was **179.192 ms** at `ad0175229`; **134.938 ms** remains the wave-1-only stat) → **1.31× headroom** (250/191.188 = 1.3074). The observed WARM range across ALL evidence is now **103.310–191.188 ms**, so the earlier **1.85×** figure (250/134.938) OVERSTATED the headroom — it quoted the wave-1-only max, not the all-evidence max. **The bound still holds**: every observed WARM datum (wave-1, P4 rehearsal, HEAD confirmations, both F2-gate pack runs) is ≤ 250 ms. HEAD confirmations 115–132 ms corroborate.
+- **SLO-1-COLD ≤ 360 ms** — *new class*. Conditions: cold/first-boot environment **OR** contended host. Derivation bracket: observed cold max **307.878 ms** (tester A) × 1.15 margin = 354.06 → rounded up to **360 ms**. Covers tester range 237.982–307.878.
+- **Flip-day bound = the COLD class.** The only empirical flip-posture datum (tester boot D, flag-ON exec, 302.418 ms) is cold-class; applying the 250 ms WARM bound to a cold flip boot would false-fire.
+- **Flip-day SWITCH semantics (not a bound-class statement).** **[flip-prep rider — 2026-11-22: a TRIP takes effect on the NEXT tick exactly; a RESTORE (un-trip) is INTERVAL-bound, not tick-bound — the KILL_SWITCHED skip stamps `last_run_at`, so an un-tripped engine resumes a job only when that job next comes DUE (≤ one full interval — an hour for a 3600 s job).]** **[flip-prep rider — 2026-11-22: the runtime fail-to-legacy polarity is ENGINE-scoped ("the engine does not own execution"); the PILOT's per-module legacy suppression is armed at BOOT (ownership conjuncts), so a runtime trip of the pilot's switch leaves that lane owned by NOBODY until a restart (restart-scoped), until the tail's runtime re-arm design lands.]** (Same sentences as the phase-2 pilot recommendation's activation-shape rows; there is NO dedicated flip-day runbook file in-tree — this section and `phase2-pilot-recommendation.md` are the flip-day guidance homes.)
+
+**Gate constant mirror** (the pack `test/packs/engine_boot_slo_gate.sh` pins its constants to these exact strings — divergence is RED):
+
+```
+SLO1_WARM_BOUND_MS=250
+SLO1_COLD_BOUND_MS=360
+```
+
+**Per-registration scaling (ATTRIBUTION, NOT MEASUREMENT):** `bound(N) ≈ bound(12) + 10 ms × (N − 12)`. The ~10 ms/registration coefficient is a **residual attribution (~7–10 ms/reg)** from the observed spread, **not a controlled measurement** — no N≠12 boot was run. Disclose the caveat wherever the formula is used; do not promote it to a measured constant.
+
+**COLD-class pack limitation (disclosed):** fresh-PG-cluster boots (tester procedure: `initdb -A trust`, fresh scratch DBs, concurrent shard load) are a **tester-lane procedure, not pack-runnable**. The pack therefore *encodes and pins* the COLD bound as a constant with provenance but cannot execute a COLD measurement leg; only the WARM class has an executable boot leg. The doc-equality leg keeps both constants honest against this section.
+
+### 9.8 Open measurement question (decision-level, LEADER)
+
+The per-registration coefficient (§9.7) is attributed, not measured. **Question:** fund an N-sweep (boot with N ≠ 12 observer specs, warm class) to measure the coefficient, or ratify the attributed 10 ms/reg with an explicit caveat and no further measurement? Under "fund": a tester-lane commission seeds N=6/12/18 warm boots. Under "ratify": the formula ships labelled ATTRIBUTION and the gate stays at N=12 bounds. This lane does not decide.

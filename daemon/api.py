@@ -3954,7 +3954,11 @@ async def lifespan(app: FastAPI):
     _engine_block_entry_t0 = time.perf_counter()  # UNGATED whole-block telemetry (D4.9)
     _engine_svc = None  # C1: pre-bound so the except handler can drop a partial executor
     try:
-        from daemon.services.engine.boot import build_observer_specs, run_boot_pass
+        from daemon.services.engine.boot import (
+            build_observer_specs,
+            describe_use_engine_flags,
+            run_boot_pass,
+        )
         from daemon.services.engine.engine import EngineService
         from daemon.services.engine.guardrails import (
             DependencyRef,
@@ -3978,9 +3982,13 @@ async def lifespan(app: FastAPI):
             _engine_registry,
             _engine_cfg,
             shadow_mode=_engine_cfg.shadow_mode,
+            # D3.12 — the kill-switch resolver is INJECTED into the engine.
+            # The tick path consults it AT TICK TIME (D3.6) on every
+            # dispatch, so a flip of the switch takes effect on the next
+            # tick, with no restart. It caches nothing and the tick never
+            # reads os.environ itself.
+            switch_resolver=_engine_switch,
         )
-        # ARM the P3 killswitch surface (inert while dormant).
-        _engine_svc._switch_resolver = _engine_switch
 
         # N dormant observer specs — execute_fn withheld by construction.
         _observer_specs = build_observer_specs(config)
@@ -4103,11 +4111,12 @@ async def lifespan(app: FastAPI):
         ) * 1000.0
         logger.info(
             "engine boot posture: enabled=%s shadow=%s registrations=%d observer "
-            "specs (execute_fn withheld, USE_ENGINE all unset); "
+            "specs (execute_fn withheld); use_engine_flags=%s; "
             "block_elapsed_ms_gated=%.3f block_elapsed_ms_total=%.3f",
             _engine_cfg.enabled,
             _engine_cfg.shadow_mode,
             len(_observer_specs),
+            describe_use_engine_flags(_observer_specs),
             _engine_gated_elapsed_ms,
             _engine_block_total_elapsed_ms,
         )

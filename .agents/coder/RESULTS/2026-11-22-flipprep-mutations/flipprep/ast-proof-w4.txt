@@ -1,0 +1,62 @@
+===== daemon/services/engine/execution.py =====
+--- comment-stripped (ast.unparse) diff: 5 changed lines ---
+--- HEAD:normalized
++++ WORKTREE:normalized
+@@ -15,3 +15,3 @@
+ from daemon.services.engine.locks import JobLockTable
+-from daemon.services.engine.state import effective_interval_seconds, now_iso, parse_iso, skip_outcome, stamp_terminal, TerminalStamp, IDLE_GATE_SKIP_REASONS, now_iso as _now_iso, REASON_TIMEOUT_PENDING_EXTEND, OUTCOME_TIMEOUT_PENDING_EXTEND
++from daemon.services.engine.state import effective_interval_seconds, normalize_skip_reason, now_iso, parse_iso, skip_outcome, stamp_terminal, TerminalStamp, IDLE_GATE_SKIP_REASONS, now_iso as _now_iso, REASON_TIMEOUT_PENDING_EXTEND, OUTCOME_TIMEOUT_PENDING_EXTEND
+ from daemon.services.engine import dispatch as D
+@@ -225,3 +225,4 @@
+             await self._stamp(job_id, cache, spec, started_iso, skip_outcome(kill_reason), kill_reason, started_dt, None, 0, None)
+-            cache['skips_by_reason'][kill_reason] = cache['skips_by_reason'].get(kill_reason, 0) + 1
++            reason_key = normalize_skip_reason(kill_reason or 'KILL_SWITCHED')
++            cache['skips_by_reason'][reason_key] = cache['skips_by_reason'].get(reason_key, 0) + 1
+             return
+--- AST-changed defs (name-level): ['EngineExecutionLoop', 'EngineExecutionLoop', '__init__', '__init__', 'cache', 'cache', 'locks', 'locks', 'repository', 'repository', 'shadow_mode', 'shadow_mode', 'switch_resolver', 'switch_resolver', 'shadow_active', 'shadow_active', '_resolve_switch', '_resolve_switch', 'resolution', 'resolution', 'boot_id', 'boot_id', 'host_pid', 'host_pid', 'run', 'run', '_tick', '_tick', '_is_due', '_is_due', '_dispatch_one', '_dispatch_one', 'attempt', '_dispatch', 'on_extend_fire', 'attempt', '_dispatch', 'on_extend_fire', '_stamp_extend_fire', '_stamp_extend_fire', '_stamp', '_stamp', '_update_consecutive_skips', 'ingest_event', '_update_consecutive_skips', 'ingest_event', 'set_executor', 'set_executor']
+
+===== daemon/services/engine/killswitch.py =====
+--- comment-stripped (ast.unparse) diff: 25 changed lines ---
+--- HEAD:normalized
++++ WORKTREE:normalized
+@@ -2,5 +2,8 @@
+ 
+-FAIL-TO-LEGACY polarity (D3.5): an unreadable engine-wide switch resolves
+-to "engine does not own execution" (legacy path). A per-job ``kill_switch_key``
+-that is unreadable resolves to "job skipped, counted as KILL_SWITCHED".
++FAIL-TO-LEGACY polarity (D3.5): an UNREADABLE (malformed/garbage) engine-wide
++switch resolves to "engine does not own execution" (legacy path). An ABSENT
++engine-wide switch is NOT unreadable — it resolves to the shipped default
++(enabled) per the AMD-8 absent-vs-explicit split. A per-job
++``kill_switch_key`` that is unreadable resolves to "job skipped, counted as
++KILL_SWITCHED".
+ 
+@@ -8,3 +11,13 @@
+ ``kill_switch_key`` -> ``ENSEMBLE_ENGINE_ENABLED`` -> ``ENSEMBLE_ENGINE_SHADOW_MODE``
+--> spec. A flip takes effect on the next tick, no restart.
++-> spec. A TRIP takes effect on the next tick, no restart; a RESTORE (un-trip)
++is INTERVAL-bound, not tick-bound — the skip stamps ``last_run_at``, so the
++job must come DUE again (≤ one full interval) before the engine executes it.
++
++SCOPE (honest): the runtime fail-to-legacy polarity above is ENGINE-scoped —
++"the engine does not own execution" is a statement about the ENGINE, not
++about any single module's legacy loop. The PILOT's per-module legacy
++suppression is armed at BOOT (the ownership conjuncts), NOT at runtime: a
++runtime trip of the pilot's per-module switch leaves that lane owned by
++NOBODY until a restart (restart-scoped), until the tail's runtime re-arm
++design lands.
+ 
+@@ -14,3 +27,5 @@
+ Wiring owner: P4 — T4.4 constructs EngineService with the killswitch
+-resolver; until then (D4.11 dormancy) this switch surface is INERT, not live.
++resolver; the surface is ARMED at boot and READ on every dispatch
++(D3.6/D3.12) — the D4.11 dormancy is a POSTURE (no module is owned by the
++engine yet), not an inert surface.
+ """
+--- AST-changed defs (name-level): ['normalize_switch_value', 'normalize_switch_value', 'EngineSwitchResolver', 'engine_enabled', 'EngineSwitchResolver', 'shadow_mode', 'engine_enabled', 'job_killed', 'shadow_mode', 'source_value', 'job_killed', 'resolve_job', 'source_value', 'kill_switch_from_env', 'resolve_job', 'kill_switch_from_env']
+--- module docstring: CHANGED (string constant only; no executable statement added/removed)
+
+daemon/services/engine/execution.py: defs whose EXECUTABLE body (docstring stripped) changed -> ['EngineExecutionLoop', '_dispatch_one']
+daemon/services/engine/execution.py: module-level executable statements changed -> YES (count 14 -> 14)
+daemon/services/engine/killswitch.py: defs whose EXECUTABLE body (docstring stripped) changed -> NONE
+daemon/services/engine/killswitch.py: module-level executable statements changed -> NO (count 9 -> 9)

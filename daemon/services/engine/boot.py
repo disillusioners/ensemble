@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 from enum import Enum
 from typing import Any, Awaitable, Callable, Iterable, Optional
 
@@ -183,6 +184,42 @@ def build_observer_specs(config: Any) -> tuple[Any, ...]:
     return tuple(specs)
 
 
+def describe_use_engine_flags(specs: Iterable[Any], environ: Any = None) -> str:
+    """Truthful rendering of the ``SERVICES_*_USE_ENGINE`` family at boot.
+
+    F1: the boot posture line must NOT claim "USE_ENGINE all unset" when a
+    flag is actually set. This renders the REAL state of the family: the
+    distinct ``kill_switch_key`` names carried by the registered specs
+    (every observer spec names its module's USE_ENGINE seam), and which of
+    those names carry a value right now.
+
+    Shapes:
+
+    * every key unset ⇒ ``"all unset (0/N)"``
+    * some keys set ⇒ ``"SERVICES_A_USE_ENGINE=1, SERVICES_B_USE_ENGINE=0 (2/N)"``
+
+    The value is collapsed to single spaces and truncated — it is
+    operator-supplied text and must never break the log line.
+    """
+    env = os.environ if environ is None else environ
+    keys = sorted(
+        {str(getattr(s, "kill_switch_key", "") or "") for s in (specs or ())}
+    )
+    keys = [k for k in keys if k]
+    set_entries: list[str] = []
+    for key in keys:
+        raw = env.get(key) if hasattr(env, "get") else None
+        if raw is None:
+            continue
+        text = " ".join(str(raw).split())
+        if len(text) > 32:
+            text = text[:29] + "..."
+        set_entries.append(f"{key}={text}")
+    if not set_entries:
+        return f"all unset (0/{len(keys)})"
+    return f"{', '.join(set_entries)} ({len(set_entries)}/{len(keys)})"
+
+
 class FirstTickScheduler:
     """Boot-scoped first-tick offset cache (stable within one boot).
 
@@ -227,6 +264,7 @@ __all__ = [
     "FirstTickScheduler",
     "build_observer_specs",
     "compute_first_tick_offset",
+    "describe_use_engine_flags",
     "first_tick_jitter",
     "run_boot_pass",
     "run_boot_sweep",

@@ -1,0 +1,13 @@
+......F..                                                                [100%]
+=================================== FAILURES ===================================
+E   AssertionError: assert 'SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE' in 'all unset (0/12)'
+/home/nea/ensemble-src-wt-engine-flipprep/tests/unit/services/engine/test_boot_posture_truth.py:133: AssertionError: assert 'SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE' in 'all unset (0/12)'
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-engine-flipprep/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/services/engine/test_boot_posture_truth.py::test_production_seam_reads_the_ambient_environment
+1 failed, 8 passed, 1 warning in 0.63s

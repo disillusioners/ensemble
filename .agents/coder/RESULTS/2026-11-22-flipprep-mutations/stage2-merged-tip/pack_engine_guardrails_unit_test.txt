@@ -1,0 +1,66 @@
+=== Test Pack: engine_guardrails_unit_test ===
+
+--- unit legs ---
+============================= test session starts ==============================
+platform linux -- Python 3.14.7, pytest-9.0.2, pluggy-1.6.0 -- /home/nea/ensemble-src-wt-engine-flipprep/.venv/bin/python
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: /home/nea/ensemble-src-wt-engine-flipprep
+configfile: pyproject.toml
+plugins: anyio-4.12.1, hypothesis-6.165.10, asyncio-1.3.0, mock-3.15.1, xdist-3.8.0, langsmith-0.7.7, timeout-2.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 280.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 40 items
+
+tests/unit/services/test_engine_dependency_liveness.py::test_resolve_at_due_calls_getter_at_due_time PASSED [  2%]
+tests/unit/services/test_engine_dependency_liveness.py::test_resolve_at_due_none_is_missing PASSED [  5%]
+tests/unit/services/test_engine_dependency_liveness.py::test_dependency_becomes_available_after_start_no_restart PASSED [  7%]
+tests/unit/services/test_engine_dependency_liveness.py::test_assert_dependencies_resolvable_pure_and_names PASSED [ 10%]
+tests/unit/services/test_engine_dependency_liveness.py::test_assert_dependencies_resolvable_ok_when_resolved PASSED [ 12%]
+tests/unit/services/test_engine_dependency_liveness.py::test_dep_missing_tracker_escalates_after_2x_interval PASSED [ 15%]
+tests/unit/services/test_engine_dependency_liveness.py::test_dep_missing_tracker_resets_on_resolve PASSED [ 17%]
+tests/unit/services/test_engine_dependency_liveness.py::test_escalate_dead_log_once_single PASSED [ 20%]
+tests/unit/services/test_engine_dependency_liveness.py::test_extend_wedge_tracker_escalates_after_2x PASSED [ 22%]
+tests/unit/services/test_engine_dependency_liveness.py::test_extend_wedge_tracker_clears_on_release PASSED [ 25%]
+tests/unit/services/test_engine_dependency_liveness.py::test_factors PASSED [ 27%]
+tests/unit/services/test_engine_dependency_liveness.py::test_engine_due_evaluation_stamps_dep_missing PASSED [ 30%]
+tests/unit/services/test_engine_dependency_liveness.py::test_engine_dep_missing_escalates_to_dead PASSED [ 32%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_normalize_switch_value PASSED [ 35%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_fail_to_legacy_unreadable_engine_disabled PASSED [ 37%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_explicit_off_values_disable PASSED [ 40%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_explicit_truthy_enables PASSED [ 42%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_absent_engine_defaults_true PASSED [ 45%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_per_job_unreadable_killed PASSED [ 47%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_per_job_explicit_off_killed PASSED [ 50%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_per_job_absent_not_killed PASSED [ 52%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_resolve_job_killed_returns_skip_reason PASSED [ 55%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_shadow_mode_default_true_and_safe_on_malformed PASSED [ 57%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_kill_switch_from_env_reaper_pattern PASSED [ 60%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_use_engine_enabled_default_off PASSED [ 62%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_use_engine_enabled_on PASSED [ 65%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_use_engine_enabled_off_explicit PASSED [ 67%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_ownership_record PASSED [ 70%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_fixture_module_off_legacy_climbs PASSED [ 72%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_fixture_module_on_engine_climbs PASSED [ 75%]
+tests/unit/services/test_engine_kill_switch_dualpath.py::test_fixture_module_runtime_flip PASSED [ 77%]
+tests/unit/services/test_engine_supervisor_reregistration.py::test_supervisor_restarts_counter_attribute PASSED [ 80%]
+tests/unit/services/test_engine_supervisor_reregistration.py::test_re_registration_changed_bumps_version PASSED [ 82%]
+tests/unit/services/test_engine_supervisor_reregistration.py::test_re_registration_identical_echoes PASSED [ 85%]
+tests/unit/services/test_engine_supervisor_reregistration.py::test_re_registration_out_of_band_mutation_bumps PASSED [ 87%]
+tests/unit/services/test_engine_supervisor_reregistration.py::test_cancel_callback_invoked_on_changed_reregistration PASSED [ 90%]
+tests/unit/services/test_engine_supervisor_reregistration.py::test_cancel_callback_not_invoked_on_echo PASSED [ 92%]
+tests/unit/services/test_engine_supervisor_reregistration.py::test_supervisor_boundary_never_returns_on_exception PASSED [ 95%]
+tests/unit/services/test_engine_supervisor_reregistration.py::test_f2_cancel_refreshes_spec_and_persisted_dead PASSED [ 97%]
+tests/unit/services/test_engine_supervisor_reregistration.py::test_f3_cancel_clears_pending_event_and_registry_owns_no_latch PASSED [100%]
+
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-engine-flipprep/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 40 passed, 1 warning in 19.89s ========================
+SUMMARY: ======================== 40 passed, 1 warning in 19.89s ========================
+RESULT: PASS

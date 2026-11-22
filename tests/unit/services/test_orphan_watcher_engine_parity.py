@@ -947,7 +947,10 @@ async def test_shadow_row_cadence_for_orphan_watcher():
 def test_posture_line_stable_across_ownership():
     """The single posture line is unchanged; the pilot line is additive."""
     assert API_SRC.count('"engine boot posture: enabled=%s shadow=%s registrations=%d') == 1
-    assert "specs (execute_fn withheld, USE_ENGINE all unset)" in API_SRC
+    # F1: the USE_ENGINE state is rendered DYNAMICALLY — the static
+    # "all unset" claim is gone (it printed even when a flag was set).
+    assert "specs (execute_fn withheld); use_engine_flags=%s;" in API_SRC
+    assert "USE_ENGINE all unset" not in API_SRC
     assert "orphan-watcher pilot: engine executor registered, legacy " in API_SRC
     # Pilot line lives INSIDE the conjunct-true registration block.
     reg_at = API_SRC.index("if engine_owns_execution(engine_config=_engine_cfg):")

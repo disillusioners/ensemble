@@ -1,18 +1,33 @@
 """Kill switches (Engine Arc Phase 3 — T3.2).
 
-FAIL-TO-LEGACY polarity (D3.5): an unreadable engine-wide switch resolves
-to "engine does not own execution" (legacy path). A per-job ``kill_switch_key``
-that is unreadable resolves to "job skipped, counted as KILL_SWITCHED".
+FAIL-TO-LEGACY polarity (D3.5): an UNREADABLE (malformed/garbage) engine-wide
+switch resolves to "engine does not own execution" (legacy path). An ABSENT
+engine-wide switch is NOT unreadable — it resolves to the shipped default
+(enabled) per the AMD-8 absent-vs-explicit split. A per-job
+``kill_switch_key`` that is unreadable resolves to "job skipped, counted as
+KILL_SWITCHED".
 
 Resolution is read at TICK TIME through a ladder (D3.6): per-job
 ``kill_switch_key`` -> ``ENSEMBLE_ENGINE_ENABLED`` -> ``ENSEMBLE_ENGINE_SHADOW_MODE``
--> spec. A flip takes effect on the next tick, no restart.
+-> spec. A TRIP takes effect on the next tick, no restart; a RESTORE (un-trip)
+is INTERVAL-bound, not tick-bound — the skip stamps ``last_run_at``, so the
+job must come DUE again (≤ one full interval) before the engine executes it.
+
+SCOPE (honest): the runtime fail-to-legacy polarity above is ENGINE-scoped —
+"the engine does not own execution" is a statement about the ENGINE, not
+about any single module's legacy loop. The PILOT's per-module legacy
+suppression is armed at BOOT (the ownership conjuncts), NOT at runtime: a
+runtime trip of the pilot's per-module switch leaves that lane owned by
+NOBODY until a restart (restart-scoped), until the tail's runtime re-arm
+design lands.
 
 Reads are PURE functions over an injected resolver (D3.12): tests never
 touch ``os.environ``.
 
 Wiring owner: P4 — T4.4 constructs EngineService with the killswitch
-resolver; until then (D4.11 dormancy) this switch surface is INERT, not live.
+resolver; the surface is ARMED at boot and READ on every dispatch
+(D3.6/D3.12) — the D4.11 dormancy is a POSTURE (no module is owned by the
+engine yet), not an inert surface.
 """
 
 from __future__ import annotations
@@ -93,6 +108,21 @@ class EngineSwitchResolver:
             # unreadable => KILL_SWITCHED (counted)
             return True
         return not bool(val)
+
+    def source_value(self, key: str) -> Any:
+        """The RAW injected-source value for ``key`` (``None`` when absent).
+
+        The ABSENT-vs-EXPLICIT distinction the D3.6 ladder needs: an absent
+        key means "this tier has no opinion" (the caller falls through to
+        the next tier), while an explicit value is that tier's decision.
+
+        The decision helpers above deliberately COLLAPSE the two (e.g.
+        ``shadow_mode()`` defaults to the shipped posture when the key is
+        absent), so a caller that must honour the config tier needs this
+        raw read. Pure over the injected resolver (D3.12) — nothing is
+        cached.
+        """
+        return self.resolver(key)
 
     def resolve_job(self, spec: Any) -> tuple[bool, Optional[str]]:
         """Return (should_run, skip_reason). skip_reason is KILL_SWITCHED or None."""
