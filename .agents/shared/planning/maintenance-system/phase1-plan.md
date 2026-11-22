@@ -17,7 +17,7 @@
 - No-idle design statement embedded in every new seam; failure-mode table.
 
 ### Out of scope
-- The orchestrator agent upgrade (Phase 2 — cross-ref `phase2-plan.md (sibling)`), the five lane bodies (`phase3-plan.md (sibling)`), and report/receipt/manual-trigger/FE (`phase4-plan.md (sibling)`). The full `maintenancer` orchestrator prompt is a P2 artifact; P1 uses a placeholder message body.
+- The orchestrator agent upgrade (Phase 2 — cross-ref `phase2-plan.md (sibling)`), the five lane bodies (`phase3-plan.md (sibling)`), and report/receipt/manual-trigger/FE (`phase4-plan.md (sibling)`). The full `maintenancer` orchestrator prompt is a P2 artifact; P1 writes the FUNCTIONAL weekly message literal (T1.1 — embedding `trigger: scheduled`; NOT a placeholder — see AC1).
 - The test suite and staging (Phase 5 — cross-ref `phase5-plan.md (sibling)`); P1 only NAMES the pins it needs.
 - Any code, daemon run, DB write, git mutation, or install — this lane plans only.
 
