@@ -14,10 +14,10 @@ import type { MaintenanceReportRun } from '../../models';
  *
  * **GET ONLY — there is no write lane here.** The report is authored by
  * the daemon's `run-report-writer` worker child; the browser only ever
- * READS the run list and opens a run's `report_view_url` /
- * `receipt_view_url` (live_views `maintenance-reports` root). The
- * service carries no post/put/delete/patch call — pinned by
- * `report.pins.spec.ts`.
+ * READS the run list, FETCHES a run's `report_view_url` for the
+ * in-app render (`fetchViewMarkdown`), and opens the artifact links
+ * (live_views `maintenance-reports` root). The service carries no
+ * post/put/delete/patch call — pinned by `report.pins.spec.ts`.
  *
  * Auth-off posture (cross-lane contract note): the BE door returns
  * 503 AUTH_NOT_CONFIGURED when auth is off. The service surfaces a
@@ -75,5 +75,26 @@ export class ReportService {
         return EMPTY;
       }),
     );
+  }
+
+  /**
+   * `GET <viewUrl>` — read a maintenance artifact's VIEW resource.
+   *
+   * The URL is the SAME relative `/views/maintenance-reports/...` path
+   * the run list already carries (the FE never rewrites it — see
+   * `models/report.model.ts`). It is a VIEW resource read, NOT an API
+   * mutation: GET only, no write verb (pinned by
+   * `report.pins.spec.ts`).
+   *
+   * The response is the daemon's markdown WRAPPER page (HTML): the
+   * live-views markdown lane wraps every `.md` artifact
+   * (`daemon/routers/live_views.py:2122`) and offers NO raw mode for
+   * `.md` (`?raw=1` is the mermaid lane only). The component extracts
+   * the raw markdown from the wrapper's stable
+   * `<article id="rendered"><pre>` element — see
+   * `extractMarkdownFromWrapper` in `report.component.ts`.
+   */
+  fetchViewMarkdown(viewUrl: string): Observable<string> {
+    return this.http.get(viewUrl, { responseType: 'text' });
   }
 }

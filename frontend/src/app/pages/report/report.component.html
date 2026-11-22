@@ -54,12 +54,19 @@
         <h2>{{ run.run_id }}</h2>
         <button mat-button (click)="clearSelection()">Close</button>
       </header>
-      <iframe
-        class="report-frame"
-        [src]="run.report_view_url"
-        title="Maintenance report"
-        sandbox="allow-scripts"
-      ></iframe>
+      @if (reportLoading()) {
+        <mat-spinner diameter="32"></mat-spinner>
+      }
+
+      @if (reportError()) {
+        <p class="report-error">{{ reportError() }}</p>
+      }
+
+      @if (!reportLoading() && !reportError()) {
+        <div class="report-body">
+          <markdown [data]="reportMarkdown()"></markdown>
+        </div>
+      }
       <p class="report-links">
         <a [href]="run.report_view_url" target="_blank" rel="noopener">Open report</a>
         ·
