@@ -428,6 +428,33 @@ class TestRegistrationContract:
         assert second.version == 1
         assert second.updated_at == first.updated_at  # NO churn at all
 
+    def test_f4_echo_revival_of_dead_job(self):
+        """F4: identical re-registration of a DEAD job revives it (dead=0)
+        while staying a true echo (version + updated_at untouched).
+
+        Simulates an F1-escalated / born-dead job: register -> stamp dead=1,
+        then re-register the IDENTICAL spec.  The revival is targeted (only
+        the dead column moves); version and updated_at must not churn.
+        """
+        repo = EngineRepository(_engine())
+        reg = EngineRegistry(repo)
+        spec = _spec()
+        assert reg.register(spec) == 1
+        # Simulate escalation to dead.
+        repo.stamp_job_outcome("orphan-watcher", dead=1)
+        pre = repo.get_job("orphan-watcher")
+        assert pre is not None and pre.dead == 1
+        pre_updated = pre.updated_at
+        pre_version = pre.version
+        # Identical re-registration -> echo + revival.
+        assert reg.register(spec) == 1
+        post = repo.get_job("orphan-watcher")
+        assert post is not None
+        assert post.dead == 0  # revived
+        assert post.version == 1  # still an echo
+        assert post.version == pre_version
+        assert post.updated_at == pre_updated  # no churn
+
     def test_db_grounded_echo_across_registry_instances(self):
         """D-2: a FRESH registry (empty RAM cache) must echo, not bump.
 
@@ -617,6 +644,27 @@ class TestRepositorySurface:
             repo.stamp_job_outcome("nope", last_outcome="SUCCEEDED") is None
         )
 
+    def test_revive_job_flips_only_dead(self):
+        """F4 repository leg: revive_job touches ONLY the dead column
+        (version + updated_at untouched)."""
+        repo = EngineRepository(_engine())
+        reg = EngineRegistry(repo)
+        reg.register(_spec())
+        repo.stamp_job_outcome("orphan-watcher", dead=1)
+        pre = repo.get_job("orphan-watcher")
+        assert pre is not None and pre.dead == 1
+        pre_version = pre.version
+        pre_updated = pre.updated_at
+        revived = repo.revive_job("orphan-watcher")
+        assert revived is not None
+        assert revived.dead == 0
+        assert revived.version == pre_version
+        assert revived.updated_at == pre_updated
+
+    def test_revive_job_returns_none_for_unknown(self):
+        repo = EngineRepository(_engine())
+        assert repo.revive_job("nope") is None
+
 
 # ── AC4: EngineConfig resolution ───────────────────────────────────────
 
@@ -752,6 +800,13 @@ def _tracked_substrate_paths() -> list[Path]:
     engine directory (another lane's WIP, a scratch module) can never
     affect this scan and can never make the pin unreproducible outside
     this particular working tree. Sorted for determinism.
+
+    In a .git-less tree (e.g. an archive extraction produced by
+    ``git archive HEAD | tar -x``) ``git ls-files`` fails with rc=128 and
+    stderr "not a git repository".  There is no tracked/untracked
+    distinction in such a tree, so fall back to a sorted filesystem walk
+    of ``daemon/services/engine/*.py`` — the walk IS the tracked set in
+    that case.  Any OTHER git failure keeps the hard assert.
     """
     import subprocess
 
@@ -763,15 +818,21 @@ def _tracked_substrate_paths() -> list[Path]:
         text=True,
         check=False,
     )
-    assert proc.returncode == 0, (
-        f"git ls-files failed ({proc.returncode}) — the tracked-scoped "
-        f"substrate scan cannot be reproduced: {proc.stderr.strip()}"
-    )
-    tracked_names = {
-        line.rsplit("/", 1)[-1]
-        for line in proc.stdout.splitlines()
-        if line.strip().endswith(".py")
-    }
+    if proc.returncode == 0:
+        tracked_names = {
+            line.rsplit("/", 1)[-1]
+            for line in proc.stdout.splitlines()
+            if line.strip().endswith(".py")
+        }
+    elif proc.returncode == 128 and "not a git repository" in (
+        proc.stderr or ""
+    ).lower():
+        tracked_names = {p.name for p in ENGINE_DIR.rglob("*.py")}
+    else:
+        assert False, (
+            f"git ls-files failed ({proc.returncode}) — the tracked-scoped "
+            f"substrate scan cannot be reproduced: {(proc.stderr or '').strip()}"
+        )
     missing = [name for name in SUBSTRATE_MODULES if name not in tracked_names]
     assert not missing, (
         f"the P1 substrate modules are not all TRACKED in git: {missing} "

@@ -8,6 +8,7 @@ import pytest
 
 from daemon.services.engine.registry import EngineRegistry
 from daemon.repositories.engine.repository import EngineRepository
+from daemon.services.engine.engine import EngineService
 from daemon.services.engine.spec import (
     IntervalTrigger,
     JobSpec,
@@ -133,3 +134,107 @@ def test_supervisor_boundary_never_returns_on_exception():
     from daemon.services.engine.execution import EngineExecutionLoop
     src = inspect.getsource(EngineExecutionLoop.run)
     assert "continue" in src
+
+
+def test_f2_cancel_refreshes_spec_and_persisted_dead():
+    """F2: after a CHANGED re-registration fires the cancel callback, the
+    engine cache entry carries the NEW spec (== registry.cached_spec) and
+    persisted_dead == the DB row's current dead value.  Cache is seeded with
+    a STALE spec + stale persisted_dead first so the refresh is observable.
+    """
+    repo = EngineRepository(_engine())
+    reg = EngineRegistry(repo)
+    svc = EngineService(repository=repo, registry=reg, shadow_mode=True)
+    reg.set_cancel_callback(svc._cancel_inflight_tick)
+
+    v1 = reg.register(_spec())
+    assert v1 == 1
+
+    stale_spec = JobSpec(
+        id="job-1",
+        meta=ServiceMeta(service_tag="t", category="reconciler"),
+        trigger=IntervalTrigger(seconds=10.0),
+        max_runtime_s=1.0,
+    )
+    svc._cache["job-1"] = {
+        "spec": stale_spec,
+        "persisted_dead": False,  # stale (DB row is dead=1)
+        "pending_event": True,
+        "cancel_requested": False,
+        "reregistered": False,
+    }
+
+    repo.stamp_job_outcome("job-1", dead=1)
+
+    changed = JobSpec(
+        id="job-1",
+        meta=ServiceMeta(service_tag="t", category="reconciler"),
+        trigger=IntervalTrigger(seconds=10.0),
+        max_runtime_s=9.0,
+    )
+    v2 = reg.register(changed)
+    assert v2 == 2
+
+    cache = svc._cache["job-1"]
+    assert cache["spec"] is reg.cached_spec("job-1")
+    row = repo.get_job("job-1")
+    assert cache["persisted_dead"] == bool(getattr(row, "dead", 0))
+    # observable refresh: stale False -> now matches row (dead=1 untouched by re-reg)
+    assert cache["persisted_dead"] is True
+
+
+def test_f3_cancel_clears_pending_event_and_registry_owns_no_latch():
+    """F3: after the same cancel path, cache['pending_event'] is False AND
+    the registry performed no dead/cancel_requested write of its own (the
+    latch lives only in EngineService._cache)."""
+    repo = EngineRepository(_engine())
+    reg = EngineRegistry(repo)
+    svc = EngineService(repository=repo, registry=reg, shadow_mode=True)
+    reg.set_cancel_callback(svc._cancel_inflight_tick)
+
+    reg.register(_spec())
+
+    revive_calls = []
+    stamp_calls = []
+    orig_revive = repo.revive_job
+    orig_stamp = repo.stamp_job_outcome
+
+    def tracked_revive(jid):
+        revive_calls.append(jid)
+        return orig_revive(jid)
+
+    def tracked_stamp(jid, **kw):
+        stamp_calls.append((jid, kw))
+        return orig_stamp(jid, **kw)
+
+    repo.revive_job = tracked_revive
+    repo.stamp_job_outcome = tracked_stamp
+
+    svc._cache["job-1"] = {
+        "spec": _spec(),
+        "persisted_dead": False,
+        "pending_event": True,
+        "cancel_requested": False,
+        "reregistered": False,
+    }
+
+    changed = JobSpec(
+        id="job-1",
+        meta=ServiceMeta(service_tag="t", category="reconciler"),
+        trigger=IntervalTrigger(seconds=10.0),
+        max_runtime_s=9.0,
+    )
+    reg.register(changed)
+
+    cache = svc._cache["job-1"]
+    assert cache["pending_event"] is False
+
+    # Registry never owns the latch: its cache carries no pending_event /
+    # cancel_requested keys.
+    reg_entry = reg._cache.get("job-1", {})
+    assert "pending_event" not in reg_entry
+    assert "cancel_requested" not in reg_entry
+
+    # The cancel path performed no dead/outcome writes of its own.
+    assert revive_calls == []
+    assert stamp_calls == []
