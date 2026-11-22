@@ -57,16 +57,18 @@ flowchart TD
 
 All rulings and decisions are recorded with evidence in **`decisions.md`** (same directory): LEADER-RULING rows (Emperor design changes 1–3, R1–R9, DP-1, OQ3, AMENDMENT-1 — fixed) and PLANNER-DECISION rows PD-1…PD-11 (phase cut, FE wire-vs-seam, manual path, report schema, DB-vs-files, report authorship, knobs home, chain identity/re-arm seam, run_id minting, open-question adjudications, hbk scope encoding).
 
-**Binding-requirements layer (BR-1..19 + DP-1)** — folded into the carrying phase docs as labeled `BR-N` blocks (single source of truth; the architect's `architecture-recommendation.md`, commit `28e3b7590`, remains the verdict record). BR-20 (staging re-check discipline) rides P5 T5.7 and this overview's release line. Supersessions of planner decisions are recorded in `decisions.md` §D.
+**Binding-requirements layer (BR-1..20 + DP-1)** — folded into the carrying phase docs as labeled `BR-N` blocks (single source of truth; the architect's `architecture-recommendation.md`, commit `28e3b7590`, remains the verdict record). BR-20 (staging re-check discipline) rides P5 T5.7 and this overview's release line. Supersessions of planner decisions are recorded in `decisions.md` §D.
 
 ## 5. Risks (top set, deduplicated across phases — full tables in each phase file)
+
+> **Package convention:** the §5 ledger is regenerated after every fold.
 
 | Risk | Sev | Mitigation |
 |---|---|---|
 | Idle/busy gate reintroduced on the trigger path (the killed failure class) | high | R2 two-legged mutation-proven pin (behavioral busy-fires-anyway + structural no-`JOB_IDLE_POLICIES`/`_is_idle` reference) — P5 T5.1 |
-| Source-GC archives the chain row ⇒ chain silently dies | high | Boot guard RECREATES (get-or-recreate, seed.py pattern); cancelled/paused = operator intent, respected; guard tests incl. post-GC (P1 T1.4, P5 T5.4) |
-| Report-writer child fails ⇒ "report ALWAYS written" broken | med | Report-ALWAYS contract incl. total-failure case; scoped-write fallback named in P2 (not chosen); INDEX dedup |
-| `schedule_executions` lacks an explicit manual-vs-scheduled marker | med | D-D provenance via creator/origin marker on the manual row; explicit marker specced as a small build item (P1/P4 cross-ref); P5 T5.6 proves the receipt |
+| Source-GC archives the chain row ⇒ chain silently dies | high | Boot guard recreates ARCHIVE-AWARE (BR-3: `cancelled` archive ⇒ never revive; `stopped` ⇒ revive IFF the archived config carries a `chain` block; no archive row ⇒ create; never re-archive over a stale snapshot); guard tests = P5 T5.4 legs (c)/(d)/(e) |
+| Report-writer child fails ⇒ "report ALWAYS written" broken | med | BR-13 L0→L3 writer ladder (L0 dispatch, write order run→receipt→INDEX last; L1 one minimal-stub writer; L2 one bare worker child = the pre-decided scoped-write fallback, seat still never writes; L3 accepted surfaced reportless terminal per DP-1); BR-15 detector + orphan listing; INDEX dedup |
+| `schedule_executions` lacks an explicit manual-vs-scheduled marker | med | `trigger_type` DERIVED per P4 T4.6 (`config.chain` present ⇒ scheduled; absent + `creator_instance_id` present ⇒ manual — no new field; the chain row always carries `chain`, manual rows never do); P5 T5.6 proves the receipt |
 | POK merges hit the now-live family cap (`pok_family_full`) | med | Same-slug supersede only; cap-aware merge rules encoded in P3 lane 2 |
 | FE ordering-pin specs break on menu append | low | Spec updates listed as P4 tasks (gear-menu tail-append convention honored) |
 | Release-slot collision (sibling hbk lane stages first) / base drift | med | R7: re-check tags at tag time, next free slot, rebase onto staged source_commit; upstream `86e196576` deletes `test_scheduler_deferred_delivery_pin.py` — interaction noted in P5 |
