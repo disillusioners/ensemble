@@ -74,6 +74,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from daemon.models.common import ErrorCodes, ErrorResponse
+from daemon.services.event_registry import record as _event_registry_record
 from daemon.services.question_manager import QuestionPack, pack_to_dict
 
 if TYPE_CHECKING:
@@ -430,6 +431,11 @@ async def _emit_answer_events(
                     "delivery_ms": delivery_ms,
                 },
             )
+            # Phase 5 event registry — class-2 bridge (T5.4): observe the
+            # durable emission AFTER create_event returns (never inside
+            # it; zero delivery change — record() never raises).
+            _event_registry_record("event_bus:question_answered",
+                                   instance_id=instance_id)
     except Exception as e:  # noqa: BLE001 — §8.6
         logger.warning(
             f"QUESTION_ANSWERED EventBus emission failed for "

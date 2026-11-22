@@ -1,0 +1,33 @@
+......F...................FF....                                         [100%]
+=================================== FAILURES ===================================
+E   AssertionError: Bash registry should retain the entry — D5 documents that natural foreground exit does not unregister
+    assert 'inst-f-cbba8616' in {}
+     +  where {} = <daemon.tools.bash.BashProcessRegistry object at 0x7358876dd2b0>._entries
+/home/nea/ensemble-src-wt-live-defects-p1/tests/tools/test_auto_kill_integration.py:746: AssertionError: Bash registry should retain the entry — D5 documents that natural foreground exit does not unregister
+E   AssertionError: setsid escapee should have been reaped by the stamp sweep
+    assert not True
+     +  where True = _pid_alive(2036936)
+/home/nea/ensemble-src-wt-live-defects-p1/tests/tools/test_auto_kill_integration.py:1911: AssertionError: setsid escapee should have been reaped by the stamp sweep
+E   AssertionError: timeout-race escapee should be reaped by the next sweep
+    assert not True
+     +  where True = _pid_alive(2036958)
+/home/nea/ensemble-src-wt-live-defects-p1/tests/tools/test_auto_kill_integration.py:1992: AssertionError: timeout-race escapee should be reaped by the next sweep
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-live-defects-p1/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/tools/test_auto_kill_integration.py::TestDaemonShutdownKillsEverything::test_shutdown_sweeps_both_registries_with_real_processes
+  /home/nea/ensemble-src-wt-live-defects-p1/daemon/services/decision/config.py:439: PydanticDeprecatedSince211: Accessing the 'model_computed_fields' attribute on the instance is deprecated. Instead, you should access this attribute from the model class. Deprecated in Pydantic V2.11 to be removed in V3.0.
+    value = getattr(source, name)
+
+tests/tools/test_auto_kill_integration.py::TestDaemonShutdownKillsEverything::test_shutdown_sweeps_both_registries_with_real_processes
+  /home/nea/ensemble-src-wt-live-defects-p1/daemon/services/decision/config.py:439: PydanticDeprecatedSince211: Accessing the 'model_fields' attribute on the instance is deprecated. Instead, you should access this attribute from the model class. Deprecated in Pydantic V2.11 to be removed in V3.0.
+    value = getattr(source, name)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/tools/test_auto_kill_integration.py::TestScenarioFNohupGrandchild::test_nohup_grandchild_killed_by_killpg
+FAILED tests/tools/test_auto_kill_integration.py::TestSetsidOrphanReapedByStampSweep::test_setsid_orphan_reaped_by_stamp_sweep
+FAILED tests/tools/test_auto_kill_integration.py::TestPathDTimeoutRaceEscapee::test_timeout_race_escapee_reaped_by_next_sweep
+3 failed, 29 passed, 3 warnings in 15.42s

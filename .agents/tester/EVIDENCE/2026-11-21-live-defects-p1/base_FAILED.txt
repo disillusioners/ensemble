@@ -1,0 +1,76 @@
+# BASE FAILED NODE LIST — leg=base  commit=b71742fe3
+# canonical form: full node ids (file::Class::test). Where a scope's
+# pytest invocation suppresses the FAILED summary (the two packs run
+# -q --tb=short -rs with no -rf), the tb HEADER is quoted and the
+# canonical id is given explicitly.
+# fence (all legs): ENSEMBLE_SELF_ENV=dev POSTGRES_HOST=127.0.0.1
+#   POSTGRES_PORT=5432 POSTGRES_DB=ensemble_dev POSTGRES_USER=ensemble_dev_app
+#   POSTGRES_PASSWORD=**** (per-variable, from the lane dev .env; never written)
+
+## S1  test/packs/bash_spawn_reaper_feature_test.sh  (transcript S1-base-pack-base-b71742fe3.txt)
+  canonical ids (per tb headers):
+    TestHardGuards.test_ladder_fires_for_gate_passing_row
+    TestSweepRows.test_killed_row_closed_with_lane_label
+    TestShutdownSweepService.test_self_owned_current_boot_row_swept
+    TestBootReconcileLeg.test_m5_previous_boot_burner_killed
+    TestStampContract.test_explicit_off_byte_identical_env_no_row
+    TestWriterUnsetOrdering.test_instance_id_none_never_stamps
+
+## S1-direct  same 4 modules, --tb=short (transcript S1-direct4files-base-b71742fe3.txt)
+  tests/unit/services/test_bash_spawn_reaper.py::TestHardGuards::test_ladder_fires_for_gate_passing_row
+  tests/unit/services/test_bash_spawn_reaper.py::TestSweepRows::test_killed_row_closed_with_lane_label
+  tests/unit/services/test_bash_spawn_reaper.py::TestShutdownSweepService::test_self_owned_current_boot_row_swept
+  tests/unit/services/test_bash_spawn_reaper_boot.py::TestBootReconcileLeg::test_m5_previous_boot_burner_killed
+  tests/tools/test_bash_spawn_stamp.py::TestStampContract::test_stamp_present_in_child_env_when_on
+  tests/tools/test_bash_spawn_stamp.py::TestStampContract::test_env_none_materializes_inherit_copy_plus_one
+  tests/tools/test_bash_spawn_stamp.py::TestStampContract::test_explicit_off_byte_identical_env_no_row
+  tests/tools/test_bash_spawn_stamp.py::TestWriterUnsetOrdering::test_instance_id_none_never_stamps
+
+## S2  tests/unit/services/test_c2_orphan_watcher_sweep.py (transcript S2-c2-orphan-base-b71742fe3.txt)
+  (none)
+
+## S3  tests/unit/services/test_bash_spawn_retention_sweep.py — HEAD-ONLY (no base counterpart)
+  N/A at base: the file does not exist at b71742fe3.
+
+## S4  test/packs/bash_spawn_repository_pg_test.sh (transcript S4-pg-pack-base-b71742fe3.txt)
+  (none)
+
+## S5  grep-derived extra scopes (per-file, --tb=short)
+  -- S5-pg-orphan-siblings-base-b71742fe3.txt
+    tests/postgres/test_06f500af_bug_class_eliminated_pg.py::test_orphan_watcher_cancelled_on_startup_sweep
+  -- S5-test_auto_kill_integration-base-b71742fe3.txt
+    tests/tools/test_auto_kill_integration.py::TestScenarioFNohupGrandchild::test_nohup_grandchild_killed_by_killpg
+    tests/tools/test_auto_kill_integration.py::TestSetsidOrphanReapedByStampSweep::test_setsid_orphan_reaped_by_stamp_sweep
+    tests/tools/test_auto_kill_integration.py::TestPathDTimeoutRaceEscapee::test_timeout_race_escapee_reaped_by_next_sweep
+  -- S5-test_bash_ram_guard-base-b71742fe3.txt
+    tests/tools/test_bash_ram_guard.py::TestStagedGrowerStrictUnderReport::test_the_under_report_bound_is_strictly_positive_on_a_staged_grower
+  -- S5-test_child_outcome_payload_surfacing-base-b71742fe3.txt
+    (none)
+  -- S5-test_dependency_bus-base-b71742fe3.txt
+    (none)
+  -- S5-test_instance_ops_behaviour-base-b71742fe3.txt
+    (none)
+  -- S5-test_job_feedback_observer-base-b71742fe3.txt
+    tests/job_queue/test_job_feedback_observer.py::TestDispatchTwoTierBashCleanupDurableRows::test_tier1_sibling_owned_row_skipped
+  -- S5-test_manager_shutdown-base-b71742fe3.txt
+    tests/test_manager_shutdown.py::TestManagerShutdownDurableBashSweep::test_durable_sweep_sibling_alive_skip_and_dead_writer_swept
+  -- S5-test_metrics_query_provider-base-b71742fe3.txt
+    (none)
+  -- S5-test_nudge_completion_watcher_d2-base-b71742fe3.txt
+    (none)
+  -- S5-test_observer_hardening_f13_f14_f15-base-b71742fe3.txt
+    (none)
+  -- S5-test_proc_ram_guard-base-b71742fe3.txt
+    (none)
+  -- S5-test_ram_guard_interactions-base-b71742fe3.txt
+    (none)
+  -- S5-test_ram_guard_ladder-base-b71742fe3.txt
+    (none)
+  -- S5-test_ram_guard_tree_reader-base-b71742fe3.txt
+    (none)
+  -- S5-test_resource_pid_registry-base-b71742fe3.txt
+    (none)
+  -- S5-test_resource_pid_registry-nopg-base-b71742fe3.txt
+    (none)
+  -- S5-test_terminate_downside_row_drain-base-b71742fe3.txt
+    (none)

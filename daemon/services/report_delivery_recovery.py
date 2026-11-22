@@ -344,6 +344,7 @@ from daemon.services.report_recipient import (
     resolve_report_recipient,
 )
 from daemon.services.timestamps import now_utc, now_utc_naive
+from .event_registry import record as _event_registry_record
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -353,6 +354,28 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+
+def _p5_row_age_seconds(created_at: Any) -> float | None:
+    """Honest state-table lag for the event-registry bridge (D5.12).
+
+    The row's own ``created_at`` stamp vs the observation clock at the
+    seam. ``None`` for a missing / unparsable stamp — never fabricated.
+    """
+    stamp = parse_iso_utc(created_at)
+    if stamp is None:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - stamp).total_seconds())
+
+
+def _p5_max_row_age_seconds(rows: Any) -> float | None:
+    """The OLDEST observed row's age (the most-behind obligation)."""
+    oldest: float | None = None
+    for row in rows or ():
+        age = _p5_row_age_seconds(getattr(row, "created_at", None))
+        if age is not None and (oldest is None or age > oldest):
+            oldest = age
+    return oldest
 
 
 # ── F-2 (durability-f1-f2 / phase2, tasks 2.5 + 2.6) helpers ────────────────
@@ -1260,6 +1283,11 @@ class ReportDeliveryRecoveryService:
             parent_not_terminal=parent_not_terminal,
             limit=self._batch_cap,
         )
+        # Phase 5 event registry — class-3 bridge (T5.5): observe the
+        # obligations this lane read (no state-machine write added).
+        _event_registry_record("report_injection_obligation",
+                               lane=lane, observed=len(rows),
+                               lag_seconds=_p5_max_row_age_seconds(rows))
         for row in rows:
             # F4 (2026-08-20): stop-event check between rows — a
             # polite ``stop()`` exits the batch promptly without
@@ -2475,6 +2503,11 @@ class ReportDeliveryRecoveryService:
             recovery_retry_minutes=recovery_retry_minutes,
             limit=self._batch_cap,
         )
+        # Phase 5 event registry — class-3 bridge (T5.5): observe the
+        # stranded PENDING obligations this lane read (lanes 3/4).
+        _event_registry_record("report_injection_obligation",
+                               lane=lane_name, observed=len(rows),
+                               lag_seconds=_p5_max_row_age_seconds(rows))
         for row in rows:
             # F4 (2026-08-20): stop-event check between rows — a
             # polite ``stop()`` exits the batch promptly without
@@ -3604,6 +3637,12 @@ class ReportDeliveryRecoveryService:
                 )
                 return
             out.recovered += 1
+            # Phase 5 event registry — class-3 bridge (T5.5): the
+            # committed abandonment, observed AFTER the guarded write.
+            _event_registry_record("mission_commission_transition",
+                                   transition="abandoned", abandon_reason=reason,
+                                   commission_id=commission.commission_id,
+                                   lag_seconds=_p5_row_age_seconds(commission.created_at))
         # The DETECTION counters move in every mode (in ``dry`` they are
         # the dry-run evidence that tunes the TTL default).
         if reason == MISSION_ABANDON_REASON_WORKER_TERMINAL:
@@ -3673,6 +3712,12 @@ class ReportDeliveryRecoveryService:
                 )
                 return
             out.recovered += 1
+            # Phase 5 event registry — class-3 bridge (T5.5): the
+            # committed satisfy-on-evidence, observed AFTER the write.
+            _event_registry_record("mission_commission_transition",
+                                   transition="satisfied_on_evidence",
+                                   commission_id=commission.commission_id,
+                                   lag_seconds=_p5_row_age_seconds(commission.created_at))
         out.satisfied_on_evidence += 1
         # WARNING is for sweep ACTIONS only (a REAL ledger write); the
         # dry-run preview is INFO.

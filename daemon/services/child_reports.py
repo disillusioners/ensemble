@@ -16,6 +16,7 @@ from sqlmodel import select as sqlmodel_select
 
 from ..graph import ThinkingChatOpenAI, clean_llm_config
 from ..persistence import get_instance_messages
+from .event_registry import record as _event_registry_record
 from ..repositories.instance.models import Instance, InstanceStatus
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
 from ..repositories.report_injection.repository import (
@@ -839,6 +840,17 @@ class ChildReportsService:
                 fire_err,
             )
             return
+
+        # Phase 5 event registry — class-1 bridge (T5.3): observe the S1
+        # terminalization AFTER the bus fire's CAS commit, never inside it
+        # (F-19: no second fire, no second CAS, no parallel probe — the
+        # dims come from the fire's return value alone).
+        _event_registry_record(
+            "instance_terminalized",
+            instance_id=child_instance_id,
+            outcome=outcome_status,
+            fired_count=len(fired),
+        )
 
         if not fired:
             return
@@ -2516,6 +2528,13 @@ Provide a concise summary:"""
                     instance_id[:8], _inc_exc,
                 )
                 _denied_count = None
+            # Phase 5 event registry — class-4 bridge (T5.6): observe the
+            # COMMITTED deny-epoch increment (the ledger stays untouched;
+            # fail-open posture is labeled, never changed).
+            if _denied_count is not None:
+                _event_registry_record("attestation_epoch", instance_id=instance_id,
+                                       epoch_action="deny_increment",
+                                       path="fp4_l6", denied_count=_denied_count)
         else:
             # No instance repo wired (test double / partial init).
             # Proceed with the bind check using the in-memory
@@ -2641,11 +2660,16 @@ Provide a concise summary:"""
         )
         if isinstance(ledger, SQLModelInstanceRepository):
             try:
-                safe_set_escalated_and_reset(
+                _esc_result = safe_set_escalated_and_reset(
                     ledger,
                     instance_id,
                     log_context={"path": "fp4_l6_release"},
                 )
+                # Phase 5 event registry — class-4 bridge (T5.6): the
+                # committed escalation epoch, ledger behavior unchanged.
+                _event_registry_record("attestation_epoch", instance_id=instance_id,
+                                       epoch_action="escalated_and_reset",
+                                       path="fp4_l6_release", ok=bool(_esc_result))
             except Exception as _esc_exc:  # noqa: BLE001
                 logger.warning(
                     "FP4 L6: safe_set_escalated_and_reset raised "
@@ -5670,6 +5694,17 @@ Provide a concise summary:"""
                     parent_agent_id = parent_for_event.agent_id
             
             session.commit()
+            # Phase 5 event registry — class-2 bridge (T5.4): observe the
+            # two durable completion rows AFTER the transaction commits
+            # (the row is the truth; the staged-rows helper twin
+            # ``_create_completion_events`` is a caller-commits surface
+            # with no in-daemon production caller — this inline block is
+            # the LIVE producer).
+            _event_registry_record("event_bus:instance_completed",
+                                   instance_id=instance_id)
+            _event_registry_record("event_bus:child_completed",
+                                   instance_id=instance.parent_id,
+                                   child_instance_id=instance_id)
             # Post-commit side effects are dispatched by the async caller.
             return _ChildCompletionDbResult(
                 outcome="regular_child_completed",

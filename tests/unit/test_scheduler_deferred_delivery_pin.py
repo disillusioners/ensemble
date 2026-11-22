@@ -224,7 +224,6 @@ async def pin_manager(pin_engine: Engine):
         ),
         persistence=PersistenceConfig(
             db_path="/tmp/pin-sched-def-unused.db",
-            checkpoint_interval=1,
             checkpoint_ttl_hours=168,
             checkpoint_cleanup_interval=24,
             max_instance_history=300,

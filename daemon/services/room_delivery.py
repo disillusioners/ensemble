@@ -56,6 +56,7 @@ from daemon.repositories.room.repository import (
     RoomRepository,
 )
 from daemon.repositories.room.service import RoomChatService
+from daemon.services.event_registry import record as _event_registry_record
 
 if TYPE_CHECKING:
     from ..manager import InstanceManager
@@ -874,6 +875,11 @@ class RoomDeliveryService:
                     {"room_id": room_id, "seq": seq, "member_name": member_name,
                      "outcome": "proposal"},
                 )
+                # Phase 5 event registry — class-2 bridge (T5.4/L-10).
+                _event_registry_record("event_bus:room_tag_delivery",
+                                       instance_id=parent_iid,
+                                       room_id=room_id, seq=seq,
+                                       outcome="proposal")
             # LANE_B_CAS_ALLOWED (non-terminal − {running, paused}) matches
             # this lane-(b) tuple today.
             elif parent_status == "running" or parent_status in LANE_B_CAS_ALLOWED:
@@ -897,12 +903,22 @@ class RoomDeliveryService:
                     {"room_id": room_id, "seq": seq, "member_name": member_name,
                      "outcome": "parked_paused"},
                 )
+                # Phase 5 event registry — class-2 bridge (T5.4/L-10).
+                _event_registry_record("event_bus:room_tag_delivery",
+                                       instance_id=parent_iid,
+                                       room_id=room_id, seq=seq,
+                                       outcome="parked_paused")
             # parent terminal → one-hop durable pending (no routing).
             await self._room.emit_room_event(
                 parent_iid, EventKind.ROOM_PROPOSAL.value,
                 {"room_id": room_id, "seq": seq, "member_name": member_name,
                  "trigger": "addressed_terminal", "outcome": "pending"},
             )
+            # Phase 5 event registry — class-2 bridge (T5.4/L-10).
+            _event_registry_record("event_bus:room_proposal",
+                                   instance_id=parent_iid,
+                                   room_id=room_id, seq=seq,
+                                   outcome="pending")
             return "parent_notice"
 
         # running → no delivery action.
@@ -1013,6 +1029,11 @@ class RoomDeliveryService:
                 "outcome": "minted",
             },
         )
+        # Phase 5 event registry — class-2 bridge (T5.4/L-10).
+        _event_registry_record("event_bus:room_proposal",
+                               instance_id=sender_instance_id,
+                               room_id=room_id, seq=post["seq"],
+                               outcome="minted")
         return True
 
     async def _route_proposal_to_parent(
@@ -1078,6 +1099,13 @@ class RoomDeliveryService:
                 {"room_id": room_id, "seq": seq, "member_name": member_name,
                  "outcome": "parked_paused"},
             )
+            # Phase 5 event registry — class-2 bridge (T5.4/L-10): the
+            # ADDRESSED lane's paused branch (non-escalating, still a
+            # real tag-delivery row).
+            _event_registry_record("event_bus:room_tag_delivery",
+                                   instance_id=parent_iid,
+                                   room_id=room_id, seq=seq,
+                                   outcome="parked_paused")
         # parent terminal → one-hop durable pending: do nothing (no
         # recursion, no revive). The proposal row stays in the log and is
         # surfaced when the parent next runs through a legitimate lane.
@@ -1171,6 +1199,11 @@ class RoomDeliveryService:
                 "outcome": "recorded",
             },
         )
+        # Phase 5 event registry — class-2 bridge (T5.4/L-10).
+        _event_registry_record("event_bus:room_decision",
+                               instance_id=decider_instance_id,
+                               room_id=room_id, seq=row["seq"],
+                               outcome="recorded")
         return {
             "decision": decision,
             "note": note,
@@ -1202,6 +1235,12 @@ class RoomDeliveryService:
                 "outcome": outcome,
             },
         )
+        # Phase 5 event registry — class-2 bridge (T5.4/L-10): the shared
+        # helper's ONE observation covers every _emit_delivery_event
+        # caller (each call emits exactly one row).
+        _event_registry_record("event_bus:room_tag_delivery",
+                               instance_id=instance_id,
+                               room_id=room_id, seq=seq, outcome=outcome)
 
     def _notification_text(self, room_id: str, sender_name: str, seq: int) -> str:
         text = f"Room {room_id} · new tagged message from {sender_name} (seq {seq})"

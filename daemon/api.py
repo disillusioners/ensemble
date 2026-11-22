@@ -1227,6 +1227,51 @@ async def lifespan(app: FastAPI):
             f"{type(bash_reconcile_err).__name__}: {bash_reconcile_err}"
         )
 
+    # ─────────────────────────────────────────────────────────────
+    # bash-spawn registry retention sweep (census A2 fix,
+    # 2026-11-21) — PERIODIC companion lane. The five piggyback
+    # lanes left closed-row retention boot-only (prune ran solely
+    # inside the one-shot reconcile) and reaping cadence ==
+    # instance-terminalization cadence (stall mode), so the
+    # registry grew unbounded between boots. This lane ticks
+    # every ENSEMBLE_BASH_REAPER_RETENTION_INTERVAL_SECONDS
+    # (default 900s): prunes REAPED rows past the 30d window and
+    # sweeps OPEN rows whose owning instance is TERMINAL through
+    # the existing ``sweep_instance`` machinery (all D8/D9 guards
+    # inherited). Honors the master switch
+    # (ENSEMBLE_BASH_ORPHAN_REAPER) BEFORE any repository touch —
+    # OFF ⇒ counted + rate-limited-logged no-op, never silent.
+    # ALWAYS-ON wiring (enabled hardcoded True — the constructor
+    # kwarg is an internal test seam, same shape as the
+    # tmp-image sweep). First tick runs IMMEDIATELY inside the
+    # loop, so the boot-time state gets its first prune without a
+    # separate synchronous pre-tick.
+    # ─────────────────────────────────────────────────────────────
+    try:
+        from daemon.services.bash_spawn_reaper import (
+            BashSpawnRetentionSweepService,
+        )
+
+        bash_spawn_retention = BashSpawnRetentionSweepService(
+            repo=bash_spawn_repo,
+            instance_repo=SQLModelInstanceRepository(
+                engine=manager.engine
+            ),
+        )
+        bash_spawn_retention.start()
+        app.state.bash_spawn_retention = bash_spawn_retention
+        daemon_logger.info(
+            "[Startup] bash spawn retention sweep started "
+            f"(interval="
+            f"{bash_spawn_retention._interval_seconds}s)"
+        )
+    except Exception as bash_retention_err:  # noqa: BLE001
+        daemon_logger.warning(
+            "[Startup] bash spawn retention sweep wiring failed "
+            f"(non-fatal): {type(bash_retention_err).__name__}: "
+            f"{bash_retention_err}"
+        )
+
     # Create queue repository for job queue management
     queue_repo = JobQueueRepository(engine=manager.engine)
 
@@ -1920,7 +1965,14 @@ async def lifespan(app: FastAPI):
         config.services.orphan_watcher_sweep_grace_seconds
     )
     orphan_watcher_sweep = OrphanWatcherSweepService(
-        dependency_bus=get_dependency_bus(),
+        # D-9 (review hardening, 2026-11-21): explicit ``None``, NOT
+        # ``get_dependency_bus()``. This constructor runs BEFORE
+        # ``init_dependency_bus`` registers the singleton, so a
+        # construction-time read froze ``None`` forever (the born-dead
+        # trap pattern). The service late-binds — it re-reads the
+        # singleton per tick — so None here documents the intent
+        # instead of simulating a capture that never succeeds.
+        dependency_bus=None,
         interval_seconds=orphan_sweep_interval,
         min_watcher_age_seconds=orphan_sweep_grace,
     )
@@ -2974,6 +3026,27 @@ async def lifespan(app: FastAPI):
     # See ``daemon/services/dependency_bus.py`` for the bus API.
     await init_dependency_bus(app, manager)
 
+    # Boot wiring assertion (born-dead fix, 2026-11-21): this call is
+    # the ONLY site that registers the bus singleton
+    # (``set_dependency_bus``). Services constructed EARLIER in this
+    # lifespan — notably ``OrphanWatcherSweepService`` (the C2 wiring
+    # above) — used to capture the singleton at construction time and
+    # never re-read it, leaving the periodic lane permanently on its
+    # bus-is-None branch ("born dead"). The sweep now late-binds, but
+    # a bus that failed to start here must be LOUD at boot, not
+    # DEBUG-quiet forever: if the singleton is still None, every
+    # bus-dependent lane (completion authority included) is degraded
+    # this boot. Log ERROR and continue — the boot-without-bus
+    # continuation is init_dependency_bus's own design decision.
+    if get_dependency_bus() is None:
+        logger.error(
+            "BOOT WIRING ASSERTION FAILED: DependencyBus singleton is "
+            "None after init_dependency_bus — every bus-dependent "
+            "lane (orphan-watcher sweep, completion authority) is "
+            "non-functional this boot. See the init_dependency_bus "
+            "warning above for the underlying cause."
+        )
+
     # Bootstrap system default project (Phase 1 of system_default_project feature)
     # This ensures the system project exists and has its queues provisioned
     # before any other services start using it. Must run BEFORE JobProcessor.start().
@@ -3732,6 +3805,144 @@ async def lifespan(app: FastAPI):
     )
 
     # ─────────────────────────────────────────────────────────────
+    # P4 — central engine boot wiring (Engine Arc Phase 1 / T4.4–T4.6).
+    # ONE contiguous try/except-guarded block. DORMANT POSTURE (CS-1): N
+    # observer specs registered (execute_fn withheld), zero executables,
+    # shadow rows present, ALL SERVICES_*_USE_ENGINE unset — registration for
+    # observation is NOT migration. Off the readyz-green critical path (D4.3:
+    # after init_dependency_bus and the readiness refresher task creation).
+    # F-16: disjoint from the live-defects api.py regions. F-8/F-12/F-13/
+    # F-14/F-15 untouched. A failure logs WARNING and boot CONTINUES.
+    # ─────────────────────────────────────────────────────────────
+    _engine_block_entry_t0 = time.perf_counter()  # UNGATED whole-block telemetry (D4.9)
+    try:
+        from daemon.services.engine.boot import build_observer_specs, run_boot_pass
+        from daemon.services.engine.engine import EngineService
+        from daemon.services.engine.guardrails import assert_dependencies_resolvable
+        from daemon.services.engine.killswitch import EngineSwitchResolver
+        from daemon.services.engine.registry import EngineRegistry
+        from daemon.services.engine.watchdog import (
+            EngineWatchdog,
+            make_direct_db_rearm,
+        )
+        from daemon.repositories.engine.repository import EngineRepository
+        from daemon.services.event_registry.emit import set_event_sink
+
+        _engine_cfg = config.engine
+        _engine_repo = EngineRepository(manager.engine)
+        _engine_registry = EngineRegistry(_engine_repo)
+        _engine_switch = EngineSwitchResolver(resolver=os.environ.get)
+        _engine_svc = EngineService(
+            _engine_repo,
+            _engine_registry,
+            _engine_cfg,
+            shadow_mode=_engine_cfg.shadow_mode,
+        )
+        # ARM the P3 killswitch surface (inert while dormant).
+        _engine_svc._switch_resolver = _engine_switch
+
+        # N dormant observer specs — execute_fn withheld by construction.
+        _observer_specs = build_observer_specs(config)
+
+        _engine_gated_t0 = time.perf_counter()
+
+        async def _engine_registration_pass():
+            for _spec in _observer_specs:
+                await _engine_registry.aregister(_spec)
+
+        # Deadlined registration pass (BOOT_PASS; expire ⇒ ERROR + CONTINUE).
+        await run_boot_pass(
+            _engine_registration_pass(),
+            float(_engine_cfg.boot_pass_deadline_seconds),
+            "engine_registration",
+        )
+
+        # T4.6 — boot wiring assertion immediately after the registration pass.
+        _engine_wiring_report = assert_dependencies_resolvable(
+            [
+                (_spec, _engine_svc.get_dependencies(_spec.id))
+                for _spec in _observer_specs
+            ]
+        )
+        if not _engine_wiring_report.ok:
+            for _jid, _labels in _engine_wiring_report.unresolved.items():
+                for _label in _labels:
+                    logger.error(
+                        "engine boot wiring: unresolved dependency %s -> %s",
+                        _jid,
+                        _label,
+                    )
+            logger.error(
+                "engine boot wiring summary: %s", _engine_wiring_report.summary()
+            )
+
+        # AMD-5 — the set_event_sink composition line (ONE owner: P4 T4.4).
+        set_event_sink(_engine_svc.ingest_event)
+
+        # Start the tick task and the engine-independent watchdog (AMD-2:
+        # watchdog start is OUTSIDE the construction try, owns this envelope).
+        await _engine_svc.start()
+        _engine_watchdog = EngineWatchdog(
+            _engine_svc,
+            _engine_cfg,
+            rearm=make_direct_db_rearm(_engine_repo),
+        )
+        _engine_watchdog.start()
+
+        # Store both handles on app.state (shutdown clears them).
+        app.state.engine_service = _engine_svc
+        app.state.engine_watchdog = _engine_watchdog
+
+        # P6 mount (coordination addendum): assemble the observability adapter
+        # consumed by daemon/routers/engine.py. Read-only; no router change.
+        from types import SimpleNamespace as _SN
+
+        from daemon.services.dependency_bus import get_dependency_bus
+
+        _engine_dep_bus = get_dependency_bus()  # None-safe (unwired boot ⇒ live=None)
+
+        app.state.engine_observability = _SN(
+            repository=_engine_repo,
+            engine_service=_engine_svc,
+            maintenance_service=getattr(manager, "_maintenance_service", None),
+            switch_resolver=_engine_switch,
+            # D5.4 second live source: dependency_bus bound into the snapshot
+            # call (projection.event_view only forwards `bus=`).
+            event_snapshot=(
+                lambda bus=None, _dep=_engine_dep_bus: __import__(
+                    "daemon.services.event_registry.metrics", fromlist=["snapshot"]
+                ).snapshot(bus=bus, dependency_bus=_dep)
+            ),
+            dependency_bus=_engine_dep_bus,
+            runs_reader=None,  # router default (bounded tail via repository.engine)
+        )
+
+        # Exactly ONE posture INFO line. SLO-1 GATED number (registration pass +
+        # engine start + watchdog start) must be <=250ms. The UNGATED total
+        # (block entry incl. imports/construction/build_observer_specs through
+        # watchdog start) is reported as telemetry (D4.9 concern visibility).
+        _engine_gated_elapsed_ms = (time.perf_counter() - _engine_gated_t0) * 1000.0
+        _engine_block_total_elapsed_ms = (
+            time.perf_counter() - _engine_block_entry_t0
+        ) * 1000.0
+        logger.info(
+            "engine boot posture: enabled=%s shadow=%s registrations=%d observer "
+            "specs (execute_fn withheld, USE_ENGINE all unset); "
+            "block_elapsed_ms_gated=%.3f block_elapsed_ms_total=%.3f",
+            _engine_cfg.enabled,
+            _engine_cfg.shadow_mode,
+            len(_observer_specs),
+            _engine_gated_elapsed_ms,
+            _engine_block_total_elapsed_ms,
+        )
+    except Exception as _engine_boot_exc:  # noqa: BLE001 — never abort boot
+        app.state.engine_service = None
+        app.state.engine_watchdog = None
+        logger.warning(
+            "engine boot wiring failed (boot CONTINUES): %s", _engine_boot_exc
+        )
+
+    # ─────────────────────────────────────────────────────────────
     # service-tool Phase 1 (1.C.14) — ServiceReconciliationService.
     # D6 boot sweep + periodic PID-liveness / start-time-match
     # reconcile for the ``service_tracking`` table (mark dead or
@@ -4075,6 +4286,28 @@ async def lifespan(app: FastAPI):
     # Stop JobFeedbackObserver before processor
     if hasattr(app.state, '_job_feedback_observer'):
         await app.state._job_feedback_observer.stop()
+
+    # Batch C — C2 (2026-09-11) orphan-watcher sweep — stop it HERE,
+    # BEFORE ``shutdown_dependency_bus`` (D-10, review hardening
+    # 2026-11-21). Same lifecycle as the eligible-pending sweep (the
+    # ``stop()`` method cancels + awaits the asyncio task). The hoist
+    # is REQUIRED by the late-bind fix: the lane re-reads the bus
+    # singleton on EVERY tick, so leaving the stop in its old slot
+    # (after ``shutdown_dependency_bus`` cleared the singleton) left a
+    # window in which a tick could only resolve ``None`` and no-op.
+    # ``stop()`` depends on nothing but its own task, so ordering it
+    # first is dependency-free.
+    orphan_sweep = getattr(
+        app.state, "orphan_watcher_sweep", None
+    )
+    if orphan_sweep is not None:
+        try:
+            await orphan_sweep.stop()
+        except Exception as e:
+            logger.warning(
+                f"OrphanWatcherSweepService shutdown error: {e}"
+            )
+        app.state.orphan_watcher_sweep = None
 
     # Stop the DependencyBus. The bus is flag-agnostic (always wired),
     # so this stops it whenever it was started. Safe to call when the
@@ -4451,21 +4684,20 @@ async def lifespan(app: FastAPI):
             )
         app.state.eligible_pending_sweep = None
 
-    # Batch C — C2 (2026-09-11): stop the orphan-watcher sweep.
-    # Same lifecycle as the eligible-pending sweep above; the
-    # ``stop()`` method cancels + awaits the asyncio task so the
-    # shutdown branch stays compact.
-    orphan_sweep = getattr(
-        app.state, "orphan_watcher_sweep", None
+    # bash-spawn registry retention sweep (census A2 fix, 2026-11-21)
+    # — stop the periodic lane BEFORE the durable shutdown sweep, so
+    # the two reaper surfaces never race each other on the way down.
+    bash_spawn_retention = getattr(
+        app.state, "bash_spawn_retention", None
     )
-    if orphan_sweep is not None:
+    if bash_spawn_retention is not None:
         try:
-            await orphan_sweep.stop()
+            await bash_spawn_retention.stop()
         except Exception as e:
             logger.warning(
-                f"OrphanWatcherSweepService shutdown error: {e}"
+                f"BashSpawnRetentionSweepService shutdown error: {e}"
             )
-        app.state.orphan_watcher_sweep = None
+        app.state.bash_spawn_retention = None
 
     # --- TmpImageCleanupService shutdown (clipboard-image-chat phase 3) ---
     # Stop the retention sweep BEFORE the JobLockSweepService
@@ -4497,6 +4729,26 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"SourcesGcService shutdown error: {e}")
         app.state.sources_gc = None
+
+    # --- Central engine shutdown (Engine Arc P4 / T4.5) ---
+    # Stop the engine BEFORE the sweep cluster (no engine tick can touch a
+    # service the sweeps are stopping). Stop the watchdog first so it cannot
+    # fire on a stopping engine, then stop the tick task, then clear BOTH
+    # app.state handles. Both stops are idempotent (P2 T2.5).
+    _engine_watchdog = getattr(app.state, "engine_watchdog", None)
+    if _engine_watchdog is not None:
+        try:
+            _engine_watchdog.stop()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("EngineWatchdog shutdown error: %s", e)
+        app.state.engine_watchdog = None
+    _engine_service = getattr(app.state, "engine_service", None)
+    if _engine_service is not None:
+        try:
+            await _engine_service.stop()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("EngineService shutdown error: %s", e)
+        app.state.engine_service = None
 
     # --- PlaneSyncWatchdogService shutdown (Phase 3) ---
     # Stop the periodic re-drive sweep BEFORE the manager shuts down
@@ -6471,6 +6723,16 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # first-match-wins resolves /api/prompts/* to this router.
     api_router.include_router(prompts_router)         # /api/prompts (Phase B T5)
     api_router.include_router(memoir_router)          # /api/memoir/persona (Phase 5: JEV persona approval)
+
+    # Engine Arc Phase 6 (P6-prepared, landed by P4): observability door.
+    # Read-only /api/engine/* surface — three GETs, no mutating verb
+    # (D6.8). Mounted inside api_router BEFORE the SPA catch-all (F-15)
+    # so Starlette first-match-wins resolves /api/engine/* to this router.
+    # The adapter is assembled in the P4 lifespan wiring block
+    # (app.state.engine_observability). F-15 + F-5 anchors untouched.
+    from daemon.routers.engine import router as engine_router
+
+    api_router.include_router(engine_router)          # /api/engine/*
 
     # OAuth2 Phase 3 (T3.12 / FR-41): the MCP-KB key-management CRUD —
     # the ONE new OAuth2-human-lane family (§5.6: 30 legacy + 1 new).

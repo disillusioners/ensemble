@@ -259,6 +259,114 @@ PRE_EXISTING_DAEMON_OFFENDERS = frozenset(
         "daemon/tools/_tool_registry.py",  # 8b8df3ead
         "daemon/tools/instance.py",  # 0b02931b7
         "daemon/tools/tool_usage.py",  # 1aa360051
+        # ── THE ENGINE-ARC P1-P6 PROGRAM — T6.3 census ceremony union (2026-11-21) ──
+        # MECHANICALLY GENERATED: `git diff --name-only <LANE_BASE>` daemon paths
+        # not in ALLOWED_DAEMON_DIFF / this set. 53 rows added by the P6
+        # census ceremony, ATTRIBUTED PER GROUP below — the set is NOT
+        # uniformly this lane's: it spans the engine-arc program's own
+        # files, the P4 lane's contributions, and DRIFT-MERGED FOREIGN-LANE
+        # files that entered the same diff window. Each row carries its
+        # first-in-range commit so attribution is per-file, not per-count.
+        #
+        # Groups (53 rows total): (A) engine-arc program P1/P2/P3/P6 modules
+        # + migrations, 25 rows · (B) engine-arc program P5 event-registry
+        # bridge surfaces, 14 rows · (C) P4 lane contributions, 2 rows ·
+        # (D) DRIFT-MERGED FOREIGN-LANE files, 12 rows. Only groups (A)-(C)
+        # carry this program's work; group (D) is recorded attribution, not
+        # authorship — the per-row FIRST-IN-RANGE commit keeps each auditable.
+        #
+        # P7 INTAKE (one lookup; DO NOT implement here):
+        #  * QUARANTINE ledger corrections — the kwarg-drift family attribution
+        #    (test_child_report_next_turn_execution family + the queue_routing
+        #    red) and a metrics-confinement offender-list enlargement row.
+        #  * A function-scoped create_event pin (the P5 event-registry surface).
+        #  * Per-site census pins for the multi-site kinds (room_delivery x7,
+        #    midflight_qa x4, job_completed x2, error x2).
+        #  * Two regex tightenings: the census alias form + the D5.11
+        #    from-import form.
+        #  * The D5.4 SECOND live source (beyond EventBus._global_subscribers).
+        #
+        # D6 REMEDIATION DISCLOSURE (P6 stage review NEEDS-WORK, 2026-11-21):
+        # the pre-remediation commit 75b017c43 carried a wrong-mechanism
+        # wording in daemon/config.py's extend_ceiling_seconds Field
+        # description (it named `asyncio.gather` as the canceller; the
+        # engine's real mechanism is asyncio.wait_for(asyncio.shield(task),
+        # timeout=...) + task.cancel() — daemon/services/engine/dispatch.py
+        # ~:119-151 at this tree). That hunk was REVERTED and re-landed
+        # with the mechanism-correct text in the remediation commit, and
+        # the thread-escape substance (the to_thread payloads at
+        # daemon/services/engine/execution.py:148/:184/:293 are not bounded
+        # by the await ceiling) was preserved. The co-landed :3426-3428
+        # ServicesConfig de-absoluting hunk (AMD-11) was NOT reverted.
+        #
+        # SHAs: the projection + census remediation landed as 56946e1ed.
+        # The config.py re-land hunk rode 281ba1864 (the P4-lane
+        # boot-packs commit) rather than the remediation commit: the
+        # sibling lane's `git add` swept this lane's UNCOMMITTED
+        # working-tree config.py edit into its commit mid-flight (the
+        # known concurrent-commit hazard in a shared worktree). Content
+        # landed byte-identical, zero work lost; the attribution is
+        # restored ON DISK by this disclosure.
+        #
+        # ── (A) engine-arc program — P1/P2/P3/P6 modules + migrations ──
+        "daemon/migrations/versions/20261121_120000_create_engine_jobs.sql",  # engine-arc P1 9cf956ada
+        "daemon/migrations/versions/20261121_120001_create_engine_runs.sql",  # engine-arc P1 9cf956ada
+        "daemon/plugin_subsystem/config_compat_contract.py",  # engine-arc P1 36d736a17
+        "daemon/repositories/engine/__init__.py",  # engine-arc P1 9cf956ada
+        "daemon/repositories/engine/models.py",  # engine-arc P1 9cf956ada
+        "daemon/repositories/engine/repository.py",  # engine-arc P1 9cf956ada
+        "daemon/routers/engine.py",  # engine-arc P6 3c571f070
+        "daemon/services/engine/__init__.py",  # engine-arc P1 dfd0c42a7
+        "daemon/services/engine/dispatch.py",  # engine-arc P2 d64806dec
+        "daemon/services/engine/dualpath.py",  # engine-arc P3 c4bf2c3b7
+        "daemon/services/engine/engine.py",  # engine-arc P2 d64806dec
+        "daemon/services/engine/estate.py",  # engine-arc P1 dfd0c42a7
+        "daemon/services/engine/execution.py",  # engine-arc P2 d64806dec
+        "daemon/services/engine/guardrails.py",  # engine-arc P3 c4bf2c3b7
+        "daemon/services/engine/killswitch.py",  # engine-arc P3 c4bf2c3b7
+        "daemon/services/engine/locks.py",  # engine-arc P2 d64806dec
+        "daemon/services/engine/metrics.py",  # engine-arc P2 d64806dec
+        "daemon/services/engine/projection.py",  # engine-arc P6 3c571f070
+        "daemon/services/engine/registry.py",  # engine-arc P1 dfd0c42a7
+        "daemon/services/engine/spec.py",  # engine-arc P1 dfd0c42a7
+        "daemon/services/engine/state.py",  # engine-arc P2 d64806dec
+        "daemon/services/event_registry/__init__.py",  # engine-arc P5 656f3b4f2
+        "daemon/services/event_registry/catalog.py",  # engine-arc P5 656f3b4f2
+        "daemon/services/event_registry/emit.py",  # engine-arc P5 656f3b4f2
+        "daemon/services/event_registry/metrics.py",  # engine-arc P5 656f3b4f2
+        # ── (B) engine-arc program — P5 event-registry bridge surfaces ──
+        "daemon/routers/answer_helper.py",  # engine-arc P5 5b9698651
+        "daemon/services/child_reports.py",  # engine-arc P5 42909fb85
+        "daemon/services/event_publisher.py",  # engine-arc P5 5b9698651
+        "daemon/services/instance_messaging.py",  # engine-arc P5 f31c43732
+        "daemon/services/job_feedback_observer.py",  # engine-arc P5 5b9698651
+        "daemon/services/job_recovery_service.py",  # engine-arc P5 5b9698651
+        "daemon/services/message_processing_errors.py",  # engine-arc P5 f31c43732
+        "daemon/services/midflight_qa.py",  # engine-arc P5 5b9698651
+        "daemon/services/ram_guard_events.py",  # engine-arc P5 5b9698651
+        "daemon/services/report_delivery_recovery.py",  # engine-arc P5 42909fb85
+        "daemon/services/room_delivery.py",  # engine-arc P5 f31c43732
+        "daemon/services/stale_task_recovery.py",  # engine-arc P5 5b9698651
+        "daemon/repositories/room/membership.py",  # engine-arc P5 f31c43732
+        "daemon/repositories/room/repository.py",  # engine-arc P5 f31c43732
+        # ── (C) P4 lane contributions (boot phases + watchdog) ──
+        "daemon/services/engine/boot.py",  # P4-lane 924820dc0
+        "daemon/services/engine/watchdog.py",  # P4-lane 924820dc0
+        # ── (D) DRIFT-MERGED FOREIGN-LANE files (not this program's work;
+        # committed by sibling lanes inside the same diff window — recorded
+        # so the confinement pin discriminates, never silently absorbed) ──
+        "daemon/__init__.py",  # foreign-lane b71742fe3 version bump
+        "daemon/routers/instances.py",  # foreign-lane 9bcd5d1c9 orjson
+        "daemon/routers/schedules.py",  # foreign-lane b1b445754 schedule-fire-notify
+        "daemon/services/bash_spawn_reaper.py",  # foreign-lane 6aa357dc3 bash-spawn reaper
+        "daemon/repositories/bash_spawn/models.py",  # foreign-lane 6aa357dc3 bash-spawn reaper
+        "daemon/repositories/bash_spawn/repository.py",  # foreign-lane 6aa357dc3 bash-spawn reaper
+        "daemon/services/orphan_watcher_sweep.py",  # foreign-lane 5044dc148 orphan-watcher fix
+        "daemon/services/ram_guard/guard.py",  # foreign-lane e924e3e1d ram-guard poll
+        "daemon/services/schedule_fire_notify.py",  # foreign-lane b1b445754 schedule-fire-notify
+        "daemon/services/schedule_fire_notify_metrics.py",  # foreign-lane b1b445754 schedule-fire-notify
+        "daemon/services/scheduling_service.py",  # foreign-lane b1b445754 schedule-fire-notify
+        "daemon/sources/adapters/scheduler.py",  # foreign-lane b1b445754 schedule-fire-notify
     }
 )
 

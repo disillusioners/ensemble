@@ -39,6 +39,29 @@ from typing import Any
 
 CONTRACT_DEPTH = 3
 
+# Retired config keys that the TARGET release's ``load_config`` still
+# tolerates via explicit compat pops (daemon/config.py). The promote gate
+# describes what the target release ACCEPTS — and a config carrying one of
+# these still boots (load_config silently drops it). Without these entries
+# the gate refuses a config the daemon can load: the exact regression the
+# engine-arc dead-knob sweep (T1.12) surfaced (RC=3 vs base RC=0). Keep this
+# set in lockstep with the pops in daemon/config.py load_config.
+try:
+    from daemon.config import RETIRED_CONFIG_KEYS as _TOLERATED_RETIRED_KEYS  # noqa: E402
+except Exception as exc:  # noqa: BLE001 — stage-time safety
+    import sys as _sys
+
+    print(
+        "config_compat_contract: RETIRED_CONFIG_KEYS import FAILED "
+        f"({exc!r}) — falling back to a HARDCODED set; this hides drift "
+        "between load_config's pop set and the tolerated set. FIX NOW.",
+        file=_sys.stderr,
+    )
+    _TOLERATED_RETIRED_KEYS: dict[str, tuple[str, ...]] = {
+        "persistence": ("checkpointer_db_path", "checkpoint_interval"),
+        "services": ("worker_poll_interval", "lease_heartbeat_interval_seconds"),
+    }
+
 
 def _is_model(annotation: Any) -> bool:
     """True when the annotation is a nested pydantic model class."""
@@ -76,7 +99,14 @@ def emit(repo_root: Path) -> dict:
     except Exception as exc:  # noqa: BLE001 — the caller warns + proceeds
         print(f"config-contract: model import FAILED: {exc}", file=sys.stderr)
         raise SystemExit(4)
-    return _walk(Config, 0)
+    contract = _walk(Config, 0)
+    # A retired key that load_config pops is still ACCEPTED by this release —
+    # including it keeps the promote gate from refusing a bootable config.
+    for section, keys in _TOLERATED_RETIRED_KEYS.items():
+        node = contract.setdefault(section, {})
+        for key in keys:
+            node[key] = None
+    return contract
 
 
 def main() -> int:

@@ -39,12 +39,10 @@ def mock_config():
     config.queue.llm_retry_timeout_attempts = 3
     config.queue.discard_on_startup = None
     config.persistence.db_path = ":memory:"
-    config.persistence.checkpoint_interval = 1
     config.persistence.checkpoint_ttl_hours = 168
     config.persistence.checkpoint_cleanup_interval = 24
     config.persistence.max_instance_history = 300
     config.agents.directory = "./agents"
-    config.services.worker_poll_interval = 0.5
     config.services.stale_task_recovery_interval = 60
     config.services.task_timeout_minutes = 60.0
     config.services.max_task_retries = 3

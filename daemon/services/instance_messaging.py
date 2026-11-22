@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timezone
 
 from daemon.services.timestamps import now_utc_iso, now_utc_naive
+from daemon.services.event_registry import record as _event_registry_record
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -2889,6 +2890,11 @@ class InstanceMessagingService:
             session.add(event)
 
             session.commit()
+            # Phase 5 event registry — class-2 bridge (T5.4/L-10): observe
+            # the durable MESSAGE_RECEIVED row AFTER the commit.
+            _event_registry_record("event_bus:message_received",
+                                   instance_id=instance_id,
+                                   message_id=message_id)
             # Capture the Task PK after commit + refresh so the caller
             # can surface it as ``AsyncMessageResult.job_id``. The marker
             # branch intentionally has no Task and leaves task_id=None.

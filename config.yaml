@@ -354,7 +354,6 @@ persistence:
   db_path: ./data/instances.db
   # checkpointer_db_path was removed; the checkpointer DB path lives in
   # ensemble.json (EnsembleConfig.sqlite.checkpoints_db).
-  checkpoint_interval: 1
   checkpoint_ttl_hours: 168
   checkpoint_cleanup_interval: 24
   max_instance_history: 1000
@@ -568,6 +567,39 @@ services:
 # Job System Settings
 job_system:
   job_retry_scheduler_enabled: null  # null/empty = disabled. Set to true to enable background retry polling.
+
+# Central polling/event engine (Engine Arc Phase 1 — engine-arc-phase1).
+# Field names mirror daemon/config.py:EngineConfig exactly.
+# Env vars override these via the ENSEMBLE_ENGINE_* prefix (auto-covered
+# by tests/conftest.py::_TRACKED_ENV_PREFIXES = ("OPENAI_", "ENSEMBLE_")).
+#
+# DORMANT POSTURE (CS-5 / D-3 ADOPT): enabled=true + shadow_mode=true +
+# every SERVICES_<MODULE>_USE_ENGINE unset == registered, observing,
+# executing NOTHING. Phase 1 ships the substrate only — no tick loop, no
+# dispatch, no execute_fn call path exists yet (P2/P4 build those).
+engine:
+  # Axis 1 of the dormancy truth table: does the tick loop run?
+  # false = the one-flag full-off.
+  enabled: ${ENSEMBLE_ENGINE_ENABLED:-true}
+  # Axis 2: compute due-ness + record would_fire/SKIPPED_SHADOW evidence
+  # while execute_fn is NEVER invoked. "dormant" is not "absent".
+  shadow_mode: ${ENSEMBLE_ENGINE_SHADOW_MODE:-true}
+  # Tick-loop resolution (seconds) — one engine task, never per-job sleeps.
+  tick_resolution_seconds: ${ENSEMBLE_ENGINE_TICK_RESOLUTION_SECONDS:-1.0}
+  # Dedicated executor size for the DEDICATED_EXECUTOR concurrency class.
+  tick_workers: ${ENSEMBLE_ENGINE_TICK_WORKERS:-2}
+  # Engine-independent watchdog sampler cadence (seconds).
+  watchdog_interval_seconds: ${ENSEMBLE_ENGINE_WATCHDOG_INTERVAL_SECONDS:-5.0}
+  # Boot window the watchdog stall threshold derives from. 120.0 = the
+  # Emperor boot SLO (boot_epoch -> readyz-green <= 120s).
+  boot_max_window_seconds: ${ENSEMBLE_ENGINE_BOOT_MAX_WINDOW_SECONDS:-120.0}
+  # Per-pass deadlines for the engine's own boot classes (expiry logs
+  # ERROR and boot CONTINUES — boot hygiene must never block boot).
+  boot_sweep_deadline_seconds: ${ENSEMBLE_ENGINE_BOOT_SWEEP_DEADLINE_SECONDS:-15.0}
+  boot_pass_deadline_seconds: ${ENSEMBLE_ENGINE_BOOT_PASS_DEADLINE_SECONDS:-30.0}
+  # engine_runs retention window (knob only in P1; the prune sweep rides
+  # the module-migration tail).
+  run_retention_days: ${ENSEMBLE_ENGINE_RUN_RETENTION_DAYS:-30}
 
 # Scheduled Tasks Settings (Phase 1 foundation).
 # Field names mirror daemon/config.py:SchedulingConfig exactly.

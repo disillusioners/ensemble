@@ -49,6 +49,17 @@ Covered:
        ``daemon/services/orphan_watcher_sweep.py`` and is wired
        into ``daemon/api.py``'s lifespan alongside the
        eligible-PENDING sweep (sanity import check).
+   11. LATE-BIND (born-dead wiring fix, 2026-11-21): a bus
+       registered AFTER construction (the production ordering —
+       ``init_dependency_bus`` runs ~1000 lifespan lines after the
+       service is constructed) is picked up on the next tick via
+       the module singleton; an explicitly injected fixture bus
+       keeps precedence.
+   12. DEAD-DETECTION (born-dead wiring fix, 2026-11-21): zero
+       effective sweeps through the 2x-interval grace window
+       (ticks 1-2) fires a loud ERROR on tick 3, then a
+       rate-limited WARNING reminder every 10 no-op ticks — the
+       trap is never DEBUG-quiet forever again.
 
 Census stays at 23/1/0 — the periodic lane calls the bus's
 ``_sweep_orphan_watchers`` (the same primitive the startup path
@@ -60,10 +71,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from unittest.mock import AsyncMock, MagicMock
+import logging
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from daemon.services import orphan_watcher_sweep as orphan_watcher_sweep_module
 from daemon.services.orphan_watcher_sweep import (
     DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS,
     OrphanWatcherSweepService,
@@ -144,22 +157,33 @@ class TestSweepOnce:
 
     @pytest.mark.asyncio
     async def test_sweep_once_silent_when_bus_unwired(self):
-        """Legacy / pre-wiring case: ``dependency_bus=None`` →
-        ``sweep_once`` returns ``cancelled=0``, no raise, no
-        spurious error. The bus's own startup sweep is the
-        primary path; the periodic lane is the secondary
-        backstop.
+        """Legacy / pre-wiring case: ``dependency_bus=None`` AND the
+        module singleton is None → ``sweep_once`` returns
+        ``cancelled=0``, no raise, no spurious error. The bus's own
+        startup sweep is the primary path; the periodic lane is the
+        secondary backstop.
+
+        UPDATED (born-dead wiring fix, 2026-11-21): the tick path now
+        late-binds and consults ``get_dependency_bus()`` each tick, so
+        this test PINS the getter to return None — keeping the
+        legacy-None case deterministic regardless of whatever other
+        tests may have left in the module singleton.
         """
         svc = OrphanWatcherSweepService(
             dependency_bus=None,
             interval_seconds=1,
         )
-        # Must NOT raise.
-        result = await svc.sweep_once()
+        with patch.object(
+            orphan_watcher_sweep_module, "get_dependency_bus",
+            return_value=None,
+        ):
+            # Must NOT raise.
+            result = await svc.sweep_once()
 
         assert result["cancelled"] == 0
         assert result["errors"] == 0
         assert result["ticks"] == 1
+        assert result["effective_runs"] == 0
 
     @pytest.mark.asyncio
     async def test_sweep_once_swallows_bus_exception(self):
@@ -449,3 +473,238 @@ class TestWiring:
 
         cfg = ServicesConfig()
         assert cfg.orphan_watcher_sweep_interval_seconds == 90
+
+
+# ---------------------------------------------------------------------------
+# 5. Late-bind — the born-dead wiring trap fix (2026-11-21)
+# ---------------------------------------------------------------------------
+
+_SWEEP_LOGGER = "daemon.services.orphan_watcher_sweep"
+
+
+class TestLateBind:
+    """Born-dead wiring trap (census A1, 2026-11-21): the api.py
+    lifespan constructs this service BEFORE ``init_dependency_bus``
+    registers the module singleton, so the old
+    capture-at-construction behavior froze ``None`` into
+    ``self._dependency_bus`` for the daemon's ENTIRE lifetime — every
+    tick took the bus-is-None DEBUG branch and the periodic lane never
+    dispatched a single sweep in production (live v0.31.22: 215+
+    no-op ticks while the cycle counter climbed).
+
+    The fix: an EXPLICITLY injected bus (legacy test fixture) wins;
+    otherwise the module singleton is re-read on EVERY tick.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bus_registered_after_construction_is_picked_up(
+        self, monkeypatch
+    ):
+        """The production trap shape: constructed while the singleton
+        is still None, the bus registered LATER must be picked up on
+        the NEXT tick — no re-construction, no re-wire call.
+
+        The singleton is driven through the real module global (what
+        ``set_dependency_bus`` assigns); ``monkeypatch`` keeps the
+        leak-free auto-restore.
+        """
+        import daemon.services.dependency_bus as dependency_bus_module
+
+        svc = OrphanWatcherSweepService(
+            dependency_bus=None,
+            interval_seconds=1,
+        )
+        # Pre-wiring: getter returns None → no sweep dispatched.
+        with patch.object(
+            orphan_watcher_sweep_module, "get_dependency_bus",
+            return_value=None,
+        ):
+            pre = await svc.sweep_once()
+        assert pre["cancelled"] == 0
+        assert pre["effective_runs"] == 0
+
+        # The lifespan registers the bus AFTER the service started.
+        bus = MagicMock()
+        bus._sweep_orphan_watchers = AsyncMock(return_value=2)
+        monkeypatch.setattr(dependency_bus_module, "_dependency_bus", bus)
+
+        post = await svc.sweep_once()
+        bus._sweep_orphan_watchers.assert_awaited_once()
+        assert post["cancelled"] == 2
+        assert post["effective_runs"] == 1
+
+    @pytest.mark.asyncio
+    async def test_explicit_fixture_bus_wins_over_singleton(
+        self, monkeypatch
+    ):
+        """An EXPLICITLY injected bus (legacy test fixture) keeps
+        precedence over the late-bound singleton — existing fixture
+        semantics are preserved, not silently re-wired mid-test."""
+        import daemon.services.dependency_bus as dependency_bus_module
+
+        fixture_bus = MagicMock()
+        fixture_bus._sweep_orphan_watchers = AsyncMock(return_value=5)
+        singleton_bus = MagicMock()
+        singleton_bus._sweep_orphan_watchers = AsyncMock(return_value=99)
+        monkeypatch.setattr(
+            dependency_bus_module, "_dependency_bus", singleton_bus
+        )
+
+        svc = OrphanWatcherSweepService(
+            dependency_bus=fixture_bus,
+            interval_seconds=1,
+        )
+        result = await svc.sweep_once()
+
+        fixture_bus._sweep_orphan_watchers.assert_awaited_once()
+        singleton_bus._sweep_orphan_watchers.assert_not_awaited()
+        assert result["cancelled"] == 5
+
+
+# ---------------------------------------------------------------------------
+# 6. Dead-detection — the trap is never DEBUG-quiet forever (2026-11-21)
+# ---------------------------------------------------------------------------
+
+
+class TestDeadDetection:
+    """Born-dead detection: zero effective sweeps past the first two
+    ticks (>= 2x interval on the loop cadence) escalates LOUDLY — an
+    ERROR on first crossing, then a rate-limited WARNING reminder
+    every 10 subsequent no-op ticks. A lane whose sweeps dispatch
+    normally NEVER triggers it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_dead_detection_fires_error_after_grace_window(
+        self, caplog
+    ):
+        """Zero effective sweeps through the 2x-interval grace window
+        (ticks 1-2) → the DEAD-DETECTION ERROR fires on tick 3 (the
+        first tick at 2x interval on the loop cadence)."""
+        svc = OrphanWatcherSweepService(
+            dependency_bus=None,
+            interval_seconds=1,
+        )
+        with patch.object(
+            orphan_watcher_sweep_module, "get_dependency_bus",
+            return_value=None,
+        ):
+            with caplog.at_level(logging.ERROR, logger=_SWEEP_LOGGER):
+                await svc.sweep_once()  # tick 1 (t=0) — grace
+                await svc.sweep_once()  # tick 2 (t=1x) — grace
+                assert not svc._dead_detection_fired
+                await svc.sweep_once()  # tick 3 (t=2x) — crossing
+
+        assert svc._dead_detection_fired is True
+        errors = [
+            r for r in caplog.records
+            if r.levelno == logging.ERROR
+            and "DEAD-DETECTION" in r.getMessage()
+        ]
+        assert len(errors) == 1
+        assert svc.counters()["effective_runs_total"] == 0
+
+    @pytest.mark.asyncio
+    async def test_dead_detection_does_not_fire_within_grace(self, caplog):
+        """Two no-op ticks (inside the 2x-interval window) must NOT
+        fire the detection — the lifespan wires the bus shortly after
+        start(), and that window is legitimate."""
+        svc = OrphanWatcherSweepService(
+            dependency_bus=None,
+            interval_seconds=1,
+        )
+        with patch.object(
+            orphan_watcher_sweep_module, "get_dependency_bus",
+            return_value=None,
+        ):
+            with caplog.at_level(logging.ERROR, logger=_SWEEP_LOGGER):
+                await svc.sweep_once()  # tick 1
+                await svc.sweep_once()  # tick 2 (t=1x — still grace)
+
+        assert svc._dead_detection_fired is False
+        assert not [
+            r for r in caplog.records if r.levelno == logging.ERROR
+        ]
+
+    @pytest.mark.asyncio
+    async def test_dead_detection_reminder_is_rate_limited(self, caplog):
+        """12 no-op ticks → exactly ONE ERROR (the crossing) and
+        exactly ONE WARNING reminder (tick 10) — loud but not
+        spammy."""
+        svc = OrphanWatcherSweepService(
+            dependency_bus=None,
+            interval_seconds=1,
+        )
+        with patch.object(
+            orphan_watcher_sweep_module, "get_dependency_bus",
+            return_value=None,
+        ):
+            with caplog.at_level(logging.WARNING, logger=_SWEEP_LOGGER):
+                for _ in range(12):
+                    await svc.sweep_once()
+
+        errors = [
+            r for r in caplog.records if r.levelno == logging.ERROR
+        ]
+        warnings = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert len(errors) == 1
+        assert len(warnings) == 1
+        assert "still dead" in warnings[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_no_dead_detection_when_sweeps_are_effective(self, caplog):
+        """A lane whose sweeps dispatch normally (explicit working
+        bus) never triggers the detection, and ``effective_runs``
+        accumulates."""
+        bus = MagicMock()
+        bus._sweep_orphan_watchers = AsyncMock(return_value=0)
+        svc = OrphanWatcherSweepService(
+            dependency_bus=bus,
+            interval_seconds=1,
+        )
+        with caplog.at_level(logging.ERROR, logger=_SWEEP_LOGGER):
+            for _ in range(3):
+                await svc.sweep_once()
+
+        assert svc._dead_detection_fired is False
+        assert svc.counters()["effective_runs_total"] == 3
+        assert not [
+            r for r in caplog.records if r.levelno == logging.ERROR
+        ]
+
+    @pytest.mark.asyncio
+    async def test_lane_recovery_after_dead_detection(
+        self, caplog, monkeypatch
+    ):
+        """After the detection fired, a bus registered later flips the
+        lane effective again — the recovery is logged at INFO and
+        ``effective_runs`` starts accumulating."""
+        import daemon.services.dependency_bus as dependency_bus_module
+
+        svc = OrphanWatcherSweepService(
+            dependency_bus=None,
+            interval_seconds=1,
+        )
+        with patch.object(
+            orphan_watcher_sweep_module, "get_dependency_bus",
+            return_value=None,
+        ):
+            await svc.sweep_once()  # tick 1 (t=0)
+            await svc.sweep_once()  # tick 2 (t=1x)
+            await svc.sweep_once()  # tick 3 (t=2x) — detection fires
+        assert svc._dead_detection_fired is True
+
+        bus = MagicMock()
+        bus._sweep_orphan_watchers = AsyncMock(return_value=1)
+        monkeypatch.setattr(dependency_bus_module, "_dependency_bus", bus)
+        with caplog.at_level(logging.INFO, logger=_SWEEP_LOGGER):
+            post = await svc.sweep_once()
+
+        assert post["effective_runs"] == 1
+        assert any(
+            "recovered" in r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.INFO
+        )

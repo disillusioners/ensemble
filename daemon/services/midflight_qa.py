@@ -71,6 +71,7 @@ from daemon.constants import STUCK_HEARTBEAT_AFTER_SECONDS
 from daemon.repositories.event.models import EventKind
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.task.models import TaskStatus, TaskType
+from daemon.services.event_registry import record as _event_registry_record
 from daemon.services.question_manager import pack_to_dict
 
 if TYPE_CHECKING:
@@ -507,6 +508,9 @@ async def emit_question_requested(
                 kind=EventKind.QUESTION_REQUESTED,
                 data=payload,
             )
+            # Phase 5 event registry — class-2 bridge (T5.4).
+            _event_registry_record("event_bus:question_requested",
+                                   instance_id=instance_id)
         except Exception as e:  # noqa: BLE001 — §8.6 emission must not break the asker
             logger.warning(
                 "midflight_qa: QUESTION_REQUESTED EventBus emission failed "
@@ -581,6 +585,9 @@ async def emit_midflight_report(
                 kind=EventKind.MIDFLIGHT_REPORT,
                 data=payload,
             )
+            # Phase 5 event registry — class-2 bridge (T5.4).
+            _event_registry_record("event_bus:midflight_report",
+                                   instance_id=instance_id)
         except Exception as e:  # noqa: BLE001 — §8.6
             logger.warning(
                 "midflight_qa: MIDFLIGHT_REPORT EventBus emission failed "
@@ -768,6 +775,9 @@ async def emit_stuck_awaiting_answer(
                 kind=EventKind.STUCK_AWAITING_ANSWER,
                 data=payload,
             )
+            # Phase 5 event registry — class-2 bridge (T5.4).
+            _event_registry_record("event_bus:stuck_awaiting_answer",
+                                   instance_id=asker_instance_id)
         except Exception as e:  # noqa: BLE001 — §8.6
             logger.warning(
                 "midflight_qa: STUCK_AWAITING_ANSWER EventBus emission failed "
@@ -855,6 +865,9 @@ async def emit_child_question_still_pending(
                 kind=EventKind.CHILD_QUESTION_STILL_PENDING,
                 data=payload,
             )
+            # Phase 5 event registry — class-2 bridge (T5.4).
+            _event_registry_record("event_bus:child_question_still_pending",
+                                   instance_id=child_instance_id)
         except Exception as e:  # noqa: BLE001 — §8.6
             logger.warning(
                 "midflight_qa: CHILD_QUESTION_STILL_PENDING EventBus emission "

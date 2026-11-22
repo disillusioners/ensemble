@@ -1,0 +1,25 @@
+# Identity + integrity verification
+generated: 2026-11-21T15:22:16Z
+HEAD leg worktree : c8db252e871ba758e705924656fc47827b960858  branch=fix/phase1-live-defects
+BASE leg worktree : b71742fe33e25db177bd86761f5b5ef16da0f425  (detached)
+uv.lock sha256[:16] base=ad418aa6d2fe4ca3 head=ad418aa6d2fe4ca3
+python base=Python 3.14.7 head=Python 3.14.7
+pkg count base=117 head=117 (diff empty => byte-equal envs)
+
+## HEAD workflow status (must show only the EVIDENCE dir as untracked)
+?? .agents/tester/EVIDENCE/2026-11-21-live-defects-p1/
+
+## BASE workflow status (must be CLEAN — no writes to the base leg)
+(end)
+
+## lane diff base..HEAD (prod + tests)
+ daemon/api.py                                      | 116 ++++-
+ daemon/repositories/bash_spawn/models.py           |   4 +-
+ daemon/repositories/bash_spawn/repository.py       |  18 +
+ daemon/services/bash_spawn_reaper.py               | 447 ++++++++++++++++++-
+ daemon/services/orphan_watcher_sweep.py            |  87 ++++
+ tests/repositories/test_bash_spawn_repository.py   |  23 +
+ tests/unit/services/test_bash_spawn_reaper.py      |  27 ++
+ .../services/test_bash_spawn_retention_sweep.py    | 479 +++++++++++++++++++++
+ .../unit/services/test_c2_orphan_watcher_sweep.py  | 277 +++++++++++-
+ 9 files changed, 1454 insertions(+), 24 deletions(-)
