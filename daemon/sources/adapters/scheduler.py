@@ -50,6 +50,29 @@ When a one-shot's ``run_at`` is past-due beyond
 ``error_message='past_lateness_cap: lateness={X}s, cap={Y}s'`` and does
 NOT dispatch a JobItem. The schedule remains armed (NOT disabled) so the
 operator can update ``run_at`` and re-fire.
+
+MODULE-BAND RATIONALE (tidier fix pass 2026-11-22, 3220 lines at the tip;
+the band was crossed IN-RANGE at 2992 → 3208):
+this adapter crossed the >3000 band IN-RANGE with no
+rationale on record.  It hosts THREE concerns.  (1) The DST / ADR
+semantics — the croniter-delegated cron path and the naive one-shot
+anchor, which MUST share one DST rule (the module docstring above IS
+that contract).  (2) The one-shot IDEMPOTENCY + LATENESS-CAP contract
+(ADR-004 / ADR-003) — the idempotency key is derived from
+``self._run_at``, NEVER from ``next_trigger``, and a past-due one-shot
+beyond the lateness cap is SKIPPED, not dispatched.  (3) The CENTRAL
+MAINTENANCE chain re-arm seam (BR-4) — the consuming fire mints the
+next week's instant and rewrites the row's config.
+
+Concern (3) IS EXTRACTABLE: the chain re-arm is ONE method
+(``_rearm_chain_row``) plus its marker, and since this pass it delegates
+the config construction to the seeder
+(``daemon.repositories.source.maintenance_seed.refresh_chain_keys``) —
+so it can move to its own adapter module without touching the DST
+semantics or the idempotency/lateness contracts.  Concerns (1) and (2)
+are NOT separable from the adapter's core — they ARE the adapter's
+contract.  The (3) extraction is DEFERRED to a post-staging refactor;
+this pass records the rationale only.
 """
 
 from __future__ import annotations
@@ -59,7 +82,6 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Awaitable
-from zoneinfo import ZoneInfo
 from croniter import croniter
 from croniter import CroniterBadCronError
 
@@ -82,6 +104,7 @@ from daemon.constants import (
 from daemon.models import SchedulerInstanceMode
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.message_queue.models import MessageStatus
+from daemon.repositories.source.maintenance_seed import refresh_chain_keys
 from daemon.repositories.source.models import ExecutionStatus
 from daemon.repositories.task.models import TaskStatus
 from daemon.registry import get_registry
@@ -362,6 +385,14 @@ class SchedulerAdapter(MessageSourceAdapter):
         self._cron_expression: str | None = None
         self._interval_seconds: int | None = None
         self._run_at: datetime | None = None
+        # The CHAIN marker (Central Maintenance System, P1): a config
+        # that carries a ``chain`` block describes a SELF-RESCHEDULING
+        # one-shot — the adapter rewrites its own ``run_at`` at each
+        # consuming fire instead of disabling the row.  The marker is
+        # the ONE concept shared by the re-arm seam (here), the boot
+        # guard and the archive-aware revive (BR-3) — there is NO
+        # hardcoded schedule name anywhere in this file.
+        self._chain_config: dict | None = None
         
         # Message configuration
         self._agent: str | None = scheduler_config.get("agent")
@@ -569,7 +600,19 @@ class SchedulerAdapter(MessageSourceAdapter):
             logger.warning("No 'agent' specified in scheduler config")
         if not self._message_content:
             logger.warning("No 'message' specified in scheduler config")
-    
+
+        # The CHAIN marker (Central Maintenance System, P1) — exposed
+        # here so the re-arm seam can key on the config's ``chain``
+        # block (one concept, one marker) instead of a schedule name.
+        # An EMPTY / non-dict ``chain`` is NOT a chain row.
+        chain = scheduler_config.get("chain")
+        self._chain_config = dict(chain) if isinstance(chain, dict) and chain else None
+        if self._chain_config is not None:
+            logger.info(
+                f"Chain schedule detected for {self.source_id}: "
+                f"mode={self._chain_config.get('mode')}"
+            )
+
     async def start(self) -> None:
         """Start the scheduler loop."""
         if self._status == SourceStatus.RUNNING:
@@ -812,14 +855,12 @@ class SchedulerAdapter(MessageSourceAdapter):
                     # ``rearmed`` / ``failed`` NEVER do — the intent
                     # survives and the schedule re-arms on the 5s cadence.
                     if self._fire_outcome in self._CONSUMING_FIRE_OUTCOMES:
-                        self._is_one_time_executed = True
-                        logger.info(f"One-time schedule executed: {self.source_id}")
-                        # NEW: Notify completion so adapter can disable itself
-                        if self._on_complete_callback:
-                            try:
-                                self._on_complete_callback(self.source_id, completed=True)
-                            except Exception as e:
-                                logger.warning(f"on_complete_callback failed: {e}")
+                        if await self._handle_consumed_one_time():
+                            # The CHAIN row was re-armed: the next trigger
+                            # is the freshly minted next-week instant, so
+                            # the loop stays alive (the chain is
+                            # self-rescheduling).
+                            continue
                         break
                     # NOT consumed — re-arm on the mandated cadence (the
                     # branch that already took the sleep does not sleep
@@ -843,7 +884,195 @@ class SchedulerAdapter(MessageSourceAdapter):
                 await asyncio.sleep(SCHEDULER_ERROR_RETRY_S)
 
         logger.info(f"Scheduler loop ended: {self.source_id}")
-    
+
+    async def _handle_consumed_one_time(self) -> bool:
+        """Handle a CONSUMING one-shot outcome (the re-arm authority).
+
+        Returns:
+            ``True`` when the row was RE-ARMED (a chain row) — the
+            caller MUST then CONTINUE the loop, because the next
+            trigger is the freshly minted next-week instant.
+            ``False`` when the one-shot is FINISHED — the caller breaks
+            the loop.
+
+        A CHAIN row (a config that carries a ``chain`` block) is the
+        self-rescheduling weekly trigger of the Central Maintenance
+        System: the completion callback that DISABLES a one-shot
+        (``daemon/sources/registry.py:608-620``) is SKIPPED for it and
+        the row's ``run_at`` is rewritten to the next week's instant
+        instead.  The rewrite is a READ-MODIFY-WRITE of the COMPLETE
+        config — ``update_source_config`` FULL-REPLACES the config
+        column (``daemon/repositories/source/repository.py:178-201``),
+        so every other key (agent / message / timezone / recurrence /
+        instance_mode / project_id / chain) is carried over verbatim.
+
+        THIS IS NOT the 5s same-episode re-arm (R-P1-2): the ``rearmed``
+        fire outcome (a deferred delivery that re-armed inside the same
+        episode) is NOT a consuming outcome, so it never reaches this
+        method — the one-shot is not consumed and the loop takes the 5s
+        cadence branch instead.
+        """
+        if self._chain_config is not None:
+            status = await self._rearm_chain_row()
+            if status == "rearmed":
+                # The next trigger is the new instant — the chain lives.
+                self._is_one_time_executed = False
+                return True
+            # Not re-armed.  The one-shot IS consumed here (the executed
+            # flag is NOT reset: a reset with a stale ``run_at`` would
+            # spin the 5s cadence instead of waiting for the next slot).
+            self._is_one_time_executed = True
+            if status == "skipped_operator":
+                logger.info(
+                    "Scheduler %s: the chain row is cancelled/paused — the "
+                    "operator's intent wins; the chain stays halted",
+                    self.source_id,
+                )
+            else:
+                logger.error(
+                    "Scheduler %s: the chain row could NOT be re-armed — the "
+                    "row stays armed and the boot guard retries at the next "
+                    "boot",
+                    self.source_id,
+                )
+            return False
+
+        self._is_one_time_executed = True
+        logger.info(f"One-time schedule executed: {self.source_id}")
+        # NEW: Notify completion so adapter can disable itself
+        if self._on_complete_callback:
+            try:
+                self._on_complete_callback(self.source_id, completed=True)
+            except Exception as e:
+                logger.warning(f"on_complete_callback failed: {e}")
+        return False
+
+    async def _rearm_chain_row(self) -> str:
+        """Rewrite the chain row's ``run_at`` for the next week.
+
+        The write is a READ-MODIFY-WRITE of the COMPLETE config (the
+        config column is full-replaced).  Because the idempotency key
+        is derived from ``self._run_at``
+        (``scheduler:{source_id}:{run_at.isoformat()}``), the new week
+        mints a NEW key automatically.
+
+        The next slot is the next weekday-D occurrence counted from the
+        re-arm (``allow_today=False``) — the re-arm must never land on
+        the same day it just fired, and the effective interval is
+        therefore 5–13 days rather than exactly 7 (BR-1 sub-semantics).
+
+        Returns:
+            ``"rearmed"`` — the row now carries the next week's instant;
+            ``"skipped_operator"`` — the row is cancelled or paused (the
+            operator's intent wins; NOTHING is written);
+            ``"failed"`` — the re-arm could not be performed (invalid
+            knobs, an unreadable row, or a failed persistence write).
+            The row is left ARMED in that case so the boot guard (or the
+            adapter's past-due auto-fire) can deliver the run later.
+        """
+        if self._source_repo is None:
+            logger.error(
+                "Scheduler %s: cannot re-arm the chain row — no source repo",
+                self.source_id,
+            )
+            return "failed"
+        try:
+            live = self._source_repo.get_source_config(self.source_id)
+        except Exception as exc:  # noqa: BLE001 — the re-arm never raises
+            logger.error(
+                "Scheduler %s: cannot read the chain row for the re-arm: %s",
+                self.source_id,
+                exc,
+            )
+            return "failed"
+        if live is None:
+            logger.error(
+                "Scheduler %s: cannot re-arm the chain row — the row is gone",
+                self.source_id,
+            )
+            return "failed"
+
+        status = str(getattr(live, "status", "") or "").strip().lower()
+        if status == SourceStatus.CANCELLED.value:
+            return "skipped_operator"
+        if not getattr(live, "enabled", True):
+            return "skipped_operator"
+
+        config = dict(getattr(live, "config", None) or {})
+        try:
+            from daemon.services.maintenance_schedule_knobs import (
+                pick_next_fire_instant,
+                read_maintenance_knobs,
+            )
+
+            knobs = read_maintenance_knobs()
+            picked = pick_next_fire_instant(
+                knobs,
+                now=datetime.now(timezone.utc),
+                allow_today=False,
+            )
+        except Exception as exc:  # noqa: BLE001 — the knobs are fail-closed
+            logger.error(
+                "Scheduler %s: the maintenance knobs are invalid — no re-arm "
+                "(fail-closed): %s",
+                self.source_id,
+                exc,
+            )
+            return "failed"
+
+        # The chain-key refresh is the SEEDER's (BR-3 — one concept, one
+        # marker): the seeder force-sets the chain marker, so the adapter
+        # can never re-introduce a divergent mode literal of its own.
+        new_config = refresh_chain_keys(config, picked=picked, knobs=knobs)
+
+        try:
+            updated = self._source_repo.update_source_config(
+                self.source_id,
+                config=new_config,
+                enabled=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — the re-arm never raises
+            logger.error(
+                "Scheduler %s: the chain re-arm write failed: %s",
+                self.source_id,
+                exc,
+            )
+            return "failed"
+        if updated is None:
+            logger.error(
+                "Scheduler %s: the chain re-arm write found no row",
+                self.source_id,
+            )
+            return "failed"
+
+        # The completion callback is SKIPPED for chain rows, so the status
+        # is explicitly promoted to RUNNING here (a stopped/cancelled row
+        # is skipped by the registry's boot filter).
+        try:
+            self._source_repo.update_source_status(
+                self.source_id, SourceStatus.RUNNING.value
+            )
+        except Exception as exc:  # noqa: BLE001 — the status is best-effort
+            logger.warning(
+                "Scheduler %s: could not promote the chain row to running: %s",
+                self.source_id,
+                exc,
+            )
+
+        # The in-memory state follows the persisted one: the next trigger
+        # is the new instant, and the idempotency key (derived from
+        # ``self._run_at``) is therefore a NEW key for the new week.
+        self._run_at = picked.instant_utc
+        self._last_skipped_run_at = None
+        logger.info(
+            "Scheduler %s: chain re-armed for %s (local %s %s)",
+            self.source_id,
+            picked.run_at_iso,
+            picked.local_time,
+            knobs.timezone,
+        )
+        return "rearmed"
+
     def _get_next_trigger_time(self):
         """Calculate next trigger time based on schedule type.
 

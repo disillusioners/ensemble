@@ -1,0 +1,55 @@
+.report-page {
+  padding: 1rem;
+}
+
+.report-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.report-error {
+  color: #c62828;
+}
+
+.report-empty {
+  color: #666;
+}
+
+.report-runs {
+  width: 100%;
+  border-collapse: collapse;
+
+  th, td {
+    padding: 0.5rem;
+    border-bottom: 1px solid #e0e0e0;
+    text-align: left;
+  }
+
+  tr.selected td {
+    background: #e3f2fd;
+  }
+}
+
+.report-view {
+  margin-top: 1.5rem;
+}
+
+.report-view-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.report-body {
+  margin-top: 0.5rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  overflow-x: auto;
+}
+
+.report-links {
+  margin-top: 0.5rem;
+}

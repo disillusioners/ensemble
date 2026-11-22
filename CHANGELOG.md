@@ -5,6 +5,25 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.34] — 2026-11-22
+
+### Added — Central Maintenance System (lane `feature/central-maintenance-system`, P1–P5)
+
+- The **maintenancer** agent (`agents/maintenancer/`): roster + templated skills (lane-skill check, run-report writer), report-scrutiny and fan-in-valve pins, and the maintenance knowledge-base coverage gate.
+- **Scheduled-tasks source adapter** (`daemon/sources/adapters/scheduler.py`): TZ/DST-correct scheduling, catch-up + idempotency semantics, one-shot cap discipline; REST API with phase-3 contract + delete-guard placement; scheduler acceptance pack (177 nodes, no-skip parking) green.
+- **Maintenance-reports door**: `GET` + `HEAD /api/maintenance-reports` (scope-reuse `maintenance:read`, auth-OFF 503 fail-closed, protected-default class) + FE report view (in-app markdown render, lazy `/report` route).
+- P5A verification: maintenancer pin quartet + scheduler packs registered in PACKS.md; router class/scope manifest pins extended (declared-route census 127 · mount census 43 · api_families 39).
+
+## [v0.31.33] — 2026-11-22
+
+### Fixed — WC watchdog wedge-notice false-positive class (wake-source recognition)
+
+- Cured the waiting-children watchdog FALSE-POSITIVE wedge notices (anomaly a370b036; four false `system:watchdog:wedge` notices on ari root 77ddcb9f 2026-11-21→22, children verified alive/processing at notice time). The wedge pass recognized only PROCESS_REPORT carriers as legitimate liveness, so healthy event-waiting and parked-cascade roots read as "no_live_carrier / zero non-terminal children".
+- New tri-state `_has_legitimate_wake_source` gate in the wedge pass (after S4 in-scope admission, before the carrier check, both arms): (1) any live PENDING/RUNNING delivery task of any kind (`list_live_delivery_tasks_for_instance`); (2) armed job-watch rows whose watched receipt can still fire (terminal receipt = stranded watcher = not a wake source); (3) open PENDING/DEFERRED report-injection obligations (`has_open_obligation_for_parent`, the RDRS armed-post-restart callbacks); (4) resumable descendants via the canonical mission-live guard (`evaluate_mission_live` with `skip_root=True`, bus count = fulfillable watchers only); (5) unsettled `mission_commissions` rows over the permanent tree (RDRS lane-7 semantics — the watchdog defers to lane-7 TTL adjudication).
+- True ⇒ suppress + clear the wedge episode (one INFO log naming the holding leg); wired-read RAISED ⇒ UNKNOWN ⇒ suppressed without clearing (R1 tri-state fail-closed); unwired leg reads False (existing fixtures unchanged). Detection power preserved: a genuinely wedged root (no wake sources, no live tree, nothing pending) still flags; proven by mutation pins both directions.
+- Preserved exactly: `WEDGE_SOURCE`, reason-code fingerprint episode dedupe, B.S.5 skip + l6_anchor exemption, kill-switch emission-only semantics, S4 row-checked notice composition, hang pass / B3 escalation/release / W-B heartbeat gate, `enqueue_message` + `safe_notify_all_pools` wake path. The watchdog remains resolve_work-disjoint.
+- Regression: new behavioral pin pack `tests/unit/services/test_waiting_children_watchdog_wake_sources.py` (17 nodes, PACKS.md-registered) — both false-positive shapes (event-watch parent; parked-cascade parent with live grandchild), true-wedge legs (classic + S4 arms), fulfillable/unfulfillable split, tri-state fail-closed, stranded-watch, skip_root polarity, and preservation pins; mutation-verified both directions (gate forced always-True ⇒ 9 fire-expecting pins RED; per-leg flip-off ⇒ each leg non-vacuous). Base-run evidence: 8 RED suppression pins on pre-fix base (defect reproduced) flip green post-fix.
+
 ## [v0.31.32] — 2026-11-22
 
 ### Added — ENGINE-ARC PHASE-2 PILOT: OrphanWatcherSweepService onto the engine execution path, shipping FLAG-OFF (dormant by default)

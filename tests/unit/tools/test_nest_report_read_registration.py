@@ -286,13 +286,37 @@ class TestTheGrants:
         # with "project_future" while the base expectation did not name
         # it); the re-aim restores the pin's INTENT (a mis-ordered
         # array is caught mechanically).
+        # BR-8 (the maintenancer seat's grant, phase2-plan.md Task 2.1):
+        # the seat was granted four LITERAL tool names — spawn_instance,
+        # send_message, subtree_messages, subtree_status — appended
+        # AFTER the phase-3/5 entries, so the maintenancer's tail now
+        # ends with those four literals instead of "nest-report". The
+        # pin follows the array's REAL tail (the same re-aim posture as
+        # the "pok" / "guidelines" / "project_future" entries above);
+        # the invariant — a clean append point, no interleaving — is
+        # unchanged and still asserted end-to-end.
+        expected_tails = {
+            "maintenancer": [
+                CATEGORY,
+                "pok",
+                "nest-report",
+                "spawn_instance",
+                "send_message",
+                "subtree_messages",
+                "subtree_status",
+            ],
+            "devops": [
+                CATEGORY,
+                "pok",
+                "nest-report",
+                "guidelines",
+                "project_future",
+            ],
+            "wanderer": [CATEGORY, "pok", "nest-report"],
+        }
         for agent in ("maintenancer", "devops", "wanderer"):
             allow = _agent_meta(agent)["tools"]["allow"]
-            expected_tail = (
-                [CATEGORY, "pok", "nest-report", "guidelines", "project_future"]
-                if agent == "devops"
-                else [CATEGORY, "pok", "nest-report"]
-            )
+            expected_tail = expected_tails[agent]
             assert allow[-len(expected_tail):] == expected_tail, (
                 agent,
                 allow[-len(expected_tail):],

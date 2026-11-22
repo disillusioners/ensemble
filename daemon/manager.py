@@ -1233,6 +1233,37 @@ class InstanceManager:
         except Exception as exc:  # noqa: BLE001 — substrate never aborts boot
             logger.warning("[ToolUsageDigest] seeder startup failed: %s", exc)
 
+        # ── Central Maintenance System (P1): weekly trigger chain ─────────
+        # The chain is ONE self-rescheduling one-shot row whose ``run_at``
+        # is rewritten at each fire.  This boot hook is the chain's
+        # survival net: it runs BEFORE any adapter exists (sources start
+        # later, at the api lifespan's ``manager.start_sources()``), so it
+        # must NEVER blanket-re-mint a past ``run_at`` — that would
+        # pre-empt the adapter's past-due auto-fire and silently skip the
+        # missed week (BR-1 / R-P1-8).  The guard is ARCHIVE-AWARE: an
+        # archived CANCELLED chain is never revived, an archived STOPPED
+        # chain is revived only when its snapshot carries a chain block
+        # (BR-3).
+        #
+        # Every failure is contained — a trigger chain never aborts boot.
+        try:
+            from .repositories.source.maintenance_seed import (
+                seed_central_maintenance_schedule,
+            )
+
+            outcome = seed_central_maintenance_schedule(self._engine)
+            if outcome is not None:
+                logger.info(
+                    "[CentralMaintenance] chain guard: action=%s source_id=%s "
+                    "run_at=%s (%s)",
+                    outcome.action,
+                    outcome.source_id,
+                    outcome.run_at,
+                    outcome.detail,
+                )
+        except Exception as exc:  # noqa: BLE001 — a trigger chain never aborts boot
+            logger.warning("[CentralMaintenance] chain guard failed: %s", exc)
+
         # ── The memoir kill-switch line (once per boot) ───────────────────
         # The knob's resolved state is emitted ONCE at boot so the
         # "unset ⇒ ENABLED by default" default is never silent (D0.7 /

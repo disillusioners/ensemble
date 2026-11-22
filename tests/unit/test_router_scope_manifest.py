@@ -17,8 +17,8 @@ column: every ``api_router.include_router(...)`` mount in
 
 The cage greps ``daemon/api.py`` for the SPECIFIC
 ``api_router.include_router(`` pattern (NOT the raw
-``include_router(`` textual set — the F3-pinned census: 37 textual
-matches at the current tree = 34 unconditional mounts + the 2
+``include_router(`` textual set — the F3-pinned census: 42 textual
+matches at the current tree = 39 unconditional mounts + the 2
 auth-ON-gated families (mcp-kb keys, auth-self) + the 1
 gateway-flag-gated (WS) mount; the residual matches are the 2
 app-level ``app.include_router(`` calls + prose comments,
@@ -207,6 +207,16 @@ PINNED_SCOPE_MANIFEST: dict[str, frozenset[str] | str] = {
     # GET /daily) carry the metrics door's any-of scope set and NOTHING
     # broader; the auth-OFF 503 fail-closed gate lives in the route.
     "/api/tool-usage": "maintenance:read|metrics:read",
+    # Central Maintenance System P4 (2026-11-22): the READ-ONLY run-list
+    # door (GET + HEAD /api/maintenance-reports). The family carries the
+    # EXISTING ``maintenance:read`` scope — the same taxonomy entry the
+    # /api/wedge-captures and /api/metrics families use (the deliberate
+    # scope-REUSE convention; NO new scope is minted). BOTH routes carry
+    # the scope explicitly
+    # (``dependencies=[scope_required("maintenance:read")]``), so the
+    # family manifests that scope (NOT a wildcard); the auth-OFF
+    # fail-closed 503 gate lives in the route.
+    "/api/maintenance-reports": "maintenance:read",
 }
 
 #: The wildcard sentinel as stored in the manifest.
@@ -302,8 +312,8 @@ class TestSourceMatchTarget:
     """The F3-pinned cage match target: ``api_router.include_router(``."""
 
     def test_census_pinned(self):
-        """The textual census: 37 ``api_router.include_router(`` matches
-        at the current tree = 34 unconditional + 2 auth-ON-gated
+        """The textual census: 42 ``api_router.include_router(`` matches
+        at the current tree = 39 unconditional + 2 auth-ON-gated
         (mcp-kb keys, auth-self) + 1 gateway-flag-gated (WS). A drift
         here fails the cage and forces a manifest review.
 
@@ -344,12 +354,20 @@ class TestSourceMatchTarget:
         wildcard to ``maintenance:read`` — the route now carries the
         scope, so the family manifests that scope (not ``*``). That
         added ONE decorated route to the census below (107 → 108).
+
+        Central Maintenance System P4 (2026-11-22) added the
+        maintenance_reports_router (40 unconditional; was 39 pre-P4 — the
+        engine-arc mount in the v0.31.31 rebase base moved pre-P4 38 → 39) —
+        the cage reflects this with the /api/maintenance-reports family
+        pinned in the manifest above (the family declares the EXISTING
+        ``maintenance:read`` scope — the deliberate scope-REUSE
+        convention, the same shape as the /api/wedge-captures row).
         """
         source = API_PY.read_text()
         matches = re.findall(r"api_router\.include_router\(", source)
-        assert len(matches) == 42, (
+        assert len(matches) == 43, (
             f"api_router.include_router( census drifted: {len(matches)} "
-            "(pinned 42 = 39 unconditional + 2 auth-ON-gated + 1 "
+            "(pinned 43 = 40 unconditional + 2 auth-ON-gated + 1 "
             "gateway-flag-gated (WS)). New mount? "
             "Declare its family in PINNED_SCOPE_MANIFEST above."
         )
@@ -474,6 +492,15 @@ class TestScopeManifestCage:
         119 → 120. The MOUNT census (40) and the CLASS-manifest family
         count (36) are UNCHANGED, and the scope-manifest family map
         needs NO edit — ``/api/rooms`` is already declared.
+
+        Central Maintenance System P4 (2026-11-22) added the
+        maintenance-reports door — TWO scope-decorated routes (GET +
+        HEAD /api/maintenance-reports, each carrying the EXISTING
+        ``maintenance:read`` scope) on ONE new mount — growing the
+        declared-route census 125 → 127 and the MOUNT census 42 → 43
+        (the v0.31.31 rebase base moved pre-P4 122 → 125 / 41 → 42);
+        the CLASS-manifest family count grew 38 → 39 (the new
+        /api/maintenance-reports family, pinned as protected-default).
         """
         declared = [
             r
@@ -482,8 +509,9 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 125, (
-            f"declared-route census drifted: {len(declared)} (pinned 125)"
+        assert len(declared) == 127, (
+            f"declared-route census drifted: {len(declared)} (pinned 127 = "
+            "122 old-base + 3 engine-arc v0.31.31 rebase base + 2 P4)"
         )
 
     def test_manifest_entries_valid(self):

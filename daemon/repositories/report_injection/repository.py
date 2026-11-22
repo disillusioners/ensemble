@@ -1008,6 +1008,52 @@ class ReportInjectionRepository:
             )
             return list(session.exec(stmt).all())
 
+    def has_open_obligation_for_parent(
+        self, parent_instance_id: str
+    ) -> bool:
+        """True iff the parent has at least one OPEN delivery obligation.
+
+        An open obligation is a row in state ``PENDING`` (the report
+        is enqueued but not yet delivered — the claim paths have not
+        won it yet) or ``DEFERRED`` (the pause-report-recovery marker
+        awaiting its recovery pass — ``daemon/services/`` lane-2/3
+        recovery transitions it back to ``PENDING``). BOTH are
+        UNFULFILLED obligations: the parent is still OWED a report, so
+        a delivery lane still has work to do for it.
+
+        The terminal states (``INJECTED`` / ``TASK_DELIVERED`` /
+        ``FAILED``) are NOT open obligations — the delivery already
+        happened (or was dead-lettered).
+
+        Used by the WAITING_CHILDREN watchdog's wake-source gate
+        (anomaly ``a370b036``): a parent with an open report
+        obligation is NOT wedged — the injection lane will deliver to
+        it, so the wedge backstop must stay silent.
+
+        Args:
+            parent_instance_id: The parent whose obligations are
+                probed.
+
+        Returns:
+            ``True`` when at least one ``PENDING``/``DEFERRED`` row
+            exists for the parent; ``False`` otherwise (including the
+            no-rows case).
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(ReportInjection)
+                .where(
+                    ReportInjection.parent_instance_id == parent_instance_id
+                )
+                .where(
+                    ReportInjection.state.in_(
+                        [_PENDING_STATE, _DEFERRED_STATE]
+                    )
+                )
+                .limit(1)
+            )
+            return session.exec(stmt).first() is not None
+
     def transition_deferred_to_pending(
         self, injection_id: str
     ) -> bool:
