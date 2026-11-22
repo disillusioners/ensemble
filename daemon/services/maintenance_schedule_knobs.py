@@ -302,6 +302,12 @@ def pick_next_fire_instant(
 
     # Sunday-based knob (0=Sun..6=Sat) → Python weekday() (Mon=0..Sun=6).
     target_py_weekday = (knobs.weekday + 6) % 7
+    # The weekday is anchored on the LOCAL window date (``today`` is in
+    # the knob's timezone), NEVER on the UTC date of the stored instant
+    # (P5B F2): a "Sunday 01:00–05:00 ICT" chain fires Sunday LOCAL, so
+    # the stored ``run_at_utc`` legitimately lands on the PRIOR UTC date
+    # (Sun 04:15 ICT = Sat 21:15Z). Pinned behaviorally by the
+    # UTC-date-boundary tests in tests/unit/test_maintenance_schedule_knobs.py.
     today = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     days_ahead = (target_py_weekday - today.weekday()) % 7
     if days_ahead == 0 and not allow_today:

@@ -77,6 +77,41 @@ As a fallback, a direct `send_message` to a maintenancer instance carrying the s
 `trigger: manual` token line will fire a manual run. This is documented but NOT canonical — it
 produces no schedule row and no executions audit, so prefer the ONE-SHOT `task_schedule` path.
 
+## Operator notes from the staged-boot proof (P5B, 2026-11-22)
+
+### List door on auth-OFF deployments (BY DESIGN)
+
+`GET /api/maintenance-reports` returns **503 `AUTH_NOT_CONFIGURED`** on any auth-OFF deployment —
+the shipped default. This is the BR-17 fail-closed door (`daemon/routers/maintenance_reports.py:158-171`):
+`create_app` sets `app.state.auth_config` only when auth is enabled, and the door refuses to publish
+run history on an open bind. An operator note, not a defect. The FE-facing view URLs still serve the
+artifacts directly — `/views/maintenance-reports/run-<run_id>.md` and `receipt-<run_id>.md` return
+HTTP 200 (the live-views markdown shell).
+
+### Staged-boot prerequisites (the tier-2 rogue-containment guard)
+
+A staged/frozen boot against an env-configured PostgreSQL DB needs ONE of:
+
+- the tier-1 persisted `ensemble.json` in the boot's data dir (mode 600; the password field may stay
+  empty — env wins for every field), or
+- `ENSEMBLE_DB_AMBIENT_ALLOW=1` for a sanctioned first boot (the persisted `ensemble.json` makes
+  later boots tier 1).
+
+Without either, `daemon/ensemble_config.py::assert_db_resolution_sanctioned` refuses BEFORE any TCP
+connection and the boot hard-exits **78** — a precise refusal, not a blind failure. The guard's own
+message names the remedy. Scrub/keep the ambient env PER-VARIABLE (never the `env -u VAR*` glob
+idiom — it silently unsets nothing) following the existing env-fence conventions, and pin
+`ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0` explicitly on any frozen-binary boot from a daemon-child
+shell.
+
+### Weekday semantics (the window is a LOCAL clock window)
+
+The chain's `weekday` knob is evaluated on the **LOCAL** window date (the `timezone` knob's
+calendar), never on the UTC date of the stored `run_at_utc`. A "Sunday 01:00–05:00
+Asia/Ho_Chi_Minh" chain fires **Sunday local time**; because ICT is UTC+7, that instant's stored
+`run_at_utc` lands on the PRIOR UTC date (Sunday 04:15 ICT = Saturday 21:15Z). Read from the UTC
+date alone the row looks off-by-one-day — it is not.
+
 ## Cross-references and scope
 
 - Trigger mechanics (one-shot chain, re-arm, lateness cap, window knobs) live in

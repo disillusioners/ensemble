@@ -418,3 +418,57 @@ def test_effective_spawnable_set_is_four() -> None:
         assert f"`{member}`" in workflow, (
             f"workflow.md must name the effective spawnable member {member!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# P5B F6 — the lane dispatch matches the member to the required tool
+# families (the staged-boot proof, 2026-11-22)
+# ---------------------------------------------------------------------------
+
+
+def _agent_allow(agent: str) -> list[str]:
+    meta = json.loads((PROJECT_ROOT / "agents" / agent / "meta.json").read_text())
+    return list(meta.get("tools", {}).get("allow", []))
+
+
+def test_explorer_surface_lacks_the_metrics_and_skill_families() -> None:
+    """WHY the mapping moved the lanes: the explorer surface carries NO
+    ``metrics-read`` and NO ``dynamic-skill`` (``skill_*``) family — a
+    metrics-watch / skill-check child on the explorer seat fails at the
+    child and burns orchestrator supplements (P5B F6, RESULTS :605)."""
+    allow = _agent_allow("explorer")
+    assert "metrics-read" not in allow
+    assert "dynamic-skill" not in allow
+
+
+def test_worker_surface_carries_the_families_the_lanes_need() -> None:
+    """The worker seat carries the families explorer lacks: bash (the
+    metrics REST pull) and dynamic-skill (skill_search/list/view)."""
+    allow = _agent_allow("worker")
+    assert "bash" in allow
+    assert "dynamic-skill" in allow
+
+
+def test_workflow_carries_the_family_matched_lane_member_mapping() -> None:
+    """workflow.md names the required family per lane child and routes
+    each lane to the member whose surface carries it (BR-10 discipline
+    unchanged — the spawnable set stays 4)."""
+    workflow = _read(PROJECT_ROOT / "agents" / "maintenancer" / "workflow.md")
+    assert "REQUIRED TOOL FAMILIES" in workflow
+    for lane, member in (
+        ("lane-pok-sweep", "explorer"),
+        ("lane-metrics-watch", "worker"),
+        ("lane-skill-check", "worker"),
+        ("lane-abnormality-check", "explorer"),
+        ("lane-disk-sweep", "worker"),
+    ):
+        assert f"`{lane}`" in workflow, f"workflow.md must name {lane}"
+        row = f"`{lane}` → `{member}`"
+        assert row in workflow, f"lane→member mapping missing: {row}"
+
+
+def test_workflow_states_the_explorer_family_gap_explicitly() -> None:
+    """The mapping records the gap that caused the live failure."""
+    workflow = _read(PROJECT_ROOT / "agents" / "maintenancer" / "workflow.md")
+    assert "NO `metrics-read`" in workflow
+    assert "`skill_*`" in workflow

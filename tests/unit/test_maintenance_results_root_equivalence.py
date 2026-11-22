@@ -196,3 +196,44 @@ def test_fresh_root_guard_de_duplicates_board_item(tmp_path) -> None:
     with Session(engine) as s:
         items = s.exec(select(BoardItem)).all()
     assert len(items) == 1
+
+
+# ---------------------------------------------------------------------------
+# P5B F3 — surface 5: the LANE evidence root (dispatch-envelope carried)
+# ---------------------------------------------------------------------------
+
+
+def test_surface5_workflow_envelope_mandates_install_root_evidence_dir() -> None:
+    """P5B F3: the staged boot split lane evidence across two roots (the
+    disk lane resolved its evidence cwd-relative into the SOURCE
+    CHECKOUT while the abnormality lane wrote the install root). The
+    dispatch envelope now carries the ABSOLUTE per-run evidence dir
+    under the PROMOTE-STABLE install root, resolved by the orchestrator
+    (which owns the root), and the lane child never resolves it
+    cwd-relative."""
+    wf = _read("agents/maintenancer/workflow.md")
+    assert "Evidence root (P5B F3" in wf, (
+        "workflow.md must carry the Evidence root clause (P5B F3)"
+    )
+    assert "<install-root>/.agents/maintenancer/RESULTS/evidence/<run_token>/" in wf
+    assert "PROMOTE-STABLE" in wf
+    assert "NEVER resolves the artifact root cwd-relative" in wf
+
+
+def test_lane_bodies_carry_the_envelope_carried_absolute_evidence_dir() -> None:
+    """All five lane bodies point the child at the envelope-carried
+    absolute evidence dir — the ambiguous cwd-resolvable relative
+    convention (``evidence/<run_id>/``) is gone from every lane body."""
+    for rel in (
+        "lane-disk-sweep.md",
+        "lane-metrics-watch.md",
+        "lane-skill-check.md",
+        "lane-pok-sweep.md",
+        "lane-abnormality-check.md",
+    ):
+        body = _read(f"agents/maintenancer/skills-template/{rel}")
+        assert "the dispatch envelope carries" in body, f"{rel}: envelope mandate missing"
+        assert "NEVER a cwd-relative resolution" in body, f"{rel}: fence missing"
+        assert "evidence/<run_id>/" not in body, (
+            f"{rel}: the cwd-ambiguous relative convention must be gone"
+        )

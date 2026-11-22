@@ -48,7 +48,7 @@ The canonical PD-4a result block with status `ok|degraded|failed` and a one-line
 ### Where the digest lives (plan-decided)
 
 - The durable weekly report is the file-based run report the writer child authors (`run-<run_id>`). The digest folds into that report's **metrics section** — the writer owns the report body.
-- If a standalone digest file is needed, it goes at an ABSOLUTE path under the report artifact dir, inside the run's evidence subpath `.agents/maintenancer/RESULTS/evidence/<run_id>/`, and that path is recorded in `evidence_paths`.
+- If a standalone digest file is needed, it goes inside the run's evidence directory — the ABSOLUTE `<install-root>/.agents/maintenancer/RESULTS/evidence/<run_token>/` the dispatch envelope carries (the install-root RESULTS tree, never a cwd-relative resolution) — and that path is recorded in `evidence_paths`.
 - NEVER a gitignored digests leaf under the shared planning directories — that leaf is dev-local and holds no durable weekly report.
 
 ### Response bounds I respect
@@ -64,7 +64,7 @@ The canonical PD-4a result block with status `ok|degraded|failed` and a one-line
 - Absence of data is a finding (`degraded`), never an invented number.
 - Failure isolation: `ok` = ran clean, `degraded` = a sub-check failed or the surface returned no data but a result was produced, `failed` = I could not produce a result at all. A failing lane never blocks the weekly report.
 - Three-class routing: every recommendation lands in exactly one class — `auto_fix_now`, `needs_emperor_word` (surfaced, never acted on), `route_to_lane` (names the owning lane or team).
-- The result block carries `measured_at` as an ISO-8601 UTC stamp of my measure, `actions_taken` as idempotent action ids or `none`, and `evidence_paths` as ABSOLUTE paths under the run evidence convention `.agents/maintenancer/RESULTS/evidence/<run_id>/` — never inline artifacts.
+- The result block carries `measured_at` as an ISO-8601 UTC stamp of my measure, `actions_taken` as idempotent action ids or `none`, and `evidence_paths` as ABSOLUTE paths under the run's evidence directory — the ABSOLUTE `<install-root>/.agents/maintenancer/RESULTS/evidence/<run_token>/` the dispatch envelope carries (the install-root RESULTS tree, NEVER a cwd-relative resolution) — never inline artifacts.
 - The lane resolves under the event-driven deadline: a wake naming this child marks the lane `failed-timeout`, the fan-in valve is applied once, and the run proceeds.
 
 ## Idempotency and limits

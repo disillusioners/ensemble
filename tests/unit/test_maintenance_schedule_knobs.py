@@ -1000,3 +1000,92 @@ class TestP5DstHonesty:
             assert any(
                 "shifted-forward" in record.getMessage() for record in picker_records
             )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# P5B F2 — the weekday is anchored on the LOCAL window date, across a
+# UTC-date boundary (the staged-boot proof, 2026-11-22)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestP5bUtcDateBoundaryWeekday:
+    """The window is a LOCAL clock window, so the weekday knob must be
+    evaluated on the LOCAL calendar date — never on the UTC date of the
+    stored ``run_at_utc``. ICT is UTC+7, so every window minute sits
+    across a UTC-date boundary: Sunday-local fires land on the PRIOR
+    UTC date (Sun 04:15 ICT = Sat 21:15Z), and a boot whose UTC date is
+    Sunday is ALREADY Monday locally.
+
+    The staged boot (RESULTS §2, 20:47:13Z Sunday-UTC / Monday-ICT,
+    weekday=0) seeded ``run_at_utc=2026-11-28T21:15Z`` = Sunday
+    2026-11-29 04:15 ICT — the correct LOCAL-Sunday pick. A picker that
+    anchored on the UTC date would have answered ``2026-11-22T21:15Z`` =
+    MONDAY 04:15 ICT instead. These pins freeze the local anchoring in
+    both boundary directions.
+    """
+
+    BOOT_NOW = datetime(2026, 11, 22, 20, 47, 13, tzinfo=timezone.utc)
+
+    def test_boot_crossing_the_utc_date_boundary_picks_the_next_local_sunday(self):
+        """The staged-boot shape: the reference instant is a Sunday on
+        the UTC calendar but a MONDAY locally (ICT). The next Sunday is
+        picked on the LOCAL calendar — 2026-11-29 ICT — whose UTC
+        instant lands on the PRIOR UTC date."""
+        knobs = read_maintenance_knobs()  # weekday 0 (Sunday), 01:00–05:00 ICT
+        picked = pick_next_fire_instant(
+            knobs, now=self.BOOT_NOW, allow_today=True, rng=_FixedRng(255)
+        )
+        local = picked.instant_utc.astimezone(ICT)
+        assert local.strftime("%A") == "Sunday"
+        assert local.date() == datetime(2026, 11, 29).date()
+        assert local.hour == 4 and local.minute == 15
+        # The stored UTC instant lands on the PRIOR UTC date — the
+        # boundary the operator-facing docs call out.
+        assert picked.instant_utc.date() == datetime(2026, 11, 28).date()
+        assert picked.instant_utc.strftime("%A") == "Saturday"
+
+    def test_the_seed_matches_the_v03134_staged_boot_row_exactly(self):
+        """Reproduces the verbatim chain row from the staged boot
+        (RESULTS §2): run_at_utc=2026-11-28T21:15:00+00:00 — proving the
+        seeded row IS the Sunday-local answer."""
+        knobs = read_maintenance_knobs()
+        picked = pick_next_fire_instant(
+            knobs, now=self.BOOT_NOW, allow_today=True, rng=_FixedRng(255)
+        )
+        assert picked.run_at_iso == "2026-11-28T21:15:00+00:00"
+        assert picked.local_time == "04:15"
+        assert picked.weekday == 0
+
+    def test_a_utc_date_anchored_weekday_would_answer_monday_local(self):
+        """The F2 failure shape, pinned as a NEGATIVE: anchoring the
+        weekday on the UTC date of the boot (Sunday 2026-11-22) would
+        keep 'today' eligible and answer 2026-11-22T21:15Z — Monday
+        04:15 ICT. The local anchor must NOT produce that instant."""
+        knobs = read_maintenance_knobs()
+        picked = pick_next_fire_instant(
+            knobs, now=self.BOOT_NOW, allow_today=True, rng=_FixedRng(255)
+        )
+        utc_anchored_wrong_answer = datetime(
+            2026, 11, 22, 21, 15, tzinfo=timezone.utc
+        )
+        assert picked.instant_utc != utc_anchored_wrong_answer
+        local_wrong = utc_anchored_wrong_answer.astimezone(ICT)
+        assert local_wrong.strftime("%A") == "Monday"
+        assert picked.instant_utc.astimezone(ICT).strftime("%A") == "Sunday"
+
+    def test_local_sunday_reference_before_the_window_keeps_local_today(self):
+        """The boundary in the other direction: Saturday-UTC 17:00Z is
+        Sunday 00:00 ICT — today IS the target weekday locally, and the
+        drawn minute is still ahead, so allow_today keeps LOCAL today
+        (2026-11-29), never rolling a week because the UTC date says
+        Saturday."""
+        knobs = read_maintenance_knobs()
+        now = datetime(2026, 11, 28, 17, 0, tzinfo=timezone.utc)
+        picked = pick_next_fire_instant(
+            knobs, now=now, allow_today=True, rng=_FixedRng(255)
+        )
+        local = picked.instant_utc.astimezone(ICT)
+        assert local.date() == datetime(2026, 11, 29).date()
+        assert local.strftime("%A") == "Sunday"
+        assert (local.date() - now.astimezone(ICT).date()).days == 0
+        assert picked.instant_utc.date() == datetime(2026, 11, 28).date()
