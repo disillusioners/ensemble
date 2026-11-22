@@ -1957,6 +1957,7 @@ async def lifespan(app: FastAPI):
         DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS,
         DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS,
         ORPHAN_WATCHER_ENGINE_FLAG,
+        ORPHAN_WATCHER_ENGINE_JOB_ID,
         OrphanWatcherSweepService,
         build_engine_executor,
         engine_owns_execution,
@@ -4016,15 +4017,33 @@ async def lifespan(app: FastAPI):
         if _engine_svc is not None:
             try:
                 _engine_svc._executors.pop("orphan-watcher", None)
+                # R5 — the drop is LOUD: an executor silently discarded here
+                # is the difference between "the engine owns the sweep" and
+                # "nobody owns the sweep", so it must be visible in ops logs.
+                logger.warning(
+                    "orphan-watcher pilot FAIL-TO-LEGACY: dropped the engine executor for job_id=%s (engine boot wiring failed: %s) — execution returns to the legacy path",
+                    ORPHAN_WATCHER_ENGINE_JOB_ID,
+                    _engine_boot_exc,
+                )
             except Exception:  # noqa: BLE001 — best effort
                 pass
         if _orphan_legacy_suppressed:
             _orphan_legacy_suppressed = False
             app.state.orphan_watcher_sweep = orphan_watcher_sweep
-            rearm_legacy_loop(
-                orphan_watcher_sweep,
-                reason=f"engine boot wiring failed: {_engine_boot_exc}",
-            )
+            # R2 — the re-arm itself must NEVER abort the boot: this handler
+            # runs in the "never abort boot" path, so a raise here would be
+            # strictly worse than the dead lane it prevents.
+            try:
+                rearm_legacy_loop(
+                    orphan_watcher_sweep,
+                    reason=f"engine boot wiring failed: {_engine_boot_exc}",
+                )
+            except Exception as _rearm_err:  # noqa: BLE001 — never abort boot
+                logger.error(
+                    "orphan-watcher pilot FAIL-TO-LEGACY re-arm raised (%s); "
+                    "the legacy sweep loop may still be down — boot CONTINUES",
+                    _rearm_err,
+                )
 
     # ─────────────────────────────────────────────────────────────
     # service-tool Phase 1 (1.C.14) — ServiceReconciliationService.

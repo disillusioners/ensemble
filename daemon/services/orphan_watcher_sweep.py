@@ -148,6 +148,11 @@ def rearm_legacy_loop(
 
     Idempotent: a live loop is left alone (never a second loop). Returns
     ``True`` when the legacy loop was (re-)armed.
+
+    FAIL-SOFT (R2): this runs inside the boot block's exception handler, so
+    it MUST NOT raise — an exception here would abort the daemon boot, which
+    is strictly worse than the dead lane it prevents. A failing ``start()``
+    is logged at ERROR and reported as ``False``.
     """
     if service is None:
         return False
@@ -158,7 +163,16 @@ def rearm_legacy_loop(
         done = getattr(task, "done", None)
         if callable(done) and not done():
             return False  # already running — never start a second loop
-    service.start()
+    try:
+        service.start()
+    except Exception as start_err:  # noqa: BLE001 — never abort the boot
+        logger.error(
+            "orphan-watcher pilot FAIL-TO-LEGACY RE-ARM FAILED: %s — the "
+            "legacy sweep loop could not be restarted (%s)",
+            reason,
+            start_err,
+        )
+        return False
     logger.warning(
         "orphan-watcher pilot FAIL-TO-LEGACY: %s — the legacy sweep loop "
         "was RE-ARMED (ownership returned to the legacy path)",
@@ -186,10 +200,23 @@ def build_engine_executor(
     forwards (``ServicesConfig.orphan_watcher_sweep_grace_seconds``), so both
     paths apply the identical age predicate.
 
-    Errors propagate to the engine's honest state machine (FAILED_BACKOFF);
-    the legacy path swallows them into ``_errors_total``. The parity pack
-    maps that difference explicitly (it is not a behavior divergence of the
-    sweep itself).
+    FAILURE PROPAGATION, SCOPED (R1c). The bus's own sweep method is
+    internally FAIL-OPEN: ``DependencyBus._sweep_orphan_watchers`` wraps its
+    DB write in a try/except that logs a warning and returns 0 — it never
+    raises. So:
+
+    * a DB-level failure inside the bus ⇒ the bus swallows it and returns 0
+      ⇒ BOTH paths observe ``cancelled == 0`` and neither records an error
+      (symmetric fail-open — the parity HOLDS);
+    * only a BRIDGE-level failure (the bus getter raising, or the
+      ``asyncio.run`` bridge itself failing) reaches the engine, which stamps
+      ``FAILED_BACKOFF``; the legacy path's equivalent (its ``sweep_once``
+      try/except) counts it in ``_errors_total`` and logs ERROR.
+
+    Both paths therefore FAIL OPEN symmetrically — the sweep lane keeps
+    running either way; only the failure ACCOUNTING differs (engine
+    ``FAILED_BACKOFF`` + ``error_class`` vs legacy ``_errors_total``).
+    The parity pack maps that difference explicitly.
     """
     # Resolved at CALL time (the default constant is defined below this block).
     grace = int(

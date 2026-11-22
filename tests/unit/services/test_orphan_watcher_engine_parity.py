@@ -42,6 +42,7 @@ the consequence so a future engine-core fix cannot silently double-execute.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -54,7 +55,7 @@ from sqlalchemy import create_engine
 from sqlmodel import SQLModel, Session, select
 from sqlmodel.pool import StaticPool
 
-from daemon.repositories.engine.models import EngineRun
+from daemon.repositories.engine.models import OUTCOME_FAILED_BACKOFF, EngineRun
 from daemon.repositories.engine.repository import EngineRepository
 from daemon.services import orphan_watcher_sweep as ows
 from daemon.services.engine.boot import build_observer_specs, compute_first_tick_offset
@@ -398,9 +399,160 @@ async def test_parity_state_stamp_mapping(monkeypatch):
     # Explicit mapping (documented, not assumed equal):
     #   legacy ticks  -> engine_runs row count (one row per due tick)
     #   legacy cancelled -> executor result["cancelled"] (both 1 on fixture)
-    #   legacy errors -> engine outcome FAILED (0 here ⇒ no FAILED rows)
+    #   legacy errors -> engine outcome OUTCOME_FAILED_BACKOFF (0 here ⇒ no
+    #                    failed rows). R1: the assertion uses the IMPORTED
+    #                    constant — the literal "FAILED" is OUTSIDE the engine's
+    #                    outcome vocabulary (the real member is
+    #                    "FAILED_BACKOFF"), so a literal check passes even when
+    #                    EVERY run failed (the vacuous sentinel).
     assert len(runs) >= legacy_result["ticks"]
-    assert not any(r.outcome == "FAILED" for r in runs)
+    assert not any(r.outcome == OUTCOME_FAILED_BACKOFF for r in runs)
+
+
+@pytest.mark.asyncio
+async def test_bridge_failure_stamps_failed_backoff_and_maps_to_legacy_errors(monkeypatch):
+    """R1(b): a BRIDGE-level failure ⇒ OUTCOME_FAILED_BACKOFF + error_class.
+
+    The bus's own sweep is internally fail-open (it swallows DB errors and
+    returns 0), so only a BRIDGE-level failure (the bus getter raising)
+    reaches the engine's honest state machine. The legacy path's equivalent
+    accounting is its ``_errors_total`` counter — both fail OPEN (the lane
+    keeps running); only the accounting differs.
+    """
+    cfg = _make_cfg(interval=1, shadow=False)
+
+    def _boom() -> Any:
+        raise RuntimeError("bridge exploded")
+
+    db = _db_engine()
+    repo = EngineRepository(db)
+    svc = EngineService(repo, EngineRegistry(repo), cfg.engine, shadow_mode=False)
+    await EngineRegistry(repo).aregister(_orphan_spec(cfg))
+    svc.set_executor(ORPHAN_WATCHER_ENGINE_JOB_ID, _boom)
+    await svc.start()
+    try:
+        await asyncio.sleep(2.6)
+    finally:
+        await svc.stop()
+
+    with Session(db) as s:
+        runs = list(s.exec(select(EngineRun).where(EngineRun.job_id == ORPHAN_WATCHER_ENGINE_JOB_ID)).all())
+    assert len(runs) >= 1
+    # The REAL vocabulary member — the out-of-vocabulary literal "FAILED"
+    # would never match these rows (the vacuous sentinel).
+    assert {r.outcome for r in runs} == {OUTCOME_FAILED_BACKOFF}
+    # error_class carries the exception CLASS (never the message).
+    assert {r.error_class for r in runs} == {"RuntimeError"}
+
+    # The legacy path's equivalent accounting for the SAME bridge failure.
+    legacy = OrphanWatcherSweepService(
+        dependency_bus=None, min_watcher_age_seconds=30
+    )
+    monkeypatch.setattr(ows, "get_dependency_bus", _boom)
+    legacy_result = await legacy.sweep_once()
+    assert legacy_result["errors"] == 1
+    assert legacy_result["cancelled"] == 0
+    assert legacy_result["effective_runs"] == 0
+    # Both paths FAIL OPEN: the legacy lane survives the error and keeps
+    # ticking; the engine keeps stamping rows.
+    assert legacy_result["ticks"] == 1
+
+
+@pytest.mark.asyncio
+async def test_engine_due_ticks_equal_legacy_ticks(monkeypatch):
+    """R4: over the SAME window the engine's due-ticks EQUAL the legacy ticks.
+
+    Same fixtures, same elapsed window, same cadence ⇒ the two paths must
+    produce the SAME number of executions (no extra engine tick, no missing
+    one). The window (3.5 s) sits between the two neighbouring tick
+    boundaries (3.0/3.1 and 4.0/4.1) so neither side can race the window
+    edge — the equality is deterministic, not a wall-clock coin flip.
+    """
+    interval = 1
+    window = 3.5
+    cfg = _make_cfg(interval=interval, shadow=False)
+    bus = _FakeBus(_fixture_watchers())
+    monkeypatch.setattr(ows, "get_dependency_bus", lambda: bus)
+    calls = {"n": 0}
+
+    def counting_executor() -> dict[str, Any]:
+        calls["n"] += 1
+        return build_engine_executor(30)()
+
+    legacy = OrphanWatcherSweepService(
+        dependency_bus=_FakeBus(_fixture_watchers()),
+        interval_seconds=interval,
+        min_watcher_age_seconds=30,
+    )
+    db = _db_engine()
+    repo = EngineRepository(db)
+    svc = EngineService(repo, EngineRegistry(repo), cfg.engine, shadow_mode=False)
+    await EngineRegistry(repo).aregister(_orphan_spec(cfg))
+    svc.set_executor(ORPHAN_WATCHER_ENGINE_JOB_ID, counting_executor)
+
+    await svc.start()
+    legacy.start()  # the REAL legacy loop, started in the same instant
+    try:
+        await asyncio.sleep(window)
+    finally:
+        await svc.stop()
+        await legacy.stop()
+
+    with Session(db) as s:
+        rows = list(s.exec(select(EngineRun).where(EngineRun.job_id == ORPHAN_WATCHER_ENGINE_JOB_ID)).all())
+    legacy_ticks = legacy.counters()["ticks"]
+    assert legacy_ticks >= 2, f"legacy loop did not tick enough: {legacy_ticks}"
+    assert len(rows) == legacy_ticks, (
+        f"engine due-ticks ({len(rows)}) != legacy ticks ({legacy_ticks})"
+    )
+    assert calls["n"] == legacy_ticks
+
+
+@pytest.mark.asyncio
+async def test_real_service_rearm_leaves_a_live_loop_and_is_idempotent():
+    """D-2: the REAL service, re-armed ⇒ a LIVE legacy loop (not done).
+
+    Idempotence by BEHAVIOR (not a source grep): a second re-arm returns
+    False and leaves the SAME task in place — never a second loop.
+    """
+    service = OrphanWatcherSweepService(
+        dependency_bus=None, interval_seconds=90, min_watcher_age_seconds=30
+    )
+    try:
+        assert rearm_legacy_loop(service, reason="simulated boot-block failure") is True
+        task = service._task
+        assert task is not None
+        assert not task.done(), "the re-armed legacy loop is not running"
+        # The loop is not merely alive — it is the RIGHT loop (it ticks).
+        await asyncio.sleep(0.05)
+        assert service.counters()["ticks"] >= 1
+        # A second re-arm is a no-op (never a second loop).
+        assert rearm_legacy_loop(service, reason="second attempt") is False
+        assert service._task is task
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_rearm_never_raises_when_start_fails(caplog):
+    """R2: the re-arm helper is FAIL-SOFT — a failing start() is logged, not raised.
+
+    It runs inside the boot block's never-abort handler; a raise there would
+    abort the daemon boot — strictly worse than the dead lane it prevents.
+    """
+    class _Boom:
+        _task = None
+
+        def start(self) -> None:
+            raise RuntimeError("start exploded")
+
+    with caplog.at_level(
+        logging.ERROR, logger="daemon.services.orphan_watcher_sweep"
+    ):
+        assert rearm_legacy_loop(_Boom(), reason="simulated boot-block failure") is False
+    assert any(
+        "FAIL-TO-LEGACY RE-ARM FAILED" in rec.message for rec in caplog.records
+    ), "the failed re-arm was not logged"
 
 
 # ── 3. dormant default for executables / one-flag rollback ────────────────
@@ -559,14 +711,24 @@ def test_fail_to_legacy_rearm_on_boot_block_failure():
 
 
 def test_boot_block_except_handler_calls_the_rearm():
-    """Source pin: the boot-block except handler RE-ARMS legacy (mutation: RED)."""
+    """Source pin: the boot-block except handler RE-ARMS legacy (mutation: RED).
+
+    R2: the re-arm call site is itself guarded — the handler runs in the
+    never-abort-boot path, so a raise there would abort the boot.
+    R5: the executor drop is LOUD (an observable WARNING naming the job).
+    """
     handler_at = API_SRC.index("except Exception as _engine_boot_exc:")
-    window = API_SRC[handler_at : handler_at + 1600]
+    window = API_SRC[handler_at : handler_at + 2600]
     assert "rearm_legacy_loop(" in window
     assert "FAIL-TO-LEGACY" in window or "orphan_watcher_sweep" in window
     # The partial executor is dropped first (a half-started engine must not
     # double-run the sweep beside the re-armed legacy loop).
     assert "_executors.pop(" in window
+    # R5 — the drop is observable in ops logs (job id + fail-to-legacy reason).
+    assert "dropped the engine executor for job_id=" in window
+    # R2 — the call site is guarded so the handler can never abort the boot.
+    assert "except Exception as _rearm_err:" in window
+    assert "boot CONTINUES" in window
 
 
 @pytest.mark.asyncio
@@ -660,7 +822,13 @@ async def test_shadow_row_cadence_for_orphan_watcher():
     assert {r.skip_reason for r in runs} == {"SHADOW"}
     cache = svc._cache[ORPHAN_WATCHER_ENGINE_JOB_ID]
     assert cache["last_outcome"] == "SKIPPED_SHADOW"
-    print(f"\n[EVIDENCE] orphan-watcher SKIPPED_SHADOW rows over 2× interval: {len(runs)}")
+    print(
+        "\n[EVIDENCE][CODE-LEVEL PROBE] orphan-watcher SKIPPED_SHADOW rows "
+        f"over 2× interval: {len(runs)} — IN-PROCESS 1s cadence probe "
+        "(code-level). This is NOT the operational greenlight criterion "
+        "(≥2× the 90s interval on a real boot); the tester's boot smokes "
+        "produce that evidence."
+    )
 
 
 def test_posture_line_stable_across_ownership():
