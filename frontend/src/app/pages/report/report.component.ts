@@ -53,14 +53,23 @@ const REPORT_UNAVAILABLE = 'Failed to load the report.';
  * `<pre>` still carries the raw source; `textContent` decodes the
  * entities `html.escape` wrote, yielding the original markdown.
  *
- * Returns `null` when the payload carries no markdown element — the
- * caller renders the "not available" posture (fail-closed, never a
- * blank pane).
+ * Returns `null` when the payload carries no markdown element — OR
+ * when that element carries no CONTENT (empty / whitespace-only) —
+ * so the caller renders the fail-closed error posture instead of a
+ * blank pane. A whitespace-only carrier is a MISS, never an empty
+ * hit: the artifact carried nothing to render.
  */
 export function extractMarkdownFromWrapper(wrapperHtml: string): string | null {
   const doc = new DOMParser().parseFromString(wrapperHtml, 'text/html');
   const pre = doc.querySelector('article#rendered pre');
-  return pre ? pre.textContent : null;
+  const text = pre?.textContent ?? '';
+  // G3 — fail-closed: an empty / whitespace-only carrier is a MISS.
+  // The hit path returns the carrier's raw text UNCHANGED (the
+  // daemon-carrier contract — the `<pre>` IS the raw markdown).
+  if (text.trim().length === 0) {
+    return null;
+  }
+  return text;
 }
 
 /**
