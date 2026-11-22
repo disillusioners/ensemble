@@ -2126,3 +2126,35 @@ describe('snapshot-uiux route + menu wiring', () => {
 });
 
 // FE-UI lane marker (group-chat P6 room modal lane): A-P6-23.
+
+describe('report (Phase 4, BR-19) route + menu wiring', () => {
+  const appTsPath = path.resolve(__dirname, 'app.ts');
+  const routesTsPath = path.resolve(__dirname, 'app.routes.ts');
+  const appHtmlPath = path.resolve(__dirname, 'app.html');
+
+  it('app.routes.ts registers the /report route with title "Report"', () => {
+    const source = fs.readFileSync(routesTsPath, 'utf8');
+    const routeMatch = source.match(
+      /path:\s*'report'[\s\S]*?title:\s*'Report'/,
+    );
+    expect(routeMatch).not.toBeNull();
+  });
+
+  it('app.ts settingsMenuItems includes the Report item placed AFTER Metrics and BEFORE the conditional appends', () => {
+    const source = fs.readFileSync(appTsPath, 'utf8');
+    const metricsIdx = source.indexOf("{ label: 'Metrics', icon: 'query_stats', route: '/metrics' }");
+    const reportIdx = source.indexOf("{ label: 'Report', icon: 'summarize', route: '/report' }");
+    const dbUpdateIdx = source.indexOf("settingsMenuItems.update(items => [");
+    expect(metricsIdx).toBeGreaterThan(-1);
+    expect(reportIdx).toBeGreaterThan(-1);
+    expect(dbUpdateIdx).toBeGreaterThan(-1);
+    expect(metricsIdx).toBeLessThan(reportIdx);
+    expect(reportIdx).toBeLessThan(dbUpdateIdx);
+  });
+
+  it('app.html does NOT add a top-level header link for /report', () => {
+    const source = fs.readFileSync(appHtmlPath, 'utf8');
+    expect(source.includes("'/report'")).toBe(false);
+    expect(source.includes('"/report"')).toBe(false);
+  });
+});

@@ -103,3 +103,20 @@ describe('MCP Gateway — the read surface is GET-only', () => {
     expect(serviceSrc).toContain('/api/mcps-gateway/audit');
   });
 });
+
+describe('MCP Gateway — the Report entry does not displace this entry', () => {
+  it('keeps MCP Gateway BEFORE the Report entry (the Report pins live in its own spec)', () => {
+    const gatewayIdx = appTs.indexOf("{ label: 'MCP Gateway'");
+    const reportIdx = appTs.indexOf("{ label: 'Report'");
+
+    expect(gatewayIdx).toBeGreaterThan(-1);
+    expect(reportIdx).toBeGreaterThan(-1);
+
+    // The Report entry is a SIBLING page: its own pins (item shape,
+    // route, header-link absence) live in
+    // `pages/report/report.pins.spec.ts`. This file asserts only that
+    // Phase 4's Report insertion did not take THIS page's slot — the
+    // subject stays the gateway's own entry.
+    expect(gatewayIdx).toBeLessThan(reportIdx);
+  });
+});

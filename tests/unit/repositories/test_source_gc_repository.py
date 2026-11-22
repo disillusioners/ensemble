@@ -768,7 +768,23 @@ class TestP11BootNoBehaviorChange:
     # "room"/"chat" there would let a manager.py hunk that merely
     # mentions room types slip past the manager.py pins.
     FRONTEND_UI_LANE_SANCTIONED_PATH = "frontend/"
-    FRONTEND_UI_LANE_MARKERS = ("room", "chat", "tool", "tab", "expect")
+    # ── CENTRAL-MAINTENANCE-P4 lane (2026-11-22) — one more marker ──────
+    # "report" (the maintenance-report slice's own noun) joins the
+    # group-chat lane's "room"/"chat" and the tool-usage lane's
+    # "tool"/"tab" — one token per sanctioned FE slice, in the same
+    # ANY-of shape, and NOT folded into the manager.py marker set (that
+    # tuple is the manager.py-hunk carve-out source; admitting a
+    # generic FE token there would let a manager.py hunk slip past).
+    # Measured over the post-merge span: the CENTRAL-MAINTENANCE-P4
+    # report slice carries "report" NATIVELY in 11 of its 12 frontend/
+    # hunks (the route line, the barrel export, the model header, the
+    # page/component/service/spec bodies); the 12th — the models barrel's
+    # line-count comment hunk — carries it via a minimal non-behavioral
+    # marker comment added in the same change (the house precedent:
+    # app.component.spec.ts / chat.component.spec.ts). The FE markers
+    # stay scoped to the PATH allowlist (F-1): a foreign frontend/ path
+    # is an offender whatever its wording says.
+    FRONTEND_UI_LANE_MARKERS = ("room", "chat", "tool", "tab", "expect", "report")
 
     # F-1 — the FE-UI sanction is PATH-BOUND, not marker-bound. The
     # marker vocabulary ("room" / "chat") is GENERIC: a foreign
@@ -839,6 +855,27 @@ class TestP11BootNoBehaviorChange:
         "frontend/src/app/pages/metrics/tabs/tool-usage-tab.component.ts",
         "frontend/src/app/services/tool-usage.service.spec.ts",
         "frontend/src/app/services/tool-usage.service.ts",
+        # ── CENTRAL-MAINTENANCE-P4 lane (2026-11-22): the Report slice ──
+        # The plan-ratified P4 report slice (phase4-plan.md PD-2 — the FE
+        # wire decision — plus BR-19's gear-menu row): the lazy /report
+        # route, its read-only page + service + wire model, the gear-menu
+        # entry, and the sibling-page non-displacement pins. 13 paths in
+        # all — 11 NEW here, 2 ALREADY sanctioned by an earlier lane
+        # (app.component.spec.ts from group-chat P6; models/index.ts from
+        # tool-usage P1, whose barrel this lane also grew). Sanctioned per
+        # F-1's maintenance rule: the path is added here in the same
+        # change that touches it.
+        "frontend/src/app/app.routes.ts",
+        "frontend/src/app/app.ts",
+        "frontend/src/app/models/report.model.ts",
+        "frontend/src/app/pages/mcps-gateway/mcps-gateway.pins.spec.ts",
+        "frontend/src/app/pages/metrics/metrics-gear-menu.spec.ts",
+        "frontend/src/app/pages/report/report.component.html",
+        "frontend/src/app/pages/report/report.component.scss",
+        "frontend/src/app/pages/report/report.component.spec.ts",
+        "frontend/src/app/pages/report/report.component.ts",
+        "frontend/src/app/pages/report/report.pins.spec.ts",
+        "frontend/src/app/pages/report/report.service.ts",
     )
 
     # F-2 — the FIXED committed-tree reference for the compensator: the
@@ -928,6 +965,22 @@ class TestP11BootNoBehaviorChange:
         # owning token instead of any-of is a mechanism change (the
         # carve-out is a flat ANY-of set) and is left as a follow-up.
         "tool-usage",
+        # ── CENTRAL-MAINTENANCE-P1 lane (2026-11-22) — the single marker ──
+        # The lane's sanctioned daemon/manager.py drift: the "Central
+        # Maintenance System (P1): weekly trigger chain" boot block (+31
+        # lines — the chain's archive-aware survival net, seeded before
+        # any adapter exists). Mirrors the decision / memoir / group-chat /
+        # compact-note / self-service-promote / tool-usage blocks above.
+        #
+        # NORMALIZED TO ONE TOKEN — "central maintenance" (space form).
+        # Measured over the post-merge span: the lane's manager.py drift
+        # is 1 hunk and 1/1 carries "central maintenance" in its added
+        # lines (the section header "Central Maintenance System (P1):
+        # weekly trigger chain"), so the marker is PER-HUNK-COMPLETE with
+        # NO marker comment added to daemon/manager.py — the same posture
+        # the tool-usage block takes. The token is disjoint from the other
+        # markers over the span, so no other lane's hunk is carried by it.
+        "central maintenance",
     )
 
     # ── THE HUNK-MARKER CHECK'S BLIND SPOT (disclosed, not fixed) ────────

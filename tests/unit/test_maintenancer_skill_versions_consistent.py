@@ -147,12 +147,30 @@ def test_kb_curator_only_auto_load_skill() -> None:
     )
 
 
-def test_seven_skills_in_manifest() -> None:
-    """Spec task 4.1 — exactly 7 skills (log-forensics,
-    job-mission-repair, ens-db-repair, restart-upgrade-ops,
-    bug-advisory, health-check, kb-curator).
+def test_manifest_skill_set_is_exact() -> None:
+    """P2 T2.7 — exact 13-skill SET EQUALITY (name-level, not count-level).
+
+    A missing or extra name reddens the pin deliberately; future additions
+    must update this set explicitly rather than slip in unnoticed.
     """
     manifest = _load_manifest()
-    assert len(manifest["skills"]) == 7, (
-        f"maintenancer manifest must list exactly 7 skills; got {len(manifest['skills'])}"
+    expected = {
+        "kb-curator",
+        "log-forensics",
+        "job-mission-repair",
+        "ens-db-repair",
+        "restart-upgrade-ops",
+        "bug-advisory",
+        "health-check",
+        "lane-disk-sweep",
+        "lane-pok-sweep",
+        "lane-skill-check",
+        "lane-abnormality-check",
+        "lane-metrics-watch",
+        "run-report-writer",
+    }
+    actual = {skill["name"] for skill in manifest["skills"]}
+    assert actual == expected, (
+        f"maintenancer manifest skill set drifted: "
+        f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
     )

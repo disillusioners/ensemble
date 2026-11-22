@@ -593,7 +593,12 @@ export class App implements OnInit {
     // (D-3 — T1 phase 7, task 7.3): the standalone `/resources` route
     // is retired and the resource module is tab 1 of this page. This
     // entry is therefore the SINGLE gear-menu entry for those surfaces.
-    { label: 'Metrics', icon: 'query_stats', route: '/metrics' }
+    { label: 'Metrics', icon: 'query_stats', route: '/metrics' },
+    // Report — Central Maintenance System Phase 4 (D-E / BR-19).
+    // GEAR MENU ONLY (no top-level header link). Static entry placed
+    // AFTER Metrics and BEFORE the conditional Database/Maintenance
+    // appends so those appends still land at the menu tail.
+    { label: 'Report', icon: 'summarize', route: '/report' }
   ]);
 
   constructor() {

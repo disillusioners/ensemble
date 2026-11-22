@@ -120,6 +120,7 @@ from daemon.routers import (
     nest_reports_router,    # /api/nest-reports (nest-anomaly-report lane: the anomaly domain route)
     rooms_router,           # /api/rooms/* + /api/instances/{id}/rooms (P6 group-chat observability modal)
     tool_usage_router,      # /api/tool-usage (tool-usage-metrics-p1: ledger read door)
+    maintenance_reports_router,  # /api/maintenance-reports (Central Maintenance System: the run list)
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
@@ -168,6 +169,13 @@ from daemon.services.readiness import (
 )
 from daemon.constants import SSE_TIMEOUT_S, SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE
 from daemon.repositories.instance.models import InstanceStatus
+from daemon.config import LiveViewsRootConfig
+from daemon.routers.maintenance_reports import (
+    LIVE_VIEW_ALLOWED_EXTENSIONS,
+    LIVE_VIEW_FILENAME_PATTERNS,
+    LIVE_VIEW_ROOT_NAME,
+    RESULTS_ROOT,
+)
 from daemon import constants
 
 # Determine the base path (use working directory for production)
@@ -464,8 +472,6 @@ def inject_reports_live_view_root(config, data_dir) -> bool:
     Returns:
         True iff the root was injected by this call.
     """
-    from daemon.config import LiveViewsRootConfig
-
     roots = getattr(getattr(config, "live_views", None), "roots", None)
     if not isinstance(roots, dict):
         return False
@@ -481,6 +487,77 @@ def inject_reports_live_view_root(config, data_dir) -> bool:
         description=(
             "Agent-written report pages (view_write). "
             "Daemon-injected — do not declare it in config.yaml."
+        ),
+    )
+    return True
+
+
+def inject_maintenance_results_live_view_root(config) -> bool:
+    """Inject the daemon-managed ``maintenance-reports`` live-view root.
+
+    BR-18 (Central Maintenance System — ``phase4-plan.md:56``).  All
+    FOUR pinned elements of the registration:
+
+    1. **Mechanism** — a daemon-injected LIFESPAN registration (this
+       helper is called from ``lifespan``, mirroring
+       :func:`inject_reports_live_view_root`).  NOT a static
+       ``config.yaml`` absolute path: an operator ``live_views.roots:``
+       block REPLACES the seed dict, so a config-declared root would
+       silently vanish.
+    2. **Root name** — ``maintenance-reports`` (a named root, sibling of
+       ``designer-artifact`` / ``planning`` / ``tmp-images``).
+    3. **Form** — the RELATIVE root ``.agents/maintenancer/RESULTS/``
+       resolved at daemon startup against the PROMOTE-STABLE
+       LIVE-INSTALL project root (host-portable; no absolute path lives
+       in the config).  The resolution goes through the seeder's OWN
+       helper (``maintenance_results_dir``), which the BE list route
+       (BR-17) resolves ONCE at its module import; this registration
+       SHARES that already-resolved value (``RESULTS_ROOT``) rather
+       than resolving a second time, so the seeder (P1), the BE list
+       route (BR-17) and this registration share ONE root basis AND ONE
+       resolution moment BY CONSTRUCTION (plan Task 4.8 root-resolution
+       note).  The basis is the INSTALL DIR (the ancestor that owns
+       ``releases/``), NOT the release dir: a promote must never MOVE the
+       artifact root.
+    4. **Allowlist** — the ``.md`` renderer only (the extension gate on
+       the root entry below), restricted to the ``run-*.md`` /
+       ``receipt-*.md`` / ``INDEX.md`` filename patterns (the per-root
+       FILENAME gate is wired on the live-views service at the same
+       lifespan site; both gates read the same constants).
+
+    Injection is IDEMPOTENT and NEVER overrides an operator-declared
+    ``maintenance-reports`` entry (the same posture as the ``reports``
+    root above).
+
+    Fail-soft: the artifact root's absence is NOT a boot failure — the
+    seeder creates the directory at first boot, and an install with no
+    runs simply has no content to serve.
+    """
+    roots = getattr(getattr(config, "live_views", None), "roots", None)
+    if not isinstance(roots, dict):
+        return False
+    if LIVE_VIEW_ROOT_NAME in roots:
+        # An operator-declared entry is honoured verbatim.
+        return False
+    # ONE resolution moment: the router's already-resolved RESULTS_ROOT
+    # (the router resolves it ONCE, at its module import, through the
+    # seeder's OWN helper).  Re-resolving here would be the second
+    # moment the two-moments question asks about; the BASIS logic stays
+    # in the seeder helper and the VALUE is shared.
+    root_dir = RESULTS_ROOT
+    if not root_dir.is_absolute():
+        # The filesystem resolver refuses a relative root — leave the
+        # root ABSENT rather than publishing a path that can never
+        # resolve (the uniform-404 posture, never a boot failure).
+        return False
+    roots[LIVE_VIEW_ROOT_NAME] = LiveViewsRootConfig(
+        type="filesystem",
+        path=str(root_dir.resolve()),
+        allowed_extensions=list(LIVE_VIEW_ALLOWED_EXTENSIONS),
+        description=(
+            "Central Maintenance System run artifacts "
+            "(.agents/maintenancer/RESULTS/). Daemon-injected — do not "
+            "declare it in config.yaml."
         ),
     )
     return True
@@ -2320,10 +2397,33 @@ async def lifespan(app: FastAPI):
         config, getattr(app.state, "data_dir", None)
     )
 
+    # ─────────────────────────────────────────────────────────────
+    # BR-18 (Central Maintenance System): the ``maintenance-reports``
+    # root is DAEMON-INJECTED, exactly like the ``reports`` root above
+    # — never a static config.yaml absolute path.  Its path derives
+    # from the LIVE-INSTALL project root (``.agents/maintenancer/
+    # RESULTS/``) through the seeder's OWN helper, so the seeder, the
+    # BE list route and this registration share ONE root basis BY
+    # CONSTRUCTION (plan Task 4.8 root-resolution note).
+    #
+    # The root's FILENAME allowlist (``run-*.md`` / ``receipt-*.md`` /
+    # ``INDEX.md``) is wired on the live-views service below; the
+    # extension allowlist (``.md`` only → the markdown renderer) rides
+    # the root entry itself.
+    # ─────────────────────────────────────────────────────────────
+    inject_maintenance_results_live_view_root(config)
+
     live_views_service = LiveViewsService(
         config=config.live_views,
         tmp_image_store=tmp_image_store,
         project_workdir_by_shortname_resolver=_resolve_project_workdir_by_shortname,
+        # BR-18 element 4 — the per-root FILENAME allowlist: the
+        # ``maintenance-reports`` root serves the three artifact shapes
+        # and NOTHING else.  Every other root keeps the pre-existing
+        # behaviour (extension allowlist only).
+        root_filename_patterns={
+            LIVE_VIEW_ROOT_NAME: LIVE_VIEW_FILENAME_PATTERNS,
+        },
         # Phase 2: bind evidence is the third-tier fallback in
         # the URL base-resolution chain (operator override >
         # Host-capture auto-detect > bind evidence > path-relative).
@@ -6821,6 +6921,13 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # domain-route placement precedent. Fail-closed auth posture + the
     # any-of read scope set replicate the metrics door verbatim.
     api_router.include_router(tool_usage_router)        # /api/tool-usage
+    # Central Maintenance System (BR-17): the READ-ONLY run-list door
+    # (GET/HEAD /api/maintenance-reports).  Mounted HERE — inside
+    # api_router, BEFORE the SPA catch-all — the tool-usage door's
+    # placement precedent.  The door carries the EXISTING
+    # ``maintenance:read`` scope (no new scope is minted) and the
+    # fail-closed auth-OFF gate; it exposes NO write verb.
+    api_router.include_router(maintenance_reports_router)  # /api/maintenance-reports
     # Phase 3 / plane-integration-revival — POST /api/plane/sync/{project_id}.
     # The router is mounted BEFORE the SPA catch-all (the catch-all
     # only fires for unmatched paths; the prefix /api/plane is owned

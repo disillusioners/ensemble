@@ -110,3 +110,20 @@ describe('Metrics — the lazy route', () => {
     expect(routeIdx).toBeLessThan(idRouteIdx);
   });
 });
+
+describe('Metrics — the Report entry does not displace this entry', () => {
+  it('keeps Metrics BEFORE the Report entry (the Report pins live in its own spec)', () => {
+    const metricsIdx = appTs.indexOf("{ label: 'Metrics'");
+    const reportIdx = appTs.indexOf("{ label: 'Report'");
+
+    expect(metricsIdx).toBeGreaterThan(-1);
+    expect(reportIdx).toBeGreaterThan(-1);
+
+    // The Report entry is a SIBLING page: its own pins (item shape,
+    // route, header-link absence) live in
+    // `pages/report/report.pins.spec.ts`. This file asserts only that
+    // Phase 4's Report insertion did not take THIS page's slot — the
+    // subject stays the Metrics entry.
+    expect(metricsIdx).toBeLessThan(reportIdx);
+  });
+});

@@ -101,6 +101,7 @@ growth is reserved for extensions of the five sections above.
 
 from __future__ import annotations
 
+import fnmatch
 import html
 import logging
 import os
@@ -922,9 +923,25 @@ class LiveViewsService:
         bind_host: str | None = None,
         bind_port: int | None = None,
         host_recorder: "HostRecorder | None" = None,
+        root_filename_patterns: dict[str, tuple[str, ...]] | None = None,
     ) -> None:
         self._config = config
         self._tmp_image_store = tmp_image_store
+        # Per-root FILENAME allowlist (BR-18 element 4 — the
+        # ``maintenance-reports`` root serves ``run-*.md`` /
+        # ``receipt-*.md`` / ``INDEX.md`` and NOTHING else).
+        #
+        # The registry's ``allowed_extensions`` gates the EXTENSION
+        # only; this map gates WHICH FILENAMES inside the root may be
+        # served. It is a per-root policy supplied by the lifespan
+        # (the daemon-injected root registration wires its own
+        # patterns), so a root WITHOUT an entry keeps the pre-existing
+        # behaviour (extension allowlist only). A pattern miss raises
+        # the same uniform 404 as a missing file — no path disclosure.
+        self._root_filename_patterns: dict[str, tuple[str, ...]] = {
+            name: tuple(patterns)
+            for name, patterns in (root_filename_patterns or {}).items()
+        }
         # Resolver is passed in by the lifespan (avoids a hard
         # dependency on the manager here). It returns the project
         # main_directory (or None) for the supplied shortname.
@@ -1335,6 +1352,26 @@ class LiveViewsService:
             if ext not in entry.allowed_extensions:
                 # Extension not in the allowlist — uniform 404
                 # (the file may exist; we just don't serve it).
+                raise PathNotFoundError(rel_path)
+
+        # Per-root FILENAME allowlist (BR-18 element 4). The extension
+        # gate above says WHICH TYPES may be served; this gate says
+        # WHICH FILES inside the root may be served. A pattern miss
+        # raises the SAME uniform 404 as a missing file — the caller
+        # can probe neither the file's existence nor the root's layout.
+        filename_patterns = self._root_filename_patterns.get(root_name)
+        # ``is not None`` (NOT a truthiness test) — the EMPTY pattern
+        # tuple is a MISCONFIGURATION and must FAIL CLOSED (uniform
+        # 404), exactly like the sibling extension gate above.  A root
+        # that declares NO patterns is absent from the map (``None``)
+        # and keeps the pre-existing behaviour (extension allowlist
+        # only).
+        if filename_patterns is not None:
+            basename = PurePosixPath(rel_path).name
+            if not any(
+                fnmatch.fnmatchcase(basename, pattern)
+                for pattern in filename_patterns
+            ):
                 raise PathNotFoundError(rel_path)
 
         # Existence + regular-file check:
