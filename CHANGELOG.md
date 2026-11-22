@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.31.28] — 2026-11-22
+
+### Fixed — `project_get` name resolution: shortname + case-insensitive + substring ladder
+
+- `project_get(name=...)` now resolves through ONE ladder: exact name -> exact shortname -> case-insensitive exact name -> case-insensitive exact shortname -> case-insensitive substring over NAME + SHORTNAMES only. A shortname such as "ensemble" now resolves to its project instead of returning "not found".
+- The project DESCRIPTION is never searched, and projects of any status (active/paused/archived) stay resolvable.
+- A reference matching several projects returns a typed AMBIGUOUS_PROJECT refusal that LISTS the candidates (the tool never picks one for you); an unknown reference keeps the "not found" wording and error_code NOT_FOUND.
+- The explicit `shortname=` argument resolves against shortnames only, never against the project name.
+
 ## [v0.31.27] — 2026-11-22
 
 ### Added — Release B (Engine Arc Phase 1): central polling/event engine + event registry, shipping DORMANT
