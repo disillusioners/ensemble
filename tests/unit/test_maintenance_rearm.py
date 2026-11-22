@@ -306,3 +306,257 @@ class TestNonChainOneShotUnchanged:
         row = _insert_row(rearm_engine, _plain_config(stale))
         adapter, _completions = _build_adapter(rearm_engine, row)
         assert adapter._chain_config is None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# P5 T5.3 — additional legs (appended)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestPersistenceAcrossReconstruction:
+    @pytest.mark.asyncio
+    async def test_rearmed_run_at_persists_across_adapter_reconstruction(
+        self, rearm_engine
+    ):
+        """The formal proof of P1 open-question #8: a rewritten run_at
+        survives adapter reconstruction / boot."""
+        stale = datetime.now(timezone.utc) - timedelta(minutes=5)
+        row = _insert_row(rearm_engine, _chain_config(stale))
+        adapter, _completions = _build_adapter(rearm_engine, row)
+
+        async def _fake_emit() -> None:
+            adapter._fire_outcome = adapter.FIRE_OUTCOME_DIRECT
+            adapter._stop_event.set()
+
+        adapter._emit_scheduled_message = _fake_emit  # type: ignore[assignment]
+        await adapter._run_schedule()
+
+        refreshed = _row(rearm_engine)
+        assert refreshed is not None
+        persisted = datetime.fromisoformat(refreshed.config["run_at"])
+
+        # Reconstruct an adapter from the refreshed row (simulates a boot).
+        new_adapter, _ = _build_adapter(rearm_engine, refreshed)
+        assert new_adapter._run_at == persisted, (
+            "the re-armed run_at did not survive adapter reconstruction"
+        )
+
+
+class TestConfigCompletenessRMW:
+    @pytest.mark.asyncio
+    async def test_all_identity_keys_survive_rearm_apart_from_run_at(
+        self, rearm_engine
+    ):
+        stale = datetime.now(timezone.utc) - timedelta(minutes=5)
+        original = _chain_config(stale)
+        row = _insert_row(rearm_engine, original)
+        adapter, _completions = _build_adapter(rearm_engine, row)
+
+        async def _fake_emit() -> None:
+            adapter._fire_outcome = adapter.FIRE_OUTCOME_DIRECT
+            adapter._stop_event.set()
+
+        adapter._emit_scheduled_message = _fake_emit  # type: ignore[assignment]
+        await adapter._run_schedule()
+
+        refreshed = _row(rearm_engine)
+        assert refreshed is not None
+        config = refreshed.config
+        for key in ("agent", "message", "timezone", "recurrence",
+                    "instance_mode", "project_id"):
+            assert config[key] == original[key], (
+                f"key {key!r} did not survive the re-arm write"
+            )
+        assert "chain" in config and isinstance(config["chain"], dict)
+        assert config["chain"].get("mode") == "weekly-random"
+        assert config["run_at"] != original["run_at"]
+        assert config["chain"].get("run_at_utc") == config["run_at"]
+
+
+class TestFailedRunRearm:
+    @pytest.mark.asyncio
+    async def test_a_failed_run_still_mints_the_next_run_at(
+        self, rearm_engine, _fast_retry
+    ):
+        """STOP-THREAD CANDIDATE: production currently does NOT advance
+        the chain on a failed outcome (failed is not a consuming fire).
+        This leg asserts the requested behavior and is expected to be RED
+        under the current production code."""
+        stale = datetime.now(timezone.utc) - timedelta(minutes=5)
+        original = stale.isoformat()
+        row = _insert_row(rearm_engine, _chain_config(stale))
+        adapter, completions = _build_adapter(rearm_engine, row)
+        key_before = _key(adapter)
+
+        async def _fake_emit() -> None:
+            adapter._fire_outcome = adapter.FIRE_OUTCOME_FAILED
+            adapter._stop_event.set()
+
+        adapter._emit_scheduled_message = _fake_emit  # type: ignore[assignment]
+        await adapter._run_schedule()
+
+        refreshed = _row(rearm_engine)
+        assert refreshed is not None
+        new_run_at = datetime.fromisoformat(refreshed.config["run_at"])
+        assert new_run_at > datetime.now(timezone.utc), (
+            "a failed run did not mint the next run_at"
+        )
+        assert refreshed.config["run_at"] != original
+        key_after = _key(adapter)
+        assert key_after != key_before
+
+
+class TestDistinguishWeeklyRearmFromSameEpisode:
+    def test_weekly_rearm_and_same_episode_rearmed_are_distinct(self):
+        assert (
+            SchedulerAdapter.FIRE_OUTCOME_REARMED
+            not in SchedulerAdapter._CONSUMING_FIRE_OUTCOMES
+        )
+        assert SchedulerAdapter.FIRE_OUTCOME_REARMED != SchedulerAdapter.FIRE_OUTCOME_DIRECT
+        assert SchedulerAdapter.FIRE_OUTCOME_REARMED != SchedulerAdapter.FIRE_OUTCOME_FAILED
+        import inspect
+
+        src = inspect.getsource(SchedulerAdapter._run_schedule)
+        assert "self._fire_outcome in self._CONSUMING_FIRE_OUTCOMES" in src
+
+
+class TestG2ForceSetPin:
+    def test_refresh_chain_keys_force_sets_chain_mode_for_legacy_config(self):
+        from daemon.repositories.source.maintenance_seed import (
+            CHAIN_MODE,
+            refresh_chain_keys,
+        )
+
+        legacy_config = {
+            "agent": "maintenancer",
+            "message": "legacy",
+            "timezone": "Asia/Ho_Chi_Minh",
+            "recurrence": "once",
+            "local_time": "03:00",
+            "run_at": datetime.now(timezone.utc).isoformat(),
+            "chain": {"mode": "legacy-mode", "run_at_utc": "x"},
+        }
+
+        class _Picked:
+            run_at_iso = "2026-11-29T03:00:00+00:00"
+            local_time = "10:00"
+
+        class _Knobs:
+            timezone = "Asia/Ho_Chi_Minh"
+            window_start = "01:00"
+            window_end = "05:00"
+            weekday = 0
+
+        out = refresh_chain_keys(legacy_config, picked=_Picked(), knobs=_Knobs())
+        assert out["chain"]["mode"] == CHAIN_MODE == "weekly-random"
+        assert out["chain"]["mode"] != "legacy-mode"
+
+    def test_rearm_seam_delegates_to_refresh_chain_keys(self):
+        import inspect
+
+        src = inspect.getsource(SchedulerAdapter._rearm_chain_row)
+        assert "refresh_chain_keys" in src
+
+
+class TestBR2ExpiredIdempotencyKey:
+    @pytest.mark.asyncio
+    async def test_expired_key_creates_second_job_item(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from daemon.services.job_queue_service import JobQueueService
+
+        repo = MagicMock()
+        repo.find_by_idempotency_key = MagicMock(return_value=None)
+        repo.create = MagicMock()
+
+        def _create_or_get_side_effect(**kwargs):
+            key = kwargs.get("idempotency_key")
+            existing = repo.find_by_idempotency_key(key)
+            if existing is not None:
+                return existing, False
+            new_job = repo.create(**kwargs)
+            return new_job, True
+
+        repo.create_or_get_by_idempotency_key = MagicMock(
+            side_effect=_create_or_get_side_effect
+        )
+
+        lock_manager = MagicMock()
+        queue_repo = MagicMock()
+
+        mock_queue = MagicMock()
+        mock_queue.queue_id = "system-fifo-queue-id"
+        mock_queue.project_id = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+        mock_queue.queue_name = "system_fifo_queue"
+
+        def _get_by_name(project_id, queue_name):
+            if queue_name == "system_fifo_queue":
+                return mock_queue
+            return None
+
+        queue_repo.get_by_name = MagicMock(side_effect=_get_by_name)
+        queue_repo.get = MagicMock(return_value=None)
+
+        svc = JobQueueService(
+            repository=repo,
+            lock_manager=lock_manager,
+            queue_repo=queue_repo,
+        )
+        mock_config = MagicMock()
+        mock_config.idempotency_key_ttl_hours = 24
+        svc.set_config(mock_config)
+
+        # Pin the substrate TTL constant was NOT widened.
+        assert svc._idempotency_key_ttl_hours == 24
+
+        old_time = datetime.now(timezone.utc) - timedelta(hours=25)
+        existing_job = MagicMock()
+        existing_job.job_id = "old-job-expired"
+        existing_job.agent_id = "developer"
+        existing_job.project_id = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+        existing_job.admission_state = "queued"
+        existing_job.message = "test message"
+        existing_job.source = "api"
+        existing_job.priority = 5
+        existing_job.instance_id = None
+        existing_job.queue_id = None
+        existing_job.idempotency_key = "key-expired"
+        existing_job.job_metadata = {}
+        existing_job.created_at = old_time.isoformat()
+
+        repo.find_by_idempotency_key.return_value = existing_job
+
+        new_job = MagicMock()
+        new_job.job_id = "new-job-expired"
+        repo.create.return_value = new_job
+
+        def _make_agent_meta():
+            m = MagicMock()
+            m.path = "/agents/developer"
+            return m
+
+        mock_registry = MagicMock()
+        mock_registry.get_resolved.return_value = _make_agent_meta()
+        mock_registry.get_version.return_value = None
+
+        with patch("daemon.services.job_queue_service.get_registry") as mock_get_registry:
+            mock_get_registry.return_value = mock_registry
+            result = await svc.enqueue(
+                agent_id="developer",
+                message="test message",
+                source="api",
+                project_id="71931ae0-0f25-5fbf-853b-2a78cc978d7e",
+                idempotency_key="key-expired",
+            )
+
+        assert result.job_id == "new-job-expired"
+        repo.create.assert_called_once()
+
+    def test_idempotency_ttl_constant_not_widened(self):
+        from daemon.services.job_queue_service import JobQueueService
+
+        # Read the source default (substrate TTL must stay 24h).
+        import inspect
+
+        src = inspect.getsource(JobQueueService.__init__)
+        assert "self._idempotency_key_ttl_hours: int = 24" in src
