@@ -5,7 +5,14 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.31.32] — 2026-11-22
+
+### Added — ENGINE-ARC PHASE-2 PILOT: OrphanWatcherSweepService onto the engine execution path, shipping FLAG-OFF (dormant by default)
+
+- First real engine execution capability: the orphan watcher sweep service gained an engine-routed execution path (dual-path migration of `OrphanWatcherSweepService` onto the central polling/event engine). DORMANT BY DEFAULT — `SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE` is unset in every environment, so the LEGACY scheduler path remains the owner of the orphan sweep; the engine participates in observing ticks only (`SKIPPED_SHADOW` rows, zero non-shadow executions).
+- Parity-proven: parity proof is the core deliverable of the pilot — engine-routed sweep behavior is asserted equal to the legacy loop before any flag flip; "engine-owns-proven" (legacy suppression + engine exclusivity under the flag) and flag-off legacy-loop resume are pinned in the pilot gate pack (59 nodes; F-1/F-2 residue evidence).
+- One-flag rollback scope: unsetting `SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE` returns the orphan sweep entirely to the legacy loop; production bridge failure seam pinned with truthful executor-drop logging; dual-path gate hardened per review riders R1–R6.
+- Drift disclosure (tag-to-tag delta honesty): the v0.31.31 → v0.31.32 delta is the pilot arc only. Sibling-lane releases v0.31.28 (project_get name-resolution ladder), v0.31.29 + v0.31.31 (job lookup resolver divergence + canonical ID follow-up keying), and v0.31.30 (hbk inode-churn mint fix) already carry their own dated sections above (v0.31.30 shipped without a section — its fix is disclosed here) and are NOT duplicated. Zero migration files in the live-current-tag → slot-tag delta (v0.31.27 → v0.31.32): the pilot adds ZERO migrations.
 
 ## [v0.31.31] — 2026-11-22
 
