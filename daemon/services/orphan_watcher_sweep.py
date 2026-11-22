@@ -81,12 +81,8 @@ ORPHAN_WATCHER_ENGINE_JOB_ID: str = "orphan-watcher"
 ORPHAN_WATCHER_ENGINE_FLAG: str = "SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE"
 
 
-def engine_owns_execution(environ: Any = None) -> bool:
-    """The ONE dual-path ownership decision, shared by both api.py sites.
-
-    ``environ=None`` reads the live ``os.environ``; tests pass a dict.
-    Unset / OFF ⇒ ``False`` (legacy loop owns) — the shipped dormant
-    default. ON ⇒ the engine owns and the legacy loop is suppressed.
+def _normalized_slug() -> str:
+    """The dualpath slug, hyphen-normalized.
 
     NOTE (engine-core drift, reported not patched — engine/** is a Phase-1
     reviewed fence): ``dualpath.py:31`` derives the key as
@@ -96,8 +92,79 @@ def engine_owns_execution(environ: Any = None) -> bool:
     than the engine's kill switch and could double-execute on a flag flip.
     We normalize here so BOTH paths read the one canonical flag.
     """
-    normalized_slug = ORPHAN_WATCHER_ENGINE_SLUG.replace("-", "_")
-    return ownership_for(normalized_slug, environ).engine_owns
+    return ORPHAN_WATCHER_ENGINE_SLUG.replace("-", "_")
+
+
+def engine_owns_execution(environ: Any = None, engine_config: Any = None) -> bool:
+    """The ownership CONJUNCT — the ONE decision both api.py sites consult.
+
+    **The engine owns execution iff ALL THREE hold:**
+
+    1. ``SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE`` is ON (the per-job
+       dual-path flag);
+    2. the engine is ENABLED (``ENSEMBLE_ENGINE_ENABLED`` / ``EngineConfig
+       .enabled``) — otherwise there is no tick loop to execute on;
+    3. the engine is NOT in SHADOW (``ENSEMBLE_ENGINE_SHADOW_MODE`` /
+       ``EngineConfig.shadow_mode``) — in shadow the engine computes
+       due-ness and stamps ``SKIPPED_SHADOW`` but NEVER invokes the
+       executor (``execution.py`` shadow gate).
+
+    Conjuncting the flag with the engine's own posture is what makes the
+    migration fail-to-legacy instead of fail-stuck: flag ON + shadow ON
+    (the SHIPPED default) would otherwise suppress the legacy loop while
+    the engine refuses to execute it — a dead sweep lane.
+
+    ``engine_config`` MUST be the engine's own config object (``config.engine``
+    — the very object the P4 boot block passes to ``EngineService``), so both
+    wiring sites consult the SAME resolution with no divergent
+    re-implementation. ``None`` ⇒ fail-to-legacy (``False``): without the
+    engine's posture we may not claim ownership.
+
+    EFFECTIVE FLIP RECIPE (greenlight criterion 8 — the shadow switch is a
+    NAMED separate switch): flag ON **+** ``ENSEMBLE_ENGINE_SHADOW_MODE=false``
+    (+ the engine enabled). ROLLBACK = flag OFF (or shadow ON, or the engine
+    disabled) ⇒ the legacy loop owns again.
+    """
+    if engine_config is None:
+        return False  # fail-to-legacy: no posture ⇒ no ownership claim
+    if not ownership_for(_normalized_slug(), environ).engine_owns:
+        return False
+    enabled = bool(getattr(engine_config, "enabled", True))
+    shadow_mode = bool(getattr(engine_config, "shadow_mode", True))
+    return enabled and not shadow_mode
+
+
+def rearm_legacy_loop(
+    service: "OrphanWatcherSweepService | None",
+    *,
+    reason: str,
+) -> bool:
+    """Fail-to-legacy re-arm (C1).
+
+    Called when the engine's boot block failed AFTER the construct site had
+    suppressed the legacy loop: the engine never took ownership (its
+    executor registration + start did not complete), so ownership returns to
+    the legacy path instead of leaving the sweep lane DEAD.
+
+    Idempotent: a live loop is left alone (never a second loop). Returns
+    ``True`` when the legacy loop was (re-)armed.
+    """
+    if service is None:
+        return False
+    task = getattr(service, "_task", None)
+    if task is not None:
+        # Defensive: this runs inside the boot block's exception handler —
+        # a probe that raises here would abort the boot we are trying to keep.
+        done = getattr(task, "done", None)
+        if callable(done) and not done():
+            return False  # already running — never start a second loop
+    service.start()
+    logger.warning(
+        "orphan-watcher pilot FAIL-TO-LEGACY: %s — the legacy sweep loop "
+        "was RE-ARMED (ownership returned to the legacy path)",
+        reason,
+    )
+    return True
 
 
 def build_engine_executor(

@@ -60,8 +60,10 @@ from pathlib import Path
 BASE_SHA = "8894f86a853c5fcba2173ab29405f02c71c1f3ef"
 
 # The expected daemon/ path set — DATA, per D7.4. Grouped by ownership-map row.
-# 48 declared paths; the pilot lane's committed diff adds 2 sanctioned paths
-# (``daemon/api.py`` + the new service-module row) to the 46-path lane base.
+# 48 declared paths. At the re-anchored base the lane's committed daemon/ diff
+# is exactly 2 paths: `daemon/api.py` (ALREADY declared by the P4 lifespan row)
+# and `daemon/services/orphan_watcher_sweep.py` (ONE newly declared row, added
+# by this lane with its sanctioning comment below).
 EXPECTED_DAEMON_PATHS: frozenset[str] = frozenset({
     # --- P1: migrations (phase1 §0.3, two migration rows) -----------------
     "daemon/migrations/versions/20261121_120000_create_engine_jobs.sql",
