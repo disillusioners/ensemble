@@ -53,9 +53,9 @@ the engine snapshot — each field carrying its ``source``. ``job_metrics()``
 itself is UNTOUCHED (fence F-2: its published block set is pinned).
 
 Fences honored here: F-1 (zero metrics registered), F-2 (no
-``job_metrics()`` edit), F-3/F-11 (no ``action_by``/``acted_at`` dims; no
-``resource_pid_map`` + ``action`` pairing), D6.9/D6.10 (bounds), D6.8 (no
-mutating view).
+``job_metrics()`` edit), F-3/F-11 (no dormant resource-monitor column
+dims; no ``resource_pid_map`` + ``action`` pairing), D6.9/D6.10 (bounds),
+D6.8 (no mutating view).
 """
 
 from __future__ import annotations
