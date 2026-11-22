@@ -1,0 +1,54 @@
+node_id	base_P	base_F	base_UNKNOWN	head_P	head_F	head_UNKNOWN	classification	runs_base	runs_head
+tests/job_queue/test_defer_self_witness_watchdog.py::TestDeferSelfWitnessCensus::test_constitution_drift_test_passes	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/message_queue_redesign/test_timeout_retry_e2e.py::TestStaleRecoveryConfigThreshold::test_stale_recovery_uses_config_threshold	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/message_queue_redesign/test_usage_limit_deferral.py::TestGraceSweepEpisodeRecovery::test_live_anchor_bypass_and_episode_schedule	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/message_queue_redesign/test_usage_limit_deferral.py::TestGraceSweepEpisodeRecovery::test_no_anchor_byte_identical_default_budget	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/message_queue_redesign/test_usage_limit_deferral.py::TestGraceSweepEpisodeRecovery::test_permanent_fail_path_still_fails_message_and_reports	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/message_queue_redesign/test_usage_limit_deferral.py::TestStartupRecoveryPostRetryFix::test_episode_startup_recovery_bypass_no_report	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/message_queue_redesign/test_usage_limit_deferral.py::TestStartupRecoveryPostRetryFix::test_past_deadline_anchor_not_live_default_path	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/message_queue_redesign/test_usage_limit_deferral.py::TestStartupRecoveryPostRetryFix::test_permanent_fail_reports_exactly_once	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/message_queue_redesign/test_usage_limit_deferral.py::TestStartupRecoveryPostRetryFix::test_successful_retry_no_permanent_failure_report	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/perf/test_auth_middleware_latency.py::TestAuthMiddlewareLatency::test_public_path_p99_under_threshold	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_chart_tools_reuse_integration.py::TestT1RealDispatchReviveWalk::test_third_call_revives_revived_charter_unchanged	2	1	0	0	3	0	PRE-EXISTING (red on BOTH sides)	3	3
+tests/test_chart_tools_reuse_integration.py::TestT3ErrorPolicyEnd2End::test_error_charter_revives_then_respawns_on_second_failure	1	2	0	3	0	0	FIXED AT HEAD / base-side flake	3	3
+tests/test_checkpoint_adapter_resilience.py::TestSaverRetryProxyABCRegistration::test_stategraph_compile_accepts_proxy_as_checkpointer	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_dependency_bus.py::TestGenerationCounterBump::test_per_parent_lock_serializes_db_insert	3	0	0	2	1	0	NET-NEW CANDIDATE (red at HEAD only)	3	3
+tests/test_initiative_message.py::TestAPIListEndpoint::test_list_includes_initiative_message_per_row	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_initiative_message.py::TestAPIListEndpoint::test_search_via_initiative_message_via_api	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_injection_api.py::TestAppendListSemantics::test_first_injection_emits_only_pending_then_post_echo	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_injection_api.py::TestAppendListSemantics::test_second_injection_appends_no_cleared	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_injection_api.py::TestEmptyContentValidation::test_empty_content_does_not_emit_sse	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_injection_api.py::TestEmptyContentValidation::test_empty_or_whitespace_returns_400[   ]	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_injection_api.py::TestEmptyContentValidation::test_empty_or_whitespace_returns_400[\n]	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_injection_api.py::TestEmptyContentValidation::test_empty_or_whitespace_returns_400[\t\n  ]	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_injection_api.py::TestEmptyContentValidation::test_empty_or_whitespace_returns_400[]	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_instance_list_order_api.py::TestOrderActivity::test_activity_descendants_unchanged	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_instance_list_order_api.py::TestOrderActivity::test_activity_terminal_roots_updated_at_desc	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_instance_list_order_api.py::TestOrderDefaultByteCompat::test_no_param_exact_pinned_order	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_instance_list_order_api.py::TestOrderDefaultByteCompat::test_order_pinned_identical_to_default	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_instance_list_order_api.py::TestOrderDefaultByteCompat::test_pinned_still_beats_newest_unpinned	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_instance_search_api.py::TestSearchBackwardCompat::test_empty_search_returns_all	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_instance_search_api.py::TestSearchCombined::test_search_includes_kb_when_exclude_kb_false	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_instance_search_api.py::TestSearchCombined::test_search_with_pagination	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_instance_search_api.py::TestSearchCombined::test_search_with_project_id	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_instance_search_api.py::TestSearchSpecialChars::test_backslash_is_literal	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_language_check.py::TestLanguageCheckNodeErrorHandling::test_detection_error_does_not_crash	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_language_check.py::TestLanguageCheckNodeErrorHandling::test_detection_re_error_caught	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_language_check.py::TestLanguageCheckNodeErrorHandling::test_detection_type_error_caught	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_language_check.py::TestLanguageCheckNodeErrorHandling::test_detection_value_error_caught	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_pipeline_unified.py::TestPipelineUnit::test_post_processing_error_runs_error_handler_and_on_error	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/test_worker_notification.py::TestWorkerLifecycleIntegration::test_multi_worker_notification	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/tools/test_auto_kill_integration.py::TestPathADurableTombstoneReap::test_sibling_alive_row_skipped_by_terminal_lane	2	1	0	2	1	0	PRE-EXISTING (red on BOTH sides)	3	3
+tests/tools/test_bash_ram_guard.py::TestRealBallooningTree::test_the_leaderless_tree_is_still_watched_and_killed	1	2	0	2	1	0	PRE-EXISTING (red on BOTH sides)	3	3
+tests/tools/test_bash_ram_guard.py::TestStagedGrowerStrictUnderReport::test_the_under_report_bound_is_strictly_positive_on_a_staged_grower	2	1	0	2	1	0	PRE-EXISTING (red on BOTH sides)	3	3
+tests/unit/job_state/test_constitution_drift.py::test_known_admission_state_writers_matches_source_exactly_no_drift	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/unit/routers/test_defer_blocked_api.py::TestConsistencyPin::test_route_executes_the_derived_witness_statement	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/unit/routers/test_defer_blocked_api.py::TestStalledClassification::test_mixed_paused_stalled_live_instance_less_in_one_payload	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/unit/routers/test_work_router.py::TestKindFilter::test_kind_filter_job_with_only_jobs_returns_jobs	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/unit/services/test_work_resolver_badge_pushdown.py::test_row_budget	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/unit/test_nudge_behavior.py::TestIsEmptyContent::test_empty_list_is_vacuously_empty	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/unit/test_nudge_behavior.py::TestIsEmptyContent::test_list_with_only_whitespace_text_blocks_is_empty	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/unit/test_prompt_assent_freshness.py::TestTheFreshnessBound::test_inside_the_bound_is_fresh	2	1	0	1	2	0	PRE-EXISTING (red on BOTH sides)	3	3
+tests/unit/tools/test_critical_notes_lifecycle.py::TestProjectCnBackfillEmbeddings::test_happy_path_summary_line_shape_and_persistence	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/unit/tools/test_frozen_tool_name_discovery.py::test_registry_validation_zero_warnings_for_project_manager_frozen_mode	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
+tests/unit/tools/test_mcp_init_guard.py::test_the_recovery_probe_brings_the_server_back_without_a_restart	3	0	0	3	0	0	NOT REPRODUCED IN ISOLATION (sweep composition artifact)	3	3
