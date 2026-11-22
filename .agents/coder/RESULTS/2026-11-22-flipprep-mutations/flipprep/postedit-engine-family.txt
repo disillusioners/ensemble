@@ -1,0 +1,22 @@
+........................................................................ [ 63%]
+.........................................                                [100%]
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-engine-flipprep/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/unit/services/engine/test_kill_switch_exec_wiring.py: 15 warnings
+tests/unit/services/test_engine_single_flight.py: 8 warnings
+  /home/nea/ensemble-src-wt-engine-flipprep/daemon/services/engine/dispatch.py:51: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(fn):
+
+tests/unit/services/test_engine_single_flight.py::test_off_loop_thread_discipline_dedicated_executor
+  /home/nea/ensemble-src-wt-engine-flipprep/daemon/services/engine/dispatch.py:66: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(fn):
+
+tests/unit/services/test_engine_single_flight.py::test_main_loop_runs_on_loop_thread
+  /home/nea/ensemble-src-wt-engine-flipprep/daemon/services/engine/dispatch.py:33: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(fn):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+113 passed, 26 warnings in 27.69s

@@ -1,0 +1,39 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.7, pytest-9.0.2, pluggy-1.6.0 -- /home/nea/ensemble-src-wt-engine-flipprep/.venv/bin/python
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: /home/nea/ensemble-src-wt-engine-flipprep
+configfile: pyproject.toml
+plugins: anyio-4.12.1, hypothesis-6.165.10, asyncio-1.3.0, mock-3.15.1, xdist-3.8.0, langsmith-0.7.7, timeout-2.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 280.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 11 items
+
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_resolver_is_injected_into_the_engine_at_boot PASSED [  9%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_tick_path_consults_the_resolver_on_every_dispatch PASSED [ 18%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_tick_never_reads_os_environ_directly PASSED [ 27%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_resolver_absent_means_no_switch_opinion_not_a_trip PASSED [ 36%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_per_job_trip_skips_only_that_job_and_restores PASSED [ 45%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_engine_wide_trip_skips_every_job_and_restores PASSED [ 54%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_unreadable_engine_wide_switch_is_fail_to_legacy PASSED [ 63%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_unreadable_per_job_switch_skips_that_job PASSED [ 72%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_shadow_tier_is_read_at_tick_time PASSED [ 81%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_absent_shadow_key_does_not_override_the_config_tier PASSED [ 90%]
+tests/unit/services/engine/test_kill_switch_exec_wiring.py::test_real_tick_loop_re_arms_on_flip_without_restart PASSED [100%]
+
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-engine-flipprep/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/unit/services/engine/test_kill_switch_exec_wiring.py: 15 warnings
+  /home/nea/ensemble-src-wt-engine-flipprep/daemon/services/engine/dispatch.py:51: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(fn):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 11 passed, 16 warnings in 7.24s ========================
+RUNNER_LABEL=BASE-76aa3351d
+PYTEST_EXIT=0
+SUMMARY======================== 11 passed, 16 warnings in 7.24s ========================

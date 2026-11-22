@@ -1,0 +1,55 @@
+==============================================================
+F2 EVIDENCE TRANSCRIPT — boot-01
+started_utc=2026-11-22T16:50:51Z
+worktree=/home/nea/ensemble-src-wt-engine-flipprep
+git_head=8a1045c025f151330db31ee5131adee02379413c
+git_branch=feature/engine-killswitch-exec
+git_status_short_begin>>>
+?? .f2-transcripts/
+git_status_short_end<<<
+python=Python 3.14.7
+--------------------------------------------------------------
+LAUNCH COMMAND (verbatim; POSTGRES_USER/POSTGRES_PASSWORD sourced
+from ./.env and deliberately NOT echoed):
+cd /home/nea/ensemble-src-wt-engine-flipprep && \
+  set -a; . ./.env; set +a; \
+  export PORT=<PORT> DAEMON_PORT=<PORT> \
+    POSTGRES_DB=ensemble_dev POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 \
+    ENSEMBLE_SELF_ENV=dev \
+    ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 \
+    DATA_DIR=./data_dev ENSEMBLE_DATA_DIR=./data_dev PERSISTENCE_DB_PATH=./data_dev/instances.db \
+    .venv/bin/python -m daemon
+--------------------------------------------------------------
+EFFECTIVE FENCE (as seen by the launched process):
+PORT=1801
+DAEMON_PORT=1801
+POSTGRES_DB=ensemble_dev
+POSTGRES_HOST=127.0.0.1
+POSTGRES_PORT=5432
+POSTGRES_USER=<set-from-.env>
+ENSEMBLE_SELF_ENV=dev
+ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0
+DATA_DIR=./data_dev
+ENSEMBLE_DATA_DIR=./data_dev
+PERSISTENCE_DB_PATH=./data_dev/instances.db
+FENCE_ASSERT=PASS
+--------------------------------------------------------------
+DAEMON STDOUT+STDERR FOLLOWS
+==============================================================
+--------------------------------------------------------------
+RECORDED_PID=243217
+RECORDED_PID_START=Sun Nov 22 16:50:50 2026
+RECORDED_PID_CMD=.venv/bin/python -m daemon 
+LAUNCH_EPOCH_MS=1795366251540
+CHILDREN_AT_LAUNCH=
+DB RESOLUTION REFUSED (rogue-containment): tier=ambient (ensemble.json absent) with ambient POSTGRES_* present (POSTGRES_HOST,POSTGRES_PORT,POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD) and ENSEMBLE_DB_AMBIENT_ALLOW != 1. Refusing before any TCP connection. Set ENSEMBLE_DB_AMBIENT_ALLOW=1 for a sanctioned first boot (the persisted ensemble.json makes later boots tier 1).
+PROBE daemon process died before readyz (pid 243217 gone at +16360ms)
+--------------------------------------------------------------
+TERMINATION: pid=243217 dead=1 exit_code=78
+PORT_STILL_LISTENING=0
+LIVEZ_GREEN_MS=NEVER
+READYZ_GREEN_MS=NEVER
+POSTURE_LINE=MISSING
+BOUND_LINE=MISSING
+ended_utc=2026-11-22T16:51:08Z
+==============================================================
