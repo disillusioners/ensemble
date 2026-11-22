@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.31.29] — 2026-11-22
+
+### Fixed — Job lookup resolver divergence (job_get / job_inject / job_continue / watch_mission)
+
+- WorkResolverService: normalized incoming work_id parameters across `resolve_work`, `per_kind_status_for`, and record converters, stripping leading/trailing whitespace, surrounding quotes, brackets, and backticks.
+- Job queue tools: sanitized incoming job IDs across all 10 job tool entrypoints (`job_get`, `job_inject`, `job_continue`, `job_cancel`, `job_pause`, `job_resume`, `job_messages`, `job_tree`, `job_progress`, `job_answer`) against trailing newlines, whitespace, and formatting artifacts.
+- JobItem-only completion and continuation: reinforced `job_continue` handling for JobItem-only completed rows (e.g. direct task jobs without a Task row), correcting terminal-state checks and error messaging.
+- Regression test pack: added 31-node unit test pack `tests/unit/test_job_lookup_resolver_divergence.py` exercising JobItem-only, Task-only, dual-backed, decorated ID normalization, and tool surfaces; registered in PACKS.md.
+
 ## [v0.31.28] — 2026-11-22
 
 ### Fixed — `project_get` name resolution: shortname + case-insensitive + substring ladder
