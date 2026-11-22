@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -118,6 +119,60 @@ def test_non_bus_kinds_have_no_live_source():
         "kinds"]["instance_terminalized"]
     assert all(c["live"] is None for c in entry["consumers_live"])
     assert entry["consumers_live"][0]["consumer"] == "dependency_bus:child_keyed_waiters"
+
+
+def test_live_source_dispatch_covers_exactly_the_event_bus_source():
+    # D5.4 dispatch pin (P7 item-9): the IMPLEMENTED live-source
+    # dispatch set is EXACTLY {"event_bus"} — the only extractor is
+    # _live_subscriber_ids duck-typed on the bus's _global_subscribers,
+    # so any OTHER source routed through it would be a LIE (a dispatch
+    # branch without a real extractor). The catalog's second substrate
+    # (dependency-watchers, e.g. dependency_bus:child_keyed_waiters) has
+    # NO live source today — landing it is the DELIBERATE, NAMED
+    # follow-up (D5.4's second live source) and must re-point this pin
+    # AND test_non_bus_kinds_have_no_live_source together.
+    #
+    # Leg 1 (behavioral, probe spec): a kind declaring a non-bus source
+    # must be reported UNVERIFIED (live=None) even with a bus in hand.
+    # A silent half-implementation — `or live_source ==
+    # "dependency_watchers"` in the dispatch, or any branch that
+    # "verifies" a non-bus source against the bus's subscriber set —
+    # yields a real verdict (True/False) instead of None ⇒ RED.
+    from daemon.services.event_registry.metrics import _consumers_live
+
+    probe = SimpleNamespace(
+        kind_id="event_registry:test_probe_non_bus_source",
+        consumers=("dependency_bus:child_keyed_waiters",),
+        metadata={"live_source": "dependency_watchers"},
+    )
+    entries, verified, _ = _consumers_live(
+        probe, _StubBus(("job_feedback_observer",))
+    )
+    assert verified is False, (
+        "the dispatch verified a non-event_bus live source against the "
+        "bus's subscriber set — a dispatch branch without a real "
+        "extractor (D5.4 lie); re-point deliberately when the real "
+        "second live source lands"
+    )
+    assert entries == [
+        {"consumer": "dependency_bus:child_keyed_waiters", "live": None}
+    ]
+    # Leg 2 (catalog-declaration fence): the catalog must not declare a
+    # live source the dispatch does not implement — declaration without
+    # implementation is the other half-implementation shape. Today the
+    # catalog declares exactly one source ("event_bus"); gaining a
+    # second declared source REDs until the real extractor lands and
+    # both pins are re-pointed deliberately.
+    from daemon.services.event_registry import CATALOG
+
+    declared = {
+        (spec.metadata or {}).get("live_source") for spec in CATALOG
+    } - {None}
+    assert declared == {"event_bus"}, (
+        "the catalog declares live sources beyond event_bus — the "
+        "second live source has been declared; land its real extractor "
+        f"and re-point the D5.4 dispatch pins: {sorted(declared)}"
+    )
 
 
 def test_warning_state_reset_re_warns(caplog):
