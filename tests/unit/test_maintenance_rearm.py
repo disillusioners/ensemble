@@ -375,18 +375,53 @@ class TestConfigCompletenessRMW:
 
 class TestFailedRunRearm:
     @pytest.mark.asyncio
-    async def test_a_failed_run_still_mints_the_next_run_at(
+    async def test_consuming_fire_with_failed_run_keeps_minted_next_run_at(
+        self, rearm_engine
+    ):
+        """phase1-plan.md:15 (D-G): the re-arm seam lives in the one-shot
+        CONSUMPTION branch and mints the next run_at independent of the
+        run's eventual success/failure — the mint is NOT rolled back when
+        the run later reports failure, the row stays enabled, and the
+        chain stays intact.
+
+        Pin the "independent of run success" side: a consuming fire mints
+        the next-week instant, and that mint survives (no rollback, row
+        still enabled, chain intact)."""
+        stale = datetime.now(timezone.utc) - timedelta(minutes=5)
+        row = _insert_row(rearm_engine, _chain_config(stale))
+        adapter, completions = _build_adapter(rearm_engine, row)
+
+        async def _fake_emit() -> None:
+            adapter._fire_outcome = adapter.FIRE_OUTCOME_DIRECT
+            adapter._stop_event.set()
+
+        adapter._emit_scheduled_message = _fake_emit  # type: ignore[assignment]
+        await adapter._run_schedule()
+
+        refreshed = _row(rearm_engine)
+        assert refreshed is not None
+        new_run_at = datetime.fromisoformat(refreshed.config["run_at"])
+        assert new_run_at > datetime.now(timezone.utc), (
+            "consuming fire did not mint the next run_at"
+        )
+        assert refreshed.enabled is True
+        assert refreshed.status == SourceStatus.RUNNING.value
+        assert refreshed.config["chain"].get("run_at_utc") == refreshed.config["run_at"]
+        assert completions == [], (
+            "chain-aware skip did not skip the completion callback"
+        )
+
+    @pytest.mark.asyncio
+    async def test_failed_dispatch_is_non_consuming_and_never_advances_chain(
         self, rearm_engine, _fast_retry
     ):
-        """STOP-THREAD CANDIDATE: production currently does NOT advance
-        the chain on a failed outcome (failed is not a consuming fire).
-        This leg asserts the requested behavior and is expected to be RED
-        under the current production code."""
+        """phase1-plan.md:15 (D-G): a FAILED dispatch (outcome=failed) does
+        NOT consume and never advances the chain — it re-arms same-episode
+        on the 5s cadence instead. Cite phase1-plan.md:15."""
         stale = datetime.now(timezone.utc) - timedelta(minutes=5)
         original = stale.isoformat()
         row = _insert_row(rearm_engine, _chain_config(stale))
         adapter, completions = _build_adapter(rearm_engine, row)
-        key_before = _key(adapter)
 
         async def _fake_emit() -> None:
             adapter._fire_outcome = adapter.FIRE_OUTCOME_FAILED
@@ -397,13 +432,10 @@ class TestFailedRunRearm:
 
         refreshed = _row(rearm_engine)
         assert refreshed is not None
-        new_run_at = datetime.fromisoformat(refreshed.config["run_at"])
-        assert new_run_at > datetime.now(timezone.utc), (
-            "a failed run did not mint the next run_at"
-        )
-        assert refreshed.config["run_at"] != original
-        key_after = _key(adapter)
-        assert key_after != key_before
+        # NO next-week mint — the chain did not advance.
+        assert refreshed.config["run_at"] == original
+        assert adapter._run_at == stale
+        assert completions == []
 
 
 class TestDistinguishWeeklyRearmFromSameEpisode:
