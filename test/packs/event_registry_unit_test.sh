@@ -28,11 +28,22 @@ echo "=== Test Pack: event_registry_unit_test ==="
 
 cd "$PROJECT_DIR"
 
-timeout 120s .venv/bin/pytest \
-  tests/unit/services/event_registry/ \
-  --override-ini="addopts=" --tb=short -q 2>&1
+EXIT_CODE=0
+SCRUB=(
+  -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_USER -u POSTGRES_PASSWORD
+  -u POSTGRES_DB -u POSTGRES_URL -u DATABASE_URL -u ENSEMBLE_DB_DSN
+  -u SSL_CERT_FILE -u SSL_CERT_DIR
+  -u OPENAI_API_KEY
+)
 
-EXIT_CODE=$?
+timeout 120s env \
+  "${SCRUB[@]}" \
+  ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 \
+  ENSEMBLE_SELF_ENV=dev \
+  PYTHONDONTWRITEBYTECODE=1 \
+  .venv/bin/pytest \
+  tests/unit/services/event_registry/ \
+  --override-ini="addopts=" --tb=short -q 2>&1 || EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 124 ]; then
   echo "RESULT: TIMEOUT"

@@ -135,6 +135,7 @@ timeout 200 env \
   "${SCRUB[@]}" \
   ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 \
   ENSEMBLE_SELF_ENV=dev \
+  PYTHONDONTWRITEBYTECODE=1 \
   "$PYTEST_BIN" \
     -p no:randomly \
     -p no:xdist \
@@ -175,6 +176,7 @@ timeout 280 env \
   "${SCRUB[@]}" \
   ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 \
   ENSEMBLE_SELF_ENV=dev \
+  PYTHONDONTWRITEBYTECODE=1 \
   PYTEST_TIMEOUT=280 \
   "$PYTEST_BIN" \
     -p no:randomly \

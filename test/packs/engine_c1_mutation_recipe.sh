@@ -31,9 +31,10 @@ open(p,"w").write(s)
 print("mutated")
 PY
 # run pin (expect failure)
-env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_DB \
+timeout 300 env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_DB \
   -u POSTGRES_URL -u DATABASE_URL -u ENSEMBLE_DB_DSN -u SSL_CERT_FILE -u SSL_CERT_DIR \
   -u OPENAI_API_KEY ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 ENSEMBLE_SELF_ENV=dev \
+  PYTHONDONTWRITEBYTECODE=1 \
   POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 POSTGRES_DB=ensemble_dev \
   "$PYTEST" -p no:randomly -p no:xdist -q --color=no --override-ini="addopts=" \
   "$PIN" >/tmp/c1_mutated.out 2>&1
@@ -41,9 +42,10 @@ MUT_EXIT=$?
 # restore
 cp /tmp/exec.before daemon/services/engine/execution.py
 # re-run (expect pass)
-env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_DB \
+timeout 300 env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_DB \
   -u POSTGRES_URL -u DATABASE_URL -u ENSEMBLE_DB_DSN -u SSL_CERT_FILE -u SSL_CERT_DIR \
   -u OPENAI_API_KEY ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 ENSEMBLE_SELF_ENV=dev \
+  PYTHONDONTWRITEBYTECODE=1 \
   POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 POSTGRES_DB=ensemble_dev \
   "$PYTEST" -p no:randomly -p no:xdist -q --color=no --override-ini="addopts=" \
   "$PIN" >/tmp/c1_restored.out 2>&1

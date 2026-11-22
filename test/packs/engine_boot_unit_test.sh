@@ -29,6 +29,7 @@ OUT="$(mktemp)"
 timeout 280 env "${SCRUB[@]}" \
   ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 \
   ENSEMBLE_SELF_ENV=dev \
+  PYTHONDONTWRITEBYTECODE=1 \
   POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 POSTGRES_DB=ensemble_dev \
   "$PYTEST_BIN" -p no:randomly -p no:xdist -v --tb=short --color=no \
   --override-ini="addopts=" "${UNIT_FILES[@]}" 2>&1 | tee "$OUT"

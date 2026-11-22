@@ -31,8 +31,20 @@ cd "$PROJECT_DIR"
 # pytest would abort the script BEFORE `EXIT_CODE=$?`, making the
 # RESULT: FAIL / RESULT: TIMEOUT branches below unreachable — exactly
 # when the contract matters. Capture the status in an OR-list instead.
+SCRUB=(
+  -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_USER -u POSTGRES_PASSWORD
+  -u POSTGRES_DB -u POSTGRES_URL -u DATABASE_URL -u ENSEMBLE_DB_DSN
+  -u SSL_CERT_FILE -u SSL_CERT_DIR
+  -u OPENAI_API_KEY
+)
+
 EXIT_CODE=0
-timeout 180s .venv/bin/pytest \
+timeout 180s env \
+  "${SCRUB[@]}" \
+  ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 \
+  ENSEMBLE_SELF_ENV=dev \
+  PYTHONDONTWRITEBYTECODE=1 \
+  .venv/bin/pytest \
   tests/unit/services/engine/test_projection.py \
   tests/api/test_engine_routes.py \
   tests/unit/metrics/test_metrics_family_adjudication.py \
