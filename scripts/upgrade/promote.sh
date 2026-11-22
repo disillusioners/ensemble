@@ -967,6 +967,11 @@ if ! restart_via_launcher; then
     # this process id by construction).
     rm -f "${HANDBACK_ERROR_FILE:-}" 2>/dev/null || true
     rm -f "${HANDBACK_VERIFY_REASON_FILE:-}" 2>/dev/null || true
+    # hbk-err inode-churn fix (2026-11-22): the ELAPSED channel was cleaned
+    # by NOBODY here — it is the one side-channel with no rm in any ceremony
+    # script — so a ceremony that did not reach the hand-back leaked it.
+    # Same consume-then-clear discipline (the name embeds this process id).
+    rm -f "${HANDBACK_VERIFY_ELAPSED_FILE:-}" 2>/dev/null || true
     HB_ERR="${HB_ERR:-$HB_VERIFY_REASON}"
     journal_history_append halt "promote aborted post-flip: unit hand-back failed for $VERSION — halt-for-human, txn left open for sweep recovery (declared=${SUPERVISION_MODE:-?} verified=${SUPERVISION_STATE:-?} unit=${SUPERVISION_UNIT:-?}; no nohup fallback — Amendment #1; hand-back error: ${HB_ERR:-none captured})" \
                               || true   # history is advisory; the open txn IS the B4 contract

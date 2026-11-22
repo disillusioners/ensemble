@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.31.31] — 2026-11-22
+
+### Fixed — Job lookup resolver divergence & canonical ID follow-up keying
+
+- WorkResolverService: normalized incoming work_id parameters across `resolve_work`, `per_kind_status_for`, and record converters, stripping leading/trailing whitespace, surrounding quotes, brackets, and backticks.
+- Job queue tools: sanitized incoming job IDs across all 17 work-id-taking tools (`job_get`, `job_inject`, `job_continue`, `job_cancel`, `job_retry`, `job_delete`, `job_restore`, `job_pause`, `job_resume`, `job_messages`, `job_tree`, `job_progress`, `job_answer`, `watch_job`, `unwatch_job`, `watch_jobs`, `watch_mission`) against trailing newlines, whitespace, and formatting artifacts.
+- Post-resolution canonical ID keying: follow-up database lookups and mutations in `job_continue` (soft-delete check), `job_cancel`, `job_retry`, `job_delete`, `job_restore`, `watch_job`/`watch_jobs` (watch arming + notify), and `watch_mission` (pre-dispatch receipt) now key on the canonical `record.work_id` instead of the raw decorated input, eliminating false "has been deleted" and "may not exist" errors.
+- JobItem-only completion and continuation: reinforced `job_continue` handling for JobItem-only completed rows (e.g. direct task jobs without a Task row), correcting terminal-state checks and error messaging.
+- Regression test pack: widened unit test pack `tests/unit/test_job_lookup_resolver_divergence.py` to 61 nodes covering JobItem-only, Task-only, dual-backed, full 7-decoration matrix across all tool surfaces, and `watch_mission` receipt resolution; registered in PACKS.md.
+
+## [v0.31.29] — 2026-11-22
+
+### Fixed — Job lookup resolver divergence (job_get / job_inject / job_continue / watch_mission)
+
+- WorkResolverService: normalized incoming work_id parameters across `resolve_work`, `per_kind_status_for`, and record converters, stripping leading/trailing whitespace, surrounding quotes, brackets, and backticks.
+- Job queue tools: sanitized incoming job IDs across all 10 job tool entrypoints (`job_get`, `job_inject`, `job_continue`, `job_cancel`, `job_pause`, `job_resume`, `job_messages`, `job_tree`, `job_progress`, `job_answer`) against trailing newlines, whitespace, and formatting artifacts.
+- JobItem-only completion and continuation: reinforced `job_continue` handling for JobItem-only completed rows (e.g. direct task jobs without a Task row), correcting terminal-state checks and error messaging.
+- Regression test pack: added 31-node unit test pack `tests/unit/test_job_lookup_resolver_divergence.py` exercising JobItem-only, Task-only, dual-backed, decorated ID normalization, and tool surfaces; registered in PACKS.md.
+
+## [v0.31.28] — 2026-11-22
+
+### Fixed — `project_get` name resolution: shortname + case-insensitive + substring ladder
+
+- `project_get(name=...)` now resolves through ONE ladder: exact name -> exact shortname -> case-insensitive exact name -> case-insensitive exact shortname -> case-insensitive substring over NAME + SHORTNAMES only. A shortname such as "ensemble" now resolves to its project instead of returning "not found".
+- The project DESCRIPTION is never searched, and projects of any status (active/paused/archived) stay resolvable.
+- A reference matching several projects returns a typed AMBIGUOUS_PROJECT refusal that LISTS the candidates (the tool never picks one for you); an unknown reference keeps the "not found" wording and error_code NOT_FOUND.
+- The explicit `shortname=` argument resolves against shortnames only, never against the project name.
+
 ## [v0.31.27] — 2026-11-22
 
 ### Added — Release B (Engine Arc Phase 1): central polling/event engine + event registry, shipping DORMANT

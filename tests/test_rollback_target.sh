@@ -48,6 +48,17 @@ UPGRADE_DIR="$REPO_ROOT/scripts/upgrade"
 LAUNCHER="$REPO_ROOT/launcher.sh"
 ROLLBACK="$UPGRADE_DIR/rollback.sh"
 
+# ── hbk-err inode-churn containment (2026-11-22) ──────────────────────────
+# scripts/upgrade/lib.sh mints its hand-back side-channels into
+# ${TMPDIR:-/tmp}. This suite sources lib.sh 12 times; give the run a
+# scratch TMPDIR so the channels (and every other fixture that honours
+# TMPDIR) stay OUT of the shared /tmp root.
+HBK_SCRATCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hbk-scratch.XXXXXX")"
+export TMPDIR="$HBK_SCRATCH_DIR"
+# W1 (review 2026-11-22): the house fixture trap removes this scratch dir at
+# exit — the per-run containment must not become a 7th leak class.
+_register_fixture "$TMPDIR"
+
 PASS=0
 
 FAIL=0

@@ -65,6 +65,16 @@ set -u
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UPGRADE_DIR="$REPO_ROOT/scripts/upgrade"
 
+# ── hbk-err inode-churn containment (2026-11-22) ──────────────────────────
+# scripts/upgrade/lib.sh mints its hand-back side-channels into
+# ${TMPDIR:-/tmp}. This suite sources lib.sh 12 times; give the run a
+# scratch TMPDIR so the channels (and every other fixture that honours
+# TMPDIR) stay OUT of the shared /tmp root.
+HBK_SCRATCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hbk-scratch.XXXXXX")"
+export TMPDIR="$HBK_SCRATCH_DIR"
+# W1 (review 2026-11-22): this suite installs its OWN EXIT trap below (which
+# REPLACES any earlier one), so the scratch is removed there alongside FIXTURE.
+
 PASS=0
 FAIL=0
 FAILED_TESTS=""
@@ -106,7 +116,7 @@ section() { printf '\n== %s ==\n' "$1"; }
 
 FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/promote-staleness.XXXXXX")"
 FIXTURE="$(cd "$FIXTURE" && pwd)"
-trap 'rm -rf "$FIXTURE"' EXIT
+trap 'rm -rf "$FIXTURE" "$HBK_SCRATCH_DIR"' EXIT
 
 # Pin the interpreter: prefer the repo venv python (has PyYAML), fall
 # back to system python3.
