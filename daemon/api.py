@@ -2558,6 +2558,15 @@ async def lifespan(app: FastAPI):
             # is preferred for diagnosability (a missing-repo warning
             # would be noise in prod).
             task_repository=getattr(manager, "_task_repo", None),
+            # Wake-source gate (anomaly a370b036): the JOB-watcher
+            # repository — the armed watch rows are the "this parent
+            # still has a live wake source" evidence for an event-watch
+            # root. The repository is built ONCE above (the
+            # job-notification lanes share it) and handed to the
+            # watchdog explicitly; the manager also carries it as
+            # ``_watcher_repo`` (the tools access seam) as the
+            # watchdog's fallback.
+            watcher_repository=watcher_repo,
         )
     except Exception as watchdog_boot_exc:
         app.state.waiting_children_watchdog_task = None
