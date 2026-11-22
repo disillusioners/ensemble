@@ -260,11 +260,11 @@ RC=124 with a partial log — that is the BUDGET, not a regression.
 **Fold-in verification:** full pin suite **twice** — 41P/0F both runs, identical
 shape (no order/flake drift). Mutation proofs (worktree-level, byte-identical
 restore each time):
-* **A — symlink guard removed:** `PIN EXIT 1`, **38P/3F** (L10's three legs red);
-  restored → `PIN EXIT 0`, **41P/0F**.
-* **B — lazy mint reverted:** `PIN EXIT 1`, **32P/9F** (L1/L2/L5/L9 red — the
+* **A — lazy mint reverted:** `PIN EXIT 1`, **32P/9F** (L1/L2/L5/L9 red — the
   original churn pin still fails when disabled); restored → `PIN EXIT 0`,
   **41P/0F**.
+* **B — symlink guard removed:** `PIN EXIT 1`, **38P/3F** (L10's three legs red);
+  restored → `PIN EXIT 0`, **41P/0F**.
 
 **Scoped re-run (excludes `tests/test_release_journal.sh` — tester-owned):**
 every file reproduced the fix-phase outcome exactly and every failure-name set
