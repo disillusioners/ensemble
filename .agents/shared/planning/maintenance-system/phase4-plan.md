@@ -45,13 +45,26 @@
 
 ---
 
+## Binding requirements (architect addendum §7 — BR-14, BR-16, BR-16b, BR-17, BR-18, BR-19)
+
+Each BR below is a labeled, grep-verifiable block carrying its operative text. The addendum stays as the verdict record.
+
+- **BR-14** run_id single authority = the report-writer child. Strike the seat-mint step (the seat has no bash/filesystem). Name the daemon venv interpreter (`/home/nea/ensemble-src/.venv/bin/python` — bare `python3` fails on this host: ModuleNotFoundError sqlalchemy). Bash fallback `ckpt-$(date -u +%Y%m%d_%H%M%S%6N)-$(openssl rand -hex 4)` is a BINDING rung in the skill body. Carry a `run_token` in the dispatch task; re-dispatches reuse it (INDEX dedup survives re-mints).
+- **BR-16** Artifact root pinned + created: the LIVE-INSTALL daemon project root `.agents/maintenancer/RESULTS/` (never a worktree — worktrees are report-only per R8/R9; absolute `write_file` bypasses the boundary check, so the root must be stated ONCE in the `run-report-writer` skill); dir created by the seeder at first boot; the FE list route and the live_views root read THE SAME root.
+- **BR-16b** INDEX appends via `write_file(append=True)` (in-process lock + tail read-back, `daemon/tools/filesystem.py:1570-1590`), never `bash >>`; rows carry the run_id.
+- **BR-17** BE list-route safety contract: fixed root resolved at daemon startup; run_id regex `^ckpt-\d{8}_\d{12}-[0-9a-f]{8}$` used only as a filename component + `os.path.realpath` containment (defense-in-depth, mirroring `daemon/services/live_views.py:30-35`); GET(+HEAD)-only with the verb pinned by a spec (`.not.toMatch(/\.(post|put|delete|patch)\(/)` posture); scope `maintenance:read` (`daemon/auth/scopes.py:76`); registration in `daemon/api.py` beside `tool_usage_router`.
+- **BR-18** Content access = live_views root registration for `.agents/maintenancer/RESULTS/` (reuses traversal guard + `.md` renderer; no new path-serving surface); list response = view URLs (`run_id, trigger_type, started_at, ended_at, overall_status, report_view_url, receipt_view_url`), not repo-relative paths. (Architect rulings §9.3/§9.4.)
+- **BR-19** Anchor corrections in P4 FE tasks: TWO conditional appends (Database `frontend/src/app/app.ts:797` — no idempotence guard; Maintenance `:842` — route-keyed); `dbUpdateIdx` resolves to the FIRST (Database); static Report sits after Metrics (`:596`) so `metricsIdx < reportIdx < dbUpdateIdx` holds; extend the three verified spec files (`mcps-gateway.pins.spec.ts:60-84`, `metrics-gear-menu.spec.ts:47-59`, `app.component.spec.ts:2092-2114`).
+
+---
+
 ## Tasks
 
 ### Task 4.1 — Report path convention + run_id (D-B)
-- **Description:** Establish `.agents/maintenancer/RESULTS/` as the durable report dir (precedent: `.agents/tester/RESULTS/` dated-file house pattern). Three artifacts per run: `run-<run_id>.md` (human-readable report + recommendations), `receipt-<run_id>.md` (machine-readable receipt), `INDEX.md` (chronological ledger). `run_id = ckpt-YYYYMMDD_HHMMSSffffff-<hex8>` — format is `ckpt-` + UTC microsecond timestamp + `secrets.token_hex(4)` suffix (`daemon/services/maintenance_run_identity.py:6,34-37,46-47`). **D-H:** run_id IS single-sourced from `new_maintenance_run_id()` — do NOT switch authorities. Because the receipt writer is a worker child in an agent turn (it cannot invoke daemon Python as a function), use these agent-side mint mechanics:
-  - **PRIMARY mint path:** the child shells out to the pure helper — `cd <repo-checkout> && python3 -c "from daemon.services.maintenance_run_identity import new_maintenance_run_id; print(new_maintenance_run_id())"`. Single-sourcing is preserved (format changes propagate from the one module); the helper is pure (stdlib only — timestamp + `secrets.token_hex(4)`); no daemon runtime is needed, just the package importable from the checkout. **Task note:** implementer verifies the module has NO import-time config/DB side effects and pins that in P5 (import-purity check).
-  - **FALLBACK (documented, same task):** if the import is unavailable in the executing context, bash format-spec mint `ckpt-$(date -u +%Y%m%d_%H%M%S%6N)-$(openssl rand -hex 4)` matching the canonical regex — documented as drift-risk-bounded (regex-pinned by the P5 run_id shape pin already listed in the Verification plan).
-  - **INDEX.md dedup by run_id covers both paths** — already in Task 4.4; keep unchanged.
+- **Description:** Establish `.agents/maintenancer/RESULTS/` as the durable report dir (precedent: `.agents/tester/RESULTS/` dated-file house pattern). Three artifacts per run: `run-<run_id>.md` (human-readable report + recommendations), `receipt-<run_id>.md` (machine-readable receipt), `INDEX.md` (chronological ledger). `run_id = ckpt-YYYYMMDD_HHMMSSffffff-<hex8>` — format is `ckpt-` + UTC microsecond timestamp + `secrets.token_hex(4)` suffix (`daemon/services/maintenance_run_identity.py:6,34-37,46-47`). **BR-14 (D-H aligned):** run_id single authority = the report-writer child — strike any seat-mint step (the seat has no bash/filesystem). The writer carries a `run_token` in its dispatch task; re-dispatches reuse it (INDEX dedup survives re-mints). Mint mechanics (agent-side):
+  - **PRIMARY mint path:** the child shells out to the pure helper via the daemon venv interpreter (bare `python3` FAILS on this host — ModuleNotFoundError sqlalchemy): `cd <repo-checkout> && /home/nea/ensemble-src/.venv/bin/python -c "from daemon.services.maintenance_run_identity import new_maintenance_run_id; print(new_maintenance_run_id())"`. Single-sourcing preserved (format changes propagate from one module); the helper module is pure stdlib, but the IMPORT CHAIN is not (KMS filter installs at import) — the venv works but costs ~6.5s. **Task note:** implementer verifies the module has NO import-time config/DB side effects and pins that in P5 (import-purity check).
+  - **FALLBACK (BINDING rung in the skill body):** if the import is unavailable in the executing context, bash format-spec mint `ckpt-$(date -u +%Y%m%d_%H%M%S%6N)-$(openssl rand -hex 4)` matching the canonical regex — drift-risk-bounded (regex-pinned by the P5 run_id shape pin already listed in the Verification plan). Rows carry the run_id.
+  - **INDEX.md dedup by run_id covers both paths (and re-dispatches via run_token)** — already in Task 4.4; keep unchanged.
   Use `.md` only — `.log` is gitignored.
 - **Touch points:** convention documented in `run-report-writer` skill body (Phase 2 artifact) and here; no new code file in-repo for the path itself.
 - **Verification:** path uses `.md`; run_id matches the helper's regex; INDEX is chronological by run_id prefix (lexicographic = chronological, per helper docstring :36-37).
@@ -88,10 +101,10 @@
 - **Verification:** receipt parses; all five lanes present with statuses; disk lane has both bytes+inodes; three recommendation classes present; trigger_type in the closed set.
 - **Agent hint:** `worker` (report writer child).
 
-### Task 4.4 — INDEX.md format
-- **Description:** Chronological table, newest first or last (state the choice), columns: `run_id | date | trigger_type | overall_status | report_path | receipt_path`. Append-only; one row per run; ordered by run_id prefix (lexicographic = chronological). Idempotence: re-running a run_id must not duplicate its INDEX row (dedup by run_id).
+### Task 4.4 — INDEX.md format (BR-16b)
+- **Description:** Chronological table, newest first or last (state the choice), columns: `run_id | date | trigger_type | overall_status | report_path | receipt_path`. Append-only; one row per run; ordered by run_id prefix (lexicographic = chronological). **BR-16b:** INDEX appends via `write_file(append=True)` (in-process lock + tail read-back, `daemon/tools/filesystem.py:1570-1590`) — NEVER `bash >>`. Rows carry the run_id. Idempotence: re-running a run_id must not duplicate its INDEX row (dedup by run_id; covers re-dispatches via the run_token).
 - **Touch points:** `run-report-writer` skill body; format documented here.
-- **Verification:** INDEX rows sorted; each run_id appears once; paths are absolute or repo-relative under `.agents/maintenancer/RESULTS/`.
+- **Verification:** INDEX rows sorted; each run_id appears once; paths are absolute or repo-relative under `.agents/maintenancer/RESULTS/`; no `bash >>` in the writer skill; append uses the locked helper.
 - **Agent hint:** `worker` (report writer child).
 
 ### Task 4.5 — D-C justification (no DB) — state, do not re-litigate
@@ -100,23 +113,29 @@
 - **Verification:** no migration file created for this system; no `maintenance_runs` write path in the design.
 - **Agent hint:** `doc-writer` (record only).
 
-### Task 4.6 — D-D manual trigger: canonical path + invocation + receipt
-- **Description:** Canonical path = scheduler ONE-SHOT at `run_at=now` targeting `maintenancer`, same dispatch as the weekly chain. Ari invokes via the `task_schedule` tool surface (`daemon/tools/scheduling.py:165-189`): `task_schedule(label=..., message=..., when=<now ISO 8601>, recurrence="once", agent_id="maintenancer")`. Capability VERIFIED in-repo: `TaskScheduleInput` supports `recurrence="once"` with ISO-8601 `when` (`:93-94`), `agent_id` targeting (`:98,175`), and past/near-now one-shots are handled — the adapter fires them immediately within the lateness cap or skips, and the operator reads truth from executions history (`daemon/services/scheduling_service.py:491-493`). Receipt `trigger_type=manual` derived from a requester/origin marker on the manual schedule row (the row carries the requester; the report writer reads that marker). Fallback: direct `send_message` to a maintenancer instance (documented, but NOT canonical). Trigger mechanics detail lives in `phase1-plan.md (sibling)` — cross-ref only.
-- **Touch points:** this plan (exact invocation + receipt); `phase1-plan.md (sibling)` cross-ref for mechanics; Ari's invocation documented as a runbook note (no Ari prompt edit — out of lane).
-- **Verification:** invocation uses recurrence=once + agent_id=maintenancer; receipt trigger_type=manual; fallback documented; no contradiction with scheduling.py (verified above).
+### Task 4.6 — D-D manual trigger: canonical path + invocation + receipt (trigger_type derivation owned here)
+- **Description:** Canonical path = scheduler ONE-SHOT at `run_at=now` targeting `maintenancer`, same dispatch as the weekly chain. Ari invokes via the `task_schedule` tool surface (`daemon/tools/scheduling.py:165-189`): `task_schedule(label=..., message=..., when=<now ISO 8601>, recurrence="once", agent_id="maintenancer")`. Capability VERIFIED in-repo: `TaskScheduleInput` supports `recurrence="once"` with ISO-8601 `when` (`:93-94`), `agent_id` targeting (`:98,175`), and past/near-now one-shots are handled — the adapter fires them immediately within the lateness cap or skips, and the operator reads truth from executions history (`daemon/services/scheduling_service.py:491-493`). **trigger_type marker — ONE owner (planner ruling): P4 owns the exact field spec; P1 cross-references this derivation without redefining it.** Derivation (no new field): `config.chain` present ⇒ `scheduled`; `config.chain` absent + `creator_instance_id` present ⇒ `manual`. The chain row is code-seeded so it always carries `chain`; manual `task_schedule` rows never do (addendum A5(a) proves they cannot). The report writer reads the dispatching row's config to derive `trigger_type`. Fallback: direct `send_message` to a maintenancer instance (documented, but NOT canonical). Trigger mechanics detail lives in `phase1-plan.md (sibling)` — cross-ref only.
+- **Touch points:** this plan (exact invocation + receipt + derivation spec); `phase1-plan.md (sibling)` cross-ref for mechanics; Ari's invocation documented as a runbook note (no Ari prompt edit — out of lane).
+- **Verification:** invocation uses recurrence=once + agent_id=maintenancer; receipt trigger_type derived per the rule above (config.chain present ⇒ scheduled; absent + creator_instance_id present ⇒ manual); fallback documented; no contradiction with scheduling.py (verified above).
 - **Agent hint:** `doc-writer` (runbook note); trigger mechanics are sibling Phase 1.
 
 ### Task 4.7 — D-E FE wiring: gear-menu entry + lazy route + view + BE list route + specs
 - **Description:**
-  1. **Gear-menu entry:** add a static `settingsMenuItems` entry in `frontend/src/app/app.ts` (array at `:566-597`), placed AFTER `Metrics` (`:596`) and BEFORE the conditional Database/Maintenance `settingsMenuItems.update(...)` appends (`:838-854`), so those appends stay at the menu tail. GEAR MENU ONLY — no top-level header link (header nav is hardcoded in `app.html:11-39`; do not touch it). Follow the idempotence guard pattern (`app.ts:841` `.some(i => i.route === ...)`) if using a conditional-append; a static entry is simpler and matches MCP Gateway/Metrics.
+  1. **Gear-menu entry (BR-19):** add a static `settingsMenuItems` entry in `frontend/src/app/app.ts` (array at `:566-597`), placed AFTER `Metrics` (`:596`) and BEFORE the conditional appends — TWO of them: Database (`app.ts:797`, NO idempotence guard) and Maintenance (`:842`, route-keyed guard). `dbUpdateIdx` in every pin spec resolves to the FIRST (Database, `:797`). GEAR MENU ONLY — no top-level header link (header nav is hardcoded in `app.html:11-39`; do not touch it). Follow the idempotence guard pattern (`app.ts:841` `.some(i => i.route === ...)`) if using a conditional-append; a static entry is simpler and matches MCP Gateway/Metrics.
   2. **Lazy `/report` route:** add `{ path: 'report', loadComponent: () => import(...).then(m => m.ReportComponent), title: '...' }` in `frontend/src/app/app.routes.ts` BEFORE the catch-all `**` (`:225`). Do NOT host under the Maintenance shell (`maintenance/checkpoint-cleanup` at `:214-219` uses `maintenanceAvailabilityGuard` which hides it unless checkpoint-cleanup ready).
-  3. **Report view component:** new `frontend/src/app/pages/report/report.component.ts` (+ html/scss/spec) — read-only list of runs from the BE list route + render selected report; mirror the MCP Gateway read-only page pattern (`frontend/src/app/pages/mcps-gateway/`).
-  4. **BE read-only list route:** add a GET-only route that lists report artifacts (run_id/date/status/paths) from `.agents/maintenancer/RESULTS/INDEX.md` or a dir scan — mirror the tool-usage/metrics read-only door posture (`daemon/routers/tool_usage.py:39-50` GET-only, auth scopes). live_views has NO list endpoint (`daemon/services/live_views.py:36-37` GET/HEAD only) so a dedicated read route is required.
-  5. **Spec updates (ordering pins):** update `frontend/src/app/pages/mcps-gateway/mcps-gateway.pins.spec.ts` and `frontend/src/app/pages/metrics/metrics-gear-menu.spec.ts` (both pin the `MCP Gateway → Metrics → (conditional appends)` order at metrics-gear-menu.spec.ts:47-59) and `frontend/src/app/app.component.spec.ts` (gear-menu/snapshots pins at :2092-2121) to include the new Report entry in the ordering assertions. Add a report page pin spec mirroring the gateway pins (lazy route + gear entry + no header link + read-only service).
+  3. **Report view component (BR-18):** new `frontend/src/app/pages/report/report.component.ts` (+ html/scss/spec) — read-only list of runs from the BE list route + render selected report; mirror the MCP Gateway read-only page pattern (`frontend/src/app/pages/mcps-gateway/`). **Content access = register `.agents/maintenancer/RESULTS/` as a live_views root** (reuses the traversal guard + `.md` renderer; no new path-serving surface). **Response shape = view URLs** (`{run_id, trigger_type, started_at, ended_at, overall_status, report_view_url, receipt_view_url}`), NOT repo-relative paths. (Architect rulings §9.3/§9.4.)
+  4. **BE read-only list route (BR-17):** add a GET-only route that lists report artifacts — mirror the tool-usage/metrics read-only door posture (`daemon/routers/tool_usage.py:39-50` GET-only, auth scopes). live_views has NO list endpoint (`daemon/services/live_views.py:36-37` GET/HEAD only) so a dedicated read route is required. Safety contract: fixed root resolved at daemon startup; `run_id` param validated `^ckpt-\d{8}_\d{12}-[0-9a-f]{8}$` and used ONLY as a filename component under the fixed root + `os.path.realpath` containment (defense-in-depth, mirroring `live_views.py:30-35`); GET(+HEAD)-only with the verb pinned by a spec (`.not.toMatch(/\.(post|put|delete|patch)\(/)` posture); scope `maintenance:read` (`daemon/auth/scopes.py:76`); registration in `daemon/api.py` beside `tool_usage_router`.
+  5. **Spec updates (ordering pins, BR-19):** update `frontend/src/app/pages/mcps-gateway/mcps-gateway.pins.spec.ts` (`:60-84`) and `frontend/src/app/pages/metrics/metrics-gear-menu.spec.ts` (`:47-59`) (both pin the `MCP Gateway → Metrics → (conditional appends)` order) and `frontend/src/app/app.component.spec.ts` (`:2092-2114`) to include the new Report entry in the ordering assertions. Add a report page pin spec mirroring the gateway pins (lazy route + gear entry + no header link + read-only service). **TWO conditional appends exist** (Database `app.ts:797` — NO idempotence guard; Maintenance `:842` — route-keyed guard); `dbUpdateIdx` in every pin spec resolves to the FIRST (Database); static Report sits after Metrics (`:596`) so `metricsIdx < reportIdx < dbUpdateIdx` holds. Task 4.7.5 must name BOTH appends.
   - **FE ordering note:** the new entry goes AFTER Metrics and BEFORE the conditional appends; every existing ordering pin that asserts `... < dbUpdateIdx` must be extended to assert `reportIdx < dbUpdateIdx` and `metricsIdx < reportIdx`.
 - **Touch points:** `frontend/src/app/app.ts`, `frontend/src/app/app.routes.ts`, `frontend/src/app/pages/report/` (new), a new daemon router module for the list route + its registration, `mcps-gateway.pins.spec.ts`, `metrics-gear-menu.spec.ts`, `app.component.spec.ts`, new report pin spec.
 - **Verification:** `/report` reachable via gear menu only; no header link; lazy route before wildcard; BE route GET-only; all ordering pins green with Report in the chain; FE deferred-part NOTHING (fully wired).
 - **Agent hint:** `coder` (FE + BE), `tester` (P5 pins).
+
+### Task 4.8 — Seeder creates RESULTS dir at first boot (BR-16)
+- **Description:** BR-16 pins the artifact root as the LIVE-INSTALL daemon project root `.agents/maintenancer/RESULTS/` (never a worktree — worktrees are report-only per R8/R9; absolute `write_file` bypasses the boundary check, so the root must be stated ONCE in the `run-report-writer` skill). The dir does NOT exist today (worktree: no `.agents/maintenancer/`; live install `.agents/` has only `shared/`). Add a seeder step that creates `.agents/maintenancer/RESULTS/` at first boot. The FE list route (Task 4.7.4) and the live_views root (BR-18) read THE SAME root.
+- **Touch points:** seeder module (new or existing boot hook, e.g. alongside `InstanceManager.__init__`/`manager.py:1212-1217` precedent); `run-report-writer` skill body (states the root once); FE list route (reads the same root).
+- **Verification:** dir exists after a fresh boot; root is identical across seeder, writer skill, FE list route, and live_views registration; no worktree path is ever used as the root.
+- **Agent hint:** `coder` / `devops`.
 
 ---
 
@@ -137,29 +156,36 @@
 
 ## Acceptance criteria
 
-- Report + receipt + INDEX written per run via worker child with absolute paths; `.md` only; run_id matches `ckpt-YYYYMMDD_HHMMSSffffff-<hex8>`.
-- Receipt has run id, trigger type scheduled|manual, start/end timestamps, five per-lane results + statuses, three recommendation classes, bytes AND inodes for disk lane.
-- INDEX chronological, dedup by run_id.
+- Report + receipt + INDEX written per run via worker child with absolute paths; `.md` only; run_id matches `ckpt-YYYYMMDD_HHMMSSffffff-<hex8>` (minted by the writer via venv PRIMARY or bash FALLBACK; run_token reuses identity across re-dispatches).
+- Receipt has run id, trigger type scheduled|manual (derived: `config.chain` present ⇒ scheduled; absent + `creator_instance_id` present ⇒ manual), start/end timestamps, five per-lane results + statuses, three recommendation classes, bytes AND inodes for disk lane.
+- INDEX chronological, dedup by run_id; appends via `write_file(append=True)` (BR-16b), never `bash >>`; rows carry run_id.
 - D-C justification recorded; no DB tables/migrations; no `maintenance_runs` writes.
-- D-D canonical manual trigger documented with exact `task_schedule` invocation + receipt trigger_type=manual + fallback; cross-ref Phase 1.
-- D-E: gear-menu Report entry (after Metrics, before appends, no header link), lazy `/report` route before wildcard, report view component, GET-only BE list route, all ordering pins updated; nothing deferred.
-- Report ALWAYS written incl. total-failure case.
+- Artifact root pinned (BR-16): live-install daemon project root `.agents/maintenancer/RESULTS/`, created by seeder at first boot; FE list route + live_views root read the SAME root; never a worktree.
+- BE list route (BR-17): fixed root + run_id regex + realpath containment + GET(+HEAD)-only + `maintenance:read` scope + registration in `daemon/api.py` beside `tool_usage_router`.
+- Content access (BR-18): `.agents/maintenancer/RESULTS/` registered as a live_views root; list response = view URLs (`run_id, trigger_type, started_at, ended_at, overall_status, report_view_url, receipt_view_url`).
+- D-D canonical manual trigger documented with exact `task_schedule` invocation + receipt trigger_type derivation + fallback; cross-ref Phase 1.
+- D-E: gear-menu Report entry (after Metrics, before BOTH conditional appends, no header link), lazy `/report` route before wildcard, report view component, GET-only BE list route, all ordering pins updated (three verified spec files + report pin); nothing deferred. `dbUpdateIdx` resolves to the FIRST (Database) append.
+- Report ALWAYS written incl. total-failure case (BR-13 ladder L0→L1→L2→L3).
 
 ---
 
 ## Verification plan (pins this phase needs; P5 sibling owns the suite)
 
-- Report-ALWAYS-on-total-failure pin (named in Phase 2 and here) — assert report/receipt/INDEX exist even when all lanes fail.
-- Receipt schema pin — closed trigger_type set, five lanes, disk bytes+inodes, three recommendation classes.
-- run_id shape pin — regex `ckpt-\d{8}_\d{6}\d{6}-[0-9a-f]{8}` (mirror any existing maintenance_run_identity test).
+- Report-ALWAYS-on-total-failure pin (named in Phase 2 and here) — assert report/receipt/INDEX exist even when all lanes fail (BR-13 ladder L0→L1→L2→L3).
+- Receipt schema pin — closed trigger_type set, five lanes, disk bytes+inodes, three recommendation classes; trigger_type derived per BR (config.chain present ⇒ scheduled; absent + creator_instance_id present ⇒ manual).
+- run_id shape pin — regex `^ckpt-\d{8}_\d{12}-[0-9a-f]{8}$` (BR-17); mint via venv PRIMARY or bash FALLBACK; import-purity check (P5).
 - D-C pin — no migration file for this system; no `maintenance_runs` write path.
-- FE pins — update `mcps-gateway.pins.spec.ts`, `metrics-gear-menu.spec.ts`, `app.component.spec.ts`; new report pin spec (lazy route + gear entry + no header link + GET-only service).
-- BE list route pin — GET-only, no write verb, auth scopes.
+- Artifact root pin (BR-16) — seeder creates `.agents/maintenancer/RESULTS/` at first boot; FE list route + live_views root read the SAME root; never a worktree.
+- BE list route pin (BR-17) — GET-only, no write verb, auth scopes, run_id regex + realpath containment, registration in `daemon/api.py` beside `tool_usage_router`.
+- Content access pin (BR-18) — `.agents/maintenancer/RESULTS/` registered as a live_views root; list response = view URLs (`run_id, trigger_type, started_at, ended_at, overall_status, report_view_url, receipt_view_url`).
+- FE pins (BR-19) — update `mcps-gateway.pins.spec.ts` (`:60-84`), `metrics-gear-menu.spec.ts` (`:47-59`), `app.component.spec.ts` (`:2092-2114`); new report pin spec (lazy route + gear entry + no header link + GET-only service); `dbUpdateIdx` resolves to the FIRST (Database) append; `metricsIdx < reportIdx < dbUpdateIdx`.
+- INDEX append pin (BR-16b) — `write_file(append=True)`, never `bash >>`.
 
 ---
 
 ## Open questions
 
-- **BE list route registration:** a new daemon router module must be registered in the app (where routers are wired). Confirm the canonical registration site during implementation; this plan names the requirement but does not pin the exact `create_app` line (not yet verified in-repo).
-- **Manual origin marker:** the exact field on the manual schedule row that carries requester/origin (for `trigger_type=manual` derivation) is a Phase 1 (sibling) detail; P4 assumes it is readable by the report writer. Cross-ref `phase1-plan.md (sibling)`; no blocker to planning.
+- **BE list route registration (resolved by BR-17):** registration pinned in `daemon/api.py` beside `tool_usage_router`; fixed root resolved at daemon startup. No open item remains.
+- **Manual trigger_type derivation (resolved):** P4 owns the exact field spec (config.chain present ⇒ scheduled; absent + creator_instance_id present ⇒ manual); P1 cross-references this derivation without redefining it. No open item remains.
+- **Manual origin marker (resolved):** derived from the dispatching row's config (BR above); no separate marker field needed.
 - **No contradiction found** with the one-shot-at-now-to-agent capability — verified in-repo (scheduling.py + scheduling_service.py). Nothing to escalate.

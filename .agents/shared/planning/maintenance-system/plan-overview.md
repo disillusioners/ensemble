@@ -3,7 +3,7 @@
 **Board:** wi-73d81a32 · **PM ledger:** ENSEMBLE-35 · **Status:** PLANNED
 **Worktree:** `/home/nea/ensemble-src-wt-maintsys` · branch `feature/central-maintenance-system` · base `origin/latest @ 1b9797ab7` (staged v0.31.26 source tree)
 **Planned:** 2026-11-22 (planner lane; research: 3 explorers, planning: 2 workers, synthesis: planner)
-**Nominal release slot:** v0.31.27 (RE-CHECK at tag time — R7)
+**Nominal release slot:** v0.31.27 (RE-CHECK at tag time — R7 / BR-20)
 
 ---
 
@@ -55,7 +55,9 @@ flowchart TD
 
 ## 4. Decision index
 
-All rulings and decisions are recorded with evidence in **`decisions.md`** (same directory): LEADER-RULING rows (Emperor design changes 1–3, R1–R9 — fixed) and PLANNER-DECISION rows PD-1…PD-11 (phase cut, FE wire-vs-seam, manual path, report schema, DB-vs-files, report authorship, knobs home, chain identity/re-arm seam, run_id minting, open-question adjudications, hbk scope encoding).
+All rulings and decisions are recorded with evidence in **`decisions.md`** (same directory): LEADER-RULING rows (Emperor design changes 1–3, R1–R9, DP-1, OQ3, AMENDMENT-1 — fixed) and PLANNER-DECISION rows PD-1…PD-11 (phase cut, FE wire-vs-seam, manual path, report schema, DB-vs-files, report authorship, knobs home, chain identity/re-arm seam, run_id minting, open-question adjudications, hbk scope encoding).
+
+**Binding-requirements layer (BR-1..19 + DP-1)** — folded into the carrying phase docs as labeled `BR-N` blocks (single source of truth; the architect's `architecture-recommendation.md`, commit `28e3b7590`, remains the verdict record). BR-20 (staging re-check discipline) rides P5 T5.7 and this overview's release line. Supersessions of planner decisions are recorded in `decisions.md` §D.
 
 ## 5. Risks (top set, deduplicated across phases — full tables in each phase file)
 
@@ -69,6 +71,11 @@ All rulings and decisions are recorded with evidence in **`decisions.md`** (same
 | FE ordering-pin specs break on menu append | low | Spec updates listed as P4 tasks (gear-menu tail-append convention honored) |
 | Release-slot collision (sibling hbk lane stages first) / base drift | med | R7: re-check tags at tag time, next free slot, rebase onto staged source_commit; upstream `86e196576` deletes `test_scheduler_deferred_delivery_pin.py` — interaction noted in P5 |
 | Upstream test deletions vs our new scheduler tests | low | P5 rebase discipline + interaction note |
+| Wedged lane / wedged re-dispatch parks the run forever (no time bound) | high | BR-11 event-driven lane deadline via EXISTING watchdogs (WAITING_CHILDREN hang watchdog ≤3600s; long-tool nudge) — valve → `[incomplete]` → proceed; covers initial dispatch + single re-dispatch; no polling |
+| Reportless week (orchestrator dies mid-run; both writer rungs fail) | med | BR-13 L0→L3 writer ladder + DP-1 (ACCEPTED — surfaced, documented terminal); BR-15 boot-guard detector + lane-4 orphan listing — never silent |
+| >24h outage ⇒ idempotency-key TTL expiry ⇒ real second run | low | BR-2 documented at-least-once semantics (two run_ids/reports tolerated by design); TTL deliberately NOT widened |
+| tz-knob gap shift lands the instant outside the window (non-ICT zones) | low | BR-5 picker consumes the `anchor_local_to_utc` warning and fails closed outside `[start,end)`; P5 DST-zone test leg (America/New_York gap+fold) |
+| Deliberately cancelled chain resurrected by the guard | med | BR-3 archive-aware recreate: `cancelled` ⇒ never revive; `stopped` ⇒ revive IFF the archived config snapshot carries a `chain` block; never re-archive over a stale snapshot |
 
 ## 6. Out of scope
 
@@ -92,6 +99,7 @@ All rulings and decisions are recorded with evidence in **`decisions.md`** (same
 | `phase5-plan.md` | worker (plan-creation) | tests, verification map, staging |
 | `plan-overview.md` | planner (synthesis) | this file |
 | `decisions.md` | planner (adjudication log) | LEADER-RULING vs PLANNER-DECISION with evidence |
+| `architecture-recommendation.md` | architect (validation lane, commit `28e3b7590`) | verdict record: BR-1..20 binding requirements, focus evidence, §9 architect rulings, DP-1 |
 
 ## 8. Verification & staging
 

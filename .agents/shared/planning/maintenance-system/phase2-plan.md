@@ -9,7 +9,7 @@
 ## Scope
 
 ### In scope
-- `agents/maintenancer/meta.json`: add the `"instance"` tool category (plus `subtree_messages` / `subtree_status` read surfaces per leader precedent); keep the `deny` list unchanged; map the three existing `team_members` to lane roles.
+- `agents/maintenancer/meta.json`: grant four literal tool names (`spawn_instance`, `send_message`, `subtree_messages`, `subtree_status`) per BR-8 (the seat already holds `instance_read`+`instance_ops`); deny list byte-unchanged; map the three existing `team_members` to lane roles. BR-9 run-containment Cardinal rule lands in the same change.
 - `agents/maintenancer/rule.md` + `workflow.md`: orchestrator rule/workflow for weekly-run dispatch, per-lane status capture, and the report-ALWAYS invariant (including total-failure), staged in-repo.
 - Six new per-lane skills under `agents/maintenancer/skills-template/` + matching `skill-set.yaml` rows: `lane-disk-sweep`, `lane-pok-sweep`, `lane-skill-check`, `lane-abnormality-check`, `lane-metrics-watch`, `run-report-writer`.
 - Failure-isolation design: per-lane child dispatch, per-lane status capture, report always authored even on total lane failure.
@@ -41,13 +41,27 @@
 
 ---
 
+## Binding requirements (architect addendum §7 — BR-8..BR-14)
+
+Each BR below is a labeled, grep-verifiable block carrying its operative text. The addendum stays as the verdict record.
+
+- **BR-8** Grant literal tool names, NOT the `"instance"` category: allow += `spawn_instance`, `send_message`, `subtree_messages`, `subtree_status`; deny byte-unchanged; omit `terminate_instance`/`pause_instance`/`resume_instance`/`set_instance_tunable`/council quartet/`list_instances`/`get_instance_info` (fleet reads already held via `instance_read`; audited kill already held via `instance_ops`). Correct T2.1's premise (seat already holds `instance_read`+`instance_ops`). Note: the allow grammar accepts literal tool names (`resolve_tool_filter`, `daemon/tools/instance.py:455`); `"instance"` is NOT in `PRIVILEGED_TOOL_CATEGORIES` — literal grants carry no category-bypass hazard.
+- **BR-9** Cardinal-tier run-containment rule (rule.md + workflow mirror), landing in the SAME change as the grant: touch ONLY children of THIS run; never message/pause/resume/terminate instances not spawned this run; wedged-child kill via audited `instance_terminate` only; never pass `join_room`/`member_name` at spawn.
+- **BR-10** P5 seat pins — exact-set deny == `{git_commit, edit_file, write_file}`; resolved-surface assertion (via `resolve_tool_filter`) EXCLUDES `terminate_instance`, `pause_instance`, `resume_instance`, `set_instance_tunable`, `convene_council*`, `spawn_councilor`; one workflow line: effective spawnable set is 4 (kb-writer implied by `knowledge` via `TOOL_REQUIRED_AGENTS`, `daemon/tools/_auth.py:35`).
+- **BR-11** Event-driven lane deadline — a lane is `failed-timeout` when a parent wake carries `source=system:watchdog` (`daemon/services/waiting_children_watchdog.py:627`, ≤3600s threshold+cadence) or `system=long-tool-nudge` (`daemon/services/long_tool_nudge.py:1471-1475`) naming that child; apply the valve once, else `[incomplete]`, then proceed. Deadline covers the initial dispatch AND its single re-dispatch. Report-writer fires on lane resolution OR global deadline (same wake mechanism bounds the writer wait ≈2h). NO polling (`workflow.md:71` forbids it). Loop-breaker (threshold 3, `daemon/config.py:6648`) and bash 1800s cap (`daemon/tools/bash.py:1283`) already bound the two likeliest wedge shapes — note them.
+- **BR-12** Lane-status mapping table (P2 T2.4): child `ERROR` ⇒ `failed`; silent-past-deadline ⇒ `degraded` + `[incomplete]`; `COMPLETED` ⇒ `ok|degraded` per its result block.
+- **BR-13** Report-writer ladder (pre-decided; replaces the "named, not chosen" fallback): L0 dispatch, write order run→receipt→INDEX last · L1 crash/wedge ⇒ ONE fresh minimal-stub writer (no skill load) · L2 ⇒ ONE bare worker child, no load_skill, skeleton all-failed + best-effort receipt/INDEX (this IS the scoped-write fallback, staying a CHILD — PD-6 seat-non-mutating intact) · L3 accepted documented reportless terminal, surfaced by BR-15. The seat never writes (PD-6 intact). DP-1 ruling row (verbatim, lane leader 2026-11-22, ACCEPTED): "BR-13 L3 accepts a surfaced, documented reportless week when both writer rungs fail. Rationale: failure-isolation contract = a lane failure never kills the report; double independent writer failure is beyond contract; BR-15 ensures the residual is surfaced (detector + orphan listing), never silent."
+- **BR-14** run_id single authority = the report-writer child. Strike the seat-mint step in P2 T2.4 (the seat has no bash/filesystem). Name the daemon venv interpreter (`/home/nea/ensemble-src/.venv/bin/python` — bare `python3` fails on this host: ModuleNotFoundError sqlalchemy). Bash fallback `ckpt-$(date -u +%Y%m%d_%H%M%S%6N)-$(openssl rand -hex 4)` is a BINDING rung in the skill body. Carry a `run_token` in the dispatch task; re-dispatches reuse it (INDEX dedup survives re-mints).
+
+---
+
 ## Tasks
 
-### Task 2.1 — Add `instance` + subtree read categories to `meta.json`
-- **Description:** Add `"instance"` to `tools.allow` so the seat can `spawn_instance` / `send_message` worker children, plus `"subtree_messages"` and `"subtree_status"` for subtree status reads (mirrors `agents/leader/meta.json:19-21`). Keep `tools.deny` EXACTLY `["git_commit", "edit_file", "write_file"]` (verified at `agents/maintenancer/meta.json:26`) — the seat must remain non-mutating per D-A. Do NOT add `instance_read`/`instance_ops` semantics here: those are the nest-ops fleet surfaces (`daemon/tools/_tool_registry.py:94-118`, 4 read + 6 act tools), not the spawn/send child surface; the spawn/send surface is the `"instance"` category.
-- **Touch points:** `agents/maintenancer/meta.json` (`tools.allow`, lines 12-25; `tools.deny` line 26 unchanged).
-- **Verification:** JSON parses; `"instance"`, `"subtree_messages"`, `"subtree_status"` present in allow; deny list byte-unchanged; version bump considered per house convention.
-- **Agent hint:** `coder` (config-only edit) — but note this is a plan; the implementing instance does the edit.
+### Task 2.1 — Grant four literal tool names to `meta.json` (BR-8)
+- **Description:** BR-8 corrects the premise: the seat ALREADY holds `instance_read` + `instance_ops` (`agents/maintenancer/meta.json:19-20`). Do NOT grant the whole `"instance"` category (14 tools). Instead grant four literal names: allow += `spawn_instance`, `send_message`, `subtree_messages`, `subtree_status`. Keep `tools.deny` EXACTLY `["git_commit", "edit_file", "write_file"]` (verified at `agents/maintenancer/meta.json:26`) — deny byte-unchanged. OMIT by omission: `terminate_instance`, `pause_instance`, `resume_instance`, `set_instance_tunable`, the council quartet, `list_instances`, `get_instance_info` (fleet reads already held via `instance_read`; the audited wedged-child kill already held via `instance_ops`). Note: the allow grammar accepts literal tool names (`resolve_tool_filter`, `daemon/tools/instance.py:455`); `"instance"` is NOT in `PRIVILEGED_TOOL_CATEGORIES` — literal grants carry no category-bypass hazard. BR-9 (run-containment Cardinal rule) lands in the SAME change as this grant.
+- **Touch points:** `agents/maintenancer/meta.json` (`tools.allow` lines 12-25; `tools.deny` line 26 unchanged).
+- **Verification:** JSON parses; the four literal names present in allow; deny list byte-unchanged; resolved-surface assertion (BR-10) excludes the omitted names.
+- **Agent hint:** `coder` (config-only edit).
 
 ### Task 2.2 — Map team_members to lane roles
 - **Description:** Keep `team_members: ["explorer", "worker", "coder"]` (`agents/maintenancer/meta.json:28`) and document the mapping in `workflow.md`: `explorer` = read-only surveys (POK census reads, anomaly reads, skill-table reads, metrics digests); `worker` = bash sweeps + report/receipt/INDEX writing (the only member that writes, with ABSOLUTE paths, per D-A); `coder` = fix sketches only (route-to-lane recommendations, never applied inline). No new team members needed — the three existing roles cover all five lanes + report writer.
@@ -55,16 +69,16 @@
 - **Verification:** workflow names all three roles with their lane responsibilities; no role is granted a capability outside its `meta.json`.
 - **Agent hint:** `doc-writer` / `coder`.
 
-### Task 2.3 — Orchestrator `rule.md` additions (weekly-run cardinal rules)
-- **Description:** Add cardinal/guideline rules for the weekly run WITHOUT duplicating the END TURN invariant (already at `rule.md:7` and `workflow.md:69-73`). New rules: (a) the run dispatches five lanes + a report writer as isolated worker children; (b) each lane returns a status `ok|degraded|failed` + a result block; (c) REPORT ALWAYS written — even if every lane fails, the report writer child still runs with total-failure statuses; (d) report authorship goes to the `worker` child with ABSOLUTE paths (D-A), the seat never writes; (e) no idle gating — the run executes regardless of busyness (ruling). Keep report-sanity scrutiny (`rule.md:9`) and fan-in valve (`workflow.md:36-45`) intact.
-- **Touch points:** `agents/maintenancer/rule.md` (new rules section, ~lines 12-19 area, before the `---` at line 13 or as new Guidelines).
-- **Verification:** rules state report-ALWAYS incl. total failure; seat non-mutating preserved; no contradiction with Cardinal #3/#5.
+### Task 2.3 — Orchestrator `rule.md` additions (weekly-run cardinal rules + BR-9 run-containment)
+- **Description:** Add cardinal/guideline rules for the weekly run WITHOUT duplicating the END TURN invariant (already at `rule.md:7` and `workflow.md:69-73`). New rules: (a) the run dispatches five lanes + a report writer as isolated worker children; (b) each lane returns a status `ok|degraded|failed` + a result block; (c) REPORT ALWAYS written — even if every lane fails, the report writer child still runs with total-failure statuses; (d) report authorship goes to the `worker` child with ABSOLUTE paths (D-A), the seat never writes; (e) no idle gating — the run executes regardless of busyness (ruling). **BR-9 Cardinal-tier run-containment rule (lands in the SAME change as the grant, rule.md + workflow mirror):** touch ONLY children of THIS run; never message/pause/resume/terminate instances not spawned this run; wedged-child kill via audited `instance_terminate` only; never pass `join_room`/`member_name` at spawn. Keep report-sanity scrutiny (`rule.md:9`) and fan-in valve (`workflow.md:36-45`) intact.
+- **Touch points:** `agents/maintenancer/rule.md` (new rules section, ~lines 12-19 area, before the `---` at line 13 or as new Guidelines); mirror in `workflow.md`.
+- **Verification:** rules state report-ALWAYS incl. total failure; seat non-mutating preserved; run-containment Cardinal rule present in both rule.md and workflow.md; no contradiction with Cardinal #3/#5.
 - **Agent hint:** `coder` / `doc-writer`.
 
-### Task 2.4 — Orchestrator `workflow.md` additions (weekly-run dispatch flow)
-- **Description:** Extend the dispatch pattern (`workflow.md:19-32`, one skill per worker, spawn-then-send, END TURN) with a "Weekly Run" flow: (1) mint run_id (format from `daemon/services/maintenance_run_identity.py:6,30-47`, `ckpt-YYYYMMDD_HHMMSSffffff-<hex8>` — see P4 D-B); (2) dispatch up to 3 concurrent lane children per wave (concurrency cap at `workflow.md:29-32`), each with ONE `load_skill`, END TURN after each wave; (3) fan-in statuses via the existing fan-in escape valve (`workflow.md:36-45`, max re-dispatch = 1, then mark `[incomplete]`); (4) after all lanes resolve (ok/degraded/failed/incomplete), dispatch the `run-report-writer` child — this step is unconditional. Encode the **load_skill spawn contract**: `load_skill` rides `send_message` ONLY — spawn the child with no task first, then `send_message(..., load_skill="<one>")` while the child is free; NEVER pass the artifact in the task context (truncated at 4000 chars at the tool layer — pass file PATHS instead).
-- **Touch points:** `agents/maintenancer/workflow.md` (new "Weekly Run Flow" + "load_skill spawn contract" subsections).
-- **Verification:** flow makes the report-writer dispatch unconditional; path-passing rule stated; END TURN per wave preserved.
+### Task 2.4 — Orchestrator `workflow.md` additions (weekly-run dispatch flow + BR-11/BR-12/BR-13/BR-14)
+- **Description:** Extend the dispatch pattern (`workflow.md:19-32`, one skill per worker, spawn-then-send, END TURN) with a "Weekly Run" flow: (1) **BR-14: run_id single authority = the report-writer child** — STRIKE the seat-mint step (the seat has no bash/filesystem and cannot mint); carry a `run_token` in the dispatch task; the writer child mints via PRIMARY `python3` shell-out (see P4 D-H/Task 4.1) and re-dispatches reuse the `run_token` so INDEX dedup survives re-mints; (2) dispatch up to 3 concurrent lane children per wave (concurrency cap at `workflow.md:29-32`), each with ONE `load_skill`, END TURN after each wave; (3) fan-in statuses via the existing fan-in escape valve (`workflow.md:36-45`, max re-dispatch = 1, then mark `[incomplete]`); (4) **BR-12 lane-status mapping:** child `ERROR` ⇒ `failed`; silent-past-deadline ⇒ `degraded` + `[incomplete]`; `COMPLETED` ⇒ `ok|degraded` per its result block; (5) after all lanes resolve (ok/degraded/failed/incomplete), dispatch the `run-report-writer` child — this step is unconditional. **BR-11 event-driven lane deadline:** a lane is `failed-timeout` when a parent wake carries `source=system:watchdog` (`daemon/services/waiting_children_watchdog.py:627`, ≤3600s threshold+cadence) or `system=long-tool-nudge` (`daemon/services/long_tool_nudge.py:1471-1475`) naming that child; apply the valve once, else `[incomplete]`, then proceed. The deadline covers the initial dispatch AND its single re-dispatch. The report-writer fires on lane resolution OR the global deadline (the same wake mechanism bounds the writer wait ≈2h). NO polling (`workflow.md:71` forbids it). Loop-breaker (threshold 3, `daemon/config.py:6648`) and the bash 1800s cap (`daemon/tools/bash.py:1283`) already bound the two likeliest wedge shapes — note them. **BR-13 report-writer ladder (pre-decided, replaces the "named, not chosen" fallback):** L0 dispatch (write order run→receipt→INDEX last — crash leaves no half-ledger row) · L1 crash/wedge ⇒ ONE fresh minimal-stub writer (no skill load) · L2 ⇒ ONE bare worker child, no load_skill, skeleton all-failed + best-effort receipt/INDEX (this IS the scoped-write fallback, staying a CHILD — PD-6 seat-non-mutating intact) · L3 accepted documented reportless terminal, surfaced by BR-15. DP-1 ruling row (verbatim, lane leader 2026-11-22, ACCEPTED): "BR-13 L3 accepts a surfaced, documented reportless week when both writer rungs fail. Rationale: failure-isolation contract = a lane failure never kills the report; double independent writer failure is beyond contract; BR-15 ensures the residual is surfaced (detector + orphan listing), never silent." Encode the **load_skill spawn contract**: `load_skill` rides `send_message` ONLY — spawn the child with no task first, then `send_message(..., load_skill="<one>")` while the child is free; NEVER pass the artifact in the task context (truncated at 4000 chars at the tool layer — pass file PATHS instead).
+- **Touch points:** `agents/maintenancer/workflow.md` (new "Weekly Run Flow" + "load_skill spawn contract" + "run-containment" + "lane deadline" subsections); `run-report-writer` skill body carries the BR-13 ladder + BR-14 mint mechanics.
+- **Verification:** flow makes the report-writer dispatch unconditional; path-passing rule stated; END TURN per wave preserved; run-containment rule present; lane-status mapping table present; BR-13 ladder + DP-1 row verbatim; BR-14 run_token + venv + bash fallback present.
 - **Agent hint:** `coder` / `doc-writer`.
 
 ### Task 2.5 — Create six lane skill bodies under `skills-template/`
@@ -98,8 +112,8 @@
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Adding `"instance"` category grants broader spawn power to a seat with a deny list — must not also grant host-write | High | Keep `deny` byte-unchanged (Task 2.1); report writing stays in the `worker` child (D-A); verify with pin. |
-| Report-ALWAYS not guaranteed if the report-writer child itself fails | High | Fan-in valve marks child `[incomplete]` after 1 re-dispatch; report-writer dispatch is unconditional; spec a scoped-write fallback with tradeoffs if a child cannot write (D-A) — do not silently pick it. |
+| Granting spawn power to a seat with a deny list — must not also grant host-write (BR-8/BR-9) | High | Literal four-name grant only (no category); deny byte-unchanged; BR-9 run-containment Cardinal rule in SAME PR; verify via BR-10 pins. |
+| Report-ALWAYS not guaranteed if the report-writer child itself fails (BR-13) | High | BR-13 ladder L0→L1→L2→L3 (L2 is the pre-decided scoped-write fallback, stays a CHILD); DP-1 ruling row verbatim; BR-15 surfaces a reportless week; fan-in valve marks `[incomplete]` after 1 re-dispatch. |
 | Skill seeding misses a lane (body without manifest row or vice versa) | Medium | Version-consistency pin asserts set equality (Task 2.6/2.7). |
 | `load_skill` attached at spawn (wrong) → skill not loaded | Medium | Encode spawn-then-send contract explicitly (Task 2.4); detail-plan.md:976-986 precedent. |
 | In-repo prompt edits assumed live immediately | Medium | Flag post-promote DB adoption as operator step (R3); this lane stages only. |
@@ -109,23 +123,29 @@
 
 ## Acceptance criteria
 
-- `agents/maintenancer/meta.json` has `"instance"`, `"subtree_messages"`, `"subtree_status"` in allow; `deny` unchanged; JSON valid.
+- `agents/maintenancer/meta.json` grants the four literal names (`spawn_instance`, `send_message`, `subtree_messages`, `subtree_status`); deny byte-unchanged; JSON valid (BR-8).
+- BR-9 run-containment Cardinal rule present in `rule.md` + `workflow.md`.
+- BR-11 event-driven lane deadline + BR-12 lane-status mapping present in `workflow.md`.
+- BR-13 ladder + DP-1 row verbatim present in `workflow.md`/`run-report-writer` skill.
+- BR-14 run_token + venv interpreter + bash fallback present; no seat-mint step.
 - Six new skill bodies + six matching `skill-set.yaml` rows exist; version-consistency pin green.
-- `rule.md` / `workflow.md` encode: 5-lane + report-writer dispatch, per-lane status, report-ALWAYS incl. total failure, seat non-mutating, no idle gating, load_skill spawn contract, path-passing rule.
+- `rule.md` / `workflow.md` encode: 5-lane + report-writer dispatch, per-lane status, report-ALWAYS incl. total failure, seat non-mutating, no idle gating, load_skill spawn contract, path-passing rule, run-containment, lane deadline, status mapping, writer ladder.
 - Post-promote DB prompt adoption is explicitly flagged as an operator step (not done in-lane).
-- All four maintenancer pins stay green; new pins named for P5.
+- All four maintenancer pins stay green; new pins named for P5 (BR-10).
 
 ---
 
 ## Verification plan (pins this phase needs; P5 sibling owns the suite)
 
 - Extend/keep green: `tests/unit/test_maintenancer_skill_versions_consistent.py` (set equality + version match — must cover 6 new skills), `tests/unit/test_maintenancer_team_members_within_team.py`, `tests/unit/test_maintenancer_report_scrutiny.py`, `tests/unit/test_maintenancer_fan_in_valve.py`.
-- NEW pin required (name for P5): report-ALWAYS-on-total-failure — assert the workflow dispatch of the report writer is unconditional and the seat `deny` list is unchanged.
+- NEW pin required (name for P5, BR-10): exact-set deny == `{git_commit, edit_file, write_file}`; resolved-surface assertion (via `resolve_tool_filter`) EXCLUDES `terminate_instance`, `pause_instance`, `resume_instance`, `set_instance_tunable`, `convene_council*`, `spawn_councilor`; one workflow line: effective spawnable set is 4 (kb-writer implied by `knowledge` via `TOOL_REQUIRED_AGENTS`, `daemon/tools/_auth.py:35`).
+- NEW pin required (name for P5, BR-11): event-driven lane deadline — a lane is `failed-timeout` on a parent wake carrying `source=system:watchdog` or `system=long-tool-nudge` naming that child; apply the valve once, else `[incomplete]`; NO polling.
+- NEW pin required (name for P5, BR-13): report-writer ladder L0→L1→L2→L3 + DP-1 ruling row verbatim; L2 is the pre-decided scoped-write fallback (stays a CHILD); BR-15 surfaces a reportless week.
 - Integration precedent to mirror (P5): `tests/integration/test_maintenancer_end_to_end.py` flow at detail-plan.md:971-988 (spawn → load_skill → evidence fan-in → scrutiny → report carries evidence).
 
 ---
 
 ## Open questions
 
-- **Scoped-write fallback (D-A):** if the `worker` child cannot write the report under the current tool policy, the named fallback is a scoped write capability on the report-writer child only. This plan does NOT pick it; the implementing lane must confirm the child path works first and escalate with tradeoffs if not. No blocker to planning.
+- **Scoped-write fallback (D-A / BR-13):** BR-13 L2 pre-decides the fallback as a bare worker child (no load_skill, skeleton all-failed + best-effort receipt/INDEX) — the seat never writes (PD-6 intact). DP-1 accepts a surfaced, documented reportless week when both writer rungs fail (lane leader 2026-11-22, ACCEPTED); BR-15 surfaces it. No open decision remains for planning.
 - No contradiction found with the one-shot-at-now-to-agent capability (that is Phase 1 / D-D territory, verified in Phase 4).

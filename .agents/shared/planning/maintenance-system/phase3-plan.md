@@ -45,6 +45,17 @@
 
 ---
 
+## Binding requirements (architect addendum §7 — BR-11..BR-14)
+
+Each BR below is a labeled, grep-verifiable block carrying its operative text. The addendum stays as the verdict record.
+
+- **BR-11** Event-driven lane deadline — a lane is `failed-timeout` when a parent wake carries `source=system:watchdog` (`daemon/services/waiting_children_watchdog.py:627`, ≤3600s threshold+cadence) or `system=long-tool-nudge` (`daemon/services/long_tool_nudge.py:1471-1475`) naming that child; apply the valve once, else `[incomplete]`, then proceed. Deadline covers the initial dispatch AND its single re-dispatch. Report-writer fires on lane resolution OR global deadline (same wake mechanism bounds the writer wait ≈2h). NO polling. Loop-breaker (threshold 3, `daemon/config.py:6648`) and bash 1800s cap (`daemon/tools/bash.py:1283`) already bound the two likeliest wedge shapes.
+- **BR-12** Lane-status mapping table (P2 T2.4): child `ERROR` ⇒ `failed`; silent-past-deadline ⇒ `degraded` + `[incomplete]`; `COMPLETED` ⇒ `ok|degraded` per its result block.
+- **BR-13** Report-writer ladder (pre-decided): L0 dispatch, write order run→receipt→INDEX last · L1 crash/wedge ⇒ ONE fresh minimal-stub writer (no skill load) · L2 ⇒ ONE bare worker child, no load_skill, skeleton all-failed + best-effort receipt/INDEX · L3 accepted documented reportless terminal, surfaced by BR-15. The seat never writes (PD-6 intact). DP-1 ruling row (verbatim, lane leader 2026-11-22, ACCEPTED): "BR-13 L3 accepts a surfaced, documented reportless week when both writer rungs fail. Rationale: failure-isolation contract = a lane failure never kills the report; double independent writer failure is beyond contract; BR-15 ensures the residual is surfaced (detector + orphan listing), never silent."
+- **BR-14** run_id single authority = the report-writer child. Carry a `run_token` in the dispatch task; re-dispatches reuse it (INDEX dedup survives re-mints). The venv interpreter and bash fallback are named in P2/P4 (BR-14).
+
+---
+
 ## Common weekly procedure (all lanes)
 
 Every lane follows **measure → act → report** and returns this **per-lane result block** (consumed by P4's receipt):
@@ -66,6 +77,7 @@ evidence_paths: [ <absolute file paths> ]        # NEVER inline artifacts (4000-
 - **status semantics:** `ok` = ran clean; `degraded` = partial (some sub-check failed but result produced); `failed` = lane could not produce a result. A failing lane NEVER blocks the report (R4).
 - **Three-class routing:** every recommendation lands in exactly one class; class-2 items are surfaced, never acted on; class-3 items name the owning lane/team.
 - **Idempotency:** each lane's actions are safe to re-run; a re-run within the same week must not double-count (dedup by run_id / measured_at where applicable).
+- **BR-11/BR-12/BR-13/BR-14 consequences (cross-ref P2):** lanes resolve under the BR-11 event-driven deadline (a lane is `failed-timeout` on a `system:watchdog`/`system:long-tool-nudge` wake naming that child; apply the valve once, else `[incomplete]`, then proceed — initial dispatch AND single re-dispatch covered); per-lane result blocks (this section's schema) are consumed by the BR-13 writer ladder; the `run_token` threads the dispatch so re-dispatches reuse identity (INDEX dedup survives re-mints).
 
 ---
 
@@ -89,6 +101,9 @@ evidence_paths: [ <absolute file paths> ]        # NEVER inline artifacts (4000-
 
 ### Out-of-lane items (route_to_lane class)
 - The 5 ranked structural fixes in baseline lines 26-31 (full-repo extraction per gate/verify run; pytest-of-nea keep-3 bypass; shakedown-fleet-*/skill-capture-sink-session-* no TTL; journal .bak rotation; worktree census drift) → route-to-lane, NOT swept by us.
+
+### Containment note (OQ3 leader ruling, 2026-11-22)
+> "Lane-1 sweep is designed for the PRE-fix contract (empty ensemble-hbk-* files exist and are swept); NO gating dependency on the sibling hbk fix (c4b322b03, not yet on origin/latest) landing. Containment re-checked at rebase/tag time per BR-20." (Authority: lane leader, 2026-11-22.)
 
 ### Idempotency/limits
 - 48h recency gate; newest-3+current pytest roots kept; bounded batch deletes; re-run within same week re-measures but never deletes protected/kept classes.
@@ -232,5 +247,6 @@ evidence_paths: [ <absolute file paths> ]        # NEVER inline artifacts (4000-
 
 ## Open questions
 
+- **OQ3 lane-1 containment (resolved):** leader ruling (2026-11-22) — "Lane-1 sweep is designed for the PRE-fix contract (empty ensemble-hbk-* files exist and are swept); NO gating dependency on the sibling hbk fix (c4b322b03, not yet on origin/latest) landing. Containment re-checked at rebase/tag time per BR-20." Folded into Lane 1 (Containment note). No blocker to planning.
 - **Lane 5 digest path:** resolved in-lane (fold into P4 report artifact) but flagged because the in-repo convention is unverified; if the implementing lane finds an established durable convention, use it and update this section.
 - **Lane 2 merge execution:** this lane only proposes; confirm PM/curator remains the writer for POK merges (consistent with D-C's no-agent-writes-to-daemon-state principle). No blocker to planning.
