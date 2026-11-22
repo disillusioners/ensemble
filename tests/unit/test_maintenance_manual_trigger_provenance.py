@@ -226,3 +226,56 @@ def test_fallback_direct_send_message_weakest_provenance_documented() -> None:
     runbook = _read("docs/runbooks/central-maintenance-manual-trigger.md")
     assert "send_message" in runbook
     assert "weakest" in runbook.lower() or "not canonical" in runbook.lower()
+
+
+# ---------------------------------------------------------------------------
+# P5B staged-boot proof — F7 provenance line + F4/F8/F2 operator notes
+# ---------------------------------------------------------------------------
+
+
+def test_writer_started_at_provenance_is_envelope_derived_only() -> None:
+    """P5B F7 — the run report's parenthetical carried a timestamp that
+    matched neither the trigger nor the boot (a mis-derived note). The
+    writer contract now pins the provenance to envelope-derived values
+    only: the arm instant embedded in the ``run_token`` — the same
+    instant the receipt's ``started_at`` derives from — else the
+    parenthetical is omitted, never invented."""
+    skill = _read("agents/maintenancer/skills-template/run-report-writer.md")
+    assert "Started-at provenance (P5B F7)" in skill
+    assert "run_token" in skill
+    assert "OMITTED, never invented" in skill
+    low = skill.lower()
+    assert "never read a db" in low or "never reads the db" in low
+
+
+def test_runbook_carries_the_auth_off_list_door_operator_note() -> None:
+    """P5B F4 — operator note, not a defect: the list door 503s on
+    auth-OFF by design (BR-17 fail-closed); the view URLs still serve."""
+    runbook = _read("docs/runbooks/central-maintenance-manual-trigger.md")
+    assert "AUTH_NOT_CONFIGURED" in runbook
+    assert "BR-17" in runbook
+    assert "/views/maintenance-reports/" in runbook
+
+
+def test_runbook_carries_the_staged_boot_prerequisites_note() -> None:
+    """P5B F8 — a staged/frozen boot against an env-configured PG DB
+    needs the tier-1 ensemble.json OR ENSEMBLE_DB_AMBIENT_ALLOW=1, else
+    the tier-2 guard hard-exits 78. The per-variable scrub recipe stays
+    a POINTER (guard message + env-fence conventions), not inlined."""
+    runbook = _read("docs/runbooks/central-maintenance-manual-trigger.md")
+    assert "ENSEMBLE_DB_AMBIENT_ALLOW=1" in runbook
+    assert "assert_db_resolution_sanctioned" in runbook
+    assert "78" in runbook
+    assert "ensemble.json" in runbook
+    low = runbook.lower()
+    assert "per-variable" in low, "the scrub recipe must stay a per-variable POINTER"
+    assert "env -u var*" in low or "never the `env -u var*` glob" in low
+
+
+def test_runbook_carries_the_local_weekday_operator_note() -> None:
+    """P5B F2 — operator-doc clarity: the weekday knob is evaluated on
+    the LOCAL window date, so the stored run_at_utc lands on the PRIOR
+    UTC date (Sun 04:15 ICT = Sat 21:15Z) without being off-by-one."""
+    runbook = _read("docs/runbooks/central-maintenance-manual-trigger.md")
+    assert "LOCAL" in runbook
+    assert "PRIOR UTC date" in runbook

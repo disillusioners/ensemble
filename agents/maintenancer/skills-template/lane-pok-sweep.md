@@ -39,7 +39,7 @@ The canonical PD-4a result block with status `ok|degraded|failed` and a one-line
 
 ## Weekly procedure
 
-**Measure.** Recompile a FRESH live listing with the read/query verb (`pok_query`) — the read/query verb is my only POK tool. Per-row sha verify, the active count, and a family prefix census. The fresh listing is written by ME, the lane child, as per-run evidence under `.agents/maintenancer/RESULTS/evidence/<run_id>/live-active-<date>.json` — inside the artifact root's evidence subpath, NOT a third top-level writer at the root (the root's top level holds only the run, receipt, and INDEX artifacts).
+**Measure.** Recompile a FRESH live listing with the read/query verb (`pok_query`) — the read/query verb is my only POK tool. Per-row sha verify, the active count, and a family prefix census. The fresh listing is written by ME, the lane child, as per-run evidence inside the run's evidence directory — the ABSOLUTE `<install-root>/.agents/maintenancer/RESULTS/evidence/<run_token>/live-active-<date>.json` the dispatch envelope carries (the install-root RESULTS tree, NEVER a cwd-relative resolution) — not a third top-level writer at the root (the root's top level holds only the run, receipt, and INDEX artifacts).
 
 **Act.** Read-only in-lane. Delta reconciliation against the committed baseline (the phase-4 §2a-2b style), then adjudicate the NEW clusters under the guardrail. I produce merge and consolidation PROPOSALS only — this lane never writes to the operating-knowledge store, and curator authority stays with the project manager. Re-use the committed generator scripts as METHOD (`dual-key-census-gen.py`, `_laneB_generate.py`); I do not hand-type a census.
 
@@ -72,11 +72,12 @@ The committed census set under `.agents/shared/planning/pok-sweep/` is my baseli
 
 - **No writes to the operating-knowledge store from this lane.** All POK write verbs are forbidden here — I write nothing, I never author, supersede, pin, dispute, archive, or reclassify an entry. The fence is PROMPT/WORKFLOW-LEVEL, not a capability grant: the operating-knowledge tool category carries a write verb, and my prohibition on it is the binding control.
 - Proposals route to the project manager / curator lane; the read/query verb is my only POK tool.
+- **Project context (P5B F5 — the AC10 gate):** `pok_*` verbs are PROJECT-SCOPED and the system-default project accepts NO POK calls (AC10, `pok_default_project`). I operate on the project bound at MY spawn — the orchestrator binds it explicitly (the run's non-default POK target project), never by bare inheritance. If my binding is the system-default project, every `pok_query` is a guaranteed refusal: I report `failed [incomplete]` IMMEDIATELY with the AC10 error verbatim instead of consuming the re-dispatch — a scoping refusal is not transient, and a re-dispatch cannot succeed.
 - Guardrail as stated above: never archive on age/access_count, 240-char body cap, durable-fact coverage required.
 - The do-not-re-execute ledger is respected — I do not re-run the executed `snapshot-l3` merge.
 - Failure isolation: `ok` = ran clean, `degraded` = a sub-check failed but a result was produced, `failed` = I could not produce a result at all. A failing lane never blocks the weekly report.
 - Three-class routing: every recommendation lands in exactly one class — `auto_fix_now`, `needs_emperor_word` (surfaced, never acted on), `route_to_lane` (names the owning lane or team).
-- The result block carries `measured_at` as an ISO-8601 UTC stamp of my measure, `actions_taken` as idempotent action ids or `none`, and `evidence_paths` as ABSOLUTE paths under the run evidence convention `.agents/maintenancer/RESULTS/evidence/<run_id>/` — never inline artifacts.
+- The result block carries `measured_at` as an ISO-8601 UTC stamp of my measure, `actions_taken` as idempotent action ids or `none`, and `evidence_paths` as ABSOLUTE paths under the run's evidence directory — the ABSOLUTE `<install-root>/.agents/maintenancer/RESULTS/evidence/<run_token>/` the dispatch envelope carries (the install-root RESULTS tree, NEVER a cwd-relative resolution) — never inline artifacts.
 - The lane resolves under the event-driven deadline: a wake naming this child marks the lane `failed-timeout`, the fan-in valve is applied once, and the run proceeds.
 
 ## Idempotency and limits
