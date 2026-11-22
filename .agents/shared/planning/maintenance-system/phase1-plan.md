@@ -13,7 +13,7 @@
 - Env-first window / weekday / timezone knobs with ICT defaults, resolved at each ARM/RE-ARM and echoed into the row config for audit (D-F).
 - A uniform-random minute picker (inclusive window, next-weekday-boundary arithmetic, ICT anchoring via `anchor_local_to_utc`).
 - A re-arm seam in the one-shot **consumption branch** (`scheduler.py:808-835` — the SINGLE re-arm authority) that rewrites `run_at` on consuming fire outcomes — independent of run success (a FAILED dispatch does not consume and never advances the chain) (D-G).
-- A boot-time chain-break guard (get-or-recreate) adjacent to the existing tool-usage seeder hook, plus an optional UN_GATED daily backstop design.
+- A boot-time chain-break guard (archive-aware get-or-recreate) adjacent to the existing tool-usage seeder hook, plus an optional UN_GATED daily backstop design.
 - No-idle design statement embedded in every new seam; failure-mode table.
 
 ### Out of scope
@@ -71,7 +71,7 @@
 - **Verification:** re-arm-independence test (run fails ⇒ next `run_at` still minted, key differs) — named for P5; structural pin that the dispatch path has no idle consult.
 - **Agent hint:** `coder` (scheduler-adapter fluency).
 
-### Task 1.4 — Boot-time chain-break guard (get-or-recreate)
+### Task 1.4 — Boot-time chain-break guard (archive-aware get-or-recreate)
 - **Description:** Immediately adjacent to the tool-usage seeder hook (`daemon/manager.py:1212-1217`, fail-open try/except), call the Task 1.1 seeder (get-or-create). Source-GC can archive scheduler rows — the GC predicate is `source_type=='scheduler' AND enabled==False AND status IN ('stopped','cancelled') AND age>retention` (`daemon/repositories/source/repository.py:728-772`; service `daemon/services/sources_gc_service.py`; wiring `daemon/api.py:2192-2205`; defaults `daemon/config.py:3047-3110` — retention 14d, hourly). An ARMED chain row (`enabled=True`) is therefore GC-INELIGIBLE — mid-week GC of the live row is IMPOSSIBLE; only a DISABLED row (operator-cancelled, or `stopped`) can be collected. The guard runs BEFORE any adapter exists (the seeder hook sits inside `InstanceManager.__init__`; sources start later at `daemon/api.py:3168` `manager.start_sources()`) — which is exactly why an unconditional past-`run_at` re-mint would silently pre-empt the adapter's auto-fire.
   Semantics: (i) row MISSING ⇒ consult the ARCHIVE first, then act per **BR-3** below — never just "repair"; (ii) row CANCELLED/paused = OPERATOR INTENT ⇒ respect, do not fight (`TaskScheduleUpdateInput.paused` `daemon/tools/scheduling.py:128`; seeder NO-OP-in-any-state `seed.py:164-166`); (iii) `run_at` PAST ⇒ the EXACT **BR-1** predicate below — NOT an unconditional re-mint. Optional daily backstop: a NEW `MaintenanceService` job registered `UN_GATED` (mirror `tests/unit/test_maintenance_idle_starvation.py:194-208`), never the primary driver.
 - **BR-1** — guard re-mint predicate (operative text):
@@ -81,7 +81,7 @@
 - **BR-3** — archive-aware recreate (operative text):
   > The guard consults `source_configs_archive` (source_id + name + status + config snapshot) BEFORE recreating: `cancelled` ⇒ NEVER revive; `stopped` ⇒ revive IFF the archived config snapshot carries a `chain` block (same keying as the re-arm seam — one concept, one marker); no archive row ⇒ create. Never re-archive over a stale snapshot (PK collision, `repository.py:83-84`).
   - **Implementation consequence:** archive columns verified at `daemon/repositories/source/models.py:221-251` (`source_id` PK, `name`, `config`, `status`, …) / `daemon/migrations/versions/20261107_122648_create_source_gc_archive_tables.sql:80-93` (span includes the `source_id` PK at `:81` — BR-3-load-bearing). An operator-cancelled chain writes `enabled=False, status='cancelled'` atomically (`daemon/services/scheduling_service.py:897` → `daemon/repositories/source/repository.py:604-607`) ⇒ GC-eligible ⇒ archived ⇒ the live row is ABSENT; the archive-aware guard must NOT resurrect it (the previous unconditional get-or-create DID, against the plan's own "respect operator intent" rule). The re-archive path must never collide the archive PK (`repository.py:83-84` `archive_id_collision`).
-- **Touch points:** `daemon/manager.py` (~1212-1217); `daemon/repositories/source/maintenance_seed.py` (archive-aware recreate + BR-1 past-`run_at` repair); optional `daemon/services/maintenance.py` job registration.
+- **Touch points:** `daemon/manager.py` (~1212-1217); `daemon/repositories/source/maintenance_seed.py` (archive-aware recreate + BR-1 past-`run_at` repair + **seeder creates `.agents/maintenancer/RESULTS/` at first boot** — P1's seeder OWNS this dir-creation step; P4 Task 4.8 references it as a zero-edit consumer); optional `daemon/services/maintenance.py` job registration.
 - **Verification:** guard tests (BR-1: cap unset ⇒ untouched, cap exceeded ⇒ re-minted; BR-3: cancelled-archived not resurrected, stopped+chain revived; missing row recreated; cancelled respected) — named for P5.
 - **Agent hint:** `coder`.
 
