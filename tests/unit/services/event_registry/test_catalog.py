@@ -201,17 +201,10 @@ def test_no_bridge_pending_kind_is_actually_bridged():
         k for k, r in BRIDGE_PENDING.items()
         if r.startswith("L-11 declared-silent:")
     }
-    # The declared-silent set is exactly the pinned six.
-    assert DECLARED_SILENT_KINDS == {
-        "event_bus:processing_started",
-        "event_bus:processing_completed",
-        "event_bus:processing_failed",
-        "event_bus:child_failed",
-        "event_bus:message_completed",
-        "event_bus:room_post",
-    }
-    # Terminal-state contract: 30 kinds = 23 bridged + 6 declared-silent
-    # + 1 deferred_v2.
-    assert len(CATALOG) == 30
-    assert len(BRIDGE_PENDING) == 6
+    # The declared-silent set is empty after L-11 retirement.
+    assert DECLARED_SILENT_KINDS == set()
+    # Terminal-state contract: 24 kinds = 23 bridged + 0 declared-silent
+    # + 1 deferred_v2 (L-11 retirement).
+    assert len(CATALOG) == 24
+    assert len(BRIDGE_PENDING) == 0
     assert len(DEFERRED_V2_KINDS) == 1

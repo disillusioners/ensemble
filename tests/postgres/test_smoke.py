@@ -61,7 +61,7 @@ def test_event_repository_get_returns_row(pg_repository_factory):
     repo: EventRepository = pg_repository_factory(EventRepository)
     created = repo.create_event(
         instance_id="smoke-instance",
-        kind=EventKind.PROCESSING_COMPLETED.value,
+        kind=EventKind.MESSAGE_RECEIVED.value,
         data={"status": "ok"},
     )
 
@@ -69,7 +69,7 @@ def test_event_repository_get_returns_row(pg_repository_factory):
     assert fetched is not None
     assert fetched.id == created.id
     assert fetched.instance_id == "smoke-instance"
-    assert fetched.kind == EventKind.PROCESSING_COMPLETED.value
+    assert fetched.kind == EventKind.MESSAGE_RECEIVED.value
     assert fetched.data is not None
     assert '"status"' in fetched.data and '"ok"' in fetched.data
 

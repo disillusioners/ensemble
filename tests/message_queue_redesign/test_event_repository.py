@@ -32,7 +32,7 @@ class TestEventCreation:
         
         event = repo.create_event(
             instance_id="test-instance-123",
-            kind=EventKind.PROCESSING_STARTED.value,
+            kind=EventKind.MESSAGE_RECEIVED.value,
         )
         
         assert event.id is not None
@@ -71,7 +71,7 @@ class TestEventCreation:
         
         event = repo.create_event(
             instance_id="test-instance",
-            kind=EventKind.PROCESSING_STARTED.value,
+            kind=EventKind.MESSAGE_RECEIVED.value,
         )
         
         assert event.message_id is None
@@ -93,7 +93,7 @@ class TestMessageIdCorrelation:
         )
         event2 = repo.create_event(
             instance_id="test-instance",
-            kind=EventKind.PROCESSING_STARTED.value,
+            kind=EventKind.MESSAGE_RECEIVED.value,
             message_id=message_id,
         )
         
@@ -104,7 +104,7 @@ class TestMessageIdCorrelation:
         correlated_events = [e for e in events if e.message_id == message_id]
         assert len(correlated_events) == 2
         assert correlated_events[0].kind == EventKind.MESSAGE_RECEIVED.value
-        assert correlated_events[1].kind == EventKind.PROCESSING_STARTED.value
+        assert correlated_events[1].kind == EventKind.MESSAGE_RECEIVED.value
 
     def test_events_from_different_messages(self, engine):
         """Test that events from different messages are distinguishable."""
@@ -123,7 +123,7 @@ class TestMessageIdCorrelation:
         )
         repo.create_event(
             instance_id="test-instance",
-            kind=EventKind.PROCESSING_STARTED.value,
+            kind=EventKind.MESSAGE_RECEIVED.value,
             message_id="msg-1",
         )
         
@@ -239,7 +239,7 @@ class TestCursorBasedDelivery:
         # Create interleaved events for different instances
         repo.create_event(instance_id="instance-1", kind=EventKind.MESSAGE_RECEIVED.value)
         repo.create_event(instance_id="instance-2", kind=EventKind.MESSAGE_RECEIVED.value)
-        repo.create_event(instance_id="instance-1", kind=EventKind.PROCESSING_STARTED.value)
+        repo.create_event(instance_id="instance-1", kind=EventKind.MESSAGE_RECEIVED.value)
         
         # Get events for instance-1 after first event
         events = repo.get_by_instance("instance-1")
@@ -250,7 +250,7 @@ class TestCursorBasedDelivery:
         
         # Should only include the PROCESSING_STARTED event
         assert len(result) == 1
-        assert result[0].kind == EventKind.PROCESSING_STARTED.value
+        assert result[0].kind == EventKind.MESSAGE_RECEIVED.value
 
 
 class TestEventStats:
