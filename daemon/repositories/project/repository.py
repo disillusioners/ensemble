@@ -94,6 +94,105 @@ def _is_seq_unique_race(exc: BaseException | str) -> bool:
     )
 
 
+# ── Project-reference resolution ladder (module-level support) ───────
+# The ladder itself lives in ONE repository method
+# (``SQLModelProjectRepository.resolve_project_reference``) — the tool
+# layer CALLS it and never re-implements the tiering.
+#
+# Cap on how many candidates an AMBIGUOUS refusal enumerates. BOTH the
+# structured ``candidates`` field AND the human-readable message are
+# capped; ``candidate_count`` always reports the TOTAL number of matches
+# (before the cap) so the caller can still see how many were dropped.
+_RESOLVE_CANDIDATE_CAP = 10
+
+
+def _dedupe_projects(projects: list[Project]) -> list[Project]:
+    """Dedupe projects by ``project_id``, preserving first-seen order.
+
+    A shortname JOIN can return the same project once per matching
+    shortname row — the ladder counts PROJECTS, not link rows.
+    """
+    seen: set[str] = set()
+    deduped: list[Project] = []
+    for project in projects:
+        if project.project_id in seen:
+            continue
+        seen.add(project.project_id)
+        deduped.append(project)
+    return deduped
+
+
+def _resolution_candidates(projects: list[Project]) -> list[dict[str, Any]]:
+    """Build the structured candidate rows for an AMBIGUOUS refusal.
+
+    Each row carries ``project_id``, ``name`` and ``shortnames`` — the
+    same data the human-readable message enumerates. Rows are sorted by
+    (name, project_id) so the enumeration is deterministic across runs
+    and dialects.
+    """
+    rows = [
+        {
+            "project_id": project.project_id,
+            "name": project.name,
+            "shortnames": list(project.shortnames or []),
+        }
+        for project in projects
+    ]
+    rows.sort(key=lambda row: (row["name"].lower(), row["project_id"]))
+    return rows
+
+
+def _resolution_ambiguous(query: str, projects: list[Project]) -> dict[str, Any]:
+    """Build the typed AMBIGUOUS_PROJECT refusal for ``query``.
+
+    The message NAMES every enumerated candidate (name + shortnames +
+    project_id) so a human reading only the error text can still pick an
+    explicit ``project_id``. The frozen refusal sentence is the message
+    PREFIX; the candidate enumeration follows it.
+    """
+    rows = _resolution_candidates(projects)
+    total = len(rows)
+    shown = rows[:_RESOLVE_CANDIDATE_CAP]
+    message = (
+        f"Project '{query}' is ambiguous - {total} projects match. "
+        "Retry with an explicit project_id."
+    )
+    if shown:
+        message += " Candidates: " + "; ".join(
+            "'{name}' (project_id: {pid}, shortnames: {sns})".format(
+                name=row["name"],
+                pid=row["project_id"],
+                sns=", ".join(row["shortnames"]) if row["shortnames"] else "none",
+            )
+            for row in shown
+        )
+        if total > len(shown):
+            message += f" (+{total - len(shown)} more)"
+    return {
+        "found": False,
+        "error_code": "AMBIGUOUS_PROJECT",
+        "error": message,
+        "query": query,
+        "candidates": shown,
+        "candidate_count": total,
+    }
+
+
+def _resolution_hit(
+    projects: list[Project], query: str, matched_by: str
+) -> dict[str, Any]:
+    """Build the resolution result for a ladder tier that matched.
+
+    Exactly one match → the FOUND envelope (the project is already
+    ENRICHED by the caller). More than one match → the typed
+    AMBIGUOUS_PROJECT refusal — the ladder NEVER silently picks one of
+    several candidates.
+    """
+    if len(projects) == 1:
+        return {"found": True, "project": projects[0], "matched_by": matched_by}
+    return _resolution_ambiguous(query, projects)
+
+
 class SQLModelProjectRepository:
     """SQLModel-based Project repository with bulk operations for tags/shortnames."""
     
@@ -335,6 +434,180 @@ class SQLModelProjectRepository:
             )
             project = session.exec(stmt).first()
             return self._enrich_project(session, project)
+
+    def resolve_project_reference(self, query: str, scope: str = "name") -> dict:
+        """Resolve a human-typed project reference to exactly ONE project.
+
+        The resolution ladder — the FIRST tier that matches wins:
+
+        ==========  =======================================================
+        Tier        Match rule
+        ==========  =======================================================
+        L1          exact project NAME (case-sensitive)
+        L2          exact project SHORTNAME (case-sensitive)
+        L3          case-insensitive exact project NAME
+        L4          case-insensitive exact project SHORTNAME
+        L5          case-insensitive SUBSTRING over NAME + SHORTNAMES
+        ==========  =======================================================
+
+        ``scope="name"`` runs the FULL ladder (a reference may resolve via
+        the project NAME or via one of its SHORTNAMES). ``scope="shortname"``
+        runs the shortname-only ladder — it NEVER resolves via the project
+        NAME (the strict anchor the live-views scope resolver in
+        ``daemon/api.py`` relies on).
+
+        Guarantees:
+
+        * NO status filter — paused / archived / completed projects stay
+          resolvable. (Contrast :meth:`match_by_keywords`, a SEPARATE
+          helper that filters ``status=active``; its semantics are left
+          untouched.)
+        * The DESCRIPTION is never part of the match surface — L5 covers
+          NAME + SHORTNAMES only.
+        * More than one match is a typed AMBIGUOUS_PROJECT refusal that
+          enumerates the candidates; the ladder NEVER silently picks one.
+        * The returned project is ENRICHED (:meth:`_enrich_project`), so
+          ``.shortnames`` / ``.tags`` are populated.
+
+        Case folding is delegated to the database's ``lower()`` — ASCII
+        only on SQLite, full Unicode on PostgreSQL. The fence that makes
+        the CI tiers dialect-stable is the explicit ``func.lower()`` on
+        BOTH sides (``func.lower(col).contains(query.lower())``): plain
+        ``contains()`` would be case-sensitive on PostgreSQL and
+        case-insensitive on SQLite.
+
+        Returns one of::
+
+            {"found": True, "project": Project, "matched_by": str}
+            {"found": False, "error_code": "NOT_FOUND",
+             "error": "Project not found", "query": str, "candidates": []}
+            {"found": False, "error_code": "AMBIGUOUS_PROJECT", "error": str,
+             "query": str, "candidates": [...], "candidate_count": int}
+
+        Args:
+            query: The reference to resolve. Matched case-sensitively on
+                the exact tiers and case-insensitively on the CI tiers.
+            scope: ``"name"`` (full ladder) or ``"shortname"``
+                (shortname-only ladder).
+
+        Raises:
+            ValueError: If ``scope`` is neither ``"name"`` nor
+                ``"shortname"`` — fail closed, so an unknown scope can
+                never silently widen the ladder to the project NAME.
+        """
+        if scope not in ("name", "shortname"):
+            raise ValueError(
+                f"Invalid scope '{scope}' for project reference resolution — "
+                "expected 'name' or 'shortname'"
+            )
+        if not query or not query.strip():
+            return {
+                "found": False,
+                "error_code": "NOT_FOUND",
+                "error": "Project not found",
+                "query": query,
+                "candidates": [],
+            }
+
+        shortname_only = scope == "shortname"
+        lowered = query.lower()
+
+        with Session(self.engine) as session:
+            # ── L1 — exact NAME (case-sensitive) ────────────────────────────
+            if not shortname_only:
+                hits = list(session.exec(
+                    select(Project).where(Project.name == query)
+                ))
+                if hits:
+                    return _resolution_hit(
+                        self._enrich_projects(session, hits), query, "name_exact"
+                    )
+
+            # ── L2 — exact SHORTNAME (case-sensitive) ───────────────────────
+            hits = list(session.exec(
+                select(Project)
+                .join(ProjectShortnameLink)
+                .where(ProjectShortnameLink.shortname == query)
+            ))
+            if hits:
+                return _resolution_hit(
+                    self._enrich_projects(session, _dedupe_projects(hits)),
+                    query,
+                    "shortname_exact",
+                )
+
+            # ── L3 — case-insensitive exact NAME ────────────────────────────
+            if not shortname_only:
+                hits = list(session.exec(
+                    select(Project).where(func.lower(Project.name) == lowered)
+                ))
+                if hits:
+                    return _resolution_hit(
+                        self._enrich_projects(session, hits), query, "name_exact_ci"
+                    )
+
+            # ── L4 — case-insensitive exact SHORTNAME ───────────────────────
+            hits = list(session.exec(
+                select(Project)
+                .join(ProjectShortnameLink)
+                .where(func.lower(ProjectShortnameLink.shortname) == lowered)
+            ))
+            if hits:
+                return _resolution_hit(
+                    self._enrich_projects(session, _dedupe_projects(hits)),
+                    query,
+                    "shortname_exact_ci",
+                )
+
+            # ── L5 — case-insensitive SUBSTRING over NAME + SHORTNAMES ONLY ──
+            # The DESCRIPTION is deliberately NOT part of the match surface.
+            name_hits: list[Project] = []
+            shortname_hits: list[Project] = []
+            if not shortname_only:
+                name_hits = list(session.exec(
+                    select(Project).where(
+                        func.lower(Project.name).contains(lowered)
+                    )
+                ))
+            shortname_hits = list(session.exec(
+                select(Project)
+                .join(ProjectShortnameLink)
+                .where(
+                    func.lower(ProjectShortnameLink.shortname).contains(lowered)
+                )
+            ))
+
+            by_id: dict[str, Project] = {}
+            matched_by_name: set[str] = set()
+            for project in name_hits:
+                if project.project_id not in by_id:
+                    by_id[project.project_id] = project
+                matched_by_name.add(project.project_id)
+            for project in shortname_hits:
+                if project.project_id not in by_id:
+                    by_id[project.project_id] = project
+
+            if not by_id:
+                return {
+                    "found": False,
+                    "error_code": "NOT_FOUND",
+                    "error": "Project not found",
+                    "query": query,
+                    "candidates": [],
+                }
+
+            enriched = self._enrich_projects(session, list(by_id.values()))
+            if len(enriched) == 1:
+                only = enriched[0]
+                # A project can match by NAME and by SHORTNAME at once —
+                # NAME wins (it is the primary identifier).
+                matched_by = (
+                    "name_substring"
+                    if only.project_id in matched_by_name
+                    else "shortname_substring"
+                )
+                return {"found": True, "project": only, "matched_by": matched_by}
+            return _resolution_ambiguous(query, enriched)
 
     def get_by_instance(self, instance_id: str) -> list[Project]:
         """Get all projects linked to an instance."""
