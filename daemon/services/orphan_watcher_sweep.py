@@ -59,14 +59,101 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from daemon.services.dependency_bus import get_dependency_bus
+from daemon.services.engine.dualpath import ownership_for
 
 if TYPE_CHECKING:
     from daemon.services.dependency_bus import DependencyBus
 
 logger = logging.getLogger(__name__)
+
+
+# ── Engine Arc Phase-2 pilot: dual-path identity (wiring only) ────────────
+# ``dualpath.py:31`` derives ``SERVICES_<SLUG>_USE_ENGINE`` from the slug.
+# This slug is the estate row's ``service_tag`` (estate.py
+# "orphan-watcher-sweep") and the P4 observer spec's ``kill_switch_key`` —
+# one identity shared by the legacy construct site and the P4 boot block.
+ORPHAN_WATCHER_ENGINE_SLUG: str = "orphan-watcher-sweep"
+ORPHAN_WATCHER_ENGINE_JOB_ID: str = "orphan-watcher"
+ORPHAN_WATCHER_ENGINE_FLAG: str = "SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE"
+
+
+def engine_owns_execution(environ: Any = None) -> bool:
+    """The ONE dual-path ownership decision, shared by both api.py sites.
+
+    ``environ=None`` reads the live ``os.environ``; tests pass a dict.
+    Unset / OFF ⇒ ``False`` (legacy loop owns) — the shipped dormant
+    default. ON ⇒ the engine owns and the legacy loop is suppressed.
+
+    NOTE (engine-core drift, reported not patched — engine/** is a Phase-1
+    reviewed fence): ``dualpath.py:31`` derives the key as
+    ``SERVICES_{slug.upper()}_USE_ENGINE`` WITHOUT normalizing hyphens, while
+    ``boot.py:179`` (the spec's ``kill_switch_key``) DOES ``replace('-', '_')``.
+    Passing the hyphenated estate slug raw would read a DIFFERENT variable
+    than the engine's kill switch and could double-execute on a flag flip.
+    We normalize here so BOTH paths read the one canonical flag.
+    """
+    normalized_slug = ORPHAN_WATCHER_ENGINE_SLUG.replace("-", "_")
+    return ownership_for(normalized_slug, environ).engine_owns
+
+
+def build_engine_executor(
+    min_watcher_age_seconds: int | None = None,
+) -> Callable[[], dict[str, Any]]:
+    """Build the engine's DB_OFFLOAD ``execute_fn`` for the orphan pilot.
+
+    MUST be a SYNC callable: ``dispatch.run_db_offload`` refuses coroutine
+    functions (W-4 discipline — an async fn would silently defeat the
+    off-loop guarantee). The bus method it bridges to is async, so the sync
+    adapter runs it in a fresh event loop inside the engine's worker thread
+    via ``asyncio.run``. ``DependencyBus._sweep_orphan_watchers`` is
+    loop-agnostic (its DB write is already ``await asyncio.to_thread(...)``),
+    so no loop-bound bus state crosses the seam.
+
+    The bus is LATE-BOUND via ``get_dependency_bus()`` on EVERY tick — never
+    captured at construction (the born-dead trap this migration exists to
+    make impossible). The grace window is the SAME value the legacy service
+    forwards (``ServicesConfig.orphan_watcher_sweep_grace_seconds``), so both
+    paths apply the identical age predicate.
+
+    Errors propagate to the engine's honest state machine (FAILED_BACKOFF);
+    the legacy path swallows them into ``_errors_total``. The parity pack
+    maps that difference explicitly (it is not a behavior divergence of the
+    sweep itself).
+    """
+    # Resolved at CALL time (the default constant is defined below this block).
+    grace = int(
+        DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS
+        if min_watcher_age_seconds is None
+        else min_watcher_age_seconds
+    )
+
+    def _execute() -> dict[str, Any]:
+        bus = get_dependency_bus()  # late bind, in the worker thread, every tick
+        if bus is None:
+            # DependencyRef gates this at due-time; a disappearance between
+            # resolution and dispatch is a counted no-op, never an exception.
+            return {
+                "cancelled": 0,
+                "bus_wired": 0,
+                "grace_seconds": grace,
+            }
+        cancelled = int(
+            asyncio.run(
+                bus._sweep_orphan_watchers(min_watcher_age_seconds=grace)
+            )
+            or 0
+        )
+        return {
+            "cancelled": cancelled,
+            "bus_wired": 1,
+            "grace_seconds": grace,
+        }
+
+    return _execute
 
 
 # Default — mirrors ``eligible_pending_sweep.DEFAULT_SWEEP_INTERVAL_SECONDS``

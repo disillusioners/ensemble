@@ -1956,7 +1956,10 @@ async def lifespan(app: FastAPI):
     from daemon.services.orphan_watcher_sweep import (
         DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS,
         DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS,
+        ORPHAN_WATCHER_ENGINE_FLAG,
         OrphanWatcherSweepService,
+        build_engine_executor,
+        engine_owns_execution,
     )
     orphan_sweep_interval = (
         config.services.orphan_watcher_sweep_interval_seconds
@@ -1984,6 +1987,17 @@ async def lifespan(app: FastAPI):
         logger.error(
             f"OrphanWatcherSweepService DISABLED — interval="
             f"{orphan_sweep_interval}s below the floor of 1s"
+        )
+    elif engine_owns_execution():
+        # Engine Arc Phase-2 pilot (flag ON): the engine owns execution. The
+        # legacy loop is SUPPRESSED — single-executor by construction. The
+        # service object is retained on app.state so the existing shutdown
+        # path's ``stop()`` stays a harmless no-op (no task was started).
+        app.state.orphan_watcher_sweep = orphan_watcher_sweep
+        logger.info(
+            "OrphanWatcherSweepService legacy loop SUPPRESSED — engine owns "
+            "execution (%s=1); sweep object retained for shutdown",
+            ORPHAN_WATCHER_ENGINE_FLAG,
         )
     else:
         orphan_watcher_sweep.start()
@@ -3818,7 +3832,10 @@ async def lifespan(app: FastAPI):
     try:
         from daemon.services.engine.boot import build_observer_specs, run_boot_pass
         from daemon.services.engine.engine import EngineService
-        from daemon.services.engine.guardrails import assert_dependencies_resolvable
+        from daemon.services.engine.guardrails import (
+            DependencyRef,
+            assert_dependencies_resolvable,
+        )
         from daemon.services.engine.killswitch import EngineSwitchResolver
         from daemon.services.engine.registry import EngineRegistry
         from daemon.services.engine.watchdog import (
@@ -3856,6 +3873,37 @@ async def lifespan(app: FastAPI):
             float(_engine_cfg.boot_pass_deadline_seconds),
             "engine_registration",
         )
+
+        # Engine Arc Phase-2 pilot — the FIRST executable registration.
+        # Flag OFF/unset: NO executor (this job stays shadow-skipped; the
+        # legacy loop owns). Flag ON: executor registered here AND the legacy
+        # loop suppressed at the construct site — exactly one executor, no
+        # double-execution window. Rollback = flip the one flag back to OFF.
+        if engine_owns_execution():
+            from daemon.services.dependency_bus import (
+                get_dependency_bus as _get_pilot_bus,
+            )
+
+            _engine_svc.set_executor(
+                "orphan-watcher",
+                build_engine_executor(min_watcher_age_seconds=orphan_sweep_grace),
+            )
+            # Born-dead trap impossibility: the bus is a declared singleton
+            # getter resolved at EVERY due-time (never ctor-captured). The
+            # boot wiring assertion below now checks it for a REAL adopter.
+            _engine_svc.set_dependencies(
+                "orphan-watcher",
+                [
+                    DependencyRef(
+                        label="dependency_bus", getter=_get_pilot_bus
+                    )
+                ],
+            )
+            logger.info(
+                "orphan-watcher pilot: engine executor registered, legacy "
+                "loop suppressed (%s=1); dependency_bus late-bound at tick",
+                ORPHAN_WATCHER_ENGINE_FLAG,
+            )
 
         # T4.6 — boot wiring assertion immediately after the registration pass.
         _engine_wiring_report = assert_dependencies_resolvable(

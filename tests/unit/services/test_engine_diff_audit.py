@@ -48,10 +48,20 @@ from pathlib import Path
 # the planning tip). HEAD-anchored, NOT working-tree-anchored: this gate audits
 # what the branch COMMITS, so an uncommitted daemon edit does not change the
 # verdict. Re-anchor per the procedure in the module docstring.
-BASE_SHA = "1a74b0493cc1b956c6c775be0f818e1ec5e2beec"
+#
+# RE-ANCHORED 2026-11-22 (Engine Arc Phase-2 pilot lane): the old base
+# ``1a74b0493`` is the PHASE-1 family base. Between it and this lane's base
+# ``8894f86a`` the release bump ``2bfd20acf`` (v0.31.27) touched
+# ``daemon/__init__.py``, reddening this pin with a PRE-EXISTING path no
+# ownership-map row sanctions. Per the documented re-anchor procedure the base
+# moves to the lane base; the committed diff then contains ONLY this lane's
+# sanctioned paths (``daemon/api.py`` already declared; the service module is
+# added below as an explicit Phase-2 pilot row).
+BASE_SHA = "8894f86a853c5fcba2173ab29405f02c71c1f3ef"
 
 # The expected daemon/ path set — DATA, per D7.4. Grouped by ownership-map row.
-# 47 declared paths; the actual diff (45 paths at tip aebf72c9f) is a subset.
+# 48 declared paths; the pilot lane's committed diff adds 2 sanctioned paths
+# (``daemon/api.py`` + the new service-module row) to the 46-path lane base.
 EXPECTED_DAEMON_PATHS: frozenset[str] = frozenset({
     # --- P1: migrations (phase1 §0.3, two migration rows) -----------------
     "daemon/migrations/versions/20261121_120000_create_engine_jobs.sql",
@@ -123,12 +133,18 @@ EXPECTED_DAEMON_PATHS: frozenset[str] = frozenset({
     # the file is now a claimed ownership-map row (owner P1), so the prior
     # marker is obsolete and must stay gone.
     "daemon/plugin_subsystem/config_compat_contract.py",  # P1 — T1.12 D-1 compat-contract extension (landed 6e97cdce2)
+    # --- PHASE 2 PILOT — orphan-watcher migration (this lane, 2026-11-22) ---
+    # Sanctioned by the Emperor GO 2026-11-22 + the phase2-pilot-recommendation
+    # charter: the pilot's execute_fn adapter lives in the service's OWN module
+    # (build_engine_executor / engine_owns_execution), never in engine/**.
+    "daemon/services/orphan_watcher_sweep.py",  # Phase-2 pilot — dual-path seam + late-bound engine executor
 })
 
 # Owner hints for the RED message — which phase SHOULD have owned an offending
 # path. Kept separate from the set so the set stays a clean data literal.
 _SPECIAL_OWNERS: dict[str, str] = {
-    "daemon/api.py": "P4 (lifespan) / P6 (router catalogue)",
+    "daemon/api.py": "P4 (lifespan) / P6 (router catalogue) / Phase-2 pilot (dual-path wiring)",
+    "daemon/services/orphan_watcher_sweep.py": "Phase-2 pilot (dual-path seam + late-bound executor, Emperor GO 2026-11-22)",
     "daemon/config.py": "P1 (EngineConfig + dead-knob deletes)",
     "daemon/manager.py": "P1 (late-import registration)",
     "daemon/graph.py": "P5 (class-4 attestation-bridge caller, row 43/M-5)",
