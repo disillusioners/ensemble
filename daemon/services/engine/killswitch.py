@@ -94,6 +94,21 @@ class EngineSwitchResolver:
             return True
         return not bool(val)
 
+    def source_value(self, key: str) -> Any:
+        """The RAW injected-source value for ``key`` (``None`` when absent).
+
+        The ABSENT-vs-EXPLICIT distinction the D3.6 ladder needs: an absent
+        key means "this tier has no opinion" (the caller falls through to
+        the next tier), while an explicit value is that tier's decision.
+
+        The decision helpers above deliberately COLLAPSE the two (e.g.
+        ``shadow_mode()`` defaults to the shipped posture when the key is
+        absent), so a caller that must honour the config tier needs this
+        raw read. Pure over the injected resolver (D3.12) — nothing is
+        cached.
+        """
+        return self.resolver(key)
+
     def resolve_job(self, spec: Any) -> tuple[bool, Optional[str]]:
         """Return (should_run, skip_reason). skip_reason is KILL_SWITCHED or None."""
         if self.job_killed(getattr(spec, "kill_switch_key", None)):

@@ -61,6 +61,71 @@ class EngineExecutionLoop:
         return bool(getattr(self.engine, "shadow_mode", True))
 
     @property
+    def switch_resolver(self) -> Any:
+        """The INJECTED kill-switch resolver (D3.12) — ``None`` when absent.
+
+        Read on EVERY dispatch (D3.6): the resolver caches nothing, so a flip
+        of the switch takes effect on the next tick, with no restart. The
+        tick NEVER touches ``os.environ`` itself.
+        """
+        return getattr(self.engine, "_switch_resolver", None)
+
+    @property
+    def shadow_active(self) -> bool:
+        """Tick-time SHADOW posture (D3.6 ladder, tier 3).
+
+        The env tier (the resolver's LIVE read of
+        ``ENSEMBLE_ENGINE_SHADOW_MODE``) wins when the source EXPLICITLY
+        provides the key; an ABSENT key means "this tier has no opinion" and
+        the boot-scoped CONFIG tier decides. That is the D3.6
+        "(env/config tier)" precedence, and it is what keeps the tick-time
+        read from silently overriding a config-tier posture (an operator
+        who set ``shadow_mode: false`` in config.yaml without setting the
+        env var must NOT be pushed back into shadow).
+
+        The read is live, so an explicit shadow flip takes effect on the
+        next tick, with no restart.
+        """
+        resolver = self.switch_resolver
+        if resolver is None:
+            return bool(self.shadow_mode)
+        source_value = getattr(resolver, "source_value", None)
+        if not callable(source_value):
+            return bool(self.shadow_mode)
+        if source_value("ENSEMBLE_ENGINE_SHADOW_MODE") is None:
+            # ABSENT ⇒ no live opinion ⇒ the config tier decides.
+            return bool(self.shadow_mode)
+        # EXPLICIT ⇒ the env tier decides (malformed ⇒ fail-safe: shadow).
+        return bool(resolver.shadow_mode())
+
+    def _resolve_switch(self, spec: Any) -> tuple[bool, Optional[str]]:
+        """D3.6 ladder — the engine-wide switch, read AT TICK TIME.
+
+        Tier 1: the per-job ``kill_switch_key`` (env/config tier) — tripped
+        ⇒ THIS job is skipped (D3.5: an unreadable per-job key resolves to
+        "job skipped, counted as KILL_SWITCHED").
+        Tier 2: ``ENSEMBLE_ENGINE_ENABLED`` — tripped or unreadable ⇒ the
+        engine does not own execution ⇒ EVERY job is skipped (D3.5
+        fail-to-legacy polarity: the legacy path keeps running; it is a
+        separate loop and is never touched here).
+        Tier 3 (``ENSEMBLE_ENGINE_SHADOW_MODE``) is the SHADOW posture and
+        is resolved at the shadow gate below — the next tier of the same
+        ladder.
+
+        Returns ``(should_run, skip_reason)`` where ``skip_reason`` is the
+        canonical ``KILL_SWITCHED`` token of the D2.6 skip vocabulary.
+        """
+        resolver = self.switch_resolver
+        if resolver is None:
+            # No resolver injected ⇒ no switch opinion (the surface is
+            # absent, NOT tripped). The boot wiring always injects one.
+            return True, None
+        should_run, reason = resolver.resolve_job(spec)
+        if should_run:
+            return True, None
+        return False, reason or "KILL_SWITCHED"
+
+    @property
     def resolution(self) -> float:
         cfg = getattr(self.engine, "config", None)
         if cfg is not None and getattr(cfg, "tick_resolution_seconds", None) is not None:
@@ -231,6 +296,25 @@ class EngineExecutionLoop:
         started_iso = now_iso()
         started_dt = datetime.now(timezone.utc)
 
+        # ── D3.6 — the kill-switch ladder, read AT TICK TIME ──────────
+        # The resolver is INJECTED (D3.12) and consulted on EVERY dispatch
+        # (never once at boot): a flip takes effect on the NEXT tick, with
+        # no restart. D3.5's fail-to-legacy polarity is preserved — a
+        # tripped switch means "the engine does not own execution"; the
+        # job is SKIPPED and COUNTED with the honest state machine's
+        # vocabulary, while the legacy path (a separate loop) keeps running.
+        should_run, kill_reason = self._resolve_switch(spec)
+        if not should_run:
+            await self._stamp(
+                job_id, cache, spec, started_iso,
+                skip_outcome(kill_reason), kill_reason,
+                started_dt, None, 0, None,
+            )
+            cache["skips_by_reason"][kill_reason] = (
+                cache["skips_by_reason"].get(kill_reason, 0) + 1
+            )
+            return
+
         # P3 T3.5: re-registration cancel — if a re-registration landed
         # while this job was in-flight, audit as SKIPPED_REREGISTERED.
         if cache.get("cancel_requested") or cache.get("reregistered"):
@@ -341,7 +425,7 @@ class EngineExecutionLoop:
         try:
             # shadow posture / withheld execute_fn
             executor = self.engine._executors.get(job_id)
-            shadow = self.shadow_mode or executor is None
+            shadow = self.shadow_active or executor is None
             if shadow:
                 reason = "SHADOW"
                 await self._stamp(

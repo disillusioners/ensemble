@@ -3869,9 +3869,13 @@ async def lifespan(app: FastAPI):
             _engine_registry,
             _engine_cfg,
             shadow_mode=_engine_cfg.shadow_mode,
+            # D3.12 — the kill-switch resolver is INJECTED into the engine.
+            # The tick path consults it AT TICK TIME (D3.6) on every
+            # dispatch, so a flip of the switch takes effect on the next
+            # tick, with no restart. It caches nothing and the tick never
+            # reads os.environ itself.
+            switch_resolver=_engine_switch,
         )
-        # ARM the P3 killswitch surface (inert while dormant).
-        _engine_svc._switch_resolver = _engine_switch
 
         # N dormant observer specs — execute_fn withheld by construction.
         _observer_specs = build_observer_specs(config)

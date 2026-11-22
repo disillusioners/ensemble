@@ -35,10 +35,18 @@ class EngineService:
         config: Any = None,
         dedicated_executor: Optional[ThreadPoolExecutor] = None,
         shadow_mode: Optional[bool] = None,
+        switch_resolver: Optional[Any] = None,
     ) -> None:
         self.repository = repository
         self.registry = registry
         self.config = config
+        # D3.12 — the kill-switch resolver is INJECTED (a pure function over
+        # an injected ``resolver(key) -> value`` source). The tick path
+        # consults it AT TICK TIME (D3.6) and NEVER reads ``os.environ``
+        # directly, so the whole switch family is testable without env.
+        # ``None`` ⇒ the switch surface is ABSENT (not tripped): the tick
+        # path then has no switch opinion at all.
+        self._switch_resolver = switch_resolver
         self.shadow_mode = (
             shadow_mode if shadow_mode is not None
             else getattr(config, "shadow_mode", True)
@@ -83,6 +91,15 @@ class EngineService:
     @property
     def locks(self) -> JobLockTable:
         return self._locks
+
+    @property
+    def switch_resolver(self) -> Any:
+        """The INJECTED kill-switch resolver (D3.12) — ``None`` when absent.
+
+        The tick path reads this on EVERY dispatch (D3.6): a flip of the
+        switch takes effect on the next tick, with no restart.
+        """
+        return self._switch_resolver
 
     @property
     def _cache_view(self):
