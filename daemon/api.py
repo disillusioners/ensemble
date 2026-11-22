@@ -1956,7 +1956,12 @@ async def lifespan(app: FastAPI):
     from daemon.services.orphan_watcher_sweep import (
         DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS,
         DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS,
+        ORPHAN_WATCHER_ENGINE_FLAG,
+        ORPHAN_WATCHER_ENGINE_JOB_ID,
         OrphanWatcherSweepService,
+        build_engine_executor,
+        engine_owns_execution,
+        rearm_legacy_loop,
     )
     orphan_sweep_interval = (
         config.services.orphan_watcher_sweep_interval_seconds
@@ -1980,10 +1985,33 @@ async def lifespan(app: FastAPI):
     # (defensive — the config Field constraint enforces the bound,
     # this is a second line of defence for legacy test fixtures
     # that construct the service directly).
+    # C1 (fail-stuck fix): the construct site may suppress the legacy loop,
+    # but ONLY on the full ownership CONJUNCT (flag ON ∧ engine enabled ∧
+    # engine shadow OFF). When the conjunct does not hold, the legacy loop
+    # owns and the engine merely shadow-observes (SKIPPED_SHADOW rows keep
+    # accumulating — the correct greenlight posture). If the engine's boot
+    # block later fails, the except handler RE-ARMS the legacy loop.
+    _orphan_legacy_suppressed = False
     if orphan_sweep_interval < 1:
         logger.error(
             f"OrphanWatcherSweepService DISABLED — interval="
             f"{orphan_sweep_interval}s below the floor of 1s"
+        )
+    elif engine_owns_execution(engine_config=getattr(config, "engine", None)):
+        # Engine Arc Phase-2 pilot: the engine owns execution (the full
+        # conjunct holds). The legacy loop is SUPPRESSED — single-executor
+        # by construction. The service object is retained on app.state so
+        # the existing shutdown path's ``stop()`` stays a harmless no-op.
+        # EFFECTIVE FLIP RECIPE: flag ON + ENSEMBLE_ENGINE_SHADOW_MODE=false
+        # (+ engine enabled). ROLLBACK: flag OFF (or shadow ON, or engine
+        # disabled) ⇒ the legacy loop owns again.
+        _orphan_legacy_suppressed = True
+        app.state.orphan_watcher_sweep = orphan_watcher_sweep
+        logger.info(
+            "OrphanWatcherSweepService legacy loop SUPPRESSED — engine owns "
+            "execution (%s=1, engine enabled, shadow off); sweep object "
+            "retained for shutdown",
+            ORPHAN_WATCHER_ENGINE_FLAG,
         )
     else:
         orphan_watcher_sweep.start()
@@ -3815,10 +3843,14 @@ async def lifespan(app: FastAPI):
     # F-14/F-15 untouched. A failure logs WARNING and boot CONTINUES.
     # ─────────────────────────────────────────────────────────────
     _engine_block_entry_t0 = time.perf_counter()  # UNGATED whole-block telemetry (D4.9)
+    _engine_svc = None  # C1: pre-bound so the except handler can drop a partial executor
     try:
         from daemon.services.engine.boot import build_observer_specs, run_boot_pass
         from daemon.services.engine.engine import EngineService
-        from daemon.services.engine.guardrails import assert_dependencies_resolvable
+        from daemon.services.engine.guardrails import (
+            DependencyRef,
+            assert_dependencies_resolvable,
+        )
         from daemon.services.engine.killswitch import EngineSwitchResolver
         from daemon.services.engine.registry import EngineRegistry
         from daemon.services.engine.watchdog import (
@@ -3856,6 +3888,41 @@ async def lifespan(app: FastAPI):
             float(_engine_cfg.boot_pass_deadline_seconds),
             "engine_registration",
         )
+
+        # Engine Arc Phase-2 pilot — the FIRST executable registration.
+        # The SAME ownership CONJUNCT as the construct site (same
+        # ``config.engine`` object ⇒ no divergent resolution):
+        #   flag ON ∧ engine enabled ∧ engine shadow OFF.
+        # Flag OFF/unset (or shadow ON, or engine disabled): NO executor
+        # (this job stays shadow-skipped; the legacy loop owns).
+        # Conjunct true: executor registered here AND the legacy loop
+        # suppressed at the construct site — exactly one executor, no
+        # double-execution window.
+        if engine_owns_execution(engine_config=_engine_cfg):
+            from daemon.services.dependency_bus import (
+                get_dependency_bus as _get_pilot_bus,
+            )
+
+            _engine_svc.set_executor(
+                "orphan-watcher",
+                build_engine_executor(min_watcher_age_seconds=orphan_sweep_grace),
+            )
+            # Born-dead trap impossibility: the bus is a declared singleton
+            # getter resolved at EVERY due-time (never ctor-captured). The
+            # boot wiring assertion below now checks it for a REAL adopter.
+            _engine_svc.set_dependencies(
+                "orphan-watcher",
+                [
+                    DependencyRef(
+                        label="dependency_bus", getter=_get_pilot_bus
+                    )
+                ],
+            )
+            logger.info(
+                "orphan-watcher pilot: engine executor registered, legacy "
+                "loop suppressed (%s=1); dependency_bus late-bound at tick",
+                ORPHAN_WATCHER_ENGINE_FLAG,
+            )
 
         # T4.6 — boot wiring assertion immediately after the registration pass.
         _engine_wiring_report = assert_dependencies_resolvable(
@@ -3941,6 +4008,59 @@ async def lifespan(app: FastAPI):
         logger.warning(
             "engine boot wiring failed (boot CONTINUES): %s", _engine_boot_exc
         )
+        # C1 FAIL-TO-LEGACY: the construct site may have suppressed the
+        # legacy loop on the strength of the pilot conjunct. The engine never
+        # took ownership (registration + start did not complete), so the
+        # legacy path MUST get the sweep back — otherwise the lane is DEAD.
+        # The executor is dropped first so a half-started engine cannot
+        # double-run the sweep next to the re-armed legacy loop.
+        if _engine_svc is not None:
+            try:
+                # F-2: the IMPORTED constant (never a retyped literal — a
+                # retyped key would silently pop nothing) and the drop's
+                # RESULT, so the log says what actually happened.
+                dropped = _engine_svc._executors.pop(
+                    ORPHAN_WATCHER_ENGINE_JOB_ID, None
+                )
+                if dropped is not None:
+                    # R5 — the drop is LOUD: an executor silently discarded
+                    # here is the difference between "the engine owns the
+                    # sweep" and "nobody owns the sweep".
+                    logger.warning(
+                        "orphan-watcher pilot FAIL-TO-LEGACY: dropped the engine executor for job_id=%s (engine boot wiring failed: %s) — execution returns to the legacy path",
+                        ORPHAN_WATCHER_ENGINE_JOB_ID,
+                        _engine_boot_exc,
+                    )
+                else:
+                    logger.warning(
+                        "orphan-watcher pilot FAIL-TO-LEGACY: no engine executor was registered for job_id=%s (nothing to drop; engine boot wiring failed: %s) — execution returns to the legacy path",
+                        ORPHAN_WATCHER_ENGINE_JOB_ID,
+                        _engine_boot_exc,
+                    )
+            except Exception as _pop_err:  # noqa: BLE001 — best effort
+                # 🟢(c) — the last silent except now says something.
+                logger.error(
+                    "orphan-watcher pilot FAIL-TO-LEGACY: dropping the engine executor for job_id=%s raised (%s); boot CONTINUES",
+                    ORPHAN_WATCHER_ENGINE_JOB_ID,
+                    _pop_err,
+                )
+        if _orphan_legacy_suppressed:
+            _orphan_legacy_suppressed = False
+            app.state.orphan_watcher_sweep = orphan_watcher_sweep
+            # R2 — the re-arm itself must NEVER abort the boot: this handler
+            # runs in the "never abort boot" path, so a raise here would be
+            # strictly worse than the dead lane it prevents.
+            try:
+                rearm_legacy_loop(
+                    orphan_watcher_sweep,
+                    reason=f"engine boot wiring failed: {_engine_boot_exc}",
+                )
+            except Exception as _rearm_err:  # noqa: BLE001 — never abort boot
+                logger.error(
+                    "orphan-watcher pilot FAIL-TO-LEGACY re-arm raised (%s); "
+                    "the legacy sweep loop may still be down — boot CONTINUES",
+                    _rearm_err,
+                )
 
     # ─────────────────────────────────────────────────────────────
     # service-tool Phase 1 (1.C.14) — ServiceReconciliationService.

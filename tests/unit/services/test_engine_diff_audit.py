@@ -48,10 +48,23 @@ from pathlib import Path
 # the planning tip). HEAD-anchored, NOT working-tree-anchored: this gate audits
 # what the branch COMMITS, so an uncommitted daemon edit does not change the
 # verdict. Re-anchor per the procedure in the module docstring.
-BASE_SHA = "1a74b0493cc1b956c6c775be0f818e1ec5e2beec"
+#
+# RE-ANCHORED 2026-11-22 (Engine Arc Phase-2 pilot lane): the old base
+# ``1a74b0493`` is the PHASE-1 family base. Between it and this lane's base
+# ``8894f86a`` the release bump ``2bfd20acf`` (v0.31.27) touched
+# ``daemon/__init__.py``, reddening this pin with a PRE-EXISTING path no
+# ownership-map row sanctions. Per the documented re-anchor procedure the base
+# moves to the lane base; the committed diff then contains ONLY this lane's
+# sanctioned paths (``daemon/api.py`` already declared; the service module is
+# added below as an explicit Phase-2 pilot row).
+BASE_SHA = "8894f86a853c5fcba2173ab29405f02c71c1f3ef"
 
 # The expected daemon/ path set — DATA, per D7.4. Grouped by ownership-map row.
-# 47 declared paths; the actual diff (45 paths at tip aebf72c9f) is a subset.
+# 54 declared paths (48 program rows + 6 P2-pilot stage-1 drift-arc addendum
+# rows). At the re-anchor the lane's committed daemon/ diff was exactly 2 paths:
+# `daemon/api.py` (ALREADY declared by the P4 lifespan row)
+# and `daemon/services/orphan_watcher_sweep.py` (ONE newly declared row, added
+# by this lane with its sanctioning comment below).
 EXPECTED_DAEMON_PATHS: frozenset[str] = frozenset({
     # --- P1: migrations (phase1 §0.3, two migration rows) -----------------
     "daemon/migrations/versions/20261121_120000_create_engine_jobs.sql",
@@ -123,12 +136,28 @@ EXPECTED_DAEMON_PATHS: frozenset[str] = frozenset({
     # the file is now a claimed ownership-map row (owner P1), so the prior
     # marker is obsolete and must stay gone.
     "daemon/plugin_subsystem/config_compat_contract.py",  # P1 — T1.12 D-1 compat-contract extension (landed 6e97cdce2)
+    # --- PHASE 2 PILOT — orphan-watcher migration (this lane, 2026-11-22) ---
+    # Sanctioned by the Emperor GO 2026-11-22 + the phase2-pilot-recommendation
+    # charter: the pilot's execute_fn adapter lives in the service's OWN module
+    # (build_engine_executor / engine_owns_execution), never in engine/**.
+    "daemon/services/orphan_watcher_sweep.py",  # Phase-2 pilot — dual-path seam + late-bound engine executor
+    # --- P2-PILOT STAGE-1 DRIFT-MERGE ADDENDUM (2026-11-22) -----------------
+    # The 28-commit origin/latest drift merge (8894f86a -> 7fd7af010) carried
+    # these 6 daemon paths from sibling lanes. Each row cites its drift arc and
+    # first-in-range commit so the attribution is per-file, not per-count.
+    "daemon/__init__.py",  # drift-arc release-bump 0da8aa619 (P2-pilot stage-1 census addendum 2026-11-22)
+    "daemon/repositories/project/repository.py",  # drift-arc projres 8a4ce6899 (P2-pilot stage-1 census addendum 2026-11-22)
+    "daemon/services/work_resolver.py",  # drift-arc work_resolver 96f21f1c5 (P2-pilot stage-1 census addendum 2026-11-22)
+    "daemon/tools/job_queue.py",  # drift-arc job-queue bd364876f (P2-pilot stage-1 census addendum 2026-11-22)
+    "daemon/tools/project.py",  # drift-arc projres 8a4ce6899 (P2-pilot stage-1 census addendum 2026-11-22)
+    "daemon/tools/upgrade_tools.py",  # drift-arc upgrade_tools PIPELINE_SCRIPTS re-pin 5aa5d01ae (P2-pilot stage-1 census addendum 2026-11-22)
 })
 
 # Owner hints for the RED message — which phase SHOULD have owned an offending
 # path. Kept separate from the set so the set stays a clean data literal.
 _SPECIAL_OWNERS: dict[str, str] = {
-    "daemon/api.py": "P4 (lifespan) / P6 (router catalogue)",
+    "daemon/api.py": "P4 (lifespan) / P6 (router catalogue) / Phase-2 pilot (dual-path wiring)",
+    "daemon/services/orphan_watcher_sweep.py": "Phase-2 pilot (dual-path seam + late-bound executor, Emperor GO 2026-11-22)",
     "daemon/config.py": "P1 (EngineConfig + dead-knob deletes)",
     "daemon/manager.py": "P1 (late-import registration)",
     "daemon/graph.py": "P5 (class-4 attestation-bridge caller, row 43/M-5)",

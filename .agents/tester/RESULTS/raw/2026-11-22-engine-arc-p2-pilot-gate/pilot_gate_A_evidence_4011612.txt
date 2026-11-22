@@ -1,0 +1,58 @@
+=== PILOT GATE A — PSQL EVIDENCE DUMP ===
+captured_utc=2026-11-22T12:53:37Z  db=pilot_gate_a_4011612  scratch=/tmp/pilot_gate_A_4011612  daemon_pid=4012302
+T0=1795351761.484710708 T_LIVE=1795351788.217177525 T_READY=1795351788.250455228 LIVEDELTA=26.732 DELTA=26.766 VERDICT=PASS
+---- (a) engine_jobs (expect 12, incl orphan-watcher) ----
+            id             |        service_tag        |                kill_switch_key                | interval_seconds | dead | enabled 
+---------------------------+---------------------------+-----------------------------------------------+------------------+------+---------
+ drift-reconcile           | drift-reconcile           | SERVICES_DRIFT_RECONCILE_USE_ENGINE           |              300 |    0 |       1
+ eligible-pending          | eligible-pending-sweep    | SERVICES_ELIGIBLE_PENDING_SWEEP_USE_ENGINE    |               90 |    0 |       1
+ job-lock                  | job-lock-sweep            | SERVICES_JOB_LOCK_SWEEP_USE_ENGINE            |               90 |    0 |       1
+ mission-strand-heal       | mission-strand-heal       | SERVICES_MISSION_STRAND_HEAL_USE_ENGINE       |              300 |    0 |       1
+ orphan-watcher            | orphan-watcher-sweep      | SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE      |               90 |    0 |       1
+ plane-sync-watchdog       | plane-sync-watchdog       | SERVICES_PLANE_SYNC_WATCHDOG_USE_ENGINE       |              300 |    0 |       1
+ report-delivery-recovery  | report-delivery-recovery  | SERVICES_REPORT_DELIVERY_RECOVERY_USE_ENGINE  |              300 |    0 |       1
+ sources-gc                | sources-gc                | SERVICES_SOURCES_GC_USE_ENGINE                |             3600 |    0 |       1
+ stale-pause               | stale-pause-sweep         | SERVICES_STALE_PAUSE_SWEEP_USE_ENGINE         |              300 |    0 |       1
+ tmp-image                 | tmp-image-cleanup         | SERVICES_TMP_IMAGE_CLEANUP_USE_ENGINE         |             3600 |    0 |       1
+ waiting-children-watchdog | waiting-children-watchdog | SERVICES_WAITING_CHILDREN_WATCHDOG_USE_ENGINE |             3600 |    0 |       1
+ watch-reconcile           | watch-reconcile-sweep     | SERVICES_WATCH_RECONCILE_SWEEP_USE_ENGINE     |              300 |    0 |       1
+(12 rows)
+
+---- (b) engine_runs orphan-watcher (SKIPPED_SHADOW cadence + boot_id) ----
+ id |            started_at            |    outcome     | skip_reason |             boot_id              
+----+----------------------------------+----------------+-------------+----------------------------------
+  5 | 2026-11-22T12:49:47.369032+00:00 | SKIPPED_SHADOW | SHADOW      | e9be04f94d1443758adc932c574cfdec
+ 15 | 2026-11-22T12:51:17.637811+00:00 | SKIPPED_SHADOW | SHADOW      | e9be04f94d1443758adc932c574cfdec
+ 18 | 2026-11-22T12:52:47.752601+00:00 | SKIPPED_SHADOW | SHADOW      | e9be04f94d1443758adc932c574cfdec
+(3 rows)
+
+---- (c) zero non-SKIPPED outcomes for ANY job (expect 0 rows) ----
+ job_id | outcome | count 
+--------+---------+-------
+(0 rows)
+
+---- (c2) orphan-watcher non-SKIPPED_SHADOW count (expect 0) ----
+0
+---- (e) planted strengthener watcher final state ----
+            watch_id             |            source_task_id             |   state   |        created_at         |             fired_at             
+---------------------------------+---------------------------------------+-----------+---------------------------+----------------------------------
+ pilot-gate-strengthener-4011612 | pilot-gate-nonexistent-source-4011612 | CANCELLED | 2020-01-01T00:00:00+00:00 | 2026-11-22T12:51:13.821358+00:00
+(1 row)
+
+---- (extra) all engine_runs outcomes summary ----
+          job_id           |    outcome     | count 
+---------------------------+----------------+-------
+ drift-reconcile           | SKIPPED_SHADOW |     1
+ eligible-pending          | SKIPPED_SHADOW |     3
+ job-lock                  | SKIPPED_SHADOW |     3
+ mission-strand-heal       | SKIPPED_SHADOW |     1
+ orphan-watcher            | SKIPPED_SHADOW |     3
+ plane-sync-watchdog       | SKIPPED_SHADOW |     1
+ report-delivery-recovery  | SKIPPED_SHADOW |     1
+ sources-gc                | SKIPPED_SHADOW |     1
+ stale-pause               | SKIPPED_SHADOW |     1
+ tmp-image                 | SKIPPED_SHADOW |     1
+ waiting-children-watchdog | SKIPPED_SHADOW |     1
+ watch-reconcile           | SKIPPED_SHADOW |     1
+(12 rows)
+

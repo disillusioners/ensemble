@@ -59,14 +59,195 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from daemon.services.dependency_bus import get_dependency_bus
+from daemon.services.engine.dualpath import ownership_for
 
 if TYPE_CHECKING:
     from daemon.services.dependency_bus import DependencyBus
 
 logger = logging.getLogger(__name__)
+
+
+# ── Engine Arc Phase-2 pilot: dual-path identity (wiring only) ────────────
+# ``dualpath.py:31`` derives ``SERVICES_<SLUG>_USE_ENGINE`` from the slug.
+# This slug is the estate row's ``service_tag`` (estate.py
+# "orphan-watcher-sweep") and the P4 observer spec's ``kill_switch_key`` —
+# one identity shared by the legacy construct site and the P4 boot block.
+ORPHAN_WATCHER_ENGINE_SLUG: str = "orphan-watcher-sweep"
+ORPHAN_WATCHER_ENGINE_JOB_ID: str = "orphan-watcher"
+ORPHAN_WATCHER_ENGINE_FLAG: str = "SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE"
+
+
+def _normalized_slug() -> str:
+    """The dualpath slug, hyphen-normalized.
+
+    NOTE (engine-core drift, reported not patched — engine/** is a Phase-1
+    reviewed fence): ``dualpath.py:31`` derives the key as
+    ``SERVICES_{slug.upper()}_USE_ENGINE`` WITHOUT normalizing hyphens, while
+    ``boot.py:179`` (the spec's ``kill_switch_key``) DOES ``replace('-', '_')``.
+    Passing the hyphenated estate slug raw would read a DIFFERENT variable
+    than the engine's kill switch and could double-execute on a flag flip.
+    We normalize here so BOTH paths read the one canonical flag.
+    """
+    return ORPHAN_WATCHER_ENGINE_SLUG.replace("-", "_")
+
+
+def engine_owns_execution(environ: Any = None, engine_config: Any = None) -> bool:
+    """The ownership CONJUNCT — the ONE decision both api.py sites consult.
+
+    **The engine owns execution iff ALL THREE hold:**
+
+    1. ``SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE`` is ON (the per-job
+       dual-path flag);
+    2. the engine is ENABLED (``ENSEMBLE_ENGINE_ENABLED`` / ``EngineConfig
+       .enabled``) — otherwise there is no tick loop to execute on;
+    3. the engine is NOT in SHADOW (``ENSEMBLE_ENGINE_SHADOW_MODE`` /
+       ``EngineConfig.shadow_mode``) — in shadow the engine computes
+       due-ness and stamps ``SKIPPED_SHADOW`` but NEVER invokes the
+       executor (``execution.py`` shadow gate).
+
+    Conjuncting the flag with the engine's own posture is what makes the
+    migration fail-to-legacy instead of fail-stuck: flag ON + shadow ON
+    (the SHIPPED default) would otherwise suppress the legacy loop while
+    the engine refuses to execute it — a dead sweep lane.
+
+    ``engine_config`` MUST be the engine's own config object (``config.engine``
+    — the very object the P4 boot block passes to ``EngineService``), so both
+    wiring sites consult the SAME resolution with no divergent
+    re-implementation. ``None`` ⇒ fail-to-legacy (``False``): without the
+    engine's posture we may not claim ownership.
+
+    EFFECTIVE FLIP RECIPE (greenlight criterion 8 — the shadow switch is a
+    NAMED separate switch): flag ON **+** ``ENSEMBLE_ENGINE_SHADOW_MODE=false``
+    (+ the engine enabled). ROLLBACK = flag OFF (or shadow ON, or the engine
+    disabled) ⇒ the legacy loop owns again.
+    """
+    if engine_config is None:
+        return False  # fail-to-legacy: no posture ⇒ no ownership claim
+    if not ownership_for(_normalized_slug(), environ).engine_owns:
+        return False
+    enabled = bool(getattr(engine_config, "enabled", True))
+    shadow_mode = bool(getattr(engine_config, "shadow_mode", True))
+    return enabled and not shadow_mode
+
+
+def rearm_legacy_loop(
+    service: "OrphanWatcherSweepService | None",
+    *,
+    reason: str,
+) -> bool:
+    """Fail-to-legacy re-arm (C1).
+
+    Called when the engine's boot block failed AFTER the construct site had
+    suppressed the legacy loop: the engine never took ownership (its
+    executor registration + start did not complete), so ownership returns to
+    the legacy path instead of leaving the sweep lane DEAD.
+
+    Idempotent: a live loop is left alone (never a second loop). Returns
+    ``True`` when the legacy loop was (re-)armed.
+
+    FAIL-SOFT (R2): this runs inside the boot block's exception handler, so
+    it MUST NOT raise — an exception here would abort the daemon boot, which
+    is strictly worse than the dead lane it prevents. A failing ``start()``
+    is logged at ERROR and reported as ``False``.
+    """
+    if service is None:
+        return False
+    try:
+        task = getattr(service, "_task", None)
+        if task is not None:
+            # Defensive: this runs inside the boot block's exception handler —
+            # a probe that raises here would abort the boot we are trying to keep.
+            done = getattr(task, "done", None)
+            if callable(done) and not done():
+                return False  # already running — never start a second loop
+        service.start()
+    except Exception as start_err:  # noqa: BLE001 — never abort the boot
+        logger.error(
+            "orphan-watcher pilot FAIL-TO-LEGACY RE-ARM FAILED: %s — the "
+            "legacy sweep loop could not be restarted (%s)",
+            reason,
+            start_err,
+        )
+        return False
+    logger.warning(
+        "orphan-watcher pilot FAIL-TO-LEGACY: %s — the legacy sweep loop "
+        "was RE-ARMED (ownership returned to the legacy path)",
+        reason,
+    )
+    return True
+
+
+def build_engine_executor(
+    min_watcher_age_seconds: int | None = None,
+) -> Callable[[], dict[str, Any]]:
+    """Build the engine's DB_OFFLOAD ``execute_fn`` for the orphan pilot.
+
+    MUST be a SYNC callable: ``dispatch.run_db_offload`` refuses coroutine
+    functions (W-4 discipline — an async fn would silently defeat the
+    off-loop guarantee). The bus method it bridges to is async, so the sync
+    adapter runs it in a fresh event loop inside the engine's worker thread
+    via ``asyncio.run``. ``DependencyBus._sweep_orphan_watchers`` is
+    loop-agnostic (its DB write is already ``await asyncio.to_thread(...)``),
+    so no loop-bound bus state crosses the seam.
+
+    The bus is LATE-BOUND via ``get_dependency_bus()`` on EVERY tick — never
+    captured at construction (the born-dead trap this migration exists to
+    make impossible). The grace window is the SAME value the legacy service
+    forwards (``ServicesConfig.orphan_watcher_sweep_grace_seconds``), so both
+    paths apply the identical age predicate.
+
+    FAILURE PROPAGATION, SCOPED (R1c). The bus's own sweep method is
+    internally FAIL-OPEN: ``DependencyBus._sweep_orphan_watchers`` wraps its
+    DB write in a try/except that logs a warning and returns 0 — it never
+    raises. So:
+
+    * a DB-level failure inside the bus ⇒ the bus swallows it and returns 0
+      ⇒ BOTH paths observe ``cancelled == 0`` and neither records an error
+      (symmetric fail-open — the parity HOLDS);
+    * only a BRIDGE-level failure (the bus getter raising, or the
+      ``asyncio.run`` bridge itself failing) reaches the engine, which stamps
+      ``FAILED_BACKOFF``; the legacy path's equivalent (its ``sweep_once``
+      try/except) counts it in ``_errors_total`` and logs ERROR.
+
+    Both paths therefore FAIL OPEN symmetrically — the sweep lane keeps
+    running either way; only the failure ACCOUNTING differs (engine
+    ``FAILED_BACKOFF`` + ``error_class`` vs legacy ``_errors_total``).
+    The parity pack maps that difference explicitly.
+    """
+    # Resolved at CALL time (the default constant is defined below this block).
+    grace = int(
+        DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS
+        if min_watcher_age_seconds is None
+        else min_watcher_age_seconds
+    )
+
+    def _execute() -> dict[str, Any]:
+        bus = get_dependency_bus()  # late bind, in the worker thread, every tick
+        if bus is None:
+            # DependencyRef gates this at due-time; a disappearance between
+            # resolution and dispatch is a counted no-op, never an exception.
+            return {
+                "cancelled": 0,
+                "bus_wired": 0,
+                "grace_seconds": grace,
+            }
+        cancelled = int(
+            asyncio.run(
+                bus._sweep_orphan_watchers(min_watcher_age_seconds=grace)
+            )
+            or 0
+        )
+        return {
+            "cancelled": cancelled,
+            "bus_wired": 1,
+            "grace_seconds": grace,
+        }
+
+    return _execute
 
 
 # Default — mirrors ``eligible_pending_sweep.DEFAULT_SWEEP_INTERVAL_SECONDS``
