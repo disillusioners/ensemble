@@ -114,11 +114,18 @@ def test_no_bus_passed_reports_unverifiable_not_absent():
     ]
 
 
-def test_non_bus_kinds_have_no_live_source():
+def test_kinds_with_no_live_source_report_all_consumers_unverifiable():
+    # Kinds whose declared/namespace sources are not implemented (the
+    # class-3 rdrs:* substrate; attestation_epoch; the deferred_v2 entry)
+    # keep every consumer at live=None ("cannot verify" != "absent").
+    # instance_terminalized used to be in this set; it now carries the
+    # dependency_bus source (see
+    # test_instance_terminalized_verifies_its_dependency_bus_lane).
     entry = snapshot(bus=_StubBus(("job_feedback_observer",)))[
-        "kinds"]["instance_terminalized"]
-    assert all(c["live"] is None for c in entry["consumers_live"])
-    assert entry["consumers_live"][0]["consumer"] == "dependency_bus:child_keyed_waiters"
+        "kinds"]["report_injection_obligation"]
+    assert entry["consumers_live"] == [
+        {"consumer": "rdrs:sweep_lanes_1_3_4_5", "live": None}
+    ]
 
 
 def test_live_source_dispatch_covers_exactly_the_event_bus_source():
@@ -159,20 +166,131 @@ def test_live_source_dispatch_covers_exactly_the_event_bus_source():
     ]
     # Leg 2 (catalog-declaration fence): the catalog must not declare a
     # live source the dispatch does not implement — declaration without
-    # implementation is the other half-implementation shape. Today the
-    # catalog declares exactly one source ("event_bus"); gaining a
-    # second declared source REDs until the real extractor lands and
-    # both pins are re-pointed deliberately.
-    from daemon.services.event_registry import CATALOG
+    # implementation is the other half-implementation shape. The IMPLEMENTED
+    # dispatch set is now exactly {"event_bus", "dependency_bus"} (the
+    # second live source — D5.4 "the dependency bus's lane names" — landed
+    # this round: daemon/services/event_registry/metrics.py
+    # `_live_dependency_bus_lanes`). The catalog declares exactly those
+    # two (event_bus family + instance_terminalized); a THIRD declared
+    # source REDs here (the fence guards the frontier, not the status
+    # quo).
+    from daemon.services.event_registry import CATALOG, LIVE_SOURCES
 
     declared = {
         (spec.metadata or {}).get("live_source") for spec in CATALOG
     } - {None}
-    assert declared == {"event_bus"}, (
-        "the catalog declares live sources beyond event_bus — the "
-        "second live source has been declared; land its real extractor "
-        f"and re-point the D5.4 dispatch pins: {sorted(declared)}"
+    assert declared == set(LIVE_SOURCES), (
+        "the catalog's declared live sources do not match the "
+        "implemented dispatch set — the second live source has been "
+        f"mis-declared or a third source slipped in: declared={sorted(declared)} "
+        f"implemented={sorted(LIVE_SOURCES)}"
     )
+    assert set(LIVE_SOURCES) == {"event_bus", "dependency_bus"}, (
+        "the IMPLEMENTED dispatch set drifted from the declared shape: "
+        "a third source must NOT be added without a real extractor"
+    )
+
+
+# ── D5.4 SECOND LIVE SOURCE — extractor + per-kind verification ────────
+
+
+def test_live_dependency_bus_lanes_extracts_armed_arm_lanes():
+    # The dependency bus's live LANE names = the arm-lane tags of the
+    # currently ARMED watchers (the bus's in-RAM `_pending` cache — the
+    # same RAM-only read the event-bus extractor does). The two
+    # production arm lanes stamp metadata["kind"] = "child_complete"
+    # (spawn/send_message) / "nudge_complete" (nudge) — bus docstring
+    # names both arm lanes (dependency_bus.py:719-724).
+    from daemon.services.event_registry.metrics import (
+        _live_dependency_bus_lanes,
+    )
+
+    class _Bus:
+        _pending = {
+            "src-a": [SimpleNamespace(metadata={"kind": "child_complete"})],
+            "src-b": [
+                SimpleNamespace(metadata={"kind": "nudge_complete"}),
+                SimpleNamespace(metadata={"kind": "child_complete"}),
+            ],
+        }
+
+    assert _live_dependency_bus_lanes(_Bus()) == {
+        "child_complete", "nudge_complete"
+    }
+    # An empty (but real) armed set is a VERIFIED empty lane population
+    # — the extractor returns the empty set, NOT None.
+    class _EmptyBus:
+        _pending = {}
+
+    assert _live_dependency_bus_lanes(_EmptyBus()) == set()
+    # No lane surface at all => "cannot verify" (None), never "absent".
+    assert _live_dependency_bus_lanes(None) is None
+    assert _live_dependency_bus_lanes(SimpleNamespace()) is None
+    # A duck-typed explicit lane-name surface wins over the derived one.
+    class _ExplicitBus:
+        _lane_names = ("alpha", "beta")
+
+    assert _live_dependency_bus_lanes(_ExplicitBus()) == {"alpha", "beta"}
+
+
+def test_live_dependency_bus_lanes_survives_stubs_without_metadata():
+    from daemon.services.event_registry.metrics import (
+        _live_dependency_bus_lanes,
+    )
+
+    class _Bus:
+        _pending = {"src": [SimpleNamespace(metadata=None), None]}
+
+    assert _live_dependency_bus_lanes(_Bus()) == set()
+
+
+def test_instance_terminalized_verifies_its_dependency_bus_lane(caplog):
+    class _StubDependencyBus:
+        _pending = {
+            "src-1": [SimpleNamespace(metadata={"kind": "child_complete"})],
+        }
+
+    # With a dependency bus, the dependency_bus arm lanes verify; the
+    # report_lane consumer has no extractor -> live=None ("cannot
+    # verify", honest). Reset before ANY snapshot so the warning-count
+    # assertion below is not polluted by an earlier snapshot's record.
+    reset_warning_state_for_tests()
+    import logging as _logging
+
+    with caplog.at_level(_logging.WARNING):
+        entry = snapshot(
+            bus=_StubBus(()), dependency_bus=_StubDependencyBus()
+        )["kinds"]["instance_terminalized"]
+        assert entry["consumers_live"] == [
+            {"consumer": "dependency_bus:child_complete", "live": True},
+            {"consumer": "dependency_bus:nudge_complete", "live": False},
+            {"consumer": "report_lane:structural_parent", "live": None},
+        ]
+        warnings = [
+            r for r in caplog.records
+            if "ABSENT from the live subscriber set" in r.getMessage()
+            and "instance_terminalized" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+
+
+def test_third_unimplemented_source_still_unverifiable():
+    # The fence keeps guarding the frontier, not the status quo: a kind
+    # declaring a THIRD (unimplemented) source must report UNVERIFIED
+    # (live=None, verified=False) even with a bus in hand.
+    from daemon.services.event_registry.metrics import _consumers_live
+
+    probe = SimpleNamespace(
+        kind_id="event_registry:test_probe_third_source",
+        consumers=("rdrs:some_lane",),
+        metadata={"live_source": "rdrs"},
+    )
+    entries, verified, _ = _consumers_live(
+        probe, _StubBus(("job_feedback_observer",))
+    )
+    assert verified is False
+    assert entries == [{"consumer": "rdrs:some_lane", "live": None}]
+
 
 
 def test_warning_state_reset_re_warns(caplog):

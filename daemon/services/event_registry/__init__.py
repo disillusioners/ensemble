@@ -54,6 +54,7 @@ from .emit import (
     set_event_sink,
 )
 from .metrics import (
+    LIVE_SOURCES,
     reset_warning_state_for_tests,
     snapshot,
 )
@@ -66,6 +67,7 @@ __all__ = [
     "KIND_INDEX",
     "RING_CAP",
     "SEAM_DEPTH_TRIGGERS",
+    "LIVE_SOURCES",
     "ZERO_PRODUCER_KINDS",
     "EventClass",
     "FailurePosture",

@@ -150,7 +150,8 @@ CATALOG: tuple[KindSpec, ...] = (
         "no second CAS, no parallel probe).",
         posture=FailurePosture.FAIL_MISS,
         consumers=(
-            "dependency_bus:child_keyed_waiters",
+            "dependency_bus:child_complete",
+            "dependency_bus:nudge_complete",
             "report_lane:structural_parent",
         ),
         metadata={
@@ -164,6 +165,23 @@ CATALOG: tuple[KindSpec, ...] = (
                 "(D5.12 / AC7; the boot-telemetry wrong-clock-frame trap)",
             },
             "f19_fence": "return-value observation only (list[FollowUp])",
+            # D5.4 (second live source): the dependency bus's live arm
+            # lanes — the bus's armed-watcher lane tags
+            # (metadata["kind"] on armed FollowUps: "child_complete" =
+            # the spawn/send_message arm lane, "nudge_complete" = the
+            # nudge arm lane; bus docstring names both arm lanes at
+            # daemon/services/dependency_bus.py:719-724). The extractor
+            # reads the bus's in-RAM armed-watcher cache — the live
+            # set is the set of arm lanes currently holding a waiter.
+            "live_source": "dependency_bus",
+            "live_lane_vocabulary": (
+                "the bus's live arm-lane tags (metadata['kind'] on armed "
+                "FollowUps: 'child_complete' = spawn/send_message arm lane, "
+                "'nudge_complete' = nudge arm lane). The child-keyed fire "
+                "(fire_for_terminal_child) serves both arm lanes — every "
+                "armed watcher carries metadata['child_id'] (the bus "
+                "REFUSES an arm without it, dependency_bus.py:718-745)."
+            ),
         },
     ),
     # ── Class 2 — DURABLE BUS EVENTS (derived family; see above) ──
