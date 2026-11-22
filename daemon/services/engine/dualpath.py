@@ -63,47 +63,8 @@ def ownership_for(module_slug: str, environ: Any = None) -> EngineOwnership:
     )
 
 
-class FixtureModule:
-    """A fixture module proving both paths (T3.3).
-
-    Holds a legacy tick counter and an engine run counter. ``tick()`` increments
-    exactly ONE of them per call based on the current ownership (runtime flip
-    moves ownership on the next tick, no restart).
-    """
-
-    def __init__(self, slug: str = "fixture", environ: Any = None) -> None:
-        self.slug = slug
-        self._environ = environ
-        self.legacy_ticks: int = 0
-        self.engine_runs: int = 0
-        self.registered_with_engine: bool = False
-
-    def _ownership(self) -> EngineOwnership:
-        return ownership_for(self.slug, self._environ)
-
-    def set_environ(self, environ: Any) -> None:
-        self._environ = environ
-
-    def tick(self) -> str:
-        own = self._ownership()
-        if own.engine_owns:
-            self.engine_runs += 1
-            self.registered_with_engine = True
-            return "engine"
-        else:
-            self.legacy_ticks += 1
-            self.registered_with_engine = False
-            return "legacy"
-
-    def reset(self) -> None:
-        self.legacy_ticks = 0
-        self.engine_runs = 0
-        self.registered_with_engine = False
-
-
 __all__ = [
     "EngineOwnership",
-    "FixtureModule",
     "ownership_for",
     "use_engine_enabled",
 ]
