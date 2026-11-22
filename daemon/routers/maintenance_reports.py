@@ -318,10 +318,14 @@ def _collect_runs(root: Path) -> list[dict[str, Any]]:
         rows.append(
             {
                 "run_id": run_id,
-                "trigger_type": header.get("trigger_type"),
-                "started_at": header.get("started_at"),
-                "ended_at": header.get("ended_at"),
-                "overall_status": header.get("overall_status"),
+                # A header field the artifact does not carry is an EMPTY
+                # STRING, never ``null`` — the wire shape is string-typed
+                # end to end (the FE's ``MaintenanceReportRun`` model
+                # declares every one of these fields as a string).
+                "trigger_type": header.get("trigger_type", ""),
+                "started_at": header.get("started_at", ""),
+                "ended_at": header.get("ended_at", ""),
+                "overall_status": header.get("overall_status", ""),
                 "report_view_url": _view_url(
                     report_name or f"run-{run_id}.md"
                 ),
