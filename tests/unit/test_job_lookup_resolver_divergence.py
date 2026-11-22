@@ -25,7 +25,9 @@ Three row shapes must resolve:
 
 …and the handle a human (or an agent) pastes into a chat must survive ordinary
 DECORATION — trailing whitespace, a trailing newline, surrounding quotes,
-surrounding backticks — instead of collapsing to "Job not found".
+surrounding backticks — instead of collapsing to "Job not found". The SAME
+rule applies to the watch front-end (``watch_mission``), which resolves its
+receipt through the very same resolver.
 
 LIVE ANCHOR
 -----------
@@ -41,19 +43,41 @@ HERMETICITY
 -----------
 In-memory SQLite (``StaticPool``) + the REAL repositories + the REAL
 ``WorkResolverService`` + the REAL ``JobQueueService`` (with the real resolver
-wired through ``set_work_resolver``) + the REAL ``create_job_tools`` factory.
+wired through ``set_work_resolver``) + the REAL ``create_job_tools`` /
+``create_mission_watch_tools`` factories.
 Zero PostgreSQL, zero network, zero daemon, zero live-install contact.
 
-NODE MAP
---------
-``TestResolveWorkRowShapes``       — (a) JobItem-only, (b) Task-only,
-                                     (c) dual-backed, (e) unknown id.
-``TestResolveWorkIdNormalization``  — (d) whitespace / quotes / backticks.
-``TestJobToolLookup``              — the tool-level (a)/(b)/(c) legs through
-                                     ``job_get`` / ``job_continue`` / ``job_inject``.
-``TestAntiVacuityControls``        — the CONTROL legs that keep the pins from
-                                     degenerating into "every id resolves"
-                                     (the sibling control of a mutation matrix).
+NODE MAP — 61 nodes
+-------------------
+``TestResolveWorkRowShapes``        **5**  — (a) JobItem-only (task-kind AND
+                                            the ``job_type='message'`` mirror
+                                            kind), (b) Task-only, (c) dual-backed,
+                                            (e) unknown id → ``None``.
+``TestResolveWorkIdNormalization``   **14** — (d) 7 decorations (trailing space
+                                            / trailing newline / leading space /
+                                            surrounding whitespace / double quotes
+                                            / single quotes / backticks) ×
+                                            {resolves to the SAME record as the
+                                            bare id | ANTI-VACUITY: a decorated
+                                            UNKNOWN id still → ``None``}.
+``TestJobToolLookup``               **23** — (a) ``job_get`` fetches the
+                                            JobItem-only row, (b) ``job_continue``
+                                            continues the completed JobItem-only
+                                            row (the lookup phase passes AND the
+                                            continue reaches the enqueue),
+                                            (c) ``job_get`` / ``job_continue`` /
+                                            ``job_inject`` × 7 decorations — the
+                                            FULL decoration set, not just
+                                            whitespace.
+``TestWatchMissionReceiptResolution`` **15** — ``watch_mission`` resolves a
+                                            decorated receipt through the shared
+                                            resolver (dispatched receipt: 7
+                                            decorations) and arms the pre-dispatch
+                                            receipt on the CANONICAL id (7
+                                            decorations) + the unknown-target
+                                            refusal (1).
+``TestAntiVacuityControls``          **4**  — the "Job not found" path survives
+                                            the fix (the sibling control).
 
 MUTATION MEANINGFULNESS
 -----------------------
@@ -63,25 +87,31 @@ live worktree. The measured red-sets are recorded in
 ``.agents/tester/PACKS.md`` under
 ``JOB-LOOKUP-RESOLVER-DIVERGENCE — Unit Pack Registration``:
 
-* BASE tree (no normalization) — 18 passed / 13 failed; the 13 reds are
-  EXACTLY the normalization contract (the companion fix's acceptance
-  criteria). Every other node is green at base.
-* COMPANION FIX (mod-1's in-flight tree) — 31/31 GREEN.
-* resolver normalization reverted  ⇒ 9 NEW REDS
-* tool-boundary strip on ``job_continue`` reverted ⇒ 2 NEW REDS
-* JobItem-only branch broken ⇒ 17 NEW REDS
-* Task-only branch broken ⇒ 1 NEW RED
-* dual-backed branch broken ⇒ 1 NEW RED
+* BASE tree ``faff9c1de`` — 51 passed / 10 failed; the 10 reds are EXACTLY
+  the canonical-id keying contract (3 ``job_continue`` wrapper legs + 7
+  ``watch_mission`` pre-dispatch legs) that the companion fix lane lands.
+  Every other node is green at base.
+* COMPANION FIX (mod-1-rev's in-flight tree) — 61/61 GREEN.
+* resolver normalization reverted ⇒ 30 NEW REDS
+* ``job_continue``'s follow-up lookup re-keyed to the raw id ⇒ 3 NEW REDS
+* ``watch_mission``'s pre-dispatch receipt re-keyed to the raw target ⇒
+  7 NEW REDS
+* JobItem-only branch broken ⇒ 39 NEW REDS
 
 SEAM CONTRACT (what these pins assume of the fix)
 --------------------------------------------------
 1. ``resolve_work`` normalizes the caller-supplied handle BEFORE its two
    indexed lookups (whitespace + matched quote / bracket / backtick
    wrappers). A decorated id must resolve to the SAME record as the bare id.
-2. The tool surface tolerates a whitespace / newline padded id END-TO-END —
-   including ``job_continue``'s SECOND lookup (the soft-delete re-check),
-   which must not answer "has been deleted" for a row that exists.
-3. Normalization never FABRICATES a hit: a decorated id for work that does
+2. The tool surface tolerates a decorated id END-TO-END — including
+   ``job_continue``'s SECOND lookup (the soft-delete re-check), which must
+   not answer "has been deleted" for a row that exists. The re-check is
+   keyed on the CANONICAL id the resolver returned.
+3. Every KEYED WRITE downstream of a resolver lookup (the watch row) is
+   keyed on the CANONICAL id too — a watch row keyed on a decorated handle
+   is never resolved by the notifier (``WHERE job_id == work_id``) and is
+   therefore a stranded watch.
+4. Normalization never FABRICATES a hit: a decorated id for work that does
    not exist still resolves to ``None`` / "Job not found".
 """
 
@@ -106,12 +136,14 @@ from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 from daemon.repositories.job_queue.repository import JobRepository
+from daemon.repositories.job_queue.watcher_repository import JobWatcherRepository
 from daemon.repositories.task.models import Task, TaskStatus
 from daemon.repositories.task.repository import TaskRepository
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService
+from daemon.services.mission_resolver import MissionResolver
 from daemon.services.work_resolver import WorkResolverService
-from daemon.tools.job_queue import create_job_tools
+from daemon.tools.job_queue import create_job_tools, create_mission_watch_tools
 
 
 # ── Live incident anchor ────────────────────────────────────────────────────
@@ -120,6 +152,15 @@ from daemon.tools.job_queue import create_job_tools
 #: Seeded verbatim (same id, same admission/terminal/job_type shape) so the
 #: pins reproduce the incident's row rather than a synthetic stand-in.
 LIVE_INCIDENT_JOB_ID = "a785828f-9e28-45a0-9e4f-2caa21de281e"
+
+#: The instance that OWNS the watched mission (the mission the receipt
+#: belongs to) — seeded live so the mission watch arms instead of
+#: short-circuiting on "already terminal".
+MISSION_INSTANCE_ID = "inst-mission"
+
+#: The instance that CALLS ``watch_mission`` — the watcher row's
+#: ``instance_id`` (a real FK to ``instances.instance_id``).
+WATCHER_INSTANCE_ID = "inst-watcher"
 
 
 # ── Decoration matrix ───────────────────────────────────────────────────────
@@ -645,7 +686,7 @@ class TestJobToolLookup:
         assert result["instance_id"] == tools["instance_id"]
         tools["manager"].enqueue_message_job.assert_awaited_once()
 
-    @pytest.mark.parametrize("decoration", ["trailing_space", "trailing_newline"])
+    @pytest.mark.parametrize("decoration", sorted(_DECORATIONS))
     async def test_job_get_accepts_a_decorated_id(self, tools, engine, decoration):
         """(c) ``job_get`` resolves a whitespace-decorated id."""
         _seed_jobitem(
@@ -659,7 +700,7 @@ class TestJobToolLookup:
         _assert_no_error(result)
         assert result["work_id"] == LIVE_INCIDENT_JOB_ID
 
-    @pytest.mark.parametrize("decoration", ["trailing_space", "trailing_newline"])
+    @pytest.mark.parametrize("decoration", sorted(_DECORATIONS))
     async def test_job_continue_accepts_a_decorated_id(self, tools, engine, decoration):
         """(c) ``job_continue`` resolves a whitespace-decorated id.
 
@@ -683,7 +724,7 @@ class TestJobToolLookup:
         assert result["new_job_id"] == "new-job-1"
         tools["manager"].enqueue_message_job.assert_awaited_once()
 
-    @pytest.mark.parametrize("decoration", ["trailing_space", "trailing_newline"])
+    @pytest.mark.parametrize("decoration", sorted(_DECORATIONS))
     async def test_job_inject_accepts_a_decorated_id(self, tools, engine, decoration):
         """(c) ``job_inject`` resolves a whitespace-decorated id."""
         _seed_jobitem(
@@ -700,6 +741,134 @@ class TestJobToolLookup:
         _assert_no_error(result)
         assert result["instance_id"] == tools["instance_id"]
         assert result["status"] == "injected"
+
+
+# ── watch_mission receipt resolution (the shared-resolver front-end) ────────
+
+
+class TestWatchMissionReceiptResolution:
+    """``watch_mission`` must resolve a DECORATED receipt via the shared resolver.
+
+    The watch tools are a RESOLVER FRONT-END: ``watch_mission(target=...)``
+    accepts a mission_id (= instance_id) OR a job reference (the receipt
+    ``job_create`` / ``job_continue`` returned) and resolves the work side
+    through the SAME ``JobQueueService.get_work`` →
+    ``WorkResolverService.resolve_work`` chain the direct lookup tools use.
+    A receipt copied out of markdown / JSON tool output therefore has to
+    survive the SAME normalization rule — otherwise the watch silently
+    refuses to arm ("Could not resolve ... as a mission_id or job
+    reference") and the caller is left believing the mission is unwatched.
+    """
+
+    @pytest.fixture
+    def watch_tools(self, job_service, engine, task_repo, instance_repo, job_repo):
+        """REAL ``watch_mission`` tool over the REAL repositories."""
+        mission_resolver = MissionResolver(instance_repo, job_repo)
+        watcher_repo = JobWatcherRepository(engine)
+        built = create_mission_watch_tools(
+            job_service=job_service,
+            mission_resolver=mission_resolver,
+            task_repo=task_repo,
+            watcher_repo=watcher_repo,
+            current_instance_id=WATCHER_INSTANCE_ID,
+        )
+        return {
+            "watch_mission": _tool_by_name(built, "watch_mission"),
+            "watcher_repo": watcher_repo,
+        }
+
+    @pytest.mark.parametrize("decoration", sorted(_DECORATIONS))
+    async def test_watch_mission_resolves_a_decorated_receipt(self, watch_tools, engine, decoration):
+        """A decorated receipt resolves AND arms its watch row.
+
+        The mission side is live (a ``running`` instance) and owns one
+        LIVE receipt (a ``pending`` Task row); the watch row is keyed on
+        the receipt's ``work_id``, so the assertion reads the armed row
+        back out of the watcher repository.
+        """
+        _seed_instance(engine, instance_id=WATCHER_INSTANCE_ID)
+        _seed_instance(engine, instance_id=MISSION_INSTANCE_ID, status="running")
+        work_id = str(uuid.uuid4())
+        # The mission's live receipt: the Task row (the receipt the watch
+        # row keys on) + the JobItem mirror (the handle the caller copies
+        # out of the tool output).
+        _seed_task(
+            engine,
+            work_id=work_id,
+            instance_id=MISSION_INSTANCE_ID,
+            task_type="process_message",
+            status=TaskStatus.PENDING.value,
+        )
+        _seed_jobitem(
+            engine,
+            job_id=work_id,
+            instance_id=MISSION_INSTANCE_ID,
+            admission_state=AdmissionState.QUEUED.value,
+            terminal_reason=None,
+            job_type="task",
+        )
+
+        result = await watch_tools["watch_mission"].ainvoke(
+            {"target": _DECORATIONS[decoration](work_id)}
+        )
+
+        assert "Error" not in result, result
+        assert result.startswith("Mission watch registered"), result
+        armed = watch_tools["watcher_repo"].get_watchers_for_job(work_id)
+        assert [w.instance_id for w in armed] == [WATCHER_INSTANCE_ID], armed
+
+    async def test_watch_mission_still_refuses_an_unknown_target(self, watch_tools, engine):
+        """ANTI-VACUITY: an unresolvable target is still refused.
+
+        The decoration tolerance must not turn the watch tool into a
+        "watch anything" primitive — an unknown handle still gets the
+        explicit refusal.
+        """
+        _seed_instance(engine, instance_id=WATCHER_INSTANCE_ID)
+
+        result = await watch_tools["watch_mission"].ainvoke(
+            {"target": str(uuid.uuid4())}
+        )
+
+        assert result.startswith("Error: Could not resolve"), result
+
+    @pytest.mark.parametrize("decoration", sorted(_DECORATIONS))
+    async def test_watch_mission_arms_a_pre_dispatch_receipt_on_the_canonical_id(
+        self, watch_tools, engine, decoration
+    ):
+        """A decorated PRE-DISPATCH receipt arms on the CANONICAL id.
+
+        ``job_create`` returns the receipt BEFORE the mission is
+        dispatched (the JobItem row carries no ``instance_id`` yet), and
+        the tool's own docstring calls that form out: "the receipt form
+        works even before the mission is dispatched". The watch row is
+        keyed by ``job_id`` — the engine's notify path queries
+        ``WHERE job_id == work_id`` — so a watch armed on the DECORATED
+        handle would never be resolved by the notifier: a stranded
+        watch. The row must be keyed on the canonical id the resolver
+        returned.
+        """
+        _seed_instance(engine, instance_id=WATCHER_INSTANCE_ID)
+        work_id = str(uuid.uuid4())
+        # A pre-dispatch receipt: the JobItem row exists (job_create
+        # enqueued it) but no instance is minted yet.
+        _seed_jobitem(
+            engine,
+            job_id=work_id,
+            instance_id=None,
+            admission_state=AdmissionState.QUEUED.value,
+            terminal_reason=None,
+            job_type="task",
+        )
+
+        result = await watch_tools["watch_mission"].ainvoke(
+            {"target": _DECORATIONS[decoration](work_id)}
+        )
+
+        assert "Error" not in result, result
+        assert "receipt" in result, result
+        armed = watch_tools["watcher_repo"].get_watchers_for_job(work_id)
+        assert [w.instance_id for w in armed] == [WATCHER_INSTANCE_ID], armed
 
 
 # ── Anti-vacuity controls (the sibling control of the mutation matrix) ──────
