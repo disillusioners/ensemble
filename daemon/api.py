@@ -3897,14 +3897,23 @@ async def lifespan(app: FastAPI):
         # consumed by daemon/routers/engine.py. Read-only; no router change.
         from types import SimpleNamespace as _SN
 
+        from daemon.services.dependency_bus import get_dependency_bus
+
+        _engine_dep_bus = get_dependency_bus()  # None-safe (unwired boot ⇒ live=None)
+
         app.state.engine_observability = _SN(
             repository=_engine_repo,
             engine_service=_engine_svc,
             maintenance_service=getattr(manager, "_maintenance_service", None),
             switch_resolver=_engine_switch,
-            event_snapshot=__import__(
-                "daemon.services.event_registry.metrics", fromlist=["snapshot"]
-            ).snapshot,
+            # D5.4 second live source: dependency_bus bound into the snapshot
+            # call (projection.event_view only forwards `bus=`).
+            event_snapshot=(
+                lambda bus=None, _dep=_engine_dep_bus: __import__(
+                    "daemon.services.event_registry.metrics", fromlist=["snapshot"]
+                ).snapshot(bus=bus, dependency_bus=_dep)
+            ),
+            dependency_bus=_engine_dep_bus,
             runs_reader=None,  # router default (bounded tail via repository.engine)
         )
 
