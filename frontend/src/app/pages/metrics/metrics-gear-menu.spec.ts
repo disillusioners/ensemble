@@ -111,22 +111,19 @@ describe('Metrics — the lazy route', () => {
   });
 });
 
-describe('Report — gear menu entry (Phase 4, BR-19)', () => {
-  it('places Report AFTER Metrics and BEFORE the conditional appends', () => {
+describe('Metrics — the Report entry does not displace this entry', () => {
+  it('keeps Metrics BEFORE the Report entry (the Report pins live in its own spec)', () => {
     const metricsIdx = appTs.indexOf("{ label: 'Metrics'");
     const reportIdx = appTs.indexOf("{ label: 'Report'");
-    const dbUpdateIdx = appTs.indexOf('settingsMenuItems.update(items => [');
 
     expect(metricsIdx).toBeGreaterThan(-1);
     expect(reportIdx).toBeGreaterThan(-1);
-    expect(dbUpdateIdx).toBeGreaterThan(-1);
 
+    // The Report entry is a SIBLING page: its own pins (item shape,
+    // route, header-link absence) live in
+    // `pages/report/report.pins.spec.ts`. This file asserts only that
+    // Phase 4's Report insertion did not take THIS page's slot — the
+    // subject stays the Metrics entry.
     expect(metricsIdx).toBeLessThan(reportIdx);
-    expect(reportIdx).toBeLessThan(dbUpdateIdx);
-  });
-
-  it('does NOT add a top-level header link for /report', () => {
-    expect(appHtml.includes("'/report'")).toBe(false);
-    expect(appHtml.includes('"/report"')).toBe(false);
   });
 });

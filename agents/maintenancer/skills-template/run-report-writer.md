@@ -29,12 +29,9 @@ run → receipt → INDEX last. Files are `run-<run_id>.md`, `receipt-<run_id>.m
 
 ### Writer ladder (BR-13)
 
-- **L0** — dispatch the `run-report-writer` child; write order run → receipt → INDEX last.
-- **L1** — crash/wedge: ONE fresh minimal-stub writer, no skill load.
-- **L2** — still no report: ONE bare worker child, no `load_skill`, skeleton all-failed + best-effort receipt/INDEX. This is the scoped-write fallback; it stays a CHILD — the seat never writes.
-- **L3** — accepted documented reportless terminal, surfaced by the reportless-week detector (BR-15).
+I am the **L0** rung: I write the run, then the receipt, then INDEX last. The ladder itself is STATED ONCE — the orchestrator's `workflow.md` §Report-writer ladder (BR-13) owns the full rung list (L0 → L1 → L2 → L3) and the escalation policy. I never restate the rungs here, and I never dispatch a replacement writer: escalation is the orchestrator's move, and the seat never writes.
 
-**DP-1 (ACCEPTED)** — *"BR-13 L3 accepts a surfaced, documented reportless week when both writer rungs fail. Rationale: failure-isolation contract = a lane failure never kills the report; double independent writer failure is beyond contract; BR-15 ensures the residual is surfaced (detector + orphan listing), never silent."* — lane leader, 2026-11-22.
+The ladder's terminal rung (L3) is the ACCEPTED decision **DP-1** — quoted once, in the orchestrator's `workflow.md` §Report-writer ladder (BR-13).
 
 ## Focus areas
 

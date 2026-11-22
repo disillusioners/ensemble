@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
-from sqlmodel import SQLModel, Session, select
+from sqlmodel import SQLModel, Session
 
 from daemon.repositories.source.models import (
     ScheduleExecution,

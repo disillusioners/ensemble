@@ -1360,7 +1360,13 @@ class LiveViewsService:
         # raises the SAME uniform 404 as a missing file — the caller
         # can probe neither the file's existence nor the root's layout.
         filename_patterns = self._root_filename_patterns.get(root_name)
-        if filename_patterns:
+        # ``is not None`` (NOT a truthiness test) — the EMPTY pattern
+        # tuple is a MISCONFIGURATION and must FAIL CLOSED (uniform
+        # 404), exactly like the sibling extension gate above.  A root
+        # that declares NO patterns is absent from the map (``None``)
+        # and keeps the pre-existing behaviour (extension allowlist
+        # only).
+        if filename_patterns is not None:
             basename = PurePosixPath(rel_path).name
             if not any(
                 fnmatch.fnmatchcase(basename, pattern)

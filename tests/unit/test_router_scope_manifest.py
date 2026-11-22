@@ -17,8 +17,8 @@ column: every ``api_router.include_router(...)`` mount in
 
 The cage greps ``daemon/api.py`` for the SPECIFIC
 ``api_router.include_router(`` pattern (NOT the raw
-``include_router(`` textual set — the F3-pinned census: 37 textual
-matches at the current tree = 34 unconditional mounts + the 2
+``include_router(`` textual set — the F3-pinned census: 42 textual
+matches at the current tree = 39 unconditional mounts + the 2
 auth-ON-gated families (mcp-kb keys, auth-self) + the 1
 gateway-flag-gated (WS) mount; the residual matches are the 2
 app-level ``app.include_router(`` calls + prose comments,

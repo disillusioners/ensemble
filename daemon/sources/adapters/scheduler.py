@@ -50,6 +50,29 @@ When a one-shot's ``run_at`` is past-due beyond
 ``error_message='past_lateness_cap: lateness={X}s, cap={Y}s'`` and does
 NOT dispatch a JobItem. The schedule remains armed (NOT disabled) so the
 operator can update ``run_at`` and re-fire.
+
+MODULE-BAND RATIONALE (tidier fix pass 2026-11-22, 3220 lines at the tip;
+the band was crossed IN-RANGE at 2992 → 3208):
+this adapter crossed the >3000 band IN-RANGE with no
+rationale on record.  It hosts THREE concerns.  (1) The DST / ADR
+semantics — the croniter-delegated cron path and the naive one-shot
+anchor, which MUST share one DST rule (the module docstring above IS
+that contract).  (2) The one-shot IDEMPOTENCY + LATENESS-CAP contract
+(ADR-004 / ADR-003) — the idempotency key is derived from
+``self._run_at``, NEVER from ``next_trigger``, and a past-due one-shot
+beyond the lateness cap is SKIPPED, not dispatched.  (3) The CENTRAL
+MAINTENANCE chain re-arm seam (BR-4) — the consuming fire mints the
+next week's instant and rewrites the row's config.
+
+Concern (3) IS EXTRACTABLE: the chain re-arm is ONE method
+(``_rearm_chain_row``) plus its marker, and since this pass it delegates
+the config construction to the seeder
+(``daemon.repositories.source.maintenance_seed.refresh_chain_keys``) —
+so it can move to its own adapter module without touching the DST
+semantics or the idempotency/lateness contracts.  Concerns (1) and (2)
+are NOT separable from the adapter's core — they ARE the adapter's
+contract.  The (3) extraction is DEFERRED to a post-staging refactor;
+this pass records the rationale only.
 """
 
 from __future__ import annotations
@@ -59,7 +82,6 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Awaitable
-from zoneinfo import ZoneInfo
 from croniter import croniter
 from croniter import CroniterBadCronError
 
@@ -82,6 +104,7 @@ from daemon.constants import (
 from daemon.models import SchedulerInstanceMode
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.message_queue.models import MessageStatus
+from daemon.repositories.source.maintenance_seed import refresh_chain_keys
 from daemon.repositories.source.models import ExecutionStatus
 from daemon.repositories.task.models import TaskStatus
 from daemon.registry import get_registry
@@ -970,7 +993,7 @@ class SchedulerAdapter(MessageSourceAdapter):
             return "failed"
 
         status = str(getattr(live, "status", "") or "").strip().lower()
-        if status == "cancelled":
+        if status == SourceStatus.CANCELLED.value:
             return "skipped_operator"
         if not getattr(live, "enabled", True):
             return "skipped_operator"
@@ -997,22 +1020,10 @@ class SchedulerAdapter(MessageSourceAdapter):
             )
             return "failed"
 
-        new_config = dict(config)
-        new_config["run_at"] = picked.run_at_iso
-        new_config["local_time"] = picked.local_time
-        new_config["timezone"] = knobs.timezone
-        chain = dict(config.get("chain") or {})
-        chain.update(
-            {
-                "mode": chain.get("mode") or "weekly-random",
-                "window_start": knobs.window_start,
-                "window_end": knobs.window_end,
-                "weekday": knobs.weekday,
-                "timezone": knobs.timezone,
-                "run_at_utc": picked.run_at_iso,
-            }
-        )
-        new_config["chain"] = chain
+        # The chain-key refresh is the SEEDER's (BR-3 — one concept, one
+        # marker): the seeder force-sets the chain marker, so the adapter
+        # can never re-introduce a divergent mode literal of its own.
+        new_config = refresh_chain_keys(config, picked=picked, knobs=knobs)
 
         try:
             updated = self._source_repo.update_source_config(
@@ -1038,7 +1049,9 @@ class SchedulerAdapter(MessageSourceAdapter):
         # is explicitly promoted to RUNNING here (a stopped/cancelled row
         # is skipped by the registry's boot filter).
         try:
-            self._source_repo.update_source_status(self.source_id, "running")
+            self._source_repo.update_source_status(
+                self.source_id, SourceStatus.RUNNING.value
+            )
         except Exception as exc:  # noqa: BLE001 — the status is best-effort
             logger.warning(
                 "Scheduler %s: could not promote the chain row to running: %s",

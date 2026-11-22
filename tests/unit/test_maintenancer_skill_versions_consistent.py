@@ -147,7 +147,7 @@ def test_kb_curator_only_auto_load_skill() -> None:
     )
 
 
-def test_thirteen_skills_in_manifest() -> None:
+def test_manifest_skill_set_is_exact() -> None:
     """P2 T2.7 — exact 13-skill SET EQUALITY (name-level, not count-level).
 
     A missing or extra name reddens the pin deliberately; future additions

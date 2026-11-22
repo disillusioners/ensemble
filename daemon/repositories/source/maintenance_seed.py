@@ -76,6 +76,27 @@ No-idle attestation
 -------------------
 This module carries NO idle/busyness precondition of any kind: the
 weekly trigger fires regardless of system busyness (R2 / E-2).
+
+Size rationale (tidier fix pass 2026-11-22, 1352 lines at the tip): this
+module owns
+FOUR concerns, all of them about the ONE chain row and its artifact
+root. (1) The PROMOTE-STABLE install-root resolution
+(``resolve_live_install_root`` / ``maintenance_results_dir``) — a PURE
+path helper with no row access. (2) The chain-config CONSTRUCTION
+(``build_chain_config`` / ``refresh_chain_keys``) — the config the row
+carries. (3) The boot-time chain-break GUARD (the BR-1 past-``run_at``
+re-mint predicate + the BR-3 one-concept-one-marker decisions). (4) The
+TWO surfacing detectors (BR-15 reportless week + the D4 fresh-root
+detector) and their BOARD-NOTICE surface. The GUARD and the DETECTORS
+mutate the SAME row and read the config the CONSTRUCTION writes, so they
+stay textually adjacent to it; splitting them apart would fork the
+config shape they share. The install-root resolution is the ONE
+SEPARABLE concern — it is a pure function of the install layout and
+belongs in its own path module (a pure MOVE, no behaviour change, and it
+is the extraction that unblocks the rest). The board-notice writer is
+separable from the detectors ONLY by moving the notice payload with
+them; it stays for now. The remaining guard/detector split is DEFERRED
+to a post-staging refactor.
 """
 
 from __future__ import annotations
@@ -84,7 +105,7 @@ import json
 import logging
 import sys
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -188,18 +209,6 @@ class GuardOutcome:
     detail: str = ""
     reportless_week: dict[str, Any] | None = None
     results_root_empty: dict[str, Any] | None = None
-    warnings: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "action": self.action,
-            "source_id": self.source_id,
-            "run_at": self.run_at,
-            "detail": self.detail,
-            "reportless_week": self.reportless_week,
-            "results_root_empty": self.results_root_empty,
-            "warnings": list(self.warnings),
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -337,13 +346,19 @@ def ensure_maintenance_results_dir(root: Path | None = None) -> Path | None:
 # ---------------------------------------------------------------------------
 
 
-def _refresh_chain_keys(
+def refresh_chain_keys(
     config: dict[str, Any],
     *,
     picked: Any,
     knobs: Any,
 ) -> dict[str, Any]:
     """Refresh ONLY the chain-owned keys of an existing config.
+
+    PUBLIC — the adapter-side chain re-arm seam
+    (``daemon/sources/adapters/scheduler.py``) reuses THIS function
+    instead of inlining its own refresh, so the chain marker
+    (``CHAIN_MODE``) and the resolved-knob keys exist in exactly ONE
+    place (BR-3 — one concept, one marker).
 
     Every other key (agent / message / recurrence / instance_mode /
     project_id / anything a future surface adds) is PRESERVED — the
@@ -587,7 +602,7 @@ def _apply_br1_past_run_at(
         # An unparseable/missing run_at would make the adapter raise at
         # construction time — the chain would be dead. Repair it.
         picked = _mint(knobs, now=now, allow_today=True, rng=rng)
-        return _refresh_chain_keys(config, picked=picked, knobs=knobs), (
+        return refresh_chain_keys(config, picked=picked, knobs=knobs), (
             "reminted_unparseable_run_at"
         )
     if run_at > now:
@@ -598,7 +613,7 @@ def _apply_br1_past_run_at(
     if lateness <= cap:
         return None, "past_run_at_within_cap"
     picked = _mint(knobs, now=now, allow_today=True, rng=rng)
-    return _refresh_chain_keys(config, picked=picked, knobs=knobs), "reminted"
+    return refresh_chain_keys(config, picked=picked, knobs=knobs), "reminted"
 
 
 def seed_central_maintenance_schedule(
@@ -733,7 +748,7 @@ def _guard_present_row(
         return GuardOutcome(
             action="noop_cancelled",
             source_id=row.source_id,
-            run_at=config.get("run_at") if isinstance(config, dict) else None,
+            run_at=config.get("run_at"),
             detail="cancelled row — operator intent preserved",
         )
 
@@ -754,7 +769,7 @@ def _guard_present_row(
         return GuardOutcome(
             action="noop_paused",
             source_id=row.source_id,
-            run_at=config.get("run_at") if isinstance(config, dict) else None,
+            run_at=config.get("run_at"),
             detail="paused row — operator intent preserved",
         )
 
@@ -1332,6 +1347,7 @@ __all__ = [
     "detect_results_root_empty",
     "ensure_maintenance_results_dir",
     "maintenance_results_dir",
+    "refresh_chain_keys",
     "resolve_live_install_root",
     "seed_central_maintenance_schedule",
 ]

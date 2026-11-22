@@ -169,6 +169,13 @@ from daemon.services.readiness import (
 )
 from daemon.constants import SSE_TIMEOUT_S, SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE
 from daemon.repositories.instance.models import InstanceStatus
+from daemon.config import LiveViewsRootConfig
+from daemon.routers.maintenance_reports import (
+    LIVE_VIEW_ALLOWED_EXTENSIONS,
+    LIVE_VIEW_FILENAME_PATTERNS,
+    LIVE_VIEW_ROOT_NAME,
+    RESULTS_ROOT,
+)
 from daemon import constants
 
 # Determine the base path (use working directory for production)
@@ -465,8 +472,6 @@ def inject_reports_live_view_root(config, data_dir) -> bool:
     Returns:
         True iff the root was injected by this call.
     """
-    from daemon.config import LiveViewsRootConfig
-
     roots = getattr(getattr(config, "live_views", None), "roots", None)
     if not isinstance(roots, dict):
         return False
@@ -505,12 +510,15 @@ def inject_maintenance_results_live_view_root(config) -> bool:
        resolved at daemon startup against the PROMOTE-STABLE
        LIVE-INSTALL project root (host-portable; no absolute path lives
        in the config).  The resolution goes through the seeder's OWN
-       helper (``maintenance_results_dir``) — imported HERE, from the
-       seeder module itself, so the seeder (P1), the BE list route
-       (BR-17) and this registration share ONE root basis BY
-       CONSTRUCTION (plan Task 4.8 root-resolution note).  The basis is
-       the INSTALL DIR (the ancestor that owns ``releases/``), NOT the
-       release dir: a promote must never MOVE the artifact root.
+       helper (``maintenance_results_dir``), which the BE list route
+       (BR-17) resolves ONCE at its module import; this registration
+       SHARES that already-resolved value (``RESULTS_ROOT``) rather
+       than resolving a second time, so the seeder (P1), the BE list
+       route (BR-17) and this registration share ONE root basis AND ONE
+       resolution moment BY CONSTRUCTION (plan Task 4.8 root-resolution
+       note).  The basis is the INSTALL DIR (the ancestor that owns
+       ``releases/``), NOT the release dir: a promote must never MOVE the
+       artifact root.
     4. **Allowlist** — the ``.md`` renderer only (the extension gate on
        the root entry below), restricted to the ``run-*.md`` /
        ``receipt-*.md`` / ``INDEX.md`` filename patterns (the per-root
@@ -525,20 +533,18 @@ def inject_maintenance_results_live_view_root(config) -> bool:
     seeder creates the directory at first boot, and an install with no
     runs simply has no content to serve.
     """
-    from daemon.config import LiveViewsRootConfig
-    from daemon.repositories.source.maintenance_seed import maintenance_results_dir
-    from daemon.routers.maintenance_reports import (
-        LIVE_VIEW_ALLOWED_EXTENSIONS,
-        LIVE_VIEW_ROOT_NAME,
-    )
-
     roots = getattr(getattr(config, "live_views", None), "roots", None)
     if not isinstance(roots, dict):
         return False
     if LIVE_VIEW_ROOT_NAME in roots:
         # An operator-declared entry is honoured verbatim.
         return False
-    root_dir = Path(str(maintenance_results_dir()))
+    # ONE resolution moment: the router's already-resolved RESULTS_ROOT
+    # (the router resolves it ONCE, at its module import, through the
+    # seeder's OWN helper).  Re-resolving here would be the second
+    # moment the two-moments question asks about; the BASIS logic stays
+    # in the seeder helper and the VALUE is shared.
+    root_dir = RESULTS_ROOT
     if not root_dir.is_absolute():
         # The filesystem resolver refuses a relative root — leave the
         # root ABSENT rather than publishing a path that can never
@@ -2406,11 +2412,6 @@ async def lifespan(app: FastAPI):
     # the root entry itself.
     # ─────────────────────────────────────────────────────────────
     inject_maintenance_results_live_view_root(config)
-
-    from daemon.routers.maintenance_reports import (
-        LIVE_VIEW_FILENAME_PATTERNS,
-        LIVE_VIEW_ROOT_NAME,
-    )
 
     live_views_service = LiveViewsService(
         config=config.live_views,

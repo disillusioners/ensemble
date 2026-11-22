@@ -39,7 +39,6 @@ from daemon.repositories.source.models import (
 )
 from daemon.repositories.source.maintenance_seed import (
     CHAIN_MODE,
-    FINDING_KIND_REPORTLESS_WEEK,
     FINDING_KIND_RESULTS_ROOT_EMPTY,
     SEED_NAME,
     SEED_SOURCE_ID,
