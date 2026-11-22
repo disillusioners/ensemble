@@ -203,6 +203,7 @@
 - AC5: Staging artifact produced at the re-checked next-free version, rebased onto staged `source_commit`, with explicit NO-promote/NO-ceremony handoff note and operator-step flag (BR-20).
 - AC6: No test touches live-shaped paths or prod DB; all boot-smoke fences pinned.
 - AC7: BR-11 (event-driven deadline covering the initial dispatch AND its single re-dispatch, no polling), BR-14 (named venv interpreter + bash fallback binding + run_token reuse) and BR-15 (reportless-week detector + lane-4 orphan listing) legs are green.
+- AC8: Promote-time root equivalence — the artifact root resolves to the PROMOTE-STABLE live-install INSTALL DIR (the ancestor that owns `releases/`), NEVER a `releases/<ver>/` path, and the THREE surfaces (the P1 seeder, the BR-17 BE list route, the BR-18 live_views root registration) resolve to the IDENTICAL path through the ONE shared helper (`daemon.repositories.source.maintenance_seed.maintenance_results_dir()` — import-only reuse, no duplicated basis logic); a promote strands NOTHING (the run history, the BE list and the live-views root all survive it), and the fresh-root guard surfaces a moved/lost root as its OWN finding kind (a loud log + ONE de-duplicated board item) — NEVER as a routine reportless week.
 
 ---
 

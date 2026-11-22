@@ -180,6 +180,15 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
     # metrics/nest-reports precedent. The scope declaration lives in the
     # scope cage (maintenance:read|metrics:read).
     "/api/engine": frozenset({"pd"}),
+    # Central Maintenance System P4 (2026-11-22): the maintenance run-list
+    # door (GET + HEAD /api/maintenance-reports). No route carries an
+    # explicit class tag ⇒ protected-default ("pd"), the
+    # metrics/nest-reports/tool-usage precedent. The SCOPE declaration
+    # lives in the scope cage
+    # (``tests/unit/test_router_scope_manifest.py`` — the family declares
+    # the EXISTING ``maintenance:read`` scope); the auth-OFF 503
+    # fail-closed gate lives in the route.
+    "/api/maintenance-reports": frozenset({"pd"}),
     "/api/webhooks": frozenset({"module_lane"}),  # FR-40 module lane
     "/api/work": frozenset({"pd"}),
     "/api/workspace": frozenset({"pd"}),
@@ -422,4 +431,7 @@ class TestRouterClassManifest:
         # to 35.
         # tool-usage-metrics-p1 added the /api/tool-usage family — the
         # api_families count grew from 36 to 37.
-        assert len(api_families) == 38, sorted(api_families)
+        # Central Maintenance System P4 (2026-11-22) added the
+        # /api/maintenance-reports family — the api_families count grew
+        # from 38 to 39 (atop the engine-arc /api/engine family in the v0.31.31 rebase base).
+        assert len(api_families) == 39, sorted(api_families)

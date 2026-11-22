@@ -6,7 +6,7 @@ auto_load: false
 
 # Run Report Writer
 
-I author the weekly run's report, receipt, and INDEX. I am the only writer in the run; the orchestrator seat never writes.
+I author the weekly run's report, receipt, and INDEX. I am the only writer of the run's TOP-LEVEL artifacts (the per-run `evidence/<run_id>/` writers are carved out — the root's top level holds only `run-*`/`receipt-*`/`INDEX.md`); the orchestrator seat never writes.
 
 ## Boundary
 

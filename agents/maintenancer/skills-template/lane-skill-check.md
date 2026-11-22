@@ -10,7 +10,7 @@ Consolidated skill-system check. I compare the declared skill set with the bodie
 
 ## Boundary
 
-I am the skill-check lane. I read only: skill bodies, their version declarations, and the manifest that lists them. I never edit a skill body, bump a version, or change the manifest. I do not write reports, receipts, or INDEX; the report writer owns those.
+I am the skill-check lane. I read only: skill bodies, their version declarations, and the manifest that lists them — plus, through the SELECT-only DB seat, the five weekly DB-seat measures (usage-record growth, orphan-sweep residue, A/B stalls, bank requirement presence, skill-file/embedding GC candidates). I never edit a skill body, bump a version, or change the manifest, and I never write through the seat. I do not write reports, receipts, or INDEX; the report writer owns those.
 
 ## Contract
 

@@ -8,7 +8,12 @@ WHAT THIS DOOR IS
 -----------------
 A READ-ONLY list of the maintenance runs whose artifacts live under the
 artifact root ``<live-install root>/.agents/maintenancer/RESULTS/``
-(BR-16 — the LIVE-INSTALL root, never a worktree):
+(BR-16 — the LIVE-INSTALL root, never a worktree).  The live-install
+root is the PROMOTE-STABLE INSTALL DIR (the ancestor that owns
+``releases/``), NEVER a ``releases/<ver>/`` directory: a promote must
+not MOVE the artifact root (the D4 cure — the seeder's
+``maintenance_results_dir()`` is the ONE resolver for all three
+surfaces).
 
 * ``run-<run_id>.md``     — the human-readable run report,
 * ``receipt-<run_id>.md`` — the machine-readable receipt,
@@ -51,9 +56,13 @@ SAFETY CONTRACT (BR-17)
    ``Path.cwd()``, so a daemon launched from a worktree still reads
    its own install. The seeder (P1), this door (BR-17) and the
    live-views root registration (BR-18) therefore share ONE root
-   basis BY CONSTRUCTION (plan Task 4.8 root-resolution note).
+   basis BY CONSTRUCTION (plan Task 4.8 root-resolution note).  That
+   basis is the PROMOTE-STABLE INSTALL DIR (the ancestor that owns
+   ``releases/``), NEVER a ``releases/<ver>/`` directory: a promote
+   must not MOVE the root, or the run history is stranded (the D4
+   cure).
 5. **The run-id is a FILENAME COMPONENT, never a path.** Every run id
-   is matched against ``^ckpt-\\d{8}_\\d{12}-[0-9a-f]{8}$`` before it
+   is matched against ``^ckpt-\\d{8}_\\d{12}-[0-9a-f]{8}\\Z`` before it
    is used to build a filename, and the built path is re-checked with
    an ``os.path.realpath`` containment test against the resolved root
    (defense-in-depth — the same layered guard the live-views resolver
@@ -103,7 +112,10 @@ MAX_RESPONSE_BYTES = 1_000_000
 
 #: BR-17 — the run-id shape. A run id is used ONLY as a filename
 #: component under the fixed root; it never becomes a path segment.
-RUN_ID_PATTERN = re.compile(r"^ckpt-\d{8}_\d{12}-[0-9a-f]{8}$")
+#: The anchor is ``\Z`` (NOT ``$``): ``$`` also matches BEFORE a
+#: trailing newline, so a run id carrying one would pass the shape
+#: check and reach the path builder.
+RUN_ID_PATTERN = re.compile(r"^ckpt-\d{8}_\d{12}-[0-9a-f]{8}\Z")
 
 #: BR-18 — the live-views root NAME (a named root, sibling of
 #: ``designer-artifact`` / ``planning`` / ``tmp-images``).

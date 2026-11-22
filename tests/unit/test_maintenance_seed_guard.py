@@ -14,6 +14,7 @@ touched.
 from __future__ import annotations
 
 import json
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +24,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlmodel import SQLModel, Session, select
 
+from daemon.models.board import BoardItem, BoardItemTag
 from daemon.repositories.project.models import (
     Project,
     ProjectMetadataRecord,
@@ -37,11 +39,14 @@ from daemon.repositories.source.models import (
 )
 from daemon.repositories.source.maintenance_seed import (
     CHAIN_MODE,
+    FINDING_KIND_REPORTLESS_WEEK,
+    FINDING_KIND_RESULTS_ROOT_EMPTY,
     SEED_NAME,
     SEED_SOURCE_ID,
     SEED_SOURCE_TYPE,
     WEEKLY_RUN_MESSAGE,
     detect_reportless_week,
+    detect_results_root_empty,
     ensure_maintenance_results_dir,
     maintenance_results_dir,
     resolve_live_install_root,
@@ -58,6 +63,10 @@ GUARD_TABLES = [
     ProjectTagLink.__table__,
     ProjectShortnameLink.__table__,
     ProjectMetadataRecord.__table__,
+    # The board tables — the D4 fresh-root guard writes its ONE
+    # de-duplicated notice here (the durable de-dup surface).
+    BoardItem.__table__,
+    BoardItemTag.__table__,
 ]
 
 
@@ -244,7 +253,66 @@ class TestSeedLifecycle:
         location — never from ``Path.cwd()`` (a worktree)."""
         root = resolve_live_install_root()
         assert root.is_absolute()
-        assert (root / "daemon").is_dir()
+        if not getattr(sys, "frozen", False):
+            assert (root / "daemon").is_dir()
+
+    def test_the_live_install_root_is_promote_stable(self):
+        """The D4 cure — the artifact root NEVER lives under
+        ``releases/<ver>/``: a promote would MOVE the root (stranding the
+        run history) and the keep-3 release eviction would DESTROY it.
+        The basis is the INSTALL DIR (the ancestor that owns
+        ``releases/``)."""
+        root = resolve_live_install_root()
+        assert root.is_absolute()
+        assert "releases" not in root.parts, (
+            f"the artifact-root basis is release-scoped: {root} — a promote "
+            "would move it and the release eviction would destroy it"
+        )
+
+    def test_a_frozen_install_resolves_the_install_dir_not_the_release_dir(
+        self, tmp_path, monkeypatch
+    ):
+        """The D4 cure's frozen leg — the staged binary lives at
+        ``<INSTALL_DIR>/releases/<ver>/ensemble-prod``; the basis is the
+        INSTALL DIR (the ancestor that owns ``releases/``), NEVER the
+        release dir a promote replaces.  A regression to the OLD basis
+        (``Path(sys.executable).parent``) REDS this leg."""
+        install_dir = tmp_path / "agents-ensemble"
+        release_dir = install_dir / "releases" / "v0.31.30"
+        release_dir.mkdir(parents=True)
+        binary = release_dir / "ensemble-prod"
+        binary.write_text("", encoding="utf-8")
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "executable", str(binary), raising=False)
+        resolved = resolve_live_install_root()
+        assert resolved == install_dir.resolve()
+        assert resolved != release_dir.resolve()
+        # The artifact root hangs off the install dir — it survives the
+        # promote (the release dir is what the promote replaces).
+        assert maintenance_results_dir().parents[2] == install_dir.resolve()
+
+    def test_a_source_tree_inside_a_release_dir_lifts_to_the_install_dir(
+        self, tmp_path, monkeypatch
+    ):
+        """The source-install twin of the frozen leg — a daemon run from
+        SOURCE inside ``<INSTALL_DIR>/releases/<ver>/`` must still land on
+        the install dir, never on the release dir."""
+        install_dir = tmp_path / "agents-ensemble"
+        release_dir = install_dir / "releases" / "v0.31.30"
+        release_dir.mkdir(parents=True)
+        # The resolver reads its own module location — simulate a source
+        # tree at <INSTALL>/releases/<ver>/daemon/repositories/source/.
+        source_file = release_dir / "daemon" / "repositories" / "source" / (
+            "maintenance_seed.py"
+        )
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("", encoding="utf-8")
+        monkeypatch.setattr(
+            "daemon.repositories.source.maintenance_seed.__file__", str(source_file)
+        )
+        resolved = resolve_live_install_root()
+        assert resolved == install_dir.resolve()
+        assert resolved != release_dir.resolve()
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -473,7 +541,12 @@ class TestBr15ReportlessWeek:
             is None
         )
 
-    def test_a_fire_without_a_report_is_detected(self, guard_engine, results_root):
+    def test_an_empty_root_is_not_a_reportless_week(self, guard_engine, results_root):
+        """The D4 cure — the EMPTY-root case is NOT a reportless week: it
+        is the moved/lost-root shape and belongs to
+        :func:`detect_results_root_empty`.  Surfacing it as a routine
+        reportless week IS the D4 false-positive (a promote moves the
+        root ⇒ every post-promote boot cried reportless)."""
         seed_central_maintenance_schedule(guard_engine, results_root=results_root)
         with Session(guard_engine) as session:
             session.add(
@@ -488,12 +561,12 @@ class TestBr15ReportlessWeek:
         from daemon.repositories.source.repository import SQLModelSourceRepository
 
         source_repo = SQLModelSourceRepository(guard_engine)
-        finding = detect_reportless_week(
-            source_repo, source_id=SEED_SOURCE_ID, results_root=results_root
+        assert (
+            detect_reportless_week(
+                source_repo, source_id=SEED_SOURCE_ID, results_root=results_root
+            )
+            is None
         )
-        assert finding is not None
-        assert finding["source_id"] == SEED_SOURCE_ID
-        assert finding["latest_report"] is None
 
     def test_a_fire_with_a_report_is_not_a_miss(self, guard_engine, results_root):
         seed_central_maintenance_schedule(guard_engine, results_root=results_root)
@@ -522,3 +595,132 @@ class TestBr15ReportlessWeek:
             source_repo, source_id=SEED_SOURCE_ID, results_root=results_root
         )
         assert finding is None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D4 — the fresh-root guard (a MOVED/LOST artifact root)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestD4FreshRootGuard:
+    """The D4 cure — 'no runs ever' vs 'root moved/lost'."""
+
+    def test_no_execution_record_means_no_finding(self, guard_engine, results_root):
+        """'No runs ever' — with no durable last-fire state the empty root
+        is the fresh-install state, NOT a moved/lost root."""
+        seed_central_maintenance_schedule(guard_engine, results_root=results_root)
+        from daemon.repositories.source.repository import SQLModelSourceRepository
+
+        source_repo = SQLModelSourceRepository(guard_engine)
+        assert (
+            detect_results_root_empty(
+                source_repo, source_id=SEED_SOURCE_ID, results_root=results_root
+            )
+            is None
+        )
+
+    def test_a_fired_chain_with_an_empty_root_is_a_moved_root(
+        self, guard_engine, results_root
+    ):
+        """Durable last-fire state EXISTS and the root holds no run-*.md ⇒
+        the moved/lost-root finding — a DISTINCT kind, never a reportless
+        week."""
+        seed_central_maintenance_schedule(guard_engine, results_root=results_root)
+        with Session(guard_engine) as session:
+            session.add(
+                ScheduleExecution(
+                    execution_id=str(uuid.uuid4()),
+                    schedule_id=SEED_SOURCE_ID,
+                    triggered_at=datetime.now(timezone.utc).isoformat(),
+                    status="completed",
+                )
+            )
+            session.commit()
+        from daemon.repositories.source.repository import SQLModelSourceRepository
+
+        source_repo = SQLModelSourceRepository(guard_engine)
+        finding = detect_results_root_empty(
+            source_repo, source_id=SEED_SOURCE_ID, results_root=results_root
+        )
+        assert finding is not None
+        assert finding["kind"] == FINDING_KIND_RESULTS_ROOT_EMPTY
+        assert finding["source_id"] == SEED_SOURCE_ID
+        assert finding["latest_report"] is None
+        assert "MOVED" in finding["detail"]
+
+    def test_a_root_holding_a_report_is_not_a_moved_root(
+        self, guard_engine, results_root
+    ):
+        seed_central_maintenance_schedule(guard_engine, results_root=results_root)
+        artifact_root = maintenance_results_dir(results_root)
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        (artifact_root / "run-20261122_030000_deadbeef.md").write_text(
+            "# run\n", encoding="utf-8"
+        )
+        with Session(guard_engine) as session:
+            session.add(
+                ScheduleExecution(
+                    execution_id=str(uuid.uuid4()),
+                    schedule_id=SEED_SOURCE_ID,
+                    triggered_at=datetime.now(timezone.utc).isoformat(),
+                    status="completed",
+                )
+            )
+            session.commit()
+        from daemon.repositories.source.repository import SQLModelSourceRepository
+
+        source_repo = SQLModelSourceRepository(guard_engine)
+        assert (
+            detect_results_root_empty(
+                source_repo, source_id=SEED_SOURCE_ID, results_root=results_root
+            )
+            is None
+        )
+
+    def test_the_board_notice_fires_once_across_boots(
+        self, guard_engine, results_root
+    ):
+        """The durable de-dup — the moved-root notice writes ONE board
+        item; a second surfacing pass (the next boot) does NOT duplicate
+        it.  The notice carries its OWN tag (never the reportless-week
+        tag), so the two episodes can never mask each other."""
+        from daemon.repositories.source.maintenance_seed import (
+            _detect_and_surface_results_root_empty,
+        )
+        from daemon.repositories.source.repository import SQLModelSourceRepository
+        from daemon.services.board_service import BoardService
+
+        seed_central_maintenance_schedule(guard_engine, results_root=results_root)
+        with Session(guard_engine) as session:
+            session.add(
+                ScheduleExecution(
+                    execution_id=str(uuid.uuid4()),
+                    schedule_id=SEED_SOURCE_ID,
+                    triggered_at=datetime.now(timezone.utc).isoformat(),
+                    status="completed",
+                )
+            )
+            session.commit()
+        source_repo = SQLModelSourceRepository(guard_engine)
+        board = BoardService(engine=guard_engine)
+
+        first = _detect_and_surface_results_root_empty(
+            source_repo,
+            source_id=SEED_SOURCE_ID,
+            results_root=results_root,
+            engine=guard_engine,
+        )
+        assert first is not None
+        opened = board.list_items(status="open", tag="results-root-empty", limit=5)
+        assert int(opened.get("count") or 0) == 1
+
+        # The next boot: the finding repeats, the board item does not.
+        second = _detect_and_surface_results_root_empty(
+            source_repo,
+            source_id=SEED_SOURCE_ID,
+            results_root=results_root,
+            engine=guard_engine,
+        )
+        assert second is not None
+        opened = board.list_items(status="open", tag="results-root-empty", limit=5)
+        assert int(opened.get("count") or 0) == 1

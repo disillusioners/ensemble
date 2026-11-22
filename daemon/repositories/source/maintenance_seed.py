@@ -44,13 +44,32 @@ NEVER authors a stub, NEVER self-heals and NEVER re-fires.  The
 "never fired yet" case is not a miss: with no execution record there is
 nothing to detect.
 
+The D4 CURE — the FRESH-ROOT guard (a DISTINCT surfacing)
+----------------------------------------------------------
+An EMPTY artifact root is NOT a reportless week.  Two conditions share
+the "no ``run-*.md``" shape and MUST NOT be conflated:
+
+* **"no runs ever"** — no durable last-fire state (the chain never
+  fired): there is nothing to detect; the root is simply fresh;
+* **"root moved/lost"** — durable last-fire state EXISTS but the root
+  holds NO ``run-*.md``: a run should have landed and the root is
+  empty where it must not be.  That is a POSSIBLE moved/lost root
+  (the D4 promote-time seam) and it is surfaced as its OWN finding
+  kind — a loud log line plus ONE de-duplicated board item — NEVER as
+  a routine reportless-week event.
+
 Artifact root
 -------------
-``.agents/maintenancer/RESULTS/`` under the LIVE-INSTALL daemon project
-root — resolved from the daemon package's own location (the house
-convention: ``Path(sys.executable).parent`` when frozen, else the
-directory that holds ``daemon/``), NEVER from ``Path.cwd()`` and NEVER
-from a worktree path.  The seeder creates that directory idempotently
+``.agents/maintenancer/RESULTS/`` under the PROMOTE-STABLE
+LIVE-INSTALL daemon project root — the INSTALL DIR (the ancestor that
+owns ``releases/``) for a frozen install, else the directory that
+holds ``daemon/``.  NEVER from ``Path.cwd()`` and NEVER from a path
+under ``releases/<ver>/``: the root must not MOVE when a release is
+promoted.  A promote ADDS a release dir and repoints ``current``
+INSIDE the install dir, and the keep-3 release eviction only ever
+removes a ``releases/<ver>/`` subtree — a release-scoped root would
+therefore move on every promote (stranding the run history) and lose
+it on every eviction.  The seeder creates that directory idempotently
 at first boot.
 
 No-idle attestation
@@ -105,6 +124,23 @@ BOARD_TITLE = "maintenance: reportless week detected"
 BOARD_TAGS = ("maintenance", "central-maintenance", "reportless-week")
 BOARD_AUTHOR = "daemon:central-maintenance"
 
+#: The board item written when the artifact root is EMPTY where a run
+#: should have landed (the D4 moved/lost-root notice).  Its OWN title
+#: and its OWN tag: the two notices never share a de-dup key, so an
+#: open reportless-week item can never mask a moved root (and vice
+#: versa).
+BOARD_TITLE_ROOT_EMPTY = (
+    "maintenance: results root empty (possible moved/lost root)"
+)
+BOARD_TAGS_ROOT_EMPTY = ("maintenance", "central-maintenance", "results-root-empty")
+
+#: The finding kinds the boot guard surfaces.  The two are DISTINCT:
+#: a reportless week is a fire that produced no report; an empty
+#: results root is a root that may have MOVED (or been lost) — the
+#: empty-root case is NEVER surfaced as a reportless week.
+FINDING_KIND_REPORTLESS_WEEK = "reportless_week"
+FINDING_KIND_RESULTS_ROOT_EMPTY = "results_root_empty"
+
 #: The FUNCTIONAL weekly dispatch message (plan Task 1.1 — NOT a
 #: placeholder).  The trigger token travels in the message BODY: the
 #: orchestrator parses ``trigger:`` and passes ``trigger_type`` to the
@@ -140,6 +176,10 @@ class GuardOutcome:
         run_at: The row's ``run_at`` after the pass (``None`` if unknown).
         detail: A human-readable explanation for the log line.
         reportless_week: The BR-15 finding (``None`` when there is none).
+        results_root_empty: The D4 fresh-root finding (``None`` when there
+            is none) — a MOVED/LOST artifact root.  DISTINCT from
+            ``reportless_week``: an empty root is never surfaced as a
+            routine reportless week.
     """
 
     action: str
@@ -147,6 +187,7 @@ class GuardOutcome:
     run_at: str | None = None
     detail: str = ""
     reportless_week: dict[str, Any] | None = None
+    results_root_empty: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -156,33 +197,118 @@ class GuardOutcome:
             "run_at": self.run_at,
             "detail": self.detail,
             "reportless_week": self.reportless_week,
+            "results_root_empty": self.results_root_empty,
             "warnings": list(self.warnings),
         }
 
 
 # ---------------------------------------------------------------------------
-# Paths — the LIVE-INSTALL daemon project root (never a worktree)
+# Paths — the PROMOTE-STABLE live-install daemon project root
 # ---------------------------------------------------------------------------
 
 
-def resolve_live_install_root() -> Path:
-    """Resolve the live-install daemon project root.
+def _install_dir_owning_releases(exe: Path) -> Path | None:
+    """The nearest ancestor of ``exe`` that owns a ``releases/`` dir.
 
-    The house convention (``daemon/registry.py``, ``daemon/loader.py``,
-    ``daemon/manager.py``): a frozen (PyInstaller) install resolves to
-    the executable's directory; a source install resolves to the
-    directory that holds the ``daemon/`` package.  The result is the
-    INSTALL's own root — it never depends on ``Path.cwd()``, so a daemon
-    launched from a worktree still writes into its own install.
+    The staged binary lives at ``<INSTALL_DIR>/releases/<ver>/ensemble-prod``
+    (``scripts/upgrade/stage.sh:5-17``), so the INSTALL DIR is the
+    ancestor that owns ``releases/``.  The walk (bounded to four
+    ancestors) covers the resolved-release shape
+    (``releases/<ver>/ensemble-prod``) AND the ``current``-symlink
+    shape (``current/ensemble-prod``); the symlink is resolved FIRST,
+    so the former is what the walk normally sees.
+
+    Returns ``None`` when no ancestor looks like an install dir.
+    """
+    for candidate in list(exe.parents)[:4]:
+        try:
+            if (candidate / "releases").is_dir():
+                return candidate
+        except OSError:  # pragma: no cover — an unreadable ancestor
+            continue
+    return None
+
+
+def _frozen_install_root() -> Path:
+    """The PROMOTE-STABLE install root of a frozen (PyInstaller) install.
+
+    The OLD basis (``Path(sys.executable).parent`` — the binary's own
+    directory) landed the artifact root UNDER ``releases/<ver>/``: every
+    promote MOVED the root, the keep-3 release eviction DESTROYED the
+    run history, and the BR-15 detector false-positived a reportless
+    week on every post-promote boot.
+
+    The install dir is what a promote does NOT move: a promote adds a
+    release dir and repoints ``current`` INSIDE the install dir, and
+    the eviction only ever removes a ``releases/<ver>/`` subtree.
+    """
+    try:
+        exe = Path(sys.executable).resolve()
+    except OSError:  # pragma: no cover — an exotic resolve failure
+        exe = Path(sys.executable)
+    # The house convention (two parents up from the binary) — the exact
+    # shape stage.sh produces.
+    candidate = exe.parent.parent.parent
+    try:
+        if (candidate / "releases").is_dir():
+            return candidate
+    except OSError:  # pragma: no cover — an unreadable ancestor
+        pass
+    walk = _install_dir_owning_releases(exe)
+    if walk is not None:
+        return walk
+    # Nothing verified an install dir — the house convention stands as
+    # the last resort (it is the layout the launcher stages).
+    return candidate
+
+
+def resolve_live_install_root() -> Path:
+    """Resolve the PROMOTE-STABLE live-install daemon project root.
+
+    The basis, by install shape:
+
+    * **frozen install** — the INSTALL DIR (the ancestor that owns
+      ``releases/``): stable across promotes AND across the keep-3
+      release eviction (the D4 cure);
+    * **source install** (dev / worktree) — the checkout root (the
+      directory that holds ``daemon/``): the daemon's OWN tree, so a
+      dev run never writes into the production install.  A source tree
+      that itself lives under ``releases/<ver>/`` is lifted to its
+      install dir, so that shape can never re-introduce a
+      release-scoped root.
+
+    NEVER ``Path.cwd()`` (a daemon launched from anywhere writes into
+    its own install) and NEVER a path under ``releases/<ver>/`` (a
+    promote would move the root and strand the run history).
     """
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
+        return _frozen_install_root()
     # daemon/repositories/source/maintenance_seed.py → install root.
-    return Path(__file__).resolve().parents[3]
+    checkout = Path(__file__).resolve().parents[3]
+    if checkout.parent.name == "releases":
+        # A source tree inside a release dir — lift to the install dir.
+        install = checkout.parent.parent
+        try:
+            if (install / "releases").is_dir():
+                return install
+        except OSError:  # pragma: no cover — an unreadable ancestor
+            pass
+    return checkout
 
 
 def maintenance_results_dir(root: Path | None = None) -> Path:
-    """The artifact root: ``<install root>/.agents/maintenancer/RESULTS/``."""
+    """THE artifact-root resolver — ``<install root>/.agents/maintenancer/RESULTS/``.
+
+    ONE helper, THREE surfaces (the D4 cure): the seeder (P1), the BE
+    list route (``daemon/routers/maintenance_reports.py``) and the
+    live-views root registration (``daemon/api.py``) all resolve through
+    THIS function, so the basis logic exists exactly once and the three
+    surfaces can never disagree.
+
+    Args:
+        root: An explicit base directory (tests only). ``None`` resolves
+            the PROMOTE-STABLE live-install root.
+    """
     base = resolve_live_install_root() if root is None else Path(root)
     return base / RESULTS_RELATIVE_DIR
 
@@ -536,6 +662,12 @@ def seed_central_maintenance_schedule(
                 results_root=results_root,
                 engine=engine,
             )
+            outcome.results_root_empty = _detect_and_surface_results_root_empty(
+                source_repo,
+                source_id=SEED_SOURCE_ID,
+                results_root=results_root,
+                engine=engine,
+            )
             return outcome
 
         # ── the row: id first, then name (seed.py:161-166) ──────────────
@@ -562,6 +694,12 @@ def seed_central_maintenance_schedule(
             )
 
         outcome.reportless_week = _detect_and_surface_reportless_week(
+            source_repo,
+            source_id=outcome.source_id or SEED_SOURCE_ID,
+            results_root=results_root,
+            engine=engine,
+        )
+        outcome.results_root_empty = _detect_and_surface_results_root_empty(
             source_repo,
             source_id=outcome.source_id or SEED_SOURCE_ID,
             results_root=results_root,
@@ -905,6 +1043,11 @@ def detect_reportless_week(
     The "never fired yet" case is NOT a miss: with no execution record
     there is nothing to detect, and ``None`` is returned.
 
+    The EMPTY-root case is NOT this detector's business (the D4 cure):
+    an empty root is the moved/lost-root shape and belongs to
+    :func:`detect_results_root_empty` — it is NEVER surfaced here as a
+    routine reportless week.
+
     Returns:
         The finding dict, or ``None`` when there is nothing to report.
     """
@@ -926,17 +1069,15 @@ def detect_reportless_week(
     results_dir = maintenance_results_dir(results_root)
     newest, newest_mtime = _latest_run_report(results_dir)
     if newest is None:
-        return {
-            "source_id": source_id,
-            "execution_id": getattr(execution, "execution_id", None),
-            "triggered_at": triggered_at.isoformat() if triggered_at else None,
-            "results_dir": str(results_dir),
-            "latest_report": None,
-            "detail": "the most recent chain fire produced no run-*.md report",
-        }
+        # The root holds NO report at all — that is the empty-root shape
+        # (the root may have MOVED with a promote), not a reportless
+        # week.  :func:`detect_results_root_empty` owns it; surfacing
+        # it here would re-create the D4 false-positive.
+        return None
     if triggered_at is not None and newest_mtime is not None:
         if newest_mtime < triggered_at:
             return {
+                "kind": FINDING_KIND_REPORTLESS_WEEK,
                 "source_id": source_id,
                 "execution_id": getattr(execution, "execution_id", None),
                 "triggered_at": triggered_at.isoformat(),
@@ -948,6 +1089,127 @@ def detect_reportless_week(
                 ),
             }
     return None
+
+
+def detect_results_root_empty(
+    source_repo: Any,
+    *,
+    source_id: str,
+    results_root: Path | None = None,
+) -> dict[str, Any] | None:
+    """Detect a MOVED/LOST artifact root (the D4 promote-time seam).
+
+    This detector separates the two conditions that share the "no
+    ``run-*.md``" shape:
+
+    * **"no runs ever"** — no durable last-fire state (the chain never
+      fired): there is nothing to detect and the root is simply fresh
+      ⇒ ``None``;
+    * **"root moved/lost"** — durable last-fire state EXISTS but the
+      root holds NO ``run-*.md``: a run should have landed and the
+      root is empty where it must not be.  The artifact root may have
+      MOVED with a promote (the D4 seam) or been lost.
+
+    Surface-ONLY: the detector NEVER authors a stub, NEVER recreates
+    the root's content, NEVER self-heals and NEVER re-fires.  The
+    finding is a DISTINCT kind — it is NEVER surfaced as a routine
+    reportless-week event (that case belongs to
+    :func:`detect_reportless_week`).
+
+    Returns:
+        The finding dict, or ``None`` when there is nothing to report.
+    """
+    try:
+        execution = source_repo.get_latest_execution(source_id)
+    except Exception as exc:  # noqa: BLE001 — a read failure is not fatal
+        logger.warning(
+            "[CentralMaintenance] could not read the latest execution for "
+            "%s: %s",
+            source_id,
+            exc,
+        )
+        return None
+    if execution is None:
+        # No durable last-fire state ⇒ the chain never fired ⇒ the empty
+        # root is the FRESH-INSTALL state, not a moved/lost root.
+        return None
+
+    results_dir = maintenance_results_dir(results_root)
+    newest, _newest_mtime = _latest_run_report(results_dir)
+    if newest is not None:
+        # The root holds reports ⇒ it is not empty ⇒ nothing to detect.
+        return None
+
+    triggered_at = _parse_run_at(getattr(execution, "triggered_at", None))
+    return {
+        "kind": FINDING_KIND_RESULTS_ROOT_EMPTY,
+        "source_id": source_id,
+        "execution_id": getattr(execution, "execution_id", None),
+        "triggered_at": triggered_at.isoformat() if triggered_at else None,
+        "results_dir": str(results_dir),
+        "latest_report": None,
+        "detail": (
+            "the chain fired but the artifact root holds no run-*.md — the "
+            "root may have MOVED (a promote) or been lost"
+        ),
+    }
+
+
+def _surface_board_notice(
+    engine: Engine,
+    *,
+    title: str,
+    body_md: str,
+    tags: list[str],
+    dedup_tag: str,
+) -> bool:
+    """Write ONE board notice, de-duplicated against the OPEN items.
+
+    The board is the daemon-side operator surface; the OPEN-item check
+    is the DURABLE de-dup: the daemon may boot many times while the
+    condition holds, so the log line is the loud per-boot surface and
+    the board carries the durable one-shot record (ONE item per
+    episode).
+
+    Args:
+        engine: The daemon's engine.
+        title: The board item title.
+        body_md: The board item body.
+        tags: The board item tags.
+        dedup_tag: The tag the de-dup counts on — the OPEN items
+            carrying it suppress a duplicate write.
+
+    Returns:
+        True when an item was created, False when the write was
+        de-duplicated or failed (the notice is best-effort — never
+        fatal).
+    """
+    try:
+        from daemon.services.board_service import BoardService
+
+        board = BoardService(engine=engine)
+        existing = board.list_items(status="open", tag=dedup_tag, limit=5)
+        if int(existing.get("count") or 0) > 0:
+            logger.info(
+                "[CentralMaintenance] a %s board item is already open — not "
+                "creating a duplicate",
+                dedup_tag,
+            )
+            return False
+        board.create_item(
+            title=title,
+            body_md=body_md,
+            tags=list(tags),
+            created_by_instance=BOARD_AUTHOR,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — the notice is best-effort
+        logger.warning(
+            "[CentralMaintenance] could not write the %s board notice: %s",
+            dedup_tag,
+            exc,
+        )
+        return False
 
 
 def _detect_and_surface_reportless_week(
@@ -973,42 +1235,79 @@ def _detect_and_surface_reportless_week(
         finding.get("source_id"),
         finding.get("results_dir"),
     )
-    try:
-        from daemon.services.board_service import BoardService
+    # De-dup: ONE open board item per reportless-week episode.  The
+    # daemon may boot many times while the chain is broken — the log
+    # line is the loud per-boot surface, the board carries the durable
+    # one.
+    _surface_board_notice(
+        engine,
+        title=BOARD_TITLE,
+        body_md=(
+            "The most recent central-maintenance chain fire produced no "
+            "`run-*.md` report.\n\n"
+            f"- source_id: {finding.get('source_id')}\n"
+            f"- execution_id: {finding.get('execution_id')}\n"
+            f"- triggered_at: {finding.get('triggered_at')}\n"
+            f"- artifact root: {finding.get('results_dir')}\n\n"
+            "Surface-only: the daemon authored no stub and did not "
+            "re-fire the chain."
+        ),
+        tags=list(BOARD_TAGS),
+        dedup_tag="reportless-week",
+    )
+    return finding
 
-        board = BoardService(engine=engine)
-        # De-dup: ONE open board item per reportless-week episode.  The
-        # daemon may boot many times while the chain is broken — the log
-        # line is the loud per-boot surface, the board carries the
-        # durable one.
-        existing = board.list_items(status="open", tag="reportless-week", limit=5)
-        if int(existing.get("count") or 0) > 0:
-            logger.info(
-                "[CentralMaintenance] a reportless-week board item is "
-                "already open — not creating a duplicate"
-            )
-            return finding
-        board.create_item(
-            title=BOARD_TITLE,
-            body_md=(
-                "The most recent central-maintenance chain fire produced no "
-                "`run-*.md` report.\n\n"
-                f"- source_id: {finding.get('source_id')}\n"
-                f"- execution_id: {finding.get('execution_id')}\n"
-                f"- triggered_at: {finding.get('triggered_at')}\n"
-                f"- artifact root: {finding.get('results_dir')}\n\n"
-                "Surface-only: the daemon authored no stub and did not "
-                "re-fire the chain."
-            ),
-            tags=list(BOARD_TAGS),
-            created_by_instance=BOARD_AUTHOR,
-        )
-    except Exception as exc:  # noqa: BLE001 — the notice is best-effort
-        logger.warning(
-            "[CentralMaintenance] could not write the reportless-week board "
-            "notice: %s",
-            exc,
-        )
+
+def _detect_and_surface_results_root_empty(
+    source_repo: Any,
+    *,
+    source_id: str,
+    results_root: Path | None,
+    engine: Engine,
+) -> dict[str, Any] | None:
+    """Detect AND surface a MOVED/LOST artifact root (log + board notice).
+
+    The D4 fresh-root guard: durable last-fire state EXISTS but the
+    artifact root holds no ``run-*.md``.  The surfacing is DISTINCT
+    from the reportless-week notice — its own title, its own tag, its
+    own de-dup key — so the two episodes can never mask each other,
+    and it is NEVER reported as a routine reportless week.
+    """
+    finding = detect_results_root_empty(
+        source_repo,
+        source_id=source_id,
+        results_root=results_root,
+    )
+    if finding is None:
+        return None
+    logger.error(
+        "[CentralMaintenance] RESULTS ROOT EMPTY — %s (source_id=%s, "
+        "results_dir=%s). The artifact root may have MOVED (a promote) or "
+        "been lost. Surface-only: no stub is authored, nothing is "
+        "self-healed, nothing is re-fired.",
+        finding.get("detail"),
+        finding.get("source_id"),
+        finding.get("results_dir"),
+    )
+    # De-dup: ONE open board item per empty-root episode — the durable
+    # state that keeps this a once-per-episode notice across boots.
+    _surface_board_notice(
+        engine,
+        title=BOARD_TITLE_ROOT_EMPTY,
+        body_md=(
+            "The central-maintenance chain fired, but the artifact root "
+            "holds no `run-*.md` — the root may have MOVED (a promote) or "
+            "been lost.\n\n"
+            f"- source_id: {finding.get('source_id')}\n"
+            f"- execution_id: {finding.get('execution_id')}\n"
+            f"- triggered_at: {finding.get('triggered_at')}\n"
+            f"- artifact root: {finding.get('results_dir')}\n\n"
+            "Surface-only: the daemon authored no stub, did not "
+            "self-heal the root and did not re-fire the chain."
+        ),
+        tags=list(BOARD_TAGS_ROOT_EMPTY),
+        dedup_tag="results-root-empty",
+    )
     return finding
 
 
@@ -1016,7 +1315,11 @@ __all__ = [
     "BOARD_AUTHOR",
     "BOARD_TAGS",
     "BOARD_TITLE",
+    "BOARD_TAGS_ROOT_EMPTY",
+    "BOARD_TITLE_ROOT_EMPTY",
     "CHAIN_MODE",
+    "FINDING_KIND_REPORTLESS_WEEK",
+    "FINDING_KIND_RESULTS_ROOT_EMPTY",
     "GuardOutcome",
     "MaintenanceSeedError",
     "RESULTS_RELATIVE_DIR",
@@ -1026,6 +1329,7 @@ __all__ = [
     "WEEKLY_RUN_MESSAGE",
     "build_chain_config",
     "detect_reportless_week",
+    "detect_results_root_empty",
     "ensure_maintenance_results_dir",
     "maintenance_results_dir",
     "resolve_live_install_root",
