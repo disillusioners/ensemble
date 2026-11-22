@@ -27,15 +27,18 @@ echo "=== Test Pack: engine_observability_unit_test ==="
 
 cd "$PROJECT_DIR"
 
+# FAIL-PATH REACHABILITY: under `set -euo pipefail` a bare non-zero
+# pytest would abort the script BEFORE `EXIT_CODE=$?`, making the
+# RESULT: FAIL / RESULT: TIMEOUT branches below unreachable — exactly
+# when the contract matters. Capture the status in an OR-list instead.
+EXIT_CODE=0
 timeout 180s .venv/bin/pytest \
   tests/unit/services/engine/test_projection.py \
   tests/api/test_engine_routes.py \
   tests/unit/metrics/test_metrics_family_adjudication.py \
   "tests/unit/test_maintenance_idle_starvation.py::TestSkipStreakTelemetry::test_job_metrics_exposes_one_block_per_job" \
   "tests/test_settings_resolution.py::TestManagedKeysConsistency::test_every_entry_is_consistent" \
-  --override-ini="addopts=" --tb=short -q 2>&1
-
-EXIT_CODE=$?
+  --override-ini="addopts=" --tb=short -q 2>&1 || EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 124 ]; then
   echo "RESULT: TIMEOUT"

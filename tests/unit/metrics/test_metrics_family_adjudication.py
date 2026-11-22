@@ -296,8 +296,17 @@ PRE_EXISTING_DAEMON_OFFENDERS = frozenset(
         # with the mechanism-correct text in the remediation commit, and
         # the thread-escape substance (the to_thread payloads at
         # daemon/services/engine/execution.py:148/:184/:293 are not bounded
-        # by the await ceiling) was preserved. The co-landed :3422-3425
+        # by the await ceiling) was preserved. The co-landed :3426-3428
         # ServicesConfig de-absoluting hunk (AMD-11) was NOT reverted.
+        #
+        # SHAs: the projection + census remediation landed as 56946e1ed.
+        # The config.py re-land hunk rode 281ba1864 (the P4-lane
+        # boot-packs commit) rather than the remediation commit: the
+        # sibling lane's `git add` swept this lane's UNCOMMITTED
+        # working-tree config.py edit into its commit mid-flight (the
+        # known concurrent-commit hazard in a shared worktree). Content
+        # landed byte-identical, zero work lost; the attribution is
+        # restored ON DISK by this disclosure.
         #
         # ── (A) engine-arc program — P1/P2/P3/P6 modules + migrations ──
         "daemon/migrations/versions/20261121_120000_create_engine_jobs.sql",  # engine-arc P1 9cf956ada
