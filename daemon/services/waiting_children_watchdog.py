@@ -149,11 +149,48 @@ parent scans failed; only a full enumeration failure (repo blip)
 skips the whole tick's purges (no fresh signal at all).
 
 **PAUSED parents**: skipped entirely per design (see step 4).
+
+**The wedge pass and the WAKE-SOURCE gate (anomaly ``a370b036``).**
+
+The wedge pass answers "is this parked parent WEDGED?" — i.e. it has
+nothing left to wait for AND nothing left that can deliver to it.
+That question is only meaningful if the parent really has NO
+remaining wake source. The gate ``_has_legitimate_wake_source``
+answers the missing half of the question BEFORE the carrier check:
+"is there still a LIVE path that can wake this parent?" Two healthy
+shapes were firing FALSE wedge notices (four notices on root
+``77ddcb9f``, 2026-11-21→22):
+
+* **(a) event-watch root** — the parent holds ARMED
+  ``watch_mission`` / job-event watch rows, has NO ``PROCESS_REPORT``
+  carrier, and its direct children are all terminal. The armed watch
+  IS a live wake source (it will fire when the watched receipt
+  settles) — reading "no PROCESS_REPORT carrier" as "nothing can
+  deliver" produced the false notice.
+* **(b) parked-cascade root** — the parent's DIRECT children are all
+  terminal, but a GRANDCHILD is still running. The wedge census reads
+  DIRECT children only, so the parent looked childless while its
+  subtree was still working.
+
+The gate is TRI-STATE (R1 discipline): ``True`` = a legitimate wake
+source exists (the notice is SUPPRESSED and the wedge episode is
+dropped — the parent is healthy); ``False`` = no wake source (the
+existing carrier gate decides, unchanged); ``None`` = UNKNOWN — a
+WIRED leg read RAISED, so the notice must NOT be emitted (a false
+wedge notice is the harm) and the episode must NOT be closed. An
+UNWIRED leg repository is NOT unknown — it is simply "no evidence"
+(``False``), which preserves every pre-existing unwired fixture.
+
+The gate runs AFTER the S4 in-scope admission (a parent that is not
+in scope is not a wedge candidate at all) and BEFORE the live-carrier
+check — so it suppresses the notice for BOTH arms (the classic
+zero-children arm and the S4 subject arm).
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -163,9 +200,16 @@ if TYPE_CHECKING:
 from daemon.constants import TERMINAL_INSTANCE_STATUSES
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
+from daemon.repositories.job_queue.models import (
+    AdmissionState,
+    _ADMISSION_TO_LEGACY_STATUS,
+)
+from daemon.repositories.mission_record.models import CommissionState
 from daemon.services.report_integrity_guard import parent_has_active_b_notice
 from daemon.services.attestation_ledger import L6_ANCHOR_META_KEY
+from daemon.services.mission_live_guard import evaluate_mission_live
 from daemon.services.pool_orchestrator import safe_notify_all_pools
+from daemon.services.work_status import canonicalize_status, is_terminal
 
 logger = logging.getLogger(__name__)
 
@@ -627,6 +671,7 @@ class WaitingChildrenWatchdog:
         interval_seconds: int = 3600,
         hang_threshold_seconds: int = 3600,
         task_repository: Any | None = None,
+        watcher_repository: Any | None = None,
         escalation_nudge_count: int = 3,
         release_after_nudge_count: int = 5,
     ) -> None:
@@ -669,6 +714,15 @@ class WaitingChildrenWatchdog:
         # used in ``daemon/api.py``. Tests inject a real repo;
         # production relies on the manager surface.
         self._task_repository = task_repository
+        # Wake-source gate (anomaly a370b036): the JOB-watcher
+        # repository — the ARMED watch rows are the "an event-watch
+        # root still has a live wake source" evidence. It is built in
+        # ``daemon/api.py`` (the JobWatcherRepository is created there
+        # for the job-notification lanes) and injected here; the
+        # manager also carries it as ``_watcher_repo`` (the tools
+        # access seam) — the constructor argument is preferred, the
+        # manager attribute is the fallback.
+        self._watcher_repository = watcher_repository
 
         # ``set`` of ``(parent_id, child_id)`` tuples in a currently
         # notified episode. Cleared implicitly on each tick by
@@ -1114,6 +1168,456 @@ class WaitingChildrenWatchdog:
         if _inspect.iscoroutine(live):
             return True
         return len(live) > 0
+
+    # ─── Wake-source gate (anomaly a370b036) ───────────────────────────
+    #
+    # The wedge pass answers "is the parent WEDGED?" — but a parent with
+    # a LIVE wake source is not wedged, it is WAITING. The gate below
+    # answers the missing half of the question ("is there still a live
+    # path that can wake this parent?") and suppresses the false notices
+    # of anomaly a370b036 (four false notices on root 77ddcb9f,
+    # 2026-11-21→22).
+    #
+    # LEGS (any True ⇒ the parent is healthy ⇒ the notice is suppressed):
+    #
+    #   1. ``live_delivery_task`` — ANY live (PENDING/RUNNING) task row
+    #      for the parent, ANY kind. The old carrier probe only looked
+    #      at ``PROCESS_REPORT`` tasks and read "no PROCESS_REPORT
+    #      carrier" as "nothing can deliver" (false-positive shape (a)).
+    #   2. ``armed_job_watch`` — ARMED job-event / mission watches whose
+    #      watched receipt can STILL fire. An armed watch on a TERMINAL
+    #      receipt is a STRANDED watcher (it can never fire) — not a
+    #      wake source.
+    #   3. ``open_report_obligation`` — a PENDING/DEFERRED
+    #      report-injection row for the parent: the parent is still owed
+    #      a report, so the injection lane will deliver to it.
+    #   4. ``resumable_descendant`` — the canonical mission-live guard
+    #      over the parent's DESCENDANTS (the direct-children-only
+    #      census missed a live GRANDCHILD — false-positive shape (b)).
+    #   5. ``unsettled_mission_commission`` — an OUTSTANDING mission
+    #      commission for any member of the parent's tree: the mission
+    #      graph is unsettled (RDRS lane-7 semantics — the watchdog
+    #      defers to lane 7's TTL, it does not adjudicate).
+
+    #: Leg names — the OBSERVABILITY vocabulary of the suppression log.
+    _WAKE_LEG_DELIVERY_TASK = "live_delivery_task"
+    _WAKE_LEG_ARMED_JOB_WATCH = "armed_job_watch"
+    _WAKE_LEG_REPORT_OBLIGATION = "open_report_obligation"
+    _WAKE_LEG_RESUMABLE_DESCENDANT = "resumable_descendant"
+    _WAKE_LEG_MISSION_COMMISSION = "unsettled_mission_commission"
+
+    @staticmethod
+    def _probe(probe: Any, *args: Any) -> tuple[bool, Any]:
+        """Call a repository probe and report whether it returned a
+        USABLE value.
+
+        The watchdog never awaits a repository read — every repository
+        helper it uses is synchronous. A test double (an ``AsyncMock``
+        manager) returns a COROUTINE for any method call; leaving that
+        coroutine un-awaited is a RuntimeWarning at GC time. The
+        coroutine is therefore CLOSED here and reported as "not a
+        usable value" — the caller treats the leg as UNWIRED.
+
+        Returns:
+            ``(usable, value)`` — ``usable`` is ``False`` when the
+            probe returned a coroutine (closed) or ``None``.
+        """
+        result = probe(*args)
+        if inspect.iscoroutine(result):
+            try:
+                result.close()
+            except Exception:  # noqa: BLE001 — closing is best-effort
+                pass
+            return (False, None)
+        return (True, result)
+
+    async def _has_legitimate_wake_source(
+        self,
+        parent_id: str,
+        *,
+        bus_pending_count: int = 0,
+    ) -> tuple[bool | None, str | None]:
+        """TRI-STATE: does ``parent_id`` still have a LEGITIMATE wake source?
+
+        Evaluated AFTER the S4 in-scope admission and BEFORE the
+        live-carrier check, for BOTH wedge arms (the classic
+        zero-children arm and the S4 subject arm).
+
+        **R1 TRI-STATE.** The return value is ``(verdict, leg)``:
+
+        * ``(True, leg)`` — a leg holds: the parent has a live wake
+          source and is therefore HEALTHY. The caller SUPPRESSES the
+          wedge notice and drops the wedge episode (mirroring the
+          carrier-True branch).
+        * ``(False, None)`` — no leg holds and no leg read failed: the
+          existing carrier gate decides, unchanged.
+        * ``(None, None)`` — UNKNOWN: a WIRED leg read RAISED. The
+          caller must NOT emit a notice (a false wedge notice is the
+          harm) and must NOT end the episode.
+
+        **UNWIRED is not UNKNOWN.** A leg whose repository is not
+        wired (or is a test double whose read returns a mock artifact
+        instead of rows) is simply "no evidence" — ``False``. Only a
+        WIRED repository that RAISES produces UNKNOWN. This preserves
+        every pre-existing unwired fixture: an unwired leg never
+        suppresses a notice that the previous code would have emitted.
+
+        Args:
+            parent_id: The parked parent whose wake sources are
+                probed.
+            bus_pending_count: The number of PENDING dependency-bus
+                watchers that can STILL fire for this parent (the
+                FULFILLABLE ones — the S4 subject rows are excluded:
+                a watcher that can no longer fire is not liveness
+                evidence). Feeds leg 4's bus leg.
+
+        Returns:
+            ``(verdict, leg_name)`` — see the tri-state contract above.
+        """
+        unknown = False
+
+        # ── Legs 1-3: the cheap repository reads ──────────────────────
+        for leg_name, probe in (
+            (self._WAKE_LEG_DELIVERY_TASK, self._leg_live_delivery_task),
+            (self._WAKE_LEG_ARMED_JOB_WATCH, self._leg_armed_job_watch),
+            (
+                self._WAKE_LEG_REPORT_OBLIGATION,
+                self._leg_open_report_obligation,
+            ),
+        ):
+            try:
+                if probe(parent_id):
+                    return (True, leg_name)
+            except Exception as exc:  # noqa: BLE001 — R1: UNKNOWN
+                unknown = True
+                logger.warning(
+                    "[Watchdog] wake-source leg %s raised for %s...: "
+                    "%s: %s — UNKNOWN (no notice on an unknown)",
+                    leg_name,
+                    parent_id[:8],
+                    type(exc).__name__,
+                    exc,
+                )
+
+        # ── Leg 4: resumable descendants (the canonical guard) ───────
+        try:
+            _verdict = await evaluate_mission_live(
+                instance_repository=self._repo,
+                instance_id=parent_id,
+                bus_pending_count=bus_pending_count,
+                # MANDATORY: the parked parent's OWN WAITING_CHILDREN
+                # status is not liveness — it is the very state the
+                # wedge is about. Only the DESCENDANTS count.
+                skip_root=True,
+            )
+            if getattr(_verdict, "live", False):
+                return (True, self._WAKE_LEG_RESUMABLE_DESCENDANT)
+            if getattr(_verdict, "error", False):
+                # The guard's fail-OPEN contract (live=False, error=True)
+                # is INVERTED here: the watchdog's harm is a FALSE
+                # notice, so an unknown tree is UNKNOWN, not "dead".
+                unknown = True
+                logger.warning(
+                    "[Watchdog] wake-source leg %s could not evaluate "
+                    "%s... (%s) — UNKNOWN (no notice on an unknown)",
+                    self._WAKE_LEG_RESUMABLE_DESCENDANT,
+                    parent_id[:8],
+                    getattr(_verdict, "reason", "no reason recorded"),
+                )
+        except Exception as exc:  # noqa: BLE001 — R1: UNKNOWN
+            unknown = True
+            logger.warning(
+                "[Watchdog] wake-source leg %s raised for %s...: "
+                "%s: %s — UNKNOWN (no notice on an unknown)",
+                self._WAKE_LEG_RESUMABLE_DESCENDANT,
+                parent_id[:8],
+                type(exc).__name__,
+                exc,
+            )
+
+        # ── Leg 5: unsettled mission commissions ──────────────────────
+        try:
+            if self._leg_unsettled_mission_commission(parent_id):
+                return (True, self._WAKE_LEG_MISSION_COMMISSION)
+        except Exception as exc:  # noqa: BLE001 — R1: UNKNOWN
+            unknown = True
+            logger.warning(
+                "[Watchdog] wake-source leg %s raised for %s...: "
+                "%s: %s — UNKNOWN (no notice on an unknown)",
+                self._WAKE_LEG_MISSION_COMMISSION,
+                parent_id[:8],
+                type(exc).__name__,
+                exc,
+            )
+
+        return (None, None) if unknown else (False, None)
+
+    # ── Leg 1 ───────────────────────────────────────────────────────────
+
+    def _leg_live_delivery_task(self, parent_id: str) -> bool:
+        """Leg 1: does the parent have ANY live delivery task row?
+
+        ANY kind — the ``PROCESS_REPORT``-only carrier probe is the
+        false-positive class of anomaly ``a370b036`` (shape (a)).
+
+        Unwired repository (or a mock artifact) ⇒ ``False`` (no
+        evidence). A repository that RAISES propagates to the gate,
+        which turns it into UNKNOWN.
+        """
+        repo = self._task_repository
+        if repo is None:
+            repo = getattr(self._manager, "_task_repo", None)
+        probe = getattr(repo, "list_live_delivery_tasks_for_instance", None)
+        if probe is None or not callable(probe):
+            # No repo wired — silent no-op (the pre-existing fixture
+            # shape). NOT unknown: the gate simply has no evidence.
+            return False
+        usable, rows = self._probe(probe, parent_id)
+        if not usable or not isinstance(rows, (list, tuple)):
+            # A test double returned a mock artifact (or a coroutine)
+            # instead of rows — treat the leg as UNWIRED (never as
+            # "rows exist").
+            return False
+        return len(rows) > 0
+
+    # ── Leg 2 ───────────────────────────────────────────────────────────
+
+    def _leg_armed_job_watch(self, parent_id: str) -> bool:
+        """Leg 2: does the parent hold an ARMED watch that can STILL fire?
+
+        The armed ``job_watchers`` rows of this parent are read
+        through the ``JobWatcherRepository``. A watch whose watched
+        receipt is already TERMINAL is a STRANDED watcher — it can
+        never fire, so it is NOT a wake source.
+        """
+        repo = self._watcher_repository
+        if repo is None:
+            repo = getattr(self._manager, "_watcher_repo", None)
+        probe = getattr(repo, "get_watches_for_instance", None)
+        if probe is None or not callable(probe):
+            return False
+        usable, rows = self._probe(probe, parent_id)
+        if not usable or not isinstance(rows, (list, tuple)):
+            # Mock artifact (or a coroutine) — treat as unwired.
+            return False
+        for row in rows:
+            work_id = getattr(row, "job_id", None)
+            if not isinstance(work_id, str) or not work_id:
+                continue
+            if self._watched_receipt_can_fire(work_id):
+                return True
+        return False
+
+    def _watched_receipt_can_fire(self, work_id: str) -> bool:
+        """True iff the watched work receipt can STILL fire its watch.
+
+        The canonical vocabulary (the shape of
+        ``daemon/tools/job_queue.py``'s mission-terminal gate): a
+        receipt is TERMINAL when the JobItem's own status is terminal
+        — and, for a MESSAGE-MIRROR row, only when the MISSION side
+        is terminal too (the mirror receipt settles before its
+        mission does; the two are different answers).
+
+        The receipt is read through the manager's JOB repository (the
+        ``JobQueueService.repository`` public accessor — the same hop
+        the RDRS lane-7 sweep uses). The watchdog stays
+        ``resolve_work``-DISJOINT: the resolver is not imported, not
+        called and not consulted here.
+        """
+        item = self._read_job_receipt(work_id)
+        receipt_status, mission_liveness = self._receipt_state(item)
+        if receipt_status is not None:
+            if not is_terminal(receipt_status):
+                # The receipt is still live — the watch can fire.
+                return True
+            if mission_liveness is None or is_terminal(mission_liveness):
+                # Terminal receipt (and, for a mirror row, a terminal
+                # mission) — a STRANDED watcher: it can never fire.
+                return False
+            # A mirror row whose receipt settled but whose MISSION is
+            # still live: the mission-terminal watch can still fire.
+            return True
+        # No JobItem receipt row — the work id may be TASK-backed.
+        task = self._read_task_receipt(work_id)
+        if task is None:
+            # The work row is gone — the watch can never fire.
+            return False
+        status = getattr(task, "status", None)
+        if not isinstance(status, str):
+            # Mock artifact — treat as unresolved (not as "can fire").
+            return False
+        return not is_terminal(canonicalize_status(status))
+
+    def _read_job_receipt(self, work_id: str) -> Any | None:
+        """Read the JobItem receipt row for ``work_id`` (or ``None``).
+
+        ``None`` when the job repository is unwired OR the row does
+        not exist. A mock artifact is returned AS-IS — the caller
+        duck-checks it (``_receipt_state``).
+        """
+        repo = self._job_repository()
+        probe = getattr(repo, "get", None)
+        if probe is None or not callable(probe):
+            return None
+        usable, item = self._probe(probe, work_id)
+        return item if usable else None
+
+    def _job_repository(self) -> Any | None:
+        """The manager's JOB repository — read-only, ``None`` if unwired.
+
+        Resolution hop: ``manager._job_queue_service`` → the service's
+        PUBLIC ``repository`` accessor. This is the documented seam
+        (the manager's own docstring names it for the RDRS lane-7
+        JOBITEM-LIVE probe); the private ``_repository`` is the
+        fallback for older shapes.
+        """
+        service = getattr(self._manager, "_job_queue_service", None)
+        if service is None:
+            return None
+        repo = getattr(service, "repository", None)
+        if repo is None:
+            repo = getattr(service, "_repository", None)
+        return repo
+
+    def _receipt_state(
+        self, item: Any | None
+    ) -> tuple[str | None, str | None]:
+        """Return ``(receipt_status, mission_liveness)`` — canonical vocabulary.
+
+        ``(None, None)`` when ``item`` is not a receipt row (``None``
+        or a mock artifact) — the caller then falls back to the Task
+        receipt.
+
+        The derivation MIRRORS the work resolver's receipt-status rule
+        (``daemon/services/work_resolver.py::_job_to_record`` — the
+        authority for the canonical vocabulary) WITHOUT calling the
+        resolver (the watchdog stays ``resolve_work``-disjoint):
+
+        * ``admission_state='done'`` → the status comes from the
+          Phase 7c ``terminal_reason`` discriminator (the queue-side
+          terminal). A mirror row's terminal is ``settled`` (the
+          transport-receipt token), a task row's is ``completed``.
+        * ``admission_state='active'`` → the LINKED INSTANCE's
+          canonical status (the instance is the execution authority).
+        * otherwise → the admission-state map (``queued`` → pending).
+
+        The MISSION liveness is the linked instance's canonical status
+        and is meaningful for MIRROR rows only (the resolver's Fix-C
+        read-model split: for a task-kind row the receipt status IS
+        the liveness signal).
+        """
+        if item is None:
+            return (None, None)
+        job_id = getattr(item, "job_id", None)
+        if not isinstance(job_id, str) or not job_id:
+            # Not a receipt row (mock artifact).
+            return (None, None)
+        kind = getattr(item, "job_type", None) or "task"
+        admission = getattr(item, "admission_state", None)
+        terminal_reason = getattr(item, "terminal_reason", None)
+        instance_id = getattr(item, "instance_id", None)
+        instance_status: str | None = None
+        if isinstance(instance_id, str) and instance_id:
+            row = self._repo.get(instance_id)
+            raw = getattr(row, "status", None) if row is not None else None
+            if isinstance(raw, str):
+                instance_status = canonicalize_status(raw)
+        if admission == AdmissionState.DONE.value:
+            receipt = (
+                canonicalize_status(terminal_reason)
+                if isinstance(terminal_reason, str) and terminal_reason
+                else "completed"
+            )
+            if receipt == "completed" and kind == "message":
+                # The mirror receipt's transport terminal (M3).
+                receipt = "settled"
+        elif (
+            admission == AdmissionState.ACTIVE.value
+            and instance_status is not None
+        ):
+            receipt = instance_status
+        elif isinstance(admission, str):
+            receipt = canonicalize_status(
+                _ADMISSION_TO_LEGACY_STATUS.get(admission, "pending")
+            )
+        else:
+            receipt = None
+        mission_liveness = (
+            instance_status if kind == "message" else None
+        )
+        return (receipt, mission_liveness)
+
+    def _read_task_receipt(self, work_id: str) -> Any | None:
+        """Read the Task row for ``work_id`` (or ``None``).
+
+        The task-backed half of the work-id space: a job-watch row may
+        be armed on a Task's work id (the resolver's correlation key)
+        rather than on a JobItem id.
+        """
+        repo = self._task_repository
+        if repo is None:
+            repo = getattr(self._manager, "_task_repo", None)
+        probe = getattr(repo, "get_by_work_id", None)
+        if probe is None or not callable(probe):
+            return None
+        usable, task = self._probe(probe, work_id)
+        return task if usable else None
+
+    # ── Leg 3 ───────────────────────────────────────────────────────────
+
+    def _leg_open_report_obligation(self, parent_id: str) -> bool:
+        """Leg 3: does the parent still have an OPEN report obligation?
+
+        A PENDING or DEFERRED report-injection row means the parent
+        is still OWED a child report — the injection lane will deliver
+        to it, so it is not wedged.
+        """
+        repo = getattr(self._manager, "_report_injection_repo", None)
+        probe = getattr(repo, "has_open_obligation_for_parent", None)
+        if probe is None or not callable(probe):
+            return False
+        usable, result = self._probe(probe, parent_id)
+        if not usable or not isinstance(result, bool):
+            # Mock artifact (or a coroutine) — treat as unwired (no
+            # evidence).
+            return False
+        return result
+
+    # ── Leg 5 ───────────────────────────────────────────────────────────
+
+    def _leg_unsettled_mission_commission(self, parent_id: str) -> bool:
+        """Leg 5: is the parent's mission graph UNSETTLED?
+
+        An OUTSTANDING mission commission for ANY member of the
+        parent's permanent tree means the mission graph has not
+        settled — the RDRS lane-7 semantics (the watchdog DEFERS to
+        lane 7's TTL; it never adjudicates the commission itself).
+        """
+        service = getattr(self._manager, "_mission_record_service", None)
+        if service is None:
+            return False
+        repo = None
+        accessor = getattr(service, "commission_repository", None)
+        if callable(accessor):
+            usable, resolved = self._probe(accessor)
+            if usable:
+                repo = resolved
+        if repo is None:
+            repo = getattr(service, "_repo", None)
+        probe = getattr(repo, "find_outstanding_commission_for_worker", None)
+        if probe is None or not callable(probe):
+            return False
+        for worker_id in self._repo.get_tree_ids_permanent(parent_id):
+            usable, row = self._probe(probe, worker_id)
+            if not usable or row is None:
+                continue
+            state = getattr(row, "state", None)
+            if (
+                isinstance(state, str)
+                and state == CommissionState.OUTSTANDING.value
+            ):
+                return True
+        return False
 
     # ─── W-B liveness-gate helper ────────────────────────────────────
 
@@ -2033,6 +2537,48 @@ class WaitingChildrenWatchdog:
                     # the entry must survive it (fail-closed).
                     if not subjects_read_failed:
                         self._wedge_notified.pop(parent_id, None)
+                    continue
+                # ── Wake-source gate (anomaly a370b036) ────────────────
+                # The wedge question has two halves: "is there nothing
+                # left to wait for" (the in-scope admission above) and
+                # "is there nothing left that can wake me" (this
+                # gate). A parent with a LIVE wake source is WAITING,
+                # not wedged — firing a notice on it is the false
+                # positive this gate cures (shape (a): an event-watch
+                # root with armed watch rows; shape (b): a root whose
+                # GRANDCHILD is still running).
+                #
+                # The bus leg of leg 4 counts only the FULFILLABLE
+                # watchers: the S4 subject rows are the watchers that
+                # can NO LONGER fire, so they are NOT liveness evidence.
+                _fulfillable_pending = max(
+                    0, _total_pending - len(_subject_rows)
+                )
+                _wake_state, _wake_leg = (
+                    await self._has_legitimate_wake_source(
+                        parent_id,
+                        bus_pending_count=_fulfillable_pending,
+                    )
+                )
+                if _wake_state is None:
+                    # R1: UNKNOWN (a wired leg read RAISED) — fail
+                    # CLOSED: no notice on an unknown (the false wedge
+                    # notice is the harm), and the episode must NOT
+                    # end on it (no pop).
+                    continue
+                if _wake_state:
+                    # A legitimate wake source exists — the parent is
+                    # healthy. Mirror the carrier-True branch: drop
+                    # the wedge episode so a later genuine wedge can
+                    # re-notify, and emit NO notice.
+                    logger.info(
+                        "[Watchdog] wedge suppressed for %s... — a "
+                        "legitimate wake source is live (leg=%s); no "
+                        "notice emitted",
+                        parent_id[:8],
+                        _wake_leg,
+                    )
+                    self._wedge_notified.pop(parent_id, None)
                     continue
                 # Wedge condition part 1: zero live carrier. If a
                 # carrier exists, the wedge is NOT active — the

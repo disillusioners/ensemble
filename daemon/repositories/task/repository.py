@@ -2008,6 +2008,52 @@ class TaskRepository:
             )
             return list(db_session.exec(stmt))
 
+    def list_live_delivery_tasks_for_instance(
+        self, instance_id: str
+    ) -> list[Task]:
+        """Return every live Task row for ``instance_id`` — ANY kind.
+
+        Wedge-fix backstop helper (waiting_children_watchdog): the
+        GENERIC "can anything still deliver to this instance?" probe.
+        It mirrors
+        :meth:`list_live_process_report_carriers_for_instance` MINUS
+        the ``task_type`` filter.
+
+        Why the widening matters: a parked ``WAITING_CHILDREN``
+        parent may be waiting on a delivery that is NOT a
+        ``PROCESS_REPORT`` carrier — a ``process_message`` turn, a
+        report-injection fallback task, a continuation row. Reading
+        "no PROCESS_REPORT carrier" as "nothing can deliver to me" is
+        the false-positive class behind anomaly ``a370b036`` (the
+        wedge-notice false positives on root ``77ddcb9f``,
+        2026-11-21→22): the wedge fired on a parent that still had a
+        live delivery row.
+
+        "Live" = ``status IN ('pending', 'running')`` — the SAME
+        vocabulary as the carrier helper (PAUSED is NOT live: a
+        paused task row cannot deliver on its own).
+
+        Args:
+            instance_id: The instance ID whose live task rows are
+                enumerated.
+
+        Returns:
+            List of live Task rows (possibly empty).
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(Task)
+                .where(Task.instance_id == instance_id)
+                .where(
+                    Task.status.in_([
+                        TaskStatus.PENDING.value,
+                        TaskStatus.RUNNING.value,
+                    ])
+                )
+                .order_by(col(Task.created_at).desc())
+            )
+            return list(db_session.exec(stmt))
+
     def child_has_recent_heartbeat(
         self,
         instance_id: str,
