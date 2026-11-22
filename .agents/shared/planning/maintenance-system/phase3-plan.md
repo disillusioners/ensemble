@@ -27,7 +27,7 @@
 
 ## Preconditions & dependencies
 
-- **Upstream:** Phase 2 registers the six lane skills and the `instance` category; each lane here is the body behind one registered skill. Lane skill names are fixed by Phase 2: `lane-disk-sweep`, `lane-pok-sweep`, `lane-skill-check`, `lane-abnormality-check`, `lane-metrics-watch`.
+- **Upstream:** Phase 2 registers the six lane skills and grants the FOUR LITERAL tool names (BR-8: `spawn_instance`, `send_message`, `subtree_messages`, `subtree_status`; deny byte-unchanged — NOT the whole `"instance"` category); each lane here is the body behind one registered skill. Lane skill names are fixed by Phase 2: `lane-disk-sweep`, `lane-pok-sweep`, `lane-skill-check`, `lane-abnormality-check`, `lane-metrics-watch`.
 - **Downstream:** Phase 4 consumes each lane's result block into the receipt. Phase 5 (sibling) owns test pins.
 - **Parallelizable-with:** Phase 4 (receipt schema) — agree on the result-block fields below. Lanes are mutually independent (different substrates); each is dispatched as its own worker child with its own skill (R4).
 - **Base:** worktree `/home/nea/ensemble-src-wt-maintsys`, branch `feature/central-maintenance-system`, base `origin/latest @ 1b9797ab7`. NEVER operate from `/home/nea/ensemble-src`.
@@ -45,7 +45,7 @@
 
 ---
 
-## Binding requirements (architect addendum §7 — BR-11..BR-14)
+## Binding requirements (architect addendum §7 — BR-11..BR-15)
 
 Each BR below is a labeled, grep-verifiable block carrying its operative text. The addendum stays as the verdict record.
 
@@ -53,6 +53,7 @@ Each BR below is a labeled, grep-verifiable block carrying its operative text. T
 - **BR-12** Lane-status mapping table (P2 T2.4): child `ERROR` ⇒ `failed`; silent-past-deadline ⇒ `degraded` + `[incomplete]`; `COMPLETED` ⇒ `ok|degraded` per its result block.
 - **BR-13** Report-writer ladder (pre-decided): L0 dispatch, write order run→receipt→INDEX last · L1 crash/wedge ⇒ ONE fresh minimal-stub writer (no skill load) · L2 ⇒ ONE bare worker child, no load_skill, skeleton all-failed + best-effort receipt/INDEX · L3 accepted documented reportless terminal, surfaced by BR-15. The seat never writes (PD-6 intact). DP-1 ruling row (verbatim, lane leader 2026-11-22, ACCEPTED): "BR-13 L3 accepts a surfaced, documented reportless week when both writer rungs fail. Rationale: failure-isolation contract = a lane failure never kills the report; double independent writer failure is beyond contract; BR-15 ensures the residual is surfaced (detector + orphan listing), never silent."
 - **BR-14** run_id single authority = the report-writer child. Carry a `run_token` in the dispatch task; re-dispatches reuse it (INDEX dedup survives re-mints). The venv interpreter and bash fallback are named in P2/P4 (BR-14).
+- **BR-15** Orchestrator-death backstop (surface-only; P3 landing = Lane 4 orphan listing): lane 4 lists NON-TERMINAL instances with a maintenancer parent via the existing `instance_read` seat and surfaces them (route_to_lane for audited cleanup). The reportless-week DETECTOR half of BR-15 lands in P1 T1.4 (boot guard: most-recent fire produced a `run-*.md`? miss ⇒ report_anomaly/board notice — never author, never self-heal, never re-fire). P2 carries the authoritative ladder text (BR-13); P3 is the summary.
 
 ---
 
@@ -61,17 +62,7 @@ Each BR below is a labeled, grep-verifiable block carrying its operative text. T
 Every lane follows **measure → act → report** and returns this **per-lane result block** (consumed by P4's receipt):
 
 ```
-lane: <lane-disk-sweep | lane-pok-sweep | lane-skill-check | lane-abnormality-check | lane-metrics-watch>
-status: ok | degraded | failed
-measured_at: <ISO-8601 UTC>
-summary: <one-line outcome>
-metrics: { <lane-specific key>: <value> }        # bytes/inodes for disk; counts for others
-actions_taken: [ <idempotent action ids or "none"> ]
-recommendations:
-  auto_fix_now: [ ... ]        # class 1 — safe, bounded, in-lane
-  needs_emperor_word: [ ... ]  # class 2 — needs user decision
-  route_to_lane: [ ... ]       # class 3 — another lane/owner owns the fix
-evidence_paths: [ <absolute file paths> ]        # NEVER inline artifacts (4000-char cap)
+(CANONICAL SCHEMA — frozen in decisions.md PD-4/PD-4a; this block is CITED BY REFERENCE from there and must never diverge. Field set: lane, status ok|degraded|failed, measured_at ISO-8601 UTC, summary, metrics {lane-specific; disk = bytes_reclaimed AND inodes_reclaimed both required}, actions_taken [ids|"none"], recommendations {auto_fix_now / needs_emperor_word / route_to_lane}, evidence_paths [absolute paths — never inline, 4000-char cap]. The full fenced form lives ONLY in decisions.md PD-4a.)
 ```
 
 - **status semantics:** `ok` = ran clean; `degraded` = partial (some sub-check failed but result produced); `failed` = lane could not produce a result. A failing lane NEVER blocks the report (R4).
@@ -87,7 +78,7 @@ evidence_paths: [ <absolute file paths> ]        # NEVER inline artifacts (4000-
 - Baseline: `.agents/shared/planning/maintenance-system/disk-lane-baseline-2026-11-18.md` — round-2 freed ~60 GB bytes + ~2.32M inodes; `/tmp` was ~86.6 GB / 3.20M entries (~51% of all used inodes) (lines 7-8).
 - Consumer-class table (lines 10-24): lane-scratch-trees, full-repo base-extract clones, mktemp-trees, shakedown-fleet-*, pytest-of-nea (newest-3+current kept), _MEI* PyInstaller dirs, skillfix* (KEPT — paused incident), node-compile-cache, cn-review2-BSntpd (KEPT — live lane cwd), protected set (NEVER: 9router* user-owned, v0*sidecars-preserved, systemd/snap-private, .X11-unix).
 - Fence recipe (lines 41-45): (1) recency `find <p> -newermt <now-48h> -print -quit` → delete only zero-hit; (2) open-by-process `/proc/*/fd` + cwd/exe/root readlink sweep immediately BEFORE each rm batch; (3) evidence-pointer grep of `/tmp/<name>` across `data/evidence/` + `.agents/` + `docs/` → protect-list; (4) worktrees: HEAD ancestor-of origin/latest AND porcelain-clean AND zero /proc refs AND not in a live commission; dirt = sidecar-rescue or keep+flag.
-- hbk classes (measured 2026-11-22, NOT in the 2026-11-18 table — add as a class-family): `ensemble-hbk-err.*` ~1,746 EMPTY · `ensemble-hbk-verify.*` ~4,721 (297 POPULATED with diagnostics = RETENTION, never blind-delete) · `ensemble-hbk-velapsed.*` ~4,427 EMPTY · legacy `ensemble-hbk-verify.<pid>` — ≈10,894 files total. Root cause = 3 mktemp calls at `scripts/upgrade/lib.sh` SOURCE time (err:5939/verify:5995/velapsed:6032, shipped v0.31.18; readers use `-s` so empty-by-design). Sibling fix lane stops minting; our lane sweeps accumulated + recurring.
+- hbk classes (measured 2026-11-22, NOT in the 2026-11-18 table — add as a class-family): `ensemble-hbk-err.*` ~1,746 EMPTY · `ensemble-hbk-verify.*` ~4,721 (297 POPULATED with diagnostics = RETENTION, never blind-delete) · `ensemble-hbk-velapsed.*` ~4,427 EMPTY · legacy `ensemble-hbk-verify.<pid>` — ≈10,894 files total **(DATED SNAPSHOT — the plan SELF-DECLARES re-measure: figures are planning-time evidence, never constants; each run re-measures live before acting — a 2026-11-22 live re-read already drifted to ~11,591, confirming this rule)**. Root cause = 3 mktemp calls at `scripts/upgrade/lib.sh` SOURCE time (err:5939/verify:5995/velapsed:6032, shipped v0.31.18; readers use `-s` so empty-by-design). Sibling fix lane stops minting; our lane sweeps accumulated + recurring.
 
 ### Weekly procedure
 1. **Measure:** `df` bytes + `df -i` inodes BEFORE; enumerate `/tmp` consumer classes; count hbk classes (empty vs populated).
@@ -171,7 +162,7 @@ evidence_paths: [ <absolute file paths> ]        # NEVER inline artifacts (4000-
 - `maintenance_runs` history as signal: interrupted row's `completed_at` = daemon death timestamp; boots <60s leave no row; skip-streak WARNINGs = starvation telemetry. `kind` vocabulary `auto|manual_dry_run|manual_execute` (`daemon/repositories/maintenance_runs/models.py:11,105-107`).
 
 ### Weekly procedure
-1. **Measure** (read-only): anomaly clusters in the weekly window by severity (`max_severity`), repeat incidents (`report_count`), unresolved (`board_item_id` null); old-tier `maintenance_runs` health — interrupted rows, skip-streak WARNINGs, boots with no row.
+1. **Measure** (read-only): anomaly clusters in the weekly window by severity (`max_severity`), repeat incidents (`report_count`), unresolved (`board_item_id` null); old-tier `maintenance_runs` health — interrupted rows, skip-streak WARNINGs, boots with no row. **BR-15 orphan listing (this lane is its P3 landing site):** list NON-TERMINAL instances whose parent is a maintenancer instance (orphaned run children — stuck lane workers) via the existing `instance_read` seat; surface them in the result block (route_to_lane for wedged-child cleanup via the audited `instance_terminate`).
 2. **Act:** none in-lane — classify anomalies; flag starvation telemetry (the old tier's idle-only starvation class — 500 skips, 0 executions — is a regression PIN for P5 sibling, not re-litigated here).
 3. **Report:** cluster counts by severity, top repeat incidents, old-tier health signals, result block.
 

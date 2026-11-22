@@ -5,6 +5,8 @@
 **Method:** 4 dispatched validation workers (area fan-out: trigger-chain+pin / seat-privilege / failure-isolation / FE) + direct read-only verification of staging facts (Focus F). `DEGRADED — skill bank miss` (resilience-/security-/structural-design absent from the project bank; manual design briefs embedded). One worker wedge → terminated + re-dispatched once (escape valve); anomaly `386328f8`.
 **Standing verdict:** **NO BLOCK.** The architecture is sound; every HARDEN below is a small, buildable delta. Load-bearing 🔴s: three plan-internal contradictions/omissions on the trigger chain (BR-1..BR-3), the report-writer ladder undecided (BR-13), run_id dual-authority (BR-14), artifact root unpinned (BR-16).
 
+> **POST-FOLD READER NOTE (2026-11-22, approver iteration-001):** this record predates the fold commits — several in-doc plan line anchors (§1 A3, §4 gaps, §7 BR-16, §10) now point at shifted lines. Resolve every reference by TASK-ID against the carrying phase docs: A3 ⇒ `phase1-plan.md` T1.4/AC4 · §4 gaps ⇒ `phase2-plan.md` T2.4 · BR-16 ⇒ `phase4-plan.md` Task 4.8 · §10 DP-1 ⇒ `decisions.md` §A (ACCEPTED). The phase docs + decisions.md are the single source of truth; this file is the verdict record.
+
 ---
 
 ## §0 Verdict table
@@ -71,7 +73,7 @@ E1/E2/E4 SOUND (evidence in §0). E3 HARDEN — binding contract (BR-17/BR-18): 
 
 ## §6 Focus F — staging/rebase (SOUND — facts verified in-worktree)
 
-`1b9797ab7` tree == `v0.31.26` tag tree (both `6be5ada4c`, diff empty) ✔ · `v0.31.27` FREE at verification time ✔ (engine-lane release-B staging was dispatched ~05:58Z and may take it — R7's next-free-slot + rebase-onto-staged-`source_commit` clause covers this exactly) · drift `1b9797ab7..86e196576` = 82 commits, **zero** `frontend/` files (FE stacking clean; `git diff 1b9797ab7 HEAD -- frontend/` also empty) · upstream DELETES `tests/unit/test_scheduler_deferred_delivery_pin.py` — reconcile with the BR-7 keep-green list AT REBASE TIME (the pin may simply vanish; the other two scheduler pin files persist) · our release stacks cleanly on v0.31.26 whether it promotes before or after our staging (identical base tree; promote order is ceremony territory, out of lane scope). BR-20 binds the re-check discipline.
+`1b9797ab7` tree == `v0.31.26` tag tree (both `6be5ada4c`, diff empty) ✔ · `v0.31.27` FREE at verification time ✔ (engine-lane release-B staging was dispatched ~05:58Z and may take it — R7's next-free-slot + rebase-onto-staged-`source_commit` clause covers this exactly) · drift `1b9797ab7..86e196576` = 82 commits, **zero** `frontend/` files (FE stacking clean; `git diff 1b9797ab7 HEAD -- frontend/` also empty) · *[CORRECTED 2026-11-22, approver iteration-001: upstream does NOT delete `tests/unit/test_scheduler_deferred_delivery_pin.py` — the file is PRESENT at `86e196576` and at `origin/latest` (`8894f86a`); the observed diff removed one line inside it. The BR-7 obligation is therefore unconditional keep-green of a surviving pin.]* · our release stacks cleanly on v0.31.26 whether it promotes before or after our staging (identical base tree; promote order is ceremony territory, out of lane scope). BR-20 binds the re-check discipline.
 
 ---
 
@@ -86,7 +88,7 @@ E1/E2/E4 SOUND (evidence in §0). E3 HARDEN — binding contract (BR-17/BR-18): 
 
 **No-idle pin (P5)**
 - **BR-6** Structural leg = AST (docstrings/comments excluded) over exactly `daemon/sources/adapters/scheduler.py`, `daemon/services/maintenance_schedule_knobs.py`, `daemon/repositories/source/maintenance_seed.py`, `daemon/manager.py`; assert no reference resolving to `JOB_IDLE_POLICIES`/`IdlePolicy`/`_is_idle`. Behavioral leg per T5.1. One mutation (idle-gate insertion in the chain branch) must RED both legs. ONE canonical predicate string — P1 T1.5 is the single source; AC5 and P5 T5.1 cite it VERBATIM (predicate-ledger convention; three paraphrases today).
-- **BR-7** Census/pin hygiene — if the optional UN_GATED backstop lands: update `test_maintenance_idle_starvation.py:113` set-equality AND `:172` un_gated-count. Add to P5 AC2: existing scheduler pins stay green after T1.3 (`test_scheduler_adapter.py`, `test_scheduler_deferred_mechanism_probe.py`; `test_scheduler_deferred_delivery_pin.py` until the rebase deletes it).
+- **BR-7** Census/pin hygiene — if the optional UN_GATED backstop lands: update `test_maintenance_idle_starvation.py:113` set-equality AND `:172` un_gated-count. Add to P5 AC2: existing scheduler pins stay green after T1.3 (`tests/test_scheduler_adapter.py`, `tests/unit/test_scheduler_deferred_mechanism_probe.py`; `tests/unit/test_scheduler_deferred_delivery_pin.py`). *[CORRECTED 2026-11-22, approver iteration-001: the deferred-delivery pin SURVIVES upstream — present at `86e196576` and at tip `8894f86a`; no deletion exists. The obligation is stricter: unconditional keep-green. The "until the rebase deletes it" clause is void.]*
 
 **Seat (P2)**
 - **BR-8** Grant literal tool names, NOT the `"instance"` category: allow += `spawn_instance`, `send_message`, `subtree_messages`, `subtree_status`; deny byte-unchanged; omit `terminate_instance`/`pause_instance`/`resume_instance`/`set_instance_tunable`/council quartet/`list_instances`/`get_instance_info` (fleet reads already held via `instance_read`; audited kill already held via `instance_ops`). Correct T2.1's premise (seat already holds `instance_read`+`instance_ops`).
@@ -108,7 +110,7 @@ E1/E2/E4 SOUND (evidence in §0). E3 HARDEN — binding contract (BR-17/BR-18): 
 - **BR-19** Anchor corrections in P4 FE tasks: TWO conditional appends (Database `app.ts:797` — no idempotence guard; Maintenance `:842` — route-keyed); `dbUpdateIdx` resolves to the FIRST (Database); static Report sits after Metrics (:596) so `metricsIdx < reportIdx < dbUpdateIdx` holds; extend the three verified spec files.
 
 **Staging (P5)**
-- **BR-20** At tag time (binding, per R7): re-check the free slot (`v0.31.27` free at addendum time; engine-lane release-B may take it ⇒ next free slot + rebase onto the staged `source_commit`); drift-merge/rebase onto `origin/latest` (currently `86e196576`, daemon-only, deletes `test_scheduler_deferred_delivery_pin.py` — reconcile the BR-7 keep-green list at that moment); FE stacking proven clean (zero FE delta base→HEAD and base→upstream).
+- **BR-20** At tag time (binding, per R7): re-check the free slot (`v0.31.27` free at addendum time; engine-lane release-B may take it ⇒ next free slot + rebase onto the staged `source_commit`); drift-merge/rebase onto `origin/latest` (was `86e196576` at addendum time, `8894f86a` by iteration-001 — daemon-only; *[CORRECTED 2026-11-22: `test_scheduler_deferred_delivery_pin.py` SURVIVES upstream — reconcile the BR-7 keep-green list unconditionally at that moment, no deletion expected]*); FE stacking proven clean (zero FE delta base→HEAD and base→upstream).
 
 ---
 
@@ -129,6 +131,8 @@ E1/E2/E4 SOUND (evidence in §0). E3 HARDEN — binding contract (BR-17/BR-18): 
 5. **The PD-6 scoped-write fallback is hereby pre-decided** as BR-13 L2 (bare worker child; seat still never writes). The plan said "do not silently pick it" — this addendum picks it LOUDLY; veto reopens it.
 
 ## §10 Decisions pending (leader/user)
+
+> **STATUS UPDATE 2026-11-22 (approver iteration-001):** DP-1 is **ACCEPTED** (lane leader, 2026-11-22) — the authoritative row lives in `decisions.md` §A. The text below is retained as the original pending-record.
 
 - **DP-1 (veto window):** BR-13 L3 — an accepted, documented, surfaced REPORTLESS week when both writer rungs fail. Consistent with the "surface, not self-heal" posture; if a reportless week is unacceptable, BR-15 escalates to a stub-authoring backstop (not recommended — it re-opens PD-6).
 

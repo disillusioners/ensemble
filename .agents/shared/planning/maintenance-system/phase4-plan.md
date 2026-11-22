@@ -66,18 +66,18 @@ Each BR below is a labeled, grep-verifiable block carrying its operative text. T
   - **FALLBACK (BINDING rung in the skill body):** if the import is unavailable in the executing context, bash format-spec mint `ckpt-$(date -u +%Y%m%d_%H%M%S%6N)-$(openssl rand -hex 4)` matching the canonical regex — drift-risk-bounded (regex-pinned by the P5 run_id shape pin already listed in the Verification plan). Rows carry the run_id.
   - **INDEX.md dedup by run_id covers both paths (and re-dispatches via run_token)** — already in Task 4.4; keep unchanged.
   Use `.md` only — `.log` is gitignored.
-- **Touch points:** convention documented in `run-report-writer` skill body (Phase 2 artifact) and here; no new code file in-repo for the path itself.
+- **Touch points:** **SPEC-ONLY — the implementation surface is P2's `run-report-writer.md` skill body (owned by P2 T2.5); P4 edits NO file.** The path convention is documented here as spec.
 - **Verification:** path uses `.md`; run_id matches the helper's regex; INDEX is chronological by run_id prefix (lexicographic = chronological, per helper docstring :36-37).
 - **Agent hint:** `doc-writer` / `worker` (report writer child).
 
 ### Task 4.2 — Report body format (`run-<run_id>.md`)
 - **Description:** Human-readable: header (run_id, trigger type, start/end timestamps, overall status), one section per lane with its status (ok/degraded/failed) + summary + metrics + evidence paths, a Recommendations section grouped into three classes (auto-fix-now / needs-Emperor-word / route-to-lane), and a `### Gaps` section for `[incomplete]` lanes (fan-in valve precedent, workflow.md:42). Report is ALWAYS written even on total lane failure (R4) — in that case all lanes show `failed` and the report still exists.
-- **Touch points:** `run-report-writer` skill body (Phase 2); report template documented here.
+- **Touch points:** **SPEC-ONLY — implementation surface is P2's `run-report-writer.md` (owned by T2.5); P4 edits NO file.** Report template documented here as spec.
 - **Verification:** report contains all five lane sections + three recommendation classes + gaps; total-failure case still produces a report.
 - **Agent hint:** `worker` (report writer child, absolute paths).
 
 ### Task 4.3 — Receipt schema (`receipt-<run_id>.md`)
-- **Description:** Machine-readable fields, one per line or a fenced YAML block:
+- **Description:** Machine-readable fields, one per line or a fenced YAML block. **The `lanes:` entries embed the PD-4a CANONICAL RESULT BLOCK verbatim (frozen in `decisions.md` PD-4/PD-4a — full field set: `lane`, `status`, `measured_at`, `summary`, `metrics`, `actions_taken`, `recommendations` {three classes}, `evidence_paths`; cited by reference here, never re-embedded divergently — dropping `measured_at` or `actions_taken` from any lane entry is a schema violation).** Receipt header fields:
   ```
   run_id: <ckpt-...>
   trigger_type: scheduled | manual
@@ -85,25 +85,20 @@ Each BR below is a labeled, grep-verifiable block carrying its operative text. T
   ended_at: <ISO-8601 UTC>
   overall_status: ok | degraded | failed
   lanes:
-    - lane: lane-disk-sweep
-      status: ok | degraded | failed
-      summary: <one line>
-      metrics: { bytes_reclaimed: N, inodes_reclaimed: N, ... }   # disk lane; others lane-specific
-      evidence_paths: [ <absolute paths> ]
-    - ... (one per lane; Phase 3 common result block)
+    - <PD-4a canonical block, one per lane (all five present)>
   recommendations:
     auto_fix_now: [ ... ]
     needs_emperor_word: [ ... ]
     route_to_lane: [ ... ]
   ```
-  `bytes_reclaimed` AND `inodes_reclaimed` are required for the disk lane ("where applicable"); other lanes carry their own metrics keys. `trigger_type` is `scheduled` for the weekly chain, `manual` for the one-shot manual path (D-D).
-- **Touch points:** `run-report-writer` skill body; schema documented here.
+  `bytes_reclaimed` AND `inodes_reclaimed` are required inside the disk lane's `metrics` ("where applicable"); other lanes carry their own metrics keys. `trigger_type` is `scheduled` for the weekly chain, `manual` for the one-shot manual path (D-D).
+- **Touch points:** **SPEC-ONLY — implementation surface is P2's `run-report-writer.md` (owned by T2.5); P4 edits NO file.** Receipt schema documented here as spec (PD-4a reference).
 - **Verification:** receipt parses; all five lanes present with statuses; disk lane has both bytes+inodes; three recommendation classes present; trigger_type in the closed set.
 - **Agent hint:** `worker` (report writer child).
 
 ### Task 4.4 — INDEX.md format (BR-16b)
 - **Description:** Chronological table, newest first or last (state the choice), columns: `run_id | date | trigger_type | overall_status | report_path | receipt_path`. Append-only; one row per run; ordered by run_id prefix (lexicographic = chronological). **BR-16b:** INDEX appends via `write_file(append=True)` (in-process lock + tail read-back, `daemon/tools/filesystem.py:1570-1590`) — NEVER `bash >>`. Rows carry the run_id. Idempotence: re-running a run_id must not duplicate its INDEX row (dedup by run_id; covers re-dispatches via the run_token).
-- **Touch points:** `run-report-writer` skill body; format documented here.
+- **Touch points:** **SPEC-ONLY — implementation surface is P2's `run-report-writer.md` (owned by T2.5); P4 edits NO file.** INDEX format documented here as spec.
 - **Verification:** INDEX rows sorted; each run_id appears once; paths are absolute or repo-relative under `.agents/maintenancer/RESULTS/`; no `bash >>` in the writer skill; append uses the locked helper.
 - **Agent hint:** `worker` (report writer child).
 
@@ -114,7 +109,7 @@ Each BR below is a labeled, grep-verifiable block carrying its operative text. T
 - **Agent hint:** `doc-writer` (record only).
 
 ### Task 4.6 — D-D manual trigger: canonical path + invocation + receipt (trigger_type derivation owned here)
-- **Description:** Canonical path = scheduler ONE-SHOT at `run_at=now` targeting `maintenancer`, same dispatch as the weekly chain. Ari invokes via the `task_schedule` tool surface (`daemon/tools/scheduling.py:165-189`): `task_schedule(label=..., message=..., when=<now ISO 8601>, recurrence="once", agent_id="maintenancer")`. Capability VERIFIED in-repo: `TaskScheduleInput` supports `recurrence="once"` with ISO-8601 `when` (`:93-94`), `agent_id` targeting (`:98,175`), and past/near-now one-shots are handled — the adapter fires them immediately within the lateness cap or skips, and the operator reads truth from executions history (`daemon/services/scheduling_service.py:491-493`). **trigger_type marker — ONE owner (planner ruling): P4 owns the exact field spec; P1 cross-references this derivation without redefining it.** Derivation (no new field): `config.chain` present ⇒ `scheduled`; `config.chain` absent + `creator_instance_id` present ⇒ `manual`. The chain row is code-seeded so it always carries `chain`; manual `task_schedule` rows never do (addendum A5(a) proves they cannot). The report writer reads the dispatching row's config to derive `trigger_type`. Fallback: direct `send_message` to a maintenancer instance (documented, but NOT canonical). Trigger mechanics detail lives in `phase1-plan.md (sibling)` — cross-ref only.
+- **Description:** Canonical path = scheduler ONE-SHOT at `run_at=now` targeting `maintenancer`, same dispatch as the weekly chain. Ari invokes via the `task_schedule` tool surface (`daemon/tools/scheduling.py:165-189`): `task_schedule(label=..., message=..., when=<now ISO 8601>, recurrence="once", agent_id="maintenancer")`. Capability VERIFIED in-repo: `TaskScheduleInput` supports `recurrence="once"` with ISO-8601 `when` (`:93-94`), `agent_id` targeting (`:98,175`), and past/near-now one-shots are handled — the adapter fires them immediately within the lateness cap or skips, and the operator reads truth from executions history (`daemon/services/scheduling_service.py:491-493`). **trigger_type marker — ONE owner (planner ruling): P4 owns the exact field spec; P1 cross-references this derivation without redefining it.** Derivation (no new field): `config.chain` present ⇒ `scheduled`; `config.chain` absent + `creator_instance_id` present ⇒ `manual`. The chain row is code-seeded so it always carries `chain`; manual `task_schedule` rows never do (addendum A5(a) proves they cannot). The report writer reads the dispatching row's config to derive `trigger_type`. **REST-fallback caveat (documented limitation):** REST-created rows carry NO `creator_instance_id` (`scheduling_service.py:818-824` — creator capture is tool-path-only), so the `manual` branch of the derivation is defined for task_schedule-origin rows; REST-origin manual runs are outside the canonical path (documented, not supported by the derivation — surface via the fallback `send_message` note instead). Fallback: direct `send_message` to a maintenancer instance (documented, but NOT canonical). Trigger mechanics detail lives in `phase1-plan.md (sibling)` — cross-ref only.
 - **Touch points:** this plan (exact invocation + receipt + derivation spec); `phase1-plan.md (sibling)` cross-ref for mechanics; Ari's invocation documented as a runbook note (no Ari prompt edit — out of lane).
 - **Verification:** invocation uses recurrence=once + agent_id=maintenancer; receipt trigger_type derived per the rule above (config.chain present ⇒ scheduled; absent + creator_instance_id present ⇒ manual); fallback documented; no contradiction with scheduling.py (verified above).
 - **Agent hint:** `doc-writer` (runbook note); trigger mechanics are sibling Phase 1.
