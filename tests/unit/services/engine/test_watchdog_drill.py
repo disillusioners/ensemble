@@ -30,7 +30,7 @@ from sqlmodel.pool import StaticPool
 from daemon.repositories.engine.repository import EngineRepository
 from daemon.services.engine.engine import EngineService
 from daemon.services.engine.registry import EngineRegistry
-from daemon.services.engine.watchdog import EngineWatchdog
+from daemon.services.engine.watchdog import EngineWatchdog, make_direct_db_rearm
 
 
 class _Cfg:
@@ -179,3 +179,90 @@ async def test_stall_predicate_removed_is_red():
     # The real predicate WOULD have fired on the same sample.
     real = EngineWatchdog(svc, _Cfg())
     assert real.is_stalled(wd.sample()) is True
+
+
+# ---------------------------------------------------------------------------
+# S-2 — the watchdog re-arm predicate pin (Engine Arc P7)
+# ---------------------------------------------------------------------------
+# The predicate under test is the REAL one at
+# ``daemon/services/engine/watchdog.py:63`` (inside ``make_direct_db_rearm``):
+#
+#     if getattr(job, "dead", 0) and not getattr(job, "last_outcome", None):
+#
+# INTENT (documented at the pin, verbatim-style): the rearm targets ONLY the
+# born-dead-with-no-stamp shape (``dead=1`` AND ``last_outcome`` falsy).  The
+# second conjunct is INTENTIONAL, not an oversight: an F1-escalated row
+# (``dead=1`` AND ``last_outcome="SKIPPED_DEP_MISSING"``, per the escalation
+# path at ``daemon/services/engine/execution.py:270-297``) carries a terminal
+# outcome and is owned by the escalation/backoff path — NOT by the watchdog.
+# Re-arming it here would race the escalation owner, so the watchdog must leave
+# it dead.
+#
+# Mutation proof (disposable extract, ``git archive HEAD | tar -x -C /tmp``):
+# drop the ``not getattr(job, "last_outcome", None)`` conjunct from
+# ``watchdog.py:63`` ⇒ ``test_f1_escalated_row_is_not_rearmed`` REDs (the
+# escalated row gets stamped).  Restore = discard the extract.
+
+
+class _FakeEngineJob:
+    """Minimal stand-in for an ``EngineJob`` row (only the fields the predicate reads)."""
+
+    def __init__(self, job_id, dead, last_outcome):
+        self.id = job_id
+        self.dead = dead
+        self.last_outcome = last_outcome
+
+
+class _FakeEngineRepository:
+    """Tiny fake repository: ``list_jobs`` + ``stamp_job_outcome``, recording stamps."""
+
+    def __init__(self, jobs):
+        self._jobs = list(jobs)
+        self.stamps = []
+
+    def list_jobs(self):
+        return list(self._jobs)
+
+    def stamp_job_outcome(self, job_id, *, dead=None, **_kwargs):
+        self.stamps.append((str(job_id), dead))
+        for job in self._jobs:
+            if str(job.id) == str(job_id) and dead is not None:
+                job.dead = dead
+        return 1
+
+
+class TestDirectDbRearmPredicate:
+    """Pin the REAL ``make_direct_db_rearm`` predicate (``watchdog.py:63``)."""
+
+    def test_born_dead_no_stamp_is_rearmed(self):
+        """(a) dead=1 + last_outcome=None → re-armed (stamp dead=0), returns 1."""
+        repo = _FakeEngineRepository([_FakeEngineJob("j1", dead=1, last_outcome=None)])
+        rearmed = make_direct_db_rearm(repo)({})
+        assert rearmed == 1
+        assert repo.stamps == [("j1", 0)]
+        assert repo._jobs[0].dead == 0
+
+    def test_f1_escalated_row_is_not_rearmed(self):
+        """(b) dead=1 + last_outcome="SKIPPED_DEP_MISSING" → NOT re-armed.
+
+        The exclusion is INTENTIONAL — see the module comment block above.
+        This is the F1-escalated shape (``execution.py:270-297``): the row
+        carries a terminal outcome and is owned by the escalation/backoff
+        path, not the watchdog.  Mutation: removing the ``not last_outcome``
+        conjunct makes this leg RED.
+        """
+        repo = _FakeEngineRepository([
+            _FakeEngineJob("j2", dead=1, last_outcome="SKIPPED_DEP_MISSING"),
+        ])
+        rearmed = make_direct_db_rearm(repo)({})
+        assert rearmed == 0
+        assert repo.stamps == []
+        assert repo._jobs[0].dead == 1
+
+    def test_alive_row_is_untouched(self):
+        """(c) dead=0 + last_outcome=None → untouched (no stamp), returns 0."""
+        repo = _FakeEngineRepository([_FakeEngineJob("j3", dead=0, last_outcome=None)])
+        rearmed = make_direct_db_rearm(repo)({})
+        assert rearmed == 0
+        assert repo.stamps == []
+        assert repo._jobs[0].dead == 0
