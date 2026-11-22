@@ -49,7 +49,7 @@
 
 Each BR below is a labeled, grep-verifiable block carrying its operative text. The addendum stays as the verdict record.
 
-- **BR-11** Event-driven lane deadline — a lane is `failed-timeout` when a parent wake carries `source=system:watchdog` (`daemon/services/waiting_children_watchdog.py:627`, ≤3600s threshold+cadence) or `system=long-tool-nudge` (`daemon/services/long_tool_nudge.py:1471-1475`) naming that child; apply the valve once, else `[incomplete]`, then proceed. Deadline covers the initial dispatch AND its single re-dispatch. Report-writer fires on lane resolution OR global deadline (same wake mechanism bounds the writer wait ≈2h). NO polling. Loop-breaker (threshold 3, `daemon/config.py:6648`) and bash 1800s cap (`daemon/tools/bash.py:1283`) already bound the two likeliest wedge shapes.
+- **BR-11** Event-driven lane deadline — a lane is `failed-timeout` when a parent wake carries `source=system:watchdog` (`daemon/services/waiting_children_watchdog.py:627`, ≤3600s threshold+cadence) or `source=system:long-tool-nudge` (`daemon/services/long_tool_nudge.py:1471-1475`) naming that child; apply the valve once, else `[incomplete]`, then proceed. Deadline covers the initial dispatch AND its single re-dispatch. Report-writer fires on lane resolution OR global deadline (same wake mechanism bounds the writer wait ≈2h). NO polling. Loop-breaker (threshold 3, `daemon/config.py:6648`) and bash 1800s cap (`daemon/tools/bash.py:1283`) already bound the two likeliest wedge shapes.
 - **BR-12** Lane-status mapping table (P2 T2.4): child `ERROR` ⇒ `failed`; silent-past-deadline ⇒ `degraded` + `[incomplete]`; `COMPLETED` ⇒ `ok|degraded` per its result block.
 - **BR-13** Report-writer ladder (pre-decided): L0 dispatch, write order run→receipt→INDEX last · L1 crash/wedge ⇒ ONE fresh minimal-stub writer (no skill load) · L2 ⇒ ONE bare worker child, no load_skill, skeleton all-failed + best-effort receipt/INDEX · L3 accepted documented reportless terminal, surfaced by BR-15. The seat never writes (PD-6 intact). DP-1 ruling row (verbatim, lane leader 2026-11-22, ACCEPTED): "BR-13 L3 accepts a surfaced, documented reportless week when both writer rungs fail. Rationale: failure-isolation contract = a lane failure never kills the report; double independent writer failure is beyond contract; BR-15 ensures the residual is surfaced (detector + orphan listing), never silent."
 - **BR-14** run_id single authority = the report-writer child. Carry a `run_token` in the dispatch task; re-dispatches reuse it (INDEX dedup survives re-mints). The venv interpreter and bash fallback are named in P2/P4 (BR-14).
@@ -105,7 +105,7 @@ Every lane follows **measure → act → report** and returns this **per-lane re
 
 ### Substrate (verified)
 - `.agents/shared/planning/pok-sweep/` (10 files): `census-active-2026-11-18.json/.md`, `dual-key-census-2026-11-18.md` + `dual-key-census-gen.py`, `cluster-proposals-2026-11-18.md`, `family-cap-consolidation-2026-11-18.md` + `_laneB_generate.py`, `live-active-2026-11-18-post-phase1.json`, `phase1-completion-scan-2026-11-18.md`, `phase4-recensus-2026-11-18.md`.
-- Guardrail (cluster-proposals-2026-11-18.md:12-14): archive ONLY if (a) durable fact covered by another ACTIVE row, or (b) dated snapshot whose content lives in a routed home — NEVER on age/access_count. 240-char body cap; durable-fact rubric at line 12.
+- Guardrail (cluster-proposals-2026-11-18.md:11-14 — rubric begins at :11, anchor corrected 2026-11-22): archive ONLY if (a) durable fact covered by another ACTIVE row, or (b) dated snapshot whose content lives in a routed home — NEVER on age/access_count. 240-char body cap; durable-fact rubric at line 12.
 - Do-not-re-execute ledger (family-cap-consolidation-2026-11-18.md:9,27-29): snapshot-l3 4→3 merge already executed; prompt-assent/git cap-blocked; multi-token family gating LANDED (`daemon/repositories/pok/models.py:132` pattern `^([a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*)-(\d{2})-(.+)$`); supersede is count-preserving + `pok_family_full`-exempt.
 - Constraints: `POK_FAMILY_MAX=3` (`daemon/services/pok_service.py:117`), `POK_CURATED_CAP_PER_VIEW=2` (:115), `POK_BLOCK_MAX_ENTRIES=8` (:122).
 - Open follow-ups wi-f1367551 (POK sweep) + wi-34d44806 (doctrine v2) bound scope.
@@ -116,7 +116,7 @@ Every lane follows **measure → act → report** and returns this **per-lane re
 3. **Report:** new active rows since baseline, sha mismatches, candidate clusters with COVERAGE verdict, cap-blocked families, result block.
 
 ### Safety fences applied
-- No POK writes from this lane (read-only seat via `pok` category); proposals route to PM/curator.
+- No POK writes from this lane — **the fence is PROMPT/WORKFLOW-LEVEL, not a category capability** (the `pok` category granted at meta.json:24 contains the WRITE tool `pok_upsert`; only `pok_curate` is curator-gated — `daemon/tools/_tool_registry.py:1292-1293,1951-1953`): the `lane-pok-sweep` skill body FORBIDS `pok_upsert` and `pok_curate` outright and permits `pok_query` only; proposals route to PM/curator (route_to_lane). P5 T5.5 pins the skill-body prohibition string.
 - Guardrail: never archive on age/access_count; 240-char cap; durable-fact coverage required.
 - Respect do-not-re-execute ledger — do not re-run the executed snapshot-l3 merge.
 
@@ -124,7 +124,7 @@ Every lane follows **measure → act → report** and returns this **per-lane re
 - Approved merge proposals → PM/curator (class 3). Doctrine v2 (wi-34d44806) → planner lane.
 
 ### Idempotency/limits
-- Baseline comparison is by captured sha/snapshot, not live drift; re-runs reconcile against the same committed census; no writes = naturally idempotent.
+- Baseline comparison is by captured sha/snapshot, not live drift; re-runs reconcile against the same committed census; no writes = naturally idempotent. **Fresh-listing destination (named, one writer):** the weekly fresh live listing is written by the LANE CHILD as per-run evidence under `.agents/maintenancer/RESULTS/evidence/<run_id>/live-active-<date>.json` (inside the BR-16 artifact root, under the run's evidence subpath — NOT a third top-level writer at the root; the root's top level holds only `run-*`/`receipt-*`/`INDEX.md`).
 
 ---
 
