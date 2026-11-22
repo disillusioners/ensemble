@@ -34,7 +34,7 @@ The commission is the accumulated **P7 intake (16 items)** from every phase stag
 | 13 | **§PREDICATE LEDGER attestation** | ✅ DONE — **2 DRIFTS (routed to planner)** | See §3. CS-1..CS-8 verbatim MATCH at every governing site; all 19 DELETION RECORD rows legal (12 ABSENT, 7 BRACKETED-RETAINED). CS-9 verbatim absent at 2 of 5 sites. |
 | 14 | **Ceremony — clean-checkout pack re-runs** | ✅ DONE — 8/8 PASS | See §4. Every leg run in a sha-pinned clean checkout at `4fbcf5369` with tree-identity asserted (the shared venv's editable `.pth` did **not** win the import). |
 | 15 | **Mutation recipes from disposable clones only** | ✅ DONE | Every mutation proof ran in a `git archive` extraction (`/tmp/p7w2_*`, `/tmp/p7pins_*`, `/tmp/p7s2_*`) — the live worktree was never mutated; extracts discarded after each proof. |
-| 16 | **Family regression vs TRUE base `1a74b0493`** | ✅ SCOPED LEG PASS (net-new ZERO) · ◐ whole-tree leg authorized & in flight | Scoped dual-side leg (557-node declared scope): **NET-NEW = ZERO** in both digest forms; 2 diff nodes both lane-FIXED pre-existing stale pins; HEAD-ONLY corpus 359/359 green. See §7. |
+| 16 | **Family regression vs TRUE base `1a74b0493`** | ✅ COMPLETE after one fix cycle | Leg 1 (scoped 557): NET-NEW ZERO. Leg 2 (whole-tree 40,181/leg): **1 net-new candidate** — a genuine fence violation (`projection.py:56` docstring naming the banned `action_by`/`acted_at` tokens) — **fixed family-side** (docstring reword; the audit NOT relaxed), 3× re-verified green; final net-new ZERO. Conftest blast-radius: no effect outside the family. See §7. |
 
 ---
 
@@ -115,6 +115,8 @@ All three corrections were adjudicated against **standalone evidence** (POK rule
 | `5b97654d1` | `test(event-registry): function-scoped create_event pin (GAP-15), per-site census counts, exact-alias + D5.11 from-import tightenings, D5.4 dispatch pin` |
 | `7be03a956a` | `docs(tester): P7 ledger corrections — QUARANTINE kwarg-drift row + queue_routing dispute amendment + confinement enlargement record; S-6 fence amendment on metrics_scope_cage row` |
 | `4fbcf5369` | `docs(tester): register engine-arc P1 engine/event-registry unit packs + census leg (8 registrations, mechanical counts)` |
+| `e9c79e558` | `docs(tester): P7 tester gate report + ceremony clean-checkout evidence (8/8 legs PASS, attestation 2 drifts, scoped regression net-new ZERO)` |
+| `625b808ff` | `fix(engine): P7 regression closure — projection docstring no longer names the dormant resource-monitor columns (resource-control-seam _NAME_RE fence)` |
 
 No push was performed. `daemon/` was touched by exactly ONE commit (`aefe0f475`, the authorized FixtureModule relocation: class + one `__all__` entry removed) and by no other P7 change — every other P7 edit is test code or tester documentation.
 
@@ -145,7 +147,31 @@ Accounting closure: shard sums == collected per leg (139+139+140+139 = 557 both 
 
 Neither is a net-new candidate: the family **reduced** the red set by 2.
 
-**Leg 2 — WHOLE-TREE (recipe default scope): AUTHORIZED AND IN FLIGHT.** The scoped leg certifies "no net-new across the declared 557-node scope" but **cannot** certify the session-wide `tests/conftest.py` change (the family's 2-line removal of `checkpoint_interval: 1` and `config.services.worker_poll_interval = 0.5`) — a hole a reviewer would rightly flag, given four core seams are touched. The whole-tree leg (~3058 items, ≈30 min/leg at the measured 102.7 nodes/min, inside the 90-min Tier-2 budget) was therefore authorized; it runs with the same mechanics, fence and comparator, and its verdict will be appended here. **This report's item-16 status stays OPEN until it lands.**
+**Leg 2 — WHOLE-TREE (recipe default scope): COMPLETE. 40,181 nodes per leg, 1 net-new candidate found and FIXED.**
+
+Scope: the whole `tests/` tree with the ensure.md pre-exclusion registry (each with its named compensating pin): `tests/packs/` (g7 `sys.exit(0)` collection trap — packs run via registered scripts), `tests/e2e/test_context_injection_hybrid.py` (module-import HTTP GET to a live `:8079` — pinned by the Release Gate's `e2e_workflows_ensure_test`), `tests/performance/test_message_api_cost.py` (>300 s solo — pinned by `regression_performance`). No other exclusion. Collection: BASE 40,181 node ids (41,459 items − 1,278 marker-deselected), HEAD 40,540; the BASE node set is a strict subset of HEAD (base-only 0, head-only 359 = the family's new files); the comparative run used the **same 40,181 ids on both legs** — symmetric inputs.
+
+Projection (measured-rate guard): probes serial/`-n 8`/`-n 14`/unit-heavy ⇒ pre-run projection 42.9 min/leg (advisory breach, reported not stopped, per the recipe); shard-0 re-projection 24.1 min/leg ⇒ no breach survived; actual 29.4 + 29.8 min (66 % of the 90-min budget). Parallelism `-n 14` with `--junitxml` per shard (crash-resilient capture); accounting closure per leg (8/8 shards, sums == collected, no shard death).
+
+| Leg | Collected | Passed | Failed | Errors | Skipped | Unique red ids | Wall |
+|---|---|---|---|---|---|---|---|
+| BASE `1a74b0493` | 40,181 | 39,133 | 431 | 28 | 403 | 567 | 29.4 min |
+| HEAD `4fbcf5369` | 40,181 | 39,111 | 432 | 28 | 403 | 570 | 29.8 min |
+
+Two-form comparator (LC_ALL=C pinned): GREP-FULL base-only 16 / head-only 19; **BARE-ID (canonical) base-only 10 / head-only 12**. The 7-line GREP-FULL gap is daemon LOG noise (6× symmetric `ScriptedChatModel exhausted` + 1× asyncio stray), not test failures — the form-tag trap the recipe warns about. All 22 diff node ids adjudicated on the 3× isolated sequential ladder per side:
+
+- **BASE-only (10):** 2 lane-FIXED stale pins (the settings-resolution MANAGED_KEYS 19→22 re-baseline and the confinement-pin 12→65 offender enlargement — both already classified in Leg 1); 3 pre-existing reds transitively fixed at HEAD (prompt_version_resolution sqlite insert-retry, llm_allowed_models ×2 — empty lane diffs, isolated 3/3 green at HEAD); 1 known pre-existing flake family (atomic_status, row 29); 4 composition flakes (mixed 3×, all with standing QUARANTINE rows).
+- **HEAD-only (12):** 1 **net-new candidate** (below); 1 known context-flake (atomic_dequeue, row 57); **10 composition artifacts** — 3/3 isolated PASS at HEAD, the documented shard-composition class (rows 62/156: "the lane's added test files re-balanced the greedy shard split" — exactly what happened; the row explicitly anticipates this noise).
+
+**🔴 The 1 net-new candidate — `tests/test_resource_control_seam.py::TestDormancyWriteSiteAudit::test_no_daemon_file_names_action_by_acted_at`: deterministic (3/3 FAIL isolated at HEAD, 3/3 PASS isolated at BASE), empty test-file diff, and the trigger is the family's own `daemon/services/engine/projection.py:56` — a DOCSTRING naming the dormant `action_by`/`acted_at` columns.** This violates the documented HARD fence (`test-strategy.md` §7 `_NAME_RE` dormancy fence: only `daemon/models/resource_monitor.py` may name those columns; "Engine code/tests must not introduce these names"). The production code does not functionally use the columns — the prose alone trips the token-level audit. **Adjudication: family defect, fixed family-side** (docstring reworded to stop naming the banned tokens; the audit test is NOT relaxed — negative-guard fences are never weakened). Fix + 3× re-verification recorded below.
+
+**Conftest blast-radius answer (the reason this leg was authorized): NO effect outside the engine family.** The session-wide `tests/conftest.py` change (removal of `checkpoint_interval: 1` and `config.services.worker_poll_interval = 0.5`) is the fixture half of the family's retired-knob removal; the static reader set is exactly ONE head-only family file (`test_engine_config_deadknobs.py`), and the 40,181-node empirical run attributes zero net-new failures to it. The single net-new candidate is triggered by `projection.py`'s docstring, not the conftest edit.
+
+**Census/count-pin caveat (recorded):** 37 tree files read git history; 9 red in this run — 8 symmetric pre-existing (identical BASE/HEAD counts) + 1 lane-FIXED (the adjudication pin). The three HEAD-sensitive census pins (the daemon-diff confinement pin, the MANAGED_KEYS count, and the resource-control-seam write-site audit) answer differently depending on the checked-out commit — logged as future work (§9 Q6).
+
+**Fix record (the one fix cycle of this gate):** commit `625b808ff` — `daemon/services/engine/projection.py` docstring reworded (3 lines, zero logic change; the F-3/F-11 fence-honored note now reads "no dormant resource-monitor column dims" instead of naming the banned columns). Proof: `grep -nE '\b(action_by|acted_at)\b' daemon/services/engine/projection.py` → ZERO hits, re-proved on the committed blob (`git show HEAD:… | grep -c` → 0; the audit's `rglob("*.py")` scope confirmed clean — the two `.sql` migration hits are outside it). Re-verification: `tests/test_resource_control_seam.py` **3/3 runs × 32/32 passed** (20.9/20.2/20.7 s, full env scrub, `-p no:randomly`) — including the audit node and the `:294-346` fence itself; and the P6 projection pack `tests/unit/services/engine/test_projection.py` **23/23 passed** (2.73 s), proving the docstring change disturbed nothing. **Final item-16 verdict: NET-NEW = ZERO** (scoped leg zero; whole-tree leg's single candidate fixed and re-verified; the audit test itself untouched — negative-guard fences are never weakened).
+
+**Answers to the leg's own questions (adjudicated):** (1) reword the docstring, do NOT relax the audit — executed (`625b808ff`); (2) blocking YES under item 16's zero-net-new bar — fixed; (3) no QUARANTINE row changes for the two lane-FIXED pins (both green at HEAD; row 159 remains the documentary enlargement record); (4) of the 4 flakes, three are covered by standing rows; the chart-T3 node got a new consolidated row (committed with this report).
 
 **Standing interpretability caveat (recorded for future gates).** Both diff nodes are *census/count* pins, not behaviour pins: `test_the_daemon_diff_is_confined_to_the_allowed_files` computes `git diff <LANE_BASE>..HEAD`, so its A/B outcome depends on **which commit is checked out**, not only on tree contents — a red in that class means "the pin's allowlist is stale for this commit range", never "the code regressed". That is why the ladder, not the sweep delta, decides. Logged as future work (Q6).
 
@@ -155,7 +181,7 @@ Neither is a net-new candidate: the family **reduced** the red set by 2.
 
 ## 8. Worktree state
 
-`/home/nea/ensemble-src-wt-engine-arc-p1` · branch `feature/engine-arc-phase1` · tip `4fbcf5369` · working tree clean at the registration freeze (the only post-freeze addition is this report + the ceremony evidence directory, both under `.agents/tester/RESULTS/`) · no push · no live-install contact · no daemon boot · no port bound (port 8088 untouched throughout).
+`/home/nea/ensemble-src-wt-engine-arc-p1` · branch `feature/engine-arc-phase1` · tip `625b808ff` (the fence-closure fix; the ceremony evidence was captured at `4fbcf5369`, the registration tip) · working tree clean after the final ledger/report commit · no push at any point · no live-install contact · no daemon boot · no port bound (port 8088 untouched throughout). `daemon/` was touched by exactly TWO commits, both mission-directed single-purpose edits: `aefe0f475` (FixtureModule relocation) and `625b808ff` (the docstring fence closure) — every other P7 change is test code or tester documentation.
 
 ---
 
@@ -172,7 +198,8 @@ Neither is a net-new candidate: the family **reduced** the red set by 2.
 
 ## 10. Gaps / incomplete
 
-- **Item 16 whole-tree leg (leg 2) in flight** — the scoped 557-node leg is complete with NET-NEW = ZERO; the whole-tree leg is authorized and running. Item 16's status stays OPEN until it lands.
+- **Item 16 whole-tree leg: COMPLETE** — 1 net-new candidate (the `projection.py:56` docstring fence violation) found, fixed family-side, and 3× re-verified; final net-new ZERO. The scoped 557-node leg also stands (net-new ZERO).
 - **The three unauthed cross-cutting packs** (§2, Q1) — a scope gap in the family, not a P7 failure.
 - The first attestation worker (`67eb22d6`) **wedged** mid-run — its last tool call was 01:23:57 and it produced no report (verified via `subtree_messages`: tool-call turns only, no report); it held no partial output worth keeping, so after the escape valve's single re-dispatch delivered the complete matrix (§3) it was **TERMINATED** (watchdog hang notice: 1h4m idle). Item 13 is fully evidenced by the replacement's matrix; no duplicate or conflicting attestation exists.
 - **Pack wrappers were not executed inside the regression leg** (their bare-`.venv/bin/pytest` invocation would measure the worktree instead of the clone). The registered invocations WERE executed in the ceremony (§4, 8/8 PASS with tree-identity asserted) — so wrapper correctness is evidenced by the ceremony, and the regression leg's contribution is the file-target comparison.
+- **One daemon-file fix landed post-ceremony** (the `projection.py:56` docstring reword, item 16) — the ceremony evidence was captured at `4fbcf5369`, one commit before the fix; the fix touches NO test file and NO pack scope (its verification is the 3× standalone fence run + the projection pack re-run recorded in §7).
