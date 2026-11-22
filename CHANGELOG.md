@@ -5,6 +5,14 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.35] — 2026-11-22
+
+### Fixed — Central Maintenance System live-proof cures (staged-boot v0.31.34 feedback)
+
+- Maintenancer workflow/skills hardening: dispatch-context framing, tool-family vocabulary, evidence-root pinning, and local-weekday handling (run-report writer + lane skill templates).
+- Y1 fence completed: scheduler pack scripts + router-manifest suites self-fence auth env — results now independent of ambient host environment.
+- P5B staged-boot manual-trigger proof (receipt shape verbatim @ v0.31.34) documented; provenance/results-root equivalence + schedule-knobs pins added. Zero daemon behavior change.
+
 ## [v0.31.34] — 2026-11-22
 
 ### Added — Central Maintenance System (lane `feature/central-maintenance-system`, P1–P5)
