@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.31.27] — 2026-11-22
+
+### Added — Release B (Engine Arc Phase 1): central polling/event engine + event registry, shipping DORMANT
+
+- Engine Arc Phase 1 (central polling/event engine + event registry) ships in the OBSERVER-SPEC POSTURE: observer specs registered, ZERO executables (execute_fn withheld) — shadow rows are present (registered + observing, executing nothing).
+- NO existing periodic mechanism is modified: the engine registers for OBSERVATION only; the legacy path still owns every mechanism.
+- Migration delta is +2 ADDITIVE tables (`engine_jobs`, `engine_runs`) — CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS only, zero removals; inert on rollback.
+- `SERVICES_<MODULE>_USE_ENGINE` flags exist, all default OFF; none is wired to any module yet.
+
 ## [v0.31.26] — 2026-11-21
 
 ### Added — Release A (defects-first): orphan-watcher born-dead fix; bash-spawn retention/stall fix + env-redaction rider; tester PACKS/QUARANTINE bookkeeping
