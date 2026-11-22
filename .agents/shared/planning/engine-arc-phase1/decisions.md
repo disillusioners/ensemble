@@ -164,3 +164,9 @@ Factual basis: the 8 kinds' 13 landed sites span 5 files — `daemon/services/in
 > "RULING (leader, L-11 — zero-producer kinds stay DECLARED-SILENT): the 6 zero-producer kinds (processing_started/completed/failed, child_failed, message_completed, room_post) stay DECLARED-SILENT with pinned reasons — bridges would be fabricated telemetry (F-12/D5.12 class); the zero-producer register is diagnostic value (likely dead remnants of an older event model — flagged for the Phase-2+ substrate arc); enum retirement = separate future commission."
 
 Factual basis: these 6 catalog kinds have no producer site in the event census (EV-01..EV-55 + §N); L-9/L-10 bridge only kinds with real producers, so bridging these would fabricate telemetry — the F-12 / D5.12 anti-fabrication class. Folded: the zero-producer register is retained as diagnostic value (pinned reasons), flagged for the Phase-2+ substrate arc; enum retirement is out of scope for Phase 1 (separate future commission). No `phase1-plan.md` §0.3 map row (no file edits), no census row rewrite — this ruling is recorded here and mirrored in `plan-overview.md` ATTESTATION row 67.
+
+**L-12 — P4 OQ-4 flush disposition (event-registry periodic flush ships UNWIRED).**
+
+> "RULING (leader, L-12 — P4 OQ-4 flush disposition): the event-registry periodic flush composition ships UNWIRED in Phase 1 — `daemon/services/event_registry/metrics.py` event_view projection (P6) is the documented composition point (read-driven drain; the emit ring is bounded deque(1024) + drop-counted, so an unwired flush cannot grow unbounded); binding flush cadence to engine ticks would need an explicit commission — deferred to the Phase-2 pilot IF its telemetry requires idle-period coverage."
+
+Factual basis: the emit ring's bounded-deque(1024)+drop-count design bounds memory without a flush task; the P6 event_view projection drains on read; any engine-tick-bound flush is a new commission (dormant Phase 1 wires none).
