@@ -64,7 +64,7 @@
 - **BR-5** — DST-zone leg (operative text):
   > The picker MUST consume `anchor_local_to_utc`'s warning (loud, never silent) and fail-closed if the anchored instant leaves `[start,end)`; P5 T5.2 adds a DST-zone leg (America/New_York gap day + fold day; deterministic instant inside the window).
   - **Leg detail:** with `ENSEMBLE_MAINT_TIMEZONE=America/New_York`, exercise a DST **gap** day (spring-forward) and a DST **fold** day (fall-back): the anchored instant must be deterministic, must fall INSIDE `[start,end)`, and the non-empty `anchor_local_to_utc` warning must be surfaced (asserted, never swallowed). Add a fail-closed leg: a gap-shift that lands outside the window ⇒ NO arm + loud warning.
-- **Touch points:** new `tests/unit/test_maintenance_schedule_knobs.py`.
+- **Touch points:** `tests/unit/test_maintenance_schedule_knobs.py` — **EXTENDS the existing file created by P1 (do not create anew)** [P1/P5 test-path adoption, leader 2026-11-22].
 - **Verification:** all legs green (incl. the DST-zone gap/fold legs); no DB/daemon dependency (pure helper).
 - **Agent hint:** `tester`.
 
@@ -76,7 +76,7 @@
 - **BR-2** — at-least-once leg (operative text):
   > Test leg: enqueue with expired key ⇒ 2nd JobItem (P5 T5.3). Do NOT widen the substrate key TTL (global blast radius; widening would make the >24h boot re-dispatch collapse into the consumed JobItem = a missed week — worse).
   - **Leg detail:** enqueue with an EXPIRED idempotency key (past the 24h TTL, `daemon/services/job_queue_service.py:276`) ⇒ a **SECOND JobItem** is created — two runs are DOCUMENTED, not widened away. The test asserts the second JobItem exists AND that the substrate TTL was NOT changed by the implementation.
-- **Touch points:** new `tests/unit/test_maintenance_chain_rearm.py`.
+- **Touch points:** `tests/unit/test_maintenance_rearm.py` — **EXTEND P1's existing file (do not create `test_maintenance_chain_rearm.py`; P1's file is green and carries the overlapping coverage — a shadow file would duplicate coverage ownership)** [P1/P5 test-path adoption, leader 2026-11-22].
 - **Verification:** failed-run case still advances the chain; persistence + config-completeness check green; expired-key leg green.
 - **Agent hint:** `tester`.
 
@@ -92,7 +92,7 @@
   - **Leg (d) stopped+chain revived:** an archived row whose `status='stopped'` and whose archived config snapshot CARRIES a `chain` block ⇒ the guard revives it (same keying as the re-arm seam — one concept, one marker).
   - **Leg (e) no archive row ⇒ create:** a missing row with no archive record ⇒ created, exactly as the seed lifecycle mirror prescribes (deterministic uuid5, `tests/unit/repositories/test_tool_usage_seed_lifecycle.py:136-145`).
 - **Also still proven (unchanged):** a present cancelled/paused row is RESPECTED (`daemon/tools/scheduling.py:128` `TaskScheduleUpdateInput.paused`; seeder NO-OP-in-any-state `seed.py:164-166`) — the guard must not re-enable it; and the archive re-archive path never collides the archive PK (`repository.py:83-84` `archive_id_collision`).
-- **Touch points:** new `tests/unit/test_maintenance_chain_guard.py`.
+- **Touch points:** `tests/unit/test_maintenance_seed_guard.py` — **EXTEND P1's existing file (do not create `test_maintenance_chain_guard.py`; same rule — no shadow duplicates)** [P1/P5 test-path adoption, leader 2026-11-22].
 - **Verification:** legs (a)–(e) green; the guard never fights operator intent and never resurrects a cancelled chain.
 - **Agent hint:** `tester`.
 
