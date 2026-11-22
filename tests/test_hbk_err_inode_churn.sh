@@ -226,7 +226,7 @@ L5_SEEN="$(grep -cE '^HANDBACK_(ERROR_FILE|VERIFY_REASON_FILE|VERIFY_ELAPSED_FIL
 assert_eq "L5 the guard's pattern still matches all three assignments" "3" "$L5_SEEN"
 
 # ════════════════════════════════════════════════════════════════════════════
-section "L6 — the LEGACY FALLBACK (the $$-keyed no-suffix path still works)"
+section 'L6 — the LEGACY FALLBACK (the $$-keyed no-suffix path still works)'
 
 L6_SRC="$(grep -c 'ensemble-hbk-verify\.\$\$' "$LIB" || true)"
 assert_ne "L6 the legacy no-suffix fallback path is still present in lib.sh" "0" "$L6_SRC"
@@ -246,12 +246,6 @@ assert_contains "L6 the reader reads the legacy-shaped path" "reader=[LEGACY-PAY
 # ════════════════════════════════════════════════════════════════════════════
 section "L7 — the LOGGING-SYMMETRY pin (one rule per channel; all three covered)"
 
-# A "normal-logging call" in a writer helper: a WARN, the dual-sink diag
-# emitter, or an explicit unbuffered stderr write.
-_has_logging_call() {
-    grep -qE '_warn |_hb_verify_diag |>&2' "$1"
-}
-
 # (a) err channel — the writer HELPER must log. This is the ONE hole the
 # fix closes; it is RED at the pre-fix tree by construction.
 L7_ERR_BODY="$(sed -n '/^_handback_err_file_write()/,/^}/p' "$LIB")"
@@ -263,8 +257,13 @@ assert_ne "L7 the err writer helper carries a normal-logging call" "0" "$L7_ERR_
 L7_EL_BODY="$(sed -n '/^_handback_verify_elapsed_write()/,/^}/p' "$LIB")"
 L7_EL_N="$(printf '%s\n' "$L7_EL_BODY" | grep -cE '_warn |_hb_verify_diag |>&2' || true)"
 assert_ne "L7 the elapsed writer helper carries a normal-logging call" "0" "$L7_EL_N"
-assert_eq "L7 the elapsed helper never writes to stdout (the capture seam)" "0" \
-    "$(printf '%s\n' "$L7_EL_BODY" | grep -cE 'printf .*[^>]>$' || true)"
+# W4 (review 2026-11-22): the old regex could not match the plausible
+# regression. Assert BEHAVIOUR instead — call the writer and require its
+# STDOUT to be empty. This is the seam that matters: the verify runs inside
+# `newpid="$(_supervision_unit_serving ...)"` (lib.sh :7297), so any stdout
+# byte here would corrupt the captured MainPID.
+L7_EL_STDOUT="$(TMPDIR="$L1_DIR" bash -c '. '"$LIB"'; _handback_verify_elapsed_write 42' 2>/dev/null)"
+assert_eq "L7 the elapsed writer emits NOTHING on stdout (the MainPID capture seam)" "" "$L7_EL_STDOUT"
 
 # (c) reason channel — EVERY call site must carry a `_hb_verify_diag`
 # sibling (the pre-existing 15/15 symmetry; the pin freezes it).
@@ -282,9 +281,12 @@ _reason_sites_without_sibling() {
                 case "$line" in
                     _handback_verify_reason_write\(\)*) continue ;;
                 esac
-                # the +/-4 line window around the call site
+                # S4 (review 2026-11-22): the old +/-4 window could credit a
+                # NEIGHBOURING site's diag. All 15 real sites carry their
+                # sibling on the IMMEDIATELY adjacent line (-1 or +1), so
+                # narrow the window to exactly that.
                 window=""
-                for ((j = i - 4; j <= i + 4; j++)); do
+                for ((j = i - 1; j <= i + 1; j++)); do
                     if [ "$j" -ge 0 ] && [ "$j" -lt "$n" ]; then
                         window="$window${lines[$j]}
 "
@@ -310,8 +312,12 @@ assert_eq "L7 the reason symmetry census sees all 15 reason write sites" "15" "$
 # ════════════════════════════════════════════════════════════════════════════
 section "L8 — the CLEANUP pins (all three channels are cleaned)"
 
-L8_TRAP="$(grep -c '_handback_channels_cleanup' "$LIB" || true)"
-assert_ne "L8 lib.sh's EXIT trap body calls the channel cleanup" "0" "$L8_TRAP"
+# W3 (review 2026-11-22): the old file-wide grep counted the call + the
+# comment + the definition, so deleting the REAL trap call still left 2 and
+# the pin passed vacuously. Scope to the _trap_safe_exit BODY.
+L8_TRAP_BODY="$(sed -n '/^_trap_safe_exit()/,/^}/p' "$LIB")"
+L8_TRAP="$(printf '%s\n' "$L8_TRAP_BODY" | grep -c '_handback_channels_cleanup' || true)"
+assert_eq "L8 lib.sh's EXIT trap body calls the channel cleanup" "1" "$L8_TRAP"
 L8_CLEAN="$(sed -n '/^_handback_channels_cleanup()/,/^}/p' "$LIB" | grep -c 'rm -f' || true)"
 assert_eq "L8 the cleanup removes ALL THREE channels" "3" "$L8_CLEAN"
 for s in promote restart rollback; do
@@ -361,6 +367,58 @@ assert_eq "L9 the REAL tree mints nothing (the same conditions are green)" "0" "
 REAL_GUARD_RC=0
 _structural_guard "$LIB" >/dev/null 2>&1 || REAL_GUARD_RC=$?
 assert_eq "L9 the structural guard passes on the real tree" "0" "$REAL_GUARD_RC"
+
+# ════════════════════════════════════════════════════════════════════════════
+section "L10 — the SYMLINK GUARD pin (review W2: a planted symlink must NOT be followed)"
+
+# The O_EXCL claim protects the FIRST write; a REPEAT write must still
+# truncate-and-overwrite (last-writer-wins). The guard in between must refuse
+# a symlink planted at the agreed path — otherwise `printf > "$f"` follows it
+# and overwrites its target. Pre-fix the XXXXXX path was mktemp-CREATED, so
+# this plant window is NEW in world-writable /tmp.
+L10_DIR="$HBK_SCRATCH/l10"; mkdir -p "$L10_DIR"
+L10_TARGET="$L10_DIR/target.txt"
+L10_LINK="$L10_DIR/ensemble-hbk-err.planted"
+printf 'ORIGINAL' > "$L10_TARGET"
+ln -s "$L10_TARGET" "$L10_LINK"
+
+L10_OUT="$(TMPDIR="$L10_DIR" bash -c "
+    . '$LIB'
+    HANDBACK_ERROR_FILE='$L10_LINK'
+    _handback_err_file_write 'PLANTED-PAYLOAD'
+    printf 'target=[%s]\n' \"\$(cat '$L10_TARGET')\"
+    printf 'reader=[%s]\n' \"\$(_handback_last_error_text)\"
+" 2>/dev/null)"
+assert_contains "L10 a planted symlink's target is NOT overwritten" "target=[ORIGINAL]" "$L10_OUT"
+assert_contains "L10 the guard fails closed (the payload never reaches the symlink)" "reader=[ORIGINAL]" "$L10_OUT"
+
+# MUTATION (its own proof): remove the guard from a scratch COPY of lib.sh.
+# With the guard gone the else-branch does not return, so the payload write
+# follows the symlink and overwrites the target — the reviewer's probe.
+MUT10_LIB="$HBK_SCRATCH/l10-mutant-lib.sh"
+sed 's~\[ -f "$f" \] && \[ ! -L "$f" \] || return 0~:  # MUTANT: symlink guard removed~' "$LIB" > "$MUT10_LIB"
+L10_MUT_GUARD="$(grep -c '\[ ! -L "\$f" \]' "$MUT10_LIB" || true)"
+assert_eq "L10 the mutant removed the symlink guard" "0" "$L10_MUT_GUARD"
+printf 'ORIGINAL' > "$L10_TARGET"
+MUT10_OUT="$(TMPDIR="$L10_DIR" bash -c "
+    . '$MUT10_LIB'
+    HANDBACK_ERROR_FILE='$L10_LINK'
+    _handback_err_file_write 'PLANTED-PAYLOAD'
+    printf 'target=[%s]\n' \"\$(cat '$L10_TARGET')\"
+" 2>/dev/null)"
+assert_contains "L10 the MUTANT overwrites the target (so the pin WOULD go red)" \
+    "target=[PLANTED-PAYLOAD]" "$MUT10_OUT"
+
+# The real tree, same conditions ⇒ green (the contrast that proves the pin
+# discriminates, not just the mutant's red).
+printf 'ORIGINAL' > "$L10_TARGET"
+L10_REAL_OUT="$(TMPDIR="$L10_DIR" bash -c "
+    . '$LIB'
+    HANDBACK_ERROR_FILE='$L10_LINK'
+    _handback_err_file_write 'PLANTED-PAYLOAD'
+    printf 'target=[%s]\n' \"\$(cat '$L10_TARGET')\"
+" 2>/dev/null)"
+assert_contains "L10 the REAL tree keeps the target untouched" "target=[ORIGINAL]" "$L10_REAL_OUT"
 
 # ════════════════════════════════════════════════════════════════════════════
 teardown_fake_home

@@ -62,19 +62,26 @@ pre-fix semantics: the reason channel is written up to 15 times per verify.
 
 ### (2) Cleanup of all three channels
 
-* `_handback_channels_cleanup` removes all three; it is hooked **into** the
-  existing `_trap_safe_exit` body (`lib.sh`) — the trap is *not* replaced, so
-  the ceremony scripts that install their own EXIT trap (promote/stage/
-  stop/restart/rollback via `_trap_install_signal_handlers`) keep theirs and
-  also get the cleanup.
+* `_handback_channels_cleanup` removes all three; it is called from the
+  `_trap_safe_exit` body (`lib.sh`). **The trap IS replaced** —
+  `_trap_install_signal_handlers` does `trap '_trap_safe_exit' EXIT` (lib.sh
+  :3464). The hook survives because it is **part of the replacement body**,
+  not because the old trap was left intact. That covers the six ceremony
+  scripts that call it: `promote.sh:234`, `stage.sh:444`, `rollback.sh:161`,
+  `stop-ensemble.sh:367`, `adopt-unit.sh:225`, `restart.sh:206`.
+  Packs that install their **own** EXIT trap replace this one and therefore
+  do **not** get this cleanup; they are safe by the lazy-mint INVARIANT (no
+  file exists unless it carries a payload), not by a trap.
 * the **elapsed** channel — cleaned by nobody before — is now removed by
   `promote.sh` / `restart.sh` / `rollback.sh` alongside the other two.
 * the **reason** channel is now cleared at verify entry
   (`_supervision_handback_unit`) — the stale-read hole: the path is minted
   once per shell, so a reason written by an earlier attempt that failed
   *without* writing a reason could be surfaced by a later attempt.
-* `status.sh` / `stage.sh` (no traps, no cleanup) need no edit: under lazy
-  mint they never create a file at all, and they write no payload.
+* `status.sh` installs **no** trap and has no channel cleanup; it needs no
+  edit because under lazy mint it never creates a file at all and writes no
+  payload — it is safe by the invariant, not by a trap. `stage.sh` DOES
+  install its own trap (`:444`) and is covered by `_trap_safe_exit`.
 
 ### (3) Pack containment
 
@@ -96,6 +103,21 @@ The export is placed **before** `pf_fence_init` in the two preflight packs:
 the fence's cleanup removes `"$TMPDIR"/pf-sandbox.*` and `"$TMPDIR"/pf-home.*`,
 so a `TMPDIR` changed *after* the sandbox was created would leave the sandbox
 behind.
+
+**Review W1 (fold-in):** the scratch dir is now removed at exit at all seven
+sites — otherwise the containment would itself become a leak class (7 dirs per
+run). `test_release_journal.sh`, `test_rollback_target.sh` and
+`promote_handback_halt_serving_green_test.sh` register it with
+`_register_fixture` (from `tests/upgrade_test_lib.sh` — the reviewer's cited
+`tests/helpers/upgrade_test_lib.sh` does not exist); the latter's own EXIT trap
+calls `_cleanup_fixtures`, so the registration survives the replacement.
+`test_supervision_stop_handback.sh` owns a one-line EXIT trap.
+`test_promote_plugin_staleness.sh` extends its own EXIT trap. The two preflight
+packs do **not** source `upgrade_test_lib.sh` (`preflight_pack_common.sh`
+doesn't either), so they chain explicitly:
+`trap 'pf_fence_cleanup; rm -rf "$HBK_SCRATCH_DIR"' EXIT` — **fence first**
+(it needs `TMPDIR` to match `pf-sandbox.*`), scratch second. Reversing that
+order would break the fence's cleanup.
 
 ### (4) Logging symmetry — the one real hole
 
@@ -124,6 +146,7 @@ never a legal seam there.
 | L7 | logging symmetry, one rule per channel, all three covered |
 | L8 | cleanup: all three on exit, the elapsed in the ceremony scripts, the reason at verify entry |
 | L9 | the mutation self-test (the pack proves it can fail) |
+| L10 | **review W2** the symlink guard: a symlink planted at the agreed path must NOT be followed; its own mutant removes the guard and proves the target WOULD be overwritten |
 
 **Mutation proof (executed):** with the fix disabled the pack goes
 **27P/9F** (L1/L5/L9 red); with it re-enabled it returns **36P/0F**, exit 0.
@@ -216,6 +239,40 @@ PACKS.md records this suite as *over-budget at the current tip*
 (over-budget at this tip)"), and the house completes it with
 `env -i PATH HOME TERM timeout 1200 …`. The 600 s run therefore returns
 RC=124 with a partial log — that is the BUDGET, not a regression.
+
+---
+
+## 5b. Review fold-in (W1–W5, S1–S5) — follow-up commit
+
+| item | what landed |
+|---|---|
+| **W2** | `_handback_channel_write` now proceeds to the payload write **only** when the O_EXCL claim succeeded **or** the path is a regular non-symlink file (`[ -f "$f" ] && [ ! -L "$f" ] || return 0`). A planted symlink fails closed (reader sees "nothing captured"); repeat writes still truncate-overwrite. New **L10** pin with its own mutation proof. |
+| **W1** | all seven pack scratch dirs are now removed at exit: `_register_fixture` where `tests/upgrade_test_lib.sh` is sourced (3 packs), an owned one-line trap (1), an extended own trap (1), and an explicit chained `trap 'pf_fence_cleanup; rm -rf "$HBK_SCRATCH_DIR"' EXIT` in the two preflight packs (fence **first** — it needs TMPDIR). **Empirically verified:** the `/tmp/hbk-scratch.*` count stayed at **21 before and after** the whole fold-in scoped run (the 21 are the fix-phase's pre-W1 leaks; nothing in /tmp was deleted). |
+| **W3** | the L8 trap assertion is scoped to the `_trap_safe_exit` BODY (`sed -n '/^_trap_safe_exit()/,/^}/p'`) and expects exactly **1** call — the old file-wide grep counted call + comment + definition (vacuous). |
+| **W4** | the unfalsifiable stdout regex is replaced by a behavioural assert: call `_handback_verify_elapsed_write 42` and require **empty stdout** (the `newpid="$(_supervision_unit_serving …)"` seam at lib.sh :7297). |
+| **W5** | the lib.sh trap comments and this record now state the truth: the trap **IS** replaced by `_trap_install_signal_handlers`; the hook survives as part of the replacement body; coverage is the six ceremony scripts; packs' own traps replace it; `status.sh` is safe by the lazy-mint invariant, not by a trap; `stage.sh` DOES install its own trap (`:444`). |
+| **S1** | both factual errors in this record corrected (see W5). |
+| **S2** | the err-channel `_hb_verify_diag` now bounds its text with `head -c 400`, matching the reason channel's cap. |
+| **S3** | the dead `_has_logging_call()` helper was removed. |
+| **S4** | the L7c sibling window was tightened from ±4 lines to the **immediately adjacent line only** (−1/+1) — all 15 real sites carry their diag there. |
+| **S5** | the L6 header is single-quoted so `$$` is not expanded by the pin script. |
+
+**Fold-in verification:** full pin suite **twice** — 41P/0F both runs, identical
+shape (no order/flake drift). Mutation proofs (worktree-level, byte-identical
+restore each time):
+* **A — symlink guard removed:** `PIN EXIT 1`, **38P/3F** (L10's three legs red);
+  restored → `PIN EXIT 0`, **41P/0F**.
+* **B — lazy mint reverted:** `PIN EXIT 1`, **32P/9F** (L1/L2/L5/L9 red — the
+  original churn pin still fails when disabled); restored → `PIN EXIT 0`,
+  **41P/0F**.
+
+**Scoped re-run (excludes `tests/test_release_journal.sh` — tester-owned):**
+every file reproduced the fix-phase outcome exactly and every failure-name set
+was byte-identical to the base-attributed round (33/1/4/1/1/1/1 reds as
+recorded above), so no re-diff against BASE was needed. `test_hbk_err_inode_churn.sh`
+41P/0F; `handback_verify_budget` 120P/0F; `gate_legs` 86/86;
+`preflight_anchor_index` 42P/0F; `preflight_stage_lock` 13P/0F;
+`preflight_ceremony_readiness` 40P/0F; `pipeline_scripts_floor` 48P/0F.
 
 ---
 

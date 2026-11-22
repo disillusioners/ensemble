@@ -38,7 +38,13 @@ PF_PACK_NAME="preflight-census"
 # BEFORE pf_fence_init (where this pack calls it): the fence's cleanup
 # removes "$TMPDIR"/pf-sandbox.* and "$TMPDIR"/pf-home.*, so a TMPDIR
 # changed after the sandbox was created would leave the sandbox behind.
-export TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/hbk-scratch.XXXXXX")"
+HBK_SCRATCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hbk-scratch.XXXXXX")"
+export TMPDIR="$HBK_SCRATCH_DIR"
+# W1 (review 2026-11-22): preflight_pack_common.sh does NOT source
+# upgrade_test_lib.sh, so _register_fixture is unavailable here. The EXIT
+# trap installed AFTER pf_fence_init below is chained: pf_fence_cleanup runs
+# FIRST (it needs TMPDIR to match "$TMPDIR"/pf-sandbox.*), then the scratch
+# dir is removed. Reversing that order would break the fence's cleanup.
 
 PF_CHECK_ONLY=0
 for a in "$@"; do
@@ -49,7 +55,7 @@ for a in "$@"; do
 done
 
 pf_fence_init
-trap pf_fence_cleanup EXIT
+trap 'pf_fence_cleanup; rm -rf "$HBK_SCRATCH_DIR"' EXIT
 
 CENSUS="$PF_REPO_ROOT/tests/packs/preflight_census.txt"
 WS="${PF_CENSUS_WS:-$PF_REPO_ROOT}"

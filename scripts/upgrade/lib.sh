@@ -3393,12 +3393,16 @@ _trap_safe_exit() {
     # It runs BEFORE the lock-release early return: the hold must be
     # released even when the lock was already released by the path itself.
     _watchdog_hold_release_if_armed >/dev/null 2>&1 || true
-    # hbk-err inode-churn fix (2026-11-22): the hand-back side-channel files
-    # are removed on EVERY exit path. Hooked INTO the existing trap body —
-    # the trap itself is NOT replaced, so the ceremony scripts that install
-    # their own EXIT trap (promote/stage/stop/restart/rollback via
-    # _trap_install_signal_handlers) keep theirs AND get this cleanup. It
-    # runs BEFORE the lock-release early return so it also fires on the
+    # hbk-err inode-churn fix (2026-11-22; wording narrowed at review W5):
+    # the channel files are removed on every exit path of the CEREMONY
+    # scripts — the six that call _trap_install_signal_handlers, which
+    # REPLACES the EXIT trap with this very body (so the hook survives by
+    # being part of the replacement, not by leaving the old trap intact).
+    # Packs that install their OWN EXIT trap replace this one and do NOT get
+    # this cleanup; they are safe by the lazy-mint INVARIANT (no file exists
+    # unless it carries a payload), not by a trap. status.sh installs no
+    # trap at all and is safe by that same invariant.
+    # It runs BEFORE the lock-release early return so it also fires on the
     # already-released path.
     _handback_channels_cleanup >/dev/null 2>&1 || true
     if [ "${_LOCK_RELEASED:-0}" = "1" ]; then
@@ -5972,7 +5976,24 @@ HANDBACK_ERROR_FILE="$(mktemp -u "${TMPDIR:-/tmp}/ensemble-hbk-err.$$.XXXXXX" 2>
 _handback_channel_write() {
     local f="${1:-}" text="${2:-}"
     [ -n "$f" ] || return 0
-    ( set -C; : > "$f" ) 2>/dev/null || true
+    # SYMLINK GUARD (review W2, 2026-11-22): the O_EXCL claim protects the
+    # FIRST write, but a REPEAT write in the same shell must still
+    # truncate-and-overwrite (last-writer-wins — the reason channel is
+    # written up to 15 times per verify). Between those two moments a
+    # planted symlink at the agreed path would be FOLLOWED by an
+    # unconditional `printf > "$f"`, overwriting its target. Pre-fix the
+    # XXXXXX path was mktemp-CREATED (symlink-immune at creation), so this
+    # plant window is NEW. Fail closed: write ONLY when the claim succeeded
+    # OR the existing path is a REGULAR, NON-SYMLINK file.
+    if ( set -C; : > "$f" ) 2>/dev/null; then
+        :  # fresh file created by us — the name is ours
+    else
+        # claim refused: either a repeat write to our own file, or a plant.
+        # `-f` alone follows a symlink to a regular file, so `-L` is the
+        # decisive rejection. A dangling link, FIFO, device or directory
+        # also fails `-f` and is refused.
+        [ -f "$f" ] && [ ! -L "$f" ] || return 0
+    fi
     printf '%s' "$text" > "$f" 2>/dev/null || true
 }
 _handback_err_file_write() {
@@ -5988,7 +6009,7 @@ _handback_err_file_write() {
     # error can never be swallowed. _hb_verify_diag is the DUAL-SINK
     # emitter (the narrative file + unbuffered stderr) — the same seam
     # every reason-channel writer already uses.
-    _hb_verify_diag "launchd hand-back: hand-back error captured (err side-channel): $1"
+    _hb_verify_diag "launchd hand-back: hand-back error captured (err side-channel): $(printf '%s' "${1:-}" | head -c 400)"
 }
 _handback_err_file_clear() {
     rm -f "${HANDBACK_ERROR_FILE:-}" 2>/dev/null || true
