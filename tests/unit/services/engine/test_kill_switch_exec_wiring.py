@@ -343,6 +343,56 @@ async def test_unreadable_per_job_switch_skips_that_job():
     assert h.calls == {"job-a": 0, "job-b": 1}
 
 
+# ── MUTATION PROOF 4: the ABSENT engine-wide switch ⇒ the engine OWNS
+#    execution (the AMD-8 absent-vs-explicit split) ─────────────────────────
+
+@pytest.mark.asyncio
+async def test_absent_switch_sources_leave_the_engine_owning_execution():
+    """AMD-8 absent-vs-explicit split, pinned AT THE EXEC-WIRING SEAM.
+
+    Every switch source is ABSENT: the injected resolver returns ``None``
+    for EVERY key — no ``ENSEMBLE_ENGINE_ENABLED``, no per-job key value,
+    no shadow key. An absent key is not an opinion, so the absent
+    engine-wide switch resolves to the shipped default (enabled): the
+    engine OWNS execution, the job RUNS, and NOTHING is counted as
+    KILL_SWITCHED.
+
+    This is the V2 mutation leg — inverting the absent⇒enabled split (the
+    absent case resolving as tripped) MUST redden THIS node.
+    """
+    jobs = [
+        # per-job key SET in the spec but ABSENT in the source (the tier is
+        # exercised at the wiring seam, not skipped around),
+        _spec("job-a", ENGINE_KEY),
+        # no per-job key at all.
+        _spec("job-b", None),
+    ]
+    h = _Harness(jobs, shadow=False)
+    await h.build(jobs)
+    h.arm("job-a")
+    h.arm("job-b")
+
+    # VACUITY GUARD: the source stays EMPTY — every switch key resolves to
+    # None. A pre-seeded source would make this node vacuous.
+    assert h.source == {}, "the injected source must be ABSENT for every key"
+
+    await h.dispatch("job-a")
+    await h.dispatch("job-b")
+
+    # The engine OWNS execution: BOTH jobs ran (the executor was invoked).
+    assert h.calls == {"job-a": 1, "job-b": 1}
+    assert h.outcomes("job-a") == ["SUCCEEDED"]
+    assert h.outcomes("job-b") == ["SUCCEEDED"]
+
+    # NOTHING was skipped, nothing was counted as KILL_SWITCHED.
+    assert "KILL_SWITCHED" not in h.skip_reasons("job-a")
+    assert "KILL_SWITCHED" not in h.skip_reasons("job-b")
+    for job_id in ("job-a", "job-b"):
+        cache = h.engine._cache[job_id]
+        assert "KILL_SWITCHED" not in cache["skips_by_reason"]
+        assert cache["last_skip_reason"] != "KILL_SWITCHED"
+
+
 # ── the ladder's third tier: the SHADOW posture ─────────────────────────
 
 @pytest.mark.asyncio
