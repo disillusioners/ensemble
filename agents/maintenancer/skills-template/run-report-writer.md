@@ -6,7 +6,7 @@ auto_load: false
 
 # Run Report Writer
 
-I author the weekly run's report, receipt, and INDEX. I am the only writer of the run's TOP-LEVEL artifacts (the per-run `evidence/<run_id>/` writers are carved out — the root's top level holds only `run-*`/`receipt-*`/`INDEX.md`); the orchestrator seat never writes.
+I author the weekly run's report, receipt, and INDEX. I am the only writer of the run's TOP-LEVEL artifacts (the per-run `evidence/<run_id>/` writers are carved out — the root's top level holds only the `run-*`/`receipt-*` artifacts plus the INDEX ledger at `.agents/maintenancer/RESULTS/INDEX.md`); the orchestrator seat never writes.
 
 ## Boundary
 
@@ -25,7 +25,7 @@ On dispatch I receive a `run_token`, the `trigger_type` FROM THE ENVELOPE, the l
 
 ### Write order and INDEX
 
-run → receipt → INDEX last. Files are `run-<run_id>.md`, `receipt-<run_id>.md`, `INDEX.md`. INDEX appends via `write_file(append=True)` with the run_id on each row — never shell redirection.
+run → receipt → INDEX last. Files are `run-<run_id>.md`, `receipt-<run_id>.md`, and the INDEX ledger (`.agents/maintenancer/RESULTS/INDEX.md`). INDEX appends via `write_file(append=True)` with the run_id on each row — never shell redirection.
 
 ### Writer ladder (BR-13)
 

@@ -101,7 +101,24 @@ GRANT_NOT_LAST_EXCEPTIONS: frozenset[str] = frozenset({"ari"})
 #: quartet), so the append is a DELIBERATE CONTRACT UPDATE and the
 #: later-lane category is named here — the same mechanism the
 #: guideline-read-tool lane used.
-GRANT_POST_TAIL: frozenset[str] = frozenset({"guidelines", "room"})
+#: The central-maintenance P2 lane (BR-8 — phase2-plan.md Task 2.1) granted
+#: the maintenancer SEAT four LITERAL tool names — spawn_instance,
+#: send_message, subtree_messages, subtree_status — appended AFTER
+#: ``nest-report`` (the allow grammar accepts literal tool names, so the
+#: seat grant needs no category; BR-9's run-containment rule rides the same
+#: change). The append is a DELIBERATE CONTRACT UPDATE (the seat
+#: dispatches its five lane children and reads their results back), so the
+#: four literals are named here — the same mechanism the guideline-read-tool
+#: and group-chat lanes used. They are TOOL NAMES, not categories: the set
+#: means "documented later-lane ENTRIES" that may follow the grant.
+GRANT_POST_TAIL: frozenset[str] = frozenset({
+    "guidelines",
+    "room",
+    "spawn_instance",
+    "send_message",
+    "subtree_messages",
+    "subtree_status",
+})
 
 #: The re-pinned allow-array constants — the file, the constant name and
 #: the value the constant MUST carry after the grant.

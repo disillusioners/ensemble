@@ -4,7 +4,8 @@
 // rationale); runtime values from the mirrors are imported from the
 // model files directly by the modules that use them.
 //
-// Why this file is large (1,108 lines): the single barrel
+// FE-UI lane marker (central maintenance P4 report slice): PD-2.
+// Why this file is large (1,109 lines): the single barrel
 // aggregation of the FE's wire-mirror types — one import site by
 // design.
 // FE-UI lane marker (group-chat P6 room modal surface): A-P6-23.
