@@ -47,8 +47,22 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
 
-WT = "/home/nea/ensemble-src-wt-engine-arc-p1"
+#: The tree THIS harness lives in — i.e. the tree under test.  Derived from
+#: the harness's own location, NEVER from a fixed lane path: the base
+#: extract (``git archive HEAD`` of this tree) and the GREEN baseline
+#: (``cwd=WT``) then bind to the checkout the pack actually runs in, so a
+#: clean-checkout ceremony leg exercises the pinned sha instead of the
+#: lane worktree (POK ceremony-clean-checkout-03-wt-binding).
+_HERE = Path(__file__).resolve()
+WT = str(
+    next(
+        p
+        for p in _HERE.parents
+        if (p / "pyproject.toml").is_file() and (p / "daemon").is_dir()
+    )
+)
 PY = os.path.join(WT, ".venv", "bin", "python")
 
 SCRUB_VARS = [
@@ -113,6 +127,9 @@ class BLeg:
     node: str
     control: bool = False  # True => expect GREEN with the plant (no-false-RED)
     note: str = ""
+    #: ADDITIONAL (old, new) plant sites in the SAME file (multi-site
+    #: mutations — each must occur exactly once, else the leg FAILs).
+    extra: tuple = ()
 
 
 BLEGS: list[BLeg] = [
@@ -163,10 +180,50 @@ BLEGS: list[BLeg] = [
     BLeg(
         id="B6",
         path="daemon/services/event_registry/metrics.py",
-        old='    live_ids = _live_subscriber_ids(bus) if live_source == "event_bus" else None',
-        new='    live_ids = _live_subscriber_ids(bus) if live_source == "event_bus" or live_source == "dependency_watchers" else None',
+        # B6 RE-TARGETED at 6373ce830 (the real D5.4 second live source
+        # landed): the ORIGINAL plant string (`live_source == "event_bus"
+        # or live_source == "dependency_watchers"`) no longer exists — the
+        # dispatch is now a LIVE_SOURCES registry + a per-consumer lane
+        # resolver.  The SAME defect class (a dispatch branch with NO real
+        # extractor, i.e. the "D5.4 lie") is planted in the new shape:
+        #   site 1 — the honesty short-circuit (a kind whose declared
+        #            live_source is NOT implemented is unverifiable) is
+        #            weakened so a kind WITH consumers is still dispatched;
+        #   site 2 — the "dependency_bus" source is answered from the
+        #            EVENT-BUS subscriber set instead of the dependency
+        #            bus's own lane extractor.
+        # Result: the probe kind (declared live_source "dependency_watchers",
+        # consumer "dependency_bus:child_keyed_waiters") gets a REAL verdict
+        # (verified=True / live=False) instead of None ⇒ the pin's Leg-1
+        # "D5.4 lie" assertion REDs — the SAME assertion the original B6
+        # reddened.
+        old='''    if declared_source is not None and declared_source not in LIVE_SOURCES:
+        return (
+            [{"consumer": c, "live": None} for c in spec.consumers],
+            False,
+            False,
+        )''',
+        new='''    if declared_source is not None and declared_source not in LIVE_SOURCES and not spec.consumers:
+        return (
+            [{"consumer": c, "live": None} for c in spec.consumers],
+            False,
+            False,
+        )''',
+        extra=(
+            (
+                '''        if source == "dependency_bus":
+            live_ids = extractor(dependency_bus)''',
+                '''        if source == "dependency_bus":
+            live_ids = _live_subscriber_ids(bus)''',
+            ),
+        ),
         node="tests/unit/services/event_registry/test_metrics.py::test_live_source_dispatch_covers_exactly_the_event_bus_source",
-        note="D5.4 fake dispatch -> live-source pin RED",
+        note=(
+            "D5.4 fake dispatch, RE-TARGETED to the landed dispatch shape: a "
+            "non-bus source answered from the BUS's subscriber set (a "
+            "dispatch branch without a real extractor) -> live-source pin "
+            "RED (Leg-1 'D5.4 lie')"
+        ),
     ),
     BLeg(
         id="B7",
@@ -323,10 +380,13 @@ def run_b_leg(leg: BLeg, base: str) -> tuple[str, bool, float, dict]:
     if leg.old not in original:
         shutil.rmtree(extract, ignore_errors=True)
         return "FAIL", False, time.time() - t0, info
-    count = original.count(leg.old)
-    if count != 1 and not leg.all_sites if hasattr(leg, "all_sites") else False:
-        pass
     planted = original.replace(leg.old, leg.new, 1)
+    # additional (multi-site) plant sites — each must occur exactly once
+    for extra_old, extra_new in leg.extra:
+        if planted.count(extra_old) != 1:
+            shutil.rmtree(extract, ignore_errors=True)
+            return "FAIL", False, time.time() - t0, info
+        planted = planted.replace(extra_old, extra_new, 1)
     open(target, "w", encoding="utf-8").write(planted)
 
     # run pin (expect RED)
