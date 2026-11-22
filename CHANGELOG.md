@@ -5,6 +5,15 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.34] — 2026-11-22
+
+### Added — Central Maintenance System (lane `feature/central-maintenance-system`, P1–P5)
+
+- The **maintenancer** agent (`agents/maintenancer/`): roster + templated skills (lane-skill check, run-report writer), report-scrutiny and fan-in-valve pins, and the maintenance knowledge-base coverage gate.
+- **Scheduled-tasks source adapter** (`daemon/sources/adapters/scheduler.py`): TZ/DST-correct scheduling, catch-up + idempotency semantics, one-shot cap discipline; REST API with phase-3 contract + delete-guard placement; scheduler acceptance pack (177 nodes, no-skip parking) green.
+- **Maintenance-reports door**: `GET` + `HEAD /api/maintenance-reports` (scope-reuse `maintenance:read`, auth-OFF 503 fail-closed, protected-default class) + FE report view (in-app markdown render, lazy `/report` route).
+- P5A verification: maintenancer pin quartet + scheduler packs registered in PACKS.md; router class/scope manifest pins extended (declared-route census 127 · mount census 43 · api_families 39).
+
 ## [v0.31.33] — 2026-11-22
 
 ### Fixed — WC watchdog wedge-notice false-positive class (wake-source recognition)
