@@ -89,6 +89,7 @@ timeout 280 env \
     -p no:randomly \
     -p no:xdist \
     -v \
+    -s \
     --tb=short \
     --color=no \
     --override-ini="addopts=" \
