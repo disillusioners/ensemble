@@ -145,3 +145,54 @@ def test_fresh_root_guard_surfaces_moved_root_as_own_finding_kind(tmp_path) -> N
     assert FINDING_KIND_RESULTS_ROOT_EMPTY != FINDING_KIND_REPORTLESS_WEEK
     assert FINDING_KIND_RESULTS_ROOT_EMPTY == "results_root_empty"
     assert FINDING_KIND_REPORTLESS_WEEK == "reportless_week"
+
+
+def test_fresh_root_guard_de_duplicates_board_item(tmp_path) -> None:
+    """The guard writes ONE de-duplicated board item across repeated boots."""
+    from sqlalchemy import create_engine, select
+    from sqlmodel import SQLModel, Session
+    from daemon.repositories.source.models import SourceConfig, ScheduleExecution
+    from daemon.repositories.source.repository import SQLModelSourceRepository
+    from daemon.repositories.source.maintenance_seed import (
+        _detect_and_surface_results_root_empty,
+        BOARD_TITLE_ROOT_EMPTY,
+    )
+    from daemon.models.board import BoardItem, BoardItemTag
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'guard2.db'}",
+        connect_args={"check_same_thread": False},
+        future=True,
+    )
+    SQLModel.metadata.create_all(
+        engine,
+        tables=[SourceConfig.__table__, ScheduleExecution.__table__, BoardItem.__table__, BoardItemTag.__table__],
+    )
+    source_id = "central-maintenance-weekly"
+    with Session(engine) as s:
+        s.add(
+            SourceConfig(
+                source_id=source_id,
+                source_type="scheduler",
+                name="central-maintenance-weekly",
+                config={"agent": "maintenancer"},
+                enabled=True,
+                autostart=True,
+                status="running",
+                created_at="t",
+                updated_at="t",
+            )
+        )
+        s.commit()
+
+    repo = SQLModelSourceRepository(engine)
+    repo.record_execution_start(source_id, "exec-1")
+    empty_root = tmp_path / "results2"
+    empty_root.mkdir()
+
+    _detect_and_surface_results_root_empty(repo, source_id=source_id, results_root=empty_root, engine=engine)
+    _detect_and_surface_results_root_empty(repo, source_id=source_id, results_root=empty_root, engine=engine)
+
+    with Session(engine) as s:
+        items = s.exec(select(BoardItem)).all()
+    assert len(items) == 1
