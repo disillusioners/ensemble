@@ -4,7 +4,7 @@ Commission: fix the RELEASE-RETENTION EVICTION GAP (a staged release dir could b
 ceremony, with NO journal row). Resequenced by Ari 2026-11-23T12:12Z: the LIB-HALF landed FIRST as a
 scripts-only STOPGAP (v0.31.43); Phase 2 (v0.31.45) added the ceremony surface + 4-pin pack; this
 refresh closes the two reviewer gaps from the one-wave verification (RE-DISPATCH #1) and re-stages as
-v0.31.47. Owner: sonic-developer. Integration branch: `fix/retention-phase2`.
+v0.31.48 (v0.31.47's pushed tag points at an honest intermediate commit whose stage the L1 tip-identity guard REFUSED — the tip moved between push and stage; the tag was never force-moved and no dir was staged under it). Owner: sonic-developer. Integration branch: `fix/retention-phase2`.
 
 ## Files touched across modules
 
@@ -89,8 +89,7 @@ journal_splice.py) — the silent-empty-journal vacuity trap is closed at the so
 - **G2 census (journal-derived, fresh at refresh time):** current=v0.31.42 (pinned), previous=v0.31.37
   (pinned); `staged` rows exist for v0.31.45 (17:33:02Z) and v0.31.46 (18:30:21Z — the sibling lane's
   stage ran with module B live) → both awaiting-ceremony pinned; HELD no-journal-evidence set =
-  {v0.31.41, v0.31.43, v0.31.44}; after this re-stage the tree also carries v0.31.47 (its own `staged`
-  row). NOTHING on live is evictable: the next live sweep evicts nothing and writes `retention_pin_hold`
+  {v0.31.41, v0.31.43, v0.31.44}; after this re-stage the tree also carries v0.31.48 (its own `staged` row). NOTHING on live is evictable: the next live sweep evicts nothing and writes `retention_pin_hold`
   rows naming the held dirs (the fix DEFERS live retention; it neither triggers nor blocks a sweep).
 - **The one dir that becomes evictable:** v0.31.37 (commit row 03:10:20Z + later version-greater commit
   v0.31.42 10:24:12Z) once it loses the `previous` pin at the next promote — then evicted WITH a row,
@@ -118,10 +117,10 @@ journal_splice.py) — the silent-empty-journal vacuity trap is closed at the so
 - §9 block against this tree's lib.sh → `PASS=9 FAIL=0`.
 - `bash -n scripts/upgrade/{lib,stage,promote}.sh` → clean.
 - Live census (journal-derived, read-only): `python3 -c "import json;d=json.load(open('/home/nea/agents-ensemble/releases/state.json'));print(d['current'],d['previous']);[print(r.get('event'),r.get('detail')[:90]) for r in d['history'] if r.get('event') in ('staged','retention_evict','retention_refuse','retention_pin_hold')]"` —
-  expect current=v0.31.42/previous=v0.31.37; `staged` rows for v0.31.45, v0.31.46, v0.31.47; ZERO
+  expect current=v0.31.42/previous=v0.31.37; `staged` rows for v0.31.45, v0.31.46, v0.31.48; ZERO
   retention_evict rows until a real superseding promote commits.
-- `ls -1 /home/nea/agents-ensemble/releases/ | grep '^v'` → v0.31.37, .41, .42, .43, .44, .45, .46, .47
-  (8 dirs vs keep-3 — over-retention is the expected steady state under fixed code).
+- `ls -1 /home/nea/agents-ensemble/releases/ | grep '^v'` → v0.31.37, .41, .42, .43, .44, .45, .46, .48
+  (8 dirs vs keep-3 (v0.31.47 is a TAG with NO dir — guard-refused stage) — over-retention is the expected steady state under fixed code).
 - `readlink /home/nea/agents-ensemble/releases/current` → resolves to an EXISTING dir == journal current.
 
 ## Bash-raises used
