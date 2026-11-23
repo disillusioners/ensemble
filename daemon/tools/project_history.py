@@ -41,8 +41,7 @@ caller can retry with an explicit project_id.
 Args:
     project_id: The project ID to add the entry to (optional when name or
                shortname is given).
-    name: The project name to add the entry to (used if project_id is not
-          provided).
+    name: The project name or shortname (used if project_id is not provided). Resolved via scope="name" — the FULL ladder (L1-L5): may match the project NAME or any of its SHORTNAMES.
     shortname: A project shortname/nickname (used if project_id and name
                are not provided).
     entry_type: Type of event — milestone, commit, phase, bugfix, deployment,
@@ -75,8 +74,7 @@ caller can retry with an explicit project_id.
 Args:
     project_id: The project ID to list entries for (optional when name or
                shortname is given).
-    name: The project name to list entries for (used if project_id is not
-          provided).
+    name: The project name or shortname (used if project_id is not provided). Resolved via scope="name" — the FULL ladder (L1-L5): may match the project NAME or any of its SHORTNAMES.
     shortname: A project shortname/nickname (used if project_id and name
                are not provided).
     limit: Maximum entries to return (default 20, max 100).
@@ -99,8 +97,7 @@ caller can retry with an explicit project_id.
 Args:
     project_id: The project ID to search within (optional when name or
                shortname is given).
-    name: The project name to search within (used if project_id is not
-          provided).
+    name: The project name or shortname (used if project_id is not provided). Resolved via scope="name" — the FULL ladder (L1-L5): may match the project NAME or any of its SHORTNAMES.
     shortname: A project shortname/nickname (used if project_id and name
                are not provided).
     query: Search string to match.
@@ -124,8 +121,7 @@ caller can retry with an explicit project_id.
 Args:
     project_id: The project ID the entry belongs to (optional when name or
                shortname is given).
-    name: The project name the entry belongs to (used if project_id is not
-          provided).
+    name: The project name or shortname (used if project_id is not provided). Resolved via scope="name" — the FULL ladder (L1-L5): may match the project NAME or any of its SHORTNAMES.
     shortname: A project shortname/nickname (used if project_id and name
                are not provided).
     entry_id: The ID of the entry to delete.
