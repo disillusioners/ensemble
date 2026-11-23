@@ -188,6 +188,45 @@ READINESS_GRACE_HORIZON_S: float = 120.0
 # over-eager threshold costs grace availability, never safety.
 READINESS_LEAK_TICK_THRESHOLD: int = 3
 
+# ── Readiness boot-warm window (checkpoint-saver transient tolerance) ──
+# READINESS_BOOT_WARM_WINDOW_S is the BOOT-WARM window: the span after
+# the daemon boot epoch during which a GRACE-ELIGIBLE checkpoint-saver
+# failure class (``pool_busy`` / ``read_timeout``) is TOLERATED instead
+# of degrading /readyz. The tolerance is published, never silent
+# (``detail.checkpoint_saver_boot_warm`` + a readiness warning log).
+#
+# MEASURED JUSTIFICATION (live evidence, ensemble-main journal, v0.31.33
+# boot 2026-11-22 22:22:48Z): at 22:24:40Z — ~112s into the boot, with
+# readyz already GREEN since ~22:23:53 — ONE refresh tick logged
+#   "[Readiness] degraded: checkpoint_saver: sentinel checkpoint read
+#    failed (checkpoint path cannot serve reads — see readiness logs)"
+# with queue_max_age=1.266607s; the NEXT tick was green again (3/3 ticks
+# green at 5-9ms). A green→503→green flap INSIDE the boot window is an
+# auto-rollback risk at a flip ceremony: the Emperor's boot SLO
+# (2026-11-21) is boot_epoch→readyz-green ≤ 120s, and a 503 inside that
+# window reads as "never went green".
+#
+# ROOT CAUSE (measured at base 5f0eafa83): the sentinel probe RIDES the
+# hot path BY DESIGN — the sentinel ``aget_tuple`` takes the saver's ONE
+# asyncio.Lock, which every production checkpoint op also takes. During
+# the boot-restore storm that lock is held for >0.9s, so the probe's
+# inner budget expires and it returns a GRACE-ELIGIBLE class — yet the
+# composite degraded anyway (the grace tracker deliberately never changes
+# ready/reasons; the flip gate does not consume the grace).
+#
+# THE TOLERANCE IS NARROW BY CONSTRUCTION: it applies ONLY to the
+# grace-eligible classes, ONLY inside the window, and it NEVER widens a
+# timeout into masking a real checkpoint-path failure — an EXCEPTION
+# (``hard_component_red``) and the OUTER probe timeout (``probe_timeout``)
+# still degrade INSIDE the window, and after the window EVERY class
+# degrades exactly as before. The probe budget is UNCHANGED (0.9s inner
+# / 1.0s outer) and the sentinel keeps riding the hot path: this is a
+# VERDICT-TRUTH fix, not a desensitisation of the probe.
+#
+# The 120.0s default mirrors the Emperor boot SLO, so the tolerance can
+# never outlive the boot window the ceremony measures.
+READINESS_BOOT_WARM_WINDOW_S: float = 120.0
+
 # ── Checkpoint saver pool sizing (soak-gate-mcp-warmup, A4) ─────────────
 # These are the DEFAULT tiers ONLY (house 4-tier ladder, same shape as
 # WORKER_POOL_SIZE / CHAT_WORKER_POOL_SIZE above): the runtime value
