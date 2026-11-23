@@ -341,18 +341,40 @@ SONIC_BASELINE_PATHS = tuple(
     for artifact in SONIC_ARTIFACTS
 )  # 20 rows
 
-# ---- FROZEN [sonic-llm-pins-v3] (combined spec §1/§2.2 + D-B: developer
+# ---- FROZEN [sonic-llm-pins-v4] (combined spec §1/§2.2 + D-B: developer
 # joins the judgment class at "agentic"; coder/tester stay "coding";
 # leader/reviewer stay "agentic") ----
+#
+# v4 BRIDGE re-pin (2026-11-23, llmproxy outage): the proxy's ``agentic``
+# alias returned HTTP 400 ``invalid_request_error`` on every request on BOTH
+# deployments (llm.ensem.dev + llm.daoduc.org), so leader/developer/reviewer
+# were BRIDGED onto ``agentic-turbo`` (a healthy pool). The permanent fix is
+# PROXY-SIDE — repairing the ``agentic`` alias (expert-team job 98c5b408).
+#
+# ⏳ TEMPORARY — REVERT (named so it is not forgotten): once the ``agentic``
+# alias is healthy again, restore leader/developer/reviewer to "agentic" and
+# retitle this block v3. The revert is a 3-value edit in this map + the same
+# 3 values in the self-test fixture metas below.
 EXPECTED_LLM_MODEL = {
-    "sonic-leader": "agentic",
-    "sonic-developer": "agentic",
+    "sonic-leader": "agentic-turbo",
+    "sonic-developer": "agentic-turbo",
     "sonic-coder": "coding",
-    "sonic-reviewer": "agentic",
+    "sonic-reviewer": "agentic-turbo",
     "sonic-tester": "coding",
 }
+# The sonic model POOLS that must remain in the daemon's in-tree default
+# selectable set (``_ALLOWED_MODELS_DEFAULT``).
+#
+# NOTE — this guard is POOL VISIBILITY, not pin resolvability: the
+# single-model pin (``meta.llm_model``) is NOT gated by ``allowed_models`` at
+# runtime — priority-3 resolution in ``instance_lifecycle.spawn_instance``
+# slots it in verbatim (only the weighted ``llm_models`` pool is filtered).
+# ``agentic-turbo`` is supplied by the live deployment's explicit
+# ``OPENAI_SELECTABLE_MODELS``; the shipped in-tree default keeps the
+# canonical ``agentic``/``coding`` pair because the bridge is temporary (the
+# revert restores the v3 pins and this tuple unchanged).
 EXPECTED_MODELS_IN_DEFAULT_SET = ("agentic", "coding")
-# ---- END FROZEN [sonic-llm-pins-v3] ----
+# ---- END FROZEN [sonic-llm-pins-v4] ----
 
 # This lane's base — the A9 steady-team fence is judged relative to it.
 AGENTS_FENCE_BASE = "3f45cd6dd"
@@ -668,7 +690,8 @@ def a3_allow_deny(fx: Fixture) -> None:
 
 
 def a4_llm_model(fx: Fixture) -> None:
-    """A4: per-agent llm_model pin map; BOTH pin values in the in-tree set."""
+    """A4: per-agent llm_model pin map (FROZEN v4) + the sonic model pools
+    present in the in-tree default selectable set."""
     for agent in SONIC_AGENTS:
         meta = json.loads(fx.metas[agent])
         model = meta.get("llm_model")
@@ -1110,7 +1133,7 @@ def build_good_fixture() -> Fixture:
     metas = {
         "sonic-leader": {
             "id": "sonic-leader", "name": "Sonic Leader", "version": "1.1.1",
-            "llm_model": "agentic", "innate_skills": ["todo"],
+            "llm_model": "agentic-turbo", "innate_skills": ["todo"],
             "skill_injection": False, "default_queue": "system_parallel_queue",
             "tools": {"allow": list(FROZEN_TOOLS["sonic-leader"]["allow"]),
                       "deny": list(FROZEN_TOOLS["sonic-leader"]["deny"])},
@@ -1118,7 +1141,7 @@ def build_good_fixture() -> Fixture:
         },
         "sonic-developer": {
             "id": "sonic-developer", "name": "Sonic Developer", "version": "1.0.1",
-            "llm_model": "agentic", "innate_skills": ["todo"],
+            "llm_model": "agentic-turbo", "innate_skills": ["todo"],
             "skill_injection": False, "default_queue": "system_parallel_queue",
             "tools": {"allow": list(FROZEN_TOOLS["sonic-developer"]["allow"]),
                       "deny": list(FROZEN_TOOLS["sonic-developer"]["deny"])},
@@ -1134,7 +1157,7 @@ def build_good_fixture() -> Fixture:
         },
         "sonic-reviewer": {
             "id": "sonic-reviewer", "name": "Sonic Reviewer", "version": "1.1.1",
-            "llm_model": "agentic", "innate_skills": [], "skill_injection": False,
+            "llm_model": "agentic-turbo", "innate_skills": [], "skill_injection": False,
             "tools": {"allow": list(FROZEN_TOOLS["sonic-reviewer"]["allow"]),
                       "deny": list(FROZEN_TOOLS["sonic-reviewer"]["deny"])},
             "team_members": [],
