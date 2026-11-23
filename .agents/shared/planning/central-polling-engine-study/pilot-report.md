@@ -50,11 +50,11 @@ All five are ancestors of this lane's base `7243143d0` (re-verified here via
 | D4c | Truth-table tests | `tests/unit/services/test_orphan_watcher_truth_table.py` (15) | all 8 combinations + the unset/`0` distinction + the same-predicate pin |
 | D4d | Honesty pins | `tests/unit/services/test_orphan_watcher_spec_truthfulness.py` (7) | the truthful spec, the untouched 11, the dead-detection safety |
 | D5 | Soak harness + doc | `scripts/soak/engine_pilot_orphan_soak.py`, `soak-harness.md` | the read-only 48 h machinery + the exact verdict rule |
-| D6 | Boot-SLO tool | `scripts/measure/engine_pilot_boot_slo.sh` | the isolated boot → readyz-green measurement (emits the JSONL the soak harness consumes) |
+| D6 | Boot-SLO tool | `scripts/measure/engine_pilot_boot_slo.sh` | the isolated boot → readyz-green measurement (emits the JSONL the soak harness consumes); `--engine-flag/--shadow-mode` also drive the **flag-ON runtime proof** |
 
 ---
 
-## 2. The two findings that decide the flip
+## 2. The three findings that decide the flip
 
 ### 2.1 The study's dead-lane claim is **REFUTED**
 
@@ -85,10 +85,41 @@ landed unit pack uses a shape-mock, so it could not see this):
 
 **Nothing blocking was found in the landed pilot code.**
 
+### 2.3 The last missing artifact — the RUNTIME proof at flag-ON — is now MEASURED
+
+A dev boot on the **fenced dev DB** with the pilot switches set (a dev
+boot, **not** a live flip) produced the end-to-end evidence:
+
+```
+OrphanWatcherSweepService legacy loop SUPPRESSED — engine owns execution
+  (SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE=1, engine enabled, shadow off)
+orphan-watcher pilot: engine executor registered, legacy loop suppressed
+engine boot posture: ... use_engine_flags=SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE=1 (1/12);
+  executable_specs=1 (orphan-watcher); block_elapsed_ms_gated=144.249
+```
+
+```
+engine_runs id=687  job_id='orphan-watcher'  outcome='SUCCEEDED'
+   started_at=2026-11-23T18:18:29.857842Z  finished_at=...29.868268Z
+   duration_seconds=0.010382  error_class=None
+engine_jobs['orphan-watcher']: last_outcome='SUCCEEDED'  dead=0
+```
+
+| Check | Result |
+|---|---|
+| the legacy loop ticked during the flag-ON boot | **0** ⇒ exactly one owner |
+| cross-loop errors / `Traceback` / `FAILED_BACKOFF` | **0** |
+| `engine_jobs.dead` | **0** (no false-dead) |
+| the sweep's cancellations | **0 orphans existed** in the dev DB — a real sweep that found nothing (stated explicitly, not implied) |
+
+⇒ **Truth-table row 3 is empirically confirmed end-to-end**: flag ON ∧ shadow
+OFF ∧ engine enabled ⇒ the engine executes the sweep, the legacy loop is
+suppressed, the run is stamped `SUCCEEDED`, and the engine path — running on
+its worker-thread loop in a live daemon — raised nothing.
+
 ---
 
 ## 3. The flip-precondition number (adjudicated)
-
 A shipped flipprep boot measured `block_elapsed_ms_gated=499.918 ms`
 against the SLO-1 ≤250 ms cost bound. **This lane measured the landed engine
 boot block on this tree four times** (two via its own D6 script, two via the
@@ -209,6 +240,7 @@ evidence), with R3/R4/R5/R6/R8/R9 PASS and the missing evidence named.
 | The honesty pins | `tests/unit/services/test_orphan_watcher_spec_truthfulness.py` — 7 nodes |
 | The landed pack (adjacent, re-run) | `test/packs/engine_orphan_pilot_parity_test.sh` — 59/59 at `5b562165e` |
 | The byte proofs | `git diff 5044dc148..HEAD -- daemon/services/dependency_bus.py` → EMPTY; `... -- daemon/services/orphan_watcher_sweep.py` → 181 insertions / **0 deletions** |
+| The flag-ON runtime proof (in situ, fenced dev DB) | `bash scripts/measure/engine_pilot_boot_slo.sh --source <tree> --engine-flag 1 --shadow-mode 0 --timeout 60 --out flagon.jsonl` → `engine_runs id=687 outcome='SUCCEEDED' duration=0.010382s`; legacy loop SUPPRESSED (0 ticks); 0 cross-loop errors; `dead=0` |
 | The boot-SLO measurement | `scripts/measure/engine_pilot_boot_slo.sh` → one JSONL record per boot (`block_elapsed_ms_gated`, `boot_to_readyz_seconds`) |
 | The live dev-DB stamps (ownership evidence) | `engine_runs` for `orphan-watcher`: 44 `SKIPPED_SHADOW` + 4 `SKIPPED_KILL_SWITCHED`; `engine_jobs`: `last_outcome=SKIPPED_SHADOW`, `dead=0` |
 

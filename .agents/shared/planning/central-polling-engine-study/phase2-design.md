@@ -46,7 +46,7 @@ harnesses**, NOT the migration.
 | V4 | Registration class **DB_OFFLOAD** | **VERIFIED** | `dispatch.run_db_offload` is the DB_OFFLOAD path (`execution.py:465-466`); the spec's per-tick `UPDATE dependency_watchers` disqualifies MAIN_LOOP |
 | V5 | **Fail-to-legacy** on engine failure (never abort boot, never a second legacy loop) | **VERIFIED** | the boot block's `except` drops the executor LOUDLY and re-arms the legacy loop (`api.py:4123-4180`); `rearm_legacy_loop` is idempotent and fail-soft (`orphan_watcher_sweep.py:137-181`) |
 | V6 | **Exactly one owner** (no double execution, no dead lane) | **VERIFIED** | both api.py sites consult the SAME conjunct — exactly two `engine_owns_execution(` call sites in `daemon/api.py` (source-pinned); the truth table resolves all 8 combinations with **no BOTH and no NEITHER** row (§2) |
-| V7 | The legacy path is **byte-unchanged** when the flag is OFF | **VERIFIED** | `git diff 5044dc148..HEAD -- daemon/services/dependency_bus.py` is **EMPTY**; `git diff 5044dc148..HEAD -- daemon/services/orphan_watcher_sweep.py` is **181 insertions, 0 deletions** — the pilot added the seam and removed nothing (§4, Direction B) |
+| V7 | The legacy path is **byte-unchanged** when the flag is OFF | **VERIFIED** | `git diff 5044dc148..HEAD -- daemon/services/dependency_bus.py` is **EMPTY**; `git diff 5044dc148..HEAD -- daemon/services/orphan_watcher_sweep.py` is **181 insertions, 0 deletions** — the pilot added the seam and removed nothing (§3.5, Direction B) |
 | V8 | **Loop-affinity** in the engine path (the real dead-lane risk) | **VERIFIED ABSENT (measured)** | §3 — the sweep's call graph touches no loop-bound primitive; the two paths were MEASURED running on different loops; a lock-touching MUTATION is proven to fail the harness |
 | V9 | `EngineSwitchResolver.resolve_job` "SET BUT NEVER READ" (a commission lead) | **REFUTED AT THIS BASE** | `execution.py:315` calls `self._resolve_switch(spec)` → `killswitch.py:127-133` on EVERY dispatch. The resolver IS injected (`api.py:3979` → `engine.py:49`). The *rollback* is still boot-scoped (the legacy suppression is armed at boot), which is a different fact — see §7 |
 
@@ -180,7 +180,62 @@ CANCELLED`), the **same four no-ops**, and the same count (`cancelled=1`
 both sides). Engine-path repeat ticks: `1 → 0 → 0` (idempotent, no double
 execution).
 
-### 3.4 Direction B — the flag-OFF fallback is byte-provably unchanged
+### 3.4 THE RUNTIME PROOF AT FLAG-ON (MEASURED, in situ — the last missing artifact)
+
+The landed unit pack and the §3.1–3.5 legs above exercise the bridge and
+the dispatch CLASS. The artifact that was still missing is the proof that
+the **engine really executes the sweep when the flag is ON, in a real
+daemon, on a different event loop**. That was produced here on the **fenced
+dev DB** (a dev boot with the pilot switches set — NOT a live flip, NOT the
+live daemon):
+
+```
+bash scripts/measure/engine_pilot_boot_slo.sh --source <tree> \
+     --engine-flag 1 --shadow-mode 0 --timeout 60 --out flagon.jsonl
+```
+
+**Observed (boot log):**
+
+```
+OrphanWatcherSweepService legacy loop SUPPRESSED — engine owns execution
+  (SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE=1, engine enabled, shadow off);
+  sweep object retained for shutdown
+orphan-watcher pilot: engine executor registered, legacy loop suppressed
+  (SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE=1); dependency_bus late-bound at tick
+engine boot posture: enabled=True shadow=False registrations=12 observer specs
+  (execute_fn withheld); use_engine_flags=SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE=1 (1/12);
+  executable_specs=1 (orphan-watcher); block_elapsed_ms_gated=144.249
+```
+
+**Observed (fenced dev DB, `engine_runs`):**
+
+```
+id=687  job_id='orphan-watcher'  started_at=2026-11-23T18:18:29.857842Z
+        finished_at=2026-11-23T18:18:29.868268Z  outcome='SUCCEEDED'
+        skip_reason=None  duration_seconds=0.010382  error_class=None
+engine_jobs['orphan-watcher']: last_run_at=2026-11-23T18:18:29.868268Z
+        last_outcome='SUCCEEDED'  dead=0  interval=90.0
+```
+
+**Observed (absence of the failure modes):**
+
+| Check | Result |
+|---|---|
+| legacy loop ticks during the flag-ON boot | **0** (grep on the boot log) ⇒ exactly one owner |
+| cross-loop errors (`different event loop` / `attached to a different loop`) | **0** |
+| `Traceback` / `FAILED_BACKOFF` in the boot log | **0** |
+| `engine_jobs.dead` | **0** (no false-dead) |
+| the sweep's own cancellation count | **0 orphans to cancel** — the dev DB held **0** PENDING watchers, so the engine executed a real sweep that found nothing (stated explicitly rather than implied) |
+
+⇒ **Truth-table row 3 is now empirically confirmed end-to-end**: flag ON ∧
+shadow OFF ∧ engine enabled ⇒ the engine executes the sweep, the legacy
+loop is suppressed, and the run is stamped `SUCCEEDED`. The engine path ran
+on its worker-thread loop in a live daemon and raised **nothing**.
+
+(The `executable_specs=1 (orphan-watcher)` field is this lane's honesty
+fix — it is what makes the ceremony's posture line attributable.)
+
+### 3.5 Direction B — the flag-OFF fallback is byte-provably unchanged
 
 * `git diff 5044dc148..HEAD -- daemon/services/dependency_bus.py` → **EMPTY**
   (the swept-over machinery was not touched; both paths run the same
@@ -192,7 +247,7 @@ execution).
 Both are asserted as tests (they fail loudly if the diff is unavailable —
 never a vacuous pass).
 
-### 3.5 The failure-accounting asymmetry (mapped explicitly)
+### 3.6 The failure-accounting asymmetry (mapped explicitly)
 
 The bus's own sweep is internally **FAIL-OPEN** (it catches DB errors,
 logs a warning, returns 0). Therefore:

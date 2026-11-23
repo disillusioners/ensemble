@@ -54,6 +54,9 @@ DB_NAME="ensemble_dev"
 TIMEOUT=120
 OUT=""
 LABEL=""
+ENGINE_FLAG=""
+SHADOW_MODE=""
+ENGINE_ENABLED=""
 
 usage() {
   sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
@@ -69,6 +72,9 @@ while [ $# -gt 0 ]; do
     --timeout) TIMEOUT="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --label) LABEL="$2"; shift 2 ;;
+    --engine-flag) ENGINE_FLAG="$2"; shift 2 ;;
+    --shadow-mode) SHADOW_MODE="$2"; shift 2 ;;
+    --engine-enabled) ENGINE_ENABLED="$2"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "UNKNOWN ARG: $1" >&2; usage ;;
   esac
@@ -182,6 +188,12 @@ export PORT DAEMON_PORT POSTGRES_HOST POSTGRES_PORT POSTGRES_DB DB_NAME
 export ENSEMBLE_SELF_ENV ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES
 export ENSEMBLE_DB_AMBIENT_ALLOW DATA_DIR ENSEMBLE_DATA_DIR
 export PERSISTENCE_DB_PATH PYTHONDONTWRITEBYTECODE
+# The pilot switches are applied ONLY when explicitly requested (the scrub
+# above strips them otherwise). Empty ⇒ the variable stays UNSET — which is
+# the shipped dormant posture (the flag family is never set by the product).
+[ -n "$ENGINE_FLAG" ] && export SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE="$ENGINE_FLAG"
+[ -n "$SHADOW_MODE" ] && export ENSEMBLE_ENGINE_SHADOW_MODE="$SHADOW_MODE"
+[ -n "$ENGINE_ENABLED" ] && export ENSEMBLE_ENGINE_ENABLED="$ENGINE_ENABLED"
 # FENCE ASSERTIONS — fail LOUD, before exec.
 [ "$POSTGRES_DB" != "ensemble_prod" ] || { echo "FENCE_VIOLATION=DB_IS_PROD" >&2; exit 97; }
 [ "$POSTGRES_DB" = "$DB_NAME" ] || { echo "FENCE_VIOLATION=DB_MISMATCH" >&2; exit 97; }
@@ -200,6 +212,7 @@ chmod +x "$INNER"
     PORT="$PORT" DAEMON_PORT="$PORT" \
     POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 POSTGRES_DB="$DB_NAME" \
     DB_NAME="$DB_NAME" \
+    ENGINE_FLAG="$ENGINE_FLAG" SHADOW_MODE="$SHADOW_MODE" ENGINE_ENABLED="$ENGINE_ENABLED" \
     ENSEMBLE_SELF_ENV=dev \
     ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0 \
     ENSEMBLE_DB_AMBIENT_ALLOW=1 \
@@ -269,7 +282,7 @@ elif awk "BEGIN{exit !($READYZ_S <= 120.0)}"; then
 fi
 
 RECORD=$(cat <<JSON
-{"kind": "boot_slo_measurement", "label": "${LABEL}", "boot_cwd": "${BOOT_CWD}", "boot_cmd": "${BOOT_CMD}", "port": ${PORT}, "db": "${DB_NAME}", "boot_to_livez_seconds": ${LIVEZ_S:-null}, "boot_to_readyz_seconds": ${READYZ_S:-null}, "boot_slo_seconds": 120.0, "block_elapsed_ms_gated": ${GATED:-null}, "block_elapsed_ms_total": ${TOTAL:-null}, "executable_specs": ${EXECS:-null}, "boot_epoch": "${BOOT_EPOCH_TS}", "verdict": "${VERDICT}", "log": "${LOG}"}
+{"kind": "boot_slo_measurement", "label": "${LABEL}", "boot_cwd": "${BOOT_CWD}", "boot_cmd": "${BOOT_CMD}", "port": ${PORT}, "db": "${DB_NAME}", "boot_to_livez_seconds": ${LIVEZ_S:-null}, "boot_to_readyz_seconds": ${READYZ_S:-null}, "boot_slo_seconds": 120.0, "block_elapsed_ms_gated": ${GATED:-null}, "block_elapsed_ms_total": ${TOTAL:-null}, "executable_specs": ${EXECS:-null}, "engine_flag": "${ENGINE_FLAG}", "shadow_mode": "${SHADOW_MODE}", "boot_epoch": "${BOOT_EPOCH_TS}", "verdict": "${VERDICT}", "log": "${LOG}"}
 JSON
 )
 
