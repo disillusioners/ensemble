@@ -30,24 +30,35 @@ from daemon.services.release_pointer_check import (
 
 def _make_install(root: Path, *, journal_current: str | None, alias_target: str | None,
                   top_target: str | None, make_alias_dir: bool = True,
-                  make_top_dir: bool = True) -> Path:
+                  make_top_dir: bool = True,
+                  in_flight_target: str | None = None,
+                  pending_op_target: str | None = None) -> Path:
     """Build a fake install dir. alias_target/top_target are raw readlink values
     (e.g. 'v0.31.42' / 'releases/v0.31.42') or None for absent."""
     install = root / "install"
     install.mkdir()
     (install / "releases").mkdir()
     # journal
+    import json
     if journal_current is None:
-        # torn/empty journal -> write empty file (null current)
         (install / "releases" / "state.json").write_text("{}", encoding="utf-8")
     else:
-        import json
+        payload = {"current": journal_current, "previous": None}
+        if in_flight_target is not None:
+            payload["in_flight"] = {"target": in_flight_target}
+        if pending_op_target is not None:
+            payload["pending_op"] = {"target": pending_op_target}
         (install / "releases" / "state.json").write_text(
-            json.dumps({"current": journal_current, "previous": None}),
-            encoding="utf-8",
+            json.dumps(payload), encoding="utf-8",
         )
     # release dirs for targets that should resolve
-    for name in ("v0.31.42", "v0.31.37", "vOLD"):
+    names = {"v0.31.42", "v0.31.37", "vOLD"}
+    for cand in (journal_current, alias_target, top_target, in_flight_target, pending_op_target):
+        if cand:
+            nm = str(cand).rsplit("/", 1)[-1]
+            if "DOES_NOT_EXIST" not in nm and "MISSING" not in nm:
+                names.add(nm)
+    for name in names:
         d = install / "releases" / name
         d.mkdir(exist_ok=True)
     # alias symlink
@@ -152,6 +163,46 @@ def test_none_install_dir_no_crash():
     # no install dir -> nothing-to-check
     assert r["ok"] is True
     assert r["alias_present"] is False
+
+
+def test_ceremony_window_info(install_factory, caplog):
+    import logging
+    # Mid-ceremony: alias already at the new version (vB) while journal/top
+    # still at the old (vA); in_flight target == vB. The alias mismatch's
+    # "new side" (vB) equals the ceremony target -> renders ceremony-window
+    # INFO, NO release-pointer-drift token, ceremony_in_progress=True.
+    install = install_factory(
+        journal_current="vA",
+        alias_target="vB",
+        top_target="releases/vA",
+        in_flight_target="vB",
+    )
+    r = check_release_pointer(install)
+    assert r["ceremony_in_progress"] is True
+    assert r["ok"] is True
+    assert any(str(x).startswith("ceremony-window:") for x in r["reasons"])
+    with caplog.at_level(logging.WARNING):
+        run_boot_check(install)
+    assert not any("release-pointer-drift" in rec.message for rec in caplog.records)
+
+
+def test_third_version_mismatch_warning(install_factory, caplog):
+    import logging
+    # Ceremony in progress (in_flight target vB, alias at vB) but the top
+    # pointer names a THIRD version (vC) -> real drift: WARNING + token,
+    # ceremony_in_progress still True.
+    install = install_factory(
+        journal_current="vA",
+        alias_target="vB",
+        top_target="releases/v0.31.37",
+        in_flight_target="vB",
+    )
+    r = check_release_pointer(install)
+    assert r["ceremony_in_progress"] is True
+    assert r["ok"] is False
+    with caplog.at_level(logging.WARNING):
+        run_boot_check(install)
+    assert any("release-pointer-drift" in rec.message for rec in caplog.records)
 
 
 def test_run_boot_check_logs_drift_token(install_factory, caplog):
