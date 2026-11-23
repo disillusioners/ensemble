@@ -452,7 +452,7 @@ def create_project_tools(
     
     @register_tool_category("project")
     @tool
-    def project_get(project_id: str | None = None, name: str | None = None, shortname: str | None = None) -> dict | None:
+    def project_get(project_id: str | None = None, name: str | None = None, shortname: str | None = None) -> dict:
         """Get a project by ID, name, or shortname. Use tool_help("project_get") for details."""
         if project_id:
             project = store.get(project_id)
@@ -483,6 +483,7 @@ def create_project_tools(
             return {
                 "error": resolution["error"],
                 "error_code": "AMBIGUOUS_PROJECT",
+                "query": query,
                 "candidates": resolution.get("candidates", []),
                 "candidate_count": resolution.get("candidate_count", 0),
             }

@@ -431,6 +431,7 @@ class TestProjectGetWiring:
         result = tool_map["project_get"].invoke({"name": "ambiguous"})
 
         assert result["error_code"] == "AMBIGUOUS_PROJECT"
+        assert result["query"] == "ambiguous"
         assert result["candidate_count"] == 2
         assert len(result["candidates"]) == 2
         assert "project_id" not in result
