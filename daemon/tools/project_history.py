@@ -32,8 +32,19 @@ _FULL_DOCS = {
 Records a project event such as a milestone, commit, deployment, or other
 notable occurrence. Entries are timestamped and can be filtered by type.
 
+The project is addressed by ``project_id``, ``name`` or ``shortname``
+(``project_id`` wins, then ``name``, then ``shortname``). Name/shortname
+lookups run the resolution ladder that resolves to exactly ONE project; a
+reference matching several projects is refused with the candidates so the
+caller can retry with an explicit project_id.
+
 Args:
-    project_id: The project ID to add the entry to.
+    project_id: The project ID to add the entry to (optional when name or
+               shortname is given).
+    name: The project name to add the entry to (used if project_id is not
+          provided).
+    shortname: A project shortname/nickname (used if project_id and name
+               are not provided).
     entry_type: Type of event — milestone, commit, phase, bugfix, deployment,
                note, config_change, feature, or other.
     summary: Brief description of the event (max 300 chars, auto-truncated).
@@ -55,8 +66,19 @@ Example:
 
 Returns entries in reverse chronological order (newest first).
 
+The project is addressed by ``project_id``, ``name`` or ``shortname``
+(``project_id`` wins, then ``name``, then ``shortname``). Name/shortname
+lookups run the resolution ladder that resolves to exactly ONE project; a
+reference matching several projects is refused with the candidates so the
+caller can retry with an explicit project_id.
+
 Args:
-    project_id: The project ID to list entries for.
+    project_id: The project ID to list entries for (optional when name or
+               shortname is given).
+    name: The project name to list entries for (used if project_id is not
+          provided).
+    shortname: A project shortname/nickname (used if project_id and name
+               are not provided).
     limit: Maximum entries to return (default 20, max 100).
     offset: Number of entries to skip for pagination.
     entry_type: Optional filter by entry type.
@@ -68,8 +90,19 @@ Returns:
 
 Searches both summary and details fields for matching text.
 
+The project is addressed by ``project_id``, ``name`` or ``shortname``
+(``project_id`` wins, then ``name``, then ``shortname``). Name/shortname
+lookups run the resolution ladder that resolves to exactly ONE project; a
+reference matching several projects is refused with the candidates so the
+caller can retry with an explicit project_id.
+
 Args:
-    project_id: The project ID to search within.
+    project_id: The project ID to search within (optional when name or
+               shortname is given).
+    name: The project name to search within (used if project_id is not
+          provided).
+    shortname: A project shortname/nickname (used if project_id and name
+               are not provided).
     query: Search string to match.
     limit: Maximum entries to return (default 20, max 100).
     offset: Number of entries to skip for pagination.
@@ -80,10 +113,21 @@ Returns:
     "project_history_delete": """Delete a history entry by ID.
 
 Removes a specific history entry from the project. Requires entry_id
-and matching project_id for ownership verification.
+and a matching project reference for ownership verification.
+
+The project is addressed by ``project_id``, ``name`` or ``shortname``
+(``project_id`` wins, then ``name``, then ``shortname``). Name/shortname
+lookups run the resolution ladder that resolves to exactly ONE project; a
+reference matching several projects is refused with the candidates so the
+caller can retry with an explicit project_id.
 
 Args:
-    project_id: The project ID the entry belongs to.
+    project_id: The project ID the entry belongs to (optional when name or
+               shortname is given).
+    name: The project name the entry belongs to (used if project_id is not
+          provided).
+    shortname: A project shortname/nickname (used if project_id and name
+               are not provided).
     entry_id: The ID of the entry to delete.
 
 Returns:
@@ -94,6 +138,78 @@ Returns:
 def _is_valid_entry_type(entry_type: str) -> bool:
     """Check if entry_type is a valid HistoryEntryType value."""
     return entry_type in HistoryEntryType._value2member_map_
+
+
+def _resolve_target_project(store, project_id, name, shortname):
+    """Resolve a project reference to exactly ONE project.
+
+    This mirrors the ``project_get`` dispatch (``daemon/tools/project.py``)
+    EXACTLY — the resolution ladder has ONE owner
+    (``SQLModelProjectRepository.resolve_project_reference``) and this
+    helper CALLS it. No matching logic is duplicated here.
+
+    Dispatch order:
+
+    * ``project_id`` — direct ``store.get`` lookup. The resolver is NEVER
+      called on this path (byte-compat + mock-store compat: a store stub
+      without ``resolve_project_reference`` keeps working).
+    * ``name`` — the full resolution ladder (``scope="name"``).
+    * ``shortname`` — the shortname-only ladder (``scope="shortname"``).
+    * none of them — a refusal demanding one of the three.
+
+    Returns:
+        tuple: ``(project, resolved_id, error)``. On success ``error`` is
+        ``None``, ``project`` is the resolved project and ``resolved_id``
+        is the project id every store call must use. On a refusal
+        ``project``/``resolved_id`` are ``None`` and ``error`` is the typed
+        refusal dict to hand back to the caller.
+    """
+    if project_id:
+        project = store.get(project_id)
+        if project is None:
+            return None, None, {
+                "error": "Project not found",
+                "error_code": "NOT_FOUND",
+                "query": project_id,
+                "candidates": [],
+            }
+        # The id path keeps the CALLER's id verbatim — byte-compat with the
+        # pre-resolution behaviour (for the real repository the store's own
+        # id is identical).
+        return project, project_id, None
+
+    if name:
+        resolution = store.resolve_project_reference(name, scope="name")
+        query = name
+    elif shortname:
+        resolution = store.resolve_project_reference(shortname, scope="shortname")
+        query = shortname
+    else:
+        return None, None, {
+            "error": "Must provide either project_id, name, or shortname",
+        }
+
+    if resolution.get("found"):
+        project = resolution["project"]
+        return project, project.project_id, None
+
+    if resolution.get("error_code") == "AMBIGUOUS_PROJECT":
+        # NEVER silently pick one of several candidates — the caller gets
+        # the candidates and must retry with an explicit id.
+        return None, None, {
+            "error": resolution["error"],
+            "error_code": "AMBIGUOUS_PROJECT",
+            "query": query,
+            "candidates": resolution.get("candidates", []),
+            "candidate_count": resolution.get("candidate_count", 0),
+        }
+
+    return None, None, {
+        "error": "Project not found",
+        "error_code": "NOT_FOUND",
+        "query": query,
+        "candidates": [],
+    }
 
 
 # History entry types whose addition implies a structural project change
@@ -123,7 +239,10 @@ def create_project_history_tools(
     @register_tool_category(CATEGORY_NAME)
     @tool
     def project_history_add(
-        project_id: str,
+        project_id: str | None = None,
+        name: str | None = None,
+        shortname: str | None = None,
+        *,
         entry_type: str,
         summary: str,
         details: str | None = None,
@@ -135,10 +254,12 @@ def create_project_history_tools(
             valid_types = [e.value for e in HistoryEntryType]
             return {"error": f"Invalid entry_type '{entry_type}'. Valid: {valid_types}"}
 
-        # Step 2: Validate project exists
-        project = store.get(project_id)
-        if not project:
-            return {"error": f"Project '{project_id}' not found"}
+        # Step 2: Resolve the project reference (id / name / shortname)
+        project, resolved_id, ref_error = _resolve_target_project(
+            store, project_id, name, shortname,
+        )
+        if ref_error is not None:
+            return ref_error
 
         # Step 3: Validate non-empty summary
         if not summary or not summary.strip():
@@ -151,7 +272,7 @@ def create_project_history_tools(
 
         # Step 5: Add entry via store (returns dict already)
         entry = store.add_history_entry(
-            project_id=project_id,
+            project_id=resolved_id,
             entry_type=entry_type,
             summary=summary,
             details=details,
@@ -192,7 +313,7 @@ def create_project_history_tools(
                 if proj_repo is not None:
                     try:
                         val = proj_repo.get_metadata(
-                            project_id, BLUEPRINT_ACTIVE_METADATA_KEY,
+                            resolved_id, BLUEPRINT_ACTIVE_METADATA_KEY,
                         )
                         project_blueprint_active = bool(val)
                     except Exception:
@@ -200,7 +321,7 @@ def create_project_history_tools(
             if project_blueprint_active:
                 try:
                     pending_repo.enqueue(
-                        project_id=project_id,
+                        project_id=resolved_id,
                         source_type="history",
                         source_payload={
                             "entry_type": entry_type,
@@ -221,16 +342,21 @@ def create_project_history_tools(
     @register_tool_category(CATEGORY_NAME)
     @tool
     def project_history_list(
-        project_id: str,
+        project_id: str | None = None,
+        name: str | None = None,
+        shortname: str | None = None,
+        *,
         limit: int = 20,
         offset: int = 0,
         entry_type: str | None = None,
     ) -> dict:
         """List history entries for a project. Use tool_help() for details."""
-        # Validate project exists
-        project = store.get(project_id)
-        if not project:
-            return {"error": f"Project '{project_id}' not found"}
+        # Resolve the project reference (id / name / shortname)
+        _project, resolved_id, ref_error = _resolve_target_project(
+            store, project_id, name, shortname,
+        )
+        if ref_error is not None:
+            return ref_error
 
         # Clamp and cap limit at 100
         limit = max(1, min(limit, 100))
@@ -243,7 +369,7 @@ def create_project_history_tools(
 
         # Call store (returns dict with entries, total, limit, offset)
         result = store.list_history_entries(
-            project_id=project_id,
+            project_id=resolved_id,
             entry_type=entry_type,
             limit=limit,
             offset=offset,
@@ -255,16 +381,21 @@ def create_project_history_tools(
     @register_tool_category(CATEGORY_NAME)
     @tool
     def project_history_search(
-        project_id: str,
+        project_id: str | None = None,
+        name: str | None = None,
+        shortname: str | None = None,
+        *,
         query: str,
         limit: int = 20,
         offset: int = 0,
     ) -> dict:
         """Search history entries by query. Use tool_help() for details."""
-        # Validate project exists
-        project = store.get(project_id)
-        if not project:
-            return {"error": f"Project '{project_id}' not found"}
+        # Resolve the project reference (id / name / shortname)
+        _project, resolved_id, ref_error = _resolve_target_project(
+            store, project_id, name, shortname,
+        )
+        if ref_error is not None:
+            return ref_error
 
         # Clamp and cap limit at 100
         limit = max(1, min(limit, 100))
@@ -272,7 +403,7 @@ def create_project_history_tools(
 
         # Call store (returns dict with entries, total, limit, offset, query)
         result = store.search_history_entries(
-            project_id=project_id,
+            project_id=resolved_id,
             query=query,
             limit=limit,
             offset=offset,
@@ -284,20 +415,25 @@ def create_project_history_tools(
     @register_tool_category(CATEGORY_NAME)
     @tool
     def project_history_delete(
-        project_id: str,
+        project_id: str | None = None,
+        name: str | None = None,
+        shortname: str | None = None,
+        *,
         entry_id: str,
     ) -> dict:
         """Delete a history entry by ID. Use tool_help() for details."""
-        # Validate project exists
-        project = store.get(project_id)
-        if not project:
-            return {"error": f"Project '{project_id}' not found"}
+        # Resolve the project reference (id / name / shortname)
+        _project, resolved_id, ref_error = _resolve_target_project(
+            store, project_id, name, shortname,
+        )
+        if ref_error is not None:
+            return ref_error
 
         # Delete entry
-        deleted = store.delete_history_entry(entry_id, project_id=project_id)
+        deleted = store.delete_history_entry(entry_id, project_id=resolved_id)
 
         if not deleted:
-            return {"error": f"Entry '{entry_id}' not found in project '{project_id}'"}
+            return {"error": f"Entry '{entry_id}' not found in project '{resolved_id}'"}
 
         return {"success": True, "deleted_entry_id": entry_id}
     project_history_delete._full_doc_ = _FULL_DOCS["project_history_delete"]

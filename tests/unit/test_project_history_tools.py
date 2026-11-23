@@ -390,7 +390,7 @@ class TestProjectHistoryAdd:
         assert "🚀" in result["details"]
 
     def test_add_project_not_found(self, add_tool, mock_store):
-        """Store.get returns None -> error dict."""
+        """Store.get returns None -> typed NOT_FOUND error dict."""
         mock_store.get.return_value = None
 
         result = add_tool.invoke(
@@ -402,7 +402,10 @@ class TestProjectHistoryAdd:
         )
 
         assert "error" in result
-        assert "Project 'nonexistent' not found" in result["error"]
+        assert result["error"] == "Project not found"
+        assert result["error_code"] == "NOT_FOUND"
+        assert result["query"] == "nonexistent"
+        assert result["candidates"] == []
 
 
 # =============================================================================
@@ -510,13 +513,16 @@ class TestProjectHistoryList:
         assert result["total"] == 3
 
     def test_list_project_not_found(self, list_tool, mock_store):
-        """Project not found -> error dict."""
+        """Project not found -> typed NOT_FOUND error dict."""
         mock_store.get.return_value = None
 
         result = list_tool.invoke({"project_id": "nonexistent"})
 
         assert "error" in result
-        assert "Project 'nonexistent' not found" in result["error"]
+        assert result["error"] == "Project not found"
+        assert result["error_code"] == "NOT_FOUND"
+        assert result["query"] == "nonexistent"
+        assert result["candidates"] == []
 
 
 # =============================================================================
@@ -635,7 +641,7 @@ class TestProjectHistorySearch:
         assert result["offset"] == 0
 
     def test_search_project_not_found(self, search_tool, mock_store):
-        """Project not found -> error dict."""
+        """Project not found -> typed NOT_FOUND error dict."""
         mock_store.get.return_value = None
 
         result = search_tool.invoke(
@@ -643,7 +649,10 @@ class TestProjectHistorySearch:
         )
 
         assert "error" in result
-        assert "Project 'nonexistent' not found" in result["error"]
+        assert result["error"] == "Project not found"
+        assert result["error_code"] == "NOT_FOUND"
+        assert result["query"] == "nonexistent"
+        assert result["candidates"] == []
 
 
 # =============================================================================
@@ -715,7 +724,7 @@ class TestProjectHistoryDelete:
         assert "not found" in result["error"]
 
     def test_delete_project_not_found(self, delete_tool, mock_store):
-        """Delete with nonexistent project -> error dict."""
+        """Delete with nonexistent project -> typed NOT_FOUND error dict."""
         mock_store.get.return_value = None
 
         result = delete_tool.invoke(
@@ -723,7 +732,10 @@ class TestProjectHistoryDelete:
         )
 
         assert "error" in result
-        assert "Project 'nonexistent' not found" in result["error"]
+        assert result["error"] == "Project not found"
+        assert result["error_code"] == "NOT_FOUND"
+        assert result["query"] == "nonexistent"
+        assert result["candidates"] == []
 
 
 # =============================================================================
