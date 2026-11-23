@@ -671,8 +671,19 @@ class TestReadPairParity:
                 r"^resolved env: target=(\S+) dir=(\S+) port=(\S+) db=(\S+)$", line
             ):
                 fields["env_triple"] = m.groups()
-            elif m := re.match(r"^current=(\S+) \(via releases/current → (.+)\)$", line):
+            elif m := re.match(r"^current=(\S+) \(via install-root current → (.+)\)$", line):
                 fields["current"] = m.group(2)
+            elif m := re.match(
+                r"^alias releases/current: target=(\S+) state=(\S+) journal-match=(\S+)$",
+                line,
+            ):
+                fields["alias"] = {
+                    "target": m.group(1),
+                    "state": m.group(2),
+                    "journal_match": m.group(3),
+                }
+            elif line.startswith("alias: WARNING — "):
+                fields.setdefault("alias_warnings", []).append(line)
             elif line.startswith("pipeline lock:"):
                 if line.endswith("free"):
                     fields["lock"] = "free"
@@ -766,6 +777,125 @@ class TestReadPairParity:
         #    (launcher state, upgrade.log tail) — additive, never missing.
         assert "launcher" in info_out
         assert "upgrade.log" in info_out
+
+
+class TestCurrentPointerDisplay:
+    """relcur-pointer M3 — the pointer display must name the REAL source.
+
+    A staged install has TWO ``current`` pointers:
+
+    * ``<install>/current`` — the INSTALL-ROOT pointer the launcher
+      resolves and ``_current_symlink()`` READS;
+    * ``<install>/releases/current`` — the convenience/fence ALIAS owned by
+      the ceremony.
+
+    The display used to label the install-root read as ``(via releases/
+    current → …)`` — the label LIED about the source and made an operator
+    believe ``release_info`` read the alias (it never did). The label now
+    names the real source, and the alias gets its OWN status line
+    (target / resolves-or-DANGLING / matches-journal) plus a WARNING-tone
+    note on dangling/mismatch.
+    """
+
+    @staticmethod
+    async def _current_section(tools) -> str:
+        return await tools["release_info"].ainvoke({"section": "current"})
+
+    @staticmethod
+    def _set_journal_current(install: Path, version: str | None) -> None:
+        data = uj.journal_read(install)
+        data["current"] = version
+        uj.journal_write(install, data)
+
+    async def test_current_line_names_the_install_root_source(self, harness) -> None:
+        """The value comes from the install-root symlink — say so."""
+        tools, _, install = harness
+        out = await self._current_section(tools)
+        assert (
+            "current=1.2.2 (via install-root current → releases/1.2.2)" in out
+        ), out
+        # The old, lying label must be gone from the whole surface.
+        assert "via releases/current" not in out, out
+
+    async def test_alias_absent_prints_no_alias_line(self, harness) -> None:
+        """No ``releases/current`` on the fixture → NO alias line at all
+        (an absent alias is not drift — the M2 boot check reports that
+        shape separately)."""
+        tools, _, install = harness
+        assert not (install / "releases" / "current").is_symlink()
+        out = await self._current_section(tools)
+        assert "alias releases/current:" not in out, out
+        assert "alias: WARNING" not in out, out
+
+    async def test_alias_present_clean(self, harness) -> None:
+        """Alias present, resolves, matches the journal current → status
+        line, NO warning."""
+        tools, _, install = harness
+        self._set_journal_current(install, "1.2.2")
+        (install / "releases" / "current").symlink_to("1.2.2")
+        out = await self._current_section(tools)
+        assert (
+            "alias releases/current: target=1.2.2 state=resolves journal-match=yes"
+            in out
+        ), out
+        assert "alias: WARNING" not in out, out
+
+    async def test_alias_dangling_is_flagged(self, harness) -> None:
+        """Alias points at a MISSING release dir → DANGLING + a WARNING
+        note in the D-FA5.3 dangling-note family."""
+        tools, _, install = harness
+        self._set_journal_current(install, "1.2.2")
+        (install / "releases" / "current").symlink_to("9.9.9")
+        out = await self._current_section(tools)
+        assert (
+            "alias releases/current: target=9.9.9 state=DANGLING journal-match=no"
+            in out
+        ), out
+        assert "alias: WARNING — alias-dangling:" in out, out
+        assert "D-FA5.3" in out, out
+        # Dangling AND different from the journal current → both tokens.
+        assert "alias-mismatch" in out, out
+
+    async def test_alias_mismatch_is_flagged(self, harness) -> None:
+        """Alias resolves but names a different release than the journal
+        current → journal-match=no + a mismatch WARNING."""
+        tools, _, install = harness
+        self._set_journal_current(install, "1.2.2")
+        (install / "releases" / "current").symlink_to("1.2.3")
+        out = await self._current_section(tools)
+        assert (
+            "alias releases/current: target=1.2.3 state=resolves journal-match=no"
+            in out
+        ), out
+        assert "alias: WARNING — alias-mismatch:" in out, out
+        # Resolves → NOT dangling: the dangling token must not fire.
+        assert "alias-dangling" not in out, out
+
+    async def test_alias_without_journal_current_reports_unknown(self, harness) -> None:
+        """No journal current to compare against → journal-match=unknown
+        (never a silent 'yes')."""
+        tools, _, install = harness
+        self._set_journal_current(install, None)
+        (install / "releases" / "current").symlink_to("1.2.2")
+        out = await self._current_section(tools)
+        assert (
+            "alias releases/current: target=1.2.2 state=resolves journal-match=unknown"
+            in out
+        ), out
+        assert "alias: WARNING" not in out, out
+
+    async def test_dry_run_preflight_names_the_install_root_source(
+        self, harness
+    ) -> None:
+        """The upgrade PREFLIGHT carried the same lying label — it now
+        names the real source too."""
+        tools, _, install = harness
+        out = await tools["system_upgrade"].ainvoke(
+            {"target_env": "demo", "dry_run": True}
+        )
+        assert "UPGRADE PREFLIGHT (dry-run)" in out, out
+        assert "current=1.2.2 (via install-root current)" in out, out
+        assert "via releases/current" not in out, out
 
 
 class TestUpgradeStatusRoundTrip:

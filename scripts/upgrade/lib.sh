@@ -5746,6 +5746,110 @@ atomic_flip() {
         return 1
     fi
     _log "current -> releases/$ver (atomic flip)"
+
+    # Pointer alias maintenance (relcur-m1): the ceremony OWNS the
+    # $INSTALL_DIR/releases/current alias and must never strand it.
+    # Mirror the top-level flip onto the alias with the same rename(2)
+    # discipline. CREATE it on first flip when absent (mv -T/-h creates
+    # dest when missing). Top-level flip is already committed, so an
+    # alias failure/mismatch is LOUD but never fails/rolls back.
+    local _rel="$INSTALL_DIR/releases"
+    local _alias_mirror_ok=0
+    mkdir -p "$_rel" 2>/dev/null || true
+    if ln -sfn "$ver" "$_rel/current.alias.new.$$" 2>/dev/null; then
+        # shellcheck disable=SC2086
+        if ! mv $mv_args "$_rel/current.alias.new.$$" "$_rel/current" 2>/dev/null; then
+            rm -f "$_rel/current.alias.new.$$" 2>/dev/null
+            _warn "atomic_flip: pointer alias releases/current flip FAILED for $ver — top-level current already committed; NOT rolling back"
+            journal_history_append warn "pointer-alias: releases/current flip FAILED for $ver (top-level current committed)" >/dev/null 2>&1 || true
+        else
+            _alias_mirror_ok=1
+            _log "releases/current -> $ver (pointer alias flip)"
+        fi
+    else
+        _warn "atomic_flip: pointer alias releases/current ln FAILED for $ver — top-level current already committed; NOT rolling back"
+        journal_history_append warn "pointer-alias: releases/current ln FAILED for $ver (top-level current committed)" >/dev/null 2>&1 || true
+    fi
+
+    # ASSERT (flip site): the top-level pointer and the releases/current
+    # alias MUST name the SAME release, and the alias MUST name the
+    # release just flipped. Both hold at flip time (the journal's `current`
+    # does NOT — it is written later, at commit — so it is deliberately NOT
+    # compared here; see pointer_alias_assert_commit for that check).
+    # Loud on mismatch; never fatal (the top flip is already committed).
+    local _top_base _alias_base
+    _top_base="$(basename "$(readlink "$INSTALL_DIR/current" 2>/dev/null)" 2>/dev/null)"
+    _alias_base="$(_pointer_alias_basename)"
+    if [ "$_alias_mirror_ok" = "1" ] && [ -z "$_alias_base" ]; then
+        _warn "atomic_flip: ASSERT FAILED releases/current alias is ABSENT after a successful mirror (target $ver)"
+        journal_history_append warn "pointer-alias: ASSERT alias ABSENT after mirror (target $ver)" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$_alias_base" ] && [ "$_top_base" != "$_alias_base" ]; then
+        _warn "atomic_flip: ASSERT FAILED top-level basename '$_top_base' != alias basename '$_alias_base' (target $ver)"
+        journal_history_append warn "pointer-alias: ASSERT top '$_top_base' != alias '$_alias_base'" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$_alias_base" ] && [ "$_alias_base" != "$ver" ]; then
+        _warn "atomic_flip: ASSERT FAILED alias basename '$_alias_base' != flipped version '$ver'"
+        journal_history_append warn "pointer-alias: ASSERT alias '$_alias_base' != flipped '$ver'" >/dev/null 2>&1 || true
+    fi
+
+    return 0
+}
+
+# _pointer_alias_basename — the release name the releases/current alias
+# points at (basename of its target), or EMPTY when the alias is absent.
+# The alias target is a bare release name (e.g. "v0.31.42"); a relative
+# "releases/<ver>" target is also handled (basename).
+_pointer_alias_basename() {
+    local t=""
+    [ -L "$INSTALL_DIR/releases/current" ] || return 0
+    t="$(readlink "$INSTALL_DIR/releases/current" 2>/dev/null)" || t=""
+    [ -n "$t" ] || return 0
+    printf '%s' "${t##*/}"
+}
+
+# pointer_alias_assert_commit <ver> <journal_current> — COMMIT-site
+# pointer-alias assertion. Called AFTER the journal's `current` has been set
+# to the promoted version, where the equality genuinely HOLDS on a healthy
+# ceremony: the releases/current alias MUST name the same release as the
+# journal's `current`. A mismatch here means the pointer was stranded or
+# mis-pointed — LOUD (_warn + a `warn` journal row) but NEVER fatal: the
+# ceremony's commit has already succeeded by the time this runs.
+#
+# <journal_current> — the journal's `current` value, as ALREADY READ by the
+# caller (the commit path reads the journal for its immediacy assertion
+# anyway). Passing it keeps this helper free of a second O(N) journal read
+# — the journal_read call-site census (tests/packs/preflight_census_test.sh)
+# counts direct call sites, so the read is NOT duplicated here. An EMPTY
+# value means the journal current could not be read: the invariant is then
+# UNVERIFIABLE, which is said out loud (an unverified pointer is not a
+# verified pointer).
+#
+# Deliberately NOT called at the flip site: there the journal still holds
+# the PREVIOUS current (it is written at commit), so comparing the alias
+# against the journal at flip time is guaranteed-spurious.
+pointer_alias_assert_commit() {
+    local ver="${1:-}"
+    local journal_base="${2:-}"
+    local alias_base=""
+    alias_base="$(_pointer_alias_basename)"
+    [ "$journal_base" = "null" ] && journal_base=""
+    # No journal current -> the invariant CANNOT be checked. Say so (loud,
+    # non-fatal); the ceremony's own journal_fail_loud path owns the hard
+    # refusal for an unreadable journal.
+    if [ -z "$journal_base" ]; then
+        _warn "pointer alias: journal current unreadable — the releases/current vs journal-current invariant could NOT be verified (promoted=${ver:-unknown})"
+        return 0
+    fi
+    if [ -z "$alias_base" ]; then
+        _warn "pointer alias: releases/current is ABSENT while journal current='$journal_base' (promoted=${ver:-unknown}) — the release pointer is stranded; repair: scripts/upgrade/pointer-alias-repair.sh"
+        journal_history_append warn "pointer-alias: releases/current ABSENT while journal current='$journal_base' (promoted=${ver:-unknown}) — pointer stranded" >/dev/null 2>&1 || true
+        return 0
+    fi
+    if [ "$alias_base" != "$journal_base" ]; then
+        _warn "pointer alias: releases/current -> '$alias_base' != journal current '$journal_base' (promoted=${ver:-unknown}) — the release pointer is mis-pointed; repair: scripts/upgrade/pointer-alias-repair.sh"
+        journal_history_append warn "pointer-alias: releases/current '$alias_base' != journal current '$journal_base' (promoted=${ver:-unknown}) — pointer mis-pointed" >/dev/null 2>&1 || true
+    fi
     return 0
 }
 
@@ -9727,8 +9831,10 @@ retention_evict() {
     # (post-commit seat must never fail). Pointer WRITES belong to the
     # stage/promote lane — we only read and protect here.
     local ptr_link="$INSTALL_DIR/current" tgt_raw="" tgt="" refuse_reason=""
+    local _top_healthy=0
     if [ -L "$ptr_link" ]; then
         tgt_raw="$(readlink "$ptr_link" 2>/dev/null)" || tgt_raw=""
+        _top_healthy=1
     elif [ -L "$rel/current" ]; then
         tgt_raw="$(readlink "$rel/current" 2>/dev/null)" || tgt_raw=""
     fi
@@ -9742,6 +9848,23 @@ retention_evict() {
             refuse_reason="pointer-mismatch"
         fi
     fi
+
+    # Alias-divergence seam (relcur-m1): when BOTH pointers exist and the
+    # top-level pointer is healthy, the releases/current alias is a SECOND
+    # pointer. If it is dangling or disagrees with the journal current, refuse
+    # all evictions (fail-closed, same path as primary-pointer divergence) so
+    # the alias target is never evicted. When the alias is healthy it equals
+    # journal current == already pinned — no extra pin needed.
+    if [ -z "$refuse_reason" ] && [ "$_top_healthy" = "1" ] && [ -L "$rel/current" ]; then
+        local _alias_raw="" _alias_tgt=""
+        _alias_raw="$(readlink "$rel/current" 2>/dev/null)" || _alias_raw=""
+        _alias_tgt="${_alias_raw##*/}"
+        if [ -n "$_alias_raw" ] && { [ ! -d "$rel/$_alias_tgt" ] || [ "$_alias_tgt" != "$cur" ]; }; then
+            refuse_reason="alias-divergence"
+            tgt="$_alias_tgt"
+        fi
+    fi
+
     if [ -n "$refuse_reason" ]; then
         journal_history_append retention_refuse \
             "reason=$refuse_reason pointer_target=$tgt journal_current=$cur evictions=0" \

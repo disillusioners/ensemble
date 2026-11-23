@@ -928,6 +928,15 @@ async def lifespan(app: FastAPI):
         f"[Config] reasoning_echo_disabled_models={ThinkingChatOpenAI.reasoning_echo_disabled_models} "
         f"(models matching these patterns will NOT echo reasoning_content; all others echo)"
     )
+    # Release-pointer invariant boot check (relcur-pointer M2): CHEAP, LOUD,
+    # NON-BLOCKING. Mirrors daemon/__main__.py — detects a dangling/mismatched
+    # releases/current alias vs journal current without ever gating boot
+    # (metadata drift != outage). Flag readable via last_boot_check().
+    from daemon.services.release_pointer_check import (
+        run_boot_check as _boot_release_pointer_check,
+    )
+
+    _boot_release_pointer_check()
     # Wire the OPENAI_STREAMING operator knob (CF-125s 524 fix). The
     # chokepoint ``clean_llm_config`` reads this class var when callers
     # don't pass an explicit streaming flag — see daemon/graph.py.
