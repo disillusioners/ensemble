@@ -33,14 +33,22 @@ Phase-5 tests ``TestDstSemantics`` parameterize over BOTH paths (cron
 See ``.agents/shared/planning/scheduled-tasks/decisions.md`` ADR-008 and
 ``architecture-recommendation.md`` §4 for the full rationale.
 
-## Phase-1 D4 idempotency contract (ADR-004)
+## Phase-1 D4 idempotency contract (ADR-004) — F1(a) revised
 
-One-time schedules emit ``idempotency_key=f"scheduler:{source_id}:{self._run_at.isoformat()}"``
-to ``enqueue_message_job`` (gated to ``SCHEDULE_TYPE_ONE_TIME`` so cron
-fires keep minting fresh JobItems). The key MUST be derived from
-``self._run_at`` (the configured run_at parsed once in ``__init__``),
-NOT from ``next_trigger`` — the latter returns ``now`` for past-due
-one-shots and would mutate the key on every cycle.
+ALL scheduled fires emit the PER-EXECUTION key
+``scheduler:{source_id}:exec:{execution_id}`` to ``enqueue_message_job``
+(``execution_id`` is the per-fire UUID4 minted in
+``_emit_scheduled_message`` / ``manual_trigger``). Distinct fires →
+distinct keys → fresh JobItems → the normal claim path; one execution
+re-entered → the same key → a genuine dedup hit → the D4 compensation
+reconciles. One-shot ONCE-EVER is owned by the durable consumption gate
+(``_handle_consumed_one_time`` chain re-arm) + the D3 lateness cap —
+NOT by a job-row key collision (the constant ``run_at`` key was the
+adjudicated 6105e198 wedge: terminal-fallback masquerade → dedup
+predicate blind → phantom prelude). The deferred twin is generation-
+scoped and namespaced (``scheduler:{sid}:deferred[:{run_at}]:v{gen}``) —
+never colliding with the direct key; its within-generation stability is
+the DEC-18 marker-miss latch.
 
 ## Phase-1 D3 lateness cap (ADR-003)
 
@@ -142,6 +150,61 @@ _LIVENESS_UNKNOWN = object()
 #: ``_deferred_metadata`` W4 contract: the metadata carries THIS minted id,
 #: never the busy fire's own).
 _DEFERRED_EXECUTION_ID_PREFIX = "deferred-"
+
+
+def _scheduler_direct_idempotency_key(source_id: str, execution_id: str) -> str:
+    """F1(a) (fix/post-outage-recovery b2): the PER-EXECUTION dedup key.
+
+    The pre-fix key was CONSTANT for the schedule's lifetime
+    (``scheduler:{source_id}:{run_at}``): on any re-fire of the same
+    run_at — post-outage restart, adapter reconstruction on schedule
+    update, chain re-arm before the consumption commit — the substrate
+    found the PRE-EXISTING JobItem and the JobQueueService terminal
+    fallback returned a fresh row carrying the caller's own minted
+    job_id with a rewritten key. ``enqueue_message_job``'s dedup
+    predicate (returned job_id ≠ mint) therefore evaluated False, the
+    D4 compensation never ran, and the phantom prelude pair sat wedged
+    (adjudicated wedge 6105e198, 11m19s).
+
+    The key now carries the fire's ``execution_id`` (the per-fire UUID4
+    minted in ``_emit_scheduled_message`` / ``manual_trigger``):
+      * two executions → DISTINCT keys → a fresh JobItem each → the
+        normal claim path (no phantom, no wedge);
+      * one execution re-entered (retry/re-entry within the same fire)
+        → the SAME key → a genuine dedup hit → the D4 compensation runs
+        (at-most-once per execution holds);
+      * the ONE-TIME-NESS of a one-shot is enforced by the durable
+        consumption gate (``_handle_consumed_one_time`` chain re-arm)
+        and the D3 lateness cap — NOT by a job-row key collision.
+    Applies to ALL scheduled fires (one-time chains AND recurring) —
+    a fresh UUID per fire cannot collapse recurring fires (the old
+    cron-guard concern was an artifact of the mutating ``run_at`` key).
+    """
+    return f"scheduler:{source_id}:exec:{execution_id}"
+
+
+def _deferred_idempotency_key(
+    source_id: str, run_at_iso: str | None, key_gen: int
+) -> str:
+    """The deferred delivery's idempotency key (F1(a)-scoped twin).
+
+    The deferred path is a GENERATION-scoped latch by design (DEC-18):
+    the marker-miss fallback re-enqueues under the SAME generation key to
+    dedup into the kept delivery, so the key MUST stay stable within a
+    generation — it deliberately does NOT carry the fire's execution_id.
+
+    F1(a) change: the key is NAMESPACED away from the direct-fire key and
+    the ONE-SHOT branch carries its ``run_at`` + generation explicitly
+    (``scheduler:{sid}:deferred:{run_at}:v{gen}``). Pre-fix the one-shot
+    branch returned the bare direct key ``scheduler:{sid}:{run_at}`` —
+    the SAME string the direct path used, so a direct fire and a deferred
+    delivery of one schedule shared one latch (a collision killed the
+    second delivery as a "phantom", or — post-terminal — masqueraded).
+    Post-fix the two paths can never collide.
+    """
+    if run_at_iso:
+        return f"scheduler:{source_id}:deferred:{run_at_iso}:v{key_gen}"
+    return f"scheduler:{source_id}:deferred:v{key_gen}"
 
 #: Outcome vocabulary of ``_coalesce_into`` (the in-place coalescing
 #: write): the delivery was rewritten / the guard matched no row (the
@@ -1540,18 +1603,20 @@ Original scheduled task:
     def _deferred_idempotency_key(self, key_gen: int) -> str:
         """The idempotency key of a deferred delivery.
 
-        ADR-2 (decisions.md DEC-7): a ONE-SHOT keeps the EXISTING
-        ``run_at`` key; a RECURRING fire uses the generation key
-        ``scheduler:{source_id}:deferred:v{gen}``.  The key is the dedup
-        latch ONLY — the authoritative coalescing state is the
+        Delegates to the module function (F1(a): the one-shot branch is
+        namespaced + generation-scoped — see its docstring). The key is
+        the dedup latch ONLY — the authoritative coalescing state is the
         forward-carried ``_defer_message_id`` (never a key lookup).
         """
-        if (
-            self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME
-            and self._run_at is not None
-        ):
-            return f"scheduler:{self.source_id}:{self._run_at.isoformat()}"
-        return f"scheduler:{self.source_id}:deferred:v{key_gen}"
+        run_at_iso = (
+            self._run_at.isoformat()
+            if (
+                self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME
+                and self._run_at is not None
+            )
+            else None
+        )
+        return _deferred_idempotency_key(self.source_id, run_at_iso, key_gen)
 
     def _task_for_message(self, message_id: str) -> Any:
         """The Task row for a delivery id — the PER-DELIVERY predicate.
@@ -2934,30 +2999,36 @@ Original scheduled task:
                 force_new=force_new,
             )
 
-            # D4 idempotency (architecture §1.2/§1.3): derive a deterministic
-            # key from ``self._run_at`` (the configured run_at parsed once in
-            # ``__init__`` and re-parsed identically every boot at
-            # ``_parse_schedule_config``), and pass it through to
-            # ``enqueue_message_job`` so the JobQueueService's partial UNIQUE
-            # index collapses any cross-restart or 5s-retry duplicate
-            # enqueues into one JobItem. The key MUST be derived from
-            # ``self._run_at``, NOT from ``next_trigger`` — the latter
-            # returns ``now`` for past-due one-shots
-            # (``_get_next_trigger_time`` line ~486–487), which would mutate
-            # the key on every adapter cycle AND every boot, defeating the
-            # at-most-once guarantee.
+            # D4 idempotency — F1(a) (fix/post-outage-recovery b2):
+            # PER-EXECUTION key for ALL scheduled fires through the
+            # job-queue route. ``execution_id`` is the per-fire UUID4
+            # minted in ``_emit_scheduled_message`` and threaded through
+            # ``_execute_run`` — it is available right here, so each fire
+            # mints a distinct key and a re-fired schedule (post-outage
+            # restart, adapter reconstruction, chain re-arm) can never
+            # collide with a PRE-EXISTING JobItem row again (the
+            # adjudicated 6105e198 wedge: constant key → terminal
+            # fallback masquerade → dedup predicate blind → phantom
+            # prelude wedged 11m19s).
             #
-            # Cron-path guard: ``_route_via_job_queue`` is shared by cron
-            # AND one-shot paths (only gated by ``trigger_type ==
-            # "scheduled"``). Recurring fires intentionally mint fresh
-            # JobItems — emitting the key unconditionally would collapse
-            # all future cron fires into one JobItem → silent schedule
-            # death. Gate to one-time only (architecture §1.3).
+            # Semantics:
+            #   * distinct executions → distinct keys → fresh JobItem →
+            #     the normal claim path (no phantom, no wedge);
+            #   * ONE execution re-entered (retry of the same fire) → the
+            #     same key → a GENUINE dedup hit → the D4 compensation
+            #     reconciles the second prelude (at-most-once per
+            #     execution);
+            #   * one-shot ONCE-EVER is owned by the durable consumption
+            #     gate (``_handle_consumed_one_time`` chain re-arm) plus
+            #     the D3 lateness cap — not by a job-row key collision.
+            # Recurring fires are included deliberately: a fresh UUID per
+            # fire cannot collapse them (the old cron-guard concern was
+            # an artifact of the mutating ``run_at`` key), and a key on
+            # every fire gives every delivery the same re-entry latch.
             enqueue_kwargs: dict = {}
-            if self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME and self._run_at is not None:
-                enqueue_kwargs["idempotency_key"] = (
-                    f"scheduler:{self.source_id}:{self._run_at.isoformat()}"
-                )
+            enqueue_kwargs["idempotency_key"] = (
+                _scheduler_direct_idempotency_key(self.source_id, execution_id)
+            )
 
             # ── Proposal B PR1 — scheduler lane mint (lane 9) ──────────────
             # The mint SITE is wired HERE — the scheduler's own
