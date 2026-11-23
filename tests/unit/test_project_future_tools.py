@@ -188,10 +188,15 @@ class TestAdd:
         assert len(args[2]) == 5000
 
     def test_add_unknown_project(self, tools, store):
-        """AC4 (add leg): unknown project → not-found error."""
+        """AC4 (add leg): unknown project → typed NOT_FOUND refusal."""
         store.get.return_value = None
         result = tools[0].invoke({"project_id": "nope", "summary": "idea"})
-        assert result == {"error": "Project 'nope' not found"}
+        assert result == {
+            "error": "Project not found",
+            "error_code": "NOT_FOUND",
+            "query": "nope",
+            "candidates": [],
+        }
 
     def test_add_eviction_disclosed_verbatim(self, store):
         """AC5: the store's evicted payload passes through unchanged."""
@@ -277,10 +282,15 @@ class TestList:
         assert result["cap"] is sentinel
 
     def test_list_unknown_project(self, tools, store):
-        """AC4 (list leg)."""
+        """AC4 (list leg): unknown project → typed NOT_FOUND refusal."""
         store.get.return_value = None
         result = tools[1].invoke({"project_id": "nope"})
-        assert result == {"error": "Project 'nope' not found"}
+        assert result == {
+            "error": "Project not found",
+            "error_code": "NOT_FOUND",
+            "query": "nope",
+            "candidates": [],
+        }
 
 
 # =============================================================================
@@ -317,12 +327,17 @@ class TestRemove:
         }
 
     def test_remove_unknown_project(self, tools, store):
-        """AC4 (remove leg)."""
+        """AC4 (remove leg): unknown project → typed NOT_FOUND refusal."""
         store.get.return_value = None
         result = tools[2].invoke(
             {"project_id": "nope", "entry_id": "future-1"}
         )
-        assert result == {"error": "Project 'nope' not found"}
+        assert result == {
+            "error": "Project not found",
+            "error_code": "NOT_FOUND",
+            "query": "nope",
+            "candidates": [],
+        }
 
 
 # =============================================================================
@@ -351,3 +366,93 @@ class TestFullDocContract:
             or ("wishlist" in doc.lower())
             or ("future-improvement" in doc.lower())
         ), f"{tool_name}: missing purpose phrase ('critical notes'/'wishlist'/'future-improvement')"
+
+
+# =============================================================================
+# Project-reference dispatch — the resolver seam is CALLED, never re-implemented
+# =============================================================================
+
+
+class TestReferenceDispatch:
+    """The triad (project_id / name / shortname) dispatches to the store seam.
+
+    The mock store has NO resolver configuration on the id path — that path
+    must never reach the resolver at all (mock-store compat + byte-compat).
+    """
+
+    def test_id_path_never_calls_the_resolver(self, tools, store):
+        """The id path is store.get() ONLY — the resolver stays untouched."""
+        tools[0].invoke({"project_id": "test-project-id", "summary": "idea"})
+        store.resolve_project_reference.assert_not_called()
+
+    def test_name_path_calls_resolver_with_name_scope(self, tools, store):
+        """name → resolve_project_reference(name, scope='name'); the RESOLVED id
+        is threaded into the store call."""
+        resolved = MagicMock()
+        resolved.project_id = "resolved-project-id"
+        store.resolve_project_reference.return_value = {"found": True, "project": resolved}
+
+        result = tools[0].invoke({"name": "ensemble", "summary": "idea"})
+
+        store.resolve_project_reference.assert_called_once_with("ensemble", scope="name")
+        assert result["project_id"] == "resolved-project-id"
+        assert store.add_future_entry.call_args[0][0] == "resolved-project-id"
+
+    def test_shortname_path_calls_resolver_with_shortname_scope(self, tools, store):
+        """shortname → resolve_project_reference(shortname, scope='shortname')."""
+        resolved = MagicMock()
+        resolved.project_id = "resolved-project-id"
+        store.resolve_project_reference.return_value = {"found": True, "project": resolved}
+
+        result = tools[1].invoke({"shortname": "ens"})
+
+        store.resolve_project_reference.assert_called_once_with("ens", scope="shortname")
+        assert store.list_future_entries.call_args[0][0] == "resolved-project-id"
+
+    def test_no_reference_returns_must_provide(self, tools, store):
+        """No reference at all → the must-provide refusal (no resolver call)."""
+        result = tools[0].invoke({"summary": "idea"})
+        assert result == {"error": "Must provide either project_id, name, or shortname"}
+        store.resolve_project_reference.assert_not_called()
+        store.get.assert_not_called()
+
+    def test_ambiguous_reference_refusal_is_typed(self, tools, store):
+        """An ambiguous reference → AMBIGUOUS_PROJECT + candidates + count."""
+        store.resolve_project_reference.return_value = {
+            "found": False,
+            "error_code": "AMBIGUOUS_PROJECT",
+            "error": "Multiple projects match 'ensemble'",
+            "candidates": [{"project_id": "p1", "name": "A"}],
+            "candidate_count": 2,
+        }
+
+        result = tools[2].invoke({"name": "ensemble", "entry_id": "future-1"})
+
+        assert result == {
+            "error": "Multiple projects match 'ensemble'",
+            "error_code": "AMBIGUOUS_PROJECT",
+            "query": "ensemble",
+            "candidates": [{"project_id": "p1", "name": "A"}],
+            "candidate_count": 2,
+        }
+        store.remove_future_entry.assert_not_called()
+
+    def test_unknown_reference_is_not_found(self, tools, store):
+        """An unknown reference → NOT_FOUND with the query echoed back."""
+        store.resolve_project_reference.return_value = {
+            "found": False,
+            "error_code": "NOT_FOUND",
+            "error": "Project not found",
+            "query": "nope",
+            "candidates": [],
+        }
+
+        result = tools[1].invoke({"name": "nope"})
+
+        assert result == {
+            "error": "Project not found",
+            "error_code": "NOT_FOUND",
+            "query": "nope",
+            "candidates": [],
+        }
+        store.list_future_entries.assert_not_called()
