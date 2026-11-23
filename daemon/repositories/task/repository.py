@@ -1124,6 +1124,90 @@ class TaskRepository:
             )
             return db_session.exec(stmt).first()
 
+    def find_pending_redrive_turn(self, instance_id: str) -> Task | None:
+        """F2 (fix/post-outage-recovery b2): find the adjudicated wedge shape.
+
+        The 6105e198 net: a LIVE instance holds a PENDING task anchored to a
+        NON-TERMINAL JobItem, yet nothing claims it (the wake was lost or
+        the slot-denial never re-evaluated) and the operator repair path
+        (``resume_processing_job``) cannot see PENDING —
+        :meth:`find_paused_or_cancellable_turn` selects paused/running only,
+        so the verdict came back ``no_active_job`` while the task sat
+        unclaimed for 11m19s.
+
+        The selector for that shape:
+
+          * ``status = 'pending'`` (the resume selector's blind spot),
+          * ``COALESCE(cancel_requested, FALSE) = FALSE`` (a deliberate
+            stop is never re-driven),
+          * ``task_type IN ('process_message', 'process_report')`` (the
+            same active-graph-turn scope as the pause selector),
+          * the task's ``work_id`` anchors a non-terminal JobItem
+            (``admission_state IN ('active','queued')`` — the FP1
+            admission vocabulary; ``deleted_at IS NULL``) — a pending
+            task with NO live JobItem anchor is the reconciler's /
+            wipe's domain, not a re-drive target,
+          * most recent first (deterministic for the
+            one-running-turn-per-instance invariant).
+
+        Read-only. The CALLER owns the re-drive: make-claimable + pool
+        wake via :meth:`make_pending_task_claimable` — never a direct
+        claim (the claim UPDATE in ``claim_pending_task`` is the single
+        consumer CAS, F4).
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(Task)
+                .where(Task.instance_id == instance_id)
+                .where(Task.status == TaskStatus.PENDING.value)
+                .where(col(Task.cancel_requested).is_(False))
+                .where(
+                    Task.task_type.in_([
+                        TaskType.PROCESS_MESSAGE.value,
+                        TaskType.PROCESS_REPORT.value,
+                    ])
+                )
+                .where(
+                    # Non-terminal JobItem anchor (FP1 admission
+                    # vocabulary — mirrors the wipe's FP1 arm so the
+                    # re-drive selector and the boot-wipe agree on what
+                    # "anchored live work" means).
+                    text(
+                        "EXISTS ("
+                        "SELECT 1 FROM job_queue_items jqi "
+                        "WHERE jqi.job_id = task.work_id "
+                        f"AND jqi.admission_state IN {active_admission_states_sql()} "
+                        "AND jqi.deleted_at IS NULL)"
+                    )
+                )
+                .order_by(col(Task.created_at).desc())
+            )
+            return db_session.exec(stmt).first()
+
+    def make_pending_task_claimable(self, task_id: int) -> bool:
+        """F2: clear claim-blocking backoff on a PENDING task (guarded CAS).
+
+        ``UPDATE task SET next_retry_at = NULL WHERE id = :tid AND
+        status = 'pending' AND COALESCE(cancel_requested, FALSE) = FALSE``
+
+        The ONLY mutation the F2 re-drive performs. It does NOT flip
+        status (the claim UPDATE in ``claim_pending_task`` stays the
+        single pending→running consumer CAS, F4) and it never touches
+        RUNNING/PAUSED/terminal rows. ``rowcount == 1`` ⇒ the row was
+        pending and is now claimable; ``0`` ⇒ another actor moved it.
+        """
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "UPDATE task SET next_retry_at = NULL "
+                    "WHERE id = :tid "
+                    "AND status = :status_pending "
+                    "AND COALESCE(cancel_requested, FALSE) = FALSE"
+                ),
+                {"tid": task_id, "status_pending": TaskStatus.PENDING.value},
+            )
+            return result.rowcount == 1
+
     # ---------------------------------------------------------------
     # Auto-continue boot pass (feature/auto-continue-running-after-restart)
     # ---------------------------------------------------------------
@@ -1567,6 +1651,10 @@ class TaskRepository:
                    OR i.boot_re_drive_at < :boot_epoch)
               AND t.status = 'completed'
               AND t.completed_at IS NOT NULL
+              -- N8 (review): a deliberate stop is never dispositioned —
+              -- the completed_task family excludes cancel_requested just
+              -- like the blocked_claim family does.
+              AND COALESCE(t.cancel_requested, FALSE) = FALSE
 
             ORDER BY instance_id ASC, family ASC
             """
@@ -1591,10 +1679,22 @@ class TaskRepository:
 
         ``require_running=True`` (default) is the resume/retire path guard
         (mirrors ``mark_task_auto_continued``'s status guard — avoids
-        racing a concurrent worker-pool completion). The finalize path
-        passes ``require_running=False`` because it has ALREADY flipped
-        the row to COMPLETED before stamping; the CAS still gives
-        exactly-once via the boot_re_drive_at epoch predicate.
+        racing a concurrent worker-pool completion). Callers that have
+        ALREADY flipped the row off 'running' (finalize, and the Tier-2
+        retire whose terminate_instance ran first) pass
+        ``require_running=False``.
+
+        N3 (review) — CORRECTED rationale: exactly-once for the finalize
+        disposition comes from the GUARDED TERMINALIZER STATUS FLIP
+        (``finalize_boot_consistency_instance``), NOT from this epoch
+        CAS. This CAS is the RE-SELECTION guard only: it keeps a
+        dispositioned instance out of the next boot's candidate set
+        (``boot_re_drive_at IS NULL OR < boot_epoch``). The retire path
+        ALSO stamps ``require_running=False`` (N1): its
+        ``terminate_instance`` has already flipped the row off 'running'
+        by stamp time — the default True guard would decline a stamp
+        whose disposition already happened (retire-done-but-never-stamped
+        ⇒ re-selected every boot and counted refused).
 
         Returns ``True`` iff ``rowcount == 1``. Called ONLY AFTER the
         disposition succeeds (no marked-but-never-re-driven window).
@@ -5368,6 +5468,22 @@ class TaskRepository:
                         "WHERE jqi.job_id = task.work_id "
                         f"AND jqi.admission_state IN {active_admission_states_sql()} "
                         "AND jqi.deleted_at IS NULL)"
+                        # F3 (fix/post-outage-recovery b2) — the Event
+                        # receipt arm's AUDIT MIRROR: a PENDING task whose
+                        # message has a surviving ``message_received``
+                        # Event is NOT doomed (the Event is the
+                        # receipt-of-truth — the enqueue committed). The
+                        # mirror keeps the doomed-id audit list honest
+                        # (the audit and the DELETE must agree, F-1
+                        # contract).
+                        " AND NOT ("
+                        "task.status = 'pending' "
+                        "AND EXISTS ("
+                        "SELECT 1 FROM event e "
+                        "WHERE e.message_id = task.message_id "
+                        "AND e.kind = 'message_received'"
+                        ")"
+                        ")"
                         # Render the arm-3 suffix only when present —
                         # with the kill-switch OFF the suffix is ""
                         # and the unconditional f-string rendered a
@@ -5420,6 +5536,31 @@ class TaskRepository:
                         "WHERE jqi.job_id = task.work_id "
                         f"AND jqi.admission_state IN {active_admission_states_sql()} "
                         "AND jqi.deleted_at IS NULL"
+                        ")"
+                    )
+                ).where(
+                    # F3 (fix/post-outage-recovery b2) — the Event RECEIPT
+                    # arm. Shape A of the adjudicated post-outage wedge
+                    # pair: the plain-revive enqueue (``enqueue_message``,
+                    # NOT job-driven) creates Task PENDING + a
+                    # ``message_received`` Event but NO JobItem, so the
+                    # FP1 arm above was inapplicable and the boot-wipe
+                    # DELETED a committed, unconsumed enqueue whose
+                    # durable receipt survived. The wipe's contract is
+                    # "discard doomed orphans" — a committed enqueue with
+                    # a surviving receipt is NOT doomed. Scoped to
+                    # PENDING only: terminal backlog (completed/failed/
+                    # cancelled) stays doomed so the backlog-clear keeps
+                    # its pruner role (the live host's volume discipline
+                    # depends on it).
+                    text(
+                        "NOT ("
+                        "task.status = 'pending' "
+                        "AND EXISTS ("
+                        "SELECT 1 FROM event e "
+                        "WHERE e.message_id = task.message_id "
+                        "AND e.kind = 'message_received'"
+                        ")"
                         ")"
                     )
                 )
