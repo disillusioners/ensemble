@@ -35,7 +35,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
 from sqlmodel import Session, SQLModel
@@ -77,6 +77,20 @@ def engine(tmp_path) -> Engine:
     )
 
     SQLModel.metadata.create_all(eng)
+    # The ``checkpoints`` table is created by the LangGraph saver, NOT by
+    # SQLModel metadata. The stranded classifier's class-1a conjunct
+    # requires ZERO checkpoint rows for the thread, so the table must
+    # exist for the leg to be EVALUABLE (absent => fail-closed degrade to
+    # class 3). The graceful-degradation path is pinned separately by
+    # ``test_checkpoint_leg_degrades_to_class_3_when_table_absent``.
+    with eng.connect() as conn:
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS checkpoints ("
+            "thread_id TEXT NOT NULL, checkpoint_ns TEXT NOT NULL DEFAULT '', "
+            "checkpoint_id TEXT NOT NULL, "
+            "PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id))"
+        ))
+        conn.commit()
     yield eng
     eng.dispose()
 
@@ -1450,3 +1464,193 @@ async def test_boot_epoch_none(task_repo, engine):
     mgr = _MockManager(task_repo)
     res = await surface_stranded_running_instances(mgr, None)
     assert res.skipped_no_boot_epoch == 1
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint-leg pins (class-1a conjunct) + live-developer pin
+# ---------------------------------------------------------------------------
+
+
+def _seed_checkpoint_rows(engine, instance_id: str, count: int) -> None:
+    """Insert ``count`` rows in the ``checkpoints`` table for the thread."""
+    with engine.connect() as conn:
+        for i in range(count):
+            conn.execute(text(
+                "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id) "
+                "VALUES (:tid, '', :cid)"
+            ), {"tid": instance_id, "cid": f"cp-{i}"})
+        conn.commit()
+
+
+def _seed_dependency_watcher(engine, target_instance_id: str) -> None:
+    """Insert a PENDING dependency-bus watcher targeting the instance."""
+    from daemon.repositories.dependency_bus.models import (
+        DependencyWatcher,
+        DependencyWatcherState,
+    )
+    from sqlmodel import Session
+    with Session(engine) as s:
+        s.add(DependencyWatcher(
+            source_task_id="src-task-1",
+            target_instance_id=target_instance_id,
+            state=DependencyWatcherState.PENDING.value,
+        ))
+        s.commit()
+
+
+@pytest.mark.asyncio
+async def test_class_1a_requires_zero_checkpoint_rows(task_repo, engine):
+    """P2 (checkpoint leg): an otherwise-proven-dead instance that HAS
+    checkpoint rows executed a turn -> NOT class 1a -> class 3 (surface
+    only, never retired)."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid, last_activity_at=past)
+    _seed_checkpoint_rows(engine, iid, 3)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid] == "3"
+    assert res.retired == 0
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_class_1b_does_not_require_zero_checkpoints(task_repo, engine):
+    """ASYMMETRY PIN: class 1b (delivered work) does NOT require zero
+    checkpoint rows -- the 68f04ccd exemplar carries 3 checkpoints + 1
+    blob and must stay 1b. DO NOT 'harmonise' the legs together."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    past = now_utc_naive() - timedelta(days=5)
+    _make_instance(engine, iid, last_activity_at=past)
+    _seed_checkpoint_rows(engine, iid, 3)
+    _seed_report_delivered(engine, iid)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid] == "1b"
+    assert res.retired == 1
+    assert mgr.terminated == [(iid, "orphan_retired")]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_leg_degrades_to_class_3_when_table_absent(tmp_path):
+    """Graceful degradation: with the ``checkpoints`` table ABSENT the
+    leg cannot be evaluated -> FAIL CLOSED -> class 3, no mutation, and
+    the degradation is VISIBLE in the payload (evidence)."""
+    from datetime import timedelta
+    from sqlmodel import SQLModel as _SM
+    from sqlalchemy import create_engine as _ce
+    eng = _ce(
+        f"sqlite:///{tmp_path}/no_ckpt.db",
+        connect_args={"check_same_thread": False},
+        poolclass=NullPool,
+    )
+    _SM.metadata.create_all(eng)
+    # NOTE: no `checkpoints` table created here.
+    repo = TaskRepository(eng)
+    iid = f"i-{uuid4().hex[:8]}"
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(eng, iid, last_activity_at=past)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid] == "3"
+    assert res.retired == 0
+    assert mgr.terminated == []
+    # VISIBLE: the degradation is carried in the evidence payload.
+    ev = {c.instance_id: c.evidence for c in res.classifications}[iid]
+    assert ev["checkpoint_leg"] == "degraded_absent"
+    assert res.degraded_checkpoint_leg == 1
+    eng.dispose()
+
+
+@pytest.mark.asyncio
+async def test_pending_dependency_watcher_is_class_2(task_repo, engine):
+    """P (a): a PENDING dependency-bus watcher is a class-2 leg -- the
+    instance is awaited, so it is NEVER retired."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid, last_activity_at=past)
+    _seed_dependency_watcher(engine, iid)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid] == "2"
+    assert res.retired == 0
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_just_spawned_no_rows_never_retired(task_repo, engine):
+    """P (b) just-spawned floor: an instance spawned SECONDS ago with NO
+    task/message/checkpoint/JobItem rows at all is NEVER retired (it is
+    inside the 24 h bound)."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    now = now_utc_naive()
+    _make_instance(engine, iid, last_activity_at=now - timedelta(seconds=5))
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid] in ("2", "3")
+    assert by_id[iid] not in ("1a", "1b")
+    assert res.retired == 0
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_e08fc02c_live_developer_never_retired(task_repo, engine):
+    """P (e08fc02c) THE LIVE-DEVELOPER PIN -- NEVER retirable.
+
+    Measured shape of instance ``e08fc02c-22e2-4de8-9ed2-70787c3bd898``
+    (live DB ensemble_prod, 2026-11-23T19:40-19:56Z): 12 completed task
+    rows, 12 message_queue rows, 136 checkpoints (newest ts
+    2026-11-23T19:42:40Z), 6 children of which TWO were spawned within
+    the last 10 minutes and were LIVE, 8 report_injections (all
+    TASK_DELIVERED), ZERO job_queue_items rows, last activity MINUTES
+    before measurement. It satisfies every other leg of the retired
+    selector -- the epoch/JobItem walls do NOT save it (it has no
+    JobItem rows at all) -- so the task-row / message-row / live-descendant
+    legs are what keep it safe. It MUST land in a NON-MUTATING class.
+    """
+    from datetime import timedelta
+    iid = "e08fc02c-22e2-4de8-9ed2-70787c3bd898"
+    now = now_utc_naive()
+    _make_instance(engine, iid, last_activity_at=now - timedelta(minutes=8))
+    for _ in range(12):
+        _seed_task_row(engine, iid, status="completed")
+    for _ in range(12):
+        _seed_message_row(engine, iid)
+    for _ in range(8):
+        _seed_report_delivered(engine, iid)
+    _seed_checkpoint_rows(engine, iid, 136)
+    # 6 children; two of them live (spawned minutes ago), four terminal.
+    for i in range(4):
+        _seed_child(engine, iid, f"c-{i}-{uuid4().hex[:6]}", child_status="terminated")
+    _seed_child(engine, iid, "cbdf1880-live-1", child_status="running")
+    _seed_child(engine, iid, "5f354205-live-2", child_status="running")
+    # ZERO job_queue_items rows (the shape has none).
+
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid] in ("2", "3")
+    assert by_id[iid] not in ("1a", "1b")
+    assert res.retired == 0
+    assert mgr.terminated == []

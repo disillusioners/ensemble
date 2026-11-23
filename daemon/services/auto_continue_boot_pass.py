@@ -1266,6 +1266,12 @@ class StrandedSurfacingResult:
     surfaced_ids: list[str] = field(default_factory=list)
     classifications: list = field(default_factory=list)
     durable_path: str | None = None
+    #: Instances whose checkpoint leg could NOT be evaluated (the
+    #: ``checkpoints`` table absent / probe failed). These degrade
+    #: fail-closed to class 3 (surface only, no mutation). Counted so
+    #: the degradation is VISIBLE in the summary and the durable
+    #: payload -- never silent.
+    degraded_checkpoint_leg: int = 0
     skipped_current_generation: int = 0
     skipped_kill_switch: int = 0
     skipped_no_boot_epoch: int = 0
@@ -1349,6 +1355,11 @@ async def surface_stranded_running_instances(
             # Track classifications on the result for the durable surface.
             result.classifications.append(sc)
 
+            if ev.get("checkpoint_leg") in (
+                "degraded_absent", "degraded_error",
+            ):
+                result.degraded_checkpoint_leg += 1
+
             if cls == "1a":
                 result.class_1a += 1
             elif cls == "1b":
@@ -1408,6 +1419,7 @@ async def surface_stranded_running_instances(
                     "class_2": result.class_2,
                     "class_3": result.class_3,
                     "retired": result.retired,
+                    "degraded_checkpoint_leg": result.degraded_checkpoint_leg,
                 },
                 "surfaced": [
                     {"instance_id": sc.instance_id,
@@ -1444,7 +1456,8 @@ async def surface_stranded_running_instances(
     logger.info(
         "[BOOT_RECOVERY] stranded-surfacing summary: candidates=%d "
         "class_1a=%d class_1b=%d class_2=%d class_3=%d "
-        "retired=%d terminate_switch_on=%s surfaced_id_sample=%s "
+        "retired=%d degraded_checkpoint_leg=%d terminate_switch_on=%s "
+        "surfaced_id_sample=%s "
         "(%d total) durable_path=%s duration_s=%.3f boot_epoch=%s "
         "mode=%s",
         result.candidates,
@@ -1453,6 +1466,7 @@ async def surface_stranded_running_instances(
         result.class_2,
         result.class_3,
         result.retired,
+        result.degraded_checkpoint_leg,
         _stranded_terminate_enabled(),
         _sample,
         len(result.surfaced_ids),
