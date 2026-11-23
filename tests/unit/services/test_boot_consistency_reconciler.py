@@ -181,8 +181,10 @@ class _MockManager:
         checkpoints: dict[str, bool] | None = None,
         resume_status: str = "resuming",
         terminate_ok: bool = True,
+        engine: Any | None = None,
     ) -> None:
         self._task_repo = repo
+        self._engine = engine
         self._checkpoints = checkpoints or {}
         self.resume_status = resume_status
         self.terminate_ok = terminate_ok
@@ -197,8 +199,19 @@ class _MockManager:
         return {"status": self.resume_status}
 
     async def terminate_instance(self, iid: str, terminal_reason: str = "aborted") -> bool:
+        # UN-MOCKED (review N1): the REAL terminate flips the instance row to
+        # a terminal status — the stamp that follows must survive that flip
+        # (require_running=False) or the honest bug resurfaces here.
         self.terminate_calls.append((iid, terminal_reason))
-        return self.terminate_ok
+        if not self.terminate_ok:
+            return False
+        with Session(self._engine) as s:
+            row = s.get(Instance, iid)
+            if row is not None:
+                row.status = "terminated"
+                s.add(row)
+                s.commit()
+        return True
 
 
 class _ConfigurableRepo:
@@ -252,7 +265,7 @@ async def test_mandated_repro_rederives_task_and_mq(engine, repo) -> None:
     _seed_instance(engine, iid)
     _seed_event(engine, iid, _msg_data("hello from the dead turn"))
     # No MQ row, no Task row — the post-commit-deletion signature.
-    mgr = _MockManager(repo, checkpoints={iid: True})
+    mgr = _MockManager(repo, checkpoints={iid: True}, engine=engine)
 
     out = await reconcile_boot_consistency(mgr, BOOT_EPOCH)
 
@@ -296,7 +309,7 @@ async def test_pg_unreachable_logs_error_and_degrades_readyz(engine, repo, caplo
 
 @pytest.mark.asyncio
 async def test_healthy_run_leg_healthy(engine, repo) -> None:
-    mgr = _MockManager(repo)  # empty DB → zero candidates
+    mgr = _MockManager(repo, engine=engine)  # empty DB → zero candidates
     out = await reconcile_boot_consistency(mgr, BOOT_EPOCH)
     assert out.errors == 0
     state = lane.get_boot_recovery_state()
@@ -313,7 +326,7 @@ async def test_ghost_with_content_dispatched_not_terminated(engine, repo) -> Non
     iid = "ghost-a"
     _seed_instance(engine, iid)
     _seed_event(engine, iid, _msg_data("ghost has content"))
-    mgr = _MockManager(repo, checkpoints={iid: False})  # no checkpoint
+    mgr = _MockManager(repo, checkpoints={iid: False}, engine=engine)  # no checkpoint
 
     out = await reconcile_boot_consistency(mgr, BOOT_EPOCH)
 
@@ -334,7 +347,7 @@ async def test_ghost_without_event_retired_loudly(engine, repo, caplog) -> None:
         metadata={"title": "Lost Mission", "initiative_message": "do the thing"},
     )
     # No event row at all.
-    mgr = _MockManager(repo, checkpoints={iid: False})
+    mgr = _MockManager(repo, checkpoints={iid: False}, engine=engine)
 
     with caplog.at_level(logging.ERROR):
         out = await reconcile_boot_consistency(mgr, BOOT_EPOCH)
@@ -343,6 +356,15 @@ async def test_ghost_without_event_retired_loudly(engine, repo, caplog) -> None:
     assert out.dispatched == 0
     assert mgr.terminate_calls == [(iid, "orphan_retired")]
     assert mgr.resume_calls == []
+    # N1 (un-mocked): the retire's stamp must have LANDED even though the
+    # terminate flipped the row off 'running' — post-flip stamping with
+    # require_running=True would return False here and retire would stay 0
+    # while skipped_disposition_refused ticked (the honest failure).
+    retired_row = _get_instance(engine, iid)
+    assert retired_row is not None and retired_row.boot_re_drive_at == BOOT_EPOCH, (
+        "the retire disposition must stamp boot_re_drive_at AFTER the "
+        "status flip (require_running=False)"
+    )
     assert any("Tier-2 RETIRE" in r.message and "Lost Mission" in r.message for r in caplog.records)
 
 
@@ -357,7 +379,7 @@ async def test_blocked_claim_redriven_without_cancel(engine, repo) -> None:
     _seed_instance(engine, iid)
     running_wid = _seed_task(engine, iid, "running")
     _seed_task(engine, iid, "pending")  # blocked by the RUNNING task
-    mgr = _MockManager(repo, checkpoints={iid: True})
+    mgr = _MockManager(repo, checkpoints={iid: True}, engine=engine)
 
     out = await reconcile_boot_consistency(mgr, BOOT_EPOCH)
 
@@ -387,7 +409,7 @@ async def test_completed_task_root_deferred_to_healer(engine, repo, caplog) -> N
         engine, iid, "completed",
         completed_at=BOOT_EPOCH - timedelta(minutes=2),
     )
-    mgr = _MockManager(repo)
+    mgr = _MockManager(repo, engine=engine)
 
     with caplog.at_level(logging.INFO):
         out = await reconcile_boot_consistency(mgr, BOOT_EPOCH)
@@ -408,7 +430,7 @@ async def test_prestamped_instance_not_selected(engine, repo) -> None:
     iid = "prestamped"
     _seed_instance(engine, iid, boot_re_drive_at=BOOT_EPOCH)
     _seed_event(engine, iid, _msg_data("already handled"))
-    mgr = _MockManager(repo, checkpoints={iid: True})
+    mgr = _MockManager(repo, checkpoints={iid: True}, engine=engine)
 
     out = await reconcile_boot_consistency(mgr, BOOT_EPOCH)
 
@@ -421,7 +443,7 @@ async def test_double_run_same_epoch_schedules_once(engine, repo) -> None:
     iid = "double"
     _seed_instance(engine, iid)
     _seed_event(engine, iid, _msg_data("once only"))
-    mgr = _MockManager(repo, checkpoints={iid: True})
+    mgr = _MockManager(repo, checkpoints={iid: True}, engine=engine)
 
     first = await reconcile_boot_consistency(mgr, BOOT_EPOCH)
     second = await reconcile_boot_consistency(mgr, BOOT_EPOCH)
@@ -441,7 +463,7 @@ async def test_empty_event_content_retires(engine, repo) -> None:
     iid = "empty-content"
     _seed_instance(engine, iid)
     _seed_event(engine, iid, _msg_data("   "))  # whitespace-only
-    mgr = _MockManager(repo, checkpoints={iid: True})
+    mgr = _MockManager(repo, checkpoints={iid: True}, engine=engine)
 
     out = await reconcile_boot_consistency(mgr, BOOT_EPOCH)
 
@@ -470,7 +492,7 @@ async def test_excluded_statuses_and_cancel_requested(engine, repo) -> None:
     _seed_task(engine, "cancelled", "running", cancel_requested=True)
     _seed_task(engine, "cancelled", "pending")
 
-    mgr = _MockManager(repo)
+    mgr = _MockManager(repo, engine=engine)
     out = await reconcile_boot_consistency(mgr, BOOT_EPOCH)
 
     assert out.candidates == 0
@@ -490,7 +512,7 @@ async def test_finalize_gap_non_root_finalized(engine, repo) -> None:
         engine, iid, "completed",
         completed_at=BOOT_EPOCH - timedelta(minutes=2),
     )
-    mgr = _MockManager(repo)
+    mgr = _MockManager(repo, engine=engine)
 
     out = await reconcile_boot_consistency(mgr, BOOT_EPOCH)
 
@@ -500,3 +522,70 @@ async def test_finalize_gap_non_root_finalized(engine, repo) -> None:
     final = _get_instance(engine, iid)
     assert final is not None and final.status == "completed"
     assert final.boot_re_drive_at == BOOT_EPOCH
+
+
+# ---------------------------------------------------------------------------
+# 14. N2 — multi-family overlap: ONE disposition per instance per pass
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_multi_family_overlap_single_disposition(engine, repo) -> None:
+    """N2 (review): an instance can satisfy TWO families at once — a stale
+    RUNNING task (blocked_claim) AND a terminal latest task
+    (completed_task). Pre-fix both rows dispositioned (re-drive + finalize =
+    double disposition, finalized miscount). Post-fix the FIRST family that
+    achieves a disposition claims the instance; the later family is skipped
+    for that instance in this pass."""
+    iid = "overlap-1"
+    _seed_instance(engine, iid, parent_id="parent-2")
+    # The stale RUNNING task + the PENDING task (blocked_claim needs BOTH —
+    # stale RUNNING blocker AND a pending claim-blocked task) ...
+    _seed_task(engine, iid, "running", work_id="w-stale", cancel_requested=False)
+    _seed_task(engine, iid, "pending", work_id="w-pending")
+    # ... and a COMPLETED latest task (completed_task family, non-root).
+    _seed_task(
+        engine, iid, "completed",
+        completed_at=BOOT_EPOCH - timedelta(minutes=2),
+    )
+    mgr = _MockManager(repo, engine=engine)
+
+    out = await reconcile_boot_consistency(mgr, BOOT_EPOCH)
+
+    # Exactly ONE disposition: the re-drive. NO finalize on top of it.
+    assert out.redriven == 1, f"exactly one re-drive expected, got {out!r}"
+    assert out.finalized == 0, (
+        "a second family must NOT disposition the same instance in one pass"
+    )
+    assert len(mgr.resume_calls) == 1
+    final = _get_instance(engine, iid)
+    assert final is not None and final.status == "running", (
+        "the re-dispositioned instance must NOT have been finalized"
+    )
+    assert final.boot_re_drive_at == BOOT_EPOCH
+
+
+# ---------------------------------------------------------------------------
+# 15. N8 — completed_task family excludes cancel_requested
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_completed_task_cancel_requested_excluded(engine, repo) -> None:
+    """N8 (review): a deliberate stop is never re-driven — the completed_task
+    family must exclude tasks carrying ``cancel_requested`` just like the
+    task-based families do."""
+    iid = "child-cancelled"
+    _seed_instance(engine, iid, parent_id="parent-3")
+    _seed_task(
+        engine, iid, "completed",
+        cancel_requested=True,
+        completed_at=BOOT_EPOCH - timedelta(minutes=2),
+    )
+    mgr = _MockManager(repo, engine=engine)
+
+    out = await reconcile_boot_consistency(mgr, BOOT_EPOCH)
+
+    assert out.candidates == 0, "cancel_requested completed_task must not be selected"
+    assert out.finalized == 0 and out.deferred_to_healer == 0
+    assert mgr.resume_calls == [] and mgr.terminate_calls == []

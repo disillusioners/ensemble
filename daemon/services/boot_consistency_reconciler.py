@@ -49,12 +49,37 @@ Dispositions
 * ``completed_task`` NON-ROOT → finalize the instance to COMPLETED via the
   guarded terminalizer pattern (no resume).
 
-CAS single-writer
------------------
+CLOSEOUT NOTE — the OLD-EVENT re-mint edge (deliberate semantic, recorded
+per commission): Tier 1 re-mints from the LATEST ``message_received``
+Event for the instance (``ORDER BY created_at DESC LIMIT 1`` in the
+selector). If the lost turn predates a LATER event — e.g. the instance
+received a newer message that also committed an Event before the crash —
+the re-mint resurrects the NEWEST event's content, not the older lost
+turn's. This is deliberate: the latest Event is the best durable
+approximation of "what the instance was being asked when it died", and a
+re-mint from an older event would REPLAY superseded work. The edge is
+accepted and documented here rather than solved with turn-scoped event
+correlation (no message_id→turn binding survives the wipe today); the
+F3 receipt arms shrink the family further by making the wipe stop
+deleting receipt-backed rows in the first place.
+
+CAS single-writer (N3-corrected rationale)
+------------------------------------------
 ``instances.boot_re_drive_at`` is stamped AFTER a successful disposition
 (rowcount==1 CAS, ``boot_re_drive_at IS NULL OR < boot_epoch``). Stamping
 after means "marked" ≡ "re-driven" — no marked-but-never-re-driven window.
 The residual gap (crash between disposition and stamp) re-arms next boot.
+
+CORRECTED (review N3): the epoch CAS does NOT provide finalize
+exactly-once. Finalize exactly-once comes from the GUARDED TERMINALIZER
+STATUS FLIP (``finalize_boot_consistency_instance``'s guarded
+``UPDATE ... WHERE status='running' [AND version]`` — a concurrent
+terminalizer loses that flip and reports rowcount 0). The
+``boot_re_drive_at`` epoch CAS is the RE-SELECTION guard only: it keeps a
+dispositioned instance out of the NEXT boot's candidate set. Reading the
+old text ("the CAS still gives exactly-once") as a claim about the epoch
+predicate is wrong — the status flip is the exactly-once authority for
+finalize; the epoch CAS is idempotency-of-selection.
 
 Kill-switch (rationale)
 -----------------------
@@ -92,6 +117,20 @@ Wired in ``daemon/api.py`` immediately AFTER ``sweep_orphaned_live_turns``
 in the lifespan BODY block. It is a sibling of the auto-continue /
 orphan-sweep passes, shares their kill-switch, and never runs in parallel
 with them within one boot.
+
+N7 (review) — RESIDUAL RACE, DOCUMENTED NOT FIXED: external source
+adapters (discord/slack/telegram/scheduler pollers) can begin delivering
+while this lane runs — adapter start is not ordered BEFORE the lane in
+the lifespan (fixing the ordering is lifespan surgery across the source
+subsystem, out of this commission's scope). The race window is narrow and
+BENIGN by construction: a delivery that lands mid-lane mints its own
+durable rows (Task+MQ+Event), so the lane's ``deleted_trace`` selector
+(NOT EXISTS on both mq and task) will not match it, and a
+``blocked_claim`` candidate that receives its wake mid-lane re-arms
+harmlessly (the resume is idempotent against a running turn). The
+exposure is: at most one redundant resume of an instance that was about
+to be delivered to anyway — never a lost or duplicated delivery (the
+claim CAS is the single consumer, F4).
 """
 
 from __future__ import annotations
@@ -147,6 +186,8 @@ class ReconcileResult:
     skipped_no_content: int = 0
     skipped_resume_refused: int = 0
     skipped_disposition_refused: int = 0
+    #: N2 — later-family rows for an already-dispositioned instance.
+    skipped_multi_family_overlap: int = 0
     skipped_kill_switch: int = 0
     skipped_no_boot_epoch: int = 0
     errors: int = 0
@@ -317,6 +358,18 @@ async def reconcile_boot_consistency(
         paths. Never raises out of the lifespan.
     """
     result = ReconcileResult()
+    # N5 (review): the loud-fail assertion lives OUTSIDE the swallowing
+    # try below — an AssertionError inside a broad ``except Exception``
+    # would be converted into a "DB error" counter tick (a mislabeled,
+    # half-silent failure). Here it fails loudly, exactly as intended.
+    try:
+        _task_repo_handle = manager._task_repo  # type: ignore[attr-defined]
+    except AttributeError:
+        _task_repo_handle = None
+    assert _task_repo_handle is not None, (
+        "Boot-consistency reconciler requires _task_repo to be wired by "
+        "initialize() before boot subsystems run"
+    )
     try:
         # (1) Kill-switch (shared with auto-continue — same logical action).
         enabled = _auto_continue_enabled()
@@ -340,12 +393,8 @@ async def reconcile_boot_consistency(
             )
             return result
 
-        # (3) Repo handle (loud-fail assertion — wired by initialize()).
-        task_repo = manager._task_repo  # type: ignore[attr-defined]
-        assert task_repo is not None, (
-            "Boot-consistency reconciler requires _task_repo to be wired by "
-            "initialize() before boot subsystems run"
-        )
+        # (3) Repo handle — asserted OUTSIDE this try (N5 above).
+        task_repo = _task_repo_handle
 
         loop_started = time.monotonic()
         try:
@@ -363,11 +412,33 @@ async def reconcile_boot_consistency(
             result.candidates = len(candidates)
 
             dispositions = 0
+            # N2 (review): one DISPOSITION per instance per pass. The
+            # selection UNION ALL can surface the SAME instance in two
+            # families (e.g. a stale RUNNING task ⇒ blocked_claim AND a
+            # terminal latest task ⇒ completed_task). Pre-fix both rows
+            # dispositioned — a re-drive followed by a finalize on the
+            # same instance (double disposition + a ``finalized``
+            # miscount). The stamp-after-disposition CAS cannot prevent
+            # it (the SECOND disposition runs BEFORE its stamp is
+            # declined), so the loop itself claims the instance: the
+            # FIRST family that achieves a disposition wins; later
+            # families for that instance are skipped for this pass (the
+            # residual gap re-arms next boot, as documented).
+            dispositioned_instances: set[str] = set()
             for candidate in candidates:
                 try:
                     family = candidate.get("family")
                     instance_id = candidate.get("instance_id")
                     if not instance_id:
+                        continue
+                    if instance_id in dispositioned_instances:
+                        result.skipped_multi_family_overlap += 1
+                        logger.info(
+                            "[BOOT_RECOVERY] SKIPPED multi-family overlap "
+                            "instance=%s family=%s (already dispositioned "
+                            "this pass — one disposition per instance)",
+                            str(instance_id)[:8], family,
+                        )
                         continue
 
                     # ── completed_task: healer deference / finalize ──────
@@ -403,6 +474,7 @@ async def reconcile_boot_consistency(
                             continue
                         result.finalized += 1
                         dispositions += 1
+                        dispositioned_instances.add(instance_id)
                         logger.info(
                             "[BOOT_RECOVERY] finalized instance=%s epoch=%s",
                             str(instance_id)[:8], boot_epoch.isoformat(),
@@ -426,20 +498,39 @@ async def reconcile_boot_consistency(
                             )
                             if not retired:
                                 result.skipped_disposition_refused += 1
+                                # N4: NOT a DB error — a distinct marker.
                                 logger.error(
-                                    "[BOOT_RECOVERY] retire refused instance=%s "
-                                    "(terminate_instance returned false)",
+                                    "[BOOT_RECOVERY_TERMINATE_REFUSED] retire "
+                                    "instance=%s (terminate_instance returned "
+                                    "false)",
                                     str(instance_id)[:8],
                                 )
                                 continue
+                            # N1 (review): stamp with require_running=False —
+                            # terminate_instance has ALREADY flipped the row
+                            # off 'running'; the default True guard would
+                            # decline the CAS here (retire done but never
+                            # stamped ⇒ re-selected every boot, counted
+                            # refused). Same reasoning as the finalize path.
+                            # N4: the marker names the failure class —
+                            # [BOOT_RECOVERY_DISPOSITION_REFUSED] is a CAS
+                            # loss, NOT a DB error.
                             stamped = await asyncio.to_thread(
-                                task_repo.stamp_boot_re_drive, instance_id, boot_epoch
+                                task_repo.stamp_boot_re_drive,
+                                instance_id, boot_epoch, False,
                             )
                             if not stamped:
                                 result.skipped_disposition_refused += 1
+                                logger.error(
+                                    "[BOOT_RECOVERY_DISPOSITION_REFUSED] retire "
+                                    "stamp declined instance=%s (CAS lost; the "
+                                    "retire itself already happened)",
+                                    str(instance_id)[:8],
+                                )
                                 continue
                             result.retired += 1
                             dispositions += 1
+                            dispositioned_instances.add(instance_id)
                         else:
                             # Tier 1 — re-mint from the durable Event, then
                             # re-drive. Ghost detection is informational:
@@ -459,8 +550,9 @@ async def reconcile_boot_consistency(
                             if not _resume_accepted(resume):
                                 result.skipped_resume_refused += 1
                                 logger.info(
-                                    "[BOOT_RECOVERY] SKIPPED Tier-1 instance=%s: "
-                                    "resume refused (resume=%r)",
+                                    "[BOOT_RECOVERY_RESUME_REFUSED] Tier-1 "
+                                    "instance=%s: resume refused (resume=%r) "
+                                    "— NOT a DB error",
                                     str(instance_id)[:8], resume,
                                 )
                                 continue
@@ -474,6 +566,7 @@ async def reconcile_boot_consistency(
                             if not has_ckpt:
                                 result.ghost_dispatched += 1
                             dispositions += 1
+                            dispositioned_instances.add(instance_id)
                             logger.info(
                                 "[BOOT_RECOVERY] Tier-1 dispatched instance=%s "
                                 "work_id=%s ghost=%s epoch=%s",
@@ -494,8 +587,9 @@ async def reconcile_boot_consistency(
                         if not _resume_accepted(resume):
                             result.skipped_resume_refused += 1
                             logger.info(
-                                "[BOOT_RECOVERY] SKIPPED blocked_claim "
-                                "instance=%s: resume refused (resume=%r)",
+                                "[BOOT_RECOVERY_RESUME_REFUSED] blocked_claim "
+                                "instance=%s: resume refused (resume=%r) — "
+                                "NOT a DB error",
                                 str(instance_id)[:8], resume,
                             )
                             continue
@@ -507,6 +601,7 @@ async def reconcile_boot_consistency(
                             continue
                         result.redriven += 1
                         dispositions += 1
+                        dispositioned_instances.add(instance_id)
                         logger.info(
                             "[BOOT_RECOVERY] blocked_claim re-driven instance=%s "
                             "work_id=%s epoch=%s (stale RUNNING task NOT cancelled)",

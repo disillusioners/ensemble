@@ -253,3 +253,21 @@ def test_api_wires_lane_after_orphan_sweep() -> None:
     call_pos = src.index("await reconcile_boot_consistency(")
     assert call_pos > sweep_pos
     assert lane_pos > 0
+
+def test_api_wiring_is_pre_yield_pre_traffic() -> None:
+    """N6 (review): the lane is wired in the lifespan BODY — BEFORE the
+    ``yield`` (pre-traffic). A lane wired after the yield would run only at
+    shutdown, silently inverting the boot seam. Pinned structurally: the
+    reconcile call site must sit ABOVE the lifespan yield in api.py."""
+    src = (REPO / "daemon" / "api.py").read_text()
+    call_pos = src.index("await reconcile_boot_consistency(")
+    # The lifespan's yield sits inside `async with session_mgr.run():`
+    # (8-space indent) — the ONLY yield in the lifespan body. The call must
+    # be BETWEEN the lifespan def and that yield: pre-traffic boot seam.
+    lifespan_pos = src.index("async def lifespan(")
+    yield_pos = src.index("        yield", lifespan_pos)
+    assert lifespan_pos < call_pos < yield_pos, (
+        "reconcile_boot_consistency must be wired INSIDE the lifespan body "
+        "BEFORE its yield (pre-traffic) — "
+        f"lifespan@{lifespan_pos} call@{call_pos} yield@{yield_pos}"
+    )
