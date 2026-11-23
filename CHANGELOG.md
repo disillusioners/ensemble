@@ -5,6 +5,15 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.41] — 2026-11-23
+
+### Changed — POK active-entry storage cap 512 → 1024 (board wi-1921ba17)
+
+- Single-knob raise: `POK_ACTIVE_CAP_PER_PROJECT` 512 → 1024 (`daemon/services/pok_service.py`). Refuse-never-evict semantics, PER-PROJECT scope, and the read-side injection budget (8 entries / 2,900 chars PER-VIEW) are ALL unchanged. The knob is verified single-source: no env-var, `config.yaml`, or DB-backed override exists; the tool description (`daemon/tools/pok.py`) and the seed script import the constant and auto-follow. Zero migrations — the count is enforced in Python only (no SQL CHECK/trigger).
+- Read-budget PROOF + PIN: new `TestCapIndependenceReadBudget` (`tests/unit/services/test_pok_injection_unit.py`, append-only +3 nodes) pins `POK_BLOCK_MAX_ENTRIES == 8` / `POK_BLOCK_MAX_CHARS == 2_900` and proves FUNCTIONALLY — storage cap monkeypatched to 64 AND to 4096 over a 40-row synthetic in-memory store — that the rendered view admits exactly 8 entries / 2,371 chars (≤ 2,900) in BOTH regimes. A future cap raise can never silently change the read budget without these legs going red.
+- Test pins moved to the new expectation: AC19 `test_active_cap_constant_is_1024` (both `== 1024` value pins); the tool-description negative guards now also pin `"512 active entries"` ABSENT (retired values: 64, 256, 512).
+- Docs aligned to the new house marker `[active cap 1024 — commission 2026-11-23, board wi-1921ba17]`: `decisions.md` A-13 (+ new ruling row ER-3 mirroring ER-2), `implementation-readiness` / `architecture-recommendation` / `council-fold-record` current-value pointers, and the durable-vs-rolling guideline (arc 64 → 256 → 512 → 1024; grep-expect 1024; analogous fix-loss-only statement for the 1024 bump). Historical surfaces (tester RESULTS, CHANGELOG history, tree-pinned studies, at-time event logs, ER-2, guideline provenance lines) byte-intact.
+- Verification on the merged tip: scoped POK pack (6 files, the PACKS.md `pok_family_key_scoped_pack` invocation) — 212 passed (209 registered + 3 new). The critical note `571c4019` (doctrine: storage cap ≠ injection budget) is a live-DB row with no repo mirror — untouched by a staged repo release, and its doctrine claim remains TRUE under 1024.
 ## [v0.31.40] — 2026-11-23
 
 ### Fixed — agent model pins repointed off the dead llmproxy `agentic` alias (BRIDGE)
