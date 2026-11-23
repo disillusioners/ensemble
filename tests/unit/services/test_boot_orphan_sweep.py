@@ -1025,51 +1025,92 @@ async def test_new_restart_sweeps_fresh_orphan(
     assert result.scheduled == 1
     assert ckpt_ts < boot_epoch_2  # sanity: ckpt predates new boot epoch
 
+
+
 # ---------------------------------------------------------------------------
 # Stranded-running surfacing pass tests (boot-recovery hole closure)
+# Contract: surface-only by default; termination opt-in via
+# ENSEMBLE_STRANDED_SURFACING_TERMINATE=1 (default OFF).
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_stranded_with_preepoch_checkpoint_surfaced_and_retired(
+async def test_stranded_surface_only_default_no_terminate(
     task_repo: TaskRepository, engine: Engine
 ) -> None:
-    """Class (a): running, no task, no JobItem, pre-epoch checkpoint
-    -> surfaced_with_checkpoint, retired, terminated orphan_retired."""
+    """DEFAULT (no opt-in): pre-epoch checkpoint instance is SURFACED,
+    NOT terminated. No terminate_instance call."""
     iid = f"i-{uuid4().hex[:8]}"
     _seed_instance(engine, iid, status="running")
-    # no jobitem, no task
     boot_epoch = now_utc_naive()
     mgr = _MockManager(task_repo)
-    # checkpoint predates boot epoch
     past = boot_epoch - timedelta(hours=2)
     mgr.checkpointer.raw_saver.last_writes[iid] = past
 
-    res = await surface_stranded_running_instances(mgr, boot_epoch)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
     assert res.candidates == 1
     assert res.surfaced_with_checkpoint == 1
     assert res.surfaced_no_checkpoint == 0
+    assert res.retired == 0
+    assert res.surfaced_ids == [iid]
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_stranded_surface_only_default_no_terminate_no_ckpt(
+    task_repo: TaskRepository, engine: Engine
+) -> None:
+    """DEFAULT: no-checkpoint instance surfaced, not terminated."""
+    iid = f"i-{uuid4().hex[:8]}"
+    _seed_instance(engine, iid, status="running")
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.candidates == 1
+    assert res.surfaced_no_checkpoint == 1
+    assert res.retired == 0
+    assert res.surfaced_ids == [iid]
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_stranded_opt_in_terminates_preepoch(
+    task_repo: TaskRepository, engine: Engine
+) -> None:
+    """OPT-IN (=1): pre-epoch checkpoint instance is terminated."""
+    iid = f"i-{uuid4().hex[:8]}"
+    _seed_instance(engine, iid, status="running")
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    past = boot_epoch - timedelta(hours=2)
+    mgr.checkpointer.raw_saver.last_writes[iid] = past
+
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.candidates == 1
+    assert res.surfaced_with_checkpoint == 1
     assert res.retired == 1
-    assert res.skipped_current_generation == 0
+    assert res.surfaced_ids == [iid]
     assert mgr.terminated == [(iid, "orphan_retired")]
 
 
 @pytest.mark.asyncio
-async def test_stranded_no_checkpoint_surfaced_and_retired(
+async def test_stranded_opt_in_terminates_no_ckpt(
     task_repo: TaskRepository, engine: Engine
 ) -> None:
-    """Class (b): running, no task, no JobItem, no checkpoint
-    -> surfaced_no_checkpoint, retired."""
+    """OPT-IN: no-checkpoint instance terminated."""
     iid = f"i-{uuid4().hex[:8]}"
     _seed_instance(engine, iid, status="running")
     boot_epoch = now_utc_naive()
     mgr = _MockManager(task_repo)
-    # no checkpoint (last_writes empty)
 
-    res = await surface_stranded_running_instances(mgr, boot_epoch)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
     assert res.candidates == 1
     assert res.surfaced_no_checkpoint == 1
-    assert res.surfaced_with_checkpoint == 0
     assert res.retired == 1
     assert mgr.terminated == [(iid, "orphan_retired")]
 
@@ -1078,20 +1119,20 @@ async def test_stranded_no_checkpoint_surfaced_and_retired(
 async def test_stranded_current_generation_checkpoint_skipped(
     task_repo: TaskRepository, engine: Engine
 ) -> None:
-    """An instance whose checkpoint is at/after boot_epoch is NOT
-    stranded (current generation) -> skipped, not retired."""
     iid = f"i-{uuid4().hex[:8]}"
     _seed_instance(engine, iid, status="running")
     boot_epoch = now_utc_naive()
     mgr = _MockManager(task_repo)
-    mgr.checkpointer.raw_saver.last_writes[iid] = boot_epoch  # not pre-epoch
+    mgr.checkpointer.raw_saver.last_writes[iid] = boot_epoch
 
-    res = await surface_stranded_running_instances(mgr, boot_epoch)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
     assert res.candidates == 1
     assert res.skipped_current_generation == 1
     assert res.surfaced_with_checkpoint == 0
     assert res.surfaced_no_checkpoint == 0
     assert res.retired == 0
+    assert res.surfaced_ids == []
     assert mgr.terminated == []
 
 
@@ -1099,15 +1140,14 @@ async def test_stranded_current_generation_checkpoint_skipped(
 async def test_stranded_instance_with_active_jobitem_not_selected(
     task_repo: TaskRepository, engine: Engine
 ) -> None:
-    """Instances WITH an active JobItem are owned by the resume path,
-    not this pass."""
     iid = f"i-{uuid4().hex[:8]}"
     _seed_instance(engine, iid, status="running")
     _seed_jobitem(engine, iid, admission_state=AdmissionState.ACTIVE.value)
     boot_epoch = now_utc_naive()
     mgr = _MockManager(task_repo)
 
-    res = await surface_stranded_running_instances(mgr, boot_epoch)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
     assert res.candidates == 0
     assert mgr.terminated == []
 
@@ -1137,3 +1177,21 @@ async def test_stranded_pass_boot_epoch_none(
     res = await surface_stranded_running_instances(mgr, None)
     assert res.skipped_no_boot_epoch == 1
     assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_stranded_durable_surface_accessor(
+    task_repo: TaskRepository, engine: Engine
+) -> None:
+    """The surfaced set is queryable after the boot via the accessor."""
+    from daemon.services.auto_continue_boot_pass import get_last_stranded_surfacing
+    iid = f"i-{uuid4().hex[:8]}"
+    _seed_instance(engine, iid, status="running")
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
+        await surface_stranded_running_instances(mgr, boot_epoch)
+    last = get_last_stranded_surfacing()
+    assert last is not None
+    assert iid in last.surfaced_ids

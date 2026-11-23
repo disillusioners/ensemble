@@ -140,6 +140,42 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
+# Surface-only opt-in termination gate (boot-recovery stranded surfacing)
+# ---------------------------------------------------------------------------
+
+#: Env var that opts IN to terminating stranded instances at boot.
+#: DEFAULT OFF — surface-only. Anything other than "1" (including unset)
+#: means surface-only. Env-direct, read per boot (not cached), mirroring
+#: the AUTO_CONTINUE kill-switch shape but with independent semantics.
+STRANDED_SURFACING_TERMINATE_ENV = "ENSEMBLE_STRANDED_SURFACING_TERMINATE"
+
+
+def _stranded_terminate_enabled() -> bool:
+    """Per-boot read of the termination opt-in. Default OFF."""
+    return os.environ.get(STRANDED_SURFACING_TERMINATE_ENV, "") == "1"
+
+
+# Module-level holder for the most recent stranded-surfacing result so
+# the surfaced set remains queryable after the boot (the boot pass runs
+# once per daemon lifetime). Mirrors the OrphanWatcherSweepService /
+# MissionStrandHealer counters() pattern for a one-shot pass.
+_LAST_STRANDED_SURFACING: "StrandedSurfacingResult | None" = None
+
+
+def get_last_stranded_surfacing() -> "StrandedSurfacingResult | None":
+    """Read-only accessor for the most recent stranded-surfacing result.
+
+    Returns ``None`` until the first boot pass has run. The result
+    carries ``surfaced_ids`` (the stranded instance ids) so an
+    operator can read the set 30 minutes after boot via this accessor
+    (or via the daemon log line emitted by the pass).
+    """
+    return _LAST_STRANDED_SURFACING
+
+
+
+
+# ---------------------------------------------------------------------------
 # Kill-switch
 # ---------------------------------------------------------------------------
 
@@ -1223,6 +1259,8 @@ class StrandedSurfacingResult:
     candidates: int = 0
     surfaced_with_checkpoint: int = 0
     surfaced_no_checkpoint: int = 0
+    surfaced_ids: list[str] = field(default_factory=list)
+    terminated: int = 0
     skipped_current_generation: int = 0
     skipped_kill_switch: int = 0
     skipped_no_boot_epoch: int = 0
@@ -1326,30 +1364,46 @@ async def surface_stranded_running_instances(
                     result.surfaced_with_checkpoint += 1
                     cls = "pre-epoch-checkpoint"
 
+                # Record the surfaced id so the set is queryable after
+                # the boot (surface-only durable surface).
+                result.surfaced_ids.append(instance_id)
+
                 logger.warning(
                     "[BOOT_RECOVERY] STRANDED instance=%s class=%s "
-                    "ckpt_ts=%s boot_epoch=%s — retiring (orphan_retired), "
-                    "NOT resumed (idempotency: avoids re-running "
-                    "completed work)",
+                    "ckpt_ts=%s boot_epoch=%s — SURFACED (not resumed; "
+                    "idempotency avoids re-running completed work). "
+                    "Termination is opt-in via %s=1 (default OFF).",
                     instance_id[:8],
                     cls,
                     (ckpt_ts.isoformat() if ckpt_ts is not None else None),
                     boot_epoch.isoformat(),
+                    STRANDED_SURFACING_TERMINATE_ENV,
                 )
 
-                try:
-                    ok = await manager.terminate_instance(
-                        instance_id, terminal_reason="orphan_retired"
-                    )
-                    if ok:
-                        result.retired += 1
-                except Exception as term_exc:  # noqa: BLE001
-                    result.errors += 1
-                    logger.warning(
-                        "[BOOT_RECOVERY] retire failed instance=%s: %s: %s",
+                # Termination is EXPLICIT OPT-IN, DEFAULT OFF.
+                if _stranded_terminate_enabled():
+                    try:
+                        ok = await manager.terminate_instance(
+                            instance_id, terminal_reason="orphan_retired"
+                        )
+                        if ok:
+                            result.retired += 1
+                    except Exception as term_exc:  # noqa: BLE001
+                        result.errors += 1
+                        logger.warning(
+                            "[BOOT_RECOVERY] terminate failed "
+                            "instance=%s: %s: %s",
+                            instance_id[:8],
+                            type(term_exc).__name__,
+                            term_exc,
+                        )
+                else:
+                    logger.info(
+                        "[BOOT_RECOVERY] surface-only (no terminate): "
+                        "instance=%s remains running; operator must "
+                        "decide (opt-in: %s=1)",
                         instance_id[:8],
-                        type(term_exc).__name__,
-                        term_exc,
+                        STRANDED_SURFACING_TERMINATE_ENV,
                     )
             except Exception as exc:
                 result.errors += 1
@@ -1370,17 +1424,25 @@ async def surface_stranded_running_instances(
     finally:
         result.duration_seconds = time.monotonic() - loop_started
 
+    # Publish the surfaced set as the durable, queryable surface
+    # (module-level holder + log line with ids).
+    global _LAST_STRANDED_SURFACING
+    _LAST_STRANDED_SURFACING = result
+
     logger.info(
         "[BOOT_RECOVERY] stranded-surfacing summary: candidates=%d "
         "surfaced_with_checkpoint=%d surfaced_no_checkpoint=%d "
-        "skipped_current_generation=%d retired=%d errors=%d "
-        "duration_s=%.3f boot_epoch=%s mode=%s",
+        "skipped_current_generation=%d terminated=%d errors=%d "
+        "terminate_opt_in=%s surfaced_ids=%s duration_s=%.3f "
+        "boot_epoch=%s mode=%s",
         result.candidates,
         result.surfaced_with_checkpoint,
         result.surfaced_no_checkpoint,
         result.skipped_current_generation,
         result.retired,
         result.errors,
+        _stranded_terminate_enabled(),
+        result.surfaced_ids,
         result.duration_seconds,
         boot_epoch.isoformat(),
         result.auto_continue_mode,
