@@ -12,9 +12,21 @@ READ-ONLY CONTRACT (non-negotiable)
 ------------------------------------
 * The connection MUST use a strictly read-only role (prod: the
   ``ensemble_prod_ro`` role — NEVER the daemon's write credentials).
-* The session is opened with ``default_transaction_read_only = on`` as
-  belt-and-braces, so a write is refused by the server, not merely by
-  this script's discipline.
+* ENFORCEMENT (F1, review #5 — 2026-11-23): the engine is opened with
+  ``connect_args={"options": "-c default_transaction_read_only=on"}`` —
+  a **connection-startup option** the server applies BEFORE any
+  transaction starts, so every transaction is read-only and a write is
+  refused by PostgreSQL itself. (An earlier implementation issued
+  ``SET default_transaction_read_only = on`` from a ``connect`` event
+  hook; with psycopg3 that statement is defeated by the driver's
+  implicit ``BEGIN`` ordering and the guard was **INERT** — the
+  reviewer's probe returned "WRITE ALLOWED". The probe transcript is
+  ``.agents/tester/RESULTS/2026-11-23-engine-pilot-ro-guard-probe.txt``.)
+* ROLE ASSERTION (F2, review #6): after connecting, the harness reads
+  ``SELECT current_user`` and **REFUSES LOUDLY** to proceed when the
+  target database is prod-shaped (its name contains ``prod``) and the
+  connected role is not read-only-shaped (``*_ro`` / ``ro`` / ``readonly``).
+  A write-capable production role is never silently accepted.
 * No DDL, no temp tables, no LOCKs, no INSERT/UPDATE/DELETE — ever.
 * No flag flips, no restarts, no writes to the live install.
 
@@ -120,8 +132,13 @@ CADENCE_MISSED_TICK_FACTOR = 2
 POSTURE_RE = re.compile(
     r"engine boot posture: enabled=(?P<enabled>\w+) shadow=(?P<shadow>\w+) "
     r"registrations=(?P<registrations>\d+) .*?use_engine_flags=(?P<flags>[^;]*);"
-    r"\s*executable_specs=(?P<executables>\d+)(?:\s*\((?P<job_ids>[^)]*)\))?",
+    r"(?:\s*executable_specs=(?P<executables>\d+)(?:\s*\((?P<job_ids>[^)]*)\))?)?"
 )
+#: F4 (review #9) — a PRE-PROMOTE daemon (a binary without this lane's
+#: ``executable_specs=`` field) produces a posture line the regex still
+#: matches, but with NO executable count. The R7 ownership rule then has
+#: no evidence and MUST degrade to INCONCLUSIVE — never a false VIOLATION.
+POSTURE_LEGACY_SHAPE = "pre-promote posture line (no executable_specs field)"
 BOOT_EPOCH_RE = re.compile(
     r"Boot epoch captured \(DB clock\):\s*(?P<ts>\S+)"
 )
@@ -147,6 +164,7 @@ class Evidence:
     stale_pending_watchers: int | None = None
     postures: list[dict[str, Any]] = field(default_factory=list)
     boot_measurements: list[dict[str, Any]] = field(default_factory=list)
+    role_facts: dict[str, Any] = field(default_factory=dict)
     missing: list[str] = field(default_factory=list)
 
     @property
@@ -169,17 +187,83 @@ class RuleResult:
 
 
 def _ro_engine(dsn: str):
-    """A SQLAlchemy engine pinned to a READ-ONLY transaction."""
-    from sqlalchemy import create_engine, event
+    """A SQLAlchemy engine whose sessions are READ-ONLY SERVER-SIDE.
 
-    engine = create_engine(dsn, pool_pre_ping=True, future=True)
+    F1 (review #5) — the connect-event ``SET default_transaction_read_only``
+    is **INERT** with psycopg3: the driver's implicit ``BEGIN`` is issued
+    before/around the event hook's statement, so the session default never
+    reaches the transaction that matters. The reviewer's probe returned
+    "WRITE ALLOWED" against the old implementation.
 
-    @event.listens_for(engine, "connect")
-    def _set_readonly(dbapi_conn, _rec):  # pragma: no cover - driver hook
-        with dbapi_conn.cursor() as cur:
-            cur.execute("SET default_transaction_read_only = on")
+    The fix is the **connection-startup option**: ``options=-c
+    default_transaction_read_only=on`` is applied by the server as a
+    session parameter **before any transaction starts**, so every
+    transaction this engine opens is read-only. A write is then refused by
+    PostgreSQL itself ("cannot execute INSERT in a read-only transaction").
 
-    return engine
+    The role is asserted separately (F2 — review #6) by
+    :func:`_assert_read_only_role`.
+    """
+    from sqlalchemy import create_engine
+
+    return create_engine(
+        dsn,
+        pool_pre_ping=True,
+        future=True,
+        connect_args={"options": "-c default_transaction_read_only=on"},
+    )
+
+
+def _assert_read_only_role(engine, dsn: str) -> dict[str, Any]:
+    """F2 (review #6) — assert the CONNECTED ROLE, and refuse a write-capable
+    role when the target is prod-shaped.
+
+    The harness accepts any DSN, which meant a write-capable role was
+    silently accepted. It is now:
+      * ASSERTED — the role is read from the live connection
+        (``SELECT current_user``), not from the DSN string;
+      * REFUSED LOUDLY for a prod-shaped target when the role is not
+        read-only-shaped (``*_ro`` / ``ro`` / ``readonly``).
+
+    A non-prod target (dev/scratch) is allowed with ANY role — the harness
+    never writes there either, but the RO policy is a prod-grade control —
+    and the role is recorded in the report either way.
+    """
+    from sqlalchemy import text
+
+    with engine.connect() as conn:
+        role = conn.execute(text("SELECT current_user")).scalar()
+    role = str(role or "")
+
+    try:
+        from sqlalchemy.engine import make_url
+
+        db_name = (make_url(dsn).database or "").lower()
+    except Exception:  # noqa: BLE001 — an unparsable DSN must not be fatal here
+        db_name = ""
+
+    prod_shaped = "prod" in db_name
+    ro_shaped = (
+        role.endswith("_ro")
+        or role.lower() in ("ro", "readonly", "read_only", "read-only")
+    )
+
+    if prod_shaped and not ro_shaped:
+        raise RuntimeError(
+            "REFUSING to run: the target database "
+            f"{db_name!r} is PROD-SHAPED but the connected role {role!r} is "
+            "not read-only-shaped (expected a *_ro / ro role). Pass the "
+            "read-only role's DSN (e.g. ensemble_prod_ro) — the harness "
+            "must never be pointed at a write-capable production role."
+        )
+
+    return {
+        "role": role,
+        "database": db_name,
+        "prod_shaped": prod_shaped,
+        "role_is_read_only": ro_shaped,
+        "role_asserted": True,
+    }
 
 
 def collect_db_evidence(dsn: str, window_start: datetime, window_end: datetime) -> Evidence:
@@ -189,6 +273,8 @@ def collect_db_evidence(dsn: str, window_start: datetime, window_end: datetime) 
     ev = Evidence(window_start=window_start, window_end=window_end)
     engine = _ro_engine(dsn)
     try:
+        # F2 — assert the CONNECTED ROLE before reading anything.
+        ev.role_facts = _assert_read_only_role(engine, dsn)
         with engine.connect() as conn:
             rows = conn.execute(
                 text(
@@ -256,6 +342,7 @@ def collect_log_evidence(log_dir: Path, evidence: Evidence) -> None:
                     if "engine boot posture:" in line:
                         m = POSTURE_RE.search(line)
                         if m:
+                            executables = m.group("executables")
                             evidence.postures.append(
                                 {
                                     "file": str(path),
@@ -263,7 +350,15 @@ def collect_log_evidence(log_dir: Path, evidence: Evidence) -> None:
                                     "shadow": m.group("shadow"),
                                     "registrations": int(m.group("registrations")),
                                     "use_engine_flags": m.group("flags").strip(),
-                                    "executable_specs": int(m.group("executables")),
+                                    # F4 — None means a PRE-PROMOTE binary:
+                                    # the executable count is UNKNOWN, and
+                                    # the R7 rule must then be INCONCLUSIVE.
+                                    "executable_specs": (
+                                        int(executables)
+                                        if executables is not None
+                                        else None
+                                    ),
+                                    "legacy_shape": executables is None,
                                     "executor_job_ids": (
                                         m.group("job_ids") or ""
                                     ).strip(),
@@ -585,47 +680,71 @@ def evaluate(evidence: Evidence, *, window_hours: float) -> list[RuleResult]:
         )
     else:
         latest = postures[-1]
-        executables = int(latest.get("executable_specs", 0))
+        executables = latest.get("executable_specs")
         flag_on = PILOT_FLAG in str(latest.get("use_engine_flags", ""))
-        violations = []
-        if executables == 0 and execs:
-            violations.append(
-                {
-                    "why": "the engine EXECUTED the sweep while the boot "
-                    "posture says executable_specs=0 (the engine owns nothing "
-                    "→ the legacy loop also runs → double execution)",
-                    "posture": latest.get("raw", "")[:300],
-                    "executions": len(execs),
-                }
+        # F4 (review #9) — a PRE-PROMOTE binary has no executable_specs
+        # field: the ownership evidence is UNKNOWN, so the rule degrades to
+        # INCONCLUSIVE. It must NEVER produce a false VIOLATION.
+        if executables is None:
+            evidence.missing.append(
+                POSTURE_LEGACY_SHAPE
+                + " — the R7 ownership rule has no executable-count evidence"
             )
-        if not flag_on and execs:
-            violations.append(
-                {
-                    "why": f"{PILOT_FLAG} is not set in the boot posture, yet "
-                    "the engine executed the sweep",
-                    "posture": latest.get("raw", "")[:300],
-                    "executions": len(execs),
-                }
-            )
-        if violations:
             results.append(
                 RuleResult(
                     "R7 ownership",
-                    VERDICT_VIOLATION,
-                    f"{len(violations)} ownership violation(s)",
-                    {"violations": violations},
+                    VERDICT_INCONCLUSIVE,
+                    POSTURE_LEGACY_SHAPE
+                    + " — cannot attribute executions to an owner; run the "
+                    "harness against the FLIPPED release (one carrying "
+                    "executable_specs=)",
+                    {"posture": latest.get("raw", "")[:300]},
                 )
             )
         else:
-            results.append(
-                RuleResult(
-                    "R7 ownership",
-                    VERDICT_PASS,
-                    f"posture executable_specs={executables}, "
-                    f"{len(execs)} execution(s) — consistent",
-                    {"executable_specs": executables, "executions": len(execs)},
+            violations = []
+            if executables == 0 and execs:
+                violations.append(
+                    {
+                        "why": "the engine EXECUTED the sweep while the boot "
+                        "posture says executable_specs=0 (the engine owns "
+                        "nothing → the legacy loop also runs → double "
+                        "execution)",
+                        "posture": latest.get("raw", "")[:300],
+                        "executions": len(execs),
+                    }
                 )
-            )
+            if not flag_on and execs:
+                violations.append(
+                    {
+                        "why": f"{PILOT_FLAG} is not set in the boot posture, "
+                        "yet the engine executed the sweep",
+                        "posture": latest.get("raw", "")[:300],
+                        "executions": len(execs),
+                    }
+                )
+            if violations:
+                results.append(
+                    RuleResult(
+                        "R7 ownership",
+                        VERDICT_VIOLATION,
+                        f"{len(violations)} ownership violation(s)",
+                        {"violations": violations},
+                    )
+                )
+            else:
+                results.append(
+                    RuleResult(
+                        "R7 ownership",
+                        VERDICT_PASS,
+                        f"posture executable_specs={executables}, "
+                        f"{len(execs)} execution(s) — consistent",
+                        {
+                            "executable_specs": executables,
+                            "executions": len(execs),
+                        },
+                    )
+                )
 
     # ── R8 FUNCTIONAL (the sweep is doing its job) ────────────────────
     stale = evidence.stale_pending_watchers
@@ -682,10 +801,20 @@ def evaluate(evidence: Evidence, *, window_hours: float) -> list[RuleResult]:
         )
     else:
         breaches = []
+        bases: list[str] = []
         for m in measurements:
-            elapsed = m.get("boot_to_readyz_seconds")
+            # F3 (review #7) — the SLO-ANCHORED number is the daemon-reported
+            # one (boot_epoch -> the readiness composite's own checked_at).
+            # The harness's stopwatch number (launch -> readyz) is an UPPER
+            # BOUND on it and is used only when the daemon number is absent.
+            elapsed = m.get("daemon_reported_boot_to_readyz_seconds")
+            basis = "daemon-reported (boot_epoch -> readyz checked_at)"
+            if elapsed is None:
+                elapsed = m.get("boot_to_readyz_seconds")
+                basis = str(m.get("slo_basis") or "launch->readyz (UPPER BOUND)")
             if elapsed is None:
                 elapsed = m.get("elapsed_seconds")
+                basis = "legacy field (elapsed_seconds)"
             try:
                 elapsed = float(elapsed)
             except (TypeError, ValueError):
@@ -693,8 +822,11 @@ def evaluate(evidence: Evidence, *, window_hours: float) -> list[RuleResult]:
                     f"boot measurement without a usable elapsed value: {m}"
                 )
                 continue
+            bases.append(basis)
             if elapsed > BOOT_SLO_SECONDS:
-                breaches.append({"measurement": m, "elapsed_seconds": elapsed})
+                breaches.append(
+                    {"measurement": m, "elapsed_seconds": elapsed, "basis": basis}
+                )
         if breaches:
             results.append(
                 RuleResult(
@@ -711,8 +843,9 @@ def evaluate(evidence: Evidence, *, window_hours: float) -> list[RuleResult]:
                     "R9 boot-SLO",
                     VERDICT_PASS,
                     f"{len(measurements)} boot measurement(s), all within "
-                    f"{BOOT_SLO_SECONDS}s",
-                    {"measurements": len(measurements)},
+                    f"{BOOT_SLO_SECONDS}s (basis: "
+                    f"{', '.join(sorted(set(bases))) or 'n/a'})",
+                    {"measurements": len(measurements), "bases": sorted(set(bases))},
                 )
             )
 
@@ -747,6 +880,7 @@ def build_report(
             "flag": PILOT_FLAG,
         },
         "dsn_host": _redact_dsn(dsn),
+        "role_assertion": evidence.role_facts,
         "evidence_summary": {
             "engine_runs_rows": len(evidence.runs),
             "executions": len(evidence.executions),

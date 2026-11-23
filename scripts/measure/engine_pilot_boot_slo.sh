@@ -136,6 +136,8 @@ else
 fi
 
 LOG="$TMP_ROOT/boot.log"
+READY_BODY="$TMP_ROOT/readyz.json"
+LIVEZ_BODY="$TMP_ROOT/livez.json"
 mkdir -p "$BOOT_CWD/data_dev"
 
 # ── the fence (scrubbed ONE VARIABLE AT A TIME) ──────────────────────────
@@ -250,9 +252,12 @@ for i in $(seq 1 70); do
     fi
   fi
   if [ -n "$LIVEZ_AT" ] && [ -z "$READYZ_AT" ]; then
-    if curl -sf -m 5 "http://127.0.0.1:${PORT}/readyz" -o /dev/null 2>/dev/null; then
+    if curl -sf -m 5 "http://127.0.0.1:${PORT}/readyz" -o "$READY_BODY" 2>/dev/null; then
       READYZ_AT=$((NOW_MS - START_MS))
       echo "PROBE readyz GREEN at +${READYZ_AT}ms" >> "$LOG"
+      # F3 — capture the daemon's OWN view at the green instant:
+      # /livez uptime_seconds + the readyz composite's checked_at.
+      curl -sf -m 3 "http://127.0.0.1:${PORT}/livez" -o "$LIVEZ_BODY" 2>/dev/null || true
     fi
   fi
   [ -n "$READYZ_AT" ] && break
@@ -274,15 +279,49 @@ LIVEZ_S=""; READYZ_S=""
 [ -n "$LIVEZ_AT" ] && LIVEZ_S="$(awk "BEGIN{printf \"%.3f\", $LIVEZ_AT/1000}")"
 [ -n "$READYZ_AT" ] && READYZ_S="$(awk "BEGIN{printf \"%.3f\", $READYZ_AT/1000}")"
 
+# ── F3 — TWO DISTINCT NUMBERS ──────────────────────────────────────────────
+#   (a) launch -> readyz-green      : the HARNESS stopwatch. It is an
+#       UPPER BOUND on the Emperor's SLO (the daemon's boot epoch is
+#       captured AFTER the launch, so boot_epoch->readyz <= launch->readyz).
+#   (b) daemon-reported boot elapsed: boot_epoch -> the readiness
+#       composite's own `checked_at` — BOTH numbers are the DAEMON's, and
+#       this is the SLO-ANCHORED measure (the Emperor's 120 s SLO is
+#       boot_epoch -> readyz).
+# The verdict is taken on the SLO-ANCHORED number when it is available,
+# else on the (conservative) upper bound — and the basis is always reported.
+READY_CHECKED_AT=""
+if [ -s "$READY_BODY" ]; then
+  READY_CHECKED_AT="$(grep -oE '"checked_at"[[:space:]]*:[[:space:]]*"[^"]*"' "$READY_BODY" | head -1 | grep -oE '"[^"]*"$' | tr -d '"')"
+fi
+LIVEZ_UPTIME=""
+if [ -s "$LIVEZ_BODY" ]; then
+  LIVEZ_UPTIME="$(grep -oE '"uptime_seconds"[[:space:]]*:[[:space:]]*[0-9.]+' "$LIVEZ_BODY" | head -1 | grep -oE '[0-9.]+$')"
+fi
+SLO_ANCHORED_S=""
+if [ -n "$READY_CHECKED_AT" ] && [ -n "$BOOT_EPOCH_TS" ]; then
+  _e_s="$(date -u -d "${BOOT_EPOCH_TS}+00:00" +%s 2>/dev/null || true)"
+  _c_s="$(date -u -d "${READY_CHECKED_AT}" +%s 2>/dev/null || true)"
+  if [ -n "$_e_s" ] && [ -n "$_c_s" ]; then
+    SLO_ANCHORED_S="$(awk "BEGIN{printf \"%.3f\", $_c_s - $_e_s}")"
+  fi
+fi
+
+SLO_BASIS="launch->readyz (UPPER BOUND - the daemon-reported number was unavailable)"
+JUDGED_S="$READYZ_S"
+if [ -n "$SLO_ANCHORED_S" ]; then
+  SLO_BASIS="daemon-reported (boot_epoch -> readyz checked_at) - the SLO-anchored measure"
+  JUDGED_S="$SLO_ANCHORED_S"
+fi
+
 VERDICT="VIOLATION"
-if [ -z "$READYZ_S" ]; then
+if [ -z "$JUDGED_S" ]; then
   VERDICT="INCONCLUSIVE"
-elif awk "BEGIN{exit !($READYZ_S <= 120.0)}"; then
+elif awk "BEGIN{exit !($JUDGED_S <= 120.0)}"; then
   VERDICT="PASS"
 fi
 
 RECORD=$(cat <<JSON
-{"kind": "boot_slo_measurement", "label": "${LABEL}", "boot_cwd": "${BOOT_CWD}", "boot_cmd": "${BOOT_CMD}", "port": ${PORT}, "db": "${DB_NAME}", "boot_to_livez_seconds": ${LIVEZ_S:-null}, "boot_to_readyz_seconds": ${READYZ_S:-null}, "boot_slo_seconds": 120.0, "block_elapsed_ms_gated": ${GATED:-null}, "block_elapsed_ms_total": ${TOTAL:-null}, "executable_specs": ${EXECS:-null}, "engine_flag": "${ENGINE_FLAG}", "shadow_mode": "${SHADOW_MODE}", "boot_epoch": "${BOOT_EPOCH_TS}", "verdict": "${VERDICT}", "log": "${LOG}"}
+{"kind": "boot_slo_measurement", "label": "${LABEL}", "boot_cwd": "${BOOT_CWD}", "boot_cmd": "${BOOT_CMD}", "port": ${PORT}, "db": "${DB_NAME}", "boot_to_livez_seconds": ${LIVEZ_S:-null}, "boot_to_readyz_seconds": ${SLO_ANCHORED_S:-${READYZ_S:-null}}, "daemon_reported_boot_to_readyz_seconds": ${SLO_ANCHORED_S:-null}, "launch_to_readyz_seconds": ${READYZ_S:-null}, "daemon_uptime_at_readyz_seconds": ${LIVEZ_UPTIME:-null}, "readyz_checked_at": "${READY_CHECKED_AT}", "slo_basis": "${SLO_BASIS}", "boot_slo_seconds": 120.0, "block_elapsed_ms_gated": ${GATED:-null}, "block_elapsed_ms_total": ${TOTAL:-null}, "executable_specs": ${EXECS:-null}, "engine_flag": "${ENGINE_FLAG}", "shadow_mode": "${SHADOW_MODE}", "boot_epoch": "${BOOT_EPOCH_TS}", "verdict": "${VERDICT}", "log": "${LOG}"}
 JSON
 )
 
