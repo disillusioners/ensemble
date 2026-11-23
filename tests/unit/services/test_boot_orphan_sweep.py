@@ -1125,9 +1125,9 @@ async def test_class_1a_never_dispatched_retired_by_default(task_repo, engine):
     assert res.class_1a == 1
     assert res.class_2 == 0
     assert res.class_3 == 0
-    assert res.retired == 1
+    assert res.retired == 0
     assert iid in res.surfaced_ids
-    assert mgr.terminated == [(iid, "orphan_retired")]
+    assert mgr.terminated == []
 
 
 @pytest.mark.asyncio
@@ -1143,8 +1143,8 @@ async def test_class_1b_delivered_retired_by_default(task_repo, engine):
     with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
         res = await surface_stranded_running_instances(mgr, boot_epoch)
     assert res.class_1b == 1
-    assert res.retired == 1
-    assert mgr.terminated == [(iid, "orphan_retired")]
+    assert res.retired == 0
+    assert mgr.terminated == []
 
 
 @pytest.mark.asyncio
@@ -1321,14 +1321,14 @@ async def test_p8_default_on_opt_out(task_repo, engine):
     _make_instance(engine, iid, last_activity_at=past)
     boot_epoch = now_utc_naive()
     mgr = _MockManager(task_repo)
-    # opt out
-    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "0"):
+    # default (unset) -> surface only, no retire
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
         res = await surface_stranded_running_instances(mgr, boot_epoch)
     assert res.retired == 0
     assert mgr.terminated == []
-    # default (unset) -> retired (same instance, now eligible)
+    # opt in -> retired
     mgr2 = _MockManager(task_repo)
-    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
         res2 = await surface_stranded_running_instances(mgr2, boot_epoch)
     assert res2.retired == 1
     assert mgr2.terminated == [(iid, "orphan_retired")]
