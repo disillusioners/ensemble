@@ -1111,9 +1111,10 @@ def _seed_child(engine, parent_id, child_id, child_status="running"):
 
 
 @pytest.mark.asyncio
-async def test_class_1a_never_dispatched_retired_by_default(task_repo, engine):
+async def test_class_1a_surfaced_not_retired_by_default(task_repo, engine):
     """Class 1a: no task/msg/job/descendant/watcher, idle past bound, no
-    delivered reports -> retired by default (switch default ON)."""
+    delivered reports -> SURFACED and NOT retired by default (switch
+    default OFF)."""
     from datetime import timedelta
     iid = f"i-{uuid4().hex[:8]}"
     past = now_utc_naive() - timedelta(days=2)
@@ -1131,8 +1132,8 @@ async def test_class_1a_never_dispatched_retired_by_default(task_repo, engine):
 
 
 @pytest.mark.asyncio
-async def test_class_1b_delivered_retired_by_default(task_repo, engine):
-    """Class 1b: proven dead + delivered reports -> retired by default."""
+async def test_class_1b_surfaced_not_retired_by_default(task_repo, engine):
+    """Class 1b: proven dead + delivered reports -> SURFACED and NOT retired by default."""
     from datetime import timedelta
     iid = f"i-{uuid4().hex[:8]}"
     past = now_utc_naive() - timedelta(days=2)
@@ -1145,6 +1146,39 @@ async def test_class_1b_delivered_retired_by_default(task_repo, engine):
     assert res.class_1b == 1
     assert res.retired == 0
     assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_class_1a_retired_when_opt_in_armed(task_repo, engine):
+    """Class 1a with ENSEMBLE_STRANDED_SURFACING_TERMINATE=1 -> retired."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid, last_activity_at=past)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.class_1a == 1
+    assert res.retired == 1
+    assert mgr.terminated == [(iid, "orphan_retired")]
+
+
+@pytest.mark.asyncio
+async def test_class_1b_retired_when_opt_in_armed(task_repo, engine):
+    """Class 1b with ENSEMBLE_STRANDED_SURFACING_TERMINATE=1 -> retired."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    past = now_utc_naive() - timedelta(days=2)
+    _make_instance(engine, iid, last_activity_at=past)
+    _seed_report_delivered(engine, iid)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    assert res.class_1b == 1
+    assert res.retired == 1
+    assert mgr.terminated == [(iid, "orphan_retired")]
 
 
 @pytest.mark.asyncio
@@ -1248,6 +1282,40 @@ async def test_p3_just_spawned_not_retired(task_repo, engine):
 
 
 @pytest.mark.asyncio
+async def test_p3_bound_24h_five_hour_idle_is_ambiguous(task_repo, engine):
+    """P3 (bound = 24h): an instance idle ~5.5h with zero evidence is
+    NOT proven dead -> class 3 (ambiguous, surface only). This is the
+    716908e7 shape today; it becomes 1a only at ~2026-11-24T14:51:31Z."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    idle_5h = now_utc_naive() - timedelta(hours=5, minutes=30)
+    _make_instance(engine, iid, last_activity_at=idle_5h)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid] == "3"
+    assert res.retired == 0
+    assert mgr.terminated == []
+
+
+@pytest.mark.asyncio
+async def test_p3_bound_24h_idle_above_bound_is_proven_dead(task_repo, engine):
+    """P3 (bound = 24h): idle past 24h with zero evidence -> class 1a."""
+    from datetime import timedelta
+    iid = f"i-{uuid4().hex[:8]}"
+    idle_25h = now_utc_naive() - timedelta(hours=25)
+    _make_instance(engine, iid, last_activity_at=idle_25h)
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "0"):
+        res = await surface_stranded_running_instances(mgr, boot_epoch)
+    by_id = {c.instance_id: c.classification for c in res.classifications}
+    assert by_id[iid] == "1a"
+
+
+@pytest.mark.asyncio
 async def test_p4_class_separation(task_repo, engine):
     """P4: (i)->1b, (ii)->1a, PM-shape->2, live-dev->2."""
     from datetime import timedelta
@@ -1313,8 +1381,9 @@ async def test_p5_fail_closed_clock_skew(task_repo, engine):
 
 
 @pytest.mark.asyncio
-async def test_p8_default_on_opt_out(task_repo, engine):
-    """P8: default (unset) retires proven-dead; =0 opts out."""
+async def test_p8_retire_switch_default_off(task_repo, engine):
+    """P8: the retire switch DEFAULTS OFF — unset and explicit =0
+    both surface only; the shared switch does not arm it."""
     from datetime import timedelta
     iid = f"i-{uuid4().hex[:8]}"
     past = now_utc_naive() - timedelta(days=2)
@@ -1326,12 +1395,20 @@ async def test_p8_default_on_opt_out(task_repo, engine):
         res = await surface_stranded_running_instances(mgr, boot_epoch)
     assert res.retired == 0
     assert mgr.terminated == []
-    # opt in -> retired
+    # explicit opt-out (=0) -> surface only, no retire
     mgr2 = _MockManager(task_repo)
-    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "1"):
+    with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", "0"):
         res2 = await surface_stranded_running_instances(mgr2, boot_epoch)
-    assert res2.retired == 1
-    assert mgr2.terminated == [(iid, "orphan_retired")]
+    assert res2.retired == 0
+    assert mgr2.terminated == []
+    # INDEPENDENT of the shared switch: the shared switch being ON
+    # (its default) does not arm the retire path.
+    mgr3 = _MockManager(task_repo)
+    with _env("ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART", "1"):
+        with _env("ENSEMBLE_STRANDED_SURFACING_TERMINATE", None):
+            res3 = await surface_stranded_running_instances(mgr3, boot_epoch)
+    assert res3.retired == 0
+    assert mgr3.terminated == []
 
 
 @pytest.mark.asyncio
