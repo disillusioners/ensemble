@@ -171,12 +171,42 @@ DEFAULT_HUSK_MIN_AGE_SECONDS: int = 86_400
 #: instances, ``ensemble_prod``, 2026-11-23) every instance that was
 #: never executed AND carries no evidence row has its stamp within
 #: **0.043 s … 0.289 s** of its creation (32 rows; median 0.066 s).
-#: 60 s is a ~200x margin over that maximum — jitter-proof — while
-#: staying an order of magnitude below the band (60 s … 300 s) where
-#: the population of instances that were dispatched LATER starts. The
-#: window is a ONE-SHOT gate: an instance whose first activity stamp
-#: lands outside it can never re-enter the class, because the window
-#: is measured from ``created_at``, which never moves.
+#: 60 s is a ~208x margin over that maximum — jitter-proof.
+#:
+#: It is ALSO ~3x the p05 (20.835 s) of the LATER-DISPATCHED cohort
+#: (4 498 instances carrying a task / message_queue / job_queue_items
+#: row; min 0.026 s, p05 20.835 s, median 57.927 s, 2 325 of them
+#: within 0 … 60 s). So the window is NOT an order of magnitude
+#: below that cohort — it sits just above its p05, and it does not
+#: separate the two classes on its own.
+#:
+#: NECESSARY BUT NOT SUFFICIENT — READ THIS BEFORE RELYING ON IT:
+#: the window does NOT discriminate "never executed" from "executed
+#: and dispatched at spawn". The SEPARATE conjunct that protects
+#: against the later-dispatched class is the EVIDENCE legs — E1 no
+#: task rows, E2 no message_queue rows (both via the shared
+#: ``never_dispatched_evidence_expr``), E3 no job_queue_items rows —
+#: and BOTH must hold. Do not read the window as telling the two
+#: classes apart.
+#:
+#: THE RESIDUAL (measured, so it is not rediscovered as a bug in
+#: this fix): an EXECUTED-but-evidence-free NON-TERMINAL row is
+#: ADMISSIBLE IN PRINCIPLE by this window — ``la_delta <= 60 s``,
+#: non-terminal, no task / message_queue / job_queue_items rows —
+#: once its checkpoints have aged past the 168 h retention, so the
+#: 24 h age gate and the 168 h retention leave a reachable band
+#: [168 h, infinity). It is EMPTY today: of 1 121 executed +
+#: evidence-free rows, 0 are non-terminal. It is seeded by the 11
+#: non-terminal later-dispatched instances at ``la_delta <= 5 s``,
+#: whose evidence rows age out (message_queue.cleanup_old after
+#: 24 h; task rows on completion). The proper closure is an E7
+#: "no checkpoints rows" leg, with graceful degradation for the
+#: SQLite unit-test fixtures (no ``checkpoints`` table there) — a
+#: SEPARATE lane, deliberately NOT implemented here.
+#:
+#: The window is a ONE-SHOT gate: an instance whose first activity
+#: stamp lands outside it can never re-enter the class, because the
+#: window is measured from ``created_at``, which never moves.
 #:
 #: It is deliberately NOT a tool argument — like the age threshold, it
 #: moves by editing this constant, never by widening the tool schema.
