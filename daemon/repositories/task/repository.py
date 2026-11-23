@@ -1408,6 +1408,67 @@ class TaskRepository:
             # CHARACTER off the id; iterate directly instead.
             return list(db_session.exec(stmt).all())
 
+    def find_stranded_running_instances(
+        self, *, boot_epoch: datetime
+    ) -> list[str]:
+        """Return ``instance_id`` rows for the boot-time STRANDED
+        surfacing pass (the complement of ``find_orphaned_live_turns``).
+
+        Feature: boot-recovery-stranded-surfacing. Covers the orphan
+        class that ``find_orphaned_live_turns`` deliberately excludes
+        via its active-JobItem clause -- RUNNING instances whose
+        ``task`` row is gone AND which carry NO active JobItem
+        (the mid-turn-pre-epoch and never-dispatched classes). These
+        are surfaced (and retired) at boot rather than resumed, so a
+        pre-epoch checkpoint is NEVER re-executed (which would
+        duplicate already-completed work).
+
+        Selection:
+          * ``instances.status = 'running'``
+          * NO active ``task`` row (``task.status IN
+            ('pending','running','paused')`` returns 0)
+          * NO active JobItem bound (the inverse of the
+            ``find_orphaned_live_turns`` JobItem clause -- instances
+            WITH an active JobItem are owned by the resume path)
+
+        Returns oldest-first by ``instances.created_at``.
+        """
+        if boot_epoch is None:
+            return []
+        with SQLModelSession(self.engine) as db_session:
+            active_task_subq = (
+                select(Task.instance_id)
+                .where(
+                    Task.status.in_([
+                        TaskStatus.PENDING.value,
+                        TaskStatus.RUNNING.value,
+                        TaskStatus.PAUSED.value,
+                    ])
+                )
+                .group_by(Task.instance_id)
+            )
+            active_job_subq = (
+                select(JobItem.instance_id)
+                .where(
+                    col(JobItem.instance_id).is_not(None)
+                )
+                .where(
+                    col(JobItem.admission_state).in_(
+                        list(ACTIVE_ADMISSION_STATES)
+                    )
+                )
+                .where(col(JobItem.deleted_at).is_(None))
+                .group_by(JobItem.instance_id)
+            )
+            stmt = (
+                select(Instance.instance_id)
+                .where(Instance.status == InstanceStatus.RUNNING.value)
+                .where(col(Instance.instance_id).not_in(active_task_subq))
+                .where(col(Instance.instance_id).not_in(active_job_subq))
+                .order_by(col(Instance.created_at).asc())
+            )
+            return list(db_session.exec(stmt).all())
+
     def mark_task_auto_continued(
         self, task_id: int, boot_epoch: datetime
     ) -> bool:
