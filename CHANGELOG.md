@@ -5,6 +5,20 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.37] — 2026-11-23
+
+### Fixed — Readiness: checkpoint-saver sentinel boot-warm tolerance (Leg A, defect class: false boot-window readiness flap)
+
+- Live evidence 2026-11-22T22:24:40Z (v0.31.33 boot): ONE readiness tick degraded `/readyz` (~112s into boot, `checkpoint_saver: sentinel checkpoint read failed`; queue_max_age=1.27s), self-recovered next tick — a green→503→green flap inside the Emperor boot SLO window (boot_epoch→readyz-green ≤120s), an auto-rollback risk at flip ceremonies. Root cause: the sentinel `aget_tuple` rides the saver's single `asyncio.Lock` (hot path by design); boot-window checkpoint-restore storms hold the lock past the 0.9s inner budget, yielding a GRACE-ELIGIBLE class (`pool_busy`/`read_timeout`) that the composite nonetheless degraded (the GraceTracker deliberately never alters the verdict).
+- Fix (verdict-truth, not desensitisation): inside a 120.0s boot window measured from the daemon boot epoch (`READINESS_BOOT_WARM_WINDOW_S`), grace-eligible `checkpoint_saver` classes no longer degrade the composite — the component stays True with an OBSERVABLE marker (`detail.checkpoint_saver_boot_warm` + a WARNING log). Fail-closed both ways: `hard_component_red` (exception) and the OUTER `probe_timeout` still degrade IN-window; every class degrades post-window; a missing boot epoch means no window means degrade. Probe budget UNCHANGED (0.9s inner / 1.0s outer); sentinel still rides the hot path. Subsumes the never-landed 2026-10-30 "checkpoint-amplification" lane (zero commits in any ref — verified).
+- Observability: degraded reason strings now carry the failure-class token (` (class=pool_busy|hard_component_red|probe_timeout)`) — the live journal could not distinguish transient from genuine. Per-tick sentinel latency logs at DEBUG. Repairs 6 pre-existing stale-assertion reds in `tests/test_readiness_checkpoint_saver.py` (verified at base v0.31.36: 6 failed / 14 passed).
+
+### Changed — Event registry: L-11 declared-silent kind retirement (Leg B)
+
+- Retired the six zero-producer `EventKind` members (`processing_started`, `processing_completed`, `processing_failed`, `child_failed`, `message_completed`, `room_post`) with a `RETIRED_EVENT_KINDS` deprecation ledger (reason / retired_at / revive procedure per kind — revival is a re-registration trail, not blind deletion). Evidence: zero in-tree producers or consumers (whole-tree grep incl. string-form emissions, FE, engine projection/catalog surfaces — the `room_post` tool name and the SSE `child_failed` stream event_type are distinct namespaces); zero historical rows for all six in live `ensemble_prod` and demo `ensemble_demo` (read-only census 2026-11-23); `room_post` superseded by `room_tag_delivery`/`room_proposal`/`room_decision` rows.
+- Census 30=23/6/1 → **24=23/0/1**; `BRIDGE_PENDING`/`DECLARED_SILENT_KINDS` now empty; the deferred `turn_transition` and the 23 bridged kinds untouched. New tripwire pins: ledger completeness (drop a row ⇒ RED), retired∩registered=∅, `record()` of a retired kind refuses into the `record_refused_unknown_kind_total` counter (also the silent-revival tripwire). `event_registry_unit_test` pack re-baselined 69→78 nodes.
+- Zero migration files in the v0.31.36 → v0.31.37 delta.
+
 ## [v0.31.36] — 2026-11-22
 
 ### Added — ENGINE-ARC FLIP-PREP: kill-switch execution wiring + truthful boot posture + SLO gate (flip-day surface complete)
