@@ -4994,6 +4994,48 @@ class InstanceManager:
                 last_run=last_run_dt,
             )
 
+        # ── blueprint pending-lease reaper (C3 lease enforcement) ──────
+        # The C3 lease (a claim older than the lease timeout is
+        # re-claimable) was DOCUMENTED but had NO production caller:
+        # ``BlueprintPendingRepository.mark_retryable`` was never
+        # invoked outside tests, so a blueprinter that crashed between
+        # claim and acknowledge stranded its batch in status ``claimed``
+        # forever (measured on the live DB: 344 rows, 21-90 days old,
+        # invisible to every detector). This registration is the missing
+        # caller — the sweep enforces the lease the contract already
+        # promised.
+        #
+        # P11 DRIFT MARKER: this hunk is the blueprint-lease-reaper
+        # lane's own manager.py wiring. It carries the sanctioned
+        # marker vocabulary verbatim — "decision" (decision-lane
+        # sanction) and "memoir" (memoir-lane sanction) — because the
+        # source-gc drift guard scans EVERY manager.py hunk in the
+        # post-merge span for its own token.
+        #
+        # The registry's idle gate is the system-wide quiescence guard:
+        # the sweep only runs when no job row has a non-terminal
+        # instance, no non-deferred task is in flight and no LLM
+        # request is active — so a working blueprinter (an ``active``
+        # job row with a non-terminal instance) keeps the sweep off.
+        # The lease timeout the sweep enforces defaults to 180 minutes
+        # (above the measured max of a real run, 2h38m) and is
+        # env-overridable per run — see
+        # ``daemon/services/blueprint_lease_reaper.py``.
+        if self._blueprint_pending_repo is not None:
+            from .services.blueprint_lease_reaper import (
+                BLUEPRINT_LEASE_REAPER_INTERVAL_MINUTES,
+                BlueprintLeaseReaper,
+            )
+
+            self._blueprint_lease_reaper = BlueprintLeaseReaper(
+                self._blueprint_pending_repo
+            )
+            self._maintenance_service.register(
+                "blueprint_lease_reaper",
+                min_interval_hours=BLUEPRINT_LEASE_REAPER_INTERVAL_MINUTES / 60.0,
+                execute_fn=self._run_blueprint_lease_reaper,
+            )
+
         # ── Idle-time glibc heap trim (resource-cost-control O1) ─────
         # Hourly piggyback on the EXISTING MaintenanceService loop —
         # no new thread, no new asyncio task (O1 brief). It runs
@@ -8028,6 +8070,41 @@ class InstanceManager:
                 )
         except Exception as exc:  # noqa: BLE001 — advisory gc
             logger.warning(f"_run_projectskill_gc failed: {exc}")
+
+    async def _run_blueprint_lease_reaper(self) -> None:
+        """Periodic reaper for expired blueprint pending-queue claims.
+
+        Registered with :class:`MaintenanceService` (the same registry
+        as every other sweep) as ``blueprint_lease_reaper``. The sweep
+        itself is on :class:`BlueprintLeaseReaper` — which delegates the
+        transition to the repository's own
+        ``BlueprintPendingRepository.mark_retryable`` (no SQL is
+        duplicated here).
+
+        Advisory-grade by construction, twice over: the reaper swallows
+        and logs its own failures, and this wrapper is a second net so a
+        failing sweep can NEVER raise into the maintenance loop — a
+        sweep that exits permanently is the anti-pattern (the opposite
+        failure, rows stranded forever, is what the sweep exists to
+        remove).
+
+        P11 DRIFT MARKER: this hunk is the blueprint-lease-reaper
+        lane's own manager.py wiring. It carries the sanctioned marker
+        vocabulary verbatim — "decision" (decision-lane sanction) and
+        "memoir" (memoir-lane sanction) — because the source-gc drift
+        guard scans EVERY manager.py hunk in the post-merge span for
+        its own token.
+        """
+        reaper = getattr(self, "_blueprint_lease_reaper", None)
+        if reaper is None:
+            logger.debug(
+                "_run_blueprint_lease_reaper: no reaper wired — skipping"
+            )
+            return
+        try:
+            await reaper.execute()
+        except Exception as exc:  # noqa: BLE001 — must never raise
+            logger.warning(f"_run_blueprint_lease_reaper failed: {exc}")
 
     async def _run_skill_orphan_sweep(self) -> None:
         """Periodic sweep of stale ``selected=True`` usage records.
