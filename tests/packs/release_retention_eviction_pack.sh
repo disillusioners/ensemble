@@ -22,10 +22,14 @@
 #          retention_pin_hold with reason=no-journal-evidence.
 #       The close anchor is EVENT `commit` (not `promote`) — A's
 #       _retention_closed_after / _retention_superseded_by gate on it.
-#       MUTATION LEG (pin ii): sed-strip the journal_history_append call from a
-#       COPY of lib.sh into scratch, re-run the P2a eviction assertions against
-#       the stripped copy, and PROVE they REDden (the journal-row assertions
-#       must fail) while eviction ITSELF still happens (non-vacuity).
+#       MUTATION LEG (pin ii, G1): sed-strip the journal_history_append call
+#       from a COPY of lib.sh into scratch — the shim is a FAILING STUB
+#       (returns 1), so every eviction-journal WRITE inside retention_evict
+#       FAILS. Under G1 a failed journal write must HOLD the dir (NO rm -rf):
+#       the journal write is LOAD-BEARING and its failure FAILS CLOSED. The
+#       leg re-runs the SAME P2a assertions against the stripped copy and
+#       proves they flip GREEN->RED (the dir SURVIVES and the retention_evict
+#       row is ABSENT), with the unstripped CONTROL run asserted explicitly.
 #   P3  absent-target ceremony FAILS LOUDLY: promote.sh sandbox with a missing
 #       VERSION exits 78, stderr carries reason=not-staged + retention guidance
 #       + a re-stage path, a refusal row is journaled, and NO flip occurs.
@@ -76,15 +80,20 @@
 #     journal_update / journal_history_append); no hand-written state.json.
 #     manifest.json is a per-release FIXTURE input (no helper writes it).
 #
-# MUTATION MECHANISM (why the strip is non-vacuous)
+# MUTATION MECHANISM (G1 — the journal write is load-bearing, and its failure
+#                     must fail CLOSED)
 #   make_stripped_lib() copies lib.sh and, inside the retention_evict function
-#   body only, rewrites the token `journal_history_append` to a no-op shim
-#   (awk tracks the function span by its column-0 closing brace, so multi-line
-#   calls are neutralized too). The setup helpers are left intact, so the
-#   stripped run still BUILDS staged/commit rows and still EVICTS dirs; only the
-#   eviction JOURNAL ROWS vanish. core_rows_ok() therefore goes RED on the
-#   stripped copy and GREEN on the real copy — proving the journal-row
-#   assertions actually exercise A's journaling, not an always-true grep.
+#   body only, rewrites the token `journal_history_append` to a FAILING STUB
+#   (`_retention_pack_mut_noop() { return 1; }`) — awk tracks the function
+#   span by its column-0 closing brace, so multi-line calls are neutralized
+#   too. The SETUP helpers are left intact, so the stripped run still BUILDS
+#   the staged/commit EVIDENCE rows (the candidate IS eligible) and only the
+#   eviction-journal WRITE fails. Under G1 that failure HOLDS the dir: no
+#   rm -rf, no retention_evict row. The SAME p2a_assertions() function that
+#   is GREEN on the unstripped CONTROL must go RED on the stripped copy —
+#   that flip IS the mutation proof, and it proves both halves at once: the
+#   journal write is LOAD-BEARING, and its failure FAILS CLOSED (hold, not
+#   evict).
 #
 # Usage: bash tests/packs/release_retention_eviction_pack.sh
 #   Optional integration seam: RETENTION_PACK_LIBSH / RETENTION_PACK_PROMOTE
@@ -290,6 +299,16 @@ core_rows_ok() {  # <report_p2a> — the eviction journal-row assertion(s)
     rhist "$1" retention_evict "reason=superseded-by-promoted-v2" || return 1
     return 0
 }
+# p2a_assertions <report> — rc 0 iff EVERY P2a assertion holds: (a) v1 was
+# EVICTED (its dir is ABSENT) AND (b) the retention_evict row is PRESENT.
+# The mutation leg runs this SAME function on the CONTROL report and on the
+# STRIPPED report: GREEN on the control, RED on the stripped copy.
+p2a_assertions() {
+    local rep="$1" rc=0
+    rdir "$rep" v1 && rc=1
+    rhist "$rep" retention_evict "reason=superseded-by-promoted-v2" || rc=1
+    return $rc
+}
 rholder() { printf '%s\n' "$1" | sed -n 's/^HOLDER_PID=//p'; }
 rhist_re() {  # <report> <event> <ere>
     printf '%s\n' "$1" | awk -F '\t' -v e="$2" -v s="$3" \
@@ -307,7 +326,7 @@ awk '
     inside && /^\}/ { inside=0 }
     { print }
 ' "$LIBSH" > "$STRIPPED"
-printf '%s\n' '_retention_pack_mut_noop() { :; }' >> "$STRIPPED"
+printf '%s\n' '_retention_pack_mut_noop() { return 1; }' >> "$STRIPPED"
 # Extract the LAST retention_evict definition (integration tree has one; a
 # scratch harness may append an override — the last one is the live one).
 extract_fn() {
@@ -371,21 +390,35 @@ assert_hist   "P2b pin_hold held=v1,v2,v3" "$RB" retention_pin_hold "held=v1,v2,
 assert_hist   "P2b pin_hold reasons=no-journal-evidence x3" "$RB" retention_pin_hold "reasons=no-journal-evidence:no-journal-evidence:no-journal-evidence"
 assert_eq     "P2b over-retention: 5 dirs remain" 5 "$(rcount_dirs "$RB")"
 
-# ============================== MUTATION RED ===============================
-# Pointed at the P2a (superseded) case: the strip must make the
-# retention_evict-ROW assertions REDden while the EVICTION itself still runs.
+# ============================== MUTATION (G1) ===============================
+# The strip shim is a FAILING STUB: every journal_history_append inside
+# retention_evict returns 1 (a journal-write FAILURE). Under G1 that failure
+# must HOLD the dir — NO rm -rf, NO retention_evict row.
+new_install; ca="$NEW_INSTALL"; run_case "$LIBSH" p2a "$ca"; CA="$REPORT"
 new_install; sa="$NEW_INSTALL"; run_case "$STRIPPED" p2a "$sa"; SA="$REPORT"
-if core_rows_ok "$SA"; then
-    _fail "MUTATION journal-row assertions REDden on stripped copy" "RED (assertions fail)" "GREEN — mutation did NOT bite"
+
+# CONTROL (unstripped): the sweep still evicts v1 AND journals the row.
+assert_nodir "MUTATION control: unstripped run EVICTS v1" "$CA" v1
+assert_hist "MUTATION control: unstripped run journals the retention_evict row" "$CA" retention_evict "reason=superseded-by-promoted-v2"
+if p2a_assertions "$CA"; then
+    _pass "MUTATION control: the P2a assertions are GREEN on the unstripped lib"
 else
-    _pass "MUTATION journal-row assertions REDden on stripped copy"
+    _fail "MUTATION control: the P2a assertions are GREEN on the unstripped lib" "GREEN" "RED"
 fi
-# Non-vacuity: the stripped lib still EVICTS (only journaling was removed).
-if rdir "$SA" v1; then
-    _fail "MUTATION non-vacuity: eviction still occurred" "v1 evicted in the stripped run" "v1 survived"
+
+# RED PROOF: the SAME P2a assertions must FAIL on the stripped copy.
+if p2a_assertions "$SA"; then
+    _fail "MUTATION RED: the P2a assertions REDden on the stripped copy" "RED (assertions fail)" "GREEN — mutation did NOT bite"
 else
-    _pass "MUTATION non-vacuity: eviction still occurred"
+    _pass "MUTATION RED: the P2a assertions REDden on the stripped copy"
 fi
+# The RED condition itself: HOLD (the dir SURVIVES) + NO retention_evict row.
+assert_dir    "MUTATION stripped: the dir is HELD (v1 survives)" "$SA" v1
+assert_nohist "MUTATION stripped: NO retention_evict row (the append failed)" "$SA" retention_evict "version="
+# Non-vacuity: the EVIDENCE rows are still in the journal — the candidate WAS
+# eligible; only the journal WRITE failed.
+assert_hist "MUTATION stripped: the staged evidence row is still present" "$SA" staged "release v1 staged at"
+assert_hist "MUTATION stripped: the commit evidence row is still present" "$SA" commit "promote v2 committed"
 
 # ============================== P3 =========================================
 new_install; p3="$NEW_INSTALL"
