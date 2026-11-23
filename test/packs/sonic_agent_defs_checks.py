@@ -1207,7 +1207,7 @@ def build_good_fixture() -> Fixture:
         seal={},
         agents_changed=[ARI_RULE, BASELINE_FILE] + list(SONIC_BASELINE_PATHS),
         tool_required_agents=dict(_TOOL_REQUIRED_AGENTS_FROZEN),
-        allowed_models_default=["agentic", "coding", "coding2", "vision", "img-gen", "decision"],
+        allowed_models_default=["agentic", "coding", "vision", "img-gen", "decision"],
         pok_audience={k: set(v) for k, v in EXPECTED_POK_AUDIENCE.items()},
     )
     # Fill the remaining sonic artifact texts (baseline hashing needs all 20).

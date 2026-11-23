@@ -163,7 +163,7 @@ def _make_manager(
         manager.tmp_image_store = tmp_image_store
     # Wire the WP3 vision-model gate (P2-WP3 AC-5). Default is a
     # list containing ``"vision"`` — mirrors the production
-    # ``OPENAI_SELECTABLE_MODELS=agentic,coding,coding2,vision`` set
+    # ``OPENAI_SELECTABLE_MODELS=agentic,coding,vision`` set
     # so the gate passes on the canonical test fixture. Tests
     # exercising the gate override ``allowed_models`` /
     # ``no_config``.
