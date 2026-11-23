@@ -610,3 +610,87 @@ class TestAsyncSurfaceCensus:
         import daemon.manager as manager_mod
 
         assert not inspect.iscoroutinefunction(manager_mod.InstanceManager.set_injection)
+
+
+# ── CAP INDEPENDENCE: the read-side injection budget is a fixed house
+#    budget (8 entries / 2,900 chars per view), INDEPENDENT of the
+#    storage cap ``POK_ACTIVE_CAP_PER_PROJECT``. Raising or lowering the
+#    storage cap must never silently change what one view renders ──────
+
+
+class TestCapIndependenceReadBudget:
+    """The cap-raise dimension the standing pack does not cover: patch
+    the STORAGE cap (small and large) and prove the READ budget is
+    unchanged. Every count here is SYNTHETIC (in-memory SQLite) — never
+    a live store / live count."""
+
+    N_ROWS = 40  # > 8 in scope for the single viewer (ari)
+
+    def _seeded_service(self) -> POKService:
+        """In-memory store with N_ROWS distinct, ari-visible active rows.
+        Bodies sit at the 240-char escaped ceiling so the render is a
+        near-worst-case budget proof, not a trivial tiny-block one."""
+        from sqlmodel import Session
+
+        engine = create_engine("sqlite://")
+        SQLModel.metadata.create_all(
+            engine,
+            tables=[
+                ProjectOperatingKnowledge.__table__,
+                ProjectOperatingKnowledgeEmbedding.__table__,
+            ],
+        )
+        with Session(engine) as session:
+            for i in range(self.N_ROWS):
+                session.add(
+                    _row(
+                        f"capind-{i:03d}-fact",
+                        audience="operation",  # ari ∈ operation set → visible
+                        body=f"{i:04d}" + "x" * 236,  # 240 chars, distinct
+                    )
+                )
+            session.commit()
+        return POKService(engine)
+
+    def test_constant_pins(self) -> None:
+        """(a) The two house budget constants are pinned by value."""
+        from daemon.services.pok_service import (
+            POK_BLOCK_MAX_CHARS,
+            POK_BLOCK_MAX_ENTRIES,
+        )
+
+        assert POK_BLOCK_MAX_ENTRIES == 8
+        assert POK_BLOCK_MAX_CHARS == 2_900
+
+    @pytest.mark.parametrize("storage_cap", [64, 4096])
+    def test_read_budget_independent_of_storage_cap(
+        self, monkeypatch: pytest.MonkeyPatch, storage_cap: int
+    ) -> None:
+        """(b) With the storage cap patched smaller (64) AND larger
+        (4096), a 40-row synthetic in-scope set still admits EXACTLY 8
+        rows and renders under 2,900 chars in BOTH regimes."""
+        monkeypatch.setattr(
+            "daemon.services.pok_service.POK_ACTIVE_CAP_PER_PROJECT",
+            storage_cap,
+        )
+        service = self._seeded_service()
+        rows = service._repo.list_entries("p1", statuses=("active",))
+        assert len(rows) == self.N_ROWS  # synthetic store fully seeded
+
+        result = admit_view(rows, agent_id="ari", now=NOW)
+        block = render_pok_block(result)
+        full = f"[SYSTEM CONTEXT: {POK_BLOCK_TITLE}]\n\n{block}"
+        entries = len(result.entries)
+        chars = len(full)
+
+        # discriminating leg: >8 in scope → EXACTLY 8 admitted, never more
+        assert entries == 8, (
+            f"storage_cap={storage_cap}: admitted {entries}, expected exactly 8"
+        )
+        assert entries <= 8
+        assert chars <= 2_900, f"storage_cap={storage_cap}: {chars} chars"
+
+        print(
+            f"storage_cap={storage_cap}: {entries} entries / {chars} chars "
+            "(budget 8 / 2,900 UNCHANGED)"
+        )
