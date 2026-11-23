@@ -5,6 +5,7 @@
 **Commission:** job-watch-restart-persistence — deliverable 1(b), RESTART BEHAVIOR of armed watches.
 **Scope:** READ-ONLY investigation. No code/config/migration edits. No daemon boot, no pytest.
 **Worktree:** `/home/nea/ensemble-src-wt-jwr-restart`, branch `docs/jwr-restart`.
+**Re-dispatch provenance:** RE-DISPATCH #1 (fix item G) edited this file in `/home/nea/ensemble-src-wt-jwr2-restart`, branch `docs/jwr2-restart` (tip `919b7a9d8`). The §1–§4 anchors remain pinned to the original investigation base `a1130e257a` (unchanged by this re-dispatch); only §5.1's commit-composition wording was corrected.
 
 ---
 
@@ -141,7 +142,17 @@ So an enqueued `[JOB_EVENT]` to a **non-terminal, non-paused-task** instance is 
 
 Command: `git diff v0.31.42..HEAD --stat` over watch-path files (`daemon/tools/job_queue.py`, `daemon/services/work_notifier.py`, `daemon/services/watch_reconcile_sweep.py`, `daemon/repositories/job_queue/*`, `daemon/migrations/versions/20261011_000001*`).
 
-**Result: empty (no material deltas).** HEAD is 4 commits ahead of `v0.31.42` (all docs-only: `a1130e257`, `38d590389`, `d700970c4`, `0731e4577`); no watch-path code changed.
+**Result: empty (no material deltas).** No watch-path code changed.
+
+**Exactness correction (RE-DISPATCH #1, fix item G).** The earlier phrasing in this section — "HEAD is 4 commits ahead of `v0.31.42` (all docs-only: `a1130e257`, `38d590389`, `d700970c4`, `0731e4577`)" — was IMPRECISE: "all docs-only" is FALSE. Verified against the pinned base object (`git show a1130e257a --stat`, `git diff v0.31.42..a1130e257a --name-status`):
+
+- The range `v0.31.42..a1130e257a` is **4 commits**, but they are **NOT all docs-only**.
+- `a1130e257a` ("docs(tester): land pok-cap-1024 verdict evidence + read-budget-independence pack registration (wi-1921ba17)") lands **4 files, 565 insertions**: (a) `.agents/tester/PACKS.md` (+12 — pack registration block), (b) `.agents/tester/RESULTS/sonic-pok-cap-1024-results.md` (+177), (c) `.agents/tester/RESULTS/sonic-wi-1921ba17-results.md` (+87), and (d) an **executable 289-line tester pack script** `test/packs/pok_cap_read_budget_independence_test.sh` (blob mode **100755**, 289 lines). It is a runnable bash pack, not prose — hence "docs-only" was wrong.
+- **Path correction:** the pack script's full path is **`test/packs/pok_cap_read_budget_independence_test.sh`**, NOT `.agents/tester/packs/…`. `git ls-tree -r a1130e257a --name-only | grep -c '^\.agents/tester/packs/'` returns **0** — no `.agents/tester/packs/` directory exists at that commit. (`git show --stat` renders the path truncated as `.../packs/…`, which is what makes the wrong prefix look plausible.)
+- The other three commits are docs-only **relative to the `v0.31.42` baseline**: `d700970c4` (+33) and `0731e4577` (+10) touch only `.agents/shared/planning/sonic-team/projres-future-history-20261123/HANDOFF.md`; `38d590389` is the merge that brings the v0.31.42 release line in, and relative to `v0.31.42` it contributes only `HANDOFF.md` (+43) — its 15-file `--stat` is the merge's diff vs FIRST parent, i.e. it *carries* the release line's own code, it does not add it.
+- **Net diff `v0.31.42..a1130e257a` = 5 files, 608 insertions, 0 deletions**: 1 `HANDOFF.md`, `.agents/tester/PACKS.md`, 2 tester `RESULTS/*.md`, and 1 executable shell script. The only non-`.md` path in the whole net diff is `test/packs/pok_cap_read_budget_independence_test.sh`.
+
+**Load-bearing claim UNCHANGED and re-verified:** the watch-path diff is EMPTY at the pinned base `a1130e257a` (`git diff v0.31.42..a1130e257a --stat -- daemon/tools/job_queue.py daemon/services/work_notifier.py daemon/services/watch_reconcile_sweep.py daemon/repositories/job_queue daemon/migrations/versions/20261011_000001_create_stored_watches.sql` → no output) **and** at this report's current branch tip `919b7a9d8` (19 commits ahead of `v0.31.42`; same pathspec → no output). The 15 intervening commits add two further non-`.md` files — `tests/unit/services/test_engine_diff_audit.py` (`c2042b3f2`) and `agents/.prompt-artifacts.sha256` (`ea2b6f18d`) — plus the four jwr report artifacts; none is a watch-path file.
 
 ### 5.2 watch-loss fix 29651c06e ancestry
 
@@ -180,4 +191,4 @@ Command: `git merge-base --is-ancestor 29651c06e v0.31.42; echo $?`
 - **Terminal replay exists** for already-terminal work; mission-live guard holds `mission_terminal` rows.
 - **Enqueued `[JOB_EVENT]` rows** survive in `message_queue`; reset to `ready` on boot unless instance terminal or task running/paused.
 - **Periodic held-watch reconcile** (300s, first tick immediate) is the post-boot backstop.
-- **v0.31.42 diff:** empty on watch paths. `29651c06e` IS an ancestor of `v0.31.42` (exit 0) — contradicts brief premise.
+- **v0.31.42 diff:** empty on watch paths (at base `a1130e257a` AND at branch tip `919b7a9d8`). The 4-commit range `v0.31.42..a1130e257a` is **not** "all docs-only" — it also carries the executable 289-line tester pack `test/packs/pok_cap_read_budget_independence_test.sh` (mode 100755) + `.agents/tester/PACKS.md`. `29651c06e` IS an ancestor of `v0.31.42` (exit 0) — contradicts brief premise.
