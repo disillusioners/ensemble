@@ -151,9 +151,9 @@ STRANDED_SURFACING_TERMINATE_ENV = "ENSEMBLE_STRANDED_SURFACING_TERMINATE"
 
 
 def _stranded_terminate_enabled() -> bool:
-    """Per-boot read of the retire switch. Default ON (retire path for
-    proven-dead classes is enabled by default; opt out with =0)."""
-    return os.environ.get(STRANDED_SURFACING_TERMINATE_ENV, "1") != "0"
+    """Per-boot read of the retire opt-in. Default OFF (surface-only).
+    Retire proven-dead classes only when explicitly armed (=1)."""
+    return os.environ.get(STRANDED_SURFACING_TERMINATE_ENV, "") == "1"
 
 
 # Module-level holder for the most recent stranded-surfacing result so
@@ -1438,11 +1438,15 @@ async def surface_stranded_running_instances(
     global _LAST_STRANDED_SURFACING
     _LAST_STRANDED_SURFACING = result
 
+    # Bounded log line: counts per class + a bounded id sample +
+    # a pointer to the full durable set (never an unbounded id list).
+    _sample = result.surfaced_ids[:5]
     logger.info(
         "[BOOT_RECOVERY] stranded-surfacing summary: candidates=%d "
         "class_1a=%d class_1b=%d class_2=%d class_3=%d "
-        "retired=%d terminate_switch_on=%s surfaced_ids=%s "
-        "durable_path=%s duration_s=%.3f boot_epoch=%s mode=%s",
+        "retired=%d terminate_switch_on=%s surfaced_id_sample=%s "
+        "(%d total) durable_path=%s duration_s=%.3f boot_epoch=%s "
+        "mode=%s",
         result.candidates,
         result.class_1a,
         result.class_1b,
@@ -1450,7 +1454,8 @@ async def surface_stranded_running_instances(
         result.class_3,
         result.retired,
         _stranded_terminate_enabled(),
-        result.surfaced_ids,
+        _sample,
+        len(result.surfaced_ids),
         getattr(result, "durable_path", None),
         result.duration_seconds,
         boot_epoch.isoformat(),
