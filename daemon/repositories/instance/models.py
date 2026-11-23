@@ -71,6 +71,18 @@ class Instance(SQLModel, table=True):
     # For watchdog timeout detection
     last_activity_at: datetime | None = Field(default=None)
 
+    # Boot-consistency reconciler CAS marker (fix/post-outage-recovery SCOPE b).
+    # Naive-UTC boot epoch of the last successful boot-consistency disposition
+    # (dispatch / retire / finalize) of this instance. NULL = never reconciled.
+    # Advisory bookkeeping ONLY — never a status. Mirrors
+    # ``task.auto_continued_at`` (daemon/repositories/task/models.py:294):
+    # the ``(boot_re_drive_at IS NULL OR boot_re_drive_at < :boot_epoch)``
+    # predicate re-arms per boot generation, and the CAS is stamped AFTER the
+    # disposition succeeds (no marked-but-never-re-driven window). Schema
+    # parity: daemon/migrations/versions/20261123_190000_add_instance_boot_re_drive_at.sql
+    # (SQLite) + ``_ensure_postgres_columns`` (PG).
+    boot_re_drive_at: datetime | None = Field(default=None, index=False)
+
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     paused_at: str | None = Field(default=None, index=True)

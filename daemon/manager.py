@@ -9196,6 +9196,16 @@ class InstanceManager:
             # is gated on ``status='running'`` (served by
             # ``idx_task_status_type_created``); stamp CAS is PK-scoped (D17).
             "ALTER TABLE task ADD COLUMN IF NOT EXISTS auto_continued_at TIMESTAMP",
+            # instances.boot_re_drive_at (fix/post-outage-recovery SCOPE b):
+            # boot-consistency reconciler CAS marker. Stamped AFTER a
+            # successful dispatch/retire/finalize so "marked" ≡ "re-driven"
+            # (a′ semantics — mirrors task.auto_continued_at above). Advisory
+            # only; the ``(boot_re_drive_at IS NULL OR boot_re_drive_at <
+            # :boot_epoch)`` predicate re-arms per boot epoch. No new index —
+            # selection is gated on ``status='running'`` and the stamp CAS is
+            # PK-scoped. SQLite counterpart:
+            # 20261123_190000_add_instance_boot_re_drive_at.sql.
+            "ALTER TABLE instances ADD COLUMN IF NOT EXISTS boot_re_drive_at TIMESTAMP",
             # source_configs.autostart: whether a source auto-starts on boot
             "ALTER TABLE source_configs ADD COLUMN IF NOT EXISTS autostart BOOLEAN DEFAULT TRUE",
             # instance_ui_prefs.icon_tag: optional UI icon for existing prefs tables
