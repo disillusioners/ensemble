@@ -11,12 +11,52 @@ import os
 import httpx
 from fastapi import FastAPI
 
+# The auth env is captured when ``daemon.api`` builds the app at IMPORT
+# time (``create_app`` → ``load_config().auth`` → AuthMiddleware), so a
+# per-variable scrub must happen BEFORE that import — not in a
+# function-scoped fixture, which runs after every module-level import.
+# This module-level loop is the explicit, per-variable equivalent of the
+# shell fence; it names ONLY the seven ENSEMBLE_AUTH_* variables this
+# host exports (no family glob — ``env -u ENSEMBLE_AUTH_*`` is a NO-OP).
+for _auth_env_name in (
+    "ENSEMBLE_AUTH_ENABLED",
+    "ENSEMBLE_AUTH_ISSUER",
+    "ENSEMBLE_AUTH_DISCOVERY_URL",
+    "ENSEMBLE_AUTH_CLIENT_ID",
+    "ENSEMBLE_AUTH_CLIENT_SECRET",
+    "ENSEMBLE_AUTH_ALLOWED_ORIGINS",
+    "ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE",
+):
+    os.environ.pop(_auth_env_name, None)
+
+
 # Import the app and manager directly
 from daemon import api as api_module
 from daemon.models.source import SourceStatus
 
 
 # ==================== Fixtures ====================
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_auth_env(monkeypatch):
+    """Keep the file hermetic for the duration of every test.
+
+    The module-level scrub above handles the import-time capture; this
+    autouse fixture re-applies the SAME per-variable scrub at test time
+    (and restores the process env afterwards via monkeypatch) so a test
+    that mutates os.environ cannot leak auth state into its neighbours.
+    """
+    for _name in (
+        "ENSEMBLE_AUTH_ENABLED",
+        "ENSEMBLE_AUTH_ISSUER",
+        "ENSEMBLE_AUTH_DISCOVERY_URL",
+        "ENSEMBLE_AUTH_CLIENT_ID",
+        "ENSEMBLE_AUTH_CLIENT_SECRET",
+        "ENSEMBLE_AUTH_ALLOWED_ORIGINS",
+        "ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE",
+    ):
+        monkeypatch.delenv(_name, raising=False)
 
 
 @pytest_asyncio.fixture
