@@ -38,6 +38,7 @@ import pytest
 
 from daemon.constants import READINESS_BOOT_WARM_WINDOW_S
 from daemon.services import boot_epoch as boot_epoch_module
+from daemon.services import readiness as readiness_module
 from daemon.services.readiness import (
     CHECKPOINT_SAVER_PROBE_TIMEOUT_S,
     FAILURE_CLASS_HARD_COMPONENT_RED,
@@ -252,6 +253,50 @@ class TestGenuineFailureStillDegrades:
         it is the ``unknown`` class, which is NEVER grace-eligible."""
         epoch_control(_BOOT_EPOCH)
         composite = await _refresh(lambda: False, _FLAP_TICK)
+        assert composite.checkpoint_saver is False
+        assert composite.ready is False
+
+    @pytest.mark.asyncio
+    async def test_epoch_in_the_future_is_tolerated_while_the_process_is_young(
+        self, epoch_control, monkeypatch
+    ):
+        """CLOCK DISAGREEMENT (the DB clock is ahead of the daemon
+        clock): the epoch lands in the daemon's future. The daemon has
+        just booted (the epoch IS the boot instant), so the window is
+        open — but the tolerance is BOUNDED by the process uptime, so a
+        large clock skew can never mask contention for hours."""
+        monkeypatch.setattr(
+            readiness_module, "_readiness_process_uptime_seconds", lambda: 5.0
+        )
+        # The epoch lands 300s AFTER the tick: the daemon's clock says
+        # the boot has not happened yet (the DB clock is ahead).
+        future_epoch = _FLAP_TICK + timedelta(seconds=300)
+        epoch_control(future_epoch)
+        composite = await _refresh(
+            lambda: (False, FAILURE_CLASS_POOL_BUSY), _FLAP_TICK
+        )
+        assert composite.checkpoint_saver is True
+        assert composite.ready is True
+
+    @pytest.mark.asyncio
+    async def test_epoch_in_the_future_degrades_once_the_process_is_old(
+        self, epoch_control, monkeypatch
+    ):
+        """The same clock disagreement, but the process has been up
+        LONGER than the window: the boot-warm allowance is over, so the
+        class degrades (the tolerance may never outlive the process)."""
+        monkeypatch.setattr(
+            readiness_module,
+            "_readiness_process_uptime_seconds",
+            lambda: READINESS_BOOT_WARM_WINDOW_S + 10.0,
+        )
+        # The epoch lands 300s AFTER the tick: the daemon's clock says
+        # the boot has not happened yet (the DB clock is ahead).
+        future_epoch = _FLAP_TICK + timedelta(seconds=300)
+        epoch_control(future_epoch)
+        composite = await _refresh(
+            lambda: (False, FAILURE_CLASS_POOL_BUSY), _FLAP_TICK
+        )
         assert composite.checkpoint_saver is False
         assert composite.ready is False
 
