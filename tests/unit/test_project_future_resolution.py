@@ -328,3 +328,62 @@ class TestNoReference:
     def test_remove_without_reference(self, tool_map):
         result = tool_map["project_future_remove"].invoke({"entry_id": "future-1"})
         assert result == {"error": "Must provide either project_id, name, or shortname"}
+
+
+# =============================================================================
+# R2 fix — COMMITTED schema required-sets for the triad (LLM-facing surface)
+# =============================================================================
+
+
+class TestSchemaRequiredSets:
+    """Pin the LLM-facing pydantic schema's required-sets for the triad.
+
+    The project reference is OPTIONAL on every verb (project_id OR name OR
+    shortname), while the verb's own payload stays REQUIRED. These pins keep
+    the most delicate LLM-facing surface from silently drifting — a future
+    change that makes ``summary``/``entry_id`` optional (or that pulls a
+    reference key into ``required``) must update this pin deliberately.
+    """
+
+    @pytest.fixture
+    def tool_map(self, store):
+        tools = create_project_future_tools(store, "inst-123", "coder-agent")
+        return {t.name: t for t in tools}
+
+    def _schema(self, tool_map, name):
+        return tool_map[name].args_schema.model_json_schema()
+
+    def test_add_required_set(self, tool_map):
+        """project_future_add: required == {summary}; triad optional + present."""
+        schema = self._schema(tool_map, "project_future_add")
+        required = set(schema.get("required", []))
+        assert required == {"summary"}, (
+            f"add required-set drift: expected {{'summary'}}, got {sorted(required)}"
+        )
+        assert "summary" in required
+        for ref in ("project_id", "name", "shortname"):
+            assert ref not in required, f"triad key {ref!r} must be optional"
+            assert ref in schema["properties"], f"triad key {ref!r} missing from properties"
+
+    def test_remove_required_set(self, tool_map):
+        """project_future_remove: required == {entry_id}; triad optional + present."""
+        schema = self._schema(tool_map, "project_future_remove")
+        required = set(schema.get("required", []))
+        assert required == {"entry_id"}, (
+            f"remove required-set drift: expected {{'entry_id'}}, got {sorted(required)}"
+        )
+        assert "entry_id" in required
+        for ref in ("project_id", "name", "shortname"):
+            assert ref not in required, f"triad key {ref!r} must be optional"
+            assert ref in schema["properties"], f"triad key {ref!r} missing from properties"
+
+    def test_list_required_set_empty(self, tool_map):
+        """project_future_list: NO required set; triad optional + present."""
+        schema = self._schema(tool_map, "project_future_list")
+        required = set(schema.get("required", []))
+        assert required == set(), (
+            f"list required-set drift: expected empty, got {sorted(required)}"
+        )
+        for ref in ("project_id", "name", "shortname"):
+            assert ref not in required, f"triad key {ref!r} must be optional"
+            assert ref in schema["properties"], f"triad key {ref!r} missing from properties"
