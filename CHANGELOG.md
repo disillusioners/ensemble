@@ -5,6 +5,21 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.38] — 2026-11-23
+
+### Added — Project reference resolution: name/shortname on project_future_* + project_history_* (7 tools)
+
+- All 7 tools (`project_future_add`/`list`/`remove`, `project_history_add`/`list`/`search`/`delete`) now accept the same `project_id`/`name`/`shortname` triad as `project_get`: a project may be referenced by id, by full name, or by shortname on every tool.
+- Resolution goes through the SINGLE repository seam `SQLModelProjectRepository.resolve_project_reference` (5-tier ladder; `scope=name` runs the full ladder, `scope=shortname` is strict) — zero duplicated matching logic across the seven tools.
+- Typed refusals `NOT_FOUND` + `AMBIGUOUS_PROJECT` (with candidates + query) are returned on every tool, giving a consistent, actionable error shape.
+- The `id` path is byte-compatible with the pre-change behavior and NEVER calls the resolver.
+
+### Fixed — project_get refusal-shape fold-ins
+
+- `AMBIGUOUS_PROJECT` now carries the `query` field (parity with `NOT_FOUND`).
+- Stale `-> dict | None` annotation corrected to `-> dict`.
+- Zero migration files in the v0.31.37 → v0.31.38 delta.
+
 ## [v0.31.37] — 2026-11-23
 
 ### Fixed — Readiness: checkpoint-saver sentinel boot-warm tolerance (Leg A, defect class: false boot-window readiness flap)
