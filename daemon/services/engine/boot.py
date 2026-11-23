@@ -138,6 +138,53 @@ def compute_first_tick_offset(
     return base + first_tick_jitter(job_id, jitter, seed)
 
 
+#: Dual-path spec metadata — the Phase-2 pilot (orphan-watcher).
+#:
+#: The blanket "P4 observer spec — execute_fn withheld" description is
+#: FALSE for the migrated spec: the orphan-watcher spec's job IS executed
+#: by the engine when the ownership conjunct holds
+#: (``SERVICES_ORPHAN_WATCHER_SWEEP_USE_ENGINE`` ∧ engine enabled ∧ engine
+#: shadow OFF). The spec RECORD still carries no callable (JobSpec has no
+#: ``execute_fn`` field — the executor is attached to the engine's
+#: execution loop at boot), so the description states BOTH postures
+#: explicitly rather than implying the job never runs.
+#:
+#: The metadata is extensible by design (the Emperor's self-describing
+#: registration ruling): ``service_tag`` / ``category`` / ``module_info``
+#: already ride the spec; this adds the ownership contract an operator
+#: needs to read the row.
+#:
+#: DEAD-DETECTION SAFETY (CS-9 carve-out): the observer dead rule keys
+#: off ``job_id not in engine._executors`` (``daemon/services/engine/
+#: metrics.py``), NOT off this metadata — so a truthful description here
+#: cannot create a false-dead signal on a live lane.
+_DUAL_PATH_SPEC_META: dict[str, dict[str, Any]] = {
+    "orphan-watcher": {
+        "description": (
+            "P4 dual-path spec — the standalone orphan sweep owns unless "
+            "the ownership conjunct holds (the per-job USE_ENGINE flag AND "
+            "the engine enabled AND the engine NOT in shadow mode), in which "
+            "case the engine attaches the sweep executor at boot and the "
+            "legacy loop is suppressed (exactly one owner, fail-to-legacy "
+            "on a boot-wiring failure). This spec record never carries the "
+            "callable — JobSpec has no execute_fn field."
+        ),
+        "metadata": {
+            "observer": True,
+            "phase": "P4",
+            "dual_path": True,
+            "pilot": "orphan-watcher-engine",
+            "legacy_owner": (
+                "daemon.services.orphan_watcher_sweep.OrphanWatcherSweepService"
+            ),
+            "ownership_conjunct": (
+                "per-job USE_ENGINE flag AND engine enabled AND NOT shadow mode"
+            ),
+        },
+    },
+}
+
+
 def build_observer_specs(config: Any) -> tuple[Any, ...]:
     """Build the N dormant observer specs from the continuity table (D4.11/AMD-1).
 
@@ -160,6 +207,23 @@ def build_observer_specs(config: Any) -> tuple[Any, ...]:
             cadence = float(cadence)
         except (TypeError, ValueError):
             cadence = float(row.default_seconds)
+        flag_key = (
+            f"SERVICES_{row.service_tag.upper().replace('-', '_')}_USE_ENGINE"
+        )
+        dual = _DUAL_PATH_SPEC_META.get(row.job_id)
+        if dual is None:
+            description = (
+                "P4 observer spec — execute_fn withheld; "
+                "registration-for-observation, not migration"
+            )
+            metadata: dict[str, Any] = {"observer": True, "phase": "P4"}
+        else:
+            description = dual["description"]
+            metadata = dict(dual["metadata"])
+            # The flag name is DERIVED from the estate row (the same
+            # expression that builds ``kill_switch_key``) so the two can
+            # never drift.
+            metadata["engine_flag"] = flag_key
         specs.append(
             JobSpec(
                 id=row.job_id,
@@ -168,17 +232,12 @@ def build_observer_specs(config: Any) -> tuple[Any, ...]:
                     category=row.category,
                     service_name=row.job_id,
                     module_info=row.module_info,
-                    description=(
-                        "P4 observer spec — execute_fn withheld; "
-                        "registration-for-observation, not migration"
-                    ),
-                    metadata={"observer": True, "phase": "P4"},
+                    description=description,
+                    metadata=metadata,
                 ),
                 trigger=IntervalTrigger(seconds=cadence),
                 max_runtime_s=max(cadence, 60.0),
-                kill_switch_key=(
-                    f"SERVICES_{row.service_tag.upper().replace('-', '_')}_USE_ENGINE"
-                ),
+                kill_switch_key=flag_key,
             )
         )
     return tuple(specs)
