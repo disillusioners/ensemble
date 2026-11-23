@@ -126,12 +126,13 @@ boot block on this tree four times** (two via its own D6 script, two via the
 sanctioned pack `engine_boot_slo_gate.sh` LEG 3, which runs the same fenced
 boot independently):
 
-| Boot | Producer | `block_elapsed_ms_gated` | `block_elapsed_ms_total` | boot→readyz-green |
+| Boot | Producer | `block_elapsed_ms_gated` | `block_elapsed_ms_total` | launch→readyz (**UPPER BOUND**) |
 |---|---|---|---|---|
 | run 1 | this lane's D6 script | **142.808 ms** | 161.710 ms | **28.525 s** |
 | run 2 | this lane's D6 script | **89.332 ms** | 105.086 ms | **24.361 s** |
 | run 3 | sanctioned pack LEG 3 | **106.228 ms** | — | **26.540 s** |
 | run 4 | sanctioned pack LEG 3 (post-commit) | **112.560 ms** | — | **22.415 s** |
+| run 5 | this lane's D6 script (fix turn) | **105.052 ms** | 123.575 ms | **24.385 s** |
 
 Every one is **inside** the 250 ms WARM bound (headroom 1.75×–2.80×) and
 inside the 360 ms COLD bound. The flipprep 499.918 ms breaches **both**
@@ -140,7 +141,23 @@ class or a different tree). **The flip decision should not be priced against
 499.918 ms.**
 
 All four boots are also inside the Emperor's binding boot SLO
-(boot_epoch → readyz-green ≤ **120 s**): 22.4 s – 28.5 s.
+**22.4 s – 28.5 s — launch→readyz, an UPPER BOUND (F3 relabel, review #7).**
+
+**The Emperor's SLO is boot_epoch → readyz-green.** The harness's stopwatch
+runs from the moment it LAUNCHED the daemon, and the daemon captures its boot
+epoch *after* launch — so the launch figure is an **upper bound** on the SLO
+measure, and a verdict taken on it is conservative. From run 5 the D6 script
+reports **both**, distinctly labelled:
+
+| Number | Meaning | run 5 |
+|---|---|---|
+| `daemon_reported_boot_to_readyz_seconds` | **SLO-ANCHORED** (the Emperor's measure): the daemon's `boot_epoch` → the readiness composite's own `checked_at` | **9.000 s** |
+| `daemon_uptime_at_readyz_seconds` | the daemon's own process uptime at green (corroboration) | 8.921 s |
+| `launch_to_readyz_seconds` | **UPPER BOUND** (includes pre-boot-epoch construction/import time) | 24.385 s |
+
+⇒ the only SLO-anchored measurement so far is **9.000 s**; the earlier
+22.4–28.5 s figures are upper bounds and are relabelled as such everywhere
+they appear. Both are within the 120 s SLO.
 
 Re-derivable with:
 `bash scripts/measure/engine_pilot_boot_slo.sh --source <tree> --out measurements.jsonl`
@@ -170,7 +187,9 @@ flag change takes effect at the **next restart**, not at runtime.
 3. `bash test/packs/engine_diff_audit_test.sh` → **PASS** (Leg E; the map
    carries this lane's rows; `BASE_SHA` unchanged).
 4. `bash scripts/measure/engine_pilot_boot_slo.sh --release <release-dir>`
-   → the release's own gated block ≤ 250 ms and boot→readyz ≤ 120 s.
+   → the release's own gated block ≤ 250 ms and the **SLO-anchored**
+     boot_epoch→readyz ≤ 120 s (the D6 script now reports that number
+     explicitly, next to the launch→readyz upper bound).
 5. The staged release's binary carries the **honesty fixes** (the truthful
    spec description and the `executable_specs=` posture field) — the
    ceremony's evidence line must not understate the posture.
@@ -190,14 +209,25 @@ flag change takes effect at the **next restart**, not at runtime.
 * Both flags are independent: shadow ON ⇒ the engine observes only
   (`SKIPPED_SHADOW`) and the legacy loop keeps running.
 
-### 4.4 Residual risks (with their evidence)
+### 4.4 ⚠ The soak harness needs the FLIPPED release (F4, review #9)
+
+**The harness's R7 ownership rule reads this lane's `executable_specs=`
+field from the daemon's boot posture line.** A **pre-promote** daemon (an
+older binary without the field) gives R7 no ownership evidence ⇒ the
+harness degrades to **INCONCLUSIVE** (never a false VIOLATION).
+
+⇒ **Run the soak harness only against the FLIPPED release**, and expect
+INCONCLUSIVE if it is pointed at anything older. The harness names the
+shape it saw (`pre-promote posture line (no executable_specs field)`).
+
+### 4.5 Residual risks (with their evidence)
 
 | Residual risk | Severity | Evidence | Mitigation |
 |---|---|---|---|
 | A runtime flag trip leaves the lane owned by NOBODY | **HIGH** (operational) | `killswitch.py:16-22`; `execution.py:306-314` | boot-scoped rollback only; ceremony documents it |
 | The ceremony misreads ownership from the skip stamp | MEDIUM | `SKIPPED_SHADOW` cannot distinguish shadow-on from no-executor (`execution.py:438-440`); measured: at the shipped posture the orphan job stamps `SKIPPED_SHADOW` like the other 11 | use the posture line's `executable_specs=` + SUCCEEDED rows; R7 in the soak harness |
 | The engine boot block regresses past the cost bound | MEDIUM | not observed (89–143 ms vs 250 ms) | D6 re-measurement at flip time |
-| The boot SLO regresses | MEDIUM | not observed (24.4–28.5 s vs 120 s) | R9 in the soak harness; D6 per boot |
+| The boot SLO regresses | MEDIUM | not observed — SLO-anchored **9.0 s**; launch→readyz upper bound 22.4–28.5 s (vs 120 s) | R9 in the soak harness; D6 per boot |
 | A false `dead=true` on the live lane from the metadata honesty fix | HIGH (if mishandled) | the CS-9 carve-out keys off the **executors dict**, not the metadata (`metrics.py:69`) — pinned by test | none needed; pinned + live-observed `dead=0` |
 | The soak harness is run with write credentials | HIGH | — | the harness pins `default_transaction_read_only = on`; use `ensemble_prod_ro` |
 
@@ -277,7 +307,23 @@ was against the fenced dev DB (`ensemble_dev`) or a temporary SQLite file.
 
 ---
 
-## 9. Disclosures — pre-existing conditions and lane drift
+## 9. Fix turn (review APPROVE-WITH-NOTES, 2026-11-23) — what changed
+
+| # | Review note | Fix | Evidence |
+|---|---|---|---|
+| **F1** (#5) | the soak harness's server-side RO guard was **INERT** (the connect-event `SET` is defeated by psycopg3's `BEGIN` ordering; the reviewer's probe returned WRITE ALLOWED) | the engine now opens with `connect_args={"options": "-c default_transaction_read_only=on"}` — a **connection-startup option** the server applies before any transaction | probe transcript **AFTER: WRITE REFUSED** (`psycopg.errors.ReadOnlySqlTransaction`), with the BEFORE reproduced on the same host: `.agents/tester/RESULTS/2026-11-23-engine-pilot-ro-guard-probe.txt` |
+| **F2** (#6) | the role was never asserted — any DSN was accepted | the harness reads `SELECT current_user` from the live connection and **refuses loudly** when the target is prod-shaped and the role is not `*_ro`/`ro`-shaped | the same transcript's third leg: prod-shaped + `ensemble_prod_writer` ⇒ **REFUSED LOUDLY** |
+| **F3** (#7) | the boot figure was clocked launch→readyz but labelled boot_epoch→readyz | the D6 script now reports **BOTH**, distinctly labelled: `daemon_reported_boot_to_readyz_seconds` (**SLO-anchored**, 9.000 s) and `launch_to_readyz_seconds` (**UPPER BOUND**, 24.385 s), plus the daemon's own `daemon_uptime_at_readyz_seconds` (8.921 s) as corroboration; every 22.4–28.5 s mention is **relabelled as an upper bound** | §3 table (run 5) |
+| **F4** (#9) | R7's posture rule needs this lane's `executable_specs=` field | the harness now parses the **pre-promote** posture shape and degrades R7 to **INCONCLUSIVE** (never a false VIOLATION); the consequence is documented in `soak-harness.md` and §4.4 here | observed live: the harness reports `pre-promote posture line (no executable_specs field)` |
+| **F5** (#1) | `.f2gate-transcripts/` was untracked, so "tree clean" was tracked-scope only | **gitignored** at the repo ROOT only (`/.f2gate-transcripts/`) — a tight leaf; the path is the sanctioned pack's own output directory, and relocating it would mean editing a pack this lane does not own | `git check-ignore -v` confirms; the tree is now genuinely clean |
+
+**Deferred (non-blocking, rides the leader's report):** #8 the polarity
+assertion, #4 the public accessor, #10 the JSON escaping — **not landed**
+here, by instruction.
+
+---
+
+## 10. Disclosures — pre-existing conditions and lane drift
 
 **9.1 A PRE-EXISTING RED in the observability pack (NOT caused by this
 lane).** `test/packs/engine_observability_unit_test.sh` fails at

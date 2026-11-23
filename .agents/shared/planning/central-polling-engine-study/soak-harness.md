@@ -12,9 +12,23 @@ the **machinery**; it does not start the clock and it does not flip anything.
 
 * The DSN **must** use a strictly read-only role — in production the
   `ensemble_prod_ro` role. **Never** the daemon's write credentials.
-* The session is opened with `default_transaction_read_only = on`
-  (server-side), so a write is **refused by the database**, not merely
-  avoided by the script's discipline.
+* **ENFORCEMENT (F1, review #5).** The engine is opened with
+  `connect_args={"options": "-c default_transaction_read_only=on"}` — a
+  **connection-startup option** the server applies *before any transaction
+  starts*, so every transaction is read-only and a write is refused by
+  PostgreSQL itself. (An earlier implementation issued the same `SET` from a
+  `connect` event hook; under psycopg3 that is defeated by the driver's
+  implicit `BEGIN` ordering and the guard was **INERT** — the reviewer's
+  probe returned "WRITE ALLOWED". Probe transcript:
+  `.agents/tester/RESULTS/2026-11-23-engine-pilot-ro-guard-probe.txt`,
+  which reproduces BEFORE (WRITE ALLOWED) and AFTER (WRITE REFUSED) on the
+  same host.)
+* **ROLE ASSERTION (F2, review #6).** After connecting, the harness reads
+  `SELECT current_user` and **refuses loudly** when the target database is
+  prod-shaped (its name contains `prod`) and the connected role is not
+  read-only-shaped (`*_ro` / `ro` / `readonly`). A write-capable
+  production role is never silently accepted. The asserted role is
+  reported in `role_assertion`.
 * **No** DDL, **no** temp tables, **no** LOCKs, **no** INSERT/UPDATE/DELETE,
   **no** flag flips, **no** restarts, **no** writes to the live install.
 * Dependencies: the standard library + SQLAlchemy (the repo's own client) —
@@ -56,6 +70,19 @@ Exactly one verdict is emitted:
 
 Exit codes: `0` PASS · `3` VIOLATION · `4` INCONCLUSIVE (`--warn-only`
 forces 0 while still reporting the verdict).
+
+## ⚠ PRE-PROMOTE DEGRADATION (F4, review #9)
+
+**The R7 ownership rule needs this lane's `executable_specs=` field in the
+daemon's boot posture line.** A **pre-promote** daemon (an older binary
+without the field) yields a posture line with no executable count ⇒ R7 has
+no ownership evidence and degrades to **INCONCLUSIVE** — it can never
+produce a false **VIOLATION**.
+
+⇒ **Run the soak harness only against the FLIPPED release** (the one
+carrying `executable_specs=`). Pointed at anything older, expect
+**INCONCLUSIVE**, not a verdict. (The harness reports the shape it saw:
+`pre-promote posture line (no executable_specs field)`.)
 
 ## The rules
 

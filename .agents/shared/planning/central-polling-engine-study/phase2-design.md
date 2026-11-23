@@ -269,9 +269,15 @@ maps this asymmetry explicitly rather than hiding it.
 **Script:** `scripts/soak/engine_pilot_orphan_soak.py` · **Doc:** `soak-harness.md` (this directory)
 
 **Read-only contract:** a strictly read-only role (`ensemble_prod_ro` —
-never the daemon's write credentials), the session pinned server-side with
-`default_transaction_read_only = on`, no DDL, no temp tables, no LOCKs, no
-writes, no flag flips, no restarts.
+never the daemon's write credentials); **server-side enforcement** via the
+connection-startup option `options=-c default_transaction_read_only=on`
+(F1 — a `connect`-event `SET` is INERT under psycopg3's implicit `BEGIN`
+ordering; the probe transcript is
+`.agents/tester/RESULTS/2026-11-23-engine-pilot-ro-guard-probe.txt`, BEFORE
+= WRITE ALLOWED, AFTER = WRITE REFUSED); **role assertion** (F2 — the role
+is read from the live connection and a write-capable role on a prod-shaped
+target is REFUSED LOUDLY); no DDL, no temp tables, no LOCKs, no writes, no
+flag flips, no restarts.
 
 **Evidence sources** (the engine publishes NO events — registry→engine is
 one-way): `engine_runs` (append-only), `engine_jobs`, `dependency_watchers`
@@ -317,12 +323,13 @@ dir) plus **two more from the SANCTIONED pack**
 (`test/packs/engine_boot_slo_gate.sh` LEG 3, which runs the same fenced
 boot independently):
 
-| Boot | Producer | `block_elapsed_ms_gated` | `block_elapsed_ms_total` | boot→livez | boot→readyz | verdict |
+| Boot | Producer | `block_elapsed_ms_gated` | `block_elapsed_ms_total` | launch→livez | **launch→readyz (UPPER BOUND)** | verdict |
 |---|---|---|---|---|---|---|
 | run 1 | this lane's D6 script | **142.808 ms** | 161.710 ms | 28.525 s | **28.525 s** | PASS |
 | run 2 | this lane's D6 script | **89.332 ms** | 105.086 ms | 24.361 s | **24.361 s** | PASS |
 | run 3 | sanctioned pack LEG 3 | **106.228 ms** | — | 26.540 s | **26.540 s** | PASS |
 | run 4 | sanctioned pack LEG 3 (post-commit) | **112.560 ms** | — | 22.415 s | **22.415 s** | PASS |
+| run 5 | this lane's D6 script (fix turn) | **105.052 ms** | 123.575 ms | 24.385 s | **24.385 s** | PASS |
 
 **Adjudication of the flip-precondition number.** The shipped flipprep boot
 measured `block_elapsed_ms_gated=499.918 ms` against the SLO-1 ≤250 ms cost
@@ -337,7 +344,27 @@ the landed engine boot block costs 89–143 ms WARM. (The number is
 re-derivable: the D6 script emits one JSONL record per boot.)
 
 All four boots are also within the Emperor's binding boot SLO
-(boot_epoch → readyz-green ≤ 120 s): **22.4 s – 28.5 s**.
+**22.4 s – 28.5 s (launch→readyz — an UPPER BOUND).**
+
+**F3 RELABEL (review #7, fix turn 2026-11-23):** runs 1–5 measured
+**launch→readyz** (the harness's stopwatch from the moment it launched the
+daemon). That is an **UPPER BOUND** on the Emperor's SLO — the Emperor's SLO
+is **boot_epoch → readyz-green** (the daemon's own boot epoch is captured
+*after* launch, so `boot_epoch→readyz ≤ launch→readyz`). A verdict taken on
+the upper bound is therefore **conservative** (it can only understate
+headroom, never overstate it).
+
+From **run 5** the D6 script reports **BOTH** numbers, distinctly labelled:
+
+| Number | Meaning | run 5 |
+|---|---|---|
+| `daemon_reported_boot_to_readyz_seconds` | **SLO-ANCHORED** — the daemon's own `boot_epoch` (DB clock) → the readiness composite's own `checked_at` | **9.000 s** |
+| `daemon_uptime_at_readyz_seconds` | the daemon's own process uptime at the green instant (corroboration) | 8.921 s |
+| `launch_to_readyz_seconds` | **UPPER BOUND** — the harness's stopwatch (includes pre-boot-epoch construction/import time) | 24.385 s |
+
+⇒ The only **SLO-anchored** measurement so far is **9.000 s** (run 5); the
+earlier 22.4–28.5 s figures are upper bounds and are **relabelled as such**
+everywhere they appear. Both numbers are within the 120 s SLO.
 
 ---
 
@@ -382,7 +409,7 @@ mechanism the boot-scoped ownership decision requires anyway).
 | The study's dead-lane claim (flag ON + shadow ON) | would be **BLOCKING** | **REFUTED** (§2.1) | the conjunct is the mitigation, already landed |
 | A runtime flag trip leaves the lane owned by NOBODY | **HIGH** (operational) | `killswitch.py:16-22`, `execution.py:306-314` | boot-scoped rollback only; the ceremony documents "kill = restart with the flag off" |
 | The engine's boot block exceeds the SLO-1 cost bound | MEDIUM | **not** observed: 89–143 ms vs 250 ms (§5.1) | re-measure with the D6 script at flip time |
-| The boot SLO (120 s) regresses | MEDIUM | **not** observed: 24.4–28.5 s (§5.1) | R9 in the soak harness; D6 per boot |
+| The boot SLO (120 s) regresses | MEDIUM | **not** observed: SLO-anchored **9.0 s**; launch→readyz upper bound 22.4–28.5 s (§5.1) | R9 in the soak harness; D6 per boot |
 | The ceremony reads the wrong ownership evidence (`SKIPPED_SHADOW` cannot distinguish shadow-on from no-executor) | MEDIUM | `execution.py:438-440`; measured on the dev DB (§2.2) | the posture line's `executable_specs=` + SUCCEEDED rows; R7 in the soak harness |
 | A false `dead=true` on a live lane from the metadata change | HIGH (if mishandled) | the CS-9 carve-out keys off the **executors dict**, not the metadata (`metrics.py:69`) — pinned by test | none needed; pinned |
 | The soak harness is run with write credentials | HIGH | — | the harness pins `default_transaction_read_only = on`; use `ensemble_prod_ro` |
