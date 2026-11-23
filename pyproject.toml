@@ -1,6 +1,6 @@
 [project]
 name = "ensemble"
-version = "0.31.42"
+version = "0.31.43"
 description = "Agents Ensemble - Multi-Agent AI Daemon"
 license = "AGPL-3.0-only"
 readme = "README.md"
