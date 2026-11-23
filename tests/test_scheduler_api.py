@@ -2041,7 +2041,22 @@ class TestDeleteGuardPlacement:
 
 
 class TestScheduleListingTruthRest:
-    """The REST list surface of the truth-telling listing."""
+    """The REST list surface of the truth-telling listing.
+
+    ENVIRONMENTAL NOTE (measured 2026-11-23): this whole file needs the
+    ambient AUTH environment scrubbed, or every request is answered by
+    the auth middleware with a 302 and the tests fail with
+    ``assert 302 == 200`` (70 of 73 at the base commit — PRE-EXISTING,
+    not a regression).  Scrub the auth variables PER VARIABLE, e.g.::
+
+        unset ENSEMBLE_AUTH_ENABLED ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE \
+              ENSEMBLE_AUTH_ISSUER ENSEMBLE_AUTH_DISCOVERY_URL \
+              ENSEMBLE_AUTH_CLIENT_ID ENSEMBLE_AUTH_CLIENT_SECRET \
+              ENSEMBLE_AUTH_ALLOWED_ORIGINS
+
+    (``env -u ENSEMBLE_AUTH_*`` is a NO-OP — bash does not glob env
+    names.)
+    """
 
     def _chain_source(self, source_id="chain-1", name="central-maintenance-weekly"):
         """A chain-shaped (windowed) scheduler row — the shape the
