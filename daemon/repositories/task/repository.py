@@ -53,6 +53,7 @@ from ..job_queue.models import (
 from .models import SuspensionReason, Task, TaskStatus, TaskType
 from ..message_queue.models import MessageQueue
 from ..job_queue.watcher_models import JobWatcher
+from ..dependency_bus.models import DependencyWatcher, DependencyWatcherState
 from ..report_injection.models import ReportInjection, ReportInjectionState
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,16 @@ DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS = 86400
 #: label an operator sees — it is not a safety boundary. The safety
 #: boundary is DEFAULT_STRANDED_PROVEN_DEAD_MIN_IDLE_SECONDS (24h).
 DEFAULT_STRANDED_RECENT_ACTIVITY_SECONDS = 3600
+
+#: Checkpoint-leg evaluation states (visible in the durable payload).
+#: ``evaluated``  — the ``checkpoints`` table was present and probed.
+#: ``degraded_absent`` — the ``checkpoints`` table does not exist (SQLite
+#:     unit-test fixtures); the leg CANNOT be evaluated, so every
+#:     class-1a candidate degrades to class 3 (fail-closed, no mutation).
+#: ``degraded_error`` — the probe raised; same fail-closed degradation.
+CHECKPOINT_LEG_EVALUATED = "evaluated"
+CHECKPOINT_LEG_DEGRADED_ABSENT = "degraded_absent"
+CHECKPOINT_LEG_DEGRADED_ERROR = "degraded_error"
 
 
 def _stranded_min_idle_seconds() -> int:
@@ -1474,6 +1485,55 @@ class TaskRepository:
             # CHARACTER off the id; iterate directly instead.
             return list(db_session.exec(stmt).all())
 
+    def _probe_checkpoint_rows(self, instance_id: str) -> tuple[int | None, str]:
+        """Count the rows in the ``checkpoints`` table for one thread.
+
+        The ``checkpoints`` table is created by the LangGraph saver, NOT
+        by SQLModel metadata, so it is absent in the SQLite unit-test
+        fixtures (and absent on any engine where the saver never ran).
+
+        Returns ``(row_count, leg_state)``:
+          * ``(N, CHECKPOINT_LEG_EVALUATED)`` -- the table exists and
+            was probed; ``N`` is the row count for the thread.
+          * ``(None, CHECKPOINT_LEG_DEGRADED_ABSENT)`` -- the table does
+            not exist. The leg CANNOT be evaluated -> the caller MUST
+            degrade fail-closed (class 3, no mutation).
+          * ``(None, CHECKPOINT_LEG_DEGRADED_ERROR)`` -- the probe
+            raised. Same fail-closed degradation.
+
+        Detection of absence: SQLAlchemy's ``inspect(engine).has_table``
+        -- engine-agnostic (works on SQLite and PostgreSQL), and it does
+        NOT rely on an exception to signal "table missing" (a genuine
+        query failure is caught separately and also degrades).
+        """
+        try:
+            from sqlalchemy import inspect as _sa_inspect
+
+            if not _sa_inspect(self.engine).has_table("checkpoints"):
+                return None, CHECKPOINT_LEG_DEGRADED_ABSENT
+        except Exception as exc:  # noqa: BLE001 — read-only probe
+            logger.warning(
+                "stranded classifier: checkpoint-leg probe could not "
+                "inspect the schema — DEGRADED: %s", exc,
+            )
+            return None, CHECKPOINT_LEG_DEGRADED_ERROR
+        try:
+            from sqlalchemy import text as _sa_text
+
+            stmt = _sa_text(
+                "SELECT COUNT(*) FROM checkpoints WHERE thread_id = :tid"
+            )
+            with self.engine.connect() as conn:
+                count = conn.execute(stmt, {"tid": instance_id}).scalar()
+        except Exception as exc:  # noqa: BLE001 — read-only probe
+            logger.warning(
+                "stranded classifier: checkpoint-leg read failed for "
+                "instance=%s — DEGRADED: %s",
+                str(instance_id)[:8], exc,
+            )
+            return None, CHECKPOINT_LEG_DEGRADED_ERROR
+        return int(count or 0), CHECKPOINT_LEG_EVALUATED
+
     def classify_stranded_running_instances(
         self, *, boot_epoch: datetime
     ) -> list["StrandedClassification"]:
@@ -1583,13 +1643,29 @@ class TaskRepository:
                         nonterm_desc += 1
                 evidence["nonterminal_descendants"] = nonterm_desc
 
-                # Pending watcher
+                # Pending watcher (job lifecycle watcher)
                 watcher_count = db_session.exec(
                     select(func.count()).select_from(JobWatcher).where(
                         JobWatcher.instance_id == iid
                     )
                 ).one()
                 evidence["pending_watchers"] = int(watcher_count or 0)
+
+                # Pending DEPENDENCY watcher (dependency bus). A parent
+                # that is still awaited by the bus is LIVE work in
+                # flight -> class 2 (never retired).
+                try:
+                    dep_watcher_count = db_session.exec(
+                        select(func.count()).select_from(DependencyWatcher).where(
+                            DependencyWatcher.target_instance_id == iid
+                        ).where(
+                            DependencyWatcher.state
+                            == DependencyWatcherState.PENDING.value
+                        )
+                    ).one()
+                except Exception:
+                    dep_watcher_count = 0
+                evidence["pending_dependency_watchers"] = int(dep_watcher_count or 0)
 
                 # Delivered work
                 try:
@@ -1614,6 +1690,7 @@ class TaskRepository:
                     or bool(active_job)
                     or nonterm_desc > 0
                     or int(watcher_count or 0) > 0
+                    or int(dep_watcher_count or 0) > 0
                 )
                 if recoverable:
                     out.append(StrandedClassification(
@@ -1643,13 +1720,73 @@ class TaskRepository:
                     ))
                     continue
 
-                # Proven dead
+                # Delivered work -> class 1b. THE ZERO-CHECKPOINT LEG
+                # DOES NOT APPLY TO 1b (ASYMMETRY — DO NOT "HARMONISE"
+                # IT AWAY): exemplar 68f04ccd is class 1b and carries 3
+                # checkpoint rows + 1 blob. 1b's proof is the DELIVERED
+                # WORK itself, not the absence of execution evidence.
                 if int(delivered or 0) > 0:
-                    cls = "1b"
-                else:
-                    cls = "1a"
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="1b", evidence=evidence,
+                    ))
+                    continue
+
+                # Class 1a (never dispatched) conjunct — ALL of:
+                #   * the proven-dead legs above (no task rows in ANY
+                #     state, no message_queue rows in ANY state, no
+                #     active JobItem, no pending watcher, no pending
+                #     dependency watcher, no non-terminal descendant)
+                #   * idle past the 24 h bound (husk-aligned)
+                #   * ZERO rows in the ``checkpoints`` table for the
+                #     thread (the instance NEVER executed a turn).
+                #
+                # CHECKPOINT-BLOBS: NOT required, deliberately. Reason:
+                #   (a) MEASURED (2026-11-23, ensemble_prod): 1 442
+                #       threads carry checkpoint_blobs rows and ALL 1 442
+                #       also carry a ``checkpoints`` row -- 0 threads
+                #       carry blobs WITHOUT a checkpoints row, so the
+                #       blobs are a strict subset of the checkpoints
+                #       threads and the checkpoints probe already
+                #       excludes every blob-carrying thread that still
+                #       holds its checkpoint row.
+                #   (b) SCHEMA / WRITE PATH: ``checkpoint_blobs`` exists
+                #       only for the PostgreSQL saver (the SQLite saver
+                #       has no blobs table), so a blobs leg would be
+                #       PERMANENTLY unevaluable on SQLite -- it would
+                #       force a permanent fail-closed degradation and
+                #       make class 1a unreachable on SQLite installs.
+                #   (c) RESIDUAL (documented, not acted upon): a thread
+                #       whose checkpoints rows were swept by the 168 h
+                #       retention while its blobs linger is exactly the
+                #       E7 admissible band the sibling lane is
+                #       cross-checking. The retire arm is HELD OFF, so
+                #       this residual is never acted upon.
+                ckpt_rows, ckpt_leg_state = self._probe_checkpoint_rows(iid)
+                evidence["checkpoint_leg"] = ckpt_leg_state
+                evidence["checkpoint_rows"] = ckpt_rows
+                if ckpt_leg_state != CHECKPOINT_LEG_EVALUATED:
+                    # FAIL CLOSED: the leg cannot be evaluated -> the
+                    # class-1a conjunct cannot be PROVEN -> class 3
+                    # (ambiguous, surface only, NO MUTATION). The
+                    # degradation is VISIBLE in the payload (evidence).
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="3",
+                        evidence=evidence,
+                    ))
+                    continue
+                if int(ckpt_rows or 0) > 0:
+                    # Executed-but-evidence-free (the E7 admissible band):
+                    # a turn RAN (checkpoint row), so the instance is NOT
+                    # proven dead and NOT never-dispatched -> class 3
+                    # (ambiguous, surface only, NO MUTATION).
+                    out.append(StrandedClassification(
+                        instance_id=iid, classification="3",
+                        evidence=evidence,
+                    ))
+                    continue
+
                 out.append(StrandedClassification(
-                    instance_id=iid, classification=cls, evidence=evidence,
+                    instance_id=iid, classification="1a", evidence=evidence,
                 ))
 
         return out
