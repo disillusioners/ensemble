@@ -752,6 +752,15 @@ def main(run_preflight: bool = True):
         f"[Config] reasoning_echo_disabled_models={ThinkingChatOpenAI.reasoning_echo_disabled_models} "
         f"(models matching these patterns will NOT echo reasoning_content; all others echo)"
     )
+    # Release-pointer invariant boot check (relcur-pointer M2): CHEAP, LOUD,
+    # NON-BLOCKING. Detects a dangling/mismatched releases/current alias vs
+    # journal current without ever gating boot (metadata drift != outage).
+    # Mirrored in daemon/api.py; flag readable via last_boot_check().
+    from .services.release_pointer_check import (
+        run_boot_check as _boot_release_pointer_check,
+    )
+
+    _boot_release_pointer_check()
     # Wire the OPENAI_STREAMING operator knob (CF-125s 524 fix). The
     # chokepoint ``clean_llm_config`` reads this class var when callers
     # don't pass an explicit streaming flag — see daemon/graph.py.
