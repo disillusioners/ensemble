@@ -5,12 +5,16 @@
 #
 # WHAT THIS PINS (four contract pins, against the REAL scripts, never source-grep)
 #   P1  staged-awaiting SURVIVES: a release with a `staged` journal row and NO
-#       later promote-commit row is PINNED; retention_pin_hold is journaled.
+#       later commit row is PINNED. p1 (5 dirs, no overrun) proves NO pin_hold
+#       row fires; p1b (6 dirs, v1+v2 staged) proves the pin_hold row + held=
+#       key and the over-retention (4 dirs remain) safe direction.
 #   P2  every eviction JOURNALS:
 #        (a) staged V + LATER commit row for W>V  -> V evicted, retention_evict
 #            row with reason=superseded-by-promoted-<W>;
 #        (b) plain oldest (no staged row)         -> evicted, retention_evict
 #            row with reason=retention-oldest staged_row=no.
+#       The close anchor is EVENT `commit` (not `promote`) — A's
+#       _retention_closed_after / _retention_superseded_by gate on it.
 #       MUTATION LEG (pin ii): sed-strip the journal_history_append call from a
 #       COPY of lib.sh into scratch, re-run the two eviction assertions against
 #       the stripped copy, and PROVE they REDden (the journal-row assertions
@@ -18,17 +22,23 @@
 #   P3  absent-target ceremony FAILS LOUDLY: promote.sh sandbox with a missing
 #       VERSION exits 78, stderr carries reason=not-staged + retention guidance
 #       + a re-stage path, a refusal row is journaled, and NO flip occurs.
-#   P4  POINTER GATE: (a) healthy current pointer survives pressure; (b) dangling
-#       current -> retention_refuse + ZERO evictions; (c) a pointer aimed at an
-#       otherwise-evictable candidate pins that candidate.
+#   P4  POINTER GATE (engages ONLY when an on-disk `current` symlink exists —
+#       journal `current` alone is not a pointer): (a) healthy symlink v5 ==
+#       journal current survives pressure; (b) dangling symlink vGONE ->
+#       retention_refuse reason=pointer-dangling + ZERO evictions; (c) symlink
+#       v1 vs journal current v5 -> retention_refuse reason=pointer-mismatch,
+#       v1 survives, ZERO evictions.
 #
 # FROZEN FORMATS (modules A+B land before this pack at integration; base a1130e257
 # does NOT contain them). The pack asserts these exact tokens, nothing broader:
 #   staged row      : event `staged`, detail begins `release <V> staged at `
-#   commit row      : detail contains `promote <W> committed (`
+#   commit row      : EVENT `commit`, detail contains `promote <W> committed (`
 #   eviction rows   : events retention_evict / retention_refuse / retention_pin_hold
 #                     with details carrying version= / reason= / pointer_target=
-#   reasons         : superseded-by-promoted-<W>, retention-oldest staged_row=no
+#   reasons         : superseded-by-promoted-<W>, retention-oldest staged_row=no,
+#                     staged-awaiting-ceremony-no-promoted-descendant (pin_hold),
+#                     pointer-dangling / pointer-mismatch (refuse)
+#   pin_hold detail : held=<V,...> reason=... keep=<N> total=<N>  (NOT version=)
 #   refusal         : event `refusal`, detail contains reason=not-staged
 #
 # FENCES (hard)
@@ -52,14 +62,18 @@
 #   assertions actually exercise A's journaling, not an always-true grep.
 #
 # Usage: bash tests/packs/release_retention_eviction_pack.sh
+#   Optional integration seam: RETENTION_PACK_LIBSH / RETENTION_PACK_PROMOTE
+#   point the pack at a MERGED A+B tree's scripts without editing that tree.
 # Exit:  0 = all PASS; nonzero = at least one FAIL (or a refused fence).
 # ============================================================================
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-LIBSH="$REPO_ROOT/scripts/upgrade/lib.sh"
-PROMOTE="$REPO_ROOT/scripts/upgrade/promote.sh"
+# Test seam: an integration gate can point this pack at a MERGED A+B tree
+# without editing that tree (primary proof runs against the real merged files).
+LIBSH="${RETENTION_PACK_LIBSH:-$REPO_ROOT/scripts/upgrade/lib.sh}"
+PROMOTE="${RETENTION_PACK_PROMOTE:-$REPO_ROOT/scripts/upgrade/promote.sh}"
 
 # ---- HARD FENCE: scratch-only INSTALL_DIR --------------------------------
 LIVE_DIR=/home/nea/agents-ensemble
@@ -138,6 +152,10 @@ seed_five() {  # <install> — v1..v5 with increasing staged_at
     seed_release "$id" v4 2026-04-01T00:00:00Z
     seed_release "$id" v5 2026-05-01T00:00:00Z
 }
+seed_six() {  # <install> — v1..v6 (p1b over-retention fixture)
+    seed_five "$1"
+    seed_release "$1" v6 2026-06-01T00:00:00Z
+}
 
 # ---- worker: sources a chosen lib.sh, builds state, sweeps, emits facts ---
 # env: LIBSH (chosen lib), SC (scenario id), INSTALL_DIR (scratch install)
@@ -151,14 +169,25 @@ worker() {
             journal_update current '"v5"'
             journal_update previous '"v4"'
             ;;
+        p1b)
+            seed_six "$INSTALL_DIR"
+            journal_update current '"v6"'
+            journal_update previous '"v5"'
+            ;;
     esac
     case "$SC" in
         p1)  journal_history_append staged "release v1 staged at 2026-01-01T00:00:00Z" ;;
-        p2a) journal_history_append staged   "release v1 staged at 2026-01-01T00:00:00Z"
-             journal_history_append promote  "promote v2 committed (reason=promote)" ;;
+        p1b) journal_history_append staged "release v1 staged at 2026-01-01T00:00:00Z"
+             journal_history_append staged "release v2 staged at 2026-02-01T00:00:00Z" ;;
+        p2a) journal_history_append staged  "release v1 staged at 2026-01-01T00:00:00Z"
+             journal_history_append commit  "promote v2 committed (reason=promote)" ;;
         p2b) : ;;
-        p4b) journal_update current '"vGONE"' ;;
-        p4c) journal_update current '"v1"' ;;
+        # A's pointer gate engages ONLY when a symlink exists; the journal
+        # `current` alone is not an on-disk pointer. Plant it explicitly.
+        p4a) ln -s v5 "$INSTALL_DIR/current" ;;
+        p4b) journal_update current '"vGONE"'
+             ln -s vGONE "$INSTALL_DIR/current" ;;
+        p4c) ln -s v1 "$INSTALL_DIR/current" ;;
     esac
     retention_evict >/dev/null 2>&1
     echo "EVICT_RC=$?"
@@ -220,12 +249,25 @@ case "$_strp_body" in
 esac
 if bash -n "$STRIPPED" 2>/dev/null; then _pass "MUTATION stripped copy parses (bash -n)"; else _fail "MUTATION stripped copy parses (bash -n)"; fi
 
-# ============================== P1 =========================================
+# ============================== P1 / P1b ===================================
 new_install; i="$NEW_INSTALL"; run_case "$LIBSH" p1 "$i"
-assert_dir  "P1 staged-awaiting v1 survives" "$REPORT" v1
-assert_nodir "P1 v2 evicted under pressure"  "$REPORT" v2
-assert_hist "P1 retention_pin_hold row for v1" "$REPORT" retention_pin_hold "version=v1"
-assert_eq   "P1 keep=3 dirs remain" 3 "$(rcount_dirs "$REPORT")"
+assert_dir    "P1 staged-awaiting v1 survives" "$REPORT" v1
+assert_nodir  "P1 v2 evicted under pressure"  "$REPORT" v2
+# 5 dirs / keep=3: evictables v2,v3 == evict_count 2, so NO overrun — pin_hold
+# correctly never fires (frozen format carries held=/reason=, not version=).
+assert_nohist "P1 no pin_hold when no overrun" "$REPORT" retention_pin_hold "reason=staged-awaiting"
+assert_eq     "P1 keep=3 dirs remain" 3 "$(rcount_dirs "$REPORT")"
+
+# p1b: SIX dirs, v1+v2 staged-awaiting (no commits) → only v3,v4 evictable of
+# 3 needed ⇒ pin_hold; v1,v2 held, v5,v6 pinned ⇒ 4 dirs remain (over-retention).
+new_install; i1b="$NEW_INSTALL"; run_case "$LIBSH" p1b "$i1b"
+assert_nodir  "P1b v3 evicted" "$REPORT" v3
+assert_nodir  "P1b v4 evicted" "$REPORT" v4
+assert_dir    "P1b held v1 survives" "$REPORT" v1
+assert_dir    "P1b held v2 survives" "$REPORT" v2
+assert_eq     "P1b over-retention: 4 dirs remain" 4 "$(rcount_dirs "$REPORT")"
+assert_hist   "P1b pin_hold reason=staged-awaiting-ceremony-no-promoted-descendant" "$REPORT" retention_pin_hold "reason=staged-awaiting-ceremony-no-promoted-descendant"
+assert_hist   "P1b pin_hold held=v1" "$REPORT" retention_pin_hold "held=v1"
 
 # ============================== P2 (a,b) ===================================
 new_install; ia="$NEW_INSTALL"; run_case "$LIBSH" p2a "$ia"; RA="$REPORT"
@@ -283,13 +325,17 @@ new_install; pa="$NEW_INSTALL"; run_case "$LIBSH" p4a "$pa"
 assert_dir "P4a healthy current v5 survives sweep" "$REPORT" v5
 assert_eq  "P4a current still v5" v5 "$(rcur "$REPORT")"
 assert_eq  "P4a keep=3 dirs remain" 3 "$(rcount_dirs "$REPORT")"
+if [ -d "$pa/releases/v5" ]; then _pass "P4a symlink target dir exists post-sweep"; else _fail "P4a symlink target dir exists post-sweep"; fi
 
 new_install; pb="$NEW_INSTALL"; run_case "$LIBSH" p4b "$pb"
-assert_hist "P4b dangling pointer retention_refuse row" "$REPORT" retention_refuse "pointer_target=vGONE"
+assert_hist "P4b dangling reason=pointer-dangling" "$REPORT" retention_refuse "reason=pointer-dangling"
+assert_hist "P4b dangling pointer_target=vGONE" "$REPORT" retention_refuse "pointer_target=vGONE"
 assert_eq   "P4b ZERO dirs evicted (all 5 remain)" 5 "$(rcount_dirs "$REPORT")"
 
 new_install; pc="$NEW_INSTALL"; run_case "$LIBSH" p4c "$pc"
-assert_dir "P4c pointer-targeted oldest v1 not evicted" "$REPORT" v1
+assert_hist "P4c mismatch reason=pointer-mismatch" "$REPORT" retention_refuse "reason=pointer-mismatch"
+assert_dir  "P4c pointer-targeted oldest v1 not evicted" "$REPORT" v1
+assert_eq   "P4c ZERO evictions (all 5 dirs remain)" 5 "$(rcount_dirs "$REPORT")"
 
 # ---- summary --------------------------------------------------------------
 echo "------------------------------------------------------------"
