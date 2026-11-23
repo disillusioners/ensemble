@@ -593,7 +593,13 @@ class TestAuditAfterSoakOrdering(unittest.TestCase):
         assert len(exec_calls) == 1, f"expected 1 exec (SELECT), got {len(exec_calls)}"
         sql_str = exec_calls[0][0] if exec_calls else ""
         assert "SELECT" in sql_str.upper(), f"expected SELECT, got {sql_str}"
-        assert "DELETE" not in sql_str.upper(), f"CAPTURE must not DELETE, got {sql_str}"
+        # The CAPTURE is a SELECT; the FP1 preserve arm legitimately
+        # references the ``jqi.deleted_at`` column, so a bare "DELETE"
+        # substring test is a false positive. Assert STATEMENT shape
+        # instead: no DELETE FROM / DELETE ... WHERE statement.
+        assert "DELETE FROM" not in sql_str.upper(), (
+            f"CAPTURE must not issue a DELETE statement, got {sql_str}"
+        )
         # Capture must not commit (the doomed ids are returned
         # to the caller; the transaction boundary is invisible
         # so a crash between capture and DELETE is safe).

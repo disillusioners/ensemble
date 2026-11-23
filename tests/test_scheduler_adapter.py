@@ -2465,7 +2465,7 @@ def _stub_manager_with_job_repo(job_repo):
     return manager, mapper_repo, results
 
 
-async def _route_once(adapter, manager, mapper_repo) -> tuple[dict, object]:
+async def _route_once(adapter, manager, mapper_repo, execution_id: str = "exec-1") -> tuple[dict, object]:
     """Drive the adapter's real inline dispatch path once.
 
     Returns ``(enqueue_kwargs, result)`` — the result carries the
@@ -2473,7 +2473,9 @@ async def _route_once(adapter, manager, mapper_repo) -> tuple[dict, object]:
     """
     adapter._manager = manager
     adapter._source_repo = mapper_repo
-    result = await adapter._route_via_job_queue("exec-1", "scheduled message", {"agent": "./agents/developer"})
+    result = await adapter._route_via_job_queue(
+        execution_id, "scheduled message", {"agent": "./agents/developer"}
+    )
     return manager.enqueue_message_job.await_args.kwargs, result
 
 
@@ -2520,31 +2522,43 @@ class TestIdempotencyRestart:
         job_repo = _make_job_repo()
         config = self._one_shot_config("idem-restart")
 
-        # Two adapter instantiations from the identical persisted config —
-        # exactly what a daemon restart does (config re-parsed in __init__).
+        # F1(a) (fix/post-outage-recovery b2): each fire mints its OWN
+        # per-execution key — two distinct executions (e.g. a restart that
+        # re-fires the one-shot) do NOT collapse onto one JobItem via the
+        # key (the at-most-once authority for a one-shot moved to the
+        # durable consumption gate + the D3 lateness cap). The WITHIN-
+        # execution re-entry latch still collapses a retry of the SAME fire
+        # onto one row.
         manager1, mapper_repo1, results1 = _stub_manager_with_job_repo(job_repo)
         adapter1 = SchedulerAdapter(config, mock_on_message, manager=manager1, source_repo=mapper_repo1)
         manager2, mapper_repo2, results2 = _stub_manager_with_job_repo(job_repo)
         adapter2 = SchedulerAdapter(config, mock_on_message, manager=manager2, source_repo=mapper_repo2)
 
-        kwargs1, _r1 = await _route_once(adapter1, manager1, mapper_repo1)
-        kwargs2, _r2 = await _route_once(adapter2, manager2, mapper_repo2)
+        kwargs1, _r1 = await _route_once(adapter1, manager1, mapper_repo1, execution_id="exec-1")
+        kwargs2, _r2 = await _route_once(adapter2, manager2, mapper_repo2, execution_id="exec-2")
 
-        expected_key = f"scheduler:idem-restart:{self.RUN_AT_ISO}"
-        assert kwargs1["idempotency_key"] == expected_key
-        assert kwargs2["idempotency_key"] == expected_key
+        # Distinct executions → distinct keys.
+        assert kwargs1["idempotency_key"] == "scheduler:idem-restart:exec:exec-1"
+        assert kwargs2["idempotency_key"] == "scheduler:idem-restart:exec:exec-2"
+        assert kwargs1["idempotency_key"] != kwargs2["idempotency_key"]
 
-        # At-most-one JobItem landed for the key across the "restart".
+        # Distinct executions → distinct JobItems (no cross-fire collapse).
         from sqlmodel import Session, select
 
         from daemon.repositories.job_queue.models import JobItem
 
         with Session(job_repo.engine) as session:
             rows = session.exec(select(JobItem)).all()
-        assert len(rows) == 1, f"expected 1 JobItem after restart, got {len(rows)}"
-        assert rows[0].idempotency_key == expected_key
-        # Both attempts were handed the SAME (single) JobItem.
-        assert results1[0].job_id == results2[0].job_id == rows[0].job_id
+        assert len(rows) == 2, f"expected 2 JobItems for 2 distinct fires, got {len(rows)}"
+        assert results1[0].job_id != results2[0].job_id
+
+        # The WITHIN-execution re-entry latch: the SAME execution_id
+        # re-entered collapses onto one JobItem (the genuine-dedup arm).
+        manager3, mapper_repo3, results3 = _stub_manager_with_job_repo(job_repo)
+        adapter3 = SchedulerAdapter(config, mock_on_message, manager=manager3, source_repo=mapper_repo3)
+        kw_a, _ = await _route_once(adapter3, manager3, mapper_repo3, execution_id="exec-same")
+        kw_b, _ = await _route_once(adapter3, manager3, mapper_repo3, execution_id="exec-same")
+        assert kw_a["idempotency_key"] == kw_b["idempotency_key"] == "scheduler:idem-restart:exec:exec-same"
 
     @pytest.mark.asyncio
     async def test_cron_not_affected_by_idempotency_key(self, mock_on_message):
@@ -2565,16 +2579,21 @@ class TestIdempotencyRestart:
         adapter = SchedulerAdapter(config, mock_on_message, manager=manager, source_repo=mapper_repo)
         assert adapter._schedule_type == SchedulerAdapter.SCHEDULE_TYPE_CRON
 
-        kwargs1 = await _route_once(adapter, manager, mapper_repo)
+        kwargs1, _r1 = await _route_once(adapter, manager, mapper_repo, execution_id="exec-cron-1")
         # Two distinct cron cycles (distinct next_trigger values) — the second fire.
         adapter._manager = manager
         adapter._source_repo = mapper_repo
-        await adapter._route_via_job_queue("exec-2", "scheduled message", {"agent": "./agents/developer"})
+        await adapter._route_via_job_queue("exec-cron-2", "scheduled message", {"agent": "./agents/developer"})
         kwargs2 = manager.enqueue_message_job.await_args.kwargs
 
-        # THE gate: the cron path must not emit the key at all.
-        assert "idempotency_key" not in kwargs1
-        assert "idempotency_key" not in kwargs2
+        # F1(a) (fix/post-outage-recovery b2): EVERY scheduled fire —
+        # including recurring cron — now emits a PER-EXECUTION key, so a
+        # fresh UUID per fire cannot collapse recurring fires (the old
+        # cron-guard concern was an artifact of the mutating run_at key).
+        # The property that matters is NO COLLAPSE across distinct fires.
+        assert kwargs1["idempotency_key"] == "scheduler:idem-cron:exec:exec-cron-1"
+        assert kwargs2["idempotency_key"] == "scheduler:idem-cron:exec:exec-cron-2"
+        assert kwargs1["idempotency_key"] != kwargs2["idempotency_key"]
 
         # No collapse: two fires → two distinct JobItems.
         from sqlmodel import Session, select

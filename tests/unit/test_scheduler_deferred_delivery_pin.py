@@ -577,12 +577,16 @@ def _seed_source_and_mapping(
             session.commit()
 
 
-def _expected_run_at_key(source_id: str, run_at: datetime) -> str:
-    """The base derivation (``scheduler.py:1105-1113``): the one-shot
-    idempotency key is ``scheduler:{source_id}:{run_at.isoformat()}``.
-    ADR-2 keeps this key for one-shots post-fix; recurring rollovers use
-    ``scheduler:{source_id}:deferred:v{gen}``."""
-    return f"scheduler:{source_id}:{run_at.isoformat()}"
+def _expected_run_at_key(source_id: str, run_at: datetime, gen: int = 1) -> str:
+    """F1(a) (fix/post-outage-recovery b2): the DEFERRED one-shot key is
+    ``scheduler:{sid}:deferred:{run_at}:v{gen}`` — namespaced away from
+    the DIRECT per-execution key (``scheduler:{sid}:exec:{execution_id}``)
+    and generation-scoped (a rollover mints a fresh key). The pre-fix
+    bare ``scheduler:{sid}:{run_at}`` key was SHARED with the direct fire
+    and constant across rollovers — the adjudicated wedge exposure.
+    The key stays stable WITHIN a generation (the DEC-18 marker-miss
+    coalescing latch)."""
+    return f"scheduler:{source_id}:deferred:{run_at.isoformat()}:v{gen}"
 
 
 def _expected_generation_key(source_id: str, gen: int) -> str:
