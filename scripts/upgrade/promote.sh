@@ -367,7 +367,12 @@ _enforce_deadline "$promote_deadline" preflight
 
 # 1b. staged mode sanity
 if [ ! -d "$TARGET_REL" ]; then
-    _refuse not-staged "target release $TARGET_REL does not exist — stage it first (stage.sh $UP_TARGET --version $VERSION)"
+    # The "does not exist — stage it first" PREFIX is kept VERBATIM: an
+    # existing pin (tests/test_release_journal.sh, the F2-gate legs) asserts
+    # that exact substring. The enrichment below ADDS the retention
+    # possibility, the journal rows to read, the surviving tag + re-stage
+    # path, and the explicit no-fallback — it never REMOVES the old wording.
+    _refuse not-staged "target release $TARGET_REL does not exist — stage it first (stage.sh $UP_TARGET --version $VERSION): either it was NEVER staged on this install, OR it was removed by release retention (keep=$RETENTION_KEEP: the oldest non-pinned release dirs under releases/ are evicted). REFUSING the flip; NO other version is promoted instead — promote resolves no descendant/alternative version by design (it never substitutes a different release for the requested one). Diagnose: read the 'retention_evict' / 'retention_refuse' rows in the upgrade journal ($INSTALL_DIR/releases/state.json) to see whether retention removed it. The git tag for $VERSION survives an eviction (only the release DIR is deleted), so re-stage with: stage.sh $UP_TARGET --version $VERSION"
 fi
 journal_init || { _warn "cannot initialize journal"; exit 1; }
 # T6.4 (phase 6): the executor-start journal row carries the stamp (the

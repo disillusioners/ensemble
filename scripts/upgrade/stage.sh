@@ -1158,6 +1158,42 @@ if ! integrity_verify "$VERSION"; then
 fi
 
 _log "staged release $VERSION at $REL (rollback_safe=$ROLLBACK_SAFE source=$ROLLBACK_SAFE_SRC known_schema_gen=$KNOWN_SCHEMA_GEN contains_contract_phase=$CONTAINS_CONTRACT_PHASE) — NO flip performed (promote.sh owns current)"
+
+# ── Staged-release journal row (retention protection — FAIL-LOUD) ──────────
+#
+# FORMAT IS FROZEN: the release-retention sweep (lib.sh `retention_evict`)
+# greps this row by EVENT TOKEN `staged` and by a DETAIL that begins
+# exactly `release <VERSION> staged at ` — do not reword the prefix, do not
+# change the token.
+#
+# WHY THIS ROW IS FAIL-LOUD while `_stage_scripts_pin_journal` (above) is
+# deliberately BEST-EFFORT — the two rows are not the same kind of record:
+#   * scripts-pin row (`_stage_scripts_pin_journal`) — records an INTENT
+#     about a pin directory that may not even exist yet; losing it costs an
+#     audit detail and nothing else. Best-effort is correct there.
+#   * THIS row — is the ONLY durable record that a release dir under
+#     releases/ was staged and is AWAITING the promote ceremony. The
+#     retention sweep reads it to decide whether a staged-but-not-yet-
+#     promoted release may be evicted. A silently-missing row lets the
+#     sweep treat an awaiting-ceremony release as an ordinary release and
+#     delete it — the ceremony then refuses to promote a release that no
+#     longer exists (the `not-staged` refusal in promote.sh). A best-effort
+#     append would turn that into a silent data-loss window.
+# => A failed append is LOUD: warn + exit non-zero. The release dir is
+#    already swapped in, but it is NOT durably recorded; re-running
+#    stage.sh is the (idempotent) remediation.
+#
+# NOTE: `journal_fail_loud` (lib.sh) is deliberately NOT used here — its
+# message is flip-specific ("journal diverged from the flipped current
+# symlink", "a surviving open flipped txn makes the sweep roll back a
+# healthy promote"). The stage seat performs NO flip (promote.sh owns
+# `current`), so that wording would misdescribe this seat. The equivalent
+# fail-loud contract is spelled out inline instead: warn loudly + exit 1.
+if ! journal_history_append staged "release $VERSION staged at $REL (rollback_safe=$ROLLBACK_SAFE source=$ROLLBACK_SAFE_SRC) — awaiting ceremony (promote.sh owns current)"; then
+    _warn "journal append FAILED (staged row for $VERSION at $REL) — the staged release is NOT durably recorded and the retention sweep may evict a staged release that carries no 'staged' row. REFUSING to report a successful stage: re-stage to retry (stage.sh $UP_TARGET --version $VERSION)."
+    exit 1
+fi
+
 # D4(a)/T4.3 (phase 4): EXPLICIT success-path release. The lock's lifetime
 # no longer depends on the EXIT trap surviving (a trap-bypassing death is
 # the D4(a) orphan class; a NORMAL stage already released via the trap).
