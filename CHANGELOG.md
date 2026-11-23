@@ -5,6 +5,13 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.42] — 2026-11-23
+
+### Reverted — agent model pins restored to canonical aliases (Emperor ruling; rider to board wi-1921ba17)
+
+- The v0.31.40 agentic-bridge repin is reverted via the RECORDED machinery (agentic-bridge-repin/decisions.md row D3 — inverse of commit 9c6eb2c46 restricted to its 6 files): `"llm_model": "agentic"` restored in agents/{aegis,sonic-developer,sonic-leader,sonic-reviewer}/meta.json; the 3 EXPECTED_LLM_MODEL sonic values + the 3 self-test fixture metas + the aegis T27 pin restored in lockstep; the FROZEN [sonic-llm-pins] block re-titled v4 → v3 (both markers). Ruling of record: canonical model vocabulary = ALIASES ONLY (agentic, coding, quick, title); proxy pool ids are implementation details behind the alias layer; provider fallback is the proxy's job. v0.31.40 was never promoted — this release carries the revert so the staged stack is canonical at promote time. sonic-coder / sonic-tester (coding) and the aegis children never moved and needed no revert.
+- Guideline anchor re-derivation (review minor#3, same seam): 11 drifted pok_service.py line anchors in docs/guidelines/guideline-pok-durable-vs-rolling-state.md fixed — the +1 shift left by the v0.31.41 cap-raise comment line (:104→:105 ×2, :122→:123 ×2, :120→:121 ×2, :240→:241 ×2, :310→:311, :461→:462, refusal-envelope range :460-469→:461-470) — VALUES untouched; each new anchor opened + confirmed in source. The pok_injection.py :474 and CHANGELOG.md :226-230 citations left byte-intact (pre-existing staleness, disclosed: the 64→256 entry lives at CHANGELOG.md:574).
+- Verification on the merged tip: sonic_agent_defs pack — self-test legs PASS; static red set {A3, A8, A9} IDENTICAL to base (all pre-existing: the `room` allow entry, the maintenancer workflow prompt-drift, the stale A9 fence base); the A4 counter-mutation model legs now expect canonical `agentic` and STILL FIRE (non-vacuous); agents/aegis/meta.json DROPPED OUT of the A9 residual-diff list (the revert restored its pre-bridge bytes — strictly less drift). tests/unit/agents/test_aegis_security_family.py 556/556. Guideline registration 43/43. `grep -rln '"llm_model": "agentic-turbo"' agents/` → EMPTY.
 ## [v0.31.41] — 2026-11-23
 
 ### Changed — POK active-entry storage cap 512 → 1024 (board wi-1921ba17)
