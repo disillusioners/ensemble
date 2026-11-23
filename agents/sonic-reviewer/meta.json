@@ -5,7 +5,7 @@
   "icon": "🔍",
   "color": "accent-rose",
   "version": "1.1.1",
-  "llm_model": "agentic",
+  "llm_model": "agentic-turbo",
   "innate_skills": [],
   "skill_injection": false,
   "no_force_explore": true,
