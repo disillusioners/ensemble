@@ -291,7 +291,7 @@ class TestAc16DisputeAndArchive:
 
 
 class TestAc19TerminalityCured:
-    def test_active_cap_constant_is_512(self) -> None:
+    def test_active_cap_constant_is_1024(self) -> None:
         """The shipped active-entry cap is PINNED.
 
         The refusal leg below seeds the active counter (it never
@@ -300,7 +300,7 @@ class TestAc19TerminalityCured:
         """
         from daemon.services.pok_service import POK_ACTIVE_CAP_PER_PROJECT
 
-        assert POK_ACTIVE_CAP_PER_PROJECT == 512
+        assert POK_ACTIVE_CAP_PER_PROJECT == 1024
 
     def test_active_cap_refuse_then_archive_cure_then_succeed(
         self, svc: POKService, monkeypatch: pytest.MonkeyPatch
@@ -319,7 +319,7 @@ class TestAc19TerminalityCured:
         # The refusal mechanics below are cap-agnostic (the counter is
         # seeded), so THIS pin is what makes the refusal leg itself
         # red when the cap regresses to an older value.
-        assert cap == 512
+        assert cap == 1024
 
         seeded = 3
         for i in range(seeded):
