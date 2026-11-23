@@ -5,6 +5,20 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.31.39] — 2026-11-23
+
+### Fixed — release-note truthfulness (v0.31.38 correction)
+
+- The id path still calls store.get() ONLY (never the resolver) and threads the requested id; its not-found refusal now carries the typed NOT_FOUND shape (was untyped Project '<id>' not found — no in-tree consumer matched the old string).
+- The in-repo `## [v0.31.38]` section is corrected BY THIS RELEASE, so every future payload embedding the CHANGELOG carries the accurate claim instead of the refuted "byte-compatible" wording. The already-cut `v0.31.38` tag is NOT re-cut — this correction is additive and lands in `v0.31.39`.
+
+### Added — verification hardening for the 7-tool triad
+
+- Per-verb JSON-schema required sets VERIFIED for the 7 verbs by a read-only schema probe over the real tools (in-memory SQLite + REAL `SQLModelProjectRepository`): future add=[`summary`], remove=[`entry_id`], list=[]; history add=[`entry_type`,`summary`], search=[`query`], delete=[`entry_id`], list=[] — the triad params (`project_id`/`name`/`shortname`) are NEVER required on any of the 7 verbs (the triad params are defaulted optional; the remaining params are keyword-only so the schema keeps them required). These required-set assertions are NOT yet committed as regression pins in the resolution test files (the v0.31.38 lane asserted them programmatically only) — carried forward as an open hardening item.
+- Runtime gate pack `project_resolution_triad_runtime_proof` registered in `.agents/tester/PACKS.md`: drives the 7 tools directly against a REAL `SQLModelProjectRepository` over in-memory SQLite — shortname resolution on EVERY verb, the id path NEVER calls the resolver (call count 0 on all 7), typed `AMBIGUOUS_PROJECT` with candidates + query, typed `NOT_FOUND` with query, and the must-provide refusal. 35/35 checks PASS (`RESULT: PASS`) on the v0.31.38 merged tree `449163f17`.
+- History verb doc precision: the `name` path runs the FULL resolution ladder (which also matches shortnames) while `shortname` is resolved against SHORTNAMES ONLY — the `project_future_*` verb Args text states this ("The project name or shortname"; "Resolved against SHORTNAMES ONLY — never against the project name"); the `project_history_*` verb Args text does NOT yet spell out the name-path-matches-shortnames nuance. OPEN residual: closing it needs a source edit to `daemon/tools/project_history.py`, outside this release lane's file fence.
+- Zero migration files in the v0.31.38 → v0.31.39 delta.
+
 ## [v0.31.38] — 2026-11-23
 
 ### Added — Project reference resolution: name/shortname on project_future_* + project_history_* (7 tools)
@@ -12,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All 7 tools (`project_future_add`/`list`/`remove`, `project_history_add`/`list`/`search`/`delete`) now accept the same `project_id`/`name`/`shortname` triad as `project_get`: a project may be referenced by id, by full name, or by shortname on every tool.
 - Resolution goes through the SINGLE repository seam `SQLModelProjectRepository.resolve_project_reference` (5-tier ladder; `scope=name` runs the full ladder, `scope=shortname` is strict) — zero duplicated matching logic across the seven tools.
 - Typed refusals `NOT_FOUND` + `AMBIGUOUS_PROJECT` (with candidates + query) are returned on every tool, giving a consistent, actionable error shape.
-- The `id` path is byte-compatible with the pre-change behavior and NEVER calls the resolver.
+- The id path still calls store.get() ONLY (never the resolver) and threads the requested id; its not-found refusal now carries the typed NOT_FOUND shape (was untyped Project '<id>' not found — no in-tree consumer matched the old string).
 
 ### Fixed — project_get refusal-shape fold-ins
 
