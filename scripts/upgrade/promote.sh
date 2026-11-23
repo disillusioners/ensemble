@@ -1216,6 +1216,13 @@ if [ -z "$gate_fail_reason" ]; then
         _warn "immediacy breach at commit: journal current=$current_now ≠ $VERSION — halting (exit 78); txn left open for sweep recovery"
         exit 78
     fi
+    # relcur-m1 pointer-alias invariant (COMMIT site): the journal's `current`
+    # IS now the promoted version (proven by the immediacy assertion above),
+    # so the releases/current alias MUST name the SAME release — the equality
+    # genuinely HOLDS here on a healthy ceremony, so a RED means a REAL
+    # strand/mis-point, not a ceremony-window artifact. LOUD (warn + journal
+    # row) but NEVER fatal: the commit has already landed.
+    pointer_alias_assert_commit "$VERSION" "$current_now" || true
     journal_set_previous "${CAPTURED_PREVIOUS:-null}" || journal_fail_loud "commit: journal_set_previous ${CAPTURED_PREVIOUS:-null}"
     journal_close_txn                     || journal_fail_loud "commit: journal_close_txn"
     # D6-v (self-service-promote Wave 2): stamp the measured boot-to-green
@@ -1457,6 +1464,12 @@ fi
 journal_quarantine "$VERSION"              || journal_fail_loud "rollback bookkeeping: quarantine $VERSION (it stays promotable — operator must quarantine manually or re-stage)"
 journal_set_current "$PREV"                || journal_fail_loud "rollback bookkeeping: set_current $PREV"
 RB_JSON="$(journal_read 2>/dev/null)" || RB_JSON=""
+RB_CUR_NOW="$(_json_field_quoted "$RB_JSON" '"current":' 2>/dev/null)" || RB_CUR_NOW=""
+# relcur-m1 pointer-alias invariant (rollback parity): the auto-rollback
+# repoint went through atomic_flip (which mirrors the alias), so the alias
+# MUST name $PREV — the same invariant the commit path asserts. LOUD, never
+# fatal (the rollback bookkeeping already landed).
+pointer_alias_assert_commit "$PREV" "$RB_CUR_NOW" || true
 RB_PREV_NOW="$(_json_field_quoted "$RB_JSON" '"previous":' 2>/dev/null)" || RB_PREV_NOW=""
 [ "$RB_PREV_NOW" = "null" ] && RB_PREV_NOW=""
 if [ -n "$RB_PREV_NOW" ] && [ "$RB_PREV_NOW" != "$PREV" ] && [ -d "$REL/$RB_PREV_NOW" ] \

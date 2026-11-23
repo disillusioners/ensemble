@@ -445,8 +445,39 @@ async def s1_parity(tools: dict) -> None:
     cur_name = Path(st["current"]).name
     checks.append((
         "current symlink parity",
-        f"current={cur_name} (via releases/current" in ri,
+        f"current={cur_name} (via install-root current" in ri,
         f"status current -> {st['current']}",
+    ))
+    # relcur-pointer M3: the label names the REAL source (the install-root
+    # `current` symlink — NOT the releases/current alias), and the alias
+    # gets its OWN status line. The fixture's alias exists only when
+    # lib.sh's atomic_flip wrote it (relcur-m1), so the check is
+    # fixture-conditional: alias present ⇒ the tool must report it; alias
+    # absent ⇒ the tool must print NO alias line.
+    alias_line = next(
+        (ln for ln in ri.splitlines() if ln.startswith("alias releases/current:")), ""
+    )
+    alias_path = FAKE_DEMO / "releases" / "current"
+    if alias_path.is_symlink():
+        alias_ok = (
+            bool(alias_line)
+            and f"target={Path(os.readlink(alias_path)).name}" in alias_line
+            and "state=resolves" in alias_line
+            and "journal-match=yes" in alias_line
+        )
+        alias_detail = f"tool alias line: {alias_line!r}"
+    else:
+        alias_ok = alias_line == ""
+        alias_detail = "no releases/current alias on the fixture — tool prints no alias line"
+    checks.append((
+        "pointer alias parity (releases/current)",
+        alias_ok,
+        alias_detail,
+    ))
+    checks.append((
+        "no lying pointer label",
+        "via releases/current" not in ri,
+        "the '(via releases/current)' label is gone from the display",
     ))
     checks.append((
         "lock free parity",
@@ -494,7 +525,7 @@ async def s1_parity(tools: dict) -> None:
                f"release_info/upgrade_status vs status.sh on the SAME lib.sh-written "
                f"fixture: {len(checks)}/{len(checks)} field checks green "
                f"(current/previous/in-flight/rollback-window/quarantine/5 releases/"
-               "artifacts/current symlink/lock/history/livez-degrade)")
+               "artifacts/current symlink/pointer-alias/lock/history/livez-degrade)")
 
 
 async def s2_live_restart_provenance_gate(tools: dict, mgr: _ManagerFacade) -> None:
