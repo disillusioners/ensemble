@@ -91,21 +91,25 @@ landed unit pack uses a shape-mock, so it could not see this):
 
 A shipped flipprep boot measured `block_elapsed_ms_gated=499.918 ms`
 against the SLO-1 ≤250 ms cost bound. **This lane measured the landed engine
-boot block on this tree, twice (fenced WARM boots):**
+boot block on this tree four times** (two via its own D6 script, two via the
+sanctioned pack `engine_boot_slo_gate.sh` LEG 3, which runs the same fenced
+boot independently):
 
-| Boot | `block_elapsed_ms_gated` | `block_elapsed_ms_total` | boot→readyz-green |
-|---|---|---|---|
-| run 1 | **142.808 ms** | 161.710 ms | **28.525 s** |
-| run 2 | **89.332 ms** | 105.086 ms | **24.361 s** |
+| Boot | Producer | `block_elapsed_ms_gated` | `block_elapsed_ms_total` | boot→readyz-green |
+|---|---|---|---|---|
+| run 1 | this lane's D6 script | **142.808 ms** | 161.710 ms | **28.525 s** |
+| run 2 | this lane's D6 script | **89.332 ms** | 105.086 ms | **24.361 s** |
+| run 3 | sanctioned pack LEG 3 | **106.228 ms** | — | **26.540 s** |
+| run 4 | sanctioned pack LEG 3 (post-commit) | **112.560 ms** | — | **22.415 s** |
 
-Both are **inside** the 250 ms WARM bound (headroom 1.75×–2.80×) and inside
-the 360 ms COLD bound. The flipprep 499.918 ms breaches **both** bounds and
-was therefore not produced by this tree in this posture (out-of-class or a
-different tree). **The flip decision should not be priced against
+Every one is **inside** the 250 ms WARM bound (headroom 1.75×–2.80×) and
+inside the 360 ms COLD bound. The flipprep 499.918 ms breaches **both**
+bounds and was therefore not produced by this tree in this posture (out-of-
+class or a different tree). **The flip decision should not be priced against
 499.918 ms.**
 
-Both boots are also inside the Emperor's binding boot SLO
-(boot_epoch → readyz-green ≤ **120 s**): 24.4 s and 28.5 s.
+All four boots are also inside the Emperor's binding boot SLO
+(boot_epoch → readyz-green ≤ **120 s**): 22.4 s – 28.5 s.
 
 Re-derivable with:
 `bash scripts/measure/engine_pilot_boot_slo.sh --source <tree> --out measurements.jsonl`
@@ -238,3 +242,42 @@ was against the fenced dev DB (`ensemble_dev`) or a temporary SQLite file.
   work). The harness, the packs, the truth table and the boot tool are
   delivered and validated; they are machinery that needs the Emperor's
   ceremony to run against.
+
+---
+
+## 9. Disclosures — pre-existing conditions and lane drift
+
+**9.1 A PRE-EXISTING RED in the observability pack (NOT caused by this
+lane).** `test/packs/engine_observability_unit_test.sh` fails at
+`tests/unit/metrics/test_metrics_family_adjudication.py::TestNoProducerInstrumentation::test_the_daemon_diff_is_confined_to_the_allowed_files`
+with 14 daemon/ offenders (the same drift paths the diff-audit map's stage-2
+addendum carries: `daemon/constants.py`, `daemon/repositories/event/models.py`,
+`daemon/repositories/report_injection/repository.py`,
+`daemon/repositories/source/maintenance_seed.py`,
+`daemon/repositories/task/repository.py`, `daemon/routers/maintenance_reports.py`,
+`daemon/services/live_views.py`, `daemon/services/maintenance_schedule_knobs.py`,
+`daemon/services/pok_service.py`, `daemon/services/readiness.py`,
+`daemon/services/waiting_children_watchdog.py`,
+`daemon/tests/test_inject_allowed_models.py`, `daemon/tools/project_future.py`,
+`daemon/tools/project_history.py`).
+
+**Proved pre-existing:** with this lane's four modified files **stashed**
+(explicit-path stash) the leg fails with a **byte-identical** offender list;
+after committing, the list is unchanged and **does not contain this lane's
+two daemon/ paths** (`daemon/api.py`, `daemon/services/engine/boot.py`).
+The pin belongs to the metrics-family lane; its re-anchor is that lane's
+call, not this lane's.
+
+**9.2 Base drift.** This branch is pinned to `7243143d0` (the `v0.31.44` tag
+commit) by the commission. `origin/latest` advanced **during** this lane
+(11 → 27 commits ahead; the tip moved from `51dc98bb7` further still) —
+**forward drift, no divergence signal**. This lane did **not** pull, merge,
+rebase or fast-forward; the merge lane owns the finalise and must re-anchor
+per the house FINALIZE rule (fetch + verify `latest` unmoved from the
+branch base; if it moved, STOP and re-anchor).
+
+**9.3 Contended path.** `.agents/tester/PACKS.md` was also touched by the
+concurrent release-retention lane. This lane's registration block was
+inserted at the **top** of the file (the house newest-first convention) —
+far from the retention lane's end-of-file append — so the two regions do not
+overlap textually.

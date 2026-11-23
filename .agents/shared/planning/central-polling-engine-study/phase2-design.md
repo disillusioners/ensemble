@@ -258,27 +258,31 @@ never 9797/9798/8079; the `--release` path boots an **isolated copy** under
 ### 5.1 MEASURED — the flip-precondition number
 
 Two WARM-class fenced boots of this lane's tree (dev DB, own port, own data
-dir):
+dir) plus **two more from the SANCTIONED pack**
+(`test/packs/engine_boot_slo_gate.sh` LEG 3, which runs the same fenced
+boot independently):
 
-| Boot | `block_elapsed_ms_gated` | `block_elapsed_ms_total` | boot→livez | boot→readyz | verdict |
-|---|---|---|---|---|---|
-| run 1 | **142.808 ms** | 161.710 ms | 28.525 s | **28.525 s** | PASS |
-| run 2 | **89.332 ms** | 105.086 ms | 24.361 s | **24.361 s** | PASS |
+| Boot | Producer | `block_elapsed_ms_gated` | `block_elapsed_ms_total` | boot→livez | boot→readyz | verdict |
+|---|---|---|---|---|---|---|
+| run 1 | this lane's D6 script | **142.808 ms** | 161.710 ms | 28.525 s | **28.525 s** | PASS |
+| run 2 | this lane's D6 script | **89.332 ms** | 105.086 ms | 24.361 s | **24.361 s** | PASS |
+| run 3 | sanctioned pack LEG 3 | **106.228 ms** | — | 26.540 s | **26.540 s** | PASS |
+| run 4 | sanctioned pack LEG 3 (post-commit) | **112.560 ms** | — | 22.415 s | **22.415 s** | PASS |
 
 **Adjudication of the flip-precondition number.** The shipped flipprep boot
 measured `block_elapsed_ms_gated=499.918 ms` against the SLO-1 ≤250 ms cost
-bound. **This lane's two measurements are 89.332 ms and 142.808 ms** — both
-**within** the WARM bound (250 ms; headroom 1.75×–2.80×) and within the
-COLD bound (360 ms). The flipprep figure breaches **both** bounds
-(2.00× the WARM bound, 1.39× the COLD bound), so it was **not** produced by
-this tree in this posture; it is either out-of-class (a contended host /
-cold first boot) or was measured on a different tree. **The Emperor's flip
-decision should not be priced against 499.918 ms** — the landed engine boot
-block costs 89–143 ms WARM. (The number is re-derivable: the script emits
-one JSONL record per boot.)
+bound. **This lane's four measurements are 89.332 / 106.228 / 112.560 /
+142.808 ms** — every one **within** the WARM bound (250 ms; headroom
+1.75×–2.80×) and within the COLD bound (360 ms). The flipprep figure
+breaches **both** bounds (2.00× the WARM bound, 1.39× the COLD bound), so it
+was **not** produced by this tree in this posture; it is either out-of-class
+(a contended host / cold first boot) or was measured on a different tree.
+**The Emperor's flip decision should not be priced against 499.918 ms** —
+the landed engine boot block costs 89–143 ms WARM. (The number is
+re-derivable: the D6 script emits one JSONL record per boot.)
 
-Both boots are also within the Emperor's binding boot SLO
-(boot_epoch → readyz-green ≤ 120 s): **24.4 s and 28.5 s**.
+All four boots are also within the Emperor's binding boot SLO
+(boot_epoch → readyz-green ≤ 120 s): **22.4 s – 28.5 s**.
 
 ---
 
