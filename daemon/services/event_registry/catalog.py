@@ -462,25 +462,65 @@ _ZERO_PRODUCER_REASON = (
     "separate future commission)"
 )
 
-BRIDGE_PENDING: dict[str, str] = {
-    "event_bus:processing_started": _ZERO_PRODUCER_REASON,
-    "event_bus:processing_completed": _ZERO_PRODUCER_REASON,
-    "event_bus:processing_failed": _ZERO_PRODUCER_REASON,
-    "event_bus:child_failed": (
-        _ZERO_PRODUCER_REASON
-        + " (error_reporting's 'child_failed' is an SSE "
-        "stream_lifecycle event_type, not an event-row kind)"
-    ),
-    "event_bus:message_completed": _ZERO_PRODUCER_REASON,
-    "event_bus:room_post": (
-        _ZERO_PRODUCER_REASON
-        + " (room posts ride room_tag_delivery / room_proposal rows; "
-        "ROOM_POST has no row producer)"
-    ),
+# Kinds retired in the L-11 retirement commission (2026-11-22). These
+# were DECLARED-SILENT (zero producers) and are now removed from EventKind
+# + BRIDGE_PENDING. The ledger keeps a real trail so revival is a
+# deliberate, documented act — never a blind deletion.
+#
+# Revival procedure (per entry): re-add the EventKind member, re-add a
+# BRIDGE_PENDING row (or bridge a real emission site), and remove the row
+# from this ledger in the same change.
+_RETIRED_AT = "2026-11-22"
+
+_RETIRED_REVIVE = (
+    "re-add the EventKind member + re-register/bridge an emission site "
+    "(record() call) + remove this ledger row, all in one change"
+)
+
+RETIRED_EVENT_KINDS: dict[str, dict[str, str]] = {
+    "event_bus:processing_started": {
+        "reason": "April-2026 legacy event-model remnant: no emission site "
+        "at this tree (L-11 declared-silent).",
+        "retired_at": _RETIRED_AT,
+        "revive_procedure": _RETIRED_REVIVE,
+    },
+    "event_bus:processing_completed": {
+        "reason": "April-2026 legacy event-model remnant: no emission site "
+        "at this tree (L-11 declared-silent).",
+        "retired_at": _RETIRED_AT,
+        "revive_procedure": _RETIRED_REVIVE,
+    },
+    "event_bus:processing_failed": {
+        "reason": "April-2026 legacy event-model remnant: no emission site "
+        "at this tree (L-11 declared-silent).",
+        "retired_at": _RETIRED_AT,
+        "revive_procedure": _RETIRED_REVIVE,
+    },
+    "event_bus:child_failed": {
+        "reason": "April-2026 legacy event-model remnant: no emission site "
+        "(error_reporting's 'child_failed' is an SSE stream_lifecycle "
+        "event_type, not an event-row kind).",
+        "retired_at": _RETIRED_AT,
+        "revive_procedure": _RETIRED_REVIVE,
+    },
+    "event_bus:message_completed": {
+        "reason": "April-2026 legacy event-model remnant: no emission site "
+        "at this tree (L-11 declared-silent).",
+        "retired_at": _RETIRED_AT,
+        "revive_procedure": _RETIRED_REVIVE,
+    },
+    "event_bus:room_post": {
+        "reason": "Superseded by room_tag_delivery / room_proposal / "
+        "room_decision audit rows; ROOM_POST had no row producer.",
+        "retired_at": _RETIRED_AT,
+        "revive_procedure": _RETIRED_REVIVE,
+    },
 }
 
-# The declared-silent subset of the register (L-11). Kept as a distinct
-# class so the census and snapshot() can label it.
+BRIDGE_PENDING: dict[str, str] = {}
+
+# The declared-silent subset of the register (L-11). Empty after
+# retirement — no kind sits declared-silent unless genuinely reserved.
 DECLARED_SILENT_KINDS: frozenset[str] = frozenset(
     kind for kind, reason in BRIDGE_PENDING.items()
     if reason.startswith("L-11 declared-silent:")

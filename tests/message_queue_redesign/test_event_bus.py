@@ -442,7 +442,7 @@ class TestEventBusCleanup:
         for i in range(3):
             event_repo.create_event(
                 instance_id=instance_id,
-                kind=EventKind.PROCESSING_COMPLETED.value,
+                kind=EventKind.MESSAGE_RECEIVED.value,
                 data={"sequence": i},
             )
 

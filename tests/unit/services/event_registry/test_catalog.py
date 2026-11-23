@@ -23,6 +23,7 @@ from daemon.services.event_registry import (
     CATALOG,
     DEFERRED_V2_KINDS,
     KIND_INDEX,
+    RETIRED_EVENT_KINDS,
     SEAM_DEPTH_TRIGGERS,
     EventClass,
     FailurePosture,
@@ -201,17 +202,41 @@ def test_no_bridge_pending_kind_is_actually_bridged():
         k for k, r in BRIDGE_PENDING.items()
         if r.startswith("L-11 declared-silent:")
     }
-    # The declared-silent set is exactly the pinned six.
-    assert DECLARED_SILENT_KINDS == {
-        "event_bus:processing_started",
-        "event_bus:processing_completed",
-        "event_bus:processing_failed",
-        "event_bus:child_failed",
-        "event_bus:message_completed",
-        "event_bus:room_post",
-    }
-    # Terminal-state contract: 30 kinds = 23 bridged + 6 declared-silent
-    # + 1 deferred_v2.
-    assert len(CATALOG) == 30
-    assert len(BRIDGE_PENDING) == 6
+    # The declared-silent set is empty after L-11 retirement.
+    assert DECLARED_SILENT_KINDS == set()
+    # Terminal-state contract: 24 kinds = 23 bridged + 0 declared-silent
+    # + 1 deferred_v2 (L-11 retirement).
+    assert len(CATALOG) == 24
+    assert len(BRIDGE_PENDING) == 0
     assert len(DEFERRED_V2_KINDS) == 1
+
+
+# ── L-11 retirement ledger ───────────────────────────────────────────────
+
+
+_RETIRED_SIX = {
+    "event_bus:processing_started",
+    "event_bus:processing_completed",
+    "event_bus:processing_failed",
+    "event_bus:child_failed",
+    "event_bus:message_completed",
+    "event_bus:room_post",
+}
+
+
+def test_retired_ledger_carries_exactly_the_six_retired_kinds():
+    assert set(RETIRED_EVENT_KINDS) == _RETIRED_SIX
+
+
+def test_retired_ledger_rows_are_well_formed():
+    for kind_id, row in RETIRED_EVENT_KINDS.items():
+        assert isinstance(row, dict), kind_id
+        for field_name in ("reason", "retired_at", "revive_procedure"):
+            assert field_name in row, (kind_id, field_name)
+            assert isinstance(row[field_name], str) and row[field_name].strip(), (
+                kind_id, field_name
+            )
+
+
+def test_retired_kinds_are_not_simultaneously_registered():
+    assert set(RETIRED_EVENT_KINDS) & set(KIND_INDEX) == set()

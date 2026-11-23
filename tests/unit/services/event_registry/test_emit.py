@@ -20,6 +20,7 @@ import pytest
 
 from daemon.services import event_registry
 from daemon.services.event_registry import (
+    RETIRED_EVENT_KINDS,
     RING_CAP,
     counters,
     flush,
@@ -241,3 +242,18 @@ def test_record_is_a_pure_observation_side_effect_free_call():
         lowered = name.lower()
         for token in forbidden:
             assert token not in lowered, (name, token)
+
+
+# ── L-11 retirement: retired kinds are refused as unknown ───────────────
+
+
+@pytest.mark.parametrize("retired_kind", sorted(RETIRED_EVENT_KINDS))
+def test_record_refuses_every_retired_kind(retired_kind):
+    # A retired kind must behave like any unregistered kind: record()
+    # returns False and the refused-unknown counter increments. This is
+    # the silent-revival tripwire — if anyone re-registers a kind
+    # without going through the revive procedure (ledger removal +
+    # bridge), record() would succeed and this leg REDs.
+    assert record(retired_kind, x=1) is False
+    assert counters()["record_refused_unknown_kind_total"] == 1
+    assert recent() == []

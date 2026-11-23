@@ -23,17 +23,19 @@ class EventKind(str, enum.Enum):
     preserves watcher rows; the fifth (``child_question_still_pending``)
     is dispatch-only via EventBus + LiveEventHub and never enters the
     work_notifier status map.
+
+    L-11 retirement (2026-11-22): the six declared-silent kinds
+    (processing_started/completed/failed, child_failed, message_completed,
+    room_post) were removed. See RETIRED_EVENT_KINDS in
+    daemon/services/event_registry/catalog.py. Historical DB rows
+    carrying those strings remain readable as raw strings (the column is
+    a plain str; no reader parses via EventKind(value)).
     """
     MESSAGE_RECEIVED = "message_received"
-    PROCESSING_STARTED = "processing_started"
-    PROCESSING_COMPLETED = "processing_completed"
-    PROCESSING_FAILED = "processing_failed"
     CHILD_COMPLETED = "child_completed"
-    CHILD_FAILED = "child_failed"
     INSTANCE_COMPLETED = "instance_completed"
     INSTANCE_LIFECYCLE = "instance_lifecycle"
     ERROR = "error"
-    MESSAGE_COMPLETED = "message_completed"
     # v0.13.9 fix (fix/job-completed-result-arm, 2026-09-22):
     # JobItem mirror columns were dropped in Phase 5 Batch 2 (commit
     # 41633433); the existing ``instance_lifecycle`` event was the only
@@ -72,7 +74,11 @@ class EventKind(str, enum.Enum):
     # carries ids/counts/outcomes, never message text. Additive —
     # older readers ignore unknown kinds (the SSE parser surfaces
     # ``kind`` as a string, not a typed enum).
-    ROOM_POST = "room_post"
+    #
+    # L-11 retirement (2026-11-22): ``room_post`` was declared-silent
+    # (no row producer; posts ride room_tag_delivery/room_proposal rows)
+    # and has been retired — see RETIRED_EVENT_KINDS in
+    # daemon/services/event_registry/catalog.py.
     ROOM_JOIN = "room_join"
     ROOM_LEAVE = "room_leave"
     # Tag-delivery audit (P3): the outcome rides ``data`` —

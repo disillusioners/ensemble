@@ -9,7 +9,7 @@ bidirectional contract:
    (mutation: add a record with an unregistered kind ⇒ RED);
 2. every catalog kind except (a) the ``deferred_v2`` entry and (b) the
    L-11 DECLARED-SILENT register has ≥1 bridge — the TERMINAL-STATE
-   contract after the L-10 increment: 30 kinds = 23 bridged / 6
+   contract after L-11 retirement: 24 kinds = 23 bridged / 0
    declared-silent / 1 deferred_v2 (mutations: delete a bridge ⇒ RED;
    add a bridge for a declared-silent kind ⇒ RED — nothing may
    silently bridge the L-11 six);
@@ -177,12 +177,12 @@ def test_every_catalog_kind_has_a_bridge_or_a_pinned_pending_reason():
 
     for kind_id in DECLARED_SILENT_KINDS:
         assert "L-11 declared-silent:" in BRIDGE_PENDING[kind_id]
-    # TERMINAL-STATE CONTRACT: 30 kinds = 23 bridged + 6 declared-silent
-    # + 1 deferred_v2; the bridged set and the register are DISJOINT and
-    # their union (plus deferred) covers the catalog exactly.
-    assert len(CATALOG) == 30
+    # TERMINAL-STATE CONTRACT: 24 kinds = 23 bridged + 0 declared-silent
+    # + 1 deferred_v2 (L-11 retirement); the bridged set and the register
+    # are DISJOINT and their union (plus deferred) covers the catalog exactly.
+    assert len(CATALOG) == 24
     assert len(bridged) == 23, sorted(set(KIND_INDEX) - bridged - set(BRIDGE_PENDING) - set(DEFERRED_V2_KINDS))
-    assert len(BRIDGE_PENDING) == 6
+    assert len(BRIDGE_PENDING) == 0
     assert len(DEFERRED_V2_KINDS) == 1
     assert bridged & set(BRIDGE_PENDING) == set()
     assert bridged | set(BRIDGE_PENDING) | set(DEFERRED_V2_KINDS) == set(KIND_INDEX)
