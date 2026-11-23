@@ -189,20 +189,23 @@ DEFAULT_HUSK_MIN_AGE_SECONDS: int = 86_400
 #: and BOTH must hold. Do not read the window as telling the two
 #: classes apart.
 #:
-#: THE RESIDUAL (measured, so it is not rediscovered as a bug in
-#: this fix): an EXECUTED-but-evidence-free NON-TERMINAL row is
-#: ADMISSIBLE IN PRINCIPLE by this window — ``la_delta <= 60 s``,
-#: non-terminal, no task / message_queue / job_queue_items rows —
-#: once its checkpoints have aged past the 168 h retention, so the
-#: 24 h age gate and the 168 h retention leave a reachable band
-#: [168 h, infinity). It is EMPTY today: of 1 121 executed +
-#: evidence-free rows, 0 are non-terminal. It is seeded by the 11
-#: non-terminal later-dispatched instances at ``la_delta <= 5 s``,
-#: whose evidence rows age out (message_queue.cleanup_old after
-#: 24 h; task rows on completion). The proper closure is an E7
-#: "no checkpoints rows" leg, with graceful degradation for the
-#: SQLite unit-test fixtures (no ``checkpoints`` table there) — a
-#: SEPARATE lane, deliberately NOT implemented here.
+#: THE RESIDUAL — CLOSED by the E7 leg (this lane): an
+#: EXECUTED-but-evidence-free NON-TERMINAL row is admissible in
+#: principle by this window — ``la_delta <= 60 s``, non-terminal, no
+#: task / message_queue / job_queue_items rows — once its checkpoints
+#: have aged past the 168 h retention, so the 24 h age gate and the
+#: 168 h retention leave a reachable band [168 h, infinity). The E7
+#: leg (zero rows in the ``checkpoints`` table for the thread) now
+#: excludes any such row that has ever executed a turn, because a
+#: turn that ran leaves a checkpoint row. It is EMPTY today: of
+#: 1 121 executed + evidence-free rows, 0 are non-terminal. It is
+#: seeded by the 11 non-terminal later-dispatched instances at
+#: ``la_delta <= 5 s``, whose evidence rows age out
+#: (message_queue.cleanup_old after 24 h; task rows on completion) —
+#: those rows carry checkpoint rows and are therefore excluded by E7.
+#: Graceful degradation: where the ``checkpoints`` table is absent
+#: (SQLite unit-test fixtures), E7 cannot be evaluated and the
+#: detector degrades (nothing flagged) rather than silently passing.
 #:
 #: The window is a ONE-SHOT gate: an instance whose first activity
 #: stamp lands outside it can never re-enter the class, because the
@@ -1507,6 +1510,85 @@ def _job_item_counts_by_instance(
     return counts
 
 
+def _checkpoint_thread_ids(
+    manager: Any, instance_ids: list[str]
+) -> set[str] | None:
+    """Return the set of ``instance_id``s (threads) that HAVE at least
+    one row in the ``checkpoints`` table.
+
+    E7 of the husk predicate (never-dispatched husk detector, D1). A
+    checkpoint row is the LangGraph evidence that a turn actually
+    executed — even when the ``message_queue`` / ``task`` / ``job_queue_items``
+    evidence has aged out (the [168 h, infinity) residual band), the
+    checkpoint row survives only until the 168 h retention sweep, and a
+    row that has EVER run a turn carries one. So "zero checkpoints rows"
+    is the third evidence leg: a husk must have NONE.
+
+    Returns the SET of threads with >= 1 checkpoint row (so the caller
+    can exclude them), or ``None`` when the leg could not be evaluated
+    — the checkpoints table is absent (SQLite unit-test fixtures do not
+    create it; graceful degradation, fail-closed: a missing proof never
+    produces a flag) OR the probe failed. The caller must then NOT flag
+    and must surface the degradation.
+
+    Detection of absence: SQLAlchemy's ``inspect(engine).has_table`` —
+    engine-agnostic (works on both SQLite and PostgreSQL), no exception
+    is relied on to signal "table missing". A genuine query failure
+    (any exception) ALSO returns ``None`` so a broken probe degrades
+    instead of silently passing.
+
+    Scope note: only the ``checkpoints`` table is probed. The companion
+    ``checkpoint_blobs`` table was measured on the live fleet
+    (2026-11-23, ``ensemble_prod``): 1 442 distinct threads carry
+    blobs and ALL 1 442 also carry a ``checkpoints`` row — 0 threads
+    have blobs without a checkpoints row. The blobs are therefore a
+    strict subset of the checkpoints threads, and probing ``checkpoints``
+    alone is sound; adding a blobs probe would add no coverage. If a
+    future write path ever decouples them, this leg must be revisited.
+    """
+    engine = getattr(manager, "engine", None)
+    if engine is None:
+        return None
+    if not instance_ids:
+        return set()
+    try:
+        from sqlalchemy import inspect as _sa_inspect
+
+        if not _sa_inspect(engine).has_table("checkpoints"):
+            return None
+    except Exception as exc:  # noqa: BLE001 — read-only probe
+        logger.warning(
+            "instance_read: checkpoint evidence probe could not inspect "
+            "the schema — the husk detector's evidence legs are DEGRADED: %s",
+            exc,
+        )
+        return None
+    thread_ids: set[str] = set()
+    try:
+        from sqlalchemy import text, bindparam
+
+        stmt = text(
+            "SELECT DISTINCT thread_id FROM checkpoints "
+            "WHERE thread_id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True))
+        with engine.connect() as conn:
+            for chunk in chunked(list(instance_ids), _HUSK_PROBE_CHUNK):
+                if not chunk:
+                    continue
+                rows = conn.execute(stmt, {"ids": list(chunk)}).all()
+                for (thread_id,) in rows:
+                    if thread_id:
+                        thread_ids.add(str(thread_id))
+    except Exception as exc:  # noqa: BLE001 — read-only probe
+        logger.warning(
+            "instance_read: checkpoint evidence read failed — the husk "
+            "detector's evidence legs are DEGRADED: %s",
+            exc,
+        )
+        return None
+    return thread_ids
+
+
 def _activity_is_spawn_stamp_only(
     info: dict[str, Any],
     *,
@@ -1618,10 +1700,16 @@ def _husk_flagged_rows(
        false-negative a ``running``/``version>1`` evidence-free row
        (D-1 amendment, arch §1.1-§1.2).
     2. the grouped JobItem probe (E3) over the surviving ids.
+    3. the ``checkpoints`` table probe (E7) over the surviving ids —
+       a thread with ANY checkpoint row has executed a turn and is
+       therefore NOT a never-dispatched husk, even in the
+       [168 h, infinity) residual band where the other evidence has
+       aged out.
 
-    Either leg being UNAVAILABLE (a probe failure) suppresses the
-    verdict for that run: a husk report must never rest on a leg the
-    scanner could not actually evaluate.
+    Either leg being UNAVAILABLE (a probe failure, or the checkpoints
+    table being absent — SQLite unit-test fixtures do not create it)
+    suppresses the verdict for that run: a husk report must never rest
+    on a leg the scanner could not actually evaluate.
 
     Returns ``(flagged, degraded)``:
 
@@ -1660,11 +1748,21 @@ def _husk_flagged_rows(
     surviving = [iid for iid in candidate_ids if iid in evidence_free]
     if not surviving:
         # E1/E2 cleared EVERY candidate — there is nothing left for the
-        # E3 probe to check. "0 husks" is TRUE, not degraded.
+        # E3/E7 probes to check. "0 husks" is TRUE, not degraded.
         return [], False
     job_counts = _job_item_counts_by_instance(manager, surviving)
     if job_counts is None:
         # The E3 leg could not run — the count is a LOWER BOUND.
+        return [], True
+
+    job_free = [iid for iid in surviving if not job_counts.get(iid, 0)]
+    if not job_free:
+        # E3 cleared EVERY surviving candidate — nothing left for E7.
+        # "0 husks" is TRUE, not degraded.
+        return [], False
+    checkpoint_threads = _checkpoint_thread_ids(manager, job_free)
+    if checkpoint_threads is None:
+        # The E7 leg could not run — the count is a LOWER BOUND.
         return [], True
 
     flagged: list[dict[str, Any]] = []
@@ -1673,6 +1771,11 @@ def _husk_flagged_rows(
         if instance_id not in evidence_free:
             continue
         if job_counts.get(instance_id, 0):
+            continue
+        # E7: a thread with ANY checkpoint row has executed a turn —
+        # not a never-dispatched husk, even if every other evidence
+        # leg is satisfied (the [168 h, infinity) residual band).
+        if instance_id in checkpoint_threads:
             continue
         flagged.append(
             _flagged_row(
@@ -1683,7 +1786,8 @@ def _husk_flagged_rows(
                     "(last_activity_at is null, or it lies inside the "
                     "spawn-stamp window of created_at), no task, no job "
                     "item, no messages, no children, no question pack, no "
-                    f"pause marker; age {age}s (threshold {threshold}s)"
+                    "pause marker, no checkpoint rows; "
+                    f"age {age}s (threshold {threshold}s)"
                 ),
             )
         )
