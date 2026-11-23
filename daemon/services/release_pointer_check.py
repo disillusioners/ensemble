@@ -77,29 +77,42 @@ def _basename(target: str | None) -> str | None:
     return stripped.rsplit("/", 1)[-1] or None
 
 
-def _journal_current(install_dir: Path) -> str | None:
-    """Tolerant READ of ``releases/state.json`` -> ``current`` value.
+def _read_journal(install_dir: Path) -> tuple[str | None, str | None, str | None]:
+    """Tolerant READ of ``releases/state.json``.
 
-    Returns None for an absent / empty / torn / non-object document or an
-    unreadable file.  NEVER writes, NEVER locks, NEVER raises.
+    Returns ``(current, in_flight_target, pending_op_target)``.  Each value
+    is a non-empty str or None.  Absent / empty / torn / non-object /
+    unreadable documents yield ``(None, None, None)``.  ``in_flight`` and
+    ``pending_op`` may be dicts carrying a ``target`` key; shape misses
+    (wrong type / missing key) yield None for that field.  NEVER writes,
+    NEVER locks, NEVER raises.
     """
     jp = install_dir / "releases" / "state.json"
     try:
         if not jp.is_file():
-            return None
+            return None, None, None
         raw = jp.read_text(encoding="utf-8")
     except OSError:
-        return None
+        return None, None, None
     if not raw.strip():
-        return None
+        return None, None, None
     try:
         data = json.loads(raw)
     except (ValueError, json.JSONDecodeError):
-        return None
+        return None, None, None
     if not isinstance(data, dict):
-        return None
-    value = data.get("current")
-    return value if isinstance(value, str) and value else None
+        return None, None, None
+
+    def _target(key: str) -> str | None:
+        val = data.get(key)
+        if not isinstance(val, dict):
+            return None
+        t = val.get("target")
+        return t if isinstance(t, str) and t else None
+
+    current = data.get("current")
+    current = current if isinstance(current, str) and current else None
+    return current, _target("in_flight"), _target("pending_op")
 
 
 def _readlink(path: Path) -> str | None:
@@ -119,7 +132,8 @@ def check_release_pointer(install_dir: Path | str | None) -> ReleasePointerCheck
     a :class:`ReleasePointerCheckResult` carrying:
 
     journal_current, top_target, alias_present, alias_target, alias_dangling,
-    alias_matches_journal, top_matches_journal, ok, reasons
+    alias_matches_journal, top_matches_journal, ok, reasons,
+    ceremony_in_progress
 
     ``top_target`` / ``alias_target`` are the RAW ``os.readlink`` values
     (e.g. ``"releases/v0.31.42"`` and ``"v0.31.42"``).  Matching compares
@@ -128,14 +142,17 @@ def check_release_pointer(install_dir: Path | str | None) -> ReleasePointerCheck
     root = Path(install_dir) if install_dir is not None else None
 
     journal_current: str | None = None
+    in_flight_target: str | None = None
+    pending_target: str | None = None
     top_target: str | None = None
     alias_present = False
     alias_target: str | None = None
     alias_dangling = False
     top_dangling = False
+    ceremony_in_progress = False
 
     if root is not None:
-        journal_current = _journal_current(root)
+        journal_current, in_flight_target, pending_target = _read_journal(root)
         top_target = _readlink(root / "current")
         alias_path = root / "releases" / "current"
         alias_target = _readlink(alias_path)
@@ -161,6 +178,11 @@ def check_release_pointer(install_dir: Path | str | None) -> ReleasePointerCheck
     alias_name = _basename(alias_target)
     top_name = _basename(top_target)
     has_journal = bool(journal_current)
+
+    ceremony_targets = {t for t in (in_flight_target, pending_target) if t}
+    ceremony_in_progress = bool(ceremony_targets) and (
+        alias_name in ceremony_targets or top_name in ceremony_targets
+    )
 
     alias_matches_journal = has_journal and alias_name == journal_current
     top_matches_journal = has_journal and top_name == journal_current
@@ -189,10 +211,17 @@ def check_release_pointer(install_dir: Path | str | None) -> ReleasePointerCheck
                 f"resolves to a missing directory"
             )
         elif alias_present and not alias_matches_journal:
-            reasons.append(
-                f"alias-mismatch: releases/current -> {alias_name} "
-                f"!= journal current={journal_current}"
-            )
+            if ceremony_in_progress and alias_name in ceremony_targets:
+                reasons.append(
+                    "ceremony-window: release-pointer ceremony window — "
+                    f"pointer names in-flight target {alias_name}; "
+                    "journal commits at ceremony end"
+                )
+            else:
+                reasons.append(
+                    f"alias-mismatch: releases/current -> {alias_name} "
+                    f"!= journal current={journal_current}"
+                )
         if top_target is None:
             reasons.append(
                 f"top-absent: install-root current symlink missing "
@@ -203,12 +232,23 @@ def check_release_pointer(install_dir: Path | str | None) -> ReleasePointerCheck
                 f"top-dangling: current -> {top_target} resolves to a missing directory"
             )
         elif not top_matches_journal:
-            reasons.append(
-                f"top-mismatch: current -> {top_name} "
-                f"!= journal current={journal_current}"
-            )
+            if ceremony_in_progress and top_name in ceremony_targets:
+                reasons.append(
+                    "ceremony-window: release-pointer ceremony window — "
+                    f"pointer names in-flight target {top_name}; "
+                    "journal commits at ceremony end"
+                )
+            else:
+                reasons.append(
+                    f"top-mismatch: current -> {top_name} "
+                    f"!= journal current={journal_current}"
+                )
 
-    warn_reasons = [r for r in reasons if not r.startswith("nothing-to-check")]
+    warn_reasons = [
+        r for r in reasons
+        if not r.startswith("nothing-to-check")
+        and not r.startswith("ceremony-window:")
+    ]
     ok = not warn_reasons
 
     return ReleasePointerCheckResult(
@@ -221,6 +261,7 @@ def check_release_pointer(install_dir: Path | str | None) -> ReleasePointerCheck
         top_matches_journal=bool(top_matches_journal),
         ok=ok,
         reasons=reasons,
+        ceremony_in_progress=bool(ceremony_in_progress),
     )
 
 
@@ -275,6 +316,7 @@ def run_boot_check(install_dir: Path | str | None = None) -> ReleasePointerCheck
             top_matches_journal=False,
             ok=False,
             reasons=[f"check-error: {type(exc).__name__}: {exc}"],
+            ceremony_in_progress=False,
         )
 
     _LAST_BOOT_CHECK = result
