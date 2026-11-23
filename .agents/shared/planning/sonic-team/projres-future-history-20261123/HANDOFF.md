@@ -143,6 +143,16 @@ edit to daemon/tools/project_history.py" bullet. Zero migrations in the delta.
   (git ls-remote --tags origin 'v0.31.*') immediately before the tag was created;
   a pushed tag is never re-cut and never force-pushed.
 
+- Dispatch + refusal shaping now exists in THREE copies (daemon/tools/project.py inline at
+  :455-497, the project_future.py helper, the project_history.py helper). The LADDER is NOT
+  duplicated — all matching logic is owned solely by
+  daemon/repositories/project/repository.py resolve_project_reference (reviewer priority 1
+  verified clean). Reviewer advisory A2 (one shared helper) was DELIBERATELY DEFERRED: it
+  would re-touch all three surfaces and destabilise a fix wave bounded by max-1
+  re-dispatch, while the ladder itself stays single-owner either way. Accepted cost: one
+  edited copy can silently diverge from the other two (a refusal-shape drift risk, not a
+  matching-logic risk). Offered as the next cleanup lane.
+
 ## How to verify
 
 On the merged tree (integration worktree / any checkout of tag v0.31.39):
